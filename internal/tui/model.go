@@ -1,7 +1,12 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
+
+	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/tool"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -25,10 +30,16 @@ type model struct {
 	viewport viewport.Model
 	input    textarea.Model
 	messages []message
+	agent    *agent.Agent
+	config   *config.Config
 	width    int
 	height   int
 	ready    bool
+	err      error
 }
+
+type agentResponseMsg string
+type errorMsg error
 
 var (
 	userStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true)
@@ -41,6 +52,30 @@ var (
 )
 
 func newModel() model {
+	cfg, _ := config.Load()
+
+	// Initialize tools
+	tools := []tool.Tool{
+		tool.ReadTool{},
+		tool.WriteTool{},
+		tool.GlobTool{},
+		tool.GrepTool{},
+		tool.BashTool{},
+		tool.EditTool{},
+		tool.ApplyPatchTool{},
+		tool.TodoWriteTool{},
+		tool.SkillTool{},
+		tool.QuestionTool{},
+		tool.WebFetchTool{},
+		tool.WebSearchTool{},
+	}
+
+	var a *agent.Agent
+	if cfg != nil && cfg.Model != "" {
+		client := agent.NewClient("", cfg.Model)
+		a = agent.NewAgent(client, tools)
+	}
+
 	ta := textarea.New()
 	ta.Placeholder = "Ask anything…  (enter to send, ctrl+c to quit)"
 	ta.Focus()
@@ -57,6 +92,8 @@ func newModel() model {
 		viewport: vp,
 		input:    ta,
 		messages: []message{},
+		config:   cfg,
+		agent:    a,
 	}
 }
 
@@ -90,15 +127,66 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.messages = append(m.messages,
 				message{role: roleUser, text: text},
-				message{role: roleAssistant, text: hintStyle.Render("(no llm wired yet)")},
 			)
 			m.input.Reset()
 			m.renderTranscript()
 			m.viewport.GotoBottom()
+
+			if m.agent != nil {
+				return m, m.askAgent()
+			} else {
+				m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
+				m.renderTranscript()
+				m.viewport.GotoBottom()
+			}
 		}
+	case []agent.Message:
+		for _, am := range msg {
+			if am.Role == "assistant" {
+				if len(am.ToolCalls) > 0 {
+					for _, tc := range am.ToolCalls {
+						m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 calling %s(%s)...", tc.Function.Name, tc.Function.Arguments)})
+					}
+				}
+				if am.Content != "" {
+					m.messages = append(m.messages, message{role: roleAssistant, text: am.Content})
+				}
+			} else if am.Role == "tool" {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ tool result: %s", am.Content)})
+			}
+		}
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+	case errorMsg:
+		m.err = msg
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)
+}
+
+func (m model) askAgent() tea.Cmd {
+	return func() tea.Msg {
+		var agentMsgs []agent.Message
+
+		// Add context as system message
+		ctx := agent.LoadContext()
+		if ctx != "" {
+			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
+		}
+
+		for _, msg := range m.messages {
+			role := "user"
+			if msg.role == roleAssistant {
+				role = "assistant"
+			}
+			agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
+		}
+		resp, err := m.agent.Step(agentMsgs)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return resp
+	}
 }
 
 func (m *model) layout() {
@@ -132,6 +220,9 @@ func (m *model) renderTranscript() {
 func (m model) View() string {
 	if !m.ready {
 		return "initializing…"
+	}
+	if m.err != nil {
+		return fmt.Sprintf("Error: %v\n\nPress Ctrl+C to quit", m.err)
 	}
 	header := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#7DCFFF")).
