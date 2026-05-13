@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
@@ -24,6 +25,7 @@ const (
 type message struct {
 	role role
 	text string
+	raw  *agent.Message
 }
 
 type model struct {
@@ -51,11 +53,8 @@ var (
 	hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
 )
 
-func newModel() model {
-	cfg, _ := config.Load()
-
-	// Initialize tools
-	tools := []tool.Tool{
+func (m *model) getInitialTools() []tool.Tool {
+	return []tool.Tool{
 		tool.ReadTool{},
 		tool.WriteTool{},
 		tool.GlobTool{},
@@ -69,10 +68,17 @@ func newModel() model {
 		tool.WebFetchTool{},
 		tool.WebSearchTool{},
 	}
+}
+
+func newModel() model {
+	cfg, _ := config.Load()
+
+	tmp := model{}
+	tools := tmp.getInitialTools()
 
 	var a *agent.Agent
 	if cfg != nil && cfg.Model != "" {
-		client := agent.NewClient("", cfg.Model)
+		client := agent.NewClient(cfg, cfg.Model)
 		a = agent.NewAgent(client, tools)
 	}
 
@@ -125,9 +131,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" {
 				return m, tea.Batch(tiCmd, vpCmd)
 			}
-			m.messages = append(m.messages,
-				message{role: roleUser, text: text},
-			)
+
+			if strings.HasPrefix(text, "/") {
+				return m.handleCommand(text)
+			}
+
+			// Check if we are answering a question
+			var pendingToolCallID string
+			if len(m.messages) > 0 {
+				last := m.messages[len(m.messages)-1]
+				if last.raw != nil && len(last.raw.ToolCalls) > 0 {
+					for _, tc := range last.raw.ToolCalls {
+						if tc.Function.Name == "question" {
+							pendingToolCallID = tc.ID
+							break
+						}
+					}
+				}
+			}
+
+			if pendingToolCallID != "" {
+				m.messages = append(m.messages, message{
+					role: roleAssistant,
+					text: fmt.Sprintf("✅ tool result: %s", text),
+					raw: &agent.Message{
+						Role:    "tool",
+						Content: text,
+						ToolID:  pendingToolCallID,
+					},
+				})
+			} else {
+				m.messages = append(m.messages,
+					message{role: roleUser, text: text},
+				)
+			}
 			m.input.Reset()
 			m.renderTranscript()
 			m.viewport.GotoBottom()
@@ -142,17 +179,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case []agent.Message:
 		for _, am := range msg {
+			copyMsg := am // copy
 			if am.Role == "assistant" {
 				if len(am.ToolCalls) > 0 {
-					for _, tc := range am.ToolCalls {
-						m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 calling %s(%s)...", tc.Function.Name, tc.Function.Arguments)})
-					}
-				}
-				if am.Content != "" {
-					m.messages = append(m.messages, message{role: roleAssistant, text: am.Content})
+					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 calling %d tools...", len(am.ToolCalls)), raw: &copyMsg})
+				} else if am.Content != "" {
+					m.messages = append(m.messages, message{role: roleAssistant, text: am.Content, raw: &copyMsg})
 				}
 			} else if am.Role == "tool" {
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ tool result: %s", am.Content)})
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ tool result: %s", am.Content), raw: &copyMsg})
 			}
 		}
 		m.renderTranscript()
@@ -162,6 +197,87 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)
+}
+
+func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
+	parts := strings.Fields(text)
+	cmd := parts[0]
+	args := parts[1:]
+	m.input.Reset()
+
+	switch cmd {
+	case "/model":
+		m.handleModelCmd(args)
+	case "/connect":
+		m.handleConnectCmd(args)
+	case "/session":
+		m.handleSessionCmd(args)
+	case "/compact":
+		m.handleCompactCmd(args)
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
+	}
+
+	m.renderTranscript()
+	m.viewport.GotoBottom()
+	return m, nil
+}
+
+func (m *model) handleModelCmd(args []string) {
+	if len(args) > 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", args[0])})
+		client := agent.NewClient(m.config, args[0])
+		if client != nil {
+			var tools []tool.Tool
+			if m.agent != nil {
+				tools = m.agent.GetTools()
+			} else {
+				tools = m.getInitialTools()
+			}
+			m.agent = agent.NewAgent(client, tools)
+		}
+	}
+}
+
+func (m *model) handleConnectCmd(args []string) {
+	var b strings.Builder
+	b.WriteString("Provider status:\n")
+	providers := []string{"openai", "anthropic", "google", "zai", "openrouter", "moonshot", "minimax", "alibaba"}
+	for _, p := range providers {
+		status := "❌ disconnected"
+		envVar := ""
+		switch p {
+		case "openai": envVar = "OPENAI_API_KEY"
+		case "anthropic": envVar = "ANTHROPIC_API_KEY"
+		case "openrouter": envVar = "OPENROUTER_API_KEY"
+		}
+		if envVar != "" && os.Getenv(envVar) != "" {
+			status = "✅ connected"
+		}
+		b.WriteString(fmt.Sprintf("- %s: %s\n", p, status))
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m *model) handleSessionCmd(args []string) {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Active session: default\nUse '/session list' to see all sessions."})
+	} else if args[0] == "list" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Sessions:\n- default (active)"})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switched to session %s (simulated)", args[0])})
+	}
+}
+
+func (m *model) handleCompactCmd(args []string) {
+	newMsgs := []message{}
+	for _, msg := range m.messages {
+		if msg.role == roleUser || (msg.role == roleAssistant && msg.raw == nil) {
+			newMsgs = append(newMsgs, msg)
+		}
+	}
+	m.messages = newMsgs
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Conversation compacted (removed tool history from view)."})
 }
 
 func (m model) askAgent() tea.Cmd {
@@ -175,11 +291,18 @@ func (m model) askAgent() tea.Cmd {
 		}
 
 		for _, msg := range m.messages {
+			if msg.raw != nil {
+				agentMsgs = append(agentMsgs, *msg.raw)
+				continue
+			}
 			role := "user"
 			if msg.role == roleAssistant {
 				role = "assistant"
 			}
-			agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
+			agentMsgs = append(agentMsgs, agent.Message{
+				Role:    role,
+				Content: msg.text,
+			})
 		}
 		resp, err := m.agent.Step(agentMsgs)
 		if err != nil {

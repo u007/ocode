@@ -38,7 +38,7 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 
 	content, err := os.ReadFile(params.Path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
 	}
 	return string(content), nil
 }
@@ -78,11 +78,11 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	if err := os.MkdirAll(filepath.Dir(params.Path), 0755); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to create directories for %s: %w", params.Path, err)
 	}
 
 	if err := os.WriteFile(params.Path, []byte(params.Content), 0644); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to write file %s: %w", params.Path, err)
 	}
 	return fmt.Sprintf("Successfully wrote to %s", params.Path), nil
 }

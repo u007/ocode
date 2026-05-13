@@ -94,7 +94,7 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 
 	content, err := os.ReadFile(params.Path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
 	}
 
 	text := string(content)
@@ -104,7 +104,7 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 
 	newText := strings.Replace(text, params.Old, params.New, 1)
 	if err := os.WriteFile(params.Path, []byte(newText), 0644); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to write edited file %s: %w", params.Path, err)
 	}
 
 	return fmt.Sprintf("Successfully edited %s", params.Path), nil

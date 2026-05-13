@@ -1,10 +1,12 @@
 package tool
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -37,15 +39,25 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	// filepath.Glob doesn't support **
-	// For a real implementation we might want a more powerful glob library
-	// But let's try a simple approach or use `find` if available
+	// Basic support for **
+	// Replace ** with a regex that matches anything across directories
+	regexPattern := regexp.QuoteMeta(params.Pattern)
+	regexPattern = strings.ReplaceAll(regexPattern, "\\*\\*", ".*")
+	regexPattern = strings.ReplaceAll(regexPattern, "\\*", "[^/]*")
+	if !strings.HasPrefix(regexPattern, ".*") && !strings.HasPrefix(regexPattern, "/") {
+		regexPattern = ".*" + regexPattern
+	}
+	re, err := regexp.Compile("^" + regexPattern + "$")
+	if err != nil {
+		return "", fmt.Errorf("invalid pattern: %w", err)
+	}
 
 	var matches []string
-	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return err
+			return fmt.Errorf("error walking path %s: %w", path, err)
 		}
+		path = filepath.ToSlash(path) // normalize for regex
 		if info.IsDir() {
 			if info.Name() == ".git" || info.Name() == "node_modules" {
 				return filepath.SkipDir
@@ -53,23 +65,14 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 			return nil
 		}
 
-		matched, err := filepath.Match(params.Pattern, path)
-		if err != nil {
-			return err
-		}
-		// If simple match fails, try a very basic ** simulation by matching the base name if pattern has no slashes
-		if !matched && !strings.Contains(params.Pattern, "/") {
-			matched, _ = filepath.Match(params.Pattern, filepath.Base(path))
-		}
-
-		if matched {
+		if re.MatchString(path) {
 			matches = append(matches, path)
 		}
 		return nil
 	})
 
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("glob failed: %w", err)
 	}
 
 	if len(matches) == 0 {
@@ -117,16 +120,48 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 		params.Path = "."
 	}
 
-	// Use grep command if available for efficiency
-	cmd := exec.Command("grep", "-rnE", params.Pattern, params.Path)
-	output, err := cmd.CombinedOutput()
+	re, err := regexp.Compile(params.Pattern)
 	if err != nil {
-		// grep returns non-zero exit code if no matches found
-		if len(output) == 0 {
-			return "No matches found", nil
-		}
-		return string(output), nil
+		return "", fmt.Errorf("invalid regex: %w", err)
 	}
 
-	return string(output), nil
+	var results []string
+	err = filepath.Walk(params.Path, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return fmt.Errorf("error walking path %s: %w", path, err)
+		}
+		if info.IsDir() {
+			if info.Name() == ".git" || info.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		file, err := os.Open(path)
+		if err != nil {
+			return nil // skip unreadable files
+		}
+		defer file.Close()
+
+		scanner := bufio.NewScanner(file)
+		lineNum := 1
+		for scanner.Scan() {
+			line := scanner.Text()
+			if re.MatchString(line) {
+				results = append(results, fmt.Sprintf("%s:%d:%s", path, lineNum, line))
+			}
+			lineNum++
+		}
+		return nil
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("grep failed: %w", err)
+	}
+
+	if len(results) == 0 {
+		return "No matches found", nil
+	}
+
+	return strings.Join(results, "\n"), nil
 }

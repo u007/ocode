@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 )
 
@@ -90,15 +91,20 @@ func getProjectConfigPath() (string, error) {
 	return "", os.ErrNotExist
 }
 
+var jsoncComments = regexp.MustCompile(`(?m)^\s*//.*$|/\*[\s\S]*?\*/|//.*$`)
+
 func loadFromFile(path string, config *Config) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 
+	// Basic JSONC support: remove comments
+	cleanData := jsoncComments.ReplaceAll(data, []byte(""))
+
 	// Simplified merging logic: unmarshal into a temp config and merge
 	var temp Config
-	if err := json.Unmarshal(data, &temp); err != nil {
+	if err := json.Unmarshal(cleanData, &temp); err != nil {
 		return err
 	}
 

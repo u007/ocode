@@ -49,6 +49,14 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			if err != nil {
 				result = fmt.Sprintf("Error: %v", err)
 			}
+			if result == "WAITING_FOR_USER_RESPONSE" {
+				// We must provide a tool result message even if we stop,
+				// but since we want to wait for user, we'll return now.
+				// On the next turn, the TUI will have appended the user's answer as a tool result.
+				// Wait, the TUI currently just appends a 'user' message.
+				// We need to fix the protocol.
+				return newMsgs, nil
+			}
 			toolMsg := Message{
 				Role:    "tool",
 				ToolID:  tc.ID,
@@ -76,4 +84,12 @@ func (a *Agent) GetToolDefinitions() []map[string]interface{} {
 		defs = append(defs, t.Definition())
 	}
 	return defs
+}
+
+func (a *Agent) GetTools() []tool.Tool {
+	tools := make([]tool.Tool, 0, len(a.tools))
+	for _, t := range a.tools {
+		tools = append(tools, t)
+	}
+	return tools
 }

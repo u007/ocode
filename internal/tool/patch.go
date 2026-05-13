@@ -37,6 +37,12 @@ func (t ApplyPatchTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
+	// Check if patch command exists
+	_, err := exec.LookPath("patch")
+	if err != nil {
+		return "Error: 'patch' command not found. Please install patch utility for your system (e.g., 'git' for Windows usually includes it).", nil
+	}
+
 	cmd := exec.Command("patch", "-p1")
 	cmd.Stdin = strings.NewReader(params.PatchText)
 	output, err := cmd.CombinedOutput()
