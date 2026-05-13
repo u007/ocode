@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 
@@ -29,15 +30,16 @@ type message struct {
 }
 
 type model struct {
-	viewport viewport.Model
-	input    textarea.Model
-	messages []message
-	agent    *agent.Agent
-	config   *config.Config
-	width    int
-	height   int
-	ready    bool
-	err      error
+	viewport  viewport.Model
+	input     textarea.Model
+	messages  []message
+	agent     *agent.Agent
+	config    *config.Config
+	sessionID string
+	width     int
+	height    int
+	ready     bool
+	err       error
 }
 
 type agentResponseMsg string
@@ -70,8 +72,15 @@ func (m *model) getInitialTools() []tool.Tool {
 	}
 }
 
-func newModel() model {
+func newModel(sid string, cont bool) model {
 	cfg, _ := config.Load()
+
+	if cont {
+		ids, _ := session.List()
+		if len(ids) > 0 {
+			sid = ids[len(ids)-1] // latest
+		}
+	}
 
 	tmp := model{}
 	tools := tmp.getInitialTools()
@@ -94,13 +103,30 @@ func newModel() model {
 	vp := viewport.New(80, 20)
 	vp.SetContent(hintStyle.Render("  ocode — opencode clone · type a message to begin\n"))
 
-	return model{
-		viewport: vp,
-		input:    ta,
-		messages: []message{},
-		config:   cfg,
-		agent:    a,
+	m := model{
+		viewport:  vp,
+		input:     ta,
+		messages:  []message{},
+		config:    cfg,
+		agent:     a,
+		sessionID: sid,
 	}
+
+	if sid != "" {
+		msgs, err := session.Load(sid)
+		if err == nil {
+			for _, am := range msgs {
+				role := roleUser
+				if am.Role == "assistant" || am.Role == "tool" {
+					role = roleAssistant
+				}
+				copyMsg := am
+				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
+			}
+		}
+	}
+
+	return m
 }
 
 func (m model) Init() tea.Cmd {
@@ -112,6 +138,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
 	)
+
+	// Save session on any message update
+	defer func() {
+		if len(m.messages) > 0 {
+			var agentMsgs []agent.Message
+			for _, msg := range m.messages {
+				if msg.raw != nil {
+					agentMsgs = append(agentMsgs, *msg.raw)
+				} else {
+					role := "user"
+					if msg.role == roleAssistant {
+						role = "assistant"
+					}
+					agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
+				}
+			}
+			session.Save(m.sessionID, agentMsgs)
+		}
+	}()
 
 	m.input, tiCmd = m.input.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
@@ -261,11 +306,34 @@ func (m *model) handleConnectCmd(args []string) {
 
 func (m *model) handleSessionCmd(args []string) {
 	if len(args) == 0 {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Active session: default\nUse '/session list' to see all sessions."})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Active session: %s\nUse '/session list' to see all sessions.", m.sessionID)})
 	} else if args[0] == "list" {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Sessions:\n- default (active)"})
+		ids, _ := session.List()
+		var b strings.Builder
+		b.WriteString("Sessions:\n")
+		for _, id := range ids {
+			b.WriteString(fmt.Sprintf("- %s\n", id))
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+	} else if args[0] == "load" && len(args) > 1 {
+		msgs, err := session.Load(args[1])
+		if err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session: %v", err)})
+		} else {
+			m.sessionID = args[1]
+			m.messages = []message{}
+			for _, am := range msgs {
+				role := roleUser
+				if am.Role == "assistant" || am.Role == "tool" {
+					role = roleAssistant
+				}
+				copyMsg := am
+				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Loaded session %s", m.sessionID)})
+		}
 	} else {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switched to session %s (simulated)", args[0])})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /session [list|load <id>]"})
 	}
 }
 

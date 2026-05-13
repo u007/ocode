@@ -245,7 +245,7 @@ var providers = map[string]providerInfo{
 	"openai":     {"OPENAI_API_KEY", "https://api.openai.com/v1"},
 	"anthropic":  {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
 	"openrouter": {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
-	"google":     {"GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"},
+	"google":     {"GOOGLE_OAUTH_ACCESS_TOKEN", "https://generativelanguage.googleapis.com/v1beta/openai"},
 	"zai":        {"ZAI_API_KEY", "https://api.z.ai/v1"},
 	"z.ai":       {"ZAI_API_KEY", "https://api.z.ai/v1"},
 	"zai-coding": {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
@@ -292,6 +292,9 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	if info, ok := providers[provider]; ok {
 		if apiKey == "" {
 			apiKey = os.Getenv(info.envKey)
+			if provider == "google" && apiKey == "" {
+				apiKey = os.Getenv("GOOGLE_API_KEY")
+			}
 		}
 		if baseURL == "" {
 			baseURL = info.baseURL
