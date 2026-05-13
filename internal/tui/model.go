@@ -242,7 +242,7 @@ func (m *model) handleModelCmd(args []string) {
 func (m *model) handleConnectCmd(args []string) {
 	var b strings.Builder
 	b.WriteString("Provider status:\n")
-	providers := []string{"openai", "anthropic", "google", "zai", "openrouter", "moonshot", "minimax", "alibaba"}
+	providers := []string{"openai", "anthropic", "google", "zai", "zai-coding", "openrouter", "moonshot", "minimax", "alibaba", "alibaba-coding", "chutes"}
 	for _, p := range providers {
 		status := "❌ disconnected"
 		envVar := ""

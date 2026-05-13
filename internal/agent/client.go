@@ -248,10 +248,13 @@ var providers = map[string]providerInfo{
 	"google":     {"GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"},
 	"zai":        {"ZAI_API_KEY", "https://api.z.ai/v1"},
 	"z.ai":       {"ZAI_API_KEY", "https://api.z.ai/v1"},
-	"zai-coding": {"ZAI_API_KEY", "https://api.z.ai/v1/coding"},
+	"zai-coding": {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
+	"chutes":     {"CHUTES_API_KEY", "https://api.chutes.ai/v1"},
+	"chutes-coding": {"CHUTES_API_KEY", "https://api.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
+	"alibaba":    {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+	"alibaba-coding": {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
 	"moonshot":   {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
 	"minimax":    {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
-	"alibaba":    {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
 }
 
 func NewClient(cfg *config.Config, model string) LLMClient {
