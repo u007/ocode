@@ -39,6 +39,8 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
+	ign := NewIgnoreMatcher()
+
 	// Basic support for **
 	// Replace ** with a regex that matches anything across directories
 	regexPattern := regexp.QuoteMeta(params.Pattern)
@@ -60,6 +62,14 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 		if path == "." {
 			return nil
 		}
+
+		if ign.IsIgnored(path, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		path = filepath.ToSlash(path) // normalize for regex
 		if info.IsDir() {
 			if info.Name() == ".git" || info.Name() == "node_modules" {
@@ -128,10 +138,17 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("invalid regex: %w", err)
 	}
 
+	ign := NewIgnoreMatcher()
 	var results []string
 	err = filepath.Walk(params.Path, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return fmt.Errorf("error walking path %s: %w", path, err)
+		}
+		if ign.IsIgnored(path, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if info.IsDir() {
 			if info.Name() == ".git" || info.Name() == "node_modules" {
@@ -164,6 +181,64 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 
 	if len(results) == 0 {
 		return "No matches found", nil
+	}
+
+	return strings.Join(results, "\n"), nil
+}
+
+type ListTool struct{}
+
+func (t ListTool) Name() string        { return "list" }
+func (t ListTool) Description() string { return "List files and directories in a given path" }
+func (t ListTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "list",
+		"description": "List files and directories in a given path",
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional path to list (default: current directory)",
+				},
+			},
+		},
+	}
+}
+
+func (t ListTool) Execute(args json.RawMessage) (string, error) {
+	var params struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	if params.Path == "" {
+		params.Path = "."
+	}
+
+	ign := NewIgnoreMatcher()
+	entries, err := os.ReadDir(params.Path)
+	if err != nil {
+		return "", fmt.Errorf("failed to list directory %s: %w", params.Path, err)
+	}
+
+	var results []string
+	for _, e := range entries {
+		name := e.Name()
+		fullPath := filepath.Join(params.Path, name)
+		if ign.IsIgnored(fullPath, e.IsDir()) {
+			continue
+		}
+		if e.IsDir() {
+			name += "/"
+		}
+		results = append(results, name)
+	}
+
+	if len(results) == 0 {
+		return "Empty directory", nil
 	}
 
 	return strings.Join(results, "\n"), nil

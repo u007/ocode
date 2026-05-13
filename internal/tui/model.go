@@ -10,6 +10,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/jamesmercstudio/ocode/internal/snapshot"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -70,6 +71,7 @@ func (m *model) getInitialTools() []tool.Tool {
 		tool.QuestionTool{},
 		tool.WebFetchTool{},
 		tool.WebSearchTool{},
+		tool.LSPTool{},
 	}
 }
 
@@ -248,6 +250,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		m.handleSessionCmd(args)
 	case "/compact":
 		m.handleCompactCmd(args)
+	case "/undo":
+		m.handleUndoCmd(args)
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
 	}
@@ -335,6 +339,15 @@ func (m *model) handleCompactCmd(args []string) {
 	}
 	m.messages = newMsgs
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Conversation compacted (removed tool history from view)."})
+}
+
+func (m *model) handleUndoCmd(args []string) {
+	path, err := snapshot.Undo()
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error undoing: %v", err)})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Successfully reverted changes to %s", path)})
+	}
 }
 
 func (m *model) saveSession() {

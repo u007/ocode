@@ -255,6 +255,11 @@ var providers = map[string]providerInfo{
 	"alibaba-coding": {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
 	"moonshot":   {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
 	"minimax":    {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
+	"requesty":   {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
+	"302ai":      {"302AI_API_KEY", "https://api.302.ai/v1"},
+	"deepseek":   {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
+	"groq":       {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
+	"mistral":    {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
 }
 
 func NewClient(cfg *config.Config, model string) LLMClient {

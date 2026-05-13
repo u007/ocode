@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+
+	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
 type BashTool struct{}
@@ -91,6 +93,9 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
+
+	// Backup before edit
+	snapshot.Backup(params.Path)
 
 	content, err := os.ReadFile(params.Path)
 	if err != nil {

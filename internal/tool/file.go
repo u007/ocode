@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
 type ReadTool struct{}
@@ -76,6 +78,9 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
+
+	// Backup before write
+	snapshot.Backup(params.Path)
 
 	if err := os.MkdirAll(filepath.Dir(params.Path), 0755); err != nil {
 		return "", fmt.Errorf("failed to create directories for %s: %w", params.Path, err)

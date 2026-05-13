@@ -84,8 +84,31 @@ func (t TodoWriteTool) Execute(args json.RawMessage) (string, error) {
 
 	// By default, write to TODO_OCODE.md
 	if err := os.WriteFile("TODO_OCODE.md", []byte(params.TodoText), 0644); err != nil {
-		return "", err
+		return "", fmt.Errorf("failed to write TODO_OCODE.md: %w", err)
 	}
 
 	return "Successfully updated TODO_OCODE.md", nil
+}
+
+type TodoReadTool struct{}
+
+func (t TodoReadTool) Name() string        { return "todoread" }
+func (t TodoReadTool) Description() string { return "Read the current todo list" }
+func (t TodoReadTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "todoread",
+		"description": "Read the current todo list from TODO_OCODE.md",
+		"parameters":  map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+	}
+}
+
+func (t TodoReadTool) Execute(args json.RawMessage) (string, error) {
+	content, err := os.ReadFile("TODO_OCODE.md")
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "No todo list found (TODO_OCODE.md does not exist)", nil
+		}
+		return "", fmt.Errorf("failed to read TODO_OCODE.md: %w", err)
+	}
+	return string(content), nil
 }

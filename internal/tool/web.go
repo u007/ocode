@@ -2,6 +2,7 @@ package tool
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 )
@@ -71,7 +72,25 @@ func (t WebSearchTool) Definition() map[string]interface{} {
 }
 
 func (t WebSearchTool) Execute(args json.RawMessage) (string, error) {
-	// For now, this requires an external API or a crawler
-	// Return a placeholder message
-	return "Web search is not yet fully implemented in this clone.", nil
+	var params struct {
+		Query string `json:"query"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	// Use DDG html search for a functional free version
+	url := fmt.Sprintf("https://html.duckduckgo.com/html/?q=%s", params.Query)
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("search request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read search response: %w", err)
+	}
+
+	return string(body), nil
 }
