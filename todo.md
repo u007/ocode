@@ -3,7 +3,7 @@
 ## Progress
 
 - [x] Initialize `todo.md`
-- [x] Implement Configuration System (JSONC supported)
+- [x] Implement Configuration System (JSONC supported, MCP config)
 - [x] Implement File Tools (`read`, `write`)
 - [x] Implement Search Tools (recursive `glob`, pure Go `grep`)
 - [x] Implement Command and Edit Tools (`bash`, `edit`)
@@ -17,25 +17,21 @@
 - [x] Support `AGENTS.md` and `CLAUDE.md` context
 - [x] Implement Basic Slash Commands (`/model`, `/connect`, `/session`, `/compact`)
 - [x] Integrated `opencode.json` provider settings into LLM client
+- [x] Support for Global Custom Tools (`~/.config/opencode/tools/*.json`)
+- [x] Basic MCP Support (local stdio servers)
+- [x] Support OpenCode sessions (Auto-save and Resume)
 - [x] Update TUI State and Rendering (Tool visualization, history persistence)
 - [x] Cross-platform support (Windows/Unix aware, native grep)
 - [x] Final Integration and Verification
 
 ## Pending Items
 
-- [ ] Support more providers:
-    - [ ] Requesty
-    - [ ] 302.AI
-    - [ ] Google OAuth2 for Vertex AI
-    - [ ] DeepSeek (native API)
-    - [ ] Groq (native API)
-    - [ ] Mistral (native API)
+- [ ] Support more providers (Requesty, 302.AI, etc.)
 - [ ] Real-time Web Search tool
-- [ ] Support MCP servers
-- [ ] Support custom tools
+- [ ] Support Remote/SSE MCP servers
 - [ ] LSP integration
 - [ ] Snapshots (undo/revert)
 - [ ] Advanced Context compaction logic
 - [ ] File watcher ignore patterns
 - [ ] Advanced TUI features (themes, keybinds)
-- [ ] Persistent session storage to disk
+- [ ] Persistent session storage optimization

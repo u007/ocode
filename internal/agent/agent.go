@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/mcp"
 )
 
 type Agent struct {
@@ -92,4 +94,35 @@ func (a *Agent) GetTools() []tool.Tool {
 		tools = append(tools, t)
 	}
 	return tools
+}
+
+func (a *Agent) AddTools(tools []tool.Tool) {
+	for _, t := range tools {
+		a.tools[t.Name()] = t
+	}
+}
+
+func (a *Agent) LoadExternalTools(cfg *config.Config) {
+	// Load Custom Tools
+	custom := tool.LoadCustomTools()
+	a.AddTools(custom)
+
+	// Load MCP Tools
+	if cfg != nil {
+		for name, mcpCfg := range cfg.MCP {
+			if mcpCfg.Enabled && mcpCfg.Type == "local" {
+				client, err := mcp.NewLocalClient(name, mcpCfg)
+				if err == nil {
+					mcpTools, err := client.ListTools()
+					if err == nil {
+						var tools []tool.Tool
+						for _, mt := range mcpTools {
+							tools = append(tools, mt)
+						}
+						a.AddTools(tools)
+					}
+				}
+			}
+		}
+	}
 }

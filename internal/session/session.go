@@ -1,8 +1,11 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,8 +15,10 @@ import (
 )
 
 type Session struct {
-	ID       string          `json:"id"`
-	Messages []agent.Message `json:"messages"`
+	ID        string          `json:"id"`
+	Messages  []agent.Message `json:"messages"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
 }
 
 func GetStorageDir() (string, error) {
@@ -27,8 +32,7 @@ func GetStorageDir() (string, error) {
 		base = filepath.Join(os.Getenv("USERPROFILE"), ".local", "share", "opencode")
 	}
 
-	wd, _ := os.Getwd()
-	slug := sanitizeSlug(wd)
+	slug := getProjectSlug()
 
 	dir := filepath.Join(base, "project", slug, "storage")
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -37,12 +41,17 @@ func GetStorageDir() (string, error) {
 	return dir, nil
 }
 
-func sanitizeSlug(path string) string {
-	s := strings.ToLower(path)
-	s = strings.ReplaceAll(s, "\\", "-")
-	s = strings.ReplaceAll(s, "/", "-")
-	s = strings.ReplaceAll(s, ":", "")
-	return strings.Trim(s, "-")
+func getProjectSlug() string {
+	wd, _ := os.Getwd()
+
+	// Try to find Git root
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	if output, err := cmd.Output(); err == nil {
+		wd = strings.TrimSpace(string(output))
+	}
+
+	hash := sha256.Sum256([]byte(wd))
+	return hex.EncodeToString(hash[:])[:12]
 }
 
 func Save(id string, messages []agent.Message) error {
@@ -57,17 +66,24 @@ func Save(id string, messages []agent.Message) error {
 
 	path := filepath.Join(dir, id+".json")
 
-	s := Session{
-		ID:       id,
-		Messages: messages,
+	var s Session
+	data, err := os.ReadFile(path)
+	if err == nil {
+		json.Unmarshal(data, &s)
+	} else {
+		s.ID = id
+		s.CreatedAt = time.Now()
 	}
 
-	data, err := json.MarshalIndent(s, "", "  ")
+	s.Messages = messages
+	s.UpdatedAt = time.Now()
+
+	out, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, out, 0644)
 }
 
 func Load(id string) ([]agent.Message, error) {

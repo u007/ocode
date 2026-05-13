@@ -9,6 +9,15 @@ import (
 	"runtime"
 )
 
+type MCPConfig struct {
+	Type        string            `json:"type"`
+	Command     []string          `json:"command,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Environment map[string]string `json:"environment,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Enabled     bool              `json:"enabled"`
+}
+
 type Config struct {
 	Model        string                 `json:"model"`
 	SmallModel   string                 `json:"small_model"`
@@ -17,6 +26,7 @@ type Config struct {
 	Permission   map[string]interface{} `json:"permission"`
 	Agent        map[string]interface{} `json:"agent"`
 	DefaultAgent string                 `json:"default_agent"`
+	MCP          map[string]MCPConfig   `json:"mcp"`
 }
 
 func Load() (*Config, error) {
@@ -116,6 +126,12 @@ func loadFromFile(path string, config *Config) error {
 	}
 	if temp.DefaultAgent != "" {
 		config.DefaultAgent = temp.DefaultAgent
+	}
+	if config.MCP == nil {
+		config.MCP = make(map[string]MCPConfig)
+	}
+	for k, v := range temp.MCP {
+		config.MCP[k] = v
 	}
 	for k, v := range temp.Tools {
 		config.Tools[k] = v

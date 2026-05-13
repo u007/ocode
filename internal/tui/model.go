@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/session"
@@ -89,6 +90,7 @@ func newModel(sid string, cont bool) model {
 	if cfg != nil && cfg.Model != "" {
 		client := agent.NewClient(cfg, cfg.Model)
 		a = agent.NewAgent(client, tools)
+		a.LoadExternalTools(cfg)
 	}
 
 	ta := textarea.New()
@@ -102,6 +104,10 @@ func newModel(sid string, cont bool) model {
 
 	vp := viewport.New(80, 20)
 	vp.SetContent(hintStyle.Render("  ocode — opencode clone · type a message to begin\n"))
+
+	if sid == "" {
+		sid = time.Now().Format("2006-01-02-150405")
+	}
 
 	m := model{
 		viewport:  vp,
@@ -138,25 +144,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
 	)
-
-	// Save session on any message update
-	defer func() {
-		if len(m.messages) > 0 {
-			var agentMsgs []agent.Message
-			for _, msg := range m.messages {
-				if msg.raw != nil {
-					agentMsgs = append(agentMsgs, *msg.raw)
-				} else {
-					role := "user"
-					if msg.role == roleAssistant {
-						role = "assistant"
-					}
-					agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
-				}
-			}
-			session.Save(m.sessionID, agentMsgs)
-		}
-	}()
 
 	m.input, tiCmd = m.input.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
@@ -213,6 +200,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.renderTranscript()
 			m.viewport.GotoBottom()
+			m.saveSession()
 
 			if m.agent != nil {
 				return m, m.askAgent()
@@ -237,6 +225,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.renderTranscript()
 		m.viewport.GotoBottom()
+		m.saveSession()
 	case errorMsg:
 		m.err = msg
 	}
@@ -346,6 +335,24 @@ func (m *model) handleCompactCmd(args []string) {
 	}
 	m.messages = newMsgs
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Conversation compacted (removed tool history from view)."})
+}
+
+func (m *model) saveSession() {
+	if len(m.messages) > 0 {
+		var agentMsgs []agent.Message
+		for _, msg := range m.messages {
+			if msg.raw != nil {
+				agentMsgs = append(agentMsgs, *msg.raw)
+			} else {
+				role := "user"
+				if msg.role == roleAssistant {
+					role = "assistant"
+				}
+				agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
+			}
+		}
+		session.Save(m.sessionID, agentMsgs)
+	}
 }
 
 func (m model) askAgent() tea.Cmd {
