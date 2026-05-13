@@ -30,6 +30,7 @@ type ToolCall struct {
 
 type LLMClient interface {
 	Chat(messages []Message, tools []map[string]interface{}) (*Message, error)
+	GetProvider() string
 }
 
 type GenericClient struct {
@@ -37,6 +38,10 @@ type GenericClient struct {
 	Model    string
 	BaseURL  string
 	Provider string
+}
+
+func (c *GenericClient) GetProvider() string {
+	return c.Provider
 }
 
 func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
@@ -260,6 +265,8 @@ var providers = map[string]providerInfo{
 	"deepseek":   {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
 	"groq":       {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
 	"mistral":    {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
+	"opencode":   {"OPENCODE_API_KEY", "https://api.opencode.ai/v1"},
+	"opencode-go": {"OPENCODE_API_KEY", "https://api.opencode.ai/v1/go"},
 }
 
 func NewClient(cfg *config.Config, model string) LLMClient {
@@ -299,6 +306,20 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 			apiKey = os.Getenv(info.envKey)
 			if provider == "google" && apiKey == "" {
 				apiKey = os.Getenv("GOOGLE_API_KEY")
+			}
+			if apiKey == "" {
+				// Try reading GOOGLE_APPLICATION_CREDENTIALS
+				creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+				if creds != "" {
+					data, err := os.ReadFile(creds)
+					if err == nil {
+						var key struct {
+							Key string `json:"private_key"`
+						}
+						json.Unmarshal(data, &key)
+						// This is a placeholder; real Vertex auth is more complex
+					}
+				}
 			}
 		}
 		if baseURL == "" {

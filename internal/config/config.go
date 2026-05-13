@@ -19,9 +19,15 @@ type MCPConfig struct {
 }
 
 type TUIConfig struct {
-	Theme  string  `json:"theme"`
-	Mouse  *bool   `json:"mouse"`
-	Scroll float64 `json:"scroll_speed"`
+	Theme         string            `json:"theme"`
+	Mouse         *bool             `json:"mouse"`
+	Scroll        float64           `json:"scroll_speed"`
+	Keybinds      map[string]string `json:"keybinds"`
+	LeaderTimeout int               `json:"leader_timeout"`
+}
+
+type WatcherConfig struct {
+	Ignore []string `json:"ignore"`
 }
 
 type Config struct {
@@ -34,6 +40,7 @@ type Config struct {
 	DefaultAgent string                 `json:"default_agent"`
 	MCP          map[string]MCPConfig   `json:"mcp"`
 	TUI          TUIConfig              `json:"tui"`
+	Watcher      WatcherConfig          `json:"watcher"`
 }
 
 func Load() (*Config, error) {
@@ -47,6 +54,7 @@ func Load() (*Config, error) {
 	mouseDefault := true
 	config.TUI.Mouse = &mouseDefault
 	config.TUI.Scroll = 3.0
+	config.TUI.LeaderTimeout = 2000
 
 	// 1. Global config
 	globalPath, err := getGlobalConfigPath()
@@ -98,9 +106,11 @@ func mergeTUI(path string, config *Config) {
 	var temp struct {
 		TUI TUIConfig `json:"tui"`
 		// Also support top-level theme/mouse etc in tui.json
-		Theme  string  `json:"theme"`
-		Mouse  *bool   `json:"mouse"`
-		Scroll float64 `json:"scroll_speed"`
+		Theme         string            `json:"theme"`
+		Mouse         *bool             `json:"mouse"`
+		Scroll        float64           `json:"scroll_speed"`
+		Keybinds      map[string]string `json:"keybinds"`
+		LeaderTimeout int               `json:"leader_timeout"`
 	}
 	if err := json.Unmarshal(cleanData, &temp); err == nil {
 		if temp.Theme != "" { config.TUI.Theme = temp.Theme }
@@ -109,6 +119,10 @@ func mergeTUI(path string, config *Config) {
 		if temp.TUI.Mouse != nil { config.TUI.Mouse = temp.TUI.Mouse }
 		if temp.Scroll != 0 { config.TUI.Scroll = temp.Scroll }
 		if temp.TUI.Scroll != 0 { config.TUI.Scroll = temp.TUI.Scroll }
+		if temp.LeaderTimeout != 0 { config.TUI.LeaderTimeout = temp.LeaderTimeout }
+		if temp.TUI.LeaderTimeout != 0 { config.TUI.LeaderTimeout = temp.TUI.LeaderTimeout }
+		if config.TUI.Keybinds == nil { config.TUI.Keybinds = make(map[string]string) }
+		for k, v := range temp.TUI.Keybinds { config.TUI.Keybinds[k] = v }
 	}
 }
 
@@ -187,6 +201,9 @@ func loadFromFile(path string, config *Config) error {
 	}
 	for k, v := range temp.Tools {
 		config.Tools[k] = v
+	}
+	for _, ignore := range temp.Watcher.Ignore {
+		config.Watcher.Ignore = append(config.Watcher.Ignore, ignore)
 	}
 	for k, v := range temp.Permission {
 		config.Permission[k] = v

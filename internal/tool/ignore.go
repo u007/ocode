@@ -13,7 +13,7 @@ type IgnoreMatcher struct {
 	matcher gitignore.Matcher
 }
 
-func NewIgnoreMatcher() *IgnoreMatcher {
+func NewIgnoreMatcher(extraPatterns []string) *IgnoreMatcher {
 	var patterns []gitignore.Pattern
 
 	// Load .gitignore
@@ -36,6 +36,10 @@ func NewIgnoreMatcher() *IgnoreMatcher {
 				patterns = append(patterns, gitignore.ParsePattern(line, nil))
 			}
 		}
+	}
+
+	for _, p := range extraPatterns {
+		patterns = append(patterns, gitignore.ParsePattern(p, nil))
 	}
 
 	return &IgnoreMatcher{

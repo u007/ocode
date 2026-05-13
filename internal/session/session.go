@@ -16,6 +16,7 @@ import (
 
 type Session struct {
 	ID        string          `json:"id"`
+	Title     string          `json:"title"`
 	Messages  []agent.Message `json:"messages"`
 	CreatedAt time.Time       `json:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at"`
@@ -54,7 +55,7 @@ func getProjectSlug() string {
 	return hex.EncodeToString(hash[:])[:12]
 }
 
-func Save(id string, messages []agent.Message) error {
+func Save(id string, title string, messages []agent.Message) error {
 	dir, err := GetStorageDir()
 	if err != nil {
 		return err
@@ -75,6 +76,9 @@ func Save(id string, messages []agent.Message) error {
 		s.CreatedAt = time.Now()
 	}
 
+	if title != "" {
+		s.Title = title
+	}
 	s.Messages = messages
 	s.UpdatedAt = time.Now()
 
@@ -106,7 +110,7 @@ func Load(id string) ([]agent.Message, error) {
 	return s.Messages, nil
 }
 
-func List() ([]string, error) {
+func List() ([]Session, error) {
 	dir, err := GetStorageDir()
 	if err != nil {
 		return nil, err
@@ -117,11 +121,17 @@ func List() ([]string, error) {
 		return nil, err
 	}
 
-	var ids []string
+	var sessions []Session
 	for _, e := range entries {
 		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
-			ids = append(ids, strings.TrimSuffix(e.Name(), ".json"))
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err == nil {
+				var s Session
+				if err := json.Unmarshal(data, &s); err == nil {
+					sessions = append(sessions, s)
+				}
+			}
 		}
 	}
-	return ids, nil
+	return sessions, nil
 }

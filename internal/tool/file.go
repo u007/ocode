@@ -91,3 +91,42 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 	}
 	return fmt.Sprintf("Successfully wrote to %s", params.Path), nil
 }
+
+type DeleteTool struct{}
+
+func (t DeleteTool) Name() string        { return "delete" }
+func (t DeleteTool) Description() string { return "Delete a file or directory" }
+func (t DeleteTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "delete",
+		"description": "Delete a file or directory",
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path": map[string]interface{}{
+					"type":        "string",
+					"description": "Path to the file or directory to delete",
+				},
+			},
+			"required": []string{"path"},
+		},
+	}
+}
+
+func (t DeleteTool) Execute(args json.RawMessage) (string, error) {
+	var params struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	// Backup before delete
+	snapshot.Backup(params.Path)
+
+	if err := os.RemoveAll(params.Path); err != nil {
+		return "", fmt.Errorf("failed to delete %s: %w", params.Path, err)
+	}
+
+	return fmt.Sprintf("Successfully deleted %s", params.Path), nil
+}

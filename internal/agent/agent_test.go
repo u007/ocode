@@ -16,6 +16,8 @@ func (m *MockClient) Chat(messages []Message, tools []map[string]interface{}) (*
 	return m.Response, m.Err
 }
 
+func (m *MockClient) GetProvider() string { return "mock" }
+
 func TestAgentStep(t *testing.T) {
 	mock := &MockClient{
 		Response: &Message{
@@ -23,7 +25,7 @@ func TestAgentStep(t *testing.T) {
 			Content: "Hello!",
 		},
 	}
-	a := NewAgent(mock, nil)
+	a := NewAgent(mock, nil, nil)
 
 	msgs, err := a.Step([]Message{{Role: "user", Content: "Hi"}})
 	if err != nil {
@@ -56,7 +58,7 @@ func TestAgentToolExecution(t *testing.T) {
 	mock := &MockToolClient{responses: []*Message{step1, step2}}
 
 	mockTool := &MockTool{name: "test_tool", result: "success"}
-	a := NewAgent(mock, nil)
+	a := NewAgent(mock, nil, nil)
 	a.AddTools([]tool.Tool{mockTool})
 
 	msgs, err := a.Step([]Message{{Role: "user", Content: "do tool"}})
@@ -83,6 +85,8 @@ func (m *MockToolClient) Chat(messages []Message, tools []map[string]interface{}
 	m.idx++
 	return r, nil
 }
+
+func (m *MockToolClient) GetProvider() string { return "mock" }
 
 type MockTool struct {
 	name   string

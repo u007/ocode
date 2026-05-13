@@ -34,12 +34,13 @@ func (t GlobTool) Definition() map[string]interface{} {
 func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		Pattern string `json:"pattern"`
+		Ignore  []string `json:"ignore"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
 
-	ign := NewIgnoreMatcher()
+	ign := NewIgnoreMatcher(params.Ignore)
 
 	// Basic support for **
 	// Replace ** with a regex that matches anything across directories
@@ -122,8 +123,9 @@ func (t GrepTool) Definition() map[string]interface{} {
 
 func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		Pattern string `json:"pattern"`
-		Path    string `json:"path"`
+		Pattern string   `json:"pattern"`
+		Path    string   `json:"path"`
+		Ignore  []string `json:"ignore"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -138,7 +140,7 @@ func (t GrepTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("invalid regex: %w", err)
 	}
 
-	ign := NewIgnoreMatcher()
+	ign := NewIgnoreMatcher(params.Ignore)
 	var results []string
 	err = filepath.Walk(params.Path, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -212,8 +214,9 @@ func (t ListTool) Definition() map[string]interface{} {
 
 func (t ListTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		Path    string `json:"path"`
-		Pattern string `json:"pattern"`
+		Path    string   `json:"path"`
+		Pattern string   `json:"pattern"`
+		Ignore  []string `json:"ignore"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -223,7 +226,7 @@ func (t ListTool) Execute(args json.RawMessage) (string, error) {
 		params.Path = "."
 	}
 
-	ign := NewIgnoreMatcher()
+	ign := NewIgnoreMatcher(params.Ignore)
 	entries, err := os.ReadDir(params.Path)
 	if err != nil {
 		return "", fmt.Errorf("failed to list directory %s: %w", params.Path, err)
