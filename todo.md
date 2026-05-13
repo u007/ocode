@@ -23,6 +23,7 @@
 - [x] Update TUI State and Rendering (Tool visualization, history persistence)
 - [x] Cross-platform support (Windows/Unix aware, native grep)
 - [x] Final Integration and Verification
+- [x] Implement Core Unit Tests
 
 ## Pending Items
 

@@ -44,7 +44,7 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 	regexPattern := regexp.QuoteMeta(params.Pattern)
 	regexPattern = strings.ReplaceAll(regexPattern, "\\*\\*", ".*")
 	regexPattern = strings.ReplaceAll(regexPattern, "\\*", "[^/]*")
-	if !strings.HasPrefix(regexPattern, ".*") && !strings.HasPrefix(regexPattern, "/") {
+	if !strings.HasPrefix(regexPattern, ".*") {
 		regexPattern = ".*" + regexPattern
 	}
 	re, err := regexp.Compile("^" + regexPattern + "$")
@@ -57,6 +57,9 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 		if err != nil {
 			return fmt.Errorf("error walking path %s: %w", path, err)
 		}
+		if path == "." {
+			return nil
+		}
 		path = filepath.ToSlash(path) // normalize for regex
 		if info.IsDir() {
 			if info.Name() == ".git" || info.Name() == "node_modules" {
@@ -65,7 +68,7 @@ func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 			return nil
 		}
 
-		if re.MatchString(path) {
+		if re.MatchString(path) || re.MatchString("./"+path) {
 			matches = append(matches, path)
 		}
 		return nil
