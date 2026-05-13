@@ -1,0 +1,6 @@
+/ocode
+*.test
+*.out
+.env
+.env.local
+.DS_Store
