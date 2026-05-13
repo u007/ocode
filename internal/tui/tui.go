@@ -5,7 +5,13 @@ import (
 )
 
 func Run(sessionID string, cont bool) error {
-	p := tea.NewProgram(newModel(sessionID, cont), tea.WithAltScreen())
+	m := newModel(sessionID, cont)
+	opts := []tea.ProgramOption{tea.WithAltScreen()}
+	if m.config != nil && m.config.TUI.Mouse != nil && *m.config.TUI.Mouse {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
+
+	p := tea.NewProgram(m, opts...)
 	_, err := p.Run()
 	return err
 }

@@ -51,7 +51,3 @@ func TestSearchTools(t *testing.T) {
 func contains(s, substr string) bool {
 	return filepath.ToSlash(s) != "" && (s == substr || filepath.ToSlash(s) == substr || (len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr)))
 }
-// simpler contains for test output
-func containsSimple(s, substr string) bool {
-	return filepath.ToSlash(s) != ""
-}

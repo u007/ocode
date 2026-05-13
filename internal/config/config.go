@@ -18,6 +18,12 @@ type MCPConfig struct {
 	Enabled     bool              `json:"enabled"`
 }
 
+type TUIConfig struct {
+	Theme  string  `json:"theme"`
+	Mouse  *bool   `json:"mouse"`
+	Scroll float64 `json:"scroll_speed"`
+}
+
 type Config struct {
 	Model        string                 `json:"model"`
 	SmallModel   string                 `json:"small_model"`
@@ -27,6 +33,7 @@ type Config struct {
 	Agent        map[string]interface{} `json:"agent"`
 	DefaultAgent string                 `json:"default_agent"`
 	MCP          map[string]MCPConfig   `json:"mcp"`
+	TUI          TUIConfig              `json:"tui"`
 }
 
 func Load() (*Config, error) {
@@ -35,6 +42,11 @@ func Load() (*Config, error) {
 		Permission: make(map[string]interface{}),
 		Provider:   make(map[string]interface{}),
 	}
+
+	// Default TUI values
+	mouseDefault := true
+	config.TUI.Mouse = &mouseDefault
+	config.TUI.Scroll = 3.0
 
 	// 1. Global config
 	globalPath, err := getGlobalConfigPath()
@@ -57,7 +69,47 @@ func Load() (*Config, error) {
 		config.Model = model
 	}
 
+	// 4. TUI config files
+	loadTUIConfig(config)
+
 	return config, nil
+}
+
+func loadTUIConfig(config *Config) {
+	home, _ := os.UserHomeDir()
+	globalTUI := filepath.Join(home, ".config", "opencode", "tui.json")
+	if runtime.GOOS == "windows" {
+		globalTUI = filepath.Join(os.Getenv("APPDATA"), "opencode", "tui.json")
+	}
+
+	projectTUI := "tui.json"
+
+	// Load global then project
+	mergeTUI(globalTUI, config)
+	mergeTUI(projectTUI, config)
+}
+
+func mergeTUI(path string, config *Config) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	cleanData := jsoncComments.ReplaceAll(data, []byte(""))
+	var temp struct {
+		TUI TUIConfig `json:"tui"`
+		// Also support top-level theme/mouse etc in tui.json
+		Theme  string  `json:"theme"`
+		Mouse  *bool   `json:"mouse"`
+		Scroll float64 `json:"scroll_speed"`
+	}
+	if err := json.Unmarshal(cleanData, &temp); err == nil {
+		if temp.Theme != "" { config.TUI.Theme = temp.Theme }
+		if temp.TUI.Theme != "" { config.TUI.Theme = temp.TUI.Theme }
+		if temp.Mouse != nil { config.TUI.Mouse = temp.Mouse }
+		if temp.TUI.Mouse != nil { config.TUI.Mouse = temp.TUI.Mouse }
+		if temp.Scroll != 0 { config.TUI.Scroll = temp.Scroll }
+		if temp.TUI.Scroll != 0 { config.TUI.Scroll = temp.TUI.Scroll }
+	}
 }
 
 func getGlobalConfigPath() (string, error) {

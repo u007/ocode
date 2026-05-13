@@ -201,6 +201,10 @@ func (t ListTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "Optional path to list (default: current directory)",
 				},
+				"pattern": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional glob pattern to filter results",
+				},
 			},
 		},
 	}
@@ -208,7 +212,8 @@ func (t ListTool) Definition() map[string]interface{} {
 
 func (t ListTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		Path string `json:"path"`
+		Path    string `json:"path"`
+		Pattern string `json:"pattern"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -231,6 +236,14 @@ func (t ListTool) Execute(args json.RawMessage) (string, error) {
 		if ign.IsIgnored(fullPath, e.IsDir()) {
 			continue
 		}
+
+		if params.Pattern != "" {
+			matched, _ := filepath.Match(params.Pattern, name)
+			if !matched {
+				continue
+			}
+		}
+
 		if e.IsDir() {
 			name += "/"
 		}

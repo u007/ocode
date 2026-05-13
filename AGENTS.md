@@ -17,16 +17,17 @@ internal/tui/tui.go   → tea.NewProgram(newModel(), tea.WithAltScreen())
 internal/tui/model.go → Bubble Tea model (chat transcript viewport + input textarea)
 ```
 
-Messages are echoed locally (`"(no llm wired yet)"`) — no LLM integration exists.
+The agent supports multi-turn reasoning with autonomous tool execution across multiple LLM providers (OpenAI, Anthropic, Google, etc.).
 
 ## Stack
 
 - Go 1.26.1
 - Bubble Tea v1, Bubbles v1, Lipgloss v1 (Charm ecosystem)
+- Model Context Protocol (MCP) support
 
 ## Conventions
 
-- `internal/tui/` is the only package — keep it flat until growth justifies splitting
+- Package structure is modular: `internal/agent`, `internal/config`, `internal/tool`, `internal/session`, `internal/mcp`, `internal/tui`, `internal/snapshot`.
 - Model holds all state: `messages []message`, viewport, input. Update/view are methods on `model`.
 - Lipgloss styles defined as package-level vars in `model.go`
 - No exported API surface beyond `tui.Run()`

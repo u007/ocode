@@ -8,13 +8,13 @@ import (
 	"strings"
 )
 
-type ApplyPatchTool struct{}
+type PatchTool struct{}
 
-func (t ApplyPatchTool) Name() string        { return "apply_patch" }
-func (t ApplyPatchTool) Description() string { return "Apply patches to files" }
-func (t ApplyPatchTool) Definition() map[string]interface{} {
+func (t PatchTool) Name() string        { return "patch" }
+func (t PatchTool) Description() string { return "Apply patches to files" }
+func (t PatchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
-		"name":        "apply_patch",
+		"name":        "patch",
 		"description": "Apply patches to files",
 		"parameters": map[string]interface{}{
 			"type": "object",
@@ -29,7 +29,7 @@ func (t ApplyPatchTool) Definition() map[string]interface{} {
 	}
 }
 
-func (t ApplyPatchTool) Execute(args json.RawMessage) (string, error) {
+func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		PatchText string `json:"patchText"`
 	}

@@ -57,6 +57,31 @@ var (
 	hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
 )
 
+func (m *model) applyTheme() {
+	if m.config == nil || m.config.TUI.Theme == "" {
+		return
+	}
+
+	switch m.config.TUI.Theme {
+	case "tokyonight":
+		userStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7")).Bold(true)
+		assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#bb9af7")).Bold(true)
+		borderStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#3b4261")).
+			Padding(0, 1)
+		hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89")).Italic(true)
+	case "opencode":
+		userStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Bold(true)
+		assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ffff")).Bold(true)
+		borderStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#444444")).
+			Padding(0, 1)
+		hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true)
+	}
+}
+
 func (m *model) getInitialTools() []tool.Tool {
 	return []tool.Tool{
 		tool.ReadTool{},
@@ -65,7 +90,8 @@ func (m *model) getInitialTools() []tool.Tool {
 		tool.GrepTool{},
 		tool.BashTool{},
 		tool.EditTool{},
-		tool.ApplyPatchTool{},
+		tool.MultiEditTool{},
+		tool.PatchTool{},
 		tool.TodoWriteTool{},
 		tool.SkillTool{},
 		tool.QuestionTool{},
@@ -119,6 +145,8 @@ func newModel(sid string, cont bool) model {
 		agent:     a,
 		sessionID: sid,
 	}
+
+	m.applyTheme()
 
 	if sid != "" {
 		msgs, err := session.Load(sid)

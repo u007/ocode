@@ -6,8 +6,8 @@
 - [x] Implement Configuration System (JSONC supported, MCP config)
 - [x] Implement File Tools (`read`, `write`, `list`)
 - [x] Implement Search Tools (recursive `glob`, pure Go `grep`)
-- [x] Implement Command and Edit Tools (`bash`, `edit`)
-- [x] Implement Patch and Todo Tools (`apply_patch`, `todowrite`, `todoread`)
+- [x] Implement Command and Edit Tools (`bash`, `edit`, `multiedit`)
+- [x] Implement Patch and Todo Tools (`patch`, `todowrite`, `todoread`)
 - [x] Implement Skill and Question Tools (`skill`, `question`)
 - [x] Implement Web Tools (`webfetch`, DuckDuckGo `websearch`)
 - [x] Implement LLM Client (OpenAI, Anthropic, OpenRouter, Google, Z.AI, Moonshot, MiniMax, Alibaba, Chutes, Requesty, 302.AI, DeepSeek, Groq, Mistral)
@@ -35,5 +35,7 @@
 - [ ] Advanced Snapshots (directory-level undo)
 - [ ] Advanced Context compaction logic
 - [ ] File watcher ignore patterns
-- [ ] Advanced TUI features (themes, keybinds)
+- [x] TUI Configuration Support (`tui.json`)
+- [x] Theme Support (opencode, tokyonight presets)
+- [ ] Advanced TUI features (custom keybinds)
 - [ ] Persistent session storage optimization

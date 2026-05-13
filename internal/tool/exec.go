@@ -114,3 +114,59 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 
 	return fmt.Sprintf("Successfully edited %s", params.Path), nil
 }
+
+type MultiEditTool struct{}
+
+func (t MultiEditTool) Name() string        { return "multiedit" }
+func (t MultiEditTool) Description() string { return "Perform multiple edits in one or more files" }
+func (t MultiEditTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "multiedit",
+		"description": "Perform multiple edits in one or more files",
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"edits": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"path": map[string]interface{}{"type": "string"},
+							"old":  map[string]interface{}{"type": "string"},
+							"new":  map[string]interface{}{"type": "string"},
+						},
+						"required": []string{"path", "old", "new"},
+					},
+				},
+			},
+			"required": []string{"edits"},
+		},
+	}
+}
+
+func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
+	var params struct {
+		Edits []struct {
+			Path string `json:"path"`
+			Old  string `json:"old"`
+			New  string `json:"new"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	var results []string
+	editTool := EditTool{}
+	for _, e := range params.Edits {
+		editArgs, _ := json.Marshal(e)
+		res, err := editTool.Execute(editArgs)
+		if err != nil {
+			results = append(results, fmt.Sprintf("Error editing %s: %v", e.Path, err))
+		} else {
+			results = append(results, res)
+		}
+	}
+
+	return strings.Join(results, "\n"), nil
+}
