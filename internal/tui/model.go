@@ -1,7 +1,21 @@
 package tui
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
+
+	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/auth"
+	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/session"
+	"github.com/jamesmercstudio/ocode/internal/snapshot"
+	"github.com/jamesmercstudio/ocode/internal/tool"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -19,16 +33,47 @@ const (
 type message struct {
 	role role
 	text string
+	raw  *agent.Message
+}
+
+type editorFinishedMsg struct {
+	content string
+	err     error
+}
+
+type authFinishedMsg struct {
+	token string
+	err   error
+}
+
+type fileSearchFinishedMsg struct {
+	processedText string
+	messages      []message
+	err           error
 }
 
 type model struct {
-	viewport viewport.Model
-	input    textarea.Model
-	messages []message
-	width    int
-	height   int
-	ready    bool
+	viewport     viewport.Model
+	input        textarea.Model
+	messages     []message
+	agent        *agent.Agent
+	config       *config.Config
+	sessionID    string
+	showThinking bool
+	showDetails  bool
+	leaderActive bool
+	leaderTimer  *time.Timer
+	showPalette  bool
+	paletteInput string
+	width        int
+	height       int
+	ready        bool
+	err          error
+	scrollSpeed  int
 }
+
+type agentResponseMsg string
+type errorMsg error
 
 var (
 	userStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true)
@@ -40,7 +85,71 @@ var (
 	hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
 )
 
-func newModel() model {
+func (m *model) applyTheme() {
+	if m.config == nil || m.config.TUI.Theme == "" {
+		return
+	}
+
+	switch m.config.TUI.Theme {
+	case "tokyonight":
+		userStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7")).Bold(true)
+		assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#bb9af7")).Bold(true)
+		borderStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#3b4261")).
+			Padding(0, 1)
+		hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89")).Italic(true)
+	case "opencode":
+		userStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Bold(true)
+		assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ffff")).Bold(true)
+		borderStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("#444444")).
+			Padding(0, 1)
+		hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true)
+	}
+}
+
+func (m *model) getInitialTools() []tool.Tool {
+	return []tool.Tool{
+		&tool.ReadTool{},
+		&tool.WriteTool{},
+		&tool.DeleteTool{},
+		&tool.GlobTool{},
+		&tool.GrepTool{},
+		&tool.BashTool{},
+		&tool.EditTool{},
+		&tool.MultiEditTool{},
+		&tool.PatchTool{},
+		&tool.TodoWriteTool{},
+		&tool.SkillTool{},
+		&tool.QuestionTool{},
+		&tool.WebFetchTool{},
+		&tool.WebSearchTool{},
+		&tool.LSPTool{},
+	}
+}
+
+func newModel(sid string, cont bool) model {
+	cfg, _ := config.Load()
+
+	if cont {
+		sessions, _ := session.List()
+		if len(sessions) > 0 {
+			sid = sessions[0].ID
+		}
+	}
+
+	tmp := model{}
+	tools := tmp.getInitialTools()
+
+	var a *agent.Agent
+	if cfg != nil && cfg.Model != "" {
+		client := agent.NewClient(cfg, cfg.Model)
+		a = agent.NewAgent(client, tools, cfg)
+		a.LoadExternalTools(cfg)
+	}
+
 	ta := textarea.New()
 	ta.Placeholder = "Ask anything…  (enter to send, ctrl+c to quit)"
 	ta.Focus()
@@ -53,11 +162,42 @@ func newModel() model {
 	vp := viewport.New(80, 20)
 	vp.SetContent(hintStyle.Render("  ocode — opencode clone · type a message to begin\n"))
 
-	return model{
-		viewport: vp,
-		input:    ta,
-		messages: []message{},
+	if sid == "" {
+		sid = time.Now().Format("2006-01-02-150405")
 	}
+
+	m := model{
+		viewport:     vp,
+		input:        ta,
+		messages:     []message{},
+		config:       cfg,
+		agent:        a,
+		sessionID:    sid,
+		showThinking: true,
+		scrollSpeed:  3,
+	}
+
+	if cfg != nil && cfg.TUI.Scroll != 0 {
+		m.scrollSpeed = int(cfg.TUI.Scroll)
+	}
+
+	m.applyTheme()
+
+	if sid != "" {
+		msgs, err := session.Load(sid)
+		if err == nil {
+			for _, am := range msgs {
+				role := roleUser
+				if am.Role == "assistant" || am.Role == "tool" {
+					role = roleAssistant
+				}
+				copyMsg := am
+				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
+			}
+		}
+	}
+
+	return m
 }
 
 func (m model) Init() tea.Cmd {
@@ -70,6 +210,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		vpCmd tea.Cmd
 	)
 
+	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		if msg.Type == tea.MouseWheelUp {
+			m.viewport.LineUp(m.scrollSpeed)
+			return m, nil
+		}
+		if msg.Type == tea.MouseWheelDown {
+			m.viewport.LineDown(m.scrollSpeed)
+			return m, nil
+		}
+	}
+
 	m.input, tiCmd = m.input.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
 
@@ -80,7 +232,69 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		m.ready = true
 	case tea.KeyMsg:
+		if m.showPalette {
+			if msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlP {
+				m.showPalette = false
+				return m, nil
+			}
+			if msg.Type == tea.KeyEnter {
+				m.showPalette = false
+				return m.handleCommand(m.paletteInput)
+			}
+			if msg.Type == tea.KeyBackspace {
+				if len(m.paletteInput) > 0 {
+					m.paletteInput = m.paletteInput[:len(m.paletteInput)-1]
+				}
+				return m, nil
+			}
+			m.paletteInput += msg.String()
+			return m, nil
+		}
+
+		if m.leaderActive {
+			m.leaderActive = false
+			if m.leaderTimer != nil {
+				m.leaderTimer.Stop()
+			}
+
+			key := msg.String()
+			if m.config != nil {
+				if cmd, ok := m.config.TUI.Keybinds[key]; ok {
+					return m.handleCommand(cmd)
+				}
+			}
+
+			switch key {
+			case "u":
+				return m.handleCommand("/undo")
+			case "r":
+				return m.handleCommand("/redo")
+			case "n":
+				return m.handleCommand("/new")
+			case "l":
+				return m.handleCommand("/session list")
+			case "c":
+				return m.handleCommand("/compact")
+			case "q":
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+
 		switch msg.Type {
+		case tea.KeyCtrlP:
+			m.showPalette = !m.showPalette
+			m.paletteInput = ""
+			return m, nil
+		case tea.KeyCtrlX:
+			m.leaderActive = true
+			timeout := 2000
+			if m.config != nil && m.config.TUI.LeaderTimeout != 0 {
+				timeout = m.config.TUI.LeaderTimeout
+			}
+			m.leaderTimer = time.AfterFunc(time.Duration(timeout)*time.Millisecond, func() {
+			})
+			return m, nil
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyEnter:
@@ -88,17 +302,618 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if text == "" {
 				return m, tea.Batch(tiCmd, vpCmd)
 			}
-			m.messages = append(m.messages,
-				message{role: roleUser, text: text},
-				message{role: roleAssistant, text: hintStyle.Render("(no llm wired yet)")},
-			)
-			m.input.Reset()
+
+			if strings.HasPrefix(text, "/") {
+				return m.handleCommand(text)
+			}
+
+			if strings.HasPrefix(text, "!") {
+				m.input.Reset()
+				cmdText := strings.TrimPrefix(text, "!")
+				m.messages = append(m.messages, message{role: roleUser, text: text})
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 calling bash(%s)...", cmdText)})
+				m.renderTranscript()
+				m.viewport.GotoBottom()
+				return m, func() tea.Msg {
+					bash := tool.BashTool{}
+					args, _ := json.Marshal(map[string]string{"command": cmdText})
+					res, err := bash.Execute(args)
+					if err != nil {
+						res = fmt.Sprintf("Error: %v", err)
+					}
+					return []agent.Message{{Role: "tool", Content: res}}
+				}
+			}
+
+			var pendingToolCallID string
+			if len(m.messages) > 0 {
+				last := m.messages[len(m.messages)-1]
+				if last.raw != nil && len(last.raw.ToolCalls) > 0 {
+					for _, tc := range last.raw.ToolCalls {
+						if tc.Function.Name == "question" {
+							pendingToolCallID = tc.ID
+							break
+						}
+					}
+				}
+			}
+
+			if pendingToolCallID != "" {
+				m.messages = append(m.messages, message{
+					role: roleAssistant,
+					text: fmt.Sprintf("✅ tool result: %s", text),
+					raw: &agent.Message{
+						Role:    "tool",
+						Content: text,
+						ToolID:  pendingToolCallID,
+					},
+				})
+				m.input.Reset()
+				m.renderTranscript()
+				m.viewport.GotoBottom()
+				m.saveSession()
+				return m, m.askAgent()
+			} else {
+				m.input.Reset()
+				return m, m.processFileReferences(text)
+			}
+		}
+
+	case fileSearchFinishedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error processing files: %v", msg.err)})
+		} else {
+			m.messages = append(m.messages, msg.messages...)
+			m.messages = append(m.messages, message{role: roleUser, text: msg.processedText})
+		}
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		m.saveSession()
+		if m.agent != nil {
+			return m, m.askAgent()
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
 			m.renderTranscript()
 			m.viewport.GotoBottom()
 		}
+
+	case authFinishedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Login failed: %v", msg.err)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Google Login successful! Token received."})
+			os.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", msg.token)
+			if m.config != nil && m.config.Model != "" {
+				client := agent.NewClient(m.config, m.config.Model)
+				m.agent = agent.NewAgent(client, m.getInitialTools(), m.config)
+			}
+		}
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+
+	case []agent.Message:
+		for _, am := range msg {
+			copyMsg := am
+			if am.Role == "assistant" {
+				if len(am.ToolCalls) > 0 {
+					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 calling %d tools...", len(am.ToolCalls)), raw: &copyMsg})
+				} else if am.Content != "" {
+					m.messages = append(m.messages, message{role: roleAssistant, text: am.Content, raw: &copyMsg})
+				}
+			} else if am.Role == "tool" {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ tool result: %s", am.Content), raw: &copyMsg})
+			}
+		}
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		m.saveSession()
+		if len(msg) > 0 && (msg[len(msg)-1].Role == "tool" || (msg[len(msg)-1].Role == "assistant" && len(msg[len(msg)-1].ToolCalls) > 0)) {
+			stop := false
+			last := msg[len(msg)-1]
+			if last.Role == "assistant" {
+				for _, tc := range last.ToolCalls {
+					if tc.Function.Name == "question" {
+						stop = true
+						break
+					}
+				}
+			}
+			if !stop {
+				return m, m.askAgent()
+			}
+		}
+
+	case editorFinishedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor error: %v", msg.err)})
+		} else {
+			m.input.SetValue(msg.content)
+		}
+	case errorMsg:
+		m.err = msg
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)
+}
+
+func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
+	parts := strings.Fields(text)
+	cmd := parts[0]
+	args := parts[1:]
+
+	if cmd != "/editor" {
+		m.input.Reset()
+	}
+
+	var cmdResult tea.Cmd
+
+	switch cmd {
+	case "/model":
+		m.handleModelCmd(args)
+	case "/thinking":
+		m.handleThinkingCmd(args)
+	case "/connect":
+		m.handleConnectCmd(args)
+	case "/login":
+		cmdResult = m.handleLoginCmd(args)
+	case "/session":
+		m.handleSessionCmd(args)
+	case "/compact":
+		m.handleCompactCmd(args)
+	case "/undo":
+		m.handleUndoCmd(args)
+	case "/help":
+		m.handleHelpCmd(args)
+	case "/redo":
+		m.handleRedoCmd(args)
+	case "/export":
+		m.handleExportCmd(args)
+	case "/new", "/clear":
+		m.handleNewCmd(args)
+	case "/editor":
+		cmdResult = m.handleEditorCmd(args)
+	case "/exit", "/quit", "/q":
+		return m, tea.Quit
+	case "/themes":
+		m.handleThemesCmd(args)
+	case "/share":
+		m.handleShareCmd(args)
+	case "/models":
+		m.handleModelsCmd(args)
+	case "/details":
+		m.handleDetailsCmd(args)
+	case "/init":
+		m.handleInitCmd(args)
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
+	}
+
+	m.renderTranscript()
+	m.viewport.GotoBottom()
+	return m, cmdResult
+}
+
+func (m *model) handleLoginCmd(args []string) tea.Cmd {
+	return func() tea.Msg {
+		token, err := auth.LoginWithGoogle()
+		return authFinishedMsg{token: token, err: err}
+	}
+}
+
+func (m *model) processFileReferences(text string) tea.Cmd {
+	return func() tea.Msg {
+		re := regexp.MustCompile(`@([^\s]+)`)
+		matches := re.FindAllStringSubmatch(text, -1)
+		processedText := text
+		var msgs []message
+
+		for _, match := range matches {
+			path := match[1]
+			foundPath := ""
+			filepath.Walk(".", func(p string, info os.FileInfo, err error) error { //nolint:errcheck
+				if err != nil {
+					return nil
+				}
+				if foundPath != "" {
+					// Already found — skip remaining directories to avoid full-tree scan.
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if info.IsDir() {
+					return nil
+				}
+				if strings.Contains(strings.ToLower(p), strings.ToLower(path)) {
+					foundPath = p
+				}
+				return nil
+			})
+
+			if foundPath != "" {
+				path = foundPath
+			}
+
+			content, err := os.ReadFile(path)
+			if err == nil {
+				fileCtx := fmt.Sprintf("\n--- File: %s ---\n%s\n", path, string(content))
+				msgs = append(msgs, message{
+					role: roleAssistant,
+					text: fmt.Sprintf("📎 Added context from %s", path),
+					raw: &agent.Message{
+						Role:    "system",
+						Content: fileCtx,
+					},
+				})
+			}
+		}
+		return fileSearchFinishedMsg{processedText: processedText, messages: msgs}
+	}
+}
+
+func (m *model) handleModelCmd(args []string) {
+	if len(args) > 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", args[0])})
+		client := agent.NewClient(m.config, args[0])
+		if client != nil {
+			var tools []tool.Tool
+			if m.agent != nil {
+				tools = m.agent.GetTools()
+			} else {
+				tools = m.getInitialTools()
+			}
+			m.agent = agent.NewAgent(client, tools, m.config)
+		}
+	}
+}
+
+func (m *model) handleThinkingCmd(args []string) {
+	m.showThinking = !m.showThinking
+	status := "hidden"
+	if m.showThinking {
+		status = "visible"
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Thinking blocks are now %s.", status)})
+}
+
+func maskKey(key string) string {
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + strings.Repeat("*", len(key)-8) + key[len(key)-4:]
+}
+
+func (m *model) handleConnectCmd(args []string) {
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("Provider status:\n")
+		providers := []string{"openai", "anthropic", "google", "zai", "zai-coding", "openrouter", "moonshot", "minimax", "alibaba", "alibaba-coding", "chutes"}
+		for _, p := range providers {
+			status := "❌ disconnected"
+			envVar := ""
+			switch p {
+			case "openai":
+				envVar = "OPENAI_API_KEY"
+			case "anthropic":
+				envVar = "ANTHROPIC_API_KEY"
+			case "openrouter":
+				envVar = "OPENROUTER_API_KEY"
+			}
+			if envVar != "" && os.Getenv(envVar) != "" {
+				status = "✅ connected"
+			}
+			b.WriteString(fmt.Sprintf("- %s: %s\n", p, status))
+		}
+		b.WriteString("\nUsage: /connect <provider> <apikey>")
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+	} else if len(args) == 2 {
+		provider := args[0]
+		key := args[1]
+
+		envVar := ""
+		switch provider {
+		case "openai":
+			envVar = "OPENAI_API_KEY"
+		case "anthropic":
+			envVar = "ANTHROPIC_API_KEY"
+		case "openrouter":
+			envVar = "OPENROUTER_API_KEY"
+		case "google":
+			envVar = "GOOGLE_API_KEY"
+		}
+
+		if envVar != "" {
+			os.Setenv(envVar, key)
+			// Show only a masked version of the key to avoid it lingering in scroll-back.
+			masked := maskKey(key)
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf(
+				"API key for %s set (%s). Note: the key is held in memory only and will not persist after restart.", provider, masked,
+			)})
+
+			if m.config != nil && m.config.Model != "" {
+				client := agent.NewClient(m.config, m.config.Model)
+				m.agent = agent.NewAgent(client, m.getInitialTools(), m.config)
+			}
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Provider %s not natively supported for direct key setting yet.", provider)})
+		}
+	}
+}
+
+func (m *model) handleSessionCmd(args []string) {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Active session: %s\nUse '/session list' to see all sessions.", m.sessionID)})
+	} else if args[0] == "list" {
+		sessions, _ := session.List()
+		var b strings.Builder
+		b.WriteString("Sessions:\n")
+		for _, s := range sessions {
+			title := s.Title
+			if title == "" {
+				title = "(no title)"
+			}
+			b.WriteString(fmt.Sprintf("- %s: %s\n", s.ID, title))
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+	} else if args[0] == "load" && len(args) > 1 {
+		msgs, err := session.Load(args[1])
+		if err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session: %v", err)})
+		} else {
+			m.sessionID = args[1]
+			m.messages = []message{}
+			for _, am := range msgs {
+				role := roleUser
+				if am.Role == "assistant" || am.Role == "tool" {
+					role = roleAssistant
+				}
+				copyMsg := am
+				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Loaded session %s", m.sessionID)})
+		}
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /session [list|load <id>]"})
+	}
+}
+
+func (m *model) handleCompactCmd(args []string) {
+	newMsgs := []message{}
+	for _, msg := range m.messages {
+		if msg.role == roleUser || (msg.role == roleAssistant && msg.raw == nil) {
+			newMsgs = append(newMsgs, msg)
+		}
+	}
+	m.messages = newMsgs
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Conversation compacted (removed tool history from view)."})
+}
+
+func (m *model) handleRedoCmd(args []string) {
+	path, err := snapshot.Redo()
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error redoing: %v", err)})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Successfully restored changes to %s", path)})
+	}
+}
+
+func (m *model) handleExportCmd(args []string) {
+	filename := fmt.Sprintf("ocode_export_%d.md", time.Now().Unix())
+	var b strings.Builder
+	for _, msg := range m.messages {
+		role := "User"
+		if msg.role == roleAssistant {
+			role = "Assistant"
+		}
+		b.WriteString(fmt.Sprintf("## %s\n\n%s\n\n", role, msg.text))
+	}
+	err := os.WriteFile(filename, []byte(b.String()), 0644)
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error exporting: %v", err)})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Exported conversation to %s", filename)})
+	}
+}
+
+func (m *model) handleNewCmd(args []string) {
+	m.messages = []message{}
+	m.sessionID = time.Now().Format("2006-01-02-150405")
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session."})
+}
+
+func (m *model) handleEditorCmd(args []string) tea.Cmd {
+	editor := os.Getenv("EDITOR")
+	if editor == "" {
+		if _, err := exec.LookPath("vim"); err == nil {
+			editor = "vim"
+		} else if _, err := exec.LookPath("nano"); err == nil {
+			editor = "nano"
+		} else if _, err := exec.LookPath("notepad"); err == nil {
+			editor = "notepad"
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: EDITOR not set and no common editor found."})
+			return nil
+		}
+	}
+
+	tmpFile, err := os.CreateTemp("", "ocode-msg-*.txt")
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error creating temp file: %v", err)})
+		return nil
+	}
+
+	content := m.input.Value()
+	tmpFile.Write([]byte(content))
+	tmpFile.Close()
+
+	cmdParts := strings.Fields(editor)
+	cmdParts = append(cmdParts, tmpFile.Name())
+	c := exec.Command(cmdParts[0], cmdParts[1:]...)
+
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		if err != nil {
+			return editorFinishedMsg{err: err}
+		}
+		newContent, err := os.ReadFile(tmpFile.Name())
+		os.Remove(tmpFile.Name())
+		if err != nil {
+			return editorFinishedMsg{err: err}
+		}
+		return editorFinishedMsg{content: string(newContent)}
+	})
+}
+
+func (m *model) handleShareCmd(args []string) {
+	filename := fmt.Sprintf("ocode_share_%s.md", m.sessionID)
+	var b strings.Builder
+	b.WriteString("# Shared OpenCode Session\n\n")
+	for _, msg := range m.messages {
+		role := "User"
+		if msg.role == roleAssistant {
+			role = "Assistant"
+		}
+		b.WriteString(fmt.Sprintf("### %s\n\n%s\n\n", role, msg.text))
+	}
+	os.WriteFile(filename, []byte(b.String()), 0644)
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Session shared to local file: %s", filename)})
+}
+
+func (m *model) handleThemesCmd(args []string) {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Available themes:\n- opencode\n- tokyonight\nUse '/themes <name>' to switch."})
+		return
+	}
+
+	m.config.TUI.Theme = args[0]
+	m.applyTheme()
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s", args[0])})
+}
+
+func (m *model) handleModelsCmd(args []string) {
+	provider := "openai"
+	if m.agent != nil {
+		provider = m.agent.GetProvider()
+	}
+
+	models := map[string][]string{
+		"openai":    {"gpt-4o", "gpt-4o-mini", "o1-preview"},
+		"anthropic": {"claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307"},
+		"google":    {"gemini-1.5-pro", "gemini-1.5-flash"},
+	}
+
+	list := models[provider]
+	if len(list) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("No model list for provider %s", provider)})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Available models for %s:\n- %s", provider, strings.Join(list, "\n- "))})
+	}
+}
+
+func (m *model) handleDetailsCmd(args []string) {
+	m.showDetails = !m.showDetails
+	status := "hidden"
+	if m.showDetails {
+		status = "visible"
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tool execution details are now %s.", status)})
+}
+
+func (m *model) handleInitCmd(args []string) {
+	if _, err := os.Stat("AGENTS.md"); err == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "AGENTS.md already exists."})
+		return
+	}
+
+	content := "# Project Rules\n\n- Follow Go best practices.\n- Keep functions small and modular.\n"
+	err := os.WriteFile("AGENTS.md", []byte(content), 0644)
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error creating AGENTS.md: %v", err)})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Created AGENTS.md with default rules."})
+	}
+}
+
+func (m *model) handleHelpCmd(args []string) {
+	help := `Available Commands:
+/model <name>  : Switch LLM model
+/connect       : Show/Set provider API keys
+/login         : Google Login via OAuth2
+/session <cmd> : Manage sessions (list, load <id>)
+/compact       : Reduce context size by removing tool history
+/undo          : Revert last file change
+/redo          : Restore last undone change
+/export        : Save chat as Markdown
+/new           : Start a fresh session
+/thinking      : Toggle visibility of agent thoughts
+/models        : List recommended models for active provider
+/details       : Toggle tool execution details
+/init          : Create default AGENTS.md
+/help          : Show this help
+
+Shortcuts:
+!command       : Run a shell command
+@path          : Add file content to context
+Ctrl+P         : Open command palette
+Ctrl+X         : Leader key for quick actions (u:undo, r:redo, n:new, l:list, c:compact)
+`
+	m.messages = append(m.messages, message{role: roleAssistant, text: help})
+}
+
+func (m *model) handleUndoCmd(args []string) {
+	path, err := snapshot.Undo()
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error undoing: %v", err)})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Successfully reverted changes to %s", path)})
+	}
+}
+
+func (m *model) saveSession() {
+	if len(m.messages) > 0 {
+		var agentMsgs []agent.Message
+		for _, msg := range m.messages {
+			if msg.raw != nil {
+				agentMsgs = append(agentMsgs, *msg.raw)
+			} else {
+				role := "user"
+				if msg.role == roleAssistant {
+					role = "assistant"
+				}
+				agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
+			}
+		}
+		session.Save(m.sessionID, "", agentMsgs)
+	}
+}
+
+func (m model) askAgent() tea.Cmd {
+	return func() tea.Msg {
+		var agentMsgs []agent.Message
+		ctx := agent.LoadContext()
+		if ctx != "" {
+			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
+		}
+
+		for _, msg := range m.messages {
+			if msg.raw != nil {
+				agentMsgs = append(agentMsgs, *msg.raw)
+				continue
+			}
+			role := "user"
+			if msg.role == roleAssistant {
+				role = "assistant"
+			}
+			agentMsgs = append(agentMsgs, agent.Message{
+				Role:    role,
+				Content: msg.text,
+			})
+		}
+		resp, err := m.agent.Step(agentMsgs)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return resp
+	}
 }
 
 func (m *model) layout() {
@@ -108,6 +923,20 @@ func (m *model) layout() {
 	m.viewport.Width = m.width - 4
 	m.viewport.Height = m.height - inputHeight - headerHeight - 2
 	m.renderTranscript()
+}
+
+func (m *model) renderPalette() string {
+	header := lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true).Render(" > ") + m.paletteInput
+	commands := []string{"/model", "/connect", "/login", "/session", "/compact", "/undo", "/redo", "/export", "/new", "/thinking", "/models", "/details", "/init"}
+	var results []string
+	for _, c := range commands {
+		if strings.Contains(c, m.paletteInput) {
+			results = append(results, c)
+		}
+	}
+
+	body := strings.Join(results, "\n")
+	return borderStyle.Width(m.width - 2).Render(header + "\n\n" + body)
 }
 
 func (m *model) renderTranscript() {
@@ -133,14 +962,41 @@ func (m model) View() string {
 	if !m.ready {
 		return "initializing…"
 	}
+
+	if m.showPalette {
+		return m.renderPalette()
+	}
+
+	if m.err != nil {
+		return fmt.Sprintf("Error: %v\n\nPress Ctrl+C to quit", m.err)
+	}
 	header := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#7DCFFF")).
 		Bold(true).
 		Render("◆ ocode") + hintStyle.Render("  ·  opencode clone")
 
+	status := m.renderStatus()
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		borderStyle.Width(m.width-2).Render(m.viewport.View()),
 		borderStyle.Width(m.width-2).Render(m.input.View()),
+		status,
+	)
+}
+
+func (m *model) renderStatus() string {
+	modelName := "no model"
+	if m.agent != nil && m.config != nil {
+		modelName = m.config.Model
+	}
+
+	statusStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("#565F89")).
+		Background(lipgloss.Color("#1A1B26")).
+		Padding(0, 1)
+
+	return statusStyle.Width(m.width).Render(
+		fmt.Sprintf(" Model: %s | Session: %s | ctrl+p: palette | ctrl+x: leader", modelName, m.sessionID),
 	)
 }
