@@ -1,39 +1,26 @@
-# ocode — agent instructions
+# Agent Instructions - ocode
 
-## Run
+## Tech Stack
+- Go 1.23
+- Charm TUI (Bubble Tea, Lipgloss)
+- LLM Providers: OpenAI, Anthropic, Google, Z.AI, Alibaba
 
-```sh
-go run .           # dev
-go build -o ocode . && ./ocode  # build + run
-```
+## Coding Standards
+- Use modular packages in `internal/`.
+- All file modifications must use `snapshot.Backup`.
+- Respect `.gitignore` and `watcher.ignore`.
+- Follow Go best practices and standard formatting.
 
-No test framework wired yet. No lint/format config set up.
+## Tools
+- `read`, `write`, `delete`: Basic file operations.
+- `grep`, `glob`: Advanced search tools.
+- `bash`: Shell execution (cross-platform).
+- `lsp`: Code intelligence (supports goToDefinition, hover).
+- `agent`: Sub-agent delegation.
+- `websearch`: Web search via DuckDuckGo.
+- `question`: Pause for user input.
 
-## Architecture
-
-```
-main.go              → calls tui.Run()
-internal/tui/tui.go   → tea.NewProgram(newModel(), tea.WithAltScreen())
-internal/tui/model.go → Bubble Tea model (chat transcript viewport + input textarea)
-```
-
-The agent supports multi-turn reasoning with autonomous tool execution across multiple LLM providers (OpenAI, Anthropic, Google, etc.).
-
-## Stack
-
-- Go 1.26.1
-- Bubble Tea v1, Bubbles v1, Lipgloss v1 (Charm ecosystem)
-- Model Context Protocol (MCP) support
-
-## Conventions
-
-- Package structure is modular: `internal/agent`, `internal/config`, `internal/tool`, `internal/session`, `internal/mcp`, `internal/tui`, `internal/snapshot`.
-- Model holds all state: `messages []message`, viewport, input. Update/view are methods on `model`.
-- Lipgloss styles defined as package-level vars in `model.go`
-- No exported API surface beyond `tui.Run()`
-
-## Constraints
-
-- No tests, no CI — anything added should include both
-- Single binary — avoid external runtime deps
-- Bubble Tea `tea.WithAltScreen()` is set — be mindful of terminal lifecycle
+## User Interaction
+- TUI supports `/commands` and `!shell`.
+- Use `ctrl+x` for leader keys and `ctrl+p` for palette.
+- Sessions are automatically saved and resumed.

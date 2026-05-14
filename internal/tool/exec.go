@@ -3,28 +3,25 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
-
-	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
 type BashTool struct{}
 
 func (t BashTool) Name() string        { return "bash" }
-func (t BashTool) Description() string { return "Execute shell commands in your project environment" }
+func (t BashTool) Description() string { return "Execute shell commands and return stdout/stderr" }
 func (t BashTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "bash",
-		"description": "Execute shell commands in your project environment",
+		"description": "Execute shell commands and return combined stdout and stderr",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"command": map[string]interface{}{
 					"type":        "string",
-					"description": "The command to run",
+					"description": "The command to execute",
 				},
 			},
 			"required": []string{"command"},
@@ -48,125 +45,17 @@ func (t BashTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	output, err := cmd.CombinedOutput()
+	res := string(output)
 	if err != nil {
-		return string(output), fmt.Errorf("command failed: %w", err)
-	}
-
-	return string(output), nil
-}
-
-type EditTool struct{}
-
-func (t EditTool) Name() string        { return "edit" }
-func (t EditTool) Description() string { return "Modify existing files using exact string replacements" }
-func (t EditTool) Definition() map[string]interface{} {
-	return map[string]interface{}{
-		"name":        "edit",
-		"description": "Modify existing files using exact string replacements",
-		"parameters": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"path": map[string]interface{}{
-					"type":        "string",
-					"description": "Path to the file to edit",
-				},
-				"old": map[string]interface{}{
-					"type":        "string",
-					"description": "Exact text to find and replace",
-				},
-				"new": map[string]interface{}{
-					"type":        "string",
-					"description": "New text to replace with",
-				},
-			},
-			"required": []string{"path", "old", "new"},
-		},
-	}
-}
-
-func (t EditTool) Execute(args json.RawMessage) (string, error) {
-	var params struct {
-		Path string `json:"path"`
-		Old  string `json:"old"`
-		New  string `json:"new"`
-	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", err
-	}
-
-	// Backup before edit
-	snapshot.Backup(params.Path)
-
-	content, err := os.ReadFile(params.Path)
-	if err != nil {
-		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
-	}
-
-	text := string(content)
-	if !strings.Contains(text, params.Old) {
-		return "", fmt.Errorf("exact text to replace not found in %s", params.Path)
-	}
-
-	newText := strings.Replace(text, params.Old, params.New, 1)
-	if err := os.WriteFile(params.Path, []byte(newText), 0644); err != nil {
-		return "", fmt.Errorf("failed to write edited file %s: %w", params.Path, err)
-	}
-
-	return fmt.Sprintf("Successfully edited %s", params.Path), nil
-}
-
-type MultiEditTool struct{}
-
-func (t MultiEditTool) Name() string        { return "multiedit" }
-func (t MultiEditTool) Description() string { return "Perform multiple edits in one or more files" }
-func (t MultiEditTool) Definition() map[string]interface{} {
-	return map[string]interface{}{
-		"name":        "multiedit",
-		"description": "Perform multiple edits in one or more files",
-		"parameters": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"edits": map[string]interface{}{
-					"type": "array",
-					"items": map[string]interface{}{
-						"type": "object",
-						"properties": map[string]interface{}{
-							"path": map[string]interface{}{"type": "string"},
-							"old":  map[string]interface{}{"type": "string"},
-							"new":  map[string]interface{}{"type": "string"},
-						},
-						"required": []string{"path", "old", "new"},
-					},
-				},
-			},
-			"required": []string{"edits"},
-		},
-	}
-}
-
-func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
-	var params struct {
-		Edits []struct {
-			Path string `json:"path"`
-			Old  string `json:"old"`
-			New  string `json:"new"`
-		} `json:"edits"`
-	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", err
-	}
-
-	var results []string
-	editTool := EditTool{}
-	for _, e := range params.Edits {
-		editArgs, _ := json.Marshal(e)
-		res, err := editTool.Execute(editArgs)
-		if err != nil {
-			results = append(results, fmt.Sprintf("Error editing %s: %v", e.Path, err))
-		} else {
-			results = append(results, res)
+		if res == "" {
+			return fmt.Sprintf("Command failed: %v", err), nil
 		}
+		return fmt.Sprintf("Command failed (%v). Output:\n%s", err, res), nil
 	}
 
-	return strings.Join(results, "\n"), nil
+	if strings.TrimSpace(res) == "" {
+		return "Command executed successfully (no output).", nil
+	}
+
+	return res, nil
 }

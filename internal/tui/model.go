@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
@@ -40,24 +41,35 @@ type editorFinishedMsg struct {
 	err     error
 }
 
-type model struct {
-	viewport      viewport.Model
-	input         textarea.Model
+type authFinishedMsg struct {
+	token string
+	err   error
+}
+
+type fileSearchFinishedMsg struct {
+	processedText string
 	messages      []message
-	agent         *agent.Agent
-	config        *config.Config
-	sessionID     string
-	showThinking  bool
-	showDetails   bool
-	leaderActive  bool
-	leaderTimer   *time.Timer
-	showPalette   bool
-	paletteInput  string
-	width         int
-	height        int
-	ready         bool
 	err           error
-	scrollSpeed   int
+}
+
+type model struct {
+	viewport     viewport.Model
+	input        textarea.Model
+	messages     []message
+	agent        *agent.Agent
+	config       *config.Config
+	sessionID    string
+	showThinking bool
+	showDetails  bool
+	leaderActive bool
+	leaderTimer  *time.Timer
+	showPalette  bool
+	paletteInput string
+	width        int
+	height       int
+	ready        bool
+	err          error
+	scrollSpeed  int
 }
 
 type agentResponseMsg string
@@ -100,21 +112,21 @@ func (m *model) applyTheme() {
 
 func (m *model) getInitialTools() []tool.Tool {
 	return []tool.Tool{
-		tool.ReadTool{},
-		tool.WriteTool{},
-		tool.DeleteTool{},
-		tool.GlobTool{},
-		tool.GrepTool{},
-		tool.BashTool{},
-		tool.EditTool{},
-		tool.MultiEditTool{},
-		tool.PatchTool{},
-		tool.TodoWriteTool{},
-		tool.SkillTool{},
-		tool.QuestionTool{},
-		tool.WebFetchTool{},
-		tool.WebSearchTool{},
-		tool.LSPTool{},
+		&tool.ReadTool{},
+		&tool.WriteTool{},
+		&tool.DeleteTool{},
+		&tool.GlobTool{},
+		&tool.GrepTool{},
+		&tool.BashTool{},
+		&tool.EditTool{},
+		&tool.MultiEditTool{},
+		&tool.PatchTool{},
+		&tool.TodoWriteTool{},
+		&tool.SkillTool{},
+		&tool.QuestionTool{},
+		&tool.WebFetchTool{},
+		&tool.WebSearchTool{},
+		&tool.LSPTool{},
 	}
 }
 
@@ -124,7 +136,7 @@ func newModel(sid string, cont bool) model {
 	if cont {
 		sessions, _ := session.List()
 		if len(sessions) > 0 {
-			sid = sessions[0].ID // latest is first in optimized session.List()
+			sid = sessions[0].ID
 		}
 	}
 
@@ -336,58 +348,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						ToolID:  pendingToolCallID,
 					},
 				})
-			} else {
-				re := regexp.MustCompile(`@([^\s]+)`)
-				matches := re.FindAllStringSubmatch(text, -1)
-				processedText := text
-				for _, match := range matches {
-					path := match[1]
-					foundPath := ""
-					filepath.Walk(".", func(p string, info os.FileInfo, err error) error {
-						if foundPath != "" || info.IsDir() {
-							return nil
-						}
-						if strings.Contains(strings.ToLower(p), strings.ToLower(path)) {
-							foundPath = p
-						}
-						return nil
-					})
-
-					if foundPath != "" {
-						path = foundPath
-					}
-
-					content, err := os.ReadFile(path)
-					if err == nil {
-						fileCtx := fmt.Sprintf("\n--- File: %s ---\n%s\n", path, string(content))
-						m.messages = append(m.messages, message{
-							role: roleAssistant,
-							text: fmt.Sprintf("📎 Added context from %s", path),
-							raw: &agent.Message{
-								Role:    "system",
-								Content: fileCtx,
-							},
-						})
-					}
-				}
-
-				m.messages = append(m.messages,
-					message{role: roleUser, text: processedText},
-				)
-			}
-			m.input.Reset()
-			m.renderTranscript()
-			m.viewport.GotoBottom()
-			m.saveSession()
-
-			if m.agent != nil {
-				return m, m.askAgent()
-			} else {
-				m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
+				m.input.Reset()
 				m.renderTranscript()
 				m.viewport.GotoBottom()
+				m.saveSession()
+				return m, m.askAgent()
+			} else {
+				m.input.Reset()
+				return m, m.processFileReferences(text)
 			}
 		}
+
+	case fileSearchFinishedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error processing files: %v", msg.err)})
+		} else {
+			m.messages = append(m.messages, msg.messages...)
+			m.messages = append(m.messages, message{role: roleUser, text: msg.processedText})
+		}
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		m.saveSession()
+		if m.agent != nil {
+			return m, m.askAgent()
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+		}
+
+	case authFinishedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Login failed: %v", msg.err)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Google Login successful! Token received."})
+			os.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", msg.token)
+			if m.config != nil && m.config.Model != "" {
+				client := agent.NewClient(m.config, m.config.Model)
+				m.agent = agent.NewAgent(client, m.getInitialTools(), m.config)
+			}
+		}
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+
 	case []agent.Message:
 		for _, am := range msg {
 			copyMsg := am
@@ -451,6 +454,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		m.handleThinkingCmd(args)
 	case "/connect":
 		m.handleConnectCmd(args)
+	case "/login":
+		cmdResult = m.handleLoginCmd(args)
 	case "/session":
 		m.handleSessionCmd(args)
 	case "/compact":
@@ -488,6 +493,54 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	return m, cmdResult
 }
 
+func (m *model) handleLoginCmd(args []string) tea.Cmd {
+	return func() tea.Msg {
+		token, err := auth.LoginWithGoogle()
+		return authFinishedMsg{token: token, err: err}
+	}
+}
+
+func (m *model) processFileReferences(text string) tea.Cmd {
+	return func() tea.Msg {
+		re := regexp.MustCompile(`@([^\s]+)`)
+		matches := re.FindAllStringSubmatch(text, -1)
+		processedText := text
+		var msgs []message
+
+		for _, match := range matches {
+			path := match[1]
+			foundPath := ""
+			filepath.Walk(".", func(p string, info os.FileInfo, err error) error {
+				if foundPath != "" || info.IsDir() {
+					return nil
+				}
+				if strings.Contains(strings.ToLower(p), strings.ToLower(path)) {
+					foundPath = p
+				}
+				return nil
+			})
+
+			if foundPath != "" {
+				path = foundPath
+			}
+
+			content, err := os.ReadFile(path)
+			if err == nil {
+				fileCtx := fmt.Sprintf("\n--- File: %s ---\n%s\n", path, string(content))
+				msgs = append(msgs, message{
+					role: roleAssistant,
+					text: fmt.Sprintf("📎 Added context from %s", path),
+					raw: &agent.Message{
+						Role:    "system",
+						Content: fileCtx,
+					},
+				})
+			}
+		}
+		return fileSearchFinishedMsg{processedText: processedText, messages: msgs}
+	}
+}
+
 func (m *model) handleModelCmd(args []string) {
 	if len(args) > 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", args[0])})
@@ -514,26 +567,56 @@ func (m *model) handleThinkingCmd(args []string) {
 }
 
 func (m *model) handleConnectCmd(args []string) {
-	var b strings.Builder
-	b.WriteString("Provider status:\n")
-	providers := []string{"openai", "anthropic", "google", "zai", "zai-coding", "openrouter", "moonshot", "minimax", "alibaba", "alibaba-coding", "chutes"}
-	for _, p := range providers {
-		status := "❌ disconnected"
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("Provider status:\n")
+		providers := []string{"openai", "anthropic", "google", "zai", "zai-coding", "openrouter", "moonshot", "minimax", "alibaba", "alibaba-coding", "chutes"}
+		for _, p := range providers {
+			status := "❌ disconnected"
+			envVar := ""
+			switch p {
+			case "openai":
+				envVar = "OPENAI_API_KEY"
+			case "anthropic":
+				envVar = "ANTHROPIC_API_KEY"
+			case "openrouter":
+				envVar = "OPENROUTER_API_KEY"
+			}
+			if envVar != "" && os.Getenv(envVar) != "" {
+				status = "✅ connected"
+			}
+			b.WriteString(fmt.Sprintf("- %s: %s\n", p, status))
+		}
+		b.WriteString("\nUsage: /connect <provider> <apikey>")
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+	} else if len(args) == 2 {
+		provider := args[0]
+		key := args[1]
+
 		envVar := ""
-		switch p {
+		switch provider {
 		case "openai":
 			envVar = "OPENAI_API_KEY"
 		case "anthropic":
 			envVar = "ANTHROPIC_API_KEY"
 		case "openrouter":
 			envVar = "OPENROUTER_API_KEY"
+		case "google":
+			envVar = "GOOGLE_API_KEY"
 		}
-		if envVar != "" && os.Getenv(envVar) != "" {
-			status = "✅ connected"
+
+		if envVar != "" {
+			os.Setenv(envVar, key)
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Successfully set API key for %s.", provider)})
+
+			if m.config != nil && m.config.Model != "" {
+				client := agent.NewClient(m.config, m.config.Model)
+				m.agent = agent.NewAgent(client, m.getInitialTools(), m.config)
+			}
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Provider %s not natively supported for direct key setting yet.", provider)})
 		}
-		b.WriteString(fmt.Sprintf("- %s: %s\n", p, status))
 	}
-	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
 
 func (m *model) handleSessionCmd(args []string) {
@@ -732,7 +815,8 @@ func (m *model) handleInitCmd(args []string) {
 func (m *model) handleHelpCmd(args []string) {
 	help := `Available Commands:
 /model <name>  : Switch LLM model
-/connect       : Show provider connection status
+/connect       : Show/Set provider API keys
+/login         : Google Login via OAuth2
 /session <cmd> : Manage sessions (list, load <id>)
 /compact       : Reduce context size by removing tool history
 /undo          : Revert last file change
@@ -822,7 +906,7 @@ func (m *model) layout() {
 
 func (m *model) renderPalette() string {
 	header := lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true).Render(" > ") + m.paletteInput
-	commands := []string{"/model", "/connect", "/session", "/compact", "/undo", "/redo", "/export", "/new", "/thinking", "/models", "/details", "/init"}
+	commands := []string{"/model", "/connect", "/login", "/session", "/compact", "/undo", "/redo", "/export", "/new", "/thinking", "/models", "/details", "/init"}
 	var results []string
 	for _, c := range commands {
 		if strings.Contains(c, m.paletteInput) {

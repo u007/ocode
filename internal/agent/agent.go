@@ -26,7 +26,6 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		tools:  toolMap,
 		config: cfg,
 	}
-	// Add subagent tool
 	a.tools["agent"] = AgentTool{mainAgent: a}
 	return a
 }
@@ -36,17 +35,21 @@ type AgentTool struct {
 }
 
 func (t AgentTool) Name() string        { return "agent" }
-func (t AgentTool) Description() string { return "Call a subagent to perform a specific task" }
+func (t AgentTool) Description() string { return "Delegate a specific task to a specialized sub-agent" }
 func (t AgentTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "agent",
-		"description": "Delegate a task to a specialized subagent",
+		"description": "Spawn a sub-agent with a specific scope to handle a task autonomously.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"prompt": map[string]interface{}{
 					"type":        "string",
-					"description": "Instructions for the subagent",
+					"description": "The specific task or instructions for the sub-agent.",
+				},
+				"context": map[string]interface{}{
+					"type":        "string",
+					"description": "Additional background context relevant to the task.",
 				},
 			},
 			"required": []string{"prompt"},
@@ -56,13 +59,21 @@ func (t AgentTool) Definition() map[string]interface{} {
 
 func (t AgentTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		Prompt string `json:"prompt"`
+		Prompt  string `json:"prompt"`
+		Context string `json:"context"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
 
-	resp, err := t.mainAgent.Step([]Message{{Role: "user", Content: params.Prompt}})
+	subAgentMsgs := []Message{
+		{Role: "system", Content: "You are a specialized sub-agent. Your goal is to complete the task provided by the main agent. " +
+			"Be concise and return only the final result or relevant code. " +
+			"Background Context: " + params.Context},
+		{Role: "user", Content: params.Prompt},
+	}
+
+	resp, err := t.mainAgent.Step(subAgentMsgs)
 	if err != nil {
 		return "", err
 	}
@@ -81,9 +92,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		return []Message{{Role: "assistant", Content: "(no llm client configured)"}}, nil
 	}
 
-	// Advanced Context Compaction
 	messages = a.compactContext(messages)
-
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
 
@@ -127,24 +136,20 @@ func (a *Agent) compactContext(messages []Message) []Message {
 		return messages
 	}
 
-	// Always keep the first message (usually system prompt or initial instructions)
-	// and the last few messages for immediate context.
 	keepFront := 2
 	keepBack := 8
 
 	compacted := make([]Message, 0)
 	compacted = append(compacted, messages[:keepFront]...)
 
-	// Create a summary of the middle part
 	summaryPrompt := "The following is a part of a long conversation that is being compacted. " +
-		"Summarize the key events and outcomes of this segment, especially any file changes or decisions made:\n\n"
+		"Summarize the key events and outcomes of this segment:\n\n"
 	for _, m := range messages[keepFront : len(messages)-keepBack] {
 		if m.Role == "user" || m.Role == "assistant" {
 			summaryPrompt += fmt.Sprintf("[%s]: %s\n", m.Role, m.Content)
 		}
 	}
 
-	// Attempt to summarize using the same client
 	summaryResp, err := a.client.Chat([]Message{{Role: "user", Content: summaryPrompt}}, nil)
 	if err == nil && summaryResp.Content != "" {
 		compacted = append(compacted, Message{
@@ -152,10 +157,9 @@ func (a *Agent) compactContext(messages []Message) []Message {
 			Content: "Previous conversation summary: " + summaryResp.Content,
 		})
 	} else {
-		// Fallback: just indicate truncation
 		compacted = append(compacted, Message{
 			Role:    "system",
-			Content: "...[Conversation history truncated for brevity]...",
+			Content: "...[Conversation history truncated]...",
 		})
 	}
 

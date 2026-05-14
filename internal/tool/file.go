@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
@@ -79,7 +80,6 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	// Backup before write
 	snapshot.Backup(params.Path)
 
 	if err := os.MkdirAll(filepath.Dir(params.Path), 0755); err != nil {
@@ -121,7 +121,6 @@ func (t DeleteTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	// Backup before delete
 	snapshot.Backup(params.Path)
 
 	if err := os.RemoveAll(params.Path); err != nil {
@@ -129,4 +128,105 @@ func (t DeleteTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	return fmt.Sprintf("Successfully deleted %s", params.Path), nil
+}
+
+type EditTool struct{}
+
+func (t EditTool) Name() string        { return "edit" }
+func (t EditTool) Description() string { return "Edit a file by replacing a block of text" }
+func (t EditTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "edit",
+		"description": "Edit a file by replacing a search block with a replace block",
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"path":    map[string]interface{}{"type": "string"},
+				"search":  map[string]interface{}{"type": "string"},
+				"replace": map[string]interface{}{"type": "string"},
+			},
+			"required": []string{"path", "search", "replace"},
+		},
+	}
+}
+
+func (t EditTool) Execute(args json.RawMessage) (string, error) {
+	var params struct {
+		Path    string `json:"path"`
+		Search  string `json:"search"`
+		Replace string `json:"replace"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(params.Path)
+	if err != nil {
+		return "", err
+	}
+
+	if !strings.Contains(string(content), params.Search) {
+		return "", fmt.Errorf("search block not found in file")
+	}
+
+	snapshot.Backup(params.Path)
+	newContent := strings.Replace(string(content), params.Search, params.Replace, 1)
+	err = os.WriteFile(params.Path, []byte(newContent), 0644)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("Successfully edited %s", params.Path), nil
+}
+
+type MultiEditTool struct{}
+
+func (t MultiEditTool) Name() string        { return "multiedit" }
+func (t MultiEditTool) Description() string { return "Perform multiple edits across files" }
+func (t MultiEditTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name": "multiedit",
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"edits": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"path":    map[string]interface{}{"type": "string"},
+							"search":  map[string]interface{}{"type": "string"},
+							"replace": map[string]interface{}{"type": "string"},
+						},
+						"required": []string{"path", "search", "replace"},
+					},
+				},
+			},
+			"required": []string{"edits"},
+		},
+	}
+}
+
+func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
+	var params struct {
+		Edits []struct {
+			Path    string `json:"path"`
+			Search  string `json:"search"`
+			Replace string `json:"replace"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	for _, e := range params.Edits {
+		edit := EditTool{}
+		data, _ := json.Marshal(e)
+		_, err := edit.Execute(data)
+		if err != nil {
+			return "", fmt.Errorf("edit failed for %s: %w", e.Path, err)
+		}
+	}
+
+	return fmt.Sprintf("Successfully performed %d edits", len(params.Edits)), nil
 }

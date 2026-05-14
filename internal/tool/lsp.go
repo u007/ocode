@@ -4,23 +4,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
+
+	"github.com/jamesmercstudio/ocode/internal/lsp"
 )
 
-type LSPTool struct{}
+type LSPTool struct {
+	clients map[string]*lsp.Client
+	mu      sync.Mutex
+}
 
-func (t LSPTool) Name() string        { return "lsp" }
-func (t LSPTool) Description() string { return "Interact with LSP servers (Experimental)" }
-func (t LSPTool) Definition() map[string]interface{} {
+func (t *LSPTool) Name() string        { return "lsp" }
+func (t *LSPTool) Description() string { return "Interact with LSP servers for code intelligence" }
+func (t *LSPTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "lsp",
-		"description": "Interact with configured LSP servers to get code intelligence (Experimental)",
+		"description": "Interact with LSP servers to get code intelligence like goToDefinition or hover",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"operation": map[string]interface{}{
 					"type":        "string",
-					"description": "LSP operation to perform (e.g., goToDefinition, findReferences, hover, status, symbols)",
+					"description": "LSP operation (goToDefinition, hover, symbols, status, restart)",
 				},
 				"path": map[string]interface{}{
 					"type":        "string",
@@ -36,7 +43,7 @@ func (t LSPTool) Definition() map[string]interface{} {
 				},
 				"query": map[string]interface{}{
 					"type":        "string",
-					"description": "Search query for symbols",
+					"description": "Query for symbols search",
 				},
 			},
 			"required": []string{"operation"},
@@ -44,7 +51,40 @@ func (t LSPTool) Definition() map[string]interface{} {
 	}
 }
 
-func (t LSPTool) Execute(args json.RawMessage) (string, error) {
+func (t *LSPTool) getClient(ext string) (*lsp.Client, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.clients == nil {
+		t.clients = make(map[string]*lsp.Client)
+	}
+
+	if client, ok := t.clients[ext]; ok {
+		return client, nil
+	}
+
+	server := "gopls"
+	switch ext {
+	case ".go": server = "gopls"
+	case ".py": server = "pyright"
+	case ".rs": server = "rust-analyzer"
+	default: return nil, fmt.Errorf("no LSP server configured for extension %s", ext)
+	}
+
+	if _, err := exec.LookPath(server); err != nil {
+		return nil, fmt.Errorf("LSP server %s not found in PATH", server)
+	}
+
+	c, err := lsp.NewClient(server)
+	if err != nil {
+		return nil, err
+	}
+	c.Initialize(".")
+	t.clients[ext] = c
+	return c, nil
+}
+
+func (t *LSPTool) Execute(args json.RawMessage) (string, error) {
 	var input struct {
 		Operation string `json:"operation"`
 		Path      string `json:"path"`
@@ -56,56 +96,72 @@ func (t LSPTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
+	ext := filepath.Ext(input.Path)
+
 	switch input.Operation {
 	case "status":
 		return t.handleStatus()
+	case "restart":
+		t.mu.Lock()
+		if c, ok := t.clients[ext]; ok {
+			c.Close()
+			delete(t.clients, ext)
+		}
+		t.mu.Unlock()
+		return fmt.Sprintf("Restarted LSP server for %s", ext), nil
+	case "goToDefinition":
+		client, err := t.getClient(ext)
+		if err != nil { return "", err }
+		return t.handleGoToDefinition(client, input.Path, input.Line, input.Char)
+	case "hover":
+		client, err := t.getClient(ext)
+		if err != nil { return "", err }
+		return t.handleHover(client, input.Path, input.Line, input.Char)
 	case "symbols":
 		return t.handleSymbols(input.Path, input.Query)
-	case "goToDefinition":
-		return t.handleGoToDefinition(input.Path, input.Line, input.Char)
 	}
 
-	return fmt.Sprintf("LSP operation '%s' received. The LSP client is currently in 'Active-Hybrid Mode'. "+
-		"It performs direct shell-based symbol lookups as a reliable bridge to full LSP sessions.", input.Operation), nil
+	return "Operation not supported", nil
 }
 
-func (t LSPTool) handleStatus() (string, error) {
-	servers := []string{"gopls", "pyright", "rust-analyzer", "typescript-language-server", "clangd"}
-	status := "LSP Server Detection:\n"
+func (t *LSPTool) handleStatus() (string, error) {
+	servers := []string{"gopls", "pyright", "rust-analyzer"}
+	var status strings.Builder
+	status.WriteString("LSP Status:\n")
 	for _, s := range servers {
-		_, err := exec.LookPath(s)
-		if err == nil {
-			status += fmt.Sprintf("- %s: ✅ Found\n", s)
-		} else {
-			status += fmt.Sprintf("- %s: ❌ Not found\n", s)
-		}
+		found := "❌"
+		if _, err := exec.LookPath(s); err == nil { found = "✅" }
+		status.WriteString(fmt.Sprintf("- %s: %s\n", s, found))
 	}
-	return status, nil
+	return status.String(), nil
 }
 
-func (t LSPTool) handleSymbols(path, query string) (string, error) {
-	// Fallback to ctags-like behavior or grep for symbols if no LSP server is active
+func (t *LSPTool) handleGoToDefinition(client *lsp.Client, path string, line, char int) (string, error) {
+	abs, _ := filepath.Abs(path)
+	params := map[string]interface{}{
+		"textDocument": map[string]interface{}{"uri": "file://" + abs},
+		"position":     map[string]interface{}{"line": line, "character": char},
+	}
+	res, err := client.Call("textDocument/definition", params)
+	if err != nil { return "", err }
+	return string(res), nil
+}
+
+func (t *LSPTool) handleHover(client *lsp.Client, path string, line, char int) (string, error) {
+	abs, _ := filepath.Abs(path)
+	params := map[string]interface{}{
+		"textDocument": map[string]interface{}{"uri": "file://" + abs},
+		"position":     map[string]interface{}{"line": line, "character": char},
+	}
+	res, err := client.Call("textDocument/hover", params)
+	if err != nil { return "", err }
+	return string(res), nil
+}
+
+func (t *LSPTool) handleSymbols(path, query string) (string, error) {
 	if strings.HasSuffix(path, ".go") {
-		cmd := exec.Command("grep", "-E", "^func |^type ", path)
-		if query != "" {
-			cmd = exec.Command("grep", "-E", "^func |^type ", path)
-			// pipeline grep is easier in bash but we use exec
-		}
-		out, _ := cmd.Output()
-		if len(out) == 0 { return "No symbols found.", nil }
-		return "Go Symbols (Fallback):\n" + string(out), nil
+		out, _ := exec.Command("grep", "-E", "^func |^type ", path).Output()
+		return "Go Symbols:\n" + string(out), nil
 	}
-	return "Symbol lookup currently only optimized for Go/Python.", nil
-}
-
-func (t LSPTool) handleGoToDefinition(path string, line, char int) (string, error) {
-	// Real-world implementation would use a persistent gopls session
-	// For this task, we'll demonstrate the intent by showing how we'd call gopls
-	if _, err := exec.LookPath("gopls"); err == nil {
-		// Example: gopls definition file:line:char
-		// This is a simplified demo of calling a language server cli
-		return fmt.Sprintf("LSP (gopls) would now resolve definition at %s:%d:%d. "+
-			"In 'Hybrid Mode', use 'grep -r' or 'read' for the actual content.", path, line, char), nil
-	}
-	return "No LSP server found for goToDefinition.", nil
+	return "Symbol search only available for Go files currently.", nil
 }

@@ -15,7 +15,7 @@
 - [x] Support for Coding Plans (Z.AI Coding, Alibaba Coding, Chutes AI Coding)
 - [x] Implement Agent Reasoning Loop (Tool execution, pause for questions)
 - [x] Support `AGENTS.md` and `CLAUDE.md` context
-- [x] Support for Subagents (`agent` tool)
+- [x] Support for Subagents (`agent` tool with scoped delegation)
 - [x] Implement Slash Commands (`/model`, `/connect`, `/session`, `/compact`, `/undo`, `/redo`, `/export`, `/new`, `/thinking`, `/models`, `/details`, `/init`, `/editor`, `/exit`, `/themes`, `/share`, `/help`)
 - [x] TUI Bash Shortcut (`!command`) and Fuzzy File References (`@path`)
 - [x] Leader Key Support (`ctrl+x`) and Command Palette (`ctrl+p`)
@@ -31,10 +31,11 @@
 - [x] Advanced Context compaction logic (auto-summarize)
 - [x] Advanced TUI features (scroll acceleration, mouse support)
 - [x] Persistent session storage optimization (indexing, sorting)
-- [x] Hybrid LSP tool implementation
+- [x] Persistent LSP client implementation (gopls, pyright)
+- [x] Google OAuth2 flow with local server callback
 - [x] Final Integration and Verification
 
 ## Pending Items
 
-- [ ] Full LSP client protocol (persistent server sessions)
-- [ ] Direct Google OAuth2 flow (local server callback)
+- [ ] Advanced TUI features (multi-window support)
+- [ ] Direct LSP server protocol optimization (persistent JSON-RPC streams)
