@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/tool"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/mcp"
+	"github.com/jamesmercstudio/ocode/internal/tool"
 )
 
 type Agent struct {
@@ -62,8 +62,6 @@ func (t AgentTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	// For simplicity, we just reuse the main agent's client and logic for now
-	// In a full implementation, this would spawn a new Agent instance with a scoped history
 	resp, err := t.mainAgent.Step([]Message{{Role: "user", Content: params.Prompt}})
 	if err != nil {
 		return "", err
@@ -83,18 +81,13 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		return []Message{{Role: "assistant", Content: "(no llm client configured)"}}, nil
 	}
 
-	// Update tool definitions with global ignore patterns
-	if a.config != nil && len(a.config.Watcher.Ignore) > 0 {
-		// potential use for 'ignore' var later
-	}
+	// Advanced Context Compaction
+	messages = a.compactContext(messages)
 
 	toolDefs := a.GetToolDefinitions()
-	// Inject ignore patterns into relevant tools' parameters for the LLM to see (optional, but helps LLM understand constraints)
-	// For now, we'll just handle it in Execute.
-
 	var newMsgs []Message
 
-	for i := 0; i < 10; i++ { // Limit iterations
+	for i := 0; i < 10; i++ {
 		resp, err := a.client.Chat(messages, toolDefs)
 		if err != nil {
 			return nil, err
@@ -113,11 +106,6 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				result = fmt.Sprintf("Error: %v", err)
 			}
 			if result == "WAITING_FOR_USER_RESPONSE" {
-				// We must provide a tool result message even if we stop,
-				// but since we want to wait for user, we'll return now.
-				// On the next turn, the TUI will have appended the user's answer as a tool result.
-				// Wait, the TUI currently just appends a 'user' message.
-				// We need to fix the protocol.
 				return newMsgs, nil
 			}
 			toolMsg := Message{
@@ -133,13 +121,54 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	return newMsgs, nil
 }
 
+func (a *Agent) compactContext(messages []Message) []Message {
+	maxMessages := 20
+	if len(messages) <= maxMessages {
+		return messages
+	}
+
+	// Always keep the first message (usually system prompt or initial instructions)
+	// and the last few messages for immediate context.
+	keepFront := 2
+	keepBack := 8
+
+	compacted := make([]Message, 0)
+	compacted = append(compacted, messages[:keepFront]...)
+
+	// Create a summary of the middle part
+	summaryPrompt := "The following is a part of a long conversation that is being compacted. " +
+		"Summarize the key events and outcomes of this segment, especially any file changes or decisions made:\n\n"
+	for _, m := range messages[keepFront : len(messages)-keepBack] {
+		if m.Role == "user" || m.Role == "assistant" {
+			summaryPrompt += fmt.Sprintf("[%s]: %s\n", m.Role, m.Content)
+		}
+	}
+
+	// Attempt to summarize using the same client
+	summaryResp, err := a.client.Chat([]Message{{Role: "user", Content: summaryPrompt}}, nil)
+	if err == nil && summaryResp.Content != "" {
+		compacted = append(compacted, Message{
+			Role:    "system",
+			Content: "Previous conversation summary: " + summaryResp.Content,
+		})
+	} else {
+		// Fallback: just indicate truncation
+		compacted = append(compacted, Message{
+			Role:    "system",
+			Content: "...[Conversation history truncated for brevity]...",
+		})
+	}
+
+	compacted = append(compacted, messages[len(messages)-keepBack:]...)
+	return compacted
+}
+
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
 	t, ok := a.tools[name]
 	if !ok {
 		return "", fmt.Errorf("tool %s not found", name)
 	}
 
-	// Inject global ignore patterns if it's a search tool
 	if name == "glob" || name == "grep" || name == "list" {
 		var params map[string]interface{}
 		json.Unmarshal(args, &params)
@@ -179,11 +208,9 @@ func (a *Agent) AddTools(tools []tool.Tool) {
 }
 
 func (a *Agent) LoadExternalTools(cfg *config.Config) {
-	// Load Custom Tools
 	custom := tool.LoadCustomTools()
 	a.AddTools(custom)
 
-	// Load MCP Tools
 	if cfg != nil {
 		for name, mcpCfg := range cfg.MCP {
 			if !mcpCfg.Enabled {

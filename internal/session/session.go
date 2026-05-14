@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,16 +21,20 @@ type Session struct {
 	Messages  []agent.Message `json:"messages"`
 	CreatedAt time.Time       `json:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+type sessionIndex struct {
+	LastSessionID string            `json:"last_session_id"`
+	Sessions      map[string]string `json:"sessions"` // ID -> Title
 }
 
 func GetStorageDir() (string, error) {
-	// Priority 1: Local .ocode/sessions directory
 	localDir := filepath.Join(".ocode", "sessions")
 	if _, err := os.Stat(localDir); err == nil {
 		return localDir, nil
 	}
 
-	// Priority 2: Standard XDG/Appdata location
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -52,13 +57,11 @@ func GetStorageDir() (string, error) {
 func getProjectSlug() string {
 	wd, _ := os.Getwd()
 
-	// Try to find Git root
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	if output, err := cmd.Output(); err == nil {
 		wd = strings.TrimSpace(string(output))
 	}
 
-	// Normalizing path to prevent slug changes on case-insensitive systems or trailing slashes
 	wd = filepath.Clean(wd)
 	if runtime.GOOS == "windows" {
 		wd = strings.ToLower(wd)
@@ -91,7 +94,20 @@ func Save(id string, title string, messages []agent.Message) error {
 
 	if title != "" {
 		s.Title = title
+	} else if s.Title == "" && len(messages) > 0 {
+		// Auto-title from first user message
+		for _, m := range messages {
+			if m.Role == "user" {
+				title = m.Content
+				if len(title) > 40 {
+					title = title[:37] + "..."
+				}
+				s.Title = title
+				break
+			}
+		}
 	}
+
 	s.Messages = messages
 	s.UpdatedAt = time.Now()
 
@@ -100,7 +116,29 @@ func Save(id string, title string, messages []agent.Message) error {
 		return err
 	}
 
-	return os.WriteFile(path, out, 0644)
+	err = os.WriteFile(path, out, 0644)
+	if err != nil {
+		return err
+	}
+
+	return updateIndex(dir, id, s.Title)
+}
+
+func updateIndex(dir, id, title string) error {
+	indexPath := filepath.Join(dir, "index.json")
+	var idx sessionIndex
+	data, err := os.ReadFile(indexPath)
+	if err == nil {
+		json.Unmarshal(data, &idx)
+	}
+	if idx.Sessions == nil {
+		idx.Sessions = make(map[string]string)
+	}
+	idx.LastSessionID = id
+	idx.Sessions[id] = title
+
+	out, _ := json.MarshalIndent(idx, "", "  ")
+	return os.WriteFile(indexPath, out, 0644)
 }
 
 func Load(id string) ([]agent.Message, error) {
@@ -136,7 +174,7 @@ func List() ([]Session, error) {
 
 	var sessions []Session
 	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" && e.Name() != "index.json" {
 			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
 			if err == nil {
 				var s Session
@@ -146,5 +184,10 @@ func List() ([]Session, error) {
 			}
 		}
 	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	})
+
 	return sessions, nil
 }

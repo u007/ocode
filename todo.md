@@ -28,11 +28,13 @@
 - [x] Update TUI State and Rendering (Status bar, Themes: `opencode`, `tokyonight`)
 - [x] Cross-platform support (Windows/Unix aware)
 - [x] Core unit tests for reasoning and tools
+- [x] Advanced Context compaction logic (auto-summarize)
+- [x] Advanced TUI features (scroll acceleration, mouse support)
+- [x] Persistent session storage optimization (indexing, sorting)
+- [x] Hybrid LSP tool implementation
 - [x] Final Integration and Verification
 
 ## Pending Items
 
-- [ ] Full LSP client implementation
-- [ ] Advanced Context compaction logic (auto-summarize)
-- [ ] Advanced TUI features (scroll acceleration)
-- [ ] Persistent session storage optimization
+- [ ] Full LSP client protocol (persistent server sessions)
+- [ ] Direct Google OAuth2 flow (local server callback)

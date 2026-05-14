@@ -41,22 +41,23 @@ type editorFinishedMsg struct {
 }
 
 type model struct {
-	viewport     viewport.Model
-	input        textarea.Model
-	messages     []message
-	agent        *agent.Agent
-	config       *config.Config
-	sessionID    string
-	showThinking bool
-	showDetails  bool
-	leaderActive bool
-	leaderTimer  *time.Timer
-	showPalette  bool
-	paletteInput string
-	width        int
-	height       int
-	ready        bool
-	err          error
+	viewport      viewport.Model
+	input         textarea.Model
+	messages      []message
+	agent         *agent.Agent
+	config        *config.Config
+	sessionID     string
+	showThinking  bool
+	showDetails   bool
+	leaderActive  bool
+	leaderTimer   *time.Timer
+	showPalette   bool
+	paletteInput  string
+	width         int
+	height        int
+	ready         bool
+	err           error
+	scrollSpeed   int
 }
 
 type agentResponseMsg string
@@ -123,7 +124,7 @@ func newModel(sid string, cont bool) model {
 	if cont {
 		sessions, _ := session.List()
 		if len(sessions) > 0 {
-			sid = sessions[len(sessions)-1].ID // latest
+			sid = sessions[0].ID // latest is first in optimized session.List()
 		}
 	}
 
@@ -161,6 +162,11 @@ func newModel(sid string, cont bool) model {
 		agent:        a,
 		sessionID:    sid,
 		showThinking: true,
+		scrollSpeed:  3,
+	}
+
+	if cfg != nil && cfg.TUI.Scroll != 0 {
+		m.scrollSpeed = int(cfg.TUI.Scroll)
 	}
 
 	m.applyTheme()
@@ -191,6 +197,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		tiCmd tea.Cmd
 		vpCmd tea.Cmd
 	)
+
+	switch msg := msg.(type) {
+	case tea.MouseMsg:
+		if msg.Type == tea.MouseWheelUp {
+			m.viewport.LineUp(m.scrollSpeed)
+			return m, nil
+		}
+		if msg.Type == tea.MouseWheelDown {
+			m.viewport.LineDown(m.scrollSpeed)
+			return m, nil
+		}
+	}
 
 	m.input, tiCmd = m.input.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
@@ -228,7 +246,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			key := msg.String()
-			// Check custom keybinds first
 			if m.config != nil {
 				if cmd, ok := m.config.TUI.Keybinds[key]; ok {
 					return m.handleCommand(cmd)
@@ -264,8 +281,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				timeout = m.config.TUI.LeaderTimeout
 			}
 			m.leaderTimer = time.AfterFunc(time.Duration(timeout)*time.Millisecond, func() {
-				// We can't easily trigger a tea.Msg from here without a handle
-				// But for now, simple timeout is fine.
 			})
 			return m, nil
 		case tea.KeyCtrlC, tea.KeyEsc:
@@ -298,7 +313,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			// Check if we are answering a question
 			var pendingToolCallID string
 			if len(m.messages) > 0 {
 				last := m.messages[len(m.messages)-1]
@@ -323,14 +337,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					},
 				})
 			} else {
-				// Handle file references (@path) with fuzzy matching
 				re := regexp.MustCompile(`@([^\s]+)`)
 				matches := re.FindAllStringSubmatch(text, -1)
 				processedText := text
 				for _, match := range matches {
 					path := match[1]
-
-					// Simple fuzzy matching by walking
 					foundPath := ""
 					filepath.Walk(".", func(p string, info os.FileInfo, err error) error {
 						if foundPath != "" || info.IsDir() {
@@ -393,9 +404,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderTranscript()
 		m.viewport.GotoBottom()
 		m.saveSession()
-		// If the last message was a tool result or assistant with tool calls, we continue the chain
 		if len(msg) > 0 && (msg[len(msg)-1].Role == "tool" || (msg[len(msg)-1].Role == "assistant" && len(msg[len(msg)-1].ToolCalls) > 0)) {
-			// But check if it was a "question" tool, if so we stop
 			stop := false
 			last := msg[len(msg)-1]
 			if last.Role == "assistant" {
@@ -611,7 +620,6 @@ func (m *model) handleNewCmd(args []string) {
 func (m *model) handleEditorCmd(args []string) tea.Cmd {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
-		// Fallback for different platforms
 		if _, err := exec.LookPath("vim"); err == nil {
 			editor = "vim"
 		} else if _, err := exec.LookPath("nano"); err == nil {
@@ -776,8 +784,6 @@ func (m *model) saveSession() {
 func (m model) askAgent() tea.Cmd {
 	return func() tea.Msg {
 		var agentMsgs []agent.Message
-
-		// Add context as system message
 		ctx := agent.LoadContext()
 		if ctx != "" {
 			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
