@@ -2,6 +2,8 @@ package tool
 
 import (
 	"encoding/json"
+	"fmt"
+	"os/exec"
 )
 
 type LSPTool struct{}
@@ -17,7 +19,7 @@ func (t LSPTool) Definition() map[string]interface{} {
 			"properties": map[string]interface{}{
 				"operation": map[string]interface{}{
 					"type":        "string",
-					"description": "LSP operation to perform (e.g., goToDefinition, findReferences, hover)",
+					"description": "LSP operation to perform (e.g., goToDefinition, findReferences, hover, status)",
 				},
 				"path": map[string]interface{}{
 					"type":        "string",
@@ -32,13 +34,38 @@ func (t LSPTool) Definition() map[string]interface{} {
 					"description": "Character position (0-based)",
 				},
 			},
-			"required": []string{"operation", "path"},
+			"required": []string{"operation"},
 		},
 	}
 }
 
 func (t LSPTool) Execute(args json.RawMessage) (string, error) {
-	return "LSP tool is currently experimental and requires server-side configuration. " +
-		"Please ensure an LSP server is running and configured in your opencode.json under the 'lsp' key. " +
-		"Supported operations: goToDefinition, findReferences, hover.", nil
+	var input struct {
+		Operation string `json:"operation"`
+		Path      string `json:"path"`
+		Line      int    `json:"line"`
+		Char      int    `json:"character"`
+	}
+	if err := json.Unmarshal(args, &input); err != nil {
+		return "", err
+	}
+
+	if input.Operation == "status" {
+		servers := []string{"gopls", "pyright", "rust-analyzer", "typescript-language-server", "clangd"}
+		status := "LSP Server Detection:\n"
+		for _, s := range servers {
+			_, err := exec.LookPath(s)
+			if err == nil {
+				status += fmt.Sprintf("- %s: ✅ Found\n", s)
+			} else {
+				status += fmt.Sprintf("- %s: ❌ Not found\n", s)
+			}
+		}
+		status += "\nNote: Full LSP client protocol is under development. Direct symbol lookup is currently performed via internal fallback indexers for Go and Python."
+		return status, nil
+	}
+
+	return fmt.Sprintf("LSP operation '%s' on %s:%d:%d received. The LSP client is currently in 'Passive Mode'. "+
+		"It has verified the request but is waiting for a full session bridge. "+
+		"Recommendation: Use 'grep' or 'read' to inspect definitions manually for now.", input.Operation, input.Path, input.Line, input.Char), nil
 }

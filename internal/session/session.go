@@ -23,6 +23,13 @@ type Session struct {
 }
 
 func GetStorageDir() (string, error) {
+	// Priority 1: Local .ocode/sessions directory
+	localDir := filepath.Join(".ocode", "sessions")
+	if _, err := os.Stat(localDir); err == nil {
+		return localDir, nil
+	}
+
+	// Priority 2: Standard XDG/Appdata location
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -30,12 +37,12 @@ func GetStorageDir() (string, error) {
 
 	base := filepath.Join(home, ".local", "share", "opencode")
 	if runtime.GOOS == "windows" {
-		base = filepath.Join(os.Getenv("USERPROFILE"), ".local", "share", "opencode")
+		base = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "opencode")
 	}
 
 	slug := getProjectSlug()
 
-	dir := filepath.Join(base, "project", slug, "storage")
+	dir := filepath.Join(base, "project", slug, "sessions")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
@@ -49,6 +56,12 @@ func getProjectSlug() string {
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
 	if output, err := cmd.Output(); err == nil {
 		wd = strings.TrimSpace(string(output))
+	}
+
+	// Normalizing path to prevent slug changes on case-insensitive systems or trailing slashes
+	wd = filepath.Clean(wd)
+	if runtime.GOOS == "windows" {
+		wd = strings.ToLower(wd)
 	}
 
 	hash := sha256.Sum256([]byte(wd))

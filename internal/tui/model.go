@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
+	"github.com/jamesmercstudio/ocode/internal/tool"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -35,23 +35,28 @@ type message struct {
 	raw  *agent.Message
 }
 
+type editorFinishedMsg struct {
+	content string
+	err     error
+}
+
 type model struct {
-	viewport      viewport.Model
-	input         textarea.Model
-	messages      []message
-	agent         *agent.Agent
-	config        *config.Config
-	sessionID     string
-	showThinking  bool
-	showDetails   bool
-	leaderActive  bool
-	leaderTimer   *time.Timer
-	showPalette   bool
-	paletteInput  string
-	width         int
-	height        int
-	ready         bool
-	err           error
+	viewport     viewport.Model
+	input        textarea.Model
+	messages     []message
+	agent        *agent.Agent
+	config       *config.Config
+	sessionID    string
+	showThinking bool
+	showDetails  bool
+	leaderActive bool
+	leaderTimer  *time.Timer
+	showPalette  bool
+	paletteInput string
+	width        int
+	height       int
+	ready        bool
+	err          error
 }
 
 type agentResponseMsg string
@@ -149,13 +154,13 @@ func newModel(sid string, cont bool) model {
 	}
 
 	m := model{
-		viewport:      vp,
-		input:         ta,
-		messages:      []message{},
-		config:        cfg,
-		agent:         a,
-		sessionID:     sid,
-		showThinking:  true,
+		viewport:     vp,
+		input:        ta,
+		messages:     []message{},
+		config:       cfg,
+		agent:        a,
+		sessionID:    sid,
+		showThinking: true,
 	}
 
 	m.applyTheme()
@@ -218,7 +223,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.leaderActive {
 			m.leaderActive = false
-			if m.leaderTimer != nil { m.leaderTimer.Stop() }
+			if m.leaderTimer != nil {
+				m.leaderTimer.Stop()
+			}
 
 			key := msg.String()
 			// Check custom keybinds first
@@ -229,12 +236,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			switch key {
-			case "u": return m.handleCommand("/undo")
-			case "r": return m.handleCommand("/redo")
-			case "n": return m.handleCommand("/new")
-			case "l": return m.handleCommand("/session list")
-			case "c": return m.handleCommand("/compact")
-			case "q": return m, tea.Quit
+			case "u":
+				return m.handleCommand("/undo")
+			case "r":
+				return m.handleCommand("/redo")
+			case "n":
+				return m.handleCommand("/new")
+			case "l":
+				return m.handleCommand("/session list")
+			case "c":
+				return m.handleCommand("/compact")
+			case "q":
+				return m, tea.Quit
 			}
 			return m, nil
 		}
@@ -247,7 +260,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyCtrlX:
 			m.leaderActive = true
 			timeout := 2000
-			if m.config != nil && m.config.TUI.LeaderTimeout != 0 { timeout = m.config.TUI.LeaderTimeout }
+			if m.config != nil && m.config.TUI.LeaderTimeout != 0 {
+				timeout = m.config.TUI.LeaderTimeout
+			}
 			m.leaderTimer = time.AfterFunc(time.Duration(timeout)*time.Millisecond, func() {
 				// We can't easily trigger a tea.Msg from here without a handle
 				// But for now, simple timeout is fine.
@@ -318,7 +333,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Simple fuzzy matching by walking
 					foundPath := ""
 					filepath.Walk(".", func(p string, info os.FileInfo, err error) error {
-						if foundPath != "" || info.IsDir() { return nil }
+						if foundPath != "" || info.IsDir() {
+							return nil
+						}
 						if strings.Contains(strings.ToLower(p), strings.ToLower(path)) {
 							foundPath = p
 						}
@@ -362,7 +379,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case []agent.Message:
 		for _, am := range msg {
-			copyMsg := am // copy
+			copyMsg := am
 			if am.Role == "assistant" {
 				if len(am.ToolCalls) > 0 {
 					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 calling %d tools...", len(am.ToolCalls)), raw: &copyMsg})
@@ -376,6 +393,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderTranscript()
 		m.viewport.GotoBottom()
 		m.saveSession()
+		// If the last message was a tool result or assistant with tool calls, we continue the chain
+		if len(msg) > 0 && (msg[len(msg)-1].Role == "tool" || (msg[len(msg)-1].Role == "assistant" && len(msg[len(msg)-1].ToolCalls) > 0)) {
+			// But check if it was a "question" tool, if so we stop
+			stop := false
+			last := msg[len(msg)-1]
+			if last.Role == "assistant" {
+				for _, tc := range last.ToolCalls {
+					if tc.Function.Name == "question" {
+						stop = true
+						break
+					}
+				}
+			}
+			if !stop {
+				return m, m.askAgent()
+			}
+		}
+
+	case editorFinishedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor error: %v", msg.err)})
+		} else {
+			m.input.SetValue(msg.content)
+		}
 	case errorMsg:
 		m.err = msg
 	}
@@ -387,7 +428,12 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(text)
 	cmd := parts[0]
 	args := parts[1:]
-	m.input.Reset()
+
+	if cmd != "/editor" {
+		m.input.Reset()
+	}
+
+	var cmdResult tea.Cmd
 
 	switch cmd {
 	case "/model":
@@ -411,7 +457,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	case "/new", "/clear":
 		m.handleNewCmd(args)
 	case "/editor":
-		m.handleEditorCmd(args)
+		cmdResult = m.handleEditorCmd(args)
 	case "/exit", "/quit", "/q":
 		return m, tea.Quit
 	case "/themes":
@@ -430,7 +476,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 
 	m.renderTranscript()
 	m.viewport.GotoBottom()
-	return m, nil
+	return m, cmdResult
 }
 
 func (m *model) handleModelCmd(args []string) {
@@ -466,9 +512,12 @@ func (m *model) handleConnectCmd(args []string) {
 		status := "❌ disconnected"
 		envVar := ""
 		switch p {
-		case "openai": envVar = "OPENAI_API_KEY"
-		case "anthropic": envVar = "ANTHROPIC_API_KEY"
-		case "openrouter": envVar = "OPENROUTER_API_KEY"
+		case "openai":
+			envVar = "OPENAI_API_KEY"
+		case "anthropic":
+			envVar = "ANTHROPIC_API_KEY"
+		case "openrouter":
+			envVar = "OPENROUTER_API_KEY"
 		}
 		if envVar != "" && os.Getenv(envVar) != "" {
 			status = "✅ connected"
@@ -487,7 +536,9 @@ func (m *model) handleSessionCmd(args []string) {
 		b.WriteString("Sessions:\n")
 		for _, s := range sessions {
 			title := s.Title
-			if title == "" { title = "(no title)" }
+			if title == "" {
+				title = "(no title)"
+			}
 			b.WriteString(fmt.Sprintf("- %s: %s\n", s.ID, title))
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
@@ -538,7 +589,9 @@ func (m *model) handleExportCmd(args []string) {
 	var b strings.Builder
 	for _, msg := range m.messages {
 		role := "User"
-		if msg.role == roleAssistant { role = "Assistant" }
+		if msg.role == roleAssistant {
+			role = "Assistant"
+		}
 		b.WriteString(fmt.Sprintf("## %s\n\n%s\n\n", role, msg.text))
 	}
 	err := os.WriteFile(filename, []byte(b.String()), 0644)
@@ -555,19 +608,27 @@ func (m *model) handleNewCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session."})
 }
 
-func (m *model) handleEditorCmd(args []string) {
+func (m *model) handleEditorCmd(args []string) tea.Cmd {
 	editor := os.Getenv("EDITOR")
 	if editor == "" {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: EDITOR environment variable not set."})
-		return
+		// Fallback for different platforms
+		if _, err := exec.LookPath("vim"); err == nil {
+			editor = "vim"
+		} else if _, err := exec.LookPath("nano"); err == nil {
+			editor = "nano"
+		} else if _, err := exec.LookPath("notepad"); err == nil {
+			editor = "notepad"
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: EDITOR not set and no common editor found."})
+			return nil
+		}
 	}
 
 	tmpFile, err := os.CreateTemp("", "ocode-msg-*.txt")
 	if err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error creating temp file: %v", err)})
-		return
+		return nil
 	}
-	defer os.Remove(tmpFile.Name())
 
 	content := m.input.Value()
 	tmpFile.Write([]byte(content))
@@ -575,15 +636,19 @@ func (m *model) handleEditorCmd(args []string) {
 
 	cmdParts := strings.Fields(editor)
 	cmdParts = append(cmdParts, tmpFile.Name())
-	cmd := exec.Command(cmdParts[0], cmdParts[1:]...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	c := exec.Command(cmdParts[0], cmdParts[1:]...)
 
-	// This will suspend Bubble Tea
-	// But in this environment we can't easily wait for a subprocess that needs terminal access
-	// Let's return a message for now
-	m.messages = append(m.messages, message{role: roleAssistant, text: "Editor launched (simulated). In a real terminal, this would open your editor."})
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		if err != nil {
+			return editorFinishedMsg{err: err}
+		}
+		newContent, err := os.ReadFile(tmpFile.Name())
+		os.Remove(tmpFile.Name())
+		if err != nil {
+			return editorFinishedMsg{err: err}
+		}
+		return editorFinishedMsg{content: string(newContent)}
+	})
 }
 
 func (m *model) handleShareCmd(args []string) {
@@ -592,7 +657,9 @@ func (m *model) handleShareCmd(args []string) {
 	b.WriteString("# Shared OpenCode Session\n\n")
 	for _, msg := range m.messages {
 		role := "User"
-		if msg.role == roleAssistant { role = "Assistant" }
+		if msg.role == roleAssistant {
+			role = "Assistant"
+		}
 		b.WriteString(fmt.Sprintf("### %s\n\n%s\n\n", role, msg.text))
 	}
 	os.WriteFile(filename, []byte(b.String()), 0644)
