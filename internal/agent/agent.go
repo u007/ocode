@@ -175,10 +175,11 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 
 	if name == "glob" || name == "grep" || name == "list" {
 		var params map[string]interface{}
-		json.Unmarshal(args, &params)
-		if a.config != nil && len(a.config.Watcher.Ignore) > 0 {
+		if err := json.Unmarshal(args, &params); err == nil && a.config != nil && len(a.config.Watcher.Ignore) > 0 {
 			params["ignore"] = a.config.Watcher.Ignore
-			args, _ = json.Marshal(params)
+			if merged, err := json.Marshal(params); err == nil {
+				args = merged
+			}
 		}
 	}
 

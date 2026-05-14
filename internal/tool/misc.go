@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type SkillTool struct{}
@@ -36,14 +37,31 @@ func (t SkillTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	// Try to find skill in .opencode/skills/name.md or name/SKILL.md
-	paths := []string{
-		filepath.Join(".opencode", "skills", params.Name+".md"),
-		filepath.Join(".opencode", "skills", params.Name, "SKILL.md"),
+	// Reject names that attempt directory traversal.
+	if strings.Contains(params.Name, "/") || strings.Contains(params.Name, "\\") || strings.Contains(params.Name, "..") {
+		return "", fmt.Errorf("invalid skill name %q", params.Name)
 	}
 
-	for _, p := range paths {
-		if content, err := os.ReadFile(p); err == nil {
+	skillsDir := filepath.Join(".opencode", "skills")
+	candidates := []string{
+		filepath.Join(skillsDir, params.Name+".md"),
+		filepath.Join(skillsDir, params.Name, "SKILL.md"),
+	}
+
+	for _, p := range candidates {
+		// Double-check the resolved path is still within skillsDir.
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		absSkillsDir, err := filepath.Abs(skillsDir)
+		if err != nil {
+			continue
+		}
+		if !strings.HasPrefix(abs, absSkillsDir+string(filepath.Separator)) && abs != absSkillsDir {
+			continue
+		}
+		if content, err := os.ReadFile(abs); err == nil {
 			return string(content), nil
 		}
 	}

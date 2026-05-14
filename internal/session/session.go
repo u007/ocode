@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -86,7 +87,9 @@ func Save(id string, title string, messages []agent.Message) error {
 	var s Session
 	data, err := os.ReadFile(path)
 	if err == nil {
-		json.Unmarshal(data, &s)
+		if err := json.Unmarshal(data, &s); err != nil {
+			return fmt.Errorf("session file %s is corrupt: %w", path, err)
+		}
 	} else {
 		s.ID = id
 		s.CreatedAt = time.Now()
@@ -129,7 +132,8 @@ func updateIndex(dir, id, title string) error {
 	var idx sessionIndex
 	data, err := os.ReadFile(indexPath)
 	if err == nil {
-		json.Unmarshal(data, &idx)
+		// Best-effort: ignore corrupt index (it will be rebuilt over time).
+		json.Unmarshal(data, &idx) //nolint:errcheck
 	}
 	if idx.Sessions == nil {
 		idx.Sessions = make(map[string]string)
@@ -137,7 +141,10 @@ func updateIndex(dir, id, title string) error {
 	idx.LastSessionID = id
 	idx.Sessions[id] = title
 
-	out, _ := json.MarshalIndent(idx, "", "  ")
+	out, err := json.MarshalIndent(idx, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal session index: %w", err)
+	}
 	return os.WriteFile(indexPath, out, 0644)
 }
 
