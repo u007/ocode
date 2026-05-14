@@ -10,6 +10,26 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
+// confinedPath resolves p relative to the process working directory and
+// verifies that the result is within that directory. It returns the cleaned
+// absolute path on success, or an error if the path would escape the working
+// directory.
+func confinedPath(p string) (string, error) {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("could not determine working directory: %w", err)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", fmt.Errorf("invalid path %q: %w", p, err)
+	}
+	rel, err := filepath.Rel(wd, abs)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("path %q is outside the working directory", p)
+	}
+	return abs, nil
+}
+
 type ReadTool struct{}
 
 func (t ReadTool) Name() string        { return "read" }
@@ -39,7 +59,12 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	content, err := os.ReadFile(params.Path)
+	safe, err := confinedPath(params.Path)
+	if err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(safe)
 	if err != nil {
 		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
 	}
@@ -80,13 +105,18 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	snapshot.Backup(params.Path)
+	safe, err := confinedPath(params.Path)
+	if err != nil {
+		return "", err
+	}
 
-	if err := os.MkdirAll(filepath.Dir(params.Path), 0755); err != nil {
+	snapshot.Backup(safe) //nolint:errcheck
+
+	if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
 		return "", fmt.Errorf("failed to create directories for %s: %w", params.Path, err)
 	}
 
-	if err := os.WriteFile(params.Path, []byte(params.Content), 0644); err != nil {
+	if err := os.WriteFile(safe, []byte(params.Content), 0644); err != nil {
 		return "", fmt.Errorf("failed to write file %s: %w", params.Path, err)
 	}
 	return fmt.Sprintf("Successfully wrote to %s", params.Path), nil
@@ -121,9 +151,14 @@ func (t DeleteTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	snapshot.Backup(params.Path)
+	safe, err := confinedPath(params.Path)
+	if err != nil {
+		return "", err
+	}
 
-	if err := os.RemoveAll(params.Path); err != nil {
+	snapshot.Backup(safe) //nolint:errcheck
+
+	if err := os.RemoveAll(safe); err != nil {
 		return "", fmt.Errorf("failed to delete %s: %w", params.Path, err)
 	}
 
@@ -160,7 +195,12 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	content, err := os.ReadFile(params.Path)
+	safe, err := confinedPath(params.Path)
+	if err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(safe)
 	if err != nil {
 		return "", err
 	}
@@ -169,10 +209,9 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("search block not found in file")
 	}
 
-	snapshot.Backup(params.Path)
+	snapshot.Backup(safe) //nolint:errcheck
 	newContent := strings.Replace(string(content), params.Search, params.Replace, 1)
-	err = os.WriteFile(params.Path, []byte(newContent), 0644)
-	if err != nil {
+	if err = os.WriteFile(safe, []byte(newContent), 0644); err != nil {
 		return "", err
 	}
 

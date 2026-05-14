@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -13,14 +14,17 @@ type Snapshot struct {
 	Timestamp    time.Time
 }
 
-var snapshots []Snapshot
-var redoStack []Snapshot
+var (
+	mu        sync.Mutex
+	snapshots []Snapshot
+	redoStack []Snapshot
+)
 
 func Backup(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // Nothing to backup
+			return nil
 		}
 		return err
 	}
@@ -37,31 +41,39 @@ func Backup(path string) error {
 		return err
 	}
 
+	mu.Lock()
 	snapshots = append(snapshots, Snapshot{
 		OriginalPath: path,
 		BackupPath:   backupPath,
 		Timestamp:    time.Now(),
 	})
+	mu.Unlock()
 	return nil
 }
 
 func Undo() (string, error) {
+	mu.Lock()
 	if len(snapshots) == 0 {
+		mu.Unlock()
 		return "", fmt.Errorf("no snapshots available to undo")
 	}
-
 	last := snapshots[len(snapshots)-1]
 	snapshots = snapshots[:len(snapshots)-1]
+	mu.Unlock()
 
-	// Save to redo stack
 	currentData, _ := os.ReadFile(last.OriginalPath)
 	redoBackupPath := last.BackupPath + ".redo"
-	os.WriteFile(redoBackupPath, currentData, 0644)
+	if err := os.WriteFile(redoBackupPath, currentData, 0644); err != nil {
+		return "", fmt.Errorf("failed to save redo backup for %s: %w", last.OriginalPath, err)
+	}
+
+	mu.Lock()
 	redoStack = append(redoStack, Snapshot{
 		OriginalPath: last.OriginalPath,
 		BackupPath:   redoBackupPath,
 		Timestamp:    time.Now(),
 	})
+	mu.Unlock()
 
 	data, err := os.ReadFile(last.BackupPath)
 	if err != nil {
@@ -72,32 +84,33 @@ func Undo() (string, error) {
 		return "", fmt.Errorf("failed to restore file %s: %w", last.OriginalPath, err)
 	}
 
-	// Clean up backup file
-	os.Remove(last.BackupPath)
-
+	os.Remove(last.BackupPath) //nolint:errcheck
 	return last.OriginalPath, nil
 }
 
 func Redo() (string, error) {
+	mu.Lock()
 	if len(redoStack) == 0 {
+		mu.Unlock()
 		return "", fmt.Errorf("nothing to redo")
 	}
-
 	last := redoStack[len(redoStack)-1]
 	redoStack = redoStack[:len(redoStack)-1]
+	mu.Unlock()
 
 	data, err := os.ReadFile(last.BackupPath)
 	if err != nil {
 		return "", fmt.Errorf("failed to read redo file %s: %w", last.BackupPath, err)
 	}
 
-	// Backup current state for undo before applying redo
-	Backup(last.OriginalPath)
+	if err := Backup(last.OriginalPath); err != nil {
+		return "", fmt.Errorf("failed to backup before redo: %w", err)
+	}
 
 	if err := os.WriteFile(last.OriginalPath, data, 0644); err != nil {
 		return "", fmt.Errorf("failed to restore file %s: %w", last.OriginalPath, err)
 	}
 
-	os.Remove(last.BackupPath)
+	os.Remove(last.BackupPath) //nolint:errcheck
 	return last.OriginalPath, nil
 }

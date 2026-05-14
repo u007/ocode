@@ -3,7 +3,6 @@ package tool
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"testing"
 )
 
@@ -14,24 +13,29 @@ func TestFileTools(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	testFile := filepath.Join(tmpDir, "test.txt")
+	// Change into tmpDir so confinedPath allows relative paths inside it.
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
 	content := "hello world"
 
-	// Test Write
+	// Test Write using a relative path (confined to tmpDir).
 	writeTool := WriteTool{}
 	writeArgs, _ := json.Marshal(map[string]string{
-		"path":    testFile,
+		"path":    "test.txt",
 		"content": content,
 	})
-	_, err = writeTool.Execute(writeArgs)
-	if err != nil {
+	if _, err = writeTool.Execute(writeArgs); err != nil {
 		t.Fatalf("WriteTool failed: %v", err)
 	}
 
 	// Test Read
 	readTool := ReadTool{}
 	readArgs, _ := json.Marshal(map[string]string{
-		"path": testFile,
+		"path": "test.txt",
 	})
 	res, err := readTool.Execute(readArgs)
 	if err != nil {
@@ -39,5 +43,11 @@ func TestFileTools(t *testing.T) {
 	}
 	if res != content {
 		t.Errorf("expected %s, got %s", content, res)
+	}
+
+	// Ensure path traversal is rejected.
+	badArgs, _ := json.Marshal(map[string]string{"path": "../../../etc/passwd"})
+	if _, err := readTool.Execute(badArgs); err == nil {
+		t.Error("expected error for path traversal, got nil")
 	}
 }

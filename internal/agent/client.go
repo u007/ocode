@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 )
+
+var llmHTTPClient = &http.Client{Timeout: 120 * time.Second}
 
 type Message struct {
 	Role      string     `json:"role"`
@@ -76,8 +79,7 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -113,41 +115,45 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 			continue
 		}
 		// Anthropic roles: user, assistant
+		// tool results must be sent as role=user with tool_result content blocks.
 		role := m.Role
 		if role == "tool" {
-			role = "user" // Tool results are 'user' role in Anthropic with tool_result content
+			role = "user"
 		}
 
-		content := []interface{}{
-			map[string]interface{}{
-				"type": "text",
-				"text": m.Content,
-			},
-		}
+		var content []interface{}
 
 		if m.Role == "tool" {
+			// Tool result block only — no extra text block.
 			content = []interface{}{
 				map[string]interface{}{
-					"type":         "tool_result",
-					"tool_use_id":  m.ToolID,
-					"content":      m.Content,
+					"type":        "tool_result",
+					"tool_use_id": m.ToolID,
+					"content":     m.Content,
 				},
+			}
+		} else {
+			// For user/assistant messages: text first, then tool_use blocks.
+			if m.Content != "" {
+				content = append(content, map[string]interface{}{
+					"type": "text",
+					"text": m.Content,
+				})
+			}
+			for _, tc := range m.ToolCalls {
+				var input interface{}
+				json.Unmarshal([]byte(tc.Function.Arguments), &input) //nolint:errcheck
+				content = append(content, map[string]interface{}{
+					"type":  "tool_use",
+					"id":    tc.ID,
+					"name":  tc.Function.Name,
+					"input": input,
+				})
 			}
 		}
 
-		if len(m.ToolCalls) > 0 {
-			for _, tc := range m.ToolCalls {
-				content = append(content, map[string]interface{}{
-					"type": "tool_use",
-					"id":   tc.ID,
-					"name": tc.Function.Name,
-					"input": func() interface{} {
-						var res interface{}
-						json.Unmarshal([]byte(tc.Function.Arguments), &res)
-						return res
-					}(),
-				})
-			}
+		if len(content) == 0 {
+			continue
 		}
 
 		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
@@ -189,8 +195,7 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 	req.Header.Set("x-api-key", c.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

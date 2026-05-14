@@ -125,10 +125,10 @@ func (c *MCPClient) requestRemote(method string, params interface{}) (json.RawMe
 		"params":  params,
 	}
 
-	data, _ := json.Marshal(reqBody)
-
-	// If SSE is active, we might want to handle it differently,
-	// but for standard tool listing/calling, HTTP POST is the norm.
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal MCP request: %w", err)
+	}
 
 	req, err := http.NewRequest("POST", c.url, bytes.NewBuffer(data))
 	if err != nil {

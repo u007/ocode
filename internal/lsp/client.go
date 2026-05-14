@@ -18,6 +18,7 @@ type Client struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
+	reader *bufio.Reader
 	id     int
 	mu     sync.Mutex
 }
@@ -41,14 +42,16 @@ func NewClient(serverPath string) (*Client, error) {
 		cmd:    cmd,
 		stdin:  stdin,
 		stdout: stdout,
+		reader: bufio.NewReader(stdout),
 	}, nil
 }
 
 func (c *Client) Call(method string, params interface{}) (json.RawMessage, error) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.id++
 	id := c.id
-	c.mu.Unlock()
 
 	req := map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -67,8 +70,7 @@ func (c *Client) Call(method string, params interface{}) (json.RawMessage, error
 		return nil, err
 	}
 
-	reader := bufio.NewReader(c.stdout)
-	line, err := reader.ReadString('\n')
+	line, err := c.reader.ReadString('\n')
 	if err != nil {
 		return nil, err
 	}
@@ -79,14 +81,14 @@ func (c *Client) Call(method string, params interface{}) (json.RawMessage, error
 	}
 
 	for {
-		line, err = reader.ReadString('\n')
+		line, err = c.reader.ReadString('\n')
 		if err != nil || line == "\r\n" {
 			break
 		}
 	}
 
 	body := make([]byte, contentLength)
-	if _, err := io.ReadFull(reader, body); err != nil {
+	if _, err := io.ReadFull(c.reader, body); err != nil {
 		return nil, err
 	}
 
@@ -112,13 +114,16 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) Initialize(rootPath string) error {
-	abs, _ := filepath.Abs(rootPath)
+	abs, err := filepath.Abs(rootPath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve root path: %w", err)
+	}
 	u := url.URL{Scheme: "file", Path: filepath.ToSlash(abs)}
 	params := map[string]interface{}{
-		"processId": os.Getpid(),
-		"rootUri":   u.String(),
+		"processId":    os.Getpid(),
+		"rootUri":      u.String(),
 		"capabilities": map[string]interface{}{},
 	}
-	_, err := c.Call("initialize", params)
+	_, err = c.Call("initialize", params)
 	return err
 }

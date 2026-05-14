@@ -10,6 +10,8 @@ import (
 	"strings"
 )
 
+const maxFetchBytes = 2 * 1024 * 1024 // 2 MB
+
 type WebFetchTool struct{}
 
 func (t WebFetchTool) Name() string        { return "webfetch" }
@@ -45,7 +47,7 @@ func (t WebFetchTool) Execute(args json.RawMessage) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes))
 	if err != nil {
 		return "", err
 	}
@@ -101,7 +103,7 @@ func (t WebSearchTool) Execute(args json.RawMessage) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes))
 	if err != nil {
 		return "", err
 	}

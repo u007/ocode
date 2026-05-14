@@ -510,8 +510,18 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 		for _, match := range matches {
 			path := match[1]
 			foundPath := ""
-			filepath.Walk(".", func(p string, info os.FileInfo, err error) error {
-				if foundPath != "" || info.IsDir() {
+			filepath.Walk(".", func(p string, info os.FileInfo, err error) error { //nolint:errcheck
+				if err != nil {
+					return nil
+				}
+				if foundPath != "" {
+					// Already found — skip remaining directories to avoid full-tree scan.
+					if info.IsDir() {
+						return filepath.SkipDir
+					}
+					return nil
+				}
+				if info.IsDir() {
 					return nil
 				}
 				if strings.Contains(strings.ToLower(p), strings.ToLower(path)) {
@@ -566,6 +576,13 @@ func (m *model) handleThinkingCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Thinking blocks are now %s.", status)})
 }
 
+func maskKey(key string) string {
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + strings.Repeat("*", len(key)-8) + key[len(key)-4:]
+}
+
 func (m *model) handleConnectCmd(args []string) {
 	if len(args) == 0 {
 		var b strings.Builder
@@ -607,7 +624,11 @@ func (m *model) handleConnectCmd(args []string) {
 
 		if envVar != "" {
 			os.Setenv(envVar, key)
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Successfully set API key for %s.", provider)})
+			// Show only a masked version of the key to avoid it lingering in scroll-back.
+			masked := maskKey(key)
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf(
+				"API key for %s set (%s). Note: the key is held in memory only and will not persist after restart.", provider, masked,
+			)})
 
 			if m.config != nil && m.config.Model != "" {
 				client := agent.NewClient(m.config, m.config.Model)
@@ -966,7 +987,7 @@ func (m model) View() string {
 
 func (m *model) renderStatus() string {
 	modelName := "no model"
-	if m.agent != nil {
+	if m.agent != nil && m.config != nil {
 		modelName = m.config.Model
 	}
 
