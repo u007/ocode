@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/jamesmercstudio/ocode/internal/agent"
 )
 
 type commandSpec struct {
@@ -127,14 +129,7 @@ func modelSuggestions(m *model) []string {
 }
 
 func providerModels(provider string) []string {
-	switch provider {
-	case "anthropic":
-		return []string{"claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307"}
-	case "google":
-		return []string{"gemini-1.5-pro", "gemini-1.5-flash"}
-	default:
-		return []string{"gpt-4o", "gpt-4o-mini", "o1-preview"}
-	}
+	return agent.ProviderModels(provider)
 }
 
 func commandHelpText() string {
