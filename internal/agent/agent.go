@@ -11,9 +11,10 @@ import (
 )
 
 type Agent struct {
-	client LLMClient
-	tools  map[string]tool.Tool
-	config *config.Config
+	client   LLMClient
+	tools    map[string]tool.Tool
+	mcpTools map[string]struct{}
+	config   *config.Config
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -22,9 +23,10 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		toolMap[t.Name()] = t
 	}
 	a := &Agent{
-		client: client,
-		tools:  toolMap,
-		config: cfg,
+		client:   client,
+		tools:    toolMap,
+		mcpTools: make(map[string]struct{}),
+		config:   cfg,
 	}
 	a.tools["agent"] = AgentTool{mainAgent: a}
 	return a
@@ -131,6 +133,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 }
 
 func (a *Agent) compactContext(messages []Message) []Message {
+	if a.config == nil || a.config.Ocode == nil || !a.config.Ocode.Compact.Enabled {
+		return messages
+	}
+
 	maxMessages := 20
 	if len(messages) <= maxMessages {
 		return messages
@@ -150,7 +156,8 @@ func (a *Agent) compactContext(messages []Message) []Message {
 		}
 	}
 
-	summaryResp, err := a.client.Chat([]Message{{Role: "user", Content: summaryPrompt}}, nil)
+	summaryClient := a.compactSummaryClient()
+	summaryResp, err := summaryClient.Chat([]Message{{Role: "user", Content: summaryPrompt}}, nil)
 	if err == nil && summaryResp.Content != "" {
 		compacted = append(compacted, Message{
 			Role:    "system",
@@ -165,6 +172,40 @@ func (a *Agent) compactContext(messages []Message) []Message {
 
 	compacted = append(compacted, messages[len(messages)-keepBack:]...)
 	return compacted
+}
+
+func (a *Agent) compactSummaryClient() LLMClient {
+	if a.config == nil || a.config.Ocode == nil {
+		return a.client
+	}
+
+	compact := a.config.Ocode.Compact
+	if compact.SummaryProvider == "" && compact.SummaryModel == "" {
+		return a.client
+	}
+
+	provider := compact.SummaryProvider
+	if provider == "" {
+		provider = a.client.GetProvider()
+	}
+
+	model := compact.SummaryModel
+	if model == "" {
+		model = a.client.GetModel()
+	}
+	if model == "" {
+		return a.client
+	}
+
+	targetModel := model
+	if provider != "" {
+		targetModel = provider + ":" + model
+	}
+
+	if client := NewClient(a.config, targetModel); client != nil {
+		return client
+	}
+	return a.client
 }
 
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
@@ -212,6 +253,31 @@ func (a *Agent) AddTools(tools []tool.Tool) {
 	}
 }
 
+func (a *Agent) addMCPTools(tools []tool.Tool) {
+	for _, t := range tools {
+		a.tools[t.Name()] = t
+		a.mcpTools[t.Name()] = struct{}{}
+	}
+}
+
+func (a *Agent) MCPToolNames() []string {
+	names := make([]string, 0, len(a.mcpTools))
+	for name := range a.mcpTools {
+		names = append(names, name)
+	}
+	return names
+}
+
+func (a *Agent) RestoreMCPToolNames(names []string) {
+	for _, name := range names {
+		a.mcpTools[name] = struct{}{}
+	}
+}
+
+func (a *Agent) MCPToolCount() int {
+	return len(a.mcpTools)
+}
+
 func (a *Agent) LoadExternalTools(cfg *config.Config) {
 	custom := tool.LoadCustomTools()
 	a.AddTools(custom)
@@ -236,7 +302,7 @@ func (a *Agent) LoadExternalTools(cfg *config.Config) {
 					for _, mt := range mcpTools {
 						tools = append(tools, mt)
 					}
-					a.AddTools(tools)
+					a.addMCPTools(tools)
 				}
 			}
 		}

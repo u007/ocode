@@ -51,3 +51,60 @@ func TestDiscardRecentRemovesBackups(t *testing.T) {
 		t.Fatalf("expected snapshot files to be removed, got %d", len(entries))
 	}
 }
+
+func TestChangedFilesReturnsUniquePaths(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile("a.txt", []byte("a\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("b.txt", []byte("b\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	Reset()
+
+	if err := Backup("a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Backup("b.txt"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Backup("a.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ChangedFiles()
+	want := []string{"a.txt", "b.txt"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("expected %v, got %v", want, got)
+	}
+}
+
+func TestResetClearsSnapshots(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile("a.txt", []byte("a\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	Reset()
+	if err := Backup("a.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	Reset()
+	if got := ChangedFiles(); len(got) != 0 {
+		t.Fatalf("expected changed files to clear, got %v", got)
+	}
+}

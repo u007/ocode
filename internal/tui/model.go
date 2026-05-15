@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,23 +58,26 @@ type leaderTimeoutMsg struct {
 }
 
 type model struct {
-	viewport     viewport.Model
-	input        textarea.Model
-	messages     []message
-	agent        *agent.Agent
-	config       *config.Config
-	sessionID    string
-	showThinking bool
-	showDetails  bool
-	leaderActive bool
-	leaderSeq    int
-	showPalette  bool
-	paletteInput string
-	width        int
-	height       int
-	ready        bool
-	err          error
-	scrollSpeed  int
+	viewport         viewport.Model
+	input            textarea.Model
+	messages         []message
+	agent            *agent.Agent
+	config           *config.Config
+	sessionID        string
+	showThinking     bool
+	showDetails      bool
+	leaderActive     bool
+	leaderSeq        int
+	showPalette      bool
+	showSidebar      bool
+	sessionTelemetry sidebarTelemetry
+	activeModel      string
+	paletteInput     string
+	width            int
+	height           int
+	ready            bool
+	err              error
+	scrollSpeed      int
 }
 
 type agentResponseMsg string
@@ -87,6 +91,11 @@ var (
 			BorderForeground(lipgloss.Color("#3B4261")).
 			Padding(0, 1)
 	hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
+)
+
+const (
+	sidebarMinWidth    = 120
+	sidebarColumnWidth = 38
 )
 
 func (m *model) applyTheme() {
@@ -112,6 +121,39 @@ func (m *model) applyTheme() {
 			Padding(0, 1)
 		hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true)
 	}
+}
+
+func (m *model) toggleSidebar() {
+	m.showSidebar = !m.showSidebar
+	m.layout()
+}
+
+func (m model) sidebarEnabled() bool {
+	return m.showSidebar && m.width >= sidebarMinWidth
+}
+
+func (m model) panelWidth() int {
+	if m.sidebarEnabled() {
+		return m.width - sidebarColumnWidth
+	}
+	return m.width
+}
+
+func (m model) currentModelName() string {
+	if m.activeModel != "" {
+		return m.activeModel
+	}
+	if m.config != nil && m.config.Model != "" {
+		return m.config.Model
+	}
+
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].raw != nil && m.messages[i].raw.Model != "" {
+			return m.messages[i].raw.Model
+		}
+	}
+
+	return "no model"
 }
 
 func (m *model) getInitialTools() []tool.Tool {
@@ -170,6 +212,9 @@ func newModel(sid string, cont bool) model {
 	if sid == "" {
 		sid = time.Now().Format("2006-01-02-150405")
 	}
+	tool.SetTodoSession(sid)
+	snapshot.Reset()
+	tool.ResetTodoState()
 
 	m := model{
 		viewport:     vp,
@@ -179,6 +224,7 @@ func newModel(sid string, cont bool) model {
 		agent:        a,
 		sessionID:    sid,
 		showThinking: true,
+		activeModel:  func() string { if cfg != nil { return cfg.Model }; return "" }(),
 		scrollSpeed:  3,
 	}
 
@@ -189,9 +235,11 @@ func newModel(sid string, cont bool) model {
 	m.applyTheme()
 
 	if sid != "" {
-		msgs, err := session.Load(sid)
+		sess, err := session.Load(sid)
 		if err == nil {
-			for _, am := range msgs {
+			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
+			restoreTodoState(sess.Metadata)
+			for _, am := range sess.Messages {
 				role := roleUser
 				if am.Role == "assistant" || am.Role == "tool" {
 					role = roleAssistant
@@ -217,6 +265,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
+		if msg.Type == tea.MouseLeft {
+			if path, ok := m.sidebarFileForClick(msg); ok {
+				return m, openSidebarFileInEditor(path)
+			}
+		}
 		if msg.Type == tea.MouseWheelUp {
 			m.viewport.LineUp(m.scrollSpeed)
 			return m, nil
@@ -288,6 +341,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showPalette = !m.showPalette
 			m.paletteInput = ""
 			return m, nil
+		case tea.KeyCtrlB:
+			m.toggleSidebar()
+			return m, nil
 		case tea.KeyCtrlX:
 			m.leaderActive = true
 			m.leaderSeq++
@@ -301,6 +357,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyTab:
+			current := m.input.Value()
+			if !strings.HasPrefix(current, "/") {
+				return m, nil
+			}
+
+			suggestions := autocompleteSlashInput(&m, current)
+			if len(suggestions) == 0 {
+				return m, nil
+			}
+
+			if strings.HasSuffix(current, " ") {
+				m.input.SetValue(strings.TrimSpace(current) + " " + suggestions[0])
+				return m, nil
+			}
+
+			m.input.SetValue(suggestions[0])
+			return m, nil
 		case tea.KeyEnter:
 			text := strings.TrimSpace(m.input.Value())
 			if text == "" {
@@ -408,6 +482,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if am.Role == "tool" {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ tool result: %s", am.Content), raw: &copyMsg})
 			}
+			if am.Usage != nil || am.Spend != nil {
+				m.sessionTelemetry.addMessage(am)
+			}
 		}
 		m.renderTranscript()
 		m.viewport.GotoBottom()
@@ -442,6 +519,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return m, nil
+	}
 	cmd := parts[0]
 	args := parts[1:]
 
@@ -450,46 +530,11 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	}
 
 	var cmdResult tea.Cmd
-
-	switch cmd {
-	case "/model":
-		m.handleModelCmd(args)
-	case "/thinking":
-		m.handleThinkingCmd(args)
-	case "/connect":
-		m.handleConnectCmd(args)
-	case "/login":
-		cmdResult = m.handleLoginCmd(args)
-	case "/session":
-		m.handleSessionCmd(args)
-	case "/compact":
-		m.handleCompactCmd(args)
-	case "/undo":
-		m.handleUndoCmd(args)
-	case "/help":
-		m.handleHelpCmd(args)
-	case "/redo":
-		m.handleRedoCmd(args)
-	case "/export":
-		m.handleExportCmd(args)
-	case "/new", "/clear":
-		m.handleNewCmd(args)
-	case "/editor":
-		cmdResult = m.handleEditorCmd(args)
-	case "/exit", "/quit", "/q":
-		return m, tea.Quit
-	case "/themes":
-		m.handleThemesCmd(args)
-	case "/share":
-		m.handleShareCmd(args)
-	case "/models":
-		m.handleModelsCmd(args)
-	case "/details":
-		m.handleDetailsCmd(args)
-	case "/init":
-		m.handleInitCmd(args)
-	default:
+	spec := lookupCommand(cmd)
+	if spec == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
+	} else {
+		cmdResult = spec.handler(m, args)
 	}
 
 	m.renderTranscript()
@@ -558,6 +603,10 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 func (m *model) handleModelCmd(args []string) {
 	if len(args) > 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", args[0])})
+		var mcpNames []string
+		if m.agent != nil {
+			mcpNames = m.agent.MCPToolNames()
+		}
 		client := agent.NewClient(m.config, args[0])
 		if client != nil {
 			var tools []tool.Tool
@@ -567,6 +616,11 @@ func (m *model) handleModelCmd(args []string) {
 				tools = m.getInitialTools()
 			}
 			m.agent = agent.NewAgent(client, tools, m.config)
+			m.agent.RestoreMCPToolNames(mcpNames)
+			m.activeModel = args[0]
+			if m.config != nil {
+				m.config.Model = args[0]
+			}
 		}
 	}
 }
@@ -660,13 +714,18 @@ func (m *model) handleSessionCmd(args []string) {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 	} else if args[0] == "load" && len(args) > 1 {
-		msgs, err := session.Load(args[1])
+		sess, err := session.Load(args[1])
 		if err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session: %v", err)})
 		} else {
 			m.sessionID = args[1]
+			tool.SetTodoSession(m.sessionID)
+			snapshot.Reset()
+			tool.ResetTodoState()
+			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
+			restoreTodoState(sess.Metadata)
 			m.messages = []message{}
-			for _, am := range msgs {
+			for _, am := range sess.Messages {
 				role := roleUser
 				if am.Role == "assistant" || am.Role == "tool" {
 					role = roleAssistant
@@ -722,22 +781,19 @@ func (m *model) handleExportCmd(args []string) {
 func (m *model) handleNewCmd(args []string) {
 	m.messages = []message{}
 	m.sessionID = time.Now().Format("2006-01-02-150405")
+	tool.SetTodoSession(m.sessionID)
+	snapshot.Reset()
+	tool.ResetTodoState()
+	m.sessionTelemetry = sidebarTelemetry{}
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session."})
 }
 
 func (m *model) handleEditorCmd(args []string) tea.Cmd {
 	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		if _, err := exec.LookPath("vim"); err == nil {
-			editor = "vim"
-		} else if _, err := exec.LookPath("nano"); err == nil {
-			editor = "nano"
-		} else if _, err := exec.LookPath("notepad"); err == nil {
-			editor = "notepad"
-		} else {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: EDITOR not set and no common editor found."})
-			return nil
-		}
+	editor, ok := resolveEditor(editor)
+	if !ok {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: EDITOR not set and no common editor found."})
+		return nil
 	}
 
 	tmpFile, err := os.CreateTemp("", "ocode-msg-*.txt")
@@ -765,6 +821,37 @@ func (m *model) handleEditorCmd(args []string) tea.Cmd {
 		}
 		return editorFinishedMsg{content: string(newContent)}
 	})
+}
+
+var openSidebarFileInEditor = openPathInEditor
+
+func openPathInEditor(path string) tea.Cmd {
+	editor, ok := resolveEditor(os.Getenv("EDITOR"))
+	if !ok {
+		return func() tea.Msg { return errorMsg(fmt.Errorf("EDITOR not set and no common editor found")) }
+	}
+
+	cmdParts := strings.Fields(editor)
+	cmdParts = append(cmdParts, path)
+	c := exec.Command(cmdParts[0], cmdParts[1:]...)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		if err != nil {
+			return errorMsg(err)
+		}
+		return nil
+	})
+}
+
+func resolveEditor(editor string) (string, bool) {
+	if editor != "" {
+		return editor, true
+	}
+	for _, candidate := range []string{"vim", "nano", "notepad"} {
+		if _, err := exec.LookPath(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 func (m *model) handleShareCmd(args []string) {
@@ -798,14 +885,7 @@ func (m *model) handleModelsCmd(args []string) {
 	if m.agent != nil {
 		provider = m.agent.GetProvider()
 	}
-
-	models := map[string][]string{
-		"openai":    {"gpt-4o", "gpt-4o-mini", "o1-preview"},
-		"anthropic": {"claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307"},
-		"google":    {"gemini-1.5-pro", "gemini-1.5-flash"},
-	}
-
-	list := models[provider]
+	list := providerModels(provider)
 	if len(list) == 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("No model list for provider %s", provider)})
 	} else {
@@ -838,29 +918,7 @@ func (m *model) handleInitCmd(args []string) {
 }
 
 func (m *model) handleHelpCmd(args []string) {
-	help := `Available Commands:
-/model <name>  : Switch LLM model
-/connect       : Show/Set provider API keys
-/login         : Google Login via OAuth2
-/session <cmd> : Manage sessions (list, load <id>)
-/compact       : Reduce context size by removing tool history
-/undo          : Revert last file change
-/redo          : Restore last undone change
-/export        : Save chat as Markdown
-/new           : Start a fresh session
-/thinking      : Toggle visibility of agent thoughts
-/models        : List recommended models for active provider
-/details       : Toggle tool execution details
-/init          : Create default AGENTS.md
-/help          : Show this help
-
-Shortcuts:
-!command       : Run a shell command
-@path          : Add file content to context
-Ctrl+P         : Open command palette
-Ctrl+X         : Leader key for quick actions (u:undo, r:redo, n:new, l:list, c:compact)
-`
-	m.messages = append(m.messages, message{role: roleAssistant, text: help})
+	m.messages = append(m.messages, message{role: roleAssistant, text: commandHelpText()})
 }
 
 func (m *model) handleUndoCmd(args []string) {
@@ -886,7 +944,7 @@ func (m *model) saveSession() {
 				agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
 			}
 		}
-		session.Save(m.sessionID, "", agentMsgs)
+		session.Save(m.sessionID, "", agentMsgs, m.sessionSidebarMetadata())
 	}
 }
 
@@ -921,17 +979,29 @@ func (m model) askAgent() tea.Cmd {
 }
 
 func (m *model) layout() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+
 	inputHeight := 5
 	headerHeight := 2
-	m.input.SetWidth(m.width - 4)
-	m.viewport.Width = m.width - 4
+	panelWidth := m.panelWidth()
+	innerWidth := panelWidth - 4
+	if innerWidth < 1 {
+		innerWidth = 1
+	}
+	m.input.SetWidth(innerWidth)
+	m.viewport.Width = innerWidth
 	m.viewport.Height = m.height - inputHeight - headerHeight - 2
+	if m.viewport.Height < 1 {
+		m.viewport.Height = 1
+	}
 	m.renderTranscript()
 }
 
 func (m *model) renderPalette() string {
 	header := lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true).Render(" > ") + m.paletteInput
-	commands := []string{"/model", "/connect", "/login", "/session", "/compact", "/undo", "/redo", "/export", "/new", "/thinking", "/models", "/details", "/init"}
+	commands := commandNames()
 	var results []string
 	for _, c := range commands {
 		if strings.Contains(c, m.paletteInput) {
@@ -980,27 +1050,340 @@ func (m model) View() string {
 		Render("◆ ocode") + hintStyle.Render("  ·  opencode clone")
 
 	status := m.renderStatus()
-
-	return lipgloss.JoinVertical(lipgloss.Left,
+	panelWidth := m.panelWidth()
+	transcript := borderStyle.Width(panelWidth - 2).Render(m.viewport.View())
+	input := borderStyle.Width(panelWidth - 2).Render(m.input.View())
+	left := lipgloss.JoinVertical(lipgloss.Left,
 		header,
-		borderStyle.Width(m.width-2).Render(m.viewport.View()),
-		borderStyle.Width(m.width-2).Render(m.input.View()),
+		transcript,
+		input,
 		status,
 	)
+
+	if m.sidebarEnabled() {
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebar())
+	}
+
+	return left
 }
 
 func (m *model) renderStatus() string {
-	modelName := "no model"
-	if m.agent != nil && m.config != nil {
-		modelName = m.config.Model
-	}
-
 	statusStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("#565F89")).
 		Background(lipgloss.Color("#1A1B26")).
 		Padding(0, 1)
 
-	return statusStyle.Width(m.width).Render(
-		fmt.Sprintf(" Model: %s | Session: %s | ctrl+p: palette | ctrl+x: leader", modelName, m.sessionID),
+	return statusStyle.Width(m.panelWidth()).Render(
+		fmt.Sprintf(" Model: %s | Session: %s | ctrl+p: palette | ctrl+x: leader", m.currentModelName(), m.sessionID),
 	)
+}
+
+type sidebarTelemetry struct {
+	promptTokens     int64
+	completionTokens int64
+	totalTokens      int64
+	spend            *float64
+}
+
+type sidebarRenderData struct {
+	lines     []string
+	fileLines map[int]string
+}
+
+func (t sidebarTelemetry) usedTokens() int64 {
+	if t.totalTokens > 0 {
+		return t.totalTokens
+	}
+	return t.promptTokens + t.completionTokens
+}
+
+func (t *sidebarTelemetry) addMessage(msg agent.Message) {
+	messageTotal := int64(0)
+	if msg.Usage != nil {
+		if msg.Usage.PromptTokens != nil {
+			t.promptTokens += *msg.Usage.PromptTokens
+			messageTotal += *msg.Usage.PromptTokens
+		}
+		if msg.Usage.CompletionTokens != nil {
+			t.completionTokens += *msg.Usage.CompletionTokens
+			messageTotal += *msg.Usage.CompletionTokens
+		}
+		if msg.Usage.TotalTokens != nil {
+			messageTotal = *msg.Usage.TotalTokens
+		}
+		t.totalTokens += messageTotal
+	}
+	if msg.Spend != nil {
+		if t.spend == nil {
+			t.spend = new(float64)
+		}
+		*t.spend += *msg.Spend
+	}
+}
+
+func (t sidebarTelemetry) metadata() map[string]any {
+	if t.promptTokens == 0 && t.completionTokens == 0 && t.totalTokens == 0 && t.spend == nil {
+		return nil
+	}
+	meta := map[string]any{
+		"prompt_tokens":     t.promptTokens,
+		"completion_tokens": t.completionTokens,
+		"total_tokens":      t.totalTokens,
+	}
+	if t.spend != nil {
+		meta["spend"] = *t.spend
+	}
+	return meta
+}
+
+func (m model) sessionSidebarMetadata() map[string]any {
+	meta := m.sessionTelemetry.metadata()
+	todo := tool.TodoState()
+	if todo != "" {
+		if meta == nil {
+			meta = make(map[string]any)
+		}
+		meta["todo_text"] = todo
+	}
+	return meta
+}
+
+func restoreTodoState(meta map[string]any) {
+	if len(meta) == 0 {
+		return
+	}
+	if v, ok := meta["todo_text"]; ok {
+		if s, ok := v.(string); ok {
+			tool.SetTodoState(s)
+		}
+	}
+}
+
+func telemetryFromSessionMetadata(meta map[string]any) sidebarTelemetry {
+	if len(meta) == 0 {
+		return sidebarTelemetry{}
+	}
+
+	var telemetry sidebarTelemetry
+	if v, ok := meta["prompt_tokens"]; ok {
+		telemetry.promptTokens = int64FromAny(v)
+	}
+	if v, ok := meta["completion_tokens"]; ok {
+		telemetry.completionTokens = int64FromAny(v)
+	}
+	if v, ok := meta["total_tokens"]; ok {
+		telemetry.totalTokens = int64FromAny(v)
+	}
+	if v, ok := meta["spend"]; ok {
+		if f, ok := float64FromAny(v); ok {
+			telemetry.spend = &f
+		}
+	}
+	return telemetry
+}
+
+func int64FromAny(v any) int64 {
+	switch n := v.(type) {
+	case int:
+		return int64(n)
+	case int8:
+		return int64(n)
+	case int16:
+		return int64(n)
+	case int32:
+		return int64(n)
+	case int64:
+		return n
+	case float32:
+		return int64(n)
+	case float64:
+		return int64(n)
+	default:
+		return 0
+	}
+}
+
+func float64FromAny(v any) (float64, bool) {
+	switch n := v.(type) {
+	case float32:
+		return float64(n), true
+	case float64:
+		return n, true
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	default:
+		return 0, false
+	}
+}
+
+func aggregateSidebarTelemetry(messages []message) sidebarTelemetry {
+	var telemetry sidebarTelemetry
+	for _, msg := range messages {
+		if msg.raw == nil {
+			continue
+		}
+		telemetry.addMessage(*msg.raw)
+	}
+	return telemetry
+}
+
+func modelContextWindow(modelName string) (int64, bool) {
+	switch modelName {
+	case "gpt-4o", "gpt-4o-mini", "o1-preview":
+		return 128000, true
+	case "claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307":
+		return 200000, true
+	case "gemini-1.5-pro":
+		return 1048576, true
+	case "gemini-1.5-flash":
+		return 1000000, true
+	default:
+		return 0, false
+	}
+}
+
+func formatPercent(used, total int64) string {
+	if total <= 0 {
+		return "0%"
+	}
+	percent := float64(used) / float64(total) * 100
+	return fmt.Sprintf("%.1f%%", percent)
+}
+
+func (m model) buildSidebarRenderData() sidebarRenderData {
+	data := sidebarRenderData{fileLines: map[int]string{}}
+	appendSection := func(title string, body []string, filePaths []string) {
+		if len(data.lines) > 0 {
+			data.lines = append(data.lines, "")
+		}
+		data.lines = append(data.lines, title)
+		for i, line := range body {
+			data.lines = append(data.lines, line)
+			if i < len(filePaths) {
+				data.fileLines[len(data.lines)] = filePaths[i]
+			}
+		}
+	}
+
+	telemetry := m.sessionTelemetry
+	if telemetry.usedTokens() == 0 && telemetry.spend == nil {
+		telemetry = aggregateSidebarTelemetry(m.messages)
+	}
+	modelName := m.currentModelName()
+
+	contextLine := "n/a"
+	if used := telemetry.usedTokens(); used > 0 {
+		if window, ok := modelContextWindow(modelName); ok {
+			contextLine = fmt.Sprintf("%s / %s (%s)", strconv.FormatInt(used, 10), strconv.FormatInt(window, 10), formatPercent(used, window))
+		} else {
+			contextLine = fmt.Sprintf("%s tokens", strconv.FormatInt(used, 10))
+		}
+	}
+
+	spendLine := "n/a"
+	if telemetry.spend != nil {
+		spendLine = fmt.Sprintf("$%.4f", *telemetry.spend)
+	}
+
+	appendSection("Session", []string{m.sessionID}, nil)
+	appendSection("Model", []string{modelName}, nil)
+	appendSection("Context", []string{contextLine}, nil)
+	appendSection("Spend", []string{spendLine}, nil)
+	appendSection("MCP", []string{m.renderMCPStatus()}, nil)
+	appendSection("LSP", []string{m.renderLSPStatus()}, nil)
+
+	changed := snapshot.ChangedFiles()
+	if len(changed) == 0 {
+		appendSection("Files", []string{"No changed files yet."}, nil)
+	} else {
+		body := make([]string, 0, len(changed))
+		for _, path := range changed {
+			body = append(body, "- "+shortenSidebarPath(path, sidebarColumnWidth-4))
+		}
+		appendSection("Files", body, changed)
+	}
+
+	todo := tool.TodoState()
+	if todo == "" {
+		appendSection("TODO", []string{"No live session todo state yet."}, nil)
+	} else {
+		appendSection("TODO", strings.Split(todo, "\n"), nil)
+	}
+
+	appendSection("Hints", []string{"Ctrl+B toggle sidebar", "/sidebar toggle sidebar", "Ctrl+P command palette", "Ctrl+X leader actions"}, nil)
+	return data
+}
+
+func (m model) renderSidebar() string {
+	data := m.buildSidebarRenderData()
+	sections := strings.Join(data.lines, "\n")
+	return borderStyle.Width(sidebarColumnWidth).Render(sections)
+}
+
+func (m model) sidebarFileForClick(msg tea.MouseMsg) (string, bool) {
+	if !m.sidebarEnabled() || msg.Type != tea.MouseLeft {
+		return "", false
+	}
+	if msg.X < m.panelWidth() {
+		return "", false
+	}
+
+	data := m.buildSidebarRenderData()
+	for line, path := range data.fileLines {
+		if msg.Y == line {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+func shortenSidebarPath(path string, max int) string {
+	if len(path) <= max {
+		return path
+	}
+	if max <= 3 {
+		return path[:max]
+	}
+	return path[:max-3] + "..."
+}
+
+func (m model) renderMCPStatus() string {
+	enabled := 0
+	if m.config != nil {
+		for _, cfg := range m.config.MCP {
+			if cfg.Enabled {
+				enabled++
+			}
+		}
+	}
+
+	if enabled == 0 {
+		return "disabled"
+	}
+
+	loaded := 0
+	if m.agent != nil {
+		loaded = m.agent.MCPToolCount()
+	}
+
+	if loaded > 0 {
+		return fmt.Sprintf("%d configured, %d loaded", enabled, loaded)
+	}
+	return fmt.Sprintf("%d configured", enabled)
+}
+
+func (m model) renderLSPStatus() string {
+	if m.agent == nil {
+		return "unavailable"
+	}
+
+	for _, tool := range m.agent.GetTools() {
+		if tool.Name() == "lsp" {
+			return "available"
+		}
+	}
+
+	return "unavailable"
 }

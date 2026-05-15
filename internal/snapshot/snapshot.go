@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 )
@@ -51,6 +52,30 @@ func Backup(path string) error {
 	return nil
 }
 
+func ChangedFiles() []string {
+	mu.Lock()
+	defer mu.Unlock()
+
+	seen := make(map[string]struct{})
+	files := make([]string, 0, len(snapshots))
+	for _, s := range snapshots {
+		if _, ok := seen[s.OriginalPath]; ok {
+			continue
+		}
+		seen[s.OriginalPath] = struct{}{}
+		files = append(files, s.OriginalPath)
+	}
+	sort.Strings(files)
+	return files
+}
+
+func Reset() {
+	mu.Lock()
+	snapshots = nil
+	redoStack = nil
+	mu.Unlock()
+}
+
 func Undo() (string, error) {
 	mu.Lock()
 	if len(snapshots) == 0 {
@@ -61,8 +86,11 @@ func Undo() (string, error) {
 	snapshots = snapshots[:len(snapshots)-1]
 	mu.Unlock()
 
-	currentData, _ := os.ReadFile(last.OriginalPath)
 	redoBackupPath := last.BackupPath + ".redo"
+	currentData, err := os.ReadFile(last.OriginalPath)
+	if err != nil && !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to read current file for redo backup %s: %w", last.OriginalPath, err)
+	}
 	if err := os.WriteFile(redoBackupPath, currentData, 0644); err != nil {
 		return "", fmt.Errorf("failed to save redo backup for %s: %w", last.OriginalPath, err)
 	}

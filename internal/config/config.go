@@ -41,6 +41,7 @@ type Config struct {
 	MCP          map[string]MCPConfig   `json:"mcp"`
 	TUI          TUIConfig              `json:"tui"`
 	Watcher      WatcherConfig          `json:"watcher"`
+	Ocode        *OcodeConfig           `json:"-"`
 }
 
 func Load() (*Config, error) {
@@ -80,6 +81,11 @@ func Load() (*Config, error) {
 	// 4. TUI config files
 	loadTUIConfig(config)
 
+	// 5. Ocode sidecar config
+	if err := LoadOcodeConfig(config); err != nil {
+		return nil, fmt.Errorf("failed to load ocode config: %w", err)
+	}
+
 	return config, nil
 }
 
@@ -113,16 +119,36 @@ func mergeTUI(path string, config *Config) {
 		LeaderTimeout int               `json:"leader_timeout"`
 	}
 	if err := json.Unmarshal(cleanData, &temp); err == nil {
-		if temp.Theme != "" { config.TUI.Theme = temp.Theme }
-		if temp.TUI.Theme != "" { config.TUI.Theme = temp.TUI.Theme }
-		if temp.Mouse != nil { config.TUI.Mouse = temp.Mouse }
-		if temp.TUI.Mouse != nil { config.TUI.Mouse = temp.TUI.Mouse }
-		if temp.Scroll != 0 { config.TUI.Scroll = temp.Scroll }
-		if temp.TUI.Scroll != 0 { config.TUI.Scroll = temp.TUI.Scroll }
-		if temp.LeaderTimeout != 0 { config.TUI.LeaderTimeout = temp.LeaderTimeout }
-		if temp.TUI.LeaderTimeout != 0 { config.TUI.LeaderTimeout = temp.TUI.LeaderTimeout }
-		if config.TUI.Keybinds == nil { config.TUI.Keybinds = make(map[string]string) }
-		for k, v := range temp.TUI.Keybinds { config.TUI.Keybinds[k] = v }
+		if temp.Theme != "" {
+			config.TUI.Theme = temp.Theme
+		}
+		if temp.TUI.Theme != "" {
+			config.TUI.Theme = temp.TUI.Theme
+		}
+		if temp.Mouse != nil {
+			config.TUI.Mouse = temp.Mouse
+		}
+		if temp.TUI.Mouse != nil {
+			config.TUI.Mouse = temp.TUI.Mouse
+		}
+		if temp.Scroll != 0 {
+			config.TUI.Scroll = temp.Scroll
+		}
+		if temp.TUI.Scroll != 0 {
+			config.TUI.Scroll = temp.TUI.Scroll
+		}
+		if temp.LeaderTimeout != 0 {
+			config.TUI.LeaderTimeout = temp.LeaderTimeout
+		}
+		if temp.TUI.LeaderTimeout != 0 {
+			config.TUI.LeaderTimeout = temp.TUI.LeaderTimeout
+		}
+		if config.TUI.Keybinds == nil {
+			config.TUI.Keybinds = make(map[string]string)
+		}
+		for k, v := range temp.TUI.Keybinds {
+			config.TUI.Keybinds[k] = v
+		}
 	}
 }
 
@@ -138,6 +164,14 @@ func getGlobalConfigPath() (string, error) {
 }
 
 func getProjectConfigPath() (string, error) {
+	dir, err := findProjectConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "opencode.json"), nil
+}
+
+func findProjectConfigDir() (string, error) {
 	curr, err := os.Getwd()
 	if err != nil {
 		return "", err
@@ -146,17 +180,14 @@ func getProjectConfigPath() (string, error) {
 	for {
 		path := filepath.Join(curr, "opencode.json")
 		if _, err := os.Stat(path); err == nil {
-			return path, nil
+			return curr, nil
 		}
-
-		// Also check .jsonc if needed, but for now stick to .json
 
 		parent := filepath.Dir(curr)
 		if parent == curr {
 			break
 		}
 
-		// Stop at git root
 		if _, err := os.Stat(filepath.Join(curr, ".git")); err == nil {
 			break
 		}
