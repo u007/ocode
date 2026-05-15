@@ -73,6 +73,7 @@ func loadStoreLocked() error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			mergeOpencodeCredentials(cache)
 			return nil
 		}
 		return fmt.Errorf("read %s: %w", path, err)
@@ -84,7 +85,71 @@ func loadStoreLocked() error {
 	if cache.Credentials == nil {
 		cache.Credentials = map[string]Credential{}
 	}
+	mergeOpencodeCredentials(cache)
 	return nil
+}
+
+// opencodeAuthPath returns the path to opencode's auth.json (XDG data dir).
+func opencodeAuthPath() string {
+	if runtime.GOOS == "windows" {
+		if appdata := os.Getenv("APPDATA"); appdata != "" {
+			return filepath.Join(appdata, "opencode", "auth.json")
+		}
+		return ""
+	}
+	home, _ := os.UserHomeDir()
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "opencode", "auth.json")
+	}
+	return filepath.Join(home, ".local", "share", "opencode", "auth.json")
+}
+
+// mergeOpencodeCredentials reads opencode's auth.json and fills in any providers
+// not already present in dst (ocode credentials take precedence).
+func mergeOpencodeCredentials(dst *authFile) {
+	path := opencodeAuthPath()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // opencode not installed or no credentials — silently skip
+	}
+	// opencode format: { "providerID": {"type":"api","key":"..."} | {"type":"oauth","access_token":"..."} }
+	var raw map[string]struct {
+		Type         string `json:"type"`
+		Key          string `json:"key"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresAt    int64  `json:"expires_at"`
+		Account      string `json:"account"`
+		BaseURL      string `json:"baseURL"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return
+	}
+	for id, oc := range raw {
+		if _, exists := dst.Credentials[id]; exists {
+			continue // ocode credential wins
+		}
+		switch oc.Type {
+		case "api":
+			if oc.Key != "" {
+				dst.Credentials[id] = Credential{Kind: KindAPIKey, Key: oc.Key, BaseURL: oc.BaseURL}
+			}
+		case "oauth":
+			if oc.AccessToken != "" {
+				dst.Credentials[id] = Credential{
+					Kind:         KindOAuth,
+					AccessToken:  oc.AccessToken,
+					RefreshToken: oc.RefreshToken,
+					ExpiresAt:    oc.ExpiresAt,
+					Account:      oc.Account,
+					BaseURL:      oc.BaseURL,
+				}
+			}
+		}
+	}
 }
 
 func ensureLoadedLocked() error {

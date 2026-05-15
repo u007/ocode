@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 )
 
 func TestLookupCommandResolvesAliases(t *testing.T) {
@@ -48,10 +48,10 @@ func TestSlashAutocompleteResolvesCommand(t *testing.T) {
 }
 
 func TestTabAutocompleteRunsInUpdatePath(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(80, 20)}
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
 	m.input.SetValue("/m")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	got := updated.(model)
 	if got.input.Value() != "/model" {
 		t.Fatalf("expected tab to complete /m to /model, got %q", got.input.Value())
@@ -63,10 +63,10 @@ func TestTabAutocompleteRunsInUpdatePath(t *testing.T) {
 }
 
 func TestTabOnModelOpensPicker(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(80, 20)}
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
 	m.input.SetValue("/model ")
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	got := updated.(model)
 	if !got.showPicker {
 		t.Fatal("expected tab on /model to open picker")
@@ -74,7 +74,7 @@ func TestTabOnModelOpensPicker(t *testing.T) {
 }
 
 func TestSidebarCommandTogglesStateWithoutMessage(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(80, 20)}
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
 
 	updated, cmd := m.handleCommand("/sidebar")
 	if cmd != nil {

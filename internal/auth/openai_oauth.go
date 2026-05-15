@@ -18,7 +18,7 @@ const (
 	openaiAuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	openaiTokenURL     = "https://auth.openai.com/oauth/token"
 	openaiRedirectURI  = "http://localhost:1455/auth/callback"
-	openaiScope        = "openid profile email offline_access"
+	openaiScope        = "openid profile email offline_access api.connectors.read api.connectors.invoke"
 	openaiLoopbackPort = 1455
 )
 

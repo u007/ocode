@@ -13,6 +13,10 @@ import (
 func TestCredential(ctx context.Context, id string) error {
 	switch id {
 	case "openai":
+		if _, ok := OAuthAccessToken(id); ok {
+			// ChatGPT OAuth tokens lack api.model.read scope; skip the models probe.
+			return nil
+		}
 		return probeBearer(ctx, "https://api.openai.com/v1/models", ResolveKey(id))
 	case "anthropic":
 		if tok, ok := OAuthAccessToken(id); ok {

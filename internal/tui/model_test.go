@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
@@ -40,15 +40,15 @@ func TestInitialToolsIncludesList(t *testing.T) {
 }
 
 func TestSidebarToggleWithCtrlB(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(80, 20)}
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 	got := updated.(model)
 	if !got.showSidebar {
 		t.Fatal("expected Ctrl+B to toggle sidebar on")
 	}
 
-	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyCtrlB})
+	updated, _ = got.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 	got = updated.(model)
 	if got.showSidebar {
 		t.Fatal("expected Ctrl+B to toggle sidebar off")
@@ -64,7 +64,7 @@ func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
 		showSidebar: true,
 		sessionID:   "session-123",
 		input:       textarea.New(),
-		viewport:    viewport.New(100, 20),
+		viewport:    viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
 		config:      &config.Config{Model: "gpt-4o"},
 		messages: []message{{
 			role: roleAssistant,
@@ -77,7 +77,7 @@ func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
 		}},
 	}
 
-	view := m.View()
+	view := m.View().Content
 	for _, want := range []string{"Session", "session-123", "Model", "gpt-4o", "Context", "Spend", "MCP", "LSP", "TODO", "Ctrl+B"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected wide view to include %q, got %q", want, view)
@@ -92,10 +92,10 @@ func TestSidebarViewHidesOnNarrowTerminals(t *testing.T) {
 		height:      30,
 		showSidebar: true,
 		input:       textarea.New(),
-		viewport:    viewport.New(76, 20),
+		viewport:    viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
 	}
 
-	view := m.View()
+	view := m.View().Content
 	if strings.Contains(view, "No live session todo state yet.") || strings.Contains(view, "Ctrl+B toggle sidebar") {
 		t.Fatalf("expected narrow view to hide sidebar, got %q", view)
 	}
@@ -129,10 +129,10 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 		height:      40,
 		showSidebar: true,
 		input:       textarea.New(),
-		viewport:    viewport.New(100, 20),
+		viewport:    viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
 	}
 
-	view := m.View()
+	view := m.View().Content
 	for _, want := range []string{"Files", "changed.go", "TODO", "- [ ] ship task 4"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected sidebar to include %q, got %q", want, view)
@@ -167,8 +167,8 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 		return func() tea.Msg { return nil }
 	}
 
-	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(100, 20)}
-	updated, cmd := m.Update(tea.MouseMsg{Type: tea.MouseLeft, X: 120, Y: 20})
+	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
+	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 23})
 	_ = updated
 	if cmd == nil {
 		t.Fatal("expected sidebar file click to return editor command")

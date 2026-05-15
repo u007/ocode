@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
 )
@@ -37,6 +37,7 @@ var commandSpecs = []commandSpec{
 	{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
 	{name: "/editor", help: "Reopen the external editor", handler: runEditorCmd},
 	{name: "/sidebar", help: "Toggle sidebar placeholder", handler: runSidebarCmd},
+	{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 	{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 }
 
@@ -239,6 +240,22 @@ func runEditorCmd(m *model, args []string) tea.Cmd {
 func runSidebarCmd(m *model, args []string) tea.Cmd {
 	m.toggleSidebar()
 	return nil
+}
+
+func runMCPAuthCmd(m *model, args []string) tea.Cmd {
+	if len(args) < 2 {
+		return func() tea.Msg {
+			return statusMsg{text: "Usage: /mcp-auth <server-name>"}
+		}
+	}
+	serverName := args[1]
+	return func() tea.Msg {
+		err := m.handleMCPAuth(serverName)
+		if err != nil {
+			return statusMsg{text: fmt.Sprintf("MCP auth failed: %s", err.Error())}
+		}
+		return statusMsg{text: fmt.Sprintf("MCP authentication successful for %s", serverName)}
+	}
 }
 
 func runExitCmd(m *model, args []string) tea.Cmd {
