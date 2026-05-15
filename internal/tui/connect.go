@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/auth"
@@ -203,30 +203,32 @@ func (m model) renderConnect() string {
 }
 
 // updateConnectDialog handles key events while the connect dialog is open.
-func (m model) updateConnectDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	d := m.connect
 	if d == nil {
 		m.showConnect = false
 		return m, nil
 	}
 
+	keyStr := msg.String()
+
 	switch d.stage {
 	case connectStageProvider:
-		switch msg.Type {
-		case tea.KeyEsc:
+		switch keyStr {
+		case "esc":
 			m.closeConnectDialog()
 			return m, nil
-		case tea.KeyUp:
+		case "up":
 			if d.providerIdx > 0 {
 				d.providerIdx--
 			}
 			return m, nil
-		case tea.KeyDown:
+		case "down":
 			if d.providerIdx < len(auth.Providers)-1 {
 				d.providerIdx++
 			}
 			return m, nil
-		case tea.KeyEnter:
+		case "enter":
 			d.provider = &auth.Providers[d.providerIdx]
 			d.methods = m.buildMethods()
 			d.methodIdx = 0
@@ -236,31 +238,31 @@ func (m model) updateConnectDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connectStageMethod:
-		switch msg.Type {
-		case tea.KeyEsc:
+		switch keyStr {
+		case "esc":
 			d.stage = connectStageProvider
 			return m, nil
-		case tea.KeyUp:
+		case "up":
 			if d.methodIdx > 0 {
 				d.methodIdx--
 			}
 			return m, nil
-		case tea.KeyDown:
+		case "down":
 			if d.methodIdx < len(d.methods)-1 {
 				d.methodIdx++
 			}
 			return m, nil
-		case tea.KeyEnter:
+		case "enter":
 			return m.applyConnectMethod()
 		}
 		return m, nil
 
 	case connectStageKeyInput:
-		switch msg.Type {
-		case tea.KeyEsc:
+		switch keyStr {
+		case "esc":
 			d.stage = connectStageMethod
 			return m, nil
-		case tea.KeyEnter:
+		case "enter":
 			key := strings.TrimSpace(d.keyInput.Value())
 			if key == "" {
 				d.message = "API key cannot be empty."
@@ -288,11 +290,11 @@ func (m model) updateConnectDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case connectStagePasteCode:
-		switch msg.Type {
-		case tea.KeyEsc:
+		switch keyStr {
+		case "esc":
 			d.stage = connectStageMethod
 			return m, nil
-		case tea.KeyEnter:
+		case "enter":
 			input := strings.TrimSpace(d.codeInput.Value())
 			code, state, ok := auth.ParseAnthropicCallback(input)
 			if !ok {
@@ -314,7 +316,7 @@ func (m model) updateConnectDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case connectStageWaitBrowser, connectStageDeviceCode:
-		if msg.Type == tea.KeyEsc {
+		if keyStr == "esc" {
 			if d.cancelFlow != nil {
 				d.cancelFlow()
 			}
@@ -324,7 +326,7 @@ func (m model) updateConnectDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case connectStageMessage:
-		if msg.Type == tea.KeyEnter || msg.Type == tea.KeyEsc {
+		if keyStr == "enter" || keyStr == "esc" {
 			m.closeConnectDialog()
 		}
 		return m, nil

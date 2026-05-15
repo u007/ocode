@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -146,7 +147,7 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 
 func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interface{}) (*Message, error) {
 	if c.UseOAuth && c.Provider == "openai" {
-		return nil, fmt.Errorf("openai ChatGPT OAuth requires the Codex Responses API endpoint (not yet implemented). Use an API key for now, or use Copilot for an OAuth-backed alternative.")
+		return c.chatOpenAIResponses(messages, tools)
 	}
 	url := c.BaseURL + "/chat/completions"
 	payload := map[string]interface{}{
@@ -210,6 +211,133 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		return msg, nil
 	}
 	return nil, fmt.Errorf("no response from %s", c.Provider)
+}
+
+// chatOpenAIResponses calls the OpenAI Responses API using a ChatGPT OAuth token.
+// The token must have api.connectors.invoke scope (obtained via the login flow).
+// The chatgpt_account_id claim is extracted from the JWT and sent as ChatGPT-Account-ID.
+func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	accountID := jwtClaim(c.APIKey, "https://api.openai.com/auth", "chatgpt_account_id")
+
+	// Map messages → Responses API input items.
+	input := make([]map[string]interface{}, 0, len(messages))
+	for _, m := range messages {
+		item := map[string]interface{}{"role": m.Role, "content": m.Content}
+		input = append(input, item)
+	}
+
+	payload := map[string]interface{}{
+		"model": c.Model,
+		"input": input,
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	url := "https://api.openai.com/v1/responses"
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if accountID != "" {
+		req.Header.Set("ChatGPT-Account-ID", accountID)
+	}
+
+	resp, err := llmHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("openai responses error (%d): %s", resp.StatusCode, string(body))
+	}
+
+	var result struct {
+		Model  string `json:"model"`
+		Output []struct {
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Content []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	// Find the first message-type output item.
+	for _, out := range result.Output {
+		if out.Type != "message" {
+			continue
+		}
+		var text string
+		for _, c := range out.Content {
+			if c.Type == "output_text" {
+				text += c.Text
+			}
+		}
+		msg := &Message{
+			Role:    out.Role,
+			Content: text,
+			Model:   result.Model,
+		}
+		if msg.Model == "" {
+			msg.Model = c.Model
+		}
+		usage, err := usageForProvider(c.Provider, result.Usage)
+		if err != nil {
+			return nil, err
+		}
+		msg.Usage = usage
+		if usage != nil {
+			msg.Spend = usage.Spend(msg.Model)
+		}
+		return msg, nil
+	}
+	return nil, fmt.Errorf("no response from openai responses api")
+}
+
+// jwtClaim extracts a nested string field from a JWT payload without verifying the signature.
+// path is a chain of keys: jwtClaim(token, "https://api.openai.com/auth", "chatgpt_account_id")
+func jwtClaim(token string, keys ...string) string {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	padded := parts[1]
+	switch len(padded) % 4 {
+	case 2:
+		padded += "=="
+	case 3:
+		padded += "="
+	}
+	data, err := base64.URLEncoding.DecodeString(padded)
+	if err != nil {
+		return ""
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return ""
+	}
+	var cur interface{} = payload
+	for _, k := range keys {
+		m, ok := cur.(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		cur = m[k]
+	}
+	s, _ := cur.(string)
+	return s
 }
 
 func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]interface{}) (*Message, error) {
@@ -393,6 +521,8 @@ var providers = map[string]providerInfo{
 	"moonshot":       {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
 	"minimax":        {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
 	"requesty":       {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
+	"deepinfra":      {"DEEPINFRA_API_KEY", "https://api.deepinfra.com/v1/openai"},
+	"nvidia":         {"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"},
 	"302ai":          {"302AI_API_KEY", "https://api.302.ai/v1"},
 	"deepseek":       {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
 	"groq":           {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},

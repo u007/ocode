@@ -3,6 +3,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/r3labs/sse/v2"
 )
@@ -39,15 +42,20 @@ func (t MCPTool) Execute(args json.RawMessage) (string, error) {
 type MCPClient struct {
 	name    string
 	isLocal bool
+	timeout time.Duration
 	// Local
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
 	stdout io.ReadCloser
 	reader *bufio.Scanner
 	// Remote
-	url     string
-	headers map[string]string
-	sse     *sse.Client
+	url       string
+	headers   map[string]string
+	sse       *sse.Client
+	httpCli   *http.Client
+	oauthCfg  *config.MCPOAuthConfig
+	token     *auth.MCPAuthToken
+	tokenMu   sync.RWMutex
 
 	mu sync.Mutex
 	id int
@@ -58,23 +66,50 @@ func NewRemoteClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 		return nil, fmt.Errorf("no URL specified for remote MCP server %s", name)
 	}
 
+	timeout := time.Duration(cfg.Timeout) * time.Millisecond
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+
 	client := sse.NewClient(cfg.URL)
 	for k, v := range cfg.Headers {
 		client.Headers[k] = v
 	}
 
-	return &MCPClient{
-		name:    name,
-		isLocal: false,
-		url:     cfg.URL,
-		headers: cfg.Headers,
-		sse:     client,
-	}, nil
+	httpCli := &http.Client{Timeout: timeout}
+
+	mc := &MCPClient{
+		name:     name,
+		isLocal:  false,
+		url:      cfg.URL,
+		headers:  cfg.Headers,
+		sse:      client,
+		timeout:  timeout,
+		httpCli:  httpCli,
+		oauthCfg: cfg.OAuth,
+	}
+
+	if mc.needsOAuth() {
+		token, err := mc.loadOrRefreshToken()
+		if err != nil {
+			return nil, err
+		}
+		if token != nil {
+			mc.token = token
+		}
+	}
+
+	return mc, nil
 }
 
 func NewLocalClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 	if len(cfg.Command) == 0 {
 		return nil, fmt.Errorf("no command specified for MCP server %s", name)
+	}
+
+	timeout := time.Duration(cfg.Timeout) * time.Millisecond
+	if timeout == 0 {
+		timeout = 5 * time.Second
 	}
 
 	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
@@ -98,6 +133,7 @@ func NewLocalClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 		stdin:   stdin,
 		stdout:  stdout,
 		reader:  bufio.NewScanner(stdout),
+		timeout: timeout,
 	}, nil
 }
 
@@ -108,15 +144,80 @@ func (c *MCPClient) request(method string, params interface{}) (json.RawMessage,
 	return c.requestRemote(method, params)
 }
 
+func (c *MCPClient) needsOAuth() bool {
+	if c.oauthCfg == nil {
+		return false
+	}
+	if c.oauthCfg.Enabled != nil {
+		return *c.oauthCfg.Enabled
+	}
+	return c.oauthCfg.AuthorizationURL != "" && c.oauthCfg.TokenURL != "" && c.oauthCfg.ClientID != ""
+}
+
+func (c *MCPClient) loadOrRefreshToken() (*auth.MCPAuthToken, error) {
+	token, ok := auth.GetMCPAuth(c.name)
+	if !ok {
+		return nil, nil
+	}
+	if token.IsExpired() {
+		if c.oauthCfg.TokenURL == "" || c.oauthCfg.ClientID == "" {
+			return nil, fmt.Errorf("mcp server %s token expired and no refresh config available", c.name)
+		}
+		refreshed, err := auth.RefreshMCPAuthToken(c.name, c.oauthCfg.TokenURL, c.oauthCfg.ClientID, token)
+		if err != nil {
+			return nil, fmt.Errorf("refresh mcp token for %s: %w", c.name, err)
+		}
+		return &refreshed, nil
+	}
+	return &token, nil
+}
+
+func (c *MCPClient) ensureValidToken() error {
+	if !c.needsOAuth() {
+		return nil
+	}
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	if c.token == nil {
+		token, err := c.loadOrRefreshToken()
+		if err != nil {
+			return err
+		}
+		c.token = token
+	}
+	if c.token != nil && c.token.IsExpired() {
+		if c.oauthCfg.TokenURL == "" || c.oauthCfg.ClientID == "" {
+			return fmt.Errorf("mcp server %s token expired and no refresh config available", c.name)
+		}
+		refreshed, err := auth.RefreshMCPAuthToken(c.name, c.oauthCfg.TokenURL, c.oauthCfg.ClientID, *c.token)
+		if err != nil {
+			return fmt.Errorf("refresh mcp token for %s: %w", c.name, err)
+		}
+		c.token = &refreshed
+	}
+	if c.token == nil {
+		return fmt.Errorf("mcp server %s requires authentication: run /mcp-auth %s", c.name, c.name)
+	}
+	return nil
+}
+
+func (c *MCPClient) AuthHeader() string {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	if c.token == nil {
+		return ""
+	}
+	return c.token.AuthorizationHeader()
+}
+
 func (c *MCPClient) requestRemote(method string, params interface{}) (json.RawMessage, error) {
+	if err := c.ensureValidToken(); err != nil {
+		return nil, err
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.id++
-
-	// For remote MCP, we typically use POST for requests and SSE for notifications/responses if streaming.
-	// However, standard tool calling is usually a single POST.
-	// If it's a true SSE MCP, we'd subscribe here.
-	// For simplicity, let's stick to the POST-based request/response which most remote MCPs support.
 
 	reqBody := map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -139,8 +240,11 @@ func (c *MCPClient) requestRemote(method string, params interface{}) (json.RawMe
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
+	if authHdr := c.AuthHeader(); authHdr != "" {
+		req.Header.Set("Authorization", authHdr)
+	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.httpCli.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -184,8 +288,28 @@ func (c *MCPClient) requestLocal(method string, params interface{}) (json.RawMes
 
 	fmt.Fprintln(c.stdin, string(data))
 
-	if !c.reader.Scan() {
-		return nil, fmt.Errorf("failed to read response from MCP server %s", c.name)
+	type scanResult struct {
+		ok  bool
+		err error
+	}
+	done := make(chan scanResult, 1)
+	go func() {
+		done <- scanResult{ok: c.reader.Scan(), err: c.reader.Err()}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("MCP server %s timed out after %s", c.name, c.timeout)
+	case res := <-done:
+		if !res.ok {
+			if res.err != nil {
+				return nil, fmt.Errorf("failed to read response from MCP server %s: %w", c.name, res.err)
+			}
+			return nil, fmt.Errorf("failed to read response from MCP server %s", c.name)
+		}
 	}
 
 	var resp struct {

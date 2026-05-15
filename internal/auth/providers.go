@@ -3,6 +3,8 @@ package auth
 import (
 	"os"
 	"time"
+
+	"github.com/jamesmercstudio/ocode/internal/config"
 )
 
 // refreshIfExpiring returns a fresh credential if the stored OAuth token is
@@ -62,6 +64,10 @@ var Providers = []Provider{
 	{ID: "alibaba", Label: "Alibaba (DashScope)", EnvVar: "DASHSCOPE_API_KEY"},
 	{ID: "alibaba-coding", Label: "Alibaba Coding", EnvVar: "DASHSCOPE_CODING_API_KEY"},
 	{ID: "chutes", Label: "Chutes", EnvVar: "CHUTES_API_KEY"},
+	{ID: "deepseek", Label: "DeepSeek", EnvVar: "DEEPSEEK_API_KEY"},
+	{ID: "requesty", Label: "Requesty", EnvVar: "REQUESTY_API_KEY"},
+	{ID: "deepinfra", Label: "DeepInfra", EnvVar: "DEEPINFRA_API_KEY"},
+	{ID: "nvidia", Label: "NVIDIA NIM", EnvVar: "NVIDIA_API_KEY"},
 }
 
 // GetBaseURL returns the per-credential base URL override, or "" if none.
@@ -98,7 +104,7 @@ func FindProvider(id string) *Provider {
 }
 
 // ResolveKey returns the effective API key for a provider.
-// Precedence: env var > stored credential > "".
+// Precedence: env var > stored credential > opencode config options.apiKey > "".
 func ResolveKey(id string) string {
 	p := FindProvider(id)
 	if p == nil {
@@ -110,22 +116,45 @@ func ResolveKey(id string) string {
 		}
 	}
 	cred, ok := Get(id)
+	if ok {
+		cred = refreshIfExpiring(id, cred)
+		if cred.Kind == KindAPIKey && cred.Key != "" {
+			return cred.Key
+		}
+	}
+	cfg, _ := config.Load()
+	return providerConfigAPIKey(cfg, id)
+}
+
+// providerConfigAPIKey extracts provider.<id>.options.apiKey from the opencode config.
+func providerConfigAPIKey(cfg *config.Config, id string) string {
+	if cfg == nil {
+		return ""
+	}
+	raw, ok := cfg.Provider[id]
 	if !ok {
 		return ""
 	}
-	cred = refreshIfExpiring(id, cred)
-	if cred.Kind == KindAPIKey {
-		return cred.Key
+	m, ok := raw.(map[string]interface{})
+	if !ok {
+		return ""
 	}
-	return ""
+	opts, ok := m["options"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	key, _ := opts["apiKey"].(string)
+	return key
 }
 
 // HydrateEnv loads stored credentials into the process env so existing
 // callers that read os.Getenv keep working. Env vars already set win.
+// Precedence: existing env > auth store > opencode config options.apiKey.
 func HydrateEnv() error {
 	if err := LoadStore(); err != nil {
 		return err
 	}
+	cfg, _ := config.Load()
 	for _, p := range Providers {
 		if p.EnvVar == "" {
 			continue
@@ -134,15 +163,16 @@ func HydrateEnv() error {
 			continue
 		}
 		cred, ok := Get(p.ID)
-		if !ok {
-			continue
-		}
-		cred = refreshIfExpiring(p.ID, cred)
-		switch cred.Kind {
-		case KindAPIKey:
-			if cred.Key != "" {
+		if ok {
+			cred = refreshIfExpiring(p.ID, cred)
+			if cred.Kind == KindAPIKey && cred.Key != "" {
 				_ = os.Setenv(p.EnvVar, cred.Key)
+				continue
 			}
+		}
+		// Fall back to opencode config provider options.apiKey
+		if key := providerConfigAPIKey(cfg, p.ID); key != "" {
+			_ = os.Setenv(p.EnvVar, key)
 		}
 	}
 	return nil

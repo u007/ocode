@@ -18,10 +18,11 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 
-	"github.com/charmbracelet/bubbles/textarea"
-	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 type role int
@@ -68,6 +69,10 @@ type leaderTimeoutMsg struct {
 	seq int
 }
 
+type statusMsg struct {
+	text string
+}
+
 type model struct {
 	viewport         viewport.Model
 	input            textarea.Model
@@ -95,6 +100,7 @@ type model struct {
 	ready            bool
 	err              error
 	scrollSpeed      int
+	workDir          string
 }
 
 type agentResponseMsg string
@@ -119,25 +125,7 @@ func (m *model) applyTheme() {
 	if m.config == nil || m.config.TUI.Theme == "" {
 		return
 	}
-
-	switch m.config.TUI.Theme {
-	case "tokyonight":
-		userStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#7aa2f7")).Bold(true)
-		assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#bb9af7")).Bold(true)
-		borderStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#3b4261")).
-			Padding(0, 1)
-		hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89")).Italic(true)
-	case "opencode":
-		userStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ff00")).Bold(true)
-		assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#00ffff")).Bold(true)
-		borderStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("#444444")).
-			Padding(0, 1)
-		hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888")).Italic(true)
-	}
+	ApplyThemeColors(m.config.TUI.Theme)
 }
 
 func (m *model) toggleSidebar() {
@@ -216,15 +204,18 @@ func newModel(sid string, cont bool) model {
 	}
 
 	ta := textarea.New()
-	ta.Placeholder = "Ask anything…  (enter to send, ctrl+c to quit)"
+	ta.Placeholder = "Ask anything…  (enter to send, shift+enter for newline, ctrl+c to quit)"
 	ta.Focus()
 	ta.Prompt = "▍ "
 	ta.CharLimit = 8000
 	ta.SetHeight(3)
 	ta.ShowLineNumbers = false
-	ta.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	styles := ta.Styles()
+	styles.Focused.CursorLine = lipgloss.NewStyle()
+	ta.SetStyles(styles)
+	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "insert newline"))
 
-	vp := viewport.New(80, 20)
+	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	vp.SetContent(hintStyle.Render("  ocode — opencode clone · type a message to begin\n"))
 
 	if sid == "" {
@@ -242,6 +233,7 @@ func newModel(sid string, cont bool) model {
 		agent:        a,
 		sessionID:    sid,
 		showThinking: true,
+		showSidebar:  true,
 		activeModel: func() string {
 			if cfg != nil {
 				return cfg.Model
@@ -249,6 +241,10 @@ func newModel(sid string, cont bool) model {
 			return ""
 		}(),
 		scrollSpeed: 3,
+		workDir:     func() string {
+			d, _ := os.Getwd()
+			return d
+		}(),
 	}
 
 	if cfg != nil && cfg.TUI.Scroll != 0 {
@@ -287,18 +283,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
-	case tea.MouseMsg:
-		if msg.Type == tea.MouseLeft {
+	case tea.MouseClickMsg:
+		if msg.Button == tea.MouseLeft {
 			if path, ok := m.sidebarFileForClick(msg); ok {
 				return m, openSidebarFileInEditor(path)
 			}
 		}
-		if msg.Type == tea.MouseWheelUp {
-			m.viewport.LineUp(m.scrollSpeed)
+	case tea.MouseWheelMsg:
+		if msg.Button == tea.MouseWheelUp {
+			m.viewport.ScrollUp(m.scrollSpeed)
 			return m, nil
 		}
-		if msg.Type == tea.MouseWheelDown {
-			m.viewport.LineDown(m.scrollSpeed)
+		if msg.Button == tea.MouseWheelDown {
+			m.viewport.ScrollDown(m.scrollSpeed)
 			return m, nil
 		}
 	}
@@ -312,23 +309,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.layout()
 		m.ready = true
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
+		keyStr := msg.String()
 		if m.showPicker {
-			switch msg.Type {
-			case tea.KeyEsc:
+			switch keyStr {
+			case "esc":
 				m.closePicker()
 				return m, nil
-			case tea.KeyUp:
+			case "up":
 				if m.pickerIndex > 0 {
 					m.pickerIndex--
 				}
 				return m, nil
-			case tea.KeyDown:
+			case "down":
 				if m.pickerIndex < len(m.pickerVisibleItems())-1 {
 					m.pickerIndex++
 				}
 				return m, nil
-			case tea.KeyEnter:
+			case "enter":
 				items := m.pickerVisibleItems()
 				if len(items) > 0 && m.pickerIndex < len(items) {
 					selected := items[m.pickerIndex]
@@ -338,14 +336,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.closePicker()
 				return m, nil
-			case tea.KeyBackspace:
+			case "backspace":
 				if len(m.pickerFilter) > 0 {
 					m.pickerFilter = m.pickerFilter[:len(m.pickerFilter)-1]
 					m.pickerIndex = 0
 				}
 				return m, nil
-			case tea.KeyRunes, tea.KeySpace:
-				m.pickerFilter += msg.String()
+			}
+			if len(msg.Text) > 0 {
+				m.pickerFilter += msg.Text
 				m.pickerIndex = 0
 				return m, nil
 			}
@@ -357,28 +356,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if m.showPalette {
-			if msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlP {
+			if keyStr == "esc" || keyStr == "ctrl+p" {
 				m.showPalette = false
 				return m, nil
 			}
-			if msg.Type == tea.KeyEnter {
+			if keyStr == "enter" {
 				m.showPalette = false
 				return m.handleCommand(m.paletteInput)
 			}
-			if msg.Type == tea.KeyBackspace {
+			if keyStr == "backspace" {
 				if len(m.paletteInput) > 0 {
 					m.paletteInput = m.paletteInput[:len(m.paletteInput)-1]
 				}
 				return m, nil
 			}
-			m.paletteInput += msg.String()
+			if len(msg.Text) > 0 {
+				m.paletteInput += msg.Text
+			}
 			return m, nil
 		}
 
 		if m.leaderActive {
 			m.leaderActive = false
 
-			key := msg.String()
+			key := keyStr
 			if m.config != nil {
 				if cmd, ok := m.config.TUI.Keybinds[key]; ok {
 					return m.handleCommand(cmd)
@@ -402,15 +403,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		switch msg.Type {
-		case tea.KeyCtrlP:
+		switch keyStr {
+		case "ctrl+p":
 			m.showPalette = !m.showPalette
 			m.paletteInput = ""
 			return m, nil
-		case tea.KeyCtrlB:
+		case "ctrl+b":
 			m.toggleSidebar()
 			return m, nil
-		case tea.KeyCtrlX:
+		case "ctrl+x":
 			m.leaderActive = true
 			m.leaderSeq++
 			timeout := 2000
@@ -421,12 +422,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(time.Duration(timeout)*time.Millisecond, func(time.Time) tea.Msg {
 				return leaderTimeoutMsg{seq: seq}
 			})
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case "ctrl+c", "esc":
 			return m, tea.Quit
-		case tea.KeyShiftTab:
+		case "shift+tab":
 			m.cycleAgentMode()
 			return m, nil
-		case tea.KeyTab:
+		case "tab":
 			current := m.input.Value()
 			if !strings.HasPrefix(current, "/") {
 				return m, nil
@@ -450,7 +451,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.input.SetValue(suggestions[0])
 			return m, nil
-		case tea.KeyEnter:
+		case "enter":
 			text := strings.TrimSpace(m.input.Value())
 			if text == "" {
 				return m, tea.Batch(tiCmd, vpCmd)
@@ -544,6 +545,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.renderTranscript()
+	case statusMsg:
+		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
+		m.renderTranscript()
+		m.viewport.GotoBottom()
 	case connectOAuthFinishedMsg:
 		if m.connect == nil {
 			return m, nil
@@ -659,6 +664,24 @@ func (m *model) handleLoginCmd(args []string) tea.Cmd {
 		token, err := auth.LoginWithGoogle()
 		return authFinishedMsg{token: token, err: err}
 	}
+}
+
+func (m *model) handleMCPAuth(serverName string) error {
+	if m.config == nil {
+		return fmt.Errorf("config not loaded")
+	}
+	mcpCfg, ok := m.config.MCP[serverName]
+	if !ok {
+		return fmt.Errorf("mcp server %q not found in config", serverName)
+	}
+	if mcpCfg.OAuth == nil {
+		return fmt.Errorf("mcp server %q has no oauth configuration", serverName)
+	}
+	oauth := mcpCfg.OAuth
+	if oauth.AuthorizationURL == "" || oauth.TokenURL == "" || oauth.ClientID == "" {
+		return fmt.Errorf("mcp server %q oauth config is incomplete", serverName)
+	}
+	return auth.MCPAuthFlow(serverName, oauth.AuthorizationURL, oauth.TokenURL, oauth.ClientID, oauth.Scopes)
 }
 
 func (m *model) processFileReferences(text string) tea.Cmd {
@@ -959,7 +982,8 @@ func (m *model) handleShareCmd(args []string) {
 
 func (m *model) handleThemesCmd(args []string) {
 	if len(args) == 0 {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Available themes:\n- opencode\n- tokyonight\nUse '/themes <name>' to switch."})
+		themes := AvailableThemes()
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Available themes:\n- " + strings.Join(themes, "\n- ") + "\nUse '/themes <name>' to switch."})
 		return
 	}
 
@@ -1079,11 +1103,12 @@ func (m *model) layout() {
 		innerWidth = 1
 	}
 	m.input.SetWidth(innerWidth)
-	m.viewport.Width = innerWidth
-	m.viewport.Height = m.height - inputHeight - headerHeight - 2
-	if m.viewport.Height < 1 {
-		m.viewport.Height = 1
+	m.viewport.SetWidth(innerWidth)
+	newHeight := m.height - inputHeight - headerHeight - 2
+	if newHeight < 1 {
+		newHeight = 1
 	}
+	m.viewport.SetHeight(newHeight)
 	m.renderTranscript()
 }
 
@@ -1120,7 +1145,16 @@ func (m *model) renderTranscript() {
 	m.viewport.SetContent(b.String())
 }
 
-func (m model) View() string {
+func (m model) View() tea.View {
+	v := tea.NewView(m.renderContent())
+	v.AltScreen = true
+	if m.config != nil && m.config.TUI.Mouse != nil && *m.config.TUI.Mouse {
+		v.MouseMode = tea.MouseModeCellMotion
+	}
+	return v
+}
+
+func (m model) renderContent() string {
 	if !m.ready {
 		return "initializing…"
 	}
@@ -1383,6 +1417,8 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		spendLine = fmt.Sprintf("$%.4f", *telemetry.spend)
 	}
 
+	projectDir := shortenSidebarPath(shortenWorkingDir(m.workDir), sidebarColumnWidth-4)
+	appendSection("Project", []string{projectDir}, nil)
 	appendSection("Session", []string{m.sessionID}, nil)
 	appendSection("Model", []string{modelName}, nil)
 	appendSection("Context", []string{contextLine}, nil)
@@ -1418,21 +1454,37 @@ func (m model) renderSidebar() string {
 	return borderStyle.Width(sidebarColumnWidth).Render(sections)
 }
 
-func (m model) sidebarFileForClick(msg tea.MouseMsg) (string, bool) {
-	if !m.sidebarEnabled() || msg.Type != tea.MouseLeft {
+func (m model) sidebarFileForClick(msg tea.MouseClickMsg) (string, bool) {
+	if !m.sidebarEnabled() || msg.Button != tea.MouseLeft {
 		return "", false
 	}
-	if msg.X < m.panelWidth() {
+	mouse := msg.Mouse()
+	if mouse.X < m.panelWidth() {
 		return "", false
 	}
 
 	data := m.buildSidebarRenderData()
 	for line, path := range data.fileLines {
-		if msg.Y == line {
+		if mouse.Y == line {
 			return path, true
 		}
 	}
 	return "", false
+}
+
+func shortenWorkingDir(dir string) string {
+	if dir == "" {
+		return "(no project)"
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && strings.HasPrefix(dir, home) {
+		rel := "~" + dir[len(home):]
+		if rel == "~" {
+			return "~/"
+		}
+		return rel
+	}
+	return dir
 }
 
 func shortenSidebarPath(path string, max int) string {
@@ -1462,6 +1514,13 @@ func (m model) renderMCPStatus() string {
 	loaded := 0
 	if m.agent != nil {
 		loaded = m.agent.MCPToolCount()
+	}
+
+	if m.agent != nil {
+		errs := m.agent.MCPErrors()
+		if len(errs) > 0 {
+			return fmt.Sprintf("%d configured, %d loaded, %d errors", enabled, loaded, len(errs))
+		}
 	}
 
 	if loaded > 0 {

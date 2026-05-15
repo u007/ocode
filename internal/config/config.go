@@ -9,6 +9,14 @@ import (
 	"runtime"
 )
 
+type MCPOAuthConfig struct {
+	Enabled          *bool    `json:"enabled"`
+	AuthorizationURL string   `json:"authorization_url"`
+	TokenURL         string   `json:"token_url"`
+	ClientID         string   `json:"client_id"`
+	Scopes           []string `json:"scopes"`
+}
+
 type MCPConfig struct {
 	Type        string            `json:"type"`
 	Command     []string          `json:"command,omitempty"`
@@ -16,6 +24,8 @@ type MCPConfig struct {
 	Environment map[string]string `json:"environment,omitempty"`
 	Headers     map[string]string `json:"headers,omitempty"`
 	Enabled     bool              `json:"enabled"`
+	Timeout     int               `json:"timeout"`
+	OAuth       *MCPOAuthConfig   `json:"oauth"`
 }
 
 type TUIConfig struct {
@@ -65,7 +75,14 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// 2. Project config
+	// 2. Custom config dir (OPENCODE_CONFIG_DIR)
+	if customDir := os.Getenv("OPENCODE_CONFIG_DIR"); customDir != "" {
+		if err := loadFromDir(customDir, config); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to load custom config dir: %w", err)
+		}
+	}
+
+	// 3. Project config
 	projectPath, err := getProjectConfigPath()
 	if err == nil {
 		if err := loadFromFile(projectPath, config); err != nil && !os.IsNotExist(err) {
@@ -73,17 +90,35 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// 3. Env overrides (simplified for now)
+	// 4. .opencode/ directory in project root
+	projectRoot := FindProjectRoot()
+	if projectRoot != "" {
+		for _, dirName := range []string{".opencode", ".opencodes"} {
+			dir := filepath.Join(projectRoot, dirName)
+			if err := loadFromDir(dir, config); err != nil && !os.IsNotExist(err) {
+				return nil, fmt.Errorf("failed to load %s config: %w", dirName, err)
+			}
+		}
+	}
+
+	// 5. Simple env overrides
 	if model := os.Getenv("OPENCODE_MODEL"); model != "" {
 		config.Model = model
 	}
 
-	// 4. TUI config files
+	// 6. TUI config files
 	loadTUIConfig(config)
 
-	// 5. Ocode sidecar config
+	// 6. Ocode sidecar config
 	if err := LoadOcodeConfig(config); err != nil {
 		return nil, fmt.Errorf("failed to load ocode config: %w", err)
+	}
+
+	// 7. OPENCODE_CONFIG_CONTENT (inline JSON, highest priority)
+	if content := os.Getenv("OPENCODE_CONFIG_CONTENT"); content != "" {
+		if err := loadFromString(content, config); err != nil {
+			return nil, fmt.Errorf("failed to parse OPENCODE_CONFIG_CONTENT: %w", err)
+		}
 	}
 
 	return config, nil
@@ -196,6 +231,111 @@ func findProjectConfigDir() (string, error) {
 	}
 
 	return "", os.ErrNotExist
+}
+
+func FindProjectRoot() string {
+	curr, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	for {
+		if _, err := os.Stat(filepath.Join(curr, "opencode.json")); err == nil {
+			return curr
+		}
+
+		if _, err := os.Stat(filepath.Join(curr, ".git")); err == nil {
+			return curr
+		}
+
+		parent := filepath.Dir(curr)
+		if parent == curr {
+			break
+		}
+
+		curr = parent
+	}
+
+	return ""
+}
+
+func loadFromDir(dir string, config *Config) error {
+	path := filepath.Join(dir, "opencode.json")
+	if _, err := os.Stat(path); err != nil {
+		return err
+	}
+	return loadFromFile(path, config)
+}
+
+func loadFromString(content string, config *Config) error {
+	cleanData := jsoncComments.ReplaceAll([]byte(content), []byte(""))
+
+	var temp Config
+	if err := json.Unmarshal(cleanData, &temp); err != nil {
+		return err
+	}
+
+	if temp.Model != "" {
+		config.Model = temp.Model
+	}
+	if temp.SmallModel != "" {
+		config.SmallModel = temp.SmallModel
+	}
+	if temp.DefaultAgent != "" {
+		config.DefaultAgent = temp.DefaultAgent
+	}
+	if config.MCP == nil {
+		config.MCP = make(map[string]MCPConfig)
+	}
+	for k, v := range temp.MCP {
+		config.MCP[k] = v
+	}
+	for k, v := range temp.Tools {
+		config.Tools[k] = v
+	}
+	for _, ignore := range temp.Watcher.Ignore {
+		config.Watcher.Ignore = append(config.Watcher.Ignore, ignore)
+	}
+	for k, v := range temp.Permission {
+		config.Permission[k] = v
+	}
+	for k, v := range temp.Provider {
+		config.Provider[k] = v
+	}
+
+	return nil
+}
+
+func Save(cfg *Config, path string) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return fmt.Errorf("write config tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename config file: %w", err)
+	}
+	return nil
+}
+
+func (c *Config) ActiveConfigPath() (string, error) {
+	projectPath, err := getProjectConfigPath()
+	if err == nil {
+		if _, statErr := os.Stat(projectPath); statErr == nil {
+			return projectPath, nil
+		}
+	}
+	globalPath, err := getGlobalConfigPath()
+	if err != nil {
+		return "", fmt.Errorf("resolve global config path: %w", err)
+	}
+	return globalPath, nil
 }
 
 var jsoncComments = regexp.MustCompile(`(?m)^\s*//.*$|/\*[\s\S]*?\*/|//.*$`)

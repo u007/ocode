@@ -11,11 +11,12 @@ import (
 )
 
 type Agent struct {
-	client   LLMClient
-	tools    map[string]tool.Tool
-	mcpTools map[string]struct{}
-	config   *config.Config
-	mode     Mode
+	client    LLMClient
+	tools     map[string]tool.Tool
+	mcpTools  map[string]struct{}
+	mcpErrors []string
+	config    *config.Config
+	mode      Mode
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -310,6 +311,10 @@ func (a *Agent) MCPToolCount() int {
 	return len(a.mcpTools)
 }
 
+func (a *Agent) MCPErrors() []string {
+	return a.mcpErrors
+}
+
 func (a *Agent) LoadExternalTools(cfg *config.Config) {
 	custom := tool.LoadCustomTools()
 	a.AddTools(custom)
@@ -327,15 +332,22 @@ func (a *Agent) LoadExternalTools(cfg *config.Config) {
 				client, err = mcp.NewRemoteClient(name, mcpCfg)
 			}
 
-			if err == nil && client != nil {
+			if err != nil {
+				a.mcpErrors = append(a.mcpErrors, fmt.Sprintf("%s: %v", name, err))
+				continue
+			}
+
+			if client != nil {
 				mcpTools, err := client.ListTools()
-				if err == nil {
-					var tools []tool.Tool
-					for _, mt := range mcpTools {
-						tools = append(tools, mt)
-					}
-					a.addMCPTools(tools)
+				if err != nil {
+					a.mcpErrors = append(a.mcpErrors, fmt.Sprintf("%s: %v", name, err))
+					continue
 				}
+				var tools []tool.Tool
+				for _, mt := range mcpTools {
+					tools = append(tools, mt)
+				}
+				a.addMCPTools(tools)
 			}
 		}
 	}
