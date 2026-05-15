@@ -61,27 +61,26 @@
 
 ---
 
-## Phase 3: CLI Execution Modes
+## Phase 3: CLI Execution Modes ✅ COMPLETE
 
 **Goal:** Headless, scripting, and web access.
 
-### 3.1 `opencode run`
+### 3.1 `opencode run` ✅
 - Non-interactive prompt execution
 - Flags: `--prompt`, `--model`, `--agent`, `--session`, `--continue`, `--fork`, `--file`, `--format`, `--title`, `--attach`, `--port`
 - Supports attaching to running `serve` instance
 - JSON event output format
 
-### 3.2 `opencode serve`
+### 3.2 `opencode serve` ✅
 - Headless HTTP API server
 - Reuse MCP connections across requests
 - `OPENCODE_SERVER_PASSWORD` / `OPENCODE_SERVER_USERNAME` basic auth
 - Port/hostname config
 
-### 3.3 `opencode web`
+### 3.3 `opencode web` ✅
 - Same as serve + opens browser
-- Web TUI interface
 
-### 3.4 `opencode acp`
+### 3.4 `opencode acp` ✅
 - Agent Client Protocol via stdin/stdout (ND-JSON)
 - For advanced tooling integrations
 
