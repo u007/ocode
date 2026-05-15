@@ -15,6 +15,7 @@ type Agent struct {
 	tools    map[string]tool.Tool
 	mcpTools map[string]struct{}
 	config   *config.Config
+	mode     Mode
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -27,6 +28,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		tools:    toolMap,
 		mcpTools: make(map[string]struct{}),
 		config:   cfg,
+		mode:     ModeBuild,
 	}
 	a.tools["agent"] = AgentTool{mainAgent: a}
 	return a
@@ -94,6 +96,18 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		return []Message{{Role: "assistant", Content: "(no llm client configured)"}}, nil
 	}
 
+	if prompt := a.Mode().SystemPrompt(); prompt != "" {
+		hasMode := false
+		for _, m := range messages {
+			if m.Role == "system" && strings.HasPrefix(m.Content, "You are in ") {
+				hasMode = true
+				break
+			}
+		}
+		if !hasMode {
+			messages = append([]Message{{Role: "system", Content: prompt}}, messages...)
+		}
+	}
 	messages = a.compactContext(messages)
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
@@ -208,7 +222,25 @@ func (a *Agent) compactSummaryClient() LLMClient {
 	return a.client
 }
 
+func (a *Agent) Mode() Mode {
+	if a.mode == "" {
+		return ModeBuild
+	}
+	return a.mode
+}
+
+func (a *Agent) SetMode(m Mode) {
+	if !m.Valid() {
+		return
+	}
+	a.mode = m
+}
+
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
+	if deny, ok := gateToolCall(a.Mode(), name, args); !ok {
+		return deny, nil
+	}
+
 	t, ok := a.tools[name]
 	if !ok {
 		return "", fmt.Errorf("tool %s not found", name)

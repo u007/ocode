@@ -69,6 +69,10 @@ type model struct {
 	leaderActive     bool
 	leaderSeq        int
 	showPalette      bool
+	showPicker       bool
+	pickerItems      []string
+	pickerIndex      int
+	pickerFilter     string
 	showSidebar      bool
 	sessionTelemetry sidebarTelemetry
 	activeModel      string
@@ -290,6 +294,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		m.ready = true
 	case tea.KeyMsg:
+		if m.showPicker {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.closePicker()
+				return m, nil
+			case tea.KeyUp:
+				if m.pickerIndex > 0 {
+					m.pickerIndex--
+				}
+				return m, nil
+			case tea.KeyDown:
+				if m.pickerIndex < len(m.pickerVisibleItems())-1 {
+					m.pickerIndex++
+				}
+				return m, nil
+			case tea.KeyEnter:
+				items := m.pickerVisibleItems()
+				if len(items) > 0 && m.pickerIndex < len(items) {
+					selected := items[m.pickerIndex]
+					m.closePicker()
+					m.input.Reset()
+					return m.handleCommand("/model " + selected)
+				}
+				m.closePicker()
+				return m, nil
+			case tea.KeyBackspace:
+				if len(m.pickerFilter) > 0 {
+					m.pickerFilter = m.pickerFilter[:len(m.pickerFilter)-1]
+					m.pickerIndex = 0
+				}
+				return m, nil
+			case tea.KeyRunes, tea.KeySpace:
+				m.pickerFilter += msg.String()
+				m.pickerIndex = 0
+				return m, nil
+			}
+			return m, nil
+		}
+
 		if m.showPalette {
 			if msg.Type == tea.KeyEsc || msg.Type == tea.KeyCtrlP {
 				m.showPalette = false
@@ -357,9 +400,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyShiftTab:
+			m.cycleAgentMode()
+			return m, nil
 		case tea.KeyTab:
 			current := m.input.Value()
 			if !strings.HasPrefix(current, "/") {
+				return m, nil
+			}
+
+			trimmed := strings.TrimSpace(current)
+			if trimmed == "/model" || strings.HasPrefix(trimmed, "/model ") {
+				m.openModelPicker()
 				return m, nil
 			}
 
@@ -601,6 +653,10 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 }
 
 func (m *model) handleModelCmd(args []string) {
+	if len(args) == 0 {
+		m.openModelPicker()
+		return
+	}
 	if len(args) > 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", args[0])})
 		var mcpNames []string
@@ -1037,6 +1093,10 @@ func (m model) View() string {
 		return "initializing…"
 	}
 
+	if m.showPicker {
+		return m.renderPicker()
+	}
+
 	if m.showPalette {
 		return m.renderPalette()
 	}
@@ -1074,7 +1134,7 @@ func (m *model) renderStatus() string {
 		Padding(0, 1)
 
 	return statusStyle.Width(m.panelWidth()).Render(
-		fmt.Sprintf(" Model: %s | Session: %s | ctrl+p: palette | ctrl+x: leader", m.currentModelName(), m.sessionID),
+		fmt.Sprintf(" Mode: %s | Model: %s | Session: %s | shift+tab: mode | ctrl+p: palette | ctrl+x: leader", m.agentModeLabel(), m.currentModelName(), m.sessionID),
 	)
 }
 

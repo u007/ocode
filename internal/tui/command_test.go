@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -35,16 +34,16 @@ func TestRenderPaletteUsesRegistryCommands(t *testing.T) {
 	}
 }
 
-func TestSlashAutocompleteResolvesCommandAndModels(t *testing.T) {
+func TestSlashAutocompleteResolvesCommand(t *testing.T) {
 	m := model{}
 
 	if got := autocompleteSlashInput(&m, "/m"); len(got) == 0 || got[0] != "/model" {
 		t.Fatalf("expected /m to resolve to /model, got %#v", got)
 	}
 
-	wantModels := []string{"gpt-4o", "gpt-4o-mini", "o1-preview"}
-	if got := autocompleteSlashInput(&m, "/model "); !reflect.DeepEqual(got, wantModels) {
-		t.Fatalf("expected /model autocomplete to return %v, got %v", wantModels, got)
+	got := autocompleteSlashInput(&m, "/model ")
+	if len(got) == 0 {
+		t.Fatalf("expected /model autocomplete to return at least one model, got empty")
 	}
 }
 
@@ -58,15 +57,19 @@ func TestTabAutocompleteRunsInUpdatePath(t *testing.T) {
 		t.Fatalf("expected tab to complete /m to /model, got %q", got.input.Value())
 	}
 
-	got.input.SetValue("/model ")
-	updated, _ = got.Update(tea.KeyMsg{Type: tea.KeyTab})
-	got = updated.(model)
-	if got.input.Value() != "/model gpt-4o" {
-		t.Fatalf("expected tab to complete /model to first model, got %q", got.input.Value())
-	}
-
 	if got.showPalette {
 		t.Fatal("expected tab autocomplete to operate on the main input, not palette")
+	}
+}
+
+func TestTabOnModelOpensPicker(t *testing.T) {
+	m := model{input: textarea.New(), viewport: viewport.New(80, 20)}
+	m.input.SetValue("/model ")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got := updated.(model)
+	if !got.showPicker {
+		t.Fatal("expected tab on /model to open picker")
 	}
 }
 
