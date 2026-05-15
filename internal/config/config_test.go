@@ -29,7 +29,15 @@ func TestGetProjectConfigPath(t *testing.T) {
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
-	if path != configPath {
-		t.Errorf("expected %s, got %s", configPath, path)
+	resolvedExpected, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedGot, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolvedGot != resolvedExpected {
+		t.Errorf("expected %s, got %s", resolvedExpected, resolvedGot)
 	}
 }

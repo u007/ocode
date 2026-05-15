@@ -114,3 +114,29 @@ func Redo() (string, error) {
 	os.Remove(last.BackupPath) //nolint:errcheck
 	return last.OriginalPath, nil
 }
+
+func DiscardRecent(count int) error {
+	if count < 0 {
+		return fmt.Errorf("invalid discard count %d", count)
+	}
+	if count == 0 {
+		return nil
+	}
+
+	mu.Lock()
+	if count > len(snapshots) {
+		mu.Unlock()
+		return fmt.Errorf("cannot discard %d snapshots; only %d available", count, len(snapshots))
+	}
+	removed := append([]Snapshot(nil), snapshots[len(snapshots)-count:]...)
+	snapshots = snapshots[:len(snapshots)-count]
+	mu.Unlock()
+
+	var firstErr error
+	for _, s := range removed {
+		if err := os.Remove(s.BackupPath); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = fmt.Errorf("failed to remove snapshot %s: %w", s.BackupPath, err)
+		}
+	}
+	return firstErr
+}

@@ -52,6 +52,10 @@ type fileSearchFinishedMsg struct {
 	err           error
 }
 
+type leaderTimeoutMsg struct {
+	seq int
+}
+
 type model struct {
 	viewport     viewport.Model
 	input        textarea.Model
@@ -62,7 +66,7 @@ type model struct {
 	showThinking bool
 	showDetails  bool
 	leaderActive bool
-	leaderTimer  *time.Timer
+	leaderSeq    int
 	showPalette  bool
 	paletteInput string
 	width        int
@@ -126,6 +130,7 @@ func (m *model) getInitialTools() []tool.Tool {
 		&tool.QuestionTool{},
 		&tool.WebFetchTool{},
 		&tool.WebSearchTool{},
+		&tool.ListTool{},
 		&tool.LSPTool{},
 	}
 }
@@ -253,9 +258,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if m.leaderActive {
 			m.leaderActive = false
-			if m.leaderTimer != nil {
-				m.leaderTimer.Stop()
-			}
 
 			key := msg.String()
 			if m.config != nil {
@@ -288,13 +290,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyCtrlX:
 			m.leaderActive = true
+			m.leaderSeq++
 			timeout := 2000
 			if m.config != nil && m.config.TUI.LeaderTimeout != 0 {
 				timeout = m.config.TUI.LeaderTimeout
 			}
-			m.leaderTimer = time.AfterFunc(time.Duration(timeout)*time.Millisecond, func() {
+			seq := m.leaderSeq
+			return m, tea.Tick(time.Duration(timeout)*time.Millisecond, func(time.Time) tea.Msg {
+				return leaderTimeoutMsg{seq: seq}
 			})
-			return m, nil
 		case tea.KeyCtrlC, tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyEnter:
@@ -353,12 +357,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewport.GotoBottom()
 				m.saveSession()
 				return m, m.askAgent()
-			} else {
-				m.input.Reset()
-				return m, m.processFileReferences(text)
 			}
-		}
 
+			m.input.Reset()
+			return m, m.processFileReferences(text)
+		}
+	case leaderTimeoutMsg:
+		if m.leaderActive && msg.seq == m.leaderSeq {
+			m.leaderActive = false
+		}
+		return m, nil
 	case fileSearchFinishedMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error processing files: %v", msg.err)})
@@ -371,12 +379,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.saveSession()
 		if m.agent != nil {
 			return m, m.askAgent()
-		} else {
-			m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
-			m.renderTranscript()
-			m.viewport.GotoBottom()
 		}
-
+		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
+		m.renderTranscript()
+		m.viewport.GotoBottom()
 	case authFinishedMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Login failed: %v", msg.err)})
@@ -390,7 +396,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.renderTranscript()
 		m.viewport.GotoBottom()
-
 	case []agent.Message:
 		for _, am := range msg {
 			copyMsg := am
@@ -422,7 +427,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.askAgent()
 			}
 		}
-
 	case editorFinishedMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor error: %v", msg.err)})

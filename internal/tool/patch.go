@@ -1,11 +1,15 @@
 package tool
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+
+	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
 type PatchTool struct{}
@@ -43,14 +47,93 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 		return "Error: 'patch' command not found. Please install patch utility for your system (e.g., 'git' for Windows usually includes it).", nil
 	}
 
+	targets, err := patchTargets(params.PatchText)
+	if err != nil {
+		return "", err
+	}
+
+	var backedUp int
+	for _, path := range targets {
+		safe, err := confinedPath(path)
+		if err != nil {
+			if backedUp > 0 {
+				_ = snapshot.DiscardRecent(backedUp)
+			}
+			return "", err
+		}
+		if err := snapshot.Backup(safe); err != nil {
+			if backedUp > 0 {
+				_ = snapshot.DiscardRecent(backedUp)
+			}
+			return "", fmt.Errorf("failed to back up %s before patch: %w", safe, err)
+		}
+		backedUp++
+	}
+
 	cmd := exec.Command("patch", "-p1")
 	cmd.Stdin = strings.NewReader(params.PatchText)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		if backedUp > 0 {
+			_ = snapshot.DiscardRecent(backedUp)
+		}
 		return string(output), fmt.Errorf("patch failed: %w", err)
 	}
 
 	return string(output), nil
+}
+
+func patchTargets(patchText string) ([]string, error) {
+	seen := make(map[string]struct{})
+	var targets []string
+
+	scanner := bufio.NewScanner(strings.NewReader(patchText))
+	for scanner.Scan() {
+		line := scanner.Text()
+		var path string
+
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			rest := strings.TrimPrefix(line, "diff --git ")
+			if idx := strings.LastIndex(rest, " b/"); idx != -1 {
+				path = strings.TrimPrefix(rest[idx+1:], "b/")
+			}
+		case strings.HasPrefix(line, "+++ "):
+			path = strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
+			if cut, _, ok := strings.Cut(path, "\t"); ok {
+				path = cut
+			}
+			if path == "/dev/null" {
+				path = ""
+			}
+		case strings.HasPrefix(line, "--- "):
+			path = strings.TrimSpace(strings.TrimPrefix(line, "--- "))
+			if cut, _, ok := strings.Cut(path, "\t"); ok {
+				path = cut
+			}
+			if path == "/dev/null" {
+				path = ""
+			}
+		case strings.HasPrefix(line, "*** Update File: "), strings.HasPrefix(line, "*** Delete File: "):
+			path = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
+		}
+
+		if path == "" {
+			continue
+		}
+		path = filepath.Clean(strings.TrimPrefix(strings.TrimPrefix(path, "a/"), "b/"))
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		targets = append(targets, path)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+
+	return targets, nil
 }
 
 type TodoWriteTool struct{}
