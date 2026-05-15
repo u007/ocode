@@ -16,10 +16,13 @@ import (
 var llmHTTPClient = &http.Client{Timeout: 120 * time.Second}
 
 type Message struct {
-	Role      string     `json:"role"`
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	ToolID    string     `json:"tool_call_id,omitempty"`
+	Role      string      `json:"role"`
+	Content   string      `json:"content"`
+	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
+	ToolID    string      `json:"tool_call_id,omitempty"`
+	Model     string      `json:"-"`
+	Usage     *TokenUsage `json:"-"`
+	Spend     *float64    `json:"-"`
 }
 
 type ToolCall struct {
@@ -34,6 +37,7 @@ type ToolCall struct {
 type LLMClient interface {
 	Chat(messages []Message, tools []map[string]interface{}) (*Message, error)
 	GetProvider() string
+	GetModel() string
 }
 
 type GenericClient struct {
@@ -45,6 +49,10 @@ type GenericClient struct {
 
 func (c *GenericClient) GetProvider() string {
 	return c.Provider
+}
+
+func (c *GenericClient) GetModel() string {
+	return c.Model
 }
 
 func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
@@ -91,15 +99,30 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 	}
 
 	var result struct {
+		Model   string `json:"model"`
 		Choices []struct {
 			Message Message `json:"message"`
 		} `json:"choices"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 	if len(result.Choices) > 0 {
-		return &result.Choices[0].Message, nil
+		msg := &result.Choices[0].Message
+		msg.Model = result.Model
+		if msg.Model == "" {
+			msg.Model = c.Model
+		}
+		usage, err := usageForProvider(c.Provider, result.Usage)
+		if err != nil {
+			return nil, err
+		}
+		msg.Usage = usage
+		if usage != nil {
+			msg.Spend = usage.Spend(msg.Model)
+		}
+		return msg, nil
 	}
 	return nil, fmt.Errorf("no response from %s", c.Provider)
 }
@@ -173,8 +196,8 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		var anthropicTools []map[string]interface{}
 		for _, t := range tools {
 			anthropicTools = append(anthropicTools, map[string]interface{}{
-				"name":        t["name"],
-				"description": t["description"],
+				"name":         t["name"],
+				"description":  t["description"],
 				"input_schema": t["parameters"],
 			})
 		}
@@ -207,12 +230,14 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 	}
 
 	var result struct {
-		ID      string `json:"id"`
+		ID      string          `json:"id"`
+		Model   string          `json:"model"`
+		Usage   json.RawMessage `json:"usage"`
 		Content []struct {
-			Type  string `json:"type"`
-			Text  string `json:"text"`
-			ID    string `json:"id"`
-			Name  string `json:"name"`
+			Type  string      `json:"type"`
+			Text  string      `json:"text"`
+			ID    string      `json:"id"`
+			Name  string      `json:"name"`
 			Input interface{} `json:"input"`
 		} `json:"content"`
 	}
@@ -239,6 +264,18 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 			})
 		}
 	}
+	usage, err := usageForProvider(c.Provider, result.Usage)
+	if err != nil {
+		return nil, err
+	}
+	resMsg.Model = result.Model
+	if resMsg.Model == "" {
+		resMsg.Model = c.Model
+	}
+	resMsg.Usage = usage
+	if usage != nil {
+		resMsg.Spend = usage.Spend(resMsg.Model)
+	}
 
 	if resMsg.Content != "" || len(resMsg.ToolCalls) > 0 {
 		return resMsg, nil
@@ -252,26 +289,26 @@ type providerInfo struct {
 }
 
 var providers = map[string]providerInfo{
-	"openai":     {"OPENAI_API_KEY", "https://api.openai.com/v1"},
-	"anthropic":  {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
-	"openrouter": {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
-	"google":     {"GOOGLE_OAUTH_ACCESS_TOKEN", "https://generativelanguage.googleapis.com/v1beta/openai"},
-	"zai":        {"ZAI_API_KEY", "https://api.z.ai/v1"},
-	"z.ai":       {"ZAI_API_KEY", "https://api.z.ai/v1"},
-	"zai-coding": {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
-	"chutes":     {"CHUTES_API_KEY", "https://api.chutes.ai/v1"},
-	"chutes-coding": {"CHUTES_API_KEY", "https://api.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
-	"alibaba":    {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+	"openai":         {"OPENAI_API_KEY", "https://api.openai.com/v1"},
+	"anthropic":      {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
+	"openrouter":     {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
+	"google":         {"GOOGLE_OAUTH_ACCESS_TOKEN", "https://generativelanguage.googleapis.com/v1beta/openai"},
+	"zai":            {"ZAI_API_KEY", "https://api.z.ai/v1"},
+	"z.ai":           {"ZAI_API_KEY", "https://api.z.ai/v1"},
+	"zai-coding":     {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
+	"chutes":         {"CHUTES_API_KEY", "https://api.chutes.ai/v1"},
+	"chutes-coding":  {"CHUTES_API_KEY", "https://api.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
+	"alibaba":        {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
 	"alibaba-coding": {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
-	"moonshot":   {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
-	"minimax":    {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
-	"requesty":   {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
-	"302ai":      {"302AI_API_KEY", "https://api.302.ai/v1"},
-	"deepseek":   {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
-	"groq":       {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
-	"mistral":    {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
-	"opencode":   {"OPENCODE_API_KEY", "https://api.opencode.ai/v1"},
-	"opencode-go": {"OPENCODE_API_KEY", "https://api.opencode.ai/v1/go"},
+	"moonshot":       {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
+	"minimax":        {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
+	"requesty":       {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
+	"302ai":          {"302AI_API_KEY", "https://api.302.ai/v1"},
+	"deepseek":       {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
+	"groq":           {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
+	"mistral":        {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
+	"opencode":       {"OPENCODE_API_KEY", "https://api.opencode.ai/v1"},
+	"opencode-go":    {"OPENCODE_API_KEY", "https://api.opencode.ai/v1/go"},
 }
 
 func NewClient(cfg *config.Config, model string) LLMClient {
@@ -313,18 +350,8 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 				apiKey = os.Getenv("GOOGLE_API_KEY")
 			}
 			if apiKey == "" {
-				// Try reading GOOGLE_APPLICATION_CREDENTIALS
-				creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
-				if creds != "" {
-					data, err := os.ReadFile(creds)
-					if err == nil {
-						var key struct {
-							Key string `json:"private_key"`
-						}
-						json.Unmarshal(data, &key)
-						// This is a placeholder; real Vertex auth is more complex
-					}
-				}
+				// GOOGLE_APPLICATION_CREDENTIALS (service account) is not supported;
+				// set GOOGLE_API_KEY or GEMINI_API_KEY instead.
 			}
 		}
 		if baseURL == "" {

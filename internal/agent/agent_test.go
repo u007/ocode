@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
 
@@ -17,6 +18,7 @@ func (m *MockClient) Chat(messages []Message, tools []map[string]interface{}) (*
 }
 
 func (m *MockClient) GetProvider() string { return "mock" }
+func (m *MockClient) GetModel() string    { return "mock-model" }
 
 func TestAgentStep(t *testing.T) {
 	mock := &MockClient{
@@ -34,6 +36,25 @@ func TestAgentStep(t *testing.T) {
 
 	if len(msgs) != 1 || msgs[0].Content != "Hello!" {
 		t.Errorf("unexpected response: %+v", msgs)
+	}
+}
+
+func TestCompactSummaryClientUsesOverride(t *testing.T) {
+	a := &Agent{
+		client: &MockClient{},
+		config: &config.Config{Ocode: &config.OcodeConfig{Compact: config.CompactConfig{
+			SummaryProvider: "openai",
+			SummaryModel:    "gpt-4o-mini",
+		}}},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient, got %T", client)
+	}
+	if gc.Provider != "openai" || gc.Model != "gpt-4o-mini" {
+		t.Fatalf("unexpected summary client: %+v", gc)
 	}
 }
 
@@ -87,6 +108,7 @@ func (m *MockToolClient) Chat(messages []Message, tools []map[string]interface{}
 }
 
 func (m *MockToolClient) GetProvider() string { return "mock" }
+func (m *MockToolClient) GetModel() string    { return "mock-model" }
 
 type MockTool struct {
 	name   string

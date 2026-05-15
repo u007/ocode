@@ -4,12 +4,18 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
+)
+
+var (
+	todoMu             sync.RWMutex
+	todoStates         map[string]string
+	currentTodoSession string
 )
 
 type PatchTool struct{}
@@ -165,33 +171,77 @@ func (t TodoWriteTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	// By default, write to TODO_OCODE.md
-	if err := os.WriteFile("TODO_OCODE.md", []byte(params.TodoText), 0644); err != nil {
-		return "", fmt.Errorf("failed to write TODO_OCODE.md: %w", err)
+	todoMu.Lock()
+	if todoStates == nil {
+		todoStates = make(map[string]string)
 	}
+	if currentTodoSession == "" {
+		todoMu.Unlock()
+		return "", fmt.Errorf("todo session not set")
+	}
+	todoStates[currentTodoSession] = params.TodoText
+	todoMu.Unlock()
 
-	return "Successfully updated TODO_OCODE.md", nil
+	return "Successfully updated todo list", nil
 }
 
 type TodoReadTool struct{}
 
 func (t TodoReadTool) Name() string        { return "todoread" }
-func (t TodoReadTool) Description() string { return "Read the current todo list" }
+func (t TodoReadTool) Description() string { return "Read the current session todo list" }
 func (t TodoReadTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todoread",
-		"description": "Read the current todo list from TODO_OCODE.md",
+		"description": "Read the current session todo list",
 		"parameters":  map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	}
 }
 
 func (t TodoReadTool) Execute(args json.RawMessage) (string, error) {
-	content, err := os.ReadFile("TODO_OCODE.md")
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "No todo list found (TODO_OCODE.md does not exist)", nil
-		}
-		return "", fmt.Errorf("failed to read TODO_OCODE.md: %w", err)
+	todoMu.RLock()
+	content := todoStates[currentTodoSession]
+	todoMu.RUnlock()
+	if content == "" {
+		return "No todo list found", nil
 	}
 	return string(content), nil
+}
+
+func SetTodoSession(sessionID string) {
+	todoMu.Lock()
+	currentTodoSession = sessionID
+	if todoStates == nil {
+		todoStates = make(map[string]string)
+	}
+	todoMu.Unlock()
+}
+
+func TodoState() string {
+	todoMu.RLock()
+	defer todoMu.RUnlock()
+	if todoStates == nil {
+		return ""
+	}
+	return todoStates[currentTodoSession]
+}
+
+func SetTodoState(state string) {
+	todoMu.Lock()
+	if currentTodoSession == "" {
+		todoMu.Unlock()
+		return
+	}
+	if todoStates == nil {
+		todoStates = make(map[string]string)
+	}
+	todoStates[currentTodoSession] = state
+	todoMu.Unlock()
+}
+
+func ResetTodoState() {
+	todoMu.Lock()
+	if todoStates != nil {
+		delete(todoStates, currentTodoSession)
+	}
+	todoMu.Unlock()
 }

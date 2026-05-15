@@ -22,7 +22,7 @@ type Session struct {
 	Messages  []agent.Message `json:"messages"`
 	CreatedAt time.Time       `json:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at"`
-	Metadata  map[string]any `json:"metadata,omitempty"`
+	Metadata  map[string]any  `json:"metadata,omitempty"`
 }
 
 type sessionIndex struct {
@@ -72,7 +72,7 @@ func getProjectSlug() string {
 	return hex.EncodeToString(hash[:])[:12]
 }
 
-func Save(id string, title string, messages []agent.Message) error {
+func Save(id string, title string, messages []agent.Message, metadata map[string]any) error {
 	dir, err := GetStorageDir()
 	if err != nil {
 		return err
@@ -112,6 +112,9 @@ func Save(id string, title string, messages []agent.Message) error {
 	}
 
 	s.Messages = messages
+	if metadata != nil {
+		s.Metadata = metadata
+	}
 	s.UpdatedAt = time.Now()
 
 	out, err := json.MarshalIndent(s, "", "  ")
@@ -148,7 +151,7 @@ func updateIndex(dir, id, title string) error {
 	return os.WriteFile(indexPath, out, 0644)
 }
 
-func Load(id string) ([]agent.Message, error) {
+func Load(id string) (*Session, error) {
 	dir, err := GetStorageDir()
 	if err != nil {
 		return nil, err
@@ -165,7 +168,7 @@ func Load(id string) ([]agent.Message, error) {
 		return nil, err
 	}
 
-	return s.Messages, nil
+	return &s, nil
 }
 
 func List() ([]Session, error) {
