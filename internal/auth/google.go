@@ -180,6 +180,9 @@ func generateState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// OpenURL is the exported alias of openBrowser for use by other auth flows.
+func OpenURL(u string) { openBrowser(u) }
+
 func openBrowser(u string) {
 	var err error
 	switch runtime.GOOS {

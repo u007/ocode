@@ -53,11 +53,6 @@ type connectOAuthFinishedMsg struct {
 	err      error
 }
 
-type connectTestFinishedMsg struct {
-	provider string
-	err      error
-}
-
 type fileSearchFinishedMsg struct {
 	processedText string
 	messages      []message
@@ -551,37 +546,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.connect.message = fmt.Sprintf("OAuth failed: %v", msg.err)
 			m.connect.messageOK = false
-			m.connect.stage = connectStageMessage
-			m.viewport.GotoBottom()
-			return m, nil
-		}
-		if err := auth.Set(msg.provider, msg.cred); err != nil {
+		} else if err := auth.Set(msg.provider, msg.cred); err != nil {
 			m.connect.message = fmt.Sprintf("OAuth succeeded but failed to save: %v", err)
 			m.connect.messageOK = false
-			m.connect.stage = connectStageMessage
-			m.viewport.GotoBottom()
-			return m, nil
+		} else {
+			m.connect.message = fmt.Sprintf("%s OAuth complete.", msg.provider)
+			m.connect.messageOK = true
 		}
-		m.rebuildAgentClient()
-		label := msg.provider
-		if msg.cred.Account != "" {
-			label = msg.provider + " (" + msg.cred.Account + ")"
-		}
-		m.connect.message = fmt.Sprintf("%s OAuth complete. Testing connection…", label)
-		m.connect.messageOK = true
 		m.connect.stage = connectStageMessage
 		m.viewport.GotoBottom()
-		return m, m.testConnection(msg.provider)
-	case connectTestFinishedMsg:
-		if m.connect == nil {
-			return m, nil
-		}
-		if msg.err != nil {
-			m.connect.message = fmt.Sprintf("%s\n\n⚠ Connection test failed: %v", m.connect.message, msg.err)
-			m.connect.messageOK = false
-		} else {
-			m.connect.message = fmt.Sprintf("%s\n\n✓ Connection verified.", m.connect.message)
-		}
 	case []agent.Message:
 		for _, am := range msg {
 			copyMsg := am

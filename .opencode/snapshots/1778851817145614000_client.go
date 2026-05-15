@@ -47,7 +47,6 @@ type GenericClient struct {
 	Model    string
 	BaseURL  string
 	Provider string
-	UseOAuth bool // when true, treat APIKey as a bearer OAuth token
 }
 
 func (c *GenericClient) GetProvider() string {
@@ -145,9 +144,6 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 }
 
 func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interface{}) (*Message, error) {
-	if c.UseOAuth && c.Provider == "openai" {
-		return nil, fmt.Errorf("openai ChatGPT OAuth requires the Codex Responses API endpoint (not yet implemented). Use an API key for now, or use Copilot for an OAuth-backed alternative.")
-	}
 	url := c.BaseURL + "/chat/completions"
 	payload := map[string]interface{}{
 		"model":    c.Model,
@@ -300,13 +296,8 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-api-key", c.APIKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
-	if c.UseOAuth {
-		req.Header.Set("Authorization", "Bearer "+c.APIKey)
-		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-	} else {
-		req.Header.Set("x-api-key", c.APIKey)
-	}
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -406,7 +397,6 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	provider := ""
 	apiKey := ""
 	baseURL := ""
-	useOAuth := false
 
 	// Handle provider:model format
 	if parts := strings.SplitN(model, ":", 2); len(parts) == 2 {
@@ -441,29 +431,13 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 			if provider == "google" && apiKey == "" {
 				apiKey = os.Getenv("GOOGLE_API_KEY")
 			}
-		}
-		if apiKey == "" {
-			// Fall back to stored credential. Copilot stores a long-lived GH OAuth
-			// token under AccessToken; for other providers prefer Key, then OAuth token.
-			if cred, ok := auth.Get(provider); ok {
-				switch cred.Kind {
-				case auth.KindAPIKey:
-					apiKey = cred.Key
-				case auth.KindOAuth:
-					if tok, refreshed := auth.OAuthAccessToken(provider); refreshed {
-						apiKey = tok
-					} else {
-						apiKey = cred.AccessToken
-					}
-					useOAuth = true
-				}
+			if apiKey == "" {
+				// GOOGLE_APPLICATION_CREDENTIALS (service account) is not supported;
+				// set GOOGLE_API_KEY or GEMINI_API_KEY instead.
 			}
 		}
 		if baseURL == "" {
 			baseURL = info.baseURL
-		}
-		if override := auth.GetBaseURL(provider); override != "" {
-			baseURL = override
 		}
 	}
 
@@ -489,6 +463,5 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		Model:    model,
 		BaseURL:  baseURL,
 		Provider: provider,
-		UseOAuth: useOAuth,
 	}
 }
