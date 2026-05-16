@@ -6,6 +6,7 @@ import (
 
 	"github.com/jamesmercstudio/ocode/internal/acp"
 	"github.com/jamesmercstudio/ocode/internal/mcpcli"
+	"github.com/jamesmercstudio/ocode/internal/models"
 	"github.com/jamesmercstudio/ocode/internal/runcli"
 	"github.com/jamesmercstudio/ocode/internal/server"
 	"github.com/jamesmercstudio/ocode/internal/tui"
@@ -41,6 +42,12 @@ func main() {
 			return
 		case "acp":
 			if err := acp.Run(); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "models":
+			if err := models.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}

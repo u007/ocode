@@ -84,9 +84,12 @@
 - Agent Client Protocol via stdin/stdout (ND-JSON)
 - For advanced tooling integrations
 
-### 3.5 `opencode models [provider]`
+### 3.5 `opencode models [provider]` ✅
 - List available models per provider
-- Use models.dev registry
+- Uses OpenRouter API as model registry
+- Filter by provider name (e.g. `openai`, `anthropic`)
+- `--provider` / `-p` flag support
+- Plain text output with `NO_COLOR`
 
 ---
 
