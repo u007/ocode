@@ -3,6 +3,8 @@ package agent
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/jamesmercstudio/ocode/internal/plugins"
 )
 
 func LoadContext() string {
@@ -15,7 +17,6 @@ func LoadContext() string {
 		}
 	}
 
-	// Also check in .opencode/rules/
 	rulesDir := filepath.Join(".opencode", "rules")
 	if entries, err := os.ReadDir(rulesDir); err == nil {
 		for _, entry := range entries {
@@ -25,6 +26,10 @@ func LoadContext() string {
 				}
 			}
 		}
+	}
+
+	if pluginInstr := plugins.LoadPluginInstructions(); pluginInstr != "" {
+		context += pluginInstr
 	}
 
 	return context

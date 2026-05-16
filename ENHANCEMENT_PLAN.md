@@ -90,33 +90,36 @@
 
 ---
 
-## Phase 4: Extensibility System
+## Phase 4: Extensibility System ✅ COMPLETE
 
 **Goal:** User-defined skills, plugins, and commands.
 
-### 4.1 Skills System
+### 4.1 Skills System ✅
 - `.opencode/skills/<name>/SKILL.md` directory structure
 - Load skills at session start
 - Skill metadata: name, description, trigger patterns
-- `skill` tool already exists — wire up directory loading
+- `skill` tool wired up to directory loading
 - `~/.config/opencode/skills/` for global skills
+- `/skills` slash command to list available skills
 
-### 4.2 Plugins System
+### 4.2 Plugins System ✅
 - `.opencode/plugins/` directory
-- Plugin definition: name, description, commands, tools
+- Plugin definition: name, description, commands, tools, instructions
 - Load plugins at startup
-- Plugin isolation (separate agent context?)
+- Plugin instructions injected into agent context
 
-### 4.3 Custom Commands
+### 4.3 Custom Commands ✅
 - `.opencode/commands/` directory
 - User-defined slash commands with prompts
 - Command metadata: name, description, prompt template
 - Tab completion for custom commands
+- `/commands` slash command to list all commands
 
-### 4.4 Custom Tools
-- `~/.config/opencode/tools/*.json` — already partially implemented
-- Complete the loading pipeline
+### 4.4 Custom Tools ✅
+- `~/.config/opencode/tools/*.json` — loads from global
+- Also loads from project `tools/` and `.opencode/tools/`
 - Tool definition: name, description, command, parameters
+- Plugin tools loaded from plugin directories
 
 ---
 

@@ -15,6 +15,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/session"
+	"github.com/jamesmercstudio/ocode/internal/skill"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 
@@ -648,10 +649,24 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 
 	var cmdResult tea.Cmd
 	spec := lookupCommand(cmd)
-	if spec == nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
-	} else {
+	if spec != nil {
 		cmdResult = spec.handler(m, args)
+	} else if customCmd, ok := customCommandLookup[cmd]; ok {
+		prompt := customCmd.Prompt
+		userArgs := strings.Join(args, " ")
+		if userArgs != "" {
+			prompt = strings.ReplaceAll(prompt, "{{args}}", userArgs)
+			prompt = strings.ReplaceAll(prompt, "{args}", userArgs)
+			if !strings.HasSuffix(prompt, "\n") && !strings.HasSuffix(prompt, " ") {
+				prompt += " " + userArgs
+			}
+		}
+		m.messages = append(m.messages, message{role: roleUser, text: cmd + " " + userArgs})
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		return m, m.sendCustomCommandPrompt(prompt)
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
 	}
 
 	m.renderTranscript()
@@ -1031,6 +1046,39 @@ func (m *model) handleInitCmd(args []string) {
 
 func (m *model) handleHelpCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: commandHelpText()})
+}
+
+func (m *model) handleSkillsCmd(args []string) {
+	skills := skill.LoadSkills()
+	if len(skills) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No skills found."})
+		return
+	}
+	var b strings.Builder
+	b.WriteString("Available skills:\n")
+	for _, s := range skills {
+		b.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
+	return func() tea.Msg {
+		if m.agent == nil {
+			return errorMsg(fmt.Errorf("no agent configured"))
+		}
+		var agentMsgs []agent.Message
+		ctx := agent.LoadContext()
+		if ctx != "" {
+			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
+		}
+		agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: prompt})
+		resp, err := m.agent.Step(agentMsgs)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return resp
+	}
 }
 
 func (m *model) handleUndoCmd(args []string) {
