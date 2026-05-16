@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
@@ -71,7 +72,9 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 	return string(content), nil
 }
 
-type WriteTool struct{}
+type WriteTool struct {
+	Config *config.Config
+}
 
 func (t WriteTool) Name() string        { return "write" }
 func (t WriteTool) Description() string { return "Create new files or overwrite existing ones" }
@@ -119,6 +122,13 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 	if err := os.WriteFile(safe, []byte(params.Content), 0644); err != nil {
 		return "", fmt.Errorf("failed to write file %s: %w", params.Path, err)
 	}
+
+	var formatters map[string]config.FormatterConfig
+	if t.Config != nil {
+		formatters = t.Config.Formatters
+	}
+	FormatAfterWrite(safe, formatters)
+
 	return fmt.Sprintf("Successfully wrote to %s", params.Path), nil
 }
 
@@ -165,7 +175,9 @@ func (t DeleteTool) Execute(args json.RawMessage) (string, error) {
 	return fmt.Sprintf("Successfully deleted %s", params.Path), nil
 }
 
-type EditTool struct{}
+type EditTool struct {
+	Config *config.Config
+}
 
 func (t EditTool) Name() string        { return "edit" }
 func (t EditTool) Description() string { return "Edit a file by replacing a block of text" }
@@ -214,6 +226,12 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 	if err = os.WriteFile(safe, []byte(newContent), 0644); err != nil {
 		return "", err
 	}
+
+	var formatters map[string]config.FormatterConfig
+	if t.Config != nil {
+		formatters = t.Config.Formatters
+	}
+	FormatAfterWrite(safe, formatters)
 
 	return fmt.Sprintf("Successfully edited %s", params.Path), nil
 }

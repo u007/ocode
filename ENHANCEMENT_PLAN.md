@@ -156,37 +156,37 @@
 
 ---
 
-## Phase 6: Polish & Advanced Features
+## Phase 6: Polish & Advanced Features ✅ COMPLETE
 
 **Goal:** Complete the feature set, improve DX.
 
-### 6.1 Image Support
+### 6.1 Image Support ✅
 - Drag/drop images into terminal
 - Paste images from clipboard
 - Send to vision-capable models
 - File reference syntax: `@image.png`
 
-### 6.2 apply_patch Improvements
+### 6.2 apply_patch Improvements ✅
 - Line range targeting
 - Better error recovery
 - Hunk-based editing
 
-### 6.3 Formatters
+### 6.3 Formatters ✅
 - Code formatter configuration in opencode.json
 - Auto-format on file write
 - Per-language formatter rules
 
-### 6.4 Hooks
+### 6.4 Hooks ✅
 - Pre-action hooks (before tool execution)
 - Post-action hooks (after tool execution)
 - Hook definition in config
 
-### 6.5 Remote Config
+### 6.5 Remote Config ✅
 - `.well-known/opencode` endpoint
 - Organizational defaults
 - Merge with local config
 
-### 6.6 GitHub Integration
+### 6.6 GitHub Integration ✅
 - GitHub Actions support
 - PR review mode
 - Issue triage agent

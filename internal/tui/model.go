@@ -176,12 +176,12 @@ func (m model) currentModelName() string {
 func (m *model) getInitialTools() []tool.Tool {
 	return []tool.Tool{
 		&tool.ReadTool{},
-		&tool.WriteTool{},
+		&tool.WriteTool{Config: m.config},
 		&tool.DeleteTool{},
 		&tool.GlobTool{},
 		&tool.GrepTool{},
 		&tool.BashTool{},
-		&tool.EditTool{},
+		&tool.EditTool{Config: m.config},
 		&tool.MultiEditTool{},
 		&tool.PatchTool{},
 		&tool.TodoWriteTool{},
@@ -191,6 +191,7 @@ func (m *model) getInitialTools() []tool.Tool {
 		&tool.WebSearchTool{},
 		&tool.ListTool{},
 		&tool.LSPTool{},
+		&tool.FormatTool{Config: m.config},
 	}
 }
 
@@ -1150,6 +1151,66 @@ func (m *model) handleUndoCmd(args []string) {
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Successfully reverted changes to %s", path)})
 	}
+}
+
+func (m *model) handleGitHubPR(owner, repo string, prNumber int) (string, error) {
+	pr, err := ghGetPR(owner, repo, prNumber)
+	if err != nil {
+		return "", err
+	}
+	diff, err := ghGetPRDiff(owner, repo, prNumber)
+	if err != nil {
+		diff = "(diff unavailable)"
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("PR #%d: %s\n", pr.Number, pr.Title))
+	b.WriteString(fmt.Sprintf("State: %s | Author: %s\n\n", pr.State, pr.User.Login))
+	if pr.Body != "" {
+		b.WriteString(pr.Body + "\n\n")
+	}
+	b.WriteString("--- DIFF ---\n")
+	b.WriteString(diff)
+	return b.String(), nil
+}
+
+func (m *model) handleGitHubIssueList(owner, repo, state string) (string, error) {
+	issues, err := ghListIssues(owner, repo, state)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, issue := range issues {
+		labels := strings.Join(issue.Labels, ", ")
+		b.WriteString(fmt.Sprintf("#%d: %s [%s] by %s", issue.Number, issue.Title, issue.State, issue.Author))
+		if labels != "" {
+			b.WriteString(fmt.Sprintf(" | labels: %s", labels))
+		}
+		b.WriteString("\n")
+	}
+	if len(issues) == 0 {
+		return "No issues found.", nil
+	}
+	return b.String(), nil
+}
+
+func (m *model) handleGitHubIssueGet(owner, repo string, number int) (string, error) {
+	issue, err := ghGetIssue(owner, repo, number)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("#%d: %s\n", issue.Number, issue.Title))
+	b.WriteString(fmt.Sprintf("State: %s | Author: %s\n", issue.State, issue.Author))
+	if len(issue.Labels) > 0 {
+		b.WriteString(fmt.Sprintf("Labels: %s\n", strings.Join(issue.Labels, ", ")))
+	}
+	b.WriteString("\n")
+	b.WriteString(issue.Body)
+	return b.String(), nil
+}
+
+func (m *model) handleGitHubWorkflow(name string) string {
+	return ghGenerateWorkflow(name, nil)
 }
 
 func (m *model) saveSession() {

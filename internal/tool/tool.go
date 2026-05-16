@@ -2,6 +2,8 @@ package tool
 
 import (
 	"encoding/json"
+
+	"github.com/jamesmercstudio/ocode/internal/config"
 )
 
 type Tool interface {
@@ -11,15 +13,15 @@ type Tool interface {
 	Execute(args json.RawMessage) (string, error)
 }
 
-func LoadBuiltins() []Tool {
+func LoadBuiltins(cfg *config.Config) []Tool {
 	return []Tool{
 		&ReadTool{},
-		&WriteTool{},
+		&WriteTool{Config: cfg},
 		&DeleteTool{},
 		&GlobTool{},
 		&GrepTool{},
 		&BashTool{},
-		&EditTool{},
+		&EditTool{Config: cfg},
 		&MultiEditTool{},
 		&PatchTool{},
 		&TodoWriteTool{},
@@ -29,5 +31,9 @@ func LoadBuiltins() []Tool {
 		&WebSearchTool{},
 		&ListTool{},
 		&LSPTool{},
+		&FormatTool{Config: cfg},
+		&GitHubPRTool{},
+		&GitHubIssueTool{},
+		&GitHubWorkflowTool{},
 	}
 }

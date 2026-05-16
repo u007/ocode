@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/hooks"
 	"github.com/jamesmercstudio/ocode/internal/mcp"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
@@ -278,7 +279,27 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 		}
 	}
 
-	return t.Execute(args)
+	var hooksCfg map[string]config.HookConfig
+	if a.config != nil {
+		hooksCfg = a.config.Hooks
+	}
+
+	argsStr := string(args)
+	if err := hooks.RunPreHook(name, argsStr, hooksCfg); err != nil {
+		return fmt.Sprintf("pre-hook blocked: %v", err), nil
+	}
+
+	result, err := t.Execute(args)
+
+	if hooksCfg != nil {
+		resultStr := ""
+		if err == nil {
+			resultStr = result
+		}
+		_ = hooks.RunPostHook(name, argsStr, resultStr, hooksCfg)
+	}
+
+	return result, err
 }
 
 func (a *Agent) GetToolDefinitions() []map[string]interface{} {

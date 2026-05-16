@@ -3,10 +3,13 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"time"
 )
 
 type MCPOAuthConfig struct {
@@ -40,18 +43,32 @@ type WatcherConfig struct {
 	Ignore []string `json:"ignore"`
 }
 
+type HookConfig struct {
+	Pre  []string `json:"pre"`
+	Post []string `json:"post"`
+}
+
+type FormatterConfig struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	Files   []string `json:"files"`
+}
+
 type Config struct {
-	Model        string                 `json:"model"`
-	SmallModel   string                 `json:"small_model"`
-	Provider     map[string]interface{} `json:"provider"`
-	Tools        map[string]bool        `json:"tools"`
-	Permission   map[string]interface{} `json:"permission"`
-	Agent        map[string]interface{} `json:"agent"`
-	DefaultAgent string                 `json:"default_agent"`
-	MCP          map[string]MCPConfig   `json:"mcp"`
-	TUI          TUIConfig              `json:"tui"`
-	Watcher      WatcherConfig          `json:"watcher"`
-	Ocode        *OcodeConfig           `json:"-"`
+	Model        string                      `json:"model"`
+	SmallModel   string                      `json:"small_model"`
+	Provider     map[string]interface{}      `json:"provider"`
+	Tools        map[string]bool             `json:"tools"`
+	Permission   map[string]interface{}      `json:"permission"`
+	Agent        map[string]interface{}      `json:"agent"`
+	DefaultAgent string                      `json:"default_agent"`
+	MCP          map[string]MCPConfig        `json:"mcp"`
+	TUI          TUIConfig                   `json:"tui"`
+	Watcher      WatcherConfig               `json:"watcher"`
+	Hooks        map[string]HookConfig       `json:"hooks"`
+	Formatters   map[string]FormatterConfig  `json:"formatters"`
+	RemoteConfig string                      `json:"remote_config"`
+	Ocode        *OcodeConfig                `json:"-"`
 }
 
 func Load() (*Config, error) {
@@ -59,15 +76,15 @@ func Load() (*Config, error) {
 		Tools:      make(map[string]bool),
 		Permission: make(map[string]interface{}),
 		Provider:   make(map[string]interface{}),
+		Hooks:      make(map[string]HookConfig),
+		Formatters: make(map[string]FormatterConfig),
 	}
 
-	// Default TUI values
 	mouseDefault := true
 	config.TUI.Mouse = &mouseDefault
 	config.TUI.Scroll = 3.0
 	config.TUI.LeaderTimeout = 2000
 
-	// 1. Global config
 	globalPath, err := getGlobalConfigPath()
 	if err == nil {
 		if err := loadFromFile(globalPath, config); err != nil && !os.IsNotExist(err) {
@@ -75,14 +92,12 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// 2. Custom config dir (OPENCODE_CONFIG_DIR)
 	if customDir := os.Getenv("OPENCODE_CONFIG_DIR"); customDir != "" {
 		if err := loadFromDir(customDir, config); err != nil && !os.IsNotExist(err) {
 			return nil, fmt.Errorf("failed to load custom config dir: %w", err)
 		}
 	}
 
-	// 3. Project config
 	projectPath, err := getProjectConfigPath()
 	if err == nil {
 		if err := loadFromFile(projectPath, config); err != nil && !os.IsNotExist(err) {
@@ -90,7 +105,6 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// 4. .opencode/ directory in project root
 	projectRoot := FindProjectRoot()
 	if projectRoot != "" {
 		for _, dirName := range []string{".opencode", ".opencodes"} {
@@ -101,23 +115,25 @@ func Load() (*Config, error) {
 		}
 	}
 
-	// 5. Simple env overrides
 	if model := os.Getenv("OPENCODE_MODEL"); model != "" {
 		config.Model = model
 	}
 
-	// 6. TUI config files
 	loadTUIConfig(config)
 
-	// 6. Ocode sidecar config
 	if err := LoadOcodeConfig(config); err != nil {
 		return nil, fmt.Errorf("failed to load ocode config: %w", err)
 	}
 
-	// 7. OPENCODE_CONFIG_CONTENT (inline JSON, highest priority)
 	if content := os.Getenv("OPENCODE_CONFIG_CONTENT"); content != "" {
 		if err := loadFromString(content, config); err != nil {
 			return nil, fmt.Errorf("failed to parse OPENCODE_CONFIG_CONTENT: %w", err)
+		}
+	}
+
+	if config.RemoteConfig != "" {
+		if err := mergeRemoteConfig(config); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: remote config failed: %v\n", err)
 		}
 	}
 
@@ -302,6 +318,15 @@ func loadFromString(content string, config *Config) error {
 	for k, v := range temp.Provider {
 		config.Provider[k] = v
 	}
+	for k, v := range temp.Formatters {
+		config.Formatters[k] = v
+	}
+	for k, v := range temp.Hooks {
+		config.Hooks[k] = v
+	}
+	if temp.RemoteConfig != "" {
+		config.RemoteConfig = temp.RemoteConfig
+	}
 
 	return nil
 }
@@ -340,16 +365,85 @@ func (c *Config) ActiveConfigPath() (string, error) {
 
 var jsoncComments = regexp.MustCompile(`(?m)^\s*//.*$|/\*[\s\S]*?\*/|//.*$`)
 
+func mergeRemoteConfig(config *Config) error {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(config.RemoteConfig)
+	if err != nil {
+		return fmt.Errorf("fetch remote config: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("remote config returned %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read remote config body: %w", err)
+	}
+
+	var remote Config
+	if err := json.Unmarshal(body, &remote); err != nil {
+		return fmt.Errorf("parse remote config: %w", err)
+	}
+
+	if remote.Model != "" && config.Model == "" {
+		config.Model = remote.Model
+	}
+	if remote.SmallModel != "" && config.SmallModel == "" {
+		config.SmallModel = remote.SmallModel
+	}
+	if remote.DefaultAgent != "" && config.DefaultAgent == "" {
+		config.DefaultAgent = remote.DefaultAgent
+	}
+	if config.MCP == nil {
+		config.MCP = make(map[string]MCPConfig)
+	}
+	for k, v := range remote.MCP {
+		if _, exists := config.MCP[k]; !exists {
+			config.MCP[k] = v
+		}
+	}
+	for k, v := range remote.Tools {
+		if _, exists := config.Tools[k]; !exists {
+			config.Tools[k] = v
+		}
+	}
+	for _, ignore := range remote.Watcher.Ignore {
+		config.Watcher.Ignore = append(config.Watcher.Ignore, ignore)
+	}
+	for k, v := range remote.Permission {
+		if _, exists := config.Permission[k]; !exists {
+			config.Permission[k] = v
+		}
+	}
+	for k, v := range remote.Provider {
+		if _, exists := config.Provider[k]; !exists {
+			config.Provider[k] = v
+		}
+	}
+	for k, v := range remote.Hooks {
+		if _, exists := config.Hooks[k]; !exists {
+			config.Hooks[k] = v
+		}
+	}
+	for k, v := range remote.Formatters {
+		if _, exists := config.Formatters[k]; !exists {
+			config.Formatters[k] = v
+		}
+	}
+
+	return nil
+}
+
 func loadFromFile(path string, config *Config) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 
-	// Basic JSONC support: remove comments
 	cleanData := jsoncComments.ReplaceAll(data, []byte(""))
 
-	// Simplified merging logic: unmarshal into a temp config and merge
 	var temp Config
 	if err := json.Unmarshal(cleanData, &temp); err != nil {
 		return err
@@ -381,6 +475,15 @@ func loadFromFile(path string, config *Config) error {
 	}
 	for k, v := range temp.Provider {
 		config.Provider[k] = v
+	}
+	for k, v := range temp.Hooks {
+		config.Hooks[k] = v
+	}
+	if temp.RemoteConfig != "" {
+		config.RemoteConfig = temp.RemoteConfig
+	}
+	for k, v := range temp.Formatters {
+		config.Formatters[k] = v
 	}
 
 	return nil
