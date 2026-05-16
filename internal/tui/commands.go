@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -51,6 +52,7 @@ func init() {
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
 		{name: "/permissions", help: "View or set tool permissions", handler: runPermissionsCmd},
+		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -376,5 +378,93 @@ func runCommandsCmd(m *model, args []string) tea.Cmd {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 		return nil
+	}
+}
+
+func runGitHubCmd(m *model, args []string) tea.Cmd {
+	return func() tea.Msg {
+		if len(args) < 2 {
+			var b strings.Builder
+			b.WriteString("GitHub commands:\n")
+			b.WriteString("  /github pr <owner> <repo> <number>     — Get PR diff and details\n")
+			b.WriteString("  /github issue list <owner> <repo> [state] — List issues\n")
+			b.WriteString("  /github issue get <owner> <repo> <number> — Get issue details\n")
+			b.WriteString("  /github workflow <name>                — Generate workflow (test/lint/build/deploy)\n")
+			m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+			return nil
+		}
+
+		action := args[1]
+		switch action {
+		case "pr":
+			if len(args) < 5 {
+				return statusMsg{text: "Usage: /github pr <owner> <repo> <number>"}
+			}
+			owner, repo := args[2], args[3]
+			prNum, err := strconv.Atoi(args[4])
+			if err != nil {
+				return statusMsg{text: "Invalid PR number"}
+			}
+			return func() tea.Msg {
+				pr, err := m.handleGitHubPR(owner, repo, prNum)
+				if err != nil {
+					return statusMsg{text: fmt.Sprintf("GitHub PR error: %s", err.Error())}
+				}
+				m.messages = append(m.messages, message{role: roleAssistant, text: pr})
+				return nil
+			}
+		case "issue":
+			if len(args) < 3 {
+				return statusMsg{text: "Usage: /github issue <list|get> ..."}
+			}
+			subAction := args[2]
+			switch subAction {
+			case "list":
+				if len(args) < 5 {
+					return statusMsg{text: "Usage: /github issue list <owner> <repo> [state]"}
+				}
+				state := "open"
+				if len(args) >= 6 {
+					state = args[5]
+				}
+				return func() tea.Msg {
+					result, err := m.handleGitHubIssueList(args[3], args[4], state)
+					if err != nil {
+						return statusMsg{text: fmt.Sprintf("GitHub issue error: %s", err.Error())}
+					}
+					m.messages = append(m.messages, message{role: roleAssistant, text: result})
+					return nil
+				}
+			case "get":
+				if len(args) < 6 {
+					return statusMsg{text: "Usage: /github issue get <owner> <repo> <number>"}
+				}
+				num, err := strconv.Atoi(args[5])
+				if err != nil {
+					return statusMsg{text: "Invalid issue number"}
+				}
+				return func() tea.Msg {
+					result, err := m.handleGitHubIssueGet(args[3], args[4], num)
+					if err != nil {
+						return statusMsg{text: fmt.Sprintf("GitHub issue error: %s", err.Error())}
+					}
+					m.messages = append(m.messages, message{role: roleAssistant, text: result})
+					return nil
+				}
+			default:
+				return statusMsg{text: "Unknown issue action: " + subAction}
+			}
+		case "workflow":
+			if len(args) < 3 {
+				return statusMsg{text: "Usage: /github workflow <test|lint|build|deploy>"}
+			}
+			return func() tea.Msg {
+				result := m.handleGitHubWorkflow(args[2])
+				m.messages = append(m.messages, message{role: roleAssistant, text: result})
+				return nil
+			}
+		default:
+			return statusMsg{text: "Unknown GitHub action: " + action}
+		}
 	}
 }

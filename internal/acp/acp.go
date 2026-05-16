@@ -127,7 +127,7 @@ func getOrCreateSession(sessions map[string]*sessionState, cfg *config.Config, s
 				return nil, fmt.Errorf("failed to create LLM client")
 			}
 
-			tools := tool.LoadBuiltins()
+			tools := tool.LoadBuiltins(cfg)
 			ag := agent.NewAgent(client, tools, cfg)
 			ag.LoadExternalTools(cfg)
 
@@ -148,7 +148,7 @@ func getOrCreateSession(sessions map[string]*sessionState, cfg *config.Config, s
 		return nil, fmt.Errorf("failed to create LLM client")
 	}
 
-	tools := tool.LoadBuiltins()
+	tools := tool.LoadBuiltins(cfg)
 	ag := agent.NewAgent(client, tools, cfg)
 	ag.LoadExternalTools(cfg)
 

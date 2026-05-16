@@ -82,7 +82,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tools := tool.LoadBuiltins()
+		tools := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg)
 		ag.LoadExternalTools(h.cfg)
 
@@ -192,7 +192,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 
-		tools := tool.LoadBuiltins()
+		tools := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg)
 		ag.LoadExternalTools(h.cfg)
 

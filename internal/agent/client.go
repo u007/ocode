@@ -150,9 +150,15 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		return c.chatOpenAIResponses(messages, tools)
 	}
 	url := c.BaseURL + "/chat/completions"
+
+	openAIMessages, err := c.convertToOpenAIMessages(messages)
+	if err != nil {
+		return nil, err
+	}
+
 	payload := map[string]interface{}{
 		"model":    c.Model,
-		"messages": messages,
+		"messages": openAIMessages,
 	}
 	if len(tools) > 0 {
 		payload["tools"] = tools
@@ -211,6 +217,98 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		return msg, nil
 	}
 	return nil, fmt.Errorf("no response from %s", c.Provider)
+}
+
+func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[string]interface{}, error) {
+	var result []map[string]interface{}
+	for _, m := range messages {
+		if m.Role == "tool" {
+			result = append(result, map[string]interface{}{
+				"role":       "tool",
+				"content":    m.Content,
+				"tool_call_id": m.ToolID,
+			})
+			continue
+		}
+
+		if m.Role == "user" && strings.Contains(m.Content, "@") {
+			content, err := c.buildOpenAIContentWithImages(m.Content)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, map[string]interface{}{
+				"role":    m.Role,
+				"content": content,
+			})
+			continue
+		}
+
+		result = append(result, map[string]interface{}{
+			"role":    m.Role,
+			"content": m.Content,
+		})
+	}
+	return result, nil
+}
+
+func (c *GenericClient) buildOpenAIContentWithImages(text string) ([]map[string]interface{}, error) {
+	var content []map[string]interface{}
+	parts := strings.Fields(text)
+	hasImage := false
+	var textParts []string
+
+	for _, part := range parts {
+		if strings.HasPrefix(part, "@") {
+			filePath := strings.TrimPrefix(part, "@")
+			if IsImageFile(filePath) {
+				isImage, mimeType, err := DetectImage(filePath)
+				if err != nil || !isImage {
+					textParts = append(textParts, part)
+					continue
+				}
+				encoded, err := EncodeImage(filePath)
+				if err != nil {
+					textParts = append(textParts, part)
+					continue
+				}
+				if !hasImage {
+					if len(textParts) > 0 {
+						content = append(content, map[string]interface{}{
+							"type": "text",
+							"text": strings.Join(textParts, " "),
+						})
+						textParts = nil
+					}
+					hasImage = true
+				}
+				content = append(content, map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": "data:" + mimeType + ";base64," + encoded,
+					},
+				})
+				continue
+			}
+		}
+		textParts = append(textParts, part)
+	}
+
+	if len(textParts) > 0 {
+		if hasImage {
+			content = append(content, map[string]interface{}{
+				"type": "text",
+				"text": strings.Join(textParts, " "),
+			})
+		} else {
+			return nil, nil
+		}
+	}
+
+	if !hasImage {
+		return nil, nil
+	}
+
+	return content, nil
 }
 
 // chatOpenAIResponses calls the OpenAI Responses API using a ChatGPT OAuth token.
@@ -350,8 +448,6 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 			system = m.Content
 			continue
 		}
-		// Anthropic roles: user, assistant
-		// tool results must be sent as role=user with tool_result content blocks.
 		role := m.Role
 		if role == "tool" {
 			role = "user"
@@ -360,7 +456,6 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		var content []interface{}
 
 		if m.Role == "tool" {
-			// Tool result block only — no extra text block.
 			content = []interface{}{
 				map[string]interface{}{
 					"type":        "tool_result",
@@ -369,12 +464,22 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 				},
 			}
 		} else {
-			// For user/assistant messages: text first, then tool_use blocks.
-			if m.Content != "" {
-				content = append(content, map[string]interface{}{
-					"type": "text",
-					"text": m.Content,
-				})
+			if m.Role == "user" && strings.Contains(m.Content, "@") {
+				imgBlocks, err := c.buildAnthropicImageContent(m.Content)
+				if err != nil {
+					return nil, err
+				}
+				if imgBlocks != nil {
+					content = imgBlocks
+				}
+			}
+			if content == nil {
+				if m.Content != "" {
+					content = append(content, map[string]interface{}{
+						"type": "text",
+						"text": m.Content,
+					})
+				}
 			}
 			for _, tc := range m.ToolCalls {
 				var input interface{}
@@ -499,6 +604,68 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		return resMsg, nil
 	}
 	return nil, fmt.Errorf("no response from anthropic")
+}
+
+func (c *GenericClient) buildAnthropicImageContent(text string) ([]interface{}, error) {
+	var content []interface{}
+	parts := strings.Fields(text)
+	hasImage := false
+	var textParts []string
+
+	for _, part := range parts {
+		if strings.HasPrefix(part, "@") {
+			filePath := strings.TrimPrefix(part, "@")
+			if IsImageFile(filePath) {
+				isImage, mimeType, err := DetectImage(filePath)
+				if err != nil || !isImage {
+					textParts = append(textParts, part)
+					continue
+				}
+				encoded, err := EncodeImage(filePath)
+				if err != nil {
+					textParts = append(textParts, part)
+					continue
+				}
+				if !hasImage {
+					if len(textParts) > 0 {
+						content = append(content, map[string]interface{}{
+							"type": "text",
+							"text": strings.Join(textParts, " "),
+						})
+						textParts = nil
+					}
+					hasImage = true
+				}
+				content = append(content, map[string]interface{}{
+					"type": "image",
+					"source": map[string]interface{}{
+						"type":       "base64",
+						"media_type": mimeType,
+						"data":       encoded,
+					},
+				})
+				continue
+			}
+		}
+		textParts = append(textParts, part)
+	}
+
+	if len(textParts) > 0 {
+		if hasImage {
+			content = append(content, map[string]interface{}{
+				"type": "text",
+				"text": strings.Join(textParts, " "),
+			})
+		} else {
+			return nil, nil
+		}
+	}
+
+	if !hasImage {
+		return nil, nil
+	}
+
+	return content, nil
 }
 
 type providerInfo struct {
