@@ -28,10 +28,12 @@ type slashSuggestion struct {
 
 After every key press updates the textarea (`m.input.Update(msg)`), inspect `m.input.Value()`:
 
-- If value starts with `/` and contains no space character → compute `slashPopupItems` by filtering all `commandSpecs` + `loadedCustomCommands` where `name` has the typed prefix; show popup (`showSlashPopup = true`)
+- If value starts with `/` and contains no space character AND none of `showPicker`, `showConnect`, `showPalette` are true → compute `slashPopupItems` by filtering all `commandSpecs` + `loadedCustomCommands` where `name` has the typed prefix; show popup (`showSlashPopup = true`)
 - Otherwise → `showSlashPopup = false`
 
 Filtering is case-insensitive prefix match on `spec.name`. Each result maps to `slashSuggestion{name: spec.name, desc: spec.help}`. Custom commands use their `Name` and `Description` fields.
+
+Typing just `/` (no further characters) shows **all** commands — the empty prefix matches everything.
 
 ## Key Handling
 
@@ -41,9 +43,13 @@ When `showSlashPopup` is true, intercept keys **before** passing to textarea:
 |-----|--------|
 | `↑` | Decrement `slashPopupIndex` (clamp to 0) |
 | `↓` | Increment `slashPopupIndex` (clamp to len-1) |
-| `Enter` | Set `m.input.SetValue(selected.name)`, close popup, then run normal enter handling |
+| `Tab` | Same as `↓` (select next item) |
+| `Enter` | Select item: set input to `selected.name` + trailing space, close popup. Do NOT submit — user presses Enter again to execute. |
 | `Esc` | Close popup, leave input unchanged |
+| Mouse click on row | Select that row (same as Enter for that item) |
 | All others | Pass through to textarea; popup re-filters on next render cycle |
+
+**`/model` special case:** if the selected command is `/model`, after inserting the text, immediately call `m.openModelPicker()` to chain into the existing model picker flow.
 
 "Close popup" means: `showSlashPopup = false`, `slashPopupIndex = 0`, `slashPopupItems = nil`.
 
@@ -100,6 +106,5 @@ Example:
 
 ## Out of Scope
 
-- Mouse click to select (BubbleTea mouse events are a separate concern)
 - Fuzzy matching (prefix match is sufficient)
 - Argument autocomplete (e.g. model names after `/model `) — existing Tab behavior handles this
