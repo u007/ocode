@@ -49,6 +49,8 @@ func init() {
 		{name: "/skills", help: "List available skills", handler: runSkillsCmd},
 		{name: "/commands", help: "List all available commands (built-in + custom)", handler: runCommandsCmd},
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
+		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
+		{name: "/permissions", help: "View or set tool permissions", handler: runPermissionsCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -283,6 +285,62 @@ func runMCPAuthCmd(m *model, args []string) tea.Cmd {
 
 func runExitCmd(m *model, args []string) tea.Cmd {
 	return tea.Quit
+}
+
+func runAgentCmd(m *model, args []string) tea.Cmd {
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("Available agents:\n")
+		for _, spec := range agent.DefaultAgents {
+			current := ""
+			if m.agent != nil && m.agent.Spec() != nil && m.agent.Spec().Name == spec.Name {
+				current = " (active)"
+			}
+			b.WriteString(fmt.Sprintf("  %-10s %s%s\n", spec.Name, spec.Description, current))
+		}
+		b.WriteString("\nUse '/agent <name>' to switch. Press Tab to cycle.")
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return nil
+	}
+	m.switchAgent(args[0])
+	return nil
+}
+
+func runPermissionsCmd(m *model, args []string) tea.Cmd {
+	if len(args) == 0 {
+		if m.agent == nil || m.agent.Permissions() == nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission rules configured."})
+			return nil
+		}
+		rules := m.agent.Permissions().Rules()
+		if len(rules) == 0 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission rules configured. All tools allowed by default."})
+			return nil
+		}
+		var b strings.Builder
+		b.WriteString("Permission rules:\n")
+		for toolName, level := range rules {
+			b.WriteString(fmt.Sprintf("  %-20s %s\n", toolName, level))
+		}
+		b.WriteString("\nUsage: /permissions <tool> <allow|deny|ask>")
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return nil
+	}
+	if len(args) >= 2 {
+		toolName := args[0]
+		level := agent.PermissionLevel(args[1])
+		if level != agent.PermissionAllow && level != agent.PermissionDeny && level != agent.PermissionAsk {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission level. Use: allow, deny, or ask."})
+			return nil
+		}
+		if m.agent != nil && m.agent.Permissions() != nil {
+			m.agent.Permissions().SetRule(toolName, level)
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Set %s permission for %q to %s.", level, toolName, level)})
+		return nil
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions [<tool> <allow|deny|ask>]"})
+	return nil
 }
 
 func runSkillsCmd(m *model, args []string) tea.Cmd {

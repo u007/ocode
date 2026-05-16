@@ -11,12 +11,14 @@ import (
 )
 
 type Agent struct {
-	client    LLMClient
-	tools     map[string]tool.Tool
-	mcpTools  map[string]struct{}
-	mcpErrors []string
-	config    *config.Config
-	mode      Mode
+	client      LLMClient
+	tools       map[string]tool.Tool
+	mcpTools    map[string]struct{}
+	mcpErrors   []string
+	config      *config.Config
+	mode        Mode
+	spec        *AgentSpec
+	permissions *PermissionManager
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -25,13 +27,18 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		toolMap[t.Name()] = t
 	}
 	a := &Agent{
-		client:   client,
-		tools:    toolMap,
-		mcpTools: make(map[string]struct{}),
-		config:   cfg,
-		mode:     ModeBuild,
+		client:      client,
+		tools:       toolMap,
+		mcpTools:    make(map[string]struct{}),
+		config:      cfg,
+		mode:        ModeBuild,
+		permissions: NewPermissionManager(),
 	}
 	a.tools["agent"] = AgentTool{mainAgent: a}
+	a.tools["task"] = TaskTool{mainAgent: a}
+	if cfg != nil {
+		a.permissions.LoadFromConfig(cfg.Permission)
+	}
 	return a
 }
 
@@ -242,6 +249,20 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 		return deny, nil
 	}
 
+	if a.permissions != nil {
+		level := a.permissions.Check(name)
+		if level == PermissionDeny {
+			return fmt.Sprintf("denied: tool %q is not permitted by permission rules", name), nil
+		}
+		if level == PermissionAsk {
+			return fmt.Sprintf("PERMISSION_ASK:%s", name), nil
+		}
+	}
+
+	if !a.isToolAllowed(name) {
+		return fmt.Sprintf("denied: tool %q is not allowed for this agent", name), nil
+	}
+
 	t, ok := a.tools[name]
 	if !ok {
 		return "", fmt.Errorf("tool %s not found", name)
@@ -263,6 +284,9 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 func (a *Agent) GetToolDefinitions() []map[string]interface{} {
 	defs := make([]map[string]interface{}, 0, len(a.tools))
 	for _, t := range a.tools {
+		if !a.isToolAllowed(t.Name()) {
+			continue
+		}
 		defs = append(defs, t.Definition())
 	}
 	return defs
@@ -275,9 +299,56 @@ func (a *Agent) GetProvider() string {
 func (a *Agent) GetTools() []tool.Tool {
 	tools := make([]tool.Tool, 0, len(a.tools))
 	for _, t := range a.tools {
+		if !a.isToolAllowed(t.Name()) {
+			continue
+		}
 		tools = append(tools, t)
 	}
 	return tools
+}
+
+func (a *Agent) isToolAllowed(name string) bool {
+	if a.spec != nil && len(a.spec.Tools) > 0 {
+		found := false
+		for _, allowed := range a.spec.Tools {
+			if allowed == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if a.spec != nil {
+		for _, denied := range a.spec.DeniedTools {
+			if denied == name {
+				return false
+			}
+		}
+	}
+	if a.permissions != nil {
+		level := a.permissions.Check(name)
+		if level == PermissionDeny {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *Agent) SetSpec(spec *AgentSpec) {
+	a.spec = spec
+	if spec != nil && spec.Mode.Valid() {
+		a.mode = spec.Mode
+	}
+}
+
+func (a *Agent) Spec() *AgentSpec {
+	return a.spec
+}
+
+func (a *Agent) Permissions() *PermissionManager {
+	return a.permissions
 }
 
 func (a *Agent) AddTools(tools []tool.Tool) {
