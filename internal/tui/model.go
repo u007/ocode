@@ -44,6 +44,12 @@ type editorFinishedMsg struct {
 	err     error
 }
 
+type permissionAskMsg struct {
+	toolName string
+	toolArgs json.RawMessage
+	toolCallID string
+}
+
 type authFinishedMsg struct {
 	token string
 	err   error
@@ -102,6 +108,11 @@ type model struct {
 	err              error
 	scrollSpeed      int
 	workDir          string
+	currentAgentIdx  int
+	showPermDialog   bool
+	pendingToolName  string
+	pendingToolArgs  json.RawMessage
+	pendingToolCallID string
 }
 
 type agentResponseMsg string
@@ -181,6 +192,24 @@ func (m *model) getInitialTools() []tool.Tool {
 		&tool.ListTool{},
 		&tool.LSPTool{},
 	}
+}
+
+func (m *model) switchAgent(name string) {
+	spec := agent.FindAgentSpec(name)
+	if spec == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown agent: %s", name)})
+		return
+	}
+	for i := range agent.DefaultAgents {
+		if agent.DefaultAgents[i].Name == name {
+			m.currentAgentIdx = i
+			break
+		}
+	}
+	if m.agent != nil {
+		m.agent.SetSpec(spec)
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Agent switched to: %s (%s)", spec.Name, spec.Description)})
 }
 
 func newModel(sid string, cont bool) model {
@@ -430,27 +459,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "tab":
 			current := m.input.Value()
-			if !strings.HasPrefix(current, "/") {
+			if strings.HasPrefix(current, "/") {
+				trimmed := strings.TrimSpace(current)
+				if trimmed == "/model" || strings.HasPrefix(trimmed, "/model ") {
+					m.openModelPicker()
+					return m, nil
+				}
+
+				suggestions := autocompleteSlashInput(&m, current)
+				if len(suggestions) == 0 {
+					return m, nil
+				}
+
+				if strings.HasSuffix(current, " ") {
+					m.input.SetValue(strings.TrimSpace(current) + " " + suggestions[0])
+					return m, nil
+				}
+
+				m.input.SetValue(suggestions[0])
 				return m, nil
 			}
-
-			trimmed := strings.TrimSpace(current)
-			if trimmed == "/model" || strings.HasPrefix(trimmed, "/model ") {
-				m.openModelPicker()
-				return m, nil
-			}
-
-			suggestions := autocompleteSlashInput(&m, current)
-			if len(suggestions) == 0 {
-				return m, nil
-			}
-
-			if strings.HasSuffix(current, " ") {
-				m.input.SetValue(strings.TrimSpace(current) + " " + suggestions[0])
-				return m, nil
-			}
-
-			m.input.SetValue(suggestions[0])
+			m.cycleAgentMode()
 			return m, nil
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
@@ -493,22 +522,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-			if pendingToolCallID != "" {
-				m.messages = append(m.messages, message{
-					role: roleAssistant,
-					text: fmt.Sprintf("✅ tool result: %s", text),
-					raw: &agent.Message{
-						Role:    "tool",
-						Content: text,
-						ToolID:  pendingToolCallID,
-					},
-				})
-				m.input.Reset()
+		if pendingToolCallID != "" {
+			m.messages = append(m.messages, message{
+				role: roleAssistant,
+				text: fmt.Sprintf("✅ tool result: %s", text),
+				raw: &agent.Message{
+					Role:    "tool",
+					Content: text,
+					ToolID:  pendingToolCallID,
+				},
+			})
+			m.input.Reset()
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+			m.saveSession()
+			return m, m.askAgent()
+		}
+
+		if m.showPermDialog {
+			m.showPermDialog = false
+			toolName := m.pendingToolName
+			approved := strings.ToLower(text) == "y" || strings.ToLower(text) == "yes" || strings.ToLower(text) == "allow"
+			if approved {
+				if m.agent != nil && m.agent.Permissions() != nil {
+					m.agent.Permissions().SetRule(toolName, agent.PermissionAllow)
+				}
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ Tool %q allowed. Re-executing...", toolName)})
 				m.renderTranscript()
 				m.viewport.GotoBottom()
-				m.saveSession()
-				return m, m.askAgent()
+				return m, m.reExecutePendingTool(toolName)
 			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("❌ Tool %q denied by user.", toolName)})
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+			m.saveSession()
+			return m, m.askAgent()
+		}
 
 			m.input.Reset()
 			return m, m.processFileReferences(text)
@@ -598,7 +647,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.messages = append(m.messages, message{role: roleAssistant, text: am.Content, raw: &copyMsg})
 				}
 			} else if am.Role == "tool" {
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ tool result: %s", am.Content), raw: &copyMsg})
+				if strings.HasPrefix(am.Content, "PERMISSION_ASK:") {
+					parts := strings.SplitN(am.Content, ":", 2)
+					if len(parts) == 2 {
+						m.showPermDialog = true
+						m.pendingToolName = parts[1]
+						m.pendingToolCallID = am.ToolID
+						m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⚠ Permission required for tool: %s. Allow or deny? (y/n)", parts[1]), raw: &copyMsg})
+					}
+				} else {
+					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ tool result: %s", am.Content), raw: &copyMsg})
+				}
 			}
 			if am.Usage != nil || am.Spend != nil {
 				m.sessionTelemetry.addMessage(am)
@@ -617,6 +676,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
+			}
+			if last.Role == "tool" && strings.HasPrefix(last.Content, "PERMISSION_ASK:") {
+				stop = true
 			}
 			if !stop {
 				return m, m.askAgent()
@@ -1138,6 +1200,38 @@ func (m model) askAgent() tea.Cmd {
 	}
 }
 
+func (m model) reExecutePendingTool(toolName string) tea.Cmd {
+	return func() tea.Msg {
+		if m.agent == nil {
+			return errorMsg(fmt.Errorf("no agent configured"))
+		}
+		var agentMsgs []agent.Message
+		ctx := agent.LoadContext()
+		if ctx != "" {
+			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
+		}
+		for _, msg := range m.messages {
+			if msg.raw != nil {
+				agentMsgs = append(agentMsgs, *msg.raw)
+				continue
+			}
+			role := "user"
+			if msg.role == roleAssistant {
+				role = "assistant"
+			}
+			agentMsgs = append(agentMsgs, agent.Message{
+				Role:    role,
+				Content: msg.text,
+			})
+		}
+		resp, err := m.agent.Step(agentMsgs)
+		if err != nil {
+			return errorMsg(err)
+		}
+		return resp
+	}
+}
+
 func (m *model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
@@ -1251,8 +1345,14 @@ func (m *model) renderStatus() string {
 		Background(lipgloss.Color("#1A1B26")).
 		Padding(0, 1)
 
+	agentName := "build"
+	specs := agent.DefaultAgents
+	if m.currentAgentIdx >= 0 && m.currentAgentIdx < len(specs) {
+		agentName = specs[m.currentAgentIdx].Name
+	}
+
 	return statusStyle.Width(m.panelWidth()).Render(
-		fmt.Sprintf(" Mode: %s | Model: %s | Session: %s | shift+tab: mode | ctrl+p: palette | ctrl+x: leader", m.agentModeLabel(), m.currentModelName(), m.sessionID),
+		fmt.Sprintf(" Agent: %s | Mode: %s | Model: %s | Session: %s | tab: agent | ctrl+p: palette | ctrl+x: leader", agentName, m.agentModeLabel(), m.currentModelName(), m.sessionID),
 	)
 }
 

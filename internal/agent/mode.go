@@ -13,10 +13,12 @@ const (
 	ModeBuild  Mode = "build"
 	ModePlan   Mode = "plan"
 	ModeReview Mode = "review"
+	ModeDebug  Mode = "debug"
+	ModeDocs   Mode = "docs"
 )
 
 func (m Mode) Valid() bool {
-	return m == ModeBuild || m == ModePlan || m == ModeReview
+	return m == ModeBuild || m == ModePlan || m == ModeReview || m == ModeDebug || m == ModeDocs
 }
 
 func (m Mode) String() string { return string(m) }
@@ -27,6 +29,10 @@ func NextMode(m Mode) Mode {
 		return ModePlan
 	case ModePlan:
 		return ModeReview
+	case ModeReview:
+		return ModeDebug
+	case ModeDebug:
+		return ModeDocs
 	default:
 		return ModeBuild
 	}
@@ -45,6 +51,14 @@ func (m Mode) SystemPrompt() string {
 			"You MAY read any file, search, and write review documents to paths matching REVIEW.md, " +
 			"*.review.md, or reviews/**. You MUST NOT edit code or run mutating shell commands. " +
 			"Bash is restricted to read-only commands."
+	case ModeDebug:
+		return "You are in DEBUG mode. Investigate and diagnose issues. " +
+			"You MAY read any file, search, and run bash commands (read-only and diagnostic). " +
+			"You MUST NOT edit files or use write/patch/delete tools."
+	case ModeDocs:
+		return "You are in DOCS mode. Write and maintain documentation. " +
+			"You MAY read any file, search, and write/edit documentation files. " +
+			"You MUST NOT edit source code or run shell commands."
 	default:
 		return ""
 	}
@@ -123,6 +137,22 @@ func isAllowedReviewWritePath(path string) bool {
 	return false
 }
 
+func isAllowedDocsWritePath(path string) bool {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	base := filepath.Base(clean)
+	ext := strings.ToLower(filepath.Ext(base))
+	if ext == ".md" || ext == ".txt" || ext == ".rst" {
+		return true
+	}
+	if strings.HasPrefix(clean, "docs/") || strings.Contains(clean, "/docs/") {
+		return true
+	}
+	if strings.HasPrefix(clean, "documentation/") || strings.Contains(clean, "/documentation/") {
+		return true
+	}
+	return false
+}
+
 // gateToolCall returns ("", true, nil) if the tool call is permitted,
 // or (denyMessage, false, nil) if denied. It does not execute the tool.
 func gateToolCall(mode Mode, name string, args json.RawMessage) (string, bool) {
@@ -134,6 +164,12 @@ func gateToolCall(mode Mode, name string, args json.RawMessage) (string, bool) {
 	case "read", "glob", "grep", "list", "lsp", "webfetch", "websearch", "todoread", "todowrite", "question", "skill":
 		return "", true
 	case "edit", "multiedit", "patch", "delete":
+		if mode == ModeDebug {
+			return fmt.Sprintf("denied: tool %q is not permitted in %s mode (no code edits)", name, mode), false
+		}
+		if mode == ModeDocs {
+			return "", true
+		}
 		return fmt.Sprintf("denied: tool %q is not permitted in %s mode (no code edits)", name, mode), false
 	case "write":
 		var p struct {
@@ -154,8 +190,17 @@ func gateToolCall(mode Mode, name string, args json.RawMessage) (string, bool) {
 		if mode == ModeReview && isAllowedReviewWritePath(target) {
 			return "", true
 		}
-		return fmt.Sprintf("denied: %s mode only permits writes to plan/review docs (got %q)", mode, target), false
+		if mode == ModeDocs && isAllowedDocsWritePath(target) {
+			return "", true
+		}
+		if mode == ModeDebug {
+			return fmt.Sprintf("denied: %s mode does not permit writes", mode), false
+		}
+		return fmt.Sprintf("denied: %s mode only permits writes to plan/review/docs (got %q)", mode, target), false
 	case "bash":
+		if mode == ModeDocs {
+			return fmt.Sprintf("denied: bash is not permitted in %s mode", mode), false
+		}
 		var p struct {
 			Command string `json:"command"`
 			Cmd     string `json:"cmd"`
@@ -170,7 +215,9 @@ func gateToolCall(mode Mode, name string, args json.RawMessage) (string, bool) {
 		}
 		return fmt.Sprintf("denied: bash command not in read-only allowlist for %s mode: %q", mode, cmd), false
 	default:
-		// Unknown / MCP / custom tools: deny in plan/review for safety.
+		if mode == ModeDebug || mode == ModeDocs {
+			return fmt.Sprintf("denied: tool %q is not permitted in %s mode", name, mode), false
+		}
 		return fmt.Sprintf("denied: tool %q is not permitted in %s mode", name, mode), false
 	}
 }

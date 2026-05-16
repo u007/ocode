@@ -123,25 +123,25 @@
 
 ---
 
-## Phase 5: Agents & Permissions
+## Phase 5: Agents & Permissions ✅ COMPLETE
 
 **Goal:** Multi-agent system with granular access control.
 
-### 5.1 Primary Agents Expansion
-- Add **Review** agent (read-only + write REVIEW.md)
-- Add **Debug** agent (bash + read tools only)
-- Add **Docs** agent (file ops, no system commands)
-- Agent switching via Tab (already exists, expand to 5 agents)
+### 5.1 Primary Agents Expansion ✅
+- Added **Review** agent (read-only + write REVIEW.md)
+- Added **Debug** agent (bash + read tools only)
+- Added **Docs** agent (file ops, no system commands)
+- Agent switching via Tab (expanded to 5 agents)
 - Custom agents via config + `.opencode/agents/` markdown files
 
-### 5.2 Subagent System
+### 5.2 Subagent System ✅
 - **General** subagent — multi-step tasks, parallel work
 - **Explore** subagent — fast read-only codebase exploration
 - **Scout** subagent — external docs, dependency research
 - `Task` tool for subagent delegation
 - `@agent` mention syntax for manual invocation
 
-### 5.3 Permission System
+### 5.3 Permission System ✅
 - Granular `allow` / `deny` / `ask` per tool
 - Wildcard patterns (e.g., `mymcp_*: "ask"`)
 - Config: `permission` field in opencode.json
@@ -149,7 +149,7 @@
 - Per-agent permission overrides
 - `task_permission` for subagent gating
 
-### 5.4 Agent Mode Refinement
+### 5.4 Agent Mode Refinement ✅
 - Current 3 modes → map to 5 agents
 - Mode-specific tool gating (already partially done)
 - System prompt per agent

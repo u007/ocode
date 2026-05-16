@@ -85,12 +85,16 @@ func (m model) renderPicker() string {
 }
 
 func (m *model) cycleAgentMode() {
-	if m.agent == nil {
+	specs := agent.DefaultAgents
+	if len(specs) == 0 {
 		return
 	}
-	next := agent.NextMode(m.agent.Mode())
-	m.agent.SetMode(next)
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Agent mode → %s", next)})
+	m.currentAgentIdx = (m.currentAgentIdx + 1) % len(specs)
+	spec := specs[m.currentAgentIdx]
+	if m.agent != nil {
+		m.agent.SetSpec(&spec)
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Agent → %s (%s)", spec.Name, spec.Description)})
 	m.renderTranscript()
 	m.viewport.GotoBottom()
 }
