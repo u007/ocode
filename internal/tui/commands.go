@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/commands"
 )
 
 type commandSpec struct {
@@ -18,45 +19,55 @@ type commandSpec struct {
 	handler       func(*model, []string) tea.Cmd
 }
 
-var commandSpecs = []commandSpec{
-	{name: "/model", usage: "/model <name>", help: "Switch LLM model", takesModelArg: true, handler: runModelCmd},
-	{name: "/connect", help: "Show/Set provider API keys", handler: runConnectCmd},
-	{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
-	{name: "/session", usage: "/session <cmd>", help: "Manage sessions (list, load <id>)", handler: runSessionCmd},
-	{name: "/compact", help: "Reduce context size by removing tool history", handler: runCompactCmd},
-	{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
-	{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},
-	{name: "/export", help: "Save chat as Markdown", handler: runExportCmd},
-	{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
-	{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
-	{name: "/models", help: "List recommended models for active provider", handler: runModelsCmd},
-	{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
-	{name: "/init", help: "Create default AGENTS.md", handler: runInitCmd},
-	{name: "/help", help: "Show this help", handler: runHelpCmd},
-	{name: "/themes", help: "List available themes", handler: runThemesCmd},
-	{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
-	{name: "/editor", help: "Reopen the external editor", handler: runEditorCmd},
-	{name: "/sidebar", help: "Toggle sidebar placeholder", handler: runSidebarCmd},
-	{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
-	{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
-}
-
-var commandLookup = func() map[string]*commandSpec {
-	lookup := make(map[string]*commandSpec, len(commandSpecs))
-	for i := range commandSpecs {
-		spec := &commandSpecs[i]
-		lookup[spec.name] = spec
-		for _, alias := range spec.aliases {
-			lookup[alias] = spec
-		}
-	}
-	return lookup
-}()
-
+var commandSpecs []commandSpec
+var commandLookup map[string]*commandSpec
 var commandHelpOutput string
 
+var loadedCustomCommands []commands.Command
+var customCommandLookup map[string]*commands.Command
+
 func init() {
+	commandSpecs = []commandSpec{
+		{name: "/model", usage: "/model <name>", help: "Switch LLM model", takesModelArg: true, handler: runModelCmd},
+		{name: "/connect", help: "Show/Set provider API keys", handler: runConnectCmd},
+		{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
+		{name: "/session", usage: "/session <cmd>", help: "Manage sessions (list, load <id>)", handler: runSessionCmd},
+		{name: "/compact", help: "Reduce context size by removing tool history", handler: runCompactCmd},
+		{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
+		{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},
+		{name: "/export", help: "Save chat as Markdown", handler: runExportCmd},
+		{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
+		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
+		{name: "/models", help: "List recommended models for active provider", handler: runModelsCmd},
+		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
+		{name: "/init", help: "Create default AGENTS.md", handler: runInitCmd},
+		{name: "/help", help: "Show this help", handler: runHelpCmd},
+		{name: "/themes", help: "List available themes", handler: runThemesCmd},
+		{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
+		{name: "/editor", help: "Reopen the external editor", handler: runEditorCmd},
+		{name: "/sidebar", help: "Toggle sidebar placeholder", handler: runSidebarCmd},
+		{name: "/skills", help: "List available skills", handler: runSkillsCmd},
+		{name: "/commands", help: "List all available commands (built-in + custom)", handler: runCommandsCmd},
+		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
+		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
+	}
+
+	commandLookup = make(map[string]*commandSpec, len(commandSpecs))
+	for i := range commandSpecs {
+		spec := &commandSpecs[i]
+		commandLookup[spec.name] = spec
+		for _, alias := range spec.aliases {
+			commandLookup[alias] = spec
+		}
+	}
+
 	commandHelpOutput = buildCommandHelpText(commandSpecs)
+	loadedCustomCommands = commands.LoadCommands()
+	customCommandLookup = make(map[string]*commands.Command, len(loadedCustomCommands))
+	for i := range loadedCustomCommands {
+		cmd := &loadedCustomCommands[i]
+		customCommandLookup["/"+cmd.Name] = cmd
+	}
 }
 
 func lookupCommand(name string) *commandSpec {
@@ -64,9 +75,12 @@ func lookupCommand(name string) *commandSpec {
 }
 
 func commandNames() []string {
-	names := make([]string, 0, len(commandSpecs))
+	names := make([]string, 0, len(commandSpecs)+len(loadedCustomCommands))
 	for _, spec := range commandSpecs {
 		names = append(names, spec.name)
+	}
+	for _, cmd := range loadedCustomCommands {
+		names = append(names, "/"+cmd.Name)
 	}
 	return names
 }
@@ -115,6 +129,15 @@ func autocompleteSlashInput(m *model, text string) []string {
 					seen[spec.name] = struct{}{}
 				}
 				break
+			}
+		}
+	}
+	for _, cmd := range loadedCustomCommands {
+		name := "/" + cmd.Name
+		if strings.HasPrefix(name, prefix) {
+			if _, ok := seen[name]; !ok {
+				matches = append(matches, name)
+				seen[name] = struct{}{}
 			}
 		}
 	}
@@ -260,4 +283,40 @@ func runMCPAuthCmd(m *model, args []string) tea.Cmd {
 
 func runExitCmd(m *model, args []string) tea.Cmd {
 	return tea.Quit
+}
+
+func runSkillsCmd(m *model, args []string) tea.Cmd {
+	return func() tea.Msg {
+		m.handleSkillsCmd(args)
+		return nil
+	}
+}
+
+func runCommandsCmd(m *model, args []string) tea.Cmd {
+	return func() tea.Msg {
+		var b strings.Builder
+		b.WriteString("Built-in commands:\n")
+		for _, spec := range commandSpecs {
+			if spec.help == "" {
+				continue
+			}
+			name := spec.name
+			if spec.usage != "" {
+				name = spec.usage
+			}
+			b.WriteString(fmt.Sprintf("  %-22s %s\n", name, spec.help))
+		}
+		if len(loadedCustomCommands) > 0 {
+			b.WriteString("\nCustom commands:\n")
+			for _, cmd := range loadedCustomCommands {
+				desc := cmd.Description
+				if desc == "" {
+					desc = "(no description)"
+				}
+				b.WriteString(fmt.Sprintf("  /%-22s %s\n", cmd.Name, desc))
+			}
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return nil
+	}
 }
