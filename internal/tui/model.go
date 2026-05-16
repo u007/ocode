@@ -45,8 +45,8 @@ type editorFinishedMsg struct {
 }
 
 type permissionAskMsg struct {
-	toolName string
-	toolArgs json.RawMessage
+	toolName   string
+	toolArgs   json.RawMessage
 	toolCallID string
 }
 
@@ -81,37 +81,40 @@ type statusMsg struct {
 }
 
 type model struct {
-	viewport         viewport.Model
-	input            textarea.Model
-	messages         []message
-	agent            *agent.Agent
-	config           *config.Config
-	sessionID        string
-	showThinking     bool
-	showDetails      bool
-	leaderActive     bool
-	leaderSeq        int
-	showPalette      bool
-	showPicker       bool
-	pickerItems      []string
-	pickerIndex      int
-	pickerFilter     string
-	showConnect      bool
-	connect          *connectDialog
-	showSidebar      bool
-	sessionTelemetry sidebarTelemetry
-	activeModel      string
-	paletteInput     string
-	width            int
-	height           int
-	ready            bool
-	err              error
-	scrollSpeed      int
-	workDir          string
-	currentAgentIdx  int
-	showPermDialog   bool
-	pendingToolName  string
-	pendingToolArgs  json.RawMessage
+	viewport          viewport.Model
+	input             textarea.Model
+	messages          []message
+	agent             *agent.Agent
+	config            *config.Config
+	sessionID         string
+	showThinking      bool
+	showDetails       bool
+	leaderActive      bool
+	leaderSeq         int
+	showPalette       bool
+	showPicker        bool
+	pickerItems       []string
+	pickerIndex       int
+	pickerFilter      string
+	showSlashPopup    bool
+	slashPopupIndex   int
+	slashPopupItems   []slashSuggestion
+	showConnect       bool
+	connect           *connectDialog
+	showSidebar       bool
+	sessionTelemetry  sidebarTelemetry
+	activeModel       string
+	paletteInput      string
+	width             int
+	height            int
+	ready             bool
+	err               error
+	scrollSpeed       int
+	workDir           string
+	currentAgentIdx   int
+	showPermDialog    bool
+	pendingToolName   string
+	pendingToolArgs   json.RawMessage
 	pendingToolCallID string
 }
 
@@ -272,7 +275,7 @@ func newModel(sid string, cont bool) model {
 			return ""
 		}(),
 		scrollSpeed: 3,
-		workDir:     func() string {
+		workDir: func() string {
 			d, _ := os.Getwd()
 			return d
 		}(),
@@ -316,6 +319,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
+			if m.showSlashPopup {
+				mouse := msg.Mouse()
+				if idx, ok := m.slashPopupRowForY(mouse.Y); ok {
+					selected := m.slashPopupItems[idx]
+					m.closeSlashPopup()
+					m.input.SetValue(selected.name + " ")
+					if selected.name == "/model" {
+						m.openModelPicker()
+					}
+					return m, nil
+				}
+			}
 			if path, ok := m.sidebarFileForClick(msg); ok {
 				return m, openSidebarFileInEditor(path)
 			}
@@ -329,10 +344,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.ScrollDown(m.scrollSpeed)
 			return m, nil
 		}
+	case tea.KeyPressMsg:
+		if m.showSlashPopup {
+			switch msg.String() {
+			case "esc":
+				m.closeSlashPopup()
+				return m, nil
+			case "up":
+				if m.slashPopupIndex > 0 {
+					m.slashPopupIndex--
+				}
+				return m, nil
+			case "down", "tab":
+				if len(m.slashPopupItems) == 0 {
+					break // fall through to outer handler when nothing to navigate
+				}
+				if m.slashPopupIndex < len(m.slashPopupItems)-1 {
+					m.slashPopupIndex++
+				}
+				return m, nil
+			case "enter":
+				if len(m.slashPopupItems) > 0 && m.slashPopupIndex < len(m.slashPopupItems) && !m.inputIsExactSlashCommand() {
+					selected := m.slashPopupItems[m.slashPopupIndex]
+					m.closeSlashPopup()
+					m.input.SetValue(selected.name + " ")
+					if selected.name == "/model" {
+						m.openModelPicker()
+					}
+					return m, nil
+				}
+			}
+		}
 	}
 
 	m.input, tiCmd = m.input.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
+	m = m.updateSlashPopupState()
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -489,6 +536,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if strings.HasPrefix(text, "/") {
+				m.closeSlashPopup()
 				return m.handleCommand(text)
 			}
 
@@ -523,42 +571,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		if pendingToolCallID != "" {
-			m.messages = append(m.messages, message{
-				role: roleAssistant,
-				text: fmt.Sprintf("✅ tool result: %s", text),
-				raw: &agent.Message{
-					Role:    "tool",
-					Content: text,
-					ToolID:  pendingToolCallID,
-				},
-			})
-			m.input.Reset()
-			m.renderTranscript()
-			m.viewport.GotoBottom()
-			m.saveSession()
-			return m, m.askAgent()
-		}
-
-		if m.showPermDialog {
-			m.showPermDialog = false
-			toolName := m.pendingToolName
-			approved := strings.ToLower(text) == "y" || strings.ToLower(text) == "yes" || strings.ToLower(text) == "allow"
-			if approved {
-				if m.agent != nil && m.agent.Permissions() != nil {
-					m.agent.Permissions().SetRule(toolName, agent.PermissionAllow)
-				}
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ Tool %q allowed. Re-executing...", toolName)})
+			if pendingToolCallID != "" {
+				m.messages = append(m.messages, message{
+					role: roleAssistant,
+					text: fmt.Sprintf("✅ tool result: %s", text),
+					raw: &agent.Message{
+						Role:    "tool",
+						Content: text,
+						ToolID:  pendingToolCallID,
+					},
+				})
+				m.input.Reset()
 				m.renderTranscript()
 				m.viewport.GotoBottom()
-				return m, m.reExecutePendingTool(toolName)
+				m.saveSession()
+				return m, m.askAgent()
 			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("❌ Tool %q denied by user.", toolName)})
-			m.renderTranscript()
-			m.viewport.GotoBottom()
-			m.saveSession()
-			return m, m.askAgent()
-		}
+
+			if m.showPermDialog {
+				m.showPermDialog = false
+				toolName := m.pendingToolName
+				approved := strings.ToLower(text) == "y" || strings.ToLower(text) == "yes" || strings.ToLower(text) == "allow"
+				if approved {
+					if m.agent != nil && m.agent.Permissions() != nil {
+						m.agent.Permissions().SetRule(toolName, agent.PermissionAllow)
+					}
+					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ Tool %q allowed. Re-executing...", toolName)})
+					m.renderTranscript()
+					m.viewport.GotoBottom()
+					return m, m.reExecutePendingTool(toolName)
+				}
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("❌ Tool %q denied by user.", toolName)})
+				m.renderTranscript()
+				m.viewport.GotoBottom()
+				m.saveSession()
+				return m, m.askAgent()
+			}
 
 			m.input.Reset()
 			return m, m.processFileReferences(text)
@@ -1386,12 +1434,12 @@ func (m model) renderContent() string {
 	panelWidth := m.panelWidth()
 	transcript := borderStyle.Width(panelWidth - 2).Render(m.viewport.View())
 	input := borderStyle.Width(panelWidth - 2).Render(m.input.View())
-	left := lipgloss.JoinVertical(lipgloss.Left,
-		header,
-		transcript,
-		input,
-		status,
-	)
+	leftParts := []string{header, transcript}
+	if m.showSlashPopup {
+		leftParts = append(leftParts, m.renderSlashPopup())
+	}
+	leftParts = append(leftParts, input, status)
+	left := lipgloss.JoinVertical(lipgloss.Left, leftParts...)
 
 	if m.sidebarEnabled() {
 		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebar())
