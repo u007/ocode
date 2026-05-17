@@ -84,7 +84,7 @@ func (m *gitModel) Resize(w, h int) {
 	if diffH < 1 {
 		diffH = 1
 	}
-	m.diff.SetWidth(diffW)
+	m.diff.SetWidth(diffW - 1)
 	m.diff.SetHeight(diffH)
 	m.commitInput.SetWidth(sectW + filesW)
 }
@@ -516,9 +516,9 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 		strings.Join(fileLines, "\n"),
 	)
 
-	diffPane := focusBorder(m.panel == gitPanelDiff).Width(diffW - 2).Height(h - 4).Render(
-		m.diff.View(),
-	)
+	diffSB := renderScrollbar(m.diff.Height(), m.diff.TotalLineCount(), m.diff.VisibleLineCount(), m.diff.YOffset())
+	diffContent := lipgloss.JoinHorizontal(lipgloss.Top, m.diff.View(), diffSB)
+	diffPane := focusBorder(m.panel == gitPanelDiff).Width(diffW - 2).Height(h - 4).Render(diffContent)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, sectPane, filesPane, diffPane)
 
