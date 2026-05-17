@@ -31,7 +31,7 @@
 - Create: `internal/tui/scrollbar.go`
 - Create: `internal/tui/scrollbar_test.go`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `internal/tui/scrollbar_test.go`:
 
