@@ -10,19 +10,20 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/agent"
 )
 
-func TestRenderToolResultMarksTruncatedOutputExpandable(t *testing.T) {
+func TestRenderToolResultPreservesFullOutput(t *testing.T) {
 	content := strings.Repeat("line\n", 1000)
 
 	got := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
 
-	if !strings.Contains(got, fullToolOutputMarker) {
-		t.Fatalf("expected expandable marker in truncated output, got %q", got)
+	if got != ApplyThemeColors("tokyonight").Text.Render(content) {
+		t.Fatal("expected rendered tool result to preserve full output")
 	}
 }
 
-func TestClickTruncatedToolOutputOpensFullOutputAndBackReturns(t *testing.T) {
+func TestClickToolOutputExpandsInline(t *testing.T) {
 	content := strings.Repeat("process output line\n", 600)
 	text := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
+	toolID := "tool-1"
 	m := model{
 		ready:     true,
 		width:     100,
@@ -30,34 +31,25 @@ func TestClickTruncatedToolOutputOpensFullOutputAndBackReturns(t *testing.T) {
 		input:     textarea.New(),
 		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(24)),
 		styles:    ApplyThemeColors("tokyonight"),
-		messages:  []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", Content: content}}},
+		messages:  []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
 		sessionID: "test",
 	}
 	m.renderTranscript()
-	m.viewport.GotoBottom()
 
-	markerLine := -1
-	for line := range m.toolOutputLineMap {
-		markerLine = line
-		break
+	if len(m.toolOutputRegions) != 1 {
+		t.Fatalf("expected one clickable tool output region, got %d", len(m.toolOutputRegions))
 	}
-	if markerLine < 0 {
-		t.Fatal("expected marker line to be clickable")
+	if strings.Count(m.viewport.View(), "process output line") > toolOutputPreviewLines {
+		t.Fatal("expected collapsed tool output to show at most preview lines")
 	}
 
-	y := markerLine - m.viewport.YOffset() + 2
+	y := m.toolOutputRegions[0].startLine - m.viewport.YOffset() + 2
 	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 4, Y: y})
 	got := derefTestModel(t, updated)
-	if !got.showFullToolOutput {
-		t.Fatal("expected full output view to open")
+	if !got.expandedToolOutputs[0] {
+		t.Fatal("expected click to expand tool output inline")
 	}
-	if !strings.Contains(got.fullToolOutput.View(), "process output line") {
-		t.Fatal("expected full output view to contain original output")
-	}
-
-	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
-	got = derefTestModel(t, updated)
-	if got.showFullToolOutput {
-		t.Fatal("expected esc to return to main screen")
+	if strings.Count(got.viewport.View(), "process output line") <= toolOutputPreviewLines {
+		t.Fatal("expected expanded output to show more than preview lines")
 	}
 }

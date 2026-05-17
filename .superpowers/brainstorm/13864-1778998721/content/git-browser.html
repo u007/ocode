@@ -1,0 +1,107 @@
+<h2>Git Browser Layout</h2>
+<p class="subtitle">When on the Git tab, what's the primary workflow?</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="display:flex;justify-content:space-between;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">
+          <span style="color:#58a6ff">◆ ocode</span>
+          <span><span style="padding:2px 6px;font-size:10px;color:#8b949e">1:chat</span>&nbsp;<span style="padding:2px 6px;font-size:10px;color:#8b949e">2:files</span>&nbsp;<span style="background:#21262d;padding:2px 6px;font-size:10px;color:#fff">3:git</span></span>
+        </div>
+        <div style="display:flex;gap:6px;height:115px">
+          <div style="width:110px;border:1px solid #30363d;border-radius:4px;padding:6px;font-size:10px;overflow:hidden">
+            <div style="color:#f0883e;margin-bottom:4px">● staged (2)</div>
+            <div style="padding-left:6px;color:#3fb950;background:#21262d;border-radius:2px;padding:2px 6px;margin-bottom:1px">M internal/tui/model.go</div>
+            <div style="padding-left:6px;color:#3fb950;padding:2px 6px;margin-bottom:4px">M main.go</div>
+            <div style="color:#8b949e;margin-bottom:4px">○ unstaged (3)</div>
+            <div style="padding-left:6px;color:#8b949e;padding:2px 6px">M agent.go</div>
+            <div style="padding-left:6px;color:#8b949e;padding:2px 6px">M config.go</div>
+            <div style="padding-left:6px;color:#8b949e;padding:2px 6px">? new_file.go</div>
+          </div>
+          <div style="flex:1;border:1px solid #30363d;border-radius:4px;padding:6px;font-size:10px;color:#8b949e;overflow:hidden">
+            <div style="color:#c9d1d9;margin-bottom:4px;border-bottom:1px solid #30363d;padding-bottom:3px">model.go diff</div>
+            <div style="color:#f85149">- old line removed</div>
+            <div style="color:#3fb950">+ new line added</div>
+            <div style="color:#3fb950">+ another addition</div>
+            <div style="margin-top:4px;color:#8b949e">@@ -2169,7 +2169,8 @@</div>
+            <div style="color:#f85149">- return left</div>
+            <div style="color:#3fb950">+ return right</div>
+          </div>
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">s: stage · u: unstage · c: commit · d: discard</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Staged/Unstaged + Diff (lazygit-style)</h3>
+      <p>Left: file list grouped by staged/unstaged/untracked. Right: unified diff of selected file. s/u to stage/unstage, c to commit.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="display:flex;justify-content:space-between;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">
+          <span style="color:#58a6ff">◆ ocode</span>
+          <span><span style="padding:2px 6px;font-size:10px;color:#8b949e">1:chat</span>&nbsp;<span style="padding:2px 6px;font-size:10px;color:#8b949e">2:files</span>&nbsp;<span style="background:#21262d;padding:2px 6px;font-size:10px;color:#fff">3:git</span></span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:4px;height:115px">
+          <div style="border:1px solid #30363d;border-radius:4px;padding:5px;font-size:10px;height:40px;overflow:hidden">
+            <div style="color:#8b949e;font-size:9px;margin-bottom:3px">COMMITS</div>
+            <div style="background:#21262d;border-radius:2px;padding:2px 6px;color:#c9d1d9">feat: tool parallelism · <span style="color:#8b949e">398a31f · james · 2h ago</span></div>
+            <div style="padding:2px 6px;color:#8b949e">fix: activity tracker race · 95b84d5 · james · 5h ago</div>
+          </div>
+          <div style="flex:1;border:1px solid #30363d;border-radius:4px;padding:5px;font-size:10px;overflow:hidden">
+            <div style="color:#8b949e;font-size:9px;margin-bottom:3px">FILES IN COMMIT</div>
+            <div style="color:#3fb950">M internal/tui/model.go</div>
+            <div style="color:#3fb950">M internal/agent/client.go</div>
+            <div style="color:#f85149">- internal/old.go</div>
+          </div>
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">j/k: navigate commits · enter: show diff · ctrl+c: checkout</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Commit Log + Files</h3>
+      <p>Top: scrollable commit log. Bottom: files changed in selected commit. Enter to view diff. Focused on reviewing history.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="display:flex;justify-content:space-between;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">
+          <span style="color:#58a6ff">◆ ocode</span>
+          <span><span style="padding:2px 6px;font-size:10px;color:#8b949e">1:chat</span>&nbsp;<span style="padding:2px 6px;font-size:10px;color:#8b949e">2:files</span>&nbsp;<span style="background:#21262d;padding:2px 6px;font-size:10px;color:#fff">3:git</span></span>
+        </div>
+        <div style="display:flex;gap:4px;height:115px">
+          <div style="width:70px;border:1px solid #30363d;border-radius:4px;padding:5px;font-size:9px;overflow:hidden">
+            <div style="background:#21262d;border-radius:2px;padding:2px 4px;color:#fff;margin-bottom:2px">Changes</div>
+            <div style="padding:2px 4px;color:#8b949e">Log</div>
+            <div style="padding:2px 4px;color:#8b949e">Stash</div>
+            <div style="padding:2px 4px;color:#8b949e">Branches</div>
+          </div>
+          <div style="flex:1;border:1px solid #30363d;border-radius:4px;padding:5px;font-size:10px;overflow:hidden">
+            <div style="color:#f0883e;margin-bottom:3px">● staged (2)</div>
+            <div style="color:#3fb950;background:#21262d;border-radius:2px;padding:1px 4px;margin-bottom:1px">M model.go</div>
+            <div style="color:#3fb950;padding:1px 4px">M main.go</div>
+            <div style="color:#8b949e;margin-top:4px">○ unstaged (3)</div>
+            <div style="color:#8b949e;padding:1px 4px">M agent.go</div>
+          </div>
+          <div style="flex:1;border:1px solid #30363d;border-radius:4px;padding:5px;font-size:10px;color:#8b949e;overflow:hidden">
+            <div style="color:#f85149">- old line</div>
+            <div style="color:#3fb950">+ new line</div>
+            <div style="color:#3fb950">+ added</div>
+          </div>
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">tab: switch panel · s: stage · c: commit · l: log</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C — 3-Panel: Sections + Files + Diff (full lazygit)</h3>
+      <p>Left: section switcher (Changes/Log/Stash/Branches). Middle: file list. Right: diff. Tab cycles focus between panels.</p>
+    </div>
+  </div>
+
+</div>

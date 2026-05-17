@@ -1,0 +1,32 @@
+{
+  "compact": {
+    "enabled": true,
+    "summary_provider": "deepseek",
+    "summary_model": "deepseek-v4-flash"
+  },
+  "permissions": {
+    "mode": "yolo",
+    "tools": {
+      "agent": "ask",
+      "bash": "ask",
+      "delete": "ask",
+      "edit": "ask",
+      "format": "ask",
+      "glob": "allow",
+      "grep": "allow",
+      "list": "allow",
+      "lsp": "allow",
+      "mcp_*": "ask",
+      "multi_edit": "ask",
+      "patch": "ask",
+      "question": "allow",
+      "read": "allow",
+      "skill": "allow",
+      "task": "ask",
+      "webfetch": "ask",
+      "websearch": "ask",
+      "write": "ask"
+    },
+    "bash": {}
+  }
+}

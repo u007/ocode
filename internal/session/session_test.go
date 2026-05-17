@@ -46,6 +46,38 @@ func TestSaveAndLoadPreservesMetadata(t *testing.T) {
 	}
 }
 
+func TestSaveAndLoadPreservesMessageImages(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	messages := []agent.Message{{
+		Role:    "user",
+		Content: "describe this",
+		Images: []agent.Image{{
+			Path:     "screenshot.png",
+			MIMEType: "image/png",
+			Data:     "aW1n",
+		}},
+	}}
+	if err := Save("session-images", "", messages, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	sess, err := Load("session-images")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if len(sess.Messages) != 1 || len(sess.Messages[0].Images) != 1 {
+		t.Fatalf("expected image to persist, got %#v", sess.Messages)
+	}
+	img := sess.Messages[0].Images[0]
+	if img.Path != "screenshot.png" || img.MIMEType != "image/png" || img.Data != "aW1n" {
+		t.Fatalf("unexpected image data: %#v", img)
+	}
+}
+
 func TestListAllIncludesOnlyCurrentDirClaudeSessions(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()

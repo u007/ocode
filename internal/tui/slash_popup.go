@@ -2,9 +2,14 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/jamesmercstudio/ocode/internal/agent"
+
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
@@ -91,11 +96,27 @@ func (m *model) closeSlashPopup() {
 	m.slashPopupItems = nil
 }
 
-func (m model) updateSlashPopupState() model {
+func (m model) updateSlashPopupState() (model, tea.Cmd) {
 	value := m.input.Value()
-	if !strings.HasPrefix(value, "/") || strings.Contains(value, " ") || m.showPicker || m.showConnect || m.showPalette {
+	if m.showPicker || m.showConnect || m.showPalette {
 		m.closeSlashPopup()
-		return m
+		return m, nil
+	}
+	if token, ok := activeAtToken(value); ok {
+		var cmd tea.Cmd
+		if m.fileListCache == nil {
+			cmd = buildFileListCache()
+		}
+		m.slashPopupItems = filterFileCache(m.fileListCache, strings.ToLower(token))
+		m.showSlashPopup = true
+		if m.slashPopupIndex >= len(m.slashPopupItems) {
+			m.slashPopupIndex = 0
+		}
+		return m, cmd
+	}
+	if !strings.HasPrefix(value, "/") || strings.Contains(value, " ") {
+		m.closeSlashPopup()
+		return m, nil
 	}
 
 	m.slashPopupItems = slashSuggestions(value)
@@ -103,8 +124,72 @@ func (m model) updateSlashPopupState() model {
 	if m.slashPopupIndex >= len(m.slashPopupItems) {
 		m.slashPopupIndex = 0
 	}
-	return m
+	return m, nil
 }
+
+func buildFileListCache() tea.Cmd {
+	return func() tea.Msg {
+		var items []slashSuggestion
+		filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error { //nolint:errcheck
+			if err != nil {
+				return nil
+			}
+			name := d.Name()
+			if d.IsDir() && (name == ".git" || name == ".ocode") {
+				return filepath.SkipDir
+			}
+			if d.IsDir() {
+				return nil
+			}
+			clean := strings.TrimPrefix(filepath.ToSlash(path), "./")
+			desc := "file"
+			if agent.IsImageFile(clean) {
+				desc = "image"
+			}
+			items = append(items, slashSuggestion{name: "@" + clean, display: "@" + clean, desc: desc})
+			return nil
+		})
+		return fileListCacheMsg{items: items}
+	}
+}
+
+func filterFileCache(cache []slashSuggestion, query string) []slashSuggestion {
+	out := make([]slashSuggestion, 0, 32)
+	for _, item := range cache {
+		clean := strings.TrimPrefix(strings.ToLower(item.name), "@")
+		if query == "" || fuzzyScore(clean, query) > 0 {
+			out = append(out, item)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		li := fuzzyScore(strings.TrimPrefix(strings.ToLower(out[i].name), "@"), query)
+		lj := fuzzyScore(strings.TrimPrefix(strings.ToLower(out[j].name), "@"), query)
+		if li != lj {
+			return li > lj
+		}
+		return strings.ToLower(out[i].name) < strings.ToLower(out[j].name)
+	})
+	return out
+}
+
+func activeAtToken(value string) (string, bool) {
+	idx := strings.LastIndex(value, "@")
+	if idx == -1 {
+		return "", false
+	}
+	if idx > 0 {
+		prev := value[idx-1]
+		if prev != ' ' && prev != '\n' && prev != '\t' {
+			return "", false
+		}
+	}
+	token := value[idx+1:]
+	if strings.ContainsAny(token, " \n\t") {
+		return "", false
+	}
+	return token, true
+}
+
 
 func (m model) slashPopupRowForY(y int) (int, bool) {
 	if !m.showSlashPopup || len(m.slashPopupItems) == 0 {
@@ -141,6 +226,28 @@ func (m model) inputIsExactSlashCommand() bool {
 	}
 	_, ok := customCommandLookup[text]
 	return ok
+}
+
+func (m *model) acceptPopupSuggestion(selected slashSuggestion) {
+	m.closeSlashPopup()
+	if strings.HasPrefix(selected.name, "@") {
+		value := m.input.Value()
+		idx := strings.LastIndex(value, "@")
+		if idx == -1 {
+			m.input.SetValue(selected.name + " ")
+			return
+		}
+		m.input.SetValue(value[:idx] + selected.name + " ")
+		return
+	}
+	m.input.SetValue(selected.name + " ")
+	if selected.name == "/models" {
+		m.openModelPicker()
+	} else if selected.name == "/session" {
+		m.openSessionPicker()
+	} else if selected.name == "/themes" {
+		m.openThemePicker()
+	}
 }
 
 func (m model) renderSlashPopup() string {

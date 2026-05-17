@@ -255,14 +255,4 @@ func (m *model) cycleAgentMode() {
 	if m.agent != nil {
 		m.agent.SetSpec(&spec)
 	}
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Agent → %s (%s)", spec.Name, spec.Description)})
-	m.renderTranscript()
-	m.viewport.GotoBottom()
-}
-
-func (m model) agentModeLabel() string {
-	if m.agent == nil {
-		return string(agent.ModeBuild)
-	}
-	return string(m.agent.Mode())
 }

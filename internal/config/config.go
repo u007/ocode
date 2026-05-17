@@ -117,10 +117,8 @@ func Load() (*Config, error) {
 
 	if model := os.Getenv("OPENCODE_MODEL"); model != "" {
 		config.Model = model
-	} else {
-		if recent := LoadRecentModels(); len(recent) > 0 {
-			config.Model = recent[0]
-		}
+	} else if recent := LoadRecentModels(); len(recent) > 0 {
+		config.Model = recent[0]
 	}
 
 	loadTUIConfig(config)
@@ -129,9 +127,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to load ocode config: %w", err)
 	}
 
-	// Fallback: if no model was set yet, try the last model saved in ocodeconfig.json
-	if config.Model == "" {
-		config.Model = GetLastModel()
+	// The TUI's own last_model records every model string, including shorthand
+	// names that cannot be represented in opencode's provider/model recent list.
+	if os.Getenv("OPENCODE_MODEL") == "" {
+		if lastModel := GetLastModel(); lastModel != "" {
+			config.Model = lastModel
+		}
 	}
 
 	if content := os.Getenv("OPENCODE_CONFIG_CONTENT"); content != "" {

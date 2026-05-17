@@ -1,0 +1,101 @@
+<h2>File Explorer Layout</h2>
+<p class="subtitle">When on the Files tab, how should the file tree and editor interact?</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="display:flex;justify-content:space-between;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">
+          <span style="color:#58a6ff">◆ ocode</span>
+          <span><span style="padding:2px 6px;font-size:10px;color:#8b949e">1:chat</span>&nbsp;<span style="background:#21262d;padding:2px 6px;font-size:10px;color:#fff">2:files</span>&nbsp;<span style="padding:2px 6px;font-size:10px;color:#8b949e">3:git</span></span>
+        </div>
+        <div style="display:flex;gap:6px;height:110px">
+          <div style="width:90px;border:1px solid #30363d;border-radius:4px;padding:6px;font-size:10px;color:#8b949e;overflow:hidden">
+            <div style="color:#c9d1d9;margin-bottom:4px">📁 internal/</div>
+            <div style="padding-left:8px">📁 tui/</div>
+            <div style="padding-left:16px;color:#58a6ff;background:#21262d;border-radius:2px">model.go</div>
+            <div style="padding-left:16px">tui.go</div>
+            <div style="padding-left:8px">📁 agent/</div>
+            <div style="padding-left:8px">📁 config/</div>
+          </div>
+          <div style="flex:1;border:1px solid #30363d;border-radius:4px;padding:6px;font-size:10px;color:#8b949e">
+            <div style="color:#c9d1d9;margin-bottom:4px;border-bottom:1px solid #30363d;padding-bottom:3px">model.go</div>
+            <div style="color:#d2a8ff">func </div><span style="color:#79c0ff">(m model) View()</span> {<br/>
+            &nbsp;&nbsp;v := tea.NewView(...)<br/>
+            &nbsp;&nbsp;...<br/>
+            }
+          </div>
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">j/k: navigate · enter: open in nvim · /: search</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Split: Tree + Preview</h3>
+      <p>Left pane: navigable file tree. Right pane: read-only syntax preview. Enter opens selected file in nvim/vim/emacs externally.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="display:flex;justify-content:space-between;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">
+          <span style="color:#58a6ff">◆ ocode</span>
+          <span><span style="padding:2px 6px;font-size:10px;color:#8b949e">1:chat</span>&nbsp;<span style="background:#21262d;padding:2px 6px;font-size:10px;color:#fff">2:files</span>&nbsp;<span style="padding:2px 6px;font-size:10px;color:#8b949e">3:git</span></span>
+        </div>
+        <div style="border:1px solid #30363d;border-radius:4px;padding:6px;font-size:10px;color:#8b949e;height:110px;overflow:hidden">
+          <div style="display:flex;gap:8px;margin-bottom:6px">
+            <span style="color:#c9d1d9">📁 internal/tui/</span>
+            <span style="color:#8b949e;font-size:9px">· 14 files</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px">
+            <div style="background:#21262d;border-radius:2px;padding:3px 6px;color:#58a6ff">model.go</div>
+            <div style="padding:3px 6px">tui.go</div>
+            <div style="padding:3px 6px">commands.go</div>
+            <div style="padding:3px 6px">theme.go</div>
+            <div style="padding:3px 6px">picker.go</div>
+            <div style="padding:3px 6px">connect.go</div>
+          </div>
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">arrows: navigate · enter: open in nvim · backspace: up dir · /: fuzzy</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Full-width File Browser (ranger-style)</h3>
+      <p>Grid/list of files, breadcrumb path at top, arrow-key navigation. Enter opens in external editor. No preview pane — maximizes file list.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="display:flex;justify-content:space-between;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">
+          <span style="color:#58a6ff">◆ ocode</span>
+          <span><span style="padding:2px 6px;font-size:10px;color:#8b949e">1:chat</span>&nbsp;<span style="background:#21262d;padding:2px 6px;font-size:10px;color:#fff">2:files</span>&nbsp;<span style="padding:2px 6px;font-size:10px;color:#8b949e">3:git</span></span>
+        </div>
+        <div style="display:flex;gap:4px;height:110px">
+          <div style="width:60px;border:1px solid #30363d;border-radius:4px;padding:4px;font-size:9px;color:#8b949e">
+            <div style="color:#c9d1d9;margin-bottom:2px">parent/</div>
+            <div style="padding-left:4px">tui/ →</div>
+          </div>
+          <div style="width:80px;border:1px solid #30363d;border-radius:4px;padding:4px;font-size:9px;color:#8b949e">
+            <div style="color:#c9d1d9;margin-bottom:2px">tui/</div>
+            <div style="background:#21262d;color:#58a6ff;border-radius:2px;padding:1px 3px">model.go</div>
+            <div style="padding:1px 3px">tui.go</div>
+            <div style="padding:1px 3px">theme.go</div>
+          </div>
+          <div style="flex:1;border:1px solid #30363d;border-radius:4px;padding:4px;font-size:9px;color:#8b949e">
+            <div style="color:#c9d1d9;margin-bottom:2px">model.go</div>
+            <div style="color:#d2a8ff">func</div> View() {<br/>...<br/>}
+          </div>
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">←/→: parent/child · enter: open in nvim</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C — Miller Columns (macOS Finder-style)</h3>
+      <p>3-column: parent dir → current dir → preview. Arrow left/right to traverse. Enter opens in external editor.</p>
+    </div>
+  </div>
+
+</div>

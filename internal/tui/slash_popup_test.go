@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -72,7 +74,7 @@ func TestSlashPopupStateDefaults(t *testing.T) {
 func TestSlashPopupShowsWhenInputStartsWithSlash(t *testing.T) {
 	m := model{input: newTestTextarea()}
 	m.input.SetValue("/co")
-	m = m.updateSlashPopupState()
+	m, _ = m.updateSlashPopupState()
 	if !m.showSlashPopup {
 		t.Fatal("expected popup to show for /co input")
 	}
@@ -84,7 +86,7 @@ func TestSlashPopupShowsWhenInputStartsWithSlash(t *testing.T) {
 func TestSlashPopupHidesWhenInputHasSpace(t *testing.T) {
 	m := model{input: newTestTextarea(), showSlashPopup: true}
 	m.input.SetValue("/compact ")
-	m = m.updateSlashPopupState()
+	m, _ = m.updateSlashPopupState()
 	if m.showSlashPopup {
 		t.Fatal("expected popup to hide when input contains space")
 	}
@@ -93,7 +95,7 @@ func TestSlashPopupHidesWhenInputHasSpace(t *testing.T) {
 func TestSlashPopupHidesWhenInputNotSlash(t *testing.T) {
 	m := model{input: newTestTextarea(), showSlashPopup: true}
 	m.input.SetValue("hello")
-	m = m.updateSlashPopupState()
+	m, _ = m.updateSlashPopupState()
 	if m.showSlashPopup {
 		t.Fatal("expected popup to hide for non-slash input")
 	}
@@ -102,9 +104,58 @@ func TestSlashPopupHidesWhenInputNotSlash(t *testing.T) {
 func TestSlashPopupHidesWhenOtherModalOpen(t *testing.T) {
 	m := model{input: newTestTextarea(), showPicker: true}
 	m.input.SetValue("/co")
-	m = m.updateSlashPopupState()
+	m, _ = m.updateSlashPopupState()
 	if m.showSlashPopup {
 		t.Fatal("expected popup to hide when showPicker is true")
+	}
+}
+
+func TestAtFilePopupFiltersByTypedName(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll("assets", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join("assets", "screen.png"), []byte("img"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("notes.txt", []byte("txt"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{input: newTestTextarea()}
+	// Pre-populate the file list cache synchronously (simulates the async cmd completing)
+	if msg, ok := buildFileListCache()().(fileListCacheMsg); ok {
+		m.fileListCache = msg.items
+	}
+	m.input.SetValue("look @screen")
+	m, _ = m.updateSlashPopupState()
+	if !m.showSlashPopup || len(m.slashPopupItems) == 0 {
+		t.Fatalf("expected @ file popup, got %#v", m.slashPopupItems)
+	}
+	if m.slashPopupItems[0].name != "@assets/screen.png" || m.slashPopupItems[0].desc != "image" {
+		t.Fatalf("expected image suggestion first, got %#v", m.slashPopupItems[0])
+	}
+}
+
+func TestAtFilePopupEnterReplacesActiveToken(t *testing.T) {
+	m := model{
+		input:           newTestTextarea(),
+		showSlashPopup:  true,
+		slashPopupItems: []slashSuggestion{{name: "@assets/screen.png", desc: "image"}},
+	}
+	m.input.SetValue("describe @scr")
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := updated.(model)
+	if got.showSlashPopup {
+		t.Fatal("expected popup closed after Enter")
+	}
+	if got.input.Value() != "describe @assets/screen.png " {
+		t.Fatalf("expected @ token replacement, got %q", got.input.Value())
 	}
 }
 

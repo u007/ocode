@@ -143,7 +143,7 @@ func buildCommandHelpText(specs []commandSpec) string {
 	}
 	b.WriteString("\nShortcuts:\n")
 	b.WriteString("!command       : Run an interactive shell command (takes over terminal; output not captured)\n")
-	b.WriteString("@path          : Add file content to context\n")
+	b.WriteString("@path          : Add file context or attach an image\n")
 	b.WriteString("Ctrl+P         : Open command palette\n")
 	b.WriteString("Ctrl+X         : Leader key for quick actions (u:undo, r:redo, n:new, l:list, c:compact)\n")
 	b.WriteString("Ctrl+O         : Toggle YOLO permissions mode\n")

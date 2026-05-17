@@ -42,9 +42,10 @@ const (
 )
 
 type message struct {
-	role role
-	text string
-	raw  *agent.Message
+	role      role
+	text      string
+	raw       *agent.Message
+	transient bool
 }
 
 type editorFinishedMsg struct {
@@ -82,6 +83,7 @@ type connectTestFinishedMsg struct {
 type fileSearchFinishedMsg struct {
 	processedText string
 	messages      []message
+	images        []agent.Image
 	err           error
 }
 
@@ -101,6 +103,8 @@ type streamMsgEvent struct {
 }
 
 type ctrlCResetMsg struct{}
+type dotTickMsg struct{}
+type fileListCacheMsg struct{ items []slashSuggestion }
 type streamStartedMsg struct{ cancel chan struct{} }
 
 type streamDoneMsg struct {
@@ -132,6 +136,7 @@ type model struct {
 	showSlashPopup      bool
 	slashPopupIndex     int
 	slashPopupItems     []slashSuggestion
+	fileListCache       []slashSuggestion
 	showConnect         bool
 	connect             *connectDialog
 	showSidebar         bool
@@ -141,6 +146,10 @@ type model struct {
 	width               int
 	height              int
 	ready               bool
+	activeTab           int
+	chatUnread          bool
+	files               filesModel
+	git                 gitModel
 	err                 error
 	scrollSpeed         int
 	workDir             string
@@ -162,10 +171,15 @@ type model struct {
 	inputHistory        []string
 	inputHistoryIndex   int
 	queuedInputs        []string
-	showFullToolOutput  bool
-	fullToolOutputTitle string
-	fullToolOutput      viewport.Model
-	toolOutputLineMap   map[int]int
+	expandedToolOutputs map[int]bool
+	toolOutputRegions   []toolOutputRegion
+	dotFrame            int
+}
+
+type toolOutputRegion struct {
+	messageIndex int
+	startLine    int
+	endLine      int
 }
 
 type agentResponseMsg string
@@ -301,7 +315,6 @@ func (m *model) switchAgent(name string) {
 	if m.agent != nil {
 		m.agent.SetSpec(spec)
 	}
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Agent switched to: %s (%s)", spec.Name, spec.Description)})
 }
 
 func newModel(sid string, cont bool, yolo bool) model {
@@ -342,7 +355,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "insert newline"))
 
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
-	vp.SetContent(hintStyle.Render("  ocode v"+version.Version+" — opencode clone · type a message to begin\n"))
+	vp.SetContent(hintStyle.Render("  ocode v" + version.Version + " — opencode clone · type a message to begin\n"))
 
 	if sid == "" {
 		sid = time.Now().Format("2006-01-02-150405")
@@ -379,6 +392,13 @@ func newModel(sid string, cont bool, yolo bool) model {
 
 	m.applyTheme()
 
+	workDir := m.workDir
+	m.files = newFilesModel(workDir)
+	if cfg != nil && cfg.Ocode != nil {
+		m.files.SetEditor(config.ResolveEditor(cfg.Ocode))
+	}
+	m.git = newGitModel(workDir)
+
 	if sid != "" {
 		sess, err := session.Load(sid)
 		if err == nil {
@@ -387,7 +407,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 			for _, am := range sess.Messages {
 				role := tuiRoleForAgentMessage(am)
 				copyMsg := am
-				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
+				m.messages = append(m.messages, message{role: role, text: displayTextForAgentMessage(am), raw: &copyMsg})
 			}
 		}
 	}
@@ -401,23 +421,18 @@ func (m model) Init() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
-		tiCmd tea.Cmd
-		vpCmd tea.Cmd
+		tiCmd    tea.Cmd
+		vpCmd    tea.Cmd
+		popupCmd tea.Cmd
 	)
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		if m.showFullToolOutput {
-			m.width = msg.Width
-			m.height = msg.Height
-			m.layoutFullToolOutput()
-			m.ready = true
-			return m, nil
-		}
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
 			if idx, ok := m.toolOutputForClick(msg); ok {
-				m.openFullToolOutput(idx)
+				m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
+				m.renderTranscript()
 				return m, nil
 			}
 			if m.showPicker {
@@ -439,15 +454,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				mouse := msg.Mouse()
 				if idx, ok := m.slashPopupRowForY(mouse.Y); ok {
 					selected := m.slashPopupItems[idx]
-					m.closeSlashPopup()
-					m.input.SetValue(selected.name + " ")
-					if selected.name == "/models" {
-						m.openModelPicker()
-					} else if selected.name == "/session" {
-						m.openSessionPicker()
-					} else if selected.name == "/themes" {
-						m.openThemePicker()
-					}
+					m.acceptPopupSuggestion(selected)
 					return m, nil
 				}
 			}
@@ -456,16 +463,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.MouseWheelMsg:
-		if m.showFullToolOutput {
-			if msg.Button == tea.MouseWheelUp {
-				m.fullToolOutput.ScrollUp(m.scrollSpeed)
-				return m, nil
-			}
-			if msg.Button == tea.MouseWheelDown {
-				m.fullToolOutput.ScrollDown(m.scrollSpeed)
-				return m, nil
-			}
-		}
 		if msg.Button == tea.MouseWheelUp {
 			m.viewport.ScrollUp(m.scrollSpeed)
 			return m, nil
@@ -475,17 +472,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case tea.KeyPressMsg:
-		if m.showFullToolOutput {
-			switch msg.String() {
-			case "esc", "b", "backspace":
-				m.showFullToolOutput = false
-				m.renderTranscript()
-				return m, nil
-			}
-			var cmd tea.Cmd
-			m.fullToolOutput, cmd = m.fullToolOutput.Update(msg)
-			return m, cmd
-		}
 		if m.showSlashPopup {
 			switch msg.String() {
 			case "esc":
@@ -508,15 +494,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if len(m.slashPopupItems) > 0 && m.slashPopupIndex < len(m.slashPopupItems) && !m.inputIsExactSlashCommand() {
 					selected := m.slashPopupItems[m.slashPopupIndex]
-					m.closeSlashPopup()
-					m.input.SetValue(selected.name + " ")
-					if selected.name == "/models" {
-						m.openModelPicker()
-					} else if selected.name == "/session" {
-						m.openSessionPicker()
-					} else if selected.name == "/themes" {
-						m.openThemePicker()
-					}
+					m.acceptPopupSuggestion(selected)
 					return m, nil
 				}
 			}
@@ -525,16 +503,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	m.input, tiCmd = m.input.Update(msg)
 	m.viewport, vpCmd = m.viewport.Update(msg)
-	m = m.updateSlashPopupState()
+	m, popupCmd = m.updateSlashPopupState()
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		m.layout()
+		m.files.Resize(m.width, m.height)
+		m.git.Resize(m.width, m.height)
 		m.ready = true
 	case tea.KeyPressMsg:
 		keyStr := msg.String()
+
+		// Global tab switching — always handled regardless of active tab
+		switch keyStr {
+		case "ctrl+1":
+			m.activeTab = tabChat
+			m.chatUnread = false
+			return m, nil
+		case "ctrl+2":
+			m.activeTab = tabFiles
+			return m, nil
+		case "ctrl+3":
+			m.activeTab = tabGit
+			return m, nil
+		}
+
 		if m.showPicker {
 			switch keyStr {
 			case "esc":
@@ -816,17 +811,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			return m, m.processFileReferences(text)
 		}
+
+		// Forward tab-local key input to sub-models
+		if m.activeTab == tabFiles {
+			var cmd tea.Cmd
+			m.files, cmd = m.files.Update(msg, m.width, m.height)
+			return m, cmd
+		}
+		if m.activeTab == tabGit {
+			var cmd tea.Cmd
+			m.git, cmd = m.git.Update(msg, m.width, m.height)
+			return m, cmd
+		}
 	case leaderTimeoutMsg:
 		if m.leaderActive && msg.seq == m.leaderSeq {
 			m.leaderActive = false
 		}
+		return m, nil
+	case fileListCacheMsg:
+		m.fileListCache = msg.items
+		m, _ = m.updateSlashPopupState()
 		return m, nil
 	case fileSearchFinishedMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error processing files: %v", msg.err)})
 		} else {
 			m.messages = append(m.messages, msg.messages...)
-			m.messages = append(m.messages, message{role: roleUser, text: msg.processedText})
+			userMsg := message{role: roleUser, text: msg.processedText}
+			if len(msg.images) > 0 {
+				raw := agent.Message{Role: "user", Content: msg.processedText, Images: msg.images}
+				userMsg.text = displayTextForAgentMessage(raw)
+				userMsg.raw = &raw
+			}
+			m.messages = append(m.messages, userMsg)
 		}
 		m.renderTranscript()
 		m.viewport.GotoBottom()
@@ -927,17 +944,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
+	case dotTickMsg:
+		if m.streaming || m.lastActivity.LLMRunning {
+			m.dotFrame = (m.dotFrame + 1) % 4
+			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
+		}
 	case streamStartedMsg:
 		m.streaming = true
 		m.cancelStream = msg.cancel
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
+		m.dotFrame = 0
 		if !m.activityRowReserved {
 			m.activityRowReserved = true
 			m.layout()
 		}
+		cmd := tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		if m.agent != nil {
-			return m, listenActivity(m.agent.Activity())
+			return m, tea.Batch(listenActivity(m.agent.Activity()), cmd)
 		}
+		return m, cmd
 	case activityUpdateMsg:
 		m.lastActivity = msg.snap
 		if !m.activityRowReserved {
@@ -949,6 +974,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case streamMsgEvent:
 		m.appendAgentMessage(msg.msg)
+		if m.activeTab != tabChat {
+			m.chatUnread = true
+		}
 		m.renderTranscript()
 		m.viewport.GotoBottom()
 		return m, waitStreamEvent(msg.ch, msg.errCh, msg.cancel)
@@ -978,9 +1006,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case editorFinishedMsg:
+		m.layout()
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor error: %v", msg.err)})
-		} else {
+		} else if msg.content != "" {
 			m.input.SetValue(msg.content)
 		}
 	case errorMsg:
@@ -991,7 +1020,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m, tea.Batch(tiCmd, vpCmd)
+	return m, tea.Batch(tiCmd, vpCmd, popupCmd)
 }
 
 func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
@@ -1064,6 +1093,7 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 		matches := re.FindAllStringSubmatch(text, -1)
 		processedText := text
 		var msgs []message
+		var images []agent.Image
 
 		for _, match := range matches {
 			path := match[1]
@@ -1092,6 +1122,19 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 				path = foundPath
 			}
 
+			if agent.IsImageFile(path) {
+				img, err := agent.NewImage(path)
+				if err != nil {
+					return fileSearchFinishedMsg{err: fmt.Errorf("attach image %s: %w", path, err)}
+				}
+				images = append(images, img)
+				msgs = append(msgs, message{
+					role: roleAssistant,
+					text: fmt.Sprintf("📎 Attached image %s", path),
+				})
+				continue
+			}
+
 			content, err := os.ReadFile(path)
 			if err == nil {
 				fileCtx := fmt.Sprintf("\n--- File: %s ---\n%s\n", path, string(content))
@@ -1105,7 +1148,7 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 				})
 			}
 		}
-		return fileSearchFinishedMsg{processedText: processedText, messages: msgs}
+		return fileSearchFinishedMsg{processedText: processedText, messages: msgs, images: images}
 	}
 }
 
@@ -1228,7 +1271,7 @@ func (m *model) handleSessionCmd(args []string) {
 			for _, am := range sess.Messages {
 				role := tuiRoleForAgentMessage(am)
 				copyMsg := am
-				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
+				m.messages = append(m.messages, message{role: role, text: displayTextForAgentMessage(am), raw: &copyMsg})
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Loaded session %s", m.sessionID)})
 			m.input.Focus()
@@ -1245,6 +1288,25 @@ func tuiRoleForAgentMessage(msg agent.Message) role {
 		return roleUser
 	}
 	return roleAssistant
+}
+
+func displayTextForAgentMessage(msg agent.Message) string {
+	if len(msg.Images) == 0 {
+		return msg.Content
+	}
+	var b strings.Builder
+	b.WriteString(msg.Content)
+	if msg.Content != "" {
+		b.WriteString("\n")
+	}
+	for _, img := range msg.Images {
+		label := img.Path
+		if label == "" {
+			label = img.MIMEType
+		}
+		b.WriteString(fmt.Sprintf("[image: %s]\n", label))
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m *model) handleCompactCmd(args []string) {
@@ -1295,7 +1357,7 @@ func (m *model) handleNewCmd(args []string) {
 	m.sessionTelemetry = sidebarTelemetry{}
 	m.inputHistory = nil
 	m.inputHistoryIndex = -1
-	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session."})
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session.", transient: true})
 }
 
 func (m *model) handleEditorCmd(args []string) tea.Cmd {
@@ -1556,6 +1618,9 @@ func (m *model) saveSession() {
 	if len(m.messages) > 0 {
 		var agentMsgs []agent.Message
 		for _, msg := range m.messages {
+			if msg.transient {
+				continue
+			}
 			if msg.raw != nil {
 				agentMsgs = append(agentMsgs, *msg.raw)
 			} else {
@@ -1565,6 +1630,9 @@ func (m *model) saveSession() {
 				}
 				agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
 			}
+		}
+		if len(agentMsgs) == 0 {
+			return
 		}
 		session.Save(m.sessionID, "", agentMsgs, m.sessionSidebarMetadata())
 	}
@@ -1599,6 +1667,8 @@ func (m *model) appendAgentMessage(am agent.Message) {
 		if strings.HasPrefix(am.Content, "PERMISSION_ASK:") {
 			if req, ok := parsePermissionRequest(am.Content); ok {
 				m.showPermDialog = true
+				m.activeTab = tabChat
+				m.chatUnread = false
 				m.pendingPermission = req
 				m.pendingToolName = req.ToolName
 				m.pendingToolArgs = req.Args
@@ -1773,6 +1843,9 @@ func (m model) askAgent() tea.Cmd {
 	}
 
 	for _, msg := range m.messages {
+		if msg.transient {
+			continue
+		}
 		if msg.raw != nil {
 			agentMsgs = append(agentMsgs, *msg.raw)
 			continue
@@ -1872,6 +1945,9 @@ func (m model) reExecutePendingTool(toolName string) tea.Cmd {
 			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
 		}
 		for _, msg := range m.messages {
+			if msg.transient {
+				continue
+			}
 			if msg.raw != nil {
 				agentMsgs = append(agentMsgs, *msg.raw)
 				continue
@@ -1949,59 +2025,26 @@ func (m *model) renderPalette() string {
 	return borderStyle.Width(m.width - 2).Render(header + "\n\n" + body)
 }
 
-func (m *model) openFullToolOutput(messageIndex int) {
-	if messageIndex < 0 || messageIndex >= len(m.messages) {
-		return
-	}
-	msg := m.messages[messageIndex]
-	if msg.raw == nil {
-		return
-	}
-	m.showFullToolOutput = true
-	toolName := m.lookupToolName(msg.raw.ToolID)
-	if toolName == "" {
-		toolName = "tool"
-	}
-	m.fullToolOutputTitle = fmt.Sprintf("%s output", toolName)
-	m.fullToolOutput = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
-	m.fullToolOutput.SetContent(msg.raw.Content)
-	m.layoutFullToolOutput()
-}
-
-func (m *model) layoutFullToolOutput() {
-	width := m.width - 4
-	if width < 1 {
-		width = 1
-	}
-	height := m.height - 4
-	if height < 1 {
-		height = 1
-	}
-	m.fullToolOutput.SetWidth(width)
-	m.fullToolOutput.SetHeight(height)
-}
-
-func (m model) renderFullToolOutput() string {
-	header := m.styles.Header.Render("◆ " + m.fullToolOutputTitle)
-	help := hintStyle.Render("  esc/b/backspace: back  ·  arrows/mouse: scroll")
-	body := borderStyle.Width(m.width - 2).Render(constrainView(m.fullToolOutput.View(), m.fullToolOutput.Width(), m.fullToolOutput.Height()))
-	return lipgloss.JoinVertical(lipgloss.Left, header+help, body)
-}
-
 func (m model) toolOutputForClick(msg tea.MouseClickMsg) (int, bool) {
-	if len(m.toolOutputLineMap) == 0 || m.showFullToolOutput {
+	if len(m.toolOutputRegions) == 0 {
 		return 0, false
 	}
 	mouse := msg.Mouse()
 	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
 		return 0, false
 	}
-	innerY := mouse.Y - lipgloss.Height(m.styles.Header.Render("◆ ocode")) - 1
-	if innerY < 0 || innerY >= m.viewport.Height() {
+	clickY := mouse.Y - lipgloss.Height(m.styles.Header.Render("◆ ocode")) - 1
+	if clickY < 0 || clickY >= m.viewport.Height() {
 		return 0, false
 	}
-	idx, ok := m.toolOutputLineMap[m.viewport.YOffset()+innerY]
-	return idx, ok
+	clickY += m.viewport.YOffset()
+
+	for _, region := range m.toolOutputRegions {
+		if clickY >= region.startLine && clickY <= region.endLine {
+			return region.messageIndex, true
+		}
+	}
+	return 0, false
 }
 
 func (m *model) renderTranscript() {
@@ -2009,40 +2052,65 @@ func (m *model) renderTranscript() {
 		return
 	}
 	var b strings.Builder
-	expandableMessages := []int{}
+	m.toolOutputRegions = nil
+	if m.expandedToolOutputs == nil {
+		m.expandedToolOutputs = make(map[int]bool)
+	}
+
 	for i, msg := range m.messages {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
 		switch msg.role {
 		case roleUser:
-			b.WriteString(userStyle.Render("you") + "\n" + msg.text)
+			b.WriteString(userStyle.Render("you") + "\n" + strings.TrimRight(msg.text, "\n"))
 		case roleAssistant:
-			b.WriteString(assistantStyle.Render("ocode") + "\n" + m.renderAssistantText(msg.text))
-			if msg.raw != nil && strings.Contains(msg.text, fullToolOutputMarker) {
-				expandableMessages = append(expandableMessages, i)
+			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
+				toolName := m.lookupToolName(msg.raw.ToolID)
+				if toolName == "" {
+					toolName = "tool"
+				}
+				startLine := lipgloss.Height(b.String())
+				boxContent := m.renderToolOutputBox(toolName, msg.raw.Content, m.expandedToolOutputs[i])
+				b.WriteString(boxContent)
+				endLine := lipgloss.Height(b.String()) - 1
+				m.toolOutputRegions = append(m.toolOutputRegions, toolOutputRegion{
+					messageIndex: i,
+					startLine:    startLine,
+					endLine:      endLine,
+				})
+			} else {
+				b.WriteString(assistantStyle.Render("ocode") + "\n" + m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
 			}
 		}
 	}
-	wrapped := wrapView(b.String(), m.viewport.Width())
-	m.toolOutputLineMap = toolOutputLineMap(wrapped, expandableMessages)
-	m.viewport.SetContent(wrapped)
+	m.viewport.SetContent(wrapView(b.String(), m.viewport.Width()))
 }
 
-func toolOutputLineMap(rendered string, expandableMessages []int) map[int]int {
-	if len(expandableMessages) == 0 {
-		return nil
-	}
-	lineMap := map[int]int{}
-	next := 0
-	for lineNo, line := range strings.Split(rendered, "\n") {
-		if !strings.Contains(line, fullToolOutputMarker) || next >= len(expandableMessages) {
-			continue
+func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
+	content = strings.TrimRight(content, "\n")
+	lines := strings.Split(content, "\n")
+	boxContent := content
+	footer := m.styles.Hint.Render("  ▲ click to collapse")
+
+	if !expanded {
+		footer = ""
+		if len(lines) > toolOutputPreviewLines {
+			boxContent = strings.Join(lines[len(lines)-toolOutputPreviewLines:], "\n")
+			footer = m.styles.Hint.Render(fmt.Sprintf("  … %d earlier lines · click to expand", len(lines)-toolOutputPreviewLines))
 		}
-		lineMap[lineNo] = expandableMessages[next]
-		next++
 	}
-	return lineMap
+
+	width := m.viewport.Width() - 4
+	if width < 1 {
+		width = 1
+	}
+	box := m.styles.ToolBox.Width(width).Render(boxContent)
+	header := m.styles.Hint.Render("  " + toolName + " output")
+	if footer != "" {
+		return header + "\n" + box + "\n" + footer
+	}
+	return header + "\n" + box
 }
 
 func padViewHeight(view string, height int) string {
@@ -2180,10 +2248,6 @@ func (m model) renderContent() string {
 		return "initializing…"
 	}
 
-	if m.showFullToolOutput {
-		return m.renderFullToolOutput()
-	}
-
 	if m.showPicker {
 		return m.renderPicker()
 	}
@@ -2196,7 +2260,23 @@ func (m model) renderContent() string {
 		return m.renderPalette()
 	}
 
-	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  opencode clone v"+version.Version)
+	// Route non-modal views by active tab
+	switch m.activeTab {
+	case tabFiles:
+		return m.files.View(m.width, m.height, m.styles, m.chatUnread)
+	case tabGit:
+		return m.git.View(m.width, m.height, m.styles, m.chatUnread)
+	}
+	// tabChat falls through to existing rendering below
+
+	tabBar := renderTabBar(m.activeTab, m.chatUnread)
+	headerLeft := m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+	headerRight := tabBar
+	headerPad := m.panelWidth() - lipgloss.Width(headerLeft) - lipgloss.Width(headerRight)
+	if headerPad < 0 {
+		headerPad = 0
+	}
+	header := headerLeft + strings.Repeat(" ", headerPad) + headerRight
 
 	status := m.renderStatus()
 	panelWidth := m.panelWidth()
@@ -2230,22 +2310,31 @@ func (m *model) renderStatus() string {
 		agentName = specs[m.currentAgentIdx].Name
 	}
 
-	suffix := " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
-	if m.ctrlCPressed {
-		suffix = " | ctrl+c again to quit"
-	} else if m.streaming {
-		suffix = " | esc: stop"
+	var suffix string
+	switch m.activeTab {
+	case tabFiles:
+		suffix = " | e: open in editor | /: search | ctrl+1-3: switch tab"
+	case tabGit:
+		suffix = " | tab: cycle panel | s: stage | u: unstage | c: commit | ctrl+1-3: switch tab"
+	default:
+		suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
+		if m.ctrlCPressed {
+			suffix = " | ctrl+c again to quit"
+		} else if m.streaming {
+			suffix = " | esc: stop"
+		}
 	}
 	llmState := "○ idle"
 	if m.streaming || m.lastActivity.LLMRunning {
-		llmState = "⟳ running"
+		dots := [4]string{"●○○", "●●○", "●●●", "○●●"}
+		llmState = dots[m.dotFrame]
 	}
 	permissionMode := ""
 	if m.agent != nil && m.agent.Permissions() != nil && m.agent.Permissions().Mode() == agent.PermissionModeYOLO {
 		permissionMode = " | YOLO permissions"
 	}
 	width := m.statusContentWidth()
-	text := fmt.Sprintf(" LLM: %s | Agent: %s | Mode: %s | Model: %s | Session: %s%s%s", llmState, agentName, m.agentModeLabel(), m.currentModelName(), m.sessionID, permissionMode, suffix)
+	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s | Session: %s%s%s", llmState, agentName, m.currentModelName(), m.sessionID, permissionMode, suffix)
 	return m.styles.Status.Width(width).Render(ansi.Truncate(text, width, "..."))
 }
 
