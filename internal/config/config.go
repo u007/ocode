@@ -129,6 +129,11 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("failed to load ocode config: %w", err)
 	}
 
+	// Fallback: if no model was set yet, try the last model saved in ocodeconfig.json
+	if config.Model == "" {
+		config.Model = GetLastModel()
+	}
+
 	if content := os.Getenv("OPENCODE_CONFIG_CONTENT"); content != "" {
 		if err := loadFromString(content, config); err != nil {
 			return nil, fmt.Errorf("failed to parse OPENCODE_CONFIG_CONTENT: %w", err)
@@ -219,38 +224,80 @@ func getGlobalTUIPath() (string, error) {
 }
 
 func SaveTUITheme(theme string) error {
-	tuiPath, err := getGlobalTUIPath()
+	configPath, err := getGlobalConfigPath()
 	if err != nil {
 		return err
 	}
 
-	existing, _ := os.ReadFile(tuiPath)
+	existing, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
 	m := map[string]any{}
 	if len(existing) > 0 {
 		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
 		if err := json.Unmarshal(jsoncData, &m); err != nil {
-			m = map[string]any{}
+			return fmt.Errorf("parse config: %w", err)
+		}
+	}
+	nested, ok := m["tui"].(map[string]any)
+	if !ok {
+		nested = map[string]any{}
+		m["tui"] = nested
+	}
+	nested["theme"] = theme
+	// If a legacy top-level theme exists, update it too so reads stay deterministic.
+	if _, hasTheme := m["theme"]; hasTheme {
+		m["theme"] = theme
+	}
+
+	if err := saveJSONFile(configPath, m); err != nil {
+		return err
+	}
+	return syncLegacyTUIThemeIfPresent(theme)
+}
+
+func syncLegacyTUIThemeIfPresent(theme string) error {
+	tuiPath, err := getGlobalTUIPath()
+	if err != nil {
+		return err
+	}
+	existing, err := os.ReadFile(tuiPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read legacy tui config: %w", err)
+	}
+	m := map[string]any{}
+	if len(existing) > 0 {
+		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
+		if err := json.Unmarshal(jsoncData, &m); err != nil {
+			return fmt.Errorf("parse legacy tui config: %w", err)
 		}
 	}
 	m["theme"] = theme
-	// If a nested tui.theme override exists, update it too so reads stay deterministic.
 	if nested, ok := m["tui"].(map[string]any); ok {
 		if _, hasTheme := nested["theme"]; hasTheme {
 			nested["theme"] = theme
 		}
 	}
-	data, err := json.MarshalIndent(m, "", "  ")
+	return saveJSONFile(tuiPath, m)
+}
+
+func saveJSONFile(path string, value any) error {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal tui config: %w", err)
+		return fmt.Errorf("marshal config: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(tuiPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
-	tmp := tuiPath + ".tmp"
+	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("write tui config: %w", err)
+		return fmt.Errorf("write config: %w", err)
 	}
-	return os.Rename(tmp, tuiPath)
+	return os.Rename(tmp, path)
 }
 
 func getGlobalConfigPath() (string, error) {

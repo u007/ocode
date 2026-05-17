@@ -2,8 +2,10 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/session"
 )
@@ -11,6 +13,16 @@ import (
 func (m *model) openModelPicker() {
 	items := agent.AllProviderModels()
 	m.pickerKind = "model"
+	m.pickerItems = items
+	m.pickerValues = items
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.showPicker = true
+}
+
+func (m *model) openThemePicker() {
+	items := AvailableThemes()
+	m.pickerKind = "theme"
 	m.pickerItems = items
 	m.pickerValues = items
 	m.pickerIndex = 0
@@ -50,7 +62,7 @@ func (m *model) openMessagePicker() {
 	items := make([]string, 0, len(m.messages))
 	values := make([]string, 0, len(m.messages))
 	for i, msg := range m.messages {
-		if msg.role != roleUser {
+		if !isRevertibleUserMessage(msg) {
 			continue
 		}
 		preview := strings.TrimSpace(msg.text)
@@ -66,6 +78,16 @@ func (m *model) openMessagePicker() {
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
+}
+
+func isRevertibleUserMessage(msg message) bool {
+	if msg.role != roleUser {
+		return false
+	}
+	if msg.raw != nil && msg.raw.Role != "user" {
+		return false
+	}
+	return strings.TrimSpace(msg.text) != ""
 }
 
 func (m *model) closePicker() {
@@ -109,6 +131,66 @@ func (m model) pickerVisibleItems() ([]string, []string) {
 	return items, valuesFor(items)
 }
 
+func (m model) pickerVisibleRange() (int, int) {
+	const maxRows = 15
+	items, _ := m.pickerVisibleItems()
+	start := 0
+	if m.pickerIndex >= maxRows {
+		start = m.pickerIndex - maxRows + 1
+	}
+	end := start + maxRows
+	if end > len(items) {
+		end = len(items)
+	}
+	return start, end
+}
+
+func (m model) pickerRowForY(y int) (int, bool) {
+	if !m.showPicker {
+		return 0, false
+	}
+	start, end := m.pickerVisibleRange()
+	idx := y - 3 // border top + header + blank line
+	if idx < 0 || start+idx >= end {
+		return 0, false
+	}
+	return start + idx, true
+}
+
+func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
+	items, values := m.pickerVisibleItems()
+	if len(items) == 0 || index < 0 || index >= len(items) {
+		m.closePicker()
+		return m, nil
+	}
+
+	selected := values[index]
+	kind := m.pickerKind
+	m.closePicker()
+	m.input.Reset()
+	if kind == "session" {
+		return m.handleCommand("/session load " + selected)
+	}
+	if kind == "message" {
+		idx, _ := strconv.Atoi(selected)
+		input := m.messages[idx].text
+		m.messages = m.messages[:idx]
+		m.input.SetValue(input)
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		if len(m.messages) == 0 {
+			session.Save(m.sessionID, "", nil, m.sessionSidebarMetadata()) //nolint:errcheck
+		} else {
+			m.saveSession()
+		}
+		return m, nil
+	}
+	if kind == "theme" {
+		return m.handleCommand("/themes " + selected)
+	}
+	return m.handleCommand("/models " + selected)
+}
+
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
 
@@ -118,6 +200,9 @@ func (m model) renderPicker() string {
 	}
 	if m.pickerKind == "message" {
 		title = "Revert to message"
+	}
+	if m.pickerKind == "theme" {
+		title = "Select theme"
 	}
 	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilter+"_")
 
@@ -131,17 +216,12 @@ func (m model) renderPicker() string {
 		if m.pickerKind == "message" {
 			empty = "(no user messages)"
 		}
+		if m.pickerKind == "theme" {
+			empty = "(no themes)"
+		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
-		maxRows := 15
-		start := 0
-		if m.pickerIndex >= maxRows {
-			start = m.pickerIndex - maxRows + 1
-		}
-		end := start + maxRows
-		if end > len(items) {
-			end = len(items)
-		}
+		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
 			if i == m.pickerIndex {
@@ -152,6 +232,7 @@ func (m model) renderPicker() string {
 			body.WriteString(line)
 			body.WriteString("\n")
 		}
+		const maxRows = 15
 		if len(items) > maxRows {
 			body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown", end-start, len(items))))
 		}

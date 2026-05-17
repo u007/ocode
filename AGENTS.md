@@ -7,7 +7,6 @@
 
 ## Coding Standards
 - Use modular packages in `internal/`.
-- All file modifications must use `snapshot.Backup`.
 - Respect `.gitignore` and `watcher.ignore`.
 - Follow Go best practices and standard formatting.
 

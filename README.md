@@ -44,7 +44,9 @@ Permissions live in `ocodeconfig.json` because they are ocode-only runtime polic
     "mode": "normal",
     "tools": {
       "read": "allow",
-      "write": "ask",
+      "write": "allow",
+      "edit": "allow",
+      "patch": "allow",
       "bash": "ask"
     },
     "bash": {
@@ -60,7 +62,7 @@ Permissions live in `ocodeconfig.json` because they are ocode-only runtime polic
 
 Permission levels are `allow`, `ask`, and `deny`. Modes are `normal`, `yolo`, and `locked`.
 
-- `normal`: follow tool and bash-prefix rules.
+- `normal`: follow tool and bash-prefix rules. Project-confined file writes/edits/patches/formats are allowed by default; delete, shell, network, and delegation tools still ask.
 - `yolo`: allow permission-gated tools without prompting, while still respecting agent mode restrictions and hard safety blocks.
 - `locked`: allow read/search-style tools only.
 
@@ -82,4 +84,9 @@ internal/tui/        Bubble Tea model, view, update
 
 - `/session`, `/sessions`, and `/resume` open a picker with current-project ocode and Claude Code sessions, sorted newest first.
 - `/session list` still prints saved sessions, and `/session load <id>` loads one directly.
+- On exit, ocode prints the current session ID and a resume command: `ocode -session <id>`.
 - Claude Code sessions are marked `[claude]`; resuming one clones it into ocode history as `claude-<id>`.
+- `Ctrl+O` toggles YOLO permissions mode. `/yolo [on|off|status]` is also available, and `--yolo` starts in YOLO mode.
+- `Ctrl+Y` retries the last LLM timeout or I/O failure without resending the error message as context.
+- Messages submitted while the AI is running are shown in a queue and sent automatically when the current response finishes.
+- `!command` hands the terminal to the process (interactive programs like `vim`, `less`, `git diff` work). Output is not captured into the chat transcript.

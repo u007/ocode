@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -16,7 +18,13 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/config"
 )
 
-var llmHTTPClient = &http.Client{Timeout: 120 * time.Second}
+const (
+	llmRequestTimeout = 5 * time.Minute
+	llmMaxRetries     = 3
+)
+
+var llmHTTPClient = &http.Client{Timeout: llmRequestTimeout}
+var llmRetryBaseDelay = 500 * time.Millisecond
 
 type Message struct {
 	Role             string      `json:"role"`
@@ -61,13 +69,44 @@ func (c *GenericClient) GetModel() string {
 }
 
 func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
-	if c.Provider == "anthropic" {
-		return c.chatAnthropic(messages, tools)
+	var lastErr error
+	for attempt := 0; attempt <= llmMaxRetries; attempt++ {
+		var (
+			msg *Message
+			err error
+		)
+		if c.Provider == "anthropic" {
+			msg, err = c.chatAnthropic(messages, tools)
+		} else if c.Provider == "copilot" {
+			msg, err = c.chatCopilot(messages, tools)
+		} else {
+			msg, err = c.chatOpenAI(messages, tools)
+		}
+		if err == nil {
+			return msg, nil
+		}
+		lastErr = err
+		if !isRetryableLLMClientError(err) || attempt == llmMaxRetries {
+			break
+		}
+		time.Sleep(time.Duration(attempt+1) * llmRetryBaseDelay)
 	}
-	if c.Provider == "copilot" {
-		return c.chatCopilot(messages, tools)
+	return nil, fmt.Errorf("llm request failed after %d attempt(s): %w", llmMaxRetries+1, lastErr)
+}
+
+func isRetryableLLMClientError(err error) bool {
+	if err == nil {
+		return false
 	}
-	return c.chatOpenAI(messages, tools)
+	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof")
 }
 
 // chatCopilot exchanges the stored GitHub OAuth token (held in APIKey) for a short-lived
@@ -715,8 +754,8 @@ var providers = map[string]providerInfo{
 	"zai":            {"ZAI_API_KEY", "https://api.z.ai/v1"},
 	"z.ai":           {"ZAI_API_KEY", "https://api.z.ai/v1"},
 	"zai-coding":     {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
-	"chutes":         {"CHUTES_API_KEY", "https://api.chutes.ai/v1"},
-	"chutes-coding":  {"CHUTES_API_KEY", "https://api.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
+	"chutes":         {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"},
+	"chutes-coding":  {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
 	"alibaba":        {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
 	"alibaba-coding": {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
 	"moonshot":       {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},

@@ -41,28 +41,45 @@ func NextMode(m Mode) Mode {
 // SystemPrompt returns a prompt prefix describing mode constraints.
 func (m Mode) SystemPrompt() string {
 	switch m {
+	case ModeBuild:
+		return "You are in BUILD mode. Complete the user's request end-to-end. " +
+			expectationValidationWorkflow
 	case ModePlan:
 		return "You are in PLAN mode. Investigate the codebase and produce a written plan. " +
 			"You MAY read any file, search, and write plan documents to paths matching PLAN.md, " +
 			"*.plan.md, plans/**, or docs/plans/**. You MUST NOT edit code, run mutating shell " +
-			"commands, or use the patch tool. Bash is restricted to read-only commands."
+			"commands, or use the patch tool. Bash is restricted to read-only commands. " +
+			planValidationWorkflow
 	case ModeReview:
 		return "You are in REVIEW mode. Critique the code and produce a written review. " +
 			"You MAY read any file, search, and write review documents to paths matching REVIEW.md, " +
 			"*.review.md, or reviews/**. You MUST NOT edit code or run mutating shell commands. " +
-			"Bash is restricted to read-only commands."
+			"Bash is restricted to read-only commands. " +
+			reviewValidationWorkflow
 	case ModeDebug:
 		return "You are in DEBUG mode. Investigate and diagnose issues. " +
 			"You MAY read any file, search, and run bash commands (read-only and diagnostic). " +
-			"You MUST NOT edit files or use write/patch/delete tools."
+			"You MUST NOT edit files or use write/patch/delete tools. " +
+			debugValidationWorkflow
 	case ModeDocs:
 		return "You are in DOCS mode. Write and maintain documentation. " +
 			"You MAY read any file, search, and write/edit documentation files. " +
-			"You MUST NOT edit source code or run shell commands."
+			"You MUST NOT edit source code or run shell commands. " +
+			docsValidationWorkflow
 	default:
 		return ""
 	}
 }
+
+const expectationValidationWorkflow = "Before doing substantial work, explore the codebase only as much as needed, derive an explicit User Expectation Checklist from the user's request, do the requested work, then validate every checklist item using the strongest practical checks available: tests, build, lint, typecheck, reproduction steps, manual inspection, or targeted reads. If any checklist item is not satisfied, iterate with fixes until it is satisfied or clearly blocked. In the final response, report checklist status, validation performed, and any remaining gaps or blockers."
+
+const planValidationWorkflow = "Your plan must include a User Expectation Checklist, implementation steps, and a Validation Plan that maps commands or checks to the checklist items they verify. If requirements are unclear or contradictory, ask before planning implementation details."
+
+const debugValidationWorkflow = "For bug reports, restate the observed failure, identify expected behavior from the user request, docs, tests, or existing patterns, reproduce or inspect the failure path, and identify the smallest root cause. Validate the diagnosis with a regression check, reproduction result, or targeted evidence. If validation fails, keep investigating until the issue is confirmed or clearly blocked."
+
+const reviewValidationWorkflow = "Review whether the code satisfies the User Expectation Checklist. Prioritize behavioral bugs, missed requirements, regression risk, and missing validation. Report findings first with file and line references when possible."
+
+const docsValidationWorkflow = "Before editing docs, validate the documented behavior against current code, commands, or APIs. After editing, confirm the docs match the verified behavior and report any gaps that could not be validated."
 
 var readOnlyBashAllowlist = map[string]struct{}{
 	"ls": {}, "cat": {}, "head": {}, "tail": {}, "wc": {},

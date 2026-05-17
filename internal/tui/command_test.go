@@ -7,6 +7,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"github.com/jamesmercstudio/ocode/internal/config"
 )
 
 func TestLookupCommandResolvesAliases(t *testing.T) {
@@ -32,6 +33,10 @@ func TestLookupCommandResolvesAliases(t *testing.T) {
 
 	if got := lookupCommand("/sessions"); got == nil || got.name != "/session" {
 		t.Fatalf("expected /sessions to resolve to /session, got %#v", got)
+	}
+
+	if got := lookupCommand("/theme"); got == nil || got.name != "/themes" {
+		t.Fatalf("expected /theme to resolve to /themes, got %#v", got)
 	}
 }
 
@@ -82,6 +87,65 @@ func TestTabOnModelOpensPicker(t *testing.T) {
 	got := updated.(model)
 	if !got.showPicker {
 		t.Fatal("expected tab on /models to open picker")
+	}
+}
+
+func TestThemeCommandOpensPicker(t *testing.T) {
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+
+	updated, cmd := m.handleCommand("/theme")
+	if cmd != nil {
+		t.Fatalf("expected /theme to return no command, got %T", cmd)
+	}
+
+	got := updated.(*model)
+	if !got.showPicker || got.pickerKind != "theme" {
+		t.Fatalf("expected /theme to open theme picker, got showPicker=%v kind=%q", got.showPicker, got.pickerKind)
+	}
+	if len(got.pickerItems) == 0 {
+		t.Fatal("expected theme picker to include themes")
+	}
+}
+
+func TestTabOnThemeOpensPicker(t *testing.T) {
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m.input.SetValue("/theme ")
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	got := updated.(model)
+	if !got.showPicker || got.pickerKind != "theme" {
+		t.Fatalf("expected tab on /theme to open theme picker, got showPicker=%v kind=%q", got.showPicker, got.pickerKind)
+	}
+}
+
+func TestThemePickerSelectionSwitchesTheme(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	themes := AvailableThemes()
+	if len(themes) == 0 {
+		t.Fatal("expected built-in themes")
+	}
+	m := model{
+		input:        textarea.New(),
+		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		config:       &config.Config{},
+		showPicker:   true,
+		pickerKind:   "theme",
+		pickerItems:  themes,
+		pickerValues: themes,
+	}
+
+	updated, cmd := m.selectPickerIndex(0)
+	if cmd != nil {
+		t.Fatalf("expected theme picker selection to return no command, got %T", cmd)
+	}
+
+	got := updated.(*model)
+	if got.showPicker {
+		t.Fatal("expected theme picker to close after selection")
+	}
+	if got.config.TUI.Theme != themes[0] {
+		t.Fatalf("expected selected theme %q, got %q", themes[0], got.config.TUI.Theme)
 	}
 }
 

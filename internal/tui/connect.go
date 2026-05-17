@@ -22,9 +22,9 @@ const (
 	connectStageProvider connectStage = iota
 	connectStageMethod
 	connectStageKeyInput
-	connectStagePasteCode    // Anthropic: user pastes authorization code
-	connectStageWaitBrowser  // OpenAI: localhost callback is running
-	connectStageDeviceCode   // Copilot: show user_code, await poll
+	connectStagePasteCode   // Anthropic: user pastes authorization code
+	connectStageWaitBrowser // OpenAI: localhost callback is running
+	connectStageDeviceCode  // Copilot: show user_code, await poll
 	connectStageMessage
 )
 
@@ -194,6 +194,57 @@ func (m model) renderConnect() string {
 	return borderStyle.Width(width).Render(header + "\n\n" + body + "\n" + hint)
 }
 
+func (m model) connectRowForY(y int) (int, bool) {
+	if !m.showConnect || m.connect == nil {
+		return 0, false
+	}
+
+	var count int
+	switch m.connect.stage {
+	case connectStageProvider:
+		count = len(auth.Providers)
+	case connectStageMethod:
+		count = len(m.connect.methods)
+	default:
+		return 0, false
+	}
+
+	idx := y - 3 // border top + header + blank line
+	if idx < 0 || idx >= count {
+		return 0, false
+	}
+	return idx, true
+}
+
+func (m model) selectConnectRow(index int) (tea.Model, tea.Cmd) {
+	d := m.connect
+	if d == nil {
+		m.showConnect = false
+		return m, nil
+	}
+
+	switch d.stage {
+	case connectStageProvider:
+		if index < 0 || index >= len(auth.Providers) {
+			return m, nil
+		}
+		d.providerIdx = index
+		d.provider = &auth.Providers[d.providerIdx]
+		d.methods = m.buildMethods()
+		d.methodIdx = 0
+		d.stage = connectStageMethod
+		return m, nil
+	case connectStageMethod:
+		if index < 0 || index >= len(d.methods) {
+			return m, nil
+		}
+		d.methodIdx = index
+		return m.applyConnectMethod()
+	default:
+		return m, nil
+	}
+}
+
 // updateConnectDialog handles key events while the connect dialog is open.
 func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	d := m.connect
@@ -221,11 +272,7 @@ func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
-			d.provider = &auth.Providers[d.providerIdx]
-			d.methods = m.buildMethods()
-			d.methodIdx = 0
-			d.stage = connectStageMethod
-			return m, nil
+			return m.selectConnectRow(d.providerIdx)
 		}
 		return m, nil
 
@@ -245,7 +292,7 @@ func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "enter":
-			return m.applyConnectMethod()
+			return m.selectConnectRow(d.methodIdx)
 		}
 		return m, nil
 

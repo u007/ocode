@@ -7,12 +7,17 @@ import (
 	"path/filepath"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
-	"charm.land/lipgloss/v2"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
+)
+
+const (
+	toolOutputTruncateLimit = 4000
+	fullToolOutputMarker    = "…(truncated; click to show full output)"
 )
 
 // formatToolCallHint returns a single-line summary of a tool call,
@@ -26,6 +31,9 @@ func formatToolCallHint(tc agent.ToolCall) string {
 		if v, ok := args[k]; ok {
 			if s, ok := v.(string); ok {
 				return s
+			}
+			if f, ok := v.(float64); ok {
+				return fmt.Sprintf("%g", f)
 			}
 		}
 		return ""
@@ -41,7 +49,16 @@ func formatToolCallHint(tc agent.ToolCall) string {
 
 	switch name {
 	case "read":
-		return fmt.Sprintf("📖 read %s", first("path", "file_path"))
+		p := first("path", "file_path", "filePath")
+		offset := first("offset", "start_line")
+		limit := first("limit")
+		if offset != "" && limit != "" {
+			return fmt.Sprintf("📖 read %s offset=%s limit=%s", p, offset, limit)
+		}
+		if offset != "" {
+			return fmt.Sprintf("📖 read %s offset=%s", p, offset)
+		}
+		return fmt.Sprintf("📖 read %s", p)
 	case "write":
 		return fmt.Sprintf("✏  write %s", first("path", "file_path"))
 	case "edit":
@@ -86,6 +103,149 @@ func formatToolCallHint(tc agent.ToolCall) string {
 	return fmt.Sprintf("🔧 %s %s", name, a)
 }
 
+func makeToolCall(name, argsJSON string) agent.ToolCall {
+	tc := agent.ToolCall{}
+	tc.Function.Name = name
+	tc.Function.Arguments = argsJSON
+	return tc
+}
+
+// renderThinkingContent replaces <tool_call> XML blocks embedded in thinking
+// text (emitted by some models) with formatted hints via formatToolCallHint.
+// It handles two common formats:
+//
+//	<tool_call><function=name><parameter=k>v</parameter></function></tool_call>
+//	<tool_call><name>name</name><parameters><k>v</k></parameters></tool_call>
+func renderThinkingContent(text string, st Styles) string {
+	const open = "<tool_call>"
+	const close = "</tool_call>"
+	if !strings.Contains(text, open) {
+		return text
+	}
+	var b strings.Builder
+	for {
+		start := strings.Index(text, open)
+		if start < 0 {
+			b.WriteString(text)
+			break
+		}
+		b.WriteString(text[:start])
+		text = text[start+len(open):]
+		end := strings.Index(text, close)
+		var block string
+		if end < 0 {
+			block = text
+			text = ""
+		} else {
+			block = text[:end]
+			text = text[end+len(close):]
+		}
+		hint := parseThinkingToolCall(block)
+		b.WriteString(st.Thinking.Copy().Faint(true).Italic(true).Render("  " + hint))
+		if end >= 0 {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// parseThinkingToolCall parses the inner content of a <tool_call> block and
+// returns a formatted hint string.
+func parseThinkingToolCall(block string) string {
+	block = strings.TrimSpace(block)
+
+	// Format 1: <function=name><parameter=k>v</parameter>...
+	if strings.HasPrefix(block, "<function=") {
+		end := strings.Index(block, ">")
+		if end < 0 {
+			return "🔧 " + block
+		}
+		name := block[len("<function="):end]
+		rest := block[end+1:]
+		args := map[string]interface{}{}
+		for {
+			ps := strings.Index(rest, "<parameter=")
+			if ps < 0 {
+				break
+			}
+			pe := strings.Index(rest[ps:], ">")
+			if pe < 0 {
+				break
+			}
+			key := rest[ps+len("<parameter=") : ps+pe]
+			rest = rest[ps+pe+1:]
+			closeTag := "</parameter>"
+			ce := strings.Index(rest, closeTag)
+			var val string
+			if ce >= 0 {
+				val = rest[:ce]
+				rest = rest[ce+len(closeTag):]
+			} else {
+				val = rest
+				rest = ""
+			}
+			args[key] = strings.TrimSpace(val)
+		}
+		argsJSON, _ := json.Marshal(args)
+		return formatToolCallHint(makeToolCall(name, string(argsJSON)))
+	}
+
+	// Format 2: <name>name</name><parameters><k>v</k>...</parameters>
+	name := extractXMLTag(block, "name")
+	args := map[string]interface{}{}
+	params := extractXMLTag(block, "parameters")
+	if params != "" {
+		rest := params
+		for {
+			ts := strings.Index(rest, "<")
+			if ts < 0 {
+				break
+			}
+			te := strings.Index(rest[ts:], ">")
+			if te < 0 {
+				break
+			}
+			key := rest[ts+1 : ts+te]
+			if strings.HasPrefix(key, "/") {
+				rest = rest[ts+te+1:]
+				continue
+			}
+			rest = rest[ts+te+1:]
+			closeTag := "</" + key + ">"
+			ce := strings.Index(rest, closeTag)
+			var val string
+			if ce >= 0 {
+				val = rest[:ce]
+				rest = rest[ce+len(closeTag):]
+			} else {
+				val = rest
+				rest = ""
+			}
+			args[key] = strings.TrimSpace(val)
+		}
+	}
+	if name == "" {
+		return "🔧 " + strings.TrimSpace(block)
+	}
+	argsJSON, _ := json.Marshal(args)
+	return formatToolCallHint(makeToolCall(name, string(argsJSON)))
+}
+
+func extractXMLTag(s, tag string) string {
+	open := "<" + tag + ">"
+	close := "</" + tag + ">"
+	start := strings.Index(s, open)
+	if start < 0 {
+		return ""
+	}
+	start += len(open)
+	end := strings.Index(s[start:], close)
+	if end < 0 {
+		return s[start:]
+	}
+	return s[start : start+end]
+}
+
 // renderToolResult formats a tool result for display:
 // - DIFF: prefix → colorized unified diff
 // - read result → syntax-highlighted code block
@@ -97,8 +257,8 @@ func renderToolResult(toolName, content string, st Styles) string {
 	if toolName == "read" {
 		return renderReadResult(content, st)
 	}
-	if len(content) > 4000 {
-		content = content[:4000] + "\n…(truncated)"
+	if len(content) > toolOutputTruncateLimit {
+		content = content[:toolOutputTruncateLimit] + "\n" + fullToolOutputMarker
 	}
 	return st.Text.Render(content)
 }

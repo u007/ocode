@@ -93,7 +93,8 @@ func (t AgentTool) Execute(args json.RawMessage) (string, error) {
 
 	subAgentMsgs := []Message{
 		{Role: "system", Content: "You are a specialized sub-agent. Your goal is to complete the task provided by the main agent. " +
-			"Be concise and return only the final result or relevant code. " +
+			"Use a User Expectation Checklist for multi-step work, validate each checklist item with the strongest practical check available, and iterate if validation fails. " +
+			"Be concise and return only the final result, relevant code, checklist status, validation performed, and remaining gaps. " +
 			"Background Context: " + params.Context},
 		{Role: "user", Content: params.Prompt},
 	}

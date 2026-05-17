@@ -1,13 +1,18 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,12 +24,14 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/skill"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/jamesmercstudio/ocode/internal/version"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type role int
@@ -54,6 +61,11 @@ type permissionAskMsg struct {
 type authFinishedMsg struct {
 	token string
 	err   error
+}
+
+type shellFinishedMsg struct {
+	command string
+	err     error
 }
 
 type connectOAuthFinishedMsg struct {
@@ -100,52 +112,60 @@ type activityUpdateMsg struct {
 }
 
 type model struct {
-	viewport          viewport.Model
-	input             textarea.Model
-	messages          []message
-	agent             *agent.Agent
-	config            *config.Config
-	sessionID         string
-	showThinking      bool
-	showDetails       bool
-	leaderActive      bool
-	leaderSeq         int
-	showPalette       bool
-	showPicker        bool
-	pickerKind        string
-	pickerItems       []string
-	pickerValues      []string
-	pickerIndex       int
-	pickerFilter      string
-	showSlashPopup    bool
-	slashPopupIndex   int
-	slashPopupItems   []slashSuggestion
-	showConnect       bool
-	connect           *connectDialog
-	showSidebar       bool
-	sessionTelemetry  sidebarTelemetry
-	activeModel       string
-	paletteInput      string
-	width             int
-	height            int
-	ready             bool
-	err               error
-	scrollSpeed       int
-	workDir           string
-	currentAgentIdx   int
-	showPermDialog    bool
-	pendingToolName   string
-	pendingToolArgs   json.RawMessage
-	pendingToolCallID string
-	pendingPermission agent.PermissionRequest
-	styles            Styles
+	viewport            viewport.Model
+	input               textarea.Model
+	messages            []message
+	agent               *agent.Agent
+	config              *config.Config
+	sessionID           string
+	showThinking        bool
+	showDetails         bool
+	leaderActive        bool
+	leaderSeq           int
+	showPalette         bool
+	showPicker          bool
+	pickerKind          string
+	pickerItems         []string
+	pickerValues        []string
+	pickerIndex         int
+	pickerFilter        string
+	showSlashPopup      bool
+	slashPopupIndex     int
+	slashPopupItems     []slashSuggestion
+	showConnect         bool
+	connect             *connectDialog
+	showSidebar         bool
+	sessionTelemetry    sidebarTelemetry
+	activeModel         string
+	paletteInput        string
+	width               int
+	height              int
+	ready               bool
+	err                 error
+	scrollSpeed         int
+	workDir             string
+	currentAgentIdx     int
+	showPermDialog      bool
+	pendingToolName     string
+	pendingToolArgs     json.RawMessage
+	pendingToolCallID   string
+	pendingPermission   agent.PermissionRequest
+	styles              Styles
 	streaming           bool
 	ctrlCPressed        bool
 	cancelStream        chan struct{}
 	lastActivity        agent.ActivitySnapshot
 	activityRowReserved bool
-  escPressed        bool
-  escPressTime      time.Time
+	escPressed          bool
+	escPressTime        time.Time
+	lastRetryableLLMErr string
+	inputHistory        []string
+	inputHistoryIndex   int
+	queuedInputs        []string
+	showFullToolOutput  bool
+	fullToolOutputTitle string
+	fullToolOutput      viewport.Model
+	toolOutputLineMap   map[int]int
 }
 
 type agentResponseMsg string
@@ -160,8 +180,9 @@ var (
 			Padding(0, 1)
 	hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
 
-	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Strikethrough(true).Faint(true)
+	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Strikethrough(true)
 	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
+	todoPendingStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#A9B1D6"))
 )
 
 // styleTodoLine renders a markdown todo line with strikethrough/dim for done
@@ -178,7 +199,9 @@ func styleTodoLine(line string) string {
 	case "x", "X":
 		return indent + todoDoneStyle.Render("- [✓] "+body)
 	case "~", "-":
-		return indent + todoInProgressStyle.Render("- [•] "+body)
+		return indent + todoInProgressStyle.Render("- [⟳] "+body)
+	case " ":
+		return indent + todoPendingStyle.Render("- [○] "+body)
 	default:
 		return line
 	}
@@ -311,6 +334,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	ta.Prompt = "▍ "
 	ta.CharLimit = 8000
 	ta.SetHeight(3)
+	ta.MaxWidth = 80
 	ta.ShowLineNumbers = false
 	styles := ta.Styles()
 	styles.Focused.CursorLine = lipgloss.NewStyle()
@@ -318,7 +342,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "insert newline"))
 
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
-	vp.SetContent(hintStyle.Render("  ocode — opencode clone · type a message to begin\n"))
+	vp.SetContent(hintStyle.Render("  ocode v"+version.Version+" — opencode clone · type a message to begin\n"))
 
 	if sid == "" {
 		sid = time.Now().Format("2006-01-02-150405")
@@ -361,10 +385,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
 			for _, am := range sess.Messages {
-				role := roleUser
-				if am.Role == "assistant" || am.Role == "tool" {
-					role = roleAssistant
-				}
+				role := tuiRoleForAgentMessage(am)
 				copyMsg := am
 				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
 			}
@@ -385,8 +406,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	)
 
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		if m.showFullToolOutput {
+			m.width = msg.Width
+			m.height = msg.Height
+			m.layoutFullToolOutput()
+			m.ready = true
+			return m, nil
+		}
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
+			if idx, ok := m.toolOutputForClick(msg); ok {
+				m.openFullToolOutput(idx)
+				return m, nil
+			}
+			if m.showPicker {
+				mouse := msg.Mouse()
+				if idx, ok := m.pickerRowForY(mouse.Y); ok {
+					m.pickerIndex = idx
+					return m.selectPickerIndex(idx)
+				}
+				return m, nil
+			}
+			if m.showConnect {
+				mouse := msg.Mouse()
+				if idx, ok := m.connectRowForY(mouse.Y); ok {
+					return m.selectConnectRow(idx)
+				}
+				return m, nil
+			}
 			if m.showSlashPopup {
 				mouse := msg.Mouse()
 				if idx, ok := m.slashPopupRowForY(mouse.Y); ok {
@@ -397,6 +445,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.openModelPicker()
 					} else if selected.name == "/session" {
 						m.openSessionPicker()
+					} else if selected.name == "/themes" {
+						m.openThemePicker()
 					}
 					return m, nil
 				}
@@ -406,6 +456,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.MouseWheelMsg:
+		if m.showFullToolOutput {
+			if msg.Button == tea.MouseWheelUp {
+				m.fullToolOutput.ScrollUp(m.scrollSpeed)
+				return m, nil
+			}
+			if msg.Button == tea.MouseWheelDown {
+				m.fullToolOutput.ScrollDown(m.scrollSpeed)
+				return m, nil
+			}
+		}
 		if msg.Button == tea.MouseWheelUp {
 			m.viewport.ScrollUp(m.scrollSpeed)
 			return m, nil
@@ -415,6 +475,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case tea.KeyPressMsg:
+		if m.showFullToolOutput {
+			switch msg.String() {
+			case "esc", "b", "backspace":
+				m.showFullToolOutput = false
+				m.renderTranscript()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.fullToolOutput, cmd = m.fullToolOutput.Update(msg)
+			return m, cmd
+		}
 		if m.showSlashPopup {
 			switch msg.String() {
 			case "esc":
@@ -443,6 +514,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.openModelPicker()
 					} else if selected.name == "/session" {
 						m.openSessionPicker()
+					} else if selected.name == "/themes" {
+						m.openThemePicker()
 					}
 					return m, nil
 				}
@@ -479,27 +552,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
-				items, values := m.pickerVisibleItems()
-				if len(items) > 0 && m.pickerIndex < len(items) {
-					selected := values[m.pickerIndex]
-					kind := m.pickerKind
-					m.closePicker()
-					m.input.Reset()
-				if kind == "session" {
-					return m.handleCommand("/session load " + selected)
-				}
-				if kind == "message" {
-					idx, _ := strconv.Atoi(selected)
-					m.messages = m.messages[:idx+1]
-					m.renderTranscript()
-					m.viewport.GotoBottom()
-					m.saveSession()
-					return m, nil
-				}
-				return m.handleCommand("/models " + selected)
-				}
-				m.closePicker()
-				return m, nil
+				return m.selectPickerIndex(m.pickerIndex)
 			case "backspace":
 				if len(m.pickerFilter) > 0 {
 					m.pickerFilter = m.pickerFilter[:len(m.pickerFilter)-1]
@@ -577,9 +630,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showPalette = !m.showPalette
 			m.paletteInput = ""
 			return m, nil
+		case "up":
+			// Navigate input history backwards
+			if len(m.inputHistory) == 0 {
+				break // fall through to textarea
+			}
+			if m.inputHistoryIndex == -1 {
+				// First up: go to most recent entry
+				m.inputHistoryIndex = len(m.inputHistory) - 1
+			} else if m.inputHistoryIndex > 0 {
+				m.inputHistoryIndex--
+			}
+			m.input.SetValue(m.inputHistory[m.inputHistoryIndex])
+			return m, nil
+		case "down":
+			// Navigate input history forwards
+			if len(m.inputHistory) == 0 || m.inputHistoryIndex == -1 {
+				break // fall through to textarea
+			}
+			if m.inputHistoryIndex < len(m.inputHistory)-1 {
+				m.inputHistoryIndex++
+				m.input.SetValue(m.inputHistory[m.inputHistoryIndex])
+			} else {
+				// Past the most recent: clear input
+				m.inputHistoryIndex = -1
+				m.input.SetValue("")
+			}
+			return m, nil
 		case "ctrl+b":
 			m.toggleSidebar()
 			return m, nil
+		case "ctrl+o":
+			return m.handleCommand("/yolo")
+		case "ctrl+y":
+			return m.retryLastLLMError()
 		case "ctrl+x":
 			m.leaderActive = true
 			m.leaderSeq++
@@ -630,6 +714,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.openModelPicker()
 					return m, nil
 				}
+				if trimmed == "/themes" || strings.HasPrefix(trimmed, "/themes ") || trimmed == "/theme" || strings.HasPrefix(trimmed, "/theme ") {
+					m.openThemePicker()
+					return m, nil
+				}
 
 				suggestions := autocompleteSlashInput(&m, current)
 				if len(suggestions) == 0 {
@@ -652,6 +740,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(tiCmd, vpCmd)
 			}
 
+			// Save non-command inputs to history
+			if !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "!") {
+				// Deduplicate: don't add if same as last entry
+				if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
+					m.inputHistory = append(m.inputHistory, text)
+				}
+			}
+			m.inputHistoryIndex = -1
+
 			if strings.HasPrefix(text, "/") {
 				m.closeSlashPopup()
 				return m.handleCommand(text)
@@ -661,24 +758,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.input.Reset()
 				cmdText := strings.TrimPrefix(text, "!")
 				m.messages = append(m.messages, message{role: roleUser, text: text})
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 calling bash(%s)...", cmdText)})
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 running shell: %s", cmdText)})
 				m.renderTranscript()
 				m.viewport.GotoBottom()
-				return m, func() tea.Msg {
-					args, _ := json.Marshal(map[string]string{"command": cmdText})
-					var res string
-					var err error
-					if m.agent != nil {
-						res, err = m.agent.HandleToolCall("bash", args)
-					} else {
-						bash := tool.BashTool{}
-						res, err = bash.Execute(args)
-					}
-					if err != nil {
-						res = fmt.Sprintf("Error: %v", err)
-					}
-					return []agent.Message{{Role: "tool", ToolID: "shell", Content: res}}
-				}
+				return m, runInteractiveShell(cmdText, m.workDir)
+			}
+
+			if m.streaming {
+				m.queuedInputs = append(m.queuedInputs, text)
+				m.input.Reset()
+				m.layout()
+				m.viewport.GotoBottom()
+				return m, nil
 			}
 
 			var pendingToolCallID string
@@ -800,6 +891,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.connect.message = fmt.Sprintf("%s\n\n✓ Connection verified.", m.connect.message)
 		}
+	case shellFinishedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Shell command failed: %v", msg.err)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Shell command finished: %s", msg.command)})
+		}
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		m.saveSession()
 	case []agent.Message:
 		for _, am := range msg {
 			m.appendAgentMessage(am)
@@ -830,6 +930,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamStartedMsg:
 		m.streaming = true
 		m.cancelStream = msg.cancel
+		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
+		if !m.activityRowReserved {
+			m.activityRowReserved = true
+			m.layout()
+		}
 		if m.agent != nil {
 			return m, listenActivity(m.agent.Activity())
 		}
@@ -850,15 +955,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamDoneMsg:
 		m.streaming = false
 		m.lastActivity = agent.ActivitySnapshot{}
-		if m.activityRowReserved {
-			m.activityRowReserved = false
-			m.layout()
-		}
+		m.layout()
 		m.saveSession()
 		if msg.err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", msg.err)})
+			errorText := fmt.Sprintf("Error: %v", msg.err)
+			if isRetryableLLMError(msg.err) {
+				m.lastRetryableLLMErr = errorText
+			} else {
+				m.lastRetryableLLMErr = ""
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: errorText})
 			m.renderTranscript()
 			m.viewport.GotoBottom()
+		} else {
+			m.lastRetryableLLMErr = ""
+			if len(m.queuedInputs) > 0 && m.agent != nil {
+				text := m.queuedInputs[0]
+				m.queuedInputs = m.queuedInputs[1:]
+				m.layout()
+				m.viewport.GotoBottom()
+				return m, m.processFileReferences(text)
+			}
 		}
 	case editorFinishedMsg:
 		if msg.err != nil {
@@ -1017,6 +1134,11 @@ func (m *model) handleModelCmd(args []string) {
 			if m.config != nil {
 				m.config.Model = args[0]
 			}
+			// SaveLastModel persists any model name to ocodeconfig.json (project-level)
+			if err := config.SaveLastModel(args[0]); err != nil {
+				log.Printf("save last model: %v", err)
+			}
+			// SaveRecentModel requires "provider/model" format and goes to the global state file
 			if strings.Contains(args[0], "/") {
 				if err := config.SaveRecentModel(args[0]); err != nil {
 					log.Printf("save recent model: %v", err)
@@ -1104,10 +1226,7 @@ func (m *model) handleSessionCmd(args []string) {
 			restoreTodoState(sess.Metadata)
 			m.messages = []message{}
 			for _, am := range sess.Messages {
-				role := roleUser
-				if am.Role == "assistant" || am.Role == "tool" {
-					role = roleAssistant
-				}
+				role := tuiRoleForAgentMessage(am)
 				copyMsg := am
 				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
 			}
@@ -1119,6 +1238,13 @@ func (m *model) handleSessionCmd(args []string) {
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /session [list|load <id>]"})
 	}
+}
+
+func tuiRoleForAgentMessage(msg agent.Message) role {
+	if msg.Role == "user" {
+		return roleUser
+	}
+	return roleAssistant
 }
 
 func (m *model) handleCompactCmd(args []string) {
@@ -1167,6 +1293,8 @@ func (m *model) handleNewCmd(args []string) {
 	snapshot.Reset()
 	tool.ResetTodoState()
 	m.sessionTelemetry = sidebarTelemetry{}
+	m.inputHistory = nil
+	m.inputHistoryIndex = -1
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session."})
 }
 
@@ -1203,6 +1331,23 @@ func (m *model) handleEditorCmd(args []string) tea.Cmd {
 		}
 		return editorFinishedMsg{content: string(newContent)}
 	})
+}
+
+func runInteractiveShell(command string, dir string) tea.Cmd {
+	c := shellExecCommand(command)
+	if dir != "" {
+		c.Dir = dir
+	}
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return shellFinishedMsg{command: command, err: err}
+	})
+}
+
+func shellExecCommand(command string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/C", command)
+	}
+	return exec.Command("bash", "-c", command)
 }
 
 var openSidebarFileInEditor = openPathInEditor
@@ -1253,8 +1398,7 @@ func (m *model) handleShareCmd(args []string) {
 
 func (m *model) handleThemesCmd(args []string) {
 	if len(args) == 0 {
-		themes := AvailableThemes()
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Available themes:\n- " + strings.Join(themes, "\n- ") + "\nUse '/themes <name>' to switch."})
+		m.openThemePicker()
 		return
 	}
 
@@ -1432,7 +1576,7 @@ func (m *model) appendAgentMessage(am agent.Message) {
 		if am.ReasoningContent != "" && m.showThinking {
 			m.messages = append(m.messages, message{
 				role: roleAssistant,
-				text: m.styles.Thinking.Render("⟁ thinking\n" + am.ReasoningContent),
+				text: m.styles.Thinking.Render("⟁ thinking\n") + renderThinkingContent(am.ReasoningContent, m.styles),
 			})
 		}
 		if len(am.ToolCalls) > 0 {
@@ -1503,7 +1647,7 @@ func renderPermissionPrompt(req agent.PermissionRequest) string {
 	if req.Rule != "" {
 		b.WriteString(fmt.Sprintf("Matched rule: %s\n", req.Rule))
 	}
-	b.WriteString("\nChoose: [y] allow once  [n] deny once  [a] always allow matched rule  [d] always deny matched rule  [t] always allow tool  [x] always deny tool")
+	b.WriteString("\nChoose: [y] allow once  [n] deny once  [a] always allow matched rule  [t] always allow tool")
 	return b.String()
 }
 
@@ -1532,19 +1676,11 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		m.persistPermissions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q.", toolName)})
 		return m.executeToolWithRules(toolName, args)
-	case "d":
-		m.setPermissionRule(req, agent.PermissionDeny)
-		m.persistPermissions()
-		return m.permissionDeniedToolResult(toolName)
-	case "x":
-		m.setToolPermission(toolName, agent.PermissionDeny)
-		m.persistPermissions()
-		return m.permissionDeniedToolResult(toolName)
 	case "n", "no", "deny":
 		return m.permissionDeniedToolResult(toolName)
 	default:
 		m.showPermDialog = true
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, d, t, or x."})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t."})
 		return nil
 	}
 }
@@ -1668,6 +1804,49 @@ func (m model) askAgent() tea.Cmd {
 	)
 }
 
+func (m model) retryLastLLMError() (tea.Model, tea.Cmd) {
+	if m.streaming {
+		return m, nil
+	}
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No LLM configured to retry."})
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		return m, nil
+	}
+	if m.lastRetryableLLMErr == "" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No retryable LLM timeout or I/O error."})
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		return m, nil
+	}
+	if len(m.messages) > 0 {
+		last := m.messages[len(m.messages)-1]
+		if last.role == roleAssistant && last.text == m.lastRetryableLLMErr {
+			m.messages = m.messages[:len(m.messages)-1]
+		}
+	}
+	m.lastRetryableLLMErr = ""
+	m.renderTranscript()
+	m.viewport.GotoBottom()
+	return m, m.askAgent()
+}
+
+func isRetryableLLMError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof")
+}
+
 func waitStreamEvent(ch chan agent.Message, errCh chan error, cancel chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
@@ -1719,25 +1898,41 @@ func (m *model) layout() {
 		return
 	}
 
-	inputHeight := 5
-	headerHeight := 2
 	panelWidth := m.panelWidth()
-	innerWidth := panelWidth - 4
+	innerWidth := panelWidth - 6
 	if innerWidth < 1 {
 		innerWidth = 1
 	}
 	m.input.SetWidth(innerWidth)
+	m.input.MaxWidth = innerWidth
 	m.viewport.SetWidth(innerWidth)
-	activityRowHeight := 0
-	if m.activityRowReserved {
-		activityRowHeight = 1
-	}
-	newHeight := m.height - inputHeight - headerHeight - 2 - activityRowHeight
+	newHeight := m.height - m.bottomChromeHeight(panelWidth)
 	if newHeight < 1 {
 		newHeight = 1
 	}
 	m.viewport.SetHeight(newHeight)
 	m.renderTranscript()
+}
+
+func (m model) bottomChromeHeight(panelWidth int) int {
+	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  opencode clone v"+version.Version)
+	input := borderStyle.Width(panelWidth - 2).Render(m.input.View())
+	status := m.renderStatus()
+
+	height := lipgloss.Height(header)
+	height += 2 // transcript border
+	height += lipgloss.Height(input)
+	if m.showSlashPopup {
+		height += lipgloss.Height(m.renderSlashPopup())
+	}
+	if row := m.renderQueueRow(); row != "" {
+		height += lipgloss.Height(row)
+	}
+	if row := m.renderActivityRow(); row != "" {
+		height += lipgloss.Height(row)
+	}
+	height += lipgloss.Height(status)
+	return height
 }
 
 func (m *model) renderPalette() string {
@@ -1754,11 +1949,67 @@ func (m *model) renderPalette() string {
 	return borderStyle.Width(m.width - 2).Render(header + "\n\n" + body)
 }
 
+func (m *model) openFullToolOutput(messageIndex int) {
+	if messageIndex < 0 || messageIndex >= len(m.messages) {
+		return
+	}
+	msg := m.messages[messageIndex]
+	if msg.raw == nil {
+		return
+	}
+	m.showFullToolOutput = true
+	toolName := m.lookupToolName(msg.raw.ToolID)
+	if toolName == "" {
+		toolName = "tool"
+	}
+	m.fullToolOutputTitle = fmt.Sprintf("%s output", toolName)
+	m.fullToolOutput = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	m.fullToolOutput.SetContent(msg.raw.Content)
+	m.layoutFullToolOutput()
+}
+
+func (m *model) layoutFullToolOutput() {
+	width := m.width - 4
+	if width < 1 {
+		width = 1
+	}
+	height := m.height - 4
+	if height < 1 {
+		height = 1
+	}
+	m.fullToolOutput.SetWidth(width)
+	m.fullToolOutput.SetHeight(height)
+}
+
+func (m model) renderFullToolOutput() string {
+	header := m.styles.Header.Render("◆ " + m.fullToolOutputTitle)
+	help := hintStyle.Render("  esc/b/backspace: back  ·  arrows/mouse: scroll")
+	body := borderStyle.Width(m.width - 2).Render(constrainView(m.fullToolOutput.View(), m.fullToolOutput.Width(), m.fullToolOutput.Height()))
+	return lipgloss.JoinVertical(lipgloss.Left, header+help, body)
+}
+
+func (m model) toolOutputForClick(msg tea.MouseClickMsg) (int, bool) {
+	if len(m.toolOutputLineMap) == 0 || m.showFullToolOutput {
+		return 0, false
+	}
+	mouse := msg.Mouse()
+	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
+		return 0, false
+	}
+	innerY := mouse.Y - lipgloss.Height(m.styles.Header.Render("◆ ocode")) - 1
+	if innerY < 0 || innerY >= m.viewport.Height() {
+		return 0, false
+	}
+	idx, ok := m.toolOutputLineMap[m.viewport.YOffset()+innerY]
+	return idx, ok
+}
+
 func (m *model) renderTranscript() {
 	if len(m.messages) == 0 {
 		return
 	}
 	var b strings.Builder
+	expandableMessages := []int{}
 	for i, msg := range m.messages {
 		if i > 0 {
 			b.WriteString("\n\n")
@@ -1768,9 +2019,66 @@ func (m *model) renderTranscript() {
 			b.WriteString(userStyle.Render("you") + "\n" + msg.text)
 		case roleAssistant:
 			b.WriteString(assistantStyle.Render("ocode") + "\n" + m.renderAssistantText(msg.text))
+			if msg.raw != nil && strings.Contains(msg.text, fullToolOutputMarker) {
+				expandableMessages = append(expandableMessages, i)
+			}
 		}
 	}
-	m.viewport.SetContent(b.String())
+	wrapped := wrapView(b.String(), m.viewport.Width())
+	m.toolOutputLineMap = toolOutputLineMap(wrapped, expandableMessages)
+	m.viewport.SetContent(wrapped)
+}
+
+func toolOutputLineMap(rendered string, expandableMessages []int) map[int]int {
+	if len(expandableMessages) == 0 {
+		return nil
+	}
+	lineMap := map[int]int{}
+	next := 0
+	for lineNo, line := range strings.Split(rendered, "\n") {
+		if !strings.Contains(line, fullToolOutputMarker) || next >= len(expandableMessages) {
+			continue
+		}
+		lineMap[lineNo] = expandableMessages[next]
+		next++
+	}
+	return lineMap
+}
+
+func padViewHeight(view string, height int) string {
+	if height <= 0 {
+		return view
+	}
+	for lipgloss.Height(view) < height {
+		view += "\n"
+	}
+	return view
+}
+
+func constrainView(view string, width int, height int) string {
+	if width > 0 {
+		view = wrapView(view, width)
+	}
+	if height > 0 {
+		lines := strings.Split(view, "\n")
+		if len(lines) > height {
+			lines = lines[:height]
+		}
+		view = strings.Join(lines, "\n")
+	}
+	return padViewHeight(view, height)
+}
+
+func wrapView(view string, width int) string {
+	if width <= 0 {
+		return view
+	}
+	lines := strings.Split(view, "\n")
+	wrapped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		wrapped = append(wrapped, strings.Split(ansi.Hardwrap(line, width, false), "\n")...)
+	}
+	return strings.Join(wrapped, "\n")
 }
 
 func listenActivity(tracker *agent.ActivityTracker) tea.Cmd {
@@ -1786,7 +2094,7 @@ func (m model) renderActivityRow() string {
 	}
 	snap := m.lastActivity
 	if !snap.LLMRunning && len(snap.ActiveTools) == 0 && len(snap.ActiveAgents) == 0 {
-		return m.styles.Status.Width(m.panelWidth()).Render("")
+		return m.styles.Status.Width(m.statusContentWidth()).Render("")
 	}
 	var parts []string
 	if snap.LLMRunning {
@@ -1798,7 +2106,7 @@ func (m model) renderActivityRow() string {
 	if len(snap.ActiveAgents) > 0 {
 		parts = append(parts, "🤖 "+strings.Join(snap.ActiveAgents, ", "))
 	}
-	return m.styles.Status.Width(m.panelWidth()).Render(" " + strings.Join(parts, "  │  "))
+	return m.styles.Status.Width(m.statusContentWidth()).Render(" " + strings.Join(parts, "  │  "))
 }
 
 func (m model) renderAssistantText(text string) string {
@@ -1872,6 +2180,10 @@ func (m model) renderContent() string {
 		return "initializing…"
 	}
 
+	if m.showFullToolOutput {
+		return m.renderFullToolOutput()
+	}
+
 	if m.showPicker {
 		return m.renderPicker()
 	}
@@ -1884,15 +2196,18 @@ func (m model) renderContent() string {
 		return m.renderPalette()
 	}
 
-	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  opencode clone")
+	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  opencode clone v"+version.Version)
 
 	status := m.renderStatus()
 	panelWidth := m.panelWidth()
-	transcript := borderStyle.Width(panelWidth - 2).Render(m.viewport.View())
+	transcript := borderStyle.Width(panelWidth - 2).Render(constrainView(m.viewport.View(), m.viewport.Width(), m.viewport.Height()))
 	input := borderStyle.Width(panelWidth - 2).Render(m.input.View())
 	leftParts := []string{header, transcript}
 	if m.showSlashPopup {
 		leftParts = append(leftParts, m.renderSlashPopup())
+	}
+	if row := m.renderQueueRow(); row != "" {
+		leftParts = append(leftParts, row)
 	}
 	leftParts = append(leftParts, input)
 	if row := m.renderActivityRow(); row != "" {
@@ -1915,19 +2230,44 @@ func (m *model) renderStatus() string {
 		agentName = specs[m.currentAgentIdx].Name
 	}
 
-	suffix := " | tab: agent | ctrl+p: palette | ctrl+x: leader"
+	suffix := " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
 	if m.ctrlCPressed {
 		suffix = " | ctrl+c again to quit"
 	} else if m.streaming {
 		suffix = " | esc: stop"
 	}
+	llmState := "○ idle"
+	if m.streaming || m.lastActivity.LLMRunning {
+		llmState = "⟳ running"
+	}
 	permissionMode := ""
 	if m.agent != nil && m.agent.Permissions() != nil && m.agent.Permissions().Mode() == agent.PermissionModeYOLO {
 		permissionMode = " | YOLO permissions"
 	}
-	return m.styles.Status.Width(m.panelWidth()).Render(
-		fmt.Sprintf(" Agent: %s | Mode: %s | Model: %s | Session: %s%s%s", agentName, m.agentModeLabel(), m.currentModelName(), m.sessionID, permissionMode, suffix),
-	)
+	width := m.statusContentWidth()
+	text := fmt.Sprintf(" LLM: %s | Agent: %s | Mode: %s | Model: %s | Session: %s%s%s", llmState, agentName, m.agentModeLabel(), m.currentModelName(), m.sessionID, permissionMode, suffix)
+	return m.styles.Status.Width(width).Render(ansi.Truncate(text, width, "..."))
+}
+
+func (m model) renderQueueRow() string {
+	if len(m.queuedInputs) == 0 {
+		return ""
+	}
+	items := make([]string, 0, len(m.queuedInputs))
+	for i, input := range m.queuedInputs {
+		label := fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(input))
+		items = append(items, ansi.Truncate(label, 48, "..."))
+	}
+	text := fmt.Sprintf(" Queued (%d): %s", len(m.queuedInputs), strings.Join(items, " | "))
+	return m.styles.Status.Width(m.statusContentWidth()).Render(text)
+}
+
+func (m model) statusContentWidth() int {
+	width := m.panelWidth() - 2
+	if width < 1 {
+		return 1
+	}
+	return width
 }
 
 type sidebarTelemetry struct {
@@ -2171,13 +2511,21 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		appendSection("TODO", styled, nil)
 	}
 
-	appendSection("Hints", []string{"Ctrl+B toggle sidebar", "/sidebar toggle sidebar", "Ctrl+P command palette", "Ctrl+X leader actions"}, nil)
+	appendSection("Hints", []string{"Ctrl+B toggle sidebar", "/sidebar toggle sidebar", "Ctrl+P command palette", "Ctrl+X leader actions", "Ctrl+O toggle YOLO", "Ctrl+Y retry LLM timeout/I/O"}, nil)
 	return data
 }
 
 func (m model) renderSidebar() string {
 	data := m.buildSidebarRenderData()
-	sections := strings.Join(data.lines, "\n")
+	maxLines := m.height - 2 // account for border
+	if maxLines < 1 {
+		maxLines = 1
+	}
+	lines := data.lines
+	if len(lines) > maxLines {
+		lines = lines[:maxLines]
+	}
+	sections := strings.Join(lines, "\n")
 	return borderStyle.Width(sidebarColumnWidth).Render(sections)
 }
 
