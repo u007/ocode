@@ -3,6 +3,7 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,6 +81,24 @@ type statusMsg struct {
 	text string
 }
 
+type streamMsgEvent struct {
+	msg    agent.Message
+	ch     chan agent.Message
+	errCh  chan error
+	cancel chan struct{}
+}
+
+type ctrlCResetMsg struct{}
+type streamStartedMsg struct{ cancel chan struct{} }
+
+type streamDoneMsg struct {
+	err error
+}
+
+type activityUpdateMsg struct {
+	snap agent.ActivitySnapshot
+}
+
 type model struct {
 	viewport          viewport.Model
 	input             textarea.Model
@@ -93,7 +112,9 @@ type model struct {
 	leaderSeq         int
 	showPalette       bool
 	showPicker        bool
+	pickerKind        string
 	pickerItems       []string
+	pickerValues      []string
 	pickerIndex       int
 	pickerFilter      string
 	showSlashPopup    bool
@@ -116,6 +137,15 @@ type model struct {
 	pendingToolName   string
 	pendingToolArgs   json.RawMessage
 	pendingToolCallID string
+	pendingPermission agent.PermissionRequest
+	styles            Styles
+	streaming           bool
+	ctrlCPressed        bool
+	cancelStream        chan struct{}
+	lastActivity        agent.ActivitySnapshot
+	activityRowReserved bool
+  escPressed        bool
+  escPressTime      time.Time
 }
 
 type agentResponseMsg string
@@ -129,7 +159,41 @@ var (
 			BorderForeground(lipgloss.Color("#3B4261")).
 			Padding(0, 1)
 	hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
+
+	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Strikethrough(true).Faint(true)
+	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
 )
+
+// styleTodoLine renders a markdown todo line with strikethrough/dim for done
+// items and a warning color for in-progress (`- [~]` or `- [-]`). Non-todo
+// lines are returned unchanged.
+func styleTodoLine(line string) string {
+	trimmed := strings.TrimLeft(line, " \t")
+	indent := line[:len(line)-len(trimmed)]
+	prefix, body, ok := splitTodoMarker(trimmed)
+	if !ok {
+		return line
+	}
+	switch prefix {
+	case "x", "X":
+		return indent + todoDoneStyle.Render("- [✓] "+body)
+	case "~", "-":
+		return indent + todoInProgressStyle.Render("- [•] "+body)
+	default:
+		return line
+	}
+}
+
+func splitTodoMarker(s string) (marker, body string, ok bool) {
+	if len(s) < 6 || s[0] != '-' || s[1] != ' ' || s[2] != '[' || s[4] != ']' {
+		return "", "", false
+	}
+	rest := s[5:]
+	if len(rest) > 0 && rest[0] == ' ' {
+		rest = rest[1:]
+	}
+	return string(s[3]), rest, true
+}
 
 const (
 	sidebarMinWidth    = 120
@@ -137,10 +201,11 @@ const (
 )
 
 func (m *model) applyTheme() {
-	if m.config == nil || m.config.TUI.Theme == "" {
-		return
+	if m.config != nil && m.config.TUI.Theme != "" {
+		m.styles = ApplyThemeColors(m.config.TUI.Theme)
+	} else {
+		m.styles = ApplyThemeColors("tokyonight")
 	}
-	ApplyThemeColors(m.config.TUI.Theme)
 }
 
 func (m *model) toggleSidebar() {
@@ -216,7 +281,7 @@ func (m *model) switchAgent(name string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Agent switched to: %s (%s)", spec.Name, spec.Description)})
 }
 
-func newModel(sid string, cont bool) model {
+func newModel(sid string, cont bool, yolo bool) model {
 	cfg, _ := config.Load()
 	_ = auth.HydrateEnv()
 
@@ -234,11 +299,14 @@ func newModel(sid string, cont bool) model {
 	if cfg != nil && cfg.Model != "" {
 		client := agent.NewClient(cfg, cfg.Model)
 		a = agent.NewAgent(client, tools, cfg)
+		if yolo && a.Permissions() != nil {
+			a.Permissions().SetMode(agent.PermissionModeYOLO)
+		}
 		a.LoadExternalTools(cfg)
 	}
 
 	ta := textarea.New()
-	ta.Placeholder = "Ask anything…  (enter to send, shift+enter for newline, ctrl+c to quit)"
+	ta.Placeholder = "Ask anything…  (enter to send, shift+enter for newline, ctrl+c twice to quit)"
 	ta.Focus()
 	ta.Prompt = "▍ "
 	ta.CharLimit = 8000
@@ -325,8 +393,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selected := m.slashPopupItems[idx]
 					m.closeSlashPopup()
 					m.input.SetValue(selected.name + " ")
-					if selected.name == "/model" {
+					if selected.name == "/models" {
 						m.openModelPicker()
+					} else if selected.name == "/session" {
+						m.openSessionPicker()
 					}
 					return m, nil
 				}
@@ -353,8 +423,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "up":
 				if m.slashPopupIndex > 0 {
 					m.slashPopupIndex--
+					return m, nil
 				}
-				return m, nil
+				// fall through to textarea when already at top
 			case "down", "tab":
 				if len(m.slashPopupItems) == 0 {
 					break // fall through to outer handler when nothing to navigate
@@ -368,8 +439,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					selected := m.slashPopupItems[m.slashPopupIndex]
 					m.closeSlashPopup()
 					m.input.SetValue(selected.name + " ")
-					if selected.name == "/model" {
+					if selected.name == "/models" {
 						m.openModelPicker()
+					} else if selected.name == "/session" {
+						m.openSessionPicker()
 					}
 					return m, nil
 				}
@@ -400,17 +473,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "down":
-				if m.pickerIndex < len(m.pickerVisibleItems())-1 {
+				items, _ := m.pickerVisibleItems()
+				if m.pickerIndex < len(items)-1 {
 					m.pickerIndex++
 				}
 				return m, nil
 			case "enter":
-				items := m.pickerVisibleItems()
+				items, values := m.pickerVisibleItems()
 				if len(items) > 0 && m.pickerIndex < len(items) {
-					selected := items[m.pickerIndex]
+					selected := values[m.pickerIndex]
+					kind := m.pickerKind
 					m.closePicker()
 					m.input.Reset()
-					return m.handleCommand("/model " + selected)
+				if kind == "session" {
+					return m.handleCommand("/session load " + selected)
+				}
+				if kind == "message" {
+					idx, _ := strconv.Atoi(selected)
+					m.messages = m.messages[:idx+1]
+					m.renderTranscript()
+					m.viewport.GotoBottom()
+					m.saveSession()
+					return m, nil
+				}
+				return m.handleCommand("/models " + selected)
 				}
 				m.closePicker()
 				return m, nil
@@ -472,13 +558,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "n":
 				return m.handleCommand("/new")
 			case "l":
-				return m.handleCommand("/session list")
+				return m.handleCommand("/session")
 			case "c":
 				return m.handleCommand("/compact")
 			case "q":
+				m.saveSession()
 				return m, tea.Quit
 			}
 			return m, nil
+		}
+
+		if m.escPressed && keyStr != "esc" {
+			m.escPressed = false
 		}
 
 		switch keyStr {
@@ -500,8 +591,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(time.Duration(timeout)*time.Millisecond, func(time.Time) tea.Msg {
 				return leaderTimeoutMsg{seq: seq}
 			})
-		case "ctrl+c", "esc":
-			return m, tea.Quit
+		case "esc":
+			if m.streaming && m.cancelStream != nil {
+				select {
+				case <-m.cancelStream:
+				default:
+					close(m.cancelStream)
+				}
+				return m, nil
+			}
+			if !m.escPressed {
+				m.escPressed = true
+				m.escPressTime = time.Now()
+				return m, nil
+			}
+			if time.Since(m.escPressTime) < 500*time.Millisecond {
+				m.escPressed = false
+				m.openMessagePicker()
+				return m, nil
+			}
+			m.escPressed = false
+			return m, nil
+		case "ctrl+c":
+			if m.ctrlCPressed {
+				m.saveSession()
+				return m, tea.Quit
+			}
+			m.ctrlCPressed = true
+			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return ctrlCResetMsg{} })
 		case "shift+tab":
 			m.cycleAgentMode()
 			return m, nil
@@ -509,7 +626,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			current := m.input.Value()
 			if strings.HasPrefix(current, "/") {
 				trimmed := strings.TrimSpace(current)
-				if trimmed == "/model" || strings.HasPrefix(trimmed, "/model ") {
+				if trimmed == "/models" || strings.HasPrefix(trimmed, "/models ") || trimmed == "/model" || strings.HasPrefix(trimmed, "/model ") {
 					m.openModelPicker()
 					return m, nil
 				}
@@ -548,13 +665,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.renderTranscript()
 				m.viewport.GotoBottom()
 				return m, func() tea.Msg {
-					bash := tool.BashTool{}
 					args, _ := json.Marshal(map[string]string{"command": cmdText})
-					res, err := bash.Execute(args)
+					var res string
+					var err error
+					if m.agent != nil {
+						res, err = m.agent.HandleToolCall("bash", args)
+					} else {
+						bash := tool.BashTool{}
+						res, err = bash.Execute(args)
+					}
 					if err != nil {
 						res = fmt.Sprintf("Error: %v", err)
 					}
-					return []agent.Message{{Role: "tool", Content: res}}
+					return []agent.Message{{Role: "tool", ToolID: "shell", Content: res}}
 				}
 			}
 
@@ -589,23 +712,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 			if m.showPermDialog {
+				choice := strings.ToLower(strings.TrimSpace(text))
 				m.showPermDialog = false
-				toolName := m.pendingToolName
-				approved := strings.ToLower(text) == "y" || strings.ToLower(text) == "yes" || strings.ToLower(text) == "allow"
-				if approved {
-					if m.agent != nil && m.agent.Permissions() != nil {
-						m.agent.Permissions().SetRule(toolName, agent.PermissionAllow)
-					}
-					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ Tool %q allowed. Re-executing...", toolName)})
-					m.renderTranscript()
-					m.viewport.GotoBottom()
-					return m, m.reExecutePendingTool(toolName)
-				}
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("❌ Tool %q denied by user.", toolName)})
+				cmd := m.handlePermissionChoice(choice)
+				m.input.Reset()
 				m.renderTranscript()
 				m.viewport.GotoBottom()
 				m.saveSession()
-				return m, m.askAgent()
+				return m, cmd
 			}
 
 			m.input.Reset()
@@ -688,29 +802,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case []agent.Message:
 		for _, am := range msg {
-			copyMsg := am
-			if am.Role == "assistant" {
-				if len(am.ToolCalls) > 0 {
-					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 calling %d tools...", len(am.ToolCalls)), raw: &copyMsg})
-				} else if am.Content != "" {
-					m.messages = append(m.messages, message{role: roleAssistant, text: am.Content, raw: &copyMsg})
-				}
-			} else if am.Role == "tool" {
-				if strings.HasPrefix(am.Content, "PERMISSION_ASK:") {
-					parts := strings.SplitN(am.Content, ":", 2)
-					if len(parts) == 2 {
-						m.showPermDialog = true
-						m.pendingToolName = parts[1]
-						m.pendingToolCallID = am.ToolID
-						m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⚠ Permission required for tool: %s. Allow or deny? (y/n)", parts[1]), raw: &copyMsg})
-					}
-				} else {
-					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("✅ tool result: %s", am.Content), raw: &copyMsg})
-				}
-			}
-			if am.Usage != nil || am.Spend != nil {
-				m.sessionTelemetry.addMessage(am)
-			}
+			m.appendAgentMessage(am)
 		}
 		m.renderTranscript()
 		m.viewport.GotoBottom()
@@ -733,6 +825,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.askAgent()
 			}
 		}
+	case ctrlCResetMsg:
+		m.ctrlCPressed = false
+	case streamStartedMsg:
+		m.streaming = true
+		m.cancelStream = msg.cancel
+		if m.agent != nil {
+			return m, listenActivity(m.agent.Activity())
+		}
+	case activityUpdateMsg:
+		m.lastActivity = msg.snap
+		if !m.activityRowReserved {
+			m.activityRowReserved = true
+			m.layout()
+		}
+		if m.agent != nil {
+			return m, listenActivity(m.agent.Activity())
+		}
+	case streamMsgEvent:
+		m.appendAgentMessage(msg.msg)
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		return m, waitStreamEvent(msg.ch, msg.errCh, msg.cancel)
+	case streamDoneMsg:
+		m.streaming = false
+		m.lastActivity = agent.ActivitySnapshot{}
+		if m.activityRowReserved {
+			m.activityRowReserved = false
+			m.layout()
+		}
+		m.saveSession()
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", msg.err)})
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+		}
 	case editorFinishedMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor error: %v", msg.err)})
@@ -740,7 +867,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.SetValue(msg.content)
 		}
 	case errorMsg:
-		m.err = msg
+		if msg != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", error(msg))})
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+		}
 	}
 
 	return m, tea.Batch(tiCmd, vpCmd)
@@ -886,6 +1017,11 @@ func (m *model) handleModelCmd(args []string) {
 			if m.config != nil {
 				m.config.Model = args[0]
 			}
+			if strings.Contains(args[0], "/") {
+				if err := config.SaveRecentModel(args[0]); err != nil {
+					log.Printf("save recent model: %v", err)
+				}
+			}
 		}
 	}
 }
@@ -937,9 +1073,9 @@ func (m *model) handleConnectCmd(args []string) {
 
 func (m *model) handleSessionCmd(args []string) {
 	if len(args) == 0 {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Active session: %s\nUse '/session list' to see all sessions.", m.sessionID)})
+		m.openSessionPicker()
 	} else if args[0] == "list" {
-		sessions, _ := session.List()
+		sessions, _ := session.ListAll()
 		var b strings.Builder
 		b.WriteString("Sessions:\n")
 		for _, s := range sessions {
@@ -947,15 +1083,20 @@ func (m *model) handleSessionCmd(args []string) {
 			if title == "" {
 				title = "(no title)"
 			}
-			b.WriteString(fmt.Sprintf("- %s: %s\n", s.ID, title))
+			marker := "ocode"
+			if s.Source == session.SourceClaude {
+				marker = "claude"
+			}
+			b.WriteString(fmt.Sprintf("- [%s] %s: %s\n", marker, s.ID, title))
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 	} else if args[0] == "load" && len(args) > 1 {
-		sess, err := session.Load(args[1])
+		sess, err := session.LoadAny(args[1])
 		if err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session: %v", err)})
 		} else {
-			m.sessionID = args[1]
+			m.saveSession()
+			m.sessionID = sess.ID
 			tool.SetTodoSession(m.sessionID)
 			snapshot.Reset()
 			tool.ResetTodoState()
@@ -971,6 +1112,9 @@ func (m *model) handleSessionCmd(args []string) {
 				m.messages = append(m.messages, message{role: role, text: am.Content, raw: &copyMsg})
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Loaded session %s", m.sessionID)})
+			m.input.Focus()
+			m.layout()
+			m.viewport.GotoBottom()
 		}
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /session [list|load <id>]"})
@@ -1016,6 +1160,7 @@ func (m *model) handleExportCmd(args []string) {
 }
 
 func (m *model) handleNewCmd(args []string) {
+	m.saveSession()
 	m.messages = []message{}
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	tool.SetTodoSession(m.sessionID)
@@ -1113,22 +1258,24 @@ func (m *model) handleThemesCmd(args []string) {
 		return
 	}
 
-	m.config.TUI.Theme = args[0]
+	name := args[0]
+	if _, ok := GetTheme(name); !ok {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown theme: %s", name)})
+		return
+	}
+
+	m.config.TUI.Theme = name
 	m.applyTheme()
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s", args[0])})
+	if err := config.SaveTUITheme(name); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s (save failed: %v)", name, err)})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s", name)})
+	}
 }
 
+// handleModelsCmd is an alias for handleModelCmd; see commandSpecs for the /model ↔ /models aliasing.
 func (m *model) handleModelsCmd(args []string) {
-	provider := "openai"
-	if m.agent != nil {
-		provider = m.agent.GetProvider()
-	}
-	list := providerModels(provider)
-	if len(list) == 0 {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("No model list for provider %s", provider)})
-	} else {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Available models for %s:\n- %s", provider, strings.Join(list, "\n- "))})
-	}
+	m.handleModelCmd(args)
 }
 
 func (m *model) handleDetailsCmd(args []string) {
@@ -1279,33 +1426,259 @@ func (m *model) saveSession() {
 	}
 }
 
-func (m model) askAgent() tea.Cmd {
-	return func() tea.Msg {
-		var agentMsgs []agent.Message
-		ctx := agent.LoadContext()
-		if ctx != "" {
-			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
-		}
-
-		for _, msg := range m.messages {
-			if msg.raw != nil {
-				agentMsgs = append(agentMsgs, *msg.raw)
-				continue
-			}
-			role := "user"
-			if msg.role == roleAssistant {
-				role = "assistant"
-			}
-			agentMsgs = append(agentMsgs, agent.Message{
-				Role:    role,
-				Content: msg.text,
+func (m *model) appendAgentMessage(am agent.Message) {
+	copyMsg := am
+	if am.Role == "assistant" {
+		if am.ReasoningContent != "" && m.showThinking {
+			m.messages = append(m.messages, message{
+				role: roleAssistant,
+				text: m.styles.Thinking.Render("⟁ thinking\n" + am.ReasoningContent),
 			})
 		}
-		resp, err := m.agent.Step(agentMsgs)
-		if err != nil {
-			return errorMsg(err)
+		if len(am.ToolCalls) > 0 {
+			var b strings.Builder
+			if am.Content != "" {
+				b.WriteString(am.Content)
+				b.WriteString("\n\n")
+			}
+			for i, tc := range am.ToolCalls {
+				if i > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(formatToolCallHint(tc))
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: b.String(), raw: &copyMsg})
+		} else if am.Content != "" {
+			m.messages = append(m.messages, message{role: roleAssistant, text: am.Content, raw: &copyMsg})
 		}
-		return resp
+	} else if am.Role == "tool" {
+		if strings.HasPrefix(am.Content, "PERMISSION_ASK:") {
+			if req, ok := parsePermissionRequest(am.Content); ok {
+				m.showPermDialog = true
+				m.pendingPermission = req
+				m.pendingToolName = req.ToolName
+				m.pendingToolArgs = req.Args
+				m.pendingToolCallID = am.ToolID
+				m.messages = append(m.messages, message{role: roleAssistant, text: renderPermissionPrompt(req), raw: &copyMsg})
+			}
+		} else {
+			toolName := m.lookupToolName(am.ToolID)
+			m.messages = append(m.messages, message{
+				role: roleAssistant,
+				text: renderToolResult(toolName, am.Content, m.styles),
+				raw:  &copyMsg,
+			})
+		}
+	}
+	if am.Usage != nil || am.Spend != nil {
+		m.sessionTelemetry.addMessage(am)
+	}
+}
+
+func parsePermissionRequest(content string) (agent.PermissionRequest, bool) {
+	var req agent.PermissionRequest
+	payload := strings.TrimPrefix(content, "PERMISSION_ASK:")
+	if payload == content || payload == "" {
+		return req, false
+	}
+	if err := json.Unmarshal([]byte(payload), &req); err != nil {
+		return req, false
+	}
+	if req.ToolName == "" {
+		return req, false
+	}
+	return req, true
+}
+
+func renderPermissionPrompt(req agent.PermissionRequest) string {
+	var b strings.Builder
+	b.WriteString("Permission required\n\n")
+	b.WriteString(fmt.Sprintf("Tool: %s\n", req.ToolName))
+	if req.Command != "" {
+		b.WriteString(fmt.Sprintf("Command: %s\n", req.Command))
+	}
+	if req.Prefix != "" {
+		b.WriteString(fmt.Sprintf("Prefix: %s\n", req.Prefix))
+	}
+	if req.Rule != "" {
+		b.WriteString(fmt.Sprintf("Matched rule: %s\n", req.Rule))
+	}
+	b.WriteString("\nChoose: [y] allow once  [n] deny once  [a] always allow matched rule  [d] always deny matched rule  [t] always allow tool  [x] always deny tool")
+	return b.String()
+}
+
+func (m *model) handlePermissionChoice(choice string) tea.Cmd {
+	if m.agent == nil {
+		return func() tea.Msg { return errorMsg(fmt.Errorf("no agent configured")) }
+	}
+	req := m.pendingPermission
+	toolName := m.pendingToolName
+	args := m.pendingToolArgs
+	if len(args) == 0 {
+		args = req.Args
+	}
+
+	switch choice {
+	case "y", "yes", "allow", "once":
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName)})
+		return m.executeApprovedTool(toolName, args)
+	case "a", "always", "always allow":
+		m.setPermissionRule(req, agent.PermissionAllow)
+		m.persistPermissions()
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req))})
+		return m.executeToolWithRules(toolName, args)
+	case "t":
+		m.setToolPermission(toolName, agent.PermissionAllow)
+		m.persistPermissions()
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q.", toolName)})
+		return m.executeToolWithRules(toolName, args)
+	case "d":
+		m.setPermissionRule(req, agent.PermissionDeny)
+		m.persistPermissions()
+		return m.permissionDeniedToolResult(toolName)
+	case "x":
+		m.setToolPermission(toolName, agent.PermissionDeny)
+		m.persistPermissions()
+		return m.permissionDeniedToolResult(toolName)
+	case "n", "no", "deny":
+		return m.permissionDeniedToolResult(toolName)
+	default:
+		m.showPermDialog = true
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, d, t, or x."})
+		return nil
+	}
+}
+
+func permissionRuleLabel(req agent.PermissionRequest) string {
+	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
+		return fmt.Sprintf("bash prefix %q", req.Prefix)
+	}
+	return fmt.Sprintf("tool %q", req.ToolName)
+}
+
+func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.PermissionLevel) {
+	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
+		if m.agent != nil && m.agent.Permissions() != nil {
+			m.agent.Permissions().SetBashPrefixRule(req.Prefix, level)
+		}
+		return
+	}
+	m.setToolPermission(req.ToolName, level)
+}
+
+func (m *model) setToolPermission(toolName string, level agent.PermissionLevel) {
+	if m.agent != nil && m.agent.Permissions() != nil {
+		m.agent.Permissions().SetRule(toolName, level)
+	}
+}
+
+func (m *model) persistPermissions() {
+	if m.agent == nil || m.agent.Permissions() == nil {
+		return
+	}
+	permissions := m.agent.Permissions().ExportConfig()
+	if m.config != nil && m.config.Ocode != nil {
+		m.config.Ocode.Permissions = permissions
+	}
+	if err := config.SaveOcodePermissions(permissions); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save permissions: %v", err)})
+	}
+}
+
+func (m model) executeApprovedTool(toolName string, args json.RawMessage) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.agent.HandleApprovedToolCall(toolName, args)
+		if err != nil {
+			result = fmt.Sprintf("Error: %v", err)
+		}
+		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: result}}
+	}
+}
+
+func (m model) executeToolWithRules(toolName string, args json.RawMessage) tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.agent.HandleToolCall(toolName, args)
+		if err != nil {
+			result = fmt.Sprintf("Error: %v", err)
+		}
+		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: result}}
+	}
+}
+
+func (m model) permissionDeniedToolResult(toolName string) tea.Cmd {
+	return func() tea.Msg {
+		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: fmt.Sprintf("denied: tool %q denied by user", toolName)}}
+	}
+}
+
+func (m *model) lookupToolName(toolID string) string {
+	if toolID == "" {
+		return ""
+	}
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		raw := m.messages[i].raw
+		if raw == nil {
+			continue
+		}
+		for _, tc := range raw.ToolCalls {
+			if tc.ID == toolID {
+				return tc.Function.Name
+			}
+		}
+	}
+	return ""
+}
+
+func (m model) askAgent() tea.Cmd {
+	var agentMsgs []agent.Message
+	ctx := agent.LoadContext()
+	if ctx != "" {
+		agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
+	}
+
+	for _, msg := range m.messages {
+		if msg.raw != nil {
+			agentMsgs = append(agentMsgs, *msg.raw)
+			continue
+		}
+		role := "user"
+		if msg.role == roleAssistant {
+			role = "assistant"
+		}
+		agentMsgs = append(agentMsgs, agent.Message{
+			Role:    role,
+			Content: msg.text,
+		})
+	}
+
+	cancel := make(chan struct{})
+	ch := make(chan agent.Message, 16)
+	errCh := make(chan error, 1)
+	a := m.agent
+	go func() {
+		a.OnMessage = func(am agent.Message) { ch <- am }
+		_, err := a.Step(agentMsgs)
+		a.OnMessage = nil
+		close(ch)
+		errCh <- err
+	}()
+	return tea.Batch(
+		func() tea.Msg { return streamStartedMsg{cancel: cancel} },
+		waitStreamEvent(ch, errCh, cancel),
+	)
+}
+
+func waitStreamEvent(ch chan agent.Message, errCh chan error, cancel chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case <-cancel:
+			return streamDoneMsg{err: nil}
+		case am, ok := <-ch:
+			if !ok {
+				return streamDoneMsg{err: <-errCh}
+			}
+			return streamMsgEvent{msg: am, ch: ch, errCh: errCh, cancel: cancel}
+		}
 	}
 }
 
@@ -1355,7 +1728,11 @@ func (m *model) layout() {
 	}
 	m.input.SetWidth(innerWidth)
 	m.viewport.SetWidth(innerWidth)
-	newHeight := m.height - inputHeight - headerHeight - 2
+	activityRowHeight := 0
+	if m.activityRowReserved {
+		activityRowHeight = 1
+	}
+	newHeight := m.height - inputHeight - headerHeight - 2 - activityRowHeight
 	if newHeight < 1 {
 		newHeight = 1
 	}
@@ -1364,7 +1741,7 @@ func (m *model) layout() {
 }
 
 func (m *model) renderPalette() string {
-	header := lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true).Render(" > ") + m.paletteInput
+	header := m.styles.Header.Render(" > ") + m.paletteInput
 	commands := commandNames()
 	var results []string
 	for _, c := range commands {
@@ -1390,10 +1767,95 @@ func (m *model) renderTranscript() {
 		case roleUser:
 			b.WriteString(userStyle.Render("you") + "\n" + msg.text)
 		case roleAssistant:
-			b.WriteString(assistantStyle.Render("ocode") + "\n" + msg.text)
+			b.WriteString(assistantStyle.Render("ocode") + "\n" + m.renderAssistantText(msg.text))
 		}
 	}
 	m.viewport.SetContent(b.String())
+}
+
+func listenActivity(tracker *agent.ActivityTracker) tea.Cmd {
+	return func() tea.Msg {
+		snap := <-tracker.Notify()
+		return activityUpdateMsg{snap: snap}
+	}
+}
+
+func (m model) renderActivityRow() string {
+	if !m.activityRowReserved {
+		return ""
+	}
+	snap := m.lastActivity
+	if !snap.LLMRunning && len(snap.ActiveTools) == 0 && len(snap.ActiveAgents) == 0 {
+		return m.styles.Status.Width(m.panelWidth()).Render("")
+	}
+	var parts []string
+	if snap.LLMRunning {
+		parts = append(parts, "⟳ LLM")
+	}
+	if len(snap.ActiveTools) > 0 {
+		parts = append(parts, "⚙ "+strings.Join(snap.ActiveTools, ", "))
+	}
+	if len(snap.ActiveAgents) > 0 {
+		parts = append(parts, "🤖 "+strings.Join(snap.ActiveAgents, ", "))
+	}
+	return m.styles.Status.Width(m.panelWidth()).Render(" " + strings.Join(parts, "  │  "))
+}
+
+func (m model) renderAssistantText(text string) string {
+	var b strings.Builder
+	for {
+		start, tagLen := findThinkingStart(text)
+		if start < 0 {
+			b.WriteString(m.styles.Text.Render(text))
+			break
+		}
+		if start > 0 {
+			b.WriteString(m.styles.Text.Render(text[:start]))
+		}
+		remaining := text[start+tagLen:]
+		end, endLen := findThinkingEnd(remaining)
+		if end < 0 {
+			if m.showThinking {
+				b.WriteString(m.styles.Thinking.Render(remaining))
+			}
+			break
+		}
+		if m.showThinking {
+			b.WriteString(m.styles.Thinking.Render(remaining[:end]))
+		}
+		text = remaining[end+endLen:]
+	}
+	return b.String()
+}
+
+func findThinkingStart(text string) (int, int) {
+	think := strings.Index(text, "<think>")
+	thinking := strings.Index(text, "<thinking>")
+	if think < 0 {
+		if thinking < 0 {
+			return -1, 0
+		}
+		return thinking, len("<thinking>")
+	}
+	if thinking < 0 || think < thinking {
+		return think, len("<think>")
+	}
+	return thinking, len("<thinking>")
+}
+
+func findThinkingEnd(text string) (int, int) {
+	think := strings.Index(text, "</think>")
+	thinking := strings.Index(text, "</thinking>")
+	if think < 0 {
+		if thinking < 0 {
+			return -1, 0
+		}
+		return thinking, len("</thinking>")
+	}
+	if thinking < 0 || think < thinking {
+		return think, len("</think>")
+	}
+	return thinking, len("</thinking>")
 }
 
 func (m model) View() tea.View {
@@ -1422,13 +1884,7 @@ func (m model) renderContent() string {
 		return m.renderPalette()
 	}
 
-	if m.err != nil {
-		return fmt.Sprintf("Error: %v\n\nPress Ctrl+C to quit", m.err)
-	}
-	header := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#7DCFFF")).
-		Bold(true).
-		Render("◆ ocode") + hintStyle.Render("  ·  opencode clone")
+	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  opencode clone")
 
 	status := m.renderStatus()
 	panelWidth := m.panelWidth()
@@ -1438,7 +1894,11 @@ func (m model) renderContent() string {
 	if m.showSlashPopup {
 		leftParts = append(leftParts, m.renderSlashPopup())
 	}
-	leftParts = append(leftParts, input, status)
+	leftParts = append(leftParts, input)
+	if row := m.renderActivityRow(); row != "" {
+		leftParts = append(leftParts, row)
+	}
+	leftParts = append(leftParts, status)
 	left := lipgloss.JoinVertical(lipgloss.Left, leftParts...)
 
 	if m.sidebarEnabled() {
@@ -1449,19 +1909,24 @@ func (m model) renderContent() string {
 }
 
 func (m *model) renderStatus() string {
-	statusStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#565F89")).
-		Background(lipgloss.Color("#1A1B26")).
-		Padding(0, 1)
-
 	agentName := "build"
 	specs := agent.DefaultAgents
 	if m.currentAgentIdx >= 0 && m.currentAgentIdx < len(specs) {
 		agentName = specs[m.currentAgentIdx].Name
 	}
 
-	return statusStyle.Width(m.panelWidth()).Render(
-		fmt.Sprintf(" Agent: %s | Mode: %s | Model: %s | Session: %s | tab: agent | ctrl+p: palette | ctrl+x: leader", agentName, m.agentModeLabel(), m.currentModelName(), m.sessionID),
+	suffix := " | tab: agent | ctrl+p: palette | ctrl+x: leader"
+	if m.ctrlCPressed {
+		suffix = " | ctrl+c again to quit"
+	} else if m.streaming {
+		suffix = " | esc: stop"
+	}
+	permissionMode := ""
+	if m.agent != nil && m.agent.Permissions() != nil && m.agent.Permissions().Mode() == agent.PermissionModeYOLO {
+		permissionMode = " | YOLO permissions"
+	}
+	return m.styles.Status.Width(m.panelWidth()).Render(
+		fmt.Sprintf(" Agent: %s | Mode: %s | Model: %s | Session: %s%s%s", agentName, m.agentModeLabel(), m.currentModelName(), m.sessionID, permissionMode, suffix),
 	)
 }
 
@@ -1698,7 +2163,12 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	if todo == "" {
 		appendSection("TODO", []string{"No live session todo state yet."}, nil)
 	} else {
-		appendSection("TODO", strings.Split(todo, "\n"), nil)
+		raw := strings.Split(todo, "\n")
+		styled := make([]string, len(raw))
+		for i, line := range raw {
+			styled[i] = styleTodoLine(line)
+		}
+		appendSection("TODO", styled, nil)
 	}
 
 	appendSection("Hints", []string{"Ctrl+B toggle sidebar", "/sidebar toggle sidebar", "Ctrl+P command palette", "Ctrl+X leader actions"}, nil)
