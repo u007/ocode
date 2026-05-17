@@ -4,13 +4,20 @@
 
 Two features:
 1. Auto-scroll to bottom when restoring a prior session
-2. Interactive terminal scrollbar (track + thumb) on all viewport surfaces
+2. Interactive terminal scrollbar (track + thumb) on all scrollable surfaces
 
-Surfaces covered:
+### All scrollable surfaces
+
+**Viewport-based** (use `viewport.Model` math):
 - Transcript (messages) — `model.go`, `m.viewport`
 - Debug log — `model.go`, `m.logViewport`
 - Git diff — `git_model.go`, `m.diff`
 - File preview — `files_model.go`, `m.preview`
+
+**List-based** (windowed plain `[]string`, not viewport.Model):
+- Picker dialog — `picker.go`, `m.pickerItems`, `pickerVisibleRange()`, maxRows=15
+- Slash popup — `slash_popup.go`, `m.slashPopupItems`, `slashPopupVisibleRange()`, maxRows=8
+- Connect dialog — `connect.go`, `m.connect.providerIdx` / `m.connect.methodIdx` (small fixed lists, include for consistency)
 
 ---
 
@@ -18,122 +25,137 @@ Surfaces covered:
 
 ### Problem
 
-In `New()`, session messages are appended to `m.messages` but `renderTranscript()` is never called and `GotoBottom()` is never invoked. On startup the viewport contains only the hint text and shows the top of the transcript.
+In `New()`, session messages are appended to `m.messages` but `renderTranscript()` is never called and `GotoBottom()` is never invoked. The viewport also has no correct dimensions yet — those arrive with the first `WindowSizeMsg`. Calling `renderTranscript()` at `New()` time would wrap at the stub width of 80 cols and then not re-wrap on resize.
 
 ### Fix
 
-Two-part fix:
+One-shot flag approach:
 
-1. After the session restore loop in `New()`, call `m.renderTranscript()` so `SetContent` is called with the restored messages before the model is returned.
+1. After the session restore loop in `New()`, set `m.restoredPendingScroll = true` on the model (new `bool` field).
+2. In the `WindowSizeMsg` handler, after `layout()` resizes the viewports, check `m.restoredPendingScroll`: if true, call `m.renderTranscript()` then `m.viewport.GotoBottom()` then set `m.restoredPendingScroll = false`.
 
-2. In the `WindowSizeMsg` handler (second switch, after `layout()` is called), add a `GotoBottom()` call for both `m.viewport` and `m.logViewport` when `len(m.messages) > 0`. This handles the race where terminal dimensions are unknown at init time — the viewport is properly sized only after the first `WindowSizeMsg`.
-
-No new state needed.
+This fires exactly once after the first resize event (correct dimensions), then never again — so subsequent terminal resizes do not snap the user back to the bottom while they are scrolled up.
 
 ---
 
-## Feature 2: Scrollbar on All Viewport Surfaces
+## Feature 2: Scrollbar on All Scrollable Surfaces
 
-### Scrollbar rendering — shared helper
+### Scrollbar rendering — shared helpers
 
-Add a pure function `renderScrollbar(height int, scrollPct float64, totalLines int, visibleLines int) string` in `model.go` (accessible to sub-models via package scope).
+Add two pure functions in a new file `internal/tui/scrollbar.go`:
 
-- Returns a single-column string of `height` lines
-- When `totalLines <= visibleLines`: returns an empty string (scrollbar hidden)
-- Otherwise: computes thumb size = `max(1, visibleLines * height / totalLines)` and thumb position from `scrollPct`
-- Track character: `│` rendered in dim/hint style
-- Thumb character: `█` rendered in accent color (blue `#7AA2F7`)
+**`renderScrollbar(height int, totalLines int, visibleLines int, offsetLines int) string`**
+- Returns a single-column string of `height` rune lines
+- When `totalLines <= visibleLines`: returns a column of dim track chars (no thumb) — width is always present so layout never reflows
+- Thumb size: `max(1, visibleLines * height / totalLines)` lines
+- Thumb top: `int(float64(offsetLines) / float64(max(1, totalLines-visibleLines)) * float64(height-thumbSize))`
+- Track character: `┊` (dim style) — visually distinct from border `│`
+- Thumb character: `█` (accent color `#7AA2F7`)
 
-### Viewport width adjustment
+**`renderListScrollbar(height int, totalItems int, visibleStart int, visibleCount int) string`**
+- Same character/style rules
+- For list-based surfaces where there's no `viewport.Model`
+- Thumb position derived from `visibleStart / max(1, totalItems - visibleCount)`
 
-Each panel that shows a scrollbar must subtract 1 from the viewport's content width. The scrollbar column sits *inside* the border (between content and right border wall). The border width is unchanged.
+### Width rule
 
-Each render call:
-1. Render `vp.View()` at `width - 1`
-2. Compute scrollbar column via helper
-3. `lipgloss.JoinHorizontal(lipgloss.Top, content, scrollbar)`
-4. Pass the joined string into `borderStyle.Width(width).Render(...)`
+**Always reserve the scrollbar column.** Every scrollable panel is allocated 1 column narrower than its border interior. When there is nothing to scroll, the scrollbar column renders as all-track characters. This prevents layout reflow when scroll state changes.
 
-Width accounting:
-- Transcript / log: in `layout()`, subtract 1 from `m.viewport.Width` and `m.logViewport.Width` when the scrollbar is visible (i.e. `TotalLineCount > VisibleLineCount`). Since visibility can change, always reserve the column (subtract 1 unconditionally when the panel is active).
-- Git diff / file preview: subtract 1 in each panel's render method.
+### Mouse interaction — viewport surfaces
 
-Simpler rule: **always subtract 1** — the scrollbar column is always present; when there's nothing to scroll, it renders as all-track characters (invisible-feeling, no thumb). This avoids layout reflow when scroll state changes.
+**Scroll behavior: jump-to-position.** Clicking or dragging the scrollbar sets `YOffset` to the position proportional to where the mouse is within the track. The thumb does not preserve a grab offset — it follows the mouse Y directly. This is simpler and sufficient for a terminal UI.
 
-### Mouse interaction — drag state
-
-Add to `model` struct:
+**Drag state** — add to `model` struct:
 ```
-scrollbarDrag        scrollbarDragState  // which viewport is being dragged
-scrollbarDragStartY  int                 // Y at drag start
+scrollbarDrag       scrollbarDragTarget
 ```
-
 ```go
-type scrollbarDragState int
+type scrollbarDragTarget int
 const (
-    scrollbarDragNone scrollbarDragState = iota
+    scrollbarDragNone scrollbarDragTarget = iota
     scrollbarDragTranscript
     scrollbarDragLog
 )
 ```
 
-For `gitModel` and `filesModel`, add equivalent `scrollbarDrag bool` + `scrollbarDragStartY int` fields to those structs.
+For `gitModel`: add `diffScrollbarDrag bool` field.
+For `filesModel`: add `previewScrollbarDrag bool` field.
 
-### Scrollbar hit detection
-
-For each viewport, compute the scrollbar column's X position and the viewport's Y range. A click/motion is "on the scrollbar" when:
-- `mouse.X == scrollbarX` (rightmost column inside the border)
+**Hit detection** — a mouse event hits a scrollbar when:
+- `mouse.X == panelRight - 1` (last column inside border, before right border wall)
 - `mouse.Y` is within `[viewportTop, viewportTop + viewportHeight)`
 
-Helper: `scrollbarXForPanel(panelX, panelWidth int) int` returns `panelX + panelWidth - 2` (inside right border wall).
+Sub-models (`gitModel`, `filesModel`) do not know their screen-absolute X position. The parent `model.go` must do hit detection for git diff and file preview scrollbars before forwarding mouse events, and then set a flag / call `SetYOffset` directly rather than relying on the sub-model to detect it. Alternatively, pass `panelOriginX` into the sub-model's `Update` — the cleaner approach is to handle scrollbar clicks in `model.go` for all surfaces.
 
-### Click/drag → SetYOffset
-
-When a click or motion lands on the scrollbar:
+**SetYOffset calculation:**
 ```
-targetPct = float64(mouse.Y - viewportTop) / float64(viewportHeight)
-targetOffset = int(targetPct * float64(totalLines - visibleLines))
-vp.SetYOffset(targetOffset)
+trackTop    = viewportTop   (first row of viewport inside border)
+trackHeight = viewportHeight
+clickRow    = mouse.Y - trackTop
+targetPct   = float64(clickRow) / float64(trackHeight)
+totalLines  = vp.TotalLineCount()
+visible     = vp.VisibleLineCount()
+offset      = int(targetPct * float64(max(0, totalLines - visible)))
+vp.SetYOffset(offset)
 ```
 
-### Integration points
+**Integration in `model.go`:**
 
-**`model.go` — `handleMouseAction`:**
-- Before existing checks, test if click is on transcript scrollbar (tab == chat) or log scrollbar (tab == log)
-- On press: set `scrollbarDrag` state and call `SetYOffset`
-- Return `true` to consume event
+`handleMouseAction` (click/press):
+- Before existing checks, test if click hits transcript scrollbar (tab == chat) or log scrollbar (tab == log) or git diff scrollbar (tab == git) or file preview scrollbar (tab == files)
+- Set `scrollbarDrag` state, call `SetYOffset`, return `true`
+- For git diff / file preview: call `SetYOffset` on `m.git.diff` / `m.files.preview` directly
 
-**`model.go` — `handleMouseMotion`:**
-- If `scrollbarDrag != scrollbarDragNone`, call `SetYOffset` for the active drag surface
+`handleMouseAction` (release):
+- Clear `scrollbarDrag`
+
+`handleMouseMotion`:
+- If `scrollbarDrag != scrollbarDragNone`, compute and apply `SetYOffset` for the dragged surface
 - Return `true`
 
-**`model.go` — `handleMouseAction` (release):**
-- Clear `scrollbarDrag` state
+`gitModel.Update` and `filesModel.Update` do not need mouse cases for scrollbar — all handled in `model.go`.
 
-**`git_model.go` — `Update`:**
-- Add `tea.MouseClickMsg`, `tea.MouseReleaseMsg`, `tea.MouseMotionMsg` cases
-- Same hit-detect-then-SetYOffset pattern for `m.diff`
+### Mouse interaction — list-based surfaces
 
-**`files_model.go` — `Update`:**
-- Add same mouse cases for `m.preview`
+Picker and slash popup use index-based scrolling (no `viewport.Model`). Clicking the scrollbar column maps to an item index:
 
-Mouse events flow into git/files models because `model.go` already forwards `msg` to `m.git.Update(msg, w, h)` and `m.files.Update(msg, w, h)` when those tabs are active.
+```
+clickRow    = mouse.Y - listTop
+targetPct   = float64(clickRow) / float64(listHeight)
+targetIndex = int(targetPct * float64(totalItems))
+m.pickerIndex = clamp(targetIndex, 0, len(items)-1)
+```
 
-### View changes
+Drag state for list surfaces: add `listScrollbarDrag bool` to `model` struct, set/clear in same handlers.
 
-**`model.go` `View()`:**
-- Transcript render: join `m.viewport.View()` + scrollbar column, then border-wrap
-- Log render (`renderLogPane`): same pattern for `m.logViewport`
+Connect dialog has very few items (≤5 providers, ≤3 methods) — include a visual scrollbar for consistency but no drag needed (it will always show no-thumb state in practice).
 
-**`git_model.go` `View()`:**
-- Diff pane: join `m.diff.View()` + scrollbar, then border-wrap
+### Render changes
 
-**`files_model.go` `View()`:**
-- Preview pane: join `m.preview.View()` + scrollbar, then border-wrap
+**Viewport surfaces** — each render site:
+1. Compute scrollbar: `sb := renderScrollbar(vp.Height(), vp.TotalLineCount(), vp.VisibleLineCount(), vp.YOffset())`
+2. Join: `joined := lipgloss.JoinHorizontal(lipgloss.Top, vp.View(), sb)`
+3. Wrap: `borderStyle.Width(panelWidth - 2).Render(joined)`
+4. Viewport content width = `panelWidth - 2 - 1` (subtract border + scrollbar col)
+
+Affected sites:
+- `model.go` `View()`: transcript panel (viewport width set in `layout()`)
+- `model.go` `renderLogPane()` or equivalent log render site
+- `git_model.go` diff pane render
+- `files_model.go` preview pane render
+
+**List surfaces** — each render site:
+1. Render the list body as today
+2. Compute scrollbar column: `sb := renderListScrollbar(bodyHeight, total, start, end-start)`
+3. Join body + scrollbar, then border-wrap
+
+Affected sites:
+- `picker.go` `renderPicker()`
+- `slash_popup.go` `renderSlashPopup()`
+- `connect.go` `renderConnect()` (provider and method list stages)
 
 ---
 
 ## Out of Scope
 
-- Git sections list and git files list (plain `[]string`, not viewports) — no scrollbar
-- Slash popup, picker, connect dialog — short lists, no scrollbar needed
+- Git sections list and git files list — plain `[]string` rendered inline in `git_model.go` with no windowing; always short; no scrollbar
