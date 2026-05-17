@@ -35,6 +35,16 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
+type scrollbarDragTarget int
+
+const (
+	scrollbarDragNone       scrollbarDragTarget = iota
+	scrollbarDragTranscript
+	scrollbarDragLog
+	scrollbarDragGitDiff
+	scrollbarDragFilesPreview
+)
+
 type role int
 
 const (
@@ -165,6 +175,7 @@ type model struct {
 	err                 error
 	scrollSpeed          int
 	restoredPendingScroll bool
+	scrollbarDrag        scrollbarDragTarget
 	workDir              string
 	currentAgentIdx     int
 	showPermDialog      bool
@@ -1095,6 +1106,23 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		return m, nil, false
 	}
 
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	trackTop := headerHeight + 1
+
+	if pressed && m.transcriptScrollbarHit(mouse) {
+		m.scrollbarDrag = scrollbarDragTranscript
+		scrollbarSetOffset(&m.viewport, mouse.Y, trackTop, m.viewport.Height())
+		return m, nil, true
+	}
+	if pressed && m.logScrollbarHit(mouse) {
+		m.scrollbarDrag = scrollbarDragLog
+		scrollbarSetOffset(&m.logViewport, mouse.Y, trackTop, m.logViewport.Height())
+		return m, nil, true
+	}
+	if !pressed {
+		m.scrollbarDrag = scrollbarDragNone
+	}
+
 	if tab, ok := m.tabForClick(mouse); ok {
 		m.activeTab = tab
 		if tab == tabChat {
@@ -1143,6 +1171,18 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	if mouse.Button != tea.MouseLeft {
 		return m, nil, false
 	}
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	trackTop := headerHeight + 1
+
+	switch m.scrollbarDrag {
+	case scrollbarDragTranscript:
+		scrollbarSetOffset(&m.viewport, mouse.Y, trackTop, m.viewport.Height())
+		return m, nil, true
+	case scrollbarDragLog:
+		scrollbarSetOffset(&m.logViewport, mouse.Y, trackTop, m.logViewport.Height())
+		return m, nil, true
+	}
+
 	if tab, ok := m.tabForClick(mouse); ok {
 		m.activeTab = tab
 		if tab == tabChat {
@@ -3025,6 +3065,52 @@ func (m model) renderMCPStatus() string {
 		return fmt.Sprintf("%d configured, %d loaded", enabled, loaded)
 	}
 	return fmt.Sprintf("%d configured", enabled)
+}
+
+func (m model) mainScrollbarX() int {
+	return m.panelWidth() - 2
+}
+
+func (m model) transcriptScrollbarHit(mouse tea.Mouse) bool {
+	if m.activeTab != tabChat {
+		return false
+	}
+	if mouse.X != m.mainScrollbarX() {
+		return false
+	}
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	top := headerHeight + 1
+	return mouse.Y >= top && mouse.Y < top+m.viewport.Height()
+}
+
+func (m model) logScrollbarHit(mouse tea.Mouse) bool {
+	if m.activeTab != tabLog {
+		return false
+	}
+	if mouse.X != m.mainScrollbarX() {
+		return false
+	}
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	top := headerHeight + 1
+	return mouse.Y >= top && mouse.Y < top+m.logViewport.Height()
+}
+
+func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {
+	clickRow := mouseY - trackTop
+	if clickRow < 0 {
+		clickRow = 0
+	}
+	if clickRow >= trackHeight {
+		clickRow = trackHeight - 1
+	}
+	total := vp.TotalLineCount()
+	visible := vp.VisibleLineCount()
+	maxOffset := total - visible
+	if maxOffset <= 0 {
+		return
+	}
+	offset := int(float64(clickRow) / float64(trackHeight) * float64(maxOffset))
+	vp.SetYOffset(offset)
 }
 
 func (m model) renderLSPStatus() string {
