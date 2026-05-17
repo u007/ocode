@@ -42,25 +42,25 @@ type gitCommit struct {
 }
 
 type gitModel struct {
-	workDir      string
-	width        int
-	height       int
-	section      gitSection
-	panel        gitPanel
-	stagedFiles  []gitFile
-	unstagedFiles []gitFile
+	workDir        string
+	width          int
+	height         int
+	section        gitSection
+	panel          gitPanel
+	stagedFiles    []gitFile
+	unstagedFiles  []gitFile
 	untrackedFiles []gitFile
-	filesCursor  int
-	commits      []gitCommit
-	commitCursor int
-	stashes      []string
-	stashCursor  int
-	branches     []string
-	branchCursor int
-	diff         viewport.Model
-	committing   bool
-	commitInput  textarea.Model
-	statusMsg    string
+	filesCursor    int
+	commits        []gitCommit
+	commitCursor   int
+	stashes        []string
+	stashCursor    int
+	branches       []string
+	branchCursor   int
+	diff           viewport.Model
+	committing     bool
+	commitInput    textarea.Model
+	statusMsg      string
 }
 
 func newGitModel(workDir string) gitModel {
@@ -522,7 +522,13 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, sectPane, filesPane, diffPane)
 
-	header := styles.Header.Render("\u25c6 ocode  Git") + "  " + renderTabBar(tabGit, chatUnread)
+	tabBar := renderTabBar(tabGit, chatUnread)
+	headerLeft := styles.Header.Render("\u25c6 ocode  Git")
+	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar)
+	if headerPad < 0 {
+		headerPad = 0
+	}
+	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar
 
 	status := hintStyle.Render(m.statusMsg)
 

@@ -63,14 +63,39 @@ func TestNewClientUsesChutesLLMEndpoint(t *testing.T) {
 	}
 }
 
+func TestNewClientUsesOpenCodeGoEndpoint(t *testing.T) {
+	client := NewClient(nil, "opencode-go/glm-5.1")
+	got, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient for opencode-go model, got %T", client)
+	}
+	if got.Provider != "opencode-go" {
+		t.Fatalf("expected provider opencode-go, got %q", got.Provider)
+	}
+	if got.Model != "glm-5.1" {
+		t.Fatalf("expected stripped model glm-5.1, got %q", got.Model)
+	}
+	if got.BaseURL != "https://opencode.ai/zen/go/v1" {
+		t.Fatalf("expected opencode-go base URL, got %q", got.BaseURL)
+	}
+}
+
 func TestFallbackAllProviderModelsIncludesDeepSeek(t *testing.T) {
 	models := fallbackAllProviderModels()
+	want := map[string]bool{
+		"deepseek/deepseek-chat": false,
+		"opencode-go/glm-5.1":    false,
+	}
 	for _, model := range models {
-		if model == "deepseek/deepseek-chat" {
-			return
+		if _, ok := want[model]; ok {
+			want[model] = true
 		}
 	}
-	t.Fatalf("expected DeepSeek model in fallback list, got %#v", models)
+	for model, found := range want {
+		if !found {
+			t.Fatalf("expected %s in fallback list, got %#v", model, models)
+		}
+	}
 }
 
 func TestOpenAIToolsWrapsRawToolDefinitions(t *testing.T) {
@@ -137,6 +162,41 @@ func TestGenericClientRetriesTransientNoResponseErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "llm request failed after 4 attempt(s)") {
 		t.Fatalf("expected retry count in error, got %v", err)
+	}
+}
+
+func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	var gotURL string
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			gotURL = req.URL.String()
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{
+					"model":"gpt-test",
+					"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]
+				}`)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", APIKey: "token", UseOAuth: true}
+	msg, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotURL != "https://chatgpt.com/backend-api/codex/responses" {
+		t.Fatalf("responses URL = %q", gotURL)
+	}
+	if msg.Content != "ok" {
+		t.Fatalf("content = %q", msg.Content)
 	}
 }
 

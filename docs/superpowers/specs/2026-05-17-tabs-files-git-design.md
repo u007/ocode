@@ -121,6 +121,7 @@ Two-pane horizontal split:
 | `k` / `↑` | move up |
 | `enter` / `space` | expand dir / open file in editor |
 | `e` | open selected file in editor |
+| `E` | choose editor, save choice, then open selected file |
 | `/` | fuzzy search |
 
 ---

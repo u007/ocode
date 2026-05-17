@@ -116,6 +116,64 @@ func TestLoadFromStringValidJSON(t *testing.T) {
 	}
 }
 
+func TestMCPConfigDefaultsToEnabledAndInfersLocal(t *testing.T) {
+	cfg := &Config{
+		Tools:      make(map[string]bool),
+		Permission: make(map[string]interface{}),
+		Provider:   make(map[string]interface{}),
+		MCP:        make(map[string]MCPConfig),
+	}
+
+	err := loadFromString(`{"mcp":{"demo":{"command":"echo hello"}}}`, cfg)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	got := cfg.MCP["demo"]
+	if !got.Enabled {
+		t.Fatal("expected missing mcp.enabled to default to true")
+	}
+	if got.Type != "local" {
+		t.Fatalf("expected local type, got %q", got.Type)
+	}
+	if len(got.Command) != 2 || got.Command[0] != "echo" || got.Command[1] != "hello" {
+		t.Fatalf("expected string command to be split, got %#v", got.Command)
+	}
+	if got.Timeout != 5000 {
+		t.Fatalf("expected default timeout 5000, got %d", got.Timeout)
+	}
+}
+
+func TestSaveMCPEnabledWritesOpencodeConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{"mcp":{"demo":{"command":["echo","ok"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveMCPEnabled("demo", false); err != nil {
+		t.Fatalf("failed to save mcp enabled flag: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "opencode.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.MCP["demo"].Enabled {
+		t.Fatal("expected mcp server to be disabled")
+	}
+}
+
 func TestSaveTUIThemeWritesOpencodeConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

@@ -8,10 +8,12 @@ const (
 	tabChat  = 0
 	tabFiles = 1
 	tabGit   = 2
+	tabLog   = 3
+	tabCount = 4
 )
 
 func renderTabBar(active int, unread bool) string {
-	labels := []string{"1:chat", "2:files", "3:git"}
+	labels := []string{"1:chat", "2:files", "3:git", "4:log"}
 	if unread && active != tabChat {
 		labels[0] = "1:chat\u25cf"
 	}

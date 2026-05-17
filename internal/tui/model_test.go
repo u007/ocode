@@ -147,9 +147,60 @@ func TestCtrlOTogglesYoloMode(t *testing.T) {
 	}
 
 	updated, _ = got.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
-	got = updated.(*model)
-	if got.agent.Permissions().Mode() != agent.PermissionModeNormal {
-		t.Fatalf("expected Ctrl+O to disable YOLO, got %s", got.agent.Permissions().Mode())
+	got2 := updated.(*model)
+	if got2.agent.Permissions().Mode() != agent.PermissionModeNormal {
+		t.Fatalf("expected Ctrl+O to disable YOLO, got %s", got2.agent.Permissions().Mode())
+	}
+}
+
+func TestMCPCmdListsConfiguredServers(t *testing.T) {
+	m := model{
+		config: &config.Config{MCP: map[string]config.MCPConfig{
+			"demo": {Type: "local", Enabled: true},
+		}},
+		agent: agent.NewAgent(nil, nil, nil),
+	}
+	m.agent.RestoreMCPToolNames([]string{"demo_search"})
+
+	runMCPCmd(&m, nil)
+
+	if len(m.messages) != 1 {
+		t.Fatalf("expected one message, got %d", len(m.messages))
+	}
+	text := m.messages[0].text
+	for _, want := range []string{"MCP servers:", "demo", "enabled", "1 tools"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("expected %q in MCP output, got %q", want, text)
+		}
+	}
+}
+
+func TestCtrlCClearsNonEmptyInputBeforeQuitConfirmation(t *testing.T) {
+	m := model{
+		input:             textarea.New(),
+		viewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		inputHistoryIndex: 2,
+		ctrlCPressed:      true,
+		showSlashPopup:    true,
+	}
+	m.input.SetValue("draft message")
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd != nil {
+		t.Fatalf("expected Ctrl+C with input to return no command, got %T", cmd)
+	}
+	got := updated.(model)
+	if got.input.Value() != "" {
+		t.Fatalf("expected Ctrl+C to clear input, got %q", got.input.Value())
+	}
+	if got.ctrlCPressed {
+		t.Fatal("expected Ctrl+C clearing input to reset quit confirmation")
+	}
+	if got.inputHistoryIndex != -1 {
+		t.Fatalf("expected input history index reset, got %d", got.inputHistoryIndex)
+	}
+	if got.showSlashPopup {
+		t.Fatal("expected slash popup to close when input is cleared")
 	}
 }
 
@@ -261,6 +312,34 @@ func TestLayoutHeightDoesNotChangeWhenTranscriptScrolls(t *testing.T) {
 		if !strings.Contains(content, "draft input") || !strings.Contains(content, "Agent:") {
 			t.Fatalf("expected input and status to remain visible, got %q", content)
 		}
+	}
+}
+
+func TestInputNavigationDoesNotScrollTranscript(t *testing.T) {
+	m := model{
+		input:    textarea.New(),
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
+		styles:   ApplyThemeColors("tokyonight"),
+		messages: []message{{
+			role: roleAssistant,
+			text: strings.Repeat("long transcript line\n", 40),
+		}},
+	}
+	m.input.SetValue("first line\nsecond line")
+	m.renderTranscript()
+	m.viewport.GotoBottom()
+	offset := m.viewport.YOffset()
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	got := updated.(model)
+	if got.viewport.YOffset() != offset {
+		t.Fatalf("expected input up key not to scroll transcript, before=%d after=%d", offset, got.viewport.YOffset())
+	}
+
+	updated, _ = got.Update(tea.KeyPressMsg{Code: tea.KeyDown})
+	got = updated.(model)
+	if got.viewport.YOffset() != offset {
+		t.Fatalf("expected input down key not to scroll transcript, before=%d after=%d", offset, got.viewport.YOffset())
 	}
 }
 
@@ -583,6 +662,54 @@ func TestCtrlYRetriesLastRetryableLLMError(t *testing.T) {
 	}
 }
 
+func TestMouseWheelScrollsTranscriptOnlyWhenOverMessages(t *testing.T) {
+	lines := strings.Repeat("message line\n", 20)
+	m := model{
+		width:       80,
+		height:      24,
+		input:       newTestTextarea(),
+		viewport:    viewport.New(viewport.WithWidth(40), viewport.WithHeight(3)),
+		styles:      ApplyThemeColors("tokyonight"),
+		scrollSpeed: 3,
+	}
+	m.viewport.SetContent(lines)
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 2, Y: 2, Button: tea.MouseWheelDown})
+	got := derefTestModel(t, updated)
+	if got.viewport.YOffset() == 0 {
+		t.Fatal("expected mouse wheel over transcript to scroll messages")
+	}
+
+	before := got.viewport.YOffset()
+	updated, _ = got.Update(tea.MouseWheelMsg{X: 2, Y: 8, Button: tea.MouseWheelDown})
+	got = derefTestModel(t, updated)
+	if got.viewport.YOffset() != before {
+		t.Fatalf("expected wheel outside transcript to leave messages offset at %d, got %d", before, got.viewport.YOffset())
+	}
+}
+
+func TestUpKeyUsesInputHistoryWithoutScrollingTranscript(t *testing.T) {
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          viewport.New(viewport.WithWidth(40), viewport.WithHeight(3)),
+		inputHistory:      []string{"first", "second"},
+		inputHistoryIndex: -1,
+		scrollSpeed:       3,
+	}
+	m.viewport.SetContent(strings.Repeat("message line\n", 20))
+	m.viewport.ScrollDown(6)
+	before := m.viewport.YOffset()
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	got := derefTestModel(t, updated)
+	if got.input.Value() != "second" {
+		t.Fatalf("expected up key to recall latest input history entry, got %q", got.input.Value())
+	}
+	if got.viewport.YOffset() != before {
+		t.Fatalf("expected up key not to scroll transcript, offset changed from %d to %d", before, got.viewport.YOffset())
+	}
+}
+
 func TestEnterWhileStreamingQueuesUserInput(t *testing.T) {
 	m := model{
 		ready:     true,
@@ -697,6 +824,90 @@ func TestPickerMouseRowUsesVisibleWindow(t *testing.T) {
 	}
 	if idx != 2 {
 		t.Fatalf("expected first visible picker row to map to index 2, got %d", idx)
+	}
+
+}
+
+func TestPickerMouseReleaseSelectsModel(t *testing.T) {
+	m := model{
+		showPicker:   true,
+		pickerKind:   "model",
+		pickerItems:  []string{"test-model"},
+		pickerValues: []string{"test-model"},
+		input:        newTestTextarea(),
+	}
+
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 3, Y: 3})
+	got := derefTestModel(t, updated)
+
+	if got.showPicker {
+		t.Fatal("expected picker to close after model row release")
+	}
+	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "test-model") {
+		t.Fatalf("expected selected model message, got %#v", got.messages)
+	}
+}
+
+func TestTabMouseReleaseUsesRightAlignedHeaderPosition(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     100,
+		height:    24,
+		activeTab: tabFiles,
+		input:     newTestTextarea(),
+		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	barWidth := lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread))
+	barStart := m.panelWidth() - barWidth
+	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("1:chat"))
+	filesWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("2:files"))
+
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + filesWidth + 1, Y: 1})
+	got := derefTestModel(t, updated)
+
+	if got.activeTab != tabGit {
+		t.Fatalf("expected git tab after release, got %d", got.activeTab)
+	}
+}
+
+func TestTabMouseMotionSwitchesWhenTerminalReportsDrag(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     100,
+		height:    24,
+		activeTab: tabChat,
+		input:     newTestTextarea(),
+		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	barWidth := lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread))
+	barStart := m.tabBarStartXs(barWidth)[0]
+	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("1:chat"))
+
+	updated, _ := m.Update(tea.MouseMotionMsg{Button: tea.MouseLeft, X: barStart + chatWidth + 1, Y: 0})
+	got := derefTestModel(t, updated)
+
+	if got.activeTab != tabFiles {
+		t.Fatalf("expected files tab after left-button motion, got %d", got.activeTab)
+	}
+}
+
+func TestMouseModeDefaultsOnWithoutConfig(t *testing.T) {
+	m := model{ready: true, input: newTestTextarea()}
+
+	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
+		t.Fatalf("expected default mouse mode on without config, got %v", got)
+	}
+}
+
+func TestMouseModeCanBeDisabledByConfig(t *testing.T) {
+	disabled := false
+	m := model{ready: true, input: newTestTextarea(), config: &config.Config{}}
+	m.config.TUI.Mouse = &disabled
+
+	if got := m.View().MouseMode; got != tea.MouseModeNone {
+		t.Fatalf("expected mouse mode off when configured false, got %v", got)
 	}
 }
 

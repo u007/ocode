@@ -24,16 +24,21 @@ type fileNode struct {
 }
 
 type filesModel struct {
-	workDir  string
-	nodes    []fileNode
-	cursor   int
-	preview  viewport.Model
-	fuzzy    bool
-	query    string
-	allPaths []string
-	width    int
-	height   int
-	editor   string
+	workDir        string
+	nodes          []fileNode
+	cursor         int
+	preview        viewport.Model
+	fuzzy          bool
+	query          string
+	allPaths       []string
+	width          int
+	height         int
+	editor         string
+	saveEditor     func(string) error
+	choosingEditor bool
+	editorCursor   int
+	editorTarget   string
+	statusMsg      string
 }
 
 func newFilesModel(workDir string) filesModel {
@@ -66,6 +71,8 @@ func loadDirChildren(dir string, depth int) []fileNode {
 
 func (m *filesModel) SetEditor(e string) { m.editor = e }
 
+func (m *filesModel) SetSaveEditor(fn func(string) error) { m.saveEditor = fn }
+
 func (m *filesModel) Resize(w, h int) {
 	m.width = w
 	m.height = h
@@ -86,6 +93,9 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 		m.preview.GotoTop()
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.choosingEditor {
+			return m.updateEditorPicker(msg)
+		}
 		if m.fuzzy {
 			return m.updateFuzzy(msg)
 		}
@@ -111,7 +121,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 				return m, loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
-	case "enter", "space":
+	case "enter", "ctrl+j", "ctrl+m", "space":
 		if m.cursor < len(m.nodes) {
 			n := &m.nodes[m.cursor]
 			if n.isDir {
@@ -124,12 +134,85 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			return m, m.openInEditor(m.nodes[m.cursor].path)
 		}
+	case "E", "shift+e":
+		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
+			m.openEditorPicker(m.nodes[m.cursor].path)
+		}
 	case "/":
 		m.fuzzy = true
 		m.query = ""
 		m.buildAllPaths()
 	}
 	return m, nil
+}
+
+func (m filesModel) updateEditorPicker(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	choices := m.editorChoices()
+	switch msg.String() {
+	case "esc":
+		m.choosingEditor = false
+	case "j", "down":
+		if m.editorCursor < len(choices)-1 {
+			m.editorCursor++
+		}
+	case "k", "up":
+		if m.editorCursor > 0 {
+			m.editorCursor--
+		}
+	case "enter", "ctrl+j", "ctrl+m":
+		if len(choices) == 0 {
+			m.statusMsg = "no editor choices available"
+			return m, nil
+		}
+		choice := choices[m.editorCursor]
+		m.editor = choice
+		m.choosingEditor = false
+		if m.saveEditor != nil {
+			if err := m.saveEditor(choice); err != nil {
+				m.statusMsg = "editor save failed: " + err.Error()
+				return m, nil
+			}
+		}
+		m.statusMsg = "editor: " + choice
+		return m, m.openInEditor(m.editorTarget)
+	}
+	return m, nil
+}
+
+func (m *filesModel) openEditorPicker(path string) {
+	m.choosingEditor = true
+	m.editorTarget = path
+	m.editorCursor = 0
+	choices := m.editorChoices()
+	for i, choice := range choices {
+		if choice == m.editor {
+			m.editorCursor = i
+			break
+		}
+	}
+}
+
+func (m filesModel) editorChoices() []string {
+	seen := map[string]bool{}
+	choices := []string{}
+	add := func(editor string) {
+		editor = strings.TrimSpace(editor)
+		if editor == "" || seen[editor] {
+			return
+		}
+		seen[editor] = true
+		choices = append(choices, editor)
+	}
+	add(m.editor)
+	add(os.Getenv("VISUAL"))
+	add(os.Getenv("EDITOR"))
+	for _, candidate := range []string{"vim", "nvim", "vi", "nano", "code --wait", "cursor --wait"} {
+		name := strings.Fields(candidate)[0]
+		if _, err := exec.LookPath(name); err == nil {
+			add(candidate)
+		}
+	}
+	return choices
 }
 
 func (m filesModel) updateFuzzy(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
@@ -272,6 +355,9 @@ func (m filesModel) openInEditor(path string) tea.Cmd {
 		editor = "vi"
 	}
 	cmdParts := strings.Fields(editor)
+	if len(cmdParts) == 0 {
+		return func() tea.Msg { return editorFinishedMsg{err: os.ErrInvalid} }
+	}
 	cmdParts = append(cmdParts, path)
 	c := exec.Command(cmdParts[0], cmdParts[1:]...)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
@@ -303,11 +389,25 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 	treeContent := strings.Join(treeLines, "\n")
 	treePane := borderStyle.Width(treeW - 2).Height(h - 3).Render(treeContent)
 
-	previewPane := borderStyle.Width(previewW - 2).Render(m.preview.View())
+	previewContent := m.preview.View()
+	if m.choosingEditor {
+		previewContent = m.editorPickerView(previewW-4, styles)
+	} else if m.statusMsg != "" {
+		previewContent = hintStyle.Render(m.statusMsg) + "\n\n" + previewContent
+	} else if m.editor != "" {
+		previewContent = hintStyle.Render("editor: "+m.editor+"  (E to change)") + "\n\n" + previewContent
+	}
+	previewPane := borderStyle.Width(previewW - 2).Render(previewContent)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, treePane, previewPane)
 
-	header := styles.Header.Render("\u25c6 ocode  Files") + "  " + renderTabBar(tabFiles, chatUnread)
+	tabBar := renderTabBar(tabFiles, chatUnread)
+	headerLeft := styles.Header.Render("\u25c6 ocode  Files")
+	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar)
+	if headerPad < 0 {
+		headerPad = 0
+	}
+	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar
 
 	fuzzyBar := ""
 	if m.fuzzy {
@@ -317,7 +417,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 			results = results[:3]
 		}
 		preview = strings.Join(results, "  ")
-		fuzzyBar = hintStyle.Render("/ "+m.query+"  "+preview)
+		fuzzyBar = hintStyle.Render("/ " + m.query + "  " + preview)
 	}
 
 	parts := []string{header, row}
@@ -325,4 +425,21 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 		parts = append(parts, fuzzyBar)
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func (m filesModel) editorPickerView(width int, styles Styles) string {
+	choices := m.editorChoices()
+	lines := []string{
+		styles.Header.Render("Choose editor"),
+		hintStyle.Render("j/k move  enter select+open  esc cancel"),
+		"",
+	}
+	for i, choice := range choices {
+		line := "  " + choice
+		if i == m.editorCursor {
+			line = lipgloss.NewStyle().Reverse(true).Width(width).Render("> " + choice)
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
 }

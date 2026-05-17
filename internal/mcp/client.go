@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -51,13 +52,13 @@ type MCPClient struct {
 	stdout io.ReadCloser
 	reader *bufio.Scanner
 	// Remote
-	url       string
-	headers   map[string]string
-	sse       *sse.Client
-	httpCli   *http.Client
-	oauthCfg  *config.MCPOAuthConfig
-	token     *auth.MCPAuthToken
-	tokenMu   sync.RWMutex
+	url      string
+	headers  map[string]string
+	sse      *sse.Client
+	httpCli  *http.Client
+	oauthCfg *config.MCPOAuthConfig
+	token    *auth.MCPAuthToken
+	tokenMu  sync.RWMutex
 
 	mu sync.Mutex
 	id int
@@ -115,6 +116,12 @@ func NewLocalClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 	}
 
 	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)
+	if len(cfg.Environment) > 0 {
+		cmd.Env = os.Environ()
+		for k, v := range cfg.Environment {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err

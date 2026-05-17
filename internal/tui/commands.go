@@ -9,6 +9,7 @@ import (
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/commands"
+	"github.com/jamesmercstudio/ocode/internal/config"
 )
 
 type commandSpec struct {
@@ -48,6 +49,7 @@ func init() {
 		{name: "/sidebar", help: "Toggle sidebar placeholder", handler: runSidebarCmd},
 		{name: "/skills", help: "List available skills", handler: runSkillsCmd},
 		{name: "/commands", help: "List all available commands (built-in + custom)", handler: runCommandsCmd},
+		{name: "/mcp", usage: "/mcp [list|enable <server>|disable <server>]", help: "List or toggle MCP servers", handler: runMCPCmd},
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
 		{name: "/permissions", help: "View or set tool permissions", handler: runPermissionsCmd},
@@ -120,6 +122,15 @@ func autocompleteSlashInput(m *model, text string) []string {
 	matches := make([]string, 0, len(suggestions))
 	for _, s := range suggestions {
 		matches = append(matches, s.name)
+	}
+	if prefix == "/m" {
+		for i, name := range matches {
+			if name == "/models" {
+				copy(matches[1:i+1], matches[0:i])
+				matches[0] = name
+				break
+			}
+		}
 	}
 	return matches
 }
@@ -240,18 +251,62 @@ func runSidebarCmd(m *model, args []string) tea.Cmd {
 }
 
 func runMCPAuthCmd(m *model, args []string) tea.Cmd {
-	if len(args) < 2 {
+	if len(args) < 1 {
 		return func() tea.Msg {
 			return statusMsg{text: "Usage: /mcp-auth <server-name>"}
 		}
 	}
-	serverName := args[1]
+	serverName := args[0]
 	return func() tea.Msg {
 		err := m.handleMCPAuth(serverName)
 		if err != nil {
 			return statusMsg{text: fmt.Sprintf("MCP auth failed: %s", err.Error())}
 		}
 		return statusMsg{text: fmt.Sprintf("MCP authentication successful for %s", serverName)}
+	}
+}
+
+func runMCPCmd(m *model, args []string) tea.Cmd {
+	if m.config == nil || len(m.config.MCP) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No MCP servers configured in opencode config."})
+		return nil
+	}
+	action := "list"
+	if len(args) > 0 {
+		action = strings.ToLower(args[0])
+	}
+	switch action {
+	case "list", "ls", "status":
+		m.messages = append(m.messages, message{role: roleAssistant, text: m.renderMCPList()})
+		return nil
+	case "enable", "on", "disable", "off":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mcp enable <server> or /mcp disable <server>"})
+			return nil
+		}
+		name := args[1]
+		mcpCfg, ok := m.config.MCP[name]
+		if !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("MCP server %q not found.", name)})
+			return nil
+		}
+		enabled := action == "enable" || action == "on"
+		if err := config.SaveMCPEnabled(name, enabled); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to update MCP config: %v", err)})
+			return nil
+		}
+		mcpCfg.Enabled = enabled
+		m.config.MCP[name] = mcpCfg
+		m.rebuildAgentWithExternalTools()
+		state := "enabled"
+		if !enabled {
+			state = "disabled"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("MCP server %q %s.", name, state)})
+		return nil
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mcp [list|enable <server>|disable <server>]"})
+		return nil
 	}
 }
 
