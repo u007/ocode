@@ -12,6 +12,7 @@ type GitHubPRTool struct{}
 
 func (t GitHubPRTool) Name() string        { return "github_pr" }
 func (t GitHubPRTool) Description() string { return "Get GitHub PR diff and details" }
+func (t GitHubPRTool) Parallel() bool      { return true }
 func (t GitHubPRTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "github_pr",
@@ -73,6 +74,7 @@ type GitHubIssueTool struct{}
 
 func (t GitHubIssueTool) Name() string        { return "github_issue" }
 func (t GitHubIssueTool) Description() string { return "List or get GitHub issues" }
+func (t GitHubIssueTool) Parallel() bool      { return true }
 func (t GitHubIssueTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "github_issue",
@@ -164,6 +166,7 @@ type GitHubWorkflowTool struct{}
 
 func (t GitHubWorkflowTool) Name() string        { return "github_workflow" }
 func (t GitHubWorkflowTool) Description() string { return "Generate GitHub Actions workflow YAML" }
+func (t GitHubWorkflowTool) Parallel() bool      { return true }
 func (t GitHubWorkflowTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "github_workflow",

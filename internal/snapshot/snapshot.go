@@ -23,23 +23,24 @@ var (
 
 func Backup(path string) error {
 	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	newFile := os.IsNotExist(err)
+
+	var backupPath string
+	if !newFile {
+		dir := filepath.Join(".opencode", "snapshots")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
 		}
-		return err
-	}
 
-	dir := filepath.Join(".opencode", "snapshots")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
-	}
+		backupName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), filepath.Base(path))
+		backupPath = filepath.Join(dir, backupName)
 
-	backupName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), filepath.Base(path))
-	backupPath := filepath.Join(dir, backupName)
-
-	if err := os.WriteFile(backupPath, data, 0644); err != nil {
-		return err
+		if err := os.WriteFile(backupPath, data, 0644); err != nil {
+			return err
+		}
 	}
 
 	mu.Lock()
@@ -86,7 +87,12 @@ func Undo() (string, error) {
 	snapshots = snapshots[:len(snapshots)-1]
 	mu.Unlock()
 
-	redoBackupPath := last.BackupPath + ".redo"
+	// Save current state for redo before restoring.
+	redoBase := last.BackupPath
+	if redoBase == "" {
+		redoBase = filepath.Join(".opencode", "snapshots", fmt.Sprintf("%d_%s", time.Now().UnixNano(), filepath.Base(last.OriginalPath)))
+	}
+	redoBackupPath := redoBase + ".redo"
 	currentData, err := os.ReadFile(last.OriginalPath)
 	if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("failed to read current file for redo backup %s: %w", last.OriginalPath, err)
@@ -102,6 +108,14 @@ func Undo() (string, error) {
 		Timestamp:    time.Now(),
 	})
 	mu.Unlock()
+
+	// BackupPath == "" means the file was newly created; undo by deleting it.
+	if last.BackupPath == "" {
+		if err := os.Remove(last.OriginalPath); err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("failed to remove new file %s: %w", last.OriginalPath, err)
+		}
+		return last.OriginalPath, nil
+	}
 
 	data, err := os.ReadFile(last.BackupPath)
 	if err != nil {

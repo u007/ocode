@@ -213,6 +213,78 @@ func TestLoadWithConfigContentEnv(t *testing.T) {
 	}
 }
 
+func TestLoadPrefersRecentModelOverConfig(t *testing.T) {
+	tmpHome, err := os.MkdirTemp("", "ocode-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpHome)
+
+	tmpState, err := os.MkdirTemp("", "ocode-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpState)
+
+	tmpDir, err := os.MkdirTemp("", "ocode-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("XDG_STATE_HOME", tmpState)
+	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{"model": "config/model"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRecentModel("recent/model"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "recent/model" {
+		t.Fatalf("expected recent model, got %s", cfg.Model)
+	}
+}
+
+func TestLoadKeepsExplicitEnvModelOverRecent(t *testing.T) {
+	tmpHome, err := os.MkdirTemp("", "ocode-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpHome)
+
+	tmpState, err := os.MkdirTemp("", "ocode-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpState)
+
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("XDG_STATE_HOME", tmpState)
+	t.Setenv("OPENCODE_MODEL", "env/model")
+	if err := SaveRecentModel("recent/model"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "env/model" {
+		t.Fatalf("expected env model, got %s", cfg.Model)
+	}
+}
+
 func TestLoadWithOpenCodeDir(t *testing.T) {
 	tmpHome, err := os.MkdirTemp("", "ocode-home")
 	if err != nil {

@@ -2,45 +2,87 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"charm.land/lipgloss/v2"
 )
 
 type slashSuggestion struct {
-	name string
-	desc string
+	name    string
+	display string
+	desc    string
 }
 
 func slashSuggestions(prefix string) []slashSuggestion {
-	lower := strings.ToLower(prefix)
+	// Strip the leading slash for scoring so "/mod" and "mod" behave the
+	// same and rank by the command name itself.
+	q := strings.TrimPrefix(strings.ToLower(prefix), "/")
+
+	type scoredSuggestion struct {
+		score int
+		idx   int
+		item  slashSuggestion
+	}
+	scored := make([]scoredSuggestion, 0, len(commandSpecs)+len(loadedCustomCommands))
 	seen := make(map[string]struct{})
-	items := make([]slashSuggestion, 0, len(commandSpecs)+len(loadedCustomCommands))
+	order := 0
+
+	consider := func(name, display, desc string, searchKeys []string) {
+		if _, ok := seen[name]; ok {
+			return
+		}
+		best := 0
+		for _, k := range searchKeys {
+			if s := fuzzyScore(strings.TrimPrefix(strings.ToLower(k), "/"), q); s > best {
+				best = s
+			}
+		}
+		if best == 0 {
+			return
+		}
+		seen[name] = struct{}{}
+		scored = append(scored, scoredSuggestion{
+			score: best,
+			idx:   order,
+			item:  slashSuggestion{name: name, display: display, desc: desc},
+		})
+		order++
+	}
 
 	for _, spec := range commandSpecs {
-		if !strings.HasPrefix(spec.name, lower) {
-			continue
+		keys := append([]string{spec.name}, spec.aliases...)
+		display := spec.name
+		// If an alias scores higher than the canonical name, show it in the label.
+		bestAlias, bestAliasScore := "", 0
+		for _, a := range spec.aliases {
+			if s := fuzzyScore(strings.TrimPrefix(strings.ToLower(a), "/"), q); s > bestAliasScore {
+				bestAlias, bestAliasScore = a, s
+			}
 		}
-		if _, ok := seen[spec.name]; ok {
-			continue
+		nameScore := fuzzyScore(strings.TrimPrefix(strings.ToLower(spec.name), "/"), q)
+		if bestAliasScore > nameScore && bestAlias != "" {
+			display = bestAlias + " → " + spec.name
 		}
-		items = append(items, slashSuggestion{name: spec.name, desc: spec.help})
-		seen[spec.name] = struct{}{}
+		consider(spec.name, display, spec.help, keys)
 	}
 
 	for _, cmd := range loadedCustomCommands {
 		name := "/" + cmd.Name
-		if !strings.HasPrefix(strings.ToLower(name), lower) {
-			continue
-		}
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		items = append(items, slashSuggestion{name: name, desc: cmd.Description})
-		seen[name] = struct{}{}
+		consider(name, name, cmd.Description, []string{name})
 	}
 
-	return items
+	sort.SliceStable(scored, func(a, b int) bool {
+		if scored[a].score != scored[b].score {
+			return scored[a].score > scored[b].score
+		}
+		return scored[a].idx < scored[b].idx
+	})
+	out := make([]slashSuggestion, len(scored))
+	for i, s := range scored {
+		out[i] = s.item
+	}
+	return out
 }
 
 func (m *model) closeSlashPopup() {
@@ -69,7 +111,7 @@ func (m model) slashPopupRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	start, end := m.slashPopupVisibleRange()
-	idx := y - (m.viewport.Height() + 4) // 2 (header) + 1 (transcript border) + 1 (popup border)
+	idx := y - (m.viewport.Height() + 4) // 1 (header) + 1 (transcript border top) + viewport.Height() (content) + 1 (transcript border bottom) + 1 (popup border top)
 	if idx < 0 || start+idx >= end {
 		return 0, false
 	}
@@ -103,10 +145,7 @@ func (m model) inputIsExactSlashCommand() bool {
 
 func (m model) renderSlashPopup() string {
 	nameStyle := lipgloss.NewStyle().Bold(true)
-	descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89"))
-	selectedStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#1A1B26")).
-		Background(lipgloss.Color("#7AA2F7"))
+	descStyle := m.styles.Hint
 
 	items := m.slashPopupItems
 	start, end := m.slashPopupVisibleRange()
@@ -118,16 +157,16 @@ func (m model) renderSlashPopup() string {
 	} else {
 		maxNameLen := 0
 		for _, item := range items[start:end] {
-			if len(item.name) > maxNameLen {
-				maxNameLen = len(item.name)
+			if len(item.display) > maxNameLen {
+				maxNameLen = len(item.display)
 			}
 		}
 		for i := start; i < end; i++ {
 			item := items[i]
-			paddedName := fmt.Sprintf("%-*s", maxNameLen, item.name)
+			paddedName := fmt.Sprintf("%-*s", maxNameLen, item.display)
 			line := nameStyle.Render(paddedName) + "  " + descStyle.Render(item.desc)
 			if i == m.slashPopupIndex {
-				line = selectedStyle.Render(" " + paddedName + "  " + item.desc + " ")
+				line = m.styles.Selected.Render(" " + paddedName + "  " + item.desc + " ")
 			}
 			body.WriteString(line)
 			body.WriteByte('\n')

@@ -29,8 +29,8 @@ type providerEntry struct {
 }
 
 type modelsRegistry struct {
-	mu       sync.RWMutex
-	data     map[string]providerEntry
+	mu        sync.RWMutex
+	data      map[string]providerEntry
 	fetchedAt time.Time
 }
 
@@ -149,6 +149,29 @@ func ProviderModels(provider string) []string {
 	return fallbackProviderModels(provider)
 }
 
+// AllProviderModels returns opencode-style provider/model IDs for model pickers.
+func AllProviderModels() []string {
+	if models := allProviderModelsFromRegistry(); len(models) > 0 {
+		return models
+	}
+	return fallbackAllProviderModels()
+}
+
+func allProviderModelsFromRegistry() []string {
+	data := loadRegistry()
+	if data == nil {
+		return nil
+	}
+	ids := make([]string, 0)
+	for provider, entry := range data {
+		for model := range entry.Models {
+			ids = append(ids, provider+"/"+model)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
 func providerModelsFromRegistry(provider string) []string {
 	data := loadRegistry()
 	if data == nil {
@@ -170,11 +193,25 @@ func fallbackProviderModels(provider string) []string {
 	switch provider {
 	case "anthropic":
 		return []string{"claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307"}
+	case "deepseek":
+		return []string{"deepseek-chat", "deepseek-reasoner"}
 	case "google":
 		return []string{"gemini-1.5-pro", "gemini-1.5-flash"}
 	default:
 		return []string{"gpt-4o", "gpt-4o-mini", "o1-preview"}
 	}
+}
+
+func fallbackAllProviderModels() []string {
+	providers := []string{"anthropic", "deepseek", "google", "openai"}
+	models := make([]string, 0)
+	for _, provider := range providers {
+		for _, model := range fallbackProviderModels(provider) {
+			models = append(models, provider+"/"+model)
+		}
+	}
+	sort.Strings(models)
+	return models
 }
 
 // AllProviders returns provider IDs known to the registry (or empty if unavailable).

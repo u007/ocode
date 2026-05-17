@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
@@ -19,6 +20,66 @@ func (m *MockClient) Chat(messages []Message, tools []map[string]interface{}) (*
 
 func (m *MockClient) GetProvider() string { return "mock" }
 func (m *MockClient) GetModel() string    { return "mock-model" }
+
+func TestNewClientParsesOpenCodeProviderModel(t *testing.T) {
+	client := NewClient(nil, "deepseek/deepseek-chat")
+	got, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient for deepseek model, got %T", client)
+	}
+	if got.Provider != "deepseek" {
+		t.Fatalf("expected provider deepseek, got %q", got.Provider)
+	}
+	if got.Model != "deepseek-chat" {
+		t.Fatalf("expected stripped model deepseek-chat, got %q", got.Model)
+	}
+}
+
+func TestFallbackAllProviderModelsIncludesDeepSeek(t *testing.T) {
+	models := fallbackAllProviderModels()
+	for _, model := range models {
+		if model == "deepseek/deepseek-chat" {
+			return
+		}
+	}
+	t.Fatalf("expected DeepSeek model in fallback list, got %#v", models)
+}
+
+func TestOpenAIToolsWrapsRawToolDefinitions(t *testing.T) {
+	tools := openAITools([]map[string]interface{}{{
+		"name":        "read",
+		"description": "Read file contents",
+		"parameters":  map[string]interface{}{"type": "object"},
+	}})
+
+	if len(tools) != 1 {
+		t.Fatalf("expected one tool, got %d", len(tools))
+	}
+	if tools[0]["type"] != "function" {
+		t.Fatalf("expected OpenAI function tool type, got %#v", tools[0]["type"])
+	}
+	fn, ok := tools[0]["function"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected function definition map, got %#v", tools[0]["function"])
+	}
+	if fn["name"] != "read" {
+		t.Fatalf("expected wrapped tool definition, got %#v", fn)
+	}
+}
+
+func TestOpenAIToolsKeepsWrappedDefinitions(t *testing.T) {
+	wrapped := map[string]interface{}{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name": "read",
+		},
+	}
+	tools := openAITools([]map[string]interface{}{wrapped})
+
+	if len(tools) != 1 || !reflect.DeepEqual(tools[0]["function"], wrapped["function"]) {
+		t.Fatalf("expected existing wrapped definition to be preserved, got %#v", tools)
+	}
+}
 
 func TestAgentStep(t *testing.T) {
 	mock := &MockClient{
@@ -80,6 +141,7 @@ func TestAgentToolExecution(t *testing.T) {
 
 	mockTool := &MockTool{name: "test_tool", result: "success"}
 	a := NewAgent(mock, nil, nil)
+	a.Permissions().SetRule("test_tool", PermissionAllow)
 	a.AddTools([]tool.Tool{mockTool})
 
 	msgs, err := a.Step([]Message{{Role: "user", Content: "do tool"}})
@@ -123,3 +185,4 @@ func (m *MockTool) Definition() map[string]interface{} {
 func (m *MockTool) Execute(args json.RawMessage) (string, error) {
 	return m.result, nil
 }
+func (m *MockTool) Parallel() bool { return true }

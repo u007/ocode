@@ -39,6 +39,8 @@ func (t MCPTool) Execute(args json.RawMessage) (string, error) {
 	return t.server.CallTool(t.name, args)
 }
 
+func (t MCPTool) Parallel() bool { return false }
+
 type MCPClient struct {
 	name    string
 	isLocal bool

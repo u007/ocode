@@ -88,6 +88,8 @@ func (t TaskTool) Definition() map[string]interface{} {
 	}
 }
 
+func (t TaskTool) Parallel() bool { return true }
+
 func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		Prompt  string `json:"prompt"`
@@ -122,7 +124,9 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		{Role: "user", Content: params.Prompt},
 	}
 
+	t.mainAgent.activity.agentStarted(spec.Name)
 	resp, err := subAgent.Step(subAgentMsgs)
+	t.mainAgent.activity.agentDone(spec.Name)
 	if err != nil {
 		return "", err
 	}

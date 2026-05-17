@@ -29,17 +29,16 @@ var customCommandLookup map[string]*commands.Command
 
 func init() {
 	commandSpecs = []commandSpec{
-		{name: "/model", usage: "/model <name>", help: "Switch LLM model", takesModelArg: true, handler: runModelCmd},
+		{name: "/models", aliases: []string{"/model"}, usage: "/models [name]", help: "List and switch available models", takesModelArg: true, handler: runModelsCmd},
 		{name: "/connect", help: "Show/Set provider API keys", handler: runConnectCmd},
 		{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
-		{name: "/session", usage: "/session <cmd>", help: "Manage sessions (list, load <id>)", handler: runSessionCmd},
+		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
 		{name: "/compact", help: "Reduce context size by removing tool history", handler: runCompactCmd},
 		{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
 		{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},
 		{name: "/export", help: "Save chat as Markdown", handler: runExportCmd},
 		{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
-		{name: "/models", help: "List recommended models for active provider", handler: runModelsCmd},
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
 		{name: "/init", help: "Create default AGENTS.md", handler: runInitCmd},
 		{name: "/help", help: "Show this help", handler: runHelpCmd},
@@ -52,6 +51,7 @@ func init() {
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
 		{name: "/permissions", help: "View or set tool permissions", handler: runPermissionsCmd},
+		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
@@ -116,48 +116,16 @@ func autocompleteSlashInput(m *model, text string) []string {
 	}
 
 	prefix := strings.TrimSpace(text)
-	seen := make(map[string]struct{})
-	var matches []string
-	for _, spec := range commandSpecs {
-		if strings.HasPrefix(spec.name, prefix) {
-			if _, ok := seen[spec.name]; !ok {
-				matches = append(matches, spec.name)
-				seen[spec.name] = struct{}{}
-			}
-			continue
-		}
-		for _, alias := range spec.aliases {
-			if strings.HasPrefix(alias, prefix) {
-				if _, ok := seen[spec.name]; !ok {
-					matches = append(matches, spec.name)
-					seen[spec.name] = struct{}{}
-				}
-				break
-			}
-		}
-	}
-	for _, cmd := range loadedCustomCommands {
-		name := "/" + cmd.Name
-		if strings.HasPrefix(name, prefix) {
-			if _, ok := seen[name]; !ok {
-				matches = append(matches, name)
-				seen[name] = struct{}{}
-			}
-		}
+	suggestions := slashSuggestions(prefix)
+	matches := make([]string, 0, len(suggestions))
+	for _, s := range suggestions {
+		matches = append(matches, s.name)
 	}
 	return matches
 }
 
 func modelSuggestions(m *model) []string {
-	provider := "openai"
-	if m != nil && m.agent != nil {
-		provider = m.agent.GetProvider()
-	}
-	return providerModels(provider)
-}
-
-func providerModels(provider string) []string {
-	return agent.ProviderModels(provider)
+	return agent.AllProviderModels()
 }
 
 func commandHelpText() string {
@@ -320,11 +288,19 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			return nil
 		}
 		var b strings.Builder
-		b.WriteString("Permission rules:\n")
+		b.WriteString(fmt.Sprintf("Permission mode: %s\n\n", m.agent.Permissions().Mode()))
+		b.WriteString("Tool permission rules:\n")
 		for toolName, level := range rules {
 			b.WriteString(fmt.Sprintf("  %-20s %s\n", toolName, level))
 		}
-		b.WriteString("\nUsage: /permissions <tool> <allow|deny|ask>")
+		prefixRules := m.agent.Permissions().BashPrefixRules()
+		if len(prefixRules) > 0 {
+			b.WriteString("\nBash prefix rules:\n")
+			for prefix, level := range prefixRules {
+				b.WriteString(fmt.Sprintf("  %-20s %s\n", prefix, level))
+			}
+		}
+		b.WriteString("\nUsage: /permissions <tool> <allow|deny|ask> or /permissions bash:<prefix> <allow|deny|ask>")
 		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 		return nil
 	}
@@ -336,12 +312,54 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			return nil
 		}
 		if m.agent != nil && m.agent.Permissions() != nil {
-			m.agent.Permissions().SetRule(toolName, level)
+			if strings.HasPrefix(toolName, "bash:") {
+				m.agent.Permissions().SetBashPrefixRule(strings.TrimPrefix(toolName, "bash:"), level)
+			} else {
+				m.agent.Permissions().SetRule(toolName, level)
+			}
+			m.persistPermissions()
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Set %s permission for %q to %s.", level, toolName, level)})
 		return nil
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions [<tool> <allow|deny|ask>]"})
+	return nil
+}
+
+func runYoloCmd(m *model, args []string) tea.Cmd {
+	if m.agent == nil || m.agent.Permissions() == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured."})
+		return nil
+	}
+	mode := m.agent.Permissions().Mode()
+	if len(args) == 0 {
+		if mode == agent.PermissionModeYOLO {
+			m.agent.Permissions().SetMode(agent.PermissionModeNormal)
+			mode = agent.PermissionModeNormal
+		} else {
+			m.agent.Permissions().SetMode(agent.PermissionModeYOLO)
+			mode = agent.PermissionModeYOLO
+		}
+		m.persistPermissions()
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", mode)})
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "yes", "yolo":
+		m.agent.Permissions().SetMode(agent.PermissionModeYOLO)
+	case "off", "false", "no", "normal":
+		m.agent.Permissions().SetMode(agent.PermissionModeNormal)
+	case "locked", "lock":
+		m.agent.Permissions().SetMode(agent.PermissionModeLocked)
+	case "status":
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", mode)})
+		return nil
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /yolo [on|off|status]"})
+		return nil
+	}
+	m.persistPermissions()
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", m.agent.Permissions().Mode())})
 	return nil
 }
 

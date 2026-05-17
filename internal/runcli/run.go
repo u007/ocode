@@ -28,6 +28,7 @@ func Run(args []string) error {
 	title := fs.String("title", "", "Session title")
 	attach := fs.String("attach", "", "Attach to running serve instance URL")
 	port := fs.Int("port", 0, "Serve port (for --attach)")
+	yolo := fs.Bool("yolo", false, "Allow tools and shell commands without permission prompts")
 	fs.Parse(args)
 
 	if *attach != "" {
@@ -49,6 +50,9 @@ func Run(args []string) error {
 
 	if *model != "" {
 		cfg.Model = *model
+	}
+	if *yolo && cfg.Ocode != nil {
+		cfg.Ocode.Permissions.Mode = string(agent.PermissionModeYOLO)
 	}
 
 	modelStr := cfg.Model

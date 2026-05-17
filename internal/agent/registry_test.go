@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -72,8 +73,14 @@ func TestNextAgentSpec(t *testing.T) {
 func TestPermissionManager(t *testing.T) {
 	pm := NewPermissionManager()
 
-	if pm.Check("bash") != PermissionAllow {
-		t.Error("expected allow for unknown tool")
+	if pm.Check("unknown_tool") != PermissionAsk {
+		t.Error("expected ask for unknown tool")
+	}
+	if pm.Check("read") != PermissionAllow {
+		t.Error("expected allow for read")
+	}
+	if pm.Check("bash") != PermissionAsk {
+		t.Error("expected ask for bash")
 	}
 
 	pm.SetRule("bash", PermissionDeny)
@@ -120,14 +127,39 @@ func TestPermissionRules(t *testing.T) {
 	pm.SetRule("mcp_*", PermissionAsk)
 
 	rules := pm.Rules()
-	if len(rules) != 2 {
-		t.Errorf("expected 2 rules, got %d", len(rules))
+	if len(rules) < 2 {
+		t.Errorf("expected at least 2 rules, got %d", len(rules))
 	}
 	if rules["bash"] != PermissionDeny {
 		t.Error("expected deny for bash in rules")
 	}
 	if rules["mcp_*"] != PermissionAsk {
 		t.Error("expected ask for mcp_* in rules")
+	}
+}
+
+func TestPermissionManagerBashPrefixRules(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetBashPrefixRule("git", PermissionAllow)
+
+	decision := pm.Decide("bash", json.RawMessage(`{"command":"git status"}`))
+	if decision.Level != PermissionAllow {
+		t.Fatalf("expected git prefix allow, got %s", decision.Level)
+	}
+
+	decision = pm.Decide("bash", json.RawMessage(`{"command":"make test"}`))
+	if decision.Level != PermissionAsk || decision.Request == nil || decision.Request.Prefix != "make" {
+		t.Fatalf("expected make prefix ask request, got %+v", decision)
+	}
+}
+
+func TestPermissionManagerYoloAllowsBash(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetMode(PermissionModeYOLO)
+
+	decision := pm.Decide("bash", json.RawMessage(`{"command":"make test"}`))
+	if decision.Level != PermissionAllow {
+		t.Fatalf("expected yolo allow, got %s", decision.Level)
 	}
 }
 

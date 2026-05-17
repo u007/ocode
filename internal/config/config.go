@@ -55,20 +55,20 @@ type FormatterConfig struct {
 }
 
 type Config struct {
-	Model        string                      `json:"model"`
-	SmallModel   string                      `json:"small_model"`
-	Provider     map[string]interface{}      `json:"provider"`
-	Tools        map[string]bool             `json:"tools"`
-	Permission   map[string]interface{}      `json:"permission"`
-	Agent        map[string]interface{}      `json:"agent"`
-	DefaultAgent string                      `json:"default_agent"`
-	MCP          map[string]MCPConfig        `json:"mcp"`
-	TUI          TUIConfig                   `json:"tui"`
-	Watcher      WatcherConfig               `json:"watcher"`
-	Hooks        map[string]HookConfig       `json:"hooks"`
-	Formatters   map[string]FormatterConfig  `json:"formatters"`
-	RemoteConfig string                      `json:"remote_config"`
-	Ocode        *OcodeConfig                `json:"-"`
+	Model        string                     `json:"model"`
+	SmallModel   string                     `json:"small_model"`
+	Provider     map[string]interface{}     `json:"provider"`
+	Tools        map[string]bool            `json:"tools"`
+	Permission   map[string]interface{}     `json:"permission"`
+	Agent        map[string]interface{}     `json:"agent"`
+	DefaultAgent string                     `json:"default_agent"`
+	MCP          map[string]MCPConfig       `json:"mcp"`
+	TUI          TUIConfig                  `json:"tui"`
+	Watcher      WatcherConfig              `json:"watcher"`
+	Hooks        map[string]HookConfig      `json:"hooks"`
+	Formatters   map[string]FormatterConfig `json:"formatters"`
+	RemoteConfig string                     `json:"remote_config"`
+	Ocode        *OcodeConfig               `json:"-"`
 }
 
 func Load() (*Config, error) {
@@ -117,6 +117,10 @@ func Load() (*Config, error) {
 
 	if model := os.Getenv("OPENCODE_MODEL"); model != "" {
 		config.Model = model
+	} else {
+		if recent := LoadRecentModels(); len(recent) > 0 {
+			config.Model = recent[0]
+		}
 	}
 
 	loadTUIConfig(config)
@@ -201,6 +205,52 @@ func mergeTUI(path string, config *Config) {
 			config.TUI.Keybinds[k] = v
 		}
 	}
+}
+
+func getGlobalTUIPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(os.Getenv("APPDATA"), "opencode", "tui.json"), nil
+	}
+	return filepath.Join(home, ".config", "opencode", "tui.json"), nil
+}
+
+func SaveTUITheme(theme string) error {
+	tuiPath, err := getGlobalTUIPath()
+	if err != nil {
+		return err
+	}
+
+	existing, _ := os.ReadFile(tuiPath)
+	m := map[string]any{}
+	if len(existing) > 0 {
+		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
+		if err := json.Unmarshal(jsoncData, &m); err != nil {
+			m = map[string]any{}
+		}
+	}
+	m["theme"] = theme
+	// If a nested tui.theme override exists, update it too so reads stay deterministic.
+	if nested, ok := m["tui"].(map[string]any); ok {
+		if _, hasTheme := nested["theme"]; hasTheme {
+			nested["theme"] = theme
+		}
+	}
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal tui config: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tuiPath), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	tmp := tuiPath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return fmt.Errorf("write tui config: %w", err)
+	}
+	return os.Rename(tmp, tuiPath)
 }
 
 func getGlobalConfigPath() (string, error) {

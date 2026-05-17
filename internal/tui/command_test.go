@@ -4,12 +4,16 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestLookupCommandResolvesAliases(t *testing.T) {
+	if got := lookupCommand("/model"); got == nil || got.name != "/models" {
+		t.Fatalf("expected /model to resolve to /models, got %#v", got)
+	}
+
 	if got := lookupCommand("/clear"); got == nil || got.name != "/new" {
 		t.Fatalf("expected /clear to resolve to /new, got %#v", got)
 	}
@@ -20,6 +24,14 @@ func TestLookupCommandResolvesAliases(t *testing.T) {
 
 	if got := lookupCommand("/quit"); got == nil || got.name != "/exit" {
 		t.Fatalf("expected /quit to resolve to /exit, got %#v", got)
+	}
+
+	if got := lookupCommand("/resume"); got == nil || got.name != "/session" {
+		t.Fatalf("expected /resume to resolve to /session, got %#v", got)
+	}
+
+	if got := lookupCommand("/sessions"); got == nil || got.name != "/session" {
+		t.Fatalf("expected /sessions to resolve to /session, got %#v", got)
 	}
 }
 
@@ -37,13 +49,13 @@ func TestRenderPaletteUsesRegistryCommands(t *testing.T) {
 func TestSlashAutocompleteResolvesCommand(t *testing.T) {
 	m := model{}
 
-	if got := autocompleteSlashInput(&m, "/m"); len(got) == 0 || got[0] != "/model" {
-		t.Fatalf("expected /m to resolve to /model, got %#v", got)
+	if got := autocompleteSlashInput(&m, "/m"); len(got) == 0 || got[0] != "/models" {
+		t.Fatalf("expected /m to resolve to /models, got %#v", got)
 	}
 
-	got := autocompleteSlashInput(&m, "/model ")
+	got := autocompleteSlashInput(&m, "/models ")
 	if len(got) == 0 {
-		t.Fatalf("expected /model autocomplete to return at least one model, got empty")
+		t.Fatalf("expected /models autocomplete to return at least one model, got empty")
 	}
 }
 
@@ -53,8 +65,8 @@ func TestTabAutocompleteRunsInUpdatePath(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	got := updated.(model)
-	if got.input.Value() != "/model" {
-		t.Fatalf("expected tab to complete /m to /model, got %q", got.input.Value())
+	if got.input.Value() != "/models" {
+		t.Fatalf("expected tab to complete /m to /models, got %q", got.input.Value())
 	}
 
 	if got.showPalette {
@@ -64,12 +76,12 @@ func TestTabAutocompleteRunsInUpdatePath(t *testing.T) {
 
 func TestTabOnModelOpensPicker(t *testing.T) {
 	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
-	m.input.SetValue("/model ")
+	m.input.SetValue("/models ")
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
 	got := updated.(model)
 	if !got.showPicker {
-		t.Fatal("expected tab on /model to open picker")
+		t.Fatal("expected tab on /models to open picker")
 	}
 }
 
@@ -103,7 +115,7 @@ func TestSidebarCommandTogglesStateWithoutMessage(t *testing.T) {
 
 func TestCommandHelpTextShowsAliasesAndArgs(t *testing.T) {
 	help := commandHelpText()
-	for _, want := range []string{"/model <name>", "/new, /clear", "/exit, /quit, /q"} {
+	for _, want := range []string{"/models [name], /model", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("expected help text to include %q, got %q", want, help)
 		}

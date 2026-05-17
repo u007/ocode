@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/hooks"
@@ -20,6 +21,11 @@ type Agent struct {
 	mode        Mode
 	spec        *AgentSpec
 	permissions *PermissionManager
+	activity    *ActivityTracker
+	// OnMessage, if set, is invoked for each message produced during Step
+	// (assistant replies and tool results) as soon as they are generated,
+	// enabling live UI updates between iterations of the tool-call loop.
+	OnMessage func(Message)
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -34,11 +40,15 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		config:      cfg,
 		mode:        ModeBuild,
 		permissions: NewPermissionManager(),
+		activity:    newActivityTracker(),
 	}
 	a.tools["agent"] = AgentTool{mainAgent: a}
 	a.tools["task"] = TaskTool{mainAgent: a}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)
+		if cfg.Ocode != nil {
+			a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
+		}
 	}
 	return a
 }
@@ -70,6 +80,8 @@ func (t AgentTool) Definition() map[string]interface{} {
 	}
 }
 
+func (t AgentTool) Parallel() bool { return true }
+
 func (t AgentTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		Prompt  string `json:"prompt"`
@@ -86,7 +98,9 @@ func (t AgentTool) Execute(args json.RawMessage) (string, error) {
 		{Role: "user", Content: params.Prompt},
 	}
 
+	t.mainAgent.activity.agentStarted("agent")
 	resp, err := t.mainAgent.Step(subAgentMsgs)
+	t.mainAgent.activity.agentDone("agent")
 	if err != nil {
 		return "", err
 	}
@@ -122,33 +136,78 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	var newMsgs []Message
 
 	for i := 0; i < 10; i++ {
+		a.activity.setLLMRunning(true)
 		resp, err := a.client.Chat(messages, toolDefs)
+		a.activity.setLLMRunning(false)
 		if err != nil {
 			return nil, err
 		}
 
 		newMsgs = append(newMsgs, *resp)
 		messages = append(messages, *resp)
+		if a.OnMessage != nil {
+			a.OnMessage(*resp)
+		}
 
 		if len(resp.ToolCalls) == 0 {
 			break
 		}
 
-		for _, tc := range resp.ToolCalls {
+		type tcResult struct {
+			idx int
+			msg Message
+		}
+
+		var parallelTCs, sequentialTCs []int
+		for j, tc := range resp.ToolCalls {
+			t, ok := a.tools[tc.Function.Name]
+			if ok && t.Parallel() {
+				parallelTCs = append(parallelTCs, j)
+			} else {
+				sequentialTCs = append(sequentialTCs, j)
+			}
+		}
+
+		results := make([]Message, len(resp.ToolCalls))
+
+		if len(parallelTCs) > 0 {
+			var wg sync.WaitGroup
+			for _, i := range parallelTCs {
+				wg.Add(1)
+				go func(idx int, tc ToolCall) {
+					defer wg.Done()
+					a.activity.toolStarted(tc.Function.Name)
+					result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+					a.activity.toolDone(tc.Function.Name)
+					if err != nil {
+						result = fmt.Sprintf("Error: %v", err)
+					}
+					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result}
+				}(i, resp.ToolCalls[i])
+			}
+			wg.Wait()
+		}
+
+		for _, i := range sequentialTCs {
+			tc := resp.ToolCalls[i]
+			a.activity.toolStarted(tc.Function.Name)
 			result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			a.activity.toolDone(tc.Function.Name)
 			if err != nil {
 				result = fmt.Sprintf("Error: %v", err)
 			}
-			if result == "WAITING_FOR_USER_RESPONSE" {
-				return newMsgs, nil
-			}
-			toolMsg := Message{
-				Role:    "tool",
-				ToolID:  tc.ID,
-				Content: result,
-			}
+			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result}
+		}
+
+		for _, toolMsg := range results {
 			newMsgs = append(newMsgs, toolMsg)
 			messages = append(messages, toolMsg)
+			if a.OnMessage != nil {
+				a.OnMessage(toolMsg)
+			}
+			if toolMsg.Content == "WAITING_FOR_USER_RESPONSE" {
+				return newMsgs, nil
+			}
 		}
 	}
 
@@ -251,15 +310,27 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 	}
 
 	if a.permissions != nil {
-		level := a.permissions.Check(name)
-		if level == PermissionDeny {
+		decision := a.permissions.Decide(name, args)
+		if decision.Level == PermissionDeny {
 			return fmt.Sprintf("denied: tool %q is not permitted by permission rules", name), nil
 		}
-		if level == PermissionAsk {
-			return fmt.Sprintf("PERMISSION_ASK:%s", name), nil
+		if decision.Level == PermissionAsk {
+			payload, err := json.Marshal(decision.Request)
+			if err != nil {
+				return "", fmt.Errorf("marshal permission request: %w", err)
+			}
+			return "PERMISSION_ASK:" + string(payload), nil
 		}
 	}
 
+	return a.executeToolCall(name, args)
+}
+
+func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage) (string, error) {
+	return a.executeToolCall(name, args)
+}
+
+func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, error) {
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent", name), nil
 	}
@@ -366,6 +437,10 @@ func (a *Agent) SetSpec(spec *AgentSpec) {
 
 func (a *Agent) Spec() *AgentSpec {
 	return a.spec
+}
+
+func (a *Agent) Activity() *ActivityTracker {
+	return a.activity
 }
 
 func (a *Agent) Permissions() *PermissionManager {

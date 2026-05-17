@@ -3,11 +3,10 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
-
-	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
 const lastModelKey = "last_model"
@@ -19,19 +18,8 @@ type CompactConfig struct {
 }
 
 type OcodeConfig struct {
-	Compact     CompactConfig
-	Permissions PermissionConfig
-	Extra       map[string]json.RawMessage
-}
-
-type PermissionConfig struct {
-	Mode  string               `json:"mode,omitempty"`
-	Tools map[string]string    `json:"tools,omitempty"`
-	Bash  BashPermissionConfig `json:"bash,omitempty"`
-}
-
-type BashPermissionConfig struct {
-	Prefixes map[string]string `json:"prefixes,omitempty"`
+	Compact CompactConfig
+	Extra   map[string]json.RawMessage
 }
 
 type compactConfigFile struct {
@@ -41,8 +29,7 @@ type compactConfigFile struct {
 }
 
 type ocodeConfigFile struct {
-	Compact     compactConfigFile `json:"compact"`
-	Permissions PermissionConfig  `json:"permissions"`
+	Compact compactConfigFile `json:"compact"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -53,36 +40,8 @@ func defaultCompactConfig() CompactConfig {
 
 func defaultOcodeConfig() *OcodeConfig {
 	return &OcodeConfig{
-		Compact:     defaultCompactConfig(),
-		Permissions: defaultPermissionConfig(),
-		Extra:       make(map[string]json.RawMessage),
-	}
-}
-
-func defaultPermissionConfig() PermissionConfig {
-	return PermissionConfig{
-		Mode: "normal",
-		Tools: map[string]string{
-			"read":       "allow",
-			"glob":       "allow",
-			"grep":       "allow",
-			"list":       "allow",
-			"lsp":        "allow",
-			"write":      "ask",
-			"edit":       "ask",
-			"multi_edit": "ask",
-			"patch":      "ask",
-			"delete":     "ask",
-			"format":     "ask",
-			"bash":       "ask",
-			"webfetch":   "ask",
-			"websearch":  "ask",
-			"agent":      "ask",
-			"task":       "ask",
-			"skill":      "allow",
-			"question":   "allow",
-		},
-		Bash: BashPermissionConfig{Prefixes: map[string]string{}},
+		Compact: defaultCompactConfig(),
+		Extra:   make(map[string]json.RawMessage),
 	}
 }
 
@@ -131,15 +90,6 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "compact")
 	}
 
-	if _, ok := raw["permissions"]; ok {
-		var file ocodeConfigFile
-		if err := json.Unmarshal(cleanData, &file); err != nil {
-			return err
-		}
-		applyPermissionConfig(&cfg.Permissions, file.Permissions)
-		delete(raw, "permissions")
-	}
-
 	if cfg.Extra == nil {
 		cfg.Extra = make(map[string]json.RawMessage)
 	}
@@ -148,24 +98,6 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 
 	return nil
-}
-
-func applyPermissionConfig(dst *PermissionConfig, src PermissionConfig) {
-	if src.Mode != "" {
-		dst.Mode = src.Mode
-	}
-	if dst.Tools == nil {
-		dst.Tools = make(map[string]string)
-	}
-	for k, v := range src.Tools {
-		dst.Tools[k] = v
-	}
-	if dst.Bash.Prefixes == nil {
-		dst.Bash.Prefixes = make(map[string]string)
-	}
-	for k, v := range src.Bash.Prefixes {
-		dst.Bash.Prefixes[k] = v
-	}
 }
 
 func applyCompactConfig(dst *CompactConfig, src compactConfigFile) {
@@ -198,11 +130,10 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 
 	payload := map[string]interface{}{
-		"compact":     cfg.Compact,
-		"permissions": cfg.Permissions,
+		"compact": cfg.Compact,
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "permissions" {
+		if k == "compact" {
 			continue
 		}
 		payload[k] = v
@@ -213,19 +144,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		return err
 	}
 	data = append(data, '\n')
-	if err := snapshot.Backup(path); err != nil {
-		return fmt.Errorf("backup ocode config: %w", err)
-	}
 	return os.WriteFile(path, data, 0644)
-}
-
-func SaveOcodePermissions(permissions PermissionConfig) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Permissions = permissions
-	return SaveOcodeConfig(cfg)
 }
 
 func getGlobalOcodeConfigPath() (string, error) {

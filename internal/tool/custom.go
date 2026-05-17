@@ -22,6 +22,7 @@ type CustomTool struct {
 
 func (t CustomTool) Name() string        { return t.ToolName }
 func (t CustomTool) Description() string { return t.ToolDescription }
+func (t CustomTool) Parallel() bool      { return false }
 func (t CustomTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        t.ToolName,
