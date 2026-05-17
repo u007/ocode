@@ -242,7 +242,27 @@ func (m model) renderPicker() string {
 	if width < 40 {
 		width = 40
 	}
-	return borderStyle.Width(width).Render(header + "\n\n" + body.String() + "\n" + hintLine)
+
+	filteredItems, _ := m.pickerVisibleItems()
+	start, end := m.pickerVisibleRange()
+	visibleCount := end - start
+	if visibleCount < 1 {
+		visibleCount = 1
+	}
+	sb := renderListScrollbar(visibleCount, len(filteredItems), start, visibleCount)
+	bodyStr := body.String()
+	hintStr := hintLine
+	sbLines := strings.Split(sb, "\n")
+	bodyLines := strings.Split(strings.TrimRight(bodyStr, "\n"), "\n")
+	for i, bLine := range bodyLines {
+		sbCol := scrollbarTrackStyle.Render(scrollbarTrack)
+		if i < len(sbLines) {
+			sbCol = sbLines[i]
+		}
+		bodyLines[i] = bLine + sbCol
+	}
+	inner := header + "\n\n" + strings.Join(bodyLines, "\n") + "\n" + hintStr
+	return borderStyle.Width(width).Render(inner)
 }
 
 func (m *model) cycleAgentMode() {
