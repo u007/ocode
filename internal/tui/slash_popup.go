@@ -285,5 +285,20 @@ func (m model) renderSlashPopup() string {
 	if width < 40 {
 		width = 40
 	}
-	return borderStyle.Width(width).Render(body.String())
+
+	visibleCount := end - start
+	if visibleCount < 1 {
+		visibleCount = 1
+	}
+	sb := renderListScrollbar(visibleCount, len(items), start, visibleCount)
+	bodyLines := strings.Split(strings.TrimRight(body.String(), "\n"), "\n")
+	sbLines := strings.Split(sb, "\n")
+	for i, bLine := range bodyLines {
+		sbCol := scrollbarTrackStyle.Render(scrollbarTrack)
+		if i < len(sbLines) {
+			sbCol = sbLines[i]
+		}
+		bodyLines[i] = bLine + sbCol
+	}
+	return borderStyle.Width(width).Render(strings.Join(bodyLines, "\n"))
 }
