@@ -163,8 +163,9 @@ type model struct {
 	logViewport         viewport.Model
 	logEntries          []DebugEntry
 	err                 error
-	scrollSpeed         int
-	workDir             string
+	scrollSpeed          int
+	restoredPendingScroll bool
+	workDir              string
 	currentAgentIdx     int
 	showPermDialog      bool
 	pendingToolName     string
@@ -428,6 +429,9 @@ func newModel(sid string, cont bool, yolo bool) model {
 				copyMsg := am
 				m.messages = append(m.messages, message{role: role, text: displayTextForAgentMessage(am), raw: &copyMsg})
 			}
+			if len(m.messages) > 0 {
+				m.restoredPendingScroll = true
+			}
 		}
 	}
 
@@ -519,6 +523,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Height: m.height - m.bottomChromeHeight(m.panelWidth()) - 1,
 		})
 		m.ready = true
+		if m.restoredPendingScroll {
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+			m.restoredPendingScroll = false
+		}
 	case tea.KeyPressMsg:
 		keyStr := msg.String()
 
