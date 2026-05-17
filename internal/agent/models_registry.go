@@ -197,13 +197,17 @@ func fallbackProviderModels(provider string) []string {
 		return []string{"deepseek-chat", "deepseek-reasoner"}
 	case "google":
 		return []string{"gemini-1.5-pro", "gemini-1.5-flash"}
+	case "opencode":
+		return []string{"gpt-5.1-codex", "gpt-5.1", "claude-sonnet-4-5"}
+	case "opencode-go":
+		return []string{"glm-5.1", "qwen3.6-plus", "deepseek-v4-pro"}
 	default:
 		return []string{"gpt-4o", "gpt-4o-mini", "o1-preview"}
 	}
 }
 
 func fallbackAllProviderModels() []string {
-	providers := []string{"anthropic", "deepseek", "google", "openai"}
+	providers := []string{"anthropic", "deepseek", "google", "openai", "opencode", "opencode-go"}
 	models := make([]string, 0)
 	for _, provider := range providers {
 		for _, model := range fallbackProviderModels(provider) {

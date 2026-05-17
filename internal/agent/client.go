@@ -412,7 +412,7 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 }
 
 // chatOpenAIResponses calls the OpenAI Responses API using a ChatGPT OAuth token.
-// The token must have api.connectors.invoke scope (obtained via the login flow).
+// ChatGPT OAuth tokens use the Codex backend; API keys use api.openai.com.
 // The chatgpt_account_id claim is extracted from the JWT and sent as ChatGPT-Account-ID.
 func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[string]interface{}) (*Message, error) {
 	accountID := jwtClaim(c.APIKey, "https://api.openai.com/auth", "chatgpt_account_id")
@@ -451,7 +451,7 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		return nil, err
 	}
 
-	url := "https://api.openai.com/v1/responses"
+	url := c.openAIResponsesURL()
 	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, err
@@ -519,6 +519,13 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		return msg, nil
 	}
 	return nil, fmt.Errorf("no response from openai responses api")
+}
+
+func (c *GenericClient) openAIResponsesURL() string {
+	if c.UseOAuth && c.Provider == "openai" {
+		return "https://chatgpt.com/backend-api/codex/responses"
+	}
+	return strings.TrimRight(c.BaseURL, "/") + "/responses"
 }
 
 // jwtClaim extracts a nested string field from a JWT payload without verifying the signature.
@@ -831,8 +838,8 @@ var providers = map[string]providerInfo{
 	"deepseek":       {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
 	"groq":           {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
 	"mistral":        {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
-	"opencode":       {"OPENCODE_API_KEY", "https://api.opencode.ai/v1"},
-	"opencode-go":    {"OPENCODE_API_KEY", "https://api.opencode.ai/v1/go"},
+	"opencode":       {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
+	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
 	"copilot":        {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
 }
 

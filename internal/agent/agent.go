@@ -12,6 +12,14 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
 
+var DebugAppend func(kind, msg string)
+
+func emitDebug(kind, msg string) {
+	if DebugAppend != nil {
+		DebugAppend(kind, msg)
+	}
+}
+
 type Agent struct {
 	client      LLMClient
 	tools       map[string]tool.Tool
@@ -131,11 +139,23 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	var newMsgs []Message
 
 	for i := 0; i < 10; i++ {
+		emitDebug("LLM", fmt.Sprintf("→ %s/%s [%d msgs]", a.client.GetProvider(), a.client.GetModel(), len(messages)))
 		a.activity.setLLMRunning(true)
 		resp, err := a.client.Chat(messages, toolDefs)
 		a.activity.setLLMRunning(false)
 		if err != nil {
+			emitDebug("ERROR", fmt.Sprintf("LLM error: %v", err))
 			return nil, err
+		}
+		if resp.Usage != nil {
+			in, out := int64(0), int64(0)
+			if resp.Usage.PromptTokens != nil {
+				in = *resp.Usage.PromptTokens
+			}
+			if resp.Usage.CompletionTokens != nil {
+				out = *resp.Usage.CompletionTokens
+			}
+			emitDebug("LLM", fmt.Sprintf("← tokens in=%d out=%d", in, out))
 		}
 
 		newMsgs = append(newMsgs, *resp)
@@ -326,6 +346,7 @@ func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage) (strin
 }
 
 func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, error) {
+	emitDebug("TOOL", fmt.Sprintf("→ %s %s", name, truncateDebugArgs(args, 120)))
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent", name), nil
 	}
@@ -365,6 +386,11 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, erro
 		_ = hooks.RunPostHook(name, argsStr, resultStr, hooksCfg)
 	}
 
+	if err != nil {
+		emitDebug("ERROR", fmt.Sprintf("tool %s: %v", name, err))
+	} else {
+		emitDebug("TOOL", fmt.Sprintf("← %s (ok)", name))
+	}
 	return result, err
 }
 
@@ -513,4 +539,12 @@ func (a *Agent) LoadExternalTools(cfg *config.Config) {
 			}
 		}
 	}
+}
+
+func truncateDebugArgs(args json.RawMessage, max int) string {
+	s := string(args)
+	if len(s) > max {
+		return s[:max] + "…"
+	}
+	return s
 }

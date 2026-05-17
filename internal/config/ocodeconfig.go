@@ -248,6 +248,15 @@ func SaveOcodePermissions(permissions PermissionConfig) error {
 	return SaveOcodeConfig(cfg)
 }
 
+func SaveEditor(editor string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Editor = editor
+	return SaveOcodeConfig(cfg)
+}
+
 func getGlobalOcodeConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {

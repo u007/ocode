@@ -410,6 +410,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	if cfg != nil && cfg.Ocode != nil {
 		m.files.SetEditor(config.ResolveEditor(cfg.Ocode))
 	}
+	m.files.SetSaveEditor(config.SaveEditor)
 	m.git = newGitModel(workDir)
 	m.logViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 
@@ -447,49 +448,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 	case tea.MouseClickMsg:
-		if msg.Button == tea.MouseLeft {
-			if tab, ok := m.tabForClick(msg); ok {
-				m.activeTab = tab
-				if tab == tabChat {
-					m.chatUnread = false
-				}
-				if tab == tabLog {
-					m.refreshLogViewport()
-					m.logViewport.GotoBottom()
-				}
-				return m, nil
-			}
-			if idx, ok := m.toolOutputForClick(msg); ok {
-				m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
-				m.renderTranscript()
-				return m, nil
-			}
-			if m.showPicker {
-				mouse := msg.Mouse()
-				if idx, ok := m.pickerRowForY(mouse.Y); ok {
-					m.pickerIndex = idx
-					return m.selectPickerIndex(idx)
-				}
-				return m, nil
-			}
-			if m.showConnect {
-				mouse := msg.Mouse()
-				if idx, ok := m.connectRowForY(mouse.Y); ok {
-					return m.selectConnectRow(idx)
-				}
-				return m, nil
-			}
-			if m.showSlashPopup {
-				mouse := msg.Mouse()
-				if idx, ok := m.slashPopupRowForY(mouse.Y); ok {
-					selected := m.slashPopupItems[idx]
-					m.acceptPopupSuggestion(selected)
-					return m, nil
-				}
-			}
-			if path, ok := m.sidebarFileForClick(msg); ok {
-				return m, openSidebarFileInEditor(path)
-			}
+		if updated, cmd, ok := m.handleMouseAction(msg.Mouse(), true); ok {
+			return updated, cmd
+		}
+	case tea.MouseReleaseMsg:
+		if updated, cmd, ok := m.handleMouseAction(msg.Mouse(), false); ok {
+			return updated, cmd
+		}
+	case tea.MouseMotionMsg:
+		if updated, cmd, ok := m.handleMouseMotion(msg.Mouse()); ok {
+			return updated, cmd
 		}
 	case tea.MouseWheelMsg:
 		if !m.mouseOverTranscriptViewport(msg) {
@@ -1108,6 +1076,101 @@ func shouldForwardToTranscriptViewport(msg tea.Msg) bool {
 	default:
 		return true
 	}
+}
+
+func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.Cmd, bool) {
+	if pressed && mouse.Button != tea.MouseLeft {
+		return m, nil, false
+	}
+	if !pressed && mouse.Button != tea.MouseLeft && mouse.Button != tea.MouseNone {
+		return m, nil, false
+	}
+
+	if tab, ok := m.tabForClick(mouse); ok {
+		m.activeTab = tab
+		if tab == tabChat {
+			m.chatUnread = false
+		}
+		if tab == tabLog {
+			m.refreshLogViewport()
+			m.logViewport.GotoBottom()
+		}
+		return m, nil, true
+	}
+	if idx, ok := m.toolOutputForClick(mouse); ok {
+		m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
+		m.renderTranscript()
+		return m, nil, true
+	}
+	if m.showPicker {
+		if idx, ok := m.pickerRowForY(mouse.Y); ok {
+			m.pickerIndex = idx
+			updated, cmd := m.selectPickerIndex(idx)
+			return updated, cmd, true
+		}
+		return m, nil, true
+	}
+	if m.showConnect {
+		if idx, ok := m.connectRowForY(mouse.Y); ok {
+			updated, cmd := m.selectConnectRow(idx)
+			return updated, cmd, true
+		}
+		return m, nil, true
+	}
+	if m.showSlashPopup {
+		if idx, ok := m.slashPopupRowForY(mouse.Y); ok {
+			selected := m.slashPopupItems[idx]
+			m.acceptPopupSuggestion(selected)
+			return m, nil, true
+		}
+	}
+	if path, ok := m.sidebarFileForClick(mouse); ok {
+		return m, openSidebarFileInEditor(path), true
+	}
+	return m, nil, false
+}
+
+func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
+	if mouse.Button != tea.MouseLeft {
+		return m, nil, false
+	}
+	if tab, ok := m.tabForClick(mouse); ok {
+		m.activeTab = tab
+		if tab == tabChat {
+			m.chatUnread = false
+		}
+		if tab == tabLog {
+			m.refreshLogViewport()
+			m.logViewport.GotoBottom()
+		}
+		return m, nil, true
+	}
+	if m.showPicker {
+		if idx, ok := m.pickerRowForY(mouse.Y); ok {
+			m.pickerIndex = idx
+			updated, cmd := m.selectPickerIndex(idx)
+			return updated, cmd, true
+		}
+		return m, nil, true
+	}
+	if m.showConnect {
+		if idx, ok := m.connectRowForY(mouse.Y); ok {
+			updated, cmd := m.selectConnectRow(idx)
+			return updated, cmd, true
+		}
+		return m, nil, true
+	}
+	if m.showSlashPopup {
+		if idx, ok := m.slashPopupRowForY(mouse.Y); ok {
+			selected := m.slashPopupItems[idx]
+			m.acceptPopupSuggestion(selected)
+			return m, nil, true
+		}
+	}
+	if path, ok := m.sidebarFileForClick(mouse); ok {
+		return m, openSidebarFileInEditor(path), true
+	}
+	return m, nil, false
 }
 
 func (m model) mouseOverTranscriptViewport(msg tea.MouseWheelMsg) bool {
@@ -2191,11 +2254,10 @@ func (m *model) renderPalette() string {
 	return borderStyle.Width(m.width - 2).Render(header + "\n\n" + body)
 }
 
-func (m model) toolOutputForClick(msg tea.MouseClickMsg) (int, bool) {
+func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
 	if len(m.toolOutputRegions) == 0 {
 		return 0, false
 	}
-	mouse := msg.Mouse()
 	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
 		return 0, false
 	}
@@ -2403,10 +2465,14 @@ func findThinkingEnd(text string) (int, int) {
 func (m model) View() tea.View {
 	v := tea.NewView(m.renderContent())
 	v.AltScreen = true
-	if m.config != nil && m.config.TUI.Mouse != nil && *m.config.TUI.Mouse {
+	if m.mouseEnabled() {
 		v.MouseMode = tea.MouseModeCellMotion
 	}
 	return v
+}
+
+func (m model) mouseEnabled() bool {
+	return m.config == nil || m.config.TUI.Mouse == nil || *m.config.TUI.Mouse
 }
 
 func (m model) renderContent() string {
@@ -2481,7 +2547,7 @@ func (m *model) renderStatus() string {
 	var suffix string
 	switch m.activeTab {
 	case tabFiles:
-		suffix = " | e: open in editor | /: search | alt+[/]: switch tab"
+		suffix = " | enter/e: open | E: choose editor | /: search | alt+[/]: switch tab"
 	case tabGit:
 		suffix = " | tab: cycle panel | s: stage | u: unstage | c: commit | alt+[/]: switch tab"
 	case tabLog:
@@ -2788,11 +2854,10 @@ func (m model) renderSidebar() string {
 	return borderStyle.Width(sidebarColumnWidth).Render(sections)
 }
 
-func (m model) sidebarFileForClick(msg tea.MouseClickMsg) (string, bool) {
-	if !m.sidebarEnabled() || msg.Button != tea.MouseLeft {
+func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
+	if !m.sidebarEnabled() {
 		return "", false
 	}
-	mouse := msg.Mouse()
 	if mouse.X < m.panelWidth() {
 		return "", false
 	}
@@ -2806,23 +2871,42 @@ func (m model) sidebarFileForClick(msg tea.MouseClickMsg) (string, bool) {
 	return "", false
 }
 
-func (m model) tabForClick(msg tea.MouseClickMsg) (int, bool) {
-	mouse := msg.Mouse()
+func (m model) tabForClick(mouse tea.Mouse) (int, bool) {
 	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
-	if mouse.Y >= headerHeight {
+	if mouse.Y > headerHeight {
 		return 0, false
 	}
 	tabBar := renderTabBar(m.activeTab, m.chatUnread)
 	barWidth := lipgloss.Width(tabBar)
-	barStartX := m.panelWidth() - barWidth
-	if mouse.X < barStartX {
-		return 0, false
+	for _, barStartX := range m.tabBarStartXs(barWidth) {
+		if mouse.X < barStartX {
+			continue
+		}
+		if tab, ok := tabAtX(mouse.X, barStartX, m.chatUnread); ok {
+			return tab, true
+		}
 	}
+	return 0, false
+}
+
+func (m model) tabBarStartXs(barWidth int) []int {
+	rightAligned := m.panelWidth() - barWidth
+	if rightAligned < 0 {
+		rightAligned = 0
+	}
+
+	return []int{rightAligned}
+}
+
+func tabAtX(mouseX int, barStartX int, unread bool) (int, bool) {
 	labels := []string{"1:chat", "2:files", "3:git", "4:log"}
+	if unread {
+		labels[0] = "1:chat●"
+	}
 	x := barStartX
 	for i, label := range labels {
 		w := lipgloss.Width(hintStyle.Padding(0, 1).Render(label))
-		if mouse.X < x+w {
+		if mouseX < x+w {
 			return i, true
 		}
 		x += w

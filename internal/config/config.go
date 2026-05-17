@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -29,6 +30,56 @@ type MCPConfig struct {
 	Enabled     bool              `json:"enabled"`
 	Timeout     int               `json:"timeout"`
 	OAuth       *MCPOAuthConfig   `json:"oauth"`
+}
+
+func (c *MCPConfig) UnmarshalJSON(data []byte) error {
+	tmp := struct {
+		Type        string            `json:"type"`
+		Command     json.RawMessage   `json:"command"`
+		URL         string            `json:"url"`
+		Environment map[string]string `json:"environment"`
+		Headers     map[string]string `json:"headers"`
+		Enabled     *bool             `json:"enabled"`
+		Timeout     int               `json:"timeout"`
+		OAuth       *MCPOAuthConfig   `json:"oauth"`
+	}{}
+	if err := json.Unmarshal(data, &tmp); err != nil {
+		return err
+	}
+	c.Type = tmp.Type
+	c.URL = tmp.URL
+	c.Environment = tmp.Environment
+	c.Headers = tmp.Headers
+	c.Timeout = tmp.Timeout
+	c.OAuth = tmp.OAuth
+	if len(tmp.Command) > 0 && string(tmp.Command) != "null" {
+		var parts []string
+		if err := json.Unmarshal(tmp.Command, &parts); err == nil {
+			c.Command = parts
+		} else {
+			var command string
+			if err := json.Unmarshal(tmp.Command, &command); err != nil {
+				return fmt.Errorf("parse mcp command: %w", err)
+			}
+			c.Command = strings.Fields(command)
+		}
+	}
+	if tmp.Enabled == nil {
+		c.Enabled = true
+	} else {
+		c.Enabled = *tmp.Enabled
+	}
+	if c.Timeout == 0 {
+		c.Timeout = 5000
+	}
+	if c.Type == "" {
+		if c.URL != "" {
+			c.Type = "remote"
+		} else {
+			c.Type = "local"
+		}
+	}
+	return nil
 }
 
 type TUIConfig struct {
@@ -256,6 +307,38 @@ func SaveTUITheme(theme string) error {
 		return err
 	}
 	return syncLegacyTUIThemeIfPresent(theme)
+}
+
+func SaveMCPEnabled(name string, enabled bool) error {
+	configPath, err := (&Config{}).ActiveConfigPath()
+	if err != nil {
+		return err
+	}
+
+	existing, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read config: %w", err)
+	}
+	m := map[string]any{}
+	if len(existing) > 0 {
+		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
+		if err := json.Unmarshal(jsoncData, &m); err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+	}
+	mcpRaw, ok := m["mcp"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("mcp server %q not found in opencode config", name)
+	}
+	serverRaw, ok := mcpRaw[name].(map[string]any)
+	if !ok {
+		return fmt.Errorf("mcp server %q not found in opencode config", name)
+	}
+	serverRaw["enabled"] = enabled
+	mcpRaw[name] = serverRaw
+	m["mcp"] = mcpRaw
+
+	return saveJSONFile(configPath, m)
 }
 
 func syncLegacyTUIThemeIfPresent(theme string) error {

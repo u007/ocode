@@ -56,6 +56,8 @@ var Providers = []Provider{
 	{ID: "anthropic", Label: "Anthropic", EnvVar: "ANTHROPIC_API_KEY", OAuthFlow: "anthropic"},
 	{ID: "google", Label: "Google", EnvVar: "GOOGLE_API_KEY", OAuthFlow: "google"},
 	{ID: "copilot", Label: "GitHub Copilot", EnvVar: "GITHUB_COPILOT_TOKEN", OAuthFlow: "copilot"},
+	{ID: "opencode", Label: "OpenCode Zen", EnvVar: "OPENCODE_API_KEY"},
+	{ID: "opencode-go", Label: "OpenCode Go", EnvVar: "OPENCODE_API_KEY"},
 	{ID: "openrouter", Label: "OpenRouter", EnvVar: "OPENROUTER_API_KEY"},
 	{ID: "zai", Label: "Z.AI", EnvVar: "ZAI_API_KEY"},
 	{ID: "zai-coding", Label: "Z.AI Coding", EnvVar: "ZAI_CODING_API_KEY"},
