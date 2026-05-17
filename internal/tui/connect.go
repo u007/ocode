@@ -129,7 +129,17 @@ func (m model) renderConnect() string {
 			}
 			b.WriteString(line + "\n")
 		}
-		body = b.String()
+		rawLines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+		sb := renderListScrollbar(len(rawLines), len(auth.Providers), 0, len(rawLines))
+		sbLines := strings.Split(sb, "\n")
+		for i, line := range rawLines {
+			sbCol := scrollbarTrackStyle.Render(scrollbarTrack)
+			if i < len(sbLines) {
+				sbCol = sbLines[i]
+			}
+			rawLines[i] = line + sbCol
+		}
+		body = strings.Join(rawLines, "\n") + "\n"
 		hint = hintStyle.Render("↑/↓ select · Enter continue · Esc cancel")
 
 	case connectStageMethod:
@@ -144,7 +154,17 @@ func (m model) renderConnect() string {
 			}
 			b.WriteString(line + "\n")
 		}
-		body = b.String()
+		rawLines := strings.Split(strings.TrimRight(b.String(), "\n"), "\n")
+		sb := renderListScrollbar(len(rawLines), len(m.connect.methods), 0, len(rawLines))
+		sbLines := strings.Split(sb, "\n")
+		for i, line := range rawLines {
+			sbCol := scrollbarTrackStyle.Render(scrollbarTrack)
+			if i < len(sbLines) {
+				sbCol = sbLines[i]
+			}
+			rawLines[i] = line + sbCol
+		}
+		body = strings.Join(rawLines, "\n") + "\n"
 		hint = hintStyle.Render("↑/↓ select · Enter confirm · Esc back")
 
 	case connectStageKeyInput:
