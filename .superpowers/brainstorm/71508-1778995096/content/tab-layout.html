@@ -1,0 +1,81 @@
+<h2>Tab Navigation Layout</h2>
+<p class="subtitle">How should the tabs (Chat, Files, Git) be structured in the TUI?</p>
+
+<div class="cards">
+
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="color:#58a6ff;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">
+          ◆ ocode &nbsp;<span style="background:#21262d;padding:2px 8px;border-radius:4px 4px 0 0;color:#fff">Chat</span>&nbsp;<span style="padding:2px 8px;color:#8b949e">Files</span>&nbsp;<span style="padding:2px 8px;color:#8b949e">Git</span>
+        </div>
+        <div style="border:1px solid #30363d;border-radius:4px;padding:8px;height:80px;color:#8b949e;font-size:10px">
+          transcript / viewport content…
+        </div>
+        <div style="border:1px solid #30363d;border-radius:4px;padding:6px;margin-top:6px;color:#8b949e;font-size:10px">
+          › input area
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">tab: switch tabs · ctrl+p: palette</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A — Top Tab Bar</h3>
+      <p>Tabs in the header row alongside the ocode logo. Tab key cycles between Chat → Files → Git. Same layout, content area swaps.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="color:#58a6ff;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">◆ ocode</div>
+        <div style="display:flex;gap:8px">
+          <div style="width:36px;display:flex;flex-direction:column;gap:4px;align-items:center;padding-top:4px">
+            <div style="background:#21262d;border-radius:4px;padding:4px 6px;font-size:10px;color:#fff">💬</div>
+            <div style="border-radius:4px;padding:4px 6px;font-size:10px;color:#8b949e">📁</div>
+            <div style="border-radius:4px;padding:4px 6px;font-size:10px;color:#8b949e">⎇</div>
+          </div>
+          <div style="flex:1">
+            <div style="border:1px solid #30363d;border-radius:4px;padding:8px;height:80px;color:#8b949e;font-size:10px">
+              transcript / viewport content…
+            </div>
+            <div style="border:1px solid #30363d;border-radius:4px;padding:6px;margin-top:6px;color:#8b949e;font-size:10px">
+              › input area
+            </div>
+          </div>
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">ctrl+1/2/3: switch tab · ctrl+p: palette</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B — Icon Sidebar Tabs</h3>
+      <p>Vertical icon strip on the left. Ctrl+1/2/3 or click to switch. Maximizes vertical space for content. VSCode-style feel.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div style="font-family:monospace;font-size:11px;background:#0d1117;color:#c9d1d9;padding:12px;border-radius:6px;line-height:1.5">
+        <div style="display:flex;justify-content:space-between;border-bottom:1px solid #30363d;padding-bottom:6px;margin-bottom:8px">
+          <span style="color:#58a6ff">◆ ocode</span>
+          <span>
+            <span style="background:#21262d;padding:2px 6px;font-size:10px;color:#fff">1:chat</span>&nbsp;
+            <span style="padding:2px 6px;font-size:10px;color:#8b949e">2:files</span>&nbsp;
+            <span style="padding:2px 6px;font-size:10px;color:#8b949e">3:git</span>
+          </span>
+        </div>
+        <div style="border:1px solid #30363d;border-radius:4px;padding:8px;height:80px;color:#8b949e;font-size:10px">
+          transcript / viewport content…
+        </div>
+        <div style="border:1px solid #30363d;border-radius:4px;padding:6px;margin-top:6px;color:#8b949e;font-size:10px">
+          › input area
+        </div>
+        <div style="color:#8b949e;font-size:10px;margin-top:4px">ctrl+1/2/3: switch · ctrl+p: palette</div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C — Numbered Header Tabs (tmux-style)</h3>
+      <p>Tabs in top-right of header as numbered labels. ctrl+1/2/3 to jump. Minimal chrome, familiar terminal-native feel.</p>
+    </div>
+  </div>
+
+</div>

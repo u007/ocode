@@ -6,3 +6,5 @@
 .DS_Store
 opencode.json
 todo.md
+.opencode/snapshots
+

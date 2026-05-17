@@ -1,0 +1,35 @@
+{
+  "compact": {
+    "enabled": true,
+    "summary_provider": "deepseek",
+    "summary_model": "deepseek-v4-flash"
+  },
+  "last_model": "gpt-4o-mini",
+  "permissions": {
+    "mode": "yolo",
+    "tools": {
+      "agent": "ask",
+      "bash": "allow",
+      "delete": "ask",
+      "edit": "allow",
+      "format": "allow",
+      "glob": "allow",
+      "grep": "allow",
+      "list": "allow",
+      "lsp": "allow",
+      "mcp_*": "ask",
+      "multi_edit": "allow",
+      "multiedit": "allow",
+      "patch": "allow",
+      "question": "allow",
+      "read": "allow",
+      "replace_lines": "allow",
+      "skill": "allow",
+      "task": "ask",
+      "webfetch": "ask",
+      "websearch": "ask",
+      "write": "allow"
+    },
+    "bash": {}
+  }
+}

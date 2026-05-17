@@ -29,12 +29,19 @@ var llmRetryBaseDelay = 500 * time.Millisecond
 type Message struct {
 	Role             string      `json:"role"`
 	Content          string      `json:"content"`
+	Images           []Image     `json:"images,omitempty"`
 	ReasoningContent string      `json:"reasoning_content,omitempty"`
 	ToolCalls        []ToolCall  `json:"tool_calls,omitempty"`
 	ToolID           string      `json:"tool_call_id,omitempty"`
 	Model            string      `json:"-"`
 	Usage            *TokenUsage `json:"-"`
 	Spend            *float64    `json:"-"`
+}
+
+type Image struct {
+	Path     string `json:"path,omitempty"`
+	MIMEType string `json:"mime_type"`
+	Data     string `json:"data"`
 }
 
 type ToolCall struct {
@@ -124,9 +131,13 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 	}
 
 	url := c.BaseURL + "/chat/completions"
+	openAIMessages, err := c.convertToOpenAIMessages(messages)
+	if err != nil {
+		return nil, err
+	}
 	payload := map[string]interface{}{
 		"model":    c.Model,
-		"messages": messages,
+		"messages": openAIMessages,
 	}
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)
@@ -286,16 +297,18 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 			continue
 		}
 
-		if m.Role == "user" && strings.Contains(m.Content, "@") {
-			content, err := c.buildOpenAIContentWithImages(m.Content)
+		if m.Role == "user" && (len(m.Images) > 0 || strings.Contains(m.Content, "@")) {
+			content, err := c.buildOpenAIContentWithImages(m)
 			if err != nil {
 				return nil, err
 			}
-			result = append(result, map[string]interface{}{
-				"role":    m.Role,
-				"content": content,
-			})
-			continue
+			if content != nil {
+				result = append(result, map[string]interface{}{
+					"role":    m.Role,
+					"content": content,
+				})
+				continue
+			}
 		}
 
 		msg := map[string]interface{}{
@@ -324,8 +337,27 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 	return result, nil
 }
 
-func (c *GenericClient) buildOpenAIContentWithImages(text string) ([]map[string]interface{}, error) {
+func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]interface{}, error) {
 	var content []map[string]interface{}
+	if len(m.Images) > 0 {
+		if m.Content != "" {
+			content = append(content, map[string]interface{}{
+				"type": "text",
+				"text": m.Content,
+			})
+		}
+		for _, img := range m.Images {
+			content = append(content, map[string]interface{}{
+				"type": "image_url",
+				"image_url": map[string]interface{}{
+					"url": "data:" + img.MIMEType + ";base64," + img.Data,
+				},
+			})
+		}
+		return content, nil
+	}
+
+	text := m.Content
 	parts := strings.Fields(text)
 	hasImage := false
 	var textParts []string
@@ -334,12 +366,7 @@ func (c *GenericClient) buildOpenAIContentWithImages(text string) ([]map[string]
 		if strings.HasPrefix(part, "@") {
 			filePath := strings.TrimPrefix(part, "@")
 			if IsImageFile(filePath) {
-				isImage, mimeType, err := DetectImage(filePath)
-				if err != nil || !isImage {
-					textParts = append(textParts, part)
-					continue
-				}
-				encoded, err := EncodeImage(filePath)
+				img, err := NewImage(filePath)
 				if err != nil {
 					textParts = append(textParts, part)
 					continue
@@ -357,7 +384,7 @@ func (c *GenericClient) buildOpenAIContentWithImages(text string) ([]map[string]
 				content = append(content, map[string]interface{}{
 					"type": "image_url",
 					"image_url": map[string]interface{}{
-						"url": "data:" + mimeType + ";base64," + encoded,
+						"url": "data:" + img.MIMEType + ";base64," + img.Data,
 					},
 				})
 				continue
@@ -393,7 +420,24 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	// Map messages → Responses API input items.
 	input := make([]map[string]interface{}, 0, len(messages))
 	for _, m := range messages {
-		item := map[string]interface{}{"role": m.Role, "content": m.Content}
+		content := interface{}(m.Content)
+		if m.Role == "user" && len(m.Images) > 0 {
+			parts := make([]map[string]interface{}, 0, len(m.Images)+1)
+			if m.Content != "" {
+				parts = append(parts, map[string]interface{}{
+					"type": "input_text",
+					"text": m.Content,
+				})
+			}
+			for _, img := range m.Images {
+				parts = append(parts, map[string]interface{}{
+					"type":      "input_image",
+					"image_url": "data:" + img.MIMEType + ";base64," + img.Data,
+				})
+			}
+			content = parts
+		}
+		item := map[string]interface{}{"role": m.Role, "content": content}
 		input = append(input, item)
 	}
 
@@ -537,8 +581,8 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 				},
 			}
 		} else {
-			if m.Role == "user" && strings.Contains(m.Content, "@") {
-				imgBlocks, err := c.buildAnthropicImageContent(m.Content)
+			if m.Role == "user" && (len(m.Images) > 0 || strings.Contains(m.Content, "@")) {
+				imgBlocks, err := c.buildAnthropicImageContent(m)
 				if err != nil {
 					return nil, err
 				}
@@ -679,8 +723,29 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 	return nil, fmt.Errorf("no response from anthropic")
 }
 
-func (c *GenericClient) buildAnthropicImageContent(text string) ([]interface{}, error) {
+func (c *GenericClient) buildAnthropicImageContent(m Message) ([]interface{}, error) {
 	var content []interface{}
+	if len(m.Images) > 0 {
+		if m.Content != "" {
+			content = append(content, map[string]interface{}{
+				"type": "text",
+				"text": m.Content,
+			})
+		}
+		for _, img := range m.Images {
+			content = append(content, map[string]interface{}{
+				"type": "image",
+				"source": map[string]interface{}{
+					"type":       "base64",
+					"media_type": img.MIMEType,
+					"data":       img.Data,
+				},
+			})
+		}
+		return content, nil
+	}
+
+	text := m.Content
 	parts := strings.Fields(text)
 	hasImage := false
 	var textParts []string
@@ -694,10 +759,9 @@ func (c *GenericClient) buildAnthropicImageContent(text string) ([]interface{}, 
 					textParts = append(textParts, part)
 					continue
 				}
-				encoded, err := EncodeImage(filePath)
+				img, err := NewImage(filePath)
 				if err != nil {
-					textParts = append(textParts, part)
-					continue
+					return nil, err
 				}
 				if !hasImage {
 					if len(textParts) > 0 {
@@ -714,7 +778,7 @@ func (c *GenericClient) buildAnthropicImageContent(text string) ([]interface{}, 
 					"source": map[string]interface{}{
 						"type":       "base64",
 						"media_type": mimeType,
-						"data":       encoded,
+						"data":       img.Data,
 					},
 				})
 				continue

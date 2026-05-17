@@ -21,6 +21,7 @@ type CompactConfig struct {
 type OcodeConfig struct {
 	Compact     CompactConfig
 	Permissions PermissionConfig
+	Editor      string
 	Extra       map[string]json.RawMessage
 }
 
@@ -43,6 +44,7 @@ type compactConfigFile struct {
 type ocodeConfigFile struct {
 	Compact     compactConfigFile `json:"compact"`
 	Permissions PermissionConfig  `json:"permissions"`
+	Editor      string            `json:"editor,omitempty"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -142,6 +144,19 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "permissions")
 	}
 
+	if _, ok := raw["editor"]; ok {
+		var file struct {
+			Editor string `json:"editor"`
+		}
+		if err := json.Unmarshal(cleanData, &file); err != nil {
+			return err
+		}
+		if file.Editor != "" {
+			cfg.Editor = file.Editor
+		}
+		delete(raw, "editor")
+	}
+
 	if cfg.Extra == nil {
 		cfg.Extra = make(map[string]json.RawMessage)
 	}
@@ -202,6 +217,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	payload := map[string]interface{}{
 		"compact":     cfg.Compact,
 		"permissions": cfg.Permissions,
+	}
+	if cfg.Editor != "" {
+		payload["editor"] = cfg.Editor
 	}
 	for k, v := range cfg.Extra {
 		if k == "compact" || k == "permissions" {
@@ -299,4 +317,19 @@ func loadFullOcodeConfig() (*OcodeConfig, error) {
 	}
 
 	return ocode, nil
+}
+
+// ResolveEditor returns the editor to use for opening files.
+// Priority: ocodeconfig.json "editor" field > $VISUAL > $EDITOR > "vi"
+func ResolveEditor(cfg *OcodeConfig) string {
+	if cfg != nil && cfg.Editor != "" {
+		return cfg.Editor
+	}
+	if v := os.Getenv("VISUAL"); v != "" {
+		return v
+	}
+	if v := os.Getenv("EDITOR"); v != "" {
+		return v
+	}
+	return "vi"
 }

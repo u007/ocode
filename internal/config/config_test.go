@@ -345,6 +345,52 @@ func TestLoadKeepsExplicitEnvModelOverRecent(t *testing.T) {
 	}
 }
 
+func TestLoadPrefersLastModelOverRecent(t *testing.T) {
+	tmpHome, err := os.MkdirTemp("", "ocode-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpHome)
+
+	tmpState, err := os.MkdirTemp("", "ocode-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpState)
+
+	tmpDir, err := os.MkdirTemp("", "ocode-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("XDG_STATE_HOME", tmpState)
+	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRecentModel("recent/model"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveLastModel("gpt-4o-mini"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "gpt-4o-mini" {
+		t.Fatalf("expected last model, got %s", cfg.Model)
+	}
+}
+
 func TestLoadWithOpenCodeDir(t *testing.T) {
 	tmpHome, err := os.MkdirTemp("", "ocode-home")
 	if err != nil {

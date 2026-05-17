@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/base64"
+	"fmt"
 	"mime"
 	"os"
 	"path/filepath"
@@ -91,4 +92,19 @@ func EncodeImage(path string) (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+func NewImage(path string) (Image, error) {
+	isImage, mimeType, err := DetectImage(path)
+	if err != nil {
+		return Image{}, err
+	}
+	if !isImage {
+		return Image{}, fmt.Errorf("not an image file: %s", path)
+	}
+	encoded, err := EncodeImage(path)
+	if err != nil {
+		return Image{}, err
+	}
+	return Image{Path: path, MIMEType: mimeType, Data: encoded}, nil
 }

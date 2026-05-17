@@ -25,7 +25,7 @@ Base TUI scaffold only. No LLM wired yet.
 - `ocodeconfig.json` stores ocode-only overrides and any extra fields opencode would not accept.
 - Both are loaded from `~/.config/opencode/` and from the nearest project root beside `opencode.json`.
 - If `ocodeconfig.json` is missing, ocode creates it with compact defaults.
-- The TUI restores the most recently selected model from opencode state unless `OPENCODE_MODEL` is set.
+- The TUI restores the most recently selected model from `ocodeconfig.json`, falling back to opencode state unless `OPENCODE_MODEL` is set.
 
 Compact defaults:
 
@@ -89,4 +89,5 @@ internal/tui/        Bubble Tea model, view, update
 - `Ctrl+O` toggles YOLO permissions mode. `/yolo [on|off|status]` is also available, and `--yolo` starts in YOLO mode.
 - `Ctrl+Y` retries the last LLM timeout or I/O failure without resending the error message as context.
 - Messages submitted while the AI is running are shown in a queue and sent automatically when the current response finishes.
+- Type `@path` to attach file context. While typing an `@` token, matching files appear in a filtered popup; image files are attached as images and persisted in session history.
 - `!command` hands the terminal to the process (interactive programs like `vim`, `less`, `git diff` work). Output is not captured into the chat transcript.

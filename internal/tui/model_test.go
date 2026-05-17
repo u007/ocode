@@ -16,6 +16,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
@@ -818,6 +819,34 @@ func TestHandleNewCmdResetsSessionScopedState(t *testing.T) {
 	}
 	if got := tool.TodoState(); got != "" {
 		t.Fatalf("expected todo state to reset, got %q", got)
+	}
+}
+
+func TestHandleNewCmdFirstRequestTitlesSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(".ocode/sessions", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{}
+	m.handleNewCmd(nil)
+	m.messages = append(m.messages, message{role: roleUser, text: "first real request"})
+	m.saveSession()
+
+	sess, err := session.Load(m.sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Title != "first real request" {
+		t.Fatalf("expected first request title, got %q", sess.Title)
+	}
+	if len(sess.Messages) != 1 || sess.Messages[0].Content != "first real request" {
+		t.Fatalf("expected transient new-session notice to stay out of history, got %#v", sess.Messages)
 	}
 }
 

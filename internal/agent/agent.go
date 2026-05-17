@@ -121,14 +121,8 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	}
 
 	if prompt := a.Mode().SystemPrompt(); prompt != "" {
-		hasMode := false
-		for _, m := range messages {
-			if m.Role == "system" && strings.HasPrefix(m.Content, "You are in ") {
-				hasMode = true
-				break
-			}
-		}
-		if !hasMode {
+		hasSystem := len(messages) > 0 && messages[0].Role == "system"
+		if !hasSystem {
 			messages = append([]Message{{Role: "system", Content: prompt}}, messages...)
 		}
 	}
@@ -241,16 +235,16 @@ func (a *Agent) compactContext(messages []Message) []Message {
 
 	summaryClient := a.compactSummaryClient()
 	summaryResp, err := summaryClient.Chat([]Message{{Role: "user", Content: summaryPrompt}}, nil)
+	var summaryText string
 	if err == nil && summaryResp.Content != "" {
-		compacted = append(compacted, Message{
-			Role:    "system",
-			Content: "Previous conversation summary: " + summaryResp.Content,
-		})
+		summaryText = "\n\nPrevious conversation summary: " + summaryResp.Content
 	} else {
-		compacted = append(compacted, Message{
-			Role:    "system",
-			Content: "...[Conversation history truncated]...",
-		})
+		summaryText = "\n\n...[Conversation history truncated]..."
+	}
+	if len(compacted) > 0 && compacted[0].Role == "system" {
+		compacted[0].Content += summaryText
+	} else {
+		compacted = append(compacted, Message{Role: "system", Content: summaryText})
 	}
 
 	compacted = append(compacted, messages[len(messages)-keepBack:]...)

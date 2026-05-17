@@ -16,8 +16,7 @@ import (
 )
 
 const (
-	toolOutputTruncateLimit = 4000
-	fullToolOutputMarker    = "…(truncated; click to show full output)"
+	toolOutputPreviewLines = 12
 )
 
 // formatToolCallHint returns a single-line summary of a tool call,
@@ -256,9 +255,6 @@ func renderToolResult(toolName, content string, st Styles) string {
 	}
 	if toolName == "read" {
 		return renderReadResult(content, st)
-	}
-	if len(content) > toolOutputTruncateLimit {
-		content = content[:toolOutputTruncateLimit] + "\n" + fullToolOutputMarker
 	}
 	return st.Text.Render(content)
 }
