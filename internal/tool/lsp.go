@@ -18,6 +18,7 @@ type LSPTool struct {
 
 func (t *LSPTool) Name() string        { return "lsp" }
 func (t *LSPTool) Description() string { return "Interact with LSP servers for code intelligence" }
+func (t *LSPTool) Parallel() bool      { return true }
 func (t *LSPTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "lsp",

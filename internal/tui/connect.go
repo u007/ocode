@@ -113,22 +113,17 @@ func (m model) renderConnect() string {
 		return ""
 	}
 
-	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true)
-
 	var header, body, hint string
 
 	switch m.connect.stage {
 	case connectStageProvider:
-		header = headerStyle.Render("Connect provider")
+		header = m.styles.Header.Render("Connect provider")
 		var b strings.Builder
 		for i, p := range auth.Providers {
 			sym, detail := auth.Status(p.ID)
 			line := fmt.Sprintf("%s  %-20s %s", sym, p.Label, hintStyle.Render(detail))
 			if i == m.connect.providerIdx {
-				line = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#1A1B26")).
-					Background(lipgloss.Color("#7AA2F7")).
-					Render(" " + line + " ")
+				line = m.styles.Selected.Render(" " + line + " ")
 			} else {
 				line = "  " + line
 			}
@@ -138,15 +133,12 @@ func (m model) renderConnect() string {
 		hint = hintStyle.Render("↑/↓ select · Enter continue · Esc cancel")
 
 	case connectStageMethod:
-		header = headerStyle.Render("Method: " + m.connect.provider.Label)
+		header = m.styles.Header.Render("Method: " + m.connect.provider.Label)
 		var b strings.Builder
 		for i, opt := range m.connect.methods {
 			line := opt.label
 			if i == m.connect.methodIdx {
-				line = lipgloss.NewStyle().
-					Foreground(lipgloss.Color("#1A1B26")).
-					Background(lipgloss.Color("#7AA2F7")).
-					Render(" " + line + " ")
+				line = m.styles.Selected.Render(" " + line + " ")
 			} else {
 				line = "  " + line
 			}
@@ -156,12 +148,12 @@ func (m model) renderConnect() string {
 		hint = hintStyle.Render("↑/↓ select · Enter confirm · Esc back")
 
 	case connectStageKeyInput:
-		header = headerStyle.Render("API key: " + m.connect.provider.Label)
+		header = m.styles.Header.Render("API key: " + m.connect.provider.Label)
 		body = m.connect.keyInput.View() + "\n"
 		hint = hintStyle.Render("Enter save · Esc cancel · stored at ~/.config/ocode/auth.json (0600)")
 
 	case connectStagePasteCode:
-		header = headerStyle.Render("Anthropic OAuth: " + strings.ToUpper(m.connect.anthropicMode))
+		header = m.styles.Header.Render("Anthropic OAuth: " + strings.ToUpper(m.connect.anthropicMode))
 		body = fmt.Sprintf(
 			"1. A browser tab was opened. Sign in.\n"+
 				"2. Anthropic will redirect to a page showing an authorization code.\n"+
@@ -172,26 +164,26 @@ func (m model) renderConnect() string {
 		hint = hintStyle.Render("Enter exchange · Esc cancel")
 
 	case connectStageWaitBrowser:
-		header = headerStyle.Render("OpenAI ChatGPT OAuth")
+		header = m.styles.Header.Render("OpenAI ChatGPT OAuth")
 		body = "Opening browser… complete sign-in in the tab.\n\nThis dialog will update automatically when login finishes.\n"
 		hint = hintStyle.Render("Esc cancel")
 
 	case connectStageDeviceCode:
-		header = headerStyle.Render("GitHub Copilot — device flow")
+		header = m.styles.Header.Render("GitHub Copilot — device flow")
 		body = fmt.Sprintf(
 			"1. Open: %s\n2. Enter the code: %s\n\nWaiting for authorization…\n",
 			lipgloss.NewStyle().Underline(true).Render(m.connect.copilotDevice.VerificationURI),
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#9ECE6A")).Render(m.connect.copilotDevice.UserCode),
+			m.styles.Success.Bold(true).Render(m.connect.copilotDevice.UserCode),
 		)
 		hint = hintStyle.Render("Esc cancel")
 
 	case connectStageMessage:
-		header = headerStyle.Render("Connect")
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
+		header = m.styles.Header.Render("Connect")
+		s := m.styles.Success
 		if !m.connect.messageOK {
-			style = lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E"))
+			s = m.styles.Error
 		}
-		body = style.Render(m.connect.message) + "\n"
+		body = s.Render(m.connect.message) + "\n"
 		hint = hintStyle.Render("Enter close")
 	}
 

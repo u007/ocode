@@ -4,18 +4,65 @@ import (
 	"fmt"
 	"strings"
 
-	"charm.land/lipgloss/v2"
-
 	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/session"
 )
 
 func (m *model) openModelPicker() {
-	provider := "openai"
-	if m.agent != nil {
-		provider = m.agent.GetProvider()
-	}
-	items := agent.ProviderModels(provider)
+	items := agent.AllProviderModels()
+	m.pickerKind = "model"
 	m.pickerItems = items
+	m.pickerValues = items
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.showPicker = true
+}
+
+func (m *model) openSessionPicker() {
+	sessions, err := session.ListAll()
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error listing sessions: %v", err)})
+		return
+	}
+	items := make([]string, 0, len(sessions))
+	values := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		title := s.Title
+		if title == "" {
+			title = "(no title)"
+		}
+		marker := "[ocode]"
+		if s.Source == session.SourceClaude {
+			marker = "[claude]"
+		}
+		items = append(items, fmt.Sprintf("%s %s  %s", marker, s.ID, title))
+		values = append(values, s.ID)
+	}
+	m.pickerKind = "session"
+	m.pickerItems = items
+	m.pickerValues = values
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.showPicker = true
+}
+
+func (m *model) openMessagePicker() {
+	items := make([]string, 0, len(m.messages))
+	values := make([]string, 0, len(m.messages))
+	for i, msg := range m.messages {
+		if msg.role != roleUser {
+			continue
+		}
+		preview := strings.TrimSpace(msg.text)
+		if len(preview) > 80 {
+			preview = preview[:77] + "..."
+		}
+		items = append(items, fmt.Sprintf("[%d] %s", i, preview))
+		values = append(values, fmt.Sprintf("%d", i))
+	}
+	m.pickerKind = "message"
+	m.pickerItems = items
+	m.pickerValues = values
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
@@ -23,35 +70,68 @@ func (m *model) openModelPicker() {
 
 func (m *model) closePicker() {
 	m.showPicker = false
+	m.pickerKind = ""
 	m.pickerItems = nil
+	m.pickerValues = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
+	m.input.Focus()
 }
 
-func (m model) pickerVisibleItems() []string {
-	if m.pickerFilter == "" {
-		return m.pickerItems
-	}
-	q := strings.ToLower(m.pickerFilter)
-	out := make([]string, 0, len(m.pickerItems))
-	for _, item := range m.pickerItems {
-		if strings.Contains(strings.ToLower(item), q) {
-			out = append(out, item)
+func (m model) pickerVisibleItems() ([]string, []string) {
+	valuesFor := func(items []string) []string {
+		if len(m.pickerValues) != len(m.pickerItems) {
+			return items
 		}
+		values := make([]string, 0, len(items))
+		used := make(map[int]struct{})
+		for _, item := range items {
+			for i, original := range m.pickerItems {
+				if item != original {
+					continue
+				}
+				if _, ok := used[i]; ok {
+					continue
+				}
+				used[i] = struct{}{}
+				values = append(values, m.pickerValues[i])
+				break
+			}
+		}
+		return values
 	}
-	return out
+
+	if m.pickerFilter == "" {
+		return m.pickerItems, valuesFor(m.pickerItems)
+	}
+
+	items := fuzzyFilter(m.pickerItems, m.pickerFilter)
+	return items, valuesFor(items)
 }
 
 func (m model) renderPicker() string {
-	headerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true)
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
 
-	header := headerStyle.Render("Select model") + "  " + hintStyle.Render("filter: "+m.pickerFilter+"_")
+	title := "Select model"
+	if m.pickerKind == "session" {
+		title = "Resume session"
+	}
+	if m.pickerKind == "message" {
+		title = "Revert to message"
+	}
+	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilter+"_")
 
-	items := m.pickerVisibleItems()
+	items, _ := m.pickerVisibleItems()
 	var body strings.Builder
 	if len(items) == 0 {
-		body.WriteString(hintStyle.Render("(no models — check provider auth or network)"))
+		empty := "(no models — check provider auth or network)"
+		if m.pickerKind == "session" {
+			empty = "(no sessions)"
+		}
+		if m.pickerKind == "message" {
+			empty = "(no user messages)"
+		}
+		body.WriteString(hintStyle.Render(empty))
 	} else {
 		maxRows := 15
 		start := 0
@@ -65,7 +145,7 @@ func (m model) renderPicker() string {
 		for i := start; i < end; i++ {
 			line := items[i]
 			if i == m.pickerIndex {
-				line = lipgloss.NewStyle().Foreground(lipgloss.Color("#1A1B26")).Background(lipgloss.Color("#7AA2F7")).Render(" " + line + " ")
+				line = m.styles.Selected.Render(" " + line + " ")
 			} else {
 				line = "  " + line
 			}

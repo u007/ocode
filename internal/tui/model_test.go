@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
+	tea "charm.land/bubbletea/v2"
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
@@ -37,6 +37,26 @@ func TestInitialToolsIncludesList(t *testing.T) {
 	}
 
 	t.Fatal("expected default tools to include list")
+}
+
+func TestRenderAssistantTextThinkingToggle(t *testing.T) {
+	m := model{styles: ApplyThemeColors("tokyonight"), showThinking: true}
+	shown := m.renderAssistantText("before <think>hidden</think> after")
+	if !strings.Contains(shown, "before ") || !strings.Contains(shown, "hidden") || !strings.Contains(shown, " after") {
+		t.Fatalf("expected visible thinking and normal text, got %q", shown)
+	}
+	if strings.Contains(shown, "<think>") || strings.Contains(shown, "</think>") {
+		t.Fatalf("expected thinking tags to be removed, got %q", shown)
+	}
+
+	m.showThinking = false
+	hidden := m.renderAssistantText("before <think>hidden</think> after")
+	if strings.Contains(hidden, "hidden") {
+		t.Fatalf("expected thinking content hidden, got %q", hidden)
+	}
+	if !strings.Contains(hidden, "before ") || !strings.Contains(hidden, " after") {
+		t.Fatalf("expected normal text preserved, got %q", hidden)
+	}
 }
 
 func TestSidebarToggleWithCtrlB(t *testing.T) {
@@ -196,6 +216,26 @@ func TestHandleModelCmdUpdatesCurrentModel(t *testing.T) {
 
 	if got := m.currentModelName(); got != "gpt-4o-mini" {
 		t.Fatalf("expected active model to update, got %q", got)
+	}
+}
+
+func TestPickerSelectsSessionByValue(t *testing.T) {
+	m := model{
+		input:        textarea.New(),
+		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		showPicker:   true,
+		pickerKind:   "session",
+		pickerItems:  []string{"session-1  First session"},
+		pickerValues: []string{"session-1"},
+	}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := derefTestModel(t, updated)
+	if got.showPicker {
+		t.Fatal("expected session picker to close")
+	}
+	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "Error loading session") {
+		t.Fatalf("expected picker to load selected session id, got %#v", got.messages)
 	}
 }
 

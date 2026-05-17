@@ -14,6 +14,7 @@ type GlobTool struct{}
 
 func (t GlobTool) Name() string        { return "glob" }
 func (t GlobTool) Description() string { return "Find files by pattern matching" }
+func (t GlobTool) Parallel() bool      { return true }
 func (t GlobTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "glob",
@@ -100,6 +101,7 @@ type GrepTool struct{}
 
 func (t GrepTool) Name() string        { return "grep" }
 func (t GrepTool) Description() string { return "Search file contents using regular expressions" }
+func (t GrepTool) Parallel() bool      { return true }
 func (t GrepTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "grep",
@@ -192,6 +194,7 @@ type ListTool struct{}
 
 func (t ListTool) Name() string        { return "list" }
 func (t ListTool) Description() string { return "List files and directories in a given path" }
+func (t ListTool) Parallel() bool      { return true }
 func (t ListTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "list",

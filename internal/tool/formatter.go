@@ -19,6 +19,7 @@ type FormatTool struct {
 
 func (t FormatTool) Name() string        { return "format" }
 func (t FormatTool) Description() string { return "Format a file using configured formatter" }
+func (t FormatTool) Parallel() bool      { return false }
 func (t FormatTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "format",

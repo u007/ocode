@@ -24,6 +24,7 @@ type PatchTool struct{}
 
 func (t PatchTool) Name() string        { return "patch" }
 func (t PatchTool) Description() string { return "Apply patches to files with line range targeting and fuzzy matching" }
+func (t PatchTool) Parallel() bool      { return false }
 func (t PatchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "patch",
@@ -479,6 +480,7 @@ type TodoWriteTool struct{}
 
 func (t TodoWriteTool) Name() string        { return "todowrite" }
 func (t TodoWriteTool) Description() string { return "Manage todo lists during coding sessions" }
+func (t TodoWriteTool) Parallel() bool      { return false }
 func (t TodoWriteTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todowrite",
@@ -522,6 +524,7 @@ type TodoReadTool struct{}
 
 func (t TodoReadTool) Name() string        { return "todoread" }
 func (t TodoReadTool) Description() string { return "Read the current session todo list" }
+func (t TodoReadTool) Parallel() bool      { return true }
 func (t TodoReadTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todoread",

@@ -16,6 +16,7 @@ type WebFetchTool struct{}
 
 func (t WebFetchTool) Name() string        { return "webfetch" }
 func (t WebFetchTool) Description() string { return "Fetch the content of a URL" }
+func (t WebFetchTool) Parallel() bool      { return true }
 func (t WebFetchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "webfetch",
@@ -71,6 +72,7 @@ type WebSearchTool struct{}
 
 func (t WebSearchTool) Name() string        { return "websearch" }
 func (t WebSearchTool) Description() string { return "Search the web using DuckDuckGo" }
+func (t WebSearchTool) Parallel() bool      { return true }
 func (t WebSearchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "websearch",

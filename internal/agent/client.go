@@ -19,13 +19,14 @@ import (
 var llmHTTPClient = &http.Client{Timeout: 120 * time.Second}
 
 type Message struct {
-	Role      string      `json:"role"`
-	Content   string      `json:"content"`
-	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
-	ToolID    string      `json:"tool_call_id,omitempty"`
-	Model     string      `json:"-"`
-	Usage     *TokenUsage `json:"-"`
-	Spend     *float64    `json:"-"`
+	Role             string      `json:"role"`
+	Content          string      `json:"content"`
+	ReasoningContent string      `json:"reasoning_content,omitempty"`
+	ToolCalls        []ToolCall  `json:"tool_calls,omitempty"`
+	ToolID           string      `json:"tool_call_id,omitempty"`
+	Model            string      `json:"-"`
+	Usage            *TokenUsage `json:"-"`
+	Spend            *float64    `json:"-"`
 }
 
 type ToolCall struct {
@@ -89,7 +90,7 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 		"messages": messages,
 	}
 	if len(tools) > 0 {
-		payload["tools"] = tools
+		payload["tools"] = openAITools(tools)
 	}
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -161,7 +162,7 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		"messages": openAIMessages,
 	}
 	if len(tools) > 0 {
-		payload["tools"] = tools
+		payload["tools"] = openAITools(tools)
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -219,13 +220,28 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 	return nil, fmt.Errorf("no response from %s", c.Provider)
 }
 
+func openAITools(tools []map[string]interface{}) []map[string]interface{} {
+	openAITools := make([]map[string]interface{}, 0, len(tools))
+	for _, t := range tools {
+		if t["type"] == "function" {
+			openAITools = append(openAITools, t)
+			continue
+		}
+		openAITools = append(openAITools, map[string]interface{}{
+			"type":     "function",
+			"function": t,
+		})
+	}
+	return openAITools
+}
+
 func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[string]interface{}, error) {
 	var result []map[string]interface{}
 	for _, m := range messages {
 		if m.Role == "tool" {
 			result = append(result, map[string]interface{}{
-				"role":       "tool",
-				"content":    m.Content,
+				"role":         "tool",
+				"content":      m.Content,
 				"tool_call_id": m.ToolID,
 			})
 			continue
@@ -243,10 +259,28 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 			continue
 		}
 
-		result = append(result, map[string]interface{}{
+		msg := map[string]interface{}{
 			"role":    m.Role,
 			"content": m.Content,
-		})
+		}
+		if m.Role == "assistant" && m.ReasoningContent != "" && c.Provider == "deepseek" {
+			msg["reasoning_content"] = m.ReasoningContent
+		}
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			calls := make([]map[string]interface{}, 0, len(m.ToolCalls))
+			for _, tc := range m.ToolCalls {
+				calls = append(calls, map[string]interface{}{
+					"id":   tc.ID,
+					"type": "function",
+					"function": map[string]interface{}{
+						"name":      tc.Function.Name,
+						"arguments": tc.Function.Arguments,
+					},
+				})
+			}
+			msg["tool_calls"] = calls
+		}
+		result = append(result, msg)
 	}
 	return result, nil
 }
@@ -705,10 +739,15 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	baseURL := ""
 	useOAuth := false
 
-	// Handle provider:model format
+	// Handle provider/model (opencode) and provider:model formats.
 	if parts := strings.SplitN(model, ":", 2); len(parts) == 2 {
 		provider = parts[0]
 		model = parts[1]
+	} else if parts := strings.SplitN(model, "/", 2); len(parts) == 2 {
+		if _, ok := providers[parts[0]]; ok {
+			provider = parts[0]
+			model = parts[1]
+		}
 	}
 
 	// Use config for provider details if available

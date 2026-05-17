@@ -1,10 +1,12 @@
 package session
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -23,6 +25,20 @@ type Session struct {
 	CreatedAt time.Time       `json:"created_at"`
 	UpdatedAt time.Time       `json:"updated_at"`
 	Metadata  map[string]any  `json:"metadata,omitempty"`
+}
+
+type Source string
+
+const (
+	SourceOcode  Source = "ocode"
+	SourceClaude Source = "claude"
+)
+
+type Ref struct {
+	ID        string
+	Title     string
+	UpdatedAt time.Time
+	Source    Source
 }
 
 type sessionIndex struct {
@@ -200,4 +216,239 @@ func List() ([]Session, error) {
 	})
 
 	return sessions, nil
+}
+
+func ListAll() ([]Ref, error) {
+	ocodeSessions, err := List()
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]Ref, 0, len(ocodeSessions))
+	clonedClaude := make(map[string]struct{})
+	for _, s := range ocodeSessions {
+		refs = append(refs, Ref{ID: s.ID, Title: s.Title, UpdatedAt: s.UpdatedAt, Source: SourceOcode})
+		if s.Metadata != nil {
+			if originalID, ok := s.Metadata["claude_original_session_id"].(string); ok && originalID != "" {
+				clonedClaude[originalID] = struct{}{}
+			}
+		}
+	}
+
+	claudeRefs, err := listClaudeSessions()
+	if err != nil {
+		return nil, err
+	}
+	for _, ref := range claudeRefs {
+		if _, ok := clonedClaude[strings.TrimPrefix(ref.ID, "claude:")]; ok {
+			continue
+		}
+		refs = append(refs, ref)
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].UpdatedAt.After(refs[j].UpdatedAt)
+	})
+	return refs, nil
+}
+
+func LoadAny(id string) (*Session, error) {
+	if strings.HasPrefix(id, "claude:") {
+		return CloneClaudeSession(strings.TrimPrefix(id, "claude:"))
+	}
+	return Load(id)
+}
+
+func CloneClaudeSession(id string) (*Session, error) {
+	cloneID := "claude-" + id
+	if s, err := Load(cloneID); err == nil {
+		return s, nil
+	}
+
+	claudeSession, err := loadClaudeSession(id)
+	if err != nil {
+		return nil, err
+	}
+	claudeSession.ID = cloneID
+	if claudeSession.Metadata == nil {
+		claudeSession.Metadata = make(map[string]any)
+	}
+	claudeSession.Metadata["source"] = string(SourceClaude)
+	claudeSession.Metadata["claude_original_session_id"] = id
+	if err := Save(cloneID, claudeSession.Title, claudeSession.Messages, claudeSession.Metadata); err != nil {
+		return nil, err
+	}
+	return Load(cloneID)
+}
+
+func listClaudeSessions() ([]Ref, error) {
+	dir, err := getClaudeProjectDir()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	refs := make([]Ref, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".jsonl" {
+			continue
+		}
+		id := strings.TrimSuffix(e.Name(), ".jsonl")
+		path := filepath.Join(dir, e.Name())
+		ref, err := claudeRefFromFile(id, path)
+		if err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, nil
+}
+
+func getClaudeProjectDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	wd, _ := os.Getwd()
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	if output, err := cmd.Output(); err == nil {
+		wd = strings.TrimSpace(string(output))
+	}
+	return filepath.Join(home, ".claude", "projects", claudeProjectSlug(wd)), nil
+}
+
+func claudeProjectSlug(path string) string {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	return strings.ReplaceAll(clean, "/", "-")
+}
+
+func claudeRefFromFile(id, path string) (Ref, error) {
+	s, err := parseClaudeSessionFile(id, path)
+	if err != nil {
+		return Ref{}, err
+	}
+	return Ref{ID: "claude:" + id, Title: s.Title, UpdatedAt: s.UpdatedAt, Source: SourceClaude}, nil
+}
+
+func loadClaudeSession(id string) (*Session, error) {
+	dir, err := getClaudeProjectDir()
+	if err != nil {
+		return nil, err
+	}
+	return parseClaudeSessionFile(id, filepath.Join(dir, id+".jsonl"))
+}
+
+func parseClaudeSessionFile(id, path string) (*Session, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	s := &Session{ID: id, Metadata: map[string]any{"source": string(SourceClaude), "claude_path": path}}
+	if err := parseClaudeJSONL(f, s); err != nil {
+		return nil, err
+	}
+	if s.Title == "" {
+		s.Title = id
+	}
+	if s.CreatedAt.IsZero() {
+		if info, err := os.Stat(path); err == nil {
+			s.CreatedAt = info.ModTime()
+			s.UpdatedAt = info.ModTime()
+		}
+	}
+	return s, nil
+}
+
+func parseClaudeJSONL(r io.Reader, s *Session) error {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			Type      string          `json:"type"`
+			IsMeta    bool            `json:"isMeta"`
+			Timestamp string          `json:"timestamp"`
+			Message   json.RawMessage `json:"message"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			return err
+		}
+		if entry.IsMeta || (entry.Type != "user" && entry.Type != "assistant") {
+			continue
+		}
+		role, content, model, ok := claudeMessage(entry.Message)
+		if !ok || content == "" {
+			continue
+		}
+		parsedTime, hasTime := parseClaudeTime(entry.Timestamp)
+		if hasTime {
+			if s.CreatedAt.IsZero() || parsedTime.Before(s.CreatedAt) {
+				s.CreatedAt = parsedTime
+			}
+			if parsedTime.After(s.UpdatedAt) {
+				s.UpdatedAt = parsedTime
+			}
+		}
+		if s.Title == "" && role == "user" {
+			s.Title = titleFromContent(content)
+		}
+		s.Messages = append(s.Messages, agent.Message{Role: role, Content: content, Model: model})
+	}
+	return scanner.Err()
+}
+
+func parseClaudeTime(value string) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, value)
+	return t, err == nil
+}
+
+func titleFromContent(content string) string {
+	content = strings.TrimSpace(content)
+	content = strings.ReplaceAll(content, "\n", " ")
+	if len(content) > 40 {
+		return content[:37] + "..."
+	}
+	return content
+}
+
+func claudeMessage(raw json.RawMessage) (role, content, model string, ok bool) {
+	var msg struct {
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+		Model   string          `json:"model"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil || msg.Role == "" {
+		return "", "", "", false
+	}
+	content = claudeContentText(msg.Content)
+	return msg.Role, content, msg.Model, content != ""
+}
+
+func claudeContentText(raw json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var parts []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(raw, &parts); err != nil {
+		return ""
+	}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
+			out = append(out, strings.TrimSpace(part.Text))
+		}
+	}
+	return strings.Join(out, "\n\n")
 }

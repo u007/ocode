@@ -21,10 +21,11 @@ func TestSlashSuggestionsFiltersByPrefix(t *testing.T) {
 	if len(got) == 0 {
 		t.Fatal("expected at least one /co command")
 	}
-	for _, item := range got {
-		if !strings.HasPrefix(item.name, "/co") {
-			t.Errorf("unexpected suggestion %q does not start with /co", item.name)
-		}
+	// Fuzzy ranking: prefix matches outrank substring matches, so the
+	// top hit must start with /co even though other matches may also
+	// appear lower in the list.
+	if !strings.HasPrefix(got[0].name, "/co") {
+		t.Errorf("expected top suggestion to start with /co, got %q", got[0].name)
 	}
 }
 
@@ -45,6 +46,13 @@ func TestSlashSuggestionHasNameAndDesc(t *testing.T) {
 	}
 	if got[0].desc == "" {
 		t.Error("expected non-empty desc for /help")
+	}
+}
+
+func TestSlashSuggestionsResolveAliasesToCanonicalCommand(t *testing.T) {
+	got := slashSuggestions("/model")
+	if len(got) == 0 || got[0].name != "/models" {
+		t.Fatalf("expected /model alias to suggest /models, got %#v", got)
 	}
 }
 
@@ -160,7 +168,7 @@ func TestSlashPopupEnterRunsExactCommand(t *testing.T) {
 		input:           newTestTextarea(),
 		messages:        []message{{role: roleUser, text: "keep"}},
 		showSlashPopup:  true,
-		slashPopupItems: []slashSuggestion{{name: "/compact", desc: "Reduce context"}},
+		slashPopupItems: []slashSuggestion{{name: "/compact", display: "/compact", desc: "Reduce context"}},
 	}
 	m.input.SetValue("/compact")
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
@@ -235,7 +243,7 @@ func TestSlashPopupAppearsInLayout(t *testing.T) {
 		height:          30,
 		ready:           true,
 		showSlashPopup:  true,
-		slashPopupItems: []slashSuggestion{{name: "/compact", desc: "Reduce context"}},
+		slashPopupItems: []slashSuggestion{{name: "/compact", display: "/compact", desc: "Reduce context"}},
 	}
 	content := m.renderContent()
 	if !strings.Contains(content, "/compact") {

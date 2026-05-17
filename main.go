@@ -57,6 +57,7 @@ func main() {
 
 	sessionID := ""
 	cont := false
+	yolo := false
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-session":
@@ -66,10 +67,12 @@ func main() {
 			}
 		case "-continue":
 			cont = true
+		case "-yolo", "--yolo":
+			yolo = true
 		}
 	}
 
-	if err := tui.Run(sessionID, cont); err != nil {
+	if err := tui.Run(sessionID, cont, yolo); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

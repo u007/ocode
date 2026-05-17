@@ -12,6 +12,7 @@ type SkillTool struct{}
 
 func (t SkillTool) Name() string        { return "skill" }
 func (t SkillTool) Description() string { return "Load a skill definition" }
+func (t SkillTool) Parallel() bool      { return true }
 func (t SkillTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "skill",
@@ -56,6 +57,7 @@ type QuestionTool struct{}
 
 func (t QuestionTool) Name() string        { return "question" }
 func (t QuestionTool) Description() string { return "Ask the user a question" }
+func (t QuestionTool) Parallel() bool      { return false }
 func (t QuestionTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "question",

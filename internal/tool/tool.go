@@ -11,12 +11,14 @@ type Tool interface {
 	Description() string
 	Definition() map[string]interface{}
 	Execute(args json.RawMessage) (string, error)
+	Parallel() bool
 }
 
 func LoadBuiltins(cfg *config.Config) []Tool {
 	return []Tool{
 		&ReadTool{},
 		&WriteTool{Config: cfg},
+		&ReplaceLinesToolImpl{Config: cfg},
 		&DeleteTool{},
 		&GlobTool{},
 		&GrepTool{},

@@ -12,6 +12,7 @@ type BashTool struct{}
 
 func (t BashTool) Name() string        { return "bash" }
 func (t BashTool) Description() string { return "Execute shell commands and return stdout/stderr" }
+func (t BashTool) Parallel() bool      { return false }
 func (t BashTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "bash",
