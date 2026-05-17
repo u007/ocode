@@ -1085,6 +1085,32 @@ func TestSidebarTelemetryAggregationSumsUsageAndSpend(t *testing.T) {
 	}
 }
 
+func TestSessionRestoreScrollsToBottom(t *testing.T) {
+	m := model{
+		restoredPendingScroll: true,
+		messages: []message{
+			{role: roleUser, text: "hello"},
+			{role: roleAssistant, text: "world"},
+		},
+	}
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
+	m.input = textarea.New()
+	m.files = newFilesModel(".")
+	m.git = newGitModel(".")
+	m.width = 100
+	m.height = 30
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	result := updated.(model)
+
+	if result.restoredPendingScroll {
+		t.Error("restoredPendingScroll should be false after first WindowSizeMsg")
+	}
+	if !result.viewport.AtBottom() {
+		t.Error("viewport should be at bottom after session restore")
+	}
+}
+
 func int64Ptr(v int64) *int64 { return &v }
 
 func mustJSON(t *testing.T, v any) json.RawMessage {
