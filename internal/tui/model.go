@@ -1119,6 +1119,19 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		scrollbarSetOffset(&m.logViewport, mouse.Y, trackTop, m.logViewport.Height())
 		return m, nil, true
 	}
+	if pressed && m.activeTab == tabGit {
+		panelW := m.width
+		diffPaneRight := panelW - 1
+		scrollX := diffPaneRight - 1
+		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
+		gitTrackTop := gitHeaderH + 1
+		gitTrackH := m.git.diff.Height()
+		if mouse.X == scrollX && mouse.Y >= gitTrackTop && mouse.Y < gitTrackTop+gitTrackH {
+			m.scrollbarDrag = scrollbarDragGitDiff
+			scrollbarSetOffset(&m.git.diff, mouse.Y, gitTrackTop, gitTrackH)
+			return m, nil, true
+		}
+	}
 	if !pressed {
 		m.scrollbarDrag = scrollbarDragNone
 	}
@@ -1180,6 +1193,11 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	case scrollbarDragLog:
 		scrollbarSetOffset(&m.logViewport, mouse.Y, trackTop, m.logViewport.Height())
+		return m, nil, true
+	case scrollbarDragGitDiff:
+		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
+		gitTrackTop := gitHeaderH + 1
+		scrollbarSetOffset(&m.git.diff, mouse.Y, gitTrackTop, m.git.diff.Height())
 		return m, nil, true
 	}
 
