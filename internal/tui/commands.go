@@ -42,7 +42,7 @@ func init() {
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
 		{name: "/init", help: "Create default AGENTS.md", handler: runInitCmd},
 		{name: "/help", help: "Show this help", handler: runHelpCmd},
-		{name: "/themes", help: "List available themes", handler: runThemesCmd},
+		{name: "/themes", aliases: []string{"/theme"}, usage: "/themes [name]", help: "Choose or switch themes", handler: runThemesCmd},
 		{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
 		{name: "/editor", help: "Reopen the external editor", handler: runEditorCmd},
 		{name: "/sidebar", help: "Toggle sidebar placeholder", handler: runSidebarCmd},
@@ -142,10 +142,12 @@ func buildCommandHelpText(specs []commandSpec) string {
 		fmt.Fprintf(&b, "%-20s : %s\n", commandDisplayName(spec), spec.help)
 	}
 	b.WriteString("\nShortcuts:\n")
-	b.WriteString("!command       : Run a shell command\n")
+	b.WriteString("!command       : Run an interactive shell command (takes over terminal; output not captured)\n")
 	b.WriteString("@path          : Add file content to context\n")
 	b.WriteString("Ctrl+P         : Open command palette\n")
 	b.WriteString("Ctrl+X         : Leader key for quick actions (u:undo, r:redo, n:new, l:list, c:compact)\n")
+	b.WriteString("Ctrl+O         : Toggle YOLO permissions mode\n")
+	b.WriteString("Ctrl+Y         : Retry last LLM timeout or I/O error\n")
 	return b.String()
 }
 
@@ -254,6 +256,7 @@ func runMCPAuthCmd(m *model, args []string) tea.Cmd {
 }
 
 func runExitCmd(m *model, args []string) tea.Cmd {
+	m.saveSession()
 	return tea.Quit
 }
 

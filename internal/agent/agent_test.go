@@ -2,12 +2,23 @@ package agent
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
 	"reflect"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 type MockClient struct {
 	Response *Message
@@ -32,6 +43,23 @@ func TestNewClientParsesOpenCodeProviderModel(t *testing.T) {
 	}
 	if got.Model != "deepseek-chat" {
 		t.Fatalf("expected stripped model deepseek-chat, got %q", got.Model)
+	}
+}
+
+func TestNewClientUsesChutesLLMEndpoint(t *testing.T) {
+	client := NewClient(nil, "chutes/Qwen/Qwen3.6-27B-TEE")
+	got, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient for chutes model, got %T", client)
+	}
+	if got.Provider != "chutes" {
+		t.Fatalf("expected provider chutes, got %q", got.Provider)
+	}
+	if got.Model != "Qwen/Qwen3.6-27B-TEE" {
+		t.Fatalf("expected stripped model Qwen/Qwen3.6-27B-TEE, got %q", got.Model)
+	}
+	if got.BaseURL != "https://llm.chutes.ai/v1" {
+		t.Fatalf("expected chutes LLM base URL, got %q", got.BaseURL)
 	}
 }
 
@@ -78,6 +106,43 @@ func TestOpenAIToolsKeepsWrappedDefinitions(t *testing.T) {
 
 	if len(tools) != 1 || !reflect.DeepEqual(tools[0]["function"], wrapped["function"]) {
 		t.Fatalf("expected existing wrapped definition to be preserved, got %#v", tools)
+	}
+}
+
+func TestGenericClientRetriesTransientNoResponseErrors(t *testing.T) {
+	originalClient := llmHTTPClient
+	originalDelay := llmRetryBaseDelay
+	defer func() {
+		llmHTTPClient = originalClient
+		llmRetryBaseDelay = originalDelay
+	}()
+
+	var calls int32
+	llmRetryBaseDelay = 0
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			atomic.AddInt32(&calls, 1)
+			return nil, io.ErrUnexpectedEOF
+		}),
+	}
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected retry failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != int32(llmMaxRetries+1) {
+		t.Fatalf("expected %d attempts, got %d", llmMaxRetries+1, got)
+	}
+	if !strings.Contains(err.Error(), "llm request failed after 4 attempt(s)") {
+		t.Fatalf("expected retry count in error, got %v", err)
+	}
+}
+
+func TestLLMHTTPClientUsesFiveMinuteTimeout(t *testing.T) {
+	if llmHTTPClient.Timeout != 5*time.Minute {
+		t.Fatalf("expected LLM HTTP timeout to be 5m, got %s", llmHTTPClient.Timeout)
 	}
 }
 

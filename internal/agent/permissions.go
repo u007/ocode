@@ -68,7 +68,10 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question"} {
 		pm.rules[name] = PermissionAllow
 	}
-	for _, name := range []string{"write", "edit", "multi_edit", "patch", "delete", "format", "bash", "webfetch", "websearch", "agent", "task", "mcp_*"} {
+	for _, name := range []string{"write", "edit", "multi_edit", "multiedit", "replace_lines", "patch", "format"} {
+		pm.SetRule(name, PermissionAllow)
+	}
+	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "agent", "task", "mcp_*"} {
 		pm.SetRule(name, PermissionAsk)
 	}
 	return pm

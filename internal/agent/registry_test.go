@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -81,6 +82,15 @@ func TestPermissionManager(t *testing.T) {
 	}
 	if pm.Check("bash") != PermissionAsk {
 		t.Error("expected ask for bash")
+	}
+	if pm.Check("write") != PermissionAllow {
+		t.Error("expected allow for write")
+	}
+	if pm.Check("patch") != PermissionAllow {
+		t.Error("expected allow for patch")
+	}
+	if pm.Check("delete") != PermissionAsk {
+		t.Error("expected ask for delete")
 	}
 
 	pm.SetRule("bash", PermissionDeny)
@@ -315,5 +325,50 @@ func TestAgentSpec(t *testing.T) {
 	}
 	if a.Mode() != ModePlan {
 		t.Errorf("expected mode to be plan, got %s", a.Mode())
+	}
+}
+
+func TestModePromptsIncludeExpectationValidation(t *testing.T) {
+	tests := []struct {
+		mode Mode
+		want []string
+	}{
+		{ModeBuild, []string{"User Expectation Checklist", "validate every checklist item", "iterate with fixes"}},
+		{ModePlan, []string{"User Expectation Checklist", "Validation Plan", "checklist items they verify"}},
+		{ModeReview, []string{"User Expectation Checklist", "missed requirements", "missing validation"}},
+		{ModeDebug, []string{"observed failure", "expected behavior", "smallest root cause", "Validate the diagnosis"}},
+		{ModeDocs, []string{"validate the documented behavior", "confirm the docs match"}},
+	}
+
+	for _, tt := range tests {
+		prompt := tt.mode.SystemPrompt()
+		for _, want := range tt.want {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("%s prompt missing %q: %s", tt.mode, want, prompt)
+			}
+		}
+	}
+}
+
+func TestSubAgentPromptsIncludeExpectationCoverage(t *testing.T) {
+	tests := []struct {
+		name string
+		want []string
+	}{
+		{"general", []string{"User Expectation Checklist", "validate each checklist item", "remaining gaps"}},
+		{"explore", []string{"user expectations", "remaining unknowns"}},
+		{"scout", []string{"source URLs", "user expectations", "remaining unknowns"}},
+	}
+
+	for _, tt := range tests {
+		spec := FindSubAgentSpec(tt.name)
+		if spec == nil {
+			t.Fatalf("missing sub-agent %q", tt.name)
+		}
+		for _, want := range tt.want {
+			if !strings.Contains(spec.SystemPrompt, want) {
+				t.Fatalf("%s sub-agent prompt missing %q: %s", tt.name, want, spec.SystemPrompt)
+			}
+		}
 	}
 }

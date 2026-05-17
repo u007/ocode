@@ -108,3 +108,32 @@ func TestResetClearsSnapshots(t *testing.T) {
 		t.Fatalf("expected changed files to clear, got %v", got)
 	}
 }
+
+func TestBackupTracksNewFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	Reset()
+
+	// Backup a file that doesn't exist yet (new file)
+	if err := Backup("newfile.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ChangedFiles()
+	if len(got) != 1 || got[0] != "newfile.txt" {
+		t.Fatalf("expected [newfile.txt], got %v", got)
+	}
+
+	// Verify the snapshot has empty BackupPath for new files
+	mu.Lock()
+	if len(snapshots) != 1 || snapshots[0].BackupPath != "" {
+		mu.Unlock()
+		t.Fatalf("expected empty BackupPath for new file, got %v", snapshots[0].BackupPath)
+	}
+	mu.Unlock()
+}

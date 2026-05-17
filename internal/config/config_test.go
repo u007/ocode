@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -112,6 +113,65 @@ func TestLoadFromStringValidJSON(t *testing.T) {
 	}
 	if cfg.SmallModel != "gpt-4o-mini" {
 		t.Fatalf("expected small_model gpt-4o-mini, got %s", cfg.SmallModel)
+	}
+}
+
+func TestSaveTUIThemeWritesOpencodeConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	if err := SaveTUITheme("catppuccin"); err != nil {
+		t.Fatalf("failed to save theme: %v", err)
+	}
+
+	path := filepath.Join(tmpHome, ".config", "opencode", "opencode.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected theme to be saved to %s: %v", path, err)
+	}
+
+	var got struct {
+		TUI TUIConfig `json:"tui"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("failed to parse saved config: %v", err)
+	}
+	if got.TUI.Theme != "catppuccin" {
+		t.Fatalf("expected saved tui.theme catppuccin, got %q", got.TUI.Theme)
+	}
+}
+
+func TestSaveTUIThemePreservesExistingOpencodeConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	path := filepath.Join(tmpHome, ".config", "opencode", "opencode.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"model":"gpt-4o","tui":{"mouse":false}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveTUITheme("dracula"); err != nil {
+		t.Fatalf("failed to save theme: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Config
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("failed to parse saved config: %v", err)
+	}
+	if got.Model != "gpt-4o" {
+		t.Fatalf("expected existing model to be preserved, got %q", got.Model)
+	}
+	if got.TUI.Theme != "dracula" {
+		t.Fatalf("expected saved tui.theme dracula, got %q", got.TUI.Theme)
+	}
+	if got.TUI.Mouse == nil || *got.TUI.Mouse {
+		t.Fatalf("expected existing tui.mouse=false to be preserved, got %#v", got.TUI.Mouse)
 	}
 }
 

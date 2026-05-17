@@ -10,11 +10,15 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/runcli"
 	"github.com/jamesmercstudio/ocode/internal/server"
 	"github.com/jamesmercstudio/ocode/internal/tui"
+	"github.com/jamesmercstudio/ocode/internal/version"
 )
 
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "version", "--version", "-version":
+			fmt.Println(version.Version)
+			return
 		case "mcp":
 			if err := mcpcli.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)

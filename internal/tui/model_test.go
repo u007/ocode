@@ -1,20 +1,34 @@
 package tui
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
+
+type retryTestClient struct{}
+
+func (retryTestClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	return nil, context.DeadlineExceeded
+}
+
+func (retryTestClient) GetProvider() string { return "test" }
+
+func (retryTestClient) GetModel() string { return "test-model" }
 
 func TestLeaderTimeoutClearsActiveState(t *testing.T) {
 	m := model{leaderActive: true, leaderSeq: 1}
@@ -37,6 +51,46 @@ func TestInitialToolsIncludesList(t *testing.T) {
 	}
 
 	t.Fatal("expected default tools to include list")
+}
+
+func TestFormatReadToolCallHintShowsLineParams(t *testing.T) {
+	var tc agent.ToolCall
+	tc.Function.Name = "read"
+	tc.Function.Arguments = `{"filePath":"/tmp/model.go","offset":400,"limit":51}`
+
+	got := formatToolCallHint(tc)
+	want := "📖 read /tmp/model.go offset=400 limit=51"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestShellExecCommandUsesPlatformShell(t *testing.T) {
+	cmd := shellExecCommand("echo hello")
+	if runtime.GOOS == "windows" {
+		if cmd.Path == "" || len(cmd.Args) != 3 || cmd.Args[1] != "/C" || cmd.Args[2] != "echo hello" {
+			t.Fatalf("expected cmd /C invocation, got path=%q args=%v", cmd.Path, cmd.Args)
+		}
+		return
+	}
+	if cmd.Path == "" || len(cmd.Args) != 3 || cmd.Args[1] != "-c" || cmd.Args[2] != "echo hello" {
+		t.Fatalf("expected bash -c invocation, got path=%q args=%v", cmd.Path, cmd.Args)
+	}
+}
+
+func TestShellFinishedMessageIsRecorded(t *testing.T) {
+	m := model{
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+		sessionID: "test-shell",
+	}
+
+	updated, _ := m.Update(shellFinishedMsg{command: "echo hello"})
+	got := updated.(model)
+	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "Shell command finished: echo hello") {
+		t.Fatalf("expected shell completion message, got %#v", got.messages)
+	}
 }
 
 func TestRenderAssistantTextThinkingToggle(t *testing.T) {
@@ -72,6 +126,29 @@ func TestSidebarToggleWithCtrlB(t *testing.T) {
 	got = updated.(model)
 	if got.showSidebar {
 		t.Fatal("expected Ctrl+B to toggle sidebar off")
+	}
+}
+
+func TestCtrlOTogglesYoloMode(t *testing.T) {
+	m := model{
+		input:    textarea.New(),
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		agent:    agent.NewAgent(nil, nil, nil),
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	if cmd != nil {
+		t.Fatalf("expected Ctrl+O to return no command, got %T", cmd)
+	}
+	got := updated.(*model)
+	if got.agent.Permissions().Mode() != agent.PermissionModeYOLO {
+		t.Fatalf("expected Ctrl+O to enable YOLO, got %s", got.agent.Permissions().Mode())
+	}
+
+	updated, _ = got.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
+	got = updated.(*model)
+	if got.agent.Permissions().Mode() != agent.PermissionModeNormal {
+		t.Fatalf("expected Ctrl+O to disable YOLO, got %s", got.agent.Permissions().Mode())
 	}
 }
 
@@ -118,6 +195,163 @@ func TestSidebarViewHidesOnNarrowTerminals(t *testing.T) {
 	view := m.View().Content
 	if strings.Contains(view, "No live session todo state yet.") || strings.Contains(view, "Ctrl+B toggle sidebar") {
 		t.Fatalf("expected narrow view to hide sidebar, got %q", view)
+	}
+}
+
+func TestLayoutKeepsInputAndStatusWithinTerminalHeight(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     80,
+		height:    24,
+		sessionID: strings.Repeat("session-", 12),
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+		messages: []message{{
+			role: roleAssistant,
+			text: strings.Repeat("long transcript line that should stay in the viewport\n", 80),
+		}},
+	}
+	m.input.SetValue(strings.Repeat("draft input ", 12))
+
+	m.layout()
+	content := m.renderContent()
+
+	if got := lipgloss.Height(content); got > m.height {
+		t.Fatalf("rendered content height %d exceeds terminal height %d", got, m.height)
+	}
+	if !strings.Contains(content, "draft input") {
+		t.Fatalf("expected input to remain visible, got %q", content)
+	}
+	if !strings.Contains(content, "Agent:") {
+		t.Fatalf("expected status to remain visible, got %q", content)
+	}
+}
+
+func TestLayoutHeightDoesNotChangeWhenTranscriptScrolls(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     80,
+		height:    24,
+		sessionID: strings.Repeat("session-", 12),
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+		messages: []message{{
+			role: roleAssistant,
+			text: strings.Repeat("long transcript line that should stay in the viewport\n", 80),
+		}},
+	}
+	m.input.SetValue("draft input")
+	m.layout()
+
+	m.viewport.GotoTop()
+	top := m.renderContent()
+	m.viewport.GotoBottom()
+	bottom := m.renderContent()
+
+	if topHeight, bottomHeight := lipgloss.Height(top), lipgloss.Height(bottom); topHeight != bottomHeight {
+		t.Fatalf("expected scroll position not to change layout height, top=%d bottom=%d", topHeight, bottomHeight)
+	}
+	if got := lipgloss.Height(bottom); got > m.height {
+		t.Fatalf("rendered content height %d exceeds terminal height %d", got, m.height)
+	}
+	for _, content := range []string{top, bottom} {
+		if !strings.Contains(content, "draft input") || !strings.Contains(content, "Agent:") {
+			t.Fatalf("expected input and status to remain visible, got %q", content)
+		}
+	}
+}
+
+func TestLayoutConstrainsLongTranscriptLines(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     80,
+		height:    24,
+		sessionID: "session-1",
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+		messages: []message{{
+			role: roleAssistant,
+			text: "PERMISSION_ASK:" + strings.Repeat(`{"very_long_argument":`, 20),
+		}},
+	}
+	m.input.SetValue("draft input")
+	m.layout()
+	content := m.renderContent()
+
+	if got := lipgloss.Height(content); got > m.height {
+		t.Fatalf("rendered content height %d exceeds terminal height %d", got, m.height)
+	}
+	for _, line := range strings.Split(content, "\n") {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Fatalf("rendered line width %d exceeds terminal width %d: %q", got, m.width, line)
+		}
+	}
+	if !strings.Contains(content, "draft input") || !strings.Contains(content, "Agent:") {
+		t.Fatalf("expected input and status to remain visible, got %q", content)
+	}
+}
+
+func TestLayoutWrapsLongInputLines(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     80,
+		height:    24,
+		sessionID: "session-1",
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+		messages: []message{{
+			role: roleAssistant,
+			text: "ready",
+		}},
+	}
+	m.input.Prompt = "▍ "
+	m.input.SetValue(strings.Repeat("unbroken-input", 20))
+	m.layout()
+	content := m.renderContent()
+
+	for _, line := range strings.Split(content, "\n") {
+		if got := lipgloss.Width(line); got > m.width {
+			t.Fatalf("rendered line width %d exceeds terminal width %d: %q", got, m.width, line)
+		}
+	}
+	if got := m.input.MaxWidth; got <= 0 {
+		t.Fatalf("expected input max width to be constrained, got %d", got)
+	}
+}
+
+func TestLayoutAccountsForSlashPopupAndActivityRow(t *testing.T) {
+	m := model{
+		ready:               true,
+		width:               80,
+		height:              24,
+		sessionID:           strings.Repeat("session-", 12),
+		input:               newTestTextarea(),
+		viewport:            viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:              ApplyThemeColors("tokyonight"),
+		showSlashPopup:      true,
+		slashPopupItems:     []slashSuggestion{{name: "/compact", display: "/compact", desc: "Reduce context"}},
+		activityRowReserved: true,
+		messages: []message{{
+			role: roleAssistant,
+			text: strings.Repeat("long transcript line that should stay in the viewport\n", 80),
+		}},
+	}
+	m.input.SetValue("/co")
+
+	m.layout()
+	content := m.renderContent()
+
+	if got := lipgloss.Height(content); got > m.height {
+		t.Fatalf("rendered content height %d exceeds terminal height %d", got, m.height)
+	}
+	for _, want := range []string{"/compact", "/co", "Agent:"} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("expected %q to remain visible, got %q", want, content)
+		}
 	}
 }
 
@@ -236,6 +470,288 @@ func TestPickerSelectsSessionByValue(t *testing.T) {
 	}
 	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "Error loading session") {
 		t.Fatalf("expected picker to load selected session id, got %#v", got.messages)
+	}
+}
+
+func TestMessagePickerOnlyListsActualUserInputs(t *testing.T) {
+	m := model{
+		messages: []message{
+			{
+				role: roleUser,
+				text: "include raw user",
+				raw:  &agent.Message{Role: "user", Content: "include raw user"},
+			},
+			{
+				role: roleUser,
+				text: "exclude restored system context",
+				raw:  &agent.Message{Role: "system", Content: "exclude restored system context"},
+			},
+			{
+				role: roleAssistant,
+				text: "exclude assistant",
+				raw:  &agent.Message{Role: "assistant", Content: "exclude assistant"},
+			},
+			{
+				role: roleUser,
+				text: "include live user",
+			},
+		},
+	}
+
+	m.openMessagePicker()
+
+	if got, want := len(m.pickerItems), 2; got != want {
+		t.Fatalf("expected %d revert items, got %d: %#v", want, got, m.pickerItems)
+	}
+	if !strings.Contains(m.pickerItems[0], "include raw user") || !strings.Contains(m.pickerItems[1], "include live user") {
+		t.Fatalf("expected picker to list user inputs, got %#v", m.pickerItems)
+	}
+	for _, item := range m.pickerItems {
+		if strings.Contains(item, "system") || strings.Contains(item, "assistant") {
+			t.Fatalf("expected picker to exclude non-user messages, got %#v", m.pickerItems)
+		}
+	}
+	if got, want := strings.Join(m.pickerValues, ","), "0,3"; got != want {
+		t.Fatalf("expected picker values to retain transcript indexes, got %q", got)
+	}
+}
+
+func TestMessagePickerRestoresBeforeSelectedInputAndPrefillsIt(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(".ocode/sessions", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{
+		sessionID: "restore-test",
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		messages: []message{
+			{role: roleUser, text: "first request"},
+			{role: roleAssistant, text: "first answer"},
+			{role: roleUser, text: "retry this request"},
+			{role: roleAssistant, text: "failed answer"},
+		},
+	}
+	m.openMessagePicker()
+	m.pickerIndex = 1
+
+	updated, cmd := m.selectPickerIndex(1)
+	if cmd != nil {
+		t.Fatalf("expected no command, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+
+	if len(got.messages) != 2 {
+		t.Fatalf("expected transcript before selected input, got %#v", got.messages)
+	}
+	if got.input.Value() != "retry this request" {
+		t.Fatalf("expected selected input to be prefixed, got %q", got.input.Value())
+	}
+}
+
+func TestCtrlYRetriesLastRetryableLLMError(t *testing.T) {
+	errText := "Error: context deadline exceeded"
+	m := model{
+		input:               textarea.New(),
+		viewport:            viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		agent:               agent.NewAgent(retryTestClient{}, nil, nil),
+		lastRetryableLLMErr: errText,
+		messages: []message{
+			{role: roleUser, text: "please retry"},
+			{role: roleAssistant, text: errText},
+		},
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
+	got := derefTestModel(t, updated)
+
+	if cmd == nil {
+		t.Fatal("expected retry command")
+	}
+	if got.lastRetryableLLMErr != "" {
+		t.Fatalf("expected retryable error state to clear, got %q", got.lastRetryableLLMErr)
+	}
+	if len(got.messages) != 1 || got.messages[0].text != "please retry" {
+		t.Fatalf("expected transient error removed before retry, got %#v", got.messages)
+	}
+}
+
+func TestEnterWhileStreamingQueuesUserInput(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     80,
+		height:    24,
+		streaming: true,
+		input:     newTestTextarea(),
+		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	m.input.SetValue("follow up after this")
+	m.layout()
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := derefTestModel(t, updated)
+
+	if cmd != nil {
+		t.Fatalf("expected queued input to avoid starting a command, got %T", cmd)
+	}
+	if len(got.queuedInputs) != 1 || got.queuedInputs[0] != "follow up after this" {
+		t.Fatalf("expected input to be queued, got %#v", got.queuedInputs)
+	}
+	if got.input.Value() != "" {
+		t.Fatalf("expected input to reset after queueing, got %q", got.input.Value())
+	}
+	if len(got.messages) != 0 {
+		t.Fatalf("expected queued input not to enter transcript yet, got %#v", got.messages)
+	}
+	if content := got.renderContent(); !strings.Contains(content, "Queued (1)") || !strings.Contains(content, "follow up after this") {
+		t.Fatalf("expected queued input to render, got %q", content)
+	}
+}
+
+func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
+	m := model{
+		ready:        true,
+		width:        80,
+		height:       24,
+		streaming:    true,
+		agent:        agent.NewAgent(nil, nil, nil),
+		input:        newTestTextarea(),
+		viewport:     viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:       ApplyThemeColors("tokyonight"),
+		queuedInputs: []string{"next request"},
+	}
+	m.layout()
+
+	updated, cmd := m.Update(streamDoneMsg{})
+	got := derefTestModel(t, updated)
+
+	if got.streaming {
+		t.Fatal("expected streaming to stop")
+	}
+	if len(got.queuedInputs) != 0 {
+		t.Fatalf("expected queued input to be consumed, got %#v", got.queuedInputs)
+	}
+	if cmd == nil {
+		t.Fatal("expected next queued input command to start")
+	}
+}
+
+func TestStreamDonePreservesActivityRowAndShowsIdleStatus(t *testing.T) {
+	m := model{
+		ready:               true,
+		width:               80,
+		height:              24,
+		streaming:           true,
+		activityRowReserved: true,
+		lastActivity:        agent.ActivitySnapshot{LLMRunning: true},
+		input:               newTestTextarea(),
+		viewport:            viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:              ApplyThemeColors("tokyonight"),
+	}
+	m.layout()
+
+	updated, _ := m.Update(streamDoneMsg{})
+	got := derefTestModel(t, updated)
+
+	if got.streaming {
+		t.Fatal("expected streaming to stop")
+	}
+	if !got.activityRowReserved {
+		t.Fatal("expected activity row reservation to remain after stream done")
+	}
+	status := got.renderStatus()
+	if !strings.Contains(status, "LLM: ○ idle") {
+		t.Fatalf("expected idle LLM status, got %q", status)
+	}
+}
+
+func TestRetryableLLMErrorDetection(t *testing.T) {
+	if !isRetryableLLMError(context.DeadlineExceeded) {
+		t.Fatal("expected context deadline to be retryable")
+	}
+	if isRetryableLLMError(os.ErrPermission) {
+		t.Fatal("expected permission error to not be retryable")
+	}
+}
+
+func TestPickerMouseRowUsesVisibleWindow(t *testing.T) {
+	m := model{
+		showPicker:   true,
+		pickerKind:   "model",
+		pickerIndex:  16,
+		pickerItems:  []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"},
+		pickerValues: []string{"0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16"},
+	}
+
+	idx, ok := m.pickerRowForY(3)
+	if !ok {
+		t.Fatal("expected picker row hit")
+	}
+	if idx != 2 {
+		t.Fatalf("expected first visible picker row to map to index 2, got %d", idx)
+	}
+}
+
+func TestTuiRoleForAgentMessageOnlyMapsUserToUser(t *testing.T) {
+	tests := []struct {
+		role string
+		want role
+	}{
+		{role: "user", want: roleUser},
+		{role: "assistant", want: roleAssistant},
+		{role: "tool", want: roleAssistant},
+		{role: "system", want: roleAssistant},
+	}
+
+	for _, tt := range tests {
+		if got := tuiRoleForAgentMessage(agent.Message{Role: tt.role}); got != tt.want {
+			t.Fatalf("expected raw role %q to map to %v, got %v", tt.role, tt.want, got)
+		}
+	}
+}
+
+func TestConnectMouseSelectsProviderAndMethodRows(t *testing.T) {
+	if len(auth.Providers) < 2 {
+		t.Fatal("expected at least two auth providers")
+	}
+
+	m := model{
+		showConnect: true,
+		connect: &connectDialog{
+			stage: connectStageProvider,
+		},
+	}
+
+	idx, ok := m.connectRowForY(4)
+	if !ok {
+		t.Fatal("expected provider row hit")
+	}
+	if idx != 1 {
+		t.Fatalf("expected second provider row, got %d", idx)
+	}
+
+	updated, cmd := m.selectConnectRow(idx)
+	if cmd != nil {
+		t.Fatal("expected provider selection to stay in dialog without command")
+	}
+	got := derefTestModel(t, updated)
+	if got.connect.stage != connectStageMethod || got.connect.providerIdx != 1 {
+		t.Fatalf("expected provider click to open method stage, got %#v", got.connect)
+	}
+
+	idx, ok = got.connectRowForY(3)
+	if !ok {
+		t.Fatal("expected method row hit")
+	}
+	if idx != 0 {
+		t.Fatalf("expected first method row, got %d", idx)
 	}
 }
 

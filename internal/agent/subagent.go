@@ -20,14 +20,15 @@ var DefaultSubAgents = []SubAgentSpec{
 		Name:        "general",
 		Description: "Multi-step tasks, parallel work",
 		SystemPrompt: "You are a general-purpose sub-agent. Complete the task efficiently and return the final result. " +
-			"Be concise in your output.",
+			"Use a User Expectation Checklist for multi-step work, validate each checklist item with the strongest practical check available, and iterate if validation fails. " +
+			"Be concise in your output and include checklist status, validation performed, and remaining gaps.",
 	},
 	{
 		Name:        "explore",
 		Description: "Fast read-only codebase exploration",
 		SystemPrompt: "You are an exploration sub-agent. Your goal is to quickly investigate the codebase and return findings. " +
 			"Use only read, glob, grep, list, and lsp tools. Do not modify any files. " +
-			"Return a concise summary of what you found.",
+			"Return a concise summary of what you found, which user expectations the findings cover, and any remaining unknowns.",
 		Tools: []string{"read", "glob", "grep", "list", "lsp"},
 	},
 	{
@@ -35,7 +36,7 @@ var DefaultSubAgents = []SubAgentSpec{
 		Description: "External docs, dependency research",
 		SystemPrompt: "You are a scout sub-agent. Research external documentation, APIs, and dependencies. " +
 			"Use webfetch and websearch to find relevant information. " +
-			"Return a concise summary with key findings and source URLs.",
+			"Return a concise summary with key findings, source URLs, which user expectations the sources cover, and any remaining unknowns.",
 		Tools: []string{"webfetch", "websearch", "read"},
 	},
 }
