@@ -82,7 +82,7 @@ func (m *filesModel) Resize(w, h int) {
 	if previewH < 1 {
 		previewH = 1
 	}
-	m.preview.SetWidth(previewW)
+	m.preview.SetWidth(previewW - 1)
 	m.preview.SetHeight(previewH)
 }
 
@@ -389,7 +389,8 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 	treeContent := strings.Join(treeLines, "\n")
 	treePane := borderStyle.Width(treeW - 2).Height(h - 3).Render(treeContent)
 
-	previewContent := m.preview.View()
+	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
+	previewContent := lipgloss.JoinHorizontal(lipgloss.Top, m.preview.View(), previewSB)
 	if m.choosingEditor {
 		previewContent = m.editorPickerView(previewW-4, styles)
 	} else if m.statusMsg != "" {

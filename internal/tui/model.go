@@ -1132,6 +1132,20 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 	}
+	if pressed && m.activeTab == tabFiles {
+		treeW := m.width * 35 / 100
+		previewRight := m.width - 1
+		scrollX := previewRight - 1
+		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
+		filesTrackTop := filesHeaderH + 1
+		filesTrackH := m.files.preview.Height()
+		if mouse.X == scrollX && mouse.Y >= filesTrackTop && mouse.Y < filesTrackTop+filesTrackH {
+			m.scrollbarDrag = scrollbarDragFilesPreview
+			scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, filesTrackH)
+			_ = treeW
+			return m, nil, true
+		}
+	}
 	if !pressed {
 		m.scrollbarDrag = scrollbarDragNone
 	}
@@ -1198,6 +1212,11 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
 		gitTrackTop := gitHeaderH + 1
 		scrollbarSetOffset(&m.git.diff, mouse.Y, gitTrackTop, m.git.diff.Height())
+		return m, nil, true
+	case scrollbarDragFilesPreview:
+		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
+		filesTrackTop := filesHeaderH + 1
+		scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, m.files.preview.Height())
 		return m, nil, true
 	}
 
