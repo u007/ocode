@@ -519,7 +519,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files.Resize(m.width, m.height)
 		m.git.Resize(m.width, m.height)
 		m.logViewport, _ = m.logViewport.Update(tea.WindowSizeMsg{
-			Width:  m.panelWidth() - 2,
+			Width:  m.panelWidth() - 3,
 			Height: m.height - m.bottomChromeHeight(m.panelWidth()) - 1,
 		})
 		m.ready = true
@@ -2213,7 +2213,7 @@ func (m *model) layout() {
 	}
 
 	panelWidth := m.panelWidth()
-	innerWidth := panelWidth - 6
+	innerWidth := panelWidth - 7
 	if innerWidth < 1 {
 		innerWidth = 1
 	}
@@ -2523,7 +2523,12 @@ func (m model) renderContent() string {
 
 	status := m.renderStatus()
 	panelWidth := m.panelWidth()
-	transcript := borderStyle.Width(panelWidth - 2).Render(constrainView(m.viewport.View(), m.viewport.Width(), m.viewport.Height()))
+	transcriptSB := renderScrollbar(m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), m.viewport.YOffset())
+	transcriptContent := lipgloss.JoinHorizontal(lipgloss.Top,
+		constrainView(m.viewport.View(), m.viewport.Width(), m.viewport.Height()),
+		transcriptSB,
+	)
+	transcript := borderStyle.Width(panelWidth - 2).Render(transcriptContent)
 	input := borderStyle.Width(panelWidth - 2).Render(m.input.View())
 	leftParts := []string{header, transcript}
 	if m.showSlashPopup {
@@ -2954,7 +2959,9 @@ func (m model) renderLogTab() string {
 		headerPad = 0
 	}
 	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar
-	content := borderStyle.Width(m.panelWidth() - 2).Render(m.logViewport.View())
+	logSB := renderScrollbar(m.logViewport.Height(), m.logViewport.TotalLineCount(), m.logViewport.VisibleLineCount(), m.logViewport.YOffset())
+	logContent := lipgloss.JoinHorizontal(lipgloss.Top, m.logViewport.View(), logSB)
+	content := borderStyle.Width(m.panelWidth() - 2).Render(logContent)
 	status := m.renderStatus()
 	left := lipgloss.JoinVertical(lipgloss.Left, header, content, status)
 	if m.sidebarEnabled() {
