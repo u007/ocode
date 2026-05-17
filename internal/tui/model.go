@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -115,6 +116,15 @@ type activityUpdateMsg struct {
 	snap agent.ActivitySnapshot
 }
 
+type debugLogMsg struct{}
+
+func waitForDebugLog() tea.Cmd {
+	return func() tea.Msg {
+		<-DebugLog.Notify()
+		return debugLogMsg{}
+	}
+}
+
 type model struct {
 	viewport            viewport.Model
 	input               textarea.Model
@@ -150,6 +160,8 @@ type model struct {
 	chatUnread          bool
 	files               filesModel
 	git                 gitModel
+	logViewport         viewport.Model
+	logEntries          []DebugEntry
 	err                 error
 	scrollSpeed         int
 	workDir             string
@@ -342,7 +354,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	}
 
 	ta := textarea.New()
-	ta.Placeholder = "Ask anything…  (enter to send, shift+enter for newline, ctrl+c twice to quit)"
+	ta.Placeholder = "Ask anything…  (enter to send, shift+enter for newline, ctrl+c clears input, twice to quit)"
 	ta.Focus()
 	ta.Prompt = "▍ "
 	ta.CharLimit = 8000
@@ -379,7 +391,8 @@ func newModel(sid string, cont bool, yolo bool) model {
 			}
 			return ""
 		}(),
-		scrollSpeed: 3,
+		scrollSpeed:       3,
+		inputHistoryIndex: -1,
 		workDir: func() string {
 			d, _ := os.Getwd()
 			return d
@@ -398,6 +411,11 @@ func newModel(sid string, cont bool, yolo bool) model {
 		m.files.SetEditor(config.ResolveEditor(cfg.Ocode))
 	}
 	m.git = newGitModel(workDir)
+	m.logViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+
+	agent.DebugAppend = func(kind, msg string) {
+		DebugLog.Append(DebugEntry{Kind: DebugEntryKind(kind), Message: msg})
+	}
 
 	if sid != "" {
 		sess, err := session.Load(sid)
@@ -416,7 +434,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return textarea.Blink
+	return tea.Batch(textarea.Blink, waitForDebugLog())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -430,6 +448,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 	case tea.MouseClickMsg:
 		if msg.Button == tea.MouseLeft {
+			if tab, ok := m.tabForClick(msg); ok {
+				m.activeTab = tab
+				if tab == tabChat {
+					m.chatUnread = false
+				}
+				if tab == tabLog {
+					m.refreshLogViewport()
+					m.logViewport.GotoBottom()
+				}
+				return m, nil
+			}
 			if idx, ok := m.toolOutputForClick(msg); ok {
 				m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
 				m.renderTranscript()
@@ -463,6 +492,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case tea.MouseWheelMsg:
+		if !m.mouseOverTranscriptViewport(msg) {
+			return m, nil
+		}
 		if msg.Button == tea.MouseWheelUp {
 			m.viewport.ScrollUp(m.scrollSpeed)
 			return m, nil
@@ -502,7 +534,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	m.input, tiCmd = m.input.Update(msg)
-	m.viewport, vpCmd = m.viewport.Update(msg)
+	if shouldForwardToTranscriptViewport(msg) {
+		m.viewport, vpCmd = m.viewport.Update(msg)
+	}
 	m, popupCmd = m.updateSlashPopupState()
 
 	switch msg := msg.(type) {
@@ -512,22 +546,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		m.files.Resize(m.width, m.height)
 		m.git.Resize(m.width, m.height)
+		m.logViewport, _ = m.logViewport.Update(tea.WindowSizeMsg{
+			Width:  m.panelWidth() - 2,
+			Height: m.height - m.bottomChromeHeight(m.panelWidth()) - 1,
+		})
 		m.ready = true
 	case tea.KeyPressMsg:
 		keyStr := msg.String()
 
 		// Global tab switching — always handled regardless of active tab
 		switch keyStr {
-		case "ctrl+1":
-			m.activeTab = tabChat
-			m.chatUnread = false
+		case "alt+[":
+			m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
+			if m.activeTab == tabChat {
+				m.chatUnread = false
+			}
+			if m.activeTab == tabLog {
+				m.refreshLogViewport()
+				m.logViewport.GotoBottom()
+			}
 			return m, nil
-		case "ctrl+2":
-			m.activeTab = tabFiles
+		case "alt+]":
+			m.activeTab = (m.activeTab + 1) % tabCount
+			if m.activeTab == tabChat {
+				m.chatUnread = false
+			}
+			if m.activeTab == tabLog {
+				m.refreshLogViewport()
+				m.logViewport.GotoBottom()
+			}
 			return m, nil
-		case "ctrl+3":
-			m.activeTab = tabGit
-			return m, nil
+		}
+
+		if m.activeTab == tabLog {
+			switch keyStr {
+			case "j", "down":
+				m.logViewport.ScrollDown(1)
+				return m, nil
+			case "k", "up":
+				m.logViewport.ScrollUp(1)
+				return m, nil
+			case "c":
+				DebugLog.Clear()
+				m.logEntries = nil
+				m.refreshLogViewport()
+				return m, nil
+			}
 		}
 
 		if m.showPicker {
@@ -692,6 +756,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.escPressed = false
 			return m, nil
 		case "ctrl+c":
+			if strings.TrimSpace(m.input.Value()) != "" {
+				m.input.Reset()
+				m.inputHistoryIndex = -1
+				m.ctrlCPressed = false
+				m.closeSlashPopup()
+				return m, nil
+			}
 			if m.ctrlCPressed {
 				m.saveSession()
 				return m, tea.Quit
@@ -828,6 +899,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.leaderActive = false
 		}
 		return m, nil
+	case debugLogMsg:
+		m.logEntries = DebugLog.Snapshot()
+		if m.activeTab == tabLog {
+			m.refreshLogViewport()
+			m.logViewport.GotoBottom()
+		}
+		return m, waitForDebugLog()
 	case fileListCacheMsg:
 		m.fileListCache = msg.items
 		m, _ = m.updateSlashPopupState()
@@ -1023,6 +1101,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd, popupCmd)
 }
 
+func shouldForwardToTranscriptViewport(msg tea.Msg) bool {
+	switch msg.(type) {
+	case tea.KeyPressMsg:
+		return false
+	default:
+		return true
+	}
+}
+
+func (m model) mouseOverTranscriptViewport(msg tea.MouseWheelMsg) bool {
+	if m.activeTab != tabChat {
+		return false
+	}
+	mouse := msg.Mouse()
+	if mouse.X < 0 || mouse.X >= m.panelWidth() {
+		return false
+	}
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	transcriptTop := headerHeight
+	transcriptBottom := transcriptTop + m.viewport.Height() + 2
+	return mouse.Y >= transcriptTop && mouse.Y < transcriptBottom
+}
+
 func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(text)
 	if len(parts) == 0 {
@@ -1085,6 +1186,71 @@ func (m *model) handleMCPAuth(serverName string) error {
 		return fmt.Errorf("mcp server %q oauth config is incomplete", serverName)
 	}
 	return auth.MCPAuthFlow(serverName, oauth.AuthorizationURL, oauth.TokenURL, oauth.ClientID, oauth.Scopes)
+}
+
+func (m *model) rebuildAgentWithExternalTools() {
+	if m.config == nil || m.config.Model == "" {
+		return
+	}
+	client := agent.NewClient(m.config, m.config.Model)
+	if client == nil {
+		return
+	}
+	next := agent.NewAgent(client, m.getInitialTools(), m.config)
+	if m.agent != nil {
+		next.SetSpec(m.agent.Spec())
+		if m.agent.Permissions() != nil {
+			next.Permissions().LoadFromOcode(m.agent.Permissions().ExportConfig())
+		}
+	}
+	next.LoadExternalTools(m.config)
+	m.agent = next
+}
+
+func (m model) renderMCPList() string {
+	if m.config == nil || len(m.config.MCP) == 0 {
+		return "No MCP servers configured in opencode config."
+	}
+	names := make([]string, 0, len(m.config.MCP))
+	for name := range m.config.MCP {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	loaded := map[string]int{}
+	if m.agent != nil {
+		for _, toolName := range m.agent.MCPToolNames() {
+			if idx := strings.Index(toolName, "_"); idx > 0 {
+				loaded[toolName[:idx]]++
+			}
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("MCP servers:\n")
+	for _, name := range names {
+		cfg := m.config.MCP[name]
+		state := "disabled"
+		if cfg.Enabled {
+			state = "enabled"
+		}
+		typ := cfg.Type
+		if typ == "" {
+			typ = "local"
+		}
+		b.WriteString(fmt.Sprintf("  %-18s %-8s %-8s %d tools\n", name, typ, state, loaded[name]))
+	}
+	if m.agent != nil {
+		errs := m.agent.MCPErrors()
+		if len(errs) > 0 {
+			b.WriteString("\nErrors:\n")
+			for _, errText := range errs {
+				b.WriteString("  " + errText + "\n")
+			}
+		}
+	}
+	b.WriteString("\nUsage: /mcp enable <server>, /mcp disable <server>, /mcp-auth <server>")
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func (m *model) processFileReferences(text string) tea.Cmd {
@@ -2266,6 +2432,8 @@ func (m model) renderContent() string {
 		return m.files.View(m.width, m.height, m.styles, m.chatUnread)
 	case tabGit:
 		return m.git.View(m.width, m.height, m.styles, m.chatUnread)
+	case tabLog:
+		return m.renderLogTab()
 	}
 	// tabChat falls through to existing rendering below
 
@@ -2313,9 +2481,11 @@ func (m *model) renderStatus() string {
 	var suffix string
 	switch m.activeTab {
 	case tabFiles:
-		suffix = " | e: open in editor | /: search | ctrl+1-3: switch tab"
+		suffix = " | e: open in editor | /: search | alt+[/]: switch tab"
 	case tabGit:
-		suffix = " | tab: cycle panel | s: stage | u: unstage | c: commit | ctrl+1-3: switch tab"
+		suffix = " | tab: cycle panel | s: stage | u: unstage | c: commit | alt+[/]: switch tab"
+	case tabLog:
+		suffix = " | j/k: scroll | c: clear | alt+[/]: switch tab"
 	default:
 		suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
 		if m.ctrlCPressed {
@@ -2634,6 +2804,70 @@ func (m model) sidebarFileForClick(msg tea.MouseClickMsg) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (m model) tabForClick(msg tea.MouseClickMsg) (int, bool) {
+	mouse := msg.Mouse()
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	if mouse.Y >= headerHeight {
+		return 0, false
+	}
+	tabBar := renderTabBar(m.activeTab, m.chatUnread)
+	barWidth := lipgloss.Width(tabBar)
+	barStartX := m.panelWidth() - barWidth
+	if mouse.X < barStartX {
+		return 0, false
+	}
+	labels := []string{"1:chat", "2:files", "3:git", "4:log"}
+	x := barStartX
+	for i, label := range labels {
+		w := lipgloss.Width(hintStyle.Padding(0, 1).Render(label))
+		if mouse.X < x+w {
+			return i, true
+		}
+		x += w
+	}
+	return 0, false
+}
+
+func (m *model) refreshLogViewport() {
+	kindColor := map[DebugEntryKind]string{
+		DebugKindLLM:   "#7AA2F7",
+		DebugKindTool:  "#E0AF68",
+		DebugKindAgent: "#9ECE6A",
+		DebugKindError: "#F7768E",
+	}
+	var lines []string
+	for _, e := range m.logEntries {
+		col, ok := kindColor[e.Kind]
+		if !ok {
+			col = "#565F89"
+		}
+		tag := lipgloss.NewStyle().Foreground(lipgloss.Color(col)).Bold(true).Render(fmt.Sprintf("%-5s", string(e.Kind)))
+		lines = append(lines, tag+" "+e.Message)
+	}
+	if len(lines) == 0 {
+		m.logViewport.SetContent(hintStyle.Render("  no debug entries yet"))
+	} else {
+		m.logViewport.SetContent(strings.Join(lines, "\n"))
+	}
+}
+
+func (m model) renderLogTab() string {
+	tabBar := renderTabBar(m.activeTab, m.chatUnread)
+	headerLeft := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  debug log")
+	headerPad := m.panelWidth() - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar)
+	if headerPad < 0 {
+		headerPad = 0
+	}
+	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar
+	content := borderStyle.Width(m.panelWidth() - 2).Render(m.logViewport.View())
+	status := m.renderStatus()
+	left := lipgloss.JoinVertical(lipgloss.Left, header, content, status)
+	if m.sidebarEnabled() {
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebar())
+	}
+	return left
 }
 
 func shortenWorkingDir(dir string) string {
