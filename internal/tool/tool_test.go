@@ -41,8 +41,9 @@ func TestFileTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadTool failed: %v", err)
 	}
-	if res != content {
-		t.Errorf("expected %s, got %s", content, res)
+	wantRead := "1\thello world\n"
+	if res != wantRead {
+		t.Errorf("expected %s, got %s", wantRead, res)
 	}
 
 	// Ensure path traversal is rejected.

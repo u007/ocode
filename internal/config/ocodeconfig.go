@@ -18,10 +18,17 @@ type CompactConfig struct {
 	SummaryModel    string `json:"summary_model"`
 }
 
+const (
+	EditorModeExternal   = "external"
+	EditorModeTmuxSplit  = "tmux-split"
+	EditorModeTmuxWindow = "tmux-window"
+)
+
 type OcodeConfig struct {
 	Compact     CompactConfig
 	Permissions PermissionConfig
 	Editor      string
+	EditorMode  string
 	Extra       map[string]json.RawMessage
 }
 
@@ -45,6 +52,7 @@ type ocodeConfigFile struct {
 	Compact     compactConfigFile `json:"compact"`
 	Permissions PermissionConfig  `json:"permissions"`
 	Editor      string            `json:"editor,omitempty"`
+	EditorMode  string            `json:"editor_mode,omitempty"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -107,6 +115,9 @@ func LoadOcodeConfig(cfg *Config) error {
 		}
 	}
 
+	if ocode.EditorMode == "" {
+		ocode.EditorMode = EditorModeExternal
+	}
 	cfg.Ocode = ocode
 	return nil
 }
@@ -155,6 +166,17 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.Editor = file.Editor
 		}
 		delete(raw, "editor")
+	}
+
+	if _, ok := raw["editor_mode"]; ok {
+		var file ocodeConfigFile
+		if err := json.Unmarshal(cleanData, &file); err != nil {
+			return err
+		}
+		if file.EditorMode != "" {
+			cfg.EditorMode = file.EditorMode
+		}
+		delete(raw, "editor_mode")
 	}
 
 	if cfg.Extra == nil {
@@ -221,6 +243,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.Editor != "" {
 		payload["editor"] = cfg.Editor
 	}
+	if cfg.EditorMode != "" && cfg.EditorMode != EditorModeExternal {
+		payload["editor_mode"] = cfg.EditorMode
+	}
 	for k, v := range cfg.Extra {
 		if k == "compact" || k == "permissions" {
 			continue
@@ -254,6 +279,20 @@ func SaveEditor(editor string) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.Editor = editor
+	return SaveOcodeConfig(cfg)
+}
+
+func SaveEditorMode(mode string) error {
+	switch mode {
+	case EditorModeExternal, EditorModeTmuxSplit, EditorModeTmuxWindow:
+	default:
+		return fmt.Errorf("invalid editor_mode: %q (valid: %s, %s, %s)", mode, EditorModeExternal, EditorModeTmuxSplit, EditorModeTmuxWindow)
+	}
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.EditorMode = mode
 	return SaveOcodeConfig(cfg)
 }
 

@@ -142,3 +142,123 @@ func splitProviderModel(s string) (string, string) {
 	}
 	return "", ""
 }
+
+// LoadFavorites returns favorite models as "provider/model" strings.
+func LoadFavorites() []string {
+	path, err := getModelStatePath()
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var raw struct {
+		Favorite []modelStateEntry `json:"favorite"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(raw.Favorite))
+	for _, e := range raw.Favorite {
+		if e.ProviderID == "" || e.ModelID == "" {
+			continue
+		}
+		out = append(out, e.ProviderID+"/"+e.ModelID)
+	}
+	return out
+}
+
+func readWriteModelState(modify func(full map[string]json.RawMessage) error) error {
+	path, err := getModelStatePath()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	var full map[string]json.RawMessage
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &full); err != nil {
+			full = nil
+		}
+	}
+	if full == nil {
+		full = make(map[string]json.RawMessage)
+	}
+	if err := modify(full); err != nil {
+		return err
+	}
+	out, err := json.MarshalIndent(full, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// SaveFavoriteModel adds a model to the favorites list. No-op if already favorited.
+func SaveFavoriteModel(providerModel string) error {
+	provID, modelID := splitProviderModel(providerModel)
+	if provID == "" || modelID == "" {
+		return fmt.Errorf("invalid provider/model id: %q", providerModel)
+	}
+	return readWriteModelState(func(full map[string]json.RawMessage) error {
+		var fav []modelStateEntry
+		if raw, ok := full["favorite"]; ok {
+			_ = json.Unmarshal(raw, &fav)
+		}
+		for _, e := range fav {
+			if e.ProviderID == provID && e.ModelID == modelID {
+				return nil
+			}
+		}
+		fav = append(fav, modelStateEntry{ProviderID: provID, ModelID: modelID})
+		newFav, err := json.Marshal(fav)
+		if err != nil {
+			return err
+		}
+		full["favorite"] = newFav
+		return nil
+	})
+}
+
+// RemoveFavoriteModel removes a model from the favorites list.
+func RemoveFavoriteModel(providerModel string) error {
+	provID, modelID := splitProviderModel(providerModel)
+	if provID == "" || modelID == "" {
+		return fmt.Errorf("invalid provider/model id: %q", providerModel)
+	}
+	return readWriteModelState(func(full map[string]json.RawMessage) error {
+		var fav []modelStateEntry
+		if raw, ok := full["favorite"]; ok {
+			_ = json.Unmarshal(raw, &fav)
+		}
+		filtered := make([]modelStateEntry, 0, len(fav))
+		for _, e := range fav {
+			if e.ProviderID == provID && e.ModelID == modelID {
+				continue
+			}
+			filtered = append(filtered, e)
+		}
+		newFav, err := json.Marshal(filtered)
+		if err != nil {
+			return err
+		}
+		full["favorite"] = newFav
+		return nil
+	})
+}
+
+// IsFavorite checks whether the given "provider/model" is favorited.
+func IsFavorite(providerModel string) bool {
+	for _, f := range LoadFavorites() {
+		if f == providerModel {
+			return true
+		}
+	}
+	return false
+}
