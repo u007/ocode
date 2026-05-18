@@ -95,3 +95,54 @@ func TestApplySelectionHighlight_multiLine(t *testing.T) {
 		t.Errorf("third line should not have highlight")
 	}
 }
+
+func TestInsertHighlight_withANSI(t *testing.T) {
+	// rendered has a colour code before "world"; raw is the plain text.
+	// Selecting "world" (cols 6-11) should inject reverse-video so that the
+	// terminal sees the colour code, then enters reverse-video, then the text.
+	// This means the colour escape ends up BEFORE \x1b[7m (not inside it),
+	// which is correct: the terminal stacks both attributes.
+	raw := "hello world"
+	rendered := "hello \x1b[32mworld\x1b[m"
+
+	got := insertHighlight(rendered, raw, 6, 11)
+
+	// Reverse-video codes must be present.
+	if !strings.Contains(got, "\x1b[7m") || !strings.Contains(got, "\x1b[27m") {
+		t.Fatalf("expected reverse-video codes, got %q", got)
+	}
+	// Stripping all ANSI leaves the original plain text intact.
+	if stripANSI(got) != raw {
+		t.Errorf("stripped result should equal raw text, got %q", stripANSI(got))
+	}
+	// The colour code must come before the reverse-video open tag so that
+	// both attributes are active for "world".
+	colourPos := strings.Index(got, "\x1b[32m")
+	rvPos := strings.Index(got, "\x1b[7m")
+	if colourPos == -1 {
+		t.Errorf("colour code missing from output, got %q", got)
+	}
+	if rvPos == -1 {
+		t.Errorf("reverse-video open missing from output, got %q", got)
+	}
+	if colourPos > rvPos {
+		t.Errorf("colour code should appear before reverse-video open; colourPos=%d rvPos=%d in %q", colourPos, rvPos, got)
+	}
+}
+
+func TestInsertHighlight_noANSI(t *testing.T) {
+	got := insertHighlight("hello world", "hello world", 0, 5)
+	want := "\x1b[7mhello\x1b[27m world"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestInsertHighlight_emptyRange(t *testing.T) {
+	// rawStart == rawEnd: nothing highlighted, string returned unchanged.
+	rendered := "hello"
+	got := insertHighlight(rendered, "hello", 2, 2)
+	if got != rendered {
+		t.Errorf("empty range should return unchanged, got %q", got)
+	}
+}

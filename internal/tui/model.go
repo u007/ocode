@@ -202,16 +202,8 @@ type model struct {
 	dotFrame            int
 	sel                 selectionState
 	transcriptContent   string
+	transcriptLines     []string
 	rawTranscriptLines  []string
-}
-
-type selectionState struct {
-	active    bool
-	dragging  bool
-	startLine int
-	startCol  int
-	endLine   int
-	endCol    int
 }
 
 type toolOutputRegion struct {
@@ -2460,6 +2452,7 @@ func (m *model) renderTranscript() {
 		}
 	}
 	m.transcriptContent = wrapView(b.String(), m.viewport.Width())
+	m.transcriptLines = strings.Split(m.transcriptContent, "\n")
 	m.rawTranscriptLines = strings.Split(stripANSI(m.transcriptContent), "\n")
 	m.viewport.SetContent(m.transcriptContent)
 	m.sel = selectionState{}
@@ -3182,8 +3175,7 @@ func (m *model) applyOrClearSelectionHighlight() {
 		return
 	}
 	sl, sc, el, ec := normaliseSelection(m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
-	lines := strings.Split(m.transcriptContent, "\n")
-	highlighted := applySelectionHighlight(lines, m.rawTranscriptLines, sl, sc, el, ec)
+	highlighted := applySelectionHighlight(m.transcriptLines, m.rawTranscriptLines, sl, sc, el, ec)
 	m.viewport.SetContent(strings.Join(highlighted, "\n"))
 }
 
