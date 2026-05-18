@@ -72,6 +72,10 @@ func newGitModel(workDir string) gitModel {
 	ci.Placeholder = "Commit message..."
 	ci.SetHeight(3)
 	m.commitInput = ci
+	if _, err := m.gitRun("rev-parse", "--git-dir"); err != nil {
+		m.statusMsg = "not a git repository"
+		return m
+	}
 	m.refresh()
 	m.loadDiff()
 	return m
