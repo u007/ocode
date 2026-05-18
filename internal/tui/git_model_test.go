@@ -40,3 +40,21 @@ func TestGitStatusParsing(t *testing.T) {
 		t.Fatalf("want 1 untracked got %d", len(m.untrackedFiles))
 	}
 }
+
+func TestPendingActionConfirmation(t *testing.T) {
+	m := gitModel{
+		section:       gitSectionChanges,
+		unstagedFiles: []gitFile{{status: "M", path: "a.go"}},
+		stagedFiles:   []gitFile{},
+	}
+	// First d: sets pending
+	m2, _ := m.handleFilesKey("d")
+	if m2.pendingAction != "discard" {
+		t.Fatalf("want pendingAction=discard got %q", m2.pendingAction)
+	}
+	// Different key clears pending
+	m3, _ := m2.handleFilesKey("j")
+	if m3.pendingAction != "" {
+		t.Fatalf("want pendingAction cleared, got %q", m3.pendingAction)
+	}
+}
