@@ -104,11 +104,7 @@ func (m *gitModel) gitRun(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-func (m *gitModel) loadChanges() {
-	out, err := m.gitRun("status", "--porcelain")
-	if err != nil {
-		return
-	}
+func (m *gitModel) parseStatus(out string) {
 	m.stagedFiles = nil
 	m.unstagedFiles = nil
 	m.untrackedFiles = nil
@@ -129,6 +125,14 @@ func (m *gitModel) loadChanges() {
 			}
 		}
 	}
+}
+
+func (m *gitModel) loadChanges() {
+	out, err := m.gitRun("status", "--porcelain")
+	if err != nil {
+		return
+	}
+	m.parseStatus(out)
 }
 
 func (m *gitModel) loadLog() {

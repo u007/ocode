@@ -5,31 +5,10 @@ import (
 	"testing"
 )
 
-func TestGitStatusParsing(t *testing.T) {
-	lines := []string{
-		"M  internal/tui/model.go",
-		" M main.go",
-		"?? newfile.go",
-		"A  added.go",
-	}
+func TestParseStatus(t *testing.T) {
+	raw := "M  internal/tui/model.go\n M main.go\n?? newfile.go\nA  added.go"
 	m := gitModel{}
-	for _, line := range lines {
-		if len(line) < 3 {
-			continue
-		}
-		x, y, path := string(line[0]), string(line[1]), strings.TrimSpace(line[2:])
-		switch {
-		case x == "?" && y == "?":
-			m.untrackedFiles = append(m.untrackedFiles, gitFile{status: "?", path: path})
-		default:
-			if x != " " && x != "?" {
-				m.stagedFiles = append(m.stagedFiles, gitFile{status: x, path: path, staged: true})
-			}
-			if y != " " && y != "?" {
-				m.unstagedFiles = append(m.unstagedFiles, gitFile{status: y, path: path})
-			}
-		}
-	}
+	m.parseStatus(raw)
 	if len(m.stagedFiles) != 2 {
 		t.Fatalf("want 2 staged got %d", len(m.stagedFiles))
 	}
@@ -38,6 +17,37 @@ func TestGitStatusParsing(t *testing.T) {
 	}
 	if len(m.untrackedFiles) != 1 {
 		t.Fatalf("want 1 untracked got %d", len(m.untrackedFiles))
+	}
+	if m.stagedFiles[0].path != "internal/tui/model.go" {
+		t.Fatalf("unexpected staged path: %s", m.stagedFiles[0].path)
+	}
+	if !m.stagedFiles[0].staged {
+		t.Fatal("expected staged flag to be true")
+	}
+}
+
+func TestParseStatusRenames(t *testing.T) {
+	raw := "R  new.go"
+	m := gitModel{}
+	m.parseStatus(raw)
+	if len(m.stagedFiles) != 1 || m.stagedFiles[0].status != "R" {
+		t.Fatalf("expected rename in staged, got %+v", m.stagedFiles)
+	}
+}
+
+func TestPendingActionConfirmation(t *testing.T) {
+	m := gitModel{
+		section:       gitSectionChanges,
+		unstagedFiles: []gitFile{{status: "M", path: "a.go"}},
+		stagedFiles:   []gitFile{},
+	}
+	m2, _ := m.handleFilesKey("d")
+	if m2.pendingAction != "discard" {
+		t.Fatalf("want pendingAction=discard got %q", m2.pendingAction)
+	}
+	m3, _ := m2.handleFilesKey("j")
+	if m3.pendingAction != "" {
+		t.Fatalf("want pendingAction cleared, got %q", m3.pendingAction)
 	}
 }
 
@@ -61,20 +71,51 @@ func TestChangesFileListHighlight(t *testing.T) {
 	}
 }
 
-func TestPendingActionConfirmation(t *testing.T) {
-	m := gitModel{
-		section:       gitSectionChanges,
-		unstagedFiles: []gitFile{{status: "M", path: "a.go"}},
-		stagedFiles:   []gitFile{},
-	}
-	// First d: sets pending
-	m2, _ := m.handleFilesKey("d")
-	if m2.pendingAction != "discard" {
-		t.Fatalf("want pendingAction=discard got %q", m2.pendingAction)
-	}
-	// Different key clears pending
-	m3, _ := m2.handleFilesKey("j")
-	if m3.pendingAction != "" {
-		t.Fatalf("want pendingAction cleared, got %q", m3.pendingAction)
-	}
-}
+// TODO: uncomment when currentBranch field is added
+// func TestLoadBranchesCurrentMarker(t *testing.T) {
+// 	m := gitModel{}
+// 	raw := "  main\n* feature/foo\n  remotes/origin/main"
+// 	m.branches = nil
+// 	m.currentBranch = ""
+// 	for _, line := range strings.Split(raw, "\n") {
+// 		if line == "" {
+// 			continue
+// 		}
+// 		isCurrent := strings.HasPrefix(line, "*")
+// 		name := strings.TrimSpace(strings.TrimPrefix(line, "*"))
+// 		if isCurrent {
+// 			m.currentBranch = name
+// 		}
+// 		m.branches = append(m.branches, name)
+// 	}
+// 	if m.currentBranch != "feature/foo" {
+// 		t.Fatalf("want currentBranch=feature/foo got %q", m.currentBranch)
+// 	}
+// 	if len(m.branches) != 3 {
+// 		t.Fatalf("want 3 branches got %d", len(m.branches))
+// 	}
+// }
+
+// TODO: uncomment when parseHunks is added
+// func TestParseHunks(t *testing.T) {
+// 	diff := `diff --git a/foo.go b/foo.go
+// --- a/foo.go
+// +++ b/foo.go
+// @@ -1,3 +1,4 @@
+//  package main
+// +
+//  import "fmt"
+//  func main() {
+// @@ -10,3 +11,4 @@ func main() {
+//  	fmt.Println("hello")
+// +	fmt.Println("world")
+//  }
+// `
+// 	hunks := parseHunks(diff)
+// 	if len(hunks) != 2 {
+// 		t.Fatalf("want 2 hunks got %d", len(hunks))
+// 	}
+// 	if !strings.HasPrefix(hunks[0].header, "@@ -1,3") {
+// 		t.Fatalf("unexpected hunk 0 header: %s", hunks[0].header)
+// 	}
+// }
