@@ -241,6 +241,13 @@ func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 	return m, nil
 }
 
+func (m *gitModel) resetCursors() {
+	m.filesCursor = 0
+	m.commitCursor = 0
+	m.stashCursor = 0
+	m.branchCursor = 0
+}
+
 func (m gitModel) handleSectionKey(key string) (gitModel, tea.Cmd) {
 	sections := []gitSection{gitSectionChanges, gitSectionLog, gitSectionStash, gitSectionBranches}
 	cur := int(m.section)
@@ -248,13 +255,13 @@ func (m gitModel) handleSectionKey(key string) (gitModel, tea.Cmd) {
 	case "j", "down":
 		if cur < len(sections)-1 {
 			m.section = sections[cur+1]
-			m.filesCursor = 0
+			m.resetCursors()
 			m.loadDiff()
 		}
 	case "k", "up":
 		if cur > 0 {
 			m.section = sections[cur-1]
-			m.filesCursor = 0
+			m.resetCursors()
 			m.loadDiff()
 		}
 	case "enter":
