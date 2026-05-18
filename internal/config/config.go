@@ -341,6 +341,83 @@ func SaveMCPEnabled(name string, enabled bool) error {
 	return saveJSONFile(configPath, m)
 }
 
+func SaveMCPServer(name string, server MCPConfig) error {
+	configPath, err := (&Config{}).ActiveConfigPath()
+	if err != nil {
+		return err
+	}
+
+	m, err := loadConfigMap(configPath)
+	if err != nil {
+		return err
+	}
+	mcpRaw, ok := m["mcp"].(map[string]any)
+	if !ok {
+		mcpRaw = map[string]any{}
+	}
+	serverData, err := json.Marshal(server)
+	if err != nil {
+		return fmt.Errorf("marshal mcp server: %w", err)
+	}
+	var serverRaw map[string]any
+	if err := json.Unmarshal(serverData, &serverRaw); err != nil {
+		return fmt.Errorf("parse mcp server: %w", err)
+	}
+	mcpRaw[name] = serverRaw
+	m["mcp"] = mcpRaw
+
+	return saveJSONFile(configPath, m)
+}
+
+func ClearMCPAuthorization(name string) (bool, error) {
+	configPath, err := (&Config{}).ActiveConfigPath()
+	if err != nil {
+		return false, err
+	}
+
+	m, err := loadConfigMap(configPath)
+	if err != nil {
+		return false, err
+	}
+	mcpRaw, ok := m["mcp"].(map[string]any)
+	if !ok {
+		return false, fmt.Errorf("mcp server %q not found in opencode config", name)
+	}
+	serverRaw, ok := mcpRaw[name].(map[string]any)
+	if !ok {
+		return false, fmt.Errorf("mcp server %q not found in opencode config", name)
+	}
+	headersRaw, ok := serverRaw["headers"].(map[string]any)
+	if !ok || headersRaw["Authorization"] == nil {
+		return false, nil
+	}
+	delete(headersRaw, "Authorization")
+	if len(headersRaw) == 0 {
+		delete(serverRaw, "headers")
+	} else {
+		serverRaw["headers"] = headersRaw
+	}
+	mcpRaw[name] = serverRaw
+	m["mcp"] = mcpRaw
+
+	return true, saveJSONFile(configPath, m)
+}
+
+func loadConfigMap(path string) (map[string]any, error) {
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	m := map[string]any{}
+	if len(existing) > 0 {
+		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
+		if err := json.Unmarshal(jsoncData, &m); err != nil {
+			return nil, fmt.Errorf("parse config: %w", err)
+		}
+	}
+	return m, nil
+}
+
 func syncLegacyTUIThemeIfPresent(theme string) error {
 	tuiPath, err := getGlobalTUIPath()
 	if err != nil {

@@ -72,11 +72,6 @@ func runAdd(args []string) error {
 	}
 	name := args[0]
 
-	cfg, err := config.Load()
-	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-
 	reader := bufio.NewReader(os.Stdin)
 
 	fmt.Print("Server type (local/remote): ")
@@ -118,17 +113,12 @@ func runAdd(args []string) error {
 		mcpCfg.Enabled = false
 	}
 
-	if cfg.MCP == nil {
-		cfg.MCP = make(map[string]config.MCPConfig)
-	}
-	cfg.MCP[name] = mcpCfg
-
 	configPath, err := resolveConfigPath()
 	if err != nil {
 		return fmt.Errorf("resolve config path: %w", err)
 	}
 
-	if err := config.Save(cfg, configPath); err != nil {
+	if err := config.SaveMCPServer(name, mcpCfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
 
@@ -284,9 +274,9 @@ func runAuth(args []string) error {
 	}
 
 	auth.SetMCPAuth(name, auth.MCPAuthToken{
-		AccessToken:  token,
-		TokenType:    "Bearer",
-		Expiry:       time.Now().Add(time.Hour).Unix(),
+		AccessToken: token,
+		TokenType:   "Bearer",
+		Expiry:      time.Now().Add(time.Hour).Unix(),
 	})
 
 	fmt.Printf("OAuth token saved for server %q\n", name)
@@ -346,16 +336,13 @@ func runLogout(args []string) error {
 		return nil
 	}
 
-	delete(mcpCfg.Headers, "Authorization")
-	cfg.MCP[name] = mcpCfg
-
-	configPath, err := resolveConfigPath()
+	cleared, err := config.ClearMCPAuthorization(name)
 	if err != nil {
-		return fmt.Errorf("resolve config path: %w", err)
-	}
-
-	if err := config.Save(cfg, configPath); err != nil {
 		return fmt.Errorf("save config: %w", err)
+	}
+	if !cleared {
+		fmt.Printf("No stored token for server %q\n", name)
+		return nil
 	}
 
 	fmt.Printf("Cleared OAuth token for server %q\n", name)

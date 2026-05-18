@@ -174,6 +174,99 @@ func TestSaveMCPEnabledWritesOpencodeConfig(t *testing.T) {
 	}
 }
 
+func TestSaveMCPServerPreservesExistingOpencodeConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	path := filepath.Join(tmpDir, "opencode.json")
+	if err := os.WriteFile(path, []byte(`{"model":"gpt-4o","plugins":["alpha"],"mcp":{"existing":{"command":["echo","ok"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	err := SaveMCPServer("demo", MCPConfig{Type: "local", Command: []string{"echo", "demo"}, Enabled: true, Timeout: 5000})
+	if err != nil {
+		t.Fatalf("failed to save mcp server: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["model"] != "gpt-4o" {
+		t.Fatalf("expected existing model to be preserved, got %#v", got["model"])
+	}
+	plugins, ok := got["plugins"].([]any)
+	if !ok || len(plugins) != 1 || plugins[0] != "alpha" {
+		t.Fatalf("expected existing plugins to be preserved, got %#v", got["plugins"])
+	}
+	mcp := got["mcp"].(map[string]any)
+	if _, ok := mcp["existing"]; !ok {
+		t.Fatal("expected existing mcp server to be preserved")
+	}
+	if _, ok := mcp["demo"]; !ok {
+		t.Fatal("expected new mcp server to be added")
+	}
+}
+
+func TestClearMCPAuthorizationPreservesExistingOpencodeConfig(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	path := filepath.Join(tmpDir, "opencode.json")
+	content := `{"model":"gpt-4o","plugins":["alpha"],"mcp":{"demo":{"type":"remote","url":"https:\/\/example.com","x-extra":true,"headers":{"Authorization":"Bearer token","X-Test":"yes"}}}}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cleared, err := ClearMCPAuthorization("demo")
+	if err != nil {
+		t.Fatalf("failed to clear authorization: %v", err)
+	}
+	if !cleared {
+		t.Fatal("expected authorization to be cleared")
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	plugins, ok := got["plugins"].([]any)
+	if !ok || len(plugins) != 1 || plugins[0] != "alpha" {
+		t.Fatalf("expected existing plugins to be preserved, got %#v", got["plugins"])
+	}
+	demo := got["mcp"].(map[string]any)["demo"].(map[string]any)
+	if demo["x-extra"] != true {
+		t.Fatalf("expected unknown server field to be preserved, got %#v", demo["x-extra"])
+	}
+	headers := demo["headers"].(map[string]any)
+	if _, ok := headers["Authorization"]; ok {
+		t.Fatal("expected authorization header to be removed")
+	}
+	if headers["X-Test"] != "yes" {
+		t.Fatalf("expected other header to be preserved, got %#v", headers["X-Test"])
+	}
+}
+
 func TestSaveTUIThemeWritesOpencodeConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
