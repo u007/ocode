@@ -41,6 +41,26 @@ func TestGitStatusParsing(t *testing.T) {
 	}
 }
 
+func TestChangesFileListHighlight(t *testing.T) {
+	m := gitModel{
+		section:       gitSectionChanges,
+		panel:         gitPanelFiles,
+		stagedFiles:   []gitFile{{status: "M", path: "staged.go"}},
+		unstagedFiles: []gitFile{{status: "M", path: "unstaged.go"}},
+		filesCursor:   0,
+	}
+	lines := m.renderFileList(40)
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, "staged.go") && strings.Contains(l, "\x1b[7m") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected reverse highlight on selected row, got none")
+	}
+}
+
 func TestPendingActionConfirmation(t *testing.T) {
 	m := gitModel{
 		section:       gitSectionChanges,

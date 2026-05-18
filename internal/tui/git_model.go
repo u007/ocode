@@ -547,16 +547,27 @@ func (m gitModel) renderFileList(width int) []string {
 	var lines []string
 	switch m.section {
 	case gitSectionChanges:
+		idx := 0
 		if len(m.stagedFiles) > 0 {
 			lines = append(lines, hintStyle.Render("\u25cf staged"))
 			for _, f := range m.stagedFiles {
-				lines = append(lines, "  "+f.status+" "+f.path)
+				line := "  " + f.status + " " + f.path
+				if idx == m.filesCursor && m.panel == gitPanelFiles {
+					line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+				}
+				lines = append(lines, line)
+				idx++
 			}
 		}
 		if len(m.unstagedFiles)+len(m.untrackedFiles) > 0 {
 			lines = append(lines, hintStyle.Render("\u25cb unstaged/untracked"))
 			for _, f := range m.allUnstagedAndUntracked() {
-				lines = append(lines, "  "+f.status+" "+f.path)
+				line := "  " + f.status + " " + f.path
+				if idx == m.filesCursor && m.panel == gitPanelFiles {
+					line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+				}
+				lines = append(lines, line)
+				idx++
 			}
 		}
 	case gitSectionLog:
