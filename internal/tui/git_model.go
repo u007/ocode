@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -104,7 +106,9 @@ func (m *gitModel) refresh() {
 }
 
 func (m *gitModel) gitRun(args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = m.workDir
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
