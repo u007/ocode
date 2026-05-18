@@ -74,19 +74,7 @@ func TestChangesFileListHighlight(t *testing.T) {
 func TestLoadBranchesCurrentMarker(t *testing.T) {
 	m := gitModel{}
 	raw := "  main\n* feature/foo\n  remotes/origin/main"
-	m.branches = nil
-	m.currentBranch = ""
-	for _, line := range strings.Split(raw, "\n") {
-		if line == "" {
-			continue
-		}
-		isCurrent := strings.HasPrefix(line, "*")
-		name := strings.TrimSpace(strings.TrimPrefix(line, "*"))
-		if isCurrent {
-			m.currentBranch = name
-		}
-		m.branches = append(m.branches, name)
-	}
+	m.parseBranches(raw)
 	if m.currentBranch != "feature/foo" {
 		t.Fatalf("want currentBranch=feature/foo got %q", m.currentBranch)
 	}
