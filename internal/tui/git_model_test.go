@@ -83,26 +83,13 @@ func TestLoadBranchesCurrentMarker(t *testing.T) {
 	}
 }
 
-// TODO: uncomment when parseHunks is added
-// func TestParseHunks(t *testing.T) {
-// 	diff := `diff --git a/foo.go b/foo.go
-// --- a/foo.go
-// +++ b/foo.go
-// @@ -1,3 +1,4 @@
-//  package main
-// +
-//  import "fmt"
-//  func main() {
-// @@ -10,3 +11,4 @@ func main() {
-//  	fmt.Println("hello")
-// +	fmt.Println("world")
-//  }
-// `
-// 	hunks := parseHunks(diff)
-// 	if len(hunks) != 2 {
-// 		t.Fatalf("want 2 hunks got %d", len(hunks))
-// 	}
-// 	if !strings.HasPrefix(hunks[0].header, "@@ -1,3") {
-// 		t.Fatalf("unexpected hunk 0 header: %s", hunks[0].header)
-// 	}
-// }
+func TestParseHunks(t *testing.T) {
+	diff := "diff --git a/foo.go b/foo.go\n--- a/foo.go\n+++ b/foo.go\n@@ -1,3 +1,4 @@\n package main\n+\n import \"fmt\"\n func main() {\n@@ -10,3 +11,4 @@ func main() {\n \tfmt.Println(\"hello\")\n+\tfmt.Println(\"world\")\n }\n"
+	hunks := parseHunks(diff)
+	if len(hunks) != 2 {
+		t.Fatalf("want 2 hunks got %d", len(hunks))
+	}
+	if !strings.HasPrefix(hunks[0].header, "@@ -1,3") {
+		t.Fatalf("unexpected hunk 0 header: %s", hunks[0].header)
+	}
+}

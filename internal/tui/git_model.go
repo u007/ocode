@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -43,6 +44,23 @@ type gitCommit struct {
 	age     string
 }
 
+type gitRefreshMsg struct {
+	staged        []gitFile
+	unstaged      []gitFile
+	untracked     []gitFile
+	commits       []gitCommit
+	stashes       []string
+	branches      []string
+	currentBranch string
+	aheadBehind   string
+}
+
+type diffHunk struct {
+	header string
+	body   string
+	start  int
+}
+
 type gitModel struct {
 	workDir        string
 	width          int
@@ -60,11 +78,22 @@ type gitModel struct {
 	branches       []string
 	branchCursor   int
 	currentBranch  string
+	aheadBehind    string
 	diff           viewport.Model
 	committing     bool
 	commitInput    textarea.Model
 	statusMsg      string
-	pendingAction  string // "discard" | "drop-stash" | ""
+	pendingAction  string // "discard" | "drop-stash" | "delete-branch" | ""
+	// branch create input
+	branchInputMode bool
+	branchInputText string
+	// stash push input
+	stashInputMode bool
+	stashInputText string
+	// hunk-level staging
+	hunks      []diffHunk
+	hunkCursor int
+	diffHeader string
 }
 
 func newGitModel(workDir string) gitModel {
@@ -112,6 +141,58 @@ func (m *gitModel) gitRun(args ...string) (string, error) {
 	cmd.Dir = m.workDir
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
+}
+
+func (m *gitModel) gitRunTimeout(timeout time.Duration, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = m.workDir
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+func (m *gitModel) aheadBehindString() string {
+	ahead, err1 := m.gitRun("rev-list", "--count", "@{u}..HEAD")
+	behind, err2 := m.gitRun("rev-list", "--count", "HEAD..@{u}")
+	if err1 != nil || err2 != nil {
+		return "" // no upstream configured
+	}
+	ahead = strings.TrimSpace(ahead)
+	behind = strings.TrimSpace(behind)
+	if ahead == "0" && behind == "0" {
+		return "✓"
+	}
+	parts := []string{}
+	if ahead != "0" {
+		parts = append(parts, "↑"+ahead)
+	}
+	if behind != "0" {
+		parts = append(parts, "↓"+behind)
+	}
+	return strings.Join(parts, " ")
+}
+
+func (m *gitModel) cmdRefresh() tea.Cmd {
+	workDir := m.workDir
+	return func() tea.Msg {
+		tmp := gitModel{workDir: workDir}
+		tmp.loadChanges()
+		tmp.loadLog()
+		tmp.loadStash()
+		tmp.loadBranches()
+		ab := tmp.aheadBehindString()
+		return gitRefreshMsg{
+			staged:        tmp.stagedFiles,
+			unstaged:      tmp.unstagedFiles,
+			untracked:     tmp.untrackedFiles,
+			commits:       tmp.commits,
+			stashes:       tmp.stashes,
+			branches:      tmp.branches,
+			currentBranch: tmp.currentBranch,
+			aheadBehind:   ab,
+		}
+	}
 }
 
 func (m *gitModel) parseStatus(out string) {
@@ -206,8 +287,27 @@ func (m *gitModel) loadBranches() {
 }
 
 func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case gitRefreshMsg:
+		m.stagedFiles = msg.staged
+		m.unstagedFiles = msg.unstaged
+		m.untrackedFiles = msg.untracked
+		m.commits = msg.commits
+		m.stashes = msg.stashes
+		m.branches = msg.branches
+		m.currentBranch = msg.currentBranch
+		m.aheadBehind = msg.aheadBehind
+		m.loadDiff()
+		return m, nil
+	}
 	if m.committing {
 		return m.updateCommitInput(msg)
+	}
+	if m.branchInputMode {
+		return m.updateBranchInput(msg)
+	}
+	if m.stashInputMode {
+		return m.updateStashInput(msg)
 	}
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
@@ -232,7 +332,7 @@ func (m gitModel) updateCommitInput(msg tea.Msg) (gitModel, tea.Cmd) {
 					m.statusMsg = "committed"
 					m.committing = false
 					m.commitInput.Reset()
-					m.refresh()
+					return m, m.cmdRefresh()
 				}
 			}
 			return m, nil
@@ -241,6 +341,77 @@ func (m gitModel) updateCommitInput(msg tea.Msg) (gitModel, tea.Cmd) {
 	var cmd tea.Cmd
 	m.commitInput, cmd = m.commitInput.Update(msg)
 	return m, cmd
+}
+
+func (m gitModel) updateBranchInput(msg tea.Msg) (gitModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "esc":
+			m.branchInputMode = false
+			m.branchInputText = ""
+			return m, nil
+		case "enter":
+			name := strings.TrimSpace(m.branchInputText)
+			if name != "" {
+				if _, err := m.gitRun("checkout", "-b", name); err != nil {
+					m.statusMsg = "create branch failed: " + err.Error()
+				} else {
+					m.statusMsg = "created and switched to " + name
+				}
+			}
+			m.branchInputMode = false
+			m.branchInputText = ""
+			return m, m.cmdRefresh()
+		case "backspace":
+			if len(m.branchInputText) > 0 {
+				m.branchInputText = m.branchInputText[:len(m.branchInputText)-1]
+			}
+			return m, nil
+		default:
+			if len(msg.String()) == 1 {
+				m.branchInputText += msg.String()
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m gitModel) updateStashInput(msg tea.Msg) (gitModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "esc":
+			m.stashInputMode = false
+			m.stashInputText = ""
+			return m, nil
+		case "enter":
+			args := []string{"stash", "push"}
+			if note := strings.TrimSpace(m.stashInputText); note != "" {
+				args = append(args, "-m", note)
+			}
+			if _, err := m.gitRun(args...); err != nil {
+				m.statusMsg = "stash failed: " + err.Error()
+			} else {
+				m.statusMsg = "stashed"
+			}
+			m.stashInputMode = false
+			m.stashInputText = ""
+			return m, m.cmdRefresh()
+		case "backspace":
+			if len(m.stashInputText) > 0 {
+				m.stashInputText = m.stashInputText[:len(m.stashInputText)-1]
+			}
+			return m, nil
+		default:
+			if len(msg.String()) == 1 {
+				m.stashInputText += msg.String()
+			}
+			return m, nil
+		}
+	}
+	return m, nil
 }
 
 func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
@@ -293,7 +464,7 @@ func (m gitModel) handleSectionKey(key string) (gitModel, tea.Cmd) {
 
 func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 	// Clear pending confirmation when user presses any key other than the confirm key
-	if key != "d" {
+	if key != "d" && key != "x" {
 		m.pendingAction = ""
 	}
 	switch key {
@@ -354,8 +525,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					m.statusMsg = "stage failed: " + err.Error()
 				} else {
 					m.statusMsg = "staged " + f.path
-					m.refresh()
-					m.loadDiff()
+					return m, m.cmdRefresh()
 				}
 			}
 		}
@@ -366,8 +536,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.statusMsg = "unstage failed: " + err.Error()
 			} else {
 				m.statusMsg = "unstaged " + f.path
-				m.refresh()
-				m.loadDiff()
+				return m, m.cmdRefresh()
 			}
 		}
 	case "d":
@@ -387,8 +556,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 							m.statusMsg = "discard failed: " + err.Error()
 						} else {
 							m.statusMsg = "discarded " + f.path
-							m.refresh()
-							m.loadDiff()
+							return m, m.cmdRefresh()
 						}
 					} else {
 						m.pendingAction = "discard"
@@ -406,7 +574,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					m.statusMsg = "drop failed: " + err.Error()
 				} else {
 					m.statusMsg = "stash dropped"
-					m.refresh()
+					return m, m.cmdRefresh()
 				}
 			} else {
 				m.pendingAction = "drop-stash"
@@ -426,24 +594,95 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.statusMsg = "stash apply failed: " + err.Error()
 			} else {
 				m.statusMsg = "stash applied"
-				m.refresh()
+				return m, m.cmdRefresh()
 			}
 		}
-	case "enter":
+	case "f":
+		if m.section == gitSectionChanges || m.section == gitSectionBranches {
+			if _, err := m.gitRunTimeout(60*time.Second, "fetch", "--all"); err != nil {
+				m.statusMsg = "fetch failed: " + err.Error()
+			} else {
+				m.statusMsg = "fetched"
+			}
+			return m, m.cmdRefresh()
+		}
+	case "p":
+		if m.section == gitSectionChanges || m.section == gitSectionBranches {
+			if _, err := m.gitRunTimeout(60*time.Second, "pull"); err != nil {
+				m.statusMsg = "pull failed: " + err.Error()
+			} else {
+				m.statusMsg = "pulled"
+			}
+			return m, m.cmdRefresh()
+		}
+	case "P":
+		if m.section == gitSectionChanges || m.section == gitSectionBranches {
+			if _, err := m.gitRunTimeout(60*time.Second, "push"); err != nil {
+				m.statusMsg = "push failed: " + err.Error()
+			} else {
+				m.statusMsg = "pushed"
+			}
+			return m, m.cmdRefresh()
+		}
+	case "n":
+		if m.section == gitSectionBranches {
+			m.branchInputMode = true
+			m.branchInputText = ""
+			m.statusMsg = "new branch name:"
+		}
+	case "x":
 		if m.section == gitSectionBranches && m.branchCursor < len(m.branches) {
 			branch := m.branches[m.branchCursor]
-			var err error
-			if strings.HasPrefix(branch, "remotes/origin/") {
-				remote := strings.TrimPrefix(branch, "remotes/origin/")
-				_, err = m.gitRun("checkout", "--track", "origin/"+remote)
-			} else {
-				_, err = m.gitRun("checkout", branch)
+			if branch == m.currentBranch {
+				m.statusMsg = "cannot delete current branch"
+				return m, nil
 			}
-			if err != nil {
-				m.statusMsg = "checkout failed: " + err.Error()
-			} else {
-				m.statusMsg = "switched to " + branch
-				m.refresh()
+			if m.pendingAction == "delete-branch" {
+				m.pendingAction = ""
+				if _, err := m.gitRun("branch", "-d", branch); err != nil {
+					m.statusMsg = "delete failed: " + err.Error()
+				} else {
+					m.statusMsg = "deleted " + branch
+				}
+				return m, m.cmdRefresh()
+			}
+			m.pendingAction = "delete-branch"
+			m.statusMsg = "press x again to delete " + branch
+		}
+	case "S":
+		if m.section == gitSectionChanges {
+			m.stashInputMode = true
+			m.stashInputText = ""
+			m.statusMsg = "stash message (optional, enter to confirm):"
+		}
+	case "enter":
+		switch m.section {
+		case gitSectionBranches:
+			if m.branchCursor < len(m.branches) {
+				branch := m.branches[m.branchCursor]
+				var err error
+				if strings.HasPrefix(branch, "remotes/origin/") {
+					remote := strings.TrimPrefix(branch, "remotes/origin/")
+					_, err = m.gitRun("checkout", "--track", "origin/"+remote)
+				} else {
+					_, err = m.gitRun("checkout", branch)
+				}
+				if err != nil {
+					m.statusMsg = "checkout failed: " + err.Error()
+				} else {
+					m.statusMsg = "switched to " + branch
+					return m, m.cmdRefresh()
+				}
+			}
+		case gitSectionStash:
+			if m.stashCursor < len(m.stashes) {
+				ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
+				if _, err := m.gitRun("stash", "pop", ref); err != nil {
+					m.statusMsg = "pop failed: " + err.Error()
+				} else {
+					m.statusMsg = "stash popped"
+					return m, m.cmdRefresh()
+				}
 			}
 		}
 	}
@@ -456,8 +695,59 @@ func (m gitModel) handleDiffKey(key string) (gitModel, tea.Cmd) {
 		m.diff.ScrollDown(1)
 	case "k", "up":
 		m.diff.ScrollUp(1)
+	case "]":
+		if m.hunkCursor < len(m.hunks)-1 {
+			m.hunkCursor++
+			m.diff.SetYOffset(m.hunks[m.hunkCursor].start)
+		}
+	case "[":
+		if m.hunkCursor > 0 {
+			m.hunkCursor--
+			m.diff.SetYOffset(m.hunks[m.hunkCursor].start)
+		}
+	case "s":
+		if m.section == gitSectionChanges && m.hunkCursor < len(m.hunks) {
+			return m.applyHunk(false)
+		}
+	case "u":
+		if m.section == gitSectionChanges && m.hunkCursor < len(m.hunks) {
+			return m.applyHunk(true)
+		}
 	}
 	return m, nil
+}
+
+func (m gitModel) applyHunk(reverse bool) (gitModel, tea.Cmd) {
+	if m.hunkCursor >= len(m.hunks) {
+		return m, nil
+	}
+	hunk := m.hunks[m.hunkCursor]
+	patch := m.diffHeader + hunk.body
+	tmp, err := os.CreateTemp("", "ocode-hunk-*.patch")
+	if err != nil {
+		m.statusMsg = "hunk apply: " + err.Error()
+		return m, nil
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(patch); err != nil {
+		m.statusMsg = "hunk apply: " + err.Error()
+		return m, nil
+	}
+	tmp.Close()
+	args := []string{"apply", "--cached", tmp.Name()}
+	if reverse {
+		args = []string{"apply", "--cached", "--reverse", tmp.Name()}
+	}
+	if _, err := m.gitRun(args...); err != nil {
+		m.statusMsg = "hunk apply failed: " + err.Error()
+		return m, nil
+	}
+	action := "staged hunk"
+	if reverse {
+		action = "unstaged hunk"
+	}
+	m.statusMsg = action
+	return m, m.cmdRefresh()
 }
 
 func (m *gitModel) currentFileList() []gitFile {
@@ -478,54 +768,114 @@ func (m *gitModel) allUnstagedAndUntracked() []gitFile {
 	return out
 }
 
+func parseHunks(diff string) []diffHunk {
+	var hunks []diffHunk
+	var current strings.Builder
+	var header string
+	lineIdx := 0
+	startLine := 0
+	for _, line := range strings.Split(diff, "\n") {
+		plain := stripANSI(line)
+		if strings.HasPrefix(plain, "@@") {
+			if current.Len() > 0 && header != "" {
+				hunks = append(hunks, diffHunk{header: header, body: current.String(), start: startLine})
+				current.Reset()
+			} else {
+				current.Reset()
+			}
+			header = plain
+			startLine = lineIdx
+		}
+		current.WriteString(line + "\n")
+		lineIdx++
+	}
+	if current.Len() > 0 && header != "" {
+		hunks = append(hunks, diffHunk{header: header, body: current.String(), start: startLine})
+	}
+	return hunks
+}
+
+func extractDiffHeader(diff string) string {
+	var lines []string
+	for _, line := range strings.Split(diff, "\n") {
+		plain := stripANSI(line)
+		if strings.HasPrefix(plain, "@@") {
+			break
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func (m *gitModel) loadDiff() {
 	switch m.section {
 	case gitSectionChanges:
 		files := m.currentFileList()
 		if m.filesCursor >= len(files) {
 			m.diff.SetContent("")
+			m.hunks = nil
+			m.hunkCursor = 0
+			m.diffHeader = ""
 			return
 		}
 		f := files[m.filesCursor]
 		var out string
 		var err error
 		if f.staged {
-			out, err = m.gitRun("diff", "--cached", f.path)
+			out, err = m.gitRun("diff", "--color=always", "--cached", f.path)
 		} else {
-			out, err = m.gitRun("diff", f.path)
+			out, err = m.gitRun("diff", "--color=always", f.path)
 		}
 		if err != nil {
 			out = "error: " + err.Error()
 		}
 		m.diff.SetContent(out)
 		m.diff.GotoTop()
+		m.hunks = parseHunks(out)
+		m.hunkCursor = 0
+		m.diffHeader = extractDiffHeader(out)
 	case gitSectionLog:
 		if m.commitCursor >= len(m.commits) {
 			m.diff.SetContent("")
+			m.hunks = nil
+			m.hunkCursor = 0
+			m.diffHeader = ""
 			return
 		}
 		c := m.commits[m.commitCursor]
-		out, err := m.gitRun("show", "--stat", c.hash)
+		out, err := m.gitRun("show", "--color=always", "--stat", c.hash)
 		if err != nil {
 			out = "error: " + err.Error()
 		}
 		m.diff.SetContent(out)
 		m.diff.GotoTop()
+		m.hunks = nil
+		m.hunkCursor = 0
+		m.diffHeader = ""
 	case gitSectionStash:
 		if m.stashCursor >= len(m.stashes) {
 			m.diff.SetContent("")
+			m.hunks = nil
+			m.hunkCursor = 0
+			m.diffHeader = ""
 			return
 		}
 		ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
-		out, err := m.gitRun("stash", "show", "-p", ref)
+		out, err := m.gitRun("stash", "show", "--color=always", "-p", ref)
 		if err != nil {
 			out = "error: " + err.Error()
 		}
 		m.diff.SetContent(out)
 		m.diff.GotoTop()
+		m.hunks = nil
+		m.hunkCursor = 0
+		m.diffHeader = ""
 	case gitSectionBranches:
 		if m.branchCursor >= len(m.branches) {
 			m.diff.SetContent("")
+			m.hunks = nil
+			m.hunkCursor = 0
+			m.diffHeader = ""
 			return
 		}
 		out, err := m.gitRun("log", "--oneline", "-20", m.branches[m.branchCursor])
@@ -534,7 +884,41 @@ func (m *gitModel) loadDiff() {
 		}
 		m.diff.SetContent(out)
 		m.diff.GotoTop()
+		m.hunks = nil
+		m.hunkCursor = 0
+		m.diffHeader = ""
 	}
+}
+
+func (m gitModel) renderHints() string {
+	if m.committing {
+		return "ctrl+enter commit  esc cancel"
+	}
+	if m.branchInputMode || m.stashInputMode {
+		return "enter confirm  esc cancel"
+	}
+	base := "tab next panel  "
+	switch m.panel {
+	case gitPanelSections:
+		return base + "j/k navigate  enter focus files"
+	case gitPanelFiles:
+		switch m.section {
+		case gitSectionChanges:
+			return base + "s stage  u unstage  d discard  S stash  c commit  f fetch  p pull  P push"
+		case gitSectionLog:
+			return base + "j/k navigate"
+		case gitSectionStash:
+			return base + "enter pop  a apply  d drop"
+		case gitSectionBranches:
+			return base + "enter checkout  n new  x delete  f fetch  p pull  P push"
+		}
+	case gitPanelDiff:
+		if m.section == gitSectionChanges {
+			return base + "j/k scroll  [/] prev/next hunk  s stage hunk  u unstage hunk"
+		}
+		return base + "j/k scroll"
+	}
+	return base
 }
 
 func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
@@ -574,22 +958,38 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top, sectPane, filesPane, diffPane)
 
 	tabBar := renderTabBar(tabGit, chatUnread)
-	headerLeft := styles.Header.Render("\u25c6 ocode  Git")
+	ab := ""
+	if m.aheadBehind != "" {
+		ab = "  " + m.aheadBehind
+	}
+	headerLeft := styles.Header.Render("◆ ocode  Git" + ab)
 	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar)
 	if headerPad < 0 {
 		headerPad = 0
 	}
 	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar
 
-	status := hintStyle.Render(m.statusMsg)
-
-	parts := []string{header, row}
+	var parts []string
+	parts = append(parts, header, row)
 	if m.committing {
 		hint := hintStyle.Render("ctrl+enter submit  esc cancel")
 		parts = append(parts, hint)
 		parts = append(parts, borderStyle.Width(sectW+filesW-2).Render(m.commitInput.View()))
 	}
-	parts = append(parts, status)
+	if m.branchInputMode {
+		prompt := hintStyle.Render("New branch: ") + m.branchInputText + "█"
+		parts = append(parts, borderStyle.Width(sectW+filesW-2).Render(prompt))
+	}
+	if m.stashInputMode {
+		prompt := hintStyle.Render("Stash message: ") + m.stashInputText + "█"
+		parts = append(parts, borderStyle.Width(sectW+filesW-2).Render(prompt))
+	}
+	hints := hintStyle.Render(m.renderHints())
+	statusBar := hints
+	if m.statusMsg != "" {
+		statusBar = hints + "   " + lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E")).Render(m.statusMsg)
+	}
+	parts = append(parts, statusBar)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
@@ -599,7 +999,7 @@ func (m gitModel) renderFileList(width int) []string {
 	case gitSectionChanges:
 		idx := 0
 		if len(m.stagedFiles) > 0 {
-			lines = append(lines, hintStyle.Render("\u25cf staged"))
+			lines = append(lines, hintStyle.Render("● staged"))
 			for _, f := range m.stagedFiles {
 				line := "  " + f.status + " " + f.path
 				if idx == m.filesCursor && m.panel == gitPanelFiles {
@@ -610,7 +1010,7 @@ func (m gitModel) renderFileList(width int) []string {
 			}
 		}
 		if len(m.unstagedFiles)+len(m.untrackedFiles) > 0 {
-			lines = append(lines, hintStyle.Render("\u25cb unstaged/untracked"))
+			lines = append(lines, hintStyle.Render("○ unstaged/untracked"))
 			for _, f := range m.allUnstagedAndUntracked() {
 				line := "  " + f.status + " " + f.path
 				if idx == m.filesCursor && m.panel == gitPanelFiles {
