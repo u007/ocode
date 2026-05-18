@@ -44,6 +44,10 @@ type gitCommit struct {
 	age     string
 }
 
+type gitStatusMsg struct {
+	text string
+}
+
 type gitRefreshMsg struct {
 	staged        []gitFile
 	unstaged      []gitFile
@@ -195,6 +199,24 @@ func (m *gitModel) cmdRefresh() tea.Cmd {
 	}
 }
 
+func (m *gitModel) cmdNetworkOp(statusDone, statusFail string, args ...string) tea.Cmd {
+	workDir := m.workDir
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = workDir
+		if out, err := cmd.Output(); err != nil {
+			msg := err.Error()
+			if len(out) > 0 {
+				msg = strings.TrimSpace(string(out)) + ": " + msg
+			}
+			return gitStatusMsg{text: statusFail + ": " + msg}
+		}
+		return gitStatusMsg{text: statusDone}
+	}
+}
+
 func (m *gitModel) parseStatus(out string) {
 	m.stagedFiles = nil
 	m.unstagedFiles = nil
@@ -288,6 +310,9 @@ func (m *gitModel) loadBranches() {
 
 func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case gitStatusMsg:
+		m.statusMsg = msg.text
+		return m, m.cmdRefresh()
 	case gitRefreshMsg:
 		m.stagedFiles = msg.staged
 		m.unstagedFiles = msg.unstaged
@@ -364,8 +389,9 @@ func (m gitModel) updateBranchInput(msg tea.Msg) (gitModel, tea.Cmd) {
 			m.branchInputText = ""
 			return m, m.cmdRefresh()
 		case "backspace":
-			if len(m.branchInputText) > 0 {
-				m.branchInputText = m.branchInputText[:len(m.branchInputText)-1]
+			runes := []rune(m.branchInputText)
+			if len(runes) > 0 {
+				m.branchInputText = string(runes[:len(runes)-1])
 			}
 			return m, nil
 		default:
@@ -400,8 +426,9 @@ func (m gitModel) updateStashInput(msg tea.Msg) (gitModel, tea.Cmd) {
 			m.stashInputText = ""
 			return m, m.cmdRefresh()
 		case "backspace":
-			if len(m.stashInputText) > 0 {
-				m.stashInputText = m.stashInputText[:len(m.stashInputText)-1]
+			runes := []rune(m.stashInputText)
+			if len(runes) > 0 {
+				m.stashInputText = string(runes[:len(runes)-1])
 			}
 			return m, nil
 		default:
@@ -599,30 +626,18 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		}
 	case "f":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
-			if _, err := m.gitRunTimeout(60*time.Second, "fetch", "--all"); err != nil {
-				m.statusMsg = "fetch failed: " + err.Error()
-			} else {
-				m.statusMsg = "fetched"
-			}
-			return m, m.cmdRefresh()
+			m.statusMsg = "fetching..."
+			return m, m.cmdNetworkOp("fetched", "fetch failed", "fetch", "--all")
 		}
 	case "p":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
-			if _, err := m.gitRunTimeout(60*time.Second, "pull"); err != nil {
-				m.statusMsg = "pull failed: " + err.Error()
-			} else {
-				m.statusMsg = "pulled"
-			}
-			return m, m.cmdRefresh()
+			m.statusMsg = "pulling..."
+			return m, m.cmdNetworkOp("pulled", "pull failed", "pull")
 		}
 	case "P":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
-			if _, err := m.gitRunTimeout(60*time.Second, "push"); err != nil {
-				m.statusMsg = "push failed: " + err.Error()
-			} else {
-				m.statusMsg = "pushed"
-			}
-			return m, m.cmdRefresh()
+			m.statusMsg = "pushing..."
+			return m, m.cmdNetworkOp("pushed", "push failed", "push")
 		}
 	case "n":
 		if m.section == gitSectionBranches {
@@ -786,7 +801,7 @@ func parseHunks(diff string) []diffHunk {
 			header = plain
 			startLine = lineIdx
 		}
-		current.WriteString(line + "\n")
+		current.WriteString(plain + "\n")
 		lineIdx++
 	}
 	if current.Len() > 0 && header != "" {
@@ -802,7 +817,10 @@ func extractDiffHeader(diff string) string {
 		if strings.HasPrefix(plain, "@@") {
 			break
 		}
-		lines = append(lines, line)
+		lines = append(lines, plain)
+	}
+	if len(lines) == 0 {
+		return ""
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
