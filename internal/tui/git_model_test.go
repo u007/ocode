@@ -71,30 +71,29 @@ func TestChangesFileListHighlight(t *testing.T) {
 	}
 }
 
-// TODO: uncomment when currentBranch field is added
-// func TestLoadBranchesCurrentMarker(t *testing.T) {
-// 	m := gitModel{}
-// 	raw := "  main\n* feature/foo\n  remotes/origin/main"
-// 	m.branches = nil
-// 	m.currentBranch = ""
-// 	for _, line := range strings.Split(raw, "\n") {
-// 		if line == "" {
-// 			continue
-// 		}
-// 		isCurrent := strings.HasPrefix(line, "*")
-// 		name := strings.TrimSpace(strings.TrimPrefix(line, "*"))
-// 		if isCurrent {
-// 			m.currentBranch = name
-// 		}
-// 		m.branches = append(m.branches, name)
-// 	}
-// 	if m.currentBranch != "feature/foo" {
-// 		t.Fatalf("want currentBranch=feature/foo got %q", m.currentBranch)
-// 	}
-// 	if len(m.branches) != 3 {
-// 		t.Fatalf("want 3 branches got %d", len(m.branches))
-// 	}
-// }
+func TestLoadBranchesCurrentMarker(t *testing.T) {
+	m := gitModel{}
+	raw := "  main\n* feature/foo\n  remotes/origin/main"
+	m.branches = nil
+	m.currentBranch = ""
+	for _, line := range strings.Split(raw, "\n") {
+		if line == "" {
+			continue
+		}
+		isCurrent := strings.HasPrefix(line, "*")
+		name := strings.TrimSpace(strings.TrimPrefix(line, "*"))
+		if isCurrent {
+			m.currentBranch = name
+		}
+		m.branches = append(m.branches, name)
+	}
+	if m.currentBranch != "feature/foo" {
+		t.Fatalf("want currentBranch=feature/foo got %q", m.currentBranch)
+	}
+	if len(m.branches) != 3 {
+		t.Fatalf("want 3 branches got %d", len(m.branches))
+	}
+}
 
 // TODO: uncomment when parseHunks is added
 // func TestParseHunks(t *testing.T) {

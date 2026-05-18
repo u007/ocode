@@ -57,6 +57,7 @@ type gitModel struct {
 	stashCursor    int
 	branches       []string
 	branchCursor   int
+	currentBranch  string
 	diff           viewport.Model
 	committing     bool
 	commitInput    textarea.Model
@@ -72,6 +73,7 @@ func newGitModel(workDir string) gitModel {
 	ci.SetHeight(3)
 	m.commitInput = ci
 	m.refresh()
+	m.loadDiff()
 	return m
 }
 
@@ -176,11 +178,17 @@ func (m *gitModel) loadBranches() {
 		return
 	}
 	m.branches = nil
+	m.currentBranch = ""
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
-		m.branches = append(m.branches, strings.TrimSpace(strings.TrimPrefix(line, "*")))
+		isCurrent := strings.HasPrefix(line, "*")
+		name := strings.TrimSpace(strings.TrimPrefix(line, "*"))
+		if isCurrent {
+			m.currentBranch = name
+		}
+		m.branches = append(m.branches, name)
 	}
 }
 
@@ -615,7 +623,11 @@ func (m gitModel) renderFileList(width int) []string {
 		}
 	case gitSectionBranches:
 		for i, b := range m.branches {
-			line := b
+			marker := "  "
+			if b == m.currentBranch {
+				marker = "* "
+			}
+			line := marker + b
 			if i == m.branchCursor {
 				line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
 			}
