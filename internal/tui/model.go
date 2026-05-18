@@ -27,6 +27,8 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/tool"
 	"github.com/jamesmercstudio/ocode/internal/version"
 
+	"github.com/atotto/clipboard"
+
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -198,6 +200,18 @@ type model struct {
 	expandedToolOutputs map[int]bool
 	toolOutputRegions   []toolOutputRegion
 	dotFrame            int
+	sel                 selectionState
+	transcriptContent   string
+	rawTranscriptLines  []string
+}
+
+type selectionState struct {
+	active    bool
+	dragging  bool
+	startLine int
+	startCol  int
+	endLine   int
+	endCol    int
 }
 
 type toolOutputRegion struct {
@@ -1148,6 +1162,14 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 	if !pressed {
 		m.scrollbarDrag = scrollbarDragNone
+		if m.sel.dragging {
+			m.sel.dragging = false
+			if m.sel.active {
+				text := extractSelectionText(m.rawTranscriptLines, m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
+				_ = clipboard.WriteAll(text)
+			}
+			return m, nil, true
+		}
 	}
 
 	if tab, ok := m.tabForClick(mouse); ok {
@@ -1165,6 +1187,26 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
 		m.renderTranscript()
 		return m, nil, true
+	}
+
+	if pressed && m.activeTab == tabChat && mouse.X < m.mainScrollbarX() {
+		contentLine := (mouse.Y - m.viewportContentTopY()) + m.viewport.YOffset()
+		if contentLine >= 0 && contentLine < len(m.rawTranscriptLines) {
+			m.sel = selectionState{
+				dragging:  true,
+				startLine: contentLine,
+				startCol:  mouse.X,
+				endLine:   contentLine,
+				endCol:    mouse.X,
+			}
+			m.applyOrClearSelectionHighlight()
+			return m, nil, true
+		}
+	}
+
+	if !pressed && m.sel.active {
+		m.sel = selectionState{}
+		m.applyOrClearSelectionHighlight()
 	}
 	if m.showPicker {
 		if idx, ok := m.pickerRowForY(mouse.Y); ok {
@@ -1217,6 +1259,25 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
 		filesTrackTop := filesHeaderH + 1
 		scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, m.files.preview.Height())
+		return m, nil, true
+	}
+
+	if m.sel.dragging {
+		contentLine := (mouse.Y - m.viewportContentTopY()) + m.viewport.YOffset()
+		if contentLine < 0 {
+			contentLine = 0
+		}
+		if contentLine >= len(m.rawTranscriptLines) && len(m.rawTranscriptLines) > 0 {
+			contentLine = len(m.rawTranscriptLines) - 1
+		}
+		col := mouse.X
+		if col < 0 {
+			col = 0
+		}
+		m.sel.endLine = contentLine
+		m.sel.endCol = col
+		m.sel.active = m.sel.startLine != m.sel.endLine || m.sel.startCol != m.sel.endCol
+		m.applyOrClearSelectionHighlight()
 		return m, nil, true
 	}
 
@@ -2398,7 +2459,10 @@ func (m *model) renderTranscript() {
 			}
 		}
 	}
-	m.viewport.SetContent(wrapView(b.String(), m.viewport.Width()))
+	m.transcriptContent = wrapView(b.String(), m.viewport.Width())
+	m.rawTranscriptLines = strings.Split(stripANSI(m.transcriptContent), "\n")
+	m.viewport.SetContent(m.transcriptContent)
+	m.sel = selectionState{}
 }
 
 func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
@@ -3106,6 +3170,21 @@ func (m model) renderMCPStatus() string {
 
 func (m model) mainScrollbarX() int {
 	return m.panelWidth() - 5
+}
+
+func (m model) viewportContentTopY() int {
+	return lipgloss.Height(m.styles.Header.Render("◆ ocode")) + 1
+}
+
+func (m *model) applyOrClearSelectionHighlight() {
+	if !m.sel.active {
+		m.viewport.SetContent(m.transcriptContent)
+		return
+	}
+	sl, sc, el, ec := normaliseSelection(m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
+	lines := strings.Split(m.transcriptContent, "\n")
+	highlighted := applySelectionHighlight(lines, m.rawTranscriptLines, sl, sc, el, ec)
+	m.viewport.SetContent(strings.Join(highlighted, "\n"))
 }
 
 func (m model) transcriptScrollbarHit(mouse tea.Mouse) bool {
