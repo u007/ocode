@@ -82,7 +82,7 @@ func (m *filesModel) Resize(w, h int) {
 	if previewH < 1 {
 		previewH = 1
 	}
-	m.preview.SetWidth(previewW - 1)
+	m.preview.SetWidth(previewW - 7)
 	m.preview.SetHeight(previewH)
 }
 

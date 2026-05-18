@@ -530,7 +530,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files.Resize(m.width, m.height)
 		m.git.Resize(m.width, m.height)
 		m.logViewport, _ = m.logViewport.Update(tea.WindowSizeMsg{
-			Width:  m.panelWidth() - 3,
+			Width:  m.panelWidth() - 7,
 			Height: m.height - m.bottomChromeHeight(m.panelWidth()) - 1,
 		})
 		m.ready = true
@@ -3105,7 +3105,7 @@ func (m model) renderMCPStatus() string {
 }
 
 func (m model) mainScrollbarX() int {
-	return m.panelWidth() - 2
+	return m.panelWidth() - 5
 }
 
 func (m model) transcriptScrollbarHit(mouse tea.Mouse) bool {
