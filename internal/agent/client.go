@@ -315,7 +315,7 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 			"role":    m.Role,
 			"content": m.Content,
 		}
-		if m.Role == "assistant" && m.ReasoningContent != "" && c.Provider == "deepseek" {
+		if m.Role == "assistant" && m.ReasoningContent != "" {
 			msg["reasoning_content"] = m.ReasoningContent
 		}
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {

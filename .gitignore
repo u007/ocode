@@ -7,4 +7,5 @@
 opencode.json
 todo.md
 .opencode/snapshots
+internal/tui/.opencode
 
