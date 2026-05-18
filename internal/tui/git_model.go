@@ -140,6 +140,7 @@ func (m *gitModel) parseStatus(out string) {
 func (m *gitModel) loadChanges() {
 	out, err := m.gitRun("status", "--porcelain")
 	if err != nil {
+		m.statusMsg = "status: " + err.Error()
 		return
 	}
 	m.parseStatus(out)
@@ -178,13 +179,7 @@ func (m *gitModel) loadStash() {
 	m.stashes = strings.Split(out, "\n")
 }
 
-func (m *gitModel) loadBranches() {
-	out, err := m.gitRun("branch", "-a")
-	if err != nil {
-		m.statusMsg = "branch list: " + err.Error()
-		m.branches = nil
-		return
-	}
+func (m *gitModel) parseBranches(out string) {
 	m.branches = nil
 	m.currentBranch = ""
 	for _, line := range strings.Split(out, "\n") {
@@ -198,6 +193,16 @@ func (m *gitModel) loadBranches() {
 		}
 		m.branches = append(m.branches, name)
 	}
+}
+
+func (m *gitModel) loadBranches() {
+	out, err := m.gitRun("branch", "-a")
+	if err != nil {
+		m.statusMsg = "branch list: " + err.Error()
+		m.branches = nil
+		return
+	}
+	m.parseBranches(out)
 }
 
 func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
