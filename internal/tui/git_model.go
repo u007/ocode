@@ -84,7 +84,7 @@ func (m *gitModel) Resize(w, h int) {
 	if diffH < 1 {
 		diffH = 1
 	}
-	m.diff.SetWidth(diffW - 1)
+	m.diff.SetWidth(diffW - 7)
 	m.diff.SetHeight(diffH)
 	m.commitInput.SetWidth(sectW + filesW)
 }
