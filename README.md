@@ -68,9 +68,27 @@ Permission levels are `allow`, `ask`, and `deny`. Modes are `normal`, `yolo`, an
 
 Use `/permissions` to view or set rules, `/permissions bash:git allow` for shell prefixes, and `/yolo [on|off|status]` to toggle YOLO mode. The TUI also accepts `--yolo`/`-yolo`; `ocode run` accepts `--yolo`.
 
+Editor config also lives in `ocodeconfig.json`:
+
+```json
+{
+  "editor": "nvim",
+  "editor_mode": "tmux-split"
+}
+```
+
+- `editor` — External editor command (e.g. `nvim`, `code --wait`). Priority: config > `$VISUAL` > `$EDITOR` > `vi`.
+- `editor_mode` — How the editor opens from the Files tab:
+  - `external` (default) — Plain `exec.Command(editor, path)`.
+  - `tmux-split` — Opens via `tmux split-window` (horizontal split at width ≥120, vertical otherwise).
+  - `tmux-window` — Opens via `tmux new-window`.
+- Explicit tmux modes fail fast at startup if you are not inside a tmux session — no silent fallback.
+
+Use `/editor [command]` to set the default editor and `/editor-mode [mode]` to set the open mode. Both open a picker when called without arguments.
+
 ## Stack
 
-- Go 1.26
+- Go 1.26.1
 - Bubble Tea / Bubbles / Lipgloss (Charm TUI)
 
 ## Layout

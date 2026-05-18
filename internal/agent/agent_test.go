@@ -182,10 +182,12 @@ func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
 			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
-				Body: io.NopCloser(strings.NewReader(`{
-					"model":"gpt-test",
-					"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]
-				}`)),
+				Body: io.NopCloser(strings.NewReader(
+					"event: response.created\ndata: {\"type\":\"response.created\",\"model\":\"gpt-test\"}\n\n"+
+						"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"+
+						"event: response.completed\ndata: {\"type\":\"response.completed\",\"model\":\"gpt-test\"}\n\n"+
+						"data: [DONE]\n",
+				)),
 				Header: make(http.Header),
 			}, nil
 		}),

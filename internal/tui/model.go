@@ -40,7 +40,7 @@ import (
 type scrollbarDragTarget int
 
 const (
-	scrollbarDragNone       scrollbarDragTarget = iota
+	scrollbarDragNone scrollbarDragTarget = iota
 	scrollbarDragTranscript
 	scrollbarDragLog
 	scrollbarDragGitDiff
@@ -138,72 +138,73 @@ func waitForDebugLog() tea.Cmd {
 }
 
 type model struct {
-	viewport            viewport.Model
-	input               textarea.Model
-	messages            []message
-	agent               *agent.Agent
-	config              *config.Config
-	sessionID           string
-	showThinking        bool
-	showDetails         bool
-	leaderActive        bool
-	leaderSeq           int
-	showPalette         bool
-	showPicker          bool
-	pickerKind          string
-	pickerItems         []string
-	pickerValues        []string
-	pickerIndex         int
-	pickerFilter        string
-	showSlashPopup      bool
-	slashPopupIndex     int
-	slashPopupItems     []slashSuggestion
-	fileListCache       []slashSuggestion
-	showConnect         bool
-	connect             *connectDialog
-	showSidebar         bool
-	sessionTelemetry    sidebarTelemetry
-	activeModel         string
-	paletteInput        string
-	width               int
-	height              int
-	ready               bool
-	activeTab           int
-	chatUnread          bool
-	files               filesModel
-	git                 gitModel
-	logViewport         viewport.Model
-	logEntries          []DebugEntry
-	err                 error
-	scrollSpeed          int
+	viewport              viewport.Model
+	input                 textarea.Model
+	messages              []message
+	agent                 *agent.Agent
+	config                *config.Config
+	sessionID             string
+	showThinking          bool
+	showDetails           bool
+	leaderActive          bool
+	leaderSeq             int
+	showPalette           bool
+	showPicker            bool
+	pickerKind            string
+	pickerItems           []string
+	pickerValues          []string
+	pickerIsHeader        []bool
+	pickerIndex           int
+	pickerFilter          string
+	showSlashPopup        bool
+	slashPopupIndex       int
+	slashPopupItems       []slashSuggestion
+	fileListCache         []slashSuggestion
+	showConnect           bool
+	connect               *connectDialog
+	showSidebar           bool
+	sessionTelemetry      sidebarTelemetry
+	activeModel           string
+	paletteInput          string
+	width                 int
+	height                int
+	ready                 bool
+	activeTab             int
+	chatUnread            bool
+	files                 filesModel
+	git                   gitModel
+	logViewport           viewport.Model
+	logEntries            []DebugEntry
+	err                   error
+	scrollSpeed           int
 	restoredPendingScroll bool
-	scrollbarDrag        scrollbarDragTarget
-	workDir              string
-	currentAgentIdx     int
-	showPermDialog      bool
-	pendingToolName     string
-	pendingToolArgs     json.RawMessage
-	pendingToolCallID   string
-	pendingPermission   agent.PermissionRequest
-	styles              Styles
-	streaming           bool
-	ctrlCPressed        bool
-	cancelStream        chan struct{}
-	lastActivity        agent.ActivitySnapshot
-	activityRowReserved bool
-	escPressed          bool
-	escPressTime        time.Time
-	lastRetryableLLMErr string
-	inputHistory        []string
-	inputHistoryIndex   int
-	queuedInputs        []string
-	expandedToolOutputs map[int]bool
-	toolOutputRegions   []toolOutputRegion
-	dotFrame            int
-	sel                 selectionState
-	transcriptContent   string
-	transcriptLines     []string
-	rawTranscriptLines  []string
+	scrollbarDrag         scrollbarDragTarget
+	workDir               string
+	currentAgentIdx       int
+	showPermDialog        bool
+	pendingToolName       string
+	pendingToolArgs       json.RawMessage
+	pendingToolCallID     string
+	pendingPermission     agent.PermissionRequest
+	styles                Styles
+	streaming             bool
+	ctrlCPressed          bool
+	cancelStream          chan struct{}
+	lastActivity          agent.ActivitySnapshot
+	activityRowReserved   bool
+	escPressed            bool
+	escPressTime          time.Time
+	lastRetryableLLMErr   string
+	inputHistory          []string
+	inputHistoryIndex     int
+	queuedInputs          []string
+	expandedToolOutputs   map[int]bool
+	toolOutputRegions     []toolOutputRegion
+	dotFrame              int
+	sel                   selectionState
+	transcriptContent     string
+	transcriptLines       []string
+	rawTranscriptLines    []string
 }
 
 type toolOutputRegion struct {
@@ -427,6 +428,12 @@ func newModel(sid string, cont bool, yolo bool) model {
 	m.files = newFilesModel(workDir)
 	if cfg != nil && cfg.Ocode != nil {
 		m.files.SetEditor(config.ResolveEditor(cfg.Ocode))
+		m.files.SetEditorMode(cfg.Ocode.EditorMode)
+		m.files.SetEditorOpener(createEditorOpener(
+			config.ResolveEditor(cfg.Ocode),
+			cfg.Ocode.EditorMode,
+			func() int { return m.width },
+		))
 	}
 	m.files.SetSaveEditor(config.SaveEditor)
 	m.git = newGitModel(workDir)
@@ -481,15 +488,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return updated, cmd
 		}
 	case tea.MouseWheelMsg:
+		scrollSpeed := m.scrollSpeed
+		if scrollSpeed < 1 {
+			scrollSpeed = 1
+		}
+		if m.activeTab == tabFiles {
+			if msg.Button == tea.MouseWheelUp {
+				m.files.preview.ScrollUp(scrollSpeed)
+				return m, nil
+			}
+			if msg.Button == tea.MouseWheelDown {
+				m.files.preview.ScrollDown(scrollSpeed)
+				return m, nil
+			}
+		}
 		if !m.mouseOverTranscriptViewport(msg) {
 			return m, nil
 		}
 		if msg.Button == tea.MouseWheelUp {
-			m.viewport.ScrollUp(m.scrollSpeed)
+			m.viewport.ScrollUp(scrollSpeed)
 			return m, nil
 		}
 		if msg.Button == tea.MouseWheelDown {
-			m.viewport.ScrollDown(m.scrollSpeed)
+			m.viewport.ScrollDown(scrollSpeed)
 			return m, nil
 		}
 	case tea.KeyPressMsg:
@@ -534,7 +555,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.layout()
 		m.files.Resize(m.width, m.height)
-		m.git.Resize(m.width, m.height)
+		m.git.Resize(m.panelWidth(), m.height)
 		m.logViewport, _ = m.logViewport.Update(tea.WindowSizeMsg{
 			Width:  m.panelWidth() - 7,
 			Height: m.height - m.bottomChromeHeight(m.panelWidth()) - 1,
@@ -550,6 +571,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Global tab switching — always handled regardless of active tab
 		switch keyStr {
+		case "1":
+			if m.activeTab == tabChat {
+				break
+			}
+			m.activeTab = tabChat
+			m.chatUnread = false
+			return m, nil
+		case "2":
+			if m.activeTab == tabChat {
+				break
+			}
+			m.activeTab = tabFiles
+			return m, nil
+		case "3":
+			if m.activeTab == tabChat {
+				break
+			}
+			m.activeTab = tabGit
+			return m, nil
+		case "4":
+			if m.activeTab == tabChat {
+				break
+			}
+			m.activeTab = tabLog
+			m.refreshLogViewport()
+			m.logViewport.GotoBottom()
+			return m, nil
 		case "alt+[", "ctrl+shift+[":
 			m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
 			if m.activeTab == tabChat {
@@ -596,20 +644,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "up":
 				if m.pickerIndex > 0 {
 					m.pickerIndex--
+					for m.pickerIndex > 0 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+						m.pickerIndex--
+					}
 				}
 				return m, nil
 			case "down":
 				items, _ := m.pickerVisibleItems()
 				if m.pickerIndex < len(items)-1 {
 					m.pickerIndex++
+					for m.pickerIndex < len(items)-1 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+						m.pickerIndex++
+					}
 				}
 				return m, nil
 			case "enter":
+				if m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+					return m, nil
+				}
 				return m.selectPickerIndex(m.pickerIndex)
 			case "backspace":
 				if len(m.pickerFilter) > 0 {
 					m.pickerFilter = m.pickerFilter[:len(m.pickerFilter)-1]
 					m.pickerIndex = 0
+				}
+				return m, nil
+			}
+			if keyStr == "f" && m.pickerFilter == "" && m.pickerKind == "model" {
+				items, values := m.pickerVisibleItems()
+				isSelectable := len(m.pickerIsHeader) == 0 || (m.pickerIndex < len(m.pickerIsHeader) && !m.pickerIsHeader[m.pickerIndex])
+				if m.pickerIndex < len(items) && m.pickerIndex < len(values) && isSelectable {
+					modelID := values[m.pickerIndex]
+					if config.IsFavorite(modelID) {
+						_ = config.RemoveFavoriteModel(modelID)
+					} else {
+						_ = config.SaveFavoriteModel(modelID)
+					}
+					m.openModelPicker()
+					return m, nil
 				}
 				return m, nil
 			}
@@ -885,7 +957,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.activeTab == tabGit {
 			var cmd tea.Cmd
-			m.git, cmd = m.git.Update(msg, m.width, m.height)
+			m.git, cmd = m.git.Update(msg, m.panelWidth(), m.height)
 			return m, cmd
 		}
 	case leaderTimeoutMsg:
@@ -900,6 +972,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logViewport.GotoBottom()
 		}
 		return m, waitForDebugLog()
+	case filesPreviewMsg:
+		var cmd tea.Cmd
+		m.files, cmd = m.files.Update(msg, m.width, m.height)
+		return m, cmd
 	case fileListCacheMsg:
 		m.fileListCache = msg.items
 		m, _ = m.updateSlashPopupState()
@@ -1080,9 +1156,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case editorFinishedMsg:
 		m.layout()
 		if msg.err != nil {
+			if m.activeTab == tabFiles {
+				m.files.statusMsg = fmt.Sprintf("Editor error: %v", msg.err)
+				return m, nil
+			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor error: %v", msg.err)})
 		} else if msg.content != "" {
 			m.input.SetValue(msg.content)
+		}
+		if m.activeTab == tabFiles {
+			return m, m.files.refreshPreviewCmd()
 		}
 	case errorMsg:
 		if msg != nil {
@@ -1126,7 +1209,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		return m, nil, true
 	}
 	if pressed && m.activeTab == tabGit {
-		panelW := m.width
+		panelW := m.panelWidth()
 		diffPaneRight := panelW - 1
 		scrollX := diffPaneRight - 1
 		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
@@ -1148,8 +1231,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if mouse.X == scrollX && mouse.Y >= filesTrackTop && mouse.Y < filesTrackTop+filesTrackH {
 			m.scrollbarDrag = scrollbarDragFilesPreview
 			scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, filesTrackH)
-			_ = treeW
 			return m, nil, true
+		}
+		if mouse.X >= treeW && mouse.X < previewRight && mouse.Y >= filesTrackTop && mouse.Y < filesTrackTop+filesTrackH {
+			var cmd tea.Cmd
+			m.files, cmd = m.files.startInlineEdit()
+			return m, cmd, true
 		}
 	}
 	if !pressed {
@@ -1159,8 +1246,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			if m.sel.active {
 				text := extractSelectionText(m.rawTranscriptLines, m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
 				_ = clipboard.WriteAll(text)
+				m.sel = selectionState{}
+				m.applyOrClearSelectionHighlight()
+				return m, nil, true
 			}
-			return m, nil, true
+			m.sel = selectionState{}
+			m.applyOrClearSelectionHighlight()
 		}
 	}
 
@@ -1175,12 +1266,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		return m, nil, true
 	}
-	if idx, ok := m.toolOutputForClick(mouse); ok {
-		m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
-		m.renderTranscript()
-		return m, nil, true
-	}
-
 	if pressed && m.activeTab == tabChat && mouse.X < m.mainScrollbarX() {
 		contentLine := (mouse.Y - m.viewportContentTopY()) + m.viewport.YOffset()
 		if contentLine >= 0 && contentLine < len(m.rawTranscriptLines) {
@@ -1199,6 +1284,14 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	if !pressed && m.sel.active {
 		m.sel = selectionState{}
 		m.applyOrClearSelectionHighlight()
+	}
+
+	if !pressed && !m.sel.active {
+		if idx, ok := m.toolOutputForClick(mouse); ok {
+			m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
+			m.renderTranscript()
+			return m, nil, true
+		}
 	}
 	if m.showPicker {
 		if idx, ok := m.pickerRowForY(mouse.Y); ok {
@@ -1334,9 +1427,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	cmd := parts[0]
 	args := parts[1:]
 
-	if cmd != "/editor" {
-		m.input.Reset()
-	}
+	m.input.Reset()
 
 	var cmdResult tea.Cmd
 	spec := lookupCommand(cmd)
@@ -1729,38 +1820,62 @@ func (m *model) handleNewCmd(args []string) {
 }
 
 func (m *model) handleEditorCmd(args []string) tea.Cmd {
-	editor := os.Getenv("EDITOR")
-	editor, ok := resolveEditor(editor)
-	if !ok {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: EDITOR not set and no common editor found."})
+	if len(args) == 0 {
+		m.openEditorPicker()
 		return nil
 	}
-
-	tmpFile, err := os.CreateTemp("", "ocode-msg-*.txt")
-	if err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error creating temp file: %v", err)})
+	editor := strings.Join(args, " ")
+	if err := validateEditorCmd(editor); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Invalid editor: %v", err)})
 		return nil
 	}
+	if err := config.SaveEditor(editor); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save editor: %v", err)})
+		return nil
+	}
+	if m.config != nil && m.config.Ocode != nil {
+		m.config.Ocode.Editor = editor
+	}
+	m.refreshEditorOpener()
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Default editor set to: %s", editor)})
+	return nil
+}
 
-	content := m.input.Value()
-	tmpFile.Write([]byte(content))
-	tmpFile.Close()
+func (m *model) handleEditorModeCmd(args []string) tea.Cmd {
+	if len(args) == 0 {
+		m.openEditorModePicker()
+		return nil
+	}
+	mode := args[0]
+	if mode != config.EditorModeExternal && mode != config.EditorModeTmuxSplit && mode != config.EditorModeTmuxWindow {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Invalid editor mode: %q. Valid modes: %s, %s, %s", mode, config.EditorModeExternal, config.EditorModeTmuxSplit, config.EditorModeTmuxWindow)})
+		return nil
+	}
+	if err := validateTmuxEditorMode(mode); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot set tmux editor mode: %v", err)})
+		return nil
+	}
+	if err := config.SaveEditorMode(mode); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save editor mode: %v", err)})
+		return nil
+	}
+	if m.config != nil && m.config.Ocode != nil {
+		m.config.Ocode.EditorMode = mode
+	}
+	m.refreshEditorOpener()
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor mode set to: %s", mode)})
+	return nil
+}
 
-	cmdParts := strings.Fields(editor)
-	cmdParts = append(cmdParts, tmpFile.Name())
-	c := exec.Command(cmdParts[0], cmdParts[1:]...)
-
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		if err != nil {
-			return editorFinishedMsg{err: err}
-		}
-		newContent, err := os.ReadFile(tmpFile.Name())
-		os.Remove(tmpFile.Name())
-		if err != nil {
-			return editorFinishedMsg{err: err}
-		}
-		return editorFinishedMsg{content: string(newContent)}
-	})
+func (m *model) refreshEditorOpener() {
+	if m.config == nil || m.config.Ocode == nil {
+		return
+	}
+	editor := config.ResolveEditor(m.config.Ocode)
+	mode := m.config.Ocode.EditorMode
+	m.files.SetEditor(editor)
+	m.files.SetEditorMode(mode)
+	m.files.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }))
 }
 
 func runInteractiveShell(command string, dir string) tea.Cmd {
@@ -2640,7 +2755,11 @@ func (m model) renderContent() string {
 	case tabFiles:
 		return m.files.View(m.width, m.height, m.styles, m.chatUnread)
 	case tabGit:
-		return m.git.View(m.width, m.height, m.styles, m.chatUnread)
+		gitView := m.git.View(m.panelWidth(), m.height, m.styles, m.chatUnread)
+		if m.sidebarEnabled() {
+			return lipgloss.JoinHorizontal(lipgloss.Top, gitView, m.renderSidebar())
+		}
+		return gitView
 	case tabLog:
 		return m.renderLogTab()
 	}
@@ -2695,7 +2814,7 @@ func (m *model) renderStatus() string {
 	var suffix string
 	switch m.activeTab {
 	case tabFiles:
-		suffix = " | enter/e: open | E: choose editor | /: search | alt+[/]/ctrl+shift+[/]: switch tab"
+		suffix = " | i: edit | ^S: save | n/N: new | r: rename | D: delete | y: copy path | R: reload | alt+[/]: tab"
 	case tabGit:
 		suffix = " | tab: cycle panel | s: stage | u: unstage | c: commit | alt+[/]/ctrl+shift+[/]: switch tab"
 	case tabLog:

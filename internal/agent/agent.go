@@ -220,7 +220,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			if a.OnMessage != nil {
 				a.OnMessage(toolMsg)
 			}
-			if toolMsg.Content == "WAITING_FOR_USER_RESPONSE" {
+			if toolMsg.Content == "WAITING_FOR_USER_RESPONSE" || strings.HasPrefix(toolMsg.Content, "PERMISSION_ASK:") {
 				return newMsgs, nil
 			}
 		}

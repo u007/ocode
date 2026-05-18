@@ -2,22 +2,105 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/session"
 )
 
 func (m *model) openModelPicker() {
-	items := agent.AllProviderModels()
+	allModels := agent.AllProviderModels()
+	favorites := config.LoadFavorites()
+	recents := config.LoadRecentModels()
+
+	shown := make(map[string]bool)
+	var items, values []string
+	var isHeader []bool
+
+	appendHeader := func(label string) {
+		items = append(items, label)
+		values = append(values, "")
+		isHeader = append(isHeader, true)
+	}
+	appendModel := func(label, value string) {
+		items = append(items, label)
+		values = append(values, value)
+		isHeader = append(isHeader, false)
+		shown[value] = true
+	}
+
+	if len(favorites) > 0 {
+		appendHeader("★ Favorites")
+		for _, f := range favorites {
+			appendModel("  ★ "+displayModelName(f), f)
+		}
+		appendHeader("")
+	}
+
+	var recentModels []string
+	for _, r := range recents {
+		if !shown[r] {
+			recentModels = append(recentModels, r)
+		}
+	}
+	if len(recentModels) > 0 {
+		appendHeader("Recently Used")
+		for _, r := range recentModels {
+			appendModel("  "+displayModelName(r), r)
+		}
+		appendHeader("")
+	}
+
+	providerMap := make(map[string][]string)
+	for _, modelID := range allModels {
+		if shown[modelID] {
+			continue
+		}
+		provider, model := splitPickerModel(modelID)
+		providerMap[provider] = append(providerMap[provider], model)
+	}
+	providers := make([]string, 0, len(providerMap))
+	for provider := range providerMap {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	for _, provider := range providers {
+		appendHeader(provider)
+		models := providerMap[provider]
+		sort.Strings(models)
+		for _, model := range models {
+			appendModel("  "+model, provider+"/"+model)
+		}
+	}
+
 	m.pickerKind = "model"
 	m.pickerItems = items
-	m.pickerValues = items
+	m.pickerValues = values
+	m.pickerIsHeader = isHeader
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
+}
+
+func displayModelName(providerModel string) string {
+	_, model := splitPickerModel(providerModel)
+	if model == "" {
+		return providerModel
+	}
+	return model
+}
+
+func splitPickerModel(s string) (string, string) {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '/' {
+			return s[:i], s[i+1:]
+		}
+	}
+	return "", s
 }
 
 func (m *model) openThemePicker() {
@@ -25,6 +108,7 @@ func (m *model) openThemePicker() {
 	m.pickerKind = "theme"
 	m.pickerItems = items
 	m.pickerValues = items
+	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
@@ -53,6 +137,29 @@ func (m *model) openSessionPicker() {
 	m.pickerKind = "session"
 	m.pickerItems = items
 	m.pickerValues = values
+	m.pickerIsHeader = nil
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.showPicker = true
+}
+
+func (m *model) openEditorPicker() {
+	items := []string{"nvim", "vim", "nano", "code --wait", "cursor --wait"}
+	m.pickerKind = "editor"
+	m.pickerItems = items
+	m.pickerValues = items
+	m.pickerIsHeader = nil
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.showPicker = true
+}
+
+func (m *model) openEditorModePicker() {
+	items := []string{config.EditorModeExternal, config.EditorModeTmuxSplit, config.EditorModeTmuxWindow}
+	m.pickerKind = "editor-mode"
+	m.pickerItems = items
+	m.pickerValues = items
+	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
@@ -75,6 +182,7 @@ func (m *model) openMessagePicker() {
 	m.pickerKind = "message"
 	m.pickerItems = items
 	m.pickerValues = values
+	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
@@ -95,12 +203,43 @@ func (m *model) closePicker() {
 	m.pickerKind = ""
 	m.pickerItems = nil
 	m.pickerValues = nil
+	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.input.Focus()
 }
 
 func (m model) pickerVisibleItems() ([]string, []string) {
+	if m.pickerKind == "model" && m.pickerFilter != "" {
+		allUnique := make(map[string]bool)
+		for _, modelID := range agent.AllProviderModels() {
+			allUnique[modelID] = true
+		}
+		for _, modelID := range config.LoadRecentModels() {
+			allUnique[modelID] = true
+		}
+		for _, modelID := range config.LoadFavorites() {
+			allUnique[modelID] = true
+		}
+		flat := make([]string, 0, len(allUnique))
+		for modelID := range allUnique {
+			flat = append(flat, modelID)
+		}
+		sort.Strings(flat)
+		matched := fuzzyFilter(flat, m.pickerFilter)
+		items := make([]string, len(matched))
+		values := make([]string, len(matched))
+		for i, modelID := range matched {
+			values[i] = modelID
+			if config.IsFavorite(modelID) {
+				items[i] = "★ " + displayModelName(modelID)
+			} else {
+				items[i] = displayModelName(modelID)
+			}
+		}
+		return items, values
+	}
+
 	valuesFor := func(items []string) []string {
 		if len(m.pickerValues) != len(m.pickerItems) {
 			return items
@@ -154,7 +293,11 @@ func (m model) pickerRowForY(y int) (int, bool) {
 	if idx < 0 || start+idx >= end {
 		return 0, false
 	}
-	return start + idx, true
+	row := start + idx
+	if row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
+		return 0, false
+	}
+	return row, true
 }
 
 func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
@@ -163,7 +306,10 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-
+	if index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
+		m.closePicker()
+		return m, nil
+	}
 	selected := values[index]
 	kind := m.pickerKind
 	m.closePicker()
@@ -188,11 +334,20 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	if kind == "theme" {
 		return m.handleCommand("/themes " + selected)
 	}
+	if kind == "editor" {
+		return m.handleCommand("/editor " + selected)
+	}
+	if kind == "editor-mode" {
+		return m.handleCommand("/editor-mode " + selected)
+	}
 	return m.handleCommand("/models " + selected)
 }
 
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
+	if m.pickerKind == "model" {
+		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · f favorite · Esc cancel · type to filter")
+	}
 
 	title := "Select model"
 	if m.pickerKind == "session" {
@@ -203,6 +358,12 @@ func (m model) renderPicker() string {
 	}
 	if m.pickerKind == "theme" {
 		title = "Select theme"
+	}
+	if m.pickerKind == "editor" {
+		title = "Select editor"
+	}
+	if m.pickerKind == "editor-mode" {
+		title = "Select editor mode"
 	}
 	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilter+"_")
 
@@ -219,17 +380,28 @@ func (m model) renderPicker() string {
 		if m.pickerKind == "theme" {
 			empty = "(no themes)"
 		}
+		if m.pickerKind == "editor" {
+			empty = "(no editors available)"
+		}
+		if m.pickerKind == "editor-mode" {
+			empty = "(no editor modes available)"
+		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
-			if i == m.pickerIndex {
-				line = m.styles.Selected.Render(" " + line + " ")
-			} else {
-				line = "  " + line
+			isHeader := i < len(m.pickerIsHeader) && m.pickerIsHeader[i]
+			switch {
+			case line == "":
+				// spacer line
+			case isHeader:
+				body.WriteString(hintStyle.Render("  " + line))
+			case i == m.pickerIndex:
+				body.WriteString(m.styles.Selected.Render(" " + line + " "))
+			default:
+				body.WriteString("  " + line)
 			}
-			body.WriteString(line)
 			body.WriteString("\n")
 		}
 		const maxRows = 15

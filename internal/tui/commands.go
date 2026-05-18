@@ -45,7 +45,8 @@ func init() {
 		{name: "/help", help: "Show this help", handler: runHelpCmd},
 		{name: "/themes", aliases: []string{"/theme"}, usage: "/themes [name]", help: "Choose or switch themes", handler: runThemesCmd},
 		{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
-		{name: "/editor", help: "Reopen the external editor", handler: runEditorCmd},
+		{name: "/editor", usage: "/editor [command]", help: "Choose default external editor", handler: runEditorCmd},
+		{name: "/editor-mode", usage: "/editor-mode [external|tmux-split|tmux-window]", help: "Set editor open mode", handler: runEditorModeCmd},
 		{name: "/sidebar", help: "Toggle sidebar placeholder", handler: runSidebarCmd},
 		{name: "/skills", help: "List available skills", handler: runSkillsCmd},
 		{name: "/commands", help: "List all available commands (built-in + custom)", handler: runCommandsCmd},
@@ -543,4 +544,8 @@ func runGitHubCmd(m *model, args []string) tea.Cmd {
 			return statusMsg{text: "Unknown GitHub action: " + action}
 		}
 	}
+}
+
+func runEditorModeCmd(m *model, args []string) tea.Cmd {
+	return m.handleEditorModeCmd(args)
 }

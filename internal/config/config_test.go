@@ -496,6 +496,53 @@ func TestLoadKeepsExplicitEnvModelOverRecent(t *testing.T) {
 	}
 }
 
+func TestFavoriteModelsState(t *testing.T) {
+	tmpState, err := os.MkdirTemp("", "ocode-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpState)
+	t.Setenv("XDG_STATE_HOME", tmpState)
+
+	if err := SaveRecentModel("provider/recent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveFavoriteModel("provider/favorite"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveFavoriteModel("provider/favorite"); err != nil {
+		t.Fatal(err)
+	}
+
+	favorites := LoadFavorites()
+	if len(favorites) != 1 || favorites[0] != "provider/favorite" {
+		t.Fatalf("expected one favorite, got %#v", favorites)
+	}
+	if !IsFavorite("provider/favorite") {
+		t.Fatal("expected provider/favorite to be favorite")
+	}
+	if err := RemoveFavoriteModel("provider/favorite"); err != nil {
+		t.Fatal(err)
+	}
+	if IsFavorite("provider/favorite") {
+		t.Fatal("expected favorite to be removed")
+	}
+	recents := LoadRecentModels()
+	if len(recents) != 1 || recents[0] != "provider/recent" {
+		t.Fatalf("expected recents preserved, got %#v", recents)
+	}
+}
+
+func TestFavoriteModelsValidateProviderModel(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := SaveFavoriteModel("missing-slash"); err == nil {
+		t.Fatal("expected invalid favorite model id to fail")
+	}
+	if err := RemoveFavoriteModel("missing-slash"); err == nil {
+		t.Fatal("expected invalid favorite model id to fail")
+	}
+}
+
 func TestLoadPrefersLastModelOverRecent(t *testing.T) {
 	tmpHome, err := os.MkdirTemp("", "ocode-home")
 	if err != nil {

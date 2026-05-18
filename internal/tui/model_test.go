@@ -467,7 +467,7 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 	}
 
 	view := m.View().Content
-	for _, want := range []string{"Files", "changed.go", "TODO", "- [ ] ship task 4"} {
+	for _, want := range []string{"Files", "changed.go", "TODO", "- [○] ship task 4"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected sidebar to include %q, got %q", want, view)
 		}
@@ -531,6 +531,70 @@ func TestHandleModelCmdUpdatesCurrentModel(t *testing.T) {
 	if got := m.currentModelName(); got != "gpt-4o-mini" {
 		t.Fatalf("expected active model to update, got %q", got)
 	}
+}
+
+func TestModelPickerShowsFavoritesAndRecentsFirst(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := config.SaveRecentModel("openai/gpt-4o-mini"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRecentModel("anthropic/claude-sonnet-4-20250514"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveFavoriteModel("openai/gpt-4o-mini"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{}
+	m.openModelPicker()
+
+	if len(m.pickerItems) < 4 {
+		t.Fatalf("expected grouped picker items, got %#v", m.pickerItems)
+	}
+	if m.pickerItems[0] != "★ Favorites" {
+		t.Fatalf("expected favorites header first, got %#v", m.pickerItems[:4])
+	}
+	if !strings.Contains(m.pickerItems[1], "gpt-4o-mini") || m.pickerValues[1] != "openai/gpt-4o-mini" {
+		t.Fatalf("expected favorite model first, got items=%#v values=%#v", m.pickerItems[:4], m.pickerValues[:4])
+	}
+	if !containsString(m.pickerItems, "Recently Used") {
+		t.Fatalf("expected recent section, got %#v", m.pickerItems)
+	}
+	for i, value := range m.pickerValues {
+		if value == "openai/gpt-4o-mini" && i != 1 {
+			t.Fatalf("favorite should not be duplicated in recents/providers, got duplicate at %d in %#v", i, m.pickerValues)
+		}
+	}
+}
+
+func TestModelPickerToggleFavorite(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	m := model{showPicker: true, pickerKind: "model", pickerItems: []string{"openai/gpt-4o-mini"}, pickerValues: []string{"openai/gpt-4o-mini"}}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	got := derefTestModel(t, updated)
+	if !config.IsFavorite("openai/gpt-4o-mini") {
+		t.Fatal("expected f to add selected model to favorites")
+	}
+	if !got.showPicker || got.pickerKind != "model" {
+		t.Fatalf("expected model picker to remain open, got showPicker=%v kind=%q", got.showPicker, got.pickerKind)
+	}
+
+	got.pickerIndex = 1
+	updated, _ = got.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	_ = updated
+	if config.IsFavorite("openai/gpt-4o-mini") {
+		t.Fatal("expected f to remove selected model from favorites")
+	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPickerSelectsSessionByValue(t *testing.T) {

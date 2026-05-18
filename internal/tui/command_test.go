@@ -185,3 +185,102 @@ func TestCommandHelpTextShowsAliasesAndArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestEditorCommandOpensPicker(t *testing.T) {
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)), files: newFilesModel(".")}
+
+	updated, cmd := m.handleCommand("/editor")
+	if cmd != nil {
+		t.Fatalf("expected /editor to return no command, got %T", cmd)
+	}
+
+	got := updated.(*model)
+	if !got.showPicker || got.pickerKind != "editor" {
+		t.Fatalf("expected /editor to open editor picker, got showPicker=%v kind=%q", got.showPicker, got.pickerKind)
+	}
+	if len(got.pickerItems) == 0 {
+		t.Fatal("expected editor picker to include editors")
+	}
+	if got.pickerItems[0] != "nvim" {
+		t.Fatalf("expected first picker item to be nvim, got %q", got.pickerItems[0])
+	}
+}
+
+func TestEditorCommandSetsEditor(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	m := model{
+		input:    newTestTextarea(),
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		files:    newFilesModel("."),
+		config:   &config.Config{Ocode: &config.OcodeConfig{}},
+	}
+
+	updated, cmd := m.handleCommand("/editor cat")
+	if cmd != nil {
+		t.Fatalf("expected /editor cat to return no command, got %T", cmd)
+	}
+
+	got := updated.(*model)
+	if got.files.editor != "cat" {
+		t.Fatalf("expected editor to be set to cat, got %q", got.files.editor)
+	}
+}
+
+func TestEditorModeCommandOpensPicker(t *testing.T) {
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+
+	updated, cmd := m.handleCommand("/editor-mode")
+	if cmd != nil {
+		t.Fatalf("expected /editor-mode to return no command, got %T", cmd)
+	}
+
+	got := updated.(*model)
+	if !got.showPicker || got.pickerKind != "editor-mode" {
+		t.Fatalf("expected /editor-mode to open editor-mode picker, got showPicker=%v kind=%q", got.showPicker, got.pickerKind)
+	}
+	if len(got.pickerItems) != 3 {
+		t.Fatalf("expected 3 editor mode options, got %d", len(got.pickerItems))
+	}
+	if got.pickerItems[0] != config.EditorModeExternal {
+		t.Fatalf("expected first option to be external, got %q", got.pickerItems[0])
+	}
+}
+
+func TestEditorModeCommandValidMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	m := model{
+		input:    textarea.New(),
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		config:   &config.Config{Ocode: &config.OcodeConfig{}},
+		files:    newFilesModel("."),
+	}
+
+	updated, cmd := m.handleCommand("/editor-mode external")
+	if cmd != nil {
+		t.Fatalf("expected /editor-mode external to return no command, got %T", cmd)
+	}
+
+	got := updated.(*model)
+	if got.config.Ocode.EditorMode != config.EditorModeExternal {
+		t.Fatalf("expected editor mode to be set to external, got %q", got.config.Ocode.EditorMode)
+	}
+}
+
+func TestEditorModeCommandInvalidMode(t *testing.T) {
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+
+	updated, cmd := m.handleCommand("/editor-mode bogus")
+	if cmd != nil {
+		t.Fatalf("expected /editor-mode bogus to return no command, got %T", cmd)
+	}
+
+	got := updated.(*model)
+	if len(got.messages) == 0 {
+		t.Fatal("expected error message for invalid mode")
+	}
+	if !strings.Contains(got.messages[0].text, "Invalid editor mode") {
+		t.Fatalf("expected error to mention invalid mode, got %q", got.messages[0].text)
+	}
+}

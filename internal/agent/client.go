@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -451,6 +452,7 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		"instructions": strings.Join(instructions, "\n\n"),
 		"input":        input,
 		"store":        false,
+		"stream":       true,
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -480,52 +482,68 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		return nil, fmt.Errorf("openai responses error (%d): %s", resp.StatusCode, string(body))
 	}
 
-	var result struct {
-		Model  string `json:"model"`
-		Output []struct {
-			Type    string `json:"type"`
-			Role    string `json:"role"`
-			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"content"`
-		} `json:"output"`
-		Usage json.RawMessage `json:"usage"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	// Find the first message-type output item.
-	for _, out := range result.Output {
-		if out.Type != "message" {
+	// Parse SSE stream to accumulate the full response.
+	var fullText string
+	var resultModel string
+	var lastEvent string
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			lastEvent = strings.TrimPrefix(line, "event: ")
 			continue
 		}
-		var text string
-		for _, c := range out.Content {
-			if c.Type == "output_text" {
-				text += c.Text
+		if !strings.HasPrefix(line, "data: ") {
+			if line == "" {
+				lastEvent = ""
+			}
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "[DONE]" {
+			break
+		}
+		var payload struct {
+			Type  string `json:"type"`
+			Model string `json:"model"`
+			Delta string `json:"delta"`
+			Text  string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(data), &payload); err != nil {
+			continue
+		}
+		eventType := payload.Type
+		if eventType == "" {
+			eventType = lastEvent
+		}
+		if payload.Model != "" {
+			resultModel = payload.Model
+		}
+		switch eventType {
+		case "response.output_text.delta":
+			fullText += payload.Delta
+		case "response.output_text.done":
+			fullText += payload.Text
+		case "response.completed":
+			if payload.Model != "" {
+				resultModel = payload.Model
 			}
 		}
-		msg := &Message{
-			Role:    out.Role,
-			Content: text,
-			Model:   result.Model,
-		}
-		if msg.Model == "" {
-			msg.Model = c.Model
-		}
-		usage, err := usageForProvider(c.Provider, result.Usage)
-		if err != nil {
-			return nil, err
-		}
-		msg.Usage = usage
-		if usage != nil {
-			msg.Spend = usage.Spend(msg.Model)
-		}
-		return msg, nil
 	}
-	return nil, fmt.Errorf("no response from openai responses api")
+
+	if fullText == "" {
+		return nil, fmt.Errorf("no response from openai responses api")
+	}
+
+	msg := &Message{
+		Role:    "assistant",
+		Content: fullText,
+		Model:   resultModel,
+	}
+	if msg.Model == "" {
+		msg.Model = c.Model
+	}
+	return msg, nil
 }
 
 func (c *GenericClient) openAIResponsesURL() string {

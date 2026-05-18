@@ -2,17 +2,46 @@ package tui
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/alecthomas/chroma/v2/quick"
+	"github.com/atotto/clipboard"
+	"github.com/jamesmercstudio/ocode/internal/config"
 )
 
-type filesPreviewMsg struct{ content string }
+type filesPreviewMsg struct {
+	path     string
+	content  string
+	raw      string
+	size     int64
+	language string
+	editable bool
+}
+
+type filesMode int
+
+const (
+	filesModeNormal filesMode = iota
+	filesModeEdit
+	filesModePrompt
+	filesModeDeleteConfirm
+)
+
+type filesPromptKind int
+
+const (
+	filesPromptCreateFile filesPromptKind = iota
+	filesPromptCreateDir
+	filesPromptRename
+)
 
 type fileNode struct {
 	path     string
@@ -24,27 +53,42 @@ type fileNode struct {
 }
 
 type filesModel struct {
-	workDir        string
-	nodes          []fileNode
-	cursor         int
-	preview        viewport.Model
-	fuzzy          bool
-	query          string
-	allPaths       []string
-	width          int
-	height         int
-	editor         string
-	saveEditor     func(string) error
-	choosingEditor bool
-	editorCursor   int
-	editorTarget   string
-	statusMsg      string
+	workDir         string
+	nodes           []fileNode
+	cursor          int
+	preview         viewport.Model
+	fuzzy           bool
+	query           string
+	allPaths        []string
+	width           int
+	height          int
+	editor          string
+	saveEditor      func(string) error
+	choosingEditor  bool
+	editorCursor    int
+	editorTarget    string
+	statusMsg       string
+	mode            filesMode
+	editorInput     textarea.Model
+	promptInput     textarea.Model
+	promptKind      filesPromptKind
+	promptTarget    string
+	previewPath     string
+	previewSize     int64
+	previewLang     string
+	previewEditable bool
+	gitStatus       map[string]string
+	editorOpener    func(string) tea.Cmd
+	editorMode      string
 }
 
 func newFilesModel(workDir string) filesModel {
 	m := filesModel{workDir: workDir}
 	m.preview = viewport.New()
+	m.editorInput = textarea.New()
+	m.promptInput = textarea.New()
 	m.nodes = loadDirChildren(workDir, 0)
+	m.refreshGitStatus()
 	return m
 }
 
@@ -73,6 +117,10 @@ func (m *filesModel) SetEditor(e string) { m.editor = e }
 
 func (m *filesModel) SetSaveEditor(fn func(string) error) { m.saveEditor = fn }
 
+func (m *filesModel) SetEditorOpener(fn func(string) tea.Cmd) { m.editorOpener = fn }
+
+func (m *filesModel) SetEditorMode(mode string) { m.editorMode = mode }
+
 func (m *filesModel) Resize(w, h int) {
 	m.width = w
 	m.height = h
@@ -84,17 +132,29 @@ func (m *filesModel) Resize(w, h int) {
 	}
 	m.preview.SetWidth(previewW - 7)
 	m.preview.SetHeight(previewH)
+	m.editorInput.SetWidth(previewW - 7)
+	m.editorInput.SetHeight(previewH)
+	m.promptInput.SetWidth(previewW - 7)
+	m.promptInput.SetHeight(1)
 }
 
 func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case filesPreviewMsg:
-		m.preview.SetContent(msg.content)
-		m.preview.GotoTop()
+		m.applyPreview(msg)
 		return m, nil
 	case tea.KeyPressMsg:
 		if m.choosingEditor {
 			return m.updateEditorPicker(msg)
+		}
+		if m.mode == filesModeEdit {
+			return m.updateInlineEdit(msg)
+		}
+		if m.mode == filesModePrompt {
+			return m.updatePrompt(msg)
+		}
+		if m.mode == filesModeDeleteConfirm {
+			return m.updateDeleteConfirm(msg)
 		}
 		if m.fuzzy {
 			return m.updateFuzzy(msg)
@@ -138,10 +198,73 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			m.openEditorPicker(m.nodes[m.cursor].path)
 		}
+	case "i":
+		return m.startInlineEdit()
+	case "n":
+		m.startCreateFile()
+	case "N", "shift+n":
+		m.startCreateDir()
+	case "r":
+		m.startRename()
+	case "D", "shift+d":
+		m.startDelete()
+	case "y":
+		m.copySelectedPath()
+	case "R", "shift+r":
+		return m, m.refreshPreviewCmd()
 	case "/":
 		m.fuzzy = true
 		m.query = ""
 		m.buildAllPaths()
+	}
+	return m, nil
+}
+
+func (m filesModel) updateInlineEdit(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = filesModeNormal
+		m.editorInput.Blur()
+		m.statusMsg = "edit cancelled"
+		return m, nil
+	case "ctrl+s":
+		return m.saveInlineEdit()
+	}
+	var cmd tea.Cmd
+	m.editorInput, cmd = m.editorInput.Update(msg)
+	return m, cmd
+}
+
+func (m filesModel) updatePrompt(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = filesModeNormal
+		m.statusMsg = "action cancelled"
+		return m, nil
+	case "enter", "ctrl+j", "ctrl+m":
+		return m.submitPrompt()
+	}
+	var cmd tea.Cmd
+	m.promptInput, cmd = m.promptInput.Update(msg)
+	return m, cmd
+}
+
+func (m filesModel) updateDeleteConfirm(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	switch msg.String() {
+	case "y", "Y", "shift+y":
+		path := m.promptTarget
+		if err := os.Remove(path); err != nil {
+			m.statusMsg = "delete failed: " + err.Error()
+			m.mode = filesModeNormal
+			return m, nil
+		}
+		m.mode = filesModeNormal
+		m.statusMsg = "deleted: " + filepath.Base(path)
+		m.rebuildTreeKeeping(filepath.Dir(path))
+		return m, m.refreshPreviewCmd()
+	case "n", "N", "esc":
+		m.mode = filesModeNormal
+		m.statusMsg = "delete cancelled"
 	}
 	return m, nil
 }
@@ -266,11 +389,12 @@ func (m *filesModel) toggleDir(idx int) {
 func loadPreviewCmd(n fileNode) tea.Cmd {
 	return func() tea.Msg {
 		if n.isDir {
-			return filesPreviewMsg{content: "[directory]"}
+			return filesPreviewMsg{path: n.path, content: "[directory]", language: "directory"}
 		}
+		info, statErr := os.Stat(n.path)
 		f, err := os.Open(n.path)
 		if err != nil {
-			return filesPreviewMsg{content: "[cannot read file]"}
+			return filesPreviewMsg{path: n.path, content: "[cannot read file]", language: languageForPath(n.path)}
 		}
 		defer f.Close()
 
@@ -283,15 +407,45 @@ func loadPreviewCmd(n fileNode) tea.Cmd {
 			probe = probe[:512]
 		}
 		if bytes.IndexByte(probe, 0) >= 0 {
-			return filesPreviewMsg{content: "[binary file]"}
+			return filesPreviewMsg{path: n.path, content: "[binary file]", size: fileSize(info, statErr), language: languageForPath(n.path)}
 		}
 
 		content := string(data)
+		editable := nr <= 1024*1024
 		if nr > 1024*1024 {
 			content = string(data[:1024*1024]) + "\n[truncated — 1MB limit]"
 		}
-		return filesPreviewMsg{content: content}
+		language := languageForPath(n.path)
+		return filesPreviewMsg{path: n.path, content: highlightContent(content, language), raw: content, size: fileSize(info, statErr), language: language, editable: editable}
 	}
+}
+
+func fileSize(info os.FileInfo, err error) int64 {
+	if err != nil || info == nil {
+		return 0
+	}
+	return info.Size()
+}
+
+func (m *filesModel) applyPreview(msg filesPreviewMsg) {
+	m.previewPath = msg.path
+	m.previewSize = msg.size
+	m.previewLang = msg.language
+	m.previewEditable = msg.editable
+	m.preview.SetContent(msg.content)
+	m.preview.GotoTop()
+}
+
+func highlightContent(content string, language string) string {
+	if language == "" || language == "text" || language == "directory" {
+		return content
+	}
+	var highlighted bytes.Buffer
+	if err := quick.Highlight(&highlighted, content, language, "terminal16m", "monokai"); err != nil {
+		// intentionally not logged: unknown lexer/style should not block plain-text preview
+		return content
+	}
+	return highlighted.String()
 }
 
 func (m *filesModel) buildAllPaths() {
@@ -349,7 +503,187 @@ func (m *filesModel) navigateTo(relPath string) {
 	}
 }
 
+func (m *filesModel) rebuildTreeKeeping(path string) {
+	rel, err := filepath.Rel(m.workDir, path)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		rel = ""
+	}
+	m.nodes = loadDirChildren(m.workDir, 0)
+	m.refreshGitStatus()
+	if rel != "" && rel != "." {
+		m.navigateTo(rel)
+		return
+	}
+	if m.cursor >= len(m.nodes) {
+		m.cursor = len(m.nodes) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
+func (m filesModel) refreshPreviewCmd() tea.Cmd {
+	if m.cursor >= len(m.nodes) {
+		return nil
+	}
+	return loadPreviewCmd(m.nodes[m.cursor])
+}
+
+func (m filesModel) selectedNode() (fileNode, bool) {
+	if m.cursor < 0 || m.cursor >= len(m.nodes) {
+		return fileNode{}, false
+	}
+	return m.nodes[m.cursor], true
+}
+
+func (m filesModel) selectedActionDir() string {
+	n, ok := m.selectedNode()
+	if !ok {
+		return m.workDir
+	}
+	if n.isDir {
+		return n.path
+	}
+	return filepath.Dir(n.path)
+}
+
+func (m *filesModel) startCreateFile() {
+	m.mode = filesModePrompt
+	m.promptKind = filesPromptCreateFile
+	m.promptTarget = m.selectedActionDir()
+	m.promptInput.SetValue("")
+	m.statusMsg = "new file name"
+}
+
+func (m *filesModel) startCreateDir() {
+	m.mode = filesModePrompt
+	m.promptKind = filesPromptCreateDir
+	m.promptTarget = m.selectedActionDir()
+	m.promptInput.SetValue("")
+	m.statusMsg = "new directory name"
+}
+
+func (m *filesModel) startRename() {
+	n, ok := m.selectedNode()
+	if !ok {
+		return
+	}
+	m.mode = filesModePrompt
+	m.promptKind = filesPromptRename
+	m.promptTarget = n.path
+	m.promptInput.SetValue(n.name)
+	m.statusMsg = "rename"
+}
+
+func (m *filesModel) startDelete() {
+	n, ok := m.selectedNode()
+	if !ok {
+		return
+	}
+	m.mode = filesModeDeleteConfirm
+	m.promptTarget = n.path
+	m.statusMsg = "delete " + n.name + "? y/N"
+}
+
+func (m filesModel) submitPrompt() (filesModel, tea.Cmd) {
+	name := strings.TrimSpace(m.promptInput.Value())
+	if name == "" || strings.Contains(name, string(filepath.Separator)) {
+		m.statusMsg = "invalid name"
+		return m, nil
+	}
+	var target string
+	switch m.promptKind {
+	case filesPromptCreateFile:
+		target = filepath.Join(m.promptTarget, name)
+		f, err := os.OpenFile(target, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0644)
+		if err != nil {
+			m.statusMsg = "create file failed: " + err.Error()
+			return m, nil
+		}
+		if err := f.Close(); err != nil {
+			m.statusMsg = "create file close failed: " + err.Error()
+			return m, nil
+		}
+	case filesPromptCreateDir:
+		target = filepath.Join(m.promptTarget, name)
+		if err := os.Mkdir(target, 0755); err != nil {
+			m.statusMsg = "create directory failed: " + err.Error()
+			return m, nil
+		}
+	case filesPromptRename:
+		target = filepath.Join(filepath.Dir(m.promptTarget), name)
+		if err := os.Rename(m.promptTarget, target); err != nil {
+			m.statusMsg = "rename failed: " + err.Error()
+			return m, nil
+		}
+	}
+	m.mode = filesModeNormal
+	m.statusMsg = "saved: " + name
+	m.rebuildTreeKeeping(target)
+	return m, m.refreshPreviewCmd()
+}
+
+func (m filesModel) startInlineEdit() (filesModel, tea.Cmd) {
+	n, ok := m.selectedNode()
+	if !ok || n.isDir {
+		return m, nil
+	}
+	result := loadPreviewCmd(n)()
+	preview, ok := result.(filesPreviewMsg)
+	if !ok || !preview.editable {
+		m.statusMsg = "file is not editable in preview"
+		return m, nil
+	}
+	m.applyPreview(preview)
+	m.editorInput.SetValue(preview.raw)
+	m.editorInput.Focus()
+	m.mode = filesModeEdit
+	m.statusMsg = "editing: ctrl+s save, esc cancel"
+	return m, nil
+}
+
+func (m filesModel) saveInlineEdit() (filesModel, tea.Cmd) {
+	n, ok := m.selectedNode()
+	if !ok || n.isDir {
+		m.statusMsg = "no file selected"
+		return m, nil
+	}
+	info, err := os.Stat(n.path)
+	mode := os.FileMode(0644)
+	if err == nil {
+		mode = info.Mode()
+	}
+	if err := os.WriteFile(n.path, []byte(m.editorInput.Value()), mode); err != nil {
+		m.statusMsg = "save failed: " + err.Error()
+		return m, nil
+	}
+	m.mode = filesModeNormal
+	m.editorInput.Blur()
+	m.statusMsg = "saved: " + n.name
+	return m, loadPreviewCmd(n)
+}
+
+func (m *filesModel) copySelectedPath() {
+	n, ok := m.selectedNode()
+	if !ok {
+		return
+	}
+	rel, err := filepath.Rel(m.workDir, n.path)
+	if err != nil {
+		m.statusMsg = "copy path failed: " + err.Error()
+		return
+	}
+	if err := clipboard.WriteAll(rel); err != nil {
+		m.statusMsg = "copy path failed: " + err.Error()
+		return
+	}
+	m.statusMsg = "copied path: " + rel
+}
+
 func (m filesModel) openInEditor(path string) tea.Cmd {
+	if m.editorOpener != nil {
+		return m.editorOpener(path)
+	}
 	editor := m.editor
 	if editor == "" {
 		editor = "vi"
@@ -363,6 +697,100 @@ func (m filesModel) openInEditor(path string) tea.Cmd {
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		return editorFinishedMsg{err: err}
 	})
+}
+
+func (m *filesModel) refreshGitStatus() {
+	m.gitStatus = map[string]string{}
+	if _, err := os.Stat(filepath.Join(m.workDir, ".git")); err != nil {
+		return
+	}
+	out, err := exec.Command("git", "-C", m.workDir, "status", "--short").Output()
+	if err != nil {
+		m.statusMsg = "git status failed: " + err.Error()
+		return
+	}
+	m.gitStatus = parseGitStatusShort(string(out))
+}
+
+func parseGitStatusShort(out string) map[string]string {
+	status := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		if len(line) < 4 {
+			continue
+		}
+		code := strings.TrimSpace(line[:2])
+		path := strings.TrimSpace(line[3:])
+		if idx := strings.LastIndex(path, " -> "); idx >= 0 {
+			path = path[idx+4:]
+		}
+		badge := "M"
+		if strings.Contains(code, "?") {
+			badge = "?"
+		} else if strings.Contains(code, "A") {
+			badge = "A"
+		} else if strings.Contains(code, "D") {
+			badge = "D"
+		} else if strings.Contains(code, "R") {
+			badge = "R"
+		}
+		status[path] = badge
+	}
+	return status
+}
+
+func languageForPath(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go":
+		return "go"
+	case ".js", ".jsx":
+		return "javascript"
+	case ".ts", ".tsx":
+		return "typescript"
+	case ".json":
+		return "json"
+	case ".md", ".markdown":
+		return "markdown"
+	case ".css":
+		return "css"
+	case ".html":
+		return "html"
+	case ".sh", ".bash", ".zsh":
+		return "shell"
+	case ".py":
+		return "python"
+	case ".txt":
+		return "text"
+	default:
+		return "text"
+	}
+}
+
+func formatBytes(n int64) string {
+	if n < 1024 {
+		return fmt.Sprintf("%d B", n)
+	}
+	if n < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+}
+
+func (m filesModel) previewHeader() string {
+	if m.previewPath == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(m.workDir, m.previewPath)
+	if err != nil {
+		rel = m.previewPath
+	}
+	parts := []string{rel}
+	if m.previewLang != "" {
+		parts = append(parts, m.previewLang)
+	}
+	if m.previewSize > 0 {
+		parts = append(parts, formatBytes(m.previewSize))
+	}
+	return strings.Join(parts, "  |  ")
 }
 
 func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
@@ -381,6 +809,11 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 			}
 		}
 		line := indent + icon + n.name
+		if rel, err := filepath.Rel(m.workDir, n.path); err == nil {
+			if badge := m.gitStatus[rel]; badge != "" {
+				line = badge + " " + line
+			}
+		}
 		if i == m.cursor {
 			line = lipgloss.NewStyle().Reverse(true).Width(treeW - 2).Render(line)
 		}
@@ -390,9 +823,29 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 	treePane := borderStyle.Width(treeW - 2).Height(h - 3).Render(treeContent)
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
-	previewContent := lipgloss.JoinHorizontal(lipgloss.Top, m.preview.View(), previewSB)
+	previewBody := m.preview.View()
+	if m.mode == filesModeEdit {
+		previewBody = m.editorInput.View()
+	}
+	previewContent := lipgloss.JoinHorizontal(lipgloss.Top, previewBody, previewSB)
+	if header := m.previewHeader(); header != "" {
+		previewContent = hintStyle.Render(header) + "\n" + previewContent
+	}
+	if m.mode == filesModeNormal && m.previewEditable {
+		hint := "i inline edit  e external  E choose editor  /editor set default"
+		if isTmuxMode(m.editorMode) {
+			hint = "e " + m.tmuxOpenHint() + "  i inline edit  E choose editor  /editor set default"
+		}
+		previewContent = hintStyle.Render(hint) + "\n" + previewContent
+	}
 	if m.choosingEditor {
 		previewContent = m.editorPickerView(previewW-4, styles)
+	} else if m.mode == filesModePrompt {
+		previewContent = hintStyle.Render(m.statusMsg) + "\n" + m.promptInput.View()
+	} else if m.mode == filesModeDeleteConfirm {
+		previewContent = hintStyle.Render(m.statusMsg) + "\n" + hintStyle.Render("press y to confirm, esc/n to cancel")
+	} else if m.mode == filesModeEdit {
+		previewContent = hintStyle.Render("ctrl+s save  esc cancel") + "\n" + previewContent
 	} else if m.statusMsg != "" {
 		previewContent = hintStyle.Render(m.statusMsg) + "\n\n" + previewContent
 	} else if m.editor != "" {
@@ -443,4 +896,19 @@ func (m filesModel) editorPickerView(width int, styles Styles) string {
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func isTmuxMode(mode string) bool {
+	return mode == config.EditorModeTmuxSplit || mode == config.EditorModeTmuxWindow
+}
+
+func (m filesModel) tmuxOpenHint() string {
+	switch m.editorMode {
+	case config.EditorModeTmuxSplit:
+		return "tmux split: " + m.editor
+	case config.EditorModeTmuxWindow:
+		return "tmux window: " + m.editor
+	default:
+		return "editor: " + m.editor
+	}
 }
