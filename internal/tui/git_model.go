@@ -70,7 +70,7 @@ func newGitModel(workDir string) gitModel {
 	m.diff = viewport.New()
 	ci := textarea.New()
 	ci.Placeholder = "Commit message..."
-	ci.SetHeight(3)
+	ci.SetHeight(5)
 	m.commitInput = ci
 	if _, err := m.gitRun("rev-parse", "--git-dir"); err != nil {
 		m.statusMsg = "not a git repository"
@@ -214,7 +214,7 @@ func (m gitModel) updateCommitInput(msg tea.Msg) (gitModel, tea.Cmd) {
 		case "esc":
 			m.committing = false
 			return m, nil
-		case "enter":
+		case "ctrl+enter":
 			text := strings.TrimSpace(m.commitInput.Value())
 			if text != "" {
 				if _, err := m.gitRun("commit", "-m", text); err != nil {
@@ -576,6 +576,8 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 
 	parts := []string{header, row}
 	if m.committing {
+		hint := hintStyle.Render("ctrl+enter submit  esc cancel")
+		parts = append(parts, hint)
 		parts = append(parts, borderStyle.Width(sectW+filesW-2).Render(m.commitInput.View()))
 	}
 	parts = append(parts, status)
