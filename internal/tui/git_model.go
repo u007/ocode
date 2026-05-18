@@ -61,6 +61,7 @@ type gitModel struct {
 	committing     bool
 	commitInput    textarea.Model
 	statusMsg      string
+	pendingAction  string // "discard" | "drop-stash" | ""
 }
 
 func newGitModel(workDir string) gitModel {
@@ -249,6 +250,10 @@ func (m gitModel) handleSectionKey(key string) (gitModel, tea.Cmd) {
 }
 
 func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
+	// Clear pending confirmation when user presses any key other than the confirm key
+	if key != "d" {
+		m.pendingAction = ""
+	}
 	switch key {
 	case "j", "down":
 		switch m.section {
@@ -325,11 +330,12 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		}
 	case "d":
 		if m.section == gitSectionChanges {
-			if m.statusMsg == "press d again to discard" {
-				if m.filesCursor >= len(m.stagedFiles) {
-					idx := m.filesCursor - len(m.stagedFiles)
-					unstaged := m.allUnstagedAndUntracked()
-					if idx < len(unstaged) {
+			if m.filesCursor >= len(m.stagedFiles) {
+				idx := m.filesCursor - len(m.stagedFiles)
+				unstaged := m.allUnstagedAndUntracked()
+				if idx < len(unstaged) {
+					if m.pendingAction == "discard" {
+						m.pendingAction = ""
 						f := unstaged[idx]
 						if f.status == "?" {
 							m.statusMsg = "cannot discard untracked file"
@@ -342,30 +348,27 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 							m.refresh()
 							m.loadDiff()
 						}
+					} else {
+						m.pendingAction = "discard"
+						m.statusMsg = "press d again to discard"
 					}
 				}
 			} else {
-				m.statusMsg = "press d again to discard"
+				m.statusMsg = "cannot discard staged file — unstage first"
 			}
 		} else if m.section == gitSectionStash && m.stashCursor < len(m.stashes) {
-			if m.statusMsg == "press d again to drop stash" {
+			if m.pendingAction == "drop-stash" {
+				m.pendingAction = ""
 				ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
-				m.gitRun("stash", "drop", ref)
-				m.statusMsg = "stash dropped"
-				m.refresh()
+				if _, err := m.gitRun("stash", "drop", ref); err != nil {
+					m.statusMsg = "drop failed: " + err.Error()
+				} else {
+					m.statusMsg = "stash dropped"
+					m.refresh()
+				}
 			} else {
+				m.pendingAction = "drop-stash"
 				m.statusMsg = "press d again to drop stash"
-			}
-		}
-	case "D":
-		if m.section == gitSectionStash && m.stashCursor < len(m.stashes) {
-			if m.statusMsg == "press D again to drop stash" {
-				ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
-				m.gitRun("stash", "drop", ref)
-				m.statusMsg = "stash dropped"
-				m.refresh()
-			} else {
-				m.statusMsg = "press D again to drop stash"
 			}
 		}
 	case "c":
