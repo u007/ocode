@@ -863,7 +863,7 @@ func TestTabMouseReleaseUsesRightAlignedHeaderPosition(t *testing.T) {
 	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("1:chat"))
 	filesWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("2:files"))
 
-	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + filesWidth + 1, Y: 1})
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + filesWidth + 1, Y: 0})
 	got := derefTestModel(t, updated)
 
 	if got.activeTab != tabGit {

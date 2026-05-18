@@ -550,7 +550,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Global tab switching — always handled regardless of active tab
 		switch keyStr {
-		case "alt+[":
+		case "alt+[", "ctrl+shift+[":
 			m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
 			if m.activeTab == tabChat {
 				m.chatUnread = false
@@ -560,7 +560,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logViewport.GotoBottom()
 			}
 			return m, nil
-		case "alt+]":
+		case "alt+]", "ctrl+shift+]":
 			m.activeTab = (m.activeTab + 1) % tabCount
 			if m.activeTab == tabChat {
 				m.chatUnread = false
@@ -2695,11 +2695,11 @@ func (m *model) renderStatus() string {
 	var suffix string
 	switch m.activeTab {
 	case tabFiles:
-		suffix = " | enter/e: open | E: choose editor | /: search | alt+[/]: switch tab"
+		suffix = " | enter/e: open | E: choose editor | /: search | alt+[/]/ctrl+shift+[/]: switch tab"
 	case tabGit:
-		suffix = " | tab: cycle panel | s: stage | u: unstage | c: commit | alt+[/]: switch tab"
+		suffix = " | tab: cycle panel | s: stage | u: unstage | c: commit | alt+[/]/ctrl+shift+[/]: switch tab"
 	case tabLog:
-		suffix = " | j/k: scroll | c: clear | alt+[/]: switch tab"
+		suffix = " | j/k: scroll | c: clear | alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
 		suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
 		if m.ctrlCPressed {
@@ -3021,7 +3021,7 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 
 func (m model) tabForClick(mouse tea.Mouse) (int, bool) {
 	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
-	if mouse.Y > headerHeight {
+	if mouse.Y >= headerHeight {
 		return 0, false
 	}
 	tabBar := renderTabBar(m.activeTab, m.chatUnread)
@@ -3030,7 +3030,7 @@ func (m model) tabForClick(mouse tea.Mouse) (int, bool) {
 		if mouse.X < barStartX {
 			continue
 		}
-		if tab, ok := tabAtX(mouse.X, barStartX, m.chatUnread); ok {
+		if tab, ok := tabAtX(mouse.X, barStartX, m.activeTab, m.chatUnread); ok {
 			return tab, true
 		}
 	}
@@ -3046,14 +3046,19 @@ func (m model) tabBarStartXs(barWidth int) []int {
 	return []int{rightAligned}
 }
 
-func tabAtX(mouseX int, barStartX int, unread bool) (int, bool) {
+func tabAtX(mouseX int, barStartX int, activeTab int, unread bool) (int, bool) {
 	labels := []string{"1:chat", "2:files", "3:git", "4:log"}
-	if unread {
+	if unread && activeTab != 0 {
 		labels[0] = "1:chat●"
 	}
 	x := barStartX
 	for i, label := range labels {
-		w := lipgloss.Width(hintStyle.Padding(0, 1).Render(label))
+		var w int
+		if i == activeTab {
+			w = lipgloss.Width(lipgloss.NewStyle().Bold(true).Reverse(true).Padding(0, 1).Render(label))
+		} else {
+			w = lipgloss.Width(hintStyle.Padding(0, 1).Render(label))
+		}
 		if mouseX < x+w {
 			return i, true
 		}

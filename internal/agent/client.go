@@ -418,8 +418,13 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	accountID := jwtClaim(c.APIKey, "https://api.openai.com/auth", "chatgpt_account_id")
 
 	// Map messages → Responses API input items.
+	instructions := make([]string, 0, 1)
 	input := make([]map[string]interface{}, 0, len(messages))
 	for _, m := range messages {
+		if m.Role == "system" {
+			instructions = append(instructions, m.Content)
+			continue
+		}
 		content := interface{}(m.Content)
 		if m.Role == "user" && len(m.Images) > 0 {
 			parts := make([]map[string]interface{}, 0, len(m.Images)+1)
@@ -442,8 +447,10 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	}
 
 	payload := map[string]interface{}{
-		"model": c.Model,
-		"input": input,
+		"model":        c.Model,
+		"instructions": strings.Join(instructions, "\n\n"),
+		"input":        input,
+		"store":        false,
 	}
 
 	jsonData, err := json.Marshal(payload)
