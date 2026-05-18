@@ -172,10 +172,14 @@ func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
 	}()
 
 	var gotURL string
+	var gotPayload map[string]interface{}
 	llmHTTPClient = &http.Client{
 		Timeout: llmRequestTimeout,
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			gotURL = req.URL.String()
+			if err := json.NewDecoder(req.Body).Decode(&gotPayload); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body: io.NopCloser(strings.NewReader(`{
@@ -188,12 +192,26 @@ func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
 	}
 
 	client := &GenericClient{Provider: "openai", Model: "gpt-test", APIKey: "token", UseOAuth: true}
-	msg, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "hi"}}, nil)
+	msg, err := client.chatOpenAIResponses([]Message{{Role: "system", Content: "be terse"}, {Role: "user", Content: "hi"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if gotURL != "https://chatgpt.com/backend-api/codex/responses" {
 		t.Fatalf("responses URL = %q", gotURL)
+	}
+	if gotPayload["instructions"] != "be terse" {
+		t.Fatalf("instructions = %#v", gotPayload["instructions"])
+	}
+	if gotPayload["store"] != false {
+		t.Fatalf("store = %#v", gotPayload["store"])
+	}
+	input, ok := gotPayload["input"].([]interface{})
+	if !ok || len(input) != 1 {
+		t.Fatalf("input = %#v", gotPayload["input"])
+	}
+	item, ok := input[0].(map[string]interface{})
+	if !ok || item["role"] != "user" {
+		t.Fatalf("input item = %#v", input[0])
 	}
 	if msg.Content != "ok" {
 		t.Fatalf("content = %q", msg.Content)
