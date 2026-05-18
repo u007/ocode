@@ -151,7 +151,12 @@ func (m *gitModel) loadLog() {
 }
 
 func (m *gitModel) loadStash() {
-	out, _ := m.gitRun("stash", "list")
+	out, err := m.gitRun("stash", "list")
+	if err != nil {
+		m.statusMsg = "stash list: " + err.Error()
+		m.stashes = nil
+		return
+	}
 	if out == "" {
 		m.stashes = nil
 		return
@@ -160,7 +165,12 @@ func (m *gitModel) loadStash() {
 }
 
 func (m *gitModel) loadBranches() {
-	out, _ := m.gitRun("branch", "-a")
+	out, err := m.gitRun("branch", "-a")
+	if err != nil {
+		m.statusMsg = "branch list: " + err.Error()
+		m.branches = nil
+		return
+	}
 	m.branches = nil
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
@@ -475,7 +485,10 @@ func (m *gitModel) loadDiff() {
 			return
 		}
 		ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
-		out, _ := m.gitRun("stash", "show", "-p", ref)
+		out, err := m.gitRun("stash", "show", "-p", ref)
+		if err != nil {
+			out = "error: " + err.Error()
+		}
 		m.diff.SetContent(out)
 		m.diff.GotoTop()
 	case gitSectionBranches:
@@ -483,7 +496,10 @@ func (m *gitModel) loadDiff() {
 			m.diff.SetContent("")
 			return
 		}
-		out, _ := m.gitRun("log", "--oneline", "-20", m.branches[m.branchCursor])
+		out, err := m.gitRun("log", "--oneline", "-20", m.branches[m.branchCursor])
+		if err != nil {
+			out = "error: " + err.Error()
+		}
 		m.diff.SetContent(out)
 		m.diff.GotoTop()
 	}
