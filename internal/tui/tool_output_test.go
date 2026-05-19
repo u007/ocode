@@ -45,6 +45,7 @@ func TestClickToolOutputExpandsInline(t *testing.T) {
 
 	y := m.toolOutputRegions[0].startLine - m.viewport.YOffset() + 2
 	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 4, Y: y})
+	updated, _ = updated.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 4, Y: y})
 	got := derefTestModel(t, updated)
 	if !got.expandedToolOutputs[0] {
 		t.Fatal("expected click to expand tool output inline")

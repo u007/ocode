@@ -51,7 +51,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		activity:    newActivityTracker(),
 	}
 	a.tools["agent"] = AgentTool{mainAgent: a}
-	a.tools["task"] = TaskTool{mainAgent: a}
+	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)
 		if cfg.Ocode != nil {
@@ -59,6 +59,13 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		}
 	}
 	return a
+}
+
+func (a *Agent) SetChildSessionPersistence(persist func(sessionID, title string, messages []Message, metadata map[string]any) error) {
+	if taskTool, ok := a.tools["task"].(TaskTool); ok {
+		taskTool.persistChildSess = persist
+		a.tools["task"] = taskTool
+	}
 }
 
 type AgentTool struct {

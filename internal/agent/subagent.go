@@ -51,22 +51,29 @@ func FindSubAgentSpec(name string) *SubAgentSpec {
 }
 
 type TaskTool struct {
-	mainAgent *Agent
+	mainAgent        *Agent
+	registry         *AgentRegistry
+	persistChildSess func(sessionID, title string, messages []Message, metadata map[string]any) error
 }
 
 func (t TaskTool) Name() string        { return "task" }
 func (t TaskTool) Description() string { return "Delegate a task to a specialized sub-agent" }
 func (t TaskTool) Definition() map[string]interface{} {
-	subAgentNames := make([]string, len(DefaultSubAgents))
-	subAgentDescs := make([]string, len(DefaultSubAgents))
-	for i, sa := range DefaultSubAgents {
-		subAgentNames[i] = sa.Name
-		subAgentDescs[i] = fmt.Sprintf("%s: %s", sa.Name, sa.Description)
+	subAgents := t.registrySubAgents()
+	subAgentNames := make([]string, 0)
+	subAgentDescs := make([]string, 0)
+	visibleAgentNames := make([]string, 0)
+	for _, sa := range subAgents {
+		subAgentNames = append(subAgentNames, sa.Name)
+		if !sa.Hidden {
+			visibleAgentNames = append(visibleAgentNames, sa.Name)
+			subAgentDescs = append(subAgentDescs, fmt.Sprintf("%s: %s", sa.Name, sa.Description))
+		}
 	}
 
 	return map[string]interface{}{
 		"name":        "task",
-		"description": "Spawn a sub-agent with a specific scope to handle a task autonomously.",
+		"description": "Spawn a sub-agent with a specific scope to handle a task autonomously. Available agents: " + strings.Join(subAgentDescs, ", "),
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -76,7 +83,7 @@ func (t TaskTool) Definition() map[string]interface{} {
 				},
 				"agent": map[string]interface{}{
 					"type":        "string",
-					"description": "The sub-agent type to use. Options: " + strings.Join(subAgentNames, ", "),
+					"description": "The sub-agent type to use. Options: " + strings.Join(visibleAgentNames, ", "),
 					"enum":        subAgentNames,
 				},
 				"context": map[string]interface{}{
@@ -90,6 +97,42 @@ func (t TaskTool) Definition() map[string]interface{} {
 }
 
 func (t TaskTool) Parallel() bool { return true }
+
+func (t TaskTool) registrySubAgents() []AgentDefinition {
+	if t.registry != nil {
+		return t.registry.SubAgents()
+	}
+	var result []AgentDefinition
+	for _, sa := range DefaultSubAgents {
+		result = append(result, AgentDefinition{
+			Name:         sa.Name,
+			Description:  sa.Description,
+			SystemPrompt: sa.SystemPrompt,
+			Tools:        sa.Tools,
+			Mode:         AgentModeSubagent,
+			Source:       "builtin",
+		})
+	}
+	return result
+}
+
+func (t TaskTool) findAgent(name string) *AgentDefinition {
+	if t.registry != nil {
+		return t.registry.Get(name)
+	}
+	spec := FindSubAgentSpec(name)
+	if spec != nil {
+		return &AgentDefinition{
+			Name:         spec.Name,
+			Description:  spec.Description,
+			SystemPrompt: spec.SystemPrompt,
+			Tools:        spec.Tools,
+			Mode:         AgentModeSubagent,
+			Source:       "builtin",
+		}
+	}
+	return nil
+}
 
 func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
@@ -105,15 +148,28 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("prompt is required")
 	}
 
-	spec := FindSubAgentSpec(params.Agent)
+	spec := t.findAgent(params.Agent)
 	if spec == nil {
-		spec = &DefaultSubAgents[0]
+		if params.Agent != "" && t.registry != nil {
+			return "", fmt.Errorf("unknown agent: %s", params.Agent)
+		}
+		defaultSpec := t.findAgent("general")
+		if defaultSpec == nil {
+			return "", fmt.Errorf("no agent available")
+		}
+		spec = defaultSpec
 	}
 
-	tools := t.getToolsForSubAgent(spec)
+	tools := t.getToolsForDef(spec)
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config)
 	subAgent.mode = t.mainAgent.mode
+
+	// Apply per-agent permissions from the agent definition
+	if len(spec.Permissions) > 0 {
+		_, pm := buildPermissionManagerFromAgentWithDiags(spec.Permissions)
+		subAgent.permissions = pm
+	}
 
 	systemPrompt := spec.SystemPrompt
 	if params.Context != "" {
@@ -125,11 +181,25 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		{Role: "user", Content: params.Prompt},
 	}
 
-	t.mainAgent.activity.agentStarted(spec.Name)
+	if t.mainAgent.activity != nil {
+		t.mainAgent.activity.agentStarted(spec.Name)
+	}
 	resp, err := subAgent.Step(subAgentMsgs)
-	t.mainAgent.activity.agentDone(spec.Name)
+	if t.mainAgent.activity != nil {
+		t.mainAgent.activity.agentDone(spec.Name)
+	}
 	if err != nil {
 		return "", err
+	}
+
+	// Persist child session with all messages and metadata (if callback is provided)
+	sessionID := childSessionID("parent", spec.Name)
+	metadata := childSessionMetadata("parent", spec.Name)
+	if t.persistChildSess != nil {
+		if err := t.persistChildSess(sessionID, fmt.Sprintf("Child: %s", spec.Name), resp, metadata); err != nil {
+			// Log but don't fail the task for session persistence errors
+			emitDebug("SESSION", fmt.Sprintf("failed to persist child session: %v", err))
+		}
 	}
 
 	var b strings.Builder
@@ -138,7 +208,29 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 			b.WriteString(m.Content)
 		}
 	}
-	return b.String(), nil
+	result := b.String()
+	if sessionID != "" {
+		result += fmt.Sprintf("\n\n(Child session: %s)", sessionID)
+	}
+	return result, nil
+}
+
+func (t TaskTool) getToolsForDef(spec *AgentDefinition) []tool.Tool {
+	if len(spec.Tools) == 0 {
+		return t.mainAgent.GetTools()
+	}
+
+	allTools := t.mainAgent.GetTools()
+	result := make([]tool.Tool, 0, len(spec.Tools))
+	for _, mainTool := range allTools {
+		for _, allowed := range spec.Tools {
+			if mainTool.Name() == allowed {
+				result = append(result, mainTool)
+				break
+			}
+		}
+	}
+	return result
 }
 
 func (t TaskTool) getToolsForSubAgent(spec *SubAgentSpec) []tool.Tool {
