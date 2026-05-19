@@ -320,3 +320,52 @@ func derefTestModel(t *testing.T, value tea.Model) model {
 		return model{}
 	}
 }
+
+func TestLooksLikeFilePath(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"absolute multi-segment", "/home/user/file.png", true},
+		{"absolute single-segment", "/models", false},
+		{"slash command", "/compact", false},
+		{"slash command with args", "/models gpt-4", false},
+		{"absolute image file", "/photo.png", true},
+		{"relative path", "src/main.go", false},
+		{"empty", "", false},
+		{"bare slash", "/", false},
+		{"absolute go file", "/tmp/main.go", true},
+		{"windows-like path", "C:\\Users\\file.txt", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := looksLikeFilePath(tc.in)
+			if got != tc.want {
+				t.Errorf("looksLikeFilePath(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSlashPopupHidesForFilePath(t *testing.T) {
+	ta := textarea.New()
+	ta.SetValue("/tmp/screen.png")
+	m := model{
+		input:             ta,
+		viewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
+		width:             80,
+		height:            30,
+		ready:             true,
+		showSlashPopup:    true, // force it open
+		slashPopupItems:   []slashSuggestion{{name: "/compact", desc: "test"}},
+		slashPopupIndex:   0,
+	}
+	m, _ = m.updateSlashPopupState()
+	if m.showSlashPopup {
+		t.Error("expected slash popup to hide for file path input")
+	}
+	if len(m.slashPopupItems) != 0 {
+		t.Error("expected slash popup items to be cleared")
+	}
+}

@@ -314,24 +314,44 @@ func renderReadResult(content string, st Styles) string {
 		}
 	}
 
+	// Extract the continuation footer from the read tool (e.g. "…(use start_line=51, limit=50 to continue)")
+	// before stripping line numbers, since it has no \t prefix.
+	continuation := ""
+	bodyLines := strings.Split(body, "\n")
+	if len(bodyLines) > 0 {
+		last := bodyLines[len(bodyLines)-1]
+		if strings.HasPrefix(last, "…(") && strings.Contains(last, "start_line=") {
+			continuation = last
+			bodyLines = bodyLines[:len(bodyLines)-1]
+			body = strings.Join(bodyLines, "\n")
+		}
+	}
+
 	// Strip "<n>\t" prefix from each line if present.
 	stripped := stripLineNumbers(body)
 
 	// Show 5 lines preview; the tool already limits content via start_line/end_line.
 	const previewLines = 5
 	lines := strings.Split(stripped, "\n")
-	truncated := ""
+	previewTruncated := ""
 	if len(lines) > previewLines {
-		truncated = fmt.Sprintf("\n…(%d more lines)", len(lines)-previewLines)
+		previewTruncated = fmt.Sprintf("\n…(%d more lines)", len(lines)-previewLines)
 		stripped = strings.Join(lines[:previewLines], "\n")
 	}
 
 	highlighted := highlightCode(stripped, path)
+
+	var parts []string
 	if path != "" {
-		header := lipgloss.NewStyle().Faint(true).Render("⟡ " + path)
-		return header + "\n" + highlighted + truncated
+		parts = append(parts, lipgloss.NewStyle().Faint(true).Render("⟡ "+path))
 	}
-	return highlighted + truncated
+	parts = append(parts, highlighted)
+	if continuation != "" {
+		parts = append(parts, lipgloss.NewStyle().Faint(true).Render(continuation))
+	} else if previewTruncated != "" {
+		parts = append(parts, previewTruncated)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func stripLineNumbers(s string) string {

@@ -27,8 +27,8 @@ type filesPreviewMsg struct {
 }
 
 type filesAddToContextMsg struct {
-	path    string
-	content string
+	path      string
+	content   string
 	startLine int
 	endLine   int
 }
@@ -624,6 +624,23 @@ func (m *filesModel) navigateTo(relPath string) {
 	}
 }
 
+func (m filesModel) treeNodeForClick(mouse tea.Mouse, headerHeight int) (int, bool) {
+	treeW := m.width * 35 / 100
+	if mouse.X >= treeW {
+		return 0, false
+	}
+	// Tree content starts after header + 1 (border top line)
+	treeContentTop := headerHeight + 1
+	if mouse.Y < treeContentTop {
+		return 0, false
+	}
+	nodeIndex := mouse.Y - treeContentTop
+	if nodeIndex < 0 || nodeIndex >= len(m.nodes) {
+		return 0, false
+	}
+	return nodeIndex, true
+}
+
 func (m *filesModel) rebuildTreeKeeping(path string) {
 	rel, err := filepath.Rel(m.workDir, path)
 	if err != nil || strings.HasPrefix(rel, "..") {
@@ -940,7 +957,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 			}
 		}
 		if i == m.cursor {
-			line = lipgloss.NewStyle().Reverse(true).Width(treeW - 2).Render(line)
+			line = selectedStyle.Width(treeW - 2).Render(line)
 		}
 		treeLines = append(treeLines, line)
 	}
@@ -948,7 +965,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 
 	focusBorder := func(focused bool) lipgloss.Style {
 		if focused {
-			return borderStyle.BorderForeground(lipgloss.Color("#7AA2F7"))
+			return borderStyle.BorderForeground(selectedStyle.GetBackground())
 		}
 		return borderStyle
 	}
@@ -1025,7 +1042,7 @@ func (m filesModel) editorPickerView(width int, styles Styles) string {
 	for i, choice := range choices {
 		line := "  " + choice
 		if i == m.editorCursor {
-			line = lipgloss.NewStyle().Reverse(true).Width(width).Render("> " + choice)
+			line = selectedStyle.Width(width).Render("> " + choice)
 		}
 		lines = append(lines, line)
 	}

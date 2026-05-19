@@ -61,11 +61,12 @@ type LLMClient interface {
 }
 
 type GenericClient struct {
-	APIKey   string
-	Model    string
-	BaseURL  string
-	Provider string
-	UseOAuth bool // when true, treat APIKey as a bearer OAuth token
+	APIKey         string
+	Model          string
+	BaseURL        string
+	Provider       string
+	UseOAuth       bool // when true, treat APIKey as a bearer OAuth token
+	ThinkingBudget int  // >0 enables extended thinking for Anthropic models that support it
 }
 
 func (c *GenericClient) GetProvider() string {
@@ -681,11 +682,24 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		}
 	}
 
+	maxTokens := 4096
+	if c.ThinkingBudget > 0 {
+		// thinking budget counts against max_tokens; ensure room for response
+		maxTokens = c.ThinkingBudget + 4096
+	}
+
 	payload := map[string]interface{}{
 		"model":      c.Model,
 		"system":     systemPayload,
 		"messages":   anthropicMsgs,
-		"max_tokens": 4096,
+		"max_tokens": maxTokens,
+	}
+
+	if c.ThinkingBudget > 0 {
+		payload["thinking"] = map[string]interface{}{
+			"type":         "enabled",
+			"budget_tokens": c.ThinkingBudget,
+		}
 	}
 
 	if len(tools) > 0 {
@@ -718,9 +732,16 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 	req.Header.Set("anthropic-version", "2023-06-01")
 	if c.UseOAuth {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
-		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		if c.ThinkingBudget > 0 {
+			req.Header.Set("anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14")
+		} else {
+			req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		}
 	} else {
 		req.Header.Set("x-api-key", c.APIKey)
+		if c.ThinkingBudget > 0 {
+			req.Header.Set("anthropic-beta", "interleaved-thinking-2025-05-14")
+		}
 	}
 
 	resp, err := llmHTTPClient.Do(req)
@@ -754,6 +775,8 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 	for _, block := range result.Content {
 		if block.Type == "text" {
 			resMsg.Content += block.Text
+		} else if block.Type == "thinking" {
+			resMsg.ReasoningContent += block.Text
 		} else if block.Type == "tool_use" {
 			args, _ := json.Marshal(block.Input)
 			resMsg.ToolCalls = append(resMsg.ToolCalls, ToolCall{
@@ -988,11 +1011,33 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		return nil
 	}
 
-	return &GenericClient{
-		APIKey:   apiKey,
-		Model:    model,
-		BaseURL:  baseURL,
-		Provider: provider,
-		UseOAuth: useOAuth,
+	thinkingBudget := 0
+	if cfg != nil {
+		thinkingBudget = cfg.ThinkingBudget
 	}
+
+	return &GenericClient{
+		APIKey:         apiKey,
+		Model:          model,
+		BaseURL:        baseURL,
+		Provider:       provider,
+		UseOAuth:       useOAuth,
+		ThinkingBudget: thinkingBudget,
+	}
+}
+
+// ModelSupportsThinking returns true when the resolved model supports extended
+// thinking (Anthropic claude-3-7+ and claude-4+ families).
+func ModelSupportsThinking(modelID string) bool {
+	// Strip provider prefix if present
+	model := modelID
+	if _, m, ok := splitModelID(modelID); ok {
+		model = m
+	}
+	// claude-3-7-sonnet, claude-opus-4, claude-sonnet-4, claude-haiku-4, ...
+	return strings.Contains(model, "claude-3-7") ||
+		strings.Contains(model, "claude-3-opus") ||
+		strings.Contains(model, "claude-opus-4") ||
+		strings.Contains(model, "claude-sonnet-4") ||
+		strings.Contains(model, "claude-haiku-4")
 }

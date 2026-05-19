@@ -17,7 +17,28 @@ go build -o ocode .
 
 ## Status
 
-Base TUI scaffold only. No LLM wired yet.
+Production-ready TUI AI coding agent with multi-provider LLM support (OpenAI, Anthropic,
+Google, Z.AI, Alibaba, Copilot), MCP client, session management, git integration, LSP
+intelligence, theme system, and extensible agent system.
+
+## Features
+
+- **Multi-Provider LLM** — OpenAI, Anthropic (incl. Claude thinking/extended thinking), Google, Z.AI, Alibaba, GitHub Copilot
+- **Separated Agent System** — Registry-based agent definitions with permission isolation and child session tracking
+- **Anthropic Prompt Caching** — Automatic `cache_control` markers on system messages and large tool results
+- **Extended Thinking** — Toggle thinking mode on supporting Anthropic models via `Ctrl+T` (off/low/med/high)
+- **Tool Result Truncation** — Large tool outputs (>100 lines) are truncated in-context and written to disk for retrieval
+- **Context Window Tracking** — Registry-backed model context windows with sidebar telemetry
+- **MCP Client** — Local + remote MCP server support with OAuth, CLI management commands, timeouts
+- **Git Integration** — Full git UI within TUI: status, diff, staging, commits, branches, stashes, push/pull/fetch
+- **File Browser** — Tree-based file explorer with preview panel, inline vim editor, external editor, add-to-context
+- **Session Management** — Auto-save/resume, session picker, Claude Code session cloning
+- **LSP Integration** — Go-to-definition, hover docs, symbol search
+- **Theme System** — Built-in themes (tokyonight, tokyonight-storm, catppuccin-mocha), loadable from disk
+- **Permissions System** — Granular allow/ask/deny per tool + bash prefix rules, YOLO mode, locked mode
+- **Slash Commands & Palette** — Extensible `/commands` and `Ctrl+P` command palette
+- **Mouse Support** — Clickable tabs, sidebar, file tree, transcript scrolling, input text selection
+- **Undo/Redo** — Session history undo/redo stack
 
 ## Config
 
@@ -96,8 +117,17 @@ Use `/editor [command]` to set the default editor and `/editor-mode [mode]` to s
 ## Layout
 
 ```
-main.go              entry
-internal/tui/        Bubble Tea model, view, update
+main.go                  entry point
+internal/acp/            Anthropic prompt caching
+internal/agent/          LLM client, agent registry, permissions, tool truncation
+internal/auth/           Multi-provider OAuth + keychain
+internal/config/         Config loading (opencode.json / ocodeconfig.json)
+internal/mcp/            MCP client (local + remote)
+internal/server/         HTTP server mode
+internal/tool/           Built-in tools (read, write, edit, bash, grep, glob, etc.)
+internal/tui/            Bubble Tea TUI (model, view, update, themes, git, files, etc.)
+internal/version/        Version info
+docs/                    Design specs and enhancement plans
 ```
 
 ## Sessions

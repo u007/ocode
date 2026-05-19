@@ -500,8 +500,19 @@ func ApplyThemeColors(name string) Styles {
 	}
 	setUserStyle(s.User)
 	setAssistantStyle(s.Assistant)
+	setHeaderStyle(s.Header)
 	setBorderStyle(s.Border)
 	setHintStyle(s.Hint)
+	setSelectedStyle(s.Selected)
+	setStatusStyle(s.Status)
+	setSuccessStyle(s.Success)
+	setErrorStyle(s.Error)
+	setTextStyle(s.Text)
+	setThinkingStyle(s.Thinking)
+	setDimStyle(s.Dim)
+	setToolBoxStyle(s.ToolBox)
+	setTodoStyles(s.Dim, s.Header, s.Text)
+	setScrollbarStyles(s.Dim, s.Selected)
 	return s
 }
 
@@ -520,10 +531,57 @@ func setAssistantStyle(s lipgloss.Style) {
 	assistantStyle = s
 }
 
+func setHeaderStyle(s lipgloss.Style) {
+	headerStyle = s
+}
+
 func setBorderStyle(s lipgloss.Style) {
 	borderStyle = s
 }
 
 func setHintStyle(s lipgloss.Style) {
 	hintStyle = s
+}
+
+func setSelectedStyle(s lipgloss.Style) {
+	selectedStyle = s
+}
+
+func setStatusStyle(s lipgloss.Style) {
+	statusStyle = s
+}
+
+func setSuccessStyle(s lipgloss.Style) {
+	successStyle = s
+}
+
+func setErrorStyle(s lipgloss.Style) {
+	errorStyle = s
+}
+
+func setTextStyle(s lipgloss.Style) {
+	textStyle = s
+}
+
+func setThinkingStyle(s lipgloss.Style) {
+	thinkingStyle = s
+}
+
+func setDimStyle(s lipgloss.Style) {
+	dimStyle = s
+}
+
+func setToolBoxStyle(s lipgloss.Style) {
+	toolBoxStyle = s
+}
+
+func setScrollbarStyles(track, thumb lipgloss.Style) {
+	scrollbarTrackStyle = lipgloss.NewStyle().Foreground(track.GetForeground())
+	scrollbarThumbStyle = lipgloss.NewStyle().Foreground(thumb.GetBackground())
+}
+
+func setTodoStyles(done, inProgress, pending lipgloss.Style) {
+	todoDoneStyle = lipgloss.NewStyle().Foreground(done.GetForeground()).Strikethrough(true)
+	todoInProgressStyle = lipgloss.NewStyle().Foreground(inProgress.GetForeground()).Bold(true)
+	todoPendingStyle = lipgloss.NewStyle().Foreground(pending.GetForeground())
 }
