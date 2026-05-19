@@ -116,7 +116,11 @@ func LoadOcodeConfig(cfg *Config) error {
 	}
 
 	if ocode.EditorMode == "" {
-		ocode.EditorMode = EditorModeExternal
+		if os.Getenv("TMUX") != "" {
+			ocode.EditorMode = EditorModeTmuxSplit
+		} else {
+			ocode.EditorMode = EditorModeExternal
+		}
 	}
 	cfg.Ocode = ocode
 	return nil

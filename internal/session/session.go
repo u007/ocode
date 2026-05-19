@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -183,8 +184,49 @@ func Load(id string) (*Session, error) {
 	if err := json.Unmarshal(data, &s); err != nil {
 		return nil, err
 	}
+	s.Messages = removeIncompleteToolRequests(s.Messages)
 
 	return &s, nil
+}
+
+func removeIncompleteToolRequests(messages []agent.Message) []agent.Message {
+	completedToolIDs := make(map[string]struct{})
+	for _, msg := range messages {
+		if msg.Role == "tool" {
+			if msg.ToolID == "" {
+				log.Printf("session: tool message with empty ToolID (content: %.80q) — treating as incomplete", msg.Content)
+				continue
+			}
+			if !isIncompleteToolResult(msg.Content) {
+				completedToolIDs[msg.ToolID] = struct{}{}
+			}
+		}
+	}
+
+	out := make([]agent.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg.Role == "tool" && isIncompleteToolResult(msg.Content) {
+			continue
+		}
+		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+			completedCalls := make([]agent.ToolCall, 0, len(msg.ToolCalls))
+			for _, call := range msg.ToolCalls {
+				if _, ok := completedToolIDs[call.ID]; ok {
+					completedCalls = append(completedCalls, call)
+				}
+			}
+			msg.ToolCalls = completedCalls
+			if msg.Content == "" && msg.ReasoningContent == "" && len(msg.ToolCalls) == 0 {
+				continue
+			}
+		}
+		out = append(out, msg)
+	}
+	return out
+}
+
+func isIncompleteToolResult(content string) bool {
+	return content == "WAITING_FOR_USER_RESPONSE" || strings.HasPrefix(content, "PERMISSION_ASK:")
 }
 
 func List() ([]Session, error) {

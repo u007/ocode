@@ -78,6 +78,57 @@ func TestSaveAndLoadPreservesMessageImages(t *testing.T) {
 	}
 }
 
+func TestLoadRemovesIncompleteToolRequests(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	completedCall := agent.ToolCall{ID: "call-complete", Type: "function"}
+	completedCall.Function.Name = "read"
+	completedCall.Function.Arguments = `{"filePath":"README.md"}`
+
+	incompleteCall := agent.ToolCall{ID: "call-incomplete", Type: "function"}
+	incompleteCall.Function.Name = "bash"
+	incompleteCall.Function.Arguments = `{"command":"go test ./..."}`
+
+	questionCall := agent.ToolCall{ID: "call-question", Type: "function"}
+	questionCall.Function.Name = "question"
+	questionCall.Function.Arguments = `{}`
+
+	permissionCall := agent.ToolCall{ID: "call-permission", Type: "function"}
+	permissionCall.Function.Name = "bash"
+	permissionCall.Function.Arguments = `{"command":"git status"}`
+
+	messages := []agent.Message{
+		{Role: "user", Content: "start"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{completedCall, incompleteCall}},
+		{Role: "tool", ToolID: "call-complete", Content: "read result"},
+		{Role: "assistant", Content: "need input", ToolCalls: []agent.ToolCall{questionCall}},
+		{Role: "tool", ToolID: "call-question", Content: "WAITING_FOR_USER_RESPONSE"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{permissionCall}},
+		{Role: "tool", ToolID: "call-permission", Content: `PERMISSION_ASK:{"tool_name":"bash"}`},
+	}
+	if err := Save("session-tools", "", messages, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	sess, err := Load("session-tools")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	if len(sess.Messages) != 4 {
+		t.Fatalf("expected incomplete placeholder tool message to be removed, got %#v", sess.Messages)
+	}
+	if len(sess.Messages[1].ToolCalls) != 1 || sess.Messages[1].ToolCalls[0].ID != "call-complete" {
+		t.Fatalf("expected only completed tool call to remain, got %#v", sess.Messages[1].ToolCalls)
+	}
+	if len(sess.Messages[3].ToolCalls) != 0 || sess.Messages[3].Content != "need input" {
+		t.Fatalf("expected question tool call stripped while keeping assistant text, got %#v", sess.Messages[3])
+	}
+}
+
 func TestListAllIncludesOnlyCurrentDirClaudeSessions(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()
