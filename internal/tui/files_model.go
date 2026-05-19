@@ -159,6 +159,9 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 		if m.fuzzy {
 			return m.updateFuzzy(msg)
 		}
+		if m.panel == filesPanelPreview {
+			return m.updatePreview(msg)
+		}
 		return m.updateTree(msg, w, h)
 	}
 	return m, nil
@@ -216,6 +219,22 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.buildAllPaths()
 	case "tab":
 		m.panel = (m.panel + 1) % 2
+	}
+	return m, nil
+}
+
+func (m filesModel) updatePreview(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		m.preview.ScrollDown(1)
+	case "k", "up":
+		m.preview.ScrollUp(1)
+	case "tab":
+		m.panel = (m.panel + 1) % 2
+	case "e":
+		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
+			return m, m.openInEditor(m.nodes[m.cursor].path)
+		}
 	}
 	return m, nil
 }
