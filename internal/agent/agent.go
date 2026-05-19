@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -57,6 +58,10 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		if cfg.Ocode != nil {
 			a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
 		}
+	}
+	// Set workDir for path-scoped permission checks
+	if wd, err := os.Getwd(); err == nil {
+		a.permissions.SetWorkDir(wd)
 	}
 	return a
 }

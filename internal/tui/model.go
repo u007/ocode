@@ -119,6 +119,7 @@ type ctrlCResetMsg struct{}
 type dotTickMsg struct{}
 type fileListCacheMsg struct{ items []slashSuggestion }
 type streamStartedMsg struct{ cancel chan struct{} }
+type pickerFilterDebounceMsg struct{}
 
 type streamDoneMsg struct {
 	err error
@@ -156,6 +157,8 @@ type model struct {
 	pickerIsHeader        []bool
 	pickerIndex           int
 	pickerFilter          string
+	pickerFilterPending   string
+	pickerFilterDebounce  *time.Timer
 	showSlashPopup        bool
 	slashPopupIndex       int
 	slashPopupItems       []slashSuggestion
@@ -418,6 +421,11 @@ func newModel(sid string, cont bool, yolo bool) model {
 		}(),
 	}
 
+	// Set workDir for path-scoped permission checks
+	if m.agent != nil && m.agent.Permissions() != nil {
+		m.agent.Permissions().SetWorkDir(m.workDir)
+	}
+
 	if cfg != nil && cfg.TUI.Scroll != 0 {
 		m.scrollSpeed = int(cfg.TUI.Scroll)
 	}
@@ -664,9 +672,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m.selectPickerIndex(m.pickerIndex)
 			case "backspace":
-				if len(m.pickerFilter) > 0 {
-					m.pickerFilter = m.pickerFilter[:len(m.pickerFilter)-1]
+				if len(m.pickerFilterPending) > 0 {
+					m.pickerFilterPending = m.pickerFilterPending[:len(m.pickerFilterPending)-1]
+					if m.pickerFilterDebounce != nil {
+						m.pickerFilterDebounce.Stop()
+					}
+					m.pickerFilterDebounce = time.NewTimer(150 * time.Millisecond)
 					m.pickerIndex = 0
+					return m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
+						return pickerFilterDebounceMsg{}
+					})
 				}
 				return m, nil
 			}
@@ -686,9 +701,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if len(msg.Text) > 0 {
-				m.pickerFilter += msg.Text
-				m.pickerIndex = 0
-				return m, nil
+				m.pickerFilterPending += msg.Text
+				if m.pickerFilterDebounce != nil {
+					m.pickerFilterDebounce.Stop()
+				}
+				m.pickerFilterDebounce = time.NewTimer(150 * time.Millisecond)
+				return m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
+					return pickerFilterDebounceMsg{}
+				})
 			}
 			return m, nil
 		}
@@ -1097,6 +1117,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dotFrame = (m.dotFrame + 1) % 4
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
+	case pickerFilterDebounceMsg:
+		m.pickerFilter = m.pickerFilterPending
 	case streamStartedMsg:
 		m.streaming = true
 		m.cancelStream = msg.cancel
@@ -2220,9 +2242,18 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName)})
 		return m.executeApprovedTool(toolName, args)
 	case "a", "always", "always allow":
-		m.setPermissionRule(req, agent.PermissionAllow)
+		// Special handling for webfetch domains
+		if toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain.") {
+			domain := strings.TrimPrefix(req.Rule, "webfetch.domain.")
+			if m.agent != nil && m.agent.Permissions() != nil {
+				m.agent.Permissions().SetWebfetchDomain(domain, agent.PermissionAllow)
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing webfetch for domain %q.", domain)})
+		} else {
+			m.setPermissionRule(req, agent.PermissionAllow)
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req))})
+		}
 		m.persistPermissions()
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req))})
 		return m.executeToolWithRules(toolName, args)
 	case "t":
 		m.setToolPermission(toolName, agent.PermissionAllow)
@@ -2514,6 +2545,31 @@ func (m *model) renderPalette() string {
 	return borderStyle.Width(m.width - 2).Render(header + "\n\n" + body)
 }
 
+func (m *model) renderPermissionDialog() string {
+	req := m.pendingPermission
+	hint := hintStyle.Render("[y] allow once · [n] deny once · [a] always allow rule · [t] always allow tool")
+
+	var body strings.Builder
+	body.WriteString("Tool: " + req.ToolName + "\n")
+	if req.Command != "" {
+		body.WriteString("Command: " + req.Command + "\n")
+	}
+	if req.Prefix != "" {
+		body.WriteString("Prefix: " + req.Prefix + "\n")
+	}
+	if req.Rule != "" {
+		body.WriteString("Rule: " + req.Rule + "\n")
+	}
+
+	header := m.styles.Header.Render("Permission required")
+	width := m.width - 4
+	if width < 40 {
+		width = 40
+	}
+
+	return borderStyle.Width(width).Render(header + "\n\n" + body.String() + "\n" + hint)
+}
+
 func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
 	if len(m.toolOutputRegions) == 0 {
 		return 0, false
@@ -2754,6 +2810,10 @@ func (m model) renderContent() string {
 
 	if m.showPalette {
 		return m.renderPalette()
+	}
+
+	if m.showPermDialog {
+		return m.renderPermissionDialog()
 	}
 
 	// Route non-modal views by active tab

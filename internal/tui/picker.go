@@ -73,7 +73,7 @@ func (m *model) openModelPicker() {
 		models := providerMap[provider]
 		sort.Strings(models)
 		for _, model := range models {
-			appendModel("  "+model, provider+"/"+model)
+			appendModel("  "+provider+"/"+model, provider+"/"+model)
 		}
 	}
 
@@ -83,6 +83,7 @@ func (m *model) openModelPicker() {
 	m.pickerIsHeader = isHeader
 	m.pickerIndex = 0
 	m.pickerFilter = ""
+	m.pickerFilterPending = ""
 	m.showPicker = true
 }
 
@@ -111,6 +112,7 @@ func (m *model) openThemePicker() {
 	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
+	m.pickerFilterPending = ""
 	m.showPicker = true
 }
 
@@ -140,6 +142,7 @@ func (m *model) openSessionPicker() {
 	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
+	m.pickerFilterPending = ""
 	m.showPicker = true
 }
 
@@ -151,6 +154,7 @@ func (m *model) openEditorPicker() {
 	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
+	m.pickerFilterPending = ""
 	m.showPicker = true
 }
 
