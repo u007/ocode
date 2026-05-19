@@ -129,6 +129,11 @@ type streamDoneMsg struct {
 	err error
 }
 
+type compactStartedMsg struct{}
+type compactFinishedMsg struct {
+	result agent.CompactResult
+}
+
 type activityUpdateMsg struct {
 	snap agent.ActivitySnapshot
 }
@@ -219,6 +224,11 @@ type model struct {
 	filesSel              selectionState
 	inputSel              selectionState
 	rawInputLines         []string
+	compactCh             chan agent.CompactResult
+	compactStartCh        chan struct{}
+	compacting            bool
+	lastCompactErr        error
+	pendingCompactUIIdx   []int
 	thinkingLevelIdx      int // index into thinkingBudgetLevels
 }
 
@@ -444,12 +454,15 @@ func newModel(sid string, cont bool, yolo bool) model {
 			d, _ := os.Getwd()
 			return d
 		}(),
+		compactCh:      make(chan agent.CompactResult, 4),
+		compactStartCh: make(chan struct{}, 4),
 	}
 
 	// Set workDir for path-scoped permission checks
 	if m.agent != nil && m.agent.Permissions() != nil {
 		m.agent.Permissions().SetWorkDir(m.workDir)
 	}
+	m.wireCompactCallbacks()
 
 	if cfg != nil && cfg.TUI.Scroll != 0 {
 		m.scrollSpeed = int(cfg.TUI.Scroll)
@@ -497,7 +510,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, waitForDebugLog())
+	return tea.Batch(textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh))
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -716,6 +729,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.config != nil && m.config.Model != "" {
 				client := agent.NewClient(m.config, m.config.Model)
 				m.agent = agent.NewAgent(client, m.getInitialTools(), m.config)
+				m.wireCompactCallbacks()
 			}
 		}
 		m.renderTranscript()
@@ -803,7 +817,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
 	case dotTickMsg:
-		if m.streaming || m.lastActivity.LLMRunning {
+		if m.streaming || m.lastActivity.LLMRunning || m.compacting {
 			m.dotFrame = (m.dotFrame + 1) % 4
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
@@ -847,6 +861,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamWasInterrupted = msg.err != nil
 		m.layout()
 		m.saveSession()
+		if msg.err == nil && m.agent != nil {
+			agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
+			// Only update the pending uiIdx mapping if the agent actually
+			// started a compaction goroutine. Otherwise an earlier in-flight
+			// compaction's eventual OnCompact would splice using *this*
+			// turn's mapping — silently deleting the wrong messages.
+			if m.agent.MaybeCompactAsync(agentMsgs) {
+				m.pendingCompactUIIdx = uiIdx
+			}
+		}
 		if msg.err != nil {
 			errorText := fmt.Sprintf("Error: %v", msg.err)
 			if isRetryableLLMError(msg.err) {
@@ -867,6 +891,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.processFileReferences(text)
 			}
 		}
+	case compactStartedMsg:
+		m.compacting = true
+		m.lastCompactErr = nil
+		m.layout()
+		return m, tea.Batch(
+			waitCompactEvent(m.compactStartCh, m.compactCh),
+			tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} }),
+		)
+	case compactFinishedMsg:
+		m.compacting = false
+		if msg.result.Err != nil {
+			m.lastCompactErr = msg.result.Err
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⚠ Compaction failed: %v (conversation continues uncompacted)", msg.result.Err)})
+			m.renderTranscript()
+		} else if msg.result.OK {
+			if m.applyCompactionResult(msg.result, m.pendingCompactUIIdx) {
+				m.pendingCompactUIIdx = nil
+				m.renderTranscript()
+				m.viewport.GotoBottom()
+				m.saveSession()
+			}
+		}
+		m.layout()
+		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 	case editorFinishedMsg:
 		m.layout()
 		if msg.err != nil {
@@ -1766,6 +1814,7 @@ func (m *model) rebuildAgentWithExternalTools() {
 	}
 	next.LoadExternalTools(m.config)
 	m.agent = next
+	m.wireCompactCallbacks()
 }
 
 func (m model) renderMCPList() string {
@@ -1900,6 +1949,7 @@ func (m *model) handleModelCmd(args []string) {
 			}
 			m.agent = agent.NewAgent(client, tools, m.config)
 			m.agent.RestoreMCPToolNames(mcpNames)
+			m.wireCompactCallbacks()
 			m.activeModel = args[0]
 			if m.config != nil {
 				m.config.Model = args[0]
@@ -2019,6 +2069,9 @@ func tuiRoleForAgentMessage(msg agent.Message) role {
 }
 
 func displayTextForAgentMessage(msg agent.Message) string {
+	if msg.Role == "system" && strings.HasPrefix(msg.Content, "[Compacted summary of ") {
+		return "📦 " + msg.Content
+	}
 	if len(msg.Images) == 0 {
 		return msg.Content
 	}
@@ -2998,6 +3051,124 @@ func wrapView(view string, width int) string {
 	return strings.Join(wrapped, "\n")
 }
 
+// wireCompactCallbacks attaches OnCompactStart and OnCompact to the active
+// agent so async compaction results flow back through the TUI's event loop.
+// Must be re-invoked whenever m.agent is replaced.
+func (m *model) wireCompactCallbacks() {
+	if m.agent == nil {
+		return
+	}
+	startCh := m.compactStartCh
+	doneCh := m.compactCh
+	m.agent.OnCompactStart = func() {
+		select {
+		case startCh <- struct{}{}:
+		default:
+		}
+	}
+	m.agent.OnCompact = func(r agent.CompactResult) {
+		select {
+		case doneCh <- r:
+		default:
+		}
+	}
+}
+
+func waitCompactEvent(startCh chan struct{}, doneCh chan agent.CompactResult) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case <-startCh:
+			return compactStartedMsg{}
+		case r := <-doneCh:
+			return compactFinishedMsg{result: r}
+		}
+	}
+}
+
+// buildAgentMessagesSnapshot reconstructs the full agent.Message list
+// equivalent to what askAgent would send. Used at compaction trigger time so
+// the agent can splice against the canonical history.
+func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
+	var agentMsgs []agent.Message
+	var uiIdx []int
+	ctx := agent.LoadContext()
+	if ctx != "" {
+		agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
+		uiIdx = append(uiIdx, -1) // sentinel: synthetic message, not present in m.messages
+	}
+	for i, msg := range m.messages {
+		if msg.transient || msg.role == roleThinking {
+			continue
+		}
+		if msg.raw != nil {
+			if strings.HasPrefix(msg.raw.Content, "PERMISSION_ASK:") {
+				continue
+			}
+			if msg.raw.Content == "WAITING_FOR_USER_RESPONSE" {
+				continue
+			}
+			agentMsgs = append(agentMsgs, *msg.raw)
+			uiIdx = append(uiIdx, i)
+			continue
+		}
+		role := "user"
+		if msg.role == roleAssistant {
+			role = "assistant"
+		}
+		agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
+		uiIdx = append(uiIdx, i)
+	}
+	return agentMsgs, uiIdx
+}
+
+// applyCompactionResult splices m.messages by replacing the UI rows that
+// correspond to the agent-message range [r.ReplaceFrom, r.ReplaceTo) with a
+// single banner message wrapping r.Summary. The uiIdx slice is the mapping
+// produced by buildAgentMessagesSnapshot at the time MaybeCompactAsync was
+// called. We re-check the snapshot against current m.messages to guard
+// against drift (messages added/removed while compaction was running).
+func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) bool {
+	if !r.OK {
+		return false
+	}
+	if r.ReplaceFrom >= r.ReplaceTo {
+		return false
+	}
+	if r.ReplaceTo > len(uiIdx) {
+		return false
+	}
+	// Collect the UI indices that correspond to the agent range. -1 sentinels
+	// (synthetic context system msg) are skipped — those don't live in
+	// m.messages and don't need replacing.
+	var realUIIndices []int
+	for i := r.ReplaceFrom; i < r.ReplaceTo; i++ {
+		if uiIdx[i] >= 0 {
+			realUIIndices = append(realUIIndices, uiIdx[i])
+		}
+	}
+	if len(realUIIndices) == 0 {
+		return false
+	}
+	uiFrom := realUIIndices[0]
+	uiTo := realUIIndices[len(realUIIndices)-1] + 1
+	if uiFrom < 0 || uiTo > len(m.messages) || uiFrom >= uiTo {
+		return false
+	}
+	rawCopy := r.Summary
+	replacedCount := r.ReplaceTo - r.ReplaceFrom
+	banner := message{
+		role: roleAssistant,
+		text: fmt.Sprintf("📦 Compacted %d earlier messages", replacedCount),
+		raw:  &rawCopy,
+	}
+	newMsgs := make([]message, 0, len(m.messages)-(uiTo-uiFrom)+1)
+	newMsgs = append(newMsgs, m.messages[:uiFrom]...)
+	newMsgs = append(newMsgs, banner)
+	newMsgs = append(newMsgs, m.messages[uiTo:]...)
+	m.messages = newMsgs
+	return true
+}
+
 func listenActivity(tracker *agent.ActivityTracker) tea.Cmd {
 	return func() tea.Msg {
 		snap := <-tracker.Notify()
@@ -3220,8 +3391,13 @@ func (m *model) renderStatus() string {
 	if m.agent != nil && m.agent.Permissions() != nil && m.agent.Permissions().Mode() == agent.PermissionModeYOLO {
 		permissionMode = " | YOLO permissions"
 	}
+	compactState := ""
+	if m.compacting {
+		dots := []string{".  ", ".. ", "...", " ..", "  ."}
+		compactState = fmt.Sprintf(" | 📦 compacting%s", dots[m.dotFrame%len(dots)])
+	}
 	width := m.statusContentWidth()
-	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s | Session: %s%s%s", llmState, agentName, m.currentModelName(), m.sessionID, permissionMode, suffix)
+	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s | Session: %s%s%s%s", llmState, agentName, m.currentModelName(), m.sessionID, permissionMode, compactState, suffix)
 	return m.styles.Status.Width(width).Render(ansi.Truncate(text, width, "..."))
 }
 
@@ -3724,6 +3900,12 @@ func (m *model) applyOrClearSelectionHighlight() {
 }
 
 func (m *model) syncRawInputLines() {
+	// Guard against an uninitialised textarea (tests construct zero models
+	// and dispatch key events before Init); calling View on zero state
+	// panics inside the bubbles textarea memoizer.
+	if m.input.Width() <= 0 {
+		return
+	}
 	rendered := stripANSI(m.input.View())
 	m.rawInputLines = strings.Split(rendered, "\n")
 }

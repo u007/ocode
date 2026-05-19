@@ -36,8 +36,19 @@ type Agent struct {
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
 	OnMessage func(Message)
+	// OnCompactStart, if set, is invoked when async compaction begins (so the
+	// UI can show a spinner). It runs from the goroutine that called
+	// MaybeCompactAsync — keep handlers fast and thread-safe.
+	OnCompactStart func()
+	// OnCompact, if set, is invoked when async compaction finishes. The
+	// callback receives a CompactResult describing whether compaction
+	// occurred, the splice indices, and the summary message to insert.
+	OnCompact func(CompactResult)
 	// maxSteps limits the number of agentic iterations. 0 = unlimited.
 	maxSteps int
+	// compactMu serialises async compaction passes so a slow summary call
+	// can't fire OnCompact twice for overlapping snapshots.
+	compactMu sync.Mutex
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -149,7 +160,6 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			messages = append([]Message{{Role: "system", Content: prompt}}, messages...)
 		}
 	}
-	messages = a.compactContext(messages)
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
 
@@ -192,6 +202,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				out = *resp.Usage.CompletionTokens
 			}
 			emitDebug("LLM", fmt.Sprintf("← tokens in=%d out=%d", in, out))
+			a.warnIfNearWindow(in)
 		}
 
 		newMsgs = append(newMsgs, *resp)
@@ -267,46 +278,157 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	return newMsgs, nil
 }
 
-func (a *Agent) compactContext(messages []Message) []Message {
-	if a.config == nil || a.config.Ocode == nil || !a.config.Ocode.Compact.Enabled {
-		return messages
+// warnIfNearWindow emits a debug warning when the most recent prompt token
+// count is close to the active model's window. Mid-loop compaction is unsafe
+// (would split open tool-call pairs), so the actual compaction is deferred to
+// the post-Step trigger fired by the TUI on streamDoneMsg. This warning lets
+// users see why they may be approaching a hard context-length error.
+func (a *Agent) warnIfNearWindow(promptTokens int64) {
+	rt := a.resolveCompactRuntime()
+	if !rt.Enabled || rt.WindowTokens <= 0 {
+		return
 	}
-
-	maxMessages := 20
-	if len(messages) <= maxMessages {
-		return messages
+	limit := int64(float64(rt.WindowTokens) * rt.TokenThreshold)
+	if promptTokens >= limit {
+		emitDebug("COMPACT", fmt.Sprintf("warning: prompt tokens=%d ≥ threshold=%d (window=%d); compaction will run after this Step", promptTokens, limit, rt.WindowTokens))
 	}
+}
 
-	keepFront := 2
-	keepBack := 8
-
-	compacted := make([]Message, 0)
-	compacted = append(compacted, messages[:keepFront]...)
-
-	summaryPrompt := "The following is a part of a long conversation that is being compacted. " +
-		"Summarize the key events and outcomes of this segment:\n\n"
-	for _, m := range messages[keepFront : len(messages)-keepBack] {
-		if m.Role == "user" || m.Role == "assistant" {
-			summaryPrompt += fmt.Sprintf("[%s]: %s\n", m.Role, m.Content)
+// resolveCompactRuntime materialises the compaction knobs for the current
+// agent + active model. Returns Enabled=false when compaction is disabled.
+func (a *Agent) resolveCompactRuntime() compactRuntime {
+	rt := compactRuntime{Enabled: false}
+	if a.config == nil || a.config.Ocode == nil {
+		return rt
+	}
+	c := a.config.Ocode.Compact
+	if !c.Enabled {
+		return rt
+	}
+	rt.Enabled = true
+	rt.TokenThreshold = c.TokenThreshold
+	if rt.TokenThreshold <= 0 || rt.TokenThreshold > 1 {
+		rt.TokenThreshold = 0.85
+	}
+	rt.KeepRecentTurns = c.KeepRecentTurns
+	if rt.KeepRecentTurns <= 0 {
+		rt.KeepRecentTurns = 3
+	}
+	rt.MinMessages = c.MinMessages
+	if rt.MinMessages <= 0 {
+		rt.MinMessages = 8
+	}
+	rt.SummaryTimeoutSeconds = c.SummaryTimeoutSeconds
+	if rt.SummaryTimeoutSeconds <= 0 {
+		rt.SummaryTimeoutSeconds = 30
+	}
+	rt.SummaryMaxRetries = c.SummaryMaxRetries
+	if rt.SummaryMaxRetries < 0 {
+		rt.SummaryMaxRetries = 0
+	}
+	rt.MaxSummaryInputTokens = c.MaxSummaryInputTokens
+	if rt.MaxSummaryInputTokens <= 0 {
+		rt.MaxSummaryInputTokens = 50000
+	}
+	if a.client != nil {
+		model := a.client.GetModel()
+		if a.client.GetProvider() != "" {
+			model = a.client.GetProvider() + "/" + model
 		}
+		rt.WindowTokens = int(ModelWindow(model))
+	}
+	return rt
+}
+
+// MaybeCompactAsync runs compaction in a goroutine. It first checks the token
+// threshold; if exceeded, it picks a tool-pair-safe cut, runs the summary
+// client with a timeout + retry loop, and fires OnCompact with the result.
+//
+// Returns true iff a compaction goroutine was actually started — false when
+// disabled, below threshold, or another compaction is already in flight. The
+// boolean lets callers (TUI) avoid stomping per-trigger state with snapshots
+// from a deferred call that never produced a result.
+//
+// The provided messages slice is read-only; the caller is responsible for
+// splicing its own copy when OnCompact fires.
+func (a *Agent) MaybeCompactAsync(messages []Message) bool {
+	rt := a.resolveCompactRuntime()
+	if !rt.Enabled {
+		return false
+	}
+	need, used := shouldCompact(messages, rt)
+	if !need {
+		return false
+	}
+	if !a.compactMu.TryLock() {
+		emitDebug("COMPACT", "skipped: another compaction in flight")
+		return false
+	}
+	snapshot := make([]Message, len(messages))
+	copy(snapshot, messages)
+	emitDebug("COMPACT", fmt.Sprintf("triggered: ~%d tokens used, window=%d, threshold=%.2f", used, rt.WindowTokens, rt.TokenThreshold))
+	if a.OnCompactStart != nil {
+		a.OnCompactStart()
+	}
+	go func() {
+		defer a.compactMu.Unlock()
+		result := a.runCompact(snapshot, rt)
+		if a.OnCompact != nil {
+			a.OnCompact(result)
+		}
+	}()
+	return true
+}
+
+func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult {
+	res := CompactResult{OriginalLen: len(messages)}
+
+	prefixEnd := findPrefixEnd(messages)
+	tailStart := findTurnBoundary(messages, rt.KeepRecentTurns)
+	if tailStart < prefixEnd {
+		tailStart = prefixEnd
+	}
+	tailStart = safeCut(messages, tailStart)
+	if tailStart <= prefixEnd {
+		// Nothing meaningful to summarize between prefix and tail.
+		emitDebug("COMPACT", "skipped: no compactible middle after safe-cut")
+		return res
 	}
 
-	summaryClient := a.compactSummaryClient()
-	summaryResp, err := summaryClient.Chat([]Message{{Role: "user", Content: summaryPrompt}}, nil)
-	var summaryText string
-	if err == nil && summaryResp.Content != "" {
-		summaryText = "\n\nPrevious conversation summary: " + summaryResp.Content
-	} else {
-		summaryText = "\n\n...[Conversation history truncated]..."
-	}
-	if len(compacted) > 0 && compacted[0].Role == "system" {
-		compacted[0].Content += summaryText
-	} else {
-		compacted = append(compacted, Message{Role: "system", Content: summaryText})
+	middle := messages[prefixEnd:tailStart]
+	if len(middle) == 0 {
+		return res
 	}
 
-	compacted = append(compacted, messages[len(messages)-keepBack:]...)
-	return compacted
+	prompt, dropped := buildSummaryPrompt(middle, rt.MaxSummaryInputTokens)
+	if dropped > 0 {
+		emitDebug("COMPACT", fmt.Sprintf("dropped %d middle msgs from summary input (size cap)", dropped))
+	}
+
+	ctx, cancel := contextWithTimeout(rt.SummaryTimeoutSeconds)
+	defer cancel()
+
+	client := a.compactSummaryClient()
+	summaryText, err := runSummary(ctx, client, prompt, rt.SummaryMaxRetries)
+	if err != nil {
+		emitDebug("COMPACT", fmt.Sprintf("summary failed: %v", err))
+		res.Err = err
+		return res
+	}
+
+	summaryMsg := Message{
+		Role: "system",
+		Content: fmt.Sprintf(
+			"[Compacted summary of %d earlier messages]\n\n%s",
+			len(middle), strings.TrimSpace(summaryText),
+		),
+	}
+	res.OK = true
+	res.ReplaceFrom = prefixEnd
+	res.ReplaceTo = tailStart
+	res.Summary = summaryMsg
+	emitDebug("COMPACT", fmt.Sprintf("done: replaced [%d:%d] (%d msgs) with summary", prefixEnd, tailStart, len(middle)))
+	return res
 }
 
 func (a *Agent) compactSummaryClient() LLMClient {

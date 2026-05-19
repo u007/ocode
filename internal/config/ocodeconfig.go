@@ -13,9 +13,15 @@ import (
 const lastModelKey = "last_model"
 
 type CompactConfig struct {
-	Enabled         bool   `json:"enabled"`
-	SummaryProvider string `json:"summary_provider"`
-	SummaryModel    string `json:"summary_model"`
+	Enabled               bool    `json:"enabled"`
+	SummaryProvider       string  `json:"summary_provider"`
+	SummaryModel          string  `json:"summary_model"`
+	TokenThreshold        float64 `json:"token_threshold"`
+	KeepRecentTurns       int     `json:"keep_recent_turns"`
+	MinMessages           int     `json:"min_messages"`
+	SummaryTimeoutSeconds int     `json:"summary_timeout_seconds"`
+	SummaryMaxRetries     int     `json:"summary_max_retries"`
+	MaxSummaryInputTokens int     `json:"max_summary_input_tokens"`
 }
 
 const (
@@ -43,9 +49,15 @@ type BashPermissionConfig struct {
 }
 
 type compactConfigFile struct {
-	Enabled         *bool   `json:"enabled"`
-	SummaryProvider *string `json:"summary_provider"`
-	SummaryModel    *string `json:"summary_model"`
+	Enabled               *bool    `json:"enabled"`
+	SummaryProvider       *string  `json:"summary_provider"`
+	SummaryModel          *string  `json:"summary_model"`
+	TokenThreshold        *float64 `json:"token_threshold"`
+	KeepRecentTurns       *int     `json:"keep_recent_turns"`
+	MinMessages           *int     `json:"min_messages"`
+	SummaryTimeoutSeconds *int     `json:"summary_timeout_seconds"`
+	SummaryMaxRetries     *int     `json:"summary_max_retries"`
+	MaxSummaryInputTokens *int     `json:"max_summary_input_tokens"`
 }
 
 type ocodeConfigFile struct {
@@ -57,7 +69,13 @@ type ocodeConfigFile struct {
 
 func defaultCompactConfig() CompactConfig {
 	return CompactConfig{
-		Enabled: true,
+		Enabled:               true,
+		TokenThreshold:        0.85,
+		KeepRecentTurns:       3,
+		MinMessages:           8,
+		SummaryTimeoutSeconds: 30,
+		SummaryMaxRetries:     1,
+		MaxSummaryInputTokens: 50000,
 	}
 }
 
@@ -220,6 +238,24 @@ func applyCompactConfig(dst *CompactConfig, src compactConfigFile) {
 	}
 	if src.SummaryModel != nil {
 		dst.SummaryModel = *src.SummaryModel
+	}
+	if src.TokenThreshold != nil {
+		dst.TokenThreshold = *src.TokenThreshold
+	}
+	if src.KeepRecentTurns != nil {
+		dst.KeepRecentTurns = *src.KeepRecentTurns
+	}
+	if src.MinMessages != nil {
+		dst.MinMessages = *src.MinMessages
+	}
+	if src.SummaryTimeoutSeconds != nil {
+		dst.SummaryTimeoutSeconds = *src.SummaryTimeoutSeconds
+	}
+	if src.SummaryMaxRetries != nil {
+		dst.SummaryMaxRetries = *src.SummaryMaxRetries
+	}
+	if src.MaxSummaryInputTokens != nil {
+		dst.MaxSummaryInputTokens = *src.MaxSummaryInputTokens
 	}
 }
 
