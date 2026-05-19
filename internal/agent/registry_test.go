@@ -157,9 +157,9 @@ func TestPermissionManagerBashPrefixRules(t *testing.T) {
 		t.Fatalf("expected git prefix allow, got %s", decision.Level)
 	}
 
-	decision = pm.Decide("bash", json.RawMessage(`{"command":"make test"}`))
-	if decision.Level != PermissionAsk || decision.Request == nil || decision.Request.Prefix != "make" {
-		t.Fatalf("expected make prefix ask request, got %+v", decision)
+	decision = pm.Decide("bash", json.RawMessage(`{"command":"curl https://example.com"}`))
+	if decision.Level != PermissionAsk || decision.Request == nil || decision.Request.Prefix != "curl" {
+		t.Fatalf("expected curl prefix ask request, got %+v", decision)
 	}
 }
 
@@ -167,7 +167,7 @@ func TestPermissionManagerYoloAllowsBash(t *testing.T) {
 	pm := NewPermissionManager()
 	pm.SetMode(PermissionModeYOLO)
 
-	decision := pm.Decide("bash", json.RawMessage(`{"command":"make test"}`))
+	decision := pm.Decide("bash", json.RawMessage(`{"command":"curl https://example.com"}`))
 	if decision.Level != PermissionAllow {
 		t.Fatalf("expected yolo allow, got %s", decision.Level)
 	}
