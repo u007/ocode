@@ -646,15 +646,44 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 			continue
 		}
 
+		if n := len(anthropicMsgs); n > 0 && anthropicMsgs[n-1]["role"] == role {
+			prev, _ := anthropicMsgs[n-1]["content"].([]interface{})
+			anthropicMsgs[n-1]["content"] = append(prev, content...)
+			continue
+		}
 		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
 			"role":    role,
 			"content": content,
 		})
 	}
 
+	// Build system payload with cache_control for prompt caching
+	var systemPayload interface{}
+	if system != "" {
+		systemPayload = []interface{}{
+			map[string]interface{}{
+				"type":          "text",
+				"text":          system,
+				"cache_control": map[string]interface{}{"type": "ephemeral"},
+			},
+		}
+	}
+
+	// Add cache_control to first user message content for prompt caching
+	for i := range anthropicMsgs {
+		if anthropicMsgs[i]["role"] == "user" {
+			if content, ok := anthropicMsgs[i]["content"].([]interface{}); ok && len(content) > 0 {
+				if last, ok := content[len(content)-1].(map[string]interface{}); ok {
+					last["cache_control"] = map[string]interface{}{"type": "ephemeral"}
+				}
+			}
+			break
+		}
+	}
+
 	payload := map[string]interface{}{
 		"model":      c.Model,
-		"system":     system,
+		"system":     systemPayload,
 		"messages":   anthropicMsgs,
 		"max_tokens": 4096,
 	}
@@ -667,6 +696,10 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 				"description":  t["description"],
 				"input_schema": t["parameters"],
 			})
+		}
+		// Add cache_control to last tool for prompt caching
+		if len(anthropicTools) > 0 {
+			anthropicTools[len(anthropicTools)-1]["cache_control"] = map[string]interface{}{"type": "ephemeral"}
 		}
 		payload["tools"] = anthropicTools
 	}
