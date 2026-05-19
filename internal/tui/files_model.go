@@ -26,12 +26,20 @@ type filesPreviewMsg struct {
 	editable bool
 }
 
+type filesAddToContextMsg struct {
+	path    string
+	content string
+	startLine int
+	endLine   int
+}
+
 type filesMode int
 
 const (
 	filesModeNormal filesMode = iota
 	filesModePrompt
 	filesModeDeleteConfirm
+	filesModeEdit
 )
 
 type filesPromptKind int
@@ -86,6 +94,13 @@ type filesModel struct {
 	editorOpener    func(string) tea.Cmd
 	editorMode      string
 	panel           filesPanel
+	previewRaw      string
+	previewRawLines []string
+	previewLines    []string
+	inlineEditor    inlineFileEditor
+	inlineEditPath  string
+	inlineEditMtime int64
+	inlineEditSize  int64
 }
 
 func newFilesModel(workDir string) filesModel {
@@ -156,6 +171,9 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 		if m.mode == filesModeDeleteConfirm {
 			return m.updateDeleteConfirm(msg)
 		}
+		if m.mode == filesModeEdit {
+			return m.updateInlineEdit(msg)
+		}
 		if m.fuzzy {
 			return m.updateFuzzy(msg)
 		}
@@ -209,6 +227,8 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.startRename()
 	case "D", "shift+d":
 		m.startDelete()
+	case "i":
+		return m.startInlineEdit()
 	case "y":
 		m.copySelectedPath()
 	case "R", "shift+r":
@@ -235,6 +255,8 @@ func (m filesModel) updatePreview(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			return m, m.openInEditor(m.nodes[m.cursor].path)
 		}
+	case "i":
+		return m.startInlineEdit()
 	}
 	return m, nil
 }
@@ -271,6 +293,98 @@ func (m filesModel) updateDeleteConfirm(msg tea.KeyPressMsg) (filesModel, tea.Cm
 		m.statusMsg = "delete cancelled"
 	}
 	return m, nil
+}
+
+func (m filesModel) startInlineEdit() (filesModel, tea.Cmd) {
+	n, ok := m.selectedNode()
+	if !ok {
+		m.statusMsg = "no file selected"
+		return m, nil
+	}
+	if n.isDir {
+		m.statusMsg = "cannot edit directory"
+		return m, nil
+	}
+	if !m.previewEditable || m.previewPath != n.path {
+		m.statusMsg = "file is not editable"
+		return m, nil
+	}
+	info, err := os.Stat(n.path)
+	if err != nil {
+		m.statusMsg = "edit stat failed: " + err.Error()
+		return m, nil
+	}
+	data, err := os.ReadFile(n.path)
+	if err != nil {
+		m.statusMsg = "edit read failed: " + err.Error()
+		return m, nil
+	}
+	m.mode = filesModeEdit
+	m.inlineEditor = newInlineFileEditor(string(data))
+	m.inlineEditPath = n.path
+	m.inlineEditMtime = info.ModTime().UnixNano()
+	m.inlineEditSize = info.Size()
+	m.statusMsg = "vim edit: i/a insert  :w save  :q quit  :q! discard  :wq save+quit"
+	return m, nil
+}
+
+func (m filesModel) updateInlineEdit(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	m.inlineEditor = m.inlineEditor.update(msg)
+	cmd := m.inlineEditor.lastCommand
+	if cmd == "" {
+		return m, nil
+	}
+	switch cmd {
+	case "w":
+		return m.saveInlineEdit(false)
+	case "wq":
+		return m.saveInlineEdit(true)
+	case "q":
+		if m.inlineEditor.dirty {
+			m.statusMsg = "unsaved changes: use :w to save or :q! to discard"
+			return m, nil
+		}
+		m.mode = filesModeNormal
+		m.statusMsg = "edit closed"
+		return m, nil
+	case "q!":
+		m.mode = filesModeNormal
+		m.statusMsg = "edit discarded"
+		return m, m.refreshPreviewCmd()
+	default:
+		m.statusMsg = "unknown command: " + cmd
+		return m, nil
+	}
+}
+
+func (m filesModel) saveInlineEdit(exit bool) (filesModel, tea.Cmd) {
+	info, err := os.Stat(m.inlineEditPath)
+	if err != nil {
+		m.statusMsg = "edit stat failed: " + err.Error()
+		return m, nil
+	}
+	if info.ModTime().UnixNano() != m.inlineEditMtime || info.Size() != m.inlineEditSize {
+		m.statusMsg = "file changed on disk; reload before saving"
+		return m, nil
+	}
+	if err := os.WriteFile(m.inlineEditPath, []byte(m.inlineEditor.content()), info.Mode()); err != nil {
+		m.statusMsg = "edit save failed: " + err.Error()
+		return m, nil
+	}
+	info, err = os.Stat(m.inlineEditPath)
+	if err != nil {
+		m.statusMsg = "edit stat failed: " + err.Error()
+		return m, nil
+	}
+	m.inlineEditor.markClean()
+	m.inlineEditMtime = info.ModTime().UnixNano()
+	m.inlineEditSize = info.Size()
+	m.refreshGitStatus()
+	m.statusMsg = "saved: " + filepath.Base(m.inlineEditPath)
+	if exit {
+		m.mode = filesModeNormal
+	}
+	return m, m.refreshPreviewCmd()
 }
 
 func (m filesModel) updateEditorPicker(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
@@ -437,6 +551,9 @@ func (m *filesModel) applyPreview(msg filesPreviewMsg) {
 	m.previewLang = msg.language
 	m.previewEditable = msg.editable
 	m.preview.SetContent(msg.content)
+	m.previewRaw = msg.raw
+	m.previewRawLines = strings.Split(msg.raw, "\n")
+	m.previewLines = strings.Split(msg.content, "\n")
 	m.preview.GotoTop()
 }
 
@@ -739,6 +856,50 @@ func formatBytes(n int64) string {
 	return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
 }
 
+func (m *filesModel) applySelectionHighlight(startLine, startCol, endLine, endCol int) {
+	if len(m.previewLines) == 0 {
+		return
+	}
+	highlighted := applySelectionHighlight(m.previewLines, m.previewRawLines, startLine, startCol, endLine, endCol)
+	m.preview.SetContent(strings.Join(highlighted, "\n"))
+}
+
+func (m *filesModel) clearSelectionHighlight() {
+	if len(m.previewLines) == 0 {
+		return
+	}
+	m.preview.SetContent(strings.Join(m.previewLines, "\n"))
+}
+
+func (m filesModel) extractSelectionText(startLine, startCol, endLine, endCol int) string {
+	return extractSelectionText(m.previewRawLines, startLine, startCol, endLine, endCol)
+}
+
+func (m filesModel) previewContentVisible() bool {
+	return m.panel == filesPanelPreview && len(m.previewRawLines) > 0
+}
+
+func (m filesModel) previewHeaderLines() int {
+	n := 0
+	if m.previewHeader() != "" {
+		n++ // path | lang | size
+	}
+	if m.mode == filesModeNormal && m.previewEditable {
+		n++ // editor hint
+	}
+	if m.mode == filesModePrompt || m.mode == filesModeDeleteConfirm {
+		n = 1 // status line only, preview is replaced
+	} else if m.choosingEditor {
+		return 0 // editor picker replaces everything
+	}
+	if m.statusMsg != "" {
+		n += 2 // status + blank
+	} else if m.editor != "" {
+		n += 2 // "editor: ..." + blank line
+	}
+	return n
+}
+
 func (m filesModel) previewHeader() string {
 	if m.previewPath == "" {
 		return ""
@@ -796,16 +957,22 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
 	previewBody := m.preview.View()
+	if m.mode == filesModeEdit {
+		previewBody = m.inlineEditor.view(previewW-7, h-5)
+	}
 	previewContent := lipgloss.JoinHorizontal(lipgloss.Top, previewBody, previewSB)
 	if header := m.previewHeader(); header != "" {
 		previewContent = hintStyle.Render(header) + "\n" + previewContent
 	}
 	if m.mode == filesModeNormal && m.previewEditable {
-		hint := "tab jump  e external  E choose editor  /editor set default"
+		hint := "tab jump  i vim edit  e external  E choose editor  a add to context  /editor set default"
 		if isTmuxMode(m.editorMode) {
-			hint = "tab jump  e " + m.tmuxOpenHint() + "  E choose editor  /editor set default"
+			hint = "tab jump  i vim edit  e " + m.tmuxOpenHint() + "  E choose editor  a add to context  /editor set default"
 		}
 		previewContent = hintStyle.Render(hint) + "\n" + previewContent
+	}
+	if m.mode == filesModeEdit {
+		previewContent = hintStyle.Render("vim edit: i/a insert  esc normal  :w save  :q quit  :q! discard  :wq save+quit") + "\n" + previewContent
 	}
 	if m.choosingEditor {
 		previewContent = m.editorPickerView(previewW-4, styles)
@@ -863,6 +1030,21 @@ func (m filesModel) editorPickerView(width int, styles Styles) string {
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
+}
+
+func (m filesModel) addToContextCmd() tea.Cmd {
+	return func() tea.Msg {
+		rel, err := filepath.Rel(m.workDir, m.previewPath)
+		if err != nil {
+			rel = m.previewPath
+		}
+		return filesAddToContextMsg{
+			path:      rel,
+			content:   m.previewRaw,
+			startLine: 0,
+			endLine:   len(m.previewRawLines),
+		}
+	}
 }
 
 func isTmuxMode(mode string) bool {

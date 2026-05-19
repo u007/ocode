@@ -84,6 +84,8 @@ Editor config also lives in `ocodeconfig.json`:
   - `tmux-window` — Opens via `tmux new-window`.
 - Explicit tmux modes fail fast at startup if you are not inside a tmux session — no silent fallback.
 
+In the Files tab, `i` opens a minimal vim-like inline editor for editable text files. It supports `i`/`a` insert, `esc` normal mode, `:w`, `:q`, `:q!`, and `:wq`. Use `e` or `enter` for the configured external editor.
+
 Use `/editor [command]` to set the default editor and `/editor-mode [mode]` to set the open mode. Both open a picker when called without arguments.
 
 ## Stack
