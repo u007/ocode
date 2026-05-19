@@ -2330,6 +2330,12 @@ func (m model) askAgent() tea.Cmd {
 			continue
 		}
 		if msg.raw != nil {
+			if strings.HasPrefix(msg.raw.Content, "PERMISSION_ASK:") {
+				continue
+			}
+			if msg.raw.Content == "WAITING_FOR_USER_RESPONSE" {
+				continue
+			}
 			agentMsgs = append(agentMsgs, *msg.raw)
 			continue
 		}
