@@ -83,6 +83,8 @@ func (m *model) openModelPicker() {
 	m.pickerIsHeader = isHeader
 	m.pickerIndex = 0
 	m.pickerFilter = ""
+	m.pickerFilterPending = ""
+	m.pickerFilterSeq++
 	m.showPicker = true
 }
 
@@ -206,6 +208,8 @@ func (m *model) closePicker() {
 	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
+	m.pickerFilterPending = ""
+	m.pickerFilterSeq++
 	m.input.Focus()
 }
 
@@ -232,9 +236,9 @@ func (m model) pickerVisibleItems() ([]string, []string) {
 		for i, modelID := range matched {
 			values[i] = modelID
 			if config.IsFavorite(modelID) {
-				items[i] = "★ " + displayModelName(modelID)
+				items[i] = "★ " + modelID
 			} else {
-				items[i] = displayModelName(modelID)
+				items[i] = modelID
 			}
 		}
 		return items, values
@@ -294,7 +298,8 @@ func (m model) pickerRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	row := start + idx
-	if row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
+	isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
+	if !isFiltered && row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
 		return 0, false
 	}
 	return row, true
@@ -306,7 +311,8 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-	if index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
+	isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
+	if !isFiltered && index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
 		m.closePicker()
 		return m, nil
 	}
@@ -365,7 +371,7 @@ func (m model) renderPicker() string {
 	if m.pickerKind == "editor-mode" {
 		title = "Select editor mode"
 	}
-	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilter+"_")
+	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilterPending+"_")
 
 	items, _ := m.pickerVisibleItems()
 	var body strings.Builder
@@ -388,10 +394,11 @@ func (m model) renderPicker() string {
 		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
+		isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
-			isHeader := i < len(m.pickerIsHeader) && m.pickerIsHeader[i]
+			isHeader := !isFiltered && i < len(m.pickerIsHeader) && m.pickerIsHeader[i]
 			switch {
 			case line == "":
 				// spacer line

@@ -39,6 +39,7 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	agent.ApplyAgentConfig(cfg)
 
 	model := cfg.Model
 	if model == "" {

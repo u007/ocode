@@ -220,7 +220,7 @@ func mergeTUI(path string, config *Config) {
 	if err != nil {
 		return
 	}
-	cleanData := jsoncComments.ReplaceAll(data, []byte(""))
+	cleanData := stripJSONCComments(data)
 	var temp struct {
 		TUI TUIConfig `json:"tui"`
 		// Also support top-level theme/mouse etc in tui.json
@@ -287,7 +287,7 @@ func SaveTUITheme(theme string) error {
 	}
 	m := map[string]any{}
 	if len(existing) > 0 {
-		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
+		jsoncData := stripJSONCComments(existing)
 		if err := json.Unmarshal(jsoncData, &m); err != nil {
 			return fmt.Errorf("parse config: %w", err)
 		}
@@ -321,7 +321,7 @@ func SaveMCPEnabled(name string, enabled bool) error {
 	}
 	m := map[string]any{}
 	if len(existing) > 0 {
-		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
+		jsoncData := stripJSONCComments(existing)
 		if err := json.Unmarshal(jsoncData, &m); err != nil {
 			return fmt.Errorf("parse config: %w", err)
 		}
@@ -410,7 +410,7 @@ func loadConfigMap(path string) (map[string]any, error) {
 	}
 	m := map[string]any{}
 	if len(existing) > 0 {
-		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
+		jsoncData := stripJSONCComments(existing)
 		if err := json.Unmarshal(jsoncData, &m); err != nil {
 			return nil, fmt.Errorf("parse config: %w", err)
 		}
@@ -432,7 +432,7 @@ func syncLegacyTUIThemeIfPresent(theme string) error {
 	}
 	m := map[string]any{}
 	if len(existing) > 0 {
-		jsoncData := jsoncComments.ReplaceAll(existing, []byte(""))
+		jsoncData := stripJSONCComments(existing)
 		if err := json.Unmarshal(jsoncData, &m); err != nil {
 			return fmt.Errorf("parse legacy tui config: %w", err)
 		}
@@ -542,7 +542,7 @@ func loadFromDir(dir string, config *Config) error {
 }
 
 func loadFromString(content string, config *Config) error {
-	cleanData := jsoncComments.ReplaceAll([]byte(content), []byte(""))
+	cleanData := stripJSONCComments([]byte(content))
 
 	var temp Config
 	if err := json.Unmarshal(cleanData, &temp); err != nil {
@@ -621,7 +621,19 @@ func (c *Config) ActiveConfigPath() (string, error) {
 	return globalPath, nil
 }
 
-var jsoncComments = regexp.MustCompile(`(?m)^\s*//.*$|/\*[\s\S]*?\*/|//.*$`)
+// jsoncComments matches either a quoted string (to skip it) or a comment (to remove it).
+var jsoncComments = regexp.MustCompile(`"(?:[^"\\]|\\.)*"|//[^\n]*|/\*[\s\S]*?\*/`)
+
+// stripJSONCComments removes // and /* */ comments from JSONC content while
+// preserving URLs and other // sequences inside quoted strings.
+func stripJSONCComments(data []byte) []byte {
+	return jsoncComments.ReplaceAllFunc(data, func(match []byte) []byte {
+		if match[0] == '"' {
+			return match // preserve quoted strings
+		}
+		return nil // remove comments
+	})
+}
 
 func mergeRemoteConfig(config *Config) error {
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -700,7 +712,7 @@ func loadFromFile(path string, config *Config) error {
 		return err
 	}
 
-	cleanData := jsoncComments.ReplaceAll(data, []byte(""))
+	cleanData := stripJSONCComments(data)
 
 	var temp Config
 	if err := json.Unmarshal(cleanData, &temp); err != nil {

@@ -8,6 +8,10 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+
+	"github.com/JohannesKaufmann/html-to-markdown/v2/converter"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/base"
+	"github.com/JohannesKaufmann/html-to-markdown/v2/plugin/commonmark"
 )
 
 const maxFetchBytes = 2 * 1024 * 1024 // 2 MB
@@ -15,12 +19,12 @@ const maxFetchBytes = 2 * 1024 * 1024 // 2 MB
 type WebFetchTool struct{}
 
 func (t WebFetchTool) Name() string        { return "webfetch" }
-func (t WebFetchTool) Description() string { return "Fetch the content of a URL" }
+func (t WebFetchTool) Description() string { return "Fetch the content of a URL and return it as LLM-optimized markdown" }
 func (t WebFetchTool) Parallel() bool      { return true }
 func (t WebFetchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "webfetch",
-		"description": "Fetch the content of a URL and return it as text",
+		"description": "Fetch the content of a URL and return it as LLM-optimized markdown. Preserves headings, links, lists, tables, and code blocks while stripping navigation, scripts, and boilerplate.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -53,18 +57,36 @@ func (t WebFetchTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	return t.stripHTML(string(body)), nil
+	contentType := resp.Header.Get("Content-Type")
+	if strings.Contains(contentType, "text/plain") || strings.Contains(contentType, "application/json") {
+		return string(body), nil
+	}
+
+	conv := converter.NewConverter(
+		converter.WithPlugins(
+			base.NewBasePlugin(),
+			commonmark.NewCommonmarkPlugin(),
+		),
+	)
+
+	markdown, err := conv.ConvertString(string(body))
+	if err != nil {
+		return t.stripHTML(string(body)), nil
+	}
+
+	// Truncate if too large for context window
+	if len(markdown) > 50000 {
+		markdown = markdown[:50000] + "\n\n... [content truncated]"
+	}
+
+	return markdown, nil
 }
 
 func (t WebFetchTool) stripHTML(html string) string {
-	// Simple regex-based HTML stripping for token efficiency
 	re := regexp.MustCompile("<[^>]*>")
 	text := re.ReplaceAllString(html, " ")
-
-	// Collapse whitespace
 	re = regexp.MustCompile(`\s+`)
 	text = re.ReplaceAllString(text, " ")
-
 	return strings.TrimSpace(text)
 }
 

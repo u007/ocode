@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -35,6 +36,8 @@ type Agent struct {
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
 	OnMessage func(Message)
+	// maxSteps limits the number of agentic iterations. 0 = unlimited.
+	maxSteps int
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -150,7 +153,28 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
 
-	for i := 0; i < 10; i++ {
+	for i := 0; ; i++ {
+		limit := a.maxSteps
+		if limit <= 0 {
+			limit = 100
+		}
+		if i >= limit {
+			summarizeMsg := Message{
+				Role:    "system",
+				Content: "You have reached the maximum number of steps (" + strconv.Itoa(limit) + "). Stop using tools and respond with a summary of your work and any remaining tasks.",
+			}
+			newMsgs = append(newMsgs, summarizeMsg)
+			messages = append(messages, summarizeMsg)
+			resp, err := a.client.Chat(messages, toolDefs)
+			if err != nil {
+				return nil, err
+			}
+			newMsgs = append(newMsgs, *resp)
+			if a.OnMessage != nil {
+				a.OnMessage(*resp)
+			}
+			return newMsgs, nil
+		}
 		emitDebug("LLM", fmt.Sprintf("→ %s/%s [%d msgs]", a.client.GetProvider(), a.client.GetModel(), len(messages)))
 		a.activity.setLLMRunning(true)
 		resp, err := a.client.Chat(messages, toolDefs)
@@ -465,6 +489,9 @@ func (a *Agent) SetSpec(spec *AgentSpec) {
 	a.spec = spec
 	if spec != nil && spec.Mode.Valid() {
 		a.mode = spec.Mode
+	}
+	if spec != nil && spec.MaxSteps > 0 {
+		a.maxSteps = spec.MaxSteps
 	}
 }
 

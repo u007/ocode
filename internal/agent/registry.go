@@ -7,6 +7,7 @@ type AgentSpec struct {
 	Tools        []string
 	DeniedTools  []string
 	Mode         Mode
+	MaxSteps     int
 }
 
 var DefaultAgents = []AgentSpec{
