@@ -57,6 +57,9 @@ func formatToolCallHint(tc agent.ToolCall) string {
 		if offset != "" {
 			return fmt.Sprintf("📖 read %s offset=%s", p, offset)
 		}
+		if limit != "" {
+			return fmt.Sprintf("📖 read %s limit=%s", p, limit)
+		}
 		return fmt.Sprintf("📖 read %s", p)
 	case "write":
 		return fmt.Sprintf("✏  write %s", first("path", "file_path"))

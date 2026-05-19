@@ -27,6 +27,7 @@ type agentSession struct {
 
 func NewHandler() *Handler {
 	cfg, _ := config.Load()
+	agent.ApplyAgentConfig(cfg)
 	return &Handler{
 		agents: make(map[string]*agentSession),
 		cfg:    cfg,

@@ -1,6 +1,10 @@
 package agent
 
-import "sort"
+import (
+	"sort"
+
+	"github.com/jamesmercstudio/ocode/internal/config"
+)
 
 var DefaultAgentRegistry *AgentRegistry
 
@@ -27,6 +31,7 @@ type AgentDefinition struct {
 	Hidden       bool
 	Permissions  map[string]interface{}
 	Source       string
+	MaxSteps     int
 }
 
 type LoadDiagnostic struct {
@@ -155,4 +160,57 @@ func (r *AgentRegistry) addLoaded(def AgentDefinition) {
 		}
 	}
 	r.defs = append(r.defs, def)
+}
+
+func ApplyAgentConfig(cfg *config.Config) {
+	if cfg == nil || cfg.Agent == nil {
+		return
+	}
+	for name, raw := range cfg.Agent {
+		agentCfg, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		steps, ok := extractSteps(agentCfg)
+		if !ok {
+			continue
+		}
+		for i := range DefaultAgents {
+			if DefaultAgents[i].Name == name {
+				DefaultAgents[i].MaxSteps = steps
+			}
+		}
+		def := DefaultAgentRegistry.Get(name)
+		if def != nil {
+			def.MaxSteps = steps
+		}
+	}
+}
+
+func extractSteps(cfg map[string]interface{}) (int, bool) {
+	if v, ok := cfg["steps"]; ok {
+		switch n := v.(type) {
+		case float64:
+			if int(n) > 0 {
+				return int(n), true
+			}
+		case int:
+			if n > 0 {
+				return n, true
+			}
+		}
+	}
+	if v, ok := cfg["maxSteps"]; ok {
+		switch n := v.(type) {
+		case float64:
+			if int(n) > 0 {
+				return int(n), true
+			}
+		case int:
+			if n > 0 {
+				return n, true
+			}
+		}
+	}
+	return 0, false
 }

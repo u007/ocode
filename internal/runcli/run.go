@@ -47,6 +47,7 @@ func Run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	agent.ApplyAgentConfig(cfg)
 
 	if *model != "" {
 		cfg.Model = *model

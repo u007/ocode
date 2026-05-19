@@ -183,7 +183,8 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 	if fileTools[toolName] {
 		path := extractPathFromArgs(toolName, args)
 		if path != "" {
-			if !isWithinWorkDir(pm, path) {
+			// Relative paths and glob patterns (non-absolute) are implicitly within workDir
+			if filepath.IsAbs(path) && !isWithinWorkDir(pm, path) {
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".out_of_scope",
 				}}

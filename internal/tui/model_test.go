@@ -588,17 +588,21 @@ func TestModelPickerToggleFavorite(t *testing.T) {
 	}
 }
 
-func TestModelPickerFilterUpdatesImmediately(t *testing.T) {
+func TestModelPickerFilterDebounces(t *testing.T) {
 	m := model{showPicker: true, pickerKind: "model", pickerItems: []string{"openai/gpt-4o-mini"}, pickerValues: []string{"openai/gpt-4o-mini"}}
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
 	got := derefTestModel(t, updated)
 
-	if cmd != nil {
-		t.Fatalf("expected filter keypress to avoid debounce command, got %T", cmd)
+	if cmd == nil {
+		t.Fatal("expected debounce cmd after filter keypress, got nil")
 	}
-	if got.pickerFilter != "g" {
-		t.Fatalf("expected filter to update immediately, got %q", got.pickerFilter)
+	// pending input visible immediately, applied filter deferred
+	if got.pickerFilterPending != "g" {
+		t.Fatalf("expected pickerFilterPending=%q, got %q", "g", got.pickerFilterPending)
+	}
+	if got.pickerFilter != "" {
+		t.Fatalf("expected pickerFilter to remain empty before debounce fires, got %q", got.pickerFilter)
 	}
 }
 

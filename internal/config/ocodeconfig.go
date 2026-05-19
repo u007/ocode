@@ -135,7 +135,7 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		return err
 	}
 
-	cleanData := jsoncComments.ReplaceAll(data, []byte(""))
+	cleanData := stripJSONCComments(data)
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(cleanData, &raw); err != nil {
 		return err

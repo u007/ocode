@@ -52,6 +52,7 @@ type role int
 const (
 	roleUser role = iota
 	roleAssistant
+	roleThinking
 )
 
 type message struct {
@@ -117,6 +118,7 @@ type streamMsgEvent struct {
 
 type ctrlCResetMsg struct{}
 type dotTickMsg struct{}
+type pickerFilterApplyMsg struct{ seq int; filter string }
 type fileListCacheMsg struct{ items []slashSuggestion }
 type streamStartedMsg struct{ cancel chan struct{} }
 
@@ -144,6 +146,7 @@ type model struct {
 	agent                 *agent.Agent
 	config                *config.Config
 	sessionID             string
+	sessionTitle          string
 	showThinking          bool
 	showDetails           bool
 	leaderActive          bool
@@ -156,6 +159,8 @@ type model struct {
 	pickerIsHeader        []bool
 	pickerIndex           int
 	pickerFilter          string
+	pickerFilterPending   string
+	pickerFilterSeq       int
 	showSlashPopup        bool
 	slashPopupIndex       int
 	slashPopupItems       []slashSuggestion
@@ -202,6 +207,9 @@ type model struct {
 	toolOutputRegions     []toolOutputRegion
 	dotFrame              int
 	sel                   selectionState
+	streamStartedAt       time.Time
+	streamEndedAt         time.Time
+	streamWasInterrupted  bool
 	transcriptContent     string
 	transcriptLines       []string
 	rawTranscriptLines    []string
@@ -351,6 +359,7 @@ func (m *model) switchAgent(name string) {
 
 func newModel(sid string, cont bool, yolo bool) model {
 	cfg, _ := config.Load()
+	agent.ApplyAgentConfig(cfg)
 	_ = auth.HydrateEnv()
 
 	if cont {
@@ -452,6 +461,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	if sid != "" {
 		sess, err := session.Load(sid)
 		if err == nil {
+			m.sessionTitle = sess.Title
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
 			for _, am := range sess.Messages {
@@ -766,6 +776,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.askAgent()
 			}
 		}
+	case pickerFilterApplyMsg:
+		if msg.seq == m.pickerFilterSeq {
+			m.pickerFilter = msg.filter
+			m.pickerIndex = 0
+		}
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
 	case dotTickMsg:
@@ -777,6 +792,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = true
 		m.cancelStream = msg.cancel
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
+		m.streamStartedAt = time.Now()
+		m.streamEndedAt = time.Time{}
 		m.dotFrame = 0
 		if !m.activityRowReserved {
 			m.activityRowReserved = true
@@ -807,6 +824,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamDoneMsg:
 		m.streaming = false
 		m.lastActivity = agent.ActivitySnapshot{}
+		m.streamEndedAt = time.Now()
+		m.streamWasInterrupted = msg.err != nil
 		m.layout()
 		m.saveSession()
 		if msg.err != nil {
@@ -937,16 +956,21 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		case "enter":
-			if m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+			isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
+			if !isFiltered && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
 				return true, m, nil
 			}
 			newM, cmd := m.selectPickerIndex(m.pickerIndex)
 			return true, newM, cmd
 		case "backspace":
-			if len(m.pickerFilter) > 0 {
-				m.pickerFilter = m.pickerFilter[:len(m.pickerFilter)-1]
-				m.pickerIndex = 0
-				return true, m, nil
+			if len(m.pickerFilterPending) > 0 {
+				m.pickerFilterPending = m.pickerFilterPending[:len(m.pickerFilterPending)-1]
+				m.pickerFilterSeq++
+				seq := m.pickerFilterSeq
+				pending := m.pickerFilterPending
+				return true, m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+					return pickerFilterApplyMsg{seq: seq, filter: pending}
+				})
 			}
 			return true, m, nil
 		}
@@ -966,9 +990,13 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			return true, m, nil
 		}
 		if len(msg.Text) > 0 {
-			m.pickerFilter += msg.Text
-			m.pickerIndex = 0
-			return true, m, nil
+			m.pickerFilterPending += msg.Text
+			m.pickerFilterSeq++
+			seq := m.pickerFilterSeq
+			pending := m.pickerFilterPending
+			return true, m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+				return pickerFilterApplyMsg{seq: seq, filter: pending}
+			})
 		}
 		return true, m, nil
 	}
@@ -1043,12 +1071,32 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Model, tea.Cmd) {
 	keyStr := msg.String()
 
+	if m.showPermDialog {
+		switch keyStr {
+		case "y", "n", "a", "t":
+			m.showPermDialog = false
+			cmd := m.handlePermissionChoice(keyStr)
+			m.input.Reset()
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+			m.saveSession()
+			return m, cmd
+		}
+	}
+
 	switch keyStr {
 	case "ctrl+p":
 		m.showPalette = !m.showPalette
 		m.paletteInput = ""
 		return m, nil
 	case "up":
+		if len(m.queuedInputs) > 0 && m.input.Value() == "" {
+			last := m.queuedInputs[len(m.queuedInputs)-1]
+			m.queuedInputs = m.queuedInputs[:len(m.queuedInputs)-1]
+			m.input.SetValue(last)
+			m.layout()
+			return m, nil
+		}
 		if len(m.inputHistory) == 0 {
 			break
 		}
@@ -1858,6 +1906,7 @@ func (m *model) handleSessionCmd(args []string) {
 		} else {
 			m.saveSession()
 			m.sessionID = sess.ID
+			m.sessionTitle = sess.Title
 			tool.SetTodoSession(m.sessionID)
 			snapshot.Reset()
 			tool.ResetTodoState()
@@ -1947,6 +1996,7 @@ func (m *model) handleNewCmd(args []string) {
 	m.saveSession()
 	m.messages = []message{}
 	m.sessionID = time.Now().Format("2006-01-02-150405")
+	m.sessionTitle = ""
 	tool.SetTodoSession(m.sessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
@@ -2238,7 +2288,7 @@ func (m *model) saveSession() {
 	if len(m.messages) > 0 {
 		var agentMsgs []agent.Message
 		for _, msg := range m.messages {
-			if msg.transient {
+			if msg.transient || msg.role == roleThinking {
 				continue
 			}
 			if msg.raw != nil {
@@ -2254,8 +2304,30 @@ func (m *model) saveSession() {
 		if len(agentMsgs) == 0 {
 			return
 		}
-		session.Save(m.sessionID, "", agentMsgs, m.sessionSidebarMetadata())
+		session.Save(m.sessionID, m.sessionTitle, agentMsgs, m.sessionSidebarMetadata())
 	}
+}
+
+func countUserMessages(msgs []message) int {
+	n := 0
+	for _, msg := range msgs {
+		if msg.role == roleUser && !msg.transient {
+			n++
+		}
+	}
+	return n
+}
+
+var ocodeTitleRe = regexp.MustCompile(`(?s)^<ocode-title>(.*?)</ocode-title>\s*\n?`)
+
+func extractSessionTitle(content string) (title, rest string) {
+	m := ocodeTitleRe.FindStringSubmatchIndex(content)
+	if m == nil {
+		return "", content
+	}
+	title = strings.TrimSpace(content[m[2]:m[3]])
+	rest = strings.TrimSpace(content[m[1]:])
+	return title, rest
 }
 
 func (m *model) appendAgentMessage(am agent.Message) {
@@ -2263,14 +2335,22 @@ func (m *model) appendAgentMessage(am agent.Message) {
 	if am.Role == "assistant" {
 		if am.ReasoningContent != "" && m.showThinking {
 			m.messages = append(m.messages, message{
-				role: roleAssistant,
-				text: m.styles.Thinking.Render("⟁ thinking\n") + renderThinkingContent(am.ReasoningContent, m.styles),
+				role: roleThinking,
+				text: am.ReasoningContent,
 			})
+		}
+		content := am.Content
+		if m.sessionTitle == "" && content != "" {
+			if title, rest := extractSessionTitle(content); title != "" {
+				m.sessionTitle = title
+				content = rest
+				copyMsg.Content = content
+			}
 		}
 		if len(am.ToolCalls) > 0 {
 			var b strings.Builder
-			if am.Content != "" {
-				b.WriteString(am.Content)
+			if content != "" {
+				b.WriteString(content)
 				b.WriteString("\n\n")
 			}
 			for i, tc := range am.ToolCalls {
@@ -2280,8 +2360,8 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				b.WriteString(formatToolCallHint(tc))
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: b.String(), raw: &copyMsg})
-		} else if am.Content != "" {
-			m.messages = append(m.messages, message{role: roleAssistant, text: am.Content, raw: &copyMsg})
+		} else if content != "" {
+			m.messages = append(m.messages, message{role: roleAssistant, text: content, raw: &copyMsg})
 		}
 	} else if am.Role == "tool" {
 		if strings.HasPrefix(am.Content, "PERMISSION_ASK:") {
@@ -2354,7 +2434,7 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 
 	switch choice {
 	case "y", "yes", "allow", "once":
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName), transient: true})
 		return m.executeApprovedTool(toolName, args)
 	case "a", "always", "always allow":
 		// Special handling for webfetch domains
@@ -2363,23 +2443,23 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			if m.agent != nil && m.agent.Permissions() != nil {
 				m.agent.Permissions().SetWebfetchDomain(domain, agent.PermissionAllow)
 			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing webfetch for domain %q.", domain)})
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing webfetch for domain %q.", domain), transient: true})
 		} else {
 			m.setPermissionRule(req, agent.PermissionAllow)
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req))})
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req)), transient: true})
 		}
 		m.persistPermissions()
 		return m.executeToolWithRules(toolName, args)
 	case "t":
 		m.setToolPermission(toolName, agent.PermissionAllow)
 		m.persistPermissions()
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q.", toolName)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q.", toolName), transient: true})
 		return m.executeToolWithRules(toolName, args)
 	case "n", "no", "deny":
 		return m.permissionDeniedToolResult(toolName)
 	default:
 		m.showPermDialog = true
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t."})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
 		return nil
 	}
 }
@@ -2471,8 +2551,13 @@ func (m model) askAgent() tea.Cmd {
 		agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
 	}
 
+	isFirstUserMsg := m.sessionTitle == "" && countUserMessages(m.messages) == 1
+
 	for _, msg := range m.messages {
 		if msg.transient {
+			continue
+		}
+		if msg.role == roleThinking {
 			continue
 		}
 		if msg.raw != nil {
@@ -2493,6 +2578,13 @@ func (m model) askAgent() tea.Cmd {
 			Role:    role,
 			Content: msg.text,
 		})
+	}
+
+	if isFirstUserMsg && len(agentMsgs) > 0 {
+		last := &agentMsgs[len(agentMsgs)-1]
+		if last.Role == "user" {
+			last.Content += "\n\n[System: Begin your response with <ocode-title>brief session title</ocode-title> on its own line, then continue normally.]"
+		}
 	}
 
 	cancel := make(chan struct{})
@@ -2627,16 +2719,24 @@ func (m *model) layout() {
 
 func (m model) bottomChromeHeight(panelWidth int) int {
 	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  opencode clone v"+version.Version)
-	input := borderStyle.Width(panelWidth - 2).Render(m.input.View())
+	var inputArea string
+	if m.showPermDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.input.View())
+	}
 	status := m.renderStatus()
 
 	height := lipgloss.Height(header)
 	height += 2 // transcript border
-	height += lipgloss.Height(input)
-	if m.showSlashPopup {
+	height += lipgloss.Height(inputArea)
+	if m.showSlashPopup && !m.showPermDialog {
 		height += lipgloss.Height(m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
+		height += lipgloss.Height(row)
+	}
+	if row := m.renderStoppedIndicator(); row != "" {
 		height += lipgloss.Height(row)
 	}
 	if row := m.renderActivityRow(); row != "" {
@@ -2660,9 +2760,9 @@ func (m *model) renderPalette() string {
 	return borderStyle.Width(m.width - 2).Render(header + "\n\n" + body)
 }
 
-func (m *model) renderPermissionDialog() string {
+func (m *model) renderPermissionDialog(width int) string {
 	req := m.pendingPermission
-	hint := hintStyle.Render("[y] allow once · [n] deny once · [a] always allow rule · [t] always allow tool")
+	hint := hintStyle.Render("[y] allow once · [n] deny · [a] always allow rule · [t] always allow tool")
 
 	var body strings.Builder
 	body.WriteString("Tool: " + req.ToolName + "\n")
@@ -2676,13 +2776,8 @@ func (m *model) renderPermissionDialog() string {
 		body.WriteString("Rule: " + req.Rule + "\n")
 	}
 
-	header := m.styles.Header.Render("Permission required")
-	width := m.width - 4
-	if width < 40 {
-		width = 40
-	}
-
-	return borderStyle.Width(width).Render(header + "\n\n" + body.String() + "\n" + hint)
+	header := m.styles.Header.Render("⚠ Permission required")
+	return header + "\n\n" + body.String() + "\n" + hint
 }
 
 func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
@@ -2723,6 +2818,9 @@ func (m *model) renderTranscript() {
 		switch msg.role {
 		case roleUser:
 			b.WriteString(userStyle.Render("you") + "\n" + strings.TrimRight(msg.text, "\n"))
+		case roleThinking:
+			content := renderThinkingContent(strings.TrimRight(msg.text, "\n"), m.styles)
+			b.WriteString(assistantStyle.Render("ocode") + "\n" + m.styles.Thinking.Render("⟁ thinking\n"+content))
 		case roleAssistant:
 			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
 				toolName := m.lookupToolName(msg.raw.ToolID)
@@ -2927,10 +3025,6 @@ func (m model) renderContent() string {
 		return m.renderPalette()
 	}
 
-	if m.showPermDialog {
-		return m.renderPermissionDialog()
-	}
-
 	// Route non-modal views by active tab
 	switch m.activeTab {
 	case tabFiles:
@@ -2967,15 +3061,23 @@ func (m model) renderContent() string {
 		transcriptSB,
 	)
 	transcript := borderStyle.Width(panelWidth - 2).Render(transcriptContent)
-	input := borderStyle.Width(panelWidth - 2).Render(m.input.View())
+	var inputArea string
+	if m.showPermDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.input.View())
+	}
 	leftParts := []string{header, transcript}
-	if m.showSlashPopup {
+	if m.showSlashPopup && !m.showPermDialog {
 		leftParts = append(leftParts, m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
 		leftParts = append(leftParts, row)
 	}
-	leftParts = append(leftParts, input)
+	if row := m.renderStoppedIndicator(); row != "" {
+		leftParts = append(leftParts, row)
+	}
+	leftParts = append(leftParts, inputArea)
 	if row := m.renderActivityRow(); row != "" {
 		leftParts = append(leftParts, row)
 	}
@@ -3024,6 +3126,21 @@ func (m *model) renderStatus() string {
 	width := m.statusContentWidth()
 	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s | Session: %s%s%s", llmState, agentName, m.currentModelName(), m.sessionID, permissionMode, suffix)
 	return m.styles.Status.Width(width).Render(ansi.Truncate(text, width, "..."))
+}
+
+func (m model) renderStoppedIndicator() string {
+	if m.streaming || m.streamEndedAt.IsZero() || m.streamStartedAt.IsZero() {
+		return ""
+	}
+	elapsed := m.streamEndedAt.Sub(m.streamStartedAt).Round(time.Second)
+	at := m.streamEndedAt.Format("3:04:05 PM")
+	var label string
+	if m.streamWasInterrupted {
+		label = fmt.Sprintf(" ⚡ interrupted at %s · took %s", at, elapsed)
+	} else {
+		label = fmt.Sprintf(" ✓ done at %s · took %s", at, elapsed)
+	}
+	return m.styles.Status.Width(m.statusContentWidth()).Render(label)
 }
 
 func (m model) renderQueueRow() string {
@@ -3258,7 +3375,11 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 
 	projectDir := shortenSidebarPath(shortenWorkingDir(m.workDir), sidebarColumnWidth-4)
 	appendSection("Project", []string{projectDir}, nil)
-	appendSection("Session", []string{m.sessionID}, nil)
+	sessionInfo := []string{m.sessionID}
+	if m.sessionTitle != "" {
+		sessionInfo = append(sessionInfo, m.sessionTitle)
+	}
+	appendSection("Session", sessionInfo, nil)
 	appendSection("Model", []string{modelName}, nil)
 	appendSection("Context", []string{contextLine}, nil)
 	appendSection("Spend", []string{spendLine}, nil)

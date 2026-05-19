@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -113,11 +114,22 @@ func parseAgentContent(content, source string) (*AgentDefinition, []LoadDiagnost
 	hidden := fm.fields["hidden"] == "true"
 
 	knownUnsupported := map[string]bool{
-		"model": true, "temperature": true, "top_p": true, "steps": true, "maxSteps": true,
+		"model": true, "temperature": true, "top_p": true,
 	}
 	for k := range fm.fields {
 		if knownUnsupported[k] {
 			diags = append(diags, LoadDiagnostic{Level: "warning", File: source, Message: "ignored unsupported field: " + k})
+		}
+	}
+
+	var maxSteps int
+	if stepsStr, ok := fm.fields["steps"]; ok && stepsStr != "" {
+		if n, err := strconv.Atoi(stepsStr); err == nil && n > 0 {
+			maxSteps = n
+		}
+	} else if maxStepsStr, ok := fm.fields["maxSteps"]; ok && maxStepsStr != "" {
+		if n, err := strconv.Atoi(maxStepsStr); err == nil && n > 0 {
+			maxSteps = n
 		}
 	}
 
@@ -129,6 +141,7 @@ func parseAgentContent(content, source string) (*AgentDefinition, []LoadDiagnost
 		Hidden:       hidden,
 		Permissions:  fm.permissions,
 		Source:       source,
+		MaxSteps:     maxSteps,
 	}
 
 	return def, diags

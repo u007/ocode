@@ -164,6 +164,9 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config)
 	subAgent.mode = t.mainAgent.mode
+	if spec.MaxSteps > 0 {
+		subAgent.maxSteps = spec.MaxSteps
+	}
 
 	// Apply per-agent permissions from the agent definition
 	if len(spec.Permissions) > 0 {
