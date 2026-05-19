@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -47,10 +48,12 @@ type PermissionDecision struct {
 }
 
 type PermissionManager struct {
-	mode         PermissionMode
-	rules        map[string]PermissionLevel
-	patterns     []patternRule
-	bashPrefixes map[string]PermissionLevel
+	mode              PermissionMode
+	rules             map[string]PermissionLevel
+	patterns          []patternRule
+	bashPrefixes      map[string]PermissionLevel
+	workDir           string
+	webfetchDomains   map[string]PermissionLevel
 }
 
 type patternRule struct {
@@ -60,10 +63,11 @@ type patternRule struct {
 
 func NewPermissionManager() *PermissionManager {
 	pm := &PermissionManager{
-		mode:         PermissionModeNormal,
-		rules:        make(map[string]PermissionLevel),
-		patterns:     make([]patternRule, 0),
-		bashPrefixes: make(map[string]PermissionLevel),
+		mode:            PermissionModeNormal,
+		rules:           make(map[string]PermissionLevel),
+		patterns:        make([]patternRule, 0),
+		bashPrefixes:    make(map[string]PermissionLevel),
+		webfetchDomains: make(map[string]PermissionLevel),
 	}
 	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question"} {
 		pm.rules[name] = PermissionAllow
@@ -147,6 +151,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if pm.mode == PermissionModeYOLO {
 			return PermissionDecision{Level: PermissionAllow}
 		}
+		// Check safe bash commands first
+		if isSafeBashCommand(command) {
+			return PermissionDecision{Level: PermissionAllow}
+		}
 		if ok {
 			if level, exists := pm.bashPrefixes[prefix]; exists {
 				if level == PermissionAsk {
@@ -165,6 +173,49 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 	if pm.mode == PermissionModeYOLO {
 		return PermissionDecision{Level: PermissionAllow}
 	}
+
+	// Path-scoped file tools
+	fileTools := map[string]bool{
+		"read": true, "write": true, "edit": true, "delete": true,
+		"multiedit": true, "replace_lines": true, "glob": true, "grep": true,
+		"list": true, "lsp": true, "patch": true, "format": true, "todowrite": true,
+	}
+	if fileTools[toolName] {
+		path := extractPathFromArgs(toolName, args)
+		if path != "" {
+			if !isWithinWorkDir(pm, path) {
+				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".out_of_scope",
+				}}
+			}
+			if isSensitivePath(path) {
+				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".sensitive_path",
+				}}
+			}
+			if toolName == "delete" {
+				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".delete",
+				}}
+			}
+			return PermissionDecision{Level: PermissionAllow}
+		}
+	}
+
+	// Webfetch domain tracking
+	if toolName == "webfetch" {
+		path := extractPathFromArgs(toolName, args)
+		domain := extractDomainFromURL(path)
+		if domain != "" {
+			if level, exists := pm.webfetchDomains[domain]; exists {
+				return PermissionDecision{Level: level}
+			}
+			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "webfetch.domain." + domain,
+			}}
+		}
+	}
+
 	level := pm.Check(toolName)
 	if level == PermissionAsk {
 		return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName}}
@@ -180,6 +231,153 @@ func bashPermissionRequest(args json.RawMessage, command, prefix string) *Permis
 		rule = "bash.prefix." + prefix
 	}
 	return &PermissionRequest{ToolName: "bash", Args: args, Command: command, Prefix: prefix, Scope: scope, Rule: rule}
+}
+
+func isWithinWorkDir(pm *PermissionManager, rawPath string) bool {
+	if pm.workDir == "" {
+		return true
+	}
+	absPath, err := filepath.Abs(rawPath)
+	if err != nil {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// File may not exist yet (e.g., write creating new file); check directory
+		dir := filepath.Dir(absPath)
+		resolved, err = filepath.EvalSymlinks(dir)
+		if err != nil {
+			return false
+		}
+		resolved = filepath.Join(resolved, filepath.Base(absPath))
+	}
+	workDirSep := pm.workDir + string(filepath.Separator)
+	return resolved == pm.workDir || strings.HasPrefix(resolved, workDirSep)
+}
+
+func isSensitivePath(path string) bool {
+	clean := filepath.ToSlash(filepath.Clean(path))
+	base := filepath.Base(clean)
+
+	// Exact match sensitive filenames
+	sensitiveBases := []string{".env", ".netrc", ".npmrc", ".pypirc"}
+	for _, s := range sensitiveBases {
+		if base == s {
+			return true
+		}
+	}
+
+	// .env.* variants
+	if strings.HasPrefix(base, ".env.") {
+		return true
+	}
+
+	// SSH keys
+	sshKeyBases := []string{"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"}
+	for _, k := range sshKeyBases {
+		if base == k {
+			return true
+		}
+	}
+
+	// Certificate/key files
+	certSuffixes := []string{".pem", ".key", ".p12", ".pfx", ".secrets"}
+	for _, suffix := range certSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+
+	// Paths under sensitive directories
+	sensitiveDirs := []string{".git/", ".github/workflows/", ".aws/"}
+	for _, dir := range sensitiveDirs {
+		if strings.Contains("/"+clean+"/", "/"+dir) || strings.HasPrefix(clean, dir) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractPathFromArgs(toolName string, args json.RawMessage) string {
+	var params struct {
+		Path    string `json:"path"`
+		Pattern string `json:"pattern"`
+		URL     string `json:"url"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return ""
+	}
+	switch toolName {
+	case "read", "write", "delete", "edit", "multiedit", "replace_lines", "format", "lsp", "patch", "todowrite":
+		return params.Path
+	case "glob", "list":
+		if params.Pattern != "" {
+			return params.Pattern
+		}
+		return params.Path
+	case "grep":
+		return params.Path
+	case "webfetch":
+		return params.URL
+	default:
+		return ""
+	}
+}
+
+func isSafeBashCommand(cmd string) bool {
+	trimmed := strings.TrimSpace(cmd)
+	if trimmed == "" {
+		return false
+	}
+
+	// Safe command prefixes
+	safePrefixes := []string{
+		"git ", "git\t",
+		"ls ", "ls\t", "ls -",
+		"pwd", "pwd ",
+		"echo ", "echo\t",
+		"cat ", "cat\t",
+		"grep ", "rg ", "ag ",
+		"find ", // but check for -exec
+		"wc ", "sort ", "uniq ", "head ", "tail ",
+		"which ", "type ", "env ",
+		"go build", "go test", "go run", "go vet", "go fmt",
+		"npm run ", "yarn run ", "bun run ", "pnpm run ",
+		"make ",
+	}
+
+	for _, prefix := range safePrefixes {
+		if strings.HasPrefix(trimmed, prefix) {
+			// Special check: find with -exec is not safe
+			if strings.HasPrefix(trimmed, "find ") && strings.Contains(trimmed, " -exec ") {
+				return false
+			}
+			// Special check: make without shell metachars
+			if strings.HasPrefix(trimmed, "make ") {
+				for _, meta := range []string{"|", "&", ";", "$(", "`"} {
+					if strings.Contains(trimmed, meta) {
+						return false
+					}
+				}
+			}
+			return true
+		}
+	}
+
+	return false
+}
+
+func extractDomainFromURL(rawURL string) string {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		hostname = parsed.Host
+	}
+	return hostname
 }
 
 func matchPattern(pattern, name string) bool {
@@ -224,6 +422,16 @@ func (pm *PermissionManager) SetMode(mode PermissionMode) {
 	switch mode {
 	case PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked:
 		pm.mode = mode
+	}
+}
+
+func (pm *PermissionManager) SetWorkDir(path string) {
+	pm.workDir = filepath.Clean(path)
+}
+
+func (pm *PermissionManager) SetWebfetchDomain(domain string, level PermissionLevel) {
+	if validPermissionLevel(level) {
+		pm.webfetchDomains[domain] = level
 	}
 }
 
@@ -356,7 +564,21 @@ func splitShellFields(command string) []string {
 
 func isHardBlockedCommand(command string) bool {
 	compact := strings.Join(splitShellFields(command), " ")
-	return compact == "rm -rf /" || compact == "rm -fr /" || strings.Contains(command, ":(){ :|:& };:")
+	if compact == "rm -rf /" || compact == "rm -fr /" || strings.Contains(command, ":(){ :|:& };:") {
+		return true
+	}
+	// Hard-block destructive and exfiltration patterns
+	blockedPatterns := []string{
+		"| bash", "| sh", "| python", "| perl",  // pipe to shell
+		"dd if=", "mkfs",                         // disk/partition write
+		"; sudo", "&& sudo", "| sudo",            // privilege escalation chains
+	}
+	for _, p := range blockedPatterns {
+		if strings.Contains(command, p) {
+			return true
+		}
+	}
+	return false
 }
 
 func IsAllowedPlanWritePath(path string) bool {
