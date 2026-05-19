@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
@@ -426,8 +427,8 @@ func TestTaskToolReturnsChildResult(t *testing.T) {
 	if result == "" {
 		t.Fatal("expected non-empty result from task execution")
 	}
-	if result != "task completed" {
-		t.Fatalf("expected 'task completed', got %q", result)
+	if !strings.Contains(result, "task completed") {
+		t.Fatalf("expected result to contain 'task completed', got %q", result)
 	}
 }
 

@@ -119,7 +119,6 @@ type ctrlCResetMsg struct{}
 type dotTickMsg struct{}
 type fileListCacheMsg struct{ items []slashSuggestion }
 type streamStartedMsg struct{ cancel chan struct{} }
-type pickerFilterDebounceMsg struct{}
 
 type streamDoneMsg struct {
 	err error
@@ -157,8 +156,6 @@ type model struct {
 	pickerIsHeader        []bool
 	pickerIndex           int
 	pickerFilter          string
-	pickerFilterPending   string
-	pickerFilterDebounce  *time.Timer
 	showSlashPopup        bool
 	slashPopupIndex       int
 	slashPopupItems       []slashSuggestion
@@ -208,6 +205,7 @@ type model struct {
 	transcriptContent     string
 	transcriptLines       []string
 	rawTranscriptLines    []string
+	filesSel              selectionState
 }
 
 type toolOutputRegion struct {
@@ -600,6 +598,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "esc" && !m.filesHasActiveFocus() {
 				return m.handleEscKey()
 			}
+			if msg.String() == "a" && m.files.panel == filesPanelPreview && m.files.previewPath != "" {
+				return m, m.filesAddToContext()
+			}
 			var cmd tea.Cmd
 			m.files, cmd = m.files.Update(msg, m.width, m.height)
 			return m, cmd
@@ -633,6 +634,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg, m.width, m.height)
 		return m, cmd
+	case filesAddToContextMsg:
+		label := ""
+		if msg.startLine >= 0 && msg.endLine > msg.startLine {
+			label = fmt.Sprintf(" (lines %d-%d)", msg.startLine+1, msg.endLine)
+		}
+		fileCtx := fmt.Sprintf("\n--- File: %s%s ---\n%s\n", msg.path, label, msg.content)
+		m.messages = append(m.messages, message{
+			role: roleAssistant,
+			text: fmt.Sprintf("\u2b06 Added context from %s%s", msg.path, label),
+			raw: &agent.Message{
+				Role:    "system",
+				Content: fileCtx,
+			},
+		})
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		m.saveSession()
+		return m, nil
 	case fileListCacheMsg:
 		m.fileListCache = msg.items
 		m, _ = m.updateSlashPopupState()
@@ -754,8 +773,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.dotFrame = (m.dotFrame + 1) % 4
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
-	case pickerFilterDebounceMsg:
-		m.pickerFilter = m.pickerFilterPending
 	case streamStartedMsg:
 		m.streaming = true
 		m.cancelStream = msg.cancel
@@ -926,16 +943,10 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			newM, cmd := m.selectPickerIndex(m.pickerIndex)
 			return true, newM, cmd
 		case "backspace":
-			if len(m.pickerFilterPending) > 0 {
-				m.pickerFilterPending = m.pickerFilterPending[:len(m.pickerFilterPending)-1]
-				if m.pickerFilterDebounce != nil {
-					m.pickerFilterDebounce.Stop()
-				}
-				m.pickerFilterDebounce = time.NewTimer(150 * time.Millisecond)
+			if len(m.pickerFilter) > 0 {
+				m.pickerFilter = m.pickerFilter[:len(m.pickerFilter)-1]
 				m.pickerIndex = 0
-				return true, m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
-					return pickerFilterDebounceMsg{}
-				})
+				return true, m, nil
 			}
 			return true, m, nil
 		}
@@ -955,14 +966,9 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			return true, m, nil
 		}
 		if len(msg.Text) > 0 {
-			m.pickerFilterPending += msg.Text
-			if m.pickerFilterDebounce != nil {
-				m.pickerFilterDebounce.Stop()
-			}
-			m.pickerFilterDebounce = time.NewTimer(150 * time.Millisecond)
-			return true, m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
-				return pickerFilterDebounceMsg{}
-			})
+			m.pickerFilter += msg.Text
+			m.pickerIndex = 0
+			return true, m, nil
 		}
 		return true, m, nil
 	}
@@ -1317,6 +1323,23 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, filesTrackH)
 			return m, nil, true
 		}
+		treeW := m.width * 35 / 100
+		previewLeft := treeW + 2
+		previewBodyTop := filesHeaderH + 1 + m.files.previewHeaderLines()
+		if mouse.X >= previewLeft && mouse.X < scrollX && mouse.Y >= previewBodyTop && mouse.Y < previewBodyTop+m.files.preview.Height() {
+			contentLine := (mouse.Y - previewBodyTop) + m.files.preview.YOffset()
+			if contentLine >= 0 && contentLine < len(m.files.previewRawLines) {
+				m.filesSel = selectionState{
+					dragging:  true,
+					startLine: contentLine,
+					startCol:  mouse.X - previewLeft,
+					endLine:   contentLine,
+					endCol:    mouse.X - previewLeft,
+				}
+				m.files.applySelectionHighlight(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
+				return m, nil, true
+			}
+		}
 	}
 	if !pressed {
 		m.scrollbarDrag = scrollbarDragNone
@@ -1331,6 +1354,18 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			m.sel = selectionState{}
 			m.applyOrClearSelectionHighlight()
+		}
+		if m.filesSel.dragging {
+			m.filesSel.dragging = false
+			if m.filesSel.active {
+				text := m.files.extractSelectionText(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
+				_ = clipboard.WriteAll(text)
+				m.filesSel = selectionState{}
+				m.files.clearSelectionHighlight()
+				return m, nil, true
+			}
+			m.filesSel = selectionState{}
+			m.files.clearSelectionHighlight()
 		}
 	}
 
@@ -1442,6 +1477,29 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		m.sel.endCol = col
 		m.sel.active = m.sel.startLine != m.sel.endLine || m.sel.startCol != m.sel.endCol
 		m.applyOrClearSelectionHighlight()
+		return m, nil, true
+	}
+
+	if m.filesSel.dragging {
+		treeW := m.width * 35 / 100
+		previewLeft := treeW + 2
+		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
+		previewBodyTop := filesHeaderH + 1 + m.files.previewHeaderLines()
+		contentLine := (mouse.Y - previewBodyTop) + m.files.preview.YOffset()
+		if contentLine < 0 {
+			contentLine = 0
+		}
+		if contentLine >= len(m.files.previewRawLines) && len(m.files.previewRawLines) > 0 {
+			contentLine = len(m.files.previewRawLines) - 1
+		}
+		col := mouse.X - previewLeft
+		if col < 0 {
+			col = 0
+		}
+		m.filesSel.endLine = contentLine
+		m.filesSel.endCol = col
+		m.filesSel.active = m.filesSel.startLine != m.filesSel.endLine || m.filesSel.startCol != m.filesSel.endCol
+		m.files.applySelectionHighlight(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
 		return m, nil, true
 	}
 
@@ -3484,4 +3542,38 @@ func (m model) renderLSPStatus() string {
 	}
 
 	return "unavailable"
+}
+
+func (m *model) filesAddToContext() tea.Cmd {
+	return func() tea.Msg {
+		rel, err := filepath.Rel(m.workDir, m.files.previewPath)
+		if err != nil {
+			rel = m.files.previewPath
+		}
+		var content string
+		var startLine, endLine int
+		if m.filesSel.active {
+			sl, sc, el, ec := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
+			content = m.files.extractSelectionText(sl, sc, el, ec)
+			startLine = sl + 1
+			endLine = el + 1
+			m.filesSel = selectionState{}
+			m.files.clearSelectionHighlight()
+		} else {
+			content = m.files.previewRaw
+			startLine = 0
+			endLine = len(m.files.previewRawLines)
+		}
+		label := ""
+		if startLine > 0 && endLine > startLine {
+			label = fmt.Sprintf(" (lines %d-%d)", startLine, endLine)
+		}
+		fileCtx := fmt.Sprintf("\n--- File: %s%s ---\n%s\n", rel, label, content)
+		return filesAddToContextMsg{
+			path:      rel,
+			content:   fileCtx,
+			startLine: startLine - 1,
+			endLine:   endLine,
+		}
+	}
 }

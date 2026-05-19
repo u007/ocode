@@ -588,6 +588,20 @@ func TestModelPickerToggleFavorite(t *testing.T) {
 	}
 }
 
+func TestModelPickerFilterUpdatesImmediately(t *testing.T) {
+	m := model{showPicker: true, pickerKind: "model", pickerItems: []string{"openai/gpt-4o-mini"}, pickerValues: []string{"openai/gpt-4o-mini"}}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'g', Text: "g"})
+	got := derefTestModel(t, updated)
+
+	if cmd != nil {
+		t.Fatalf("expected filter keypress to avoid debounce command, got %T", cmd)
+	}
+	if got.pickerFilter != "g" {
+		t.Fatalf("expected filter to update immediately, got %q", got.pickerFilter)
+	}
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {
