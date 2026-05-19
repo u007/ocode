@@ -19,8 +19,13 @@ const (
 	modelsCacheFile = "models.json"
 )
 
+type modelLimit struct {
+	Context int64 `json:"context"`
+}
+
 type modelEntry struct {
-	ID string `json:"id"`
+	ID    string    `json:"id"`
+	Limit modelLimit `json:"limit"`
 }
 
 type providerEntry struct {
@@ -155,6 +160,43 @@ func AllProviderModels() []string {
 		return models
 	}
 	return fallbackAllProviderModels()
+}
+
+// ModelWindow returns the context window size for a given model ID in
+// "provider/model" format (e.g. "openai/gpt-4o") or bare model name.
+// It checks the models.dev registry first, then falls back to 0.
+func ModelWindow(modelID string) int64 {
+	data := loadRegistry()
+	if data == nil {
+		return 0
+	}
+
+	// Try "provider/model" format first
+	if provider, model, ok := splitModelID(modelID); ok {
+		if entry, ok := data[provider]; ok {
+			if m, ok := entry.Models[model]; ok && m.Limit.Context > 0 {
+				return m.Limit.Context
+			}
+		}
+	}
+
+	// Try bare model name — search all providers
+	for _, entry := range data {
+		if m, ok := entry.Models[modelID]; ok && m.Limit.Context > 0 {
+			return m.Limit.Context
+		}
+	}
+
+	return 0
+}
+
+func splitModelID(id string) (provider, model string, ok bool) {
+	for i := 0; i < len(id); i++ {
+		if id[i] == '/' {
+			return id[:i], id[i+1:], true
+		}
+	}
+	return "", "", false
 }
 
 func allProviderModelsFromRegistry() []string {

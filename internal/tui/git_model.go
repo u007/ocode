@@ -1012,7 +1012,7 @@ func (m *gitModel) buildCommitViewport(width int) {
 	for i, c := range m.commits {
 		line := fmt.Sprintf("%s  %s  %s", c.hash, c.subject, c.age)
 		if i == m.commitCursor {
-			line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+			line = selectedStyle.Width(width).Render(line)
 		}
 		lines = append(lines, line)
 	}
@@ -1026,7 +1026,7 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 
 	focusBorder := func(focused bool) lipgloss.Style {
 		if focused {
-			return borderStyle.BorderForeground(lipgloss.Color("#7AA2F7"))
+			return borderStyle.BorderForeground(selectedStyle.GetBackground())
 		}
 		return borderStyle
 	}
@@ -1035,7 +1035,7 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 	sectionLines := make([]string, len(sectionNames))
 	for i, name := range sectionNames {
 		if gitSection(i) == m.section {
-			sectionLines[i] = lipgloss.NewStyle().Reverse(true).Width(sectW - 4).Render(name)
+			sectionLines[i] = selectedStyle.Width(sectW - 4).Render(name)
 		} else {
 			sectionLines[i] = name
 		}
@@ -1093,7 +1093,7 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 	hints := hintStyle.Render(m.renderHints())
 	statusBar := hints
 	if m.statusMsg != "" {
-		statusBar = hints + "   " + lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E")).Render(m.statusMsg)
+		statusBar = hints + "   " + errorStyle.Render(m.statusMsg)
 	}
 	parts = append(parts, statusBar)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -1109,7 +1109,7 @@ func (m gitModel) renderFileList(width int) []string {
 			for _, f := range m.stagedFiles {
 				line := "  " + f.status + " " + f.path
 				if idx == m.filesCursor && m.panel == gitPanelFiles {
-					line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+					line = selectedStyle.Width(width).Render(line)
 				}
 				lines = append(lines, line)
 				idx++
@@ -1120,7 +1120,7 @@ func (m gitModel) renderFileList(width int) []string {
 			for _, f := range m.allUnstagedAndUntracked() {
 				line := "  " + f.status + " " + f.path
 				if idx == m.filesCursor && m.panel == gitPanelFiles {
-					line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+					line = selectedStyle.Width(width).Render(line)
 				}
 				lines = append(lines, line)
 				idx++
@@ -1130,7 +1130,7 @@ func (m gitModel) renderFileList(width int) []string {
 		for i, c := range m.commits {
 			line := fmt.Sprintf("%s  %s  %s", c.hash, c.subject, c.age)
 			if i == m.commitCursor {
-				line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+				line = selectedStyle.Width(width).Render(line)
 			}
 			lines = append(lines, line)
 		}
@@ -1138,7 +1138,7 @@ func (m gitModel) renderFileList(width int) []string {
 		for i, s := range m.stashes {
 			line := s
 			if i == m.stashCursor {
-				line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+				line = selectedStyle.Width(width).Render(line)
 			}
 			lines = append(lines, line)
 		}
@@ -1150,7 +1150,7 @@ func (m gitModel) renderFileList(width int) []string {
 			}
 			line := marker + b
 			if i == m.branchCursor {
-				line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+				line = selectedStyle.Width(width).Render(line)
 			}
 			lines = append(lines, line)
 		}

@@ -106,8 +106,9 @@ type FormatterConfig struct {
 }
 
 type Config struct {
-	Model        string                     `json:"model"`
-	SmallModel   string                     `json:"small_model"`
+	Model          string                     `json:"model"`
+	SmallModel     string                     `json:"small_model"`
+	ThinkingBudget int                        `json:"-"` // runtime-only: extended thinking token budget
 	Provider     map[string]interface{}     `json:"provider"`
 	Tools        map[string]bool            `json:"tools"`
 	Permission   map[string]interface{}     `json:"permission"`

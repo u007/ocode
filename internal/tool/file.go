@@ -112,7 +112,7 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		sb.WriteString(fmt.Sprintf("%d\t%s\n", i, lines[i-1]))
 	}
 	if end < total {
-		sb.WriteString(fmt.Sprintf("…(%d more lines, use start_line=%d to continue)\n", total-end, end+1))
+		sb.WriteString(fmt.Sprintf("…(use start_line=%d, limit=50 to continue)\n", end+1))
 	}
 	return sb.String(), nil
 }

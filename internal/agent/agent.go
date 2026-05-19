@@ -233,6 +233,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					if err != nil {
 						result = fmt.Sprintf("Error: %v", err)
 					}
+					result = TruncateToolResult(tc.ID, result)
 					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result}
 				}(i, resp.ToolCalls[i])
 			}
@@ -247,6 +248,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			if err != nil {
 				result = fmt.Sprintf("Error: %v", err)
 			}
+			result = TruncateToolResult(tc.ID, result)
 			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result}
 		}
 

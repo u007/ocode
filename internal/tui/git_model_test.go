@@ -52,6 +52,7 @@ func TestPendingActionConfirmation(t *testing.T) {
 }
 
 func TestChangesFileListHighlight(t *testing.T) {
+	ApplyThemeColors("opencode")
 	m := gitModel{
 		section:       gitSectionChanges,
 		panel:         gitPanelFiles,
@@ -61,13 +62,14 @@ func TestChangesFileListHighlight(t *testing.T) {
 	}
 	lines := m.renderFileList(40)
 	found := false
+	want := selectedStyle.Width(40).Render("  M staged.go")
 	for _, l := range lines {
-		if strings.Contains(l, "staged.go") && strings.Contains(l, "\x1b[7m") {
+		if l == want {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("expected reverse highlight on selected row, got none")
+		t.Fatal("expected themed selected highlight on selected row, got none")
 	}
 }
 

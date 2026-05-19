@@ -96,6 +96,20 @@ func (m *model) closeSlashPopup() {
 	m.slashPopupItems = nil
 }
 
+// looksLikeFilePath returns true when the input is most likely a file path
+// (e.g. "/path/to/file.png") rather than a slash command like "/models".
+func looksLikeFilePath(s string) bool {
+	if !strings.HasPrefix(s, "/") {
+		return false
+	}
+	rest := s[1:] // strip leading slash
+	if strings.Contains(rest, "/") {
+		return true // contains more path segments: /home/user/file.png
+	}
+	// Single-segment absolute path with an image extension: /file.png
+	return agent.IsImageFile(s)
+}
+
 func (m model) updateSlashPopupState() (model, tea.Cmd) {
 	value := m.input.Value()
 	if m.showPicker || m.showConnect || m.showPalette {
@@ -115,6 +129,13 @@ func (m model) updateSlashPopupState() (model, tea.Cmd) {
 		return m, cmd
 	}
 	if !strings.HasPrefix(value, "/") || strings.Contains(value, " ") {
+		m.closeSlashPopup()
+		return m, nil
+	}
+
+	// Avoid triggering slash-command popup when a file path is dragged into
+	// the input (e.g. "/path/to/file.png" pasted into an empty field).
+	if looksLikeFilePath(value) {
 		m.closeSlashPopup()
 		return m, nil
 	}

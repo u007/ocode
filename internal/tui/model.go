@@ -118,7 +118,10 @@ type streamMsgEvent struct {
 
 type ctrlCResetMsg struct{}
 type dotTickMsg struct{}
-type pickerFilterApplyMsg struct{ seq int; filter string }
+type pickerFilterApplyMsg struct {
+	seq    int
+	filter string
+}
 type fileListCacheMsg struct{ items []slashSuggestion }
 type streamStartedMsg struct{ cancel chan struct{} }
 
@@ -214,7 +217,13 @@ type model struct {
 	transcriptLines       []string
 	rawTranscriptLines    []string
 	filesSel              selectionState
+	inputSel              selectionState
+	rawInputLines         []string
+	thinkingLevelIdx      int // index into thinkingBudgetLevels
 }
+
+var thinkingBudgetLevels = []int{0, 1024, 8000, 16000}
+var thinkingBudgetLabels = []string{"off", "low", "med", "high"}
 
 type toolOutputRegion struct {
 	messageIndex int
@@ -228,11 +237,20 @@ type errorMsg error
 var (
 	userStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true)
 	assistantStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#BB9AF7")).Bold(true)
+	headerStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true)
 	borderStyle    = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#3B4261")).
 			Padding(0, 1)
-	hintStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
+	hintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
+	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#1A1B26")).Background(lipgloss.Color("#7AA2F7"))
+	statusStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#787C99")).Background(lipgloss.Color("#1A1B26")).Padding(0, 1).Bold(true)
+	successStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
+	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E"))
+	textStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#C0CAF5"))
+	thinkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261")).Italic(true)
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261"))
+	toolBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#3B4261")).Padding(0, 1)
 
 	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Strikethrough(true)
 	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
@@ -561,6 +579,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.activeTab == tabChat || m.activeTab == tabLog {
 		m.input, tiCmd = m.input.Update(msg)
+		m.syncRawInputLines()
 	}
 	if shouldForwardToTranscriptViewport(msg) {
 		m.viewport, vpCmd = m.viewport.Update(msg)
@@ -1119,6 +1138,15 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.input.SetValue("")
 		}
 		return m, nil
+	case "ctrl+t":
+		if agent.ModelSupportsThinking(m.config.Model) {
+			m.thinkingLevelIdx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
+			m.config.ThinkingBudget = thinkingBudgetLevels[m.thinkingLevelIdx]
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+		}
+		return m, nil
 	case "ctrl+b":
 		m.toggleSidebar()
 		return m, nil
@@ -1361,9 +1389,20 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 	if pressed && m.activeTab == tabFiles {
+		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
+		// Handle tree panel click — select/open file or toggle directory
+		if idx, ok := m.files.treeNodeForClick(mouse, filesHeaderH); ok {
+			n := m.files.nodes[idx]
+			m.files.cursor = idx
+			if n.isDir {
+				m.files.toggleDir(idx)
+			} else {
+				return m, loadPreviewCmd(n), true
+			}
+			return m, nil, true
+		}
 		previewRight := m.width - 1
 		scrollX := previewRight - 1
-		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
 		filesTrackTop := filesHeaderH + 1
 		filesTrackH := m.files.preview.Height()
 		if mouse.X == scrollX && mouse.Y >= filesTrackTop && mouse.Y < filesTrackTop+filesTrackH {
@@ -1415,6 +1454,16 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.filesSel = selectionState{}
 			m.files.clearSelectionHighlight()
 		}
+		if m.inputSel.dragging {
+			m.inputSel.dragging = false
+			if m.inputSel.active {
+				text := extractSelectionText(m.rawInputLines, m.inputSel.startLine, m.inputSel.startCol, m.inputSel.endLine, m.inputSel.endCol)
+				_ = clipboard.WriteAll(text)
+				m.inputSel = selectionState{}
+				return m, nil, true
+			}
+			m.inputSel = selectionState{}
+		}
 	}
 
 	if tab, ok := m.tabForClick(mouse); ok {
@@ -1425,6 +1474,21 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if tab == tabLog {
 			m.refreshLogViewport()
 			m.logViewport.GotoBottom()
+		}
+		return m, nil, true
+	}
+	if pressed && m.isClickInInputArea(mouse) {
+		topY := m.inputAreaTopY()
+		relRow := mouse.Y - topY - 1 + m.input.ScrollYOffset() // -1 for top border
+		if relRow < 0 {
+			relRow = 0
+		}
+		m.inputSel = selectionState{
+			dragging:  true,
+			startLine: relRow,
+			startCol:  mouse.X,
+			endLine:   relRow,
+			endCol:    mouse.X,
 		}
 		return m, nil, true
 	}
@@ -1548,6 +1612,25 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		m.filesSel.endCol = col
 		m.filesSel.active = m.filesSel.startLine != m.filesSel.endLine || m.filesSel.startCol != m.filesSel.endCol
 		m.files.applySelectionHighlight(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
+		return m, nil, true
+	}
+
+	if m.inputSel.dragging {
+		topY := m.inputAreaTopY()
+		relRow := mouse.Y - topY - 1 + m.input.ScrollYOffset()
+		if relRow < 0 {
+			relRow = 0
+		}
+		if relRow >= len(m.rawInputLines) && len(m.rawInputLines) > 0 {
+			relRow = len(m.rawInputLines) - 1
+		}
+		col := mouse.X
+		if col < 0 {
+			col = 0
+		}
+		m.inputSel.endLine = relRow
+		m.inputSel.endCol = col
+		m.inputSel.active = m.inputSel.startLine != m.inputSel.endLine || m.inputSel.startCol != m.inputSel.endCol
 		return m, nil, true
 	}
 
@@ -1963,6 +2046,7 @@ func (m *model) handleCompactCmd(args []string) {
 	}
 	m.messages = newMsgs
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Conversation compacted (removed tool history from view)."})
+	m.sessionTelemetry = sidebarTelemetry{}
 }
 
 func (m *model) handleRedoCmd(args []string) {
@@ -2318,7 +2402,7 @@ func countUserMessages(msgs []message) int {
 	return n
 }
 
-var ocodeTitleRe = regexp.MustCompile(`(?s)^<ocode-title>(.*?)</ocode-title>\s*\n?`)
+var ocodeTitleRe = regexp.MustCompile(`(?s)<ocode-title>(.*?)</ocode-title>`)
 
 func extractSessionTitle(content string) (title, rest string) {
 	m := ocodeTitleRe.FindStringSubmatchIndex(content)
@@ -2326,7 +2410,9 @@ func extractSessionTitle(content string) (title, rest string) {
 		return "", content
 	}
 	title = strings.TrimSpace(content[m[2]:m[3]])
-	rest = strings.TrimSpace(content[m[1]:])
+	// Remove the title tag from content, preserving surrounding text
+	rest = content[:m[0]] + content[m[1]:]
+	rest = strings.TrimSpace(rest)
 	return title, rest
 }
 
@@ -2506,6 +2592,7 @@ func (m model) executeApprovedTool(toolName string, args json.RawMessage) tea.Cm
 		if err != nil {
 			result = fmt.Sprintf("Error: %v", err)
 		}
+		result = agent.TruncateToolResult(m.pendingToolCallID, result)
 		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: result}}
 	}
 }
@@ -2516,6 +2603,7 @@ func (m model) executeToolWithRules(toolName string, args json.RawMessage) tea.C
 		if err != nil {
 			result = fmt.Sprintf("Error: %v", err)
 		}
+		result = agent.TruncateToolResult(m.pendingToolCallID, result)
 		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: result}}
 	}
 }
@@ -3045,7 +3133,12 @@ func (m model) renderContent() string {
 	// tabChat falls through to existing rendering below
 
 	tabBar := renderTabBar(m.activeTab, m.chatUnread)
-	headerLeft := m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+	var headerLeft string
+	if m.sessionTitle != "" {
+		headerLeft = m.styles.Header.Render("\u25c6 ocode "+m.sessionTitle) + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+	} else {
+		headerLeft = m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+	}
 	headerRight := tabBar
 	headerPad := m.panelWidth() - lipgloss.Width(headerLeft) - lipgloss.Width(headerRight)
 	if headerPad < 0 {
@@ -3065,7 +3158,7 @@ func (m model) renderContent() string {
 	if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
-		inputArea = borderStyle.Width(panelWidth - 2).Render(m.input.View())
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	leftParts := []string{header, transcript}
 	if m.showSlashPopup && !m.showPermDialog {
@@ -3107,7 +3200,11 @@ func (m *model) renderStatus() string {
 	case tabLog:
 		suffix = " | j/k: scroll | c: clear | alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
-		suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
+		if agent.ModelSupportsThinking(m.config.Model) {
+			suffix = fmt.Sprintf(" | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry | ctrl+t: thinking[%s]", thinkingBudgetLabels[m.thinkingLevelIdx])
+		} else {
+			suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
+		}
 		if m.ctrlCPressed {
 			suffix = " | ctrl+c again to quit"
 		} else if m.streaming {
@@ -3316,6 +3413,12 @@ func aggregateSidebarTelemetry(messages []message) sidebarTelemetry {
 }
 
 func modelContextWindow(modelName string) (int64, bool) {
+	// Check models.dev registry first
+	if mw := agent.ModelWindow(modelName); mw > 0 {
+		return mw, true
+	}
+
+	// Fallback to hardcoded values for common models not in registry
 	switch modelName {
 	case "gpt-4o", "gpt-4o-mini", "o1-preview":
 		return 128000, true
@@ -3415,7 +3518,18 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 
 func (m model) renderSidebar() string {
 	data := m.buildSidebarRenderData()
-	maxLines := m.height - 2 // account for border
+
+	// Build header with session title (if available) and version info
+	var header string
+	if m.sessionTitle != "" {
+		header = m.styles.Header.Render(m.sessionTitle) + hintStyle.Render("  ·  opencode clone v"+version.Version)
+	} else {
+		header = hintStyle.Render("◆ ocode  sidebar  ·  v" + version.Version)
+	}
+
+	// Calculate max lines for content (account for border and header)
+	headerHeight := lipgloss.Height(header)
+	maxLines := m.height - 2 - headerHeight
 	if maxLines < 1 {
 		maxLines = 1
 	}
@@ -3424,7 +3538,7 @@ func (m model) renderSidebar() string {
 		lines = lines[:maxLines]
 	}
 	sections := strings.Join(lines, "\n")
-	return borderStyle.Width(sidebarColumnWidth).Render(sections)
+	return borderStyle.Width(sidebarColumnWidth).Render(header + "\n" + sections)
 }
 
 func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
@@ -3493,19 +3607,19 @@ func tabAtX(mouseX int, barStartX int, activeTab int, unread bool) (int, bool) {
 }
 
 func (m *model) refreshLogViewport() {
-	kindColor := map[DebugEntryKind]string{
-		DebugKindLLM:   "#7AA2F7",
-		DebugKindTool:  "#E0AF68",
-		DebugKindAgent: "#9ECE6A",
-		DebugKindError: "#F7768E",
+	kindColor := map[DebugEntryKind]lipgloss.Style{
+		DebugKindLLM:   userStyle,
+		DebugKindTool:  headerStyle,
+		DebugKindAgent: successStyle,
+		DebugKindError: errorStyle,
 	}
 	var lines []string
 	for _, e := range m.logEntries {
-		col, ok := kindColor[e.Kind]
+		style, ok := kindColor[e.Kind]
 		if !ok {
-			col = "#565F89"
+			style = hintStyle
 		}
-		tag := lipgloss.NewStyle().Foreground(lipgloss.Color(col)).Bold(true).Render(fmt.Sprintf("%-5s", string(e.Kind)))
+		tag := style.Bold(true).Render(fmt.Sprintf("%-5s", string(e.Kind)))
 		lines = append(lines, tag+" "+e.Message)
 	}
 	if len(lines) == 0 {
@@ -3607,6 +3721,54 @@ func (m *model) applyOrClearSelectionHighlight() {
 	sl, sc, el, ec := normaliseSelection(m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
 	highlighted := applySelectionHighlight(m.transcriptLines, m.rawTranscriptLines, sl, sc, el, ec)
 	m.viewport.SetContent(strings.Join(highlighted, "\n"))
+}
+
+func (m *model) syncRawInputLines() {
+	rendered := stripANSI(m.input.View())
+	m.rawInputLines = strings.Split(rendered, "\n")
+}
+
+func (m model) inputViewWithSelection() string {
+	view := m.input.View()
+	if !m.inputSel.active {
+		return view
+	}
+	renderedLines := strings.Split(view, "\n")
+	sl, sc, el, ec := normaliseSelection(m.inputSel.startLine, m.inputSel.startCol, m.inputSel.endLine, m.inputSel.endCol)
+	highlighted := applySelectionHighlight(renderedLines, m.rawInputLines, sl, sc, el, ec)
+	return strings.Join(highlighted, "\n")
+}
+
+func (m model) inputAreaHeight() int {
+	panelWidth := m.panelWidth()
+	var rendered string
+	if m.showPermDialog {
+		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else {
+		rendered = borderStyle.Width(panelWidth - 2).Render(m.input.View())
+	}
+	return lipgloss.Height(rendered)
+}
+
+func (m model) inputAreaTopY() int {
+	statusH := lipgloss.Height(m.renderStatus())
+	activityH := 0
+	if row := m.renderActivityRow(); row != "" {
+		activityH = lipgloss.Height(row)
+	}
+	return m.height - statusH - activityH - m.inputAreaHeight()
+}
+
+func (m model) isClickInInputArea(mouse tea.Mouse) bool {
+	if m.activeTab != tabChat || m.showPermDialog {
+		return false
+	}
+	if mouse.X >= m.panelWidth() {
+		return false
+	}
+	topY := m.inputAreaTopY()
+	h := m.inputAreaHeight()
+	return mouse.Y >= topY && mouse.Y < topY+h
 }
 
 func (m model) transcriptScrollbarHit(mouse tea.Mouse) bool {
