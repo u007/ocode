@@ -564,7 +564,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.layout()
-		m.files.Resize(m.width, m.height)
+		m.files.Resize(m.panelWidth(), m.height)
 		m.git.Resize(m.panelWidth(), m.height)
 		m.logViewport, _ = m.logViewport.Update(tea.WindowSizeMsg{
 			Width:  m.panelWidth() - 7,
@@ -2876,7 +2876,11 @@ func (m model) renderContent() string {
 	// Route non-modal views by active tab
 	switch m.activeTab {
 	case tabFiles:
-		return m.files.View(m.width, m.height, m.styles, m.chatUnread)
+		filesView := m.files.View(m.panelWidth(), m.height, m.styles, m.chatUnread)
+		if m.sidebarEnabled() {
+			return lipgloss.JoinHorizontal(lipgloss.Top, filesView, m.renderSidebar())
+		}
+		return filesView
 	case tabGit:
 		gitView := m.git.View(m.panelWidth(), m.height, m.styles, m.chatUnread)
 		if m.sidebarEnabled() {
