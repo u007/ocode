@@ -376,7 +376,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	}
 
 	ta := textarea.New()
-	ta.Placeholder = "Ask anything…  (enter to send, shift+enter for newline, ctrl+c clears input, twice to quit)"
+	ta.Placeholder = "Ask anything…  (enter to send, shift+enter for newline, tab autocomplete, ctrl+c clears input, twice to quit)"
 	ta.Focus()
 	ta.Prompt = "▍ "
 	ta.CharLimit = 8000
@@ -551,7 +551,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	m.input, tiCmd = m.input.Update(msg)
+	if m.activeTab == tabChat || m.activeTab == tabLog {
+		m.input, tiCmd = m.input.Update(msg)
+	}
 	if shouldForwardToTranscriptViewport(msg) {
 		m.viewport, vpCmd = m.viewport.Update(msg)
 	}
@@ -575,411 +577,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.restoredPendingScroll = false
 		}
 	case tea.KeyPressMsg:
-		keyStr := msg.String()
-
-		// Global tab switching — always handled regardless of active tab
-		switch keyStr {
-		case "1":
-			if m.activeTab == tabChat {
-				break
-			}
-			m.activeTab = tabChat
-			m.chatUnread = false
-			return m, nil
-		case "2":
-			if m.activeTab == tabChat {
-				break
-			}
-			m.activeTab = tabFiles
-			return m, nil
-		case "3":
-			if m.activeTab == tabChat {
-				break
-			}
-			m.activeTab = tabGit
-			return m, nil
-		case "4":
-			if m.activeTab == tabChat {
-				break
-			}
-			m.activeTab = tabLog
-			m.refreshLogViewport()
-			m.logViewport.GotoBottom()
-			return m, nil
-		case "alt+[", "ctrl+shift+[":
-			m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
-			if m.activeTab == tabChat {
-				m.chatUnread = false
-			}
-			if m.activeTab == tabLog {
-				m.refreshLogViewport()
-				m.logViewport.GotoBottom()
-			}
-			return m, nil
-		case "alt+]", "ctrl+shift+]":
-			m.activeTab = (m.activeTab + 1) % tabCount
-			if m.activeTab == tabChat {
-				m.chatUnread = false
-			}
-			if m.activeTab == tabLog {
-				m.refreshLogViewport()
-				m.logViewport.GotoBottom()
-			}
-			return m, nil
-		}
-
-		if m.activeTab == tabLog {
-			switch keyStr {
-			case "j", "down":
-				m.logViewport.ScrollDown(1)
-				return m, nil
-			case "k", "up":
-				m.logViewport.ScrollUp(1)
-				return m, nil
-			case "c":
-				DebugLog.Clear()
-				m.logEntries = nil
-				m.refreshLogViewport()
-				return m, nil
-			}
-		}
-
-		if m.showPicker {
-			switch keyStr {
-			case "esc":
-				m.closePicker()
-				return m, nil
-			case "up":
-				if m.pickerIndex > 0 {
-					m.pickerIndex--
-					for m.pickerIndex > 0 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
-						m.pickerIndex--
-					}
-				}
-				return m, nil
-			case "down":
-				items, _ := m.pickerVisibleItems()
-				if m.pickerIndex < len(items)-1 {
-					m.pickerIndex++
-					for m.pickerIndex < len(items)-1 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
-						m.pickerIndex++
-					}
-				}
-				return m, nil
-			case "enter":
-				if m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
-					return m, nil
-				}
-				return m.selectPickerIndex(m.pickerIndex)
-			case "backspace":
-				if len(m.pickerFilterPending) > 0 {
-					m.pickerFilterPending = m.pickerFilterPending[:len(m.pickerFilterPending)-1]
-					if m.pickerFilterDebounce != nil {
-						m.pickerFilterDebounce.Stop()
-					}
-					m.pickerFilterDebounce = time.NewTimer(150 * time.Millisecond)
-					m.pickerIndex = 0
-					return m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
-						return pickerFilterDebounceMsg{}
-					})
-				}
-				return m, nil
-			}
-			if keyStr == "f" && m.pickerFilter == "" && m.pickerKind == "model" {
-				items, values := m.pickerVisibleItems()
-				isSelectable := len(m.pickerIsHeader) == 0 || (m.pickerIndex < len(m.pickerIsHeader) && !m.pickerIsHeader[m.pickerIndex])
-				if m.pickerIndex < len(items) && m.pickerIndex < len(values) && isSelectable {
-					modelID := values[m.pickerIndex]
-					if config.IsFavorite(modelID) {
-						_ = config.RemoveFavoriteModel(modelID)
-					} else {
-						_ = config.SaveFavoriteModel(modelID)
-					}
-					m.openModelPicker()
-					return m, nil
-				}
-				return m, nil
-			}
-			if len(msg.Text) > 0 {
-				m.pickerFilterPending += msg.Text
-				if m.pickerFilterDebounce != nil {
-					m.pickerFilterDebounce.Stop()
-				}
-				m.pickerFilterDebounce = time.NewTimer(150 * time.Millisecond)
-				return m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
-					return pickerFilterDebounceMsg{}
-				})
-			}
-			return m, nil
-		}
-
-		if m.showConnect {
-			return m.updateConnectDialog(msg)
-		}
-
-		if m.showPalette {
-			if keyStr == "esc" || keyStr == "ctrl+p" {
-				m.showPalette = false
-				return m, nil
-			}
-			if keyStr == "enter" {
-				m.showPalette = false
-				return m.handleCommand(m.paletteInput)
-			}
-			if keyStr == "backspace" {
-				if len(m.paletteInput) > 0 {
-					m.paletteInput = m.paletteInput[:len(m.paletteInput)-1]
-				}
-				return m, nil
-			}
-			if len(msg.Text) > 0 {
-				m.paletteInput += msg.Text
-			}
-			return m, nil
-		}
-
-		if m.leaderActive {
-			m.leaderActive = false
-
-			key := keyStr
-			if m.config != nil {
-				if cmd, ok := m.config.TUI.Keybinds[key]; ok {
-					return m.handleCommand(cmd)
-				}
-			}
-
-			switch key {
-			case "u":
-				return m.handleCommand("/undo")
-			case "r":
-				return m.handleCommand("/redo")
-			case "n":
-				return m.handleCommand("/new")
-			case "l":
-				return m.handleCommand("/session")
-			case "c":
-				return m.handleCommand("/compact")
-			case "q":
-				m.saveSession()
-				return m, tea.Quit
-			}
-			return m, nil
-		}
-
-		if m.escPressed && keyStr != "esc" {
+		// Reset double-esc state on any non-esc keypress
+		if m.escPressed && msg.String() != "esc" {
 			m.escPressed = false
 		}
 
-		switch keyStr {
-		case "ctrl+p":
-			m.showPalette = !m.showPalette
-			m.paletteInput = ""
-			return m, nil
-		case "up":
-			// Navigate input history backwards
-			if len(m.inputHistory) == 0 {
-				break // fall through to textarea
-			}
-			if m.inputHistoryIndex == -1 {
-				// First up: go to most recent entry
-				m.inputHistoryIndex = len(m.inputHistory) - 1
-			} else if m.inputHistoryIndex > 0 {
-				m.inputHistoryIndex--
-			}
-			m.input.SetValue(m.inputHistory[m.inputHistoryIndex])
-			return m, nil
-		case "down":
-			// Navigate input history forwards
-			if len(m.inputHistory) == 0 || m.inputHistoryIndex == -1 {
-				break // fall through to textarea
-			}
-			if m.inputHistoryIndex < len(m.inputHistory)-1 {
-				m.inputHistoryIndex++
-				m.input.SetValue(m.inputHistory[m.inputHistoryIndex])
-			} else {
-				// Past the most recent: clear input
-				m.inputHistoryIndex = -1
-				m.input.SetValue("")
-			}
-			return m, nil
-		case "ctrl+b":
-			m.toggleSidebar()
-			return m, nil
-		case "ctrl+o":
-			return m.handleCommand("/yolo")
-		case "ctrl+y":
-			return m.retryLastLLMError()
-		case "ctrl+x":
-			m.leaderActive = true
-			m.leaderSeq++
-			timeout := 2000
-			if m.config != nil && m.config.TUI.LeaderTimeout != 0 {
-				timeout = m.config.TUI.LeaderTimeout
-			}
-			seq := m.leaderSeq
-			return m, tea.Tick(time.Duration(timeout)*time.Millisecond, func(time.Time) tea.Msg {
-				return leaderTimeoutMsg{seq: seq}
-			})
-		case "esc":
-			if m.streaming && m.cancelStream != nil {
-				select {
-				case <-m.cancelStream:
-				default:
-					close(m.cancelStream)
-				}
-				return m, nil
-			}
-			if !m.escPressed {
-				m.escPressed = true
-				m.escPressTime = time.Now()
-				return m, nil
-			}
-			if time.Since(m.escPressTime) < 500*time.Millisecond {
-				m.escPressed = false
-				m.openMessagePicker()
-				return m, nil
-			}
-			m.escPressed = false
-			return m, nil
-		case "ctrl+c":
-			if strings.TrimSpace(m.input.Value()) != "" {
-				m.input.Reset()
-				m.inputHistoryIndex = -1
-				m.ctrlCPressed = false
-				m.closeSlashPopup()
-				return m, nil
-			}
-			if m.ctrlCPressed {
-				m.saveSession()
-				return m, tea.Quit
-			}
-			m.ctrlCPressed = true
-			return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return ctrlCResetMsg{} })
-		case "shift+tab":
-			m.cycleAgentMode()
-			return m, nil
-		case "tab":
-			current := m.input.Value()
-			if strings.HasPrefix(current, "/") {
-				trimmed := strings.TrimSpace(current)
-				if trimmed == "/models" || strings.HasPrefix(trimmed, "/models ") || trimmed == "/model" || strings.HasPrefix(trimmed, "/model ") {
-					m.openModelPicker()
-					return m, nil
-				}
-				if trimmed == "/themes" || strings.HasPrefix(trimmed, "/themes ") || trimmed == "/theme" || strings.HasPrefix(trimmed, "/theme ") {
-					m.openThemePicker()
-					return m, nil
-				}
-
-				suggestions := autocompleteSlashInput(&m, current)
-				if len(suggestions) == 0 {
-					return m, nil
-				}
-
-				if strings.HasSuffix(current, " ") {
-					m.input.SetValue(strings.TrimSpace(current) + " " + suggestions[0])
-					return m, nil
-				}
-
-				m.input.SetValue(suggestions[0])
-				return m, nil
-			}
-			m.cycleAgentMode()
-			return m, nil
-		case "enter":
-			text := strings.TrimSpace(m.input.Value())
-			if text == "" {
-				return m, tea.Batch(tiCmd, vpCmd)
-			}
-
-			// Save non-command inputs to history
-			if !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "!") {
-				// Deduplicate: don't add if same as last entry
-				if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
-					m.inputHistory = append(m.inputHistory, text)
-				}
-			}
-			m.inputHistoryIndex = -1
-
-			if strings.HasPrefix(text, "/") {
-				m.closeSlashPopup()
-				return m.handleCommand(text)
-			}
-
-			if strings.HasPrefix(text, "!") {
-				m.input.Reset()
-				cmdText := strings.TrimPrefix(text, "!")
-				m.messages = append(m.messages, message{role: roleUser, text: text})
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 running shell: %s", cmdText)})
-				m.renderTranscript()
-				m.viewport.GotoBottom()
-				return m, runInteractiveShell(cmdText, m.workDir)
-			}
-
-			if m.streaming {
-				m.queuedInputs = append(m.queuedInputs, text)
-				m.input.Reset()
-				m.layout()
-				m.viewport.GotoBottom()
-				return m, nil
-			}
-
-			var pendingToolCallID string
-			if len(m.messages) > 0 {
-				last := m.messages[len(m.messages)-1]
-				if last.raw != nil && len(last.raw.ToolCalls) > 0 {
-					for _, tc := range last.raw.ToolCalls {
-						if tc.Function.Name == "question" {
-							pendingToolCallID = tc.ID
-							break
-						}
-					}
-				}
-			}
-
-			if pendingToolCallID != "" {
-				m.messages = append(m.messages, message{
-					role: roleAssistant,
-					text: fmt.Sprintf("✅ tool result: %s", text),
-					raw: &agent.Message{
-						Role:    "tool",
-						Content: text,
-						ToolID:  pendingToolCallID,
-					},
-				})
-				m.input.Reset()
-				m.renderTranscript()
-				m.viewport.GotoBottom()
-				m.saveSession()
-				return m, m.askAgent()
-			}
-
-			if m.showPermDialog {
-				choice := strings.ToLower(strings.TrimSpace(text))
-				m.showPermDialog = false
-				cmd := m.handlePermissionChoice(choice)
-				m.input.Reset()
-				m.renderTranscript()
-				m.viewport.GotoBottom()
-				m.saveSession()
-				return m, cmd
-			}
-
-			m.input.Reset()
-			return m, m.processFileReferences(text)
+		// 1. True globals — tab switching, always active
+		if handled, newM, cmd := m.handleGlobalTabKeys(msg); handled {
+			return newM, cmd
 		}
 
-		// Forward tab-local key input to sub-models
-		if m.activeTab == tabFiles {
+		// 2. Modal overlays — picker, connect, palette, leader
+		if handled, newM, cmd := m.handleModalKeys(msg); handled {
+			return newM, cmd
+		}
+
+		// 3. Per-tab dispatch
+		switch m.activeTab {
+		case tabChat:
+			return m.handleChatKeys(msg, tiCmd, vpCmd)
+		case tabFiles:
+			if msg.String() == "esc" && !m.filesHasActiveFocus() {
+				return m.handleEscKey()
+			}
 			var cmd tea.Cmd
 			m.files, cmd = m.files.Update(msg, m.width, m.height)
 			return m, cmd
-		}
-		if m.activeTab == tabGit {
+		case tabGit:
+			if msg.String() == "esc" && !m.gitHasActiveFocus() {
+				return m.handleEscKey()
+			}
 			var cmd tea.Cmd
 			m.git, cmd = m.git.Update(msg, m.panelWidth(), m.height)
 			return m, cmd
+		case tabLog:
+			return m.handleLogKeys(msg)
 		}
+
+		// Unreachable, but keep return for safety
+		return m, nil
+
 	case leaderTimeoutMsg:
 		if m.leaderActive && msg.seq == m.leaderSeq {
 			m.leaderActive = false
@@ -1200,6 +837,432 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd, popupCmd)
 }
 
+// handleGlobalTabKeys handles tab-switching keys (1-4, alt+[/], ctrl+shift+[/])
+// regardless of the active tab. Returns (true, ...) when a key is consumed.
+func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "1":
+		if m.activeTab == tabChat {
+			return false, m, nil
+		}
+		m.activeTab = tabChat
+		m.chatUnread = false
+		return true, m, nil
+	case "2":
+		if m.activeTab == tabChat {
+			return false, m, nil
+		}
+		m.activeTab = tabFiles
+		return true, m, nil
+	case "3":
+		if m.activeTab == tabChat {
+			return false, m, nil
+		}
+		m.activeTab = tabGit
+		return true, m, nil
+	case "4":
+		if m.activeTab == tabChat {
+			return false, m, nil
+		}
+		m.activeTab = tabLog
+		m.refreshLogViewport()
+		m.logViewport.GotoBottom()
+		return true, m, nil
+	case "alt+[", "ctrl+shift+[":
+		m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
+		if m.activeTab == tabChat {
+			m.chatUnread = false
+		}
+		if m.activeTab == tabLog {
+			m.refreshLogViewport()
+			m.logViewport.GotoBottom()
+		}
+		return true, m, nil
+	case "alt+]", "ctrl+shift+]":
+		m.activeTab = (m.activeTab + 1) % tabCount
+		if m.activeTab == tabChat {
+			m.chatUnread = false
+		}
+		if m.activeTab == tabLog {
+			m.refreshLogViewport()
+			m.logViewport.GotoBottom()
+		}
+		return true, m, nil
+	}
+	return false, m, nil
+}
+
+// handleModalKeys handles overlay dialogs (picker, connect, palette, leader)
+// that take precedence over any active tab. Returns (true, ...) if consumed.
+func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
+	keyStr := msg.String()
+
+	if m.showPicker {
+		switch keyStr {
+		case "esc":
+			m.closePicker()
+			return true, m, nil
+		case "up":
+			if m.pickerIndex > 0 {
+				m.pickerIndex--
+				for m.pickerIndex > 0 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+					m.pickerIndex--
+				}
+			}
+			return true, m, nil
+		case "down":
+			items, _ := m.pickerVisibleItems()
+			if m.pickerIndex < len(items)-1 {
+				m.pickerIndex++
+				for m.pickerIndex < len(items)-1 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+					m.pickerIndex++
+				}
+			}
+			return true, m, nil
+		case "enter":
+			if m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+				return true, m, nil
+			}
+			newM, cmd := m.selectPickerIndex(m.pickerIndex)
+			return true, newM, cmd
+		case "backspace":
+			if len(m.pickerFilterPending) > 0 {
+				m.pickerFilterPending = m.pickerFilterPending[:len(m.pickerFilterPending)-1]
+				if m.pickerFilterDebounce != nil {
+					m.pickerFilterDebounce.Stop()
+				}
+				m.pickerFilterDebounce = time.NewTimer(150 * time.Millisecond)
+				m.pickerIndex = 0
+				return true, m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
+					return pickerFilterDebounceMsg{}
+				})
+			}
+			return true, m, nil
+		}
+		if keyStr == "f" && m.pickerFilter == "" && m.pickerKind == "model" {
+			items, values := m.pickerVisibleItems()
+			isSelectable := len(m.pickerIsHeader) == 0 || (m.pickerIndex < len(m.pickerIsHeader) && !m.pickerIsHeader[m.pickerIndex])
+			if m.pickerIndex < len(items) && m.pickerIndex < len(values) && isSelectable {
+				modelID := values[m.pickerIndex]
+				if config.IsFavorite(modelID) {
+					_ = config.RemoveFavoriteModel(modelID)
+				} else {
+					_ = config.SaveFavoriteModel(modelID)
+				}
+				m.openModelPicker()
+				return true, m, nil
+			}
+			return true, m, nil
+		}
+		if len(msg.Text) > 0 {
+			m.pickerFilterPending += msg.Text
+			if m.pickerFilterDebounce != nil {
+				m.pickerFilterDebounce.Stop()
+			}
+			m.pickerFilterDebounce = time.NewTimer(150 * time.Millisecond)
+			return true, m, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
+				return pickerFilterDebounceMsg{}
+			})
+		}
+		return true, m, nil
+	}
+
+	if m.showConnect {
+		newM, cmd := m.updateConnectDialog(msg)
+		return true, newM, cmd
+	}
+
+	if m.showPalette {
+		if keyStr == "esc" || keyStr == "ctrl+p" {
+			m.showPalette = false
+			return true, m, nil
+		}
+		if keyStr == "enter" {
+			m.showPalette = false
+			newM, cmd := m.handleCommand(m.paletteInput)
+			return true, newM, cmd
+		}
+		if keyStr == "backspace" {
+			if len(m.paletteInput) > 0 {
+				m.paletteInput = m.paletteInput[:len(m.paletteInput)-1]
+			}
+			return true, m, nil
+		}
+		if len(msg.Text) > 0 {
+			m.paletteInput += msg.Text
+		}
+		return true, m, nil
+	}
+
+	if m.leaderActive {
+		m.leaderActive = false
+
+		key := keyStr
+		if m.config != nil {
+			if cmd, ok := m.config.TUI.Keybinds[key]; ok {
+				newM, c := m.handleCommand(cmd)
+				return true, newM, c
+			}
+		}
+
+		switch key {
+		case "u":
+			newM, c := m.handleCommand("/undo")
+			return true, newM, c
+		case "r":
+			newM, c := m.handleCommand("/redo")
+			return true, newM, c
+		case "n":
+			newM, c := m.handleCommand("/new")
+			return true, newM, c
+		case "l":
+			newM, c := m.handleCommand("/session")
+			return true, newM, c
+		case "c":
+			newM, c := m.handleCommand("/compact")
+			return true, newM, c
+		case "q":
+			m.saveSession()
+			return true, m, tea.Quit
+		}
+		return true, m, nil
+	}
+
+	return false, m, nil
+}
+
+// handleChatKeys handles all chat-tab-specific key bindings. tiCmd and vpCmd
+// are forwarded from the outer Update so chat's "enter" (empty input) batch
+// can still flush textarea/viewport updates.
+func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Model, tea.Cmd) {
+	keyStr := msg.String()
+
+	switch keyStr {
+	case "ctrl+p":
+		m.showPalette = !m.showPalette
+		m.paletteInput = ""
+		return m, nil
+	case "up":
+		if len(m.inputHistory) == 0 {
+			break
+		}
+		if m.inputHistoryIndex == -1 {
+			m.inputHistoryIndex = len(m.inputHistory) - 1
+		} else if m.inputHistoryIndex > 0 {
+			m.inputHistoryIndex--
+		}
+		m.input.SetValue(m.inputHistory[m.inputHistoryIndex])
+		return m, nil
+	case "down":
+		if len(m.inputHistory) == 0 || m.inputHistoryIndex == -1 {
+			break
+		}
+		if m.inputHistoryIndex < len(m.inputHistory)-1 {
+			m.inputHistoryIndex++
+			m.input.SetValue(m.inputHistory[m.inputHistoryIndex])
+		} else {
+			m.inputHistoryIndex = -1
+			m.input.SetValue("")
+		}
+		return m, nil
+	case "ctrl+b":
+		m.toggleSidebar()
+		return m, nil
+	case "ctrl+o":
+		return m.handleCommand("/yolo")
+	case "ctrl+y":
+		return m.retryLastLLMError()
+	case "ctrl+x":
+		m.leaderActive = true
+		m.leaderSeq++
+		timeout := 2000
+		if m.config != nil && m.config.TUI.LeaderTimeout != 0 {
+			timeout = m.config.TUI.LeaderTimeout
+		}
+		seq := m.leaderSeq
+		return m, tea.Tick(time.Duration(timeout)*time.Millisecond, func(time.Time) tea.Msg {
+			return leaderTimeoutMsg{seq: seq}
+		})
+	case "esc":
+		return m.handleEscKey()
+	case "ctrl+c":
+		if strings.TrimSpace(m.input.Value()) != "" {
+			m.input.Reset()
+			m.inputHistoryIndex = -1
+			m.ctrlCPressed = false
+			m.closeSlashPopup()
+			return m, nil
+		}
+		if m.ctrlCPressed {
+			m.saveSession()
+			return m, tea.Quit
+		}
+		m.ctrlCPressed = true
+		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return ctrlCResetMsg{} })
+	case "shift+tab":
+		m.cycleAgentMode()
+		return m, nil
+	case "tab":
+		current := m.input.Value()
+		if strings.HasPrefix(current, "/") {
+			trimmed := strings.TrimSpace(current)
+			if trimmed == "/models" || strings.HasPrefix(trimmed, "/models ") || trimmed == "/model" || strings.HasPrefix(trimmed, "/model ") {
+				m.openModelPicker()
+				return m, nil
+			}
+			if trimmed == "/themes" || strings.HasPrefix(trimmed, "/themes ") || trimmed == "/theme" || strings.HasPrefix(trimmed, "/theme ") {
+				m.openThemePicker()
+				return m, nil
+			}
+
+			suggestions := autocompleteSlashInput(&m, current)
+			if len(suggestions) == 0 {
+				return m, nil
+			}
+
+			if strings.HasSuffix(current, " ") {
+				m.input.SetValue(strings.TrimSpace(current) + " " + suggestions[0])
+				return m, nil
+			}
+
+			m.input.SetValue(suggestions[0])
+			return m, nil
+		}
+		m.cycleAgentMode()
+		return m, nil
+	case "enter":
+		text := strings.TrimSpace(m.input.Value())
+		if text == "" {
+			return m, tea.Batch(tiCmd, vpCmd)
+		}
+
+		if !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "!") {
+			if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
+				m.inputHistory = append(m.inputHistory, text)
+			}
+		}
+		m.inputHistoryIndex = -1
+
+		if strings.HasPrefix(text, "/") {
+			m.closeSlashPopup()
+			return m.handleCommand(text)
+		}
+
+		if strings.HasPrefix(text, "!") {
+			m.input.Reset()
+			cmdText := strings.TrimPrefix(text, "!")
+			m.messages = append(m.messages, message{role: roleUser, text: text})
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 running shell: %s", cmdText)})
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+			return m, runInteractiveShell(cmdText, m.workDir)
+		}
+
+		if m.streaming {
+			m.queuedInputs = append(m.queuedInputs, text)
+			m.input.Reset()
+			m.layout()
+			m.viewport.GotoBottom()
+			return m, nil
+		}
+
+		var pendingToolCallID string
+		if len(m.messages) > 0 {
+			last := m.messages[len(m.messages)-1]
+			if last.raw != nil && len(last.raw.ToolCalls) > 0 {
+				for _, tc := range last.raw.ToolCalls {
+					if tc.Function.Name == "question" {
+						pendingToolCallID = tc.ID
+						break
+					}
+				}
+			}
+		}
+
+		if pendingToolCallID != "" {
+			m.messages = append(m.messages, message{
+				role: roleAssistant,
+				text: fmt.Sprintf("✅ tool result: %s", text),
+				raw: &agent.Message{
+					Role:    "tool",
+					Content: text,
+					ToolID:  pendingToolCallID,
+				},
+			})
+			m.input.Reset()
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+			m.saveSession()
+			return m, m.askAgent()
+		}
+
+		if m.showPermDialog {
+			choice := strings.ToLower(strings.TrimSpace(text))
+			m.showPermDialog = false
+			cmd := m.handlePermissionChoice(choice)
+			m.input.Reset()
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+			m.saveSession()
+			return m, cmd
+		}
+
+		m.input.Reset()
+		return m, m.processFileReferences(text)
+	}
+
+	return m, tea.Batch(tiCmd, vpCmd)
+}
+
+// handleLogKeys handles key bindings for the log tab.
+func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		m.logViewport.ScrollDown(1)
+	case "k", "up":
+		m.logViewport.ScrollUp(1)
+	case "c":
+		DebugLog.Clear()
+		m.logEntries = nil
+		m.refreshLogViewport()
+	}
+	return m, nil
+}
+
+// handleEscKey is shared esc logic: cancel stream first, then double-esc opens message picker.
+func (m model) handleEscKey() (tea.Model, tea.Cmd) {
+	if m.streaming && m.cancelStream != nil {
+		select {
+		case <-m.cancelStream:
+		default:
+			close(m.cancelStream)
+		}
+		return m, nil
+	}
+	if !m.escPressed {
+		m.escPressed = true
+		m.escPressTime = time.Now()
+		return m, nil
+	}
+	if time.Since(m.escPressTime) < 500*time.Millisecond {
+		m.escPressed = false
+		m.openMessagePicker()
+		return m, nil
+	}
+	m.escPressed = false
+	return m, nil
+}
+
+// filesHasActiveFocus reports whether the files sub-model has an active mode that should consume esc.
+func (m model) filesHasActiveFocus() bool {
+	return m.files.fuzzy || m.files.mode != filesModeNormal || m.files.choosingEditor
+}
+
+// gitHasActiveFocus reports whether the git sub-model has an active mode that should consume esc.
+func (m model) gitHasActiveFocus() bool {
+	return m.git.committing || m.git.branchInputMode || m.git.stashInputMode || m.git.pendingAction != ""
+}
+
 func shouldForwardToTranscriptViewport(msg tea.Msg) bool {
 	switch msg.(type) {
 	case tea.KeyPressMsg:
@@ -1244,7 +1307,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 	if pressed && m.activeTab == tabFiles {
-		treeW := m.width * 35 / 100
 		previewRight := m.width - 1
 		scrollX := previewRight - 1
 		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
@@ -1254,11 +1316,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.scrollbarDrag = scrollbarDragFilesPreview
 			scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, filesTrackH)
 			return m, nil, true
-		}
-		if mouse.X >= treeW && mouse.X < previewRight && mouse.Y >= filesTrackTop && mouse.Y < filesTrackTop+filesTrackH {
-			var cmd tea.Cmd
-			m.files, cmd = m.files.startInlineEdit()
-			return m, cmd, true
 		}
 	}
 	if !pressed {

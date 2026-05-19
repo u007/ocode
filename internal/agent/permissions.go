@@ -151,10 +151,6 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if pm.mode == PermissionModeYOLO {
 			return PermissionDecision{Level: PermissionAllow}
 		}
-		// Check safe bash commands first
-		if isSafeBashCommand(command) {
-			return PermissionDecision{Level: PermissionAllow}
-		}
 		if ok {
 			if level, exists := pm.bashPrefixes[prefix]; exists {
 				if level == PermissionAsk {
@@ -162,6 +158,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				}
 				return PermissionDecision{Level: level}
 			}
+		}
+		// Check safe bash commands after prefix rules
+		if isSafeBashCommand(command) {
+			return PermissionDecision{Level: PermissionAllow}
 		}
 		level := pm.Check(toolName)
 		if level == PermissionAsk {

@@ -163,6 +163,25 @@ func TestPermissionManagerBashPrefixRules(t *testing.T) {
 	}
 }
 
+// TestPermissionPrefixBeatseSafeCommand verifies that an explicit prefix deny rule
+// wins over the safe-command allowlist (prefix rules take priority).
+func TestPermissionPrefixBeatsSafeCommand(t *testing.T) {
+	// "git status" is in isSafeBashCommand; a deny prefix rule must still win.
+	pm := NewPermissionManager()
+	pm.SetBashPrefixRule("git", PermissionDeny)
+	decision := pm.Decide("bash", json.RawMessage(`{"command":"git status"}`))
+	if decision.Level != PermissionDeny {
+		t.Fatalf("expected prefix deny to win over safe command, got %s", decision.Level)
+	}
+
+	// No prefix rule set: safe command is allowed.
+	pm2 := NewPermissionManager()
+	decision2 := pm2.Decide("bash", json.RawMessage(`{"command":"git status"}`))
+	if decision2.Level != PermissionAllow {
+		t.Fatalf("expected safe command allow when no prefix rule, got %s", decision2.Level)
+	}
+}
+
 func TestPermissionManagerYoloAllowsBash(t *testing.T) {
 	pm := NewPermissionManager()
 	pm.SetMode(PermissionModeYOLO)

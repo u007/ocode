@@ -31,106 +31,6 @@ func TestFilesPreviewShowsMetadataAndLanguage(t *testing.T) {
 	}
 }
 
-func TestFilesPreviewShowsEditHintForEditableFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "note.txt")
-	if err := os.WriteFile(path, []byte("hello\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := newFilesModel(dir)
-	m.Resize(100, 30)
-	if result, ok := loadPreviewCmd(m.nodes[0])().(filesPreviewMsg); ok {
-		m.applyPreview(result)
-	}
-
-	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false)
-	if !strings.Contains(view, "i inline edit") {
-		t.Fatalf("expected editable preview hint, got:\n%s", view)
-	}
-}
-
-func TestFilesInlineEditSavesSelectedTextFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "note.txt")
-	if err := os.WriteFile(path, []byte("old\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := newFilesModel(dir)
-	m.Resize(100, 30)
-	m, cmd := m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
-	if cmd != nil {
-		if msg := cmd(); msg != nil {
-			m, _ = m.Update(msg, 100, 30)
-		}
-	}
-	if m.mode != filesModeEdit {
-		t.Fatalf("expected edit mode, got %v", m.mode)
-	}
-	m.editorInput.SetValue("new\n")
-	m, _ = m.Update(tea.KeyPressMsg{Code: 's', Mod: tea.ModCtrl}, 100, 30)
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(data) != "new\n" {
-		t.Fatalf("expected saved content, got %q", string(data))
-	}
-	if m.mode != filesModeNormal {
-		t.Fatalf("expected normal mode after save, got %v", m.mode)
-	}
-}
-
-func TestFilesInlineEditFocusesEditor(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "note.txt")
-	if err := os.WriteFile(path, []byte("old\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := newFilesModel(dir)
-	m.Resize(100, 30)
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
-
-	if !m.editorInput.Focused() {
-		t.Fatal("expected inline editor to be focused after entering edit mode")
-	}
-}
-
-func TestFilesPreviewClickStartsInlineEdit(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "note.txt")
-	if err := os.WriteFile(path, []byte("old\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	m := model{
-		ready:     true,
-		width:     100,
-		height:    30,
-		activeTab: tabFiles,
-		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
-		styles:    ApplyThemeColors("tokyonight"),
-	}
-	m.files = newFilesModel(dir)
-	m.files.Resize(100, 30)
-	if result, ok := loadPreviewCmd(m.files.nodes[0])().(filesPreviewMsg); ok {
-		m.files.applyPreview(result)
-	}
-
-	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 45, Y: 4})
-	got := derefTestModel(t, updated)
-	if got.files.mode != filesModeEdit {
-		t.Fatalf("expected preview click to enter edit mode, got %v", got.files.mode)
-	}
-	if !got.files.editorInput.Focused() {
-		t.Fatal("expected preview click to focus inline editor")
-	}
-}
-
 func TestFilesActionsCreateRenameAndDelete(t *testing.T) {
 	dir := t.TempDir()
 	m := newFilesModel(dir)
@@ -307,10 +207,13 @@ func TestFilesHintsExternalMode(t *testing.T) {
 	}
 
 	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false)
+	if !strings.Contains(view, "tab jump") {
+		t.Fatalf("expected tab jump hint, got:\n%s", view)
+	}
 	if !strings.Contains(view, "e external") {
 		t.Fatalf("expected external editor hint, got:\n%s", view)
 	}
-	if !strings.Contains(view, "E choose editor") {
+	if !strings.Contains(view, "choose editor") {
 		t.Fatalf("expected choose editor hint, got:\n%s", view)
 	}
 }
@@ -332,51 +235,11 @@ func TestFilesHintsTmuxSplitMode(t *testing.T) {
 	if !strings.Contains(view, "tmux split: nvim") {
 		t.Fatalf("expected tmux split hint, got:\n%s", view)
 	}
-	if !strings.Contains(view, "E choose editor") {
+	if !strings.Contains(view, "tab jump") {
+		t.Fatalf("expected tab jump hint, got:\n%s", view)
+	}
+	if !strings.Contains(view, "choose") || !strings.Contains(view, "editor") {
 		t.Fatalf("expected choose editor hint, got:\n%s", view)
 	}
 }
 
-func TestFilesHintsEditMode(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "note.txt")
-	os.WriteFile(path, []byte("hello\n"), 0644)
-
-	m := newFilesModel(dir)
-	m.Resize(100, 30)
-	m.mode = filesModeEdit
-
-	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false)
-	if !strings.Contains(view, "ctrl+s save") {
-		t.Fatalf("expected ctrl+s save hint in edit mode, got:\n%s", view)
-	}
-	if !strings.Contains(view, "esc cancel") {
-		t.Fatalf("expected esc cancel hint in edit mode, got:\n%s", view)
-	}
-}
-
-func TestFileModePreservedOnInlineSave(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "script.sh")
-	os.WriteFile(path, []byte("echo old\n"), 0755)
-
-	m := newFilesModel(dir)
-	m.Resize(100, 30)
-	m.mode = filesModeEdit
-	m.editorInput.SetValue("echo new\n")
-	m.cursor = 0
-
-	m, _ = m.saveInlineEdit()
-
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat failed: %v", err)
-	}
-	if info.Mode()&0100 == 0 {
-		t.Fatal("expected executable permission to be preserved")
-	}
-	data, _ := os.ReadFile(path)
-	if string(data) != "echo new\n" {
-		t.Fatalf("expected new content, got %q", string(data))
-	}
-}

@@ -30,7 +30,6 @@ type filesMode int
 
 const (
 	filesModeNormal filesMode = iota
-	filesModeEdit
 	filesModePrompt
 	filesModeDeleteConfirm
 )
@@ -41,6 +40,13 @@ const (
 	filesPromptCreateFile filesPromptKind = iota
 	filesPromptCreateDir
 	filesPromptRename
+)
+
+type filesPanel int
+
+const (
+	filesPanelPicker filesPanel = iota
+	filesPanelPreview
 )
 
 type fileNode struct {
@@ -69,7 +75,6 @@ type filesModel struct {
 	editorTarget    string
 	statusMsg       string
 	mode            filesMode
-	editorInput     textarea.Model
 	promptInput     textarea.Model
 	promptKind      filesPromptKind
 	promptTarget    string
@@ -80,12 +85,12 @@ type filesModel struct {
 	gitStatus       map[string]string
 	editorOpener    func(string) tea.Cmd
 	editorMode      string
+	panel           filesPanel
 }
 
 func newFilesModel(workDir string) filesModel {
 	m := filesModel{workDir: workDir}
 	m.preview = viewport.New()
-	m.editorInput = textarea.New()
 	m.promptInput = textarea.New()
 	m.nodes = loadDirChildren(workDir, 0)
 	m.refreshGitStatus()
@@ -132,8 +137,6 @@ func (m *filesModel) Resize(w, h int) {
 	}
 	m.preview.SetWidth(previewW - 7)
 	m.preview.SetHeight(previewH)
-	m.editorInput.SetWidth(previewW - 7)
-	m.editorInput.SetHeight(previewH)
 	m.promptInput.SetWidth(previewW - 7)
 	m.promptInput.SetHeight(1)
 }
@@ -146,9 +149,6 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 	case tea.KeyPressMsg:
 		if m.choosingEditor {
 			return m.updateEditorPicker(msg)
-		}
-		if m.mode == filesModeEdit {
-			return m.updateInlineEdit(msg)
 		}
 		if m.mode == filesModePrompt {
 			return m.updatePrompt(msg)
@@ -198,8 +198,6 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			m.openEditorPicker(m.nodes[m.cursor].path)
 		}
-	case "i":
-		return m.startInlineEdit()
 	case "n":
 		m.startCreateFile()
 	case "N", "shift+n":
@@ -216,23 +214,10 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.fuzzy = true
 		m.query = ""
 		m.buildAllPaths()
+	case "tab":
+		m.panel = (m.panel + 1) % 2
 	}
 	return m, nil
-}
-
-func (m filesModel) updateInlineEdit(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.mode = filesModeNormal
-		m.editorInput.Blur()
-		m.statusMsg = "edit cancelled"
-		return m, nil
-	case "ctrl+s":
-		return m.saveInlineEdit()
-	}
-	var cmd tea.Cmd
-	m.editorInput, cmd = m.editorInput.Update(msg)
-	return m, cmd
 }
 
 func (m filesModel) updatePrompt(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
@@ -623,46 +608,6 @@ func (m filesModel) submitPrompt() (filesModel, tea.Cmd) {
 	return m, m.refreshPreviewCmd()
 }
 
-func (m filesModel) startInlineEdit() (filesModel, tea.Cmd) {
-	n, ok := m.selectedNode()
-	if !ok || n.isDir {
-		return m, nil
-	}
-	result := loadPreviewCmd(n)()
-	preview, ok := result.(filesPreviewMsg)
-	if !ok || !preview.editable {
-		m.statusMsg = "file is not editable in preview"
-		return m, nil
-	}
-	m.applyPreview(preview)
-	m.editorInput.SetValue(preview.raw)
-	m.editorInput.Focus()
-	m.mode = filesModeEdit
-	m.statusMsg = "editing: ctrl+s save, esc cancel"
-	return m, nil
-}
-
-func (m filesModel) saveInlineEdit() (filesModel, tea.Cmd) {
-	n, ok := m.selectedNode()
-	if !ok || n.isDir {
-		m.statusMsg = "no file selected"
-		return m, nil
-	}
-	info, err := os.Stat(n.path)
-	mode := os.FileMode(0644)
-	if err == nil {
-		mode = info.Mode()
-	}
-	if err := os.WriteFile(n.path, []byte(m.editorInput.Value()), mode); err != nil {
-		m.statusMsg = "save failed: " + err.Error()
-		return m, nil
-	}
-	m.mode = filesModeNormal
-	m.editorInput.Blur()
-	m.statusMsg = "saved: " + n.name
-	return m, loadPreviewCmd(n)
-}
-
 func (m *filesModel) copySelectedPath() {
 	n, ok := m.selectedNode()
 	if !ok {
@@ -820,21 +765,26 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 		treeLines = append(treeLines, line)
 	}
 	treeContent := strings.Join(treeLines, "\n")
-	treePane := borderStyle.Width(treeW - 2).Height(h - 3).Render(treeContent)
+
+	focusBorder := func(focused bool) lipgloss.Style {
+		if focused {
+			return borderStyle.BorderForeground(lipgloss.Color("#7AA2F7"))
+		}
+		return borderStyle
+	}
+
+	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 3).Render(treeContent)
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
 	previewBody := m.preview.View()
-	if m.mode == filesModeEdit {
-		previewBody = m.editorInput.View()
-	}
 	previewContent := lipgloss.JoinHorizontal(lipgloss.Top, previewBody, previewSB)
 	if header := m.previewHeader(); header != "" {
 		previewContent = hintStyle.Render(header) + "\n" + previewContent
 	}
 	if m.mode == filesModeNormal && m.previewEditable {
-		hint := "i inline edit  e external  E choose editor  /editor set default"
+		hint := "tab jump  e external  E choose editor  /editor set default"
 		if isTmuxMode(m.editorMode) {
-			hint = "e " + m.tmuxOpenHint() + "  i inline edit  E choose editor  /editor set default"
+			hint = "tab jump  e " + m.tmuxOpenHint() + "  E choose editor  /editor set default"
 		}
 		previewContent = hintStyle.Render(hint) + "\n" + previewContent
 	}
@@ -844,14 +794,12 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 		previewContent = hintStyle.Render(m.statusMsg) + "\n" + m.promptInput.View()
 	} else if m.mode == filesModeDeleteConfirm {
 		previewContent = hintStyle.Render(m.statusMsg) + "\n" + hintStyle.Render("press y to confirm, esc/n to cancel")
-	} else if m.mode == filesModeEdit {
-		previewContent = hintStyle.Render("ctrl+s save  esc cancel") + "\n" + previewContent
 	} else if m.statusMsg != "" {
 		previewContent = hintStyle.Render(m.statusMsg) + "\n\n" + previewContent
 	} else if m.editor != "" {
 		previewContent = hintStyle.Render("editor: "+m.editor+"  (E to change)") + "\n\n" + previewContent
 	}
-	previewPane := borderStyle.Width(previewW - 2).Render(previewContent)
+	previewPane := focusBorder(m.panel == filesPanelPreview).Width(previewW - 2).Render(previewContent)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, treePane, previewPane)
 

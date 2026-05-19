@@ -98,11 +98,16 @@ type gitModel struct {
 	hunks      []diffHunk
 	hunkCursor int
 	diffHeader string
+	// commit log pagination
+	commitViewport viewport.Model
+	loadingLog     bool
+	logsMore       bool
 }
 
 func newGitModel(workDir string) gitModel {
 	m := gitModel{workDir: workDir}
 	m.diff = viewport.New()
+	m.commitViewport = viewport.New()
 	ci := textarea.New()
 	ci.Placeholder = "Commit message..."
 	ci.SetHeight(5)
@@ -128,6 +133,8 @@ func (m *gitModel) Resize(w, h int) {
 	}
 	m.diff.SetWidth(diffW - 7)
 	m.diff.SetHeight(diffH)
+	m.commitViewport.SetWidth(filesW - 7)
+	m.commitViewport.SetHeight(h - 5)
 	m.commitInput.SetWidth(sectW + filesW)
 }
 
@@ -199,6 +206,42 @@ func (m *gitModel) cmdRefresh() tea.Cmd {
 	}
 }
 
+type loadMoreLogMsg struct {
+	commits []gitCommit
+	hasMore bool
+	err     error
+}
+
+func (m *gitModel) cmdLoadMoreLog() tea.Cmd {
+	skip := len(m.commits)
+	workDir := m.workDir
+	return func() tea.Msg {
+		cmd := exec.Command("git", "log", "--format=%h\t%s\t%an\t%cr", fmt.Sprintf("--skip=%d", skip), "-50")
+		cmd.Dir = workDir
+		out, err := cmd.Output()
+		if err != nil {
+			return loadMoreLogMsg{err: err}
+		}
+		trimmed := strings.TrimSpace(string(out))
+		if trimmed == "" {
+			return loadMoreLogMsg{}
+		}
+		var commits []gitCommit
+		for _, line := range strings.Split(trimmed, "\n") {
+			parts := strings.SplitN(line, "\t", 4)
+			if len(parts) == 4 {
+				commits = append(commits, gitCommit{
+					hash:    parts[0],
+					subject: parts[1],
+					author:  parts[2],
+					age:     parts[3],
+				})
+			}
+		}
+		return loadMoreLogMsg{commits: commits, hasMore: len(commits) >= 50}
+	}
+}
+
 func (m *gitModel) cmdNetworkOp(statusDone, statusFail string, args ...string) tea.Cmd {
 	workDir := m.workDir
 	return func() tea.Msg {
@@ -266,6 +309,8 @@ func (m *gitModel) loadLog() {
 			})
 		}
 	}
+	m.logsMore = len(m.commits) >= 50
+	m.loadingLog = false
 }
 
 func (m *gitModel) loadStash() {
@@ -322,7 +367,20 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 		m.branches = msg.branches
 		m.currentBranch = msg.currentBranch
 		m.aheadBehind = msg.aheadBehind
+		m.loadingLog = false
+		m.logsMore = len(m.commits) >= 50
 		m.loadDiff()
+		return m, nil
+	case loadMoreLogMsg:
+		m.loadingLog = false
+		if msg.err != nil {
+			m.statusMsg = "git log failed: " + msg.err.Error()
+			return m, nil
+		}
+		if len(msg.commits) > 0 {
+			m.commits = append(m.commits, msg.commits...)
+		}
+		m.logsMore = msg.hasMore
 		return m, nil
 	}
 	if m.committing {
@@ -506,7 +564,14 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		case gitSectionLog:
 			if m.commitCursor < len(m.commits)-1 {
 				m.commitCursor++
+				if m.commitCursor >= m.commitViewport.YOffset()+m.commitViewport.VisibleLineCount() {
+					m.commitViewport.ScrollDown(1)
+				}
 				m.loadDiff()
+				if !m.loadingLog && m.logsMore && m.commitCursor >= len(m.commits)-5 {
+					m.loadingLog = true
+					return m, m.cmdLoadMoreLog()
+				}
 			}
 		case gitSectionStash:
 			if m.stashCursor < len(m.stashes)-1 {
@@ -529,6 +594,9 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		case gitSectionLog:
 			if m.commitCursor > 0 {
 				m.commitCursor--
+				if m.commitCursor < m.commitViewport.YOffset() {
+					m.commitViewport.ScrollUp(1)
+				}
 				m.loadDiff()
 			}
 		case gitSectionStash:
@@ -939,6 +1007,18 @@ func (m gitModel) renderHints() string {
 	return base
 }
 
+func (m *gitModel) buildCommitViewport(width int) {
+	var lines []string
+	for i, c := range m.commits {
+		line := fmt.Sprintf("%s  %s  %s", c.hash, c.subject, c.age)
+		if i == m.commitCursor {
+			line = lipgloss.NewStyle().Reverse(true).Width(width).Render(line)
+		}
+		lines = append(lines, line)
+	}
+	m.commitViewport.SetContent(strings.Join(lines, "\n"))
+}
+
 func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 	sectW := w * 20 / 100
 	filesW := w * 30 / 100
@@ -964,10 +1044,18 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 		strings.Join(sectionLines, "\n"),
 	)
 
-	fileLines := m.renderFileList(filesW - 4)
-	filesPane := focusBorder(m.panel == gitPanelFiles).Width(filesW - 2).Height(h - 4).Render(
-		strings.Join(fileLines, "\n"),
-	)
+	var filesContent string
+	if m.section == gitSectionLog {
+		savedOffset := m.commitViewport.YOffset()
+		m.buildCommitViewport(filesW - 7)
+		m.commitViewport.SetYOffset(savedOffset)
+		logSB := renderScrollbar(m.commitViewport.Height(), m.commitViewport.TotalLineCount(), m.commitViewport.VisibleLineCount(), m.commitViewport.YOffset())
+		filesContent = lipgloss.JoinHorizontal(lipgloss.Top, m.commitViewport.View(), logSB)
+	} else {
+		fileLines := m.renderFileList(filesW - 4)
+		filesContent = strings.Join(fileLines, "\n")
+	}
+	filesPane := focusBorder(m.panel == gitPanelFiles).Width(filesW - 2).Height(h - 4).Render(filesContent)
 
 	diffSB := renderScrollbar(m.diff.Height(), m.diff.TotalLineCount(), m.diff.VisibleLineCount(), m.diff.YOffset())
 	diffContent := lipgloss.JoinHorizontal(lipgloss.Top, m.diff.View(), diffSB)
