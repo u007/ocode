@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -488,6 +489,7 @@ func (m *MockToolClient) GetModel() string    { return "mock-model" }
 type MockTool struct {
 	name   string
 	result string
+	Error  error
 }
 
 func (m *MockTool) Name() string        { return m.name }
@@ -496,7 +498,7 @@ func (m *MockTool) Definition() map[string]interface{} {
 	return map[string]interface{}{"name": m.name}
 }
 func (m *MockTool) Execute(args json.RawMessage) (string, error) {
-	return m.result, nil
+	return m.result, m.Error
 }
 func (m *MockTool) Parallel() bool { return true }
 
@@ -530,5 +532,115 @@ func TestAgentEmitsProcessJobEvent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("no job event received")
+	}
+}
+
+func TestRecoverOrphanedToolCallsBasicRecovery(t *testing.T) {
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a.permissions = nil // Disable permission checks for testing
+
+	// Create messages with orphaned tool calls (no matching tool result).
+	tc := ToolCall{ID: "call-1", Type: "function"}
+	tc.Function.Name = "mock_tool"
+	tc.Function.Arguments = `{}`
+	messages := []Message{
+		{Role: "assistant", Content: "I'll help", ToolCalls: []ToolCall{tc}},
+	}
+
+	result := a.recoverOrphanedToolCalls(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages (assistant + tool result), got %d", len(result))
+	}
+	if result[0].Role != "assistant" {
+		t.Fatalf("expected first message to be assistant, got %q", result[0].Role)
+	}
+	if result[1].Role != "tool" || result[1].ToolID != "call-1" {
+		t.Fatalf("expected second message to be tool result for call-1, got role=%q toolid=%q", result[1].Role, result[1].ToolID)
+	}
+	if !strings.Contains(result[1].Content, "success") {
+		t.Fatalf("expected successful tool result, got: %s", result[1].Content)
+	}
+}
+
+func TestRecoverOrphanedToolCallsPartialRecovery(t *testing.T) {
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a.permissions = nil // Disable permission checks for testing
+
+	// Create messages: one call with result, one without.
+	tc1 := ToolCall{ID: "call-1", Type: "function"}
+	tc1.Function.Name = "mock_tool"
+	tc1.Function.Arguments = `{}`
+	tc2 := ToolCall{ID: "call-2", Type: "function"}
+	tc2.Function.Name = "mock_tool"
+	tc2.Function.Arguments = `{}`
+
+	messages := []Message{
+		{Role: "assistant", Content: "I'll help", ToolCalls: []ToolCall{tc1, tc2}},
+		{Role: "tool", ToolID: "call-1", Content: "existing result"},
+	}
+
+	result := a.recoverOrphanedToolCalls(messages)
+
+	if len(result) != 3 {
+		t.Fatalf("expected 3 messages (assistant + existing tool + recovered tool), got %d", len(result))
+	}
+	if result[1].Content != "existing result" {
+		t.Fatalf("expected existing result to be preserved, got: %s", result[1].Content)
+	}
+	if result[2].ToolID != "call-2" {
+		t.Fatalf("expected recovered call to be call-2, got: %s", result[2].ToolID)
+	}
+}
+
+func TestRecoverOrphanedToolCallsFailedRecovery(t *testing.T) {
+	// Create a tool that returns an error.
+	failingTool := &MockTool{
+		name:   "mock_tool",
+		Error:  fmt.Errorf("mock tool failed"),
+	}
+	a := NewAgent(&MockClient{}, []tool.Tool{failingTool}, nil)
+	a.permissions = nil // Disable permission checks for testing
+
+	tc := ToolCall{ID: "call-1", Type: "function"}
+	tc.Function.Name = "mock_tool"
+	tc.Function.Arguments = `{}`
+	messages := []Message{
+		{Role: "assistant", Content: "I'll help", ToolCalls: []ToolCall{tc}},
+	}
+
+	result := a.recoverOrphanedToolCalls(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(result))
+	}
+	if !strings.HasPrefix(result[1].Content, "ORPHAN_TOOL_ERROR:") {
+		t.Fatalf("expected error tag in result, got: %s", result[1].Content)
+	}
+	if !strings.Contains(result[1].Content, "mock tool failed") {
+		t.Fatalf("expected error message in result, got: %s", result[1].Content)
+	}
+}
+
+func TestRecoverOrphanedToolCallsEmptyCase(t *testing.T) {
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a.permissions = nil // Disable permission checks for testing
+
+	// No orphaned calls — all have results.
+	tc := ToolCall{ID: "call-1", Type: "function"}
+	tc.Function.Name = "mock_tool"
+	tc.Function.Arguments = `{}`
+	messages := []Message{
+		{Role: "assistant", Content: "I'll help", ToolCalls: []ToolCall{tc}},
+		{Role: "tool", ToolID: "call-1", Content: "result"},
+	}
+
+	result := a.recoverOrphanedToolCalls(messages)
+
+	if len(result) != 2 {
+		t.Fatalf("expected 2 messages (no recovery), got %d", len(result))
+	}
+	if result[1].Content != "result" {
+		t.Fatalf("expected result to be unchanged, got: %s", result[1].Content)
 	}
 }

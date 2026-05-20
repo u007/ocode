@@ -211,6 +211,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
 
+	// Recover orphaned tool calls from prior sessions: find the last assistant
+	// message that has ToolCalls, then check which call IDs have no following
+	// tool-result message. Re-execute those calls now (the prior execution is
+	// guaranteed gone — we're in a new Step invocation).
+	messages = a.recoverOrphanedToolCalls(messages)
+
 	for i := 0; ; i++ {
 		if a.cancelled() {
 			return newMsgs, nil
@@ -810,6 +816,58 @@ func (a *Agent) LoadExternalTools(cfg *config.Config) {
 			}
 		}
 	}
+}
+
+// recoverOrphanedToolCalls finds the last assistant message with ToolCalls,
+// identifies any call IDs that have no following tool-result message, and
+// re-executes them. This handles sessions that were persisted mid-tool-execution
+// where the prior execution is guaranteed finished (we are in a new Step call).
+func (a *Agent) recoverOrphanedToolCalls(messages []Message) []Message {
+	// Find last assistant message index that has tool calls.
+	lastAssistantIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
+			lastAssistantIdx = i
+			break
+		}
+	}
+	if lastAssistantIdx < 0 {
+		return messages
+	}
+
+	// Collect tool IDs that already have results after that message.
+	answered := make(map[string]bool)
+	for i := lastAssistantIdx + 1; i < len(messages); i++ {
+		if messages[i].Role == "tool" && messages[i].ToolID != "" {
+			answered[messages[i].ToolID] = true
+		}
+	}
+
+	// Find orphaned calls.
+	var orphans []ToolCall
+	for _, tc := range messages[lastAssistantIdx].ToolCalls {
+		if !answered[tc.ID] {
+			orphans = append(orphans, tc)
+		}
+	}
+	if len(orphans) == 0 {
+		return messages
+	}
+
+	emitDebug("RECOVER", fmt.Sprintf("re-executing %d orphaned tool call(s)", len(orphans)))
+
+	// Re-execute each orphan and append its result.
+	for _, tc := range orphans {
+		result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+		if err != nil {
+			// ORPHAN_TOOL_ERROR: prefix is internal-only, used by TUI to render a visible warning.
+			// Do not use this prefix in tool outputs; it has special semantic meaning for session recovery.
+			result = fmt.Sprintf("ORPHAN_TOOL_ERROR:%s:%v\n%s", tc.Function.Name, err, result)
+		}
+		result = TruncateToolResult(tc.ID, result)
+		messages = append(messages, Message{Role: "tool", ToolID: tc.ID, Content: result})
+	}
+	return messages
 }
 
 func truncateDebugArgs(args json.RawMessage, max int) string {

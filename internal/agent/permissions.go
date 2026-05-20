@@ -67,7 +67,7 @@ type patternRule struct {
 var pathScopedTools = map[string]bool{
 	"read": true, "write": true, "edit": true, "delete": true,
 	"multiedit": true, "replace_lines": true, "glob": true, "grep": true,
-	"list": true, "lsp": true, "patch": true, "format": true,
+	"list": true, "lsp": true, "apply_patch": true, "format": true,
 }
 
 func NewPermissionManager() *PermissionManager {
@@ -81,7 +81,7 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite"} {
 		pm.rules[name] = PermissionAllow
 	}
-	for _, name := range []string{"write", "edit", "multiedit", "replace_lines", "patch", "format"} {
+	for _, name := range []string{"write", "edit", "multiedit", "replace_lines", "apply_patch", "format"} {
 		pm.SetRule(name, PermissionAllow)
 	}
 	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "agent", "task", "mcp_*"} {
@@ -303,7 +303,7 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 		return ""
 	}
 	switch toolName {
-	case "read", "write", "delete", "edit", "multiedit", "replace_lines", "format", "lsp", "patch", "grep":
+	case "read", "write", "delete", "edit", "multiedit", "replace_lines", "format", "lsp", "apply_patch", "grep":
 		return params.Path
 	case "glob", "list":
 		if params.Pattern != "" {

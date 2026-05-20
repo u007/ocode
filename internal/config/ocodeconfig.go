@@ -101,7 +101,7 @@ func defaultPermissionConfig() PermissionConfig {
 			"multi_edit":    "allow",
 			"multiedit":     "allow",
 			"replace_lines": "allow",
-			"patch":         "allow",
+			"apply_patch":   "allow",
 			"delete":        "ask",
 			"format":        "allow",
 			"bash":          "ask",

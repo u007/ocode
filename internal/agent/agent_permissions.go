@@ -11,7 +11,7 @@ func buildPermissionManagerFromAgentWithDiags(permissions map[string]interface{}
 
 	groupToolMap := map[string][]string{
 		"read":      {"read"},
-		"edit":      {"write", "edit", "multi_edit", "multiedit", "replace_lines", "patch", "format"},
+		"edit":      {"write", "edit", "multi_edit", "multiedit", "replace_lines", "apply_patch", "format"},
 		"glob":      {"glob"},
 		"grep":      {"grep"},
 		"bash":      {"bash"},

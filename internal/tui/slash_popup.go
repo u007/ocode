@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -110,6 +111,171 @@ func looksLikeFilePath(s string) bool {
 	return agent.IsImageFile(s)
 }
 
+// shortcodeForPastedFiles converts terminal file drags (which arrive as pasted
+// absolute paths or file:// URIs) into compact, Claude Code-style file tokens.
+// It only converts when the entire paste is one or more existing files, so
+// ordinary pasted prose is left untouched.
+func shortcodeForPastedFiles(content, workDir string) (string, bool) {
+	paths := pastedExistingFilePaths(content)
+	if len(paths) == 0 {
+		return content, false
+	}
+
+	shortcodes := make([]string, 0, len(paths))
+	for _, p := range paths {
+		shortcodes = append(shortcodes, compactFileShortcode(p))
+	}
+	return strings.Join(shortcodes, " ") + " ", true
+}
+
+func (m *model) shortcodePastedFiles(content string) (string, bool) {
+	paths := pastedExistingFilePaths(content)
+	if len(paths) == 0 {
+		return content, false
+	}
+	if m.fileShortcodePaths == nil {
+		m.fileShortcodePaths = make(map[string]string)
+	}
+
+	shortcodes := make([]string, 0, len(paths))
+	for _, p := range paths {
+		token := m.uniqueFileShortcode(p)
+		m.fileShortcodePaths[token] = p
+		shortcodes = append(shortcodes, token)
+	}
+	return strings.Join(shortcodes, " ") + " ", true
+}
+
+func (m *model) uniqueFileShortcode(path string) string {
+	base := safeFileShortcodeLabel(filepath.Base(path))
+	for i := 1; ; i++ {
+		label := base
+		if i > 1 {
+			label = fmt.Sprintf("%s %d", base, i)
+		}
+		token := "[file: " + label + "]"
+		if existing, ok := m.fileShortcodePaths[token]; !ok || existing == path {
+			return token
+		}
+	}
+}
+
+func compactFileShortcode(path string) string {
+	return "[file: " + safeFileShortcodeLabel(filepath.Base(path)) + "]"
+}
+
+func safeFileShortcodeLabel(label string) string {
+	label = strings.ReplaceAll(label, "]", "）")
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "file"
+	}
+	return label
+}
+
+func pastedExistingFilePaths(content string) []string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return nil
+	}
+
+	if p, ok := normalizePastedPath(trimmed); ok {
+		return []string{p}
+	}
+
+	fields := strings.Fields(trimmed)
+	if len(fields) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(fields))
+	for _, f := range fields {
+		p, ok := normalizePastedPath(f)
+		if !ok {
+			return nil
+		}
+		paths = append(paths, p)
+	}
+	return paths
+}
+
+func normalizePastedPath(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	s = strings.Trim(s, "\r\n")
+	if len(s) >= 2 {
+		if (s[0] == '\'' && s[len(s)-1] == '\'') || (s[0] == '"' && s[len(s)-1] == '"') {
+			s = s[1 : len(s)-1]
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(s), "file://") {
+		if u, err := url.Parse(s); err == nil {
+			s = u.Path
+			if s == "" && u.Host != "" {
+				s = u.Host
+			}
+		}
+	}
+	s = unescapeDraggedPath(s)
+	if info, err := os.Stat(s); err == nil && !info.IsDir() {
+		if abs, err := filepath.Abs(s); err == nil {
+			return abs, true
+		}
+		return s, true
+	}
+	return "", false
+}
+
+func unescapeDraggedPath(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	escaped := false
+	for _, r := range s {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if escaped {
+		b.WriteRune('\\')
+	}
+	return b.String()
+}
+
+func displayPathForShortcode(path, workDir string) string {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		absPath = path
+	}
+	if workDir != "" {
+		if absWorkDir, err := filepath.Abs(workDir); err == nil {
+			if rel, err := filepath.Rel(absWorkDir, absPath); err == nil && rel != "." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+				return filepath.ToSlash(rel)
+			}
+		}
+	}
+	return filepath.ToSlash(absPath)
+}
+
+func escapeAtPath(path string) string {
+	var b strings.Builder
+	b.Grow(len(path))
+	for _, r := range path {
+		switch r {
+		case ' ', '\t', '\n', '\r', '\\':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func unescapeAtPath(path string) string { return unescapeDraggedPath(path) }
+
 func (m model) updateSlashPopupState() (model, tea.Cmd) {
 	value := m.input.Value()
 	if m.showPicker || m.showConnect || m.showPalette {
@@ -167,7 +333,7 @@ func buildFileListCache() tea.Cmd {
 			if agent.IsImageFile(clean) {
 				desc = "image"
 			}
-			items = append(items, slashSuggestion{name: "@" + clean, display: "@" + clean, desc: desc})
+			items = append(items, slashSuggestion{name: "@" + escapeAtPath(clean), display: "@" + clean, desc: desc})
 			return nil
 		})
 		return fileListCacheMsg{items: items}
@@ -210,7 +376,6 @@ func activeAtToken(value string) (string, bool) {
 	}
 	return token, true
 }
-
 
 func (m model) slashPopupRowForY(y int) (int, bool) {
 	if !m.showSlashPopup || len(m.slashPopupItems) == 0 {
@@ -279,6 +444,17 @@ func (m model) renderSlashPopup() string {
 	start, end := m.slashPopupVisibleRange()
 
 	var body strings.Builder
+
+	// Show the active @query so the user can see what they're filtering by.
+	if token, ok := activeAtToken(m.input.Value()); ok {
+		query := token
+		if query == "" {
+			query = "…"
+		}
+		body.WriteString(m.styles.Hint.Render("@ filter: ") + nameStyle.Render(query))
+		body.WriteByte('\n')
+	}
+
 	if len(items) == 0 {
 		body.WriteString(hintStyle.Render("(no matching commands)"))
 		body.WriteByte('\n')

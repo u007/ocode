@@ -109,18 +109,18 @@ type Config struct {
 	Model          string                     `json:"model"`
 	SmallModel     string                     `json:"small_model"`
 	ThinkingBudget int                        `json:"-"` // runtime-only: extended thinking token budget
-	Provider     map[string]interface{}     `json:"provider"`
-	Tools        map[string]bool            `json:"tools"`
-	Permission   map[string]interface{}     `json:"permission"`
-	Agent        map[string]interface{}     `json:"agent"`
-	DefaultAgent string                     `json:"default_agent"`
-	MCP          map[string]MCPConfig       `json:"mcp"`
-	TUI          TUIConfig                  `json:"tui"`
-	Watcher      WatcherConfig              `json:"watcher"`
-	Hooks        map[string]HookConfig      `json:"hooks"`
-	Formatters   map[string]FormatterConfig `json:"formatters"`
-	RemoteConfig string                     `json:"remote_config"`
-	Ocode        *OcodeConfig               `json:"-"`
+	Provider       map[string]interface{}     `json:"provider"`
+	Tools          map[string]bool            `json:"tools"`
+	Permission     map[string]interface{}     `json:"permission"`
+	Agent          map[string]interface{}     `json:"agent"`
+	DefaultAgent   string                     `json:"default_agent"`
+	MCP            map[string]MCPConfig       `json:"mcp"`
+	TUI            TUIConfig                  `json:"tui"`
+	Watcher        WatcherConfig              `json:"watcher"`
+	Hooks          map[string]HookConfig      `json:"hooks"`
+	Formatters     map[string]FormatterConfig `json:"formatters"`
+	RemoteConfig   string                     `json:"remote_config"`
+	Ocode          *OcodeConfig               `json:"-"`
 }
 
 func Load() (*Config, error) {
@@ -719,6 +719,12 @@ func loadFromFile(path string, config *Config) error {
 	if err := json.Unmarshal(cleanData, &temp); err != nil {
 		return err
 	}
+	// opencode stores TUI theme as top-level `theme` in legacy opencode.json,
+	// then migrates it to tui.json. Read both so ocode stays compatible.
+	var legacyTUI struct {
+		Theme string `json:"theme"`
+	}
+	_ = json.Unmarshal(cleanData, &legacyTUI)
 
 	if temp.Model != "" {
 		config.Model = temp.Model
@@ -755,6 +761,9 @@ func loadFromFile(path string, config *Config) error {
 	}
 	for k, v := range temp.Formatters {
 		config.Formatters[k] = v
+	}
+	if legacyTUI.Theme != "" {
+		config.TUI.Theme = legacyTUI.Theme
 	}
 	if temp.TUI.Theme != "" {
 		config.TUI.Theme = temp.TUI.Theme

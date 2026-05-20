@@ -86,8 +86,8 @@ func TestPermissionManager(t *testing.T) {
 	if pm.Check("write") != PermissionAllow {
 		t.Error("expected allow for write")
 	}
-	if pm.Check("patch") != PermissionAllow {
-		t.Error("expected allow for patch")
+	if pm.Check("apply_patch") != PermissionAllow {
+		t.Error("expected allow for apply_patch")
 	}
 	if pm.Check("delete") != PermissionAsk {
 		t.Error("expected ask for delete")

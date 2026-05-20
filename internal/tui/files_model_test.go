@@ -23,7 +23,7 @@ func TestFilesPreviewShowsMetadataAndLanguage(t *testing.T) {
 		m.applyPreview(result)
 	}
 
-	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false)
+	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false, false)
 	for _, want := range []string{"main.go", "go", "13 B"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected preview view to contain %q, got:\n%s", want, view)
@@ -206,7 +206,7 @@ func TestFilesHintsExternalMode(t *testing.T) {
 		m.applyPreview(result)
 	}
 
-	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false)
+	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false, false)
 	if !strings.Contains(view, "tab jump") {
 		t.Fatalf("expected tab jump hint, got:\n%s", view)
 	}
@@ -317,13 +317,13 @@ func TestFilesInlineVimViewAndHints(t *testing.T) {
 		m.applyPreview(result)
 	}
 
-	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false)
+	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false, false)
 	if !strings.Contains(view, "i vim edit") {
 		t.Fatalf("expected vim edit hint, got:\n%s", view)
 	}
 
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
-	view = m.View(100, 30, ApplyThemeColors("tokyonight"), false)
+	view = m.View(100, 30, ApplyThemeColors("tokyonight"), false, false)
 	for _, want := range []string{"hello", "-- NORMAL --", ":w save"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected edit view to contain %q, got:\n%s", want, view)
@@ -418,7 +418,7 @@ func TestFilesHintsTmuxSplitMode(t *testing.T) {
 		m.applyPreview(result)
 	}
 
-	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false)
+	view := m.View(100, 30, ApplyThemeColors("tokyonight"), false, false)
 	if !strings.Contains(view, "tmux split: nvim") {
 		t.Fatalf("expected tmux split hint, got:\n%s", view)
 	}

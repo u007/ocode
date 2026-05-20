@@ -935,7 +935,7 @@ func (m filesModel) previewHeader() string {
 	return strings.Join(parts, "  |  ")
 }
 
-func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
+func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) string {
 	treeW := w * 35 / 100
 	previewW := w - treeW - 3
 
@@ -1007,12 +1007,18 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread bool) string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top, treePane, previewPane)
 
 	tabBar := renderTabBar(tabFiles, chatUnread)
+	var exitBtn string
+	if exitPending {
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
+	} else {
+		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
+	}
 	headerLeft := styles.Header.Render("\u25c6 ocode  Files")
-	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar)
+	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if headerPad < 0 {
 		headerPad = 0
 	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar
+	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
 
 	fuzzyBar := ""
 	if m.fuzzy {

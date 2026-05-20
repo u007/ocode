@@ -259,43 +259,74 @@ func renderToolResult(toolName, content string, st Styles) string {
 	if toolName == "read" {
 		return renderReadResult(content, st)
 	}
+	if looksLikeUnifiedDiff(content) {
+		return renderUnifiedDiff(content, st)
+	}
 	return st.Text.Render(content)
+}
+
+func looksLikeUnifiedDiff(content string) bool {
+	for _, line := range strings.SplitN(content, "\n", 6) {
+		if strings.HasPrefix(line, "diff --git ") || strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
+			return true
+		}
+	}
+	return false
 }
 
 func renderDiff(content string, st Styles) string {
 	lines := strings.Split(content, "\n")
 	header := ""
-	if strings.HasPrefix(lines[0], "DIFF:") {
+	if len(lines) > 0 && strings.HasPrefix(lines[0], "DIFF:") {
 		header = strings.TrimPrefix(lines[0], "DIFF:")
 		lines = lines[1:]
 	}
-	addStyle := st.Success
-	delStyle := st.Error
-	metaStyle := lipgloss.NewStyle().Faint(true)
 
 	var b strings.Builder
 	if header != "" {
-		b.WriteString(metaStyle.Render("⟡ " + header))
+		b.WriteString(st.Header.Render("⟡ " + header))
 		b.WriteString("\n")
 	}
-	for _, line := range lines {
+	b.WriteString(renderUnifiedDiff(strings.Join(lines, "\n"), st))
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func renderUnifiedDiff(content string, st Styles) string {
+	addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2ECC71")).Background(lipgloss.Color("#1a3326")).Bold(true)
+	delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5C57")).Background(lipgloss.Color("#3b1a1a")).Bold(true)
+	hunkStyle := lipgloss.NewStyle().Foreground(st.Header.GetForeground()).Bold(true)
+	metaStyle := lipgloss.NewStyle().Foreground(st.Hint.GetForeground()).Faint(true)
+	fileStyle := lipgloss.NewStyle().Foreground(st.Header.GetForeground()).Bold(true)
+
+	lines := strings.Split(content, "\n")
+	var b strings.Builder
+	for i, line := range lines {
 		if line == "" {
-			b.WriteString("\n")
+			if i < len(lines)-1 {
+				b.WriteString("\n")
+			}
 			continue
 		}
-		switch line[0] {
-		case '+':
+
+		switch {
+		case strings.HasPrefix(line, "diff --git "):
+			b.WriteString(fileStyle.Render(line))
+		case strings.HasPrefix(line, "@@"):
+			b.WriteString(hunkStyle.Render(line))
+		case strings.HasPrefix(line, "+"):
 			b.WriteString(addStyle.Render(line))
-		case '-':
+		case strings.HasPrefix(line, "-"):
 			b.WriteString(delStyle.Render(line))
-		case '@':
+		case strings.HasPrefix(line, "index ") || strings.HasPrefix(line, "new file mode ") || strings.HasPrefix(line, "deleted file mode ") || strings.HasPrefix(line, "similarity index ") || strings.HasPrefix(line, "rename from ") || strings.HasPrefix(line, "rename to "):
 			b.WriteString(metaStyle.Render(line))
 		default:
 			b.WriteString(st.Text.Render(line))
 		}
-		b.WriteString("\n")
+		if i < len(lines)-1 {
+			b.WriteString("\n")
+		}
 	}
-	return strings.TrimRight(b.String(), "\n")
+	return b.String()
 }
 
 // renderReadResult strips the "1\t" / "  12\t" line-number prefix the read
