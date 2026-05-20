@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -205,6 +206,9 @@ func TestCtrlCClearsNonEmptyInputBeforeQuitConfirmation(t *testing.T) {
 }
 
 func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
+	snapshot.Reset()
+	defer snapshot.Reset()
+
 	spend := 0.1234
 	m := model{
 		ready:       true,
@@ -231,6 +235,20 @@ func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected wide view to include %q, got %q", want, view)
 		}
+	}
+}
+
+func TestSidebarMiddleSectionsCapAtFortyPercent(t *testing.T) {
+	m := model{height: 100}
+	data := sidebarRenderData{
+		topLines:    make([]string, 10),
+		bottomLines: make([]string, 2),
+	}
+
+	got := m.sidebarScrollBoxHeight(data, 1)
+	want := 38 // (height 100 - outer border 2 - header 1) * 40%.
+	if got != want {
+		t.Fatalf("expected sidebar middle section height %d, got %d", want, got)
 	}
 }
 
@@ -444,6 +462,7 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 	}
 
 	snapshot.Reset()
+	defer snapshot.Reset()
 	tool.SetTodoSession("session-1")
 	tool.ResetTodoState()
 
@@ -458,12 +477,13 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 	}
 
 	m := model{
-		ready:       true,
-		width:       140,
-		height:      40,
-		showSidebar: true,
-		input:       textarea.New(),
-		viewport:    viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		ready:         true,
+		width:         140,
+		height:        40,
+		showSidebar:   true,
+		sidebarScroll: 2,
+		input:         textarea.New(),
+		viewport:      viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
 	}
 
 	view := m.View().Content
@@ -471,6 +491,42 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected sidebar to include %q, got %q", want, view)
 		}
+	}
+}
+
+func TestFormatSidebarFilePathStripsProjectPrefix(t *testing.T) {
+	tmpDir := t.TempDir()
+	absPath := filepath.Join(tmpDir, "internal", "tui", "model.go")
+
+	if got := formatSidebarFilePath(absPath, tmpDir, 80); got != "internal/tui/model.go" {
+		t.Fatalf("expected project-relative path, got %q", got)
+	}
+	if got := formatSidebarFilePath("./internal/tui/model.go", tmpDir, 80); got != "internal/tui/model.go" {
+		t.Fatalf("expected ./ prefix stripped, got %q", got)
+	}
+}
+
+func TestFormatSidebarFilePathTruncatesMiddlePreservingFilename(t *testing.T) {
+	path := "very/long/path/to/important.go"
+	got := formatSidebarFilePath(path, "", 24)
+
+	if len(got) > 24 {
+		t.Fatalf("expected truncated path to fit width, got %q len=%d", got, len(got))
+	}
+	if !strings.Contains(got, "...") {
+		t.Fatalf("expected middle truncation marker, got %q", got)
+	}
+	if !strings.HasSuffix(got, "important.go") {
+		t.Fatalf("expected filename ending to be preserved, got %q", got)
+	}
+
+	longFile := "absurdly_long_generated_filename_with_suffix_test.go"
+	got = formatSidebarFilePath("nested/"+longFile, "", 24)
+	if len(got) > 24 {
+		t.Fatalf("expected long filename to fit width, got %q len=%d", got, len(got))
+	}
+	if !strings.HasSuffix(got, "suffix_test.go") {
+		t.Fatalf("expected long filename ending to be prioritized, got %q", got)
 	}
 }
 
@@ -1022,8 +1078,8 @@ func TestMouseModeDefaultsOnWithoutConfig(t *testing.T) {
 
 func TestMouseModeCanBeDisabledByConfig(t *testing.T) {
 	disabled := false
-	m := model{ready: true, input: newTestTextarea(), config: &config.Config{}}
-	m.config.TUI.Mouse = &disabled
+	m := model{ready: true, input: newTestTextarea(), config: &config.Config{Ocode: &config.OcodeConfig{}}}
+	m.config.Ocode.TUI.Mouse = &disabled
 
 	if got := m.View().MouseMode; got != tea.MouseModeNone {
 		t.Fatalf("expected mouse mode off when configured false, got %v", got)

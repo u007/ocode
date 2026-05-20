@@ -118,6 +118,7 @@ type streamMsgEvent struct {
 
 type ctrlCResetMsg struct{}
 type dotTickMsg struct{}
+type registryReadyMsg struct{}
 type pickerFilterApplyMsg struct {
 	seq    int
 	filter string
@@ -144,6 +145,17 @@ func waitForDebugLog() tea.Cmd {
 	return func() tea.Msg {
 		<-DebugLog.Notify()
 		return debugLogMsg{}
+	}
+}
+
+func waitForRegistry() tea.Cmd {
+	return func() tea.Msg {
+		for {
+			if agent.RegistryReady() {
+				return registryReadyMsg{}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 }
 
@@ -273,6 +285,7 @@ var (
 	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Strikethrough(true)
 	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
 	todoPendingStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#A9B1D6"))
+	todoProgressStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
 )
 
 // styleTodoLine renders a markdown todo line with strikethrough/dim for done
@@ -308,14 +321,71 @@ func splitTodoMarker(s string) (marker, body string, ok bool) {
 	return string(s[3]), rest, true
 }
 
+func renderSidebarTodo(todo string, width int) []string {
+	raw := strings.Split(todo, "\n")
+	styled := make([]string, 0, len(raw)+3)
+	done, active, pending := 0, 0, 0
+
+	for _, line := range raw {
+		trimmed := strings.TrimLeft(line, " \t")
+		marker, _, ok := splitTodoMarker(trimmed)
+		if ok {
+			switch marker {
+			case "x", "X":
+				done++
+			case "~", "-":
+				active++
+			case " ":
+				pending++
+			}
+		}
+
+		prefix := "  "
+		if ok && (marker == "~" || marker == "-") {
+			prefix = todoInProgressStyle.Render("› ")
+		}
+		styled = append(styled, prefix+styleTodoLine(line))
+	}
+
+	total := done + active + pending
+	if total == 0 {
+		return styled
+	}
+
+	summary := fmt.Sprintf("%d/%d done", done, total)
+	if active > 0 {
+		summary += fmt.Sprintf(" • %d active", active)
+	}
+	if pending > 0 {
+		summary += fmt.Sprintf(" • %d queued", pending)
+	}
+
+	barWidth := width - lipgloss.Width(summary) - 3
+	if barWidth > 14 {
+		barWidth = 14
+	}
+	if barWidth < 6 {
+		barWidth = 6
+	}
+	filled := (done*barWidth + total/2) / total
+	if filled > barWidth {
+		filled = barWidth
+	}
+	bar := todoProgressStyle.Render(strings.Repeat("━", filled)) + dimStyle.Render(strings.Repeat("━", barWidth-filled))
+
+	lines := []string{bar + " " + hintStyle.Render(summary), ""}
+	lines = append(lines, styled...)
+	return lines
+}
+
 const (
 	sidebarMinWidth    = 120
 	sidebarColumnWidth = 38
 )
 
 func (m *model) applyTheme() {
-	if m.config != nil && m.config.TUI.Theme != "" {
-		m.styles = ApplyThemeColors(m.config.TUI.Theme)
+	if m.config != nil && m.config.Ocode != nil && m.config.Ocode.TUI.Theme != "" {
+		m.styles = ApplyThemeColors(m.config.Ocode.TUI.Theme)
 	} else {
 		m.styles = ApplyThemeColors("tokyonight")
 	}
@@ -472,25 +542,33 @@ func newModel(sid string, cont bool, yolo bool) model {
 	}
 	m.wireCompactCallbacks()
 
-	if cfg != nil && cfg.TUI.Scroll != 0 {
-		m.scrollSpeed = int(cfg.TUI.Scroll)
+	if cfg != nil && cfg.Ocode != nil && cfg.Ocode.TUI.Scroll != 0 {
+		m.scrollSpeed = int(cfg.Ocode.TUI.Scroll)
 	}
 
 	m.applyTheme()
 
 	workDir := m.workDir
 	m.files = newFilesModel(workDir)
+	m.git = newGitModel(workDir)
 	if cfg != nil && cfg.Ocode != nil {
-		m.files.SetEditor(config.ResolveEditor(cfg.Ocode))
-		m.files.SetEditorMode(cfg.Ocode.EditorMode)
+		editor := config.ResolveEditor(cfg.Ocode)
+		editorMode := cfg.Ocode.EditorMode
+		m.files.SetEditor(editor)
+		m.files.SetEditorMode(editorMode)
 		m.files.SetEditorOpener(createEditorOpener(
-			config.ResolveEditor(cfg.Ocode),
-			cfg.Ocode.EditorMode,
+			editor,
+			editorMode,
+			func() int { return m.width },
+		))
+		m.git.SetEditor(editor)
+		m.git.SetEditorOpener(createEditorOpener(
+			editor,
+			editorMode,
 			func() int { return m.width },
 		))
 	}
 	m.files.SetSaveEditor(config.SaveEditor)
-	m.git = newGitModel(workDir)
 	m.logViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 
 	agent.DebugAppend = func(kind, msg string) {
@@ -521,6 +599,9 @@ func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh)}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
+	}
+	if !agent.RegistryReady() {
+		cmds = append(cmds, waitForRegistry())
 	}
 	return tea.Batch(cmds...)
 }
@@ -709,6 +790,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.leaderActive = false
 		}
 		return m, nil
+	case registryReadyMsg:
+		// Registry loaded — re-render so status bar and sidebar reflect reasoning support.
+		return m, nil
 	case debugLogMsg:
 		m.logEntries = DebugLog.Snapshot()
 		if m.activeTab == tabLog {
@@ -720,6 +804,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg, m.width, m.height)
 		m.filesSel = selectionState{}
+		return m, cmd
+	case gitStatusMsg, gitRefreshMsg, loadMoreLogMsg:
+		var cmd tea.Cmd
+		m.git, cmd = m.git.Update(msg, m.panelWidth(), m.height)
 		return m, cmd
 	case filesAddToContextMsg:
 		label := ""
@@ -1040,12 +1128,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.files.statusMsg = fmt.Sprintf("Editor error: %v", msg.err)
 				return m, nil
 			}
+			if m.activeTab == tabGit {
+				m.git.statusMsg = fmt.Sprintf("Editor error: %v", msg.err)
+				return m, nil
+			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor error: %v", msg.err)})
 		} else if msg.content != "" {
 			m.input.SetValue(msg.content)
 		}
 		if m.activeTab == tabFiles {
 			return m, m.files.refreshPreviewCmd()
+		}
+		if m.activeTab == tabGit {
+			m.git.statusMsg = "editor closed"
+			return m, m.git.cmdRefresh()
 		}
 	case errorMsg:
 		if msg != nil {
@@ -1217,8 +1313,8 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		m.leaderActive = false
 
 		key := keyStr
-		if m.config != nil {
-			if cmd, ok := m.config.TUI.Keybinds[key]; ok {
+		if m.config != nil && m.config.Ocode != nil {
+			if cmd, ok := m.config.Ocode.TUI.Keybinds[key]; ok {
 				newM, c := m.handleCommand(cmd)
 				return true, newM, c
 			}
@@ -1344,8 +1440,8 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		m.leaderActive = true
 		m.leaderSeq++
 		timeout := 2000
-		if m.config != nil && m.config.TUI.LeaderTimeout != 0 {
-			timeout = m.config.TUI.LeaderTimeout
+		if m.config != nil && m.config.Ocode != nil && m.config.Ocode.TUI.LeaderTimeout != 0 {
+			timeout = m.config.Ocode.TUI.LeaderTimeout
 		}
 		seq := m.leaderSeq
 		return m, tea.Tick(time.Duration(timeout)*time.Millisecond, func(time.Time) tea.Msg {
@@ -2511,6 +2607,8 @@ func (m *model) refreshEditorOpener() {
 	m.files.SetEditor(editor)
 	m.files.SetEditorMode(mode)
 	m.files.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }))
+	m.git.SetEditor(editor)
+	m.git.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }))
 }
 
 func runInteractiveShell(command string, dir string) tea.Cmd {
@@ -2588,7 +2686,7 @@ func (m *model) handleThemesCmd(args []string) {
 		return
 	}
 
-	m.config.TUI.Theme = name
+	m.config.Ocode.TUI.Theme = name
 	m.applyTheme()
 	if err := config.SaveTUITheme(name); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s (save failed: %v)", name, err)})
@@ -3789,7 +3887,7 @@ func (m model) View() tea.View {
 }
 
 func (m model) mouseEnabled() bool {
-	return m.config == nil || m.config.TUI.Mouse == nil || *m.config.TUI.Mouse
+	return m.config == nil || m.config.Ocode == nil || m.config.Ocode.TUI.Mouse == nil || *m.config.Ocode.TUI.Mouse
 }
 
 func (m model) renderContent() string {
@@ -3881,6 +3979,7 @@ func (m *model) renderStatus() string {
 	}
 
 	var suffix string
+	supportsReasoning := m.config != nil && agent.ModelSupportsThinking(m.config.Model)
 	switch m.activeTab {
 	case tabFiles:
 		suffix = " | i: edit | ^S: save | n/N: new | r: rename | D: delete | y: copy path | R: reload | alt+[/]: tab"
@@ -3889,8 +3988,8 @@ func (m *model) renderStatus() string {
 	case tabLog:
 		suffix = " | j/k: scroll | c: clear | alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
-		if m.config != nil && agent.ModelSupportsThinking(m.config.Model) {
-			suffix = fmt.Sprintf(" | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry | ctrl+t: thinking[%s]", thinkingBudgetLabels[m.thinkingLevelIdx])
+		if supportsReasoning {
+			suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry | ctrl+t: reasoning"
 		} else {
 			suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
 		}
@@ -3918,8 +4017,12 @@ func (m *model) renderStatus() string {
 	if jc := m.renderJobCounts(); jc != "" {
 		jobState = " | " + jc
 	}
+	reasoningState := ""
+	if supportsReasoning {
+		reasoningState = fmt.Sprintf(" | Reasoning: %s", thinkingBudgetLabels[m.thinkingLevelIdx])
+	}
 	width := m.statusContentWidth()
-	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s | Session: %s%s%s%s%s", llmState, agentName, m.currentModelName(), m.sessionID, permissionMode, compactState, jobState, suffix)
+	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s%s | Session: %s%s%s%s%s", llmState, agentName, m.currentModelName(), reasoningState, m.sessionID, permissionMode, compactState, jobState, suffix)
 	return m.styles.Status.Width(width).Render(ansi.Truncate(text, width, "..."))
 }
 
@@ -4227,7 +4330,11 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		sessionInfo = append(sessionInfo, m.sessionTitle)
 	}
 	appendTopSection("Session", sessionInfo)
-	appendTopSection("Model", []string{modelName})
+	modelLines := []string{modelName}
+	if agent.ModelSupportsThinking(modelName) {
+		modelLines = append(modelLines, fmt.Sprintf("Reasoning: %s", thinkingBudgetLabels[m.thinkingLevelIdx]))
+	}
+	appendTopSection("Model", modelLines)
 	appendTopSection("Context", []string{contextLine})
 	appendTopSection("Spend", []string{spendLine})
 	appendScrollSection("MCP", []string{m.renderMCPStatus()}, nil)
@@ -4239,7 +4346,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	} else {
 		body := make([]string, 0, len(changed))
 		for _, path := range changed {
-			body = append(body, "- "+shortenSidebarPath(path, sidebarColumnWidth-4))
+			body = append(body, "- "+formatSidebarFilePath(path, m.workDir, sidebarColumnWidth-4))
 		}
 		appendScrollSection("Files", body, changed)
 	}
@@ -4248,12 +4355,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	if todo == "" {
 		appendScrollSection("TODO", []string{"No live session todo state yet."}, nil)
 	} else {
-		raw := strings.Split(todo, "\n")
-		styled := make([]string, len(raw))
-		for i, line := range raw {
-			styled[i] = styleTodoLine(line)
-		}
-		appendScrollSection("TODO", styled, nil)
+		appendScrollSection("TODO", renderSidebarTodo(todo, boxBodyWidth), nil)
 	}
 
 	appendBottomSection("Hints", []string{"Ctrl+B toggle sidebar"})
@@ -4303,6 +4405,15 @@ func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) 
 	available := m.height - 2 - headerHeight - len(data.topLines) - len(data.bottomLines)
 	if available < 3 {
 		return 3
+	}
+
+	contentHeight := m.height - 2 - headerHeight
+	maxScrollBoxHeight := contentHeight * 40 / 100
+	if maxScrollBoxHeight < 3 {
+		maxScrollBoxHeight = 3
+	}
+	if available > maxScrollBoxHeight {
+		return maxScrollBoxHeight
 	}
 	return available
 }
@@ -4408,15 +4519,19 @@ func (m model) tabForClick(mouse tea.Mouse) (int, bool) {
 }
 
 func (m model) tabBarStartX() int {
+	starts := m.tabBarStartXs(lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread)))
+	return starts[0]
+}
+
+func (m model) tabBarStartXs(tabBarWidth int) []int {
 	if m.sidebarEnabled() {
-		return m.panelWidth()
+		return []int{m.panelWidth()}
 	}
-	tabBar := renderTabBar(m.activeTab, m.chatUnread)
-	rightAligned := m.panelWidth() - lipgloss.Width(tabBar)
+	rightAligned := m.panelWidth() - tabBarWidth
 	if rightAligned < 0 {
-		return 0
+		rightAligned = 0
 	}
-	return rightAligned
+	return []int{rightAligned}
 }
 
 func (m model) exitButtonForClick(mouse tea.Mouse) bool {
@@ -4511,6 +4626,35 @@ func shortenSidebarPath(path string, max int) string {
 		return path[:max]
 	}
 	return path[:max-3] + "..."
+}
+
+func formatSidebarFilePath(path string, workDir string, max int) string {
+	path = filepath.Clean(path)
+	if rel, err := filepath.Rel(workDir, path); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		path = rel
+	}
+	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
+	if len(path) <= max {
+		return path
+	}
+	if max <= 3 {
+		return path[:max]
+	}
+
+	file := filepath.ToSlash(filepath.Base(path))
+	if len(file) >= max-3 {
+		return "..." + file[len(file)-(max-3):]
+	}
+
+	prefixMax := max - len(file) - 4
+	if prefixMax < 0 {
+		prefixMax = 0
+	}
+	prefix := path
+	if len(prefix) > prefixMax {
+		prefix = prefix[:prefixMax]
+	}
+	return prefix + ".../" + file
 }
 
 func (m model) renderMCPStatus() string {

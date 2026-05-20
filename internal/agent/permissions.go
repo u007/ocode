@@ -67,7 +67,7 @@ type patternRule struct {
 var pathScopedTools = map[string]bool{
 	"read": true, "write": true, "edit": true, "delete": true,
 	"multiedit": true, "replace_lines": true, "glob": true, "grep": true,
-	"list": true, "lsp": true, "apply_patch": true, "format": true,
+	"list": true, "lsp": true, "apply_patch": true, "format": true, "repo_overview": true,
 }
 
 func NewPermissionManager() *PermissionManager {
@@ -78,13 +78,13 @@ func NewPermissionManager() *PermissionManager {
 		bashPrefixes:    make(map[string]PermissionLevel),
 		webfetchDomains: make(map[string]PermissionLevel),
 	}
-	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite"} {
+	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell"} {
 		pm.rules[name] = PermissionAllow
 	}
 	for _, name := range []string{"write", "edit", "multiedit", "replace_lines", "apply_patch", "format"} {
 		pm.SetRule(name, PermissionAllow)
 	}
-	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "agent", "task", "mcp_*"} {
+	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "agent", "repo_clone", "mcp_*"} {
 		pm.SetRule(name, PermissionAsk)
 	}
 	return pm
@@ -303,7 +303,7 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 		return ""
 	}
 	switch toolName {
-	case "read", "write", "delete", "edit", "multiedit", "replace_lines", "format", "lsp", "apply_patch", "grep":
+	case "read", "write", "delete", "edit", "multiedit", "replace_lines", "format", "lsp", "apply_patch", "grep", "repo_overview":
 		return params.Path
 	case "glob", "list":
 		if params.Pattern != "" {

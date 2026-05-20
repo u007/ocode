@@ -114,6 +114,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	a.tools["agent"] = AgentTool{mainAgent: a}
 	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
+	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
 	a.tools["wait"] = WaitTool{procs: a.procs, runs: a.runs, stopCh: a.stopCh}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)

@@ -24,8 +24,9 @@ type modelLimit struct {
 }
 
 type modelEntry struct {
-	ID    string    `json:"id"`
-	Limit modelLimit `json:"limit"`
+	ID        string     `json:"id"`
+	Reasoning bool       `json:"reasoning"`
+	Limit     modelLimit `json:"limit"`
 }
 
 type providerEntry struct {
@@ -149,6 +150,23 @@ func loadRegistry() map[string]providerEntry {
 // warm before the first call to ModelWindow or ProviderModels.
 func PreloadRegistry() {
 	go loadRegistry()
+}
+
+func registrySnapshotIfReady() map[string]providerEntry {
+	if !registry.mu.TryRLock() {
+		return nil
+	}
+	defer registry.mu.RUnlock()
+	if registry.data == nil || time.Since(registry.fetchedAt) >= modelsCacheTTL {
+		return nil
+	}
+	return registry.data
+}
+
+// RegistryReady reports whether the models.dev registry has been loaded and is
+// not stale. Safe to call from any goroutine.
+func RegistryReady() bool {
+	return registrySnapshotIfReady() != nil
 }
 
 // ProviderModels returns model IDs for a provider from models.dev, falling

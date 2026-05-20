@@ -107,7 +107,6 @@ type FormatterConfig struct {
 
 type Config struct {
 	Model          string                     `json:"model"`
-	SmallModel     string                     `json:"small_model"`
 	ThinkingBudget int                        `json:"-"` // runtime-only: extended thinking token budget
 	Provider       map[string]interface{}     `json:"provider"`
 	Tools          map[string]bool            `json:"tools"`
@@ -115,7 +114,6 @@ type Config struct {
 	Agent          map[string]interface{}     `json:"agent"`
 	DefaultAgent   string                     `json:"default_agent"`
 	MCP            map[string]MCPConfig       `json:"mcp"`
-	TUI            TUIConfig                  `json:"tui"`
 	Watcher        WatcherConfig              `json:"watcher"`
 	Hooks          map[string]HookConfig      `json:"hooks"`
 	Formatters     map[string]FormatterConfig `json:"formatters"`
@@ -131,11 +129,6 @@ func Load() (*Config, error) {
 		Hooks:      make(map[string]HookConfig),
 		Formatters: make(map[string]FormatterConfig),
 	}
-
-	mouseDefault := true
-	config.TUI.Mouse = &mouseDefault
-	config.TUI.Scroll = 3.0
-	config.TUI.LeaderTimeout = 2000
 
 	globalPath, err := getGlobalConfigPath()
 	if err == nil {
@@ -173,8 +166,6 @@ func Load() (*Config, error) {
 		config.Model = recent[0]
 	}
 
-	loadTUIConfig(config)
-
 	if err := LoadOcodeConfig(config); err != nil {
 		return nil, fmt.Errorf("failed to load ocode config: %w", err)
 	}
@@ -202,113 +193,6 @@ func Load() (*Config, error) {
 	return config, nil
 }
 
-func loadTUIConfig(config *Config) {
-	home, _ := os.UserHomeDir()
-	globalTUI := filepath.Join(home, ".config", "opencode", "tui.json")
-	if runtime.GOOS == "windows" {
-		globalTUI = filepath.Join(os.Getenv("APPDATA"), "opencode", "tui.json")
-	}
-
-	projectTUI := "tui.json"
-
-	// Load global then project
-	mergeTUI(globalTUI, config)
-	mergeTUI(projectTUI, config)
-}
-
-func mergeTUI(path string, config *Config) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	cleanData := stripJSONCComments(data)
-	var temp struct {
-		TUI TUIConfig `json:"tui"`
-		// Also support top-level theme/mouse etc in tui.json
-		Theme         string            `json:"theme"`
-		Mouse         *bool             `json:"mouse"`
-		Scroll        float64           `json:"scroll_speed"`
-		Keybinds      map[string]string `json:"keybinds"`
-		LeaderTimeout int               `json:"leader_timeout"`
-	}
-	if err := json.Unmarshal(cleanData, &temp); err == nil {
-		if temp.Theme != "" {
-			config.TUI.Theme = temp.Theme
-		}
-		if temp.TUI.Theme != "" {
-			config.TUI.Theme = temp.TUI.Theme
-		}
-		if temp.Mouse != nil {
-			config.TUI.Mouse = temp.Mouse
-		}
-		if temp.TUI.Mouse != nil {
-			config.TUI.Mouse = temp.TUI.Mouse
-		}
-		if temp.Scroll != 0 {
-			config.TUI.Scroll = temp.Scroll
-		}
-		if temp.TUI.Scroll != 0 {
-			config.TUI.Scroll = temp.TUI.Scroll
-		}
-		if temp.LeaderTimeout != 0 {
-			config.TUI.LeaderTimeout = temp.LeaderTimeout
-		}
-		if temp.TUI.LeaderTimeout != 0 {
-			config.TUI.LeaderTimeout = temp.TUI.LeaderTimeout
-		}
-		if config.TUI.Keybinds == nil {
-			config.TUI.Keybinds = make(map[string]string)
-		}
-		for k, v := range temp.TUI.Keybinds {
-			config.TUI.Keybinds[k] = v
-		}
-	}
-}
-
-func getGlobalTUIPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("APPDATA"), "opencode", "tui.json"), nil
-	}
-	return filepath.Join(home, ".config", "opencode", "tui.json"), nil
-}
-
-func SaveTUITheme(theme string) error {
-	configPath, err := getGlobalConfigPath()
-	if err != nil {
-		return err
-	}
-
-	existing, err := os.ReadFile(configPath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read config: %w", err)
-	}
-	m := map[string]any{}
-	if len(existing) > 0 {
-		jsoncData := stripJSONCComments(existing)
-		if err := json.Unmarshal(jsoncData, &m); err != nil {
-			return fmt.Errorf("parse config: %w", err)
-		}
-	}
-	nested, ok := m["tui"].(map[string]any)
-	if !ok {
-		nested = map[string]any{}
-		m["tui"] = nested
-	}
-	nested["theme"] = theme
-	// If a legacy top-level theme exists, update it too so reads stay deterministic.
-	if _, hasTheme := m["theme"]; hasTheme {
-		m["theme"] = theme
-	}
-
-	if err := saveJSONFile(configPath, m); err != nil {
-		return err
-	}
-	return syncLegacyTUIThemeIfPresent(theme)
-}
 
 func SaveMCPEnabled(name string, enabled bool) error {
 	configPath, err := (&Config{}).ActiveConfigPath()
@@ -419,33 +303,6 @@ func loadConfigMap(path string) (map[string]any, error) {
 	return m, nil
 }
 
-func syncLegacyTUIThemeIfPresent(theme string) error {
-	tuiPath, err := getGlobalTUIPath()
-	if err != nil {
-		return err
-	}
-	existing, err := os.ReadFile(tuiPath)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read legacy tui config: %w", err)
-	}
-	m := map[string]any{}
-	if len(existing) > 0 {
-		jsoncData := stripJSONCComments(existing)
-		if err := json.Unmarshal(jsoncData, &m); err != nil {
-			return fmt.Errorf("parse legacy tui config: %w", err)
-		}
-	}
-	m["theme"] = theme
-	if nested, ok := m["tui"].(map[string]any); ok {
-		if _, hasTheme := nested["theme"]; hasTheme {
-			nested["theme"] = theme
-		}
-	}
-	return saveJSONFile(tuiPath, m)
-}
 
 func saveJSONFile(path string, value any) error {
 	data, err := json.MarshalIndent(value, "", "  ")
@@ -553,9 +410,6 @@ func loadFromString(content string, config *Config) error {
 	if temp.Model != "" {
 		config.Model = temp.Model
 	}
-	if temp.SmallModel != "" {
-		config.SmallModel = temp.SmallModel
-	}
 	if temp.DefaultAgent != "" {
 		config.DefaultAgent = temp.DefaultAgent
 	}
@@ -661,9 +515,6 @@ func mergeRemoteConfig(config *Config) error {
 	if remote.Model != "" && config.Model == "" {
 		config.Model = remote.Model
 	}
-	if remote.SmallModel != "" && config.SmallModel == "" {
-		config.SmallModel = remote.SmallModel
-	}
 	if remote.DefaultAgent != "" && config.DefaultAgent == "" {
 		config.DefaultAgent = remote.DefaultAgent
 	}
@@ -719,18 +570,9 @@ func loadFromFile(path string, config *Config) error {
 	if err := json.Unmarshal(cleanData, &temp); err != nil {
 		return err
 	}
-	// opencode stores TUI theme as top-level `theme` in legacy opencode.json,
-	// then migrates it to tui.json. Read both so ocode stays compatible.
-	var legacyTUI struct {
-		Theme string `json:"theme"`
-	}
-	_ = json.Unmarshal(cleanData, &legacyTUI)
 
 	if temp.Model != "" {
 		config.Model = temp.Model
-	}
-	if temp.SmallModel != "" {
-		config.SmallModel = temp.SmallModel
 	}
 	if temp.DefaultAgent != "" {
 		config.DefaultAgent = temp.DefaultAgent
@@ -761,12 +603,6 @@ func loadFromFile(path string, config *Config) error {
 	}
 	for k, v := range temp.Formatters {
 		config.Formatters[k] = v
-	}
-	if legacyTUI.Theme != "" {
-		config.TUI.Theme = legacyTUI.Theme
-	}
-	if temp.TUI.Theme != "" {
-		config.TUI.Theme = temp.TUI.Theme
 	}
 
 	return nil

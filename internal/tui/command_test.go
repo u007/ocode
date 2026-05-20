@@ -128,7 +128,7 @@ func TestThemePickerSelectionSwitchesTheme(t *testing.T) {
 	m := model{
 		input:        textarea.New(),
 		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
-		config:       &config.Config{},
+		config:       &config.Config{Ocode: &config.OcodeConfig{}},
 		showPicker:   true,
 		pickerKind:   "theme",
 		pickerItems:  themes,
@@ -144,8 +144,8 @@ func TestThemePickerSelectionSwitchesTheme(t *testing.T) {
 	if got.showPicker {
 		t.Fatal("expected theme picker to close after selection")
 	}
-	if got.config.TUI.Theme != themes[0] {
-		t.Fatalf("expected selected theme %q, got %q", themes[0], got.config.TUI.Theme)
+	if got.config.Ocode.TUI.Theme != themes[0] {
+		t.Fatalf("expected selected theme %q, got %q", themes[0], got.config.Ocode.TUI.Theme)
 	}
 }
 

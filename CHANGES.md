@@ -1,5 +1,27 @@
 # Changelog
 
+## [Unreleased] — 2026-05-21
+
+### Added
+- **Model Registry Reasoning Flag** — `ModelSupportsThinking()` expanded to cover OpenAI, Gemini, DeepSeek, and other providers via heuristic matching on model name patterns.
+- **Reasoning Effort Mapping** — `reasoningEffortForBudget()` maps thinking budget levels to OpenAI `reasoning_effort` values for both chat and responses APIs.
+- **Task Status Tool** — New `task_status` tool for querying async sub-agent run state, plus OpenCode-compatible `task`/`task_id` aliases.
+- **Synchronous Sub-Agent TUI Visibility** — Synchronous sub-agent runs now register in the run registry and emit `JobEvent` on completion so they appear in the TUI job panel.
+- **Repo Tools** — New `repo_clone` and `repo_overview` tools (`internal/tool/repo.go`) for cloning and analysing remote git repositories under a confined path extension.
+- **Plan Tools** — New `plan_enter` and `plan_exit` tools (`internal/tool/plan.go`) for structured multi-step planning workflow; `plan_enter` refuses to overwrite an existing today's plan.
+- **OcodeConfig** — TUI and other user-facing settings migrated from flat `Config` to `OcodeConfig` struct (`internal/config/ocodeconfig.go`), loaded from `.opencode/config.yaml`.
+- **Git Panel Editor Support** — File editor can be launched directly from the git panel.
+- **Sidebar Todo Progress Bar** — Visual progress indicator for todo items in the sidebar.
+- **Scroll-Box Height Cap** — Scroll boxes now have a configurable maximum height to avoid over-tall viewports.
+- **File Path Formatting** — File path display uses abbreviated formatting for long paths.
+
+### Fixed
+- **Sub-Agent `notifyDone` on Synchronous Runs** — Success and error paths for synchronous tasks now call `notifyDone`, fixing silent non-completion in the TUI job view.
+- **Nil Pointer on `Ocode` Config** — Guards added in `applyTheme`, keybind setup, leader timeout, and scroll speed to handle a nil `Config.Ocode` pointer without panicking.
+- **`plan_enter` Overwrite Protection** — Calling `plan_enter` twice on the same day no longer silently overwrites a partially filled plan template.
+
+---
+
 ## [Unreleased] — 2026-05-20
 
 ### Added
