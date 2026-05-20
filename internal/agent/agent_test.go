@@ -340,7 +340,7 @@ func TestOpenAIResponsesRequestsReasoningEncryptedContent(t *testing.T) {
 		}),
 	}
 
-	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1", ThinkingBudget: 8000}
 	if _, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "hi"}}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -358,6 +358,13 @@ func TestOpenAIResponsesRequestsReasoningEncryptedContent(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected reasoning.encrypted_content in include, got %#v", include)
+	}
+	reasoning, ok := gotPayload["reasoning"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected reasoning param in payload, got %#v", gotPayload)
+	}
+	if effort, _ := reasoning["effort"].(string); effort != "medium" {
+		t.Fatalf("expected medium reasoning effort, got %#v", reasoning)
 	}
 }
 
@@ -596,8 +603,8 @@ func TestRecoverOrphanedToolCallsPartialRecovery(t *testing.T) {
 func TestRecoverOrphanedToolCallsFailedRecovery(t *testing.T) {
 	// Create a tool that returns an error.
 	failingTool := &MockTool{
-		name:   "mock_tool",
-		Error:  fmt.Errorf("mock tool failed"),
+		name:  "mock_tool",
+		Error: fmt.Errorf("mock tool failed"),
 	}
 	a := NewAgent(&MockClient{}, []tool.Tool{failingTool}, nil)
 	a.permissions = nil // Disable permission checks for testing
@@ -642,5 +649,44 @@ func TestRecoverOrphanedToolCallsEmptyCase(t *testing.T) {
 	}
 	if result[1].Content != "result" {
 		t.Fatalf("expected result to be unchanged, got: %s", result[1].Content)
+	}
+}
+
+func TestModelSupportsThinkingUsesModelsDevReasoningFlag(t *testing.T) {
+	registry.mu.Lock()
+	previousData := registry.data
+	previousFetchedAt := registry.fetchedAt
+	registry.data = map[string]providerEntry{
+		"openai": {
+			ID: "openai",
+			Models: map[string]modelEntry{
+				"gpt-5.2": {ID: "gpt-5.2", Reasoning: true},
+				"gpt-4o":  {ID: "gpt-4o", Reasoning: false},
+			},
+		},
+		"anthropic": {
+			ID: "anthropic",
+			Models: map[string]modelEntry{
+				"claude-3-opus-20240229": {ID: "claude-3-opus-20240229", Reasoning: false},
+			},
+		},
+	}
+	registry.fetchedAt = time.Now()
+	registry.mu.Unlock()
+	defer func() {
+		registry.mu.Lock()
+		registry.data = previousData
+		registry.fetchedAt = previousFetchedAt
+		registry.mu.Unlock()
+	}()
+
+	if !ModelSupportsThinking("openai/gpt-5.2") {
+		t.Fatal("expected gpt-5.2 reasoning flag from models.dev to be honored")
+	}
+	if ModelSupportsThinking("openai/gpt-4o") {
+		t.Fatal("expected gpt-4o non-reasoning flag from models.dev to be honored")
+	}
+	if ModelSupportsThinking("anthropic/claude-3-opus-20240229") {
+		t.Fatal("expected models.dev false flag to override fallback heuristics")
 	}
 }

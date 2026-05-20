@@ -35,6 +35,8 @@ type OcodeConfig struct {
 	Permissions PermissionConfig
 	Editor      string
 	EditorMode  string
+	SmallModel  string
+	TUI         TUIConfig
 	Extra       map[string]json.RawMessage
 }
 
@@ -60,11 +62,21 @@ type compactConfigFile struct {
 	MaxSummaryInputTokens *int     `json:"max_summary_input_tokens"`
 }
 
+type tuiConfigFile struct {
+	Theme         string            `json:"theme"`
+	Mouse         *bool             `json:"mouse"`
+	Scroll        float64           `json:"scroll_speed"`
+	Keybinds      map[string]string `json:"keybinds"`
+	LeaderTimeout int               `json:"leader_timeout"`
+}
+
 type ocodeConfigFile struct {
 	Compact     compactConfigFile `json:"compact"`
 	Permissions PermissionConfig  `json:"permissions"`
 	Editor      string            `json:"editor,omitempty"`
 	EditorMode  string            `json:"editor_mode,omitempty"`
+	SmallModel  string            `json:"small_model,omitempty"`
+	TUI         tuiConfigFile     `json:"tui"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -79,10 +91,20 @@ func defaultCompactConfig() CompactConfig {
 	}
 }
 
+func defaultTUIConfig() TUIConfig {
+	mouseDefault := true
+	return TUIConfig{
+		Mouse:         &mouseDefault,
+		Scroll:        3.0,
+		LeaderTimeout: 2000,
+	}
+}
+
 func defaultOcodeConfig() *OcodeConfig {
 	return &OcodeConfig{
 		Compact:     defaultCompactConfig(),
 		Permissions: defaultPermissionConfig(),
+		TUI:         defaultTUIConfig(),
 		Extra:       make(map[string]json.RawMessage),
 	}
 }
@@ -201,6 +223,26 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "editor_mode")
 	}
 
+	if _, ok := raw["small_model"]; ok {
+		var file ocodeConfigFile
+		if err := json.Unmarshal(cleanData, &file); err != nil {
+			return err
+		}
+		if file.SmallModel != "" {
+			cfg.SmallModel = file.SmallModel
+		}
+		delete(raw, "small_model")
+	}
+
+	if _, ok := raw["tui"]; ok {
+		var file ocodeConfigFile
+		if err := json.Unmarshal(cleanData, &file); err != nil {
+			return err
+		}
+		applyTUIConfig(&cfg.TUI, file.TUI)
+		delete(raw, "tui")
+	}
+
 	if cfg.Extra == nil {
 		cfg.Extra = make(map[string]json.RawMessage)
 	}
@@ -226,6 +268,27 @@ func applyPermissionConfig(dst *PermissionConfig, src PermissionConfig) {
 	}
 	for k, v := range src.Bash.Prefixes {
 		dst.Bash.Prefixes[k] = v
+	}
+}
+
+func applyTUIConfig(dst *TUIConfig, src tuiConfigFile) {
+	if src.Theme != "" {
+		dst.Theme = src.Theme
+	}
+	if src.Mouse != nil {
+		dst.Mouse = src.Mouse
+	}
+	if src.Scroll != 0 {
+		dst.Scroll = src.Scroll
+	}
+	if src.LeaderTimeout != 0 {
+		dst.LeaderTimeout = src.LeaderTimeout
+	}
+	if dst.Keybinds == nil {
+		dst.Keybinds = make(map[string]string)
+	}
+	for k, v := range src.Keybinds {
+		dst.Keybinds[k] = v
 	}
 }
 
@@ -285,6 +348,12 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.EditorMode != "" && cfg.EditorMode != EditorModeExternal {
 		payload["editor_mode"] = cfg.EditorMode
+	}
+	if cfg.SmallModel != "" {
+		payload["small_model"] = cfg.SmallModel
+	}
+	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
+		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
 		if k == "compact" || k == "permissions" {
@@ -405,6 +474,24 @@ func loadFullOcodeConfig() (*OcodeConfig, error) {
 	}
 
 	return ocode, nil
+}
+
+func SaveTUITheme(theme string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.TUI.Theme = theme
+	return SaveOcodeConfig(cfg)
+}
+
+func SaveSmallModel(model string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.SmallModel = model
+	return SaveOcodeConfig(cfg)
 }
 
 // ResolveEditor returns the editor to use for opening files.

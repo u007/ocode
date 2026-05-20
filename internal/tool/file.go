@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
@@ -14,32 +13,6 @@ import (
 
 const defaultReadLines = 50
 const maxReadLines = 250
-
-var (
-	readTrackerMu sync.RWMutex
-	readTracker   = make(map[string]bool)
-)
-
-// MarkFileRead records that a file has been read in the current session.
-func MarkFileRead(path string) {
-	readTrackerMu.Lock()
-	defer readTrackerMu.Unlock()
-	readTracker[path] = true
-}
-
-// IsFileRead reports whether a file has been read in the current session.
-func IsFileRead(path string) bool {
-	readTrackerMu.RLock()
-	defer readTrackerMu.RUnlock()
-	return readTracker[path]
-}
-
-// ResetReadTracker clears the session read tracking state.
-func ResetReadTracker() {
-	readTrackerMu.Lock()
-	defer readTrackerMu.Unlock()
-	readTracker = make(map[string]bool)
-}
 
 // toolResultCacheDir returns the directory where truncated tool outputs are saved.
 func toolResultCacheDir() string {
@@ -51,10 +24,9 @@ func toolResultCacheDir() string {
 }
 
 // confinedPath resolves p relative to the process working directory and
-// verifies that the result is within that directory or the tool-results cache
-// dir (so the model can read back truncated output). It returns the cleaned
-// absolute path on success, or an error if the path would escape both allowed
-// roots.
+// verifies that the result is within the workspace, the tool-results cache,
+// or the managed repository cache. It returns the cleaned absolute path on
+// success, or an error if the path would escape all allowed roots.
 func confinedPath(p string) (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -72,6 +44,12 @@ func confinedPath(p string) (string, error) {
 	cacheDir := toolResultCacheDir()
 	if cacheRel, err := filepath.Rel(cacheDir, abs); err == nil && !strings.HasPrefix(cacheRel, "..") {
 		return abs, nil
+	}
+	// Also allow reads from the managed repository cache.
+	if repoCache, err := repoCacheDir(); err == nil {
+		if repoRel, err := filepath.Rel(repoCache, abs); err == nil && !strings.HasPrefix(repoRel, "..") {
+			return abs, nil
+		}
 	}
 	return "", fmt.Errorf("path %q is outside the working directory", p)
 }
@@ -125,8 +103,6 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
 	}
-
-	MarkFileRead(safe)
 
 	lines := strings.Split(string(content), "\n")
 	total := len(lines)
@@ -209,12 +185,7 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	prev, err := os.ReadFile(safe)
-	fileExists := err == nil
-
-	if fileExists && params.Mode != "append" && !IsFileRead(safe) {
-		return "", fmt.Errorf("cannot overwrite %s: file must be read with the read tool before writing to it", params.Path)
-	}
+	prev, _ := os.ReadFile(safe)
 
 	snapshot.Backup(safe) //nolint:errcheck
 
@@ -255,9 +226,11 @@ type ReplaceLinesToolImpl struct {
 	Config *config.Config
 }
 
-func (t ReplaceLinesToolImpl) Name() string        { return "replace_lines" }
-func (t ReplaceLinesToolImpl) Description() string { return "Replace a range of lines in a file with new content" }
-func (t ReplaceLinesToolImpl) Parallel() bool      { return false }
+func (t ReplaceLinesToolImpl) Name() string { return "replace_lines" }
+func (t ReplaceLinesToolImpl) Description() string {
+	return "Replace a range of lines in a file with new content"
+}
+func (t ReplaceLinesToolImpl) Parallel() bool { return false }
 func (t ReplaceLinesToolImpl) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "replace_lines",
@@ -479,7 +452,7 @@ func (t MultiEditTool) Description() string { return "Perform multiple edits acr
 func (t MultiEditTool) Parallel() bool      { return false }
 func (t MultiEditTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
-		"name": "multiedit",
+		"name":        "multiedit",
 		"description": "Perform multiple search/replace edits across files. All edits are validated first, then applied atomically — if any edit fails, none are applied.",
 		"parameters": map[string]interface{}{
 			"type": "object",

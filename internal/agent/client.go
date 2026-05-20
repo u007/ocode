@@ -214,6 +214,9 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		"model":    c.Model,
 		"messages": openAIMessages,
 	}
+	if c.Provider == "openai" && c.ThinkingBudget > 0 {
+		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+	}
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)
 	}
@@ -286,6 +289,17 @@ func openAITools(tools []map[string]interface{}) []map[string]interface{} {
 		})
 	}
 	return openAITools
+}
+
+func reasoningEffortForBudget(budget int) string {
+	switch {
+	case budget >= 16000:
+		return "high"
+	case budget >= 8000:
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[string]interface{}, error) {
@@ -511,6 +525,11 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		"store":        false,
 		"stream":       true,
 		"include":      []string{"reasoning.encrypted_content"},
+	}
+	if c.ThinkingBudget > 0 {
+		payload["reasoning"] = map[string]interface{}{
+			"effort": reasoningEffortForBudget(c.ThinkingBudget),
+		}
 	}
 
 	if len(tools) > 0 {
@@ -1140,18 +1159,73 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	}
 }
 
-// ModelSupportsThinking returns true when the resolved model supports extended
-// thinking (Anthropic claude-3-7+ and claude-4+ families).
+// ModelSupportsThinking returns true when the resolved model supports
+// provider-level reasoning / extended thinking.
 func ModelSupportsThinking(modelID string) bool {
-	// Strip provider prefix if present
-	model := modelID
-	if _, m, ok := splitModelID(modelID); ok {
+	if reasoning, ok := modelSupportsThinkingFromRegistry(modelID); ok {
+		return reasoning
+	}
+
+	model := strings.ToLower(modelID)
+	provider := ""
+	if p, m, ok := splitModelID(model); ok {
+		provider = p
 		model = m
 	}
-	// claude-3-7-sonnet, claude-opus-4, claude-sonnet-4, claude-haiku-4, ...
-	return strings.Contains(model, "claude-3-7") ||
-		strings.Contains(model, "claude-3-opus") ||
-		strings.Contains(model, "claude-opus-4") ||
-		strings.Contains(model, "claude-sonnet-4") ||
-		strings.Contains(model, "claude-haiku-4")
+
+	if strings.Contains(model, "non-reasoning") {
+		return false
+	}
+
+	// Fallback heuristics for when models.dev is unavailable. The registry's
+	// explicit reasoning flag wins whenever present.
+	switch provider {
+	case "anthropic", "":
+		if strings.Contains(model, "claude-3-7") ||
+			strings.Contains(model, "claude-opus-4") ||
+			strings.Contains(model, "claude-sonnet-4") ||
+			strings.Contains(model, "claude-haiku-4") {
+			return true
+		}
+	}
+
+	return strings.HasPrefix(model, "o1") ||
+		strings.HasPrefix(model, "o3") ||
+		strings.HasPrefix(model, "o4") ||
+		strings.HasPrefix(model, "gpt-5") ||
+		strings.Contains(model, "gemini-2.5") ||
+		strings.Contains(model, "gemini-3") ||
+		strings.Contains(model, "gemma-4") ||
+		strings.Contains(model, "deepseek-reasoner") ||
+		strings.Contains(model, "deepseek-v4") ||
+		strings.HasPrefix(model, "qwq") ||
+		strings.HasPrefix(model, "qwen3") ||
+		strings.HasPrefix(model, "glm-5") ||
+		strings.HasPrefix(model, "glm-4.5") ||
+		strings.HasPrefix(model, "glm-4.6") ||
+		strings.HasPrefix(model, "glm-4.7") ||
+		strings.Contains(model, "grok-4") && strings.Contains(model, "reasoning")
+}
+
+func modelSupportsThinkingFromRegistry(modelID string) (bool, bool) {
+	data := registrySnapshotIfReady()
+	if data == nil {
+		return false, false
+	}
+
+	if provider, model, ok := splitModelID(modelID); ok {
+		if entry, ok := data[provider]; ok {
+			if m, ok := entry.Models[model]; ok {
+				return m.Reasoning, true
+			}
+		}
+	}
+
+	for _, entry := range data {
+		if m, ok := entry.Models[modelID]; ok {
+			return m.Reasoning, true
+		}
+	}
+
+	return false, false
 }

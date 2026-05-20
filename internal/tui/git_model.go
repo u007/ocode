@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -105,6 +106,9 @@ type gitModel struct {
 	// diff text selection
 	diffRawLines []string
 	diffLines    []string
+	// external editor integration
+	editor       string
+	editorOpener func(string) tea.Cmd
 }
 
 func newGitModel(workDir string) gitModel {
@@ -123,6 +127,10 @@ func newGitModel(workDir string) gitModel {
 	m.loadDiff()
 	return m
 }
+
+func (m *gitModel) SetEditor(e string) { m.editor = e }
+
+func (m *gitModel) SetEditorOpener(fn func(string) tea.Cmd) { m.editorOpener = fn }
 
 func (m *gitModel) Resize(w, h int) {
 	m.width = w
@@ -372,6 +380,12 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 		m.aheadBehind = msg.aheadBehind
 		m.loadingLog = false
 		m.logsMore = len(m.commits) >= 50
+		files := m.currentFileList()
+		if len(files) == 0 {
+			m.filesCursor = 0
+		} else if m.filesCursor >= len(files) {
+			m.filesCursor = len(files) - 1
+		}
 		m.loadDiff()
 		return m, nil
 	case loadMoreLogMsg:
@@ -741,6 +755,15 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			m.stashInputText = ""
 			m.statusMsg = "stash message (optional, enter to confirm):"
 		}
+	case "E":
+		if m.section == gitSectionChanges {
+			files := m.currentFileList()
+			if m.filesCursor < len(files) {
+				path := filepath.Join(m.workDir, files[m.filesCursor].path)
+				m.statusMsg = "opening editor..."
+				return m, m.openInEditor(path)
+			}
+		}
 	case "enter":
 		switch m.section {
 		case gitSectionBranches:
@@ -773,6 +796,28 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m gitModel) openInEditor(path string) tea.Cmd {
+	if m.editorOpener != nil {
+		return m.editorOpener(path)
+	}
+	editor := m.editor
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	cmdParts := strings.Fields(editor)
+	if len(cmdParts) == 0 {
+		return func() tea.Msg { return editorFinishedMsg{err: os.ErrInvalid} }
+	}
+	cmdParts = append(cmdParts, path)
+	c := exec.Command(cmdParts[0], cmdParts[1:]...)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return editorFinishedMsg{err: err}
+	})
 }
 
 func (m gitModel) handleDiffKey(key string) (gitModel, tea.Cmd) {
@@ -1001,6 +1046,41 @@ func (m *gitModel) loadDiff() {
 	}
 }
 
+func (m *gitModel) loadFilePreview(f gitFile) {
+	path := filepath.Join(m.workDir, f.path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		m.setDiffContent("error: " + err.Error())
+		m.diff.GotoTop()
+		m.hunks = nil
+		m.hunkCursor = 0
+		m.diffHeader = ""
+		return
+	}
+	probe := data
+	if len(probe) > 512 {
+		probe = probe[:512]
+	}
+	if strings.ContainsRune(string(probe), '\x00') {
+		m.setDiffContent("[binary file]")
+		m.diff.GotoTop()
+		m.hunks = nil
+		m.hunkCursor = 0
+		m.diffHeader = ""
+		return
+	}
+	content := string(data)
+	if len(data) > 1024*1024 {
+		content = string(data[:1024*1024]) + "\n[truncated — 1MB limit]"
+	}
+	header := hintStyle.Render("Preview: "+f.path+"  (E edit)") + "\n\n"
+	m.setDiffContent(header + highlightContent(content, languageForPath(f.path)))
+	m.diff.GotoTop()
+	m.hunks = nil
+	m.hunkCursor = 0
+	m.diffHeader = ""
+}
+
 func (m gitModel) renderHints() string {
 	if m.committing {
 		return "ctrl+enter commit  esc cancel"
@@ -1015,7 +1095,7 @@ func (m gitModel) renderHints() string {
 	case gitPanelFiles:
 		switch m.section {
 		case gitSectionChanges:
-			return base + "s stage  u unstage  d discard  S stash  c commit  f fetch  p pull  P push"
+			return base + "s stage  u unstage  d discard  E edit  S stash  c commit  f fetch  p pull  P push"
 		case gitSectionLog:
 			return base + "j/k navigate"
 		case gitSectionStash:
@@ -1109,9 +1189,18 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 	var parts []string
 	parts = append(parts, header, row)
 	if m.committing {
-		hint := hintStyle.Render("ctrl+enter submit  esc cancel")
-		parts = append(parts, hint)
-		parts = append(parts, borderStyle.Width(sectW+filesW-2).Render(m.commitInput.View()))
+		dialogW := w * 60 / 100
+		if dialogW < 40 {
+			dialogW = w - 4
+		}
+		if dialogW > w-4 {
+			dialogW = w - 4
+		}
+		title := styles.Header.Render("Commit message")
+		hint := hintStyle.Render("ctrl+enter commit  esc cancel")
+		body := lipgloss.JoinVertical(lipgloss.Left, title, "", m.commitInput.View(), "", hint)
+		dialog := borderStyle.Width(dialogW).Render(body)
+		parts = append(parts, lipgloss.PlaceHorizontal(w, lipgloss.Center, dialog))
 	}
 	if m.branchInputMode {
 		prompt := hintStyle.Render("New branch: ") + m.branchInputText + "█"

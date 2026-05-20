@@ -104,15 +104,12 @@ func TestLoadFromStringValidJSON(t *testing.T) {
 		MCP:        make(map[string]MCPConfig),
 	}
 
-	err = loadFromString(`{"model": "gpt-4o", "small_model": "gpt-4o-mini"}`, cfg)
+	err = loadFromString(`{"model": "gpt-4o"}`, cfg)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
 	if cfg.Model != "gpt-4o" {
 		t.Fatalf("expected model gpt-4o, got %s", cfg.Model)
-	}
-	if cfg.SmallModel != "gpt-4o-mini" {
-		t.Fatalf("expected small_model gpt-4o-mini, got %s", cfg.SmallModel)
 	}
 }
 
@@ -267,7 +264,7 @@ func TestClearMCPAuthorizationPreservesExistingOpencodeConfig(t *testing.T) {
 	}
 }
 
-func TestSaveTUIThemeWritesOpencodeConfig(t *testing.T) {
+func TestSaveTUIThemeWritesOcodeConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -275,7 +272,7 @@ func TestSaveTUIThemeWritesOpencodeConfig(t *testing.T) {
 		t.Fatalf("failed to save theme: %v", err)
 	}
 
-	path := filepath.Join(tmpHome, ".config", "opencode", "opencode.json")
+	path := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("expected theme to be saved to %s: %v", path, err)
@@ -292,14 +289,14 @@ func TestSaveTUIThemeWritesOpencodeConfig(t *testing.T) {
 	}
 }
 
-func TestSaveTUIThemePreservesExistingOpencodeConfig(t *testing.T) {
+func TestSaveTUIThemePreservesExistingOcodeConfig(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	path := filepath.Join(tmpHome, ".config", "opencode", "opencode.json")
+	path := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(`{"model":"gpt-4o","tui":{"mouse":false}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"tui":{"mouse":false}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -311,12 +308,11 @@ func TestSaveTUIThemePreservesExistingOpencodeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got Config
+	var got struct {
+		TUI TUIConfig `json:"tui"`
+	}
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("failed to parse saved config: %v", err)
-	}
-	if got.Model != "gpt-4o" {
-		t.Fatalf("expected existing model to be preserved, got %q", got.Model)
 	}
 	if got.TUI.Theme != "dracula" {
 		t.Fatalf("expected saved tui.theme dracula, got %q", got.TUI.Theme)

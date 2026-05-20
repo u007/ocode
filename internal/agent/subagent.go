@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
@@ -88,13 +89,26 @@ func (t TaskTool) Definition() map[string]interface{} {
 					"description": "The sub-agent type to use. Options: " + strings.Join(visibleAgentNames, ", "),
 					"enum":        subAgentNames,
 				},
+				"subagent_type": map[string]interface{}{
+					"type":        "string",
+					"description": "OpenCode-compatible alias for agent. Options: " + strings.Join(visibleAgentNames, ", "),
+					"enum":        subAgentNames,
+				},
 				"context": map[string]interface{}{
 					"type":        "string",
 					"description": "Additional background context relevant to the task.",
 				},
+				"description": map[string]interface{}{
+					"type":        "string",
+					"description": "OpenCode-compatible short description of the task.",
+				},
 				"run_in_background": map[string]interface{}{
 					"type":        "boolean",
-					"description": "If true, run the subagent in the background and return immediately with the run ID. Poll with agent_status.",
+					"description": "If true, run the subagent in the background and return immediately with the run ID. Poll with agent_status or task_status.",
+				},
+				"background": map[string]interface{}{
+					"type":        "boolean",
+					"description": "OpenCode-compatible alias for run_in_background.",
 				},
 			},
 			"required": []string{"prompt"},
@@ -106,8 +120,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		Prompt          string `json:"prompt"`
 		Agent           string `json:"agent"`
+		SubagentType    string `json:"subagent_type"`
 		Context         string `json:"context"`
+		Description     string `json:"description"`
 		RunInBackground bool   `json:"run_in_background"`
+		Background      bool   `json:"background"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -115,6 +132,12 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 
 	if params.Prompt == "" {
 		return "", fmt.Errorf("prompt is required")
+	}
+	if params.Agent == "" {
+		params.Agent = params.SubagentType
+	}
+	if params.Background {
+		params.RunInBackground = true
 	}
 
 	spec := t.findAgent(params.Agent)
@@ -152,12 +175,27 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		{Role: "user", Content: params.Prompt},
 	}
 
+	attachRunTranscript := func(run *AgentRun) {
+		if run == nil {
+			return
+		}
+		// Seed the transcript with the prompt so the TUI drill-in has useful
+		// context immediately, then stream every sub-agent assistant/tool message
+		// into the run as Step progresses. The parent agent only sees the final
+		// task tool result, so without this hook the live agent strip stays empty.
+		for _, msg := range subAgentMsgs {
+			run.appendTranscript(msg)
+		}
+		subAgent.OnMessage = func(msg Message) { run.appendTranscript(msg) }
+	}
+
 	// Background mode
 	if params.RunInBackground && t.runs != nil {
 		run := t.runs.New(spec.Name)
 		run.Procs = subAgent.Procs()
 		run.Sub = subAgent
 		run.Cancel = subAgent.Cancel
+		attachRunTranscript(run)
 
 		go func() {
 			if t.mainAgent.activity != nil {
@@ -182,10 +220,18 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 			t.runs.notifyDone(run)
 		}()
 
-		return fmt.Sprintf("Background agent started: %s (agent: %s). Poll with agent_status.", run.ID, spec.Name), nil
+		return fmt.Sprintf("task_id: %s (agent: %s)\nstate: running\n\n<task_result>\nBackground task started. Poll with task_status or agent_status.\n</task_result>", run.ID, spec.Name), nil
 	}
 
 	// Synchronous mode
+	var run *AgentRun
+	if t.runs != nil {
+		run = t.runs.New(spec.Name)
+		run.Procs = subAgent.Procs()
+		run.Sub = subAgent
+		run.Cancel = subAgent.Cancel
+		attachRunTranscript(run)
+	}
 	if t.mainAgent.activity != nil {
 		t.mainAgent.activity.agentStarted(spec.Name)
 	}
@@ -194,6 +240,10 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		t.mainAgent.activity.agentDone(spec.Name)
 	}
 	if err != nil {
+		if run != nil {
+			run.finishErr(err.Error())
+			t.runs.notifyDone(run)
+		}
 		return "", err
 	}
 
@@ -212,6 +262,10 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		}
 	}
 	result := b.String()
+	if run != nil {
+		run.finishOK(result)
+		t.runs.notifyDone(run)
+	}
 	if sessionID != "" {
 		result += fmt.Sprintf("\n\n(Child session: %s)", sessionID)
 	}
@@ -335,4 +389,106 @@ func (t AgentStatusTool) Execute(args json.RawMessage) (string, error) {
 		b.WriteString("\nError: " + run.Err)
 	}
 	return b.String(), nil
+}
+
+// TaskStatusTool returns the status of a background agent run using the
+// opencode-compatible task_status tool name.
+type TaskStatusTool struct {
+	runs *AgentRunRegistry
+}
+
+func (t TaskStatusTool) Name() string        { return "task_status" }
+func (t TaskStatusTool) Description() string { return "Poll the status of a background subagent task" }
+func (t TaskStatusTool) Parallel() bool      { return true }
+func (t TaskStatusTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "task_status",
+		"description": "Poll the status of a background subagent task launched with the task tool. Use this for tasks started with task(run_in_background=true). Returns task_id, state, and task_result/task_error blocks.",
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"task_id": map[string]interface{}{
+					"type":        "string",
+					"description": "The task_id returned by the task tool",
+				},
+				"wait": map[string]interface{}{
+					"type":        "boolean",
+					"description": "When true, wait until the task reaches a terminal state or timeout",
+				},
+				"timeout_ms": map[string]interface{}{
+					"type":        "integer",
+					"description": "Maximum milliseconds to wait when wait=true (default: 60000)",
+				},
+			},
+			"required": []string{"task_id"},
+		},
+	}
+}
+
+func (t TaskStatusTool) Execute(args json.RawMessage) (string, error) {
+	var params struct {
+		TaskID    string `json:"task_id"`
+		Wait      bool   `json:"wait"`
+		TimeoutMS int    `json:"timeout_ms"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+	if params.TaskID == "" {
+		return "", fmt.Errorf("task_id is required")
+	}
+	if t.runs == nil {
+		return "", fmt.Errorf("no agent run registry")
+	}
+
+	if params.Wait {
+		timeout := 60 * time.Second
+		if params.TimeoutMS > 0 {
+			timeout = time.Duration(params.TimeoutMS) * time.Millisecond
+		}
+		deadline := time.Now().Add(timeout)
+		for {
+			run, ok := t.runs.Get(params.TaskID)
+			if !ok {
+				return formatTaskStatus(params.TaskID, "error", fmt.Sprintf("unknown task %s", params.TaskID)), nil
+			}
+			if run.statusValue() != RunRunning || time.Now().After(deadline) {
+				return formatTaskRunStatus(params.TaskID, run), nil
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+
+	run, ok := t.runs.Get(params.TaskID)
+	if !ok {
+		return formatTaskStatus(params.TaskID, "error", fmt.Sprintf("unknown task %s", params.TaskID)), nil
+	}
+	return formatTaskRunStatus(params.TaskID, run), nil
+}
+
+func formatTaskRunStatus(taskID string, run *AgentRun) string {
+	status := run.statusValue()
+	switch status {
+	case RunRunning:
+		lines := run.LastLines(5)
+		text := "Task is still running."
+		if len(lines) > 0 {
+			text = strings.Join(lines, "\n")
+		}
+		return formatTaskStatus(taskID, "running", text)
+	case RunDone:
+		return formatTaskStatus(taskID, "completed", run.Result)
+	case RunFailed:
+		return formatTaskStatus(taskID, "error", run.Err)
+	default:
+		return formatTaskStatus(taskID, string(status), "")
+	}
+}
+
+func formatTaskStatus(taskID, state, text string) string {
+	tag := "task_result"
+	if state == "error" || state == "failed" || state == "cancelled" {
+		tag = "task_error"
+	}
+	return fmt.Sprintf("task_id: %s\nstate: %s\n\n<%s>\n%s\n</%s>", taskID, state, tag, text, tag)
 }
