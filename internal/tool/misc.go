@@ -53,30 +53,93 @@ func (t SkillTool) Execute(args json.RawMessage) (string, error) {
 	return s.Content, nil
 }
 
+type QuestionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description"`
+}
+
+type QuestionPrompt struct {
+	Header   string           `json:"header"`
+	Question string           `json:"question"`
+	Options  []QuestionOption `json:"options"`
+	Multiple bool             `json:"multiple"`
+}
+
 type QuestionTool struct{}
 
 func (t QuestionTool) Name() string        { return "question" }
-func (t QuestionTool) Description() string { return "Ask the user a question" }
+func (t QuestionTool) Description() string { return "Ask the user questions during execution" }
 func (t QuestionTool) Parallel() bool      { return false }
 func (t QuestionTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "question",
-		"description": "Ask the user a question during execution",
+		"description": "Ask the user one or more questions with selectable options. Users can pick from options or type a custom answer. Returns the user's selections.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
-				"question": map[string]interface{}{
-					"type":        "string",
-					"description": "The question to ask",
+				"questions": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"header": map[string]interface{}{
+								"type":        "string",
+								"description": "Very short label (max 30 chars) shown as the question header.",
+							},
+							"question": map[string]interface{}{
+								"type":        "string",
+								"description": "The full question text shown to the user.",
+							},
+							"options": map[string]interface{}{
+								"type": "array",
+								"items": map[string]interface{}{
+									"type": "object",
+									"properties": map[string]interface{}{
+										"label": map[string]interface{}{
+											"type":        "string",
+											"description": "Display text for the option (1-5 words, concise).",
+										},
+										"description": map[string]interface{}{
+											"type":        "string",
+											"description": "Explanation of what selecting this option does.",
+										},
+									},
+									"required": []string{"label", "description"},
+								},
+								"description": "Available choices. A 'Type your own answer' option is added automatically.",
+							},
+							"multiple": map[string]interface{}{
+								"type":        "boolean",
+								"description": "Allow selecting multiple choices (default: false).",
+							},
+						},
+						"required": []string{"question", "header", "options"},
+					},
+					"description": "One or more questions to ask the user.",
 				},
 			},
-			"required": []string{"question"},
+			"required": []string{"questions"},
 		},
 	}
 }
 
 func (t QuestionTool) Execute(args json.RawMessage) (string, error) {
-	// In a TUI, this needs to be handled by the update loop to prompt the user
-	// For now, return a special message that the agent/TUI can catch
-	return "WAITING_FOR_USER_RESPONSE", nil
+	var params struct {
+		Questions []QuestionPrompt `json:"questions"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	if len(params.Questions) == 0 {
+		return "", fmt.Errorf("at least one question is required")
+	}
+
+	var b strings.Builder
+	b.WriteString("QUESTION_PROMPT:\n")
+	data, _ := json.Marshal(params.Questions)
+	b.Write(data)
+	b.WriteString("\n\nWAITING_FOR_USER_RESPONSE")
+
+	return b.String(), nil
 }

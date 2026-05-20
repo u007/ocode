@@ -164,8 +164,7 @@ func buildCommandHelpText(specs []commandSpec) string {
 }
 
 func runModelCmd(m *model, args []string) tea.Cmd {
-	m.handleModelCmd(args)
-	return nil
+	return m.handleModelCmd(args)
 }
 
 func runConnectCmd(m *model, args []string) tea.Cmd {
@@ -213,8 +212,7 @@ func runThinkingCmd(m *model, args []string) tea.Cmd {
 }
 
 func runModelsCmd(m *model, args []string) tea.Cmd {
-	m.handleModelsCmd(args)
-	return nil
+	return m.handleModelsCmd(args)
 }
 
 func runDetailsCmd(m *model, args []string) tea.Cmd {
@@ -298,13 +296,13 @@ func runMCPCmd(m *model, args []string) tea.Cmd {
 		}
 		mcpCfg.Enabled = enabled
 		m.config.MCP[name] = mcpCfg
-		m.rebuildAgentWithExternalTools()
+		listenCmd := m.rebuildAgentWithExternalTools()
 		state := "enabled"
 		if !enabled {
 			state = "disabled"
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("MCP server %q %s.", name, state)})
-		return nil
+		return listenCmd
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mcp [list|enable <server>|disable <server>]"})
 		return nil
@@ -313,6 +311,9 @@ func runMCPCmd(m *model, args []string) tea.Cmd {
 
 func runExitCmd(m *model, args []string) tea.Cmd {
 	m.saveSession()
+	if m.agent != nil {
+		m.agent.Shutdown()
+	}
 	return tea.Quit
 }
 

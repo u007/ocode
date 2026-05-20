@@ -179,3 +179,115 @@ func TestShouldCompactDisabled(t *testing.T) {
 		t.Errorf("should not compact when disabled")
 	}
 }
+
+// TestTokenEstimateHandlesExtendedThinking verifies that reasoning content
+// is counted at a higher rate (2 chars/token) than regular text (4 chars/token).
+// This documents the per-provider tokenization difference.
+func TestTokenEstimateHandlesExtendedThinking(t *testing.T) {
+	// Message with only reasoning content (e.g., extended thinking before response)
+	m := Message{
+		Role:            "assistant",
+		Content:         "",                                // no regular content
+		ReasoningContent: strings.Repeat("x", 10000),      // 10k chars of thinking
+	}
+	est := tokenEstimate(m)
+
+	// Expected: (10000 / 2) + framingOverheadPerMessage = 5000 + 75 = 5075
+	// Old behavior would calculate: (10000 / 4) + 75 = 2500 + 75 = 2575
+	// This test ensures new logic is 2x more accurate for reasoning content.
+	if est < 4500 {
+		t.Errorf("reasoning content underestimated: got %d tokens, expected ~5000+", est)
+	}
+}
+
+// TestTokenEstimateIncludesFramingOverhead verifies that each message's
+// framing overhead (role, JSON structure) is accounted for.
+func TestTokenEstimateIncludesFramingOverhead(t *testing.T) {
+	m := Message{Role: "user", Content: "hello"}
+	est := tokenEstimate(m)
+
+	// Expected: (5 chars / 4) + framingOverheadPerMessage = 1 + 75 = 76
+	if est < framingOverheadPerMessage {
+		t.Errorf("framing overhead missing: got %d tokens, expected >= %d", est, framingOverheadPerMessage)
+	}
+}
+
+// TestShouldCompactUsesLatestUsage verifies that shouldCompact uses the most
+// recent Usage.PromptTokens value (which represents cumulative tokens at that point).
+func TestShouldCompactUsesLatestUsage(t *testing.T) {
+	rt := compactRuntime{
+		Enabled:        true,
+		TokenThreshold: 0.6,
+		MinMessages:    3,
+		WindowTokens:   1000, // threshold: 600 tokens
+	}
+
+	t200 := int64(200)
+	t700 := int64(700)
+
+	msgs := []Message{
+		{Role: "user", Content: "x", Usage: &TokenUsage{PromptTokens: &t200}},
+		{Role: "assistant", Content: "y"},
+		{Role: "user", Content: "z", Usage: &TokenUsage{PromptTokens: &t700}},
+	}
+
+	need, used := shouldCompact(msgs, rt)
+	if used != 700 {
+		t.Errorf("used tokens=%d, want 700 (most recent Usage.PromptTokens)", used)
+	}
+	if !need {
+		t.Errorf("expected compaction (700 >= threshold %d)", int(float64(rt.WindowTokens)*rt.TokenThreshold))
+	}
+}
+
+// TestShouldCompactFallbackWhenUsageMissing verifies that when no message has
+// Usage data, we fall back to character estimation with a safety margin.
+func TestShouldCompactFallbackWhenUsageMissing(t *testing.T) {
+	rt := compactRuntime{
+		Enabled:        true,
+		TokenThreshold: 0.5,
+		MinMessages:    2,
+		WindowTokens:   1000,
+	}
+
+	msgs := []Message{
+		{Role: "user", Content: strings.Repeat("x", 2000)},     // No Usage
+		{Role: "assistant", Content: strings.Repeat("y", 1000)}, // No Usage
+	}
+
+	need, used := shouldCompact(msgs, rt)
+	// With fallback estimate and safety margin (15%), we should get a reasonable estimate.
+	// Without proper handling, this would use inaccurate char/token ratio.
+	if used < 500 {
+		t.Errorf("fallback estimate too low: %d tokens (likely underestimating)", used)
+	}
+	// Trigger threshold is 500, so with ~900+ estimated tokens, compaction should trigger
+	if !need {
+		t.Logf("fallback estimate: %d tokens, threshold: %d", used, int(float64(rt.WindowTokens)*rt.TokenThreshold))
+		t.Errorf("expected compaction to trigger with fallback estimate")
+	}
+}
+
+// TestShouldCompactFallbackWithSafetyMargin verifies that when no Usage data
+// is available, we use the character heuristic with a 15% safety margin.
+func TestShouldCompactFallbackWithSafetyMargin(t *testing.T) {
+	rt := compactRuntime{
+		Enabled:        true,
+		TokenThreshold: 0.3,  // 300 tokens threshold
+		MinMessages:    3,
+		WindowTokens:   1000,
+	}
+
+	msgs := []Message{
+		{Role: "user", Content: "x"},
+		{Role: "assistant", Content: strings.Repeat("y", 3000)}, // ~750 tokens
+		{Role: "user", Content: "z"},
+	}
+
+	need, used := shouldCompact(msgs, rt)
+	// With no Usage data: estimate is ~860 tokens (3000 chars / 4 + framing + safety),
+	// with 15% margin applied. This should exceed the 300 token threshold.
+	if !need {
+		t.Errorf("fallback estimate should trigger: used=%d, threshold=%d", used, int(float64(rt.WindowTokens)*rt.TokenThreshold))
+	}
+}

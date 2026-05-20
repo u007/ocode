@@ -22,19 +22,19 @@ var (
 
 type PatchTool struct{}
 
-func (t PatchTool) Name() string        { return "patch" }
+func (t PatchTool) Name() string        { return "apply_patch" }
 func (t PatchTool) Description() string { return "Apply patches to files with line range targeting and fuzzy matching" }
 func (t PatchTool) Parallel() bool      { return false }
 func (t PatchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
-		"name":        "patch",
-		"description": "Apply patches to files with line range targeting and fuzzy matching",
+		"name":        "apply_patch",
+		"description": "Apply patches to files. Supports unified diff format and marker-based format (*** Add File:, *** Update File:, *** Move to:, *** Delete File:). Paths in patches are relative to the project root.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"patchText": map[string]interface{}{
 					"type":        "string",
-					"description": "The patch content to apply (unified diff format)",
+					"description": "The patch content to apply. Supports unified diff or marker-based format with *** Add/Update/Move/Delete File: markers.",
 				},
 				"fuzzy": map[string]interface{}{
 					"type":        "boolean",
@@ -58,6 +58,13 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 	fuzzy := true
 	if params.Fuzzy != nil {
 		fuzzy = *params.Fuzzy
+	}
+
+	if strings.Contains(params.PatchText, "*** Add File:") ||
+		strings.Contains(params.PatchText, "*** Update File:") ||
+		strings.Contains(params.PatchText, "*** Move to:") ||
+		strings.Contains(params.PatchText, "*** Delete File:") {
+		return applyMarkerPatch(params.PatchText)
 	}
 
 	targets, err := patchTargets(params.PatchText)
@@ -105,6 +112,115 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	return string(output), nil
+}
+
+func applyMarkerPatch(patchText string) (string, error) {
+	scanner := bufio.NewScanner(strings.NewReader(patchText))
+	var currentOp string
+	var currentPath string
+	var content strings.Builder
+	var results []string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		switch {
+		case strings.HasPrefix(line, "*** Add File:"):
+			if currentOp != "" {
+				if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
+					return strings.Join(results, "\n"), err
+				}
+				results = append(results, fmt.Sprintf("added %s", currentPath))
+			}
+			currentOp = "add"
+			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "*** Add File:"))
+			content.Reset()
+		case strings.HasPrefix(line, "*** Update File:"):
+			if currentOp != "" {
+				if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
+					return strings.Join(results, "\n"), err
+				}
+				results = append(results, fmt.Sprintf("updated %s", currentPath))
+			}
+			currentOp = "update"
+			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "*** Update File:"))
+			content.Reset()
+		case strings.HasPrefix(line, "*** Move to:"):
+			if currentOp != "" {
+				if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
+					return strings.Join(results, "\n"), err
+				}
+				results = append(results, fmt.Sprintf("moved to %s", currentPath))
+			}
+			currentOp = "move"
+			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "*** Move to:"))
+			content.Reset()
+		case strings.HasPrefix(line, "*** Delete File:"):
+			if currentOp != "" {
+				if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
+					return strings.Join(results, "\n"), err
+				}
+				results = append(results, fmt.Sprintf("deleted %s", currentPath))
+			}
+			currentOp = "delete"
+			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "*** Delete File:"))
+			content.Reset()
+		default:
+			if currentOp != "" {
+				content.WriteString(line)
+				content.WriteString("\n")
+			}
+		}
+	}
+
+	if currentOp != "" {
+		if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
+			return strings.Join(results, "\n"), err
+		}
+		switch currentOp {
+		case "add":
+			results = append(results, fmt.Sprintf("added %s", currentPath))
+		case "update":
+			results = append(results, fmt.Sprintf("updated %s", currentPath))
+		case "move":
+			results = append(results, fmt.Sprintf("moved to %s", currentPath))
+		case "delete":
+			results = append(results, fmt.Sprintf("deleted %s", currentPath))
+		}
+	}
+
+	if len(results) == 0 {
+		return "No patch operations found", nil
+	}
+
+	return strings.Join(results, "\n"), nil
+}
+
+func executeMarkerOp(op, path, content string) error {
+	if path == "" {
+		return fmt.Errorf("empty path in patch operation")
+	}
+
+	safe, err := confinedPath(path)
+	if err != nil {
+		return err
+	}
+
+	switch op {
+	case "add", "update":
+		snapshot.Backup(safe) //nolint:errcheck
+		if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(safe, []byte(strings.TrimRight(content, "\n")), 0644)
+	case "move":
+		return os.Rename(safe, path)
+	case "delete":
+		snapshot.Backup(safe) //nolint:errcheck
+		return os.Remove(safe)
+	default:
+		return fmt.Errorf("unknown operation: %s", op)
+	}
 }
 
 type hunk struct {
