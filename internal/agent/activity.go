@@ -1,11 +1,20 @@
 package agent
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
+
+// ToolActivity holds a running tool's name and when it started.
+type ToolActivity struct {
+	Name      string
+	StartedAt time.Time
+}
 
 // ActivitySnapshot is a point-in-time view of what the agent is doing.
 type ActivitySnapshot struct {
 	LLMRunning   bool
-	ActiveTools  []string
+	ActiveTools  []ToolActivity
 	ActiveAgents []string
 }
 
@@ -13,7 +22,7 @@ type ActivitySnapshot struct {
 type ActivityTracker struct {
 	mu           sync.Mutex
 	llmRunning   bool
-	activeTools  []string
+	activeTools  []ToolActivity
 	activeAgents []string
 	notify       chan ActivitySnapshot
 }
@@ -32,7 +41,7 @@ func (t *ActivityTracker) setLLMRunning(v bool) {
 
 func (t *ActivityTracker) toolStarted(name string) {
 	t.mu.Lock()
-	t.activeTools = append(t.activeTools, name)
+	t.activeTools = append(t.activeTools, ToolActivity{Name: name, StartedAt: time.Now()})
 	snap := t.snapshot()
 	t.publishLocked(snap)
 	t.mu.Unlock()
@@ -40,7 +49,12 @@ func (t *ActivityTracker) toolStarted(name string) {
 
 func (t *ActivityTracker) toolDone(name string) {
 	t.mu.Lock()
-	t.activeTools = removeStr(t.activeTools, name)
+	for i, ta := range t.activeTools {
+		if ta.Name == name {
+			t.activeTools = append(t.activeTools[:i], t.activeTools[i+1:]...)
+			break
+		}
+	}
 	snap := t.snapshot()
 	t.publishLocked(snap)
 	t.mu.Unlock()
@@ -56,7 +70,12 @@ func (t *ActivityTracker) agentStarted(name string) {
 
 func (t *ActivityTracker) agentDone(name string) {
 	t.mu.Lock()
-	t.activeAgents = removeStr(t.activeAgents, name)
+	for i, v := range t.activeAgents {
+		if v == name {
+			t.activeAgents = append(t.activeAgents[:i], t.activeAgents[i+1:]...)
+			break
+		}
+	}
 	snap := t.snapshot()
 	t.publishLocked(snap)
 	t.mu.Unlock()
@@ -64,7 +83,7 @@ func (t *ActivityTracker) agentDone(name string) {
 
 // snapshot returns a copy of current state. Must be called with mu held.
 func (t *ActivityTracker) snapshot() ActivitySnapshot {
-	tools := make([]string, len(t.activeTools))
+	tools := make([]ToolActivity, len(t.activeTools))
 	copy(tools, t.activeTools)
 	agents := make([]string, len(t.activeAgents))
 	copy(agents, t.activeAgents)
@@ -94,12 +113,3 @@ func (t *ActivityTracker) publishLocked(snap ActivitySnapshot) {
 	}
 }
 
-// removeStr removes the first occurrence of name from slice.
-func removeStr(s []string, name string) []string {
-	for i, v := range s {
-		if v == name {
-			return append(s[:i], s[i+1:]...)
-		}
-	}
-	return s
-}

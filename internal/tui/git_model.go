@@ -102,6 +102,9 @@ type gitModel struct {
 	commitViewport viewport.Model
 	loadingLog     bool
 	logsMore       bool
+	// diff text selection
+	diffRawLines []string
+	diffLines    []string
 }
 
 func newGitModel(workDir string) gitModel {
@@ -851,6 +854,28 @@ func (m *gitModel) allUnstagedAndUntracked() []gitFile {
 	return out
 }
 
+func (m *gitModel) setDiffContent(content string) {
+	m.diff.SetContent(content)
+	raw := stripANSI(content)
+	m.diffRawLines = strings.Split(raw, "\n")
+	m.diffLines = strings.Split(content, "\n")
+}
+
+func (m *gitModel) applyDiffSelectionHighlight(startLine, startCol, endLine, endCol int) {
+	if len(m.diffLines) == 0 {
+		return
+	}
+	highlighted := applySelectionHighlight(m.diffLines, m.diffRawLines, startLine, startCol, endLine, endCol)
+	m.diff.SetContent(strings.Join(highlighted, "\n"))
+}
+
+func (m *gitModel) clearDiffSelectionHighlight() {
+	if len(m.diffLines) == 0 {
+		return
+	}
+	m.diff.SetContent(strings.Join(m.diffLines, "\n"))
+}
+
 func parseHunks(diff string) []diffHunk {
 	var hunks []diffHunk
 	var current strings.Builder
@@ -898,7 +923,7 @@ func (m *gitModel) loadDiff() {
 	case gitSectionChanges:
 		files := m.currentFileList()
 		if m.filesCursor >= len(files) {
-			m.diff.SetContent("")
+			m.setDiffContent("")
 			m.hunks = nil
 			m.hunkCursor = 0
 			m.diffHeader = ""
@@ -915,14 +940,14 @@ func (m *gitModel) loadDiff() {
 		if err != nil {
 			out = "error: " + err.Error()
 		}
-		m.diff.SetContent(out)
+		m.setDiffContent(out)
 		m.diff.GotoTop()
 		m.hunks = parseHunks(out)
 		m.hunkCursor = 0
 		m.diffHeader = extractDiffHeader(out)
 	case gitSectionLog:
 		if m.commitCursor >= len(m.commits) {
-			m.diff.SetContent("")
+			m.setDiffContent("")
 			m.hunks = nil
 			m.hunkCursor = 0
 			m.diffHeader = ""
@@ -933,14 +958,14 @@ func (m *gitModel) loadDiff() {
 		if err != nil {
 			out = "error: " + err.Error()
 		}
-		m.diff.SetContent(out)
+		m.setDiffContent(out)
 		m.diff.GotoTop()
 		m.hunks = nil
 		m.hunkCursor = 0
 		m.diffHeader = ""
 	case gitSectionStash:
 		if m.stashCursor >= len(m.stashes) {
-			m.diff.SetContent("")
+			m.setDiffContent("")
 			m.hunks = nil
 			m.hunkCursor = 0
 			m.diffHeader = ""
@@ -951,14 +976,14 @@ func (m *gitModel) loadDiff() {
 		if err != nil {
 			out = "error: " + err.Error()
 		}
-		m.diff.SetContent(out)
+		m.setDiffContent(out)
 		m.diff.GotoTop()
 		m.hunks = nil
 		m.hunkCursor = 0
 		m.diffHeader = ""
 	case gitSectionBranches:
 		if m.branchCursor >= len(m.branches) {
-			m.diff.SetContent("")
+			m.setDiffContent("")
 			m.hunks = nil
 			m.hunkCursor = 0
 			m.diffHeader = ""
@@ -968,7 +993,7 @@ func (m *gitModel) loadDiff() {
 		if err != nil {
 			out = "error: " + err.Error()
 		}
-		m.diff.SetContent(out)
+		m.setDiffContent(out)
 		m.diff.GotoTop()
 		m.hunks = nil
 		m.hunkCursor = 0

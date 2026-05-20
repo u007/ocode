@@ -39,6 +39,8 @@ intelligence, theme system, and extensible agent system.
 - **Slash Commands & Palette** — Extensible `/commands` and `Ctrl+P` command palette
 - **Mouse Support** — Clickable tabs, sidebar, file tree, transcript scrolling, input text selection
 - **Undo/Redo** — Session history undo/redo stack
+- **Async Agent Runs** — Launch and monitor background subagent executions with transcript capture, process registry, and detail view drill-in
+- **Background Process Management** — Spawn and tail shell processes (256KB circular output buffer) with wait tool and lifecycle tracking
 
 ## Config
 

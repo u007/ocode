@@ -22,6 +22,15 @@ func emitDebug(kind, msg string) {
 	}
 }
 
+// JobEvent describes a background job (process or agent run) that finished.
+type JobEvent struct {
+	Kind   string // "process" or "agent"
+	ID     string
+	Name   string // process command, or agent name
+	Status string // exited/killed/done/failed
+	Result string // output tail or result text
+}
+
 type Agent struct {
 	client      LLMClient
 	tools       map[string]tool.Tool
@@ -32,6 +41,11 @@ type Agent struct {
 	spec        *AgentSpec
 	permissions *PermissionManager
 	activity    *ActivityTracker
+	procs       *tool.ProcessRegistry
+	runs        *AgentRunRegistry
+	stopCh      chan struct{}
+	stopMu      sync.Mutex
+	jobEvents   chan JobEvent
 	// OnMessage, if set, is invoked for each message produced during Step
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
@@ -65,8 +79,42 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		permissions: NewPermissionManager(),
 		activity:    newActivityTracker(),
 	}
+	a.procs = tool.NewProcessRegistry()
+	a.runs = NewAgentRunRegistry()
+	a.stopCh = make(chan struct{})
+	a.jobEvents = make(chan JobEvent, 32)
+	a.procs.SetOnDone(func(p *tool.Process) {
+		text, status, code, _ := a.procs.Output(p.ID)
+		a.emitJob(JobEvent{
+			Kind:   "process",
+			ID:     p.ID,
+			Name:   p.Command,
+			Status: string(status),
+			Result: fmt.Sprintf("exit %d\n%s", code, text),
+		})
+	})
+	a.runs.SetOnDone(func(r *AgentRun) {
+		result := r.Result
+		status := "done"
+		if r.statusValue() == RunFailed {
+			result = r.Err
+			status = "failed"
+		}
+		a.emitJob(JobEvent{
+			Kind:   "agent",
+			ID:     r.ID,
+			Name:   r.Name,
+			Status: status,
+			Result: result,
+		})
+	})
+	a.tools["bash"] = &tool.BashTool{Procs: a.procs}
+	a.tools["bash_output"] = tool.BashOutputTool{Procs: a.procs}
+	a.tools["kill_shell"] = tool.KillShellTool{Procs: a.procs}
 	a.tools["agent"] = AgentTool{mainAgent: a}
-	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry}
+	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
+	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
+	a.tools["wait"] = WaitTool{procs: a.procs, runs: a.runs, stopCh: a.stopCh}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)
 		if cfg.Ocode != nil {
@@ -164,6 +212,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	var newMsgs []Message
 
 	for i := 0; ; i++ {
+		if a.cancelled() {
+			return newMsgs, nil
+		}
 		limit := a.maxSteps
 		if limit <= 0 {
 			limit = 100
@@ -263,6 +314,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result}
 		}
 
+		pauseAfterResults := false
 		for _, toolMsg := range results {
 			newMsgs = append(newMsgs, toolMsg)
 			messages = append(messages, toolMsg)
@@ -270,8 +322,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				a.OnMessage(toolMsg)
 			}
 			if toolMsg.Content == "WAITING_FOR_USER_RESPONSE" || strings.HasPrefix(toolMsg.Content, "PERMISSION_ASK:") {
-				return newMsgs, nil
+				pauseAfterResults = true
 			}
+		}
+		if pauseAfterResults {
+			return newMsgs, nil
 		}
 	}
 
@@ -625,6 +680,59 @@ func (a *Agent) Spec() *AgentSpec {
 
 func (a *Agent) Activity() *ActivityTracker {
 	return a.activity
+}
+
+// Procs returns this agent's background-process registry.
+func (a *Agent) Procs() *tool.ProcessRegistry { return a.procs }
+
+// Runs returns the registry of async subagent runs.
+func (a *Agent) Runs() *AgentRunRegistry { return a.runs }
+
+// JobEvents is the channel the TUI reads background-job completions from.
+func (a *Agent) JobEvents() chan JobEvent { return a.jobEvents }
+
+// emitJob delivers a completion event, dropping it only if the buffer is full.
+func (a *Agent) emitJob(ev JobEvent) {
+	select {
+	case a.jobEvents <- ev:
+	default:
+		emitDebug("JOB", "job event buffer full, dropped "+ev.ID)
+	}
+}
+
+// Shutdown cancels the agent, kills its background processes, and cancels all
+// async subagent runs. Call on /clear and TUI exit.
+func (a *Agent) Shutdown() {
+	a.Cancel()
+	if a.procs != nil {
+		a.procs.KillAll()
+	}
+	if a.runs != nil {
+		a.runs.CancelAll()
+	}
+}
+
+// Cancel signals the agent's Step loop to stop before the next LLM call.
+// Best-effort: an in-flight HTTP call is not interrupted.
+func (a *Agent) Cancel() {
+	a.stopMu.Lock()
+	defer a.stopMu.Unlock()
+	select {
+	case <-a.stopCh:
+		// already closed
+	default:
+		close(a.stopCh)
+	}
+}
+
+// cancelled reports whether Cancel has been called.
+func (a *Agent) cancelled() bool {
+	select {
+	case <-a.stopCh:
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *Agent) Permissions() *PermissionManager {

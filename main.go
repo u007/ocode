@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/jamesmercstudio/ocode/internal/acp"
+	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/mcpcli"
 	"github.com/jamesmercstudio/ocode/internal/models"
 	"github.com/jamesmercstudio/ocode/internal/runcli"
@@ -58,6 +59,8 @@ func main() {
 			return
 		}
 	}
+
+	agent.PreloadRegistry()
 
 	sessionID := ""
 	cont := false

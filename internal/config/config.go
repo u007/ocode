@@ -756,6 +756,9 @@ func loadFromFile(path string, config *Config) error {
 	for k, v := range temp.Formatters {
 		config.Formatters[k] = v
 	}
+	if temp.TUI.Theme != "" {
+		config.TUI.Theme = temp.TUI.Theme
+	}
 
 	return nil
 }

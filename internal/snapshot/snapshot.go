@@ -182,3 +182,33 @@ func DiscardRecent(count int) error {
 	}
 	return firstErr
 }
+
+// Restore reverts a specific file to its most recent backup state.
+// It does not modify the snapshot list — use for atomic rollback only.
+func Restore(path string) error {
+	mu.Lock()
+	var last *Snapshot
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		if snapshots[i].OriginalPath == path {
+			s := snapshots[i]
+			last = &s
+			break
+		}
+	}
+	mu.Unlock()
+
+	if last == nil {
+		return nil
+	}
+
+	if last.BackupPath == "" {
+		return os.Remove(last.OriginalPath)
+	}
+
+	data, err := os.ReadFile(last.BackupPath)
+	if err != nil {
+		return fmt.Errorf("failed to read backup for %s: %w", path, err)
+	}
+
+	return os.WriteFile(last.OriginalPath, data, 0644)
+}

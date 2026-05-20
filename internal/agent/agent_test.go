@@ -183,9 +183,9 @@ func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body: io.NopCloser(strings.NewReader(
-					"event: response.created\ndata: {\"type\":\"response.created\",\"model\":\"gpt-test\"}\n\n"+
-						"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n"+
-						"event: response.completed\ndata: {\"type\":\"response.completed\",\"model\":\"gpt-test\"}\n\n"+
+					"event: response.created\ndata: {\"type\":\"response.created\",\"model\":\"gpt-test\"}\n\n" +
+						"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+						"event: response.completed\ndata: {\"type\":\"response.completed\",\"model\":\"gpt-test\"}\n\n" +
 						"data: [DONE]\n",
 				)),
 				Header: make(http.Header),
@@ -219,6 +219,174 @@ func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
 		t.Fatalf("content = %q", msg.Content)
 	}
 }
+
+func TestOpenAIResponsesCapturesReasoningAndFunctionCallItems(t *testing.T) {
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					"event: response.output_item.done\n" +
+						"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_123\",\"summary\":[]}}\n\n" +
+						"event: response.output_item.done\n" +
+						"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_123\",\"call_id\":\"call_123\",\"name\":\"read\",\"arguments\":\"{\\\"filePath\\\":\\\"README.md\\\"}\"}}\n\n" +
+						"event: response.completed\n" +
+						"data: {\"type\":\"response.completed\",\"model\":\"gpt-test\"}\n\n" +
+						"data: [DONE]\n",
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	msg, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "read"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.OpenAIResponseItems) != 2 {
+		t.Fatalf("expected reasoning and function call items, got %#v", msg.OpenAIResponseItems)
+	}
+	if msg.OpenAIResponseItems[0]["type"] != "reasoning" || msg.OpenAIResponseItems[1]["type"] != "function_call" {
+		t.Fatalf("unexpected response items: %#v", msg.OpenAIResponseItems)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].ID != "call_123" || msg.ToolCalls[0].Function.Name != "read" {
+		t.Fatalf("unexpected tool calls: %#v", msg.ToolCalls)
+	}
+}
+
+func TestOpenAIResponsesIncludesStoredOutputItemsBeforeToolResult(t *testing.T) {
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	var gotPayload map[string]interface{}
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(req.Body).Decode(&gotPayload); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					"event: response.output_text.delta\n" +
+						"data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n" +
+						"data: [DONE]\n",
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	messages := []Message{
+		{Role: "user", Content: "read"},
+		{
+			Role: "assistant",
+			OpenAIResponseItems: []map[string]interface{}{
+				{"type": "reasoning", "id": "rs_123", "summary": []interface{}{}},
+				{"type": "function_call", "id": "fc_123", "call_id": "call_123", "name": "read", "arguments": "{}"},
+			},
+		},
+		{Role: "tool", ToolID: "call_123", Content: "file contents"},
+	}
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	if _, err := client.chatOpenAIResponses(messages, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	input, ok := gotPayload["input"].([]interface{})
+	if !ok || len(input) != 4 {
+		t.Fatalf("input = %#v", gotPayload["input"])
+	}
+	for i, wantType := range []string{"message", "reasoning", "function_call", "function_call_output"} {
+		item, ok := input[i].(map[string]interface{})
+		if !ok || item["type"] != wantType {
+			t.Fatalf("input[%d] = %#v, want type %q", i, input[i], wantType)
+		}
+	}
+}
+
+func TestOpenAIResponsesRequestsReasoningEncryptedContent(t *testing.T) {
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	var gotPayload map[string]interface{}
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(req.Body).Decode(&gotPayload); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					"event: response.output_text.delta\n" +
+						"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+						"data: [DONE]\n",
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	if _, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	include, ok := gotPayload["include"].([]interface{})
+	if !ok {
+		t.Fatalf("expected include param in payload, got %#v", gotPayload)
+	}
+	found := false
+	for _, v := range include {
+		if s, _ := v.(string); s == "reasoning.encrypted_content" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected reasoning.encrypted_content in include, got %#v", include)
+	}
+}
+
+func TestOpenAIResponsesReturnsErrorOnTruncatedStream(t *testing.T) {
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(&errReader{err: io.ErrUnexpectedEOF}),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected error from truncated SSE stream")
+	}
+}
+
+type errReader struct{ err error }
+
+func (e *errReader) Read(p []byte) (int, error) { return 0, e.err }
 
 func TestLLMHTTPClientUsesFiveMinuteTimeout(t *testing.T) {
 	if llmHTTPClient.Timeout != 5*time.Minute {
@@ -331,3 +499,36 @@ func (m *MockTool) Execute(args json.RawMessage) (string, error) {
 	return m.result, nil
 }
 func (m *MockTool) Parallel() bool { return true }
+
+func TestNewAgentHasProcessTools(t *testing.T) {
+	a := NewAgent(nil, nil, nil)
+	for _, name := range []string{"bash", "bash_output", "kill_shell"} {
+		if _, ok := a.tools[name]; !ok {
+			t.Fatalf("agent missing tool %q", name)
+		}
+	}
+	if a.Procs() == nil {
+		t.Fatal("agent has no process registry")
+	}
+}
+
+func TestAgentCancelStopsBeforeNextStep(t *testing.T) {
+	a := NewAgent(nil, nil, nil) // nil client → Step returns the stub message
+	a.Cancel()
+	if !a.cancelled() {
+		t.Fatal("expected agent to report cancelled")
+	}
+}
+
+func TestAgentEmitsProcessJobEvent(t *testing.T) {
+	a := NewAgent(nil, nil, nil)
+	p := a.Procs().StartBackground("echo job-evt")
+	select {
+	case ev := <-a.JobEvents():
+		if ev.Kind != "process" || ev.ID != p.ID {
+			t.Fatalf("unexpected event: %+v", ev)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no job event received")
+	}
+}

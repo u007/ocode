@@ -129,6 +129,45 @@ func TestLoadRemovesIncompleteToolRequests(t *testing.T) {
 	}
 }
 
+func TestListRemovesIncompleteToolRequests(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	completedCall := agent.ToolCall{ID: "call-complete", Type: "function"}
+	completedCall.Function.Name = "read"
+	completedCall.Function.Arguments = `{"filePath":"README.md"}`
+
+	incompleteCall := agent.ToolCall{ID: "call-interrupted", Type: "function"}
+	incompleteCall.Function.Name = "bash"
+	incompleteCall.Function.Arguments = `{"command":"sleep 60"}`
+
+	messages := []agent.Message{
+		{Role: "user", Content: "start"},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{completedCall, incompleteCall}},
+		{Role: "tool", ToolID: "call-complete", Content: "read result"},
+	}
+	if err := Save("session-list-tools", "", messages, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	sessions, err := List()
+	if err != nil {
+		t.Fatalf("List failed: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("expected one session, got %d", len(sessions))
+	}
+	if len(sessions[0].Messages) != 3 {
+		t.Fatalf("expected messages to remain except incomplete tool calls, got %#v", sessions[0].Messages)
+	}
+	calls := sessions[0].Messages[1].ToolCalls
+	if len(calls) != 1 || calls[0].ID != "call-complete" {
+		t.Fatalf("expected List to strip interrupted tool call, got %#v", calls)
+	}
+}
+
 func TestListAllIncludesOnlyCurrentDirClaudeSessions(t *testing.T) {
 	tmpHome := t.TempDir()
 	tmpDir := t.TempDir()

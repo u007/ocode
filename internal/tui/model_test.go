@@ -770,6 +770,43 @@ func TestMouseWheelScrollsTranscriptOnlyWhenOverMessages(t *testing.T) {
 	}
 }
 
+func TestGitDiffMouseDragSelectsDiffText(t *testing.T) {
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			diff: viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+	m.git.setDiffContent("line one\nline two\nline three")
+
+	panelW := m.panelWidth()
+	diffLeft := panelW*20/100 + panelW*30/100 + 1
+	gitBodyTop := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git")) + 1
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: diffLeft, Y: gitBodyTop + 1}, true)
+	if !ok {
+		t.Fatal("expected mouse press in git diff panel to be handled")
+	}
+	got := updated.(model)
+	updated, _, ok = got.handleMouseMotion(tea.Mouse{Button: tea.MouseLeft, X: diffLeft + 4, Y: gitBodyTop + 1})
+	if !ok {
+		t.Fatal("expected git diff drag motion to be handled")
+	}
+	got = updated.(model)
+
+	if !got.gitSel.active || !got.gitSel.dragging {
+		t.Fatalf("expected active dragging selection, got %#v", got.gitSel)
+	}
+	if got.gitSel.startLine != 0 || got.gitSel.endLine != 0 || got.gitSel.startCol != 0 || got.gitSel.endCol != 4 {
+		t.Fatalf("unexpected selection state: %#v", got.gitSel)
+	}
+	if !strings.Contains(got.git.diff.View(), "\x1b[7m") {
+		t.Fatalf("expected highlighted diff content, got %q", got.git.diff.View())
+	}
+}
+
 func TestUpKeyUsesInputHistoryWithoutScrollingTranscript(t *testing.T) {
 	m := model{
 		input:             newTestTextarea(),

@@ -295,13 +295,19 @@ func TestAgentSpecToolFiltering(t *testing.T) {
 	})
 
 	tools := a.GetTools()
-	if len(tools) != 0 {
-		t.Errorf("expected 0 tools (none added), got %d", len(tools))
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 allowed wired tool, got %d", len(tools))
+	}
+	if tools[0].Name() != "bash" {
+		t.Fatalf("expected bash tool, got %q", tools[0].Name())
 	}
 
 	defs := a.GetToolDefinitions()
-	if len(defs) != 0 {
-		t.Errorf("expected 0 tool definitions, got %d", len(defs))
+	if len(defs) != 1 {
+		t.Fatalf("expected 1 tool definition, got %d", len(defs))
+	}
+	if defs[0]["name"] != "bash" {
+		t.Fatalf("expected bash definition, got %#v", defs[0]["name"])
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
@@ -14,10 +15,46 @@ import (
 const defaultReadLines = 50
 const maxReadLines = 250
 
+var (
+	readTrackerMu sync.RWMutex
+	readTracker   = make(map[string]bool)
+)
+
+// MarkFileRead records that a file has been read in the current session.
+func MarkFileRead(path string) {
+	readTrackerMu.Lock()
+	defer readTrackerMu.Unlock()
+	readTracker[path] = true
+}
+
+// IsFileRead reports whether a file has been read in the current session.
+func IsFileRead(path string) bool {
+	readTrackerMu.RLock()
+	defer readTrackerMu.RUnlock()
+	return readTracker[path]
+}
+
+// ResetReadTracker clears the session read tracking state.
+func ResetReadTracker() {
+	readTrackerMu.Lock()
+	defer readTrackerMu.Unlock()
+	readTracker = make(map[string]bool)
+}
+
+// toolResultCacheDir returns the directory where truncated tool outputs are saved.
+func toolResultCacheDir() string {
+	if env := os.Getenv("XDG_STATE_HOME"); env != "" {
+		return filepath.Join(env, "opencode", "tool-results")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "state", "opencode", "tool-results")
+}
+
 // confinedPath resolves p relative to the process working directory and
-// verifies that the result is within that directory. It returns the cleaned
-// absolute path on success, or an error if the path would escape the working
-// directory.
+// verifies that the result is within that directory or the tool-results cache
+// dir (so the model can read back truncated output). It returns the cleaned
+// absolute path on success, or an error if the path would escape both allowed
+// roots.
 func confinedPath(p string) (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -28,10 +65,15 @@ func confinedPath(p string) (string, error) {
 		return "", fmt.Errorf("invalid path %q: %w", p, err)
 	}
 	rel, err := filepath.Rel(wd, abs)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("path %q is outside the working directory", p)
+	if err == nil && !strings.HasPrefix(rel, "..") {
+		return abs, nil
 	}
-	return abs, nil
+	// Also allow reads from the tool-results state directory.
+	cacheDir := toolResultCacheDir()
+	if cacheRel, err := filepath.Rel(cacheDir, abs); err == nil && !strings.HasPrefix(cacheRel, "..") {
+		return abs, nil
+	}
+	return "", fmt.Errorf("path %q is outside the working directory", p)
 }
 
 type ReadTool struct{}
@@ -83,6 +125,8 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
 	}
+
+	MarkFileRead(safe)
 
 	lines := strings.Split(string(content), "\n")
 	total := len(lines)
@@ -165,7 +209,12 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	prev, _ := os.ReadFile(safe)
+	prev, err := os.ReadFile(safe)
+	fileExists := err == nil
+
+	if fileExists && params.Mode != "append" && !IsFileRead(safe) {
+		return "", fmt.Errorf("cannot overwrite %s: file must be read with the read tool before writing to it", params.Path)
+	}
 
 	snapshot.Backup(safe) //nolint:errcheck
 
@@ -354,13 +403,17 @@ func (t EditTool) Parallel() bool      { return false }
 func (t EditTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "edit",
-		"description": "Edit a file by replacing a search block with a replace block",
+		"description": "Edit a file by replacing a search block with a replace block. The search block must appear exactly once, or replace_all must be true.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"path":    map[string]interface{}{"type": "string"},
 				"search":  map[string]interface{}{"type": "string"},
 				"replace": map[string]interface{}{"type": "string"},
+				"replace_all": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Replace all occurrences of the search block (default: false).",
+				},
 			},
 			"required": []string{"path", "search", "replace"},
 		},
@@ -369,9 +422,10 @@ func (t EditTool) Definition() map[string]interface{} {
 
 func (t EditTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		Path    string `json:"path"`
-		Search  string `json:"search"`
-		Replace string `json:"replace"`
+		Path       string `json:"path"`
+		Search     string `json:"search"`
+		Replace    string `json:"replace"`
+		ReplaceAll bool   `json:"replace_all"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -387,12 +441,22 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	if !strings.Contains(string(content), params.Search) {
+	fileContent := string(content)
+	count := strings.Count(fileContent, params.Search)
+	if count == 0 {
 		return "", fmt.Errorf("search block not found in file")
+	}
+	if count > 1 && !params.ReplaceAll {
+		return "", fmt.Errorf("search block appears %d times; must be unique or set replace_all=true", count)
 	}
 
 	snapshot.Backup(safe) //nolint:errcheck
-	newContent := strings.Replace(string(content), params.Search, params.Replace, 1)
+	var newContent string
+	if params.ReplaceAll {
+		newContent = strings.ReplaceAll(fileContent, params.Search, params.Replace)
+	} else {
+		newContent = strings.Replace(fileContent, params.Search, params.Replace, 1)
+	}
 	if err = os.WriteFile(safe, []byte(newContent), 0644); err != nil {
 		return "", err
 	}
@@ -403,17 +467,20 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 	}
 	FormatAfterWrite(safe, formatters)
 
-	return FormatDiff(params.Path, string(content), newContent), nil
+	return FormatDiff(params.Path, fileContent, newContent), nil
 }
 
-type MultiEditTool struct{}
+type MultiEditTool struct {
+	Config *config.Config
+}
 
 func (t MultiEditTool) Name() string        { return "multiedit" }
-func (t MultiEditTool) Description() string { return "Perform multiple edits across files" }
+func (t MultiEditTool) Description() string { return "Perform multiple edits across files atomically" }
 func (t MultiEditTool) Parallel() bool      { return false }
 func (t MultiEditTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name": "multiedit",
+		"description": "Perform multiple search/replace edits across files. All edits are validated first, then applied atomically — if any edit fails, none are applied.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -447,14 +514,70 @@ func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	for _, e := range params.Edits {
-		edit := EditTool{}
-		data, _ := json.Marshal(e)
-		_, err := edit.Execute(data)
-		if err != nil {
-			return "", fmt.Errorf("edit failed for %s: %w", e.Path, err)
-		}
+	if len(params.Edits) == 0 {
+		return "", fmt.Errorf("no edits provided")
 	}
 
-	return fmt.Sprintf("Successfully performed %d edits", len(params.Edits)), nil
+	type fileEdit struct {
+		safe        string
+		origContent string
+		newContent  string
+	}
+
+	byFile := make(map[string]*fileEdit)
+	var fileOrder []string
+
+	for _, e := range params.Edits {
+		safe, err := confinedPath(e.Path)
+		if err != nil {
+			return "", err
+		}
+
+		fe, exists := byFile[safe]
+		if !exists {
+			content, err := os.ReadFile(safe)
+			if err != nil {
+				return "", fmt.Errorf("cannot read %s: %w", e.Path, err)
+			}
+			fe = &fileEdit{safe: safe, origContent: string(content), newContent: string(content)}
+			byFile[safe] = fe
+			fileOrder = append(fileOrder, safe)
+		}
+
+		count := strings.Count(fe.newContent, e.Search)
+		if count == 0 {
+			return "", fmt.Errorf("search block not found in %s", e.Path)
+		}
+		if count > 1 {
+			return "", fmt.Errorf("search block appears %d times in %s; must be unique", count, e.Path)
+		}
+		fe.newContent = strings.Replace(fe.newContent, e.Search, e.Replace, 1)
+	}
+
+	var backedUp []string
+	for _, safe := range fileOrder {
+		snapshot.Backup(safe) //nolint:errcheck
+		backedUp = append(backedUp, safe)
+	}
+
+	var formatters map[string]config.FormatterConfig
+	if t.Config != nil {
+		formatters = t.Config.Formatters
+	}
+
+	for _, safe := range fileOrder {
+		fe := byFile[safe]
+		if fe.newContent == fe.origContent {
+			continue
+		}
+		if err := os.WriteFile(safe, []byte(fe.newContent), 0644); err != nil {
+			for _, bu := range backedUp {
+				_ = snapshot.Restore(bu)
+			}
+			return "", fmt.Errorf("failed to write %s: %w", fe.safe, err)
+		}
+		FormatAfterWrite(safe, formatters)
+	}
+
+	return fmt.Sprintf("Successfully performed %d edits across %d file(s)", len(params.Edits), len(fileOrder)), nil
 }

@@ -41,6 +41,19 @@ func TestVisualColToRuneIdx(t *testing.T) {
 	if got := visualColToRuneIdx(wide, 4); got != 5 {
 		t.Errorf("wide col 4 (after 中) want byte 5, got %d", got)
 	}
+
+	// Tab: advances to next tab stop (width 8). "\tfoo" renders f at col 8.
+	tabbed := "\tfoo"
+	if got := visualColToRuneIdx(tabbed, 8); got != 1 {
+		t.Errorf("tab col 8 (start of foo) want byte 1, got %d", got)
+	}
+	if got := visualColToRuneIdx(tabbed, 9); got != 2 {
+		t.Errorf("tab col 9 (after f) want byte 2, got %d", got)
+	}
+	// Click inside the tab span maps to the tab itself (byte 0).
+	if got := visualColToRuneIdx(tabbed, 4); got != 0 {
+		t.Errorf("tab col 4 (inside tab) want byte 0, got %d", got)
+	}
 }
 
 func TestExtractSelectionText(t *testing.T) {

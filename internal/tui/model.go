@@ -211,10 +211,14 @@ type model struct {
 	inputHistory          []string
 	inputHistoryIndex     int
 	queuedInputs          []string
+	pendingJobMsgs        []message
 	expandedToolOutputs   map[int]bool
 	toolOutputRegions     []toolOutputRegion
 	dotFrame              int
 	sel                   selectionState
+	detail                detailStack
+	agentStripBlocks      []agentStripBlock
+	agentStripRow0        int
 	streamStartedAt       time.Time
 	streamEndedAt         time.Time
 	streamWasInterrupted  bool
@@ -223,6 +227,7 @@ type model struct {
 	rawTranscriptLines    []string
 	filesSel              selectionState
 	inputSel              selectionState
+	gitSel                selectionState
 	rawInputLines         []string
 	compactCh             chan agent.CompactResult
 	compactStartCh        chan struct{}
@@ -510,7 +515,11 @@ func newModel(sid string, cont bool, yolo bool) model {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh))
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh)}
+	if m.agent != nil {
+		cmds = append(cmds, listenJobs(m.agent))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -546,6 +555,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if msg.Button == tea.MouseWheelDown {
 				m.files.preview.ScrollDown(scrollSpeed)
+				return m, nil
+			}
+		}
+		if m.activeTab == tabGit {
+			if msg.Button == tea.MouseWheelUp {
+				m.git.diff.ScrollUp(scrollSpeed)
+				return m, nil
+			}
+			if msg.Button == tea.MouseWheelDown {
+				m.git.diff.ScrollDown(scrollSpeed)
 				return m, nil
 			}
 		}
@@ -675,6 +694,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case filesPreviewMsg:
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg, m.width, m.height)
+		m.filesSel = selectionState{}
 		return m, cmd
 	case filesAddToContextMsg:
 		label := ""
@@ -727,9 +747,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Google Login successful! Token received."})
 			os.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", msg.token)
 			if m.config != nil && m.config.Model != "" {
+				if m.agent != nil {
+					m.agent.Shutdown()
+				}
 				client := agent.NewClient(m.config, m.config.Model)
 				m.agent = agent.NewAgent(client, m.getInitialTools(), m.config)
 				m.wireCompactCallbacks()
+				return m, listenJobs(m.agent)
 			}
 		}
 		m.renderTranscript()
@@ -793,17 +817,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.saveSession()
 		if len(msg) > 0 && (msg[len(msg)-1].Role == "tool" || (msg[len(msg)-1].Role == "assistant" && len(msg[len(msg)-1].ToolCalls) > 0)) {
 			stop := false
-			last := msg[len(msg)-1]
-			if last.Role == "assistant" {
-				for _, tc := range last.ToolCalls {
-					if tc.Function.Name == "question" {
-						stop = true
-						break
-					}
+			for _, am := range msg {
+				if am.Role == "tool" && strings.HasPrefix(am.Content, "PERMISSION_ASK:") {
+					stop = true
+					break
 				}
 			}
-			if last.Role == "tool" && strings.HasPrefix(last.Content, "PERMISSION_ASK:") {
-				stop = true
+			if !stop {
+				last := msg[len(msg)-1]
+				if last.Role == "assistant" {
+					for _, tc := range last.ToolCalls {
+						if tc.Function.Name == "question" {
+							stop = true
+							break
+						}
+					}
+				}
 			}
 			if !stop {
 				return m, m.askAgent()
@@ -817,8 +846,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
 	case dotTickMsg:
-		if m.streaming || m.lastActivity.LLMRunning || m.compacting {
+		if m.streaming || m.lastActivity.LLMRunning || m.compacting || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
 			m.dotFrame = (m.dotFrame + 1) % 4
+			// Refresh live detail view content.
+			if top, ok := m.detail.top(); ok && m.agent != nil {
+				switch top.kind {
+				case detailAgentRun:
+					if run, ok2 := m.agent.Runs().Get(top.runID); ok2 {
+						m.detail[len(m.detail)-1].vp.SetContent(renderRunTranscript(run))
+					}
+				case detailProcessList:
+					if m.agent.Procs() != nil {
+						m.detail[len(m.detail)-1].vp.SetContent(renderProcessList(m.agent.Procs()))
+					}
+				case detailProcessLog:
+					if m.agent.Procs() != nil {
+						m.detail[len(m.detail)-1].vp.SetContent(renderProcessLog(m.agent.Procs(), top.procID))
+					}
+				}
+			}
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
 	case streamStartedMsg:
@@ -846,6 +892,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.agent != nil {
 			return m, listenActivity(m.agent.Activity())
 		}
+	case jobCompletedMsg:
+		ev := msg.ev
+		var header string
+		if ev.Kind == "agent" {
+			header = fmt.Sprintf("[Background agent %s (%s) %s]", ev.ID, ev.Name, ev.Status)
+		} else {
+			header = fmt.Sprintf("[Background process %s %s]", ev.ID, ev.Status)
+		}
+		body := header + "\n" + ev.Result
+		injected := message{
+			role: roleUser,
+			text: body,
+			raw:  &agent.Message{Role: "user", Content: body},
+		}
+		if m.streaming {
+			m.pendingJobMsgs = append(m.pendingJobMsgs, injected)
+		} else {
+			m.messages = append(m.messages, message{
+				role:      roleAssistant,
+				text:      hintStyle.Render("↩ " + header + " — resuming"),
+				transient: true,
+			})
+			m.messages = append(m.messages, injected)
+			m.renderTranscript()
+			m.viewport.GotoBottom()
+			cmd := m.askAgent()
+			if m.agent != nil {
+				return m, tea.Batch(cmd, listenJobs(m.agent))
+			}
+			return m, cmd
+		}
+		if m.agent != nil {
+			return m, listenJobs(m.agent)
+		}
+		return m, nil
 	case streamMsgEvent:
 		m.appendAgentMessage(msg.msg)
 		if m.activeTab != tabChat {
@@ -883,6 +964,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.GotoBottom()
 		} else {
 			m.lastRetryableLLMErr = ""
+			if len(m.pendingJobMsgs) > 0 && m.agent != nil {
+				m.messages = append(m.messages, message{
+					role:      roleAssistant,
+					text:      hintStyle.Render("↩ background job(s) completed — resuming"),
+					transient: true,
+				})
+				m.messages = append(m.messages, m.pendingJobMsgs...)
+				m.pendingJobMsgs = nil
+				m.renderTranscript()
+				m.viewport.GotoBottom()
+				return m, m.askAgent()
+			}
 			if len(m.queuedInputs) > 0 && m.agent != nil {
 				text := m.queuedInputs[0]
 				m.queuedInputs = m.queuedInputs[1:]
@@ -1124,6 +1217,9 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			return true, newM, c
 		case "q":
 			m.saveSession()
+			if m.agent != nil {
+				m.agent.Shutdown()
+			}
 			return true, m, tea.Quit
 		}
 		return true, m, nil
@@ -1151,7 +1247,24 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 	}
 
+	// Route j/k/scroll inside a detail view before normal chat keys.
+	if !m.detail.empty() {
+		switch keyStr {
+		case "j", "down":
+			m.detail[len(m.detail)-1].vp.ScrollDown(m.scrollSpeed)
+			return m, nil
+		case "k", "up":
+			m.detail[len(m.detail)-1].vp.ScrollUp(m.scrollSpeed)
+			return m, nil
+		case "esc":
+			return m.handleEscKey()
+		}
+	}
+
 	switch keyStr {
+	case "ctrl+g":
+		m.openProcessList()
+		return m, nil
 	case "ctrl+p":
 		m.showPalette = !m.showPalette
 		m.paletteInput = ""
@@ -1187,7 +1300,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 		return m, nil
 	case "ctrl+t":
-		if agent.ModelSupportsThinking(m.config.Model) {
+		if m.config != nil && agent.ModelSupportsThinking(m.config.Model) {
 			m.thinkingLevelIdx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
 			m.config.ThinkingBudget = thinkingBudgetLevels[m.thinkingLevelIdx]
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
@@ -1225,6 +1338,9 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 		if m.ctrlCPressed {
 			m.saveSession()
+			if m.agent != nil {
+				m.agent.Shutdown()
+			}
 			return m, tea.Quit
 		}
 		m.ctrlCPressed = true
@@ -1369,6 +1485,10 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if !m.detail.empty() {
+		m.detail.pop()
+		return m, nil
+	}
 	if !m.escPressed {
 		m.escPressed = true
 		m.escPressTime = time.Now()
@@ -1425,15 +1545,83 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 	if pressed && m.activeTab == tabGit {
 		panelW := m.panelWidth()
-		diffPaneRight := panelW - 1
-		scrollX := diffPaneRight - 1
 		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
-		gitTrackTop := gitHeaderH + 1
+		gitBodyTop := gitHeaderH + 1 // +1 for top border of panes
+		sectW := panelW * 20 / 100
+		filesW := panelW * 30 / 100
+		sectRight := sectW
+		filesRight := sectRight + filesW
+		diffRight := panelW - 1
+		scrollX := diffRight - 1
+
+		// scrollbar for diff panel
 		gitTrackH := m.git.diff.Height()
-		if mouse.X == scrollX && mouse.Y >= gitTrackTop && mouse.Y < gitTrackTop+gitTrackH {
+		if mouse.X == scrollX && mouse.Y >= gitBodyTop && mouse.Y < gitBodyTop+gitTrackH {
 			m.scrollbarDrag = scrollbarDragGitDiff
-			scrollbarSetOffset(&m.git.diff, mouse.Y, gitTrackTop, gitTrackH)
+			scrollbarSetOffset(&m.git.diff, mouse.Y, gitBodyTop, gitTrackH)
 			return m, nil, true
+		}
+
+		// section panel click
+		if mouse.X >= 0 && mouse.X < sectRight && mouse.Y >= gitBodyTop {
+			row := mouse.Y - gitBodyTop - 1 // -1 for border
+			if row >= 0 && row < 4 {
+				m.git.section = gitSection(row)
+				m.git.panel = gitPanelSections
+				m.git.resetCursors()
+				m.git.loadDiff()
+			}
+			return m, nil, true
+		}
+
+		// file list panel click
+		if mouse.X >= sectRight && mouse.X < filesRight && mouse.Y >= gitBodyTop {
+			row := mouse.Y - gitBodyTop - 1 // -1 for border
+			if row >= 0 {
+				m.git.panel = gitPanelFiles
+				switch m.git.section {
+				case gitSectionChanges:
+					files := m.git.currentFileList()
+					if row < len(files) {
+						m.git.filesCursor = row
+						m.git.loadDiff()
+					}
+				case gitSectionLog:
+					if row < len(m.git.commits) {
+						m.git.commitCursor = row
+						m.git.loadDiff()
+					}
+				case gitSectionStash:
+					if row < len(m.git.stashes) {
+						m.git.stashCursor = row
+						m.git.loadDiff()
+					}
+				case gitSectionBranches:
+					if row < len(m.git.branches) {
+						m.git.branchCursor = row
+						m.git.loadDiff()
+					}
+				}
+			}
+			return m, nil, true
+		}
+
+		// diff panel text selection
+		diffLeft := filesRight + 1 // after files pane border
+		if mouse.X >= diffLeft && mouse.X < scrollX && mouse.Y >= gitBodyTop {
+			contentLine := (mouse.Y - gitBodyTop - 1) + m.git.diff.YOffset()
+			if contentLine >= 0 && contentLine < len(m.git.diffRawLines) {
+				m.git.panel = gitPanelDiff
+				m.gitSel = selectionState{
+					dragging:  true,
+					startLine: contentLine,
+					startCol:  mouse.X - diffLeft,
+					endLine:   contentLine,
+					endCol:    mouse.X - diffLeft,
+				}
+				m.git.applyDiffSelectionHighlight(m.gitSel.startLine, m.gitSel.startCol, m.gitSel.endLine, m.gitSel.endCol)
+				return m, nil, true
+			}
 		}
 	}
 	if pressed && m.activeTab == tabFiles {
@@ -1495,8 +1683,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			if m.filesSel.active {
 				text := m.files.extractSelectionText(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
 				_ = clipboard.WriteAll(text)
-				m.filesSel = selectionState{}
-				m.files.clearSelectionHighlight()
+				// keep selection + highlight after release so it persists
+				// until a new selection, file change, or add-to-context
 				return m, nil, true
 			}
 			m.filesSel = selectionState{}
@@ -1511,6 +1699,18 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				return m, nil, true
 			}
 			m.inputSel = selectionState{}
+		}
+		if m.gitSel.dragging {
+			m.gitSel.dragging = false
+			if m.gitSel.active {
+				text := extractSelectionText(m.git.diffRawLines, m.gitSel.startLine, m.gitSel.startCol, m.gitSel.endLine, m.gitSel.endCol)
+				_ = clipboard.WriteAll(text)
+				m.gitSel = selectionState{}
+				m.git.clearDiffSelectionHighlight()
+				return m, nil, true
+			}
+			m.gitSel = selectionState{}
+			m.git.clearDiffSelectionHighlight()
 		}
 	}
 
@@ -1682,6 +1882,31 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 
+	if m.gitSel.dragging {
+		panelW := m.panelWidth()
+		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
+		gitBodyTop := gitHeaderH + 1
+		sectW := panelW * 20 / 100
+		filesW := panelW * 30 / 100
+		diffLeft := sectW + filesW + 1
+		contentLine := (mouse.Y - gitBodyTop - 1) + m.git.diff.YOffset()
+		if contentLine < 0 {
+			contentLine = 0
+		}
+		if contentLine >= len(m.git.diffRawLines) && len(m.git.diffRawLines) > 0 {
+			contentLine = len(m.git.diffRawLines) - 1
+		}
+		col := mouse.X - diffLeft
+		if col < 0 {
+			col = 0
+		}
+		m.gitSel.endLine = contentLine
+		m.gitSel.endCol = col
+		m.gitSel.active = m.gitSel.startLine != m.gitSel.endLine || m.gitSel.startCol != m.gitSel.endCol
+		m.git.applyDiffSelectionHighlight(m.gitSel.startLine, m.gitSel.startCol, m.gitSel.endLine, m.gitSel.endCol)
+		return m, nil, true
+	}
+
 	if tab, ok := m.tabForClick(mouse); ok {
 		m.activeTab = tab
 		if tab == tabChat {
@@ -1797,13 +2022,13 @@ func (m *model) handleMCPAuth(serverName string) error {
 	return auth.MCPAuthFlow(serverName, oauth.AuthorizationURL, oauth.TokenURL, oauth.ClientID, oauth.Scopes)
 }
 
-func (m *model) rebuildAgentWithExternalTools() {
+func (m *model) rebuildAgentWithExternalTools() tea.Cmd {
 	if m.config == nil || m.config.Model == "" {
-		return
+		return nil
 	}
 	client := agent.NewClient(m.config, m.config.Model)
 	if client == nil {
-		return
+		return nil
 	}
 	next := agent.NewAgent(client, m.getInitialTools(), m.config)
 	if m.agent != nil {
@@ -1813,8 +2038,12 @@ func (m *model) rebuildAgentWithExternalTools() {
 		}
 	}
 	next.LoadExternalTools(m.config)
+	if m.agent != nil {
+		m.agent.Shutdown()
+	}
 	m.agent = next
 	m.wireCompactCallbacks()
+	return listenJobs(m.agent)
 }
 
 func (m model) renderMCPList() string {
@@ -1928,10 +2157,10 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 	}
 }
 
-func (m *model) handleModelCmd(args []string) {
+func (m *model) handleModelCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
 		m.openModelPicker()
-		return
+		return nil
 	}
 	if len(args) > 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", args[0])})
@@ -1946,6 +2175,9 @@ func (m *model) handleModelCmd(args []string) {
 				tools = m.agent.GetTools()
 			} else {
 				tools = m.getInitialTools()
+			}
+			if m.agent != nil {
+				m.agent.Shutdown()
 			}
 			m.agent = agent.NewAgent(client, tools, m.config)
 			m.agent.RestoreMCPToolNames(mcpNames)
@@ -1964,8 +2196,10 @@ func (m *model) handleModelCmd(args []string) {
 					log.Printf("save recent model: %v", err)
 				}
 			}
+			return listenJobs(m.agent)
 		}
 	}
+	return nil
 }
 
 func (m *model) handleThinkingCmd(args []string) {
@@ -2130,6 +2364,9 @@ func (m *model) handleExportCmd(args []string) {
 }
 
 func (m *model) handleNewCmd(args []string) {
+	if m.agent != nil {
+		m.agent.Shutdown()
+	}
 	m.saveSession()
 	m.messages = []message{}
 	m.sessionID = time.Now().Format("2006-01-02-150405")
@@ -2287,8 +2524,8 @@ func (m *model) handleThemesCmd(args []string) {
 }
 
 // handleModelsCmd is an alias for handleModelCmd; see commandSpecs for the /model ↔ /models aliasing.
-func (m *model) handleModelsCmd(args []string) {
-	m.handleModelCmd(args)
+func (m *model) handleModelsCmd(args []string) tea.Cmd {
+	return m.handleModelCmd(args)
 }
 
 func (m *model) handleDetailsCmd(args []string) {
@@ -3169,6 +3406,18 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) bool {
 	return true
 }
 
+type jobCompletedMsg struct {
+	ev agent.JobEvent
+}
+
+// listenJobs blocks on the agent's job-events channel and re-arms itself.
+func listenJobs(a *agent.Agent) tea.Cmd {
+	return func() tea.Msg {
+		ev := <-a.JobEvents()
+		return jobCompletedMsg{ev: ev}
+	}
+}
+
 func listenActivity(tracker *agent.ActivityTracker) tea.Cmd {
 	return func() tea.Msg {
 		snap := <-tracker.Notify()
@@ -3189,12 +3438,145 @@ func (m model) renderActivityRow() string {
 		parts = append(parts, "⟳ LLM")
 	}
 	if len(snap.ActiveTools) > 0 {
-		parts = append(parts, "⚙ "+strings.Join(snap.ActiveTools, ", "))
+		toolParts := make([]string, len(snap.ActiveTools))
+		for i, ta := range snap.ActiveTools {
+			elapsed := time.Since(ta.StartedAt).Round(time.Second)
+			toolParts[i] = fmt.Sprintf("%s [%s · %s]", ta.Name, ta.StartedAt.Format("15:04:05"), formatDuration(elapsed))
+		}
+		parts = append(parts, "⚙ "+strings.Join(toolParts, ", "))
 	}
 	if len(snap.ActiveAgents) > 0 {
 		parts = append(parts, "🤖 "+strings.Join(snap.ActiveAgents, ", "))
 	}
 	return m.styles.Status.Width(m.statusContentWidth()).Render(" " + strings.Join(parts, "  │  "))
+}
+
+// jobCounts returns the number of running background processes and agent runs.
+func (m model) jobCounts() (procs, agents int) {
+	if m.agent == nil {
+		return 0, 0
+	}
+	if m.agent.Procs() != nil {
+		procs = m.agent.Procs().RunningCount()
+	}
+	if m.agent.Runs() != nil {
+		agents = m.agent.Runs().RunningCount()
+	}
+	return procs, agents
+}
+
+// renderJobCounts renders the "▣ N bg · M agents" segment, or "" when idle.
+func (m model) renderJobCounts() string {
+	procs, agents := m.jobCounts()
+	if procs == 0 && agents == 0 {
+		return ""
+	}
+	return fmt.Sprintf("▣ %d bg · %d agents", procs, agents)
+}
+
+var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func truncateToWidth(s string, w int) string {
+	if w < 1 {
+		return ""
+	}
+	r := []rune(s)
+	if len(r) <= w {
+		return s
+	}
+	return string(r[:w-1]) + "…"
+}
+
+// renderAgentStrip renders one block per running agent run: a header line plus
+// the last 2 transcript lines. Returns the rendered string and the per-block
+// row ranges (relative to the strip's first row).
+func (m model) renderAgentStrip() (string, []agentStripBlock) {
+	if m.agent == nil || m.agent.Runs() == nil {
+		return "", nil
+	}
+	runs := m.agent.Runs().Snapshot()
+	if len(runs) == 0 {
+		return "", nil
+	}
+	width := m.panelWidth() - 2
+	var b strings.Builder
+	var blocks []agentStripBlock
+	row := 0
+	frame := spinnerFrames[m.dotFrame%len(spinnerFrames)]
+	for _, ri := range runs {
+		start := row
+		status := string(ri.Status)
+		icon := frame
+		if ri.Status == agent.RunDone {
+			icon = "✓"
+		} else if ri.Status == agent.RunFailed {
+			icon = "✗"
+		}
+		head := fmt.Sprintf("▸ %-10s %s %s", ri.Name, icon, status)
+		b.WriteString(truncateToWidth(head, width) + "\n")
+		row++
+		for _, ln := range ri.LastLines(2) {
+			b.WriteString(hintStyle.Render("  │ "+truncateToWidth(ln, width-4)) + "\n")
+			row++
+		}
+		blocks = append(blocks, agentStripBlock{runID: ri.ID, rowStart: start, rowEnd: row})
+	}
+	return strings.TrimRight(b.String(), "\n"), blocks
+}
+
+// openAgentDetail pushes a drill-in view for the given run id.
+func (m *model) openAgentDetail(runID string) {
+	if m.modalOpen() || m.agent == nil || m.agent.Runs() == nil {
+		return
+	}
+	run, ok := m.agent.Runs().Get(runID)
+	if !ok {
+		return
+	}
+	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
+	vp.SetContent(renderRunTranscript(run))
+	m.detail.push(detailView{kind: detailAgentRun, runID: runID, vp: vp})
+}
+
+// openProcessList pushes a process list drill-in view.
+func (m *model) openProcessList() {
+	if m.modalOpen() || m.agent == nil || m.agent.Procs() == nil {
+		return
+	}
+	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
+	vp.SetContent(renderProcessList(m.agent.Procs()))
+	m.detail.push(detailView{kind: detailProcessList, vp: vp})
+}
+
+// openProcessLog pushes a process log drill-in view.
+func (m *model) openProcessLog(procID string) {
+	if m.modalOpen() || m.agent == nil || m.agent.Procs() == nil {
+		return
+	}
+	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
+	vp.SetContent(renderProcessLog(m.agent.Procs(), procID))
+	m.detail.push(detailView{kind: detailProcessLog, procID: procID, vp: vp})
+}
+
+// modalOpen reports whether any modal overlay is currently shown.
+func (m model) modalOpen() bool {
+	return m.showPicker || m.showConnect || m.showPalette || m.showPermDialog
+}
+
+// renderDetailView renders the top-of-stack detail view.
+func (m model) renderDetailView(d detailView) string {
+	var title string
+	switch d.kind {
+	case detailAgentRun:
+		title = "Agent " + d.runID
+	case detailProcessList:
+		title = "Background processes"
+	case detailProcessLog:
+		title = "Process " + d.procID
+	}
+	header := hintStyle.Render("◆ "+title) + hintStyle.Render("  esc: back · j/k: scroll")
+	body := d.vp.View()
+	return lipgloss.JoinVertical(lipgloss.Left, header, body)
 }
 
 func (m model) renderAssistantText(text string) string {
@@ -3284,6 +3666,11 @@ func (m model) renderContent() string {
 		return m.renderPalette()
 	}
 
+	// Drill-in detail view takes precedence over tab content (but not modals).
+	if top, ok := m.detail.top(); ok {
+		return m.renderDetailView(top)
+	}
+
 	// Route non-modal views by active tab
 	switch m.activeTab {
 	case tabFiles:
@@ -3341,6 +3728,9 @@ func (m model) renderContent() string {
 	if row := m.renderStoppedIndicator(); row != "" {
 		leftParts = append(leftParts, row)
 	}
+	if strip, _ := m.renderAgentStrip(); strip != "" {
+		leftParts = append(leftParts, strip)
+	}
 	leftParts = append(leftParts, inputArea)
 	if row := m.renderActivityRow(); row != "" {
 		leftParts = append(leftParts, row)
@@ -3371,7 +3761,7 @@ func (m *model) renderStatus() string {
 	case tabLog:
 		suffix = " | j/k: scroll | c: clear | alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
-		if agent.ModelSupportsThinking(m.config.Model) {
+		if m.config != nil && agent.ModelSupportsThinking(m.config.Model) {
 			suffix = fmt.Sprintf(" | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry | ctrl+t: thinking[%s]", thinkingBudgetLabels[m.thinkingLevelIdx])
 		} else {
 			suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
@@ -3396,8 +3786,12 @@ func (m *model) renderStatus() string {
 		dots := []string{".  ", ".. ", "...", " ..", "  ."}
 		compactState = fmt.Sprintf(" | 📦 compacting%s", dots[m.dotFrame%len(dots)])
 	}
+	jobState := ""
+	if jc := m.renderJobCounts(); jc != "" {
+		jobState = " | " + jc
+	}
 	width := m.statusContentWidth()
-	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s | Session: %s%s%s%s", llmState, agentName, m.currentModelName(), m.sessionID, permissionMode, compactState, suffix)
+	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s | Session: %s%s%s%s%s", llmState, agentName, m.currentModelName(), m.sessionID, permissionMode, compactState, jobState, suffix)
 	return m.styles.Status.Width(width).Render(ansi.Truncate(text, width, "..."))
 }
 
@@ -3607,6 +4001,15 @@ func modelContextWindow(modelName string) (int64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	return fmt.Sprintf("%dm%ds", m, s)
 }
 
 func formatPercent(used, total int64) string {

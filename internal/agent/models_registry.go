@@ -145,6 +145,12 @@ func loadRegistry() map[string]providerEntry {
 	return remote
 }
 
+// PreloadRegistry fetches the models.dev registry in the background so it is
+// warm before the first call to ModelWindow or ProviderModels.
+func PreloadRegistry() {
+	go loadRegistry()
+}
+
 // ProviderModels returns model IDs for a provider from models.dev, falling
 // back to a small hardcoded list on failure.
 func ProviderModels(provider string) []string {

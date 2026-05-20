@@ -28,15 +28,16 @@ var llmHTTPClient = &http.Client{Timeout: llmRequestTimeout}
 var llmRetryBaseDelay = 500 * time.Millisecond
 
 type Message struct {
-	Role             string      `json:"role"`
-	Content          string      `json:"content"`
-	Images           []Image     `json:"images,omitempty"`
-	ReasoningContent string      `json:"reasoning_content,omitempty"`
-	ToolCalls        []ToolCall  `json:"tool_calls,omitempty"`
-	ToolID           string      `json:"tool_call_id,omitempty"`
-	Model            string      `json:"-"`
-	Usage            *TokenUsage `json:"-"`
-	Spend            *float64    `json:"-"`
+	Role                string                   `json:"role"`
+	Content             string                   `json:"content"`
+	Images              []Image                  `json:"images,omitempty"`
+	ReasoningContent    string                   `json:"reasoning_content,omitempty"`
+	ToolCalls           []ToolCall               `json:"tool_calls,omitempty"`
+	ToolID              string                   `json:"tool_call_id,omitempty"`
+	OpenAIResponseItems []map[string]interface{} `json:"openai_response_items,omitempty"`
+	Model               string                   `json:"-"`
+	Usage               *TokenUsage              `json:"-"`
+	Spend               *float64                 `json:"-"`
 }
 
 type Image struct {
@@ -427,6 +428,14 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 			instructions = append(instructions, m.Content)
 			continue
 		}
+		if m.Role == "tool" {
+			input = append(input, map[string]interface{}{
+				"type":    "function_call_output",
+				"call_id": m.ToolID,
+				"output":  m.Content,
+			})
+			continue
+		}
 		content := interface{}(m.Content)
 		if m.Role == "user" && len(m.Images) > 0 {
 			parts := make([]map[string]interface{}, 0, len(m.Images)+1)
@@ -444,8 +453,27 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 			}
 			content = parts
 		}
-		item := map[string]interface{}{"role": m.Role, "content": content}
-		input = append(input, item)
+		// Skip role items with no content; assistant tool-call-only turns are
+		// emitted below as stored Responses output items or function_call items.
+		if m.Content != "" || (m.Role == "user" && len(m.Images) > 0) {
+			input = append(input, map[string]interface{}{"type": "message", "role": m.Role, "content": content})
+		}
+		if m.Role == "assistant" {
+			if len(m.OpenAIResponseItems) > 0 {
+				for _, item := range m.OpenAIResponseItems {
+					input = append(input, item)
+				}
+				continue
+			}
+			for _, tc := range m.ToolCalls {
+				input = append(input, map[string]interface{}{
+					"type":      "function_call",
+					"call_id":   tc.ID,
+					"name":      tc.Function.Name,
+					"arguments": tc.Function.Arguments,
+				})
+			}
+		}
 	}
 
 	payload := map[string]interface{}{
@@ -454,6 +482,26 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		"input":        input,
 		"store":        false,
 		"stream":       true,
+		"include":      []string{"reasoning.encrypted_content"},
+	}
+
+	if len(tools) > 0 {
+		respTools := make([]map[string]interface{}, 0, len(tools))
+		for _, t := range tools {
+			fn := t
+			if t["type"] == "function" {
+				if f, ok := t["function"].(map[string]interface{}); ok {
+					fn = f
+				}
+			}
+			respTools = append(respTools, map[string]interface{}{
+				"type":        "function",
+				"name":        fn["name"],
+				"description": fn["description"],
+				"parameters":  fn["parameters"],
+			})
+		}
+		payload["tools"] = respTools
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -487,7 +535,10 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	var fullText string
 	var resultModel string
 	var lastEvent string
+	var toolCalls []ToolCall
+	var responseItems []map[string]interface{}
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "event: ") {
@@ -505,10 +556,11 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 			break
 		}
 		var payload struct {
-			Type  string `json:"type"`
-			Model string `json:"model"`
-			Delta string `json:"delta"`
-			Text  string `json:"text"`
+			Type  string                 `json:"type"`
+			Model string                 `json:"model"`
+			Delta string                 `json:"delta"`
+			Text  string                 `json:"text"`
+			Item  map[string]interface{} `json:"item"`
 		}
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
 			continue
@@ -524,7 +576,35 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		case "response.output_text.delta":
 			fullText += payload.Delta
 		case "response.output_text.done":
-			fullText += payload.Text
+			// done carries the full part text; only use it when no deltas
+			// streamed, otherwise the body would be appended twice.
+			if fullText == "" {
+				fullText = payload.Text
+			}
+		case "response.output_item.done":
+			itemType, _ := payload.Item["type"].(string)
+			if itemType == "reasoning" || itemType == "function_call" {
+				responseItems = append(responseItems, payload.Item)
+			}
+			if itemType == "function_call" {
+				id, _ := payload.Item["call_id"].(string)
+				if id == "" {
+					id, _ = payload.Item["id"].(string)
+				}
+				name, _ := payload.Item["name"].(string)
+				arguments, _ := payload.Item["arguments"].(string)
+				toolCalls = append(toolCalls, ToolCall{
+					ID:   id,
+					Type: "function",
+					Function: struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					}{
+						Name:      name,
+						Arguments: arguments,
+					},
+				})
+			}
 		case "response.completed":
 			if payload.Model != "" {
 				resultModel = payload.Model
@@ -532,14 +612,20 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		}
 	}
 
-	if fullText == "" {
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("openai responses stream error: %w", err)
+	}
+
+	if fullText == "" && len(toolCalls) == 0 {
 		return nil, fmt.Errorf("no response from openai responses api")
 	}
 
 	msg := &Message{
-		Role:    "assistant",
-		Content: fullText,
-		Model:   resultModel,
+		Role:                "assistant",
+		Content:             fullText,
+		Model:               resultModel,
+		ToolCalls:           toolCalls,
+		OpenAIResponseItems: responseItems,
 	}
 	if msg.Model == "" {
 		msg.Model = c.Model
@@ -697,7 +783,7 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 
 	if c.ThinkingBudget > 0 {
 		payload["thinking"] = map[string]interface{}{
-			"type":         "enabled",
+			"type":          "enabled",
 			"budget_tokens": c.ThinkingBudget,
 		}
 	}

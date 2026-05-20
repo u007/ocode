@@ -247,6 +247,7 @@ func List() ([]Session, error) {
 			if err == nil {
 				var s Session
 				if err := json.Unmarshal(data, &s); err == nil {
+					s.Messages = removeIncompleteToolRequests(s.Messages)
 					sessions = append(sessions, s)
 				}
 			}

@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+// Token estimation constants. The base heuristic is ~4 chars per token for regular text.
+// Extended thinking / reasoning content is billed separately and costs ~2-3x more per
+// character due to different tokenization and special handling by the LLM provider.
+// Message framing overhead (role markers, JSON structure) adds ~50-100 tokens per message.
+const (
+	charsPerToken                = 4
+	reasoningCharsPerToken       = 2     // Reasoning is more expensive; use ~2 chars per token
+	framingOverheadPerMessage    = 75    // ~75 tokens for role, content key, JSON overhead
+	messageStructureCharOverhead = 300   // ~300 chars worth of overhead per message for structure
+)
+
 // CompactResult describes the outcome of a compaction pass.
 //
 // When OK is true, the caller should splice its message list by replacing
@@ -23,14 +34,25 @@ type CompactResult struct {
 	Err         error
 }
 
-// tokenEstimate is a coarse heuristic: ~4 chars per token. Used only when
-// real Usage data is unavailable for the most recent response.
+// tokenEstimate is a coarse heuristic used when real Usage data is unavailable.
+// It properly separates regular text (~4 chars/token) from extended thinking
+// content (~2 chars/token) which is billed at a higher rate. Includes message
+// framing overhead. WARNING: This is unreliable and can be off by 20-40%;
+// prefer real Usage data from the API when available.
 func tokenEstimate(m Message) int {
-	chars := len(m.Content) + len(m.ReasoningContent)
+	regularChars := len(m.Content)
+	reasoningChars := len(m.ReasoningContent)
+
 	for _, tc := range m.ToolCalls {
-		chars += len(tc.Function.Name) + len(tc.Function.Arguments)
+		regularChars += len(tc.Function.Name) + len(tc.Function.Arguments)
 	}
-	return (chars + 3) / 4
+
+	// Calculate tokens for each content type with appropriate multiplier
+	regularTokens := (regularChars + charsPerToken - 1) / charsPerToken
+	reasoningTokens := (reasoningChars + reasoningCharsPerToken - 1) / reasoningCharsPerToken
+
+	// Add message framing overhead
+	return regularTokens + reasoningTokens + framingOverheadPerMessage
 }
 
 func messagesTokens(msgs []Message) int {
@@ -38,6 +60,8 @@ func messagesTokens(msgs []Message) int {
 	for _, m := range msgs {
 		n += tokenEstimate(m)
 	}
+	// Add aggregate overhead for message structure and separators
+	n += len(msgs) * (messageStructureCharOverhead / charsPerToken)
 	return n
 }
 
@@ -123,7 +147,6 @@ func buildSummaryPrompt(middle []Message, maxInputTokens int) (string, int) {
 	if maxInputTokens <= 0 {
 		maxInputTokens = 50000
 	}
-	const charsPerToken = 4
 	maxChars := maxInputTokens * charsPerToken
 
 	// Pre-render each middle message as a transcript fragment.
@@ -240,8 +263,12 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 }
 
 // shouldCompact decides whether the current message list warrants compaction.
-// Uses real prompt tokens from the most recent Usage when available; falls
-// back to the per-message character heuristic otherwise.
+// Prefers real Usage.PromptTokens from API responses; falls back to character
+// estimation only when Usage is completely unavailable. Uses the most recent
+// Usage value as it represents the cumulative token count at that point in the
+// conversation. Falls back to per-message character heuristic only if Usage is
+// completely unavailable; this fallback is unreliable and 20-40% inaccurate,
+// especially for extended thinking content.
 func shouldCompact(msgs []Message, cfg compactRuntime) (bool, int) {
 	if !cfg.Enabled {
 		return false, 0
@@ -249,7 +276,8 @@ func shouldCompact(msgs []Message, cfg compactRuntime) (bool, int) {
 	if len(msgs) < cfg.MinMessages {
 		return false, 0
 	}
-	// Find latest Usage by walking backward.
+
+	// Find most recent Usage.PromptTokens from any message (usually from assistant responses)
 	usedTokens := 0
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Usage != nil && msgs[i].Usage.PromptTokens != nil {
@@ -257,14 +285,21 @@ func shouldCompact(msgs []Message, cfg compactRuntime) (bool, int) {
 			break
 		}
 	}
+
+	// Only fall back to character heuristic if no Usage data is available at all
 	if usedTokens == 0 {
 		usedTokens = messagesTokens(msgs)
+		// Apply 15% safety margin to account for reasoning content and message
+		// framing overhead that may be underestimated in the heuristic
+		usedTokens = int(float64(usedTokens) * 1.15)
 	}
+
 	threshold := cfg.WindowTokens
 	if threshold <= 0 {
-		// No model window known: fall back to a generous default so we still
-		// compact eventually rather than never.
-		threshold = 128_000
+		// No model window known: fall back to a conservative default so we compact
+		// before hitting real limits. Allows compaction to trigger sooner when window
+		// is unknown.
+		threshold = 100_000
 	}
 	limit := int(float64(threshold) * cfg.TokenThreshold)
 	return usedTokens >= limit, usedTokens

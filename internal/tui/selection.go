@@ -21,8 +21,12 @@ func stripANSI(s string) string {
 	return ansi.Strip(s)
 }
 
+// tabWidth is the terminal tab stop used when mapping screen columns.
+const tabWidth = 8
+
 // visualColToRuneIdx converts a 0-based visual column offset in a plain-text
-// line to a byte index, accounting for wide runes (CJK, emoji).
+// line to a byte index, accounting for wide runes (CJK, emoji) and tabs
+// (which advance to the next tab stop on the terminal).
 func visualColToRuneIdx(line string, visualCol int) int {
 	col := 0
 	i := 0
@@ -32,6 +36,9 @@ func visualColToRuneIdx(line string, visualCol int) int {
 		}
 		r, size := utf8.DecodeRuneInString(line[i:])
 		w := runewidth.RuneWidth(r)
+		if r == '\t' {
+			w = tabWidth - (col % tabWidth)
+		}
 		if col+w > visualCol {
 			break
 		}

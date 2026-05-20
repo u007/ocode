@@ -48,17 +48,26 @@ type PermissionDecision struct {
 }
 
 type PermissionManager struct {
-	mode              PermissionMode
-	rules             map[string]PermissionLevel
-	patterns          []patternRule
-	bashPrefixes      map[string]PermissionLevel
-	workDir           string
-	webfetchDomains   map[string]PermissionLevel
+	mode            PermissionMode
+	rules           map[string]PermissionLevel
+	patterns        []patternRule
+	bashPrefixes    map[string]PermissionLevel
+	workDir         string
+	webfetchDomains map[string]PermissionLevel
 }
 
 type patternRule struct {
 	pattern string
 	level   PermissionLevel
+}
+
+// pathScopedTools are file tools whose decision depends on the target path
+// (workdir scope, sensitive paths). Membership must stay in sync with the
+// path-returning cases of extractPathFromArgs.
+var pathScopedTools = map[string]bool{
+	"read": true, "write": true, "edit": true, "delete": true,
+	"multiedit": true, "replace_lines": true, "glob": true, "grep": true,
+	"list": true, "lsp": true, "patch": true, "format": true,
 }
 
 func NewPermissionManager() *PermissionManager {
@@ -69,10 +78,10 @@ func NewPermissionManager() *PermissionManager {
 		bashPrefixes:    make(map[string]PermissionLevel),
 		webfetchDomains: make(map[string]PermissionLevel),
 	}
-	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question"} {
+	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite"} {
 		pm.rules[name] = PermissionAllow
 	}
-	for _, name := range []string{"write", "edit", "multi_edit", "multiedit", "replace_lines", "patch", "format"} {
+	for _, name := range []string{"write", "edit", "multiedit", "replace_lines", "patch", "format"} {
 		pm.SetRule(name, PermissionAllow)
 	}
 	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "agent", "task", "mcp_*"} {
@@ -100,18 +109,8 @@ func (pm *PermissionManager) LoadFromConfig(cfg map[string]interface{}) {
 		return
 	}
 	for k, v := range cfg {
-		s, ok := v.(string)
-		if !ok {
-			continue
-		}
-		level := PermissionLevel(s)
-		if level != PermissionAllow && level != PermissionDeny && level != PermissionAsk {
-			continue
-		}
-		if strings.Contains(k, "*") {
-			pm.patterns = append(pm.patterns, patternRule{pattern: k, level: level})
-		} else {
-			pm.rules[k] = level
+		if s, ok := v.(string); ok {
+			pm.SetRule(k, PermissionLevel(s))
 		}
 	}
 }
@@ -147,10 +146,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if isHardBlockedCommand(command) {
 			return PermissionDecision{Level: PermissionDeny}
 		}
-		prefix, ok := bashPrefix(command)
 		if pm.mode == PermissionModeYOLO {
 			return PermissionDecision{Level: PermissionAllow}
 		}
+		prefix, ok := bashPrefix(command)
 		if ok {
 			if level, exists := pm.bashPrefixes[prefix]; exists {
 				if level == PermissionAsk {
@@ -174,13 +173,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
-	// Path-scoped file tools
-	fileTools := map[string]bool{
-		"read": true, "write": true, "edit": true, "delete": true,
-		"multiedit": true, "replace_lines": true, "glob": true, "grep": true,
-		"list": true, "lsp": true, "patch": true, "format": true, "todowrite": true,
-	}
-	if fileTools[toolName] {
+	if pathScopedTools[toolName] {
 		path := extractPathFromArgs(toolName, args)
 		if path != "" {
 			// Relative paths and glob patterns (non-absolute) are implicitly within workDir
@@ -310,14 +303,12 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 		return ""
 	}
 	switch toolName {
-	case "read", "write", "delete", "edit", "multiedit", "replace_lines", "format", "lsp", "patch", "todowrite":
+	case "read", "write", "delete", "edit", "multiedit", "replace_lines", "format", "lsp", "patch", "grep":
 		return params.Path
 	case "glob", "list":
 		if params.Pattern != "" {
 			return params.Pattern
 		}
-		return params.Path
-	case "grep":
 		return params.Path
 	case "webfetch":
 		return params.URL
@@ -480,7 +471,7 @@ func validPermissionLevel(level PermissionLevel) bool {
 
 func isReadOnlyTool(name string) bool {
 	switch name {
-	case "read", "glob", "grep", "list", "lsp", "webfetch", "websearch", "skill", "question":
+	case "read", "glob", "grep", "list", "lsp", "webfetch", "websearch", "skill", "question", "todoread", "todowrite":
 		return true
 	default:
 		return false
@@ -570,9 +561,9 @@ func isHardBlockedCommand(command string) bool {
 	}
 	// Hard-block destructive and exfiltration patterns
 	blockedPatterns := []string{
-		"| bash", "| sh", "| python", "| perl",  // pipe to shell
-		"dd if=", "mkfs",                         // disk/partition write
-		"; sudo", "&& sudo", "| sudo",            // privilege escalation chains
+		"| bash", "| sh", "| python", "| perl", // pipe to shell
+		"dd if=", "mkfs", // disk/partition write
+		"; sudo", "&& sudo", "| sudo", // privilege escalation chains
 	}
 	for _, p := range blockedPatterns {
 		if strings.Contains(command, p) {
