@@ -476,6 +476,34 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		}
 	}
 
+	// Ensure every function_call has a matching function_call_output.
+	// OpenAI Responses API returns 400 if a call_id has no output.
+	outputIDs := make(map[string]bool)
+	for _, item := range input {
+		if item["type"] == "function_call_output" {
+			if id, ok := item["call_id"].(string); ok {
+				outputIDs[id] = true
+			}
+		}
+	}
+	for _, item := range input {
+		if item["type"] == "function_call" {
+			if id, ok := item["call_id"].(string); ok && !outputIDs[id] {
+				toolName := ""
+				if name, ok := item["name"].(string); ok {
+					toolName = name
+				}
+				emitDebug("API", fmt.Sprintf("auto-filling missing output for call %s (%s)", id, toolName))
+				input = append(input, map[string]interface{}{
+					"type":    "function_call_output",
+					"call_id": id,
+					"output":  "error: tool result missing",
+				})
+				outputIDs[id] = true
+			}
+		}
+	}
+
 	payload := map[string]interface{}{
 		"model":        c.Model,
 		"instructions": strings.Join(instructions, "\n\n"),

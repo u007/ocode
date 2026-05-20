@@ -352,14 +352,14 @@ func TestSlashPopupHidesForFilePath(t *testing.T) {
 	ta := textarea.New()
 	ta.SetValue("/tmp/screen.png")
 	m := model{
-		input:             ta,
-		viewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
-		width:             80,
-		height:            30,
-		ready:             true,
-		showSlashPopup:    true, // force it open
-		slashPopupItems:   []slashSuggestion{{name: "/compact", desc: "test"}},
-		slashPopupIndex:   0,
+		input:           ta,
+		viewport:        viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
+		width:           80,
+		height:          30,
+		ready:           true,
+		showSlashPopup:  true, // force it open
+		slashPopupItems: []slashSuggestion{{name: "/compact", desc: "test"}},
+		slashPopupIndex: 0,
 	}
 	m, _ = m.updateSlashPopupState()
 	if m.showSlashPopup {
@@ -367,5 +367,155 @@ func TestSlashPopupHidesForFilePath(t *testing.T) {
 	}
 	if len(m.slashPopupItems) != 0 {
 		t.Error("expected slash popup items to be cleared")
+	}
+}
+
+func TestShortcodeForPastedFilesConvertsDraggedPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "assets", "screen shot.png")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("img"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok := shortcodeForPastedFiles(path, dir)
+	if !ok {
+		t.Fatal("expected pasted file path to convert")
+	}
+	want := "[file: screen shot.png] "
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestShortcodeForPastedFilesLeavesTextAlone(t *testing.T) {
+	got, ok := shortcodeForPastedFiles("please read /tmp/not-a-real-file", t.TempDir())
+	if ok {
+		t.Fatalf("expected prose not to convert, got %q", got)
+	}
+}
+
+func TestPasteMsgConvertsDraggedPathInInput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "assets", "screen.png")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("img"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{input: textarea.New(), activeTab: tabChat, workDir: dir}
+	updated, _ := m.Update(tea.PasteMsg{Content: path})
+	got := updated.(model)
+
+	if got.input.Value() != "[file: screen.png] " {
+		t.Fatalf("expected dragged path to become shortcode, got %q", got.input.Value())
+	}
+	if got.fileShortcodePaths["[file: screen.png]"] != path {
+		t.Fatalf("expected compact shortcode to keep real path, got %#v", got.fileShortcodePaths)
+	}
+}
+
+func TestFilePopupEscapesSpaceInSuggestion(t *testing.T) {
+	m := model{
+		input:           textarea.New(),
+		slashPopupItems: []slashSuggestion{{name: "@assets/my\\ screen.png", desc: "image"}},
+	}
+	m.input.SetValue("describe @my")
+	m.acceptPopupSuggestion(m.slashPopupItems[0])
+
+	if got := m.input.Value(); got != "describe @assets/my\\ screen.png " {
+		t.Fatalf("expected escaped file shortcode, got %q", got)
+	}
+}
+
+func TestProcessFileReferencesResolvesCompactShortcode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(path, []byte("hello compact"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{fileShortcodePaths: map[string]string{"[file: notes.txt]": path}}
+	msg := m.processFileReferences("summarize [file: notes.txt]")()
+	got := msg.(fileSearchFinishedMsg)
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	if len(got.messages) != 1 || got.messages[0].raw == nil || !strings.Contains(got.messages[0].raw.Content, "hello compact") {
+		t.Fatalf("expected compact shortcode to add file context, got %#v", got.messages)
+	}
+}
+
+func TestUniqueFileShortcodeHandlesCollision(t *testing.T) {
+	// When two files have the same basename, the shortcode function should generate
+	// unique labels by appending counters: [file: notes.txt], [file: notes.txt 2], etc.
+	dir := t.TempDir()
+
+	// Create two files with the same name in different directories.
+	path1 := filepath.Join(dir, "dir1", "notes.txt")
+	path2 := filepath.Join(dir, "dir2", "notes.txt")
+	os.MkdirAll(filepath.Dir(path1), 0755)
+	os.MkdirAll(filepath.Dir(path2), 0755)
+	os.WriteFile(path1, []byte(""), 0644)
+	os.WriteFile(path2, []byte(""), 0644)
+
+	m := &model{
+		fileShortcodePaths: make(map[string]string),
+	}
+
+	// Generate shortcodes for both files.
+	shortcode1 := m.uniqueFileShortcode(path1)
+	m.fileShortcodePaths[shortcode1] = path1
+
+	shortcode2 := m.uniqueFileShortcode(path2)
+	m.fileShortcodePaths[shortcode2] = path2
+
+	// They should be different.
+	if shortcode1 == shortcode2 {
+		t.Fatalf("expected different shortcodes for same basename, got %q and %q", shortcode1, shortcode2)
+	}
+
+	// First should be the base label.
+	if shortcode1 != "[file: notes.txt]" {
+		t.Fatalf("expected first shortcode [file: notes.txt], got %q", shortcode1)
+	}
+
+	// Second should have a counter.
+	if shortcode2 != "[file: notes.txt 2]" {
+		t.Fatalf("expected second shortcode [file: notes.txt 2], got %q", shortcode2)
+	}
+
+	// Verify both paths are stored correctly.
+	if m.fileShortcodePaths[shortcode1] != path1 {
+		t.Fatalf("expected shortcode1 to resolve to path1, got %q", m.fileShortcodePaths[shortcode1])
+	}
+	if m.fileShortcodePaths[shortcode2] != path2 {
+		t.Fatalf("expected shortcode2 to resolve to path2, got %q", m.fileShortcodePaths[shortcode2])
+	}
+}
+
+func TestUniqueFileShortcodeReusesIfSamePath(t *testing.T) {
+	// If the same file path is requested twice, the shortcode should be reused.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "notes.txt")
+	os.WriteFile(path, []byte(""), 0644)
+
+	m := &model{
+		fileShortcodePaths: make(map[string]string),
+	}
+
+	shortcode1 := m.uniqueFileShortcode(path)
+	m.fileShortcodePaths[shortcode1] = path
+
+	// Request the same path again.
+	shortcode2 := m.uniqueFileShortcode(path)
+
+	// Should return the same shortcode.
+	if shortcode1 != shortcode2 {
+		t.Fatalf("expected same shortcode for same path, got %q and %q", shortcode1, shortcode2)
 	}
 }

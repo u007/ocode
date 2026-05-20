@@ -129,7 +129,7 @@ func (m *gitModel) Resize(w, h int) {
 	m.height = h
 	sectW := w * 20 / 100
 	filesW := w * 30 / 100
-	diffW := w - sectW - filesW - 4
+	diffW := w - sectW - filesW
 	diffH := h - 5
 	if diffH < 1 {
 		diffH = 1
@@ -933,14 +933,14 @@ func (m *gitModel) loadDiff() {
 		var out string
 		var err error
 		if f.staged {
-			out, err = m.gitRun("diff", "--color=always", "--cached", f.path)
+			out, err = m.gitRun("diff", "--no-color", "--cached", f.path)
 		} else {
-			out, err = m.gitRun("diff", "--color=always", f.path)
+			out, err = m.gitRun("diff", "--no-color", f.path)
 		}
 		if err != nil {
 			out = "error: " + err.Error()
 		}
-		m.setDiffContent(out)
+		m.setDiffContent(renderUnifiedDiff(out, currentStyles()))
 		m.diff.GotoTop()
 		m.hunks = parseHunks(out)
 		m.hunkCursor = 0
@@ -954,11 +954,11 @@ func (m *gitModel) loadDiff() {
 			return
 		}
 		c := m.commits[m.commitCursor]
-		out, err := m.gitRun("show", "--color=always", "--stat", c.hash)
+		out, err := m.gitRun("show", "--no-color", "--stat", c.hash)
 		if err != nil {
 			out = "error: " + err.Error()
 		}
-		m.setDiffContent(out)
+		m.setDiffContent(renderUnifiedDiff(out, currentStyles()))
 		m.diff.GotoTop()
 		m.hunks = nil
 		m.hunkCursor = 0
@@ -972,11 +972,11 @@ func (m *gitModel) loadDiff() {
 			return
 		}
 		ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
-		out, err := m.gitRun("stash", "show", "--color=always", "-p", ref)
+		out, err := m.gitRun("stash", "show", "--no-color", "-p", ref)
 		if err != nil {
 			out = "error: " + err.Error()
 		}
-		m.setDiffContent(out)
+		m.setDiffContent(renderUnifiedDiff(out, currentStyles()))
 		m.diff.GotoTop()
 		m.hunks = nil
 		m.hunkCursor = 0
@@ -1044,10 +1044,10 @@ func (m *gitModel) buildCommitViewport(width int) {
 	m.commitViewport.SetContent(strings.Join(lines, "\n"))
 }
 
-func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
+func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) string {
 	sectW := w * 20 / 100
 	filesW := w * 30 / 100
-	diffW := w - sectW - filesW - 4
+	diffW := w - sectW - filesW
 
 	focusBorder := func(focused bool) lipgloss.Style {
 		if focused {
@@ -1089,16 +1089,22 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread bool) string {
 	row := lipgloss.JoinHorizontal(lipgloss.Top, sectPane, filesPane, diffPane)
 
 	tabBar := renderTabBar(tabGit, chatUnread)
+	var exitBtn string
+	if exitPending {
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("✕ exit?")
+	} else {
+		exitBtn = hintStyle.Padding(0, 1).Render("✕ exit")
+	}
 	ab := ""
 	if m.aheadBehind != "" {
 		ab = "  " + m.aheadBehind
 	}
 	headerLeft := styles.Header.Render("◆ ocode  Git" + ab)
-	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar)
+	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if headerPad < 0 {
 		headerPad = 0
 	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar
+	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
 
 	var parts []string
 	parts = append(parts, header, row)

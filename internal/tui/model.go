@@ -173,9 +173,11 @@ type model struct {
 	slashPopupIndex       int
 	slashPopupItems       []slashSuggestion
 	fileListCache         []slashSuggestion
+	fileShortcodePaths    map[string]string
 	showConnect           bool
 	connect               *connectDialog
 	showSidebar           bool
+	sidebarScroll         int
 	sessionTelemetry      sidebarTelemetry
 	activeModel           string
 	paletteInput          string
@@ -202,6 +204,7 @@ type model struct {
 	styles                Styles
 	streaming             bool
 	ctrlCPressed          bool
+	exitPending           bool
 	cancelStream          chan struct{}
 	lastActivity          agent.ActivitySnapshot
 	activityRowReserved   bool
@@ -531,6 +534,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+	case tea.PasteMsg:
+		if (m.activeTab == tabChat || m.activeTab == tabLog) && !m.showPicker && !m.showConnect && !m.showPalette && !m.leaderActive {
+			content := msg.Content
+			if shortcode, ok := m.shortcodePastedFiles(content); ok {
+				content = shortcode
+			}
+			m.input.InsertString(content)
+			m.syncRawInputLines()
+			var cmd tea.Cmd
+			m, cmd = m.updateSlashPopupState()
+			return m, cmd
+		}
 	case tea.MouseClickMsg:
 		if updated, cmd, ok := m.handleMouseAction(msg.Mouse(), true); ok {
 			return updated, cmd
@@ -547,6 +562,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		scrollSpeed := m.scrollSpeed
 		if scrollSpeed < 1 {
 			scrollSpeed = 1
+		}
+		if m.mouseOverSidebar(msg.Mouse()) {
+			if msg.Button == tea.MouseWheelUp {
+				m.sidebarScroll -= scrollSpeed
+			}
+			if msg.Button == tea.MouseWheelDown {
+				m.sidebarScroll += scrollSpeed
+			}
+			m.clampSidebarScroll()
+			return m, nil
 		}
 		if m.activeTab == tabFiles {
 			if msg.Button == tea.MouseWheelUp {
@@ -623,8 +648,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.layout()
-		m.files.Resize(m.panelWidth(), m.height)
-		m.git.Resize(m.panelWidth(), m.height)
+		m.files.Resize(m.width, m.height)
+		m.git.Resize(m.width, m.height)
 		m.logViewport, _ = m.logViewport.Update(tea.WindowSizeMsg{
 			Width:  m.panelWidth() - 7,
 			Height: m.height - m.bottomChromeHeight(m.panelWidth()) - 1,
@@ -1714,6 +1739,17 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 
+	if pressed && m.exitButtonForClick(mouse) {
+		if m.exitPending {
+			return m, tea.Quit, true
+		}
+		m.exitPending = true
+		return m, nil, true
+	}
+	if pressed && !m.exitButtonForClick(mouse) {
+		m.exitPending = false
+	}
+
 	if tab, ok := m.tabForClick(mouse); ok {
 		m.activeTab = tab
 		if tab == tabChat {
@@ -2094,14 +2130,21 @@ func (m model) renderMCPList() string {
 
 func (m *model) processFileReferences(text string) tea.Cmd {
 	return func() tea.Msg {
-		re := regexp.MustCompile(`@([^\s]+)`)
-		matches := re.FindAllStringSubmatch(text, -1)
+		atRefRe := regexp.MustCompile(`@((?:\\.|[^\s])+)`)
 		processedText := text
 		var msgs []message
 		var images []agent.Image
+		seen := make(map[string]struct{})
 
-		for _, match := range matches {
-			path := match[1]
+		attachPath := func(path string) *fileSearchFinishedMsg {
+			if path == "" {
+				return nil
+			}
+			if _, ok := seen[path]; ok {
+				return nil
+			}
+			seen[path] = struct{}{}
+
 			foundPath := ""
 			filepath.Walk(".", func(p string, info os.FileInfo, err error) error { //nolint:errcheck
 				if err != nil {
@@ -2130,14 +2173,15 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 			if agent.IsImageFile(path) {
 				img, err := agent.NewImage(path)
 				if err != nil {
-					return fileSearchFinishedMsg{err: fmt.Errorf("attach image %s: %w", path, err)}
+					msg := fileSearchFinishedMsg{err: fmt.Errorf("attach image %s: %w", path, err)}
+					return &msg
 				}
 				images = append(images, img)
 				msgs = append(msgs, message{
 					role: roleAssistant,
 					text: fmt.Sprintf("📎 Attached image %s", path),
 				})
-				continue
+				return nil
 			}
 
 			content, err := os.ReadFile(path)
@@ -2152,9 +2196,39 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 					},
 				})
 			}
+			return nil
 		}
+
+		for _, path := range m.compactFileReferencePaths(text) {
+			if result := attachPath(path); result != nil {
+				return *result
+			}
+		}
+
+		for _, match := range atRefRe.FindAllStringSubmatch(text, -1) {
+			path := unescapeAtPath(match[1])
+			if result := attachPath(path); result != nil {
+				return *result
+			}
+		}
+
 		return fileSearchFinishedMsg{processedText: processedText, messages: msgs, images: images}
 	}
+}
+
+func (m *model) compactFileReferencePaths(text string) []string {
+	if len(m.fileShortcodePaths) == 0 || !strings.Contains(text, "[file:") {
+		return nil
+	}
+	re := regexp.MustCompile(`\[file: [^\]]+\]`)
+	matches := re.FindAllString(text, -1)
+	paths := make([]string, 0, len(matches))
+	for _, token := range matches {
+		if path, ok := m.fileShortcodePaths[token]; ok {
+			paths = append(paths, path)
+		}
+	}
+	return paths
 }
 
 func (m *model) handleModelCmd(args []string) tea.Cmd {
@@ -3206,7 +3280,12 @@ func (m *model) renderTranscript() {
 					toolName = "tool"
 				}
 				startLine := lipgloss.Height(b.String())
-				boxContent := m.renderToolOutputBox(toolName, msg.raw.Content, m.expandedToolOutputs[i])
+				var boxContent string
+				if strings.HasPrefix(msg.raw.Content, "ORPHAN_TOOL_ERROR:") {
+					boxContent = m.renderOrphanWarningBox(msg.raw.Content, m.expandedToolOutputs[i])
+				} else {
+					boxContent = m.renderToolOutputBox(toolName, msg.raw.Content, m.expandedToolOutputs[i])
+				}
 				b.WriteString(boxContent)
 				endLine := lipgloss.Height(b.String()) - 1
 				m.toolOutputRegions = append(m.toolOutputRegions, toolOutputRegion{
@@ -3250,6 +3329,70 @@ func (m *model) renderToolOutputBox(toolName, content string, expanded bool) str
 		return header + "\n" + box + "\n" + footer
 	}
 	return header + "\n" + box
+}
+
+// renderOrphanWarningBox renders a warning box for tool calls that failed even
+// after the recovery retry. Format: "ORPHAN_TOOL_ERROR:<name>:<err>\n<detail>"
+func (m *model) renderOrphanWarningBox(content string, expanded bool) string {
+	const maxLines = 10
+	warnColor := lipgloss.Color("#E5A50A")
+	warnStyle := lipgloss.NewStyle().Foreground(warnColor).Bold(true)
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(warnColor).
+		Padding(0, 1)
+
+	// Parse "ORPHAN_TOOL_ERROR:<name>:<err>\n<detail>"
+	body := strings.TrimPrefix(content, "ORPHAN_TOOL_ERROR:")
+	toolName := "unknown"
+	errMsg := ""
+	detail := ""
+	if idx := strings.IndexByte(body, ':'); idx >= 0 {
+		toolName = body[:idx]
+		rest := body[idx+1:]
+		if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+			errMsg = rest[:nl]
+			detail = strings.TrimSpace(rest[nl+1:])
+		} else {
+			errMsg = rest
+		}
+	}
+
+	header := warnStyle.Render("⚠ tool call failed after retry: " + toolName)
+	if errMsg != "" {
+		header += "\n" + m.styles.Error.Render("  error: "+errMsg)
+	}
+
+	boxLines := []string{}
+	if detail != "" {
+		boxLines = strings.Split(detail, "\n")
+	}
+
+	footer := ""
+	boxContent := strings.Join(boxLines, "\n")
+	if !expanded && len(boxLines) > maxLines {
+		boxContent = strings.Join(boxLines[:maxLines], "\n")
+		footer = m.styles.Hint.Render(fmt.Sprintf("  … %d more lines · click to expand", len(boxLines)-maxLines))
+	} else if expanded && len(boxLines) > maxLines {
+		footer = m.styles.Hint.Render("  ▲ click to collapse")
+	}
+
+	width := m.viewport.Width() - 4
+	if width < 1 {
+		width = 1
+	}
+
+	var b strings.Builder
+	b.WriteString(header)
+	if boxContent != "" {
+		b.WriteString("\n")
+		b.WriteString(boxStyle.Width(width).Render(boxContent))
+	}
+	if footer != "" {
+		b.WriteString("\n")
+		b.WriteString(footer)
+	}
+	return b.String()
 }
 
 func padViewHeight(view string, height int) string {
@@ -3674,35 +3817,20 @@ func (m model) renderContent() string {
 	// Route non-modal views by active tab
 	switch m.activeTab {
 	case tabFiles:
-		filesView := m.files.View(m.panelWidth(), m.height, m.styles, m.chatUnread)
-		if m.sidebarEnabled() {
-			return lipgloss.JoinHorizontal(lipgloss.Top, filesView, m.renderSidebar())
-		}
-		return filesView
+		return m.files.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
 	case tabGit:
-		gitView := m.git.View(m.panelWidth(), m.height, m.styles, m.chatUnread)
-		if m.sidebarEnabled() {
-			return lipgloss.JoinHorizontal(lipgloss.Top, gitView, m.renderSidebar())
-		}
-		return gitView
+		return m.git.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
 	case tabLog:
 		return m.renderLogTab()
 	}
 	// tabChat falls through to existing rendering below
 
-	tabBar := renderTabBar(m.activeTab, m.chatUnread)
-	var headerLeft string
+	var header string
 	if m.sessionTitle != "" {
-		headerLeft = m.styles.Header.Render("\u25c6 ocode "+m.sessionTitle) + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+		header = m.styles.Header.Render("\u25c6 ocode "+m.sessionTitle) + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
 	} else {
-		headerLeft = m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+		header = m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
 	}
-	headerRight := tabBar
-	headerPad := m.panelWidth() - lipgloss.Width(headerLeft) - lipgloss.Width(headerRight)
-	if headerPad < 0 {
-		headerPad = 0
-	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + headerRight
 
 	status := m.renderStatus()
 	panelWidth := m.panelWidth()
@@ -3739,7 +3867,7 @@ func (m model) renderContent() string {
 	left := lipgloss.JoinVertical(lipgloss.Left, leftParts...)
 
 	if m.sidebarEnabled() {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebar())
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebarWithTabBar())
 	}
 
 	return left
@@ -3839,8 +3967,10 @@ type sidebarTelemetry struct {
 }
 
 type sidebarRenderData struct {
-	lines     []string
-	fileLines map[int]string
+	topLines            []string
+	scrollLines         []string
+	bottomLines         []string
+	fileScrollLinePaths map[int]string
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -4021,17 +4151,52 @@ func formatPercent(used, total int64) string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileLines: map[int]string{}}
-	appendSection := func(title string, body []string, filePaths []string) {
-		if len(data.lines) > 0 {
-			data.lines = append(data.lines, "")
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}}
+	outerBodyWidth := sidebarColumnWidth - 4
+	boxBodyWidth := sidebarColumnWidth - 8
+	if boxBodyWidth < 8 {
+		boxBodyWidth = 8
+	}
+	appendWrapped := func(dst *[]string, line string, width int) []int {
+		start := len(*dst)
+		wrapped := strings.Split(ansi.Hardwrap(line, width, false), "\n")
+		*dst = append(*dst, wrapped...)
+		idxs := make([]int, 0, len(wrapped))
+		for i := range wrapped {
+			idxs = append(idxs, start+i)
 		}
-		data.lines = append(data.lines, title)
+		return idxs
+	}
+	appendTopSection := func(title string, body []string) {
+		if len(data.topLines) > 0 {
+			data.topLines = append(data.topLines, "")
+		}
+		data.topLines = append(data.topLines, title)
+		for _, line := range body {
+			appendWrapped(&data.topLines, line, outerBodyWidth)
+		}
+	}
+	appendScrollSection := func(title string, body []string, filePaths []string) {
+		if len(data.scrollLines) > 0 {
+			data.scrollLines = append(data.scrollLines, "")
+		}
+		data.scrollLines = append(data.scrollLines, title)
 		for i, line := range body {
-			data.lines = append(data.lines, line)
+			idxs := appendWrapped(&data.scrollLines, line, boxBodyWidth)
 			if i < len(filePaths) {
-				data.fileLines[len(data.lines)] = filePaths[i]
+				for _, idx := range idxs {
+					data.fileScrollLinePaths[idx] = filePaths[i]
+				}
 			}
+		}
+	}
+	appendBottomSection := func(title string, body []string) {
+		if len(data.bottomLines) > 0 {
+			data.bottomLines = append(data.bottomLines, "")
+		}
+		data.bottomLines = append(data.bottomLines, title)
+		for _, line := range body {
+			appendWrapped(&data.bottomLines, line, outerBodyWidth)
 		}
 	}
 
@@ -4056,49 +4221,48 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	}
 
 	projectDir := shortenSidebarPath(shortenWorkingDir(m.workDir), sidebarColumnWidth-4)
-	appendSection("Project", []string{projectDir}, nil)
+	appendTopSection("Project", []string{projectDir})
 	sessionInfo := []string{m.sessionID}
 	if m.sessionTitle != "" {
 		sessionInfo = append(sessionInfo, m.sessionTitle)
 	}
-	appendSection("Session", sessionInfo, nil)
-	appendSection("Model", []string{modelName}, nil)
-	appendSection("Context", []string{contextLine}, nil)
-	appendSection("Spend", []string{spendLine}, nil)
-	appendSection("MCP", []string{m.renderMCPStatus()}, nil)
-	appendSection("LSP", []string{m.renderLSPStatus()}, nil)
+	appendTopSection("Session", sessionInfo)
+	appendTopSection("Model", []string{modelName})
+	appendTopSection("Context", []string{contextLine})
+	appendTopSection("Spend", []string{spendLine})
+	appendScrollSection("MCP", []string{m.renderMCPStatus()}, nil)
+	appendScrollSection("LSP", []string{m.renderLSPStatus()}, nil)
 
 	changed := snapshot.ChangedFiles()
 	if len(changed) == 0 {
-		appendSection("Files", []string{"No changed files yet."}, nil)
+		appendScrollSection("Files", []string{"No changed files yet."}, nil)
 	} else {
 		body := make([]string, 0, len(changed))
 		for _, path := range changed {
 			body = append(body, "- "+shortenSidebarPath(path, sidebarColumnWidth-4))
 		}
-		appendSection("Files", body, changed)
+		appendScrollSection("Files", body, changed)
 	}
 
 	todo := tool.TodoState()
 	if todo == "" {
-		appendSection("TODO", []string{"No live session todo state yet."}, nil)
+		appendScrollSection("TODO", []string{"No live session todo state yet."}, nil)
 	} else {
 		raw := strings.Split(todo, "\n")
 		styled := make([]string, len(raw))
 		for i, line := range raw {
 			styled[i] = styleTodoLine(line)
 		}
-		appendSection("TODO", styled, nil)
+		appendScrollSection("TODO", styled, nil)
 	}
 
-	appendSection("Hints", []string{"Ctrl+B toggle sidebar", "/sidebar toggle sidebar", "Ctrl+P command palette", "Ctrl+X leader actions", "Ctrl+O toggle YOLO", "Ctrl+Y retry LLM timeout/I/O"}, nil)
+	appendBottomSection("Hints", []string{"Ctrl+B toggle sidebar"})
 	return data
 }
 
 func (m model) renderSidebar() string {
 	data := m.buildSidebarRenderData()
 
-	// Build header with session title (if available) and version info
 	var header string
 	if m.sessionTitle != "" {
 		header = m.styles.Header.Render(m.sessionTitle) + hintStyle.Render("  ·  opencode clone v"+version.Version)
@@ -4106,31 +4270,123 @@ func (m model) renderSidebar() string {
 		header = hintStyle.Render("◆ ocode  sidebar  ·  v" + version.Version)
 	}
 
-	// Calculate max lines for content (account for border and header)
 	headerHeight := lipgloss.Height(header)
-	maxLines := m.height - 2 - headerHeight
-	if maxLines < 1 {
-		maxLines = 1
+	contentHeight := m.height - 2 - headerHeight
+	if contentHeight < 1 {
+		contentHeight = 1
 	}
-	lines := data.lines
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
+
+	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
+	visibleScrollLines := scrollBoxHeight - 2
+	if visibleScrollLines < 1 {
+		visibleScrollLines = 1
 	}
-	sections := strings.Join(lines, "\n")
+	scrollOffset := clampInt(m.sidebarScroll, 0, maxInt(0, len(data.scrollLines)-visibleScrollLines))
+	visible := sliceLines(data.scrollLines, scrollOffset, visibleScrollLines)
+	if len(data.scrollLines) > visibleScrollLines {
+		marker := fmt.Sprintf(" %d/%d", scrollOffset+1, len(data.scrollLines))
+		if len(visible) > 0 {
+			visible[0] = ansi.Truncate(visible[0], maxInt(1, sidebarColumnWidth-8-lipgloss.Width(marker)), "") + hintStyle.Render(marker)
+		}
+	}
+	scrollContent := strings.Join(visible, "\n")
+	scrollBox := borderStyle.Width(sidebarColumnWidth - 4).Render(constrainView(scrollContent, sidebarColumnWidth-8, visibleScrollLines))
+
+	lines := append([]string{}, data.topLines...)
+	lines = append(lines, scrollBox)
+	lines = append(lines, data.bottomLines...)
+	sections := constrainView(strings.Join(lines, "\n"), sidebarColumnWidth-4, contentHeight)
 	return borderStyle.Width(sidebarColumnWidth).Render(header + "\n" + sections)
 }
 
-func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
-	if !m.sidebarEnabled() {
-		return "", false
+func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) int {
+	available := m.height - 2 - headerHeight - len(data.topLines) - len(data.bottomLines)
+	if available < 3 {
+		return 3
 	}
-	if mouse.X < m.panelWidth() {
+	return available
+}
+
+func (m model) renderSidebarWithTabBar() string {
+	tabBar := renderTabBar(m.activeTab, m.chatUnread)
+	var exitBtn string
+	if m.exitPending {
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("✕ exit?")
+	} else {
+		exitBtn = hintStyle.Padding(0, 1).Render("✕ exit")
+	}
+	pad := sidebarColumnWidth - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
+	if pad < 0 {
+		pad = 0
+	}
+	topRow := tabBar + strings.Repeat(" ", pad) + exitBtn
+	return lipgloss.JoinVertical(lipgloss.Left, topRow, m.renderSidebar())
+}
+
+func (m *model) clampSidebarScroll() {
+	data := m.buildSidebarRenderData()
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	visible := m.sidebarScrollBoxHeight(data, headerHeight) - 2
+	if visible < 1 {
+		visible = 1
+	}
+	m.sidebarScroll = clampInt(m.sidebarScroll, 0, maxInt(0, len(data.scrollLines)-visible))
+}
+
+func (m model) mouseOverSidebar(mouse tea.Mouse) bool {
+	return m.sidebarEnabled() && mouse.X >= m.panelWidth()
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func sliceLines(lines []string, start, count int) []string {
+	if count <= 0 || start >= len(lines) {
+		return []string{}
+	}
+	if start < 0 {
+		start = 0
+	}
+	end := start + count
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return append([]string{}, lines[start:end]...)
+}
+
+func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
+	if !m.mouseOverSidebar(mouse) {
 		return "", false
 	}
 
 	data := m.buildSidebarRenderData()
-	for line, path := range data.fileLines {
-		if mouse.Y == line {
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	boxTop := 1 + headerHeight + len(data.topLines)
+	contentTop := boxTop + 1
+	visible := m.sidebarScrollBoxHeight(data, headerHeight) - 2
+	if mouse.Y < contentTop || mouse.Y >= contentTop+visible {
+		return "", false
+	}
+	scrollLine := m.sidebarScroll + (mouse.Y - contentTop)
+	if path, ok := data.fileScrollLinePaths[scrollLine]; ok {
+		return path, true
+	}
+	if len(data.fileScrollLinePaths) == 1 {
+		for _, path := range data.fileScrollLinePaths {
 			return path, true
 		}
 	}
@@ -4138,30 +4394,41 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 }
 
 func (m model) tabForClick(mouse tea.Mouse) (int, bool) {
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
-	if mouse.Y >= headerHeight {
+	if mouse.Y != 0 {
 		return 0, false
 	}
-	tabBar := renderTabBar(m.activeTab, m.chatUnread)
-	barWidth := lipgloss.Width(tabBar)
-	for _, barStartX := range m.tabBarStartXs(barWidth) {
-		if mouse.X < barStartX {
-			continue
-		}
-		if tab, ok := tabAtX(mouse.X, barStartX, m.activeTab, m.chatUnread); ok {
-			return tab, true
-		}
+	startX := m.tabBarStartX()
+	if mouse.X < startX {
+		return 0, false
+	}
+	if tab, ok := tabAtX(mouse.X, startX, m.activeTab, m.chatUnread); ok {
+		return tab, true
 	}
 	return 0, false
 }
 
-func (m model) tabBarStartXs(barWidth int) []int {
-	rightAligned := m.panelWidth() - barWidth
-	if rightAligned < 0 {
-		rightAligned = 0
+func (m model) tabBarStartX() int {
+	if m.sidebarEnabled() {
+		return m.panelWidth()
 	}
+	tabBar := renderTabBar(m.activeTab, m.chatUnread)
+	rightAligned := m.panelWidth() - lipgloss.Width(tabBar)
+	if rightAligned < 0 {
+		return 0
+	}
+	return rightAligned
+}
 
-	return []int{rightAligned}
+func (m model) exitButtonForClick(mouse tea.Mouse) bool {
+	if mouse.Y != 0 {
+		return false
+	}
+	if !m.sidebarEnabled() {
+		return false
+	}
+	tabBar := renderTabBar(m.activeTab, m.chatUnread)
+	exitStartX := m.panelWidth() + lipgloss.Width(tabBar)
+	return mouse.X >= exitStartX
 }
 
 func tabAtX(mouseX int, barStartX int, activeTab int, unread bool) (int, bool) {
@@ -4209,20 +4476,14 @@ func (m *model) refreshLogViewport() {
 }
 
 func (m model) renderLogTab() string {
-	tabBar := renderTabBar(m.activeTab, m.chatUnread)
-	headerLeft := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  debug log")
-	headerPad := m.panelWidth() - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar)
-	if headerPad < 0 {
-		headerPad = 0
-	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar
+	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  debug log")
 	logSB := renderScrollbar(m.logViewport.Height(), m.logViewport.TotalLineCount(), m.logViewport.VisibleLineCount(), m.logViewport.YOffset())
 	logContent := lipgloss.JoinHorizontal(lipgloss.Top, m.logViewport.View(), logSB)
 	content := borderStyle.Width(m.panelWidth() - 2).Render(logContent)
 	status := m.renderStatus()
 	left := lipgloss.JoinVertical(lipgloss.Left, header, content, status)
 	if m.sidebarEnabled() {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebar())
+		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebarWithTabBar())
 	}
 	return left
 }

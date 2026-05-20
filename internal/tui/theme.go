@@ -84,21 +84,21 @@ var builtinThemes = map[string]ThemeDefinition{
 	},
 	"opencode": {
 		Colors: ThemeColors{
-			User:       "#00ff00",
-			Assistant:  "#00ffff",
-			Header:     "#00ff00",
-			Border:     "#444444",
+			User:       "#FAB283",
+			Assistant:  "#F5A97F",
+			Header:     "#FAB283",
+			Border:     "#3C3C3C",
 			Hint:       "#888888",
-			Text:       "#cccccc",
-			Background: "#000000",
-			StatusBg:   "#000000",
-			StatusFg:   "#cccccc",
-			SelectedFg: "#000000",
-			SelectedBg: "#00ff00",
-			Success:    "#00ff00",
-			Error:      "#ff0000",
-			Accent:     "#00ffff",
-			Dim:        "#444444",
+			Text:       "#EEEEEE",
+			Background: "#0A0A0A",
+			StatusBg:   "#0A0A0A",
+			StatusFg:   "#808080",
+			SelectedFg: "#0A0A0A",
+			SelectedBg: "#FAB283",
+			Success:    "#A6E3A1",
+			Error:      "#E06C75",
+			Accent:     "#FAB283",
+			Dim:        "#3C3C3C",
 		},
 	},
 	"opencode-light": {
@@ -118,6 +118,45 @@ var builtinThemes = map[string]ThemeDefinition{
 			Error:      "#cc0000",
 			Accent:     "#008888",
 			Dim:        "#aaaaaa",
+		},
+	},
+
+	"flexoki": {
+		Colors: ThemeColors{
+			User:       "#CE5D97",
+			Assistant:  "#4385BE",
+			Header:     "#D14D41",
+			Border:     "#403E3C",
+			Hint:       "#878580",
+			Text:       "#CECDC3",
+			Background: "#100F0F",
+			StatusBg:   "#1C1B1A",
+			StatusFg:   "#878580",
+			SelectedFg: "#100F0F",
+			SelectedBg: "#FFFCF0",
+			Success:    "#879A39",
+			Error:      "#D14D41",
+			Accent:     "#DA702C",
+			Dim:        "#403E3C",
+		},
+	},
+	"one-dark": {
+		Colors: ThemeColors{
+			User:       "#61AFEF",
+			Assistant:  "#C678DD",
+			Header:     "#E5C07B",
+			Border:     "#3E4451",
+			Hint:       "#5C6370",
+			Text:       "#ABB2BF",
+			Background: "#282C34",
+			StatusBg:   "#21252B",
+			StatusFg:   "#5C6370",
+			SelectedFg: "#282C34",
+			SelectedBg: "#61AFEF",
+			Success:    "#98C379",
+			Error:      "#E06C75",
+			Accent:     "#56B6C2",
+			Dim:        "#3E4451",
 		},
 	},
 	"gruvbox": {
@@ -573,6 +612,24 @@ func setDimStyle(s lipgloss.Style) {
 
 func setToolBoxStyle(s lipgloss.Style) {
 	toolBoxStyle = s
+}
+
+func currentStyles() Styles {
+	return Styles{
+		User:      userStyle,
+		Assistant: assistantStyle,
+		Header:    headerStyle,
+		Hint:      hintStyle,
+		Border:    borderStyle,
+		Selected:  selectedStyle,
+		Status:    statusStyle,
+		Success:   successStyle,
+		Error:     errorStyle,
+		Text:      textStyle,
+		Thinking:  thinkingStyle,
+		Dim:       dimStyle,
+		ToolBox:   toolBoxStyle,
+	}
 }
 
 func setScrollbarStyles(track, thumb lipgloss.Style) {
