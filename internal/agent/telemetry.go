@@ -44,6 +44,30 @@ func parseAnthropicUsage(raw json.RawMessage) (*TokenUsage, error) {
 	}, nil
 }
 
+// parseOpenAIResponsesUsage parses usage from the OpenAI Responses API,
+// which uses input_tokens/output_tokens instead of prompt_tokens/completion_tokens.
+func parseOpenAIResponsesUsage(raw json.RawMessage) (*TokenUsage, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var payload struct {
+		InputTokens  *int64 `json:"input_tokens"`
+		OutputTokens *int64 `json:"output_tokens"`
+		TotalTokens  *int64 `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	if payload.InputTokens == nil && payload.OutputTokens == nil && payload.TotalTokens == nil {
+		return nil, nil
+	}
+	return &TokenUsage{
+		PromptTokens:     payload.InputTokens,
+		CompletionTokens: payload.OutputTokens,
+		TotalTokens:      payload.TotalTokens,
+	}, nil
+}
+
 func usageForProvider(provider string, raw json.RawMessage) (*TokenUsage, error) {
 	switch provider {
 	case "anthropic":

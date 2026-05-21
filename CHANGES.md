@@ -19,6 +19,8 @@
 - **Sub-Agent `notifyDone` on Synchronous Runs** — Success and error paths for synchronous tasks now call `notifyDone`, fixing silent non-completion in the TUI job view.
 - **Nil Pointer on `Ocode` Config** — Guards added in `applyTheme`, keybind setup, leader timeout, and scroll speed to handle a nil `Config.Ocode` pointer without panicking.
 - **`plan_enter` Overwrite Protection** — Calling `plan_enter` twice on the same day no longer silently overwrites a partially filled plan template.
+- **OpenAI Responses Usage Accounting** — Responses API usage is now parsed from `input_tokens`/`output_tokens`/`total_tokens` so telemetry and spend calculations keep working for OpenAI Responses clients.
+- **Git Diff Prefix Handling** — Git hunk parsing now strips `a/` and `b/` prefixes consistently so file selection and diff previews stay aligned across staged/unstaged views.
 
 ---
 

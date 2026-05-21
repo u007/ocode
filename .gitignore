@@ -5,10 +5,9 @@
 .env.local
 .DS_Store
 opencode.json
-todo.md
 .opencode/snapshots
 internal/tui/.opencode
 
 
 # Runtime/editor snapshots
-**/.opencode/snapshots/
+internal/config/.opencode/snapshots/
