@@ -43,7 +43,6 @@ type scrollbarDragTarget int
 const (
 	scrollbarDragNone scrollbarDragTarget = iota
 	scrollbarDragTranscript
-	scrollbarDragLog
 	scrollbarDragGitDiff
 	scrollbarDragFilesPreview
 )
@@ -255,12 +254,12 @@ type model struct {
 	compacting            bool
 	lastCompactErr        error
 	pendingCompactUIIdx   []int
-	thinkingLevelIdx      int // index into thinkingBudgetLevels
-	agentStripOffset      int // first visible run index in the agent strip
-	agentStripSelected    int // selected run index in the agent strip
+	thinkingLevelIdx      int  // index into thinkingBudgetLevels
+	agentStripOffset      int  // first visible run index in the agent strip
+	agentStripSelected    int  // selected run index in the agent strip
 	agentStripFocused     bool // whether keyboard nav is routed to the agent strip
 	subAgentPermCh        chan subAgentPermRequest
-	subAgentPermMu        *sync.Mutex // serialises concurrent sub-agent permission asks
+	subAgentPermMu        *sync.Mutex                   // serialises concurrent sub-agent permission asks
 	pendingSubAgentResp   chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
 	lastClickTime         time.Time
 	lastClickX            int
@@ -1792,11 +1791,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		scrollbarSetOffset(&m.viewport, mouse.Y, trackTop, m.viewport.Height())
 		return m, nil, true
 	}
-	if pressed && m.logScrollbarHit(mouse) {
-		m.scrollbarDrag = scrollbarDragLog
-		scrollbarSetOffset(&m.logViewport, mouse.Y, trackTop, m.logViewport.Height())
-		return m, nil, true
-	}
 	if pressed && m.activeTab == tabGit {
 		panelW := m.panelWidth()
 		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
@@ -2085,9 +2079,6 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	switch m.scrollbarDrag {
 	case scrollbarDragTranscript:
 		scrollbarSetOffset(&m.viewport, mouse.Y, trackTop, m.viewport.Height())
-		return m, nil, true
-	case scrollbarDragLog:
-		scrollbarSetOffset(&m.logViewport, mouse.Y, trackTop, m.logViewport.Height())
 		return m, nil, true
 	case scrollbarDragGitDiff:
 		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
@@ -5066,9 +5057,7 @@ func (m *model) refreshLogViewport() {
 
 func (m model) renderLogTab() string {
 	header := m.styles.Header.Render("◆ ocode") + m.styles.Hint.Render("  ·  debug log")
-	logSB := renderScrollbar(m.logViewport.Height(), m.logViewport.TotalLineCount(), m.logViewport.VisibleLineCount(), m.logViewport.YOffset())
-	logContent := lipgloss.JoinHorizontal(lipgloss.Top, m.logViewport.View(), logSB)
-	content := m.styles.Border.Width(m.panelWidth() - 2).Render(logContent)
+	content := m.styles.Border.Width(m.panelWidth() - 2).Render(m.logViewport.View())
 	status := m.renderStatus()
 	left := lipgloss.JoinVertical(lipgloss.Left, header, content, status)
 	if m.sidebarEnabled() {
@@ -5245,18 +5234,6 @@ func (m model) transcriptScrollbarHit(mouse tea.Mouse) bool {
 	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
 	top := headerHeight + 1
 	return mouse.Y >= top && mouse.Y < top+m.viewport.Height()
-}
-
-func (m model) logScrollbarHit(mouse tea.Mouse) bool {
-	if m.activeTab != tabLog {
-		return false
-	}
-	if mouse.X != m.mainScrollbarX() {
-		return false
-	}
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
-	top := headerHeight + 1
-	return mouse.Y >= top && mouse.Y < top+m.logViewport.Height()
 }
 
 func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {

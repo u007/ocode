@@ -970,6 +970,15 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		return borderStyle
 	}
 
+	if m.fuzzy {
+		results := fuzzyFilter(m.allPaths, m.query)
+		if len(results) > 3 {
+			results = results[:3]
+		}
+		preview := strings.Join(results, "  ")
+		filterLine := styles.Selected.Render("/ "+m.query+"█") + "  " + styles.Hint.Render(preview)
+		treeContent = filterLine + "\n" + treeContent
+	}
 	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 3).Render(treeContent)
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
@@ -1020,21 +1029,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	}
 	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
 
-	fuzzyBar := ""
-	if m.fuzzy {
-		results := fuzzyFilter(m.allPaths, m.query)
-		preview := ""
-		if len(results) > 3 {
-			results = results[:3]
-		}
-		preview = strings.Join(results, "  ")
-		fuzzyBar = styles.Hint.Render("/ " + m.query + "  " + preview)
-	}
-
 	parts := []string{header, row}
-	if fuzzyBar != "" {
-		parts = append(parts, fuzzyBar)
-	}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
