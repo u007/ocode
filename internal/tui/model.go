@@ -1763,7 +1763,7 @@ func (m model) filesHasActiveFocus() bool {
 
 // gitHasActiveFocus reports whether the git sub-model has an active mode that should consume esc.
 func (m model) gitHasActiveFocus() bool {
-	return m.git.committing || m.git.branchInputMode || m.git.stashInputMode || m.git.pendingAction != ""
+	return m.git.committing || m.git.branchInputMode || m.git.stashInputMode || m.git.pendingAction != gitPendingNone
 }
 
 func shouldForwardToTranscriptViewport(msg tea.Msg) bool {

@@ -168,6 +168,7 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		emitDebug("error", fmt.Sprintf("copilot error (%d): %s", resp.StatusCode, string(body)))
 		return nil, fmt.Errorf("copilot error (%d): %s", resp.StatusCode, string(body))
 	}
 	var result struct {
@@ -244,6 +245,7 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		emitDebug("error", fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body)))
 		return nil, fmt.Errorf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
 	}
 
@@ -577,6 +579,7 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		emitDebug("error", fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body)))
 		return nil, fmt.Errorf("openai responses error (%d): %s", resp.StatusCode, string(body))
 	}
 
@@ -586,6 +589,7 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	var lastEvent string
 	var toolCalls []ToolCall
 	var responseItems []map[string]interface{}
+	var responseUsage json.RawMessage
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -673,6 +677,9 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 				if text := openAIResponseText(payload.Response); text != "" && fullText == "" {
 					fullText = text
 				}
+				if usageRaw, err := json.Marshal(payload.Response["usage"]); err == nil && string(usageRaw) != "null" {
+					responseUsage = usageRaw
+				}
 			}
 		}
 	}
@@ -694,6 +701,13 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	}
 	if msg.Model == "" {
 		msg.Model = c.Model
+	}
+	if len(responseUsage) > 0 {
+		usage, err := parseOpenAIResponsesUsage(responseUsage)
+		if err == nil && usage != nil {
+			msg.Usage = usage
+			msg.Spend = usage.Spend(msg.Model)
+		}
 	}
 	return msg, nil
 }
@@ -971,6 +985,7 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		emitDebug("error", fmt.Sprintf("anthropic error (%d): %s", resp.StatusCode, string(body)))
 		return nil, fmt.Errorf("anthropic error (%d): %s", resp.StatusCode, string(body))
 	}
 

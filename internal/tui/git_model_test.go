@@ -45,11 +45,11 @@ func TestPendingActionConfirmation(t *testing.T) {
 		stagedFiles:   []gitFile{},
 	}
 	m2, _ := m.handleFilesKey("d")
-	if m2.pendingAction != "discard" {
+	if m2.pendingAction != gitPendingDiscard {
 		t.Fatalf("want pendingAction=discard got %q", m2.pendingAction)
 	}
 	m3, _ := m2.handleFilesKey("j")
-	if m3.pendingAction != "" {
+	if m3.pendingAction != gitPendingNone {
 		t.Fatalf("want pendingAction cleared, got %q", m3.pendingAction)
 	}
 }

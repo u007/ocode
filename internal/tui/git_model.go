@@ -32,6 +32,15 @@ const (
 	gitPanelDiff
 )
 
+type gitPendingAction string
+
+const (
+	gitPendingNone         gitPendingAction = ""
+	gitPendingDiscard      gitPendingAction = "discard"
+	gitPendingDropStash    gitPendingAction = "drop-stash"
+	gitPendingDeleteBranch gitPendingAction = "delete-branch"
+)
+
 type gitFile struct {
 	status string
 	path   string
@@ -94,7 +103,7 @@ type gitModel struct {
 	committing     bool
 	commitInput    textarea.Model
 	statusMsg      string
-	pendingAction  string // "discard" | "drop-stash" | "delete-branch" | ""
+	pendingAction  gitPendingAction
 	// branch create input
 	branchInputMode bool
 	branchInputText string
@@ -674,7 +683,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 
 	// Clear pending confirmation when user presses any key other than the confirm key
 	if key != "d" && key != "x" {
-		m.pendingAction = ""
+		m.pendingAction = gitPendingNone
 	}
 	// esc clears filter first, then multi-selection
 	if key == "esc" && m.filterQuery != "" {
@@ -856,8 +865,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				idx := m.filesCursor - len(m.stagedFiles)
 				unstaged := m.allUnstagedAndUntracked()
 				if idx < len(unstaged) {
-					if m.pendingAction == "discard" {
-						m.pendingAction = ""
+					if m.pendingAction == gitPendingDiscard {
+						m.pendingAction = gitPendingNone
 						f := unstaged[idx]
 						if f.status == "?" {
 							m.statusMsg = "cannot discard untracked file"
@@ -870,7 +879,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 							return m, m.cmdRefresh()
 						}
 					} else {
-						m.pendingAction = "discard"
+						m.pendingAction = gitPendingDiscard
 						m.statusMsg = "press d again to discard"
 					}
 				}
@@ -878,8 +887,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.statusMsg = "cannot discard staged file — unstage first"
 			}
 		} else if m.section == gitSectionStash && m.stashCursor < len(m.stashes) {
-			if m.pendingAction == "drop-stash" {
-				m.pendingAction = ""
+			if m.pendingAction == gitPendingDropStash {
+				m.pendingAction = gitPendingNone
 				ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
 				if _, err := m.gitRun("stash", "drop", ref); err != nil {
 					m.statusMsg = "drop failed: " + err.Error()
@@ -888,7 +897,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					return m, m.cmdRefresh()
 				}
 			} else {
-				m.pendingAction = "drop-stash"
+				m.pendingAction = gitPendingDropStash
 				m.statusMsg = "press d again to drop stash"
 			}
 		}
@@ -937,8 +946,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.statusMsg = "cannot delete current branch"
 				return m, nil
 			}
-			if m.pendingAction == "delete-branch" {
-				m.pendingAction = ""
+			if m.pendingAction == gitPendingDeleteBranch {
+				m.pendingAction = gitPendingNone
 				if _, err := m.gitRun("branch", "-d", branch); err != nil {
 					m.statusMsg = "delete failed: " + err.Error()
 				} else {
@@ -946,7 +955,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				}
 				return m, m.cmdRefresh()
 			}
-			m.pendingAction = "delete-branch"
+			m.pendingAction = gitPendingDeleteBranch
 			m.statusMsg = "press x again to delete " + branch
 		}
 	case "S":
