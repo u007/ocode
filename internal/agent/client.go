@@ -168,8 +168,9 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		emitDebug("error", fmt.Sprintf("copilot error (%d): %s", resp.StatusCode, string(body)))
-		return nil, fmt.Errorf("copilot error (%d): %s", resp.StatusCode, string(body))
+		msg := fmt.Sprintf("copilot error (%d): %s", resp.StatusCode, string(body))
+		emitDebug("error", msg)
+		return nil, fmt.Errorf("%s", msg)
 	}
 	var result struct {
 		Model   string `json:"model"`
@@ -245,8 +246,9 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		emitDebug("error", fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body)))
-		return nil, fmt.Errorf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
+		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
+		emitDebug("error", msg)
+		return nil, fmt.Errorf("%s", msg)
 	}
 
 	var result struct {
@@ -579,8 +581,9 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		emitDebug("error", fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body)))
-		return nil, fmt.Errorf("openai responses error (%d): %s", resp.StatusCode, string(body))
+		msg := fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body))
+		emitDebug("error", msg)
+		return nil, fmt.Errorf("%s", msg)
 	}
 
 	// Parse SSE stream to accumulate the full response.
@@ -704,7 +707,9 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	}
 	if len(responseUsage) > 0 {
 		usage, err := parseOpenAIResponsesUsage(responseUsage)
-		if err == nil && usage != nil {
+		if err != nil {
+			emitDebug("error", fmt.Sprintf("parse openai responses usage: %v", err))
+		} else if usage != nil {
 			msg.Usage = usage
 			msg.Spend = usage.Spend(msg.Model)
 		}
@@ -985,8 +990,9 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		emitDebug("error", fmt.Sprintf("anthropic error (%d): %s", resp.StatusCode, string(body)))
-		return nil, fmt.Errorf("anthropic error (%d): %s", resp.StatusCode, string(body))
+		msg := fmt.Sprintf("anthropic error (%d): %s", resp.StatusCode, string(body))
+		emitDebug("error", msg)
+		return nil, fmt.Errorf("%s", msg)
 	}
 
 	var result struct {

@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] — 2026-05-21 (Later)
+
+### Fixed
+- **Error Message Duplication in Chat Methods** — Refactored error formatting in `chatCopilot`, `chatOpenAI`, `chatOpenAIResponses`, and `chatAnthropic` to extract message format string once, avoiding redundant formatting and improving maintainability.
+- **Silent OpenAI Responses Usage Parse Errors** — Fixed `parseOpenAIResponsesUsage` error handling to emit debug log when parsing fails instead of silently ignoring the error.
+- **ESC Key Stream Cancellation** — ESC key now cancels a running stream immediately in `handleChatKeys`, regardless of modal or sub-state focus, ensuring consistent interruption behavior.
+
 ## [Unreleased] — 2026-05-21
 
 ### Added

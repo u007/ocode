@@ -1439,6 +1439,11 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Model, tea.Cmd) {
 	keyStr := msg.String()
 
+	// ESC always cancels a running stream, regardless of any sub-state focus.
+	if keyStr == "esc" && m.streaming && m.cancelStream != nil {
+		return m.handleEscKey()
+	}
+
 	if m.showPermDialog {
 		switch keyStr {
 		case "y", "n", "a", "t":
