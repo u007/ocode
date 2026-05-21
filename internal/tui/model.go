@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
@@ -118,7 +119,7 @@ type streamMsgEvent struct {
 
 type ctrlCResetMsg struct{}
 type dotTickMsg struct{}
-type registryReadyMsg struct{}
+type registryReadyMsg struct{ failed bool }
 type pickerFilterApplyMsg struct {
 	seq    int
 	filter string
@@ -150,12 +151,17 @@ func waitForDebugLog() tea.Cmd {
 
 func waitForRegistry() tea.Cmd {
 	return func() tea.Msg {
-		for {
+		// Poll for up to ~5 seconds (50 × 100ms). If the registry never becomes
+		// ready (network down, no cache), give up and report failure so the UI
+		// degrades gracefully instead of leaking this goroutine indefinitely.
+		const maxPolls = 50
+		for i := 0; i < maxPolls; i++ {
 			if agent.RegistryReady() {
 				return registryReadyMsg{}
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
+		return registryReadyMsg{failed: true}
 	}
 }
 
@@ -250,6 +256,26 @@ type model struct {
 	lastCompactErr        error
 	pendingCompactUIIdx   []int
 	thinkingLevelIdx      int // index into thinkingBudgetLevels
+	agentStripOffset      int // first visible run index in the agent strip
+	agentStripSelected    int // selected run index in the agent strip
+	agentStripFocused     bool // whether keyboard nav is routed to the agent strip
+	subAgentPermCh        chan subAgentPermRequest
+	subAgentPermMu        *sync.Mutex // serialises concurrent sub-agent permission asks
+	pendingSubAgentResp   chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
+	lastClickTime         time.Time
+	lastClickX            int
+	lastClickY            int
+}
+
+// agentStripMaxRows caps how many strip rows are visible at once so a large
+// number of running agents cannot push the input box off screen.
+const agentStripMaxRows = 8
+
+// subAgentPermRequest carries a sub-agent permission ask from the sub-agent's
+// goroutine to the TUI Update loop, plus the channel the answer is sent back on.
+type subAgentPermRequest struct {
+	req    agent.PermissionRequest
+	respCh chan agent.PermissionResponse
 }
 
 var thinkingBudgetLevels = []int{0, 1024, 8000, 16000}
@@ -272,6 +298,7 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#3B4261")).
 			Padding(0, 1)
+	cleanBoxStyle = lipgloss.NewStyle()
 	hintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
 	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#1A1B26")).Background(lipgloss.Color("#7AA2F7"))
 	statusStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#787C99")).Background(lipgloss.Color("#1A1B26")).Padding(0, 1).Bold(true)
@@ -289,11 +316,32 @@ var (
 )
 
 // styleTodoLine renders a markdown todo line with strikethrough/dim for done
-// items and a warning color for in-progress (`- [~]` or `- [-]`). Non-todo
-// lines are returned unchanged.
+// items and a warning color for in-progress (`- [~]` or `- [-]`). Also replaces
+// status text like [in_progress], [pending], [completed] with emojis.
 func styleTodoLine(line string) string {
 	trimmed := strings.TrimLeft(line, " \t")
 	indent := line[:len(line)-len(trimmed)]
+
+	// Handle status text format: - [status_text] body
+	if strings.HasPrefix(trimmed, "- [") {
+		closeIdx := strings.Index(trimmed[3:], "]")
+		if closeIdx != -1 {
+			marker := trimmed[3 : 3+closeIdx]
+			body := strings.TrimSpace(trimmed[3+closeIdx+1:])
+
+			// Replace status text with emojis
+			switch marker {
+			case "completed", "x", "X", "✓":
+				return indent + todoDoneStyle.Render("- [✓] "+body)
+			case "in_progress", "~", "-", "⟳":
+				return indent + todoInProgressStyle.Render("- [⟳] "+body)
+			case "pending", " ", "○":
+				return indent + todoPendingStyle.Render("- [○] "+body)
+			}
+		}
+	}
+
+	// Standard checkbox format
 	prefix, body, ok := splitTodoMarker(trimmed)
 	if !ok {
 		return line
@@ -352,12 +400,15 @@ func renderSidebarTodo(todo string, width int) []string {
 		return styled
 	}
 
-	summary := fmt.Sprintf("%d/%d done", done, total)
+	summary := ""
+	if done > 0 {
+		summary += "✓ "
+	}
 	if active > 0 {
-		summary += fmt.Sprintf(" • %d active", active)
+		summary += "⟳ "
 	}
 	if pending > 0 {
-		summary += fmt.Sprintf(" • %d queued", pending)
+		summary += "○"
 	}
 
 	barWidth := width - lipgloss.Width(summary) - 3
@@ -384,7 +435,7 @@ const (
 )
 
 func (m *model) applyTheme() {
-	if m.config != nil && m.config.Ocode != nil && m.config.Ocode.TUI.Theme != "" {
+	if m.config != nil && m.config.Ocode.TUI.Theme != "" {
 		m.styles = ApplyThemeColors(m.config.Ocode.TUI.Theme)
 	} else {
 		m.styles = ApplyThemeColors("tokyonight")
@@ -534,6 +585,8 @@ func newModel(sid string, cont bool, yolo bool) model {
 		}(),
 		compactCh:      make(chan agent.CompactResult, 4),
 		compactStartCh: make(chan struct{}, 4),
+		subAgentPermCh: make(chan subAgentPermRequest),
+		subAgentPermMu: &sync.Mutex{},
 	}
 
 	// Set workDir for path-scoped permission checks
@@ -542,7 +595,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	}
 	m.wireCompactCallbacks()
 
-	if cfg != nil && cfg.Ocode != nil && cfg.Ocode.TUI.Scroll != 0 {
+	if cfg != nil && cfg.Ocode.TUI.Scroll != 0 {
 		m.scrollSpeed = int(cfg.Ocode.TUI.Scroll)
 	}
 
@@ -551,8 +604,9 @@ func newModel(sid string, cont bool, yolo bool) model {
 	workDir := m.workDir
 	m.files = newFilesModel(workDir)
 	m.git = newGitModel(workDir)
-	if cfg != nil && cfg.Ocode != nil {
-		editor := config.ResolveEditor(cfg.Ocode)
+	if cfg != nil {
+		m.git.generateCommitMsg = m.makeCommitMsgGenerator(cfg)
+		editor := config.ResolveEditor(&cfg.Ocode)
 		editorMode := cfg.Ocode.EditorMode
 		m.files.SetEditor(editor)
 		m.files.SetEditorMode(editorMode)
@@ -596,7 +650,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), listenSubAgentPerm(m.subAgentPermCh)}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
 	}
@@ -762,6 +816,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tabChat:
 			return m.handleChatKeys(msg, tiCmd, vpCmd)
 		case tabFiles:
+			if msg.String() == "ctrl+c" {
+				return m.handleTabCtrlC()
+			}
 			if msg.String() == "esc" && !m.filesHasActiveFocus() {
 				return m.handleEscKey()
 			}
@@ -772,6 +829,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.files, cmd = m.files.Update(msg, m.width, m.height)
 			return m, cmd
 		case tabGit:
+			if msg.String() == "ctrl+c" {
+				return m.handleTabCtrlC()
+			}
 			if msg.String() == "esc" && !m.gitHasActiveFocus() {
 				return m.handleEscKey()
 			}
@@ -791,7 +851,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case registryReadyMsg:
-		// Registry loaded — re-render so status bar and sidebar reflect reasoning support.
+		// Registry loaded (or load timed out) — re-render so status bar and
+		// sidebar reflect reasoning support. On failure the UI continues with
+		// whatever defaults are available.
+		if msg.failed {
+			DebugLog.Append(DebugEntry{
+				Kind:    DebugKindError,
+				Message: "models registry failed to load within deadline; continuing with defaults",
+			})
+		}
 		return m, nil
 	case debugLogMsg:
 		m.logEntries = DebugLog.Snapshot()
@@ -1121,6 +1189,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.layout()
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
+	case subAgentPermAskMsg:
+		// A sub-agent tool call needs a permission decision. Reuse the same
+		// permission dialog the main agent uses. The sub-agent goroutine is
+		// blocked on resp.respCh until handlePermissionChoice answers it.
+		req := msg.req
+		m.pendingSubAgentResp = msg.respCh
+		m.showPermDialog = true
+		m.activeTab = tabChat
+		m.chatUnread = false
+		m.pendingPermission = req
+		m.pendingToolName = req.ToolName
+		m.pendingToolArgs = req.Args
+		m.pendingToolCallID = ""
+		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + renderPermissionPrompt(req)})
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		return m, nil
 	case editorFinishedMsg:
 		m.layout()
 		if msg.err != nil {
@@ -1313,7 +1398,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		m.leaderActive = false
 
 		key := keyStr
-		if m.config != nil && m.config.Ocode != nil {
+		if m.config != nil {
 			if cmd, ok := m.config.Ocode.TUI.Keybinds[key]; ok {
 				newM, c := m.handleCommand(cmd)
 				return true, newM, c
@@ -1382,6 +1467,42 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 	}
 
+	// ctrl+a toggles keyboard focus on the agent strip (only when runs exist).
+	if keyStr == "ctrl+a" && m.detail.empty() {
+		if m.agentStripRunCount() == 0 {
+			return m, nil
+		}
+		m.agentStripFocused = !m.agentStripFocused
+		if m.agentStripFocused {
+			m.clampAgentStrip()
+		}
+		return m, nil
+	}
+
+	// When the agent strip has focus, route navigation keys to it.
+	if m.agentStripFocused && m.detail.empty() && !m.showPermDialog {
+		switch keyStr {
+		case "j", "down", "k", "up":
+			if keyStr == "j" || keyStr == "down" {
+				m.agentStripSelected++
+			} else {
+				m.agentStripSelected--
+			}
+			m.clampAgentStrip()
+			return m, nil
+		case "enter":
+			runs := m.agent.Runs().Snapshot()
+			if m.agentStripSelected >= 0 && m.agentStripSelected < len(runs) {
+				m.openAgentDetail(runs[m.agentStripSelected].ID)
+			}
+			m.agentStripFocused = false
+			return m, nil
+		case "esc":
+			m.agentStripFocused = false
+			return m, nil
+		}
+	}
+
 	switch keyStr {
 	case "ctrl+g":
 		m.openProcessList()
@@ -1440,7 +1561,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		m.leaderActive = true
 		m.leaderSeq++
 		timeout := 2000
-		if m.config != nil && m.config.Ocode != nil && m.config.Ocode.TUI.LeaderTimeout != 0 {
+		if m.config != nil && m.config.Ocode.TUI.LeaderTimeout != 0 {
 			timeout = m.config.Ocode.TUI.LeaderTimeout
 		}
 		seq := m.leaderSeq
@@ -1624,6 +1745,18 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m model) handleTabCtrlC() (tea.Model, tea.Cmd) {
+	if m.ctrlCPressed {
+		m.saveSession()
+		if m.agent != nil {
+			m.agent.Shutdown()
+		}
+		return m, tea.Quit
+	}
+	m.ctrlCPressed = true
+	return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return ctrlCResetMsg{} })
+}
+
 // filesHasActiveFocus reports whether the files sub-model has an active mode that should consume esc.
 func (m model) filesHasActiveFocus() bool {
 	return m.files.fuzzy || m.files.mode != filesModeNormal || m.files.choosingEditor
@@ -1699,6 +1832,10 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if mouse.X >= sectRight && mouse.X < filesRight && mouse.Y >= gitBodyTop {
 			row := mouse.Y - gitBodyTop - 1 // -1 for border
 			if row >= 0 {
+				isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
+				m.lastClickTime = time.Now()
+				m.lastClickX = mouse.X
+				m.lastClickY = mouse.Y
 				m.git.panel = gitPanelFiles
 				switch m.git.section {
 				case gitSectionChanges:
@@ -1706,6 +1843,10 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					if row < len(files) {
 						m.git.filesCursor = row
 						m.git.loadDiff()
+						if isDoubleClick {
+							path := filepath.Join(m.git.workDir, files[row].path)
+							return m, m.git.openInEditor(path), true
+						}
 					}
 				case gitSectionLog:
 					if row < len(m.git.commits) {
@@ -1751,8 +1892,15 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if idx, ok := m.files.treeNodeForClick(mouse, filesHeaderH); ok {
 			n := m.files.nodes[idx]
 			m.files.cursor = idx
+			isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
+			m.lastClickTime = time.Now()
+			m.lastClickX = mouse.X
+			m.lastClickY = mouse.Y
 			if n.isDir {
 				m.files.toggleDir(idx)
+			} else if isDoubleClick {
+				m.files.openEditorPicker(n.path)
+				return m, nil, true
 			} else {
 				return m, loadPreviewCmd(n), true
 			}
@@ -2564,7 +2712,7 @@ func (m *model) handleEditorCmd(args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save editor: %v", err)})
 		return nil
 	}
-	if m.config != nil && m.config.Ocode != nil {
+	if m.config != nil {
 		m.config.Ocode.Editor = editor
 	}
 	m.refreshEditorOpener()
@@ -2590,7 +2738,7 @@ func (m *model) handleEditorModeCmd(args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save editor mode: %v", err)})
 		return nil
 	}
-	if m.config != nil && m.config.Ocode != nil {
+	if m.config != nil {
 		m.config.Ocode.EditorMode = mode
 	}
 	m.refreshEditorOpener()
@@ -2599,10 +2747,10 @@ func (m *model) handleEditorModeCmd(args []string) tea.Cmd {
 }
 
 func (m *model) refreshEditorOpener() {
-	if m.config == nil || m.config.Ocode == nil {
+	if m.config == nil {
 		return
 	}
-	editor := config.ResolveEditor(m.config.Ocode)
+	editor := config.ResolveEditor(&m.config.Ocode)
 	mode := m.config.Ocode.EditorMode
 	m.files.SetEditor(editor)
 	m.files.SetEditorMode(mode)
@@ -2980,6 +3128,48 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		args = req.Args
 	}
 
+	// Sub-agent permission ask: the sub-agent goroutine is blocked on respCh.
+	// Send the granted level back instead of re-asking the main agent. "a"/"t"
+	// also persist a rule on the main agent's PermissionManager so future asks
+	// (main or sub-agent) are auto-allowed.
+	if m.pendingSubAgentResp != nil {
+		respCh := m.pendingSubAgentResp
+		m.pendingSubAgentResp = nil
+		resp := agent.PermissionResponse{Level: agent.PermissionDeny}
+		switch choice {
+		case "y", "yes", "allow", "once":
+			resp.Level = agent.PermissionAllow
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed sub-agent %q once.", toolName), transient: true})
+		case "a", "always", "always allow":
+			resp = agent.PermissionResponse{Level: agent.PermissionAllow, PersistRule: true}
+			if toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain.") {
+				domain := strings.TrimPrefix(req.Rule, "webfetch.domain.")
+				if m.agent.Permissions() != nil {
+					m.agent.Permissions().SetWebfetchDomain(domain, agent.PermissionAllow)
+				}
+			} else {
+				m.setPermissionRule(req, agent.PermissionAllow)
+			}
+			m.persistPermissions()
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s (sub-agent).", permissionRuleLabel(req)), transient: true})
+		case "t":
+			resp = agent.PermissionResponse{Level: agent.PermissionAllow, PersistTool: true}
+			m.setToolPermission(toolName, agent.PermissionAllow)
+			m.persistPermissions()
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q (sub-agent).", toolName), transient: true})
+		case "n", "no", "deny":
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Denied sub-agent %q.", toolName), transient: true})
+		default:
+			m.showPermDialog = true
+			m.pendingSubAgentResp = respCh
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
+			return nil
+		}
+		respCh <- resp
+		// Re-arm the listener so subsequent sub-agent asks are still received.
+		return listenSubAgentPerm(m.subAgentPermCh)
+	}
+
 	switch choice {
 	case "y", "yes", "allow", "once":
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName), transient: true})
@@ -3040,7 +3230,7 @@ func (m *model) persistPermissions() {
 		return
 	}
 	permissions := m.agent.Permissions().ExportConfig()
-	if m.config != nil && m.config.Ocode != nil {
+	if m.config != nil {
 		m.config.Ocode.Permissions = permissions
 	}
 	if err := config.SaveOcodePermissions(permissions); err != nil {
@@ -3289,6 +3479,9 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	if row := m.renderStoppedIndicator(); row != "" {
 		height += lipgloss.Height(row)
 	}
+	if strip, _ := m.renderAgentStrip(); strip != "" {
+		height += lipgloss.Height(strip)
+	}
 	if row := m.renderActivityRow(); row != "" {
 		height += lipgloss.Height(row)
 	}
@@ -3367,10 +3560,10 @@ func (m *model) renderTranscript() {
 		}
 		switch msg.role {
 		case roleUser:
-			b.WriteString(userStyle.Render("you") + "\n" + strings.TrimRight(msg.text, "\n"))
+			b.WriteString(userStyle.Render("you") + " " + strings.TrimRight(msg.text, "\n"))
 		case roleThinking:
 			content := renderThinkingContent(strings.TrimRight(msg.text, "\n"), m.styles)
-			b.WriteString(assistantStyle.Render("ocode") + "\n" + m.styles.Thinking.Render("⟁ thinking\n"+content))
+			b.WriteString(assistantStyle.Render("ocode") + " " + m.styles.Thinking.Render("⟁ thinking\n"+content))
 		case roleAssistant:
 			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
 				toolName := m.lookupToolName(msg.raw.ToolID)
@@ -3392,7 +3585,7 @@ func (m *model) renderTranscript() {
 					endLine:      endLine,
 				})
 			} else {
-				b.WriteString(assistantStyle.Render("ocode") + "\n" + m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
+				b.WriteString(assistantStyle.Render("ocode") + " " + m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
 			}
 		}
 	}
@@ -3517,6 +3710,37 @@ func constrainView(view string, width int, height int) string {
 	return padViewHeight(view, height)
 }
 
+func constrainViewPreservingBottom(view string, width int, height int, bottomLinesCount int) string {
+	if width > 0 {
+		view = wrapView(view, width)
+	}
+	if height > 0 {
+		lines := strings.Split(view, "\n")
+		if len(lines) > height {
+			// Preserve the last bottomLinesCount lines, truncate from the middle
+			if bottomLinesCount >= len(lines) {
+				// Not enough lines, just use what we have
+				lines = lines
+			} else if bottomLinesCount > 0 {
+				// Keep top part and bottom part
+				keepTop := height - bottomLinesCount
+				if keepTop < 0 {
+					keepTop = 0
+				}
+				if keepTop > 0 {
+					lines = append(lines[:keepTop], lines[len(lines)-bottomLinesCount:]...)
+				} else {
+					lines = lines[len(lines)-bottomLinesCount:]
+				}
+			} else {
+				lines = lines[:height]
+			}
+		}
+		view = strings.Join(lines, "\n")
+	}
+	return padViewHeight(view, height)
+}
+
 func wrapView(view string, width int) string {
 	if width <= 0 {
 		return view
@@ -3550,7 +3774,47 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	// Sub-agent permission asks: the callback runs inside a sub-agent goroutine.
+	// It hands the request to the TUI Update loop and blocks for the answer. The
+	// mutex serialises concurrent asks (multiple sub-agents may ask at once) so
+	// only one permission dialog is live and pendingPermission isn't stomped.
+	// subAgentPermCh / subAgentPermMu are created once in newModel and must not
+	// be recreated here: the listener armed in Init holds the original channel.
+	if m.subAgentPermMu == nil {
+		m.subAgentPermMu = &sync.Mutex{}
+	}
+	permCh := m.subAgentPermCh
+	permMu := m.subAgentPermMu
+	done := m.agent.Done()
+	m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse {
+		permMu.Lock()
+		defer permMu.Unlock()
+		respCh := make(chan agent.PermissionResponse, 1)
+		// Select on the agent's Done channel so a Shutdown while this sub-agent
+		// is waiting unblocks cleanly (deny) instead of leaking the goroutine.
+		select {
+		case permCh <- subAgentPermRequest{req: req, respCh: respCh}:
+		case <-done:
+			return agent.PermissionResponse{Level: agent.PermissionDeny}
+		}
+		select {
+		case resp := <-respCh:
+			return resp
+		case <-done:
+			return agent.PermissionResponse{Level: agent.PermissionDeny}
+		}
+	})
 }
+
+// listenSubAgentPerm blocks on the sub-agent permission channel and re-arms the
+// command after each request, so the TUI keeps receiving sub-agent asks.
+func listenSubAgentPerm(ch chan subAgentPermRequest) tea.Cmd {
+	return func() tea.Msg {
+		return subAgentPermAskMsg(<-ch)
+	}
+}
+
+type subAgentPermAskMsg subAgentPermRequest
 
 func waitCompactEvent(startCh chan struct{}, doneCh chan agent.CompactResult) tea.Cmd {
 	return func() tea.Msg {
@@ -3729,8 +3993,11 @@ func truncateToWidth(s string, w int) string {
 }
 
 // renderAgentStrip renders one block per running agent run: a header line plus
-// the last 2 transcript lines. Returns the rendered string and the per-block
-// row ranges (relative to the strip's first row).
+// the last 2 transcript lines. The strip is capped at agentStripMaxRows visible
+// rows; when more runs exist than fit, the slice starting at agentStripOffset is
+// shown with "↑ more"/"↓ more" indicator rows. The selected run (when the strip
+// has focus) is highlighted. Returns the rendered string and the per-block row
+// ranges (relative to the strip's first row, including any indicator rows).
 func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	if m.agent == nil || m.agent.Runs() == nil {
 		return "", nil
@@ -3740,11 +4007,59 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 		return "", nil
 	}
 	width := m.panelWidth() - 2
+	frame := spinnerFrames[m.dotFrame%len(spinnerFrames)]
+
+	offset := m.agentStripOffset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(runs)-1 {
+		offset = len(runs) - 1
+	}
+
 	var b strings.Builder
 	var blocks []agentStripBlock
 	row := 0
-	frame := spinnerFrames[m.dotFrame%len(spinnerFrames)]
-	for _, ri := range runs {
+
+	// When focused, show a one-line hint above the strip describing the keys.
+	if m.agentStripFocused {
+		b.WriteString(hintStyle.Render(fmt.Sprintf("  agents %d/%d · j/k: move · enter: open · esc: exit", m.agentStripSelected+1, len(runs)))) //nolint
+		b.WriteString("\n")
+		row++
+	}
+
+	// agentStripMaxRows is the hard cap on rows occupied by run blocks plus the
+	// "↑ more"/"↓ more" indicators (the focus hint above is separate chrome).
+	// runRows counts only run-block rows; the budget is the cap minus the rows
+	// reserved for whichever indicators are shown.
+	showUp := offset > 0
+	if showUp {
+		b.WriteString(hintStyle.Render("  ↑ more") + "\n")
+		row++
+	}
+
+	runRows := 0
+	rendered := 0
+	for i := offset; i < len(runs); i++ {
+		ri := runs[i]
+		// A block is 1 header + up to 2 transcript lines.
+		lines := ri.LastLines(2)
+		blockRows := 1 + len(lines)
+		// Reserve indicator rows: 1 for "↑ more" if scrolled, 1 for "↓ more" if
+		// more runs follow this one.
+		reserve := 0
+		if showUp {
+			reserve++
+		}
+		if i < len(runs)-1 {
+			reserve++
+		}
+		// Always render at least one block even if it exceeds the budget,
+		// otherwise a tall first block could render nothing.
+		if rendered > 0 && runRows+blockRows+reserve > agentStripMaxRows {
+			break
+		}
+
 		start := row
 		status := string(ri.Status)
 		icon := frame
@@ -3754,15 +4069,102 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 			icon = "✗"
 		}
 		head := fmt.Sprintf("▸ %-10s %s %s", ri.Name, icon, status)
-		b.WriteString(truncateToWidth(head, width) + "\n")
+		selected := m.agentStripFocused && i == m.agentStripSelected
+		if selected {
+			b.WriteString(selectedStyle.Render(truncateToWidth(head, width)) + "\n")
+		} else {
+			b.WriteString(truncateToWidth(head, width) + "\n")
+		}
 		row++
-		for _, ln := range ri.LastLines(2) {
+		for _, ln := range lines {
 			b.WriteString(hintStyle.Render("  │ "+truncateToWidth(ln, width-4)) + "\n")
 			row++
 		}
 		blocks = append(blocks, agentStripBlock{runID: ri.ID, rowStart: start, rowEnd: row})
+		runRows += blockRows
+		rendered++
 	}
+
+	if offset+rendered < len(runs) {
+		b.WriteString(hintStyle.Render(fmt.Sprintf("  ↓ more (%d)", len(runs)-offset-rendered)) + "\n")
+		row++
+	}
+
 	return strings.TrimRight(b.String(), "\n"), blocks
+}
+
+// agentStripRunCount returns the number of agent runs, used for clamping the
+// strip's selection and scroll offset.
+func (m model) agentStripRunCount() int {
+	if m.agent == nil || m.agent.Runs() == nil {
+		return 0
+	}
+	return len(m.agent.Runs().Snapshot())
+}
+
+// agentStripVisibleCount returns how many runs render starting at the given
+// offset, given the agentStripMaxRows cap. It mirrors renderAgentStrip's row
+// accounting so callers can keep the selection inside the visible window.
+func (m model) agentStripVisibleCount(offset int) int {
+	runs := m.agent.Runs().Snapshot()
+	if offset < 0 || offset >= len(runs) {
+		return 0
+	}
+	showUp := offset > 0
+	runRows := 0
+	rendered := 0
+	for i := offset; i < len(runs); i++ {
+		blockRows := 1 + len(runs[i].LastLines(2))
+		reserve := 0
+		if showUp {
+			reserve++
+		}
+		if i < len(runs)-1 {
+			reserve++
+		}
+		if rendered > 0 && runRows+blockRows+reserve > agentStripMaxRows {
+			break
+		}
+		runRows += blockRows
+		rendered++
+	}
+	return rendered
+}
+
+// clampAgentStrip keeps the selected index and scroll offset within bounds and
+// scrolls the offset so the selected run stays visible.
+func (m *model) clampAgentStrip() {
+	n := m.agentStripRunCount()
+	if n == 0 {
+		m.agentStripSelected = 0
+		m.agentStripOffset = 0
+		m.agentStripFocused = false
+		return
+	}
+	if m.agentStripSelected < 0 {
+		m.agentStripSelected = 0
+	}
+	if m.agentStripSelected > n-1 {
+		m.agentStripSelected = n - 1
+	}
+	if m.agentStripOffset < 0 {
+		m.agentStripOffset = 0
+	}
+	if m.agentStripOffset > n-1 {
+		m.agentStripOffset = n - 1
+	}
+	// Scroll up if the selection is above the window.
+	if m.agentStripSelected < m.agentStripOffset {
+		m.agentStripOffset = m.agentStripSelected
+	}
+	// Scroll down until the selection falls inside the visible window.
+	for m.agentStripOffset < m.agentStripSelected {
+		count := m.agentStripVisibleCount(m.agentStripOffset)
+		if count == 0 || m.agentStripSelected < m.agentStripOffset+count {
+			break
+		}
+		m.agentStripOffset++
+	}
 }
 
 // openAgentDetail pushes a drill-in view for the given run id.
@@ -3825,11 +4227,11 @@ func (m model) renderAssistantText(text string) string {
 	for {
 		start, tagLen := findThinkingStart(text)
 		if start < 0 {
-			b.WriteString(m.styles.Text.Render(text))
+			b.WriteString(renderMarkdownBold(text, m.styles.Text))
 			break
 		}
 		if start > 0 {
-			b.WriteString(m.styles.Text.Render(text[:start]))
+			b.WriteString(renderMarkdownBold(text[:start], m.styles.Text))
 		}
 		remaining := text[start+tagLen:]
 		end, endLen := findThinkingEnd(remaining)
@@ -3843,6 +4245,52 @@ func (m model) renderAssistantText(text string) string {
 			b.WriteString(m.styles.Thinking.Render(remaining[:end]))
 		}
 		text = remaining[end+endLen:]
+	}
+	return b.String()
+}
+
+func renderMarkdownBold(text string, normalStyle lipgloss.Style) string {
+	boldStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#da702c")).Bold(true)
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3aa99f")).Bold(true)
+	var b strings.Builder
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "# ") {
+			b.WriteString(titleStyle.Render(strings.TrimPrefix(line, "# ")))
+		} else if strings.HasPrefix(line, "## ") {
+			b.WriteString(titleStyle.Render(strings.TrimPrefix(line, "## ")))
+		} else if strings.HasPrefix(line, "### ") {
+			b.WriteString(titleStyle.Render(strings.TrimPrefix(line, "### ")))
+		} else {
+			rendered := renderBoldInLine(line, normalStyle, boldStyle)
+			b.WriteString(rendered)
+		}
+		if i < len(lines)-1 {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+func renderBoldInLine(line string, normalStyle, boldStyle lipgloss.Style) string {
+	var b strings.Builder
+	for {
+		start := strings.Index(line, "**")
+		if start < 0 {
+			b.WriteString(normalStyle.Render(line))
+			break
+		}
+		if start > 0 {
+			b.WriteString(normalStyle.Render(line[:start]))
+		}
+		line = line[start+2:]
+		end := strings.Index(line, "**")
+		if end < 0 {
+			b.WriteString(normalStyle.Render("**" + line))
+			break
+		}
+		b.WriteString(boldStyle.Render(line[:end]))
+		line = line[end+2:]
 	}
 	return b.String()
 }
@@ -3887,7 +4335,7 @@ func (m model) View() tea.View {
 }
 
 func (m model) mouseEnabled() bool {
-	return m.config == nil || m.config.Ocode == nil || m.config.Ocode.TUI.Mouse == nil || *m.config.Ocode.TUI.Mouse
+	return m.config == nil || m.config.Ocode.TUI.Mouse == nil || *m.config.Ocode.TUI.Mouse
 }
 
 func (m model) renderContent() string {
@@ -3982,21 +4430,21 @@ func (m *model) renderStatus() string {
 	supportsReasoning := m.config != nil && agent.ModelSupportsThinking(m.config.Model)
 	switch m.activeTab {
 	case tabFiles:
-		suffix = " | i: edit | ^S: save | n/N: new | r: rename | D: delete | y: copy path | R: reload | alt+[/]: tab"
+		suffix = " · i: edit · ^S: save · n/N: new · r: rename · D: delete · y: copy path · R: reload · alt+[/]: tab"
 	case tabGit:
-		suffix = " | tab: cycle panel | s: stage | u: unstage | c: commit | alt+[/]/ctrl+shift+[/]: switch tab"
+		suffix = " · tab: cycle panel · s: stage · u: unstage · c: commit · alt+[/]/ctrl+shift+[/]: switch tab"
 	case tabLog:
-		suffix = " | j/k: scroll | c: clear | alt+[/]/ctrl+shift+[/]: switch tab"
+		suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
 		if supportsReasoning {
-			suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry | ctrl+t: reasoning"
+			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader · ctrl+o: yolo · ctrl+y: retry · ctrl+t: reasoning"
 		} else {
-			suffix = " | tab: agent | ctrl+p: palette | ctrl+x: leader | ctrl+o: yolo | ctrl+y: retry"
+			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader · ctrl+o: yolo · ctrl+y: retry"
 		}
 		if m.ctrlCPressed {
-			suffix = " | ctrl+c again to quit"
+			suffix = " · ctrl+c again to quit"
 		} else if m.streaming {
-			suffix = " | esc: stop"
+			suffix = " · esc: stop"
 		}
 	}
 	llmState := "○ idle"
@@ -4022,8 +4470,17 @@ func (m *model) renderStatus() string {
 		reasoningState = fmt.Sprintf(" | Reasoning: %s", thinkingBudgetLabels[m.thinkingLevelIdx])
 	}
 	width := m.statusContentWidth()
-	text := fmt.Sprintf(" LLM: %s | Agent: %s | Model: %s%s | Session: %s%s%s%s%s", llmState, agentName, m.currentModelName(), reasoningState, m.sessionID, permissionMode, compactState, jobState, suffix)
-	return m.styles.Status.Width(width).Render(ansi.Truncate(text, width, "..."))
+
+	// First line: status info on left
+	leftStatus := fmt.Sprintf(" LLM: %s · Agent: %s · Model: %s%s%s%s%s", llmState, agentName, m.currentModelName(), reasoningState, permissionMode, compactState, jobState)
+
+	// Second line: session ID and hints
+	rightContent := fmt.Sprintf("Session: %s%s", m.sessionID, suffix)
+
+	line1 := m.styles.Status.Width(width).Render(ansi.Truncate(leftStatus, width, "..."))
+	line2 := m.styles.Hint.Render(ansi.Truncate(rightContent, width, "..."))
+
+	return line1 + "\n" + line2 + "\n"
 }
 
 func (m model) renderStoppedIndicator() string {
@@ -4378,8 +4835,12 @@ func (m model) renderSidebar() string {
 		contentHeight = 1
 	}
 
+	// Reserve space for topLines and bottomLines, rest goes to scrollBox
+	minScrollHeight := 3
+	spaceForScroll := maxInt(minScrollHeight, contentHeight-len(data.topLines)-len(data.bottomLines)-2)
+
 	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
-	visibleScrollLines := scrollBoxHeight - 2
+	visibleScrollLines := minInt(scrollBoxHeight-2, spaceForScroll)
 	if visibleScrollLines < 1 {
 		visibleScrollLines = 1
 	}
@@ -4392,12 +4853,18 @@ func (m model) renderSidebar() string {
 		}
 	}
 	scrollContent := strings.Join(visible, "\n")
-	scrollBox := borderStyle.Width(sidebarColumnWidth - 4).Render(constrainView(scrollContent, sidebarColumnWidth-8, visibleScrollLines))
+	scrollBox := cleanBoxStyle.Width(sidebarColumnWidth).Render(constrainView(scrollContent, sidebarColumnWidth, visibleScrollLines))
 
-	lines := append([]string{}, data.topLines...)
-	lines = append(lines, scrollBox)
-	lines = append(lines, data.bottomLines...)
-	sections := constrainView(strings.Join(lines, "\n"), sidebarColumnWidth-4, contentHeight)
+	// Build sections preserving top and bottom lines
+	allLines := append([]string{}, data.topLines...)
+	allLines = append(allLines, strings.Split(scrollBox, "\n")...)
+	allLines = append(allLines, data.bottomLines...)
+	sections := strings.Join(allLines, "\n")
+
+	// Only constrain if needed and prefer to keep bottom lines
+	if len(allLines) > contentHeight {
+		sections = constrainViewPreservingBottom(sections, sidebarColumnWidth-4, contentHeight, len(data.bottomLines))
+	}
 	return borderStyle.Width(sidebarColumnWidth).Render(header + "\n" + sections)
 }
 
@@ -4460,6 +4927,13 @@ func clampInt(v, lo, hi int) int {
 
 func maxInt(a, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
@@ -4591,10 +5065,10 @@ func (m *model) refreshLogViewport() {
 }
 
 func (m model) renderLogTab() string {
-	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  debug log")
+	header := m.styles.Header.Render("◆ ocode") + m.styles.Hint.Render("  ·  debug log")
 	logSB := renderScrollbar(m.logViewport.Height(), m.logViewport.TotalLineCount(), m.logViewport.VisibleLineCount(), m.logViewport.YOffset())
 	logContent := lipgloss.JoinHorizontal(lipgloss.Top, m.logViewport.View(), logSB)
-	content := borderStyle.Width(m.panelWidth() - 2).Render(logContent)
+	content := m.styles.Border.Width(m.panelWidth() - 2).Render(logContent)
 	status := m.renderStatus()
 	left := lipgloss.JoinVertical(lipgloss.Left, header, content, status)
 	if m.sidebarEnabled() {
@@ -4847,6 +5321,33 @@ func (m *model) filesAddToContext() tea.Cmd {
 			content:   fileCtx,
 			startLine: startLine - 1,
 			endLine:   endLine,
+		}
+	}
+}
+
+func (m *model) makeCommitMsgGenerator(cfg *config.Config) func(diff string) tea.Cmd {
+	return func(diff string) tea.Cmd {
+		return func() tea.Msg {
+			model := cfg.Ocode.CommitMsgModel
+			if model == "" {
+				model = "openai/gpt-5.4-mini"
+			}
+			client := agent.NewClient(cfg, model)
+			if client == nil {
+				return gitCommitMsgMsg{err: fmt.Errorf("no LLM configured")}
+			}
+			if len(diff) > 8000 {
+				diff = diff[:8000]
+			}
+			prompt := cfg.Ocode.CommitMsgPrompt
+			if prompt == "" {
+				prompt = "Write a concise git commit message (subject line only, max 72 chars) for these changes. Output only the commit message text, nothing else:"
+			}
+			msg, err := client.Chat([]agent.Message{{Role: "user", Content: prompt + "\n\n" + diff}}, nil)
+			if err != nil {
+				return gitCommitMsgMsg{err: err}
+			}
+			return gitCommitMsgMsg{text: strings.TrimSpace(msg.Content)}
 		}
 	}
 }

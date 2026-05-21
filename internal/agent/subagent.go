@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
@@ -159,6 +158,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	if spec.MaxSteps > 0 {
 		subAgent.maxSteps = spec.MaxSteps
 	}
+
+	// Propagate the permission-ask callback so sub-agent tool calls that need a
+	// decision bubble up to the main TUI. Set before the spec-permissions block
+	// so it applies whether or not the sub-agent gets its own PermissionManager.
+	subAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
 
 	if len(spec.Permissions) > 0 {
 		_, pm := buildPermissionManagerFromAgentWithDiags(spec.Permissions)
@@ -403,21 +407,13 @@ func (t TaskStatusTool) Parallel() bool      { return true }
 func (t TaskStatusTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "task_status",
-		"description": "Poll the status of a background subagent task launched with the task tool. Use this for tasks started with task(run_in_background=true). Returns task_id, state, and task_result/task_error blocks.",
+		"description": "Poll the status of a background subagent task launched with the task tool. Use this for tasks started with task(run_in_background=true). Returns the current task_id, state, and task_result/task_error blocks immediately; call again to keep polling.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"task_id": map[string]interface{}{
 					"type":        "string",
 					"description": "The task_id returned by the task tool",
-				},
-				"wait": map[string]interface{}{
-					"type":        "boolean",
-					"description": "When true, wait until the task reaches a terminal state or timeout",
-				},
-				"timeout_ms": map[string]interface{}{
-					"type":        "integer",
-					"description": "Maximum milliseconds to wait when wait=true (default: 60000)",
 				},
 			},
 			"required": []string{"task_id"},
@@ -427,9 +423,7 @@ func (t TaskStatusTool) Definition() map[string]interface{} {
 
 func (t TaskStatusTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		TaskID    string `json:"task_id"`
-		Wait      bool   `json:"wait"`
-		TimeoutMS int    `json:"timeout_ms"`
+		TaskID string `json:"task_id"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -439,24 +433,6 @@ func (t TaskStatusTool) Execute(args json.RawMessage) (string, error) {
 	}
 	if t.runs == nil {
 		return "", fmt.Errorf("no agent run registry")
-	}
-
-	if params.Wait {
-		timeout := 60 * time.Second
-		if params.TimeoutMS > 0 {
-			timeout = time.Duration(params.TimeoutMS) * time.Millisecond
-		}
-		deadline := time.Now().Add(timeout)
-		for {
-			run, ok := t.runs.Get(params.TaskID)
-			if !ok {
-				return formatTaskStatus(params.TaskID, "error", fmt.Sprintf("unknown task %s", params.TaskID)), nil
-			}
-			if run.statusValue() != RunRunning || time.Now().After(deadline) {
-				return formatTaskRunStatus(params.TaskID, run), nil
-			}
-			time.Sleep(300 * time.Millisecond)
-		}
 	}
 
 	run, ok := t.runs.Get(params.TaskID)

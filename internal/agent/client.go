@@ -1204,7 +1204,7 @@ func ModelSupportsThinking(modelID string) bool {
 		strings.HasPrefix(model, "glm-4.5") ||
 		strings.HasPrefix(model, "glm-4.6") ||
 		strings.HasPrefix(model, "glm-4.7") ||
-		strings.Contains(model, "grok-4") && strings.Contains(model, "reasoning")
+		(strings.Contains(model, "grok-4") && strings.Contains(model, "reasoning"))
 }
 
 func modelSupportsThinkingFromRegistry(modelID string) (bool, bool) {

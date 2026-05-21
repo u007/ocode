@@ -118,7 +118,7 @@ type Config struct {
 	Hooks          map[string]HookConfig      `json:"hooks"`
 	Formatters     map[string]FormatterConfig `json:"formatters"`
 	RemoteConfig   string                     `json:"remote_config"`
-	Ocode          *OcodeConfig               `json:"-"`
+	Ocode          OcodeConfig                `json:"-"`
 }
 
 func Load() (*Config, error) {

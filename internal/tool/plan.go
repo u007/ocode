@@ -149,19 +149,39 @@ func (t PlanExitTool) Execute(args json.RawMessage) (string, error) {
 
 	planStr := string(content)
 
-	// Check if plan still has template placeholders (incomplete)
-	if containsAll(planStr, []string{"<!--", "-->", "1. \n2. \n3."}) {
-		return fmt.Sprintf("Plan at %s appears incomplete. Finish filling out the plan before exiting.\n\n%s", path, planStr), nil
+	// Verify the user actually filled in implementation steps: after the
+	// "## Implementation Steps" header there must be at least one non-blank,
+	// non-list-marker line of real content.
+	if !hasImplementationContent(planStr) {
+		return fmt.Sprintf("Plan at %s appears incomplete. Add at least one implementation step before exiting.\n\n%s", path, planStr), nil
 	}
 
 	return fmt.Sprintf("Plan ready for implementation:\n\n---\n%s\n---\n\nUse `task` to start implementing this plan.", planStr), nil
 }
 
-func containsAll(s string, substrs []string) bool {
-	for _, sub := range substrs {
-		if !strings.Contains(s, sub) {
-			return false
+// hasImplementationContent reports whether the plan contains at least one
+// non-blank, non-list-marker line under the "## Implementation Steps" header.
+func hasImplementationContent(planStr string) bool {
+	idx := strings.Index(planStr, "## Implementation Steps")
+	if idx < 0 {
+		return false
+	}
+	rest := planStr[idx+len("## Implementation Steps"):]
+	for _, line := range strings.Split(rest, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Stop scanning at the next section header.
+		if strings.HasPrefix(trimmed, "## ") {
+			break
+		}
+		// Strip a leading list/ordered marker and any HTML comment markers.
+		stripped := strings.TrimSpace(strings.TrimLeft(trimmed, "-*0123456789.) "))
+		stripped = strings.TrimSpace(strings.NewReplacer("<!--", "", "-->", "").Replace(stripped))
+		if stripped != "" {
+			return true
 		}
 	}
-	return true
+	return false
 }

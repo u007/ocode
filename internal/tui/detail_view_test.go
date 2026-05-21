@@ -1,6 +1,11 @@
 package tui
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"github.com/jamesmercstudio/ocode/internal/agent"
+)
 
 func TestDetailStackPushPop(t *testing.T) {
 	var s detailStack
@@ -41,5 +46,43 @@ func TestBlockAtRow(t *testing.T) {
 	}
 	if id := blockAtRow(blocks, 99); id != "" {
 		t.Fatalf("row 99 → %q, want empty", id)
+	}
+}
+
+// TestAgentStripRowCap verifies the agent strip never renders more than
+// agentStripMaxRows worth of run/indicator rows even with many runs.
+func TestAgentStripRowCap(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	for i := 0; i < 20; i++ {
+		a.Runs().New("worker")
+	}
+	m := model{agent: a, width: 100}
+
+	strip, blocks := m.renderAgentStrip()
+	lines := strings.Split(strip, "\n")
+	if len(lines) > agentStripMaxRows {
+		t.Fatalf("strip rendered %d rows, cap is %d", len(lines), agentStripMaxRows)
+	}
+	if len(blocks) == 0 {
+		t.Fatal("expected at least one rendered block")
+	}
+	if !strings.Contains(strip, "↓ more") {
+		t.Fatal("expected a '↓ more' indicator with 20 runs")
+	}
+}
+
+// TestAgentStripScrollVisibility verifies the selected run stays inside the
+// visible window after clamping.
+func TestAgentStripScrollVisibility(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	for i := 0; i < 20; i++ {
+		a.Runs().New("worker")
+	}
+	m := model{agent: a, width: 100, agentStripFocused: true, agentStripSelected: 18}
+	m.clampAgentStrip()
+
+	count := m.agentStripVisibleCount(m.agentStripOffset)
+	if m.agentStripSelected < m.agentStripOffset || m.agentStripSelected >= m.agentStripOffset+count {
+		t.Fatalf("selected=%d not in visible window [%d,%d)", m.agentStripSelected, m.agentStripOffset, m.agentStripOffset+count)
 	}
 }

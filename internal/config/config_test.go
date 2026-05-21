@@ -72,14 +72,11 @@ func TestLoadCreatesOcodeConfigFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Ocode == nil {
-		t.Fatal("expected ocode config to load")
-	}
 	if !cfg.Ocode.Compact.Enabled {
 		t.Fatal("expected compact to default to enabled")
 	}
 
-	if err := SaveOcodeConfig(cfg.Ocode); err != nil {
+	if err := SaveOcodeConfig(&cfg.Ocode); err != nil {
 		t.Fatalf("failed to save ocode config: %v", err)
 	}
 

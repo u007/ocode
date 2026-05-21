@@ -124,7 +124,7 @@ var builtinThemes = map[string]ThemeDefinition{
 	"flexoki": {
 		Colors: ThemeColors{
 			User:       "#CE5D97",
-			Assistant:  "#4385BE",
+			Assistant:  "#DA702C",
 			Header:     "#D14D41",
 			Border:     "#403E3C",
 			Hint:       "#878580",
@@ -532,10 +532,10 @@ func ApplyThemeColors(name string) Styles {
 		Status:    lipgloss.NewStyle().Foreground(lipgloss.Color(c.StatusFg)).Background(lipgloss.Color(c.StatusBg)).Padding(0, 1).Bold(true),
 		Success:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Success)),
 		Error:     lipgloss.NewStyle().Foreground(lipgloss.Color(c.Error)),
-		Text:      lipgloss.NewStyle().Foreground(lipgloss.Color(themeColor(c.Text, "#ffffff"))),
-		Thinking:  lipgloss.NewStyle().Foreground(lipgloss.Color(themeColor(c.Thinking, c.Dim))).Italic(true),
+		Text:      lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)),
+		Thinking:  lipgloss.NewStyle().Foreground(lipgloss.Color(themeColor(c.Thinking, c.Accent))).Bold(true).Italic(true),
 		Dim:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim)),
-		ToolBox:   lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Dim)).Padding(0, 1),
+		ToolBox:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(1, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
 	}
 	setUserStyle(s.User)
 	setAssistantStyle(s.Assistant)

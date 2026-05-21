@@ -128,7 +128,7 @@ func TestThemePickerSelectionSwitchesTheme(t *testing.T) {
 	m := model{
 		input:        textarea.New(),
 		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
-		config:       &config.Config{Ocode: &config.OcodeConfig{}},
+		config:       &config.Config{Ocode: config.OcodeConfig{}},
 		showPicker:   true,
 		pickerKind:   "theme",
 		pickerItems:  themes,
@@ -213,7 +213,7 @@ func TestEditorCommandSetsEditor(t *testing.T) {
 		input:    newTestTextarea(),
 		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
 		files:    newFilesModel("."),
-		config:   &config.Config{Ocode: &config.OcodeConfig{}},
+		config:   &config.Config{Ocode: config.OcodeConfig{}},
 	}
 
 	updated, cmd := m.handleCommand("/editor cat")
@@ -253,7 +253,7 @@ func TestEditorModeCommandValidMode(t *testing.T) {
 	m := model{
 		input:    textarea.New(),
 		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
-		config:   &config.Config{Ocode: &config.OcodeConfig{}},
+		config:   &config.Config{Ocode: config.OcodeConfig{}},
 		files:    newFilesModel("."),
 	}
 

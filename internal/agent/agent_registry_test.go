@@ -417,8 +417,7 @@ func TestTaskToolReturnsChildResult(t *testing.T) {
 	taskTool := TaskTool{mainAgent: a, registry: reg}
 	a.tools["task"] = taskTool
 
-	a.config.Ocode = &config.OcodeConfig{}
-	a.config.Ocode.Permissions = config.PermissionConfig{Mode: "yolo"}
+	a.config.Ocode = config.OcodeConfig{Permissions: config.PermissionConfig{Mode: "yolo"}}
 
 	result, err := taskTool.Execute(json.RawMessage(`{"prompt": "test", "agent": "general"}`))
 	if err != nil {

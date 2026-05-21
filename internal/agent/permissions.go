@@ -47,6 +47,17 @@ type PermissionDecision struct {
 	Request *PermissionRequest
 }
 
+// PermissionResponse is returned by an interactive permission callback. Level
+// answers the current request. PersistRule/PersistTool additionally tell the
+// agent handling the request to update its own PermissionManager, so an
+// "always allow" answer applies immediately inside the currently running
+// sub-agent as well as wherever the UI persists the setting.
+type PermissionResponse struct {
+	Level       PermissionLevel
+	PersistRule bool
+	PersistTool bool
+}
+
 type PermissionManager struct {
 	mode            PermissionMode
 	rules           map[string]PermissionLevel

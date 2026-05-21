@@ -1078,7 +1078,7 @@ func TestMouseModeDefaultsOnWithoutConfig(t *testing.T) {
 
 func TestMouseModeCanBeDisabledByConfig(t *testing.T) {
 	disabled := false
-	m := model{ready: true, input: newTestTextarea(), config: &config.Config{Ocode: &config.OcodeConfig{}}}
+	m := model{ready: true, input: newTestTextarea(), config: &config.Config{Ocode: config.OcodeConfig{}}}
 	m.config.Ocode.TUI.Mouse = &disabled
 
 	if got := m.View().MouseMode; got != tea.MouseModeNone {
