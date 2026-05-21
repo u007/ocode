@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -94,4 +97,87 @@ func TestParseHunks(t *testing.T) {
 	if !strings.HasPrefix(hunks[0].header, "@@ -1,3") {
 		t.Fatalf("unexpected hunk 0 header: %s", hunks[0].header)
 	}
+}
+
+func TestGitStagePathStartingWithDashUsesPathSeparator(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	writeFileForGitTest(t, dir, "--all", "dash\n")
+	writeFileForGitTest(t, dir, "other.txt", "changed\n")
+
+	m := gitModel{
+		workDir:        dir,
+		section:        gitSectionChanges,
+		panel:          gitPanelFiles,
+		unstagedFiles:  []gitFile{{status: "M", path: "other.txt"}},
+		untrackedFiles: []gitFile{{status: "?", path: "--all"}},
+		filesCursor:    1,
+		selectedFiles:  map[int]bool{1: true},
+	}
+	m, _ = m.handleFilesKey("s")
+
+	staged := gitOutputForTest(t, dir, "diff", "--cached", "--name-only")
+	if staged != "--all" {
+		t.Fatalf("staged files = %q, want only --all", staged)
+	}
+}
+
+func TestGitUnstagePathStartingWithDashUsesPathSeparator(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	writeFileForGitTest(t, dir, "--all", "dash\n")
+	writeFileForGitTest(t, dir, "other.txt", "changed\n")
+	gitRunForTest(t, dir, "add", "--", "--all", "other.txt")
+
+	m := gitModel{
+		workDir:       dir,
+		section:       gitSectionChanges,
+		panel:         gitPanelFiles,
+		stagedFiles:   []gitFile{{status: "A", path: "--all", staged: true}, {status: "M", path: "other.txt", staged: true}},
+		filesCursor:   0,
+		selectedFiles: map[int]bool{0: true},
+	}
+	m, _ = m.handleFilesKey("u")
+
+	staged := gitOutputForTest(t, dir, "diff", "--cached", "--name-only")
+	if staged != "other.txt" {
+		t.Fatalf("staged files after unstage = %q, want only other.txt", staged)
+	}
+}
+
+func initGitRepoForPathSeparatorTest(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	gitRunForTest(t, dir, "init")
+	gitRunForTest(t, dir, "config", "user.email", "test@example.com")
+	gitRunForTest(t, dir, "config", "user.name", "Test User")
+	writeFileForGitTest(t, dir, "other.txt", "base\n")
+	gitRunForTest(t, dir, "add", "--", "other.txt")
+	gitRunForTest(t, dir, "commit", "-m", "base")
+	return dir
+}
+
+func writeFileForGitTest(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func gitRunForTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+}
+
+func gitOutputForTest(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
 }

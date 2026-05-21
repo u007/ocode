@@ -118,6 +118,9 @@ type gitModel struct {
 	// ai commit message generation
 	generateCommitMsg func(diff string) tea.Cmd
 	generatingMsg     bool
+	// file list filter
+	filterActive bool
+	filterQuery  string
 }
 
 func newGitModel(workDir string) gitModel {
@@ -576,10 +579,24 @@ func (m gitModel) updateStashInput(msg tea.Msg) (gitModel, tea.Cmd) {
 
 func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 	key := msg.String()
+
+	// Global filter activation — works from any panel
+	if m.filterActive {
+		return m.handleFilesKey(key)
+	}
+
 	switch key {
 	case "tab":
 		m.panel = (m.panel + 1) % 3
 		return m, nil
+	case "/":
+		if m.section == gitSectionChanges {
+			m.filterActive = true
+			m.filterQuery = ""
+			m.filesCursor = 0
+			m.panel = gitPanelFiles
+			return m, nil
+		}
 	}
 
 	switch m.panel {
@@ -629,9 +646,43 @@ func (m *gitModel) ensureSelectedFiles() {
 }
 
 func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
+	// Filter mode: handle typing and exit
+	if m.filterActive {
+		switch key {
+		case "esc":
+			m.filterActive = false
+			m.filterQuery = ""
+			m.filesCursor = 0
+			m.loadDiff()
+		case "backspace":
+			if len(m.filterQuery) > 0 {
+				m.filterQuery = m.filterQuery[:len(m.filterQuery)-1]
+				m.filesCursor = 0
+				m.loadDiff()
+			}
+		case "enter":
+			m.filterActive = false
+		default:
+			if len(key) == 1 {
+				m.filterQuery += key
+				m.filesCursor = 0
+				m.loadDiff()
+			}
+		}
+		return m, nil
+	}
+
 	// Clear pending confirmation when user presses any key other than the confirm key
 	if key != "d" && key != "x" {
 		m.pendingAction = ""
+	}
+	// esc clears filter first, then multi-selection
+	if key == "esc" && m.filterQuery != "" {
+		m.filterActive = false
+		m.filterQuery = ""
+		m.filesCursor = 0
+		m.loadDiff()
+		return m, nil
 	}
 	// esc clears multi-selection if active
 	if key == "esc" && len(m.selectedFiles) > 0 {
@@ -747,7 +798,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					}
 				}
 				if len(staged) > 0 {
-					args := append([]string{"add"}, staged...)
+					args := append([]string{"add", "--"}, staged...)
 					if _, err := m.gitRun(args...); err != nil {
 						m.statusMsg = "stage failed: " + err.Error()
 					} else {
@@ -761,7 +812,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				unstaged := m.allUnstagedAndUntracked()
 				if idx < len(unstaged) {
 					f := unstaged[idx]
-					if _, err := m.gitRun("add", f.path); err != nil {
+					if _, err := m.gitRun("add", "--", f.path); err != nil {
 						m.statusMsg = "stage failed: " + err.Error()
 					} else {
 						m.statusMsg = "staged " + f.path
@@ -780,7 +831,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					}
 				}
 				if len(unstaged) > 0 {
-					args := append([]string{"restore", "--staged"}, unstaged...)
+					args := append([]string{"restore", "--staged", "--"}, unstaged...)
 					if _, err := m.gitRun(args...); err != nil {
 						m.statusMsg = "unstage failed: " + err.Error()
 					} else {
@@ -791,7 +842,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				}
 			} else if m.filesCursor < len(m.stagedFiles) {
 				f := m.stagedFiles[m.filesCursor]
-				if _, err := m.gitRun("restore", "--staged", f.path); err != nil {
+				if _, err := m.gitRun("restore", "--staged", "--", f.path); err != nil {
 					m.statusMsg = "unstage failed: " + err.Error()
 				} else {
 					m.statusMsg = "unstaged " + f.path
@@ -812,7 +863,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 							m.statusMsg = "cannot discard untracked file"
 							return m, nil
 						}
-						if _, err := m.gitRun("restore", f.path); err != nil {
+						if _, err := m.gitRun("restore", "--", f.path); err != nil {
 							m.statusMsg = "discard failed: " + err.Error()
 						} else {
 							m.statusMsg = "discarded " + f.path
@@ -1036,6 +1087,9 @@ func (m *gitModel) currentFileList() []gitFile {
 		var all []gitFile
 		all = append(all, m.stagedFiles...)
 		all = append(all, m.allUnstagedAndUntracked()...)
+		if m.filterQuery != "" {
+			all = fuzzyFilterFunc(all, m.filterQuery, func(f gitFile) string { return f.path })
+		}
 		return all
 	}
 	return nil
@@ -1255,7 +1309,7 @@ func (m gitModel) renderHints() string {
 			if len(m.selectedFiles) > 0 {
 				return base + fmt.Sprintf("%d selected — s stage  u unstage  space toggle  esc clear", len(m.selectedFiles))
 			}
-			return base + "s stage  u unstage  space/shift+↑↓ select  d discard  E edit  S stash  c commit  f fetch  p pull  P push"
+			return base + "s stage  u unstage  space/shift+↑↓ select  d discard  E edit  S stash  c commit  / filter  f fetch  p pull  P push"
 		case gitSectionLog:
 			return base + "j/k navigate"
 		case gitSectionStash:
@@ -1330,6 +1384,14 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 		fileLines := m.renderFileList(filesW - 4)
 		filesContent = strings.Join(fileLines, "\n")
 	}
+	if m.filterActive || m.filterQuery != "" {
+		cursor := ""
+		if m.filterActive {
+			cursor = "█"
+		}
+		filterLine := styles.Hint.Render("/ " + m.filterQuery + cursor)
+		filesContent = filterLine + "\n" + filesContent
+	}
 	filesPane := focusBorder(m.panel == gitPanelFiles).Width(filesW - 2).Height(panelH).Render(filesContent)
 
 	diffSB := renderScrollbar(m.diff.Height(), m.diff.TotalLineCount(), m.diff.VisibleLineCount(), m.diff.YOffset())
@@ -1370,9 +1432,19 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 		parts = append(parts, styles.Border.Width(sectW+filesW-2).Render(prompt))
 	}
 	hints := styles.Hint.Render(m.renderHints())
-	statusBar := hints
-	if m.statusMsg != "" {
-		statusBar = hints + "   " + errorStyle.Render(m.statusMsg)
+	var statusBar string
+	if m.filterActive || m.filterQuery != "" {
+		cursor := ""
+		if m.filterActive {
+			cursor = "█"
+		}
+		filterStr := styles.Selected.Render("/ "+m.filterQuery+cursor) + "  " + styles.Hint.Render("esc clear")
+		statusBar = filterStr + "   " + hints
+	} else {
+		statusBar = hints
+		if m.statusMsg != "" {
+			statusBar = hints + "   " + errorStyle.Render(m.statusMsg)
+		}
 	}
 	parts = append(parts, statusBar)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -1382,6 +1454,18 @@ func (m gitModel) renderFileList(width int) []string {
 	var lines []string
 	switch m.section {
 	case gitSectionChanges:
+		if m.filterQuery != "" {
+			// Filtered: flat list, no staged/unstaged headers
+			filtered := m.currentFileList()
+			for i, f := range filtered {
+				line := "  " + f.status + " " + f.path
+				if i == m.filesCursor && m.panel == gitPanelFiles {
+					line = selectedStyle.Width(width).Render(line)
+				}
+				lines = append(lines, line)
+			}
+			break
+		}
 		idx := 0
 		checkmark := func(i int) string {
 			if m.selectedFiles[i] {

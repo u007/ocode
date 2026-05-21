@@ -519,16 +519,18 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	}
 
 	payload := map[string]interface{}{
-		"model":        c.Model,
+		"model":        normalizeOpenAICodexModel(c.Model),
 		"instructions": strings.Join(instructions, "\n\n"),
 		"input":        input,
 		"store":        false,
 		"stream":       true,
 		"include":      []string{"reasoning.encrypted_content"},
+		"text":         map[string]interface{}{"verbosity": "medium"},
 	}
 	if c.ThinkingBudget > 0 {
 		payload["reasoning"] = map[string]interface{}{
-			"effort": reasoningEffortForBudget(c.ThinkingBudget),
+			"effort":  reasoningEffortForBudget(c.ThinkingBudget),
+			"summary": "auto",
 		}
 	}
 
@@ -603,11 +605,12 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 			break
 		}
 		var payload struct {
-			Type  string                 `json:"type"`
-			Model string                 `json:"model"`
-			Delta string                 `json:"delta"`
-			Text  string                 `json:"text"`
-			Item  map[string]interface{} `json:"item"`
+			Type     string                 `json:"type"`
+			Model    string                 `json:"model"`
+			Delta    string                 `json:"delta"`
+			Text     string                 `json:"text"`
+			Item     map[string]interface{} `json:"item"`
+			Response map[string]interface{} `json:"response"`
 		}
 		if err := json.Unmarshal([]byte(data), &payload); err != nil {
 			continue
@@ -628,8 +631,15 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 			if fullText == "" {
 				fullText = payload.Text
 			}
+		case "response.content_part.done":
+			if fullText == "" {
+				fullText = payload.Text
+			}
 		case "response.output_item.done":
 			itemType, _ := payload.Item["type"].(string)
+			if itemText := openAIResponseItemText(payload.Item); itemText != "" && fullText == "" {
+				fullText = itemText
+			}
 			if itemType == "reasoning" || itemType == "function_call" {
 				responseItems = append(responseItems, payload.Item)
 			}
@@ -652,9 +662,17 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 					},
 				})
 			}
-		case "response.completed":
+		case "response.completed", "response.done":
 			if payload.Model != "" {
 				resultModel = payload.Model
+			}
+			if payload.Response != nil {
+				if model, _ := payload.Response["model"].(string); model != "" {
+					resultModel = model
+				}
+				if text := openAIResponseText(payload.Response); text != "" && fullText == "" {
+					fullText = text
+				}
 			}
 		}
 	}
@@ -685,6 +703,74 @@ func (c *GenericClient) openAIResponsesURL() string {
 		return "https://chatgpt.com/backend-api/codex/responses"
 	}
 	return strings.TrimRight(c.BaseURL, "/") + "/responses"
+}
+
+// normalizeOpenAICodexModel mirrors the Codex/opencode OAuth bridge behavior for
+// legacy model aliases while preserving unknown/new model IDs. The ChatGPT Codex
+// backend currently expects newer canonical IDs for the old GPT-5 aliases, but
+// users may still select future IDs from models.dev; those pass through.
+func normalizeOpenAICodexModel(model string) string {
+	switch model {
+	case "gpt-5", "gpt-5-mini", "gpt-5-nano":
+		return "gpt-5.1"
+	case "gpt-5-codex":
+		return "gpt-5.1-codex"
+	case "codex-mini-latest", "gpt-5-codex-mini", "gpt-5-codex-mini-medium", "gpt-5-codex-mini-high":
+		return "gpt-5.1-codex-mini"
+	}
+	for _, suffix := range []string{"-none", "-low", "-medium", "-high", "-xhigh"} {
+		if strings.HasPrefix(model, "gpt-5.1") && strings.HasSuffix(model, suffix) {
+			return strings.TrimSuffix(model, suffix)
+		}
+		if strings.HasPrefix(model, "gpt-5.2") && strings.HasSuffix(model, suffix) {
+			return strings.TrimSuffix(model, suffix)
+		}
+	}
+	return model
+}
+
+func openAIResponseText(response map[string]interface{}) string {
+	if text, _ := response["output_text"].(string); text != "" {
+		return text
+	}
+	if output, ok := response["output"].([]interface{}); ok {
+		var b strings.Builder
+		for _, raw := range output {
+			item, _ := raw.(map[string]interface{})
+			if item == nil {
+				continue
+			}
+			b.WriteString(openAIResponseItemText(item))
+		}
+		return b.String()
+	}
+	return ""
+}
+
+func openAIResponseItemText(item map[string]interface{}) string {
+	if item == nil {
+		return ""
+	}
+	if text, _ := item["text"].(string); text != "" {
+		return text
+	}
+	if content, ok := item["content"].([]interface{}); ok {
+		var b strings.Builder
+		for _, raw := range content {
+			part, _ := raw.(map[string]interface{})
+			if part == nil {
+				continue
+			}
+			partType, _ := part["type"].(string)
+			if partType == "output_text" || partType == "text" || partType == "input_text" || partType == "" {
+				if text, _ := part["text"].(string); text != "" {
+					b.WriteString(text)
+				}
+			}
+		}
+		return b.String()
+	}
+	return ""
 }
 
 // jwtClaim extracts a nested string field from a JWT payload without verifying the signature.

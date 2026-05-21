@@ -9,3 +9,6 @@ todo.md
 .opencode/snapshots
 internal/tui/.opencode
 
+
+# Runtime/editor snapshots
+**/.opencode/snapshots/

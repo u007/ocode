@@ -519,6 +519,35 @@ func TestOnPermissionAskRoutesSubAgentDecision(t *testing.T) {
 	}
 }
 
+func TestOnPermissionAskPersistToolUpdatesCurrentAgent(t *testing.T) {
+	mockTool := &MockTool{name: "ask_tool", result: "executed"}
+	a := NewAgent(nil, nil, nil)
+	a.Permissions().SetRule("ask_tool", PermissionAsk)
+	a.AddTools([]tool.Tool{mockTool})
+
+	asks := 0
+	a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+		asks++
+		return PermissionResponse{Level: PermissionAllow, PersistTool: true}
+	}
+
+	for i := 0; i < 2; i++ {
+		res, err := a.HandleToolCall("ask_tool", json.RawMessage(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res != "executed" {
+			t.Fatalf("call %d got %q, want executed", i+1, res)
+		}
+	}
+	if asks != 1 {
+		t.Fatalf("permission callback called %d times, want 1", asks)
+	}
+	if got := a.Permissions().Check("ask_tool"); got != PermissionAllow {
+		t.Fatalf("permission = %q, want allow", got)
+	}
+}
+
 // TestHandleToolCallEmitsSentinelWithoutCallback verifies the main-agent path
 // is unchanged: with no OnPermissionAsk, an Ask tool yields the sentinel.
 func TestHandleToolCallEmitsSentinelWithoutCallback(t *testing.T) {
