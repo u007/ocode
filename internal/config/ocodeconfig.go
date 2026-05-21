@@ -31,13 +31,15 @@ const (
 )
 
 type OcodeConfig struct {
-	Compact     CompactConfig
-	Permissions PermissionConfig
-	Editor      string
-	EditorMode  string
-	SmallModel  string
-	TUI         TUIConfig
-	Extra       map[string]json.RawMessage
+	Compact         CompactConfig
+	Permissions     PermissionConfig
+	Editor          string
+	EditorMode      string
+	SmallModel      string
+	CommitMsgModel  string
+	CommitMsgPrompt string
+	TUI             TUIConfig
+	Extra           map[string]json.RawMessage
 }
 
 type PermissionConfig struct {
@@ -71,12 +73,14 @@ type tuiConfigFile struct {
 }
 
 type ocodeConfigFile struct {
-	Compact     compactConfigFile `json:"compact"`
-	Permissions PermissionConfig  `json:"permissions"`
-	Editor      string            `json:"editor,omitempty"`
-	EditorMode  string            `json:"editor_mode,omitempty"`
-	SmallModel  string            `json:"small_model,omitempty"`
-	TUI         tuiConfigFile     `json:"tui"`
+	Compact         compactConfigFile `json:"compact"`
+	Permissions     PermissionConfig  `json:"permissions"`
+	Editor          string            `json:"editor,omitempty"`
+	EditorMode      string            `json:"editor_mode,omitempty"`
+	SmallModel      string            `json:"small_model,omitempty"`
+	CommitMsgModel  string            `json:"commit_msg_model,omitempty"`
+	CommitMsgPrompt string            `json:"commit_msg_prompt,omitempty"`
+	TUI             tuiConfigFile     `json:"tui"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -100,8 +104,8 @@ func defaultTUIConfig() TUIConfig {
 	}
 }
 
-func defaultOcodeConfig() *OcodeConfig {
-	return &OcodeConfig{
+func defaultOcodeConfig() OcodeConfig {
+	return OcodeConfig{
 		Compact:     defaultCompactConfig(),
 		Permissions: defaultPermissionConfig(),
 		TUI:         defaultTUIConfig(),
@@ -143,14 +147,14 @@ func LoadOcodeConfig(cfg *Config) error {
 
 	globalPath, err := getGlobalOcodeConfigPath()
 	if err == nil {
-		if err := loadOcodeConfigFile(globalPath, ocode); err != nil {
+		if err := loadOcodeConfigFile(globalPath, &ocode); err != nil {
 			return fmt.Errorf("load global ocode config: %w", err)
 		}
 	}
 
 	projectPath, err := getProjectOcodeConfigPath()
 	if err == nil {
-		if err := loadOcodeConfigFile(projectPath, ocode); err != nil {
+		if err := loadOcodeConfigFile(projectPath, &ocode); err != nil {
 			return fmt.Errorf("load project ocode config: %w", err)
 		}
 	}
@@ -181,31 +185,22 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		return err
 	}
 
+	var file ocodeConfigFile
+	if err := json.Unmarshal(cleanData, &file); err != nil {
+		return err
+	}
+
 	if _, ok := raw["compact"]; ok {
-		var file ocodeConfigFile
-		if err := json.Unmarshal(cleanData, &file); err != nil {
-			return err
-		}
 		applyCompactConfig(&cfg.Compact, file.Compact)
 		delete(raw, "compact")
 	}
 
 	if _, ok := raw["permissions"]; ok {
-		var file ocodeConfigFile
-		if err := json.Unmarshal(cleanData, &file); err != nil {
-			return err
-		}
 		applyPermissionConfig(&cfg.Permissions, file.Permissions)
 		delete(raw, "permissions")
 	}
 
 	if _, ok := raw["editor"]; ok {
-		var file struct {
-			Editor string `json:"editor"`
-		}
-		if err := json.Unmarshal(cleanData, &file); err != nil {
-			return err
-		}
 		if file.Editor != "" {
 			cfg.Editor = file.Editor
 		}
@@ -213,10 +208,6 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 
 	if _, ok := raw["editor_mode"]; ok {
-		var file ocodeConfigFile
-		if err := json.Unmarshal(cleanData, &file); err != nil {
-			return err
-		}
 		if file.EditorMode != "" {
 			cfg.EditorMode = file.EditorMode
 		}
@@ -224,21 +215,27 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 
 	if _, ok := raw["small_model"]; ok {
-		var file ocodeConfigFile
-		if err := json.Unmarshal(cleanData, &file); err != nil {
-			return err
-		}
 		if file.SmallModel != "" {
 			cfg.SmallModel = file.SmallModel
 		}
 		delete(raw, "small_model")
 	}
 
-	if _, ok := raw["tui"]; ok {
-		var file ocodeConfigFile
-		if err := json.Unmarshal(cleanData, &file); err != nil {
-			return err
+	if _, ok := raw["commit_msg_model"]; ok {
+		if file.CommitMsgModel != "" {
+			cfg.CommitMsgModel = file.CommitMsgModel
 		}
+		delete(raw, "commit_msg_model")
+	}
+
+	if _, ok := raw["commit_msg_prompt"]; ok {
+		if file.CommitMsgPrompt != "" {
+			cfg.CommitMsgPrompt = file.CommitMsgPrompt
+		}
+		delete(raw, "commit_msg_prompt")
+	}
+
+	if _, ok := raw["tui"]; ok {
 		applyTUIConfig(&cfg.TUI, file.TUI)
 		delete(raw, "tui")
 	}
@@ -332,7 +329,8 @@ func SaveOcodeConfig(cfg *OcodeConfig) error {
 
 func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg == nil {
-		cfg = defaultOcodeConfig()
+		d := defaultOcodeConfig()
+		cfg = &d
 	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -351,6 +349,12 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.SmallModel != "" {
 		payload["small_model"] = cfg.SmallModel
+	}
+	if cfg.CommitMsgModel != "" {
+		payload["commit_msg_model"] = cfg.CommitMsgModel
+	}
+	if cfg.CommitMsgPrompt != "" {
+		payload["commit_msg_prompt"] = cfg.CommitMsgPrompt
 	}
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
@@ -461,19 +465,19 @@ func loadFullOcodeConfig() (*OcodeConfig, error) {
 
 	globalPath, err := getGlobalOcodeConfigPath()
 	if err == nil {
-		if err := loadOcodeConfigFile(globalPath, ocode); err != nil && !os.IsNotExist(err) {
+		if err := loadOcodeConfigFile(globalPath, &ocode); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 	}
 
 	projectPath, err := getProjectOcodeConfigPath()
 	if err == nil {
-		if err := loadOcodeConfigFile(projectPath, ocode); err != nil && !os.IsNotExist(err) {
+		if err := loadOcodeConfigFile(projectPath, &ocode); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 	}
 
-	return ocode, nil
+	return &ocode, nil
 }
 
 func SaveTUITheme(theme string) error {

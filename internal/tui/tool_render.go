@@ -292,8 +292,8 @@ func renderDiff(content string, st Styles) string {
 }
 
 func renderUnifiedDiff(content string, st Styles) string {
-	addStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#2ECC71")).Background(lipgloss.Color("#1a3326")).Bold(true)
-	delStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5C57")).Background(lipgloss.Color("#3b1a1a")).Bold(true)
+	addStyle := st.Success.Copy().Background(lipgloss.Color("#050805")).Bold(true)
+	delStyle := st.Error.Copy().Background(lipgloss.Color("#0a0505")).Bold(true)
 	hunkStyle := lipgloss.NewStyle().Foreground(st.Header.GetForeground()).Bold(true)
 	metaStyle := lipgloss.NewStyle().Foreground(st.Hint.GetForeground()).Faint(true)
 	fileStyle := lipgloss.NewStyle().Foreground(st.Header.GetForeground()).Bold(true)

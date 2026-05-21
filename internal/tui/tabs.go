@@ -1,9 +1,5 @@
 package tui
 
-import (
-	"charm.land/lipgloss/v2"
-)
-
 const (
 	tabChat  = 0
 	tabFiles = 1
@@ -20,7 +16,7 @@ func renderTabBar(active int, unread bool) string {
 	out := ""
 	for i, label := range labels {
 		if i == active {
-			out += lipgloss.NewStyle().Bold(true).Reverse(true).Padding(0, 1).Render(label)
+			out += selectedStyle.Padding(0, 1).Render(label)
 		} else {
 			out += hintStyle.Padding(0, 1).Render(label)
 		}

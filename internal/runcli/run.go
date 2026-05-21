@@ -52,7 +52,7 @@ func Run(args []string) error {
 	if *model != "" {
 		cfg.Model = *model
 	}
-	if *yolo && cfg.Ocode != nil {
+	if *yolo {
 		cfg.Ocode.Permissions.Mode = string(agent.PermissionModeYOLO)
 	}
 

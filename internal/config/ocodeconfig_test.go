@@ -129,7 +129,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 
 		cfg := defaultOcodeConfig()
 		cfg.EditorMode = EditorModeTmuxSplit
-		err := SaveOcodeConfig(cfg)
+		err := SaveOcodeConfig(&cfg)
 		if err != nil {
 			t.Fatalf("SaveOcodeConfig failed: %v", err)
 		}
@@ -164,7 +164,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 
 		cfg := defaultOcodeConfig()
 		cfg.EditorMode = EditorModeExternal
-		err := SaveOcodeConfig(cfg)
+		err := SaveOcodeConfig(&cfg)
 		if err != nil {
 			t.Fatalf("SaveOcodeConfig failed: %v", err)
 		}
@@ -192,7 +192,7 @@ func TestEditorModeLoadSave(t *testing.T) {
 		cfg := defaultOcodeConfig()
 		cfg.Editor = "nvim"
 		cfg.EditorMode = EditorModeTmuxWindow
-		err := SaveOcodeConfig(cfg)
+		err := SaveOcodeConfig(&cfg)
 		if err != nil {
 			t.Fatalf("SaveOcodeConfig failed: %v", err)
 		}

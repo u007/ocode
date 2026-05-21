@@ -957,7 +957,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 			}
 		}
 		if i == m.cursor {
-			line = selectedStyle.Width(treeW - 2).Render(line)
+			line = styles.Selected.Width(treeW - 2).Render(line)
 		}
 		treeLines = append(treeLines, line)
 	}
@@ -979,28 +979,28 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	}
 	previewContent := lipgloss.JoinHorizontal(lipgloss.Top, previewBody, previewSB)
 	if header := m.previewHeader(); header != "" {
-		previewContent = hintStyle.Render(header) + "\n" + previewContent
+		previewContent = styles.Hint.Render(header) + "\n" + previewContent
 	}
 	if m.mode == filesModeNormal && m.previewEditable {
 		hint := "tab jump  i vim edit  e external  E choose editor  a add to context  /editor set default"
 		if isTmuxMode(m.editorMode) {
 			hint = "tab jump  i vim edit  e " + m.tmuxOpenHint() + "  E choose editor  a add to context  /editor set default"
 		}
-		previewContent = hintStyle.Render(hint) + "\n" + previewContent
+		previewContent = styles.Hint.Render(hint) + "\n" + previewContent
 	}
 	if m.mode == filesModeEdit {
-		previewContent = hintStyle.Render("vim edit: i/a insert  esc normal  :w save  :q quit  :q! discard  :wq save+quit") + "\n" + previewContent
+		previewContent = styles.Hint.Render("vim edit: i/a insert  esc normal  :w save  :q quit  :q! discard  :wq save+quit") + "\n" + previewContent
 	}
 	if m.choosingEditor {
 		previewContent = m.editorPickerView(previewW-4, styles)
 	} else if m.mode == filesModePrompt {
-		previewContent = hintStyle.Render(m.statusMsg) + "\n" + m.promptInput.View()
+		previewContent = styles.Hint.Render(m.statusMsg) + "\n" + m.promptInput.View()
 	} else if m.mode == filesModeDeleteConfirm {
-		previewContent = hintStyle.Render(m.statusMsg) + "\n" + hintStyle.Render("press y to confirm, esc/n to cancel")
+		previewContent = styles.Hint.Render(m.statusMsg) + "\n" + styles.Hint.Render("press y to confirm, esc/n to cancel")
 	} else if m.statusMsg != "" {
-		previewContent = hintStyle.Render(m.statusMsg) + "\n\n" + previewContent
+		previewContent = styles.Hint.Render(m.statusMsg) + "\n\n" + previewContent
 	} else if m.editor != "" {
-		previewContent = hintStyle.Render("editor: "+m.editor+"  (E to change)") + "\n\n" + previewContent
+		previewContent = styles.Hint.Render("editor: "+m.editor+"  (E to change)") + "\n\n" + previewContent
 	}
 	previewPane := focusBorder(m.panel == filesPanelPreview).Width(previewW - 2).Render(previewContent)
 
@@ -1011,7 +1011,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	if exitPending {
 		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
 	} else {
-		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
+		exitBtn = styles.Hint.Padding(0, 1).Render("\u2715 exit")
 	}
 	headerLeft := styles.Header.Render("\u25c6 ocode  Files")
 	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
@@ -1028,7 +1028,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 			results = results[:3]
 		}
 		preview = strings.Join(results, "  ")
-		fuzzyBar = hintStyle.Render("/ " + m.query + "  " + preview)
+		fuzzyBar = styles.Hint.Render("/ " + m.query + "  " + preview)
 	}
 
 	parts := []string{header, row}
@@ -1042,13 +1042,13 @@ func (m filesModel) editorPickerView(width int, styles Styles) string {
 	choices := m.editorChoices()
 	lines := []string{
 		styles.Header.Render("Choose editor"),
-		hintStyle.Render("j/k move  enter select+open  esc cancel"),
+		styles.Hint.Render("j/k move  enter select+open  esc cancel"),
 		"",
 	}
 	for i, choice := range choices {
 		line := "  " + choice
 		if i == m.editorCursor {
-			line = selectedStyle.Width(width).Render("> " + choice)
+			line = styles.Selected.Width(width).Render("> " + choice)
 		}
 		lines = append(lines, line)
 	}

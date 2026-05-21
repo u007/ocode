@@ -424,7 +424,7 @@ func TestAgentStep(t *testing.T) {
 func TestCompactSummaryClientUsesOverride(t *testing.T) {
 	a := &Agent{
 		client: &MockClient{},
-		config: &config.Config{Ocode: &config.OcodeConfig{Compact: config.CompactConfig{
+		config: &config.Config{Ocode: config.OcodeConfig{Compact: config.CompactConfig{
 			SummaryProvider: "openai",
 			SummaryModel:    "gpt-4o-mini",
 		}}},
@@ -476,6 +476,60 @@ func TestAgentToolExecution(t *testing.T) {
 	}
 	if msgs[1].Role != "tool" || msgs[1].Content != "success" {
 		t.Errorf("unexpected tool result: %+v", msgs[1])
+	}
+}
+
+// TestOnPermissionAskRoutesSubAgentDecision verifies that when OnPermissionAsk
+// is set (the sub-agent path), an Ask-level tool call invokes the callback and
+// acts on the returned level instead of emitting the PERMISSION_ASK sentinel.
+func TestOnPermissionAskRoutesSubAgentDecision(t *testing.T) {
+	mockTool := &MockTool{name: "ask_tool", result: "executed"}
+	a := NewAgent(nil, nil, nil)
+	a.Permissions().SetRule("ask_tool", PermissionAsk)
+	a.AddTools([]tool.Tool{mockTool})
+
+	// Allow → callback invoked, tool executes.
+	var gotReq *PermissionRequest
+	a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+		gotReq = &req
+		return PermissionResponse{Level: PermissionAllow}
+	}
+	res, err := a.HandleToolCall("ask_tool", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotReq == nil || gotReq.ToolName != "ask_tool" {
+		t.Fatalf("callback not invoked with ask_tool request: %+v", gotReq)
+	}
+	if res != "executed" {
+		t.Fatalf("allow path: got %q, want executed", res)
+	}
+	if strings.HasPrefix(res, "PERMISSION_ASK:") {
+		t.Fatal("sentinel should not be emitted when OnPermissionAsk is set")
+	}
+
+	// Deny → tool does not execute.
+	a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse { return PermissionResponse{Level: PermissionDeny} }
+	res, err = a.HandleToolCall("ask_tool", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res, "denied") {
+		t.Fatalf("deny path: got %q, want a denied message", res)
+	}
+}
+
+// TestHandleToolCallEmitsSentinelWithoutCallback verifies the main-agent path
+// is unchanged: with no OnPermissionAsk, an Ask tool yields the sentinel.
+func TestHandleToolCallEmitsSentinelWithoutCallback(t *testing.T) {
+	a := NewAgent(nil, nil, nil)
+	a.Permissions().SetRule("delete", PermissionAsk)
+	res, err := a.HandleToolCall("delete", json.RawMessage(`{"path":"x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(res, "PERMISSION_ASK:") {
+		t.Fatalf("expected PERMISSION_ASK sentinel, got %q", res)
 	}
 }
 

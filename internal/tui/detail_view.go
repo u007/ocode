@@ -71,6 +71,7 @@ func blockAtRow(blocks []agentStripBlock, row int) string {
 func renderRunTranscript(run *agent.AgentRun) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Agent %s (%s) — %s\n\n", run.ID, run.Name, run.Status))
+	b.WriteString("────────────────────────────────────────\n\n")
 	for _, m := range run.TranscriptPublic() {
 		switch m.Role {
 		case "assistant":
@@ -118,5 +119,5 @@ func renderProcessLog(reg *tool.ProcessRegistry, id string) string {
 	if status != tool.ProcRunning {
 		header += fmt.Sprintf(" (exit %d)", code)
 	}
-	return header + "\n\n" + text
+	return header + "\n\n────────────────────────────────────────\n\n" + text
 }

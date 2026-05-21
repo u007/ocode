@@ -36,7 +36,22 @@ type AgentRun struct {
 
 	mu         sync.Mutex
 	transcript []Message
+	done       chan struct{} // closed exactly once when the run reaches a terminal state
+	doneOnce   sync.Once
 }
+
+// closeDone closes the done channel exactly once, so waiters unblock when the
+// run reaches a terminal state (done, failed, or cancelled).
+func (r *AgentRun) closeDone() {
+	r.doneOnce.Do(func() {
+		if r.done != nil {
+			close(r.done)
+		}
+	})
+}
+
+// Done returns a channel that is closed when the run reaches a terminal state.
+func (r *AgentRun) Done() <-chan struct{} { return r.done }
 
 func (r *AgentRun) statusValue() RunStatus {
 	r.mu.Lock()
@@ -88,6 +103,7 @@ func (r *AgentRun) finishOK(result string) {
 	r.Result = result
 	r.EndedAt = time.Now()
 	r.mu.Unlock()
+	r.closeDone()
 }
 
 func (r *AgentRun) finishErr(err string) {
@@ -96,6 +112,7 @@ func (r *AgentRun) finishErr(err string) {
 	r.Err = err
 	r.EndedAt = time.Now()
 	r.mu.Unlock()
+	r.closeDone()
 }
 
 // tryFinishCancelled marks the run as Failed only if it is still Running.
@@ -103,12 +120,17 @@ func (r *AgentRun) finishErr(err string) {
 // without racing with the goroutine that may call finishOK later.
 func (r *AgentRun) tryFinishCancelled() {
 	r.mu.Lock()
+	cancelled := false
 	if r.Status == RunRunning {
 		r.Status = RunFailed
 		r.Err = "cancelled"
 		r.EndedAt = time.Now()
+		cancelled = true
 	}
 	r.mu.Unlock()
+	if cancelled {
+		r.closeDone()
+	}
 }
 
 // AgentRunRegistry holds the main agent's async subagent runs.
@@ -142,6 +164,7 @@ func (r *AgentRunRegistry) New(name string) *AgentRun {
 		Name:      name,
 		Status:    RunRunning,
 		StartedAt: time.Now(),
+		done:      make(chan struct{}),
 	}
 	r.runs[id] = run
 	r.order = append(r.order, id)

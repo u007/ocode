@@ -58,6 +58,19 @@ type Agent struct {
 	// callback receives a CompactResult describing whether compaction
 	// occurred, the splice indices, and the summary message to insert.
 	OnCompact func(CompactResult)
+	// OnPermissionAsk, if set, is invoked synchronously when a tool call
+	// requires a permission decision. It blocks until the user (via the TUI)
+	// responds, returning the permission response. When set, HandleToolCall acts
+	// on the returned level directly instead of emitting the PERMISSION_ASK:
+	// sentinel string. This is set ONLY on sub-agents — the main agent leaves
+	// it nil and keeps the pause-and-resume sentinel flow handled by the TUI.
+	// Sub-agents run in their own goroutines and never reach the TUI's
+	// tool-result handling, so the sentinel path is invisible to them.
+	OnPermissionAsk func(PermissionRequest) PermissionResponse
+	// subAgentPermAsker is the permission-ask callback the TUI installs on the
+	// main agent. It is not used by the main agent itself; it is copied onto
+	// each sub-agent's OnPermissionAsk so sub-agent asks reach the TUI.
+	subAgentPermAsker func(PermissionRequest) PermissionResponse
 	// maxSteps limits the number of agentic iterations. 0 = unlimited.
 	maxSteps int
 	// compactMu serialises async compaction passes so a slow summary call
@@ -118,9 +131,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	a.tools["wait"] = WaitTool{procs: a.procs, runs: a.runs, stopCh: a.stopCh}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)
-		if cfg.Ocode != nil {
-			a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
-		}
+		a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
 	}
 	// Set workDir for path-scoped permission checks
 	if wd, err := os.Getwd(); err == nil {
@@ -360,7 +371,7 @@ func (a *Agent) warnIfNearWindow(promptTokens int64) {
 // agent + active model. Returns Enabled=false when compaction is disabled.
 func (a *Agent) resolveCompactRuntime() compactRuntime {
 	rt := compactRuntime{Enabled: false}
-	if a.config == nil || a.config.Ocode == nil {
+	if a.config == nil {
 		return rt
 	}
 	c := a.config.Ocode.Compact
@@ -494,7 +505,7 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult 
 }
 
 func (a *Agent) compactSummaryClient() LLMClient {
-	if a.config == nil || a.config.Ocode == nil {
+	if a.config == nil {
 		return a.client
 	}
 
@@ -552,6 +563,22 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 			return fmt.Sprintf("denied: tool %q is not permitted by permission rules", name), nil
 		}
 		if decision.Level == PermissionAsk {
+			// When a permission callback is wired (sub-agents), ask the user
+			// synchronously and act on the answer. The PERMISSION_ASK: sentinel
+			// path is used only when no callback is set (the main agent's flow,
+			// where the TUI handles the sentinel in appendAgentMessage).
+			if a.OnPermissionAsk != nil {
+				req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
+				if decision.Request != nil {
+					req = *decision.Request
+				}
+				resp := a.OnPermissionAsk(req)
+				if resp.Level == PermissionAllow {
+					a.applyPermissionResponse(req, resp)
+					return a.executeToolCall(name, args)
+				}
+				return fmt.Sprintf("denied: tool %q denied by user", name), nil
+			}
 			payload, err := json.Marshal(decision.Request)
 			if err != nil {
 				return "", fmt.Errorf("marshal permission request: %w", err)
@@ -732,6 +759,11 @@ func (a *Agent) Cancel() {
 	}
 }
 
+// Done returns a channel closed when the agent is cancelled. Callers blocking
+// on agent-scoped work (e.g. a permission-ask callback) can select on it to
+// unblock cleanly on Shutdown/Cancel instead of leaking a goroutine.
+func (a *Agent) Done() <-chan struct{} { return a.stopCh }
+
 // cancelled reports whether Cancel has been called.
 func (a *Agent) cancelled() bool {
 	select {
@@ -744,6 +776,36 @@ func (a *Agent) cancelled() bool {
 
 func (a *Agent) Permissions() *PermissionManager {
 	return a.permissions
+}
+
+// SetSubAgentPermAsker installs the callback that sub-agents spawned by this
+// agent will use to surface permission asks to the TUI. The main agent itself
+// does not use this callback — its permission asks flow through the
+// PERMISSION_ASK: sentinel handled by the TUI's message pipeline.
+func (a *Agent) SetSubAgentPermAsker(f func(PermissionRequest) PermissionResponse) {
+	a.subAgentPermAsker = f
+}
+
+func (a *Agent) applyPermissionResponse(req PermissionRequest, resp PermissionResponse) {
+	if a.permissions == nil || resp.Level != PermissionAllow {
+		return
+	}
+	if resp.PersistTool {
+		a.permissions.SetRule(req.ToolName, PermissionAllow)
+		return
+	}
+	if !resp.PersistRule {
+		return
+	}
+	if req.ToolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain.") {
+		a.permissions.SetWebfetchDomain(strings.TrimPrefix(req.Rule, "webfetch.domain."), PermissionAllow)
+		return
+	}
+	if req.Scope == PermissionScopeBashPrefix && req.Prefix != "" {
+		a.permissions.SetBashPrefixRule(req.Prefix, PermissionAllow)
+		return
+	}
+	a.permissions.SetRule(req.ToolName, PermissionAllow)
 }
 
 func (a *Agent) AddTools(tools []tool.Tool) {
