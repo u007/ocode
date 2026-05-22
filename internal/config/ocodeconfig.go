@@ -10,7 +10,10 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
-const lastModelKey = "last_model"
+const (
+	lastModelKey          = "last_model"
+	lastThinkingBudgetKey = "last_thinking_budget"
+)
 
 type CompactConfig struct {
 	Enabled               bool    `json:"enabled"`
@@ -117,26 +120,27 @@ func defaultPermissionConfig() PermissionConfig {
 	return PermissionConfig{
 		Mode: "normal",
 		Tools: map[string]string{
-			"read":          "allow",
-			"glob":          "allow",
-			"grep":          "allow",
-			"list":          "allow",
-			"lsp":           "allow",
-			"write":         "allow",
-			"edit":          "allow",
-			"multi_edit":    "allow",
-			"multiedit":     "allow",
-			"replace_lines": "allow",
-			"apply_patch":   "allow",
-			"delete":        "ask",
-			"format":        "allow",
-			"bash":          "ask",
-			"webfetch":      "ask",
-			"websearch":     "ask",
-			"agent":         "ask",
-			"task":          "ask",
-			"skill":         "allow",
-			"question":      "allow",
+			"read":            "allow",
+			"glob":            "allow",
+			"grep":            "allow",
+			"list":            "allow",
+			"lsp":             "allow",
+			"write":           "allow",
+			"edit":            "allow",
+			"multi_edit":      "allow",
+			"multiedit":       "allow",
+			"multi_file_edit": "allow",
+			"replace_lines":   "allow",
+			"apply_patch":     "allow",
+			"delete":          "ask",
+			"format":          "allow",
+			"bash":            "ask",
+			"webfetch":        "ask",
+			"websearch":       "ask",
+			"agent":           "ask",
+			"task":            "ask",
+			"skill":           "allow",
+			"question":        "allow",
 		},
 		Bash: BashPermissionConfig{Prefixes: map[string]string{}},
 	}
@@ -456,6 +460,36 @@ func GetLastModel() string {
 		}
 	}
 	return ""
+}
+
+// SaveLastThinkingBudget persists the last used thinking budget into ocodeconfig.json
+// so it can be restored across sessions.
+func SaveLastThinkingBudget(budget int) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+
+	raw, _ := json.Marshal(budget)
+	cfg.Extra[lastThinkingBudgetKey] = json.RawMessage(raw)
+
+	return SaveOcodeConfig(cfg)
+}
+
+// GetLastThinkingBudget retrieves the last saved thinking budget from
+// ocodeconfig.json. Returns 0 if not set.
+func GetLastThinkingBudget() int {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return 0
+	}
+	if raw, ok := cfg.Extra[lastThinkingBudgetKey]; ok {
+		var val int
+		if err := json.Unmarshal(raw, &val); err == nil && val >= 0 {
+			return val
+		}
+	}
+	return 0
 }
 
 // loadFullOcodeConfig loads the full ocode config from the global and project

@@ -166,6 +166,38 @@ func TestGenericClientRetriesTransientNoResponseErrors(t *testing.T) {
 	}
 }
 
+func TestChatReportsActualAttemptCountForNonRetryableErrors(t *testing.T) {
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	var calls int32
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			atomic.AddInt32(&calls, 1)
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"bad input"}}`)),
+				Header:     make(http.Header),
+			}, nil
+		}),
+	}
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	_, err := client.Chat([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected 1 attempt, got %d", got)
+	}
+	if !strings.Contains(err.Error(), "llm request failed after 1 attempt(s)") {
+		t.Fatalf("expected actual attempt count in error, got %v", err)
+	}
+}
+
 func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
 	originalClient := llmHTTPClient
 	defer func() {
@@ -365,6 +397,62 @@ func TestOpenAIResponsesRequestsReasoningEncryptedContent(t *testing.T) {
 	}
 	if effort, _ := reasoning["effort"].(string); effort != "medium" {
 		t.Fatalf("expected medium reasoning effort, got %#v", reasoning)
+	}
+}
+
+func TestOpenAIResponsesDedupesStoredItemsByID(t *testing.T) {
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	var gotPayload map[string]interface{}
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(req.Body).Decode(&gotPayload); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					"event: response.output_text.delta\n" +
+						"data: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n" +
+						"data: [DONE]\n",
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	messages := []Message{
+		{Role: "user", Content: "hi"},
+		{Role: "assistant", OpenAIResponseItems: []map[string]interface{}{
+			{"type": "reasoning", "id": "rs_dup", "summary": []interface{}{}},
+		}},
+		{Role: "assistant", OpenAIResponseItems: []map[string]interface{}{
+			{"type": "reasoning", "id": "rs_dup", "summary": []interface{}{}},
+		}},
+	}
+
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	if _, err := client.chatOpenAIResponses(messages, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	input, ok := gotPayload["input"].([]interface{})
+	if !ok {
+		t.Fatalf("input = %#v", gotPayload["input"])
+	}
+	count := 0
+	for _, raw := range input {
+		item, _ := raw.(map[string]interface{})
+		if item["id"] == "rs_dup" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected deduped reasoning item once, got %d in %#v", count, input)
 	}
 }
 

@@ -658,6 +658,10 @@ func (a *Agent) GetProvider() string {
 	return a.client.GetProvider()
 }
 
+func (a *Agent) Client() LLMClient {
+	return a.client
+}
+
 func (a *Agent) GetTools() []tool.Tool {
 	tools := make([]tool.Tool, 0, len(a.tools))
 	for _, t := range a.tools {

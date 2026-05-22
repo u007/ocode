@@ -178,6 +178,8 @@ func Load() (*Config, error) {
 		}
 	}
 
+	config.ThinkingBudget = GetLastThinkingBudget()
+
 	if content := os.Getenv("OPENCODE_CONFIG_CONTENT"); content != "" {
 		if err := loadFromString(content, config); err != nil {
 			return nil, fmt.Errorf("failed to parse OPENCODE_CONFIG_CONTENT: %w", err)
@@ -192,7 +194,6 @@ func Load() (*Config, error) {
 
 	return config, nil
 }
-
 
 func SaveMCPEnabled(name string, enabled bool) error {
 	configPath, err := (&Config{}).ActiveConfigPath()
@@ -302,7 +303,6 @@ func loadConfigMap(path string) (map[string]any, error) {
 	}
 	return m, nil
 }
-
 
 func saveJSONFile(path string, value any) error {
 	data, err := json.MarshalIndent(value, "", "  ")

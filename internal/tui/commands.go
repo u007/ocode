@@ -203,8 +203,7 @@ func runExportCmd(m *model, args []string) tea.Cmd {
 }
 
 func runNewCmd(m *model, args []string) tea.Cmd {
-	m.handleNewCmd(args)
-	return nil
+	return m.handleNewCmd(args)
 }
 
 func runThinkingCmd(m *model, args []string) tea.Cmd {

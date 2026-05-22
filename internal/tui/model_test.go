@@ -115,6 +115,33 @@ func TestRenderAssistantTextThinkingToggle(t *testing.T) {
 	}
 }
 
+func TestRenderUserTextUsesThemeBox(t *testing.T) {
+	m := model{styles: ApplyThemeColors("tokyonight")}
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	rendered := m.renderUserText("hello world")
+	plain := stripANSI(rendered)
+	if !strings.Contains(plain, "hello world") {
+		t.Fatalf("expected rendered user text to contain content, got %q", rendered)
+	}
+	if !strings.Contains(plain, "┃") {
+		t.Fatalf("expected rendered user text to include accent rail, got %q", rendered)
+	}
+	if !strings.HasPrefix(strings.Split(plain, "\n")[0], "┃ ") {
+		t.Fatalf("expected rendered user text to be indented, got %q", plain)
+	}
+}
+
+func TestRenderUserTextConstrainsBubbleWidth(t *testing.T) {
+	m := model{styles: ApplyThemeColors("tokyonight")}
+	m.viewport = viewport.New(viewport.WithWidth(40), viewport.WithHeight(10))
+	rendered := stripANSI(m.renderUserText(strings.Repeat("word ", 20)))
+	for _, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > 40 {
+			t.Fatalf("expected user bubble line width <= viewport width, got %d: %q", got, line)
+		}
+	}
+}
+
 func TestSidebarToggleWithCtrlB(t *testing.T) {
 	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
 
@@ -662,6 +689,34 @@ func TestModelPickerFilterDebounces(t *testing.T) {
 	}
 }
 
+func TestModelPickerFilterPreservesGrouping(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	if err := config.SaveRecentModel("openai/gpt-4o-mini"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveFavoriteModel("openai/gpt-4o-mini"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{}
+	m.openModelPicker()
+	m.pickerFilter = "gpt-4o-mini"
+
+	items, values := m.pickerVisibleItems()
+	if len(items) < 2 {
+		t.Fatalf("expected grouped filtered items, got items=%#v values=%#v", items, values)
+	}
+	if items[0] != "★ Favorites" {
+		t.Fatalf("expected favorites header to be preserved, got %#v", items)
+	}
+	if values[0] != "" {
+		t.Fatalf("expected header to remain unselectable, got values=%#v", values)
+	}
+	if values[1] != "openai/gpt-4o-mini" {
+		t.Fatalf("expected matching model under preserved group, got items=%#v values=%#v", items, values)
+	}
+}
+
 func containsString(items []string, want string) bool {
 	for _, item := range items {
 		if item == want {
@@ -943,6 +998,37 @@ func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal("expected next queued input command to start")
+	}
+}
+
+func TestStreamDoneInterruptedDoesNotStartNextQueuedInput(t *testing.T) {
+	m := model{
+		ready:        true,
+		width:        80,
+		height:       24,
+		streaming:    true,
+		agent:        agent.NewAgent(nil, nil, nil),
+		input:        newTestTextarea(),
+		viewport:     viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:       ApplyThemeColors("tokyonight"),
+		queuedInputs: []string{"next request"},
+	}
+	m.layout()
+
+	updated, cmd := m.Update(streamDoneMsg{err: context.Canceled})
+	got := derefTestModel(t, updated)
+
+	if got.streaming {
+		t.Fatal("expected streaming to stop")
+	}
+	if len(got.queuedInputs) != 1 {
+		t.Fatalf("expected queued input to remain after interruption, got %#v", got.queuedInputs)
+	}
+	if cmd != nil {
+		t.Fatalf("expected interrupted stream not to start next queued input, got %T", cmd)
+	}
+	if !got.streamWasInterrupted {
+		t.Fatal("expected interrupted stream to be marked interrupted")
 	}
 }
 
@@ -1440,4 +1526,22 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func TestThinkingLevelIndexForBudget(t *testing.T) {
+	cases := []struct {
+		budget int
+		want   int
+	}{
+		{budget: 0, want: 0},
+		{budget: 1024, want: 1},
+		{budget: 8000, want: 2},
+		{budget: 16000, want: 3},
+		{budget: 999, want: 0},
+	}
+	for _, tc := range cases {
+		if got := thinkingLevelIndexForBudget(tc.budget); got != tc.want {
+			t.Fatalf("budget %d: want %d, got %d", tc.budget, tc.want, got)
+		}
+	}
 }

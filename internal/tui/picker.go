@@ -215,30 +215,37 @@ func (m *model) closePicker() {
 
 func (m model) pickerVisibleItems() ([]string, []string) {
 	if m.pickerKind == "model" && m.pickerFilter != "" {
-		allUnique := make(map[string]bool)
-		for _, modelID := range agent.AllProviderModels() {
-			allUnique[modelID] = true
-		}
-		for _, modelID := range config.LoadRecentModels() {
-			allUnique[modelID] = true
-		}
-		for _, modelID := range config.LoadFavorites() {
-			allUnique[modelID] = true
-		}
-		flat := make([]string, 0, len(allUnique))
-		for modelID := range allUnique {
-			flat = append(flat, modelID)
-		}
-		sort.Strings(flat)
-		matched := fuzzyFilter(flat, m.pickerFilter)
-		items := make([]string, len(matched))
-		values := make([]string, len(matched))
-		for i, modelID := range matched {
-			values[i] = modelID
-			if config.IsFavorite(modelID) {
-				items[i] = "★ " + modelID
-			} else {
-				items[i] = modelID
+		lowerFilter := strings.ToLower(m.pickerFilter)
+		items := make([]string, 0, len(m.pickerItems))
+		values := make([]string, 0, len(m.pickerValues))
+		for i, item := range m.pickerItems {
+			if i < len(m.pickerIsHeader) && m.pickerIsHeader[i] {
+				header := item
+				sectionItems := []string{}
+				sectionValues := []string{}
+				for j := i + 1; j < len(m.pickerItems); j++ {
+					if j < len(m.pickerIsHeader) && m.pickerIsHeader[j] {
+						break
+					}
+					value := ""
+					if j < len(m.pickerValues) {
+						value = m.pickerValues[j]
+					}
+					candidate := strings.ToLower(m.pickerItems[j])
+					if value != "" {
+						candidate += " " + strings.ToLower(value)
+					}
+					if strings.Contains(candidate, lowerFilter) {
+						sectionItems = append(sectionItems, m.pickerItems[j])
+						sectionValues = append(sectionValues, value)
+					}
+				}
+				if len(sectionItems) > 0 {
+					items = append(items, header)
+					values = append(values, "")
+					items = append(items, sectionItems...)
+					values = append(values, sectionValues...)
+				}
 			}
 		}
 		return items, values
