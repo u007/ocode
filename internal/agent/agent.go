@@ -723,6 +723,22 @@ func (a *Agent) Activity() *ActivityTracker {
 // Procs returns this agent's background-process registry.
 func (a *Agent) Procs() *tool.ProcessRegistry { return a.procs }
 
+// Supervisor returns the process supervisor attached to this agent (may be nil).
+func (a *Agent) Supervisor() *tool.ProcessSupervisor {
+	if a.procs == nil {
+		return nil
+	}
+	return a.procs.Supervisor()
+}
+
+// SetSupervisor attaches a shared session-scoped process supervisor to this
+// agent and its process registry. Subagents should inherit the same supervisor.
+func (a *Agent) SetSupervisor(sup *tool.ProcessSupervisor) {
+	if a.procs != nil {
+		a.procs.SetSupervisor(sup)
+	}
+}
+
 // Runs returns the registry of async subagent runs.
 func (a *Agent) Runs() *AgentRunRegistry { return a.runs }
 
@@ -738,13 +754,10 @@ func (a *Agent) emitJob(ev JobEvent) {
 	}
 }
 
-// Shutdown cancels the agent, kills its background processes, and cancels all
-// async subagent runs. Call on /clear and TUI exit.
+// Shutdown cancels the agent and async subagent runs. Shared process teardown
+// is owned by the session supervisor, not the agent registries.
 func (a *Agent) Shutdown() {
 	a.Cancel()
-	if a.procs != nil {
-		a.procs.KillAll()
-	}
 	if a.runs != nil {
 		a.runs.CancelAll()
 	}

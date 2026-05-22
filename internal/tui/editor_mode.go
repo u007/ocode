@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/tool"
 )
 
 var (
@@ -106,13 +110,38 @@ func shellQuote(s string) string {
 
 type teaCmdBuilder func() *exec.Cmd
 
-func createEditorOpener(editor, mode string, getWidth func() int) func(string) tea.Cmd {
+func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.ProcessSupervisor) func(string) tea.Cmd {
 	if mode != config.EditorModeTmuxSplit && mode != config.EditorModeTmuxWindow {
 		return func(path string) tea.Cmd {
 			cmdParts := strings.Fields(editor)
 			cmdParts = append(cmdParts, path)
 			c := exec.Command(cmdParts[0], cmdParts[1:]...)
+			if runtime.GOOS != "windows" {
+				c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			}
+			id := fmt.Sprintf("editor-%d-%d", os.Getpid(), time.Now().UnixNano())
+			if sup != nil {
+				_, _ = sup.Register(tool.ProcessRegistration{
+					ID:               id,
+					Command:          editor + " " + path,
+					Kind:             tool.ProcessKindEditor,
+					Cmd:              c,
+					OwnsProcessGroup: runtime.GOOS != "windows",
+					StartedAt:        time.Now(),
+				})
+			}
 			return tea.ExecProcess(c, func(err error) tea.Msg {
+				if sup != nil {
+					if err == nil {
+						sup.MarkExited(id, 0)
+					} else {
+						code := 1
+						if exitErr, ok := err.(*exec.ExitError); ok {
+							code = exitErr.ExitCode()
+						}
+						sup.MarkKilled(id, code)
+					}
+				}
 				return editorFinishedMsg{err: err}
 			})
 		}

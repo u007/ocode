@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -92,6 +93,33 @@ func TestShellFinishedMessageIsRecorded(t *testing.T) {
 	got := updated.(model)
 	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "Shell command finished: echo hello") {
 		t.Fatalf("expected shell completion message, got %#v", got.messages)
+	}
+}
+
+func TestDoubleEscDisablesShellMode(t *testing.T) {
+	m := model{
+		input:     newTestTextarea(),
+		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+		sessionID: "test-shell",
+	}
+	m.input.SetValue("!echo hello")
+	m.escPressed = true
+	m.escPressTime = time.Now()
+
+	updated, cmd := m.handleEscKey()
+	if cmd != nil {
+		t.Fatalf("expected no command, got %T", cmd)
+	}
+	got := updated.(model)
+	if got.input.Value() != "echo hello" {
+		t.Fatalf("expected shell prefix to be removed, got %q", got.input.Value())
+	}
+	if got.showPalette {
+		t.Fatal("expected double-esc in shell mode to not open the message picker")
+	}
+	if got.escPressed {
+		t.Fatal("expected esc state to clear after disabling shell mode")
 	}
 }
 
@@ -229,6 +257,127 @@ func TestCtrlCClearsNonEmptyInputBeforeQuitConfirmation(t *testing.T) {
 	}
 	if got.showSlashPopup {
 		t.Fatal("expected slash popup to close when input is cleared")
+	}
+}
+
+func TestRunExitCmdUsesSharedCleanupPath(t *testing.T) {
+	cleanupCalls := 0
+	m := model{
+		cleanupState: &modelCleanupState{
+			onCleanup: func() { cleanupCalls++ },
+		},
+	}
+
+	cmd := runExitCmd(&m, nil)
+	if cmd == nil {
+		t.Fatal("expected /exit to return quit command")
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("expected /exit to use shared cleanup once, got %d", cleanupCalls)
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected /exit to quit, got %T", cmd())
+	}
+}
+
+func TestCleanupCurrentSessionDeduplicatesRepeatedCalls(t *testing.T) {
+	cleanupCalls := 0
+	shutdownCalls := 0
+	a := agent.NewAgent(nil, nil, nil)
+	m := model{
+		agent: a,
+		cleanupState: &modelCleanupState{
+			shutdown:  make(map[*agent.Agent]struct{}),
+			onCleanup: func() { cleanupCalls++ },
+			shutdownAgent: func(target *agent.Agent) {
+				shutdownCalls++
+				if target != a {
+					t.Fatalf("expected cleanup to target original agent")
+				}
+			},
+		},
+	}
+
+	m.cleanupCurrentSession()
+	m.cleanupCurrentSession()
+
+	if cleanupCalls != 1 {
+		t.Fatalf("expected repeated cleanup to run hook once, got %d", cleanupCalls)
+	}
+	if shutdownCalls != 1 {
+		t.Fatalf("expected repeated cleanup to shut down agent once, got %d", shutdownCalls)
+	}
+}
+
+func TestCleanupCurrentSessionDeduplicatesNilAgent(t *testing.T) {
+	cleanupCalls := 0
+	m := model{
+		cleanupState: &modelCleanupState{
+			shutdown:  make(map[*agent.Agent]struct{}),
+			onCleanup: func() { cleanupCalls++ },
+		},
+	}
+
+	m.cleanupCurrentSession()
+	m.cleanupCurrentSession()
+
+	if cleanupCalls != 1 {
+		t.Fatalf("expected repeated nil-agent cleanup to run hook once, got %d", cleanupCalls)
+	}
+}
+
+func TestCtrlCTwiceUsesSharedCleanupPath(t *testing.T) {
+	cleanupCalls := 0
+	m := model{
+		input: newTestTextarea(),
+		cleanupState: &modelCleanupState{
+			onCleanup: func() { cleanupCalls++ },
+		},
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("expected first Ctrl+C to arm quit confirmation")
+	}
+	if cleanupCalls != 0 {
+		t.Fatalf("expected first Ctrl+C to skip cleanup, got %d calls", cleanupCalls)
+	}
+
+	updated, cmd = updated.(model).Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("expected second Ctrl+C to return quit command")
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("expected second Ctrl+C to use shared cleanup once, got %d", cleanupCalls)
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected second Ctrl+C to quit, got %T", cmd())
+	}
+}
+
+func TestLeaderQuitUsesSharedCleanupPath(t *testing.T) {
+	cleanupCalls := 0
+	m := model{
+		input:        newTestTextarea(),
+		leaderActive: true,
+		cleanupState: &modelCleanupState{
+			onCleanup: func() { cleanupCalls++ },
+		},
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Text: "q"})
+	if cmd == nil {
+		t.Fatal("expected leader q to return quit command")
+	}
+	if cleanupCalls != 1 {
+		t.Fatalf("expected leader q to use shared cleanup once, got %d", cleanupCalls)
+	}
+	got := updated.(model)
+	if got.leaderActive {
+		t.Fatal("expected leader mode to clear after quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected leader q to quit, got %T", cmd())
 	}
 }
 
@@ -1246,6 +1395,8 @@ func TestHandleModelCmdPreservesMCPProvenance(t *testing.T) {
 
 func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 	spend := 0.5
+	cleanupCalls := 0
+	oldAgent := agent.NewAgent(nil, nil, nil)
 	m := model{
 		sessionTelemetry: sidebarTelemetry{
 			promptTokens:     10,
@@ -1253,10 +1404,22 @@ func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 			totalTokens:      30,
 			spend:            &spend,
 		},
+		agent: oldAgent,
+		cleanupState: &modelCleanupState{
+			onCleanup: func() { cleanupCalls++ },
+		},
 	}
 
 	m.handleNewCmd(nil)
 
+	if cleanupCalls != 1 {
+		t.Fatalf("expected /new to use shared cleanup once, got %d", cleanupCalls)
+	}
+	select {
+	case <-oldAgent.Done():
+	default:
+		t.Fatal("expected /new to shut down previous agent")
+	}
 	if m.sessionTelemetry.usedTokens() != 0 || m.sessionTelemetry.spend != nil {
 		t.Fatalf("expected telemetry to clear on new session, got %#v", m.sessionTelemetry)
 	}

@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestExitResumeSummaryIncludesSessionAndCommand(t *testing.T) {
@@ -18,4 +20,13 @@ func TestExitResumeSummarySkipsEmptySession(t *testing.T) {
 	if got := exitResumeSummary(""); got != "" {
 		t.Fatalf("expected empty summary for empty session ID, got %q", got)
 	}
+}
+
+func TestCleanupProgramModelSkipsNilModel(t *testing.T) {
+	cleanupProgramModel(nil)
+}
+
+func TestCleanupProgramModelHandlesModelPointer(t *testing.T) {
+	m := &model{}
+	cleanupProgramModel(tea.Model(m))
 }

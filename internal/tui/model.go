@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
@@ -179,6 +180,7 @@ type streamMsgEvent struct {
 }
 
 type ctrlCResetMsg struct{}
+type cleanupRequestMsg struct{}
 type dotTickMsg struct{}
 type registryReadyMsg struct{ failed bool }
 type pickerFilterApplyMsg struct {
@@ -224,6 +226,72 @@ func waitForRegistry() tea.Cmd {
 		}
 		return registryReadyMsg{failed: true}
 	}
+}
+
+func (m *model) ensureCleanupState() *modelCleanupState {
+	if m.cleanupState == nil {
+		m.cleanupState = newModelCleanupState()
+	}
+	if m.cleanupState.shutdown == nil {
+		m.cleanupState.shutdown = make(map[*agent.Agent]struct{})
+	}
+	return m.cleanupState
+}
+
+func (m *model) cleanupAgent(target *agent.Agent) {
+	state := m.ensureCleanupState()
+	state.mu.Lock()
+	if _, ok := state.shutdown[target]; ok {
+		state.mu.Unlock()
+		return
+	}
+	state.shutdown[target] = struct{}{}
+	hook := state.onCleanup
+	shutdown := state.shutdownAgent
+	state.mu.Unlock()
+	// saveSession and the onCleanup hook run inside the dedup guard so repeated
+	// cleanupCurrentSession calls (e.g. signal handler + deferred cleanup) do not
+	// write the session file or fire hooks more than once per agent.
+	if hook != nil {
+		hook()
+	}
+	m.saveSession()
+	if target == nil {
+		return
+	}
+	if shutdown != nil {
+		shutdown(target)
+		return
+	}
+	target.Shutdown()
+}
+
+func (m *model) cleanupCurrentSession() {
+	if m.supervisor != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = m.supervisor.Shutdown(ctx)
+	}
+	m.cleanupAgent(m.agent)
+}
+
+func (m *model) replaceAgent(next *agent.Agent) tea.Cmd {
+	prev := m.agent
+	if m.supervisor != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = m.supervisor.TerminateAll(ctx)
+	}
+	m.cleanupAgent(prev)
+	m.agent = next
+	if m.agent != nil {
+		m.agent.SetSupervisor(m.supervisor)
+	}
+	if m.agent == nil {
+		return nil
+	}
+	m.wireCompactCallbacks()
+	return listenJobs(m.agent)
 }
 
 type model struct {
@@ -318,6 +386,8 @@ type model struct {
 	compacting            bool
 	lastCompactErr        error
 	pendingCompactUIIdx   []int
+	pendingCompactResume  bool
+	skipCompactPreflight  bool
 	thinkingLevelIdx      int  // index into thinkingBudgetLevels
 	agentStripOffset      int  // first visible run index in the agent strip
 	agentStripSelected    int  // selected run index in the agent strip
@@ -329,6 +399,19 @@ type model struct {
 	lastClickX            int
 	lastClickY            int
 	permButtonRegions     []permButtonRegion
+	cleanupState          *modelCleanupState
+	supervisor            *tool.ProcessSupervisor
+}
+
+type modelCleanupState struct {
+	mu            sync.Mutex
+	shutdown      map[*agent.Agent]struct{}
+	onCleanup     func()
+	shutdownAgent func(*agent.Agent)
+}
+
+func newModelCleanupState() *modelCleanupState {
+	return &modelCleanupState{shutdown: make(map[*agent.Agent]struct{})}
 }
 
 // agentStripMaxRows caps how many strip rows are visible at once so a large
@@ -523,6 +606,10 @@ func (m *model) applyTheme() {
 
 func (m *model) applyInputTheme() {
 	styles := m.input.Styles()
+	promptStyle := m.styles.Header
+	if m.inputIsShellMode() {
+		promptStyle = m.styles.Success
+	}
 
 	// Bubble's textarea renders all soft-wrapped segments of the logical cursor
 	// line with CursorLine. Placeholder rendering also uses CursorLine for any
@@ -531,7 +618,7 @@ func (m *model) applyInputTheme() {
 	styles.Focused.Base = m.styles.Text
 	styles.Focused.Text = m.styles.Text
 	styles.Focused.CursorLine = m.styles.Hint
-	styles.Focused.Prompt = m.styles.Header
+	styles.Focused.Prompt = promptStyle
 	styles.Focused.Placeholder = m.styles.Hint
 	styles.Focused.EndOfBuffer = m.styles.Dim
 	styles.Focused.LineNumber = m.styles.Dim
@@ -540,7 +627,7 @@ func (m *model) applyInputTheme() {
 	styles.Blurred.Base = m.styles.Text
 	styles.Blurred.Text = m.styles.Text
 	styles.Blurred.CursorLine = m.styles.Hint
-	styles.Blurred.Prompt = m.styles.Dim
+	styles.Blurred.Prompt = promptStyle
 	styles.Blurred.Placeholder = m.styles.Hint
 	styles.Blurred.EndOfBuffer = m.styles.Dim
 	styles.Blurred.LineNumber = m.styles.Dim
@@ -647,8 +734,13 @@ func newModel(sid string, cont bool, yolo bool) model {
 		a.LoadExternalTools(cfg)
 	}
 
+	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
+	if a != nil {
+		a.SetSupervisor(sup)
+	}
+
 	ta := textarea.New()
-	ta.Placeholder = "Ask anything…  (enter to send, shift+enter for newline, tab autocomplete, ctrl+c clears input, twice to quit)"
+	ta.Placeholder = "Ask anything…  (prefix with ! to run a shell command, enter to send, shift+enter for newline, tab autocomplete, ctrl+c clears input, double-esc opens picker / exits shell mode)"
 	ta.Focus()
 	ta.Prompt = "▍ "
 	ta.CharLimit = 8000
@@ -698,6 +790,8 @@ func newModel(sid string, cont bool, yolo bool) model {
 		compactStartCh: make(chan struct{}, 4),
 		subAgentPermCh: make(chan subAgentPermRequest),
 		subAgentPermMu: &sync.Mutex{},
+		cleanupState:   newModelCleanupState(),
+		supervisor:     sup,
 	}
 
 	// Set workDir for path-scoped permission checks
@@ -725,12 +819,14 @@ func newModel(sid string, cont bool, yolo bool) model {
 			editor,
 			editorMode,
 			func() int { return m.width },
+			sup,
 		))
 		m.git.SetEditor(editor)
 		m.git.SetEditorOpener(createEditorOpener(
 			editor,
 			editorMode,
 			func() int { return m.width },
+			sup,
 		))
 	}
 	m.files.SetSaveEditor(config.SaveEditor)
@@ -1050,13 +1146,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Google Login successful! Token received."})
 			os.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", msg.token)
 			if m.config != nil && m.config.Model != "" {
-				if m.agent != nil {
-					m.agent.Shutdown()
-				}
 				client := agent.NewClient(m.config, m.config.Model)
-				m.agent = agent.NewAgent(client, m.getInitialTools(), m.config)
-				m.wireCompactCallbacks()
-				return m, listenJobs(m.agent)
+				next := agent.NewAgent(client, m.getInitialTools(), m.config)
+				return m, m.replaceAgent(next)
 			}
 		}
 		m.renderTranscript()
@@ -1148,6 +1240,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
+	case cleanupRequestMsg:
+		m.cleanupCurrentSession()
+		return m, tea.Quit
 	case dotTickMsg:
 		if m.streaming || m.lastActivity.LLMRunning || m.compacting || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
 			m.dotFrame = (m.dotFrame + 1) % 4
@@ -1297,6 +1392,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 	case compactFinishedMsg:
 		m.compacting = false
+		resume := m.pendingCompactResume
+		m.pendingCompactResume = false
 		if msg.result.Err != nil {
 			m.lastCompactErr = msg.result.Err
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⚠ Compaction failed: %v (conversation continues uncompacted)", msg.result.Err)})
@@ -1310,6 +1407,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.layout()
+		if resume && m.agent != nil {
+			return m, m.askAgent()
+		}
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 	case subAgentPermAskMsg:
 		// A sub-agent tool call needs a permission decision. Reuse the same
@@ -1541,10 +1641,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			newM, c := m.handleCommand("/compact")
 			return true, newM, c
 		case "q":
-			m.saveSession()
-			if m.agent != nil {
-				m.agent.Shutdown()
-			}
+			m.cleanupCurrentSession()
 			return true, m, tea.Quit
 		}
 		return true, m, nil
@@ -1706,10 +1803,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, nil
 		}
 		if m.ctrlCPressed {
-			m.saveSession()
-			if m.agent != nil {
-				m.agent.Shutdown()
-			}
+			m.cleanupCurrentSession()
 			return m, tea.Quit
 		}
 		m.ctrlCPressed = true
@@ -1770,7 +1864,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 running shell: %s", cmdText)})
 			m.renderTranscript()
 			m.viewport.GotoBottom()
-			return m, runInteractiveShell(cmdText, m.workDir)
+			return m, m.runInteractiveShell(cmdText, m.workDir)
 		}
 
 		if m.streaming {
@@ -1880,7 +1974,8 @@ func (m *model) toggleLogKind(kind DebugEntryKind) {
 	m.refreshLogViewport()
 }
 
-// handleEscKey is shared esc logic: cancel stream first, then double-esc opens message picker.
+// handleEscKey is shared esc logic: cancel stream first, then double-esc either
+// exits shell mode or opens the message picker.
 func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 	if m.streaming && m.cancelStream != nil {
 		select {
@@ -1922,6 +2017,11 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if time.Since(m.escPressTime) < 500*time.Millisecond {
+		if m.activeTab == tabChat && m.inputIsShellMode() {
+			m.escPressed = false
+			m.disableShellMode()
+			return m, nil
+		}
 		m.escPressed = false
 		m.openMessagePicker()
 		return m, nil
@@ -1932,10 +2032,7 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 
 func (m model) handleTabCtrlC() (tea.Model, tea.Cmd) {
 	if m.ctrlCPressed {
-		m.saveSession()
-		if m.agent != nil {
-			m.agent.Shutdown()
-		}
+		m.cleanupCurrentSession()
 		return m, tea.Quit
 	}
 	m.ctrlCPressed = true
@@ -2185,6 +2282,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 	if pressed && m.exitButtonForClick(mouse) {
 		if m.exitPending {
+			m.cleanupCurrentSession()
 			return m, tea.Quit, true
 		}
 		m.exitPending = true
@@ -2517,12 +2615,7 @@ func (m *model) rebuildAgentWithExternalTools() tea.Cmd {
 		}
 	}
 	next.LoadExternalTools(m.config)
-	if m.agent != nil {
-		m.agent.Shutdown()
-	}
-	m.agent = next
-	m.wireCompactCallbacks()
-	return listenJobs(m.agent)
+	return m.replaceAgent(next)
 }
 
 func (m model) renderMCPList() string {
@@ -2693,12 +2786,8 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 			} else {
 				tools = m.getInitialTools()
 			}
-			if m.agent != nil {
-				m.agent.Shutdown()
-			}
-			m.agent = agent.NewAgent(client, tools, m.config)
-			m.agent.RestoreMCPToolNames(mcpNames)
-			m.wireCompactCallbacks()
+			next := agent.NewAgent(client, tools, m.config)
+			next.RestoreMCPToolNames(mcpNames)
 			m.activeModel = args[0]
 			if m.config != nil {
 				m.config.Model = args[0]
@@ -2713,7 +2802,7 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 					log.Printf("save recent model: %v", err)
 				}
 			}
-			return listenJobs(m.agent)
+			return m.replaceAgent(next)
 		}
 	}
 	return nil
@@ -2880,9 +2969,22 @@ func (m *model) handleExportCmd(args []string) {
 	}
 }
 
+func (m *model) handleExportClaudeCmd(args []string) {
+	msgs := m.persistedAgentMessages()
+	if len(msgs) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No messages available to export."})
+		return
+	}
+	path, err := session.AppendClaudeSession(m.sessionID, msgs)
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error exporting Claude Code session: %v", err)})
+		return
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Appended current session to Claude Code history: %s", path)})
+}
+
 func (m *model) handleNewCmd(args []string) tea.Cmd {
 	cmd := m.resetSessionAgent()
-	m.saveSession()
 	m.messages = []message{}
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
@@ -2898,6 +3000,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 
 func (m *model) resetSessionAgent() tea.Cmd {
 	if m.agent == nil {
+		m.cleanupCurrentSession()
 		return nil
 	}
 
@@ -2930,11 +3033,7 @@ func (m *model) resetSessionAgent() tea.Cmd {
 	if len(mcpNames) > 0 {
 		next.RestoreMCPToolNames(mcpNames)
 	}
-
-	prev.Shutdown()
-	m.agent = next
-	m.wireCompactCallbacks()
-	return listenJobs(m.agent)
+	return m.replaceAgent(next)
 }
 
 func (m *model) handleEditorCmd(args []string) tea.Cmd {
@@ -2993,17 +3092,42 @@ func (m *model) refreshEditorOpener() {
 	mode := m.config.Ocode.EditorMode
 	m.files.SetEditor(editor)
 	m.files.SetEditorMode(mode)
-	m.files.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }))
+	m.files.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
 	m.git.SetEditor(editor)
-	m.git.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }))
+	m.git.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
 }
 
-func runInteractiveShell(command string, dir string) tea.Cmd {
+func (m *model) runInteractiveShell(command string, dir string) tea.Cmd {
 	c := shellExecCommand(command)
 	if dir != "" {
 		c.Dir = dir
 	}
+	if runtime.GOOS != "windows" {
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+	id := fmt.Sprintf("interactive-%d-%d", os.Getpid(), time.Now().UnixNano())
+	if m.supervisor != nil {
+		_, _ = m.supervisor.Register(tool.ProcessRegistration{
+			ID:               id,
+			Command:          command,
+			Kind:             tool.ProcessKindInteractiveShell,
+			Cmd:              c,
+			OwnsProcessGroup: runtime.GOOS != "windows",
+			StartedAt:        time.Now(),
+		})
+	}
 	return tea.ExecProcess(c, func(err error) tea.Msg {
+		if m.supervisor != nil {
+			if err == nil {
+				m.supervisor.MarkExited(id, 0)
+			} else {
+				code := 1
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					code = exitErr.ExitCode()
+				}
+				m.supervisor.MarkKilled(id, code)
+			}
+		}
 		return shellFinishedMsg{command: command, err: err}
 	})
 }
@@ -3464,27 +3588,33 @@ func (m *model) handleGitHubWorkflow(name string) string {
 }
 
 func (m *model) saveSession() {
-	if len(m.messages) > 0 {
-		var agentMsgs []agent.Message
-		for _, msg := range m.messages {
-			if msg.transient || msg.role == roleThinking {
-				continue
-			}
-			if msg.raw != nil {
-				agentMsgs = append(agentMsgs, *msg.raw)
-			} else {
-				role := "user"
-				if msg.role == roleAssistant {
-					role = "assistant"
-				}
-				agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
-			}
-		}
-		if len(agentMsgs) == 0 {
-			return
-		}
-		session.Save(m.sessionID, m.sessionTitle, agentMsgs, m.sessionSidebarMetadata())
+	agentMsgs := m.persistedAgentMessages()
+	if len(agentMsgs) == 0 {
+		return
 	}
+	session.Save(m.sessionID, m.sessionTitle, agentMsgs, m.sessionSidebarMetadata())
+}
+
+func (m *model) persistedAgentMessages() []agent.Message {
+	if len(m.messages) == 0 {
+		return nil
+	}
+	var agentMsgs []agent.Message
+	for _, msg := range m.messages {
+		if msg.transient || msg.role == roleThinking {
+			continue
+		}
+		if msg.raw != nil {
+			agentMsgs = append(agentMsgs, *msg.raw)
+		} else {
+			role := "user"
+			if msg.role == roleAssistant {
+				role = "assistant"
+			}
+			agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
+		}
+	}
+	return agentMsgs
 }
 
 func countUserMessages(msgs []message) int {
@@ -3771,41 +3901,9 @@ func (m *model) lookupToolName(toolID string) string {
 	return ""
 }
 
-func (m model) askAgent() tea.Cmd {
-	var agentMsgs []agent.Message
-	ctx := agent.LoadContext()
-	if ctx != "" {
-		agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
-	}
-
+func (m *model) askAgent() tea.Cmd {
+	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 	isFirstUserMsg := m.sessionTitle == "" && countUserMessages(m.messages) == 1
-
-	for _, msg := range m.messages {
-		if msg.transient {
-			continue
-		}
-		if msg.role == roleThinking {
-			continue
-		}
-		if msg.raw != nil {
-			if strings.HasPrefix(msg.raw.Content, "PERMISSION_ASK:") {
-				continue
-			}
-			if msg.raw.Content == "WAITING_FOR_USER_RESPONSE" {
-				continue
-			}
-			agentMsgs = append(agentMsgs, *msg.raw)
-			continue
-		}
-		role := "user"
-		if msg.role == roleAssistant {
-			role = "assistant"
-		}
-		agentMsgs = append(agentMsgs, agent.Message{
-			Role:    role,
-			Content: msg.text,
-		})
-	}
 
 	if isFirstUserMsg && len(agentMsgs) > 0 {
 		last := &agentMsgs[len(agentMsgs)-1]
@@ -3815,6 +3913,17 @@ func (m model) askAgent() tea.Cmd {
 	}
 
 	agentMsgs = m.appendSelectionMsg(agentMsgs)
+
+	if m.skipCompactPreflight {
+		m.skipCompactPreflight = false
+	} else if m.agent != nil {
+		if m.agent.MaybeCompactAsync(agentMsgs) {
+			m.pendingCompactUIIdx = uiIdx
+			m.pendingCompactResume = true
+			m.skipCompactPreflight = true
+			return nil
+		}
+	}
 
 	cancel := make(chan struct{})
 	ch := make(chan agent.Message, 16)
@@ -3964,6 +4073,7 @@ func (m *model) layoutLogViewport() {
 }
 
 func (m model) bottomChromeHeight(panelWidth int) int {
+	m.applyInputTheme()
 	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  opencode clone v"+version.Version)
 	var inputArea string
 	if m.showPermDialog {
@@ -5851,6 +5961,7 @@ func (m *model) syncRawInputLines() {
 }
 
 func (m model) inputViewWithSelection() string {
+	m.applyInputTheme()
 	view := m.input.View()
 	if !m.inputSel.active {
 		return view
@@ -5863,6 +5974,7 @@ func (m model) inputViewWithSelection() string {
 
 func (m model) inputAreaHeight() int {
 	panelWidth := m.panelWidth()
+	m.applyInputTheme()
 	var rendered string
 	if m.showPermDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
@@ -5870,6 +5982,23 @@ func (m model) inputAreaHeight() int {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.input.View())
 	}
 	return lipgloss.Height(rendered)
+}
+
+func (m model) inputIsShellMode() bool {
+	value := m.input.Value()
+	trimmedPrefix := len(value) - len(strings.TrimLeft(value, " \t"))
+	return strings.HasPrefix(value[trimmedPrefix:], "!")
+}
+
+func (m *model) disableShellMode() {
+	value := m.input.Value()
+	trimmedPrefix := len(value) - len(strings.TrimLeft(value, " \t"))
+	if !strings.HasPrefix(value[trimmedPrefix:], "!") {
+		return
+	}
+	m.input.SetValue(value[:trimmedPrefix] + value[trimmedPrefix+1:])
+	m.syncRawInputLines()
+	m.applyInputTheme()
 }
 
 func (m model) inputAreaTopY() int {

@@ -200,8 +200,8 @@ func (r *AgentRunRegistry) RunningCount() int {
 	return count
 }
 
-// CancelAll cancels every running subagent and kills their background
-// processes. Used on /clear and TUI exit.
+// CancelAll cancels every running subagent and marks it cancelled immediately.
+// Shared process teardown is owned by the session supervisor.
 func (r *AgentRunRegistry) CancelAll() {
 	r.mu.Lock()
 	runs := make([]*AgentRun, 0, len(r.runs))
@@ -215,9 +215,6 @@ func (r *AgentRunRegistry) CancelAll() {
 		}
 		if run.Cancel != nil {
 			run.Cancel()
-		}
-		if run.Procs != nil {
-			run.Procs.KillAll()
 		}
 		run.tryFinishCancelled()
 	}
