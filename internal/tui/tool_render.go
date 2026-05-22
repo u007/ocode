@@ -253,8 +253,9 @@ func extractXMLTag(s, tag string) string {
 // renderToolResult formats a tool result for display:
 // - DIFF: prefix → colorized unified diff
 // - read result → syntax-highlighted code block
-// - else → plain text, truncated if huge
+// - else → plain text, with truncation footer hidden from rendered display
 func renderToolResult(toolName, content string, st Styles) string {
+	content = stripTruncationFooter(content)
 	if strings.HasPrefix(content, "DIFF:") {
 		return renderDiff(content, st)
 	}
@@ -265,6 +266,18 @@ func renderToolResult(toolName, content string, st Styles) string {
 		return renderUnifiedDiff(content, st)
 	}
 	return st.Text.Render(content)
+}
+
+func stripTruncationFooter(content string) string {
+	marker := "\n\n" + agent.TruncationMarkerPrefix
+	idx := strings.Index(content, marker)
+	if idx >= 0 {
+		return content[:idx]
+	}
+	if strings.HasPrefix(content, agent.TruncationMarkerPrefix) {
+		return ""
+	}
+	return content
 }
 
 func looksLikeUnifiedDiff(content string) bool {
@@ -294,11 +307,11 @@ func renderDiff(content string, st Styles) string {
 }
 
 func renderUnifiedDiff(content string, st Styles) string {
-	addStyle := st.Success.Copy().Background(lipgloss.Color("#050805")).Bold(true)
-	delStyle := st.Error.Copy().Background(lipgloss.Color("#0a0505")).Bold(true)
-	hunkStyle := lipgloss.NewStyle().Foreground(st.Header.GetForeground()).Bold(true)
-	metaStyle := lipgloss.NewStyle().Foreground(st.Hint.GetForeground()).Faint(true)
-	fileStyle := lipgloss.NewStyle().Foreground(st.Header.GetForeground()).Bold(true)
+	addStyle := st.Success.Copy().Background(lipgloss.Color("#17361f")).Bold(true)
+	delStyle := st.Error.Copy().Background(lipgloss.Color("#3a1717")).Bold(true)
+	hunkStyle := lipgloss.NewStyle().Foreground(st.Header.GetForeground()).Background(lipgloss.Color("#1f2430")).Bold(true)
+	metaStyle := lipgloss.NewStyle().Foreground(st.Hint.GetForeground()).Background(lipgloss.Color("#141821")).Faint(true)
+	fileStyle := lipgloss.NewStyle().Foreground(st.Header.GetForeground()).Background(lipgloss.Color("#1a2233")).Bold(true)
 
 	lines := strings.Split(content, "\n")
 	var b strings.Builder

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -17,6 +18,67 @@ func TestRenderToolResultPreservesFullOutput(t *testing.T) {
 
 	if got != ApplyThemeColors("tokyonight").Text.Render(content) {
 		t.Fatal("expected rendered tool result to preserve full output")
+	}
+}
+
+func TestRenderToolResultHidesTruncationFooter(t *testing.T) {
+	content := fmt.Sprintf(
+		"line 1\nline 2\n\n[output truncated: showing first 100 of 139 lines]\nFull output saved to: /tmp/out.txt\nRetrieve remaining content with:\n  read tool: {\"path\": %q, \"offset\": 101, \"limit\": <n>}\n  or bash:   sed -n '101,139p' /tmp/out.txt",
+		"/tmp/out.txt",
+	)
+
+	got := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
+
+	if strings.Contains(got, "[output truncated:") ||
+		strings.Contains(got, "Full output saved to:") ||
+		strings.Contains(got, "Retrieve remaining content with:") ||
+		strings.Contains(got, "read tool:") ||
+		strings.Contains(got, "or bash:") {
+		t.Fatal("expected rendered tool result to hide truncation footer")
+	}
+	if !strings.Contains(got, "line 1") || !strings.Contains(got, "line 2") {
+		t.Fatal("expected rendered tool result to preserve visible tool output")
+	}
+}
+
+func TestRenderToolResultHidesTruncationFooterPrefixOnly(t *testing.T) {
+	content := "[output truncated: showing first 100 of 200 lines]\nFull output saved to: /tmp/out.txt"
+
+	got := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
+
+	if strings.Contains(got, "[output truncated:") || strings.Contains(got, "Full output saved to:") {
+		t.Fatal("expected rendered tool result to hide prefix-only truncation footer")
+	}
+}
+
+func TestToolOutputBoxHidesTruncationFooter(t *testing.T) {
+	content := fmt.Sprintf(
+		"line 1\nline 2\n\n[output truncated: showing first 100 of 139 lines]\nFull output saved to: /tmp/out.txt\nRetrieve remaining content with:\n  read tool: {\"path\": %q, \"offset\": 101, \"limit\": <n>}\n  or bash:   sed -n '101,139p' /tmp/out.txt",
+		"/tmp/out.txt",
+	)
+	text := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
+	toolID := "tool-expand-1"
+	m := model{
+		ready:     true,
+		width:     100,
+		height:    30,
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(24)),
+		styles:    ApplyThemeColors("tokyonight"),
+		messages:  []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
+		sessionID: "test",
+		expandedToolOutputs: map[int]bool{0: true},
+	}
+	m.renderTranscript()
+
+	view := m.viewport.View()
+	if strings.Contains(view, "[output truncated:") ||
+		strings.Contains(view, "Full output saved to:") ||
+		strings.Contains(view, "Retrieve remaining content with:") {
+		t.Fatal("expected expanded tool output box to hide truncation footer")
+	}
+	if !strings.Contains(view, "line 1") || !strings.Contains(view, "line 2") {
+		t.Fatal("expected expanded tool output box to preserve visible output")
 	}
 }
 

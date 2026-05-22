@@ -10,6 +10,10 @@ import (
 
 const maxToolResultLines = 100
 
+// TruncationMarkerPrefix is the fixed prefix of the truncation notice appended
+// by TruncateToolResult. Renderers use it to locate and strip the footer.
+const TruncationMarkerPrefix = "[output truncated: showing first "
+
 func toolResultCacheDir() (string, error) {
 	if env := os.Getenv("XDG_STATE_HOME"); env != "" {
 		return filepath.Join(env, "opencode", "tool-results"), nil

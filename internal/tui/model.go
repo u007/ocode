@@ -500,6 +500,35 @@ func (m *model) applyTheme() {
 	} else {
 		m.styles = ApplyThemeColors("tokyonight")
 	}
+	m.applyInputTheme()
+}
+
+func (m *model) applyInputTheme() {
+	styles := m.input.Styles()
+
+	// Bubble's textarea renders all soft-wrapped segments of the logical cursor
+	// line with CursorLine. Placeholder rendering also uses CursorLine for any
+	// wrapped placeholder rows that contain text. If CursorLine falls back to the
+	// library default, wrapped input/placeholder text can become bright white.
+	styles.Focused.Base = m.styles.Text
+	styles.Focused.Text = m.styles.Text
+	styles.Focused.CursorLine = m.styles.Hint
+	styles.Focused.Prompt = m.styles.Header
+	styles.Focused.Placeholder = m.styles.Hint
+	styles.Focused.EndOfBuffer = m.styles.Dim
+	styles.Focused.LineNumber = m.styles.Dim
+	styles.Focused.CursorLineNumber = m.styles.Dim
+
+	styles.Blurred.Base = m.styles.Text
+	styles.Blurred.Text = m.styles.Text
+	styles.Blurred.CursorLine = m.styles.Hint
+	styles.Blurred.Prompt = m.styles.Dim
+	styles.Blurred.Placeholder = m.styles.Hint
+	styles.Blurred.EndOfBuffer = m.styles.Dim
+	styles.Blurred.LineNumber = m.styles.Dim
+	styles.Blurred.CursorLineNumber = m.styles.Dim
+
+	m.input.SetStyles(styles)
 }
 
 func (m *model) toggleSidebar() {
@@ -607,9 +636,6 @@ func newModel(sid string, cont bool, yolo bool) model {
 	ta.SetHeight(3)
 	ta.MaxWidth = 80
 	ta.ShowLineNumbers = false
-	styles := ta.Styles()
-	styles.Focused.CursorLine = lipgloss.NewStyle()
-	ta.SetStyles(styles)
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "insert newline"))
 
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
@@ -3916,6 +3942,7 @@ func (m *model) renderTranscript() {
 }
 
 func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
+	content = stripTruncationFooter(content)
 	content = strings.TrimRight(content, "\n")
 	lines := strings.Split(content, "\n")
 	boxContent := content
