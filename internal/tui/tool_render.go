@@ -96,6 +96,8 @@ func formatToolCallHint(tc agent.ToolCall) string {
 		return fmt.Sprintf("🤖 %s: %s", name, p)
 	case "question":
 		return fmt.Sprintf("❓ %s", first("question", "prompt"))
+	case "skill":
+		return fmt.Sprintf("→ Skill %q", first("name"))
 	}
 	// Fallback: name + raw args truncated.
 	a := strings.TrimSpace(tc.Function.Arguments)

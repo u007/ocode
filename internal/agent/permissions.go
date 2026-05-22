@@ -89,13 +89,13 @@ func NewPermissionManager() *PermissionManager {
 		bashPrefixes:    make(map[string]PermissionLevel),
 		webfetchDomains: make(map[string]PermissionLevel),
 	}
-	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell"} {
+	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "agent"} {
 		pm.rules[name] = PermissionAllow
 	}
 	for _, name := range []string{"write", "edit", "multiedit", "replace_lines", "apply_patch", "format"} {
 		pm.SetRule(name, PermissionAllow)
 	}
-	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "agent", "repo_clone", "mcp_*"} {
+	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*"} {
 		pm.SetRule(name, PermissionAsk)
 	}
 	return pm

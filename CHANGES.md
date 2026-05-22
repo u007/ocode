@@ -1,5 +1,13 @@
 # Changelog
 
+## [Unreleased] — 2026-05-22
+
+### Added
+- **/context Slash Command** — New token budget inspector showing all sources contributing to base prompt context: mode system prompt, ambient files (AGENTS.md, CLAUDE.md, .cursorrules, .opencode/rules/*.md), plugin instructions, built-in tools, MCP tools grouped by server, available skills (on-demand), and live session token usage. Estimates tokens via `len(text)/4` approximation.
+- **Agent Permission Default** — `agent` tool moved from `PermissionAsk` to `PermissionAllow` in default rules, making subagent spawning non-interactive by default.
+
+---
+
 ## [Unreleased] — 2026-05-21 (Later)
 
 ### Fixed

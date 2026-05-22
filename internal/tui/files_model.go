@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"charm.land/bubbles/v2/textarea"
@@ -96,6 +97,7 @@ type filesModel struct {
 	panel           filesPanel
 	previewRaw      string
 	previewRawLines []string
+	selectedFiles   map[int]bool
 	previewLines    []string
 	inlineEditor    inlineFileEditor
 	inlineEditPath  string
@@ -189,6 +191,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 	key := msg.String()
 	switch key {
 	case "j", "down":
+		m.selectedFiles = nil
 		if m.cursor < len(m.nodes)-1 {
 			m.cursor++
 			if m.cursor < len(m.nodes) {
@@ -196,13 +199,14 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			}
 		}
 	case "k", "up":
+		m.selectedFiles = nil
 		if m.cursor > 0 {
 			m.cursor--
 			if m.cursor < len(m.nodes) {
 				return m, loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
-	case "enter", "ctrl+j", "ctrl+m", "space":
+	case "enter", "ctrl+j", "ctrl+m":
 		if m.cursor < len(m.nodes) {
 			n := &m.nodes[m.cursor]
 			if n.isDir {
@@ -211,9 +215,60 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 				return m, m.openInEditor(n.path)
 			}
 		}
+	case "space":
+		if m.cursor < len(m.nodes) {
+			n := &m.nodes[m.cursor]
+			if n.isDir {
+				m.toggleDir(m.cursor)
+				return m, nil
+			}
+			if m.selectedFiles == nil {
+				m.selectedFiles = make(map[int]bool)
+			}
+			if m.selectedFiles[m.cursor] {
+				delete(m.selectedFiles, m.cursor)
+				if len(m.selectedFiles) == 0 {
+					m.selectedFiles = nil
+				}
+			} else {
+				m.selectedFiles[m.cursor] = true
+			}
+		}
 	case "e":
 		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			return m, m.openInEditor(m.nodes[m.cursor].path)
+		}
+	case "shift+down":
+		if m.cursor < len(m.nodes)-1 {
+			if m.selectedFiles == nil {
+				m.selectedFiles = make(map[int]bool)
+			}
+			if !m.nodes[m.cursor].isDir {
+				m.selectedFiles[m.cursor] = true
+			}
+			m.cursor++
+			if !m.nodes[m.cursor].isDir {
+				m.selectedFiles[m.cursor] = true
+			}
+			if m.cursor < len(m.nodes) {
+				return m, loadPreviewCmd(m.nodes[m.cursor])
+			}
+		}
+	case "shift+up":
+		if m.cursor > 0 {
+			if m.selectedFiles == nil {
+				m.selectedFiles = make(map[int]bool)
+			}
+			if !m.nodes[m.cursor].isDir {
+				m.selectedFiles[m.cursor] = true
+			}
+			m.cursor--
+			if !m.nodes[m.cursor].isDir {
+				m.selectedFiles[m.cursor] = true
+			}
+			if m.cursor < len(m.nodes) {
+				return m, loadPreviewCmd(m.nodes[m.cursor])
+			}
 		}
 	case "E", "shift+e":
 		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
@@ -674,6 +729,31 @@ func (m filesModel) selectedNode() (fileNode, bool) {
 	return m.nodes[m.cursor], true
 }
 
+func (m filesModel) selectedFilePaths() []string {
+	if len(m.selectedFiles) == 0 {
+		return nil
+	}
+	indices := make([]int, 0, len(m.selectedFiles))
+	for idx := range m.selectedFiles {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	paths := make([]string, 0, len(indices))
+	for _, idx := range indices {
+		if idx >= 0 && idx < len(m.nodes) && !m.nodes[idx].isDir {
+			paths = append(paths, m.nodes[idx].path)
+		}
+	}
+	return paths
+}
+
+func (m filesModel) selectionHint() string {
+	if len(m.selectedFiles) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d selected — space toggle  shift+↑↓ extend  esc clear", len(m.selectedFiles))
+}
+
 func (m filesModel) selectedActionDir() string {
 	n, ok := m.selectedNode()
 	if !ok {
@@ -962,6 +1042,9 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		treeLines = append(treeLines, line)
 	}
 	treeContent := strings.Join(treeLines, "\n")
+	if hint := m.selectionHint(); hint != "" {
+		treeContent = styles.Hint.Render(hint) + "\n" + treeContent
+	}
 
 	focusBorder := func(focused bool) lipgloss.Style {
 		if focused {
