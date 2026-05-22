@@ -268,6 +268,8 @@ type model struct {
 	git                   gitModel
 	logViewport           viewport.Model
 	logEntries            []DebugEntry
+	logSearch             string
+	logKindFilter         map[DebugEntryKind]bool
 	err                   error
 	scrollSpeed           int
 	restoredPendingScroll bool
@@ -325,6 +327,7 @@ type model struct {
 	lastClickTime         time.Time
 	lastClickX            int
 	lastClickY            int
+	permButtonRegions     []permButtonRegion
 }
 
 // agentStripMaxRows caps how many strip rows are visible at once so a large
@@ -345,6 +348,11 @@ type toolOutputRegion struct {
 	messageIndex int
 	startLine    int
 	endLine      int
+}
+
+type permButtonRegion struct {
+	choice    string
+	x1, x2, y int
 }
 
 type agentResponseMsg string
@@ -756,7 +764,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 	case tea.PasteMsg:
-		if (m.activeTab == tabChat || m.activeTab == tabLog) && !m.showPicker && !m.showConnect && !m.showPalette && !m.leaderActive {
+		if m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showPalette && !m.leaderActive {
 			content := msg.Content
 			if shortcode, ok := m.shortcodePastedFiles(content); ok {
 				content = shortcode
@@ -814,6 +822,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		if m.activeTab == tabLog {
+			if msg.Button == tea.MouseWheelUp {
+				m.logViewport.ScrollUp(scrollSpeed)
+				return m, nil
+			}
+			if msg.Button == tea.MouseWheelDown {
+				m.logViewport.ScrollDown(scrollSpeed)
+				return m, nil
+			}
+		}
 		if !m.mouseOverTranscriptViewport(msg) {
 			return m, nil
 		}
@@ -855,7 +873,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.activeTab == tabChat || m.activeTab == tabLog {
+	if m.activeTab == tabChat {
 		m.input, tiCmd = m.input.Update(msg)
 		m.syncRawInputLines()
 	}
@@ -871,16 +889,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layout()
 		m.files.Resize(m.width, m.height)
 		m.git.Resize(m.width, m.height)
-		m.logViewport, _ = m.logViewport.Update(tea.WindowSizeMsg{
-			Width:  m.panelWidth() - 7,
-			Height: m.height - m.bottomChromeHeight(m.panelWidth()) - 1,
-		})
+		m.layoutLogViewport()
 		m.ready = true
 		if m.restoredPendingScroll {
 			m.renderTranscript()
 			m.viewport.GotoBottom()
 			m.restoredPendingScroll = false
 		}
+		m.updatePermButtonRegions()
 	case tea.KeyPressMsg:
 		// Reset double-esc state on any non-esc keypress
 		if m.escPressed && msg.String() != "esc" {
@@ -1803,9 +1819,45 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		DebugLog.Clear()
 		m.logEntries = nil
+		m.logSearch = ""
 		m.refreshLogViewport()
+	case "esc":
+		m.logSearch = ""
+		m.refreshLogViewport()
+	case "backspace":
+		if len(m.logSearch) > 0 {
+			runes := []rune(m.logSearch)
+			m.logSearch = string(runes[:len(runes)-1])
+			m.refreshLogViewport()
+		}
+	case "1":
+		m.toggleLogKind(DebugKindLLM)
+	case "2":
+		m.toggleLogKind(DebugKindTool)
+	case "3":
+		m.toggleLogKind(DebugKindAgent)
+	case "4":
+		m.toggleLogKind(DebugKindError)
+	default:
+		if r := []rune(msg.String()); len(r) == 1 && r[0] >= 32 {
+			m.logSearch += string(r)
+			m.refreshLogViewport()
+		}
 	}
 	return m, nil
+}
+
+func (m *model) toggleLogKind(kind DebugEntryKind) {
+	if m.logKindFilter == nil {
+		m.logKindFilter = map[DebugEntryKind]bool{
+			DebugKindLLM:   true,
+			DebugKindTool:  true,
+			DebugKindAgent: true,
+			DebugKindError: true,
+		}
+	}
+	m.logKindFilter[kind] = !m.logKindFilter[kind]
+	m.refreshLogViewport()
 }
 
 // handleEscKey is shared esc logic: cancel stream first, then double-esc opens message picker.
@@ -2088,6 +2140,20 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			m.gitSel = selectionState{}
 			m.git.clearDiffSelectionHighlight()
+		}
+	}
+
+	if pressed && m.showPermDialog {
+		for _, btn := range m.permButtonRegions {
+			if mouse.Y == btn.y && mouse.X >= btn.x1 && mouse.X <= btn.x2 {
+				m.showPermDialog = false
+				cmd := m.handlePermissionChoice(btn.choice)
+				m.input.Reset()
+				m.renderTranscript()
+				m.viewport.GotoBottom()
+				m.saveSession()
+				return m, cmd, true
+			}
 		}
 	}
 
@@ -3504,6 +3570,7 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		default:
 			m.showPermDialog = true
 			m.pendingSubAgentResp = respCh
+			m.updatePermButtonRegions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
 			return nil
 		}
@@ -3539,6 +3606,7 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		return m.permissionDeniedToolResult(toolName)
 	default:
 		m.showPermDialog = true
+		m.updatePermButtonRegions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
 		return nil
 	}
@@ -3800,6 +3868,22 @@ func (m *model) layout() {
 	}
 	m.viewport.SetHeight(newHeight)
 	m.renderTranscript()
+	m.layoutLogViewport()
+}
+
+func (m *model) layoutLogViewport() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+
+	statusH := lipgloss.Height(m.renderStatus())
+	logHeight := m.height - (1 + 1 + 1 + 2 + statusH)
+	if logHeight < 1 {
+		logHeight = 1
+	}
+
+	m.logViewport.SetWidth(max(1, m.width-5))
+	m.logViewport.SetHeight(logHeight)
 }
 
 func (m model) bottomChromeHeight(panelWidth int) int {
@@ -3848,9 +3932,23 @@ func (m *model) renderPalette() string {
 	return borderStyle.Width(m.width - 2).Render(header + "\n\n" + body)
 }
 
+var permBtnStyle = lipgloss.NewStyle().Bold(true).Padding(0, 1).Border(lipgloss.RoundedBorder())
+
+type permBtnDef struct {
+	label  string
+	choice string
+	desc   string
+}
+
+var permBtnDefs = []permBtnDef{
+	{"Y", "y", "allow once"},
+	{"N", "n", "deny"},
+	{"A", "a", "always allow rule"},
+	{"T", "t", "always allow tool"},
+}
+
 func (m *model) renderPermissionDialog(width int) string {
 	req := m.pendingPermission
-	hint := hintStyle.Render("[y] allow once · [n] deny · [a] always allow rule · [t] always allow tool")
 
 	var body strings.Builder
 	body.WriteString("Tool: " + req.ToolName + "\n")
@@ -3865,7 +3963,54 @@ func (m *model) renderPermissionDialog(width int) string {
 	}
 
 	header := m.styles.Header.Render("⚠ Permission required")
-	return header + "\n\n" + body.String() + "\n" + hint
+
+	var btnParts []string
+	for _, b := range permBtnDefs {
+		btnParts = append(btnParts, permBtnStyle.Render(b.label+" "+b.desc))
+	}
+	buttonRow := strings.Join(btnParts, " ")
+
+	return header + "\n\n" + body.String() + "\n" + buttonRow
+}
+
+// updatePermButtonRegions computes absolute screen positions for the permission
+// dialog buttons and stores them on the model. Call from Update() after layout changes.
+func (m *model) updatePermButtonRegions() {
+	if !m.showPermDialog {
+		m.permButtonRegions = nil
+		return
+	}
+	req := m.pendingPermission
+
+	// Count lines above the button row inside the dialog content (excluding border).
+	// header(1) + blank(1) + "Tool: X"(1) + optional fields + blank(1)
+	linesAbove := 4 // header + blank + "Tool: X" + blank before buttons
+	if req.Command != "" {
+		linesAbove++
+	}
+	if req.Prefix != "" {
+		linesAbove++
+	}
+	if req.Rule != "" {
+		linesAbove++
+	}
+
+	// +1 for the dialog box top border
+	buttonRowY := m.inputAreaTopY() + 1 + linesAbove
+
+	m.permButtonRegions = nil
+	x := 1 // after left border
+	for _, b := range permBtnDefs {
+		rendered := permBtnStyle.Render(b.label + " " + b.desc)
+		w := lipgloss.Width(rendered)
+		m.permButtonRegions = append(m.permButtonRegions, permButtonRegion{
+			choice: b.choice,
+			x1:     x,
+			x2:     x + w - 1,
+			y:      buttonRowY,
+		})
+		x += w + 1
+	}
 }
 
 func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
@@ -3939,6 +4084,7 @@ func (m *model) renderTranscript() {
 	m.rawTranscriptLines = strings.Split(stripANSI(m.transcriptContent), "\n")
 	m.viewport.SetContent(m.transcriptContent)
 	m.sel = selectionState{}
+	m.updatePermButtonRegions()
 }
 
 func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
@@ -5396,6 +5542,14 @@ func (m *model) refreshLogViewport() {
 	}
 	var lines []string
 	for _, e := range m.logEntries {
+		if m.logKindFilter != nil {
+			if enabled, ok := m.logKindFilter[e.Kind]; ok && !enabled {
+				continue
+			}
+		}
+		if m.logSearch != "" && !logFuzzyMatch(m.logSearch, string(e.Kind)+" "+e.Message) {
+			continue
+		}
 		style, ok := kindColor[e.Kind]
 		if !ok {
 			style = hintStyle
@@ -5404,21 +5558,81 @@ func (m *model) refreshLogViewport() {
 		lines = append(lines, tag+" "+e.Message)
 	}
 	if len(lines) == 0 {
-		m.logViewport.SetContent(hintStyle.Render("  no debug entries yet"))
+		m.logViewport.SetContent(hintStyle.Render("  no entries match"))
 	} else {
 		m.logViewport.SetContent(strings.Join(lines, "\n"))
 	}
 }
 
-func (m model) renderLogTab() string {
-	header := m.styles.Header.Render("◆ ocode") + m.styles.Hint.Render("  ·  debug log")
-	content := m.styles.Border.Width(m.panelWidth() - 2).Render(m.logViewport.View())
-	status := m.renderStatus()
-	left := lipgloss.JoinVertical(lipgloss.Left, header, content, status)
-	if m.sidebarEnabled() {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebarWithTabBar())
+// logFuzzyMatch returns true if all runes in query appear in target in order (case-insensitive).
+func logFuzzyMatch(query, target string) bool {
+	query = strings.ToLower(query)
+	target = strings.ToLower(target)
+	qi := 0
+	qr := []rune(query)
+	for _, c := range target {
+		if qi < len(qr) && c == qr[qi] {
+			qi++
+		}
 	}
-	return left
+	return qi == len(qr)
+}
+
+func (m model) renderLogTab() string {
+	tabBar := renderTabBar(tabLog, m.chatUnread)
+	var exitBtn string
+	if m.exitPending {
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("✕ exit?")
+	} else {
+		exitBtn = m.styles.Hint.Padding(0, 1).Render("✕ exit")
+	}
+	headerLeft := m.styles.Header.Render("◆ ocode") + m.styles.Hint.Render("  ·  debug log")
+	headerPad := m.width - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
+	if headerPad < 0 {
+		headerPad = 0
+	}
+	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
+
+	// search bar
+	searchPrefix := hintStyle.Render("/ ")
+	searchText := m.logSearch
+	if searchText == "" {
+		searchText = hintStyle.Render("search…")
+	}
+	searchBar := searchPrefix + searchText
+
+	// kind filter toggles
+	kinds := []struct {
+		kind  DebugEntryKind
+		label string
+		key   string
+	}{
+		{DebugKindLLM, "LLM", "1"},
+		{DebugKindTool, "TOOL", "2"},
+		{DebugKindAgent, "AGENT", "3"},
+		{DebugKindError, "ERROR", "4"},
+	}
+	kindBar := hintStyle.Render("filter: ")
+	for _, k := range kinds {
+		enabled := m.logKindFilter == nil || m.logKindFilter[k.kind]
+		label := fmt.Sprintf("[%s]%s ", k.key, k.label)
+		if enabled {
+			kindBar += selectedStyle.Render(label)
+		} else {
+			kindBar += hintStyle.Render(label)
+		}
+	}
+
+	// scrollbar + viewport
+	sb := renderScrollbar(m.logViewport.Height(), m.logViewport.TotalLineCount(), m.logViewport.VisibleLineCount(), m.logViewport.YOffset())
+	viewportContent := lipgloss.JoinHorizontal(lipgloss.Top,
+		constrainView(m.logViewport.View(), m.logViewport.Width(), m.logViewport.Height()),
+		sb,
+	)
+	content := m.styles.Border.Width(max(1, m.width-2)).Height(m.logViewport.Height() + 2).Render(viewportContent)
+	status := m.renderStatus()
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, searchBar, kindBar, content, status)
 }
 
 func shortenWorkingDir(dir string) string {
