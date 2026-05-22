@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jamesmercstudio/ocode/internal/agent"
+
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -282,5 +284,120 @@ func TestEditorModeCommandInvalidMode(t *testing.T) {
 	}
 	if !strings.Contains(got.messages[0].text, "Invalid editor mode") {
 		t.Fatalf("expected error to mention invalid mode, got %q", got.messages[0].text)
+	}
+}
+
+func TestEstimateTok(t *testing.T) {
+	cases := []struct {
+		input string
+		want  int
+	}{
+		{"", 0},
+		{"abcd", 1},
+		{"abcde", 1},
+		{"abcdefgh", 2},
+	}
+	for _, c := range cases {
+		if got := estimateTok(c.input); got != c.want {
+			t.Errorf("estimateTok(%q) = %d, want %d", c.input, got, c.want)
+		}
+	}
+}
+
+func TestContextCommandIsRegistered(t *testing.T) {
+	spec := lookupCommand("/context")
+	if spec == nil {
+		t.Fatal("expected /context to be registered")
+	}
+	if spec.help == "" {
+		t.Fatal("expected /context to have help text")
+	}
+}
+
+func TestContextCommandNilAgentGuard(t *testing.T) {
+	m := model{width: 80}
+	// must not panic
+	m.handleContextCmd(nil)
+	if len(m.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(m.messages))
+	}
+	if !strings.Contains(m.messages[0].text, "No agent") {
+		t.Fatalf("expected no-agent message, got %q", m.messages[0].text)
+	}
+}
+
+func TestContextMCPGrouping(t *testing.T) {
+	serverNames := []string{"claude_ai_Gmail", "context7"}
+	toolNames := map[string]struct{}{
+		"claude_ai_Gmail_search": {},
+		"claude_ai_Gmail_send":   {},
+		"context7_query":         {},
+		"bash":                   {},
+	}
+	defs := []map[string]interface{}{
+		{"name": "claude_ai_Gmail_search", "description": "search"},
+		{"name": "claude_ai_Gmail_send", "description": "send"},
+		{"name": "context7_query", "description": "query"},
+		{"name": "bash", "description": "run bash"},
+	}
+
+	grouped, builtin := groupMCPToolDefs(defs, toolNames, serverNames)
+
+	if len(grouped["claude_ai_Gmail"]) != 2 {
+		t.Errorf("expected 2 tools for claude_ai_Gmail, got %d", len(grouped["claude_ai_Gmail"]))
+	}
+	if len(grouped["context7"]) != 1 {
+		t.Errorf("expected 1 tool for context7, got %d", len(grouped["context7"]))
+	}
+	if len(builtin) != 1 || builtin[0]["name"] != "bash" {
+		t.Errorf("expected bash in builtin, got %v", builtin)
+	}
+}
+
+func TestContextCommandInHelp(t *testing.T) {
+	help := commandHelpText()
+	if !strings.Contains(help, "/context") {
+		t.Fatalf("expected /context in help text, got:\n%s", help)
+	}
+}
+
+func TestContextCommandAutocompletes(t *testing.T) {
+	m := model{}
+	results := autocompleteSlashInput(&m, "/con")
+	found := false
+	for _, r := range results {
+		if r == "/context" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected /context in autocomplete for '/con', got %v", results)
+	}
+}
+
+func TestContextCommandOutputHasNoRaw(t *testing.T) {
+	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil), config: &config.Config{}}
+	m.handleContextCmd(nil)
+	for _, msg := range m.messages {
+		if msg.raw != nil {
+			t.Fatal("context command output must not set raw field (would inject into LLM)")
+		}
+	}
+}
+
+func TestContextCommandOutputsSections(t *testing.T) {
+	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil), config: &config.Config{}}
+	m.handleContextCmd(nil)
+	if len(m.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(m.messages))
+	}
+	for _, want := range []string{"Context Budget", "Base Prompt", "Tools (injected every request)", "Skills (on-demand", "Session Messages"} {
+		if !strings.Contains(m.messages[0].text, want) {
+			t.Fatalf("expected %q in context output, got %q", want, m.messages[0].text)
+		}
+	}
+	if m.messages[0].raw != nil {
+		t.Fatal("context command output must not set raw field")
 	}
 }

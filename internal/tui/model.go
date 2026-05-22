@@ -22,6 +22,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/plugins"
 	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/skill"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
@@ -60,6 +61,66 @@ type message struct {
 	text      string
 	raw       *agent.Message
 	transient bool
+}
+
+// estimateTok approximates token count as len(s)/4.
+func estimateTok(s string) int {
+	return len(s) / 4
+}
+
+// formatTok formats an integer token count compactly.
+func formatTok(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%dk", n/1000)
+	}
+	return strconv.Itoa(n)
+}
+
+// columnPad returns spaces to pad label to width w for alignment.
+func columnPad(label string, w int) string {
+	pad := w - len(label)
+	if pad < 1 {
+		pad = 1
+	}
+	return strings.Repeat(" ", pad)
+}
+
+// groupMCPToolDefs separates tool definitions into per-server MCP groups and builtin.
+func groupMCPToolDefs(
+	defs []map[string]interface{},
+	mcpToolSet map[string]struct{},
+	serverNames []string,
+) (grouped map[string][]map[string]interface{}, builtin []map[string]interface{}) {
+	grouped = make(map[string][]map[string]interface{})
+	for _, def := range defs {
+		name, _ := def["name"].(string)
+		if _, isMCP := mcpToolSet[name]; !isMCP {
+			builtin = append(builtin, def)
+			continue
+		}
+		matched := false
+		for _, srv := range serverNames {
+			if strings.HasPrefix(name, srv+"_") {
+				grouped[srv] = append(grouped[srv], def)
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			builtin = append(builtin, def)
+		}
+	}
+	return
+}
+
+func latestPromptTokens(messages []message) int64 {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].raw == nil || messages[i].raw.Usage == nil || messages[i].raw.Usage.PromptTokens == nil {
+			continue
+		}
+		return *messages[i].raw.Usage.PromptTokens
+	}
+	return 0
 }
 
 type editorFinishedMsg struct {
@@ -1735,6 +1796,28 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		m.detail.pop()
 		return m, nil
 	}
+	if m.activeTab == tabFiles {
+		if m.filesSel.active || m.filesSel.dragging {
+			m.filesSel = selectionState{}
+			m.files.clearSelectionHighlight()
+			return m, nil
+		}
+		if len(m.files.selectedFiles) > 0 {
+			m.files.selectedFiles = nil
+			return m, nil
+		}
+	}
+	if m.activeTab == tabGit {
+		if m.gitSel.active || m.gitSel.dragging {
+			m.gitSel = selectionState{}
+			m.git.clearDiffSelectionHighlight()
+			return m, nil
+		}
+		if len(m.git.selectedFiles) > 0 {
+			m.git.selectedFiles = nil
+			return m, nil
+		}
+	}
 	if !m.escPressed {
 		m.escPressed = true
 		m.escPressTime = time.Now()
@@ -2886,6 +2969,242 @@ func (m *model) handleSkillsCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
 
+func (m *model) handleContextCmd(args []string) {
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No agent configured."})
+		return
+	}
+
+	var b strings.Builder
+	b.WriteString("Context Budget\n")
+	b.WriteString(strings.Repeat("═", 38) + "\n")
+
+	// ── Base Prompt ──────────────────────────────
+	b.WriteString("\nBase Prompt\n")
+	baseTotal := 0
+
+	modePrompt := m.agent.Mode().SystemPrompt()
+	modeTok := estimateTok(modePrompt)
+	baseTotal += modeTok
+	modeLabel := fmt.Sprintf("Mode (%s)", m.agent.Mode().String())
+	fmt.Fprintf(&b, "  %s%s~%s tok\n", modeLabel, columnPad(modeLabel, 28), formatTok(modeTok))
+
+	ambientFiles := []string{"AGENTS.md", "CLAUDE.md", ".cursorrules"}
+	rulesDir := filepath.Join(".opencode", "rules")
+	if entries, err := os.ReadDir(rulesDir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && filepath.Ext(e.Name()) == ".md" {
+				ambientFiles = append(ambientFiles, filepath.Join(rulesDir, e.Name()))
+			}
+		}
+	}
+	anyAmbient := false
+	for _, f := range ambientFiles {
+		content, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		anyAmbient = true
+		tok := estimateTok(string(content))
+		baseTotal += tok
+		label := filepath.Base(f)
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", label, formatTok(tok))
+	}
+	if !anyAmbient {
+		b.WriteString("  (no ambient files found)\n")
+	}
+
+	plugs := plugins.LoadPlugins()
+	for _, p := range plugs {
+		if p.Instructions == "" {
+			continue
+		}
+		tok := estimateTok(p.Instructions)
+		baseTotal += tok
+		fmt.Fprintf(&b, "  Plugin: %-20s ~%s tok\n", p.Name, formatTok(tok))
+	}
+	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(baseTotal))
+
+	// ── Tools ────────────────────────────────────
+	b.WriteString("\nTools (injected every request)\n")
+	toolsTotal := 0
+	allDefs := m.agent.GetToolDefinitions()
+	mcpSet := make(map[string]struct{})
+	for _, name := range m.agent.MCPToolNames() {
+		mcpSet[name] = struct{}{}
+	}
+	var serverNames []string
+	if m.config != nil {
+		serverNames = make([]string, 0, len(m.config.MCP))
+		for name := range m.config.MCP {
+			serverNames = append(serverNames, name)
+		}
+	}
+	sort.Strings(serverNames)
+
+	grouped, builtinDefs := groupMCPToolDefs(allDefs, mcpSet, serverNames)
+	builtinTok := 0
+	for _, def := range builtinDefs {
+		raw, _ := json.Marshal(def)
+		builtinTok += estimateTok(string(raw))
+	}
+	toolsTotal += builtinTok
+	builtinLabel := fmt.Sprintf("Built-in (%d tools)", len(builtinDefs))
+	fmt.Fprintf(&b, "  %s%s~%s tok\n", builtinLabel, columnPad(builtinLabel, 28), formatTok(builtinTok))
+
+	for _, srv := range serverNames {
+		defs, ok := grouped[srv]
+		if !ok {
+			continue
+		}
+		srvTok := 0
+		for _, def := range defs {
+			raw, _ := json.Marshal(def)
+			srvTok += estimateTok(string(raw))
+		}
+		toolsTotal += srvTok
+		label := fmt.Sprintf("MCP: %s  %d tools", srv, len(defs))
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", label, formatTok(srvTok))
+	}
+	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(toolsTotal))
+
+	injectedTotal := baseTotal + toolsTotal
+	fmt.Fprintf(&b, "\n  %-28s ~%s tok\n", "Injected per request", formatTok(injectedTotal))
+
+	// ── Skills ───────────────────────────────────
+	b.WriteString("\nSkills (on-demand, not pre-injected)\n")
+	skills := skill.LoadSkills()
+	if len(skills) == 0 {
+		b.WriteString("  (none found)\n")
+	} else {
+		shown := skills
+		extra := 0
+		if len(skills) > 5 {
+			shown = skills[:5]
+			extra = len(skills) - 5
+		}
+		skillTotal := 0
+		for _, s := range skills {
+			skillTotal += estimateTok(s.Content)
+		}
+		for _, s := range shown {
+			tok := estimateTok(s.Content)
+			fmt.Fprintf(&b, "  %-28s ~%s tok\n", s.Name, formatTok(tok))
+		}
+		if extra > 0 {
+			moreLabel := fmt.Sprintf("... +%d more (%d total)", extra, len(skills))
+			fmt.Fprintf(&b, "  %s%s~%s tok available\n", moreLabel, columnPad(moreLabel, 24), formatTok(skillTotal))
+		}
+	}
+
+	// ── Session Messages ─────────────────────────
+	b.WriteString("\nSession Messages\n")
+	modelName := m.currentModelName()
+	if used := latestPromptTokens(m.messages); used > 0 {
+		if window, ok := modelContextWindow(modelName); ok {
+			pct := formatPercent(used, window)
+			fmt.Fprintf(&b, "  Context window  %s / %s (%s)\n", strconv.FormatInt(used, 10), strconv.FormatInt(window, 10), pct)
+		} else {
+			fmt.Fprintf(&b, "  Context window  %s tokens\n", strconv.FormatInt(used, 10))
+		}
+	} else {
+		b.WriteString("  Context window  n/a\n")
+	}
+	sessionTok := m.sessionTelemetry.usedTokens()
+	if sessionTok > 0 {
+		fmt.Fprintf(&b, "  Session total   %s tok\n", strconv.FormatInt(sessionTok, 10))
+	} else {
+		b.WriteString("  Session total   n/a\n")
+	}
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m model) buildSelectionContext() string {
+	var b strings.Builder
+	writeHeader := func() {
+		if b.Len() == 0 {
+			b.WriteString("[Selected context]\n")
+		}
+	}
+
+	if len(m.files.selectedFiles) > 0 {
+		writeHeader()
+		b.WriteString("\n## Files\n")
+		indices := make([]int, 0, len(m.files.selectedFiles))
+		for idx := range m.files.selectedFiles {
+			indices = append(indices, idx)
+		}
+		sort.Ints(indices)
+		for _, idx := range indices {
+			if idx < 0 || idx >= len(m.files.nodes) {
+				continue
+			}
+			n := m.files.nodes[idx]
+			path := n.path
+			if rel, err := filepath.Rel(m.workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+				path = rel
+			}
+			if path == "" {
+				path = n.name
+			}
+			b.WriteString("- ")
+			b.WriteString(path)
+			b.WriteString("\n")
+		}
+	}
+
+	if m.filesSel.active && m.files.previewPath != "" && len(m.files.previewRawLines) > 0 {
+		writeHeader()
+		path := m.files.previewPath
+		if rel, err := filepath.Rel(m.workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+			path = rel
+		}
+		startLine, _, endLine, _ := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
+		b.WriteString("\n## File selection: ")
+		b.WriteString(path)
+		b.WriteString("\n")
+		for i := startLine; i <= endLine && i < len(m.files.previewRawLines); i++ {
+			if i < 0 {
+				continue
+			}
+			fmt.Fprintf(&b, "%d: %s\n", i+1, m.files.previewRawLines[i])
+		}
+	}
+
+	if len(m.git.selectedFiles) > 0 {
+		allFiles := m.git.currentFileList()
+		var files []gitFile
+		for idx := range m.git.selectedFiles {
+			if idx >= 0 && idx < len(allFiles) {
+				files = append(files, allFiles[idx])
+			}
+		}
+		if len(files) > 0 {
+			writeHeader()
+			b.WriteString("\n## Git diff\n")
+			for _, f := range files {
+				b.WriteString("- ")
+				b.WriteString(f.path)
+				b.WriteString("\n")
+			}
+		}
+	}
+
+	return b.String()
+}
+
+func (m model) appendSelectionMsg(msgs []agent.Message) []agent.Message {
+	ctx := m.buildSelectionContext()
+	if strings.TrimSpace(ctx) == "" {
+		return msgs
+	}
+	out := make([]agent.Message, 0, len(msgs)+1)
+	out = append(out, agent.Message{Role: "system", Content: ctx})
+	out = append(out, msgs...)
+	return out
+}
+
 func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
 	return func() tea.Msg {
 		if m.agent == nil {
@@ -2897,6 +3216,7 @@ func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
 			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
 		}
 		agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: prompt})
+		agentMsgs = m.appendSelectionMsg(agentMsgs)
 		resp, err := m.agent.Step(agentMsgs)
 		if err != nil {
 			return errorMsg(err)
@@ -3323,6 +3643,8 @@ func (m model) askAgent() tea.Cmd {
 		}
 	}
 
+	agentMsgs = m.appendSelectionMsg(agentMsgs)
+
 	cancel := make(chan struct{})
 	ch := make(chan agent.Message, 16)
 	errCh := make(chan error, 1)
@@ -3424,6 +3746,7 @@ func (m model) reExecutePendingTool(toolName string) tea.Cmd {
 				Content: msg.text,
 			})
 		}
+		agentMsgs = m.appendSelectionMsg(agentMsgs)
 		resp, err := m.agent.Step(agentMsgs)
 		if err != nil {
 			return errorMsg(err)

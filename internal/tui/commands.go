@@ -49,6 +49,7 @@ func init() {
 		{name: "/editor-mode", usage: "/editor-mode [external|tmux-split|tmux-window]", help: "Set editor open mode", handler: runEditorModeCmd},
 		{name: "/sidebar", help: "Toggle sidebar placeholder", handler: runSidebarCmd},
 		{name: "/skills", help: "List available skills", handler: runSkillsCmd},
+		{name: "/context", help: "Show context window token budget", handler: runContextCmd},
 		{name: "/commands", help: "List all available commands (built-in + custom)", handler: runCommandsCmd},
 		{name: "/mcp", usage: "/mcp [list|enable <server>|disable <server>]", help: "List or toggle MCP servers", handler: runMCPCmd},
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
@@ -428,6 +429,11 @@ func runSkillsCmd(m *model, args []string) tea.Cmd {
 		m.handleSkillsCmd(args)
 		return nil
 	}
+}
+
+func runContextCmd(m *model, args []string) tea.Cmd {
+	m.handleContextCmd(args)
+	return nil
 }
 
 func runCommandsCmd(m *model, args []string) tea.Cmd {

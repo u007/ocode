@@ -535,7 +535,7 @@ func ApplyThemeColors(name string) Styles {
 		Text:      lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)),
 		Thinking:  lipgloss.NewStyle().Foreground(lipgloss.Color(themeColor(c.Thinking, c.Accent))).Bold(true).Italic(true),
 		Dim:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim)),
-		ToolBox:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(1, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
+		ToolBox:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
 	}
 	setUserStyle(s.User)
 	setAssistantStyle(s.Assistant)

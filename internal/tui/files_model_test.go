@@ -188,7 +188,7 @@ func TestFilesEnterUsesEditorOpener(t *testing.T) {
 	m.editor = "echo"
 	m.editorOpener = createEditorOpener("echo", "external", nil)
 
-	m, cmd := m.Update(tea.KeyPressMsg{Code: ' '}, 100, 30)
+	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}, 100, 30)
 	if cmd == nil {
 		t.Fatal("expected cmd from opening file via opener")
 	}
@@ -215,6 +215,80 @@ func TestFilesHintsExternalMode(t *testing.T) {
 	}
 	if !strings.Contains(view, "choose editor") {
 		t.Fatalf("expected choose editor hint, got:\n%s", view)
+	}
+}
+
+func TestFilesSpaceTogglesSelection(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+	m.nodes = []fileNode{{path: "/a/foo.go", name: "foo.go"}}
+	m.cursor = 0
+	m.panel = filesPanelPicker
+
+	got, _ := m.Update(tea.KeyPressMsg{Code: ' ', Text: " "}, 100, 30)
+	if !got.selectedFiles[0] {
+		t.Fatal("expected space to select file at cursor")
+	}
+
+	got, _ = got.Update(tea.KeyPressMsg{Code: ' ', Text: " "}, 100, 30)
+	if got.selectedFiles[0] {
+		t.Fatal("expected second space to deselect file at cursor")
+	}
+}
+
+func TestFilesSpaceOnDirTogglesExpand(t *testing.T) {
+	dir := t.TempDir()
+	m := newFilesModel(dir)
+	m.nodes = []fileNode{{path: filepath.Join(dir, "sub"), name: "sub", isDir: true}}
+	m.cursor = 0
+	m.panel = filesPanelPicker
+
+	got, _ := m.Update(tea.KeyPressMsg{Code: ' ', Text: " "}, 100, 30)
+	if len(got.selectedFiles) != 0 {
+		t.Fatalf("expected no file selection for directory, got %#v", got.selectedFiles)
+	}
+	if !got.nodes[0].expanded {
+		t.Fatal("expected space on directory to toggle expansion")
+	}
+}
+
+func TestFilesShiftDownExtendsSelection(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+	m.nodes = []fileNode{{path: "/a/a.go", name: "a.go"}, {path: "/a/b.go", name: "b.go"}, {path: "/a/c.go", name: "c.go"}}
+	m.cursor = 0
+	m.panel = filesPanelPicker
+
+	got, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown, Mod: tea.ModShift}, 100, 30)
+	if !got.selectedFiles[0] || !got.selectedFiles[1] {
+		t.Fatalf("expected shift+down to select 0 and 1, got %#v", got.selectedFiles)
+	}
+	if got.cursor != 1 {
+		t.Fatalf("expected cursor to move to 1, got %d", got.cursor)
+	}
+}
+
+func TestFilesPlainNavClearsSelection(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+	m.nodes = []fileNode{{path: "/a/a.go", name: "a.go"}, {path: "/a/b.go", name: "b.go"}}
+	m.cursor = 0
+	m.panel = filesPanelPicker
+	m.selectedFiles = map[int]bool{0: true}
+
+	got, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown}, 100, 30)
+	if len(got.selectedFiles) != 0 {
+		t.Fatalf("expected plain down to clear selection, got %#v", got.selectedFiles)
+	}
+	if got.cursor != 1 {
+		t.Fatalf("expected cursor to move to 1, got %d", got.cursor)
+	}
+}
+
+func TestFilesSelectionHintShowsCount(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+	m.selectedFiles = map[int]bool{0: true, 1: true}
+
+	hint := m.selectionHint()
+	if !strings.Contains(hint, "2 selected") {
+		t.Fatalf("expected selection hint count, got %q", hint)
 	}
 }
 
@@ -429,4 +503,3 @@ func TestFilesHintsTmuxSplitMode(t *testing.T) {
 		t.Fatalf("expected choose editor hint, got:\n%s", view)
 	}
 }
-

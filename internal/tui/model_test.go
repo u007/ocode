@@ -1286,6 +1286,151 @@ func TestSessionRestoreScrollsToBottom(t *testing.T) {
 	}
 }
 
+func TestEscClearsFilesHighlightFirst(t *testing.T) {
+	m := model{activeTab: tabFiles}
+	m.filesSel = selectionState{active: true, startLine: 0, endLine: 1}
+	m.files.selectedFiles = map[int]bool{0: true}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	got := derefTestModel(t, updated)
+
+	if got.filesSel.active {
+		t.Fatal("expected files selection highlight to clear first")
+	}
+	if len(got.files.selectedFiles) == 0 {
+		t.Fatal("expected files multi-select to survive first esc")
+	}
+}
+
+func TestEscClearsFilesSelectedFilesSecond(t *testing.T) {
+	m := model{activeTab: tabFiles}
+	m.files.selectedFiles = map[int]bool{0: true}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	got := derefTestModel(t, updated)
+
+	if len(got.files.selectedFiles) != 0 {
+		t.Fatalf("expected files multi-select to clear on esc, got %#v", got.files.selectedFiles)
+	}
+}
+
+func TestEscClearsGitHighlightFirst(t *testing.T) {
+	m := model{activeTab: tabGit}
+	m.gitSel = selectionState{active: true, startLine: 0, endLine: 1}
+	m.git.selectedFiles = map[int]bool{0: true}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	got := derefTestModel(t, updated)
+
+	if got.gitSel.active {
+		t.Fatal("expected git selection highlight to clear first")
+	}
+	if len(got.git.selectedFiles) == 0 {
+		t.Fatal("expected git multi-select to survive first esc")
+	}
+}
+
+func TestEscClearsGitSelectedFilesSecond(t *testing.T) {
+	m := model{activeTab: tabGit}
+	m.git.selectedFiles = map[int]bool{0: true}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	got := derefTestModel(t, updated)
+
+	if len(got.git.selectedFiles) != 0 {
+		t.Fatalf("expected git multi-select to clear on esc, got %#v", got.git.selectedFiles)
+	}
+}
+
+func TestBuildSelectionContextEmpty(t *testing.T) {
+	if got := (model{}).buildSelectionContext(); got != "" {
+		t.Fatalf("expected empty context, got %q", got)
+	}
+}
+
+func TestBuildSelectionContextFilesOnly(t *testing.T) {
+	m := model{workDir: "/proj"}
+	m.files.nodes = []fileNode{{path: "/proj/main.go", name: "main.go"}, {path: "/proj/foo.go", name: "foo.go"}}
+	m.files.selectedFiles = map[int]bool{0: true, 1: true}
+
+	got := m.buildSelectionContext()
+	for _, want := range []string{"[Selected context]", "## Files", "main.go", "foo.go"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in context, got:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildSelectionContextFilesHighlight(t *testing.T) {
+	m := model{workDir: "/proj"}
+	m.files.previewPath = "/proj/main.go"
+	m.files.previewRawLines = []string{"package main", "func main() {}", "}"}
+	m.filesSel = selectionState{active: true, startLine: 0, startCol: 0, endLine: 1, endCol: 99}
+
+	got := m.buildSelectionContext()
+	for _, want := range []string{"main.go", "1:", "2:", "package main", "func main() {}"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in context, got:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildSelectionContextGitFiles(t *testing.T) {
+	m := model{workDir: "/proj"}
+	m.git.section = gitSectionChanges
+	m.git.stagedFiles = []gitFile{{path: "internal/foo.go", status: "M", staged: true}}
+	m.git.unstagedFiles = []gitFile{{path: "internal/bar.go", status: "M"}}
+	m.git.filesCursor = 0
+
+	// Only index 1 (bar.go) selected — foo.go must not appear.
+	m.git.selectedFiles = map[int]bool{1: true}
+	got := m.buildSelectionContext()
+	if !strings.Contains(got, "## Git diff") {
+		t.Fatalf("expected ## Git diff section, got:\n%s", got)
+	}
+	if !strings.Contains(got, "internal/bar.go") {
+		t.Fatalf("expected internal/bar.go in context, got:\n%s", got)
+	}
+	if strings.Contains(got, "internal/foo.go") {
+		t.Fatalf("expected internal/foo.go to be excluded (not selected), got:\n%s", got)
+	}
+
+	// No selection and not on git tab — git section must not appear.
+	m.git.selectedFiles = nil
+	m.activeTab = tabFiles
+	got = m.buildSelectionContext()
+	if strings.Contains(got, "## Git diff") {
+		t.Fatalf("expected no git section when nothing selected and not on git tab, got:\n%s", got)
+	}
+}
+
+func TestAppendSelectionMsgSkipsWhenEmpty(t *testing.T) {
+	m := model{}
+	msgs := []agent.Message{{Role: "user", Content: "hello"}}
+	got := m.appendSelectionMsg(msgs)
+	if len(got) != 1 {
+		t.Fatalf("expected no new messages, got %d", len(got))
+	}
+}
+
+func TestAppendSelectionMsgPrependsSelectionContext(t *testing.T) {
+	m := model{workDir: "/proj"}
+	m.files.nodes = []fileNode{{path: "/proj/main.go", name: "main.go"}}
+	m.files.selectedFiles = map[int]bool{0: true}
+	msgs := []agent.Message{{Role: "user", Content: "hello"}}
+
+	got := m.appendSelectionMsg(msgs)
+	if len(got) != 2 {
+		t.Fatalf("expected one selection message prepended, got %d", len(got))
+	}
+	if got[0].Role != "system" {
+		t.Fatalf("expected prepended message to be system, got %q", got[0].Role)
+	}
+	if !strings.Contains(got[0].Content, "## Files") || !strings.Contains(got[0].Content, "main.go") {
+		t.Fatalf("expected selection context in prepended message, got:\n%s", got[0].Content)
+	}
+}
+
 func int64Ptr(v int64) *int64 { return &v }
 
 func mustJSON(t *testing.T, v any) json.RawMessage {
