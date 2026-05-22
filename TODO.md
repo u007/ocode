@@ -65,3 +65,10 @@ Deferred:
 - **Retry the failed Step after compaction.** If the LLM call inside Step fails with a context-length error, the UI surfaces the error and the post-Step compaction never runs (Step returned early). Could detect context-length errors, run sync compaction, and replay the Step.
 - **Streaming summary.** The summary client call is blocking. If it becomes the bottleneck on slow providers, switch to a streaming variant that lets the UI show partial summary text as it arrives.
 - **Drop stale `pendingCompactUIIdx`.** If the user clears the session between compaction trigger and completion, the splice indices become stale. Today `applyCompactionResult` guards with bounds checks, but a session-generation counter would be cleaner.
+
+## apply_patch parity with opencode — follow-up
+
+- **Align remaining edge cases with upstream behavior.** Current parser/executor now supports opencode-style `*** Begin Patch` envelopes, `*** Add/Delete/Update File`, `*** Move to`, `@@` hunks, and rollback on failure. Next pass should compare against upstream behavior for duplicate context, repeated hunks, rename+update ordering, and exact failure modes.
+- **Match upstream error strings where practical.** LLM behavior can be sensitive to familiar tool responses; aligning error wording may improve self-correction when a patch is malformed.
+- **Add edge-case tests.** Cover move+update in one patch, EOF insertions via `*** End of File`, multiple hunks in one file, repeated-context matching, and whitespace-tolerant matching cases.
+- **Consider importing or porting the upstream parser more literally.** If true byte-for-byte compatibility is a goal, the cleanest path is a closer structural port of the upstream opencode apply_patch parser rather than maintaining a merely compatible reimplementation.

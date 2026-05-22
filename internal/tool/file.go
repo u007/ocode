@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
@@ -20,6 +21,11 @@ func toolResultCacheDir() string {
 		return filepath.Join(env, "opencode", "tool-results")
 	}
 	home, _ := os.UserHomeDir()
+	if runtime.GOOS == "windows" {
+		if base := os.Getenv("LOCALAPPDATA"); base != "" {
+			return filepath.Join(base, "opencode", "tool-results")
+		}
+	}
 	return filepath.Join(home, ".local", "state", "opencode", "tool-results")
 }
 
@@ -447,12 +453,128 @@ type MultiEditTool struct {
 	Config *config.Config
 }
 
-func (t MultiEditTool) Name() string        { return "multiedit" }
-func (t MultiEditTool) Description() string { return "Perform multiple edits across files atomically" }
-func (t MultiEditTool) Parallel() bool      { return false }
+func (t MultiEditTool) Name() string { return "multiedit" }
+func (t MultiEditTool) Description() string {
+	return "Perform multiple edits to a single file atomically"
+}
+func (t MultiEditTool) Parallel() bool { return false }
 func (t MultiEditTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "multiedit",
+		"description": "Perform multiple search/replace edits to a single file. All edits are applied in sequence on the result of the previous edit, and all are validated before writing — if any edit fails, none are applied.",
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"file_path": map[string]interface{}{"type": "string"},
+				"edits": map[string]interface{}{
+					"type": "array",
+					"items": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"oldString":  map[string]interface{}{"type": "string"},
+							"newString":  map[string]interface{}{"type": "string"},
+							"replaceAll": map[string]interface{}{"type": "boolean"},
+						},
+						"required": []string{"oldString", "newString"},
+					},
+				},
+			},
+			"required": []string{"file_path", "edits"},
+		},
+	}
+}
+
+func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
+	var params struct {
+		FilePath string `json:"file_path"`
+		Edits    []struct {
+			OldString  string `json:"oldString"`
+			NewString  string `json:"newString"`
+			ReplaceAll bool   `json:"replaceAll"`
+		} `json:"edits"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return "", err
+	}
+
+	if params.FilePath == "" {
+		return "", fmt.Errorf("file_path is required")
+	}
+	if len(params.Edits) == 0 {
+		return "", fmt.Errorf("no edits provided")
+	}
+
+	safe, err := confinedPath(params.FilePath)
+	if err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(safe)
+	origContent := ""
+	fileExists := err == nil
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("cannot read %s: %w", params.FilePath, err)
+		}
+	} else {
+		origContent = string(content)
+	}
+
+	newContent := origContent
+	for i, e := range params.Edits {
+		if e.OldString == e.NewString {
+			return "", fmt.Errorf("edit %d is a no-op: oldString and newString are identical", i+1)
+		}
+		if !fileExists && i == 0 && e.OldString == "" {
+			newContent = e.NewString
+			fileExists = true
+			continue
+		}
+
+		count := strings.Count(newContent, e.OldString)
+		if count == 0 {
+			return "", fmt.Errorf("oldString not found in content")
+		}
+		if count > 1 && !e.ReplaceAll {
+			return "", fmt.Errorf("Found multiple matches for oldString. Provide more surrounding lines in oldString to identify the correct match, or use replaceAll.")
+		}
+		if e.ReplaceAll {
+			newContent = strings.ReplaceAll(newContent, e.OldString, e.NewString)
+		} else {
+			newContent = strings.Replace(newContent, e.OldString, e.NewString, 1)
+		}
+	}
+
+	snapshot.Backup(safe) //nolint:errcheck
+	if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
+		return "", fmt.Errorf("failed to create directories for %s: %w", params.FilePath, err)
+	}
+	if err := os.WriteFile(safe, []byte(newContent), 0644); err != nil {
+		_ = snapshot.Restore(safe)
+		return "", fmt.Errorf("failed to write %s: %w", params.FilePath, err)
+	}
+
+	var formatters map[string]config.FormatterConfig
+	if t.Config != nil {
+		formatters = t.Config.Formatters
+	}
+	FormatAfterWrite(safe, formatters)
+
+	return FormatDiff(params.FilePath, origContent, newContent), nil
+}
+
+type MultiFileEditTool struct {
+	Config *config.Config
+}
+
+func (t MultiFileEditTool) Name() string { return "multi_file_edit" }
+func (t MultiFileEditTool) Description() string {
+	return "Perform multiple edits across files atomically"
+}
+func (t MultiFileEditTool) Parallel() bool { return false }
+func (t MultiFileEditTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "multi_file_edit",
 		"description": "Perform multiple search/replace edits across files. All edits are validated first, then applied atomically — if any edit fails, none are applied.",
 		"parameters": map[string]interface{}{
 			"type": "object",
@@ -462,9 +584,10 @@ func (t MultiEditTool) Definition() map[string]interface{} {
 					"items": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"path":    map[string]interface{}{"type": "string"},
-							"search":  map[string]interface{}{"type": "string"},
-							"replace": map[string]interface{}{"type": "string"},
+							"path":        map[string]interface{}{"type": "string"},
+							"search":      map[string]interface{}{"type": "string"},
+							"replace":     map[string]interface{}{"type": "string"},
+							"replace_all": map[string]interface{}{"type": "boolean"},
 						},
 						"required": []string{"path", "search", "replace"},
 					},
@@ -475,12 +598,13 @@ func (t MultiEditTool) Definition() map[string]interface{} {
 	}
 }
 
-func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
+func (t MultiFileEditTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		Edits []struct {
-			Path    string `json:"path"`
-			Search  string `json:"search"`
-			Replace string `json:"replace"`
+			Path       string `json:"path"`
+			Search     string `json:"search"`
+			Replace    string `json:"replace"`
+			ReplaceAll bool   `json:"replace_all"`
 		} `json:"edits"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
@@ -500,7 +624,7 @@ func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
 	byFile := make(map[string]*fileEdit)
 	var fileOrder []string
 
-	for _, e := range params.Edits {
+	for i, e := range params.Edits {
 		safe, err := confinedPath(e.Path)
 		if err != nil {
 			return "", err
@@ -517,14 +641,22 @@ func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
 			fileOrder = append(fileOrder, safe)
 		}
 
+		if e.Search == e.Replace {
+			return "", fmt.Errorf("edit %d is a no-op: search and replace are identical", i+1)
+		}
+
 		count := strings.Count(fe.newContent, e.Search)
 		if count == 0 {
 			return "", fmt.Errorf("search block not found in %s", e.Path)
 		}
-		if count > 1 {
-			return "", fmt.Errorf("search block appears %d times in %s; must be unique", count, e.Path)
+		if count > 1 && !e.ReplaceAll {
+			return "", fmt.Errorf("search block appears %d times in %s; must be unique or set replace_all=true", count, e.Path)
 		}
-		fe.newContent = strings.Replace(fe.newContent, e.Search, e.Replace, 1)
+		if e.ReplaceAll {
+			fe.newContent = strings.ReplaceAll(fe.newContent, e.Search, e.Replace)
+		} else {
+			fe.newContent = strings.Replace(fe.newContent, e.Search, e.Replace, 1)
+		}
 	}
 
 	var backedUp []string

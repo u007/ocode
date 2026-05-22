@@ -66,7 +66,9 @@ func formatToolCallHint(tc agent.ToolCall) string {
 	case "edit":
 		return fmt.Sprintf("✏  edit %s", first("path", "file_path"))
 	case "multiedit":
-		return "✏  multiedit"
+		return fmt.Sprintf("✏  multiedit %s", first("path", "file_path"))
+	case "multi_file_edit":
+		return "✏  multi_file_edit"
 	case "replace_lines":
 		p := first("path", "file_path")
 		start := str("start_line")

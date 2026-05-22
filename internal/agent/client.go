@@ -80,7 +80,9 @@ func (c *GenericClient) GetModel() string {
 
 func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
 	var lastErr error
+	attempts := 0
 	for attempt := 0; attempt <= llmMaxRetries; attempt++ {
+		attempts = attempt + 1
 		var (
 			msg *Message
 			err error
@@ -101,7 +103,7 @@ func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{})
 		}
 		time.Sleep(time.Duration(attempt+1) * llmRetryBaseDelay)
 	}
-	return nil, fmt.Errorf("llm request failed after %d attempt(s): %w", llmMaxRetries+1, lastErr)
+	return nil, fmt.Errorf("llm request failed after %d attempt(s): %w", attempts, lastErr)
 }
 
 func isRetryableLLMClientError(err error) bool {
@@ -493,6 +495,7 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 			}
 		}
 	}
+	input = dedupeOpenAIResponseInputItems(input)
 
 	// Ensure every function_call has a matching function_call_output.
 	// OpenAI Responses API returns 400 if a call_id has no output.
@@ -715,6 +718,34 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		}
 	}
 	return msg, nil
+}
+
+func dedupeOpenAIResponseInputItems(input []map[string]interface{}) []map[string]interface{} {
+	seenIDs := make(map[string]struct{})
+	seenCallIDs := make(map[string]struct{})
+	out := make([]map[string]interface{}, 0, len(input))
+	for _, item := range input {
+		itemType, _ := item["type"].(string)
+		if id, _ := item["id"].(string); id != "" {
+			if _, ok := seenIDs[id]; ok {
+				emitDebug("API", fmt.Sprintf("dropping duplicate responses input item id=%s type=%s", id, itemType))
+				continue
+			}
+			seenIDs[id] = struct{}{}
+		}
+		if itemType == "function_call" || itemType == "function_call_output" {
+			if callID, _ := item["call_id"].(string); callID != "" {
+				key := itemType + ":" + callID
+				if _, ok := seenCallIDs[key]; ok {
+					emitDebug("API", fmt.Sprintf("dropping duplicate responses input %s call_id=%s", itemType, callID))
+					continue
+				}
+				seenCallIDs[key] = struct{}{}
+			}
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func (c *GenericClient) openAIResponsesURL() string {

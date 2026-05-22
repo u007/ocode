@@ -46,6 +46,7 @@ const (
 	scrollbarDragTranscript
 	scrollbarDragGitDiff
 	scrollbarDragFilesPreview
+	scrollbarDragLog
 )
 
 type role int
@@ -344,6 +345,15 @@ type subAgentPermRequest struct {
 var thinkingBudgetLevels = []int{0, 1024, 8000, 16000}
 var thinkingBudgetLabels = []string{"off", "low", "med", "high"}
 
+func thinkingLevelIndexForBudget(budget int) int {
+	for i, level := range thinkingBudgetLevels {
+		if level == budget {
+			return i
+		}
+	}
+	return 0
+}
+
 type toolOutputRegion struct {
 	messageIndex int
 	startLine    int
@@ -351,8 +361,8 @@ type toolOutputRegion struct {
 }
 
 type permButtonRegion struct {
-	choice    string
-	x1, x2, y int
+	choice         string
+	x1, x2, y1, y2 int
 }
 
 type agentResponseMsg string
@@ -581,7 +591,8 @@ func (m *model) getInitialTools() []tool.Tool {
 		&tool.GrepTool{},
 		&tool.BashTool{},
 		&tool.EditTool{Config: m.config},
-		&tool.MultiEditTool{},
+		&tool.MultiEditTool{Config: m.config},
+		&tool.MultiFileEditTool{Config: m.config},
 		&tool.PatchTool{},
 		&tool.TodoWriteTool{},
 		&tool.SkillTool{},
@@ -670,6 +681,12 @@ func newModel(sid string, cont bool, yolo bool) model {
 				return cfg.Model
 			}
 			return ""
+		}(),
+		thinkingLevelIdx: func() int {
+			if cfg != nil {
+				return thinkingLevelIndexForBudget(cfg.ThinkingBudget)
+			}
+			return 0
 		}(),
 		scrollSpeed:       3,
 		inputHistoryIndex: -1,
@@ -966,8 +983,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case debugLogMsg:
 		m.logEntries = DebugLog.Snapshot()
 		if m.activeTab == tabLog {
+			atBottom := m.logViewport.AtBottom() || m.logViewport.TotalLineCount() == 0
 			m.refreshLogViewport()
-			m.logViewport.GotoBottom()
+			if atBottom {
+				m.logViewport.GotoBottom()
+			}
 		}
 		return m, waitForDebugLog()
 	case filesPreviewMsg:
@@ -1370,7 +1390,6 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		}
 		m.activeTab = tabLog
 		m.refreshLogViewport()
-		m.logViewport.GotoBottom()
 		return true, m, nil
 	case "alt+[", "ctrl+shift+[":
 		m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
@@ -1379,7 +1398,6 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		}
 		if m.activeTab == tabLog {
 			m.refreshLogViewport()
-			m.logViewport.GotoBottom()
 		}
 		return true, m, nil
 	case "alt+]", "ctrl+shift+]":
@@ -1389,7 +1407,6 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		}
 		if m.activeTab == tabLog {
 			m.refreshLogViewport()
-			m.logViewport.GotoBottom()
 		}
 		return true, m, nil
 	}
@@ -1652,6 +1669,9 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		if m.config != nil && agent.ModelSupportsThinking(m.config.Model) {
 			m.thinkingLevelIdx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
 			m.config.ThinkingBudget = thinkingBudgetLevels[m.thinkingLevelIdx]
+			if err := config.SaveLastThinkingBudget(m.config.ThinkingBudget); err != nil {
+				log.Printf("save last thinking budget: %v", err)
+			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
 			m.renderTranscript()
 			m.viewport.GotoBottom()
@@ -1957,6 +1977,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		scrollbarSetOffset(&m.viewport, mouse.Y, trackTop, m.viewport.Height())
 		return m, nil, true
 	}
+	if pressed && m.logScrollbarHit(mouse) {
+		m.scrollbarDrag = scrollbarDragLog
+		logTrackTop, logTrackHeight := m.logScrollbarMetrics()
+		scrollbarSetOffset(&m.logViewport, mouse.Y, logTrackTop, logTrackHeight)
+		return m, nil, true
+	}
 	if pressed && m.activeTab == tabGit {
 		panelW := m.panelWidth()
 		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
@@ -2145,7 +2171,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 	if pressed && m.showPermDialog {
 		for _, btn := range m.permButtonRegions {
-			if mouse.Y == btn.y && mouse.X >= btn.x1 && mouse.X <= btn.x2 {
+			if mouse.Y >= btn.y1 && mouse.Y <= btn.y2 && mouse.X >= btn.x1 && mouse.X <= btn.x2 {
 				m.showPermDialog = false
 				cmd := m.handlePermissionChoice(btn.choice)
 				m.input.Reset()
@@ -2175,7 +2201,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		if tab == tabLog {
 			m.refreshLogViewport()
-			m.logViewport.GotoBottom()
 		}
 		return m, nil, true
 	}
@@ -2259,6 +2284,10 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	switch m.scrollbarDrag {
 	case scrollbarDragTranscript:
 		scrollbarSetOffset(&m.viewport, mouse.Y, trackTop, m.viewport.Height())
+		return m, nil, true
+	case scrollbarDragLog:
+		logTrackTop, logTrackHeight := m.logScrollbarMetrics()
+		scrollbarSetOffset(&m.logViewport, mouse.Y, logTrackTop, logTrackHeight)
 		return m, nil, true
 	case scrollbarDragGitDiff:
 		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
@@ -2365,7 +2394,6 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		}
 		if tab == tabLog {
 			m.refreshLogViewport()
-			m.logViewport.GotoBottom()
 		}
 		return m, nil, true
 	}
@@ -2852,10 +2880,8 @@ func (m *model) handleExportCmd(args []string) {
 	}
 }
 
-func (m *model) handleNewCmd(args []string) {
-	if m.agent != nil {
-		m.agent.Shutdown()
-	}
+func (m *model) handleNewCmd(args []string) tea.Cmd {
+	cmd := m.resetSessionAgent()
 	m.saveSession()
 	m.messages = []message{}
 	m.sessionID = time.Now().Format("2006-01-02-150405")
@@ -2867,6 +2893,48 @@ func (m *model) handleNewCmd(args []string) {
 	m.inputHistory = nil
 	m.inputHistoryIndex = -1
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session.", transient: true})
+	return cmd
+}
+
+func (m *model) resetSessionAgent() tea.Cmd {
+	if m.agent == nil {
+		return nil
+	}
+
+	prev := m.agent
+	tools := prev.GetTools()
+	if len(tools) == 0 {
+		tools = m.getInitialTools()
+	}
+	mcpNames := prev.MCPToolNames()
+	mode := prev.Mode()
+	spec := prev.Spec()
+	permCfg := prev.Permissions().ExportConfig()
+
+	modelName := m.currentModelName()
+	if modelName == "" && m.config != nil {
+		modelName = m.config.Model
+	}
+	client := agent.NewClient(m.config, modelName)
+	if client == nil {
+		client = prev.Client()
+	}
+
+	next := agent.NewAgent(client, tools, m.config)
+	next.SetMode(mode)
+	next.SetSpec(spec)
+	if next.Permissions() != nil {
+		next.Permissions().LoadFromOcode(permCfg)
+		next.Permissions().SetWorkDir(m.workDir)
+	}
+	if len(mcpNames) > 0 {
+		next.RestoreMCPToolNames(mcpNames)
+	}
+
+	prev.Shutdown()
+	m.agent = next
+	m.wireCompactCallbacks()
+	return listenJobs(m.agent)
 }
 
 func (m *model) handleEditorCmd(args []string) tea.Cmd {
@@ -3161,10 +3229,19 @@ func (m *model) handleContextCmd(args []string) {
 	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(toolsTotal))
 
 	injectedTotal := baseTotal + toolsTotal
+	b.WriteString("\nSkill catalog (pre-injected)\n")
+	skillCatalog := skill.BuildCatalog()
+	if skillCatalog == "" {
+		b.WriteString("  (none found)\n")
+	} else {
+		catalogTok := estimateTok(skillCatalog)
+		injectedTotal += catalogTok
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Compact catalog", formatTok(catalogTok))
+	}
 	fmt.Fprintf(&b, "\n  %-28s ~%s tok\n", "Injected per request", formatTok(injectedTotal))
 
 	// ── Skills ───────────────────────────────────
-	b.WriteString("\nSkills (on-demand, not pre-injected)\n")
+	b.WriteString("\nSkills (full contents available on demand, not pre-injected)\n")
 	skills := skill.LoadSkills()
 	if len(skills) == 0 {
 		b.WriteString("  (none found)\n")
@@ -3950,6 +4027,8 @@ var permBtnDefs = []permBtnDef{
 func (m *model) renderPermissionDialog(width int) string {
 	req := m.pendingPermission
 
+	contentWidth := max(0, width-2)
+
 	var body strings.Builder
 	body.WriteString("Tool: " + req.ToolName + "\n")
 	if req.Command != "" {
@@ -3968,9 +4047,13 @@ func (m *model) renderPermissionDialog(width int) string {
 	for _, b := range permBtnDefs {
 		btnParts = append(btnParts, permBtnStyle.Render(b.label+" "+b.desc))
 	}
-	buttonRow := strings.Join(btnParts, " ")
+	buttonRow := lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
+		lipgloss.JoinHorizontal(lipgloss.Top, btnParts...),
+	)
 
-	return header + "\n\n" + body.String() + "\n" + buttonRow
+	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
+		header + "\n\n" + body.String() + "\n" + buttonRow,
+	)
 }
 
 // updatePermButtonRegions computes absolute screen positions for the permission
@@ -3996,20 +4079,22 @@ func (m *model) updatePermButtonRegions() {
 	}
 
 	// +1 for the dialog box top border
-	buttonRowY := m.inputAreaTopY() + 1 + linesAbove
+	buttonTopY := m.inputAreaTopY() + 1 + linesAbove
 
 	m.permButtonRegions = nil
 	x := 1 // after left border
 	for _, b := range permBtnDefs {
 		rendered := permBtnStyle.Render(b.label + " " + b.desc)
 		w := lipgloss.Width(rendered)
+		h := lipgloss.Height(rendered)
 		m.permButtonRegions = append(m.permButtonRegions, permButtonRegion{
 			choice: b.choice,
 			x1:     x,
 			x2:     x + w - 1,
-			y:      buttonRowY,
+			y1:     buttonTopY,
+			y2:     buttonTopY + h - 1,
 		})
-		x += w + 1
+		x += w
 	}
 }
 
@@ -4050,10 +4135,10 @@ func (m *model) renderTranscript() {
 		}
 		switch msg.role {
 		case roleUser:
-			b.WriteString(userStyle.Render("you") + " " + strings.TrimRight(msg.text, "\n"))
+			b.WriteString(m.renderUserText(strings.TrimRight(msg.text, "\n")))
 		case roleThinking:
 			content := renderThinkingContent(strings.TrimRight(msg.text, "\n"), m.styles)
-			b.WriteString(assistantStyle.Render("ocode") + " " + m.styles.Thinking.Render("⟁ thinking\n"+content))
+			b.WriteString(m.styles.Thinking.Render("⟁ thinking\n" + content))
 		case roleAssistant:
 			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
 				toolName := m.lookupToolName(msg.raw.ToolID)
@@ -4075,7 +4160,7 @@ func (m *model) renderTranscript() {
 					endLine:      endLine,
 				})
 			} else {
-				b.WriteString(assistantStyle.Render("ocode") + " " + m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
+				b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
 			}
 		}
 	}
@@ -4085,6 +4170,16 @@ func (m *model) renderTranscript() {
 	m.viewport.SetContent(m.transcriptContent)
 	m.sel = selectionState{}
 	m.updatePermButtonRegions()
+}
+
+func (m *model) renderUserText(text string) string {
+	content := renderMarkdownBold(text, m.styles.Text)
+	bubbleWidth := m.viewport.Width() - 6
+	if bubbleWidth < 12 {
+		bubbleWidth = 12
+	}
+	body := m.styles.UserMessageBox.Width(bubbleWidth).Render(content)
+	return body
 }
 
 func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
@@ -4106,7 +4201,7 @@ func (m *model) renderToolOutputBox(toolName, content string, expanded bool) str
 	if width < 1 {
 		width = 1
 	}
-	box := m.styles.ToolBox.Width(width).Render(boxContent)
+	box := m.styles.ToolBox.Width(width).Render(renderToolResult(toolName, boxContent, m.styles))
 	header := m.styles.Hint.Render("  " + toolName + " output")
 	if footer != "" {
 		return header + "\n" + box + "\n" + footer
@@ -4943,6 +5038,10 @@ func (m *model) renderStatus() string {
 	if m.streaming || m.lastActivity.LLMRunning {
 		dots := [4]string{"●○○", "●●○", "●●●", "○●●"}
 		llmState = dots[m.dotFrame]
+		if !m.streamStartedAt.IsZero() {
+			elapsed := time.Since(m.streamStartedAt).Round(time.Second)
+			llmState = fmt.Sprintf("%s · %s", llmState, formatDuration(elapsed))
+		}
 	}
 	permissionMode := ""
 	if m.agent != nil && m.agent.Permissions() != nil && m.agent.Permissions().Mode() == agent.PermissionModeYOLO {
@@ -5316,9 +5415,9 @@ func (m model) renderSidebar() string {
 
 	var header string
 	if m.sessionTitle != "" {
-		header = m.styles.Header.Render(m.sessionTitle) + hintStyle.Render("  ·  opencode clone v"+version.Version)
+		header = m.styles.Header.Render(m.sessionTitle)
 	} else {
-		header = hintStyle.Render("◆ ocode  sidebar  ·  v" + version.Version)
+		header = hintStyle.Render("sidebar")
 	}
 
 	headerHeight := lipgloss.Height(header)
@@ -5629,7 +5728,8 @@ func (m model) renderLogTab() string {
 		constrainView(m.logViewport.View(), m.logViewport.Width(), m.logViewport.Height()),
 		sb,
 	)
-	content := m.styles.Border.Width(max(1, m.width-2)).Height(m.logViewport.Height() + 2).Render(viewportContent)
+	contentWidth := max(1, m.width-4)
+	content := m.styles.Border.Width(contentWidth).Height(m.logViewport.Height() + 2).Render(viewportContent)
 	status := m.renderStatus()
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, searchBar, kindBar, content, status)
@@ -5803,6 +5903,24 @@ func (m model) transcriptScrollbarHit(mouse tea.Mouse) bool {
 	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
 	top := headerHeight + 1
 	return mouse.Y >= top && mouse.Y < top+m.viewport.Height()
+}
+
+func (m model) logScrollbarMetrics() (top, height int) {
+	top = 3
+	height = m.logViewport.Height()
+	if height < 1 {
+		height = 1
+	}
+	return top, height
+}
+
+func (m model) logScrollbarHit(mouse tea.Mouse) bool {
+	if m.activeTab != tabLog {
+		return false
+	}
+	trackTop, trackHeight := m.logScrollbarMetrics()
+	trackX := m.width - 3
+	return mouse.X == trackX && mouse.Y >= trackTop && mouse.Y < trackTop+trackHeight
 }
 
 func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {

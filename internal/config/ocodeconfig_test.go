@@ -239,3 +239,33 @@ func TestSaveEditorMode(t *testing.T) {
 		}
 	})
 }
+
+func TestSaveAndGetLastThinkingBudget(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveLastThinkingBudget(8000); err != nil {
+		t.Fatalf("SaveLastThinkingBudget failed: %v", err)
+	}
+	if got := GetLastThinkingBudget(); got != 8000 {
+		t.Fatalf("want 8000, got %d", got)
+	}
+
+	data, err := os.ReadFile(filepath.Join(configDir, "ocodeconfig.json"))
+	if err != nil {
+		t.Fatalf("read config failed: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse config failed: %v", err)
+	}
+	if got, ok := parsed["last_thinking_budget"].(float64); !ok || int(got) != 8000 {
+		t.Fatalf("want last_thinking_budget 8000, got %v", parsed["last_thinking_budget"])
+	}
+}

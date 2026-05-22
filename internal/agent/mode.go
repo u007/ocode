@@ -180,7 +180,7 @@ func gateToolCall(mode Mode, name string, args json.RawMessage) (string, bool) {
 	switch name {
 	case "read", "glob", "grep", "list", "lsp", "webfetch", "websearch", "todoread", "todowrite", "question", "skill":
 		return "", true
-	case "edit", "multiedit", "apply_patch", "delete":
+	case "edit", "multiedit", "multi_file_edit", "apply_patch", "delete":
 		if mode == ModeDebug {
 			return fmt.Sprintf("denied: tool %q is not permitted in %s mode (no code edits)", name, mode), false
 		}

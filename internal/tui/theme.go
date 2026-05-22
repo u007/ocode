@@ -40,7 +40,7 @@ type Styles struct {
 	User, Assistant, Header, Hint, Border lipgloss.Style
 	Text, Thinking                        lipgloss.Style
 	Selected, Status, Success, Error      lipgloss.Style
-	Dim, ToolBox                          lipgloss.Style
+	Dim, ToolBox, UserMessageBox          lipgloss.Style
 }
 
 var builtinThemes = map[string]ThemeDefinition{
@@ -536,6 +536,15 @@ func ApplyThemeColors(name string) Styles {
 		Thinking:  lipgloss.NewStyle().Foreground(lipgloss.Color(themeColor(c.Thinking, c.Accent))).Bold(true).Italic(true),
 		Dim:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim)),
 		ToolBox:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
+		UserMessageBox: lipgloss.NewStyle().
+			Foreground(lipgloss.Color(c.Text)).
+			BorderStyle(lipgloss.ThickBorder()).
+			BorderLeft(true).
+			BorderTop(false).
+			BorderRight(false).
+			BorderBottom(false).
+			BorderForeground(lipgloss.Color(c.Header)).
+			Padding(0, 1),
 	}
 	setUserStyle(s.User)
 	setAssistantStyle(s.Assistant)

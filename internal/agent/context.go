@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 
 	"github.com/jamesmercstudio/ocode/internal/plugins"
+	"github.com/jamesmercstudio/ocode/internal/skill"
 )
 
 func LoadContext() string {
@@ -30,6 +31,9 @@ func LoadContext() string {
 
 	if pluginInstr := plugins.LoadPluginInstructions(); pluginInstr != "" {
 		context += pluginInstr
+	}
+	if skillCatalog := skill.BuildCatalog(); skillCatalog != "" {
+		context += skillCatalog
 	}
 
 	return context

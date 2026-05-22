@@ -25,6 +25,7 @@ func LoadBuiltins(cfg *config.Config) []Tool {
 		&BashTool{},
 		&EditTool{Config: cfg},
 		&MultiEditTool{Config: cfg},
+		&MultiFileEditTool{Config: cfg},
 		&PatchTool{},
 		&TodoWriteTool{},
 		&TodoReadTool{},

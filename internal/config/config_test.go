@@ -621,3 +621,46 @@ func TestLoadWithOpenCodeDir(t *testing.T) {
 		t.Fatalf("expected model opencode-dir-model from .opencode/, got %s", cfg.Model)
 	}
 }
+
+func TestLoadPrefersLastThinkingBudget(t *testing.T) {
+	tmpHome, err := os.MkdirTemp("", "ocode-home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpHome)
+
+	tmpState, err := os.MkdirTemp("", "ocode-state")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpState)
+
+	tmpDir, err := os.MkdirTemp("", "ocode-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	t.Setenv("HOME", tmpHome)
+	t.Setenv("XDG_STATE_HOME", tmpState)
+	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveLastThinkingBudget(16000); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ThinkingBudget != 16000 {
+		t.Fatalf("expected last thinking budget, got %d", cfg.ThinkingBudget)
+	}
+}

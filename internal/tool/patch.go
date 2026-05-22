@@ -1,15 +1,13 @@
 package tool
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
@@ -20,25 +18,352 @@ var (
 	currentTodoSession string
 )
 
+const patchDescription = `Use the apply_patch tool to edit files. Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+Example patch:
+
+` + "```" + `
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+` + "```" + `
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with ` + "`+`" + ` even when creating a new file`
+
+// patchHunk represents a parsed file operation.
+type patchHunk struct {
+	typ      string // "add", "delete", "update"
+	path     string
+	movePath string
+	contents string        // for add
+	chunks   []updateChunk // for update
+}
+
+type updateChunk struct {
+	oldLines      []string
+	newLines      []string
+	changeContext string
+	isEndOfFile   bool
+}
+
+// parsePatch parses the *** Begin Patch / *** End Patch envelope.
+func parsePatch(patchText string) ([]patchHunk, error) {
+	text := strings.TrimSpace(patchText)
+	lines := strings.Split(text, "\n")
+
+	beginIdx := -1
+	endIdx := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "*** Begin Patch" {
+			beginIdx = i
+		} else if strings.TrimSpace(l) == "*** End Patch" {
+			endIdx = i
+			break
+		}
+	}
+	if beginIdx == -1 || endIdx == -1 || beginIdx >= endIdx {
+		return nil, fmt.Errorf("invalid patch format: missing *** Begin Patch / *** End Patch markers")
+	}
+
+	var hunks []patchHunk
+	i := beginIdx + 1
+	for i < endIdx {
+		line := lines[i]
+		switch {
+		case strings.HasPrefix(line, "*** Add File:"):
+			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Add File:"))
+			if path == "" {
+				i++
+				continue
+			}
+			content, nextIdx := parseAddFileContent(lines, i+1, endIdx)
+			hunks = append(hunks, patchHunk{typ: "add", path: path, contents: content})
+			i = nextIdx
+
+		case strings.HasPrefix(line, "*** Delete File:"):
+			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Delete File:"))
+			if path == "" {
+				i++
+				continue
+			}
+			hunks = append(hunks, patchHunk{typ: "delete", path: path})
+			i++
+
+		case strings.HasPrefix(line, "*** Update File:"):
+			path := strings.TrimSpace(strings.TrimPrefix(line, "*** Update File:"))
+			if path == "" {
+				i++
+				continue
+			}
+			movePath := ""
+			nextIdx := i + 1
+			if nextIdx < endIdx && strings.HasPrefix(lines[nextIdx], "*** Move to:") {
+				movePath = strings.TrimSpace(strings.TrimPrefix(lines[nextIdx], "*** Move to:"))
+				nextIdx++
+			}
+			chunks, after := parseUpdateChunks(lines, nextIdx, endIdx)
+			hunks = append(hunks, patchHunk{
+				typ:      "update",
+				path:     path,
+				movePath: movePath,
+				chunks:   chunks,
+			})
+			i = after
+
+		default:
+			i++
+		}
+	}
+	return hunks, nil
+}
+
+func parseAddFileContent(lines []string, start, end int) (string, int) {
+	var sb strings.Builder
+	i := start
+	for i < end && !strings.HasPrefix(lines[i], "***") {
+		if strings.HasPrefix(lines[i], "+") {
+			sb.WriteString(lines[i][1:])
+			sb.WriteByte('\n')
+		}
+		i++
+	}
+	content := sb.String()
+	if strings.HasSuffix(content, "\n") {
+		content = content[:len(content)-1]
+	}
+	return content, i
+}
+
+func parseUpdateChunks(lines []string, start, end int) ([]updateChunk, int) {
+	var chunks []updateChunk
+	i := start
+	for i < end && !strings.HasPrefix(lines[i], "***") {
+		if !strings.HasPrefix(lines[i], "@@") {
+			i++
+			continue
+		}
+		ctx := strings.TrimSpace(lines[i][2:])
+		i++
+		var oldLines, newLines []string
+		isEOF := false
+		for i < end && !strings.HasPrefix(lines[i], "@@") && !strings.HasPrefix(lines[i], "***") {
+			l := lines[i]
+			if l == "*** End of File" {
+				isEOF = true
+				i++
+				break
+			}
+			if strings.HasPrefix(l, " ") {
+				content := l[1:]
+				oldLines = append(oldLines, content)
+				newLines = append(newLines, content)
+			} else if strings.HasPrefix(l, "-") {
+				oldLines = append(oldLines, l[1:])
+			} else if strings.HasPrefix(l, "+") {
+				newLines = append(newLines, l[1:])
+			}
+			i++
+		}
+		chunks = append(chunks, updateChunk{
+			oldLines:      oldLines,
+			newLines:      newLines,
+			changeContext: ctx,
+			isEndOfFile:   isEOF,
+		})
+	}
+	return chunks, i
+}
+
+// deriveNewContents applies update chunks to original file lines.
+func deriveNewContents(originalLines []string, filePath string, chunks []updateChunk) ([]string, error) {
+	lines := make([]string, len(originalLines))
+	copy(lines, originalLines)
+
+	// Drop trailing empty element for consistent counting.
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	type replacement struct {
+		start  int
+		oldLen int
+		newSeg []string
+	}
+	var replacements []replacement
+	lineIdx := 0
+
+	for _, chunk := range chunks {
+		if chunk.changeContext != "" {
+			idx := seekSequence(lines, []string{chunk.changeContext}, lineIdx, false)
+			if idx == -1 {
+				return nil, fmt.Errorf("failed to find context %q in %s", chunk.changeContext, filePath)
+			}
+			lineIdx = idx + 1
+		}
+
+		if len(chunk.oldLines) == 0 {
+			insertAt := len(lines)
+			if insertAt > 0 && lines[insertAt-1] == "" {
+				insertAt--
+			}
+			replacements = append(replacements, replacement{insertAt, 0, chunk.newLines})
+			continue
+		}
+
+		pattern := chunk.oldLines
+		newSlice := chunk.newLines
+		found := seekSequence(lines, pattern, lineIdx, chunk.isEndOfFile)
+
+		// Retry without trailing empty line.
+		if found == -1 && len(pattern) > 0 && pattern[len(pattern)-1] == "" {
+			pattern2 := pattern[:len(pattern)-1]
+			newSlice2 := newSlice
+			if len(newSlice2) > 0 && newSlice2[len(newSlice2)-1] == "" {
+				newSlice2 = newSlice2[:len(newSlice2)-1]
+			}
+			found = seekSequence(lines, pattern2, lineIdx, chunk.isEndOfFile)
+			if found != -1 {
+				pattern = pattern2
+				newSlice = newSlice2
+			}
+		}
+
+		if found == -1 {
+			return nil, fmt.Errorf("failed to find expected lines in %s:\n%s", filePath, strings.Join(chunk.oldLines, "\n"))
+		}
+		replacements = append(replacements, replacement{found, len(pattern), newSlice})
+		lineIdx = found + len(pattern)
+	}
+
+	// Apply replacements in reverse order.
+	for r := len(replacements) - 1; r >= 0; r-- {
+		rep := replacements[r]
+		after := append([]string{}, lines[rep.start+rep.oldLen:]...)
+		lines = append(lines[:rep.start], rep.newSeg...)
+		lines = append(lines, after...)
+	}
+
+	// Ensure trailing newline sentinel.
+	if len(lines) == 0 || lines[len(lines)-1] != "" {
+		lines = append(lines, "")
+	}
+	return lines, nil
+}
+
+func seekSequence(lines, pattern []string, startIdx int, eof bool) int {
+	if len(pattern) == 0 {
+		return -1
+	}
+	type comparator func(a, b string) bool
+	passes := []comparator{
+		func(a, b string) bool { return a == b },
+		func(a, b string) bool { return strings.TrimRight(a, " \t") == strings.TrimRight(b, " \t") },
+		func(a, b string) bool { return strings.TrimSpace(a) == strings.TrimSpace(b) },
+		func(a, b string) bool {
+			return normalizeUnicode(strings.TrimSpace(a)) == normalizeUnicode(strings.TrimSpace(b))
+		},
+	}
+	tryMatch := func(cmp comparator) int {
+		if eof {
+			fromEnd := len(lines) - len(pattern)
+			if fromEnd >= startIdx {
+				match := true
+				for j, p := range pattern {
+					if !cmp(lines[fromEnd+j], p) {
+						match = false
+						break
+					}
+				}
+				if match {
+					return fromEnd
+				}
+			}
+		}
+		for i := startIdx; i <= len(lines)-len(pattern); i++ {
+			match := true
+			for j, p := range pattern {
+				if !cmp(lines[i+j], p) {
+					match = false
+					break
+				}
+			}
+			if match {
+				return i
+			}
+		}
+		return -1
+	}
+	for _, cmp := range passes {
+		if idx := tryMatch(cmp); idx != -1 {
+			return idx
+		}
+	}
+	return -1
+}
+
+func normalizeUnicode(s string) string {
+	var sb strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '‘' || r == '’' || r == '‚' || r == '‛':
+			sb.WriteByte('\'')
+		case r == '“' || r == '”' || r == '„' || r == '‟':
+			sb.WriteByte('"')
+		case r >= '‐' && r <= '―':
+			sb.WriteByte('-')
+		case r == '…':
+			sb.WriteString("...")
+		case r == ' ':
+			sb.WriteByte(' ')
+		default:
+			if unicode.IsPrint(r) {
+				sb.WriteRune(r)
+			}
+		}
+	}
+	return sb.String()
+}
+
+// PatchTool applies file patches in the opencode marker format.
 type PatchTool struct{}
 
-func (t PatchTool) Name() string        { return "apply_patch" }
-func (t PatchTool) Description() string { return "Apply patches to files with line range targeting and fuzzy matching" }
-func (t PatchTool) Parallel() bool      { return false }
+func (t PatchTool) Name() string { return "apply_patch" }
+func (t PatchTool) Description() string {
+	return "Apply patches to files using the opencode patch format"
+}
+func (t PatchTool) Parallel() bool { return false }
 func (t PatchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "apply_patch",
-		"description": "Apply patches to files. Supports unified diff format and marker-based format (*** Add File:, *** Update File:, *** Move to:, *** Delete File:). Paths in patches are relative to the project root.",
+		"description": patchDescription,
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"patchText": map[string]interface{}{
 					"type":        "string",
-					"description": "The patch content to apply. Supports unified diff or marker-based format with *** Add/Update/Move/Delete File: markers.",
-				},
-				"fuzzy": map[string]interface{}{
-					"type":        "boolean",
-					"description": "Enable fuzzy matching for context lines (default: true)",
+					"description": "The full patch text that describes all changes to be made",
 				},
 			},
 			"required": []string{"patchText"},
@@ -49,32 +374,29 @@ func (t PatchTool) Definition() map[string]interface{} {
 func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
 		PatchText string `json:"patchText"`
-		Fuzzy     *bool  `json:"fuzzy"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
-
-	fuzzy := true
-	if params.Fuzzy != nil {
-		fuzzy = *params.Fuzzy
+	if params.PatchText == "" {
+		return "", fmt.Errorf("patchText is required")
 	}
 
-	if strings.Contains(params.PatchText, "*** Add File:") ||
-		strings.Contains(params.PatchText, "*** Update File:") ||
-		strings.Contains(params.PatchText, "*** Move to:") ||
-		strings.Contains(params.PatchText, "*** Delete File:") {
-		return applyMarkerPatch(params.PatchText)
-	}
-
-	targets, err := patchTargets(params.PatchText)
+	hunks, err := parsePatch(params.PatchText)
 	if err != nil {
 		return "", err
 	}
+	if len(hunks) == 0 {
+		return "", fmt.Errorf("patch rejected: no file operations found")
+	}
 
+	// Snapshot all affected files before applying.
 	var backedUp int
-	for _, path := range targets {
-		safe, err := confinedPath(path)
+	for _, h := range hunks {
+		if h.typ == "add" {
+			continue
+		}
+		safe, err := confinedPath(h.path)
 		if err != nil {
 			if backedUp > 0 {
 				_ = snapshot.DiscardRecent(backedUp)
@@ -85,511 +407,120 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 			if backedUp > 0 {
 				_ = snapshot.DiscardRecent(backedUp)
 			}
-			return "", fmt.Errorf("failed to back up %s before patch: %w", safe, err)
+			return "", fmt.Errorf("failed to back up %s: %w", safe, err)
 		}
 		backedUp++
 	}
 
-	if fuzzy {
-		result, err := applyPatchFuzzy(params.PatchText)
-		if err != nil {
-			if backedUp > 0 {
-				_ = snapshot.DiscardRecent(backedUp)
+	var (
+		results      []string
+		cleanupPaths []string
+	)
+	rollback := func(cause error) (string, error) {
+		for i := len(cleanupPaths) - 1; i >= 0; i-- {
+			if err := os.Remove(cleanupPaths[i]); err != nil && !os.IsNotExist(err) {
+				return strings.Join(results, "\n"), fmt.Errorf("%w (rollback cleanup failed: %v)", cause, err)
 			}
-			return result, err
 		}
-		return result, nil
-	}
-
-	cmd := exec.Command("patch", "-p1")
-	cmd.Stdin = strings.NewReader(params.PatchText)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
 		if backedUp > 0 {
-			_ = snapshot.DiscardRecent(backedUp)
+			seen := make(map[string]struct{}, backedUp)
+			for i := len(hunks) - 1; i >= 0; i-- {
+				h := hunks[i]
+				if h.typ == "add" {
+					continue
+				}
+				safe, err := confinedPath(h.path)
+				if err != nil {
+					return strings.Join(results, "\n"), fmt.Errorf("%w (rollback path resolution failed: %v)", cause, err)
+				}
+				if _, ok := seen[safe]; ok {
+					continue
+				}
+				seen[safe] = struct{}{}
+				if restoreErr := snapshot.Restore(safe); restoreErr != nil {
+					return strings.Join(results, "\n"), fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
+				}
+			}
+			if discardErr := snapshot.DiscardRecent(backedUp); discardErr != nil {
+				return strings.Join(results, "\n"), fmt.Errorf("%w (rollback cleanup failed: %v)", cause, discardErr)
+			}
 		}
-		return string(output), fmt.Errorf("patch failed: %w", err)
+		return strings.Join(results, "\n"), cause
 	}
 
-	return string(output), nil
-}
-
-func applyMarkerPatch(patchText string) (string, error) {
-	scanner := bufio.NewScanner(strings.NewReader(patchText))
-	var currentOp string
-	var currentPath string
-	var content strings.Builder
-	var results []string
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		switch {
-		case strings.HasPrefix(line, "*** Add File:"):
-			if currentOp != "" {
-				if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
-					return strings.Join(results, "\n"), err
-				}
-				results = append(results, fmt.Sprintf("added %s", currentPath))
-			}
-			currentOp = "add"
-			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "*** Add File:"))
-			content.Reset()
-		case strings.HasPrefix(line, "*** Update File:"):
-			if currentOp != "" {
-				if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
-					return strings.Join(results, "\n"), err
-				}
-				results = append(results, fmt.Sprintf("updated %s", currentPath))
-			}
-			currentOp = "update"
-			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "*** Update File:"))
-			content.Reset()
-		case strings.HasPrefix(line, "*** Move to:"):
-			if currentOp != "" {
-				if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
-					return strings.Join(results, "\n"), err
-				}
-				results = append(results, fmt.Sprintf("moved to %s", currentPath))
-			}
-			currentOp = "move"
-			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "*** Move to:"))
-			content.Reset()
-		case strings.HasPrefix(line, "*** Delete File:"):
-			if currentOp != "" {
-				if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
-					return strings.Join(results, "\n"), err
-				}
-				results = append(results, fmt.Sprintf("deleted %s", currentPath))
-			}
-			currentOp = "delete"
-			currentPath = strings.TrimSpace(strings.TrimPrefix(line, "*** Delete File:"))
-			content.Reset()
-		default:
-			if currentOp != "" {
-				content.WriteString(line)
-				content.WriteString("\n")
-			}
-		}
-	}
-
-	if currentOp != "" {
-		if err := executeMarkerOp(currentOp, currentPath, content.String()); err != nil {
-			return strings.Join(results, "\n"), err
-		}
-		switch currentOp {
+	for _, h := range hunks {
+		switch h.typ {
 		case "add":
-			results = append(results, fmt.Sprintf("added %s", currentPath))
-		case "update":
-			results = append(results, fmt.Sprintf("updated %s", currentPath))
-		case "move":
-			results = append(results, fmt.Sprintf("moved to %s", currentPath))
-		case "delete":
-			results = append(results, fmt.Sprintf("deleted %s", currentPath))
-		}
-	}
-
-	if len(results) == 0 {
-		return "No patch operations found", nil
-	}
-
-	return strings.Join(results, "\n"), nil
-}
-
-func executeMarkerOp(op, path, content string) error {
-	if path == "" {
-		return fmt.Errorf("empty path in patch operation")
-	}
-
-	safe, err := confinedPath(path)
-	if err != nil {
-		return err
-	}
-
-	switch op {
-	case "add", "update":
-		snapshot.Backup(safe) //nolint:errcheck
-		if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
-			return err
-		}
-		return os.WriteFile(safe, []byte(strings.TrimRight(content, "\n")), 0644)
-	case "move":
-		return os.Rename(safe, path)
-	case "delete":
-		snapshot.Backup(safe) //nolint:errcheck
-		return os.Remove(safe)
-	default:
-		return fmt.Errorf("unknown operation: %s", op)
-	}
-}
-
-type hunk struct {
-	origStart int
-	origCount int
-	newStart  int
-	newCount  int
-	lines     []string
-}
-
-func parseHunkHeader(line string) (*hunk, error) {
-	if !strings.HasPrefix(line, "@@") {
-		return nil, fmt.Errorf("invalid hunk header: %s", line)
-	}
-
-	parts := strings.Split(line, "@@")
-	if len(parts) < 3 {
-		return nil, fmt.Errorf("malformed hunk header: %s", line)
-	}
-
-	header := strings.TrimSpace(parts[1])
-	ranges := strings.Split(header, " ")
-	if len(ranges) < 2 {
-		return nil, fmt.Errorf("invalid hunk range: %s", header)
-	}
-
-	h := &hunk{}
-
-	oldRange := strings.TrimPrefix(ranges[0], "-")
-	newRange := strings.TrimPrefix(ranges[1], "+")
-
-	if oldStart, oldCount, err := parseRange(oldRange); err == nil {
-		h.origStart = oldStart
-		h.origCount = oldCount
-	}
-
-	if newStart, newCount, err := parseRange(newRange); err == nil {
-		h.newStart = newStart
-		h.newCount = newCount
-	}
-
-	return h, nil
-}
-
-func parseRange(s string) (int, int, error) {
-	if idx := strings.Index(s, ","); idx != -1 {
-		start, err := strconv.Atoi(s[:idx])
-		if err != nil {
-			return 0, 0, err
-		}
-		count, err := strconv.Atoi(s[idx+1:])
-		if err != nil {
-			return 0, 0, err
-		}
-		return start, count, nil
-	}
-	start, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, 0, err
-	}
-	return start, 1, nil
-}
-
-func parseHunks(patchText string) (map[string][]hunk, error) {
-	fileHunks := make(map[string][]hunk)
-	var currentFile string
-	var currentHunk *hunk
-
-	scanner := bufio.NewScanner(strings.NewReader(patchText))
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		switch {
-		case strings.HasPrefix(line, "diff --git "):
-			rest := strings.TrimPrefix(line, "diff --git ")
-			if idx := strings.LastIndex(rest, " b/"); idx != -1 {
-				currentFile = strings.TrimPrefix(rest[idx+1:], "b/")
-			}
-			currentHunk = nil
-		case strings.HasPrefix(line, "@@"):
-			h, err := parseHunkHeader(line)
+			safe, err := confinedPath(h.path)
 			if err != nil {
-				return nil, err
+				return rollback(err)
 			}
-			currentHunk = h
-			if currentFile != "" {
-				fileHunks[currentFile] = append(fileHunks[currentFile], *h)
+			if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
+				return rollback(err)
 			}
-		case currentHunk != nil:
-			if strings.HasPrefix(line, "-") || strings.HasPrefix(line, "+") || strings.HasPrefix(line, " ") || line == `\ No newline at end of file` {
-				idx := len(fileHunks[currentFile]) - 1
-				if idx >= 0 {
-					h := &fileHunks[currentFile][idx]
-					h.lines = append(h.lines, line)
+			content := h.contents
+			if !strings.HasSuffix(content, "\n") {
+				content += "\n"
+			}
+			if err := os.WriteFile(safe, []byte(content), 0644); err != nil {
+				return rollback(err)
+			}
+			cleanupPaths = append(cleanupPaths, safe)
+			results = append(results, "A "+h.path)
+
+		case "delete":
+			safe, err := confinedPath(h.path)
+			if err != nil {
+				return rollback(err)
+			}
+			if err := os.Remove(safe); err != nil {
+				return rollback(err)
+			}
+			results = append(results, "D "+h.path)
+
+		case "update":
+			safe, err := confinedPath(h.path)
+			if err != nil {
+				return rollback(err)
+			}
+			raw, err := os.ReadFile(safe)
+			if err != nil {
+				return rollback(fmt.Errorf("failed to read %s: %w", h.path, err))
+			}
+			originalLines := strings.Split(string(raw), "\n")
+			newLines, err := deriveNewContents(originalLines, safe, h.chunks)
+			if err != nil {
+				return rollback(err)
+			}
+			newContent := strings.Join(newLines, "\n")
+			dest := safe
+			if h.movePath != "" {
+				dest, err = confinedPath(h.movePath)
+				if err != nil {
+					return rollback(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+					return rollback(err)
+				}
+				if err := os.Remove(safe); err != nil {
+					return rollback(err)
 				}
 			}
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return fileHunks, nil
-}
-
-func applyPatchFuzzy(patchText string) (string, error) {
-	fileHunks, err := parseHunks(patchText)
-	if err != nil {
-		return "", fmt.Errorf("parse hunks: %w", err)
-	}
-
-	if len(fileHunks) == 0 {
-		return applyPatchSystem(patchText)
-	}
-
-	var results []string
-	for filePath, hunks := range fileHunks {
-		safe, err := confinedPath(filePath)
-		if err != nil {
-			return "", err
-		}
-
-		content, err := os.ReadFile(safe)
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", filePath, err)
-		}
-
-		lines := strings.Split(string(content), "\n")
-		var applied int
-		var applyErr error
-
-		for i := len(hunks) - 1; i >= 0; i-- {
-			h := hunks[i]
-			lines, applyErr = applyHunk(lines, h)
-			if applyErr == nil {
-				applied++
+			if err := os.WriteFile(dest, []byte(newContent), 0644); err != nil {
+				return rollback(err)
+			}
+			if h.movePath != "" {
+				cleanupPaths = append(cleanupPaths, dest)
+			}
+			if h.movePath != "" {
+				results = append(results, "M "+h.path+" -> "+h.movePath)
+			} else {
+				results = append(results, "M "+h.path)
 			}
 		}
-
-		if applyErr != nil {
-			return fmt.Sprintf("applied %d/%d hunks to %s: %v", applied, len(hunks), filePath, applyErr), applyErr
-		}
-
-		newContent := strings.Join(lines, "\n")
-		if err := os.WriteFile(safe, []byte(newContent), 0644); err != nil {
-			return "", fmt.Errorf("write %s: %w", filePath, err)
-		}
-
-		results = append(results, fmt.Sprintf("applied %d hunks to %s", applied, filePath))
 	}
 
-	return strings.Join(results, "\n"), nil
-}
-
-func applyHunk(lines []string, h hunk) ([]string, error) {
-	if len(h.lines) == 0 {
-		return lines, nil
-	}
-
-	contextLines := make([]string, 0)
-	deleteLines := make([]string, 0)
-	insertLines := make([]string, 0)
-
-	for _, l := range h.lines {
-		if strings.HasPrefix(l, " ") {
-			contextLines = append(contextLines, strings.TrimPrefix(l, " "))
-		} else if strings.HasPrefix(l, "-") {
-			deleteLines = append(deleteLines, strings.TrimPrefix(l, "-"))
-		} else if strings.HasPrefix(l, "+") {
-			insertLines = append(insertLines, strings.TrimPrefix(l, "+"))
-		}
-	}
-
-	if len(contextLines) == 0 && len(deleteLines) == 0 {
-		insertPos := h.newStart - 1
-		if insertPos < 0 {
-			insertPos = 0
-		}
-		if insertPos > len(lines) {
-			insertPos = len(lines)
-		}
-		result := make([]string, 0, len(lines)+len(insertLines))
-		result = append(result, lines[:insertPos]...)
-		result = append(result, insertLines...)
-		result = append(result, lines[insertPos:]...)
-		return result, nil
-	}
-
-	startIdx := findContextMatch(lines, contextLines, deleteLines, h.origStart-1)
-	if startIdx == -1 {
-		startIdx = findFuzzyMatch(lines, contextLines, deleteLines)
-	}
-	if startIdx == -1 {
-		return lines, fmt.Errorf("could not match hunk context at line %d", h.origStart)
-	}
-
-	if len(deleteLines) > 0 {
-		endIdx := startIdx
-		for _, dl := range deleteLines {
-			if endIdx >= len(lines) || !linesMatch(lines[endIdx], dl) {
-				return lines, fmt.Errorf("could not match delete line at line %d", endIdx+1)
-			}
-			endIdx++
-		}
-
-		result := make([]string, 0, len(lines)+len(insertLines)-len(deleteLines))
-		result = append(result, lines[:startIdx]...)
-		result = append(result, insertLines...)
-		result = append(result, lines[endIdx:]...)
-		return result, nil
-	}
-
-	endIdx := startIdx + len(contextLines)
-	result := make([]string, 0, len(lines)+len(insertLines))
-	result = append(result, lines[:startIdx]...)
-	result = append(result, insertLines...)
-	result = append(result, lines[endIdx:]...)
-	return result, nil
-}
-
-func findContextMatch(lines, contextLines, deleteLines []string, hintIdx int) int {
-	if len(contextLines) == 0 {
-		return hintIdx
-	}
-
-	if hintIdx >= 0 && hintIdx < len(lines) {
-		if matchContextAt(lines, contextLines, hintIdx) {
-			return hintIdx
-		}
-	}
-
-	for i := 0; i <= len(lines)-len(contextLines); i++ {
-		if matchContextAt(lines, contextLines, i) {
-			return i
-		}
-	}
-
-	return -1
-}
-
-func matchContextAt(lines, context []string, start int) bool {
-	for i, ctx := range context {
-		if start+i >= len(lines) {
-			return false
-		}
-		if !linesMatch(lines[start+i], ctx) {
-			return false
-		}
-	}
-	return true
-}
-
-func findFuzzyMatch(lines, contextLines, deleteLines []string) int {
-	if len(contextLines) == 0 {
-		return 0
-	}
-
-	bestIdx := -1
-	bestScore := 0
-
-	for i := 0; i <= len(lines)-len(contextLines); i++ {
-		score := 0
-		for j, ctx := range contextLines {
-			if i+j < len(lines) && linesFuzzyMatch(lines[i+j], ctx) {
-				score++
-			}
-		}
-		if score > bestScore {
-			bestScore = score
-			bestIdx = i
-		}
-	}
-
-	if bestScore >= len(contextLines)/2+1 {
-		return bestIdx
-	}
-
-	return -1
-}
-
-func linesMatch(a, b string) bool {
-	return strings.TrimSpace(a) == strings.TrimSpace(b)
-}
-
-func linesFuzzyMatch(a, b string) bool {
-	a = strings.TrimSpace(a)
-	b = strings.TrimSpace(b)
-	if a == b {
-		return true
-	}
-	if len(a) < 3 || len(b) < 3 {
-		return false
-	}
-	aLower := strings.ToLower(a)
-	bLower := strings.ToLower(b)
-	if strings.Contains(aLower, bLower) || strings.Contains(bLower, aLower) {
-		return true
-	}
-	return false
-}
-
-func applyPatchSystem(patchText string) (string, error) {
-	_, err := exec.LookPath("patch")
-	if err != nil {
-		return "Error: 'patch' command not found. Please install patch utility for your system.", nil
-	}
-
-	cmd := exec.Command("patch", "-p1")
-	cmd.Stdin = strings.NewReader(patchText)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(output), fmt.Errorf("patch failed: %w", err)
-	}
-
-	return string(output), nil
-}
-
-func patchTargets(patchText string) ([]string, error) {
-	seen := make(map[string]struct{})
-	var targets []string
-
-	scanner := bufio.NewScanner(strings.NewReader(patchText))
-	for scanner.Scan() {
-		line := scanner.Text()
-		var path string
-
-		switch {
-		case strings.HasPrefix(line, "diff --git "):
-			rest := strings.TrimPrefix(line, "diff --git ")
-			if idx := strings.LastIndex(rest, " b/"); idx != -1 {
-				path = strings.TrimPrefix(rest[idx+1:], "b/")
-			}
-		case strings.HasPrefix(line, "+++ "):
-			path = strings.TrimSpace(strings.TrimPrefix(line, "+++ "))
-			if cut, _, ok := strings.Cut(path, "\t"); ok {
-				path = cut
-			}
-			if path == "/dev/null" {
-				path = ""
-			}
-		case strings.HasPrefix(line, "--- "):
-			path = strings.TrimSpace(strings.TrimPrefix(line, "--- "))
-			if cut, _, ok := strings.Cut(path, "\t"); ok {
-				path = cut
-			}
-			if path == "/dev/null" {
-				path = ""
-			}
-		case strings.HasPrefix(line, "*** Update File: "), strings.HasPrefix(line, "*** Delete File: "):
-			path = strings.TrimSpace(strings.SplitN(line, ":", 2)[1])
-		}
-
-		if path == "" {
-			continue
-		}
-		path = filepath.Clean(strings.TrimPrefix(strings.TrimPrefix(path, "a/"), "b/"))
-		if _, ok := seen[path]; ok {
-			continue
-		}
-		seen[path] = struct{}{}
-		targets = append(targets, path)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
-	return targets, nil
+	return "Success. Updated the following files:\n" + strings.Join(results, "\n"), nil
 }
 
 type TodoWriteTool struct{}

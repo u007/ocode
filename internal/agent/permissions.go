@@ -77,7 +77,7 @@ type patternRule struct {
 // path-returning cases of extractPathFromArgs.
 var pathScopedTools = map[string]bool{
 	"read": true, "write": true, "edit": true, "delete": true,
-	"multiedit": true, "replace_lines": true, "glob": true, "grep": true,
+	"multiedit": true, "multi_file_edit": true, "replace_lines": true, "glob": true, "grep": true,
 	"list": true, "lsp": true, "apply_patch": true, "format": true, "repo_overview": true,
 }
 
@@ -92,7 +92,7 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "agent"} {
 		pm.rules[name] = PermissionAllow
 	}
-	for _, name := range []string{"write", "edit", "multiedit", "replace_lines", "apply_patch", "format"} {
+	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format"} {
 		pm.SetRule(name, PermissionAllow)
 	}
 	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*"} {
@@ -306,16 +306,20 @@ func isSensitivePath(path string) bool {
 
 func extractPathFromArgs(toolName string, args json.RawMessage) string {
 	var params struct {
-		Path    string `json:"path"`
-		Pattern string `json:"pattern"`
-		URL     string `json:"url"`
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"`
+		Pattern  string `json:"pattern"`
+		URL      string `json:"url"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return ""
 	}
 	switch toolName {
-	case "read", "write", "delete", "edit", "multiedit", "replace_lines", "format", "lsp", "apply_patch", "grep", "repo_overview":
-		return params.Path
+	case "read", "write", "delete", "edit", "multiedit", "multi_file_edit", "replace_lines", "format", "lsp", "apply_patch", "grep", "repo_overview":
+		if params.Path != "" {
+			return params.Path
+		}
+		return params.FilePath
 	case "glob", "list":
 		if params.Pattern != "" {
 			return params.Pattern
