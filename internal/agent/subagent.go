@@ -159,6 +159,10 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		subAgent.maxSteps = spec.MaxSteps
 	}
 
+	// Inherit the shared session supervisor so subagent processes are tracked
+	// under the same lifecycle owner as the main agent.
+	subAgent.SetSupervisor(t.mainAgent.Supervisor())
+
 	// Propagate the permission-ask callback so sub-agent tool calls that need a
 	// decision bubble up to the main TUI. Set before the spec-permissions block
 	// so it applies whether or not the sub-agent gets its own PermissionManager.

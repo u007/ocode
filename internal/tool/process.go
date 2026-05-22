@@ -2,6 +2,7 @@ package tool
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
@@ -76,9 +77,19 @@ func (p *Process) snapshotStatus() (ProcStatus, int) {
 	return p.Status, p.ExitCode
 }
 
+func (p *Process) snapshotViewState() (ProcStatus, int, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.Status, p.ExitCode, !p.EndedAt.IsZero()
+}
+
 // ProcessRegistry holds an agent's background processes.
+// When a ProcessSupervisor is attached, lifecycle (registration, shutdown)
+// delegates to the supervisor while output buffering and incremental reads
+// remain local. Without a supervisor the registry is self-contained.
 type ProcessRegistry struct {
 	mu      sync.Mutex
+	sup     *ProcessSupervisor
 	procs   map[string]*Process
 	order   []string
 	counter int
@@ -87,6 +98,23 @@ type ProcessRegistry struct {
 
 func NewProcessRegistry() *ProcessRegistry {
 	return &ProcessRegistry{procs: map[string]*Process{}}
+}
+
+// SetSupervisor attaches a session-scoped process supervisor. After this call:
+//   - StartBackground registers new processes with the supervisor.
+//   - KillAll delegates through supervisor.Shutdown.
+//   - Snapshot reads from supervisor records.
+func (r *ProcessRegistry) SetSupervisor(sup *ProcessSupervisor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sup = sup
+}
+
+// Supervisor returns the attached process supervisor (may be nil).
+func (r *ProcessRegistry) Supervisor() *ProcessSupervisor {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sup
 }
 
 // SetOnDone registers a callback fired (on its own goroutine) when a process
@@ -106,6 +134,7 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	r.procs[id] = p
 	r.order = append(r.order, id)
 	onDone := r.onDone
+	sup := r.sup
 	r.mu.Unlock()
 
 	var cmd *exec.Cmd
@@ -119,12 +148,32 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	p.cmd = cmd
 	p.mu.Unlock()
 
+	if sup != nil {
+		reg := ProcessRegistration{
+			ID:               id,
+			Command:          command,
+			Kind:             ProcessKindBackgroundBash,
+			Cmd:              cmd,
+			OwnsProcessGroup: runtime.GOOS != "windows",
+			StartedAt:        p.StartedAt,
+		}
+		if _, err := sup.Register(reg); err != nil {
+			p.appendOutput([]byte("failed to start: " + err.Error()))
+			finishProcess(p, 1, ProcExited, onDone)
+			sup.MarkFailedToStart(id, err)
+			return p
+		}
+	}
+
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 
 	if err := cmd.Start(); err != nil {
 		p.appendOutput([]byte("failed to start: " + err.Error()))
-		r.finish(p, 1, ProcExited, onDone)
+		finishProcess(p, 1, ProcExited, onDone)
+		if sup != nil {
+			sup.MarkFailedToStart(id, err)
+		}
 		return p
 	}
 
@@ -157,13 +206,20 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 			status = ProcKilled
 		}
 		p.mu.Unlock()
-		r.finish(p, code, status, onDone)
+		finishProcess(p, code, status, onDone)
+		if sup != nil {
+			if status == ProcKilled {
+				sup.MarkKilled(id, code)
+			} else {
+				sup.MarkExited(id, code)
+			}
+		}
 	}()
 	return p
 }
 
-// finish records terminal state and fires onDone once.
-func (r *ProcessRegistry) finish(p *Process, code int, status ProcStatus, onDone func(*Process)) {
+// finishProcess records terminal state on a Process and fires onDone once.
+func finishProcess(p *Process, code int, status ProcStatus, onDone func(*Process)) {
 	p.mu.Lock()
 	if p.Status != ProcRunning && !p.EndedAt.IsZero() {
 		p.mu.Unlock()
@@ -186,12 +242,13 @@ func (r *ProcessRegistry) finish(p *Process, code int, status ProcStatus, onDone
 func (r *ProcessRegistry) Output(id string) (text string, status ProcStatus, exitCode int, err error) {
 	r.mu.Lock()
 	p, ok := r.procs[id]
+	sup := r.sup
 	r.mu.Unlock()
 	if !ok {
 		return "", "", 0, fmt.Errorf("unknown process id %q", id)
 	}
-	out, st := p.readSince()
-	_, code := p.snapshotStatus()
+	out, _ := p.readSince()
+	st, code := r.viewState(p, id, sup)
 	return out, st, code, nil
 }
 
@@ -199,6 +256,7 @@ func (r *ProcessRegistry) Output(id string) (text string, status ProcStatus, exi
 func (r *ProcessRegistry) Kill(id string) (string, error) {
 	r.mu.Lock()
 	p, ok := r.procs[id]
+	sup := r.sup
 	r.mu.Unlock()
 	if !ok {
 		return "", fmt.Errorf("unknown process id %q", id)
@@ -218,11 +276,27 @@ func (r *ProcessRegistry) Kill(id string) (string, error) {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 	}
+	if sup != nil {
+		sup.MarkKilled(id, code)
+	}
 	return fmt.Sprintf("process %s killed", id), nil
 }
 
-// KillAll terminates every running process (lifecycle teardown).
+// KillAll terminates every running process (lifecycle teardown). When a
+// supervisor is attached this delegates through TerminateAll so the session
+// can continue registering new processes afterward; callers that need permanent
+// shutdown should invoke supervisor.Shutdown directly.
 func (r *ProcessRegistry) KillAll() {
+	r.mu.Lock()
+	sup := r.sup
+	r.mu.Unlock()
+
+	if sup != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = sup.TerminateAll(ctx)
+		return
+	}
 	r.mu.Lock()
 	ids := append([]string(nil), r.order...)
 	r.mu.Unlock()
@@ -242,10 +316,37 @@ type ProcInfo struct {
 // Snapshot returns all processes in start order.
 func (r *ProcessRegistry) Snapshot() []ProcInfo {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]ProcInfo, 0, len(r.order))
-	for _, id := range r.order {
-		p := r.procs[id]
+	sup := r.sup
+	ids := append([]string(nil), r.order...)
+	procs := make(map[string]*Process, len(r.procs))
+	for id, p := range r.procs {
+		procs[id] = p
+	}
+	r.mu.Unlock()
+
+	if sup != nil {
+		out := make([]ProcInfo, 0, len(ids))
+		for _, id := range ids {
+			p := procs[id]
+			if p == nil {
+				continue
+			}
+			st, code := r.viewState(p, id, sup)
+			out = append(out, ProcInfo{
+				ID:       id,
+				Command:  p.Command,
+				Status:   st,
+				ExitCode: code,
+			})
+		}
+		return out
+	}
+	out := make([]ProcInfo, 0, len(ids))
+	for _, id := range ids {
+		p := procs[id]
+		if p == nil {
+			continue
+		}
 		st, code := p.snapshotStatus()
 		out = append(out, ProcInfo{ID: id, Command: p.Command, Status: st, ExitCode: code})
 	}
@@ -267,16 +368,38 @@ func (r *ProcessRegistry) RunningCount() int {
 func (r *ProcessRegistry) Dump(id string) (string, ProcStatus, int, error) {
 	r.mu.Lock()
 	p, ok := r.procs[id]
+	sup := r.sup
 	r.mu.Unlock()
 	if !ok {
 		return "", "", 0, fmt.Errorf("unknown process id %q", id)
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	out := ""
 	if p.dropped > 0 {
 		out = fmt.Sprintf("[…truncated %d bytes]\n", p.dropped)
 	}
 	out += string(p.buf)
-	return out, p.Status, p.ExitCode, nil
+	p.mu.Unlock()
+	st, code := r.viewState(p, id, sup)
+	return out, st, code, nil
+}
+
+func (r *ProcessRegistry) viewState(p *Process, id string, sup *ProcessSupervisor) (ProcStatus, int) {
+	localStatus, localCode, localDone := p.snapshotViewState()
+	if localDone {
+		return localStatus, localCode
+	}
+	if sup != nil {
+		if rec, ok := sup.Lookup(id); ok {
+			return viewStatus(rec.Status), rec.ExitCode
+		}
+	}
+	return localStatus, localCode
+}
+
+func viewStatus(status ProcStatus) ProcStatus {
+	if status == ProcFailedToStart {
+		return ProcExited
+	}
+	return status
 }

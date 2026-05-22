@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -259,5 +260,79 @@ func TestCloneClaudeSessionSavesOcodeSession(t *testing.T) {
 		if ref.ID == "claude:claude-1" {
 			t.Fatalf("expected cloned Claude session to hide raw Claude ref, got %#v", refs)
 		}
+	}
+}
+
+func TestAppendClaudeSessionWritesClaudeJsonl(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	t.Setenv("HOME", tmpHome)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := AppendClaudeSession("session-claude", []agent.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi there", Model: "claude-sonnet-4"},
+	})
+	if err != nil {
+		t.Fatalf("AppendClaudeSession failed: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read exported file: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected two JSONL lines, got %d: %q", len(lines), string(data))
+	}
+
+	var first, second map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatalf("first line is not valid JSON: %v", err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &second); err != nil {
+		t.Fatalf("second line is not valid JSON: %v", err)
+	}
+
+	if first["type"] != "user" || second["type"] != "assistant" {
+		t.Fatalf("expected user then assistant lines, got %#v %#v", first["type"], second["type"])
+	}
+	if first["uuid"] == "" || second["parentUuid"] != first["uuid"] {
+		t.Fatalf("expected parent UUID chain, got first=%#v second=%#v", first["uuid"], second["parentUuid"])
+	}
+	if first["sessionId"] != "session-claude" {
+		t.Fatalf("expected sessionId to be preserved, got %#v", first["sessionId"])
+	}
+
+	msg, ok := first["message"].(map[string]any)
+	if !ok || msg["content"] != "hello" {
+		t.Fatalf("expected first message content to be plain text, got %#v", first["message"])
+	}
+	if _, ok := second["message"].(map[string]any); !ok {
+		t.Fatalf("expected assistant message object, got %#v", second["message"])
+	}
+
+	if _, err := AppendClaudeSession("session-claude", []agent.Message{{Role: "user", Content: "follow-up"}}); err != nil {
+		t.Fatalf("second AppendClaudeSession failed: %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to reread exported file: %v", err)
+	}
+	lines = strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected append-only file to grow to three lines, got %d: %q", len(lines), string(data))
+	}
+	var third map[string]any
+	if err := json.Unmarshal([]byte(lines[2]), &third); err != nil {
+		t.Fatalf("third line is not valid JSON: %v", err)
+	}
+	if third["parentUuid"] != second["uuid"] {
+		t.Fatalf("expected appended line to chain from prior UUID, got parent=%#v want=%#v", third["parentUuid"], second["uuid"])
 	}
 }

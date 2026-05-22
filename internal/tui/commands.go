@@ -38,6 +38,7 @@ func init() {
 		{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
 		{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},
 		{name: "/export", help: "Save chat as Markdown", handler: runExportCmd},
+		{name: "/export-claude", help: "Append chat to Claude Code JSONL", handler: runExportClaudeCmd},
 		{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
@@ -155,7 +156,7 @@ func buildCommandHelpText(specs []commandSpec) string {
 		fmt.Fprintf(&b, "%-20s : %s\n", commandDisplayName(spec), spec.help)
 	}
 	b.WriteString("\nShortcuts:\n")
-	b.WriteString("!command       : Run an interactive shell command (takes over terminal; output not captured)\n")
+	b.WriteString("!command       : Prefix the input with ! to run a shell command (double-esc exits shell mode)\n")
 	b.WriteString("@path          : Add file context or attach an image\n")
 	b.WriteString("Ctrl+P         : Open command palette\n")
 	b.WriteString("Ctrl+X         : Leader key for quick actions (u:undo, r:redo, n:new, l:list, c:compact)\n")
@@ -199,6 +200,11 @@ func runRedoCmd(m *model, args []string) tea.Cmd {
 
 func runExportCmd(m *model, args []string) tea.Cmd {
 	m.handleExportCmd(args)
+	return nil
+}
+
+func runExportClaudeCmd(m *model, args []string) tea.Cmd {
+	m.handleExportClaudeCmd(args)
 	return nil
 }
 
@@ -310,10 +316,7 @@ func runMCPCmd(m *model, args []string) tea.Cmd {
 }
 
 func runExitCmd(m *model, args []string) tea.Cmd {
-	m.saveSession()
-	if m.agent != nil {
-		m.agent.Shutdown()
-	}
+	m.cleanupCurrentSession()
 	return tea.Quit
 }
 

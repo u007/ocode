@@ -172,7 +172,7 @@ func TestFilesEditorOpenerExternalMode(t *testing.T) {
 		t.Fatal("expected non-nil cmd for default opener")
 	}
 
-	m.editorOpener = createEditorOpener("cat", "external", nil)
+	m.editorOpener = createEditorOpener("cat", "external", nil, nil)
 	cmd2 := m.openInEditor(path)
 	if cmd2 == nil {
 		t.Fatal("expected non-nil cmd for external opener")
@@ -186,7 +186,7 @@ func TestFilesEnterUsesEditorOpener(t *testing.T) {
 
 	m := newFilesModel(dir)
 	m.editor = "echo"
-	m.editorOpener = createEditorOpener("echo", "external", nil)
+	m.editorOpener = createEditorOpener("echo", "external", nil, nil)
 
 	m, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}, 100, 30)
 	if cmd == nil {

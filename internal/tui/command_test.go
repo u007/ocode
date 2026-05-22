@@ -40,13 +40,17 @@ func TestLookupCommandResolvesAliases(t *testing.T) {
 	if got := lookupCommand("/theme"); got == nil || got.name != "/themes" {
 		t.Fatalf("expected /theme to resolve to /themes, got %#v", got)
 	}
+
+	if got := lookupCommand("/export-claude"); got == nil || got.name != "/export-claude" {
+		t.Fatalf("expected /export-claude to resolve to itself, got %#v", got)
+	}
 }
 
 func TestRenderPaletteUsesRegistryCommands(t *testing.T) {
 	m := model{width: 80}
 	got := m.renderPalette()
 
-	for _, want := range []string{"/help", "/sidebar", "/exit"} {
+	for _, want := range []string{"/help", "/sidebar", "/export-claude", "/exit"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected palette to include %s, got %q", want, got)
 		}
