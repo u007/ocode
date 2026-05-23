@@ -18,7 +18,7 @@ WAITING_FOR_USER_RESPONSE`
 }
 
 func TestQuestionPromptStartsInteractiveDialog(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(90), viewport.WithHeight(20)), styles: ApplyThemeColors("tokyonight")}
+	m := model{input: textarea.New(), questionInput: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(90), viewport.WithHeight(20)), styles: ApplyThemeColors("tokyonight")}
 	m.appendAgentMessage(agent.Message{Role: "tool", ToolID: "call-1", Content: testQuestionContent()})
 
 	if !m.showQuestionDialog {
@@ -36,7 +36,7 @@ func TestQuestionPromptStartsInteractiveDialog(t *testing.T) {
 }
 
 func TestQuestionPromptArrowSelectionSubmitsToolResult(t *testing.T) {
-	m := model{input: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(90), viewport.WithHeight(20)), styles: ApplyThemeColors("tokyonight")}
+	m := model{input: newTestTextarea(), questionInput: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(90), viewport.WithHeight(20)), styles: ApplyThemeColors("tokyonight")}
 	m.appendAgentMessage(agent.Message{Role: "tool", ToolID: "call-1", Content: testQuestionContent()})
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown})
@@ -60,7 +60,7 @@ func TestQuestionPromptArrowSelectionSubmitsToolResult(t *testing.T) {
 }
 
 func TestQuestionPromptOtherOpensTextInput(t *testing.T) {
-	m := model{input: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(90), viewport.WithHeight(20)), styles: ApplyThemeColors("tokyonight")}
+	m := model{input: newTestTextarea(), questionInput: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(90), viewport.WithHeight(20)), styles: ApplyThemeColors("tokyonight")}
 	m.appendAgentMessage(agent.Message{Role: "tool", ToolID: "call-1", Content: testQuestionContent()})
 	m.questionCursor[0] = 2
 
@@ -89,7 +89,7 @@ func TestQuestionPromptLeftRightTabs(t *testing.T) {
 [{"header":"First","question":"Pick first","options":[{"label":"A","description":"Alpha"}],"multiple":false},{"header":"Second","question":"Pick second","options":[{"label":"B","description":"Beta"}],"multiple":false}]
 
 WAITING_FOR_USER_RESPONSE`
-	m := model{input: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(90), viewport.WithHeight(20)), styles: ApplyThemeColors("tokyonight")}
+	m := model{input: newTestTextarea(), questionInput: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(90), viewport.WithHeight(20)), styles: ApplyThemeColors("tokyonight")}
 	m.appendAgentMessage(agent.Message{Role: "tool", ToolID: "call-1", Content: content})
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyRight})

@@ -89,10 +89,14 @@ func TestShellFinishedMessageIsRecorded(t *testing.T) {
 		sessionID: "test-shell",
 	}
 
-	updated, _ := m.Update(shellFinishedMsg{command: "echo hello"})
+	updated, _ := m.Update(shellFinishedMsg{command: "echo hello", output: "hello\n", toolCallID: "shell-test"})
 	got := updated.(model)
-	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "Shell command finished: echo hello") {
-		t.Fatalf("expected shell completion message, got %#v", got.messages)
+	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "hello") {
+		t.Fatalf("expected shell output recorded as tool result, got %#v", got.messages)
+	}
+	last := got.messages[len(got.messages)-1].raw
+	if last == nil || last.Role != "tool" || last.ToolID != "shell-test" {
+		t.Fatalf("expected raw tool message with matching ToolID, got %#v", last)
 	}
 }
 
@@ -1706,5 +1710,145 @@ func TestThinkingLevelIndexForBudget(t *testing.T) {
 		if got := thinkingLevelIndexForBudget(tc.budget); got != tc.want {
 			t.Fatalf("budget %d: want %d, got %d", tc.budget, tc.want, got)
 		}
+	}
+}
+
+func TestTruncateTitle(t *testing.T) {
+	cases := []struct {
+		name   string
+		input  string
+		maxLen int
+		want   string
+	}{
+		{
+			name:   "no truncation needed",
+			input:  "short",
+			maxLen: 80,
+			want:   "short",
+		},
+		{
+			name:   "exact length",
+			input:  "exactly eighty characters long" + strings.Repeat("x", 50),
+			maxLen: 80,
+			want:   "exactly eighty characters long" + strings.Repeat("x", 50),
+		},
+		{
+			name:   "truncate with ellipsis",
+			input:  "this is a very long title that needs to be truncated because it exceeds the maximum length",
+			maxLen: 40,
+			want:   "this is a very long title that needs ...",
+		},
+		{
+			name:   "multibyte UTF-8 emoji safe",
+			input:  "Hello 🎉🎊🎈 " + strings.Repeat("world ", 10),
+			maxLen: 30,
+			want:   "Hello 🎉🎊🎈 world world world...",
+		},
+		{
+			name:   "multibyte UTF-8 CJK safe",
+			input:  "你好世界你好世界你好世界你好世界你好世界你好世界你好世界",
+			maxLen: 10,
+			want:   "你好世界你好世...",
+		},
+		{
+			name:   "accented characters safe",
+			input:  "café résumé naïve façade " + strings.Repeat("x", 50),
+			maxLen: 30,
+			want:   "café résumé naïve façade xx...",
+		},
+		{
+			name:   "maxLen 4 edge case",
+			input:  "toolong",
+			maxLen: 4,
+			want:   "t...",
+		},
+	}
+
+	for _, tc := range cases {
+		got := truncateTitle(tc.input, tc.maxLen)
+		if got != tc.want {
+			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestHandleTitleCmdExplicit(t *testing.T) {
+	m := model{
+		messages: []message{},
+	}
+
+	_ = m.handleTitleCmd([]string{"My", "Session", "Title"})
+
+	if m.sessionTitle != "My Session Title" {
+		t.Errorf("expected sessionTitle=%q, got %q", "My Session Title", m.sessionTitle)
+	}
+	if len(m.messages) == 0 {
+		t.Fatal("expected confirmation message")
+	}
+	if !strings.Contains(m.messages[0].text, "Session title set to") {
+		t.Errorf("unexpected message: %q", m.messages[0].text)
+	}
+}
+
+func TestHandleTitleCmdExplicitTruncated(t *testing.T) {
+	m := model{
+		messages: []message{},
+	}
+
+	longTitle := strings.Repeat("x", 100)
+	_ = m.handleTitleCmd([]string{longTitle})
+
+	if len(m.sessionTitle) > maxExplicitTitleLen {
+		t.Errorf("title exceeds max length: %d > %d", len(m.sessionTitle), maxExplicitTitleLen)
+	}
+	if !strings.HasSuffix(m.sessionTitle, "...") {
+		t.Errorf("expected truncated title to end with ellipsis, got %q", m.sessionTitle)
+	}
+}
+
+func TestHandleTitleCmdWhitespaceOnly(t *testing.T) {
+	m := model{
+		messages: []message{},
+	}
+
+	_ = m.handleTitleCmd([]string{"   ", "\t", "\n"})
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected usage message")
+	}
+	if !strings.Contains(m.messages[0].text, "Usage:") {
+		t.Errorf("expected usage message, got %q", m.messages[0].text)
+	}
+}
+
+func TestHandleTitleCmdNoArgClearsTitle(t *testing.T) {
+	m := model{
+		messages: []message{},
+		sessionTitle: "old title",
+	}
+
+	_ = m.handleTitleCmd([]string{})
+
+	if m.sessionTitle != "" {
+		t.Errorf("expected sessionTitle to be cleared, got %q", m.sessionTitle)
+	}
+	if len(m.messages) == 0 {
+		t.Fatal("expected auto-generate message")
+	}
+	if !strings.Contains(m.messages[0].text, "auto-generate") {
+		t.Errorf("unexpected message: %q", m.messages[0].text)
+	}
+}
+
+func TestHandleTitleCmdUTF8Safe(t *testing.T) {
+	m := model{
+		messages: []message{},
+	}
+
+	titleWithEmoji := "Test 🎉 Session 🚀 Title"
+	_ = m.handleTitleCmd([]string{titleWithEmoji})
+
+	if m.sessionTitle != titleWithEmoji {
+		t.Errorf("expected %q, got %q", titleWithEmoji, m.sessionTitle)
 	}
 }
