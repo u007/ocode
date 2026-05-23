@@ -346,6 +346,15 @@ type model struct {
 	workDir               string
 	currentAgentIdx       int
 	showPermDialog        bool
+	showQuestionDialog    bool
+	questionToolCallID    string
+	questionPrompts       []tool.QuestionPrompt
+	questionTab           int
+	questionCursor        []int
+	questionSelected      []map[int]bool
+	questionCustom        []string
+	questionTextActive    bool
+	questionInput         textarea.Model
 	pendingToolName       string
 	pendingToolArgs       json.RawMessage
 	pendingToolCallID     string
@@ -749,6 +758,16 @@ func newModel(sid string, cont bool, yolo bool) model {
 	ta.ShowLineNumbers = false
 	ta.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "insert newline"))
 
+	questionInput := textarea.New()
+	questionInput.Placeholder = "Type your answer…"
+	questionInput.Focus()
+	questionInput.Prompt = "↳ "
+	questionInput.CharLimit = 8000
+	questionInput.SetHeight(2)
+	questionInput.MaxWidth = 80
+	questionInput.ShowLineNumbers = false
+	questionInput.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "insert newline"))
+
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	vp.SetContent(hintStyle.Render("  ocode v" + version.Version + " — opencode clone · type a message to begin\n"))
 
@@ -788,6 +807,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 		}(),
 		compactCh:      make(chan agent.CompactResult, 4),
 		compactStartCh: make(chan struct{}, 4),
+		questionInput:  questionInput,
 		subAgentPermCh: make(chan subAgentPermRequest),
 		subAgentPermMu: &sync.Mutex{},
 		cleanupState:   newModelCleanupState(),
@@ -986,7 +1006,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.activeTab == tabChat {
+	if m.activeTab == tabChat && !m.showQuestionDialog {
 		m.input, tiCmd = m.input.Update(msg)
 		m.syncRawInputLines()
 	}
@@ -1213,7 +1233,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg) > 0 && (msg[len(msg)-1].Role == "tool" || (msg[len(msg)-1].Role == "assistant" && len(msg[len(msg)-1].ToolCalls) > 0)) {
 			stop := false
 			for _, am := range msg {
-				if am.Role == "tool" && strings.HasPrefix(am.Content, "PERMISSION_ASK:") {
+				if am.Role == "tool" && strings.HasPrefix(am.Content, tool.SentinelPermissionAsk) {
 					stop = true
 					break
 				}
@@ -1464,6 +1484,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleGlobalTabKeys handles tab-switching keys (1-4, alt+[/], ctrl+shift+[/])
 // regardless of the active tab. Returns (true, ...) when a key is consumed.
 func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
+	if m.showQuestionDialog {
+		return false, m, nil
+	}
 	switch msg.String() {
 	case "1":
 		if m.activeTab == tabChat {
@@ -1672,6 +1695,10 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.saveSession()
 			return m, cmd
 		}
+	}
+
+	if m.showQuestionDialog {
+		return m.handleQuestionKeys(msg, tiCmd, vpCmd)
 	}
 
 	// Route j/k/scroll inside a detail view before normal chat keys.
@@ -3675,7 +3702,7 @@ func (m *model) appendAgentMessage(am agent.Message) {
 			m.messages = append(m.messages, message{role: roleAssistant, text: content, raw: &copyMsg})
 		}
 	} else if am.Role == "tool" {
-		if strings.HasPrefix(am.Content, "PERMISSION_ASK:") {
+		if strings.HasPrefix(am.Content, tool.SentinelPermissionAsk) {
 			if req, ok := parsePermissionRequest(am.Content); ok {
 				m.showPermDialog = true
 				m.activeTab = tabChat
@@ -3686,6 +3713,9 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				m.pendingToolCallID = am.ToolID
 				m.messages = append(m.messages, message{role: roleAssistant, text: renderPermissionPrompt(req), raw: &copyMsg})
 			}
+		} else if prompts, ok := parseQuestionPrompt(am.Content); ok {
+			m.startQuestionPrompt(am.ToolID, prompts)
+			m.messages = append(m.messages, message{role: roleAssistant, text: renderQuestionTranscriptNotice(prompts), raw: &copyMsg})
 		} else {
 			toolName := m.lookupToolName(am.ToolID)
 			m.messages = append(m.messages, message{
@@ -3702,7 +3732,7 @@ func (m *model) appendAgentMessage(am agent.Message) {
 
 func parsePermissionRequest(content string) (agent.PermissionRequest, bool) {
 	var req agent.PermissionRequest
-	payload := strings.TrimPrefix(content, "PERMISSION_ASK:")
+	payload := strings.TrimPrefix(content, tool.SentinelPermissionAsk)
 	if payload == content || payload == "" {
 		return req, false
 	}
@@ -4078,6 +4108,8 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	var inputArea string
 	if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else if m.showQuestionDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.input.View())
 	}
@@ -4086,7 +4118,7 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	height := lipgloss.Height(header)
 	height += 2 // transcript border
 	height += lipgloss.Height(inputArea)
-	if m.showSlashPopup && !m.showPermDialog {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
 		height += lipgloss.Height(m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -4251,6 +4283,10 @@ func (m *model) renderTranscript() {
 			b.WriteString(m.styles.Thinking.Render("⟁ thinking\n" + content))
 		case roleAssistant:
 			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
+				if _, ok := parseQuestionPrompt(msg.raw.Content); ok {
+					b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
+					break
+				}
 				toolName := m.lookupToolName(msg.raw.ToolID)
 				if toolName == "" {
 					toolName = "tool"
@@ -4540,10 +4576,10 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 			continue
 		}
 		if msg.raw != nil {
-			if strings.HasPrefix(msg.raw.Content, "PERMISSION_ASK:") {
+			if strings.HasPrefix(msg.raw.Content, tool.SentinelPermissionAsk) {
 				continue
 			}
-			if msg.raw.Content == "WAITING_FOR_USER_RESPONSE" {
+			if strings.Contains(msg.raw.Content, tool.SentinelWaitingForUser) {
 				continue
 			}
 			agentMsgs = append(agentMsgs, *msg.raw)
@@ -4900,7 +4936,7 @@ func (m *model) openProcessLog(procID string) {
 
 // modalOpen reports whether any modal overlay is currently shown.
 func (m model) modalOpen() bool {
-	return m.showPicker || m.showConnect || m.showPalette || m.showPermDialog
+	return m.showPicker || m.showConnect || m.showPalette || m.showPermDialog || m.showQuestionDialog
 }
 
 // renderDetailView renders the top-of-stack detail view.
@@ -5086,11 +5122,13 @@ func (m model) renderContent() string {
 	var inputArea string
 	if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else if m.showQuestionDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	leftParts := []string{header, transcript}
-	if m.showSlashPopup && !m.showPermDialog {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
 		leftParts = append(leftParts, m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -5978,6 +6016,8 @@ func (m model) inputAreaHeight() int {
 	var rendered string
 	if m.showPermDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else if m.showQuestionDialog {
+		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.input.View())
 	}
@@ -6011,7 +6051,7 @@ func (m model) inputAreaTopY() int {
 }
 
 func (m model) isClickInInputArea(mouse tea.Mouse) bool {
-	if m.activeTab != tabChat || m.showPermDialog {
+	if m.activeTab != tabChat || m.showPermDialog || m.showQuestionDialog {
 		return false
 	}
 	if mouse.X >= m.panelWidth() {
