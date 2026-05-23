@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -142,8 +143,10 @@ type authFinishedMsg struct {
 }
 
 type shellFinishedMsg struct {
-	command string
-	err     error
+	command    string
+	output     string
+	toolCallID string
+	err        error
 }
 
 type connectOAuthFinishedMsg struct {
@@ -1215,11 +1218,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connect.message = fmt.Sprintf("%s\n\n✓ Connection verified.", m.connect.message)
 		}
 	case shellFinishedMsg:
+		content := msg.output
 		if msg.err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Shell command failed: %v", msg.err)})
-		} else {
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Shell command finished: %s", msg.command)})
+			if content == "" {
+				content = fmt.Sprintf("Command failed: %v", msg.err)
+			} else {
+				content = fmt.Sprintf("Command failed (%v). Output:\n%s", msg.err, content)
+			}
+		} else if strings.TrimSpace(content) == "" {
+			content = "Command executed successfully (no output)."
 		}
+		m.appendAgentMessage(agent.Message{
+			Role:    "tool",
+			ToolID:  msg.toolCallID,
+			Content: content,
+		})
 		m.renderTranscript()
 		m.viewport.GotoBottom()
 		m.saveSession()
@@ -1887,11 +1900,18 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		if strings.HasPrefix(text, "!") {
 			m.input.Reset()
 			cmdText := strings.TrimPrefix(text, "!")
-			m.messages = append(m.messages, message{role: roleUser, text: text})
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("🔧 running shell: %s", cmdText)})
+			toolCallID := fmt.Sprintf("shell-%d", time.Now().UnixNano())
+			argsJSON, _ := json.Marshal(map[string]string{"command": cmdText})
+			tc := agent.ToolCall{ID: toolCallID, Type: "function"}
+			tc.Function.Name = "bash"
+			tc.Function.Arguments = string(argsJSON)
+			m.appendAgentMessage(agent.Message{
+				Role:      "assistant",
+				ToolCalls: []agent.ToolCall{tc},
+			})
 			m.renderTranscript()
 			m.viewport.GotoBottom()
-			return m, m.runInteractiveShell(cmdText, m.workDir)
+			return m, m.runCapturedShell(cmdText, m.workDir, toolCallID)
 		}
 
 		if m.streaming {
@@ -2835,6 +2855,38 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 	return nil
 }
 
+const (
+	maxExplicitTitleLen = 80
+)
+
+func truncateTitle(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen-3]) + "..."
+}
+
+func (m *model) handleTitleCmd(args []string) tea.Cmd {
+	if len(args) > 0 {
+		title := strings.TrimSpace(strings.Join(args, " "))
+		if title == "" {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /title [text]"})
+			return nil
+		}
+		title = truncateTitle(title, maxExplicitTitleLen)
+		m.sessionTitle = title
+		m.saveSession()
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Session title set to %q.", title)})
+		return nil
+	}
+
+	m.sessionTitle = ""
+	m.saveSession()
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Title cleared — will auto-generate from next assistant response."})
+	return nil
+}
+
 func (m *model) handleThinkingCmd(args []string) {
 	m.showThinking = !m.showThinking
 	status := "hidden"
@@ -3124,39 +3176,59 @@ func (m *model) refreshEditorOpener() {
 	m.git.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
 }
 
-func (m *model) runInteractiveShell(command string, dir string) tea.Cmd {
-	c := shellExecCommand(command)
-	if dir != "" {
-		c.Dir = dir
-	}
-	if runtime.GOOS != "windows" {
-		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	}
-	id := fmt.Sprintf("interactive-%d-%d", os.Getpid(), time.Now().UnixNano())
-	if m.supervisor != nil {
-		_, _ = m.supervisor.Register(tool.ProcessRegistration{
-			ID:               id,
-			Command:          command,
-			Kind:             tool.ProcessKindInteractiveShell,
-			Cmd:              c,
-			OwnsProcessGroup: runtime.GOOS != "windows",
-			StartedAt:        time.Now(),
-		})
-	}
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		if m.supervisor != nil {
+// runCapturedShell runs `command` non-interactively, capturing combined
+// stdout/stderr, and emits a shellFinishedMsg with the output.
+func (m *model) runCapturedShell(command string, dir string, toolCallID string) tea.Cmd {
+	supervisor := m.supervisor
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+		defer cancel()
+		var c *exec.Cmd
+		if runtime.GOOS == "windows" {
+			c = exec.CommandContext(ctx, "cmd", "/C", command)
+		} else {
+			c = exec.CommandContext(ctx, "bash", "-c", command)
+		}
+		if dir != "" {
+			c.Dir = dir
+		}
+		if runtime.GOOS != "windows" {
+			c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		}
+		var buf bytes.Buffer
+		c.Stdout = &buf
+		c.Stderr = &buf
+
+		id := fmt.Sprintf("shell-cmd-%d-%d", os.Getpid(), time.Now().UnixNano())
+		if supervisor != nil {
+			_, _ = supervisor.Register(tool.ProcessRegistration{
+				ID:               id,
+				Command:          command,
+				Kind:             tool.ProcessKindBackgroundBash,
+				Cmd:              c,
+				OwnsProcessGroup: runtime.GOOS != "windows",
+				StartedAt:        time.Now(),
+			})
+		}
+
+		err := c.Run()
+		out := buf.String()
+		if ctx.Err() == context.DeadlineExceeded {
+			err = fmt.Errorf("timed out after 600s")
+		}
+		if supervisor != nil {
 			if err == nil {
-				m.supervisor.MarkExited(id, 0)
+				supervisor.MarkExited(id, 0)
 			} else {
 				code := 1
 				if exitErr, ok := err.(*exec.ExitError); ok {
 					code = exitErr.ExitCode()
 				}
-				m.supervisor.MarkKilled(id, code)
+				supervisor.MarkKilled(id, code)
 			}
 		}
-		return shellFinishedMsg{command: command, err: err}
-	})
+		return shellFinishedMsg{command: command, output: out, toolCallID: toolCallID, err: err}
+	}
 }
 
 func shellExecCommand(command string) *exec.Cmd {

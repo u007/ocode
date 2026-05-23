@@ -46,6 +46,7 @@ func init() {
 		{name: "/help", help: "Show this help", handler: runHelpCmd},
 		{name: "/themes", aliases: []string{"/theme"}, usage: "/themes [name]", help: "Choose or switch themes", handler: runThemesCmd},
 		{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
+		{name: "/title", usage: "/title [text]", help: "Set session title (no arg = reset to auto-generate)", handler: runTitleCmd},
 		{name: "/editor", usage: "/editor [command]", help: "Choose default external editor", handler: runEditorCmd},
 		{name: "/editor-mode", usage: "/editor-mode [external|tmux-split|tmux-window]", help: "Set editor open mode", handler: runEditorModeCmd},
 		{name: "/sidebar", help: "Toggle sidebar placeholder", handler: runSidebarCmd},
@@ -244,6 +245,10 @@ func runThemesCmd(m *model, args []string) tea.Cmd {
 func runShareCmd(m *model, args []string) tea.Cmd {
 	m.handleShareCmd(args)
 	return nil
+}
+
+func runTitleCmd(m *model, args []string) tea.Cmd {
+	return m.handleTitleCmd(args)
 }
 
 func runEditorCmd(m *model, args []string) tea.Cmd {

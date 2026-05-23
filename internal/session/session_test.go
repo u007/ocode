@@ -305,8 +305,12 @@ func TestAppendClaudeSessionWritesClaudeJsonl(t *testing.T) {
 	if first["uuid"] == "" || second["parentUuid"] != first["uuid"] {
 		t.Fatalf("expected parent UUID chain, got first=%#v second=%#v", first["uuid"], second["parentUuid"])
 	}
-	if first["sessionId"] != "session-claude" {
-		t.Fatalf("expected sessionId to be preserved, got %#v", first["sessionId"])
+	wantSessionUUID := sessionUUIDv5("session-claude")
+	if first["sessionId"] != wantSessionUUID {
+		t.Fatalf("expected sessionId to be derived UUIDv5 %q, got %#v", wantSessionUUID, first["sessionId"])
+	}
+	if filepath.Base(path) != wantSessionUUID+".jsonl" {
+		t.Fatalf("expected filename to use UUID, got %q", filepath.Base(path))
 	}
 
 	msg, ok := first["message"].(map[string]any)
@@ -334,5 +338,8 @@ func TestAppendClaudeSessionWritesClaudeJsonl(t *testing.T) {
 	}
 	if third["parentUuid"] != second["uuid"] {
 		t.Fatalf("expected appended line to chain from prior UUID, got parent=%#v want=%#v", third["parentUuid"], second["uuid"])
+	}
+	if third["uuid"] == first["uuid"] || third["uuid"] == second["uuid"] {
+		t.Fatalf("appended entry uuid collides with earlier entry: third=%#v first=%#v second=%#v", third["uuid"], first["uuid"], second["uuid"])
 	}
 }
