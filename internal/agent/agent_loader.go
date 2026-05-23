@@ -113,14 +113,16 @@ func parseAgentContent(content, source string) (*AgentDefinition, []LoadDiagnost
 
 	hidden := fm.fields["hidden"] == "true"
 
-	knownUnsupported := map[string]bool{
-		"model": true, "temperature": true, "top_p": true,
+	notYetApplied := map[string]bool{
+		"temperature": true, "top_p": true,
 	}
 	for k := range fm.fields {
-		if knownUnsupported[k] {
-			diags = append(diags, LoadDiagnostic{Level: "warning", File: source, Message: "ignored unsupported field: " + k})
+		if notYetApplied[k] {
+			diags = append(diags, LoadDiagnostic{Level: "warning", File: source, Message: "field parsed but not yet applied (no LLM client plumbing): " + k})
 		}
 	}
+
+	model := strings.TrimSpace(fm.fields["model"])
 
 	var maxSteps int
 	if stepsStr, ok := fm.fields["steps"]; ok && stepsStr != "" {
@@ -142,6 +144,7 @@ func parseAgentContent(content, source string) (*AgentDefinition, []LoadDiagnost
 		Permissions:  fm.permissions,
 		Source:       source,
 		MaxSteps:     maxSteps,
+		Model:        model,
 	}
 
 	return def, diags

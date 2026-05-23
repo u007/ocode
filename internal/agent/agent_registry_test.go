@@ -247,10 +247,12 @@ func TestAgentLoaderDiagnosticsUnsupportedFields(t *testing.T) {
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
 	os.MkdirAll(agentsDir, 0755)
-	os.WriteFile(filepath.Join(agentsDir, "with-model.md"), []byte(`---
-description: has model field
+	// model is now applied; temperature/top_p still warn until client plumbing lands.
+	os.WriteFile(filepath.Join(agentsDir, "with-tuning.md"), []byte(`---
+description: has tuning fields
 mode: subagent
 model: gpt-5
+temperature: 0.3
 ---
 valid prompt
 `), 0644)
@@ -268,8 +270,12 @@ valid prompt
 	if !foundWarn {
 		t.Fatalf("expected unsupported field warning diagnostic, got %#v", diags)
 	}
-	if reg.Get("with-model") == nil {
+	def := reg.Get("with-tuning")
+	if def == nil {
 		t.Fatal("expected agent to load despite unsupported field")
+	}
+	if def.Model != "gpt-5" {
+		t.Errorf("expected Model=\"gpt-5\", got %q", def.Model)
 	}
 }
 

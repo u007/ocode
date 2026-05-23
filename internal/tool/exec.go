@@ -142,10 +142,14 @@ func (t BashTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	if err != nil {
-		if res == "" {
-			return fmt.Sprintf("Command failed: %v", err), nil
+		code := 1
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
 		}
-		return fmt.Sprintf("Command failed (%v). Output:\n%s", err, truncateOutput(res)), nil
+		if res == "" {
+			return fmt.Sprintf("Command failed (exit code %d): %v", code, err), nil
+		}
+		return fmt.Sprintf("Command failed (exit code %d). Output:\n%s", code, truncateOutput(res)), nil
 	}
 
 	if strings.TrimSpace(res) == "" {

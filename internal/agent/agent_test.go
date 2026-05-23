@@ -33,6 +33,18 @@ func (m *MockClient) Chat(messages []Message, tools []map[string]interface{}) (*
 func (m *MockClient) GetProvider() string { return "mock" }
 func (m *MockClient) GetModel() string    { return "mock-model" }
 
+type captureClient struct {
+	Messages []Message
+}
+
+func (c *captureClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	c.Messages = append([]Message(nil), messages...)
+	return &Message{Role: "assistant", Content: "ok"}, nil
+}
+
+func (c *captureClient) GetProvider() string { return "mock" }
+func (c *captureClient) GetModel() string    { return "mock-model" }
+
 type blockingToolCallClient struct {
 	started chan struct{}
 	release chan struct{}
@@ -109,6 +121,49 @@ func TestStepCancellationAfterChatSkipsToolCalls(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 0 {
 		t.Fatalf("tool calls after cancellation = %d, want 0", got)
+	}
+}
+
+func TestStepIncludesModePromptWithExistingSystemMessage(t *testing.T) {
+	client := &captureClient{}
+	a := NewAgent(client, nil, nil)
+	a.SetMode(ModePlan)
+
+	_, err := a.Step([]Message{
+		{Role: "system", Content: "Context and rules:\nexisting"},
+		{Role: "user", Content: "make a plan"},
+	})
+	if err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+
+	var found bool
+	for _, msg := range client.Messages {
+		if msg.Role == "system" && strings.Contains(msg.Content, "[ocode:mode]") && strings.Contains(msg.Content, "PLAN mode") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("mode prompt missing from messages: %#v", client.Messages)
+	}
+}
+
+func TestPrepareMessagesDoesNotDuplicateMarkedBasePrompt(t *testing.T) {
+	a := NewAgent(&captureClient{}, nil, nil)
+	once := a.PrepareMessages([]Message{{Role: "user", Content: "hello"}}, "selected")
+	twice := a.PrepareMessages(once, "selected")
+
+	counts := map[string]int{}
+	for _, msg := range twice {
+		if msg.Role == "system" {
+			counts[promptMarker(msg.Content)]++
+		}
+	}
+	for _, marker := range []string{promptEnvMarker, promptModeMarker, promptSelectionMarker} {
+		if counts[marker] != 1 {
+			t.Fatalf("marker %s count = %d, want 1 in %#v", marker, counts[marker], twice)
+		}
 	}
 }
 

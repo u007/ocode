@@ -452,7 +452,7 @@ func (m model) renderPicker() string {
 }
 
 func (m *model) cycleAgentMode() {
-	specs := agent.DefaultAgents
+	specs := agent.PrimaryAgentSpecs()
 	if len(specs) == 0 {
 		return
 	}
