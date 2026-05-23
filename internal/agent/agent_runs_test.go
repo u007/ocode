@@ -87,3 +87,17 @@ func TestAgentRunRegistryCancelAll(t *testing.T) {
 		t.Fatal("CancelAll did not invoke run cancel")
 	}
 }
+
+func TestAgentRunTerminalStateIsStickyAfterCancel(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	r.CancelAll()
+
+	run.finishOK("late success")
+	if run.statusValue() != RunFailed {
+		t.Fatalf("status after late finishOK = %s, want %s", run.statusValue(), RunFailed)
+	}
+	if run.Result != "" {
+		t.Fatalf("late finishOK should not set result, got %q", run.Result)
+	}
+}

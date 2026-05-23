@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -323,6 +324,41 @@ func TestProcessRegistry_WithSupervisor_ClosedSupervisorRetainsFailedStartRecord
 	}
 	if reg.RunningCount() != 0 {
 		t.Fatalf("running count = %d, want 0", reg.RunningCount())
+	}
+}
+
+func TestBashToolForegroundRegistersWithSupervisor(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX sleep")
+	}
+	sup := NewProcessSupervisor(ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	reg := NewProcessRegistry()
+	reg.SetSupervisor(sup)
+	done := make(chan struct{})
+
+	go func() {
+		_, _ = (BashTool{Procs: reg}).Execute(json.RawMessage(`{"command":"sleep 30"}`))
+		close(done)
+	}()
+
+	for i := 0; i < 100; i++ {
+		if len(sup.Snapshot()) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(sup.Snapshot()) == 0 {
+		t.Fatal("expected foreground bash command to register with supervisor")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := sup.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("foreground bash command did not stop after supervisor shutdown")
 	}
 }
 

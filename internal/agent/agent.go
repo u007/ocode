@@ -248,6 +248,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			if err != nil {
 				return nil, err
 			}
+			if a.cancelled() {
+				return newMsgs, nil
+			}
 			newMsgs = append(newMsgs, *resp)
 			if a.OnMessage != nil {
 				a.OnMessage(*resp)
@@ -261,6 +264,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		if err != nil {
 			emitDebug("ERROR", fmt.Sprintf("LLM error: %v", err))
 			return nil, err
+		}
+		if a.cancelled() {
+			return newMsgs, nil
 		}
 		if resp.Usage != nil {
 			in, out := int64(0), int64(0)
@@ -307,6 +313,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				wg.Add(1)
 				go func(idx int, tc ToolCall) {
 					defer wg.Done()
+					if a.cancelled() {
+						return
+					}
 					a.activity.toolStarted(tc.Function.Name)
 					result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 					a.activity.toolDone(tc.Function.Name)
@@ -321,6 +330,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 
 		for _, i := range sequentialTCs {
+			if a.cancelled() {
+				return newMsgs, nil
+			}
 			tc := resp.ToolCalls[i]
 			a.activity.toolStarted(tc.Function.Name)
 			result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
@@ -330,6 +342,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			result = TruncateToolResult(tc.ID, result)
 			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result}
+		}
+		if a.cancelled() {
+			return newMsgs, nil
 		}
 
 		pauseAfterResults := false

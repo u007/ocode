@@ -99,6 +99,10 @@ func (r *AgentRun) LastLines(n int) []string {
 
 func (r *AgentRun) finishOK(result string) {
 	r.mu.Lock()
+	if r.Status != RunRunning {
+		r.mu.Unlock()
+		return
+	}
 	r.Status = RunDone
 	r.Result = result
 	r.EndedAt = time.Now()
@@ -108,6 +112,10 @@ func (r *AgentRun) finishOK(result string) {
 
 func (r *AgentRun) finishErr(err string) {
 	r.mu.Lock()
+	if r.Status != RunRunning {
+		r.mu.Unlock()
+		return
+	}
 	r.Status = RunFailed
 	r.Err = err
 	r.EndedAt = time.Now()
