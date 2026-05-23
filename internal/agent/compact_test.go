@@ -240,6 +240,20 @@ func TestShouldCompactUsesLatestUsage(t *testing.T) {
 	}
 }
 
+// TestCurrentContextEstimateSkipsZeroUsage verifies that a Usage struct with
+// all-zero fields is not treated as real data and falls through to heuristic.
+func TestCurrentContextEstimateSkipsZeroUsage(t *testing.T) {
+	t0 := int64(0)
+	msgs := []Message{
+		{Role: "assistant", Usage: &TokenUsage{PromptTokens: &t0}},
+		{Role: "user", Content: strings.Repeat("x", 400)},
+	}
+	_, source := CurrentContextEstimate(msgs)
+	if source != "estimated" {
+		t.Errorf("expected source=%q for zero Usage, got %q", "estimated", source)
+	}
+}
+
 // TestShouldCompactFallbackWhenUsageMissing verifies that when no message has
 // Usage data, we fall back to character estimation with a safety margin.
 func TestShouldCompactFallbackWhenUsageMissing(t *testing.T) {

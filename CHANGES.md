@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] — 2026-05-24
+
+### Changed
+
+- **Token Estimation Refactor** — Extracted `CurrentContextEstimate()` to separate token counting logic from `shouldCompact()`. Improves accuracy by counting messages appended after the latest Usage-bearing response (tool results, new prompts), not just the cumulative total at that point.
+- **Agent Run Detail View Redesign** — Restructured transcript rendering from flat text output to nested card-based view with status indicators, timeline events, sub-agent tracking, and intentional hiding of system prompts for clearer user experience.
+- **Scrollbar Metrics Extraction** — Extracted scrollbar calculations into `scrollbarThumbMetrics()` and `scrollbarThumbOffset()` helper functions for composability and testability.
+
+---
+
 ## [Unreleased] — 2026-05-23
 
 ### Added

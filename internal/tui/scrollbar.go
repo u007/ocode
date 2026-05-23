@@ -30,15 +30,7 @@ func renderScrollbar(height, totalLines, visibleLines, offsetLines int) string {
 		return strings.Join(lines, "\n")
 	}
 
-	thumbSize := visibleLines * height / totalLines
-	if thumbSize < 1 {
-		thumbSize = 1
-	}
-	maxOffset := totalLines - visibleLines
-	if maxOffset < 1 {
-		maxOffset = 1
-	}
-	thumbTop := int(float64(offsetLines) / float64(maxOffset) * float64(height-thumbSize))
+	thumbTop, thumbSize, _ := scrollbarThumbMetrics(height, totalLines, visibleLines, offsetLines)
 
 	track := scrollbarTrackStyle.Render(scrollbarTrack)
 	thumb := scrollbarThumbStyle.Render(scrollbarThumb)
@@ -50,6 +42,38 @@ func renderScrollbar(height, totalLines, visibleLines, offsetLines int) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+func scrollbarThumbMetrics(height, totalLines, visibleLines, offsetLines int) (top, size int, ok bool) {
+	if height <= 0 || totalLines <= visibleLines || totalLines == 0 {
+		return 0, 0, false
+	}
+
+	thumbSize := visibleLines * height / totalLines
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	maxOffset := totalLines - visibleLines
+	if maxOffset < 1 {
+		maxOffset = 1
+	}
+	thumbTop := int(float64(offsetLines) / float64(maxOffset) * float64(height-thumbSize))
+	return thumbTop, thumbSize, true
+}
+
+func scrollbarThumbOffset(mouseY, trackTop, trackHeight, totalLines, visibleLines, offsetLines int) (int, bool) {
+	if mouseY < trackTop || mouseY >= trackTop+trackHeight {
+		return 0, false
+	}
+	thumbTop, thumbSize, ok := scrollbarThumbMetrics(trackHeight, totalLines, visibleLines, offsetLines)
+	if !ok {
+		return 0, false
+	}
+	relY := mouseY - trackTop
+	if relY < thumbTop || relY >= thumbTop+thumbSize {
+		return 0, false
+	}
+	return relY - thumbTop, true
 }
 
 func renderListScrollbar(height, totalItems, visibleStart, visibleCount int) string {

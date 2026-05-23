@@ -262,13 +262,42 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 	return "", lastErr
 }
 
+// CurrentContextEstimate returns the best estimate for the token count that
+// will be sent on the next LLM request (excluding any new user prompt).
+// It prefers real Usage data from the most recent API response and adds a
+// heuristic estimate for any messages appended after that response.
+func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Usage == nil {
+			continue
+		}
+		var base int64
+		if msgs[i].Usage.TotalTokens != nil && *msgs[i].Usage.TotalTokens > 0 {
+			base = *msgs[i].Usage.TotalTokens
+		} else {
+			if msgs[i].Usage.PromptTokens != nil {
+				base += *msgs[i].Usage.PromptTokens
+			}
+			if msgs[i].Usage.CompletionTokens != nil {
+				base += *msgs[i].Usage.CompletionTokens
+			}
+		}
+		if base > 0 {
+			tail := messagesTokens(msgs[i+1:])
+			if tail > 0 {
+				return int(base) + tail, "actual+tail"
+			}
+			return int(base), "actual"
+		}
+	}
+	return messagesTokens(msgs), "estimated"
+}
+
 // shouldCompact decides whether the current message list warrants compaction.
-// Prefers real Usage.PromptTokens from API responses; falls back to character
-// estimation only when Usage is completely unavailable. Uses the most recent
-// Usage value as it represents the cumulative token count at that point in the
-// conversation. Falls back to per-message character heuristic only if Usage is
-// completely unavailable; this fallback is unreliable and 20-40% inaccurate,
-// especially for extended thinking content.
+// It uses CurrentContextEstimate so that messages appended after the latest
+// Usage-bearing response (tool results, new user prompts, etc.) are counted.
+// Falls back to a character heuristic with a 15% safety margin only when no
+// Usage data exists at all.
 func shouldCompact(msgs []Message, cfg compactRuntime) (bool, int) {
 	if !cfg.Enabled {
 		return false, 0
@@ -277,18 +306,8 @@ func shouldCompact(msgs []Message, cfg compactRuntime) (bool, int) {
 		return false, 0
 	}
 
-	// Find most recent Usage.PromptTokens from any message (usually from assistant responses)
-	usedTokens := 0
-	for i := len(msgs) - 1; i >= 0; i-- {
-		if msgs[i].Usage != nil && msgs[i].Usage.PromptTokens != nil {
-			usedTokens = int(*msgs[i].Usage.PromptTokens)
-			break
-		}
-	}
-
-	// Only fall back to character heuristic if no Usage data is available at all
-	if usedTokens == 0 {
-		usedTokens = messagesTokens(msgs)
+	usedTokens, source := CurrentContextEstimate(msgs)
+	if source == "estimated" {
 		// Apply 15% safety margin to account for reasoning content and message
 		// framing overhead that may be underestimated in the heuristic
 		usedTokens = int(float64(usedTokens) * 1.15)
