@@ -329,7 +329,7 @@ func runAgentCmd(m *model, args []string) tea.Cmd {
 	if len(args) == 0 {
 		var b strings.Builder
 		b.WriteString("Available agents:\n")
-		for _, spec := range agent.DefaultAgents {
+		for _, spec := range agent.PrimaryAgentSpecs() {
 			current := ""
 			if m.agent != nil && m.agent.Spec() != nil && m.agent.Spec().Name == spec.Name {
 				current = " (active)"

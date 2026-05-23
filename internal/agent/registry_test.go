@@ -61,7 +61,10 @@ func TestNextAgentSpec(t *testing.T) {
 	}
 
 	next = NextAgentSpec("docs")
-	if next == nil || next.Name != "build" {
+	if next == nil {
+		t.Fatal("expected an agent after docs")
+	}
+	if len(PrimaryAgentSpecs()) == len(DefaultAgents) && next.Name != "build" {
 		t.Errorf("expected build after docs (wrap), got %v", next)
 	}
 

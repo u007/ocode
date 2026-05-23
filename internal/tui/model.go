@@ -219,6 +219,7 @@ type streamDoneMsg struct {
 }
 
 type compactStartedMsg struct{}
+type titleGeneratedMsg struct{ title string }
 type compactFinishedMsg struct {
 	result agent.CompactResult
 }
@@ -433,6 +434,8 @@ type model struct {
 	rawInputLines         []string
 	compactCh             chan agent.CompactResult
 	compactStartCh        chan struct{}
+	titleCh               chan string
+	titleRequested        bool
 	compacting            bool
 	lastCompactErr        error
 	pendingCompactUIIdx   []int
@@ -736,6 +739,8 @@ func (m *model) getInitialTools() []tool.Tool {
 		&tool.QuestionTool{},
 		&tool.WebFetchTool{},
 		&tool.WebSearchTool{},
+			&tool.RepoCloneTool{},
+			&tool.RepoOverviewTool{},
 		&tool.ListTool{},
 		&tool.LSPTool{},
 		&tool.FormatTool{Config: m.config},
@@ -748,8 +753,8 @@ func (m *model) switchAgent(name string) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown agent: %s", name)})
 		return
 	}
-	for i := range agent.DefaultAgents {
-		if agent.DefaultAgents[i].Name == name {
+	for i, spec := range agent.PrimaryAgentSpecs() {
+		if spec.Name == name {
 			m.currentAgentIdx = i
 			break
 		}
@@ -848,6 +853,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 		}(),
 		compactCh:      make(chan agent.CompactResult, 4),
 		compactStartCh: make(chan struct{}, 4),
+		titleCh:        make(chan string, 4),
 		questionInput:  questionInput,
 		subAgentPermCh: make(chan subAgentPermRequest),
 		subAgentPermMu: &sync.Mutex{},
@@ -901,6 +907,9 @@ func newModel(sid string, cont bool, yolo bool) model {
 		sess, err := session.Load(sid)
 		if err == nil {
 			m.sessionTitle = sess.Title
+			if sess.Title != "" {
+				m.titleRequested = true
+			}
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
 			for _, am := range sess.Messages {
@@ -918,7 +927,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), listenSubAgentPerm(m.subAgentPermCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitTitleEvent(m.titleCh), listenSubAgentPerm(m.subAgentPermCh)}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
 	}
@@ -1488,6 +1497,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.askAgent()
 		}
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
+	case titleGeneratedMsg:
+		if msg.title != "" && m.sessionTitle == "" {
+			m.sessionTitle = truncateTitle(msg.title, maxExplicitTitleLen)
+			m.saveSession()
+		}
+		return m, waitTitleEvent(m.titleCh)
 	case subAgentPermAskMsg:
 		// A sub-agent tool call needs a permission decision. Reuse the same
 		// permission dialog the main agent uses. The sub-agent goroutine is
@@ -2942,6 +2957,7 @@ func (m *model) handleTitleCmd(args []string) tea.Cmd {
 	}
 
 	m.sessionTitle = ""
+	m.titleRequested = false
 	m.saveSession()
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Title cleared — will auto-generate from next assistant response."})
 	return nil
@@ -3019,6 +3035,7 @@ func (m *model) handleSessionCmd(args []string) {
 			m.saveSession()
 			m.sessionID = sess.ID
 			m.sessionTitle = sess.Title
+			m.titleRequested = sess.Title != ""
 			tool.SetTodoSession(m.sessionID)
 			snapshot.Reset()
 			tool.ResetTodoState()
@@ -3127,6 +3144,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.messages = []message{}
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
+	m.titleRequested = false
 	tool.SetTodoSession(m.sessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
@@ -3459,6 +3477,15 @@ func (m *model) handleContextCmd(args []string) {
 	// ── Base Prompt ──────────────────────────────
 	b.WriteString("\nBase Prompt\n")
 	baseTotal := 0
+	for _, msg := range m.agent.BasePromptMessages("") {
+		if !strings.Contains(msg.Content, "[ocode:environment]") {
+			continue
+		}
+		tok := estimateTok(msg.Content)
+		baseTotal += tok
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Environment", formatTok(tok))
+		break
+	}
 
 	modePrompt := m.agent.Mode().SystemPrompt()
 	modeTok := estimateTok(modePrompt)
@@ -3695,15 +3722,11 @@ func (m model) buildSelectionContext() string {
 	return b.String()
 }
 
-func (m model) appendSelectionMsg(msgs []agent.Message) []agent.Message {
-	ctx := m.buildSelectionContext()
-	if strings.TrimSpace(ctx) == "" {
+func (m model) prepareAgentMessages(msgs []agent.Message) []agent.Message {
+	if m.agent == nil {
 		return msgs
 	}
-	out := make([]agent.Message, 0, len(msgs)+1)
-	out = append(out, agent.Message{Role: "system", Content: ctx})
-	out = append(out, msgs...)
-	return out
+	return m.agent.PrepareMessages(msgs, m.buildSelectionContext())
 }
 
 func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
@@ -3711,13 +3734,8 @@ func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
 		if m.agent == nil {
 			return errorMsg(fmt.Errorf("no agent configured"))
 		}
-		var agentMsgs []agent.Message
-		ctx := agent.LoadContext()
-		if ctx != "" {
-			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
-		}
-		agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: prompt})
-		agentMsgs = m.appendSelectionMsg(agentMsgs)
+		agentMsgs := []agent.Message{{Role: "user", Content: prompt}}
+		agentMsgs = m.prepareAgentMessages(agentMsgs)
 		resp, err := m.agent.Step(agentMsgs)
 		if err != nil {
 			return errorMsg(err)
@@ -3849,6 +3867,41 @@ func extractSessionTitle(content string) (title, rest string) {
 	return title, rest
 }
 
+// maybeGenerateTitle asynchronously generates a session title once, after the
+// first assistant response with non-empty content has landed. Subsequent
+// responses are ignored unless /title clears the session title (which also
+// resets titleRequested via handleTitleCmd).
+func (m *model) maybeGenerateTitle(assistantContent string) {
+	if m.agent == nil || m.titleRequested || m.sessionTitle != "" {
+		return
+	}
+	if strings.TrimSpace(assistantContent) == "" {
+		return
+	}
+	userMsg := m.lastUserMessageText()
+	if strings.TrimSpace(userMsg) == "" {
+		return
+	}
+	m.titleRequested = true
+	ch := m.titleCh
+	m.agent.GenerateTitleAsync(userMsg, assistantContent, func(t string) {
+		select {
+		case ch <- t:
+		default:
+		}
+	})
+}
+
+func (m *model) lastUserMessageText() string {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
+		if msg.role == roleUser && !msg.transient {
+			return msg.text
+		}
+	}
+	return ""
+}
+
 func (m *model) appendAgentMessage(am agent.Message) {
 	copyMsg := am
 	if am.Role == "assistant" {
@@ -3882,6 +3935,7 @@ func (m *model) appendAgentMessage(am agent.Message) {
 		} else if content != "" {
 			m.messages = append(m.messages, message{role: roleAssistant, text: content, raw: &copyMsg})
 		}
+		m.maybeGenerateTitle(content)
 	} else if am.Role == "tool" {
 		if strings.HasPrefix(am.Content, tool.SentinelPermissionAsk) {
 			if req, ok := parsePermissionRequest(am.Content); ok {
@@ -4114,16 +4168,6 @@ func (m *model) lookupToolName(toolID string) string {
 
 func (m *model) askAgent() tea.Cmd {
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
-	isFirstUserMsg := m.sessionTitle == "" && countUserMessages(m.messages) == 1
-
-	if isFirstUserMsg && len(agentMsgs) > 0 {
-		last := &agentMsgs[len(agentMsgs)-1]
-		if last.Role == "user" {
-			last.Content += "\n\n[System: Begin your response with <ocode-title>brief session title</ocode-title> on its own line, then continue normally.]"
-		}
-	}
-
-	agentMsgs = m.appendSelectionMsg(agentMsgs)
 
 	if m.skipCompactPreflight {
 		m.skipCompactPreflight = false
@@ -4216,10 +4260,6 @@ func (m model) reExecutePendingTool(toolName string) tea.Cmd {
 			return errorMsg(fmt.Errorf("no agent configured"))
 		}
 		var agentMsgs []agent.Message
-		ctx := agent.LoadContext()
-		if ctx != "" {
-			agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
-		}
 		for _, msg := range m.messages {
 			if msg.transient {
 				continue
@@ -4237,7 +4277,7 @@ func (m model) reExecutePendingTool(toolName string) tea.Cmd {
 				Content: msg.text,
 			})
 		}
-		agentMsgs = m.appendSelectionMsg(agentMsgs)
+		agentMsgs = m.prepareAgentMessages(agentMsgs)
 		resp, err := m.agent.Step(agentMsgs)
 		if err != nil {
 			return errorMsg(err)
@@ -4741,16 +4781,25 @@ func waitCompactEvent(startCh chan struct{}, doneCh chan agent.CompactResult) te
 	}
 }
 
+func waitTitleEvent(ch chan string) tea.Cmd {
+	return func() tea.Msg {
+		t := <-ch
+		return titleGeneratedMsg{title: t}
+	}
+}
+
 // buildAgentMessagesSnapshot reconstructs the full agent.Message list
 // equivalent to what askAgent would send. Used at compaction trigger time so
 // the agent can splice against the canonical history.
 func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 	var agentMsgs []agent.Message
 	var uiIdx []int
-	ctx := agent.LoadContext()
-	if ctx != "" {
-		agentMsgs = append(agentMsgs, agent.Message{Role: "system", Content: "Context and rules:\n" + ctx})
-		uiIdx = append(uiIdx, -1) // sentinel: synthetic message, not present in m.messages
+	if m.agent != nil {
+		base := m.agent.BasePromptMessages(m.buildSelectionContext())
+		agentMsgs = append(agentMsgs, base...)
+		for range base {
+			uiIdx = append(uiIdx, -1) // sentinel: synthetic message, not present in m.messages
+		}
 	}
 	for i, msg := range m.messages {
 		if msg.transient || msg.role == roleThinking {
@@ -4774,6 +4823,31 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 		agentMsgs = append(agentMsgs, agent.Message{Role: role, Content: msg.text})
 		uiIdx = append(uiIdx, i)
 	}
+
+	// Strip shell-* tool_calls (from !command synthesis) that have already been
+	// responded to. DeepSeek is strict: assistant messages with tool_calls must
+	// be immediately followed by tool messages. Only shell-* IDs are stripped —
+	// real LLM tool_calls are never removed; failures there must be returned as
+	// error tool results, not suppressed.
+	respondedToolIDs := make(map[string]bool)
+	for _, msg := range agentMsgs {
+		if msg.Role == "tool" && msg.ToolID != "" {
+			respondedToolIDs[msg.ToolID] = true
+		}
+	}
+	for i := range agentMsgs {
+		if agentMsgs[i].Role == "assistant" && len(agentMsgs[i].ToolCalls) > 0 {
+			var filtered []agent.ToolCall
+			for _, tc := range agentMsgs[i].ToolCalls {
+				isShell := strings.HasPrefix(tc.ID, "shell-")
+				if !isShell || !respondedToolIDs[tc.ID] {
+					filtered = append(filtered, tc)
+				}
+			}
+			agentMsgs[i].ToolCalls = filtered
+		}
+	}
+
 	return agentMsgs, uiIdx
 }
 
@@ -5342,7 +5416,7 @@ func (m model) renderContent() string {
 
 func (m *model) renderStatus() string {
 	agentName := "build"
-	specs := agent.DefaultAgents
+	specs := agent.PrimaryAgentSpecs()
 	if m.currentAgentIdx >= 0 && m.currentAgentIdx < len(specs) {
 		agentName = specs[m.currentAgentIdx].Name
 	}

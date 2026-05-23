@@ -1786,30 +1786,31 @@ func TestBuildSelectionContextGitFiles(t *testing.T) {
 	}
 }
 
-func TestAppendSelectionMsgSkipsWhenEmpty(t *testing.T) {
+func TestPrepareAgentMessagesSkipsWhenNoAgent(t *testing.T) {
 	m := model{}
 	msgs := []agent.Message{{Role: "user", Content: "hello"}}
-	got := m.appendSelectionMsg(msgs)
+	got := m.prepareAgentMessages(msgs)
 	if len(got) != 1 {
 		t.Fatalf("expected no new messages, got %d", len(got))
 	}
 }
 
-func TestAppendSelectionMsgPrependsSelectionContext(t *testing.T) {
-	m := model{workDir: "/proj"}
+func TestPrepareAgentMessagesIncludesSelectionContext(t *testing.T) {
+	m := model{workDir: "/proj", agent: agent.NewAgent(retryTestClient{}, nil, nil)}
 	m.files.nodes = []fileNode{{path: "/proj/main.go", name: "main.go"}}
 	m.files.selectedFiles = map[int]bool{0: true}
 	msgs := []agent.Message{{Role: "user", Content: "hello"}}
 
-	got := m.appendSelectionMsg(msgs)
-	if len(got) != 2 {
-		t.Fatalf("expected one selection message prepended, got %d", len(got))
+	got := m.prepareAgentMessages(msgs)
+	var selection string
+	for _, msg := range got {
+		if strings.Contains(msg.Content, "[ocode:selection]") {
+			selection = msg.Content
+			break
+		}
 	}
-	if got[0].Role != "system" {
-		t.Fatalf("expected prepended message to be system, got %q", got[0].Role)
-	}
-	if !strings.Contains(got[0].Content, "## Files") || !strings.Contains(got[0].Content, "main.go") {
-		t.Fatalf("expected selection context in prepended message, got:\n%s", got[0].Content)
+	if !strings.Contains(selection, "## Files") || !strings.Contains(selection, "main.go") {
+		t.Fatalf("expected selection context in prepared messages, got:\n%v", got)
 	}
 }
 

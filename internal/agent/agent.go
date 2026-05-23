@@ -152,11 +152,11 @@ type AgentTool struct {
 }
 
 func (t AgentTool) Name() string        { return "agent" }
-func (t AgentTool) Description() string { return "Delegate a specific task to a specialized sub-agent" }
+func (t AgentTool) Description() string { return "Compatibility alias for the task sub-agent tool" }
 func (t AgentTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "agent",
-		"description": "Spawn a sub-agent with a specific scope to handle a task autonomously.",
+		"description": "Compatibility alias for task. Spawn a registry-backed sub-agent with a specific scope to handle a task autonomously.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -164,9 +164,29 @@ func (t AgentTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "The specific task or instructions for the sub-agent.",
 				},
+				"agent": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional sub-agent name. Defaults to general.",
+				},
+				"subagent_type": map[string]interface{}{
+					"type":        "string",
+					"description": "OpenCode-compatible alias for agent.",
+				},
 				"context": map[string]interface{}{
 					"type":        "string",
 					"description": "Additional background context relevant to the task.",
+				},
+				"description": map[string]interface{}{
+					"type":        "string",
+					"description": "Short description of the task.",
+				},
+				"run_in_background": map[string]interface{}{
+					"type":        "boolean",
+					"description": "If true, run the subagent in the background and return immediately with the run ID.",
+				},
+				"background": map[string]interface{}{
+					"type":        "boolean",
+					"description": "OpenCode-compatible alias for run_in_background.",
 				},
 			},
 			"required": []string{"prompt"},
@@ -177,36 +197,14 @@ func (t AgentTool) Definition() map[string]interface{} {
 func (t AgentTool) Parallel() bool { return true }
 
 func (t AgentTool) Execute(args json.RawMessage) (string, error) {
-	var params struct {
-		Prompt  string `json:"prompt"`
-		Context string `json:"context"`
+	if t.mainAgent == nil {
+		return "", fmt.Errorf("no main agent configured")
 	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", err
+	if task, ok := t.mainAgent.tools["task"].(TaskTool); ok {
+		return task.Execute(args)
 	}
-
-	subAgentMsgs := []Message{
-		{Role: "system", Content: "You are a specialized sub-agent. Your goal is to complete the task provided by the main agent. " +
-			"Use a User Expectation Checklist for multi-step work, validate each checklist item with the strongest practical check available, and iterate if validation fails. " +
-			"Be concise and return only the final result, relevant code, checklist status, validation performed, and remaining gaps. " +
-			"Background Context: " + params.Context},
-		{Role: "user", Content: params.Prompt},
-	}
-
-	t.mainAgent.activity.agentStarted("agent")
-	resp, err := t.mainAgent.Step(subAgentMsgs)
-	t.mainAgent.activity.agentDone("agent")
-	if err != nil {
-		return "", err
-	}
-
-	var b strings.Builder
-	for _, m := range resp {
-		if m.Role == "assistant" && m.Content != "" {
-			b.WriteString(m.Content)
-		}
-	}
-	return b.String(), nil
+	task := TaskTool{mainAgent: t.mainAgent, registry: DefaultAgentRegistry, runs: t.mainAgent.runs}
+	return task.Execute(args)
 }
 
 func (a *Agent) Step(messages []Message) ([]Message, error) {
@@ -214,12 +212,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		return []Message{{Role: "assistant", Content: "(no llm client configured)"}}, nil
 	}
 
-	if prompt := a.Mode().SystemPrompt(); prompt != "" {
-		hasSystem := len(messages) > 0 && messages[0].Role == "system"
-		if !hasSystem {
-			messages = append([]Message{{Role: "system", Content: prompt}}, messages...)
-		}
-	}
+	messages = a.PrepareMessages(messages, "")
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
 
@@ -725,6 +718,28 @@ func (a *Agent) SetSpec(spec *AgentSpec) {
 	if spec != nil && spec.MaxSteps > 0 {
 		a.maxSteps = spec.MaxSteps
 	}
+	a.applySpecModel(spec)
+}
+
+// applySpecModel swaps the active LLM client when the spec declares a Model
+// override. Empty Model leaves the current client untouched (inherit). A
+// failed NewClient call is logged and the previous client is kept so a typo
+// in an agent file can't strand the session without an LLM.
+func (a *Agent) applySpecModel(spec *AgentSpec) {
+	if spec == nil || strings.TrimSpace(spec.Model) == "" {
+		return
+	}
+	if a.config == nil {
+		emitDebug("AGENT", fmt.Sprintf("spec %q requested model %q but agent has no config; keeping current client", spec.Name, spec.Model))
+		return
+	}
+	client := NewClient(a.config, spec.Model)
+	if client == nil {
+		emitDebug("AGENT", fmt.Sprintf("spec %q model %q: NewClient returned nil; keeping current client", spec.Name, spec.Model))
+		return
+	}
+	emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
+	a.client = client
 }
 
 func (a *Agent) Spec() *AgentSpec {
