@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased] — 2026-05-23
+
+### Added
+
+- **Question Prompt Tool Support** — New TUI dialog for `AskUserQuestion` tool, rendering multi-choice/text input questions with tab navigation between prompts and cursor/selection tracking per question. Similar UX to permission dialogs.
+- **Tool Sentinel Constants** — Extracted hardcoded sentinel strings (`QUESTION_PROMPT:`, `WAITING_FOR_USER_RESPONSE`, `PERMISSION_ASK:`) into constants in `internal/tool/misc.go` for maintainability and consistency across agent, session, and TUI modules.
+
+### Fixed
+
+- **Sentinel String References** — Replaced all hardcoded string literals with `tool.SentinelWaitingForUser`, `tool.SentinelPermissionAsk`, and `tool.SentinelQuestionPrompt` for cleaner, centralized control.
+
+---
+
 ## [Unreleased] — 2026-05-22
 
 ### Added

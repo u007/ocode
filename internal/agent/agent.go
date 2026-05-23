@@ -339,7 +339,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			if a.OnMessage != nil {
 				a.OnMessage(toolMsg)
 			}
-			if toolMsg.Content == "WAITING_FOR_USER_RESPONSE" || strings.HasPrefix(toolMsg.Content, "PERMISSION_ASK:") {
+			if strings.Contains(toolMsg.Content, tool.SentinelWaitingForUser) || strings.HasPrefix(toolMsg.Content, tool.SentinelPermissionAsk) {
 				pauseAfterResults = true
 			}
 		}
@@ -583,7 +583,7 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 			if err != nil {
 				return "", fmt.Errorf("marshal permission request: %w", err)
 			}
-			return "PERMISSION_ASK:" + string(payload), nil
+			return tool.SentinelPermissionAsk + string(payload), nil
 		}
 	}
 

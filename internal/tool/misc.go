@@ -8,6 +8,12 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/skill"
 )
 
+const (
+	SentinelQuestionPrompt = "QUESTION_PROMPT:"
+	SentinelWaitingForUser = "WAITING_FOR_USER_RESPONSE"
+	SentinelPermissionAsk  = "PERMISSION_ASK:"
+)
+
 type SkillTool struct{}
 
 func (t SkillTool) Name() string        { return "skill" }
@@ -136,10 +142,10 @@ func (t QuestionTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString("QUESTION_PROMPT:\n")
+	b.WriteString(SentinelQuestionPrompt + "\n")
 	data, _ := json.Marshal(params.Questions)
 	b.Write(data)
-	b.WriteString("\n\nWAITING_FOR_USER_RESPONSE")
+	b.WriteString("\n\n" + SentinelWaitingForUser)
 
 	return b.String(), nil
 }

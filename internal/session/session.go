@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/tool"
 )
 
 type Session struct {
@@ -226,7 +227,7 @@ func removeIncompleteToolRequests(messages []agent.Message) []agent.Message {
 }
 
 func isIncompleteToolResult(content string) bool {
-	return content == "WAITING_FOR_USER_RESPONSE" || strings.HasPrefix(content, "PERMISSION_ASK:")
+	return strings.Contains(content, tool.SentinelWaitingForUser) || strings.HasPrefix(content, tool.SentinelPermissionAsk)
 }
 
 func List() ([]Session, error) {
