@@ -47,6 +47,11 @@ func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
 		return ""
 	}
 
+	system := titleSystemPrompt
+	if def := lookupHiddenAgent("title"); def != nil && strings.TrimSpace(def.SystemPrompt) != "" {
+		system = def.SystemPrompt
+	}
+
 	prompt := buildTitlePrompt(userMsg, assistantMsg)
 	ctx, cancel := context.WithTimeout(context.Background(), titleTimeoutSeconds*time.Second)
 	defer cancel()
@@ -57,7 +62,7 @@ func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
 	}, 1)
 	go func() {
 		resp, err := client.Chat([]Message{
-			{Role: "system", Content: titleSystemPrompt},
+			{Role: "system", Content: system},
 			{Role: "user", Content: prompt},
 		}, nil)
 		if err != nil {
@@ -90,6 +95,14 @@ func (a *Agent) titleClient() LLMClient {
 	if a.config == nil {
 		return a.client
 	}
+	// Precedence: registry "title" agent's Model > Ocode.SmallModel > main client.
+	if def := lookupHiddenAgent("title"); def != nil {
+		if m := strings.TrimSpace(def.Model); m != "" {
+			if c := NewClient(a.config, m); c != nil {
+				return c
+			}
+		}
+	}
 	small := strings.TrimSpace(a.config.Ocode.SmallModel)
 	if small == "" {
 		return a.client
@@ -98,6 +111,21 @@ func (a *Agent) titleClient() LLMClient {
 		return client
 	}
 	return a.client
+}
+
+// lookupHiddenAgent fetches a hidden agent definition by name from the default
+// registry, or returns nil if the registry is uninitialised or the name is
+// unknown. Hidden agents drive runtime helpers (title generation, compaction)
+// and can be overridden by users via markdown files in .opencode/agents/.
+func lookupHiddenAgent(name string) *AgentDefinition {
+	if DefaultAgentRegistry == nil {
+		return nil
+	}
+	def := DefaultAgentRegistry.Get(name)
+	if def == nil || !def.Hidden {
+		return nil
+	}
+	return def
 }
 
 func buildTitlePrompt(userMsg, assistantMsg string) string {

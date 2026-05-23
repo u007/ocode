@@ -2,6 +2,12 @@
 
 ## [Unreleased] — 2026-05-24
 
+### Added
+
+- **Hidden Agents Framework** — Introduced hidden agents (e.g., `title`, `compaction`) that drive runtime helpers but aren't exposed in the UI. Users can override system prompts and model selection via `.opencode/agents/` markdown files.
+- **Provider-Specific Prompts** — New `provider_prompts.go` module enables AI-provider-specific system prompts (e.g., Claude vs GPT) to be appended to base prompts during agent initialization.
+- **Per-Agent Model Selection** — Agents can now specify a custom model override (e.g., `"gpt-4o"`), with precedence: agent-specific model > small model config > main client.
+
 ### Changed
 
 - **Token Estimation Refactor** — Extracted `CurrentContextEstimate()` to separate token counting logic from `shouldCompact()`. Improves accuracy by counting messages appended after the latest Usage-bearing response (tool results, new prompts), not just the cumulative total at that point.

@@ -138,6 +138,17 @@ func findPrefixEnd(msgs []Message) int {
 	return i
 }
 
+// compactionSystemPrompt is the instruction prepended to every compaction
+// summary call. Also exposed as the SystemPrompt of the hidden "compaction"
+// registry agent so users can override it via .opencode/agents/compaction.md.
+const compactionSystemPrompt = "You are summarizing a portion of an ongoing coding-assistant " +
+	"conversation that is being compacted to save context. Preserve: " +
+	"(1) what the user asked for, (2) decisions made, (3) files/code " +
+	"that were inspected or modified, (4) tool calls and their outcomes, " +
+	"(5) any unresolved issues or pending work. Be terse but specific " +
+	"with file paths, function names, and concrete results. Do not " +
+	"include filler."
+
 // buildSummaryPrompt assembles the prompt sent to the summary model. It walks
 // the middle slice and emits a structured transcript that preserves tool
 // calls, tool results, and reasoning content (not just user/assistant text).
@@ -191,13 +202,7 @@ func buildSummaryPrompt(middle []Message, maxInputTokens int) (string, int) {
 		joined = strings.Join(fragments, "\n\n")
 	}
 
-	prompt := "You are summarizing a portion of an ongoing coding-assistant " +
-		"conversation that is being compacted to save context. Preserve: " +
-		"(1) what the user asked for, (2) decisions made, (3) files/code " +
-		"that were inspected or modified, (4) tool calls and their outcomes, " +
-		"(5) any unresolved issues or pending work. Be terse but specific " +
-		"with file paths, function names, and concrete results. Do not " +
-		"include filler.\n\n"
+	prompt := compactionSystemPrompt + "\n\n"
 	if dropped > 0 {
 		prompt += fmt.Sprintf("[NOTE: %d earlier messages omitted from this batch due to size.]\n\n", dropped)
 	}

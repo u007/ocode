@@ -156,7 +156,12 @@ func (t PlanExitTool) Execute(args json.RawMessage) (string, error) {
 		return fmt.Sprintf("Plan at %s appears incomplete. Add at least one implementation step before exiting.\n\n%s", path, planStr), nil
 	}
 
-	return fmt.Sprintf("Plan ready for implementation:\n\n---\n%s\n---\n\nUse `task` to start implementing this plan.", planStr), nil
+	return fmt.Sprintf(
+		"Plan ready for implementation:\n\n---\n%s\n---\n\n"+
+			"To implement, ask the user to switch to BUILD mode (`/agent build` in the TUI, or run with `--agent build`). "+
+			"From inside plan mode you may also delegate a focused implementation step via the `task` tool, but a mode switch is preferred for multi-step work.",
+		planStr,
+	), nil
 }
 
 // hasImplementationContent reports whether the plan contains at least one

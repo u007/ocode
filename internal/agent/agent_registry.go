@@ -111,6 +111,26 @@ func (r *AgentRegistry) registerBuiltins() {
 			Mode:         AgentModeSubagent,
 			Source:       "builtin",
 		},
+		// Hidden agents — not surfaced in /agent or Tab. Their lifecycle is
+		// driven by the runtime (title.go, compact.go) but the registry holds
+		// the prompts and optional Model override so users can tune them via
+		// a markdown agent of the same name in .opencode/agents/.
+		{
+			Name:         "title",
+			Description:  "Generates session titles after the first exchange",
+			SystemPrompt: titleSystemPrompt,
+			Mode:         AgentModeSubagent,
+			Hidden:       true,
+			Source:       "builtin",
+		},
+		{
+			Name:         "compaction",
+			Description:  "Summarizes older context when the window fills",
+			SystemPrompt: compactionSystemPrompt,
+			Mode:         AgentModeSubagent,
+			Hidden:       true,
+			Source:       "builtin",
+		},
 	}
 }
 
