@@ -5023,7 +5023,12 @@ func (m model) renderDetailView(d detailView) string {
 		title = "Process " + d.procID
 	}
 	header := hintStyle.Render("◆ "+title) + hintStyle.Render("  esc: back · j/k: scroll")
-	body := d.vp.View()
+	scrollbar := renderScrollbar(d.vp.Height(), d.vp.TotalLineCount(), d.vp.VisibleLineCount(), d.vp.YOffset())
+	bodyContent := lipgloss.JoinHorizontal(lipgloss.Top,
+		constrainView(d.vp.View(), d.vp.Width(), d.vp.Height()),
+		scrollbar,
+	)
+	body := borderStyle.Width(m.panelWidth() - 2).Render(bodyContent)
 	return lipgloss.JoinVertical(lipgloss.Left, header, body)
 }
 
