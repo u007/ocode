@@ -4826,12 +4826,16 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 
 	// Strip shell-* tool_calls (from !command synthesis) that have already been
 	// responded to. DeepSeek is strict: assistant messages with tool_calls must
-	// be immediately followed by tool messages. Only shell-* IDs are stripped —
-	// real LLM tool_calls are never removed; failures there must be returned as
-	// error tool results, not suppressed.
+	// be immediately followed by tool messages. Both the tool_call entries AND
+	// their corresponding tool result messages are stripped so orphaned tool
+	// results don't sit between remaining real tool_calls and their results.
+	strippedIDs := make(map[string]bool)
 	respondedToolIDs := make(map[string]bool)
 	for _, msg := range agentMsgs {
 		if msg.Role == "tool" && msg.ToolID != "" {
+			if strings.HasPrefix(msg.ToolID, "shell-") {
+				strippedIDs[msg.ToolID] = true
+			}
 			respondedToolIDs[msg.ToolID] = true
 		}
 	}
@@ -4846,6 +4850,23 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 			}
 			agentMsgs[i].ToolCalls = filtered
 		}
+	}
+	// Strip orphaned shell-* tool result messages whose matching tool_calls
+	// were removed above.
+	if len(strippedIDs) > 0 {
+		filtered := agentMsgs[:0]
+		uiFiltered := uiIdx[:0]
+		for i, msg := range agentMsgs {
+			if msg.Role == "tool" && msg.ToolID != "" && strippedIDs[msg.ToolID] {
+				continue
+			}
+			filtered = append(filtered, msg)
+			if i < len(uiIdx) {
+				uiFiltered = append(uiFiltered, uiIdx[i])
+			}
+		}
+		agentMsgs = filtered
+		uiIdx = uiFiltered
 	}
 
 	return agentMsgs, uiIdx

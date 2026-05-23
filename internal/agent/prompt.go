@@ -11,6 +11,7 @@ import (
 
 const (
 	promptEnvMarker       = "[ocode:environment]"
+	promptProviderMarker  = "[ocode:provider]"
 	promptModeMarker      = "[ocode:mode]"
 	promptContextMarker   = "[ocode:context]"
 	promptSelectionMarker = "[ocode:selection]"
@@ -45,6 +46,11 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 	var msgs []Message
 	if env := a.environmentPrompt(); env != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptEnvMarker + "\n" + env})
+	}
+	if a.client != nil {
+		if pp := providerPrompt(a.client.GetProvider()); pp != "" {
+			msgs = append(msgs, Message{Role: "system", Content: promptProviderMarker + "\n" + pp})
+		}
 	}
 	agentPrompt := a.Mode().SystemPrompt()
 	if a.spec != nil && strings.TrimSpace(a.spec.SystemPrompt) != "" {
