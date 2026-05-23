@@ -116,14 +116,35 @@ func groupMCPToolDefs(
 	return
 }
 
-func latestPromptTokens(messages []message) int64 {
+func latestRequestUsage(messages []message) (input, output, total int64) {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].raw == nil || messages[i].raw.Usage == nil || messages[i].raw.Usage.PromptTokens == nil {
+		if messages[i].raw == nil || messages[i].raw.Usage == nil {
 			continue
 		}
-		return *messages[i].raw.Usage.PromptTokens
+		u := messages[i].raw.Usage
+		if u.PromptTokens != nil {
+			input = *u.PromptTokens
+		}
+		if u.CompletionTokens != nil {
+			output = *u.CompletionTokens
+		}
+		if u.TotalTokens != nil {
+			total = *u.TotalTokens
+		} else {
+			total = input + output
+		}
+		return
 	}
-	return 0
+	return 0, 0, 0
+}
+
+func (m *model) currentContextEstimate() (int64, string) {
+	agentMsgs, _ := m.buildAgentMessagesSnapshot()
+	if len(agentMsgs) == 0 {
+		return 0, "empty"
+	}
+	tokens, source := agent.CurrentContextEstimate(agentMsgs)
+	return int64(tokens), source
 }
 
 type editorFinishedMsg struct {
@@ -203,7 +224,8 @@ type compactFinishedMsg struct {
 }
 
 type activityUpdateMsg struct {
-	snap agent.ActivitySnapshot
+	tracker *agent.ActivityTracker
+	snap    agent.ActivitySnapshot
 }
 
 type debugLogMsg struct{}
@@ -280,12 +302,27 @@ func (m *model) cleanupCurrentSession() {
 
 func (m *model) replaceAgent(next *agent.Agent) tea.Cmd {
 	prev := m.agent
+	// Cancel sub-agents first so they can't start new processes while we
+	// tear down the old agent.
+	if prev != nil {
+		prev.Cancel()
+		if prev.Runs() != nil {
+			prev.Runs().CancelAll()
+		}
+	}
+	// Now kill every tracked process. Any process that was started by a
+	// sub-agent before CancelAll ran is already registered with the
+	// supervisor and will be killed here.
 	if m.supervisor != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = m.supervisor.TerminateAll(ctx)
 	}
 	m.cleanupAgent(prev)
+	return m.installAgent(next)
+}
+
+func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	m.agent = next
 	if m.agent != nil {
 		m.agent.SetSupervisor(m.supervisor)
@@ -346,6 +383,7 @@ type model struct {
 	scrollSpeed           int
 	restoredPendingScroll bool
 	scrollbarDrag         scrollbarDragTarget
+	scrollbarDragOffset   int
 	workDir               string
 	currentAgentIdx       int
 	showPermDialog        bool
@@ -1284,7 +1322,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch top.kind {
 				case detailAgentRun:
 					if run, ok2 := m.agent.Runs().Get(top.runID); ok2 {
-						m.detail[len(m.detail)-1].vp.SetContent(renderRunTranscript(run))
+						m.detail[len(m.detail)-1].vp.SetContent(renderRunTranscript(run, top.vp.Width()))
 					}
 				case detailProcessList:
 					if m.agent.Procs() != nil {
@@ -1315,6 +1353,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 	case activityUpdateMsg:
+		if m.agent == nil || msg.tracker != m.agent.Activity() {
+			return m, nil
+		}
 		m.lastActivity = msg.snap
 		if !m.activityRowReserved {
 			m.activityRowReserved = true
@@ -1324,6 +1365,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, listenActivity(m.agent.Activity())
 		}
 	case jobCompletedMsg:
+		if msg.agent != m.agent {
+			return m, nil
+		}
 		ev := msg.ev
 		var header string
 		if ev.Kind == "agent" {
@@ -2113,18 +2157,25 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		return m, nil, false
 	}
 
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
-	trackTop := headerHeight + 1
-
-	if pressed && m.transcriptScrollbarHit(mouse) {
-		m.scrollbarDrag = scrollbarDragTranscript
-		scrollbarSetOffset(&m.viewport, mouse.Y, trackTop, m.viewport.Height())
-		return m, nil, true
+	if pressed {
+		if thumbOffset, ok := m.transcriptScrollbarThumbOffset(mouse); ok {
+			m.scrollbarDrag = scrollbarDragTranscript
+			m.scrollbarDragOffset = thumbOffset
+			return m, nil, true
+		}
+		if m.transcriptScrollbarHit(mouse) {
+			scrollbarSetOffset(&m.viewport, mouse.Y, m.viewportContentTopY(), m.viewport.Height())
+			return m, nil, true
+		}
 	}
 	if pressed && m.logScrollbarHit(mouse) {
-		m.scrollbarDrag = scrollbarDragLog
 		logTrackTop, logTrackHeight := m.logScrollbarMetrics()
-		scrollbarSetOffset(&m.logViewport, mouse.Y, logTrackTop, logTrackHeight)
+		if thumbOffset, ok := m.logScrollbarThumbOffset(mouse); ok {
+			m.scrollbarDrag = scrollbarDragLog
+			m.scrollbarDragOffset = thumbOffset
+		} else {
+			scrollbarSetOffset(&m.logViewport, mouse.Y, logTrackTop, logTrackHeight)
+		}
 		return m, nil, true
 	}
 	if pressed && m.activeTab == tabGit {
@@ -2141,8 +2192,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// scrollbar for diff panel
 		gitTrackH := m.git.diff.Height()
 		if mouse.X == scrollX && mouse.Y >= gitBodyTop && mouse.Y < gitBodyTop+gitTrackH {
-			m.scrollbarDrag = scrollbarDragGitDiff
-			scrollbarSetOffset(&m.git.diff, mouse.Y, gitBodyTop, gitTrackH)
+			if thumbOffset, ok := scrollbarThumbOffset(mouse.Y, gitBodyTop, gitTrackH, m.git.diff.TotalLineCount(), m.git.diff.VisibleLineCount(), m.git.diff.YOffset()); ok {
+				m.scrollbarDrag = scrollbarDragGitDiff
+				m.scrollbarDragOffset = thumbOffset
+			} else {
+				scrollbarSetOffset(&m.git.diff, mouse.Y, gitBodyTop, gitTrackH)
+			}
 			return m, nil, true
 		}
 
@@ -2241,8 +2296,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		filesTrackTop := filesHeaderH + 1
 		filesTrackH := m.files.preview.Height()
 		if mouse.X == scrollX && mouse.Y >= filesTrackTop && mouse.Y < filesTrackTop+filesTrackH {
-			m.scrollbarDrag = scrollbarDragFilesPreview
-			scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, filesTrackH)
+			if thumbOffset, ok := scrollbarThumbOffset(mouse.Y, filesTrackTop, filesTrackH, m.files.preview.TotalLineCount(), m.files.preview.VisibleLineCount(), m.files.preview.YOffset()); ok {
+				m.scrollbarDrag = scrollbarDragFilesPreview
+				m.scrollbarDragOffset = thumbOffset
+			} else {
+				scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, filesTrackH)
+			}
 			return m, nil, true
 		}
 		treeW := m.width * 35 / 100
@@ -2265,6 +2324,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 	if !pressed {
 		m.scrollbarDrag = scrollbarDragNone
+		m.scrollbarDragOffset = 0
 		if m.sel.dragging {
 			m.sel.dragging = false
 			if m.sel.active {
@@ -2428,21 +2488,21 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 
 	switch m.scrollbarDrag {
 	case scrollbarDragTranscript:
-		scrollbarSetOffset(&m.viewport, mouse.Y, trackTop, m.viewport.Height())
+		scrollbarSetOffset(&m.viewport, mouse.Y-m.scrollbarDragOffset, trackTop, m.viewport.Height())
 		return m, nil, true
 	case scrollbarDragLog:
 		logTrackTop, logTrackHeight := m.logScrollbarMetrics()
-		scrollbarSetOffset(&m.logViewport, mouse.Y, logTrackTop, logTrackHeight)
+		scrollbarSetOffset(&m.logViewport, mouse.Y-m.scrollbarDragOffset, logTrackTop, logTrackHeight)
 		return m, nil, true
 	case scrollbarDragGitDiff:
 		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
 		gitTrackTop := gitHeaderH + 1
-		scrollbarSetOffset(&m.git.diff, mouse.Y, gitTrackTop, m.git.diff.Height())
+		scrollbarSetOffset(&m.git.diff, mouse.Y-m.scrollbarDragOffset, gitTrackTop, m.git.diff.Height())
 		return m, nil, true
 	case scrollbarDragFilesPreview:
 		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
 		filesTrackTop := filesHeaderH + 1
-		scrollbarSetOffset(&m.files.preview, mouse.Y, filesTrackTop, m.files.preview.Height())
+		scrollbarSetOffset(&m.files.preview, mouse.Y-m.scrollbarDragOffset, filesTrackTop, m.files.preview.Height())
 		return m, nil, true
 	}
 
@@ -3071,6 +3131,11 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	snapshot.Reset()
 	tool.ResetTodoState()
 	m.sessionTelemetry = sidebarTelemetry{}
+	m.lastActivity = agent.ActivitySnapshot{}
+	m.detail = nil
+	m.agentStripOffset = 0
+	m.agentStripSelected = 0
+	m.agentStripFocused = false
 	m.inputHistory = nil
 	m.inputHistoryIndex = -1
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session.", transient: true})
@@ -3078,41 +3143,70 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 }
 
 func (m *model) resetSessionAgent() tea.Cmd {
-	if m.agent == nil {
-		m.cleanupCurrentSession()
-		return nil
-	}
-
 	prev := m.agent
-	tools := prev.GetTools()
-	if len(tools) == 0 {
-		tools = m.getInitialTools()
-	}
-	mcpNames := prev.MCPToolNames()
-	mode := prev.Mode()
-	spec := prev.Spec()
-	permCfg := prev.Permissions().ExportConfig()
+	var next *agent.Agent
+	if prev == nil {
+		tools := m.getInitialTools()
+		modelName := m.currentModelName()
+		if modelName == "" && m.config != nil {
+			modelName = m.config.Model
+		}
+		client := agent.NewClient(m.config, modelName)
+		if client != nil {
+			next = agent.NewAgent(client, tools, m.config)
+			next.SetMode(agent.ModeBuild)
+			if next.Permissions() != nil {
+				next.Permissions().SetWorkDir(m.workDir)
+			}
+			next.LoadExternalTools(m.config)
+		}
+	} else {
+		tools := prev.GetTools()
+		if len(tools) == 0 {
+			tools = m.getInitialTools()
+		}
+		mcpNames := prev.MCPToolNames()
+		mode := prev.Mode()
+		spec := prev.Spec()
+		permCfg := prev.Permissions().ExportConfig()
 
-	modelName := m.currentModelName()
-	if modelName == "" && m.config != nil {
-		modelName = m.config.Model
-	}
-	client := agent.NewClient(m.config, modelName)
-	if client == nil {
-		client = prev.Client()
+		modelName := m.currentModelName()
+		if modelName == "" && m.config != nil {
+			modelName = m.config.Model
+		}
+		client := agent.NewClient(m.config, modelName)
+		if client == nil {
+			client = prev.Client()
+		}
+
+		next = agent.NewAgent(client, tools, m.config)
+		next.SetMode(mode)
+		next.SetSpec(spec)
+		if next.Permissions() != nil {
+			next.Permissions().LoadFromOcode(permCfg)
+			next.Permissions().SetWorkDir(m.workDir)
+		}
+		if len(mcpNames) > 0 {
+			next.RestoreMCPToolNames(mcpNames)
+		}
 	}
 
-	next := agent.NewAgent(client, tools, m.config)
-	next.SetMode(mode)
-	next.SetSpec(spec)
-	if next.Permissions() != nil {
-		next.Permissions().LoadFromOcode(permCfg)
-		next.Permissions().SetWorkDir(m.workDir)
+	if prev != nil {
+		prev.Cancel()
+		if prev.Runs() != nil {
+			prev.Runs().CancelAll()
+		}
 	}
-	if len(mcpNames) > 0 {
-		next.RestoreMCPToolNames(mcpNames)
+	if m.supervisor != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = m.supervisor.Shutdown(ctx)
 	}
-	return m.replaceAgent(next)
+	if prev != nil {
+		m.cleanupAgent(prev)
+	}
+	m.supervisor = tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
+	return m.installAgent(next)
 }
 
 func (m *model) handleEditorCmd(args []string) tea.Cmd {
@@ -3492,21 +3586,36 @@ func (m *model) handleContextCmd(args []string) {
 	// ── Session Messages ─────────────────────────
 	b.WriteString("\nSession Messages\n")
 	modelName := m.currentModelName()
-	if used := latestPromptTokens(m.messages); used > 0 {
+
+	ctxTokens, ctxSource := m.currentContextEstimate()
+	if ctxTokens > 0 {
 		if window, ok := modelContextWindow(modelName); ok {
-			pct := formatPercent(used, window)
-			fmt.Fprintf(&b, "  Context window  %s / %s (%s)\n", strconv.FormatInt(used, 10), strconv.FormatInt(window, 10), pct)
+			pct := formatPercent(ctxTokens, window)
+			fmt.Fprintf(&b, "  Context    %s / %s (%s)  %s\n", strconv.FormatInt(ctxTokens, 10), strconv.FormatInt(window, 10), pct, ctxSource)
 		} else {
-			fmt.Fprintf(&b, "  Context window  %s tokens\n", strconv.FormatInt(used, 10))
+			fmt.Fprintf(&b, "  Context    %s tok  %s\n", strconv.FormatInt(ctxTokens, 10), ctxSource)
 		}
 	} else {
-		b.WriteString("  Context window  n/a\n")
+		b.WriteString("  Context    n/a\n")
 	}
-	sessionTok := m.sessionTelemetry.usedTokens()
-	if sessionTok > 0 {
-		fmt.Fprintf(&b, "  Session total   %s tok\n", strconv.FormatInt(sessionTok, 10))
+
+	lastIn, lastOut, lastTotal := latestRequestUsage(m.messages)
+	if lastTotal > 0 {
+		fmt.Fprintf(&b, "  Last req   In %s  Out %s  Total %s\n", strconv.FormatInt(lastIn, 10), strconv.FormatInt(lastOut, 10), strconv.FormatInt(lastTotal, 10))
+	}
+
+	telemetry := m.sessionTelemetry
+	if telemetry.usedTokens() == 0 && telemetry.spend == nil {
+		telemetry = aggregateSidebarTelemetry(m.messages)
+	}
+	if billed := telemetry.usedTokens(); billed > 0 {
+		if telemetry.spend != nil {
+			fmt.Fprintf(&b, "  Usage      In %s  Out %s  $%.4f\n", strconv.FormatInt(telemetry.inputTokens, 10), strconv.FormatInt(telemetry.outputTokens, 10), *telemetry.spend)
+		} else {
+			fmt.Fprintf(&b, "  Usage      In %s  Out %s\n", strconv.FormatInt(telemetry.inputTokens, 10), strconv.FormatInt(telemetry.outputTokens, 10))
+		}
 	} else {
-		b.WriteString("  Session total   n/a\n")
+		b.WriteString("  Usage      n/a\n")
 	}
 
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
@@ -4717,21 +4826,22 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) bool {
 }
 
 type jobCompletedMsg struct {
-	ev agent.JobEvent
+	agent *agent.Agent
+	ev    agent.JobEvent
 }
 
 // listenJobs blocks on the agent's job-events channel and re-arms itself.
 func listenJobs(a *agent.Agent) tea.Cmd {
 	return func() tea.Msg {
 		ev := <-a.JobEvents()
-		return jobCompletedMsg{ev: ev}
+		return jobCompletedMsg{agent: a, ev: ev}
 	}
 }
 
 func listenActivity(tracker *agent.ActivityTracker) tea.Cmd {
 	return func() tea.Msg {
 		snap := <-tracker.Notify()
-		return activityUpdateMsg{snap: snap}
+		return activityUpdateMsg{tracker: tracker, snap: snap}
 	}
 }
 
@@ -4797,8 +4907,9 @@ func truncateToWidth(s string, w int) string {
 	return string(r[:w-1]) + "…"
 }
 
-// renderAgentStrip renders one block per running agent run: a header line plus
-// the last 2 transcript lines. The strip is capped at agentStripMaxRows visible
+// renderAgentStrip renders top-level agent runs as collapsed activity cards: a
+// header line plus the latest meaningful transcript events. The strip is capped
+// at agentStripMaxRows visible
 // rows; when more runs exist than fit, the slice starting at agentStripOffset is
 // shown with "↑ more"/"↓ more" indicator rows. The selected run (when the strip
 // has focus) is highlighted. Returns the rendered string and the per-block row
@@ -4847,8 +4958,8 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	rendered := 0
 	for i := offset; i < len(runs); i++ {
 		ri := runs[i]
-		// A block is 1 header + up to 2 transcript lines.
-		lines := ri.LastLines(2)
+		// A block is 1 header + up to agentRunPreviewLineCount event lines.
+		lines := agentRunEvents(ri, agentRunPreviewLineCount)
 		blockRows := 1 + len(lines)
 		// Reserve indicator rows: 1 for "↑ more" if scrolled, 1 for "↓ more" if
 		// more runs follow this one.
@@ -4867,13 +4978,11 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 
 		start := row
 		status := string(ri.Status)
-		icon := frame
-		if ri.Status == agent.RunDone {
-			icon = "✓"
-		} else if ri.Status == agent.RunFailed {
-			icon = "✗"
+		icon := statusIcon(ri.Status, frame)
+		head := fmt.Sprintf("▸ %-10s %s %s · %s", ri.Name, icon, status, formatRunElapsed(ri))
+		if summary := formatChildSummary(agentRunChildren(ri)); summary != "" {
+			head += " · " + summary
 		}
-		head := fmt.Sprintf("▸ %-10s %s %s", ri.Name, icon, status)
 		selected := m.agentStripFocused && i == m.agentStripSelected
 		if selected {
 			b.WriteString(selectedStyle.Render(truncateToWidth(head, width)) + "\n")
@@ -4882,7 +4991,7 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 		}
 		row++
 		for _, ln := range lines {
-			b.WriteString(hintStyle.Render("  │ "+truncateToWidth(ln, width-4)) + "\n")
+			b.WriteString(hintStyle.Render("  │ "+truncateToWidth(stripANSI(ln), width-4)) + "\n")
 			row++
 		}
 		blocks = append(blocks, agentStripBlock{runID: ri.ID, rowStart: start, rowEnd: row})
@@ -4919,7 +5028,7 @@ func (m model) agentStripVisibleCount(offset int) int {
 	runRows := 0
 	rendered := 0
 	for i := offset; i < len(runs); i++ {
-		blockRows := 1 + len(runs[i].LastLines(2))
+		blockRows := 1 + len(agentRunEvents(runs[i], agentRunPreviewLineCount))
 		reserve := 0
 		if showUp {
 			reserve++
@@ -4982,7 +5091,7 @@ func (m *model) openAgentDetail(runID string) {
 		return
 	}
 	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
-	vp.SetContent(renderRunTranscript(run))
+	vp.SetContent(renderRunTranscript(run, vp.Width()))
 	m.detail.push(detailView{kind: detailAgentRun, runID: runID, vp: vp})
 }
 
@@ -5336,10 +5445,10 @@ func (m model) statusContentWidth() int {
 }
 
 type sidebarTelemetry struct {
-	promptTokens     int64
-	completionTokens int64
-	totalTokens      int64
-	spend            *float64
+	inputTokens  int64
+	outputTokens int64
+	totalTokens  int64
+	spend        *float64
 }
 
 type sidebarRenderData struct {
@@ -5353,18 +5462,18 @@ func (t sidebarTelemetry) usedTokens() int64 {
 	if t.totalTokens > 0 {
 		return t.totalTokens
 	}
-	return t.promptTokens + t.completionTokens
+	return t.inputTokens + t.outputTokens
 }
 
 func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 	messageTotal := int64(0)
 	if msg.Usage != nil {
 		if msg.Usage.PromptTokens != nil {
-			t.promptTokens += *msg.Usage.PromptTokens
+			t.inputTokens += *msg.Usage.PromptTokens
 			messageTotal += *msg.Usage.PromptTokens
 		}
 		if msg.Usage.CompletionTokens != nil {
-			t.completionTokens += *msg.Usage.CompletionTokens
+			t.outputTokens += *msg.Usage.CompletionTokens
 			messageTotal += *msg.Usage.CompletionTokens
 		}
 		if msg.Usage.TotalTokens != nil {
@@ -5381,13 +5490,13 @@ func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 }
 
 func (t sidebarTelemetry) metadata() map[string]any {
-	if t.promptTokens == 0 && t.completionTokens == 0 && t.totalTokens == 0 && t.spend == nil {
+	if t.inputTokens == 0 && t.outputTokens == 0 && t.totalTokens == 0 && t.spend == nil {
 		return nil
 	}
 	meta := map[string]any{
-		"prompt_tokens":     t.promptTokens,
-		"completion_tokens": t.completionTokens,
-		"total_tokens":      t.totalTokens,
+		"input_tokens":  t.inputTokens,
+		"output_tokens": t.outputTokens,
+		"billed_tokens": t.totalTokens,
 	}
 	if t.spend != nil {
 		meta["spend"] = *t.spend
@@ -5424,11 +5533,22 @@ func telemetryFromSessionMetadata(meta map[string]any) sidebarTelemetry {
 	}
 
 	var telemetry sidebarTelemetry
+	// New keys
+	if v, ok := meta["input_tokens"]; ok {
+		telemetry.inputTokens = int64FromAny(v)
+	}
+	if v, ok := meta["output_tokens"]; ok {
+		telemetry.outputTokens = int64FromAny(v)
+	}
+	if v, ok := meta["billed_tokens"]; ok {
+		telemetry.totalTokens = int64FromAny(v)
+	}
+	// Legacy keys for backward compatibility with older sessions
 	if v, ok := meta["prompt_tokens"]; ok {
-		telemetry.promptTokens = int64FromAny(v)
+		telemetry.inputTokens = int64FromAny(v)
 	}
 	if v, ok := meta["completion_tokens"]; ok {
-		telemetry.completionTokens = int64FromAny(v)
+		telemetry.outputTokens = int64FromAny(v)
 	}
 	if v, ok := meta["total_tokens"]; ok {
 		telemetry.totalTokens = int64FromAny(v)
@@ -5518,6 +5638,22 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm%ds", m, s)
 }
 
+func formatCompactInt(n int64) string {
+	if n >= 1_000_000 {
+		if n%1_000_000 == 0 {
+			return fmt.Sprintf("%dM", n/1_000_000)
+		}
+		return fmt.Sprintf("%.2fM", float64(n)/1_000_000)
+	}
+	if n >= 1000 {
+		if n%1000 == 0 {
+			return fmt.Sprintf("%dk", n/1000)
+		}
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return strconv.FormatInt(n, 10)
+}
+
 func formatPercent(used, total int64) string {
 	if total <= 0 {
 		return "0%"
@@ -5582,18 +5718,23 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	}
 	modelName := m.currentModelName()
 
+	ctxTokens, _ := m.currentContextEstimate()
 	contextLine := "n/a"
-	if used := telemetry.usedTokens(); used > 0 {
+	if ctxTokens > 0 {
 		if window, ok := modelContextWindow(modelName); ok {
-			contextLine = fmt.Sprintf("%s / %s (%s)", strconv.FormatInt(used, 10), strconv.FormatInt(window, 10), formatPercent(used, window))
+			contextLine = fmt.Sprintf("%s / %s (%s)", formatCompactInt(ctxTokens), formatCompactInt(window), formatPercent(ctxTokens, window))
 		} else {
-			contextLine = fmt.Sprintf("%s tokens", strconv.FormatInt(used, 10))
+			contextLine = fmt.Sprintf("%s tok", formatCompactInt(ctxTokens))
 		}
 	}
 
-	spendLine := "n/a"
-	if telemetry.spend != nil {
-		spendLine = fmt.Sprintf("$%.4f", *telemetry.spend)
+	usageLine := "n/a"
+	if billed := telemetry.usedTokens(); billed > 0 {
+		if telemetry.spend != nil {
+			usageLine = fmt.Sprintf("In %s  Out %s  $%.4f", formatCompactInt(telemetry.inputTokens), formatCompactInt(telemetry.outputTokens), *telemetry.spend)
+		} else {
+			usageLine = fmt.Sprintf("In %s  Out %s", formatCompactInt(telemetry.inputTokens), formatCompactInt(telemetry.outputTokens))
+		}
 	}
 
 	projectDir := shortenSidebarPath(shortenWorkingDir(m.workDir), sidebarColumnWidth-4)
@@ -5608,8 +5749,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		modelLines = append(modelLines, fmt.Sprintf("Reasoning: %s", thinkingBudgetLabels[m.thinkingLevelIdx]))
 	}
 	appendTopSection("Model", modelLines)
-	appendTopSection("Context", []string{contextLine})
-	appendTopSection("Spend", []string{spendLine})
+	appendTopSection("Context", []string{contextLine, usageLine})
 	appendScrollSection("MCP", []string{m.renderMCPStatus()}, nil)
 	appendScrollSection("LSP", []string{m.renderLSPStatus()}, nil)
 
@@ -6146,9 +6286,15 @@ func (m model) transcriptScrollbarHit(mouse tea.Mouse) bool {
 	if mouse.X != m.mainScrollbarX() {
 		return false
 	}
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
-	top := headerHeight + 1
+	top := m.viewportContentTopY()
 	return mouse.Y >= top && mouse.Y < top+m.viewport.Height()
+}
+
+func (m model) transcriptScrollbarThumbOffset(mouse tea.Mouse) (int, bool) {
+	if !m.transcriptScrollbarHit(mouse) {
+		return 0, false
+	}
+	return scrollbarThumbOffset(mouse.Y, m.viewportContentTopY(), m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), m.viewport.YOffset())
 }
 
 func (m model) logScrollbarMetrics() (top, height int) {
@@ -6169,6 +6315,14 @@ func (m model) logScrollbarHit(mouse tea.Mouse) bool {
 	return mouse.X == trackX && mouse.Y >= trackTop && mouse.Y < trackTop+trackHeight
 }
 
+func (m model) logScrollbarThumbOffset(mouse tea.Mouse) (int, bool) {
+	if !m.logScrollbarHit(mouse) {
+		return 0, false
+	}
+	trackTop, trackHeight := m.logScrollbarMetrics()
+	return scrollbarThumbOffset(mouse.Y, trackTop, trackHeight, m.logViewport.TotalLineCount(), m.logViewport.VisibleLineCount(), m.logViewport.YOffset())
+}
+
 func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {
 	clickRow := mouseY - trackTop
 	if clickRow < 0 {
@@ -6183,7 +6337,19 @@ func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {
 	if maxOffset <= 0 {
 		return
 	}
-	offset := int(float64(clickRow) / float64(trackHeight) * float64(maxOffset))
+	_, thumbSize, ok := scrollbarThumbMetrics(trackHeight, total, visible, vp.YOffset())
+	if !ok {
+		return
+	}
+	maxThumbTop := trackHeight - thumbSize
+	if maxThumbTop <= 0 {
+		vp.SetYOffset(0)
+		return
+	}
+	if clickRow > maxThumbTop {
+		clickRow = maxThumbTop
+	}
+	offset := int(float64(clickRow) / float64(maxThumbTop) * float64(maxOffset))
 	vp.SetYOffset(offset)
 }
 

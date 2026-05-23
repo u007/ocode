@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -80,19 +82,59 @@ func (t BashTool) Execute(args json.RawMessage) (string, error) {
 		cmd = exec.CommandContext(ctx, "cmd", "/C", params.Command)
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-c", params.Command)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	var sup *ProcessSupervisor
+	if t.Procs != nil {
+		sup = t.Procs.Supervisor()
+	}
+	var waitDone chan error
+	id := ""
+	if sup != nil {
+		waitDone = make(chan error, 1)
+		id = fmt.Sprintf("bash-fg-%d-%d", os.Getpid(), time.Now().UnixNano())
+		_, regErr := sup.Register(ProcessRegistration{
+			ID:               id,
+			Command:          params.Command,
+			Kind:             ProcessKindBackgroundBash,
+			Cmd:              cmd,
+			OwnsProcessGroup: runtime.GOOS != "windows",
+			StartedAt:        time.Now(),
+			waitFn: func() error {
+				return <-waitDone
+			},
+		})
+		if regErr != nil {
+			return fmt.Sprintf("Command failed: %v", regErr), nil
+		}
+	}
+
 	err := cmd.Run()
+	if waitDone != nil {
+		waitDone <- err
+	}
 	res := stdout.String()
 	if stderr.Len() > 0 {
 		if res != "" {
 			res += "\n"
 		}
 		res += stderr.String()
+	}
+	if sup != nil {
+		if err == nil {
+			sup.MarkExited(id, 0)
+		} else {
+			code := 1
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			}
+			sup.MarkKilled(id, code)
+		}
 	}
 
 	if ctx.Err() == context.DeadlineExceeded {

@@ -33,6 +33,36 @@ func (m *MockClient) Chat(messages []Message, tools []map[string]interface{}) (*
 func (m *MockClient) GetProvider() string { return "mock" }
 func (m *MockClient) GetModel() string    { return "mock-model" }
 
+type blockingToolCallClient struct {
+	started chan struct{}
+	release chan struct{}
+	resp    *Message
+}
+
+func (m *blockingToolCallClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	close(m.started)
+	<-m.release
+	return m.resp, nil
+}
+
+func (m *blockingToolCallClient) GetProvider() string { return "mock" }
+func (m *blockingToolCallClient) GetModel() string    { return "mock-model" }
+
+type countingTool struct {
+	calls *int32
+}
+
+func (t countingTool) Name() string        { return "count" }
+func (t countingTool) Description() string { return "count calls" }
+func (t countingTool) Definition() map[string]interface{} {
+	return map[string]interface{}{"name": "count"}
+}
+func (t countingTool) Execute(json.RawMessage) (string, error) {
+	atomic.AddInt32(t.calls, 1)
+	return "ok", nil
+}
+func (t countingTool) Parallel() bool { return false }
+
 func TestNewClientParsesOpenCodeProviderModel(t *testing.T) {
 	client := NewClient(nil, "deepseek/deepseek-chat")
 	got, ok := client.(*GenericClient)
@@ -44,6 +74,41 @@ func TestNewClientParsesOpenCodeProviderModel(t *testing.T) {
 	}
 	if got.Model != "deepseek-chat" {
 		t.Fatalf("expected stripped model deepseek-chat, got %q", got.Model)
+	}
+}
+
+func TestStepCancellationAfterChatSkipsToolCalls(t *testing.T) {
+	var calls int32
+	tc := ToolCall{ID: "call-1", Type: "function"}
+	tc.Function.Name = "count"
+	tc.Function.Arguments = `{}`
+	client := &blockingToolCallClient{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		resp:    &Message{Role: "assistant", ToolCalls: []ToolCall{tc}},
+	}
+	a := NewAgent(client, []tool.Tool{countingTool{calls: &calls}}, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Step([]Message{{Role: "user", Content: "run a tool"}})
+		done <- err
+	}()
+
+	<-client.started
+	a.Cancel()
+	close(client.release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Step() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Step() did not return after cancellation")
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("tool calls after cancellation = %d, want 0", got)
 	}
 }
 

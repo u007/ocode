@@ -411,7 +411,7 @@ func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
 	}
 
 	view := m.View().Content
-	for _, want := range []string{"Session", "session-123", "Model", "gpt-4o", "Context", "Spend", "MCP", "LSP", "TODO", "Ctrl+B"} {
+	for _, want := range []string{"Session", "session-123", "Model", "gpt-4o", "Context", "$0.1234", "MCP", "LSP", "TODO", "Ctrl+B"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected wide view to include %q, got %q", want, view)
 		}
@@ -1034,6 +1034,78 @@ func TestMouseWheelScrollsTranscriptOnlyWhenOverMessages(t *testing.T) {
 	}
 }
 
+func TestTranscriptScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
+	m := model{
+		width:     80,
+		height:    24,
+		activeTab: tabChat,
+		input:     newTestTextarea(),
+		viewport:  viewport.New(viewport.WithWidth(40), viewport.WithHeight(10)),
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	m.viewport.SetContent(strings.Repeat("message line\n", 200))
+	m.viewport.SetYOffset(60)
+	before := m.viewport.YOffset()
+
+	thumbTop, thumbSize, ok := scrollbarThumbMetrics(m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), before)
+	if !ok {
+		t.Fatal("expected scrollable transcript")
+	}
+	trackRow := 0
+	if trackRow >= thumbTop && trackRow < thumbTop+thumbSize {
+		trackRow = thumbTop + thumbSize
+	}
+	if trackRow >= m.viewport.Height() {
+		trackRow = 0
+	}
+	trackTop := lipgloss.Height(m.styles.Header.Render("◆ ocode")) + 1
+
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.mainScrollbarX(), Y: trackTop + trackRow})
+	got := derefTestModel(t, updated)
+	if got.viewport.YOffset() == before {
+		t.Fatalf("expected scrollbar track click to jump transcript, offset stayed at %d", before)
+	}
+	if got.scrollbarDrag != scrollbarDragNone {
+		t.Fatalf("expected scrollbar track click not to start drag, got %v", got.scrollbarDrag)
+	}
+
+	afterClick := got.viewport.YOffset()
+	updated, _ = got.Update(tea.MouseMotionMsg{Button: tea.MouseLeft, X: m.mainScrollbarX(), Y: trackTop + min(trackRow+2, m.viewport.Height()-1)})
+	got = derefTestModel(t, updated)
+	if got.viewport.YOffset() != afterClick {
+		t.Fatalf("expected motion after track click not to keep dragging transcript, before=%d after=%d", afterClick, got.viewport.YOffset())
+	}
+}
+
+func TestTranscriptScrollbarThumbClickDoesNotJumpScroll(t *testing.T) {
+	m := model{
+		width:     80,
+		height:    24,
+		activeTab: tabChat,
+		input:     newTestTextarea(),
+		viewport:  viewport.New(viewport.WithWidth(40), viewport.WithHeight(10)),
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	m.viewport.SetContent(strings.Repeat("message line\n", 200))
+	m.viewport.SetYOffset(60)
+	before := m.viewport.YOffset()
+
+	thumbTop, _, ok := scrollbarThumbMetrics(m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), before)
+	if !ok {
+		t.Fatal("expected scrollable transcript")
+	}
+	trackTop := lipgloss.Height(m.styles.Header.Render("◆ ocode")) + 1
+
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.mainScrollbarX(), Y: trackTop + thumbTop})
+	got := derefTestModel(t, updated)
+	if got.viewport.YOffset() != before {
+		t.Fatalf("expected scrollbar thumb click not to jump transcript, before=%d after=%d", before, got.viewport.YOffset())
+	}
+	if got.scrollbarDrag != scrollbarDragTranscript {
+		t.Fatalf("expected transcript scrollbar drag to start, got %v", got.scrollbarDrag)
+	}
+}
+
 func TestGitDiffMouseDragSelectsDiffText(t *testing.T) {
 	m := model{
 		width:     100,
@@ -1403,10 +1475,10 @@ func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 	oldAgent := agent.NewAgent(nil, nil, nil)
 	m := model{
 		sessionTelemetry: sidebarTelemetry{
-			promptTokens:     10,
-			completionTokens: 20,
-			totalTokens:      30,
-			spend:            &spend,
+			inputTokens:  10,
+			outputTokens: 20,
+			totalTokens:  30,
+			spend:        &spend,
 		},
 		agent: oldAgent,
 		cleanupState: &modelCleanupState{
@@ -1426,6 +1498,63 @@ func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 	}
 	if m.sessionTelemetry.usedTokens() != 0 || m.sessionTelemetry.spend != nil {
 		t.Fatalf("expected telemetry to clear on new session, got %#v", m.sessionTelemetry)
+	}
+}
+
+func TestHandleNewCmdReplacesSupervisor(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, nil)
+	oldSupervisor := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
+	oldAgent.SetSupervisor(oldSupervisor)
+	m := model{
+		agent:      oldAgent,
+		supervisor: oldSupervisor,
+	}
+
+	m.handleNewCmd(nil)
+
+	if m.supervisor == nil {
+		t.Fatal("expected /new to install a fresh supervisor")
+	}
+	if m.supervisor == oldSupervisor {
+		t.Fatal("expected /new to replace the previous supervisor")
+	}
+	if m.agent == nil || m.agent.Supervisor() != m.supervisor {
+		t.Fatal("expected new agent to use the fresh supervisor")
+	}
+	if _, err := oldSupervisor.Register(tool.ProcessRegistration{ID: "late-proc"}); err != tool.ErrProcessSupervisorClosed {
+		t.Fatalf("old supervisor Register() error = %v, want %v", err, tool.ErrProcessSupervisorClosed)
+	}
+}
+
+func TestActivityUpdateFromPreviousAgentIgnored(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, nil)
+	newAgent := agent.NewAgent(nil, nil, nil)
+	m := model{agent: newAgent}
+
+	updated, _ := m.Update(activityUpdateMsg{
+		tracker: oldAgent.Activity(),
+		snap:    agent.ActivitySnapshot{LLMRunning: true},
+	})
+	got := updated.(model)
+
+	if got.lastActivity.LLMRunning {
+		t.Fatal("expected stale activity update to be ignored")
+	}
+}
+
+func TestJobCompletionFromPreviousAgentIgnored(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, nil)
+	newAgent := agent.NewAgent(nil, nil, nil)
+	m := model{agent: newAgent}
+
+	updated, _ := m.Update(jobCompletedMsg{
+		agent: oldAgent,
+		ev:    agent.JobEvent{Kind: "agent", ID: "old", Name: "old", Status: "done", Result: "old result"},
+	})
+	got := updated.(model)
+
+	if len(got.messages) != 0 {
+		t.Fatalf("expected stale job completion to be ignored, got %#v", got.messages)
 	}
 }
 
@@ -1505,7 +1634,7 @@ func TestSidebarTelemetryAggregationSumsUsageAndSpend(t *testing.T) {
 		{raw: &agent.Message{Usage: &agent.TokenUsage{PromptTokens: int64Ptr(5), CompletionTokens: int64Ptr(15)}, Spend: &spendB}},
 	})
 
-	if telemetry.promptTokens != 15 || telemetry.completionTokens != 35 || telemetry.totalTokens != 50 {
+	if telemetry.inputTokens != 15 || telemetry.outputTokens != 35 || telemetry.totalTokens != 50 {
 		t.Fatalf("expected summed usage totals, got %#v", telemetry)
 	}
 	if telemetry.spend == nil || math.Abs(*telemetry.spend-0.3) > 1e-9 {
@@ -1823,7 +1952,7 @@ func TestHandleTitleCmdWhitespaceOnly(t *testing.T) {
 
 func TestHandleTitleCmdNoArgClearsTitle(t *testing.T) {
 	m := model{
-		messages: []message{},
+		messages:     []message{},
 		sessionTitle: "old title",
 	}
 
@@ -1850,5 +1979,66 @@ func TestHandleTitleCmdUTF8Safe(t *testing.T) {
 
 	if m.sessionTitle != titleWithEmoji {
 		t.Errorf("expected %q, got %q", titleWithEmoji, m.sessionTitle)
+	}
+}
+
+func TestCurrentContextEstimateExcludesNextInput(t *testing.T) {
+	m := model{
+		messages: []message{
+			{role: roleUser, text: "hi", raw: &agent.Message{Role: "user", Content: "hi"}},
+			{role: roleAssistant, text: "hello", raw: &agent.Message{
+				Role:    "assistant",
+				Content: "hello",
+				Usage:   &agent.TokenUsage{PromptTokens: int64Ptr(10), CompletionTokens: int64Ptr(5), TotalTokens: int64Ptr(15)},
+			}},
+		},
+	}
+	tokens, source := m.currentContextEstimate()
+	if tokens != 15 {
+		t.Errorf("expected 15, got %d", tokens)
+	}
+	if source != "actual" {
+		t.Errorf("expected source actual, got %s", source)
+	}
+}
+
+func TestSidebarContextUsesCurrentEstimateNotCumulativeTotal(t *testing.T) {
+	spend := 0.1
+	m := model{
+		ready:       true,
+		width:       140,
+		height:      40,
+		showSidebar: true,
+		sessionID:   "session-ctx",
+		input:       textarea.New(),
+		viewport:    viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		config:      &config.Config{Model: "gpt-4o"},
+		messages: []message{
+			{
+				role: roleAssistant,
+				text: "first",
+				raw: &agent.Message{
+					Role:  "assistant",
+					Usage: &agent.TokenUsage{PromptTokens: int64Ptr(1000), CompletionTokens: int64Ptr(100)},
+					Spend: &spend,
+				},
+			},
+			{
+				role: roleAssistant,
+				text: "second",
+				raw: &agent.Message{
+					Role:  "assistant",
+					Usage: &agent.TokenUsage{PromptTokens: int64Ptr(2000), CompletionTokens: int64Ptr(200)},
+				},
+			},
+		},
+	}
+	view := m.View().Content
+	// The context line should show ~2.2k, not the cumulative 3.3k
+	if strings.Contains(view, "3.3k") || strings.Contains(view, "3300") {
+		t.Fatalf("sidebar context should not show cumulative total 3.3k, got view:\n%s", view)
+	}
+	if !strings.Contains(view, "Context") {
+		t.Fatalf("expected sidebar to contain 'Context', got view:\n%s", view)
 	}
 }
