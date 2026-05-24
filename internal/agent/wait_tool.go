@@ -22,9 +22,11 @@ type WaitTool struct {
 	stopCh <-chan struct{} // closed when the agent is cancelled
 }
 
-func (t WaitTool) Name() string        { return "wait" }
-func (t WaitTool) Description() string { return "Wait for a duration or until a background job finishes" }
-func (t WaitTool) Parallel() bool      { return false }
+func (t WaitTool) Name() string { return "wait" }
+func (t WaitTool) Description() string {
+	return "Wait for a duration or until a background job finishes"
+}
+func (t WaitTool) Parallel() bool { return false }
 func (t WaitTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "wait",

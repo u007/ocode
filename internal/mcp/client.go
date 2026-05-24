@@ -71,7 +71,7 @@ func NewRemoteClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 
 	timeout := time.Duration(cfg.Timeout) * time.Millisecond
 	if timeout == 0 {
-		timeout = 5 * time.Second
+		timeout = 20 * time.Second
 	}
 
 	client := sse.NewClient(cfg.URL)
@@ -112,7 +112,7 @@ func NewLocalClient(name string, cfg config.MCPConfig) (*MCPClient, error) {
 
 	timeout := time.Duration(cfg.Timeout) * time.Millisecond
 	if timeout == 0 {
-		timeout = 5 * time.Second
+		timeout = 20 * time.Second
 	}
 
 	cmd := exec.Command(cfg.Command[0], cfg.Command[1:]...)

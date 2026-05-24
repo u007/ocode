@@ -112,4 +112,3 @@ func (t *ActivityTracker) publishLocked(snap ActivitySnapshot) {
 	default:
 	}
 }
-

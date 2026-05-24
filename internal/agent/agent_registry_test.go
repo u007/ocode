@@ -537,7 +537,10 @@ func TestChildAgentSession(t *testing.T) {
 	}
 }
 
-func TestHiddenAgentNotInDescriptionButInEnum(t *testing.T) {
+// Hidden agents must be excluded from BOTH the description and the JSON
+// Schema enum. An earlier iteration only filtered the description, which
+// meant the model could still call task(agent="secret") via the enum.
+func TestHiddenAgentNotInDescriptionOrEnum(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -564,20 +567,15 @@ secret prompt
 	agentProp := props["agent"].(map[string]interface{})
 
 	enum := agentProp["enum"].([]string)
-	found := false
 	for _, name := range enum {
 		if name == "secret" {
-			found = true
-			break
+			t.Fatalf("hidden agent leaked into enum: %v", enum)
 		}
-	}
-	if !found {
-		t.Fatal("expected hidden agent in enum")
 	}
 
 	desc := agentProp["description"].(string)
 	if contains(desc, "secret") {
-		t.Fatal("expected hidden agent excluded from visible description")
+		t.Fatal("hidden agent leaked into visible description")
 	}
 }
 

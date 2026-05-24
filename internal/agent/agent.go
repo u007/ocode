@@ -149,6 +149,11 @@ func (a *Agent) SetChildSessionPersistence(persist func(sessionID, title string,
 	}
 }
 
+// AgentTool is a legacy compatibility shim. The "agent" tool is no longer
+// registered (the runtime exposes "task" instead), but the type is kept so
+// older session transcripts and user-supplied permission entries naming
+// "agent" still resolve. Removal target: drop once stored transcripts older
+// than the deprecation date no longer need to round-trip — track in TODO.md.
 type AgentTool struct {
 	mainAgent *Agent
 }
@@ -234,7 +239,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 		if i >= limit {
 			summarizeMsg := Message{
-				Role:    "system",
+				Role:    "user",
 				Content: "You have reached the maximum number of steps (" + strconv.Itoa(limit) + "). Stop using tools and respond with a summary of your work and any remaining tasks.",
 			}
 			newMsgs = append(newMsgs, summarizeMsg)
@@ -940,43 +945,38 @@ func (a *Agent) LoadExternalTools(cfg *config.Config) {
 	}
 }
 
-// recoverOrphanedToolCalls finds the last assistant message with ToolCalls,
+// recoverOrphanedToolCalls iterates over all assistant messages with ToolCalls,
 // identifies any call IDs that have no following tool-result message, and
 // re-executes them. This handles sessions that were persisted mid-tool-execution
-// where the prior execution is guaranteed finished (we are in a new Step call).
+// or messages that were compacted, where prior execution results may have been
+// removed but the tool_call declarations remain.
 func (a *Agent) recoverOrphanedToolCalls(messages []Message) []Message {
-	// Find last assistant message index that has tool calls.
-	lastAssistantIdx := -1
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
-			lastAssistantIdx = i
-			break
-		}
-	}
-	if lastAssistantIdx < 0 {
-		return messages
-	}
-
-	// Collect tool IDs that already have results after that message.
-	answered := make(map[string]bool)
-	for i := lastAssistantIdx + 1; i < len(messages); i++ {
-		if messages[i].Role == "tool" && messages[i].ToolID != "" {
-			answered[messages[i].ToolID] = true
+	// Build a set of all tool result IDs present in the conversation.
+	resultIDs := make(map[string]bool)
+	for _, msg := range messages {
+		if msg.Role == "tool" && msg.ToolID != "" {
+			resultIDs[msg.ToolID] = true
 		}
 	}
 
-	// Find orphaned calls.
+	// Collect all orphaned tool calls across ALL assistant messages.
 	var orphans []ToolCall
-	for _, tc := range messages[lastAssistantIdx].ToolCalls {
-		if !answered[tc.ID] {
-			orphans = append(orphans, tc)
+	orphanIDs := make(map[string]bool) // dedup: avoid re-executing the same call ID twice
+	for _, msg := range messages {
+		if msg.Role == "assistant" {
+			for _, tc := range msg.ToolCalls {
+				if tc.ID != "" && !resultIDs[tc.ID] && !orphanIDs[tc.ID] {
+					orphans = append(orphans, tc)
+					orphanIDs[tc.ID] = true
+				}
+			}
 		}
 	}
 	if len(orphans) == 0 {
 		return messages
 	}
 
-	emitDebug("RECOVER", fmt.Sprintf("re-executing %d orphaned tool call(s)", len(orphans)))
+	emitDebug("RECOVER", fmt.Sprintf("re-executing %d orphaned tool call(s) across history", len(orphans)))
 
 	// Re-execute each orphan and append its result.
 	for _, tc := range orphans {

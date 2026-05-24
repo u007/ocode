@@ -97,34 +97,23 @@ func (r *AgentRegistry) registerBuiltins() {
 			Mode:        AgentModePrimary,
 			Source:      "builtin",
 		},
-		{
-			Name:         "general",
-			Description:  "Multi-step tasks, parallel work",
-				SystemPrompt: generalSubAgentPrompt,
+	}
+	// Subagents (general/explore/scout) come from DefaultSubAgents — single
+	// source of truth for name/description/prompt/tools. Hidden agents
+	// (title, compaction) drive runtime helpers and can be overridden by
+	// users via markdown files in .opencode/agents/.
+	for _, sa := range DefaultSubAgents {
+		r.defs = append(r.defs, AgentDefinition{
+			Name:         sa.Name,
+			Description:  sa.Description,
+			SystemPrompt: sa.SystemPrompt,
+			Tools:        sa.Tools,
 			Mode:         AgentModeSubagent,
 			Source:       "builtin",
-		},
-		{
-			Name:         "explore",
-			Description:  "Fast read-only codebase exploration",
-				SystemPrompt: exploreSubAgentPrompt,
-				Tools:        []string{"read", "glob", "grep", "list", "lsp", "bash", "webfetch", "websearch"},
-			Mode:         AgentModeSubagent,
-			Source:       "builtin",
-		},
-		{
-			Name:         "scout",
-			Description:  "External docs, dependency research",
-				SystemPrompt: scoutSubAgentPrompt,
-				Tools:        []string{"repo_clone", "repo_overview", "glob", "grep", "list", "read", "webfetch", "websearch"},
-			Mode:         AgentModeSubagent,
-			Source:       "builtin",
-		},
-		// Hidden agents — not surfaced in /agent or Tab. Their lifecycle is
-		// driven by the runtime (title.go, compact.go) but the registry holds
-		// the prompts and optional Model override so users can tune them via
-		// a markdown agent of the same name in .opencode/agents/.
-		{
+		})
+	}
+	r.defs = append(r.defs,
+		AgentDefinition{
 			Name:         "title",
 			Description:  "Generates session titles after the first exchange",
 			SystemPrompt: titleSystemPrompt,
@@ -132,7 +121,7 @@ func (r *AgentRegistry) registerBuiltins() {
 			Hidden:       true,
 			Source:       "builtin",
 		},
-		{
+		AgentDefinition{
 			Name:         "compaction",
 			Description:  "Summarizes older context when the window fills",
 			SystemPrompt: compactionSystemPrompt,
@@ -140,7 +129,7 @@ func (r *AgentRegistry) registerBuiltins() {
 			Hidden:       true,
 			Source:       "builtin",
 		},
-	}
+	)
 }
 
 func (r *AgentRegistry) Get(name string) *AgentDefinition {

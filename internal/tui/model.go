@@ -46,6 +46,7 @@ type scrollbarDragTarget int
 const (
 	scrollbarDragNone scrollbarDragTarget = iota
 	scrollbarDragTranscript
+	scrollbarDragDetail
 	scrollbarDragGitDiff
 	scrollbarDragFilesPreview
 	scrollbarDragLog
@@ -219,7 +220,17 @@ type streamDoneMsg struct {
 }
 
 type compactStartedMsg struct{}
-type titleGeneratedMsg struct{ title string }
+type titleGeneratedMsg struct {
+	title string
+	gen   uint64
+}
+
+// titleResult is the envelope sent on titleCh so the receiver can detect
+// stale results from goroutines started before /new or /title clear.
+type titleResult struct {
+	title string
+	gen   uint64
+}
 type compactFinishedMsg struct {
 	result agent.CompactResult
 }
@@ -357,6 +368,12 @@ type model struct {
 	pickerFilter          string
 	pickerFilterPending   string
 	pickerFilterSeq       int
+
+	// Pagination state for the session picker (infinite scroll)
+	pickerSessionRefs     []session.Ref // all loaded session refs
+	pickerSessionPage     int           // number of pages loaded so far
+	pickerSessionTotal    int           // total count of all sessions
+	pickerSessionMore     bool          // whether more pages are available
 	showSlashPopup        bool
 	slashPopupIndex       int
 	slashPopupItems       []slashSuggestion
@@ -434,8 +451,9 @@ type model struct {
 	rawInputLines         []string
 	compactCh             chan agent.CompactResult
 	compactStartCh        chan struct{}
-	titleCh               chan string
+	titleCh               chan titleResult
 	titleRequested        bool
+	titleGen              uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
 	compacting            bool
 	lastCompactErr        error
 	pendingCompactUIIdx   []int
@@ -739,8 +757,8 @@ func (m *model) getInitialTools() []tool.Tool {
 		&tool.QuestionTool{},
 		&tool.WebFetchTool{},
 		&tool.WebSearchTool{},
-			&tool.RepoCloneTool{},
-			&tool.RepoOverviewTool{},
+		&tool.RepoCloneTool{},
+		&tool.RepoOverviewTool{},
 		&tool.ListTool{},
 		&tool.LSPTool{},
 		&tool.FormatTool{Config: m.config},
@@ -853,7 +871,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 		}(),
 		compactCh:      make(chan agent.CompactResult, 4),
 		compactStartCh: make(chan struct{}, 4),
-		titleCh:        make(chan string, 4),
+		titleCh:        make(chan titleResult, 4),
 		questionInput:  questionInput,
 		subAgentPermCh: make(chan subAgentPermRequest),
 		subAgentPermMu: &sync.Mutex{},
@@ -975,6 +993,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if scrollSpeed < 1 {
 			scrollSpeed = 1
 		}
+		if !m.detail.empty() {
+			if !m.mouseOverDetailViewport(msg.Mouse()) {
+				return m, nil
+			}
+			top := &m.detail[len(m.detail)-1]
+			if msg.Button == tea.MouseWheelUp {
+				top.vp.ScrollUp(scrollSpeed)
+				return m, nil
+			}
+			if msg.Button == tea.MouseWheelDown {
+				top.vp.ScrollDown(scrollSpeed)
+				return m, nil
+			}
+		}
 		if m.mouseOverSidebar(msg.Mouse()) {
 			if msg.Button == tea.MouseWheelUp {
 				m.sidebarScroll -= scrollSpeed
@@ -1056,7 +1088,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.activeTab == tabChat && !m.showQuestionDialog {
+	if m.activeTab == tabChat && !m.showQuestionDialog && m.detail.empty() {
 		m.input, tiCmd = m.input.Update(msg)
 		m.syncRawInputLines()
 	}
@@ -1315,8 +1347,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case pickerFilterApplyMsg:
 		if msg.seq == m.pickerFilterSeq {
+			prevEmpty := m.pickerFilter == ""
 			m.pickerFilter = msg.filter
 			m.pickerIndex = 0
+			// When filter is cleared for sessions, go back to paginated view
+			if m.pickerKind == "session" && m.pickerSessionRefs != nil && !prevEmpty && msg.filter == "" {
+				m.pickerSessionPage = 1
+				m.pickerSessionMore = len(m.pickerSessionRefs) > sessionPickerPageSize
+				m.rebuildSessionPickerItems()
+			}
 		}
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
@@ -1327,21 +1366,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.streaming || m.lastActivity.LLMRunning || m.compacting || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
 			m.dotFrame = (m.dotFrame + 1) % 4
 			// Refresh live detail view content.
-			if top, ok := m.detail.top(); ok && m.agent != nil {
-				switch top.kind {
-				case detailAgentRun:
-					if run, ok2 := m.agent.Runs().Get(top.runID); ok2 {
-						m.detail[len(m.detail)-1].vp.SetContent(renderRunTranscript(run, top.vp.Width()))
-					}
-				case detailProcessList:
-					if m.agent.Procs() != nil {
-						m.detail[len(m.detail)-1].vp.SetContent(renderProcessList(m.agent.Procs()))
-					}
-				case detailProcessLog:
-					if m.agent.Procs() != nil {
-						m.detail[len(m.detail)-1].vp.SetContent(renderProcessLog(m.agent.Procs(), top.procID))
-					}
-				}
+			if !m.detail.empty() {
+				m.refreshTopDetailView()
 			}
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
@@ -1498,7 +1524,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 	case titleGeneratedMsg:
-		if msg.title != "" && m.sessionTitle == "" {
+		// Drop stale results from goroutines started before /new or /title clear.
+		if msg.gen == m.titleGen && msg.title != "" && m.sessionTitle == "" {
 			m.sessionTitle = truncateTitle(msg.title, maxExplicitTitleLen)
 			m.saveSession()
 		}
@@ -1634,6 +1661,12 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 					m.pickerIndex++
 				}
 			}
+			// Infinite scroll: trigger load more when within 5 items of bottom
+			if m.pickerKind == "session" && m.pickerSessionMore {
+				if m.pickerIndex >= len(m.pickerItems)-5 {
+					m.loadMoreSessions()
+				}
+			}
 			return true, m, nil
 		case "enter":
 			isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
@@ -1651,6 +1684,12 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 				return true, m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
 					return pickerFilterApplyMsg{seq: seq, filter: pending}
 				})
+			}
+			// When filter is fully cleared for sessions, go back to paginated view
+			if m.pickerKind == "session" && m.pickerSessionRefs != nil {
+				m.pickerSessionPage = 1
+				m.pickerSessionMore = len(m.pickerSessionRefs) > sessionPickerPageSize
+				m.rebuildSessionPickerItems()
 			}
 			return true, m, nil
 		}
@@ -1670,6 +1709,10 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			return true, m, nil
 		}
 		if len(msg.Text) > 0 {
+			// When filtering sessions, load all sessions so the filter works globally
+			if m.pickerKind == "session" && m.pickerSessionMore && m.pickerFilterPending == "" {
+				m.loadAllSessions()
+			}
 			m.pickerFilterPending += msg.Text
 			m.pickerFilterSeq++
 			seq := m.pickerFilterSeq
@@ -1782,6 +1825,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		case "k", "up":
 			m.detail[len(m.detail)-1].vp.ScrollUp(m.scrollSpeed)
 			return m, nil
+		case "ctrl+g":
+			top := m.detail[len(m.detail)-1]
+			if top.kind == detailAgentRun {
+				m.openProcessListForRun(top.runPath)
+				return m, nil
+			}
 		case "esc":
 			return m.handleEscKey()
 		}
@@ -2173,6 +2222,19 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 
 	if pressed {
+		if thumbOffset, ok := m.detailScrollbarThumbOffset(mouse); ok {
+			m.scrollbarDrag = scrollbarDragDetail
+			m.scrollbarDragOffset = thumbOffset
+			return m, nil, true
+		}
+		if m.detailScrollbarHit(mouse) {
+			trackTop, trackHeight := m.detailScrollbarMetrics()
+			scrollbarSetOffset(&m.detail[len(m.detail)-1].vp, mouse.Y, trackTop, trackHeight)
+			return m, nil, true
+		}
+		if !m.detail.empty() {
+			return m, nil, true
+		}
 		if thumbOffset, ok := m.transcriptScrollbarThumbOffset(mouse); ok {
 			m.scrollbarDrag = scrollbarDragTranscript
 			m.scrollbarDragOffset = thumbOffset
@@ -2460,6 +2522,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 
 	if !pressed && !m.sel.active {
+		if updated, cmd, ok := m.handleDetailClick(mouse); ok {
+			return updated, cmd, true
+		}
+		if !m.detail.empty() {
+			return m, nil, true
+		}
 		if idx, ok := m.toolOutputForClick(mouse); ok {
 			m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
 			m.renderTranscript()
@@ -2504,6 +2572,10 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	switch m.scrollbarDrag {
 	case scrollbarDragTranscript:
 		scrollbarSetOffset(&m.viewport, mouse.Y-m.scrollbarDragOffset, trackTop, m.viewport.Height())
+		return m, nil, true
+	case scrollbarDragDetail:
+		detailTrackTop, detailTrackHeight := m.detailScrollbarMetrics()
+		scrollbarSetOffset(&m.detail[len(m.detail)-1].vp, mouse.Y-m.scrollbarDragOffset, detailTrackTop, detailTrackHeight)
 		return m, nil, true
 	case scrollbarDragLog:
 		logTrackTop, logTrackHeight := m.logScrollbarMetrics()
@@ -2643,6 +2715,44 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		return m, openSidebarFileInEditor(path), true
 	}
 	return m, nil, false
+}
+
+func (m model) handleDetailClick(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
+	if len(m.detail) == 0 || !m.mouseOverDetailViewport(mouse) {
+		return m, nil, false
+	}
+	top := m.detail[len(m.detail)-1]
+	contentLine := (mouse.Y - m.detailViewportContentTopY()) + top.vp.YOffset()
+	if contentLine < 0 {
+		return m, nil, true
+	}
+	if top.kind == detailAgentRun {
+		for _, b := range top.procs {
+			if contentLine >= b.rowStart && contentLine < b.rowEnd {
+				m.openProcessLogForRun(top.runPath, b.procID)
+				return m, nil, true
+			}
+		}
+		for _, b := range top.runs {
+			if b.runPath != top.runPath && contentLine >= b.rowStart && contentLine < b.rowEnd {
+				m.openAgentDetail(b.runPath)
+				return m, nil, true
+			}
+		}
+	}
+	if top.kind == detailProcessList {
+		row := contentLine - 2
+		if row >= 0 {
+			if reg := m.processRegistryForRun(top.runPath); reg != nil {
+				procs := reg.Snapshot()
+				if row < len(procs) {
+					m.openProcessLogForRun(top.runPath, procs[row].ID)
+					return m, nil, true
+				}
+			}
+		}
+	}
+	return m, nil, true
 }
 
 func (m model) mouseOverTranscriptViewport(msg tea.MouseWheelMsg) bool {
@@ -2958,6 +3068,7 @@ func (m *model) handleTitleCmd(args []string) tea.Cmd {
 
 	m.sessionTitle = ""
 	m.titleRequested = false
+	m.titleGen++
 	m.saveSession()
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Title cleared — will auto-generate from next assistant response."})
 	return nil
@@ -3145,6 +3256,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
 	m.titleRequested = false
+	m.titleGen++
 	tool.SetTodoSession(m.sessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
@@ -3884,9 +3996,10 @@ func (m *model) maybeGenerateTitle(assistantContent string) {
 	}
 	m.titleRequested = true
 	ch := m.titleCh
+	gen := m.titleGen
 	m.agent.GenerateTitleAsync(userMsg, assistantContent, func(t string) {
 		select {
-		case ch <- t:
+		case ch <- titleResult{title: t, gen: gen}:
 		default:
 		}
 	})
@@ -4673,8 +4786,7 @@ func constrainViewPreservingBottom(view string, width int, height int, bottomLin
 		if len(lines) > height {
 			// Preserve the last bottomLinesCount lines, truncate from the middle
 			if bottomLinesCount >= len(lines) {
-				// Not enough lines, just use what we have
-				lines = lines
+				// Not enough lines, keep as-is.
 			} else if bottomLinesCount > 0 {
 				// Keep top part and bottom part
 				keepTop := height - bottomLinesCount
@@ -4781,10 +4893,10 @@ func waitCompactEvent(startCh chan struct{}, doneCh chan agent.CompactResult) te
 	}
 }
 
-func waitTitleEvent(ch chan string) tea.Cmd {
+func waitTitleEvent(ch chan titleResult) tea.Cmd {
 	return func() tea.Msg {
-		t := <-ch
-		return titleGeneratedMsg{title: t}
+		r := <-ch
+		return titleGeneratedMsg{title: r.title, gen: r.gen}
 	}
 }
 
@@ -5181,33 +5293,125 @@ func (m *model) openAgentDetail(runID string) {
 	if m.modalOpen() || m.agent == nil || m.agent.Runs() == nil {
 		return
 	}
-	run, ok := m.agent.Runs().Get(runID)
+	run, ok := m.findAgentRun(runID)
 	if !ok {
 		return
 	}
 	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
-	vp.SetContent(renderRunTranscript(run, vp.Width()))
-	m.detail.push(detailView{kind: detailAgentRun, runID: runID, vp: vp})
+	content, runs, procs := renderRunTranscriptDetail(run, runID, vp.Width())
+	vp.SetContent(content)
+	m.detail.push(detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, procs: procs})
 }
 
 // openProcessList pushes a process list drill-in view.
 func (m *model) openProcessList() {
-	if m.modalOpen() || m.agent == nil || m.agent.Procs() == nil {
+	m.openProcessListForRun("")
+}
+
+func (m *model) openProcessListForRun(runID string) {
+	reg := m.processRegistryForRun(runID)
+	if m.modalOpen() || reg == nil {
 		return
 	}
 	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
-	vp.SetContent(renderProcessList(m.agent.Procs()))
-	m.detail.push(detailView{kind: detailProcessList, vp: vp})
+	vp.SetContent(renderProcessList(reg))
+	dv := detailView{kind: detailProcessList, runPath: runID, vp: vp}
+	if run, ok := m.findAgentRun(runID); ok {
+		dv.runID = run.ID
+	}
+	m.detail.push(dv)
 }
 
 // openProcessLog pushes a process log drill-in view.
 func (m *model) openProcessLog(procID string) {
-	if m.modalOpen() || m.agent == nil || m.agent.Procs() == nil {
+	m.openProcessLogForRun("", procID)
+}
+
+func (m *model) openProcessLogForRun(runID, procID string) {
+	reg := m.processRegistryForRun(runID)
+	if m.modalOpen() || reg == nil {
 		return
 	}
 	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
-	vp.SetContent(renderProcessLog(m.agent.Procs(), procID))
-	m.detail.push(detailView{kind: detailProcessLog, procID: procID, vp: vp})
+	vp.SetContent(renderProcessLog(reg, procID))
+	dv := detailView{kind: detailProcessLog, runPath: runID, procID: procID, vp: vp}
+	if run, ok := m.findAgentRun(runID); ok {
+		dv.runID = run.ID
+	}
+	m.detail.push(dv)
+}
+
+func (m *model) refreshTopDetailView() {
+	if len(m.detail) == 0 {
+		return
+	}
+	top := &m.detail[len(m.detail)-1]
+	switch top.kind {
+	case detailAgentRun:
+		run, ok := m.findAgentRun(top.runPath)
+		if !ok {
+			return
+		}
+		content, runs, procs := renderRunTranscriptDetail(run, top.runPath, top.vp.Width())
+		top.vp.SetContent(content)
+		top.runID = run.ID
+		top.runs = runs
+		top.procs = procs
+	case detailProcessList:
+		if reg := m.processRegistryForRun(top.runPath); reg != nil {
+			top.vp.SetContent(renderProcessList(reg))
+		}
+	case detailProcessLog:
+		if reg := m.processRegistryForRun(top.runPath); reg != nil {
+			top.vp.SetContent(renderProcessLog(reg, top.procID))
+		}
+	}
+}
+
+func (m model) processRegistryForRun(runID string) *tool.ProcessRegistry {
+	if m.agent == nil {
+		return nil
+	}
+	if runID == "" {
+		return m.agent.Procs()
+	}
+	run, ok := m.findAgentRun(runID)
+	if !ok {
+		return nil
+	}
+	return run.Procs
+}
+
+func (m model) findAgentRun(runID string) (*agent.AgentRun, bool) {
+	if m.agent == nil || m.agent.Runs() == nil || runID == "" {
+		return nil, false
+	}
+	return findAgentRunByPath(m.agent.Runs(), runID)
+}
+
+func findAgentRunByPath(reg *agent.AgentRunRegistry, runPath string) (*agent.AgentRun, bool) {
+	if reg == nil || runPath == "" {
+		return nil, false
+	}
+	parts := strings.Split(runPath, "/")
+	cur := reg
+	var run *agent.AgentRun
+	for _, part := range parts {
+		if part == "" || cur == nil {
+			return nil, false
+		}
+		var ok bool
+		run, ok = cur.Get(part)
+		if !ok {
+			return nil, false
+		}
+		if run.Sub == nil {
+			cur = nil
+		} else {
+			cur = run.Sub.Runs()
+		}
+	}
+	return run, true
 }
 
 // modalOpen reports whether any modal overlay is currently shown.
@@ -5226,7 +5430,13 @@ func (m model) renderDetailView(d detailView) string {
 	case detailProcessLog:
 		title = "Process " + d.procID
 	}
-	header := hintStyle.Render("◆ "+title) + hintStyle.Render("  esc: back · j/k: scroll")
+	hints := "esc: back · j/k: scroll · mouse: scroll"
+	if d.kind == detailAgentRun {
+		hints += " · click: sub-agent/process · ctrl+g: processes"
+	} else if d.kind == detailProcessList {
+		hints += " · click: open process"
+	}
+	header := hintStyle.Render("◆ "+title) + hintStyle.Render("  "+hints)
 	scrollbar := renderScrollbar(d.vp.Height(), d.vp.TotalLineCount(), d.vp.VisibleLineCount(), d.vp.YOffset())
 	bodyContent := lipgloss.JoinHorizontal(lipgloss.Top,
 		constrainView(d.vp.View(), d.vp.Width(), d.vp.Height()),
@@ -6378,6 +6588,69 @@ func (m model) isClickInInputArea(mouse tea.Mouse) bool {
 	topY := m.inputAreaTopY()
 	h := m.inputAreaHeight()
 	return mouse.Y >= topY && mouse.Y < topY+h
+}
+
+func (m model) detailHeaderHeight() int {
+	if len(m.detail) == 0 {
+		return 0
+	}
+	top := m.detail[len(m.detail)-1]
+	title := ""
+	switch top.kind {
+	case detailAgentRun:
+		title = "Agent " + top.runID
+	case detailProcessList:
+		title = "Background processes"
+	case detailProcessLog:
+		title = "Process " + top.procID
+	}
+	header := hintStyle.Render("◆ " + title)
+	return lipgloss.Height(header)
+}
+
+func (m model) detailViewportContentTopY() int {
+	return m.detailHeaderHeight() + 1
+}
+
+func (m model) detailScrollbarMetrics() (top, height int) {
+	if len(m.detail) == 0 {
+		return 0, 0
+	}
+	top = m.detailViewportContentTopY()
+	height = m.detail[len(m.detail)-1].vp.Height()
+	if height < 1 {
+		height = 1
+	}
+	return top, height
+}
+
+func (m model) detailScrollbarX() int {
+	return m.panelWidth() - 3
+}
+
+func (m model) mouseOverDetailViewport(mouse tea.Mouse) bool {
+	if len(m.detail) == 0 {
+		return false
+	}
+	topY, height := m.detailScrollbarMetrics()
+	return mouse.X >= 0 && mouse.X <= m.detailScrollbarX() && mouse.Y >= topY && mouse.Y < topY+height
+}
+
+func (m model) detailScrollbarHit(mouse tea.Mouse) bool {
+	if len(m.detail) == 0 || mouse.X != m.detailScrollbarX() {
+		return false
+	}
+	topY, height := m.detailScrollbarMetrics()
+	return mouse.Y >= topY && mouse.Y < topY+height
+}
+
+func (m model) detailScrollbarThumbOffset(mouse tea.Mouse) (int, bool) {
+	if !m.detailScrollbarHit(mouse) {
+		return 0, false
+	}
+	topY, height := m.detailScrollbarMetrics()
+	vp := m.detail[len(m.detail)-1].vp
+	return scrollbarThumbOffset(mouse.Y, topY, height, vp.TotalLineCount(), vp.VisibleLineCount(), vp.YOffset())
 }
 
 func (m model) transcriptScrollbarHit(mouse tea.Mouse) bool {

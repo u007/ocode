@@ -14,9 +14,9 @@ import (
 // Message framing overhead (role markers, JSON structure) adds ~50-100 tokens per message.
 const (
 	charsPerToken                = 4
-	reasoningCharsPerToken       = 2     // Reasoning is more expensive; use ~2 chars per token
-	framingOverheadPerMessage    = 75    // ~75 tokens for role, content key, JSON overhead
-	messageStructureCharOverhead = 300   // ~300 chars worth of overhead per message for structure
+	reasoningCharsPerToken       = 2   // Reasoning is more expensive; use ~2 chars per token
+	framingOverheadPerMessage    = 75  // ~75 tokens for role, content key, JSON overhead
+	messageStructureCharOverhead = 300 // ~300 chars worth of overhead per message for structure
 )
 
 // CompactResult describes the outcome of a compaction pass.
@@ -86,7 +86,8 @@ func findTurnBoundary(msgs []Message, recentTurns int) int {
 
 // safeCut walks `cut` backward until messages[cut:] is a self-contained API
 // request: every role=tool in the suffix has its matching assistant{ToolCalls}
-// also in the suffix. Returns the adjusted cut index (>= 0, <= cut).
+// also in the suffix, AND every assistant{ToolCalls} in the suffix has a
+// matching role=tool result. Returns the adjusted cut index (>= 0, <= cut).
 func safeCut(msgs []Message, cut int) int {
 	if cut <= 0 {
 		return 0
@@ -95,8 +96,9 @@ func safeCut(msgs []Message, cut int) int {
 		cut = len(msgs)
 	}
 	for cut > 0 {
-		// Build set of assistant tool_call IDs in the suffix [cut:].
+		// Build sets of assistant tool_call IDs and tool result IDs in the suffix [cut:].
 		suffixCallIDs := map[string]struct{}{}
+		suffixResultIDs := map[string]struct{}{}
 		for i := cut; i < len(msgs); i++ {
 			if msgs[i].Role == "assistant" {
 				for _, tc := range msgs[i].ToolCalls {
@@ -105,11 +107,24 @@ func safeCut(msgs []Message, cut int) int {
 					}
 				}
 			}
+			if msgs[i].Role == "tool" && msgs[i].ToolID != "" {
+				suffixResultIDs[msgs[i].ToolID] = struct{}{}
+			}
 		}
 		safe := true
+		// Every tool result must have a matching assistant tool_call.
 		for i := cut; i < len(msgs); i++ {
 			if msgs[i].Role == "tool" && msgs[i].ToolID != "" {
 				if _, ok := suffixCallIDs[msgs[i].ToolID]; !ok {
+					safe = false
+					break
+				}
+			}
+		}
+		if safe {
+			// Every assistant tool_call must have a matching tool result.
+			for id := range suffixCallIDs {
+				if _, ok := suffixResultIDs[id]; !ok {
 					safe = false
 					break
 				}
