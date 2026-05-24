@@ -8,6 +8,19 @@ import (
 	"strings"
 )
 
+func parseOptionalFloat(s string) *float64 {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	s = strings.Trim(s, "\"'")
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil
+	}
+	return &v
+}
+
 func (r *AgentRegistry) LoadMarkdownAgents() []LoadDiagnostic {
 	var globalLoaded []AgentDefinition
 	var projectLoaded []AgentDefinition
@@ -113,16 +126,17 @@ func parseAgentContent(content, source string) (*AgentDefinition, []LoadDiagnost
 
 	hidden := fm.fields["hidden"] == "true"
 
-	notYetApplied := map[string]bool{
-		"temperature": true, "top_p": true,
-	}
-	for k := range fm.fields {
-		if notYetApplied[k] {
-			diags = append(diags, LoadDiagnostic{Level: "warning", File: source, Message: "field parsed but not yet applied (no LLM client plumbing): " + k})
-		}
-	}
-
 	model := strings.TrimSpace(fm.fields["model"])
+	color := strings.TrimSpace(fm.fields["color"])
+	temperature := parseOptionalFloat(fm.fields["temperature"])
+	topP := parseOptionalFloat(fm.fields["top_p"])
+	// Surface invalid numeric values as warnings rather than silently dropping.
+	if raw := strings.TrimSpace(fm.fields["temperature"]); raw != "" && temperature == nil {
+		diags = append(diags, LoadDiagnostic{Level: "warning", File: source, Message: "invalid temperature (not a number): " + raw})
+	}
+	if raw := strings.TrimSpace(fm.fields["top_p"]); raw != "" && topP == nil {
+		diags = append(diags, LoadDiagnostic{Level: "warning", File: source, Message: "invalid top_p (not a number): " + raw})
+	}
 
 	var maxSteps int
 	if stepsStr, ok := fm.fields["steps"]; ok && stepsStr != "" {
@@ -145,6 +159,9 @@ func parseAgentContent(content, source string) (*AgentDefinition, []LoadDiagnost
 		Source:       source,
 		MaxSteps:     maxSteps,
 		Model:        model,
+		Color:        color,
+		Temperature:  temperature,
+		TopP:         topP,
 	}
 
 	return def, diags

@@ -35,6 +35,15 @@ type AgentDefinition struct {
 	// Model is an optional OpenCode-style override in "provider/model" or
 	// "provider:model" form. Empty means inherit the session's current model.
 	Model string
+	// Color is an optional ANSI/hex color used by the TUI to tint the agent
+	// name in the status bar. Accepts named colors ("blue", "green") or
+	// hex ("#7AA2F7"). Empty means use the default text color.
+	Color string
+	// Temperature/TopP, when non-nil, override the client's sampling
+	// parameters when this agent is active. Pointer so "unset" is distinct
+	// from explicit zero.
+	Temperature *float64
+	TopP        *float64
 }
 
 type LoadDiagnostic struct {

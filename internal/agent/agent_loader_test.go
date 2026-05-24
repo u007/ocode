@@ -5,6 +5,17 @@ import (
 	"testing"
 )
 
+func TestParseAgentContent_HonorsColorField(t *testing.T) {
+	src := "---\ndescription: test\nmode: primary\ncolor: \"#7AA2F7\"\n---\nbody"
+	def, _ := parseAgentContent(src, "fake.md")
+	if def == nil {
+		t.Fatal("expected def")
+	}
+	if def.Color != "\"#7AA2F7\"" && def.Color != "#7AA2F7" {
+		t.Errorf("Color = %q, want #7AA2F7 (with or without quotes)", def.Color)
+	}
+}
+
 func TestParseAgentContent_HonorsModelField(t *testing.T) {
 	src := "---\ndescription: test\nmode: primary\nmodel: anthropic/claude-haiku-4-5\n---\nbody"
 	def, diags := parseAgentContent(src, "fake.md")
@@ -21,22 +32,6 @@ func TestParseAgentContent_HonorsModelField(t *testing.T) {
 	}
 }
 
-func TestParseAgentContent_WarnsForUnappliedTemperatureTopP(t *testing.T) {
-	src := "---\ndescription: test\nmode: primary\ntemperature: 0.2\ntop_p: 0.9\n---\nbody"
-	def, diags := parseAgentContent(src, "fake.md")
-	if def == nil {
-		t.Fatalf("expected def, got nil")
-	}
-	var sawTemp, sawTopP bool
-	for _, d := range diags {
-		if strings.Contains(d.Message, "temperature") {
-			sawTemp = true
-		}
-		if strings.Contains(d.Message, "top_p") {
-			sawTopP = true
-		}
-	}
-	if !sawTemp || !sawTopP {
-		t.Errorf("expected diagnostics for temperature and top_p; got %+v", diags)
-	}
-}
+// Replaced by the richer sampling_params_test.go suite. Temperature/top_p are
+// now applied (not warned about) when valid; warnings only fire for invalid
+// numeric values.
