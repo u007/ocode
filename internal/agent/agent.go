@@ -124,7 +124,9 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	a.tools["bash"] = &tool.BashTool{Procs: a.procs}
 	a.tools["bash_output"] = tool.BashOutputTool{Procs: a.procs}
 	a.tools["kill_shell"] = tool.KillShellTool{Procs: a.procs}
-	a.tools["agent"] = AgentTool{mainAgent: a}
+	// "agent" tool retired in favor of "task". AgentTool the type is kept
+	// only so existing transcripts/back-compat permission entries still
+	// resolve. It is no longer registered on new agents.
 	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
@@ -725,21 +727,31 @@ func (a *Agent) SetSpec(spec *AgentSpec) {
 // override. Empty Model leaves the current client untouched (inherit). A
 // failed NewClient call is logged and the previous client is kept so a typo
 // in an agent file can't strand the session without an LLM.
+//
+// It also propagates spec.Temperature / spec.TopP onto the resulting client
+// (or the existing client when no Model swap happens) for the providers that
+// support those sampling params.
 func (a *Agent) applySpecModel(spec *AgentSpec) {
-	if spec == nil || strings.TrimSpace(spec.Model) == "" {
+	if spec == nil {
 		return
 	}
-	if a.config == nil {
-		emitDebug("AGENT", fmt.Sprintf("spec %q requested model %q but agent has no config; keeping current client", spec.Name, spec.Model))
-		return
+	if strings.TrimSpace(spec.Model) != "" {
+		if a.config == nil {
+			emitDebug("AGENT", fmt.Sprintf("spec %q requested model %q but agent has no config; keeping current client", spec.Name, spec.Model))
+		} else if client := NewClient(a.config, spec.Model); client != nil {
+			emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
+			a.client = client
+		} else {
+			emitDebug("AGENT", fmt.Sprintf("spec %q model %q: NewClient returned nil; keeping current client", spec.Name, spec.Model))
+		}
 	}
-	client := NewClient(a.config, spec.Model)
-	if client == nil {
-		emitDebug("AGENT", fmt.Sprintf("spec %q model %q: NewClient returned nil; keeping current client", spec.Name, spec.Model))
-		return
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.Temperature = spec.Temperature
+		gc.TopP = spec.TopP
+		if spec.Temperature != nil || spec.TopP != nil {
+			emitDebug("AGENT", fmt.Sprintf("spec %q: sampling params temperature=%v top_p=%v", spec.Name, spec.Temperature, spec.TopP))
+		}
 	}
-	emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
-	a.client = client
 }
 
 func (a *Agent) Spec() *AgentSpec {

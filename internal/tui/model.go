@@ -5437,9 +5437,15 @@ func (m model) renderContent() string {
 
 func (m *model) renderStatus() string {
 	agentName := "build"
+	agentColor := ""
 	specs := agent.PrimaryAgentSpecs()
 	if m.currentAgentIdx >= 0 && m.currentAgentIdx < len(specs) {
 		agentName = specs[m.currentAgentIdx].Name
+		agentColor = specs[m.currentAgentIdx].Color
+	}
+	displayAgentName := agentName
+	if agentColor != "" {
+		displayAgentName = lipgloss.NewStyle().Foreground(lipgloss.Color(agentColor)).Bold(true).Render(agentName)
 	}
 
 	var suffix string
@@ -5492,7 +5498,7 @@ func (m *model) renderStatus() string {
 	width := m.statusContentWidth()
 
 	// First line: status info on left
-	leftStatus := fmt.Sprintf(" LLM: %s · Agent: %s · Model: %s%s%s%s%s", llmState, agentName, m.currentModelName(), reasoningState, permissionMode, compactState, jobState)
+	leftStatus := fmt.Sprintf(" LLM: %s · Agent: %s · Model: %s%s%s%s%s", llmState, displayAgentName, m.currentModelName(), reasoningState, permissionMode, compactState, jobState)
 
 	// Second line: session ID and hints
 	rightContent := fmt.Sprintf("Session: %s%s", m.sessionID, suffix)

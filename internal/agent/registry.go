@@ -11,6 +11,12 @@ type AgentSpec struct {
 	// Model is an optional override; when non-empty, switching to this agent
 	// swaps the active LLM client to the named model.
 	Model string
+	// Color is an optional hint used by the TUI to tint the agent name.
+	Color string
+	// Temperature/TopP, when non-nil, override the LLM client's sampling
+	// parameters while this agent is active.
+	Temperature *float64
+	TopP        *float64
 }
 
 var DefaultAgents = []AgentSpec{
@@ -18,28 +24,33 @@ var DefaultAgents = []AgentSpec{
 		Name:        "build",
 		Description: "Full development work with all tools enabled",
 		Mode:        ModeBuild,
+		Color:       "#9ECE6A", // green: implementation
 	},
 	{
 		Name:        "plan",
 		Description: "Analysis and planning without making changes",
 		Mode:        ModePlan,
+		Color:       "#7AA2F7", // blue: thinking
 	},
 	{
 		Name:        "review",
 		Description: "Code review with read-only access",
 		Mode:        ModeReview,
+		Color:       "#E0AF68", // amber: scrutiny
 	},
 	{
 		Name:        "debug",
 		Description: "Focused investigation with bash and read tools",
 		Tools:       []string{"read", "glob", "grep", "list", "lsp", "bash", "webfetch", "websearch", "skill"},
 		Mode:        ModeDebug,
+		Color:       "#F7768E", // red: investigation
 	},
 	{
 		Name:        "docs",
 		Description: "Documentation writing with file operations",
 		Tools:       []string{"read", "write", "edit", "glob", "grep", "list", "delete", "webfetch", "websearch", "skill"},
 		Mode:        ModeDocs,
+		Color:       "#BB9AF7", // purple: writing
 	},
 }
 
@@ -107,5 +118,8 @@ func agentSpecFromDefinition(def AgentDefinition) AgentSpec {
 		Mode:         mode,
 		MaxSteps:     def.MaxSteps,
 		Model:        def.Model,
+		Color:        def.Color,
+		Temperature:  def.Temperature,
+		TopP:         def.TopP,
 	}
 }

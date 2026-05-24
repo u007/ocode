@@ -193,7 +193,20 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	tools := t.getToolsForDef(spec)
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config)
-	subAgent.mode = t.mainAgent.mode
+	// Subagents do not inherit the parent's mode prompt — they have their own
+	// system prompt. Setting a spec with SystemPrompt makes BasePromptMessages
+	// use it in place of the mode prompt; leaving subAgent.mode empty prevents
+	// any leakage. The subagent prompt below is now a no-op once the assembler
+	// picks up spec.SystemPrompt, but we keep the explicit message for now to
+	// preserve transcript shape.
+	subAgent.spec = &AgentSpec{
+		Name:         spec.Name,
+		Description:  spec.Description,
+		SystemPrompt: spec.SystemPrompt,
+		Tools:        spec.Tools,
+		DeniedTools:  spec.DeniedTools,
+		MaxSteps:     spec.MaxSteps,
+	}
 	if spec.MaxSteps > 0 {
 		subAgent.maxSteps = spec.MaxSteps
 	}
@@ -212,15 +225,17 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		subAgent.permissions = pm
 	}
 
-	systemPrompt := spec.SystemPrompt
+	// spec.SystemPrompt is delivered via the prompt assembler (BasePromptMessages
+	// picks it up from subAgent.spec). We only inject background context here as
+	// a marker-less extra system message; the assembler will preserve it.
+	var subAgentMsgs []Message
 	if params.Context != "" {
-		systemPrompt += "\nBackground Context: " + params.Context
+		subAgentMsgs = append(subAgentMsgs, Message{
+			Role:    "system",
+			Content: "Background Context: " + params.Context,
+		})
 	}
-
-	subAgentMsgs := []Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: params.Prompt},
-	}
+	subAgentMsgs = append(subAgentMsgs, Message{Role: "user", Content: params.Prompt})
 
 	attachRunTranscript := func(run *AgentRun) {
 		if run == nil {

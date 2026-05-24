@@ -68,6 +68,23 @@ type GenericClient struct {
 	Provider       string
 	UseOAuth       bool // when true, treat APIKey as a bearer OAuth token
 	ThinkingBudget int  // >0 enables extended thinking for Anthropic models that support it
+	// Temperature, when non-nil, is added to the request payload for providers
+	// that accept it. Pointer so we can distinguish "unset" from explicit zero.
+	Temperature *float64
+	// TopP, when non-nil, is added to the request payload for providers that
+	// accept it. Pointer for the same reason as Temperature.
+	TopP *float64
+}
+
+// applyGenerationParams adds temperature / top_p to a request payload if
+// configured. Centralised so every provider branch picks them up.
+func (c *GenericClient) applyGenerationParams(payload map[string]interface{}) {
+	if c.Temperature != nil {
+		payload["temperature"] = *c.Temperature
+	}
+	if c.TopP != nil {
+		payload["top_p"] = *c.TopP
+	}
 }
 
 func (c *GenericClient) GetProvider() string {
@@ -144,6 +161,7 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 		"model":    c.Model,
 		"messages": openAIMessages,
 	}
+	c.applyGenerationParams(payload)
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)
 	}
@@ -218,6 +236,7 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		"model":    c.Model,
 		"messages": openAIMessages,
 	}
+	c.applyGenerationParams(payload)
 	if c.Provider == "openai" && c.ThinkingBudget > 0 {
 		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
 	}
@@ -534,6 +553,7 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		"include":      []string{"reasoning.encrypted_content"},
 		"text":         map[string]interface{}{"verbosity": "medium"},
 	}
+	c.applyGenerationParams(payload)
 	if c.ThinkingBudget > 0 {
 		payload["reasoning"] = map[string]interface{}{
 			"effort":  reasoningEffortForBudget(c.ThinkingBudget),
@@ -962,6 +982,12 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		"system":     systemPayload,
 		"messages":   anthropicMsgs,
 		"max_tokens": maxTokens,
+	}
+	// Anthropic disallows temperature/top_p tuning when extended thinking is on
+	// (the API requires temperature=1.0 + no top_p). Skip applying overrides in
+	// that case so a thinking-enabled session doesn't get hard-rejected.
+	if c.ThinkingBudget == 0 {
+		c.applyGenerationParams(payload)
 	}
 
 	if c.ThinkingBudget > 0 {

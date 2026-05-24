@@ -247,35 +247,57 @@ func TestAgentLoaderDiagnosticsUnsupportedFields(t *testing.T) {
 
 	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
 	os.MkdirAll(agentsDir, 0755)
-	// model is now applied; temperature/top_p still warn until client plumbing lands.
+	// model + valid tuning fields should now load without warnings; only
+	// invalid numeric values for temperature/top_p emit a warning.
 	os.WriteFile(filepath.Join(agentsDir, "with-tuning.md"), []byte(`---
 description: has tuning fields
 mode: subagent
 model: gpt-5
 temperature: 0.3
+top_p: 0.9
 ---
 valid prompt
+`), 0644)
+	os.WriteFile(filepath.Join(agentsDir, "with-bad-tuning.md"), []byte(`---
+description: bad tuning
+mode: subagent
+temperature: lukewarm
+---
+prompt
 `), 0644)
 
 	reg := NewAgentRegistry()
 	diags := reg.LoadMarkdownAgents()
 
-	foundWarn := false
+	// Good agent must NOT produce warnings on its own.
 	for _, d := range diags {
-		if d.Level == "warning" {
-			foundWarn = true
-			break
+		if d.Level == "warning" && d.File != "" && filepath.Base(d.File) == "with-tuning.md" {
+			t.Errorf("did not expect a warning for a well-formed tuning agent, got: %+v", d)
 		}
 	}
-	if !foundWarn {
-		t.Fatalf("expected unsupported field warning diagnostic, got %#v", diags)
+	// Bad agent must produce a warning about the invalid temperature.
+	var badWarn bool
+	for _, d := range diags {
+		if d.Level == "warning" && filepath.Base(d.File) == "with-bad-tuning.md" {
+			badWarn = true
+		}
 	}
+	if !badWarn {
+		t.Fatalf("expected a warning for the malformed temperature, got %#v", diags)
+	}
+
 	def := reg.Get("with-tuning")
 	if def == nil {
-		t.Fatal("expected agent to load despite unsupported field")
+		t.Fatal("expected agent to load")
 	}
 	if def.Model != "gpt-5" {
-		t.Errorf("expected Model=\"gpt-5\", got %q", def.Model)
+		t.Errorf("Model = %q, want gpt-5", def.Model)
+	}
+	if def.Temperature == nil || *def.Temperature != 0.3 {
+		t.Errorf("Temperature = %v, want 0.3", def.Temperature)
+	}
+	if def.TopP == nil || *def.TopP != 0.9 {
+		t.Errorf("TopP = %v, want 0.9", def.TopP)
 	}
 }
 
