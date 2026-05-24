@@ -184,9 +184,6 @@ func gateToolCall(mode Mode, name string, args json.RawMessage) (string, bool) {
 		// Plan/review/debug/docs agents may delegate to read-only subagents
 		// (explore, scout, general). Per-subagent tool gates still apply inside
 		// the subagent run, so plan mode delegating to explore stays read-only.
-		if mode == ModePlan || mode == ModeReview || mode == ModeDebug || mode == ModeDocs {
-			return "", true
-		}
 		return "", true
 	case "plan_enter", "plan_exit":
 		if mode == ModePlan {

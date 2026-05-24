@@ -23,10 +23,26 @@ const (
 
 // detailView is one entry on the drill-in stack.
 type detailView struct {
-	kind   detailViewKind
-	runID  string // set for detailAgentRun and process views scoped to a run
-	procID string // set for detailProcessLog
-	vp     viewport.Model
+	kind    detailViewKind
+	runID   string // set for detailAgentRun and process views scoped to a run
+	runPath string // unique nested path for detailAgentRun/process views
+	procID  string // set for detailProcessLog
+	vp      viewport.Model
+	runs    []detailRunBlock
+	procs   []detailProcBlock
+}
+
+type detailRunBlock struct {
+	runID    string
+	runPath  string
+	rowStart int
+	rowEnd   int
+}
+
+type detailProcBlock struct {
+	procID   string
+	rowStart int
+	rowEnd   int
 }
 
 // detailStack is a LIFO stack of drill-in views. The empty stack means the
@@ -74,15 +90,20 @@ func blockAtRow(blocks []agentStripBlock, row int) string {
 // detail viewport. It intentionally hides raw system prompts; the default user
 // view should explain agent activity, not dump internal prompts.
 func renderRunTranscript(run *agent.AgentRun, width int) string {
+	content, _, _ := renderRunTranscriptDetail(run, run.ID, width)
+	return content
+}
+
+func renderRunTranscriptDetail(run *agent.AgentRun, runPath string, width int) (string, []detailRunBlock, []detailProcBlock) {
 	if width < 24 {
 		width = 24
 	}
-	return renderAgentRunCard(run, width, 0)
+	return renderAgentRunCard(run, runPath, width, 0)
 }
 
-func renderAgentRunCard(run *agent.AgentRun, width, depth int) string {
+func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (string, []detailRunBlock, []detailProcBlock) {
 	if run == nil {
-		return ""
+		return "", nil, nil
 	}
 	indent := strings.Repeat("  ", min(depth, 2))
 	cardWidth := max(20, width-lipglossWidth(indent)-2)
@@ -90,52 +111,112 @@ func renderAgentRunCard(run *agent.AgentRun, width, depth int) string {
 	childSummary := formatChildSummary(children)
 
 	var body strings.Builder
+	var runBlocks []detailRunBlock
+	var procBlocks []detailProcBlock
+	currentRow := 0
+	appendLine := func(line string) {
+		body.WriteString(line)
+		body.WriteString("\n")
+		currentRow++
+	}
 	header := fmt.Sprintf("▾ %s  %s %s · %s", run.Name, statusIcon(run.Status, "●"), run.Status, formatRunElapsed(run))
 	if childSummary != "" {
 		header += " · " + childSummary
 	}
-	body.WriteString(header)
-	body.WriteString("\n")
-	body.WriteString(hintStyle.Render(run.ID))
+	cardStart := currentRow
+	appendLine(header)
+	appendLine(hintStyle.Render(run.ID))
 
 	if run.Status == agent.RunFailed && strings.TrimSpace(run.Err) != "" {
-		body.WriteString("\n\n")
-		body.WriteString(errorStyle.Render("Error: " + strings.TrimSpace(run.Err)))
+		appendLine(errorStyle.Render("Error: " + strings.TrimSpace(run.Err)))
 	}
 
 	if events := agentRunEvents(run, 0); len(events) > 0 {
-		body.WriteString("\n\n")
-		body.WriteString(headerStyle.Render("Timeline"))
+		appendLine(headerStyle.Render("Timeline"))
 		for _, event := range events {
-			body.WriteString("\n")
-			body.WriteString("• " + renderMarkdownBold(event, textStyle))
+			appendLine("• " + renderMarkdownBold(event, textStyle))
 		}
 	} else {
-		body.WriteString("\n\n")
-		body.WriteString(hintStyle.Render("No user-visible activity yet."))
+		appendLine(hintStyle.Render("No user-visible activity yet."))
 	}
 
 	if run.Status == agent.RunDone && strings.TrimSpace(run.Result) != "" {
-		body.WriteString("\n\n")
-		body.WriteString(headerStyle.Render("Result"))
-		body.WriteString("\n")
-		body.WriteString(renderMarkdownBold(strings.TrimSpace(run.Result), textStyle))
+		appendLine(headerStyle.Render("Result"))
+		appendLine(renderMarkdownBold(strings.TrimSpace(run.Result), textStyle))
+	}
+
+	if procs := runProcesses(run); len(procs) > 0 {
+		appendLine(headerStyle.Render("Background processes"))
+		for _, pi := range procs {
+			line := formatProcessListLine(pi)
+			rowStart := currentRow
+			appendLine(line)
+			procBlocks = append(procBlocks, detailProcBlock{procID: pi.ID, rowStart: rowStart, rowEnd: currentRow})
+		}
 	}
 
 	if len(children) > 0 {
-		body.WriteString("\n\n")
-		body.WriteString(headerStyle.Render("Sub-agents"))
+		appendLine(headerStyle.Render("Sub-agents"))
 		for _, child := range children {
-			body.WriteString("\n")
-			body.WriteString(renderAgentRunCard(child, max(20, cardWidth-4), depth+1))
+			childStart := currentRow
+			childPath := runPath + "/" + child.ID
+			childText, childRuns, childProcs := renderAgentRunCard(child, childPath, max(20, cardWidth-4), depth+1)
+			body.WriteString(childText)
+			if !strings.HasSuffix(childText, "\n") {
+				body.WriteString("\n")
+			}
+			added := lineCount(childText)
+			for _, b := range childRuns {
+				b.rowStart += childStart
+				b.rowEnd += childStart
+				runBlocks = append(runBlocks, b)
+			}
+			for _, b := range childProcs {
+				b.rowStart += childStart
+				b.rowEnd += childStart
+				procBlocks = append(procBlocks, b)
+			}
+			currentRow += added
 		}
 	}
 
 	card := toolBoxStyle.Width(cardWidth).Render(body.String())
-	if indent == "" {
-		return card
+	runBlocks = append([]detailRunBlock{{runID: run.ID, runPath: runPath, rowStart: cardStart, rowEnd: currentRow}}, runBlocks...)
+	for i := range runBlocks {
+		runBlocks[i].rowStart++
+		runBlocks[i].rowEnd++
 	}
-	return indentBlock(card, indent)
+	for i := range procBlocks {
+		procBlocks[i].rowStart++
+		procBlocks[i].rowEnd++
+	}
+	if indent == "" {
+		return card, runBlocks, procBlocks
+	}
+	return indentBlock(card, indent), runBlocks, procBlocks
+}
+
+func lineCount(s string) int {
+	trimmed := strings.TrimSuffix(stripANSI(s), "\n")
+	if trimmed == "" {
+		return 0
+	}
+	return strings.Count(trimmed, "\n") + 1
+}
+
+func runProcesses(run *agent.AgentRun) []tool.ProcInfo {
+	if run == nil || run.Procs == nil {
+		return nil
+	}
+	return run.Procs.Snapshot()
+}
+
+func formatProcessListLine(pi tool.ProcInfo) string {
+	line := fmt.Sprintf("  %-8s %-9s %s", pi.ID, pi.Status, pi.Command)
+	if pi.Status != tool.ProcRunning {
+		line += fmt.Sprintf("  (exit %d)", pi.ExitCode)
+	}
+	return line
 }
 
 func agentRunEvents(run *agent.AgentRun, limit int) []string {
@@ -278,11 +359,7 @@ func renderProcessList(reg *tool.ProcessRegistry) string {
 	var b strings.Builder
 	b.WriteString("Background processes (enter/click to open):\n\n")
 	for _, pi := range reg.Snapshot() {
-		line := fmt.Sprintf("  %-8s %-9s %s", pi.ID, pi.Status, pi.Command)
-		if pi.Status != tool.ProcRunning {
-			line += fmt.Sprintf("  (exit %d)", pi.ExitCode)
-		}
-		b.WriteString(line + "\n")
+		b.WriteString(formatProcessListLine(pi) + "\n")
 	}
 	return b.String()
 }

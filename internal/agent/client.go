@@ -77,14 +77,53 @@ type GenericClient struct {
 }
 
 // applyGenerationParams adds temperature / top_p to a request payload if
-// configured. Centralised so every provider branch picks them up.
+// configured. Centralised so every provider branch picks them up. Skipped
+// when the active model is a reasoning family (o1/o3/o4/gpt-5/etc.) or when
+// the Anthropic extended-thinking budget is set — both APIs reject the
+// sampling tunables in those cases.
 func (c *GenericClient) applyGenerationParams(payload map[string]interface{}) {
+	if !c.samplingTunable() {
+		return
+	}
 	if c.Temperature != nil {
 		payload["temperature"] = *c.Temperature
 	}
 	if c.TopP != nil {
 		payload["top_p"] = *c.TopP
 	}
+}
+
+// samplingTunable reports whether the active client/model accepts temperature
+// and top_p. Reasoning-family OpenAI models (o1/o3/o4/gpt-5*) and any
+// thinking-enabled session must omit these fields or the API hard-rejects.
+func (c *GenericClient) samplingTunable() bool {
+	if c.ThinkingBudget > 0 {
+		return false
+	}
+	if isReasoningOnlyModel(c.Model) {
+		return false
+	}
+	return true
+}
+
+// isReasoningOnlyModel returns true for models that reject temperature/top_p.
+// Kept narrow on purpose: only the OpenAI o-series and gpt-5* families are
+// known-bad today. Extend as new families surface the same constraint.
+func isReasoningOnlyModel(modelID string) bool {
+	m := strings.ToLower(strings.TrimSpace(modelID))
+	if m == "" {
+		return false
+	}
+	if i := strings.LastIndex(m, "/"); i >= 0 {
+		m = m[i+1:]
+	}
+	if i := strings.LastIndex(m, ":"); i >= 0 {
+		m = m[i+1:]
+	}
+	return strings.HasPrefix(m, "o1") ||
+		strings.HasPrefix(m, "o3") ||
+		strings.HasPrefix(m, "o4") ||
+		strings.HasPrefix(m, "gpt-5")
 }
 
 func (c *GenericClient) GetProvider() string {
@@ -327,7 +366,135 @@ func reasoningEffortForBudget(budget int) string {
 	}
 }
 
+// hoistSystemMessages moves any system messages that appear after a non-system
+// message to the front of the list, preserving their relative order. Some
+// OpenAI-compatible providers (DeepSeek, chutes-routed DeepSeek) reject
+// requests where a system message appears mid-conversation; the compaction
+// summary is inserted as a system message after the first user turn, which
+// trips that check. Leading system messages are left untouched.
+func hoistSystemMessages(messages []Message) []Message {
+	sawNonSystem := false
+	needsHoist := false
+	for _, m := range messages {
+		if m.Role != "system" {
+			sawNonSystem = true
+			continue
+		}
+		if sawNonSystem {
+			needsHoist = true
+			break
+		}
+	}
+	if !needsHoist {
+		return messages
+	}
+	out := make([]Message, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == "system" {
+			out = append(out, m)
+		}
+	}
+	for _, m := range messages {
+		if m.Role != "system" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// mergeLeadingSystemMessages merges consecutive system messages at the front
+// of the messages slice into a single system message. Some OpenAI-compatible
+// providers (Chutes-routed DeepSeek in particular) reject multiple system
+// messages or require exactly one system message at position 0. Merging them
+// eliminates that ambiguity.
+func mergeLeadingSystemMessages(messages []Message) []Message {
+	if len(messages) == 0 || messages[0].Role != "system" {
+		return messages
+	}
+	// Count leading system messages.
+	end := 0
+	for end < len(messages) && messages[end].Role == "system" {
+		end++
+	}
+	if end <= 1 {
+		return messages // zero or one system message — nothing to merge
+	}
+	// Merge their content.
+	var b strings.Builder
+	for i := 0; i < end; i++ {
+		if i > 0 {
+			b.WriteString("\n\n")
+		}
+		b.WriteString(messages[i].Content)
+	}
+	out := make([]Message, 0, len(messages)-end+1)
+	out = append(out, Message{Role: "system", Content: b.String()})
+	out = append(out, messages[end:]...)
+	return out
+}
+
+// collectAndRemoveSystemMessages extracts all system-role messages from the
+// slice, merges them into a single string (separated by blank lines), and
+// returns the merged text plus the slice with all system messages removed.
+// Useful for providers like Anthropic that pass system as a top-level field.
+func collectAndRemoveSystemMessages(messages []Message) (string, []Message) {
+	var parts []string
+	var rest []Message
+	for _, m := range messages {
+		if m.Role == "system" {
+			parts = append(parts, m.Content)
+		} else {
+			rest = append(rest, m)
+		}
+	}
+	if len(parts) == 0 {
+		return "", messages
+	}
+	return strings.Join(parts, "\n\n"), rest
+}
+
+// repairToolCallSequence ensures every assistant tool_call has a matching
+// `role:"tool"` message before the next assistant/user turn. OpenAI-compatible
+// providers (DeepSeek in particular) reject the request with a 400 when any
+// tool_call_id is left unanswered — this can happen if a tool execution was
+// cancelled, panicked, or the session was persisted mid-turn. Rather than drop
+// the assistant request, we synthesise a stub tool result so the conversation
+// stays valid and the model can react to the failure on the next turn.
+func repairToolCallSequence(messages []Message) []Message {
+	out := make([]Message, 0, len(messages))
+	for i := 0; i < len(messages); i++ {
+		m := messages[i]
+		out = append(out, m)
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			continue
+		}
+		// Collect tool result IDs that appear before the next assistant/user/system message.
+		seen := make(map[string]bool, len(m.ToolCalls))
+		for j := i + 1; j < len(messages); j++ {
+			if messages[j].Role != "tool" {
+				break
+			}
+			seen[messages[j].ToolID] = true
+		}
+		for _, tc := range m.ToolCalls {
+			if tc.ID == "" || seen[tc.ID] {
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "[agent] repair: synthesising missing tool result for tool_call_id=%s (%s)\n", tc.ID, tc.Function.Name)
+			out = append(out, Message{
+				Role:    "tool",
+				ToolID:  tc.ID,
+				Content: "[tool execution interrupted: no result was recorded; treat this call as failed]",
+			})
+		}
+	}
+	return out
+}
+
 func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[string]interface{}, error) {
+	messages = repairToolCallSequence(messages)
+	messages = hoistSystemMessages(messages)
+	messages = mergeLeadingSystemMessages(messages)
 	var result []map[string]interface{}
 	for _, m := range messages {
 		if m.Role == "tool" {
@@ -880,13 +1047,12 @@ func jwtClaim(token string, keys ...string) string {
 func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]interface{}) (*Message, error) {
 	url := c.BaseURL + "/messages"
 
-	var system string
+	messages = repairToolCallSequence(messages)
+
+	system, messages := collectAndRemoveSystemMessages(messages)
+
 	var anthropicMsgs []map[string]interface{}
 	for _, m := range messages {
-		if m.Role == "system" {
-			system = m.Content
-			continue
-		}
 		role := m.Role
 		if role == "tool" {
 			role = "user"
@@ -983,12 +1149,9 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		"messages":   anthropicMsgs,
 		"max_tokens": maxTokens,
 	}
-	// Anthropic disallows temperature/top_p tuning when extended thinking is on
-	// (the API requires temperature=1.0 + no top_p). Skip applying overrides in
-	// that case so a thinking-enabled session doesn't get hard-rejected.
-	if c.ThinkingBudget == 0 {
-		c.applyGenerationParams(payload)
-	}
+	// applyGenerationParams self-skips when ThinkingBudget>0 — Anthropic's
+	// Messages API rejects temperature/top_p alongside extended thinking.
+	c.applyGenerationParams(payload)
 
 	if c.ThinkingBudget > 0 {
 		payload["thinking"] = map[string]interface{}{

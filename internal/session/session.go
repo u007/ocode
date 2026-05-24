@@ -294,6 +294,77 @@ func ListAll() ([]Ref, error) {
 	return refs, nil
 }
 
+// ListRefs returns Ref metadata for all sessions without loading full message content.
+// It is significantly faster than List/ListAll for listing operations.
+func ListRefs() ([]Ref, error) {
+	dir, err := GetStorageDir()
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	// Lightweight struct for partial JSON decode (no Messages)
+	type sessionMeta struct {
+		ID        string    `json:"id"`
+		Title     string    `json:"title"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Metadata  map[string]any `json:"metadata,omitempty"`
+	}
+
+	refs := make([]Ref, 0, len(entries))
+	clonedClaude := make(map[string]struct{})
+
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" || e.Name() == "index.json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var meta sessionMeta
+		if err := json.Unmarshal(data, &meta); err != nil {
+			continue
+		}
+		refs = append(refs, Ref{
+			ID:        meta.ID,
+			Title:     meta.Title,
+			UpdatedAt: meta.UpdatedAt,
+			Source:    SourceOcode,
+		})
+		if meta.Metadata != nil {
+			if originalID, ok := meta.Metadata["claude_original_session_id"].(string); ok && originalID != "" {
+				clonedClaude[originalID] = struct{}{}
+			}
+		}
+	}
+
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].UpdatedAt.After(refs[j].UpdatedAt)
+	})
+
+	claudeRefs, err := listClaudeSessions()
+	if err != nil {
+		return refs, nil // best-effort: return ocode-only refs
+	}
+	for _, ref := range claudeRefs {
+		if _, ok := clonedClaude[strings.TrimPrefix(ref.ID, "claude:")]; ok {
+			continue
+		}
+		refs = append(refs, ref)
+	}
+
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].UpdatedAt.After(refs[j].UpdatedAt)
+	})
+
+	return refs, nil
+}
+
 func LoadAny(id string) (*Session, error) {
 	if strings.HasPrefix(id, "claude:") {
 		return CloneClaudeSession(strings.TrimPrefix(id, "claude:"))

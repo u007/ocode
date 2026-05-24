@@ -41,6 +41,84 @@ func TestSafeCutRespectsToolPairs(t *testing.T) {
 	}
 }
 
+func TestSafeCutReverseDirection(t *testing.T) {
+	// Test that safeCut also walks back when an assistant with tool_calls in
+	// the suffix is missing its matching tool result (the reverse of the
+	// existing check which guards against orphaned tool results).
+
+	t.Run("orphaned_result_in_suffix", func(t *testing.T) {
+		// Cut between assistant(call2) and its tool result: the tool result
+		// in the suffix has no matching assistant — must walk back.
+		msgs := []Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "ask"},
+			{Role: "assistant", ToolCalls: []ToolCall{tcCall("call1", "read")}},
+			{Role: "tool", ToolID: "call1", Content: "result1"},
+			{Role: "assistant", Content: "done"},
+			{Role: "user", Content: "followup"},
+			{Role: "assistant", ToolCalls: []ToolCall{tcCall("call2", "write")}},
+			{Role: "tool", ToolID: "call2", Content: "result2"},
+			{Role: "assistant", Content: "finished"},
+		}
+		// Cut between assistant(call2) and tool(call2) — tool result orphaned in suffix.
+		got := safeCut(msgs, 7)
+		if got == 7 {
+			t.Errorf("safeCut(7) = %d, must not equal 7 (would orphan tool result call2 in suffix)", got)
+		}
+		// Clean cut after the full pair is safe.
+		got = safeCut(msgs, 8)
+		if got != 8 {
+			t.Errorf("safeCut(8) = %d, want 8 (clean boundary after tool pair)", got)
+		}
+	})
+
+	t.Run("orphaned_call_in_suffix", func(t *testing.T) {
+		// Cut between tool(call1) and user: the assistant(call1) in the
+		// suffix has no matching tool result — must walk back.
+		msgs := []Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "ask"},
+			{Role: "assistant", ToolCalls: []ToolCall{tcCall("call1", "read")}},
+			{Role: "tool", ToolID: "call1", Content: "result1"},
+			{Role: "user", Content: "next"},
+		}
+		// Cut at index 4 (the user "next"): suffix = [user(next)]
+		// No tool pairs in suffix → safe. Assistant(call1) with its result
+		// are both in the prefix, which is fine.
+		got := safeCut(msgs, 4)
+		if got != 4 {
+			t.Errorf("safeCut(4) = %d, want 4 (no tool pairs in suffix)", got)
+		}
+	})
+
+	t.Run("orphaned_call_in_suffix_requires_walkback", func(t *testing.T) {
+		// Assistant(call2) has no matching tool result in the conversation.
+		// The cut at the user boundary would put assistant(call2) in the
+		// suffix without its result — must walk back to exclude it.
+		msgs := []Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "ask"},
+			{Role: "assistant", ToolCalls: []ToolCall{tcCall("call1", "read")}},
+			{Role: "tool", ToolID: "call1", Content: "result1"},
+			{Role: "assistant", Content: "done"},
+			{Role: "user", Content: "followup"},
+			{Role: "assistant", ToolCalls: []ToolCall{tcCall("call2", "write")}},
+			// No tool result for call2!
+		}
+		// findTurnBoundary(1) would give index 5 (user "followup").
+		// safeCut(5): suffix=[user(followup), assistant(call2)]
+		//   suffixCallIDs = {"call2"}, suffixResultIDs = {}
+		//   Reverse check: "call2" not in suffixResultIDs → unsafe!
+		got := safeCut(msgs, 5)
+		if got == 5 {
+			t.Errorf("safeCut(5) = %d, must not equal 5 (would orphan assistant tool_call call2 in suffix)", got)
+		}
+		if got > 5 {
+			t.Errorf("safeCut(5) = %d, must not exceed 5 (cut beyond len would be invalid)", got)
+		}
+	})
+}
+
 func TestSafeCutNoToolCalls(t *testing.T) {
 	msgs := []Message{
 		{Role: "system", Content: "sys"},

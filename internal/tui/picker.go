@@ -116,33 +116,86 @@ func (m *model) openThemePicker() {
 	m.showPicker = true
 }
 
+const sessionPickerPageSize = 50
+
+// formatPickerSession builds the display string for a session ref.
+func formatPickerSession(s session.Ref) string {
+	title := s.Title
+	if title == "" {
+		title = "(no title)"
+	}
+	marker := "[ocode]"
+	if s.Source == session.SourceClaude {
+		marker = "[claude]"
+	}
+	return fmt.Sprintf("%s %s  %s", marker, s.ID, title)
+}
+
+// rebuildSessionPickerItems rebuilds pickerItems/pickerValues from pickerSessionRefs
+// up to the current page.
+func (m *model) rebuildSessionPickerItems() {
+	total := len(m.pickerSessionRefs)
+	pageEnd := m.pickerSessionPage * sessionPickerPageSize
+	if pageEnd > total {
+		pageEnd = total
+	}
+	items := make([]string, 0, pageEnd)
+	values := make([]string, 0, pageEnd)
+	for i := 0; i < pageEnd; i++ {
+		items = append(items, formatPickerSession(m.pickerSessionRefs[i]))
+		values = append(values, m.pickerSessionRefs[i].ID)
+	}
+	m.pickerItems = items
+	m.pickerValues = values
+}
+
 func (m *model) openSessionPicker() {
-	sessions, err := session.ListAll()
+	refs, err := session.ListRefs()
 	if err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error listing sessions: %v", err)})
 		return
 	}
-	items := make([]string, 0, len(sessions))
-	values := make([]string, 0, len(sessions))
-	for _, s := range sessions {
-		title := s.Title
-		if title == "" {
-			title = "(no title)"
-		}
-		marker := "[ocode]"
-		if s.Source == session.SourceClaude {
-			marker = "[claude]"
-		}
-		items = append(items, fmt.Sprintf("%s %s  %s", marker, s.ID, title))
-		values = append(values, s.ID)
-	}
+	m.pickerSessionRefs = refs
+	m.pickerSessionTotal = len(refs)
+	m.pickerSessionPage = 1
+	m.pickerSessionMore = len(refs) > sessionPickerPageSize
+
+	m.rebuildSessionPickerItems()
+
 	m.pickerKind = "session"
-	m.pickerItems = items
-	m.pickerValues = values
 	m.pickerIsHeader = nil
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
+}
+
+// loadMoreSessions loads the next page of sessions into the picker items.
+func (m *model) loadMoreSessions() {
+	if !m.pickerSessionMore {
+		return
+	}
+	m.pickerSessionPage++
+	m.rebuildSessionPickerItems()
+	m.pickerSessionMore = m.pickerSessionPage*sessionPickerPageSize < len(m.pickerSessionRefs)
+}
+
+// loadAllSessions loads all sessions into the picker (used when filtering).
+func (m *model) loadAllSessions() {
+	if !m.pickerSessionMore {
+		return
+	}
+	m.pickerSessionPage = (len(m.pickerSessionRefs) + sessionPickerPageSize - 1) / sessionPickerPageSize
+	m.rebuildSessionPickerItems()
+	m.pickerSessionMore = false
+}
+
+// pickerScrollPercent returns how far through the items the cursor is (0.0 - 1.0).
+func (m model) pickerScrollPercent() float64 {
+	items, _ := m.pickerVisibleItems()
+	if len(items) <= 1 {
+		return 1.0
+	}
+	return float64(m.pickerIndex) / float64(len(items)-1)
 }
 
 func (m *model) openEditorPicker() {
@@ -210,6 +263,10 @@ func (m *model) closePicker() {
 	m.pickerFilter = ""
 	m.pickerFilterPending = ""
 	m.pickerFilterSeq++
+	m.pickerSessionRefs = nil
+	m.pickerSessionPage = 0
+	m.pickerSessionTotal = 0
+	m.pickerSessionMore = false
 	m.input.Focus()
 }
 
@@ -420,9 +477,15 @@ func (m model) renderPicker() string {
 		}
 		const maxRows = 15
 		if len(items) > maxRows {
-			body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown", end-start, len(items))))
+			if m.pickerKind == "session" && m.pickerSessionMore {
+				body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown ↓ scroll for more", end-start, m.pickerSessionTotal)))
+			} else {
+				body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown", end-start, len(items))))
+			}
+		} else if m.pickerKind == "session" && m.pickerSessionMore {
+			body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown ↓ scroll for more", end-start, m.pickerSessionTotal)))
 		}
-	}
+		}
 
 	width := m.width - 4
 	if width < 40 {
@@ -435,7 +498,11 @@ func (m model) renderPicker() string {
 	if visibleCount < 1 {
 		visibleCount = 1
 	}
-	sb := renderListScrollbar(visibleCount, len(filteredItems), start, visibleCount)
+	totalForScrollbar := len(filteredItems)
+	if m.pickerKind == "session" && m.pickerSessionTotal > totalForScrollbar {
+		totalForScrollbar = m.pickerSessionTotal
+	}
+	sb := renderListScrollbar(visibleCount, totalForScrollbar, start, visibleCount)
 	bodyStr := body.String()
 	hintStr := hintLine
 	sbLines := strings.Split(sb, "\n")

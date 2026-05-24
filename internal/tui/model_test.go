@@ -1034,6 +1034,203 @@ func TestMouseWheelScrollsTranscriptOnlyWhenOverMessages(t *testing.T) {
 	}
 }
 
+func TestMouseWheelScrollsAgentDetailView(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	msgs := make([]agent.Message, 0, 80)
+	for i := 0; i < 40; i++ {
+		msgs = append(msgs,
+			agent.Message{Role: "user", Content: "task line"},
+			agent.Message{Role: "assistant", Content: "reply line"},
+		)
+	}
+	setRunTranscriptForTest(run, msgs...)
+
+	m := model{
+		ready:       true,
+		width:       80,
+		height:      24,
+		activeTab:   tabChat,
+		input:       newTestTextarea(),
+		styles:      ApplyThemeColors("tokyonight"),
+		scrollSpeed: 3,
+		agent:       a,
+	}
+	m.openAgentDetail(run.ID)
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 2, Y: m.detailViewportContentTopY(), Button: tea.MouseWheelDown})
+	got := derefTestModel(t, updated)
+	if len(got.detail) == 0 || got.detail[len(got.detail)-1].vp.YOffset() == 0 {
+		t.Fatal("expected mouse wheel to scroll agent detail view")
+	}
+	before := got.detail[len(got.detail)-1].vp.YOffset()
+	updated, _ = got.Update(tea.MouseWheelMsg{X: 2, Y: got.height - 1, Button: tea.MouseWheelDown})
+	got = derefTestModel(t, updated)
+	if got.detail[len(got.detail)-1].vp.YOffset() != before {
+		t.Fatalf("expected wheel outside detail viewport to keep offset %d, got %d", before, got.detail[len(got.detail)-1].vp.YOffset())
+	}
+}
+
+func TestAgentDetailScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	msgs := make([]agent.Message, 0, 120)
+	for i := 0; i < 60; i++ {
+		msgs = append(msgs, agent.Message{Role: "assistant", Content: "detail line"})
+	}
+	setRunTranscriptForTest(run, msgs...)
+
+	m := model{
+		ready:     true,
+		width:     80,
+		height:    24,
+		activeTab: tabChat,
+		input:     newTestTextarea(),
+		styles:    ApplyThemeColors("tokyonight"),
+		agent:     a,
+	}
+	m.openAgentDetail(run.ID)
+	m.detail[len(m.detail)-1].vp.SetYOffset(30)
+	before := m.detail[len(m.detail)-1].vp.YOffset()
+
+	top := m.detail[len(m.detail)-1]
+	trackTop, trackHeight := m.detailScrollbarMetrics()
+	thumbTop, thumbSize, ok := scrollbarThumbMetrics(trackHeight, top.vp.TotalLineCount(), top.vp.VisibleLineCount(), before)
+	if !ok {
+		t.Fatal("expected scrollable detail viewport")
+	}
+	trackRow := 0
+	if trackRow >= thumbTop && trackRow < thumbTop+thumbSize {
+		trackRow = thumbTop + thumbSize
+	}
+	if trackRow >= trackHeight {
+		trackRow = 0
+	}
+
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.detailScrollbarX(), Y: trackTop + trackRow})
+	got := derefTestModel(t, updated)
+	if got.detail[len(got.detail)-1].vp.YOffset() == before {
+		t.Fatalf("expected detail scrollbar track click to jump offset from %d", before)
+	}
+	if got.scrollbarDrag != scrollbarDragNone {
+		t.Fatalf("expected detail scrollbar track click not to start drag, got %v", got.scrollbarDrag)
+	}
+}
+
+func TestAgentDetailClickOpensNestedSubAgent(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	run.Sub = agent.NewAgent(nil, nil, nil)
+	child := run.Sub.Runs().New("child")
+	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "root"})
+	setRunTranscriptForTest(child, agent.Message{Role: "assistant", Content: "child"})
+
+	m := model{ready: true, width: 100, height: 28, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
+	m.openAgentDetail(run.ID)
+	top := m.detail[len(m.detail)-1]
+	var row int
+	found := false
+	for _, b := range top.runs {
+		if b.runPath != top.runPath {
+			row = b.rowStart
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected child run block in detail view")
+	}
+
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 2, Y: m.detailViewportContentTopY() + row})
+	got := derefTestModel(t, updated)
+	if len(got.detail) < 2 {
+		t.Fatal("expected clicking child run to push nested detail view")
+	}
+	if got.detail[len(got.detail)-1].runID != child.ID {
+		t.Fatalf("expected nested detail for %q, got %q", child.ID, got.detail[len(got.detail)-1].runID)
+	}
+}
+
+func TestMouseWheelScrollsAgentDetailViewport(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	msgs := make([]agent.Message, 0, 60)
+	for i := 0; i < 60; i++ {
+		msgs = append(msgs, agent.Message{Role: "assistant", Content: "detail line"})
+	}
+	setRunTranscriptForTest(run, msgs...)
+
+	m := model{
+		ready:       true,
+		width:       80,
+		height:      24,
+		activeTab:   tabChat,
+		input:       newTestTextarea(),
+		styles:      ApplyThemeColors("tokyonight"),
+		scrollSpeed: 3,
+		agent:       a,
+	}
+	m.openAgentDetail(run.ID)
+
+	updated, _ := m.Update(tea.MouseWheelMsg{X: 2, Y: m.detailViewportContentTopY(), Button: tea.MouseWheelDown})
+	got := derefTestModel(t, updated)
+	if got.detail[len(got.detail)-1].vp.YOffset() == 0 {
+		t.Fatal("expected mouse wheel over detail viewport to scroll")
+	}
+
+	before := got.detail[len(got.detail)-1].vp.YOffset()
+	updated, _ = got.Update(tea.MouseWheelMsg{X: 2, Y: got.height - 1, Button: tea.MouseWheelDown})
+	got = derefTestModel(t, updated)
+	if got.detail[len(got.detail)-1].vp.YOffset() != before {
+		t.Fatalf("expected wheel outside detail viewport to keep offset at %d, got %d", before, got.detail[len(got.detail)-1].vp.YOffset())
+	}
+}
+
+func TestAgentDetailShowsAndOpensRunBackgroundProcess(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	run.Procs = tool.NewProcessRegistry()
+	proc := run.Procs.StartBackground("printf hello")
+	t.Cleanup(func() { _, _ = run.Procs.Kill(proc.ID) })
+	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "root"})
+	time.Sleep(50 * time.Millisecond)
+
+	m := model{ready: true, width: 100, height: 28, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
+	m.openAgentDetail(run.ID)
+	top := m.detail[len(m.detail)-1]
+	if len(top.procs) == 0 {
+		t.Fatal("expected background process blocks in agent detail view")
+	}
+	row := top.procs[0].rowStart
+
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 2, Y: m.detailViewportContentTopY() + row})
+	got := derefTestModel(t, updated)
+	if len(got.detail) < 2 {
+		t.Fatal("expected clicking process row to open process log detail")
+	}
+	if got.detail[len(got.detail)-1].kind != detailProcessLog {
+		t.Fatalf("expected process log detail, got %v", got.detail[len(got.detail)-1].kind)
+	}
+	if got.detail[len(got.detail)-1].procID != proc.ID {
+		t.Fatalf("expected process log for %q, got %q", proc.ID, got.detail[len(got.detail)-1].procID)
+	}
+}
+
+func TestAgentDetailSuppressesHiddenInputEditing(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "root"})
+
+	m := model{ready: true, width: 100, height: 28, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
+	m.openAgentDetail(run.ID)
+
+	updated, _ := m.Update(tea.KeyPressMsg{Text: "x"})
+	got := derefTestModel(t, updated)
+	if got.input.Value() != "" {
+		t.Fatalf("expected hidden chat input to stay unchanged while detail view is open, got %q", got.input.Value())
+	}
+}
+
 func TestTranscriptScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
 	m := model{
 		width:     80,

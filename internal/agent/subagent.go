@@ -80,6 +80,17 @@ var DefaultSubAgents = []SubAgentSpec{
 	},
 }
 
+// enumNames returns visible names for the JSON Schema enum, falling back to
+// the full list (which may include hidden agents like "title"/"compaction")
+// only if no visible subagents are registered — otherwise we'd ship an empty
+// enum, which most schema validators reject.
+func enumNames(visible, all []string) []string {
+	if len(visible) > 0 {
+		return visible
+	}
+	return all
+}
+
 func FindSubAgentSpec(name string) *SubAgentSpec {
 	for i := range DefaultSubAgents {
 		if DefaultSubAgents[i].Name == name {
@@ -125,12 +136,12 @@ func (t TaskTool) Definition() map[string]interface{} {
 				"agent": map[string]interface{}{
 					"type":        "string",
 					"description": "The sub-agent type to use. Options: " + strings.Join(visibleAgentNames, ", "),
-					"enum":        subAgentNames,
+					"enum":        enumNames(visibleAgentNames, subAgentNames),
 				},
 				"subagent_type": map[string]interface{}{
 					"type":        "string",
 					"description": "OpenCode-compatible alias for agent. Options: " + strings.Join(visibleAgentNames, ", "),
-					"enum":        subAgentNames,
+					"enum":        enumNames(visibleAgentNames, subAgentNames),
 				},
 				"context": map[string]interface{}{
 					"type":        "string",
@@ -194,22 +205,24 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config)
 	// Subagents do not inherit the parent's mode prompt — they have their own
-	// system prompt. Setting a spec with SystemPrompt makes BasePromptMessages
-	// use it in place of the mode prompt; leaving subAgent.mode empty prevents
-	// any leakage. The subagent prompt below is now a no-op once the assembler
-	// picks up spec.SystemPrompt, but we keep the explicit message for now to
-	// preserve transcript shape.
-	subAgent.spec = &AgentSpec{
+	// system prompt. SetSpec installs the spec AND runs applySpecModel so any
+	// Model / Temperature / TopP overrides on the registry definition actually
+	// reach the subagent's client. Building the spec literal and assigning to
+	// subAgent.spec directly would bypass applySpecModel and silently lose
+	// those fields.
+	subSpec := AgentSpec{
 		Name:         spec.Name,
 		Description:  spec.Description,
 		SystemPrompt: spec.SystemPrompt,
 		Tools:        spec.Tools,
 		DeniedTools:  spec.DeniedTools,
 		MaxSteps:     spec.MaxSteps,
+		Model:        spec.Model,
+		Color:        spec.Color,
+		Temperature:  spec.Temperature,
+		TopP:         spec.TopP,
 	}
-	if spec.MaxSteps > 0 {
-		subAgent.maxSteps = spec.MaxSteps
-	}
+	subAgent.SetSpec(&subSpec)
 
 	// Inherit the shared session supervisor so subagent processes are tracked
 	// under the same lifecycle owner as the main agent.

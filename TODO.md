@@ -45,6 +45,8 @@ Execution wrapper design:
 ## LLM provider layer — deferred work
 
 - **Streaming provider adapters.** `internal/agent/llm_contract.go` defines stream event types and the optional `StreamingLLMClient` interface, but `GenericClient` still uses request/response chat. Next step is dedicated OpenAI-compatible, Anthropic, and Copilot adapters that emit `text_delta`, `thinking_delta`, tool-call, usage, and done events.
+- **Thread context into `LLMClient.Chat`.** Title generation (`title.go`) and compaction (`compact.go`) wrap `client.Chat` in `select { case <-ctx.Done() }`, but the inner goroutine ignores cancellation and keeps running until the HTTP client's 5-minute timeout fires. Adding `Chat(ctx, ...)` to the interface + propagating through all 4 providers and the test mocks would let these helpers actually cancel. Bounded leak today, but cost is real on slow networks. (from review-changes: 2026-05-24)
+- **Drop `AgentTool` legacy shim.** The `agent` tool is no longer registered (`internal/agent/agent.go` only registers `task`). The type stays for transcript/permission compatibility. Remove once historical sessions don't need to round-trip — pick a date (e.g. 2026-08-01) and delete the type, the back-compat permission alias, and the TUI tool renderer branch. (from review-changes: 2026-05-24)
 
 ## Context compaction — deferred work
 

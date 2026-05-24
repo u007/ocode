@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
 )
@@ -85,4 +87,33 @@ func TestAgentStripScrollVisibility(t *testing.T) {
 	if m.agentStripSelected < m.agentStripOffset || m.agentStripSelected >= m.agentStripOffset+count {
 		t.Fatalf("selected=%d not in visible window [%d,%d)", m.agentStripSelected, m.agentStripOffset, m.agentStripOffset+count)
 	}
+}
+
+func TestRenderRunTranscriptUsesSingleSpacingBetweenSectionsAndEvents(t *testing.T) {
+	run := &agent.AgentRun{
+		ID:     "agent-1",
+		Name:   "worker",
+		Status: agent.RunDone,
+		Result: "done",
+	}
+	setRunTranscriptForTest(run,
+		agent.Message{Role: "user", Content: "first task"},
+		agent.Message{Role: "assistant", Content: "first reply"},
+	)
+
+	rendered := stripANSI(renderRunTranscript(run, 80))
+	if strings.Contains(rendered, "Timeline\n\n•") {
+		t.Fatalf("timeline bullets should be single-spaced, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "• Task: first task\n\n• Agent: first reply") {
+		t.Fatalf("agent messages should be single-spaced, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "Result\n\ndone") {
+		t.Fatalf("result section should be single-spaced, got:\n%s", rendered)
+	}
+}
+
+func setRunTranscriptForTest(run *agent.AgentRun, msgs ...agent.Message) {
+	v := reflect.ValueOf(run).Elem().FieldByName("transcript")
+	reflect.NewAt(v.Type(), unsafe.Pointer(v.UnsafeAddr())).Elem().Set(reflect.ValueOf(msgs))
 }

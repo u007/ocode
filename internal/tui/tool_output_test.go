@@ -23,7 +23,7 @@ func TestRenderToolResultPreservesFullOutput(t *testing.T) {
 
 func TestRenderToolResultHidesTruncationFooter(t *testing.T) {
 	content := fmt.Sprintf(
-		"line 1\nline 2\n\n[output truncated: showing first 100 of 139 lines]\nFull output saved to: /tmp/out.txt\nRetrieve remaining content with:\n  read tool: {\"path\": %q, \"offset\": 101, \"limit\": <n>}\n  or bash:   sed -n '101,139p' /tmp/out.txt",
+		"line 1\nline 2\n\n[output truncated: showing 100/139 lines, 14/14 chars]\nFull output saved to: /tmp/out.txt\nRetrieve remaining content with:\n  read tool: {\"path\": %q, \"start_line\": 101, \"end_line\": <n>}\n  or bash:   sed -n '101,139p' /tmp/out.txt",
 		"/tmp/out.txt",
 	)
 
@@ -42,7 +42,7 @@ func TestRenderToolResultHidesTruncationFooter(t *testing.T) {
 }
 
 func TestRenderToolResultHidesTruncationFooterPrefixOnly(t *testing.T) {
-	content := "[output truncated: showing first 100 of 200 lines]\nFull output saved to: /tmp/out.txt"
+	content := "[output truncated: showing 100/200 lines, 1000/2000 chars]\nFull output saved to: /tmp/out.txt"
 
 	got := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
 
@@ -53,20 +53,20 @@ func TestRenderToolResultHidesTruncationFooterPrefixOnly(t *testing.T) {
 
 func TestToolOutputBoxHidesTruncationFooter(t *testing.T) {
 	content := fmt.Sprintf(
-		"line 1\nline 2\n\n[output truncated: showing first 100 of 139 lines]\nFull output saved to: /tmp/out.txt\nRetrieve remaining content with:\n  read tool: {\"path\": %q, \"offset\": 101, \"limit\": <n>}\n  or bash:   sed -n '101,139p' /tmp/out.txt",
+		"line 1\nline 2\n\n[output truncated: showing 100/139 lines, 14/14 chars]\nFull output saved to: /tmp/out.txt\nRetrieve remaining content with:\n  read tool: {\"path\": %q, \"start_line\": 101, \"end_line\": <n>}\n  or bash:   sed -n '101,139p' /tmp/out.txt",
 		"/tmp/out.txt",
 	)
 	text := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
 	toolID := "tool-expand-1"
 	m := model{
-		ready:     true,
-		width:     100,
-		height:    30,
-		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(24)),
-		styles:    ApplyThemeColors("tokyonight"),
-		messages:  []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
-		sessionID: "test",
+		ready:               true,
+		width:               100,
+		height:              30,
+		input:               textarea.New(),
+		viewport:            viewport.New(viewport.WithWidth(96), viewport.WithHeight(24)),
+		styles:              ApplyThemeColors("tokyonight"),
+		messages:            []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
+		sessionID:           "test",
 		expandedToolOutputs: map[int]bool{0: true},
 	}
 	m.renderTranscript()
