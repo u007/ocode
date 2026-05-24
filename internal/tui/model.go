@@ -404,6 +404,7 @@ type model struct {
 	scrollbarDragOffset   int
 	workDir               string
 	currentAgentIdx       int
+	branchlessMode        bool
 	showPermDialog        bool
 	showQuestionDialog    bool
 	questionToolCallID    string

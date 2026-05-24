@@ -73,6 +73,7 @@ type tuiConfigFile struct {
 	Scroll        float64           `json:"scroll_speed"`
 	Keybinds      map[string]string `json:"keybinds"`
 	LeaderTimeout int               `json:"leader_timeout"`
+	Branchless    *bool             `json:"branchless"`
 }
 
 type ocodeConfigFile struct {
@@ -284,6 +285,9 @@ func applyTUIConfig(dst *TUIConfig, src tuiConfigFile) {
 	}
 	if src.LeaderTimeout != 0 {
 		dst.LeaderTimeout = src.LeaderTimeout
+	}
+	if src.Branchless != nil {
+		dst.Branchless = *src.Branchless
 	}
 	if dst.Keybinds == nil {
 		dst.Keybinds = make(map[string]string)
