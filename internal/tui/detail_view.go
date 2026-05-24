@@ -114,10 +114,15 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (
 	var runBlocks []detailRunBlock
 	var procBlocks []detailProcBlock
 	currentRow := 0
+	innerWidth := max(1, cardWidth-4)
 	appendLine := func(line string) {
-		body.WriteString(line)
+		wrapped := wrapView(line, innerWidth)
+		body.WriteString(wrapped)
 		body.WriteString("\n")
-		currentRow++
+		currentRow += lineCount(wrapped)
+		if wrapped == "" {
+			currentRow++
+		}
 	}
 	header := fmt.Sprintf("▾ %s  %s %s · %s", run.Name, statusIcon(run.Status, "●"), run.Status, formatRunElapsed(run))
 	if childSummary != "" {
