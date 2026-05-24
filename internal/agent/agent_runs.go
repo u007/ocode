@@ -23,16 +23,18 @@ const transcriptCap = 200
 
 // AgentRun is one async subagent execution.
 type AgentRun struct {
-	ID        string
-	Name      string
-	Status    RunStatus
-	Result    string
-	Err       string
-	StartedAt time.Time
-	EndedAt   time.Time
-	Procs     *tool.ProcessRegistry // the subagent's process registry
-	Sub       *Agent                // the subagent (for teardown)
-	Cancel    func()                // cancels the subagent's Step loop
+	ID         string
+	Name       string
+	Status     RunStatus
+	Result     string
+	Err        string
+	StartedAt  time.Time
+	EndedAt    time.Time
+	Procs      *tool.ProcessRegistry // the subagent's process registry
+	Sub        *Agent                // the subagent (for teardown)
+	Cancel     func()                // cancels the subagent's Step loop
+	Background bool                  // true if the LLM launched this with run_in_background; false means the parent's task tool call already received the full result synchronously
+	ToolCallID string                // the originating task tool_call id (best-effort; empty if unknown)
 
 	mu         sync.Mutex
 	transcript []Message

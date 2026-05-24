@@ -1231,6 +1231,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				userMsg.raw = &raw
 			}
 			m.messages = append(m.messages, userMsg)
+			if m.agent != nil {
+				m.agent.ResetSubagentDispatch()
+			}
 		}
 		m.renderTranscript()
 		m.viewport.GotoBottom()
@@ -1404,6 +1407,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		ev := msg.ev
+		// For agent runs that were synchronous, the parent agent already
+		// received the full result via the task tool's return value and the
+		// LLM has already responded to it. Re-injecting the completion as a
+		// fresh user/system message causes infinite re-dispatch loops with
+		// small models. Just listen for the next job and bail.
+		if ev.Kind == "agent" && !ev.Background {
+			if m.agent != nil {
+				return m, listenJobs(m.agent)
+			}
+			return m, nil
+		}
 		var header string
 		if ev.Kind == "agent" {
 			header = fmt.Sprintf("[Background agent %s (%s) %s]", ev.ID, ev.Name, ev.Status)
@@ -1411,10 +1425,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			header = fmt.Sprintf("[Background process %s %s]", ev.ID, ev.Status)
 		}
 		body := header + "\n" + ev.Result
+		// Use the system role so the model treats this as an out-of-band
+		// notification, not a fresh user instruction. This makes it far less
+		// likely to re-dispatch the same task in response to its own
+		// completion notice.
 		injected := message{
 			role: roleUser,
 			text: body,
-			raw:  &agent.Message{Role: "user", Content: body},
+			raw:  &agent.Message{Role: "system", Content: body},
 		}
 		if m.streaming {
 			m.pendingJobMsgs = append(m.pendingJobMsgs, injected)
@@ -2794,6 +2812,9 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.messages = append(m.messages, message{role: roleUser, text: cmd + " " + userArgs})
+		if m.agent != nil {
+			m.agent.ResetSubagentDispatch()
+		}
 		m.renderTranscript()
 		m.viewport.GotoBottom()
 		return m, m.sendCustomCommandPrompt(prompt)

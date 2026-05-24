@@ -24,11 +24,13 @@ func emitDebug(kind, msg string) {
 
 // JobEvent describes a background job (process or agent run) that finished.
 type JobEvent struct {
-	Kind   string // "process" or "agent"
-	ID     string
-	Name   string // process command, or agent name
-	Status string // exited/killed/done/failed
-	Result string // output tail or result text
+	Kind       string // "process" or "agent"
+	ID         string
+	Name       string // process command, or agent name
+	Status     string // exited/killed/done/failed
+	Result     string // output tail or result text
+	Background bool   // for Kind=="agent": true if run_in_background; false means the parent already consumed the result via the task tool's return value
+	ToolCallID string // for Kind=="agent": id of the task tool_call that spawned this run, when known
 }
 
 type Agent struct {
@@ -76,6 +78,40 @@ type Agent struct {
 	// compactMu serialises async compaction passes so a slow summary call
 	// can't fire OnCompact twice for overlapping snapshots.
 	compactMu sync.Mutex
+	// subagentDispatchGuard tracks consecutive identical task-tool dispatches
+	// since the last user input, to break runaway loops where a small model
+	// keeps re-launching the same subagent in response to its own completion
+	// notifications.
+	subagentDispatchMu    sync.Mutex
+	subagentDispatchLast  string
+	subagentDispatchCount int
+}
+
+const subagentDispatchLimit = 3
+
+// NoteSubagentDispatch increments the consecutive-dispatch counter for the
+// given subagent name and returns the new count. Callers use this to refuse
+// runaway loops (see TaskTool.Execute).
+func (a *Agent) NoteSubagentDispatch(name string) int {
+	a.subagentDispatchMu.Lock()
+	defer a.subagentDispatchMu.Unlock()
+	if a.subagentDispatchLast == name {
+		a.subagentDispatchCount++
+	} else {
+		a.subagentDispatchLast = name
+		a.subagentDispatchCount = 1
+	}
+	return a.subagentDispatchCount
+}
+
+// ResetSubagentDispatch clears the consecutive-dispatch counter. The TUI
+// calls this whenever the user sends a new message, so legitimate repeated
+// dispatches across turns are allowed.
+func (a *Agent) ResetSubagentDispatch() {
+	a.subagentDispatchMu.Lock()
+	a.subagentDispatchLast = ""
+	a.subagentDispatchCount = 0
+	a.subagentDispatchMu.Unlock()
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -114,11 +150,13 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 			status = "failed"
 		}
 		a.emitJob(JobEvent{
-			Kind:   "agent",
-			ID:     r.ID,
-			Name:   r.Name,
-			Status: status,
-			Result: result,
+			Kind:       "agent",
+			ID:         r.ID,
+			Name:       r.Name,
+			Status:     status,
+			Result:     result,
+			Background: r.Background,
+			ToolCallID: r.ToolCallID,
 		})
 	})
 	a.tools["bash"] = &tool.BashTool{Procs: a.procs}

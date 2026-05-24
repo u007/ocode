@@ -201,6 +201,16 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		spec = defaultSpec
 	}
 
+	// Re-dispatch guard: refuse repeated identical subagent launches without
+	// any intervening user input. Without this, a small model that interprets
+	// every job-completion notification as a fresh request will loop forever
+	// re-launching the same subagent.
+	if t.mainAgent != nil {
+		if count := t.mainAgent.NoteSubagentDispatch(spec.Name); count > subagentDispatchLimit {
+			return fmt.Sprintf("Error: refusing to dispatch subagent %q — it has been launched %d times in a row without any new user input. This usually means the conversation is in a feedback loop. Wait for the user to provide new direction before retrying.", spec.Name, count), nil
+		}
+	}
+
 	tools := t.getToolsForDef(spec)
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config)
@@ -267,6 +277,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// Background mode
 	if params.RunInBackground && t.runs != nil {
 		run := t.runs.New(spec.Name)
+		run.Background = true
 		run.Procs = subAgent.Procs()
 		run.Sub = subAgent
 		run.Cancel = subAgent.Cancel
