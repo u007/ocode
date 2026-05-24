@@ -88,6 +88,7 @@ type TUIConfig struct {
 	Scroll        float64           `json:"scroll_speed"`
 	Keybinds      map[string]string `json:"keybinds"`
 	LeaderTimeout int               `json:"leader_timeout"`
+	Branchless    bool              `json:"branchless"`
 }
 
 type WatcherConfig struct {

@@ -106,7 +106,7 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (
 		return "", nil, nil
 	}
 	indent := strings.Repeat("  ", min(depth, 2))
-	cardWidth := max(20, width-lipglossWidth(indent)-2)
+	cardWidth := max(20, width-lipglossWidth(indent)-4)
 	children := agentRunChildren(run)
 	childSummary := formatChildSummary(children)
 
