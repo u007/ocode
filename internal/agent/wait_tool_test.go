@@ -49,6 +49,20 @@ func TestWaitToolJoinShortCircuits(t *testing.T) {
 	}
 }
 
+func TestWaitToolJoinAcceptsAgentRunPrefix(t *testing.T) {
+	runs := NewAgentRunRegistry()
+	run := runs.New("explore")
+	run.finishErr("stopped unexpectedly")
+	wt := WaitTool{runs: runs}
+	out, err := wt.Execute([]byte(`{"seconds":1,"for":"` + run.ID + `"}`))
+	if err != nil {
+		t.Fatalf("Execute err: %v", err)
+	}
+	if !strings.Contains(out, "stopped unexpectedly") {
+		t.Fatalf("output: %q", out)
+	}
+}
+
 func TestWaitToolJoinUnknownID(t *testing.T) {
 	wt := WaitTool{runs: NewAgentRunRegistry()}
 	out, _ := wt.Execute([]byte(`{"seconds":1,"for":"agent-999"}`))

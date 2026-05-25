@@ -6,6 +6,8 @@ import (
 	"testing"
 	"unsafe"
 
+	"charm.land/lipgloss/v2"
+
 	"github.com/jamesmercstudio/ocode/internal/agent"
 )
 
@@ -110,6 +112,33 @@ func TestRenderRunTranscriptUsesSingleSpacingBetweenSectionsAndEvents(t *testing
 	}
 	if strings.Contains(rendered, "Result\n\ndone") {
 		t.Fatalf("result section should be single-spaced, got:\n%s", rendered)
+	}
+}
+
+func TestDetailAgentViewFitsPanelWidth(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	setRunTranscriptForTest(run,
+		agent.Message{Role: "user", Content: strings.Repeat("x", 120)},
+		agent.Message{Role: "assistant", Content: strings.Repeat("y", 120)},
+	)
+
+	m := model{
+		agent:  a,
+		width:  80,
+		height: 24,
+		styles: ApplyThemeColors("tokyonight"),
+	}
+	m.openAgentDetail(run.ID)
+	if len(m.detail) != 1 {
+		t.Fatalf("expected detail view to open, got %d entries", len(m.detail))
+	}
+
+	rendered := stripANSI(m.renderDetailView(m.detail[0]))
+	for _, line := range strings.Split(rendered, "\n") {
+		if got := lipgloss.Width(line); got > m.panelWidth() {
+			t.Fatalf("detail line width %d exceeds panel width %d: %q", got, m.panelWidth(), line)
+		}
 	}
 }
 

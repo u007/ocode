@@ -59,7 +59,11 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 	if agentPrompt != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptModeMarker + "\n" + agentPrompt})
 	}
-	if ctx := LoadContext(); strings.TrimSpace(ctx) != "" {
+	ctx := a.getPreloadedContext()
+	if ctx == "" {
+		ctx = LoadContext()
+	}
+	if strings.TrimSpace(ctx) != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptContextMarker + "\nContext and rules:\n" + ctx})
 	}
 	if sel := strings.TrimSpace(selectionContext); sel != "" {

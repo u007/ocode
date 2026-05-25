@@ -2,6 +2,10 @@ package agent
 
 import (
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -251,5 +255,79 @@ func TestOpenAIResponsesHandlesJSONArguments(t *testing.T) {
 	}
 	if input[1]["output"] != "error: tool result missing" {
 		t.Fatalf("expected auto-filled output, got %v", input[1]["output"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Streaming-parser regression tests (review fixes 8, 9, 17)
+// ---------------------------------------------------------------------------
+
+func TestParseOpenAIChatCompletionsStream_MultiToolCall(t *testing.T) {
+	// Two tool calls streamed across multiple chunks with indices 0 and 1;
+	// arguments arrive as partial fragments. The parser must assemble both
+	// in index order with concatenated arguments.
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-a","function":{"name":"bash","arguments":"{\"cmd"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\":\"ls\"}"}}]}}]}`,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call-b","function":{"name":"read","arguments":"{\"path\":\"a.txt\"}"}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if msg == nil {
+		t.Fatal("nil msg")
+	}
+	if len(msg.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %d", len(msg.ToolCalls))
+	}
+	if msg.ToolCalls[0].ID != "call-a" || msg.ToolCalls[0].Function.Name != "bash" {
+		t.Fatalf("tool 0 mismatch: %+v", msg.ToolCalls[0])
+	}
+	if msg.ToolCalls[0].Function.Arguments != `{"cmd":"ls"}` {
+		t.Fatalf("tool 0 arguments not reassembled: %q", msg.ToolCalls[0].Function.Arguments)
+	}
+	if msg.ToolCalls[1].ID != "call-b" || msg.ToolCalls[1].Function.Name != "read" {
+		t.Fatalf("tool 1 mismatch: %+v", msg.ToolCalls[1])
+	}
+}
+
+func TestChatAnthropic_TruncatedToolJSONFallsBackToEmptyObject(t *testing.T) {
+	// Spin up a fake Anthropic endpoint that emits a tool_use block whose
+	// input_json_delta fragments do NOT assemble into valid JSON, then ends
+	// without a usable signature. The client must catch !json.Valid and fall
+	// back to "{}" so the tool call is still dispatched.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fw := w.(http.Flusher)
+		write := func(s string) { _, _ = io.WriteString(w, s); fw.Flush() }
+		write("data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n")
+		write("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_x\",\"name\":\"bash\"}}\n\n")
+		// Deliberately broken / truncated JSON fragment.
+		write("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\": \\\"ls\"}}\n\n")
+		write("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		write("data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	c := &GenericClient{
+		APIKey:   "test",
+		Model:    "claude-test",
+		BaseURL:  srv.URL,
+		Provider: "anthropic",
+	}
+	msg, err := c.chatAnthropic([]Message{{Role: "user", Content: "hi"}}, nil)
+	if err != nil {
+		t.Fatalf("chatAnthropic error: %v", err)
+	}
+	if msg == nil || len(msg.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %+v", msg)
+	}
+	if got := msg.ToolCalls[0].Function.Arguments; got != "{}" {
+		t.Fatalf("expected {} fallback, got %q", got)
 	}
 }

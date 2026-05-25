@@ -12,7 +12,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/auth"
@@ -74,6 +76,38 @@ type GenericClient struct {
 	// TopP, when non-nil, is added to the request payload for providers that
 	// accept it. Pointer for the same reason as Temperature.
 	TopP *float64
+	// OnDelta, when non-nil, is invoked from inside Chat for each streamed
+	// reasoning or text token. kind is "reasoning" or "text". Callers MUST set
+	// this only around their own Chat call (via SetOnDelta / chatWithDelta) and
+	// clear it after; subagents share the same *GenericClient and a stale
+	// callback would leak deltas across agent boundaries. Access is serialised
+	// via deltaMu so concurrent Chat callers can swap the field without racing
+	// the streaming reader goroutines that fire it.
+	OnDelta func(kind, text string)
+
+	// deltaMu protects reads and writes to OnDelta. Refactoring Chat() to take
+	// the callback per-call would require changing the LLMClient interface and
+	// every call site; mutex-guarding the field is the lighter alternative
+	// noted as acceptable in the original review.
+	deltaMu sync.Mutex
+}
+
+// SetOnDelta installs (or clears, with nil) the streaming-token callback on
+// the client. Safe to call concurrently with active Chat invocations on the
+// same *GenericClient.
+func (c *GenericClient) SetOnDelta(fn func(kind, text string)) {
+	c.deltaMu.Lock()
+	c.OnDelta = fn
+	c.deltaMu.Unlock()
+}
+
+// onDelta returns the currently-installed delta callback (or nil) under the
+// mutex. Streaming reader paths call this once per chunk to avoid racing with
+// SetOnDelta in chatWithDelta.
+func (c *GenericClient) onDelta() func(kind, text string) {
+	c.deltaMu.Lock()
+	defer c.deltaMu.Unlock()
+	return c.OnDelta
 }
 
 // applyGenerationParams adds temperature / top_p to a request payload if
@@ -199,6 +233,7 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 	payload := map[string]interface{}{
 		"model":    c.Model,
 		"messages": openAIMessages,
+		"stream":   true,
 	}
 	c.applyGenerationParams(payload)
 	if len(tools) > 0 {
@@ -231,25 +266,17 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 		emitDebug("error", msg)
 		return nil, fmt.Errorf("%s", msg)
 	}
-	var result struct {
-		Model   string `json:"model"`
-		Choices []struct {
-			Message Message `json:"message"`
-		} `json:"choices"`
-		Usage json.RawMessage `json:"usage"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta())
+	if err != nil {
 		return nil, err
 	}
-	if len(result.Choices) == 0 {
+	if msg == nil {
 		return nil, fmt.Errorf("no response from copilot")
 	}
-	msg := &result.Choices[0].Message
-	msg.Model = result.Model
 	if msg.Model == "" {
 		msg.Model = c.Model
 	}
-	usage, err := usageForProvider("openai", result.Usage)
+	usage, err := usageForProvider("openai", usageRaw)
 	if err != nil {
 		return nil, err
 	}
@@ -274,6 +301,7 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 	payload := map[string]interface{}{
 		"model":    c.Model,
 		"messages": openAIMessages,
+		"stream":   true,
 	}
 	c.applyGenerationParams(payload)
 	if c.Provider == "openai" && c.ThinkingBudget > 0 {
@@ -311,33 +339,150 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		return nil, fmt.Errorf("%s", msg)
 	}
 
-	var result struct {
-		Model   string `json:"model"`
-		Choices []struct {
-			Message Message `json:"message"`
-		} `json:"choices"`
-		Usage json.RawMessage `json:"usage"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta())
+	if err != nil {
 		return nil, err
 	}
-	if len(result.Choices) > 0 {
-		msg := &result.Choices[0].Message
-		msg.Model = result.Model
-		if msg.Model == "" {
-			msg.Model = c.Model
-		}
-		usage, err := usageForProvider(c.Provider, result.Usage)
-		if err != nil {
-			return nil, err
-		}
-		msg.Usage = usage
-		if usage != nil {
-			msg.Spend = usage.Spend(msg.Model)
-		}
-		return msg, nil
+	if msg == nil {
+		return nil, fmt.Errorf("no response from %s", c.Provider)
 	}
-	return nil, fmt.Errorf("no response from %s", c.Provider)
+	if msg.Model == "" {
+		msg.Model = c.Model
+	}
+	usage, err := usageForProvider(c.Provider, usageRaw)
+	if err != nil {
+		return nil, err
+	}
+	msg.Usage = usage
+	if usage != nil {
+		msg.Spend = usage.Spend(msg.Model)
+	}
+	return msg, nil
+}
+
+// parseOpenAIChatCompletionsStream parses a Server-Sent Events stream in the
+// OpenAI chat-completions format and returns the assembled assistant Message
+// plus the raw usage payload (last `data:` line with non-empty usage). Used by
+// both chatOpenAI and chatCopilot since Copilot speaks the same dialect.
+//
+// SSE chunk shape (abridged):
+//
+//	{"choices":[{"delta":{"role":"assistant","content":"hi","reasoning_content":"…",
+//	  "tool_calls":[{"index":0,"id":"…","function":{"name":"…","arguments":"…"}}]}}],
+//	 "model":"…","usage":{…}}
+//
+// Tool call arguments are streamed as partial JSON fragments, concatenated by
+// the per-choice `tool_calls[i].index`.
+func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text string)) (*Message, json.RawMessage, error) {
+	msg := &Message{Role: "assistant"}
+	toolByIdx := map[int]*ToolCall{}
+	var toolOrder []int
+	var usageRaw json.RawMessage
+
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var chunk struct {
+			Model   string `json:"model"`
+			Choices []struct {
+				Delta struct {
+					Content          string `json:"content"`
+					ReasoningContent string `json:"reasoning_content"`
+					Reasoning        string `json:"reasoning"`
+					Role             string `json:"role"`
+					ToolCalls        []struct {
+						Index    int    `json:"index"`
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string `json:"name"`
+							Arguments string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+			Usage json.RawMessage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+		if chunk.Model != "" && msg.Model == "" {
+			msg.Model = chunk.Model
+		}
+		if len(chunk.Usage) > 0 && string(chunk.Usage) != "null" {
+			usageRaw = chunk.Usage
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		ch := chunk.Choices[0]
+		if ch.Delta.Content != "" {
+			msg.Content += ch.Delta.Content
+			if onDelta != nil {
+				onDelta("text", ch.Delta.Content)
+			}
+		}
+		// Some providers stream reasoning under `reasoning_content` (DeepSeek,
+		// official OpenAI for o-series via chat/completions). Others use
+		// `reasoning` (Grok 4 family). Accept both.
+		reasoning := ch.Delta.ReasoningContent
+		if reasoning == "" {
+			reasoning = ch.Delta.Reasoning
+		}
+		if reasoning != "" {
+			msg.ReasoningContent += reasoning
+			if onDelta != nil {
+				onDelta("reasoning", reasoning)
+			}
+		}
+		for _, tc := range ch.Delta.ToolCalls {
+			existing, ok := toolByIdx[tc.Index]
+			if !ok {
+				existing = &ToolCall{Type: "function"}
+				toolByIdx[tc.Index] = existing
+				toolOrder = append(toolOrder, tc.Index)
+			}
+			if tc.ID != "" {
+				existing.ID = tc.ID
+			}
+			if tc.Type != "" {
+				existing.Type = tc.Type
+			}
+			if tc.Function.Name != "" {
+				existing.Function.Name = tc.Function.Name
+			}
+			if tc.Function.Arguments != "" {
+				existing.Function.Arguments += tc.Function.Arguments
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, nil, fmt.Errorf("openai stream error: SSE line exceeded 16MB buffer (likely huge reasoning block): %w", err)
+		}
+		return nil, nil, fmt.Errorf("openai stream error: %w", err)
+	}
+	sort.Ints(toolOrder)
+	for _, idx := range toolOrder {
+		msg.ToolCalls = append(msg.ToolCalls, *toolByIdx[idx])
+	}
+	// Skip empty keep-alive / heartbeat chunks: some providers send a `data:`
+	// frame with no content, reasoning, or tool calls just to keep the SSE
+	// connection alive. Returning (nil, nil, nil) lets the caller treat this
+	// as "no response" without surfacing it as an error.
+	if msg.Content == "" && msg.ReasoningContent == "" && len(msg.ToolCalls) == 0 {
+		return nil, nil, nil
+	}
+	return msg, usageRaw, nil
 }
 
 func openAITools(tools []map[string]interface{}) []map[string]interface{} {
@@ -666,12 +811,13 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		}
 		if m.Role == "assistant" {
 			if len(m.OpenAIResponseItems) > 0 {
-				for _, item := range m.OpenAIResponseItems {
-					input = append(input, item)
-				}
-				continue
+				input = append(input, m.OpenAIResponseItems...)
 			}
+			presentCallIDs := openAIResponseFunctionCallIDs(m.OpenAIResponseItems)
 			for _, tc := range m.ToolCalls {
+				if _, ok := presentCallIDs[tc.ID]; ok {
+					continue
+				}
 				input = append(input, map[string]interface{}{
 					"type":      "function_call",
 					"call_id":   tc.ID,
@@ -778,13 +924,15 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 
 	// Parse SSE stream to accumulate the full response.
 	var fullText string
+	var reasoningText string
 	var resultModel string
 	var lastEvent string
 	var toolCalls []ToolCall
 	var responseItems []map[string]interface{}
 	var responseUsage json.RawMessage
+	onDelta := c.onDelta()
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "event: ") {
@@ -822,6 +970,18 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		switch eventType {
 		case "response.output_text.delta":
 			fullText += payload.Delta
+			if onDelta != nil && payload.Delta != "" {
+				onDelta("text", payload.Delta)
+			}
+		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+			reasoningText += payload.Delta
+			if onDelta != nil && payload.Delta != "" {
+				onDelta("reasoning", payload.Delta)
+			}
+		case "response.reasoning_summary_text.done", "response.reasoning_text.done":
+			if reasoningText == "" {
+				reasoningText = payload.Text
+			}
 		case "response.output_text.done":
 			// done carries the full part text; only use it when no deltas
 			// streamed, otherwise the body would be appended twice.
@@ -878,6 +1038,9 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	}
 
 	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, fmt.Errorf("openai responses stream error: SSE line exceeded 16MB buffer (likely huge reasoning block): %w", err)
+		}
 		return nil, fmt.Errorf("openai responses stream error: %w", err)
 	}
 
@@ -888,6 +1051,7 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	msg := &Message{
 		Role:                "assistant",
 		Content:             fullText,
+		ReasoningContent:    reasoningText,
 		Model:               resultModel,
 		ToolCalls:           toolCalls,
 		OpenAIResponseItems: responseItems,
@@ -905,6 +1069,19 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 		}
 	}
 	return msg, nil
+}
+
+func openAIResponseFunctionCallIDs(items []map[string]interface{}) map[string]struct{} {
+	callIDs := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if itemType, _ := item["type"].(string); itemType != "function_call" {
+			continue
+		}
+		if callID, _ := item["call_id"].(string); callID != "" {
+			callIDs[callID] = struct{}{}
+		}
+	}
+	return callIDs
 }
 
 func dedupeOpenAIResponseInputItems(input []map[string]interface{}) []map[string]interface{} {
@@ -1148,6 +1325,7 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		"system":     systemPayload,
 		"messages":   anthropicMsgs,
 		"max_tokens": maxTokens,
+		"stream":     true,
 	}
 	// applyGenerationParams self-skips when ThinkingBudget>0 — Anthropic's
 	// Messages API rejects temperature/top_p alongside extended thinking.
@@ -1215,48 +1393,165 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		return nil, fmt.Errorf("%s", msg)
 	}
 
-	var result struct {
-		ID      string          `json:"id"`
-		Model   string          `json:"model"`
-		Usage   json.RawMessage `json:"usage"`
-		Content []struct {
-			Type  string      `json:"type"`
-			Text  string      `json:"text"`
-			ID    string      `json:"id"`
-			Name  string      `json:"name"`
-			Input interface{} `json:"input"`
-		} `json:"content"`
+	// Streaming parser. Anthropic emits one of:
+	//   message_start / content_block_start / content_block_delta /
+	//   content_block_stop / message_delta / message_stop / ping / error.
+	// Blocks are addressed by index; tool_use inputs arrive as partial_json
+	// deltas that we accumulate into a per-block string and json-parse at stop.
+	// signature_delta tokens are silently dropped — the current non-streaming
+	// path also discards them (see TODO.md: extended thinking signatures are
+	// not yet preserved across turns, so interleaved-thinking multi-turn flows
+	// remain at parity with the previous behavior).
+	type anthropicBlock struct {
+		typ       string
+		text      string
+		toolID    string
+		toolName  string
+		toolJSON  string
+		signature string
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+	blocks := map[int]*anthropicBlock{}
+	resMsg := &Message{Role: "assistant"}
+	var resultModel string
+	var resultUsage json.RawMessage
+	onDelta := c.onDelta()
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		data := strings.TrimPrefix(line, "data: ")
+		if data == "" || data == "[DONE]" {
+			continue
+		}
+		var ev struct {
+			Type    string `json:"type"`
+			Index   int    `json:"index"`
+			Message struct {
+				Model string          `json:"model"`
+				Usage json.RawMessage `json:"usage"`
+			} `json:"message"`
+			ContentBlock struct {
+				Type  string `json:"type"`
+				ID    string `json:"id"`
+				Name  string `json:"name"`
+				Text  string `json:"text"`
+			} `json:"content_block"`
+			Delta struct {
+				Type        string `json:"type"`
+				Text        string `json:"text"`
+				Thinking    string `json:"thinking"`
+				PartialJSON string `json:"partial_json"`
+				Signature   string `json:"signature"`
+			} `json:"delta"`
+			Usage json.RawMessage `json:"usage"`
+		}
+		if err := json.Unmarshal([]byte(data), &ev); err != nil {
+			continue
+		}
+		switch ev.Type {
+		case "message_start":
+			if ev.Message.Model != "" {
+				resultModel = ev.Message.Model
+			}
+			if len(ev.Message.Usage) > 0 {
+				resultUsage = ev.Message.Usage
+			}
+		case "content_block_start":
+			blocks[ev.Index] = &anthropicBlock{
+				typ:      ev.ContentBlock.Type,
+				toolID:   ev.ContentBlock.ID,
+				toolName: ev.ContentBlock.Name,
+				text:     ev.ContentBlock.Text,
+			}
+		case "content_block_delta":
+			b, ok := blocks[ev.Index]
+			if !ok {
+				continue
+			}
+			switch ev.Delta.Type {
+			case "text_delta":
+				b.text += ev.Delta.Text
+				if onDelta != nil && ev.Delta.Text != "" {
+					onDelta("text", ev.Delta.Text)
+				}
+			case "thinking_delta":
+				b.text += ev.Delta.Thinking
+				if onDelta != nil && ev.Delta.Thinking != "" {
+					onDelta("reasoning", ev.Delta.Thinking)
+				}
+			case "input_json_delta":
+				b.toolJSON += ev.Delta.PartialJSON
+			case "signature_delta":
+				b.signature += ev.Delta.Signature
+			}
+		case "content_block_stop":
+			// finalization happens below in index order; nothing to do here.
+		case "message_delta":
+			if len(ev.Usage) > 0 {
+				// message_delta carries cumulative output_tokens; merge by
+				// preferring it over message_start's input_tokens.
+				resultUsage = mergeAnthropicUsage(resultUsage, ev.Usage)
+			}
+		case "message_stop":
+			// drained below.
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if errors.Is(err, bufio.ErrTooLong) {
+			return nil, fmt.Errorf("anthropic stream error: SSE line exceeded 16MB buffer (likely huge reasoning block): %w", err)
+		}
+		return nil, fmt.Errorf("anthropic stream error: %w", err)
 	}
 
-	resMsg := &Message{Role: "assistant"}
-	for _, block := range result.Content {
-		if block.Type == "text" {
-			resMsg.Content += block.Text
-		} else if block.Type == "thinking" {
-			resMsg.ReasoningContent += block.Text
-		} else if block.Type == "tool_use" {
-			args, _ := json.Marshal(block.Input)
+	// Walk blocks in index order so multi-block responses preserve ordering.
+	indices := make([]int, 0, len(blocks))
+	for idx := range blocks {
+		indices = append(indices, idx)
+	}
+	sort.Ints(indices)
+	for _, idx := range indices {
+		b := blocks[idx]
+		switch b.typ {
+		case "text":
+			resMsg.Content += b.text
+		case "thinking":
+			resMsg.ReasoningContent += b.text
+		case "tool_use":
+			args := b.toolJSON
+			if args == "" {
+				args = "{}"
+			} else if !json.Valid([]byte(args)) {
+				// Streamed input_json_delta fragments did not assemble into
+				// valid JSON (typically the stream was truncated mid-tool).
+				// Fall back to an empty object so the tool call is still
+				// dispatched and the model can react to the error.
+				fmt.Fprintf(os.Stderr, "[agent] anthropic: truncated tool_use input_json for %s (id=%s, %d bytes); falling back to {}\n", b.toolName, b.toolID, len(args))
+				args = "{}"
+			}
 			resMsg.ToolCalls = append(resMsg.ToolCalls, ToolCall{
-				ID:   block.ID,
+				ID:   b.toolID,
 				Type: "function",
 				Function: struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
 				}{
-					Name:      block.Name,
-					Arguments: string(args),
+					Name:      b.toolName,
+					Arguments: args,
 				},
 			})
 		}
 	}
-	usage, err := usageForProvider(c.Provider, result.Usage)
+	if resultModel != "" {
+		resMsg.Model = resultModel
+	}
+	usage, err := usageForProvider(c.Provider, resultUsage)
 	if err != nil {
 		return nil, err
 	}
-	resMsg.Model = result.Model
 	if resMsg.Model == "" {
 		resMsg.Model = c.Model
 	}
@@ -1555,4 +1850,40 @@ func modelSupportsThinkingFromRegistry(modelID string) (bool, bool) {
 	}
 
 	return false, false
+}
+
+// mergeAnthropicUsage merges an incremental usage payload from message_delta
+// over the cumulative usage seen so far (typically from message_start). Anthropic
+// streams input_tokens up front and updates output_tokens at the end; the merged
+// object keeps the highest seen value for each key so usageForProvider sees both.
+func mergeAnthropicUsage(base, incoming json.RawMessage) json.RawMessage {
+	if len(base) == 0 {
+		return incoming
+	}
+	if len(incoming) == 0 {
+		return base
+	}
+	var b, i map[string]interface{}
+	if err := json.Unmarshal(base, &b); err != nil {
+		return incoming
+	}
+	if err := json.Unmarshal(incoming, &i); err != nil {
+		return base
+	}
+	for k, v := range i {
+		if existing, ok := b[k]; ok {
+			// Keep larger numeric value; non-numeric falls through to overwrite.
+			ef, eok := existing.(float64)
+			nf, nok := v.(float64)
+			if eok && nok && ef > nf {
+				continue
+			}
+		}
+		b[k] = v
+	}
+	merged, err := json.Marshal(b)
+	if err != nil {
+		return incoming
+	}
+	return merged
 }

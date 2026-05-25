@@ -10,7 +10,7 @@ import (
 )
 
 func TestParseOpenAIUsage(t *testing.T) {
-	usage, err := parseOpenAIUsage(json.RawMessage(`{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46}`))
+	usage, err := parseOpenAIUsage(json.RawMessage(`{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46,"prompt_tokens_details":{"cached_tokens":8}}`))
 	if err != nil {
 		t.Fatalf("parseOpenAIUsage failed: %v", err)
 	}
@@ -24,10 +24,13 @@ func TestParseOpenAIUsage(t *testing.T) {
 	if got := usage.TotalTokens; got == nil || *got != 46 {
 		t.Fatalf("expected total tokens 46, got %#v", got)
 	}
+	if got := usage.CacheReadTokens; got == nil || *got != 8 {
+		t.Fatalf("expected cached tokens 8, got %#v", got)
+	}
 }
 
 func TestParseAnthropicUsage(t *testing.T) {
-	usage, err := parseAnthropicUsage(json.RawMessage(`{"input_tokens":7,"output_tokens":11}`))
+	usage, err := parseAnthropicUsage(json.RawMessage(`{"input_tokens":7,"output_tokens":11,"cache_read_input_tokens":3}`))
 	if err != nil {
 		t.Fatalf("parseAnthropicUsage failed: %v", err)
 	}
@@ -37,6 +40,9 @@ func TestParseAnthropicUsage(t *testing.T) {
 	}
 	if got := usage.CompletionTokens; got == nil || *got != 11 {
 		t.Fatalf("expected output tokens mapped to completion tokens 11, got %#v", got)
+	}
+	if got := usage.CacheReadTokens; got == nil || *got != 3 {
+		t.Fatalf("expected cached tokens 3, got %#v", got)
 	}
 	if usage.TotalTokens != nil {
 		t.Fatalf("expected total tokens to stay nil when missing, got %#v", usage.TotalTokens)

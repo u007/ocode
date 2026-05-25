@@ -10,6 +10,7 @@ type TokenUsage struct {
 	PromptTokens     *int64 `json:"prompt_tokens,omitempty"`
 	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
 	TotalTokens      *int64 `json:"total_tokens,omitempty"`
+	CacheReadTokens  *int64 `json:"cache_read_tokens,omitempty"`
 }
 
 func parseOpenAIUsage(raw json.RawMessage) (*TokenUsage, error) {
@@ -17,12 +18,29 @@ func parseOpenAIUsage(raw json.RawMessage) (*TokenUsage, error) {
 		return nil, nil
 	}
 
-	var usage TokenUsage
-	if err := json.Unmarshal(raw, &usage); err != nil {
+	var payload struct {
+		PromptTokens        *int64 `json:"prompt_tokens"`
+		CompletionTokens    *int64 `json:"completion_tokens"`
+		TotalTokens         *int64 `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens *int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
 	}
 
-	return &usage, nil
+	var cacheRead *int64
+	if payload.PromptTokensDetails != nil && payload.PromptTokensDetails.CachedTokens != nil {
+		cacheRead = payload.PromptTokensDetails.CachedTokens
+	}
+
+	return &TokenUsage{
+		PromptTokens:     payload.PromptTokens,
+		CompletionTokens: payload.CompletionTokens,
+		TotalTokens:      payload.TotalTokens,
+		CacheReadTokens:  cacheRead,
+	}, nil
 }
 
 func parseAnthropicUsage(raw json.RawMessage) (*TokenUsage, error) {
@@ -31,8 +49,9 @@ func parseAnthropicUsage(raw json.RawMessage) (*TokenUsage, error) {
 	}
 
 	var payload struct {
-		InputTokens  *int64 `json:"input_tokens"`
-		OutputTokens *int64 `json:"output_tokens"`
+		InputTokens          *int64 `json:"input_tokens"`
+		OutputTokens         *int64 `json:"output_tokens"`
+		CacheReadInputTokens *int64 `json:"cache_read_input_tokens"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
@@ -41,6 +60,7 @@ func parseAnthropicUsage(raw json.RawMessage) (*TokenUsage, error) {
 	return &TokenUsage{
 		PromptTokens:     payload.InputTokens,
 		CompletionTokens: payload.OutputTokens,
+		CacheReadTokens:  payload.CacheReadInputTokens,
 	}, nil
 }
 
@@ -51,9 +71,12 @@ func parseOpenAIResponsesUsage(raw json.RawMessage) (*TokenUsage, error) {
 		return nil, nil
 	}
 	var payload struct {
-		InputTokens  *int64 `json:"input_tokens"`
-		OutputTokens *int64 `json:"output_tokens"`
-		TotalTokens  *int64 `json:"total_tokens"`
+		InputTokens         *int64 `json:"input_tokens"`
+		OutputTokens        *int64 `json:"output_tokens"`
+		TotalTokens         *int64 `json:"total_tokens"`
+		PromptTokensDetails *struct {
+			CachedTokens *int64 `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
@@ -61,10 +84,15 @@ func parseOpenAIResponsesUsage(raw json.RawMessage) (*TokenUsage, error) {
 	if payload.InputTokens == nil && payload.OutputTokens == nil && payload.TotalTokens == nil {
 		return nil, nil
 	}
+	var cacheRead *int64
+	if payload.PromptTokensDetails != nil && payload.PromptTokensDetails.CachedTokens != nil {
+		cacheRead = payload.PromptTokensDetails.CachedTokens
+	}
 	return &TokenUsage{
 		PromptTokens:     payload.InputTokens,
 		CompletionTokens: payload.OutputTokens,
 		TotalTokens:      payload.TotalTokens,
+		CacheReadTokens:  cacheRead,
 	}, nil
 }
 
@@ -95,6 +123,13 @@ func (u *TokenUsage) SpendWithPricing(modelPricing pricing.ModelPricing) *float6
 		return nil
 	}
 
+	// TODO(billing): apply reduced cache-read pricing. Anthropic bills cache
+	// reads at 10% of input price and cache writes at 125%; OpenAI bills
+	// cached input at 50%. CacheReadTokens is captured on TokenUsage but not
+	// yet factored into Spend — current numbers overstate cost on
+	// cache-heavy turns. Needs a CachedInputPerMillion field on
+	// pricing.ModelPricing plus provider-aware subtraction from PromptTokens
+	// before applying the input rate.
 	spend := (float64(*u.PromptTokens) * modelPricing.InputPerMillion / 1_000_000) +
 		(float64(*u.CompletionTokens) * modelPricing.OutputPerMillion / 1_000_000)
 	return &spend

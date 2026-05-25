@@ -22,6 +22,14 @@ func emitDebug(kind, msg string) {
 	}
 }
 
+// DebugAppendf is a fmt.Sprintf shortcut for callers outside this package
+// that want to emit a debug log without importing fmt twice.
+func DebugAppendf(kind, format string, args ...interface{}) {
+	if DebugAppend != nil {
+		DebugAppend(kind, fmt.Sprintf(format, args...))
+	}
+}
+
 // JobEvent describes a background job (process or agent run) that finished.
 type JobEvent struct {
 	Kind       string // "process" or "agent"
@@ -52,6 +60,12 @@ type Agent struct {
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
 	OnMessage func(Message)
+	// OnDelta, if set, is invoked from inside Chat for each streamed reasoning
+	// or text token (kind ∈ {"reasoning","text"}). The callback fires on the
+	// HTTP goroutine — keep handlers fast and non-blocking (push to a buffered
+	// channel). Subagents do not inherit OnDelta, preventing pollution of the
+	// parent TUI.
+	OnDelta func(kind, text string)
 	// OnCompactStart, if set, is invoked when async compaction begins (so the
 	// UI can show a spinner). It runs from the goroutine that called
 	// MaybeCompactAsync — keep handlers fast and thread-safe.
@@ -82,9 +96,11 @@ type Agent struct {
 	// since the last user input, to break runaway loops where a small model
 	// keeps re-launching the same subagent in response to its own completion
 	// notifications.
-	subagentDispatchMu    sync.Mutex
-	subagentDispatchLast  string
-	subagentDispatchCount int
+	subagentDispatchMu     sync.Mutex
+	subagentDispatchLast   string
+	subagentDispatchCount  int
+	preloadedContextMu     sync.RWMutex
+	preloadedContext       string // set by askAgent to avoid duplicate LoadContext calls
 }
 
 const subagentDispatchLimit = 3
@@ -112,6 +128,35 @@ func (a *Agent) ResetSubagentDispatch() {
 	a.subagentDispatchLast = ""
 	a.subagentDispatchCount = 0
 	a.subagentDispatchMu.Unlock()
+}
+
+// chatWithDelta proxies client.Chat, attaching the agent's OnDelta callback
+// to the underlying *GenericClient for the duration of the call. The field is
+// always cleared on return so subagents that share the same client (see
+// subagent.go) never inherit a stale callback.
+func (a *Agent) chatWithDelta(messages []Message, toolDefs []map[string]interface{}) (*Message, error) {
+	gc, ok := a.client.(*GenericClient)
+	if ok && a.OnDelta != nil {
+		gc.SetOnDelta(a.OnDelta)
+		defer gc.SetOnDelta(nil)
+	}
+	return a.client.Chat(messages, toolDefs)
+}
+
+// SetPreloadedContext stores a pre-computed context string so
+// BasePromptMessages skips the filesystem read on the next call.
+// Cleared automatically after use in Step / buildAgentMessagesSnapshot.
+func (a *Agent) SetPreloadedContext(ctx string) {
+	a.preloadedContextMu.Lock()
+	a.preloadedContext = ctx
+	a.preloadedContextMu.Unlock()
+}
+
+// getPreloadedContext returns the cached context under read lock.
+func (a *Agent) getPreloadedContext() string {
+	a.preloadedContextMu.RLock()
+	defer a.preloadedContextMu.RUnlock()
+	return a.preloadedContext
 }
 
 func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
@@ -282,7 +327,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			newMsgs = append(newMsgs, summarizeMsg)
 			messages = append(messages, summarizeMsg)
-			resp, err := a.client.Chat(messages, toolDefs)
+			resp, err := a.chatWithDelta(messages, toolDefs)
 			if err != nil {
 				return nil, err
 			}
@@ -297,7 +342,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 		emitDebug("LLM", fmt.Sprintf("→ %s/%s [%d msgs]", a.client.GetProvider(), a.client.GetModel(), len(messages)))
 		a.activity.setLLMRunning(true)
-		resp, err := a.client.Chat(messages, toolDefs)
+		resp, err := a.chatWithDelta(messages, toolDefs)
 		a.activity.setLLMRunning(false)
 		if err != nil {
 			emitDebug("ERROR", fmt.Sprintf("LLM error: %v", err))

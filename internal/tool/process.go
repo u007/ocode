@@ -34,11 +34,14 @@ type Process struct {
 	StartedAt time.Time
 	EndedAt   time.Time
 
-	mu         sync.Mutex
-	buf        []byte // last <=procBufferCap bytes of the logical stream
-	dropped    int    // count of bytes dropped off the front
-	readCursor int    // logical offset already returned by readSince
-	cmd        *exec.Cmd
+	mu           sync.Mutex
+	buf          []byte // last <=procBufferCap bytes of the logical stream
+	dropped      int    // count of bytes dropped off the front
+	readCursor   int    // logical offset already returned by readSince
+	cmd          *exec.Cmd
+	notifyOnExit bool
+	bgRequestCh  chan struct{}
+	bgRequested  bool
 }
 
 // appendOutput appends process output, dropping oldest bytes past the cap.
@@ -100,6 +103,11 @@ func NewProcessRegistry() *ProcessRegistry {
 	return &ProcessRegistry{procs: map[string]*Process{}}
 }
 
+func (r *ProcessRegistry) nextIDLocked() string {
+	r.counter++
+	return "proc-" + strconv.Itoa(r.counter)
+}
+
 // SetSupervisor attaches a session-scoped process supervisor. After this call:
 //   - StartBackground registers new processes with the supervisor.
 //   - KillAll delegates through supervisor.Shutdown.
@@ -125,12 +133,17 @@ func (r *ProcessRegistry) SetOnDone(fn func(*Process)) {
 	r.mu.Unlock()
 }
 
+func (r *ProcessRegistry) onDoneCallback() func(*Process) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.onDone
+}
+
 // StartBackground launches command detached and returns its Process record.
 func (r *ProcessRegistry) StartBackground(command string) *Process {
 	r.mu.Lock()
-	r.counter++
-	id := "proc-" + strconv.Itoa(r.counter)
-	p := &Process{ID: id, Command: command, Status: ProcRunning, StartedAt: time.Now()}
+	id := r.nextIDLocked()
+	p := &Process{ID: id, Command: command, Status: ProcRunning, StartedAt: time.Now(), notifyOnExit: true}
 	r.procs[id] = p
 	r.order = append(r.order, id)
 	onDone := r.onDone
@@ -148,6 +161,11 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	p.cmd = cmd
 	p.mu.Unlock()
 
+	// Single shared cmd.Wait() so the supervisor's defaultWait and the
+	// pump-then-finalize goroutine below don't both call Wait concurrently
+	// (which races on cmd internal state).
+	waitState := newCommandWait()
+
 	if sup != nil {
 		reg := ProcessRegistration{
 			ID:               id,
@@ -156,6 +174,7 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 			Cmd:              cmd,
 			OwnsProcessGroup: runtime.GOOS != "windows",
 			StartedAt:        p.StartedAt,
+			waitFn:           waitState.Wait,
 		}
 		if _, err := sup.Register(reg); err != nil {
 			p.appendOutput([]byte("failed to start: " + err.Error()))
@@ -189,9 +208,11 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	go func() { defer wg.Done(); pump(stdout) }()
 	go func() { defer wg.Done(); pump(stderr) }()
 
+	go func() { waitState.Store(cmd.Wait()) }()
+
 	go func() {
 		wg.Wait()
-		err := cmd.Wait()
+		err := waitState.Wait()
 		code := 0
 		status := ProcExited
 		if err != nil {
@@ -218,6 +239,76 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	return p
 }
 
+// RegisterForeground adds a running foreground bash command to the registry so
+// the UI can promote it to the background mid-execution.
+func (r *ProcessRegistry) RegisterForeground(command string, cmd *exec.Cmd, startedAt time.Time, waitFn func() error) (*Process, error) {
+	r.mu.Lock()
+	id := r.nextIDLocked()
+	p := &Process{
+		ID:          id,
+		Command:     command,
+		Status:      ProcRunning,
+		StartedAt:   startedAt,
+		cmd:         cmd,
+		bgRequestCh: make(chan struct{}),
+	}
+	r.procs[id] = p
+	r.order = append(r.order, id)
+	sup := r.sup
+	r.mu.Unlock()
+
+	if sup != nil {
+		_, err := sup.Register(ProcessRegistration{
+			ID:               id,
+			Command:          command,
+			Kind:             ProcessKindBackgroundBash,
+			Cmd:              cmd,
+			OwnsProcessGroup: runtime.GOOS != "windows",
+			StartedAt:        startedAt,
+			waitFn:           waitFn,
+		})
+		if err != nil {
+			r.mu.Lock()
+			delete(r.procs, id)
+			for i, existing := range r.order {
+				if existing == id {
+					r.order = append(r.order[:i], r.order[i+1:]...)
+					break
+				}
+			}
+			r.mu.Unlock()
+			return nil, err
+		}
+	}
+
+	return p, nil
+}
+
+// RequestBackgroundLatest promotes the newest running foreground bash command
+// into a background job. It returns that process's id and command.
+func (r *ProcessRegistry) RequestBackgroundLatest() (string, string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.order) - 1; i >= 0; i-- {
+		p := r.procs[r.order[i]]
+		if p == nil {
+			continue
+		}
+		p.mu.Lock()
+		ok := p.Status == ProcRunning && p.bgRequestCh != nil && !p.bgRequested
+		if ok {
+			p.bgRequested = true
+			p.notifyOnExit = true
+			close(p.bgRequestCh)
+			id, command := p.ID, p.Command
+			p.mu.Unlock()
+			return id, command, true
+		}
+		p.mu.Unlock()
+	}
+	return "", "", false
+}
+
 // finishProcess records terminal state on a Process and fires onDone once.
 func finishProcess(p *Process, code int, status ProcStatus, onDone func(*Process)) {
 	p.mu.Lock()
@@ -232,8 +323,9 @@ func finishProcess(p *Process, code int, status ProcStatus, onDone func(*Process
 	}
 	p.ExitCode = code
 	p.EndedAt = time.Now()
+	notifyOnExit := p.notifyOnExit
 	p.mu.Unlock()
-	if onDone != nil {
+	if notifyOnExit && onDone != nil {
 		go onDone(p)
 	}
 }

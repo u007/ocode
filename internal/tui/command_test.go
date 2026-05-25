@@ -396,7 +396,7 @@ func TestContextCommandOutputsSections(t *testing.T) {
 	if len(m.messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(m.messages))
 	}
-	for _, want := range []string{"Context Budget", "Base Prompt", "Tools (injected every request)", "Skill catalog (pre-injected)", "Skills (full contents available on demand, not pre-injected)", "Session Messages"} {
+	for _, want := range []string{"Context Budget", "Base Prompt", "Tools (injected every request)", "MCP: (none)", "Skill catalog (pre-injected)", "Skills (full contents available on demand, not pre-injected)", "Session Messages"} {
 		if !strings.Contains(m.messages[0].text, want) {
 			t.Fatalf("expected %q in context output, got %q", want, m.messages[0].text)
 		}
