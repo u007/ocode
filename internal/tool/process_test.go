@@ -362,6 +362,79 @@ func TestBashToolForegroundRegistersWithSupervisor(t *testing.T) {
 	}
 }
 
+func TestBashToolForegroundCanBeMovedToBackground(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX sleep")
+	}
+	reg := NewProcessRegistry()
+	completed := make(chan *Process, 1)
+	reg.SetOnDone(func(p *Process) { completed <- p })
+	resultCh := make(chan string, 1)
+
+	go func() {
+		out, _ := (BashTool{Procs: reg}).Execute(json.RawMessage(`{"command":"sleep 0.2; echo promoted"}`))
+		resultCh <- out
+	}()
+
+	var id string
+	for i := 0; i < 100; i++ {
+		var ok bool
+		id, _, ok = reg.RequestBackgroundLatest()
+		if ok {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if id == "" {
+		t.Fatal("expected running foreground bash to become backgroundable")
+	}
+
+	out := <-resultCh
+	if !strings.Contains(out, "Moved running bash command to background as "+id) {
+		t.Fatalf("unexpected promotion result: %q", out)
+	}
+
+	select {
+	case <-completed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected promoted process completion callback")
+	}
+
+	text, st, code, err := reg.Dump(id)
+	if err != nil {
+		t.Fatalf("Dump error: %v", err)
+	}
+	if st != ProcExited {
+		t.Fatalf("status = %s, want %s", st, ProcExited)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if !strings.Contains(text, "promoted") {
+		t.Fatalf("dump missing promoted output: %q", text)
+	}
+}
+
+func TestBashToolForegroundDoesNotEmitCompletionWithoutPromotion(t *testing.T) {
+	reg := NewProcessRegistry()
+	completed := make(chan struct{}, 1)
+	reg.SetOnDone(func(*Process) { completed <- struct{}{} })
+
+	out, err := (BashTool{Procs: reg}).Execute(json.RawMessage(`{"command":"echo hi"}`))
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if strings.TrimSpace(out) != "hi" {
+		t.Fatalf("output = %q, want hi", out)
+	}
+
+	select {
+	case <-completed:
+		t.Fatal("unexpected completion callback for non-promoted foreground bash")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 func TestProcessRingBufferTruncates(t *testing.T) {
 	p := &Process{ID: "proc-1", Command: "x", Status: ProcRunning}
 	// Write more than the cap.

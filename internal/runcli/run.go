@@ -7,40 +7,81 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/jamesmercstudio/ocode/internal/commands"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
 
+type stringSliceFlag []string
+
+func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
+func (s *stringSliceFlag) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
+
 func Run(args []string) error {
-	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	prompt := fs.String("prompt", "", "Prompt text")
 	model := fs.String("model", "", "Model to use")
+	fs.StringVar(model, "m", "", "Model to use")
 	agentName := fs.String("agent", "", "Agent name")
 	sessionID := fs.String("session", "", "Session ID")
+	fs.StringVar(sessionID, "s", "", "Session ID")
 	cont := fs.Bool("continue", false, "Continue last session")
+	fs.BoolVar(cont, "c", false, "Continue last session")
 	fork := fs.Bool("fork", false, "Fork from last session")
-	file := fs.String("file", "", "File to read prompt from")
-	format := fs.String("format", "text", "Output format (text/json)")
+	var files stringSliceFlag
+	fs.Var(&files, "file", "File(s) to attach to message")
+	fs.Var(&files, "f", "File(s) to attach to message")
+	format := fs.String("format", "default", "Output format (default/json)")
 	title := fs.String("title", "", "Session title")
 	attach := fs.String("attach", "", "Attach to running serve instance URL")
 	port := fs.Int("port", 0, "Serve port (for --attach)")
 	yolo := fs.Bool("yolo", false, "Allow tools and shell commands without permission prompts")
-	fs.Parse(args)
+	dangerous := fs.Bool("dangerously-skip-permissions", false, "Auto-approve permissions that are not explicitly denied")
+	command := fs.String("command", "", "Slash command to run; positional message is used as command arguments")
+	share := fs.Bool("share", false, "Share the session (accepted for OpenCode compatibility)")
+	dir := fs.String("dir", "", "Directory to run in")
+	variant := fs.String("variant", "", "Model variant (accepted for OpenCode compatibility)")
+	thinking := fs.Bool("thinking", false, "Show thinking blocks (accepted for OpenCode compatibility)")
+	username := fs.String("username", "", "Basic auth username for --attach")
+	fs.StringVar(username, "u", "", "Basic auth username for --attach")
+	password := fs.String("password", "", "Basic auth password for --attach")
+	fs.StringVar(password, "p", "", "Basic auth password for --attach")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	_ = share
+	_ = variant
+	_ = thinking
 
-	if *attach != "" {
-		return runAttach(*attach, *port, *prompt, *file, *format, *sessionID)
+	if *dir != "" {
+		if err := os.Chdir(*dir); err != nil {
+			return fmt.Errorf("failed to change directory to %s: %w", *dir, err)
+		}
 	}
 
-	promptText, err := resolvePrompt(*prompt, *file)
+	if *attach != "" {
+		promptText, err := resolveRunInput(*prompt, fs.Args(), files, *command)
+		if err != nil {
+			return err
+		}
+		return runAttach(*attach, *port, promptText, *format, *sessionID, *username, *password)
+	}
+
+	promptText, err := resolveRunInput(*prompt, fs.Args(), files, *command)
 	if err != nil {
 		return err
 	}
 	if promptText == "" {
-		return fmt.Errorf("no prompt provided (use --prompt or stdin)")
+		return fmt.Errorf("you must provide a message or a command")
 	}
 
 	cfg, err := config.Load()
@@ -52,7 +93,7 @@ func Run(args []string) error {
 	if *model != "" {
 		cfg.Model = *model
 	}
-	if *yolo {
+	if *yolo || *dangerous {
 		cfg.Ocode.Permissions.Mode = string(agent.PermissionModeYOLO)
 	}
 
@@ -69,6 +110,15 @@ func Run(args []string) error {
 	tools := tool.LoadBuiltins(cfg)
 	ag := agent.NewAgent(client, tools, cfg)
 	ag.LoadExternalTools(cfg)
+	// Only install an OnPermissionAsk override when the user explicitly opted
+	// into yolo / dangerously-skip-permissions. Otherwise leave the callback
+	// nil so the agent's default sentinel/deny path runs and prompts surface to
+	// the caller normally.
+	if *yolo || *dangerous {
+		ag.OnPermissionAsk = func(req agent.PermissionRequest) agent.PermissionResponse {
+			return agent.PermissionResponse{Level: agent.PermissionAllow}
+		}
+	}
 
 	if *agentName != "" {
 		ag.SetMode(agent.Mode(*agentName))
@@ -119,11 +169,73 @@ func Run(args []string) error {
 	}
 
 	if *format == "json" {
-		return outputJSON(responseText.String(), *sessionID, *title)
+		return outputJSONEvents(resp, *sessionID)
 	}
 
 	fmt.Println(responseText.String())
 	return nil
+}
+
+func resolveRunInput(prompt string, positional []string, files []string, command string) (string, error) {
+	base := prompt
+	if base == "" && len(positional) > 0 {
+		base = strings.Join(positional, " ")
+	}
+
+	if command != "" {
+		cmdPrompt, err := resolveCommandPrompt(command, base)
+		if err != nil {
+			return "", err
+		}
+		base = cmdPrompt
+	}
+
+	if base == "" && len(files) == 1 {
+		// Backward-compatible ocode behavior: with only --file, read the prompt
+		// from that file. OpenCode treats --file as an attachment; when a message
+		// is present we emulate that below by appending file contents.
+		return resolvePrompt("", files[0])
+	}
+
+	piped, err := readPipedStdin()
+	if err != nil {
+		return "", err
+	}
+	parts := make([]string, 0, 2+len(files))
+	if strings.TrimSpace(base) != "" {
+		parts = append(parts, base)
+	}
+	if strings.TrimSpace(piped) != "" {
+		parts = append(parts, piped)
+	}
+	for _, file := range files {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return "", fmt.Errorf("read file %s: %w", file, err)
+		}
+		parts = append(parts, fmt.Sprintf("Attached file %s:\n%s", filepath.Base(file), string(data)))
+	}
+	return strings.Join(parts, "\n"), nil
+}
+
+func resolveCommandPrompt(name, args string) (string, error) {
+	name = strings.TrimPrefix(strings.TrimSpace(name), "/")
+	if name == "" {
+		return "", fmt.Errorf("command name is required")
+	}
+	cmd, err := commands.LoadCommand(name)
+	if err != nil {
+		return "", err
+	}
+	if cmd == nil {
+		return "", fmt.Errorf("command %q not found", name)
+	}
+	p := strings.ReplaceAll(cmd.Prompt, "{{args}}", args)
+	p = strings.ReplaceAll(p, "{args}", args)
+	if !cmd.HasArgs && strings.TrimSpace(args) != "" {
+		p = strings.TrimSpace(p) + "\n\nArguments:\n" + args
+	}
+	return p, nil
 }
 
 func resolvePrompt(prompt, file string) (string, error) {
@@ -137,6 +249,14 @@ func resolvePrompt(prompt, file string) (string, error) {
 		}
 		return string(data), nil
 	}
+	piped, err := readPipedStdin()
+	if err != nil {
+		return "", err
+	}
+	return piped, nil
+}
+
+func readPipedStdin() (string, error) {
 	stat, _ := os.Stdin.Stat()
 	if (stat.Mode() & os.ModeCharDevice) == 0 {
 		data, err := io.ReadAll(os.Stdin)
@@ -148,28 +268,70 @@ func resolvePrompt(prompt, file string) (string, error) {
 	return "", nil
 }
 
-func outputJSON(text, sessionID, title string) error {
-	out := map[string]interface{}{
-		"content":   text,
-		"sessionID": sessionID,
-		"title":     title,
+func outputJSONEvents(messages []agent.Message, sessionID string) error {
+	enc := json.NewEncoder(os.Stdout)
+	toolCalls := map[string]agent.ToolCall{}
+
+	emit := func(eventType string, data map[string]interface{}) error {
+		payload := map[string]interface{}{
+			"type":      eventType,
+			"sessionID": sessionID,
+		}
+		for k, v := range data {
+			payload[k] = v
+		}
+		return enc.Encode(payload)
 	}
-	data, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return err
+
+	for _, msg := range messages {
+		for _, tc := range msg.ToolCalls {
+			toolCalls[tc.ID] = tc
+		}
+		if msg.Role == "assistant" && strings.TrimSpace(msg.Content) != "" {
+			if err := emit("text", map[string]interface{}{
+				"part": map[string]interface{}{
+					"type": "text",
+					"text": msg.Content,
+				},
+			}); err != nil {
+				return err
+			}
+		}
+		if msg.Role != "tool" {
+			continue
+		}
+		part := map[string]interface{}{
+			"type": "tool",
+			"state": map[string]interface{}{
+				"status": "completed",
+				"output": msg.Content,
+			},
+		}
+		if tc, ok := toolCalls[msg.ToolID]; ok {
+			part["id"] = tc.ID
+			part["tool"] = tc.Function.Name
+			var input map[string]interface{}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err == nil {
+				part["state"].(map[string]interface{})["input"] = input
+			} else {
+				// Surface the unparseable arguments so consumers can debug the
+				// upstream tool-call payload instead of seeing the input field
+				// silently disappear.
+				part["state"].(map[string]interface{})["input_raw"] = tc.Function.Arguments
+			}
+		} else {
+			part["id"] = msg.ToolID
+		}
+		if err := emit("tool_use", map[string]interface{}{"part": part}); err != nil {
+			return err
+		}
 	}
-	fmt.Println(string(data))
 	return nil
 }
 
-func runAttach(baseURL string, port int, prompt, file, format, sessionID string) error {
+func runAttach(baseURL string, port int, promptText, format, sessionID, username, password string) error {
 	if port != 0 && !strings.Contains(baseURL, ":") {
 		baseURL = fmt.Sprintf("http://localhost:%d", port)
-	}
-
-	promptText, err := resolvePrompt(prompt, file)
-	if err != nil {
-		return err
 	}
 
 	payload := map[string]interface{}{
@@ -184,7 +346,18 @@ func runAttach(baseURL string, port int, prompt, file, format, sessionID string)
 		return err
 	}
 
-	resp, err := http.Post(baseURL+"/api/chat", "application/json", strings.NewReader(string(body)))
+	req, err := http.NewRequest(http.MethodPost, baseURL+"/api/chat", strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if password != "" || username != "" {
+		if username == "" {
+			username = "opencode"
+		}
+		req.SetBasicAuth(username, password)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("attach request failed: %w", err)
 	}

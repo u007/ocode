@@ -58,10 +58,16 @@ type PermissionResponse struct {
 	PersistTool bool
 }
 
+type pathPatternEntry struct {
+	pattern string
+	level   PermissionLevel
+}
+
 type PermissionManager struct {
 	mode            PermissionMode
 	rules           map[string]PermissionLevel
 	patterns        []patternRule
+	pathPatterns    map[string][]pathPatternEntry // toolName → path-glob patterns
 	bashPrefixes    map[string]PermissionLevel
 	workDir         string
 	webfetchDomains map[string]PermissionLevel
@@ -86,6 +92,7 @@ func NewPermissionManager() *PermissionManager {
 		mode:            PermissionModeNormal,
 		rules:           make(map[string]PermissionLevel),
 		patterns:        make([]patternRule, 0),
+		pathPatterns:    make(map[string][]pathPatternEntry),
 		bashPrefixes:    make(map[string]PermissionLevel),
 		webfetchDomains: make(map[string]PermissionLevel),
 	}
@@ -119,9 +126,19 @@ func (pm *PermissionManager) LoadFromConfig(cfg map[string]interface{}) {
 	if cfg == nil {
 		return
 	}
-	for k, v := range cfg {
-		if s, ok := v.(string); ok {
-			pm.SetRule(k, PermissionLevel(s))
+	for toolName, val := range cfg {
+		switch v := val.(type) {
+		case string:
+			pm.SetRule(toolName, PermissionLevel(v))
+		case map[string]interface{}:
+			for pattern, levelVal := range v {
+				if levelStr, ok := levelVal.(string); ok {
+					level := PermissionLevel(levelStr)
+					if validPermissionLevel(level) {
+						pm.SetPathRule(toolName, pattern, level)
+					}
+				}
+			}
 		}
 	}
 }
@@ -187,6 +204,17 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 	if pathScopedTools[toolName] {
 		path := extractPathFromArgs(toolName, args)
 		if path != "" {
+			// Check path-based permission patterns first (e.g., opencode.json
+			// "permission" entries with glob patterns). An explicit "allow" or
+			// "deny" overrides the normal workdir/sensitive checks.
+			if level := pm.CheckPathPatterns(toolName, path); level != "" {
+				if level == PermissionAsk {
+					return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
+						ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".path_pattern",
+					}}
+				}
+				return PermissionDecision{Level: level}
+			}
 			// Relative paths and glob patterns (non-absolute) are implicitly within workDir
 			if filepath.IsAbs(path) && !isWithinWorkDir(pm, path) {
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
@@ -387,6 +415,64 @@ func extractDomainFromURL(rawURL string) string {
 	return hostname
 }
 
+// matchPathPattern matches a path against a glob pattern that may contain
+// "**" (recursive wildcard, matches zero or more path segments) and "*"
+// (single-segment wildcard, does not match "/"). Standard filepath.Match
+// patterns like "?" are also supported.
+func matchPathPattern(pattern, path string) bool {
+	// Normalise to forward slashes, but do NOT filepath.Clean the pattern —
+	// "**" is not a real filesystem element and Clean would interpret it as a
+	// literal directory name.
+	pattern = filepath.ToSlash(pattern)
+	cleanPath := filepath.ToSlash(filepath.Clean(path))
+
+	// Split into segments so we can handle "**" correctly.
+	patSegs := strings.Split(pattern, "/")
+	pathSegs := strings.Split(cleanPath, "/")
+
+	return matchPathSegments(patSegs, pathSegs)
+}
+
+// matchPathSegments recursively matches path segments against pattern segments,
+// supporting "**" as a recursive wildcard (matches zero or more segments).
+func matchPathSegments(pattern, path []string) bool {
+	// If both are empty, it's a match.
+	if len(pattern) == 0 && len(path) == 0 {
+		return true
+	}
+
+	// If pattern is empty but path isn't, no match.
+	if len(pattern) == 0 {
+		return false
+	}
+
+	// Handle "**" at current position
+	if pattern[0] == "**" {
+		// Try matching zero or more path segments against the rest of the pattern.
+		// Try zero first, then one, two, etc.
+		for i := 0; i <= len(path); i++ {
+			if matchPathSegments(pattern[1:], path[i:]) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// If path is empty but pattern isn't (and we didn't match ** above), no match.
+	if len(path) == 0 {
+		return false
+	}
+
+	// Match current segment with filepath.Match (handles *, ?, [a-z], etc.)
+	matched, err := filepath.Match(pattern[0], path[0])
+	if err != nil || !matched {
+		return false
+	}
+
+	// Recurse to the next segment
+	return matchPathSegments(pattern[1:], path[1:])
+}
+
 func matchPattern(pattern, name string) bool {
 	if pattern == "*" {
 		return true
@@ -416,6 +502,38 @@ func (pm *PermissionManager) SetRule(toolName string, level PermissionLevel) {
 	} else {
 		pm.rules[toolName] = level
 	}
+}
+
+func (pm *PermissionManager) SetPathRule(toolName, pattern string, level PermissionLevel) {
+	if toolName == "" || pattern == "" || !validPermissionLevel(level) {
+		return
+	}
+	pm.pathPatterns[toolName] = append(pm.pathPatterns[toolName], pathPatternEntry{pattern: pattern, level: level})
+}
+
+// CheckPathPatterns returns the first matching permission level from path-based
+// rules for the given tool and target path, or empty string if no rule matches.
+func (pm *PermissionManager) CheckPathPatterns(toolName, targetPath string) PermissionLevel {
+	entries, ok := pm.pathPatterns[toolName]
+	if !ok {
+		return ""
+	}
+	for _, entry := range entries {
+		if matchPathPattern(entry.pattern, targetPath) {
+			return entry.level
+		}
+	}
+	// Also check wildcard tool entries (e.g., "mcp_*" → matches any MCP tool)
+	for pattern, entries := range pm.pathPatterns {
+		if matchPattern(pattern, toolName) {
+			for _, entry := range entries {
+				if matchPathPattern(entry.pattern, targetPath) {
+					return entry.level
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (pm *PermissionManager) SetBashPrefixRule(prefix string, level PermissionLevel) {

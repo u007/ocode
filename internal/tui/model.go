@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -207,6 +208,25 @@ type streamMsgEvent struct {
 type ctrlCResetMsg struct{}
 type cleanupRequestMsg struct{}
 type dotTickMsg struct{}
+
+// sidebarComputeCache memoises expensive sidebar values (context-token estimate
+// and telemetry aggregation) that walk the full message slice. The cache is
+// keyed on a coarse fingerprint of m.messages; when nothing has changed we
+// skip the O(n) recompute on every View() call (every keystroke).
+type sidebarComputeCache struct {
+	key            sidebarCacheKey
+	ctxTokens      int64
+	ctxSource      string
+	ctxComputed    bool
+	telemetry      sidebarTelemetry
+	telemetryReady bool
+}
+
+type sidebarCacheKey struct {
+	msgCount int
+	lastLen  int
+	model    string
+}
 type registryReadyMsg struct{ failed bool }
 type pickerFilterApplyMsg struct {
 	seq    int
@@ -347,132 +367,144 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 }
 
 type model struct {
-	viewport              viewport.Model
-	input                 textarea.Model
-	messages              []message
-	agent                 *agent.Agent
-	config                *config.Config
-	sessionID             string
-	sessionTitle          string
-	showThinking          bool
-	showDetails           bool
-	leaderActive          bool
-	leaderSeq             int
-	showPalette           bool
-	showPicker            bool
-	pickerKind            string
-	pickerItems           []string
-	pickerValues          []string
-	pickerIsHeader        []bool
-	pickerIndex           int
-	pickerFilter          string
-	pickerFilterPending   string
-	pickerFilterSeq       int
+	viewport            viewport.Model
+	input               textarea.Model
+	messages            []message
+	agent               *agent.Agent
+	config              *config.Config
+	sessionID           string
+	sessionTitle        string
+	showThinking        bool
+	showDetails         bool
+	leaderActive        bool
+	leaderSeq           int
+	showPalette         bool
+	showPicker          bool
+	pickerKind          string
+	pickerItems         []string
+	pickerValues        []string
+	pickerIsHeader      []bool
+	pickerIndex         int
+	pickerFilter        string
+	pickerFilterPending string
+	pickerFilterSeq     int
 
 	// Pagination state for the session picker (infinite scroll)
-	pickerSessionRefs     []session.Ref // all loaded session refs
-	pickerSessionPage     int           // number of pages loaded so far
-	pickerSessionTotal    int           // total count of all sessions
-	pickerSessionMore     bool          // whether more pages are available
-	showSlashPopup        bool
-	slashPopupIndex       int
-	slashPopupItems       []slashSuggestion
-	fileListCache         []slashSuggestion
-	fileShortcodePaths    map[string]string
-	showConnect           bool
-	connect               *connectDialog
-	showSidebar           bool
-	sidebarScroll         int
-	sessionTelemetry      sidebarTelemetry
-	activeModel           string
-	paletteInput          string
-	width                 int
-	height                int
-	ready                 bool
-	activeTab             int
-	chatUnread            bool
-	files                 filesModel
-	git                   gitModel
-	logViewport           viewport.Model
-	logEntries            []DebugEntry
-	logSearch             string
-	logKindFilter         map[DebugEntryKind]bool
-	err                   error
-	scrollSpeed           int
-	restoredPendingScroll bool
-	scrollbarDrag         scrollbarDragTarget
-	scrollbarDragOffset   int
-	workDir               string
-	currentAgentIdx       int
-	branchlessMode        bool
-	showPermDialog        bool
-	showQuestionDialog    bool
-	questionToolCallID    string
-	questionPrompts       []tool.QuestionPrompt
-	questionTab           int
-	questionCursor        []int
-	questionSelected      []map[int]bool
-	questionCustom        []string
-	questionTextActive    bool
-	questionInput         textarea.Model
-	pendingToolName       string
-	pendingToolArgs       json.RawMessage
-	pendingToolCallID     string
-	pendingPermission     agent.PermissionRequest
-	styles                Styles
-	streaming             bool
-	ctrlCPressed          bool
-	exitPending           bool
-	cancelStream          chan struct{}
-	lastActivity          agent.ActivitySnapshot
-	activityRowReserved   bool
-	escPressed            bool
-	escPressTime          time.Time
-	lastRetryableLLMErr   string
-	inputHistory          []string
-	inputHistoryIndex     int
-	queuedInputs          []string
-	pendingJobMsgs        []message
-	expandedToolOutputs   map[int]bool
-	toolOutputRegions     []toolOutputRegion
-	dotFrame              int
-	sel                   selectionState
-	detail                detailStack
-	agentStripBlocks      []agentStripBlock
-	agentStripRow0        int
-	streamStartedAt       time.Time
-	streamEndedAt         time.Time
-	streamWasInterrupted  bool
-	transcriptContent     string
-	transcriptLines       []string
-	rawTranscriptLines    []string
-	filesSel              selectionState
-	inputSel              selectionState
-	gitSel                selectionState
-	rawInputLines         []string
-	compactCh             chan agent.CompactResult
-	compactStartCh        chan struct{}
-	titleCh               chan titleResult
-	titleRequested        bool
-	titleGen              uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
-	compacting            bool
-	lastCompactErr        error
-	pendingCompactUIIdx   []int
-	pendingCompactResume  bool
-	skipCompactPreflight  bool
-	thinkingLevelIdx      int  // index into thinkingBudgetLevels
-	agentStripOffset      int  // first visible run index in the agent strip
-	agentStripSelected    int  // selected run index in the agent strip
-	agentStripFocused     bool // whether keyboard nav is routed to the agent strip
-	subAgentPermCh        chan subAgentPermRequest
-	subAgentPermMu        *sync.Mutex                   // serialises concurrent sub-agent permission asks
-	pendingSubAgentResp   chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
-	lastClickTime         time.Time
-	lastClickX            int
-	lastClickY            int
-	permButtonRegions     []permButtonRegion
-	cleanupState          *modelCleanupState
-	supervisor            *tool.ProcessSupervisor
+	pickerSessionRefs        []session.Ref // all loaded session refs
+	pickerSessionPage        int           // number of pages loaded so far
+	pickerSessionTotal       int           // total count of all sessions
+	pickerSessionMore        bool          // whether more pages are available
+	showSlashPopup           bool
+	slashPopupIndex          int
+	slashPopupItems          []slashSuggestion
+	fileListCache            []slashSuggestion
+	fileShortcodePaths       map[string]string
+	showConnect              bool
+	connect                  *connectDialog
+	showSidebar              bool
+	sidebarScroll            int
+	sessionTelemetry         sidebarTelemetry
+	activeModel              string
+	paletteInput             string
+	width                    int
+	height                   int
+	ready                    bool
+	activeTab                int
+	chatUnread               bool
+	files                    filesModel
+	git                      gitModel
+	logViewport              viewport.Model
+	logEntries               []DebugEntry
+	logSearch                string
+	logKindFilter            map[DebugEntryKind]bool
+	err                      error
+	scrollSpeed              int
+	restoredPendingScroll    bool
+	scrollbarDrag            scrollbarDragTarget
+	scrollbarDragOffset      int
+	workDir                  string
+	currentAgentIdx          int
+	branchlessMode           bool
+	showPermDialog           bool
+	showQuestionDialog       bool
+	questionToolCallID       string
+	questionPrompts          []tool.QuestionPrompt
+	questionTab              int
+	questionCursor           []int
+	questionSelected         []map[int]bool
+	questionCustom           []string
+	questionTextActive       bool
+	questionInput            textarea.Model
+	pendingToolName          string
+	pendingToolArgs          json.RawMessage
+	pendingToolCallID        string
+	pendingPermission        agent.PermissionRequest
+	styles                   Styles
+	streaming                bool
+	ctrlCPressed             bool
+	exitPending              bool
+	cancelStream             chan struct{}
+	lastActivity             agent.ActivitySnapshot
+	activityRowReserved      bool
+	escPressed               bool
+	escPressTime             time.Time
+	lastRetryableLLMErr      string
+	inputHistory             []string
+	inputHistoryIndex        int
+	unsavedInput             string
+	inputAtFirstLineUpNotice bool
+	queuedInputs             []string
+	pendingJobMsgs           []message
+	expandedToolOutputs      map[int]bool
+	toolOutputRegions        []toolOutputRegion
+	expandedThinking         map[int]bool
+	thinkingRegions          []toolOutputRegion
+	dotFrame                 int
+	sel                      selectionState
+	detail                   detailStack
+	agentStripBlocks         []agentStripBlock
+	agentStripRow0           int
+	streamStartedAt          time.Time
+	streamEndedAt            time.Time
+	streamWasInterrupted     bool
+	transcriptContent        string
+	transcriptLines          []string
+	rawTranscriptLines       []string
+	filesSel                 selectionState
+	inputSel                 selectionState
+	gitSel                   selectionState
+	rawInputLines            []string
+	rawInputLinesDirty       bool
+	inputThemeApplied        bool
+	inputThemeShellMode      bool
+	sidebarCache             *sidebarComputeCache
+	compactCh                chan agent.CompactResult
+	compactStartCh           chan struct{}
+	titleCh                  chan titleResult
+	deltaCh                  chan deltaEvent
+	deltaDrops               uint64 // bumped each time the deltaCh select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
+	streamingThinkingIdx     int       // index into m.messages of the in-flight roleThinking message; -1 when none
+	lastDeltaRender          time.Time // throttles renderTranscript to ≥50ms cadence during streams
+	titleRequested           bool
+	titleGen                 uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
+	compacting               bool
+	lastCompactErr           error
+	pendingCompactUIIdx      []int
+	pendingCompactResume     bool
+	skipCompactPreflight     bool
+	thinkingLevelIdx         int  // index into thinkingBudgetLevels
+	agentStripOffset         int  // first visible run index in the agent strip
+	agentStripSelected       int  // selected run index in the agent strip
+	agentStripFocused        bool // whether keyboard nav is routed to the agent strip
+	subAgentPermCh           chan subAgentPermRequest
+	subAgentPermMu           *sync.Mutex                   // serialises concurrent sub-agent permission asks
+	pendingSubAgentResp      chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
+	lastClickTime            time.Time
+	lastClickX               int
+	lastClickY               int
+	permButtonRegions        []permButtonRegion
+	cleanupState             *modelCleanupState
+	supervisor               *tool.ProcessSupervisor
 }
 
 type modelCleanupState struct {
@@ -531,23 +563,30 @@ var (
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("#3B4261")).
 			Padding(0, 1)
-	cleanBoxStyle = lipgloss.NewStyle()
-	hintStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
-	selectedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#1A1B26")).Background(lipgloss.Color("#7AA2F7"))
-	statusStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#787C99")).Background(lipgloss.Color("#1A1B26")).Padding(0, 1).Bold(true)
-	successStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
-	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E"))
-	textStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#C0CAF5"))
+	cleanBoxStyle       = lipgloss.NewStyle()
+	hintStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Italic(true)
+	selectedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#1A1B26")).Background(lipgloss.Color("#7AA2F7"))
+	statusStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("#787C99")).Background(lipgloss.Color("#1A1B26")).Padding(0, 1).Bold(true)
+	successStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
+	errorStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E"))
+	textStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C0CAF5"))
 	thinkingStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261")).Italic(true).Faint(true)
 	thinkingHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261")).Bold(true).Italic(true)
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261"))
-	toolBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#3B4261")).Padding(0, 1)
+	dimStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261"))
+	toolBoxStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#3B4261")).Padding(0, 1)
+	sidebarHeaderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true)
+	sidebarSectionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#BB9AF7")).Bold(true)
+	sidebarAccentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true)
 
 	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Strikethrough(true)
 	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
 	todoPendingStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#A9B1D6"))
 	todoProgressStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
 )
+
+func renderSidebarSectionTitle(title string) string {
+	return sidebarSectionStyle.Render(title)
+}
 
 // styleTodoLine renders a markdown todo line with strikethrough/dim for done
 // items and a warning color for in-progress (`- [~]` or `- [-]`). Also replaces
@@ -674,13 +713,18 @@ func (m *model) applyTheme() {
 	} else {
 		m.styles = ApplyThemeColors("tokyonight")
 	}
+	m.inputThemeApplied = false
 	m.applyInputTheme()
 }
 
 func (m *model) applyInputTheme() {
+	shellMode := m.inputIsShellMode()
+	if m.inputThemeApplied && m.inputThemeShellMode == shellMode {
+		return
+	}
 	styles := m.input.Styles()
 	promptStyle := m.styles.Header
-	if m.inputIsShellMode() {
+	if shellMode {
 		promptStyle = m.styles.Success
 	}
 
@@ -707,11 +751,31 @@ func (m *model) applyInputTheme() {
 	styles.Blurred.CursorLineNumber = m.styles.Dim
 
 	m.input.SetStyles(styles)
+	m.inputThemeApplied = true
+	m.inputThemeShellMode = shellMode
 }
 
 func (m *model) toggleSidebar() {
 	m.showSidebar = !m.showSidebar
 	m.layout()
+}
+
+func (m *model) backgroundLatestForegroundBash() bool {
+	if m.agent == nil || m.agent.Procs() == nil {
+		return false
+	}
+	id, command, ok := m.agent.Procs().RequestBackgroundLatest()
+	if !ok {
+		return false
+	}
+	m.messages = append(m.messages, message{
+		role:      roleAssistant,
+		text:      hintStyle.Render(fmt.Sprintf("↩ moved bash to background: %s (%s)", id, truncateToWidth(command, 48))),
+		transient: true,
+	})
+	m.renderTranscript()
+	m.viewport.GotoBottom()
+	return true
 }
 
 func (m model) sidebarEnabled() bool {
@@ -874,6 +938,8 @@ func newModel(sid string, cont bool, yolo bool) model {
 		compactCh:      make(chan agent.CompactResult, 4),
 		compactStartCh: make(chan struct{}, 4),
 		titleCh:        make(chan titleResult, 4),
+		deltaCh:        make(chan deltaEvent, 256),
+		streamingThinkingIdx: -1,
 		questionInput:  questionInput,
 		subAgentPermCh: make(chan subAgentPermRequest),
 		subAgentPermMu: &sync.Mutex{},
@@ -918,6 +984,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	}
 	m.files.SetSaveEditor(config.SaveEditor)
 	m.logViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	m.sidebarCache = &sidebarComputeCache{}
 
 	agent.DebugAppend = func(kind, msg string) {
 		DebugLog.Append(DebugEntry{Kind: DebugEntryKind(kind), Message: msg})
@@ -947,7 +1014,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitTitleEvent(m.titleCh), listenSubAgentPerm(m.subAgentPermCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitTitleEvent(m.titleCh), waitDeltaEvent(m.deltaCh), listenSubAgentPerm(m.subAgentPermCh)}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
 	}
@@ -973,7 +1040,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				content = shortcode
 			}
 			m.input.InsertString(content)
-			m.syncRawInputLines()
+			m.rawInputLinesDirty = true
 			var cmd tea.Cmd
 			m, cmd = m.updateSlashPopupState()
 			return m, cmd
@@ -1092,7 +1159,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.activeTab == tabChat && !m.showQuestionDialog && m.detail.empty() {
 		m.input, tiCmd = m.input.Update(msg)
-		m.syncRawInputLines()
+		m.rawInputLinesDirty = true
+		(&m).applyInputTheme()
 	}
 	if shouldForwardToTranscriptViewport(msg) {
 		m.viewport, vpCmd = m.viewport.Update(msg)
@@ -1470,6 +1538,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastActivity = agent.ActivitySnapshot{}
 		m.streamEndedAt = time.Now()
 		m.streamWasInterrupted = msg.err != nil
+		// Reset so the next turn's first reasoning delta starts a fresh
+		// thinking block instead of appending into the prior turn's buffer.
+		m.streamingThinkingIdx = -1
+		if dropped := atomic.SwapUint64(&m.deltaDrops, 0); dropped > 0 {
+			agent.DebugAppendf("stream", "dropped %d reasoning deltas under backpressure", dropped)
+		}
 		m.layout()
 		m.saveSession()
 		if msg.err == nil && m.agent != nil {
@@ -1550,6 +1624,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.saveSession()
 		}
 		return m, waitTitleEvent(m.titleCh)
+	case deltaMsg:
+		m.applyThinkingDelta(msg.kind, msg.text)
+		return m, waitDeltaEvent(m.deltaCh)
 	case subAgentPermAskMsg:
 		// A sub-agent tool call needs a permission decision. Reuse the same
 		// permission dialog the main agent uses. The sub-agent goroutine is
@@ -1783,6 +1860,9 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		}
 
 		switch key {
+		case "s":
+			m.toggleSidebar()
+			return true, m, nil
 		case "u":
 			newM, c := m.handleCommand("/undo")
 			return true, newM, c
@@ -1813,6 +1893,11 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 // can still flush textarea/viewport updates.
 func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Model, tea.Cmd) {
 	keyStr := msg.String()
+
+	// Clear the first-line-up notice on any key that isn't "up".
+	if keyStr != "up" {
+		m.inputAtFirstLineUpNotice = false
+	}
 
 	// ESC always cancels a running stream, regardless of any sub-state focus.
 	if keyStr == "esc" && m.streaming && m.cancelStream != nil {
@@ -1901,6 +1986,35 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		m.paletteInput = ""
 		return m, nil
 	case "up":
+		// If already in history mode, continue navigating history directly.
+		if m.inputHistoryIndex != -1 {
+			if len(m.inputHistory) > 0 && m.inputHistoryIndex > 0 {
+				m.inputHistoryIndex--
+			}
+			if len(m.inputHistory) > 0 {
+				m.input.SetValue(m.inputHistory[m.inputHistoryIndex])
+			}
+			return m, nil
+		}
+
+		// Multi-line: navigate within input first.
+		value := m.input.Value()
+		if value != "" && m.input.LineCount() > 1 && m.input.Line() > 0 {
+			m.input.CursorUp()
+			m.inputAtFirstLineUpNotice = false
+			return m, nil
+		}
+
+		// First press at first line: notice. Second press: enter history.
+		if value != "" && !m.inputAtFirstLineUpNotice {
+			m.inputAtFirstLineUpNotice = true
+			return m, nil
+		}
+		if value != "" && m.inputAtFirstLineUpNotice {
+			m.unsavedInput = value
+			m.inputAtFirstLineUpNotice = false
+		}
+
 		if len(m.queuedInputs) > 0 && m.input.Value() == "" {
 			last := m.queuedInputs[len(m.queuedInputs)-1]
 			m.queuedInputs = m.queuedInputs[:len(m.queuedInputs)-1]
@@ -1927,7 +2041,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.input.SetValue(m.inputHistory[m.inputHistoryIndex])
 		} else {
 			m.inputHistoryIndex = -1
-			m.input.SetValue("")
+			if m.unsavedInput != "" {
+				m.input.SetValue(m.unsavedInput)
+				m.unsavedInput = ""
+			} else {
+				m.input.SetValue("")
+			}
 		}
 		return m, nil
 	case "ctrl+t":
@@ -1943,7 +2062,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 		return m, nil
 	case "ctrl+b":
-		m.toggleSidebar()
+		if m.backgroundLatestForegroundBash() {
+			return m, nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("↩ no running bash command to move to background"), transient: true})
+		m.renderTranscript()
+		m.viewport.GotoBottom()
 		return m, nil
 	case "ctrl+o":
 		return m.handleCommand("/yolo")
@@ -1966,6 +2090,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		if strings.TrimSpace(m.input.Value()) != "" {
 			m.input.Reset()
 			m.inputHistoryIndex = -1
+			m.unsavedInput = ""
 			m.ctrlCPressed = false
 			m.closeSlashPopup()
 			return m, nil
@@ -2019,6 +2144,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			}
 		}
 		m.inputHistoryIndex = -1
+		m.unsavedInput = ""
 
 		if strings.HasPrefix(text, "/") {
 			m.closeSlashPopup()
@@ -2449,6 +2575,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if m.inputSel.dragging {
 			m.inputSel.dragging = false
 			if m.inputSel.active {
+				(&m).ensureRawInputLines()
 				text := extractSelectionText(m.rawInputLines, m.inputSel.startLine, m.inputSel.startCol, m.inputSel.endLine, m.inputSel.endCol)
 				_ = clipboard.WriteAll(text)
 				m.inputSel = selectionState{}
@@ -2550,6 +2677,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		if idx, ok := m.toolOutputForClick(mouse); ok {
 			m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
+			m.renderTranscript()
+			return m, nil, true
+		}
+		if idx, ok := m.thinkingForClick(mouse); ok {
+			m.expandedThinking[idx] = !m.expandedThinking[idx]
 			m.renderTranscript()
 			return m, nil, true
 		}
@@ -2656,6 +2788,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	}
 
 	if m.inputSel.dragging {
+		(&m).ensureRawInputLines()
 		topY := m.inputAreaTopY()
 		relRow := mouse.Y - topY - 1 + m.input.ScrollYOffset()
 		if relRow < 0 {
@@ -3176,6 +3309,7 @@ func (m *model) handleSessionCmd(args []string) {
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
 			restoreTodoState(sess.Metadata)
 			m.messages = []message{}
+			m.streamingThinkingIdx = -1
 			for _, am := range sess.Messages {
 				role := tuiRoleForAgentMessage(am)
 				copyMsg := am
@@ -3276,6 +3410,7 @@ func (m *model) handleExportClaudeCmd(args []string) {
 func (m *model) handleNewCmd(args []string) tea.Cmd {
 	cmd := m.resetSessionAgent()
 	m.messages = []message{}
+	m.streamingThinkingIdx = -1
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
 	m.titleRequested = false
@@ -3691,6 +3826,9 @@ func (m *model) handleContextCmd(args []string) {
 	builtinLabel := fmt.Sprintf("Built-in (%d tools)", len(builtinDefs))
 	fmt.Fprintf(&b, "  %s%s~%s tok\n", builtinLabel, columnPad(builtinLabel, 28), formatTok(builtinTok))
 
+	if len(serverNames) == 0 {
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "MCP: (none)", "0")
+	}
 	for _, srv := range serverNames {
 		defs, ok := grouped[srv]
 		if !ok {
@@ -4042,11 +4180,19 @@ func (m *model) appendAgentMessage(am agent.Message) {
 	copyMsg := am
 	if am.Role == "assistant" {
 		if am.ReasoningContent != "" && m.showThinking {
-			m.messages = append(m.messages, message{
-				role: roleThinking,
-				text: am.ReasoningContent,
-			})
+			if m.streamingThinkingIdx >= 0 && m.streamingThinkingIdx < len(m.messages) && m.messages[m.streamingThinkingIdx].role == roleThinking {
+				// Streamed live — replace partial buffer with the canonical text
+				// and collapse to last-3-lines view now that streaming is done.
+				m.messages[m.streamingThinkingIdx].text = am.ReasoningContent
+				delete(m.expandedThinking, m.streamingThinkingIdx)
+			} else {
+				m.messages = append(m.messages, message{
+					role: roleThinking,
+					text: am.ReasoningContent,
+				})
+			}
 		}
+		m.streamingThinkingIdx = -1
 		content := am.Content
 		if m.sessionTitle == "" && content != "" {
 			if title, rest := extractSessionTitle(content); title != "" {
@@ -4303,12 +4449,18 @@ func (m *model) lookupToolName(toolID string) string {
 }
 
 func (m *model) askAgent() tea.Cmd {
+	// Load context once — both buildAgentMessagesSnapshot and Step call
+	// BasePromptMessages, which would otherwise re-read context files twice.
+	if m.agent != nil {
+		m.agent.SetPreloadedContext(agent.LoadContext())
+	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
 	if m.skipCompactPreflight {
 		m.skipCompactPreflight = false
 	} else if m.agent != nil {
 		if m.agent.MaybeCompactAsync(agentMsgs) {
+			m.agent.SetPreloadedContext("")
 			m.pendingCompactUIIdx = uiIdx
 			m.pendingCompactResume = true
 			m.skipCompactPreflight = true
@@ -4323,6 +4475,7 @@ func (m *model) askAgent() tea.Cmd {
 	go func() {
 		a.OnMessage = func(am agent.Message) { ch <- am }
 		_, err := a.Step(agentMsgs)
+		a.SetPreloadedContext("")
 		a.OnMessage = nil
 		close(ch)
 		errCh <- err
@@ -4441,6 +4594,9 @@ func (m *model) layout() {
 	}
 	m.viewport.SetHeight(newHeight)
 	m.renderTranscript()
+	if !m.detail.empty() {
+		m.refreshTopDetailView()
+	}
 	m.layoutLogViewport()
 }
 
@@ -4618,14 +4774,35 @@ func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
 	return 0, false
 }
 
+func (m model) thinkingForClick(mouse tea.Mouse) (int, bool) {
+	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
+		return 0, false
+	}
+	clickY := mouse.Y - lipgloss.Height(m.styles.Header.Render("◆ ocode")) - 1
+	if clickY < 0 || clickY >= m.viewport.Height() {
+		return 0, false
+	}
+	clickY += m.viewport.YOffset()
+	for _, region := range m.thinkingRegions {
+		if clickY >= region.startLine && clickY <= region.endLine {
+			return region.messageIndex, true
+		}
+	}
+	return 0, false
+}
+
 func (m *model) renderTranscript() {
 	if len(m.messages) == 0 {
 		return
 	}
 	var b strings.Builder
 	m.toolOutputRegions = nil
+	m.thinkingRegions = nil
 	if m.expandedToolOutputs == nil {
 		m.expandedToolOutputs = make(map[int]bool)
+	}
+	if m.expandedThinking == nil {
+		m.expandedThinking = make(map[int]bool)
 	}
 
 	for i, msg := range m.messages {
@@ -4636,9 +4813,37 @@ func (m *model) renderTranscript() {
 		case roleUser:
 			b.WriteString(m.renderUserText(strings.TrimRight(msg.text, "\n")))
 		case roleThinking:
-			content := renderThinkingContent(strings.TrimRight(msg.text, "\n"), m.styles)
-			b.WriteString(m.styles.ThinkingHeader.Render("⟁ thinking\n"))
-			b.WriteString(m.styles.Thinking.Render(content))
+			text := strings.TrimSpace(msg.text)
+			if text == "" {
+				continue
+			}
+			content := renderThinkingContent(text, m.styles)
+			expanded := m.expandedThinking[i]
+			width := m.viewport.Width()
+			wrapped := wrapView(content, width)
+			lines := strings.Split(wrapped, "\n")
+			totalLines := len(lines)
+			collapsed := !expanded && totalLines > 3
+			header := "⟁ thinking"
+			if collapsed {
+				header = fmt.Sprintf("⟁ thinking · %d lines [▸ click to expand]", totalLines)
+			} else if totalLines > 3 {
+				header = fmt.Sprintf("⟁ thinking · %d lines [▾ click to collapse]", totalLines)
+			}
+			startLine := lipgloss.Height(b.String())
+			b.WriteString(m.styles.ThinkingHeader.Render(header))
+			b.WriteString("\n")
+			body := content
+			if collapsed {
+				body = strings.Join(lines[totalLines-3:], "\n")
+			}
+			b.WriteString(m.styles.Thinking.Render(body))
+			endLine := lipgloss.Height(b.String()) - 1
+			m.thinkingRegions = append(m.thinkingRegions, toolOutputRegion{
+				messageIndex: i,
+				startLine:    startLine,
+				endLine:      endLine,
+			})
 		case roleAssistant:
 			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
 				if _, ok := parseQuestionPrompt(msg.raw.Content); ok {
@@ -4864,6 +5069,22 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	deltaCh := m.deltaCh
+	m.agent.OnDelta = func(kind, text string) {
+		if deltaCh == nil {
+			return
+		}
+		select {
+		case deltaCh <- deltaEvent{kind: kind, text: text}:
+		default:
+			// drop on backpressure — visual stream may skip a token but state
+			// stays consistent because the full ReasoningContent arrives in the
+			// final assistant Message. Counter is incremented atomically because
+			// this callback fires from the LLM streaming goroutine while the TUI
+			// Update loop may read deltaDrops.
+			atomic.AddUint64(&m.deltaDrops, 1)
+		}
+	}
 	// Sub-agent permission asks: the callback runs inside a sub-agent goroutine.
 	// It hands the request to the TUI Update loop and blocks for the answer. The
 	// mutex serialises concurrent asks (multiple sub-agents may ask at once) so
@@ -4914,6 +5135,56 @@ func waitCompactEvent(startCh chan struct{}, doneCh chan agent.CompactResult) te
 		case r := <-doneCh:
 			return compactFinishedMsg{result: r}
 		}
+	}
+}
+
+// deltaEvent carries one streamed token (kind ∈ {"reasoning","text"}) from
+// the LLM HTTP goroutine to the TUI's event loop via deltaCh.
+type deltaEvent struct {
+	kind string
+	text string
+}
+
+type deltaMsg deltaEvent
+
+// applyThinkingDelta appends a streamed reasoning token to the in-flight
+// roleThinking message (creating one if none exists). Text deltas are
+// ignored — the final assistant Message replaces them on arrival, and
+// streaming the assistant text would duplicate it. Auto-expands the
+// streaming message so users see it grow live.
+func (m *model) applyThinkingDelta(kind, text string) {
+	if kind != "reasoning" || text == "" || !m.showThinking {
+		return
+	}
+	if m.streamingThinkingIdx < 0 || m.streamingThinkingIdx >= len(m.messages) || m.messages[m.streamingThinkingIdx].role != roleThinking {
+		m.messages = append(m.messages, message{role: roleThinking, text: text})
+		m.streamingThinkingIdx = len(m.messages) - 1
+		if m.expandedThinking == nil {
+			m.expandedThinking = make(map[int]bool)
+		}
+		// Expand on creation only — never on subsequent deltas, so a user who
+		// clicks to collapse mid-stream isn't fought by the next token.
+		m.expandedThinking[m.streamingThinkingIdx] = true
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+		m.lastDeltaRender = time.Now()
+		return
+	}
+	m.messages[m.streamingThinkingIdx].text += text
+	// Throttle re-renders to ≥50ms during a stream — a long reasoning turn
+	// can emit thousands of tokens and renderTranscript walks the full
+	// message list + re-wraps. Final state always lands via appendAgentMessage.
+	if time.Since(m.lastDeltaRender) < 50*time.Millisecond {
+		return
+	}
+	m.renderTranscript()
+	m.viewport.GotoBottom()
+	m.lastDeltaRender = time.Now()
+}
+
+func waitDeltaEvent(ch chan deltaEvent) tea.Cmd {
+	return func() tea.Msg {
+		return deltaMsg(<-ch)
 	}
 }
 
@@ -5321,7 +5592,7 @@ func (m *model) openAgentDetail(runID string) {
 	if !ok {
 		return
 	}
-	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
+	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
 	content, runs, procs := renderRunTranscriptDetail(run, runID, vp.Width())
 	vp.SetContent(content)
 	m.detail.push(detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, procs: procs})
@@ -5337,7 +5608,7 @@ func (m *model) openProcessListForRun(runID string) {
 	if m.modalOpen() || reg == nil {
 		return
 	}
-	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
+	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
 	vp.SetContent(renderProcessList(reg))
 	dv := detailView{kind: detailProcessList, runPath: runID, vp: vp}
 	if run, ok := m.findAgentRun(runID); ok {
@@ -5356,7 +5627,7 @@ func (m *model) openProcessLogForRun(runID, procID string) {
 	if m.modalOpen() || reg == nil {
 		return
 	}
-	vp := viewport.New(viewport.WithWidth(m.panelWidth()-4), viewport.WithHeight(m.height-6))
+	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
 	vp.SetContent(renderProcessLog(reg, procID))
 	dv := detailView{kind: detailProcessLog, runPath: runID, procID: procID, vp: vp}
 	if run, ok := m.findAgentRun(runID); ok {
@@ -5370,6 +5641,8 @@ func (m *model) refreshTopDetailView() {
 		return
 	}
 	top := &m.detail[len(m.detail)-1]
+	top.vp.SetWidth(m.detailViewportWidth())
+	top.vp.SetHeight(m.detailViewportHeight())
 	switch top.kind {
 	case detailAgentRun:
 		run, ok := m.findAgentRun(top.runPath)
@@ -5390,6 +5663,14 @@ func (m *model) refreshTopDetailView() {
 			top.vp.SetContent(renderProcessLog(reg, top.procID))
 		}
 	}
+}
+
+func (m model) detailViewportWidth() int {
+	return max(1, m.panelWidth()-7)
+}
+
+func (m model) detailViewportHeight() int {
+	return max(1, m.height-6)
 }
 
 func (m model) processRegistryForRun(runID string) *tool.ProcessRegistry {
@@ -5460,7 +5741,7 @@ func (m model) renderDetailView(d detailView) string {
 	} else if d.kind == detailProcessList {
 		hints += " · click: open process"
 	}
-	header := hintStyle.Render("◆ "+title) + hintStyle.Render("  "+hints)
+	header := wrapView(hintStyle.Render("◆ "+title)+hintStyle.Render("  "+hints), m.panelWidth())
 	scrollbar := renderScrollbar(d.vp.Height(), d.vp.TotalLineCount(), d.vp.VisibleLineCount(), d.vp.YOffset())
 	bodyContent := lipgloss.JoinHorizontal(lipgloss.Top,
 		constrainView(d.vp.View(), d.vp.Width(), d.vp.Height()),
@@ -5783,6 +6064,7 @@ type sidebarTelemetry struct {
 	inputTokens  int64
 	outputTokens int64
 	totalTokens  int64
+	cachedTokens int64
 	spend        *float64
 }
 
@@ -5811,6 +6093,9 @@ func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 			t.outputTokens += *msg.Usage.CompletionTokens
 			messageTotal += *msg.Usage.CompletionTokens
 		}
+		if msg.Usage.CacheReadTokens != nil {
+			t.cachedTokens += *msg.Usage.CacheReadTokens
+		}
 		if msg.Usage.TotalTokens != nil {
 			messageTotal = *msg.Usage.TotalTokens
 		}
@@ -5825,13 +6110,14 @@ func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 }
 
 func (t sidebarTelemetry) metadata() map[string]any {
-	if t.inputTokens == 0 && t.outputTokens == 0 && t.totalTokens == 0 && t.spend == nil {
+	if t.inputTokens == 0 && t.outputTokens == 0 && t.totalTokens == 0 && t.spend == nil && t.cachedTokens == 0 {
 		return nil
 	}
 	meta := map[string]any{
 		"input_tokens":  t.inputTokens,
 		"output_tokens": t.outputTokens,
 		"billed_tokens": t.totalTokens,
+		"cached_tokens": t.cachedTokens,
 	}
 	if t.spend != nil {
 		meta["spend"] = *t.spend
@@ -5877,6 +6163,9 @@ func telemetryFromSessionMetadata(meta map[string]any) sidebarTelemetry {
 	}
 	if v, ok := meta["billed_tokens"]; ok {
 		telemetry.totalTokens = int64FromAny(v)
+	}
+	if v, ok := meta["cached_tokens"]; ok {
+		telemetry.cachedTokens = int64FromAny(v)
 	}
 	// Legacy keys for backward compatibility with older sessions
 	if v, ok := meta["prompt_tokens"]; ok {
@@ -5999,8 +6288,9 @@ func formatPercent(used, total int64) string {
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
 	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}}
+	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
-	boxBodyWidth := sidebarColumnWidth - 8
+	boxBodyWidth := sidebarColumnWidth - 4
 	if boxBodyWidth < 8 {
 		boxBodyWidth = 8
 	}
@@ -6014,20 +6304,11 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		}
 		return idxs
 	}
-	appendTopSection := func(title string, body []string) {
-		if len(data.topLines) > 0 {
-			data.topLines = append(data.topLines, "")
-		}
-		data.topLines = append(data.topLines, title)
-		for _, line := range body {
-			appendWrapped(&data.topLines, line, outerBodyWidth)
-		}
-	}
 	appendScrollSection := func(title string, body []string, filePaths []string) {
 		if len(data.scrollLines) > 0 {
 			data.scrollLines = append(data.scrollLines, "")
 		}
-		data.scrollLines = append(data.scrollLines, title)
+		data.scrollLines = append(data.scrollLines, renderSidebarSectionTitle(title))
 		for i, line := range body {
 			idxs := appendWrapped(&data.scrollLines, line, boxBodyWidth)
 			if i < len(filePaths) {
@@ -6037,15 +6318,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 			}
 		}
 	}
-	appendBottomSection := func(title string, body []string) {
-		if len(data.bottomLines) > 0 {
-			data.bottomLines = append(data.bottomLines, "")
-		}
-		data.bottomLines = append(data.bottomLines, title)
-		for _, line := range body {
-			appendWrapped(&data.bottomLines, line, outerBodyWidth)
-		}
-	}
+
 
 	telemetry := m.sessionTelemetry
 	if telemetry.usedTokens() == 0 && telemetry.spend == nil {
@@ -6065,49 +6338,118 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 
 	usageLine := "n/a"
 	if billed := telemetry.usedTokens(); billed > 0 {
+		inTokensStr := formatCompactInt(telemetry.inputTokens)
+		if telemetry.cachedTokens > 0 {
+			inTokensStr = fmt.Sprintf("%s (%s cached)", inTokensStr, formatCompactInt(telemetry.cachedTokens))
+		}
 		if telemetry.spend != nil {
-			usageLine = fmt.Sprintf("In %s  Out %s  $%.4f", formatCompactInt(telemetry.inputTokens), formatCompactInt(telemetry.outputTokens), *telemetry.spend)
+			usageLine = fmt.Sprintf("In %s  Out %s  $%.4f", inTokensStr, formatCompactInt(telemetry.outputTokens), *telemetry.spend)
 		} else {
-			usageLine = fmt.Sprintf("In %s  Out %s", formatCompactInt(telemetry.inputTokens), formatCompactInt(telemetry.outputTokens))
+			usageLine = fmt.Sprintf("In %s  Out %s", inTokensStr, formatCompactInt(telemetry.outputTokens))
 		}
 	}
 
-	projectDir := shortenSidebarPath(shortenWorkingDir(m.workDir), sidebarColumnWidth-4)
-	appendTopSection("Project", []string{projectDir})
-	sessionInfo := []string{m.sessionID}
-	if m.sessionTitle != "" {
-		sessionInfo = append(sessionInfo, m.sessionTitle)
+	// ── Compact top: mode + model + token usage on one line ──
+	var statusParts []string
+	if m.agent != nil {
+		modeStr := strings.ToUpper(string(m.agent.Mode()))
+		statusParts = append(statusParts, sidebarAccentStyle.Render("["+modeStr+"]"))
 	}
-	appendTopSection("Session", sessionInfo)
-	modelLines := []string{modelName}
-	if agent.ModelSupportsThinking(modelName) {
-		modelLines = append(modelLines, fmt.Sprintf("Reasoning: %s", thinkingBudgetLabels[m.thinkingLevelIdx]))
+	if modelName != "" {
+		statusParts = append(statusParts, sidebarHeaderStyle.Render(modelName))
 	}
-	appendTopSection("Model", modelLines)
-	appendTopSection("Context", []string{contextLine, usageLine})
-	appendScrollSection("MCP", []string{m.renderMCPStatus()}, nil)
-	appendScrollSection("LSP", []string{m.renderLSPStatus()}, nil)
+	if ctxTokens > 0 {
+		statusParts = append(statusParts, dimStyle.Render(contextLine))
+	}
+	if len(statusParts) > 0 {
+		statusLine := strings.Join(statusParts, "  ")
+		data.topLines = append(data.topLines, statusLine)
+	}
+	data.topLines = append(data.topLines, "")
 
+	// ── Git status section (scrollable) ──
+	gitBranch := m.git.currentBranch
+	if gitBranch == "" {
+		gitBranch = "(no git repo)"
+	}
+	gitBody := []string{dimStyle.Render("Branch: ") + gitBranch}
+	if m.git.aheadBehind != "" {
+		gitBody[0] += "  " + dimStyle.Render(m.git.aheadBehind)
+	}
+	stagedCount := len(m.git.stagedFiles)
+	unstagedCount := len(m.git.unstagedFiles)
+	untrackedCount := len(m.git.untrackedFiles)
+	if stagedCount+unstagedCount+untrackedCount > 0 {
+		var parts []string
+		if stagedCount > 0 {
+			parts = append(parts, successStyle.Render(fmt.Sprintf("+%d staged", stagedCount)))
+		}
+		if unstagedCount > 0 {
+			parts = append(parts, errorStyle.Render(fmt.Sprintf("~%d modified", unstagedCount)))
+		}
+		if untrackedCount > 0 {
+			parts = append(parts, dimStyle.Render(fmt.Sprintf("?%d untracked", untrackedCount)))
+		}
+		gitBody = append(gitBody, strings.Join(parts, "  "))
+	}
+	appendScrollSection("Git", gitBody, nil)
+
+	// ── Files section (scrollable) ──
 	changed := snapshot.ChangedFiles()
 	if len(changed) == 0 {
-		appendScrollSection("Files", []string{"No changed files yet."}, nil)
+		appendScrollSection("Files", []string{"No files changed this session."}, nil)
 	} else {
 		body := make([]string, 0, len(changed))
 		for _, path := range changed {
-			body = append(body, "- "+formatSidebarFilePath(path, m.workDir, sidebarColumnWidth-4))
+			// Look up git status for this file
+			status := gitFileStatus(m.git, path)
+			prefix := "- "
+			if status != "" {
+				prefix = status + " "
+			}
+			body = append(body, prefix+formatSidebarFilePath(path, m.workDir, sidebarColumnWidth-lipgloss.Width(prefix)-4))
 		}
 		appendScrollSection("Files", body, changed)
 	}
 
+	// ── TODO section (scrollable) ──
 	todo := tool.TodoState()
 	if todo == "" {
-		appendScrollSection("TODO", []string{"No live session todo state yet."}, nil)
+		appendScrollSection("TODO", []string{"No todo list for this session yet."}, nil)
 	} else {
 		appendScrollSection("TODO", renderSidebarTodo(todo, boxBodyWidth), nil)
 	}
 
-	appendBottomSection("Hints", []string{"Ctrl+B toggle sidebar"})
+	// ── MCP + LSP on one line ──
+	mcpLine := "MCP: " + m.renderMCPStatus()
+	lspLine := "LSP: " + m.renderLSPStatus()
+	appendScrollSection("Tools", []string{mcpLine + "  |  " + lspLine}, nil)
+
+	// ── Bottom: usage + quick actions ──
+	data.bottomLines = append(data.bottomLines, "")
+	appendWrapped(&data.bottomLines, usageLine, outerBodyWidth)
+	appendWrapped(&data.bottomLines, dimStyle.Render("Ctrl+B bg bash  r run  l lint  b build"), outerBodyWidth)
 	return data
+}
+
+// gitFileStatus returns a short git porcelain status string for path.
+func gitFileStatus(g gitModel, path string) string {
+	for _, f := range g.stagedFiles {
+		if f.path == path || strings.HasSuffix(path, "/"+f.path) {
+			return successStyle.Render("+" + f.status)
+		}
+	}
+	for _, f := range g.unstagedFiles {
+		if f.path == path || strings.HasSuffix(path, "/"+f.path) {
+			return errorStyle.Render("~" + f.status)
+		}
+	}
+	for _, f := range g.untrackedFiles {
+		if f.path == path || strings.HasSuffix(path, "/"+f.path) {
+			return dimStyle.Render("?" + f.status)
+		}
+	}
+	return ""
 }
 
 func (m model) renderSidebar() string {
@@ -6115,9 +6457,7 @@ func (m model) renderSidebar() string {
 
 	var header string
 	if m.sessionTitle != "" {
-		header = m.styles.Header.Render(m.sessionTitle)
-	} else {
-		header = hintStyle.Render("sidebar")
+		header = sidebarHeaderStyle.Render("◆ ") + m.styles.Header.Render(m.sessionTitle)
 	}
 
 	headerHeight := lipgloss.Height(header)
@@ -6131,7 +6471,8 @@ func (m model) renderSidebar() string {
 	spaceForScroll := maxInt(minScrollHeight, contentHeight-len(data.topLines)-len(data.bottomLines)-2)
 
 	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
-	visibleScrollLines := minInt(scrollBoxHeight-2, spaceForScroll)
+	// User requested: no border — scrollBoxHeight IS the visible height
+	visibleScrollLines := minInt(scrollBoxHeight, spaceForScroll)
 	if visibleScrollLines < 1 {
 		visibleScrollLines = 1
 	}
@@ -6140,11 +6481,14 @@ func (m model) renderSidebar() string {
 	if len(data.scrollLines) > visibleScrollLines {
 		marker := fmt.Sprintf(" %d/%d", scrollOffset+1, len(data.scrollLines))
 		if len(visible) > 0 {
-			visible[0] = ansi.Truncate(visible[0], maxInt(1, sidebarColumnWidth-8-lipgloss.Width(marker)), "") + hintStyle.Render(marker)
+			visible[0] = ansi.Truncate(visible[0], maxInt(1, sidebarColumnWidth-4-lipgloss.Width(marker)), "") + hintStyle.Render(marker)
 		}
 	}
+	// User requested no border/padding on Git/Files/TODO/Tools (2026-05-25)
 	scrollContent := strings.Join(visible, "\n")
-	scrollBox := cleanBoxStyle.Width(sidebarColumnWidth).Render(constrainView(scrollContent, sidebarColumnWidth, visibleScrollLines))
+	scrollBox := lipgloss.NewStyle().
+		Width(sidebarColumnWidth-4).
+		Render(constrainView(scrollContent, sidebarColumnWidth-4, visibleScrollLines))
 
 	// Build sections preserving top and bottom lines
 	allLines := append([]string{}, data.topLines...)
@@ -6156,7 +6500,10 @@ func (m model) renderSidebar() string {
 	if len(allLines) > contentHeight {
 		sections = constrainViewPreservingBottom(sections, sidebarColumnWidth-4, contentHeight, len(data.bottomLines))
 	}
-	return borderStyle.Width(sidebarColumnWidth).Render(header + "\n" + sections)
+	return borderStyle.
+		BorderForeground(lipgloss.Color("#7AA2F7")).
+		Width(sidebarColumnWidth).
+		Render(header + "\n" + sections)
 }
 
 func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) int {
@@ -6184,6 +6531,7 @@ func (m model) renderSidebarWithTabBar() string {
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("✕ exit")
 	}
+	tabBar = sidebarAccentStyle.Render("▌ ") + tabBar
 	pad := sidebarColumnWidth - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if pad < 0 {
 		pad = 0
@@ -6194,8 +6542,8 @@ func (m model) renderSidebarWithTabBar() string {
 
 func (m *model) clampSidebarScroll() {
 	data := m.buildSidebarRenderData()
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
-	visible := m.sidebarScrollBoxHeight(data, headerHeight) - 2
+	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ "))
+	visible := m.sidebarScrollBoxHeight(data, headerHeight)
 	if visible < 1 {
 		visible = 1
 	}
@@ -6250,10 +6598,14 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 	}
 
 	data := m.buildSidebarRenderData()
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	headerHeight := 0
+	if m.sessionTitle != "" {
+		headerHeight = 1
+	}
+	// User requested: no border/padding on scroll sections (2026-05-25)
 	boxTop := 1 + headerHeight + len(data.topLines)
-	contentTop := boxTop + 1
-	visible := m.sidebarScrollBoxHeight(data, headerHeight) - 2
+	contentTop := boxTop
+	visible := m.sidebarScrollBoxHeight(data, headerHeight)
 	if mouse.Y < contentTop || mouse.Y >= contentTop+visible {
 		return "", false
 	}
@@ -6548,6 +6900,17 @@ func (m *model) syncRawInputLines() {
 	}
 	rendered := stripANSI(m.input.View())
 	m.rawInputLines = strings.Split(rendered, "\n")
+	m.rawInputLinesDirty = false
+}
+
+// ensureRawInputLines synchronises rawInputLines lazily. Callers that need an
+// up-to-date copy (mouse handlers, selection highlight) call this; the typing
+// hot path only sets the dirty bit to avoid an extra textarea View() per key.
+func (m *model) ensureRawInputLines() {
+	if !m.rawInputLinesDirty {
+		return
+	}
+	m.syncRawInputLines()
 }
 
 func (m model) inputViewWithSelection() string {
@@ -6556,6 +6919,7 @@ func (m model) inputViewWithSelection() string {
 	if !m.inputSel.active {
 		return view
 	}
+	m.ensureRawInputLines()
 	renderedLines := strings.Split(view, "\n")
 	sl, sc, el, ec := normaliseSelection(m.inputSel.startLine, m.inputSel.startCol, m.inputSel.endLine, m.inputSel.endCol)
 	highlighted := applySelectionHighlight(renderedLines, m.rawInputLines, sl, sc, el, ec)
@@ -6589,7 +6953,7 @@ func (m *model) disableShellMode() {
 		return
 	}
 	m.input.SetValue(value[:trimmedPrefix] + value[trimmedPrefix+1:])
-	m.syncRawInputLines()
+	m.rawInputLinesDirty = true
 	m.applyInputTheme()
 }
 

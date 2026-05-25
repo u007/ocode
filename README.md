@@ -40,7 +40,15 @@ intelligence, theme system, and extensible agent system.
 - **Mouse Support** — Clickable tabs, sidebar, file tree, transcript scrolling, input text selection
 - **Undo/Redo** — Session history undo/redo stack
 - **Async Agent Runs** — Launch and monitor background subagent executions with transcript capture, process registry, and detail view drill-in
-- **Background Process Management** — Spawn and tail shell processes (256KB circular output buffer) with wait tool and lifecycle tracking
+- **Background Process Management** — Spawn and tail shell processes (256KB circular output buffer) with wait tool and lifecycle tracking; press `Ctrl+B` during a foreground `bash` tool call to move it into the background and let the main agent continue the turn
+
+## Shortcut policy
+
+- Avoid single-stroke shortcuts that commonly conflict with host terminals such as Warp, Ghostty, and iTerm2.
+- Prefer the existing leader sequence (`Ctrl+X`, then a second key) for non-essential UI toggles.
+- Sidebar toggle uses `Ctrl+X`, then `S`.
+- `Ctrl+B` is reserved for moving a running foreground `bash` tool call into the background.
+- Background jobs and subagents report completion back into the main conversation; live state remains available through `bash_output`, `agent_status`, `task_status`, and `wait`.
 
 ## Config
 
@@ -142,4 +150,5 @@ docs/                    Design specs and enhancement plans
 - `Ctrl+Y` retries the last LLM timeout or I/O failure without resending the error message as context.
 - Messages submitted while the AI is running are shown in a queue and sent automatically when the current response finishes.
 - Type `@path` to attach file context. While typing an `@` token, matching files appear in a filtered popup; image files are attached as images and persisted in session history.
+- Context files (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) loaded at session start use the committed `HEAD` version when the working-tree copy has unstaged modifications. This keeps the base prompt stable across edits — commit the change to make it effective. A note is logged to stderr when the swap occurs.
 - `!command` hands the terminal to the process (interactive programs like `vim`, `less`, `git diff` work). Output is not captured into the chat transcript.

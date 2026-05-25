@@ -36,6 +36,20 @@ func buildPermissionManagerFromAgentWithDiags(permissions map[string]interface{}
 
 		levelStr, ok := val.(string)
 		if !ok {
+			// Object-valued permission — load as path patterns.
+			if patterns, ok := val.(map[string]interface{}); ok {
+				for pattern, levelVal := range patterns {
+					if levelStr, ok := levelVal.(string); ok {
+						level := PermissionLevel(levelStr)
+						if validPermissionLevel(level) {
+							for _, toolName := range groupToolMap[group] {
+								pm.SetPathRule(toolName, pattern, level)
+							}
+						}
+					}
+				}
+				continue
+			}
 			diags = append(diags, LoadDiagnostic{Level: "warning", Message: "skipped non-shorthand permission for " + group + " — treated as ask"})
 			for _, toolName := range groupToolMap[group] {
 				pm.SetRule(toolName, PermissionAsk)

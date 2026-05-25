@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"runtime/debug"
 	"strings"
 
 	"github.com/jamesmercstudio/ocode/internal/tool"
@@ -242,6 +243,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// decision bubble up to the main TUI. Set before the spec-permissions block
 	// so it applies whether or not the sub-agent gets its own PermissionManager.
 	subAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
+	subAgent.SetSubAgentPermAsker(t.mainAgent.subAgentPermAsker)
 
 	if len(spec.Permissions) > 0 {
 		_, pm := buildPermissionManagerFromAgentWithDiags(spec.Permissions)
@@ -284,25 +286,13 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		attachRunTranscript(run)
 
 		go func() {
-			if t.mainAgent.activity != nil {
-				t.mainAgent.activity.agentStarted(spec.Name)
-			}
-			resp, err := subAgent.Step(subAgentMsgs)
-			if t.mainAgent.activity != nil {
-				t.mainAgent.activity.agentDone(spec.Name)
-			}
+			result, err := t.executeSubAgent(spec.Name, subAgent, subAgentMsgs)
 			if err != nil {
 				run.finishErr(err.Error())
 				t.runs.notifyDone(run)
 				return
 			}
-			var b strings.Builder
-			for _, m := range resp {
-				if m.Role == "assistant" && m.Content != "" {
-					b.WriteString(m.Content)
-				}
-			}
-			run.finishOK(b.String())
+			run.finishOK(result)
 			t.runs.notifyDone(run)
 		}()
 
@@ -318,13 +308,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		run.Cancel = subAgent.Cancel
 		attachRunTranscript(run)
 	}
-	if t.mainAgent.activity != nil {
-		t.mainAgent.activity.agentStarted(spec.Name)
-	}
-	resp, err := subAgent.Step(subAgentMsgs)
-	if t.mainAgent.activity != nil {
-		t.mainAgent.activity.agentDone(spec.Name)
-	}
+	result, resp, err := t.executeSubAgentWithTranscript(spec.Name, subAgent, subAgentMsgs)
 	if err != nil {
 		if run != nil {
 			run.finishErr(err.Error())
@@ -341,13 +325,6 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		}
 	}
 
-	var b strings.Builder
-	for _, m := range resp {
-		if m.Role == "assistant" && m.Content != "" {
-			b.WriteString(m.Content)
-		}
-	}
-	result := b.String()
 	if run != nil {
 		run.finishOK(result)
 		t.runs.notifyDone(run)
@@ -356,6 +333,36 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		result += fmt.Sprintf("\n\n(Child session: %s)", sessionID)
 	}
 	return result, nil
+}
+
+func (t TaskTool) executeSubAgent(name string, subAgent *Agent, messages []Message) (string, error) {
+	result, _, err := t.executeSubAgentWithTranscript(name, subAgent, messages)
+	return result, err
+}
+
+func (t TaskTool) executeSubAgentWithTranscript(name string, subAgent *Agent, messages []Message) (result string, resp []Message, err error) {
+	if t.mainAgent.activity != nil {
+		t.mainAgent.activity.agentStarted(name)
+		defer t.mainAgent.activity.agentDone(name)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("subagent %s stopped unexpectedly: %v\n%s", name, r, strings.TrimSpace(string(debug.Stack())))
+			resp = nil
+			result = ""
+		}
+	}()
+	resp, err = subAgent.Step(messages)
+	if err != nil {
+		return "", nil, err
+	}
+	var b strings.Builder
+	for _, m := range resp {
+		if m.Role == "assistant" && m.Content != "" {
+			b.WriteString(m.Content)
+		}
+	}
+	return b.String(), resp, nil
 }
 
 func (t TaskTool) registrySubAgents() []AgentDefinition {

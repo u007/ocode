@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +34,44 @@ func (retryTestClient) Chat([]agent.Message, []map[string]interface{}) (*agent.M
 func (retryTestClient) GetProvider() string { return "test" }
 
 func (retryTestClient) GetModel() string { return "test-model" }
+
+type nestedTaskClient struct {
+	responses []*agent.Message
+	mu        sync.Mutex
+	idx       int
+}
+
+func (c *nestedTaskClient) Chat(messages []agent.Message, tools []map[string]interface{}) (*agent.Message, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.idx >= len(c.responses) {
+		return &agent.Message{Role: "assistant", Content: "done"}, nil
+	}
+	r := c.responses[c.idx]
+	c.idx++
+	return r, nil
+}
+
+func (c *nestedTaskClient) GetProvider() string { return "test" }
+
+func (c *nestedTaskClient) GetModel() string { return "test-model" }
+
+type askOnlyTool struct{}
+
+func (askOnlyTool) Name() string        { return "ask_tool" }
+func (askOnlyTool) Description() string { return "requires permission" }
+func (askOnlyTool) Definition() map[string]interface{} {
+	return map[string]interface{}{"name": "ask_tool"}
+}
+func (askOnlyTool) Execute(args json.RawMessage) (string, error) { return "executed", nil }
+func (askOnlyTool) Parallel() bool                               { return false }
+
+func makeAgentToolCall(id, name, args string) agent.ToolCall {
+	tc := agent.ToolCall{ID: id, Type: "function"}
+	tc.Function.Name = name
+	tc.Function.Arguments = args
+	return tc
+}
 
 func TestLeaderTimeoutClearsActiveState(t *testing.T) {
 	m := model{leaderActive: true, leaderSeq: 1}
@@ -97,6 +137,102 @@ func TestShellFinishedMessageIsRecorded(t *testing.T) {
 	last := got.messages[len(got.messages)-1].raw
 	if last == nil || last.Role != "tool" || last.ToolID != "shell-test" {
 		t.Fatalf("expected raw tool message with matching ToolID, got %#v", last)
+	}
+}
+
+func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
+	client := &nestedTaskClient{responses: []*agent.Message{
+		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-parent-task", "task", `{"prompt":"spawn nested"}`)}},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-child-task", "task", `{"prompt":"use ask tool"}`)}},
+		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-ask", "ask_tool", `{}`)}},
+		{Role: "assistant", Content: "nested complete"},
+		{Role: "assistant", Content: "child complete"},
+		{Role: "assistant", Content: "parent complete"},
+	}}
+	a := agent.NewAgent(client, []tool.Tool{askOnlyTool{}}, nil)
+	a.Permissions().SetRule("task", agent.PermissionAllow)
+	a.Permissions().SetRule("ask_tool", agent.PermissionAllow)
+
+	m := model{
+		agent:          a,
+		input:          newTestTextarea(),
+		viewport:       viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:         ApplyThemeColors("tokyonight"),
+		subAgentPermCh: make(chan subAgentPermRequest),
+		subAgentPermMu: &sync.Mutex{},
+		messages: []message{{
+			role: roleUser,
+			text: "start",
+			raw:  &agent.Message{Role: "user", Content: "start"},
+		}},
+	}
+	m.layout()
+	m.wireCompactCallbacks()
+
+	stepDone := make(chan []agent.Message, 1)
+	stepErr := make(chan error, 1)
+	go func() {
+		msgs, err := a.Step([]agent.Message{{Role: "user", Content: "start"}})
+		if err != nil {
+			stepErr <- err
+			return
+		}
+		stepDone <- msgs
+	}()
+
+	listenCmd := listenSubAgentPerm(m.subAgentPermCh)
+	if listenCmd == nil {
+		t.Fatal("expected permission listener command")
+	}
+	msg := listenCmd()
+	permMsg, ok := msg.(subAgentPermAskMsg)
+	if !ok {
+		t.Fatalf("expected subAgentPermAskMsg, got %T", msg)
+	}
+
+	updated, _ := m.Update(permMsg)
+	got := derefTestModel(t, updated)
+	if !got.showPermDialog {
+		t.Fatal("expected permission dialog to be shown")
+	}
+	if got.pendingSubAgentResp == nil {
+		t.Fatal("expected pending sub-agent response channel")
+	}
+	if got.pendingToolName != "ask_tool" {
+		t.Fatalf("pending tool = %q, want ask_tool", got.pendingToolName)
+	}
+	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "sub-agent") {
+		t.Fatalf("expected transcript to mention sub-agent permission prompt, got %#v", got.messages)
+	}
+
+	cmd := got.handlePermissionChoice("y")
+	if cmd == nil {
+		t.Fatal("expected re-arm command after sub-agent permission choice")
+	}
+	if got.pendingSubAgentResp != nil {
+		t.Fatal("expected pending sub-agent response to clear after approval")
+	}
+
+	select {
+	case err := <-stepErr:
+		t.Fatalf("Step err: %v", err)
+	case msgs := <-stepDone:
+		joined := ""
+		for _, am := range msgs {
+			joined += am.Content + "\n"
+		}
+		if !strings.Contains(joined, "parent complete") {
+			t.Fatalf("expected parent completion after permission approval, got %q", joined)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for nested subagent step to finish")
+	}
+
+	if got.agent.Permissions().Check("ask_tool") != agent.PermissionAllow {
+		t.Fatalf("ask_tool permission = %q, want allow", got.agent.Permissions().Check("ask_tool"))
+	}
+	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "Allowed sub-agent \"ask_tool\" once.") {
+		t.Fatalf("expected approval acknowledgement, got %#v", got.messages)
 	}
 }
 
@@ -174,19 +310,63 @@ func TestRenderUserTextConstrainsBubbleWidth(t *testing.T) {
 	}
 }
 
-func TestSidebarToggleWithCtrlB(t *testing.T) {
+func TestLeaderSTogglesSidebar(t *testing.T) {
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)), leaderActive: true}
+
+	consumed, updated, _ := m.handleModalKeys(tea.KeyPressMsg{Code: 's'})
+	if !consumed {
+		t.Fatal("expected leader+s to be consumed")
+	}
+	got := updated.(model)
+	if !got.showSidebar {
+		t.Fatal("expected leader+s to toggle sidebar on")
+	}
+
+	got.leaderActive = true
+	consumed, updated, _ = got.handleModalKeys(tea.KeyPressMsg{Code: 's'})
+	if !consumed {
+		t.Fatal("expected leader+s to be consumed on second toggle")
+	}
+	got = updated.(model)
+	if got.showSidebar {
+		t.Fatal("expected leader+s to toggle sidebar off")
+	}
+}
+
+func TestCtrlBMovesForegroundBashToBackgroundBeforeTogglingSidebar(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX bash command setup")
+	}
+	a := agent.NewAgent(nil, nil, nil)
+	cmd := exec.Command("bash", "-c", "sleep 30")
+	if _, err := a.Procs().RegisterForeground("sleep 30", cmd, time.Now(), nil); err != nil {
+		t.Fatalf("RegisterForeground error: %v", err)
+	}
+	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)), agent: a}
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
+	got := updated.(model)
+	if got.showSidebar {
+		t.Fatal("expected Ctrl+B to background bash instead of toggling sidebar")
+	}
+	if len(got.messages) == 0 || !strings.Contains(stripANSI(got.messages[len(got.messages)-1].text), "moved bash to background") {
+		t.Fatalf("expected backgrounding hint message, got %#v", got.messages)
+	}
+	if id, _, ok := a.Procs().RequestBackgroundLatest(); ok || id != "" {
+		t.Fatal("expected foreground bash to already be promoted")
+	}
+}
+
+func TestCtrlBWithoutRunningBashDoesNotToggleSidebar(t *testing.T) {
 	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 	got := updated.(model)
-	if !got.showSidebar {
-		t.Fatal("expected Ctrl+B to toggle sidebar on")
-	}
-
-	updated, _ = got.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
-	got = updated.(model)
 	if got.showSidebar {
-		t.Fatal("expected Ctrl+B to toggle sidebar off")
+		t.Fatal("expected Ctrl+B not to toggle sidebar when no bash is running")
+	}
+	if len(got.messages) == 0 || !strings.Contains(stripANSI(got.messages[len(got.messages)-1].text), "no running bash command") {
+		t.Fatalf("expected no-running-bash hint, got %#v", got.messages)
 	}
 }
 
@@ -411,7 +591,7 @@ func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
 	}
 
 	view := m.View().Content
-	for _, want := range []string{"Session", "session-123", "Model", "gpt-4o", "Context", "$0.1234", "MCP", "LSP", "TODO", "Ctrl+B"} {
+	for _, want := range []string{"gpt-4o", "$0.1234", "Tools", "TODO", "Git", "Files", "Ctrl+B", "run", "lint", "build"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected wide view to include %q, got %q", want, view)
 		}
@@ -443,7 +623,7 @@ func TestSidebarViewHidesOnNarrowTerminals(t *testing.T) {
 	}
 
 	view := m.View().Content
-	if strings.Contains(view, "No live session todo state yet.") || strings.Contains(view, "Ctrl+B toggle sidebar") {
+	if strings.Contains(view, "No live session todo state yet.") || strings.Contains(view, "Ctrl+X then S sidebar") {
 		t.Fatalf("expected narrow view to hide sidebar, got %q", view)
 	}
 }
@@ -738,7 +918,7 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 	}
 
 	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
-	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 23})
+	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 8})
 	_ = updated
 	if cmd == nil {
 		t.Fatal("expected sidebar file click to return editor command")
@@ -1827,11 +2007,11 @@ func TestSidebarTelemetryAggregationSumsUsageAndSpend(t *testing.T) {
 	spendA := 0.1
 	spendB := 0.2
 	telemetry := aggregateSidebarTelemetry([]message{
-		{raw: &agent.Message{Usage: &agent.TokenUsage{PromptTokens: int64Ptr(10), CompletionTokens: int64Ptr(20)}, Spend: &spendA}},
-		{raw: &agent.Message{Usage: &agent.TokenUsage{PromptTokens: int64Ptr(5), CompletionTokens: int64Ptr(15)}, Spend: &spendB}},
+		{raw: &agent.Message{Usage: &agent.TokenUsage{PromptTokens: int64Ptr(10), CompletionTokens: int64Ptr(20), CacheReadTokens: int64Ptr(4)}, Spend: &spendA}},
+		{raw: &agent.Message{Usage: &agent.TokenUsage{PromptTokens: int64Ptr(5), CompletionTokens: int64Ptr(15), CacheReadTokens: int64Ptr(3)}, Spend: &spendB}},
 	})
 
-	if telemetry.inputTokens != 15 || telemetry.outputTokens != 35 || telemetry.totalTokens != 50 {
+	if telemetry.inputTokens != 15 || telemetry.outputTokens != 35 || telemetry.totalTokens != 50 || telemetry.cachedTokens != 7 {
 		t.Fatalf("expected summed usage totals, got %#v", telemetry)
 	}
 	if telemetry.spend == nil || math.Abs(*telemetry.spend-0.3) > 1e-9 {
@@ -2236,7 +2416,7 @@ func TestSidebarContextUsesCurrentEstimateNotCumulativeTotal(t *testing.T) {
 	if strings.Contains(view, "3.3k") || strings.Contains(view, "3300") {
 		t.Fatalf("sidebar context should not show cumulative total 3.3k, got view:\n%s", view)
 	}
-	if !strings.Contains(view, "Context") {
-		t.Fatalf("expected sidebar to contain 'Context', got view:\n%s", view)
+	if !strings.Contains(view, "2.2k") && !strings.Contains(view, "2200") {
+		t.Fatalf("expected sidebar to show ~2.2k context, got view:\n%s", view)
 	}
 }

@@ -60,6 +60,15 @@ func (m *blockingToolCallClient) Chat(messages []Message, tools []map[string]int
 func (m *blockingToolCallClient) GetProvider() string { return "mock" }
 func (m *blockingToolCallClient) GetModel() string    { return "mock-model" }
 
+type panicClient struct{}
+
+func (p *panicClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	panic("boom")
+}
+
+func (p *panicClient) GetProvider() string { return "mock" }
+func (p *panicClient) GetModel() string    { return "mock-model" }
+
 type countingTool struct {
 	calls *int32
 }
@@ -121,6 +130,128 @@ func TestStepCancellationAfterChatSkipsToolCalls(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 0 {
 		t.Fatalf("tool calls after cancellation = %d, want 0", got)
+	}
+}
+
+func TestTaskToolBackgroundRunUnexpectedStopMarksFailed(t *testing.T) {
+	a := NewAgent(&panicClient{}, nil, nil)
+	taskTool, ok := a.tools["task"].(TaskTool)
+	if !ok {
+		t.Fatalf("task tool type = %T", a.tools["task"])
+	}
+	out, err := taskTool.Execute([]byte(`{"prompt":"test","run_in_background":true}`))
+	if err != nil {
+		t.Fatalf("Execute err: %v", err)
+	}
+	if !strings.Contains(out, "task_id:") {
+		t.Fatalf("expected task id in output, got %q", out)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		runs := a.Runs().Snapshot()
+		if len(runs) != 1 {
+			t.Fatalf("runs len = %d, want 1", len(runs))
+		}
+		if runs[0].statusValue() == RunFailed {
+			if !strings.Contains(runs[0].Err, "stopped unexpectedly") {
+				t.Fatalf("run err = %q", runs[0].Err)
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("background run never reached failed state")
+}
+
+func TestNestedSubAgentPermissionAskCascadesToMainThread(t *testing.T) {
+	childTask := ToolCall{ID: "call-child-task", Type: "function"}
+	childTask.Function.Name = "task"
+	childTask.Function.Arguments = `{"prompt":"grandchild work","agent":"general"}`
+
+	grandchildAsk := ToolCall{ID: "call-grandchild-ask", Type: "function"}
+	grandchildAsk.Function.Name = "ask_tool"
+	grandchildAsk.Function.Arguments = `{}`
+
+	client := &MockToolClient{responses: []*Message{
+		{Role: "assistant", ToolCalls: []ToolCall{childTask}},
+		{Role: "assistant", ToolCalls: []ToolCall{grandchildAsk}},
+		{Role: "assistant", Content: "grandchild done"},
+		{Role: "assistant", Content: "child done"},
+	}}
+
+	a := NewAgent(client, nil, nil)
+	a.Permissions().SetRule("task", PermissionAllow)
+	a.Permissions().SetRule("ask_tool", PermissionAsk)
+	a.AddTools([]tool.Tool{&MockTool{name: "ask_tool", result: "approved"}})
+
+	var asks []PermissionRequest
+	a.SetSubAgentPermAsker(func(req PermissionRequest) PermissionResponse {
+		asks = append(asks, req)
+		return PermissionResponse{Level: PermissionAllow}
+	})
+
+	taskTool, ok := a.tools["task"].(TaskTool)
+	if !ok {
+		t.Fatalf("task tool type = %T", a.tools["task"])
+	}
+	result, err := taskTool.Execute([]byte(`{"prompt":"child work","agent":"general"}`))
+	if err != nil {
+		t.Fatalf("Execute err: %v", err)
+	}
+	if len(asks) != 1 {
+		t.Fatalf("permission asks = %d, want 1", len(asks))
+	}
+	if asks[0].ToolName != "ask_tool" {
+		t.Fatalf("permission ask tool = %q, want ask_tool", asks[0].ToolName)
+	}
+	if !strings.Contains(result, "child done") {
+		t.Fatalf("result = %q, want child done", result)
+	}
+}
+
+func TestNestedSubagentPermissionCallbackCascades(t *testing.T) {
+	mkToolCall := func(id, name, args string) ToolCall {
+		tc := ToolCall{ID: id, Type: "function"}
+		tc.Function.Name = name
+		tc.Function.Arguments = args
+		return tc
+	}
+	client := &MockToolClient{responses: []*Message{
+		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-parent-task", "task", `{"prompt":"spawn nested"}`)}},
+		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-child-task", "task", `{"prompt":"use ask tool"}`)}},
+		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-ask", "ask_tool", `{}`)}},
+		{Role: "assistant", Content: "nested complete"},
+		{Role: "assistant", Content: "child complete"},
+		{Role: "assistant", Content: "parent complete"},
+	}}
+	a := NewAgent(client, []tool.Tool{&MockTool{name: "ask_tool", result: "executed"}}, nil)
+	a.Permissions().SetRule("ask_tool", PermissionAllow)
+	var asks int
+	a.SetSubAgentPermAsker(func(req PermissionRequest) PermissionResponse {
+		asks++
+		if req.ToolName != "ask_tool" {
+			t.Fatalf("unexpected permission request for %q", req.ToolName)
+		}
+		return PermissionResponse{Level: PermissionAllow}
+	})
+
+	// Root should allow task spawning so only nested ask_tool triggers the callback.
+	a.Permissions().SetRule("task", PermissionAllow)
+
+	msgs, err := a.Step([]Message{{Role: "user", Content: "start"}})
+	if err != nil {
+		t.Fatalf("Step err: %v", err)
+	}
+	if asks != 1 {
+		t.Fatalf("permission callback called %d times, want 1", asks)
+	}
+	joined := ""
+	for _, m := range msgs {
+		joined += m.Content + "\n"
+	}
+	if !strings.Contains(joined, "parent complete") {
+		t.Fatalf("expected final parent response, got %q", joined)
 	}
 }
 
@@ -464,6 +595,72 @@ func TestOpenAIResponsesIncludesStoredOutputItemsBeforeToolResult(t *testing.T) 
 		if !ok || item["type"] != wantType {
 			t.Fatalf("input[%d] = %#v, want type %q", i, input[i], wantType)
 		}
+	}
+}
+
+func TestOpenAIResponsesFallsBackToToolCallsWhenStoredItemsMissFunctionCall(t *testing.T) {
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	var gotPayload map[string]interface{}
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(req.Body).Decode(&gotPayload); err != nil {
+				t.Fatalf("decode request body: %v", err)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					"event: response.output_text.delta\n" +
+						"data: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n" +
+						"data: [DONE]\n",
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	messages := []Message{
+		{Role: "user", Content: "read"},
+		{
+			Role: "assistant",
+			OpenAIResponseItems: []map[string]interface{}{
+				{"type": "reasoning", "id": "rs_123", "summary": []interface{}{}},
+			},
+			ToolCalls: []ToolCall{{
+				ID:   "call_123",
+				Type: "function",
+				Function: struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				}{
+					Name:      "read",
+					Arguments: "{}",
+				},
+			}},
+		},
+		{Role: "tool", ToolID: "call_123", Content: "file contents"},
+	}
+	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
+	if _, err := client.chatOpenAIResponses(messages, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	input, ok := gotPayload["input"].([]interface{})
+	if !ok || len(input) != 4 {
+		t.Fatalf("input = %#v", gotPayload["input"])
+	}
+	for i, wantType := range []string{"message", "reasoning", "function_call", "function_call_output"} {
+		item, ok := input[i].(map[string]interface{})
+		if !ok || item["type"] != wantType {
+			t.Fatalf("input[%d] = %#v, want type %q", i, input[i], wantType)
+		}
+	}
+	if got := input[2].(map[string]interface{})["call_id"]; got != "call_123" {
+		t.Fatalf("function_call call_id = %v, want call_123", got)
 	}
 }
 
