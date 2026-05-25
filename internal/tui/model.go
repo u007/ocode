@@ -538,7 +538,8 @@ var (
 	successStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
 	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E"))
 	textStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#C0CAF5"))
-	thinkingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261")).Italic(true)
+	thinkingStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261")).Italic(true).Faint(true)
+	thinkingHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261")).Bold(true).Italic(true)
 	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261"))
 	toolBoxStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#3B4261")).Padding(0, 1)
 
@@ -4636,7 +4637,8 @@ func (m *model) renderTranscript() {
 			b.WriteString(m.renderUserText(strings.TrimRight(msg.text, "\n")))
 		case roleThinking:
 			content := renderThinkingContent(strings.TrimRight(msg.text, "\n"), m.styles)
-			b.WriteString(m.styles.Thinking.Render("⟁ thinking\n" + content))
+			b.WriteString(m.styles.ThinkingHeader.Render("⟁ thinking\n"))
+			b.WriteString(m.styles.Thinking.Render(content))
 		case roleAssistant:
 			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
 				if _, ok := parseQuestionPrompt(msg.raw.Content); ok {
