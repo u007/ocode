@@ -6320,13 +6320,47 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	}
 
 
-	telemetry := m.sessionTelemetry
-	if telemetry.usedTokens() == 0 && telemetry.spend == nil {
-		telemetry = aggregateSidebarTelemetry(m.messages)
-	}
 	modelName := m.currentModelName()
 
-	ctxTokens, _ := m.currentContextEstimate()
+	// Cache the two O(messages) computations so typing in the input box doesn't
+	// re-walk the entire transcript on every keystroke. Keyed on a coarse
+	// fingerprint of m.messages plus the active model name (which affects token
+	// counting heuristics). A second-by-second drift is acceptable here — the
+	// numbers refresh as soon as a message is appended or the user stops typing
+	// for one tick.
+	cacheKey := sidebarCacheKey{msgCount: len(m.messages), model: modelName}
+	if n := len(m.messages); n > 0 {
+		cacheKey.lastLen = len(m.messages[n-1].text)
+	}
+	cache := m.sidebarCache
+	if cache == nil {
+		cache = &sidebarComputeCache{}
+	}
+	if cache.key != cacheKey {
+		cache.key = cacheKey
+		cache.ctxComputed = false
+		cache.telemetryReady = false
+	}
+
+	telemetry := m.sessionTelemetry
+	if telemetry.usedTokens() == 0 && telemetry.spend == nil {
+		if !cache.telemetryReady {
+			cache.telemetry = aggregateSidebarTelemetry(m.messages)
+			cache.telemetryReady = true
+		}
+		telemetry = cache.telemetry
+	}
+
+	var ctxTokens int64
+	if cache.ctxComputed {
+		ctxTokens = cache.ctxTokens
+	} else {
+		tokens, source := m.currentContextEstimate()
+		cache.ctxTokens = tokens
+		cache.ctxSource = source
+		cache.ctxComputed = true
+		ctxTokens = tokens
+	}
 	contextLine := "n/a"
 	if ctxTokens > 0 {
 		if window, ok := modelContextWindow(modelName); ok {
