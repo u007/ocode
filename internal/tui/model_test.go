@@ -283,6 +283,30 @@ func TestRenderAssistantTextThinkingToggle(t *testing.T) {
 	}
 }
 
+func TestThinkingStreamStartsCollapsed(t *testing.T) {
+	m := model{
+		viewport:     viewport.New(viewport.WithWidth(40), viewport.WithHeight(6)),
+		styles:       ApplyThemeColors("tokyonight"),
+		showThinking: true,
+	}
+
+	m.applyThinkingDelta("reasoning", strings.Repeat("line\n", 12))
+
+	if m.streamingThinkingIdx < 0 {
+		t.Fatal("expected thinking message to be created")
+	}
+	if m.expandedThinking[m.streamingThinkingIdx] {
+		t.Fatal("expected streaming thinking to stay collapsed by default")
+	}
+	plain := stripANSI(m.transcriptContent)
+	if !strings.Contains(plain, "click to expand") {
+		t.Fatalf("expected collapsed thinking affordance, got %q", plain)
+	}
+	if strings.Contains(plain, "line\nline\nline\nline") {
+		t.Fatalf("expected full streaming thinking not to be expanded, got %q", plain)
+	}
+}
+
 func TestRenderUserTextUsesThemeBox(t *testing.T) {
 	m := model{styles: ApplyThemeColors("tokyonight")}
 	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
@@ -594,6 +618,31 @@ func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
 	for _, want := range []string{"gpt-4o", "$0.1234", "Tools", "TODO", "Git", "Files", "Ctrl+B", "run", "lint", "build"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected wide view to include %q, got %q", want, view)
+		}
+	}
+}
+
+func TestBuildSidebarRenderDataShowsCacheAndSpendOnSeparateLines(t *testing.T) {
+	snapshot.Reset()
+	defer snapshot.Reset()
+	tool.ResetTodoState()
+
+	spend := 0.1234
+	m := model{
+		config: &config.Config{Model: "gpt-4o"},
+		sessionTelemetry: sidebarTelemetry{
+			inputTokens:  1000,
+			outputTokens: 2000,
+			totalTokens:  3000,
+			cachedTokens: 300,
+			spend:        &spend,
+		},
+	}
+
+	got := strings.Join(m.buildSidebarRenderData().bottomLines, "\n")
+	for _, want := range []string{"In 1k  Cache 300  Out 2k", "$0.1234"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected sidebar usage block to include %q, got %q", want, got)
 		}
 	}
 }
@@ -2019,6 +2068,125 @@ func TestSidebarTelemetryAggregationSumsUsageAndSpend(t *testing.T) {
 	}
 }
 
+func TestSaveSessionPersistsSidebarTelemetryForReload(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+
+	spend := 0.035
+	m := model{
+		sessionID: "session-usage",
+		messages:  []message{{role: roleAssistant, text: "hello"}},
+		sessionTelemetry: sidebarTelemetry{
+			inputTokens:  12,
+			outputTokens: 34,
+			totalTokens:  46,
+			cachedTokens: 9,
+			spend:        &spend,
+		},
+	}
+
+	m.saveSession()
+
+	sess, err := session.Load("session-usage")
+	if err != nil {
+		t.Fatalf("load session: %v", err)
+	}
+	telemetry := telemetryFromSessionMetadata(sess.Metadata)
+	if telemetry.inputTokens != 12 || telemetry.outputTokens != 34 || telemetry.totalTokens != 46 || telemetry.cachedTokens != 9 {
+		t.Fatalf("expected sidebar telemetry to round-trip, got %#v", telemetry)
+	}
+	if telemetry.spend == nil || math.Abs(*telemetry.spend-0.035) > 1e-9 {
+		t.Fatalf("expected spend to round-trip, got %#v", telemetry.spend)
+	}
+}
+
+func TestHandleSessionLoadRestoresSidebarUsageAndTodoState(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+	snapshot.Reset()
+	defer snapshot.Reset()
+	tool.ResetTodoState()
+	defer tool.ResetTodoState()
+
+	meta := map[string]any{
+		"input_tokens":  int64(12),
+		"output_tokens": int64(34),
+		"billed_tokens": int64(46),
+		"cached_tokens": int64(9),
+		"spend":         0.035,
+		"todo_text":     "- [ ] restore the sidebar usage block",
+	}
+	if err := session.Save("session-usage", "Saved Usage", []agent.Message{{Role: "assistant", Content: "hello"}}, meta); err != nil {
+		t.Fatalf("save session: %v", err)
+	}
+
+	currentSpend := 0.01
+	m := model{
+		sessionID:    "current-session",
+		sessionTitle: "Current Session",
+		width:        140,
+		height:       40,
+		showSidebar:  true,
+		input:        textarea.New(),
+		viewport:     viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		config:       &config.Config{Model: "gpt-4o"},
+		messages:     []message{{role: roleAssistant, text: "current reply"}},
+		sessionTelemetry: sidebarTelemetry{
+			inputTokens:  1,
+			outputTokens: 2,
+			totalTokens:  3,
+			spend:        &currentSpend,
+		},
+	}
+	tool.SetTodoSession(m.sessionID)
+	tool.SetTodoState("- [ ] current todo")
+
+	m.handleSessionCmd([]string{"load", "session-usage"})
+
+	if m.sessionID != "session-usage" {
+		t.Fatalf("expected session id to switch, got %q", m.sessionID)
+	}
+	if m.sessionTitle != "Saved Usage" {
+		t.Fatalf("expected session title to restore, got %q", m.sessionTitle)
+	}
+	if !m.titleRequested {
+		t.Fatal("expected restored titled session to mark titleRequested")
+	}
+	if tool.TodoState() != "- [ ] restore the sidebar usage block" {
+		t.Fatalf("expected todo state to restore, got %q", tool.TodoState())
+	}
+	if m.sessionTelemetry.inputTokens != 12 || m.sessionTelemetry.outputTokens != 34 || m.sessionTelemetry.totalTokens != 46 || m.sessionTelemetry.cachedTokens != 9 {
+		t.Fatalf("expected restored sidebar telemetry, got %#v", m.sessionTelemetry)
+	}
+	if m.sessionTelemetry.spend == nil || math.Abs(*m.sessionTelemetry.spend-0.035) > 1e-9 {
+		t.Fatalf("expected restored spend 0.035, got %#v", m.sessionTelemetry.spend)
+	}
+	if len(m.messages) < 2 {
+		t.Fatalf("expected restored transcript and load confirmation, got %#v", m.messages)
+	}
+	if m.messages[0].text != "hello" {
+		t.Fatalf("expected restored transcript message, got %q", m.messages[0].text)
+	}
+	if got := m.messages[len(m.messages)-1].text; got != "Loaded session session-usage" {
+		t.Fatalf("expected load confirmation, got %q", got)
+	}
+
+	got := strings.Join(m.buildSidebarRenderData().bottomLines, "\n")
+	for _, want := range []string{"In 12  Cache 9  Out 34", "$0.0350"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected restored sidebar usage block to include %q, got %q", want, got)
+		}
+	}
+}
+
 func TestSessionRestoreScrollsToBottom(t *testing.T) {
 	m := model{
 		restoredPendingScroll: true,
@@ -2042,6 +2210,48 @@ func TestSessionRestoreScrollsToBottom(t *testing.T) {
 	}
 	if !result.viewport.AtBottom() {
 		t.Error("viewport should be at bottom after session restore")
+	}
+}
+
+func TestRerenderTranscriptAutoScrollsNearBottom(t *testing.T) {
+	m := model{
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
+		styles:   ApplyThemeColors("tokyonight"),
+		messages: []message{{role: roleAssistant, text: strings.Repeat("line\n", 60)}},
+	}
+	m.renderTranscript()
+
+	maxOffset := m.viewport.TotalLineCount() - m.viewport.VisibleLineCount()
+	m.viewport.SetYOffset((maxOffset*9 + 9) / 10)
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: "new line"})
+	m.rerenderTranscriptAndMaybeScroll()
+
+	if !m.viewport.AtBottom() {
+		t.Fatalf("expected transcript to auto-scroll when already within 90%% of bottom; offset=%d max=%d", m.viewport.YOffset(), m.viewport.TotalLineCount()-m.viewport.VisibleLineCount())
+	}
+}
+
+func TestRerenderTranscriptDoesNotAutoScrollAwayFromBottom(t *testing.T) {
+	m := model{
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
+		styles:   ApplyThemeColors("tokyonight"),
+		messages: []message{{role: roleAssistant, text: strings.Repeat("line\n", 60)}},
+	}
+	m.renderTranscript()
+
+	maxOffset := m.viewport.TotalLineCount() - m.viewport.VisibleLineCount()
+	before := int(float64(maxOffset) * 0.89)
+	m.viewport.SetYOffset(before)
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: "new line"})
+	m.rerenderTranscriptAndMaybeScroll()
+
+	if m.viewport.AtBottom() {
+		t.Fatalf("expected transcript not to auto-scroll when above 90%% threshold; offset=%d max=%d", m.viewport.YOffset(), m.viewport.TotalLineCount()-m.viewport.VisibleLineCount())
+	}
+	if got := m.viewport.YOffset(); got != before {
+		t.Fatalf("expected transcript offset to stay at %d when above threshold, got %d", before, got)
 	}
 }
 

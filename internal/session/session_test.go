@@ -47,6 +47,60 @@ func TestSaveAndLoadPreservesMetadata(t *testing.T) {
 	}
 }
 
+func TestSaveWritesOcodeSessionFormatWithSidebarMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir temp dir: %v", err)
+	}
+
+	meta := map[string]any{
+		"input_tokens":  12,
+		"output_tokens": 34,
+		"billed_tokens": 46,
+		"cached_tokens": 9,
+		"spend":         0.035,
+	}
+	if err := Save("session-format", "Demo", []agent.Message{{Role: "user", Content: "hi"}}, meta); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	dir, err := GetStorageDir()
+	if err != nil {
+		t.Fatalf("GetStorageDir failed: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "session-format.json"))
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal raw session failed: %v", err)
+	}
+	for _, key := range []string{"id", "title", "messages", "created_at", "updated_at", "metadata"} {
+		if _, ok := got[key]; !ok {
+			t.Fatalf("expected opencode session format to include %q, got %#v", key, got)
+		}
+	}
+	metadata, ok := got["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected metadata object, got %#v", got["metadata"])
+	}
+	for key, want := range map[string]float64{
+		"input_tokens":  12,
+		"output_tokens": 34,
+		"billed_tokens": 46,
+		"cached_tokens": 9,
+		"spend":         0.035,
+	} {
+		if metadata[key] != want {
+			t.Fatalf("expected metadata[%q]=%v, got %#v", key, want, metadata[key])
+		}
+	}
+}
+
 func TestSaveAndLoadPreservesMessageImages(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()

@@ -526,18 +526,20 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 type TodoWriteTool struct{}
 
 func (t TodoWriteTool) Name() string        { return "todowrite" }
-func (t TodoWriteTool) Description() string { return "Manage todo lists during coding sessions" }
+func (t TodoWriteTool) Description() string {
+	return "Manage todo lists during coding sessions."
+}
 func (t TodoWriteTool) Parallel() bool      { return false }
 func (t TodoWriteTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todowrite",
-		"description": "Manage todo lists during coding sessions",
+		"description": "Manage todo lists during coding sessions. Examples: ○ (pending), ⌛️ (working), ✅ (done), ❌ (cancelled) - without the status text",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"todoText": map[string]interface{}{
 					"type":        "string",
-					"description": "The todo list content",
+					"description": "The todo list content. Each line is a bullet starting with a status emoji:  ○ (pending), ⌛️ (working), ✅ (done), ❌ (cancelled) - without the status text",
 				},
 			},
 			"required": []string{"todoText"},

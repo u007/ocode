@@ -482,7 +482,7 @@ type model struct {
 	compactStartCh           chan struct{}
 	titleCh                  chan titleResult
 	deltaCh                  chan deltaEvent
-	deltaDrops               uint64 // bumped each time the deltaCh select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
+	deltaDrops               uint64    // bumped each time the deltaCh select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
 	streamingThinkingIdx     int       // index into m.messages of the in-flight roleThinking message; -1 when none
 	lastDeltaRender          time.Time // throttles renderTranscript to ≥50ms cadence during streams
 	titleRequested           bool
@@ -570,8 +570,8 @@ var (
 	successStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
 	errorStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("#F7768E"))
 	textStyle           = lipgloss.NewStyle().Foreground(lipgloss.Color("#C0CAF5"))
-	thinkingStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261")).Italic(true).Faint(true)
-	thinkingHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261")).Bold(true).Italic(true)
+	thinkingStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	thinkingHeaderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true)
 	dimStyle            = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B4261"))
 	toolBoxStyle        = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("#3B4261")).Padding(0, 1)
 	sidebarHeaderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true)
@@ -605,11 +605,11 @@ func styleTodoLine(line string) string {
 			// Replace status text with emojis
 			switch marker {
 			case "completed", "x", "X", "✓":
-				return indent + todoDoneStyle.Render("- [✓] "+body)
+				return indent + todoDoneStyle.Render("[✓] "+body)
 			case "in_progress", "~", "-", "⟳":
-				return indent + todoInProgressStyle.Render("- [⟳] "+body)
+				return indent + todoInProgressStyle.Render("[⟳] "+body)
 			case "pending", " ", "○":
-				return indent + todoPendingStyle.Render("- [○] "+body)
+				return indent + todoPendingStyle.Render("[○] "+body)
 			}
 		}
 	}
@@ -621,11 +621,11 @@ func styleTodoLine(line string) string {
 	}
 	switch prefix {
 	case "x", "X":
-		return indent + todoDoneStyle.Render("- [✓] "+body)
+		return indent + todoDoneStyle.Render("[✓] "+body)
 	case "~", "-":
-		return indent + todoInProgressStyle.Render("- [⟳] "+body)
+		return indent + todoInProgressStyle.Render("[⟳] "+body)
 	case " ":
-		return indent + todoPendingStyle.Render("- [○] "+body)
+		return indent + todoPendingStyle.Render("[○] "+body)
 	default:
 		return line
 	}
@@ -773,8 +773,7 @@ func (m *model) backgroundLatestForegroundBash() bool {
 		text:      hintStyle.Render(fmt.Sprintf("↩ moved bash to background: %s (%s)", id, truncateToWidth(command, 48))),
 		transient: true,
 	})
-	m.renderTranscript()
-	m.viewport.GotoBottom()
+	m.rerenderTranscriptAndMaybeScroll()
 	return true
 }
 
@@ -935,16 +934,16 @@ func newModel(sid string, cont bool, yolo bool) model {
 			d, _ := os.Getwd()
 			return d
 		}(),
-		compactCh:      make(chan agent.CompactResult, 4),
-		compactStartCh: make(chan struct{}, 4),
-		titleCh:        make(chan titleResult, 4),
-		deltaCh:        make(chan deltaEvent, 256),
+		compactCh:            make(chan agent.CompactResult, 4),
+		compactStartCh:       make(chan struct{}, 4),
+		titleCh:              make(chan titleResult, 4),
+		deltaCh:              make(chan deltaEvent, 256),
 		streamingThinkingIdx: -1,
-		questionInput:  questionInput,
-		subAgentPermCh: make(chan subAgentPermRequest),
-		subAgentPermMu: &sync.Mutex{},
-		cleanupState:   newModelCleanupState(),
-		supervisor:     sup,
+		questionInput:        questionInput,
+		subAgentPermCh:       make(chan subAgentPermRequest),
+		subAgentPermMu:       &sync.Mutex{},
+		cleanupState:         newModelCleanupState(),
+		supervisor:           sup,
 	}
 
 	// Set workDir for path-scoped permission checks
@@ -1177,8 +1176,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.layoutLogViewport()
 		m.ready = true
 		if m.restoredPendingScroll {
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 			m.restoredPendingScroll = false
 		}
 		m.updatePermButtonRegions()
@@ -1281,8 +1279,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Content: fileCtx,
 			},
 		})
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
 		return m, nil
 	case fileListCacheMsg:
@@ -1305,15 +1302,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.agent.ResetSubagentDispatch()
 			}
 		}
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
 		if m.agent != nil {
 			return m, m.askAgent()
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 	case authFinishedMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Login failed: %v", msg.err)})
@@ -1329,8 +1324,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.renderTranscript()
 	case statusMsg:
 		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 	case connectOAuthFinishedMsg:
 		if m.connect == nil {
 			return m, nil
@@ -1385,15 +1379,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			ToolID:  msg.toolCallID,
 			Content: content,
 		})
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
 	case []agent.Message:
 		for _, am := range msg {
 			m.appendAgentMessage(am)
 		}
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
 		if len(msg) > 0 && (msg[len(msg)-1].Role == "tool" || (msg[len(msg)-1].Role == "assistant" && len(msg[len(msg)-1].ToolCalls) > 0)) {
 			stop := false
@@ -1513,8 +1505,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				transient: true,
 			})
 			m.messages = append(m.messages, injected)
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 			cmd := m.askAgent()
 			if m.agent != nil {
 				return m, tea.Batch(cmd, listenJobs(m.agent))
@@ -1530,8 +1521,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeTab != tabChat {
 			m.chatUnread = true
 		}
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		return m, waitStreamEvent(msg.ch, msg.errCh, msg.cancel)
 	case streamDoneMsg:
 		m.streaming = false
@@ -1564,8 +1554,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastRetryableLLMErr = ""
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: errorText})
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 		} else {
 			m.lastRetryableLLMErr = ""
 			if len(m.pendingJobMsgs) > 0 && m.agent != nil {
@@ -1576,15 +1565,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				})
 				m.messages = append(m.messages, m.pendingJobMsgs...)
 				m.pendingJobMsgs = nil
-				m.renderTranscript()
-				m.viewport.GotoBottom()
+				m.rerenderTranscriptAndMaybeScroll()
 				return m, m.askAgent()
 			}
 			if len(m.queuedInputs) > 0 && m.agent != nil {
 				text := m.queuedInputs[0]
 				m.queuedInputs = m.queuedInputs[1:]
 				m.layout()
-				m.viewport.GotoBottom()
+				m.maybeScrollTranscriptToBottom()
 				return m, m.processFileReferences(text)
 			}
 		}
@@ -1607,8 +1595,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.result.OK {
 			if m.applyCompactionResult(msg.result, m.pendingCompactUIIdx) {
 				m.pendingCompactUIIdx = nil
-				m.renderTranscript()
-				m.viewport.GotoBottom()
+				m.rerenderTranscriptAndMaybeScroll()
 				m.saveSession()
 			}
 		}
@@ -1641,8 +1628,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingToolArgs = req.Args
 		m.pendingToolCallID = ""
 		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + renderPermissionPrompt(req)})
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	case editorFinishedMsg:
 		m.layout()
@@ -1669,8 +1655,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errorMsg:
 		if msg != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", error(msg))})
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 		}
 	}
 
@@ -1910,8 +1895,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.showPermDialog = false
 			cmd := m.handlePermissionChoice(keyStr)
 			m.input.Reset()
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 			m.saveSession()
 			return m, cmd
 		}
@@ -2057,8 +2041,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 				log.Printf("save last thinking budget: %v", err)
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 		}
 		return m, nil
 	case "ctrl+b":
@@ -2066,8 +2049,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, nil
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("↩ no running bash command to move to background"), transient: true})
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	case "ctrl+o":
 		return m.handleCommand("/yolo")
@@ -2163,8 +2145,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 				Role:      "assistant",
 				ToolCalls: []agent.ToolCall{tc},
 			})
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.runCapturedShell(cmdText, m.workDir, toolCallID)
 		}
 
@@ -2172,7 +2153,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.queuedInputs = append(m.queuedInputs, text)
 			m.input.Reset()
 			m.layout()
-			m.viewport.GotoBottom()
+			m.maybeScrollTranscriptToBottom()
 			return m, nil
 		}
 
@@ -2200,8 +2181,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 				},
 			})
 			m.input.Reset()
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 			m.saveSession()
 			return m, m.askAgent()
 		}
@@ -2211,8 +2191,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.showPermDialog = false
 			cmd := m.handlePermissionChoice(choice)
 			m.input.Reset()
-			m.renderTranscript()
-			m.viewport.GotoBottom()
+			m.rerenderTranscriptAndMaybeScroll()
 			m.saveSession()
 			return m, cmd
 		}
@@ -2603,8 +2582,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.showPermDialog = false
 				cmd := m.handlePermissionChoice(btn.choice)
 				m.input.Reset()
-				m.renderTranscript()
-				m.viewport.GotoBottom()
+				m.rerenderTranscriptAndMaybeScroll()
 				m.saveSession()
 				return m, cmd, true
 			}
@@ -2950,15 +2928,13 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		if m.agent != nil {
 			m.agent.ResetSubagentDispatch()
 		}
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		return m, m.sendCustomCommandPrompt(prompt)
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
 	}
 
-	m.renderTranscript()
-	m.viewport.GotoBottom()
+	m.rerenderTranscriptAndMaybeScroll()
 	return m, cmdResult
 }
 
@@ -3905,14 +3881,13 @@ func (m *model) handleContextCmd(args []string) {
 	}
 
 	telemetry := m.sessionTelemetry
-	if telemetry.usedTokens() == 0 && telemetry.spend == nil {
+	if !telemetry.hasData() {
 		telemetry = aggregateSidebarTelemetry(m.messages)
 	}
-	if billed := telemetry.usedTokens(); billed > 0 {
+	if telemetry.hasData() {
+		fmt.Fprintf(&b, "  Usage      In %s  Cache %s  Out %s\n", strconv.FormatInt(telemetry.inputTokens, 10), strconv.FormatInt(telemetry.cachedTokens, 10), strconv.FormatInt(telemetry.outputTokens, 10))
 		if telemetry.spend != nil {
-			fmt.Fprintf(&b, "  Usage      In %s  Out %s  $%.4f\n", strconv.FormatInt(telemetry.inputTokens, 10), strconv.FormatInt(telemetry.outputTokens, 10), *telemetry.spend)
-		} else {
-			fmt.Fprintf(&b, "  Usage      In %s  Out %s\n", strconv.FormatInt(telemetry.inputTokens, 10), strconv.FormatInt(telemetry.outputTokens, 10))
+			fmt.Fprintf(&b, "             $%.4f\n", *telemetry.spend)
 		}
 	} else {
 		b.WriteString("  Usage      n/a\n")
@@ -4492,14 +4467,12 @@ func (m model) retryLastLLMError() (tea.Model, tea.Cmd) {
 	}
 	if m.agent == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "No LLM configured to retry."})
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	}
 	if m.lastRetryableLLMErr == "" {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "No retryable LLM timeout or I/O error."})
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	}
 	if len(m.messages) > 0 {
@@ -4509,8 +4482,7 @@ func (m model) retryLastLLMError() (tea.Model, tea.Cmd) {
 		}
 	}
 	m.lastRetryableLLMErr = ""
-	m.renderTranscript()
-	m.viewport.GotoBottom()
+	m.rerenderTranscriptAndMaybeScroll()
 	return m, m.askAgent()
 }
 
@@ -4789,6 +4761,30 @@ func (m model) thinkingForClick(mouse tea.Mouse) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+func (m *model) shouldAutoScrollTranscript() bool {
+	if m.restoredPendingScroll {
+		return true
+	}
+	if m.viewport.TotalLineCount() == 0 {
+		return true
+	}
+	return m.viewport.AtBottom() || m.viewport.ScrollPercent() >= 0.9
+}
+
+func (m *model) rerenderTranscriptAndMaybeScroll() {
+	shouldScroll := m.shouldAutoScrollTranscript()
+	m.renderTranscript()
+	if shouldScroll {
+		m.viewport.GotoBottom()
+	}
+}
+
+func (m *model) maybeScrollTranscriptToBottom() {
+	if m.shouldAutoScrollTranscript() {
+		m.viewport.GotoBottom()
+	}
 }
 
 func (m *model) renderTranscript() {
@@ -5162,11 +5158,7 @@ func (m *model) applyThinkingDelta(kind, text string) {
 		if m.expandedThinking == nil {
 			m.expandedThinking = make(map[int]bool)
 		}
-		// Expand on creation only — never on subsequent deltas, so a user who
-		// clicks to collapse mid-stream isn't fought by the next token.
-		m.expandedThinking[m.streamingThinkingIdx] = true
-		m.renderTranscript()
-		m.viewport.GotoBottom()
+		m.rerenderTranscriptAndMaybeScroll()
 		m.lastDeltaRender = time.Now()
 		return
 	}
@@ -5177,8 +5169,7 @@ func (m *model) applyThinkingDelta(kind, text string) {
 	if time.Since(m.lastDeltaRender) < 50*time.Millisecond {
 		return
 	}
-	m.renderTranscript()
-	m.viewport.GotoBottom()
+	m.rerenderTranscriptAndMaybeScroll()
 	m.lastDeltaRender = time.Now()
 }
 
@@ -6082,6 +6073,10 @@ func (t sidebarTelemetry) usedTokens() int64 {
 	return t.inputTokens + t.outputTokens
 }
 
+func (t sidebarTelemetry) hasData() bool {
+	return t.inputTokens > 0 || t.outputTokens > 0 || t.totalTokens > 0 || t.cachedTokens > 0 || t.spend != nil
+}
+
 func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 	messageTotal := int64(0)
 	if msg.Usage != nil {
@@ -6110,7 +6105,7 @@ func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 }
 
 func (t sidebarTelemetry) metadata() map[string]any {
-	if t.inputTokens == 0 && t.outputTokens == 0 && t.totalTokens == 0 && t.spend == nil && t.cachedTokens == 0 {
+	if !t.hasData() {
 		return nil
 	}
 	meta := map[string]any{
@@ -6286,6 +6281,22 @@ func formatPercent(used, total int64) string {
 	return fmt.Sprintf("%.1f%%", percent)
 }
 
+func sidebarUsageLines(telemetry sidebarTelemetry) []string {
+	if !telemetry.hasData() {
+		return []string{"n/a"}
+	}
+	tokenLine := fmt.Sprintf(
+		"In %s  Cache %s  Out %s",
+		formatCompactInt(telemetry.inputTokens),
+		formatCompactInt(telemetry.cachedTokens),
+		formatCompactInt(telemetry.outputTokens),
+	)
+	if telemetry.spend == nil {
+		return []string{tokenLine}
+	}
+	return []string{tokenLine, fmt.Sprintf("$%.4f", *telemetry.spend)}
+}
+
 func (m model) buildSidebarRenderData() sidebarRenderData {
 	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}}
 	// User requested no border/padding on scroll sections (2026-05-25)
@@ -6319,7 +6330,6 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		}
 	}
 
-
 	modelName := m.currentModelName()
 
 	// Cache the two O(messages) computations so typing in the input box doesn't
@@ -6343,7 +6353,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	}
 
 	telemetry := m.sessionTelemetry
-	if telemetry.usedTokens() == 0 && telemetry.spend == nil {
+	if !telemetry.hasData() {
 		if !cache.telemetryReady {
 			cache.telemetry = aggregateSidebarTelemetry(m.messages)
 			cache.telemetryReady = true
@@ -6370,18 +6380,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		}
 	}
 
-	usageLine := "n/a"
-	if billed := telemetry.usedTokens(); billed > 0 {
-		inTokensStr := formatCompactInt(telemetry.inputTokens)
-		if telemetry.cachedTokens > 0 {
-			inTokensStr = fmt.Sprintf("%s (%s cached)", inTokensStr, formatCompactInt(telemetry.cachedTokens))
-		}
-		if telemetry.spend != nil {
-			usageLine = fmt.Sprintf("In %s  Out %s  $%.4f", inTokensStr, formatCompactInt(telemetry.outputTokens), *telemetry.spend)
-		} else {
-			usageLine = fmt.Sprintf("In %s  Out %s", inTokensStr, formatCompactInt(telemetry.outputTokens))
-		}
-	}
+	usageLines := sidebarUsageLines(telemetry)
 
 	// ── Compact top: mode + model + token usage on one line ──
 	var statusParts []string
@@ -6399,6 +6398,9 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		statusLine := strings.Join(statusParts, "  ")
 		data.topLines = append(data.topLines, statusLine)
 	}
+	cwdLabel := dimStyle.Render("cwd: ")
+	cwdMax := sidebarColumnWidth - 4 - lipgloss.Width(cwdLabel)
+	data.topLines = append(data.topLines, cwdLabel+sidebarAccentStyle.Render(compactWorkingDir(m.workDir, cwdMax)))
 	data.topLines = append(data.topLines, "")
 
 	// ── Git status section (scrollable) ──
@@ -6461,7 +6463,9 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 
 	// ── Bottom: usage + quick actions ──
 	data.bottomLines = append(data.bottomLines, "")
-	appendWrapped(&data.bottomLines, usageLine, outerBodyWidth)
+	for _, usageLine := range usageLines {
+		appendWrapped(&data.bottomLines, usageLine, outerBodyWidth)
+	}
 	appendWrapped(&data.bottomLines, dimStyle.Render("Ctrl+B bg bash  r run  l lint  b build"), outerBodyWidth)
 	return data
 }
@@ -6521,7 +6525,7 @@ func (m model) renderSidebar() string {
 	// User requested no border/padding on Git/Files/TODO/Tools (2026-05-25)
 	scrollContent := strings.Join(visible, "\n")
 	scrollBox := lipgloss.NewStyle().
-		Width(sidebarColumnWidth-4).
+		Width(sidebarColumnWidth - 4).
 		Render(constrainView(scrollContent, sidebarColumnWidth-4, visibleScrollLines))
 
 	// Build sections preserving top and bottom lines
@@ -6834,6 +6838,40 @@ func shortenWorkingDir(dir string) string {
 		return rel
 	}
 	return dir
+}
+
+// compactWorkingDir produces a sidebar-friendly form: replaces $HOME with ~,
+// then truncates with a middle ellipsis (e.g. "/a/b/.../xyz") when the result
+// exceeds max characters. The base directory name is always preserved.
+func compactWorkingDir(dir string, max int) string {
+	short := shortenWorkingDir(dir)
+	if max <= 0 || len(short) <= max {
+		return short
+	}
+	if max <= 3 {
+		return short[:max]
+	}
+	base := filepath.Base(short)
+	// Pick a leading anchor: "~" if home-relative, otherwise the root "/".
+	var head string
+	switch {
+	case strings.HasPrefix(short, "~"):
+		head = "~"
+	case strings.HasPrefix(short, "/"):
+		head = ""
+	default:
+		head = ""
+	}
+	ellipsis := "/.../"
+	// Reserve room for head + ellipsis + base; if base alone is too long, tail-truncate it.
+	if len(head)+len(ellipsis)+len(base) > max {
+		keep := max - len(head) - len(ellipsis)
+		if keep < 1 {
+			return short[:max]
+		}
+		return head + ellipsis + base[len(base)-keep:]
+	}
+	return head + ellipsis + base
 }
 
 func shortenSidebarPath(path string, max int) string {
