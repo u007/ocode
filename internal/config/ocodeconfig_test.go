@@ -215,6 +215,129 @@ func TestEditorModeLoadSave(t *testing.T) {
 	})
 }
 
+func TestSaveOcodeConfigUsesProjectPathWhenAvailable(t *testing.T) {
+	projectDir := t.TempDir()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd)
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(projectDir, "opencode.json"), []byte(`{"model":"test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := defaultOcodeConfig()
+	cfg.Permissions.Tools["bash"] = "allow"
+	if err := SaveOcodeConfig(&cfg); err != nil {
+		t.Fatalf("SaveOcodeConfig failed: %v", err)
+	}
+
+	projectPath := filepath.Join(projectDir, "ocodeconfig.json")
+	if _, err := os.Stat(projectPath); err != nil {
+		t.Fatalf("expected project ocode config to be created: %v", err)
+	}
+	globalPath := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
+	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
+		t.Fatalf("expected global ocode config to remain absent, got err=%v", err)
+	}
+	data, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	permissions, ok := parsed["permissions"].(map[string]any)
+	if !ok {
+		t.Fatal("permissions not found in saved project config")
+	}
+	tools, ok := permissions["tools"].(map[string]any)
+	if !ok {
+		t.Fatal("permissions.tools not found in saved project config")
+	}
+	if tools["bash"] != "allow" {
+		t.Fatalf("want bash allow, got %v", tools["bash"])
+	}
+}
+
+func TestSaveOcodePermissionsUsesProjectPathWhenProjectExists(t *testing.T) {
+	projectDir := t.TempDir()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd)
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(projectDir, "opencode.json"), []byte(`{"model":"test"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	permissions := defaultPermissionConfig()
+	permissions.Tools["webfetch"] = "allow"
+	if err := SaveOcodePermissions(permissions); err != nil {
+		t.Fatalf("SaveOcodePermissions failed: %v", err)
+	}
+
+	projectPath := filepath.Join(projectDir, "ocodeconfig.json")
+	data, err := os.ReadFile(projectPath)
+	if err != nil {
+		t.Fatalf("read project ocode config failed: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	permissionsRaw, ok := parsed["permissions"].(map[string]any)
+	if !ok {
+		t.Fatal("permissions not found in saved project config")
+	}
+	tools, ok := permissionsRaw["tools"].(map[string]any)
+	if !ok {
+		t.Fatal("permissions.tools not found in saved project config")
+	}
+	if tools["webfetch"] != "allow" {
+		t.Fatalf("want webfetch allow, got %v", tools["webfetch"])
+	}
+	globalPath := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
+	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
+		t.Fatalf("expected global ocode config to remain absent, got err=%v", err)
+	}
+}
+
+func TestSaveOcodePermissionsPersistsAcrossNextSession(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	chdirTempForConfigTest(t)
+
+	permissions := defaultPermissionConfig()
+	permissions.Tools["bash"] = "allow"
+	if err := SaveOcodePermissions(permissions); err != nil {
+		t.Fatalf("SaveOcodePermissions failed: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if got := cfg.Ocode.Permissions.Tools["bash"]; got != "allow" {
+		t.Fatalf("want persisted bash allow, got %q", got)
+	}
+}
+
 func TestSaveEditorMode(t *testing.T) {
 	chdirTempForConfigTest(t)
 

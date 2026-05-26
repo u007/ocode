@@ -158,7 +158,7 @@ func renderThinkingContent(text string, st Styles) string {
 			text = text[end+len(close):]
 		}
 		hint := parseThinkingToolCall(block)
-		b.WriteString(st.Thinking.Copy().Faint(true).Italic(true).Render("  " + hint))
+		b.WriteString(st.Thinking.Copy().Render("  " + hint))
 		if end >= 0 {
 			b.WriteString("\n")
 		}

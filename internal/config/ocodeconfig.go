@@ -328,7 +328,7 @@ func applyCompactConfig(dst *CompactConfig, src compactConfigFile) {
 }
 
 func SaveOcodeConfig(cfg *OcodeConfig) error {
-	path, err := getGlobalOcodeConfigPath()
+	path, err := ActiveOcodeConfigPath()
 	if err != nil {
 		return err
 	}
@@ -434,6 +434,18 @@ func getProjectOcodeConfigPath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "ocodeconfig.json"), nil
+}
+
+func ActiveOcodeConfigPath() (string, error) {
+	projectPath, err := getProjectOcodeConfigPath()
+	if err == nil {
+		return projectPath, nil
+	}
+	globalPath, err := getGlobalOcodeConfigPath()
+	if err != nil {
+		return "", fmt.Errorf("resolve global ocode config path: %w", err)
+	}
+	return globalPath, nil
 }
 
 // SaveLastModel persists the last used provider/model string into the ocodeconfig.json

@@ -80,9 +80,13 @@ func TestLoadCreatesOcodeConfigFiles(t *testing.T) {
 		t.Fatalf("failed to save ocode config: %v", err)
 	}
 
+	projectPath := filepath.Join(tmpDir, "ocodeconfig.json")
+	if _, err := os.Stat(projectPath); err != nil {
+		t.Fatalf("expected %s to be created: %v", projectPath, err)
+	}
 	globalPath := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
-	if _, err := os.Stat(globalPath); err != nil {
-		t.Fatalf("expected %s to be created: %v", globalPath, err)
+	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
+		t.Fatalf("expected global ocode config to remain absent, got err=%v", err)
 	}
 }
 
