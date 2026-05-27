@@ -70,6 +70,7 @@ var Providers = []Provider{
 	{ID: "requesty", Label: "Requesty", EnvVar: "REQUESTY_API_KEY"},
 	{ID: "deepinfra", Label: "DeepInfra", EnvVar: "DEEPINFRA_API_KEY"},
 	{ID: "nvidia", Label: "NVIDIA NIM", EnvVar: "NVIDIA_API_KEY"},
+	{ID: "lmstudio", Label: "LM Studio (local)"},
 }
 
 // GetBaseURL returns the per-credential base URL override, or "" if none.

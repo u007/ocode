@@ -48,6 +48,12 @@ type sessionIndex struct {
 	Sessions      map[string]string `json:"sessions"` // ID -> Title
 }
 
+const canonicalSessionPrefix = "ses_"
+
+func NewSessionID() string {
+	return canonicalSessionPrefix + time.Now().Format("2006-01-02-150405")
+}
+
 func GetStorageDir() (string, error) {
 	localDir := filepath.Join(".ocode", "sessions")
 	if _, err := os.Stat(localDir); err == nil {
@@ -97,7 +103,7 @@ func Save(id string, title string, messages []agent.Message, metadata map[string
 	}
 
 	if id == "" {
-		id = time.Now().Format("2006-01-02-150405")
+		id = NewSessionID()
 	}
 
 	path := filepath.Join(dir, id+".json")
@@ -175,19 +181,66 @@ func Load(id string) (*Session, error) {
 		return nil, err
 	}
 
-	path := filepath.Join(dir, id+".json")
-	data, err := os.ReadFile(path)
+	path, data, err := readSessionFile(dir, id)
 	if err != nil {
 		return nil, err
 	}
 
 	var s Session
 	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("session file %s is corrupt: %w", path, err)
 	}
 	s.Messages = removeIncompleteToolRequests(s.Messages)
 
 	return &s, nil
+}
+
+func readSessionFile(dir, id string) (string, []byte, error) {
+	paths := sessionLoadPaths(dir, id)
+	var firstErr error
+	for i, path := range paths {
+		data, err := os.ReadFile(path)
+		if err == nil {
+			if i > 0 {
+				log.Printf("session: fallback load for %q via %s", id, path)
+			}
+			return path, data, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if !os.IsNotExist(err) {
+			return "", nil, err
+		}
+	}
+	return "", nil, firstErr
+}
+
+func sessionLoadPaths(dir, id string) []string {
+	ids := []string{id}
+	switch {
+	case strings.HasPrefix(id, canonicalSessionPrefix):
+		legacyID := strings.TrimPrefix(id, canonicalSessionPrefix)
+		if legacyID != "" && legacyID != id {
+			ids = append(ids, legacyID)
+		}
+	default:
+		ids = append(ids, canonicalSessionPrefix+id)
+	}
+	paths := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, candidate := range ids {
+		if candidate == "" {
+			continue
+		}
+		path := filepath.Join(dir, candidate+".json")
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	return paths
 }
 
 func removeIncompleteToolRequests(messages []agent.Message) []agent.Message {

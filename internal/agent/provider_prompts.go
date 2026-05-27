@@ -1,51 +1,95 @@
 package agent
 
-import "strings"
+import (
+	_ "embed"
+	"strings"
+)
 
-// providerPrompt returns a short provider-tuned prompt fragment to nudge the
-// model toward output styles its family handles best. Returns "" for unknown
-// providers so we stay silent rather than hallucinating guidance.
+//go:embed prompts/claude.txt
+var claudePromptText string
+
+//go:embed prompts/gpt.txt
+var gptPromptText string
+
+//go:embed prompts/reasoning.txt
+var reasoningPromptText string
+
+//go:embed prompts/gemini.txt
+var geminiPromptText string
+
+//go:embed prompts/copilot.txt
+var copilotPromptText string
+
+//go:embed prompts/kimi.txt
+var kimiPromptText string
+
+// modelFamilyPrompt returns a short tuning fragment for the given
+// provider/model pair. Model-ID routing wins over provider routing so that
+// reasoning models and codex variants land in their own buckets even when
+// served through the generic "openai" provider. Returns "" for unknown
+// combinations so we stay silent rather than hallucinating guidance.
 //
-// These fragments are intentionally small (one or two short paragraphs). They
+// The fragments are intentionally small (a handful of bullets). They
 // complement, not replace, the agent/mode prompt.
-func providerPrompt(provider string) string {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "anthropic", "claude":
-		return anthropicProviderPrompt
-	case "openai", "gpt", "azure":
-		return openaiProviderPrompt
-	case "google", "gemini", "vertex":
-		return geminiProviderPrompt
-	case "copilot", "github":
-		return copilotProviderPrompt
-	case "moonshot", "kimi":
-		return kimiProviderPrompt
-	default:
-		return ""
+func modelFamilyPrompt(provider, model string) string {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	m := strings.ToLower(strings.TrimSpace(model))
+
+	// Reasoning models — check first so they win over generic gpt/claude.
+	if isReasoningModel(m) {
+		return reasoningPromptText
 	}
+
+	// Model-ID hints.
+	switch {
+	case strings.Contains(m, "claude"):
+		return claudePromptText
+	case strings.Contains(m, "gemini"):
+		return geminiPromptText
+	case strings.Contains(m, "kimi"):
+		return kimiPromptText
+	case strings.Contains(m, "gpt"):
+		return gptPromptText
+	}
+
+	// Provider fallback.
+	switch p {
+	case "anthropic", "claude":
+		return claudePromptText
+	case "openai", "gpt", "azure":
+		return gptPromptText
+	case "google", "gemini", "vertex":
+		return geminiPromptText
+	case "copilot", "github":
+		return copilotPromptText
+	case "moonshot", "kimi":
+		return kimiPromptText
+	}
+	return ""
 }
 
-const anthropicProviderPrompt = `Output discipline (Claude):
-- Prefer concise prose. Use XML-style tags (<plan>, <file>, <diff>) only when structure clearly helps the reader; otherwise plain text.
-- When tools are available, call them rather than describing what you would do.
-- Think before acting: silently reason about edge cases, then output the result. Do not narrate internal deliberation in user-visible text.`
+// providerPrompt is kept for backwards compatibility with callers that only
+// have a provider string. New code should call modelFamilyPrompt.
+func providerPrompt(provider string) string {
+	return modelFamilyPrompt(provider, "")
+}
 
-const openaiProviderPrompt = `Output discipline (GPT):
-- Be direct and terse. Lead with the answer, then evidence.
-- Prefer tool calls over textual descriptions when a tool fits.
-- Use minimal structure — short paragraphs, sparing bullets. Avoid filler ("Sure!", "Certainly!", "Of course!").`
-
-const geminiProviderPrompt = `Output discipline (Gemini):
-- Structure complex answers with explicit headings or numbered steps; Gemini handles structured output well.
-- Prefer tool calls over textual descriptions when a tool fits.
-- Stay grounded in observed evidence; cite files or sources when making factual claims.`
-
-const copilotProviderPrompt = `Output discipline (Copilot):
-- Be direct and terse. Lead with the answer; show only the most relevant code.
-- Prefer tool calls over textual descriptions when a tool fits.
-- Avoid filler and unnecessary preamble.`
-
-const kimiProviderPrompt = `Output discipline (Kimi):
-- Be concise. Lead with the answer, then evidence.
-- Prefer tool calls over textual descriptions when a tool fits.
-- Avoid filler and unnecessary preamble.`
+func isReasoningModel(model string) bool {
+	if model == "" {
+		return false
+	}
+	// Match common reasoning-model identifiers across providers.
+	// OpenAI: o1, o1-mini, o1-preview, o3, o3-mini, o4-mini.
+	// Anthropic: *-thinking variants.
+	// Generic: any model id containing "thinking".
+	if strings.Contains(model, "thinking") {
+		return true
+	}
+	// OpenAI o-series: bare "o1"/"o3"/"o4" optionally followed by '-' or end.
+	for _, prefix := range []string{"o1", "o3", "o4"} {
+		if model == prefix || strings.HasPrefix(model, prefix+"-") {
+			return true
+		}
+	}
+	return false
+}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -234,11 +235,19 @@ func allProviderModelsFromRegistry() []string {
 			ids = append(ids, provider+"/"+model)
 		}
 	}
+	for _, m := range fetchLMStudioModels() {
+		ids = append(ids, "lmstudio/"+m)
+	}
 	sort.Strings(ids)
 	return ids
 }
 
 func providerModelsFromRegistry(provider string) []string {
+	if provider == "lmstudio" {
+		models := fetchLMStudioModels()
+		sort.Strings(models)
+		return models
+	}
 	data := loadRegistry()
 	if data == nil {
 		return nil
@@ -252,6 +261,45 @@ func providerModelsFromRegistry(provider string) []string {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
+	return ids
+}
+
+// fetchLMStudioModels queries the local LM Studio API for available models.
+// Returns nil silently if LM Studio is not running.
+func fetchLMStudioModels() []string {
+	base := os.Getenv("LMSTUDIO_BASE_URL")
+	if base == "" {
+		base = "http://localhost:1234"
+	}
+	base = strings.TrimRight(base, "/")
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(base + "/v1/models")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
+	if err != nil {
+		return nil
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(result.Data))
+	for _, m := range result.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
 	return ids
 }
 

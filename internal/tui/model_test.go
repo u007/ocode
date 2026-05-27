@@ -151,7 +151,7 @@ func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 	}}
 	a := agent.NewAgent(client, []tool.Tool{askOnlyTool{}}, nil)
 	a.Permissions().SetRule("task", agent.PermissionAllow)
-	a.Permissions().SetRule("ask_tool", agent.PermissionAllow)
+	a.Permissions().SetRule("ask_tool", agent.PermissionAsk)
 
 	m := model{
 		agent:          a,
@@ -228,11 +228,52 @@ func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 		t.Fatal("timed out waiting for nested subagent step to finish")
 	}
 
-	if got.agent.Permissions().Check("ask_tool") != agent.PermissionAllow {
-		t.Fatalf("ask_tool permission = %q, want allow", got.agent.Permissions().Check("ask_tool"))
+	if got.agent.Permissions().Check("ask_tool") != agent.PermissionAsk {
+		t.Fatalf("ask_tool permission = %q, want ask", got.agent.Permissions().Check("ask_tool"))
 	}
 	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "Allowed sub-agent \"ask_tool\" once.") {
 		t.Fatalf("expected approval acknowledgement, got %#v", got.messages)
+	}
+}
+
+func TestRenderPermissionPromptIsConciseAndNotJSON(t *testing.T) {
+	req := agent.PermissionRequest{
+		ToolName: "read",
+		Args:     json.RawMessage(`{"path":"internal/tui/model.go","start_line":1,"end_line":5}`),
+		Scope:    agent.PermissionScopeTool,
+		Rule:     "tool.read.out_of_scope",
+	}
+
+	got := renderPermissionPrompt(req)
+
+	if strings.Contains(got, `{"path"`) {
+		t.Fatalf("expected permission prompt to avoid raw JSON, got %q", got)
+	}
+	if !strings.Contains(got, "📖 read internal/tui/model.go") {
+		t.Fatalf("expected concise tool summary, got %q", got)
+	}
+	if !strings.Contains(got, "[y] once  [n] deny  [a] always this rule  [t] always this tool") {
+		t.Fatalf("expected concise permission choices, got %q", got)
+	}
+}
+
+func TestRenderPermissionRequestBodyIncludesBashPrefixScope(t *testing.T) {
+	req := agent.PermissionRequest{
+		ToolName: "bash",
+		Args:     json.RawMessage(`{"command":"git push origin main"}`),
+		Command:  "git push origin main",
+		Prefix:   "git",
+		Scope:    agent.PermissionScopeBashPrefix,
+		Rule:     "bash.prefix.git",
+	}
+
+	got := renderPermissionRequestBody(req)
+
+	if !strings.Contains(got, "$ git push origin main") {
+		t.Fatalf("expected bash command summary, got %q", got)
+	}
+	if !strings.Contains(got, `Always-rule scope: bash prefix "git"`) {
+		t.Fatalf("expected bash prefix scope summary, got %q", got)
 	}
 }
 
@@ -302,8 +343,40 @@ func TestThinkingStreamStartsCollapsed(t *testing.T) {
 	if !strings.Contains(plain, "click to expand") {
 		t.Fatalf("expected collapsed thinking affordance, got %q", plain)
 	}
-	if strings.Contains(plain, "line\nline\nline\nline") {
-		t.Fatalf("expected full streaming thinking not to be expanded, got %q", plain)
+	// Collapsed shows last 8 lines of 12. The full 12 lines should NOT appear.
+	if strings.Contains(plain, "line\nline\nline\nline\nline\nline\nline\nline\nline\n") {
+		t.Fatalf("expected streaming thinking to show ≤8 lines when collapsed, got %q", plain)
+	}
+}
+
+func TestLateThinkingDeltaAfterAssistantMessageIsIgnored(t *testing.T) {
+	m := model{
+		viewport:             viewport.New(viewport.WithWidth(60), viewport.WithHeight(10)),
+		styles:               ApplyThemeColors("tokyonight"),
+		showThinking:         true,
+		streaming:            true,
+		streamingThinkingIdx: -1,
+	}
+
+	m.applyThinkingDelta("reasoning", "draft reasoning")
+	if len(m.messages) != 1 || m.messages[0].role != roleThinking {
+		t.Fatalf("expected initial streamed thinking message, got %#v", m.messages)
+	}
+
+	m.appendAgentMessage(agent.Message{Role: "assistant", ReasoningContent: "final reasoning", Content: "done"})
+	if got := len(m.messages); got != 2 {
+		t.Fatalf("expected thinking + assistant after final message, got %d messages", got)
+	}
+
+	m.applyThinkingDelta("reasoning", " late tail")
+	if got := len(m.messages); got != 2 {
+		t.Fatalf("expected late delta to be ignored, got %d messages", got)
+	}
+	if got := m.messages[0].text; got != "final reasoning" {
+		t.Fatalf("expected canonical reasoning to remain unchanged, got %q", got)
+	}
+	if m.messages[len(m.messages)-1].role != roleAssistant {
+		t.Fatalf("expected assistant message to remain last, got %#v", m.messages[len(m.messages)-1])
 	}
 }
 
@@ -895,8 +968,8 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 		viewport:      viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
 	}
 
-	view := m.View().Content
-	for _, want := range []string{"Files", "changed.go", "TODO", "- [○] ship task 4"} {
+	view := stripANSI(m.View().Content)
+	for _, want := range []string{"Files", "changed.go", "TODO", "[○] ship task 4"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected sidebar to include %q, got %q", want, view)
 		}
@@ -1566,6 +1639,68 @@ func TestGitDiffMouseDragSelectsDiffText(t *testing.T) {
 	}
 	if !strings.Contains(got.git.diff.View(), "\x1b[7m") {
 		t.Fatalf("expected highlighted diff content, got %q", got.git.diff.View())
+	}
+}
+
+func TestGitRightClickDeselectsActiveFile(t *testing.T) {
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			section:       gitSectionChanges,
+			panel:         gitPanelFiles,
+			unstagedFiles: []gitFile{{status: "M", path: "main.go"}},
+			filesCursor:   0,
+			diff:          viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+	m.git.setDiffContent("diff content")
+
+	panelW := m.panelWidth()
+	gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseRight, X: panelW * 20 / 100, Y: gitHeaderH + 2})
+	got := derefTestModel(t, updated)
+
+	if got.git.filesCursor != -1 {
+		t.Fatalf("expected git files cursor to be cleared, got %d", got.git.filesCursor)
+	}
+	if strings.TrimSpace(got.git.diff.View()) != "" {
+		t.Fatalf("expected git diff to be cleared, got %q", got.git.diff.View())
+	}
+}
+
+func TestFilesRightClickDeselectsActiveFile(t *testing.T) {
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabFiles,
+		styles:    ApplyThemeColors("tokyonight"),
+		files: filesModel{
+			width:   100,
+			nodes:   []fileNode{{path: "/tmp/main.go", name: "main.go"}},
+			cursor:  0,
+			preview: viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+	m.files.previewPath = "/tmp/main.go"
+	m.files.preview.SetContent("package main")
+	m.files.previewRawLines = []string{"package main"}
+	m.files.previewLines = []string{"package main"}
+
+	filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseRight, X: 1, Y: filesHeaderH + 1})
+	got := derefTestModel(t, updated)
+
+	if got.files.cursor != -1 {
+		t.Fatalf("expected files cursor to be cleared, got %d", got.files.cursor)
+	}
+	if got.files.previewPath != "" {
+		t.Fatalf("expected files preview path to be cleared, got %q", got.files.previewPath)
+	}
+	if strings.TrimSpace(got.files.preview.View()) != "" {
+		t.Fatalf("expected files preview to be cleared, got %q", got.files.preview.View())
 	}
 }
 
@@ -2370,6 +2505,35 @@ func TestBuildSelectionContextGitFiles(t *testing.T) {
 	got = m.buildSelectionContext()
 	if strings.Contains(got, "## Git diff") {
 		t.Fatalf("expected no git section when nothing selected and not on git tab, got:\n%s", got)
+	}
+}
+
+func TestBuildSelectionSidebarBodyFilesAndLineSelection(t *testing.T) {
+	m := model{workDir: "/proj"}
+	m.files.nodes = []fileNode{{path: "/proj/main.go", name: "main.go"}, {path: "/proj/internal/foo.go", name: "foo.go"}}
+	m.files.selectedFiles = map[int]bool{0: true, 1: true}
+	m.files.previewPath = "/proj/internal/foo.go"
+	m.files.previewRawLines = []string{"one", "two", "three"}
+	m.filesSel = selectionState{active: true, startLine: 0, startCol: 0, endLine: 1, endCol: 9}
+
+	got := strings.Join(m.buildSelectionSidebarBody(32), "\n")
+	for _, want := range []string{"• main.go", "foo.go", "↳", ":1-2"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in sidebar body, got:\n%s", want, got)
+		}
+	}
+}
+
+func TestBuildSidebarRenderDataIncludesSelectionSection(t *testing.T) {
+	m := model{workDir: "/proj"}
+	m.files.nodes = []fileNode{{path: "/proj/main.go", name: "main.go"}}
+	m.files.selectedFiles = map[int]bool{0: true}
+
+	got := strings.Join(m.buildSidebarRenderData().scrollLines, "\n")
+	for _, want := range []string{"Selection", "main.go"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q in sidebar render data, got:\n%s", want, got)
+		}
 	}
 }
 

@@ -48,7 +48,7 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 		msgs = append(msgs, Message{Role: "system", Content: promptEnvMarker + "\n" + env})
 	}
 	if a.client != nil {
-		if pp := providerPrompt(a.client.GetProvider()); pp != "" {
+		if pp := modelFamilyPrompt(a.client.GetProvider(), a.client.GetModel()); pp != "" {
 			msgs = append(msgs, Message{Role: "system", Content: promptProviderMarker + "\n" + pp})
 		}
 	}

@@ -226,7 +226,7 @@ func TestNestedSubagentPermissionCallbackCascades(t *testing.T) {
 		{Role: "assistant", Content: "parent complete"},
 	}}
 	a := NewAgent(client, []tool.Tool{&MockTool{name: "ask_tool", result: "executed"}}, nil)
-	a.Permissions().SetRule("ask_tool", PermissionAllow)
+	a.Permissions().SetRule("ask_tool", PermissionAsk)
 	var asks int
 	a.SetSubAgentPermAsker(func(req PermissionRequest) PermissionResponse {
 		asks++

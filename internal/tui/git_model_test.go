@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	tea "charm.land/bubbletea/v2"
 )
 
 func TestParseStatus(t *testing.T) {
@@ -140,6 +142,73 @@ func TestGitUnstagePathStartingWithDashUsesPathSeparator(t *testing.T) {
 	staged := gitOutputForTest(t, dir, "diff", "--cached", "--name-only")
 	if staged != "other.txt" {
 		t.Fatalf("staged files after unstage = %q, want only other.txt", staged)
+	}
+}
+
+func TestGitIgnoreSelectedFileAppendsToGitignore(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	writeFileForGitTest(t, dir, "tmp.log", "hello\n")
+
+	m := gitModel{
+		workDir:        dir,
+		section:        gitSectionChanges,
+		panel:          gitPanelFiles,
+		untrackedFiles: []gitFile{{status: "?", path: "tmp.log"}},
+	}
+	got, _ := m.handleFilesKey("i")
+
+	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(content)) != "tmp.log" {
+		t.Fatalf(".gitignore = %q, want tmp.log", string(content))
+	}
+	if got.statusMsg != "ignored tmp.log" {
+		t.Fatalf("statusMsg = %q, want ignored tmp.log", got.statusMsg)
+	}
+}
+
+func TestGitIgnoreCustomPathPromptAppendsToGitignore(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	m := gitModel{workDir: dir, section: gitSectionChanges, panel: gitPanelFiles}
+
+	m, _ = m.handleFilesKey("I")
+	if !m.ignorePathInputMode {
+		t.Fatal("expected ignore path prompt to open")
+	}
+	for _, key := range []tea.KeyPressMsg{{Code: 'b', Text: "b"}, {Code: 'u', Text: "u"}, {Code: 'i', Text: "i"}, {Code: 'l', Text: "l"}, {Code: 'd', Text: "d"}, {Code: '/'}, {Code: '*', Text: "*"}} {
+		m, _ = m.Update(key, 80, 24)
+	}
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}, 80, 24)
+
+	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(content)) != "build/*" {
+		t.Fatalf(".gitignore = %q, want build/*", string(content))
+	}
+	if m.statusMsg != "ignored build/*" {
+		t.Fatalf("statusMsg = %q, want ignored build/*", m.statusMsg)
+	}
+}
+
+func TestAppendUniqueLineAvoidsDuplicateGitignoreEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".gitignore")
+	if err := os.WriteFile(path, []byte("tmp.log\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendUniqueLine(path, "tmp.log\n"); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != "tmp.log\n" {
+		t.Fatalf(".gitignore = %q, want single tmp.log entry", string(content))
 	}
 }
 

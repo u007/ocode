@@ -66,7 +66,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	if as == nil {
 		sid := req.SessionID
 		if sid == "" {
-			sid = time.Now().Format("2006-01-02-150405")
+			sid = session.NewSessionID()
 		}
 
 		var messages []agent.Message

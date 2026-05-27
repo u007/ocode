@@ -110,6 +110,9 @@ type gitModel struct {
 	// stash push input
 	stashInputMode bool
 	stashInputText string
+	// gitignore path input
+	ignorePathInputMode bool
+	ignorePathInputText string
 	// hunk-level staging
 	hunks      []diffHunk
 	hunkCursor int
@@ -444,6 +447,9 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 	if m.stashInputMode {
 		return m.updateStashInput(msg)
 	}
+	if m.ignorePathInputMode {
+		return m.updateIgnorePathInput(msg)
+	}
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		return m.handleKey(msg, w, h)
@@ -586,6 +592,40 @@ func (m gitModel) updateStashInput(msg tea.Msg) (gitModel, tea.Cmd) {
 	return m, nil
 }
 
+func (m gitModel) updateIgnorePathInput(msg tea.Msg) (gitModel, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		switch msg.String() {
+		case "esc":
+			m.ignorePathInputMode = false
+			m.ignorePathInputText = ""
+			m.statusMsg = "ignore cancelled"
+			return m, nil
+		case "enter":
+			path := strings.TrimSpace(m.ignorePathInputText)
+			m.ignorePathInputMode = false
+			m.ignorePathInputText = ""
+			if path == "" {
+				m.statusMsg = "ignore path required"
+				return m, nil
+			}
+			return m.ignorePath(path)
+		case "backspace":
+			runes := []rune(m.ignorePathInputText)
+			if len(runes) > 0 {
+				m.ignorePathInputText = string(runes[:len(runes)-1])
+			}
+			return m, nil
+		default:
+			if len(msg.String()) == 1 {
+				m.ignorePathInputText += msg.String()
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
 func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 	key := msg.String()
 
@@ -700,7 +740,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 	}
 	switch key {
 	case " ":
-		if m.section == gitSectionChanges {
+		if m.section == gitSectionChanges && m.filesCursor >= 0 {
 			m.ensureSelectedFiles()
 			if m.selectedFiles[m.filesCursor] {
 				delete(m.selectedFiles, m.filesCursor)
@@ -710,7 +750,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		}
 		return m, nil
 	case "shift+down":
-		if m.section == gitSectionChanges {
+		if m.section == gitSectionChanges && m.filesCursor >= 0 {
 			m.ensureSelectedFiles()
 			files := m.currentFileList()
 			if m.filesCursor < len(files)-1 {
@@ -722,7 +762,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		}
 		return m, nil
 	case "shift+up":
-		if m.section == gitSectionChanges {
+		if m.section == gitSectionChanges && m.filesCursor >= 0 {
 			m.ensureSelectedFiles()
 			if m.filesCursor > 0 {
 				m.selectedFiles[m.filesCursor] = true
@@ -816,7 +856,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 						return m, m.cmdRefresh()
 					}
 				}
-			} else if m.filesCursor >= len(m.stagedFiles) {
+			} else if m.filesCursor >= 0 && m.filesCursor >= len(m.stagedFiles) {
 				idx := m.filesCursor - len(m.stagedFiles)
 				unstaged := m.allUnstagedAndUntracked()
 				if idx < len(unstaged) {
@@ -849,7 +889,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 						return m, m.cmdRefresh()
 					}
 				}
-			} else if m.filesCursor < len(m.stagedFiles) {
+			} else if m.filesCursor >= 0 && m.filesCursor < len(m.stagedFiles) {
 				f := m.stagedFiles[m.filesCursor]
 				if _, err := m.gitRun("restore", "--staged", "--", f.path); err != nil {
 					m.statusMsg = "unstage failed: " + err.Error()
@@ -861,7 +901,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		}
 	case "d":
 		if m.section == gitSectionChanges {
-			if m.filesCursor >= len(m.stagedFiles) {
+			if m.filesCursor >= 0 && m.filesCursor >= len(m.stagedFiles) {
 				idx := m.filesCursor - len(m.stagedFiles)
 				unstaged := m.allUnstagedAndUntracked()
 				if idx < len(unstaged) {
@@ -918,6 +958,22 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				return m, m.cmdRefresh()
 			}
 		}
+	case "i":
+		if m.section == gitSectionChanges {
+			files := m.currentFileList()
+			if len(files) == 0 || m.filesCursor < 0 || m.filesCursor >= len(files) {
+				m.statusMsg = "no file selected"
+				return m, nil
+			}
+			return m.ignorePath(files[m.filesCursor].path)
+		}
+	case "I":
+		if m.section == gitSectionChanges {
+			m.ignorePathInputMode = true
+			m.ignorePathInputText = ""
+			m.statusMsg = "ignore path:"
+			return m, nil
+		}
 	case "f":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
 			m.statusMsg = "fetching..."
@@ -967,7 +1023,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 	case "E":
 		if m.section == gitSectionChanges {
 			files := m.currentFileList()
-			if m.filesCursor < len(files) {
+			if m.filesCursor >= 0 && m.filesCursor < len(files) {
 				path := filepath.Join(m.workDir, files[m.filesCursor].path)
 				m.statusMsg = "opening editor..."
 				return m, m.openInEditor(path)
@@ -1104,6 +1160,50 @@ func (m *gitModel) currentFileList() []gitFile {
 	return nil
 }
 
+func (m gitModel) ignorePath(path string) (gitModel, tea.Cmd) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		m.statusMsg = "ignore path required"
+		return m, nil
+	}
+	if err := appendUniqueLine(filepath.Join(m.workDir, ".gitignore"), path+"\n"); err != nil {
+		m.statusMsg = "ignore failed: " + err.Error()
+		return m, nil
+	}
+	m.statusMsg = "ignored " + path
+	return m, m.cmdRefresh()
+}
+
+func appendUniqueLine(path, line string) error {
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	trimmedLine := strings.TrimRight(line, "\n")
+	if len(content) > 0 {
+		for _, existing := range strings.Split(strings.ReplaceAll(string(content), "\r\n", "\n"), "\n") {
+			if strings.TrimSpace(existing) == trimmedLine {
+				return nil
+			}
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if len(content) > 0 && !strings.HasSuffix(string(content), "\n") {
+		if _, err := f.WriteString("\n"); err != nil {
+			return err
+		}
+	}
+	_, err = f.WriteString(line)
+	return err
+}
+
 func (m *gitModel) allUnstagedAndUntracked() []gitFile {
 	var out []gitFile
 	out = append(out, m.unstagedFiles...)
@@ -1116,6 +1216,14 @@ func (m *gitModel) setDiffContent(content string) {
 	raw := stripANSI(content)
 	m.diffRawLines = strings.Split(raw, "\n")
 	m.diffLines = strings.Split(content, "\n")
+}
+
+func (m *gitModel) clearActiveFile() {
+	m.filesCursor = -1
+	m.setDiffContent("")
+	m.hunks = nil
+	m.hunkCursor = 0
+	m.diffHeader = ""
 }
 
 func (m *gitModel) applyDiffSelectionHighlight(startLine, startCol, endLine, endCol int) {
@@ -1179,7 +1287,7 @@ func (m *gitModel) loadDiff() {
 	switch m.section {
 	case gitSectionChanges:
 		files := m.currentFileList()
-		if m.filesCursor >= len(files) {
+		if m.filesCursor < 0 || m.filesCursor >= len(files) {
 			m.setDiffContent("")
 			m.hunks = nil
 			m.hunkCursor = 0
@@ -1305,7 +1413,7 @@ func (m gitModel) renderHints() string {
 		}
 		return "ctrl+enter commit" + genHint + "  esc cancel"
 	}
-	if m.branchInputMode || m.stashInputMode {
+	if m.branchInputMode || m.stashInputMode || m.ignorePathInputMode {
 		return "enter confirm  esc cancel"
 	}
 	base := "tab next panel  "
@@ -1318,7 +1426,7 @@ func (m gitModel) renderHints() string {
 			if len(m.selectedFiles) > 0 {
 				return base + fmt.Sprintf("%d selected — s stage  u unstage  space toggle  esc clear", len(m.selectedFiles))
 			}
-			return base + "s stage  u unstage  space/shift+↑↓ select  d discard  E edit  S stash  c commit  / filter  f fetch  p pull  P push"
+			return base + "s stage  u unstage  i ignore file  I ignore path  space/shift+↑↓ select  d discard  E edit  S stash  c commit  / filter  f fetch  p pull  P push"
 		case gitSectionLog:
 			return base + "j/k navigate"
 		case gitSectionStash:
@@ -1438,6 +1546,10 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 	}
 	if m.stashInputMode {
 		prompt := styles.Hint.Render("Stash message: ") + m.stashInputText + "█"
+		parts = append(parts, styles.Border.Width(sectW+filesW-2).Render(prompt))
+	}
+	if m.ignorePathInputMode {
+		prompt := styles.Hint.Render("Ignore path: ") + m.ignorePathInputText + "█"
 		parts = append(parts, styles.Border.Width(sectW+filesW-2).Render(prompt))
 	}
 	hints := styles.Hint.Render(m.renderHints())

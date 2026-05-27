@@ -7,6 +7,14 @@ func buildPermissionManagerFromAgent(permissions map[string]interface{}) *Permis
 
 func buildPermissionManagerFromAgentWithDiags(permissions map[string]interface{}) ([]LoadDiagnostic, *PermissionManager) {
 	pm := NewPermissionManager()
+	return applyAgentPermissionsWithDiags(pm, permissions), pm
+}
+
+func applyAgentPermissionsWithDiags(pm *PermissionManager, permissions map[string]interface{}) []LoadDiagnostic {
+	if pm == nil {
+		pm = NewPermissionManager()
+	}
+
 	var diags []LoadDiagnostic
 
 	groupToolMap := map[string][]string{
@@ -67,5 +75,5 @@ func buildPermissionManagerFromAgentWithDiags(permissions map[string]interface{}
 		}
 	}
 
-	return diags, pm
+	return diags
 }

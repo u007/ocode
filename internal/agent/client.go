@@ -85,7 +85,12 @@ type GenericClient struct {
 	// the streaming reader goroutines that fire it.
 	OnDelta func(kind, text string)
 
-	// deltaMu protects reads and writes to OnDelta. Refactoring Chat() to take
+	// OnUsage, when non-nil, is invoked from inside Chat when the provider
+	// streams token usage information (e.g. Anthropic message_delta). Follows
+	// the same pattern as OnDelta — set per-call via SetOnUsage, cleared after.
+	OnUsage func(inputTokens, outputTokens int64)
+
+	// deltaMu protects reads and writes to OnDelta and OnUsage. Refactoring
 	// the callback per-call would require changing the LLMClient interface and
 	// every call site; mutex-guarding the field is the lighter alternative
 	// noted as acceptable in the original review.
@@ -108,6 +113,24 @@ func (c *GenericClient) onDelta() func(kind, text string) {
 	c.deltaMu.Lock()
 	defer c.deltaMu.Unlock()
 	return c.OnDelta
+}
+
+// SetOnUsage installs (or clears, with nil) the streaming-usage callback on
+// the client. Safe to call concurrently with active Chat invocations on the
+// same *GenericClient.
+func (c *GenericClient) SetOnUsage(fn func(inputTokens, outputTokens int64)) {
+	c.deltaMu.Lock()
+	c.OnUsage = fn
+	c.deltaMu.Unlock()
+}
+
+// onUsage returns the currently-installed usage callback (or nil) under the
+// mutex. Streaming reader paths call this once per chunk to avoid racing with
+// SetOnUsage in chatWithDelta.
+func (c *GenericClient) onUsage() func(inputTokens, outputTokens int64) {
+	c.deltaMu.Lock()
+	defer c.deltaMu.Unlock()
+	return c.OnUsage
 }
 
 // applyGenerationParams adds temperature / top_p to a request payload if
@@ -266,7 +289,7 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 		emitDebug("error", msg)
 		return nil, fmt.Errorf("%s", msg)
 	}
-	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta())
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
 	if err != nil {
 		return nil, err
 	}
@@ -339,7 +362,7 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		return nil, fmt.Errorf("%s", msg)
 	}
 
-	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta())
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +396,7 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 //
 // Tool call arguments are streamed as partial JSON fragments, concatenated by
 // the per-choice `tool_calls[i].index`.
-func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text string)) (*Message, json.RawMessage, error) {
+func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text string), onUsage func(inputTokens, outputTokens int64)) (*Message, json.RawMessage, error) {
 	msg := &Message{Role: "assistant"}
 	toolByIdx := map[int]*ToolCall{}
 	var toolOrder []int
@@ -420,6 +443,24 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 		}
 		if len(chunk.Usage) > 0 && string(chunk.Usage) != "null" {
 			usageRaw = chunk.Usage
+			if onUsage != nil {
+				var usage struct {
+					PromptTokens     *int64 `json:"prompt_tokens"`
+					CompletionTokens *int64 `json:"completion_tokens"`
+				}
+				if err := json.Unmarshal(chunk.Usage, &usage); err == nil {
+					in, out := int64(0), int64(0)
+					if usage.PromptTokens != nil {
+						in = *usage.PromptTokens
+					}
+					if usage.CompletionTokens != nil {
+						out = *usage.CompletionTokens
+					}
+					if in > 0 || out > 0 {
+						onUsage(in, out)
+					}
+				}
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -598,41 +639,96 @@ func collectAndRemoveSystemMessages(messages []Message) (string, []Message) {
 	return strings.Join(parts, "\n\n"), rest
 }
 
-// repairToolCallSequence ensures every assistant tool_call has a matching
-// `role:"tool"` message before the next assistant/user turn. OpenAI-compatible
-// providers (DeepSeek in particular) reject the request with a 400 when any
-// tool_call_id is left unanswered — this can happen if a tool execution was
-// cancelled, panicked, or the session was persisted mid-turn. Rather than drop
-// the assistant request, we synthesise a stub tool result so the conversation
-// stays valid and the model can react to the failure on the next turn.
+// repairToolCallSequence rewrites message history into a provider-valid
+// assistant(tool_calls) -> tool* sequence.
+//
+// OpenAI-compatible providers (DeepSeek in particular) are strict about two
+// invariants:
+//   - every assistant tool_call must receive a matching role=tool result
+//   - every role=tool message must appear immediately after the assistant that
+//     requested it
+//
+// Real sessions can violate that when a tool/sub-agent is interrupted, when an
+// out-of-band system notification is injected between the assistant and the
+// eventual tool result, or when a session is persisted mid-turn. Rather than
+// sending invalid history, we pull matching tool results back next to their
+// assistant, synthesise stubs for missing results, and downgrade any remaining
+// stray tool messages into system notes.
 func repairToolCallSequence(messages []Message) []Message {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	consumed := make([]bool, len(messages))
 	out := make([]Message, 0, len(messages))
+
 	for i := 0; i < len(messages); i++ {
-		m := messages[i]
-		out = append(out, m)
-		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+		if consumed[i] {
 			continue
 		}
-		// Collect tool result IDs that appear before the next assistant/user/system message.
-		seen := make(map[string]bool, len(m.ToolCalls))
+		m := messages[i]
+		consumed[i] = true
+
+		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
+			if m.Role == "tool" {
+				fmt.Fprintf(os.Stderr, "[agent] repair: downgrading stray tool result for tool_call_id=%s\n", m.ToolID)
+				out = append(out, Message{
+					Role:    "system",
+					Content: fmt.Sprintf("[stray tool result for tool_call_id=%s was recorded out of sequence and downgraded to a note; the assistant turn referencing this call received a synthesised 'interrupted' stub — this note holds the real output]\n\n%s", m.ToolID, m.Content),
+				})
+				continue
+			}
+			out = append(out, m)
+			continue
+		}
+
+		out = append(out, m)
+
+		pending := make(map[string]ToolCall, len(m.ToolCalls))
+		for _, tc := range m.ToolCalls {
+			if tc.ID != "" {
+				pending[tc.ID] = tc
+			}
+		}
+
+		var matched []Message
 		for j := i + 1; j < len(messages); j++ {
-			if messages[j].Role != "tool" {
+			if consumed[j] {
+				continue
+			}
+			next := messages[j]
+			if next.Role == "assistant" || next.Role == "user" {
 				break
 			}
-			seen[messages[j].ToolID] = true
+			if next.Role != "tool" {
+				continue
+			}
+			if _, ok := pending[next.ToolID]; !ok {
+				continue
+			}
+			matched = append(matched, next)
+			consumed[j] = true
+			delete(pending, next.ToolID)
 		}
+
+		out = append(out, matched...)
+
 		for _, tc := range m.ToolCalls {
-			if tc.ID == "" || seen[tc.ID] {
+			if tc.ID == "" {
+				continue
+			}
+			if _, ok := pending[tc.ID]; !ok {
 				continue
 			}
 			fmt.Fprintf(os.Stderr, "[agent] repair: synthesising missing tool result for tool_call_id=%s (%s)\n", tc.ID, tc.Function.Name)
 			out = append(out, Message{
 				Role:    "tool",
 				ToolID:  tc.ID,
-				Content: "[tool execution interrupted: no result was recorded; treat this call as failed]",
+				Content: fmt.Sprintf("[tool execution interrupted: no result was recorded inline for tool_call_id=%s; treat this call as failed. If a later system note references this id, that note holds the real output captured out-of-sequence.]", tc.ID),
 			})
 		}
 	}
+
 	return out
 }
 
@@ -1414,7 +1510,14 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 	resMsg := &Message{Role: "assistant"}
 	var resultModel string
 	var resultUsage json.RawMessage
+	// Capture onDelta and onUsage once at stream start. Contract: streaming
+	// callbacks are bound for the lifetime of one Chat call. SetOnDelta /
+	// SetOnUsage invoked mid-stream do not take effect until the next Chat;
+	// chatWithDelta sets them before the call and defer-clears them after.
+	// parseOpenAIChatCompletionsStream follows the same contract via its
+	// function parameters.
 	onDelta := c.onDelta()
+	onUsage := c.onUsage()
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -1435,10 +1538,10 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 				Usage json.RawMessage `json:"usage"`
 			} `json:"message"`
 			ContentBlock struct {
-				Type  string `json:"type"`
-				ID    string `json:"id"`
-				Name  string `json:"name"`
-				Text  string `json:"text"`
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+				Text string `json:"text"`
 			} `json:"content_block"`
 			Delta struct {
 				Type        string `json:"type"`
@@ -1459,6 +1562,17 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 			}
 			if len(ev.Message.Usage) > 0 {
 				resultUsage = ev.Message.Usage
+				if onUsage != nil {
+					var u struct {
+						InputTokens  int64 `json:"input_tokens"`
+						OutputTokens int64 `json:"output_tokens"`
+					}
+					if err := json.Unmarshal(ev.Message.Usage, &u); err == nil {
+						if u.InputTokens > 0 || u.OutputTokens > 0 {
+							onUsage(u.InputTokens, u.OutputTokens)
+						}
+					}
+				}
 			}
 		case "content_block_start":
 			blocks[ev.Index] = &anthropicBlock{
@@ -1495,6 +1609,17 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 				// message_delta carries cumulative output_tokens; merge by
 				// preferring it over message_start's input_tokens.
 				resultUsage = mergeAnthropicUsage(resultUsage, ev.Usage)
+				if onUsage != nil {
+					var u struct {
+						InputTokens  int64 `json:"input_tokens"`
+						OutputTokens int64 `json:"output_tokens"`
+					}
+					if err := json.Unmarshal(ev.Usage, &u); err == nil {
+						if u.InputTokens > 0 || u.OutputTokens > 0 {
+							onUsage(u.InputTokens, u.OutputTokens)
+						}
+					}
+				}
 			}
 		case "message_stop":
 			// drained below.
@@ -1677,6 +1802,7 @@ var providers = map[string]providerInfo{
 	"opencode":       {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
 	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
 	"copilot":        {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
+	"lmstudio":       {"", "http://localhost:1234/v1"},
 }
 
 func NewClient(cfg *config.Config, model string) LLMClient {
@@ -1746,6 +1872,13 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		}
 		if override := auth.GetBaseURL(provider); override != "" {
 			baseURL = override
+		}
+	}
+
+	// LM Studio base URL can be overridden via env var.
+	if provider == "lmstudio" {
+		if override := os.Getenv("LMSTUDIO_BASE_URL"); override != "" {
+			baseURL = strings.TrimRight(override, "/") + "/v1"
 		}
 	}
 

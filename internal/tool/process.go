@@ -91,12 +91,28 @@ func (p *Process) snapshotViewState() (ProcStatus, int, bool) {
 // delegates to the supervisor while output buffering and incremental reads
 // remain local. Without a supervisor the registry is self-contained.
 type ProcessRegistry struct {
-	mu      sync.Mutex
-	sup     *ProcessSupervisor
-	procs   map[string]*Process
-	order   []string
-	counter int
-	onDone  func(*Process)
+	mu        sync.Mutex
+	sup       *ProcessSupervisor
+	supPrefix string
+	procs     map[string]*Process
+	order     []string
+	counter   int
+	onDone    func(*Process)
+}
+
+// supID returns the ID used when talking to the shared ProcessSupervisor.
+// When multiple ProcessRegistry instances (e.g. subagents) share one
+// supervisor, supPrefix namespaces their IDs so monotonically-issued
+// "proc-N" counters from different registries do not collide in the
+// supervisor's records map.
+func (r *ProcessRegistry) supID(id string) string {
+	r.mu.Lock()
+	prefix := r.supPrefix
+	r.mu.Unlock()
+	if prefix == "" {
+		return id
+	}
+	return prefix + id
 }
 
 func NewProcessRegistry() *ProcessRegistry {
@@ -116,6 +132,17 @@ func (r *ProcessRegistry) SetSupervisor(sup *ProcessSupervisor) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sup = sup
+}
+
+// SetSupervisorIDPrefix sets a namespace prefix prepended to this registry's
+// IDs when registering with the shared ProcessSupervisor. Internal proc IDs
+// (those returned to callers / used in wait_tool) are unchanged. Use this when
+// multiple registries share one supervisor (e.g. subagents inheriting the
+// parent agent's supervisor) so their proc-N counters do not collide.
+func (r *ProcessRegistry) SetSupervisorIDPrefix(prefix string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.supPrefix = prefix
 }
 
 // Supervisor returns the attached process supervisor (may be nil).
@@ -166,9 +193,10 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	// (which races on cmd internal state).
 	waitState := newCommandWait()
 
+	supID := r.supID(id)
 	if sup != nil {
 		reg := ProcessRegistration{
-			ID:               id,
+			ID:               supID,
 			Command:          command,
 			Kind:             ProcessKindBackgroundBash,
 			Cmd:              cmd,
@@ -179,7 +207,7 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 		if _, err := sup.Register(reg); err != nil {
 			p.appendOutput([]byte("failed to start: " + err.Error()))
 			finishProcess(p, 1, ProcExited, onDone)
-			sup.MarkFailedToStart(id, err)
+			sup.MarkFailedToStart(supID, err)
 			return p
 		}
 	}
@@ -191,7 +219,7 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 		p.appendOutput([]byte("failed to start: " + err.Error()))
 		finishProcess(p, 1, ProcExited, onDone)
 		if sup != nil {
-			sup.MarkFailedToStart(id, err)
+			sup.MarkFailedToStart(supID, err)
 		}
 		return p
 	}
@@ -230,9 +258,9 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 		finishProcess(p, code, status, onDone)
 		if sup != nil {
 			if status == ProcKilled {
-				sup.MarkKilled(id, code)
+				sup.MarkKilled(supID, code)
 			} else {
-				sup.MarkExited(id, code)
+				sup.MarkExited(supID, code)
 			}
 		}
 	}()
@@ -259,7 +287,7 @@ func (r *ProcessRegistry) RegisterForeground(command string, cmd *exec.Cmd, star
 
 	if sup != nil {
 		_, err := sup.Register(ProcessRegistration{
-			ID:               id,
+			ID:               r.supID(id),
 			Command:          command,
 			Kind:             ProcessKindBackgroundBash,
 			Cmd:              cmd,
@@ -369,7 +397,7 @@ func (r *ProcessRegistry) Kill(id string) (string, error) {
 		}
 	}
 	if sup != nil {
-		sup.MarkKilled(id, code)
+		sup.MarkKilled(r.supID(id), code)
 	}
 	return fmt.Sprintf("process %s killed", id), nil
 }
@@ -482,7 +510,7 @@ func (r *ProcessRegistry) viewState(p *Process, id string, sup *ProcessSuperviso
 		return localStatus, localCode
 	}
 	if sup != nil {
-		if rec, ok := sup.Lookup(id); ok {
+		if rec, ok := sup.Lookup(r.supID(id)); ok {
 			return viewStatus(rec.Status), rec.ExitCode
 		}
 	}

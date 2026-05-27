@@ -274,7 +274,7 @@ func TestParseOpenAIChatCompletionsStream_MultiToolCall(t *testing.T) {
 		``,
 	}, "\n")
 
-	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil)
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil, nil)
 	if err != nil {
 		t.Fatalf("parse error: %v", err)
 	}

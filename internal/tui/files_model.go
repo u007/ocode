@@ -207,7 +207,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			}
 		}
 	case "enter", "ctrl+j", "ctrl+m":
-		if m.cursor < len(m.nodes) {
+		if m.cursor >= 0 && m.cursor < len(m.nodes) {
 			n := &m.nodes[m.cursor]
 			if n.isDir {
 				m.toggleDir(m.cursor)
@@ -216,7 +216,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			}
 		}
 	case "space":
-		if m.cursor < len(m.nodes) {
+		if m.cursor >= 0 && m.cursor < len(m.nodes) {
 			n := &m.nodes[m.cursor]
 			if n.isDir {
 				m.toggleDir(m.cursor)
@@ -235,11 +235,11 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			}
 		}
 	case "e":
-		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
+		if m.cursor >= 0 && m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			return m, m.openInEditor(m.nodes[m.cursor].path)
 		}
 	case "shift+down":
-		if m.cursor < len(m.nodes)-1 {
+		if m.cursor >= 0 && m.cursor < len(m.nodes)-1 {
 			if m.selectedFiles == nil {
 				m.selectedFiles = make(map[int]bool)
 			}
@@ -271,7 +271,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			}
 		}
 	case "E", "shift+e":
-		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
+		if m.cursor >= 0 && m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			m.openEditorPicker(m.nodes[m.cursor].path)
 		}
 	case "n":
@@ -307,7 +307,7 @@ func (m filesModel) updatePreview(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	case "tab":
 		m.panel = (m.panel + 1) % 2
 	case "e":
-		if m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
+		if m.cursor >= 0 && m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			return m, m.openInEditor(m.nodes[m.cursor].path)
 		}
 	case "i":
@@ -612,6 +612,19 @@ func (m *filesModel) applyPreview(msg filesPreviewMsg) {
 	m.preview.GotoTop()
 }
 
+func (m *filesModel) clearActiveFile() {
+	m.cursor = -1
+	m.previewPath = ""
+	m.previewSize = 0
+	m.previewLang = ""
+	m.previewEditable = false
+	m.preview.SetContent("")
+	m.previewRaw = ""
+	m.previewRawLines = nil
+	m.previewLines = nil
+	m.preview.GotoTop()
+}
+
 func highlightContent(content string, language string) string {
 	if language == "" || language == "text" || language == "directory" {
 		return content
@@ -716,7 +729,7 @@ func (m *filesModel) rebuildTreeKeeping(path string) {
 }
 
 func (m filesModel) refreshPreviewCmd() tea.Cmd {
-	if m.cursor >= len(m.nodes) {
+	if m.cursor < 0 || m.cursor >= len(m.nodes) {
 		return nil
 	}
 	return loadPreviewCmd(m.nodes[m.cursor])

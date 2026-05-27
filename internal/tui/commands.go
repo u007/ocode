@@ -59,6 +59,7 @@ func init() {
 		{name: "/permissions", help: "View or set tool permissions", handler: runPermissionsCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
+		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -558,6 +559,10 @@ func runGitHubCmd(m *model, args []string) tea.Cmd {
 			return statusMsg{text: "Unknown GitHub action: " + action}
 		}
 	}
+}
+
+func runUsageCmd(m *model, args []string) tea.Cmd {
+	return m.handleUsageCmd(args)
 }
 
 func runEditorModeCmd(m *model, args []string) tea.Cmd {

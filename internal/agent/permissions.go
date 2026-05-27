@@ -217,16 +217,28 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			}
 			// Relative paths and glob patterns (non-absolute) are implicitly within workDir
 			if filepath.IsAbs(path) && !isWithinWorkDir(pm, path) {
+				// Check tool-level rule first — an explicit "allow" (from "always
+				// allow this rule/tool") overrides the out-of-scope gate so the user
+				// isn't asked repeatedly for the same permitted tool.
+				if pm.Check(toolName) == PermissionAllow {
+					return PermissionDecision{Level: PermissionAllow}
+				}
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".out_of_scope",
 				}}
 			}
 			if isSensitivePath(path) {
+				if pm.Check(toolName) == PermissionAllow {
+					return PermissionDecision{Level: PermissionAllow}
+				}
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".sensitive_path",
 				}}
 			}
 			if toolName == "delete" {
+				if pm.Check(toolName) == PermissionAllow {
+					return PermissionDecision{Level: PermissionAllow}
+				}
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".delete",
 				}}
@@ -565,6 +577,35 @@ func (pm *PermissionManager) Mode() PermissionMode {
 		return PermissionModeNormal
 	}
 	return pm.mode
+}
+
+func (pm *PermissionManager) Clone() *PermissionManager {
+	if pm == nil {
+		return nil
+	}
+
+	clone := &PermissionManager{
+		mode:            pm.Mode(),
+		rules:           make(map[string]PermissionLevel, len(pm.rules)),
+		patterns:        append([]patternRule(nil), pm.patterns...),
+		pathPatterns:    make(map[string][]pathPatternEntry, len(pm.pathPatterns)),
+		bashPrefixes:    make(map[string]PermissionLevel, len(pm.bashPrefixes)),
+		workDir:         pm.workDir,
+		webfetchDomains: make(map[string]PermissionLevel, len(pm.webfetchDomains)),
+	}
+	for k, v := range pm.rules {
+		clone.rules[k] = v
+	}
+	for k, v := range pm.bashPrefixes {
+		clone.bashPrefixes[k] = v
+	}
+	for k, v := range pm.webfetchDomains {
+		clone.webfetchDomains[k] = v
+	}
+	for toolName, entries := range pm.pathPatterns {
+		clone.pathPatterns[toolName] = append([]pathPatternEntry(nil), entries...)
+	}
+	return clone
 }
 
 func (pm *PermissionManager) Rules() map[string]PermissionLevel {

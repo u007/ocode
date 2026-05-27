@@ -36,10 +36,28 @@ type AgentRun struct {
 	Background bool                  // true if the LLM launched this with run_in_background; false means the parent's task tool call already received the full result synchronously
 	ToolCallID string                // the originating task tool_call id (best-effort; empty if unknown)
 
-	mu         sync.Mutex
-	transcript []Message
-	done       chan struct{} // closed exactly once when the run reaches a terminal state
-	doneOnce   sync.Once
+	mu           sync.Mutex
+	transcript   []Message
+	done         chan struct{} // closed exactly once when the run reaches a terminal state
+	doneOnce     sync.Once
+	inputTokens  int64
+	outputTokens int64
+}
+
+// AddUsage accumulates input/output token counts reported by the provider.
+// Safe to call from any goroutine.
+func (r *AgentRun) AddUsage(in, out int64) {
+	r.mu.Lock()
+	r.inputTokens += in
+	r.outputTokens += out
+	r.mu.Unlock()
+}
+
+// Usage returns the accumulated input/output token counts.
+func (r *AgentRun) Usage() (int64, int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.inputTokens, r.outputTokens
 }
 
 // closeDone closes the done channel exactly once, so waiters unblock when the

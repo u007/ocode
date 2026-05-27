@@ -66,6 +66,12 @@ type Agent struct {
 	// channel). Subagents do not inherit OnDelta, preventing pollution of the
 	// parent TUI.
 	OnDelta func(kind, text string)
+	// OnUsage, if set, is invoked when the provider streams token usage
+	// information during a Chat call. The callback fires on the HTTP goroutine
+	// — keep handlers fast and non-blocking. Not all providers support streaming
+	// usage; currently Anthropic (via message_delta) and OpenAI/Copilot (final
+	// chunk) deliver it. Subagents do not inherit OnUsage.
+	OnUsage func(inputTokens, outputTokens int64)
 	// OnCompactStart, if set, is invoked when async compaction begins (so the
 	// UI can show a spinner). It runs from the goroutine that called
 	// MaybeCompactAsync — keep handlers fast and thread-safe.
@@ -96,11 +102,11 @@ type Agent struct {
 	// since the last user input, to break runaway loops where a small model
 	// keeps re-launching the same subagent in response to its own completion
 	// notifications.
-	subagentDispatchMu     sync.Mutex
-	subagentDispatchLast   string
-	subagentDispatchCount  int
-	preloadedContextMu     sync.RWMutex
-	preloadedContext       string // set by askAgent to avoid duplicate LoadContext calls
+	subagentDispatchMu    sync.Mutex
+	subagentDispatchLast  string
+	subagentDispatchCount int
+	preloadedContextMu    sync.RWMutex
+	preloadedContext      string // set by askAgent to avoid duplicate LoadContext calls
 }
 
 const subagentDispatchLimit = 3
@@ -136,9 +142,15 @@ func (a *Agent) ResetSubagentDispatch() {
 // subagent.go) never inherit a stale callback.
 func (a *Agent) chatWithDelta(messages []Message, toolDefs []map[string]interface{}) (*Message, error) {
 	gc, ok := a.client.(*GenericClient)
-	if ok && a.OnDelta != nil {
-		gc.SetOnDelta(a.OnDelta)
-		defer gc.SetOnDelta(nil)
+	if ok {
+		if a.OnDelta != nil {
+			gc.SetOnDelta(a.OnDelta)
+			defer gc.SetOnDelta(nil)
+		}
+		if a.OnUsage != nil {
+			gc.SetOnUsage(a.OnUsage)
+			defer gc.SetOnUsage(nil)
+		}
 	}
 	return a.client.Chat(messages, toolDefs)
 }
@@ -366,6 +378,13 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		newMsgs = append(newMsgs, *resp)
 		messages = append(messages, *resp)
 		if a.OnMessage != nil {
+			// Best-effort cancellation check before delivering the
+			// response. Cancel() can still race in after this check and
+			// before OnMessage returns; OnMessage must not block on a
+			// receiver that goes away on cancel.
+			if a.cancelled() {
+				return newMsgs, nil
+			}
 			a.OnMessage(*resp)
 		}
 
@@ -435,6 +454,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			newMsgs = append(newMsgs, toolMsg)
 			messages = append(messages, toolMsg)
 			if a.OnMessage != nil {
+				// Best-effort cancellation check; see note above OnMessage
+				// call for the assistant response. Residual race window
+				// is accepted — OnMessage must tolerate post-cancel sends.
+				if a.cancelled() {
+					return newMsgs, nil
+				}
 				a.OnMessage(toolMsg)
 			}
 			if strings.Contains(toolMsg.Content, tool.SentinelWaitingForUser) || strings.HasPrefix(toolMsg.Content, tool.SentinelPermissionAsk) {
@@ -866,6 +891,15 @@ func (a *Agent) Supervisor() *tool.ProcessSupervisor {
 func (a *Agent) SetSupervisor(sup *tool.ProcessSupervisor) {
 	if a.procs != nil {
 		a.procs.SetSupervisor(sup)
+	}
+}
+
+// SetSupervisorIDPrefix namespaces this agent's process IDs in the shared
+// supervisor so subagents that inherit the parent supervisor do not collide
+// on their independently-counted "proc-N" identifiers.
+func (a *Agent) SetSupervisorIDPrefix(prefix string) {
+	if a.procs != nil {
+		a.procs.SetSupervisorIDPrefix(prefix)
 	}
 }
 

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -10,7 +11,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
 
-const agentRunPreviewLineCount = 3
+const agentRunPreviewLineCount = 4
 
 // detailViewKind enumerates the recursive drill-in screens.
 type detailViewKind int
@@ -23,13 +24,25 @@ const (
 
 // detailView is one entry on the drill-in stack.
 type detailView struct {
-	kind    detailViewKind
-	runID   string // set for detailAgentRun and process views scoped to a run
-	runPath string // unique nested path for detailAgentRun/process views
-	procID  string // set for detailProcessLog
-	vp      viewport.Model
-	runs    []detailRunBlock
-	procs   []detailProcBlock
+	kind     detailViewKind
+	runID    string // set for detailAgentRun and process views scoped to a run
+	runPath  string // unique nested path for detailAgentRun/process views
+	procID   string // set for detailProcessLog
+	vp       viewport.Model
+	content  string
+	lines    []string
+	rawLines []string
+	sel      selectionState
+	runs     []detailRunBlock
+	procs    []detailProcBlock
+	expanded map[string]bool
+	regions  []detailExpandRegion
+}
+
+type detailExpandRegion struct {
+	id       string
+	rowStart int
+	rowEnd   int
 }
 
 type detailRunBlock struct {
@@ -90,20 +103,20 @@ func blockAtRow(blocks []agentStripBlock, row int) string {
 // detail viewport. It intentionally hides raw system prompts; the default user
 // view should explain agent activity, not dump internal prompts.
 func renderRunTranscript(run *agent.AgentRun, width int) string {
-	content, _, _ := renderRunTranscriptDetail(run, run.ID, width)
+	content, _, _, _ := renderRunTranscriptDetail(run, run.ID, width, nil)
 	return content
 }
 
-func renderRunTranscriptDetail(run *agent.AgentRun, runPath string, width int) (string, []detailRunBlock, []detailProcBlock) {
+func renderRunTranscriptDetail(run *agent.AgentRun, runPath string, width int, expanded map[string]bool) (string, []detailRunBlock, []detailProcBlock, []detailExpandRegion) {
 	if width < 24 {
 		width = 24
 	}
-	return renderAgentRunCard(run, runPath, width, 0)
+	return renderAgentRunCard(run, runPath, width, 0, expanded)
 }
 
-func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (string, []detailRunBlock, []detailProcBlock) {
+func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, expanded map[string]bool) (string, []detailRunBlock, []detailProcBlock, []detailExpandRegion) {
 	if run == nil {
-		return "", nil, nil
+		return "", nil, nil, nil
 	}
 	indent := strings.Repeat("  ", min(depth, 2))
 	cardWidth := max(20, width-lipglossWidth(indent)-4)
@@ -113,16 +126,27 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (
 	var body strings.Builder
 	var runBlocks []detailRunBlock
 	var procBlocks []detailProcBlock
+	var expandRegions []detailExpandRegion
 	currentRow := 0
 	innerWidth := max(1, cardWidth-4)
-	appendLine := func(line string) {
-		wrapped := wrapView(line, innerWidth)
-		body.WriteString(wrapped)
-		body.WriteString("\n")
-		currentRow += lineCount(wrapped)
-		if wrapped == "" {
+	appendBlock := func(block string) {
+		block = strings.TrimRight(block, "\n")
+		if block == "" {
+			body.WriteString("\n")
 			currentRow++
+			return
 		}
+		body.WriteString(block)
+		body.WriteString("\n")
+		currentRow += lineCount(block)
+	}
+	appendLine := func(line string) {
+		appendBlock(wrapView(line, innerWidth))
+	}
+	appendExpandableRegion := func(id, block string) {
+		start := currentRow
+		appendBlock(block)
+		expandRegions = append(expandRegions, detailExpandRegion{id: id, rowStart: start, rowEnd: currentRow})
 	}
 	header := fmt.Sprintf("▾ %s  %s %s · %s", run.Name, statusIcon(run.Status, "●"), run.Status, formatRunElapsed(run))
 	if childSummary != "" {
@@ -136,10 +160,40 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (
 		appendLine(errorStyle.Render("Error: " + strings.TrimSpace(run.Err)))
 	}
 
-	if events := agentRunEvents(run, 0); len(events) > 0 {
-		appendLine(headerStyle.Render("Timeline"))
-		for _, event := range events {
-			appendLine("• " + renderMarkdownBold(event, textStyle))
+	if messages := run.TranscriptPublic(); len(messages) > 0 {
+		appendLine(headerStyle.Render("Messages"))
+		toolNames := make(map[string]string)
+		systemHidden := false
+		for i, msg := range messages {
+			switch msg.Role {
+			case "system":
+				systemHidden = true
+			case "user":
+				if text := strings.TrimSpace(msg.Content); text != "" {
+					appendLine(headerStyle.Render("Task"))
+					appendBlock(renderMarkdownBold(text, textStyle))
+				}
+			case "assistant":
+				if msg.ReasoningContent != "" {
+					regionID := fmt.Sprintf("%s/thinking:%d", runPath, i)
+					appendExpandableRegion(regionID, renderDetailThinkingBox(msg.ReasoningContent, innerWidth, expanded[regionID]))
+				}
+				if text := strings.TrimSpace(msg.Content); text != "" {
+					appendLine(headerStyle.Render("LLM message"))
+					appendBlock(renderMarkdownBold(text, textStyle))
+				}
+				for j, tc := range msg.ToolCalls {
+					toolNames[tc.ID] = tc.Function.Name
+					regionID := fmt.Sprintf("%s/tool-request:%d:%d", runPath, i, j)
+					appendExpandableRegion(regionID, renderDetailToolRequestBox(tc, innerWidth, expanded[regionID]))
+				}
+			case "tool":
+				regionID := fmt.Sprintf("%s/tool-result:%d", runPath, i)
+				appendExpandableRegion(regionID, renderDetailToolResultBox(toolNames[msg.ToolID], msg.Content, innerWidth, expanded[regionID]))
+			}
+		}
+		if systemHidden {
+			appendLine(hintStyle.Render("System prompt hidden"))
 		}
 	} else {
 		appendLine(hintStyle.Render("No user-visible activity yet."))
@@ -165,7 +219,7 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (
 		for _, child := range children {
 			childStart := currentRow
 			childPath := runPath + "/" + child.ID
-			childText, childRuns, childProcs := renderAgentRunCard(child, childPath, max(20, cardWidth-4), depth+1)
+			childText, childRuns, childProcs, childRegions := renderAgentRunCard(child, childPath, max(20, cardWidth-4), depth+1, expanded)
 			body.WriteString(childText)
 			if !strings.HasSuffix(childText, "\n") {
 				body.WriteString("\n")
@@ -181,11 +235,19 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (
 				b.rowEnd += childStart
 				procBlocks = append(procBlocks, b)
 			}
+			for _, b := range childRegions {
+				b.rowStart += childStart
+				b.rowEnd += childStart
+				expandRegions = append(expandRegions, b)
+			}
 			currentRow += added
 		}
 	}
 
-	card := toolBoxStyle.Width(cardWidth).Render(body.String())
+	// Render as plain content (no boxed background) so the transcript matches
+	// the main chat view. Indentation provides the visual nesting cue for
+	// sub-agent cards.
+	card := strings.TrimRight(body.String(), "\n")
 	runBlocks = append([]detailRunBlock{{runID: run.ID, runPath: runPath, rowStart: cardStart, rowEnd: currentRow}}, runBlocks...)
 	for i := range runBlocks {
 		runBlocks[i].rowStart++
@@ -195,10 +257,103 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int) (
 		procBlocks[i].rowStart++
 		procBlocks[i].rowEnd++
 	}
-	if indent == "" {
-		return card, runBlocks, procBlocks
+	for i := range expandRegions {
+		expandRegions[i].rowStart++
+		expandRegions[i].rowEnd++
 	}
-	return indentBlock(card, indent), runBlocks, procBlocks
+	if indent == "" {
+		return card, runBlocks, procBlocks, expandRegions
+	}
+	return indentBlock(card, indent), runBlocks, procBlocks, expandRegions
+}
+
+func renderDetailThinkingBox(content string, width int, expanded bool) string {
+	text := strings.TrimSpace(renderThinkingContent(content, ApplyThemeColors("tokyonight")))
+	if text == "" {
+		return ""
+	}
+	wrapped := wrapView(text, max(1, width))
+	lines := strings.Split(wrapped, "\n")
+	totalLines := len(lines)
+	collapsed := !expanded && totalLines > 8
+	header := "⟁ thinking"
+	if collapsed {
+		header = fmt.Sprintf("⟁ thinking · %d lines [▸ click to expand]", totalLines)
+	} else if totalLines > 8 {
+		header = fmt.Sprintf("⟁ thinking · %d lines [▾ click to collapse]", totalLines)
+	}
+	body := text
+	if collapsed {
+		body = strings.Join(lines[totalLines-8:], "\n")
+	}
+	return thinkingHeaderStyle.Render(header) + "\n" + toolBoxStyle.Width(max(1, width)).Render(textStyle.Render(body))
+}
+
+func renderDetailToolRequestBox(tc agent.ToolCall, width int, expanded bool) string {
+	toolName := tc.Function.Name
+	if toolName == "" {
+		toolName = "tool"
+	}
+	body := formatToolCallHint(tc)
+	if args := strings.TrimSpace(prettyToolArguments(tc.Function.Arguments)); args != "" && args != "{}" {
+		body += "\n\n" + args
+	}
+	visible, footer := collapsePreviewBlock(body, 8, expanded, false)
+	box := toolBoxStyle.Width(max(1, width)).Render(textStyle.Render(visible))
+	header := hintStyle.Render("tool request · " + toolName)
+	if footer != "" {
+		return header + "\n" + box + "\n" + hintStyle.Render(footer)
+	}
+	return header + "\n" + box
+}
+
+func renderDetailToolResultBox(toolName, content string, width int, expanded bool) string {
+	if toolName == "" {
+		toolName = "tool"
+	}
+	content = stripTruncationFooter(content)
+	content = strings.TrimRight(content, "\n")
+	visible, footer := collapsePreviewBlock(content, toolOutputPreviewLines, expanded, true)
+	box := toolBoxStyle.Width(max(1, width)).Render(renderToolResult(toolName, visible, ApplyThemeColors("tokyonight")))
+	header := hintStyle.Render("tool result · " + toolName)
+	if footer != "" {
+		return header + "\n" + box + "\n" + hintStyle.Render(footer)
+	}
+	return header + "\n" + box
+}
+
+func collapsePreviewBlock(content string, previewLines int, expanded, tail bool) (string, string) {
+	content = strings.TrimRight(content, "\n")
+	if content == "" {
+		return "", ""
+	}
+	lines := strings.Split(content, "\n")
+	if expanded && len(lines) > previewLines {
+		return content, "  ▲ click to collapse"
+	}
+	if len(lines) <= previewLines {
+		return content, ""
+	}
+	if tail {
+		return strings.Join(lines[len(lines)-previewLines:], "\n"), fmt.Sprintf("  … %d earlier lines · click to expand", len(lines)-previewLines)
+	}
+	return strings.Join(lines[:previewLines], "\n"), fmt.Sprintf("  … %d more lines · click to expand", len(lines)-previewLines)
+}
+
+func prettyToolArguments(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var v interface{}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw
+	}
+	formatted, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return raw
+	}
+	return string(formatted)
 }
 
 func lineCount(s string) int {
