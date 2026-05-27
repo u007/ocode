@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"runtime/debug"
 	"strings"
+	"sync/atomic"
 
 	"github.com/jamesmercstudio/ocode/internal/tool"
 )
+
+// subAgentSupervisorCounter assigns each subagent a unique namespace prefix
+// for IDs registered in the shared parent supervisor, preventing collisions
+// between independently-counted "proc-N" sequences across sibling subagents.
+var subAgentSupervisorCounter atomic.Uint64
 
 type SubAgentSpec struct {
 	Name         string
@@ -236,8 +242,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	subAgent.SetSpec(&subSpec)
 
 	// Inherit the shared session supervisor so subagent processes are tracked
-	// under the same lifecycle owner as the main agent.
+	// under the same lifecycle owner as the main agent. Namespace this subagent's
+	// supervisor IDs so its "proc-N" counter cannot collide with the parent's
+	// or another subagent's identically-numbered process.
 	subAgent.SetSupervisor(t.mainAgent.Supervisor())
+	subAgent.SetSupervisorIDPrefix(fmt.Sprintf("sub-%d-", subAgentSupervisorCounter.Add(1)))
 
 	// Propagate the permission-ask callback so sub-agent tool calls that need a
 	// decision bubble up to the main TUI. Set before the spec-permissions block
@@ -245,9 +254,14 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	subAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
 	subAgent.SetSubAgentPermAsker(t.mainAgent.subAgentPermAsker)
 
+	if parentPerms := t.mainAgent.Permissions(); parentPerms != nil {
+		subAgent.permissions = parentPerms.Clone()
+	}
+	if subAgent.permissions == nil {
+		subAgent.permissions = NewPermissionManager()
+	}
 	if len(spec.Permissions) > 0 {
-		_, pm := buildPermissionManagerFromAgentWithDiags(spec.Permissions)
-		subAgent.permissions = pm
+		applyAgentPermissionsWithDiags(subAgent.permissions, spec.Permissions)
 	}
 
 	// spec.SystemPrompt is delivered via the prompt assembler (BasePromptMessages
@@ -274,6 +288,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 			run.appendTranscript(msg)
 		}
 		subAgent.OnMessage = func(msg Message) { run.appendTranscript(msg) }
+		subAgent.OnUsage = func(in, out int64) { run.AddUsage(in, out) }
 	}
 
 	// Background mode

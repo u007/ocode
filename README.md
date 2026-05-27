@@ -1,6 +1,6 @@
 # ocode
 
-Terminal AI coding agent — opencode clone in Go.
+Terminal AI coding agent in Go — started as an opencode clone, now diverged. See [Differences from opencode](#differences-from-opencode) for what changed and why.
 
 ## Run
 
@@ -118,6 +118,69 @@ Editor config also lives in `ocodeconfig.json`:
 In the Files tab, `i` opens a minimal vim-like inline editor for editable text files. It supports `i`/`a` insert, `esc` normal mode, `:w`, `:q`, `:q!`, and `:wq`. Use `e` or `enter` for the configured external editor.
 
 Use `/editor [command]` to set the default editor and `/editor-mode [mode]` to set the open mode. Both open a picker when called without arguments.
+
+## Differences from opencode
+
+ocode shares opencode's overall shape (TUI agent, multi-provider, MCP, sessions) but diverges in a few deliberate places. Upstream-compatible config (`opencode.json`) is preserved; ocode-only behavior lives in `ocodeconfig.json`.
+
+### Language and runtime
+
+| Area | opencode | ocode |
+|---|---|---|
+| Language | TypeScript + Bun + Effect | Go 1.26.1 |
+| TUI | Solid-based custom renderer | Bubble Tea / Bubbles / Lipgloss |
+| Distribution | npm + Bun runtime | Single static binary |
+
+### System prompts
+
+opencode swaps the **entire** system prompt per model family. It ships seven full prompts in `packages/opencode/src/session/prompt/` (`anthropic.txt`, `gpt.txt`, `gemini.txt`, `beast.txt`, `codex.txt`, `kimi.txt`, `trinity.txt`, `default.txt`) — ~1146 lines total — selected by model-ID substring (e.g. `gpt-4`/`o1`/`o3` → `beast.txt`).
+
+ocode keeps **one shared base prompt** and appends a small **provider-keyed fragment** (~3 bullets) from `internal/agent/provider_prompts.go`. Trade-off:
+
+- ocode wins on maintenance: prompt fixes land in one place, smaller per-request token footprint.
+- opencode wins on model tuning: bespoke prompts per family capture each model's quirks.
+- ocode is moving toward a hybrid: file-backed, model-ID-routed fragments (not full per-family bibles). See planning notes in this repo.
+
+### Permissions
+
+ocode adds first-class permission modes (`normal`, `yolo`, `locked`) with per-tool and bash-prefix rules, stored in `ocodeconfig.json`. opencode handles permissions inline in the agent loop. See `/permissions` and `/yolo`.
+
+### Sessions
+
+- ocode can list, pick, and resume opencode sessions and **Claude Code sessions** (cloned into ocode history as `claude-<id>`). opencode does not read Claude Code session files.
+- Auto-save with `/session`, `/sessions`, `/resume`, and a sidebar picker.
+- `Ctrl+Y` retries the last LLM timeout or I/O failure without resending the error as context.
+
+### TUI features unique to ocode
+
+- **Foreground bash → background:** `Ctrl+B` during a running `bash` tool call moves it to the background and frees the agent to continue the turn.
+- **Inline vim-like editor** in the Files tab (`i`, `:w`, `:q`, `:wq`) plus tmux-split / tmux-window external editor modes.
+- **Async subagent runs** with transcript capture, process registry, and detail-view drill-in.
+- **Background process management** with a 256KB circular output buffer and `wait` tool.
+- **Sidebar telemetry** for context window usage, cached via keystroke-debounced recompute.
+- **Extended thinking toggle** (`Ctrl+T` → off/low/med/high) on supporting Anthropic models.
+
+### Anthropic prompt caching
+
+ocode adds explicit `cache_control` markers on system messages and large tool results (`internal/acp/`). opencode relies on provider-side caching defaults.
+
+### Tool result handling
+
+Outputs over ~100 lines are truncated in-context and written to disk; the agent reads back via path. opencode keeps full output in-context.
+
+### Config layout
+
+- `opencode.json` — upstream-compatible settings, read but never written by ocode.
+- `ocodeconfig.json` — ocode-only overrides (permissions, editor, compaction, model memory).
+- Both loaded from `~/.config/opencode/` and the nearest project root.
+- TUI model selection persists in `ocodeconfig.json`, falling back to opencode state unless `OPENCODE_MODEL` is set.
+
+### What ocode does **not** have (vs opencode)
+
+- No web/desktop frontends — terminal only.
+- No plugin marketplace.
+- Smaller skill ecosystem.
+- No `plan-reminder` / `build-switch` prompt overlays (one mode prompt does both jobs).
 
 ## Stack
 

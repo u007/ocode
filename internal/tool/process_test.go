@@ -543,6 +543,78 @@ func TestBashOutputTool(t *testing.T) {
 	}
 }
 
+// TestProcessRegistry_SupervisorIDPrefix_PreventsCollision verifies that two
+// ProcessRegistry instances sharing one ProcessSupervisor can both spawn
+// processes whose local IDs collide ("proc-1") without colliding in the
+// supervisor's records map, when each registry is given a distinct supID
+// prefix via SetSupervisorIDPrefix.
+func TestProcessRegistry_SupervisorIDPrefix_PreventsCollision(t *testing.T) {
+	sup := NewProcessSupervisor(ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	regA := NewProcessRegistry()
+	regA.SetSupervisor(sup)
+	regA.SetSupervisorIDPrefix("a-")
+	regB := NewProcessRegistry()
+	regB.SetSupervisor(sup)
+	regB.SetSupervisorIDPrefix("b-")
+
+	pA := regA.StartBackground("true")
+	pB := regB.StartBackground("true")
+
+	if pA.ID != "proc-1" || pB.ID != "proc-1" {
+		t.Fatalf("expected both local IDs to be proc-1 (got %q and %q)", pA.ID, pB.ID)
+	}
+
+	// Both registrations should appear distinctly in the supervisor.
+	if _, ok := sup.Lookup("a-proc-1"); !ok {
+		t.Fatalf("supervisor missing a-proc-1 record")
+	}
+	if _, ok := sup.Lookup("b-proc-1"); !ok {
+		t.Fatalf("supervisor missing b-proc-1 record")
+	}
+
+	// Drain to exit so test goroutines finish.
+	for i := 0; i < 200; i++ {
+		stA, _ := pA.snapshotStatus()
+		stB, _ := pB.snapshotStatus()
+		if stA != ProcRunning && stB != ProcRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestProcessRegistry_NoPrefix_CollidesInSupervisor confirms the negative
+// case: without SetSupervisorIDPrefix, two registries sharing a supervisor
+// collide on the second registration. This documents the failure mode that
+// SetSupervisorIDPrefix exists to prevent.
+func TestProcessRegistry_NoPrefix_CollidesInSupervisor(t *testing.T) {
+	sup := NewProcessSupervisor(ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	regA := NewProcessRegistry()
+	regA.SetSupervisor(sup)
+	regB := NewProcessRegistry()
+	regB.SetSupervisor(sup)
+
+	pA := regA.StartBackground("true")
+	pB := regB.StartBackground("true")
+
+	// First registration succeeds; second collides (supID "proc-1" already exists).
+	for i := 0; i < 200; i++ {
+		stA, _ := pA.snapshotStatus()
+		stB, _ := pB.snapshotStatus()
+		if stA != ProcRunning && stB != ProcRunning {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	outB, _, _, err := regB.Output(pB.ID)
+	if err != nil {
+		t.Fatalf("regB Output: %v", err)
+	}
+	if !strings.Contains(outB, "already registered") {
+		t.Fatalf("expected regB to fail with 'already registered'; got %q", outB)
+	}
+}
+
 func TestKillShellTool(t *testing.T) {
 	r := NewProcessRegistry()
 	p := r.StartBackground("sleep 30")

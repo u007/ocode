@@ -47,6 +47,92 @@ func TestSaveAndLoadPreservesMetadata(t *testing.T) {
 	}
 }
 
+func TestNewSessionIDUsesCanonicalPrefix(t *testing.T) {
+	id := NewSessionID()
+	if !strings.HasPrefix(id, "ses_") {
+		t.Fatalf("expected canonical ses_ prefix, got %q", id)
+	}
+	if len(id) != len("ses_2006-01-02-150405") {
+		t.Fatalf("expected timestamp-style session id, got %q", id)
+	}
+}
+
+func TestLoadFallsBackToLegacyBareTimestamp(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	legacyID := "2025-05-26-102317"
+	if err := Save(legacyID, "Legacy", []agent.Message{{Role: "user", Content: "hello"}}, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	sess, err := Load("ses_" + legacyID)
+	if err != nil {
+		t.Fatalf("Load with canonical prefix failed: %v", err)
+	}
+	if sess.ID != legacyID {
+		t.Fatalf("expected stored legacy id preserved, got %q", sess.ID)
+	}
+}
+
+func TestLoadFallsBackToCanonicalPrefixedID(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	canonicalID := "ses_2025-05-26-102317"
+	if err := Save(canonicalID, "Canonical", []agent.Message{{Role: "user", Content: "hello"}}, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	sess, err := Load("2025-05-26-102317")
+	if err != nil {
+		t.Fatalf("Load with legacy bare id failed: %v", err)
+	}
+	if sess.ID != canonicalID {
+		t.Fatalf("expected stored canonical id preserved, got %q", sess.ID)
+	}
+}
+
+func TestSaveGeneratesCanonicalPrefixedIDWhenBlank(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Save("", "Generated", []agent.Message{{Role: "user", Content: "hello"}}, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	dir, err := GetStorageDir()
+	if err != nil {
+		t.Fatalf("GetStorageDir failed: %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" || entry.Name() == "index.json" {
+			continue
+		}
+		if !strings.HasPrefix(entry.Name(), "ses_") {
+			t.Fatalf("expected generated session file to use ses_ prefix, got %q", entry.Name())
+		}
+		return
+	}
+	t.Fatal("expected generated session file")
+}
+
 func TestSaveWritesOcodeSessionFormatWithSidebarMetadata(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()

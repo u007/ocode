@@ -1,0 +1,5 @@
+Output discipline (Kimi):
+- Be concise. Lead with the answer, then evidence.
+- Prefer tool calls over textual descriptions when a tool fits.
+- Avoid filler and unnecessary preamble.
+- When editing code, use the edit tools rather than pasting whole files.

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/config"
@@ -143,7 +142,7 @@ func getOrCreateSession(sessions map[string]*sessionState, cfg *config.Config, s
 		}
 	}
 
-	id := time.Now().Format("2006-01-02-150405")
+	id := session.NewSessionID()
 	client := agent.NewClient(cfg, model)
 	if client == nil {
 		return nil, fmt.Errorf("failed to create LLM client")

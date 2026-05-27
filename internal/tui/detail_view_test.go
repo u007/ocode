@@ -6,6 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
@@ -139,6 +140,57 @@ func TestDetailAgentViewFitsPanelWidth(t *testing.T) {
 		if got := lipgloss.Width(line); got > m.panelWidth() {
 			t.Fatalf("detail line width %d exceeds panel width %d: %q", got, m.panelWidth(), line)
 		}
+	}
+}
+
+func TestRenderRunTranscriptShowsThinkingLLMToolRequestAndToolResult(t *testing.T) {
+	run := &agent.AgentRun{
+		ID:     "agent-1",
+		Name:   "worker",
+		Status: agent.RunDone,
+	}
+	setRunTranscriptForTest(run,
+		agent.Message{Role: "assistant", ReasoningContent: "step 1\nstep 2\nstep 3\nstep 4", Content: "done thinking", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-1", "bash", `{"command":"printf one\\ntwo\\nthree\\nfour\\nfive\\nsix\\nseven\\neight\\nnine"}`)}},
+		agent.Message{Role: "tool", ToolID: "call-1", Content: strings.Repeat("tool line\n", 20)},
+	)
+
+	rendered := stripANSI(renderRunTranscript(run, 80))
+	for _, want := range []string{"⟁ thinking", "LLM message", "tool request · bash", "tool result · bash"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("expected rendered transcript to contain %q, got:\n%s", want, rendered)
+		}
+	}
+	if !strings.Contains(rendered, "click to expand") {
+		t.Fatalf("expected collapsed expandable sections, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "tool line\ntool line\ntool line\ntool line\ntool line\ntool line\ntool line\ntool line\ntool line\ntool line\ntool line\ntool line\ntool line") {
+		t.Fatalf("expected collapsed tool output preview, got full content:\n%s", rendered)
+	}
+}
+
+func TestAgentDetailClickTogglesExpandableTranscriptSection(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	setRunTranscriptForTest(run,
+		agent.Message{Role: "assistant", ReasoningContent: strings.Join([]string{"line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8", "line 9"}, "\n")},
+	)
+
+	m := model{ready: true, width: 100, height: 28, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
+	m.openAgentDetail(run.ID)
+	top := m.detail[len(m.detail)-1]
+	if len(top.regions) == 0 {
+		t.Fatal("expected clickable expandable region in detail view")
+	}
+	row := top.regions[0].rowStart
+
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 2, Y: m.detailViewportContentTopY() + row})
+	got := derefTestModel(t, updated)
+	top = got.detail[len(got.detail)-1]
+	if !top.expanded[top.regions[0].id] {
+		t.Fatal("expected detail transcript region to expand after click")
+	}
+	if !strings.Contains(stripANSI(top.vp.View()), "click to collapse") {
+		t.Fatalf("expected expanded detail transcript to show collapse affordance, got:\n%s", stripANSI(top.vp.View()))
 	}
 }
 

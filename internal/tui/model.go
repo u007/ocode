@@ -30,6 +30,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/skill"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/jamesmercstudio/ocode/internal/usage"
 	"github.com/jamesmercstudio/ocode/internal/version"
 
 	"github.com/atotto/clipboard"
@@ -73,12 +74,16 @@ func estimateTok(s string) int {
 	return len(s) / 4
 }
 
-// formatTok formats an integer token count compactly.
+// formatTok formats an integer token count compactly, e.g. 1234 → "1.2k".
 func formatTok(n int) string {
-	if n >= 1000 {
-		return fmt.Sprintf("%dk", n/1000)
+	switch {
+	case n >= 1000000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1000:
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	default:
+		return strconv.Itoa(n)
 	}
-	return strconv.Itoa(n)
 }
 
 // columnPad returns spaces to pad label to width w for alignment.
@@ -196,6 +201,11 @@ type leaderTimeoutMsg struct {
 
 type statusMsg struct {
 	text string
+}
+
+type usageSummaryMsg struct {
+	text string
+	err  error
 }
 
 type streamMsgEvent struct {
@@ -466,6 +476,10 @@ type model struct {
 	agentStripRow0           int
 	streamStartedAt          time.Time
 	streamEndedAt            time.Time
+	streamTokenEstimate      int       // live character count during streaming for token estimation
+	streamThinkingChars      int       // live thinking/reasoning character count
+	streamOutputChars        int       // live output (non-thinking) character count
+	tokenBlinkUntil          time.Time // when the token-count blink effect expires (2s after last token)
 	streamWasInterrupted     bool
 	transcriptContent        string
 	transcriptLines          []string
@@ -482,7 +496,9 @@ type model struct {
 	compactStartCh           chan struct{}
 	titleCh                  chan titleResult
 	deltaCh                  chan deltaEvent
-	deltaDrops               uint64    // bumped each time the deltaCh select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
+	deltaDrops               uint64 // bumped each time the deltaCh select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
+	usageCh                  chan usageEvent
+	streamFinalOutputTokens  int64     // exact output tokens from streaming usage event (0 = not yet received)
 	streamingThinkingIdx     int       // index into m.messages of the in-flight roleThinking message; -1 when none
 	lastDeltaRender          time.Time // throttles renderTranscript to ≥50ms cadence during streams
 	titleRequested           bool
@@ -938,6 +954,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 		compactStartCh:       make(chan struct{}, 4),
 		titleCh:              make(chan titleResult, 4),
 		deltaCh:              make(chan deltaEvent, 256),
+		usageCh:              make(chan usageEvent, 16),
 		streamingThinkingIdx: -1,
 		questionInput:        questionInput,
 		subAgentPermCh:       make(chan subAgentPermRequest),
@@ -1325,6 +1342,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
 		m.rerenderTranscriptAndMaybeScroll()
+	case usageSummaryMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error querying usage: %v", msg.err)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
+		}
+		m.rerenderTranscriptAndMaybeScroll()
 	case connectOAuthFinishedMsg:
 		if m.connect == nil {
 			return m, nil
@@ -1428,7 +1452,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupCurrentSession()
 		return m, tea.Quit
 	case dotTickMsg:
-		if m.streaming || m.lastActivity.LLMRunning || m.compacting || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
+		if m.streaming || m.lastActivity.LLMRunning || m.compacting || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || time.Now().Before(m.tokenBlinkUntil) || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
 			m.dotFrame = (m.dotFrame + 1) % 4
 			// Refresh live detail view content.
 			if !m.detail.empty() {
@@ -1442,6 +1466,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
 		m.streamStartedAt = time.Now()
 		m.streamEndedAt = time.Time{}
+		m.streamTokenEstimate = 0
+		m.streamThinkingChars = 0
+		m.streamOutputChars = 0
+		m.tokenBlinkUntil = time.Time{}
 		m.dotFrame = 0
 		if !m.activityRowReserved {
 			m.activityRowReserved = true
@@ -1454,6 +1482,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case activityUpdateMsg:
 		if m.agent == nil || msg.tracker != m.agent.Activity() {
+			return m, nil
+		}
+		// If the stream was already cancelled/stopped, ignore stale
+		// LLMRunning=true updates so the "⟳ LLM" indicator doesn't stay
+		// visible indefinitely after escape. The step goroutine may not
+		// have had a chance to call setLLMRunning(false) yet, and the
+		// activity tracker's notify channel may still contain a snapshot
+		// from before the cancellation.
+		if !m.streaming && msg.snap.LLMRunning {
+			if m.agent != nil {
+				return m, listenActivity(m.agent.Activity())
+			}
 			return m, nil
 		}
 		m.lastActivity = msg.snap
@@ -1569,8 +1609,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.askAgent()
 			}
 			if len(m.queuedInputs) > 0 && m.agent != nil {
-				text := m.queuedInputs[0]
-				m.queuedInputs = m.queuedInputs[1:]
+				// Concatenate all queued inputs into a single combined message.
+				parts := make([]string, 0, len(m.queuedInputs))
+				for _, q := range m.queuedInputs {
+					parts = append(parts, strings.TrimSpace(q))
+				}
+				text := strings.Join(parts, "\n---\n")
+				m.queuedInputs = nil
 				m.layout()
 				m.maybeScrollTranscriptToBottom()
 				return m, m.processFileReferences(text)
@@ -1614,6 +1659,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deltaMsg:
 		m.applyThinkingDelta(msg.kind, msg.text)
 		return m, waitDeltaEvent(m.deltaCh)
+	case usageMsg:
+		if msg.outputTokens > 0 {
+			m.streamFinalOutputTokens = msg.outputTokens
+		}
+		// Note: sessionTelemetry is populated exclusively via addMessage
+		// (called when the message is finalized in appendAgentMessage).
+		// Do NOT set sessionTelemetry.inputTokens here — it would be
+		// double-counted when addMessage adds the same Usage data later.
+		return m, nil
 	case subAgentPermAskMsg:
 		// A sub-agent tool call needs a permission decision. Reuse the same
 		// permission dialog the main agent uses. The sub-agent goroutine is
@@ -1627,7 +1681,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingToolName = req.ToolName
 		m.pendingToolArgs = req.Args
 		m.pendingToolCallID = ""
-		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + renderPermissionPrompt(req)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + permissionRequestSummary(req)})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	case editorFinishedMsg:
@@ -1921,7 +1975,10 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 				return m, nil
 			}
 		case "esc":
-			return m.handleEscKey()
+			// Pop the current detail view unconditionally; detail navigation
+			// is independent of stream/agent cancellation.
+			m.detail.pop()
+			return m, nil
 		}
 	}
 
@@ -2084,6 +2141,13 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		m.ctrlCPressed = true
 		return m, tea.Tick(2*time.Second, func(time.Time) tea.Msg { return ctrlCResetMsg{} })
 	case "shift+tab":
+		if m.agentStripRunCount() > 0 && m.detail.empty() {
+			m.agentStripFocused = !m.agentStripFocused
+			if m.agentStripFocused {
+				m.clampAgentStrip()
+			}
+			return m, nil
+		}
 		m.cycleAgentMode()
 		return m, nil
 	case "tab":
@@ -2216,6 +2280,10 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.logSearch = ""
 		m.refreshLogViewport()
 	case "esc":
+		// If the LLM is streaming, cancel the stream even from the log tab.
+		if m.streaming {
+			return m.handleEscKey()
+		}
 		m.logSearch = ""
 		m.refreshLogViewport()
 	case "backspace":
@@ -2263,6 +2331,16 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		default:
 			close(m.cancelStream)
 		}
+	}
+	// Cancel all agent runs (main agent + sub-agents) so escape stops
+	// all running agents, not just the current stream.
+	if m.agent != nil {
+		m.agent.Cancel()
+		if m.agent.Runs() != nil {
+			m.agent.Runs().CancelAll()
+		}
+	}
+	if m.streaming {
 		return m, nil
 	}
 	if !m.detail.empty() {
@@ -2339,6 +2417,30 @@ func shouldForwardToTranscriptViewport(msg tea.Msg) bool {
 }
 
 func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.Cmd, bool) {
+	if pressed && mouse.Button == tea.MouseRight {
+		if m.activeTab == tabGit {
+			panelW := m.panelWidth()
+			gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
+			gitBodyTop := gitHeaderH + 1
+			sectW := panelW * 20 / 100
+			filesW := panelW * 30 / 100
+			sectRight := sectW
+			filesRight := sectRight + filesW
+			if mouse.X >= sectRight && mouse.X < filesRight && mouse.Y >= gitBodyTop {
+				m.git.clearActiveFile()
+				return m, nil, true
+			}
+		}
+		if m.activeTab == tabFiles {
+			filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
+			treeW := m.width * 35 / 100
+			if mouse.X >= 0 && mouse.X < treeW && mouse.Y >= filesHeaderH+1 {
+				m.files.clearActiveFile()
+				return m, nil, true
+			}
+		}
+		return m, nil, false
+	}
 	if pressed && mouse.Button != tea.MouseLeft {
 		return m, nil, false
 	}
@@ -2359,6 +2461,21 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		if !m.detail.empty() {
 			return m, nil, true
+		}
+		// Click on agent strip: open the clicked run's detail view.
+		if strip, blocks := m.renderAgentStrip(); strip != "" {
+			stripTop := m.agentStripTopY()
+			stripH := lipgloss.Height(strip)
+			relY := mouse.Y - stripTop
+			if relY >= 0 && relY < stripH {
+				for _, blk := range blocks {
+					if relY >= blk.rowStart && relY < blk.rowEnd {
+						m.openAgentDetail(blk.runID)
+						return m, nil, true
+					}
+				}
+				return m, nil, true
+			}
 		}
 		if thumbOffset, ok := m.transcriptScrollbarThumbOffset(mouse); ok {
 			m.scrollbarDrag = scrollbarDragTranscript
@@ -2858,6 +2975,16 @@ func (m model) handleDetailClick(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		return m, nil, true
 	}
 	if top.kind == detailAgentRun {
+		for _, r := range top.regions {
+			if contentLine >= r.rowStart && contentLine < r.rowEnd {
+				if m.detail[len(m.detail)-1].expanded == nil {
+					m.detail[len(m.detail)-1].expanded = map[string]bool{}
+				}
+				m.detail[len(m.detail)-1].expanded[r.id] = !m.detail[len(m.detail)-1].expanded[r.id]
+				m.refreshTopDetailView()
+				return m, nil, true
+			}
+		}
 		for _, b := range top.procs {
 			if contentLine >= b.rowStart && contentLine < b.rowEnd {
 				m.openProcessLogForRun(top.runPath, b.procID)
@@ -3521,6 +3648,75 @@ func (m *model) handleEditorModeCmd(args []string) tea.Cmd {
 	return nil
 }
 
+func (m *model) handleUsageCmd(args []string) tea.Cmd {
+	// Determine date range
+	var from, to time.Time
+
+	if len(args) == 0 {
+		// Show a help message with options
+		var b strings.Builder
+		b.WriteString("📊 Usage Summary\n\n")
+		b.WriteString("Available date ranges:\n")
+		for _, dr := range usage.DateRanges {
+			fmt.Fprintf(&b, "  /usage %s\n", dr.Label)
+		}
+		b.WriteString("\nExamples:\n")
+		b.WriteString("  /usage hour         - Last 1 hour\n")
+		b.WriteString("  /usage day          - Today\n")
+		b.WriteString("  /usage week         - Last 7 days\n")
+		b.WriteString("  /usage month        - Last 30 days\n")
+		b.WriteString("  /usage last-month   - Previous calendar month\n")
+		b.WriteString("  /usage last-3-month - Previous 3 calendar months\n")
+		b.WriteString("  /usage all          - All time\n")
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return nil
+	}
+
+	arg := strings.ToLower(strings.TrimSpace(args[0]))
+	now := time.Now()
+
+	switch arg {
+	case "hour", "1h":
+		from = now.Add(-1 * time.Hour)
+		to = now
+	case "day", "today":
+		from = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		to = now
+	case "week", "7d":
+		from = now.Add(-7 * 24 * time.Hour)
+		to = now
+	case "month", "30d":
+		from = now.Add(-30 * 24 * time.Hour)
+		to = now
+	case "last-month", "lastmonth":
+		firstOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		from = firstOfMonth.AddDate(0, -1, 0)
+		to = firstOfMonth.Add(-time.Nanosecond)
+	case "last-3-month", "last-3-months", "last3month", "last3months", "quarter":
+		firstOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		from = firstOfMonth.AddDate(0, -3, 0)
+		to = firstOfMonth.Add(-time.Nanosecond)
+	case "all", "all-time", "alltime":
+		from = time.Time{}
+		to = now
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown date range: %q. Use /usage to see available options.", arg)})
+		return nil
+	}
+
+	return func() tea.Msg {
+		records, err := usage.Query(from, to)
+		if err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error querying usage: %v", err)})
+			return nil
+		}
+		summary := usage.Summarize(records)
+		output := usage.FormatSummary(summary)
+		m.messages = append(m.messages, message{role: roleAssistant, text: output})
+		return nil
+	}
+}
+
 func (m *model) refreshEditorOpener() {
 	if m.config == nil {
 		return
@@ -3970,6 +4166,41 @@ func (m model) buildSelectionContext() string {
 	return b.String()
 }
 
+func (m model) buildSelectionSidebarBody(width int) []string {
+	body, _ := m.buildSelectionSidebarData(width)
+	return body
+}
+
+func (m model) buildSelectionSidebarData(width int) ([]string, []string) {
+	if width < 8 {
+		width = 8
+	}
+	var body []string
+	var filePaths []string
+	if len(m.files.selectedFiles) > 0 {
+		indices := make([]int, 0, len(m.files.selectedFiles))
+		for idx := range m.files.selectedFiles {
+			indices = append(indices, idx)
+		}
+		sort.Ints(indices)
+		for _, idx := range indices {
+			if idx < 0 || idx >= len(m.files.nodes) {
+				continue
+			}
+			n := m.files.nodes[idx]
+			body = append(body, "• "+formatSidebarFilePath(n.path, m.workDir, maxInt(1, width-2)))
+			filePaths = append(filePaths, n.path)
+		}
+	}
+	if m.filesSel.active && m.files.previewPath != "" && len(m.files.previewRawLines) > 0 {
+		startLine, _, endLine, _ := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
+		lineLabel := fmt.Sprintf("↳ %s:%d-%d", formatSidebarFilePath(m.files.previewPath, m.workDir, maxInt(1, width-7)), startLine+1, endLine+1)
+		body = append(body, lineLabel)
+		filePaths = append(filePaths, m.files.previewPath)
+	}
+	return body, filePaths
+}
+
 func (m model) prepareAgentMessages(msgs []agent.Message) []agent.Message {
 	if m.agent == nil {
 		return msgs
@@ -4151,6 +4382,20 @@ func (m *model) lastUserMessageText() string {
 	return ""
 }
 
+// firstUserPromptText returns the text of the first non-transient user message.
+// This serves as a fallback session title when no LLM-generated title is available.
+func (m *model) firstUserPromptText() string {
+	for _, msg := range m.messages {
+		if msg.role == roleUser && !msg.transient {
+			text := strings.TrimSpace(msg.text)
+			if text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
 func (m *model) appendAgentMessage(am agent.Message) {
 	copyMsg := am
 	if am.Role == "assistant" {
@@ -4219,7 +4464,52 @@ func (m *model) appendAgentMessage(am agent.Message) {
 	}
 	if am.Usage != nil || am.Spend != nil {
 		m.sessionTelemetry.addMessage(am)
+		// Record usage to persistent storage
+		m.recordUsage(am)
 	}
+}
+
+// recordUsage persists a usage record for a message that has token usage data.
+func (m *model) recordUsage(am agent.Message) {
+	if am.Usage == nil {
+		return
+	}
+	u := am.Usage
+	promptTokens := int64(0)
+	completionTokens := int64(0)
+	cacheReadTokens := int64(0)
+	totalTokens := int64(0)
+	spend := 0.0
+
+	if u.PromptTokens != nil {
+		promptTokens = *u.PromptTokens
+	}
+	if u.CompletionTokens != nil {
+		completionTokens = *u.CompletionTokens
+	}
+	if u.CacheReadTokens != nil {
+		cacheReadTokens = *u.CacheReadTokens
+	}
+	if u.TotalTokens != nil {
+		totalTokens = *u.TotalTokens
+	} else {
+		totalTokens = promptTokens + completionTokens
+	}
+	if am.Spend != nil {
+		spend = *am.Spend
+	}
+
+	model := am.Model
+	if model == "" {
+		model = m.activeModel
+	}
+
+	// Write asynchronously to avoid blocking the chat
+	go func() {
+		if err := usage.RecordUsage(time.Now(), model, "", promptTokens, completionTokens, cacheReadTokens, totalTokens, spend); err != nil {
+			log.Printf("usage: record: %v", err)
+		}
+	}()
 }
 
 func parsePermissionRequest(content string) (agent.PermissionRequest, bool) {
@@ -4237,20 +4527,33 @@ func parsePermissionRequest(content string) (agent.PermissionRequest, bool) {
 	return req, true
 }
 
+func permissionRequestSummary(req agent.PermissionRequest) string {
+	if req.Command != "" {
+		return formatToolCallHint(makeToolCall(req.ToolName, string(req.Args)))
+	}
+	if len(req.Args) > 0 {
+		return formatToolCallHint(makeToolCall(req.ToolName, string(req.Args)))
+	}
+	if req.ToolName != "" {
+		return "🔧 " + req.ToolName
+	}
+	return "🔧 tool action"
+}
+
+func renderPermissionRequestBody(req agent.PermissionRequest) string {
+	var lines []string
+	lines = append(lines, permissionRequestSummary(req))
+	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
+		lines = append(lines, fmt.Sprintf("Always-rule scope: bash prefix %q", req.Prefix))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func renderPermissionPrompt(req agent.PermissionRequest) string {
 	var b strings.Builder
-	b.WriteString("Permission required\n\n")
-	b.WriteString(fmt.Sprintf("Tool: %s\n", req.ToolName))
-	if req.Command != "" {
-		b.WriteString(fmt.Sprintf("Command: %s\n", req.Command))
-	}
-	if req.Prefix != "" {
-		b.WriteString(fmt.Sprintf("Prefix: %s\n", req.Prefix))
-	}
-	if req.Rule != "" {
-		b.WriteString(fmt.Sprintf("Matched rule: %s\n", req.Rule))
-	}
-	b.WriteString("\nChoose: [y] allow once  [n] deny once  [a] always allow matched rule  [t] always allow tool")
+	b.WriteString("Allow this action?\n\n")
+	b.WriteString(renderPermissionRequestBody(req))
+	b.WriteString("\n\n[y] once  [n] deny  [a] always this rule  [t] always this tool")
 	return b.String()
 }
 
@@ -4448,7 +4751,18 @@ func (m *model) askAgent() tea.Cmd {
 	errCh := make(chan error, 1)
 	a := m.agent
 	go func() {
-		a.OnMessage = func(am agent.Message) { ch <- am }
+		// Use a non-blocking send so the goroutine cannot hang forever
+		// when the channel is drained by waitStreamEvent after cancel
+		// closes. Without this, OnMessage would block on a full ch after
+		// the TUI stops reading, leaking the goroutine and keeping the
+		// activity tracker stuck in LLMRunning=true.
+		a.OnMessage = func(am agent.Message) {
+			select {
+			case ch <- am:
+			case <-cancel:
+				// Stream cancelled — drop to avoid blocking.
+			}
+		}
 		_, err := a.Step(agentMsgs)
 		a.SetPreloadedContext("")
 		a.OnMessage = nil
@@ -4656,17 +4970,7 @@ func (m *model) renderPermissionDialog(width int) string {
 
 	contentWidth := max(0, width-2)
 
-	var body strings.Builder
-	body.WriteString("Tool: " + req.ToolName + "\n")
-	if req.Command != "" {
-		body.WriteString("Command: " + req.Command + "\n")
-	}
-	if req.Prefix != "" {
-		body.WriteString("Prefix: " + req.Prefix + "\n")
-	}
-	if req.Rule != "" {
-		body.WriteString("Rule: " + req.Rule + "\n")
-	}
+	body := renderPermissionRequestBody(req)
 
 	header := m.styles.Header.Render("⚠ Permission required")
 
@@ -4679,7 +4983,7 @@ func (m *model) renderPermissionDialog(width int) string {
 	)
 
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
-		header + "\n\n" + body.String() + "\n" + buttonRow,
+		header + "\n\n" + body + "\n\n" + buttonRow,
 	)
 }
 
@@ -4693,17 +4997,8 @@ func (m *model) updatePermButtonRegions() {
 	req := m.pendingPermission
 
 	// Count lines above the button row inside the dialog content (excluding border).
-	// header(1) + blank(1) + "Tool: X"(1) + optional fields + blank(1)
-	linesAbove := 4 // header + blank + "Tool: X" + blank before buttons
-	if req.Command != "" {
-		linesAbove++
-	}
-	if req.Prefix != "" {
-		linesAbove++
-	}
-	if req.Rule != "" {
-		linesAbove++
-	}
+	// header(1) + blank(1) + body + blank(1)
+	linesAbove := 3 + strings.Count(renderPermissionRequestBody(req), "\n") + 1
 
 	// +1 for the dialog box top border
 	buttonTopY := m.inputAreaTopY() + 1 + linesAbove
@@ -4819,11 +5114,11 @@ func (m *model) renderTranscript() {
 			wrapped := wrapView(content, width)
 			lines := strings.Split(wrapped, "\n")
 			totalLines := len(lines)
-			collapsed := !expanded && totalLines > 3
+			collapsed := !expanded && totalLines > 8
 			header := "⟁ thinking"
 			if collapsed {
 				header = fmt.Sprintf("⟁ thinking · %d lines [▸ click to expand]", totalLines)
-			} else if totalLines > 3 {
+			} else if totalLines > 8 {
 				header = fmt.Sprintf("⟁ thinking · %d lines [▾ click to collapse]", totalLines)
 			}
 			startLine := lipgloss.Height(b.String())
@@ -4831,7 +5126,7 @@ func (m *model) renderTranscript() {
 			b.WriteString("\n")
 			body := content
 			if collapsed {
-				body = strings.Join(lines[totalLines-3:], "\n")
+				body = strings.Join(lines[totalLines-8:], "\n")
 			}
 			b.WriteString(m.styles.Thinking.Render(body))
 			endLine := lipgloss.Height(b.String()) - 1
@@ -4843,6 +5138,10 @@ func (m *model) renderTranscript() {
 		case roleAssistant:
 			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
 				if _, ok := parseQuestionPrompt(msg.raw.Content); ok {
+					b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
+					break
+				}
+				if strings.HasPrefix(msg.raw.Content, tool.SentinelPermissionAsk) {
 					b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
 					break
 				}
@@ -5081,6 +5380,16 @@ func (m *model) wireCompactCallbacks() {
 			atomic.AddUint64(&m.deltaDrops, 1)
 		}
 	}
+	usageCh := m.usageCh
+	m.agent.OnUsage = func(inputTokens, outputTokens int64) {
+		if usageCh == nil {
+			return
+		}
+		select {
+		case usageCh <- usageEvent{inputTokens: inputTokens, outputTokens: outputTokens}:
+		default:
+		}
+	}
 	// Sub-agent permission asks: the callback runs inside a sub-agent goroutine.
 	// It hands the request to the TUI Update loop and blocks for the answer. The
 	// mutex serialises concurrent asks (multiple sub-agents may ask at once) so
@@ -5143,14 +5452,40 @@ type deltaEvent struct {
 
 type deltaMsg deltaEvent
 
+type usageEvent struct {
+	inputTokens  int64
+	outputTokens int64
+}
+
+type usageMsg usageEvent
+
 // applyThinkingDelta appends a streamed reasoning token to the in-flight
 // roleThinking message (creating one if none exists). Text deltas are
 // ignored — the final assistant Message replaces them on arrival, and
 // streaming the assistant text would duplicate it. Auto-expands the
 // streaming message so users see it grow live.
 func (m *model) applyThinkingDelta(kind, text string) {
+	// Count all streamed characters for live token estimation.
+	if text != "" {
+		m.streamTokenEstimate += len(text)
+		if kind == "reasoning" {
+			m.streamThinkingChars += len(text)
+		} else {
+			m.streamOutputChars += len(text)
+		}
+		m.tokenBlinkUntil = time.Now().Add(2 * time.Second)
+	}
 	if kind != "reasoning" || text == "" || !m.showThinking {
 		return
+	}
+	// If streamingThinkingIdx was reset (by appendAgentMessage) and we already
+	// have a final assistant message, late thinking deltas are stale — drop them.
+	if m.streamingThinkingIdx < 0 {
+		for i := len(m.messages) - 1; i >= 0; i-- {
+			if m.messages[i].role == roleAssistant {
+				return
+			}
+		}
 	}
 	if m.streamingThinkingIdx < 0 || m.streamingThinkingIdx >= len(m.messages) || m.messages[m.streamingThinkingIdx].role != roleThinking {
 		m.messages = append(m.messages, message{role: roleThinking, text: text})
@@ -5393,11 +5728,22 @@ func truncateToWidth(s string, w int) string {
 	if w < 1 {
 		return ""
 	}
-	r := []rune(s)
-	if len(r) <= w {
-		return s
+	return ansi.Truncate(s, w, "…")
+}
+
+// constrainToWidth ensures every line in a multi-line string does not exceed
+// the given visual width. Lines are silently truncated; no ellipsis is added.
+// This is useful for constraining free-form rendered blocks that are joined
+// into the panel alongside bordered elements.
+func constrainToWidth(s string, w int) string {
+	if w < 1 {
+		return ""
 	}
-	return string(r[:w-1]) + "…"
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = ansi.Truncate(line, w, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 // renderAgentStrip renders top-level agent runs as collapsed activity cards: a
@@ -5432,8 +5778,8 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 
 	// When focused, show a one-line hint above the strip describing the keys.
 	if m.agentStripFocused {
-		b.WriteString(hintStyle.Render(fmt.Sprintf("  agents %d/%d · j/k: move · enter: open · esc: exit", m.agentStripSelected+1, len(runs)))) //nolint
-		b.WriteString("\n")
+			hint := fmt.Sprintf("  agents %d/%d · j/k: move · enter: open · esc: exit", m.agentStripSelected+1, len(runs))
+			b.WriteString(hintStyle.Render(truncateToWidth(hint, width)) + "\n")
 		row++
 	}
 
@@ -5443,7 +5789,7 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	// reserved for whichever indicators are shown.
 	showUp := offset > 0
 	if showUp {
-		b.WriteString(hintStyle.Render("  ↑ more") + "\n")
+			b.WriteString(truncateToWidth(hintStyle.Render("  ↑ more"), width) + "\n")
 		row++
 	}
 
@@ -5480,7 +5826,7 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 		if selected {
 			b.WriteString(selectedStyle.Render(truncateToWidth(head, width)) + "\n")
 		} else {
-			b.WriteString(truncateToWidth(head, width) + "\n")
+			b.WriteString(hintStyle.Render(truncateToWidth(head, width)) + "\n")
 		}
 		row++
 		for _, ln := range lines {
@@ -5493,7 +5839,8 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	}
 
 	if offset+rendered < len(runs) {
-		b.WriteString(hintStyle.Render(fmt.Sprintf("  ↓ more (%d)", len(runs)-offset-rendered)) + "\n")
+			more := fmt.Sprintf("  ↓ more (%d)", len(runs)-offset-rendered)
+			b.WriteString(truncateToWidth(hintStyle.Render(more), width) + "\n")
 		row++
 	}
 
@@ -5584,9 +5931,10 @@ func (m *model) openAgentDetail(runID string) {
 		return
 	}
 	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
-	content, runs, procs := renderRunTranscriptDetail(run, runID, vp.Width())
+	expanded := map[string]bool{}
+	content, runs, procs, regions := renderRunTranscriptDetail(run, runID, vp.Width(), expanded)
 	vp.SetContent(content)
-	m.detail.push(detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, procs: procs})
+	m.detail.push(detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, procs: procs, expanded: expanded, regions: regions})
 }
 
 // openProcessList pushes a process list drill-in view.
@@ -5640,11 +5988,12 @@ func (m *model) refreshTopDetailView() {
 		if !ok {
 			return
 		}
-		content, runs, procs := renderRunTranscriptDetail(run, top.runPath, top.vp.Width())
+		content, runs, procs, regions := renderRunTranscriptDetail(run, top.runPath, top.vp.Width(), top.expanded)
 		top.vp.SetContent(content)
 		top.runID = run.ID
 		top.runs = runs
 		top.procs = procs
+		top.regions = regions
 	case detailProcessList:
 		if reg := m.processRegistryForRun(top.runPath); reg != nil {
 			top.vp.SetContent(renderProcessList(reg))
@@ -5739,7 +6088,46 @@ func (m model) renderDetailView(d detailView) string {
 		scrollbar,
 	)
 	body := borderStyle.Width(m.panelWidth() - 2).Render(bodyContent)
-	return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	statusBar := m.renderDetailStatusBar(d)
+	if statusBar == "" {
+		return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, header, body, statusBar)
+}
+
+// renderDetailStatusBar shows live status + token usage for an agent-run detail
+// view. Returns "" for non-agent views.
+func (m model) renderDetailStatusBar(d detailView) string {
+	if d.kind != detailAgentRun {
+		return ""
+	}
+	run, ok := m.findAgentRun(d.runPath)
+	if !ok || run == nil {
+		return ""
+	}
+	in, out := run.Usage()
+	state := string(run.Status)
+	icon := statusIcon(run.Status, "●")
+	parts := []string{
+		fmt.Sprintf("%s %s", icon, state),
+		formatRunElapsed(run),
+		fmt.Sprintf("in %s · out %s", formatTokenCount(in), formatTokenCount(out)),
+	}
+	line := strings.Join(parts, "  ·  ")
+	return hintStyle.Render(line)
+}
+
+func formatTokenCount(n int64) string {
+	if n <= 0 {
+		return "0"
+	}
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	if n < 1_000_000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
 }
 
 func (m model) renderAssistantText(text string) string {
@@ -5891,15 +6279,24 @@ func (m model) renderContent() string {
 	}
 	// tabChat falls through to existing rendering below
 
+	title := m.sessionTitle
+	if title == "" {
+		if prompt := m.firstUserPromptText(); prompt != "" {
+			title = truncateTitle(prompt, maxExplicitTitleLen)
+		}
+	}
 	var header string
-	if m.sessionTitle != "" {
-		header = m.styles.Header.Render("\u25c6 ocode "+m.sessionTitle) + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+	if title != "" {
+		header = m.styles.Header.Render("\u25c6 ocode "+title) + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
 	} else {
 		header = m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
 	}
 
 	status := m.renderStatus()
 	panelWidth := m.panelWidth()
+
+	// Truncate header to panel width so it never pushes the sidebar.
+	header = ansi.Truncate(header, panelWidth, "")
 	transcriptSB := renderScrollbar(m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), m.viewport.YOffset())
 	transcriptContent := lipgloss.JoinHorizontal(lipgloss.Top,
 		constrainView(m.viewport.View(), m.viewport.Width(), m.viewport.Height()),
@@ -5925,7 +6322,8 @@ func (m model) renderContent() string {
 		leftParts = append(leftParts, row)
 	}
 	if strip, _ := m.renderAgentStrip(); strip != "" {
-		leftParts = append(leftParts, strip)
+		// Constrain the agent strip so it never pushes the sidebar.
+			leftParts = append(leftParts, constrainToWidth(strip, panelWidth-2))
 	}
 	leftParts = append(leftParts, inputArea)
 	if row := m.renderActivityRow(); row != "" {
@@ -5981,7 +6379,33 @@ func (m *model) renderStatus() string {
 		llmState = dots[m.dotFrame]
 		if !m.streamStartedAt.IsZero() {
 			elapsed := time.Since(m.streamStartedAt).Round(time.Second)
-			llmState = fmt.Sprintf("%s · %s", llmState, formatDuration(elapsed))
+			tokStr := ""
+			if m.streamTokenEstimate > 0 {
+				ratio := modelCharPerToken(m.currentModelName())
+				// Use exact output tokens from the API when available (more accurate
+				// than the character-based heuristic). The usage event carrying these
+				// arrives at different times per provider — Anthropic sends it early
+				// (message_start), OpenAI at the end (final chunk).
+				hasExact := m.streamFinalOutputTokens > 0
+				var totalTok int
+				if hasExact {
+					totalTok = int(m.streamFinalOutputTokens)
+				} else {
+					totalTok = int(float64(m.streamTokenEstimate) / ratio)
+				}
+				prefix := "~"
+				if hasExact {
+					prefix = "" // exact count from API — no tilde
+				}
+				if time.Now().Before(m.tokenBlinkUntil) {
+					colors := []string{"#7dcfff", "#9ece6a"}
+					c := colors[m.dotFrame%len(colors)]
+					tokStr = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Bold(true).Render(fmt.Sprintf(" · %s%s tok", prefix, formatTok(totalTok)))
+				} else {
+					tokStr = fmt.Sprintf(" · %s%s tok", prefix, formatTok(totalTok))
+				}
+			}
+			llmState = fmt.Sprintf("%s · %s%s", llmState, formatDuration(elapsed), tokStr)
 		}
 	}
 	permissionMode := ""
@@ -6248,6 +6672,28 @@ func modelContextWindow(modelName string) (int64, bool) {
 	}
 }
 
+// modelCharPerToken returns estimated characters per token for a given model name.
+// Used in the streaming status bar to give a more accurate live token estimate.
+// Values are heuristics based on typical character-to-token ratios for each family.
+func modelCharPerToken(modelName string) float64 {
+	if strings.Contains(modelName, "deepseek") || strings.Contains(modelName, "deep-seek") {
+		return 3.5
+	}
+	if strings.Contains(modelName, "claude") {
+		return 3.8
+	}
+	if strings.Contains(modelName, "gemini") {
+		return 3.9
+	}
+	if strings.Contains(modelName, "gpt-4") || strings.Contains(modelName, "gpt-3.5") {
+		return 4.1
+	}
+	if strings.Contains(modelName, "o1") || strings.Contains(modelName, "o3") || strings.Contains(modelName, "o4") || strings.Contains(modelName, "o5") {
+		return 3.6
+	}
+	return 4.0 // default fallback
+}
+
 func formatDuration(d time.Duration) string {
 	if d < time.Minute {
 		return fmt.Sprintf("%ds", int(d.Seconds()))
@@ -6382,7 +6828,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 
 	usageLines := sidebarUsageLines(telemetry)
 
-	// ── Compact top: mode + model + token usage on one line ──
+	// ── Line 1: mode + model name ──
 	var statusParts []string
 	if m.agent != nil {
 		modeStr := strings.ToUpper(string(m.agent.Mode()))
@@ -6391,12 +6837,13 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	if modelName != "" {
 		statusParts = append(statusParts, sidebarHeaderStyle.Render(modelName))
 	}
-	if ctxTokens > 0 {
-		statusParts = append(statusParts, dimStyle.Render(contextLine))
-	}
 	if len(statusParts) > 0 {
 		statusLine := strings.Join(statusParts, "  ")
 		data.topLines = append(data.topLines, statusLine)
+	}
+	// ── Line 2: token / context window ──
+	if ctxTokens > 0 {
+		data.topLines = append(data.topLines, dimStyle.Render(contextLine))
 	}
 	cwdLabel := dimStyle.Render("cwd: ")
 	cwdMax := sidebarColumnWidth - 4 - lipgloss.Width(cwdLabel)
@@ -6429,6 +6876,11 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		gitBody = append(gitBody, strings.Join(parts, "  "))
 	}
 	appendScrollSection("Git", gitBody, nil)
+
+	// ── Selection section (scrollable) ──
+	if selectionBody, selectionPaths := m.buildSelectionSidebarData(boxBodyWidth); len(selectionBody) > 0 {
+		appendScrollSection("Selection", selectionBody, selectionPaths)
+	}
 
 	// ── Files section (scrollable) ──
 	changed := snapshot.ChangedFiles()
@@ -6493,9 +6945,15 @@ func gitFileStatus(g gitModel, path string) string {
 func (m model) renderSidebar() string {
 	data := m.buildSidebarRenderData()
 
+	title := m.sessionTitle
+	if title == "" {
+		if prompt := m.firstUserPromptText(); prompt != "" {
+			title = truncateTitle(prompt, maxExplicitTitleLen)
+		}
+	}
 	var header string
-	if m.sessionTitle != "" {
-		header = sidebarHeaderStyle.Render("◆ ") + m.styles.Header.Render(m.sessionTitle)
+	if title != "" {
+		header = sidebarHeaderStyle.Render("◆ ") + m.styles.Header.Render(title)
 	}
 
 	headerHeight := lipgloss.Height(header)
@@ -6570,6 +7028,14 @@ func (m model) renderSidebarWithTabBar() string {
 		exitBtn = hintStyle.Padding(0, 1).Render("✕ exit")
 	}
 	tabBar = sidebarAccentStyle.Render("▌ ") + tabBar
+	// Clamp tab bar to ensure it fits within sidebar column width.
+	maxTabBar := sidebarColumnWidth - lipgloss.Width(exitBtn)
+	if maxTabBar < 10 {
+		maxTabBar = 10
+	}
+	if lipgloss.Width(tabBar) > maxTabBar {
+		tabBar = ansi.Truncate(tabBar, maxTabBar, "…")
+	}
 	pad := sidebarColumnWidth - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if pad < 0 {
 		pad = 0
@@ -6637,7 +7103,13 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 
 	data := m.buildSidebarRenderData()
 	headerHeight := 0
-	if m.sessionTitle != "" {
+	title := m.sessionTitle
+	if title == "" {
+		if prompt := m.firstUserPromptText(); prompt != "" {
+			title = truncateTitle(prompt, maxExplicitTitleLen)
+		}
+	}
+	if title != "" {
 		headerHeight = 1
 	}
 	// User requested: no border/padding on scroll sections (2026-05-25)
@@ -6951,6 +7423,22 @@ func (m model) mainScrollbarX() int {
 
 func (m model) viewportContentTopY() int {
 	return lipgloss.Height(m.styles.Header.Render("◆ ocode")) + 1
+}
+
+// agentStripTopY returns the first row of the agent strip in screen coordinates.
+func (m model) agentStripTopY() int {
+	headerH := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	y := headerH + m.viewport.Height() + 2 // +2 for transcript border
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
+		y += lipgloss.Height(m.renderSlashPopup())
+	}
+	if row := m.renderQueueRow(); row != "" {
+		y += lipgloss.Height(row)
+	}
+	if row := m.renderStoppedIndicator(); row != "" {
+		y += lipgloss.Height(row)
+	}
+	return y
 }
 
 func (m *model) applyOrClearSelectionHighlight() {

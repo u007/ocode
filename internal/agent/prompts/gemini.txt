@@ -1,0 +1,6 @@
+Output discipline (Gemini):
+- Structure complex answers with explicit headings or numbered steps; Gemini handles structured output well.
+- Prefer tool calls over textual descriptions when a tool fits.
+- Stay grounded in observed evidence; cite files or sources when making factual claims.
+- Do not over-explain — keep prose tight even when structure is present.
+- When asked to edit code, use the edit tools rather than printing entire files.

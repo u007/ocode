@@ -533,8 +533,8 @@ func ApplyThemeColors(name string) Styles {
 		Success:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Success)),
 		Error:     lipgloss.NewStyle().Foreground(lipgloss.Color(c.Error)),
 		Text:      lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)),
-		Thinking:       lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
-		ThinkingHeader: lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Bold(true),
+		Thinking:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)),
+		ThinkingHeader: lipgloss.NewStyle().Foreground(lipgloss.Color(c.Accent)).Bold(true),
 		Dim:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim)),
 		ToolBox:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
 		UserMessageBox: lipgloss.NewStyle().
