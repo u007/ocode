@@ -82,7 +82,7 @@ func LoadContext() string {
 		}
 	}
 
-	if pluginInstr := plugins.LoadPluginInstructions(); pluginInstr != "" {
+	if pluginInstr := plugins.LoadPluginInstructions(nil); pluginInstr != "" {
 		context += pluginInstr
 	}
 	if skillCatalog := skill.BuildCatalog(); skillCatalog != "" {

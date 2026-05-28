@@ -4205,7 +4205,7 @@ func (m *model) handleContextCmd(args []string) {
 		b.WriteString("  (no ambient files found)\n")
 	}
 
-	plugs := plugins.LoadPlugins()
+	plugs := plugins.LoadPlugins(nil)
 	for _, p := range plugs {
 		if p.Instructions == "" {
 			continue

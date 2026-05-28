@@ -73,7 +73,7 @@ func commandSearchPaths() []string {
 		paths = append(paths, filepath.Join(cwd, "commands"))
 	}
 
-	paths = append(paths, plugins.LoadPluginCommandDirPaths()...)
+	paths = append(paths, plugins.LoadPluginCommandDirPaths(nil)...)
 
 	return paths
 }
