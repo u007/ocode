@@ -252,6 +252,27 @@ type pickerFilterApplyMsg struct {
 	filter string
 }
 type fileListCacheMsg struct{ items []slashSuggestion }
+type pluginInstallMsg struct {
+	source string
+	ref    string
+}
+type pluginRemoveMsg struct{ name string }
+type pluginInstalledMsg struct {
+	name   string
+	source string
+	dir    string
+	err    error
+}
+type pluginRemovedMsg struct {
+	name string
+	err  error
+}
+type pluginInstallPendingMsg struct {
+	p           plugins.Plugin
+	source      string
+	dirName     string
+	installRoot string
+}
 type streamStartedMsg struct{ cancel chan struct{} }
 
 type streamDoneMsg struct {
@@ -483,6 +504,7 @@ type model struct {
 	detail                   detailStack
 	agentStripBlocks         []agentStripBlock
 	agentStripRow0           int
+	pendingPluginInstall     *pluginInstallPendingMsg
 	streamStartedAt          time.Time
 	streamEndedAt            time.Time
 	streamTokenEstimate      int       // live character count during streaming for token estimation
@@ -1483,6 +1505,106 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rebuildSessionPickerItems()
 			}
 		}
+	case pluginInstallMsg:
+		source := msg.source
+		ref := msg.ref
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Fetching plugin from %s…", source)})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, func() tea.Msg {
+			installRoot, err := plugins.PluginInstallDir()
+			if err != nil {
+				return pluginInstalledMsg{source: source, err: err}
+			}
+			var p plugins.Plugin
+			var dirName string
+			if info, statErr := os.Stat(source); statErr == nil && info.IsDir() {
+				name := filepath.Base(source)
+				destDir := filepath.Join(installRoot, name)
+				p, err = plugins.InstallLocal(source, destDir)
+				dirName = destDir
+			} else {
+				var absDir string
+				p, absDir, err = plugins.InstallGit(source, installRoot, ref)
+				dirName = absDir
+			}
+			if err != nil {
+				return pluginInstalledMsg{source: source, err: err}
+			}
+			if p.Name == "" {
+				p.Name = filepath.Base(dirName)
+			}
+			if len(p.OnInstall) > 0 {
+				return pluginInstallPendingMsg{p: p, source: source, dirName: dirName, installRoot: installRoot}
+			}
+			cfg := config.PluginConfig{Source: source, Dir: dirName, Enabled: true}
+			if saveErr := config.SavePlugin(p.Name, cfg); saveErr != nil {
+				return pluginInstalledMsg{source: source, err: saveErr}
+			}
+			return pluginInstalledMsg{name: p.Name, source: source, dir: dirName}
+		}
+	case pluginInstallPendingMsg:
+		m.pendingPluginInstall = &msg
+		var text strings.Builder
+		text.WriteString(fmt.Sprintf("Plugin %q cloned to %s.\n", msg.p.Name, msg.dirName))
+		text.WriteString(fmt.Sprintf("\nWill run: %s\n", strings.Join(msg.p.OnInstall, " ")))
+		if msg.p.MCP != nil && len(msg.p.MCP.Command) > 0 {
+			text.WriteString(fmt.Sprintf("Will register MCP server %q: %s\n", msg.p.MCP.Server, strings.Join(msg.p.MCP.Command, " ")))
+		}
+		text.WriteString("\nType /plugin confirm to proceed, or /plugin cancel to abort.")
+		m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case pluginInstalledMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin install failed: %v", msg.err)})
+		} else {
+			if m.config.Plugins == nil {
+				m.config.Plugins = map[string]config.PluginConfig{}
+			}
+			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Dir: msg.dir, Enabled: true}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q installed.", msg.name)})
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case pluginRemoveMsg:
+		name := msg.name
+		cfg, ok := m.config.Plugins[name]
+		if !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
+			return m, nil
+		}
+		pluginDir := cfg.Dir
+		var pluginForMCP *plugins.Plugin
+		for _, pl := range plugins.LoadPlugins(nil) {
+			if pl.Name == name {
+				p := pl
+				pluginForMCP = &p
+				break
+			}
+		}
+		return m, func() tea.Msg {
+			if err := plugins.Remove(pluginDir); err != nil {
+				return pluginRemovedMsg{name: name, err: err}
+			}
+			if err := config.RemovePlugin(name); err != nil {
+				return pluginRemovedMsg{name: name, err: err}
+			}
+			if pluginForMCP != nil {
+				if err := plugins.UnregisterMCP(*pluginForMCP); err != nil {
+					return pluginRemovedMsg{name: name, err: fmt.Errorf("unregister MCP: %w", err)}
+				}
+			}
+			return pluginRemovedMsg{name: name}
+		}
+	case pluginRemovedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin remove failed: %v", msg.err)})
+		} else {
+			delete(m.config.Plugins, msg.name)
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q removed.", msg.name)})
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
 	case cleanupRequestMsg:
@@ -3373,6 +3495,51 @@ func (m model) renderMCPList() string {
 		}
 	}
 	b.WriteString("\nUsage: /mcp enable <server>, /mcp disable <server>, /mcp-auth <server>")
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m model) renderPluginList() string {
+	if m.config == nil || len(m.config.Plugins) == 0 {
+		return "No plugins installed. Use /plugin install <github.com/user/repo> to add one."
+	}
+	names := make([]string, 0, len(m.config.Plugins))
+	for name := range m.config.Plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	enabled := make(map[string]bool, len(m.config.Plugins))
+	for name, p := range m.config.Plugins {
+		enabled[name] = p.Enabled
+	}
+	loaded := map[string]struct {
+		tools int
+		cmds  int
+	}{}
+	for _, p := range plugins.LoadPlugins(enabled) {
+		loaded[p.Name] = struct {
+			tools int
+			cmds  int
+		}{len(p.Tools), len(p.Commands)}
+	}
+
+	var b strings.Builder
+	b.WriteString("Plugins:\n")
+	for _, name := range names {
+		cfg := m.config.Plugins[name]
+		state := "disabled"
+		if cfg.Enabled {
+			state = "enabled"
+		}
+		info := loaded[name]
+		src := cfg.Source
+		if len(src) > 38 {
+			src = "..." + src[len(src)-35:]
+		}
+		b.WriteString(fmt.Sprintf("  %-18s %-8s %-38s %dt %dc\n",
+			name, state, src, info.tools, info.cmds))
+	}
+	b.WriteString("\nUsage: /plugin enable <name>, /plugin disable <name>, /plugin install <url>, /plugin remove <name>")
 	return strings.TrimRight(b.String(), "\n")
 }
 
