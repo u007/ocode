@@ -274,10 +274,19 @@ func finalizeManagedProcess(proc *Process, sup *ProcessSupervisor, onDone func(*
 	}
 	proc.mu.Unlock()
 	if sup != nil {
+		// Use the supervisor-scoped key captured at registration. When a
+		// subagent's ProcessRegistry has SupervisorIDPrefix set, proc.ID is
+		// the bare counter ("proc-N") while the supervisor record is keyed
+		// "<prefix>proc-N"; calling MarkExited/MarkKilled with proc.ID would
+		// silently miss the record and leave the process stuck in Running.
+		key := proc.SupKey()
+		if key == "" {
+			key = proc.ID
+		}
 		if status == ProcKilled {
-			sup.MarkKilled(proc.ID, commandExitCode(err))
+			sup.MarkKilled(key, commandExitCode(err))
 		} else {
-			sup.MarkExited(proc.ID, commandExitCode(err))
+			sup.MarkExited(key, commandExitCode(err))
 		}
 	}
 	finishProcess(proc, commandExitCode(err), status, onDone)

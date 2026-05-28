@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"encoding/json"
+	"os/exec"
 	"runtime"
 	"strings"
 	"testing"
@@ -625,5 +626,49 @@ func TestKillShellTool(t *testing.T) {
 	}
 	if !strings.Contains(out, "killed") {
 		t.Fatalf("expected kill confirmation, got %q", out)
+	}
+}
+
+func TestProcessRegistry_ForegroundWithPrefix_FinalizeMarksSupervisorRecord(t *testing.T) {
+	// Reproduces the foreground-bash + SupervisorIDPrefix bug: registering
+	// under "<prefix>proc-N" but calling MarkExited(proc.ID) would leave the
+	// supervisor record stuck in Running. The fix caches proc.SupKey at
+	// registration so finalizeManagedProcess can address the correct record.
+	sup := NewProcessSupervisor(ProcessSupervisorOptions{})
+	reg := NewProcessRegistry()
+	reg.SetSupervisor(sup)
+	reg.SetSupervisorIDPrefix("sub-7-")
+
+	cmd := exec.Command("true")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("cmd start: %v", err)
+	}
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- cmd.Wait() }()
+
+	proc, err := reg.RegisterForeground("true", cmd, time.Now(), func() error { return <-waitDone })
+	if err != nil {
+		t.Fatalf("RegisterForeground: %v", err)
+	}
+
+	wantKey := "sub-7-" + proc.ID
+	if proc.SupKey() != wantKey {
+		t.Fatalf("proc.SupKey() = %q, want %q", proc.SupKey(), wantKey)
+	}
+
+	if _, ok := sup.Lookup(wantKey); !ok {
+		t.Fatalf("supervisor record %q not found after registration", wantKey)
+	}
+
+	// Drive the command to completion (matches the exec.go path that calls
+	// finalizeManagedProcess after the wait returns).
+	finalizeManagedProcess(proc, sup, nil, <-waitDone)
+
+	rec, ok := sup.Lookup(wantKey)
+	if !ok {
+		t.Fatalf("supervisor record %q vanished after finalize", wantKey)
+	}
+	if rec.Status == ProcRunning {
+		t.Fatalf("supervisor record stuck in Running after finalize (status=%s) — supKey mismatch?", rec.Status)
 	}
 }

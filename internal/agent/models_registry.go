@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 )
@@ -269,12 +268,12 @@ func providerModelsFromRegistry(provider string) []string {
 func fetchLMStudioModels() []string {
 	base := os.Getenv("LMSTUDIO_BASE_URL")
 	if base == "" {
-		base = "http://localhost:1234"
+		base = "http://localhost:1234/v1"
 	}
-	base = strings.TrimRight(base, "/")
+	base = normalizeLMStudioBaseURL(base)
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(base + "/v1/models")
+	resp, err := client.Get(base + "/models")
 	if err != nil {
 		return nil
 	}
