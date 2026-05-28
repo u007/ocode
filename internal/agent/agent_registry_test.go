@@ -419,14 +419,20 @@ func TestTaskToolSchemaExcludesPrimaryAgents(t *testing.T) {
 	}
 }
 
-func TestTaskToolExplicitUnknownAgentErrors(t *testing.T) {
+func TestTaskToolExplicitUnknownAgentFallsBackToGeneral(t *testing.T) {
+	// When an explicitly-named agent is not found, the task tool now silently
+	// falls back to the built-in "general" sub-agent instead of erroring.
 	reg := NewAgentRegistry()
 	a := &Agent{tools: make(map[string]tool.Tool)}
 	taskTool := TaskTool{mainAgent: a, registry: reg}
 
-	_, err := taskTool.Execute(json.RawMessage(`{"prompt": "test", "agent": "nonexistent"}`))
-	if err == nil {
-		t.Fatal("expected error for unknown explicit agent")
+	// No client configured — Step returns the "no llm client" message, not an error.
+	result, err := taskTool.Execute(json.RawMessage(`{"prompt": "test", "agent": "nonexistent"}`))
+	if err != nil {
+		t.Fatalf("unexpected error after fallback to general: %v", err)
+	}
+	if result == "" {
+		t.Fatal("expected non-empty result from general fallback")
 	}
 }
 

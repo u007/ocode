@@ -17,9 +17,9 @@ const waitPollInterval = 250 * time.Millisecond
 
 // WaitTool sleeps for a duration, or blocks until a named job completes.
 type WaitTool struct {
-	procs  *tool.ProcessRegistry
-	runs   *AgentRunRegistry
-	stopCh <-chan struct{} // closed when the agent is cancelled
+	procs *tool.ProcessRegistry
+	runs  *AgentRunRegistry
+	agent *Agent // used to get the current stop channel
 }
 
 func (t WaitTool) Name() string { return "wait" }
@@ -83,12 +83,16 @@ func (t WaitTool) Execute(args json.RawMessage) (string, error) {
 		return t.waitForJob(params.For, d, clamped), nil
 	}
 
-	// Plain duration sleep — interruptible via stopCh.
+	// Plain duration sleep — interruptible via the agent's current stop channel.
+	var stopCh <-chan struct{}
+	if t.agent != nil {
+		stopCh = t.agent.StopCh()
+	}
 	ticker := time.NewTicker(d)
 	defer ticker.Stop()
 	select {
 	case <-ticker.C:
-	case <-t.stopCh:
+	case <-stopCh:
 		return "wait cancelled", nil
 	}
 	msg := fmt.Sprintf("Waited %s.", d)
@@ -99,8 +103,12 @@ func (t WaitTool) Execute(args json.RawMessage) (string, error) {
 }
 
 // waitForJob blocks until the named job completes or the deadline passes,
-// returning immediately if the agent is cancelled via stopCh.
+// returning immediately if the agent is cancelled.
 func (t WaitTool) waitForJob(id string, deadline time.Duration, clamped bool) string {
+	var stopCh <-chan struct{}
+	if t.agent != nil {
+		stopCh = t.agent.StopCh()
+	}
 	end := time.Now().Add(deadline)
 	ticker := time.NewTicker(waitPollInterval)
 	defer ticker.Stop()
@@ -117,7 +125,7 @@ func (t WaitTool) waitForJob(id string, deadline time.Duration, clamped bool) st
 		}
 		select {
 		case <-ticker.C:
-		case <-t.stopCh:
+		case <-stopCh:
 			return fmt.Sprintf("wait for %s cancelled", id)
 		}
 	}

@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,6 +43,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
+
+//go:embed initialize_prompt.txt
+var initializePromptTemplate string
 
 type scrollbarDragTarget int
 
@@ -4060,19 +4064,14 @@ func (m *model) handleDetailsCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tool execution details are now %s.", status)})
 }
 
-func (m *model) handleInitCmd(args []string) {
-	if _, err := os.Stat("AGENTS.md"); err == nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "AGENTS.md already exists."})
-		return
+func (m *model) handleInitCmd(args []string) tea.Cmd {
+	prompt := strings.ReplaceAll(initializePromptTemplate, "$ARGUMENTS", strings.Join(args, " "))
+	m.messages = append(m.messages, message{role: roleUser, text: "/init " + strings.Join(args, " ")})
+	if m.agent != nil {
+		m.agent.ResetSubagentDispatch()
 	}
-
-	content := "# Project Rules\n\n- Follow Go best practices.\n- Keep functions small and modular.\n"
-	err := os.WriteFile("AGENTS.md", []byte(content), 0644)
-	if err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error creating AGENTS.md: %v", err)})
-	} else {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Created AGENTS.md with default rules."})
-	}
+	m.rerenderTranscriptAndMaybeScroll()
+	return m.sendCustomCommandPrompt(prompt)
 }
 
 func (m *model) handleHelpCmd(args []string) {
@@ -4999,6 +4998,11 @@ func (m *model) lookupToolName(toolID string) string {
 }
 
 func (m *model) askAgent() tea.Cmd {
+	// Reset any prior cancellation so a new request isn't immediately
+	// short-circuited by a stopCh that was closed by a previous Escape/Cancel.
+	if m.agent != nil {
+		m.agent.ResetCancellation()
+	}
 	// Load context once — both buildAgentMessagesSnapshot and Step call
 	// BasePromptMessages, which would otherwise re-read context files twice.
 	if m.agent != nil {
@@ -5597,7 +5601,10 @@ func constrainViewPreservingBottom(view string, width int, height int, bottomLin
 		if len(lines) > height {
 			// Preserve the last bottomLinesCount lines, truncate from the middle
 			if bottomLinesCount >= len(lines) {
-				// Not enough lines, keep as-is.
+				// All lines are bottom lines — keep the last `height` lines
+				if len(lines) > height {
+					lines = lines[len(lines)-height:]
+				}
 			} else if bottomLinesCount > 0 {
 				// Keep top part and bottom part
 				keepTop := height - bottomLinesCount
@@ -6249,6 +6256,7 @@ func (m *model) openAgentDetail(runID string) {
 	expanded := map[string]bool{}
 	content, runs, procs, regions := renderRunTranscriptDetail(run, runID, vp.Width(), expanded)
 	vp.SetContent(content)
+	vp.GotoBottom()
 	m.detail.push(detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, procs: procs, expanded: expanded, regions: regions})
 }
 
@@ -6264,6 +6272,7 @@ func (m *model) openProcessListForRun(runID string) {
 	}
 	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
 	vp.SetContent(renderProcessList(reg))
+	vp.GotoBottom()
 	dv := detailView{kind: detailProcessList, runPath: runID, vp: vp}
 	if run, ok := m.findAgentRun(runID); ok {
 		dv.runID = run.ID
@@ -6283,6 +6292,7 @@ func (m *model) openProcessLogForRun(runID, procID string) {
 	}
 	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
 	vp.SetContent(renderProcessLog(reg, procID))
+	vp.GotoBottom()
 	dv := detailView{kind: detailProcessLog, runPath: runID, procID: procID, vp: vp}
 	if run, ok := m.findAgentRun(runID); ok {
 		dv.runID = run.ID
@@ -6600,18 +6610,30 @@ func (m model) renderContent() string {
 			title = truncateTitle(prompt, maxExplicitTitleLen)
 		}
 	}
-	var header string
+	var headerLeft string
 	if title != "" {
-		header = m.styles.Header.Render("\u25c6 ocode "+title) + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+		headerLeft = m.styles.Header.Render("\u25c6 ocode "+title) + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
 	} else {
-		header = m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
+		headerLeft = m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
 	}
+
+	// Build tab bar + exit button for the header (full width, like other tabs).
+	tabBar := renderTabBar(m.activeTab, m.chatUnread)
+	var exitBtn string
+	if m.exitPending {
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
+	} else {
+		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
+	}
+	headerPad := m.width - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
+	if headerPad < 0 {
+		headerPad = 0
+	}
+	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
 
 	status := m.renderStatus()
 	panelWidth := m.panelWidth()
 
-	// Truncate header to panel width so it never pushes the sidebar.
-	header = ansi.Truncate(header, panelWidth, "")
 	transcriptSB := renderScrollbar(m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), m.viewport.YOffset())
 	transcriptContent := lipgloss.JoinHorizontal(lipgloss.Top,
 		constrainView(m.viewport.View(), m.viewport.Width(), m.viewport.Height()),
@@ -6626,7 +6648,7 @@ func (m model) renderContent() string {
 	} else {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
-	leftParts := []string{header, transcript}
+	leftParts := []string{transcript}
 	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
 		leftParts = append(leftParts, m.renderSlashPopup())
 	}
@@ -6648,10 +6670,13 @@ func (m model) renderContent() string {
 	left := lipgloss.JoinVertical(lipgloss.Left, leftParts...)
 
 	if m.sidebarEnabled() {
-		return lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebarWithTabBar())
+		return lipgloss.JoinVertical(lipgloss.Left,
+			header,
+			lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebar()),
+		)
 	}
 
-	return left
+	return lipgloss.JoinVertical(lipgloss.Left, header, left)
 }
 
 func (m *model) renderStatus() string {
@@ -7281,7 +7306,7 @@ func (m model) renderSidebar() string {
 
 	// Reserve space for topLines and bottomLines, rest goes to scrollBox
 	minScrollHeight := 3
-	spaceForScroll := maxInt(minScrollHeight, contentHeight-len(data.topLines)-len(data.bottomLines)-2)
+	spaceForScroll := maxInt(minScrollHeight, contentHeight-len(data.topLines)-len(data.bottomLines))
 
 	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
 	// User requested: no border — scrollBoxHeight IS the visible height
@@ -7519,25 +7544,30 @@ func (m model) tabBarStartX() int {
 }
 
 func (m model) tabBarStartXs(tabBarWidth int) []int {
-	if m.sidebarEnabled() {
-		return []int{m.panelWidth()}
+	var exitBtnWidth int
+	if m.exitPending {
+		exitBtnWidth = lipgloss.Width(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?"))
+	} else {
+		exitBtnWidth = lipgloss.Width(hintStyle.Padding(0, 1).Render("\u2715 exit"))
 	}
-	rightAligned := m.panelWidth() - tabBarWidth
-	if rightAligned < 0 {
-		rightAligned = 0
+	startX := m.width - tabBarWidth - exitBtnWidth
+	if startX < 0 {
+		startX = 0
 	}
-	return []int{rightAligned}
+	return []int{startX}
 }
 
 func (m model) exitButtonForClick(mouse tea.Mouse) bool {
 	if mouse.Y != 0 {
 		return false
 	}
-	if !m.sidebarEnabled() {
-		return false
+	var exitBtn string
+	if m.exitPending {
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
+	} else {
+		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
 	}
-	tabBar := renderTabBar(m.activeTab, m.chatUnread)
-	exitStartX := m.panelWidth() + lipgloss.Width(tabBar)
+	exitStartX := m.width - lipgloss.Width(exitBtn)
 	return mouse.X >= exitStartX
 }
 

@@ -43,7 +43,7 @@ func init() {
 		{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
-		{name: "/init", help: "Create default AGENTS.md", handler: runInitCmd},
+		{name: "/init", usage: "/init [focus]", help: "Analyze project and generate AGENTS.md", handler: runInitCmd},
 		{name: "/help", help: "Show this help", handler: runHelpCmd},
 		{name: "/themes", aliases: []string{"/theme"}, usage: "/themes [name]", help: "Choose or switch themes", handler: runThemesCmd},
 		{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
@@ -235,8 +235,7 @@ func runDetailsCmd(m *model, args []string) tea.Cmd {
 }
 
 func runInitCmd(m *model, args []string) tea.Cmd {
-	m.handleInitCmd(args)
-	return nil
+	return m.handleInitCmd(args)
 }
 
 func runHelpCmd(m *model, args []string) tea.Cmd {

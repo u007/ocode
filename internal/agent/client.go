@@ -200,26 +200,36 @@ func (c *GenericClient) usesAnthropicMessagesAPI() bool {
 }
 
 func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	return c.ChatWithContext(context.Background(), messages, tools)
+}
+
+// ChatWithContext is like Chat but honours ctx cancellation so that in-flight
+// HTTP requests are interrupted when the caller's context is cancelled (e.g.
+// when the user presses Escape).
+func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	var lastErr error
 	attempts := 0
 	for attempt := 0; attempt <= llmMaxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		attempts = attempt + 1
 		var (
 			msg *Message
 			err error
 		)
-			if c.usesAnthropicMessagesAPI() {
-				msg, err = c.chatAnthropic(messages, tools)
-			} else if c.Provider == "copilot" {
-			msg, err = c.chatCopilot(messages, tools)
+		if c.usesAnthropicMessagesAPI() {
+			msg, err = c.chatAnthropic(ctx, messages, tools)
+		} else if c.Provider == "copilot" {
+			msg, err = c.chatCopilot(ctx, messages, tools)
 		} else {
-			msg, err = c.chatOpenAI(messages, tools)
+			msg, err = c.chatOpenAI(ctx, messages, tools)
 		}
 		if err == nil {
 			return msg, nil
 		}
 		lastErr = err
-		if !isRetryableLLMClientError(err) || attempt == llmMaxRetries {
+		if ctx.Err() != nil || !isRetryableLLMClientError(err) || attempt == llmMaxRetries {
 			break
 		}
 		time.Sleep(time.Duration(attempt+1) * llmRetryBaseDelay)
@@ -245,13 +255,13 @@ func isRetryableLLMClientError(err error) bool {
 // chatCopilot exchanges the stored GitHub OAuth token (held in APIKey) for a short-lived
 // Copilot API token, then calls the Copilot chat completions endpoint with the headers
 // the service requires.
-func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]interface{}) (*Message, error) {
+func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	if c.APIKey == "" {
 		return nil, fmt.Errorf("copilot: no github token configured (run /connect → GitHub Copilot)")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	tokenCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	apiToken, err := auth.CopilotExchangeAPIToken(ctx, c.APIKey)
+	apiToken, err := auth.CopilotExchangeAPIToken(tokenCtx, c.APIKey)
 	if err != nil {
 		return nil, fmt.Errorf("copilot token exchange: %w", err)
 	}
@@ -274,7 +284,7 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, err
 	}
@@ -318,9 +328,9 @@ func (c *GenericClient) chatCopilot(messages []Message, tools []map[string]inter
 	return msg, nil
 }
 
-func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interface{}) (*Message, error) {
+func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	if c.UseOAuth && c.Provider == "openai" {
-		return c.chatOpenAIResponses(messages, tools)
+		return c.chatOpenAIResponses(ctx, messages, tools)
 	}
 	url := c.BaseURL + "/chat/completions"
 
@@ -347,7 +357,7 @@ func (c *GenericClient) chatOpenAI(messages []Message, tools []map[string]interf
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, err
 	}
@@ -872,7 +882,7 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 // chatOpenAIResponses calls the OpenAI Responses API using a ChatGPT OAuth token.
 // ChatGPT OAuth tokens use the Codex backend; API keys use api.openai.com.
 // The chatgpt_account_id claim is extracted from the JWT and sent as ChatGPT-Account-ID.
-func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[string]interface{}) (*Message, error) {
+func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	accountID := jwtClaim(c.APIKey, "https://api.openai.com/auth", "chatgpt_account_id")
 
 	// Map messages → Responses API input items.
@@ -1003,7 +1013,7 @@ func (c *GenericClient) chatOpenAIResponses(messages []Message, tools []map[stri
 	}
 
 	url := c.openAIResponsesURL()
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, err
 	}
@@ -1325,7 +1335,7 @@ func jwtClaim(token string, keys ...string) string {
 	return s
 }
 
-func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]interface{}) (*Message, error) {
+func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	url := c.BaseURL + "/messages"
 
 	messages = repairToolCallSequence(messages)
@@ -1463,7 +1473,7 @@ func (c *GenericClient) chatAnthropic(messages []Message, tools []map[string]int
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, err
 	}

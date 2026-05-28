@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -320,7 +321,7 @@ func TestChatAnthropic_TruncatedToolJSONFallsBackToEmptyObject(t *testing.T) {
 		BaseURL:  srv.URL,
 		Provider: "anthropic",
 	}
-	msg, err := c.chatAnthropic([]Message{{Role: "user", Content: "hi"}}, nil)
+	msg, err := c.chatAnthropic(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
 	if err != nil {
 		t.Fatalf("chatAnthropic error: %v", err)
 	}

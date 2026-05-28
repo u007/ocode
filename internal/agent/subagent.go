@@ -197,9 +197,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	spec := t.findAgent(params.Agent)
+	var fallbackWarning string
 	if spec == nil {
-		if params.Agent != "" && t.registry != nil {
-			return "", fmt.Errorf("unknown agent: %s", params.Agent)
+		if params.Agent != "" {
+			fallbackWarning = fmt.Sprintf("⚠ Agent %q not found; fell back to built-in general agent.\n\n", params.Agent)
+			emitDebug("TASK", fmt.Sprintf("agent %q not found, falling back to general", params.Agent))
 		}
 		defaultSpec := t.findAgent("general")
 		if defaultSpec == nil {
@@ -347,7 +349,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	if sessionID != "" {
 		result += fmt.Sprintf("\n\n(Child session: %s)", sessionID)
 	}
-	return result, nil
+	return fallbackWarning + result, nil
 }
 
 func (t TaskTool) executeSubAgent(name string, subAgent *Agent, messages []Message) (string, error) {
