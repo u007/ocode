@@ -26,6 +26,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/hooks"
 	"github.com/jamesmercstudio/ocode/internal/plugins"
 	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/skill"
@@ -556,6 +557,7 @@ type model struct {
 	permButtonRegions        []permButtonRegion
 	cleanupState             *modelCleanupState
 	supervisor               *tool.ProcessSupervisor
+	hookPipeline             *hooks.Pipeline
 }
 
 type modelCleanupState struct {
@@ -948,6 +950,12 @@ func newModel(sid string, cont bool, yolo bool) model {
 		a.SetSupervisor(sup)
 	}
 
+	hp := hooks.New()
+	if a != nil {
+		a.SetHooks(hp)
+		tool.SetHookPipeline(hp)
+	}
+
 	ta := textarea.New()
 	ta.Placeholder = "Ask anything…  (prefix with ! to run a shell command, enter to send, shift+enter for newline, tab autocomplete, ctrl+c clears input, double-esc opens picker / exits shell mode)"
 	ta.Focus()
@@ -1016,6 +1024,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 		subAgentPermMu:       &sync.Mutex{},
 		cleanupState:         newModelCleanupState(),
 		supervisor:           sup,
+		hookPipeline:         hp,
 	}
 
 	// Set workDir for path-scoped permission checks
@@ -3449,6 +3458,10 @@ func (m *model) rebuildAgentWithExternalTools() tea.Cmd {
 		}
 	}
 	next.LoadExternalTools(m.config)
+	if m.hookPipeline != nil {
+		next.SetHooks(m.hookPipeline)
+		tool.SetHookPipeline(m.hookPipeline)
+	}
 	return m.replaceAgent(next)
 }
 
