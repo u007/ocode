@@ -1862,6 +1862,7 @@ var providers = map[string]providerInfo{
 	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
 	"copilot":                  {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
 	"lmstudio":                 {"", "http://localhost:1234/v1"},
+	"cloudflare-workers":       {"CLOUDFLARE_API_KEY", ""},
 	"cloudflare-gateway":       {"CLOUDFLARE_GATEWAY_KEY", ""},
 	"codex":                    {"OPENAI_API_KEY", "https://api.openai.com/v1"},
 	"xiaomi":                   {"XIAOMI_API_KEY", "https://xiaomimimo.com/v1"},
