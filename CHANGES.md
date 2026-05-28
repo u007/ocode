@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased] — 2026-05-28
+
+### Added
+- **Context-Aware Cancellation** — `chatWithDelta` now derives a `context.Context` from the agent's stop channel, interrupting in-flight HTTP requests when the user presses Escape. New `ChatWithContext()` on `GenericClient` threads context through all provider chat methods (`chatAnthropic`, `chatOpenAI`, `chatCopilot`, `chatOpenAIResponses`). New `ResetCancellation()` and `StopCh()` methods on Agent.
+- **Agent Fallback for Unknown Sub-Agents** — `TaskTool` now silently falls back to the built-in `general` agent when an explicitly-named agent is not found, instead of returning an error. A warning is prepended to the result.
+- **`/init` Prompt Template** — `/init` now sends a project-analysis prompt to the LLM instead of writing a stub AGENTS.md. Supports an optional focus argument (`/init <topic>`).
+
+### Changed
+- **WaitTool Uses Live Stop Channel** — `WaitTool` now holds a reference to the parent `Agent` and reads `StopCh()` at call time, eliminating stale stop-channel references.
+- **TUI Header Layout** — Tab bar and exit button moved into the header row (top of screen) alongside the session title, freeing vertical space. Header width adapts to sidebar state.
+- **Agent Step Loop Cancellation Snapshot** — `Step()` captures the stop channel once at invocation so concurrent `ResetCancellation()` calls don't affect in-flight loops.
+
+### Fixed
+- **Detail Viewport Scroll Position** — Agent run, process list, and process log detail views now open scrolled to the bottom (`GotoBottom()`), showing the latest output.
+- **Constrain View Bottom Preservation** — Fixed `constrainViewPreservingBottom` to correctly truncate when all lines exceed height with bottom-line preservation.
+
 ## [Unreleased] — 2026-05-24
 
 ### Added

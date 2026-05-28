@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -140,7 +141,9 @@ func (a *Agent) ResetSubagentDispatch() {
 // to the underlying *GenericClient for the duration of the call. The field is
 // always cleared on return so subagents that share the same client (see
 // subagent.go) never inherit a stale callback.
-func (a *Agent) chatWithDelta(messages []Message, toolDefs []map[string]interface{}) (*Message, error) {
+// stopCh, when provided, is used to derive a cancellable context so that
+// Escape / Cancel interrupts in-flight HTTP requests immediately.
+func (a *Agent) chatWithDelta(stopCh <-chan struct{}, messages []Message, toolDefs []map[string]interface{}) (*Message, error) {
 	gc, ok := a.client.(*GenericClient)
 	if ok {
 		if a.OnDelta != nil {
@@ -151,6 +154,9 @@ func (a *Agent) chatWithDelta(messages []Message, toolDefs []map[string]interfac
 			gc.SetOnUsage(a.OnUsage)
 			defer gc.SetOnUsage(nil)
 		}
+		ctx, ctxCancel := stopChContext(stopCh)
+		defer ctxCancel()
+		return gc.ChatWithContext(ctx, messages, toolDefs)
 	}
 	return a.client.Chat(messages, toolDefs)
 }
@@ -219,13 +225,13 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	a.tools["bash"] = &tool.BashTool{Procs: a.procs}
 	a.tools["bash_output"] = tool.BashOutputTool{Procs: a.procs}
 	a.tools["kill_shell"] = tool.KillShellTool{Procs: a.procs}
+	a.tools["wait"] = WaitTool{procs: a.procs, runs: a.runs, agent: a}
 	// "agent" tool retired in favor of "task". AgentTool the type is kept
 	// only so existing transcripts/back-compat permission entries still
 	// resolve. It is no longer registered on new agents.
 	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
-	a.tools["wait"] = WaitTool{procs: a.procs, runs: a.runs, stopCh: a.stopCh}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)
 		a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
@@ -314,6 +320,20 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		return []Message{{Role: "assistant", Content: "(no llm client configured)"}}, nil
 	}
 
+	// Capture the stop channel once at the start of this invocation.
+	// Using a local snapshot means a caller can call ResetCancellation() to
+	// unblock the next Step() without affecting this one — old goroutines still
+	// check the channel that was live when they started.
+	stopCh := a.StopCh()
+	isCancelled := func() bool {
+		select {
+		case <-stopCh:
+			return true
+		default:
+			return false
+		}
+	}
+
 	preLen := len(messages)
 	messages = a.PrepareMessages(messages, "")
 	toolDefs := a.GetToolDefinitions()
@@ -327,7 +347,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	messages = a.recoverOrphanedToolCalls(messages)
 
 	for i := 0; ; i++ {
-		if a.cancelled() {
+		if isCancelled() {
 			return newMsgs, nil
 		}
 		limit := a.maxSteps
@@ -341,11 +361,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			newMsgs = append(newMsgs, summarizeMsg)
 			messages = append(messages, summarizeMsg)
-			resp, err := a.chatWithDelta(messages, toolDefs)
+			resp, err := a.chatWithDelta(stopCh, messages, toolDefs)
 			if err != nil {
 				return nil, err
 			}
-			if a.cancelled() {
+			if isCancelled() {
 				return newMsgs, nil
 			}
 			newMsgs = append(newMsgs, *resp)
@@ -356,13 +376,13 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 		emitDebug("LLM", fmt.Sprintf("→ %s/%s [%d msgs]", a.client.GetProvider(), a.client.GetModel(), len(messages)))
 		a.activity.setLLMRunning(true)
-		resp, err := a.chatWithDelta(messages, toolDefs)
+		resp, err := a.chatWithDelta(stopCh, messages, toolDefs)
 		a.activity.setLLMRunning(false)
 		if err != nil {
 			emitDebug("ERROR", fmt.Sprintf("LLM error: %v", err))
 			return nil, err
 		}
-		if a.cancelled() {
+		if isCancelled() {
 			return newMsgs, nil
 		}
 		if resp.Usage != nil {
@@ -384,7 +404,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			// response. Cancel() can still race in after this check and
 			// before OnMessage returns; OnMessage must not block on a
 			// receiver that goes away on cancel.
-			if a.cancelled() {
+			if isCancelled() {
 				return newMsgs, nil
 			}
 			a.OnMessage(*resp)
@@ -415,9 +435,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			var wg sync.WaitGroup
 			for _, i := range parallelTCs {
 				wg.Add(1)
-				go func(idx int, tc ToolCall) {
+				go func(idx int, tc ToolCall, cancelled func() bool) {
 					defer wg.Done()
-					if a.cancelled() {
+					if cancelled() {
 						return
 					}
 					a.activity.toolStarted(tc.Function.Name)
@@ -428,13 +448,13 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					}
 					result = TruncateToolResult(tc.ID, result)
 					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result}
-				}(i, resp.ToolCalls[i])
+				}(i, resp.ToolCalls[i], isCancelled)
 			}
 			wg.Wait()
 		}
 
 		for _, i := range sequentialTCs {
-			if a.cancelled() {
+			if isCancelled() {
 				return newMsgs, nil
 			}
 			tc := resp.ToolCalls[i]
@@ -447,7 +467,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			result = TruncateToolResult(tc.ID, result)
 			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result}
 		}
-		if a.cancelled() {
+		if isCancelled() {
 			return newMsgs, nil
 		}
 
@@ -459,7 +479,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				// Best-effort cancellation check; see note above OnMessage
 				// call for the assistant response. Residual race window
 				// is accepted — OnMessage must tolerate post-cancel sends.
-				if a.cancelled() {
+				if isCancelled() {
 					return newMsgs, nil
 				}
 				a.OnMessage(toolMsg)
@@ -951,7 +971,7 @@ func (a *Agent) Shutdown() {
 }
 
 // Cancel signals the agent's Step loop to stop before the next LLM call.
-// Best-effort: an in-flight HTTP call is not interrupted.
+// In-flight HTTP calls are interrupted via context cancellation in chatWithDelta.
 func (a *Agent) Cancel() {
 	a.stopMu.Lock()
 	defer a.stopMu.Unlock()
@@ -963,19 +983,67 @@ func (a *Agent) Cancel() {
 	}
 }
 
+// ResetCancellation creates a fresh stop channel so subsequent Step calls are
+// not immediately short-circuited by a prior Cancel. Call this before spawning
+// a new request goroutine when the previous stream was cancelled (e.g. Escape).
+func (a *Agent) ResetCancellation() {
+	a.stopMu.Lock()
+	defer a.stopMu.Unlock()
+	select {
+	case <-a.stopCh:
+		// Was cancelled — replace with a fresh, open channel.
+		a.stopCh = make(chan struct{})
+	default:
+		// Not cancelled; nothing to do.
+	}
+}
+
+// StopCh returns the current stop channel. Callers that need to check
+// cancellation for the lifetime of a single operation should capture this
+// once at the start of the operation so that a later ResetCancellation call
+// does not affect their check.
+func (a *Agent) StopCh() <-chan struct{} {
+	a.stopMu.Lock()
+	ch := a.stopCh
+	a.stopMu.Unlock()
+	return ch
+}
+
 // Done returns a channel closed when the agent is cancelled. Callers blocking
 // on agent-scoped work (e.g. a permission-ask callback) can select on it to
 // unblock cleanly on Shutdown/Cancel instead of leaking a goroutine.
-func (a *Agent) Done() <-chan struct{} { return a.stopCh }
+func (a *Agent) Done() <-chan struct{} { return a.StopCh() }
 
-// cancelled reports whether Cancel has been called.
+// cancelled reports whether Cancel has been called on the current stop channel.
 func (a *Agent) cancelled() bool {
 	select {
-	case <-a.stopCh:
+	case <-a.StopCh():
 		return true
 	default:
 		return false
 	}
+}
+
+// stopChContext derives a context.Context that is cancelled when ch is closed.
+// The caller must call the returned CancelFunc to release resources.
+func stopChContext(ch <-chan struct{}) (context.Context, context.CancelFunc) {
+	select {
+	case <-ch:
+		// Channel already closed — return a pre-cancelled context.
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx, cancel
+	default:
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		defer cancel()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 func (a *Agent) Permissions() *PermissionManager {

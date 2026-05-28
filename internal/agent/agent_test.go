@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -500,7 +501,7 @@ func TestOpenAIResponsesUsesCodexBackendForOAuth(t *testing.T) {
 	}
 
 	client := &GenericClient{Provider: "openai", Model: "gpt-test", APIKey: "token", UseOAuth: true}
-	msg, err := client.chatOpenAIResponses([]Message{{Role: "system", Content: "be terse"}, {Role: "user", Content: "hi"}}, nil)
+	msg, err := client.chatOpenAIResponses(context.Background(), []Message{{Role: "system", Content: "be terse"}, {Role: "user", Content: "hi"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,7 +553,7 @@ func TestOpenAIResponsesCapturesReasoningAndFunctionCallItems(t *testing.T) {
 	}
 
 	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
-	msg, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "read"}}, nil)
+	msg, err := client.chatOpenAIResponses(context.Background(), []Message{{Role: "user", Content: "read"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +605,7 @@ func TestOpenAIResponsesIncludesStoredOutputItemsBeforeToolResult(t *testing.T) 
 		{Role: "tool", ToolID: "call_123", Content: "file contents"},
 	}
 	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
-	if _, err := client.chatOpenAIResponses(messages, nil); err != nil {
+	if _, err := client.chatOpenAIResponses(context.Background(), messages, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -667,7 +668,7 @@ func TestOpenAIResponsesFallsBackToToolCallsWhenStoredItemsMissFunctionCall(t *t
 		{Role: "tool", ToolID: "call_123", Content: "file contents"},
 	}
 	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
-	if _, err := client.chatOpenAIResponses(messages, nil); err != nil {
+	if _, err := client.chatOpenAIResponses(context.Background(), messages, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -712,7 +713,7 @@ func TestOpenAIResponsesRequestsReasoningEncryptedContent(t *testing.T) {
 	}
 
 	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1", ThinkingBudget: 8000}
-	if _, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+	if _, err := client.chatOpenAIResponses(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -775,7 +776,7 @@ func TestOpenAIResponsesDedupesStoredItemsByID(t *testing.T) {
 	}
 
 	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
-	if _, err := client.chatOpenAIResponses(messages, nil); err != nil {
+	if _, err := client.chatOpenAIResponses(context.Background(), messages, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -813,7 +814,7 @@ func TestOpenAIResponsesReturnsErrorOnTruncatedStream(t *testing.T) {
 	}
 
 	client := &GenericClient{Provider: "openai", Model: "gpt-test", BaseURL: "https://example.test/v1"}
-	_, err := client.chatOpenAIResponses([]Message{{Role: "user", Content: "hi"}}, nil)
+	_, err := client.chatOpenAIResponses(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil)
 	if err == nil {
 		t.Fatal("expected error from truncated SSE stream")
 	}

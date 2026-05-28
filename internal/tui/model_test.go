@@ -1975,7 +1975,7 @@ func TestTabMouseReleaseUsesRightAlignedHeaderPosition(t *testing.T) {
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	barWidth := lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread))
-	barStart := m.panelWidth() - barWidth
+	barStart := m.tabBarStartXs(barWidth)[0]
 	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("1:chat"))
 	filesWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("2:files"))
 
