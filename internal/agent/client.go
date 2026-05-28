@@ -1535,7 +1535,34 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	// parseOpenAIChatCompletionsStream follows the same contract via its
 	// function parameters.
 	onDelta := c.onDelta()
-	onUsage := c.onUsage()
+	rawOnUsage := c.onUsage()
+	// Anthropic's message_start and message_delta events carry CUMULATIVE
+	// input_tokens / output_tokens snapshots. Subscribers (e.g. AgentRun.AddUsage)
+	// expect incremental deltas, so unwrap the cumulative-to-delta conversion
+	// here and only forward positive increments.
+	var lastInputReported, lastOutputReported int64
+	var onUsage func(int64, int64)
+	if rawOnUsage != nil {
+		onUsage = func(in, out int64) {
+			dIn := in - lastInputReported
+			dOut := out - lastOutputReported
+			if dIn < 0 {
+				dIn = 0
+			}
+			if dOut < 0 {
+				dOut = 0
+			}
+			if in > lastInputReported {
+				lastInputReported = in
+			}
+			if out > lastOutputReported {
+				lastOutputReported = out
+			}
+			if dIn > 0 || dOut > 0 {
+				rawOnUsage(dIn, dOut)
+			}
+		}
+	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -1905,7 +1932,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	// LM Studio base URL can be overridden via env var.
 	if provider == "lmstudio" {
 		if override := os.Getenv("LMSTUDIO_BASE_URL"); override != "" {
-			baseURL = strings.TrimRight(override, "/") + "/v1"
+			baseURL = normalizeLMStudioBaseURL(override)
 		}
 	}
 
@@ -2010,6 +2037,23 @@ func modelSupportsThinkingFromRegistry(modelID string) (bool, bool) {
 	}
 
 	return false, false
+}
+
+// normalizeLMStudioBaseURL accepts user-supplied overrides in any of the
+// common shapes (with or without trailing slash, with or without a /v1 suffix)
+// and returns a canonical base URL ending in /v1. This avoids the foot-gun
+// where a naive override like "http://host:1234/v1" would otherwise be
+// concatenated into "http://host:1234/v1/v1" and every request would 404.
+func normalizeLMStudioBaseURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return s
+	}
+	s = strings.TrimRight(s, "/")
+	if strings.HasSuffix(s, "/v1") {
+		return s
+	}
+	return s + "/v1"
 }
 
 // mergeAnthropicUsage merges an incremental usage payload from message_delta
