@@ -26,6 +26,7 @@ type Credential struct {
 	ExpiresAt    int64          `json:"expires_at,omitempty"`    // OAuth (unix seconds)
 	Account      string         `json:"account,omitempty"`       // e.g. "user@example.com"
 	BaseURL      string         `json:"base_url,omitempty"`      // optional endpoint override
+	AccountID    string         `json:"account_id,omitempty"`    // Cloudflare account ID
 }
 
 // authFile is the on-disk representation.
