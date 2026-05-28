@@ -82,6 +82,13 @@ func (c *MCPConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+type PluginConfig struct {
+	Source  string `json:"source"`
+	Dir     string `json:"dir"`
+	Ref     string `json:"ref"`
+	Enabled bool   `json:"enabled"`
+}
+
 type TUIConfig struct {
 	Theme         string            `json:"theme"`
 	Mouse         *bool             `json:"mouse"`
@@ -115,6 +122,7 @@ type Config struct {
 	Agent          map[string]interface{}     `json:"agent"`
 	DefaultAgent   string                     `json:"default_agent"`
 	MCP            map[string]MCPConfig       `json:"mcp"`
+	Plugins        map[string]PluginConfig    `json:"plugins"`
 	Watcher        WatcherConfig              `json:"watcher"`
 	Hooks          map[string]HookConfig      `json:"hooks"`
 	Formatters     map[string]FormatterConfig `json:"formatters"`
@@ -290,6 +298,91 @@ func ClearMCPAuthorization(name string) (bool, error) {
 	return true, saveJSONFile(configPath, m)
 }
 
+func RemoveMCPServer(name string) error {
+	configPath, err := (&Config{}).ActiveConfigPath()
+	if err != nil {
+		return err
+	}
+	m, err := loadConfigMap(configPath)
+	if err != nil {
+		return err
+	}
+	mcpRaw, ok := m["mcp"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	delete(mcpRaw, name)
+	m["mcp"] = mcpRaw
+	return saveJSONFile(configPath, m)
+}
+
+func SavePluginEnabled(name string, enabled bool) error {
+	configPath, err := (&Config{}).ActiveConfigPath()
+	if err != nil {
+		return err
+	}
+	m, err := loadConfigMap(configPath)
+	if err != nil {
+		return err
+	}
+	pluginsRaw, ok := m["plugins"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("plugin %q not found in config", name)
+	}
+	entry, ok := pluginsRaw[name].(map[string]any)
+	if !ok {
+		return fmt.Errorf("plugin %q not found in config", name)
+	}
+	entry["enabled"] = enabled
+	pluginsRaw[name] = entry
+	m["plugins"] = pluginsRaw
+	return saveJSONFile(configPath, m)
+}
+
+func SavePlugin(name string, p PluginConfig) error {
+	configPath, err := (&Config{}).ActiveConfigPath()
+	if err != nil {
+		return err
+	}
+	m, err := loadConfigMap(configPath)
+	if err != nil {
+		return err
+	}
+	pluginsRaw, ok := m["plugins"].(map[string]any)
+	if !ok {
+		pluginsRaw = map[string]any{}
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("marshal plugin config: %w", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return fmt.Errorf("parse plugin config: %w", err)
+	}
+	pluginsRaw[name] = raw
+	m["plugins"] = pluginsRaw
+	return saveJSONFile(configPath, m)
+}
+
+func RemovePlugin(name string) error {
+	configPath, err := (&Config{}).ActiveConfigPath()
+	if err != nil {
+		return err
+	}
+	m, err := loadConfigMap(configPath)
+	if err != nil {
+		return err
+	}
+	pluginsRaw, ok := m["plugins"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	delete(pluginsRaw, name)
+	m["plugins"] = pluginsRaw
+	return saveJSONFile(configPath, m)
+}
+
 func loadConfigMap(path string) (map[string]any, error) {
 	existing, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
@@ -420,6 +513,12 @@ func loadFromString(content string, config *Config) error {
 	for k, v := range temp.MCP {
 		config.MCP[k] = v
 	}
+	if config.Plugins == nil {
+		config.Plugins = make(map[string]PluginConfig)
+	}
+	for k, v := range temp.Plugins {
+		config.Plugins[k] = v
+	}
 	for k, v := range temp.Tools {
 		config.Tools[k] = v
 	}
@@ -527,6 +626,14 @@ func mergeRemoteConfig(config *Config) error {
 			config.MCP[k] = v
 		}
 	}
+	if config.Plugins == nil {
+		config.Plugins = make(map[string]PluginConfig)
+	}
+	for k, v := range remote.Plugins {
+		if _, exists := config.Plugins[k]; !exists {
+			config.Plugins[k] = v
+		}
+	}
 	for k, v := range remote.Tools {
 		if _, exists := config.Tools[k]; !exists {
 			config.Tools[k] = v
@@ -583,6 +690,12 @@ func loadFromFile(path string, config *Config) error {
 	}
 	for k, v := range temp.MCP {
 		config.MCP[k] = v
+	}
+	if config.Plugins == nil {
+		config.Plugins = make(map[string]PluginConfig)
+	}
+	for k, v := range temp.Plugins {
+		config.Plugins[k] = v
 	}
 	for k, v := range temp.Tools {
 		config.Tools[k] = v
