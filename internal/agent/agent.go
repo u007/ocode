@@ -108,7 +108,14 @@ type Agent struct {
 	subagentDispatchCount int
 	preloadedContextMu    sync.RWMutex
 	preloadedContext      string // set by askAgent to avoid duplicate LoadContext calls
+	// pipeline, if set, runs in-process hook callbacks for tool calls and chat
+	// requests. Field is named "pipeline" (not "hooks") because the hooks package
+	// is already imported under that name.
+	pipeline *hooks.Pipeline
 }
+
+// SetHooks wires an in-process hook pipeline into this agent.
+func (a *Agent) SetHooks(p *hooks.Pipeline) { a.pipeline = p }
 
 const subagentDispatchLimit = 3
 
@@ -154,6 +161,19 @@ func (a *Agent) chatWithDelta(stopCh <-chan struct{}, messages []Message, toolDe
 			gc.SetOnUsage(a.OnUsage)
 			defer gc.SetOnUsage(nil)
 		}
+		origTemp, origTopP := gc.Temperature, gc.TopP
+		if a.pipeline != nil {
+			cp := a.pipeline.RunChatParams(gc.Model, hooks.ChatParams{
+				Temperature: gc.Temperature,
+				TopP:        gc.TopP,
+			})
+			gc.Temperature = cp.Temperature
+			gc.TopP = cp.TopP
+		}
+		defer func() {
+			gc.Temperature = origTemp
+			gc.TopP = origTopP
+		}()
 		ctx, ctxCancel := stopChContext(stopCh)
 		defer ctxCancel()
 		return gc.ChatWithContext(ctx, messages, toolDefs)
@@ -791,6 +811,10 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, erro
 		return fmt.Sprintf("pre-hook blocked: %v", err), nil
 	}
 
+	if a.pipeline != nil {
+		args = a.pipeline.RunToolBefore(name, args)
+	}
+
 	result, err := t.Execute(args)
 
 	if hooksCfg != nil {
@@ -799,6 +823,10 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, erro
 			resultStr = result
 		}
 		_ = hooks.RunPostHook(name, argsStr, resultStr, hooksCfg)
+	}
+
+	if a.pipeline != nil && err == nil {
+		result = a.pipeline.RunToolAfter(name, result)
 	}
 
 	if err != nil {
