@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release
+.PHONY: build build-all build-darwin build-linux build-windows clean install release web-build web-dev
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -7,7 +7,7 @@ OUTDIR   := release
 
 # ── Default: build for current platform ──────────────────────────────────────
 
-build:
+build: web-build
 	go build $(LDFLAGS) -o $(APP) .
 
 # ── Install ──────────────────────────────────────────────────────────────────
@@ -49,3 +49,11 @@ release: clean
 clean:
 	rm -rf $(OUTDIR)
 	rm -f $(APP) $(APP)-darwin-* $(APP)-linux-* $(APP)-windows-*
+
+# ── Web UI ───────────────────────────────────────────────────────────────────
+
+web-build:
+	cd web && npm install && npm run build
+
+web-dev:
+	cd web && npm run dev

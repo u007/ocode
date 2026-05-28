@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { ChatProvider, useChatDispatch } from "./stores/chatStore";
+import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
 import ChatInput from "./components/Chat/ChatInput";
 import SessionList from "./components/Sidebar/SessionList";
@@ -51,8 +52,10 @@ function AppInner() {
 
 export default function App() {
   return (
-    <ChatProvider>
-      <AppInner />
-    </ChatProvider>
+    <ErrorBoundary>
+      <ChatProvider>
+        <AppInner />
+      </ChatProvider>
+    </ErrorBoundary>
   );
 }
