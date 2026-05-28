@@ -183,6 +183,19 @@ func isReasoningOnlyModel(modelID string) bool {
 		strings.HasPrefix(m, "gpt-5")
 }
 
+// maybeStripMaxTokensForGateway removes max_tokens from an outgoing payload
+// when the provider is cloudflare-gateway and the model is an o-series reasoning
+// model. Cloudflare's gateway forwards to OpenAI, which rejects max_tokens for
+// o-series; it accepts only max_completion_tokens (not yet supported here).
+func maybeStripMaxTokensForGateway(provider, model string, payload map[string]interface{}) {
+	if provider != "cloudflare-gateway" {
+		return
+	}
+	if isReasoningOnlyModel(model) {
+		delete(payload, "max_tokens")
+	}
+}
+
 func (c *GenericClient) GetProvider() string {
 	return c.Provider
 }
@@ -345,6 +358,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 		"stream":   true,
 	}
 	c.applyGenerationParams(payload)
+	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
 	if c.Provider == "openai" && c.ThinkingBudget > 0 {
 		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
 	}
@@ -1848,6 +1862,8 @@ var providers = map[string]providerInfo{
 	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
 	"copilot":                  {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
 	"lmstudio":                 {"", "http://localhost:1234/v1"},
+	"cloudflare-gateway":       {"CLOUDFLARE_GATEWAY_KEY", ""},
+	"codex":                    {"OPENAI_API_KEY", "https://api.openai.com/v1"},
 	"xiaomi":                   {"XIAOMI_API_KEY", "https://xiaomimimo.com/v1"},
 	"xiaomi-token-plan-sgp":    {"XIAOMI_API_KEY", "https://token-plan-sgp.xiaomimimo.com/v1"},
 	"xiaomi-token-plan-ams":    {"XIAOMI_API_KEY", "https://token-plan-ams.xiaomimimo.com/v1"},
