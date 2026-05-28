@@ -64,6 +64,29 @@ func TestFileTools(t *testing.T) {
 	}
 }
 
+func TestConfinedPathAllowsConfiguredExtraRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
+	setExtraAllowedPaths([]string{extra})
+	t.Cleanup(func() { setExtraAllowedPaths(nil) })
+
+	target := filepath.Join(extra, "allowed.txt")
+	if err := os.WriteFile(target, []byte("ok"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := confinedPath(target); err != nil {
+		t.Fatalf("expected path to be allowed, got error: %v", err)
+	}
+}
+
 func TestMultiEditToolSequentialReplaceAndDiff(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()

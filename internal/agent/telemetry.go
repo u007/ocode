@@ -19,10 +19,11 @@ func parseOpenAIUsage(raw json.RawMessage) (*TokenUsage, error) {
 	}
 
 	var payload struct {
-		PromptTokens        *int64 `json:"prompt_tokens"`
-		CompletionTokens    *int64 `json:"completion_tokens"`
-		TotalTokens         *int64 `json:"total_tokens"`
-		PromptTokensDetails *struct {
+		PromptTokens         *int64 `json:"prompt_tokens"`
+		CompletionTokens     *int64 `json:"completion_tokens"`
+		TotalTokens          *int64 `json:"total_tokens"`
+		PromptCacheHitTokens *int64 `json:"prompt_cache_hit_tokens"`
+		PromptTokensDetails  *struct {
 			CachedTokens *int64 `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
 	}
@@ -33,6 +34,8 @@ func parseOpenAIUsage(raw json.RawMessage) (*TokenUsage, error) {
 	var cacheRead *int64
 	if payload.PromptTokensDetails != nil && payload.PromptTokensDetails.CachedTokens != nil {
 		cacheRead = payload.PromptTokensDetails.CachedTokens
+	} else if payload.PromptCacheHitTokens != nil {
+		cacheRead = payload.PromptCacheHitTokens
 	}
 
 	return &TokenUsage{
@@ -71,10 +74,11 @@ func parseOpenAIResponsesUsage(raw json.RawMessage) (*TokenUsage, error) {
 		return nil, nil
 	}
 	var payload struct {
-		InputTokens         *int64 `json:"input_tokens"`
-		OutputTokens        *int64 `json:"output_tokens"`
-		TotalTokens         *int64 `json:"total_tokens"`
-		PromptTokensDetails *struct {
+		InputTokens          *int64 `json:"input_tokens"`
+		OutputTokens         *int64 `json:"output_tokens"`
+		TotalTokens          *int64 `json:"total_tokens"`
+		PromptCacheHitTokens *int64 `json:"prompt_cache_hit_tokens"`
+		PromptTokensDetails  *struct {
 			CachedTokens *int64 `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
 	}
@@ -87,6 +91,8 @@ func parseOpenAIResponsesUsage(raw json.RawMessage) (*TokenUsage, error) {
 	var cacheRead *int64
 	if payload.PromptTokensDetails != nil && payload.PromptTokensDetails.CachedTokens != nil {
 		cacheRead = payload.PromptTokensDetails.CachedTokens
+	} else if payload.PromptCacheHitTokens != nil {
+		cacheRead = payload.PromptCacheHitTokens
 	}
 	return &TokenUsage{
 		PromptTokens:     payload.InputTokens,
@@ -101,6 +107,16 @@ func usageForProvider(provider string, raw json.RawMessage) (*TokenUsage, error)
 	case "anthropic":
 		return parseAnthropicUsage(raw)
 	default:
+		var probe struct {
+			InputTokens          *int64 `json:"input_tokens"`
+			OutputTokens         *int64 `json:"output_tokens"`
+			CacheReadInputTokens *int64 `json:"cache_read_input_tokens"`
+		}
+		if err := json.Unmarshal(raw, &probe); err == nil {
+			if probe.InputTokens != nil || probe.OutputTokens != nil || probe.CacheReadInputTokens != nil {
+				return parseAnthropicUsage(raw)
+			}
+		}
 		return parseOpenAIUsage(raw)
 	}
 }

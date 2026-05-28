@@ -136,11 +136,11 @@ func TestSafeCutNoToolCalls(t *testing.T) {
 func TestFindTurnBoundary(t *testing.T) {
 	msgs := []Message{
 		{Role: "system"},
-		{Role: "user", Content: "u1"},   // 1
+		{Role: "user", Content: "u1"},    // 1
 		{Role: "assistant", Content: ""}, // 2
-		{Role: "user", Content: "u2"},   // 3
+		{Role: "user", Content: "u2"},    // 3
 		{Role: "assistant", Content: ""}, // 4
-		{Role: "user", Content: "u3"},   // 5
+		{Role: "user", Content: "u3"},    // 5
 		{Role: "assistant", Content: ""}, // 6
 	}
 	if got := findTurnBoundary(msgs, 1); got != 5 {
@@ -181,7 +181,7 @@ func TestBuildSummaryPromptIncludesToolInfo(t *testing.T) {
 		{Role: "tool", ToolID: "c1", Content: "wrote 12 lines"},
 		{Role: "assistant", Content: "done"},
 	}
-	prompt, dropped := buildSummaryPrompt(middle, 50000)
+	prompt, dropped := buildSummaryPrompt(middle, 50000, "")
 	if dropped != 0 {
 		t.Errorf("did not expect drops; got %d", dropped)
 	}
@@ -205,7 +205,7 @@ func TestBuildSummaryPromptDropsOldestWhenOverCap(t *testing.T) {
 		{Role: "user", Content: "keepme"},
 	}
 	// maxInputTokens=1000 → maxChars=4000, so most fragments must be dropped.
-	prompt, dropped := buildSummaryPrompt(middle, 1000)
+	prompt, dropped := buildSummaryPrompt(middle, 1000, "")
 	if dropped == 0 {
 		t.Errorf("expected drops; got 0")
 	}
@@ -264,9 +264,9 @@ func TestShouldCompactDisabled(t *testing.T) {
 func TestTokenEstimateHandlesExtendedThinking(t *testing.T) {
 	// Message with only reasoning content (e.g., extended thinking before response)
 	m := Message{
-		Role:            "assistant",
-		Content:         "",                                // no regular content
-		ReasoningContent: strings.Repeat("x", 10000),      // 10k chars of thinking
+		Role:             "assistant",
+		Content:          "",                         // no regular content
+		ReasoningContent: strings.Repeat("x", 10000), // 10k chars of thinking
 	}
 	est := tokenEstimate(m)
 
@@ -343,7 +343,7 @@ func TestShouldCompactFallbackWhenUsageMissing(t *testing.T) {
 	}
 
 	msgs := []Message{
-		{Role: "user", Content: strings.Repeat("x", 2000)},     // No Usage
+		{Role: "user", Content: strings.Repeat("x", 2000)},      // No Usage
 		{Role: "assistant", Content: strings.Repeat("y", 1000)}, // No Usage
 	}
 
@@ -365,7 +365,7 @@ func TestShouldCompactFallbackWhenUsageMissing(t *testing.T) {
 func TestShouldCompactFallbackWithSafetyMargin(t *testing.T) {
 	rt := compactRuntime{
 		Enabled:        true,
-		TokenThreshold: 0.3,  // 300 tokens threshold
+		TokenThreshold: 0.3, // 300 tokens threshold
 		MinMessages:    3,
 		WindowTokens:   1000,
 	}
@@ -381,5 +381,156 @@ func TestShouldCompactFallbackWithSafetyMargin(t *testing.T) {
 	// with 15% margin applied. This should exceed the 300 token threshold.
 	if !need {
 		t.Errorf("fallback estimate should trigger: used=%d, threshold=%d", used, int(float64(rt.WindowTokens)*rt.TokenThreshold))
+	}
+}
+
+func TestBuildSummaryPromptIncludesStructuredTemplate(t *testing.T) {
+	middle := []Message{{Role: "user", Content: "hi"}}
+	prompt, _ := buildSummaryPrompt(middle, 50000, "")
+	wantSections := []string{"## Goal", "## Constraints & Preferences", "## Progress", "### Done", "### In Progress", "### Blocked", "## Key Decisions", "## Next Steps", "## Critical Context", "## Relevant Files"}
+	for _, s := range wantSections {
+		if !strings.Contains(prompt, s) {
+			t.Errorf("structured template missing section %q", s)
+		}
+	}
+}
+
+func TestBuildSummaryPromptIncludesPreviousSummaryWhenProvided(t *testing.T) {
+	middle := []Message{{Role: "user", Content: "new turn"}}
+	prev := "## Goal\n- prior task summary\n\n## Progress\n### Done\n- read foo.go"
+	prompt, _ := buildSummaryPrompt(middle, 50000, prev)
+	if !strings.Contains(prompt, "<previous-summary>") {
+		t.Errorf("anchor tag missing")
+	}
+	if !strings.Contains(prompt, "prior task summary") {
+		t.Errorf("previous summary body missing")
+	}
+	if !strings.Contains(prompt, "Update the summary above") {
+		t.Errorf("update instruction missing")
+	}
+}
+
+func TestBuildSummaryPromptCreateInstructionWhenNoPrevious(t *testing.T) {
+	prompt, _ := buildSummaryPrompt([]Message{{Role: "user", Content: "x"}}, 50000, "")
+	if !strings.Contains(prompt, "Create a new summary") {
+		t.Errorf("create instruction missing")
+	}
+	// The instruction text references <previous-summary> in passing; only
+	// the multi-line opening tag (followed by a newline) signals an active anchor.
+	if strings.Contains(prompt, "<previous-summary>\n") {
+		t.Errorf("anchor block should not be active without previous summary")
+	}
+}
+
+func TestBuildSummaryPromptRespectsCapWithPreviousSummary(t *testing.T) {
+	prev := strings.Repeat("p", 6000)
+	middle := []Message{
+		{Role: "user", Content: strings.Repeat("x", 4000)},
+		{Role: "user", Content: "keepme"},
+	}
+	prompt, dropped := buildSummaryPrompt(middle, 1000, prev)
+	if len(prompt) > 1000*charsPerToken {
+		t.Fatalf("prompt exceeded cap: got %d want <= %d", len(prompt), 1000*charsPerToken)
+	}
+	if !strings.Contains(prompt, "keepme") {
+		t.Fatalf("most recent message must remain after fitting prompt")
+	}
+	if dropped == 0 {
+		t.Fatalf("expected oldest message to drop when previous summary consumes budget")
+	}
+	if !strings.Contains(prompt, "<previous-summary>") {
+		t.Fatalf("anchored prompt missing previous-summary block")
+	}
+	if !strings.Contains(prompt, "chars truncated") {
+		t.Fatalf("expected previous summary or conversation segment to be truncated to fit cap")
+	}
+	if !strings.Contains(prompt, "[NOTE: 1 earlier messages omitted") {
+		t.Fatalf("expected omission note after dropping oldest fragment")
+	}
+}
+
+func TestFindPreviousSummary(t *testing.T) {
+	msgs := []Message{
+		{Role: "system", Content: "[ocode:environment]\nenv"},
+		{Role: "user", Content: "ask"},
+		{Role: "assistant", Content: "ok"},
+		{Role: "system", Content: compactionSummaryMarker + "\nheader\n\nbody-1"},
+		{Role: "user", Content: "more"},
+		{Role: "assistant", Content: "yep"},
+	}
+	body, idx := findPreviousSummary(msgs)
+	if idx != 3 {
+		t.Errorf("expected idx=3, got %d", idx)
+	}
+	if !strings.Contains(body, "body-1") {
+		t.Errorf("body missing content: %q", body)
+	}
+	if strings.HasPrefix(body, compactionSummaryMarker) {
+		t.Errorf("marker not stripped from returned body")
+	}
+}
+
+func TestFindPreviousSummaryReturnsLatest(t *testing.T) {
+	msgs := []Message{
+		{Role: "system", Content: compactionSummaryMarker + "\n\nfirst"},
+		{Role: "user", Content: "x"},
+		{Role: "system", Content: compactionSummaryMarker + "\n\nsecond"},
+	}
+	body, idx := findPreviousSummary(msgs)
+	if idx != 2 {
+		t.Errorf("expected idx=2 (latest), got %d", idx)
+	}
+	if !strings.Contains(body, "second") {
+		t.Errorf("expected latest 'second', got %q", body)
+	}
+}
+
+func TestFindPreviousSummaryNone(t *testing.T) {
+	msgs := []Message{
+		{Role: "system", Content: "[ocode:environment]\nenv"},
+		{Role: "user", Content: "ask"},
+		{Role: "assistant", Content: "ok"},
+	}
+	body, idx := findPreviousSummary(msgs)
+	if idx != -1 {
+		t.Errorf("expected idx=-1, got %d", idx)
+	}
+	if body != "" {
+		t.Errorf("expected empty body, got %q", body)
+	}
+}
+
+func TestPruneToolResultsShrinksLargeOutputs(t *testing.T) {
+	big := strings.Repeat("y", 5000)
+	middle := []Message{
+		{Role: "user", Content: "ask"},
+		{Role: "assistant", ToolCalls: []ToolCall{tcCall("c1", "read")}},
+		{Role: "tool", ToolID: "c1", Content: big},
+		{Role: "assistant", Content: "done"},
+	}
+	pruned := pruneToolResults(middle, 2000)
+	if len(pruned) != len(middle) {
+		t.Fatalf("length changed: got %d want %d", len(pruned), len(middle))
+	}
+	if len(pruned[2].Content) >= len(big) {
+		t.Errorf("tool content not pruned: len=%d", len(pruned[2].Content))
+	}
+	if !strings.Contains(pruned[2].Content, "pruned") {
+		t.Errorf("pruned tool content missing pruned marker: %q", pruned[2].Content)
+	}
+	// Originals must not be mutated.
+	if len(middle[2].Content) != len(big) {
+		t.Errorf("pruneToolResults mutated original slice")
+	}
+}
+
+func TestPruneToolResultsLeavesSmallContentAlone(t *testing.T) {
+	middle := []Message{
+		{Role: "tool", ToolID: "c1", Content: "small output"},
+		{Role: "assistant", Content: "ok"},
+	}
+	pruned := pruneToolResults(middle, 2000)
+	if pruned[0].Content != "small output" {
+		t.Errorf("small content was modified: %q", pruned[0].Content)
 	}
 }

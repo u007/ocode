@@ -487,6 +487,8 @@ type model struct {
 	filesSel                 selectionState
 	inputSel                 selectionState
 	gitSel                   selectionState
+	sidebarSel               selectionState
+	rawSidebarLines          []string
 	rawInputLines            []string
 	rawInputLinesDirty       bool
 	inputThemeApplied        bool
@@ -1318,6 +1320,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.agent != nil {
 				m.agent.ResetSubagentDispatch()
 			}
+			agent.DebugAppendf("SESSION", "appended user msg to m.messages (total=%d, roleCounts: user=%d asst=%d tool=%d)", len(m.messages), countRole(m.messages, roleUser), countRole(m.messages, roleAssistant), countToolMsgs(m.messages))
 		}
 		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
@@ -1573,6 +1576,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamingThinkingIdx = -1
 		if dropped := atomic.SwapUint64(&m.deltaDrops, 0); dropped > 0 {
 			agent.DebugAppendf("stream", "dropped %d reasoning deltas under backpressure", dropped)
+		}
+		if msg.err != nil {
+			agent.DebugAppendf("LLM", "stream done with error: %v", msg.err)
+		} else {
+			agent.DebugAppendf("LLM", "stream done OK (duration=%s)", time.Since(m.streamStartedAt).Round(time.Millisecond))
 		}
 		m.layout()
 		m.saveSession()
@@ -1917,6 +1925,11 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		case "c":
 			newM, c := m.handleCommand("/compact")
 			return true, newM, c
+		case "y":
+			if m.sessionID != "" {
+				_ = clipboard.WriteAll(m.sessionID)
+			}
+			return true, m, nil
 		case "q":
 			m.cleanupCurrentSession()
 			return true, m, tea.Quit
@@ -2369,6 +2382,10 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	}
+	if m.sidebarSel.active || m.sidebarSel.dragging {
+		m.sidebarSel = selectionState{}
+		return m, nil
+	}
 	if !m.escPressed {
 		m.escPressed = true
 		m.escPressTime = time.Now()
@@ -2691,6 +2708,16 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.gitSel = selectionState{}
 			m.git.clearDiffSelectionHighlight()
 		}
+		if m.sidebarSel.dragging {
+			m.sidebarSel.dragging = false
+			if m.sidebarSel.active {
+				text := extractSelectionText(m.rawSidebarLines, m.sidebarSel.startLine, m.sidebarSel.startCol, m.sidebarSel.endLine, m.sidebarSel.endCol)
+				_ = clipboard.WriteAll(text)
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
+			m.sidebarSel = selectionState{}
+		}
 	}
 
 	if pressed && m.showPermDialog {
@@ -2805,6 +2832,35 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 	if path, ok := m.sidebarFileForClick(mouse); ok {
 		return m, openSidebarFileInEditor(path), true
+	}
+	// Sidebar text selection
+	if pressed && m.mouseOverSidebar(mouse) {
+		data := m.buildSidebarRenderData()
+		headerHeight := 0
+		title := m.sessionTitle
+		if title == "" {
+			if prompt := m.firstUserPromptText(); prompt != "" {
+				title = truncateTitle(prompt, maxExplicitTitleLen)
+			}
+		}
+		if title != "" {
+			headerHeight = 1
+		}
+		boxTop := 1 + headerHeight + len(data.topLines)
+		visible := m.sidebarScrollBoxHeight(data, headerHeight)
+		if mouse.Y >= boxTop && mouse.Y < boxTop+visible {
+			scrollLine := m.sidebarScroll + (mouse.Y - boxTop)
+			if len(m.rawSidebarLines) > 0 && scrollLine >= 0 && scrollLine < len(m.rawSidebarLines) {
+				m.sidebarSel = selectionState{
+					dragging:  true,
+					startLine: scrollLine,
+					startCol:  mouse.X - m.panelWidth(),
+					endLine:   scrollLine,
+					endCol:    mouse.X - m.panelWidth(),
+				}
+				return m, nil, true
+			}
+		}
 	}
 	return m, nil, false
 }
@@ -2925,6 +2981,39 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		m.gitSel.active = m.gitSel.startLine != m.gitSel.endLine || m.gitSel.startCol != m.gitSel.endCol
 		m.git.applyDiffSelectionHighlight(m.gitSel.startLine, m.gitSel.startCol, m.gitSel.endLine, m.gitSel.endCol)
 		return m, nil, true
+	}
+
+	if m.sidebarSel.dragging {
+		data := m.buildSidebarRenderData()
+		headerHeight := 0
+		title := m.sessionTitle
+		if title == "" {
+			if prompt := m.firstUserPromptText(); prompt != "" {
+				title = truncateTitle(prompt, maxExplicitTitleLen)
+			}
+		}
+		if title != "" {
+			headerHeight = 1
+		}
+		boxTop := 1 + headerHeight + len(data.topLines)
+		visible := m.sidebarScrollBoxHeight(data, headerHeight)
+		if mouse.Y >= boxTop && mouse.Y < boxTop+visible {
+			scrollLine := m.sidebarScroll + (mouse.Y - boxTop)
+			if scrollLine < 0 {
+				scrollLine = 0
+			}
+			if len(m.rawSidebarLines) > 0 && scrollLine >= len(m.rawSidebarLines) {
+				scrollLine = len(m.rawSidebarLines) - 1
+			}
+			col := mouse.X - m.panelWidth()
+			if col < 0 {
+				col = 0
+			}
+			m.sidebarSel.endLine = scrollLine
+			m.sidebarSel.endCol = col
+			m.sidebarSel.active = m.sidebarSel.startLine != m.sidebarSel.endLine || m.sidebarSel.startCol != m.sidebarSel.endCol
+			return m, nil, true
+		}
 	}
 
 	if tab, ok := m.tabForClick(mouse); ok {
@@ -3413,11 +3502,14 @@ func (m *model) handleSessionCmd(args []string) {
 			restoreTodoState(sess.Metadata)
 			m.messages = []message{}
 			m.streamingThinkingIdx = -1
+			roleCounts := map[string]int{}
 			for _, am := range sess.Messages {
+				roleCounts[am.Role]++
 				role := tuiRoleForAgentMessage(am)
 				copyMsg := am
 				m.messages = append(m.messages, message{role: role, text: displayTextForAgentMessage(am), raw: &copyMsg})
 			}
+			agent.DebugAppendf("SESSION", "loaded session %s: %d msgs (user=%d asst=%d tool=%d system=%d)", m.sessionID, len(sess.Messages), roleCounts["user"], roleCounts["assistant"], roleCounts["tool"], roleCounts["system"])
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Loaded session %s", m.sessionID)})
 			m.input.Focus()
 			m.layout()
@@ -3439,22 +3531,46 @@ func displayTextForAgentMessage(msg agent.Message) string {
 	if msg.Role == "system" && strings.HasPrefix(msg.Content, "[Compacted summary of ") {
 		return "📦 " + msg.Content
 	}
-	if len(msg.Images) == 0 {
-		return msg.Content
-	}
-	var b strings.Builder
-	b.WriteString(msg.Content)
-	if msg.Content != "" {
-		b.WriteString("\n")
-	}
-	for _, img := range msg.Images {
-		label := img.Path
-		if label == "" {
-			label = img.MIMEType
+	if msg.Role == "system" && strings.HasPrefix(msg.Content, "[ocode:compaction-summary]") {
+		body := strings.TrimSpace(strings.TrimPrefix(msg.Content, "[ocode:compaction-summary]"))
+		if body == "" {
+			return "📦 Compacted summary"
 		}
-		b.WriteString(fmt.Sprintf("[image: %s]\n", label))
+		return "📦 " + body
 	}
-	return strings.TrimRight(b.String(), "\n")
+	var text string
+	if len(msg.Images) == 0 {
+		text = msg.Content
+	} else {
+		var b strings.Builder
+		b.WriteString(msg.Content)
+		if msg.Content != "" {
+			b.WriteString("\n")
+		}
+		for _, img := range msg.Images {
+			label := img.Path
+			if label == "" {
+				label = img.MIMEType
+			}
+			b.WriteString(fmt.Sprintf("[image: %s]\n", label))
+		}
+		text = strings.TrimRight(b.String(), "\n")
+	}
+	if len(msg.ToolCalls) > 0 {
+		var b strings.Builder
+		if text != "" {
+			b.WriteString(text)
+			b.WriteString("\n\n")
+		}
+		for i, tc := range msg.ToolCalls {
+			if i > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(formatToolCallHint(tc))
+		}
+		return b.String()
+	}
+	return text
 }
 
 func (m *model) handleCompactCmd(args []string) {
@@ -4297,7 +4413,12 @@ func (m *model) saveSession() {
 	if len(agentMsgs) == 0 {
 		return
 	}
+	roleCounts := map[string]int{}
+	for _, m := range agentMsgs {
+		roleCounts[m.Role]++
+	}
 	session.Save(m.sessionID, m.sessionTitle, agentMsgs, m.sessionSidebarMetadata())
+	agent.DebugAppendf("SESSION", "saved session %s (%d msgs: user=%d asst=%d tool=%d system=%d)", m.sessionID, len(agentMsgs), roleCounts["user"], roleCounts["assistant"], roleCounts["tool"], roleCounts["system"])
 }
 
 func (m *model) persistedAgentMessages() []agent.Message {
@@ -4613,9 +4734,11 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 
 	switch choice {
 	case "y", "yes", "allow", "once":
+		m.allowOutOfScopePath(req, false)
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName), transient: true})
 		return m.executeApprovedTool(toolName, args)
 	case "a", "always", "always allow":
+		m.allowOutOfScopePath(req, true)
 		// Special handling for webfetch domains
 		if toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain.") {
 			domain := strings.TrimPrefix(req.Rule, "webfetch.domain.")
@@ -4680,6 +4803,55 @@ func (m *model) persistPermissions() {
 	}
 }
 
+func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
+	if !strings.HasSuffix(req.Rule, ".out_of_scope") {
+		return
+	}
+	path := pathRootFromPermissionArgs(req.Args)
+	if path == "" {
+		return
+	}
+	if !tool.AddExtraAllowedPath(path) {
+		return
+	}
+	if !persist || m.config == nil {
+		return
+	}
+	for _, existing := range m.config.Ocode.ExtraAllowedPaths {
+		if existing == path {
+			return
+		}
+	}
+	m.config.Ocode.ExtraAllowedPaths = append(m.config.Ocode.ExtraAllowedPaths, path)
+	if err := config.SaveOcodeConfig(&m.config.Ocode); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save extra_allowed_paths: %v", err)})
+	}
+}
+
+func pathRootFromPermissionArgs(args json.RawMessage) string {
+	var params struct {
+		Path     string `json:"path"`
+		FilePath string `json:"file_path"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return ""
+	}
+	target := strings.TrimSpace(params.Path)
+	if target == "" {
+		target = strings.TrimSpace(params.FilePath)
+	}
+	if target == "" || !filepath.IsAbs(target) {
+		return ""
+	}
+	if info, err := os.Stat(target); err == nil {
+		if info.IsDir() {
+			return target
+		}
+		return filepath.Dir(target)
+	}
+	return filepath.Dir(target)
+}
+
 func (m model) executeApprovedTool(toolName string, args json.RawMessage) tea.Cmd {
 	return func() tea.Msg {
 		result, err := m.agent.HandleApprovedToolCall(toolName, args)
@@ -4734,6 +4906,20 @@ func (m *model) askAgent() tea.Cmd {
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
+	// Log agent message summary for debugging
+	if m.agent != nil {
+		roleCounts := map[string]int{}
+		for _, m := range agentMsgs {
+			roleCounts[m.Role]++
+			if m.Role == "tool" {
+				roleCounts["tool:"+m.ToolID]++
+			}
+		}
+		tokens, source := agent.CurrentContextEstimate(agentMsgs)
+		modelName := m.agent.GetProvider() + "/" + m.agent.Client().GetModel()
+		agent.DebugAppendf("LLM", "askAgent: %d msgs → %s (est=%d tok, src=%s)", len(agentMsgs), modelName, tokens, source)
+	}
+
 	if m.skipCompactPreflight {
 		m.skipCompactPreflight = false
 	} else if m.agent != nil {
@@ -4742,6 +4928,7 @@ func (m *model) askAgent() tea.Cmd {
 			m.pendingCompactUIIdx = uiIdx
 			m.pendingCompactResume = true
 			m.skipCompactPreflight = true
+			agent.DebugAppendf("COMPACT", "preflight compaction started, deferring LLM call")
 			return nil
 		}
 	}
@@ -5602,6 +5789,34 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 		uiIdx = uiFiltered
 	}
 
+	// Merge consecutive same-role user messages. Session resume can produce
+	// back-to-back user messages (e.g. a saved unanswered query followed by
+	// the user retyping the same input), confusing the LLM into spurious
+	// "done" responses. Merging prevents this without losing information.
+	mergedLen := 0
+	mergedUserCount := 0
+	for i, msg := range agentMsgs {
+		if mergedLen > 0 && agentMsgs[mergedLen-1].Role == msg.Role && msg.Role == "user" {
+			sep := "\n"
+			if agentMsgs[mergedLen-1].Content == "" {
+				sep = ""
+			}
+			agentMsgs[mergedLen-1].Content += sep + msg.Content
+			mergedUserCount++
+			continue
+		}
+		agentMsgs[mergedLen] = agentMsgs[i]
+		if i < len(uiIdx) {
+			uiIdx[mergedLen] = uiIdx[i]
+		}
+		mergedLen++
+	}
+	agentMsgs = agentMsgs[:mergedLen]
+	uiIdx = uiIdx[:mergedLen]
+	if mergedUserCount > 0 {
+		agent.DebugAppendf("SESSION", "merged %d consecutive user messages in buildAgentMessagesSnapshot (final agent msgs=%d)", mergedUserCount, mergedLen)
+	}
+
 	return agentMsgs, uiIdx
 }
 
@@ -5778,8 +5993,8 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 
 	// When focused, show a one-line hint above the strip describing the keys.
 	if m.agentStripFocused {
-			hint := fmt.Sprintf("  agents %d/%d · j/k: move · enter: open · esc: exit", m.agentStripSelected+1, len(runs))
-			b.WriteString(hintStyle.Render(truncateToWidth(hint, width)) + "\n")
+		hint := fmt.Sprintf("  agents %d/%d · j/k: move · enter: open · esc: exit", m.agentStripSelected+1, len(runs))
+		b.WriteString(hintStyle.Render(truncateToWidth(hint, width)) + "\n")
 		row++
 	}
 
@@ -5789,7 +6004,7 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	// reserved for whichever indicators are shown.
 	showUp := offset > 0
 	if showUp {
-			b.WriteString(truncateToWidth(hintStyle.Render("  ↑ more"), width) + "\n")
+		b.WriteString(truncateToWidth(hintStyle.Render("  ↑ more"), width) + "\n")
 		row++
 	}
 
@@ -5839,8 +6054,8 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	}
 
 	if offset+rendered < len(runs) {
-			more := fmt.Sprintf("  ↓ more (%d)", len(runs)-offset-rendered)
-			b.WriteString(truncateToWidth(hintStyle.Render(more), width) + "\n")
+		more := fmt.Sprintf("  ↓ more (%d)", len(runs)-offset-rendered)
+		b.WriteString(truncateToWidth(hintStyle.Render(more), width) + "\n")
 		row++
 	}
 
@@ -6323,7 +6538,7 @@ func (m model) renderContent() string {
 	}
 	if strip, _ := m.renderAgentStrip(); strip != "" {
 		// Constrain the agent strip so it never pushes the sidebar.
-			leftParts = append(leftParts, constrainToWidth(strip, panelWidth-2))
+		leftParts = append(leftParts, constrainToWidth(strip, panelWidth-2))
 	}
 	leftParts = append(leftParts, inputArea)
 	if row := m.renderActivityRow(); row != "" {
@@ -6363,9 +6578,9 @@ func (m *model) renderStatus() string {
 		suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
 		if supportsReasoning {
-			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader · ctrl+o: yolo · ctrl+y: retry · ctrl+t: reasoning"
+			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry · ctrl+t: reasoning"
 		} else {
-			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader · ctrl+o: yolo · ctrl+y: retry"
+			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry"
 		}
 		if m.ctrlCPressed {
 			suffix = " · ctrl+c again to quit"
@@ -6740,7 +6955,8 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 	if telemetry.spend == nil {
 		return []string{tokenLine}
 	}
-	return []string{tokenLine, fmt.Sprintf("$%.4f", *telemetry.spend)}
+	spend := fmt.Sprintf("$%.4f", *telemetry.spend)
+	return []string{tokenLine + dimStyle.Render(" · ") + sidebarAccentStyle.Render(spend)}
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
@@ -6974,6 +7190,36 @@ func (m model) renderSidebar() string {
 	}
 	scrollOffset := clampInt(m.sidebarScroll, 0, maxInt(0, len(data.scrollLines)-visibleScrollLines))
 	visible := sliceLines(data.scrollLines, scrollOffset, visibleScrollLines)
+
+	// Store raw (ANSI-stripped) scroll lines for text selection
+	m.rawSidebarLines = make([]string, len(data.scrollLines))
+	for i, line := range data.scrollLines {
+		m.rawSidebarLines[i] = stripANSI(line)
+	}
+
+	// Apply selection highlight if selection is active and overlaps visible area
+	if m.sidebarSel.active && len(visible) > 0 {
+		sl, sc, el, ec := normaliseSelection(m.sidebarSel.startLine, m.sidebarSel.startCol, m.sidebarSel.endLine, m.sidebarSel.endCol)
+		visibleStart := scrollOffset
+		visibleEnd := scrollOffset + visibleScrollLines - 1
+		if sl <= visibleEnd && el >= visibleStart {
+			adjSl := sl - visibleStart
+			adjEl := el - visibleStart
+			if adjSl < 0 {
+				adjSl = 0
+				sc = 0
+			}
+			if adjEl >= len(visible) {
+				adjEl = len(visible) - 1
+				if el < len(m.rawSidebarLines) {
+					ec = len(m.rawSidebarLines[el])
+				}
+			}
+			rawVisible := m.rawSidebarLines[visibleStart : visibleStart+len(visible)]
+			visible = applySelectionHighlight(visible, rawVisible, adjSl, sc, adjEl, ec)
+		}
+	}
+
 	if len(data.scrollLines) > visibleScrollLines {
 		marker := fmt.Sprintf(" %d/%d", scrollOffset+1, len(data.scrollLines))
 		if len(visible) > 0 {
@@ -7748,4 +7994,26 @@ func (m *model) makeCommitMsgGenerator(cfg *config.Config) func(diff string) tea
 			return gitCommitMsgMsg{text: strings.TrimSpace(msg.Content)}
 		}
 	}
+}
+
+// countRole returns the number of TUI messages with the given role.
+func countRole(msgs []message, r role) int {
+	n := 0
+	for _, m := range msgs {
+		if m.role == r {
+			n++
+		}
+	}
+	return n
+}
+
+// countToolMsgs returns the number of TUI messages that are tool results.
+func countToolMsgs(msgs []message) int {
+	n := 0
+	for _, m := range msgs {
+		if m.raw != nil && m.raw.Role == "tool" {
+			n++
+		}
+	}
+	return n
 }

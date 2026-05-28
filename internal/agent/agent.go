@@ -314,9 +314,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		return []Message{{Role: "assistant", Content: "(no llm client configured)"}}, nil
 	}
 
+	preLen := len(messages)
 	messages = a.PrepareMessages(messages, "")
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
+	emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prepare, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
 
 	// Recover orphaned tool calls from prior sessions: find the last assistant
 	// message that has ToolCalls, then check which call IDs have no following
@@ -580,23 +582,40 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult 
 	res := CompactResult{OriginalLen: len(messages)}
 
 	prefixEnd := findPrefixEnd(messages)
+
+	// Anchored multi-compaction: if a previous summary exists in the message
+	// stream, treat its position as the new prefix boundary so we only
+	// summarise content created since it. The previous summary itself is
+	// passed to the model as <previous-summary> and overwritten in place when
+	// the splice runs.
+	prevSummary, prevSummaryIdx := findPreviousSummary(messages)
+	middleStart := prefixEnd
+	replaceFrom := prefixEnd
+	if prevSummaryIdx >= prefixEnd {
+		middleStart = prevSummaryIdx + 1
+		replaceFrom = prevSummaryIdx
+	}
+
 	tailStart := findTurnBoundary(messages, rt.KeepRecentTurns)
-	if tailStart < prefixEnd {
-		tailStart = prefixEnd
+	if tailStart < middleStart {
+		tailStart = middleStart
 	}
 	tailStart = safeCut(messages, tailStart)
-	if tailStart <= prefixEnd {
-		// Nothing meaningful to summarize between prefix and tail.
+	if tailStart <= middleStart {
 		emitDebug("COMPACT", "skipped: no compactible middle after safe-cut")
 		return res
 	}
 
-	middle := messages[prefixEnd:tailStart]
+	middle := messages[middleStart:tailStart]
 	if len(middle) == 0 {
 		return res
 	}
 
-	prompt, dropped := buildSummaryPrompt(middle, rt.MaxSummaryInputTokens)
+	// Prune oversized tool results in the middle slice before summarising.
+	// Keeps signal density high without losing tool-call structure.
+	pruned := pruneToolResults(middle, compactPruneToolMaxChars)
+
+	prompt, dropped := buildSummaryPrompt(pruned, rt.MaxSummaryInputTokens, prevSummary)
 	if dropped > 0 {
 		emitDebug("COMPACT", fmt.Sprintf("dropped %d middle msgs from summary input (size cap)", dropped))
 	}
@@ -612,18 +631,22 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult 
 		return res
 	}
 
+	header := fmt.Sprintf("Compacted summary covering %d messages", len(middle))
+	if prevSummaryIdx >= 0 {
+		header = "Compacted anchored summary (updated)"
+	}
 	summaryMsg := Message{
 		Role: "system",
 		Content: fmt.Sprintf(
-			"[Compacted summary of %d earlier messages]\n\n%s",
-			len(middle), strings.TrimSpace(summaryText),
+			"%s\n%s\n\n%s",
+			compactionSummaryMarker, header, strings.TrimSpace(summaryText),
 		),
 	}
 	res.OK = true
-	res.ReplaceFrom = prefixEnd
+	res.ReplaceFrom = replaceFrom
 	res.ReplaceTo = tailStart
 	res.Summary = summaryMsg
-	emitDebug("COMPACT", fmt.Sprintf("done: replaced [%d:%d] (%d msgs) with summary", prefixEnd, tailStart, len(middle)))
+	emitDebug("COMPACT", fmt.Sprintf("done: replaced [%d:%d] (%d msgs) with anchored=%v summary", replaceFrom, tailStart, tailStart-replaceFrom, prevSummaryIdx >= 0))
 	return res
 }
 
@@ -1062,13 +1085,32 @@ func (a *Agent) LoadExternalTools(cfg *config.Config) {
 	}
 }
 
-// recoverOrphanedToolCalls iterates over all assistant messages with ToolCalls,
-// identifies any call IDs that have no following tool-result message, and
-// re-executes them. This handles sessions that were persisted mid-tool-execution
-// or messages that were compacted, where prior execution results may have been
-// removed but the tool_call declarations remain.
+// recoverOrphanedToolCalls re-executes tool calls whose results are missing.
+//
+// Only the LAST assistant message's orphans are re-executed — these represent
+// a session persisted mid-tool-execution where the most recent turn had calls
+// whose results were never saved. Historical orphans (earlier turns) are left
+// for repairToolCallSequence to synthesise inert stubs, avoiding dangerous
+// re-execution of side-effectful operations from prior turns.
+//
+// Re-executed results are inserted right after the assistant message, not at
+// the end of the message list. The old behaviour appended everything at the
+// end, placing tool results AFTER the new user message and confusing the LLM
+// into responding with "done".
 func (a *Agent) recoverOrphanedToolCalls(messages []Message) []Message {
-	// Build a set of all tool result IDs present in the conversation.
+	// Find the LAST assistant message with orphaned tool calls.
+	candidateIdx := -1
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" && len(messages[i].ToolCalls) > 0 {
+			candidateIdx = i
+			break
+		}
+	}
+	if candidateIdx < 0 {
+		return messages
+	}
+
+	// Build existing result IDs.
 	resultIDs := make(map[string]bool)
 	for _, msg := range messages {
 		if msg.Role == "tool" && msg.ToolID != "" {
@@ -1076,37 +1118,41 @@ func (a *Agent) recoverOrphanedToolCalls(messages []Message) []Message {
 		}
 	}
 
-	// Collect all orphaned tool calls across ALL assistant messages.
+	// Check if this assistant has orphaned calls.
 	var orphans []ToolCall
-	orphanIDs := make(map[string]bool) // dedup: avoid re-executing the same call ID twice
-	for _, msg := range messages {
-		if msg.Role == "assistant" {
-			for _, tc := range msg.ToolCalls {
-				if tc.ID != "" && !resultIDs[tc.ID] && !orphanIDs[tc.ID] {
-					orphans = append(orphans, tc)
-					orphanIDs[tc.ID] = true
-				}
-			}
+	seen := make(map[string]bool)
+	for _, tc := range messages[candidateIdx].ToolCalls {
+		if tc.ID != "" && !resultIDs[tc.ID] && !seen[tc.ID] {
+			orphans = append(orphans, tc)
+			seen[tc.ID] = true
 		}
 	}
 	if len(orphans) == 0 {
 		return messages
 	}
 
-	emitDebug("RECOVER", fmt.Sprintf("re-executing %d orphaned tool call(s) across history", len(orphans)))
+	emitDebug("RECOVER", fmt.Sprintf("re-executing %d orphaned tool call(s) from assistant at index %d", len(orphans), candidateIdx))
 
-	// Re-execute each orphan and append its result.
+	// Re-execute each orphan and insert results right after the assistant.
+	insertAt := candidateIdx + 1
+	for insertAt < len(messages) && messages[insertAt].Role == "tool" {
+		insertAt++ // skip existing tool results for other calls in this batch
+	}
+
+	out := make([]Message, 0, len(messages)+len(orphans))
+	out = append(out, messages[:insertAt]...)
+
 	for _, tc := range orphans {
 		result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 		if err != nil {
-			// ORPHAN_TOOL_ERROR: prefix is internal-only, used by TUI to render a visible warning.
-			// Do not use this prefix in tool outputs; it has special semantic meaning for session recovery.
 			result = fmt.Sprintf("ORPHAN_TOOL_ERROR:%s:%v\n%s", tc.Function.Name, err, result)
 		}
 		result = TruncateToolResult(tc.ID, result)
-		messages = append(messages, Message{Role: "tool", ToolID: tc.ID, Content: result})
+		out = append(out, Message{Role: "tool", ToolID: tc.ID, Content: result})
 	}
-	return messages
+
+	out = append(out, messages[insertAt:]...)
+	return out
 }
 
 func truncateDebugArgs(args json.RawMessage, max int) string {

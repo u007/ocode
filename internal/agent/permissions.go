@@ -69,6 +69,8 @@ type PermissionManager struct {
 	patterns        []patternRule
 	pathPatterns    map[string][]pathPatternEntry // toolName → path-glob patterns
 	bashPrefixes    map[string]PermissionLevel
+	bashAutoAllow   map[string]bool
+	bashPrefixModes map[string]string
 	workDir         string
 	webfetchDomains map[string]PermissionLevel
 }
@@ -76,6 +78,56 @@ type PermissionManager struct {
 type patternRule struct {
 	pattern string
 	level   PermissionLevel
+}
+
+const bashInRootPersistPrefix = "__inroot__:"
+
+var bashAutoAllowPrefixes = map[string]bool{
+	"awk":  true,
+	"basename": true,
+	"cat":  true,
+	"cut":  true,
+	"dirname": true,
+	"head": true,
+	"less": true,
+	"nl":   true,
+	"realpath": true,
+	"readlink": true,
+	"sort": true,
+	"tail": true,
+	"tr":   true,
+	"uniq": true,
+	"wc":   true,
+	"grep": true,
+	"rg":   true,
+	"sed":  true,
+}
+
+const (
+	bashPrefixModeReadOnly = "read_only"
+	bashPrefixModeMutating = "mutating"
+	bashPrefixModeNever    = "never_auto"
+)
+
+var bashAutoAllowDefaultModes = map[string]string{
+	"awk":      bashPrefixModeReadOnly,
+	"basename": bashPrefixModeReadOnly,
+	"cat":      bashPrefixModeReadOnly,
+	"cut":      bashPrefixModeReadOnly,
+	"dirname":  bashPrefixModeReadOnly,
+	"grep":     bashPrefixModeReadOnly,
+	"head":     bashPrefixModeReadOnly,
+	"less":     bashPrefixModeReadOnly,
+	"nl":       bashPrefixModeReadOnly,
+	"readlink": bashPrefixModeReadOnly,
+	"realpath": bashPrefixModeReadOnly,
+	"rg":       bashPrefixModeReadOnly,
+	"sed":      bashPrefixModeMutating,
+	"sort":     bashPrefixModeReadOnly,
+	"tail":     bashPrefixModeReadOnly,
+	"tr":       bashPrefixModeReadOnly,
+	"uniq":     bashPrefixModeReadOnly,
+	"wc":       bashPrefixModeReadOnly,
 }
 
 // pathScopedTools are file tools whose decision depends on the target path
@@ -94,7 +146,15 @@ func NewPermissionManager() *PermissionManager {
 		patterns:        make([]patternRule, 0),
 		pathPatterns:    make(map[string][]pathPatternEntry),
 		bashPrefixes:    make(map[string]PermissionLevel),
+		bashAutoAllow:   make(map[string]bool),
+		bashPrefixModes: make(map[string]string),
 		webfetchDomains: make(map[string]PermissionLevel),
+	}
+	for k, v := range bashAutoAllowPrefixes {
+		pm.bashAutoAllow[k] = v
+	}
+	for k, v := range bashAutoAllowDefaultModes {
+		pm.bashPrefixModes[k] = v
 	}
 	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell"} {
 		pm.rules[name] = PermissionAllow
@@ -159,6 +219,23 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 			pm.SetBashPrefixRule(k, level)
 		}
 	}
+	for _, prefix := range cfg.Bash.AutoAllowPrefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			continue
+		}
+		pm.bashAutoAllow[prefix] = true
+		if _, ok := pm.bashPrefixModes[prefix]; !ok {
+			pm.bashPrefixModes[prefix] = bashPrefixModeReadOnly
+		}
+	}
+	for prefix, mode := range cfg.Bash.PrefixModes {
+		mode = strings.TrimSpace(mode)
+		if mode != bashPrefixModeReadOnly && mode != bashPrefixModeMutating && mode != bashPrefixModeNever {
+			continue
+		}
+		pm.bashPrefixModes[prefix] = mode
+	}
 }
 
 func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) PermissionDecision {
@@ -179,11 +256,22 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		}
 		prefix, ok := bashPrefix(command)
 		if ok {
+			if level, exists := pm.bashPrefixes[bashInRootKey(prefix, pm.workDir)]; exists {
+				if level == PermissionAllow && canAutoAllowInRoot(pm, command, prefix) {
+					return PermissionDecision{Level: PermissionAllow}
+				}
+			}
 			if level, exists := pm.bashPrefixes[prefix]; exists {
 				if level == PermissionAsk {
 					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
 				}
+				if level == PermissionAllow && !canAutoAllowInRoot(pm, command, prefix) {
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
+				}
 				return PermissionDecision{Level: level}
+			}
+			if canAutoAllowWithMode(pm, command, prefix) {
+				return PermissionDecision{Level: PermissionAllow}
 			}
 		}
 		// Check safe bash commands after prefix rules
@@ -555,6 +643,52 @@ func (pm *PermissionManager) SetBashPrefixRule(prefix string, level PermissionLe
 	pm.bashPrefixes[prefix] = level
 }
 
+func (pm *PermissionManager) BashAutoAllowPrefixes() []string {
+	result := make([]string, 0, len(pm.bashAutoAllow))
+	for k, v := range pm.bashAutoAllow {
+		if v {
+			result = append(result, k)
+		}
+	}
+	return result
+}
+
+func (pm *PermissionManager) SetBashAutoAllowPrefix(prefix string, enabled bool) {
+	if strings.TrimSpace(prefix) == "" {
+		return
+	}
+	if enabled {
+		pm.bashAutoAllow[prefix] = true
+		if _, ok := pm.bashPrefixModes[prefix]; !ok {
+			pm.bashPrefixModes[prefix] = bashPrefixModeReadOnly
+		}
+		return
+	}
+	delete(pm.bashAutoAllow, prefix)
+}
+
+func (pm *PermissionManager) BashPrefixModes() map[string]string {
+	result := make(map[string]string, len(pm.bashPrefixModes))
+	for k, v := range pm.bashPrefixModes {
+		result[k] = v
+	}
+	return result
+}
+
+func (pm *PermissionManager) SetBashPrefixMode(prefix, mode string) bool {
+	if strings.TrimSpace(prefix) == "" {
+		return false
+	}
+	if mode != bashPrefixModeReadOnly && mode != bashPrefixModeMutating && mode != bashPrefixModeNever {
+		return false
+	}
+	pm.bashPrefixModes[prefix] = mode
+	if _, ok := pm.bashAutoAllow[prefix]; !ok && mode != bashPrefixModeNever {
+		pm.bashAutoAllow[prefix] = true
+	}
+	return true
+}
+
 func (pm *PermissionManager) SetMode(mode PermissionMode) {
 	switch mode {
 	case PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked:
@@ -590,6 +724,8 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 		patterns:        append([]patternRule(nil), pm.patterns...),
 		pathPatterns:    make(map[string][]pathPatternEntry, len(pm.pathPatterns)),
 		bashPrefixes:    make(map[string]PermissionLevel, len(pm.bashPrefixes)),
+		bashAutoAllow:   make(map[string]bool, len(pm.bashAutoAllow)),
+		bashPrefixModes: make(map[string]string, len(pm.bashPrefixModes)),
 		workDir:         pm.workDir,
 		webfetchDomains: make(map[string]PermissionLevel, len(pm.webfetchDomains)),
 	}
@@ -598,6 +734,12 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 	}
 	for k, v := range pm.bashPrefixes {
 		clone.bashPrefixes[k] = v
+	}
+	for k, v := range pm.bashAutoAllow {
+		clone.bashAutoAllow[k] = v
+	}
+	for k, v := range pm.bashPrefixModes {
+		clone.bashPrefixModes[k] = v
 	}
 	for k, v := range pm.webfetchDomains {
 		clone.webfetchDomains[k] = v
@@ -636,7 +778,25 @@ func (pm *PermissionManager) ExportConfig() config.PermissionConfig {
 	for k, v := range pm.BashPrefixRules() {
 		prefixes[k] = string(v)
 	}
-	return config.PermissionConfig{Mode: string(pm.Mode()), Tools: tools, Bash: config.BashPermissionConfig{Prefixes: prefixes}}
+	autoAllow := make([]string, 0, len(pm.bashAutoAllow))
+	for k, v := range pm.bashAutoAllow {
+		if v {
+			autoAllow = append(autoAllow, k)
+		}
+	}
+	modes := make(map[string]string, len(pm.bashPrefixModes))
+	for k, v := range pm.bashPrefixModes {
+		modes[k] = v
+	}
+	return config.PermissionConfig{
+		Mode:  string(pm.Mode()),
+		Tools: tools,
+		Bash: config.BashPermissionConfig{
+			Prefixes:          prefixes,
+			AutoAllowPrefixes: autoAllow,
+			PrefixModes:       modes,
+		},
+	}
 }
 
 func validPermissionLevel(level PermissionLevel) bool {
@@ -726,6 +886,116 @@ func splitShellFields(command string) []string {
 		fields = append(fields, b.String())
 	}
 	return fields
+}
+
+func bashInRootKey(prefix, workDir string) string {
+	cleanWorkDir := filepath.Clean(workDir)
+	return bashInRootPersistPrefix + prefix + ":" + cleanWorkDir
+}
+
+func canAutoAllowWithMode(pm *PermissionManager, command, prefix string) bool {
+	if !canAutoAllowInRoot(pm, command, prefix) {
+		return false
+	}
+	mode := pm.bashPrefixModes[prefix]
+	switch mode {
+	case bashPrefixModeNever:
+		return false
+	case bashPrefixModeMutating:
+		return true
+	default:
+		pm.bashPrefixes[bashInRootKey(prefix, pm.workDir)] = PermissionAllow
+		return true
+	}
+}
+
+func canAutoAllowInRoot(pm *PermissionManager, command, prefix string) bool {
+	if pm == nil || pm.workDir == "" {
+		return false
+	}
+	if !pm.bashAutoAllow[prefix] {
+		return false
+	}
+	if shellCompound(command) {
+		return false
+	}
+	fields := splitShellFields(command)
+	if len(fields) == 0 || fields[0] != prefix {
+		return false
+	}
+	paths := extractBashCommandPaths(prefix, fields)
+	if len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if !isWithinWorkDir(pm, p) {
+			return false
+		}
+	}
+	return true
+}
+
+func extractBashCommandPaths(prefix string, fields []string) []string {
+	var paths []string
+	sedScriptConsumed := false
+	for i := 1; i < len(fields); i++ {
+		arg := fields[i]
+		if arg == "--" {
+			for j := i + 1; j < len(fields); j++ {
+				if strings.TrimSpace(fields[j]) != "" {
+					paths = append(paths, fields[j])
+				}
+			}
+			break
+		}
+		if strings.HasPrefix(arg, "-") {
+			switch prefix {
+			case "awk":
+				if arg == "-f" {
+					i++
+				}
+			case "sed":
+				if arg == "-e" || arg == "-f" {
+					if arg == "-e" {
+						sedScriptConsumed = true
+					}
+					i++
+				}
+			case "grep", "rg", "head", "tail":
+				if arg == "-e" || arg == "-f" || arg == "--file" {
+					i++
+				}
+			}
+			continue
+		}
+		if prefix == "awk" && i == 1 {
+			continue
+		}
+		if prefix == "sed" && !sedScriptConsumed {
+			sedScriptConsumed = true
+			continue
+		}
+		if isLikelyPathArg(arg) {
+			paths = append(paths, arg)
+		}
+	}
+	return paths
+}
+
+func isLikelyPathArg(arg string) bool {
+	if arg == "" {
+		return false
+	}
+	if strings.Contains(arg, "*") || strings.Contains(arg, "?") || strings.Contains(arg, "[") {
+		return true
+	}
+	if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "./") || strings.HasPrefix(arg, "../") || strings.HasPrefix(arg, "~/") {
+		return true
+	}
+	if strings.Contains(arg, string(filepath.Separator)) || strings.Contains(arg, ".") {
+		return true
+	}
+	return true
 }
 
 func isHardBlockedCommand(command string) bool {

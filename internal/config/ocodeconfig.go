@@ -36,6 +36,7 @@ const (
 type OcodeConfig struct {
 	Compact         CompactConfig
 	Permissions     PermissionConfig
+	ExtraAllowedPaths []string
 	Editor          string
 	EditorMode      string
 	SmallModel      string
@@ -52,7 +53,9 @@ type PermissionConfig struct {
 }
 
 type BashPermissionConfig struct {
-	Prefixes map[string]string `json:"prefixes,omitempty"`
+	Prefixes          map[string]string `json:"prefixes,omitempty"`
+	AutoAllowPrefixes []string          `json:"auto_allow_prefixes,omitempty"`
+	PrefixModes       map[string]string `json:"prefix_modes,omitempty"`
 }
 
 type compactConfigFile struct {
@@ -79,6 +82,7 @@ type tuiConfigFile struct {
 type ocodeConfigFile struct {
 	Compact         compactConfigFile `json:"compact"`
 	Permissions     PermissionConfig  `json:"permissions"`
+	ExtraAllowedPaths []string        `json:"extra_allowed_paths,omitempty"`
 	Editor          string            `json:"editor,omitempty"`
 	EditorMode      string            `json:"editor_mode,omitempty"`
 	SmallModel      string            `json:"small_model,omitempty"`
@@ -143,7 +147,7 @@ func defaultPermissionConfig() PermissionConfig {
 			"skill":           "allow",
 			"question":        "allow",
 		},
-		Bash: BashPermissionConfig{Prefixes: map[string]string{}},
+		Bash: BashPermissionConfig{Prefixes: map[string]string{}, AutoAllowPrefixes: []string{}, PrefixModes: map[string]string{}},
 	}
 }
 
@@ -203,6 +207,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["permissions"]; ok {
 		applyPermissionConfig(&cfg.Permissions, file.Permissions)
 		delete(raw, "permissions")
+	}
+
+	if _, ok := raw["extra_allowed_paths"]; ok {
+		cfg.ExtraAllowedPaths = append([]string{}, file.ExtraAllowedPaths...)
+		delete(raw, "extra_allowed_paths")
 	}
 
 	if _, ok := raw["editor"]; ok {
@@ -270,6 +279,13 @@ func applyPermissionConfig(dst *PermissionConfig, src PermissionConfig) {
 	}
 	for k, v := range src.Bash.Prefixes {
 		dst.Bash.Prefixes[k] = v
+	}
+	dst.Bash.AutoAllowPrefixes = append([]string(nil), src.Bash.AutoAllowPrefixes...)
+	if dst.Bash.PrefixModes == nil {
+		dst.Bash.PrefixModes = make(map[string]string)
+	}
+	for k, v := range src.Bash.PrefixModes {
+		dst.Bash.PrefixModes[k] = v
 	}
 }
 
@@ -349,6 +365,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"compact":     cfg.Compact,
 		"permissions": cfg.Permissions,
 	}
+	if len(cfg.ExtraAllowedPaths) > 0 {
+		payload["extra_allowed_paths"] = cfg.ExtraAllowedPaths
+	}
 	if cfg.Editor != "" {
 		payload["editor"] = cfg.Editor
 	}
@@ -368,7 +387,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "permissions" {
+		if k == "compact" || k == "permissions" || k == "extra_allowed_paths" {
 			continue
 		}
 		payload[k] = v

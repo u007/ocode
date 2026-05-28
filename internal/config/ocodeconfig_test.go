@@ -325,6 +325,8 @@ func TestSaveOcodePermissionsPersistsAcrossNextSession(t *testing.T) {
 
 	permissions := defaultPermissionConfig()
 	permissions.Tools["bash"] = "allow"
+	permissions.Bash.AutoAllowPrefixes = []string{"jq"}
+	permissions.Bash.PrefixModes = map[string]string{"jq": "read_only", "sed": "mutating"}
 	if err := SaveOcodePermissions(permissions); err != nil {
 		t.Fatalf("SaveOcodePermissions failed: %v", err)
 	}
@@ -335,6 +337,12 @@ func TestSaveOcodePermissionsPersistsAcrossNextSession(t *testing.T) {
 	}
 	if got := cfg.Ocode.Permissions.Tools["bash"]; got != "allow" {
 		t.Fatalf("want persisted bash allow, got %q", got)
+	}
+	if len(cfg.Ocode.Permissions.Bash.AutoAllowPrefixes) != 1 || cfg.Ocode.Permissions.Bash.AutoAllowPrefixes[0] != "jq" {
+		t.Fatalf("want persisted auto_allow_prefixes [jq], got %#v", cfg.Ocode.Permissions.Bash.AutoAllowPrefixes)
+	}
+	if got := cfg.Ocode.Permissions.Bash.PrefixModes["sed"]; got != "mutating" {
+		t.Fatalf("want persisted sed mode mutating, got %q", got)
 	}
 }
 
@@ -390,5 +398,47 @@ func TestSaveAndGetLastThinkingBudget(t *testing.T) {
 	}
 	if got, ok := parsed["last_thinking_budget"].(float64); !ok || int(got) != 8000 {
 		t.Fatalf("want last_thinking_budget 8000, got %v", parsed["last_thinking_budget"])
+	}
+}
+
+func TestExtraAllowedPathsLoadAndSave(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	initial := `{"extra_allowed_paths":["/tmp/a","/tmp/b"]}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if len(cfg.Ocode.ExtraAllowedPaths) != 2 {
+		t.Fatalf("want 2 extra paths, got %d", len(cfg.Ocode.ExtraAllowedPaths))
+	}
+
+	cfg.Ocode.ExtraAllowedPaths = []string{"/tmp/c"}
+	if err := SaveOcodeConfig(&cfg.Ocode); err != nil {
+		t.Fatalf("SaveOcodeConfig failed: %v", err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(configDir, "ocodeconfig.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	raw, ok := parsed["extra_allowed_paths"].([]any)
+	if !ok || len(raw) != 1 || raw[0] != "/tmp/c" {
+		t.Fatalf("unexpected extra_allowed_paths: %v", parsed["extra_allowed_paths"])
 	}
 }

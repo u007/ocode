@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -56,7 +57,7 @@ func init() {
 		{name: "/mcp", usage: "/mcp [list|enable <server>|disable <server>]", help: "List or toggle MCP servers", handler: runMCPCmd},
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
-		{name: "/permissions", help: "View or set tool permissions", handler: runPermissionsCmd},
+		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|<tool>]", help: "View or set tool and bash auto-allow permissions", handler: runPermissionsCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
@@ -164,6 +165,11 @@ func buildCommandHelpText(specs []commandSpec) string {
 	b.WriteString("Ctrl+X         : Leader key for quick actions (u:undo, r:redo, n:new, l:list, c:compact)\n")
 	b.WriteString("Ctrl+O         : Toggle YOLO permissions mode\n")
 	b.WriteString("Ctrl+Y         : Retry last LLM timeout or I/O error\n")
+	b.WriteString("\nPermission examples:\n")
+	b.WriteString("/permissions bash:git allow\n")
+	b.WriteString("/permissions auto-add jq\n")
+	b.WriteString("/permissions auto-remove jq\n")
+	b.WriteString("/permissions mode sed mutating\n")
 	return b.String()
 }
 
@@ -346,6 +352,7 @@ func runAgentCmd(m *model, args []string) tea.Cmd {
 }
 
 func runPermissionsCmd(m *model, args []string) tea.Cmd {
+	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto>]"
 	if len(args) == 0 {
 		if m.agent == nil || m.agent.Permissions() == nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission rules configured."})
@@ -359,19 +366,94 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 		var b strings.Builder
 		b.WriteString(fmt.Sprintf("Permission mode: %s\n\n", m.agent.Permissions().Mode()))
 		b.WriteString("Tool permission rules:\n")
-		for toolName, level := range rules {
+		ruleNames := make([]string, 0, len(rules))
+		for toolName := range rules {
+			ruleNames = append(ruleNames, toolName)
+		}
+		sort.Strings(ruleNames)
+		for _, toolName := range ruleNames {
+			level := rules[toolName]
 			b.WriteString(fmt.Sprintf("  %-20s %s\n", toolName, level))
 		}
 		prefixRules := m.agent.Permissions().BashPrefixRules()
 		if len(prefixRules) > 0 {
 			b.WriteString("\nBash prefix rules:\n")
-			for prefix, level := range prefixRules {
+			prefixNames := make([]string, 0, len(prefixRules))
+			for prefix := range prefixRules {
+				prefixNames = append(prefixNames, prefix)
+			}
+			sort.Strings(prefixNames)
+			for _, prefix := range prefixNames {
+				level := prefixRules[prefix]
 				b.WriteString(fmt.Sprintf("  %-20s %s\n", prefix, level))
 			}
 		}
-		b.WriteString("\nUsage: /permissions <tool> <allow|deny|ask> or /permissions bash:<prefix> <allow|deny|ask>")
+		auto := m.agent.Permissions().BashAutoAllowPrefixes()
+		sort.Strings(auto)
+		if len(auto) > 0 {
+			b.WriteString("\nBash auto-allow prefixes:\n")
+			for _, prefix := range auto {
+				b.WriteString(fmt.Sprintf("  %s\n", prefix))
+			}
+		}
+		modes := m.agent.Permissions().BashPrefixModes()
+		if len(modes) > 0 {
+			modeNames := make([]string, 0, len(modes))
+			for prefix := range modes {
+				modeNames = append(modeNames, prefix)
+			}
+			sort.Strings(modeNames)
+			b.WriteString("\nBash prefix modes:\n")
+			for _, prefix := range modeNames {
+				b.WriteString(fmt.Sprintf("  %-20s %s\n", prefix, modes[prefix]))
+			}
+		}
+		b.WriteString("\n" + usage)
 		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 		return nil
+	}
+	if m.agent == nil || m.agent.Permissions() == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured."})
+		return nil
+	}
+	if len(args) >= 2 {
+		action := strings.ToLower(args[0])
+		switch action {
+		case "auto-add":
+			prefix := strings.TrimSpace(args[1])
+			if prefix == "" {
+				m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+				return nil
+			}
+			m.agent.Permissions().SetBashAutoAllowPrefix(prefix, true)
+			m.persistPermissions()
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Added bash auto-allow prefix %q.", prefix)})
+			return nil
+		case "auto-remove":
+			prefix := strings.TrimSpace(args[1])
+			if prefix == "" {
+				m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+				return nil
+			}
+			m.agent.Permissions().SetBashAutoAllowPrefix(prefix, false)
+			m.persistPermissions()
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Removed bash auto-allow prefix %q.", prefix)})
+			return nil
+		case "mode":
+			if len(args) < 3 {
+				m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+				return nil
+			}
+			prefix := strings.TrimSpace(args[1])
+			mode := strings.TrimSpace(args[2])
+			if !m.agent.Permissions().SetBashPrefixMode(prefix, mode) {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid mode. Use read_only, mutating, or never_auto."})
+				return nil
+			}
+			m.persistPermissions()
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Set bash prefix mode for %q to %q.", prefix, mode)})
+			return nil
+		}
 	}
 	if len(args) >= 2 {
 		toolName := args[0]
@@ -380,18 +462,16 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission level. Use: allow, deny, or ask."})
 			return nil
 		}
-		if m.agent != nil && m.agent.Permissions() != nil {
-			if strings.HasPrefix(toolName, "bash:") {
-				m.agent.Permissions().SetBashPrefixRule(strings.TrimPrefix(toolName, "bash:"), level)
-			} else {
-				m.agent.Permissions().SetRule(toolName, level)
-			}
-			m.persistPermissions()
+		if strings.HasPrefix(toolName, "bash:") {
+			m.agent.Permissions().SetBashPrefixRule(strings.TrimPrefix(toolName, "bash:"), level)
+		} else {
+			m.agent.Permissions().SetRule(toolName, level)
 		}
+		m.persistPermissions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Set %s permission for %q to %s.", level, toolName, level)})
 		return nil
 	}
-	m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions [<tool> <allow|deny|ask>]"})
+	m.messages = append(m.messages, message{role: roleAssistant, text: usage})
 	return nil
 }
 
