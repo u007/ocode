@@ -140,6 +140,50 @@ func TestShellFinishedMessageIsRecorded(t *testing.T) {
 	}
 }
 
+func TestCommandRunningCounterTracksOverlappingCompletions(t *testing.T) {
+	m := model{
+		input:    newTestTextarea(),
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		styles:   ApplyThemeColors("tokyonight"),
+	}
+	m.markCmdStarted()
+	m.markCmdStarted()
+
+	updated, _ := m.Update(shellFinishedMsg{command: "echo one", output: "one\n", toolCallID: "shell-1"})
+	got := updated.(model)
+	if !got.cmdRunning() {
+		t.Fatal("expected command-running state to remain active after first completion")
+	}
+
+	updated, _ = got.Update(cmdFinishedMsg{})
+	got = updated.(model)
+	if got.cmdRunning() {
+		t.Fatal("expected command-running state to clear after all completions")
+	}
+}
+
+func TestRenderStatusReflectsCommandRunningState(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     120,
+		activeTab: tabChat,
+		styles:    ApplyThemeColors("tokyonight"),
+		input:     newTestTextarea(),
+	}
+
+	m.markCmdStarted()
+	status := m.renderStatus()
+	if strings.Contains(status, "LLM: ○ idle") {
+		t.Fatalf("expected non-idle status while command is running, got %q", status)
+	}
+
+	m.markCmdFinished()
+	status = m.renderStatus()
+	if !strings.Contains(status, "LLM: ○ idle") {
+		t.Fatalf("expected idle status after command completion, got %q", status)
+	}
+}
+
 func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 	client := &nestedTaskClient{responses: []*agent.Message{
 		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-parent-task", "task", `{"prompt":"spawn nested"}`)}},

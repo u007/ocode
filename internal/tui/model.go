@@ -181,6 +181,11 @@ type shellFinishedMsg struct {
 	err        error
 }
 
+type cmdFinishedMsg struct {
+	msgs []agent.Message
+	err  error
+}
+
 type connectOAuthFinishedMsg struct {
 	provider string
 	cred     auth.Credential
@@ -511,6 +516,7 @@ type model struct {
 	titleRequested           bool
 	titleGen                 uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
 	compacting               bool
+	cmdRunningCount          int
 	lastCompactErr           error
 	pendingCompactUIIdx      []int
 	pendingCompactResume     bool
@@ -562,6 +568,20 @@ func thinkingLevelIndexForBudget(budget int) int {
 		}
 	}
 	return 0
+}
+
+func (m *model) markCmdStarted() {
+	m.cmdRunningCount++
+}
+
+func (m *model) markCmdFinished() {
+	if m.cmdRunningCount > 0 {
+		m.cmdRunningCount--
+	}
+}
+
+func (m model) cmdRunning() bool {
+	return m.cmdRunningCount > 0
 }
 
 type toolOutputRegion struct {
@@ -1404,6 +1424,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.connect.message = fmt.Sprintf("%s\n\n✓ Connection verified.", m.connect.message)
 		}
 	case shellFinishedMsg:
+		m.markCmdFinished()
 		content := msg.output
 		if msg.err != nil {
 			if content == "" {
@@ -1468,7 +1489,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cleanupCurrentSession()
 		return m, tea.Quit
 	case dotTickMsg:
-		if m.streaming || m.lastActivity.LLMRunning || m.compacting || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || time.Now().Before(m.tokenBlinkUntil) || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
+		if m.streaming || m.lastActivity.LLMRunning || m.compacting || m.cmdRunning() || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || time.Now().Before(m.tokenBlinkUntil) || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
 			m.dotFrame = (m.dotFrame + 1) % 4
 			// Refresh live detail view content.
 			if !m.detail.empty() {
@@ -1734,6 +1755,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeTab == tabGit {
 			m.git.statusMsg = "editor closed"
 			return m, m.git.cmdRefresh()
+		}
+	case cmdFinishedMsg:
+		m.markCmdFinished()
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", msg.err)})
+			m.rerenderTranscriptAndMaybeScroll()
+		} else if len(msg.msgs) > 0 {
+			for _, am := range msg.msgs {
+				m.appendAgentMessage(am)
+			}
+			m.rerenderTranscriptAndMaybeScroll()
+			m.saveSession()
 		}
 	case errorMsg:
 		if msg != nil {
@@ -2244,6 +2277,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 				ToolCalls: []agent.ToolCall{tc},
 			})
 			m.rerenderTranscriptAndMaybeScroll()
+			m.markCmdStarted()
 			return m, m.runCapturedShell(cmdText, m.workDir, toolCallID)
 		}
 
@@ -3242,6 +3276,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 			m.agent.ResetSubagentDispatch()
 		}
 		m.rerenderTranscriptAndMaybeScroll()
+		m.markCmdStarted()
 		return m, m.sendCustomCommandPrompt(prompt)
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
@@ -4094,6 +4129,7 @@ func (m *model) handleInitCmd(args []string) tea.Cmd {
 		m.agent.ResetSubagentDispatch()
 	}
 	m.rerenderTranscriptAndMaybeScroll()
+	m.markCmdStarted()
 	return m.sendCustomCommandPrompt(prompt)
 }
 
@@ -4420,15 +4456,15 @@ func (m model) prepareAgentMessages(msgs []agent.Message) []agent.Message {
 func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
 	return func() tea.Msg {
 		if m.agent == nil {
-			return errorMsg(fmt.Errorf("no agent configured"))
+			return cmdFinishedMsg{err: fmt.Errorf("no agent configured")}
 		}
 		agentMsgs := []agent.Message{{Role: "user", Content: prompt}}
 		agentMsgs = m.prepareAgentMessages(agentMsgs)
 		resp, err := m.agent.Step(agentMsgs)
 		if err != nil {
-			return errorMsg(err)
+			return cmdFinishedMsg{err: err}
 		}
-		return resp
+		return cmdFinishedMsg{msgs: resp}
 	}
 }
 
@@ -6737,7 +6773,7 @@ func (m *model) renderStatus() string {
 		}
 	}
 	llmState := "○ idle"
-	if m.streaming || m.lastActivity.LLMRunning {
+	if m.streaming || m.lastActivity.LLMRunning || m.cmdRunning() {
 		dots := [4]string{"●○○", "●●○", "●●●", "○●●"}
 		llmState = dots[m.dotFrame]
 		if !m.streamStartedAt.IsZero() {
