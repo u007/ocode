@@ -7,15 +7,24 @@ import (
 	"runtime"
 )
 
-type Plugin struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Commands     []string `json:"commands"`
-	Tools        []string `json:"tools"`
-	Instructions string   `json:"instructions"`
+type PluginMCPConfig struct {
+	Server       string   `json:"server"`
+	AutoRegister bool     `json:"auto_register"`
+	Command      []string `json:"command"`
 }
 
-func LoadPlugins() []Plugin {
+type Plugin struct {
+	Name         string           `json:"name"`
+	Description  string           `json:"description"`
+	Version      string           `json:"version"`
+	Commands     []string         `json:"commands"`
+	Tools        []string         `json:"tools"`
+	Instructions string           `json:"instructions"`
+	OnInstall    []string         `json:"on_install"`
+	MCP          *PluginMCPConfig `json:"mcp"`
+}
+
+func LoadPlugins(enabled map[string]bool) []Plugin {
 	var plugins []Plugin
 
 	for _, dir := range pluginSearchPaths() {
@@ -38,6 +47,11 @@ func LoadPlugins() []Plugin {
 			}
 			if p.Name == "" {
 				p.Name = e.Name()
+			}
+			if enabled != nil {
+				if on, ok := enabled[p.Name]; ok && !on {
+					continue
+				}
 			}
 			plugins = append(plugins, p)
 		}
@@ -87,8 +101,8 @@ func findProjectRoot() string {
 	return ""
 }
 
-func LoadPluginInstructions() string {
-	plugins := LoadPlugins()
+func LoadPluginInstructions(enabled map[string]bool) string {
+	plugins := LoadPlugins(enabled)
 	if len(plugins) == 0 {
 		return ""
 	}
@@ -102,7 +116,7 @@ func LoadPluginInstructions() string {
 	return instructions
 }
 
-func LoadPluginToolsDirPaths() []string {
+func LoadPluginToolsDirPaths(enabled map[string]bool) []string {
 	var paths []string
 
 	for _, dir := range pluginSearchPaths() {
@@ -113,6 +127,19 @@ func LoadPluginToolsDirPaths() []string {
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
+			}
+			if enabled != nil {
+				name := e.Name()
+				pluginPath := filepath.Join(dir, e.Name(), "plugin.json")
+				if data, err := os.ReadFile(pluginPath); err == nil {
+					var p Plugin
+					if err := json.Unmarshal(data, &p); err == nil && p.Name != "" {
+						name = p.Name
+					}
+				}
+				if on, ok := enabled[name]; ok && !on {
+					continue
+				}
 			}
 			toolsDir := filepath.Join(dir, e.Name(), "tools")
 			if _, err := os.Stat(toolsDir); err == nil {
@@ -124,7 +151,7 @@ func LoadPluginToolsDirPaths() []string {
 	return paths
 }
 
-func LoadPluginCommandDirPaths() []string {
+func LoadPluginCommandDirPaths(enabled map[string]bool) []string {
 	var paths []string
 
 	for _, dir := range pluginSearchPaths() {
@@ -135,6 +162,19 @@ func LoadPluginCommandDirPaths() []string {
 		for _, e := range entries {
 			if !e.IsDir() {
 				continue
+			}
+			if enabled != nil {
+				name := e.Name()
+				pluginPath := filepath.Join(dir, e.Name(), "plugin.json")
+				if data, err := os.ReadFile(pluginPath); err == nil {
+					var p Plugin
+					if err := json.Unmarshal(data, &p); err == nil && p.Name != "" {
+						name = p.Name
+					}
+				}
+				if on, ok := enabled[name]; ok && !on {
+					continue
+				}
 			}
 			cmdsDir := filepath.Join(dir, e.Name(), "commands")
 			if _, err := os.Stat(cmdsDir); err == nil {
