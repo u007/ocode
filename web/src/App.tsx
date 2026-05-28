@@ -5,6 +5,7 @@ import ChatInput from "./components/Chat/ChatInput";
 import SessionList from "./components/Sidebar/SessionList";
 import ModelSelector from "./components/Sidebar/ModelSelector";
 import AgentTabs from "./components/Sidebar/AgentTabs";
+import StatusBar from "./components/common/StatusBar";
 
 export default function App() {
   const [activeAgent, setActiveAgent] = useState("coder");
@@ -20,6 +21,7 @@ export default function App() {
         <main className="flex flex-1 flex-col">
           <ChatPanel />
           <ChatInput />
+          <StatusBar />
         </main>
       </div>
     </ChatProvider>
