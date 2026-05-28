@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -329,5 +330,74 @@ func TestChatAnthropic_TruncatedToolJSONFallsBackToEmptyObject(t *testing.T) {
 	}
 	if got := msg.ToolCalls[0].Function.Arguments; got != "{}" {
 		t.Fatalf("expected {} fallback, got %q", got)
+	}
+}
+
+func TestChatAnthropic_OnUsageEmitsIncrementalDeltas(t *testing.T) {
+	// Anthropic's message_start carries initial input/output_tokens and each
+	// message_delta carries cumulative output_tokens. The streaming OnUsage
+	// callback must convert these cumulative snapshots into incremental deltas
+	// so subscribers like AgentRun.AddUsage do not over-count.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fw := w.(http.Flusher)
+		write := func(s string) { _, _ = io.WriteString(w, s); fw.Flush() }
+		write("data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-test\",\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\n\n")
+		write("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		write("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n")
+		// Cumulative output_tokens progression: 10 -> 25 -> 40.
+		write("data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":100,\"output_tokens\":10}}\n\n")
+		write("data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":100,\"output_tokens\":25}}\n\n")
+		write("data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":100,\"output_tokens\":40}}\n\n")
+		write("data: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+		write("data: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+
+	var mu sync.Mutex
+	var sumIn, sumOut int64
+	c := &GenericClient{
+		APIKey:   "test",
+		Model:    "claude-test",
+		BaseURL:  srv.URL,
+		Provider: "anthropic",
+	}
+	c.SetOnUsage(func(in, out int64) {
+		mu.Lock()
+		defer mu.Unlock()
+		sumIn += in
+		sumOut += out
+	})
+	if _, err := c.chatAnthropic([]Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("chatAnthropic error: %v", err)
+	}
+	// Subscriber summing deltas must see the final cumulative totals exactly,
+	// not the sum of cumulative snapshots (which would be 100+100+100+100=400
+	// in and 0+10+25+40=75 out).
+	if sumIn != 100 {
+		t.Fatalf("expected summed input deltas=100, got %d", sumIn)
+	}
+	if sumOut != 40 {
+		t.Fatalf("expected summed output deltas=40, got %d", sumOut)
+	}
+}
+
+func TestNormalizeLMStudioBaseURL(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"http://localhost:1234", "http://localhost:1234/v1"},
+		{"http://localhost:1234/", "http://localhost:1234/v1"},
+		{"http://localhost:1234/v1", "http://localhost:1234/v1"},
+		{"http://localhost:1234/v1/", "http://localhost:1234/v1"},
+		{"http://host.example:8080/v1", "http://host.example:8080/v1"},
+		{"  http://localhost:1234/v1  ", "http://localhost:1234/v1"},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := normalizeLMStudioBaseURL(tc.in); got != tc.want {
+			t.Errorf("normalizeLMStudioBaseURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }
