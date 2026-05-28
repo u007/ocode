@@ -441,7 +441,9 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		}
 		pending := m.pendingPluginInstall
 		m.pendingPluginInstall = nil
-		_ = plugins.Remove(pending.dirName)
+		if err := plugins.Remove(pending.dirName); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Warning: could not clean up plugin dir %s: %v", pending.dirName, err)})
+		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Plugin install cancelled."})
 		return nil
 
