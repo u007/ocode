@@ -5,13 +5,29 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/jamesmercstudio/ocode/internal/hooks"
 )
+
+var (
+	processHooksMu sync.RWMutex
+	processHooks   *hooks.Pipeline
+)
+
+// SetHookPipeline wires the hook pipeline into the process/tool layer.
+// Safe to call concurrently.
+func SetHookPipeline(p *hooks.Pipeline) {
+	processHooksMu.Lock()
+	processHooks = p
+	processHooksMu.Unlock()
+}
 
 // ProcStatus is the lifecycle state of a background process.
 type ProcStatus string
@@ -204,6 +220,20 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	} else {
 		cmd = exec.Command("bash", "-c", command)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	}
+	processHooksMu.RLock()
+	ph := processHooks
+	processHooksMu.RUnlock()
+	if ph != nil {
+		cwd, _ := os.Getwd()
+		extra := ph.RunShellEnv(cwd)
+		if len(extra) > 0 {
+			base := os.Environ()
+			for k, v := range extra {
+				base = append(base, k+"="+v)
+			}
+			cmd.Env = base
+		}
 	}
 	p.mu.Lock()
 	p.cmd = cmd
