@@ -86,43 +86,15 @@ Phase 1 (file-backed prompts) and Phase 2 (model-ID routing) landed 2026-05-27. 
 - **Resolve mode-vs-spec prompt ambiguity.** `BasePromptMessages` computes `Mode().SystemPrompt()` and then conditionally overrides it with `spec.SystemPrompt`. Two prompt sources, one wins, the other was computed for nothing. Pick one resolver and document the precedence.
 - **Reconsider marker dedup.** The 5-marker `[ocode:*]` system with `existingPromptMarkers` scan provides idempotency and testability. If marker semantics drift further, revisit whether a simpler `Agent.prompted bool` + a separate test mechanism would be cleaner.
 
-## Plugin system — `/plugin` command + native reimplementations
+## Plugin system — `/plugin` command + native reimplementations ✅ (2026-05-29)
 
-opencode's plugins are TypeScript/JS modules; they cannot be reused in ocode. The concepts below are greenfield Go reimplementations inspired by opencode's plugin architecture.
+Implemented on branch `feat/plugin-auth-hooks`. All three subsystems shipped:
 
-### `/plugin` TUI command (not yet built)
+- **`/plugin` TUI command** — list, enable/disable, install (git+local with confirm flow), remove, info. `PluginConfig` with `Dir`/`Ref` fields in config. `internal/plugins/manager.go` with InstallGit/Local, RunOnInstall (direct exec, no shell), AutoRegisterMCP/UnregisterMCP.
+- **Auth providers** — Cloudflare Workers AI (account ID prompt + BaseURL construction), Cloudflare AI Gateway (o-series max_tokens strip), OpenAI Codex (reuses OpenAI OAuth). `AccountID` field on `Credential`.
+- **In-process hook pipeline** — `internal/hooks/pipeline.go` with ToolBefore/After, ChatParams, ShellEnv hook points. Wired into `executeToolCall`, `chatWithDelta` (save/restore GenericClient fields), and bash subprocess env injection in `tool/process.go`.
 
-Add `/plugin` as a slash command following the same pattern as `/mcp` (`commands.go` + `renderPluginList()` in `model.go`):
-
-- `/plugin` — list installed plugins (name, source, enabled, tool/command count)
-- `/plugin enable <name>` — set `enabled=true` in config + reload
-- `/plugin disable <name>` — set `enabled=false` in config
-- `/plugin install <url>` — accept `github.com/user/repo`, `https://github.com/...`, or local path; `git clone` to `~/.config/opencode/plugins/<name>/`; read `plugin.json`; register in config
-- `/plugin remove <name>` — delete from disk + remove from config
-- `/plugin info <name>` — show description, commands, tools, instructions
-
-Implementation checklist:
-- `internal/plugins/manager.go` — install/remove/enable/disable + config persistence
-- `internal/tui/commands.go` — add `/plugin` commandSpec + `runPluginCmd` handler
-- `internal/tui/model.go` — `renderPluginList()` (mirrors `renderMCPList()`)
-- `internal/config/config.go` — add `Plugins map[string]PluginConfig` with `Enabled bool, Source string`
-
-### Auth providers to add (inspired by opencode's built-in auth plugins)
-
-These exist as TypeScript plugins in opencode but need native Go implementations in `internal/auth/`:
-
-- **Cloudflare Workers AI** — API key prompt + provider entry; route to `https://api.cloudflare.com/client/v4/accounts/{id}/ai/v1`
-- **Cloudflare AI Gateway** — gateway URL routing; strip `max_tokens` for `o-series` models (opencode `cloudflare.ts` pattern)
-- **OpenAI Codex** — extend existing `openai_oauth.go`; add Codex endpoint rewriting + model list filtering
-
-### Hook pipeline — in-process hooks (inspired by opencode's server hooks)
-
-ocode currently has shell-command pre/post hooks (`HookConfig`) but no in-process hooks. opencode's hook system supports `chat.params`, `chat.headers`, `tool.execute.before/after`, and `shell.env`. Implementing these in Go inside `internal/agent/agent.go` would unlock the same extensibility without external processes:
-
-- Define `HookPipeline` interface with typed hook points
-- Wire `OnToolBefore(name, args)` / `OnToolAfter(name, result)` into `HandleToolCall`
-- Wire `OnChatParams(model, messages)` for temperature/topP/maxTokens overrides
-- Wire `OnShellEnv(cwd)` for environment injection into bash tool
+Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoindex-plugin.md` — requires plugin system to be merged first.
 
 ## apply_patch parity with opencode — follow-up
 
