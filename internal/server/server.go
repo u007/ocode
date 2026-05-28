@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,9 +17,10 @@ type Server struct {
 	password string
 	mux      *http.ServeMux
 	handler  *Handler
+	webFS    fs.FS
 }
 
-func New(addr, username, password string) *Server {
+func New(addr, username, password string, webFS fs.FS) *Server {
 	mux := http.NewServeMux()
 	h := NewHandler()
 	s := &Server{
@@ -27,6 +29,7 @@ func New(addr, username, password string) *Server {
 		password: password,
 		mux:      mux,
 		handler:  h,
+		webFS:    webFS,
 	}
 	s.registerRoutes()
 	return s
@@ -38,6 +41,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
 	s.mux.HandleFunc("GET /api/models", s.authMiddleware(s.handleListModels))
+
+	// Serve embedded web UI for non-API routes
+	s.mux.Handle("/", spaHandler(s.webFS))
 }
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
@@ -82,7 +88,7 @@ func (s *Server) Start() error {
 	return http.ListenAndServe(s.addr, s.mux)
 }
 
-func Run(args []string) error {
+func Run(args []string, webFS fs.FS) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", 4096, "Port to listen on")
 	host := fs.String("host", "0.0.0.0", "Host to bind to")
@@ -93,7 +99,7 @@ func Run(args []string) error {
 	username := os.Getenv("OPENCODE_SERVER_USERNAME")
 	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
 
-	srv := New(addr, username, password)
+	srv := New(addr, username, password, webFS)
 
 	if *openBrowser {
 		go func() {
