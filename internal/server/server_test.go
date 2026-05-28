@@ -63,6 +63,17 @@ func TestNoAuthWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestChatStreamNoMessage(t *testing.T) {
+	h := NewHandler()
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/chat/stream", nil)
+	h.HandleChatStream(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", w.Code)
+	}
+}
+
 func TestListModels(t *testing.T) {
 	h := NewHandler()
 	w := httptest.NewRecorder()

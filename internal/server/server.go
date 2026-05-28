@@ -37,6 +37,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
+	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))
 	s.mux.HandleFunc("GET /api/sessions", s.authMiddleware(s.handleListSessions))
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
@@ -77,6 +78,10 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleSendMessage(w, r, id)
+}
+
+func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleChatStream(w, r)
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +162,7 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) WithCORS() *Server {
 	wrapped := http.NewServeMux()
 	wrapped.HandleFunc("POST /api/chat", corsMiddleware(s.handleChat))
+	wrapped.HandleFunc("GET /api/chat/stream", corsMiddleware(s.handleChatStream))
 	wrapped.HandleFunc("GET /api/sessions", corsMiddleware(s.handleListSessions))
 	wrapped.HandleFunc("GET /api/sessions/{id}", corsMiddleware(s.handleGetSession))
 	wrapped.HandleFunc("POST /api/sessions/{id}/message", corsMiddleware(s.handleSendMessage))
