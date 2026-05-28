@@ -113,6 +113,29 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	sendSSE(w, flusher, "session", map[string]string{"session_id": sessionID})
 
+	// Wire up streaming callbacks so events fire during Step()
+	ag.OnDelta = func(kind, text string) {
+		if kind == "text" {
+			sendSSE(w, flusher, "text", TextDelta{Delta: text})
+		}
+	}
+	ag.OnMessage = func(m agent.Message) {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				sendSSE(w, flusher, "tool_start", ToolStartEvent{
+					Tool:    tc.Function.Name,
+					Command: tc.Function.Arguments,
+				})
+			}
+		}
+		if m.Role == "tool" {
+			sendSSE(w, flusher, "tool_result", ToolResultEvent{
+				Tool:   "tool",
+				Output: m.Content,
+			})
+		}
+	}
+
 	resp, err := ag.Step(messages)
 	if err != nil {
 		sendSSE(w, flusher, "error", map[string]string{"error": err.Error()})
@@ -121,13 +144,6 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	h.mu.Lock()
 	as.messages = append(as.messages, resp...)
-
-	for _, m := range resp {
-		if m.Role == "assistant" && m.Content != "" {
-			sendSSE(w, flusher, "text", TextDelta{Delta: m.Content})
-		}
-	}
-
 	_ = session.Save(sessionID, "", as.messages, nil)
 	h.mu.Unlock()
 
