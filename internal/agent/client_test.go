@@ -370,7 +370,7 @@ func TestChatAnthropic_OnUsageEmitsIncrementalDeltas(t *testing.T) {
 		sumIn += in
 		sumOut += out
 	})
-	if _, err := c.chatAnthropic([]Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+	if _, err := c.chatAnthropic(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
 		t.Fatalf("chatAnthropic error: %v", err)
 	}
 	// Subscriber summing deltas must see the final cumulative totals exactly,
