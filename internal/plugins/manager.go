@@ -47,7 +47,10 @@ func InstallGit(rawURL, pluginsRoot, ref string) (Plugin, string, error) {
 	if p.Name == "" {
 		p.Name = dirName
 	}
-	abs, _ := filepath.Abs(destDir)
+	abs, err := filepath.Abs(destDir)
+	if err != nil {
+		return Plugin{}, "", fmt.Errorf("resolve clone dir: %w", err)
+	}
 	return p, abs, nil
 }
 
