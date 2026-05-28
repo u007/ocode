@@ -268,7 +268,7 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 }
 
 func renderDetailThinkingBox(content string, width int, expanded bool) string {
-	text := strings.TrimSpace(renderThinkingContent(content, ApplyThemeColors("tokyonight")))
+	text := strings.TrimSpace(renderThinkingContent(content, currentStyles()))
 	if text == "" {
 		return ""
 	}
@@ -314,7 +314,7 @@ func renderDetailToolResultBox(toolName, content string, width int, expanded boo
 	content = stripTruncationFooter(content)
 	content = strings.TrimRight(content, "\n")
 	visible, footer := collapsePreviewBlock(content, toolOutputPreviewLines, expanded, true)
-	box := toolBoxStyle.Width(max(1, width)).Render(renderToolResult(toolName, visible, ApplyThemeColors("tokyonight")))
+	box := toolBoxStyle.Width(max(1, width)).Render(renderToolResult(toolName, visible, currentStyles()))
 	header := hintStyle.Render("tool result · " + toolName)
 	if footer != "" {
 		return header + "\n" + box + "\n" + hintStyle.Render(footer)

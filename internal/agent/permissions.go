@@ -2,7 +2,9 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -82,25 +84,70 @@ type patternRule struct {
 
 const bashInRootPersistPrefix = "__inroot__:"
 
+// bashAutoAllowPrefixes are commands that take filesystem path arguments and
+// are auto-allowed only when every path resolves inside the current workdir.
+// All entries here MUST be safe to run on any in-root path (read-only, or
+// mutating-but-bounded like `sed -i`). Commands that can have side effects
+// outside the working tree (network, subprocess execution, package installs)
+// MUST NOT be added here — use bashSubcommandAllow instead.
 var bashAutoAllowPrefixes = map[string]bool{
-	"awk":  true,
+	// Text processing (reads inputs, writes to stdout)
+	"awk":      true,
+	"sed":      true,
+	"tr":       true,
+	"cat":      true,
+	"tac":      true,
+	"rev":      true,
+	"head":     true,
+	"tail":     true,
+	"less":     true,
+	"more":     true,
+	"nl":       true,
+	"sort":     true,
+	"uniq":     true,
+	"cut":      true,
+	"paste":    true,
+	"join":     true,
+	"comm":     true,
+	"column":   true,
+	"expand":   true,
+	"unexpand": true,
+	"fold":     true,
+	"wc":       true,
+	"grep":     true,
+	"rg":       true,
+	"ag":       true,
+	// File / directory inspection
+	"ls":       true,
+	"tree":     true,
+	"file":     true,
+	"stat":     true,
+	"du":       true,
 	"basename": true,
-	"cat":  true,
-	"cut":  true,
-	"dirname": true,
-	"head": true,
-	"less": true,
-	"nl":   true,
+	"dirname":  true,
 	"realpath": true,
 	"readlink": true,
-	"sort": true,
-	"tail": true,
-	"tr":   true,
-	"uniq": true,
-	"wc":   true,
-	"grep": true,
-	"rg":   true,
-	"sed":  true,
+	"diff":     true,
+	"cmp":      true,
+	// Hashing
+	"md5sum":    true,
+	"sha1sum":   true,
+	"sha256sum": true,
+	"sha512sum": true,
+	"shasum":    true,
+	"cksum":     true,
+	// Binary inspection
+	"xxd":      true,
+	"hexdump":  true,
+	"od":       true,
+	"strings":  true,
+	// Structured data
+	"jq": true,
+	"yq": true,
+	// Path-aware search (extra flag inspection in canAutoAllowInRoot)
+	"find": true,
+	"fd":   true,
+	"cd":   true,
 }
 
 const (
@@ -109,25 +156,194 @@ const (
 	bashPrefixModeNever    = "never_auto"
 )
 
-var bashAutoAllowDefaultModes = map[string]string{
-	"awk":      bashPrefixModeReadOnly,
-	"basename": bashPrefixModeReadOnly,
-	"cat":      bashPrefixModeReadOnly,
-	"cut":      bashPrefixModeReadOnly,
-	"dirname":  bashPrefixModeReadOnly,
-	"grep":     bashPrefixModeReadOnly,
-	"head":     bashPrefixModeReadOnly,
-	"less":     bashPrefixModeReadOnly,
-	"nl":       bashPrefixModeReadOnly,
-	"readlink": bashPrefixModeReadOnly,
-	"realpath": bashPrefixModeReadOnly,
-	"rg":       bashPrefixModeReadOnly,
-	"sed":      bashPrefixModeMutating,
-	"sort":     bashPrefixModeReadOnly,
-	"tail":     bashPrefixModeReadOnly,
-	"tr":       bashPrefixModeReadOnly,
-	"uniq":     bashPrefixModeReadOnly,
-	"wc":       bashPrefixModeReadOnly,
+// bashAutoAllowDefaultModes defaults every entry in bashAutoAllowPrefixes to
+// read_only. Overrides for genuinely mutating commands (sed -i, etc.) are
+// listed explicitly below.
+var bashAutoAllowDefaultModes = func() map[string]string {
+	m := make(map[string]string, len(bashAutoAllowPrefixes))
+	for prefix := range bashAutoAllowPrefixes {
+		m[prefix] = bashPrefixModeReadOnly
+	}
+	m["sed"] = bashPrefixModeMutating
+	return m
+}()
+
+// bashAlwaysAllow are commands that have no filesystem path arguments and no
+// meaningful side effects. They auto-allow regardless of workdir.
+// Anything that can execute another program (env, command, exec, sudo, etc.)
+// MUST NOT be added here.
+var bashAlwaysAllow = map[string]bool{
+	"pwd":      true,
+	"whoami":   true,
+	"hostname": true,
+	"uname":    true,
+	"id":       true,
+	"tty":      true,
+	"date":     true,
+	"true":     true,
+	"false":    true,
+	":":        true,
+	"echo":     true,
+	"printf":   true,
+	"which":    true,
+	"type":     true,
+	"locale":   true,
+	"tput":     true,
+	"groups":   true,
+	"users":    true,
+	"uptime":   true,
+	"arch":     true,
+}
+
+// bashSubcommandAllow maps "<prefix> <subcommand>" (and optionally three-word
+// "<prefix> <sub1> <sub2>") strings to true for subcommand-pinned auto-allow.
+// Use only for subcommands that are read-only OR project-trusted (operate on
+// the working tree but don't reach outside it without an explicit path arg).
+//
+// Entries here intentionally do NOT path-scope further — a subcommand listed
+// here is allowed regardless of args. Do not add subcommands that take an
+// arbitrary path and write to it (e.g. `git apply`, `git checkout --`).
+var bashSubcommandAllow = map[string]bool{
+	// git — read-only subcommands only (no push/reset/checkout/clean/apply)
+	"git status":       true,
+	"git diff":         true,
+	"git log":          true,
+	"git show":         true,
+	"git blame":        true,
+	"git describe":     true,
+	"git rev-parse":    true,
+	"git rev-list":     true,
+	"git ls-files":     true,
+	"git ls-tree":      true,
+	"git ls-remote":    true,
+	"git reflog":       true,
+	"git shortlog":     true,
+	"git cat-file":     true,
+	"git grep":         true,
+	"git name-rev":     true,
+	"git for-each-ref": true,
+	// Intentionally NOT in the list: branch, tag, remote, stash, worktree,
+	// submodule, config, fetch, pull, push, reset, checkout, clean, apply,
+	// am, cherry-pick, rebase, revert, restore, switch, merge, init, add,
+	// commit. Some of these are read-only without args but become destructive
+	// with flags (e.g. `git branch -D`, `git tag -d`). Require explicit user
+	// approval.
+	// gh CLI — viewing only (intentionally omits `gh api` which can POST)
+	"gh pr":       true,
+	"gh issue":    true,
+	"gh run":      true,
+	"gh repo":     true,
+	"gh auth":     true,
+	"gh release":  true,
+	"gh workflow": true,
+	"gh label":    true,
+	"gh search":   true,
+	"gh ruleset":  true,
+	// Go toolchain
+	"go build":    true,
+	"go test":     true,
+	"go run":      true,
+	"go vet":      true,
+	"go fmt":      true,
+	"go list":     true,
+	"go doc":      true,
+	"go env":      true,
+	"go version":  true,
+	"go mod":      true,
+	"go tool":     true,
+	"go generate": true,
+	"go work":     true,
+	"gofmt":       true,
+	"goimports":   true,
+	// Rust toolchain
+	"cargo check":    true,
+	"cargo build":    true,
+	"cargo test":     true,
+	"cargo clippy":   true,
+	"cargo fmt":      true,
+	"cargo doc":      true,
+	"cargo tree":     true,
+	"cargo metadata": true,
+	"cargo version":  true,
+	"cargo run":      true,
+	// Python / TS type-checkers / formatters (project-scoped tools)
+	"pytest":         true,
+	"ruff":           true,
+	"mypy":           true,
+	"basedpyright":   true,
+	"tsc":            true,
+	"tsgo":           true,
+	"eslint":         true,
+	"prettier":       true,
+	"biome":          true,
+	"vitest":         true,
+	// Docker — read-only inspection
+	"docker ps":              true,
+	"docker images":          true,
+	"docker logs":            true,
+	"docker inspect":         true,
+	"docker version":         true,
+	"docker info":            true,
+	"docker history":         true,
+	"docker port":            true,
+	"docker top":             true,
+	"docker stats":           true,
+	"docker compose ps":      true,
+	"docker compose logs":    true,
+	"docker compose config":  true,
+	"docker compose top":     true,
+	"docker compose port":    true,
+	"docker compose images":  true,
+	"docker compose ls":      true,
+	// Node package managers — project-trusted script runners + read commands.
+	// Same trust model as `make`: scripts can do anything, but they live in
+	// the project's manifest.
+	"npm run":      true,
+	"npm test":     true,
+	"npm list":     true,
+	"npm ls":       true,
+	"npm outdated": true,
+	"npm view":     true,
+	"npm info":     true,
+	"npm audit":    true,
+	"npm fund":     true,
+	"npm doctor":   true,
+	"npm ping":     true,
+	"npm search":   true,
+	"pnpm run":     true,
+	"pnpm test":    true,
+	"pnpm list":    true,
+	"pnpm ls":      true,
+	"pnpm outdated": true,
+	"pnpm view":    true,
+	"pnpm info":    true,
+	"pnpm audit":   true,
+	"pnpm why":     true,
+	"pnpm doctor":  true,
+	"yarn run":     true,
+	"yarn test":    true,
+	"yarn list":    true,
+	"yarn outdated": true,
+	"yarn info":    true,
+	"yarn audit":   true,
+	"yarn why":     true,
+	"bun run":      true,
+	"bun test":     true,
+	// make: project-trusted, all targets (same risk model as before).
+	"make": true,
+}
+
+// findUnsafeFlags are flags on `find` that can execute subprocesses or delete
+// files. Any of these makes the command non-auto-allowable.
+var findUnsafeFlags = map[string]bool{
+	"-exec": true, "-execdir": true, "-ok": true, "-okdir": true,
+	"-delete": true, "-fprint": true, "-fprintf": true,
+	"-fprint0": true, "-fls": true,
+}
+
+// fdUnsafeFlags are flags on `fd` that can execute subprocesses.
+var fdUnsafeFlags = map[string]bool{
+	"-x": true, "--exec": true, "-X": true, "--exec-batch": true,
 }
 
 // pathScopedTools are file tools whose decision depends on the target path
@@ -254,35 +470,37 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if pm.mode == PermissionModeYOLO {
 			return PermissionDecision{Level: PermissionAllow}
 		}
-		prefix, ok := bashPrefix(command)
-		if ok {
-			if level, exists := pm.bashPrefixes[bashInRootKey(prefix, pm.workDir)]; exists {
-				if level == PermissionAllow && canAutoAllowInRoot(pm, command, prefix) {
-					return PermissionDecision{Level: PermissionAllow}
+
+		// Parse the compound command
+		parsedCmds, err := parseShellCommandLine(command)
+		if err != nil {
+			// Parsing error (unbalanced quotes, etc.): fallback to asking for safety
+			level := pm.Check(toolName)
+			if level == PermissionAsk {
+				return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "")}
+			}
+			return PermissionDecision{Level: level}
+		}
+
+		// Evaluate each constituent command, environment variable, and redirection
+		var finalDecision *PermissionDecision
+		for _, cmd := range parsedCmds {
+			dec := pm.decideSingleCommand(args, cmd)
+			if dec.Level == PermissionDeny {
+				return dec
+			}
+			if dec.Level == PermissionAsk {
+				// Keep track of the first Ask decision to return if none are Deny
+				if finalDecision == nil {
+					finalDecision = &dec
 				}
 			}
-			if level, exists := pm.bashPrefixes[prefix]; exists {
-				if level == PermissionAsk {
-					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
-				}
-				if level == PermissionAllow && !canAutoAllowInRoot(pm, command, prefix) {
-					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
-				}
-				return PermissionDecision{Level: level}
-			}
-			if canAutoAllowWithMode(pm, command, prefix) {
-				return PermissionDecision{Level: PermissionAllow}
-			}
 		}
-		// Check safe bash commands after prefix rules
-		if isSafeBashCommand(command) {
-			return PermissionDecision{Level: PermissionAllow}
+
+		if finalDecision != nil {
+			return *finalDecision
 		}
-		level := pm.Check(toolName)
-		if level == PermissionAsk {
-			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
-		}
-		return PermissionDecision{Level: level}
+		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	if pm.mode == PermissionModeYOLO {
@@ -460,47 +678,32 @@ func extractPathFromArgs(toolName string, args json.RawMessage) string {
 	}
 }
 
-func isSafeBashCommand(cmd string) bool {
-	trimmed := strings.TrimSpace(cmd)
-	if trimmed == "" {
+// matchSubcommandAllow returns true when the command matches an entry in
+// bashSubcommandAllow at the longest possible token length (3 → 2 → 1).
+// Leading dashed flags on the command itself (e.g. `git --no-pager log`)
+// would not match — that's intentional: we accept a small loss of coverage
+// in exchange for not having to parse every tool's option grammar.
+func matchSubcommandAllow(command string) bool {
+	fields := splitShellFields(command)
+	if len(fields) == 0 {
 		return false
 	}
-
-	// Safe command prefixes
-	safePrefixes := []string{
-		"git ", "git\t",
-		"ls ", "ls\t", "ls -",
-		"pwd", "pwd ",
-		"echo ", "echo\t",
-		"cat ", "cat\t",
-		"grep ", "rg ", "ag ",
-		"find ", // but check for -exec
-		"wc ", "sort ", "uniq ", "head ", "tail ",
-		"which ", "type ", "env ",
-		"go build", "go test", "go run", "go vet", "go fmt",
-		"npm run ", "yarn run ", "bun run ", "pnpm run ",
-		"make ",
-	}
-
-	for _, prefix := range safePrefixes {
-		if strings.HasPrefix(trimmed, prefix) {
-			// Special check: find with -exec is not safe
-			if strings.HasPrefix(trimmed, "find ") && strings.Contains(trimmed, " -exec ") {
-				return false
-			}
-			// Special check: make without shell metachars
-			if strings.HasPrefix(trimmed, "make ") {
-				for _, meta := range []string{"|", "&", ";", "$(", "`"} {
-					if strings.Contains(trimmed, meta) {
-						return false
-					}
-				}
-			}
+	// Three-word match (e.g. "docker compose ps").
+	if len(fields) >= 3 {
+		key := fields[0] + " " + fields[1] + " " + fields[2]
+		if bashSubcommandAllow[key] {
 			return true
 		}
 	}
-
-	return false
+	// Two-word match (e.g. "git status").
+	if len(fields) >= 2 {
+		key := fields[0] + " " + fields[1]
+		if bashSubcommandAllow[key] {
+			return true
+		}
+	}
+	// Single-word match (e.g. "make", "tsc"). These accept any args.
+	return bashSubcommandAllow[fields[0]]
 }
 
 func extractDomainFromURL(rawURL string) string {
@@ -637,7 +840,7 @@ func (pm *PermissionManager) CheckPathPatterns(toolName, targetPath string) Perm
 }
 
 func (pm *PermissionManager) SetBashPrefixRule(prefix string, level PermissionLevel) {
-	if prefix == "" || !validPermissionLevel(level) {
+	if prefix == "" || !validPermissionLevel(level) || strings.HasPrefix(prefix, bashInRootPersistPrefix) {
 		return
 	}
 	pm.bashPrefixes[prefix] = level
@@ -646,6 +849,9 @@ func (pm *PermissionManager) SetBashPrefixRule(prefix string, level PermissionLe
 func (pm *PermissionManager) BashAutoAllowPrefixes() []string {
 	result := make([]string, 0, len(pm.bashAutoAllow))
 	for k, v := range pm.bashAutoAllow {
+		if strings.HasPrefix(k, bashInRootPersistPrefix) {
+			continue
+		}
 		if v {
 			result = append(result, k)
 		}
@@ -670,6 +876,9 @@ func (pm *PermissionManager) SetBashAutoAllowPrefix(prefix string, enabled bool)
 func (pm *PermissionManager) BashPrefixModes() map[string]string {
 	result := make(map[string]string, len(pm.bashPrefixModes))
 	for k, v := range pm.bashPrefixModes {
+		if strings.HasPrefix(k, bashInRootPersistPrefix) {
+			continue
+		}
 		result[k] = v
 	}
 	return result
@@ -736,9 +945,15 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 		clone.bashPrefixes[k] = v
 	}
 	for k, v := range pm.bashAutoAllow {
+		if strings.HasPrefix(k, bashInRootPersistPrefix) {
+			continue
+		}
 		clone.bashAutoAllow[k] = v
 	}
 	for k, v := range pm.bashPrefixModes {
+		if strings.HasPrefix(k, bashInRootPersistPrefix) {
+			continue
+		}
 		clone.bashPrefixModes[k] = v
 	}
 	for k, v := range pm.webfetchDomains {
@@ -764,6 +979,9 @@ func (pm *PermissionManager) Rules() map[string]PermissionLevel {
 func (pm *PermissionManager) BashPrefixRules() map[string]PermissionLevel {
 	result := make(map[string]PermissionLevel)
 	for k, v := range pm.bashPrefixes {
+		if strings.HasPrefix(k, bashInRootPersistPrefix) {
+			continue
+		}
 		result[k] = v
 	}
 	return result
@@ -780,12 +998,18 @@ func (pm *PermissionManager) ExportConfig() config.PermissionConfig {
 	}
 	autoAllow := make([]string, 0, len(pm.bashAutoAllow))
 	for k, v := range pm.bashAutoAllow {
+		if strings.HasPrefix(k, bashInRootPersistPrefix) {
+			continue
+		}
 		if v {
 			autoAllow = append(autoAllow, k)
 		}
 	}
 	modes := make(map[string]string, len(pm.bashPrefixModes))
 	for k, v := range pm.bashPrefixModes {
+		if strings.HasPrefix(k, bashInRootPersistPrefix) {
+			continue
+		}
 		modes[k] = v
 	}
 	return config.PermissionConfig{
@@ -923,12 +1147,36 @@ func canAutoAllowInRoot(pm *PermissionManager, command, prefix string) bool {
 	if len(fields) == 0 || fields[0] != prefix {
 		return false
 	}
-	paths := extractBashCommandPaths(prefix, fields)
-	if len(paths) == 0 {
-		return false
+	// find/fd: reject if any field is an unsafe flag (executes subprocesses
+	// or deletes files). These flags would let an in-root path argument
+	// trigger arbitrary actions, defeating the workdir scope.
+	if prefix == "find" {
+		for _, f := range fields[1:] {
+			if findUnsafeFlags[f] {
+				return false
+			}
+		}
 	}
+	if prefix == "fd" {
+		for _, f := range fields[1:] {
+			if fdUnsafeFlags[f] {
+				return false
+			}
+		}
+	}
+	paths := extractBashCommandPaths(prefix, fields)
+	if prefix == "cd" && len(paths) == 0 {
+		home := os.Getenv("HOME")
+		if home != "" {
+			paths = append(paths, home)
+		}
+	}
+	// Zero paths means the command operates on stdin or the current directory
+	// only (e.g. `grep "foo"`, `find`, `ls`). That's still inside the workdir
+	// by definition, so allow.
 	for _, p := range paths {
-		if !isWithinWorkDir(pm, p) {
+		resolved := resolvePath(p, pm.workDir)
+		if !isWithinWorkDir(pm, resolved) {
 			return false
 		}
 	}
@@ -982,20 +1230,33 @@ func extractBashCommandPaths(prefix string, fields []string) []string {
 	return paths
 }
 
+// isLikelyPathArg returns true if arg looks like a filesystem path. Bare
+// identifiers (e.g. literal patterns passed to grep, awk's variable names)
+// return false so they don't get treated as out-of-workdir paths and
+// inadvertently block the auto-allow.
 func isLikelyPathArg(arg string) bool {
 	if arg == "" {
 		return false
 	}
-	if strings.Contains(arg, "*") || strings.Contains(arg, "?") || strings.Contains(arg, "[") {
+	// Glob metacharacters.
+	if strings.ContainsAny(arg, "*?[") {
 		return true
 	}
-	if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "./") || strings.HasPrefix(arg, "../") || strings.HasPrefix(arg, "~/") {
+	// Absolute or explicitly-rooted relative paths.
+	if strings.HasPrefix(arg, "/") || strings.HasPrefix(arg, "./") ||
+		strings.HasPrefix(arg, "../") || strings.HasPrefix(arg, "~/") ||
+		arg == "." || arg == ".." || arg == "~" {
 		return true
 	}
-	if strings.Contains(arg, string(filepath.Separator)) || strings.Contains(arg, ".") {
+	// Contains a path separator → almost certainly a path.
+	if strings.Contains(arg, string(filepath.Separator)) {
 		return true
 	}
-	return true
+	// Looks like a filename (has an extension dot in the middle).
+	if dot := strings.Index(arg, "."); dot > 0 && dot < len(arg)-1 {
+		return true
+	}
+	return false
 }
 
 func isHardBlockedCommand(command string) bool {
@@ -1042,4 +1303,557 @@ func IsAllowedReviewWritePath(path string) bool {
 		return true
 	}
 	return false
+}
+
+// Shell parsing and validation structures and functions
+
+type shellTokenType int
+
+const (
+	tokWord shellTokenType = iota
+	tokOp                  // &&, ||, ;, &, |
+	tokRedir               // >, >>, <, 2>, &>, etc.
+	tokSubst               // $(...) or `...`
+	tokLeftParen           // (
+	tokRightParen          // )
+)
+
+type shellToken struct {
+	typ   shellTokenType
+	value string
+}
+
+type parsedShellCommand struct {
+	envVars      []string // "KEY=VAL"
+	cmdWords     []string // command and its arguments (e.g. ["go", "test", "./..."])
+	redirections []string // target paths
+}
+
+func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
+	tokens, err := tokenizeShell(commandLine)
+	if err != nil {
+		return nil, err
+	}
+
+	var commands []parsedShellCommand
+	var currentTokens []shellToken
+
+	emitCommand := func() {
+		if len(currentTokens) > 0 {
+			cmd := parseSingleCommandTokens(currentTokens)
+			if cmd != nil {
+				commands = append(commands, *cmd)
+			}
+			currentTokens = nil
+		}
+	}
+
+	for _, tok := range tokens {
+		if tok.typ == tokOp {
+			emitCommand()
+		} else if tok.typ == tokLeftParen || tok.typ == tokRightParen {
+			emitCommand()
+		} else if tok.typ == tokSubst {
+			subCmds, err := parseShellCommandLine(tok.value)
+			if err == nil {
+				commands = append(commands, subCmds...)
+			}
+			currentTokens = append(currentTokens, tok)
+		} else {
+			currentTokens = append(currentTokens, tok)
+		}
+	}
+	emitCommand()
+
+	return commands, nil
+}
+
+func tokenizeShell(input string) ([]shellToken, error) {
+	var tokens []shellToken
+	var current strings.Builder
+
+	runes := []rune(input)
+	n := len(runes)
+
+	inSingle := false
+	inDouble := false
+	escaped := false
+
+	emitWord := func() {
+		if current.Len() > 0 {
+			tokens = append(tokens, shellToken{typ: tokWord, value: current.String()})
+			current.Reset()
+		}
+	}
+
+	for i := 0; i < n; i++ {
+		r := runes[i]
+
+		if escaped {
+			current.WriteRune(r)
+			escaped = false
+			continue
+		}
+
+		if r == '\\' && !inSingle {
+			if inDouble {
+				if i+1 < n && (runes[i+1] == '"' || runes[i+1] == '\\' || runes[i+1] == '$' || runes[i+1] == '`') {
+					escaped = true
+					continue
+				} else {
+					current.WriteRune(r)
+					continue
+				}
+			} else {
+				escaped = true
+				continue
+			}
+		}
+
+		if inSingle {
+			if r == '\'' {
+				inSingle = false
+			} else {
+				current.WriteRune(r)
+			}
+			continue
+		}
+
+		if inDouble {
+			if r == '$' && i+1 < n && runes[i+1] == '(' {
+				emitWord()
+				sub, endIdx, err := parseParenthesis(runes, i+1)
+				if err != nil {
+					return nil, err
+				}
+				tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
+				i = endIdx
+				continue
+			}
+			if r == '`' {
+				emitWord()
+				sub, endIdx, err := parseBackticks(runes, i)
+				if err != nil {
+					return nil, err
+				}
+				tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
+				i = endIdx
+				continue
+			}
+			if r == '"' {
+				inDouble = false
+			} else {
+				current.WriteRune(r)
+			}
+			continue
+		}
+
+		switch r {
+		case '\'':
+			inSingle = true
+		case '"':
+			inDouble = true
+		case '`':
+			emitWord()
+			sub, endIdx, err := parseBackticks(runes, i)
+			if err != nil {
+				return nil, err
+			}
+			tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
+			i = endIdx
+		case '$':
+			if i+1 < n && runes[i+1] == '(' {
+				emitWord()
+				sub, endIdx, err := parseParenthesis(runes, i+1)
+				if err != nil {
+					return nil, err
+				}
+				tokens = append(tokens, shellToken{typ: tokSubst, value: sub})
+				i = endIdx
+			} else {
+				current.WriteRune(r)
+			}
+		case '&':
+			emitWord()
+			if i+1 < n && runes[i+1] == '&' {
+				tokens = append(tokens, shellToken{typ: tokOp, value: "&&"})
+				i++
+			} else {
+				tokens = append(tokens, shellToken{typ: tokOp, value: "&"})
+			}
+		case '|':
+			emitWord()
+			if i+1 < n && runes[i+1] == '|' {
+				tokens = append(tokens, shellToken{typ: tokOp, value: "||"})
+				i++
+			} else {
+				tokens = append(tokens, shellToken{typ: tokOp, value: "|"})
+			}
+		case ';':
+			emitWord()
+			tokens = append(tokens, shellToken{typ: tokOp, value: ";"})
+		case '(':
+			emitWord()
+			tokens = append(tokens, shellToken{typ: tokLeftParen, value: "("})
+		case ')':
+			emitWord()
+			tokens = append(tokens, shellToken{typ: tokRightParen, value: ")"})
+		case '>':
+			emitWord()
+			if i+1 < n && runes[i+1] == '>' {
+				tokens = append(tokens, shellToken{typ: tokRedir, value: ">>"})
+				i++
+			} else {
+				tokens = append(tokens, shellToken{typ: tokRedir, value: ">"})
+			}
+		case '<':
+			emitWord()
+			tokens = append(tokens, shellToken{typ: tokRedir, value: "<"})
+		case '1', '2':
+			if i+1 < n && runes[i+1] == '>' {
+				emitWord()
+				if i+2 < n && runes[i+2] == '>' {
+					tokens = append(tokens, shellToken{typ: tokRedir, value: string(r) + ">>"})
+					i += 2
+				} else {
+					tokens = append(tokens, shellToken{typ: tokRedir, value: string(r) + ">"})
+					i++
+				}
+			} else {
+				current.WriteRune(r)
+			}
+		default:
+			if unicode.IsSpace(r) {
+				emitWord()
+			} else {
+				current.WriteRune(r)
+			}
+		}
+	}
+	emitWord()
+	return tokens, nil
+}
+
+func parseParenthesis(runes []rune, start int) (string, int, error) {
+	depth := 1
+	inSingle := false
+	inDouble := false
+	escaped := false
+	var content strings.Builder
+
+	n := len(runes)
+	for i := start + 1; i < n; i++ {
+		r := runes[i]
+		if escaped {
+			content.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && !inSingle {
+			content.WriteRune(r)
+			escaped = true
+			continue
+		}
+		if inSingle {
+			if r == '\'' {
+				inSingle = false
+			}
+			content.WriteRune(r)
+			continue
+		}
+		if inDouble {
+			if r == '"' {
+				inDouble = false
+			}
+			content.WriteRune(r)
+			continue
+		}
+
+		switch r {
+		case '\'':
+			inSingle = true
+			content.WriteRune(r)
+		case '"':
+			inDouble = true
+			content.WriteRune(r)
+		case '(':
+			depth++
+			content.WriteRune(r)
+		case ')':
+			depth--
+			if depth == 0 {
+				return content.String(), i, nil
+			}
+			content.WriteRune(r)
+		default:
+			content.WriteRune(r)
+		}
+	}
+	return "", 0, fmt.Errorf("unbalanced parenthesis in command substitution")
+}
+
+func parseBackticks(runes []rune, start int) (string, int, error) {
+	inSingle := false
+	inDouble := false
+	escaped := false
+	var content strings.Builder
+
+	n := len(runes)
+	for i := start + 1; i < n; i++ {
+		r := runes[i]
+		if escaped {
+			content.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && !inSingle {
+			content.WriteRune(r)
+			escaped = true
+			continue
+		}
+		if inSingle {
+			if r == '\'' {
+				inSingle = false
+			}
+			content.WriteRune(r)
+			continue
+		}
+		if inDouble {
+			if r == '"' {
+				inDouble = false
+			}
+			content.WriteRune(r)
+			continue
+		}
+
+		switch r {
+		case '\'':
+			inSingle = true
+			content.WriteRune(r)
+		case '"':
+			inDouble = true
+			content.WriteRune(r)
+		case '`':
+			return content.String(), i, nil
+		default:
+			content.WriteRune(r)
+		}
+	}
+	return "", 0, fmt.Errorf("unbalanced backticks in command substitution")
+}
+
+func parseSingleCommandTokens(tokens []shellToken) *parsedShellCommand {
+	var cmd parsedShellCommand
+	var remaining []shellToken
+
+	for i := 0; i < len(tokens); i++ {
+		tok := tokens[i]
+		if tok.typ == tokRedir {
+			if i+1 < len(tokens) && tokens[i+1].typ == tokWord {
+				cmd.redirections = append(cmd.redirections, tokens[i+1].value)
+				i++
+			}
+		} else {
+			remaining = append(remaining, tok)
+		}
+	}
+
+	if len(remaining) == 0 {
+		return nil
+	}
+
+	idx := 0
+	for idx < len(remaining) {
+		tok := remaining[idx]
+		if tok.typ == tokWord && strings.Contains(tok.value, "=") {
+			cmd.envVars = append(cmd.envVars, tok.value)
+			idx++
+		} else {
+			break
+		}
+	}
+
+	for idx < len(remaining) {
+		tok := remaining[idx]
+		if tok.typ == tokWord {
+			cmd.cmdWords = append(cmd.cmdWords, tok.value)
+		} else if tok.typ == tokSubst {
+			cmd.cmdWords = append(cmd.cmdWords, "$("+tok.value+")")
+		}
+		idx++
+	}
+
+	if len(cmd.cmdWords) == 0 && len(cmd.envVars) == 0 && len(cmd.redirections) == 0 {
+		return nil
+	}
+
+	return &cmd
+}
+
+func rebuildCommandLine(fields []string) string {
+	var parts []string
+	for _, f := range fields {
+		if f == "" {
+			parts = append(parts, `""`)
+			continue
+		}
+		needsQuote := false
+		for _, r := range f {
+			if unicode.IsSpace(r) || strings.ContainsRune(`'"&|;><()*?[$`, r) {
+				needsQuote = true
+				break
+			}
+		}
+		if needsQuote {
+			escaped := strings.ReplaceAll(f, `"`, `\"`)
+			parts = append(parts, `"`+escaped+`"`)
+		} else {
+			parts = append(parts, f)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func resolvePath(path string, workDir string) string {
+	if strings.HasPrefix(path, "~") {
+		home := os.Getenv("HOME")
+		if home != "" {
+			if path == "~" {
+				return home
+			}
+			if strings.HasPrefix(path, "~/") {
+				return filepath.Join(home, path[2:])
+			}
+		}
+	}
+	if !filepath.IsAbs(path) {
+		return filepath.Join(workDir, path)
+	}
+	return path
+}
+
+func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parsedShellCommand) PermissionDecision {
+	// Check env variables for path values
+	for _, env := range cmd.envVars {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 {
+			val := parts[1]
+			if isLikelyPathArg(val) {
+				resolved := resolvePath(val, pm.workDir)
+				if !isWithinWorkDir(pm, resolved) {
+					return PermissionDecision{
+						Level:   PermissionAsk,
+						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), env, false),
+					}
+				}
+				if isSensitivePath(resolved) {
+					return PermissionDecision{
+						Level:   PermissionAsk,
+						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), env, true),
+					}
+				}
+			}
+		}
+	}
+
+	// Check redirections
+	for _, path := range cmd.redirections {
+		if path == "/dev/null" || path == "/dev/stdout" || path == "/dev/stderr" {
+			continue
+		}
+		resolved := resolvePath(path, pm.workDir)
+		if !isWithinWorkDir(pm, resolved) {
+			return PermissionDecision{
+				Level:   PermissionAsk,
+				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), path, false),
+			}
+		}
+		if isSensitivePath(resolved) {
+			return PermissionDecision{
+				Level:   PermissionAsk,
+				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), path, true),
+			}
+		}
+	}
+
+	if len(cmd.cmdWords) == 0 {
+		return PermissionDecision{Level: PermissionAllow}
+	}
+
+	command := rebuildCommandLine(cmd.cmdWords)
+	if isHardBlockedCommand(command) {
+		return PermissionDecision{Level: PermissionDeny}
+	}
+
+	prefix := cmd.cmdWords[0]
+
+	// 1. Persisted in-root rule
+	if level, exists := pm.bashPrefixes[bashInRootKey(prefix, pm.workDir)]; exists {
+		if level == PermissionAllow && canAutoAllowInRoot(pm, command, prefix) {
+			return PermissionDecision{Level: PermissionAllow}
+		}
+	}
+
+	// 2. Explicit prefix rule
+	if level, exists := pm.bashPrefixes[prefix]; exists {
+		if level == PermissionAsk {
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
+		}
+		return PermissionDecision{Level: level}
+	}
+
+	// 3. Path-scoped auto-allow
+	if bashAutoAllowPrefixes[prefix] {
+		if canAutoAllowWithMode(pm, command, prefix) {
+			return PermissionDecision{Level: PermissionAllow}
+		}
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
+	}
+
+	// 4. Argless commands
+	if bashAlwaysAllow[prefix] {
+		return PermissionDecision{Level: PermissionAllow}
+	}
+
+	// 5. Subcommand-pinned allowlist
+	if matchSubcommandAllow(command) {
+		return PermissionDecision{Level: PermissionAllow}
+	}
+
+	// 6. Fall through to tool-level rule
+	level := pm.Check("bash")
+	if level == PermissionAsk {
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
+	}
+	return PermissionDecision{Level: level}
+}
+
+func redirectionPermissionRequest(args json.RawMessage, command, path string, isSensitive bool) *PermissionRequest {
+	rule := "bash.redirection.out_of_scope"
+	if isSensitive {
+		rule = "bash.redirection.sensitive_path"
+	}
+	return &PermissionRequest{
+		ToolName: "bash",
+		Args:     args,
+		Command:  command,
+		Prefix:   "",
+		Scope:    PermissionScopeTool,
+		Rule:     rule,
+	}
+}
+
+func envVarPermissionRequest(args json.RawMessage, command, envVar string, isSensitive bool) *PermissionRequest {
+	rule := "bash.env.out_of_scope"
+	if isSensitive {
+		rule = "bash.env.sensitive_path"
+	}
+	return &PermissionRequest{
+		ToolName: "bash",
+		Args:     args,
+		Command:  command,
+		Prefix:   "",
+		Scope:    PermissionScopeTool,
+		Rule:     rule,
+	}
 }

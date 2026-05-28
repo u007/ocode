@@ -17,24 +17,28 @@ const defaultReadLines = 50
 const maxReadLines = 250
 
 var (
-	extraAllowedRootsMu sync.RWMutex
-	extraAllowedRoots   []string
+	extraAllowedRootsMu    sync.RWMutex
+	persistentAllowedRoots map[string]struct{}
+	tempAllowedRootRefs    map[string]int
 )
 
 func setExtraAllowedPaths(paths []string) {
-	normalized := make([]string, 0, len(paths))
+	normalized := make(map[string]struct{}, len(paths))
 	for _, p := range paths {
 		if root, ok := normalizeRootPath(p); ok {
-			normalized = append(normalized, root)
+			normalized[root] = struct{}{}
 		}
 	}
 	extraAllowedRootsMu.Lock()
-	extraAllowedRoots = normalized
+	persistentAllowedRoots = normalized
+	if tempAllowedRootRefs == nil {
+		tempAllowedRootRefs = make(map[string]int)
+	}
 	extraAllowedRootsMu.Unlock()
 }
 
 // AddExtraAllowedPath adds one path root to the runtime allowlist.
-// Returns true when the path was normalized and added.
+// Returns true when the path was normalized and is present in the allowlist.
 func AddExtraAllowedPath(path string) bool {
 	root, ok := normalizeRootPath(path)
 	if !ok {
@@ -42,23 +46,97 @@ func AddExtraAllowedPath(path string) bool {
 	}
 	extraAllowedRootsMu.Lock()
 	defer extraAllowedRootsMu.Unlock()
-	for _, existing := range extraAllowedRoots {
-		if existing == root {
-			return true
-		}
+	if persistentAllowedRoots == nil {
+		persistentAllowedRoots = make(map[string]struct{})
 	}
-	extraAllowedRoots = append(extraAllowedRoots, root)
+	persistentAllowedRoots[root] = struct{}{}
+	return true
+}
+
+// HasExtraAllowedPath reports whether path (after normalization) is in the
+// runtime extra allowlist.
+func HasExtraAllowedPath(path string) bool {
+	root, ok := normalizeRootPath(path)
+	if !ok {
+		return false
+	}
+	extraAllowedRootsMu.RLock()
+	defer extraAllowedRootsMu.RUnlock()
+	if _, ok := persistentAllowedRoots[root]; ok {
+		return true
+	}
+	return tempAllowedRootRefs[root] > 0
+}
+
+// RemoveExtraAllowedPath removes one normalized root from the runtime
+// allowlist. It returns true when a matching entry existed and was removed.
+func RemoveExtraAllowedPath(path string) bool {
+	root, ok := normalizeRootPath(path)
+	if !ok {
+		return false
+	}
+	extraAllowedRootsMu.Lock()
+	defer extraAllowedRootsMu.Unlock()
+	if _, ok := persistentAllowedRoots[root]; !ok {
+		return false
+	}
+	delete(persistentAllowedRoots, root)
+	return true
+}
+
+// AcquireTemporaryAllowedPath increments a temporary in-memory lease for root.
+// The path remains allowed until a matching ReleaseTemporaryAllowedPath call.
+func AcquireTemporaryAllowedPath(path string) bool {
+	root, ok := normalizeRootPath(path)
+	if !ok {
+		return false
+	}
+	extraAllowedRootsMu.Lock()
+	defer extraAllowedRootsMu.Unlock()
+	if tempAllowedRootRefs == nil {
+		tempAllowedRootRefs = make(map[string]int)
+	}
+	tempAllowedRootRefs[root]++
+	return true
+}
+
+// ReleaseTemporaryAllowedPath decrements one temporary lease for root.
+// It returns true when a temporary lease existed.
+func ReleaseTemporaryAllowedPath(path string) bool {
+	root, ok := normalizeRootPath(path)
+	if !ok {
+		return false
+	}
+	extraAllowedRootsMu.Lock()
+	defer extraAllowedRootsMu.Unlock()
+	count := tempAllowedRootRefs[root]
+	if count <= 0 {
+		return false
+	}
+	if count == 1 {
+		delete(tempAllowedRootRefs, root)
+	} else {
+		tempAllowedRootRefs[root] = count - 1
+	}
 	return true
 }
 
 func getExtraAllowedRoots() []string {
 	extraAllowedRootsMu.RLock()
 	defer extraAllowedRootsMu.RUnlock()
-	if len(extraAllowedRoots) == 0 {
+	if len(persistentAllowedRoots) == 0 && len(tempAllowedRootRefs) == 0 {
 		return nil
 	}
-	out := make([]string, len(extraAllowedRoots))
-	copy(out, extraAllowedRoots)
+	out := make([]string, 0, len(persistentAllowedRoots)+len(tempAllowedRootRefs))
+	for root := range persistentAllowedRoots {
+		out = append(out, root)
+	}
+	for root := range tempAllowedRootRefs {
+		if _, ok := persistentAllowedRoots[root]; ok {
+			continue
+		}
+		out = append(out, root)
+	}
 	return out
 }
 
@@ -69,7 +147,12 @@ func normalizeRootPath(p string) (string, bool) {
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return "", false
+		dir := filepath.Dir(abs)
+		resolvedDir, dirErr := filepath.EvalSymlinks(dir)
+		if dirErr != nil {
+			return "", false
+		}
+		resolved = filepath.Join(resolvedDir, filepath.Base(abs))
 	}
 	return filepath.Clean(resolved), true
 }

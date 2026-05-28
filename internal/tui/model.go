@@ -489,6 +489,7 @@ type model struct {
 	gitSel                   selectionState
 	sidebarSel               selectionState
 	rawSidebarLines          []string
+	hoverSidebarFile         string // file path hovered by mouse in sidebar, empty when no hover
 	rawInputLines            []string
 	rawInputLinesDirty       bool
 	inputThemeApplied        bool
@@ -870,10 +871,16 @@ func newModel(sid string, cont bool, yolo bool) model {
 	agent.ApplyAgentConfig(cfg)
 	_ = auth.HydrateEnv()
 
+	// shouldLoad tracks whether the session ID was explicitly provided
+	// (via -session flag or -continue) vs auto-generated. We only attempt
+	// to load an existing session file when explicitly requested.
+	shouldLoad := sid != ""
+
 	if cont {
 		sessions, _ := session.List()
 		if len(sessions) > 0 {
 			sid = sessions[0].ID
+			shouldLoad = true
 		}
 	}
 
@@ -1008,7 +1015,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 		DebugLog.Append(DebugEntry{Kind: DebugEntryKind(kind), Message: msg})
 	}
 
-	if sid != "" {
+	if shouldLoad {
 		sess, err := session.Load(sid)
 		if err == nil {
 			m.sessionTitle = sess.Title
@@ -1025,6 +1032,8 @@ func newModel(sid string, cont bool, yolo bool) model {
 			if len(m.messages) > 0 {
 				m.restoredPendingScroll = true
 			}
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session %s: %v", sid, err)})
 		}
 	}
 
@@ -1567,7 +1576,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, waitStreamEvent(msg.ch, msg.errCh, msg.cancel)
 	case streamDoneMsg:
+		if !m.streaming {
+			return m, nil
+		}
 		m.streaming = false
+		m.cancelStream = nil
 		m.lastActivity = agent.ActivitySnapshot{}
 		m.streamEndedAt = time.Now()
 		m.streamWasInterrupted = msg.err != nil
@@ -1595,6 +1608,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if msg.err != nil {
+			if errors.Is(msg.err, context.Canceled) {
+				m.lastRetryableLLMErr = ""
+				return m, nil
+			}
 			errorText := fmt.Sprintf("Error: %v", msg.err)
 			if isRetryableLLMError(msg.err) {
 				m.lastRetryableLLMErr = errorText
@@ -1949,11 +1966,6 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	// Clear the first-line-up notice on any key that isn't "up".
 	if keyStr != "up" {
 		m.inputAtFirstLineUpNotice = false
-	}
-
-	// ESC always cancels a running stream, regardless of any sub-state focus.
-	if keyStr == "esc" && m.streaming && m.cancelStream != nil {
-		return m.handleEscKey()
 	}
 
 	if m.showPermDialog {
@@ -2354,7 +2366,7 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.streaming {
-		return m, nil
+		return m, func() tea.Msg { return streamDoneMsg{err: context.Canceled} }
 	}
 	if !m.detail.empty() {
 		m.detail.pop()
@@ -2716,6 +2728,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
+			// Simple click (no drag): try to open a file at the click position.
+			if path, ok := m.sidebarFileForClick(mouse); ok {
+				m.sidebarSel = selectionState{}
+				return m, openSidebarFileInEditor(path), true
+			}
 			m.sidebarSel = selectionState{}
 		}
 	}
@@ -2830,10 +2847,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 	}
-	if path, ok := m.sidebarFileForClick(mouse); ok {
-		return m, openSidebarFileInEditor(path), true
-	}
-	// Sidebar text selection
+	// Sidebar text selection — always start dragging on press so a subsequent
+	// release can distinguish a simple click (no drag) from a selection drag.
 	if pressed && m.mouseOverSidebar(mouse) {
 		data := m.buildSidebarRenderData()
 		headerHeight := 0
@@ -2847,10 +2862,14 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			headerHeight = 1
 		}
 		boxTop := 1 + headerHeight + len(data.topLines)
-		visible := m.sidebarScrollBoxHeight(data, headerHeight)
+		// Account for leading empty line when header is empty
+		if headerHeight == 0 {
+			boxTop++
+		}
+		visible := m.sidebarVisibleScrollLines(data, headerHeight)
 		if mouse.Y >= boxTop && mouse.Y < boxTop+visible {
 			scrollLine := m.sidebarScroll + (mouse.Y - boxTop)
-			if len(m.rawSidebarLines) > 0 && scrollLine >= 0 && scrollLine < len(m.rawSidebarLines) {
+			if scrollLine >= 0 && scrollLine < len(data.scrollLines) {
 				m.sidebarSel = selectionState{
 					dragging:  true,
 					startLine: scrollLine,
@@ -2996,14 +3015,18 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 			headerHeight = 1
 		}
 		boxTop := 1 + headerHeight + len(data.topLines)
-		visible := m.sidebarScrollBoxHeight(data, headerHeight)
+		// Account for leading empty line when header is empty
+		if headerHeight == 0 {
+			boxTop++
+		}
+		visible := m.sidebarVisibleScrollLines(data, headerHeight)
 		if mouse.Y >= boxTop && mouse.Y < boxTop+visible {
 			scrollLine := m.sidebarScroll + (mouse.Y - boxTop)
 			if scrollLine < 0 {
 				scrollLine = 0
 			}
-			if len(m.rawSidebarLines) > 0 && scrollLine >= len(m.rawSidebarLines) {
-				scrollLine = len(m.rawSidebarLines) - 1
+			if len(data.scrollLines) > 0 && scrollLine >= len(data.scrollLines) {
+				scrollLine = len(data.scrollLines) - 1
 			}
 			col := mouse.X - m.panelWidth()
 			if col < 0 {
@@ -3012,6 +3035,44 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 			m.sidebarSel.endLine = scrollLine
 			m.sidebarSel.endCol = col
 			m.sidebarSel.active = m.sidebarSel.startLine != m.sidebarSel.endLine || m.sidebarSel.startCol != m.sidebarSel.endCol
+			return m, nil, true
+		}
+	}
+
+	// Sidebar hover detection — underline clickable file paths
+	{
+		prevHover := m.hoverSidebarFile
+		if m.mouseOverSidebar(mouse) {
+			data := m.buildSidebarRenderData()
+			headerHeight := 0
+			title := m.sessionTitle
+			if title == "" {
+				if prompt := m.firstUserPromptText(); prompt != "" {
+					title = truncateTitle(prompt, maxExplicitTitleLen)
+				}
+			}
+			if title != "" {
+				headerHeight = 1
+			}
+			boxTop := 1 + headerHeight + len(data.topLines)
+			if headerHeight == 0 {
+				boxTop++
+			}
+			visible := m.sidebarVisibleScrollLines(data, headerHeight)
+			if mouse.Y >= boxTop && mouse.Y < boxTop+visible {
+				scrollLine := m.sidebarScroll + (mouse.Y - boxTop)
+				if path, ok := data.fileScrollLinePaths[scrollLine]; ok {
+					m.hoverSidebarFile = path
+				} else {
+					m.hoverSidebarFile = ""
+				}
+			} else {
+				m.hoverSidebarFile = ""
+			}
+		} else {
+			m.hoverSidebarFile = ""
+		}
+		if m.hoverSidebarFile != prevHover {
 			return m, nil, true
 		}
 	}
@@ -3055,7 +3116,16 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 }
 
 func (m model) handleDetailClick(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
-	if len(m.detail) == 0 || !m.mouseOverDetailViewport(mouse) {
+	if len(m.detail) == 0 {
+		return m, nil, false
+	}
+	// Click anywhere in the header area (above the viewport) pops back to parent.
+	topY := m.detailViewportContentTopY()
+	if mouse.Y < topY && mouse.Y >= 0 {
+		m.detail.pop()
+		return m, nil, true
+	}
+	if !m.mouseOverDetailViewport(mouse) {
 		return m, nil, false
 	}
 	top := m.detail[len(m.detail)-1]
@@ -3384,6 +3454,7 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 			}
 			return m.replaceAgent(next)
 		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to switch to model %s: unknown provider or missing configuration", args[0])})
 	}
 	return nil
 }
@@ -4665,7 +4736,14 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	var lines []string
 	lines = append(lines, permissionRequestSummary(req))
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
-		lines = append(lines, fmt.Sprintf("Always-rule scope: bash prefix %q", req.Prefix))
+		lines = append(lines, fmt.Sprintf("Always-rule scope: bash prefix %q (all `%s ...` commands)", req.Prefix, req.Prefix))
+	}
+	if root := outOfScopePathRoot(req); root != "" {
+		lines = append(lines, "Path scope: target is outside the workspace")
+		lines = append(lines, fmt.Sprintf("Path root: %s", root))
+		lines = append(lines, "[y] once = temporary path access for this one call")
+		lines = append(lines, "[a] always this rule = also persists this path root")
+		lines = append(lines, "[t] always this tool = remembers tool permission; path root is not persisted")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -4734,9 +4812,9 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 
 	switch choice {
 	case "y", "yes", "allow", "once":
-		m.allowOutOfScopePath(req, false)
+		pathRoot := outOfScopePathRoot(req)
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName), transient: true})
-		return m.executeApprovedTool(toolName, args)
+		return m.executeApprovedTool(toolName, args, pathRoot)
 	case "a", "always", "always allow":
 		m.allowOutOfScopePath(req, true)
 		// Special handling for webfetch domains
@@ -4751,12 +4829,13 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req)), transient: true})
 		}
 		m.persistPermissions()
-		return m.executeToolWithRules(toolName, args)
+		return m.executeToolWithRules(toolName, args, "")
 	case "t":
+		pathRoot := outOfScopePathRoot(req)
 		m.setToolPermission(toolName, agent.PermissionAllow)
 		m.persistPermissions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q.", toolName), transient: true})
-		return m.executeToolWithRules(toolName, args)
+		return m.executeToolWithRules(toolName, args, pathRoot)
 	case "n", "no", "deny":
 		return m.permissionDeniedToolResult(toolName)
 	default:
@@ -4804,17 +4883,17 @@ func (m *model) persistPermissions() {
 }
 
 func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
-	if !strings.HasSuffix(req.Rule, ".out_of_scope") {
+	if !persist {
 		return
 	}
-	path := pathRootFromPermissionArgs(req.Args)
+	path := outOfScopePathRoot(req)
 	if path == "" {
 		return
 	}
 	if !tool.AddExtraAllowedPath(path) {
 		return
 	}
-	if !persist || m.config == nil {
+	if m.config == nil {
 		return
 	}
 	for _, existing := range m.config.Ocode.ExtraAllowedPaths {
@@ -4826,6 +4905,13 @@ func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
 	if err := config.SaveOcodeConfig(&m.config.Ocode); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save extra_allowed_paths: %v", err)})
 	}
+}
+
+func outOfScopePathRoot(req agent.PermissionRequest) string {
+	if !strings.HasSuffix(req.Rule, ".out_of_scope") {
+		return ""
+	}
+	return pathRootFromPermissionArgs(req.Args)
 }
 
 func pathRootFromPermissionArgs(args json.RawMessage) string {
@@ -4852,8 +4938,15 @@ func pathRootFromPermissionArgs(args json.RawMessage) string {
 	return filepath.Dir(target)
 }
 
-func (m model) executeApprovedTool(toolName string, args json.RawMessage) tea.Cmd {
+func (m model) executeApprovedTool(toolName string, args json.RawMessage, pathRoot string) tea.Cmd {
 	return func() tea.Msg {
+		releaseAfter := false
+		if pathRoot != "" {
+			releaseAfter = tool.AcquireTemporaryAllowedPath(pathRoot)
+		}
+		if releaseAfter {
+			defer tool.ReleaseTemporaryAllowedPath(pathRoot)
+		}
 		result, err := m.agent.HandleApprovedToolCall(toolName, args)
 		if err != nil {
 			result = fmt.Sprintf("Error: %v", err)
@@ -4863,8 +4956,15 @@ func (m model) executeApprovedTool(toolName string, args json.RawMessage) tea.Cm
 	}
 }
 
-func (m model) executeToolWithRules(toolName string, args json.RawMessage) tea.Cmd {
+func (m model) executeToolWithRules(toolName string, args json.RawMessage, pathRoot string) tea.Cmd {
 	return func() tea.Msg {
+		releaseAfter := false
+		if pathRoot != "" {
+			releaseAfter = tool.AcquireTemporaryAllowedPath(pathRoot)
+		}
+		if releaseAfter {
+			defer tool.ReleaseTemporaryAllowedPath(pathRoot)
+		}
 		result, err := m.agent.HandleToolCall(toolName, args)
 		if err != nil {
 			result = fmt.Sprintf("Error: %v", err)
@@ -7173,7 +7273,8 @@ func (m model) renderSidebar() string {
 	}
 
 	headerHeight := lipgloss.Height(header)
-	contentHeight := m.height - 2 - headerHeight
+	effectiveHeaderHeight := maxInt(1, headerHeight)
+	contentHeight := m.height - 2 - effectiveHeaderHeight
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -7220,6 +7321,17 @@ func (m model) renderSidebar() string {
 		}
 	}
 
+	// Apply hover underline for clickable file paths
+	if m.hoverSidebarFile != "" && len(visible) > 0 {
+		hoverStyle := lipgloss.NewStyle().Underline(true)
+		for i, line := range visible {
+			actualLineIdx := scrollOffset + i
+			if path, ok := data.fileScrollLinePaths[actualLineIdx]; ok && path == m.hoverSidebarFile {
+				visible[i] = hoverStyle.Render(stripANSI(line))
+			}
+		}
+	}
+
 	if len(data.scrollLines) > visibleScrollLines {
 		marker := fmt.Sprintf(" %d/%d", scrollOffset+1, len(data.scrollLines))
 		if len(visible) > 0 {
@@ -7249,12 +7361,13 @@ func (m model) renderSidebar() string {
 }
 
 func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) int {
-	available := m.height - 2 - headerHeight - len(data.topLines) - len(data.bottomLines)
+	effectiveHeaderHeight := maxInt(1, headerHeight)
+	available := m.height - 2 - effectiveHeaderHeight - len(data.topLines) - len(data.bottomLines)
 	if available < 3 {
 		return 3
 	}
 
-	contentHeight := m.height - 2 - headerHeight
+	contentHeight := m.height - 2 - effectiveHeaderHeight
 	maxScrollBoxHeight := contentHeight * 40 / 100
 	if maxScrollBoxHeight < 3 {
 		maxScrollBoxHeight = 3
@@ -7263,6 +7376,16 @@ func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) 
 		return maxScrollBoxHeight
 	}
 	return available
+}
+
+// sidebarVisibleScrollLines returns the number of scroll lines actually rendered
+// in the sidebar. This matches the logic in renderSidebar for consistent hit-testing.
+func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight int) int {
+	effectiveHeaderHeight := maxInt(1, headerHeight)
+	contentHeight := m.height - 2 - effectiveHeaderHeight
+	spaceForScroll := maxInt(3, contentHeight-len(data.topLines)-len(data.bottomLines)-2)
+	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
+	return minInt(scrollBoxHeight, spaceForScroll)
 }
 
 func (m model) renderSidebarWithTabBar() string {
@@ -7360,19 +7483,18 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 	}
 	// User requested: no border/padding on scroll sections (2026-05-25)
 	boxTop := 1 + headerHeight + len(data.topLines)
+	// Account for leading empty line when header is empty
+	if headerHeight == 0 {
+		boxTop++
+	}
 	contentTop := boxTop
-	visible := m.sidebarScrollBoxHeight(data, headerHeight)
+	visible := m.sidebarVisibleScrollLines(data, headerHeight)
 	if mouse.Y < contentTop || mouse.Y >= contentTop+visible {
 		return "", false
 	}
 	scrollLine := m.sidebarScroll + (mouse.Y - contentTop)
 	if path, ok := data.fileScrollLinePaths[scrollLine]; ok {
 		return path, true
-	}
-	if len(data.fileScrollLinePaths) == 1 {
-		for _, path := range data.fileScrollLinePaths {
-			return path, true
-		}
 	}
 	return "", false
 }

@@ -272,8 +272,70 @@ func TestRenderPermissionRequestBodyIncludesBashPrefixScope(t *testing.T) {
 	if !strings.Contains(got, "$ git push origin main") {
 		t.Fatalf("expected bash command summary, got %q", got)
 	}
-	if !strings.Contains(got, `Always-rule scope: bash prefix "git"`) {
+	if !strings.Contains(got, "Always-rule scope: bash prefix \"git\" (all `git ...` commands)") {
 		t.Fatalf("expected bash prefix scope summary, got %q", got)
+	}
+}
+
+func TestRenderPermissionRequestBodyClarifiesOutOfScopePathBehavior(t *testing.T) {
+	outsideRoot := t.TempDir()
+	target := filepath.Join(outsideRoot, "file.txt")
+	req := agent.PermissionRequest{
+		ToolName: "read",
+		Args:     json.RawMessage(`{"path":"` + target + `"}`),
+		Scope:    agent.PermissionScopeTool,
+		Rule:     "tool.read.out_of_scope",
+	}
+
+	got := renderPermissionRequestBody(req)
+	if !strings.Contains(got, "Path scope: target is outside the workspace") {
+		t.Fatalf("expected out-of-scope hint, got %q", got)
+	}
+	if !strings.Contains(got, "[y] once = temporary path access for this one call") {
+		t.Fatalf("expected temporary once hint, got %q", got)
+	}
+	if !strings.Contains(got, "[a] always this rule = also persists this path root") {
+		t.Fatalf("expected persist hint for always rule, got %q", got)
+	}
+	if !strings.Contains(got, "[t] always this tool = remembers tool permission; path root is not persisted") {
+		t.Fatalf("expected tool-scope hint, got %q", got)
+	}
+}
+
+func TestExecuteApprovedTool_UsesTemporaryOutOfScopePathAllowance(t *testing.T) {
+	workspace := t.TempDir()
+	outsideRoot := t.TempDir()
+	target := filepath.Join(outsideRoot, "allowed.txt")
+	if err := os.WriteFile(target, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
+	tool.LoadBuiltins(nil)
+	if tool.HasExtraAllowedPath(outsideRoot) {
+		t.Fatalf("did not expect %q to be pre-allowed", outsideRoot)
+	}
+
+	a := agent.NewAgent(nil, []tool.Tool{&tool.ReadTool{}}, nil)
+	m := model{agent: a, pendingToolCallID: "tc-1"}
+	args := json.RawMessage(`{"path":"` + target + `"}`)
+
+	cmd := m.executeApprovedTool("read", args, outsideRoot)
+	msg := cmd()
+	out, ok := msg.([]agent.Message)
+	if !ok || len(out) != 1 {
+		t.Fatalf("expected one tool message, got %#v", msg)
+	}
+	if !strings.Contains(out[0].Content, "ok") {
+		t.Fatalf("expected read output to include file contents, got %q", out[0].Content)
+	}
+	if tool.HasExtraAllowedPath(outsideRoot) {
+		t.Fatalf("expected temporary path allowance for %q to be removed", outsideRoot)
 	}
 }
 
@@ -1040,10 +1102,17 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 	}
 
 	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
-	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 8})
+	// Press starts sidebar selection (no file opening yet)
+	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 9})
+	m = updated.(model)
+	if cmd != nil {
+		t.Fatal("expected press to start selection only, got stray command")
+	}
+	// Release on same position triggers file open (simple click, no drag)
+	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: 9})
 	_ = updated
 	if cmd == nil {
-		t.Fatal("expected sidebar file click to return editor command")
+		t.Fatal("expected release on file line to return editor command")
 	}
 	cmd()
 
