@@ -695,7 +695,7 @@ func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
 	}
 }
 
-func TestBuildSidebarRenderDataShowsCacheAndSpendOnSeparateLines(t *testing.T) {
+func TestBuildSidebarRenderDataShowsCacheAndSpendInline(t *testing.T) {
 	snapshot.Reset()
 	defer snapshot.Reset()
 	tool.ResetTodoState()
@@ -1973,6 +1973,19 @@ func TestTuiRoleForAgentMessageOnlyMapsUserToUser(t *testing.T) {
 		if got := tuiRoleForAgentMessage(agent.Message{Role: tt.role}); got != tt.want {
 			t.Fatalf("expected raw role %q to map to %v, got %v", tt.role, tt.want, got)
 		}
+	}
+}
+
+func TestDisplayTextForAgentMessageStripsCompactionMarker(t *testing.T) {
+	got := displayTextForAgentMessage(agent.Message{
+		Role:    "system",
+		Content: "[ocode:compaction-summary]\nCompacted anchored summary (updated)\n\n## Goal\n- keep context",
+	})
+	if !strings.HasPrefix(got, "📦 Compacted anchored summary (updated)") {
+		t.Fatalf("expected compaction banner, got %q", got)
+	}
+	if strings.Contains(got, "[ocode:compaction-summary]") {
+		t.Fatalf("internal marker leaked into display: %q", got)
 	}
 }
 

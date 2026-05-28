@@ -153,23 +153,115 @@ func findPrefixEnd(msgs []Message) int {
 	return i
 }
 
+// compactionSummaryMarker prefixes the Content of any synthetic system
+// message produced by compaction. It lets later compactions locate the
+// previous anchored summary so they can update it in place instead of
+// re-summarising blended history.
+const compactionSummaryMarker = "[ocode:compaction-summary]"
+
+// findPreviousSummary scans messages for the most recent compaction summary
+// (a role=system message whose Content begins with compactionSummaryMarker).
+// Returns the summary body (marker stripped) and the index in msgs, or
+// ("", -1) when no prior summary exists.
+func findPreviousSummary(msgs []Message) (string, int) {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role != "system" {
+			continue
+		}
+		if !strings.HasPrefix(msgs[i].Content, compactionSummaryMarker) {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(msgs[i].Content, compactionSummaryMarker))
+		return body, i
+	}
+	return "", -1
+}
+
+// pruneToolResults returns a copy of middle with each role=tool Content
+// shrunk to maxChars + a "<N chars pruned>" suffix when it exceeds the cap.
+// Other messages pass through untouched. This runs before summarisation so
+// the summary model spends its budget on signal, not on cargo log output.
+// In-memory only — the original messages on the agent are unmodified, since
+// the splice replaces the middle wholesale with the new summary.
+// compactPruneToolMaxChars mirrors opencode's TOOL_OUTPUT_MAX_CHARS (2000).
+const compactPruneToolMaxChars = 2000
+
+// Keep enough budget to preserve the prune suffix after a tool result has been
+// capped to compactPruneToolMaxChars.
+const compactRenderedToolMaxChars = compactPruneToolMaxChars + 128
+
+func pruneToolResults(middle []Message, maxChars int) []Message {
+	if maxChars <= 0 {
+		return middle
+	}
+	out := make([]Message, len(middle))
+	for i, m := range middle {
+		if m.Role == "tool" && len(m.Content) > maxChars {
+			pruned := len(m.Content) - maxChars
+			m.Content = m.Content[:maxChars] + fmt.Sprintf("\n... [pruned %d chars from tool output before summarisation]", pruned)
+		}
+		out[i] = m
+	}
+	return out
+}
+
 // compactionSystemPrompt is the instruction prepended to every compaction
 // summary call. Also exposed as the SystemPrompt of the hidden "compaction"
 // registry agent so users can override it via .opencode/agents/compaction.md.
-const compactionSystemPrompt = "You are summarizing a portion of an ongoing coding-assistant " +
-	"conversation that is being compacted to save context. Preserve: " +
-	"(1) what the user asked for, (2) decisions made, (3) files/code " +
-	"that were inspected or modified, (4) tool calls and their outcomes, " +
-	"(5) any unresolved issues or pending work. Be terse but specific " +
-	"with file paths, function names, and concrete results. Do not " +
-	"include filler."
+const compactionSystemPrompt = `You are an anchored context summariser for an ongoing coding-assistant conversation. ` +
+	`Produce a single durable summary that the assistant can rely on after older turns are dropped from the context window. ` +
+	`If a <previous-summary> block is supplied, update it: preserve still-true facts, remove stale ones, and merge in new facts from the conversation segment. ` +
+	`If none is supplied, create a fresh summary from the conversation segment. ` +
+	`Do not narrate that you are summarising. Do not include filler. Preserve exact file paths, function names, command strings, identifiers, and error text.`
+
+// summaryTemplate is the fixed Markdown structure every summary must follow.
+// Every section must appear, even if its content is "(none)". Keeping the
+// structure stable lets later compactions reliably update prior summaries.
+const summaryTemplate = `Output exactly this Markdown structure and keep the section order unchanged:
+---
+## Goal
+- [single-sentence task summary]
+
+## Constraints & Preferences
+- [user constraints, preferences, specs, or "(none)"]
+
+## Progress
+### Done
+- [completed work or "(none)"]
+
+### In Progress
+- [current work or "(none)"]
+
+### Blocked
+- [blockers or "(none)"]
+
+## Key Decisions
+- [decision and why, or "(none)"]
+
+## Next Steps
+- [ordered next actions or "(none)"]
+
+## Critical Context
+- [important technical facts, errors, open questions, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+---
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, commands, error strings, and identifiers when known.
+- Do not mention the summary process or that context was compacted.`
 
 // buildSummaryPrompt assembles the prompt sent to the summary model. It walks
 // the middle slice and emits a structured transcript that preserves tool
 // calls, tool results, and reasoning content (not just user/assistant text).
+// If previousSummary is non-empty it is included as an anchor the model must
+// update in place rather than re-synthesize from scratch.
 // If the assembled prompt would exceed maxInputTokens, the oldest middle
 // messages are dropped until it fits.
-func buildSummaryPrompt(middle []Message, maxInputTokens int) (string, int) {
+func buildSummaryPrompt(middle []Message, maxInputTokens int, previousSummary string) (string, int) {
 	if maxInputTokens <= 0 {
 		maxInputTokens = 50000
 	}
@@ -197,7 +289,7 @@ func buildSummaryPrompt(middle []Message, maxInputTokens int) (string, int) {
 			}
 		case "tool":
 			toolName := m.ToolID
-			fmt.Fprintf(&b, "[tool_result %s]: %s", toolName, truncateForSummary(m.Content, 1500))
+			fmt.Fprintf(&b, "[tool_result %s]: %s", toolName, truncateForSummary(m.Content, compactRenderedToolMaxChars))
 		case "system":
 			// Skip transient system messages from the middle; the prefix system
 			// already carries durable context.
@@ -208,21 +300,90 @@ func buildSummaryPrompt(middle []Message, maxInputTokens int) (string, int) {
 		}
 	}
 
-	// Drop oldest fragments until we fit. Returns count of dropped messages.
+	prev := strings.TrimSpace(previousSummary)
+
+	// Drop oldest fragments until the full rendered prompt fits. Returns count
+	// of dropped middle messages.
 	dropped := 0
 	joined := strings.Join(fragments, "\n\n")
-	for len(joined) > maxChars && len(fragments) > 1 {
+	prompt := renderSummaryPrompt(prev, joined, dropped)
+	for len(prompt) > maxChars && len(fragments) > 1 {
 		fragments = fragments[1:]
 		dropped++
 		joined = strings.Join(fragments, "\n\n")
+		prompt = renderSummaryPrompt(prev, joined, dropped)
 	}
 
-	prompt := compactionSystemPrompt + "\n\n"
-	if dropped > 0 {
-		prompt += fmt.Sprintf("[NOTE: %d earlier messages omitted from this batch due to size.]\n\n", dropped)
+	// If an anchored previous summary still pushes us over the cap, trim the
+	// anchor before sacrificing the most recent conversation fragment.
+	if len(prompt) > maxChars && prev != "" {
+		prev = fitSummaryPromptSection(maxChars, prev, func(candidate string) string {
+			return renderSummaryPrompt(candidate, joined, dropped)
+		})
+		prompt = renderSummaryPrompt(prev, joined, dropped)
 	}
-	prompt += "Conversation segment:\n\n" + joined
+
+	// Last resort: trim the conversation segment itself while keeping the final
+	// prompt under the configured cap.
+	if len(prompt) > maxChars && joined != "" {
+		joined = fitSummaryPromptSection(maxChars, joined, func(candidate string) string {
+			return renderSummaryPrompt(prev, candidate, dropped)
+		})
+		prompt = renderSummaryPrompt(prev, joined, dropped)
+	}
+
 	return prompt, dropped
+}
+
+func renderSummaryPrompt(previousSummary, joined string, dropped int) string {
+	var b strings.Builder
+	b.WriteString(compactionSystemPrompt)
+	b.WriteString("\n\n")
+	b.WriteString(summaryTemplate)
+	b.WriteString("\n\n")
+	if prev := strings.TrimSpace(previousSummary); prev != "" {
+		b.WriteString("<previous-summary>\n")
+		b.WriteString(prev)
+		b.WriteString("\n</previous-summary>\n\n")
+		b.WriteString("Update the summary above using the conversation segment below.\n\n")
+	} else {
+		b.WriteString("Create a new summary from the conversation segment below.\n\n")
+	}
+	if dropped > 0 {
+		fmt.Fprintf(&b, "[NOTE: %d earlier messages omitted from this batch due to size.]\n\n", dropped)
+	}
+	b.WriteString("Conversation segment:\n\n")
+	b.WriteString(joined)
+	return b.String()
+}
+
+func fitSummaryPromptSection(maxChars int, value string, render func(string) string) string {
+	if value == "" || len(render(value)) <= maxChars {
+		return value
+	}
+	lo, hi := 0, len(value)
+	best := ""
+	for lo <= hi {
+		mid := (lo + hi) / 2
+		candidate := truncatePromptSection(value, mid)
+		if len(render(candidate)) <= maxChars {
+			best = candidate
+			lo = mid + 1
+		} else {
+			hi = mid - 1
+		}
+	}
+	return best
+}
+
+func truncatePromptSection(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + fmt.Sprintf("... [+%d chars truncated]", len(s)-max)
 }
 
 func truncateForSummary(s string, max int) string {

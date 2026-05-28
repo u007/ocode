@@ -5,10 +5,11 @@ import "sync"
 type DebugEntryKind string
 
 const (
-	DebugKindLLM   DebugEntryKind = "LLM"
-	DebugKindTool  DebugEntryKind = "TOOL"
-	DebugKindAgent DebugEntryKind = "AGENT"
-	DebugKindError DebugEntryKind = "ERROR"
+	DebugKindLLM     DebugEntryKind = "LLM"
+	DebugKindTool    DebugEntryKind = "TOOL"
+	DebugKindAgent   DebugEntryKind = "AGENT"
+	DebugKindError   DebugEntryKind = "ERROR"
+	DebugKindSession DebugEntryKind = "SESSION"
 )
 
 type DebugEntry struct {

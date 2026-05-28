@@ -2,6 +2,9 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -97,5 +100,113 @@ func TestPermissions_YOLO_Allows(t *testing.T) {
 	dec := pm.Decide("write", json.RawMessage(`{"file_path":".env","content":"x"}`))
 	if dec.Level != PermissionAllow {
 		t.Fatalf("YOLO should allow, got %s", dec.Level)
+	}
+}
+
+func TestPermissions_BashAutoAllowInRoot_PersistsProjectScopedRule(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	filePath := filepath.Join(workDir, "internal", "tui", "model.go")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("package tui\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	cmd := fmt.Sprintf(`{"command":"sed -n '1,3p' %s"}`, filePath)
+	dec := pm.Decide("bash", json.RawMessage(cmd))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("expected first in-root sed command to auto-allow, got %s", dec.Level)
+	}
+
+	key := bashInRootKey("sed", resolvedWorkDir)
+	if _, exists := pm.bashPrefixes[key]; exists {
+		t.Fatalf("did not expect mutating sed mode to persist in-root key %q", key)
+	}
+}
+
+func TestPermissions_BashPersistedRule_DoesNotBypassOutOfRoot(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+	pm.bashPrefixes[bashInRootKey("sed", resolvedWorkDir)] = PermissionAllow
+
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"sed -n '1,3p' /etc/hosts"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("expected out-of-root command to ask, got %s", dec.Level)
+	}
+}
+
+func TestPermissions_BashPrefixAllowStillAsksOutsideRoot(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+	pm.SetBashPrefixRule("sed", PermissionAllow)
+
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"sed -n '1,3p' /etc/hosts"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("expected out-of-root command to ask even with sed prefix allow, got %s", dec.Level)
+	}
+}
+
+func TestPermissions_BashAutoAllowInRoot_Awk(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	filePath := filepath.Join(workDir, "data.txt")
+	if err := os.WriteFile(filePath, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	cmd := fmt.Sprintf(`{"command":"awk '{print $1}' %s"}`, filePath)
+	dec := pm.Decide("bash", json.RawMessage(cmd))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("expected in-root awk command to auto-allow, got %s", dec.Level)
+	}
+
+	if pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)] != PermissionAllow {
+		t.Fatalf("expected persisted project-scoped awk rule")
+	}
+}
+
+func TestPermissions_BashAutoAllow_NeverAutoModeAsks(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	filePath := filepath.Join(workDir, "data.txt")
+	if err := os.WriteFile(filePath, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+	pm.bashPrefixModes["awk"] = bashPrefixModeNever
+
+	cmd := fmt.Sprintf(`{"command":"awk '{print $1}' %s"}`, filePath)
+	dec := pm.Decide("bash", json.RawMessage(cmd))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("expected awk never_auto mode to ask, got %s", dec.Level)
 	}
 }

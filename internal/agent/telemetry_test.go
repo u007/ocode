@@ -29,6 +29,17 @@ func TestParseOpenAIUsage(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIUsageDeepSeekCacheHitTokens(t *testing.T) {
+	usage, err := parseOpenAIUsage(json.RawMessage(`{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154,"prompt_cache_hit_tokens":80}`))
+	if err != nil {
+		t.Fatalf("parseOpenAIUsage failed: %v", err)
+	}
+
+	if got := usage.CacheReadTokens; got == nil || *got != 80 {
+		t.Fatalf("expected deepseek-style cached tokens 80, got %#v", got)
+	}
+}
+
 func TestParseAnthropicUsage(t *testing.T) {
 	usage, err := parseAnthropicUsage(json.RawMessage(`{"input_tokens":7,"output_tokens":11,"cache_read_input_tokens":3}`))
 	if err != nil {
@@ -46,6 +57,20 @@ func TestParseAnthropicUsage(t *testing.T) {
 	}
 	if usage.TotalTokens != nil {
 		t.Fatalf("expected total tokens to stay nil when missing, got %#v", usage.TotalTokens)
+	}
+}
+
+func TestUsageForProviderAutoDetectsAnthropicShape(t *testing.T) {
+	usage, err := usageForProvider("minimax", json.RawMessage(`{"input_tokens":7,"output_tokens":11,"cache_read_input_tokens":3}`))
+	if err != nil {
+		t.Fatalf("usageForProvider failed: %v", err)
+	}
+
+	if got := usage.PromptTokens; got == nil || *got != 7 {
+		t.Fatalf("expected input tokens mapped to prompt tokens 7, got %#v", got)
+	}
+	if got := usage.CacheReadTokens; got == nil || *got != 3 {
+		t.Fatalf("expected cached tokens 3, got %#v", got)
 	}
 }
 

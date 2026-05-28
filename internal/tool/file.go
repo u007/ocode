@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
@@ -14,6 +15,72 @@ import (
 
 const defaultReadLines = 50
 const maxReadLines = 250
+
+var (
+	extraAllowedRootsMu sync.RWMutex
+	extraAllowedRoots   []string
+)
+
+func setExtraAllowedPaths(paths []string) {
+	normalized := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if root, ok := normalizeRootPath(p); ok {
+			normalized = append(normalized, root)
+		}
+	}
+	extraAllowedRootsMu.Lock()
+	extraAllowedRoots = normalized
+	extraAllowedRootsMu.Unlock()
+}
+
+// AddExtraAllowedPath adds one path root to the runtime allowlist.
+// Returns true when the path was normalized and added.
+func AddExtraAllowedPath(path string) bool {
+	root, ok := normalizeRootPath(path)
+	if !ok {
+		return false
+	}
+	extraAllowedRootsMu.Lock()
+	defer extraAllowedRootsMu.Unlock()
+	for _, existing := range extraAllowedRoots {
+		if existing == root {
+			return true
+		}
+	}
+	extraAllowedRoots = append(extraAllowedRoots, root)
+	return true
+}
+
+func getExtraAllowedRoots() []string {
+	extraAllowedRootsMu.RLock()
+	defer extraAllowedRootsMu.RUnlock()
+	if len(extraAllowedRoots) == 0 {
+		return nil
+	}
+	out := make([]string, len(extraAllowedRoots))
+	copy(out, extraAllowedRoots)
+	return out
+}
+
+func normalizeRootPath(p string) (string, bool) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", false
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Clean(resolved), true
+}
+
+func pathWithinRoot(path, root string) bool {
+	if path == root {
+		return true
+	}
+	rootWithSep := root + string(filepath.Separator)
+	return strings.HasPrefix(path, rootWithSep)
+}
 
 // toolResultCacheDir returns the directory where truncated tool outputs are saved.
 func toolResultCacheDir() string {
@@ -42,19 +109,37 @@ func confinedPath(p string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("invalid path %q: %w", p, err)
 	}
-	rel, err := filepath.Rel(wd, abs)
-	if err == nil && !strings.HasPrefix(rel, "..") {
-		return abs, nil
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		dir := filepath.Dir(abs)
+		resolvedDir, dirErr := filepath.EvalSymlinks(dir)
+		if dirErr != nil {
+			return "", fmt.Errorf("path %q is outside the working directory", p)
+		}
+		resolved = filepath.Join(resolvedDir, filepath.Base(abs))
+	}
+	resolved = filepath.Clean(resolved)
+	wdResolved, ok := normalizeRootPath(wd)
+	if !ok {
+		return "", fmt.Errorf("could not resolve working directory")
+	}
+	if pathWithinRoot(resolved, wdResolved) {
+		return resolved, nil
+	}
+	for _, root := range getExtraAllowedRoots() {
+		if pathWithinRoot(resolved, root) {
+			return resolved, nil
+		}
 	}
 	// Also allow reads from the tool-results state directory.
 	cacheDir := toolResultCacheDir()
-	if cacheRel, err := filepath.Rel(cacheDir, abs); err == nil && !strings.HasPrefix(cacheRel, "..") {
-		return abs, nil
+	if cacheResolved, ok := normalizeRootPath(cacheDir); ok && pathWithinRoot(resolved, cacheResolved) {
+		return resolved, nil
 	}
 	// Also allow reads from the managed repository cache.
 	if repoCache, err := repoCacheDir(); err == nil {
-		if repoRel, err := filepath.Rel(repoCache, abs); err == nil && !strings.HasPrefix(repoRel, "..") {
-			return abs, nil
+		if repoResolved, ok := normalizeRootPath(repoCache); ok && pathWithinRoot(resolved, repoResolved) {
+			return resolved, nil
 		}
 	}
 	return "", fmt.Errorf("path %q is outside the working directory", p)

@@ -191,6 +191,14 @@ func (c *GenericClient) GetModel() string {
 	return c.Model
 }
 
+func (c *GenericClient) usesAnthropicMessagesAPI() bool {
+	if c.Provider == "anthropic" {
+		return true
+	}
+	baseURL := strings.ToLower(strings.TrimRight(c.BaseURL, "/"))
+	return strings.HasSuffix(baseURL, "/anthropic") || strings.Contains(baseURL, "/anthropic/")
+}
+
 func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
 	var lastErr error
 	attempts := 0
@@ -200,9 +208,9 @@ func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{})
 			msg *Message
 			err error
 		)
-		if c.Provider == "anthropic" {
-			msg, err = c.chatAnthropic(messages, tools)
-		} else if c.Provider == "copilot" {
+			if c.usesAnthropicMessagesAPI() {
+				msg, err = c.chatAnthropic(messages, tools)
+			} else if c.Provider == "copilot" {
 			msg, err = c.chatCopilot(messages, tools)
 		} else {
 			msg, err = c.chatOpenAI(messages, tools)

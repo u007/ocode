@@ -72,6 +72,20 @@ Deferred:
 - **Streaming summary.** The summary client call is blocking. If it becomes the bottleneck on slow providers, switch to a streaming variant that lets the UI show partial summary text as it arrives.
 - **Drop stale `pendingCompactUIIdx`.** If the user clears the session between compaction trigger and completion, the splice indices become stale. Today `applyCompactionResult` guards with bounds checks, but a session-generation counter would be cleaner.
 
+Anchored compaction landed 2026-05-27 (anchored summary, structured template, prune-before-summarise, custom summary model already wired). Still deferred:
+- **Switch threshold to `usable(model)` not `ratio × window`.** opencode subtracts reserved-for-output from the input limit and triggers at actual usage ≥ usable. ocode still uses `0.85 × window`, which mis-fires on models whose effective input differs sharply from total context. Needs `ModelWindow` to expose input/output split.
+- **`PRUNE_PROTECTED_TOOLS` list.** opencode protects `skill` tool outputs from pruning. ocode has no equivalent. Likely candidates here: outputs from `agent_status`, `task_status`, `wait`, and MCP tools marked durable. Until then, every large tool result is prunable.
+- **Persisted on-disk prune sink.** Today `pruneToolResults` shrinks tool content in-memory before summarisation. The full output exists on disk via `internal/agent/truncate.go` only when the tool result was already large enough to be truncated at write time. Wire `pruneToolResults` to write any pruned content to disk + emit a `[full output: <path>]` reference so the agent can re-read it via the read tool.
+- **Drop char-fallback flat 1.15× multiplier.** `shouldCompact` applies a flat 15% safety margin when `Usage` is missing. This hides per-content-type weighting (text vs reasoning vs tool JSON vs images). Replace with weighted estimation or log a warning + skip compaction when `Usage` is absent.
+- **Surface compaction in TUI history.** The 📦 banner shows the count but not the structured summary content. A "view summary" affordance (expand banner, copy summary text, jump to splice point) would make multi-compaction sessions navigable.
+
+## Provider prompt hybrid — Phase 3 (deferred)
+
+Phase 1 (file-backed prompts) and Phase 2 (model-ID routing) landed 2026-05-27. Phase 3 was descoped after discovering markers are load-bearing for `prompt_shape_test.go`. Still deferred:
+- **Cache `environmentPrompt()` output on Agent.** Today every `BasePromptMessages` call re-runs `os.Getwd`, `findWorkspaceRoot` (walks parents), and 3× `os.Stat`. Cache once per agent; invalidate on cwd or model change.
+- **Resolve mode-vs-spec prompt ambiguity.** `BasePromptMessages` computes `Mode().SystemPrompt()` and then conditionally overrides it with `spec.SystemPrompt`. Two prompt sources, one wins, the other was computed for nothing. Pick one resolver and document the precedence.
+- **Reconsider marker dedup.** The 5-marker `[ocode:*]` system with `existingPromptMarkers` scan provides idempotency and testability. If marker semantics drift further, revisit whether a simpler `Agent.prompted bool` + a separate test mechanism would be cleaner.
+
 ## apply_patch parity with opencode — follow-up
 
 - **Align remaining edge cases with upstream behavior.** Current parser/executor now supports opencode-style `*** Begin Patch` envelopes, `*** Add/Delete/Update File`, `*** Move to`, `@@` hunks, and rollback on failure. Next pass should compare against upstream behavior for duplicate context, repeated hunks, rename+update ordering, and exact failure modes.

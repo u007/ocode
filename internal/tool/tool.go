@@ -15,6 +15,11 @@ type Tool interface {
 }
 
 func LoadBuiltins(cfg *config.Config) []Tool {
+	if cfg != nil {
+		setExtraAllowedPaths(cfg.Ocode.ExtraAllowedPaths)
+	} else {
+		setExtraAllowedPaths(nil)
+	}
 	return []Tool{
 		&ReadTool{},
 		&WriteTool{Config: cfg},

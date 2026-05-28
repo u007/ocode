@@ -45,6 +45,28 @@ func (c *captureClient) Chat(messages []Message, tools []map[string]interface{})
 func (c *captureClient) GetProvider() string { return "mock" }
 func (c *captureClient) GetModel() string    { return "mock-model" }
 
+type scriptedCaptureClient struct {
+	Prompts   []string
+	Responses []string
+	CallCount int
+}
+
+func (c *scriptedCaptureClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	if len(messages) > 0 {
+		c.Prompts = append(c.Prompts, messages[0].Content)
+	}
+	idx := c.CallCount
+	c.CallCount++
+	resp := "summary"
+	if idx < len(c.Responses) {
+		resp = c.Responses[idx]
+	}
+	return &Message{Role: "assistant", Content: resp}, nil
+}
+
+func (c *scriptedCaptureClient) GetProvider() string { return "mock" }
+func (c *scriptedCaptureClient) GetModel() string    { return "mock-model" }
+
 type blockingToolCallClient struct {
 	started chan struct{}
 	release chan struct{}
@@ -845,6 +867,111 @@ func TestCompactSummaryClientUsesOverride(t *testing.T) {
 	}
 }
 
+func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {
+	client := &scriptedCaptureClient{Responses: []string{"summary"}}
+	a := &Agent{client: client}
+	rt := compactRuntime{
+		Enabled:               true,
+		KeepRecentTurns:       1,
+		SummaryTimeoutSeconds: 1,
+		SummaryMaxRetries:     0,
+		MaxSummaryInputTokens: 50000,
+	}
+	big := strings.Repeat("y", 5000)
+	msgs := []Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "original ask"},
+		{Role: "assistant", ToolCalls: []ToolCall{tcCall("call1", "read")}},
+		{Role: "tool", ToolID: "call1", Content: big},
+		{Role: "assistant", Content: "done"},
+		{Role: "user", Content: "recent tail"},
+		{Role: "assistant", Content: "tail response"},
+	}
+
+	res := a.runCompact(msgs, rt)
+	if !res.OK {
+		t.Fatalf("expected compaction success, got %#v", res)
+	}
+	if len(client.Prompts) != 1 {
+		t.Fatalf("expected one summary prompt, got %d", len(client.Prompts))
+	}
+	if !strings.Contains(client.Prompts[0], "[pruned 3000 chars from tool output before summarisation]") {
+		t.Fatalf("summary prompt missing pruned marker: %q", client.Prompts[0])
+	}
+}
+
+func TestRunCompactAnchoredSummaryReplacesPreviousSummaryInPlace(t *testing.T) {
+	client := &scriptedCaptureClient{Responses: []string{"first summary", "second summary"}}
+	a := &Agent{client: client}
+	rt := compactRuntime{
+		Enabled:               true,
+		KeepRecentTurns:       1,
+		SummaryTimeoutSeconds: 1,
+		SummaryMaxRetries:     0,
+		MaxSummaryInputTokens: 50000,
+	}
+
+	msgs := []Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "original ask"},
+		{Role: "assistant", Content: "did work"},
+		{Role: "assistant", ToolCalls: []ToolCall{tcCall("call1", "read")}},
+		{Role: "tool", ToolID: "call1", Content: "result1"},
+		{Role: "assistant", Content: "done1"},
+		{Role: "user", Content: "recent tail"},
+		{Role: "assistant", Content: "tail response"},
+	}
+
+	first := a.runCompact(msgs, rt)
+	if !first.OK {
+		t.Fatalf("first compaction failed: %#v", first)
+	}
+	msgs = append(append(append([]Message{}, msgs[:first.ReplaceFrom]...), first.Summary), msgs[first.ReplaceTo:]...)
+
+	msgs = append(msgs,
+		Message{Role: "user", Content: "follow-up work"},
+		Message{Role: "assistant", Content: "more changes"},
+		Message{Role: "assistant", ToolCalls: []ToolCall{tcCall("call2", "write")}},
+		Message{Role: "tool", ToolID: "call2", Content: "result2"},
+		Message{Role: "assistant", Content: "done2"},
+		Message{Role: "user", Content: "latest tail"},
+		Message{Role: "assistant", Content: "latest response"},
+	)
+
+	second := a.runCompact(msgs, rt)
+	if !second.OK {
+		t.Fatalf("second compaction failed: %#v", second)
+	}
+	if second.ReplaceFrom != 2 {
+		t.Fatalf("second ReplaceFrom=%d, want 2 (overwrite prior summary)", second.ReplaceFrom)
+	}
+	if len(client.Prompts) != 2 {
+		t.Fatalf("expected two summary prompts, got %d", len(client.Prompts))
+	}
+	if !strings.Contains(client.Prompts[1], "<previous-summary>") || !strings.Contains(client.Prompts[1], "first summary") {
+		t.Fatalf("second prompt missing anchored previous summary: %q", client.Prompts[1])
+	}
+
+	msgs = append(append(append([]Message{}, msgs[:second.ReplaceFrom]...), second.Summary), msgs[second.ReplaceTo:]...)
+	summaryCount := 0
+	for _, msg := range msgs {
+		if msg.Role == "system" && strings.HasPrefix(msg.Content, compactionSummaryMarker) {
+			summaryCount++
+		}
+	}
+	if summaryCount != 1 {
+		t.Fatalf("expected exactly one compaction summary after anchored replace, got %d", summaryCount)
+	}
+	if strings.Contains(msgs[2].Content, "first summary") {
+		t.Fatalf("old summary should be overwritten in place: %q", msgs[2].Content)
+	}
+	for _, msg := range msgs[3:] {
+		if msg.Content == "recent tail" || msg.Content == "tail response" || msg.Content == "follow-up work" {
+			t.Fatalf("old compacted history should be dropped, found %q in final messages", msg.Content)
+		}
+	}
+}
+
 func TestAgentToolExecution(t *testing.T) {
 	// 1. Tool call from assistant
 	// 2. Tool result appended
@@ -1137,6 +1264,88 @@ func TestRecoverOrphanedToolCallsEmptyCase(t *testing.T) {
 	}
 	if result[1].Content != "result" {
 		t.Fatalf("expected result to be unchanged, got: %s", result[1].Content)
+	}
+}
+
+// TestRecoverOrphanedToolCallsOnlyLastAssistant verifies that only the last
+// assistant message's orphaned calls are re-executed. Historical orphans from
+// earlier turns are left for repairToolCallSequence to handle, avoiding
+// dangerous re-execution of side-effectful operations from prior turns.
+func TestRecoverOrphanedToolCallsOnlyLastAssistant(t *testing.T) {
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a.permissions = nil
+
+	tc1 := ToolCall{ID: "call-1", Type: "function"}
+	tc1.Function.Name = "mock_tool"
+	tc1.Function.Arguments = `{}`
+	tc2 := ToolCall{ID: "call-2", Type: "function"}
+	tc2.Function.Name = "mock_tool"
+	tc2.Function.Arguments = `{}`
+
+	// Earlier assistant has orphan (tc1), last assistant is complete (tc2 + result).
+	// The re-execution counter mock_tool uses is checked to verify only ONE call was re-executed.
+	messages := []Message{
+		{Role: "assistant", Content: "first", ToolCalls: []ToolCall{tc1}},
+		{Role: "user", Content: "continue"},
+		{Role: "assistant", Content: "second", ToolCalls: []ToolCall{tc2}},
+		{Role: "tool", ToolID: "call-2", Content: "result-2"},
+	}
+
+	result := a.recoverOrphanedToolCalls(messages)
+
+	// No changes expected: last assistant (idx 2) has all results (call-2 at idx 3).
+	// Earlier orphan (tc1 at idx 0) is NOT recovered. Length unchanged.
+	if len(result) != len(messages) {
+		t.Fatalf("expected %d messages (no recovery for historical orphan), got %d", len(messages), len(result))
+	}
+	for i := range messages {
+		if result[i].Role != messages[i].Role || result[i].ToolID != messages[i].ToolID {
+			t.Fatalf("message %d changed: got %+v, want %+v", i, result[i], messages[i])
+		}
+	}
+}
+
+// TestRecoverOrphanedToolCallsInsertPosition verifies that re-executed results
+// are inserted right after the assistant message, before any user/assistant
+// messages that follow — NOT appended at the end.
+func TestRecoverOrphanedToolCallsInsertPosition(t *testing.T) {
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a.permissions = nil
+
+	tc1 := ToolCall{ID: "call-1", Type: "function"}
+	tc1.Function.Name = "mock_tool"
+	tc1.Function.Arguments = `{}`
+	tc2 := ToolCall{ID: "call-2", Type: "function"}
+	tc2.Function.Name = "mock_tool"
+	tc2.Function.Arguments = `{}`
+
+	// Last assistant has tc1 (orphan) and tc2 (has result at ToolID "call-2").
+	// Result for tc1 should be inserted right after the assistant,
+	// BEFORE the new user message.
+	messages := []Message{
+		{Role: "user", Content: "initial"},
+		{Role: "assistant", Content: "doing work", ToolCalls: []ToolCall{tc1, tc2}},
+		{Role: "tool", ToolID: "call-2", Content: "existing-result"},
+		{Role: "user", Content: "NEW MESSAGE — must come after inserted tool results"},
+	}
+
+	result := a.recoverOrphanedToolCalls(messages)
+
+	if len(result) != len(messages)+1 {
+		t.Fatalf("expected %d messages (inserted one tool result), got %d", len(messages)+1, len(result))
+	}
+
+	// Positions:
+	//   [0] user: "initial"
+	//   [1] assistant: "doing work"
+	//   [2] tool: "existing-result" (for call-2)
+	//   [3] tool: "success" (for call-1 — INSERTED right after assistant)
+	//   [4] user: "NEW MESSAGE"
+	if result[3].Role != "tool" || result[3].ToolID != "call-1" {
+		t.Fatalf("expected inserted tool result at position 3 for call-1, got %+v", result[3])
+	}
+	if result[4].Role != "user" || !strings.Contains(result[4].Content, "NEW MESSAGE") {
+		t.Fatalf("expected user message at position 4 to be preserved, got %+v", result[4])
 	}
 }
 
