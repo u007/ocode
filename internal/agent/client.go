@@ -1809,8 +1809,12 @@ var providers = map[string]providerInfo{
 	"mistral":        {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
 	"opencode":       {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
 	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
-	"copilot":        {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
-	"lmstudio":       {"", "http://localhost:1234/v1"},
+	"copilot":                  {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
+	"lmstudio":                 {"", "http://localhost:1234/v1"},
+	"xiaomi":                   {"XIAOMI_API_KEY", "https://xiaomimimo.com/v1"},
+	"xiaomi-token-plan-sgp":    {"XIAOMI_API_KEY", "https://token-plan-sgp.xiaomimimo.com/v1"},
+	"xiaomi-token-plan-ams":    {"XIAOMI_API_KEY", "https://token-plan-ams.xiaomimimo.com/v1"},
+	"xiaomi-token-plan-cn":     {"XIAOMI_API_KEY", "https://token-plan-cn.xiaomimimo.com/v1"},
 }
 
 func NewClient(cfg *config.Config, model string) LLMClient {
@@ -1827,6 +1831,11 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		if _, ok := providers[parts[0]]; ok {
 			provider = parts[0]
 			model = parts[1]
+		} else if cfg != nil {
+			if _, ok := cfg.Provider[parts[0]]; ok {
+				provider = parts[0]
+				model = parts[1]
+			}
 		}
 	}
 

@@ -87,6 +87,109 @@ func TestConfinedPathAllowsConfiguredExtraRoot(t *testing.T) {
 	}
 }
 
+func TestAddExtraAllowedPath_AllowsNonexistentRootThenConfinesInsideIt(t *testing.T) {
+	workspace := t.TempDir()
+	extraBase := t.TempDir()
+	nonexistentRoot := filepath.Join(extraBase, "newdir")
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
+	setExtraAllowedPaths(nil)
+	t.Cleanup(func() { setExtraAllowedPaths(nil) })
+
+	if ok := AddExtraAllowedPath(nonexistentRoot); !ok {
+		t.Fatalf("expected AddExtraAllowedPath to accept nonexistent root %q", nonexistentRoot)
+	}
+	if err := os.MkdirAll(nonexistentRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(nonexistentRoot, "allowed.txt")
+	if err := os.WriteFile(target, []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := confinedPath(target); err != nil {
+		t.Fatalf("expected path under newly-added root to be allowed, got error: %v", err)
+	}
+}
+
+func TestRemoveExtraAllowedPath_RemovesOnlyAddedRoot(t *testing.T) {
+	workspace := t.TempDir()
+	extra := t.TempDir()
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
+	setExtraAllowedPaths(nil)
+	t.Cleanup(func() { setExtraAllowedPaths(nil) })
+
+	if ok := AddExtraAllowedPath(extra); !ok {
+		t.Fatalf("expected AddExtraAllowedPath to succeed for %q", extra)
+	}
+	if !HasExtraAllowedPath(extra) {
+		t.Fatalf("expected %q in extra allowlist", extra)
+	}
+	if !RemoveExtraAllowedPath(extra) {
+		t.Fatalf("expected %q to be removed", extra)
+	}
+	if HasExtraAllowedPath(extra) {
+		t.Fatalf("did not expect %q in allowlist after removal", extra)
+	}
+}
+
+func TestTemporaryAllowedPath_ReferenceCounted(t *testing.T) {
+	setExtraAllowedPaths(nil)
+	t.Cleanup(func() { setExtraAllowedPaths(nil) })
+
+	root := filepath.Join(t.TempDir(), "outside")
+	if ok := AcquireTemporaryAllowedPath(root); !ok {
+		t.Fatalf("expected first temporary acquire to succeed")
+	}
+	if ok := AcquireTemporaryAllowedPath(root); !ok {
+		t.Fatalf("expected second temporary acquire to succeed")
+	}
+	if !HasExtraAllowedPath(root) {
+		t.Fatalf("expected %q to be temporarily allowed", root)
+	}
+	if !ReleaseTemporaryAllowedPath(root) {
+		t.Fatalf("expected first temporary release to succeed")
+	}
+	if !HasExtraAllowedPath(root) {
+		t.Fatalf("expected %q to remain allowed after one release", root)
+	}
+	if !ReleaseTemporaryAllowedPath(root) {
+		t.Fatalf("expected second temporary release to succeed")
+	}
+	if HasExtraAllowedPath(root) {
+		t.Fatalf("did not expect %q to remain allowed after final release", root)
+	}
+}
+
+func TestTemporaryRelease_DoesNotRemovePersistentRoot(t *testing.T) {
+	setExtraAllowedPaths(nil)
+	t.Cleanup(func() { setExtraAllowedPaths(nil) })
+
+	root := filepath.Join(t.TempDir(), "outside")
+	if ok := AddExtraAllowedPath(root); !ok {
+		t.Fatalf("expected persistent add to succeed")
+	}
+	if ok := AcquireTemporaryAllowedPath(root); !ok {
+		t.Fatalf("expected temporary acquire to succeed")
+	}
+	if !ReleaseTemporaryAllowedPath(root) {
+		t.Fatalf("expected temporary release to succeed")
+	}
+	if !HasExtraAllowedPath(root) {
+		t.Fatalf("expected persistent root %q to remain allowed", root)
+	}
+}
+
 func TestMultiEditToolSequentialReplaceAndDiff(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()

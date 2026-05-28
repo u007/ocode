@@ -32,6 +32,12 @@ Add provider-native cache markers to chat requests. Zero config — always on wh
 - Requests sharing a common prefix are cached transparently by OpenAI's infrastructure.
 - `store: true` is for response storage, NOT prompt caching. Remove from scope.
 
+#### Caveat: Codex/Responses API (OAuth models)
+
+- **GPT-5.4 and other API-key models** use `/v1/chat/completions` — OpenAI returns `prompt_tokens_details.cached_tokens` in usage, so ocode displays cached token counts.
+- **GPT-5.3-codex and OAuth models** use the ChatGPT backend at `/backend-api/codex/responses` — this API does **not** return cache-hit fields (`prompt_tokens_details.cached_tokens` or `prompt_cache_hit_tokens`) in its usage JSON. Caching may still happen server-side, but ocode cannot display the count. This is an OpenAI backend limitation, not a client bug.
+- The parser (`parseOpenAIResponsesUsage` in `telemetry.go`) already supports both field names — the data is simply absent from the response.
+
 ### OpenAI-compatible (Google, Z.AI, Alibaba, DeepSeek, etc.)
 - **No implementation needed.** Most proxy through OpenAI-compatible endpoints.
 - Caching behavior depends on the upstream provider. No portable flag exists.

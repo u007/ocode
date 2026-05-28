@@ -26,6 +26,7 @@ intelligence, theme system, and extensible agent system.
 - **Multi-Provider LLM** — OpenAI, Anthropic (incl. Claude thinking/extended thinking), Google, Z.AI, Alibaba, GitHub Copilot
 - **Separated Agent System** — Registry-based agent definitions with permission isolation and child session tracking
 - **Anthropic Prompt Caching** — Automatic `cache_control` markers on system messages and large tool results
+- **OpenAI Caching** — Automatic server-side for API-key models (GPT-5.4, etc.); OAuth/codex backend (GPT-5.3-codex) doesn't surface cache token counts
 - **Extended Thinking** — Toggle thinking mode on supporting Anthropic models via `Ctrl+T` (off/low/med/high)
 - **Tool Result Truncation** — Large tool outputs (>100 lines) are truncated in-context and written to disk for retrieval
 - **Context Window Tracking** — Registry-backed model context windows with sidebar telemetry
@@ -67,6 +68,42 @@ Compact defaults:
 - `summary_provider`: unset, use current provider
 - `summary_model`: unset, use current model
 
+### Compaction behavior
+
+Compaction triggers automatically when used context exceeds the configured ratio of the active model's window. Every compaction:
+
+1. **Prunes** oversized tool results in the slice being summarised (capped at ~2KB each — full output remains available via on-disk tool-result truncation, see [Tool result handling](#tool-result-handling)).
+2. **Produces a structured summary** following a fixed Markdown template (Goal / Constraints / Progress / Decisions / Next Steps / Critical Context / Relevant Files). Every section is required, even if "(none)".
+3. **Anchors to the prior summary.** When a previous compaction summary exists in the session, the next compaction passes it as `<previous-summary>` and instructs the model to update it in place — merging new facts, removing stale ones, preserving still-true context. This keeps continuity across multiple compactions in the same session.
+4. **Replaces, not appends.** The prior summary message is overwritten by the new one. After N compactions there is still exactly one summary message in the session, not N.
+5. **Drops the old history.** Once a summary replaces a range of messages, the original messages are removed from the session. They are not re-sent to the LLM on the next turn. The TUI banner ("📦 Compacted N earlier messages") only shows where the cut happened.
+6. **Safe-cuts** the boundary so every assistant `tool_call` and its matching `tool_result` end up on the same side of the cut — no orphans.
+
+The summary is tagged with `[ocode:compaction-summary]` so subsequent compactions can find it. This tag is internal; you don't need to manage it manually.
+
+### Custom compaction model
+
+Compaction can use a different model than the active chat model. This is useful when you want a cheap/fast model to do summarisation while the main agent runs on something more capable (e.g. summarise with Haiku while chatting with Opus).
+
+```json
+{
+  "compact": {
+    "enabled": true,
+    "summary_provider": "anthropic",
+    "summary_model": "claude-haiku-4-5",
+    "token_threshold": 0.75,
+    "keep_recent_turns": 3,
+    "summary_timeout_seconds": 30,
+    "summary_max_retries": 1,
+    "max_summary_input_tokens": 50000
+  }
+}
+```
+
+- Leave `summary_provider` / `summary_model` empty to summarise with the active model.
+- If only one of the two is set, the other falls back to the active client's value.
+- The compaction client respects the same auth/keychain entries as the main client.
+
 Permissions live in `ocodeconfig.json` because they are ocode-only runtime policy:
 
 ```json
@@ -85,6 +122,15 @@ Permissions live in `ocodeconfig.json` because they are ocode-only runtime polic
         "git": "allow",
         "make": "ask",
         "rm": "deny"
+      },
+      "auto_allow_prefixes": [
+        "jq",
+        "stat"
+      ],
+      "prefix_modes": {
+        "sed": "mutating",
+        "jq": "read_only",
+        "python": "never_auto"
       }
     }
   }
@@ -92,6 +138,14 @@ Permissions live in `ocodeconfig.json` because they are ocode-only runtime polic
 ```
 
 Permission levels are `allow`, `ask`, and `deny`. Modes are `normal`, `yolo`, and `locked`.
+
+For `permissions.bash.prefix_modes`, supported values are:
+
+- `read_only`: auto-allow in-root calls and persist a project-scoped in-root rule.
+- `mutating`: auto-allow in-root calls once, but do not auto-persist.
+- `never_auto`: disable auto-allow for that prefix.
+
+`permissions.bash.auto_allow_prefixes` extends the built-in safe prefix set. Added prefixes still require all detected path arguments to resolve inside the current project root.
 
 - `normal`: follow tool and bash-prefix rules. Project-confined file writes/edits/patches/formats are allowed by default; delete, shell, network, and delegation tools still ask.
 - `yolo`: allow permission-gated tools without prompting, while still respecting agent mode restrictions and hard safety blocks.
@@ -135,11 +189,17 @@ ocode shares opencode's overall shape (TUI agent, multi-provider, MCP, sessions)
 
 opencode swaps the **entire** system prompt per model family. It ships seven full prompts in `packages/opencode/src/session/prompt/` (`anthropic.txt`, `gpt.txt`, `gemini.txt`, `beast.txt`, `codex.txt`, `kimi.txt`, `trinity.txt`, `default.txt`) — ~1146 lines total — selected by model-ID substring (e.g. `gpt-4`/`o1`/`o3` → `beast.txt`).
 
-ocode keeps **one shared base prompt** and appends a small **provider-keyed fragment** (~3 bullets) from `internal/agent/provider_prompts.go`. Trade-off:
+ocode runs a **hybrid**: one shared base prompt + a small **model-ID-routed fragment** loaded from `internal/agent/prompts/*.txt` (embedded via `//go:embed`). Routing checks the model ID first, then falls back to provider:
 
-- ocode wins on maintenance: prompt fixes land in one place, smaller per-request token footprint.
-- opencode wins on model tuning: bespoke prompts per family capture each model's quirks.
-- ocode is moving toward a hybrid: file-backed, model-ID-routed fragments (not full per-family bibles). See planning notes in this repo.
+- `o1` / `o3` / `o4-mini` / `*-thinking` → `reasoning.txt` (suppress chain-of-thought)
+- `claude-*` → `claude.txt`
+- `gemini-*` → `gemini.txt`
+- `kimi-*` → `kimi.txt`
+- `gpt-*` → `gpt.txt`
+- provider `copilot` / `github` → `copilot.txt`
+- unknown → no fragment (mode prompt only)
+
+Trade-off vs opencode: ocode keeps a smaller token footprint and one prompt to maintain, with a reasoning-model split that opencode handles via its larger `beast.txt` prompt.
 
 ### Permissions
 
@@ -159,6 +219,23 @@ ocode adds first-class permission modes (`normal`, `yolo`, `locked`) with per-to
 - **Background process management** with a 256KB circular output buffer and `wait` tool.
 - **Sidebar telemetry** for context window usage, cached via keystroke-debounced recompute.
 - **Extended thinking toggle** (`Ctrl+T` → off/low/med/high) on supporting Anthropic models.
+
+### Compaction
+
+Both projects compact long sessions, but with different mechanics:
+
+| Aspect | opencode | ocode |
+|---|---|---|
+| Trigger | `tokens.total >= usable(input − reserved)` | ratio threshold against model window (default 0.75) |
+| Anchored summary | yes | yes — single summary updated in place across multiple compactions |
+| Output template | fixed Markdown sections | fixed Markdown sections (same as opencode) |
+| Tool-pair safety | implicit (cuts at user-turn boundaries) | explicit `safeCut` — proves tool-call/result symmetry on both sides |
+| Prune-before-summary | yes (`TOOL_OUTPUT_MAX_CHARS=2000`) | yes (same cap) |
+| Custom summary model | no — uses session model | yes — `summary_provider` / `summary_model` in `ocodeconfig.json` |
+| Compaction marker in history | typed message part | sentinel-tagged system message (`[ocode:compaction-summary]`) |
+| Post-compaction history sent to LLM | replaced range is dropped | replaced range is dropped (verified by test) |
+
+ocode's compaction pipeline is intentionally smaller than opencode's, with three behaviors opencode does not have: per-compaction custom model selection, an explicit `safeCut` invariant, and reasoning-content-aware token estimation. See [Compaction behavior](#compaction-behavior) for the full pipeline and [Custom compaction model](#custom-compaction-model) for configuration.
 
 ### Anthropic prompt caching
 

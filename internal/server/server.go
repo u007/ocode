@@ -42,6 +42,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
 	s.mux.HandleFunc("GET /api/models", s.authMiddleware(s.handleListModels))
+	s.mux.HandleFunc("GET /api/git/status", s.authMiddleware(s.handleGitStatus))
+	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
+	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 
 	// Serve embedded web UI for non-API routes
 	s.mux.Handle("/", spaHandler(s.webFS))
@@ -86,6 +89,18 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListModels(w, r)
+}
+
+func (s *Server) handleGitStatus(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGitStatus(w, r)
+}
+
+func (s *Server) handleFileTree(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleFileTree(w, r)
+}
+
+func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleFileContent(w, r)
 }
 
 func (s *Server) Start() error {
@@ -167,6 +182,9 @@ func (s *Server) WithCORS() *Server {
 	wrapped.HandleFunc("GET /api/sessions/{id}", corsMiddleware(s.handleGetSession))
 	wrapped.HandleFunc("POST /api/sessions/{id}/message", corsMiddleware(s.handleSendMessage))
 	wrapped.HandleFunc("GET /api/models", corsMiddleware(s.handleListModels))
+	wrapped.HandleFunc("GET /api/git/status", corsMiddleware(s.handleGitStatus))
+	wrapped.HandleFunc("GET /api/files/tree", corsMiddleware(s.handleFileTree))
+	wrapped.HandleFunc("GET /api/files/content", corsMiddleware(s.handleFileContent))
 	s.mux = wrapped
 	return s
 }

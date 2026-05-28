@@ -183,6 +183,18 @@ func Load(id string) (*Session, error) {
 
 	path, data, err := readSessionFile(dir, id)
 	if err != nil {
+		if os.IsNotExist(err) && shouldSearchOtherProjects(id) {
+			fallbackPath, fallbackData, fallbackErr := readSessionFileAnyProject(id)
+			if fallbackErr == nil {
+				path = fallbackPath
+				data = fallbackData
+				err = nil
+			} else if !os.IsNotExist(fallbackErr) {
+				return nil, fallbackErr
+			}
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -193,6 +205,49 @@ func Load(id string) (*Session, error) {
 	s.Messages = removeIncompleteToolRequests(s.Messages)
 
 	return &s, nil
+}
+
+func shouldSearchOtherProjects(id string) bool {
+	if strings.HasPrefix(id, canonicalSessionPrefix) {
+		return true
+	}
+	_, err := time.Parse("2006-01-02-150405", id)
+	return err == nil
+}
+
+func readSessionFileAnyProject(id string) (string, []byte, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", nil, err
+	}
+
+	base := filepath.Join(home, ".local", "share", "opencode")
+	if runtime.GOOS == "windows" {
+		base = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "opencode")
+	}
+
+	projectRoot := filepath.Join(base, "project")
+	entries, err := os.ReadDir(projectRoot)
+	if err != nil {
+		return "", nil, err
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(projectRoot, e.Name(), "sessions")
+		path, data, readErr := readSessionFile(dir, id)
+		if readErr == nil {
+			log.Printf("session: loaded %q from fallback project path %s", id, path)
+			return path, data, nil
+		}
+		if !os.IsNotExist(readErr) {
+			return "", nil, readErr
+		}
+	}
+
+	return "", nil, os.ErrNotExist
 }
 
 func readSessionFile(dir, id string) (string, []byte, error) {
