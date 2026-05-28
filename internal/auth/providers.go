@@ -71,6 +71,9 @@ var Providers = []Provider{
 	{ID: "deepinfra", Label: "DeepInfra", EnvVar: "DEEPINFRA_API_KEY"},
 	{ID: "nvidia", Label: "NVIDIA NIM", EnvVar: "NVIDIA_API_KEY"},
 	{ID: "lmstudio", Label: "LM Studio (local)"},
+	{ID: "cloudflare-workers", Label: "Cloudflare Workers AI", EnvVar: "CLOUDFLARE_API_KEY"},
+	{ID: "cloudflare-gateway", Label: "Cloudflare AI Gateway", EnvVar: "CLOUDFLARE_GATEWAY_KEY"},
+	{ID: "codex", Label: "OpenAI Codex", EnvVar: "OPENAI_API_KEY", OAuthFlow: "openai"},
 }
 
 // GetBaseURL returns the per-credential base URL override, or "" if none.
