@@ -135,6 +135,7 @@ func Load() (*Config, error) {
 		Tools:      make(map[string]bool),
 		Permission: make(map[string]interface{}),
 		Provider:   make(map[string]interface{}),
+		Plugins:    make(map[string]PluginConfig),
 		Hooks:      make(map[string]HookConfig),
 		Formatters: make(map[string]FormatterConfig),
 	}

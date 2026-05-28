@@ -93,3 +93,32 @@ func TestRemovePlugin(t *testing.T) {
 		t.Error("plugin still present after remove")
 	}
 }
+
+func TestRemoveMCPServer(t *testing.T) {
+	tmpHome := t.TempDir()
+	tmpDir := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	cfgPath := filepath.Join(tmpDir, "opencode.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"mcp":{"gone":{"type":"local","command":["echo","hi"],"enabled":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RemoveMCPServer("gone"); err != nil {
+		t.Fatalf("RemoveMCPServer: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cfg.MCP["gone"]; ok {
+		t.Error("mcp server still present after remove")
+	}
+}
