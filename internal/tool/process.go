@@ -34,6 +34,12 @@ type Process struct {
 	StartedAt time.Time
 	EndedAt   time.Time
 
+	// supKey is the key used when reporting this process's lifecycle to the
+	// shared ProcessSupervisor. Equals ID for an empty SupervisorIDPrefix and
+	// "<prefix>"+ID otherwise. Captured at registration so finalizeManagedProcess
+	// can MarkExited/MarkKilled the right record without re-resolving the prefix.
+	supKey string
+
 	mu           sync.Mutex
 	buf          []byte // last <=procBufferCap bytes of the logical stream
 	dropped      int    // count of bytes dropped off the front
@@ -42,6 +48,16 @@ type Process struct {
 	notifyOnExit bool
 	bgRequestCh  chan struct{}
 	bgRequested  bool
+}
+
+// SupKey returns the supervisor-scoped key for this process (ID, optionally
+// namespaced by the owning registry's SupervisorIDPrefix). Empty when the
+// process was created without a registry.
+func (p *Process) SupKey() string {
+	if p == nil || p.supKey == "" {
+		return ""
+	}
+	return p.supKey
 }
 
 // appendOutput appends process output, dropping oldest bytes past the cap.
@@ -107,12 +123,16 @@ type ProcessRegistry struct {
 // supervisor's records map.
 func (r *ProcessRegistry) supID(id string) string {
 	r.mu.Lock()
-	prefix := r.supPrefix
-	r.mu.Unlock()
-	if prefix == "" {
+	defer r.mu.Unlock()
+	return r.supIDLocked(id)
+}
+
+// supIDLocked is the lock-held variant of supID. Caller must hold r.mu.
+func (r *ProcessRegistry) supIDLocked(id string) string {
+	if r.supPrefix == "" {
 		return id
 	}
-	return prefix + id
+	return r.supPrefix + id
 }
 
 func NewProcessRegistry() *ProcessRegistry {
@@ -170,7 +190,8 @@ func (r *ProcessRegistry) onDoneCallback() func(*Process) {
 func (r *ProcessRegistry) StartBackground(command string) *Process {
 	r.mu.Lock()
 	id := r.nextIDLocked()
-	p := &Process{ID: id, Command: command, Status: ProcRunning, StartedAt: time.Now(), notifyOnExit: true}
+	supKey := r.supIDLocked(id)
+	p := &Process{ID: id, supKey: supKey, Command: command, Status: ProcRunning, StartedAt: time.Now(), notifyOnExit: true}
 	r.procs[id] = p
 	r.order = append(r.order, id)
 	onDone := r.onDone
@@ -193,7 +214,7 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	// (which races on cmd internal state).
 	waitState := newCommandWait()
 
-	supID := r.supID(id)
+	supID := supKey
 	if sup != nil {
 		reg := ProcessRegistration{
 			ID:               supID,
@@ -272,8 +293,10 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 func (r *ProcessRegistry) RegisterForeground(command string, cmd *exec.Cmd, startedAt time.Time, waitFn func() error) (*Process, error) {
 	r.mu.Lock()
 	id := r.nextIDLocked()
+	supKey := r.supIDLocked(id)
 	p := &Process{
 		ID:          id,
+		supKey:      supKey,
 		Command:     command,
 		Status:      ProcRunning,
 		StartedAt:   startedAt,
@@ -287,7 +310,7 @@ func (r *ProcessRegistry) RegisterForeground(command string, cmd *exec.Cmd, star
 
 	if sup != nil {
 		_, err := sup.Register(ProcessRegistration{
-			ID:               r.supID(id),
+			ID:               supKey,
 			Command:          command,
 			Kind:             ProcessKindBackgroundBash,
 			Cmd:              cmd,
@@ -397,7 +420,7 @@ func (r *ProcessRegistry) Kill(id string) (string, error) {
 		}
 	}
 	if sup != nil {
-		sup.MarkKilled(r.supID(id), code)
+		sup.MarkKilled(p.SupKey(), code)
 	}
 	return fmt.Sprintf("process %s killed", id), nil
 }
@@ -510,7 +533,11 @@ func (r *ProcessRegistry) viewState(p *Process, id string, sup *ProcessSuperviso
 		return localStatus, localCode
 	}
 	if sup != nil {
-		if rec, ok := sup.Lookup(r.supID(id)); ok {
+		key := p.SupKey()
+		if key == "" {
+			key = r.supID(id)
+		}
+		if rec, ok := sup.Lookup(key); ok {
 			return viewStatus(rec.Status), rec.ExitCode
 		}
 	}

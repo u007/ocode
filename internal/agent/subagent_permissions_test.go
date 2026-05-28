@@ -129,3 +129,48 @@ func TestTaskSubagentInheritsParentPermissionModeAcrossSpecOverrides(t *testing.
 		t.Fatalf("ask_tool executed %d times, want 1", askTool.calls)
 	}
 }
+
+func TestTaskSubagentSharesParentPermissionManager(t *testing.T) {
+	// Subagents now share the parent's PermissionManager rather than receiving a
+	// clone. Grants applied to the parent at any time (before or after the
+	// subagent is constructed) take effect immediately for in-flight subagents,
+	// and "always allow" decisions made inside a subagent are visible to the
+	// parent on the next tool call.
+	client := &scriptedSubagentClient{responses: []*Message{
+		{Role: "assistant", ToolCalls: []ToolCall{makeAskToolCall()}},
+		{Role: "assistant", Content: "done"},
+	}}
+	askTool := &countingMockTool{name: "ask_tool", result: "executed"}
+	parent := NewAgent(client, []tool.Tool{askTool}, nil)
+	parent.Permissions().SetRule("task", PermissionAllow)
+	parent.Permissions().SetRule("ask_tool", PermissionAllow)
+	parent.SetSubAgentPermAsker(func(req PermissionRequest) PermissionResponse {
+		return PermissionResponse{Level: PermissionDeny}
+	})
+
+	reg := NewAgentRegistry()
+	reg.defs = append(reg.defs, AgentDefinition{
+		Name:        "shared-pm",
+		Description: "test",
+		Mode:        AgentModeSubagent,
+		Tools:       []string{"ask_tool"},
+		// Spec adds an "addition to its own allowed" — grants apply to the
+		// shared manager and extend the parent's allow-set.
+		Permissions: map[string]interface{}{"webfetch": "allow"},
+		Source:      "test",
+	})
+
+	parentPM := parent.Permissions()
+
+	if _, err := (TaskTool{mainAgent: parent, registry: reg}).Execute(json.RawMessage(`{"prompt":"run","agent":"shared-pm"}`)); err != nil {
+		t.Fatalf("task execute: %v", err)
+	}
+
+	// The spec's webfetch allow must be visible on the shared (parent) manager.
+	if got := parentPM.Check("webfetch"); got != PermissionAllow {
+		t.Fatalf("after subagent ran, parent webfetch = %v, want Allow (spec rule should land on shared manager)", got)
+	}
+	if askTool.calls != 1 {
+		t.Fatalf("ask_tool executed %d times, want 1", askTool.calls)
+	}
+}

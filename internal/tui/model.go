@@ -1975,8 +1975,13 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 				return m, nil
 			}
 		case "esc":
-			// Pop the current detail view unconditionally; detail navigation
-			// is independent of stream/agent cancellation.
+			// While a detail view is open: if the user has live agent work in
+			// flight (streaming or running sub-agents), Esc cancels that first
+			// so the gesture matches its meaning on the chat tab; otherwise
+			// pop the detail card.
+			if m.hasActiveAgentWork() {
+				return m.handleEscKey()
+			}
 			m.detail.pop()
 			return m, nil
 		}
@@ -2322,9 +2327,25 @@ func (m *model) toggleLogKind(kind DebugEntryKind) {
 	m.refreshLogViewport()
 }
 
+// hasActiveAgentWork reports whether the main agent or any sub-agent run is
+// currently in flight. Used to gate the agent.Cancel() / Runs().CancelAll()
+// calls in handleEscKey so that pressing Esc to dismiss a UI overlay (file
+// picker, detail card, etc.) when nothing is streaming does NOT terminate
+// background subagents.
+func (m model) hasActiveAgentWork() bool {
+	if m.streaming {
+		return true
+	}
+	if m.agent != nil && m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0 {
+		return true
+	}
+	return false
+}
+
 // handleEscKey is shared esc logic: cancel stream first, then double-esc either
 // exits shell mode or opens the message picker.
 func (m model) handleEscKey() (tea.Model, tea.Cmd) {
+	hadActiveWork := m.hasActiveAgentWork()
 	if m.streaming && m.cancelStream != nil {
 		select {
 		case <-m.cancelStream:
@@ -2332,9 +2353,11 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 			close(m.cancelStream)
 		}
 	}
-	// Cancel all agent runs (main agent + sub-agents) so escape stops
-	// all running agents, not just the current stream.
-	if m.agent != nil {
+	// Cancel agent runs only when work is actually in flight. Calling
+	// CancelAll() unconditionally would terminate background subagents on
+	// every Esc keystroke (e.g. closing a detail view or clearing a file
+	// selection), silently destroying in-flight results.
+	if hadActiveWork && m.agent != nil {
 		m.agent.Cancel()
 		if m.agent.Runs() != nil {
 			m.agent.Runs().CancelAll()

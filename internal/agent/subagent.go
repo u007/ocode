@@ -254,8 +254,14 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	subAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
 	subAgent.SetSubAgentPermAsker(t.mainAgent.subAgentPermAsker)
 
+	// Subagents share the parent (main thread) PermissionManager directly so
+	// every grant — whether seeded at startup or accumulated mid-session via
+	// "always allow" — is honored without an extra inheritance step. If the
+	// agent spec carries its own permissions, layer them onto the shared
+	// manager so they extend the main thread's allow-set ("additions to its
+	// own allowed"); there is no separate subagent-scoped PermissionManager.
 	if parentPerms := t.mainAgent.Permissions(); parentPerms != nil {
-		subAgent.permissions = parentPerms.Clone()
+		subAgent.permissions = parentPerms
 	}
 	if subAgent.permissions == nil {
 		subAgent.permissions = NewPermissionManager()
