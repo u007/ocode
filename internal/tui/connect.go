@@ -25,6 +25,7 @@ const (
 	connectStagePasteCode   // Anthropic: user pastes authorization code
 	connectStageWaitBrowser // OpenAI: localhost callback is running
 	connectStageDeviceCode  // Copilot: show user_code, await poll
+	connectStageAccountID   // Cloudflare Workers: collect account ID before API key
 	connectStageMessage
 )
 
@@ -36,6 +37,8 @@ type connectDialog struct {
 	methods     []connectMethod
 	keyInput    textinput.Model
 	codeInput   textinput.Model
+	accountIDInput textinput.Model
+	accountID      string
 	message     string
 	messageOK   bool
 
@@ -63,11 +66,16 @@ func (m *model) openConnectDialog() {
 	codeIn.Placeholder = "paste authorization code (or URL) and press Enter"
 	codeIn.CharLimit = 2048
 
+	acctIn := textinput.New()
+	acctIn.Placeholder = "Cloudflare Account ID (from dash.cloudflare.com)"
+	acctIn.CharLimit = 64
+
 	m.connect = &connectDialog{
-		stage:       connectStageProvider,
-		providerIdx: 0,
-		keyInput:    ti,
-		codeInput:   codeIn,
+		stage:          connectStageProvider,
+		providerIdx:    0,
+		keyInput:       ti,
+		codeInput:      codeIn,
+		accountIDInput: acctIn,
 	}
 	m.showConnect = true
 }
@@ -171,6 +179,11 @@ func (m model) renderConnect() string {
 		header = m.styles.Header.Render("API key: " + m.connect.provider.Label)
 		body = m.connect.keyInput.View() + "\n"
 		hint = hintStyle.Render("Enter save · Esc cancel · stored at ~/.config/ocode/auth.json (0600)")
+
+	case connectStageAccountID:
+		header = m.styles.Header.Render("Connect " + m.connect.provider.Label)
+		body = m.connect.accountIDInput.View()
+		hint = hintStyle.Render("Enter your Cloudflare Account ID, then press Enter")
 
 	case connectStagePasteCode:
 		header = m.styles.Header.Render("Anthropic OAuth: " + strings.ToUpper(m.connect.anthropicMode))
@@ -329,7 +342,12 @@ func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				d.stage = connectStageMessage
 				return m, nil
 			}
-			if err := auth.Set(d.provider.ID, auth.Credential{Kind: auth.KindAPIKey, Key: key}); err != nil {
+			cred := auth.Credential{Kind: auth.KindAPIKey, Key: key}
+			if d.provider.ID == "cloudflare-workers" && d.accountID != "" {
+				cred.AccountID = d.accountID
+				cred.BaseURL = auth.CloudflareWorkersBaseURL(d.accountID)
+			}
+			if err := auth.Set(d.provider.ID, cred); err != nil {
 				d.message = fmt.Sprintf("Failed to save: %v", err)
 				d.messageOK = false
 				d.stage = connectStageMessage
@@ -346,6 +364,29 @@ func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		d.keyInput, cmd = d.keyInput.Update(msg)
+		return m, cmd
+
+	case connectStageAccountID:
+		switch keyStr {
+		case "esc":
+			d.stage = connectStageMethod
+			return m, nil
+		case "enter":
+			id := strings.TrimSpace(d.accountIDInput.Value())
+			if id == "" {
+				d.message = "Account ID cannot be empty."
+				d.messageOK = false
+				d.stage = connectStageMessage
+				return m, nil
+			}
+			d.accountID = id
+			d.keyInput.SetValue("")
+			d.keyInput.Focus()
+			d.stage = connectStageKeyInput
+			return m, nil
+		}
+		var cmd tea.Cmd
+		d.accountIDInput, cmd = d.accountIDInput.Update(msg)
 		return m, cmd
 
 	case connectStagePasteCode:
@@ -400,6 +441,12 @@ func (m model) applyConnectMethod() (tea.Model, tea.Cmd) {
 	}
 	switch d.methods[d.methodIdx].id {
 	case "apikey":
+		if d.provider != nil && d.provider.ID == "cloudflare-workers" {
+			d.accountIDInput.SetValue("")
+			d.accountIDInput.Focus()
+			d.stage = connectStageAccountID
+			return m, nil
+		}
 		d.keyInput.SetValue("")
 		d.keyInput.Focus()
 		d.stage = connectStageKeyInput
