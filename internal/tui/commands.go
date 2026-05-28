@@ -11,6 +11,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/commands"
 	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/plugins"
 )
 
 type commandSpec struct {
@@ -61,6 +62,7 @@ func init() {
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
+		{name: "/plugin", usage: "/plugin [list|enable <name>|disable <name>|install <url>|remove <name>|info <name>|confirm|cancel]", help: "List, toggle, or install plugins", handler: runPluginCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -322,6 +324,129 @@ func runMCPCmd(m *model, args []string) tea.Cmd {
 		return listenCmd
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mcp [list|enable <server>|disable <server>]"})
+		return nil
+	}
+}
+
+func runPluginCmd(m *model, args []string) tea.Cmd {
+	action := "list"
+	if len(args) > 0 {
+		action = strings.ToLower(args[0])
+	}
+
+	switch action {
+	case "list", "ls", "":
+		m.messages = append(m.messages, message{role: roleAssistant, text: m.renderPluginList()})
+		return nil
+
+	case "info":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin info <name>"})
+			return nil
+		}
+		name := args[1]
+		p, ok := m.config.Plugins[name]
+		if !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
+			return nil
+		}
+		text := fmt.Sprintf("Plugin: %s\nSource: %s\nDir: %s\nEnabled: %v", name, p.Source, p.Dir, p.Enabled)
+		for _, pl := range plugins.LoadPlugins(nil) {
+			if pl.Name == name {
+				if pl.Description != "" {
+					text += "\nDescription: " + pl.Description
+				}
+				if len(pl.Tools) > 0 {
+					text += "\nTools: " + strings.Join(pl.Tools, ", ")
+				}
+				if len(pl.Commands) > 0 {
+					text += "\nCommands: " + strings.Join(pl.Commands, ", ")
+				}
+				break
+			}
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: text})
+		return nil
+
+	case "enable", "on", "disable", "off":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin enable <name> or /plugin disable <name>"})
+			return nil
+		}
+		name := args[1]
+		if _, ok := m.config.Plugins[name]; !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
+			return nil
+		}
+		enabled := action == "enable" || action == "on"
+		if err := config.SavePluginEnabled(name, enabled); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to update plugin config: %v", err)})
+			return nil
+		}
+		p := m.config.Plugins[name]
+		p.Enabled = enabled
+		m.config.Plugins[name] = p
+		state := "enabled"
+		if !enabled {
+			state = "disabled"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q %s.", name, state)})
+		return m.rebuildAgentWithExternalTools()
+
+	case "install":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin install <github.com/user/repo[@ref]>"})
+			return nil
+		}
+		source := args[1]
+		ref := ""
+		if at := strings.LastIndex(source, "@"); at > 0 {
+			ref = source[at+1:]
+			source = source[:at]
+		}
+		return func() tea.Msg { return pluginInstallMsg{source: source, ref: ref} }
+
+	case "remove":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin remove <name>"})
+			return nil
+		}
+		return func() tea.Msg { return pluginRemoveMsg{name: args[1]} }
+
+	case "confirm":
+		if m.pendingPluginInstall == nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No pending plugin install."})
+			return nil
+		}
+		pending := m.pendingPluginInstall
+		m.pendingPluginInstall = nil
+		return func() tea.Msg {
+			if err := plugins.RunOnInstall(pending.dirName, pending.p); err != nil {
+				return pluginInstalledMsg{source: pending.source, err: err}
+			}
+			if err := plugins.AutoRegisterMCP(pending.dirName, pending.p); err != nil {
+				return pluginInstalledMsg{source: pending.source, err: err}
+			}
+			cfg := config.PluginConfig{Source: pending.source, Dir: pending.dirName, Enabled: true}
+			if err := config.SavePlugin(pending.p.Name, cfg); err != nil {
+				return pluginInstalledMsg{source: pending.source, err: err}
+			}
+			return pluginInstalledMsg{name: pending.p.Name, source: pending.source, dir: pending.dirName}
+		}
+
+	case "cancel":
+		if m.pendingPluginInstall == nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No pending plugin install."})
+			return nil
+		}
+		pending := m.pendingPluginInstall
+		m.pendingPluginInstall = nil
+		_ = plugins.Remove(pending.dirName)
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Plugin install cancelled."})
+		return nil
+
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin [list|enable <name>|disable <name>|install <url>|remove <name>|info <name>|confirm|cancel]"})
 		return nil
 	}
 }
