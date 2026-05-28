@@ -28,3 +28,7 @@ bash_test_output.txt
 build_and_capture.sh
 build_check.sh
 build_script.sh
+
+# Web UI build artifacts
+web/node_modules/
+web/dist/assets/

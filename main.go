@@ -1,7 +1,9 @@
 package main
 
 import (
+	"embed"
 	"fmt"
+	"io/fs"
 	"os"
 
 	"github.com/jamesmercstudio/ocode/internal/acp"
@@ -13,6 +15,17 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/tui"
 	"github.com/jamesmercstudio/ocode/internal/version"
 )
+
+//go:embed all:web/dist
+var webAssets embed.FS
+
+func webFS() fs.FS {
+	f, err := fs.Sub(webAssets, "web/dist")
+	if err != nil {
+		return nil
+	}
+	return f
+}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -33,14 +46,14 @@ func main() {
 			}
 			return
 		case "serve":
-			if err := server.Run(os.Args[2:]); err != nil {
+			if err := server.Run(os.Args[2:], webFS()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
 			return
 		case "web":
 			args := append([]string{"--open"}, os.Args[2:]...)
-			if err := server.Run(args); err != nil {
+			if err := server.Run(args, webFS()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}

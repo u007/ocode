@@ -31,7 +31,7 @@ func TestHandlerChatInvalidJSON(t *testing.T) {
 }
 
 func TestAuthMiddleware(t *testing.T) {
-	s := New("localhost:0", "user", "pass")
+	s := New("localhost:0", "user", "pass", nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/api/sessions", nil)
@@ -52,7 +52,7 @@ func TestAuthMiddleware(t *testing.T) {
 }
 
 func TestNoAuthWhenEmpty(t *testing.T) {
-	s := New("localhost:0", "", "")
+	s := New("localhost:0", "", "", nil)
 
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/api/sessions", nil)
