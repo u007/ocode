@@ -6435,6 +6435,9 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 		if summary := formatChildSummary(agentRunChildren(ri)); summary != "" {
 			head += " · " + summary
 		}
+		if lbl := ri.ModelLabel(); lbl != "" {
+			head += " [" + lbl + "]"
+		}
 		selected := m.agentStripFocused && i == m.agentStripSelected
 		if selected {
 			b.WriteString(selectedStyle.Render(truncateToWidth(head, width)) + "\n")
