@@ -80,6 +80,7 @@ func init() {
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
 		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|<tool>]", help: "View or set tool and bash auto-allow permissions", handler: runPermissionsCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
+		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
 		{name: "/plugin", usage: "/plugin [list|enable <name>|disable <name>|install <url>|remove <name>|info <name>|confirm|cancel]", help: "List, toggle, or install plugins", handler: runPluginCmd},
@@ -652,6 +653,13 @@ func runYoloCmd(m *model, args []string) tea.Cmd {
 	m.persistPermissions()
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", m.agent.Permissions().Mode())})
 	return nil
+}
+
+func runSmallModelCmd(m *model, args []string) tea.Cmd {
+	return func() tea.Msg {
+		m.handleSmallModelCmd(args)
+		return nil
+	}
 }
 
 func runSkillsCmd(m *model, args []string) tea.Cmd {

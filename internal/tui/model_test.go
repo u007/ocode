@@ -184,6 +184,46 @@ func TestRenderStatusReflectsCommandRunningState(t *testing.T) {
 	}
 }
 
+func TestRenderStatusShowsActiveSubagentModel(t *testing.T) {
+	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil)
+	run := mainAgent.Runs().New("explore")
+	run.Sub = agent.NewAgent(retryTestClient{}, nil, nil)
+
+	m := model{
+		agent:     mainAgent,
+		ready:     true,
+		width:     140,
+		activeTab: tabChat,
+		styles:    ApplyThemeColors("tokyonight"),
+		input:     newTestTextarea(),
+	}
+
+	status := m.renderStatus()
+	if !strings.Contains(status, "subagent: test/test-model") {
+		t.Fatalf("expected status to include active subagent model, got %q", status)
+	}
+}
+
+func TestRenderAgentStripShowsRunModelLabel(t *testing.T) {
+	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil)
+	run := mainAgent.Runs().New("explore")
+	run.Sub = agent.NewAgent(retryTestClient{}, nil, nil)
+
+	m := model{
+		agent:  mainAgent,
+		ready:  true,
+		width:  140,
+		styles: ApplyThemeColors("tokyonight"),
+		input:  newTestTextarea(),
+	}
+	m.layout()
+
+	strip, _ := m.renderAgentStrip()
+	if !strings.Contains(strip, "[test/test-model]") {
+		t.Fatalf("expected agent strip to include run model label, got %q", strip)
+	}
+}
+
 func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 	client := &nestedTaskClient{responses: []*agent.Message{
 		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-parent-task", "task", `{"prompt":"spawn nested"}`)}},

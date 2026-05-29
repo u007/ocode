@@ -1067,6 +1067,12 @@ func newModel(sid string, cont bool, yolo bool) model {
 			text:      hintStyle.Render("⚡ small model: " + resolvedSmallModel),
 			transient: true,
 		})
+	} else if cfg != nil && cfg.Ocode.SmallModel != "" {
+		m.messages = append(m.messages, message{
+			role:      roleAssistant,
+			text:      hintStyle.Render("⚡ small model: " + cfg.Ocode.SmallModel),
+			transient: true,
+		})
 	}
 
 	// Set workDir for path-scoped permission checks
@@ -4397,6 +4403,78 @@ func (m *model) handleSkillsCmd(args []string) {
 		b.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m *model) handleSmallModelCmd(args []string) {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No config loaded."})
+		return
+	}
+
+	if len(args) == 0 {
+		// Show current small model and available candidates
+		var b strings.Builder
+		b.WriteString("Small Model\n")
+		b.WriteString(strings.Repeat("═", 40) + "\n\n")
+		b.WriteString("Used for: title generation, explore/general/compaction subagents\n\n")
+
+		current := m.config.Ocode.SmallModel
+		if current == "" {
+			b.WriteString("Current: (not set — auto-resolving from priority list)\n")
+		} else {
+			b.WriteString(fmt.Sprintf("Current: %s\n", current))
+		}
+
+		b.WriteString("\nPriority list (auto-resolve order):\n")
+		for i, candidate := range agent.SmallModelPriority {
+			marker := "  "
+			if candidate == current {
+				marker = "→ "
+			}
+			b.WriteString(fmt.Sprintf("  %d. %s%s\n", i+1, marker, candidate))
+		}
+
+		b.WriteString("\nUsage: /small-model <provider/model>  or  /small-model auto\n")
+		b.WriteString("  auto  — clear override, re-enable auto-resolve\n")
+
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return
+	}
+
+	target := strings.ToLower(args[0])
+
+	if target == "auto" {
+		// Clear override in memory so ResolveSmallModel re-probes
+		m.config.Ocode.SmallModel = ""
+		// Re-resolve
+		if small := agent.ResolveSmallModel(m.config); small != "" {
+			m.config.Ocode.SmallModel = small
+			if err := config.SaveSmallModel(small); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model resolved to %s but failed to persist: %v. In-memory value stays for this session.", small, err)})
+				return
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model set to auto-resolve → %s", small)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Small model cleared. No viable candidate found in priority list."})
+		}
+		return
+	}
+
+	// Validate that the model is available
+	client := agent.NewClient(m.config, args[0])
+	if client == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", args[0])})
+		return
+	}
+
+	// Set and persist
+	m.config.Ocode.SmallModel = args[0]
+	if err := config.SaveSmallModel(args[0]); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save small model: %v", err)})
+		return
+	}
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model updated to %s\nPersisted to config for next session.", args[0])})
 }
 
 func (m *model) handleContextCmd(args []string) {
