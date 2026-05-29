@@ -877,6 +877,24 @@ func (m model) currentModelName() string {
 	return "no model"
 }
 
+// activeSubagentModel returns "provider/model" of the most recently started
+// running subagent, or "" when no subagents are active.
+func (m model) activeSubagentModel() string {
+	if m.agent == nil || m.agent.Runs() == nil {
+		return ""
+	}
+	runs := m.agent.Runs().Snapshot()
+	// Walk in reverse — most recently started run is last.
+	for i := len(runs) - 1; i >= 0; i-- {
+		if runs[i].Status == agent.RunRunning {
+			if lbl := runs[i].ModelLabel(); lbl != "" {
+				return lbl
+			}
+		}
+	}
+	return ""
+}
+
 func (m *model) getInitialTools() []tool.Tool {
 	return []tool.Tool{
 		&tool.ReadTool{},
@@ -7094,6 +7112,9 @@ func (m *model) renderStatus() string {
 
 	// First line: status info on left
 	leftStatus := fmt.Sprintf(" LLM: %s · Agent: %s · Model: %s%s%s%s%s", llmState, displayAgentName, m.currentModelName(), reasoningState, permissionMode, compactState, jobState)
+	if subagentModel := m.activeSubagentModel(); subagentModel != "" {
+		leftStatus += fmt.Sprintf(" · subagent: %s", subagentModel)
+	}
 
 	// Second line: session ID and hints
 	rightContent := fmt.Sprintf("Session: %s%s", m.sessionID, suffix)
