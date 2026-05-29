@@ -925,6 +925,16 @@ func newModel(sid string, cont bool, yolo bool) model {
 	refreshCustomCommands(cfg)
 	_ = auth.HydrateEnv()
 
+	// Auto-select a small model from the priority list if none is configured.
+	var resolvedSmallModel string
+	if cfg != nil && cfg.Ocode.SmallModel == "" {
+		if small := agent.ResolveSmallModel(cfg); small != "" {
+			cfg.Ocode.SmallModel = small
+			resolvedSmallModel = small
+			_ = config.SaveSmallModel(small) // persist for next session; ignore error
+		}
+	}
+
 	// shouldLoad tracks whether the session ID was explicitly provided
 	// (via -session flag or -continue) vs auto-generated. We only attempt
 	// to load an existing session file when explicitly requested.
@@ -1031,6 +1041,14 @@ func newModel(sid string, cont bool, yolo bool) model {
 		cleanupState:         newModelCleanupState(),
 		supervisor:           sup,
 		hookPipeline:         hp,
+	}
+
+	if resolvedSmallModel != "" {
+		m.messages = append(m.messages, message{
+			role:      roleAssistant,
+			text:      hintStyle.Render("⚡ small model: " + resolvedSmallModel),
+			transient: true,
+		})
 	}
 
 	// Set workDir for path-scoped permission checks
