@@ -30,6 +30,26 @@ var commandHelpOutput string
 var loadedCustomCommands []commands.Command
 var customCommandLookup map[string]*commands.Command
 
+func enabledPluginMap(cfg *config.Config) map[string]bool {
+	if cfg == nil || len(cfg.Plugins) == 0 {
+		return nil
+	}
+	enabled := make(map[string]bool, len(cfg.Plugins))
+	for name, p := range cfg.Plugins {
+		enabled[name] = p.Enabled
+	}
+	return enabled
+}
+
+func refreshCustomCommands(cfg *config.Config) {
+	loadedCustomCommands = commands.LoadCommands(enabledPluginMap(cfg))
+	customCommandLookup = make(map[string]*commands.Command, len(loadedCustomCommands))
+	for i := range loadedCustomCommands {
+		cmd := &loadedCustomCommands[i]
+		customCommandLookup["/"+cmd.Name] = cmd
+	}
+}
+
 func init() {
 	commandSpecs = []commandSpec{
 		{name: "/models", aliases: []string{"/model"}, usage: "/models [name]", help: "List and switch available models", takesModelArg: true, handler: runModelsCmd},
@@ -76,12 +96,7 @@ func init() {
 	}
 
 	commandHelpOutput = buildCommandHelpText(commandSpecs)
-	loadedCustomCommands = commands.LoadCommands()
-	customCommandLookup = make(map[string]*commands.Command, len(loadedCustomCommands))
-	for i := range loadedCustomCommands {
-		cmd := &loadedCustomCommands[i]
-		customCommandLookup["/"+cmd.Name] = cmd
-	}
+	refreshCustomCommands(nil)
 }
 
 func lookupCommand(name string) *commandSpec {
@@ -386,6 +401,7 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		p := m.config.Plugins[name]
 		p.Enabled = enabled
 		m.config.Plugins[name] = p
+		refreshCustomCommands(m.config)
 		state := "enabled"
 		if !enabled {
 			state = "disabled"

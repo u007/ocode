@@ -873,7 +873,12 @@ func (m *filesModel) copySelectedPath() {
 
 func (m filesModel) openInEditor(path string) tea.Cmd {
 	if m.editorOpener != nil {
-		return m.editorOpener(path)
+		// Wrap the opener so we can intercept startup errors.
+		opener := m.editorOpener
+		return func() tea.Msg {
+			cmd := opener(path)
+			return cmd()
+		}
 	}
 	editor := m.editor
 	if editor == "" {
@@ -882,6 +887,12 @@ func (m filesModel) openInEditor(path string) tea.Cmd {
 	cmdParts := strings.Fields(editor)
 	if len(cmdParts) == 0 {
 		return func() tea.Msg { return editorFinishedMsg{err: os.ErrInvalid} }
+	}
+	// Validate the editor binary exists before attempting to run it.
+	if _, err := exec.LookPath(cmdParts[0]); err != nil {
+		return func() tea.Msg {
+			return editorFinishedMsg{err: fmt.Errorf("editor %q not found in PATH: %w", cmdParts[0], err)}
+		}
 	}
 	cmdParts = append(cmdParts, path)
 	c := exec.Command(cmdParts[0], cmdParts[1:]...)

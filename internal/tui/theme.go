@@ -41,6 +41,7 @@ type Styles struct {
 	Text, Thinking, ThinkingHeader        lipgloss.Style
 	Selected, Status, Success, Error      lipgloss.Style
 	Dim, ToolBox, UserMessageBox          lipgloss.Style
+	SidebarText                           lipgloss.Style
 }
 
 var builtinThemes = map[string]ThemeDefinition{
@@ -535,7 +536,8 @@ func ApplyThemeColors(name string) Styles {
 		Text:      lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)),
 		Thinking:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)),
 		ThinkingHeader: lipgloss.NewStyle().Foreground(lipgloss.Color(c.Accent)).Bold(true),
-		Dim:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim)),
+		Dim:            lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim)),
+		SidebarText:    lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)),
 		ToolBox:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
 		UserMessageBox: lipgloss.NewStyle().
 			Foreground(lipgloss.Color(c.Text)).
@@ -559,6 +561,7 @@ func ApplyThemeColors(name string) Styles {
 	setTextStyle(s.Text)
 	setThinkingStyle(s.Thinking)
 	setThinkingHeaderStyle(s.ThinkingHeader)
+	setSidebarTextStyle(s.SidebarText)
 	setDimStyle(s.Dim)
 	setToolBoxStyle(s.ToolBox)
 	setTodoStyles(s.Dim, s.Header, s.Text)
@@ -621,6 +624,10 @@ func setThinkingHeaderStyle(s lipgloss.Style) {
 	thinkingHeaderStyle = s
 }
 
+func setSidebarTextStyle(s lipgloss.Style) {
+	sidebarTextStyle = s
+}
+
 func setDimStyle(s lipgloss.Style) {
 	dimStyle = s
 }
@@ -644,6 +651,7 @@ func currentStyles() Styles {
 		Thinking:       thinkingStyle,
 		ThinkingHeader: thinkingHeaderStyle,
 		Dim:       dimStyle,
+		SidebarText:    sidebarTextStyle,
 		ToolBox:   toolBoxStyle,
 	}
 }

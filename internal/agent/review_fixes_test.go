@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"testing"
 
 	"github.com/jamesmercstudio/ocode/internal/tool"
@@ -99,7 +100,7 @@ func TestApplyGenerationParams_OmitsForReasoningModel(t *testing.T) {
 	temp, top := 0.4, 0.9
 	gc := &GenericClient{Model: "gpt-5.1", Temperature: &temp, TopP: &top}
 	payload := map[string]interface{}{"model": "gpt-5.1"}
-	gc.applyGenerationParams(payload)
+	gc.applyGenerationParams(context.Background(), payload)
 	if _, ok := payload["temperature"]; ok {
 		t.Errorf("payload should NOT carry temperature for reasoning model, got: %v", payload)
 	}

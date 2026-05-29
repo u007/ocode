@@ -61,7 +61,13 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 	}
 	ctx := a.getPreloadedContext()
 	if ctx == "" {
-		ctx = LoadContext()
+		enabled := make(map[string]bool)
+		if a.config != nil {
+			for name, p := range a.config.Plugins {
+				enabled[name] = p.Enabled
+			}
+		}
+		ctx = LoadContext(enabled)
 	}
 	if strings.TrimSpace(ctx) != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptContextMarker + "\nContext and rules:\n" + ctx})

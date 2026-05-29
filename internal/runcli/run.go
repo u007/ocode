@@ -223,7 +223,15 @@ func resolveCommandPrompt(name, args string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("command name is required")
 	}
-	cmd, err := commands.LoadCommand(name)
+	cfg, err := config.Load()
+	if err != nil {
+		return "", fmt.Errorf("load config: %w", err)
+	}
+	enabled := make(map[string]bool, len(cfg.Plugins))
+	for pluginName, pluginCfg := range cfg.Plugins {
+		enabled[pluginName] = pluginCfg.Enabled
+	}
+	cmd, err := commands.LoadCommand(name, enabled)
 	if err != nil {
 		return "", err
 	}

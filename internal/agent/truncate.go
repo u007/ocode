@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -114,4 +115,34 @@ func TruncateToolResult(toolUseID, result string) string {
 		maxToolResultLines+1, totalLines, path,
 	)
 	return head + notice
+}
+
+// CleanupToolResults removes cached tool result files older than maxAge.
+// It is safe to call from any goroutine.
+func CleanupToolResults(maxAge time.Duration) error {
+	dir, err := toolResultCacheDir()
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cutoff := time.Now().Add(-maxAge)
+	var firstErr error
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	return firstErr
 }

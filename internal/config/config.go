@@ -128,6 +128,7 @@ type Config struct {
 	Formatters     map[string]FormatterConfig `json:"formatters"`
 	RemoteConfig   string                     `json:"remote_config"`
 	Ocode          OcodeConfig                `json:"-"`
+	UseWebSocket   bool                       `json:"use_websocket,omitempty"`
 }
 
 func Load() (*Config, error) {
