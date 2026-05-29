@@ -16,11 +16,11 @@ type Command struct {
 	HasArgs     bool
 }
 
-func LoadCommands() []Command {
+func LoadCommands(enabled map[string]bool) []Command {
 	var cmds []Command
 	seen := make(map[string]bool)
 
-	for _, dir := range commandSearchPaths() {
+	for _, dir := range commandSearchPaths(enabled) {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -55,7 +55,7 @@ func LoadCommands() []Command {
 	return cmds
 }
 
-func commandSearchPaths() []string {
+func commandSearchPaths(enabled map[string]bool) []string {
 	var paths []string
 
 	home, err := os.UserHomeDir()
@@ -73,7 +73,7 @@ func commandSearchPaths() []string {
 		paths = append(paths, filepath.Join(cwd, "commands"))
 	}
 
-	paths = append(paths, plugins.LoadPluginCommandDirPaths(nil)...)
+	paths = append(paths, plugins.LoadPluginCommandDirPaths(enabled)...)
 
 	return paths
 }
@@ -140,8 +140,8 @@ func parseCommandFile(path string) (Command, error) {
 	}, nil
 }
 
-func LoadCommand(name string) (*Command, error) {
-	for _, dir := range commandSearchPaths() {
+func LoadCommand(name string, enabled map[string]bool) (*Command, error) {
+	for _, dir := range commandSearchPaths(enabled) {
 		candidates := []string{
 			filepath.Join(dir, name+".md"),
 		}

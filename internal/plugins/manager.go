@@ -7,13 +7,59 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 )
+
+// looksLikeCommitSHA returns true if ref looks like a full (40-char) or
+// abbreviated (≥7) hex commit hash.
+var commitSHAPat = regexp.MustCompile(`^[a-f0-9]{7,40}$`)
+
+func looksLikeCommitSHA(ref string) bool {
+	return commitSHAPat.MatchString(strings.ToLower(strings.TrimSpace(ref)))
+}
+
+func resolveCommitHash(repo *gogit.Repository, ref string) (plumbing.Hash, error) {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	if ref == "" {
+		return plumbing.Hash{}, fmt.Errorf("empty commit ref")
+	}
+	if len(ref) == 40 {
+		return plumbing.NewHash(ref), nil
+	}
+
+	iter, err := repo.Log(&gogit.LogOptions{All: true})
+	if err != nil {
+		return plumbing.Hash{}, fmt.Errorf("list commits: %w", err)
+	}
+	defer iter.Close()
+
+	var match plumbing.Hash
+	count := 0
+	err = iter.ForEach(func(c *object.Commit) error {
+		if strings.HasPrefix(c.Hash.String(), ref) {
+			match = c.Hash
+			count++
+			if count > 1 {
+				return fmt.Errorf("ambiguous commit ref %q", ref)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return plumbing.Hash{}, err
+	}
+	if count == 0 {
+		return plumbing.Hash{}, fmt.Errorf("commit %q not found", ref)
+	}
+	return match, nil
+}
 
 // InstallGit clones a git URL into pluginsRoot/<derived-dir> and returns the
 // parsed Plugin and the absolute clone directory. ref may be empty (HEAD).
@@ -26,17 +72,56 @@ func InstallGit(rawURL, pluginsRoot, ref string) (Plugin, string, error) {
 		return Plugin{}, "", fmt.Errorf("plugin directory %q already exists; remove it first", destDir)
 	}
 
-	cloneOpts := &gogit.CloneOptions{
-		URL:      gitURL,
-		Depth:    1,
-		Progress: nil,
-	}
-	if ref != "" {
-		cloneOpts.ReferenceName = plumbing.NewTagReferenceName(ref)
-	}
-
-	if _, err := gogit.PlainClone(destDir, false, cloneOpts); err != nil {
-		return Plugin{}, "", fmt.Errorf("git clone %s: %w", gitURL, err)
+	var repo *gogit.Repository
+	if ref != "" && looksLikeCommitSHA(ref) {
+		// For commit SHAs, clone the full repository so abbreviated hashes can
+		// be resolved locally, then checkout the resolved commit.
+		cloneOpts := &gogit.CloneOptions{
+			URL:      gitURL,
+			Progress: nil,
+		}
+		var err error
+		repo, err = gogit.PlainClone(destDir, false, cloneOpts)
+		if err != nil {
+			return Plugin{}, "", fmt.Errorf("git clone %s: %w", gitURL, err)
+		}
+		wt, err := repo.Worktree()
+		if err != nil {
+			_ = os.RemoveAll(destDir)
+			return Plugin{}, "", fmt.Errorf("worktree: %w", err)
+		}
+		hash, err := resolveCommitHash(repo, ref)
+		if err != nil {
+			_ = os.RemoveAll(destDir)
+			return Plugin{}, "", err
+		}
+		if err := wt.Checkout(&gogit.CheckoutOptions{
+			Hash: hash,
+		}); err != nil {
+			_ = os.RemoveAll(destDir)
+			return Plugin{}, "", fmt.Errorf("checkout %s: %w", ref, err)
+		}
+	} else {
+		cloneOpts := &gogit.CloneOptions{
+			URL:      gitURL,
+			Depth:    1,
+			Progress: nil,
+		}
+		if ref != "" {
+			// Try tag first, then branch.
+			cloneOpts.ReferenceName = plumbing.NewTagReferenceName(ref)
+		}
+		var err error
+		repo, err = gogit.PlainClone(destDir, false, cloneOpts)
+		if err != nil && ref != "" {
+			// Tag not found — try as a branch reference.
+			_ = os.RemoveAll(destDir)
+			cloneOpts.ReferenceName = plumbing.NewBranchReferenceName(ref)
+			repo, err = gogit.PlainClone(destDir, false, cloneOpts)
+		}
+		if err != nil {
+			return Plugin{}, "", fmt.Errorf("git clone %s @ %s: %w", gitURL, ref, err)
+		}
 	}
 
 	p, err := readManifest(destDir)

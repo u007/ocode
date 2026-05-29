@@ -60,7 +60,7 @@ func readContextFile(path string) (string, bool) {
 	return string(content), true
 }
 
-func LoadContext() string {
+func LoadContext(enabled map[string]bool) string {
 	var context string
 	files := []string{"AGENTS.md", "CLAUDE.md", ".cursorrules"}
 
@@ -82,7 +82,7 @@ func LoadContext() string {
 		}
 	}
 
-	if pluginInstr := plugins.LoadPluginInstructions(nil); pluginInstr != "" {
+	if pluginInstr := plugins.LoadPluginInstructions(enabled); pluginInstr != "" {
 		context += pluginInstr
 	}
 	if skillCatalog := skill.BuildCatalog(); skillCatalog != "" {

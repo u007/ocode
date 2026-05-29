@@ -70,29 +70,33 @@ func (t CustomTool) Execute(args json.RawMessage) (string, error) {
 	return string(output), nil
 }
 
-func LoadCustomTools() []Tool {
+// LoadToolsFromDir reads .json files from dir and parses them as CustomTool entries.
+// Non-existent or empty directories are silently skipped.
+func LoadToolsFromDir(dir string) []Tool {
 	var tools []Tool
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err == nil {
+				var ct CustomTool
+				if err := json.Unmarshal(data, &ct); err == nil {
+					tools = append(tools, ct)
+				}
+			}
+		}
+	}
+	return tools
+}
 
+func LoadCustomTools() []Tool {
 	home, _ := os.UserHomeDir()
 	globalPath := filepath.Join(home, ".config", "opencode", "tools")
 	if runtime.GOOS == "windows" {
 		globalPath = filepath.Join(os.Getenv("APPDATA"), "opencode", "tools")
 	}
-
-	entries, err := os.ReadDir(globalPath)
-	if err == nil {
-		for _, e := range entries {
-			if !e.IsDir() && filepath.Ext(e.Name()) == ".json" {
-				data, err := os.ReadFile(filepath.Join(globalPath, e.Name()))
-				if err == nil {
-					var ct CustomTool
-					if err := json.Unmarshal(data, &ct); err == nil {
-						tools = append(tools, ct)
-					}
-				}
-			}
-		}
-	}
-
-	return tools
+	return LoadToolsFromDir(globalPath)
 }

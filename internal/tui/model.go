@@ -371,6 +371,8 @@ func (m *model) cleanupCurrentSession() {
 		_ = m.supervisor.Shutdown(ctx)
 	}
 	m.cleanupAgent(m.agent)
+	// Evict stale tool-result cache files (older than 2 days).
+	_ = agent.CleanupToolResults(48 * time.Hour)
 }
 
 func (m *model) replaceAgent(next *agent.Agent) tea.Cmd {
@@ -467,6 +469,8 @@ type model struct {
 	currentAgentIdx          int
 	branchlessMode           bool
 	showPermDialog           bool
+	showRetryDialog          bool
+	retryDialogMsg           string
 	showQuestionDialog       bool
 	questionToolCallID       string
 	questionPrompts          []tool.QuestionPrompt
@@ -644,6 +648,7 @@ var (
 	sidebarHeaderStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7DCFFF")).Bold(true)
 	sidebarSectionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#BB9AF7")).Bold(true)
 	sidebarAccentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true)
+	sidebarTextStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 
 	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Strikethrough(true)
 	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
@@ -917,6 +922,7 @@ func (m *model) switchAgent(name string) {
 func newModel(sid string, cont bool, yolo bool) model {
 	cfg, _ := config.Load()
 	agent.ApplyAgentConfig(cfg)
+	refreshCustomCommands(cfg)
 	_ = auth.HydrateEnv()
 
 	// shouldLoad tracks whether the session ID was explicitly provided
@@ -1099,6 +1105,7 @@ func (m model) Init() tea.Cmd {
 	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitTitleEvent(m.titleCh), waitDeltaEvent(m.deltaCh), listenSubAgentPerm(m.subAgentPermCh)}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
+		cmds = append(cmds, listenRetryStatus(m.agent))
 	}
 	if !agent.RegistryReady() {
 		cmds = append(cmds, waitForRegistry())
@@ -1571,7 +1578,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.config.Plugins = map[string]config.PluginConfig{}
 			}
 			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Dir: msg.dir, Enabled: true}
+			refreshCustomCommands(m.config)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q installed.", msg.name)})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, m.rebuildAgentWithExternalTools()
 		}
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
@@ -1610,7 +1620,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin remove failed: %v", msg.err)})
 		} else {
 			delete(m.config.Plugins, msg.name)
+			refreshCustomCommands(m.config)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q removed.", msg.name)})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, m.rebuildAgentWithExternalTools()
 		}
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
@@ -1722,6 +1735,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.agent != nil {
 			return m, listenJobs(m.agent)
+		}
+		return m, nil
+	case retryStatusMsg:
+		if msg.agent != m.agent {
+			return m, nil
+		}
+		m.showRetryDialog = true
+		m.retryDialogMsg = fmt.Sprintf("⚠ Subagent %s retrying (attempt %d): %s",
+			msg.ev.Name, msg.ev.RetryCount, msg.ev.LastError)
+		if m.agent != nil {
+			return m, listenRetryStatus(m.agent)
 		}
 		return m, nil
 	case streamMsgEvent:
@@ -2145,6 +2169,14 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.rerenderTranscriptAndMaybeScroll()
 			m.saveSession()
 			return m, cmd
+		}
+	}
+
+	if m.showRetryDialog {
+		switch keyStr {
+		case "enter", "esc":
+			m.showRetryDialog = false
+			return m, nil
 		}
 	}
 
@@ -4613,13 +4645,13 @@ func (m model) buildSelectionSidebarData(width int) ([]string, []string) {
 				continue
 			}
 			n := m.files.nodes[idx]
-			body = append(body, "• "+formatSidebarFilePath(n.path, m.workDir, maxInt(1, width-2)))
+			body = append(body, sidebarTextStyle.Render("• "+formatSidebarFilePath(n.path, m.workDir, maxInt(1, width-2))))
 			filePaths = append(filePaths, n.path)
 		}
 	}
 	if m.filesSel.active && m.files.previewPath != "" && len(m.files.previewRawLines) > 0 {
 		startLine, _, endLine, _ := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
-		lineLabel := fmt.Sprintf("↳ %s:%d-%d", formatSidebarFilePath(m.files.previewPath, m.workDir, maxInt(1, width-7)), startLine+1, endLine+1)
+		lineLabel := sidebarTextStyle.Render(fmt.Sprintf("↳ %s:%d-%d", formatSidebarFilePath(m.files.previewPath, m.workDir, maxInt(1, width-7)), startLine+1, endLine+1))
 		body = append(body, lineLabel)
 		filePaths = append(filePaths, m.files.previewPath)
 	}
@@ -5245,7 +5277,7 @@ func (m *model) askAgent() tea.Cmd {
 	// Load context once — both buildAgentMessagesSnapshot and Step call
 	// BasePromptMessages, which would otherwise re-read context files twice.
 	if m.agent != nil {
-		m.agent.SetPreloadedContext(agent.LoadContext())
+		m.agent.SetPreloadedContext(agent.LoadContext(nil))
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
@@ -5437,6 +5469,8 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	var inputArea string
 	if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else if m.showRetryDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
@@ -7435,7 +7469,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	if gitBranch == "" {
 		gitBranch = "(no git repo)"
 	}
-	gitBody := []string{dimStyle.Render("Branch: ") + gitBranch}
+	gitBody := []string{dimStyle.Render("Branch: ") + sidebarTextStyle.Render(gitBranch)}
 	if m.git.aheadBehind != "" {
 		gitBody[0] += "  " + dimStyle.Render(m.git.aheadBehind)
 	}
@@ -7465,7 +7499,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	// ── Files section (scrollable) ──
 	changed := snapshot.ChangedFiles()
 	if len(changed) == 0 {
-		appendScrollSection("Files", []string{"No files changed this session."}, nil)
+		appendScrollSection("Files", []string{sidebarTextStyle.Render("No files changed this session.")}, nil)
 	} else {
 		body := make([]string, 0, len(changed))
 		for _, path := range changed {
@@ -7475,7 +7509,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 			if status != "" {
 				prefix = status + " "
 			}
-			body = append(body, prefix+formatSidebarFilePath(path, m.workDir, sidebarColumnWidth-lipgloss.Width(prefix)-4))
+			body = append(body, prefix+sidebarTextStyle.Render(formatSidebarFilePath(path, m.workDir, sidebarColumnWidth-lipgloss.Width(prefix)-4)))
 		}
 		appendScrollSection("Files", body, changed)
 	}
@@ -7483,7 +7517,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	// ── TODO section (scrollable) ──
 	todo := tool.TodoState()
 	if todo == "" {
-		appendScrollSection("TODO", []string{"No todo list for this session yet."}, nil)
+		appendScrollSection("TODO", []string{sidebarTextStyle.Render("No todo list for this session yet.")}, nil)
 	} else {
 		appendScrollSection("TODO", renderSidebarTodo(todo, boxBodyWidth), nil)
 	}
@@ -7491,7 +7525,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	// ── MCP + LSP on one line ──
 	mcpLine := "MCP: " + m.renderMCPStatus()
 	lspLine := "LSP: " + m.renderLSPStatus()
-	appendScrollSection("Tools", []string{mcpLine + "  |  " + lspLine}, nil)
+	appendScrollSection("Tools", []string{sidebarTextStyle.Render(mcpLine + "  |  " + lspLine)}, nil)
 
 	// ── Bottom: usage + quick actions ──
 	data.bottomLines = append(data.bottomLines, "")
@@ -8407,4 +8441,33 @@ func countToolMsgs(msgs []message) int {
 		}
 	}
 	return n
+}
+
+type retryStatusMsg struct {
+	agent *agent.Agent
+	ev    *agent.RetryStatusEvent
+}
+
+// listenRetryStatus blocks on the agent's retry-events channel and re-arms itself.
+func listenRetryStatus(a *agent.Agent) tea.Cmd {
+	return func() tea.Msg {
+		ev := <-a.RetryEvents()
+		return retryStatusMsg{agent: a, ev: ev}
+	}
+}
+
+func (m *model) renderRetryDialog(width int) string {
+	if !m.showRetryDialog {
+		return ""
+	}
+
+	contentWidth := max(0, width-2)
+
+	header := m.styles.Header.Render("⚠ Subagent Retry")
+	body := m.retryDialogMsg
+	dismissHint := hintStyle.Render("Press Enter or Esc to dismiss")
+
+	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
+		header + "\n\n" + body + "\n\n" + dismissHint,
+	)
 }

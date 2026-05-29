@@ -78,9 +78,6 @@ func formatToolCallHint(tc agent.ToolCall) string {
 		return fmt.Sprintf("🗑  delete %s", first("path", "file_path"))
 	case "bash":
 		cmd := first("command")
-		if len(cmd) > 80 {
-			cmd = cmd[:77] + "..."
-		}
 		return fmt.Sprintf("$ %s", cmd)
 	case "grep":
 		return fmt.Sprintf("🔎 grep %q", first("pattern"))
@@ -108,11 +105,8 @@ func formatToolCallHint(tc agent.ToolCall) string {
 	case "skill":
 		return fmt.Sprintf("→ Skill %q", first("name"))
 	}
-	// Fallback: name + raw args truncated.
+	// Fallback: name + raw args.
 	a := strings.TrimSpace(tc.Function.Arguments)
-	if len(a) > 80 {
-		a = a[:77] + "..."
-	}
 	return fmt.Sprintf("🔧 %s %s", name, a)
 }
 

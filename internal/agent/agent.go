@@ -57,6 +57,7 @@ type Agent struct {
 	stopCh      chan struct{}
 	stopMu      sync.Mutex
 	jobEvents   chan JobEvent
+	retryEvents chan *RetryStatusEvent
 	// OnMessage, if set, is invoked for each message produced during Step
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
@@ -215,6 +216,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	a.runs = NewAgentRunRegistry()
 	a.stopCh = make(chan struct{})
 	a.jobEvents = make(chan JobEvent, 32)
+	a.retryEvents = make(chan *RetryStatusEvent, 32)
 	a.procs.SetOnDone(func(p *tool.Process) {
 		text, status, code, _ := a.procs.Output(p.ID)
 		a.emitJob(JobEvent{

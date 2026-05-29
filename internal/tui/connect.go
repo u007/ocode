@@ -26,6 +26,7 @@ const (
 	connectStageWaitBrowser // OpenAI: localhost callback is running
 	connectStageDeviceCode  // Copilot: show user_code, await poll
 	connectStageAccountID   // Cloudflare Workers: collect account ID before API key
+	connectStageGatewayURL // Cloudflare AI Gateway: collect gateway URL before API key
 	connectStageMessage
 )
 
@@ -37,9 +38,11 @@ type connectDialog struct {
 	methods     []connectMethod
 	keyInput    textinput.Model
 	codeInput   textinput.Model
-	accountIDInput textinput.Model
-	accountID      string
-	message     string
+	accountIDInput  textinput.Model
+	accountID       string
+	gatewayURLInput textinput.Model
+	gatewayURL      string
+	message         string
 	messageOK   bool
 
 	// OAuth-flow scratch state.
@@ -70,12 +73,17 @@ func (m *model) openConnectDialog() {
 	acctIn.Placeholder = "Cloudflare Account ID (from dash.cloudflare.com)"
 	acctIn.CharLimit = 64
 
+	gwIn := textinput.New()
+	gwIn.Placeholder = "Cloudflare AI Gateway URL (e.g. https://gateway.ai.cloudflare.com/v1/account/gateway)"
+	gwIn.CharLimit = 256
+
 	m.connect = &connectDialog{
 		stage:          connectStageProvider,
 		providerIdx:    0,
 		keyInput:       ti,
 		codeInput:      codeIn,
 		accountIDInput: acctIn,
+		gatewayURLInput: gwIn,
 	}
 	m.showConnect = true
 }
@@ -184,6 +192,11 @@ func (m model) renderConnect() string {
 		header = m.styles.Header.Render("Connect " + m.connect.provider.Label)
 		body = m.connect.accountIDInput.View()
 		hint = hintStyle.Render("Enter your Cloudflare Account ID, then press Enter")
+
+	case connectStageGatewayURL:
+		header = m.styles.Header.Render("Connect " + m.connect.provider.Label)
+		body = m.connect.gatewayURLInput.View()
+		hint = hintStyle.Render("Enter your Cloudflare AI Gateway URL, then press Enter")
 
 	case connectStagePasteCode:
 		header = m.styles.Header.Render("Anthropic OAuth: " + strings.ToUpper(m.connect.anthropicMode))
@@ -347,6 +360,9 @@ func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 				cred.AccountID = d.accountID
 				cred.BaseURL = auth.CloudflareWorkersBaseURL(d.accountID)
 			}
+			if d.provider.ID == "cloudflare-gateway" && d.gatewayURL != "" {
+				cred.BaseURL = d.gatewayURL
+			}
 			if err := auth.Set(d.provider.ID, cred); err != nil {
 				d.message = fmt.Sprintf("Failed to save: %v", err)
 				d.messageOK = false
@@ -387,6 +403,29 @@ func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 		var cmd tea.Cmd
 		d.accountIDInput, cmd = d.accountIDInput.Update(msg)
+		return m, cmd
+
+	case connectStageGatewayURL:
+		switch keyStr {
+		case "esc":
+			d.stage = connectStageMethod
+			return m, nil
+		case "enter":
+			url := strings.TrimSpace(d.gatewayURLInput.Value())
+			if url == "" {
+				d.message = "Gateway URL cannot be empty."
+				d.messageOK = false
+				d.stage = connectStageMessage
+				return m, nil
+			}
+			d.gatewayURL = url
+			d.keyInput.SetValue("")
+			d.keyInput.Focus()
+			d.stage = connectStageKeyInput
+			return m, nil
+		}
+		var cmd tea.Cmd
+		d.gatewayURLInput, cmd = d.gatewayURLInput.Update(msg)
 		return m, cmd
 
 	case connectStagePasteCode:
@@ -445,6 +484,12 @@ func (m model) applyConnectMethod() (tea.Model, tea.Cmd) {
 			d.accountIDInput.SetValue("")
 			d.accountIDInput.Focus()
 			d.stage = connectStageAccountID
+			return m, nil
+		}
+		if d.provider != nil && d.provider.ID == "cloudflare-gateway" {
+			d.gatewayURLInput.SetValue("")
+			d.gatewayURLInput.Focus()
+			d.stage = connectStageGatewayURL
 			return m, nil
 		}
 		d.keyInput.SetValue("")

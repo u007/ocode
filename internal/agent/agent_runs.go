@@ -42,6 +42,11 @@ type AgentRun struct {
 	doneOnce     sync.Once
 	inputTokens  int64
 	outputTokens int64
+		
+	// Retry tracking
+	RetryCount   int       // number of retries attempted
+	LastError    string    // last error message if retrying
+	RetryingAt   time.Time // when the last retry started
 }
 
 // AddUsage accumulates input/output token counts reported by the provider.
@@ -159,6 +164,30 @@ func (r *AgentRun) tryFinishCancelled() {
 	if cancelled {
 		r.closeDone()
 	}
+}
+
+
+// MarkRetrying records that the run is being retried after an error.
+func (r *AgentRun) MarkRetrying(errMsg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.RetryCount++
+	r.LastError = errMsg
+	r.RetryingAt = time.Now()
+}
+
+// RetryStatus returns the current retry state.
+func (r *AgentRun) RetryStatus() (count int, lastError string, retryingAt time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.RetryCount, r.LastError, r.RetryingAt
+}
+
+// IsRetrying returns true if the run is currently in a retry state.
+func (r *AgentRun) IsRetrying() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.RetryCount > 0 && r.Status == RunRunning
 }
 
 // AgentRunRegistry holds the main agent's async subagent runs.

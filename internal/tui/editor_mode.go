@@ -114,6 +114,12 @@ func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.Proc
 	if mode != config.EditorModeTmuxSplit && mode != config.EditorModeTmuxWindow {
 		return func(path string) tea.Cmd {
 			cmdParts := strings.Fields(editor)
+			// Validate the editor binary exists before attempting to run it.
+			if _, err := exec.LookPath(cmdParts[0]); err != nil {
+				return func() tea.Msg {
+					return editorFinishedMsg{err: fmt.Errorf("editor %q not found in PATH: %w", cmdParts[0], err)}
+				}
+			}
 			cmdParts = append(cmdParts, path)
 			c := exec.Command(cmdParts[0], cmdParts[1:]...)
 			if runtime.GOOS != "windows" {

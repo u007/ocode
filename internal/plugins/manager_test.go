@@ -4,6 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	gogit "github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
 func TestInstallLocal(t *testing.T) {
@@ -86,5 +90,37 @@ func TestRunOnInstallValidation(t *testing.T) {
 	err := RunOnInstall(dir, p)
 	if err == nil {
 		t.Error("expected error for command containing shell metacharacter")
+	}
+}
+
+func TestResolveCommitHashSupportsAbbreviatedRefs(t *testing.T) {
+	dir := t.TempDir()
+	repo, err := gogit.PlainInit(dir, false)
+	if err != nil {
+		t.Fatalf("PlainInit: %v", err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatalf("Worktree: %v", err)
+	}
+	file := filepath.Join(dir, "plugin.json")
+	if err := os.WriteFile(file, []byte(`{"name":"sample"}`), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if _, err := wt.Add("plugin.json"); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	hash, err := wt.Commit("initial", &gogit.CommitOptions{
+		Author: &object.Signature{Name: "Test", Email: "test@example.com", When: time.Now()},
+	})
+	if err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	got, err := resolveCommitHash(repo, hash.String()[:7])
+	if err != nil {
+		t.Fatalf("resolveCommitHash: %v", err)
+	}
+	if got != hash {
+		t.Fatalf("resolveCommitHash abbreviated ref = %s, want %s", got, hash)
 	}
 }

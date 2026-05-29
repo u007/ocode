@@ -26,6 +26,16 @@ const (
 	llmMaxRetries     = 3
 )
 
+// Context keys for per-call chat parameter overrides (set by hook pipeline).
+// Using context avoids mutating shared *GenericClient fields, which would race
+// when multiple goroutines call Chat concurrently.
+type ctxChatParamKey int
+
+const (
+	ctxKeyTemperature ctxChatParamKey = iota
+	ctxKeyTopP
+)
+
 var llmHTTPClient = &http.Client{Timeout: llmRequestTimeout}
 var llmRetryBaseDelay = 500 * time.Millisecond
 
@@ -95,6 +105,9 @@ type GenericClient struct {
 	// every call site; mutex-guarding the field is the lighter alternative
 	// noted as acceptable in the original review.
 	deltaMu sync.Mutex
+	
+	// UseWebSocket enables WebSocket transport for OpenAI Responses API.
+	UseWebSocket bool
 }
 
 // SetOnDelta installs (or clears, with nil) the streaming-token callback on
@@ -138,15 +151,31 @@ func (c *GenericClient) onUsage() func(inputTokens, outputTokens int64) {
 // when the active model is a reasoning family (o1/o3/o4/gpt-5/etc.) or when
 // the Anthropic extended-thinking budget is set — both APIs reject the
 // sampling tunables in those cases.
-func (c *GenericClient) applyGenerationParams(payload map[string]interface{}) {
+func (c *GenericClient) applyGenerationParams(ctx context.Context, payload map[string]interface{}) {
 	if !c.samplingTunable() {
 		return
 	}
-	if c.Temperature != nil {
-		payload["temperature"] = *c.Temperature
+	// Per-call overrides from context (set by hook pipeline in chatWithDelta)
+	// take priority over struct fields. This avoids mutating the shared
+	// *GenericClient, which would race under concurrent Chat callers.
+	temp, topP := c.Temperature, c.TopP
+	if ctx != nil {
+		if v := ctx.Value(ctxKeyTemperature); v != nil {
+			if t, ok := v.(*float64); ok {
+				temp = t
+			}
+		}
+		if v := ctx.Value(ctxKeyTopP); v != nil {
+			if t, ok := v.(*float64); ok {
+				topP = t
+			}
+		}
 	}
-	if c.TopP != nil {
-		payload["top_p"] = *c.TopP
+	if temp != nil {
+		payload["temperature"] = *temp
+	}
+	if topP != nil {
+		payload["top_p"] = *topP
 	}
 }
 
@@ -289,7 +318,7 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 		"messages": openAIMessages,
 		"stream":   true,
 	}
-	c.applyGenerationParams(payload)
+	c.applyGenerationParams(ctx, payload)
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)
 	}
@@ -345,6 +374,10 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if c.UseOAuth && c.Provider == "openai" {
 		return c.chatOpenAIResponses(ctx, messages, tools)
 	}
+	// Use WebSocket transport if enabled for OpenAI
+	if c.UseWebSocket && SupportsWebSocket(c.Provider) {
+		return c.chatOpenAIWebSocket(ctx, messages, tools)
+	}
 	url := c.BaseURL + "/chat/completions"
 
 	openAIMessages, err := c.convertToOpenAIMessages(messages)
@@ -357,7 +390,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 		"messages": openAIMessages,
 		"stream":   true,
 	}
-	c.applyGenerationParams(payload)
+	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
 	if c.Provider == "openai" && c.ThinkingBudget > 0 {
 		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
@@ -994,7 +1027,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		"include":      []string{"reasoning.encrypted_content"},
 		"text":         map[string]interface{}{"verbosity": "medium"},
 	}
-	c.applyGenerationParams(payload)
+	c.applyGenerationParams(ctx, payload)
 	if c.ThinkingBudget > 0 {
 		payload["reasoning"] = map[string]interface{}{
 			"effort":  reasoningEffortForBudget(c.ThinkingBudget),
@@ -1457,7 +1490,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	}
 	// applyGenerationParams self-skips when ThinkingBudget>0 — Anthropic's
 	// Messages API rejects temperature/top_p alongside extended thinking.
-	c.applyGenerationParams(payload)
+	c.applyGenerationParams(ctx, payload)
 
 	if c.ThinkingBudget > 0 {
 		payload["thinking"] = map[string]interface{}{
@@ -1982,6 +2015,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		Provider:       provider,
 		UseOAuth:       useOAuth,
 		ThinkingBudget: thinkingBudget,
+		UseWebSocket:   cfg != nil && cfg.UseWebSocket,
 	}
 }
 
@@ -2107,4 +2141,175 @@ func mergeAnthropicUsage(base, incoming json.RawMessage) json.RawMessage {
 		return incoming
 	}
 	return merged
+}
+
+// chatOpenAIWebSocket uses WebSocket transport for OpenAI Responses API.
+func (c *GenericClient) chatOpenAIWebSocket(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
+	wsClient := NewWebSocketClient(c.BaseURL, c.APIKey)
+	defer wsClient.Close()
+
+	// Connect
+	if err := wsClient.Connect(ctx); err != nil {
+		// Fallback to HTTP on connection failure
+		emitDebug("websocket", fmt.Sprintf("WebSocket connect failed, falling back to HTTP: %v", err))
+		return c.chatOpenAIHTTP(ctx, messages, tools)
+	}
+
+	// Build request payload
+	openAIMessages, err := c.convertToOpenAIMessages(messages)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]interface{}{
+		"model":    c.Model,
+		"messages": openAIMessages,
+		"stream":   true,
+	}
+	c.applyGenerationParams(ctx, payload)
+	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
+	if c.Provider == "openai" && c.ThinkingBudget > 0 {
+		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+	}
+	if len(tools) > 0 {
+		payload["tools"] = openAITools(tools)
+	}
+
+	// Send via WebSocket
+	if err := wsClient.Send(ctx, &WSMessage{
+		Type:    "response.create",
+		Payload: mustMarshal(payload),
+	}); err != nil {
+		// Fallback to HTTP on send failure
+		emitDebug("websocket", fmt.Sprintf("WebSocket send failed, falling back to HTTP: %v", err))
+		return c.chatOpenAIHTTP(ctx, messages, tools)
+	}
+
+	// Receive streaming responses
+	return c.receiveWebSocketStream(ctx, wsClient)
+}
+
+// chatOpenAIHTTP is the original HTTP SSE implementation.
+func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
+	url := c.BaseURL + "/chat/completions"
+
+	openAIMessages, err := c.convertToOpenAIMessages(messages)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]interface{}{
+		"model":    c.Model,
+		"messages": openAIMessages,
+		"stream":   true,
+	}
+	c.applyGenerationParams(ctx, payload)
+	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
+	if c.Provider == "openai" && c.ThinkingBudget > 0 {
+		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+	}
+	if len(tools) > 0 {
+		payload["tools"] = openAITools(tools)
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+
+	resp, err := llmHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
+		emitDebug("error", msg)
+		return nil, fmt.Errorf("%s", msg)
+	}
+
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil {
+		return nil, fmt.Errorf("no response from %s", c.Provider)
+	}
+	if msg.Model == "" {
+		msg.Model = c.Model
+	}
+	usage, err := usageForProvider(c.Provider, usageRaw)
+	if err != nil {
+		return nil, err
+	}
+	msg.Usage = usage
+	if usage != nil {
+		msg.Spend = usage.Spend(msg.Model)
+	}
+	return msg, nil
+}
+
+// receiveWebSocketStream receives streaming responses from WebSocket.
+func (c *GenericClient) receiveWebSocketStream(ctx context.Context, wsClient *WebSocketClient) (*Message, error) {
+	msg := &Message{Role: "assistant"}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			wsMsg, err := wsClient.Receive(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("websocket receive: %w", err)
+			}
+
+			switch wsMsg.Type {
+			case "response.output_text.delta":
+				var delta struct {
+					Delta string `json:"delta"`
+				}
+				if err := json.Unmarshal(wsMsg.Payload, &delta); err == nil && delta.Delta != "" {
+					msg.Content += delta.Delta
+					if fn := c.onDelta(); fn != nil {
+						fn("text", delta.Delta)
+					}
+				}
+
+			case "response.completed":
+				// Stream completed
+				if msg.Model == "" {
+					msg.Model = c.Model
+				}
+				return msg, nil
+
+			case "error":
+				return nil, fmt.Errorf("websocket error: %s", wsMsg.Error)
+
+			default:
+				// Handle other message types
+				emitDebug("websocket", fmt.Sprintf("unexpected message type: %s", wsMsg.Type))
+			}
+		}
+	}
+}
+
+// mustMarshal marshals a value to JSON, panicking on error.
+func mustMarshal(v interface{}) json.RawMessage {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return data
 }
