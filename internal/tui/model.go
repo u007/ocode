@@ -5474,7 +5474,7 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
-		inputArea = borderStyle.Width(panelWidth - 2).Render(m.input.View())
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	status := m.renderStatus()
 
@@ -6916,6 +6916,8 @@ func (m model) renderContent() string {
 	var inputArea string
 	if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else if m.showRetryDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
@@ -6942,14 +6944,43 @@ func (m model) renderContent() string {
 	leftParts = append(leftParts, status)
 	left := lipgloss.JoinVertical(lipgloss.Left, leftParts...)
 
+	var result string
 	if m.sidebarEnabled() {
-		return lipgloss.JoinVertical(lipgloss.Left,
+		result = lipgloss.JoinVertical(lipgloss.Left,
 			header,
 			lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebar()),
 		)
+	} else {
+		result = lipgloss.JoinVertical(lipgloss.Left, header, left)
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, header, left)
+	// Safety net: if the rendered output exceeds terminal height, re-render
+	// with a smaller viewport to account for bottom chrome height drift between
+	// layout() and View(). We shrink the transcript viewport rather than
+	// truncating the whole view, which would lose the slash popup or status bar.
+	if m.height > 0 && lipgloss.Height(result) > m.height {
+		overflow := lipgloss.Height(result) - m.height
+		newVPH := max(1, m.viewport.Height()-overflow)
+		m.viewport.SetHeight(newVPH)
+		transcriptSB := renderScrollbar(m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), m.viewport.YOffset())
+		transcriptContent := lipgloss.JoinHorizontal(lipgloss.Top,
+			constrainView(m.viewport.View(), m.viewport.Width(), m.viewport.Height()),
+			transcriptSB,
+		)
+		transcript := borderStyle.Width(panelWidth - 2).Render(transcriptContent)
+		leftParts[0] = transcript
+		left = lipgloss.JoinVertical(lipgloss.Left, leftParts...)
+		if m.sidebarEnabled() {
+			result = lipgloss.JoinVertical(lipgloss.Left,
+				header,
+				lipgloss.JoinHorizontal(lipgloss.Top, left, m.renderSidebar()),
+			)
+		} else {
+			result = lipgloss.JoinVertical(lipgloss.Left, header, left)
+		}
+	}
+
+	return result
 }
 
 func (m *model) renderStatus() string {
@@ -7049,7 +7080,7 @@ func (m *model) renderStatus() string {
 	line1 := m.styles.Status.Width(width).Render(ansi.Truncate(leftStatus, width, "..."))
 	line2 := m.styles.Hint.Render(ansi.Truncate(rightContent, width, "..."))
 
-	return line1 + "\n" + line2 + "\n"
+	return line1 + "\n" + line2
 }
 
 func (m model) renderStoppedIndicator() string {
