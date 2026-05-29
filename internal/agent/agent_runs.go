@@ -78,6 +78,20 @@ func (r *AgentRun) closeDone() {
 // Done returns a channel that is closed when the run reaches a terminal state.
 func (r *AgentRun) Done() <-chan struct{} { return r.done }
 
+// ModelLabel returns "provider/model" (or just "model" when no provider) for
+// the subagent backing this run. Returns "" when Sub is nil.
+func (r *AgentRun) ModelLabel() string {
+	if r.Sub == nil {
+		return ""
+	}
+	p := r.Sub.GetProvider()
+	m := r.Sub.Client().GetModel()
+	if p != "" {
+		return p + "/" + m
+	}
+	return m
+}
+
 func (r *AgentRun) statusValue() RunStatus {
 	r.mu.Lock()
 	defer r.mu.Unlock()

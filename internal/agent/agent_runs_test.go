@@ -88,6 +88,35 @@ func TestAgentRunRegistryCancelAll(t *testing.T) {
 	}
 }
 
+func TestAgentRun_ModelLabel(t *testing.T) {
+	t.Run("returns provider/model when subagent has both", func(t *testing.T) {
+		run := &AgentRun{
+			Sub: &Agent{client: &GenericClient{Provider: "opencode-go", Model: "deepseek-v4-flash"}},
+		}
+		got := run.ModelLabel()
+		if got != "opencode-go/deepseek-v4-flash" {
+			t.Fatalf("ModelLabel = %q, want %q", got, "opencode-go/deepseek-v4-flash")
+		}
+	})
+
+	t.Run("returns model only when no provider", func(t *testing.T) {
+		run := &AgentRun{
+			Sub: &Agent{client: &GenericClient{Provider: "", Model: "gpt-4o"}},
+		}
+		got := run.ModelLabel()
+		if got != "gpt-4o" {
+			t.Fatalf("ModelLabel = %q, want %q", got, "gpt-4o")
+		}
+	})
+
+	t.Run("returns empty string when Sub is nil", func(t *testing.T) {
+		run := &AgentRun{Sub: nil}
+		if got := run.ModelLabel(); got != "" {
+			t.Fatalf("ModelLabel = %q, want empty", got)
+		}
+	})
+}
+
 func TestAgentRunTerminalStateIsStickyAfterCancel(t *testing.T) {
 	r := NewAgentRunRegistry()
 	run := r.New("explore")
