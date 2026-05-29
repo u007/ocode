@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add a `SmallModelPriority` constant with free/cheap model candidates, auto-resolve the small model on startup, and show the active model+provider in the TUI both in the agent strip and status bar.
+**Goal:** Add a `SmallModelPriority` constant with free/cheap model candidates, auto-resolve the small model on startup (with a chat hint), wire it into the explore/subagent dispatch path, and show the active model+provider in the TUI both in the agent strip and status bar.
 
-**Architecture:** New `internal/agent/small_model.go` owns the priority list and resolution logic. `AgentRun` gains a `ModelLabel()` helper. The TUI's `renderStatus()` and `renderAgentStrip()` are patched to show model tags. `~/.config/opencode/opencode.json` gets `"model": "opencode-go/deepseek-v4-flash"`.
+**Architecture:** New `internal/agent/small_model.go` owns the priority list and resolution logic. `AgentRun` gains a `ModelLabel()` helper. `subagent.go` wires the small model into explore/lightweight agent dispatch when `spec.Model` is unset. The TUI's `renderStatus()` and `renderAgentStrip()` are patched to show model tags. A transient chat hint surfaces the resolved small model on startup. `~/.config/opencode/opencode.json` gets `"model": "opencode-go/deepseek-v4-flash"`.
 
 **Tech Stack:** Go, Bubble Tea TUI (`internal/tui/model.go`), existing `agent.NewClient`, `config.SaveSmallModel`.
 
@@ -17,7 +17,8 @@
 | Create | `internal/agent/small_model.go` | Priority list constant + `ResolveSmallModel()` |
 | Create | `internal/agent/small_model_test.go` | Tests for resolution logic |
 | Modify | `internal/agent/agent_runs.go` | Add `ModelLabel()` to `AgentRun` |
-| Modify | `internal/tui/model.go` | `renderStatus` + `renderAgentStrip` model badges |
+| Modify | `internal/agent/subagent.go` | Wire small model into explore/lightweight agent dispatch |
+| Modify | `internal/tui/model.go` | Startup chat hint + `renderStatus` + `renderAgentStrip` model badges |
 | Edit   | `~/.config/opencode/opencode.json` | Set default model |
 
 ---
@@ -202,17 +203,31 @@ func RestoreNewClientFn(fn func(*config.Config, string) LLMClient) { newClientFn
 type GenericClientForTest = GenericClient
 ```
 
-- [ ] **Step 3: Wire `ResolveSmallModel` into `newModel()`**
+- [ ] **Step 3: Wire `ResolveSmallModel` into `newModel()` with startup chat hint**
 
 In `internal/tui/model.go`, inside `newModel()`, after `cfg, _ := config.Load()` (around line 923), add:
 
 ```go
 // Auto-select a small model from the priority list if none is configured.
+var resolvedSmallModel string
 if cfg != nil && cfg.Ocode.SmallModel == "" {
     if small := agent.ResolveSmallModel(cfg); small != "" {
         cfg.Ocode.SmallModel = small
+        resolvedSmallModel = small
         _ = config.SaveSmallModel(small) // persist for next session; ignore error
     }
+}
+```
+
+Then, at the point where `m.messages` is first initialised (inside the `model{...}` literal or just after it, around line 995), append:
+
+```go
+if resolvedSmallModel != "" {
+    m.messages = append(m.messages, message{
+        role:      roleAssistant,
+        text:      hintStyle.Render("⚡ small model: " + resolvedSmallModel),
+        transient: true,
+    })
 }
 ```
 
@@ -227,7 +242,7 @@ Expected: no errors.
 - [ ] **Step 5: Commit**
 
 ```bash
-cd /Users/james/www/ocode && git add internal/tui/model.go internal/agent/small_model.go && git commit -m "feat(tui): auto-resolve small model from priority list on startup"
+cd /Users/james/www/ocode && git add internal/tui/model.go internal/agent/small_model.go && git commit -m "feat(tui): auto-resolve small model on startup with chat hint"
 ```
 
 ---
@@ -480,13 +495,184 @@ model: opencode-go/deepseek-v4-flash
 
 ---
 
+---
+
+### Task 7: Wire small model into explore/lightweight subagent dispatch
+
+**Files:**
+- Modify: `internal/agent/subagent.go` — around line 225 (after `NewAgent`, before `SetSpec`)
+
+**Context:** `subagent.go:225` creates a subagent with `NewAgent(t.mainAgent.client, ...)`. Then `SetSpec` is called, which calls `applySpecModel` — this swaps the client only when `spec.Model != ""`. For agents like `explore`, `general`, and `compaction` the spec has no Model set, so they inherit the expensive main client. We inject the small model here.
+
+The agents eligible for the small model are those whose spec has no Model set AND whose name is in the lightweight set: `explore`, `general`, `compaction`. The `build` (primary coding) agent must never get demoted.
+
+- [ ] **Step 1: Write the failing test**
+
+In `internal/agent/subagent_permissions_test.go` or a new `internal/agent/subagent_small_model_test.go`:
+
+```go
+package agent
+
+import (
+    "testing"
+    "github.com/jamesmercstudio/ocode/internal/config"
+)
+
+func TestSmallModelEligible(t *testing.T) {
+    cases := []struct {
+        name  string
+        want  bool
+    }{
+        {"explore", true},
+        {"general", true},
+        {"compaction", true},
+        {"build", false},
+        {"plan", false},
+        {"", false},
+    }
+    for _, c := range cases {
+        got := smallModelEligible(c.name)
+        if got != c.want {
+            t.Errorf("smallModelEligible(%q) = %v, want %v", c.name, got, c.want)
+        }
+    }
+}
+
+func TestTaskTool_injectsSmallModelForExplore(t *testing.T) {
+    // Arrange
+    orig := newClientFn
+    defer func() { newClientFn = orig }()
+    var capturedModel string
+    newClientFn = func(cfg *config.Config, model string) LLMClient {
+        capturedModel = model
+        return &GenericClient{provider: "opencode-go", model: "deepseek-v4-flash"}
+    }
+
+    cfg := &config.Config{}
+    cfg.Ocode.SmallModel = "opencode-go/deepseek-v4-flash"
+    mainClient := &GenericClient{provider: "anthropic", model: "claude-sonnet-4"}
+    mainAgent := NewAgent(mainClient, nil, cfg)
+
+    task := TaskTool{mainAgent: mainAgent}
+    spec := task.findAgent("explore")
+    if spec == nil {
+        t.Fatal("explore agent spec not found")
+    }
+
+    subAgent := NewAgent(mainClient, nil, cfg)
+    subSpec := AgentSpec{Name: spec.Name, Model: spec.Model}
+    injectSmallModelIfEligible(subAgent, &subSpec, cfg)
+
+    if subSpec.Model != "opencode-go/deepseek-v4-flash" {
+        t.Fatalf("expected small model injected, got %q", subSpec.Model)
+    }
+    _ = capturedModel
+}
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+```bash
+cd /Users/james/www/ocode && go test ./internal/agent/ -run "TestSmallModelEligible|TestTaskTool_injectsSmallModel" -v 2>&1 | tail -15
+```
+
+Expected: compile error — `smallModelEligible` and `injectSmallModelIfEligible` undefined.
+
+- [ ] **Step 3: Add helpers to `small_model.go`**
+
+Append to `internal/agent/small_model.go`:
+
+```go
+// smallModelEligibleNames is the set of agent names that may use the small
+// model. Primary coding agents (build, plan) are excluded to avoid downgrading
+// the main coding loop.
+var smallModelEligibleNames = map[string]bool{
+    "explore":    true,
+    "general":    true,
+    "compaction": true,
+}
+
+// smallModelEligible reports whether the named agent is a candidate for the
+// small model. Empty name returns false.
+func smallModelEligible(name string) bool {
+    return name != "" && smallModelEligibleNames[name]
+}
+
+// injectSmallModelIfEligible sets spec.Model to the configured small model
+// when the spec has no explicit model and the agent name is eligible.
+// No-op if cfg is nil, cfg.Ocode.SmallModel is empty, or spec already has a
+// Model set (explicit registry override takes precedence).
+func injectSmallModelIfEligible(a *Agent, spec *AgentSpec, cfg *config.Config) {
+    if cfg == nil || cfg.Ocode.SmallModel == "" {
+        return
+    }
+    if spec == nil || !smallModelEligible(spec.Name) {
+        return
+    }
+    if strings.TrimSpace(spec.Model) != "" {
+        return // explicit override in agent definition wins
+    }
+    spec.Model = cfg.Ocode.SmallModel
+    emitDebug("AGENT", fmt.Sprintf("spec %q: injecting small model %s", spec.Name, spec.Model))
+}
+```
+
+Also add `"fmt"` and `"strings"` to the import block of `small_model.go` (they are needed by the new helpers):
+
+```go
+import (
+    "fmt"
+    "strings"
+
+    "github.com/jamesmercstudio/ocode/internal/config"
+)
+```
+
+- [ ] **Step 4: Call `injectSmallModelIfEligible` in `subagent.go`**
+
+In `internal/agent/subagent.go`, after building `subSpec` (around line 244, just before `subAgent.SetSpec(&subSpec)`):
+
+```go
+// Inject the small model for lightweight agents (explore, general, compaction)
+// when no explicit model override is present on the spec.
+injectSmallModelIfEligible(subAgent, &subSpec, t.mainAgent.config)
+subAgent.SetSpec(&subSpec)
+```
+
+(Replace the bare `subAgent.SetSpec(&subSpec)` call with the two lines above.)
+
+- [ ] **Step 5: Run tests to verify they pass**
+
+```bash
+cd /Users/james/www/ocode && go test ./internal/agent/ -run "TestSmallModelEligible|TestTaskTool_injectsSmallModel" -v 2>&1 | tail -15
+```
+
+Expected: all tests PASS.
+
+- [ ] **Step 6: Run full test suite**
+
+```bash
+cd /Users/james/www/ocode && go test ./... 2>&1 | tail -20
+```
+
+Expected: all pass (or only pre-existing failures).
+
+- [ ] **Step 7: Commit**
+
+```bash
+cd /Users/james/www/ocode && git add internal/agent/small_model.go internal/agent/subagent.go internal/agent/subagent_small_model_test.go && git commit -m "feat(agent): wire small model into explore/general/compaction subagent dispatch"
+```
+
+---
+
 ## Summary
 
 | Task | Deliverable |
 |------|------------|
 | 1 | `SmallModelPriority` + `ResolveSmallModel()` with tests |
-| 2 | Auto-resolution wired into TUI startup |
+| 2 | Auto-resolution wired into TUI startup + chat hint |
 | 3 | `AgentRun.ModelLabel()` with tests |
 | 4 | Model badge in agent strip card header |
 | 5 | Active subagent model in status bar |
 | 6 | opencode default set to `opencode-go/deepseek-v4-flash` |
+| 7 | Small model wired into explore/general/compaction agent dispatch |
