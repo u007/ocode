@@ -241,6 +241,9 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		Temperature:  spec.Temperature,
 		TopP:         spec.TopP,
 	}
+	// Inject the small model for lightweight agents (explore, general, compaction)
+	// when no explicit model override is present on the spec.
+	injectSmallModelIfEligible(subAgent, &subSpec, t.mainAgent.config)
 	subAgent.SetSpec(&subSpec)
 
 	// Inherit the shared session supervisor so subagent processes are tracked

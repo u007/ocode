@@ -1,6 +1,11 @@
 package agent
 
-import "github.com/jamesmercstudio/ocode/internal/config"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/jamesmercstudio/ocode/internal/config"
+)
 
 // SmallModelPriority is the ordered list of cheap/fast models tried when
 // auto-selecting a small model for lightweight tasks (title generation, etc.).
@@ -32,4 +37,37 @@ func ResolveSmallModel(cfg *config.Config) string {
 		}
 	}
 	return ""
+}
+
+// smallModelEligibleNames is the set of agent names that may use the small
+// model. Primary coding agents (build, plan) are excluded to avoid downgrading
+// the main coding loop.
+var smallModelEligibleNames = map[string]bool{
+	"explore":    true,
+	"general":    true,
+	"compaction": true,
+}
+
+// smallModelEligible reports whether the named agent is a candidate for the
+// small model. Empty name returns false.
+func smallModelEligible(name string) bool {
+	return name != "" && smallModelEligibleNames[name]
+}
+
+// injectSmallModelIfEligible sets spec.Model to the configured small model
+// when the spec has no explicit model and the agent name is eligible.
+// No-op if cfg is nil, cfg.Ocode.SmallModel is empty, or spec already has a
+// Model set (explicit registry override takes precedence).
+func injectSmallModelIfEligible(a *Agent, spec *AgentSpec, cfg *config.Config) {
+	if cfg == nil || cfg.Ocode.SmallModel == "" {
+		return
+	}
+	if spec == nil || !smallModelEligible(spec.Name) {
+		return
+	}
+	if strings.TrimSpace(spec.Model) != "" {
+		return // explicit override in agent definition wins
+	}
+	spec.Model = cfg.Ocode.SmallModel
+	emitDebug("AGENT", fmt.Sprintf("spec %q: injecting small model %s", spec.Name, spec.Model))
 }
