@@ -2096,7 +2096,9 @@ func TestTabMouseMotionSwitchesWhenTerminalReportsDrag(t *testing.T) {
 func TestMouseModeDefaultsOnWithoutConfig(t *testing.T) {
 	m := model{ready: true, input: newTestTextarea()}
 
-	if got := m.View().MouseMode; got != tea.MouseModeCellMotion {
+	// AllMotion (not CellMotion) so hover events arrive without a button held,
+	// which the sidebar file hover-underline depends on.
+	if got := m.View().MouseMode; got != tea.MouseModeAllMotion {
 		t.Fatalf("expected default mouse mode on without config, got %v", got)
 	}
 }

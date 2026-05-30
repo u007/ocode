@@ -105,7 +105,7 @@ type GenericClient struct {
 	// every call site; mutex-guarding the field is the lighter alternative
 	// noted as acceptable in the original review.
 	deltaMu sync.Mutex
-	
+
 	// UseWebSocket enables WebSocket transport for OpenAI Responses API.
 	UseWebSocket bool
 }
@@ -209,7 +209,8 @@ func isReasoningOnlyModel(modelID string) bool {
 	return strings.HasPrefix(m, "o1") ||
 		strings.HasPrefix(m, "o3") ||
 		strings.HasPrefix(m, "o4") ||
-		strings.HasPrefix(m, "gpt-5")
+		strings.HasPrefix(m, "gpt-5") ||
+		strings.Contains(m, "mimo")
 }
 
 // maybeStripMaxTokensForGateway removes max_tokens from an outgoing payload
@@ -392,7 +393,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	}
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
-	if c.Provider == "openai" && c.ThinkingBudget > 0 {
+	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
 		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
 	}
 	if len(tools) > 0 {
@@ -579,7 +580,12 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 	}
 	sort.Ints(toolOrder)
 	for _, idx := range toolOrder {
-		msg.ToolCalls = append(msg.ToolCalls, *toolByIdx[idx])
+		tc := *toolByIdx[idx]
+		if tc.Function.Arguments != "" && !json.Valid([]byte(tc.Function.Arguments)) {
+			emitDebug("AGENT", fmt.Sprintf("openai: invalid tool arguments for %s (id=%s, %d bytes); falling back to {}", tc.Function.Name, tc.ID, len(tc.Function.Arguments)))
+			tc.Function.Arguments = "{}"
+		}
+		msg.ToolCalls = append(msg.ToolCalls, tc)
 	}
 	// Skip empty keep-alive / heartbeat chunks: some providers send a `data:`
 	// frame with no content, reasoning, or tool calls just to keep the SSE
@@ -604,6 +610,21 @@ func openAITools(tools []map[string]interface{}) []map[string]interface{} {
 		})
 	}
 	return openAITools
+}
+
+// requiresJSONObjectArguments returns true for providers whose OpenAI-compatible
+// API rejects tool call arguments as a JSON-encoded string and requires them as
+// a parsed JSON object instead (e.g. Alibaba DashScope).
+func requiresJSONObjectArguments(provider string) bool {
+	return provider == "alibaba" ||
+		provider == "alibaba-coding"
+}
+
+// providerSupportsReasoningEffort returns true for providers that accept the
+// OpenAI-style reasoning_effort parameter to enable/control chain-of-thought.
+func providerSupportsReasoningEffort(provider string) bool {
+	return provider == "openai" ||
+		strings.HasPrefix(provider, "xiaomi")
 }
 
 func reasoningEffortForBudget(budget int) string {
@@ -736,7 +757,7 @@ func repairToolCallSequence(messages []Message) []Message {
 
 		if m.Role != "assistant" || len(m.ToolCalls) == 0 {
 			if m.Role == "tool" {
-				fmt.Fprintf(os.Stderr, "[agent] repair: downgrading stray tool result for tool_call_id=%s\n", m.ToolID)
+				emitDebug("AGENT", fmt.Sprintf("repair: downgrading stray tool result for tool_call_id=%s", m.ToolID))
 				out = append(out, Message{
 					Role:    "system",
 					Content: fmt.Sprintf("[stray tool result for tool_call_id=%s was recorded out of sequence and downgraded to a note; the assistant turn referencing this call received a synthesised 'interrupted' stub — this note holds the real output]\n\n%s", m.ToolID, m.Content),
@@ -785,7 +806,7 @@ func repairToolCallSequence(messages []Message) []Message {
 			if _, ok := pending[tc.ID]; !ok {
 				continue
 			}
-			fmt.Fprintf(os.Stderr, "[agent] repair: synthesising missing tool result for tool_call_id=%s (%s)\n", tc.ID, tc.Function.Name)
+			emitDebug("AGENT", fmt.Sprintf("repair: synthesising missing tool result for tool_call_id=%s (%s)", tc.ID, tc.Function.Name))
 			out = append(out, Message{
 				Role:    "tool",
 				ToolID:  tc.ID,
@@ -797,6 +818,27 @@ func repairToolCallSequence(messages []Message) []Message {
 	return out
 }
 
+// sanitizeAPIText removes null bytes and control characters from text that
+// some API JSON parsers reject even when Go's json.Marshal escapes them as
+// \\uXXXX. Keeps tab (0x09), newline (0x0A), and carriage return (0x0D).
+func sanitizeAPIText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == 0: // null byte
+			continue
+		case r < 0x20 && r != '\t' && r != '\n' && r != '\r': // control chars
+			continue
+		case r == '\uFEFF': // BOM
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[string]interface{}, error) {
 	messages = repairToolCallSequence(messages)
 	messages = hoistSystemMessages(messages)
@@ -806,7 +848,7 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 		if m.Role == "tool" {
 			result = append(result, map[string]interface{}{
 				"role":         "tool",
-				"content":      m.Content,
+				"content":      sanitizeAPIText(m.Content),
 				"tool_call_id": m.ToolID,
 			})
 			continue
@@ -828,20 +870,29 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 
 		msg := map[string]interface{}{
 			"role":    m.Role,
-			"content": m.Content,
+			"content": sanitizeAPIText(m.Content),
 		}
 		if m.Role == "assistant" && m.ReasoningContent != "" {
-			msg["reasoning_content"] = m.ReasoningContent
+			msg["reasoning_content"] = sanitizeAPIText(m.ReasoningContent)
 		}
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
 			calls := make([]map[string]interface{}, 0, len(m.ToolCalls))
 			for _, tc := range m.ToolCalls {
+				var argsVal interface{} = tc.Function.Arguments
+				if requiresJSONObjectArguments(c.Provider) {
+					var parsed interface{}
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &parsed); err == nil {
+						argsVal = parsed
+					} else {
+						argsVal = map[string]interface{}{}
+					}
+				}
 				calls = append(calls, map[string]interface{}{
 					"id":   tc.ID,
 					"type": "function",
 					"function": map[string]interface{}{
 						"name":      tc.Function.Name,
-						"arguments": tc.Function.Arguments,
+						"arguments": argsVal,
 					},
 				})
 			}
@@ -858,7 +909,7 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 		if m.Content != "" {
 			content = append(content, map[string]interface{}{
 				"type": "text",
-				"text": m.Content,
+				"text": sanitizeAPIText(m.Content),
 			})
 		}
 		for _, img := range m.Images {
@@ -1403,7 +1454,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 				map[string]interface{}{
 					"type":        "tool_result",
 					"tool_use_id": m.ToolID,
-					"content":     m.Content,
+					"content":     sanitizeAPIText(m.Content),
 				},
 			}
 		} else {
@@ -1420,7 +1471,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 				if m.Content != "" {
 					content = append(content, map[string]interface{}{
 						"type": "text",
-						"text": m.Content,
+						"text": sanitizeAPIText(m.Content),
 					})
 				}
 			}
@@ -1746,7 +1797,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 				// valid JSON (typically the stream was truncated mid-tool).
 				// Fall back to an empty object so the tool call is still
 				// dispatched and the model can react to the error.
-				fmt.Fprintf(os.Stderr, "[agent] anthropic: truncated tool_use input_json for %s (id=%s, %d bytes); falling back to {}\n", b.toolName, b.toolID, len(args))
+				emitDebug("AGENT", fmt.Sprintf("anthropic: truncated tool_use input_json for %s (id=%s, %d bytes); falling back to {}", b.toolName, b.toolID, len(args)))
 				args = "{}"
 			}
 			resMsg.ToolCalls = append(resMsg.ToolCalls, ToolCall{
@@ -1870,38 +1921,49 @@ type providerInfo struct {
 	baseURL string
 }
 
+// keyOptionalProviders are providers that can serve requests without an API
+// key — local servers and free tiers. For every other (keyed) provider,
+// NewClient refuses to build a client when no credential is available, so a
+// model switch / ResolveSmallModel fallback / compactSummaryClient skips it
+// instead of returning a client that 401s on its first request.
+var keyOptionalProviders = map[string]bool{
+	"opencode":    true, // free tier (mimo-v2.5-free etc.)
+	"opencode-go": true,
+	"lmstudio":    true, // local server, no key
+}
+
 var providers = map[string]providerInfo{
-	"openai":         {"OPENAI_API_KEY", "https://api.openai.com/v1"},
-	"anthropic":      {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
-	"openrouter":     {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
-	"google":         {"GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"},
-	"zai":            {"ZAI_API_KEY", "https://api.z.ai/v1"},
-	"z.ai":           {"ZAI_API_KEY", "https://api.z.ai/v1"},
-	"zai-coding":     {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
-	"chutes":         {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"},
-	"chutes-coding":  {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
-	"alibaba":        {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
-	"alibaba-coding": {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
-	"moonshot":       {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
-	"minimax":        {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
-	"requesty":       {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
-	"deepinfra":      {"DEEPINFRA_API_KEY", "https://api.deepinfra.com/v1/openai"},
-	"nvidia":         {"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"},
-	"302ai":          {"302AI_API_KEY", "https://api.302.ai/v1"},
-	"deepseek":       {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
-	"groq":           {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
-	"mistral":        {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
-	"opencode":       {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
-	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
-	"copilot":                  {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
-	"lmstudio":                 {"", "http://localhost:1234/v1"},
-	"cloudflare-workers":       {"CLOUDFLARE_API_KEY", ""},
-	"cloudflare-gateway":       {"CLOUDFLARE_GATEWAY_KEY", ""},
-	"codex":                    {"OPENAI_API_KEY", "https://api.openai.com/v1"},
-	"xiaomi":                   {"XIAOMI_API_KEY", "https://xiaomimimo.com/v1"},
-	"xiaomi-token-plan-sgp":    {"XIAOMI_API_KEY", "https://token-plan-sgp.xiaomimimo.com/v1"},
-	"xiaomi-token-plan-ams":    {"XIAOMI_API_KEY", "https://token-plan-ams.xiaomimimo.com/v1"},
-	"xiaomi-token-plan-cn":     {"XIAOMI_API_KEY", "https://token-plan-cn.xiaomimimo.com/v1"},
+	"openai":                {"OPENAI_API_KEY", "https://api.openai.com/v1"},
+	"anthropic":             {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
+	"openrouter":            {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
+	"google":                {"GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"},
+	"zai":                   {"ZAI_API_KEY", "https://api.z.ai/v1"},
+	"z.ai":                  {"ZAI_API_KEY", "https://api.z.ai/v1"},
+	"zai-coding":            {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
+	"chutes":                {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"},
+	"chutes-coding":         {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
+	"alibaba":               {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+	"alibaba-coding":        {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
+	"moonshot":              {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
+	"minimax":               {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
+	"requesty":              {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
+	"deepinfra":             {"DEEPINFRA_API_KEY", "https://api.deepinfra.com/v1/openai"},
+	"nvidia":                {"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"},
+	"302ai":                 {"302AI_API_KEY", "https://api.302.ai/v1"},
+	"deepseek":              {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
+	"groq":                  {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
+	"mistral":               {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
+	"opencode":              {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
+	"opencode-go":           {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
+	"copilot":               {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
+	"lmstudio":              {"", "http://localhost:1234/v1"},
+	"cloudflare-workers":    {"CLOUDFLARE_API_KEY", ""},
+	"cloudflare-gateway":    {"CLOUDFLARE_GATEWAY_KEY", ""},
+	"codex":                 {"OPENAI_API_KEY", "https://api.openai.com/v1"},
+	"xiaomi":                {"XIAOMI_API_KEY", "https://xiaomimimo.com/v1"},
+	"xiaomi-token-plan-sgp": {"XIAOMI_API_KEY", "https://token-plan-sgp.xiaomimimo.com/v1"},
+	"xiaomi-token-plan-ams": {"XIAOMI_API_KEY", "https://token-plan-ams.xiaomimimo.com/v1"},
+	"xiaomi-token-plan-cn":  {"XIAOMI_API_KEY", "https://token-plan-cn.xiaomimimo.com/v1"},
 }
 
 func NewClient(cfg *config.Config, model string) LLMClient {
@@ -2003,6 +2065,16 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		return nil
 	}
 
+	// A keyed provider with no credential (env var, stored API key, or OAuth)
+	// can't authenticate. Refuse to build the client so callers — model switch,
+	// ResolveSmallModel fallback, compactSummaryClient — skip it and surface a
+	// clear failure instead of a deferred 401 on the first request. Providers in
+	// keyOptionalProviders (local servers, free tiers) are allowed through.
+	if apiKey == "" && !useOAuth && provider != "" && !keyOptionalProviders[provider] {
+		emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q; refusing to build client (would 401)", provider))
+		return nil
+	}
+
 	thinkingBudget := 0
 	if cfg != nil {
 		thinkingBudget = cfg.ThinkingBudget
@@ -2064,6 +2136,7 @@ func ModelSupportsThinking(modelID string) bool {
 		strings.HasPrefix(model, "glm-4.5") ||
 		strings.HasPrefix(model, "glm-4.6") ||
 		strings.HasPrefix(model, "glm-4.7") ||
+		strings.Contains(model, "mimo") ||
 		(strings.Contains(model, "grok-4") && strings.Contains(model, "reasoning"))
 }
 
@@ -2168,7 +2241,7 @@ func (c *GenericClient) chatOpenAIWebSocket(ctx context.Context, messages []Mess
 	}
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
-	if c.Provider == "openai" && c.ThinkingBudget > 0 {
+	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
 		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
 	}
 	if len(tools) > 0 {
@@ -2205,7 +2278,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	}
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
-	if c.Provider == "openai" && c.ThinkingBudget > 0 {
+	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
 		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
 	}
 	if len(tools) > 0 {

@@ -13,6 +13,7 @@ import (
 )
 
 func (m *model) openModelPicker() {
+	m.input.Blur()
 	allModels := agent.AllProviderModels()
 	favorites := config.LoadFavorites()
 	recents := config.LoadRecentModels()
@@ -106,6 +107,7 @@ func splitPickerModel(s string) (string, string) {
 }
 
 func (m *model) openThemePicker() {
+	m.input.Blur()
 	items := AvailableThemes()
 	m.pickerKind = "theme"
 	m.pickerItems = items
@@ -150,6 +152,7 @@ func (m *model) rebuildSessionPickerItems() {
 }
 
 func (m *model) openSessionPicker() {
+	m.input.Blur()
 	refs, err := session.ListRefs()
 	if err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error listing sessions: %v", err)})
@@ -199,6 +202,7 @@ func (m model) pickerScrollPercent() float64 {
 }
 
 func (m *model) openEditorPicker() {
+	m.input.Blur()
 	items := []string{"nvim", "vim", "nano", "code --wait", "cursor --wait"}
 	m.pickerKind = "editor"
 	m.pickerItems = items
@@ -210,6 +214,7 @@ func (m *model) openEditorPicker() {
 }
 
 func (m *model) openEditorModePicker() {
+	m.input.Blur()
 	items := []string{config.EditorModeExternal, config.EditorModeTmuxSplit, config.EditorModeTmuxWindow}
 	m.pickerKind = "editor-mode"
 	m.pickerItems = items
@@ -221,6 +226,7 @@ func (m *model) openEditorModePicker() {
 }
 
 func (m *model) openMessagePicker() {
+	m.input.Blur()
 	items := make([]string, 0, len(m.messages))
 	values := make([]string, 0, len(m.messages))
 	for i, msg := range m.messages {

@@ -20,15 +20,19 @@ var DebugAppend func(kind, msg string)
 func emitDebug(kind, msg string) {
 	if DebugAppend != nil {
 		DebugAppend(kind, msg)
+		return
 	}
+	// No sink registered (headless modes: run/serve/acp). The TUI sets
+	// DebugAppend before its alt-screen starts, so this stderr fallback never
+	// corrupts the rendered frame; it only fires when there is no TUI to capture
+	// the message, where stderr is the correct destination.
+	fmt.Fprintf(os.Stderr, "[%s] %s\n", kind, msg)
 }
 
 // DebugAppendf is a fmt.Sprintf shortcut for callers outside this package
 // that want to emit a debug log without importing fmt twice.
 func DebugAppendf(kind, format string, args ...interface{}) {
-	if DebugAppend != nil {
-		DebugAppend(kind, fmt.Sprintf(format, args...))
-	}
+	emitDebug(kind, fmt.Sprintf(format, args...))
 }
 
 // JobEvent describes a background job (process or agent run) that finished.
@@ -851,6 +855,9 @@ func (a *Agent) GetToolDefinitions() []map[string]interface{} {
 }
 
 func (a *Agent) GetProvider() string {
+	if a.client == nil {
+		return ""
+	}
 	return a.client.GetProvider()
 }
 

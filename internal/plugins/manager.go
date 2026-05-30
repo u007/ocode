@@ -1,8 +1,10 @@
 package plugins
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -188,10 +190,16 @@ func RunOnInstall(pluginDir string, p Plugin) error {
 	}
 	cmd := exec.Command(args[0], args[1:]...) //nolint:gosec — validated above; no shell
 	cmd.Dir = abs
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	// Capture rather than inherit the terminal: the TUI runs in an alt-screen, so
+	// inherited stdout/stderr would paint the subprocess output over the frame.
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("on_install failed: %w", err)
+		return fmt.Errorf("on_install failed: %w\n%s", err, out.String())
+	}
+	if out.Len() > 0 {
+		log.Printf("plugin on_install output for %s:\n%s", p.Name, strings.TrimRight(out.String(), "\n"))
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -54,7 +55,7 @@ func executeHooks(cmds []string, toolName string, args string) error {
 func executePostHooks(cmds []string, toolName string, args string, result string) error {
 	for _, cmd := range cmds {
 		if err := runHook(cmd, toolName, args, result); err != nil {
-			fmt.Fprintf(os.Stderr, "post-hook %q failed: %v\n", cmd, err)
+			log.Printf("post-hook %q failed: %v", cmd, err)
 		}
 	}
 	return nil

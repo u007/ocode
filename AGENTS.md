@@ -10,6 +10,40 @@
 - Respect `.gitignore` and `watcher.ignore`.
 - Follow Go best practices and standard formatting.
 
+## TUI Output Safety (alt-screen)
+The TUI runs in Bubble Tea's alt-screen, so any raw write to `os.Stdout`/`os.Stderr`
+from a path the running TUI invokes paints over the rendered frame and corrupts it
+(text overlap / "hairwire" at the bottom of the chat, status line off-screen). When
+debugging rendering glitches, suspect raw writes, not just layout.
+- In any code reachable while the TUI is live (agent loop, tools, hooks, session,
+  plugins, auth, config reload): **never** `fmt.Print*`, `fmt.Fprint*(os.Stdout|os.Stderr,…)`,
+  or `println` for diagnostics. Use `agent.emitDebug` / `agent.DebugAppendf` inside the
+  `agent` package, or the stdlib `log` package elsewhere — `tui.Run()` redirects `log`
+  into the debug panel via `log.SetOutput(debugLogWriter{})`. `emitDebug` falls back to
+  stderr only when no sink is set (headless `run`/`serve`/`acp`).
+- Capture subprocess output (`cmd.Stdout = &buf`); never inherit the terminal
+  (`cmd.Stdout = os.Stdout`).
+- Clamp one-line status/activity rows with `.Width(w).MaxHeight(1)` so long content
+  can't wrap and push the bottom chrome past the terminal height.
+
+## TUI Mouse: clickable chrome vs selectable content
+Terminal mouse capture is **global per frame** (`tea.View.MouseMode` is one flag for the
+whole screen, not per-region). Enabling capture makes tabs/menus/buttons clickable but
+**blocks native terminal text selection** — the two are mutually exclusive and can't be
+scoped to a region. Never disable `MouseMode` to regain native selection; that kills
+every click target.
+- To make a region both clickable and selectable: **keep mouse ON and implement
+  selection in-app.** Per surface, a `selectionState`; **press** starts a drag, **motion**
+  highlights via `applySelectionHighlight(styled, raw, …)`, **release** copies via
+  `extractSelectionText` + `clipboard.WriteAll` when a drag happened, else clears and
+  **falls through to the click handler**. Working copies: transcript, log tab, files
+  preview, git diff, sidebar, agent-detail. Track styled + `stripANSI` raw lines in the
+  same screen-row/col coordinate space (bordered box left chrome = 2 cols).
+- **Hover** effects need `MouseModeAllMotion` — `CellMotion` emits motion only while a
+  button is held (no plain-hover events). The motion handler must process `MouseNone`
+  motion (don't early-return on `Button != MouseLeft` first), stay cheap (read cached
+  hit-test data from render), and redraw only when the hovered target changes.
+
 ## Tools
 - `read`, `write`, `delete`: Basic file operations.
 - `grep`, `glob`: Advanced search tools.

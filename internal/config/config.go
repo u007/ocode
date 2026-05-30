@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -199,7 +200,7 @@ func Load() (*Config, error) {
 
 	if config.RemoteConfig != "" {
 		if err := mergeRemoteConfig(config); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: remote config failed: %v\n", err)
+			log.Printf("warning: remote config failed: %v", err)
 		}
 	}
 

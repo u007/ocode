@@ -39,6 +39,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -460,6 +461,10 @@ type model struct {
 	logEntries               []DebugEntry
 	logSearch                string
 	logKindFilter            map[DebugEntryKind]bool
+	logStatus                string
+	logSel                   selectionState
+	logStyledLines           []string
+	logRawLines              []string
 	err                      error
 	scrollSpeed              int
 	restoredPendingScroll    bool
@@ -972,11 +977,13 @@ func newModel(sid string, cont bool, yolo bool) model {
 	var a *agent.Agent
 	if cfg != nil && cfg.Model != "" {
 		client := agent.NewClient(cfg, cfg.Model)
-		a = agent.NewAgent(client, tools, cfg)
-		if yolo && a.Permissions() != nil {
-			a.Permissions().SetMode(agent.PermissionModeYOLO)
+		if client != nil {
+			a = agent.NewAgent(client, tools, cfg)
+			if yolo && a.Permissions() != nil {
+				a.Permissions().SetMode(agent.PermissionModeYOLO)
+			}
+			a.LoadExternalTools(cfg)
 		}
-		a.LoadExternalTools(cfg)
 	}
 
 	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
@@ -1165,7 +1172,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 	case tea.PasteMsg:
-		if m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showPalette && !m.leaderActive {
+		// Route paste to the active modal's text input when a modal is open.
+		if m.showConnect && m.connect != nil {
+			d := m.connect
+			var input *textinput.Model
+			switch d.stage {
+			case connectStageKeyInput:
+				input = &d.keyInput
+			case connectStagePasteCode:
+				input = &d.codeInput
+			case connectStageAccountID:
+				input = &d.accountIDInput
+			case connectStageGatewayURL:
+				input = &d.gatewayURLInput
+			}
+			if input != nil {
+				*input, _ = input.Update(msg)
+				return m, nil
+			}
+		}
+		if m.showQuestionDialog && m.questionTextActive {
+			m.questionInput, _ = m.questionInput.Update(msg)
+			return m, nil
+		}
+		if m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showPalette && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showQuestionDialog && m.detail.empty() {
 			content := msg.Content
 			if shortcode, ok := m.shortcodePastedFiles(content); ok {
 				content = shortcode
@@ -1288,15 +1318,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if m.activeTab == tabChat && !m.showQuestionDialog && m.detail.empty() {
+	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showPalette && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showQuestionDialog && m.detail.empty()
+	if inputAllowed {
 		m.input, tiCmd = m.input.Update(msg)
 		m.rawInputLinesDirty = true
 		(&m).applyInputTheme()
 	}
-	if shouldForwardToTranscriptViewport(msg) {
-		m.viewport, vpCmd = m.viewport.Update(msg)
+	modalActive := m.modalOpen() || m.leaderActive
+	if !modalActive {
+		if shouldForwardToTranscriptViewport(msg) {
+			m.viewport, vpCmd = m.viewport.Update(msg)
+		}
+		m, popupCmd = m.updateSlashPopupState()
 	}
-	m, popupCmd = m.updateSlashPopupState()
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -1450,8 +1484,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			os.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", msg.token)
 			if m.config != nil && m.config.Model != "" {
 				client := agent.NewClient(m.config, m.config.Model)
-				next := agent.NewAgent(client, m.getInitialTools(), m.config)
-				return m, m.replaceAgent(next)
+				if client != nil {
+					next := agent.NewAgent(client, m.getInitialTools(), m.config)
+					return m, m.replaceAgent(next)
+				}
 			}
 		}
 		m.renderTranscript()
@@ -1978,7 +2014,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleGlobalTabKeys handles tab-switching keys (1-4, alt+[/], ctrl+shift+[/])
 // regardless of the active tab. Returns (true, ...) when a key is consumed.
 func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
-	if m.showQuestionDialog {
+	// When any modal overlay is active, tab-switching keys must not be handled.
+	if m.modalOpen() {
 		return false, m, nil
 	}
 	switch msg.String() {
@@ -2212,6 +2249,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.saveSession()
 			return m, cmd
 		}
+		return m, nil
 	}
 
 	if m.showRetryDialog {
@@ -2220,6 +2258,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.showRetryDialog = false
 			return m, nil
 		}
+		return m, nil
 	}
 
 	if m.showQuestionDialog {
@@ -2542,6 +2581,9 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 
 // handleLogKeys handles key bindings for the log tab.
 func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	if msg.String() != "ctrl+y" {
+		m.logStatus = ""
+	}
 	switch msg.String() {
 	case "j", "down":
 		m.logViewport.ScrollDown(1)
@@ -2551,7 +2593,17 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		DebugLog.Clear()
 		m.logEntries = nil
 		m.logSearch = ""
+		m.logStatus = ""
 		m.refreshLogViewport()
+	case "ctrl+y":
+		text := m.filteredLogText()
+		if text == "" {
+			m.logStatus = "nothing to copy"
+		} else if err := clipboard.WriteAll(text); err != nil {
+			m.logStatus = "copy failed: " + err.Error()
+		} else {
+			m.logStatus = fmt.Sprintf("copied %d lines", strings.Count(text, "\n")+1)
+		}
 	case "esc":
 		// If the LLM is streaming, cancel the stream even from the log tab.
 		if m.streaming {
@@ -2951,6 +3003,22 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.sel = selectionState{}
 			m.applyOrClearSelectionHighlight()
 		}
+		if m.logSel.dragging {
+			m.logSel.dragging = false
+			if m.logSel.active {
+				text := extractSelectionText(m.logRawLines, m.logSel.startLine, m.logSel.startCol, m.logSel.endLine, m.logSel.endCol)
+				if err := clipboard.WriteAll(text); err != nil {
+					m.logStatus = "copy failed: " + err.Error()
+				} else {
+					m.logStatus = fmt.Sprintf("copied %d lines", strings.Count(text, "\n")+1)
+				}
+				m.logSel = selectionState{}
+				m.applyOrClearLogSelectionHighlight()
+				return m, nil, true
+			}
+			m.logSel = selectionState{}
+			m.applyOrClearLogSelectionHighlight()
+		}
 		if m.filesSel.dragging {
 			m.filesSel.dragging = false
 			if m.filesSel.active {
@@ -3001,6 +3069,25 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			m.sidebarSel = selectionState{}
 		}
+		if !m.detail.empty() {
+			top := &m.detail[len(m.detail)-1]
+			if top.sel.dragging {
+				top.sel.dragging = false
+				if top.sel.active {
+					text := extractSelectionText(top.rawLines, top.sel.startLine, top.sel.startCol, top.sel.endLine, top.sel.endCol)
+					if err := clipboard.WriteAll(text); err != nil {
+						log.Printf("detail selection copy failed: %v", err)
+					}
+					top.sel = selectionState{}
+					m.applyOrClearDetailSelectionHighlight()
+					return m, nil, true
+				}
+				// No drag distance — treat as a plain click: clear and fall
+				// through to handleDetailClick for region/sub-agent toggles.
+				top.sel = selectionState{}
+				m.applyOrClearDetailSelectionHighlight()
+			}
+		}
 	}
 
 	if pressed && m.showPermDialog {
@@ -3028,15 +3115,17 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		m.exitPending = false
 	}
 
-	if tab, ok := m.tabForClick(mouse); ok {
-		m.activeTab = tab
-		if tab == tabChat {
-			m.chatUnread = false
+	if !m.modalOpen() && !m.leaderActive {
+		if tab, ok := m.tabForClick(mouse); ok {
+			m.activeTab = tab
+			if tab == tabChat {
+				m.chatUnread = false
+			}
+			if tab == tabLog {
+				m.refreshLogViewport()
+			}
+			return m, nil, true
 		}
-		if tab == tabLog {
-			m.refreshLogViewport()
-		}
-		return m, nil, true
 	}
 	if pressed && m.isClickInInputArea(mouse) {
 		topY := m.inputAreaTopY()
@@ -3064,6 +3153,40 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				endCol:    mouse.X,
 			}
 			m.applyOrClearSelectionHighlight()
+			return m, nil, true
+		}
+	}
+
+	if pressed && m.activeTab == tabLog && !m.logScrollbarHit(mouse) {
+		top := m.logContentTopY()
+		if mouse.Y >= top && mouse.Y < top+m.logViewport.Height() && mouse.X >= logContentLeftX {
+			contentLine := (mouse.Y - top) + m.logViewport.YOffset()
+			if contentLine >= 0 && contentLine < len(m.logRawLines) {
+				m.logSel = selectionState{
+					dragging:  true,
+					startLine: contentLine,
+					startCol:  mouse.X - logContentLeftX,
+					endLine:   contentLine,
+					endCol:    mouse.X - logContentLeftX,
+				}
+				m.applyOrClearLogSelectionHighlight()
+				return m, nil, true
+			}
+		}
+	}
+
+	if pressed && !m.detail.empty() && m.mouseOverDetailViewport(mouse) && !m.detailScrollbarHit(mouse) {
+		top := &m.detail[len(m.detail)-1]
+		contentLine := (mouse.Y - m.detailViewportContentTopY()) + top.vp.YOffset()
+		if contentLine >= 0 && contentLine < len(top.rawLines) && mouse.X >= detailContentLeftX {
+			top.sel = selectionState{
+				dragging:  true,
+				startLine: contentLine,
+				startCol:  mouse.X - detailContentLeftX,
+				endLine:   contentLine,
+				endCol:    mouse.X - detailContentLeftX,
+			}
+			m.applyOrClearDetailSelectionHighlight()
 			return m, nil, true
 		}
 	}
@@ -3116,35 +3239,24 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	// Sidebar text selection — always start dragging on press so a subsequent
 	// release can distinguish a simple click (no drag) from a selection drag.
 	if pressed && m.mouseOverSidebar(mouse) {
-		data := m.buildSidebarRenderData()
-		headerHeight := 0
-		title := m.sessionTitle
-		if title == "" {
-			if prompt := m.firstUserPromptText(); prompt != "" {
-				title = truncateTitle(prompt, maxExplicitTitleLen)
+		raw, contentTopY := m.sidebarSelectableLines()
+		row := mouse.Y - contentTopY
+		if row >= 0 && row < len(raw) {
+			col := mouse.X - m.panelWidth()
+			if col < 0 {
+				col = 0
 			}
-		}
-		if title != "" {
-			headerHeight = 1
-		}
-		boxTop := 1 + headerHeight + len(data.topLines)
-		// Account for leading empty line when header is empty
-		if headerHeight == 0 {
-			boxTop++
-		}
-		visible := m.sidebarVisibleScrollLines(data, headerHeight)
-		if mouse.Y >= boxTop && mouse.Y < boxTop+visible {
-			scrollLine := m.sidebarScroll + (mouse.Y - boxTop)
-			if scrollLine >= 0 && scrollLine < len(data.scrollLines) {
-				m.sidebarSel = selectionState{
-					dragging:  true,
-					startLine: scrollLine,
-					startCol:  mouse.X - m.panelWidth(),
-					endLine:   scrollLine,
-					endCol:    mouse.X - m.panelWidth(),
-				}
-				return m, nil, true
+			// Persist the on-screen buffer so release can extract the copied text
+			// (renderSidebar runs on a value copy and can't store it for us).
+			m.rawSidebarLines = raw
+			m.sidebarSel = selectionState{
+				dragging:  true,
+				startLine: row,
+				startCol:  col,
+				endLine:   row,
+				endCol:    col,
 			}
+			return m, nil, true
 		}
 	}
 	return m, nil, false
@@ -3152,6 +3264,17 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	if mouse.Button != tea.MouseLeft {
+		// Plain hover (no button): underline the clickable sidebar file path
+		// under the cursor. Requires MouseModeAllMotion (CellMotion delivers no
+		// no-button motion), so this must run before the MouseLeft drag guard.
+		prevHover := m.hoverSidebarFile
+		m.hoverSidebarFile = ""
+		if path, ok := m.sidebarFileForClick(mouse); ok {
+			m.hoverSidebarFile = path
+		}
+		if m.hoverSidebarFile != prevHover {
+			return m, nil, true
+		}
 		return m, nil, false
 	}
 	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
@@ -3197,6 +3320,45 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		m.sel.endCol = col
 		m.sel.active = m.sel.startLine != m.sel.endLine || m.sel.startCol != m.sel.endCol
 		m.applyOrClearSelectionHighlight()
+		return m, nil, true
+	}
+
+	if m.logSel.dragging {
+		contentLine := (mouse.Y - m.logContentTopY()) + m.logViewport.YOffset()
+		if contentLine < 0 {
+			contentLine = 0
+		}
+		if contentLine >= len(m.logRawLines) && len(m.logRawLines) > 0 {
+			contentLine = len(m.logRawLines) - 1
+		}
+		col := mouse.X - logContentLeftX
+		if col < 0 {
+			col = 0
+		}
+		m.logSel.endLine = contentLine
+		m.logSel.endCol = col
+		m.logSel.active = m.logSel.startLine != m.logSel.endLine || m.logSel.startCol != m.logSel.endCol
+		m.applyOrClearLogSelectionHighlight()
+		return m, nil, true
+	}
+
+	if !m.detail.empty() && m.detail[len(m.detail)-1].sel.dragging {
+		top := &m.detail[len(m.detail)-1]
+		contentLine := (mouse.Y - m.detailViewportContentTopY()) + top.vp.YOffset()
+		if contentLine < 0 {
+			contentLine = 0
+		}
+		if contentLine >= len(top.rawLines) && len(top.rawLines) > 0 {
+			contentLine = len(top.rawLines) - 1
+		}
+		col := mouse.X - detailContentLeftX
+		if col < 0 {
+			col = 0
+		}
+		top.sel.endLine = contentLine
+		top.sel.endCol = col
+		top.sel.active = top.sel.startLine != top.sel.endLine || top.sel.startCol != top.sel.endCol
+		m.applyOrClearDetailSelectionHighlight()
 		return m, nil, true
 	}
 
@@ -3269,89 +3431,35 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	}
 
 	if m.sidebarSel.dragging {
-		data := m.buildSidebarRenderData()
-		headerHeight := 0
-		title := m.sessionTitle
-		if title == "" {
-			if prompt := m.firstUserPromptText(); prompt != "" {
-				title = truncateTitle(prompt, maxExplicitTitleLen)
-			}
+		_, contentTopY := m.sidebarSelectableLines()
+		row := mouse.Y - contentTopY
+		if row < 0 {
+			row = 0
 		}
-		if title != "" {
-			headerHeight = 1
+		if len(m.rawSidebarLines) > 0 && row >= len(m.rawSidebarLines) {
+			row = len(m.rawSidebarLines) - 1
 		}
-		boxTop := 1 + headerHeight + len(data.topLines)
-		// Account for leading empty line when header is empty
-		if headerHeight == 0 {
-			boxTop++
+		col := mouse.X - m.panelWidth()
+		if col < 0 {
+			col = 0
 		}
-		visible := m.sidebarVisibleScrollLines(data, headerHeight)
-		if mouse.Y >= boxTop && mouse.Y < boxTop+visible {
-			scrollLine := m.sidebarScroll + (mouse.Y - boxTop)
-			if scrollLine < 0 {
-				scrollLine = 0
-			}
-			if len(data.scrollLines) > 0 && scrollLine >= len(data.scrollLines) {
-				scrollLine = len(data.scrollLines) - 1
-			}
-			col := mouse.X - m.panelWidth()
-			if col < 0 {
-				col = 0
-			}
-			m.sidebarSel.endLine = scrollLine
-			m.sidebarSel.endCol = col
-			m.sidebarSel.active = m.sidebarSel.startLine != m.sidebarSel.endLine || m.sidebarSel.startCol != m.sidebarSel.endCol
-			return m, nil, true
-		}
-	}
-
-	// Sidebar hover detection — underline clickable file paths
-	{
-		prevHover := m.hoverSidebarFile
-		if m.mouseOverSidebar(mouse) {
-			data := m.buildSidebarRenderData()
-			headerHeight := 0
-			title := m.sessionTitle
-			if title == "" {
-				if prompt := m.firstUserPromptText(); prompt != "" {
-					title = truncateTitle(prompt, maxExplicitTitleLen)
-				}
-			}
-			if title != "" {
-				headerHeight = 1
-			}
-			boxTop := 1 + headerHeight + len(data.topLines)
-			if headerHeight == 0 {
-				boxTop++
-			}
-			visible := m.sidebarVisibleScrollLines(data, headerHeight)
-			if mouse.Y >= boxTop && mouse.Y < boxTop+visible {
-				scrollLine := m.sidebarScroll + (mouse.Y - boxTop)
-				if path, ok := data.fileScrollLinePaths[scrollLine]; ok {
-					m.hoverSidebarFile = path
-				} else {
-					m.hoverSidebarFile = ""
-				}
-			} else {
-				m.hoverSidebarFile = ""
-			}
-		} else {
-			m.hoverSidebarFile = ""
-		}
-		if m.hoverSidebarFile != prevHover {
-			return m, nil, true
-		}
-	}
-
-	if tab, ok := m.tabForClick(mouse); ok {
-		m.activeTab = tab
-		if tab == tabChat {
-			m.chatUnread = false
-		}
-		if tab == tabLog {
-			m.refreshLogViewport()
-		}
+		m.sidebarSel.endLine = row
+		m.sidebarSel.endCol = col
+		m.sidebarSel.active = m.sidebarSel.startLine != m.sidebarSel.endLine || m.sidebarSel.startCol != m.sidebarSel.endCol
 		return m, nil, true
+	}
+
+	if !m.modalOpen() && !m.leaderActive {
+		if tab, ok := m.tabForClick(mouse); ok {
+			m.activeTab = tab
+			if tab == tabChat {
+				m.chatUnread = false
+			}
+			if tab == tabLog {
+				m.refreshLogViewport()
+			}
+			return m, nil, true
+		}
 	}
 	if m.showPicker {
 		if idx, ok := m.pickerRowForY(mouse.Y); ok {
@@ -3770,7 +3878,7 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 			}
 			return m.replaceAgent(next)
 		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to switch to model %s: unknown provider or missing configuration", args[0])})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to switch to model %s: unknown provider, or no API key found for it. Run /connect to add credentials.", args[0])})
 	}
 	return nil
 }
@@ -5573,8 +5681,15 @@ func (m *model) layoutLogViewport() {
 		logHeight = 1
 	}
 
-	m.logViewport.SetWidth(max(1, m.width-5))
+	// Reserve columns for the surrounding chrome: 4 outer margin, the bordered
+	// panel's 2 border chars + 2 horizontal padding (styles.Border has
+	// Padding(0,1)), and 1 column for the scrollbar. Undersizing here makes the
+	// border wrap every content line, doubling the panel height and pushing the
+	// frame past the terminal bottom.
+	m.logViewport.SetWidth(max(1, m.width-9))
 	m.logViewport.SetHeight(logHeight)
+	// Re-wrap entries to the new width.
+	m.refreshLogViewport()
 }
 
 func (m model) bottomChromeHeight(panelWidth int) int {
@@ -6405,7 +6520,12 @@ func (m model) renderActivityRow() string {
 	if len(snap.ActiveAgents) > 0 {
 		parts = append(parts, "🤖 "+strings.Join(snap.ActiveAgents, ", "))
 	}
-	return m.styles.Status.Width(m.statusContentWidth()).Render(" " + strings.Join(parts, "  │  "))
+	// Clamp to a single line: this is a one-line status indicator, and letting
+	// Width().Render() wrap a long tool list grows the bottom chrome past the
+	// terminal height, pushing the status bar off-screen. MaxHeight(1) keeps
+	// only the first rendered row.
+	w := m.statusContentWidth()
+	return m.styles.Status.Width(w).MaxHeight(1).Render(" " + strings.Join(parts, "  │  "))
 }
 
 // jobCounts returns the number of running background processes and agent runs.
@@ -6647,7 +6767,11 @@ func (m *model) openAgentDetail(runID string) {
 	content, runs, procs, regions := renderRunTranscriptDetail(run, runID, vp.Width(), expanded)
 	vp.SetContent(content)
 	vp.GotoBottom()
-	m.detail.push(detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, procs: procs, expanded: expanded, regions: regions})
+	dv := detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, procs: procs, expanded: expanded, regions: regions}
+	dv.content = content
+	dv.lines = strings.Split(content, "\n")
+	dv.rawLines = strings.Split(stripANSI(content), "\n")
+	m.detail.push(dv)
 }
 
 // openProcessList pushes a process list drill-in view.
@@ -6661,9 +6785,13 @@ func (m *model) openProcessListForRun(runID string) {
 		return
 	}
 	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
-	vp.SetContent(renderProcessList(reg))
+	content := renderProcessList(reg)
+	vp.SetContent(content)
 	vp.GotoBottom()
 	dv := detailView{kind: detailProcessList, runPath: runID, vp: vp}
+	dv.content = content
+	dv.lines = strings.Split(content, "\n")
+	dv.rawLines = strings.Split(stripANSI(content), "\n")
 	if run, ok := m.findAgentRun(runID); ok {
 		dv.runID = run.ID
 	}
@@ -6681,9 +6809,13 @@ func (m *model) openProcessLogForRun(runID, procID string) {
 		return
 	}
 	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
-	vp.SetContent(renderProcessLog(reg, procID))
+	content := renderProcessLog(reg, procID)
+	vp.SetContent(content)
 	vp.GotoBottom()
 	dv := detailView{kind: detailProcessLog, runPath: runID, procID: procID, vp: vp}
+	dv.content = content
+	dv.lines = strings.Split(content, "\n")
+	dv.rawLines = strings.Split(stripANSI(content), "\n")
 	if run, ok := m.findAgentRun(runID); ok {
 		dv.runID = run.ID
 	}
@@ -6695,6 +6827,11 @@ func (m *model) refreshTopDetailView() {
 		return
 	}
 	top := &m.detail[len(m.detail)-1]
+	// Don't reload content mid-drag — the live tick would wipe the in-progress
+	// selection highlight and reset its anchor.
+	if top.sel.dragging {
+		return
+	}
 	top.vp.SetWidth(m.detailViewportWidth())
 	top.vp.SetHeight(m.detailViewportHeight())
 	switch top.kind {
@@ -6704,20 +6841,50 @@ func (m *model) refreshTopDetailView() {
 			return
 		}
 		content, runs, procs, regions := renderRunTranscriptDetail(run, top.runPath, top.vp.Width(), top.expanded)
-		top.vp.SetContent(content)
+		setDetailContent(top, content)
 		top.runID = run.ID
 		top.runs = runs
 		top.procs = procs
 		top.regions = regions
 	case detailProcessList:
 		if reg := m.processRegistryForRun(top.runPath); reg != nil {
-			top.vp.SetContent(renderProcessList(reg))
+			setDetailContent(top, renderProcessList(reg))
 		}
 	case detailProcessLog:
 		if reg := m.processRegistryForRun(top.runPath); reg != nil {
-			top.vp.SetContent(renderProcessLog(reg, top.procID))
+			setDetailContent(top, renderProcessLog(reg, top.procID))
 		}
 	}
+}
+
+// setDetailContent loads content into a detail view's viewport while tracking
+// the styled and plain visual lines so in-app drag-selection can highlight a
+// range and extract its text. Resets any active selection on the view.
+func setDetailContent(top *detailView, content string) {
+	top.content = content
+	top.lines = strings.Split(content, "\n")
+	top.rawLines = strings.Split(stripANSI(content), "\n")
+	top.sel = selectionState{}
+	top.vp.SetContent(content)
+}
+
+const detailContentLeftX = 2 // border(1) + padding(1) of the detail body box
+
+// applyOrClearDetailSelectionHighlight re-renders the top detail viewport with
+// the current selection highlighted, or restores the plain styled content when
+// no selection is active.
+func (m *model) applyOrClearDetailSelectionHighlight() {
+	if len(m.detail) == 0 {
+		return
+	}
+	top := &m.detail[len(m.detail)-1]
+	if !top.sel.active {
+		top.vp.SetContent(strings.Join(top.lines, "\n"))
+		return
+	}
+	sl, sc, el, ec := normaliseSelection(top.sel.startLine, top.sel.startCol, top.sel.endLine, top.sel.endCol)
+	highlighted := applySelectionHighlight(top.lines, top.rawLines, sl, sc, el, ec)
+	top.vp.SetContent(strings.Join(highlighted, "\n"))
 }
 
 func (m model) detailViewportWidth() int {
@@ -6776,7 +6943,7 @@ func findAgentRunByPath(reg *agent.AgentRunRegistry, runPath string) (*agent.Age
 
 // modalOpen reports whether any modal overlay is currently shown.
 func (m model) modalOpen() bool {
-	return m.showPicker || m.showConnect || m.showPalette || m.showPermDialog || m.showQuestionDialog
+	return m.showPicker || m.showConnect || m.showPalette || m.showPermDialog || m.showRetryDialog || m.showQuestionDialog
 }
 
 // renderDetailView renders the top-of-stack detail view.
@@ -6790,7 +6957,7 @@ func (m model) renderDetailView(d detailView) string {
 	case detailProcessLog:
 		title = "Process " + d.procID
 	}
-	hints := "esc: back · j/k: scroll · mouse: scroll"
+	hints := "esc: back · j/k: scroll · mouse: scroll · drag: select"
 	if d.kind == detailAgentRun {
 		hints += " · click: sub-agent/process · ctrl+g: processes"
 	} else if d.kind == detailProcessList {
@@ -6952,7 +7119,9 @@ func (m model) View() tea.View {
 	v := tea.NewView(m.renderContent())
 	v.AltScreen = true
 	if m.mouseEnabled() {
-		v.MouseMode = tea.MouseModeCellMotion
+		// AllMotion (not CellMotion) so plain hover events arrive even with no
+		// button held — required for hover-underline of clickable sidebar files.
+		v.MouseMode = tea.MouseModeAllMotion
 	}
 	return v
 }
@@ -7228,7 +7397,10 @@ func (m model) renderQueueRow() string {
 		items = append(items, ansi.Truncate(label, 48, "..."))
 	}
 	text := fmt.Sprintf(" Queued (%d): %s", len(m.queuedInputs), strings.Join(items, " | "))
-	return m.styles.Status.Width(m.statusContentWidth()).Render(text)
+	// Clamp to a single line so a long queue can't wrap and push the bottom
+	// chrome past the terminal height.
+	w := m.statusContentWidth()
+	return m.styles.Status.Width(w).MaxHeight(1).Render(text)
 }
 
 func (m model) statusContentWidth() int {
@@ -7741,35 +7913,6 @@ func (m model) renderSidebar() string {
 	scrollOffset := clampInt(m.sidebarScroll, 0, maxInt(0, len(data.scrollLines)-visibleScrollLines))
 	visible := sliceLines(data.scrollLines, scrollOffset, visibleScrollLines)
 
-	// Store raw (ANSI-stripped) scroll lines for text selection
-	m.rawSidebarLines = make([]string, len(data.scrollLines))
-	for i, line := range data.scrollLines {
-		m.rawSidebarLines[i] = stripANSI(line)
-	}
-
-	// Apply selection highlight if selection is active and overlaps visible area
-	if m.sidebarSel.active && len(visible) > 0 {
-		sl, sc, el, ec := normaliseSelection(m.sidebarSel.startLine, m.sidebarSel.startCol, m.sidebarSel.endLine, m.sidebarSel.endCol)
-		visibleStart := scrollOffset
-		visibleEnd := scrollOffset + visibleScrollLines - 1
-		if sl <= visibleEnd && el >= visibleStart {
-			adjSl := sl - visibleStart
-			adjEl := el - visibleStart
-			if adjSl < 0 {
-				adjSl = 0
-				sc = 0
-			}
-			if adjEl >= len(visible) {
-				adjEl = len(visible) - 1
-				if el < len(m.rawSidebarLines) {
-					ec = len(m.rawSidebarLines[el])
-				}
-			}
-			rawVisible := m.rawSidebarLines[visibleStart : visibleStart+len(visible)]
-			visible = applySelectionHighlight(visible, rawVisible, adjSl, sc, adjEl, ec)
-		}
-	}
-
 	// Apply hover underline for clickable file paths
 	if m.hoverSidebarFile != "" && len(visible) > 0 {
 		hoverStyle := lipgloss.NewStyle().Underline(true)
@@ -7793,10 +7936,21 @@ func (m model) renderSidebar() string {
 		Width(sidebarColumnWidth - 4).
 		Render(constrainView(scrollContent, sidebarColumnWidth-4, visibleScrollLines))
 
-	// Build sections preserving top and bottom lines
+	// Compose the full on-screen column (pinned top + scroll viewport + pinned
+	// bottom) and apply the selection highlight in screen-row space so any
+	// sidebar text — not just the scroll section — can be highlighted/copied.
+	// These indices match sidebarSelectableLines used by the mouse handlers.
 	allLines := append([]string{}, data.topLines...)
 	allLines = append(allLines, strings.Split(scrollBox, "\n")...)
 	allLines = append(allLines, data.bottomLines...)
+	if m.sidebarSel.active {
+		rawAll := make([]string, len(allLines))
+		for i, line := range allLines {
+			rawAll[i] = stripANSI(line)
+		}
+		sl, sc, el, ec := normaliseSelection(m.sidebarSel.startLine, m.sidebarSel.startCol, m.sidebarSel.endLine, m.sidebarSel.endCol)
+		allLines = applySelectionHighlight(allLines, rawAll, sl, sc, el, ec)
+	}
 	sections := strings.Join(allLines, "\n")
 
 	// Only constrain if needed and prefer to keep bottom lines
@@ -7835,6 +7989,49 @@ func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight in
 	spaceForScroll := maxInt(3, contentHeight-len(data.topLines)-len(data.bottomLines)-2)
 	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
 	return minInt(scrollBoxHeight, spaceForScroll)
+}
+
+// sidebarHeaderHeight returns 1 when the sidebar shows a title row, else 0.
+func (m model) sidebarHeaderHeight() int {
+	title := m.sessionTitle
+	if title == "" {
+		if prompt := m.firstUserPromptText(); prompt != "" {
+			title = truncateTitle(prompt, maxExplicitTitleLen)
+		}
+	}
+	if title != "" {
+		return 1
+	}
+	return 0
+}
+
+// sidebarSelectableLines returns the ANSI-stripped sidebar lines exactly as laid
+// out on screen — pinned top section, the scroll viewport, then pinned bottom
+// section — plus the screen Y of the first line. Selection runs in this
+// screen-row space so any sidebar text (not just the scroll section) can be
+// highlighted and copied; the indices match the composed lines in renderSidebar.
+func (m model) sidebarSelectableLines() (raw []string, contentTopY int) {
+	data := m.buildSidebarRenderData()
+	headerHeight := m.sidebarHeaderHeight()
+	contentTopY = 1 + maxInt(1, headerHeight) // top border(1) + header row(s)
+	visibleScroll := m.sidebarVisibleScrollLines(data, headerHeight)
+	scrollOffset := clampInt(m.sidebarScroll, 0, maxInt(0, len(data.scrollLines)-visibleScroll))
+	visible := sliceLines(data.scrollLines, scrollOffset, visibleScroll)
+	raw = make([]string, 0, len(data.topLines)+visibleScroll+len(data.bottomLines))
+	for _, l := range data.topLines {
+		raw = append(raw, stripANSI(l))
+	}
+	for i := 0; i < visibleScroll; i++ {
+		if i < len(visible) {
+			raw = append(raw, stripANSI(visible[i]))
+		} else {
+			raw = append(raw, "")
+		}
+	}
+	for _, l := range data.bottomLines {
+		raw = append(raw, stripANSI(l))
+	}
+	return raw, contentTopY
 }
 
 func (m model) renderSidebarWithTabBar() string {
@@ -8038,13 +8235,68 @@ func (m *model) refreshLogViewport() {
 			style = hintStyle
 		}
 		tag := style.Bold(true).Render(fmt.Sprintf("%-5s", string(e.Kind)))
-		lines = append(lines, tag+" "+e.Message)
+		// Wrap each entry to the viewport width so long messages show their
+		// full content across multiple lines instead of being clipped.
+		line := tag + " " + e.Message
+		if w := m.logViewport.Width(); w > 0 {
+			line = wrapView(line, w)
+		}
+		lines = append(lines, line)
 	}
+	var content string
 	if len(lines) == 0 {
-		m.logViewport.SetContent(hintStyle.Render("  no entries match"))
+		content = hintStyle.Render("  no entries match")
 	} else {
-		m.logViewport.SetContent(strings.Join(lines, "\n"))
+		content = strings.Join(lines, "\n")
 	}
+	// Track the styled and plain visual lines so in-app drag-selection can
+	// highlight a range and extract its text (entries may wrap to several
+	// visual lines, so split the joined content rather than the entry slice).
+	m.logStyledLines = strings.Split(content, "\n")
+	m.logRawLines = strings.Split(stripANSI(content), "\n")
+	m.logSel = selectionState{}
+	m.logViewport.SetContent(content)
+}
+
+// applyOrClearLogSelectionHighlight re-renders the log viewport with the current
+// drag-selection highlighted, or restores the plain content when nothing is
+// selected. Mirrors applyOrClearSelectionHighlight for the transcript.
+func (m *model) applyOrClearLogSelectionHighlight() {
+	if !m.logSel.active {
+		m.logViewport.SetContent(strings.Join(m.logStyledLines, "\n"))
+		return
+	}
+	sl, sc, el, ec := normaliseSelection(m.logSel.startLine, m.logSel.startCol, m.logSel.endLine, m.logSel.endCol)
+	highlighted := applySelectionHighlight(m.logStyledLines, m.logRawLines, sl, sc, el, ec)
+	m.logViewport.SetContent(strings.Join(highlighted, "\n"))
+}
+
+// logContentTopY is the screen row of the first log line inside the bordered
+// panel: header + search bar + kind bar (3 rows) plus the panel's top border.
+func (m model) logContentTopY() int {
+	return 4
+}
+
+// logContentLeftX is the screen column of the first log character: the panel's
+// left border plus one column of horizontal padding (styles.Border Padding(0,1)).
+const logContentLeftX = 2
+
+// filteredLogText returns the currently visible (filtered) log entries as plain
+// text — no ANSI styling — for copying to the clipboard.
+func (m *model) filteredLogText() string {
+	var lines []string
+	for _, e := range m.logEntries {
+		if m.logKindFilter != nil {
+			if enabled, ok := m.logKindFilter[e.Kind]; ok && !enabled {
+				continue
+			}
+		}
+		if m.logSearch != "" && !logFuzzyMatch(m.logSearch, string(e.Kind)+" "+e.Message) {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%-5s %s", string(e.Kind), e.Message))
+	}
+	return strings.Join(lines, "\n")
 }
 
 // logFuzzyMatch returns true if all runes in query appear in target in order (case-insensitive).
@@ -8104,6 +8356,10 @@ func (m model) renderLogTab() string {
 		} else {
 			kindBar += hintStyle.Render(label)
 		}
+	}
+	kindBar += hintStyle.Render(" · ^y copy · drag to select")
+	if m.logStatus != "" {
+		kindBar += successStyle.Render("  " + m.logStatus)
 	}
 
 	// scrollbar + viewport

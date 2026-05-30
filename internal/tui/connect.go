@@ -58,6 +58,8 @@ type connectMethod struct {
 }
 
 func (m *model) openConnectDialog() {
+	m.input.Blur()
+
 	ti := textinput.New()
 	ti.Placeholder = "paste API key and press Enter"
 	ti.EchoMode = textinput.EchoPassword
@@ -94,6 +96,7 @@ func (m *model) closeConnectDialog() {
 	}
 	m.showConnect = false
 	m.connect = nil
+	m.input.Focus()
 }
 
 // buildMethods returns the available methods for the current provider.

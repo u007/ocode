@@ -76,6 +76,41 @@ func TestRepairToolCallSequence_DowngradesStrayToolResult(t *testing.T) {
 	}
 }
 
+// TestRepairToolCallSequence_RoutesNotesToDebugSink guards the fix for the TUI
+// "hairwire" overlap: the repair path used to fmt.Fprintf raw to os.Stderr,
+// which painted directly onto the bubbletea alt-screen and corrupted the frame.
+// Repair notes must flow through the DebugAppend sink the TUI installs.
+func TestRepairToolCallSequence_RoutesNotesToDebugSink(t *testing.T) {
+	prev := DebugAppend
+	t.Cleanup(func() { DebugAppend = prev })
+
+	var captured []string
+	DebugAppend = func(kind, msg string) { captured = append(captured, msg) }
+
+	msgs := []Message{
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "missing"}}},
+		{Role: "user", Content: "next"},
+		{Role: "tool", ToolID: "stray", Content: "orphan output"},
+	}
+	repairToolCallSequence(msgs)
+
+	var sawSynthesise, sawDowngrade bool
+	for _, m := range captured {
+		if strings.Contains(m, "synthesising missing tool result for tool_call_id=missing") {
+			sawSynthesise = true
+		}
+		if strings.Contains(m, "downgrading stray tool result for tool_call_id=stray") {
+			sawDowngrade = true
+		}
+	}
+	if !sawSynthesise {
+		t.Fatalf("expected synthesise note routed to debug sink, got %v", captured)
+	}
+	if !sawDowngrade {
+		t.Fatalf("expected downgrade note routed to debug sink, got %v", captured)
+	}
+}
+
 func TestRepairToolCallSequence_DoesNotPullToolResultAcrossUserTurn(t *testing.T) {
 	call := ToolCall{ID: "task-1"}
 	call.Function.Name = "bash"

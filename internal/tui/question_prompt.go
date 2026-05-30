@@ -40,6 +40,7 @@ func renderQuestionTranscriptNotice(prompts []tool.QuestionPrompt) string {
 }
 
 func (m *model) startQuestionPrompt(toolCallID string, prompts []tool.QuestionPrompt) {
+	m.input.Blur()
 	m.showQuestionDialog = true
 	m.activeTab = tabChat
 	m.chatUnread = false
@@ -374,6 +375,7 @@ func (m *model) clearQuestionPrompt() {
 	m.questionCustom = nil
 	m.questionTextActive = false
 	m.questionInput.Reset()
+	m.input.Focus()
 }
 
 func questionOptionCount(q tool.QuestionPrompt) int {

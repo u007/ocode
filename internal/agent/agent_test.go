@@ -108,6 +108,10 @@ func (t countingTool) Execute(json.RawMessage) (string, error) {
 func (t countingTool) Parallel() bool { return false }
 
 func TestNewClientParsesOpenCodeProviderModel(t *testing.T) {
+	// deepseek is a keyed provider; NewClient now refuses to build a client
+	// when no credential is found, so supply one to keep this parsing test
+	// hermetic (independent of any stored auth.json).
+	t.Setenv("DEEPSEEK_API_KEY", "test-key")
 	client := NewClient(nil, "deepseek/deepseek-chat")
 	got, ok := client.(*GenericClient)
 	if !ok {
@@ -322,6 +326,9 @@ func TestPrepareMessagesDoesNotDuplicateMarkedBasePrompt(t *testing.T) {
 }
 
 func TestNewClientUsesChutesLLMEndpoint(t *testing.T) {
+	// chutes is a keyed provider; NewClient now refuses to build a client when
+	// no credential is found, so supply one to keep this endpoint test hermetic.
+	t.Setenv("CHUTES_API_KEY", "test-key")
 	client := NewClient(nil, "chutes/Qwen/Qwen3.6-27B-TEE")
 	got, ok := client.(*GenericClient)
 	if !ok {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -10,6 +11,13 @@ import (
 )
 
 func Run(sessionID string, cont bool, yolo bool) error {
+	// Redirect the standard library logger into the debug panel before anything
+	// runs. Once bubbletea enters the alt-screen, any stray log/os.Stderr write
+	// paints over the frame and corrupts it; routing log here keeps those
+	// messages visible without bleeding onto the screen.
+	log.SetFlags(0)
+	log.SetOutput(debugLogWriter{})
+
 	m := newModel(sessionID, cont, yolo)
 
 	if m.config != nil {

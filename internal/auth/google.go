@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -85,7 +86,7 @@ func LoginWithGoogle() (string, error) {
 		}
 	}()
 
-	fmt.Printf("Opening browser for Google login…\n")
+	log.Printf("Opening browser for Google login…")
 	openBrowser(authURL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -196,6 +197,6 @@ func openBrowser(u string) {
 		err = fmt.Errorf("unsupported platform")
 	}
 	if err != nil {
-		fmt.Printf("Please open this URL in your browser: %s\n", u)
+		log.Printf("Please open this URL in your browser: %s", u)
 	}
 }

@@ -129,7 +129,7 @@ func loadRegistry() map[string]providerEntry {
 
 	remote, err := fetchRemote()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "models.dev fetch failed: %v\n", err)
+		emitDebug("AGENT", fmt.Sprintf("models.dev fetch failed: %v", err))
 		if cached, modTime, err := loadCache(); err == nil {
 			registry.data = cached
 			registry.fetchedAt = modTime
@@ -139,7 +139,7 @@ func loadRegistry() map[string]providerEntry {
 	}
 
 	if err := writeCache(remote); err != nil {
-		fmt.Fprintf(os.Stderr, "models.dev cache write failed: %v\n", err)
+		emitDebug("AGENT", fmt.Sprintf("models.dev cache write failed: %v", err))
 	}
 	registry.data = remote
 	registry.fetchedAt = time.Now()
@@ -224,18 +224,19 @@ func splitModelID(id string) (provider, model string, ok bool) {
 }
 
 func allProviderModelsFromRegistry() []string {
-	data := loadRegistry()
-	if data == nil {
-		return nil
-	}
 	ids := make([]string, 0)
-	for provider, entry := range data {
-		for model := range entry.Models {
-			ids = append(ids, provider+"/"+model)
+	if data := loadRegistry(); data != nil {
+		for provider, entry := range data {
+			for model := range entry.Models {
+				ids = append(ids, provider+"/"+model)
+			}
 		}
 	}
 	for _, m := range fetchLMStudioModels() {
 		ids = append(ids, "lmstudio/"+m)
+	}
+	if len(ids) == 0 {
+		return nil
 	}
 	sort.Strings(ids)
 	return ids

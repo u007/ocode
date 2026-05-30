@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -198,7 +199,7 @@ func MCPAuthFlow(serverName, authURL, tokenURL, clientID string, scopes []string
 		}
 	}()
 
-	fmt.Printf("Opening browser for MCP server %s authentication…\n", serverName)
+	log.Printf("Opening browser for MCP server %s authentication…", serverName)
 	openBrowser(fullAuthURL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
