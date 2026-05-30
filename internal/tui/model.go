@@ -2950,8 +2950,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			if n.isDir {
 				m.files.toggleDir(idx)
 			} else if isDoubleClick {
-				m.files.openEditorPicker(n.path)
-				return m, nil, true
+				return m, m.files.openInEditor(n.path), true
 			} else {
 				return m, loadPreviewCmd(n), true
 			}

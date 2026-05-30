@@ -873,12 +873,7 @@ func (m *filesModel) copySelectedPath() {
 
 func (m filesModel) openInEditor(path string) tea.Cmd {
 	if m.editorOpener != nil {
-		// Wrap the opener so we can intercept startup errors.
-		opener := m.editorOpener
-		return func() tea.Msg {
-			cmd := opener(path)
-			return cmd()
-		}
+		return m.editorOpener(path)
 	}
 	editor := m.editor
 	if editor == "" {
