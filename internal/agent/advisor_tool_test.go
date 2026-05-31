@@ -77,6 +77,10 @@ func TestAdvisorTool_Definition(t *testing.T) {
 	if def["name"] != "advisor" {
 		t.Errorf("definition name should be 'advisor', got %v", def["name"])
 	}
+	desc, _ := def["description"].(string)
+	if !strings.Contains(desc, "avoid redundant exploration") {
+		t.Errorf("definition description should guide prompt quality to avoid redundant exploration")
+	}
 	params, ok := def["parameters"].(map[string]interface{})
 	if !ok {
 		t.Fatal("definition should have parameters")
@@ -93,6 +97,13 @@ func TestAdvisorTool_Definition(t *testing.T) {
 	}
 	if _, ok := props["modelID"]; !ok {
 		t.Error("parameters should have 'modelID' property")
+	}
+	promptProp, _ := props["prompt"].(map[string]interface{})
+	promptDesc, _ := promptProp["description"].(string)
+	for _, want := range []string{"files/lines already inspected", "key evidence/outputs", "exact decision/questions"} {
+		if !strings.Contains(promptDesc, want) {
+			t.Errorf("prompt description missing %q", want)
+		}
 	}
 	required, ok := params["required"].([]interface{})
 	if !ok {

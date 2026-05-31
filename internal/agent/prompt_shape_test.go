@@ -73,6 +73,22 @@ func TestPrepareMessages_DoesNotDuplicateFragments(t *testing.T) {
 	}
 }
 
+func TestBuildModePrompt_IncludesAdvisorContextPacketGuidance(t *testing.T) {
+	p := ModeBuild.SystemPrompt()
+	if !strings.Contains(p, "When calling the advisor tool, provide a compact context packet") {
+		t.Fatalf("build mode prompt missing advisor context-packet guidance")
+	}
+	for _, want := range []string{
+		"files/lines already inspected",
+		"key evidence or command outputs",
+		"exact decision/questions",
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("build mode prompt missing advisor context detail %q", want)
+		}
+	}
+}
+
 func collectMarkers(msgs []Message) []string {
 	var out []string
 	for _, m := range msgs {

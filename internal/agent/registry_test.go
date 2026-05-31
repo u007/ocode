@@ -361,7 +361,7 @@ func TestModePromptsIncludeExpectationValidation(t *testing.T) {
 		mode Mode
 		want []string
 	}{
-		{ModeBuild, []string{"User Expectation Checklist", "validate every checklist item", "iterate with fixes"}},
+		{ModeBuild, []string{"User Expectation Checklist", "validate every checklist item", "iterate with fixes", "compact context packet"}},
 		{ModePlan, []string{"User Expectation Checklist", "Validation Plan", "checklist items they verify"}},
 		{ModeReview, []string{"User Expectation Checklist", "missed requirements", "missing validation"}},
 		{ModeDebug, []string{"observed failure", "expected behavior", "smallest root cause", "Validate the diagnosis"}},
