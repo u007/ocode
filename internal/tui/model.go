@@ -394,6 +394,14 @@ func (m *model) replaceAgent(next *agent.Agent) tea.Cmd {
 		defer cancel()
 		_ = m.supervisor.TerminateAll(ctx)
 	}
+	// The session supervisor is reused across this in-session swap (TerminateAll
+	// kills children but retains their proc-N records). Carry the previous
+	// agent's process-ID high-water mark forward so the new registry continues
+	// numbering instead of restarting at proc-1 and colliding. /new builds a
+	// fresh supervisor + agent and intentionally does not pass through here.
+	if prev != nil && next != nil {
+		next.SeedProcCounter(prev.ProcCounter())
+	}
 	m.cleanupAgent(prev)
 	return m.installAgent(next)
 }
@@ -544,6 +552,7 @@ type model struct {
 	usageCh                  chan usageEvent
 	streamFinalOutputTokens  int64     // exact output tokens from streaming usage event (0 = not yet received)
 	streamingThinkingIdx     int       // index into m.messages of the in-flight roleThinking message; -1 when none
+	streamAssistantFinalized bool      // true once the current stream has emitted its final assistant message
 	lastDeltaRender          time.Time // throttles renderTranscript to ≥50ms cadence during streams
 	titleRequested           bool
 	titleGen                 uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
@@ -1078,6 +1087,15 @@ func newModel(sid string, cont bool, yolo bool) model {
 		m.messages = append(m.messages, message{
 			role:      roleAssistant,
 			text:      hintStyle.Render("⚡ small model: " + cfg.Ocode.SmallModel),
+			transient: true,
+		})
+	}
+
+	// Show active advisor model on init.
+	if cfg != nil && cfg.Ocode.Advisor.Provider != "" && cfg.Ocode.Advisor.Model != "" {
+		m.messages = append(m.messages, message{
+			role:      roleAssistant,
+			text:      hintStyle.Render("🧠 advisor: " + cfg.Ocode.Advisor.Provider + "/" + cfg.Ocode.Advisor.Model),
 			transient: true,
 		})
 	}
@@ -1729,6 +1747,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamTokenEstimate = 0
 		m.streamThinkingChars = 0
 		m.streamOutputChars = 0
+		m.streamingThinkingIdx = -1
+		m.streamAssistantFinalized = false
 		m.tokenBlinkUntil = time.Time{}
 		m.dotFrame = 0
 		if !m.activityRowReserved {
@@ -1846,6 +1866,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reset so the next turn's first reasoning delta starts a fresh
 		// thinking block instead of appending into the prior turn's buffer.
 		m.streamingThinkingIdx = -1
+		m.streamAssistantFinalized = false
 		if dropped := atomic.SwapUint64(&m.deltaDrops, 0); dropped > 0 {
 			agent.DebugAppendf("stream", "dropped %d reasoning deltas under backpressure", dropped)
 		}
@@ -3847,12 +3868,28 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 		return nil
 	}
 	if len(args) > 0 {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", args[0])})
+		modelID := args[0]
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", modelID)})
+		m.activeModel = modelID
+		if m.config != nil {
+			m.config.Model = modelID
+		}
+		// Persist the user's selection even when the new client cannot be built yet
+		// (e.g. provider credentials are not connected). The UI model name should
+		// still reflect the chosen model so the picker / status line stay in sync.
+		if err := config.SaveLastModel(modelID); err != nil {
+			log.Printf("save last model: %v", err)
+		}
+		if strings.Contains(modelID, "/") {
+			if err := config.SaveRecentModel(modelID); err != nil {
+				log.Printf("save recent model: %v", err)
+			}
+		}
 		var mcpNames []string
 		if m.agent != nil {
 			mcpNames = m.agent.MCPToolNames()
 		}
-		client := agent.NewClient(m.config, args[0])
+		client := agent.NewClient(m.config, modelID)
 		if client != nil {
 			var tools []tool.Tool
 			if m.agent != nil {
@@ -3862,23 +3899,9 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 			}
 			next := agent.NewAgent(client, tools, m.config)
 			next.RestoreMCPToolNames(mcpNames)
-			m.activeModel = args[0]
-			if m.config != nil {
-				m.config.Model = args[0]
-			}
-			// SaveLastModel persists any model name to ocodeconfig.json (project-level)
-			if err := config.SaveLastModel(args[0]); err != nil {
-				log.Printf("save last model: %v", err)
-			}
-			// SaveRecentModel requires "provider/model" format and goes to the global state file
-			if strings.Contains(args[0], "/") {
-				if err := config.SaveRecentModel(args[0]); err != nil {
-					log.Printf("save recent model: %v", err)
-				}
-			}
 			return m.replaceAgent(next)
 		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to switch to model %s: unknown provider, or no API key found for it. Run /connect to add credentials.", args[0])})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Selected model %s, but no API key was found for its provider. Run /connect to add credentials.", modelID)})
 	}
 	return nil
 }
@@ -5118,6 +5141,9 @@ func (m *model) firstUserPromptText() string {
 func (m *model) appendAgentMessage(am agent.Message) {
 	copyMsg := am
 	if am.Role == "assistant" {
+		if m.streaming && len(am.ToolCalls) == 0 {
+			m.streamAssistantFinalized = true
+		}
 		if am.ReasoningContent != "" && m.showThinking {
 			if m.streamingThinkingIdx >= 0 && m.streamingThinkingIdx < len(m.messages) && m.messages[m.streamingThinkingIdx].role == roleThinking {
 				// Streamed live — replace partial buffer with the canonical text
@@ -6309,14 +6335,13 @@ func (m *model) applyThinkingDelta(kind, text string) {
 	if kind != "reasoning" || text == "" || !m.showThinking {
 		return
 	}
-	// If streamingThinkingIdx was reset (by appendAgentMessage) and we already
-	// have a final assistant message, late thinking deltas are stale — drop them.
-	if m.streamingThinkingIdx < 0 {
-		for i := len(m.messages) - 1; i >= 0; i-- {
-			if m.messages[i].role == roleAssistant {
-				return
-			}
-		}
+	if !m.streaming {
+		return
+	}
+	// If streamingThinkingIdx was reset by appendAgentMessage and this stream
+	// has already finalized its assistant message, trailing deltas are stale.
+	if m.streamingThinkingIdx < 0 && m.streamAssistantFinalized {
+		return
 	}
 	if m.streamingThinkingIdx < 0 || m.streamingThinkingIdx >= len(m.messages) || m.messages[m.streamingThinkingIdx].role != roleThinking {
 		m.messages = append(m.messages, message{role: roleThinking, text: text})
@@ -7878,6 +7903,41 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		appendScrollSection("TODO", []string{sidebarTextStyle.Render("No todo list for this session yet.")}, nil)
 	} else {
 		appendScrollSection("TODO", renderSidebarTodo(todo, boxBodyWidth), nil)
+	}
+
+	// ── Allowed section (scrollable) ──
+	if m.agent != nil {
+		perm := m.agent.Permissions()
+		mode := perm.Mode()
+		body := []string{sidebarTextStyle.Render("Mode: ") + sidebarAccentStyle.Render(string(mode))}
+
+		// Extra allowed paths (paths outside workdir explicitly permitted)
+		extraPaths := m.config.Ocode.ExtraAllowedPaths
+		if len(extraPaths) > 0 {
+			body = append(body, dimStyle.Render(fmt.Sprintf("Extra paths (%d):", len(extraPaths))))
+			for _, p := range extraPaths {
+				body = append(body, "  "+sidebarTextStyle.Render(p))
+			}
+		}
+
+		// Bash auto-allow prefixes — show count + first few examples
+		autoAllow := perm.BashAutoAllowPrefixes()
+		if len(autoAllow) > 0 {
+			exampleCount := 3
+			if exampleCount > len(autoAllow) {
+				exampleCount = len(autoAllow)
+			}
+			examples := strings.Join(autoAllow[:exampleCount], ", ")
+			remainder := len(autoAllow) - exampleCount
+			label := "Bash: " + examples
+			if remainder > 0 {
+				label += fmt.Sprintf(" +%d more", remainder)
+			}
+			// Hard-wrap to fit the sidebar width
+			body = append(body, dimStyle.Render(label))
+		}
+
+		appendScrollSection("Allowed", body, nil)
 	}
 
 	// ── MCP + LSP on one line ──

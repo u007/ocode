@@ -525,11 +525,11 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 
 type TodoWriteTool struct{}
 
-func (t TodoWriteTool) Name() string        { return "todowrite" }
+func (t TodoWriteTool) Name() string { return "todowrite" }
 func (t TodoWriteTool) Description() string {
 	return "Manage todo lists during coding sessions."
 }
-func (t TodoWriteTool) Parallel() bool      { return false }
+func (t TodoWriteTool) Parallel() bool { return false }
 func (t TodoWriteTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todowrite",

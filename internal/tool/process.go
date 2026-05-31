@@ -160,6 +160,26 @@ func (r *ProcessRegistry) nextIDLocked() string {
 	return "proc-" + strconv.Itoa(r.counter)
 }
 
+// Counter returns the high-water mark of proc-N IDs issued by this registry.
+func (r *ProcessRegistry) Counter() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.counter
+}
+
+// SeedCounter raises this registry's proc-N counter to at least n, so the next
+// issued ID continues past n. Used when a new agent (e.g. after /model switch)
+// inherits a still-live session supervisor whose records map already holds the
+// previous agent's proc-N IDs — continuing the sequence avoids reusing an index
+// and colliding in the supervisor. Never lowers the counter.
+func (r *ProcessRegistry) SeedCounter(n int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n > r.counter {
+		r.counter = n
+	}
+}
+
 // SetSupervisor attaches a session-scoped process supervisor. After this call:
 //   - StartBackground registers new processes with the supervisor.
 //   - KillAll delegates through supervisor.Shutdown.

@@ -616,6 +616,52 @@ func TestProcessRegistry_NoPrefix_CollidesInSupervisor(t *testing.T) {
 	}
 }
 
+// TestProcessRegistry_SeedCounter_AvoidsReuseOnSharedSupervisor reproduces the
+// /model-switch collision: a new registry attaches to a still-live session
+// supervisor that retains the prior registry's proc-N records. Seeding the new
+// registry's counter from the old high-water mark continues the sequence
+// (proc-2) instead of reusing proc-1 and colliding.
+func TestProcessRegistry_SeedCounter_AvoidsReuseOnSharedSupervisor(t *testing.T) {
+	sup := NewProcessSupervisor(ProcessSupervisorOptions{GracePeriod: 10 * time.Millisecond})
+	regA := NewProcessRegistry()
+	regA.SetSupervisor(sup)
+	pA := regA.StartBackground("true")
+	waitProcDone(t, pA)
+
+	// Terminated children remain in the supervisor's records map.
+	_ = sup.TerminateAll(context.Background())
+
+	// New agent's registry on the same supervisor, seeded from the old counter.
+	regB := NewProcessRegistry()
+	regB.SetSupervisor(sup)
+	regB.SeedCounter(regA.Counter())
+
+	pB := regB.StartBackground("true")
+	if pB.ID != "proc-2" {
+		t.Fatalf("expected continued ID proc-2, got %q", pB.ID)
+	}
+	waitProcDone(t, pB)
+
+	outB, _, _, err := regB.Output(pB.ID)
+	if err != nil {
+		t.Fatalf("regB Output: %v", err)
+	}
+	if strings.Contains(outB, "already registered") {
+		t.Fatalf("seeded registry should not collide; got %q", outB)
+	}
+}
+
+func waitProcDone(t *testing.T, p *Process) {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		if st, _ := p.snapshotStatus(); st != ProcRunning {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("process %s did not finish", p.ID)
+}
+
 func TestKillShellTool(t *testing.T) {
 	r := NewProcessRegistry()
 	p := r.StartBackground("sleep 30")

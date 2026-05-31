@@ -136,6 +136,7 @@ func makeToolCall(name, argsJSON string) agent.ToolCall {
 //
 //	<tool_call><function=name><parameter=k>v</parameter></function></tool_call>
 //	<tool_call><name>name</name><parameters><k>v</k></parameters></tool_call>
+//
 // collapseBlankLines reduces runs of 2+ blank lines (3+ consecutive newlines)
 // to a single blank line. Reasoning streams from Anthropic and OpenAI commonly
 // emit paragraph breaks as `\n\n\n` which visually doubles spacing in the TUI.

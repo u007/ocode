@@ -40,14 +40,14 @@ func (t GlobTool) Definition() map[string]interface{} {
 }
 
 type globMatch struct {
-	path string
+	path  string
 	mtime int64
 }
 
 func (t GlobTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		Pattern string `json:"pattern"`
-		Path    string `json:"path"`
+		Pattern string   `json:"pattern"`
+		Path    string   `json:"path"`
 		Ignore  []string `json:"ignore"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
@@ -179,13 +179,15 @@ func globToRegex(pattern string) string {
 
 type GrepTool struct{}
 
-func (t GrepTool) Name() string        { return "grep" }
-func (t GrepTool) Description() string { return "Search file contents using regular expressions" }
-func (t GrepTool) Parallel() bool      { return true }
+func (t GrepTool) Name() string { return "grep" }
+func (t GrepTool) Description() string {
+	return "Fast plain text/regex search across file contents"
+}
+func (t GrepTool) Parallel() bool { return true }
 func (t GrepTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "grep",
-		"description": "Search file contents using regular expressions. Supports include glob, output modes (files_with_matches, content, count), and multiline matching.",
+		"description": "Fast plain text/regex search across file contents. Use this for exact strings, logs, config keys, comments, and non-structural matches. For symbol/AST structure-aware queries, use code_rel.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

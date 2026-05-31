@@ -48,5 +48,6 @@ func LoadBuiltins(cfg *config.Config) []Tool {
 		&GitHubPRTool{},
 		&GitHubIssueTool{},
 		&GitHubWorkflowTool{},
+		&AstTool{},
 	}
 }

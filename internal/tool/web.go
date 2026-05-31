@@ -31,9 +31,11 @@ var webFetchClient = &http.Client{
 
 type WebFetchTool struct{}
 
-func (t WebFetchTool) Name() string        { return "webfetch" }
-func (t WebFetchTool) Description() string { return "Fetch the content of a URL and return it as LLM-optimized markdown" }
-func (t WebFetchTool) Parallel() bool      { return true }
+func (t WebFetchTool) Name() string { return "webfetch" }
+func (t WebFetchTool) Description() string {
+	return "Fetch the content of a URL and return it as LLM-optimized markdown"
+}
+func (t WebFetchTool) Parallel() bool { return true }
 func (t WebFetchTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "webfetch",

@@ -297,6 +297,99 @@ func TestParseOpenAIChatCompletionsStream_MultiToolCall(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIChatCompletionsStream_InlineThinkTags(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"A<think>B</think>C"}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	var deltas []string
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), func(kind, text string) {
+		deltas = append(deltas, kind+":"+text)
+	}, nil)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if msg == nil {
+		t.Fatal("nil msg")
+	}
+	if got := msg.Content; got != "AC" {
+		t.Fatalf("content mismatch: got %q want %q", got, "AC")
+	}
+	if got := msg.ReasoningContent; got != "B" {
+		t.Fatalf("reasoning mismatch: got %q want %q", got, "B")
+	}
+	got := strings.Join(deltas, "|")
+	want := "text:A|reasoning:B|text:C"
+	if got != want {
+		t.Fatalf("delta sequence mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestParseOpenAIChatCompletionsStream_InlineThinkTagsAcrossChunks(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"A<thi"}}]}`,
+		`data: {"choices":[{"delta":{"content":"nk>BC"}}]}`,
+		`data: {"choices":[{"delta":{"content":"</thi"}}]}`,
+		`data: {"choices":[{"delta":{"content":"nk>D"}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	var deltas []string
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), func(kind, text string) {
+		deltas = append(deltas, kind+":"+text)
+	}, nil)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if msg == nil {
+		t.Fatal("nil msg")
+	}
+	if got := msg.Content; got != "AD" {
+		t.Fatalf("content mismatch: got %q want %q", got, "AD")
+	}
+	if got := msg.ReasoningContent; got != "BC" {
+		t.Fatalf("reasoning mismatch: got %q want %q", got, "BC")
+	}
+	got := strings.Join(deltas, "|")
+	want := "text:A|reasoning:BC|text:D"
+	if got != want {
+		t.Fatalf("delta sequence mismatch: got %q want %q", got, want)
+	}
+}
+
+func TestParseOpenAIChatCompletionsStream_ExplicitReasoningSkipsInlineSplit(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"X<think>Y</think>Z","reasoning_content":"R"}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	var deltas []string
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), func(kind, text string) {
+		deltas = append(deltas, kind+":"+text)
+	}, nil)
+	if err != nil {
+		t.Fatalf("parse error: %v", err)
+	}
+	if msg == nil {
+		t.Fatal("nil msg")
+	}
+	if got := msg.Content; got != "X<think>Y</think>Z" {
+		t.Fatalf("content mismatch: got %q", got)
+	}
+	if got := msg.ReasoningContent; got != "R" {
+		t.Fatalf("reasoning mismatch: got %q want %q", got, "R")
+	}
+	got := strings.Join(deltas, "|")
+	want := "text:X<think>Y</think>Z|reasoning:R"
+	if got != want {
+		t.Fatalf("delta sequence mismatch: got %q want %q", got, want)
+	}
+}
+
 func TestChatAnthropic_TruncatedToolJSONFallsBackToEmptyObject(t *testing.T) {
 	// Spin up a fake Anthropic endpoint that emits a tool_use block whose
 	// input_json_delta fragments do NOT assemble into valid JSON, then ends

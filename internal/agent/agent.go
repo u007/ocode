@@ -263,6 +263,10 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
+	if relTool, ok := a.tools["code_rel"]; ok {
+		// Backward-compat alias: older sessions may still call "ast".
+		a.tools["ast"] = relTool
+	}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)
 		a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
@@ -977,6 +981,23 @@ func (a *Agent) Supervisor() *tool.ProcessSupervisor {
 func (a *Agent) SetSupervisor(sup *tool.ProcessSupervisor) {
 	if a.procs != nil {
 		a.procs.SetSupervisor(sup)
+	}
+}
+
+// ProcCounter returns the high-water mark of background-process IDs issued by
+// this agent's registry.
+func (a *Agent) ProcCounter() int {
+	if a.procs == nil {
+		return 0
+	}
+	return a.procs.Counter()
+}
+
+// SeedProcCounter raises this agent's process-ID counter to at least n so newly
+// started background processes continue past n rather than restarting at proc-1.
+func (a *Agent) SeedProcCounter(n int) {
+	if a.procs != nil {
+		a.procs.SeedCounter(n)
 	}
 }
 

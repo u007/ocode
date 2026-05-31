@@ -467,6 +467,7 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 	toolByIdx := map[int]*ToolCall{}
 	var toolOrder []int
 	var usageRaw json.RawMessage
+	thinkSplitter := inlineThinkingSplitter{}
 
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -532,10 +533,27 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 			continue
 		}
 		ch := chunk.Choices[0]
+		hasExplicitReasoning := ch.Delta.ReasoningContent != "" || ch.Delta.Reasoning != ""
 		if ch.Delta.Content != "" {
-			msg.Content += ch.Delta.Content
-			if onDelta != nil {
-				onDelta("text", ch.Delta.Content)
+			if hasExplicitReasoning {
+				msg.Content += ch.Delta.Content
+				if onDelta != nil {
+					onDelta("text", ch.Delta.Content)
+				}
+			} else {
+				for _, part := range thinkSplitter.Feed(ch.Delta.Content) {
+					if part.text == "" {
+						continue
+					}
+					if part.kind == "reasoning" {
+						msg.ReasoningContent += part.text
+					} else {
+						msg.Content += part.text
+					}
+					if onDelta != nil {
+						onDelta(part.kind, part.text)
+					}
+				}
 			}
 		}
 		// Some providers stream reasoning under `reasoning_content` (DeepSeek,
@@ -578,6 +596,19 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 		}
 		return nil, nil, fmt.Errorf("openai stream error: %w", err)
 	}
+	for _, part := range thinkSplitter.Flush() {
+		if part.text == "" {
+			continue
+		}
+		if part.kind == "reasoning" {
+			msg.ReasoningContent += part.text
+		} else {
+			msg.Content += part.text
+		}
+		if onDelta != nil {
+			onDelta(part.kind, part.text)
+		}
+	}
 	sort.Ints(toolOrder)
 	for _, idx := range toolOrder {
 		tc := *toolByIdx[idx]
@@ -595,6 +626,102 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 		return nil, nil, nil
 	}
 	return msg, usageRaw, nil
+}
+
+type inlineDeltaPart struct {
+	kind string
+	text string
+}
+
+type inlineThinkingSplitter struct {
+	inThinking bool
+	carry      string
+}
+
+var (
+	inlineThinkOpenTags  = []string{"<thinking>", "<think>"}
+	inlineThinkCloseTags = []string{"</thinking>", "</think>"}
+)
+
+func (s *inlineThinkingSplitter) Feed(fragment string) []inlineDeltaPart {
+	data := s.carry + fragment
+	s.carry = ""
+	if data == "" {
+		return nil
+	}
+	parts := make([]inlineDeltaPart, 0, 4)
+	for len(data) > 0 {
+		if s.inThinking {
+			idx, tagLen := firstTagIndex(data, inlineThinkCloseTags)
+			if idx >= 0 {
+				if idx > 0 {
+					parts = append(parts, inlineDeltaPart{kind: "reasoning", text: data[:idx]})
+				}
+				data = data[idx+tagLen:]
+				s.inThinking = false
+				continue
+			}
+			safeLen := len(data) - (len("</thinking>") - 1)
+			if safeLen > 0 {
+				parts = append(parts, inlineDeltaPart{kind: "reasoning", text: data[:safeLen]})
+				s.carry = data[safeLen:]
+				break
+			}
+			s.carry = data
+			break
+		}
+
+		idx, tagLen := firstTagIndex(data, inlineThinkOpenTags)
+		if idx >= 0 {
+			if idx > 0 {
+				parts = append(parts, inlineDeltaPart{kind: "text", text: data[:idx]})
+			}
+			data = data[idx+tagLen:]
+			s.inThinking = true
+			continue
+		}
+		safeLen := len(data) - (len("<thinking>") - 1)
+		if safeLen > 0 {
+			parts = append(parts, inlineDeltaPart{kind: "text", text: data[:safeLen]})
+			s.carry = data[safeLen:]
+			break
+		}
+		s.carry = data
+		break
+	}
+	return parts
+}
+
+func (s *inlineThinkingSplitter) Flush() []inlineDeltaPart {
+	if s.carry == "" {
+		return nil
+	}
+	kind := "text"
+	if s.inThinking {
+		kind = "reasoning"
+	}
+	out := []inlineDeltaPart{{kind: kind, text: s.carry}}
+	s.carry = ""
+	return out
+}
+
+func firstTagIndex(s string, tags []string) (idx int, tagLen int) {
+	best := -1
+	bestLen := 0
+	for _, tag := range tags {
+		i := strings.Index(s, tag)
+		if i < 0 {
+			continue
+		}
+		if best == -1 || i < best || (i == best && len(tag) > bestLen) {
+			best = i
+			bestLen = len(tag)
+		}
+	}
+	if best < 0 {
+		return -1, 0
+	}
+	return best, bestLen
 }
 
 func openAITools(tools []map[string]interface{}) []map[string]interface{} {

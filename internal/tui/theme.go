@@ -524,21 +524,21 @@ func ApplyThemeColors(name string) Styles {
 	}
 	c := theme.Colors
 	s := Styles{
-		User:      lipgloss.NewStyle().Foreground(lipgloss.Color(c.User)).Bold(true),
-		Assistant: lipgloss.NewStyle().Foreground(lipgloss.Color(c.Assistant)).Bold(true),
-		Header:    lipgloss.NewStyle().Foreground(lipgloss.Color(c.Header)).Bold(true),
-		Hint:      lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)).Italic(true),
-		Border:    lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)).Padding(0, 1),
-		Selected:  lipgloss.NewStyle().Foreground(lipgloss.Color(c.SelectedFg)).Background(lipgloss.Color(c.SelectedBg)),
-		Status:    lipgloss.NewStyle().Foreground(lipgloss.Color(c.StatusFg)).Background(lipgloss.Color(c.StatusBg)).Padding(0, 1).Bold(true),
-		Success:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Success)),
-		Error:     lipgloss.NewStyle().Foreground(lipgloss.Color(c.Error)),
-		Text:      lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)),
+		User:           lipgloss.NewStyle().Foreground(lipgloss.Color(c.User)).Bold(true),
+		Assistant:      lipgloss.NewStyle().Foreground(lipgloss.Color(c.Assistant)).Bold(true),
+		Header:         lipgloss.NewStyle().Foreground(lipgloss.Color(c.Header)).Bold(true),
+		Hint:           lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)).Italic(true),
+		Border:         lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)).Padding(0, 1),
+		Selected:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.SelectedFg)).Background(lipgloss.Color(c.SelectedBg)),
+		Status:         lipgloss.NewStyle().Foreground(lipgloss.Color(c.StatusFg)).Background(lipgloss.Color(c.StatusBg)).Padding(0, 1).Bold(true),
+		Success:        lipgloss.NewStyle().Foreground(lipgloss.Color(c.Success)),
+		Error:          lipgloss.NewStyle().Foreground(lipgloss.Color(c.Error)),
+		Text:           lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)),
 		Thinking:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)),
 		ThinkingHeader: lipgloss.NewStyle().Foreground(lipgloss.Color(c.Accent)).Bold(true),
 		Dim:            lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim)),
 		SidebarText:    lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)),
-		ToolBox:   lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
+		ToolBox:        lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
 		UserMessageBox: lipgloss.NewStyle().
 			Foreground(lipgloss.Color(c.Text)).
 			BorderStyle(lipgloss.ThickBorder()).
@@ -638,21 +638,21 @@ func setToolBoxStyle(s lipgloss.Style) {
 
 func currentStyles() Styles {
 	return Styles{
-		User:      userStyle,
-		Assistant: assistantStyle,
-		Header:    headerStyle,
-		Hint:      hintStyle,
-		Border:    borderStyle,
-		Selected:  selectedStyle,
-		Status:    statusStyle,
-		Success:   successStyle,
-		Error:     errorStyle,
-		Text:      textStyle,
+		User:           userStyle,
+		Assistant:      assistantStyle,
+		Header:         headerStyle,
+		Hint:           hintStyle,
+		Border:         borderStyle,
+		Selected:       selectedStyle,
+		Status:         statusStyle,
+		Success:        successStyle,
+		Error:          errorStyle,
+		Text:           textStyle,
 		Thinking:       thinkingStyle,
 		ThinkingHeader: thinkingHeaderStyle,
-		Dim:       dimStyle,
+		Dim:            dimStyle,
 		SidebarText:    sidebarTextStyle,
-		ToolBox:   toolBoxStyle,
+		ToolBox:        toolBoxStyle,
 	}
 }
 

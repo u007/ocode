@@ -26,24 +26,24 @@ const (
 	connectStageWaitBrowser // OpenAI: localhost callback is running
 	connectStageDeviceCode  // Copilot: show user_code, await poll
 	connectStageAccountID   // Cloudflare Workers: collect account ID before API key
-	connectStageGatewayURL // Cloudflare AI Gateway: collect gateway URL before API key
+	connectStageGatewayURL  // Cloudflare AI Gateway: collect gateway URL before API key
 	connectStageMessage
 )
 
 type connectDialog struct {
-	stage       connectStage
-	providerIdx int
-	methodIdx   int
-	provider    *auth.Provider
-	methods     []connectMethod
-	keyInput    textinput.Model
-	codeInput   textinput.Model
+	stage           connectStage
+	providerIdx     int
+	methodIdx       int
+	provider        *auth.Provider
+	methods         []connectMethod
+	keyInput        textinput.Model
+	codeInput       textinput.Model
 	accountIDInput  textinput.Model
 	accountID       string
 	gatewayURLInput textinput.Model
 	gatewayURL      string
 	message         string
-	messageOK   bool
+	messageOK       bool
 
 	// OAuth-flow scratch state.
 	anthropicFlow auth.AnthropicFlow
@@ -80,11 +80,11 @@ func (m *model) openConnectDialog() {
 	gwIn.CharLimit = 256
 
 	m.connect = &connectDialog{
-		stage:          connectStageProvider,
-		providerIdx:    0,
-		keyInput:       ti,
-		codeInput:      codeIn,
-		accountIDInput: acctIn,
+		stage:           connectStageProvider,
+		providerIdx:     0,
+		keyInput:        ti,
+		codeInput:       codeIn,
+		accountIDInput:  acctIn,
 		gatewayURLInput: gwIn,
 	}
 	m.showConnect = true

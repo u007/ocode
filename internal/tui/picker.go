@@ -431,9 +431,9 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		return m.handleCommand("/editor-mode " + selected)
 	}
 	if kind == "advisor" {
-			return m.handleCommand("/advisor " + selected)
-		}
-		return m.handleCommand("/models " + selected)
+		return m.handleCommand("/advisor " + selected)
+	}
+	return m.handleCommand("/models " + selected)
 }
 
 func (m model) renderPicker() string {
@@ -508,7 +508,7 @@ func (m model) renderPicker() string {
 		} else if m.pickerKind == "session" && m.pickerSessionMore {
 			body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown ↓ scroll for more", end-start, m.pickerSessionTotal)))
 		}
-		}
+	}
 
 	width := m.width - 4
 	if width < 40 {

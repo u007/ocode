@@ -475,6 +475,7 @@ func TestThinkingStreamStartsCollapsed(t *testing.T) {
 		viewport:     viewport.New(viewport.WithWidth(40), viewport.WithHeight(6)),
 		styles:       ApplyThemeColors("tokyonight"),
 		showThinking: true,
+		streaming:    true,
 	}
 
 	m.applyThinkingDelta("reasoning", strings.Repeat("line\n", 12))
@@ -523,6 +524,81 @@ func TestLateThinkingDeltaAfterAssistantMessageIsIgnored(t *testing.T) {
 	}
 	if m.messages[len(m.messages)-1].role != roleAssistant {
 		t.Fatalf("expected assistant message to remain last, got %#v", m.messages[len(m.messages)-1])
+	}
+}
+
+func TestThinkingDeltaStreamsWithPriorAssistantHistory(t *testing.T) {
+	m := model{
+		viewport:             viewport.New(viewport.WithWidth(60), viewport.WithHeight(10)),
+		styles:               ApplyThemeColors("tokyonight"),
+		showThinking:         true,
+		streaming:            true,
+		streamingThinkingIdx: -1,
+		messages: []message{
+			{role: roleAssistant, text: "previous assistant turn"},
+			{role: roleUser, text: "new user turn"},
+		},
+	}
+
+	m.applyThinkingDelta("reasoning", "live reasoning")
+
+	if got := len(m.messages); got != 3 {
+		t.Fatalf("expected reasoning message to be appended, got %d messages", got)
+	}
+	if m.messages[2].role != roleThinking {
+		t.Fatalf("expected appended roleThinking message, got role %v", m.messages[2].role)
+	}
+	if got := m.messages[2].text; got != "live reasoning" {
+		t.Fatalf("expected streamed reasoning text, got %q", got)
+	}
+}
+
+func TestThinkingDeltaIgnoredWhenNotStreaming(t *testing.T) {
+	m := model{
+		viewport:             viewport.New(viewport.WithWidth(60), viewport.WithHeight(10)),
+		styles:               ApplyThemeColors("tokyonight"),
+		showThinking:         true,
+		streaming:            false,
+		streamingThinkingIdx: -1,
+		messages: []message{
+			{role: roleAssistant, text: "previous assistant turn"},
+			{role: roleUser, text: "new user turn"},
+		},
+	}
+
+	m.applyThinkingDelta("reasoning", "late reasoning")
+
+	if got := len(m.messages); got != 2 {
+		t.Fatalf("expected no new message when not streaming, got %d messages", got)
+	}
+}
+
+func TestThinkingDeltaContinuesAfterAssistantToolCallMessage(t *testing.T) {
+	m := model{
+		viewport:             viewport.New(viewport.WithWidth(60), viewport.WithHeight(10)),
+		styles:               ApplyThemeColors("tokyonight"),
+		showThinking:         true,
+		streaming:            true,
+		streamingThinkingIdx: -1,
+	}
+
+	m.appendAgentMessage(agent.Message{
+		Role: "assistant",
+		ToolCalls: []agent.ToolCall{
+			makeAgentToolCall("call-1", "bash", `{"command":"echo hi"}`),
+		},
+	})
+
+	m.applyThinkingDelta("reasoning", "post-toolcall reasoning")
+
+	if got := len(m.messages); got != 2 {
+		t.Fatalf("expected assistant tool-call message + streamed thinking, got %d messages", got)
+	}
+	if m.messages[1].role != roleThinking {
+		t.Fatalf("expected second message to be roleThinking, got %v", m.messages[1].role)
+	}
+	if got := m.messages[1].text; got != "post-toolcall reasoning" {
+		t.Fatalf("expected streamed reasoning after tool-call assistant, got %q", got)
 	}
 }
 

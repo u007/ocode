@@ -9,6 +9,9 @@ opencode.json
 internal/tui/.opencode
 
 
+# AST index (shared per-project daemon)
+.sgindex/
+
 # Build outputs
 /release
 /ocode-darwin-*

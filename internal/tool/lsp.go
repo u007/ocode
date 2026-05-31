@@ -67,10 +67,14 @@ func (t *LSPTool) getClient(ext string) (*lsp.Client, error) {
 
 	server := "gopls"
 	switch ext {
-	case ".go": server = "gopls"
-	case ".py": server = "pyright"
-	case ".rs": server = "rust-analyzer"
-	default: return nil, fmt.Errorf("no LSP server configured for extension %s", ext)
+	case ".go":
+		server = "gopls"
+	case ".py":
+		server = "pyright"
+	case ".rs":
+		server = "rust-analyzer"
+	default:
+		return nil, fmt.Errorf("no LSP server configured for extension %s", ext)
 	}
 
 	if _, err := exec.LookPath(server); err != nil {
@@ -118,29 +122,41 @@ func (t *LSPTool) Execute(args json.RawMessage) (string, error) {
 		return fmt.Sprintf("Restarted LSP server for %s", ext), nil
 	case "goToDefinition":
 		client, err := t.getClient(ext)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return t.handleGoToDefinition(client, input.Path, input.Line, input.Char)
 	case "findReferences":
 		client, err := t.getClient(ext)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return t.handleFindReferences(client, input.Path, input.Line, input.Char)
 	case "hover":
 		client, err := t.getClient(ext)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return t.handleHover(client, input.Path, input.Line, input.Char)
 	case "documentSymbol":
 		client, err := t.getClient(ext)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return t.handleDocumentSymbol(client, input.Path)
 	case "workspaceSymbol":
 		return t.handleWorkspaceSymbol(input.Query)
 	case "goToImplementation":
 		client, err := t.getClient(ext)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return t.handleGoToImplementation(client, input.Path, input.Line, input.Char)
 	case "diagnostics":
 		client, err := t.getClient(ext)
-		if err != nil { return "", err }
+		if err != nil {
+			return "", err
+		}
 		return t.handleDiagnostics(client, input.Path)
 	}
 
@@ -153,7 +169,9 @@ func (t *LSPTool) handleStatus() (string, error) {
 	status.WriteString("LSP Status:\n")
 	for _, s := range servers {
 		found := "❌"
-		if _, err := exec.LookPath(s); err == nil { found = "✅" }
+		if _, err := exec.LookPath(s); err == nil {
+			found = "✅"
+		}
 		status.WriteString(fmt.Sprintf("- %s: %s\n", s, found))
 	}
 	return status.String(), nil
@@ -166,7 +184,9 @@ func (t *LSPTool) handleGoToDefinition(client *lsp.Client, path string, line, ch
 		"position":     map[string]interface{}{"line": line, "character": char},
 	}
 	res, err := client.Call("textDocument/definition", params)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	return string(res), nil
 }
 
@@ -177,7 +197,9 @@ func (t *LSPTool) handleHover(client *lsp.Client, path string, line, char int) (
 		"position":     map[string]interface{}{"line": line, "character": char},
 	}
 	res, err := client.Call("textDocument/hover", params)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	return string(res), nil
 }
 
@@ -189,7 +211,9 @@ func (t *LSPTool) handleFindReferences(client *lsp.Client, path string, line, ch
 		"context":      map[string]interface{}{"includeDeclaration": true},
 	}
 	res, err := client.Call("textDocument/references", params)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	return string(res), nil
 }
 
@@ -199,7 +223,9 @@ func (t *LSPTool) handleDocumentSymbol(client *lsp.Client, path string) (string,
 		"textDocument": map[string]interface{}{"uri": "file://" + abs},
 	}
 	res, err := client.Call("textDocument/documentSymbol", params)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	return string(res), nil
 }
 
@@ -225,7 +251,9 @@ func (t *LSPTool) handleGoToImplementation(client *lsp.Client, path string, line
 		"position":     map[string]interface{}{"line": line, "character": char},
 	}
 	res, err := client.Call("textDocument/implementation", params)
-	if err != nil { return "", err }
+	if err != nil {
+		return "", err
+	}
 	return string(res), nil
 }
 

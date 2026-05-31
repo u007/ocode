@@ -854,3 +854,7 @@ func (t MultiFileEditTool) Execute(args json.RawMessage) (string, error) {
 
 	return fmt.Sprintf("Successfully performed %d edits across %d file(s)", len(params.Edits), len(fileOrder)), nil
 }
+
+func ExtraAllowedRoots() []string {
+	return getExtraAllowedRoots()
+}
