@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
@@ -33,17 +34,24 @@ const (
 	EditorModeTmuxWindow = "tmux-window"
 )
 
+type AdvisorConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
 type OcodeConfig struct {
-	Compact         CompactConfig
-	Permissions     PermissionConfig
+	Compact           CompactConfig
+	Advisor           AdvisorConfig
+	Permissions       PermissionConfig
 	ExtraAllowedPaths []string
-	Editor          string
-	EditorMode      string
-	SmallModel      string
-	CommitMsgModel  string
-	CommitMsgPrompt string
-	TUI             TUIConfig
-	Extra           map[string]json.RawMessage
+	Editor            string
+	EditorMode        string
+	SmallModel        string
+	CommitMsgModel    string
+	CommitMsgPrompt   string
+	TUI               TUIConfig
+	Extra             map[string]json.RawMessage
 }
 
 type PermissionConfig struct {
@@ -79,16 +87,23 @@ type tuiConfigFile struct {
 	Branchless    *bool             `json:"branchless"`
 }
 
+type advisorConfigFile struct {
+	Enabled  *bool  `json:"enabled"`
+	Provider string `json:"provider"`
+	Model    string `json:"model"`
+}
+
 type ocodeConfigFile struct {
-	Compact         compactConfigFile `json:"compact"`
-	Permissions     PermissionConfig  `json:"permissions"`
-	ExtraAllowedPaths []string        `json:"extra_allowed_paths,omitempty"`
-	Editor          string            `json:"editor,omitempty"`
-	EditorMode      string            `json:"editor_mode,omitempty"`
-	SmallModel      string            `json:"small_model,omitempty"`
-	CommitMsgModel  string            `json:"commit_msg_model,omitempty"`
-	CommitMsgPrompt string            `json:"commit_msg_prompt,omitempty"`
-	TUI             tuiConfigFile     `json:"tui"`
+	Compact           compactConfigFile `json:"compact"`
+	Advisor           advisorConfigFile `json:"advisor"`
+	Permissions       PermissionConfig  `json:"permissions"`
+	ExtraAllowedPaths []string          `json:"extra_allowed_paths,omitempty"`
+	Editor            string            `json:"editor,omitempty"`
+	EditorMode        string            `json:"editor_mode,omitempty"`
+	SmallModel        string            `json:"small_model,omitempty"`
+	CommitMsgModel    string            `json:"commit_msg_model,omitempty"`
+	CommitMsgPrompt   string            `json:"commit_msg_prompt,omitempty"`
+	TUI               tuiConfigFile     `json:"tui"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -115,9 +130,18 @@ func defaultTUIConfig() TUIConfig {
 func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
 		Compact:     defaultCompactConfig(),
+		Advisor:     defaultAdvisorConfig(),
 		Permissions: defaultPermissionConfig(),
 		TUI:         defaultTUIConfig(),
 		Extra:       make(map[string]json.RawMessage),
+	}
+}
+
+func defaultAdvisorConfig() AdvisorConfig {
+	return AdvisorConfig{
+		Enabled:  true,
+		Provider: "deepseek",
+		Model:    "deepseek-v4-pro",
 	}
 }
 
@@ -202,6 +226,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["compact"]; ok {
 		applyCompactConfig(&cfg.Compact, file.Compact)
 		delete(raw, "compact")
+	}
+
+	if _, ok := raw["advisor"]; ok {
+		applyAdvisorConfig(&cfg.Advisor, file.Advisor)
+		delete(raw, "advisor")
 	}
 
 	if _, ok := raw["permissions"]; ok {
@@ -313,6 +342,18 @@ func applyTUIConfig(dst *TUIConfig, src tuiConfigFile) {
 	}
 }
 
+func applyAdvisorConfig(dst *AdvisorConfig, src advisorConfigFile) {
+	if src.Provider != "" {
+		dst.Provider = src.Provider
+	}
+	if src.Model != "" {
+		dst.Model = src.Model
+	}
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+}
+
 func applyCompactConfig(dst *CompactConfig, src compactConfigFile) {
 	if src.Enabled != nil {
 		dst.Enabled = *src.Enabled
@@ -363,6 +404,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 
 	payload := map[string]interface{}{
 		"compact":     cfg.Compact,
+		"advisor":     cfg.Advisor,
 		"permissions": cfg.Permissions,
 	}
 	if len(cfg.ExtraAllowedPaths) > 0 {
@@ -387,7 +429,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "permissions" || k == "extra_allowed_paths" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "extra_allowed_paths" {
 			continue
 		}
 		payload[k] = v
@@ -556,6 +598,49 @@ func SaveTUITheme(theme string) error {
 	}
 	cfg.TUI.Theme = theme
 	return SaveOcodeConfig(cfg)
+}
+
+func SaveAdvisorModel(providerModel string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if providerModel == "" {
+		// Reset to defaults.
+		cfg.Advisor = defaultAdvisorConfig()
+		return SaveOcodeConfig(cfg)
+	}
+	provider, model := SplitProviderModel(providerModel)
+	if provider == "" || model == "" {
+		return fmt.Errorf("advisor model must be in provider/model format")
+	}
+	cfg.Advisor.Provider = provider
+	cfg.Advisor.Model = model
+	return SaveOcodeConfig(cfg)
+}
+
+// DefaultAdvisorConfig returns the default advisor configuration.
+func DefaultAdvisorConfig() AdvisorConfig {
+	return defaultAdvisorConfig()
+}
+
+// DefaultAdvisorProvider returns the default advisor provider name.
+func DefaultAdvisorProvider() string {
+	return defaultAdvisorConfig().Provider
+}
+
+// DefaultAdvisorModelName returns the default advisor model name (without provider prefix).
+func DefaultAdvisorModelName() string {
+	return defaultAdvisorConfig().Model
+}
+
+// SplitProviderModel splits "provider/model" into (provider, model).
+// If no "/" separator is present, provider is empty.
+func SplitProviderModel(s string) (string, string) {
+	if parts := strings.SplitN(s, "/", 2); len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", s
 }
 
 func SaveSmallModel(model string) error {

@@ -442,3 +442,78 @@ func TestExtraAllowedPathsLoadAndSave(t *testing.T) {
 		t.Fatalf("unexpected extra_allowed_paths: %v", parsed["extra_allowed_paths"])
 	}
 }
+
+func TestAdvisorConfigLoadPreservesDefaultEnabledWhenOmitted(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := `{"advisor":{"provider":"anthropic","model":"claude-sonnet-4-6"}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if !cfg.Ocode.Advisor.Enabled {
+		t.Fatal("expected advisor.enabled to remain true default when omitted")
+	}
+	if cfg.Ocode.Advisor.Provider != "anthropic" || cfg.Ocode.Advisor.Model != "claude-sonnet-4-6" {
+		t.Fatalf("unexpected advisor config: %#v", cfg.Ocode.Advisor)
+	}
+}
+
+func TestAdvisorConfigLoadAppliesExplicitEnabledFalse(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := `{"advisor":{"enabled":false,"provider":"anthropic","model":"claude-sonnet-4-6"}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if cfg.Ocode.Advisor.Enabled {
+		t.Fatal("expected advisor.enabled to be false when explicitly configured")
+	}
+}
+
+func TestSaveAdvisorModel_RequiresProviderPrefix(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveAdvisorModel("claude-sonnet-4-6"); err == nil {
+		t.Fatal("expected error for advisor model without provider prefix")
+	}
+	if err := SaveAdvisorModel("anthropic/claude-sonnet-4-6"); err != nil {
+		t.Fatalf("SaveAdvisorModel(provider/model) failed: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if cfg.Ocode.Advisor.Provider != "anthropic" || cfg.Ocode.Advisor.Model != "claude-sonnet-4-6" {
+		t.Fatalf("unexpected saved advisor config: %#v", cfg.Ocode.Advisor)
+	}
+}

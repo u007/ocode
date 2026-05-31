@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -873,6 +874,7 @@ func (m *filesModel) copySelectedPath() {
 
 func (m filesModel) openInEditor(path string) tea.Cmd {
 	if m.editorOpener != nil {
+		log.Printf("[editor] files openInEditor: delegating to editorOpener for file=%q", path)
 		return m.editorOpener(path)
 	}
 	editor := m.editor
@@ -881,17 +883,21 @@ func (m filesModel) openInEditor(path string) tea.Cmd {
 	}
 	cmdParts := strings.Fields(editor)
 	if len(cmdParts) == 0 {
+		log.Printf("[editor] files openInEditor: no valid editor command configured")
 		return func() tea.Msg { return editorFinishedMsg{err: os.ErrInvalid} }
 	}
 	// Validate the editor binary exists before attempting to run it.
 	if _, err := exec.LookPath(cmdParts[0]); err != nil {
+		log.Printf("[editor] files openInEditor: editor %q not found in PATH: %v", cmdParts[0], err)
 		return func() tea.Msg {
 			return editorFinishedMsg{err: fmt.Errorf("editor %q not found in PATH: %w", cmdParts[0], err)}
 		}
 	}
 	cmdParts = append(cmdParts, path)
 	c := exec.Command(cmdParts[0], cmdParts[1:]...)
+	log.Printf("[editor] files openInEditor fallback: editor=%q file=%q full_cmd=%v", editor, path, cmdParts)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
+		log.Printf("[editor] files openInEditor fallback finished: editor=%q file=%q err=%v", editor, path, err)
 		return editorFinishedMsg{err: err}
 	})
 }

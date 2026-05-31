@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
@@ -109,18 +111,22 @@ func FindProvider(id string) *Provider {
 	return nil
 }
 
-// ResolveKey returns the effective API key for a provider.
-// Precedence: env var > stored credential > opencode config options.apiKey > "".
-func ResolveKey(id string) string {
-	p := FindProvider(id)
-	if p == nil {
-		return ""
-	}
+// resolveKeyWithConfig returns the effective API key for a provider given a
+// pre-loaded config. Precedence: env var > config file options.apiKey > stored
+// credential > "". Accepts a pre-loaded config to avoid repeated disk reads
+// when called in a loop (e.g. HydrateEnv).
+func resolveKeyWithConfig(p *Provider, id string, cfg *config.Config) string {
+	// 1. Environment variable (highest priority — allows env to override config).
 	if p.EnvVar != "" {
 		if v := os.Getenv(p.EnvVar); v != "" {
 			return v
 		}
 	}
+	// 2. Config file provider.<id>.options.apiKey.
+	if key := providerConfigAPIKey(cfg, id); key != "" {
+		return key
+	}
+	// 3. Stored credential (auth store).
 	cred, ok := Get(id)
 	if ok {
 		cred = refreshIfExpiring(id, cred)
@@ -128,11 +134,22 @@ func ResolveKey(id string) string {
 			return cred.Key
 		}
 	}
+	return ""
+}
+
+// ResolveKey returns the effective API key for a provider.
+// Precedence: env var > config file options.apiKey > stored credential > "".
+func ResolveKey(id string) string {
+	p := FindProvider(id)
+	if p == nil {
+		return ""
+	}
 	cfg, _ := config.Load()
-	return providerConfigAPIKey(cfg, id)
+	return resolveKeyWithConfig(p, id, cfg)
 }
 
 // providerConfigAPIKey extracts provider.<id>.options.apiKey from the opencode config.
+// If the value is of the form `{env:VAR}` it resolves the env var.
 func providerConfigAPIKey(cfg *config.Config, id string) string {
 	if cfg == nil {
 		return ""
@@ -150,12 +167,19 @@ func providerConfigAPIKey(cfg *config.Config, id string) string {
 		return ""
 	}
 	key, _ := opts["apiKey"].(string)
+	if strings.HasPrefix(key, "{env:") && strings.HasSuffix(key, "}") {
+		envVar := strings.TrimSuffix(strings.TrimPrefix(key, "{env:"), "}")
+		key = os.Getenv(envVar)
+		if key == "" {
+			log.Printf("warn: config provider.%s.options.apiKey references env var %s which is not set", id, envVar)
+		}
+	}
 	return key
 }
 
 // HydrateEnv loads stored credentials into the process env so existing
 // callers that read os.Getenv keep working. Env vars already set win.
-// Precedence: existing env > auth store > opencode config options.apiKey.
+// Precedence: existing env > config file options.apiKey > auth store.
 func HydrateEnv() error {
 	if err := LoadStore(); err != nil {
 		return err
@@ -168,16 +192,9 @@ func HydrateEnv() error {
 		if os.Getenv(p.EnvVar) != "" {
 			continue
 		}
-		cred, ok := Get(p.ID)
-		if ok {
-			cred = refreshIfExpiring(p.ID, cred)
-			if cred.Kind == KindAPIKey && cred.Key != "" {
-				_ = os.Setenv(p.EnvVar, cred.Key)
-				continue
-			}
-		}
-		// Fall back to opencode config provider options.apiKey
-		if key := providerConfigAPIKey(cfg, p.ID); key != "" {
+		// Use the shared resolution order (skipping env-var step since we
+		// already know it is empty above).
+		if key := resolveKeyWithConfig(&p, p.ID, cfg); key != "" {
 			_ = os.Setenv(p.EnvVar, key)
 		}
 	}
@@ -193,18 +210,21 @@ func Status(id string) (symbol string, detail string) {
 	if p.EnvVar != "" && os.Getenv(p.EnvVar) != "" {
 		return "✓", "env"
 	}
-	cred, ok := Get(id)
-	if !ok {
-		return "✗", "not configured"
-	}
-	switch cred.Kind {
-	case KindAPIKey:
-		return "✓", "api key"
-	case KindOAuth:
-		if cred.Account != "" {
-			return "✓", "oauth (" + cred.Account + ")"
+	if cred, ok := Get(id); ok {
+		switch cred.Kind {
+		case KindAPIKey:
+			return "✓", "api key"
+		case KindOAuth:
+			if cred.Account != "" {
+				return "✓", "oauth (" + cred.Account + ")"
+			}
+			return "✓", "oauth"
 		}
-		return "✓", "oauth"
+	}
+	// Fall back to checking the opencode config file for options.apiKey.
+	cfg, _ := config.Load()
+	if key := providerConfigAPIKey(cfg, id); key != "" {
+		return "✓", "config"
 	}
 	return "✗", "not configured"
 }

@@ -100,6 +100,19 @@ func formatToolCallHint(tc agent.ToolCall) string {
 			}
 		}
 		return fmt.Sprintf("🤖 %s:\n%s", name, p)
+	case "advisor":
+		p := first("prompt")
+		if p != "" {
+			lines := strings.Split(p, "\n")
+			const maxLines = 5
+			if len(lines) > maxLines {
+				lines = lines[:maxLines]
+				p = strings.Join(lines, "\n") + "\n..."
+			} else {
+				p = strings.Join(lines, "\n")
+			}
+		}
+		return fmt.Sprintf("🧠 advisor:\n%s", p)
 	case "question":
 		return fmt.Sprintf("❓ %s", first("question", "prompt"))
 	case "skill":

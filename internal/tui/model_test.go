@@ -2962,3 +2962,23 @@ func TestSidebarContextUsesCurrentEstimateNotCumulativeTotal(t *testing.T) {
 		t.Fatalf("expected sidebar to show ~2.2k context, got view:\n%s", view)
 	}
 }
+
+func TestHandleAdvisorCmdRequiresProviderPrefix(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	m := model{config: &config.Config{}}
+	m.config.Ocode.Advisor = config.DefaultAdvisorConfig()
+	m.handleAdvisorCmd([]string{"claude-sonnet-4-6"})
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected a validation message")
+	}
+	last := m.messages[len(m.messages)-1].text
+	if !strings.Contains(last, "provider/model") {
+		t.Fatalf("expected provider/model validation message, got %q", last)
+	}
+	if m.config.Ocode.Advisor.Provider != config.DefaultAdvisorProvider() || m.config.Ocode.Advisor.Model != config.DefaultAdvisorModelName() {
+		t.Fatalf("advisor config should remain unchanged on invalid input, got %#v", m.config.Ocode.Advisor)
+	}
+}

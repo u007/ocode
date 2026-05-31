@@ -113,6 +113,7 @@ type Agent struct {
 	subagentDispatchCount int
 	preloadedContextMu    sync.RWMutex
 	preloadedContext      string // set by askAgent to avoid duplicate LoadContext calls
+	preloadedModelContext string // cached result of LoadModelContext, set once lazily
 	// pipeline, if set, runs in-process hook callbacks for tool calls and chat
 	// requests. Field is named "pipeline" (not "hooks") because the hooks package
 	// is already imported under that name.
@@ -255,6 +256,10 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	// "agent" tool retired in favor of "task". AgentTool the type is kept
 	// only so existing transcripts/back-compat permission entries still
 	// resolve. It is no longer registered on new agents.
+	// Register the advisor tool if enabled in config (default: enabled).
+	if cfg == nil || cfg.Ocode.Advisor.Enabled {
+		a.tools["advisor"] = AdvisorTool{cfg: cfg, mainAgent: a}
+	}
 	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
@@ -934,6 +939,7 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 		} else if client := NewClient(a.config, spec.Model); client != nil {
 			emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
 			a.client = client
+			a.preloadedModelContext = "" // model may have changed; reload model-specific context lazily
 		} else {
 			emitDebug("AGENT", fmt.Sprintf("spec %q model %q: NewClient returned nil; keeping current client", spec.Name, spec.Model))
 		}

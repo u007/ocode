@@ -102,3 +102,16 @@ func containsAny(s string, subs ...string) bool {
 	}
 	return false
 }
+
+func TestApplySpecModel_ClearsPreloadedModelContextOnClientSwap(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	a := &Agent{
+		client:                &MockClient{},
+		config:                &config.Config{},
+		preloadedModelContext: "stale model context",
+	}
+	a.applySpecModel(&AgentSpec{Name: "swap", Model: "openai/gpt-4o"})
+	if a.preloadedModelContext != "" {
+		t.Fatalf("expected preloadedModelContext to be cleared on model swap, got %q", a.preloadedModelContext)
+	}
+}

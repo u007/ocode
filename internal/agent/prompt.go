@@ -10,11 +10,12 @@ import (
 )
 
 const (
-	promptEnvMarker       = "[ocode:environment]"
-	promptProviderMarker  = "[ocode:provider]"
-	promptModeMarker      = "[ocode:mode]"
-	promptContextMarker   = "[ocode:context]"
-	promptSelectionMarker = "[ocode:selection]"
+	promptEnvMarker         = "[ocode:environment]"
+	promptProviderMarker    = "[ocode:provider]"
+	promptModeMarker        = "[ocode:mode]"
+	promptContextMarker     = "[ocode:context]"
+	promptModelCtxMarker    = "[ocode:model_context]"
+	promptSelectionMarker   = "[ocode:selection]"
 )
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
@@ -71,6 +72,16 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 	}
 	if strings.TrimSpace(ctx) != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptContextMarker + "\nContext and rules:\n" + ctx})
+	}
+	if a.client != nil {
+		mc := a.preloadedModelContext
+		if mc == "" {
+			mc = LoadModelContext(a.client.GetModel())
+			a.preloadedModelContext = mc
+		}
+		if mc != "" {
+			msgs = append(msgs, Message{Role: "system", Content: promptModelCtxMarker + "\nModel-specific context:\n" + mc})
+		}
 	}
 	if sel := strings.TrimSpace(selectionContext); sel != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptSelectionMarker + "\n" + sel})

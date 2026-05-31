@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -116,6 +117,7 @@ func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.Proc
 			cmdParts := strings.Fields(editor)
 			// Validate the editor binary exists before attempting to run it.
 			if _, err := exec.LookPath(cmdParts[0]); err != nil {
+				log.Printf("[editor] editor binary not found in PATH: %q (full editor string: %q, file: %q)", cmdParts[0], editor, path)
 				return func() tea.Msg {
 					return editorFinishedMsg{err: fmt.Errorf("editor %q not found in PATH: %w", cmdParts[0], err)}
 				}
@@ -125,6 +127,7 @@ func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.Proc
 			if runtime.GOOS != "windows" {
 				c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			}
+			log.Printf("[editor] launching external editor: %q  file=%q  full_cmd=%v", editor, path, cmdParts)
 			id := fmt.Sprintf("editor-%d-%d", os.Getpid(), time.Now().UnixNano())
 			if sup != nil {
 				_, _ = sup.Register(tool.ProcessRegistration{
@@ -148,6 +151,7 @@ func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.Proc
 						sup.MarkKilled(id, code)
 					}
 				}
+				log.Printf("[editor] finished: %q  file=%q  err=%v", editor, path, err)
 				return editorFinishedMsg{err: err}
 			})
 		}
@@ -160,7 +164,9 @@ func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.Proc
 		}
 		builder := buildTmuxOpenCmd(mode, editor, path, width)
 		c := builder()
+		log.Printf("[editor] launching tmux editor: mode=%q editor=%q file=%q cmd=%v", mode, editor, path, c.Args)
 		return tea.ExecProcess(c, func(err error) tea.Msg {
+			log.Printf("[editor] tmux editor finished: mode=%q editor=%q file=%q err=%v", mode, editor, path, err)
 			return editorFinishedMsg{err: err}
 		})
 	}

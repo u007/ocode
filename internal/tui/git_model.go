@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1065,6 +1066,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 
 func (m gitModel) openInEditor(path string) tea.Cmd {
 	if m.editorOpener != nil {
+		log.Printf("[editor] git openInEditor: delegating to editorOpener for file=%q", path)
 		return m.editorOpener(path)
 	}
 	editor := m.editor
@@ -1076,11 +1078,14 @@ func (m gitModel) openInEditor(path string) tea.Cmd {
 	}
 	cmdParts := strings.Fields(editor)
 	if len(cmdParts) == 0 {
+		log.Printf("[editor] git openInEditor: no valid editor command configured")
 		return func() tea.Msg { return editorFinishedMsg{err: os.ErrInvalid} }
 	}
 	cmdParts = append(cmdParts, path)
 	c := exec.Command(cmdParts[0], cmdParts[1:]...)
+	log.Printf("[editor] git openInEditor fallback: editor=%q file=%q full_cmd=%v", editor, path, cmdParts)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
+		log.Printf("[editor] git openInEditor fallback finished: editor=%q file=%q err=%v", editor, path, err)
 		return editorFinishedMsg{err: err}
 	})
 }

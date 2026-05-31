@@ -53,6 +53,7 @@ func refreshCustomCommands(cfg *config.Config) {
 func init() {
 	commandSpecs = []commandSpec{
 		{name: "/models", aliases: []string{"/model"}, usage: "/models [name]", help: "List and switch available models", takesModelArg: true, handler: runModelsCmd},
+		{name: "/advisor", usage: "/advisor [provider/model|default]", help: "Set the advisor model (used by the advisor() tool for strategic guidance)", handler: runAdvisorCmd},
 		{name: "/connect", help: "Show/Set provider API keys", handler: runConnectCmd},
 		{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
@@ -245,6 +246,10 @@ func runThinkingCmd(m *model, args []string) tea.Cmd {
 
 func runModelsCmd(m *model, args []string) tea.Cmd {
 	return m.handleModelsCmd(args)
+}
+
+func runAdvisorCmd(m *model, args []string) tea.Cmd {
+	return m.handleAdvisorCmd(args)
 }
 
 func runDetailsCmd(m *model, args []string) tea.Cmd {

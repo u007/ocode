@@ -12,8 +12,16 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/session"
 )
 
+func (m *model) openAdvisorPicker() {
+	// Reuse the model picker listing with kind="advisor" so picker selection
+	// saves the advisor model instead of switching the active model.
+	m.openModelPicker()
+	m.pickerKind = "advisor"
+}
+
 func (m *model) openModelPicker() {
 	m.input.Blur()
+	lmsResult := agent.FetchLMStudioModels()
 	allModels := agent.AllProviderModels()
 	favorites := config.LoadFavorites()
 	recents := config.LoadRecentModels()
@@ -76,6 +84,12 @@ func (m *model) openModelPicker() {
 		for _, model := range models {
 			appendModel("  "+provider+"/"+model, provider+"/"+model)
 		}
+	}
+	if lmsResult.NeedsAPIKey && len(providerMap["lmstudio"]) == 0 {
+		appendHeader("lmstudio")
+		items = append(items, "  ⚠ API key required — set LMSTUDIO_API_KEY")
+		values = append(values, "")
+		isHeader = append(isHeader, true)
 	}
 
 	m.pickerKind = "model"
@@ -416,7 +430,10 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	if kind == "editor-mode" {
 		return m.handleCommand("/editor-mode " + selected)
 	}
-	return m.handleCommand("/models " + selected)
+	if kind == "advisor" {
+			return m.handleCommand("/advisor " + selected)
+		}
+		return m.handleCommand("/models " + selected)
 }
 
 func (m model) renderPicker() string {

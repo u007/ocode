@@ -624,6 +624,7 @@ func requiresJSONObjectArguments(provider string) bool {
 // OpenAI-style reasoning_effort parameter to enable/control chain-of-thought.
 func providerSupportsReasoningEffort(provider string) bool {
 	return provider == "openai" ||
+		provider == "openrouter" ||
 		strings.HasPrefix(provider, "xiaomi")
 }
 

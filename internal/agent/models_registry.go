@@ -11,6 +11,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/jamesmercstudio/ocode/internal/auth"
 )
 
 const (
@@ -227,6 +229,9 @@ func allProviderModelsFromRegistry() []string {
 	ids := make([]string, 0)
 	if data := loadRegistry(); data != nil {
 		for provider, entry := range data {
+			if provider == "lmstudio" {
+				continue // handled via live API fetch below
+			}
 			for model := range entry.Models {
 				ids = append(ids, provider+"/"+model)
 			}
@@ -264,9 +269,15 @@ func providerModelsFromRegistry(provider string) []string {
 	return ids
 }
 
-// fetchLMStudioModels queries the local LM Studio API for available models.
-// Returns nil silently if LM Studio is not running.
-func fetchLMStudioModels() []string {
+// LMStudioResult holds the outcome of a live LM Studio model fetch.
+type LMStudioResult struct {
+	Models      []string
+	NeedsAPIKey bool // true when LM Studio returned 401
+}
+
+// FetchLMStudioModels queries the local LM Studio API for available models.
+// Returns an empty result silently if LM Studio is not running.
+func FetchLMStudioModels() LMStudioResult {
 	base := os.Getenv("LMSTUDIO_BASE_URL")
 	if base == "" {
 		base = "http://localhost:1234/v1"
@@ -274,13 +285,23 @@ func fetchLMStudioModels() []string {
 	base = normalizeLMStudioBaseURL(base)
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(base + "/models")
+	req, err := http.NewRequest(http.MethodGet, base+"/models", nil)
 	if err != nil {
-		return nil
+		return LMStudioResult{}
+	}
+	if key := auth.ResolveKey("lmstudio"); key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return LMStudioResult{}
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return LMStudioResult{NeedsAPIKey: true}
+	}
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		return LMStudioResult{}
 	}
 	var result struct {
 		Data []struct {
@@ -289,10 +310,10 @@ func fetchLMStudioModels() []string {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 	if err != nil {
-		return nil
+		return LMStudioResult{}
 	}
 	if err := json.Unmarshal(body, &result); err != nil {
-		return nil
+		return LMStudioResult{}
 	}
 	ids := make([]string, 0, len(result.Data))
 	for _, m := range result.Data {
@@ -300,7 +321,11 @@ func fetchLMStudioModels() []string {
 			ids = append(ids, m.ID)
 		}
 	}
-	return ids
+	return LMStudioResult{Models: ids}
+}
+
+func fetchLMStudioModels() []string {
+	return FetchLMStudioModels().Models
 }
 
 func fallbackProviderModels(provider string) []string {
@@ -315,13 +340,15 @@ func fallbackProviderModels(provider string) []string {
 		return []string{"gpt-5.1-codex", "gpt-5.1", "claude-sonnet-4-5"}
 	case "opencode-go":
 		return []string{"glm-5.1", "qwen3.6-plus", "deepseek-v4-pro"}
+	case "openrouter":
+		return []string{"openai/gpt-4o", "anthropic/claude-3.5-sonnet", "meta-llama/llama-3.1-70b-instruct"}
 	default:
 		return []string{"gpt-4o", "gpt-4o-mini", "o1-preview"}
 	}
 }
 
 func fallbackAllProviderModels() []string {
-	providers := []string{"anthropic", "deepseek", "google", "openai", "opencode", "opencode-go"}
+	providers := []string{"anthropic", "deepseek", "google", "openai", "opencode", "opencode-go", "openrouter"}
 	models := make([]string, 0)
 	for _, provider := range providers {
 		for _, model := range fallbackProviderModels(provider) {

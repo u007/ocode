@@ -1119,6 +1119,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	}
 	m.files.SetSaveEditor(config.SaveEditor)
 	m.logViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	m.logViewport.SoftWrap = true
 	m.sidebarCache = &sidebarComputeCache{}
 
 	agent.DebugAppend = func(kind, msg string) {
@@ -2893,11 +2894,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					files := m.git.currentFileList()
 					if row < len(files) {
 						m.git.filesCursor = row
-						m.git.loadDiff()
 						if isDoubleClick {
 							path := filepath.Join(m.git.workDir, files[row].path)
 							return m, m.git.openInEditor(path), true
 						}
+						m.git.loadDiff()
 					}
 				case gitSectionLog:
 					if row < len(m.git.commits) {
@@ -4472,6 +4473,41 @@ func (m *model) handleThemesCmd(args []string) {
 // handleModelsCmd is an alias for handleModelCmd; see commandSpecs for the /model ↔ /models aliasing.
 func (m *model) handleModelsCmd(args []string) tea.Cmd {
 	return m.handleModelCmd(args)
+}
+
+func (m *model) handleAdvisorCmd(args []string) tea.Cmd {
+	if len(args) == 0 {
+		m.openAdvisorPicker()
+		return nil
+	}
+	modelID := strings.TrimSpace(args[0])
+	if modelID == "default" {
+		m.config.Ocode.Advisor = config.DefaultAdvisorConfig()
+		if err := config.SaveAdvisorModel(""); err != nil {
+			log.Printf("save advisor model: %v", err)
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to reset advisor model to default: %v", err)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Advisor model reset to default (%s/%s).", config.DefaultAdvisorProvider(), config.DefaultAdvisorModelName())})
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		return nil
+	}
+	provider, model := config.SplitProviderModel(modelID)
+	if provider == "" || model == "" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Advisor model must be in provider/model format (for example: anthropic/claude-sonnet-4-6)."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return nil
+	}
+	m.config.Ocode.Advisor.Provider = provider
+	m.config.Ocode.Advisor.Model = model
+	if err := config.SaveAdvisorModel(modelID); err != nil {
+		log.Printf("save advisor model: %v", err)
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to set advisor model to %s: %v", modelID, err)})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Advisor model set to %s.", modelID)})
+	}
+	m.rerenderTranscriptAndMaybeScroll()
+	return nil
 }
 
 func (m *model) handleDetailsCmd(args []string) {
