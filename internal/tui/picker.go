@@ -165,25 +165,34 @@ func (m *model) rebuildSessionPickerItems() {
 	m.pickerValues = values
 }
 
-func (m *model) openSessionPicker() {
-	m.input.Blur()
-	refs, err := session.ListRefs()
-	if err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error listing sessions: %v", err)})
-		return
+func loadSessionRefsCmd(seq int) tea.Cmd {
+	return func() tea.Msg {
+		refs, err := session.ListRefs()
+		return sessionRefsLoadedMsg{seq: seq, refs: refs, err: err}
 	}
-	m.pickerSessionRefs = refs
-	m.pickerSessionTotal = len(refs)
-	m.pickerSessionPage = 1
-	m.pickerSessionMore = len(refs) > sessionPickerPageSize
+}
 
-	m.rebuildSessionPickerItems()
-
-	m.pickerKind = "session"
+func (m *model) openSessionPicker() tea.Cmd {
+	m.input.Blur()
+	m.pickerSessionLoadSeq++
+	seq := m.pickerSessionLoadSeq
+	m.pickerSessionLoading = true
+	m.pickerSessionLoadErr = ""
+	m.pickerSessionRefs = nil
+	m.pickerSessionPage = 0
+	m.pickerSessionTotal = 0
+	m.pickerSessionMore = false
+	m.pickerItems = nil
+	m.pickerValues = nil
 	m.pickerIsHeader = nil
 	m.pickerIndex = 0
+
+	m.pickerKind = "session"
 	m.pickerFilter = ""
+	m.pickerFilterPending = ""
 	m.showPicker = true
+
+	return loadSessionRefsCmd(seq)
 }
 
 // loadMoreSessions loads the next page of sessions into the picker items.
@@ -287,6 +296,9 @@ func (m *model) closePicker() {
 	m.pickerSessionPage = 0
 	m.pickerSessionTotal = 0
 	m.pickerSessionMore = false
+	m.pickerSessionLoading = false
+	m.pickerSessionLoadErr = ""
+	m.pickerSessionLoadSeq++
 	m.input.Focus()
 }
 
@@ -392,6 +404,9 @@ func (m model) pickerRowForY(y int) (int, bool) {
 func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	items, values := m.pickerVisibleItems()
 	if len(items) == 0 || index < 0 || index >= len(items) {
+		if m.pickerKind == "session" && m.pickerSessionLoading {
+			return m, nil
+		}
 		m.closePicker()
 		return m, nil
 	}
@@ -465,7 +480,13 @@ func (m model) renderPicker() string {
 	if len(items) == 0 {
 		empty := "(no models — check provider auth or network)"
 		if m.pickerKind == "session" {
-			empty = "(no sessions)"
+			if m.pickerSessionLoading {
+				empty = "(loading sessions…)"
+			} else if m.pickerSessionLoadErr != "" {
+				empty = "(failed to load sessions: " + m.pickerSessionLoadErr + ")"
+			} else {
+				empty = "(no sessions)"
+			}
 		}
 		if m.pickerKind == "message" {
 			empty = "(no user messages)"

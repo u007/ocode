@@ -253,6 +253,11 @@ type pickerFilterApplyMsg struct {
 	seq    int
 	filter string
 }
+type sessionRefsLoadedMsg struct {
+	seq  int
+	refs []session.Ref
+	err  error
+}
 type fileListCacheMsg struct{ items []slashSuggestion }
 type pluginInstallMsg struct {
 	source string
@@ -446,6 +451,9 @@ type model struct {
 	pickerSessionPage        int           // number of pages loaded so far
 	pickerSessionTotal       int           // total count of all sessions
 	pickerSessionMore        bool          // whether more pages are available
+	pickerSessionLoading     bool          // whether refs are currently being loaded
+	pickerSessionLoadSeq     int           // generation token for in-flight loads
+	pickerSessionLoadErr     string        // last load error shown in the picker
 	showSlashPopup           bool
 	slashPopupIndex          int
 	slashPopupItems          []slashSuggestion
@@ -466,6 +474,7 @@ type model struct {
 	files                    filesModel
 	git                      gitModel
 	logViewport              viewport.Model
+	permViewport             viewport.Model
 	logEntries               []DebugEntry
 	logSearch                string
 	logKindFilter            map[DebugEntryKind]bool
@@ -569,6 +578,7 @@ type model struct {
 	subAgentPermCh           chan subAgentPermRequest
 	subAgentPermMu           *sync.Mutex                   // serialises concurrent sub-agent permission asks
 	pendingSubAgentResp      chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
+	permConfirm              string                        // "a"/"t" while the always-allow confirmation step is shown; "" otherwise. Meaningful only while showPermDialog.
 	lastClickTime            time.Time
 	lastClickX               int
 	lastClickY               int
@@ -935,8 +945,28 @@ func (m *model) getInitialTools() []tool.Tool {
 }
 
 func (m *model) switchAgent(name string) {
-	spec := agent.FindAgentSpec(name)
-	if spec == nil {
+	var spec *agent.AgentSpec
+	if s := agent.FindAgentSpec(name); s != nil {
+		spec = s
+	} else if def := agent.DefaultAgentRegistry.Get(name); def != nil && !def.Hidden {
+		// Build an AgentSpec from the registry definition (handles subagent-only agents).
+		// Hidden agents (title, compaction) drive runtime helpers and must not be
+		// reachable as user-invokable specs.
+		as := agent.AgentSpec{
+			Name:         def.Name,
+			Description:  def.Description,
+			SystemPrompt: def.SystemPrompt,
+			Tools:        def.Tools,
+			DeniedTools:  def.DeniedTools,
+			MaxSteps:     def.MaxSteps,
+			Model:        def.Model,
+			Color:        def.Color,
+			Temperature:  def.Temperature,
+			TopP:         def.TopP,
+			Mode:         agent.ModeBuild,
+		}
+		spec = &as
+	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown agent: %s", name)})
 		return
 	}
@@ -1063,6 +1093,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 			d, _ := os.Getwd()
 			return d
 		}(),
+		permViewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
 		compactCh:            make(chan agent.CompactResult, 4),
 		compactStartCh:       make(chan struct{}, 4),
 		titleCh:              make(chan titleResult, 4),
@@ -1266,6 +1297,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampSidebarScroll()
 			return m, nil
 		}
+		if m.showPermDialog {
+			if msg.Button == tea.MouseWheelUp {
+				m.permViewport.ScrollUp(scrollSpeed)
+				return m, nil
+			}
+			if msg.Button == tea.MouseWheelDown {
+				m.permViewport.ScrollDown(scrollSpeed)
+				return m, nil
+			}
+		}
 		if m.activeTab == tabFiles {
 			if msg.Button == tea.MouseWheelUp {
 				m.files.preview.ScrollUp(scrollSpeed)
@@ -1330,8 +1371,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if len(m.slashPopupItems) > 0 && m.slashPopupIndex < len(m.slashPopupItems) && !m.inputIsExactSlashCommand() {
 					selected := m.slashPopupItems[m.slashPopupIndex]
-					m.acceptPopupSuggestion(selected)
-					return m, nil
+					cmd := m.acceptPopupSuggestion(selected)
+					return m, cmd
 				}
 			}
 		}
@@ -1364,7 +1405,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rerenderTranscriptAndMaybeScroll()
 			m.restoredPendingScroll = false
 		}
-		m.updatePermButtonRegions()
 	case tea.KeyPressMsg:
 		// Reset double-esc state on any non-esc keypress
 		if m.escPressed && msg.String() != "esc" {
@@ -1618,6 +1658,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.rebuildSessionPickerItems()
 			}
 		}
+	case sessionRefsLoadedMsg:
+		if msg.seq != m.pickerSessionLoadSeq || m.pickerKind != "session" || !m.showPicker {
+			return m, nil
+		}
+		m.pickerSessionLoading = false
+		if msg.err != nil {
+			m.pickerSessionLoadErr = msg.err.Error()
+			m.pickerSessionRefs = nil
+			m.pickerSessionPage = 0
+			m.pickerSessionTotal = 0
+			m.pickerSessionMore = false
+			m.pickerItems = nil
+			m.pickerValues = nil
+			m.pickerIsHeader = nil
+			m.pickerIndex = 0
+			return m, nil
+		}
+		m.pickerSessionLoadErr = ""
+		m.pickerSessionRefs = msg.refs
+		m.pickerSessionTotal = len(msg.refs)
+		m.pickerSessionPage = 1
+		m.pickerSessionMore = len(msg.refs) > sessionPickerPageSize
+		m.rebuildSessionPickerItems()
+		if m.pickerFilter != "" || m.pickerFilterPending != "" {
+			m.loadAllSessions()
+		}
+		m.pickerIndex = 0
 	case pluginInstallMsg:
 		source := msg.source
 		ref := msg.ref
@@ -1980,6 +2047,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		req := msg.req
 		m.pendingSubAgentResp = msg.respCh
 		m.showPermDialog = true
+		m.permConfirm = ""
 		m.activeTab = tabChat
 		m.chatUnread = false
 		m.pendingPermission = req
@@ -2264,12 +2332,24 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	if m.showPermDialog {
 		switch keyStr {
 		case "y", "n", "a", "t":
-			m.showPermDialog = false
-			cmd := m.handlePermissionChoice(keyStr)
-			m.input.Reset()
-			m.rerenderTranscriptAndMaybeScroll()
-			m.saveSession()
+			cmd, closed := m.permDialogInput(keyStr)
+			if closed {
+				m.input.Reset()
+				m.rerenderTranscriptAndMaybeScroll()
+				m.saveSession()
+			}
 			return m, cmd
+		case "esc":
+			if m.permConfirm != "" {
+				m.permDialogInput("back")
+			}
+			return m, nil
+		case "up", "k":
+			m.permViewport.ScrollUp(m.scrollSpeed)
+			return m, nil
+		case "down", "j":
+			m.permViewport.ScrollDown(m.scrollSpeed)
+			return m, nil
 		}
 		return m, nil
 	}
@@ -2586,11 +2666,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 
 		if m.showPermDialog {
 			choice := strings.ToLower(strings.TrimSpace(text))
-			m.showPermDialog = false
-			cmd := m.handlePermissionChoice(choice)
+			cmd, closed := m.permDialogInput(choice)
 			m.input.Reset()
-			m.rerenderTranscriptAndMaybeScroll()
-			m.saveSession()
+			if closed {
+				m.rerenderTranscriptAndMaybeScroll()
+				m.saveSession()
+			}
 			return m, cmd
 		}
 
@@ -3114,11 +3195,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	if pressed && m.showPermDialog {
 		for _, btn := range m.permButtonRegions {
 			if mouse.Y >= btn.y1 && mouse.Y <= btn.y2 && mouse.X >= btn.x1 && mouse.X <= btn.x2 {
-				m.showPermDialog = false
-				cmd := m.handlePermissionChoice(btn.choice)
-				m.input.Reset()
-				m.rerenderTranscriptAndMaybeScroll()
-				m.saveSession()
+				cmd, closed := m.permDialogInput(btn.choice)
+				if closed {
+					m.input.Reset()
+					m.rerenderTranscriptAndMaybeScroll()
+					m.saveSession()
+				}
 				return m, cmd, true
 			}
 		}
@@ -3253,8 +3335,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	if m.showSlashPopup {
 		if idx, ok := m.slashPopupRowForY(mouse.Y); ok {
 			selected := m.slashPopupItems[idx]
-			m.acceptPopupSuggestion(selected)
-			return m, nil, true
+			cmd := m.acceptPopupSuggestion(selected)
+			return m, cmd, true
 		}
 	}
 	// Sidebar text selection — always start dragging on press so a subsequent
@@ -3500,8 +3582,8 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	if m.showSlashPopup {
 		if idx, ok := m.slashPopupRowForY(mouse.Y); ok {
 			selected := m.slashPopupItems[idx]
-			m.acceptPopupSuggestion(selected)
-			return m, nil, true
+			cmd := m.acceptPopupSuggestion(selected)
+			return m, cmd, true
 		}
 	}
 	if path, ok := m.sidebarFileForClick(mouse); ok {
@@ -3612,6 +3694,33 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		m.rerenderTranscriptAndMaybeScroll()
 		m.markCmdStarted()
 		return m, m.sendCustomCommandPrompt(prompt)
+	} else if agentName := strings.TrimPrefix(cmd, "/"); func() bool {
+		// Hidden agents (title, compaction) drive runtime helpers and must not be
+		// reachable as user-typed slash commands — the popup already filters them.
+		def := agent.DefaultAgentRegistry.Get(agentName)
+		return def != nil && !def.Hidden
+	}() {
+		m.switchAgent(agentName)
+		if len(args) > 0 {
+			userText := strings.Join(args, " ")
+			m.messages = append(m.messages, message{role: roleUser, text: userText})
+			if m.agent != nil {
+				m.agent.ResetSubagentDispatch()
+			}
+			m.rerenderTranscriptAndMaybeScroll()
+			m.markCmdStarted()
+			return m, m.askAgent()
+		} else {
+			// No extra args — show the agent description as a prompt header
+			// so the user knows which agent is active, then wait for input.
+			def := agent.DefaultAgentRegistry.Get(agentName)
+			if def.Description != "" {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("▸ __%s__ — %s", def.Name, def.Description)})
+			} else {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("▸ Switched to agent: __%s__", agentName)})
+			}
+			m.rerenderTranscriptAndMaybeScroll()
+		}
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
 	}
@@ -3985,11 +4094,15 @@ func (m *model) handleConnectCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /connect [provider apikey] — or run /connect with no args for the dialog."})
 }
 
-func (m *model) handleSessionCmd(args []string) {
+func (m *model) handleSessionCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
-		m.openSessionPicker()
+		return m.openSessionPicker()
 	} else if args[0] == "list" {
-		sessions, _ := session.ListAll()
+		sessions, err := session.ListRefs()
+		if err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error listing sessions: %v", err)})
+			return nil
+		}
 		var b strings.Builder
 		b.WriteString("Sessions:\n")
 		for _, s := range sessions {
@@ -4036,6 +4149,7 @@ func (m *model) handleSessionCmd(args []string) {
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /session [list|load <id>]"})
 	}
+	return nil
 }
 
 func tuiRoleForAgentMessage(msg agent.Message) role {
@@ -5187,6 +5301,7 @@ func (m *model) appendAgentMessage(am agent.Message) {
 		if strings.HasPrefix(am.Content, tool.SentinelPermissionAsk) {
 			if req, ok := parsePermissionRequest(am.Content); ok {
 				m.showPermDialog = true
+				m.permConfirm = ""
 				m.activeTab = tabChat
 				m.chatUnread = false
 				m.pendingPermission = req
@@ -5307,6 +5422,44 @@ func renderPermissionPrompt(req agent.PermissionRequest) string {
 	b.WriteString(renderPermissionRequestBody(req))
 	b.WriteString("\n\n[y] once  [n] deny  [a] always this rule  [t] always this tool")
 	return b.String()
+}
+
+// permDialogInput drives the permission dialog state machine for a single
+// y/n/a/t (step 1) or confirm/back (step 2) choice. "always this rule" (a) and
+// "always this tool" (t) do not persist immediately: they switch the dialog to a
+// confirmation step showing the exact rule that will be saved. The rule is only
+// persisted once the user confirms. Returns the command to run and whether the
+// dialog was closed (so callers reset input / save session). Both the keyboard
+// and mouse handlers route through here so the two paths stay in lockstep.
+func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
+	if m.permConfirm != "" {
+		switch choice {
+		case "y", "yes", "confirm":
+			pending := m.permConfirm
+			m.permConfirm = ""
+			m.showPermDialog = false
+			return m.handlePermissionChoice(pending), true
+		case "n", "no", "back", "esc":
+			m.permConfirm = ""
+			m.updatePermButtonRegions()
+			return nil, false
+		}
+		return nil, false
+	}
+
+	switch choice {
+	case "a", "t":
+		// Defer: show what will be persisted and wait for confirmation.
+		m.permConfirm = choice
+		m.updatePermButtonRegions()
+		return nil, false
+	case "y", "yes", "allow", "once", "n", "no", "deny":
+		m.showPermDialog = false
+		return m.handlePermissionChoice(choice), true
+	}
+	// Unknown input: re-display the prompt via handlePermissionChoice's default.
+	m.showPermDialog = false
+	return m.handlePermissionChoice(choice), true
 }
 
 func (m *model) handlePermissionChoice(choice string) tea.Cmd {
@@ -5443,18 +5596,22 @@ func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
 	if path == "" {
 		return
 	}
-	if !tool.AddExtraAllowedPath(path) {
+	// Normalize so the config entry is consistent with AddExtraAllowedPath
+	cleaned := filepath.Clean(path)
+	if !tool.AddExtraAllowedPath(cleaned) {
 		return
 	}
 	if m.config == nil {
 		return
 	}
+	// Compare against existing entries after normalization to avoid
+	// duplicates from equivalent path strings (e.g. /tmp/foo vs /tmp//foo)
 	for _, existing := range m.config.Ocode.ExtraAllowedPaths {
-		if existing == path {
+		if filepath.Clean(existing) == cleaned {
 			return
 		}
 	}
-	m.config.Ocode.ExtraAllowedPaths = append(m.config.Ocode.ExtraAllowedPaths, path)
+	m.config.Ocode.ExtraAllowedPaths = append(m.config.Ocode.ExtraAllowedPaths, cleaned)
 	if err := config.SaveOcodeConfig(&m.config.Ocode); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save extra_allowed_paths: %v", err)})
 	}
@@ -5712,6 +5869,9 @@ func (m *model) layout() {
 	}
 
 	panelWidth := m.panelWidth()
+	if m.showPermDialog {
+		m.syncPermViewport(max(0, panelWidth-4))
+	}
 	innerWidth := panelWidth - 7
 	if innerWidth < 1 {
 		innerWidth = 1
@@ -5729,6 +5889,9 @@ func (m *model) layout() {
 		m.refreshTopDetailView()
 	}
 	m.layoutLogViewport()
+	if m.showPermDialog {
+		m.updatePermButtonRegions()
+	}
 }
 
 func (m *model) layoutLogViewport() {
@@ -5819,25 +5982,123 @@ var permBtnDefs = []permBtnDef{
 	{"T", "t", "always allow tool"},
 }
 
+// permConfirmBtnDefs are the buttons shown during the always-allow confirmation
+// step (after the user picks A or T).
+var permConfirmBtnDefs = []permBtnDef{
+	{"Y", "confirm", "confirm"},
+	{"N", "back", "go back"},
+}
+
+// permDialogBtnDefs returns the button set for the current dialog step.
+func (m *model) permDialogBtnDefs() []permBtnDef {
+	if m.permConfirm != "" {
+		return permConfirmBtnDefs
+	}
+	return permBtnDefs
+}
+
+// renderPermConfirmBody describes exactly what selecting "always allow" will
+// persist, mirroring setPermissionRule / setToolPermission / allowOutOfScopePath
+// so the confirmation never drifts from what is actually written to settings.
+func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string) string {
+	var lines []string
+	if choice == "t" {
+		lines = append(lines, fmt.Sprintf("Persist a tool rule: always allow ALL uses of the %q tool.", toolName))
+		lines = append(lines, "This is broad — every future call to this tool is auto-allowed, regardless of arguments.")
+		return strings.Join(lines, "\n")
+	}
+
+	// choice == "a" — always this rule.
+	switch {
+	case toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain."):
+		domain := strings.TrimPrefix(req.Rule, "webfetch.domain.")
+		lines = append(lines, fmt.Sprintf("Persist a webfetch rule: always allow fetching from domain %q.", domain))
+	case req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "":
+		lines = append(lines, fmt.Sprintf("Persist a bash-prefix rule: always allow `%s ...` (all commands starting with %q).", req.Prefix, req.Prefix))
+	default:
+		lines = append(lines, fmt.Sprintf("Persist a tool rule: always allow the %q tool.", toolName))
+		lines = append(lines, "Note: for this action, \"always this rule\" and \"always this tool\" persist the same tool-level rule.")
+	}
+	if root := outOfScopePathRoot(req); root != "" {
+		lines = append(lines, fmt.Sprintf("Also persists out-of-workspace path access for: %s", root))
+	}
+	return strings.Join(lines, "\n")
+}
+
+const permissionDialogMaxBodyLines = 6
+
+func permissionDialogVisibleBodyLines(body string, width int) int {
+	if width < 1 {
+		width = 1
+	}
+	vp := viewport.New(viewport.WithWidth(width), viewport.WithHeight(permissionDialogMaxBodyLines))
+	vp.SetContent(body)
+	visible := vp.VisibleLineCount()
+	if visible < 1 {
+		return 1
+	}
+	return visible
+}
+
+func (m *model) syncPermViewport(contentWidth int) {
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	body := renderPermissionRequestBody(m.pendingPermission)
+	if m.permConfirm != "" {
+		body = renderPermConfirmBody(m.pendingPermission, m.pendingToolName, m.permConfirm)
+	}
+	prevYOffset := m.permViewport.YOffset()
+	m.permViewport.SetWidth(contentWidth)
+	m.permViewport.SetHeight(permissionDialogMaxBodyLines)
+	m.permViewport.SetContent(body)
+	m.permViewport.SetYOffset(prevYOffset)
+}
+
 func (m *model) renderPermissionDialog(width int) string {
 	req := m.pendingPermission
 
 	contentWidth := max(0, width-2)
 
 	body := renderPermissionRequestBody(req)
-
 	header := m.styles.Header.Render("⚠ Permission required")
+	if m.permConfirm != "" {
+		body = renderPermConfirmBody(req, m.pendingToolName, m.permConfirm)
+		header = m.styles.Header.Render("⚠ Confirm always-allow")
+	}
 
 	var btnParts []string
-	for _, b := range permBtnDefs {
+	for _, b := range m.permDialogBtnDefs() {
 		btnParts = append(btnParts, permBtnStyle.Render(b.label+" "+b.desc))
 	}
 	buttonRow := lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
 		lipgloss.JoinHorizontal(lipgloss.Top, btnParts...),
 	)
 
+	// Build the body area: viewport view + a scroll indicator if needed.
+	bodyView := m.permViewport.View()
+	totalLines := strings.Count(body, "\n") + 1
+	visibleLines := m.permViewport.VisibleLineCount()
+	if totalLines > visibleLines {
+		// Add a scroll indicator arrow.
+		scrollHint := "▼ "
+		if m.permViewport.YOffset() > 0 {
+			scrollHint = "▲▼ "
+		}
+		if m.permViewport.YOffset() > 0 && m.permViewport.YOffset()+m.permViewport.VisibleLineCount() >= totalLines {
+			scrollHint = "▲ "
+		}
+		// Show the hint on the last visible line by appending
+		lastNewLine := strings.LastIndex(bodyView, "\n")
+		if lastNewLine >= 0 {
+			bodyView = bodyView[:lastNewLine] + " " + scrollHint + bodyView[lastNewLine:]
+		} else if bodyView != "" {
+			bodyView = bodyView + " " + scrollHint
+		}
+	}
+
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
-		header + "\n\n" + body + "\n\n" + buttonRow,
+		header + "\n\n" + bodyView + "\n\n" + buttonRow,
 	)
 }
 
@@ -5848,18 +6109,17 @@ func (m *model) updatePermButtonRegions() {
 		m.permButtonRegions = nil
 		return
 	}
-	req := m.pendingPermission
 
-	// Count lines above the button row inside the dialog content (excluding border).
-	// header(1) + blank(1) + body + blank(1)
-	linesAbove := 3 + strings.Count(renderPermissionRequestBody(req), "\n") + 1
+	contentWidth := max(0, m.panelWidth()-4)
+	m.syncPermViewport(contentWidth)
+	visibleBodyLines := m.permViewport.VisibleLineCount()
 
-	// +1 for the dialog box top border
-	buttonTopY := m.inputAreaTopY() + 1 + linesAbove
+	// Top border + header(1) + blank(1) + body + blank(1)
+	buttonTopY := m.inputAreaTopY() + 4 + visibleBodyLines
 
 	m.permButtonRegions = nil
 	x := 1 // after left border
-	for _, b := range permBtnDefs {
+	for _, b := range m.permDialogBtnDefs() {
 		rendered := permBtnStyle.Render(b.label + " " + b.desc)
 		w := lipgloss.Width(rendered)
 		h := lipgloss.Height(rendered)
@@ -7332,10 +7592,16 @@ func (m model) renderContent() string {
 func (m *model) renderStatus() string {
 	agentName := "build"
 	agentColor := ""
-	specs := agent.PrimaryAgentSpecs()
-	if m.currentAgentIdx >= 0 && m.currentAgentIdx < len(specs) {
-		agentName = specs[m.currentAgentIdx].Name
-		agentColor = specs[m.currentAgentIdx].Color
+	if m.agent != nil && m.agent.Spec() != nil {
+		spec := m.agent.Spec()
+		agentName = spec.Name
+		agentColor = spec.Color
+	} else {
+		specs := agent.PrimaryAgentSpecs()
+		if m.currentAgentIdx >= 0 && m.currentAgentIdx < len(specs) {
+			agentName = specs[m.currentAgentIdx].Name
+			agentColor = specs[m.currentAgentIdx].Color
+		}
 	}
 	displayAgentName := agentName
 	if agentColor != "" {
@@ -7915,26 +8181,39 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		extraPaths := m.config.Ocode.ExtraAllowedPaths
 		if len(extraPaths) > 0 {
 			body = append(body, dimStyle.Render(fmt.Sprintf("Extra paths (%d):", len(extraPaths))))
-			for _, p := range extraPaths {
-				body = append(body, "  "+sidebarTextStyle.Render(p))
+			// Compact display: comma-separated, hard-wrapped, max 5 lines
+			const maxExtraPathLines = 5
+			joined := strings.Join(extraPaths, ", ")
+			lineWidth := boxBodyWidth - 2 // account for "  " prefix
+			wrapped := strings.Split(ansi.Hardwrap(joined, lineWidth, false), "\n")
+			for i, line := range wrapped {
+				if i >= maxExtraPathLines {
+					remaining := len(wrapped) - i
+					body = append(body, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
+					break
+				}
+				body = append(body, "  "+sidebarTextStyle.Render(line))
 			}
 		}
 
-		// Bash auto-allow prefixes — show count + first few examples
-		autoAllow := perm.BashAutoAllowPrefixes()
+		// Bash auto-allow prefixes added beyond the built-in defaults
+		// (sorted for stable display, never the random map order).
+		autoAllow := perm.ExtraBashAutoAllowPrefixes()
 		if len(autoAllow) > 0 {
-			exampleCount := 3
-			if exampleCount > len(autoAllow) {
-				exampleCount = len(autoAllow)
+			body = append(body, dimStyle.Render(fmt.Sprintf("Bash (%d):", len(autoAllow))))
+			// Comma-separated, hard-wrapped, max 6 lines.
+			const maxBashLines = 6
+			joined := strings.Join(autoAllow, ", ")
+			lineWidth := boxBodyWidth - 2 // account for "  " prefix
+			wrapped := strings.Split(ansi.Hardwrap(joined, lineWidth, false), "\n")
+			for i, line := range wrapped {
+				if i >= maxBashLines {
+					remaining := len(wrapped) - i
+					body = append(body, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
+					break
+				}
+				body = append(body, "  "+sidebarTextStyle.Render(line))
 			}
-			examples := strings.Join(autoAllow[:exampleCount], ", ")
-			remainder := len(autoAllow) - exampleCount
-			label := "Bash: " + examples
-			if remainder > 0 {
-				label += fmt.Sprintf(" +%d more", remainder)
-			}
-			// Hard-wrap to fit the sidebar width
-			body = append(body, dimStyle.Render(label))
 		}
 
 		appendScrollSection("Allowed", body, nil)

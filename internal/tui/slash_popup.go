@@ -78,6 +78,16 @@ func slashSuggestions(prefix string) []slashSuggestion {
 		consider(name, name, cmd.Description, []string{name})
 	}
 
+	// Add agents from the registry as slash-command suggestions so users
+	// can tab-complete /build, /git-commit-push, etc.
+	for _, def := range agent.DefaultAgentRegistry.All() {
+		if def.Hidden {
+			continue
+		}
+		name := "/" + def.Name
+		consider(name, name, def.Description, []string{name})
+	}
+
 	sort.SliceStable(scored, func(a, b int) bool {
 		if scored[a].score != scored[b].score {
 			return scored[a].score > scored[b].score
@@ -414,26 +424,27 @@ func (m model) inputIsExactSlashCommand() bool {
 	return ok
 }
 
-func (m *model) acceptPopupSuggestion(selected slashSuggestion) {
+func (m *model) acceptPopupSuggestion(selected slashSuggestion) tea.Cmd {
 	m.closeSlashPopup()
 	if strings.HasPrefix(selected.name, "@") {
 		value := m.input.Value()
 		idx := strings.LastIndex(value, "@")
 		if idx == -1 {
 			m.input.SetValue(selected.name + " ")
-			return
+			return nil
 		}
 		m.input.SetValue(value[:idx] + selected.name + " ")
-		return
+		return nil
 	}
 	m.input.SetValue(selected.name + " ")
 	if selected.name == "/models" {
 		m.openModelPicker()
 	} else if selected.name == "/session" {
-		m.openSessionPicker()
+		return m.openSessionPicker()
 	} else if selected.name == "/themes" {
 		m.openThemePicker()
 	}
+	return nil
 }
 
 func (m model) renderSlashPopup() string {

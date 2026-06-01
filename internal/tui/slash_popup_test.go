@@ -432,6 +432,20 @@ func TestFilePopupEscapesSpaceInSuggestion(t *testing.T) {
 	}
 }
 
+func TestSlashPopupSessionSuggestionReturnsLoadCmd(t *testing.T) {
+	m := model{input: textarea.New()}
+	cmd := m.acceptPopupSuggestion(slashSuggestion{name: "/session", desc: "resume session"})
+	if cmd == nil {
+		t.Fatal("expected /session suggestion to return a session load command")
+	}
+	if got := m.input.Value(); got != "/session " {
+		t.Fatalf("expected session suggestion to populate input, got %q", got)
+	}
+	if !m.showPicker || m.pickerKind != "session" || !m.pickerSessionLoading {
+		t.Fatalf("expected session picker to open in loading state, got showPicker=%v kind=%q loading=%v", m.showPicker, m.pickerKind, m.pickerSessionLoading)
+	}
+}
+
 func TestProcessFileReferencesResolvesCompactShortcode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "notes.txt")

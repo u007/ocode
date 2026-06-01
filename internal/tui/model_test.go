@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"os/exec"
@@ -184,6 +185,100 @@ func TestRenderStatusReflectsCommandRunningState(t *testing.T) {
 	}
 }
 
+func TestRenderStatusUsesActiveAgentSpec(t *testing.T) {
+	m := model{
+		agent:     agent.NewAgent(retryTestClient{}, nil, nil),
+		ready:     true,
+		width:     140,
+		activeTab: tabChat,
+		styles:    ApplyThemeColors("tokyonight"),
+		input:     newTestTextarea(),
+	}
+
+	m.switchAgent("explore")
+
+	status := m.renderStatus()
+	if !strings.Contains(status, "explore") {
+		t.Fatalf("expected status to reflect active agent spec, got %q", status)
+	}
+}
+
+func TestSwitchAgentRejectsHiddenHelper(t *testing.T) {
+	m := model{
+		agent:     agent.NewAgent(retryTestClient{}, nil, nil),
+		ready:     true,
+		width:     140,
+		activeTab: tabChat,
+		styles:    ApplyThemeColors("tokyonight"),
+		input:     newTestTextarea(),
+	}
+
+	m.switchAgent("explore")
+	before := m.agent.Spec()
+	if before == nil || before.Name != "explore" {
+		t.Fatalf("setup: expected active spec to be explore, got %+v", before)
+	}
+
+	beforeMsgs := len(m.messages)
+	m.switchAgent("title")
+	after := m.agent.Spec()
+	if after == nil || after.Name != "explore" {
+		t.Fatalf("expected hidden helper %q not to replace active spec, got %+v", "title", after)
+	}
+	if got := len(m.messages) - beforeMsgs; got != 1 {
+		t.Fatalf("expected one rejection message, got %d new messages", got)
+	}
+	if !strings.Contains(m.messages[len(m.messages)-1].text, "title") {
+		t.Fatalf("expected rejection message to mention hidden agent name, got %q", m.messages[len(m.messages)-1].text)
+	}
+}
+
+func TestHandleCommandSlashDispatchRejectsHiddenHelper(t *testing.T) {
+	m := model{
+		agent:     agent.NewAgent(retryTestClient{}, nil, nil),
+		ready:     true,
+		width:     140,
+		activeTab: tabChat,
+		styles:    ApplyThemeColors("tokyonight"),
+		input:     newTestTextarea(),
+	}
+
+	m.switchAgent("explore")
+	updated, _ := m.handleCommand("/compaction")
+	got, ok := updated.(*model)
+	if !ok {
+		t.Fatalf("expected *model from handleCommand, got %T", updated)
+	}
+	if got.agent.Spec() == nil || got.agent.Spec().Name != "explore" {
+		t.Fatalf("expected /compaction to leave active spec as explore, got %+v", got.agent.Spec())
+	}
+	last := got.messages[len(got.messages)-1].text
+	if !strings.Contains(last, "/compaction") {
+		t.Fatalf("expected rejection message to mention /compaction, got %q", last)
+	}
+}
+
+func TestRunAgentCmdRejectsHiddenHelper(t *testing.T) {
+	m := model{
+		agent:     agent.NewAgent(retryTestClient{}, nil, nil),
+		ready:     true,
+		width:     140,
+		activeTab: tabChat,
+		styles:    ApplyThemeColors("tokyonight"),
+		input:     newTestTextarea(),
+	}
+
+	m.switchAgent("explore")
+	runAgentCmd(&m, []string{"title"})
+	if m.agent.Spec() == nil || m.agent.Spec().Name != "explore" {
+		t.Fatalf("expected /agent title to leave active spec as explore, got %+v", m.agent.Spec())
+	}
+	last := m.messages[len(m.messages)-1].text
+	if !strings.Contains(last, "title") {
+		t.Fatalf("expected rejection message to mention hidden agent, got %q", last)
+	}
+}
+
 func TestRenderStatusShowsActiveSubagentModel(t *testing.T) {
 	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil)
 	run := mainAgent.Runs().New("explore")
@@ -204,6 +299,111 @@ func TestRenderStatusShowsActiveSubagentModel(t *testing.T) {
 	}
 }
 
+func TestPermissionViewportIsSyncedDuringLayout(t *testing.T) {
+	req := agent.PermissionRequest{
+		ToolName: "read",
+		Args:     json.RawMessage(`{"path":"notes.txt"}`),
+	}
+	m := model{
+		ready:             true,
+		width:             120,
+		height:            40,
+		showPermDialog:    true,
+		pendingPermission: req,
+		styles:            ApplyThemeColors("tokyonight"),
+		input:             newTestTextarea(),
+		permViewport:      viewport.New(viewport.WithWidth(1), viewport.WithHeight(1)),
+	}
+
+	m.layout()
+
+	contentWidth := max(0, m.panelWidth()-4)
+	want := permissionDialogVisibleBodyLines(renderPermissionRequestBody(req), contentWidth)
+	if got := m.permViewport.VisibleLineCount(); got != want {
+		t.Fatalf("expected permission viewport to be synced during layout, want %d visible lines, got %d", want, got)
+	}
+	if got := m.permViewport.TotalLineCount(); got == 0 {
+		t.Fatal("expected permission viewport content to be populated during layout")
+	}
+}
+
+// TestAlwaysAllowConfirmationDefersPersist verifies the two-step always-allow
+// flow: pressing "t" (or "a") opens a confirmation step and persists nothing;
+// the rule is written only after the user confirms with "y"; backing out with
+// "n" returns to step 1 having persisted nothing.
+func TestAlwaysAllowConfirmationDefersPersist(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // isolate persistPermissions disk writes
+
+	newModel := func() model {
+		a := agent.NewAgent(retryTestClient{}, []tool.Tool{askOnlyTool{}}, nil)
+		a.Permissions().SetRule("ask_tool", agent.PermissionAsk)
+		m := model{
+			agent:             a,
+			ready:             true,
+			width:             120,
+			height:            40,
+			showPermDialog:    true,
+			pendingToolName:   "ask_tool",
+			pendingPermission: agent.PermissionRequest{ToolName: "ask_tool", Scope: agent.PermissionScopeTool, Rule: "ask_tool"},
+			styles:            ApplyThemeColors("tokyonight"),
+			input:             newTestTextarea(),
+			permViewport:      viewport.New(viewport.WithWidth(1), viewport.WithHeight(1)),
+		}
+		m.layout()
+		return m
+	}
+
+	// Step 1: pressing "t" enters confirmation, persists nothing.
+	m := newModel()
+	cmd, closed := m.permDialogInput("t")
+	if closed {
+		t.Fatal(`pressing "t" should not close the dialog`)
+	}
+	if cmd != nil {
+		t.Fatal(`pressing "t" should not run a command yet`)
+	}
+	if m.permConfirm != "t" {
+		t.Fatalf("permConfirm = %q, want t", m.permConfirm)
+	}
+	if !m.showPermDialog {
+		t.Fatal("dialog should remain open in confirmation step")
+	}
+	if got := m.agent.Permissions().Check("ask_tool"); got != agent.PermissionAsk {
+		t.Fatalf("nothing should persist before confirm; Check = %q, want ask", got)
+	}
+
+	// The confirmation body must describe the tool-level rule that will persist.
+	body := renderPermConfirmBody(m.pendingPermission, m.pendingToolName, m.permConfirm)
+	if !strings.Contains(body, "ask_tool") {
+		t.Fatalf("confirm body should name the tool, got %q", body)
+	}
+
+	// Backing out with "n" returns to step 1, still nothing persisted.
+	if _, closed := m.permDialogInput("n"); closed {
+		t.Fatal(`pressing "n" in confirm step should not close the dialog`)
+	}
+	if m.permConfirm != "" {
+		t.Fatalf("permConfirm should clear after back, got %q", m.permConfirm)
+	}
+	if got := m.agent.Permissions().Check("ask_tool"); got != agent.PermissionAsk {
+		t.Fatalf("backing out must not persist; Check = %q, want ask", got)
+	}
+
+	// Now confirm: "t" then "y" persists the tool rule and closes the dialog.
+	m = newModel()
+	m.permDialogInput("t")
+	_, closed = m.permDialogInput("y")
+	if !closed {
+		t.Fatal("confirming should close the dialog")
+	}
+	if m.permConfirm != "" {
+		t.Fatalf("permConfirm should clear after confirm, got %q", m.permConfirm)
+	}
+	if got := m.agent.Permissions().Check("ask_tool"); got != agent.PermissionAllow {
+		t.Fatalf("confirm should persist allow; Check = %q, want allow", got)
+	}
+}
+
 func TestRenderAgentStripShowsRunModelLabel(t *testing.T) {
 	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil)
 	run := mainAgent.Runs().New("explore")
@@ -221,6 +421,62 @@ func TestRenderAgentStripShowsRunModelLabel(t *testing.T) {
 	strip, _ := m.renderAgentStrip()
 	if !strings.Contains(strip, "[test/test-model]") {
 		t.Fatalf("expected agent strip to include run model label, got %q", strip)
+	}
+}
+
+func TestUpdatePermButtonRegionsUsesRenderedBodyHeight(t *testing.T) {
+	outOfScopePath := filepath.Join(t.TempDir(), "outside.txt")
+	tests := []struct {
+		name string
+		req  agent.PermissionRequest
+	}{
+		{
+			name: "short body",
+			req: agent.PermissionRequest{
+				ToolName: "read",
+				Args:     json.RawMessage(`{"path":"notes.txt"}`),
+			},
+		},
+		{
+			name: "wrapped body",
+			req: agent.PermissionRequest{
+				ToolName: "read",
+				Args:     json.RawMessage(`{"path":"` + outOfScopePath + `"}`),
+				Scope:    agent.PermissionScopeTool,
+				Rule:     "tool.read.out_of_scope",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := model{
+				ready:             true,
+				width:             120,
+				height:            40,
+				showPermDialog:    true,
+				pendingPermission: tt.req,
+				styles:            ApplyThemeColors("tokyonight"),
+				input:             newTestTextarea(),
+			}
+
+			m.updatePermButtonRegions()
+			if len(m.permButtonRegions) != len(permBtnDefs) {
+				t.Fatalf("expected %d permission button regions, got %d", len(permBtnDefs), len(m.permButtonRegions))
+			}
+
+			contentWidth := max(0, m.panelWidth()-4)
+			body := renderPermissionRequestBody(tt.req)
+			visibleBodyLines := permissionDialogVisibleBodyLines(body, contentWidth)
+			wantY := m.inputAreaTopY() + 4 + visibleBodyLines
+			if got := m.permButtonRegions[0].y1; got != wantY {
+				t.Fatalf("expected permission buttons to start at y=%d, got %d", wantY, got)
+			}
+			buttonHeight := lipgloss.Height(permBtnStyle.Render(permBtnDefs[0].label + " " + permBtnDefs[0].desc))
+			if got, want := m.permButtonRegions[0].y2, wantY+buttonHeight-1; got != want {
+				t.Fatalf("expected permission button height %d at y=%d, got y2=%d", buttonHeight, wantY, got)
+			}
+		})
 	}
 }
 
@@ -1427,6 +1683,133 @@ func TestPickerSelectsSessionByValue(t *testing.T) {
 	}
 	if len(got.messages) == 0 || !strings.Contains(got.messages[len(got.messages)-1].text, "Error loading session") {
 		t.Fatalf("expected picker to load selected session id, got %#v", got.messages)
+	}
+}
+
+func TestOpenSessionPickerLoadsRefsAsync(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+
+	if err := session.Save("ses_2026-06-01-120000", "First session", []agent.Message{{Role: "user", Content: "hello"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{input: textarea.New()}
+	cmd := m.openSessionPicker()
+	if !m.showPicker || m.pickerKind != "session" || !m.pickerSessionLoading {
+		t.Fatalf("expected session picker to open in loading state, got %+v", m)
+	}
+	if m.pickerSessionPage != 0 || len(m.pickerItems) != 0 || len(m.pickerValues) != 0 {
+		t.Fatalf("expected empty picker before refs load, got page=%d items=%v values=%v", m.pickerSessionPage, m.pickerItems, m.pickerValues)
+	}
+	if cmd == nil {
+		t.Fatal("expected async load command from openSessionPicker")
+	}
+
+	updated, _ := m.Update(cmd())
+	got := updated.(model)
+	if got.pickerSessionLoading {
+		t.Fatal("expected loading flag to clear after refs load")
+	}
+	if got.pickerSessionTotal != 1 || got.pickerSessionPage != 1 || got.pickerSessionMore {
+		t.Fatalf("unexpected session paging state after load: total=%d page=%d more=%v", got.pickerSessionTotal, got.pickerSessionPage, got.pickerSessionMore)
+	}
+	if len(got.pickerItems) != 1 || len(got.pickerValues) != 1 {
+		t.Fatalf("expected one session item after load, got items=%v values=%v", got.pickerItems, got.pickerValues)
+	}
+	if got.pickerValues[0] != "ses_2026-06-01-120000" {
+		t.Fatalf("expected picker value to match session id, got %q", got.pickerValues[0])
+	}
+	if !strings.Contains(got.pickerItems[0], "First session") {
+		t.Fatalf("expected picker item to include title, got %q", got.pickerItems[0])
+	}
+}
+
+func TestSessionPickerLoadsAllRefsWhenFilterActive(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+
+	total := sessionPickerPageSize + 2
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("ses_2026-06-01-1200%02d", i)
+		title := fmt.Sprintf("Session %02d", i)
+		if err := session.Save(id, title, []agent.Message{{Role: "user", Content: "hello"}}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := model{input: textarea.New()}
+	m.openSessionPicker()
+	m.pickerFilter = "session"
+	cmd := loadSessionRefsCmd(m.pickerSessionLoadSeq)
+	updated, _ := m.Update(cmd())
+	got := updated.(model)
+	if got.pickerSessionLoading {
+		t.Fatal("expected loading flag to clear after refs load")
+	}
+	if got.pickerSessionPage != (total+sessionPickerPageSize-1)/sessionPickerPageSize {
+		t.Fatalf("expected filter to expand session pages, got page=%d total=%d pageSize=%d", got.pickerSessionPage, total, sessionPickerPageSize)
+	}
+	if got.pickerSessionMore {
+		t.Fatal("expected filtered session picker to load all refs")
+	}
+	if len(got.pickerItems) != total {
+		t.Fatalf("expected all sessions to be loaded for active filter, got %d want %d", len(got.pickerItems), total)
+	}
+}
+
+func TestSessionPickerLoadResultIgnoredAfterClose(t *testing.T) {
+	m := model{input: textarea.New()}
+	_ = m.openSessionPicker()
+	seq := m.pickerSessionLoadSeq
+	m.closePicker()
+
+	updated, _ := m.Update(sessionRefsLoadedMsg{seq: seq, refs: []session.Ref{{ID: "ses_1", Title: "ignored"}}})
+	got := updated.(model)
+	if got.showPicker {
+		t.Fatal("expected closed picker to stay closed when stale load arrives")
+	}
+	if got.pickerSessionLoading || got.pickerSessionLoadErr != "" || len(got.pickerSessionRefs) != 0 {
+		t.Fatalf("expected stale load to be ignored, got loading=%v err=%q refs=%v", got.pickerSessionLoading, got.pickerSessionLoadErr, got.pickerSessionRefs)
+	}
+}
+
+func TestSessionPickerIgnoresStaleLoadAfterReopen(t *testing.T) {
+	m := model{input: textarea.New()}
+	firstCmd := m.openSessionPicker()
+	if firstCmd == nil {
+		t.Fatal("expected first session load command")
+	}
+	firstSeq := m.pickerSessionLoadSeq
+	secondCmd := m.openSessionPicker()
+	if secondCmd == nil {
+		t.Fatal("expected second session load command")
+	}
+	secondSeq := m.pickerSessionLoadSeq
+	if secondSeq <= firstSeq {
+		t.Fatalf("expected reopen to advance load sequence, got first=%d second=%d", firstSeq, secondSeq)
+	}
+
+	updated, _ := m.Update(sessionRefsLoadedMsg{seq: firstSeq, refs: []session.Ref{{ID: "ses_old", Title: "old"}}})
+	got := updated.(model)
+	if got.pickerSessionLoadSeq != secondSeq {
+		t.Fatalf("expected active load sequence to stay on reopen, got %d want %d", got.pickerSessionLoadSeq, secondSeq)
+	}
+	if !got.pickerSessionLoading {
+		t.Fatal("expected reopened picker to remain loading after stale result")
+	}
+	if len(got.pickerSessionRefs) != 0 || len(got.pickerItems) != 0 {
+		t.Fatalf("expected stale load to be ignored, got refs=%v items=%v", got.pickerSessionRefs, got.pickerItems)
 	}
 }
 

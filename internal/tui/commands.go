@@ -206,8 +206,7 @@ func runLoginCmd(m *model, args []string) tea.Cmd {
 }
 
 func runSessionCmd(m *model, args []string) tea.Cmd {
-	m.handleSessionCmd(args)
-	return nil
+	return m.handleSessionCmd(args)
 }
 
 func runCompactCmd(m *model, args []string) tea.Cmd {

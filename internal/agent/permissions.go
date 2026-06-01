@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -856,6 +857,28 @@ func (pm *PermissionManager) BashAutoAllowPrefixes() []string {
 			result = append(result, k)
 		}
 	}
+	return result
+}
+
+// ExtraBashAutoAllowPrefixes returns auto-allow prefixes that were granted
+// beyond the built-in default set (e.g. via config or in-session "allow"),
+// sorted for stable display. The built-in defaults are excluded because they
+// are always allowed and only add noise to the sidebar.
+func (pm *PermissionManager) ExtraBashAutoAllowPrefixes() []string {
+	result := make([]string, 0)
+	for k, v := range pm.bashAutoAllow {
+		if !v {
+			continue
+		}
+		if strings.HasPrefix(k, bashInRootPersistPrefix) {
+			continue
+		}
+		if bashAutoAllowPrefixes[k] {
+			continue // built-in default — already allowed
+		}
+		result = append(result, k)
+	}
+	sort.Strings(result)
 	return result
 }
 
