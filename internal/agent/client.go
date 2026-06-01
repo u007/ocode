@@ -319,7 +319,7 @@ func (c *GenericClient) usesAnthropicMessagesAPI() bool {
 	}
 	// opencode-go routes per-model: minimax & qwen use /v1/messages (Anthropic API),
 	// everything else (deepseek, glm, kimi, mimo) uses /v1/chat/completions (OpenAI).
-	if c.Provider == "opencode-go" {
+	if c.Provider == "opencode" || c.Provider == "opencode-go" {
 		return strings.HasPrefix(c.Model, "minimax-") || strings.HasPrefix(c.Model, "qwen3.")
 	}
 	baseURL := strings.ToLower(strings.TrimRight(c.BaseURL, "/"))
