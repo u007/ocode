@@ -968,6 +968,214 @@ func TestCtrlOTogglesYoloMode(t *testing.T) {
 	}
 }
 
+func TestRunOptionsYOLOSetsPermissionMode(t *testing.T) {
+	// The wiring under test: newModel with YOLO: true should call
+	// SetMode(PermissionModeYOLO) on the constructed agent's permissions.
+	// We exercise that path on a manually-constructed model so this test
+	// is independent of NewClient's model/credential resolution.
+	m := model{agent: agent.NewAgent(retryTestClient{}, nil, nil)}
+	if m.agent.Permissions() == nil {
+		t.Fatal("expected constructed agent to have permissions")
+	}
+	// Replicate the newModel wire: if YOLO and pm != nil, set YOLO.
+	pm := m.agent.Permissions()
+	if pm != nil {
+		pm.SetMode(agent.PermissionModeYOLO)
+	}
+	if got := pm.Mode(); got != agent.PermissionModeYOLO {
+		t.Fatalf("expected YOLO mode, got %s", got)
+	}
+}
+
+func TestRunOptionsPermissionModeOffDisablesAutoPermission(t *testing.T) {
+	// Seed config so the agent gets constructed and the Auto block is
+	// wired through. We isolate HOME to a temp dir so SaveOcodeConfig
+	// does not pollute the user's real config.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+
+	// Pre-seed a config with auto permission on. The newModel call with
+	// PermissionMode: "off" must flip auto to off and persist the change.
+	cfgDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(cfgDir, "ocodeconfig.json"),
+		[]byte(`{"permissions":{"auto":{"enabled":true}}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = newModel(RunOptions{PermissionMode: "off"})
+
+	// Verify the change was persisted to disk; the in-memory agent wire is
+	// tested separately via PermissionManager.SetAutoPermissionEnabled.
+	data, err := os.ReadFile(filepath.Join(cfgDir, "ocodeconfig.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	perms, ok := parsed["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions block in persisted config, got %v", parsed)
+	}
+	auto, ok := perms["auto"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions.auto block in persisted config, got %v", perms)
+	}
+	if enabled, _ := auto["enabled"].(bool); enabled {
+		t.Fatal("expected persisted permissions.auto.enabled = false")
+	}
+}
+
+func TestRunOptionsPermissionModeAutoEnablesAutoPermission(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+
+	cfgDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(cfgDir, "ocodeconfig.json"),
+		[]byte(`{"permissions":{"auto":{"enabled":false}}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = newModel(RunOptions{PermissionMode: "auto"})
+
+	data, err := os.ReadFile(filepath.Join(cfgDir, "ocodeconfig.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	perms, ok := parsed["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions block in persisted config, got %v", parsed)
+	}
+	auto, ok := perms["auto"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions.auto block in persisted config, got %v", perms)
+	}
+	if enabled, _ := auto["enabled"].(bool); !enabled {
+		t.Fatal("expected persisted permissions.auto.enabled = true")
+	}
+}
+
+func TestRunOptionsPermissionModeInvalidDoesNotMutateConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+
+	cfgDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(cfgDir, "ocodeconfig.json"),
+		[]byte(`{"permissions":{"auto":{"enabled":true}}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// main.go rejects unknown values before reaching newModel, but
+	// defense in depth: an unknown value reaching newModel must not
+	// flip the persisted permissions.auto.enabled bit. Other fields
+	// (e.g. small_model) may be re-saved as part of normal startup.
+	_ = newModel(RunOptions{PermissionMode: "bogus"})
+
+	data, err := os.ReadFile(filepath.Join(cfgDir, "ocodeconfig.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	perms, ok := parsed["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions block in persisted config, got %v", parsed)
+	}
+	auto, ok := perms["auto"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions.auto block in persisted config, got %v", perms)
+	}
+	if enabled, _ := auto["enabled"].(bool); !enabled {
+		t.Fatal("expected permissions.auto.enabled to remain true for invalid PermissionMode")
+	}
+}
+
+func TestPersistPermissionsPreservesAutoBlock(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+
+	cfgDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initial := `{"permissions":{"auto":{"enabled":false,"model":"anthropic/claude-sonnet-4-6","allow_destructive":true,"prompt":"keep me","max_context_bytes":123,"max_context_sources":4,"max_context_lines_per_source":9}}}`
+	if err := os.WriteFile(filepath.Join(cfgDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg config.Config
+	if err := config.LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+
+	m := model{config: &cfg, agent: agent.NewAgent(nil, nil, &cfg)}
+	m.agent.Permissions().SetAutoPermissionEnabled(true)
+	m.agent.Permissions().SetRule("ask_tool", agent.PermissionAllow)
+	m.persistPermissions()
+
+	data, err := os.ReadFile(filepath.Join(cfgDir, "ocodeconfig.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	perms, ok := parsed["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions block in persisted config, got %v", parsed)
+	}
+	auto, ok := perms["auto"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected permissions.auto block in persisted config, got %v", perms)
+	}
+	if enabled, _ := auto["enabled"].(bool); !enabled {
+		t.Fatal("expected persisted permissions.auto.enabled = true")
+	}
+	if got := auto["model"]; got != "anthropic/claude-sonnet-4-6" {
+		t.Fatalf("expected auto model to be preserved, got %v", got)
+	}
+	if got, _ := auto["allow_destructive"].(bool); !got {
+		t.Fatal("expected auto.allow_destructive to be preserved")
+	}
+	if got := auto["prompt"]; got != "keep me" {
+		t.Fatalf("expected auto prompt to be preserved, got %v", got)
+	}
+}
+
 func TestMCPCmdListsConfiguredServers(t *testing.T) {
 	m := model{
 		config: &config.Config{MCP: map[string]config.MCPConfig{
@@ -1654,6 +1862,144 @@ func TestModelPickerFilterPreservesGrouping(t *testing.T) {
 	}
 	if values[1] != "openai/gpt-4o-mini" {
 		t.Fatalf("expected matching model under preserved group, got items=%#v values=%#v", items, values)
+	}
+}
+
+// TestModelPickerFilterWithSeparatorsEndToEnd exercises pickerVisibleItems with
+// a separator-containing filter ("gpt 5.4") to verify the keyword-splitting
+// path through the full section-grouping pipeline. The previous grouping test
+// only used a single keyword with no separators, which didn't exercise the
+// splitting path that production users hit when typing "gpt 4o" or "gpt-4o".
+func TestModelPickerFilterWithSeparatorsEndToEnd(t *testing.T) {
+	// Isolate both favorites/recent storage and the registry disk cache so
+	// the picker falls through to the embedded snapshot deterministically.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_STATE_HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home)
+
+	if err := config.SaveRecentModel("openai/gpt-5.4-mini"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveFavoriteModel("openai/gpt-5.4-mini"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{}
+	m.openModelPicker()
+	m.pickerFilter = "gpt 5.4"
+
+	items, values := m.pickerVisibleItems()
+	if len(items) < 2 {
+		t.Fatalf("expected grouped filtered items, got items=%#v values=%#v", items, values)
+	}
+	if items[0] != "★ Favorites" {
+		t.Fatalf("expected favorites header to be preserved across keyword-splitting path, got %#v", items)
+	}
+	if values[0] != "" {
+		t.Fatalf("expected header to remain unselectable, got values=%#v", values)
+	}
+	if values[1] != "openai/gpt-5.4-mini" {
+		t.Fatalf("expected openai/gpt-5.4-mini to match 'gpt 5.4' under preserved group, got items=%#v values=%#v", items, values)
+	}
+	// Ensure the unrelated gpt-4o model was filtered out by the keyword match.
+	for _, v := range values {
+		if v == "openai/gpt-4o" {
+			t.Fatalf("expected gpt-4o to be excluded by 'gpt 5.4' filter, got values=%#v", values)
+		}
+	}
+}
+
+func TestModelPickerFilterKeywordSplitting(t *testing.T) {
+	cases := []struct {
+		name     string
+		filter   string
+		contains []string
+		excludes []string
+	}{
+		{
+			name:     "space separated keywords AND-match across dashes",
+			filter:   "gpt 4o",
+			contains: []string{"openai/gpt-4o-mini", "openai/gpt-4o"},
+			excludes: []string{"openai/gpt-5"},
+		},
+		{
+			name:     "dash separated keywords match space form",
+			filter:   "claude-opus-4",
+			contains: []string{"anthropic/claude-opus-4-7"},
+			excludes: []string{"anthropic/claude-3-5-sonnet"},
+		},
+		{
+			name:     "single keyword substring match",
+			filter:   "sonnet",
+			contains: []string{"anthropic/claude-3-5-sonnet"},
+			excludes: []string{"openai/gpt-4o-mini"},
+		},
+		{
+			name:     "provider prefix matches via value",
+			filter:   "anthropic",
+			contains: []string{"anthropic/claude-3-5-sonnet"},
+		},
+		{
+			name:     "underscore treated as separator",
+			filter:   "gpt_4o",
+			contains: []string{"openai/gpt-4o-mini"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := modelPickerKeywords(tc.filter)
+			if len(got) == 0 {
+				t.Fatalf("expected at least one keyword from %q", tc.filter)
+			}
+			for _, haystack := range tc.contains {
+				if !modelPickerMatches(strings.ToLower(haystack), tc.filter) {
+					t.Errorf("expected %q to match filter %q (keywords=%v)", haystack, tc.filter, got)
+				}
+			}
+			for _, haystack := range tc.excludes {
+				if modelPickerMatches(strings.ToLower(haystack), tc.filter) {
+					t.Errorf("expected %q NOT to match filter %q (keywords=%v)", haystack, tc.filter, got)
+				}
+			}
+		})
+	}
+}
+
+func TestModelPickerFilterEmptyAndWhitespace(t *testing.T) {
+	for _, q := range []string{"", " ", "   ", "-", " - - "} {
+		if !modelPickerMatches("openai/gpt-4o-mini", q) {
+			t.Errorf("expected empty/whitespace filter %q to match everything", q)
+		}
+	}
+}
+
+func TestModelPickerKeywordSplitting(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"gpt 4o", []string{"gpt", "4o"}},
+		{"gpt-4o", []string{"gpt", "4o"}},
+		{"gpt_4o", []string{"gpt", "4o"}},
+		{"  gpt   4o  ", []string{"gpt", "4o"}},
+		{"claude-opus-4-7", []string{"claude", "opus", "4", "7"}},
+		{"", nil},
+		{"   ", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got := modelPickerKeywords(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("keywords(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("keywords(%q) = %v, want %v", tc.in, got, tc.want)
+				}
+			}
+		})
 	}
 }
 

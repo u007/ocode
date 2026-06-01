@@ -55,9 +55,59 @@ type OcodeConfig struct {
 }
 
 type PermissionConfig struct {
-	Mode  string               `json:"mode,omitempty"`
-	Tools map[string]string    `json:"tools,omitempty"`
-	Bash  BashPermissionConfig `json:"bash,omitempty"`
+	Mode  string                `json:"mode,omitempty"`
+	Tools map[string]string     `json:"tools,omitempty"`
+	Bash  BashPermissionConfig  `json:"bash,omitempty"`
+	Auto  *AutoPermissionConfig `json:"auto,omitempty"`
+}
+
+// AutoPermissionConfig holds the LLM auto-permission layer state, described in
+// docs/superpowers/specs/2026-06-01-llm-auto-permission-design.md. The
+// auto-permission layer is OFF by default; when enabled, the agent consults a
+// configured small model to auto-grant or fall through to human Ask. The
+// permission model can only `allow` or `ask`; it cannot emit a deny-override,
+// cannot escalate the permission mode, and cannot widen past the static
+// guardrails (hard-blocks remain deterministic and final).
+type AutoPermissionConfig struct {
+	Enabled                  bool        `json:"enabled,omitempty"`
+	Model                    string      `json:"model,omitempty"`
+	AllowDestructive         bool        `json:"allow_destructive,omitempty"`
+	Prompt                   string      `json:"prompt,omitempty"`
+	MaxContextBytes          int         `json:"max_context_bytes,omitempty"`
+	MaxContextSources        int         `json:"max_context_sources,omitempty"`
+	MaxContextLinesPerSource int         `json:"max_context_lines_per_source,omitempty"`
+	Grants                   []AutoGrant `json:"grants,omitempty"`
+}
+
+type autoPermissionConfigFile struct {
+	Enabled                  *bool       `json:"enabled"`
+	Model                    *string     `json:"model"`
+	AllowDestructive         *bool       `json:"allow_destructive"`
+	Prompt                   *string     `json:"prompt"`
+	MaxContextBytes          *int        `json:"max_context_bytes"`
+	MaxContextSources        *int        `json:"max_context_sources"`
+	MaxContextLinesPerSource *int        `json:"max_context_lines_per_source"`
+	Grants                   []AutoGrant `json:"grants"`
+}
+
+type permissionConfigFile struct {
+	Mode  string                    `json:"mode,omitempty"`
+	Tools map[string]string         `json:"tools,omitempty"`
+	Bash  BashPermissionConfig      `json:"bash,omitempty"`
+	Auto  *autoPermissionConfigFile `json:"auto,omitempty"`
+}
+
+// AutoGrant is a typed, narrow, durable rule derived from a single tool/bash
+// invocation. Auto-permission does not invent or widen rule scope; the model
+// returns only a decision and reason, and Go derives one of these typed
+// entries before persisting.
+type AutoGrant struct {
+	Kind              string          `json:"kind"`
+	Tool              string          `json:"tool,omitempty"`
+	NormalizedArgs    json.RawMessage `json:"normalized_args,omitempty"`
+	NormalizedCommand string          `json:"normalized_command,omitempty"`
+	Destructive       bool            `json:"destructive,omitempty"`
+	Domain            string          `json:"domain,omitempty"`
 }
 
 type BashPermissionConfig struct {
@@ -94,16 +144,16 @@ type advisorConfigFile struct {
 }
 
 type ocodeConfigFile struct {
-	Compact           compactConfigFile `json:"compact"`
-	Advisor           advisorConfigFile `json:"advisor"`
-	Permissions       PermissionConfig  `json:"permissions"`
-	ExtraAllowedPaths []string          `json:"extra_allowed_paths,omitempty"`
-	Editor            string            `json:"editor,omitempty"`
-	EditorMode        string            `json:"editor_mode,omitempty"`
-	SmallModel        string            `json:"small_model,omitempty"`
-	CommitMsgModel    string            `json:"commit_msg_model,omitempty"`
-	CommitMsgPrompt   string            `json:"commit_msg_prompt,omitempty"`
-	TUI               tuiConfigFile     `json:"tui"`
+	Compact           compactConfigFile    `json:"compact"`
+	Advisor           advisorConfigFile    `json:"advisor"`
+	Permissions       permissionConfigFile `json:"permissions"`
+	ExtraAllowedPaths []string             `json:"extra_allowed_paths,omitempty"`
+	Editor            string               `json:"editor,omitempty"`
+	EditorMode        string               `json:"editor_mode,omitempty"`
+	SmallModel        string               `json:"small_model,omitempty"`
+	CommitMsgModel    string               `json:"commit_msg_model,omitempty"`
+	CommitMsgPrompt   string               `json:"commit_msg_prompt,omitempty"`
+	TUI               tuiConfigFile        `json:"tui"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -172,6 +222,16 @@ func defaultPermissionConfig() PermissionConfig {
 			"question":        "allow",
 		},
 		Bash: BashPermissionConfig{Prefixes: map[string]string{}, AutoAllowPrefixes: []string{}, PrefixModes: map[string]string{}},
+		Auto: &AutoPermissionConfig{
+			Enabled:                  false,
+			Model:                    "",
+			AllowDestructive:         false,
+			Prompt:                   "",
+			MaxContextBytes:          4096,
+			MaxContextSources:        2,
+			MaxContextLinesPerSource: 80,
+			Grants:                   nil,
+		},
 	}
 }
 
@@ -293,7 +353,7 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	return nil
 }
 
-func applyPermissionConfig(dst *PermissionConfig, src PermissionConfig) {
+func applyPermissionConfig(dst *PermissionConfig, src permissionConfigFile) {
 	if src.Mode != "" {
 		dst.Mode = src.Mode
 	}
@@ -315,6 +375,48 @@ func applyPermissionConfig(dst *PermissionConfig, src PermissionConfig) {
 	}
 	for k, v := range src.Bash.PrefixModes {
 		dst.Bash.PrefixModes[k] = v
+	}
+	// Auto block: when present in src, merge field-by-field so unset fields
+	// keep their default values (e.g. MaxContextBytes: 4096). A nil src.Auto
+	// means the user did not set the block in the file, so we leave the
+	// destination's defaults intact.
+	if src.Auto != nil {
+		applyAutoPermissionConfig(dst.Auto, src.Auto)
+	}
+}
+
+func applyAutoPermissionConfig(dst *AutoPermissionConfig, src *autoPermissionConfigFile) {
+	if dst == nil {
+		return
+	}
+	if src == nil {
+		return
+	}
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.Model != nil {
+		dst.Model = *src.Model
+	}
+	if src.AllowDestructive != nil {
+		dst.AllowDestructive = *src.AllowDestructive
+	}
+	if src.Prompt != nil {
+		dst.Prompt = *src.Prompt
+	}
+	if src.MaxContextBytes != nil {
+		dst.MaxContextBytes = *src.MaxContextBytes
+	}
+	if src.MaxContextSources != nil {
+		dst.MaxContextSources = *src.MaxContextSources
+	}
+	if src.MaxContextLinesPerSource != nil {
+		dst.MaxContextLinesPerSource = *src.MaxContextLinesPerSource
+	}
+	if src.Grants != nil {
+		// Replace (not append) — Grants is the persisted auto-grant list as
+		// derived by Go; the file is a complete snapshot of that list.
+		dst.Grants = append([]AutoGrant(nil), src.Grants...)
 	}
 }
 

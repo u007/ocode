@@ -35,3 +35,5 @@ build_script.sh
 # Web UI build artifacts
 web/node_modules/
 web/dist/assets/
+internal/agent/models-snapshot.json
+

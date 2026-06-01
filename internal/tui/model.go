@@ -981,7 +981,11 @@ func (m *model) switchAgent(name string) {
 	}
 }
 
-func newModel(sid string, cont bool, yolo bool) model {
+func newModel(opts ...RunOptions) model {
+	var o RunOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	cfg, _ := config.Load()
 	agent.ApplyAgentConfig(cfg)
 	refreshCustomCommands(cfg)
@@ -997,15 +1001,44 @@ func newModel(sid string, cont bool, yolo bool) model {
 		}
 	}
 
+	// Apply --permission-mode override before constructing the agent. When
+	// set explicitly (auto/off), we mutate cfg.Ocode.Permissions.Auto and
+	// persist so the choice survives across sessions. The mutation runs
+	// even when no model is configured; later agent construction picks it up.
+	permissionModeChanged := false
+	if cfg != nil && o.PermissionMode != "" {
+		switch strings.ToLower(o.PermissionMode) {
+		case "auto":
+			if cfg.Ocode.Permissions.Auto == nil {
+				cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true}
+			} else {
+				cfg.Ocode.Permissions.Auto.Enabled = true
+			}
+			permissionModeChanged = true
+		case "off":
+			if cfg.Ocode.Permissions.Auto == nil {
+				cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
+			} else {
+				cfg.Ocode.Permissions.Auto.Enabled = false
+			}
+			permissionModeChanged = true
+		default:
+			// unknown value: leave config untouched; caller will see a stderr note.
+		}
+	}
+	if permissionModeChanged {
+		_ = config.SaveOcodeConfig(&cfg.Ocode) // best-effort persist
+	}
+
 	// shouldLoad tracks whether the session ID was explicitly provided
 	// (via -session flag or -continue) vs auto-generated. We only attempt
 	// to load an existing session file when explicitly requested.
-	shouldLoad := sid != ""
+	shouldLoad := o.SessionID != ""
 
-	if cont {
+	if o.Continue {
 		sessions, _ := session.List()
 		if len(sessions) > 0 {
-			sid = sessions[0].ID
+			o.SessionID = sessions[0].ID
 			shouldLoad = true
 		}
 	}
@@ -1018,8 +1051,12 @@ func newModel(sid string, cont bool, yolo bool) model {
 		client := agent.NewClient(cfg, cfg.Model)
 		if client != nil {
 			a = agent.NewAgent(client, tools, cfg)
-			if yolo && a.Permissions() != nil {
-				a.Permissions().SetMode(agent.PermissionModeYOLO)
+			pm := a.Permissions()
+			if o.YOLO && pm != nil {
+				pm.SetMode(agent.PermissionModeYOLO)
+			}
+			if pm != nil && cfg.Ocode.Permissions.Auto != nil && cfg.Ocode.Permissions.Auto.Enabled {
+				pm.SetAutoPermissionEnabled(true)
 			}
 			a.LoadExternalTools(cfg)
 		}
@@ -1059,10 +1096,10 @@ func newModel(sid string, cont bool, yolo bool) model {
 	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	vp.SetContent(hintStyle.Render("  ocode v" + version.Version + " — opencode clone · type a message to begin\n"))
 
-	if sid == "" {
-		sid = time.Now().Format("2006-01-02-150405")
+	if o.SessionID == "" {
+		o.SessionID = time.Now().Format("2006-01-02-150405")
 	}
-	tool.SetTodoSession(sid)
+	tool.SetTodoSession(o.SessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
 
@@ -1072,7 +1109,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 		messages:     []message{},
 		config:       cfg,
 		agent:        a,
-		sessionID:    sid,
+		sessionID:    o.SessionID,
 		showThinking: true,
 		showSidebar:  true,
 		activeModel: func() string {
@@ -1176,7 +1213,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 	}
 
 	if shouldLoad {
-		sess, err := session.Load(sid)
+		sess, err := session.Load(o.SessionID)
 		if err == nil {
 			m.sessionTitle = sess.Title
 			if sess.Title != "" {
@@ -1193,7 +1230,7 @@ func newModel(sid string, cont bool, yolo bool) model {
 				m.restoredPendingScroll = true
 			}
 		} else {
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session %s: %v", sid, err)})
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session %s: %v", o.SessionID, err)})
 		}
 	}
 
@@ -5581,6 +5618,17 @@ func (m *model) persistPermissions() {
 	}
 	permissions := m.agent.Permissions().ExportConfig()
 	if m.config != nil {
+		if existing := m.config.Ocode.Permissions.Auto; existing != nil {
+			auto := *existing
+			if permissions.Auto != nil {
+				auto.Enabled = permissions.Auto.Enabled
+			} else {
+				auto.Enabled = m.agent.Permissions().AutoPermissionEnabled()
+			}
+			permissions.Auto = &auto
+		} else if m.agent.Permissions().AutoPermissionEnabled() {
+			permissions.Auto = &config.AutoPermissionConfig{Enabled: true}
+		}
 		m.config.Ocode.Permissions = permissions
 	}
 	if err := config.SaveOcodePermissions(permissions); err != nil {
@@ -7665,8 +7713,16 @@ func (m *model) renderStatus() string {
 		}
 	}
 	permissionMode := ""
-	if m.agent != nil && m.agent.Permissions() != nil && m.agent.Permissions().Mode() == agent.PermissionModeYOLO {
-		permissionMode = " | YOLO permissions"
+	if m.agent != nil && m.agent.Permissions() != nil {
+		switch m.agent.Permissions().Mode() {
+		case agent.PermissionModeYOLO:
+			permissionMode = " | YOLO permissions"
+		case agent.PermissionModeLocked:
+			permissionMode = " | locked permissions"
+		}
+		if m.agent.Permissions().AutoPermissionEnabled() {
+			permissionMode += " · auto-permission on"
+		}
 	}
 	compactState := ""
 	if m.compacting {

@@ -492,6 +492,47 @@ func TestAdvisorConfigLoadAppliesExplicitEnabledFalse(t *testing.T) {
 	}
 }
 
+func TestAutoPermissionConfigLoadAppliesExplicitFalseOverrides(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	globalDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalPath := filepath.Join(globalDir, "ocodeconfig.json")
+	if err := os.WriteFile(globalPath, []byte(`{"permissions":{"auto":{"enabled":true,"allow_destructive":true}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := t.TempDir()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "opencode.json"), []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "ocodeconfig.json"), []byte(`{"permissions":{"auto":{"enabled":false,"allow_destructive":false}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if cfg.Ocode.Permissions.Auto == nil {
+		t.Fatal("expected permissions.auto block to load")
+	}
+	if cfg.Ocode.Permissions.Auto.Enabled {
+		t.Fatal("expected project-level permissions.auto.enabled=false to override global true")
+	}
+	if cfg.Ocode.Permissions.Auto.AllowDestructive {
+		t.Fatal("expected project-level permissions.auto.allow_destructive=false to override global true")
+	}
+}
+
 func TestSaveAdvisorModel_RequiresProviderPrefix(t *testing.T) {
 	chdirTempForConfigTest(t)
 

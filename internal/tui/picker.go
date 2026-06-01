@@ -302,9 +302,34 @@ func (m *model) closePicker() {
 	m.input.Focus()
 }
 
+// modelPickerKeywords splits a model picker query into keywords, treating
+// whitespace and dashes as separators so e.g. "gpt 4o" and "gpt-4o" both
+// produce ["gpt", "4o"].
+func modelPickerKeywords(query string) []string {
+	return strings.FieldsFunc(query, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '-' || r == '_'
+	})
+}
+
+// modelPickerMatches reports whether `candidate` matches the user's filter
+// query using keyword-based AND-fuzzy matching: every whitespace/dash
+// separated keyword in the query must fuzzy-match the candidate.
+// `candidate` must already be lower-cased; the helper does not normalize it.
+func modelPickerMatches(lower, filter string) bool {
+	keywords := modelPickerKeywords(filter)
+	if len(keywords) == 0 {
+		return true
+	}
+	for _, kw := range keywords {
+		if fuzzyScore(lower, strings.ToLower(kw)) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (m model) pickerVisibleItems() ([]string, []string) {
 	if m.pickerKind == "model" && m.pickerFilter != "" {
-		lowerFilter := strings.ToLower(m.pickerFilter)
 		items := make([]string, 0, len(m.pickerItems))
 		values := make([]string, 0, len(m.pickerValues))
 		for i, item := range m.pickerItems {
@@ -324,7 +349,7 @@ func (m model) pickerVisibleItems() ([]string, []string) {
 					if value != "" {
 						candidate += " " + strings.ToLower(value)
 					}
-					if strings.Contains(candidate, lowerFilter) {
+					if modelPickerMatches(candidate, m.pickerFilter) {
 						sectionItems = append(sectionItems, m.pickerItems[j])
 						sectionValues = append(sectionValues, value)
 					}

@@ -75,24 +75,35 @@ func main() {
 
 	agent.PreloadRegistry()
 
-	sessionID := ""
-	cont := false
-	yolo := false
+	opts := tui.RunOptions{}
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-session":
 			if i+1 < len(os.Args) {
-				sessionID = os.Args[i+1]
+				opts.SessionID = os.Args[i+1]
 				i++
 			}
 		case "-continue":
-			cont = true
-		case "-yolo", "--yolo":
-			yolo = true
+			opts.Continue = true
+		case "-yolo", "--yolo", "--dangerously-skip-permissions":
+			// --dangerously-skip-permissions is the OpenCode-compatible alias
+			// for YOLO mode: auto-approve every permission request without
+			// prompting the user.
+			opts.YOLO = true
+		case "-permission-mode", "--permission-mode":
+			if i+1 < len(os.Args) {
+				mode := os.Args[i+1]
+				if mode != "auto" && mode != "off" {
+					fmt.Fprintf(os.Stderr, "ocode: invalid --permission-mode %q (want auto or off)\n", mode)
+					os.Exit(2)
+				}
+				opts.PermissionMode = mode
+				i++
+			}
 		}
 	}
 
-	if err := tui.Run(sessionID, cont, yolo); err != nil {
+	if err := tui.Run(opts); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

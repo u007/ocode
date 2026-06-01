@@ -759,11 +759,18 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 	}
 
 	if a.permissions != nil {
+		autoEnabled := a.permissions.AutoPermissionEnabled()
 		decision := a.permissions.Decide(name, args)
+		emitDebug("PERMISSION", a.permissionDecisionTrace(name, args, decision, autoEnabled))
 		if decision.Level == PermissionDeny {
 			return fmt.Sprintf("denied: tool %q is not permitted by permission rules", name), nil
 		}
 		if decision.Level == PermissionAsk {
+			if autoEnabled {
+				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_short_circuit tool=%s model=%s request=%s", name, a.autoPermissionModelName(), permissionRequestSummary(decision.Request)))
+				return a.executeToolCall(name, args)
+			}
+			emitDebug("PERMISSION", fmt.Sprintf("tier=human_ask tool=%s request=%s callback=%t", name, permissionRequestSummary(decision.Request), a.OnPermissionAsk != nil))
 			// When a permission callback is wired (sub-agents), ask the user
 			// synchronously and act on the answer. The PERMISSION_ASK: sentinel
 			// path is used only when no callback is set (the main agent's flow,
@@ -789,6 +796,55 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 	}
 
 	return a.executeToolCall(name, args)
+}
+
+func (a *Agent) autoPermissionModelName() string {
+	if a == nil || a.config == nil {
+		return "unavailable"
+	}
+	if auto := a.config.Ocode.Permissions.Auto; auto != nil {
+		if model := strings.TrimSpace(auto.Model); model != "" {
+			return model
+		}
+	}
+	if model := ResolveSmallModel(a.config); model != "" {
+		return model + " (resolved small model)"
+	}
+	return "unavailable"
+}
+
+func (a *Agent) permissionDecisionTrace(name string, args json.RawMessage, decision PermissionDecision, autoEnabled bool) string {
+	parts := []string{
+		"tier=static_decide",
+		"tool=" + name,
+		"level=" + string(decision.Level),
+		"auto_enabled=" + strconv.FormatBool(autoEnabled),
+		"mode=" + string(a.permissions.Mode()),
+	}
+	if decision.Request != nil {
+		parts = append(parts,
+			"scope="+string(decision.Request.Scope),
+			"rule="+decision.Request.Rule,
+			"request="+permissionRequestSummary(decision.Request),
+		)
+	} else {
+		parts = append(parts, "request=none")
+	}
+	if decision.Level == PermissionAsk && autoEnabled {
+		parts = append(parts, "auto_model="+a.autoPermissionModelName())
+	}
+	return strings.Join(parts, " ")
+}
+
+func permissionRequestSummary(req *PermissionRequest) string {
+	if req == nil {
+		return "none"
+	}
+	data, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Sprintf("marshal_error:%v", err)
+	}
+	return truncateDebugArgs(data, 240)
 }
 
 func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage) (string, error) {

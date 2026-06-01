@@ -10,7 +10,17 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-func Run(sessionID string, cont bool, yolo bool) error {
+// RunOptions controls startup behavior of the TUI. Fields are zero-value
+// safe: the empty string for PermissionMode leaves the loaded config value
+// untouched.
+type RunOptions struct {
+	SessionID     string
+	Continue      bool
+	YOLO          bool
+	PermissionMode string // "" | "auto" | "off"
+}
+
+func Run(opts RunOptions) error {
 	// Redirect the standard library logger into the debug panel before anything
 	// runs. Once bubbletea enters the alt-screen, any stray log/os.Stderr write
 	// paints over the frame and corrupts it; routing log here keeps those
@@ -18,7 +28,7 @@ func Run(sessionID string, cont bool, yolo bool) error {
 	log.SetFlags(0)
 	log.SetOutput(debugLogWriter{})
 
-	m := newModel(sessionID, cont, yolo)
+	m := newModel(opts)
 
 	if m.config != nil {
 		if err := validateStartupEditorConfig(&m.config.Ocode); err != nil {

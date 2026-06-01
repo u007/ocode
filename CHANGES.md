@@ -6,6 +6,17 @@
 - **Context-Aware Cancellation** — `chatWithDelta` now derives a `context.Context` from the agent's stop channel, interrupting in-flight HTTP requests when the user presses Escape. New `ChatWithContext()` on `GenericClient` threads context through all provider chat methods (`chatAnthropic`, `chatOpenAI`, `chatCopilot`, `chatOpenAIResponses`). New `ResetCancellation()` and `StopCh()` methods on Agent.
 - **Agent Fallback for Unknown Sub-Agents** — `TaskTool` now silently falls back to the built-in `general` agent when an explicitly-named agent is not found, instead of returning an error. A warning is prepended to the result.
 - **`/init` Prompt Template** — `/init` now sends a project-analysis prompt to the LLM instead of writing a stub AGENTS.md. Supports an optional focus argument (`/init <topic>`).
+- **Embedded Models Snapshot** — `internal/agent/models-snapshot.json` is now populated from `https://models.dev/api.json` and embedded into the binary via `//go:embed`. `loadRegistry` uses the snapshot as a fallback when the network is unreachable or the user has not yet hit the API. The snapshot adds ~492KB to the binary; trim if size becomes a concern.
+- **Custom Registry Path** — Set `OPENCODE_MODELS_PATH=/path/to/models.json` to load the model registry from a local file (same JSON shape as `https://models.dev/api.json`). Useful for air-gapped environments and for pinning registry contents in CI. `loadRegistry` consults this env var before the embedded snapshot.
+- **CLI `--permission-mode auto|off`** — New top-level flag toggles the LLM auto-permission layer on or off for the session. Persists to `permissions.auto.enabled` in `ocodeconfig.json` so the choice survives across sessions. TUI status bar now surfaces `auto-permission on` alongside YOLO/locked indicators. Hard-blocks remain deterministic; the auto layer only governs Ask fallthrough.
+- **CLI `--dangerously-skip-permissions`** — Top-level alias for `-yolo`/`--yolo`. Skips every permission prompt and auto-approves requests that aren't explicitly denied. Works in both the interactive TUI and the `run` subcommand.
+
+### Changed
+- **Model Registry Cache TTL** — `modelsCacheTTL` reduced from 24h to 5min. With the background hourly refresh loop removed, the registry now refreshes lazily on each `loadRegistry` call after 5min. Trade-off: more network calls in long-running sessions (one fetch per 5min of activity) for simpler state — no background goroutine, no double refresh path. Custom registries via `OPENCODE_MODELS_PATH` are unaffected.
+- **Picker Filter Algorithm** — Model picker filtering now splits the query on whitespace, dashes, and underscores and requires every keyword to fuzzy-match. `"gpt 4o"`, `"gpt-4o"`, and `"gpt_4o"` all match the same models. Previously, filter was a simple case-insensitive substring search.
+
+### Removed
+- **Hardcoded Model Fallback** — `ProviderModels(provider)` and `AllProviderModels()` no longer return a hardcoded fallback list when the registry is unavailable. Offline/air-gapped users will see the empty picker state. To work around this, point `OPENCODE_MODELS_PATH` at a local copy of `https://models.dev/api.json` (or rely on the embedded snapshot, which is now populated).
 
 ### Changed
 - **WaitTool Uses Live Stop Channel** — `WaitTool` now holds a reference to the parent `Agent` and reads `StopCh()` at call time, eliminating stale stop-channel references.

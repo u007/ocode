@@ -1,6 +1,7 @@
 package agent
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,10 +16,14 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/auth"
 )
 
+//go:embed models-snapshot.json
+var modelsSnapshotData []byte
+
 const (
 	modelsDevURL    = "https://models.dev/api.json"
-	modelsCacheTTL  = 24 * time.Hour
+	modelsCacheTTL  = 5 * time.Minute
 	modelsCacheFile = "models.json"
+	envModelsPath   = "OPENCODE_MODELS_PATH"
 )
 
 type modelLimit struct {
@@ -111,6 +116,32 @@ func fetchRemote() (map[string]providerEntry, error) {
 	return parsed, nil
 }
 
+func loadFromEnvPath() (map[string]providerEntry, bool) {
+	path := os.Getenv(envModelsPath)
+	if path == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		emitDebug("AGENT", fmt.Sprintf("%s read failed: %v", envModelsPath, err))
+		return nil, false
+	}
+	var parsed map[string]providerEntry
+	if err := json.Unmarshal(data, &parsed); err != nil || len(parsed) == 0 {
+		emitDebug("AGENT", fmt.Sprintf("%s parse failed: %v", envModelsPath, err))
+		return nil, false
+	}
+	return parsed, true
+}
+
+func loadFromSnapshot() (map[string]providerEntry, bool) {
+	var parsed map[string]providerEntry
+	if err := json.Unmarshal(modelsSnapshotData, &parsed); err != nil || len(parsed) == 0 {
+		return nil, false
+	}
+	return parsed, true
+}
+
 func loadRegistry() map[string]providerEntry {
 	registry.mu.RLock()
 	if registry.data != nil && time.Since(registry.fetchedAt) < modelsCacheTTL {
@@ -122,6 +153,22 @@ func loadRegistry() map[string]providerEntry {
 
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
+
+	if registry.data != nil && time.Since(registry.fetchedAt) < modelsCacheTTL {
+		return registry.data
+	}
+
+	if data, ok := loadFromEnvPath(); ok {
+		registry.data = data
+		registry.fetchedAt = time.Now()
+		return data
+	}
+
+	if data, ok := loadFromSnapshot(); ok {
+		registry.data = data
+		registry.fetchedAt = time.Now()
+		return data
+	}
 
 	if cached, modTime, err := loadCache(); err == nil && time.Since(modTime) < modelsCacheTTL {
 		registry.data = cached
@@ -171,21 +218,16 @@ func RegistryReady() bool {
 	return registrySnapshotIfReady() != nil
 }
 
-// ProviderModels returns model IDs for a provider from models.dev, falling
-// back to a small hardcoded list on failure.
+// ProviderModels returns model IDs for a provider from the loaded registry.
+// Returns nil if the registry is not available.
 func ProviderModels(provider string) []string {
-	if models := providerModelsFromRegistry(provider); len(models) > 0 {
-		return models
-	}
-	return fallbackProviderModels(provider)
+	return providerModelsFromRegistry(provider)
 }
 
 // AllProviderModels returns opencode-style provider/model IDs for model pickers.
+// Returns nil if the registry is not available.
 func AllProviderModels() []string {
-	if models := allProviderModelsFromRegistry(); len(models) > 0 {
-		return models
-	}
-	return fallbackAllProviderModels()
+	return allProviderModelsFromRegistry()
 }
 
 // ModelWindow returns the context window size for a given model ID in
@@ -326,37 +368,6 @@ func FetchLMStudioModels() LMStudioResult {
 
 func fetchLMStudioModels() []string {
 	return FetchLMStudioModels().Models
-}
-
-func fallbackProviderModels(provider string) []string {
-	switch provider {
-	case "anthropic":
-		return []string{"claude-3-5-sonnet-20241022", "claude-3-opus-20240229", "claude-3-haiku-20240307"}
-	case "deepseek":
-		return []string{"deepseek-chat", "deepseek-reasoner"}
-	case "google":
-		return []string{"gemini-1.5-pro", "gemini-1.5-flash"}
-	case "opencode":
-		return []string{"gpt-5.1-codex", "gpt-5.1", "claude-sonnet-4-5"}
-	case "opencode-go":
-		return []string{"glm-5.1", "qwen3.6-plus", "deepseek-v4-pro"}
-	case "openrouter":
-		return []string{"openai/gpt-4o", "anthropic/claude-3.5-sonnet", "meta-llama/llama-3.1-70b-instruct"}
-	default:
-		return []string{"gpt-4o", "gpt-4o-mini", "o1-preview"}
-	}
-}
-
-func fallbackAllProviderModels() []string {
-	providers := []string{"anthropic", "deepseek", "google", "openai", "opencode", "opencode-go", "openrouter"}
-	models := make([]string, 0)
-	for _, provider := range providers {
-		for _, model := range fallbackProviderModels(provider) {
-			models = append(models, provider+"/"+model)
-		}
-	}
-	sort.Strings(models)
-	return models
 }
 
 // AllProviders returns provider IDs known to the registry (or empty if unavailable).

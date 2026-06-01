@@ -67,15 +67,16 @@ type pathPatternEntry struct {
 }
 
 type PermissionManager struct {
-	mode            PermissionMode
-	rules           map[string]PermissionLevel
-	patterns        []patternRule
-	pathPatterns    map[string][]pathPatternEntry // toolName → path-glob patterns
-	bashPrefixes    map[string]PermissionLevel
-	bashAutoAllow   map[string]bool
-	bashPrefixModes map[string]string
-	workDir         string
-	webfetchDomains map[string]PermissionLevel
+	mode                  PermissionMode
+	rules                 map[string]PermissionLevel
+	patterns              []patternRule
+	pathPatterns          map[string][]pathPatternEntry // toolName → path-glob patterns
+	bashPrefixes          map[string]PermissionLevel
+	bashAutoAllow         map[string]bool
+	bashPrefixModes       map[string]string
+	workDir               string
+	webfetchDomains       map[string]PermissionLevel
+	autoPermissionEnabled bool
 }
 
 type patternRule struct {
@@ -138,10 +139,10 @@ var bashAutoAllowPrefixes = map[string]bool{
 	"shasum":    true,
 	"cksum":     true,
 	// Binary inspection
-	"xxd":      true,
-	"hexdump":  true,
-	"od":       true,
-	"strings":  true,
+	"xxd":     true,
+	"hexdump": true,
+	"od":      true,
+	"strings": true,
 	// Structured data
 	"jq": true,
 	"yq": true,
@@ -268,68 +269,68 @@ var bashSubcommandAllow = map[string]bool{
 	"cargo version":  true,
 	"cargo run":      true,
 	// Python / TS type-checkers / formatters (project-scoped tools)
-	"pytest":         true,
-	"ruff":           true,
-	"mypy":           true,
-	"basedpyright":   true,
-	"tsc":            true,
-	"tsgo":           true,
-	"eslint":         true,
-	"prettier":       true,
-	"biome":          true,
-	"vitest":         true,
+	"pytest":       true,
+	"ruff":         true,
+	"mypy":         true,
+	"basedpyright": true,
+	"tsc":          true,
+	"tsgo":         true,
+	"eslint":       true,
+	"prettier":     true,
+	"biome":        true,
+	"vitest":       true,
 	// Docker — read-only inspection
-	"docker ps":              true,
-	"docker images":          true,
-	"docker logs":            true,
-	"docker inspect":         true,
-	"docker version":         true,
-	"docker info":            true,
-	"docker history":         true,
-	"docker port":            true,
-	"docker top":             true,
-	"docker stats":           true,
-	"docker compose ps":      true,
-	"docker compose logs":    true,
-	"docker compose config":  true,
-	"docker compose top":     true,
-	"docker compose port":    true,
-	"docker compose images":  true,
-	"docker compose ls":      true,
+	"docker ps":             true,
+	"docker images":         true,
+	"docker logs":           true,
+	"docker inspect":        true,
+	"docker version":        true,
+	"docker info":           true,
+	"docker history":        true,
+	"docker port":           true,
+	"docker top":            true,
+	"docker stats":          true,
+	"docker compose ps":     true,
+	"docker compose logs":   true,
+	"docker compose config": true,
+	"docker compose top":    true,
+	"docker compose port":   true,
+	"docker compose images": true,
+	"docker compose ls":     true,
 	// Node package managers — project-trusted script runners + read commands.
 	// Same trust model as `make`: scripts can do anything, but they live in
 	// the project's manifest.
-	"npm run":      true,
-	"npm test":     true,
-	"npm list":     true,
-	"npm ls":       true,
-	"npm outdated": true,
-	"npm view":     true,
-	"npm info":     true,
-	"npm audit":    true,
-	"npm fund":     true,
-	"npm doctor":   true,
-	"npm ping":     true,
-	"npm search":   true,
-	"pnpm run":     true,
-	"pnpm test":    true,
-	"pnpm list":    true,
-	"pnpm ls":      true,
+	"npm run":       true,
+	"npm test":      true,
+	"npm list":      true,
+	"npm ls":        true,
+	"npm outdated":  true,
+	"npm view":      true,
+	"npm info":      true,
+	"npm audit":     true,
+	"npm fund":      true,
+	"npm doctor":    true,
+	"npm ping":      true,
+	"npm search":    true,
+	"pnpm run":      true,
+	"pnpm test":     true,
+	"pnpm list":     true,
+	"pnpm ls":       true,
 	"pnpm outdated": true,
-	"pnpm view":    true,
-	"pnpm info":    true,
-	"pnpm audit":   true,
-	"pnpm why":     true,
-	"pnpm doctor":  true,
-	"yarn run":     true,
-	"yarn test":    true,
-	"yarn list":    true,
+	"pnpm view":     true,
+	"pnpm info":     true,
+	"pnpm audit":    true,
+	"pnpm why":      true,
+	"pnpm doctor":   true,
+	"yarn run":      true,
+	"yarn test":     true,
+	"yarn list":     true,
 	"yarn outdated": true,
-	"yarn info":    true,
-	"yarn audit":   true,
-	"yarn why":     true,
-	"bun run":      true,
-	"bun test":     true,
+	"yarn info":     true,
+	"yarn audit":    true,
+	"yarn why":      true,
+	"bun run":       true,
+	"bun test":      true,
 	// make: project-trusted, all targets (same risk model as before).
 	"make": true,
 }
@@ -423,6 +424,11 @@ func (pm *PermissionManager) LoadFromConfig(cfg map[string]interface{}) {
 func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 	if cfg.Mode != "" {
 		pm.SetMode(PermissionMode(cfg.Mode))
+	}
+	if cfg.Auto != nil {
+		pm.SetAutoPermissionEnabled(cfg.Auto.Enabled)
+	} else {
+		pm.SetAutoPermissionEnabled(false)
 	}
 	for k, v := range cfg.Tools {
 		level := PermissionLevel(v)
@@ -928,6 +934,26 @@ func (pm *PermissionManager) SetMode(mode PermissionMode) {
 	}
 }
 
+// SetAutoPermissionEnabled toggles the LLM auto-permission layer at runtime.
+// The flag is independent of mode: YOLO and locked modes bypass Ask fallthrough
+// regardless of this state, and HandleToolCall short-circuits Ask decisions when
+// the auto layer is on.
+func (pm *PermissionManager) SetAutoPermissionEnabled(enabled bool) {
+	if pm == nil {
+		return
+	}
+	pm.autoPermissionEnabled = enabled
+}
+
+// AutoPermissionEnabled reports whether the LLM auto-permission layer is
+// currently engaged. Returns false when pm is nil.
+func (pm *PermissionManager) AutoPermissionEnabled() bool {
+	if pm == nil {
+		return false
+	}
+	return pm.autoPermissionEnabled
+}
+
 func (pm *PermissionManager) SetWorkDir(path string) {
 	pm.workDir = filepath.Clean(path)
 }
@@ -951,15 +977,16 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 	}
 
 	clone := &PermissionManager{
-		mode:            pm.Mode(),
-		rules:           make(map[string]PermissionLevel, len(pm.rules)),
-		patterns:        append([]patternRule(nil), pm.patterns...),
-		pathPatterns:    make(map[string][]pathPatternEntry, len(pm.pathPatterns)),
-		bashPrefixes:    make(map[string]PermissionLevel, len(pm.bashPrefixes)),
-		bashAutoAllow:   make(map[string]bool, len(pm.bashAutoAllow)),
-		bashPrefixModes: make(map[string]string, len(pm.bashPrefixModes)),
-		workDir:         pm.workDir,
-		webfetchDomains: make(map[string]PermissionLevel, len(pm.webfetchDomains)),
+		mode:                  pm.Mode(),
+		rules:                 make(map[string]PermissionLevel, len(pm.rules)),
+		patterns:              append([]patternRule(nil), pm.patterns...),
+		pathPatterns:          make(map[string][]pathPatternEntry, len(pm.pathPatterns)),
+		bashPrefixes:          make(map[string]PermissionLevel, len(pm.bashPrefixes)),
+		bashAutoAllow:         make(map[string]bool, len(pm.bashAutoAllow)),
+		bashPrefixModes:       make(map[string]string, len(pm.bashPrefixModes)),
+		workDir:               pm.workDir,
+		webfetchDomains:       make(map[string]PermissionLevel, len(pm.webfetchDomains)),
+		autoPermissionEnabled: pm.autoPermissionEnabled,
 	}
 	for k, v := range pm.rules {
 		clone.rules[k] = v
@@ -1035,6 +1062,10 @@ func (pm *PermissionManager) ExportConfig() config.PermissionConfig {
 		}
 		modes[k] = v
 	}
+	var auto *config.AutoPermissionConfig
+	if pm.AutoPermissionEnabled() {
+		auto = &config.AutoPermissionConfig{Enabled: true}
+	}
 	return config.PermissionConfig{
 		Mode:  string(pm.Mode()),
 		Tools: tools,
@@ -1043,6 +1074,7 @@ func (pm *PermissionManager) ExportConfig() config.PermissionConfig {
 			AutoAllowPrefixes: autoAllow,
 			PrefixModes:       modes,
 		},
+		Auto: auto,
 	}
 }
 
@@ -1333,12 +1365,12 @@ func IsAllowedReviewWritePath(path string) bool {
 type shellTokenType int
 
 const (
-	tokWord shellTokenType = iota
-	tokOp                  // &&, ||, ;, &, |
-	tokRedir               // >, >>, <, 2>, &>, etc.
-	tokSubst               // $(...) or `...`
-	tokLeftParen           // (
-	tokRightParen          // )
+	tokWord       shellTokenType = iota
+	tokOp                        // &&, ||, ;, &, |
+	tokRedir                     // >, >>, <, 2>, &>, etc.
+	tokSubst                     // $(...) or `...`
+	tokLeftParen                 // (
+	tokRightParen                // )
 )
 
 type shellToken struct {

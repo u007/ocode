@@ -90,8 +90,6 @@ func TestApplySpecModel_ClearsSamplingParamsWhenSpecHasNone(t *testing.T) {
 	}
 }
 
-func floatPtr(v float64) *float64 { return &v }
-
 func containsAny(s string, subs ...string) bool {
 	for _, sub := range subs {
 		for i := 0; i+len(sub) <= len(s); i++ {
@@ -113,5 +111,96 @@ func TestApplySpecModel_ClearsPreloadedModelContextOnClientSwap(t *testing.T) {
 	a.applySpecModel(&AgentSpec{Name: "swap", Model: "openai/gpt-4o"})
 	if a.preloadedModelContext != "" {
 		t.Fatalf("expected preloadedModelContext to be cleared on model swap, got %q", a.preloadedModelContext)
+	}
+}
+
+func TestDefaultTemperatureMinimaxM2(t *testing.T) {
+	tests := []string{
+		"minimax/minimax-m2.5",
+		"minimax/minimax-m2.7",
+		"minimax/minimax-m2",
+	}
+	for _, m := range tests {
+		v := defaultTemperature(m)
+		if v == nil || *v != 1.0 {
+			t.Errorf("defaultTemperature(%q) = %v, want 1.0", m, v)
+		}
+	}
+}
+
+func TestDefaultTemperatureQwen(t *testing.T) {
+	v := defaultTemperature("qwen/qwen3.7-max")
+	if v == nil || *v != 0.55 {
+		t.Errorf("defaultTemperature(qwen/qwen3.7-max) = %v, want 0.55", v)
+	}
+}
+
+func TestDefaultTemperatureUnset(t *testing.T) {
+	if v := defaultTemperature("claude-sonnet-4-6"); v != nil {
+		t.Errorf("defaultTemperature(claude) = %v, want nil", v)
+	}
+}
+
+func TestDefaultTopP(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"minimax/minimax-m2.5", 0.95},
+		{"gemini/gemini-2.0-flash", 0.95},
+		{"kimi/kimi-k2.5", 0.95},
+		{"kimi/kimi-k2p5", 0.95},
+		{"kimi/kimi-k2-5", 0.95},
+	}
+	for _, tc := range tests {
+		v := defaultTopP(tc.model)
+		if v == nil || *v != tc.want {
+			t.Errorf("defaultTopP(%q) = %v, want %v", tc.model, v, tc.want)
+		}
+	}
+}
+
+func TestDefaultTopPUnset(t *testing.T) {
+	if v := defaultTopP("claude-sonnet-4-6"); v != nil {
+		t.Errorf("defaultTopP(claude) = %v, want nil", v)
+	}
+}
+
+func TestDefaultTopKMinimaxM2Dot(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"minimax/minimax-m2.5", 40},
+		{"minimax/minimax-m2.1", 40},
+		{"minimax/minimax-m2.7", 40},
+		{"minimax/minimax-m25", 40},
+		{"minimax/minimax-m21", 40},
+	}
+	for _, tc := range tests {
+		v := defaultTopK(tc.model)
+		if v == nil || *v != tc.want {
+			t.Errorf("defaultTopK(%q) = %v, want %v", tc.model, v, tc.want)
+		}
+	}
+}
+
+func TestDefaultTopKMinimaxM2Other(t *testing.T) {
+	v := defaultTopK("minimax/minimax-m2")
+	if v == nil || *v != 20 {
+		t.Errorf("defaultTopK(minimax/minimax-m2) = %v, want 20", v)
+	}
+}
+
+func TestDefaultTopKGemini(t *testing.T) {
+	v := defaultTopK("gemini/gemini-2.0-flash")
+	if v == nil || *v != 64 {
+		t.Errorf("defaultTopK(gemini) = %v, want 64", v)
+	}
+}
+
+func TestDefaultTopKUnset(t *testing.T) {
+	if v := defaultTopK("claude-sonnet-4-6"); v != nil {
+		t.Errorf("defaultTopK(claude) = %v, want nil", v)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync/atomic"
@@ -359,24 +361,6 @@ func TestNewClientUsesOpenCodeGoEndpoint(t *testing.T) {
 	}
 	if got.BaseURL != "https://opencode.ai/zen/go/v1" {
 		t.Fatalf("expected opencode-go base URL, got %q", got.BaseURL)
-	}
-}
-
-func TestFallbackAllProviderModelsIncludesDeepSeek(t *testing.T) {
-	models := fallbackAllProviderModels()
-	want := map[string]bool{
-		"deepseek/deepseek-chat": false,
-		"opencode-go/glm-5.1":    false,
-	}
-	for _, model := range models {
-		if _, ok := want[model]; ok {
-			want[model] = true
-		}
-	}
-	for model, found := range want {
-		if !found {
-			t.Fatalf("expected %s in fallback list, got %#v", model, models)
-		}
 	}
 }
 
@@ -1102,6 +1086,60 @@ func TestHandleToolCallEmitsSentinelWithoutCallback(t *testing.T) {
 	}
 }
 
+func TestHandleToolCallAutoPermissionBypassesAsk(t *testing.T) {
+	mockTool := &MockTool{name: "ask_tool", result: "executed"}
+	cfg := &config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
+	a := NewAgent(nil, nil, cfg)
+	a.Permissions().SetRule("ask_tool", PermissionAsk)
+	a.Permissions().SetAutoPermissionEnabled(true)
+	a.AddTools([]tool.Tool{mockTool})
+
+	prev := DebugAppend
+	t.Cleanup(func() { DebugAppend = prev })
+	var logs []string
+	DebugAppend = func(kind, msg string) {
+		if kind == "PERMISSION" {
+			logs = append(logs, msg)
+		}
+	}
+
+	called := false
+	a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+		called = true
+		return PermissionResponse{Level: PermissionDeny}
+	}
+
+	res, err := a.HandleToolCall("ask_tool", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("permission callback should not run when auto-permission is enabled")
+	}
+	if res != "executed" {
+		t.Fatalf("expected auto-permission to execute tool, got %q", res)
+	}
+	if strings.HasPrefix(res, "PERMISSION_ASK:") {
+		t.Fatal("sentinel should not be emitted when auto-permission is enabled")
+	}
+	var sawStatic, sawAuto bool
+	for _, logLine := range logs {
+		if strings.Contains(logLine, "tier=static_decide") && strings.Contains(logLine, "request={\"tool_name\":\"ask_tool\"") {
+			sawStatic = true
+		}
+		if strings.Contains(logLine, "tier=auto_short_circuit") && strings.Contains(logLine, "model=anthropic/claude-sonnet-4-6") && strings.Contains(logLine, "request={\"tool_name\":\"ask_tool\"") {
+			sawAuto = true
+		}
+	}
+	if !sawStatic {
+		t.Fatalf("expected static_decide permission trace, got %v", logs)
+	}
+	if !sawAuto {
+		t.Fatalf("expected auto_short_circuit trace with model and request, got %v", logs)
+	}
+}
+
 type MockToolClient struct {
 	responses []*Message
 	idx       int
@@ -1394,4 +1432,151 @@ func TestModelSupportsThinkingUsesModelsDevReasoningFlag(t *testing.T) {
 	if ModelSupportsThinking("anthropic/claude-3-opus-20240229") {
 		t.Fatal("expected models.dev false flag to override fallback heuristics")
 	}
+}
+
+// withRegistryState replaces registry.data and registry.fetchedAt for the
+// duration of the test, restoring the prior values via t.Cleanup.
+func withRegistryState(t *testing.T, data map[string]providerEntry, fetchedAt time.Time) {
+	t.Helper()
+	registry.mu.Lock()
+	prevData := registry.data
+	prevFetchedAt := registry.fetchedAt
+	registry.data = data
+	registry.fetchedAt = fetchedAt
+	registry.mu.Unlock()
+	t.Cleanup(func() {
+		registry.mu.Lock()
+		registry.data = prevData
+		registry.fetchedAt = prevFetchedAt
+		registry.mu.Unlock()
+	})
+}
+
+func TestLoadFromEnvPathHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "models.json")
+	want := map[string]providerEntry{
+		"openai": {ID: "openai", Models: map[string]modelEntry{
+			"gpt-test": {ID: "gpt-test", Reasoning: false, Limit: modelLimit{Context: 8192}},
+		}},
+	}
+	b, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envModelsPath, path)
+
+	got, ok := loadFromEnvPath()
+	if !ok {
+		t.Fatal("expected loadFromEnvPath to succeed with valid JSON file")
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("env path data mismatch:\n got=%#v\nwant=%#v", got, want)
+	}
+}
+
+func TestLoadFromEnvPathEmptyAndInvalid(t *testing.T) {
+	t.Run("unset", func(t *testing.T) {
+		t.Setenv(envModelsPath, "")
+		if data, ok := loadFromEnvPath(); ok || data != nil {
+			t.Fatalf("expected (nil, false) for unset env, got (%#v, %v)", data, ok)
+		}
+	})
+	t.Run("missing file", func(t *testing.T) {
+		t.Setenv(envModelsPath, filepath.Join(t.TempDir(), "does-not-exist.json"))
+		if data, ok := loadFromEnvPath(); ok || data != nil {
+			t.Fatalf("expected (nil, false) for missing file, got (%#v, %v)", data, ok)
+		}
+	})
+	t.Run("malformed json", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "bad.json")
+		if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(envModelsPath, path)
+		if data, ok := loadFromEnvPath(); ok || data != nil {
+			t.Fatalf("expected (nil, false) for malformed json, got (%#v, %v)", data, ok)
+		}
+	})
+	t.Run("empty object", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "empty.json")
+		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(envModelsPath, path)
+		if data, ok := loadFromEnvPath(); ok || data != nil {
+			t.Fatalf("expected (nil, false) for empty object, got (%#v, %v)", data, ok)
+		}
+	})
+}
+
+func TestLoadFromSnapshotPopulated(t *testing.T) {
+	if len(modelsSnapshotData) == 0 {
+		t.Fatal("expected embedded snapshot to be non-empty")
+	}
+	data, ok := loadFromSnapshot()
+	if !ok {
+		t.Fatal("expected loadFromSnapshot to return ok=true for the populated embedded snapshot")
+	}
+	if _, ok := data["openai"]; !ok {
+		t.Fatalf("expected embedded snapshot to contain openai provider, got keys: %v", keysOf(data))
+	}
+	if _, ok := data["openai"].Models["gpt-5.4-mini"]; !ok {
+		t.Fatalf("expected embedded snapshot to contain openai/gpt-5.4-mini, got openai models: %v", keysOf(data["openai"].Models))
+	}
+}
+
+func TestLoadRegistryEnvWinsOverSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "models.json")
+	want := map[string]providerEntry{
+		"custom": {ID: "custom", Models: map[string]modelEntry{
+			"my-model": {ID: "my-model", Reasoning: false, Limit: modelLimit{Context: 4096}},
+		}},
+	}
+	b, _ := json.Marshal(want)
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(envModelsPath, path)
+	// Force the registry to think its in-memory data is stale so the loader
+	// re-resolves through env -> snapshot -> cache -> remote.
+	withRegistryState(t, nil, time.Time{})
+
+	got := loadRegistry()
+	if got == nil {
+		t.Fatal("expected loadRegistry to return data from OPENCODE_MODELS_PATH")
+	}
+	if _, ok := got["custom"]; !ok {
+		t.Fatalf("expected env-var provider 'custom' to win over snapshot, got keys: %v", keysOf(got))
+	}
+}
+
+func TestLoadRegistrySnapshotWinsOverCache(t *testing.T) {
+	// HOME temp dir ensures no leftover cache file is used.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home) // windows
+	t.Setenv(envModelsPath, "")
+	withRegistryState(t, nil, time.Time{})
+
+	got := loadRegistry()
+	if got == nil {
+		t.Fatal("expected loadRegistry to return data from the embedded snapshot when no env var is set and no cache exists")
+	}
+	if _, ok := got["openai"]; !ok {
+		t.Fatalf("expected snapshot-derived data to contain openai, got keys: %v", keysOf(got))
+	}
+}
+
+func keysOf[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

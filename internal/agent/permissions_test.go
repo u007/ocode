@@ -433,6 +433,25 @@ func TestPermissions_BashAutoAllow_NeverAutoModeAsks(t *testing.T) {
 	}
 }
 
+func TestPermissions_ExportConfigPreservesAutoPermissionEnabled(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetAutoPermissionEnabled(true)
+
+	exported := pm.ExportConfig()
+	if exported.Auto == nil {
+		t.Fatal("expected exported auto block")
+	}
+	if !exported.Auto.Enabled {
+		t.Fatal("expected exported auto.enabled to be true")
+	}
+
+	roundTrip := NewPermissionManager()
+	roundTrip.LoadFromOcode(exported)
+	if !roundTrip.AutoPermissionEnabled() {
+		t.Fatal("expected LoadFromOcode to restore auto-permission enabled state")
+	}
+}
+
 func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 	workDir := t.TempDir()
 	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
@@ -548,5 +567,43 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 			t.Fatalf("expected ask for compound command with unsafe subcommand, got %s", dec2.Level)
 		}
 	})
-}
 
+	t.Run("auto_permission_default_off", func(t *testing.T) {
+		pm := NewPermissionManager()
+		if pm.AutoPermissionEnabled() {
+			t.Fatal("expected new PermissionManager to default to auto-permission off")
+		}
+	})
+
+	t.Run("auto_permission_toggle", func(t *testing.T) {
+		pm := NewPermissionManager()
+		pm.SetAutoPermissionEnabled(true)
+		if !pm.AutoPermissionEnabled() {
+			t.Fatal("expected auto-permission enabled after SetAutoPermissionEnabled(true)")
+		}
+		pm.SetAutoPermissionEnabled(false)
+		if pm.AutoPermissionEnabled() {
+			t.Fatal("expected auto-permission disabled after SetAutoPermissionEnabled(false)")
+		}
+	})
+
+	t.Run("auto_permission_setter_nil_safe", func(t *testing.T) {
+		// nil receiver must not panic; getter on nil returns false.
+		var pm *PermissionManager
+		pm.SetAutoPermissionEnabled(true)
+		if pm.AutoPermissionEnabled() {
+			t.Fatal("expected nil PermissionManager to report auto-permission off")
+		}
+	})
+
+	t.Run("auto_permission_does_not_bypass_hard_blocks", func(t *testing.T) {
+		// Hard-blocks must remain deterministic. Toggling auto-permission
+		// on must not turn a hard-blocked command into an allow.
+		pm := NewPermissionManager()
+		pm.SetAutoPermissionEnabled(true)
+		dec := pm.Decide("bash", json.RawMessage(`{"command":"rm -rf /"}`))
+		if dec.Level != PermissionDeny {
+			t.Fatalf("expected hard-block to deny regardless of auto-permission, got %s", dec.Level)
+		}
+	})
+}

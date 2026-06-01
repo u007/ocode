@@ -79,7 +79,7 @@ func init() {
 		{name: "/mcp", usage: "/mcp [list|enable <server>|disable <server>]", help: "List or toggle MCP servers", handler: runMCPCmd},
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
-		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|<tool>]", help: "View or set tool and bash auto-allow permissions", handler: runPermissionsCmd},
+		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions", handler: runPermissionsCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
@@ -499,19 +499,24 @@ func runAgentCmd(m *model, args []string) tea.Cmd {
 }
 
 func runPermissionsCmd(m *model, args []string) tea.Cmd {
-	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto>]"
+	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status>]"
 	if len(args) == 0 {
 		if m.agent == nil || m.agent.Permissions() == nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission rules configured."})
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured.\n\n" + usage})
 			return nil
 		}
 		rules := m.agent.Permissions().Rules()
 		if len(rules) == 0 {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission rules configured. All tools allowed by default."})
+			autoEnabled := m.agent.Permissions().AutoPermissionEnabled()
+			autoStatus := map[bool]string{true: "on", false: "off"}[autoEnabled]
+			msg := fmt.Sprintf("Permission mode: %s\nLLM auto-allow: %s\n\nNo permission rules configured. All tools allowed by default.\n\n%s", m.agent.Permissions().Mode(), autoStatus, usage)
+			m.messages = append(m.messages, message{role: roleAssistant, text: msg})
 			return nil
 		}
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("Permission mode: %s\n\n", m.agent.Permissions().Mode()))
+		b.WriteString(fmt.Sprintf("Permission mode: %s\n", m.agent.Permissions().Mode()))
+		autoEnabled := m.agent.Permissions().AutoPermissionEnabled()
+		b.WriteString(fmt.Sprintf("LLM auto-allow: %s\n\n", map[bool]string{true: "on", false: "off"}[autoEnabled]))
 		b.WriteString("Tool permission rules:\n")
 		ruleNames := make([]string, 0, len(rules))
 		for toolName := range rules {
@@ -599,6 +604,25 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			}
 			m.persistPermissions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Set bash prefix mode for %q to %q.", prefix, mode)})
+			return nil
+		case "auto":
+			sub := strings.ToLower(args[1])
+			switch sub {
+			case "on", "true", "yes", "1":
+				m.agent.Permissions().SetAutoPermissionEnabled(true)
+				m.persistPermissions()
+				m.messages = append(m.messages, message{role: roleAssistant, text: "LLM auto-allow enabled."})
+			case "off", "false", "no", "0":
+				m.agent.Permissions().SetAutoPermissionEnabled(false)
+				m.persistPermissions()
+				m.messages = append(m.messages, message{role: roleAssistant, text: "LLM auto-allow disabled."})
+			case "status":
+				enabled := m.agent.Permissions().AutoPermissionEnabled()
+				status := map[bool]string{true: "on", false: "off"}[enabled]
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("LLM auto-allow is %s.", status)})
+			default:
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions auto <on|off|status>"})
+			}
 			return nil
 		}
 	}

@@ -34,6 +34,7 @@ type ctxChatParamKey int
 const (
 	ctxKeyTemperature ctxChatParamKey = iota
 	ctxKeyTopP
+	ctxKeyTopK
 )
 
 var llmHTTPClient = &http.Client{Timeout: llmRequestTimeout}
@@ -86,6 +87,9 @@ type GenericClient struct {
 	// TopP, when non-nil, is added to the request payload for providers that
 	// accept it. Pointer for the same reason as Temperature.
 	TopP *float64
+	// TopK, when non-nil, is added to the request payload for models that
+	// support it (e.g. MiniMax M2.x). Pointer for the same reason.
+	TopK *float64
 	// OnDelta, when non-nil, is invoked from inside Chat for each streamed
 	// reasoning or text token. kind is "reasoning" or "text". Callers MUST set
 	// this only around their own Chat call (via SetOnDelta / chatWithDelta) and
@@ -146,19 +150,39 @@ func (c *GenericClient) onUsage() func(inputTokens, outputTokens int64) {
 	return c.OnUsage
 }
 
-// applyGenerationParams adds temperature / top_p to a request payload if
-// configured. Centralised so every provider branch picks them up. Skipped
-// when the active model is a reasoning family (o1/o3/o4/gpt-5/etc.) or when
-// the Anthropic extended-thinking budget is set — both APIs reject the
-// sampling tunables in those cases.
+// applyGenerationParams adds temperature / top_p / top_k to a request payload
+// if configured. When the struct fields are nil, model-ID-based defaults may
+// apply. Centralised so every provider branch picks them up. Skipped when the
+// active model is a reasoning family (o1/o3/o4/gpt-5/etc.) or when the
+// Anthropic extended-thinking budget is set — both APIs reject the sampling
+// tunables in those cases.
 func (c *GenericClient) applyGenerationParams(ctx context.Context, payload map[string]interface{}) {
 	if !c.samplingTunable() {
 		return
 	}
+	// Model-ID-based defaults when struct fields are nil. These match the
+	// conventions in opencode's provider/transform.ts.
+	temp := c.Temperature
+	if temp == nil {
+		if v := defaultTemperature(c.Model); v != nil {
+			temp = v
+		}
+	}
+	topP := c.TopP
+	if topP == nil {
+		if v := defaultTopP(c.Model); v != nil {
+			topP = v
+		}
+	}
+	topK := c.TopK
+	if topK == nil {
+		if v := defaultTopK(c.Model); v != nil {
+			topK = v
+		}
+	}
 	// Per-call overrides from context (set by hook pipeline in chatWithDelta)
 	// take priority over struct fields. This avoids mutating the shared
 	// *GenericClient, which would race under concurrent Chat callers.
-	temp, topP := c.Temperature, c.TopP
 	if ctx != nil {
 		if v := ctx.Value(ctxKeyTemperature); v != nil {
 			if t, ok := v.(*float64); ok {
@@ -170,6 +194,11 @@ func (c *GenericClient) applyGenerationParams(ctx context.Context, payload map[s
 				topP = t
 			}
 		}
+		if v := ctx.Value(ctxKeyTopK); v != nil {
+			if t, ok := v.(*float64); ok {
+				topK = t
+			}
+		}
 	}
 	if temp != nil {
 		payload["temperature"] = *temp
@@ -177,6 +206,52 @@ func (c *GenericClient) applyGenerationParams(ctx context.Context, payload map[s
 	if topP != nil {
 		payload["top_p"] = *topP
 	}
+	if topK != nil {
+		payload["top_k"] = *topK
+	}
+}
+
+// defaultTemperature returns a model-ID-specific temperature default, or nil
+// when the model has no known preference. Matches opencode's transform.ts.
+func defaultTemperature(modelID string) *float64 {
+	m := strings.ToLower(modelID)
+	if strings.Contains(m, "minimax-m2") {
+		return floatPtr(1.0)
+	}
+	if strings.Contains(m, "qwen") {
+		return floatPtr(0.55)
+	}
+	return nil
+}
+
+// defaultTopP returns a model-ID-specific top_p default, or nil when the model
+// has no known preference. Matches opencode's transform.ts.
+func defaultTopP(modelID string) *float64 {
+	m := strings.ToLower(modelID)
+	if strings.Contains(m, "minimax-m2") ||
+		strings.Contains(m, "gemini") ||
+		strings.Contains(m, "kimi-k2.5") ||
+		strings.Contains(m, "kimi-k2p5") ||
+		strings.Contains(m, "kimi-k2-5") {
+		return floatPtr(0.95)
+	}
+	return nil
+}
+
+// defaultTopK returns a model-ID-specific top_k default, or nil when the model
+// has no known preference. Matches opencode's transform.ts.
+func defaultTopK(modelID string) *float64 {
+	m := strings.ToLower(modelID)
+	if strings.Contains(m, "minimax-m2") {
+		if strings.Contains(m, "m2.") || strings.Contains(m, "m25") || strings.Contains(m, "m21") {
+			return floatPtr(40)
+		}
+		return floatPtr(20)
+	}
+	if strings.Contains(m, "gemini") {
+		return floatPtr(64)
+	}
+	return nil
 }
 
 // samplingTunable reports whether the active client/model accepts temperature
@@ -217,6 +292,10 @@ func isReasoningOnlyModel(modelID string) bool {
 // when the provider is cloudflare-gateway and the model is an o-series reasoning
 // model. Cloudflare's gateway forwards to OpenAI, which rejects max_tokens for
 // o-series; it accepts only max_completion_tokens (not yet supported here).
+// floatPtr is a small helper that returns a pointer to a float64 value.
+// Used to produce *float64 literals for model-ID-based defaults.
+func floatPtr(v float64) *float64 { return &v }
+
 func maybeStripMaxTokensForGateway(provider, model string, payload map[string]interface{}) {
 	if provider != "cloudflare-gateway" {
 		return
@@ -237,6 +316,11 @@ func (c *GenericClient) GetModel() string {
 func (c *GenericClient) usesAnthropicMessagesAPI() bool {
 	if c.Provider == "anthropic" {
 		return true
+	}
+	// opencode-go routes per-model: minimax & qwen use /v1/messages (Anthropic API),
+	// everything else (deepseek, glm, kimi, mimo) uses /v1/chat/completions (OpenAI).
+	if c.Provider == "opencode-go" {
+		return strings.HasPrefix(c.Model, "minimax-") || strings.HasPrefix(c.Model, "qwen3.")
 	}
 	baseURL := strings.ToLower(strings.TrimRight(c.BaseURL, "/"))
 	return strings.HasSuffix(baseURL, "/anthropic") || strings.Contains(baseURL, "/anthropic/")
