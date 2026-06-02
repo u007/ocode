@@ -2,6 +2,14 @@
 
 Track tested features, provider integrations, and known issues.
 
+## Platform Support
+
+| Platform | Status | Notes |
+|----------|--------|-------|
+| macOS | ✅ Tested | Full TUI support, all features working |
+| Linux | ✅ Tested | Full TUI support, all features working |
+| Windows | 🆘 Needs volunteer | WSL2 recommended; native Windows testing needed |
+
 ## Tested & Working ✅
 
 ### Provider Integrations
