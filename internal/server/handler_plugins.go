@@ -50,6 +50,11 @@ func (h *Handler) HandleListPlugins(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) HandleGetPlugin(w http.ResponseWriter, r *http.Request, name string) {
 	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
 	pc, ok := h.cfg.Plugins[name]
 	h.mu.Unlock()
 

@@ -12,6 +12,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/models"
 	"github.com/jamesmercstudio/ocode/internal/runcli"
 	"github.com/jamesmercstudio/ocode/internal/server"
+	"github.com/jamesmercstudio/ocode/internal/skill"
 	"github.com/jamesmercstudio/ocode/internal/tui"
 	"github.com/jamesmercstudio/ocode/internal/version"
 )
@@ -19,12 +20,24 @@ import (
 //go:embed all:web/dist
 var webAssets embed.FS
 
+//go:embed all:skills
+var bundledSkills embed.FS
+
 func webFS() fs.FS {
 	f, err := fs.Sub(webAssets, "web/dist")
 	if err != nil {
 		return nil
 	}
 	return f
+}
+
+// bundledSkillsFS exposes the embedded skills/ tree to the skill package
+// as a plain fs.FS rooted at the repo root (the natural embed shape).
+// The installer descends into "skills/" itself; this keeps the embed
+// path explicit in main.go and matches the way the real binary
+// discovers its skills.
+func bundledSkillsFS() fs.FS {
+	return bundledSkills
 }
 
 func main() {
@@ -70,10 +83,27 @@ func main() {
 				os.Exit(1)
 			}
 			return
+		case "skills":
+			// Register the embedded skills tree before delegating.
+			// Safe to call here: no goroutines have started yet.
+			if fsys := bundledSkillsFS(); fsys != nil {
+				skill.SetBundledFS(fsys)
+			}
+			if err := skill.Run(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		}
 	}
 
 	agent.PreloadRegistry()
+
+	// Register the embedded skills FS once so both the TUI and the
+	// skill package can discover bundled skills at runtime.
+	if fsys := bundledSkillsFS(); fsys != nil {
+		skill.SetBundledFS(fsys)
+	}
 
 	opts := tui.RunOptions{}
 	for i := 1; i < len(os.Args); i++ {

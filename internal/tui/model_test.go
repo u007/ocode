@@ -1727,14 +1727,16 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 
 	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
 	// Press starts sidebar selection (no file opening yet)
-	// Y=13 accounts for: header(2) + mode(1) + ctx(1) + cwd(1) + empty(1) + advisor(1) + small(1) + perm(1) + empty(1) + git_title(1) + git_branch(1) + empty(1) = 13
-	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 13})
+	// Y accounts for: appHeader(2) + sidebar_border(1) + topLines(7) +
+	// no-title-pad(1) + git_title(1) + git_branch(1) + blank(1) + files_title(1)
+	// = 2 + 1 + 7 + 1 + 1 + 1 + 1 + 1 = 15
+	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 15})
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected press to start selection only, got stray command")
 	}
 	// Release on same position triggers file open (simple click, no drag)
-	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: 13})
+	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: 15})
 	_ = updated
 	if cmd == nil {
 		t.Fatal("expected release on file line to return editor command")
@@ -1743,6 +1745,174 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 
 	if gotPath != "changed.go" {
 		t.Fatalf("expected clicked file to open, got %q", gotPath)
+	}
+}
+
+// TestSidebarHoverAndSelectUseScreenY is a regression test for the chat sidebar
+// mouse Y math. The sidebar is rendered below the app header (appHeaderHeight
+// rows) and inside a bordered box, but the original hit-test helpers used a
+// box-relative Y while mouse.Y is a screen-Y. That made the hover underline
+// appear 5-6 rows above the actual file the user was mousing over, and made
+// drag-selections start on the wrong row.
+//
+// This test pins down the correct screen-Y for the first file row by reusing
+// the model's own buildSidebarRenderData to derive the offset, and asserts:
+//  1. Hover at the on-screen file Y sets hoverSidebarFile to the file path.
+//  2. A press at the on-screen file Y places sidebarSel.startLine on the
+//     raw selectable buffer entry that contains that file path.
+//  3. The same motion at the pre-fix (box-relative) Y does NOT trigger a
+//     file hover — i.e. the offset is required.
+func TestSidebarHoverAndSelectUseScreenY(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Reset()
+	tool.SetTodoSession("session-1")
+	tool.ResetTodoState()
+	if err := os.WriteFile("changed.go", []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := snapshot.Backup("changed.go"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
+
+	// Derive the on-screen Y of the "changed.go" row from buildSidebarRenderData
+	// + the helpers the click path uses, so this test doesn't have to hard-code
+	// topLines counts (those change as the sidebar evolves).
+	data := m.buildSidebarRenderData()
+	scrollIdx := -1
+	for i := range data.scrollLines {
+		if data.fileScrollLinePaths[i] == "changed.go" {
+			scrollIdx = i
+			break
+		}
+	}
+	if scrollIdx < 0 {
+		t.Fatal("could not find changed.go in sidebar scroll data")
+	}
+	visible := m.sidebarVisibleScrollLines(data, m.sidebarHeaderHeight())
+	if scrollIdx >= visible {
+		t.Fatalf("file row scrollIdx=%d not in first visible scroll window (visible=%d); raise test height",
+			scrollIdx, visible)
+	}
+	raw, contentTopY := m.sidebarSelectableLines()
+	// raw[0] is the first topLine, the file line sits at len(data.topLines) +
+	// scrollIdx in the composed buffer.
+	fileRowInBuffer := len(data.topLines) + scrollIdx
+	if fileRowInBuffer >= len(raw) {
+		t.Fatalf("computed file row %d past end of raw buffer (%d)", fileRowInBuffer, len(raw))
+	}
+	if !strings.Contains(raw[fileRowInBuffer], "changed.go") {
+		t.Fatalf("raw[%d] = %q, expected it to contain changed.go", fileRowInBuffer, raw[fileRowInBuffer])
+	}
+	// Screen-Y of the on-screen file row = contentTopY + len(topLines) + scrollIdx.
+	fileScreenY := contentTopY + len(data.topLines) + scrollIdx
+
+	// (1) Hover at the on-screen file row sets hoverSidebarFile.
+	updated, _ := m.Update(tea.MouseMotionMsg{X: 120, Y: fileScreenY})
+	hovered := updated.(model).hoverSidebarFile
+	if hovered != "changed.go" {
+		t.Fatalf("expected hover at on-screen Y=%d to set hoverSidebarFile=changed.go, got %q",
+			fileScreenY, hovered)
+	}
+
+	// (2) Press at the on-screen file row sets sidebarSel.startLine to the
+	// line in the raw selectable buffer that contains the file.
+	updated, _ = m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: fileScreenY})
+	sel := updated.(model).sidebarSel
+	if sel.startLine != fileRowInBuffer {
+		t.Fatalf("expected press at Y=%d to start selection on raw line %d, got %d",
+			fileScreenY, fileRowInBuffer, sel.startLine)
+	}
+
+	// (3) Sanity: at the pre-fix (box-relative) Y, no file hover registers.
+	// The buggy code used contentTopY = 1 + sidebarHeaderHeight() (no
+	// appHeaderHeight), so the pre-fix fileScreenY was contentTopY-2.
+	preFixY := fileScreenY - appHeaderHeight
+	if preFixY > 0 {
+		updated, _ := m.Update(tea.MouseMotionMsg{X: 120, Y: preFixY})
+		hoveredAtPreFix := updated.(model).hoverSidebarFile
+		if hoveredAtPreFix == "changed.go" {
+			t.Fatalf("regression: hover at pre-fix Y=%d set hoverSidebarFile=changed.go "+
+				"(should be empty; the fix must add appHeaderHeight=%d)",
+				preFixY, appHeaderHeight)
+		}
+	}
+}
+
+// TestSidebarHoverAtBottomVisibleScrollRow uses the actual rendered sidebar row
+// to guard against hit-test helpers that trim the visible scroll window too
+// aggressively. The target file is placed on the last visible scroll row, which
+// is the spot that regressed when the hit-test math was two rows short.
+func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Reset()
+	tool.SetTodoSession("session-2")
+	tool.ResetTodoState()
+
+	for i := 0; i < 12; i++ {
+		name := fmt.Sprintf("file-%02d.go", i)
+		if err := os.WriteFile(name, []byte("package main\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := snapshot.Backup(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := model{ready: true, width: 140, height: 20, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
+	data := m.buildSidebarRenderData()
+	targetPath := "file-11.go"
+	scrollIdx := -1
+	for i, path := range data.fileScrollLinePaths {
+		if path == targetPath {
+			scrollIdx = i
+			break
+		}
+	}
+	if scrollIdx < 0 {
+		t.Fatalf("could not find %s in sidebar scroll data", targetPath)
+	}
+
+	headerHeight := m.sidebarHeaderHeight()
+	effectiveHeaderHeight := maxInt(1, headerHeight)
+	contentHeight := m.height - 2 - effectiveHeaderHeight
+	spaceForScroll := maxInt(3, contentHeight-len(data.topLines)-len(data.bottomLines))
+	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
+	visible := minInt(scrollBoxHeight, spaceForScroll)
+	if visible < 1 {
+		t.Fatal("expected a visible sidebar scroll window")
+	}
+	if scrollIdx < visible-1 {
+		t.Fatalf("target scrollIdx=%d cannot be placed on the last visible row (visible=%d)", scrollIdx, visible)
+	}
+
+	m.sidebarScroll = scrollIdx - (visible - 1)
+	contentTopY := appHeaderHeight + 1 + effectiveHeaderHeight
+	fileScreenY := contentTopY + len(data.topLines) + (scrollIdx - m.sidebarScroll)
+
+	rendered := strings.Split(stripANSI(m.renderSidebar()), "\n")
+	sidebarLine := fileScreenY - appHeaderHeight
+	if sidebarLine < 0 || sidebarLine >= len(rendered) {
+		t.Fatalf("computed sidebar row %d out of range for rendered sidebar with %d rows", sidebarLine, len(rendered))
+	}
+	if !strings.Contains(rendered[sidebarLine], targetPath) {
+		t.Fatalf("expected rendered sidebar row %d to contain %q, got %q", sidebarLine, targetPath, rendered[sidebarLine])
+	}
+
+	updated, _ := m.Update(tea.MouseMotionMsg{X: m.panelWidth() + 1, Y: fileScreenY})
+	if got := updated.(model).hoverSidebarFile; got != targetPath {
+		t.Fatalf("expected hover on rendered bottom row Y=%d to set hoverSidebarFile=%q, got %q", fileScreenY, targetPath, got)
 	}
 }
 
@@ -1757,11 +1927,53 @@ func TestSidebarContextWindowLookup(t *testing.T) {
 }
 
 func TestHandleModelCmdUpdatesCurrentModel(t *testing.T) {
-	m := model{config: &config.Config{Model: "gpt-4o"}}
-	m.handleModelCmd([]string{"gpt-4o-mini"})
+	m := model{config: &config.Config{
+		Model: "gpt-4o",
+		Provider: map[string]interface{}{
+			"custom": map[string]interface{}{
+				"options": map[string]interface{}{
+					"baseURL": "https://example.invalid",
+				},
+			},
+		},
+	}}
+	m.handleModelCmd([]string{"custom:demo"})
 
-	if got := m.currentModelName(); got != "gpt-4o-mini" {
+	if got := m.currentModelName(); got != "custom:demo" {
 		t.Fatalf("expected active model to update, got %q", got)
+	}
+	if len(m.messages) != 1 {
+		t.Fatalf("expected one switch notice, got %#v", m.messages)
+	}
+	if !m.messages[0].transient {
+		t.Fatalf("expected switch notice to be transient, got %#v", m.messages[0])
+	}
+}
+
+func TestHandleModelCmdSwitchNoticeStaysOutOfLLMPayload(t *testing.T) {
+	m := model{config: &config.Config{
+		Model: "gpt-4o",
+		Provider: map[string]interface{}{
+			"custom": map[string]interface{}{
+				"options": map[string]interface{}{
+					"baseURL": "https://example.invalid",
+				},
+			},
+		},
+	}}
+	m.handleModelCmd([]string{"custom:demo"})
+
+	const notice = "Switching to model custom:demo"
+	for _, msg := range m.persistedAgentMessages() {
+		if msg.Content == notice {
+			t.Fatalf("expected switch notice to stay out of persisted messages, got %#v", m.persistedAgentMessages())
+		}
+	}
+	snap, _ := m.buildAgentMessagesSnapshot()
+	for _, msg := range snap {
+		if msg.Content == notice {
+			t.Fatalf("expected switch notice to stay out of llm snapshot, got %#v", snap)
+		}
 	}
 }
 
@@ -2682,6 +2894,51 @@ func TestUpKeyUsesInputHistoryWithoutScrollingTranscript(t *testing.T) {
 	}
 	if got.viewport.YOffset() != before {
 		t.Fatalf("expected up key not to scroll transcript, offset changed from %d to %d", before, got.viewport.YOffset())
+	}
+}
+
+func TestSlashCommandAddedToInputHistory(t *testing.T) {
+	m := model{
+		ready:             true,
+		width:             80,
+		height:            24,
+		input:             newTestTextarea(),
+		viewport:          viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:            ApplyThemeColors("tokyonight"),
+		inputHistoryIndex: -1,
+	}
+	m.input.SetValue("/help")
+	m.layout()
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := derefTestModel(t, updated)
+
+	if len(got.inputHistory) != 1 {
+		t.Fatalf("expected slash command in history, got %d entries: %v", len(got.inputHistory), got.inputHistory)
+	}
+	if got.inputHistory[0] != "/help" {
+		t.Fatalf("expected /help in history, got %q", got.inputHistory[0])
+	}
+}
+
+func TestShellCommandNotAddedToInputHistory(t *testing.T) {
+	m := model{
+		ready:             true,
+		width:             80,
+		height:            24,
+		input:             newTestTextarea(),
+		viewport:          viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		styles:            ApplyThemeColors("tokyonight"),
+		inputHistoryIndex: -1,
+	}
+	m.input.SetValue("!echo hello")
+	m.layout()
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	got := derefTestModel(t, updated)
+
+	if len(got.inputHistory) != 0 {
+		t.Fatalf("expected shell command not in history, got %d entries: %v", len(got.inputHistory), got.inputHistory)
 	}
 }
 
@@ -3874,6 +4131,81 @@ func TestRunPermissionsCmdModelAutoClearsOverride(t *testing.T) {
 	}
 	if len(m.messages) == 0 || !strings.Contains(m.messages[len(m.messages)-1].text, "Permission model cleared") {
 		t.Fatalf("expected clear confirmation message, got %#v", m.messages)
+	}
+}
+func TestRunPermissionsCmdModelRequiresProviderSlashModel(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
+	m := model{
+		config: &cfg,
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		input:  textarea.New(),
+	}
+
+	// Bare model name without provider prefix should be rejected.
+	runPermissionsCmd(&m, []string{"model", "claude-sonnet-4-6"})
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected a validation message")
+	}
+	last := m.messages[len(m.messages)-1].text
+	if !strings.Contains(last, "provider/model") {
+		t.Fatalf("expected provider/model validation message, got %q", last)
+	}
+	// Config should remain unchanged.
+	if m.config.Ocode.Permissions.Auto != nil && m.config.Ocode.Permissions.Auto.Model != "" {
+		t.Fatalf("permission model should remain unchanged on invalid input, got %q", m.config.Ocode.Permissions.Auto.Model)
+	}
+}
+
+func TestRunPermissionsCmdModelRejectsProviderOnly(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
+	m := model{
+		config: &cfg,
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		input:  textarea.New(),
+	}
+
+	// Provider with trailing slash but no model name should be rejected.
+	runPermissionsCmd(&m, []string{"model", "anthropic/"})
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected a validation message")
+	}
+	last := m.messages[len(m.messages)-1].text
+	if !strings.Contains(last, "provider/model") {
+		t.Fatalf("expected provider/model validation message, got %q", last)
+	}
+}
+
+func TestRunPermissionsCmdModelRejectsSlashOnly(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
+	m := model{
+		config: &cfg,
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		input:  textarea.New(),
+	}
+
+	// Just a slash should be rejected.
+	runPermissionsCmd(&m, []string{"model", "/"})
+
+	if len(m.messages) == 0 {
+		t.Fatal("expected a validation message")
+	}
+	last := m.messages[len(m.messages)-1].text
+	if !strings.Contains(last, "provider/model") {
+		t.Fatalf("expected provider/model validation message, got %q", last)
 	}
 }
 

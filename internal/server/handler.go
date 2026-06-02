@@ -422,6 +422,10 @@ func (h *Handler) HandleSetSessionTitle(w http.ResponseWriter, r *http.Request, 
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "title cannot be empty")
+		return
+	}
 
 	s, err := session.Load(id)
 	if err != nil {

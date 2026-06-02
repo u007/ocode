@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased] — 2026-06-02
+
+### Added
+- **Skills Management CLI** — New `ocode skills` subcommand for installing, upgrading, listing, and uninstalling bundled skills. Skills are embedded into the binary via `//go:embed` and installed to `~/.config/opencode/skills/`. Subcommands: `list`, `install [name...]`, `upgrade [name...]`, `uninstall <name...>`. Backup-on-overwrite creates a timestamped `.bak.<timestamp>` copy of the existing SKILL.md before replacing it. Symlink safety: refuses to install into symlinked skill directories.
+- **Smart Skill Status Detection** — `GetSkillStatus()` distinguishes four states using SHA256 hashes and a `.bundled-hash` sidecar file: `installed` (hash matches bundled), `outdated` (bundled changed, file untouched), `custom-modified` (user edited the file), `missing` (not installed). The `.bundled-hash` file records the bundled version's hash at install time.
+- **`/skills` TUI Command** — Enhanced slash command with subcommands: `/skills` (list with status), `/skills install [name...]`, `/skills upgrade [name...]`, `/skills info <name>`, `/skills help`. Status indicators: ✓ installed, ↑ outdated, ✎ custom-modified, ✗ missing.
+
 ## [Unreleased] — 2026-05-28
 
 ### Added

@@ -270,6 +270,7 @@ type pluginInstallMsg struct {
 	ref    string
 }
 type pluginRemoveMsg struct{ name string }
+type skillsOutputMsg struct{ text string }
 type pluginInstalledMsg struct {
 	name   string
 	source string
@@ -611,7 +612,7 @@ type model struct {
 	// lspMgr is the shared LSP manager backing the `lsp` and `ast` tools.
 	// It is owned by the model so we can close it on session shutdown and
 	// during /plugin rebuilds (otherwise every rebuild leaks the gopls child).
-	lspMgr                   *lsp.Manager
+	lspMgr *lsp.Manager
 }
 
 type modelCleanupState struct {
@@ -1832,6 +1833,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
+	case skillsOutputMsg:
+		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
 	case pluginRemoveMsg:
 		name := msg.name
 		cfg, ok := m.config.Plugins[name]
@@ -2740,7 +2745,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, tea.Batch(tiCmd, vpCmd)
 		}
 
-		if !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "!") {
+		if !strings.HasPrefix(text, "!") {
 			if len(m.inputHistory) == 0 || m.inputHistory[len(m.inputHistory)-1] != text {
 				m.inputHistory = append(m.inputHistory, text)
 			}
@@ -4162,7 +4167,7 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 	}
 	if len(args) > 0 {
 		modelID := args[0]
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", modelID)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", modelID), transient: true})
 		m.activeModel = modelID
 		if m.config != nil {
 			m.config.Model = modelID
@@ -4895,17 +4900,163 @@ func (m *model) handleHelpCmd(args []string) {
 }
 
 func (m *model) handleSkillsCmd(args []string) {
-	skills := skill.LoadSkills()
-	if len(skills) == 0 {
+	// Subcommands: /skills [list|install [name...]|upgrade [name...]|info <name>]
+	sub := "list"
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+
+	switch sub {
+	case "list", "ls", "":
+		m.handleSkillsList()
+	case "info":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /skills info <name>"})
+			return
+		}
+		m.handleSkillsInfo(args[1])
+	case "help":
+		m.handleSkillsHelp()
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant,
+			text: fmt.Sprintf("Unknown skills subcommand %q. Use /skills help for usage.", sub)})
+	}
+}
+
+func (m *model) handleSkillsHelp() {
+	m.messages = append(m.messages, message{role: roleAssistant, text: `Skills Commands
+═══════════════
+  /skills                  List all skills with status
+  /skills install [name...]  Install bundled skills (all if no name)
+  /skills upgrade [name...]  Upgrade outdated skills (all if no name)
+  /skills info <name>      Show details for a specific skill
+  /skills help             Show this help
+
+Status indicators:
+  ✓ installed         — up to date with bundled version
+  ↑ outdated          — bundled has changed, file untouched
+  ✎ custom-modified   — you (or a tool) edited the file
+  ✗ missing           — not installed`})
+}
+
+func (m *model) handleSkillsList() {
+	statuses, err := skill.GetSkillStatus()
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant,
+			text: fmt.Sprintf("Error listing skills: %v", err)})
+		return
+	}
+	if len(statuses) == 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "No skills found."})
 		return
 	}
+
 	var b strings.Builder
-	b.WriteString("Available skills:\n")
-	for _, s := range skills {
-		b.WriteString(fmt.Sprintf("- %s: %s\n", s.Name, s.Description))
+	b.WriteString("Skills\n")
+	b.WriteString(strings.Repeat("═", 50) + "\n\n")
+
+	for _, s := range statuses {
+		var icon, label string
+		switch s.Status {
+		case skill.SkillInstalled:
+			icon, label = "✓", "installed"
+		case skill.SkillOutdated:
+			icon, label = "↑", "outdated"
+		case skill.SkillCustomModified:
+			icon, label = "✎", "custom-modified"
+		case skill.SkillMissing:
+			icon, label = "✗", "missing"
+		default:
+			icon, label = "?", "unknown"
+		}
+		b.WriteString(fmt.Sprintf("  %s %-18s %s\n", icon, s.Name, label))
 	}
+
+	b.WriteString("\nUse /skills install <name> to install, /skills upgrade <name> to upgrade.\n")
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m *model) handleSkillsInfo(name string) {
+	statuses, err := skill.GetSkillStatus()
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant,
+			text: fmt.Sprintf("Error: %v", err)})
+		return
+	}
+	for _, s := range statuses {
+		if !strings.EqualFold(s.Name, name) {
+			continue
+		}
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("Skill: %s\n", s.Name))
+		b.WriteString(strings.Repeat("─", 40) + "\n")
+		b.WriteString(fmt.Sprintf("Status: %s\n", s.Status))
+		if s.Source != "" {
+			b.WriteString(fmt.Sprintf("Path:   %s\n", s.Source))
+		}
+		if s.Description != "" {
+			b.WriteString(fmt.Sprintf("Version: %s\n", s.Description))
+		}
+
+		// Show a snippet of the SKILL.md content.
+		if s.Source != "" {
+			if data, err := os.ReadFile(s.Source); err == nil {
+				lines := strings.SplitN(string(data), "\n", 15)
+				b.WriteString("\nPreview:\n")
+				for _, line := range lines {
+					b.WriteString("  " + line + "\n")
+				}
+				if len(lines) == 15 {
+					b.WriteString("  ...\n")
+				}
+			}
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return
+	}
+	m.messages = append(m.messages, message{role: roleAssistant,
+		text: fmt.Sprintf("Skill %q not found. Use /skills to list all.", name)})
+}
+
+// runInstaller invokes the skill installer and captures its output. It
+// redirects both os.Stdout and os.Stderr so installer prints don't paint
+// over the alt-screen frame. A goroutine drains the read end concurrently
+// to prevent deadlock when the installer output exceeds the OS pipe buffer.
+func (m *model) runInstaller(subcmd string, names []string) string {
+	args := append([]string{subcmd}, names...)
+
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		return fmt.Sprintf("Error: pipe failed: %v", err)
+	}
+	os.Stdout = w
+	os.Stderr = w
+	defer func() {
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+	}()
+
+	// Drain the pipe concurrently so skill.Run never blocks on a full buffer.
+	var buf bytes.Buffer
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		io.Copy(&buf, r) //nolint:errcheck — pipe read; errors surface as empty output
+	}()
+
+	runErr := skill.Run(args)
+
+	w.Close()
+	<-drainDone
+	r.Close()
+
+	out := buf.String()
+	if runErr != nil {
+		out += fmt.Sprintf("\nError: %v", runErr)
+	}
+	return out
 }
 
 func (m *model) handleSmallModelCmd(args []string) {
@@ -5035,7 +5186,14 @@ func (m *model) handlePermissionModelCmd(args []string) tea.Cmd {
 		return nil
 	}
 
-	// Validate that the model is available.
+	// Validate provider/model format (must contain a "/" separator).
+	provider, modelName := config.SplitProviderModel(target)
+	if provider == "" || modelName == "" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Permission model must be in provider/model format (for example: anthropic/claude-sonnet-4-6)."})
+		return nil
+	}
+
+	// Validate that the model is available (provider exists and has credentials).
 	client := agent.NewClient(m.config, target)
 	if client == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", target)})
@@ -8815,7 +8973,7 @@ func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) 
 func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight int) int {
 	effectiveHeaderHeight := maxInt(1, headerHeight)
 	contentHeight := m.height - 2 - effectiveHeaderHeight
-	spaceForScroll := maxInt(3, contentHeight-len(data.topLines)-len(data.bottomLines)-2)
+	spaceForScroll := maxInt(3, contentHeight-len(data.topLines)-len(data.bottomLines))
 	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
 	return minInt(scrollBoxHeight, spaceForScroll)
 }
@@ -8842,7 +9000,12 @@ func (m model) sidebarHeaderHeight() int {
 func (m model) sidebarSelectableLines() (raw []string, contentTopY int) {
 	data := m.buildSidebarRenderData()
 	headerHeight := m.sidebarHeaderHeight()
-	contentTopY = 1 + maxInt(1, headerHeight) // top border(1) + header row(s)
+	// The sidebar is rendered below the app header (appHeaderHeight rows) and
+	// inside a bordered box. The first selectable row on screen is:
+	//   appHeaderHeight + sidebarBorder(1) + sidebarHeader
+	// which is the same Y used by sidebarFileForClick so press/motion/release
+	// all line up with the rendered (and hovered) rows.
+	contentTopY = appHeaderHeight + 1 + maxInt(1, headerHeight)
 	visibleScroll := m.sidebarVisibleScrollLines(data, headerHeight)
 	scrollOffset := clampInt(m.sidebarScroll, 0, maxInt(0, len(data.scrollLines)-visibleScroll))
 	visible := sliceLines(data.scrollLines, scrollOffset, visibleScroll)
@@ -8946,18 +9109,14 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 	}
 
 	data := m.buildSidebarRenderData()
-	headerHeight := 0
-	title := m.sessionTitle
-	if title == "" {
-		if prompt := m.firstUserPromptText(); prompt != "" {
-			title = truncateTitle(prompt, maxExplicitTitleLen)
-		}
-	}
-	if title != "" {
-		headerHeight = 1
-	}
+	headerHeight := m.sidebarHeaderHeight()
 	// User requested: no border/padding on scroll sections (2026-05-25)
-	boxTop := 1 + headerHeight + len(data.topLines)
+	// The sidebar is rendered below the app header (appHeaderHeight rows) and
+	// inside a bordered box, so the first scroll line lives at:
+	//   screen-Y = appHeaderHeight + sidebarBorder(1) + sidebarHeader
+	//             + len(data.topLines) [+1 when no session title]
+	// mouse.Y is a screen-Y, so we add appHeaderHeight before the bounds check.
+	boxTop := appHeaderHeight + 1 + headerHeight + len(data.topLines)
 	// Account for leading empty line when header is empty
 	if headerHeight == 0 {
 		boxTop++

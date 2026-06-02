@@ -181,10 +181,20 @@ func buildCommandHelpText(specs []commandSpec) string {
 	b.WriteString("\nShortcuts:\n")
 	b.WriteString("!command       : Prefix the input with ! to run a shell command (double-esc exits shell mode)\n")
 	b.WriteString("@path          : Add file context or attach an image\n")
+	b.WriteString("Enter          : Send message\n")
+	b.WriteString("Shift+Enter    : New line in input\n")
+	b.WriteString("Up/Down        : Navigate input history\n")
+	b.WriteString("Tab            : Autocomplete slash commands\n")
+	b.WriteString("Shift+Tab      : Toggle agent strip focus (cycle through running agents)\n")
 	b.WriteString("Ctrl+P         : Open command palette\n")
 	b.WriteString("Ctrl+X         : Leader key for quick actions (u:undo, r:redo, n:new, l:list, c:compact)\n")
+	b.WriteString("Ctrl+T         : Toggle thinking mode (when supported by model)\n")
+	b.WriteString("Ctrl+B         : Move running bash command to background\n")
+	b.WriteString("Ctrl+G         : Open process list\n")
 	b.WriteString("Ctrl+O         : Toggle YOLO permissions mode\n")
 	b.WriteString("Ctrl+Y         : Retry last LLM timeout or I/O error\n")
+	b.WriteString("Ctrl+C         : Clear input / Cancel / Quit (double-tap to quit)\n")
+	b.WriteString("Esc            : Close popup / Exit shell mode / Cancel detail view\n")
 	b.WriteString("\nPermission examples:\n")
 	b.WriteString("/permissions bash:git allow\n")
 	b.WriteString("/permissions auto-add jq\n")
@@ -724,7 +734,19 @@ func runSmallModelCmd(m *model, args []string) tea.Cmd {
 }
 
 func runSkillsCmd(m *model, args []string) tea.Cmd {
-	return func() tea.Msg {
+	sub := "list"
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+	switch sub {
+	case "install", "upgrade", "update":
+		// I/O-bound: run off the Update goroutine, communicate back via message
+		// so model state is only mutated in Update — no data race.
+		rest := args[1:]
+		return func() tea.Msg {
+			return skillsOutputMsg{text: m.runInstaller(sub, rest)}
+		}
+	default:
 		m.handleSkillsCmd(args)
 		return nil
 	}
