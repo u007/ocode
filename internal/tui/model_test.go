@@ -1916,6 +1916,84 @@ func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
 	}
 }
 
+// TestSidebarHitTestMatchesWrappedPinnedRows guards the invariant that the file
+// hover/click hit-test (sidebarFileForClick) lands on the SAME screen row the
+// sidebar actually renders the file on. The pinned header and topLines are
+// rendered inside a width-constrained, padded border (inner width
+// sidebarColumnWidth-4) that wraps long content to multiple visual rows, while
+// the hit-test counts them as a single logical row each. When a pinned row
+// wraps, every scroll row shifts down and the hit-test points N rows too high
+// (the "hover 2 lines above the file" bug). Both sub-cases place a wrapping
+// pinned row and assert the rendered row == the hit-tested row.
+func TestSidebarHitTestMatchesWrappedPinnedRows(t *testing.T) {
+	longTitle := strings.Repeat("wrap-me-title ", 6) // ~84 cols, wraps in a 34-col box
+	longModel := strings.Repeat("x", 60)             // forces the advisor: topLine to wrap
+
+	cases := []struct {
+		name  string
+		setup func(m *model)
+	}{
+		{
+			name:  "long session title wraps the header",
+			setup: func(m *model) { m.sessionTitle = longTitle },
+		},
+		{
+			name: "long advisor model wraps a topLine",
+			setup: func(m *model) {
+				m.config = &config.Config{Ocode: config.OcodeConfig{Advisor: config.AdvisorConfig{Model: longModel}}}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			origWd, _ := os.Getwd()
+			defer os.Chdir(origWd)
+			if err := os.Chdir(tmpDir); err != nil {
+				t.Fatal(err)
+			}
+			snapshot.Reset()
+			tool.SetTodoSession("session-wrap")
+			tool.ResetTodoState()
+
+			const target = "zzz_unique_target.go"
+			if err := os.WriteFile(target, []byte("package main\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := snapshot.Backup(target); err != nil {
+				t.Fatal(err)
+			}
+
+			m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
+			tc.setup(&m)
+
+			// Find the file's ACTUAL rendered row within the sidebar box.
+			rendered := strings.Split(stripANSI(m.renderSidebar()), "\n")
+			renderedRow := -1
+			for i, line := range rendered {
+				if strings.Contains(line, target) {
+					renderedRow = i
+					break
+				}
+			}
+			if renderedRow < 0 {
+				t.Fatalf("target %q not found in rendered sidebar", target)
+			}
+
+			// Convert to a full-view screen Y (the sidebar is joined below the app
+			// header) and ask the production hit-test what file lives there.
+			fileScreenY := renderedRow + appHeaderHeight
+			sidebarX := m.panelWidth() + 1
+			got, ok := m.sidebarFileForClick(tea.Mouse{X: sidebarX, Y: fileScreenY})
+			if !ok || got != target {
+				t.Fatalf("hit-test/render mismatch: file renders on screen row %d but sidebarFileForClick there returned (%q, %v); pinned-row wrap offset not accounted for",
+					fileScreenY, got, ok)
+			}
+		})
+	}
+}
+
 func TestSidebarContextWindowLookup(t *testing.T) {
 	if got, ok := modelContextWindow("gpt-4o"); !ok || got == 0 {
 		t.Fatalf("expected known context window for gpt-4o, got %d ok=%v", got, ok)

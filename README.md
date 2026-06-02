@@ -2,6 +2,11 @@
 
 Terminal AI coding agent in Go — started as an opencode clone, now diverged. See [Differences from opencode](#differences-from-opencode) for what changed and why.
 
+## Quick Start
+
+- **Setup:** See [SETUP.md](SETUP.md) for prerequisites, installation, and configuration
+- **Testing:** See [TESTING.md](TESTING.md) for tested features, known issues, and what needs validation
+
 ## Run
 
 ```bash
@@ -53,11 +58,27 @@ intelligence, theme system, and extensible agent system.
 
 ## Config
 
-- `opencode.json` stays for upstream-compatible settings.
-- `ocodeconfig.json` stores ocode-only overrides and any extra fields opencode would not accept.
-- Both are loaded from `~/.config/opencode/` and from the nearest project root beside `opencode.json`.
-- If `ocodeconfig.json` is missing, ocode creates it with compact defaults.
-- The TUI restores the most recently selected model from `ocodeconfig.json`, falling back to opencode state unless `OPENCODE_MODEL` is set.
+Config files are loaded from two locations:
+
+1. **Global config** — `~/.config/opencode/` (your home config directory)
+2. **Project config** — Current working directory or nearest ancestor containing `opencode.json`
+
+### File roles
+
+**`opencode.json`** — Upstream-compatible settings (read by both opencode and ocode).
+- Contains LLM provider credentials, model preferences, and settings opencode understands.
+- Can be checked into git for team-shared config.
+- ocode **never writes** to `opencode.json` — it remains read-only after initial creation.
+
+**`ocodeconfig.json`** — ocode-only settings and runtime state.
+- Contains ocode-exclusive config: permissions, editor settings, compaction behavior, auto-permission model.
+- **Written by ocode** to persist state: most recently selected model, session history, and editor mode.
+- Should typically be `.gitignore`'d (contains personal state like auth tokens).
+- If missing, ocode auto-creates it with compact defaults.
+
+### Config loading precedence
+
+Both files are loaded from global (`~/.config/opencode/`) and project roots. Settings from project-level configs override global settings. The TUI restores the most recently selected model from `ocodeconfig.json`, falling back to `opencode.json` unless `OPENCODE_MODEL` env var is set.
 
 Compact defaults:
 
@@ -103,6 +124,50 @@ Compaction can use a different model than the active chat model. This is useful 
 - Leave `summary_provider` / `summary_model` empty to summarise with the active model.
 - If only one of the two is set, the other falls back to the active client's value.
 - The compaction client respects the same auth/keychain entries as the main client.
+
+### opencode.json (shared config)
+
+Example global or project-level config for upstream compatibility:
+
+```json
+{
+  "apiKey": "sk-...",
+  "provider": "openai",
+  "model": "gpt-4o",
+  "temperature": 0.7,
+  "context_window": 128000
+}
+```
+
+Keys here are provider/model credentials and settings that opencode understands and may read/write.
+
+### ocodeconfig.json (ocode-only state)
+
+This file contains ocode-exclusive runtime state and configuration. It is **created and maintained by ocode**, and persists across sessions:
+
+```json
+{
+  "compact": { ... },
+  "permissions": { ... },
+  "editor": "nvim",
+  "editor_mode": "tmux-split",
+  "auto_permission_model": "deepseek:deepseek-v4-flash",
+  "model_memory": { ... },
+  "_model_history": ["gpt-4o", "claude-3-5-sonnet"],
+  "_last_session_id": "abc123..."
+}
+```
+
+**Written by ocode:**
+- `_model_history` — Recently used models (for quick switching)
+- `_last_session_id` — Last opened session (for resumption)
+- Model-specific overrides from `/config` commands
+
+**User editable:**
+- `compact` — Compaction behavior and custom summary model
+- `permissions` — Permission modes, tool rules, bash prefixes
+- `editor` / `editor_mode` — External editor and open mode
+- `auto_permission_model` — Model for automated permission decisions
 
 Permissions live in `ocodeconfig.json` because they are ocode-only runtime policy:
 
@@ -152,6 +217,24 @@ For `permissions.bash.prefix_modes`, supported values are:
 - `locked`: allow read/search-style tools only.
 
 Use `/permissions` to view or set rules, `/permissions bash:git allow` for shell prefixes, and `/yolo [on|off|status]` to toggle YOLO mode. The TUI also accepts `--yolo`/`-yolo`; `ocode run` accepts `--yolo`.
+
+### Auto-permissions
+
+Permission prompts can be automated by configuring an `auto_permission_model` that makes accept/deny decisions without user interaction. This is useful for hands-off agent operation and reduces context overhead during extended runs. Add to `ocodeconfig.json`:
+
+```json
+{
+  "permissions": {
+    "auto_permission_model": "deepseek:deepseek-v4-flash",
+    "auto_permission_deny_unsafe": true
+  }
+}
+```
+
+- `auto_permission_model` — `provider:model-id` to use for automatic permission decisions (e.g. `openai:gpt-4o-mini`, `anthropic:claude-3-5-haiku`, `deepseek:deepseek-v4-flash`). If unset, permission prompts remain interactive.
+- `auto_permission_deny_unsafe` — If `true`, the auto-permission model is instructed to conservatively deny any operation it cannot confidently approve. Default is `false`.
+
+**Recommendation:** Use a **fast, cost-effective model** like Deepseek's `deepseek-v4-flash` or OpenAI's `gpt-4o-mini` for auto-permissions. These models are inexpensive, fast enough for sub-second latency on permission decisions, and sufficiently capable for the narrowly-scoped task of approving/denying tool calls. This keeps permission overhead minimal while the main agent runs on a more capable model.
 
 Editor config also lives in `ocodeconfig.json`:
 
@@ -292,3 +375,7 @@ docs/                    Design specs and enhancement plans
 - Type `@path` to attach file context. While typing an `@` token, matching files appear in a filtered popup; image files are attached as images and persisted in session history.
 - Context files (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`) loaded at session start use the committed `HEAD` version when the working-tree copy has unstaged modifications. This keeps the base prompt stable across edits — commit the change to make it effective. A note is logged to stderr when the swap occurs.
 - `!command` hands the terminal to the process (interactive programs like `vim`, `less`, `git diff` work). Output is not captured into the chat transcript.
+
+## Cost Tracking
+
+Cost estimates displayed in the sidebar and session telemetry are calculated based on **API token usage**, not subscription charges. Costs are computed using per-token pricing for each model (input tokens, output tokens, and cached reads) obtained from the provider's pricing data. This gives an accurate representation of actual API costs regardless of subscription tier or cost structure, and applies uniformly across all providers (OpenAI, Anthropic, Google, etc.).

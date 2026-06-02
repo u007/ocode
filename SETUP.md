@@ -1,0 +1,179 @@
+# ocode Setup Guide
+
+## Prerequisites
+
+- **Go 1.26.1 or later** — [Download Go](https://go.dev/dl)
+- **Git** — for cloning and version control
+- **An LLM provider account** — OpenAI, Anthropic, Google, Z.AI, Alibaba, or GitHub Copilot
+- **Terminal** — macOS, Linux, or Windows with WSL2
+
+## Installation
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/your-org/ocode.git
+cd ocode
+```
+
+### 2. Download dependencies
+
+```bash
+go mod download
+```
+
+### 3. Run locally
+
+```bash
+go run .
+```
+
+Or build a static binary:
+
+```bash
+go build -o ocode .
+./ocode
+```
+
+## Configuration
+
+### Initial Setup (First Run)
+
+On first launch, ocode creates default config files in your project root:
+
+- **`opencode.json`** — LLM provider credentials and model settings (shared with opencode)
+- **`ocodeconfig.json`** — ocode-only state: permissions, editor config, session history
+
+You'll be prompted to authenticate with your LLM provider(s) via OAuth or API key.
+
+### Adding Provider Credentials
+
+Edit `opencode.json` to add API keys or provider configuration:
+
+```json
+{
+  "provider": "anthropic",
+  "apiKey": "sk-ant-...",
+  "model": "claude-3-5-sonnet"
+}
+```
+
+Or use environment variables (ocode respects `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
+
+### Permissions & Safety
+
+ocode starts in **normal mode** (project-confined file writes allowed, dangerous tools ask). Configure in `ocodeconfig.json`:
+
+```json
+{
+  "permissions": {
+    "mode": "normal",
+    "tools": {
+      "read": "allow",
+      "write": "allow",
+      "bash": "ask"
+    }
+  }
+}
+```
+
+Or use `/permissions` in the TUI to view/edit rules interactively.
+
+For hands-off operation, set an `auto_permission_model`:
+
+```json
+{
+  "permissions": {
+    "auto_permission_model": "deepseek:deepseek-v4-flash"
+  }
+}
+```
+
+## Development
+
+### Running Tests
+
+```bash
+go test ./...
+```
+
+### Building for distribution
+
+```bash
+go build -o ocode .
+# Binary is portable; ship it anywhere Go 1.26+ can run
+```
+
+### Debugging
+
+Enable verbose logging:
+
+```bash
+DEBUG=1 go run .
+```
+
+ocode logs to stderr and a debug panel in the TUI (visible in the Files tab).
+
+## Troubleshooting
+
+### "Cannot find Go"
+
+Ensure Go 1.26.1+ is installed and in your `$PATH`:
+
+```bash
+go version
+```
+
+### Auth fails silently
+
+Check that you have the right provider credentials in `opencode.json` or environment variables. ocode falls back to keychain on macOS/Linux.
+
+### TUI doesn't render
+
+Ensure your terminal supports 256 colors and mouse input. Test with:
+
+```bash
+echo $TERM
+```
+
+Preferred: `xterm-256color`, `screen-256color`, `tmux-256color`, or modern terminals (iTerm2, Ghostty, Warp).
+
+### Config file conflicts
+
+If `opencode.json` and `ocodeconfig.json` disagree on settings, project-level configs override global ones (`~/.config/opencode/`). Clear your global config to debug:
+
+```bash
+rm -rf ~/.config/opencode/
+```
+
+ocode recreates defaults on next run.
+
+## File Structure
+
+```
+.
+├── main.go                    entry point
+├── go.mod / go.sum            dependencies
+├── internal/
+│   ├── agent/                 LLM client, agent registry, permissions
+│   ├── auth/                  OAuth and keychain auth
+│   ├── config/                opencode.json / ocodeconfig.json loading
+│   ├── mcp/                   MCP client
+│   ├── server/                HTTP API
+│   ├── tool/                  built-in tools (read, write, bash, git, etc.)
+│   ├── tui/                   Bubble Tea TUI
+│   └── version/               version info
+├── docs/                      design specs
+├── opencode.json              (created at first run) provider config
+└── ocodeconfig.json           (created at first run) ocode state
+```
+
+## Next Steps
+
+1. Run `go run .` to start the TUI
+2. Set your preferred LLM provider via `/config` or edit `opencode.json`
+3. Type a message and press `Ctrl+Enter` to chat
+4. Press `?` to see all keyboard shortcuts
+5. Check `/help` for slash commands
+
+For detailed documentation, see [README.md](README.md).

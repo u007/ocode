@@ -6212,7 +6212,10 @@ func (m *model) askAgent() tea.Cmd {
 			}
 		}
 		tokens, source := agent.CurrentContextEstimate(agentMsgs)
-		modelName := m.agent.GetProvider() + "/" + m.agent.Client().GetModel()
+		modelName := m.agent.GetProvider()
+		if cl := m.agent.Client(); cl != nil {
+			modelName += "/" + cl.GetModel()
+		}
 		agent.DebugAppendf("LLM", "askAgent: %d msgs → %s (est=%d tok, src=%s)", len(agentMsgs), modelName, tokens, source)
 	}
 
@@ -8689,17 +8692,22 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	if modelName != "" {
 		statusParts = append(statusParts, sidebarHeaderStyle.Render(modelName))
 	}
+	// Pinned topLines are rendered inside the same width-constrained border as
+	// the scroll body, so any over-long row wraps to multiple visual rows. Route
+	// them through appendWrapped (like bottomLines) so len(data.topLines) equals
+	// the number of rows actually drawn — the hit-test relies on that count to
+	// locate file rows below them.
 	if len(statusParts) > 0 {
 		statusLine := strings.Join(statusParts, "  ")
-		data.topLines = append(data.topLines, statusLine)
+		appendWrapped(&data.topLines, statusLine, outerBodyWidth)
 	}
 	// ── Line 2: token / context window ──
 	if ctxTokens > 0 {
-		data.topLines = append(data.topLines, dimStyle.Render(contextLine))
+		appendWrapped(&data.topLines, dimStyle.Render(contextLine), outerBodyWidth)
 	}
 	cwdLabel := dimStyle.Render("cwd: ")
 	cwdMax := sidebarColumnWidth - 4 - lipgloss.Width(cwdLabel)
-	data.topLines = append(data.topLines, cwdLabel+sidebarAccentStyle.Render(compactWorkingDir(m.workDir, cwdMax)))
+	appendWrapped(&data.topLines, cwdLabel+sidebarAccentStyle.Render(compactWorkingDir(m.workDir, cwdMax)), outerBodyWidth)
 	data.topLines = append(data.topLines, "")
 
 	// ── Model configuration (pinned) ──
@@ -8717,9 +8725,9 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 			pPermModel = m.config.Ocode.Permissions.Auto.Model
 		}
 	}
-	data.topLines = append(data.topLines, dimStyle.Render("advisor: ")+sidebarTextStyle.Render(advisorModel))
-	data.topLines = append(data.topLines, dimStyle.Render("small:   ")+sidebarTextStyle.Render(smallModel))
-	data.topLines = append(data.topLines, dimStyle.Render("perm:    ")+sidebarTextStyle.Render(pPermModel))
+	appendWrapped(&data.topLines, dimStyle.Render("advisor: ")+sidebarTextStyle.Render(advisorModel), outerBodyWidth)
+	appendWrapped(&data.topLines, dimStyle.Render("small:   ")+sidebarTextStyle.Render(smallModel), outerBodyWidth)
+	appendWrapped(&data.topLines, dimStyle.Render("perm:    ")+sidebarTextStyle.Render(pPermModel), outerBodyWidth)
 	data.topLines = append(data.topLines, "")
 
 	// ── Git status section (scrollable) ──
@@ -8780,57 +8788,52 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		appendScrollSection("TODO", renderSidebarTodo(todo, boxBodyWidth), nil)
 	}
 
-	// ── Allowed section (scrollable) ──
-	if m.agent != nil {
-		perm := m.agent.Permissions()
-		mode := perm.Mode()
-		modeLabel := string(mode)
-		if perm.AutoPermissionEnabled() && mode == agent.PermissionModeNormal {
-			modeLabel += " · auto"
-		}
-		body := []string{sidebarTextStyle.Render("Mode: ") + sidebarAccentStyle.Render(modeLabel)}
+		// ── Allowed section ──
+		if m.agent != nil {
+			perm := m.agent.Permissions()
+			mode := perm.Mode()
+			modeLabel := string(mode)
+			if perm.AutoPermissionEnabled() && mode == agent.PermissionModeNormal {
+				modeLabel += " · auto"
+			}
+			allowedBody := []string{sidebarSectionStyle.Render("Allowed") + "  " + dimStyle.Render("Mode: ") + sidebarAccentStyle.Render(modeLabel)}
 
-		// Extra allowed paths (paths outside workdir explicitly permitted)
-		extraPaths := m.config.Ocode.ExtraAllowedPaths
-		if len(extraPaths) > 0 {
-			body = append(body, dimStyle.Render(fmt.Sprintf("Extra paths (%d):", len(extraPaths))))
-			// Compact display: comma-separated, hard-wrapped, max 5 lines
-			const maxExtraPathLines = 5
-			joined := strings.Join(extraPaths, ", ")
-			lineWidth := boxBodyWidth - 2 // account for "  " prefix
-			wrapped := strings.Split(ansi.Hardwrap(joined, lineWidth, false), "\n")
-			for i, line := range wrapped {
-				if i >= maxExtraPathLines {
-					remaining := len(wrapped) - i
-					body = append(body, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
-					break
+			extraPaths := m.config.Ocode.ExtraAllowedPaths
+			if len(extraPaths) > 0 {
+				allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Extra paths (%d):", len(extraPaths))))
+				const maxLines = 3
+				joined := strings.Join(extraPaths, ", ")
+				wrapped := strings.Split(ansi.Hardwrap(joined, outerBodyWidth-2, false), "\n")
+				for i, line := range wrapped {
+					if i >= maxLines {
+						remaining := len(wrapped) - i
+						allowedBody = append(allowedBody, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
+						break
+					}
+					allowedBody = append(allowedBody, "  "+sidebarTextStyle.Render(line))
 				}
-				body = append(body, "  "+sidebarTextStyle.Render(line))
+			}
+
+			autoAllow := perm.ExtraBashAutoAllowPrefixes()
+			if len(autoAllow) > 0 {
+				allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Bash (%d):", len(autoAllow))))
+				const maxLines = 3
+				joined := strings.Join(autoAllow, ", ")
+				wrapped := strings.Split(ansi.Hardwrap(joined, outerBodyWidth-2, false), "\n")
+				for i, line := range wrapped {
+					if i >= maxLines {
+						remaining := len(wrapped) - i
+						allowedBody = append(allowedBody, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
+						break
+					}
+					allowedBody = append(allowedBody, "  "+sidebarTextStyle.Render(line))
+				}
+			}
+
+			for _, line := range allowedBody {
+				appendWrapped(&data.bottomLines, line, outerBodyWidth)
 			}
 		}
-
-		// Bash auto-allow prefixes added beyond the built-in defaults
-		// (sorted for stable display, never the random map order).
-		autoAllow := perm.ExtraBashAutoAllowPrefixes()
-		if len(autoAllow) > 0 {
-			body = append(body, dimStyle.Render(fmt.Sprintf("Bash (%d):", len(autoAllow))))
-			// Comma-separated, hard-wrapped, max 6 lines.
-			const maxBashLines = 6
-			joined := strings.Join(autoAllow, ", ")
-			lineWidth := boxBodyWidth - 2 // account for "  " prefix
-			wrapped := strings.Split(ansi.Hardwrap(joined, lineWidth, false), "\n")
-			for i, line := range wrapped {
-				if i >= maxBashLines {
-					remaining := len(wrapped) - i
-					body = append(body, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
-					break
-				}
-				body = append(body, "  "+sidebarTextStyle.Render(line))
-			}
-		}
-
-		appendScrollSection("Allowed", body, nil)
-	}
 
 	// ── MCP + LSP on one line ──
 	mcpLine := "MCP: " + m.renderMCPStatus()
@@ -8878,6 +8881,13 @@ func (m model) renderSidebar() string {
 	var header string
 	if title != "" {
 		header = sidebarHeaderStyle.Render("◆ ") + m.styles.Header.Render(title)
+		// Clamp to a single visual row. The header is rendered inside a padded,
+		// width-constrained border (inner width sidebarColumnWidth-4); without
+		// this, a long title wraps to multiple rows while sidebarHeaderHeight()
+		// still reports 1, shifting every file row below it and breaking the
+		// hover/click hit-test (files become clickable N rows above where they
+		// render). Truncating keeps logical height == visual height.
+		header = ansi.Truncate(header, sidebarColumnWidth-4, "…")
 	}
 
 	headerHeight := lipgloss.Height(header)
@@ -9872,4 +9882,5 @@ func (m *model) renderRetryDialog(width int) string {
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
 		header + "\n\n" + body + "\n\n" + dismissHint,
 	)
+
 }
