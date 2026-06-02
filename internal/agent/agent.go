@@ -701,6 +701,21 @@ func (a *Agent) RecapAsync(messages []Message, gen uint64) bool {
 	return true
 }
 
+// Compact runs context compaction synchronously and returns the result.
+// Returns (result, false) if compaction is disabled in config.
+func (a *Agent) Compact(messages []Message) (CompactResult, bool) {
+	rt := a.resolveCompactRuntime(true)
+	if !rt.Enabled {
+		return CompactResult{}, false
+	}
+	return a.runCompact(messages, rt), true
+}
+
+// Recap generates a conversation recap synchronously using the small model.
+func (a *Agent) Recap(messages []Message) string {
+	return a.runRecap(messages)
+}
+
 func (a *Agent) runRecap(messages []Message) string {
 	client := a.recapClient()
 	if client == nil {
