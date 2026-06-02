@@ -12,6 +12,9 @@ internal/tui/.opencode
 # AST index (shared per-project daemon)
 .sgindex/
 
+# Session export files (contain local paths & session data)
+ocode_export_*.md
+
 # Build outputs
 /release
 /ocode-darwin-*
@@ -36,4 +39,3 @@ build_script.sh
 web/node_modules/
 web/dist/assets/
 internal/agent/models-snapshot.json
-
