@@ -2,9 +2,18 @@
 
 Terminal AI coding agent in Go — started as an opencode clone, now diverged. See [Differences from opencode](#differences-from-opencode) for what changed and why.
 
+## Why ocode?
+
+We built ocode to address a few key needs:
+
+- **Lightweight & efficient** — A single Go binary that uses under 50MB of memory (excluding MCP), compared to JS-based coding agents that often exceed 500MB. Lower memory footprint, faster startup, more room for your actual work.
+- **Auto-permissions & advisor** — First-class permission modes (normal, yolo, locked) and an advisor module for automated decision-making, similar to Claude Code's approach.
+- **Optimized for extensibility** — A clean architecture that makes it easy to add new providers, tools, and features without accumulating tech debt.
+
 ## Quick Start
 
 - **Setup:** See [SETUP.md](SETUP.md) for prerequisites, installation, and configuration
+- **Contributing:** See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, code conventions, and PR guidelines
 - **Testing:** See [TESTING.md](TESTING.md) for tested features, known issues, and what needs validation
 
 ## Run
@@ -381,3 +390,13 @@ docs/                    Design specs and enhancement plans
 ## Cost Tracking
 
 Cost estimates displayed in the sidebar and session telemetry are calculated based on **API token usage**, not subscription charges. Costs are computed using per-token pricing for each model (input tokens, output tokens, and cached reads) obtained from the provider's pricing data. This gives an accurate representation of actual API costs regardless of subscription tier or cost structure, and applies uniformly across all providers (OpenAI, Anthropic, Google, etc.).
+
+## Support
+
+Thank you for using ocode! There are several ways you can help support the project:
+
+- **Report Issues** — Found a bug or have a feature request? [Open an issue](https://github.com/anthropics/ocode/issues) to help us improve.
+- **Test Across Providers** — Try ocode with different LLM providers (OpenAI, Anthropic, Google, Z.AI, Alibaba, Copilot) and share your experience. Compatibility feedback helps us prioritize fixes and enhancements.
+- **Support OpenCode** — If you'd like to support the upstream OpenCode project, consider signing up for an [OpenCode Go plan](https://opencode.ai/go?ref=3MB2697263) using our referral link.
+
+Your support means a lot — thank you! 🙏

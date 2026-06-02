@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased] — 2026-06-03
+
+### Added
+- **CONTRIBUTING.md** — Development setup guide, code conventions, and PR guidelines for contributors.
+- **TEAM_ONBOARDING.md** — Comprehensive team onboarding documentation covering architecture, build/test/run commands, and development workflow.
+- **Team Onboarding Skill** — New bundled skill (`skills/team-onboarding/`) for generating onboarding docs from codebase analysis.
+
+### Changed
+- **README.md** — Added "Why ocode?" section highlighting lightweight design, auto-permissions, and extensibility. Added link to CONTRIBUTING.md in Quick Start. Added Support section with links to issue tracker and OpenCode Go plan.
+
 ## [Unreleased] — 2026-06-02
 
 ### Added
