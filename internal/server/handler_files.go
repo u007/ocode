@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/jamesmercstudio/ocode/internal/snapshot"
 )
 
 type FileNode struct {
@@ -88,4 +90,22 @@ func buildFileTree(root string, depth int) (FileNode, error) {
 	}
 
 	return node, nil
+}
+
+func (h *Handler) HandleUndo(w http.ResponseWriter, r *http.Request) {
+	path, err := snapshot.Undo()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": path, "action": "undo"})
+}
+
+func (h *Handler) HandleRedo(w http.ResponseWriter, r *http.Request) {
+	path, err := snapshot.Redo()
+	if err != nil {
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"path": path, "action": "redo"})
 }
