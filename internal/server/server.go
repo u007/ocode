@@ -46,6 +46,58 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 
+	// Session operations
+	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.authMiddleware(s.handleCompactSession))
+	s.mux.HandleFunc("GET /api/sessions/{id}/recap", s.authMiddleware(s.handleRecapSession))
+	s.mux.HandleFunc("GET /api/sessions/{id}/export", s.authMiddleware(s.handleExportSession))
+	s.mux.HandleFunc("GET /api/sessions/{id}/export-claude", s.authMiddleware(s.handleExportClaudeSession))
+	s.mux.HandleFunc("GET /api/sessions/{id}/share", s.authMiddleware(s.handleShareSession))
+	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
+	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
+
+	// Files
+	s.mux.HandleFunc("POST /api/files/undo", s.authMiddleware(s.handleUndo))
+	s.mux.HandleFunc("POST /api/files/redo", s.authMiddleware(s.handleRedo))
+
+	// Config
+	s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
+	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
+	s.mux.HandleFunc("GET /api/config/small-model", s.authMiddleware(s.handleGetSmallModel))
+	s.mux.HandleFunc("PUT /api/config/small-model", s.authMiddleware(s.handleSetSmallModel))
+	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
+	s.mux.HandleFunc("PUT /api/config/advisor", s.authMiddleware(s.handleSetAdvisor))
+	s.mux.HandleFunc("GET /api/config/agents", s.authMiddleware(s.handleListAgents))
+	s.mux.HandleFunc("PUT /api/config/agent", s.authMiddleware(s.handleSetAgent))
+
+	// Permissions
+	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))
+	s.mux.HandleFunc("POST /api/permissions", s.authMiddleware(s.handleSetPermission))
+	s.mux.HandleFunc("GET /api/permissions/yolo", s.authMiddleware(s.handleGetYolo))
+	s.mux.HandleFunc("PUT /api/permissions/yolo", s.authMiddleware(s.handleSetYolo))
+
+	// MCP
+	s.mux.HandleFunc("GET /api/mcp", s.authMiddleware(s.handleListMCP))
+	s.mux.HandleFunc("PUT /api/mcp/{name}/enable", s.authMiddleware(s.handleEnableMCP))
+	s.mux.HandleFunc("PUT /api/mcp/{name}/disable", s.authMiddleware(s.handleDisableMCP))
+
+	// Plugins
+	s.mux.HandleFunc("GET /api/plugins", s.authMiddleware(s.handleListPlugins))
+	s.mux.HandleFunc("GET /api/plugins/{name}", s.authMiddleware(s.handleGetPlugin))
+	s.mux.HandleFunc("PUT /api/plugins/{name}/enable", s.authMiddleware(s.handleEnablePlugin))
+	s.mux.HandleFunc("PUT /api/plugins/{name}/disable", s.authMiddleware(s.handleDisablePlugin))
+	s.mux.HandleFunc("POST /api/plugins", s.authMiddleware(s.handleInstallPlugin))
+	s.mux.HandleFunc("DELETE /api/plugins/{name}", s.authMiddleware(s.handleRemovePlugin))
+
+	// Usage
+	s.mux.HandleFunc("GET /api/usage", s.authMiddleware(s.handleGetUsage))
+
+	// Info
+	s.mux.HandleFunc("GET /api/skills", s.authMiddleware(s.handleListSkills))
+	s.mux.HandleFunc("GET /api/commands", s.authMiddleware(s.handleListCommands))
+	s.mux.HandleFunc("GET /api/github/pr/{owner}/{repo}/{number}", s.authMiddleware(s.handleGitHubPR))
+	s.mux.HandleFunc("GET /api/github/issues/{owner}/{repo}", s.authMiddleware(s.handleGitHubIssues))
+	s.mux.HandleFunc("POST /api/init", s.authMiddleware(s.handleInit))
+
 	// Serve embedded web UI for non-API routes
 	s.mux.Handle("/", spaHandler(s.webFS))
 }
@@ -175,19 +227,107 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 func (s *Server) WithCORS() *Server {
+	original := s.mux
 	wrapped := http.NewServeMux()
-	wrapped.HandleFunc("POST /api/chat", corsMiddleware(s.handleChat))
-	wrapped.HandleFunc("GET /api/chat/stream", corsMiddleware(s.handleChatStream))
-	wrapped.HandleFunc("GET /api/sessions", corsMiddleware(s.handleListSessions))
-	wrapped.HandleFunc("GET /api/sessions/{id}", corsMiddleware(s.handleGetSession))
-	wrapped.HandleFunc("POST /api/sessions/{id}/message", corsMiddleware(s.handleSendMessage))
-	wrapped.HandleFunc("GET /api/models", corsMiddleware(s.handleListModels))
-	wrapped.HandleFunc("GET /api/git/status", corsMiddleware(s.handleGitStatus))
-	wrapped.HandleFunc("GET /api/files/tree", corsMiddleware(s.handleFileTree))
-	wrapped.HandleFunc("GET /api/files/content", corsMiddleware(s.handleFileContent))
+	wrapped.HandleFunc("/", corsMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		original.ServeHTTP(w, r)
+	}))
 	s.mux = wrapped
 	return s
 }
+
+// Session shims
+func (s *Server) handleCompactSession(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleCompactSession(w, r, r.PathValue("id"))
+}
+func (s *Server) handleRecapSession(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRecapSession(w, r, r.PathValue("id"))
+}
+func (s *Server) handleExportSession(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleExportSession(w, r, r.PathValue("id"))
+}
+func (s *Server) handleExportClaudeSession(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleExportClaudeSession(w, r, r.PathValue("id"))
+}
+func (s *Server) handleShareSession(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleShareSession(w, r, r.PathValue("id"))
+}
+func (s *Server) handleSetSessionTitle(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetSessionTitle(w, r, r.PathValue("id"))
+}
+func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSessionContext(w, r, r.PathValue("id"))
+}
+
+// File shims
+func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) { s.handler.HandleUndo(w, r) }
+func (s *Server) handleRedo(w http.ResponseWriter, r *http.Request) { s.handler.HandleRedo(w, r) }
+
+// Config shims
+func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request)      { s.handler.HandleGetModel(w, r) }
+func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request)      { s.handler.HandleSetModel(w, r) }
+func (s *Server) handleGetSmallModel(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetSmallModel(w, r) }
+func (s *Server) handleSetSmallModel(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetSmallModel(w, r) }
+func (s *Server) handleGetAdvisor(w http.ResponseWriter, r *http.Request)    { s.handler.HandleGetAdvisor(w, r) }
+func (s *Server) handleSetAdvisor(w http.ResponseWriter, r *http.Request)    { s.handler.HandleSetAdvisor(w, r) }
+func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request)    { s.handler.HandleListAgents(w, r) }
+func (s *Server) handleSetAgent(w http.ResponseWriter, r *http.Request)      { s.handler.HandleSetAgent(w, r) }
+
+// Permissions shims
+func (s *Server) handleGetPermissions(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetPermissions(w, r) }
+func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request)  { s.handler.HandleSetPermission(w, r) }
+func (s *Server) handleGetYolo(w http.ResponseWriter, r *http.Request)        { s.handler.HandleGetYolo(w, r) }
+func (s *Server) handleSetYolo(w http.ResponseWriter, r *http.Request)        { s.handler.HandleSetYolo(w, r) }
+
+// MCP shims
+func (s *Server) handleListMCP(w http.ResponseWriter, r *http.Request) { s.handler.HandleListMCP(w, r) }
+func (s *Server) handleEnableMCP(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetMCPEnabled(w, r, r.PathValue("name"), true)
+}
+func (s *Server) handleDisableMCP(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetMCPEnabled(w, r, r.PathValue("name"), false)
+}
+
+// Plugin shims
+func (s *Server) handleListPlugins(w http.ResponseWriter, r *http.Request) { s.handler.HandleListPlugins(w, r) }
+func (s *Server) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPlugin(w, r, r.PathValue("name"))
+}
+func (s *Server) handleEnablePlugin(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPluginEnabled(w, r, r.PathValue("name"), true)
+}
+func (s *Server) handleDisablePlugin(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPluginEnabled(w, r, r.PathValue("name"), false)
+}
+func (s *Server) handleInstallPlugin(w http.ResponseWriter, r *http.Request) { s.handler.HandleInstallPlugin(w, r) }
+func (s *Server) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRemovePlugin(w, r, r.PathValue("name"))
+}
+
+// Usage shims
+func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetUsage(w, r) }
+
+// Info shims
+func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request)   { s.handler.HandleListSkills(w, r) }
+func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) { s.handler.HandleListCommands(w, r) }
+func (s *Server) handleGitHubPR(w http.ResponseWriter, r *http.Request) {
+	owner, repo, number, ok := parseGitHubPRRoute(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid github PR path")
+		return
+	}
+	s.handler.HandleGitHubPR(w, r, owner, repo, number)
+}
+func (s *Server) handleGitHubIssues(w http.ResponseWriter, r *http.Request) {
+	owner := r.PathValue("owner")
+	repo := r.PathValue("repo")
+	if owner == "" || repo == "" {
+		writeError(w, http.StatusBadRequest, "owner and repo are required")
+		return
+	}
+	s.handler.HandleGitHubIssues(w, r, owner, repo)
+}
+func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) { s.handler.HandleInit(w, r) }
 
 type ChatRequest struct {
 	Content   string `json:"content"`
