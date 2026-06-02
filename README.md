@@ -22,9 +22,11 @@ go build -o ocode .
 
 ## Status
 
-Production-ready TUI AI coding agent with multi-provider LLM support (OpenAI, Anthropic,
+**TUI (Terminal):** Production-ready AI coding agent with multi-provider LLM support (OpenAI, Anthropic,
 Google, Z.AI, Alibaba, Copilot), MCP client, session management, git integration, LSP
 intelligence, theme system, and extensible agent system.
+
+**Web UI:** Work-in-progress and not yet tested. HTTP server mode (`ocode serve`) available for early exploration.
 
 ## Features
 
@@ -337,7 +339,7 @@ Outputs over ~100 lines are truncated in-context and written to disk; the agent 
 
 ### What ocode does **not** have (vs opencode)
 
-- No web/desktop frontends — terminal only.
+- No desktop frontends — terminal and WIP web UI only.
 - No plugin marketplace.
 - Smaller skill ecosystem.
 - No `plan-reminder` / `build-switch` prompt overlays (one mode prompt does both jobs).
