@@ -93,7 +93,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tools := tool.LoadBuiltins(h.cfg)
+		tools, _ := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg)
 		ag.LoadExternalTools(h.cfg)
 

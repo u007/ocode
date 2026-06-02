@@ -558,3 +558,64 @@ func TestSaveAdvisorModel_RequiresProviderPrefix(t *testing.T) {
 		t.Fatalf("unexpected saved advisor config: %#v", cfg.Ocode.Advisor)
 	}
 }
+
+func TestASTPluginLoadSave(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	t.Run("default is disabled", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg.Ocode.Plugins.AST {
+			t.Fatal("ast plugin should default to disabled")
+		}
+	})
+
+	t.Run("load enabled from file", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"plugins":{"ast":true}}`), 0o644)
+
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.Plugins.AST {
+			t.Fatal("want ast plugin enabled from file")
+		}
+	})
+
+	t.Run("save round-trips", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+
+		if err := SaveOcodeASTPlugin(true); err != nil {
+			t.Fatalf("SaveOcodeASTPlugin failed: %v", err)
+		}
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.Plugins.AST {
+			t.Fatal("ast plugin should persist as enabled after save")
+		}
+
+		if err := SaveOcodeASTPlugin(false); err != nil {
+			t.Fatalf("SaveOcodeASTPlugin(false) failed: %v", err)
+		}
+		var cfg2 Config
+		if err := LoadOcodeConfig(&cfg2); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg2.Ocode.Plugins.AST {
+			t.Fatal("ast plugin should persist as disabled after save")
+		}
+	})
+}

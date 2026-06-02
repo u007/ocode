@@ -656,7 +656,7 @@ func TestExecuteApprovedTool_UsesTemporaryOutOfScopePathAllowance(t *testing.T) 
 	}
 	defer os.Chdir(origWd) //nolint:errcheck
 
-	tool.LoadBuiltins(nil)
+	_, _ = tool.LoadBuiltins(nil)
 	if tool.HasExtraAllowedPath(outsideRoot) {
 		t.Fatalf("did not expect %q to be pre-allowed", outsideRoot)
 	}
@@ -1727,13 +1727,14 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 
 	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
 	// Press starts sidebar selection (no file opening yet)
-	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 9})
+	// Y=13 accounts for: header(2) + mode(1) + ctx(1) + cwd(1) + empty(1) + advisor(1) + small(1) + perm(1) + empty(1) + git_title(1) + git_branch(1) + empty(1) = 13
+	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 13})
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected press to start selection only, got stray command")
 	}
 	// Release on same position triggers file open (simple click, no drag)
-	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: 9})
+	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: 13})
 	_ = updated
 	if cmd == nil {
 		t.Fatal("expected release on file line to return editor command")
@@ -2515,7 +2516,7 @@ func TestTranscriptScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
 	if trackRow >= m.viewport.Height() {
 		trackRow = 0
 	}
-	trackTop := lipgloss.Height(m.styles.Header.Render("◆ ocode")) + 1
+	trackTop := appHeaderHeight + 1
 
 	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.mainScrollbarX(), Y: trackTop + trackRow})
 	got := derefTestModel(t, updated)
@@ -2551,7 +2552,7 @@ func TestTranscriptScrollbarThumbClickDoesNotJumpScroll(t *testing.T) {
 	if !ok {
 		t.Fatal("expected scrollable transcript")
 	}
-	trackTop := lipgloss.Height(m.styles.Header.Render("◆ ocode")) + 1
+	trackTop := appHeaderHeight + 1
 
 	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: m.mainScrollbarX(), Y: trackTop + thumbTop})
 	got := derefTestModel(t, updated)
@@ -2577,7 +2578,7 @@ func TestGitDiffMouseDragSelectsDiffText(t *testing.T) {
 
 	panelW := m.panelWidth()
 	diffLeft := panelW*20/100 + panelW*30/100 + 1
-	gitBodyTop := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git")) + 1
+	gitBodyTop := appHeaderHeight + 1
 	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: diffLeft, Y: gitBodyTop + 1}, true)
 	if !ok {
 		t.Fatal("expected mouse press in git diff panel to be handled")
@@ -2617,7 +2618,7 @@ func TestGitRightClickDeselectsActiveFile(t *testing.T) {
 	m.git.setDiffContent("diff content")
 
 	panelW := m.panelWidth()
-	gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
+	gitHeaderH := appHeaderHeight
 	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseRight, X: panelW * 20 / 100, Y: gitHeaderH + 2})
 	got := derefTestModel(t, updated)
 
@@ -2647,7 +2648,7 @@ func TestFilesRightClickDeselectsActiveFile(t *testing.T) {
 	m.files.previewRawLines = []string{"package main"}
 	m.files.previewLines = []string{"package main"}
 
-	filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
+	filesHeaderH := appHeaderHeight
 	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseRight, X: 1, Y: filesHeaderH + 1})
 	got := derefTestModel(t, updated)
 
@@ -2868,7 +2869,7 @@ func TestTabMouseReleaseUsesRightAlignedHeaderPosition(t *testing.T) {
 	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("1:chat"))
 	filesWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("2:files"))
 
-	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + filesWidth + 1, Y: 0})
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + filesWidth + 1, Y: 1})
 	got := derefTestModel(t, updated)
 
 	if got.activeTab != tabGit {
@@ -2890,7 +2891,7 @@ func TestTabMouseMotionSwitchesWhenTerminalReportsDrag(t *testing.T) {
 	barStart := m.tabBarStartXs(barWidth)[0]
 	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("1:chat"))
 
-	updated, _ := m.Update(tea.MouseMotionMsg{Button: tea.MouseLeft, X: barStart + chatWidth + 1, Y: 0})
+	updated, _ := m.Update(tea.MouseMotionMsg{Button: tea.MouseLeft, X: barStart + chatWidth + 1, Y: 1})
 	got := derefTestModel(t, updated)
 
 	if got.activeTab != tabFiles {
@@ -3000,6 +3001,42 @@ func TestHandleModelCmdPreservesMCPProvenance(t *testing.T) {
 	}
 	if got := m.agent.MCPToolCount(); got != 1 {
 		t.Fatalf("expected MCP provenance to survive model switch, got %d", got)
+	}
+}
+
+func TestResetSessionAgentCreatesStubAgentWhenClientMissing(t *testing.T) {
+	oldDebugAppend := agent.DebugAppend
+	agent.DebugAppend = func(string, string) {}
+	t.Cleanup(func() { agent.DebugAppend = oldDebugAppend })
+
+	cfg := &config.Config{
+		Model: "custom/demo",
+		Provider: map[string]interface{}{
+			"custom": map[string]interface{}{
+				"options": map[string]interface{}{
+					"baseURL": "https://example.invalid",
+				},
+			},
+		},
+	}
+
+	m := model{config: cfg, workDir: t.TempDir()}
+	cmd := m.resetSessionAgent()
+	if m.agent == nil {
+		t.Fatal("expected resetSessionAgent to install a stub agent when the model has no credentials")
+	}
+	if m.agent.Client() != nil {
+		t.Fatalf("expected stub agent to keep a nil client, got %#v", m.agent.Client())
+	}
+	msgs, err := m.agent.Step(nil)
+	if err != nil {
+		t.Fatalf("stub agent Step() error = %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Content != "(no llm client configured)" {
+		t.Fatalf("stub agent Step() = %#v, want the no-LLM sentinel message", msgs)
+	}
+	if cmd == nil {
+		t.Fatal("expected resetSessionAgent to return a job-listener command")
 	}
 }
 
@@ -3785,5 +3822,73 @@ func TestHandleAdvisorCmdRequiresProviderPrefix(t *testing.T) {
 	}
 	if m.config.Ocode.Advisor.Provider != config.DefaultAdvisorProvider() || m.config.Ocode.Advisor.Model != config.DefaultAdvisorModelName() {
 		t.Fatalf("advisor config should remain unchanged on invalid input, got %#v", m.config.Ocode.Advisor)
+	}
+}
+
+func TestRunPermissionsCmdModelOpensPermissionPicker(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	m := model{
+		config: &cfg,
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		input:  textarea.New(),
+	}
+
+	runPermissionsCmd(&m, []string{"model"})
+
+	if !m.showPicker {
+		t.Fatal("expected permission model picker to open")
+	}
+	if m.pickerKind != "permission-model" {
+		t.Fatalf("expected permission-model picker kind, got %q", m.pickerKind)
+	}
+	if len(m.pickerItems) == 0 || m.pickerItems[0] != "(not set)" {
+		t.Fatalf("expected a clear option at the top of the picker, got %#v", m.pickerItems[:minInt(len(m.pickerItems), 3)])
+	}
+	if len(m.pickerValues) == 0 || m.pickerValues[0] != "auto" {
+		t.Fatalf("expected clear option to map to auto, got %#v", m.pickerValues[:minInt(len(m.pickerValues), 3)])
+	}
+}
+
+func TestRunPermissionsCmdModelAutoClearsOverride(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
+	m := model{
+		config: &cfg,
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		input:  textarea.New(),
+	}
+
+	runPermissionsCmd(&m, []string{"model", "auto"})
+
+	if m.config.Ocode.Permissions.Auto == nil {
+		t.Fatal("expected auto permission config to remain present")
+	}
+	if m.config.Ocode.Permissions.Auto.Model != "" {
+		t.Fatalf("expected permission model override to clear, got %q", m.config.Ocode.Permissions.Auto.Model)
+	}
+	if len(m.messages) == 0 || !strings.Contains(m.messages[len(m.messages)-1].text, "Permission model cleared") {
+		t.Fatalf("expected clear confirmation message, got %#v", m.messages)
+	}
+}
+
+func TestRecapFinishedMsgIgnoresStaleGeneration(t *testing.T) {
+	m := model{recapGen: 2, recapText: "current recap"}
+
+	updated, _ := m.Update(recapFinishedMsg{gen: 1, text: "stale recap"})
+	got := derefTestModel(t, updated)
+	if got.recapText != "current recap" {
+		t.Fatalf("stale recap should be ignored, got %q", got.recapText)
+	}
+
+	updated, _ = got.Update(recapFinishedMsg{gen: 2, text: "fresh recap"})
+	got = derefTestModel(t, updated)
+	if got.recapText != "fresh recap" {
+		t.Fatalf("matching recap generation should update text, got %q", got.recapText)
 	}
 }

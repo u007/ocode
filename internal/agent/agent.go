@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/hooks"
@@ -44,6 +45,13 @@ type JobEvent struct {
 	Result     string // output tail or result text
 	Background bool   // for Kind=="agent": true if run_in_background; false means the parent already consumed the result via the task tool's return value
 	ToolCallID string // for Kind=="agent": id of the task tool_call that spawned this run, when known
+}
+
+// RecapResult carries an async recap response plus a generation tag so callers
+// can ignore stale results after a session reset.
+type RecapResult struct {
+	Gen  uint64
+	Text string
 }
 
 type Agent struct {
@@ -86,6 +94,9 @@ type Agent struct {
 	// callback receives a CompactResult describing whether compaction
 	// occurred, the splice indices, and the summary message to insert.
 	OnCompact func(CompactResult)
+	// OnRecap, if set, is invoked when async recap finishes. The callback
+	// receives the recap result produced by the small model.
+	OnRecap func(RecapResult)
 	// OnPermissionAsk, if set, is invoked synchronously when a tool call
 	// requires a permission decision. It blocks until the user (via the TUI)
 	// responds, returning the permission response. When set, HandleToolCall acts
@@ -104,6 +115,8 @@ type Agent struct {
 	// compactMu serialises async compaction passes so a slow summary call
 	// can't fire OnCompact twice for overlapping snapshots.
 	compactMu sync.Mutex
+	// recapMu serialises async recap passes.
+	recapMu sync.Mutex
 	// subagentDispatchGuard tracks consecutive identical task-tool dispatches
 	// since the last user input, to break runaway loops where a small model
 	// keeps re-launching the same subagent in response to its own completion
@@ -166,6 +179,31 @@ func (a *Agent) chatWithDelta(stopCh <-chan struct{}, messages []Message, toolDe
 		if a.OnUsage != nil {
 			gc.SetOnUsage(a.OnUsage)
 			defer gc.SetOnUsage(nil)
+		}
+		if a.retryEvents != nil {
+			origNotifier := gc.RetryNotifier
+			// specName is safe to access even when a.spec is nil (initial agent
+			// created via NewAgent without SetSpec). Guard to avoid panic when 429
+			// retries fire before a spec is assigned.
+			specName := ""
+			if a.spec != nil {
+				specName = a.spec.Name
+			}
+			gc.RetryNotifier = func(attempt, maxRetries int, delay time.Duration, err error) {
+				a.EmitRetryStatus(&RetryStatusEvent{
+					ID:         specName,
+					Name:       gc.Model,
+					RetryCount: attempt + 1,
+					MaxRetries: maxRetries + 1,
+					LastError:  err.Error(),
+					RetryDelay: delay,
+					RetryingAt: time.Now(),
+					Kind:       "llm",
+				})
+				emitDebug("retry", fmt.Sprintf("llm %s — retry %d/%d in %v: %v",
+					gc.Model, attempt+1, maxRetries+1, delay, err))
+			}
+			defer func() { gc.RetryNotifier = origNotifier }()
 		}
 		origTemp, origTopP := gc.Temperature, gc.TopP
 		if a.pipeline != nil {
@@ -263,10 +301,6 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
-	if relTool, ok := a.tools["code_rel"]; ok {
-		// Backward-compat alias: older sessions may still call "ast".
-		a.tools["ast"] = relTool
-	}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)
 		a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
@@ -537,7 +571,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 // the post-Step trigger fired by the TUI on streamDoneMsg. This warning lets
 // users see why they may be approaching a hard context-length error.
 func (a *Agent) warnIfNearWindow(promptTokens int64) {
-	rt := a.resolveCompactRuntime()
+	rt := a.resolveCompactRuntime(false)
 	if !rt.Enabled || rt.WindowTokens <= 0 {
 		return
 	}
@@ -548,14 +582,16 @@ func (a *Agent) warnIfNearWindow(promptTokens int64) {
 }
 
 // resolveCompactRuntime materialises the compaction knobs for the current
-// agent + active model. Returns Enabled=false when compaction is disabled.
-func (a *Agent) resolveCompactRuntime() compactRuntime {
+// agent + active model. When force is false, it returns Enabled=false when
+// compaction is disabled. Manual /compact uses force=true so it can still run
+// even if automatic compaction is switched off.
+func (a *Agent) resolveCompactRuntime(force bool) compactRuntime {
 	rt := compactRuntime{Enabled: false}
 	if a.config == nil {
 		return rt
 	}
 	c := a.config.Ocode.Compact
-	if !c.Enabled {
+	if !c.Enabled && !force {
 		return rt
 	}
 	rt.Enabled = true
@@ -593,9 +629,8 @@ func (a *Agent) resolveCompactRuntime() compactRuntime {
 	return rt
 }
 
-// MaybeCompactAsync runs compaction in a goroutine. It first checks the token
-// threshold; if exceeded, it picks a tool-pair-safe cut, runs the summary
-// client with a timeout + retry loop, and fires OnCompact with the result.
+// MaybeCompactAsync runs compaction in a goroutine when the current context
+// usage is above the configured threshold.
 //
 // Returns true iff a compaction goroutine was actually started — false when
 // disabled, below threshold, or another compaction is already in flight. The
@@ -605,7 +640,7 @@ func (a *Agent) resolveCompactRuntime() compactRuntime {
 // The provided messages slice is read-only; the caller is responsible for
 // splicing its own copy when OnCompact fires.
 func (a *Agent) MaybeCompactAsync(messages []Message) bool {
-	rt := a.resolveCompactRuntime()
+	rt := a.resolveCompactRuntime(false)
 	if !rt.Enabled {
 		return false
 	}
@@ -613,13 +648,28 @@ func (a *Agent) MaybeCompactAsync(messages []Message) bool {
 	if !need {
 		return false
 	}
+	return a.startCompactAsync(messages, rt, fmt.Sprintf("triggered: ~%d tokens used, window=%d, threshold=%.2f", used, rt.WindowTokens, rt.TokenThreshold))
+}
+
+// CompactAsync runs a manual compaction in a goroutine, bypassing the token
+// threshold check so /compact always attempts a summary when the feature is
+// available.
+func (a *Agent) CompactAsync(messages []Message) bool {
+	rt := a.resolveCompactRuntime(true)
+	if !rt.Enabled {
+		return false
+	}
+	return a.startCompactAsync(messages, rt, fmt.Sprintf("manual compaction requested: messages=%d window=%d", len(messages), rt.WindowTokens))
+}
+
+func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, note string) bool {
 	if !a.compactMu.TryLock() {
 		emitDebug("COMPACT", "skipped: another compaction in flight")
 		return false
 	}
 	snapshot := make([]Message, len(messages))
 	copy(snapshot, messages)
-	emitDebug("COMPACT", fmt.Sprintf("triggered: ~%d tokens used, window=%d, threshold=%.2f", used, rt.WindowTokens, rt.TokenThreshold))
+	emitDebug("COMPACT", note)
 	if a.OnCompactStart != nil {
 		a.OnCompactStart()
 	}
@@ -631,6 +681,103 @@ func (a *Agent) MaybeCompactAsync(messages []Message) bool {
 		}
 	}()
 	return true
+}
+
+// RecapAsync generates a conversation recap using the small model in a
+// goroutine. Returns false if a recap is already in flight.
+func (a *Agent) RecapAsync(messages []Message, gen uint64) bool {
+	if !a.recapMu.TryLock() {
+		return false
+	}
+	snapshot := make([]Message, len(messages))
+	copy(snapshot, messages)
+	go func() {
+		defer a.recapMu.Unlock()
+		text := a.runRecap(snapshot)
+		if a.OnRecap != nil {
+			a.OnRecap(RecapResult{Gen: gen, Text: text})
+		}
+	}()
+	return true
+}
+
+func (a *Agent) runRecap(messages []Message) string {
+	client := a.recapClient()
+	if client == nil {
+		return "Recap unavailable: no LLM client."
+	}
+
+	var b strings.Builder
+	b.WriteString("You are a conversation recap assistant. Summarize the following conversation in caveman style — short, punchy, no fluff.\n\n")
+	b.WriteString("Cover these sections:\n")
+	b.WriteString("1. WHAT USER WANT — what was asked\n")
+	b.WriteString("2. WHAT FIND — what was found or discovered\n")
+	b.WriteString("3. DECISION — what decisions were made\n")
+	b.WriteString("4. DO — what was updated and tested\n\n")
+	b.WriteString("Format: use headers and bullet points. Be terse. No filler.\n\n")
+	b.WriteString("CONVERSATION:\n")
+
+	for _, msg := range messages {
+		role := "user"
+		if msg.Role == "assistant" {
+			role = "assistant"
+		}
+		content := msg.Content
+		if len(content) > 2000 {
+			content = content[:2000] + "... (truncated)"
+		}
+		fmt.Fprintf(&b, "[%s] %s\n\n", role, content)
+	}
+
+	prompt := b.String()
+
+	ctx, cancel := contextWithTimeout(60)
+	defer cancel()
+
+	done := make(chan struct {
+		content string
+		err     error
+	}, 1)
+	go func() {
+		resp, err := client.Chat([]Message{{Role: "user", Content: prompt}}, nil)
+		if err != nil {
+			done <- struct {
+				content string
+				err     error
+			}{"", err}
+			return
+		}
+		done <- struct {
+			content string
+			err     error
+		}{resp.Content, nil}
+	}()
+	select {
+	case <-ctx.Done():
+		return "Recap timed out."
+	case r := <-done:
+		if r.err != nil {
+			return fmt.Sprintf("Recap failed: %v", r.err)
+		}
+		if strings.TrimSpace(r.content) == "" {
+			return "Recap returned empty."
+		}
+		return r.content
+	}
+}
+
+func (a *Agent) recapClient() LLMClient {
+	if a.config == nil {
+		return a.client
+	}
+	small := strings.TrimSpace(a.config.Ocode.SmallModel)
+	if small == "" {
+		return a.client
+	}
+	if client := NewClient(a.config, small); client != nil {
+		return client
+	}
+	return a.client
 }
 
 func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult {
@@ -767,8 +914,18 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 		}
 		if decision.Level == PermissionAsk {
 			if autoEnabled {
-				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_short_circuit tool=%s model=%s request=%s", name, a.autoPermissionModelName(), permissionRequestSummary(decision.Request)))
-				return a.executeToolCall(name, args)
+				// Build the permission request so we can check for harmful ops.
+				req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
+				if decision.Request != nil {
+					req = *decision.Request
+				}
+				if IsHarmfulRequest(req) {
+					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
+					// Fall through to human ask — harmful ops cannot be auto-allowed.
+				} else {
+					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_short_circuit tool=%s model=%s request=%s", name, a.autoPermissionModelName(), permissionRequestSummary(decision.Request)))
+					return a.executeToolCall(name, args)
+				}
 			}
 			emitDebug("PERMISSION", fmt.Sprintf("tier=human_ask tool=%s request=%s callback=%t", name, permissionRequestSummary(decision.Request), a.OnPermissionAsk != nil))
 			// When a permission callback is wired (sub-agents), ask the user

@@ -68,6 +68,7 @@ type gitRefreshMsg struct {
 	branches      []string
 	currentBranch string
 	aheadBehind   string
+	autoRefresh   bool // when true, skip diff reload to preserve scroll/selection
 }
 
 type diffHunk struct {
@@ -243,6 +244,33 @@ func (m *gitModel) cmdRefresh() tea.Cmd {
 			branches:      tmp.branches,
 			currentBranch: tmp.currentBranch,
 			aheadBehind:   ab,
+		}
+	}
+}
+
+// cmdAutoRefresh is like cmdRefresh but sets autoRefresh=true on the returned
+// gitRefreshMsg. The Update handler skips loadDiff() for auto-refresh messages
+// so that the diff viewport scroll position and any active text selection are
+// preserved.
+func (m *gitModel) cmdAutoRefresh() tea.Cmd {
+	workDir := m.workDir
+	return func() tea.Msg {
+		tmp := gitModel{workDir: workDir}
+		tmp.loadChanges()
+		tmp.loadLog()
+		tmp.loadStash()
+		tmp.loadBranches()
+		ab := tmp.aheadBehindString()
+		return gitRefreshMsg{
+			staged:        tmp.stagedFiles,
+			unstaged:      tmp.unstagedFiles,
+			untracked:     tmp.untrackedFiles,
+			commits:       tmp.commits,
+			stashes:       tmp.stashes,
+			branches:      tmp.branches,
+			currentBranch: tmp.currentBranch,
+			aheadBehind:   ab,
+			autoRefresh:   true,
 		}
 	}
 }
@@ -425,7 +453,11 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 		} else if m.filesCursor >= len(files) {
 			m.filesCursor = len(files) - 1
 		}
-		m.loadDiff()
+		// During auto-refresh, skip diff reload to preserve scroll position
+		// and any active text selection.
+		if !msg.autoRefresh {
+			m.loadDiff()
+		}
 		return m, nil
 	case loadMoreLogMsg:
 		m.loadingLog = false
@@ -1533,15 +1565,17 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 	if m.aheadBehind != "" {
 		ab = "  " + m.aheadBehind
 	}
-	headerLeft := styles.Header.Render("◆ ocode  Git" + ab)
+	headerLeft := appHeaderLeftPad + styles.Header.Render("\u25c6 ocode  Git"+ab) + appHeaderHintGap + hintStyle.Render("opencode clone")
 	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if headerPad < 0 {
 		headerPad = 0
 	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
+	// Add the standard top-pad row + left gap + thin title/hint gap. Use the
+	// chat tab's "opencode clone" hint to stay consistent with model.go.
+	renderedHeader := appHeaderTopPad + headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
 
 	var parts []string
-	parts = append(parts, header, row)
+	parts = append(parts, renderedHeader, row)
 	if m.committing {
 		parts = append(parts, styles.Border.Width(w-2).Render(m.commitInput.View()))
 	}

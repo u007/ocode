@@ -107,7 +107,7 @@ func Run(args []string) error {
 		return fmt.Errorf("failed to create LLM client for model %q", modelStr)
 	}
 
-	tools := tool.LoadBuiltins(cfg)
+	tools, _ := tool.LoadBuiltins(cfg)
 	ag := agent.NewAgent(client, tools, cfg)
 	ag.LoadExternalTools(cfg)
 	// Only install an OnPermissionAsk override when the user explicitly opted

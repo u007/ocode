@@ -3,288 +3,247 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
-	"os"
-	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 
-	"github.com/jamesmercstudio/ocode/internal/astdaemon"
+	"github.com/jamesmercstudio/ocode/internal/lsp"
 )
 
-// AstTool provides AST-aware code search via ast-grep.
-// It starts a shared per-project daemon (first instance acquires lock,
-// subsequent instances reuse it) that keeps the AST index fresh via
-// fsnotify + incremental sg scan --update.
+// AstTool provides symbol-name-oriented semantic code intelligence backed by a
+// real language server (find references / definition / implementations /
+// callers / symbols). It resolves a symbol *name* to a position via
+// workspace/symbol, then runs the positional query — so the model can ask
+// "where is LoadBuiltins used?" without already knowing the file:line.
+//
+// This tool is an opt-in plugin: it is NOT registered unless enabled in the
+// ocode config (plugins.ast). Toggle it at runtime with `/plugin enable ast`.
 type AstTool struct {
-	mu       sync.Mutex
-	instance *astdaemon.Instance // shared daemon instance
+	// Mgr, if set, is a shared LSP manager (reused with LSPTool so only one
+	// gopls runs per project). Falls back to a private lazy manager when nil.
+	Mgr  *lsp.Manager
+	once sync.Once
+	mgr  *lsp.Manager
 }
 
-func (t *AstTool) Name() string { return "code_rel" }
+func (t *AstTool) Name() string { return "ast" }
 func (t *AstTool) Description() string {
-	return "Symbol/structure-aware code relation search (use grep for plain text)"
+	return "Semantic code navigation via LSP: find a symbol's references, definition, implementations, or callers by name (use grep for plain text)"
 }
-func (t *AstTool) Parallel() bool { return false }
+func (t *AstTool) Parallel() bool { return true }
 
 func (t *AstTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
-		"name":        "code_rel",
-		"description": "Code relation and AST-structure queries via ast-grep with persisted background index updates. Use this for symbol/structure-aware tasks (find function declarations, symbol kinds, relation-oriented navigation). For plain text or regex search, use grep.",
+		"name":        "ast",
+		"description": "Semantic code intelligence via the language server (LSP). Resolves a symbol by NAME and reports true references/definitions/callers — not text matches. Use this for 'where is X used / defined / who calls X / what implements X'. For plain text or regex search, use grep.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"operation": map[string]interface{}{
 					"type": "string",
-					"description": "The code relation operation to perform:\n" +
-						"  - search: Find code by AST structure/pattern (e.g. 'fn $NAME($$$)' finds functions by syntax)\n" +
-						"  - symbols: List symbols by kind (function, class, struct, interface, method, enum)\n" +
-						"  - status: Check index/daemon health\n" +
-						"  - scan: Force a re-index (normally automatic).\n" +
-						"Use grep instead when you need plain text/regex matches.",
-					"enum": []string{"search", "symbols", "status", "scan"},
+					"description": "The semantic operation:\n" +
+						"  - references: every usage of the symbol\n" +
+						"  - definition: where the symbol is defined\n" +
+						"  - implementations: types/methods implementing the interface\n" +
+						"  - callers: functions that call the symbol (best-effort; gopls)\n" +
+						"  - symbols: search workspace symbols by name (use 'query'), or list a file's symbols (use 'path')\n" +
+						"  - status: show configured language servers and install state",
+					"enum": []string{"references", "definition", "implementations", "callers", "symbols", "status"},
 				},
-				"pattern": map[string]interface{}{
+				"symbol": map[string]interface{}{
 					"type":        "string",
-					"description": "AST pattern to search for. Uses ast-grep pattern syntax: write code with $UPPERCASE wildcards for AST nodes, e.g. 'fn $NAME($$$)' matches any function. Use '$$$' for rest parameters.",
-				},
-				"kind": map[string]interface{}{
-					"type":        "string",
-					"description": "Symbol kind filter for the 'symbols' operation. One of: function, class, struct, method, interface, enum, variable, constant, type, module",
-				},
-				"lang": map[string]interface{}{
-					"type":        "string",
-					"description": "Programming language to restrict the search to (e.g. 'go', 'rust', 'python', 'typescript', 'java'). Optional — when omitted all supported languages are searched.",
+					"description": "Symbol name to resolve (e.g. 'LoadBuiltins'). Used by references/definition/implementations/callers. Prefer this over manual positions.",
 				},
 				"path": map[string]interface{}{
 					"type":        "string",
-					"description": "File or directory path to restrict the search to. Optional — when omitted the entire project is searched.",
+					"description": "File path. Optional. If given with line/character, used as the exact position instead of resolving 'symbol'. For 'symbols' without a query, lists this file's symbols.",
 				},
-				"max_results": map[string]interface{}{
-					"type":        "integer",
-					"description": "Maximum number of results to return (default: 50, max: 200)",
-					"default":     50,
+				"line":      map[string]interface{}{"type": "integer", "description": "0-based line (only with 'path' for an exact position)"},
+				"character": map[string]interface{}{"type": "integer", "description": "0-based character (only with 'path' for an exact position)"},
+				"lang": map[string]interface{}{
+					"type":        "string",
+					"description": "Language hint when only 'symbol' is given (go, rust, python, typescript, javascript). Defaults to go.",
 				},
+				"query": map[string]interface{}{"type": "string", "description": "Name query for the 'symbols' operation"},
 			},
 			"required": []string{"operation"},
 		},
 	}
 }
 
+type astParams struct {
+	Operation string `json:"operation"`
+	Symbol    string `json:"symbol"`
+	Path      string `json:"path"`
+	Line      int    `json:"line"`
+	Char      int    `json:"character"`
+	Lang      string `json:"lang"`
+	Query     string `json:"query"`
+}
+
+func (t *AstTool) manager() *lsp.Manager {
+	if t.Mgr != nil {
+		return t.Mgr
+	}
+	t.once.Do(func() { t.mgr = lsp.NewManager(".") })
+	return t.mgr
+}
+
 func (t *AstTool) Execute(args json.RawMessage) (string, error) {
-	var params struct {
-		Operation  string `json:"operation"`
-		Pattern    string `json:"pattern"`
-		Kind       string `json:"kind"`
-		Lang       string `json:"lang"`
-		Path       string `json:"path"`
-		MaxResults int    `json:"max_results"`
-	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", fmt.Errorf("code_rel: invalid params: %w", err)
+	var p astParams
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("ast: invalid params: %w", err)
 	}
 
-	// Determine project root (cwd is the project root for tool execution).
-	projectRoot, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("code_rel: get project root: %w", err)
-	}
-
-	switch params.Operation {
-	case "search":
-		return t.doSearch(projectRoot, params)
-	case "symbols":
-		return t.doSymbols(projectRoot, params)
+	switch p.Operation {
 	case "status":
-		return t.doStatus(projectRoot)
-	case "scan":
-		return t.doScan(projectRoot)
+		return t.doStatus(), nil
+	case "symbols":
+		return t.doSymbols(p)
+	case "references", "definition", "implementations", "callers":
+		return t.doPositional(p)
 	default:
-		return "", fmt.Errorf("code_rel: unknown operation %q", params.Operation)
+		return "", fmt.Errorf("ast: unknown operation %q", p.Operation)
 	}
 }
 
-func (t *AstTool) ensureDaemon(projectRoot string) error {
-	t.mu.Lock()
-	if t.instance != nil {
-		t.mu.Unlock()
-		return nil
+func (t *AstTool) doStatus() string {
+	var b strings.Builder
+	b.WriteString("AST/LSP semantic index status\n\n")
+	b.WriteString("Language servers:\n")
+	for _, s := range lsp.KnownServers() {
+		b.WriteString(fmt.Sprintf("  %s: %s\n", s, installedMark(s)))
 	}
-	t.mu.Unlock()
+	b.WriteString(fmt.Sprintf("\nSupported extensions: %s\n", lsp.SupportedExtensions()))
+	return b.String()
+}
 
-	inst, err := astdaemon.EnsureRunning(projectRoot)
+func (t *AstTool) doSymbols(p astParams) (string, error) {
+	// File-scoped listing when a path is given without a query.
+	if p.Path != "" && p.Query == "" {
+		if err := t.manager().EnsureOpen(p.Path); err != nil {
+			return "", err
+		}
+		client, err := t.manager().ClientForFile(p.Path)
+		if err != nil {
+			return "", err
+		}
+		syms, err := client.DocumentSymbols(p.Path)
+		if err != nil {
+			return "", fmt.Errorf("ast symbols: %w", err)
+		}
+		return formatSymbols(syms), nil
+	}
+	if p.Query == "" {
+		return "", fmt.Errorf("ast: 'query' (or 'path') is required for symbols operation")
+	}
+	client, err := t.clientFor(p)
 	if err != nil {
-		return err
+		return "", err
 	}
-
-	t.mu.Lock()
-	if t.instance == nil {
-		t.instance = inst
-	}
-	t.mu.Unlock()
-	return nil
-}
-
-func (t *AstTool) doSearch(projectRoot string, params struct {
-	Operation  string `json:"operation"`
-	Pattern    string `json:"pattern"`
-	Kind       string `json:"kind"`
-	Lang       string `json:"lang"`
-	Path       string `json:"path"`
-	MaxResults int    `json:"max_results"`
-}) (string, error) {
-	if params.Pattern == "" {
-		return "", fmt.Errorf("code_rel: 'pattern' is required for search operation")
-	}
-
-	if err := t.ensureDaemon(projectRoot); err != nil {
-		return "", fmt.Errorf("code_rel: daemon: %w", err)
-	}
-
-	maxResults := params.MaxResults
-	if maxResults <= 0 {
-		maxResults = 50
-	}
-	if maxResults > 200 {
-		maxResults = 200
-	}
-
-	result, err := astdaemon.Search(projectRoot, astdaemon.SearchParams{
-		Pattern:    params.Pattern,
-		Language:   params.Lang,
-		Path:       params.Path,
-		MaxResults: maxResults,
-	})
+	syms, err := client.WorkspaceSymbols(p.Query)
 	if err != nil {
-		return "", fmt.Errorf("code_rel search: %w", err)
+		return "", fmt.Errorf("ast symbols: %w", err)
 	}
-
-	return formatSearchResult(result), nil
+	sort.SliceStable(syms, func(i, j int) bool { return syms[i].Name < syms[j].Name })
+	return formatSymbols(syms), nil
 }
 
-func (t *AstTool) doSymbols(projectRoot string, params struct {
-	Operation  string `json:"operation"`
-	Pattern    string `json:"pattern"`
-	Kind       string `json:"kind"`
-	Lang       string `json:"lang"`
-	Path       string `json:"path"`
-	MaxResults int    `json:"max_results"`
-}) (string, error) {
-	if params.Kind == "" {
-		return "", fmt.Errorf("code_rel: 'kind' is required for symbols operation (e.g. 'function', 'class', 'struct')")
-	}
-
-	if err := t.ensureDaemon(projectRoot); err != nil {
-		return "", fmt.Errorf("code_rel: daemon: %w", err)
-	}
-
-	maxResults := params.MaxResults
-	if maxResults <= 0 {
-		maxResults = 50
-	}
-	if maxResults > 200 {
-		maxResults = 200
-	}
-
-	result, err := astdaemon.ListSymbols(projectRoot, astdaemon.SymbolsParams{
-		Kind:       astdaemon.SymbolKind(params.Kind),
-		Language:   params.Lang,
-		Path:       params.Path,
-		MaxResults: maxResults,
-	})
-	if err != nil {
-		return "", fmt.Errorf("code_rel symbols: %w", err)
-	}
-
-	return formatSearchResult(result), nil
-}
-
-func (t *AstTool) doStatus(projectRoot string) (string, error) {
-	status, err := astdaemon.GetIndexStatus(projectRoot)
-	if err != nil {
-		return "", fmt.Errorf("code_rel status: %w", err)
-	}
-
-	out := "## AST Index Status\n\n"
-	if !status.Installed {
-		out += "❌ ast-grep (sg) is NOT installed.\n"
-		out += "   Install with: npm install -g @ast-grep/cli  or  brew install ast-grep\n"
-		return out, nil
-	}
-
-	out += fmt.Sprintf("✅ ast-grep: installed (%s)\n", status.Version)
-	if status.DaemonAlive {
-		out += "✅ Index daemon: running\n"
-	} else {
-		out += "❌ Index daemon: not running (will start on first query)\n"
-	}
-	if status.IndexExists {
-		out += "✅ AST index: exists\n"
-	} else {
-		out += "❌ AST index: not yet built (will be built on first query)\n"
-	}
-	out += fmt.Sprintf("📁 Index directory: %s\n", status.IndexDir)
-	return out, nil
-}
-
-func (t *AstTool) doScan(projectRoot string) (string, error) {
-	// Force re-index by running sg scan --update directly.
-	// First ensure daemon is running so the project is tracked.
-	if err := t.ensureDaemon(projectRoot); err != nil {
-		return "", fmt.Errorf("code_rel: daemon: %w", err)
-	}
-
-	// Run scan synchronously so the user sees progress.
-	sg, err := astdaemon.FindSG()
+func (t *AstTool) doPositional(p astParams) (string, error) {
+	client, err := t.clientFor(p)
 	if err != nil {
 		return "", err
 	}
 
-	cmd := exec.Command(sg, "scan", "--update")
-	cmd.Dir = projectRoot
-	// Capture output but also write it back.
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Sprintf("scan failed: %v\nOutput:\n%s", err, string(out)), nil
+	path := p.Path
+	pos := lsp.Position{Line: p.Line, Character: p.Char}
+
+	// Name-based: resolve the symbol to a concrete position. Preferred path.
+	if p.Symbol != "" {
+		loc, err := resolveSymbol(client, p.Symbol)
+		if err != nil {
+			return "", err
+		}
+		path = uriToPath(loc.URI)
+		pos = loc.Range.Start
+	} else if path == "" {
+		return "", fmt.Errorf("ast: provide 'symbol' (recommended) or 'path' + line/character")
 	}
-	return fmt.Sprintf("Re-index complete.\n%s", string(out)), nil
+	// Register the resolved path with the manager's file watcher so any
+	// subsequent edit (by the user or by another tool) pushes didChange into
+	// the server before the next query. This is the only way an in-session
+	// edit stays in sync with the server's view of the document.
+	if path != "" {
+		_ = t.manager().EnsureOpen(path)
+	}
+
+	switch p.Operation {
+	case "references":
+		locs, err := client.References(path, pos)
+		if err != nil {
+			return "", fmt.Errorf("ast references: %w", err)
+		}
+		return formatLocations("References", locs), nil
+	case "definition":
+		locs, err := client.Definition(path, pos)
+		if err != nil {
+			return "", fmt.Errorf("ast definition: %w", err)
+		}
+		return formatLocations("Definition", locs), nil
+	case "implementations":
+		locs, err := client.Implementation(path, pos)
+		if err != nil {
+			return "", fmt.Errorf("ast implementations: %w", err)
+		}
+		return formatLocations("Implementations", locs), nil
+	case "callers":
+		locs, err := client.IncomingCalls(path, pos)
+		if err != nil {
+			return "", fmt.Errorf("ast callers: %w", err)
+		}
+		return formatLocations("Callers", locs), nil
+	}
+	return "", fmt.Errorf("ast: unknown operation %q", p.Operation)
 }
 
-func formatSearchResult(result *astdaemon.SearchResult) string {
-	if result == nil || len(result.Matches) == 0 {
-		return "No matches found."
-	}
-
-	out := fmt.Sprintf("Found %d match", result.Total)
-	if result.Total != 1 {
-		out += "es"
-	}
-	if result.Truncated {
-		out += fmt.Sprintf(" (showing %d of %d)", len(result.Matches), result.Total)
-	}
-	out += ":\n\n"
-
-	for i, m := range result.Matches {
-		if i > 0 {
-			out += "---\n"
+// clientFor picks the language server from path, then lang hint, defaulting to Go.
+func (t *AstTool) clientFor(p astParams) (*lsp.Client, error) {
+	ext := ""
+	switch {
+	case p.Path != "":
+		ext = filepath.Ext(p.Path)
+	case p.Lang != "":
+		ext = extForLang(p.Lang)
+		if ext == "" {
+			return nil, fmt.Errorf("ast: unknown lang %q (supported: %s)", p.Lang, lsp.SupportedExtensions())
 		}
-		out += fmt.Sprintf("File: %s\n", m.File)
-		if m.Language != "" {
-			out += fmt.Sprintf("Language: %s\n", m.Language)
-		}
-		out += fmt.Sprintf("Lines: %d-%d\n", m.Range.Start.Line+1, m.Range.End.Line+1)
-		out += fmt.Sprintf("Match:\n  %s\n", m.Text)
+	default:
+		ext = ".go"
+	}
+	return t.manager().ClientForExt(ext)
+}
 
-		// Show sub-matches (captured groups) if present.
-		if len(m.Matches) > 0 {
-			out += "Captures:\n"
-			for _, sm := range m.Matches {
-				label := sm.Group
-				if label == "" {
-					label = fmt.Sprintf("match-%d", i)
-				}
-				out += fmt.Sprintf("  %s: \"%s\"\n", label, sm.Text)
-			}
+// resolveSymbol finds the best workspace-symbol match for name and returns its
+// location. Exact (case-sensitive) name matches win; otherwise the first hit.
+func resolveSymbol(client *lsp.Client, name string) (lsp.Location, error) {
+	syms, err := client.WorkspaceSymbols(name)
+	if err != nil {
+		return lsp.Location{}, fmt.Errorf("resolve %q: %w", name, err)
+	}
+	if len(syms) == 0 {
+		return lsp.Location{}, fmt.Errorf("symbol %q not found in workspace", name)
+	}
+	for _, s := range syms {
+		if s.Name == name {
+			return s.Location, nil
 		}
 	}
-
-	return out
+	// Trailing-name match (e.g. "pkg.Name" or "Type.Method").
+	for _, s := range syms {
+		if strings.HasSuffix(s.Name, "."+name) || strings.HasSuffix(s.Name, "/"+name) {
+			return s.Location, nil
+		}
+	}
+	return syms[0].Location, nil
 }

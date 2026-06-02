@@ -282,7 +282,17 @@ func extractXMLTag(s, tag string) string {
 // - DIFF: prefix → colorized unified diff
 // - read result → syntax-highlighted code block
 // - else → plain text, with truncation footer hidden from rendered display
+//
+// Sanitization runs first. Tool output is untrusted — it comes from
+// subprocesses (bash, git, grep, …) whose authors may emit cursor
+// controls, OSC sequences, raw CRs, or other control bytes that would
+// overwrite the alt-screen frame the TUI has already rendered. We keep
+// SGR color escapes (so chroma and `git diff --color` still work) and
+// drop everything else that can move the cursor, change the window
+// title, ring the bell, or break column math in the selection walker.
+// See sanitizeForTUI for the full policy.
 func renderToolResult(toolName, content string, st Styles) string {
+	content = sanitizeForTUI(content)
 	content = stripTruncationFooter(content)
 	if strings.HasPrefix(content, "DIFF:") {
 		return renderDiff(content, st)

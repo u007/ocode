@@ -230,8 +230,8 @@ func TestSlashPopupEnterRunsExactCommand(t *testing.T) {
 	if len(got.messages) != 2 {
 		t.Fatalf("expected compact command to run, got %d messages", len(got.messages))
 	}
-	if !strings.Contains(got.messages[1].text, "Conversation compacted") {
-		t.Fatalf("expected compact status message, got %q", got.messages[1].text)
+	if !strings.Contains(got.messages[1].text, "Compaction requires an LLM connection") {
+		t.Fatalf("expected no-connection guidance, got %q", got.messages[1].text)
 	}
 }
 

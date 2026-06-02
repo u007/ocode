@@ -58,6 +58,7 @@ func init() {
 		{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
 		{name: "/compact", help: "Reduce context size by removing tool history", handler: runCompactCmd},
+		{name: "/recap", help: "Summarize conversation in caveman style (uses small model)", handler: runRecapCmd},
 		{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
 		{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},
 		{name: "/export", help: "Save chat as Markdown", handler: runExportCmd},
@@ -79,7 +80,7 @@ func init() {
 		{name: "/mcp", usage: "/mcp [list|enable <server>|disable <server>]", help: "List or toggle MCP servers", handler: runMCPCmd},
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
-		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions", handler: runPermissionsCmd},
+		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions", handler: runPermissionsCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
@@ -212,6 +213,10 @@ func runSessionCmd(m *model, args []string) tea.Cmd {
 func runCompactCmd(m *model, args []string) tea.Cmd {
 	m.handleCompactCmd(args)
 	return nil
+}
+
+func runRecapCmd(m *model, args []string) tea.Cmd {
+	return m.handleRecapCmd(args)
 }
 
 func runUndoCmd(m *model, args []string) tea.Cmd {
@@ -394,11 +399,25 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 			return nil
 		}
 		name := args[1]
+		enabled := action == "enable" || action == "on"
+		// Builtin opt-in tools (disabled by default, persisted in ocode config).
+		if name == "ast" {
+			if err := config.SaveOcodeASTPlugin(enabled); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to update ast plugin: %v", err)})
+				return nil
+			}
+			m.config.Ocode.Plugins.AST = enabled
+			state := "enabled"
+			if !enabled {
+				state = "disabled"
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q %s (LSP-backed semantic navigation).", name, state)})
+			return m.rebuildAgentWithExternalTools()
+		}
 		if _, ok := m.config.Plugins[name]; !ok {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
 			return nil
 		}
-		enabled := action == "enable" || action == "on"
 		if err := config.SavePluginEnabled(name, enabled); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to update plugin config: %v", err)})
 			return nil
@@ -499,7 +518,7 @@ func runAgentCmd(m *model, args []string) tea.Cmd {
 }
 
 func runPermissionsCmd(m *model, args []string) tea.Cmd {
-	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status>]"
+	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status> | model [<provider/model>]]"
 	if len(args) == 0 {
 		if m.agent == nil || m.agent.Permissions() == nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured.\n\n" + usage})
@@ -568,10 +587,14 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured."})
 		return nil
 	}
-	if len(args) >= 2 {
+	if len(args) >= 1 {
 		action := strings.ToLower(args[0])
 		switch action {
 		case "auto-add":
+			if len(args) < 2 {
+				m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+				return nil
+			}
 			prefix := strings.TrimSpace(args[1])
 			if prefix == "" {
 				m.messages = append(m.messages, message{role: roleAssistant, text: usage})
@@ -582,6 +605,10 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Added bash auto-allow prefix %q.", prefix)})
 			return nil
 		case "auto-remove":
+			if len(args) < 2 {
+				m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+				return nil
+			}
 			prefix := strings.TrimSpace(args[1])
 			if prefix == "" {
 				m.messages = append(m.messages, message{role: roleAssistant, text: usage})
@@ -606,6 +633,10 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Set bash prefix mode for %q to %q.", prefix, mode)})
 			return nil
 		case "auto":
+			if len(args) < 2 {
+				m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+				return nil
+			}
 			sub := strings.ToLower(args[1])
 			switch sub {
 			case "on", "true", "yes", "1":
@@ -624,6 +655,8 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 				m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions auto <on|off|status>"})
 			}
 			return nil
+		case "model":
+			return m.handlePermissionModelCmd(args[1:])
 		}
 	}
 	if len(args) >= 2 {

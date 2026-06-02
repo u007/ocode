@@ -35,6 +35,13 @@ type filesAddToContextMsg struct {
 	endLine   int
 }
 
+// filesGitStatusUpdateMsg carries a lightweight git status refresh for the
+// files tab. Unlike rebuildTreeKeeping, it only updates badge decorations
+// without touching the tree structure or cursor position.
+type filesGitStatusUpdateMsg struct {
+	gitStatus map[string]string
+}
+
 type filesMode int
 
 const (
@@ -163,6 +170,9 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case filesPreviewMsg:
 		m.applyPreview(msg)
+		return m, nil
+	case filesGitStatusUpdateMsg:
+		m.gitStatus = msg.gitStatus
 		return m, nil
 	case tea.KeyPressMsg:
 		if m.choosingEditor {
@@ -941,6 +951,23 @@ func parseGitStatusShort(out string) map[string]string {
 	return status
 }
 
+// autoRefreshFilesGitStatusCmd returns a tea.Cmd that runs `git status --short`
+// in a goroutine and delivers a filesGitStatusUpdateMsg with the parsed badges.
+// This is the non-intrusive background refresh — it only touches the badge
+// decorations, never the tree structure or cursor position.
+func autoRefreshFilesGitStatusCmd(workDir string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := os.Stat(filepath.Join(workDir, ".git")); err != nil {
+			return filesGitStatusUpdateMsg{gitStatus: map[string]string{}}
+		}
+		out, err := exec.Command("git", "-C", workDir, "status", "--short").Output()
+		if err != nil {
+			return filesGitStatusUpdateMsg{gitStatus: map[string]string{}}
+		}
+		return filesGitStatusUpdateMsg{gitStatus: parseGitStatusShort(string(out))}
+	}
+}
+
 func languageForPath(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".go":
@@ -1130,14 +1157,15 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	} else {
 		exitBtn = styles.Hint.Padding(0, 1).Render("\u2715 exit")
 	}
-	headerLeft := styles.Header.Render("\u25c6 ocode  Files")
+	headerLeft := appHeaderLeftPad + styles.Header.Render("\u25c6 ocode  Files") + appHeaderHintGap + hintStyle.Render("opencode clone")
 	headerPad := w - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
 	if headerPad < 0 {
 		headerPad = 0
 	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
+	// Top pad + left gap + thin title/hint gap, matching the chat tab header.
+	renderedHeader := appHeaderTopPad + headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
 
-	parts := []string{header, row}
+	parts := []string{renderedHeader, row}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 

@@ -19,6 +19,24 @@ func (m *model) openAdvisorPicker() {
 	m.pickerKind = "advisor"
 }
 
+func (m *model) openPermissionModelPicker() {
+	// Reuse the model picker listing with kind="permission-model" so picker
+	// selection saves the auto-permission model instead of switching the
+	// active model.
+	m.openModelPicker()
+	m.pickerKind = "permission-model"
+	m.prependPermissionModelClearOption()
+}
+
+func (m *model) prependPermissionModelClearOption() {
+	if m.pickerKind != "permission-model" {
+		return
+	}
+	m.pickerItems = append([]string{"(not set)"}, m.pickerItems...)
+	m.pickerValues = append([]string{"auto"}, m.pickerValues...)
+	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
+}
+
 func (m *model) openModelPicker() {
 	m.input.Blur()
 	lmsResult := agent.FetchLMStudioModels()
@@ -419,7 +437,7 @@ func (m model) pickerRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	row := start + idx
-	isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
 	if !isFiltered && row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
 		return 0, false
 	}
@@ -435,7 +453,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-	isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
 	if !isFiltered && index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
 		m.closePicker()
 		return m, nil
@@ -473,12 +491,18 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	if kind == "advisor" {
 		return m.handleCommand("/advisor " + selected)
 	}
+	if kind == "permission-model" {
+		if selected == "auto" {
+			return m.handleCommand("/permissions model auto")
+		}
+		return m.handleCommand("/permissions model " + selected)
+	}
 	return m.handleCommand("/models " + selected)
 }
 
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
-	if m.pickerKind == "model" {
+	if m.pickerKind == "model" || m.pickerKind == "permission-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · f favorite · Esc cancel · type to filter")
 	}
 
@@ -497,6 +521,9 @@ func (m model) renderPicker() string {
 	}
 	if m.pickerKind == "editor-mode" {
 		title = "Select editor mode"
+	}
+	if m.pickerKind == "permission-model" {
+		title = "Select permission model"
 	}
 	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilterPending+"_")
 
@@ -527,7 +554,7 @@ func (m model) renderPicker() string {
 		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
-		isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
+		isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]

@@ -3,6 +3,9 @@ package agent
 import (
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/jamesmercstudio/ocode/internal/config"
 )
 
 func tcCall(id, name string) ToolCall {
@@ -171,6 +174,66 @@ func TestFindPrefixEnd(t *testing.T) {
 		if got := findPrefixEnd(c.msgs); got != c.want {
 			t.Errorf("%s: findPrefixEnd = %d, want %d", c.name, got, c.want)
 		}
+	}
+}
+
+type fakeCompactClient struct{}
+
+func (fakeCompactClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	return &Message{Role: "assistant", Content: "compressed summary"}, nil
+}
+
+func (fakeCompactClient) GetProvider() string { return "" }
+
+func (fakeCompactClient) GetModel() string    { return "fake-compact-model" }
+
+func TestForceCompactAsyncIgnoresDisabledAutoCompaction(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Ocode.Compact.Enabled = false
+	cfg.Ocode.Compact.KeepRecentTurns = 3
+	cfg.Ocode.Compact.MinMessages = 1
+	cfg.Ocode.Compact.SummaryTimeoutSeconds = 1
+	cfg.Ocode.Compact.SummaryMaxRetries = 0
+	cfg.Ocode.Compact.MaxSummaryInputTokens = 1000
+
+	a := NewAgent(fakeCompactClient{}, nil, cfg)
+	results := make(chan CompactResult, 1)
+	a.OnCompact = func(res CompactResult) {
+		results <- res
+	}
+
+	msgs := []Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "u1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "u2"},
+		{Role: "assistant", Content: "a2"},
+		{Role: "user", Content: "u3"},
+		{Role: "assistant", Content: "a3"},
+		{Role: "user", Content: "u4"},
+		{Role: "assistant", Content: "a4"},
+	}
+
+	if !a.CompactAsync(msgs) {
+		t.Fatal("expected manual compaction to start even when auto compaction is disabled")
+	}
+
+	select {
+	case res := <-results:
+		if !res.OK {
+			t.Fatalf("expected compaction to succeed, got result: %+v", res)
+		}
+		if res.ReplaceTo <= res.ReplaceFrom {
+			t.Fatalf("expected a positive splice range, got from=%d to=%d", res.ReplaceFrom, res.ReplaceTo)
+		}
+		if res.Summary.Role != "system" {
+			t.Fatalf("expected summary role system, got %q", res.Summary.Role)
+		}
+		if !strings.Contains(res.Summary.Content, compactionSummaryMarker) {
+			t.Fatalf("expected summary marker in content, got %q", res.Summary.Content)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for manual compaction result")
 	}
 }
 

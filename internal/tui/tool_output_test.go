@@ -105,7 +105,9 @@ func TestClickToolOutputExpandsInline(t *testing.T) {
 		t.Fatal("expected collapsed tool output to show at most preview lines")
 	}
 
-	y := m.toolOutputRegions[0].startLine - m.viewport.YOffset() + 2
+	// Screen Y of the top of the transcript viewport: app header (2 rows:
+	// top pad + title) + the panel's top border (1 row).
+	y := m.toolOutputRegions[0].startLine - m.viewport.YOffset() + appHeaderHeight + 1
 	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 4, Y: y})
 	updated, _ = updated.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 4, Y: y})
 	got := derefTestModel(t, updated)
@@ -114,5 +116,26 @@ func TestClickToolOutputExpandsInline(t *testing.T) {
 	}
 	if strings.Count(got.viewport.View(), "process output line") <= toolOutputPreviewLines {
 		t.Fatal("expected expanded output to show more than preview lines")
+	}
+}
+
+func TestToolOutputPreviewRespectsSanitizedLineCount(t *testing.T) {
+	content := strings.Repeat("progress line\r", toolOutputPreviewLines+8)
+	text := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
+	toolID := "tool-cr"
+	m := model{
+		ready:     true,
+		width:     100,
+		height:    30,
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(24)),
+		styles:    ApplyThemeColors("tokyonight"),
+		messages:  []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
+		sessionID: "test",
+	}
+	m.renderTranscript()
+
+	if strings.Count(m.viewport.View(), "progress line") > toolOutputPreviewLines {
+		t.Fatalf("expected sanitized collapsed output to stay within preview lines, got view:\n%s", m.viewport.View())
 	}
 }

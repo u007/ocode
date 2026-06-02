@@ -113,7 +113,18 @@ func globalOcodeDir() string {
 // When the active model matches the stem, the file content is included.
 // Uses the same git-aware HEAD-vs-working-tree logic as readContextFile.
 //
+// Stem matching rules:
+//   - Exact: stem (lowercased) equals the model id (lowercased). This is the
+//     original behavior.
+//   - Wildcard: a stem that ends in a single trailing '*' matches any model
+//     whose id starts with the stem's prefix. A bare '*' stem is rejected to
+//     prevent an accidental "matches everything" file. Only a trailing '*' is
+//     treated as a wildcard; '*' anywhere else in the stem is literal.
+//
 // Precedence: project root > .opencode/ > global config for the same model.
+// Within a single directory, an exact match beats a wildcard match for the
+// same model — so a specific {model}.OCODE.md overrides a wildcard catch-all
+// in the same dir.
 func LoadModelContext(modelName string) string {
 	if modelName == "" {
 		return ""
@@ -123,19 +134,44 @@ func LoadModelContext(modelName string) string {
 		return ""
 	}
 
-	// Collect matching files — priority: project root > .opencode/ > global config.
-	// Map key = stem (lowercased) so earlier directories win for the same model.
-	found := make(map[string]string) // stem (lowercase) → filepath
+	// stemMatches reports whether the given (lowercased) file stem matches the
+	// (lowercased) active model. Returns ok=true with isWild=false for an
+	// exact match, ok=true with isWild=true for a prefix-wildcard match, and
+	// ok=false otherwise.
+	stemMatches := func(stemLower string) (ok, isWild bool) {
+		if stemLower == modelLower {
+			return true, false
+		}
+		if strings.HasSuffix(stemLower, "*") {
+			prefix := strings.TrimSuffix(stemLower, "*")
+			// Require at least one literal char before the '*' so a bare
+			// '*.OCODE.md' cannot accidentally match every model and shadow
+			// all real files (project-root-wins would otherwise make it
+			// silently override everything).
+			if prefix != "" && strings.HasPrefix(modelLower, prefix) {
+				return true, true
+			}
+		}
+		return false, false
+	}
 
 	searchDirs := []string{".", filepath.Join(".", ".opencode")}
 	if gd := globalOcodeDir(); gd != "" {
 		searchDirs = append(searchDirs, gd)
 	}
+
+	// Per-directory: keep at most one path. If both an exact and a wildcard
+	// match the same model in the same directory, the exact match wins.
+	// Across directories, the first directory to claim a match (the
+	// highest-priority one) wins — preserves the original first-match-wins
+	// precedence rule.
+	var matched []string
 	for _, dir := range searchDirs {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
+		var exactPath, wildcardPath string
 		for _, entry := range entries {
 			if entry.IsDir() {
 				continue
@@ -149,23 +185,35 @@ func LoadModelContext(modelName string) string {
 			// Last 9 chars are ".OCODE.md" (or equivalent).
 			stem := name[:len(name)-len(".OCODE.md")]
 			stemLower := strings.ToLower(stem)
-			if stemLower != modelLower {
+			ok, isWild := stemMatches(stemLower)
+			if !ok {
 				continue
 			}
 			fullPath := filepath.Join(dir, name)
-			// Root wins — don't overwrite if already found.
-			if _, exists := found[stemLower]; !exists {
-				found[stemLower] = fullPath
+			if isWild {
+				if wildcardPath == "" {
+					wildcardPath = fullPath
+				}
+			} else if exactPath == "" {
+				exactPath = fullPath
 			}
+		}
+		if exactPath != "" {
+			matched = append(matched, exactPath)
+			break // higher-priority dir already claimed; stop.
+		}
+		if wildcardPath != "" {
+			matched = append(matched, wildcardPath)
+			break
 		}
 	}
 
-	if len(found) == 0 {
+	if len(matched) == 0 {
 		return ""
 	}
 
 	var context string
-	for _, filePath := range found {
+	for _, filePath := range matched {
 		// Use readContextFile for git-aware HEAD-vs-working-tree logic,
 		// consistent with how AGENTS.md, CLAUDE.md, and OCODE.md are loaded.
 		if content, ok := readContextFile(filePath); ok {

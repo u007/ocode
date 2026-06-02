@@ -1,5 +1,33 @@
 # TODO
 
+## AST/LSP semantic tool — deferred work
+
+The old ast-grep "code_rel" tool + `.sgindex` daemon were removed (they relied on a
+persistent ast-grep index that doesn't exist; the daemon was a no-op). Replaced by an
+opt-in, LSP-backed `ast` tool (`internal/tool/ast.go`) over `internal/lsp`. Disabled by
+default; toggle with `/plugin enable ast` (persisted in ocode config `plugins.ast`).
+
+Incomplete / best-effort:
+- **Only gopls is validated end-to-end.** `internal/lsp/manager.go` maps `.rs`,
+  `.py`, `.ts/.tsx/.js/.jsx` to rust-analyzer / pyright-langserver / typescript-language-server
+  with correct stdio invocations, but these are **untested here**. Verify per-language
+  before relying on them.
+- **`callers` (incoming call hierarchy) is best-effort.** Requires the server to support
+  `textDocument/prepareCallHierarchy` + `callHierarchy/incomingCalls`. gopls does; many
+  servers don't, in which case it returns an error rather than results.
+- **`lsp` and `ast` tools overlap.** Both go through `internal/lsp` (shared client +
+  Manager + formatters), but `lsp` (position-based, always-on) and `ast` (name-based,
+  opt-in) are two tools doing related work. Consider consolidating to one tool once the
+  name-based UX proves out.
+- **LSP servers are never `Close()`'d.** `lsp.Manager` has no lifecycle hook in the Tool
+  interface, so each `/plugin disable ast` rebuild orphans the prior gopls until ocode
+  exits (same pre-existing behavior as the old `lsp` tool — gopls is designed to be
+  long-lived, but a second toggle spawns a fresh one). A Tool `Close()`/shutdown hook
+  would let `rebuildAgentWithExternalTools` reclaim them.
+- **Name resolution is heuristic.** `resolveSymbol` picks the first exact-name workspace
+  symbol (then trailing-name match, then first hit). Ambiguous names (same symbol in
+  multiple packages) resolve to one location; no disambiguation UI.
+
 ## Anthropic extended-thinking signatures (interleaved multi-turn)
 
 When `ThinkingBudget > 0` and `anthropic-beta: interleaved-thinking-*` is enabled, Anthropic requires that prior assistant thinking blocks be replayed *with their original `signature` field* on subsequent turns or the request is rejected. The streaming SSE parser in `chatAnthropic` (`internal/agent/client.go`) captures the signature into a per-block field but discards it on completion; `Message` has no place to round-trip thinking blocks across turns, and `convertToAnthropicMessages` only emits `text` + `tool_use` blocks for assistant history. This matches the previous non-streaming behavior (parity), but interleaved-thinking multi-turn flows will fail. Fix requires: (1) persist thinking blocks + signatures on `Message`, (2) replay them in `chatAnthropic`'s outbound `messages`, (3) ensure compaction/repair paths preserve them. Out of scope for the streaming-thinking work that introduced this note.

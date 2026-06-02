@@ -40,10 +40,18 @@ type AdvisorConfig struct {
 	Model    string `json:"model"`
 }
 
+// PluginsConfig gates opt-in builtin tools that ship disabled by default.
+// Toggled at runtime via `/plugin enable|disable <name>` and persisted here.
+type PluginsConfig struct {
+	// AST enables the LSP-backed semantic code-navigation tool ("ast").
+	AST bool `json:"ast"`
+}
+
 type OcodeConfig struct {
 	Compact           CompactConfig
 	Advisor           AdvisorConfig
 	Permissions       PermissionConfig
+	Plugins           PluginsConfig
 	ExtraAllowedPaths []string
 	Editor            string
 	EditorMode        string
@@ -143,10 +151,15 @@ type advisorConfigFile struct {
 	Model    string `json:"model"`
 }
 
+type pluginsConfigFile struct {
+	AST *bool `json:"ast"`
+}
+
 type ocodeConfigFile struct {
 	Compact           compactConfigFile    `json:"compact"`
 	Advisor           advisorConfigFile    `json:"advisor"`
 	Permissions       permissionConfigFile `json:"permissions"`
+	Plugins           pluginsConfigFile    `json:"plugins"`
 	ExtraAllowedPaths []string             `json:"extra_allowed_paths,omitempty"`
 	Editor            string               `json:"editor,omitempty"`
 	EditorMode        string               `json:"editor_mode,omitempty"`
@@ -204,6 +217,7 @@ func defaultPermissionConfig() PermissionConfig {
 			"grep":            "allow",
 			"list":            "allow",
 			"lsp":             "allow",
+			"ast":             "allow",
 			"write":           "allow",
 			"edit":            "allow",
 			"multi_edit":      "allow",
@@ -296,6 +310,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["permissions"]; ok {
 		applyPermissionConfig(&cfg.Permissions, file.Permissions)
 		delete(raw, "permissions")
+	}
+
+	if _, ok := raw["plugins"]; ok {
+		if file.Plugins.AST != nil {
+			cfg.Plugins.AST = *file.Plugins.AST
+		}
+		delete(raw, "plugins")
 	}
 
 	if _, ok := raw["extra_allowed_paths"]; ok {
@@ -509,6 +530,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"advisor":     cfg.Advisor,
 		"permissions": cfg.Permissions,
 	}
+	if cfg.Plugins.AST {
+		payload["plugins"] = cfg.Plugins
+	}
 	if len(cfg.ExtraAllowedPaths) > 0 {
 		payload["extra_allowed_paths"] = cfg.ExtraAllowedPaths
 	}
@@ -531,7 +555,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "extra_allowed_paths" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" {
 			continue
 		}
 		payload[k] = v
@@ -563,6 +587,16 @@ func SaveEditor(editor string) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.Editor = editor
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveOcodeASTPlugin persists the enabled state of the opt-in "ast" tool.
+func SaveOcodeASTPlugin(enabled bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Plugins.AST = enabled
 	return SaveOcodeConfig(cfg)
 }
 
@@ -751,6 +785,20 @@ func SaveSmallModel(model string) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.SmallModel = model
+	return SaveOcodeConfig(cfg)
+}
+
+// SavePermissionModel persists the auto-permission model override.
+// Set to empty string to clear the override and fall back to the small model.
+func SavePermissionModel(providerModel string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if cfg.Permissions.Auto == nil {
+		cfg.Permissions.Auto = &AutoPermissionConfig{Enabled: false}
+	}
+	cfg.Permissions.Auto.Model = providerModel
 	return SaveOcodeConfig(cfg)
 }
 

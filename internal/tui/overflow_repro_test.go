@@ -20,10 +20,10 @@ func TestActivityRowGrowthStaysWithinHeight(t *testing.T) {
 	m := model{
 		ready:     true,
 		width:     80, // below sidebarMinWidth (120) → sidebar off, the affected path
-		height:    12, // short terminal (e.g. a split pane); transcript viewport floors at 1
+		height:    13, // short terminal (e.g. a split pane); transcript viewport floors at 1. 13 rows = 12 chrome + 1 viewport at the floor.
 		sessionID: strings.Repeat("session-", 12),
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(8)),
+		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(7)),
 		styles:    ApplyThemeColors("tokyonight"),
 		messages: []message{{
 			role: roleAssistant,

@@ -3,7 +3,6 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,8 +11,12 @@ import (
 )
 
 type LSPTool struct {
-	clients map[string]*lsp.Client
-	mu      sync.Mutex
+	// Mgr, if set, is a shared LSP manager (so LSPTool and AstTool reuse one
+	// gopls per project instead of spawning two). Falls back to a private lazy
+	// manager when nil (e.g. tools instantiated directly in tests).
+	Mgr  *lsp.Manager
+	once sync.Once
+	mgr  *lsp.Manager
 }
 
 func (t *LSPTool) Name() string        { return "lsp" }
@@ -22,30 +25,22 @@ func (t *LSPTool) Parallel() bool      { return true }
 func (t *LSPTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "lsp",
-		"description": "Interact with LSP servers to get code intelligence: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, diagnostics.",
+		"description": "Low-level LSP code intelligence at an exact file position: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, status, restart. Requires path + 0-based line/character. For symbol-name-based navigation, prefer the 'ast' tool when enabled.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"operation": map[string]interface{}{
 					"type":        "string",
-					"description": "LSP operation: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol, goToImplementation, diagnostics, status, restart",
-					"enum":        []string{"goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "goToImplementation", "diagnostics", "status", "restart"},
+					"description": "LSP operation",
+					"enum":        []string{"goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol", "goToImplementation", "status", "restart"},
 				},
-				"path": map[string]interface{}{
+				"path":      map[string]interface{}{"type": "string", "description": "File path"},
+				"line":      map[string]interface{}{"type": "integer", "description": "Line number (0-based)"},
+				"character": map[string]interface{}{"type": "integer", "description": "Character position (0-based)"},
+				"query":     map[string]interface{}{"type": "string", "description": "Query for workspace symbol search"},
+				"lang": map[string]interface{}{
 					"type":        "string",
-					"description": "File path",
-				},
-				"line": map[string]interface{}{
-					"type":        "integer",
-					"description": "Line number (0-based)",
-				},
-				"character": map[string]interface{}{
-					"type":        "integer",
-					"description": "Character position (0-based)",
-				},
-				"query": map[string]interface{}{
-					"type":        "string",
-					"description": "Query for workspace symbol search",
+					"description": "Language hint for workspaceSymbol when no path is given (go, rust, python, typescript, javascript). Defaults to go.",
 				},
 			},
 			"required": []string{"operation"},
@@ -53,41 +48,12 @@ func (t *LSPTool) Definition() map[string]interface{} {
 	}
 }
 
-func (t *LSPTool) getClient(ext string) (*lsp.Client, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	if t.clients == nil {
-		t.clients = make(map[string]*lsp.Client)
+func (t *LSPTool) manager() *lsp.Manager {
+	if t.Mgr != nil {
+		return t.Mgr
 	}
-
-	if client, ok := t.clients[ext]; ok {
-		return client, nil
-	}
-
-	server := "gopls"
-	switch ext {
-	case ".go":
-		server = "gopls"
-	case ".py":
-		server = "pyright"
-	case ".rs":
-		server = "rust-analyzer"
-	default:
-		return nil, fmt.Errorf("no LSP server configured for extension %s", ext)
-	}
-
-	if _, err := exec.LookPath(server); err != nil {
-		return nil, fmt.Errorf("LSP server %s not found in PATH", server)
-	}
-
-	c, err := lsp.NewClient(server)
-	if err != nil {
-		return nil, err
-	}
-	c.Initialize(".")
-	t.clients[ext] = c
-	return c, nil
+	t.once.Do(func() { t.mgr = lsp.NewManager(".") })
+	return t.mgr
 }
 
 func (t *LSPTool) Execute(args json.RawMessage) (string, error) {
@@ -97,187 +63,111 @@ func (t *LSPTool) Execute(args json.RawMessage) (string, error) {
 		Line      int    `json:"line"`
 		Char      int    `json:"character"`
 		Query     string `json:"query"`
+		Lang      string `json:"lang"`
 	}
 	if err := json.Unmarshal(args, &input); err != nil {
 		return "", err
 	}
 
-	ext := ""
-	if input.Path != "" {
-		ext = filepath.Ext(input.Path)
-	}
+	mgr := t.manager()
+	pos := lsp.Position{Line: input.Line, Character: input.Char}
 
 	switch input.Operation {
 	case "status":
-		return t.handleStatus()
+		return lspStatus(), nil
 	case "restart":
-		t.mu.Lock()
-		if ext != "" {
-			if c, ok := t.clients[ext]; ok {
-				c.Close()
-				delete(t.clients, ext)
-			}
+		// Restart kills the running server process. In-flight Call/workspaceSymbol
+		// from the other tool (lsp or ast) will return "LSP client closed" —
+		// surface that risk in the result so the caller doesn't think it was
+		// a clean swap.
+		const warn = "Note: any in-flight LSP queries will be cancelled."
+		if input.Path != "" {
+			ext := filepath.Ext(input.Path)
+			mgr.Restart(ext)
+			return fmt.Sprintf("Restarted LSP server for %s. %s", ext, warn), nil
 		}
-		t.mu.Unlock()
-		return fmt.Sprintf("Restarted LSP server for %s", ext), nil
-	case "goToDefinition":
-		client, err := t.getClient(ext)
-		if err != nil {
-			return "", err
-		}
-		return t.handleGoToDefinition(client, input.Path, input.Line, input.Char)
-	case "findReferences":
-		client, err := t.getClient(ext)
-		if err != nil {
-			return "", err
-		}
-		return t.handleFindReferences(client, input.Path, input.Line, input.Char)
-	case "hover":
-		client, err := t.getClient(ext)
-		if err != nil {
-			return "", err
-		}
-		return t.handleHover(client, input.Path, input.Line, input.Char)
-	case "documentSymbol":
-		client, err := t.getClient(ext)
-		if err != nil {
-			return "", err
-		}
-		return t.handleDocumentSymbol(client, input.Path)
+		mgr.Close()
+		return "Restarted all LSP servers. " + warn, nil
 	case "workspaceSymbol":
-		return t.handleWorkspaceSymbol(input.Query)
+		// Choose the language server from the lang hint, defaulting to go when
+		// neither path nor lang was supplied. Without this, a Rust/TS workspace
+		// would silently query gopls (the only validated server) and get
+		// confusing empty results.
+		ext := extForLang(input.Lang)
+		if ext == "" {
+			ext = ".go"
+		}
+		client, err := mgr.ClientForExt(ext)
+		if err != nil {
+			return "", err
+		}
+		syms, err := client.WorkspaceSymbols(input.Query)
+		if err != nil {
+			return "", err
+		}
+		return formatSymbols(syms), nil
+	}
+
+	if input.Path == "" {
+		return "", fmt.Errorf("lsp: 'path' is required for operation %q", input.Operation)
+	}
+	client, err := mgr.ClientForFile(input.Path)
+	if err != nil {
+		return "", err
+	}
+	// Open through the manager so the file watcher registers this URI; the
+	// positional query helpers below also call EnsureOpen internally, but
+	// they do so on the Client, which bypasses the watcher. Pre-registering
+	// ensures post-edit didChange notifications reach the server.
+	if err := mgr.EnsureOpen(input.Path); err != nil {
+		// Non-fatal: many operations (hover) re-open internally.
+		_ = err
+	}
+
+	switch input.Operation {
+	case "goToDefinition":
+		locs, err := client.Definition(input.Path, pos)
+		if err != nil {
+			return "", err
+		}
+		return formatLocations("Definition", locs), nil
+	case "findReferences":
+		locs, err := client.References(input.Path, pos)
+		if err != nil {
+			return "", err
+		}
+		return formatLocations("References", locs), nil
 	case "goToImplementation":
-		client, err := t.getClient(ext)
+		locs, err := client.Implementation(input.Path, pos)
 		if err != nil {
 			return "", err
 		}
-		return t.handleGoToImplementation(client, input.Path, input.Line, input.Char)
-	case "diagnostics":
-		client, err := t.getClient(ext)
+		return formatLocations("Implementations", locs), nil
+	case "documentSymbol":
+		syms, err := client.DocumentSymbols(input.Path)
 		if err != nil {
 			return "", err
 		}
-		return t.handleDiagnostics(client, input.Path)
-	}
-
-	return "Operation not supported", nil
-}
-
-func (t *LSPTool) handleStatus() (string, error) {
-	servers := []string{"gopls", "pyright", "rust-analyzer"}
-	var status strings.Builder
-	status.WriteString("LSP Status:\n")
-	for _, s := range servers {
-		found := "❌"
-		if _, err := exec.LookPath(s); err == nil {
-			found = "✅"
+		return formatSymbols(syms), nil
+	case "hover":
+		if err := client.EnsureOpen(input.Path); err != nil {
+			return "", err
 		}
-		status.WriteString(fmt.Sprintf("- %s: %s\n", s, found))
-	}
-	return status.String(), nil
-}
-
-func (t *LSPTool) handleGoToDefinition(client *lsp.Client, path string, line, char int) (string, error) {
-	abs, _ := filepath.Abs(path)
-	params := map[string]interface{}{
-		"textDocument": map[string]interface{}{"uri": "file://" + abs},
-		"position":     map[string]interface{}{"line": line, "character": char},
-	}
-	res, err := client.Call("textDocument/definition", params)
-	if err != nil {
-		return "", err
-	}
-	return string(res), nil
-}
-
-func (t *LSPTool) handleHover(client *lsp.Client, path string, line, char int) (string, error) {
-	abs, _ := filepath.Abs(path)
-	params := map[string]interface{}{
-		"textDocument": map[string]interface{}{"uri": "file://" + abs},
-		"position":     map[string]interface{}{"line": line, "character": char},
-	}
-	res, err := client.Call("textDocument/hover", params)
-	if err != nil {
-		return "", err
-	}
-	return string(res), nil
-}
-
-func (t *LSPTool) handleFindReferences(client *lsp.Client, path string, line, char int) (string, error) {
-	abs, _ := filepath.Abs(path)
-	params := map[string]interface{}{
-		"textDocument": map[string]interface{}{"uri": "file://" + abs},
-		"position":     map[string]interface{}{"line": line, "character": char},
-		"context":      map[string]interface{}{"includeDeclaration": true},
-	}
-	res, err := client.Call("textDocument/references", params)
-	if err != nil {
-		return "", err
-	}
-	return string(res), nil
-}
-
-func (t *LSPTool) handleDocumentSymbol(client *lsp.Client, path string) (string, error) {
-	abs, _ := filepath.Abs(path)
-	params := map[string]interface{}{
-		"textDocument": map[string]interface{}{"uri": "file://" + abs},
-	}
-	res, err := client.Call("textDocument/documentSymbol", params)
-	if err != nil {
-		return "", err
-	}
-	return string(res), nil
-}
-
-func (t *LSPTool) handleWorkspaceSymbol(query string) (string, error) {
-	params := map[string]interface{}{
-		"query": query,
-	}
-	res, err := t.clientsForExt("").Call("workspace/symbol", params)
-	if err != nil {
-		out, _ := exec.Command("grep", "-r", "--include=*.go", "-E", "^func |^type ", ".").Output()
-		if len(out) > 0 {
-			return "Workspace symbols (fallback):\n" + string(out)[:min(len(out), 5000)], nil
+		res, err := client.Call("textDocument/hover", client.HoverParams(input.Path, pos))
+		if err != nil {
+			return "", err
 		}
-		return "No workspace symbol results found", nil
+		return string(res), nil
 	}
-	return string(res), nil
+
+	return "", fmt.Errorf("lsp: unsupported operation %q", input.Operation)
 }
 
-func (t *LSPTool) handleGoToImplementation(client *lsp.Client, path string, line, char int) (string, error) {
-	abs, _ := filepath.Abs(path)
-	params := map[string]interface{}{
-		"textDocument": map[string]interface{}{"uri": "file://" + abs},
-		"position":     map[string]interface{}{"line": line, "character": char},
+func lspStatus() string {
+	var b strings.Builder
+	b.WriteString("LSP servers:\n")
+	for _, s := range lsp.KnownServers() {
+		b.WriteString(fmt.Sprintf("- %s: %s\n", s, installedMark(s)))
 	}
-	res, err := client.Call("textDocument/implementation", params)
-	if err != nil {
-		return "", err
-	}
-	return string(res), nil
-}
-
-func (t *LSPTool) handleDiagnostics(client *lsp.Client, path string) (string, error) {
-	abs, _ := filepath.Abs(path)
-	res, err := client.Call("textDocument/publishDiagnostics", map[string]interface{}{
-		"uri": "file://" + abs,
-	})
-	if err != nil {
-		return fmt.Sprintf("Diagnostics for %s: use LSP status to check server health", path), nil
-	}
-	return string(res), nil
-}
-
-func (t *LSPTool) clientsForExt(ext string) *lsp.Client {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if ext != "" {
-		if c, ok := t.clients[ext]; ok {
-			return c
-		}
-	}
-	for _, c := range t.clients {
-		return c
-	}
-	return nil
+	return b.String()
 }

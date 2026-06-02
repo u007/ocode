@@ -24,6 +24,7 @@ import (
 const (
 	llmRequestTimeout = 5 * time.Minute
 	llmMaxRetries     = 3
+	llmMaxRetries429  = 6
 )
 
 // Context keys for per-call chat parameter overrides (set by hook pipeline).
@@ -112,6 +113,13 @@ type GenericClient struct {
 
 	// UseWebSocket enables WebSocket transport for OpenAI Responses API.
 	UseWebSocket bool
+
+	// RetryNotifier, if set, is invoked from ChatWithContext before each retry
+	// sleep. Fires on the calling goroutine — keep handlers fast and
+	// non-blocking (e.g. push to a buffered channel). Set per-call and cleared
+	// after; subagents share the same *GenericClient and a stale callback would
+	// leak across agent boundaries.
+	RetryNotifier func(attempt, maxRetries int, delay time.Duration, err error)
 }
 
 // SetOnDelta installs (or clears, with nil) the streaming-token callback on
@@ -336,7 +344,7 @@ func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{})
 func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	var lastErr error
 	attempts := 0
-	for attempt := 0; attempt <= llmMaxRetries; attempt++ {
+	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -356,12 +364,58 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 			return msg, nil
 		}
 		lastErr = err
-		if ctx.Err() != nil || !isRetryableLLMClientError(err) || attempt == llmMaxRetries {
+
+		if ctx.Err() != nil {
 			break
 		}
-		time.Sleep(time.Duration(attempt+1) * llmRetryBaseDelay)
+
+		// Determine retry strategy for this error.
+		is429 := isRateLimitError(err)
+		isRetryable := is429 || isRetryableLLMClientError(err)
+		if !isRetryable {
+			break
+		}
+
+		maxRetries := llmMaxRetries
+		if is429 {
+			maxRetries = llmMaxRetries429
+		}
+		if attempt >= maxRetries {
+			break
+		}
+
+		if is429 {
+			// Linear backoff: 3s → 5s across 6 retries.
+			// attempt=0 → 3.0s, 1 → 3.4s, … 5 → 5.0s.
+			delay := 3*time.Second + time.Duration(attempt)*400*time.Millisecond
+			if delay > 5*time.Second {
+				delay = 5 * time.Second
+			}
+			if c.RetryNotifier != nil {
+				c.RetryNotifier(attempt, maxRetries, delay, lastErr)
+			}
+			time.Sleep(delay)
+		} else {
+			delay := time.Duration(attempt+1) * llmRetryBaseDelay
+			if c.RetryNotifier != nil {
+				c.RetryNotifier(attempt, maxRetries, delay, lastErr)
+			}
+			time.Sleep(delay)
+		}
 	}
 	return nil, fmt.Errorf("llm request failed after %d attempt(s): %w", attempts, lastErr)
+}
+
+// isRateLimitError returns true when err is an HTTP 429 (Too Many Requests)
+// error originating from any of the provider chat methods. All of them format
+// the error as "<provider> error (429): …", so we detect the status code in
+// the formatted string.
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, " (429)")
 }
 
 func isRetryableLLMClientError(err error) bool {

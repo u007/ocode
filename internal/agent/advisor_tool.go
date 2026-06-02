@@ -14,20 +14,37 @@ import (
 // Default advisor model when OPENCODE_ADVISOR_MODEL is not set.
 const defaultAdvisorModel = "deepseek/deepseek-v4-pro"
 
-// advisorSystemPrompt instructs the advisor model on its role. It is updated
-// to inform the model that it has tools available for exploring the codebase.
-const advisorSystemPrompt = `You are a strategic advisor for a coding agent. You have access to tools that let you explore the codebase and research external resources. Use them as needed to understand the context before advising.
+// advisorSystemPrompt instructs the advisor model on its role and available
+// exploration tools. The prompt explicitly encourages the advisor to proactively
+// use tools to investigate the codebase before giving advice.
+const advisorSystemPrompt = `You are a strategic advisor for a coding agent. You have access to tools that let you explore the codebase and research external resources.
 
-Available tools:
-- read, glob, grep, list, lsp — explore the local codebase
-- bash — run shell commands (git log, cat, etc.)
-- webfetch, websearch — research external documentation
-- repo_clone, repo_overview — inspect external libraries
+YOUR EXPLORATION SUB-AGENT CAPABILITIES:
+You can and SHOULD proactively use your tools to investigate before advising. Do not rely solely on context provided in the prompt — verify, explore, and discover on your own. Your tools are:
 
-Your advice must be actionable — tell the executor:
-- What to do next
+- read — read file contents to understand implementation details
+- glob — find files matching patterns (e.g. **/*.go, **/test_*.go)
+- grep — search code for patterns, function names, error messages
+- list — list directory contents to understand project structure
+- lsp — get code intelligence: definitions, references, hover info, diagnostics
+- bash — run shell commands (git log, git diff, go test, etc.)
+- webfetch — fetch and read web pages for documentation
+- websearch — search the web for solutions, library docs, best practices
+- repo_clone, repo_overview — inspect external libraries and dependencies
+
+EXPLORATION STRATEGY:
+1. Start by understanding the project structure (list, glob)
+2. Read relevant files to understand current implementation
+3. Use grep to find all usages of key functions/types
+4. Use lsp for deep code intelligence (goToDefinition, findReferences)
+5. Check tests to understand expected behavior
+6. Research external docs if working with libraries/APIs
+7. Use git commands to understand history and context
+
+YOUR ADVICE MUST BE ACTIONABLE — tell the executor:
+- What to do next (specific files, functions, line numbers when possible)
 - What order to proceed in
-- What to watch out for
+- What to watch out for (edge cases, pitfalls, regressions)
 - What not to do
 
 Key heuristics:
@@ -35,8 +52,9 @@ Key heuristics:
 - Flag approaches that create maintenance burden
 - If the executor is stuck or looping, suggest a different approach
 - If tests or evidence contradict an assumption, say so explicitly
+- Cite specific file paths and line numbers when referencing code
 
-Before advising, use your tools to gather context. Then respond in under 300 words. Use enumerated steps. Do NOT write production code — only advise.`
+Respond in under 300 words. Use enumerated steps. Do NOT write production code — only advise.`
 
 // advisorRecursionGuard prevents nested advisor calls.
 var advisorRecursionGuard atomic.Bool
@@ -59,20 +77,31 @@ type AdvisorTool struct {
 
 func (t AdvisorTool) Name() string { return "advisor" }
 func (t AdvisorTool) Description() string {
-	return "Consult a strategic advisor (backed by a stronger reviewer model, configurable via OPENCODE_ADVISOR_MODEL; defaults to DeepSeek V4 Pro) that can explore the codebase with tools and provide a concise plan or course correction."
+	return "Consult a strategic advisor (backed by a configurable model) that can proactively explore the codebase with tools and provide a concise plan or course correction."
 }
 func (t AdvisorTool) Parallel() bool { return false }
 
 func (t AdvisorTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
-		"name":        "advisor",
-		"description": "Consult a strategic advisor (backed by a stronger reviewer model, configurable; defaults to DeepSeek V4 Pro). The advisor can explore the codebase using tools before providing advice.\n\nCall advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work, though the advisor can also do its own orientation if you feed it limited context.\n\nAlso call advisor:\n- When stuck — errors recurring, approach not converging, results that don't fit\n- When considering a change of approach\n- When you believe the task is complete. BEFORE this call, make your deliverable durable: write the file, save the result, commit the change\n\nOn tasks longer than a few steps, call advisor at least once before committing to an approach and once before declaring done. On short reactive turns where tool output directly dictates the next action, skip advisor.\n\nOptional tool args providerID and modelID override the preset model for this one call; leave them blank to use the configured default.\n\nRequired tool arg prompt must include enough concrete context so the advisor can often avoid redundant exploration: user goal, constraints, files/paths already inspected, key findings or command outputs, attempts so far, and the specific decision/questions you want advice on.\n\nGive the advice serious weight. Only override if you have primary-source evidence that contradicts a specific claim. Surface conflicts in another advisor call rather than silently switching approaches.",
+		"name": "advisor",
+		"description": "Consult a strategic advisor (backed by a configurable model) that can proactively explore the codebase with tools and provide a concise plan or course correction.\n\n" +
+			"The advisor model is resolved with this priority: per-call providerID/modelID overrides > OPENCODE_ADVISOR_MODEL env var > ocode.json [advisor] config > built-in default. If both providerID and modelID are empty, the configured default is used.\n\n" +
+			"Call advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work, though the advisor can also do its own orientation if you feed it limited context.\n\n" +
+			"Also call advisor:\n" +
+			"- When stuck — errors recurring, approach not converging, results that don't fit\n" +
+			"- When considering a change of approach\n" +
+			"- When you believe the task is complete. BEFORE this call, make your deliverable durable: write the file, save the result, commit the change\n\n" +
+			"On tasks longer than a few steps, call advisor at least once before committing to an approach and once before declaring done. On short reactive turns where tool output directly dictates the next action, skip advisor.\n\n" +
+			"Required tool arg prompt must include enough concrete context so the advisor can often avoid redundant exploration: user goal, constraints, files/paths already inspected, key findings or command outputs, attempts so far, and the exact decision/questions you want advice on.\n\n" +
+			"The advisor has its own exploration sub-agent tools (read, glob, grep, lsp, bash, websearch, etc.) and will proactively investigate the codebase before advising. You do NOT need to pre-explore everything — the advisor will discover details on its own.\n\n" +
+			"Give the advice serious weight. Only override if you have primary-source evidence that contradicts a specific claim. Surface conflicts in another advisor call rather than silently switching approaches.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"prompt": map[string]interface{}{
-					"type":        "string",
-					"description": "All context the advisor needs to provide guidance — include user goal, constraints, files/lines already inspected, key evidence/outputs, attempts so far, and the exact decision/questions you want advice on. The advisor may also use its own tools to explore further when needed.",
+					"type": "string",
+					"description": "All context the advisor needs to provide guidance — include user goal, constraints, files/lines already inspected, key evidence/outputs, attempts so far, and the exact decision/questions you want advice on. " +
+						"The advisor will proactively explore the codebase with its own exploration sub-agent tools to find details and verify assumptions — you do NOT need to pre-explore everything.",
 				},
 				"providerID": map[string]interface{}{
 					"type":        "string",
@@ -177,9 +206,21 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 	emitDebug("ADVISOR", fmt.Sprintf("calling model: %s", modelStr))
 
 	// Create an LLM client for the advisor model (may differ from the main agent's model).
+	// If the resolved model can't be created (bad provider/credentials/config) and it
+	// isn't already the built-in default, show a notice and fall back to the preset
+	// default advisor model rather than failing the call outright.
+	var fallbackNotice string
 	client := NewClient(t.cfg, modelStr)
 	if client == nil {
-		return "", fmt.Errorf("could not create client for advisor model %q: check provider credentials and config", modelStr)
+		if modelStr != defaultAdvisorModel {
+			fallbackNotice = fmt.Sprintf("⚠ advisor model %q unavailable (check provider credentials and config); falling back to default model %q", modelStr, defaultAdvisorModel)
+			emitDebug("ADVISOR", fallbackNotice)
+			modelStr = defaultAdvisorModel
+			client = NewClient(t.cfg, modelStr)
+		}
+		if client == nil {
+			return "", fmt.Errorf("could not create client for advisor model %q: check provider credentials and config", modelStr)
+		}
 	}
 
 	// Create a sub-agent with exploration tools so the advisor can investigate
@@ -197,11 +238,11 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("advisor call failed: %w", err)
 		}
-			if resp == nil || strings.TrimSpace(resp.Content) == "" {
-				return "", fmt.Errorf("advisor returned no advice (plain chat fallback). model=%q", modelStr)
-			}
-			return strings.TrimSpace(resp.Content), nil
+		if resp == nil || strings.TrimSpace(resp.Content) == "" {
+			return "", fmt.Errorf("advisor returned no advice (plain chat fallback). model=%q", modelStr)
 		}
+		return withNotice(fallbackNotice, strings.TrimSpace(resp.Content)), nil
+	}
 
 	advisorAgent := NewAgent(client, advisorTools, t.cfg)
 
@@ -247,5 +288,14 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 	if result == "" {
 		return "", fmt.Errorf("advisor returned no advice after agentic run. model=%q", modelStr)
 	}
-	return result, nil
+	return withNotice(fallbackNotice, result), nil
+}
+
+// withNotice prepends an optional notice line to the advisor result so a
+// model fallback is surfaced to the user alongside the advice.
+func withNotice(notice, body string) string {
+	if notice == "" {
+		return body
+	}
+	return notice + "\n\n" + body
 }

@@ -187,7 +187,7 @@ func (t GrepTool) Parallel() bool { return true }
 func (t GrepTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "grep",
-		"description": "Fast plain text/regex search across file contents. Use this for exact strings, logs, config keys, comments, and non-structural matches. For symbol/AST structure-aware queries, use code_rel.",
+		"description": "Fast plain text/regex search across file contents. Use this for exact strings, logs, config keys, comments, and non-structural matches. For symbol-name semantic queries (references/definition/callers), use the 'ast' tool when enabled.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{

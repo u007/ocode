@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/jamesmercstudio/ocode/internal/lsp"
 )
 
 type Tool interface {
@@ -14,13 +15,21 @@ type Tool interface {
 	Parallel() bool
 }
 
-func LoadBuiltins(cfg *config.Config) []Tool {
+// LoadBuiltins returns the full set of built-in tools (always-on + opt-in)
+// plus the shared LSP manager that backs the `lsp` and `ast` tools. The
+// caller is responsible for closing the manager when the tool set is no
+// longer in use (typically when the agent/session that owns it is torn down)
+// — failing to do so leaks the underlying language-server processes.
+func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
 	if cfg != nil {
 		setExtraAllowedPaths(cfg.Ocode.ExtraAllowedPaths)
 	} else {
 		setExtraAllowedPaths(nil)
 	}
-	return []Tool{
+	// One shared LSP manager so the lsp + ast tools reuse a single server per
+	// project instead of each spawning its own.
+	lspMgr := lsp.NewManager(".")
+	builtins := []Tool{
 		&ReadTool{},
 		&WriteTool{Config: cfg},
 		&ReplaceLinesToolImpl{Config: cfg},
@@ -43,11 +52,15 @@ func LoadBuiltins(cfg *config.Config) []Tool {
 		&PlanEnterTool{},
 		&PlanExitTool{},
 		&ListTool{},
-		&LSPTool{},
+		&LSPTool{Mgr: lspMgr},
 		&FormatTool{Config: cfg},
 		&GitHubPRTool{},
 		&GitHubIssueTool{},
 		&GitHubWorkflowTool{},
-		&AstTool{},
 	}
+	// The "ast" semantic tool is an opt-in plugin, disabled by default.
+	if cfg != nil && cfg.Ocode.Plugins.AST {
+		builtins = append(builtins, &AstTool{Mgr: lspMgr})
+	}
+	return builtins, lspMgr
 }

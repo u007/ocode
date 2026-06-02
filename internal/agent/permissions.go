@@ -357,6 +357,78 @@ var pathScopedTools = map[string]bool{
 	"list": true, "lsp": true, "apply_patch": true, "format": true, "repo_overview": true,
 }
 
+// harmfulBashPrefixes are git subcommand prefixes that are inherently
+// destructive or risky. Commands matching any of these prefixes
+// should never be auto-allowed by the LLM auto-permission layer, and
+// cannot be persisted as "always allow" rules.
+//
+// Each entry is a two-word prefix (e.g. "git revert") that locks the
+// whole subcommand family as harmful. Force-flagged single commands
+// (e.g. "git push" with --force) are handled separately in
+// IsHarmfulBashCommand.
+var harmfulBashPrefixes = map[string]bool{
+	"git revert":  true, // undo commits (rewrites history)
+	"git stash":   true, // stash/unstash (can lose uncommitted changes)
+	"git reset":   true, // reset HEAD/index/working-tree
+	"git clean":   true, // remove untracked files
+	"git checkout": true, // can discard working-tree changes
+	"git restore": true, // can discard working-tree changes
+	"git switch":  true, // can discard working-tree changes
+}
+
+// harmfulBashForceFlags lists git subcommands that are only harmful
+// when a specific force flag is present. The map value is the set of
+// flags that make the command harmful.
+var harmfulBashForceFlags = map[string]map[string]bool{
+	"git push": {"--force": true, "-f": true},
+	"git pull": {"--force": true, "-f": true},
+}
+
+// IsHarmfulBashCommand returns true when the given bash command is
+// inherently destructive or risky and should never be auto-allowed.
+// This covers:
+//   - git revert, stash, reset, clean, checkout, restore, switch (any args)
+//   - git push / pull with --force or -f
+//
+// Harmful operations always require human approval — they cannot be
+// auto-allowed by the LLM auto-permission layer and cannot be
+// persisted as "always allow" rules.
+func IsHarmfulBashCommand(command string) bool {
+	cmd := strings.TrimSpace(command)
+	parts := strings.Fields(cmd)
+	if len(parts) < 2 || parts[0] != "git" {
+		return false
+	}
+
+	// Two-word prefix check (e.g. "git revert", "git stash")
+	prefix := parts[0] + " " + parts[1]
+	if harmfulBashPrefixes[prefix] {
+		return true
+	}
+
+	// Force-flag check (e.g. "git push --force", "git pull -f")
+	if flags, ok := harmfulBashForceFlags[prefix]; ok {
+		for _, part := range parts[2:] {
+			if flags[part] {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// IsHarmfulRequest checks whether a permission request is for a
+// harmful operation that requires human approval even when the
+// auto-permission layer is active. Bash commands are checked via
+// IsHarmfulBashCommand; other tools can be added here as needed.
+func IsHarmfulRequest(req PermissionRequest) bool {
+	if req.ToolName == "bash" && req.Command != "" {
+		return IsHarmfulBashCommand(req.Command)
+	}
+	return false
+}
+
 func NewPermissionManager() *PermissionManager {
 	pm := &PermissionManager{
 		mode:            PermissionModeNormal,
@@ -807,6 +879,11 @@ func (pm *PermissionManager) SetRule(toolName string, level PermissionLevel) {
 	if !validPermissionLevel(level) {
 		return
 	}
+	// Never allow setting bash tool to allow — this would auto-approve all
+	// bash commands, including harmful operations like git revert/stash.
+	if toolName == "bash" && level == PermissionAllow {
+		return
+	}
 	if strings.Contains(toolName, "*") {
 		pm.patterns = append(pm.patterns, patternRule{pattern: toolName, level: level})
 	} else {
@@ -848,6 +925,11 @@ func (pm *PermissionManager) CheckPathPatterns(toolName, targetPath string) Perm
 
 func (pm *PermissionManager) SetBashPrefixRule(prefix string, level PermissionLevel) {
 	if prefix == "" || !validPermissionLevel(level) || strings.HasPrefix(prefix, bashInRootPersistPrefix) {
+		return
+	}
+	// Reject always-allow for git prefix — this would auto-approve all git
+	// subcommands, including harmful operations like revert, stash, etc.
+	if prefix == "git" && level == PermissionAllow {
 		return
 	}
 	pm.bashPrefixes[prefix] = level

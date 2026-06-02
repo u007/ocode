@@ -27,6 +27,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/jamesmercstudio/ocode/internal/hooks"
+	"github.com/jamesmercstudio/ocode/internal/lsp"
 	"github.com/jamesmercstudio/ocode/internal/plugins"
 	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/skill"
@@ -230,6 +231,11 @@ type ctrlCResetMsg struct{}
 type cleanupRequestMsg struct{}
 type dotTickMsg struct{}
 
+// autoRefreshTickMsg fires periodically to quietly refresh the git tab and
+// files tab in the background. The refresh is non-intrusive: it never changes
+// user focus, selection, or cursor position.
+type autoRefreshTickMsg struct{}
+
 // sidebarComputeCache memoises expensive sidebar values (context-token estimate
 // and telemetry aggregation) that walk the full message slice. The cache is
 // keyed on a coarse fingerprint of m.messages; when nothing has changed we
@@ -376,6 +382,13 @@ func (m *model) cleanupCurrentSession() {
 		defer cancel()
 		_ = m.supervisor.Shutdown(ctx)
 	}
+	// Shut down the shared LSP manager so the gopls/pyright/rust-analyzer
+	// children exit. Must run BEFORE the agent is torn down so in-flight
+	// tool calls don't see a half-closed manager.
+	if m.lspMgr != nil {
+		m.lspMgr.Close()
+		m.lspMgr = nil
+	}
 	m.cleanupAgent(m.agent)
 	// Evict stale tool-result cache files (older than 2 days).
 	_ = agent.CleanupToolResults(48 * time.Hour)
@@ -447,52 +460,57 @@ type model struct {
 	pickerFilterSeq     int
 
 	// Pagination state for the session picker (infinite scroll)
-	pickerSessionRefs        []session.Ref // all loaded session refs
-	pickerSessionPage        int           // number of pages loaded so far
-	pickerSessionTotal       int           // total count of all sessions
-	pickerSessionMore        bool          // whether more pages are available
-	pickerSessionLoading     bool          // whether refs are currently being loaded
-	pickerSessionLoadSeq     int           // generation token for in-flight loads
-	pickerSessionLoadErr     string        // last load error shown in the picker
-	showSlashPopup           bool
-	slashPopupIndex          int
-	slashPopupItems          []slashSuggestion
-	fileListCache            []slashSuggestion
-	fileShortcodePaths       map[string]string
-	showConnect              bool
-	connect                  *connectDialog
-	showSidebar              bool
-	sidebarScroll            int
-	sessionTelemetry         sidebarTelemetry
-	activeModel              string
-	paletteInput             string
-	width                    int
-	height                   int
-	ready                    bool
-	activeTab                int
-	chatUnread               bool
-	files                    filesModel
-	git                      gitModel
-	logViewport              viewport.Model
-	permViewport             viewport.Model
-	logEntries               []DebugEntry
-	logSearch                string
-	logKindFilter            map[DebugEntryKind]bool
-	logStatus                string
-	logSel                   selectionState
-	logStyledLines           []string
-	logRawLines              []string
-	err                      error
-	scrollSpeed              int
-	restoredPendingScroll    bool
-	scrollbarDrag            scrollbarDragTarget
-	scrollbarDragOffset      int
-	workDir                  string
-	currentAgentIdx          int
-	branchlessMode           bool
-	showPermDialog           bool
-	showRetryDialog          bool
-	retryDialogMsg           string
+	pickerSessionRefs     []session.Ref // all loaded session refs
+	pickerSessionPage     int           // number of pages loaded so far
+	pickerSessionTotal    int           // total count of all sessions
+	pickerSessionMore     bool          // whether more pages are available
+	pickerSessionLoading  bool          // whether refs are currently being loaded
+	pickerSessionLoadSeq  int           // generation token for in-flight loads
+	pickerSessionLoadErr  string        // last load error shown in the picker
+	showSlashPopup        bool
+	slashPopupIndex       int
+	slashPopupItems       []slashSuggestion
+	fileListCache         []slashSuggestion
+	fileShortcodePaths    map[string]string
+	showConnect           bool
+	connect               *connectDialog
+	showSidebar           bool
+	sidebarScroll         int
+	sessionTelemetry      sidebarTelemetry
+	activeModel           string
+	paletteInput          string
+	width                 int
+	height                int
+	ready                 bool
+	activeTab             int
+	chatUnread            bool
+	files                 filesModel
+	git                   gitModel
+	logViewport           viewport.Model
+	permViewport          viewport.Model
+	logEntries            []DebugEntry
+	logSearch             string
+	logKindFilter         map[DebugEntryKind]bool
+	logStatus             string
+	logSel                selectionState
+	logStyledLines        []string
+	logRawLines           []string
+	err                   error
+	scrollSpeed           int
+	restoredPendingScroll bool
+	scrollbarDrag         scrollbarDragTarget
+	scrollbarDragOffset   int
+	workDir               string
+	currentAgentIdx       int
+	branchlessMode        bool
+	showPermDialog        bool
+	showRetryDialog       bool
+	retryDialogMsg        string
+
+	// retryInfo tracks the current LLM retry state for display in the activity row.
+	// Set when a retry event arrives; cleared when the next activity snapshot or
+	// stream-done event fires (i.e. when ChatWithContext returns).
+	retryInfo                *llmRetryInfo
 	showQuestionDialog       bool
 	questionToolCallID       string
 	questionPrompts          []tool.QuestionPrompt
@@ -555,6 +573,9 @@ type model struct {
 	sidebarCache             *sidebarComputeCache
 	compactCh                chan agent.CompactResult
 	compactStartCh           chan struct{}
+	recapCh                  chan recapFinishedMsg
+	recapText                string // rendering-only recap, never sent to LLM
+	recapGen                 uint64 // monotonic counter; bumped on /new and each recap request so stale recap goroutines can be ignored
 	titleCh                  chan titleResult
 	deltaCh                  chan deltaEvent
 	deltaDrops               uint64 // bumped each time the deltaCh select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
@@ -569,6 +590,7 @@ type model struct {
 	cmdRunningCount          int
 	lastCompactErr           error
 	pendingCompactUIIdx      []int
+	pendingCompactManual     bool
 	pendingCompactResume     bool
 	skipCompactPreflight     bool
 	thinkingLevelIdx         int  // index into thinkingBudgetLevels
@@ -586,6 +608,10 @@ type model struct {
 	cleanupState             *modelCleanupState
 	supervisor               *tool.ProcessSupervisor
 	hookPipeline             *hooks.Pipeline
+	// lspMgr is the shared LSP manager backing the `lsp` and `ast` tools.
+	// It is owned by the model so we can close it on session shutdown and
+	// during /plugin rebuilds (otherwise every rebuild leaks the gopls child).
+	lspMgr                   *lsp.Manager
 }
 
 type modelCleanupState struct {
@@ -602,6 +628,10 @@ func newModelCleanupState() *modelCleanupState {
 // agentStripMaxRows caps how many strip rows are visible at once so a large
 // number of running agents cannot push the input box off screen.
 const agentStripMaxRows = 8
+
+// autoRefreshInterval is how often the git/files tabs quietly refresh in the
+// background. 10 s balances responsiveness against unnecessary git spawns.
+const autoRefreshInterval = 10 * time.Second
 
 // subAgentPermRequest carries a sub-agent permission ask from the sub-agent's
 // goroutine to the TUI Update loop, plus the channel the answer is sent back on.
@@ -920,7 +950,16 @@ func (m model) activeSubagentModel() string {
 }
 
 func (m *model) getInitialTools() []tool.Tool {
-	return []tool.Tool{
+	// Lazily create the shared LSP manager the first time the tool set is
+	// assembled. The model owns it for its lifetime so it can be closed on
+	// session shutdown (cleanupCurrentSession) and on /plugin rebuilds
+	// (replaceAgent). Without ownership here, every rebuild leaks the
+	// gopls child.
+	if m.lspMgr == nil {
+		m.lspMgr = lsp.NewManager(".")
+	}
+	lspMgr := m.lspMgr
+	tools := []tool.Tool{
 		&tool.ReadTool{},
 		&tool.WriteTool{Config: m.config},
 		&tool.DeleteTool{},
@@ -939,9 +978,15 @@ func (m *model) getInitialTools() []tool.Tool {
 		&tool.RepoCloneTool{},
 		&tool.RepoOverviewTool{},
 		&tool.ListTool{},
-		&tool.LSPTool{},
+		&tool.LSPTool{Mgr: lspMgr},
 		&tool.FormatTool{Config: m.config},
 	}
+	// The "ast" semantic tool is an opt-in plugin, disabled by default. It
+	// shares the single LSP manager so only one gopls runs per project.
+	if m.config != nil && m.config.Ocode.Plugins.AST {
+		tools = append(tools, &tool.AstTool{Mgr: lspMgr})
+	}
+	return tools
 }
 
 func (m *model) switchAgent(name string) {
@@ -1049,17 +1094,15 @@ func newModel(opts ...RunOptions) model {
 	var a *agent.Agent
 	if cfg != nil && cfg.Model != "" {
 		client := agent.NewClient(cfg, cfg.Model)
-		if client != nil {
-			a = agent.NewAgent(client, tools, cfg)
-			pm := a.Permissions()
-			if o.YOLO && pm != nil {
-				pm.SetMode(agent.PermissionModeYOLO)
-			}
-			if pm != nil && cfg.Ocode.Permissions.Auto != nil && cfg.Ocode.Permissions.Auto.Enabled {
-				pm.SetAutoPermissionEnabled(true)
-			}
-			a.LoadExternalTools(cfg)
+		a = agent.NewAgent(client, tools, cfg)
+		pm := a.Permissions()
+		if o.YOLO && pm != nil {
+			pm.SetMode(agent.PermissionModeYOLO)
 		}
+		if pm != nil && cfg.Ocode.Permissions.Auto != nil && cfg.Ocode.Permissions.Auto.Enabled {
+			pm.SetAutoPermissionEnabled(true)
+		}
+		a.LoadExternalTools(cfg)
 	}
 
 	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
@@ -1133,6 +1176,7 @@ func newModel(opts ...RunOptions) model {
 		permViewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
 		compactCh:            make(chan agent.CompactResult, 4),
 		compactStartCh:       make(chan struct{}, 4),
+		recapCh:              make(chan recapFinishedMsg, 4),
 		titleCh:              make(chan titleResult, 4),
 		deltaCh:              make(chan deltaEvent, 256),
 		usageCh:              make(chan usageEvent, 16),
@@ -1238,7 +1282,7 @@ func newModel(opts ...RunOptions) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitTitleEvent(m.titleCh), waitDeltaEvent(m.deltaCh), listenSubAgentPerm(m.subAgentPermCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitTitleEvent(m.titleCh), waitDeltaEvent(m.deltaCh), listenSubAgentPerm(m.subAgentPermCh)}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
 		cmds = append(cmds, listenRetryStatus(m.agent))
@@ -1246,6 +1290,8 @@ func (m model) Init() tea.Cmd {
 	if !agent.RegistryReady() {
 		cmds = append(cmds, waitForRegistry())
 	}
+	// Start quiet background refresh for git/files tabs.
+	cmds = append(cmds, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} }))
 	return tea.Batch(cmds...)
 }
 
@@ -1842,6 +1888,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
+	case autoRefreshTickMsg:
+		// Quiet background refresh for git and files tabs.
+		// Only refreshes when the user is not busy (not streaming, no active tool,
+		// no modals open). Preserves cursor position and selection.
+		if m.streaming || m.lastActivity.LLMRunning || m.compacting || m.cmdRunning() || len(m.lastActivity.ActiveTools) > 0 {
+			return m, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} })
+		}
+		var cmds []tea.Cmd
+		if m.activeTab == tabGit {
+			cmds = append(cmds, m.git.cmdAutoRefresh())
+		}
+		if m.activeTab == tabFiles {
+			cmds = append(cmds, autoRefreshFilesGitStatusCmd(m.workDir))
+		}
+		cmds = append(cmds, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} }))
+		return m, tea.Batch(cmds...)
 	case streamStartedMsg:
 		m.streaming = true
 		m.cancelStream = msg.cancel
@@ -1881,6 +1943,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.lastActivity = msg.snap
+		// Clear any in-progress LLM retry indicator when the LLM call finishes
+		// (a fresh activity snapshot means ChatWithContext returned).
+		if !msg.snap.LLMRunning {
+			m.retryInfo = nil
+		}
 		if !m.activityRowReserved {
 			m.activityRowReserved = true
 			m.layout()
@@ -1942,6 +2009,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case retryStatusMsg:
 		if msg.agent != m.agent {
+			return m, nil
+		}
+		if msg.ev.Kind == "llm" {
+			// Show LLM retry info in the activity row.
+			m.retryInfo = &llmRetryInfo{
+				attempt: msg.ev.RetryCount,
+				max:     msg.ev.MaxRetries,
+				delay:   msg.ev.RetryDelay,
+				errMsg:  msg.ev.LastError,
+			}
+			if m.agent != nil {
+				return m, listenRetryStatus(m.agent)
+			}
 			return m, nil
 		}
 		m.showRetryDialog = true
@@ -2042,8 +2122,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.compacting = false
 		resume := m.pendingCompactResume
 		m.pendingCompactResume = false
+		manual := m.pendingCompactManual
+		m.pendingCompactManual = false
 		if msg.result.Err != nil {
 			m.lastCompactErr = msg.result.Err
+			m.pendingCompactUIIdx = nil
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⚠ Compaction failed: %v (conversation continues uncompacted)", msg.result.Err)})
 			m.renderTranscript()
 		} else if msg.result.OK {
@@ -2051,13 +2134,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingCompactUIIdx = nil
 				m.rerenderTranscriptAndMaybeScroll()
 				m.saveSession()
+			} else {
+				m.pendingCompactUIIdx = nil
 			}
+		} else if manual {
+			m.pendingCompactUIIdx = nil
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Nothing to compact yet."})
+			m.rerenderTranscriptAndMaybeScroll()
+		} else {
+			m.pendingCompactUIIdx = nil
 		}
 		m.layout()
 		if resume && m.agent != nil {
 			return m, m.askAgent()
 		}
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
+	case recapFinishedMsg:
+		if msg.gen == m.recapGen {
+			m.recapText = msg.text
+			m.rerenderTranscriptAndMaybeScroll()
+			m.layout()
+		}
+		return m, waitRecapEvent(m.recapCh)
 	case titleGeneratedMsg:
 		// Drop stale results from goroutines started before /new or /title clear.
 		if msg.gen == m.titleGen && msg.title != "" && m.sessionTitle == "" {
@@ -2252,17 +2350,25 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		}
-		if keyStr == "f" && m.pickerFilter == "" && m.pickerKind == "model" {
+		if keyStr == "f" && m.pickerFilter == "" && (m.pickerKind == "model" || m.pickerKind == "permission-model") {
+			kind := m.pickerKind
 			items, values := m.pickerVisibleItems()
 			isSelectable := len(m.pickerIsHeader) == 0 || (m.pickerIndex < len(m.pickerIsHeader) && !m.pickerIsHeader[m.pickerIndex])
 			if m.pickerIndex < len(items) && m.pickerIndex < len(values) && isSelectable {
 				modelID := values[m.pickerIndex]
+				if kind == "permission-model" && modelID == "auto" {
+					return true, m, nil
+				}
 				if config.IsFavorite(modelID) {
 					_ = config.RemoveFavoriteModel(modelID)
 				} else {
 					_ = config.SaveFavoriteModel(modelID)
 				}
 				m.openModelPicker()
+				if kind == "permission-model" {
+					m.pickerKind = "permission-model"
+					m.prependPermissionModelClearOption()
+				}
 				return true, m, nil
 			}
 			return true, m, nil
@@ -2907,8 +3013,10 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	if pressed && mouse.Button == tea.MouseRight {
 		if m.activeTab == tabGit {
 			panelW := m.panelWidth()
-			gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
-			gitBodyTop := gitHeaderH + 1
+			// appHeaderHeight covers the chat/files/log header (2 rows: top pad +
+			// title). The git tab's header is the same height (built with the same
+			// appHeaderTopPad + LeftPad), so reuse the constant.
+			gitBodyTop := appHeaderHeight + 1
 			sectW := panelW * 20 / 100
 			filesW := panelW * 30 / 100
 			sectRight := sectW
@@ -2919,9 +3027,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 		}
 		if m.activeTab == tabFiles {
-			filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
 			treeW := m.width * 35 / 100
-			if mouse.X >= 0 && mouse.X < treeW && mouse.Y >= filesHeaderH+1 {
+			if mouse.X >= 0 && mouse.X < treeW && mouse.Y >= appHeaderHeight+1 {
 				m.files.clearActiveFile()
 				return m, nil, true
 			}
@@ -2986,8 +3093,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 	if pressed && m.activeTab == tabGit {
 		panelW := m.panelWidth()
-		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
-		gitBodyTop := gitHeaderH + 1 // +1 for top border of panes
+		// +1 for the pane's top border, which sits one row below the (now
+		// 2-row) header.
+		gitBodyTop := appHeaderHeight + 1
 		sectW := panelW * 20 / 100
 		filesW := panelW * 30 / 100
 		sectRight := sectW
@@ -3078,9 +3186,8 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 	if pressed && m.activeTab == tabFiles {
-		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
 		// Handle tree panel click — select/open file or toggle directory
-		if idx, ok := m.files.treeNodeForClick(mouse, filesHeaderH); ok {
+		if idx, ok := m.files.treeNodeForClick(mouse, appHeaderHeight); ok {
 			n := m.files.nodes[idx]
 			m.files.cursor = idx
 			isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
@@ -3098,7 +3205,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		previewRight := m.width - 1
 		scrollX := previewRight - 1
-		filesTrackTop := filesHeaderH + 1
+		filesTrackTop := appHeaderHeight + 1
 		filesTrackH := m.files.preview.Height()
 		if mouse.X == scrollX && mouse.Y >= filesTrackTop && mouse.Y < filesTrackTop+filesTrackH {
 			if thumbOffset, ok := scrollbarThumbOffset(mouse.Y, filesTrackTop, filesTrackH, m.files.preview.TotalLineCount(), m.files.preview.VisibleLineCount(), m.files.preview.YOffset()); ok {
@@ -3111,7 +3218,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		treeW := m.width * 35 / 100
 		previewLeft := treeW + 2
-		previewBodyTop := filesHeaderH + 1 + m.files.previewHeaderLines()
+		previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 		if mouse.X >= previewLeft && mouse.X < scrollX && mouse.Y >= previewBodyTop && mouse.Y < previewBodyTop+m.files.preview.Height() {
 			contentLine := (mouse.Y - previewBodyTop) + m.files.preview.YOffset()
 			if contentLine >= 0 && contentLine < len(m.files.previewRawLines) {
@@ -3417,7 +3524,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, false
 	}
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	headerHeight := appHeaderHeight
 	trackTop := headerHeight + 1
 
 	switch m.scrollbarDrag {
@@ -3433,13 +3540,11 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		scrollbarSetOffset(&m.logViewport, mouse.Y-m.scrollbarDragOffset, logTrackTop, logTrackHeight)
 		return m, nil, true
 	case scrollbarDragGitDiff:
-		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
-		gitTrackTop := gitHeaderH + 1
+		gitTrackTop := appHeaderHeight + 1
 		scrollbarSetOffset(&m.git.diff, mouse.Y-m.scrollbarDragOffset, gitTrackTop, m.git.diff.Height())
 		return m, nil, true
 	case scrollbarDragFilesPreview:
-		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
-		filesTrackTop := filesHeaderH + 1
+		filesTrackTop := appHeaderHeight + 1
 		scrollbarSetOffset(&m.files.preview, mouse.Y-m.scrollbarDragOffset, filesTrackTop, m.files.preview.Height())
 		return m, nil, true
 	}
@@ -3505,8 +3610,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	if m.filesSel.dragging {
 		treeW := m.width * 35 / 100
 		previewLeft := treeW + 2
-		filesHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Files"))
-		previewBodyTop := filesHeaderH + 1 + m.files.previewHeaderLines()
+		previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 		contentLine := (mouse.Y - previewBodyTop) + m.files.preview.YOffset()
 		if contentLine < 0 {
 			contentLine = 0
@@ -3547,8 +3651,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 
 	if m.gitSel.dragging {
 		panelW := m.panelWidth()
-		gitHeaderH := lipgloss.Height(m.styles.Header.Render("◆ ocode  Git"))
-		gitBodyTop := gitHeaderH + 1
+		gitBodyTop := appHeaderHeight + 1
 		sectW := panelW * 20 / 100
 		filesW := panelW * 30 / 100
 		diffLeft := sectW + filesW + 1
@@ -3694,7 +3797,7 @@ func (m model) mouseOverTranscriptViewport(msg tea.MouseWheelMsg) bool {
 	if mouse.X < 0 || mouse.X >= m.panelWidth() {
 		return false
 	}
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
+	headerHeight := appHeaderHeight
 	transcriptTop := headerHeight
 	transcriptBottom := transcriptTop + m.viewport.Height() + 2
 	return mouse.Y >= transcriptTop && mouse.Y < transcriptBottom
@@ -3861,8 +3964,19 @@ func (m model) renderMCPList() string {
 }
 
 func (m model) renderPluginList() string {
+	// Builtin opt-in tools (disabled by default), shown first.
+	var builtins strings.Builder
+	builtins.WriteString("Builtin plugins:\n\n")
+	astState, astIcon, astToggle := "disabled", "○", "/plugin enable ast"
+	if m.config != nil && m.config.Ocode.Plugins.AST {
+		astState, astIcon, astToggle = "enabled", "●", "/plugin disable ast"
+	}
+	builtins.WriteString(fmt.Sprintf("  %s ast [%s]\n", astIcon, astState))
+	builtins.WriteString("      LSP-backed semantic navigation (references/definition/callers).\n")
+	builtins.WriteString("      " + astToggle + "\n\n")
+
 	if m.config == nil || len(m.config.Plugins) == 0 {
-		return "No plugins installed. Use /plugin install <github.com/user/repo> to add one."
+		return builtins.String() + "No installed plugins.\n\nUse /plugin install <github.com/user/repo> to add one."
 	}
 	names := make([]string, 0, len(m.config.Plugins))
 	for name := range m.config.Plugins {
@@ -3870,39 +3984,72 @@ func (m model) renderPluginList() string {
 	}
 	sort.Strings(names)
 
-	enabled := make(map[string]bool, len(m.config.Plugins))
-	for name, p := range m.config.Plugins {
-		enabled[name] = p.Enabled
-	}
-	loaded := map[string]struct {
-		tools int
-		cmds  int
-	}{}
-	for _, p := range plugins.LoadPlugins(enabled) {
-		loaded[p.Name] = struct {
-			tools int
-			cmds  int
-		}{len(p.Tools), len(p.Commands)}
+	// Load ALL plugins (including disabled) so we get descriptions for every one.
+	allLoaded := plugins.LoadPlugins(nil)
+	loadedMeta := map[string]plugins.Plugin{}
+	for _, p := range allLoaded {
+		loadedMeta[p.Name] = p
 	}
 
+	var enabledCount, disabledCount int
 	var b strings.Builder
-	b.WriteString("Plugins:\n")
+	b.WriteString("Installed Plugins:\n\n")
 	for _, name := range names {
 		cfg := m.config.Plugins[name]
-		state := "disabled"
+		meta := loadedMeta[name]
+
+		stateIcon := "○"
+		stateLabel := "disabled"
+		toggleCmd := "/plugin enable " + name
 		if cfg.Enabled {
-			state = "enabled"
+			stateIcon = "●"
+			stateLabel = "enabled"
+			toggleCmd = "/plugin disable " + name
+			enabledCount++
+		} else {
+			disabledCount++
 		}
-		info := loaded[name]
-		src := cfg.Source
-		if len(src) > 38 {
-			src = "..." + src[len(src)-35:]
+
+		// Header line: icon + name + status badge
+		b.WriteString(fmt.Sprintf("  %s %s [%s]\n", stateIcon, name, stateLabel))
+
+		// Description / purpose
+		desc := meta.Description
+		if desc == "" {
+			desc = "(no description)"
 		}
-		b.WriteString(fmt.Sprintf("  %-18s %-8s %-38s %dt %dc\n",
-			name, state, src, info.tools, info.cmds))
+		b.WriteString(fmt.Sprintf("    %s\n", desc))
+
+		// Source
+		b.WriteString(fmt.Sprintf("    Source: %s\n", cfg.Source))
+
+		// Tool and command counts
+		toolCount := len(meta.Tools)
+		cmdCount := len(meta.Commands)
+		if toolCount > 0 || cmdCount > 0 {
+			detail := ""
+			if toolCount > 0 {
+				detail += fmt.Sprintf("%d tool(s)", toolCount)
+			}
+			if toolCount > 0 && cmdCount > 0 {
+				detail += ", "
+			}
+			if cmdCount > 0 {
+				detail += fmt.Sprintf("%d command(s)", cmdCount)
+			}
+			b.WriteString(fmt.Sprintf("    %s\n", detail))
+		}
+
+		// Toggle action hint
+		b.WriteString(fmt.Sprintf("    → %s\n", toggleCmd))
+		b.WriteString("\n")
 	}
-	b.WriteString("\nUsage: /plugin enable <name>, /plugin disable <name>, /plugin install <url>, /plugin remove <name>")
-	return strings.TrimRight(b.String(), "\n")
+
+	// Summary footer
+	b.WriteString(fmt.Sprintf("Total: %d plugin(s) (%d enabled, %d disabled)\n",
+		enabledCount+disabledCount, enabledCount, disabledCount))
+	b.WriteString("\nCommands: /plugin enable/disable <name>, /plugin info <name>, /plugin install <url>, /plugin remove <name>")
+	return strings.TrimRight(builtins.String()+b.String(), "\n")
 }
 
 func (m *model) processFileReferences(text string) tea.Cmd {
@@ -4036,14 +4183,19 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 			mcpNames = m.agent.MCPToolNames()
 		}
 		client := agent.NewClient(m.config, modelID)
+		var tools []tool.Tool
+		if m.agent != nil {
+			tools = m.agent.GetTools()
+		} else {
+			tools = m.getInitialTools()
+		}
 		if client != nil {
-			var tools []tool.Tool
-			if m.agent != nil {
-				tools = m.agent.GetTools()
-			} else {
-				tools = m.getInitialTools()
-			}
 			next := agent.NewAgent(client, tools, m.config)
+			next.RestoreMCPToolNames(mcpNames)
+			return m.replaceAgent(next)
+		}
+		if m.agent == nil {
+			next := agent.NewAgent(nil, tools, m.config)
 			next.RestoreMCPToolNames(mcpNames)
 			return m.replaceAgent(next)
 		}
@@ -4243,15 +4395,40 @@ func displayTextForAgentMessage(msg agent.Message) string {
 }
 
 func (m *model) handleCompactCmd(args []string) {
-	newMsgs := []message{}
-	for _, msg := range m.messages {
-		if msg.role == roleUser || (msg.role == roleAssistant && msg.raw == nil) {
-			newMsgs = append(newMsgs, msg)
-		}
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Compaction requires an LLM connection. Run /connect first."})
+		return
 	}
-	m.messages = newMsgs
-	m.messages = append(m.messages, message{role: roleAssistant, text: "Conversation compacted (removed tool history from view)."})
-	m.sessionTelemetry = sidebarTelemetry{}
+	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
+	if len(agentMsgs) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Nothing to compact yet."})
+		return
+	}
+	if m.agent.CompactAsync(agentMsgs) {
+		m.pendingCompactManual = true
+		m.pendingCompactUIIdx = uiIdx
+		return
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Compaction could not start right now. Try again in a moment."})
+}
+
+func (m *model) handleRecapCmd(args []string) tea.Cmd {
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Recap requires an LLM connection. Run /connect first."})
+		return nil
+	}
+	agentMsgs, _ := m.buildAgentMessagesSnapshot()
+	if len(agentMsgs) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Nothing to recap yet."})
+		return nil
+	}
+	newGen := m.recapGen + 1
+	if m.agent.RecapAsync(agentMsgs, newGen) {
+		m.recapGen = newGen
+		return nil
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Recap could not start right now. Try again in a moment."})
+	return nil
 }
 
 func (m *model) handleRedoCmd(args []string) {
@@ -4296,13 +4473,23 @@ func (m *model) handleExportClaudeCmd(args []string) {
 }
 
 func (m *model) handleNewCmd(args []string) tea.Cmd {
+	// Drop the LSP manager too so the new session starts with no language
+	// servers running. The next query (or /plugin enable ast) will lazily
+	// spin up fresh ones via getInitialTools.
+	if m.lspMgr != nil {
+		m.lspMgr.Close()
+		m.lspMgr = nil
+	}
 	cmd := m.resetSessionAgent()
 	m.messages = []message{}
 	m.streamingThinkingIdx = -1
+	m.pendingCompactManual = false
+	m.pendingCompactUIIdx = nil
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
 	m.titleRequested = false
 	m.titleGen++
+	m.recapGen++
 	tool.SetTodoSession(m.sessionID)
 	snapshot.Reset()
 	tool.ResetTodoState()
@@ -4314,6 +4501,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.agentStripFocused = false
 	m.inputHistory = nil
 	m.inputHistoryIndex = -1
+	m.recapText = ""
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session.", transient: true})
 	return cmd
 }
@@ -4328,14 +4516,12 @@ func (m *model) resetSessionAgent() tea.Cmd {
 			modelName = m.config.Model
 		}
 		client := agent.NewClient(m.config, modelName)
-		if client != nil {
-			next = agent.NewAgent(client, tools, m.config)
-			next.SetMode(agent.ModeBuild)
-			if next.Permissions() != nil {
-				next.Permissions().SetWorkDir(m.workDir)
-			}
-			next.LoadExternalTools(m.config)
+		next = agent.NewAgent(client, tools, m.config)
+		next.SetMode(agent.ModeBuild)
+		if next.Permissions() != nil {
+			next.Permissions().SetWorkDir(m.workDir)
 		}
+		next.LoadExternalTools(m.config)
 	} else {
 		tools := prev.GetTools()
 		if len(tools) == 0 {
@@ -4792,6 +4978,83 @@ func (m *model) handleSmallModelCmd(args []string) {
 	}
 
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model updated to %s\nPersisted to config for next session.", args[0])})
+}
+
+// handlePermissionModelCmd handles /permissions model [<provider/model>].
+// With no args it shows the current permission model and opens the model picker.
+// With a model arg it sets and persists the auto-permission model.
+func (m *model) handlePermissionModelCmd(args []string) tea.Cmd {
+	if len(args) == 0 {
+		// Show current model info and open the model picker.
+		var b strings.Builder
+		b.WriteString("Permission Model\n")
+		b.WriteString(strings.Repeat("═", 40) + "\n\n")
+		b.WriteString("The permission model is used for LLM auto-allow decisions.\n\n")
+
+		explicit := ""
+		if m.config != nil && m.config.Ocode.Permissions.Auto != nil {
+			explicit = m.config.Ocode.Permissions.Auto.Model
+		}
+		if explicit == "" {
+			b.WriteString("Configured: (not set — falls back to small model)\n")
+		} else {
+			b.WriteString(fmt.Sprintf("Configured: %s\n", explicit))
+		}
+
+		fallback := agent.ResolveSmallModel(m.config)
+		if fallback == "" {
+			b.WriteString("Resolved fallback: (no small model available)\n")
+		} else {
+			b.WriteString(fmt.Sprintf("Resolved fallback: %s\n", fallback))
+		}
+
+		b.WriteString("\nOpening model picker. Select a model or press Esc to cancel.\n")
+		b.WriteString("Choose \"(not set)\" to clear the override and use the small model fallback.\n")
+
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		m.openPermissionModelPicker()
+		return nil
+	}
+
+	target := strings.TrimSpace(args[0])
+	if target == "" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions model [<provider/model>]"})
+		return nil
+	}
+
+	// Clear override with "auto" keyword.
+	if strings.ToLower(target) == "auto" {
+		if err := config.SavePermissionModel(""); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to clear permission model: %v", err)})
+			return nil
+		}
+		if m.config != nil && m.config.Ocode.Permissions.Auto != nil {
+			m.config.Ocode.Permissions.Auto.Model = ""
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Permission model cleared. Will fall back to small model."})
+		return nil
+	}
+
+	// Validate that the model is available.
+	client := agent.NewClient(m.config, target)
+	if client == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", target)})
+		return nil
+	}
+
+	// Set and persist.
+	if err := config.SavePermissionModel(target); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save permission model: %v", err)})
+		return nil
+	}
+	if m.config != nil {
+		if m.config.Ocode.Permissions.Auto == nil {
+			m.config.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
+		}
+		m.config.Ocode.Permissions.Auto.Model = target
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission model updated to %s\nPersisted to config for next session.", target)})
+	return nil
 }
 
 func (m *model) handleContextCmd(args []string) {
@@ -5559,6 +5822,12 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed %q once.", toolName), transient: true})
 		return m.executeApprovedTool(toolName, args, pathRoot)
 	case "a", "always", "always allow":
+		if agent.IsHarmfulRequest(req) {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow %s — this operation is considered harmful and always requires human approval.", permissionRuleLabel(req)), transient: true})
+			m.showPermDialog = true
+			m.updatePermButtonRegions()
+			return nil
+		}
 		m.allowOutOfScopePath(req, true)
 		// Special handling for webfetch domains
 		if toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain.") {
@@ -5574,6 +5843,12 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		m.persistPermissions()
 		return m.executeToolWithRules(toolName, args, "")
 	case "t":
+		if agent.IsHarmfulRequest(req) {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow tool %q — this operation is considered harmful and always requires human approval.", toolName), transient: true})
+			m.showPermDialog = true
+			m.updatePermButtonRegions()
+			return nil
+		}
 		pathRoot := outOfScopePathRoot(req)
 		m.setToolPermission(toolName, agent.PermissionAllow)
 		m.persistPermissions()
@@ -5948,7 +6223,10 @@ func (m *model) layoutLogViewport() {
 	}
 
 	statusH := lipgloss.Height(m.renderStatus())
-	logHeight := m.height - (1 + 1 + 1 + 2 + statusH)
+	// Rows above the log viewport: app header (top pad + title) + search bar
+	// + kind filter bar + the bordered panel's top + bottom (2). The header
+	// is 2 rows now thanks to appHeaderTopPad, so the leading 1 becomes 2.
+	logHeight := m.height - (appHeaderHeight + 1 + 1 + 2 + statusH)
 	if logHeight < 1 {
 		logHeight = 1
 	}
@@ -5966,7 +6244,16 @@ func (m *model) layoutLogViewport() {
 
 func (m model) bottomChromeHeight(panelWidth int) int {
 	m.applyInputTheme()
-	header := m.styles.Header.Render("◆ ocode") + hintStyle.Render("  ·  opencode clone v"+version.Version)
+	// Mirror the real chat-tab header so the viewport sizing below matches the
+	// rows View() actually paints (renderAppHeader adds a 1-row top pad).
+	tabBar := renderTabBar(m.activeTab, m.chatUnread)
+	var exitBtn string
+	if m.exitPending {
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
+	} else {
+		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
+	}
+	header := m.renderAppHeader("\u25c6 ocode", "\u00b7  opencode clone v"+version.Version, tabBar, exitBtn, m.width)
 	var inputArea string
 	if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
@@ -6189,7 +6476,7 @@ func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
 	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
 		return 0, false
 	}
-	clickY := mouse.Y - lipgloss.Height(m.styles.Header.Render("◆ ocode")) - 1
+	clickY := mouse.Y - appHeaderHeight - 1
 	if clickY < 0 || clickY >= m.viewport.Height() {
 		return 0, false
 	}
@@ -6207,7 +6494,7 @@ func (m model) thinkingForClick(mouse tea.Mouse) (int, bool) {
 	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
 		return 0, false
 	}
-	clickY := mouse.Y - lipgloss.Height(m.styles.Header.Render("◆ ocode")) - 1
+	clickY := mouse.Y - appHeaderHeight - 1
 	if clickY < 0 || clickY >= m.viewport.Height() {
 		return 0, false
 	}
@@ -6330,6 +6617,16 @@ func (m *model) renderTranscript() {
 			}
 		}
 	}
+	if m.recapText != "" {
+		if b.Len() > 0 {
+			b.WriteString("\n\n")
+		}
+		startLine := lipgloss.Height(b.String())
+		b.WriteString(m.styles.ThinkingHeader.Render("📋 RECAP"))
+		b.WriteString("\n")
+		b.WriteString(m.styles.Thinking.Render(m.recapText))
+		_ = startLine // used for click region tracking if needed later
+	}
 	m.transcriptContent = wrapView(b.String(), m.viewport.Width())
 	m.transcriptLines = strings.Split(m.transcriptContent, "\n")
 	m.rawTranscriptLines = strings.Split(stripANSI(m.transcriptContent), "\n")
@@ -6349,7 +6646,7 @@ func (m *model) renderUserText(text string) string {
 }
 
 func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
-	content = stripTruncationFooter(content)
+	content = sanitizeForTUI(stripTruncationFooter(content))
 	content = strings.TrimRight(content, "\n")
 	lines := strings.Split(content, "\n")
 	boxContent := content
@@ -6529,6 +6826,13 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	recapDoneCh := m.recapCh
+	m.agent.OnRecap = func(result agent.RecapResult) {
+		select {
+		case recapDoneCh <- recapFinishedMsg{gen: result.Gen, text: result.Text}:
+		default:
+		}
+	}
 	deltaCh := m.deltaCh
 	m.agent.OnDelta = func(kind, text string) {
 		if deltaCh == nil {
@@ -6606,6 +6910,17 @@ func waitCompactEvent(startCh chan struct{}, doneCh chan agent.CompactResult) te
 			return compactFinishedMsg{result: r}
 		}
 	}
+}
+
+func waitRecapEvent(doneCh chan recapFinishedMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-doneCh
+	}
+}
+
+type recapFinishedMsg struct {
+	gen  uint64
+	text string
 }
 
 // deltaEvent carries one streamed token (kind ∈ {"reasoning","text"}) from
@@ -6876,6 +7191,16 @@ func (m model) renderActivityRow() string {
 	var parts []string
 	if snap.LLMRunning {
 		parts = append(parts, "⟳ LLM")
+	}
+	if m.retryInfo != nil {
+		// Truncate long error messages to keep the activity row single-line.
+		errShort := m.retryInfo.errMsg
+		if len(errShort) > 60 {
+			errShort = errShort[:57] + "..."
+		}
+		parts = append(parts, fmt.Sprintf("⚠ %s — retry %d/%d in %s",
+			errShort, m.retryInfo.attempt, m.retryInfo.max,
+			m.retryInfo.delay.Round(time.Second)))
 	}
 	if len(snap.ActiveTools) > 0 {
 		toolParts := make([]string, len(snap.ActiveTools))
@@ -7498,6 +7823,57 @@ func (m model) mouseEnabled() bool {
 	return m.config == nil || m.config.Ocode.TUI.Mouse == nil || *m.config.Ocode.TUI.Mouse
 }
 
+// appHeaderTopPad is the blank row rendered above every tab's header line so the
+// title doesn't sit flush against the terminal top edge.
+const appHeaderTopPad = "\n"
+
+// appHeaderLeftPad is a single leading space on the title so the bold "◆" mark
+// doesn't pin to the column-0 border.
+const appHeaderLeftPad = " "
+
+// appHeaderHintGap is the single-space separator between the bold title and
+// the dim hint (e.g. "·  opencode clone v…").
+const appHeaderHintGap = "  "
+
+// appHeaderHeight is the total on-screen rows the app header occupies in
+// every tab: the 1-row top pad + the 1-row title line. Centralized here so
+// viewport sizing, scrollbar hit-tests, and mouse-to-content Y offsets all
+// agree — when this constant changes, every offset above the content moves
+// by the same delta.
+const appHeaderHeight = 2
+
+// renderAppHeader returns the full top-of-screen header for a tab. It is a
+// blank top padding row, a left-padded bold title, a thin gap, the dim
+// version/subtitle hint, optional centered tab bar, and a right-aligned
+// exit button. All tab headers (chat / files / git / log) build through
+// this so a styling tweak updates every surface at once.
+//
+// The title is visually clamped to a single row via ansi.Truncate so a long
+// session title (e.g. the first user prompt) cannot soft-wrap and push the
+// bottom chrome past appHeaderHeight. The budget accounts for the right-side
+// chrome (tab bar + exit button) and the dim hint, so the title shrinks
+// first when the terminal is narrow.
+func (m model) renderAppHeader(title string, hint string, tabBar string, exitBtn string, width int) string {
+	tabBarW := lipgloss.Width(tabBar)
+	exitBtnW := lipgloss.Width(exitBtn)
+	hintRendered := hintStyle.Render(hint)
+	hintW := lipgloss.Width(hintRendered)
+	// Budget = total width minus the fixed left/right chrome (padding, hint,
+	// hint gap, tab bar, exit button). truncateToWidth returns at least "…"
+	// for any positive budget, and "" when there is no room at all, so the
+	// header always stays on a single row.
+	titleBudget := width - tabBarW - exitBtnW - len(appHeaderLeftPad) - len(appHeaderHintGap) - hintW
+	if lipgloss.Width(title) > titleBudget {
+		title = truncateToWidth(title, titleBudget)
+	}
+	headerLeft := appHeaderLeftPad + m.styles.Header.Render(title) + appHeaderHintGap + hintRendered
+	headerPad := width - lipgloss.Width(headerLeft) - tabBarW - exitBtnW
+	if headerPad < 0 {
+		headerPad = 0
+	}
+	return appHeaderTopPad + headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
+}
+
 func (m model) renderContent() string {
 	if !m.ready {
 		return "initializing…"
@@ -7537,12 +7913,7 @@ func (m model) renderContent() string {
 			title = truncateTitle(prompt, maxExplicitTitleLen)
 		}
 	}
-	var headerLeft string
-	if title != "" {
-		headerLeft = m.styles.Header.Render("\u25c6 ocode "+title) + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
-	} else {
-		headerLeft = m.styles.Header.Render("\u25c6 ocode") + hintStyle.Render("  \u00b7  opencode clone v"+version.Version)
-	}
+	versionHint := "\u00b7  opencode clone v" + version.Version
 
 	// Build tab bar + exit button for the header (full width, like other tabs).
 	tabBar := renderTabBar(m.activeTab, m.chatUnread)
@@ -7552,11 +7923,11 @@ func (m model) renderContent() string {
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
 	}
-	headerPad := m.width - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
-	if headerPad < 0 {
-		headerPad = 0
+	headerTitle := "\u25c6 ocode"
+	if title != "" {
+		headerTitle = "\u25c6 ocode " + title
 	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
+	header := m.renderAppHeader(headerTitle, versionHint, tabBar, exitBtn, m.width)
 
 	status := m.renderStatus()
 	panelWidth := m.panelWidth()
@@ -7721,7 +8092,11 @@ func (m *model) renderStatus() string {
 			permissionMode = " | locked permissions"
 		}
 		if m.agent.Permissions().AutoPermissionEnabled() {
-			permissionMode += " · auto-permission on"
+			if permissionMode == "" {
+				permissionMode = " | normal · auto-permission on"
+			} else {
+				permissionMode += " · auto-permission on"
+			}
 		}
 	}
 	compactState := ""
@@ -8169,6 +8544,26 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.topLines = append(data.topLines, cwdLabel+sidebarAccentStyle.Render(compactWorkingDir(m.workDir, cwdMax)))
 	data.topLines = append(data.topLines, "")
 
+	// ── Model configuration (pinned) ──
+	advisorModel := "(default)"
+	smallModel := "(none)"
+	pPermModel := "(none)"
+	if m.config != nil {
+		if m.config.Ocode.Advisor.Model != "" {
+			advisorModel = m.config.Ocode.Advisor.Model
+		}
+		if m.config.Ocode.SmallModel != "" {
+			smallModel = m.config.Ocode.SmallModel
+		}
+		if m.config.Ocode.Permissions.Auto != nil && m.config.Ocode.Permissions.Auto.Model != "" {
+			pPermModel = m.config.Ocode.Permissions.Auto.Model
+		}
+	}
+	data.topLines = append(data.topLines, dimStyle.Render("advisor: ")+sidebarTextStyle.Render(advisorModel))
+	data.topLines = append(data.topLines, dimStyle.Render("small:   ")+sidebarTextStyle.Render(smallModel))
+	data.topLines = append(data.topLines, dimStyle.Render("perm:    ")+sidebarTextStyle.Render(pPermModel))
+	data.topLines = append(data.topLines, "")
+
 	// ── Git status section (scrollable) ──
 	gitBranch := m.git.currentBranch
 	if gitBranch == "" {
@@ -8231,7 +8626,11 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	if m.agent != nil {
 		perm := m.agent.Permissions()
 		mode := perm.Mode()
-		body := []string{sidebarTextStyle.Render("Mode: ") + sidebarAccentStyle.Render(string(mode))}
+		modeLabel := string(mode)
+		if perm.AutoPermissionEnabled() && mode == agent.PermissionModeNormal {
+			modeLabel += " · auto"
+		}
+		body := []string{sidebarTextStyle.Render("Mode: ") + sidebarAccentStyle.Render(modeLabel)}
 
 		// Extra allowed paths (paths outside workdir explicitly permitted)
 		extraPaths := m.config.Ocode.ExtraAllowedPaths
@@ -8576,7 +8975,8 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 }
 
 func (m model) tabForClick(mouse tea.Mouse) (int, bool) {
-	if mouse.Y != 0 {
+	// The tab bar sits on the second header row (row 1; row 0 is appHeaderTopPad).
+	if mouse.Y != 1 {
 		return 0, false
 	}
 	startX := m.tabBarStartX()
@@ -8609,7 +9009,8 @@ func (m model) tabBarStartXs(tabBarWidth int) []int {
 }
 
 func (m model) exitButtonForClick(mouse tea.Mouse) bool {
-	if mouse.Y != 0 {
+	// The exit button sits on the second header row (row 1; row 0 is appHeaderTopPad).
+	if mouse.Y != 1 {
 		return false
 	}
 	var exitBtn string
@@ -8702,9 +9103,10 @@ func (m *model) applyOrClearLogSelectionHighlight() {
 }
 
 // logContentTopY is the screen row of the first log line inside the bordered
-// panel: header + search bar + kind bar (3 rows) plus the panel's top border.
+// panel: header (top pad + title = 2 rows) + search bar + kind bar plus the
+// panel's top border.
 func (m model) logContentTopY() int {
-	return 4
+	return appHeaderHeight + 3
 }
 
 // logContentLeftX is the screen column of the first log character: the panel's
@@ -8751,12 +9153,7 @@ func (m model) renderLogTab() string {
 	} else {
 		exitBtn = m.styles.Hint.Padding(0, 1).Render("✕ exit")
 	}
-	headerLeft := m.styles.Header.Render("◆ ocode") + m.styles.Hint.Render("  ·  debug log")
-	headerPad := m.width - lipgloss.Width(headerLeft) - lipgloss.Width(tabBar) - lipgloss.Width(exitBtn)
-	if headerPad < 0 {
-		headerPad = 0
-	}
-	header := headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
+	header := m.renderAppHeader("\u25c6 ocode", "  \u00b7  debug log", tabBar, exitBtn, m.width)
 
 	// search bar
 	searchPrefix := hintStyle.Render("/ ")
@@ -8930,13 +9327,14 @@ func (m model) mainScrollbarX() int {
 }
 
 func (m model) viewportContentTopY() int {
-	return lipgloss.Height(m.styles.Header.Render("◆ ocode")) + 1
+	// Top pad + title row + the panel's top border (the bordered transcript
+	// sits one row below the header).
+	return appHeaderHeight + 1
 }
 
 // agentStripTopY returns the first row of the agent strip in screen coordinates.
 func (m model) agentStripTopY() int {
-	headerH := lipgloss.Height(m.styles.Header.Render("◆ ocode"))
-	y := headerH + m.viewport.Height() + 2 // +2 for transcript border
+	y := appHeaderHeight + m.viewport.Height() + 2 // +2 for transcript border
 	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
 		y += lipgloss.Height(m.renderSlashPopup())
 	}
@@ -9283,6 +9681,14 @@ func countToolMsgs(msgs []message) int {
 type retryStatusMsg struct {
 	agent *agent.Agent
 	ev    *agent.RetryStatusEvent
+}
+
+// llmRetryInfo holds state about an in-progress LLM retry, shown in the activity row.
+type llmRetryInfo struct {
+	attempt int
+	max     int
+	delay   time.Duration
+	errMsg  string
 }
 
 // listenRetryStatus blocks on the agent's retry-events channel and re-arms itself.

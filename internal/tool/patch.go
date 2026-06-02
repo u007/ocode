@@ -533,13 +533,13 @@ func (t TodoWriteTool) Parallel() bool { return false }
 func (t TodoWriteTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "todowrite",
-		"description": "Manage todo lists during coding sessions. Examples: ○ (pending), ⌛️ (working), ✅ (done), ❌ (cancelled) - without the status text",
+		"description": "Manage todo lists during coding sessions. Use markers: [✓], [•], [ ]",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"todoText": map[string]interface{}{
 					"type":        "string",
-					"description": "The todo list content. Each line is a bullet starting with a status emoji:  ○ (pending), ⌛️ (working), ✅ (done), ❌ (cancelled) - without the status text",
+					"description": "The todo list content. Each line is a bullet starting with a status marker: [✓], [•], [ ]",
 				},
 			},
 			"required": []string{"todoText"},
