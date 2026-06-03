@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,7 +19,7 @@ const (
 	openaiAuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	openaiTokenURL     = "https://auth.openai.com/oauth/token"
 	openaiRedirectURI  = "http://localhost:1455/auth/callback"
-	openaiScope        = "openid profile email offline_access api.connectors.read api.connectors.invoke"
+	openaiScope        = "openid profile email offline_access api.connectors.read api.connectors.invoke model.request"
 	openaiLoopbackPort = 1455
 )
 
@@ -151,6 +152,7 @@ func openaiTokenRequest(form url.Values) (Credential, error) {
 	var parsed struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
 		ExpiresIn    int64  `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -159,10 +161,67 @@ func openaiTokenRequest(form url.Values) (Credential, error) {
 	if parsed.AccessToken == "" {
 		return Credential{}, fmt.Errorf("openai token response missing access_token")
 	}
+	accountID := extractOpenAIAccountID(parsed.IDToken, parsed.AccessToken)
 	return Credential{
 		Kind:         KindOAuth,
 		AccessToken:  parsed.AccessToken,
 		RefreshToken: parsed.RefreshToken,
 		ExpiresAt:    time.Now().Unix() + parsed.ExpiresIn,
+		AccountID:    accountID,
 	}, nil
+}
+
+// extractOpenAIAccountID extracts the chatgpt_account_id from JWT token claims.
+// It tries id_token first, then falls back to access_token.
+func extractOpenAIAccountID(idToken, accessToken string) string {
+	for _, tok := range []string{idToken, accessToken} {
+		if tok == "" {
+			continue
+		}
+		if id := openaiAccountIDFromJWT(tok); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func openaiAccountIDFromJWT(token string) string {
+	parts := strings.SplitN(token, ".", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	padded := parts[1]
+	switch len(padded) % 4 {
+	case 2:
+		padded += "=="
+	case 3:
+		padded += "="
+	}
+	data, err := base64.URLEncoding.DecodeString(padded)
+	if err != nil {
+		return ""
+	}
+	var claims map[string]interface{}
+	if err := json.Unmarshal(data, &claims); err != nil {
+		return ""
+	}
+	// Try direct claim first
+	if id, ok := claims["chatgpt_account_id"].(string); ok && id != "" {
+		return id
+	}
+	// Try nested claim under "https://api.openai.com/auth"
+	if nested, ok := claims["https://api.openai.com/auth"].(map[string]interface{}); ok {
+		if id, ok := nested["chatgpt_account_id"].(string); ok && id != "" {
+			return id
+		}
+	}
+	// Try organizations[0].id
+	if orgs, ok := claims["organizations"].([]interface{}); ok && len(orgs) > 0 {
+		if org, ok := orgs[0].(map[string]interface{}); ok {
+			if id, ok := org["id"].(string); ok && id != "" {
+				return id
+			}
+		}
+	}
+	return ""
 }

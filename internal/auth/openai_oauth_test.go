@@ -21,7 +21,7 @@ func TestOpenAIAuthorizeURLRequestsCodexOAuthScopes(t *testing.T) {
 	for _, scope := range strings.Fields(parsed.Query().Get("scope")) {
 		scopeSet[scope] = true
 	}
-	for _, want := range []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke"} {
+	for _, want := range []string{"openid", "profile", "email", "offline_access", "api.connectors.read", "api.connectors.invoke", "model.request"} {
 		if !scopeSet[want] {
 			t.Fatalf("scope %q missing %s", parsed.Query().Get("scope"), want)
 		}
