@@ -10,6 +10,12 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/mcpcli"
 	"github.com/jamesmercstudio/ocode/internal/models"
+	// Registers the OpenAI/Codex provider plugin via its init(). Without this
+	// blank import the plugin is never registered, so providerplugin.Get("openai")
+	// returns ok=false and ChatGPT OAuth tokens are misrouted to
+	// api.openai.com/v1/chat/completions (401 missing_scope) instead of the
+	// Codex backend.
+	_ "github.com/jamesmercstudio/ocode/internal/plugin/codex"
 	"github.com/jamesmercstudio/ocode/internal/runcli"
 	"github.com/jamesmercstudio/ocode/internal/server"
 	"github.com/jamesmercstudio/ocode/internal/skill"

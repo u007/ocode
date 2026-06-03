@@ -85,7 +85,7 @@ func init() {
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
-		{name: "/plugin", usage: "/plugin [list|enable <name>|disable <name>|install <url>|remove <name>|info <name>|confirm|cancel]", help: "List, toggle, or install plugins", handler: runPluginCmd},
+		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|sync [name]|update [name]|confirm|cancel]", help: "List, install, update, or sync plugins", handler: runPluginCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -463,6 +463,36 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		}
 		return func() tea.Msg { return pluginRemoveMsg{name: args[1]} }
 
+	case "update", "upgrade":
+		if len(args) < 2 {
+			// Update all plugins.
+			return func() tea.Msg { return pluginUpdateAllMsg{} }
+		}
+		name := args[1]
+		cfg, ok := m.config.Plugins[name]
+		if !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
+			return nil
+		}
+		return func() tea.Msg {
+			return pluginUpdateMsg{name: name, source: cfg.Source, ref: cfg.Ref}
+		}
+
+	case "sync":
+		if len(args) < 2 {
+			// Sync all plugins.
+			return func() tea.Msg { return pluginSyncAllMsg{} }
+		}
+		name := args[1]
+		cfg, ok := m.config.Plugins[name]
+		if !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
+			return nil
+		}
+		return func() tea.Msg {
+			return pluginSyncMsg{name: name, source: cfg.Source, ref: cfg.Ref}
+		}
+
 	case "confirm":
 		if m.pendingPluginInstall == nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "No pending plugin install."})
@@ -477,11 +507,11 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 			if err := plugins.AutoRegisterMCP(pending.dirName, pending.p); err != nil {
 				return pluginInstalledMsg{source: pending.source, err: err}
 			}
-			cfg := config.PluginConfig{Source: pending.source, Dir: pending.dirName, Enabled: true}
+			cfg := config.PluginConfig{Source: pending.source, Ref: pending.ref, Dir: pending.dirName, Enabled: true}
 			if err := config.SavePlugin(pending.p.Name, cfg); err != nil {
 				return pluginInstalledMsg{source: pending.source, err: err}
 			}
-			return pluginInstalledMsg{name: pending.p.Name, source: pending.source, dir: pending.dirName}
+			return pluginInstalledMsg{name: pending.p.Name, source: pending.source, ref: pending.ref, dir: pending.dirName}
 		}
 
 	case "cancel":
@@ -498,7 +528,7 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		return nil
 
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin [list|enable <name>|disable <name>|install <url>|remove <name>|info <name>|confirm|cancel]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|sync [name]|update [name]|confirm|cancel]"})
 		return nil
 	}
 }

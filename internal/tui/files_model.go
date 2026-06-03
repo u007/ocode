@@ -49,6 +49,7 @@ const (
 	filesModePrompt
 	filesModeDeleteConfirm
 	filesModeEdit
+	filesModeContentSearch
 )
 
 type filesPromptKind int
@@ -64,6 +65,22 @@ type filesPanel int
 const (
 	filesPanelPicker filesPanel = iota
 	filesPanelPreview
+)
+
+// filesContentSearchResult holds a single content search match.
+type filesContentSearchResult struct {
+	path    string // absolute path
+	relPath string // relative to workDir
+	line    int    // 1-based line number
+	text    string // matching line content
+}
+
+// filesContentSearchPanel indicates which input field is focused.
+type filesContentSearchPanel int
+
+const (
+	filesContentSearchQuery   filesContentSearchPanel = iota
+	filesContentSearchExtFilter
 )
 
 type fileNode struct {
@@ -111,6 +128,16 @@ type filesModel struct {
 	inlineEditPath  string
 	inlineEditMtime int64
 	inlineEditSize  int64
+
+	// Content search fields
+	contentSearchQuery   string
+	contentSearchExts    string // comma-separated extension patterns, e.g. "*.go,*.ts"
+	contentSearchResults []filesContentSearchResult
+	contentSearchCursor  int
+	contentSearchPanel   filesContentSearchPanel // which input is focused
+	contentSearchLoading bool
+	contentSearchDone    bool // true once search completed
+	contentSearchIncludeIgnored bool // true = search everything, false = skip .gitignore + hidden
 }
 
 func newFilesModel(workDir string) filesModel {
@@ -156,7 +183,7 @@ func (m *filesModel) Resize(w, h int) {
 	m.height = h
 	treeW := w * 35 / 100
 	previewW := w - treeW - 3
-	previewH := h - 3
+	previewH := h - 4 // reserve 1 row for bottom status bar
 	if previewH < 1 {
 		previewH = 1
 	}
@@ -174,6 +201,19 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 	case filesGitStatusUpdateMsg:
 		m.gitStatus = msg.gitStatus
 		return m, nil
+	case filesContentSearchResultMsg:
+		m.contentSearchResults = msg.results
+		m.contentSearchLoading = false
+		m.contentSearchDone = true
+		m.contentSearchCursor = 0
+		if msg.err != nil {
+			m.statusMsg = "search error: " + msg.err.Error()
+		} else if len(msg.results) == 0 {
+			m.statusMsg = "no results found"
+		} else {
+			m.statusMsg = fmt.Sprintf("%d results found — j/k navigate  enter open", len(msg.results))
+		}
+		return m, nil
 	case tea.KeyPressMsg:
 		if m.choosingEditor {
 			return m.updateEditorPicker(msg)
@@ -186,6 +226,9 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 		}
 		if m.mode == filesModeEdit {
 			return m.updateInlineEdit(msg)
+		}
+		if m.mode == filesModeContentSearch {
+			return m.updateContentSearch(msg)
 		}
 		if m.fuzzy {
 			return m.updateFuzzy(msg)
@@ -303,6 +346,16 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.fuzzy = true
 		m.query = ""
 		m.buildAllPaths()
+	case "ctrl+f", "/f":
+		m.mode = filesModeContentSearch
+		m.contentSearchQuery = ""
+		m.contentSearchExts = ""
+		m.contentSearchResults = nil
+		m.contentSearchCursor = 0
+		m.contentSearchPanel = filesContentSearchQuery
+		m.contentSearchLoading = false
+		m.contentSearchDone = false
+		m.statusMsg = "content search: type query, Tab to switch filter, Enter to search"
 	case "tab":
 		m.panel = (m.panel + 1) % 2
 	}
@@ -1040,6 +1093,8 @@ func (m filesModel) previewHeaderLines() int {
 		n = 1 // status line only, preview is replaced
 	} else if m.choosingEditor {
 		return 0 // editor picker replaces everything
+	} else if m.mode == filesModeContentSearch {
+		return 0 // content search replaces everything
 	}
 	if m.statusMsg != "" {
 		n += 2 // status + blank
@@ -1114,7 +1169,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		filterLine := styles.Selected.Render("/ "+m.query+"█") + "  " + styles.Hint.Render(preview)
 		treeContent = filterLine + "\n" + treeContent
 	}
-	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 3).Render(treeContent)
+	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 4).Render(treeContent)
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
 	previewBody := m.preview.View()
@@ -1141,6 +1196,8 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		previewContent = styles.Hint.Render(m.statusMsg) + "\n" + m.promptInput.View()
 	} else if m.mode == filesModeDeleteConfirm {
 		previewContent = styles.Hint.Render(m.statusMsg) + "\n" + styles.Hint.Render("press y to confirm, esc/n to cancel")
+	} else if m.mode == filesModeContentSearch {
+		previewContent = m.contentView(previewW-4, h, styles)
 	} else if m.statusMsg != "" {
 		previewContent = styles.Hint.Render(m.statusMsg) + "\n\n" + previewContent
 	} else if m.editor != "" {
@@ -1165,7 +1222,11 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	// Top pad + left gap + thin title/hint gap, matching the chat tab header.
 	renderedHeader := appHeaderTopPad + headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
 
-	parts := []string{renderedHeader, row}
+	// Bottom status bar with keybindings (matching renderStatus in model.go)
+	statusStr := hintStyle.Width(w - 2).MaxHeight(1).Render(
+		"ctrl+f search  / fuzzy find  tab jump  i edit  ^S save  n/N new  r rename  D delete  y path  E editor",
+	)
+	parts := []string{renderedHeader, row, statusStr}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 

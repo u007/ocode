@@ -556,6 +556,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
+	emitDebug("LLM", fmt.Sprintf("chatOpenAI: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -566,7 +567,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
-		emitDebug("error", msg)
+		emitDebug("ERROR", fmt.Sprintf("chatOpenAI: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
 		return nil, fmt.Errorf("%s", msg)
 	}
 
@@ -1252,6 +1253,18 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 // The chatgpt_account_id claim is extracted from the JWT and sent as ChatGPT-Account-ID.
 func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	accountID := c.AccountID
+	// AccountID is a cached copy of the chatgpt_account_id JWT claim. When the
+	// credential was imported from an external store (e.g. another CLI) the
+	// cache can be empty; recover it from the bearer token so the codex backend
+	// still receives ChatGPT-Account-ID. Matches the two-level lookup in
+	// auth.extractOpenAIAccountID.
+	if accountID == "" {
+		if id := jwtClaim(c.APIKey, "https://api.openai.com/auth", "chatgpt_account_id"); id != "" {
+			accountID = id
+		} else if id := jwtClaim(c.APIKey, "chatgpt_account_id"); id != "" {
+			accountID = id
+		}
+	}
 
 	// Map messages → Responses API input items.
 	instructions := make([]string, 0, 1)
@@ -2261,7 +2274,20 @@ var providers = map[string]providerInfo{
 	"xiaomi-token-plan-cn":  {"XIAOMI_API_KEY", "https://token-plan-cn.xiaomimimo.com/v1"},
 }
 
+// maskKey returns a safe-to-log representation of an API key: first 4 chars +
+// "…" if present, or "(empty)" if blank. Never leaks the full key.
+func maskKey(key string) string {
+	if key == "" {
+		return "(empty)"
+	}
+	if len(key) <= 8 {
+		return "****"
+	}
+	return key[:4] + "…" + key[len(key)-4:]
+}
+
 func NewClient(cfg *config.Config, model string) LLMClient {
+	emitDebug("AGENT", fmt.Sprintf("NewClient: building client for model %q", model))
 	provider := ""
 	apiKey := ""
 	baseURL := ""
@@ -2289,6 +2315,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 			model = parts[1]
 		}
 	}
+	emitDebug("AGENT", fmt.Sprintf("NewClient: resolved provider=%q model=%q", provider, model))
 
 	// Use config for provider details if available
 	if cfg != nil && provider != "" {
@@ -2309,6 +2336,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 			}
 		}
 	}
+	emitDebug("AGENT", fmt.Sprintf("NewClient: after config check — provider=%q apiKey=%s baseURL=%q", provider, maskKey(apiKey), baseURL))
 
 	// Apply defaults from provider map
 	if info, ok := providers[provider]; ok {
@@ -2317,6 +2345,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 			if provider == "google" && apiKey == "" {
 				apiKey = os.Getenv("GOOGLE_API_KEY")
 			}
+			emitDebug("AGENT", fmt.Sprintf("NewClient: env check — envKey=%q apiKey=%s", info.envKey, maskKey(apiKey)))
 		}
 		if apiKey == "" {
 			// Fall back to stored credential. Copilot stores a long-lived GH OAuth
@@ -2334,6 +2363,9 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 					useOAuth = true
 					accountID = cred.AccountID
 				}
+				emitDebug("AGENT", fmt.Sprintf("NewClient: credential check — kind=%s apiKey=%s useOAuth=%v", cred.Kind, maskKey(apiKey), useOAuth))
+			} else {
+				emitDebug("AGENT", fmt.Sprintf("NewClient: no stored credential for provider %q", provider))
 			}
 		}
 		if baseURL == "" {
@@ -2365,6 +2397,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	}
 
 	if baseURL == "" {
+		emitDebug("AGENT", fmt.Sprintf("NewClient: no baseURL for provider %q; returning nil", provider))
 		return nil
 	}
 
@@ -2373,8 +2406,8 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	// ResolveSmallModel fallback, compactSummaryClient — skip it and surface a
 	// clear failure instead of a deferred 401 on the first request. Providers in
 	// keyOptionalProviders (local servers, free tiers) are allowed through.
-	if apiKey == "" && !useOAuth && provider != "" && !keyOptionalProviders[provider] {
-		emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q; refusing to build client (would 401)", provider))
+	if apiKey == "" && provider != "" && !keyOptionalProviders[provider] {
+		emitDebug("AGENT", fmt.Sprintf("NewClient: no API key for provider %q (useOAuth=%v); refusing to build client (would 401)", provider, useOAuth))
 		return nil
 	}
 
@@ -2383,6 +2416,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		thinkingBudget = cfg.ThinkingBudget
 	}
 
+	emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s useOAuth=%v ws=%v", provider, model, maskKey(apiKey), useOAuth, cfg != nil && cfg.UseWebSocket))
 	return &GenericClient{
 		APIKey:         apiKey,
 		Model:          model,
@@ -2603,6 +2637,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
+	emitDebug("LLM", fmt.Sprintf("chatOpenAIHTTP: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -2613,7 +2648,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
-		emitDebug("error", msg)
+		emitDebug("ERROR", fmt.Sprintf("chatOpenAIHTTP: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
 		return nil, fmt.Errorf("%s", msg)
 	}
 

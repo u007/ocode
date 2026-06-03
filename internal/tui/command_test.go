@@ -405,3 +405,44 @@ func TestContextCommandOutputsSections(t *testing.T) {
 		t.Fatal("context command output must not set raw field")
 	}
 }
+
+// oneShotStreamClient returns a single tool-free assistant message so a.Step
+// completes in one turn without retries or hanging.
+type oneShotStreamClient struct{}
+
+func (oneShotStreamClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	return &agent.Message{Role: "assistant", Content: "done"}, nil
+}
+func (oneShotStreamClient) GetProvider() string { return "test" }
+func (oneShotStreamClient) GetModel() string    { return "test-model" }
+
+// TestCustomCommandUsesStreamingPath guards the fix for custom slash commands
+// (e.g. /review-changes) freezing the chat: they must stream live via
+// streamStartedMsg, not run synchronously and only deliver output at the end.
+func TestCustomCommandUsesStreamingPath(t *testing.T) {
+	a := agent.NewAgent(oneShotStreamClient{}, nil, &config.Config{})
+	m := &model{agent: a, config: &config.Config{}}
+
+	cmd := m.sendCustomCommandPrompt("review please")
+	if cmd == nil {
+		t.Fatal("sendCustomCommandPrompt returned nil command")
+	}
+	msg := cmd()
+	batch, ok := msg.(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected tea.BatchMsg from the streaming path, got %T", msg)
+	}
+	found := false
+	for _, c := range batch {
+		if c == nil {
+			continue
+		}
+		if _, ok := c().(streamStartedMsg); ok {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("custom command did not emit streamStartedMsg — it is not using the streaming path")
+	}
+}

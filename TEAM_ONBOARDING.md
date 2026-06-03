@@ -159,7 +159,7 @@ Key sections:
 | `plugins` | Plugin sources |
 | `hooks` | Pre/post tool hooks |
 | `editor` | Editor configuration |
-| `permissions` | Tool permission modes (auto, off, ask) |
+| `permissions` | Tool permission modes (auto, off, ask); includes exfiltration-risk detection for URL-calling commands |
 
 ### Environment variables
 

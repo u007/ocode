@@ -33,6 +33,8 @@ type Credential struct {
 	AccountID    string         `json:"account_id,omitempty"` // Cloudflare
 }
 
+// credentialJSON handles both ocode (access_token, refresh_token, expires_at,
+// account_id) and opencode (access, refresh, expires, accountId) field naming.
 type credentialJSON struct {
 	Type         string `json:"type"`
 	Kind         string `json:"kind"`
@@ -44,6 +46,11 @@ type credentialJSON struct {
 	BaseURL      string `json:"baseURL,omitempty"`
 	BaseURLOld   string `json:"base_url,omitempty"`
 	AccountID    string `json:"account_id,omitempty"`
+	// opencode aliases (no underscores, expires in milliseconds)
+	AccessOc   string `json:"access,omitempty"`
+	RefreshOc  string `json:"refresh,omitempty"`
+	ExpiresOc  int64  `json:"expires,omitempty"`
+	AccountIDO string `json:"accountId,omitempty"`
 }
 
 func normalizeCredentialKind(kind string) CredentialKind {
@@ -66,15 +73,36 @@ func (c *Credential) UnmarshalJSON(data []byte) error {
 	if kind == "" {
 		kind = raw.Kind
 	}
+
+	// Merge ocode and opencode field names — prefer ocode (underscored) names,
+	// fall back to opencode (no-underscore) aliases when the primary is empty.
+	accessToken := raw.AccessToken
+	if accessToken == "" {
+		accessToken = raw.AccessOc
+	}
+	refreshToken := raw.RefreshToken
+	if refreshToken == "" {
+		refreshToken = raw.RefreshOc
+	}
+	expiresAt := raw.ExpiresAt
+	if expiresAt == 0 && raw.ExpiresOc != 0 {
+		// opencode stores expires in milliseconds; ocode uses seconds.
+		expiresAt = raw.ExpiresOc / 1000
+	}
+	accountID := raw.AccountID
+	if accountID == "" {
+		accountID = raw.AccountIDO
+	}
+
 	*c = Credential{
 		Kind:         normalizeCredentialKind(kind),
 		Key:          raw.Key,
-		AccessToken:  raw.AccessToken,
-		RefreshToken: raw.RefreshToken,
-		ExpiresAt:    raw.ExpiresAt,
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ExpiresAt:    expiresAt,
 		Account:      raw.Account,
 		BaseURL:      raw.BaseURL,
-		AccountID:    raw.AccountID,
+		AccountID:    accountID,
 	}
 	if c.BaseURL == "" {
 		c.BaseURL = raw.BaseURLOld
@@ -121,23 +149,6 @@ func authPath() (string, error) {
 		return filepath.Join(xdg, "opencode", "auth.json"), nil
 	}
 	return filepath.Join(home, ".local", "share", "opencode", "auth.json"), nil
-}
-
-// legacyAuthPath returns the old ocode auth path at ~/.config/ocode/auth.json
-// for one-time migration.
-func legacyAuthPath() (string, error) {
-	if runtime.GOOS == "windows" {
-		appdata := os.Getenv("APPDATA")
-		if appdata == "" {
-			return "", fmt.Errorf("APPDATA not set")
-		}
-		return filepath.Join(appdata, "ocode", "auth.json"), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".config", "ocode", "auth.json"), nil
 }
 
 // readLegacyOcodeFormat attempts to parse the legacy ocode auth.json which
@@ -188,30 +199,7 @@ func loadStoreLocked() error {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("read %s: %w", path, err)
 		}
-		// File doesn't exist yet. Try legacy path for one-time migration.
-		if legacy, e := legacyAuthPath(); e == nil {
-			if legacyData, e2 := os.ReadFile(legacy); e2 == nil {
-				// Try ocode legacy format first: {"credentials": {…}}
-				if readLegacyOcodeFormat(legacyData, cache) {
-					mergeOpencodeCredentials(cache)
-					if err := persistLocked(); err == nil {
-						os.Remove(legacy)
-					}
-					cacheLoaded = true
-					return nil
-				}
-				// Try opencode flat format.
-				if e2 := json.Unmarshal(legacyData, &cache); e2 == nil {
-					mergeOpencodeCredentials(cache)
-					if err := persistLocked(); err == nil {
-						os.Remove(legacy)
-					}
-					cacheLoaded = true
-					return nil
-				}
-			}
-		}
-		// No existing file anywhere — seed with opencode credentials (if any).
+		// File doesn't exist yet — seed with opencode credentials (if any).
 		mergeOpencodeCredentials(cache)
 		cacheLoaded = true
 		// Write the empty seed file so the path is materialised on disk.

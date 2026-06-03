@@ -65,6 +65,7 @@ func skillSearchPaths() []string {
 	home, err := os.UserHomeDir()
 	if err == nil {
 		paths = append(paths, filepath.Join(home, ".config", "opencode", "skills"))
+		paths = append(paths, filepath.Join(home, ".agents", "skills"))
 	}
 
 	cwd, err := os.Getwd()

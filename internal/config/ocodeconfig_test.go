@@ -346,6 +346,79 @@ func TestSaveOcodePermissionsPersistsAcrossNextSession(t *testing.T) {
 	}
 }
 
+// TestSaveOcodePermissionsPreservesAutoModelAndGrants reproduces the
+// "permission model keeps getting erased" bug: a session whose in-memory
+// permissions (e.g. from ExportConfig) carry no auto.model/grants must not
+// erase those fields already on disk when it persists.
+func TestSaveOcodePermissionsPreservesAutoModelAndGrants(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	chdirTempForConfigTest(t)
+
+	// Disk already has a configured model + a grant (set by another session).
+	onDisk := defaultPermissionConfig()
+	onDisk.Auto.Model = "opencode/deepseek-v4-flash-free"
+	onDisk.Auto.Grants = []AutoGrant{{Kind: "tool", Tool: "bash"}}
+	if err := SaveOcodePermissions(onDisk); err != nil {
+		t.Fatalf("seed SaveOcodePermissions failed: %v", err)
+	}
+
+	// A stale session persists permissions carrying only enabled (model empty,
+	// grants nil) — exactly what ExportConfig produces.
+	stale := defaultPermissionConfig()
+	stale.Auto = &AutoPermissionConfig{Enabled: true}
+	if err := SaveOcodePermissions(stale); err != nil {
+		t.Fatalf("stale SaveOcodePermissions failed: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if got := cfg.Ocode.Permissions.Auto.Model; got != "opencode/deepseek-v4-flash-free" {
+		t.Fatalf("auto.model erased: got %q", got)
+	}
+	if len(cfg.Ocode.Permissions.Auto.Grants) != 1 {
+		t.Fatalf("auto.grants erased: got %#v", cfg.Ocode.Permissions.Auto.Grants)
+	}
+	if !cfg.Ocode.Permissions.Auto.Enabled {
+		t.Fatalf("caller's enabled=true not applied")
+	}
+}
+
+// TestSaveAutoPermissionEnabledKeepsOtherFields proves the targeted enabled
+// writer used by --permission-mode does not clobber model/grants/tool rules.
+func TestSaveAutoPermissionEnabledKeepsOtherFields(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	chdirTempForConfigTest(t)
+
+	seed := defaultPermissionConfig()
+	seed.Auto.Model = "opencode/deepseek-v4-flash-free"
+	seed.Tools["bash"] = "allow"
+	if err := SaveOcodePermissions(seed); err != nil {
+		t.Fatalf("seed failed: %v", err)
+	}
+
+	if err := SaveAutoPermissionEnabled(true); err != nil {
+		t.Fatalf("SaveAutoPermissionEnabled failed: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if !cfg.Ocode.Permissions.Auto.Enabled {
+		t.Fatalf("enabled not persisted")
+	}
+	if got := cfg.Ocode.Permissions.Auto.Model; got != "opencode/deepseek-v4-flash-free" {
+		t.Fatalf("model erased by enabled write: got %q", got)
+	}
+	if got := cfg.Ocode.Permissions.Tools["bash"]; got != "allow" {
+		t.Fatalf("tool rule erased by enabled write: got %q", got)
+	}
+}
+
 func TestSaveEditorMode(t *testing.T) {
 	chdirTempForConfigTest(t)
 

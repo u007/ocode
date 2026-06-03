@@ -577,7 +577,57 @@ func SaveOcodePermissions(permissions PermissionConfig) error {
 	if err != nil {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
+	// Preserve the on-disk auto-permission block (model, grants, context
+	// limits) when persisting permissions. ExportConfig only carries
+	// `enabled`; model/grants/limits are owned elsewhere and would otherwise
+	// be erased here by a session whose in-memory snapshot predates them (or a
+	// concurrent session). The caller is authoritative only for `enabled` and,
+	// when explicitly set, `model`.
+	if permissions.Auto != nil && cfg.Permissions.Auto != nil {
+		merged := *cfg.Permissions.Auto
+		merged.Enabled = permissions.Auto.Enabled
+		if permissions.Auto.Model != "" {
+			merged.Model = permissions.Auto.Model
+		}
+		if permissions.Auto.Grants != nil {
+			merged.Grants = permissions.Auto.Grants
+		}
+		permissions.Auto = &merged
+	}
 	cfg.Permissions = permissions
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveAutoPermissionEnabled persists only the auto-permission `enabled` flag
+// using load-modify-write, so it cannot clobber a concurrent session's
+// model/grants/tool rules the way a wholesale config write would.
+func SaveAutoPermissionEnabled(enabled bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if cfg.Permissions.Auto == nil {
+		cfg.Permissions.Auto = &AutoPermissionConfig{}
+	}
+	cfg.Permissions.Auto.Enabled = enabled
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveExtraAllowedPath appends one cleaned path to extra_allowed_paths using
+// load-modify-write (no-op if already present), avoiding a wholesale config
+// write that would drop concurrent changes to other fields.
+func SaveExtraAllowedPath(path string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cleaned := filepath.Clean(path)
+	for _, existing := range cfg.ExtraAllowedPaths {
+		if filepath.Clean(existing) == cleaned {
+			return nil
+		}
+	}
+	cfg.ExtraAllowedPaths = append(cfg.ExtraAllowedPaths, cleaned)
 	return SaveOcodeConfig(cfg)
 }
 

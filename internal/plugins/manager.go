@@ -136,6 +136,7 @@ func InstallGit(rawURL, pluginsRoot, ref string) (Plugin, string, error) {
 	}
 	abs, err := filepath.Abs(destDir)
 	if err != nil {
+		_ = os.RemoveAll(destDir)
 		return Plugin{}, "", fmt.Errorf("resolve clone dir: %w", err)
 	}
 	return p, abs, nil
@@ -198,16 +199,13 @@ func RunOnInstall(pluginDir string, p Plugin) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("on_install failed: %w\n%s", err, out.String())
 	}
-	if out.Len() > 0 {
-		log.Printf("plugin on_install output for %s:\n%s", p.Name, strings.TrimRight(out.String(), "\n"))
-	}
+	log.Printf("plugin on_install %s: %s", p.Name, out.String())
 	return nil
 }
 
-// AutoRegisterMCP writes a local MCP server entry to ocode config when the
-// plugin declares mcp.auto_register = true.
+// AutoRegisterMCP adds the plugin's MCP server config to ocode config if configured.
 func AutoRegisterMCP(pluginDir string, p Plugin) error {
-	if p.MCP == nil || !p.MCP.AutoRegister || p.MCP.Server == "" || len(p.MCP.Command) == 0 {
+	if p.MCP == nil || !p.MCP.AutoRegister || len(p.MCP.Command) == 0 {
 		return nil
 	}
 	abs, err := filepath.Abs(pluginDir)
@@ -218,12 +216,12 @@ func AutoRegisterMCP(pluginDir string, p Plugin) error {
 	for i, tok := range p.MCP.Command {
 		cmd[i] = strings.ReplaceAll(tok, "{plugin_dir}", abs)
 	}
-	server := config.MCPConfig{
+	cfg := config.MCPConfig{
 		Type:    "local",
 		Command: cmd,
 		Enabled: true,
 	}
-	return config.SaveMCPServer(p.MCP.Server, server)
+	return config.SaveMCPServer(p.MCP.Server, cfg)
 }
 
 // UnregisterMCP removes the auto-registered MCP server from ocode config.

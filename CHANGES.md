@@ -10,6 +10,9 @@
 ### Changed
 - **README.md** — Added "Why ocode?" section highlighting lightweight design, auto-permissions, and extensibility. Added link to CONTRIBUTING.md in Quick Start. Added Support section with links to issue tracker and OpenCode Go plan.
 
+### Security
+- **Exfiltration-Risk Detection for URL-Calling Commands** — `IsHarmfulBashCommand()` now detects data exfiltration risk in `curl`, `wget`, `httpie`, and `netcat` commands. Commands that could leak secrets (file upload via `-d @file`, `-F file=@secret`, `--upload-file`; env var injection via `-H "Auth: $TOKEN"`; subshell expansion `$(cat .env)`; proxy/config redirects) are flagged as **harmful** — they always require human approval and cannot be persisted as "always allow". Benign usage like `curl https://api.example.com/get` is not affected. Covers 4 detection categories across 4 tools with ~50 test cases.
+
 ## [Unreleased] — 2026-06-02
 
 ### Added

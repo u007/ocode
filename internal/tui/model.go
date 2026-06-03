@@ -184,11 +184,6 @@ type shellFinishedMsg struct {
 	err        error
 }
 
-type cmdFinishedMsg struct {
-	msgs []agent.Message
-	err  error
-}
-
 type connectOAuthFinishedMsg struct {
 	provider string
 	cred     auth.Credential
@@ -274,6 +269,7 @@ type skillsOutputMsg struct{ text string }
 type pluginInstalledMsg struct {
 	name   string
 	source string
+	ref    string
 	dir    string
 	err    error
 }
@@ -284,8 +280,38 @@ type pluginRemovedMsg struct {
 type pluginInstallPendingMsg struct {
 	p           plugins.Plugin
 	source      string
+	ref         string
 	dirName     string
 	installRoot string
+}
+type pluginUpdateMsg struct {
+	name   string
+	source string
+	ref    string
+}
+type pluginUpdatedMsg struct {
+	name    string
+	source  string
+	dir     string
+	enabled bool
+	err     error
+}
+type pluginSyncMsg struct {
+	name   string
+	source string
+	ref    string
+}
+type pluginSyncedMsg struct {
+	name   string
+	result plugins.SyncStatusResult
+}
+type pluginUpdateAllMsg struct{}
+type pluginUpdateAllDoneMsg struct {
+	results []pluginUpdatedMsg
+}
+type pluginSyncAllMsg struct{}
+type pluginSyncAllDoneMsg struct {
+	results []plugins.SyncStatusResult
 }
 type streamStartedMsg struct{ cancel chan struct{} }
 
@@ -551,6 +577,7 @@ type model struct {
 	agentStripBlocks         []agentStripBlock
 	agentStripRow0           int
 	pendingPluginInstall     *pluginInstallPendingMsg
+	pluginSyncStates         map[string]plugins.SyncStatusResult // cached sync status per plugin name
 	streamStartedAt          time.Time
 	streamEndedAt            time.Time
 	streamTokenEstimate      int       // live character count during streaming for token estimation
@@ -606,6 +633,7 @@ type model struct {
 	lastClickX               int
 	lastClickY               int
 	permButtonRegions        []permButtonRegion
+	permHoverChoice          string // choice of the permission button under the mouse, "" when none
 	cleanupState             *modelCleanupState
 	supervisor               *tool.ProcessSupervisor
 	hookPipeline             *hooks.Pipeline
@@ -1052,6 +1080,7 @@ func newModel(opts ...RunOptions) model {
 	// persist so the choice survives across sessions. The mutation runs
 	// even when no model is configured; later agent construction picks it up.
 	permissionModeChanged := false
+	autoEnabled := false
 	if cfg != nil && o.PermissionMode != "" {
 		switch strings.ToLower(o.PermissionMode) {
 		case "auto":
@@ -1060,6 +1089,7 @@ func newModel(opts ...RunOptions) model {
 			} else {
 				cfg.Ocode.Permissions.Auto.Enabled = true
 			}
+			autoEnabled = true
 			permissionModeChanged = true
 		case "off":
 			if cfg.Ocode.Permissions.Auto == nil {
@@ -1067,13 +1097,17 @@ func newModel(opts ...RunOptions) model {
 			} else {
 				cfg.Ocode.Permissions.Auto.Enabled = false
 			}
+			autoEnabled = false
 			permissionModeChanged = true
 		default:
 			// unknown value: leave config untouched; caller will see a stderr note.
 		}
 	}
 	if permissionModeChanged {
-		_ = config.SaveOcodeConfig(&cfg.Ocode) // best-effort persist
+		// Targeted load-modify-write: persist only auto.enabled so a wholesale
+		// write of this session's startup snapshot can't erase another
+		// session's model/grants/tool rules.
+		_ = config.SaveAutoPermissionEnabled(autoEnabled) // best-effort persist
 	}
 
 	// shouldLoad tracks whether the session ID was explicitly provided
@@ -1798,13 +1832,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				p.Name = filepath.Base(dirName)
 			}
 			if len(p.OnInstall) > 0 {
-				return pluginInstallPendingMsg{p: p, source: source, dirName: dirName, installRoot: installRoot}
+				return pluginInstallPendingMsg{p: p, source: source, ref: ref, dirName: dirName, installRoot: installRoot}
 			}
-			cfg := config.PluginConfig{Source: source, Dir: dirName, Enabled: true}
+			cfg := config.PluginConfig{Source: source, Ref: ref, Dir: dirName, Enabled: true}
 			if saveErr := config.SavePlugin(p.Name, cfg); saveErr != nil {
 				return pluginInstalledMsg{source: source, err: saveErr}
 			}
-			return pluginInstalledMsg{name: p.Name, source: source, dir: dirName}
+			return pluginInstalledMsg{name: p.Name, source: source, ref: ref, dir: dirName}
 		}
 	case pluginInstallPendingMsg:
 		m.pendingPluginInstall = &msg
@@ -1825,7 +1859,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.config.Plugins == nil {
 				m.config.Plugins = map[string]config.PluginConfig{}
 			}
-			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Dir: msg.dir, Enabled: true}
+			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Ref: msg.ref, Dir: msg.dir, Enabled: true}
 			refreshCustomCommands(m.config)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q installed.", msg.name)})
 			m.rerenderTranscriptAndMaybeScroll()
@@ -1877,6 +1911,213 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.rebuildAgentWithExternalTools()
 		}
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case pluginUpdateMsg:
+		name := msg.name
+		cfg, ok := m.config.Plugins[name]
+		if !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
+			return m, nil
+		}
+		source := msg.source
+		if source == "" {
+			source = cfg.Source
+		}
+		ref := msg.ref
+		if ref == "" {
+			ref = cfg.Ref
+		}
+		dir := cfg.Dir
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Updating plugin %q…", name)})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, func() tea.Msg {
+			p, err := plugins.UpdateGit(dir, source, ref)
+			if err != nil {
+				return pluginUpdatedMsg{name: name, source: source, enabled: cfg.Enabled, err: err}
+			}
+			// Persist any manifest changes (name, description, etc.).
+			cfg2 := config.PluginConfig{Source: source, Ref: ref, Dir: dir, Enabled: cfg.Enabled}
+			if saveErr := config.SavePlugin(p.Name, cfg2); saveErr != nil {
+				return pluginUpdatedMsg{name: name, source: source, enabled: cfg.Enabled, err: saveErr}
+			}
+			return pluginUpdatedMsg{name: p.Name, source: source, dir: dir, enabled: cfg.Enabled}
+		}
+	case pluginUpdatedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Update failed: %v", msg.err)})
+		} else {
+			// Update in-memory config to reflect the new state.
+			if m.config.Plugins == nil {
+				m.config.Plugins = map[string]config.PluginConfig{}
+			}
+			// If the plugin name changed on update, remove the old key.
+			// (The update handler already saved under the new name.)
+			for oldName, oldCfg := range m.config.Plugins {
+				if oldCfg.Dir == msg.dir && oldName != msg.name {
+					delete(m.config.Plugins, oldName)
+					_ = config.RemovePlugin(oldName)
+					break
+				}
+			}
+			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Dir: msg.dir, Enabled: msg.enabled}
+			refreshCustomCommands(m.config)
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q updated.", msg.name)})
+			m.rerenderTranscriptAndMaybeScroll()
+			// Clear cached sync state so list refreshes.
+			delete(m.pluginSyncStates, msg.name)
+			return m, m.rebuildAgentWithExternalTools()
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case pluginUpdateAllMsg:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Updating all plugins…"})
+		m.rerenderTranscriptAndMaybeScroll()
+		type updateJob struct {
+			name, source, ref, dir string
+			enabled                bool
+		}
+		var jobs []updateJob
+		for name, cfg := range m.config.Plugins {
+			jobs = append(jobs, updateJob{
+				name:    name,
+				source:  cfg.Source,
+				ref:     cfg.Ref,
+				dir:     cfg.Dir,
+				enabled: cfg.Enabled,
+			})
+		}
+		if len(jobs) == 0 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No plugins installed."})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		}
+		return m, func() tea.Msg {
+			var results []pluginUpdatedMsg
+			for _, j := range jobs {
+				p, err := plugins.UpdateGit(j.dir, j.source, j.ref)
+				if err != nil {
+					results = append(results, pluginUpdatedMsg{name: j.name, source: j.source, enabled: j.enabled, err: err})
+				} else {
+					cfg := config.PluginConfig{Source: j.source, Ref: j.ref, Dir: j.dir, Enabled: j.enabled}
+					if saveErr := config.SavePlugin(p.Name, cfg); saveErr != nil {
+						results = append(results, pluginUpdatedMsg{name: j.name, source: j.source, enabled: j.enabled, err: saveErr})
+					} else {
+						results = append(results, pluginUpdatedMsg{name: p.Name, source: j.source, dir: j.dir, enabled: j.enabled})
+					}
+				}
+			}
+			return pluginUpdateAllDoneMsg{results: results}
+		}
+	case pluginUpdateAllDoneMsg:
+		var text strings.Builder
+		text.WriteString("Plugin update results:\n\n")
+		for _, r := range msg.results {
+			if r.err != nil {
+				text.WriteString(fmt.Sprintf("  ✗ %s — %v\n", r.name, r.err))
+			} else {
+				text.WriteString(fmt.Sprintf("  ✓ %s — updated\n", r.name))
+				// Handle name changes on update.
+				for oldName, oldCfg := range m.config.Plugins {
+					if oldCfg.Dir == r.dir && oldName != r.name {
+						delete(m.config.Plugins, oldName)
+						_ = config.RemovePlugin(oldName)
+						break
+					}
+				}
+				m.config.Plugins[r.name] = config.PluginConfig{Source: r.source, Dir: r.dir, Enabled: r.enabled}
+				refreshCustomCommands(m.config)
+				delete(m.pluginSyncStates, r.name)
+			}
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, m.rebuildAgentWithExternalTools()
+	case pluginSyncMsg:
+		name := msg.name
+		cfg, ok := m.config.Plugins[name]
+		if !ok {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q not found.", name)})
+			return m, nil
+		}
+		source := msg.source
+		if source == "" {
+			source = cfg.Source
+		}
+		ref := msg.ref
+		if ref == "" {
+			ref = cfg.Ref
+		}
+		dir := cfg.Dir
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Checking sync for %q…", name)})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, func() tea.Msg {
+			result := plugins.CheckSync(dir, source, ref)
+			result.Name = name
+			return pluginSyncedMsg{name: name, result: result}
+		}
+	case pluginSyncedMsg:
+		if m.pluginSyncStates == nil {
+			m.pluginSyncStates = make(map[string]plugins.SyncStatusResult)
+		}
+		m.pluginSyncStates[msg.name] = msg.result
+		var text strings.Builder
+		text.WriteString(fmt.Sprintf("Plugin %q: %s\n", msg.name, msg.result.State))
+		text.WriteString(msg.result.Message)
+		m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case pluginSyncAllMsg:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Checking sync for all plugins…"})
+		m.rerenderTranscriptAndMaybeScroll()
+		type syncJob struct {
+			name, source, ref, dir string
+		}
+		var jobs []syncJob
+		for name, cfg := range m.config.Plugins {
+			jobs = append(jobs, syncJob{
+				name:   name,
+				source: cfg.Source,
+				ref:    cfg.Ref,
+				dir:    cfg.Dir,
+			})
+		}
+		return m, func() tea.Msg {
+			var results []plugins.SyncStatusResult
+			for _, j := range jobs {
+				r := plugins.CheckSync(j.dir, j.source, j.ref)
+				r.Name = j.name
+				results = append(results, r)
+			}
+			return pluginSyncAllDoneMsg{results: results}
+		}
+	case pluginSyncAllDoneMsg:
+		if m.pluginSyncStates == nil {
+			m.pluginSyncStates = make(map[string]plugins.SyncStatusResult)
+		}
+		var text strings.Builder
+		text.WriteString("Plugin sync status:\n\n")
+		for _, r := range msg.results {
+			m.pluginSyncStates[r.Name] = r
+			var icon string
+			switch r.State {
+			case plugins.SyncUpToDate:
+				icon = "✓"
+			case plugins.SyncBehind:
+				icon = "↑"
+			case plugins.SyncPinned:
+				icon = "⊠"
+			case plugins.SyncDirty:
+				icon = "⚠"
+			case plugins.SyncError:
+				icon = "✗"
+			default:
+				icon = "?"
+			}
+			text.WriteString(fmt.Sprintf("  %s %s [%s] — %s\n", icon, r.Name, r.State, r.Message))
+		}
+		text.WriteString("\nUse /plugin update <name> to update a plugin.")
+		m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	case ctrlCResetMsg:
@@ -2218,18 +2459,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeTab == tabGit {
 			m.git.statusMsg = "editor closed"
 			return m, m.git.cmdRefresh()
-		}
-	case cmdFinishedMsg:
-		m.markCmdFinished()
-		if msg.err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", msg.err)})
-			m.rerenderTranscriptAndMaybeScroll()
-		} else if len(msg.msgs) > 0 {
-			for _, am := range msg.msgs {
-				m.appendAgentMessage(am)
-			}
-			m.rerenderTranscriptAndMaybeScroll()
-			m.saveSession()
 		}
 	case errorMsg:
 		if msg != nil {
@@ -3191,6 +3420,45 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 	if pressed && m.activeTab == tabFiles {
+		// Handle content search input field focus (click on query/ext line)
+		if m.files.mode == filesModeContentSearch {
+			treeW := m.width * 35 / 100
+			previewLeft := treeW + 2
+			if mouse.X >= previewLeft {
+				previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
+				clickLine := mouse.Y - previewBodyTop
+				if clickLine == 0 {
+					m.files.contentSearchPanel = filesContentSearchQuery
+					return m, nil, true
+				}
+				if clickLine == 1 {
+					m.files.contentSearchPanel = filesContentSearchExtFilter
+					return m, nil, true
+				}
+				if clickLine == 2 {
+					m.files.contentSearchIncludeIgnored = !m.files.contentSearchIncludeIgnored
+					return m, nil, true
+				}
+			}
+		}
+		// Handle content search result click
+		if m.files.mode == filesModeContentSearch && m.files.contentSearchDone && len(m.files.contentSearchResults) > 0 {
+			treeW := m.width * 35 / 100
+			previewLeft := treeW + 2
+			previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
+			if mouse.X >= previewLeft && mouse.Y >= previewBodyTop {
+				// Calculate which result was clicked
+				clickIndex := mouse.Y - previewBodyTop
+				// Adjust for header lines in the content view (query, ext, hints, blank)
+				headerLines := 5 // query, ext, ignore toggle, blank, hint
+				resultIndex := clickIndex - headerLines
+				if resultIndex >= 0 && resultIndex < len(m.files.contentSearchResults) {
+					m.files.contentSearchCursor = resultIndex
+					m.files.navigateToSearchResult(m.files.contentSearchResults[resultIndex])
+					return m, nil, true
+				}
+			}
+		}
 		// Handle tree panel click — select/open file or toggle directory
 		if idx, ok := m.files.treeNodeForClick(mouse, appHeaderHeight); ok {
 			n := m.files.nodes[idx]
@@ -3313,10 +3581,29 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
-			// Simple click (no drag): try to open a file at the click position.
+			// Simple click (no drag): try to open a file at the click position,
+			// or cycle the permission mode if clicking the Allowed header.
 			if path, ok := m.sidebarFileForClick(mouse); ok {
 				m.sidebarSel = selectionState{}
 				return m, openSidebarFileInEditor(path), true
+			}
+			if m.sidebarAllowedHeaderForClick(mouse) && m.agent != nil {
+				perm := m.agent.Permissions()
+				// Cycle: normal → normal·auto → yolo → locked → normal
+				switch {
+				case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
+					perm.SetAutoPermissionEnabled(true)
+				case perm.Mode() == agent.PermissionModeNormal && perm.AutoPermissionEnabled():
+					perm.SetAutoPermissionEnabled(false)
+					perm.SetMode(agent.PermissionModeYOLO)
+				case perm.Mode() == agent.PermissionModeYOLO:
+					perm.SetMode(agent.PermissionModeLocked)
+				default:
+					perm.SetMode(agent.PermissionModeNormal)
+				}
+				m.persistPermissions()
+				m.sidebarSel = selectionState{}
+				return m, nil, true
 			}
 			m.sidebarSel = selectionState{}
 		}
@@ -3342,6 +3629,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	}
 
 	if pressed && m.showPermDialog {
+		// Recompute regions to match the current layout before hit-testing.
+		// The dialog can be opened from several paths; computing here (outside
+		// the render cycle) keeps the buttons clickable without each opener
+		// having to remember to sync, and avoids the render→geometry recursion.
+		m.updatePermButtonRegions()
 		for _, btn := range m.permButtonRegions {
 			if mouse.Y >= btn.y1 && mouse.Y <= btn.y2 && mouse.X >= btn.x1 && mouse.X <= btn.x2 {
 				cmd, closed := m.permDialogInput(btn.choice)
@@ -3516,6 +3808,21 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	if mouse.Button != tea.MouseLeft {
+		// Plain hover (no button) over the permission dialog: highlight the button
+		// under the cursor so the clickable target is obvious. Requires
+		// MouseModeAllMotion (CellMotion delivers no no-button motion).
+		if m.showPermDialog {
+			m.updatePermButtonRegions()
+			prev := m.permHoverChoice
+			m.permHoverChoice = ""
+			for _, btn := range m.permButtonRegions {
+				if mouse.Y >= btn.y1 && mouse.Y <= btn.y2 && mouse.X >= btn.x1 && mouse.X <= btn.x2 {
+					m.permHoverChoice = btn.choice
+					break
+				}
+			}
+			return m, nil, m.permHoverChoice != prev
+		}
 		// Plain hover (no button): underline the clickable sidebar file path
 		// under the cursor. Requires MouseModeAllMotion (CellMotion delivers no
 		// no-button motion), so this must run before the MouseLeft drag guard.
@@ -3837,7 +4144,6 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 			m.agent.ResetSubagentDispatch()
 		}
 		m.rerenderTranscriptAndMaybeScroll()
-		m.markCmdStarted()
 		return m, m.sendCustomCommandPrompt(prompt)
 	} else if agentName := strings.TrimPrefix(cmd, "/"); func() bool {
 		// Hidden agents (title, compaction) drive runtime helpers and must not be
@@ -3853,7 +4159,6 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 				m.agent.ResetSubagentDispatch()
 			}
 			m.rerenderTranscriptAndMaybeScroll()
-			m.markCmdStarted()
 			return m, m.askAgent()
 		} else {
 			// No extra args — show the agent description as a prompt header
@@ -4028,6 +4333,39 @@ func (m model) renderPluginList() string {
 		// Source
 		b.WriteString(fmt.Sprintf("    Source: %s\n", cfg.Source))
 
+		// Ref (if pinned)
+		if cfg.Ref != "" {
+			b.WriteString(fmt.Sprintf("    Ref: %s\n", cfg.Ref))
+		}
+
+		// Local commit hash
+		localHash := plugins.CurrentCommitHash(cfg.Dir)
+		if localHash != "" {
+			b.WriteString(fmt.Sprintf("    Commit: %s\n", localHash))
+		}
+
+		// Sync status (from cache)
+		if m.pluginSyncStates != nil {
+			if sync, ok := m.pluginSyncStates[name]; ok {
+				var syncIcon string
+				switch sync.State {
+				case plugins.SyncUpToDate:
+					syncIcon = "✓"
+				case plugins.SyncBehind:
+					syncIcon = "↑"
+				case plugins.SyncPinned:
+					syncIcon = "⊠"
+				case plugins.SyncDirty:
+					syncIcon = "⚠"
+				case plugins.SyncError:
+					syncIcon = "✗"
+				default:
+					syncIcon = "?"
+				}
+				b.WriteString(fmt.Sprintf("    Sync: %s %s — %s\n", syncIcon, sync.State, sync.Message))
+			}
+		}
+
 		// Tool and command counts
 		toolCount := len(meta.Tools)
 		cmdCount := len(meta.Commands)
@@ -4053,7 +4391,13 @@ func (m model) renderPluginList() string {
 	// Summary footer
 	b.WriteString(fmt.Sprintf("Total: %d plugin(s) (%d enabled, %d disabled)\n",
 		enabledCount+disabledCount, enabledCount, disabledCount))
-	b.WriteString("\nCommands: /plugin enable/disable <name>, /plugin info <name>, /plugin install <url>, /plugin remove <name>")
+	b.WriteString("\nCommands:\n")
+	b.WriteString("  /plugin install <url[@ref]>  — install a plugin\n")
+	b.WriteString("  /plugin remove <name>        — remove a plugin\n")
+	b.WriteString("  /plugin enable/disable <name> — toggle plugin\n")
+	b.WriteString("  /plugin info <name>          — show plugin details\n")
+	b.WriteString("  /plugin sync [name]          — check sync status\n")
+	b.WriteString("  /plugin update [name]        — update plugin(s)\n")
 	return strings.TrimRight(builtins.String()+b.String(), "\n")
 }
 
@@ -4891,7 +5235,6 @@ func (m *model) handleInitCmd(args []string) tea.Cmd {
 		m.agent.ResetSubagentDispatch()
 	}
 	m.rerenderTranscriptAndMaybeScroll()
-	m.markCmdStarted()
 	return m.sendCustomCommandPrompt(prompt)
 }
 
@@ -5518,18 +5861,18 @@ func (m model) prepareAgentMessages(msgs []agent.Message) []agent.Message {
 }
 
 func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
-	return func() tea.Msg {
-		if m.agent == nil {
-			return cmdFinishedMsg{err: fmt.Errorf("no agent configured")}
-		}
-		agentMsgs := []agent.Message{{Role: "user", Content: prompt}}
-		agentMsgs = m.prepareAgentMessages(agentMsgs)
-		resp, err := m.agent.Step(agentMsgs)
-		if err != nil {
-			return cmdFinishedMsg{err: err}
-		}
-		return cmdFinishedMsg{msgs: resp}
+	if m.agent == nil {
+		return func() tea.Msg { return errorMsg(fmt.Errorf("no agent configured")) }
 	}
+	// Reset any prior Escape/Cancel so this command isn't short-circuited, then
+	// stream the response live through the same path normal messages use —
+	// previously this ran the whole multi-step loop synchronously and only
+	// rendered anything once the entire run finished, so long commands (e.g.
+	// /review-changes) left the chat frozen for minutes.
+	m.agent.ResetCancellation()
+	agentMsgs := []agent.Message{{Role: "user", Content: prompt}}
+	agentMsgs = m.prepareAgentMessages(agentMsgs)
+	return m.streamStep(agentMsgs)
 }
 
 func (m *model) handleUndoCmd(args []string) {
@@ -6093,7 +6436,9 @@ func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
 		}
 	}
 	m.config.Ocode.ExtraAllowedPaths = append(m.config.Ocode.ExtraAllowedPaths, cleaned)
-	if err := config.SaveOcodeConfig(&m.config.Ocode); err != nil {
+	// Targeted load-modify-write: append only this path so we don't write this
+	// session's stale snapshot over another session's permission changes.
+	if err := config.SaveExtraAllowedPath(cleaned); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save extra_allowed_paths: %v", err)})
 	}
 }
@@ -6232,6 +6577,17 @@ func (m *model) askAgent() tea.Cmd {
 		}
 	}
 
+	return m.streamStep(agentMsgs)
+}
+
+// streamStep runs a prepared agent message set through the agent loop in a
+// goroutine, streaming every assistant/tool message into the chat as it is
+// produced and rendering reasoning deltas live (streamStartedMsg flips
+// m.streaming, which applyThinkingDelta requires). Both the normal message
+// path (askAgent) and custom slash commands (sendCustomCommandPrompt) funnel
+// through here so they share identical streaming, activity-row, and
+// error-surfacing behaviour.
+func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 	cancel := make(chan struct{})
 	ch := make(chan agent.Message, 16)
 	errCh := make(chan error, 1)
@@ -6465,6 +6821,14 @@ func (m *model) renderPalette() string {
 
 var permBtnStyle = lipgloss.NewStyle().Bold(true).Padding(0, 1).Border(lipgloss.RoundedBorder())
 
+// permBtnHoverStyle highlights the button under the mouse. It must keep the same
+// border + padding (and therefore the same width/height) as permBtnStyle so the
+// precomputed permButtonRegions stay aligned when a button is hovered.
+var permBtnHoverStyle = permBtnStyle.
+	Foreground(lipgloss.Color("0")).
+	Background(lipgloss.Color("12")).
+	BorderForeground(lipgloss.Color("12"))
+
 type permBtnDef struct {
 	label  string
 	choice string
@@ -6546,8 +6910,15 @@ func (m *model) syncPermViewport(contentWidth int) {
 	}
 	prevYOffset := m.permViewport.YOffset()
 	m.permViewport.SetWidth(contentWidth)
-	m.permViewport.SetHeight(permissionDialogMaxBodyLines)
 	m.permViewport.SetContent(body)
+	// Size the viewport to its wrapped content height (capped at the max) so the
+	// rendered body fills exactly that many rows with no padding gap below the
+	// text. viewport.View() pads/truncates to viewport.Height(), so keeping the
+	// height equal to the real content height is what makes the on-screen body
+	// height match what updatePermButtonRegions uses to place the clickable
+	// button regions — otherwise the buttons render below their hit-test rows.
+	bodyHeight := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render(body))
+	m.permViewport.SetHeight(min(max(1, bodyHeight), permissionDialogMaxBodyLines))
 	m.permViewport.SetYOffset(prevYOffset)
 }
 
@@ -6565,7 +6936,11 @@ func (m *model) renderPermissionDialog(width int) string {
 
 	var btnParts []string
 	for _, b := range m.permDialogBtnDefs() {
-		btnParts = append(btnParts, permBtnStyle.Render(b.label+" "+b.desc))
+		style := permBtnStyle
+		if b.choice == m.permHoverChoice {
+			style = permBtnHoverStyle
+		}
+		btnParts = append(btnParts, style.Render(b.label+" "+b.desc))
 	}
 	buttonRow := lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
 		lipgloss.JoinHorizontal(lipgloss.Top, btnParts...),
@@ -6603,12 +6978,18 @@ func (m *model) renderPermissionDialog(width int) string {
 func (m *model) updatePermButtonRegions() {
 	if !m.showPermDialog {
 		m.permButtonRegions = nil
+		m.permHoverChoice = ""
 		return
 	}
 
 	contentWidth := max(0, m.panelWidth()-4)
 	m.syncPermViewport(contentWidth)
-	visibleBodyLines := m.permViewport.VisibleLineCount()
+	// Use the viewport's height, not VisibleLineCount: viewport.View() pads/
+	// truncates the body to exactly Height() rows, so that is the body's true
+	// on-screen height. VisibleLineCount() returns the unpadded content count,
+	// which under-counts when the body is short and pushes the hit-test rows
+	// above the rendered buttons.
+	visibleBodyLines := m.permViewport.Height()
 
 	// Top border + header(1) + blank(1) + body + blank(1)
 	buttonTopY := m.inputAreaTopY() + 4 + visibleBodyLines
@@ -8338,10 +8719,11 @@ type sidebarTelemetry struct {
 }
 
 type sidebarRenderData struct {
-	topLines            []string
-	scrollLines         []string
-	bottomLines         []string
-	fileScrollLinePaths map[int]string
+	topLines               []string
+	scrollLines            []string
+	bottomLines            []string
+	fileScrollLinePaths    map[int]string
+	allowedHeaderBottomIdx int // index in bottomLines of the Allowed header, -1 if absent
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -8599,7 +8981,7 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -8788,52 +9170,53 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		appendScrollSection("TODO", renderSidebarTodo(todo, boxBodyWidth), nil)
 	}
 
-		// ── Allowed section ──
-		if m.agent != nil {
-			perm := m.agent.Permissions()
-			mode := perm.Mode()
-			modeLabel := string(mode)
-			if perm.AutoPermissionEnabled() && mode == agent.PermissionModeNormal {
-				modeLabel += " · auto"
-			}
-			allowedBody := []string{sidebarSectionStyle.Render("Allowed") + "  " + dimStyle.Render("Mode: ") + sidebarAccentStyle.Render(modeLabel)}
+	// ── Allowed section ──
+	if m.agent != nil {
+		perm := m.agent.Permissions()
+		mode := perm.Mode()
+		modeLabel := string(mode)
+		if perm.AutoPermissionEnabled() && mode == agent.PermissionModeNormal {
+			modeLabel += " · auto"
+		}
+		allowedBody := []string{sidebarSectionStyle.Render("Allowed") + "  " + dimStyle.Render("Mode: ") + sidebarAccentStyle.Render(modeLabel)}
 
-			extraPaths := m.config.Ocode.ExtraAllowedPaths
-			if len(extraPaths) > 0 {
-				allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Extra paths (%d):", len(extraPaths))))
-				const maxLines = 3
-				joined := strings.Join(extraPaths, ", ")
-				wrapped := strings.Split(ansi.Hardwrap(joined, outerBodyWidth-2, false), "\n")
-				for i, line := range wrapped {
-					if i >= maxLines {
-						remaining := len(wrapped) - i
-						allowedBody = append(allowedBody, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
-						break
-					}
-					allowedBody = append(allowedBody, "  "+sidebarTextStyle.Render(line))
+		extraPaths := m.config.Ocode.ExtraAllowedPaths
+		if len(extraPaths) > 0 {
+			allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Extra paths (%d):", len(extraPaths))))
+			const maxLines = 3
+			joined := strings.Join(extraPaths, ", ")
+			wrapped := strings.Split(ansi.Hardwrap(joined, outerBodyWidth-2, false), "\n")
+			for i, line := range wrapped {
+				if i >= maxLines {
+					remaining := len(wrapped) - i
+					allowedBody = append(allowedBody, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
+					break
 				}
-			}
-
-			autoAllow := perm.ExtraBashAutoAllowPrefixes()
-			if len(autoAllow) > 0 {
-				allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Bash (%d):", len(autoAllow))))
-				const maxLines = 3
-				joined := strings.Join(autoAllow, ", ")
-				wrapped := strings.Split(ansi.Hardwrap(joined, outerBodyWidth-2, false), "\n")
-				for i, line := range wrapped {
-					if i >= maxLines {
-						remaining := len(wrapped) - i
-						allowedBody = append(allowedBody, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
-						break
-					}
-					allowedBody = append(allowedBody, "  "+sidebarTextStyle.Render(line))
-				}
-			}
-
-			for _, line := range allowedBody {
-				appendWrapped(&data.bottomLines, line, outerBodyWidth)
+				allowedBody = append(allowedBody, "  "+sidebarTextStyle.Render(line))
 			}
 		}
+
+		autoAllow := perm.ExtraBashAutoAllowPrefixes()
+		if len(autoAllow) > 0 {
+			allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Bash (%d):", len(autoAllow))))
+			const maxLines = 3
+			joined := strings.Join(autoAllow, ", ")
+			wrapped := strings.Split(ansi.Hardwrap(joined, outerBodyWidth-2, false), "\n")
+			for i, line := range wrapped {
+				if i >= maxLines {
+					remaining := len(wrapped) - i
+					allowedBody = append(allowedBody, "  "+dimStyle.Render(fmt.Sprintf("+%d more", remaining)))
+					break
+				}
+				allowedBody = append(allowedBody, "  "+sidebarTextStyle.Render(line))
+			}
+		}
+
+		data.allowedHeaderBottomIdx = len(data.bottomLines)
+		for _, line := range allowedBody {
+			appendWrapped(&data.bottomLines, line, outerBodyWidth)
+		}
+	}
 
 	// ── MCP + LSP on one line ──
 	mcpLine := "MCP: " + m.renderMCPStatus()
@@ -8978,6 +9361,53 @@ func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) 
 	return available
 }
 
+// sidebarScreenLayout describes where the composed sidebar sections actually
+// land on screen AFTER renderSidebar's overflow trimming. When the composed
+// height (topLines + scroll box + bottomLines) exceeds the available content
+// height, renderSidebar calls constrainViewPreservingBottom, which keeps the
+// pinned bottom lines and trims rows from the middle (the scroll box, then the
+// top lines). Hit-tests must mirror that trimming or the clickable rows drift
+// above where the sections render — the "have to click N lines up" bug.
+type sidebarScreenLayout struct {
+	contentTopY   int // screen Y of the first composed (sections) row
+	topCount      int // top lines actually rendered
+	scrollCount   int // scroll-box rows actually rendered
+	scrollScreenY int // screen Y of the first scroll-box row
+	bottomScreenY int // screen Y of the first pinned bottom line
+}
+
+func (m model) sidebarScreenLayout(data sidebarRenderData) sidebarScreenLayout {
+	headerHeight := m.sidebarHeaderHeight()
+	effectiveHeaderHeight := maxInt(1, headerHeight)
+	// First sections row sits below the app header, the sidebar's top border, and
+	// the sidebar header line(s) — the same Y renderSidebar composes from.
+	contentTopY := appHeaderHeight + 1 + effectiveHeaderHeight
+	contentHeight := maxInt(1, m.height-2-effectiveHeaderHeight)
+	visibleScroll := m.sidebarVisibleScrollLines(data, headerHeight)
+	top := len(data.topLines)
+	bottom := len(data.bottomLines)
+
+	topCount, scrollCount := top, visibleScroll
+	if top+visibleScroll+bottom > contentHeight {
+		// Mirror constrainViewPreservingBottom: keep `keepTop` rows of the
+		// (topLines + scroll box) region, then the pinned bottom lines.
+		keepTop := maxInt(0, contentHeight-bottom)
+		if keepTop >= top {
+			scrollCount = keepTop - top
+		} else {
+			topCount = keepTop
+			scrollCount = 0
+		}
+	}
+	return sidebarScreenLayout{
+		contentTopY:   contentTopY,
+		topCount:      topCount,
+		scrollCount:   scrollCount,
+		scrollScreenY: contentTopY + topCount,
+		bottomScreenY: contentTopY + topCount + scrollCount,
+	}
+}
+
 // sidebarVisibleScrollLines returns the number of scroll lines actually rendered
 // in the sidebar. This matches the logic in renderSidebar for consistent hit-testing.
 func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight int) int {
@@ -9119,28 +9549,36 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 	}
 
 	data := m.buildSidebarRenderData()
-	headerHeight := m.sidebarHeaderHeight()
-	// User requested: no border/padding on scroll sections (2026-05-25)
-	// The sidebar is rendered below the app header (appHeaderHeight rows) and
-	// inside a bordered box, so the first scroll line lives at:
-	//   screen-Y = appHeaderHeight + sidebarBorder(1) + sidebarHeader
-	//             + len(data.topLines) [+1 when no session title]
-	// mouse.Y is a screen-Y, so we add appHeaderHeight before the bounds check.
-	boxTop := appHeaderHeight + 1 + headerHeight + len(data.topLines)
-	// Account for leading empty line when header is empty
-	if headerHeight == 0 {
-		boxTop++
-	}
-	contentTop := boxTop
-	visible := m.sidebarVisibleScrollLines(data, headerHeight)
-	if mouse.Y < contentTop || mouse.Y >= contentTop+visible {
+	// Use the rendered layout (which mirrors renderSidebar's overflow trimming)
+	// so the scroll-box bounds match the rows actually painted. mouse.Y is a
+	// screen-Y; sidebarScreenLayout already accounts for the app header and the
+	// sidebar's top border + header line(s).
+	layout := m.sidebarScreenLayout(data)
+	if mouse.Y < layout.scrollScreenY || mouse.Y >= layout.scrollScreenY+layout.scrollCount {
 		return "", false
 	}
-	scrollLine := m.sidebarScroll + (mouse.Y - contentTop)
+	scrollLine := m.sidebarScroll + (mouse.Y - layout.scrollScreenY)
 	if path, ok := data.fileScrollLinePaths[scrollLine]; ok {
 		return path, true
 	}
 	return "", false
+}
+
+// sidebarAllowedHeaderForClick returns true when the click lands on the
+// "Allowed" section header line in the pinned bottom area of the sidebar.
+func (m model) sidebarAllowedHeaderForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.allowedHeaderBottomIdx < 0 {
+		return false
+	}
+	// bottomScreenY already accounts for overflow trimming of the scroll box, so
+	// the Allowed header lands on the row it actually renders on.
+	layout := m.sidebarScreenLayout(data)
+	allowedY := layout.bottomScreenY + data.allowedHeaderBottomIdx
+	return mouse.Y == allowedY
 }
 
 func (m model) tabForClick(mouse tea.Mouse) (int, bool) {

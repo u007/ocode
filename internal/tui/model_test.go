@@ -156,10 +156,36 @@ func TestCommandRunningCounterTracksOverlappingCompletions(t *testing.T) {
 		t.Fatal("expected command-running state to remain active after first completion")
 	}
 
-	updated, _ = got.Update(cmdFinishedMsg{})
+	updated, _ = got.Update(shellFinishedMsg{command: "echo two", output: "two\n", toolCallID: "shell-2"})
 	got = updated.(model)
 	if got.cmdRunning() {
 		t.Fatal("expected command-running state to clear after all completions")
+	}
+}
+
+func TestPluginUpdateRenamedEntryIsPreservedInMemory(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	m := model{
+		config: &config.Config{
+			Plugins: map[string]config.PluginConfig{
+				"old-name": {Source: "source", Dir: "/tmp/plugin", Enabled: true},
+			},
+		},
+	}
+
+	updated, _ := m.Update(pluginUpdatedMsg{name: "new-name", source: "source", dir: "/tmp/plugin", enabled: true})
+	got := updated.(model)
+	if _, ok := got.config.Plugins["old-name"]; ok {
+		t.Fatal("old plugin name still present after rename")
+	}
+	cfg, ok := got.config.Plugins["new-name"]
+	if !ok {
+		t.Fatal("renamed plugin missing from in-memory config")
+	}
+	if !cfg.Enabled {
+		t.Fatal("renamed plugin lost enabled state")
 	}
 }
 

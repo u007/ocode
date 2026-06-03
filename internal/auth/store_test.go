@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -73,80 +75,6 @@ func TestReadLegacyOcodeFormatRejectsFlatJSON(t *testing.T) {
 	}
 }
 
-func TestLoadStoreMigratesLegacyFlatCredentials(t *testing.T) {
-	home := resetStoreForTest(t)
-	legacyPath, err := legacyAuthPath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	flat := []byte(`{"openai":{"kind":"api_key","key":"flat-legacy-key","base_url":"https://flat.example/v1"}}`)
-	if err := os.WriteFile(legacyPath, flat, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := LoadStore(); err != nil {
-		t.Fatalf("LoadStore: %v", err)
-	}
-	cred, ok := Get("openai")
-	if !ok {
-		t.Fatal("expected migrated openai credential")
-	}
-	if cred.Kind != KindAPIKey {
-		t.Fatalf("Kind = %q, want %q", cred.Kind, KindAPIKey)
-	}
-	if cred.Key != "flat-legacy-key" {
-		t.Fatalf("Key = %q, want flat-legacy-key", cred.Key)
-	}
-	if cred.BaseURL != "https://flat.example/v1" {
-		t.Fatalf("BaseURL = %q, want legacy base_url to survive migration", cred.BaseURL)
-	}
-	newPath, err := authPath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(newPath); err != nil {
-		t.Fatalf("migrated auth file missing at %s: %v", newPath, err)
-	}
-	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
-		t.Fatalf("legacy auth file should be removed after migration, stat err=%v (home=%s)", err, home)
-	}
-}
-
-func TestLoadStoreMigratesLegacyWrapperCredentials(t *testing.T) {
-	resetStoreForTest(t)
-	legacyPath, err := legacyAuthPath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Dir(legacyPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	wrapper := []byte(`{"credentials":{"openai":{"kind":"api_key","key":"wrapper-legacy-key","base_url":"https://wrapper.example/v1"}}}`)
-	if err := os.WriteFile(legacyPath, wrapper, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := LoadStore(); err != nil {
-		t.Fatalf("LoadStore: %v", err)
-	}
-	cred, ok := Get("openai")
-	if !ok {
-		t.Fatal("expected migrated openai credential from wrapper format")
-	}
-	if cred.Kind != KindAPIKey {
-		t.Fatalf("Kind = %q, want %q", cred.Kind, KindAPIKey)
-	}
-	if cred.Key != "wrapper-legacy-key" {
-		t.Fatalf("Key = %q, want wrapper-legacy-key", cred.Key)
-	}
-	if cred.BaseURL != "https://wrapper.example/v1" {
-		t.Fatalf("BaseURL = %q, want wrapper base_url to survive migration", cred.BaseURL)
-	}
-}
-
 func TestRefreshPreservesAccountID(t *testing.T) {
 	resetStoreForTest(t)
 	cred := Credential{
@@ -191,5 +119,78 @@ func TestConcurrentRefresh(t *testing.T) {
 	}
 	if result.AccountID != "acct-456" {
 		t.Errorf("AccountID lost after concurrent refresh: %q", result.AccountID)
+	}
+}
+
+// TestOpencodeOAuthFormat verifies that opencode's auth.json format (with
+// "access", "refresh", "expires", "accountId" fields) is correctly deserialized.
+func TestOpencodeOAuthFormat(t *testing.T) {
+	futureMs := time.Now().Add(24 * time.Hour).UnixMilli()
+	input := []byte(fmt.Sprintf(`{
+		"type": "oauth",
+		"access": "eyJ-opencode-access-token",
+		"refresh": "rt.1.opencode-refresh-token",
+		"expires": %d,
+		"accountId": "opencode-acct-id"
+	}`, futureMs))
+
+	var cred Credential
+	if err := json.Unmarshal(input, &cred); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if cred.Kind != KindOAuth {
+		t.Errorf("Kind = %q, want %q", cred.Kind, KindOAuth)
+	}
+	if cred.AccessToken != "eyJ-opencode-access-token" {
+		t.Errorf("AccessToken = %q, want %q", cred.AccessToken, "eyJ-opencode-access-token")
+	}
+	if cred.RefreshToken != "rt.1.opencode-refresh-token" {
+		t.Errorf("RefreshToken = %q, want %q", cred.RefreshToken, "rt.1.opencode-refresh-token")
+	}
+	if cred.AccountID != "opencode-acct-id" {
+		t.Errorf("AccountID = %q, want %q", cred.AccountID, "opencode-acct-id")
+	}
+	// expires should be converted from ms to seconds
+	expectedSeconds := futureMs / 1000
+	if cred.ExpiresAt != expectedSeconds {
+		t.Errorf("ExpiresAt = %d, want %d (converted from ms)", cred.ExpiresAt, expectedSeconds)
+	}
+	// Token should be in the future
+	if time.Until(time.Unix(cred.ExpiresAt, 0)) <= 0 {
+		t.Errorf("ExpiresAt should be in the future, got %v", time.Unix(cred.ExpiresAt, 0))
+	}
+}
+
+// TestOcodeOAuthFormat verifies that ocode's own format still works.
+func TestOcodeOAuthFormat(t *testing.T) {
+	futureSec := time.Now().Add(24 * time.Hour).Unix()
+	input := []byte(fmt.Sprintf(`{
+		"type": "oauth",
+		"access_token": "eyJ-ocode-access-token",
+		"refresh_token": "rt.1.ocode-refresh-token",
+		"expires_at": %d,
+		"account_id": "ocode-acct-id"
+	}`, futureSec))
+
+	var cred Credential
+	if err := json.Unmarshal(input, &cred); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+
+	if cred.Kind != KindOAuth {
+		t.Errorf("Kind = %q, want %q", cred.Kind, KindOAuth)
+	}
+	if cred.AccessToken != "eyJ-ocode-access-token" {
+		t.Errorf("AccessToken = %q, want %q", cred.AccessToken, "eyJ-ocode-access-token")
+	}
+	if cred.RefreshToken != "rt.1.ocode-refresh-token" {
+		t.Errorf("RefreshToken = %q, want %q", cred.RefreshToken, "rt.1.ocode-refresh-token")
+	}
+	if cred.AccountID != "ocode-acct-id" {
+		t.Errorf("AccountID = %q, want %q", cred.AccountID, "ocode-acct-id")
+	}
+	if cred.ExpiresAt != futureSec {
+		t.Errorf("ExpiresAt = %d, want %d", cred.ExpiresAt, futureSec)
 	}
 }

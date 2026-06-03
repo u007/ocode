@@ -36,6 +36,15 @@ func DebugAppendf(kind, format string, args ...interface{}) {
 	emitDebug(kind, fmt.Sprintf(format, args...))
 }
 
+// getClientAPIKey extracts the API key from an LLMClient via type assertion.
+// Returns "(unknown)" if the client type doesn't expose the key.
+func getClientAPIKey(c LLMClient) string {
+	if gc, ok := c.(*GenericClient); ok {
+		return gc.APIKey
+	}
+	return "(unknown)"
+}
+
 // JobEvent describes a background job (process or agent run) that finished.
 type JobEvent struct {
 	Kind       string // "process" or "agent"
@@ -448,7 +457,8 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		resp, err := a.chatWithDelta(stopCh, messages, toolDefs)
 		a.activity.setLLMRunning(false)
 		if err != nil {
-			emitDebug("ERROR", fmt.Sprintf("LLM error: %v", err))
+			emitDebug("ERROR", fmt.Sprintf("LLM error: provider=%s model=%q apiKey=%s error: %v",
+				a.client.GetProvider(), a.client.GetModel(), maskKey(getClientAPIKey(a.client)), err))
 			return nil, err
 		}
 		if isCancelled() {

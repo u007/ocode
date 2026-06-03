@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -122,5 +123,42 @@ func TestResolveCommitHashSupportsAbbreviatedRefs(t *testing.T) {
 	}
 	if got != hash {
 		t.Fatalf("resolveCommitHash abbreviated ref = %s, want %s", got, hash)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, string(out))
+	}
+	return string(out)
+}
+
+func TestCheckSyncAnnotatedTagUsesCommitHash(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	remote := filepath.Join(root, "remote.git")
+	clone := filepath.Join(root, "clone")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, src, "init")
+	runGit(t, src, "config", "user.email", "test@example.com")
+	runGit(t, src, "config", "user.name", "test")
+	if err := os.WriteFile(filepath.Join(src, "plugin.json"), []byte(`{"name":"sample"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, src, "add", "plugin.json")
+	runGit(t, src, "commit", "-m", "initial")
+	runGit(t, src, "tag", "-a", "v1.0.0", "-m", "annotated")
+	runGit(t, src, "clone", "--bare", ".", remote)
+	runGit(t, root, "clone", remote, clone)
+
+	got := CheckSync(clone, "", "v1.0.0")
+	if got.State != SyncUpToDate {
+		t.Fatalf("CheckSync state = %s, want %s (local=%s remote=%s msg=%s)", got.State, SyncUpToDate, got.LocalHash, got.RemoteHash, got.Message)
 	}
 }
