@@ -63,7 +63,7 @@ func (m *model) openModelPicker() {
 	if len(favorites) > 0 {
 		appendHeader("★ Favorites")
 		for _, f := range favorites {
-			appendModel("  ★ "+displayModelName(f), f)
+			appendModel("  ★ "+f, f)
 		}
 		appendHeader("")
 	}
@@ -77,7 +77,7 @@ func (m *model) openModelPicker() {
 	if len(recentModels) > 0 {
 		appendHeader("Recently Used")
 		for _, r := range recentModels {
-			appendModel("  "+displayModelName(r), r)
+			appendModel("  "+r, r)
 		}
 		appendHeader("")
 	}
@@ -121,13 +121,6 @@ func (m *model) openModelPicker() {
 	m.showPicker = true
 }
 
-func displayModelName(providerModel string) string {
-	_, model := splitPickerModel(providerModel)
-	if model == "" {
-		return providerModel
-	}
-	return model
-}
 
 func splitPickerModel(s string) (string, string) {
 	for i := 0; i < len(s); i++ {

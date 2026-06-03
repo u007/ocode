@@ -2238,11 +2238,11 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	baseURL := ""
 	useOAuth := false
 
-	// Handle provider/model (opencode) and provider:model formats.
-	if parts := strings.SplitN(model, ":", 2); len(parts) == 2 {
-		provider = parts[0]
-		model = parts[1]
-	} else if parts := strings.SplitN(model, "/", 2); len(parts) == 2 {
+	// Handle provider/model and provider:model formats.
+	// Check slash first so that OpenRouter models like
+	// "openrouter/openai/gpt-oss-120b:free" parse correctly — the colon
+	// is part of the model name, not a provider separator.
+	if parts := strings.SplitN(model, "/", 2); len(parts) == 2 {
 		if _, ok := providers[parts[0]]; ok {
 			provider = parts[0]
 			model = parts[1]
@@ -2251,6 +2251,12 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 				provider = parts[0]
 				model = parts[1]
 			}
+		}
+	}
+	if provider == "" {
+		if parts := strings.SplitN(model, ":", 2); len(parts) == 2 {
+			provider = parts[0]
+			model = parts[1]
 		}
 	}
 

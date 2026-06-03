@@ -2355,7 +2355,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		}
-		if keyStr == "f" && m.pickerFilter == "" && (m.pickerKind == "model" || m.pickerKind == "permission-model") {
+		if keyStr == "f" && (m.pickerKind == "model" || m.pickerKind == "permission-model") {
 			kind := m.pickerKind
 			items, values := m.pickerVisibleItems()
 			isSelectable := len(m.pickerIsHeader) == 0 || (m.pickerIndex < len(m.pickerIsHeader) && !m.pickerIsHeader[m.pickerIndex])
