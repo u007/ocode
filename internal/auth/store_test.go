@@ -3,6 +3,7 @@ package auth
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -143,5 +144,52 @@ func TestLoadStoreMigratesLegacyWrapperCredentials(t *testing.T) {
 	}
 	if cred.BaseURL != "https://wrapper.example/v1" {
 		t.Fatalf("BaseURL = %q, want wrapper base_url to survive migration", cred.BaseURL)
+	}
+}
+
+func TestRefreshPreservesAccountID(t *testing.T) {
+	resetStoreForTest(t)
+	cred := Credential{
+		Kind:         KindOAuth,
+		AccessToken:  "old-access",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour).Unix(),
+		AccountID:    "acct-123",
+	}
+	Set("test-preserve", cred)
+
+	result := refreshIfExpiring("test-preserve", cred)
+	if result.AccountID != "acct-123" {
+		t.Errorf("expected AccountID preserved, got %q", result.AccountID)
+	}
+}
+
+func TestConcurrentRefresh(t *testing.T) {
+	resetStoreForTest(t)
+	cred := Credential{
+		Kind:         KindOAuth,
+		AccessToken:  "old-access",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    time.Now().Add(-1 * time.Hour).Unix(),
+		AccountID:    "acct-456",
+	}
+	Set("test-concurrent", cred)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			refreshIfExpiring("test-concurrent", cred)
+		}()
+	}
+	wg.Wait()
+
+	result, ok := Get("test-concurrent")
+	if !ok {
+		t.Fatal("credential not found after concurrent refresh")
+	}
+	if result.AccountID != "acct-456" {
+		t.Errorf("AccountID lost after concurrent refresh: %q", result.AccountID)
 	}
 }

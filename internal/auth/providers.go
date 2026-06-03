@@ -4,10 +4,27 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
 )
+
+var (
+	refreshMu  = map[string]*sync.Mutex{}
+	refreshMuL sync.Mutex
+)
+
+func getRefreshMu(provider string) *sync.Mutex {
+	refreshMuL.Lock()
+	defer refreshMuL.Unlock()
+	if m, ok := refreshMu[provider]; ok {
+		return m
+	}
+	m := &sync.Mutex{}
+	refreshMu[provider] = m
+	return m
+}
 
 // refreshIfExpiring returns a fresh credential if the stored OAuth token is
 // expired or within the skew window. Falls back to the original credential
@@ -23,6 +40,16 @@ func refreshIfExpiring(id string, cred Credential) Credential {
 	if time.Until(time.Unix(cred.ExpiresAt, 0)) > skew {
 		return cred
 	}
+
+	mu := getRefreshMu(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Re-check after acquiring lock — another goroutine may have refreshed.
+	if time.Until(time.Unix(cred.ExpiresAt, 0)) > skew {
+		return cred
+	}
+
 	var refreshed Credential
 	var err error
 	switch id {
@@ -40,6 +67,10 @@ func refreshIfExpiring(id string, cred Credential) Credential {
 		refreshed.RefreshToken = cred.RefreshToken
 	}
 	refreshed.Account = cred.Account
+	refreshed.AccountID = cred.AccountID
+	if refreshed.AccountID == "" && cred.AccountID != "" {
+		log.Printf("warn: %s token refresh lost AccountID (was %q)", id, cred.AccountID)
+	}
 	_ = Set(id, refreshed)
 	return refreshed
 }
