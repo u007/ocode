@@ -19,6 +19,7 @@ import (
 
 	"github.com/jamesmercstudio/ocode/internal/auth"
 	"github.com/jamesmercstudio/ocode/internal/config"
+	providerplugin "github.com/jamesmercstudio/ocode/internal/plugin/provider"
 )
 
 const (
@@ -80,7 +81,8 @@ type GenericClient struct {
 	Model          string
 	BaseURL        string
 	Provider       string
-	UseOAuth       bool // when true, treat APIKey as a bearer OAuth token
+	UseOAuth       bool   // when true, treat APIKey as a bearer OAuth token
+	AccountID      string // cached chatgpt_account_id from OAuth credential
 	ThinkingBudget int  // >0 enables extended thinking for Anthropic models that support it
 	// Temperature, when non-nil, is added to the request payload for providers
 	// that accept it. Pointer so we can distinguish "unset" from explicit zero.
@@ -511,7 +513,9 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 
 func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	if c.UseOAuth && c.Provider == "openai" {
-		return c.chatOpenAIResponses(ctx, messages, tools)
+		if plugin, ok := providerplugin.Get("openai"); ok && plugin.ModelAllowed(c.Model) {
+			return c.chatOpenAIResponses(ctx, messages, tools)
+		}
 	}
 	// Use WebSocket transport if enabled for OpenAI
 	if c.UseWebSocket && SupportsWebSocket(c.Provider) {
@@ -1247,7 +1251,7 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 // ChatGPT OAuth tokens use the Codex backend; API keys use api.openai.com.
 // The chatgpt_account_id claim is extracted from the JWT and sent as ChatGPT-Account-ID.
 func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
-	accountID := jwtClaim(c.APIKey, "https://api.openai.com/auth", "chatgpt_account_id")
+	accountID := c.AccountID
 
 	// Map messages → Responses API input items.
 	instructions := make([]string, 0, 1)
@@ -1371,6 +1375,17 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		payload["tools"] = respTools
 	}
 
+	// Plugin params
+	if plugin, ok := providerplugin.Get("openai"); ok && c.UseOAuth {
+		for k, v := range plugin.RequestParams(providerplugin.RequestContext{}) {
+			if v == nil {
+				delete(payload, k)
+			} else {
+				payload[k] = v
+			}
+		}
+	}
+
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
@@ -1386,6 +1401,17 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	if accountID != "" {
 		req.Header.Set("ChatGPT-Account-ID", accountID)
 	}
+	// Plugin headers
+	if plugin, ok := providerplugin.Get("openai"); ok && c.UseOAuth {
+		pluginHeaders := plugin.RequestHeaders(providerplugin.RequestContext{
+			Provider:  c.Provider,
+			Model:     c.Model,
+			SessionID: os.Getenv("OPENCODE_SESSION_ID"),
+		})
+		for k, vs := range pluginHeaders {
+			req.Header[k] = vs
+		}
+	}
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -1395,6 +1421,9 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusUnauthorized && c.UseOAuth {
+			return nil, fmt.Errorf("ChatGPT session expired — run /connect to re-authenticate")
+		}
 		msg := fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body))
 		emitDebug("error", msg)
 		return nil, fmt.Errorf("%s", msg)
@@ -2237,6 +2266,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	apiKey := ""
 	baseURL := ""
 	useOAuth := false
+	accountID := ""
 
 	// Handle provider/model and provider:model formats.
 	// Check slash first so that OpenRouter models like
@@ -2302,6 +2332,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 						apiKey = cred.AccessToken
 					}
 					useOAuth = true
+					accountID = cred.AccountID
 				}
 			}
 		}
@@ -2358,6 +2389,7 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		BaseURL:        baseURL,
 		Provider:       provider,
 		UseOAuth:       useOAuth,
+		AccountID:      accountID,
 		ThinkingBudget: thinkingBudget,
 		UseWebSocket:   cfg != nil && cfg.UseWebSocket,
 	}

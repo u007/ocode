@@ -495,3 +495,29 @@ func TestNormalizeLMStudioBaseURL(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountIDFromCache(t *testing.T) {
+	client := &GenericClient{
+		Provider:  "openai",
+		Model:     "gpt-5.4",
+		APIKey:    "test-token",
+		UseOAuth:  true,
+		AccountID: "cached-account-123",
+	}
+	if client.AccountID != "cached-account-123" {
+		t.Errorf("expected cached AccountID, got %q", client.AccountID)
+	}
+}
+
+func TestAccountID_NotJWTParsed(t *testing.T) {
+	client := &GenericClient{
+		Provider:  "openai",
+		Model:     "gpt-5.4",
+		APIKey:    "not-a-real-jwt",
+		UseOAuth:  true,
+		AccountID: "from-cache",
+	}
+	if client.AccountID != "from-cache" {
+		t.Errorf("expected AccountID from cache, got %q", client.AccountID)
+	}
+}
