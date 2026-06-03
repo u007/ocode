@@ -13,6 +13,7 @@ import (
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/auth"
+	providerplugin "github.com/jamesmercstudio/ocode/internal/plugin/provider"
 )
 
 // connectStage tracks which step of the auth flow the dialog is on.
@@ -106,18 +107,27 @@ func (m *model) buildMethods() []connectMethod {
 	}
 	p := m.connect.provider
 	out := []connectMethod{{id: "apikey", label: "API Key"}}
-	switch p.OAuthFlow {
-	case "anthropic":
-		out = append(out,
-			connectMethod{id: "oauth_max", label: "Claude Pro/Max (OAuth)"},
-			connectMethod{id: "oauth_console", label: "Anthropic Console (OAuth → API key)"},
-		)
-	case "openai":
-		out = append(out, connectMethod{id: "oauth", label: "ChatGPT login (OAuth)"})
-	case "google":
-		out = append(out, connectMethod{id: "oauth", label: "Google (OAuth)"})
-	case "copilot":
-		out = append(out, connectMethod{id: "oauth", label: "GitHub device flow"})
+	if plugin, ok := providerplugin.Get(p.ID); ok {
+		for _, am := range plugin.AuthMethods() {
+			if am.Run == nil {
+				continue
+			}
+			out = append(out, connectMethod{id: "plugin_" + am.Label, label: am.Label})
+		}
+	} else {
+		switch p.OAuthFlow {
+		case "anthropic":
+			out = append(out,
+				connectMethod{id: "oauth_max", label: "Claude Pro/Max (OAuth)"},
+				connectMethod{id: "oauth_console", label: "Anthropic Console (OAuth → API key)"},
+			)
+		case "openai":
+			out = append(out, connectMethod{id: "oauth", label: "ChatGPT login (OAuth)"})
+		case "google":
+			out = append(out, connectMethod{id: "oauth", label: "Google (OAuth)"})
+		case "copilot":
+			out = append(out, connectMethod{id: "oauth", label: "GitHub device flow"})
+		}
 	}
 	if _, ok := auth.Get(p.ID); ok {
 		out = append(out, connectMethod{id: "remove", label: "Remove stored credential"})
@@ -553,6 +563,11 @@ func (m model) applyConnectMethod() (tea.Model, tea.Cmd) {
 	case "cancel":
 		m.closeConnectDialog()
 		return m, nil
+
+	default:
+		if strings.HasPrefix(d.methods[d.methodIdx].id, "plugin_") {
+			return m, m.runPluginAuth(d.methods[d.methodIdx].id)
+		}
 	}
 	return m, nil
 }
@@ -613,6 +628,30 @@ func (m model) startCopilotDevice() tea.Cmd {
 			cred.Account = auth.CopilotFetchAccount(cred.AccessToken)
 		}
 		return connectOAuthFinishedMsg{provider: "copilot", cred: cred, err: err}
+	}
+}
+
+// runPluginAuth executes a plugin's auth method and stores the result.
+func (m model) runPluginAuth(methodID string) tea.Cmd {
+	d := m.connect
+	providerID := d.provider.ID
+	return func() tea.Msg {
+		plugin, ok := providerplugin.Get(providerID)
+		if !ok {
+			return connectOAuthFinishedMsg{provider: providerID, err: fmt.Errorf("plugin not found for %s", providerID)}
+		}
+		label := strings.TrimPrefix(methodID, "plugin_")
+		for _, am := range plugin.AuthMethods() {
+			if am.Label == label && am.Run != nil {
+				result, err := am.Run(context.Background())
+				if err != nil {
+					return connectOAuthFinishedMsg{provider: providerID, err: err}
+				}
+				cred := auth.Credential{Kind: auth.KindOAuth, AccessToken: result.Access, RefreshToken: result.Refresh, ExpiresAt: result.Expires / 1000, AccountID: result.AccountID, Account: result.AccountID}
+				return connectOAuthFinishedMsg{provider: providerID, cred: cred, err: nil}
+			}
+		}
+		return connectOAuthFinishedMsg{provider: providerID, err: fmt.Errorf("auth method %q not found", label)}
 	}
 }
 
