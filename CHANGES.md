@@ -11,6 +11,12 @@
 - **Files Tab Content Search Cancellation** — Pressing Esc now properly cancels an in-flight content search.
 
 ### Added
+- **Web UI Layout Restructure** — New tab-based navigation with `TopTabs` (chat/files/git/logs), collapsible `SessionSidebar`, `CoworkSidebar`, and `ModelDialog` components. Session history, model selection, and agent tabs separated into dedicated panels.
+- **Makefile `dev` Target** — One-command hot-reload development environment launching Go backend (`:4096`) and Vite frontend (`:5173`) in parallel with port cleanup.
+- **Makefile `production` Target** — Build web UI assets then compile and serve the Go binary on `:4096`.
+- **shadcn/ui Component Library** — Added shadcn/ui primitive components (`Button`, `Select`, `CommandDialog`, `Command`) as the new UI component foundation.
+- **Cowork Panel Toggle** — Status bar button to show/hide the right-side agent cowork sidebar for parallel agent management.
+- **Model Dialog Command** — New `/model` slash command opens a model selection dialog.
 - **Git Action Logging** — All terminal-state git user actions (push, pull, fetch, commit, stage/unstage, stash, branch create/delete/checkout, hunk apply) are now logged to the DebugLog with a new `GIT` kind, filterable via `5` key in the log tab.
 - **Files Tab Content Search Streaming** — Content search results are now streamed incrementally in batches (batch size 10, flush interval 100ms) via a background goroutine, with Esc cancellation support.
 - **Binary File Detection in Open** — Both Files tab and Git tab now detect binary files and route them to the system file opener instead of Vim/editor.
@@ -25,6 +31,10 @@
 - **Test Coverage** — New tests for multi-session permission model preservation, double-click folder explorer behavior, binary file opener, empty search path, stale search message filtering, and 50-line cap removal in command parser.
 
 ### Changed
+- **Session API Response** — `GET /api/sessions/:id` now returns `SessionDetail` (includes full message history) instead of just session metadata, enabling session resume/import in the web UI.
+- **Web API Client** — Updated `listAgents` endpoint from `/api/agents` to `/api/config/agents` for consistency with the config-based API layout. Updated `getSession` return type.
+- **Makefile `install` Target** — `install` now depends on `build`, ensuring web assets are compiled before installing the binary.
+- **shadcn/ui Component Migration** — Replaced raw `<button>` elements with shadcn/ui `<Button>` across ChatInput, FileTree, AgentTabs, SessionList, ErrorBoundary, and StatusBar. Replaced raw `<select>` with shadcn/ui `<Select>` in ModelSelector. Rewrote CommandPalette using shadcn/ui `<CommandDialog>` for consistent styling and accessibility.
 - **Tab Shortcut Simplification** — Removed the numbered `1`–`4` tab shortcuts; use `alt+[` / `alt+]` (or `ctrl+shift+[` / `ctrl+shift+]`) to switch tabs. Tab bar labels updated from `1:chat`/`2:files`/`3:git`/`4:log` to plain `chat`/`files`/`git`/`log`.
 - **Advisor Tool Simplification** — Removed per-call `providerID`/`modelID` overrides from the advisor tool; model is now preset via the `/advisor` command or config, reducing complexity and preventing accidental model switching.
 - **Files Tab Selection Help** — Updated the Files tab help text to call out multi-select flow (`space` select, `shift+↑↓` extend, `D` delete).
@@ -37,6 +47,9 @@
 - **Transcript Trailing Padding** — Added 20 lines of trailing vertical padding so agent/permission boxes at the bottom of the transcript are not obscured by the viewport.
 - **Gitignore** — Added `.claude/settings.local.json` to `.gitignore`.
 - **Version** — Bumped from `0.3.0` to `0.3.1`.
+
+### Removed
+- **PermissionDialog** — Removed obsolete `PermissionDialog` component; permissions flow now uses API-driven inline approval in the web UI.
 
 ## [0.3.1] — 2026-06-04
 
