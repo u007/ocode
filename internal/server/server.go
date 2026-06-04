@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -206,6 +207,7 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
+	log.Printf("serve error: %s", msg)
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 

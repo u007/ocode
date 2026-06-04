@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
@@ -138,6 +139,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := ag.Step(messages)
 	if err != nil {
+		log.Printf("serve error: agent step: %v", err)
 		sendSSE(w, flusher, "error", map[string]string{"error": err.Error()})
 		return
 	}

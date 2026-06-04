@@ -51,6 +51,7 @@ const (
 	filesModeDeleteConfirm
 	filesModeEdit
 	filesModeContentSearch
+	filesModeFuzzy
 )
 
 type filesPromptKind int
@@ -98,8 +99,6 @@ type filesModel struct {
 	nodes           []fileNode
 	cursor          int
 	preview         viewport.Model
-	fuzzy           bool
-	query           string
 	allPaths        []string
 	width           int
 	height          int
@@ -130,6 +129,20 @@ type filesModel struct {
 	inlineEditMtime int64
 	inlineEditSize  int64
 
+	// Delete confirmation fields
+	deleteTargets []string // paths to delete (multi-select support)
+
+	// Rename confirmation fields
+	promptConfirm bool // true when user is confirming overwrite
+
+	// Fuzzy popup fields
+	fuzzyQuery   string   // current search query
+	fuzzyResults []string // filtered relative paths
+	fuzzyCursor  int      // highlighted result index
+
+	// Hidden files toggle
+	showHidden bool // true = show hidden files/folders (starting with .)
+
 	// Content search fields
 	contentSearchQuery          string
 	contentSearchExts           string // comma-separated extension patterns, e.g. "*.go,*.ts"
@@ -146,12 +159,12 @@ func newFilesModel(workDir string) filesModel {
 	m := filesModel{workDir: workDir}
 	m.preview = viewport.New()
 	m.promptInput = textarea.New()
-	m.nodes = loadDirChildren(workDir, 0)
+	m.nodes = loadDirChildren(workDir, 0, false)
 	m.refreshGitStatus()
 	return m
 }
 
-func loadDirChildren(dir string, depth int) []fileNode {
+func loadDirChildren(dir string, depth int, showHidden bool) []fileNode {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -159,7 +172,7 @@ func loadDirChildren(dir string, depth int) []fileNode {
 	nodes := make([]fileNode, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
-		if strings.HasPrefix(name, ".") {
+		if !showHidden && strings.HasPrefix(name, ".") {
 			continue
 		}
 		nodes = append(nodes, fileNode{
@@ -243,7 +256,7 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 		if m.mode == filesModeContentSearch {
 			return m.updateContentSearch(msg)
 		}
-		if m.fuzzy {
+		if m.mode == filesModeFuzzy {
 			return m.updateFuzzy(msg)
 		}
 		if m.panel == filesPanelPreview {
@@ -284,11 +297,6 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		}
 	case "space":
 		if m.cursor >= 0 && m.cursor < len(m.nodes) {
-			n := &m.nodes[m.cursor]
-			if n.isDir {
-				m.toggleDir(m.cursor)
-				return m, nil
-			}
 			if m.selectedFiles == nil {
 				m.selectedFiles = make(map[int]bool)
 			}
@@ -310,13 +318,9 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			if m.selectedFiles == nil {
 				m.selectedFiles = make(map[int]bool)
 			}
-			if !m.nodes[m.cursor].isDir {
-				m.selectedFiles[m.cursor] = true
-			}
+			m.selectedFiles[m.cursor] = true
 			m.cursor++
-			if !m.nodes[m.cursor].isDir {
-				m.selectedFiles[m.cursor] = true
-			}
+			m.selectedFiles[m.cursor] = true
 			if m.cursor < len(m.nodes) {
 				return m, loadPreviewCmd(m.nodes[m.cursor])
 			}
@@ -326,13 +330,9 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			if m.selectedFiles == nil {
 				m.selectedFiles = make(map[int]bool)
 			}
-			if !m.nodes[m.cursor].isDir {
-				m.selectedFiles[m.cursor] = true
-			}
+			m.selectedFiles[m.cursor] = true
 			m.cursor--
-			if !m.nodes[m.cursor].isDir {
-				m.selectedFiles[m.cursor] = true
-			}
+			m.selectedFiles[m.cursor] = true
 			if m.cursor < len(m.nodes) {
 				return m, loadPreviewCmd(m.nodes[m.cursor])
 			}
@@ -360,9 +360,12 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 	case "R", "shift+r":
 		return m, m.refreshPreviewCmd()
 	case "/":
-		m.fuzzy = true
-		m.query = ""
+		m.mode = filesModeFuzzy
+		m.fuzzyQuery = ""
+		m.fuzzyResults = nil
+		m.fuzzyCursor = 0
 		m.buildAllPaths()
+		m.statusMsg = ""
 	case "ctrl+f", "/f":
 		m.mode = filesModeContentSearch
 		m.contentSearchQuery = ""
@@ -373,6 +376,15 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.contentSearchLoading = false
 		m.contentSearchDone = false
 		m.statusMsg = "content search: type query, Tab to switch filter, Enter to search"
+	case "ctrl+h":
+		m.showHidden = !m.showHidden
+		m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
+		m.cursor = 0
+		if m.showHidden {
+			m.statusMsg = "showing hidden files"
+		} else {
+			m.statusMsg = "hiding hidden files"
+		}
 	case "tab":
 		m.panel = (m.panel + 1) % 2
 	}
@@ -398,9 +410,11 @@ func (m filesModel) updatePreview(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 }
 
 func (m filesModel) updatePrompt(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	prevValue := m.promptInput.Value()
 	switch msg.String() {
 	case "esc":
 		m.mode = filesModeNormal
+		m.promptConfirm = false
 		m.statusMsg = "action cancelled"
 		return m, nil
 	case "enter", "ctrl+j", "ctrl+m":
@@ -408,24 +422,54 @@ func (m filesModel) updatePrompt(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.promptInput, cmd = m.promptInput.Update(msg)
+	if m.promptInput.Value() != prevValue {
+		m.promptConfirm = false
+	}
 	return m, cmd
 }
 
 func (m filesModel) updateDeleteConfirm(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y", "shift+y":
-		path := m.promptTarget
-		if err := os.Remove(path); err != nil {
-			m.statusMsg = "delete failed: " + err.Error()
-			m.mode = filesModeNormal
-			return m, nil
+		targets := m.deleteTargets
+		if len(targets) == 0 {
+			targets = []string{m.promptTarget}
+		}
+		var errs []string
+		for _, path := range targets {
+			info, statErr := os.Stat(path)
+			if statErr != nil {
+				errs = append(errs, filepath.Base(path)+": "+statErr.Error())
+				continue
+			}
+			var rmErr error
+			if info.IsDir() {
+				rmErr = os.RemoveAll(path)
+			} else {
+				rmErr = os.Remove(path)
+			}
+			if rmErr != nil {
+				errs = append(errs, filepath.Base(path)+": "+rmErr.Error())
+			}
 		}
 		m.mode = filesModeNormal
-		m.statusMsg = "deleted: " + filepath.Base(path)
-		m.rebuildTreeKeeping(filepath.Dir(path))
+		m.deleteTargets = nil
+		m.selectedFiles = nil
+		if len(errs) > 0 {
+			m.statusMsg = "delete errors: " + strings.Join(errs, "; ")
+		} else if len(targets) == 1 {
+			m.statusMsg = "deleted: " + filepath.Base(targets[0])
+		} else {
+			m.statusMsg = fmt.Sprintf("deleted %d items", len(targets))
+		}
+		// Rebuild from the deepest parent
+		if len(targets) > 0 {
+			m.rebuildTreeKeeping(filepath.Dir(targets[0]))
+		}
 		return m, m.refreshPreviewCmd()
 	case "n", "N", "esc":
 		m.mode = filesModeNormal
+		m.deleteTargets = nil
 		m.statusMsg = "delete cancelled"
 	}
 	return m, nil
@@ -596,23 +640,44 @@ func (m filesModel) updateFuzzy(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	key := msg.String()
 	switch key {
 	case "esc":
-		m.fuzzy = false
-		m.query = ""
-	case "enter":
-		results := fuzzyFilter(m.allPaths, m.query)
-		if len(results) > 0 {
-			m.navigateTo(results[0])
+		m.mode = filesModeNormal
+		m.fuzzyQuery = ""
+		m.fuzzyResults = nil
+		m.statusMsg = ""
+	case "enter", "ctrl+j", "ctrl+m":
+		if len(m.fuzzyResults) > 0 && m.fuzzyCursor >= 0 && m.fuzzyCursor < len(m.fuzzyResults) {
+			m.navigateTo(m.fuzzyResults[m.fuzzyCursor])
 		}
-		m.fuzzy = false
-		m.query = ""
+		m.mode = filesModeNormal
+		m.fuzzyQuery = ""
+		m.fuzzyResults = nil
+		m.statusMsg = ""
+	case "down", "j":
+		if m.fuzzyCursor < len(m.fuzzyResults)-1 {
+			m.fuzzyCursor++
+		}
+	case "up", "k":
+		if m.fuzzyCursor > 0 {
+			m.fuzzyCursor--
+		}
 	case "backspace":
-		if len(m.query) > 0 {
-			m.query = m.query[:len(m.query)-1]
+		if len(m.fuzzyQuery) > 0 {
+			m.fuzzyQuery = m.fuzzyQuery[:len(m.fuzzyQuery)-1]
+			m.fuzzyResults = fuzzyFilter(m.allPaths, m.fuzzyQuery)
+			m.fuzzyCursor = 0
 		}
 	default:
 		if len(msg.Text) > 0 {
-			m.query += msg.Text
+			m.fuzzyQuery += msg.Text
+			m.fuzzyResults = fuzzyFilter(m.allPaths, m.fuzzyQuery)
+			m.fuzzyCursor = 0
 		}
+	}
+	// Load preview for highlighted result
+	if m.mode == filesModeFuzzy && len(m.fuzzyResults) > 0 && m.fuzzyCursor >= 0 && m.fuzzyCursor < len(m.fuzzyResults) {
+		absPath := filepath.Join(m.workDir, m.fuzzyResults[m.fuzzyCursor])
+		n := fileNode{path: absPath, name: filepath.Base(absPath), isDir: false}
+		return m, loadPreviewCmd(n)
 	}
 	return m, nil
 }
@@ -628,7 +693,7 @@ func (m *filesModel) toggleDir(idx int) {
 		m.nodes = append(m.nodes[:idx+1], m.nodes[end:]...)
 		n.expanded = false
 	} else {
-		children := loadDirChildren(n.path, n.depth+1)
+		children := loadDirChildren(n.path, n.depth+1, m.showHidden)
 		newNodes := make([]fileNode, 0, len(m.nodes)+len(children))
 		newNodes = append(newNodes, m.nodes[:idx+1]...)
 		newNodes = append(newNodes, children...)
@@ -740,7 +805,7 @@ func (m *filesModel) buildAllPaths() {
 }
 
 func (m *filesModel) navigateTo(relPath string) {
-	m.nodes = loadDirChildren(m.workDir, 0)
+	m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
 	parts := strings.Split(relPath, string(filepath.Separator))
 	current := m.workDir
 	for i, part := range parts {
@@ -795,7 +860,7 @@ func (m *filesModel) rebuildTreeKeeping(path string) {
 	if err != nil || strings.HasPrefix(rel, "..") {
 		rel = ""
 	}
-	m.nodes = loadDirChildren(m.workDir, 0)
+	m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
 	m.refreshGitStatus()
 	if rel != "" && rel != "." {
 		m.navigateTo(rel)
@@ -845,7 +910,7 @@ func (m filesModel) selectionHint() string {
 	if len(m.selectedFiles) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("%d selected — space toggle  shift+↑↓ extend  esc clear", len(m.selectedFiles))
+	return fmt.Sprintf("%d selected — space toggle  shift+↑↓ extend  D delete  esc clear", len(m.selectedFiles))
 }
 
 func (m filesModel) selectedActionDir() string {
@@ -864,6 +929,7 @@ func (m *filesModel) startCreateFile() {
 	m.promptKind = filesPromptCreateFile
 	m.promptTarget = m.selectedActionDir()
 	m.promptInput.SetValue("")
+	m.promptInput.Focus()
 	m.statusMsg = "new file name"
 }
 
@@ -872,6 +938,7 @@ func (m *filesModel) startCreateDir() {
 	m.promptKind = filesPromptCreateDir
 	m.promptTarget = m.selectedActionDir()
 	m.promptInput.SetValue("")
+	m.promptInput.Focus()
 	m.statusMsg = "new directory name"
 }
 
@@ -884,16 +951,41 @@ func (m *filesModel) startRename() {
 	m.promptKind = filesPromptRename
 	m.promptTarget = n.path
 	m.promptInput.SetValue(n.name)
+	m.promptInput.Focus()
 	m.statusMsg = "rename"
 }
 
 func (m *filesModel) startDelete() {
+	// Collect targets: multi-selected items or just cursor node
+	m.deleteTargets = nil
+	if len(m.selectedFiles) > 0 {
+		// Collect all selected paths, sorted by depth descending (children first)
+		type pathDepth struct {
+			path  string
+			depth int
+		}
+		var items []pathDepth
+		for idx := range m.selectedFiles {
+			if idx >= 0 && idx < len(m.nodes) {
+				items = append(items, pathDepth{path: m.nodes[idx].path, depth: m.nodes[idx].depth})
+			}
+		}
+		// Sort by depth descending so children are deleted before parents
+		sort.Slice(items, func(i, j int) bool { return items[i].depth > items[j].depth })
+		for _, item := range items {
+			m.deleteTargets = append(m.deleteTargets, item.path)
+		}
+		m.mode = filesModeDeleteConfirm
+		m.statusMsg = fmt.Sprintf("delete %d items?", len(m.deleteTargets))
+		return
+	}
 	n, ok := m.selectedNode()
 	if !ok {
 		return
 	}
 	m.mode = filesModeDeleteConfirm
 	m.promptTarget = n.path
+	m.deleteTargets = nil
 	m.statusMsg = "delete " + n.name + "? y/N"
 }
 
@@ -924,6 +1016,12 @@ func (m filesModel) submitPrompt() (filesModel, tea.Cmd) {
 		}
 	case filesPromptRename:
 		target = filepath.Join(filepath.Dir(m.promptTarget), name)
+		if _, err := os.Stat(target); err == nil && !m.promptConfirm {
+			// Target exists and user hasn't confirmed yet
+			m.promptConfirm = true
+			m.statusMsg = name + " already exists"
+			return m, nil
+		}
 		if err := os.Rename(m.promptTarget, target); err != nil {
 			m.statusMsg = "rename failed: " + err.Error()
 			return m, nil
@@ -1219,7 +1317,16 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 				icon = "\u25b8 "
 			}
 		}
-		line := indent + icon + n.name
+		// Selection marker
+		marker := "  "
+		if m.selectedFiles != nil && m.selectedFiles[i] {
+			marker = styles.Success.Render("✓ ")
+		}
+		line := marker + indent + icon + n.name
+		// Dim hidden files when showHidden is enabled
+		if m.showHidden && strings.HasPrefix(n.name, ".") {
+			line = styles.Hint.Render(line)
+		}
 		if rel, err := filepath.Rel(m.workDir, n.path); err == nil {
 			if badge := m.gitStatus[rel]; badge != "" {
 				line = badge + " " + line
@@ -1235,6 +1342,11 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		treeContent = styles.Hint.Render(hint) + "\n" + treeContent
 	}
 
+	// Show keybinding hints when tree panel is focused and in normal mode
+	if m.panel == filesPanelPicker && m.mode == filesModeNormal && len(m.selectedFiles) == 0 {
+		treeContent = styles.Hint.Render(m.treeHint()) + "\n" + treeContent
+	}
+
 	focusBorder := func(focused bool) lipgloss.Style {
 		if focused {
 			return borderStyle.BorderForeground(selectedStyle.GetBackground())
@@ -1242,14 +1354,8 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		return borderStyle
 	}
 
-	if m.fuzzy {
-		results := fuzzyFilter(m.allPaths, m.query)
-		if len(results) > 3 {
-			results = results[:3]
-		}
-		preview := strings.Join(results, "  ")
-		filterLine := styles.Selected.Render("/ "+m.query+"█") + "  " + styles.Hint.Render(preview)
-		treeContent = filterLine + "\n" + treeContent
+	if m.mode == filesModeFuzzy {
+		treeContent = m.fuzzyPopupView(treeW-2, h-4, styles)
 	}
 	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 4).Render(treeContent)
 
@@ -1275,9 +1381,30 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	if m.choosingEditor {
 		previewContent = m.editorPickerView(previewW-4, styles)
 	} else if m.mode == filesModePrompt {
-		previewContent = styles.Hint.Render(m.statusMsg) + "\n" + m.promptInput.View()
+		promptContent := styles.Hint.Render(m.statusMsg)
+		if m.promptConfirm {
+			promptContent = styles.Error.Render("⚠ "+m.statusMsg) + "\n" + styles.Hint.Render("press enter again to confirm, esc to cancel")
+		}
+		previewContent = promptContent + "\n" + m.promptInput.View()
 	} else if m.mode == filesModeDeleteConfirm {
-		previewContent = styles.Hint.Render(m.statusMsg) + "\n" + styles.Hint.Render("press y to confirm, esc/n to cancel")
+		deleteLines := []string{styles.Error.Render(m.statusMsg), ""}
+		if len(m.deleteTargets) > 0 {
+			for _, t := range m.deleteTargets {
+				name := filepath.Base(t)
+				if info, err := os.Stat(t); err == nil && info.IsDir() {
+					name += "/"
+				}
+				deleteLines = append(deleteLines, styles.Error.Render("  "+name))
+			}
+		} else {
+			name := filepath.Base(m.promptTarget)
+			if info, err := os.Stat(m.promptTarget); err == nil && info.IsDir() {
+				name += "/"
+			}
+			deleteLines = append(deleteLines, styles.Error.Render("  "+name))
+		}
+		deleteLines = append(deleteLines, "", styles.Hint.Render("press y to confirm, esc/n to cancel"))
+		previewContent = strings.Join(deleteLines, "\n")
 	} else if m.mode == filesModeContentSearch {
 		previewContent = m.contentView(previewW-4, h, styles)
 	} else if m.statusMsg != "" {
@@ -1306,7 +1433,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 
 	// Bottom status bar with keybindings (matching renderStatus in model.go)
 	statusStr := hintStyle.Width(w - 2).MaxHeight(1).Render(
-		"ctrl+f search  / fuzzy find  tab jump  i edit  o open  ^S save  n/N new  r rename  D delete  y path  E editor",
+		"ctrl+f search  / fuzzy find  space select  ^h hidden  tab jump  i edit  o open  n/N new  r rename  D delete  y path  E editor",
 	)
 	parts := []string{renderedHeader, row, statusStr}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
@@ -1326,6 +1453,63 @@ func (m filesModel) editorPickerView(width int, styles Styles) string {
 		}
 		lines = append(lines, line)
 	}
+	return strings.Join(lines, "\n")
+}
+
+// fuzzyPopupView renders the fuzzy search popup that replaces the tree pane.
+func (m filesModel) fuzzyPopupView(width, height int, styles Styles) string {
+	lines := []string{}
+
+	// Input line with cursor
+	inputLine := styles.Selected.Render("\U0001f50d " + m.fuzzyQuery + "\u2588")
+	lines = append(lines, inputLine)
+	lines = append(lines, strings.Repeat("\u2500", width))
+
+	// Results list
+	maxResults := height - 4 // room for input, separator, hint
+	if maxResults < 1 {
+		maxResults = 1
+	}
+
+	// Ensure results are up to date
+	results := m.fuzzyResults
+	if results == nil {
+		results = fuzzyFilter(m.allPaths, m.fuzzyQuery)
+	}
+
+	if len(results) == 0 {
+		if m.fuzzyQuery != "" {
+			lines = append(lines, styles.Hint.Render("  no matches"))
+		} else {
+			lines = append(lines, styles.Hint.Render("  type to search..."))
+		}
+	} else {
+		// Show results, scrolling if needed
+		start := 0
+		if m.fuzzyCursor >= maxResults {
+			start = m.fuzzyCursor - maxResults + 1
+		}
+		end := start + maxResults
+		if end > len(results) {
+			end = len(results)
+		}
+
+		for i := start; i < end; i++ {
+			path := results[i]
+			line := "  " + path
+			if i == m.fuzzyCursor {
+				line = styles.Selected.Width(width).Render("> " + path)
+			}
+			lines = append(lines, line)
+		}
+	}
+
+	// Hint line
+	totalResults := len(results)
+	hint := fmt.Sprintf("%d results  \u2191\u2193 navigate  enter select  esc cancel", totalResults)
+	lines = append(lines, strings.Repeat("\u2500", width))
+	lines = append(lines, styles.Hint.Render(hint))
+
 	return strings.Join(lines, "\n")
 }
 
@@ -1357,4 +1541,13 @@ func (m filesModel) tmuxOpenHint() string {
 	default:
 		return "editor: " + m.editor
 	}
+}
+
+// treeHint returns the keybinding hints shown at the top of the file tree
+// panel when in normal mode (no multi-select active).
+func (m filesModel) treeHint() string {
+	if len(m.selectedFiles) > 0 {
+		return ""
+	}
+	return "j/k navigate  enter open  space select  shift+↑↓ extend  n new  N folder  r rename  D del  / search  ctrl+f grep  o reveal"
 }

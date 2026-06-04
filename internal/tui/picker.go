@@ -121,7 +121,6 @@ func (m *model) openModelPicker() {
 	m.showPicker = true
 }
 
-
 func splitPickerModel(s string) (string, string) {
 	for i := 0; i < len(s); i++ {
 		if s[i] == '/' {
@@ -326,13 +325,18 @@ func modelPickerKeywords(query string) []string {
 // query using keyword-based AND-fuzzy matching: every whitespace/dash
 // separated keyword in the query must fuzzy-match the candidate.
 // `candidate` must already be lower-cased; the helper does not normalize it.
+// We require a score >= 100_000 (the multi-token tier floor) to reject the
+// subsequence fallback (tier 5, starting at 10_000). With 5 000+ provider
+// models, subsequence matching produces hundreds of false positives because
+// individual characters of the query (e.g. "claude") appear scattered across
+// unrelated model IDs, making provider sections appear unfiltered.
 func modelPickerMatches(lower, filter string) bool {
 	keywords := modelPickerKeywords(filter)
 	if len(keywords) == 0 {
 		return true
 	}
 	for _, kw := range keywords {
-		if fuzzyScore(lower, strings.ToLower(kw)) == 0 {
+		if fuzzyScore(lower, strings.ToLower(kw)) < 100_000 {
 			return false
 		}
 	}

@@ -85,7 +85,7 @@ func (t AdvisorTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name": "advisor",
 		"description": "Consult a strategic advisor (backed by a configurable model) that can proactively explore the codebase with tools and provide a concise plan or course correction.\n\n" +
-			"The advisor model is resolved with this priority: per-call providerID/modelID overrides > OPENCODE_ADVISOR_MODEL env var > ocode.json [advisor] config > built-in default. If both providerID and modelID are empty, the configured default is used.\n\n" +
+			"The advisor model is resolved with this priority: OPENCODE_ADVISOR_MODEL env var > ocode.json [advisor] config > built-in default. Use the /advisor command to preset which model the advisor uses.\n\n" +
 			"Call advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work, though the advisor can also do its own orientation if you feed it limited context.\n\n" +
 			"Also call advisor:\n" +
 			"- When stuck — errors recurring, approach not converging, results that don't fit\n" +
@@ -103,42 +103,23 @@ func (t AdvisorTool) Definition() map[string]interface{} {
 					"description": "All context the advisor needs to provide guidance — include user goal, constraints, files/lines already inspected, key evidence/outputs, attempts so far, and the exact decision/questions you want advice on. " +
 						"The advisor will proactively explore the codebase with its own exploration sub-agent tools to find details and verify assumptions — you do NOT need to pre-explore everything.",
 				},
-				"providerID": map[string]interface{}{
-					"type":        "string",
-					"description": "Optional provider override for this advisor call (e.g. \"anthropic\"). Leave blank to use configured default.",
-				},
-				"modelID": map[string]interface{}{
-					"type":        "string",
-					"description": "Optional model override for this advisor call (e.g. \"claude-sonnet-4-6\"). Leave blank to use configured default.",
-				},
 			},
 			"required": []string{"prompt"},
 		},
 	}
 }
 
-// resolveAdvisorModel returns the model string to use for the advisor.
-// Priority: per-call overrides > OPENCODE_ADVISOR_MODEL env var > config > default.
-func (t AdvisorTool) resolveModel(providerID, modelID string) string {
-	// 1. Per-call overrides take highest priority.
-	if providerID != "" && modelID != "" {
-		return providerID + "/" + modelID
-	}
-	if providerID != "" && modelID == "" {
-		// provider given but no model — use env/config default's model with this provider
-		if cfgModel := t.configModel(); cfgModel != "" {
-			return providerID + "/" + cfgModel
-		}
-		return providerID + "/deepseek-v4-pro"
-	}
-
-	// 2. OPENCODE_ADVISOR_MODEL env var.
+// resolveModel returns the model string to use for the advisor.
+// Priority: OPENCODE_ADVISOR_MODEL env var > config > default.
+// The model is preset via the /advisor command or config, not per-call.
+func (t AdvisorTool) resolveModel() string {
+	// 1. OPENCODE_ADVISOR_MODEL env var.
 	envModel := os.Getenv("OPENCODE_ADVISOR_MODEL")
 	if envModel != "" {
 		return envModel
 	}
 
-	// 3. Config from ocode.json [advisor] section.
+	// 2. Config from ocode.json [advisor] section.
 	if t.cfg != nil {
 		ac := t.cfg.Ocode.Advisor
 		if ac.Provider != "" && ac.Model != "" {
@@ -149,16 +130,8 @@ func (t AdvisorTool) resolveModel(providerID, modelID string) string {
 		}
 	}
 
-	// 4. Built-in default.
+	// 3. Built-in default.
 	return defaultAdvisorModel
-}
-
-// configModel returns just the model name from config (no provider prefix).
-func (t AdvisorTool) configModel() string {
-	if t.cfg == nil {
-		return ""
-	}
-	return t.cfg.Ocode.Advisor.Model
 }
 
 // getAdvisorTools returns a filtered set of exploration tools from the main
@@ -183,9 +156,7 @@ func (t AdvisorTool) getAdvisorTools() []tool.Tool {
 
 func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 	var params struct {
-		Prompt     string `json:"prompt"`
-		ProviderID string `json:"providerID"`
-		ModelID    string `json:"modelID"`
+		Prompt string `json:"prompt"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -201,8 +172,8 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 	}
 	defer advisorRecursionGuard.Store(false)
 
-	// Resolve the model to use for this call.
-	modelStr := t.resolveModel(params.ProviderID, params.ModelID)
+	// Resolve the model to use (preset via /advisor or config, not per-call).
+	modelStr := t.resolveModel()
 	emitDebug("ADVISOR", fmt.Sprintf("calling model: %s", modelStr))
 
 	// Create an LLM client for the advisor model (may differ from the main agent's model).
@@ -288,14 +259,15 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 	if result == "" {
 		return "", fmt.Errorf("advisor returned no advice after agentic run. model=%q", modelStr)
 	}
+
 	return withNotice(fallbackNotice, result), nil
 }
 
-// withNotice prepends an optional notice line to the advisor result so a
-// model fallback is surfaced to the user alongside the advice.
-func withNotice(notice, body string) string {
+// withNotice prepends a notice string (if non-empty) to the advisor response,
+// separated by a blank line.
+func withNotice(notice, content string) string {
 	if notice == "" {
-		return body
+		return content
 	}
-	return notice + "\n\n" + body
+	return notice + "\n\n" + content
 }

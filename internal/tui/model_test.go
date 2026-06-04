@@ -2329,6 +2329,94 @@ func containsString(items []string, want string) bool {
 	return false
 }
 
+// TestModelPickerFilterRejectsSubsequenceOnlyMatches verifies that the model
+// picker filter rejects false-positive matches caused by the fuzzyScore
+// subsequence fallback. With 5 000+ provider models, subsequence matching
+// (tier 5, score >= 10_000) matched characters scattered across unrelated
+// model IDs, making provider sections appear unfiltered. The fix requires
+// score >= 100_000 (multi-token tier floor) in modelPickerMatches.
+func TestModelPickerFilterRejectsSubsequenceOnlyMatches(t *testing.T) {
+	cases := []struct {
+		name    string
+		filter  string
+		item    string
+		matches bool
+	}{
+		{
+			name:    "claude does NOT subsequence-match alicloud",
+			filter:  "claude",
+			item:    "aihubmix/alicloud-deepseek-v4-flash",
+			matches: false,
+		},
+		{
+			name:    "claude does NOT subsequence-match amazon-bedrock",
+			filter:  "claude",
+			item:    "amazon-bedrock/meta.llama3-1-70b-instruct-v1:0",
+			matches: false,
+		},
+		{
+			name:    "claude DOES substring-match actual claude model",
+			filter:  "claude",
+			item:    "anthropic/claude-3-5-sonnet",
+			matches: true,
+		},
+		{
+			name:    "deepseek DOES substring-match alicloud-deepseek",
+			filter:  "deepseek",
+			item:    "aihubmix/alicloud-deepseek-v4-flash",
+			matches: true,
+		},
+		{
+			name:    "gpt DOES substring-match openai/gpt-4o",
+			filter:  "gpt",
+			item:    "openai/gpt-4o",
+			matches: true,
+		},
+		{
+			name:    "gpt-4o keywords match openai/gpt-4o via split",
+			filter:  "gpt-4o",
+			item:    "openai/gpt-4o",
+			matches: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := modelPickerMatches(strings.ToLower(tc.item), tc.filter)
+			if got != tc.matches {
+				t.Errorf("modelPickerMatches(%q, %q) = %v, want %v",
+					strings.ToLower(tc.item), tc.filter, got, tc.matches)
+			}
+		})
+	}
+}
+
+// TestModelPickerFilterExcludesUnmatchedProviderModels is an end-to-end test
+// that filters for "claude" and verifies NO non-claude models leak through.
+func TestModelPickerFilterExcludesUnmatchedProviderModels(t *testing.T) {
+	m := model{}
+	m.openModelPicker()
+	m.pickerFilter = "claude"
+
+	items, values := m.pickerVisibleItems()
+	if len(items) == 0 {
+		t.Fatal("expected filtered items for 'claude'")
+	}
+
+	for i, val := range values {
+		if val == "" {
+			continue // header
+		}
+		candidate := strings.ToLower(items[i])
+		if val != "" {
+			candidate += " " + strings.ToLower(val)
+		}
+		if !strings.Contains(candidate, "claude") {
+			t.Errorf("filtered item [%d] %q (val=%q) does not contain 'claude'",
+				i, items[i], val)
+		}
+	}
+}
+
 func TestPickerSelectsSessionByValue(t *testing.T) {
 	m := model{
 		input:        textarea.New(),
@@ -3376,8 +3464,8 @@ func TestTabMouseReleaseUsesRightAlignedHeaderPosition(t *testing.T) {
 	}
 	barWidth := lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread))
 	barStart := m.tabBarStartXs(barWidth)[0]
-	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("1:chat"))
-	filesWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("2:files"))
+	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("chat"))
+	filesWidth := lipgloss.Width(selectedStyle.Padding(0, 1).Render("files"))
 
 	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + filesWidth + 1, Y: 1})
 	got := derefTestModel(t, updated)
@@ -3399,7 +3487,7 @@ func TestTabMouseMotionSwitchesWhenTerminalReportsDrag(t *testing.T) {
 	}
 	barWidth := lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread))
 	barStart := m.tabBarStartXs(barWidth)[0]
-	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("1:chat"))
+	chatWidth := lipgloss.Width(selectedStyle.Padding(0, 1).Render("chat"))
 
 	updated, _ := m.Update(tea.MouseMotionMsg{Button: tea.MouseLeft, X: barStart + chatWidth + 1, Y: 1})
 	got := derefTestModel(t, updated)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -100,6 +101,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := as.agent.Step(as.messages)
 	if err != nil {
+		log.Printf("serve error: agent step: %v", err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
 	}
@@ -209,6 +211,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 
 	resp, err := as.agent.Step(as.messages)
 	if err != nil {
+		log.Printf("serve error: agent step: %v", err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
 	}

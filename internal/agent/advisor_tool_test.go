@@ -92,11 +92,12 @@ func TestAdvisorTool_Definition(t *testing.T) {
 	if _, ok := props["prompt"]; !ok {
 		t.Error("parameters should have 'prompt' property")
 	}
-	if _, ok := props["providerID"]; !ok {
-		t.Error("parameters should have 'providerID' property")
+	// providerID and modelID should NOT be exposed — model is preset via /advisor
+	if _, ok := props["providerID"]; ok {
+		t.Error("parameters should NOT have 'providerID' property (model is preset)")
 	}
-	if _, ok := props["modelID"]; !ok {
-		t.Error("parameters should have 'modelID' property")
+	if _, ok := props["modelID"]; ok {
+		t.Error("parameters should NOT have 'modelID' property (model is preset)")
 	}
 	promptProp, _ := props["prompt"].(map[string]interface{})
 	promptDesc, _ := promptProp["description"].(string)
@@ -124,46 +125,27 @@ func TestAdvisorTool_Definition(t *testing.T) {
 
 func TestAdvisorTool_ResolveModel(t *testing.T) {
 	tests := []struct {
-		name       string
-		providerID string
-		modelID    string
-		envModel   string
-		cfgModel   string
-		cfgProv    string
-		expected   string
+		name     string
+		envModel string
+		cfgModel string
+		cfgProv  string
+		expected string
 	}{
 		{
-			name:       "per-call overrides",
-			providerID: "anthropic",
-			modelID:    "claude-sonnet-4-6",
-			expected:   "anthropic/claude-sonnet-4-6",
+			name:     "env var",
+			envModel: "google/gemini-2.5-pro",
+			expected: "google/gemini-2.5-pro",
 		},
 		{
-			name:       "provider only with config model",
-			providerID: "anthropic",
-			cfgModel:   "claude-opus-4",
-			expected:   "anthropic/claude-opus-4",
+			name:     "config provider+model",
+			cfgProv:  "anthropic",
+			cfgModel: "claude-opus-4",
+			expected: "anthropic/claude-opus-4",
 		},
 		{
-			name:       "provider only without config model",
-			providerID: "openai",
-			expected:   "openai/deepseek-v4-pro",
-		},
-		{
-			name:       "env var",
-			envModel:   "google/gemini-2.5-pro",
-			expected:   "google/gemini-2.5-pro",
-		},
-		{
-			name:       "config provider+model",
-			cfgProv:    "anthropic",
-			cfgModel:   "claude-opus-4",
-			expected:   "anthropic/claude-opus-4",
-		},
-		{
-			name:       "config model only",
-			cfgModel:   "claude-sonnet-4-6",
-			expected:   "claude-sonnet-4-6",
+			name:     "config model only",
+			cfgModel: "claude-sonnet-4-6",
+			expected: "claude-sonnet-4-6",
 		},
 		{
 			name:     "default fallback",
@@ -186,7 +168,7 @@ func TestAdvisorTool_ResolveModel(t *testing.T) {
 					},
 				},
 			}
-			got := tool.resolveModel(tt.providerID, tt.modelID)
+			got := tool.resolveModel()
 			if got != tt.expected {
 				t.Errorf("resolveModel() = %q, want %q", got, tt.expected)
 			}
@@ -258,62 +240,21 @@ func TestAdvisorTool_getAdvisorTools_WithAgent(t *testing.T) {
 			}
 		}
 	}
-}
 
-func TestAdvisorTool_getAdvisorTools_FiltersNonAllowed(t *testing.T) {
-	client := &advisorMockLLMClient{response: "test"}
-	agent := NewAgent(client, nil, nil)
-	// Add non-allowed tools
-	agent.tools["write"] = &advisorMockTool{name: "write"}
-	agent.tools["edit"] = &advisorMockTool{name: "edit"}
-
-	tool := AdvisorTool{mainAgent: agent}
-	advisorTools := tool.getAdvisorTools()
-
-	// The returned tools should NOT include write or edit
-	for _, tl := range advisorTools {
-		if tl.Name() == "write" || tl.Name() == "edit" {
-			t.Errorf("advisor tools should not include %q", tl.Name())
-		}
+	// Should not include tools not in the allow-list
+	if _, ok := returned["write"]; ok {
+		t.Error("advisor tools should not include 'write'")
 	}
-
-	// But should include the default tools from NewAgent (bash, bash_output, etc.)
-	hasBash := false
-	for _, tl := range advisorTools {
-		if tl.Name() == "bash" || tl.Name() == "read" {
-			hasBash = true
-		}
+	if _, ok := returned["delete"]; ok {
+		t.Error("advisor tools should not include 'delete'")
 	}
-	if !hasBash {
-		t.Error("expected at least 'bash' or 'read' tool in advisor tools (from NewAgent defaults)")
+	if _, ok := returned["edit"]; ok {
+		t.Error("advisor tools should not include 'edit'")
+	}
+	if _, ok := returned["apply_patch"]; ok {
+		t.Error("advisor tools should not include 'apply_patch'")
 	}
 }
 
-func TestAdvisorTool_Definition_DescribesToolUse(t *testing.T) {
-	tool := AdvisorTool{}
-	def := tool.Definition()
-	desc, ok := def["description"].(string)
-	if !ok {
-		t.Fatal("definition should have description")
-	}
-	if !strings.Contains(desc, "tools") && !strings.Contains(desc, "explore") {
-		t.Error("description should mention tool usage/exploration capability")
-	}
-}
-
-func TestAdvisorAllowedTools_ContainsOnlyExploration(t *testing.T) {
-	writeTools := map[string]bool{
-		"write": true, "edit": true, "delete": true, "patch": true,
-		"replace_lines": true, "multi_edit": true, "multi_file_edit": true,
-		"format": true, "apply_patch": true,
-	}
-	for _, name := range advisorAllowedTools {
-		if writeTools[name] {
-			t.Errorf("advisorAllowedTools should not contain write tool %q", name)
-		}
-	}
-}
-
-func TestAdvisorTool_ImplementsToolInterface(t *testing.T) {
-	var _ tool.Tool = AdvisorTool{}
-}
+// Verify the tool implements the tool.Tool interface.
+var _ tool.Tool = AdvisorTool{}

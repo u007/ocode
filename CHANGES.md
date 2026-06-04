@@ -16,10 +16,25 @@
 - **Binary File Detection in Open** — Both Files tab and Git tab now detect binary files and route them to the system file opener instead of Vim/editor.
 - **Double-Click Folder Opens Explorer** — Double-clicking a directory in the Files tab tree opens it in the operating system's file explorer.
 - **Claude Settings Deny Rules** — Added built-in deny rules for `git push --force` and `rm -rf` destructive commands.
+- **Files Tab Hidden Files Toggle** — Added `Ctrl+H` to toggle showing hidden files/directories in the file tree; hidden entries are visually dimmed when visible.
+- **Files Tab Fuzzy Search Popup** — Replaced inline fuzzy filter with a full popup overlay supporting keyboard navigation (`↑`/`↓` or `j`/`k`), live preview of the highlighted result, and result count display.
+- **Files Tab Multi-Select Delete** — Space now selects directories too (not just files); `D` with multi-selected items deletes all in depth-sorted order (children before parents).
+- **Files Tab Rename Overwrite Confirmation** — Rename requires pressing enter twice when the target path already exists, preventing accidental overwrites.
+- **Files Tab Tree Hint Bar** — Added a keybinding hints bar at the top of the file tree panel showing available actions.
+- **Server Error Logging** — Added `log.Printf` error logging to serve handlers for agent step errors, surfacing failures in the debug panel.
 - **Test Coverage** — New tests for multi-session permission model preservation, double-click folder explorer behavior, binary file opener, empty search path, stale search message filtering, and 50-line cap removal in command parser.
 
 ### Changed
+- **Tab Shortcut Simplification** — Removed the numbered `1`–`4` tab shortcuts; use `alt+[` / `alt+]` (or `ctrl+shift+[` / `ctrl+shift+]`) to switch tabs. Tab bar labels updated from `1:chat`/`2:files`/`3:git`/`4:log` to plain `chat`/`files`/`git`/`log`.
+- **Advisor Tool Simplification** — Removed per-call `providerID`/`modelID` overrides from the advisor tool; model is now preset via the `/advisor` command or config, reducing complexity and preventing accidental model switching.
+- **Files Tab Selection Help** — Updated the Files tab help text to call out multi-select flow (`space` select, `shift+↑↓` extend, `D` delete).
 - **Files Tab Keybinding** — Status bar keybinding updated from `i edit` to `o open` to reflect the new binary-aware open behavior.
+- **Files Tab Status Bar** — Updated status bar to show `space select`, `^h hidden`; removed `^S save`.
+- **Files Tab Prompt Input** — Prompt input now auto-focuses when starting create file/directory or rename.
+- **Model Picker Score Threshold** — Raised fuzzy matching minimum score to 100,000 to reduce false positives from subsequence matching across 5,000+ provider models.
+- **Model Picker Navigation** — Fixed picker navigation to skip filtered-empty items when model picker is actively filtered.
+- **Log Tab Auto-Scroll** — Log viewport auto-scrolls to the bottom when switching to the log tab.
+- **Transcript Trailing Padding** — Added 20 lines of trailing vertical padding so agent/permission boxes at the bottom of the transcript are not obscured by the viewport.
 - **Gitignore** — Added `.claude/settings.local.json` to `.gitignore`.
 - **Version** — Bumped from `0.3.0` to `0.3.1`.
 

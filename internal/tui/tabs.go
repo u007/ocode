@@ -9,9 +9,9 @@ const (
 )
 
 func renderTabBar(active int, unread bool) string {
-	labels := []string{"1:chat", "2:files", "3:git", "4:log"}
+	labels := []string{"chat", "files", "git", "log"}
 	if unread && active != tabChat {
-		labels[0] = "1:chat\u25cf"
+		labels[0] = "chat●"
 	}
 	out := ""
 	for i, label := range labels {

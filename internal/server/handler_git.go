@@ -19,7 +19,8 @@ func (h *Handler) HandleGitStatus(w http.ResponseWriter, r *http.Request) {
 		branch = strings.TrimSpace(string(out))
 	}
 
-	var staged, changed []string
+	staged := []string{}
+	changed := []string{}
 	if out, err := exec.Command("git", "diff", "--name-only", "--cached").Output(); err == nil {
 		for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 			if f != "" {

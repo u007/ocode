@@ -2482,7 +2482,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(tiCmd, vpCmd, popupCmd)
 }
 
-// handleGlobalTabKeys handles tab-switching keys (1-4, alt+[/], ctrl+shift+[/])
+// handleGlobalTabKeys handles tab-switching keys (alt+[/], ctrl+shift+[/])
 // regardless of the active tab. Returns (true, ...) when a key is consumed.
 func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 	// When any modal overlay is active, tab-switching keys must not be handled.
@@ -2490,32 +2490,6 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		return false, m, nil
 	}
 	switch msg.String() {
-	case "1":
-		if m.activeTab == tabChat {
-			return false, m, nil
-		}
-		m.activeTab = tabChat
-		m.chatUnread = false
-		return true, m, nil
-	case "2":
-		if m.activeTab == tabChat {
-			return false, m, nil
-		}
-		m.activeTab = tabFiles
-		return true, m, nil
-	case "3":
-		if m.activeTab == tabChat {
-			return false, m, nil
-		}
-		m.activeTab = tabGit
-		return true, m, nil
-	case "4":
-		if m.activeTab == tabChat {
-			return false, m, nil
-		}
-		m.activeTab = tabLog
-		m.refreshLogViewport()
-		return true, m, nil
 	case "alt+[", "ctrl+shift+[":
 		m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
 		if m.activeTab == tabChat {
@@ -2551,17 +2525,37 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		case "up":
 			if m.pickerIndex > 0 {
 				m.pickerIndex--
-				for m.pickerIndex > 0 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
-					m.pickerIndex--
+				isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+				if isFiltered {
+					_, values := m.pickerVisibleItems()
+					for m.pickerIndex > 0 && m.pickerIndex < len(values) && values[m.pickerIndex] == "" {
+						m.pickerIndex--
+					}
+				} else {
+					for m.pickerIndex > 0 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+						m.pickerIndex--
+					}
 				}
 			}
 			return true, m, nil
 		case "down":
-			items, _ := m.pickerVisibleItems()
+			items, values := m.pickerVisibleItems()
 			if m.pickerIndex < len(items)-1 {
 				m.pickerIndex++
-				for m.pickerIndex < len(items)-1 && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
-					m.pickerIndex++
+				isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+				for m.pickerIndex < len(items)-1 {
+					if isFiltered {
+						if m.pickerIndex < len(values) && values[m.pickerIndex] == "" {
+							m.pickerIndex++
+							continue
+						}
+					} else {
+						if m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
+							m.pickerIndex++
+							continue
+						}
+					}
+					break
 				}
 			}
 			// Infinite scroll: trigger load more when within 5 items of bottom
@@ -3260,7 +3254,7 @@ func (m model) handleTabCtrlC() (tea.Model, tea.Cmd) {
 
 // filesHasActiveFocus reports whether the files sub-model has an active mode that should consume esc.
 func (m model) filesHasActiveFocus() bool {
-	return m.files.fuzzy || m.files.mode != filesModeNormal || m.files.choosingEditor
+	return m.files.mode != filesModeNormal || m.files.choosingEditor
 }
 
 // gitHasActiveFocus reports whether the git sub-model has an active mode that should consume esc.
@@ -3733,6 +3727,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			if tab == tabLog {
 				m.refreshLogViewport()
+				m.logViewport.GotoBottom()
 			}
 			return m, nil, true
 		}
@@ -4078,6 +4073,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 			}
 			if tab == tabLog {
 				m.refreshLogViewport()
+				m.logViewport.GotoBottom()
 			}
 			return m, nil, true
 		}
@@ -7239,6 +7235,10 @@ func (m *model) renderTranscript() {
 		b.WriteString(m.styles.Thinking.Render(m.recapText))
 		_ = startLine // used for click region tracking if needed later
 	}
+	// Add trailing padding so agent/permission boxes don't block the view.
+	for i := 0; i < 20; i++ {
+		b.WriteString("\n")
+	}
 	m.transcriptContent = wrapView(b.String(), m.viewport.Width())
 	m.transcriptLines = strings.Split(m.transcriptContent, "\n")
 	m.rawTranscriptLines = strings.Split(stripANSI(m.transcriptContent), "\n")
@@ -9705,15 +9705,15 @@ func (m model) exitButtonForClick(mouse tea.Mouse) bool {
 }
 
 func tabAtX(mouseX int, barStartX int, activeTab int, unread bool) (int, bool) {
-	labels := []string{"1:chat", "2:files", "3:git", "4:log"}
+	labels := []string{"chat", "files", "git", "log"}
 	if unread && activeTab != 0 {
-		labels[0] = "1:chat●"
+		labels[0] = "chat●"
 	}
 	x := barStartX
 	for i, label := range labels {
 		var w int
 		if i == activeTab {
-			w = lipgloss.Width(lipgloss.NewStyle().Bold(true).Reverse(true).Padding(0, 1).Render(label))
+			w = lipgloss.Width(selectedStyle.Padding(0, 1).Render(label))
 		} else {
 			w = lipgloss.Width(hintStyle.Padding(0, 1).Render(label))
 		}

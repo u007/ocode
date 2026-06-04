@@ -184,7 +184,7 @@ func TestFilesTabMouseWheelScrollsPreview(t *testing.T) {
 	}
 }
 
-func TestVisibleNumberTabShortcutWorksFromFilesTab(t *testing.T) {
+func TestNumberKeysNoLongerSwitchTabsFromFilesTab(t *testing.T) {
 	m := model{
 		ready:     true,
 		width:     100,
@@ -199,8 +199,8 @@ func TestVisibleNumberTabShortcutWorksFromFilesTab(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: '3'})
 	got := derefTestModel(t, updated)
-	if got.activeTab != tabGit {
-		t.Fatalf("expected 3 key to switch to git tab, got %d", got.activeTab)
+	if got.activeTab != tabFiles {
+		t.Fatalf("expected number key to not switch tabs, got %d", got.activeTab)
 	}
 }
 
@@ -401,11 +401,13 @@ func TestFilesSpaceOnDirTogglesExpand(t *testing.T) {
 	m.panel = filesPanelPicker
 
 	got, _ := m.Update(tea.KeyPressMsg{Code: ' ', Text: " "}, 100, 30)
-	if len(got.selectedFiles) != 0 {
-		t.Fatalf("expected no file selection for directory, got %#v", got.selectedFiles)
+	// Space now selects/deselects directories (for multi-select delete)
+	if !got.selectedFiles[0] {
+		t.Fatal("expected space on directory to select it")
 	}
-	if !got.nodes[0].expanded {
-		t.Fatal("expected space on directory to toggle expansion")
+	// Directories should NOT be expanded by space anymore (use enter for that)
+	if got.nodes[0].expanded {
+		t.Fatal("expected space on directory to NOT toggle expansion")
 	}
 }
 
@@ -447,6 +449,55 @@ func TestFilesSelectionHintShowsCount(t *testing.T) {
 	hint := m.selectionHint()
 	if !strings.Contains(hint, "2 selected") {
 		t.Fatalf("expected selection hint count, got %q", hint)
+	}
+	if !strings.Contains(hint, "D delete") {
+		t.Fatalf("expected selection hint to mention delete, got %q", hint)
+	}
+}
+
+func TestFilesTreeHintShowsSelectionFlow(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+
+	hint := m.treeHint()
+	for _, want := range []string{"space select", "shift+↑↓ extend", "D del"} {
+		if !strings.Contains(hint, want) {
+			t.Fatalf("expected tree hint to contain %q, got %q", want, hint)
+		}
+	}
+}
+
+func TestFilesRenamePromptConfirmPersistsUntilNameChanges(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := newFilesModel(dir)
+	m.Resize(100, 30)
+
+	for i, n := range m.nodes {
+		if n.name == "a.txt" {
+			m.cursor = i
+			break
+		}
+	}
+	m.startRename()
+	m.promptInput.SetValue("b.txt")
+	m, _ = m.submitPrompt()
+	if !m.promptConfirm {
+		t.Fatal("expected overwrite confirmation to be armed")
+	}
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp}, 100, 30)
+	if !m.promptConfirm {
+		t.Fatal("expected non-editing key to keep overwrite confirmation armed")
+	}
+
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'x', Text: "x"}, 100, 30)
+	if m.promptConfirm {
+		t.Fatal("expected typing to clear overwrite confirmation")
 	}
 }
 
