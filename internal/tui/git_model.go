@@ -135,6 +135,11 @@ type gitModel struct {
 	// file list filter
 	filterActive bool
 	filterQuery  string
+	// logger receives a copy of every terminal-state user action (push, pull,
+	// fetch, commit, stage/unstage, stash, branch ops, etc.) so the main
+	// model can append it to the log tab. nil means "no sink installed",
+	// which keeps unit tests and headless callers quiet by default.
+	logger func(kind DebugEntryKind, msg string)
 }
 
 func newGitModel(workDir string) gitModel {
@@ -185,6 +190,37 @@ func (m *gitModel) refresh() {
 	m.loadLog()
 	m.loadStash()
 	m.loadBranches()
+}
+
+// SetLogger installs a sink that receives a copy of every terminal-state
+// user action (push, pull, fetch, commit, stage/unstage, stash, branch ops,
+// etc.) so the main model can append it to the log tab. Passing nil is
+// allowed and disables logging — useful in tests.
+func (m *gitModel) SetLogger(logger func(kind DebugEntryKind, msg string)) {
+	m.logger = logger
+}
+
+// logGit forwards msg to the installed logger if one is set. It is a no-op
+// when no logger is installed, so callers don't need to nil-check.
+func (m *gitModel) logGit(msg string) {
+	if m.logger != nil {
+		m.logger(DebugKindGit, msg)
+	}
+}
+
+// firstLine trims a possibly multi-line git error message to its first line
+// and caps the length so a single failed `git push` doesn't flood the log
+// tab with git's full stderr. The status bar at the bottom of the Git tab
+// still shows the full error verbatim.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	const max = 160
+	if len(s) > max {
+		s = s[:max-1] + "…"
+	}
+	return strings.TrimSpace(s)
 }
 
 func (m *gitModel) gitRun(args ...string) (string, error) {
@@ -434,7 +470,11 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 		}
 		return m, nil
 	case gitStatusMsg:
+		// Choke point for network ops (push/pull/fetch) and any other
+		// statusMsg-returning operation. Log the terminal outcome so the
+		// log tab has a record of every git action.
 		m.statusMsg = msg.text
+		m.logGit(firstLine(msg.text))
 		return m, m.cmdRefresh()
 	case gitRefreshMsg:
 		m.stagedFiles = msg.staged
@@ -503,8 +543,17 @@ func (m gitModel) updateCommitInput(msg tea.Msg) (gitModel, tea.Cmd) {
 			if text != "" {
 				if _, err := m.gitRun("commit", "-m", text); err != nil {
 					m.statusMsg = "commit failed: " + err.Error()
+					m.logGit("commit failed: " + firstLine(err.Error()))
 				} else {
 					m.statusMsg = "committed"
+					subject := text
+					if i := strings.IndexByte(subject, '\n'); i >= 0 {
+						subject = subject[:i]
+					}
+					if len(subject) > 60 {
+						subject = subject[:59] + "…"
+					}
+					m.logGit("commit: " + subject)
 					m.committing = false
 					m.commitInput.Reset()
 					m.Resize(m.width, m.height)
@@ -565,8 +614,10 @@ func (m gitModel) updateBranchInput(msg tea.Msg) (gitModel, tea.Cmd) {
 			if name != "" {
 				if _, err := m.gitRun("checkout", "-b", name); err != nil {
 					m.statusMsg = "create branch failed: " + err.Error()
+					m.logGit("create branch failed: " + firstLine(err.Error()))
 				} else {
 					m.statusMsg = "created and switched to " + name
+					m.logGit("create branch: " + name)
 				}
 			}
 			m.branchInputMode = false
@@ -598,13 +649,20 @@ func (m gitModel) updateStashInput(msg tea.Msg) (gitModel, tea.Cmd) {
 			return m, nil
 		case "enter":
 			args := []string{"stash", "push"}
-			if note := strings.TrimSpace(m.stashInputText); note != "" {
+			note := strings.TrimSpace(m.stashInputText)
+			if note != "" {
 				args = append(args, "-m", note)
 			}
 			if _, err := m.gitRun(args...); err != nil {
 				m.statusMsg = "stash failed: " + err.Error()
+				m.logGit("stash failed: " + firstLine(err.Error()))
 			} else {
 				m.statusMsg = "stashed"
+				if note != "" {
+					m.logGit("stash push: " + note)
+				} else {
+					m.logGit("stash push")
+				}
 			}
 			m.stashInputMode = false
 			m.stashInputText = ""
@@ -883,8 +941,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					args := append([]string{"add", "--"}, staged...)
 					if _, err := m.gitRun(args...); err != nil {
 						m.statusMsg = "stage failed: " + err.Error()
+						m.logGit("stage failed: " + firstLine(err.Error()))
 					} else {
 						m.statusMsg = fmt.Sprintf("staged %d files", len(staged))
+						m.logGit(fmt.Sprintf("staged %d files", len(staged)))
 						m.selectedFiles = nil
 						return m, m.cmdRefresh()
 					}
@@ -896,8 +956,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					f := unstaged[idx]
 					if _, err := m.gitRun("add", "--", f.path); err != nil {
 						m.statusMsg = "stage failed: " + err.Error()
+						m.logGit("stage failed: " + firstLine(err.Error()))
 					} else {
 						m.statusMsg = "staged " + f.path
+						m.logGit("stage: " + f.path)
 						return m, m.cmdRefresh()
 					}
 				}
@@ -916,8 +978,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 					args := append([]string{"restore", "--staged", "--"}, unstaged...)
 					if _, err := m.gitRun(args...); err != nil {
 						m.statusMsg = "unstage failed: " + err.Error()
+						m.logGit("unstage failed: " + firstLine(err.Error()))
 					} else {
 						m.statusMsg = fmt.Sprintf("unstaged %d files", len(unstaged))
+						m.logGit(fmt.Sprintf("unstaged %d files", len(unstaged)))
 						m.selectedFiles = nil
 						return m, m.cmdRefresh()
 					}
@@ -926,8 +990,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				f := m.stagedFiles[m.filesCursor]
 				if _, err := m.gitRun("restore", "--staged", "--", f.path); err != nil {
 					m.statusMsg = "unstage failed: " + err.Error()
+					m.logGit("unstage failed: " + firstLine(err.Error()))
 				} else {
 					m.statusMsg = "unstaged " + f.path
+					m.logGit("unstage: " + f.path)
 					return m, m.cmdRefresh()
 				}
 			}
@@ -947,8 +1013,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 						}
 						if _, err := m.gitRun("restore", "--", f.path); err != nil {
 							m.statusMsg = "discard failed: " + err.Error()
+							m.logGit("discard failed: " + firstLine(err.Error()))
 						} else {
 							m.statusMsg = "discarded " + f.path
+							m.logGit("discard: " + f.path)
 							return m, m.cmdRefresh()
 						}
 					} else {
@@ -965,8 +1033,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
 				if _, err := m.gitRun("stash", "drop", ref); err != nil {
 					m.statusMsg = "drop failed: " + err.Error()
+					m.logGit("stash drop failed: " + firstLine(err.Error()))
 				} else {
 					m.statusMsg = "stash dropped"
+					m.logGit("stash drop: " + ref)
 					return m, m.cmdRefresh()
 				}
 			} else {
@@ -986,8 +1056,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
 			if _, err := m.gitRun("stash", "apply", ref); err != nil {
 				m.statusMsg = "stash apply failed: " + err.Error()
+				m.logGit("stash apply failed: " + firstLine(err.Error()))
 			} else {
 				m.statusMsg = "stash applied"
+				m.logGit("stash apply: " + ref)
 				return m, m.cmdRefresh()
 			}
 		}
@@ -1039,8 +1111,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.pendingAction = gitPendingNone
 				if _, err := m.gitRun("branch", "-d", branch); err != nil {
 					m.statusMsg = "delete failed: " + err.Error()
+					m.logGit("delete branch failed: " + firstLine(err.Error()))
 				} else {
 					m.statusMsg = "deleted " + branch
+					m.logGit("delete branch: " + branch)
 				}
 				return m, m.cmdRefresh()
 			}
@@ -1076,8 +1150,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				}
 				if err != nil {
 					m.statusMsg = "checkout failed: " + err.Error()
+					m.logGit("checkout failed: " + firstLine(err.Error()))
 				} else {
 					m.statusMsg = "switched to " + branch
+					m.logGit("checkout: " + branch)
 					return m, m.cmdRefresh()
 				}
 			}
@@ -1086,8 +1162,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
 				if _, err := m.gitRun("stash", "pop", ref); err != nil {
 					m.statusMsg = "pop failed: " + err.Error()
+					m.logGit("stash pop failed: " + firstLine(err.Error()))
 				} else {
 					m.statusMsg = "stash popped"
+					m.logGit("stash pop: " + ref)
 					return m, m.cmdRefresh()
 				}
 			}
@@ -1097,6 +1175,10 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 }
 
 func (m gitModel) openInEditor(path string) tea.Cmd {
+	if isBinaryFile(path) {
+		log.Printf("[editor] git openInEditor: using system opener for binary file=%q", path)
+		return openFileWithOSDefault(path)
+	}
 	if m.editorOpener != nil {
 		log.Printf("[editor] git openInEditor: delegating to editorOpener for file=%q", path)
 		return m.editorOpener(path)
@@ -1159,11 +1241,13 @@ func (m gitModel) applyHunk(reverse bool) (gitModel, tea.Cmd) {
 	tmp, err := os.CreateTemp("", "ocode-hunk-*.patch")
 	if err != nil {
 		m.statusMsg = "hunk apply: " + err.Error()
+		m.logGit("hunk apply failed: " + firstLine(err.Error()))
 		return m, nil
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.WriteString(patch); err != nil {
 		m.statusMsg = "hunk apply: " + err.Error()
+		m.logGit("hunk apply failed: " + firstLine(err.Error()))
 		return m, nil
 	}
 	tmp.Close()
@@ -1173,6 +1257,7 @@ func (m gitModel) applyHunk(reverse bool) (gitModel, tea.Cmd) {
 	}
 	if _, err := m.gitRun(args...); err != nil {
 		m.statusMsg = "hunk apply failed: " + err.Error()
+		m.logGit("hunk apply failed: " + firstLine(err.Error()))
 		return m, nil
 	}
 	action := "staged hunk"
@@ -1180,6 +1265,7 @@ func (m gitModel) applyHunk(reverse bool) (gitModel, tea.Cmd) {
 		action = "unstaged hunk"
 	}
 	m.statusMsg = action
+	m.logGit(action)
 	return m, m.cmdRefresh()
 }
 
@@ -1205,9 +1291,11 @@ func (m gitModel) ignorePath(path string) (gitModel, tea.Cmd) {
 	}
 	if err := appendUniqueLine(filepath.Join(m.workDir, ".gitignore"), path+"\n"); err != nil {
 		m.statusMsg = "ignore failed: " + err.Error()
+		m.logGit("ignore failed: " + firstLine(err.Error()))
 		return m, nil
 	}
 	m.statusMsg = "ignored " + path
+	m.logGit("ignore: " + path)
 	return m, m.cmdRefresh()
 }
 

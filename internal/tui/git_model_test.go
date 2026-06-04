@@ -56,6 +56,31 @@ func TestPendingActionConfirmation(t *testing.T) {
 	}
 }
 
+func TestGitOpenBinaryUsesSystemOpener(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binary.bin")
+	if err := os.WriteFile(path, []byte{0, 1, 2, 3}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := gitModel{}
+	called := false
+	m.editorOpener = func(string) tea.Cmd {
+		called = true
+		return nil
+	}
+
+	if !isBinaryFile(path) {
+		t.Fatal("expected binary detection to return true")
+	}
+	if cmd := m.openInEditor(path); cmd == nil {
+		t.Fatal("expected binary open to return a system-opener command")
+	}
+	if called {
+		t.Fatal("expected binary open to bypass editorOpener")
+	}
+}
+
 func TestChangesFileListHighlight(t *testing.T) {
 	ApplyThemeColors("opencode")
 	m := gitModel{

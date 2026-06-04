@@ -12,6 +12,9 @@ internal/tui/.opencode
 # AST index (shared per-project daemon)
 .sgindex/
 
+# Claude Code: local-only settings (machine/personal permission rules)
+.claude/settings.local.json
+
 # Session export files (contain local paths & session data)
 ocode_export_*.md
 

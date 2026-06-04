@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -72,6 +73,93 @@ func TestParseGitStatusShortMapsPaths(t *testing.T) {
 	}
 	if got["renamed.txt"] != "R" {
 		t.Fatalf("expected renamed badge, got %#v", got)
+	}
+}
+
+// TestFilesDoubleClickFolderOpensExplorer verifies that a second click on a
+// directory row inside the Files tab tree (within 400ms and at the same X/Y)
+// routes through the cross-platform openInFileExplorer command instead of the
+// default toggleDir. The returned tea.Cmd is the only thing the click path
+// produces; its inner cmd.Start() is the real OS action and is not exercised
+// in unit tests.
+func TestFilesDoubleClickFolderOpensExplorer(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{
+		ready:     true,
+		width:     100,
+		height:    30,
+		activeTab: tabFiles,
+		input:     newTestTextarea(),
+		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	m.files = newFilesModel(dir)
+	m.files.Resize(100, 30)
+
+	// Locate the directory node as it appears in m.files.nodes.
+	dirIdx := -1
+	for i, n := range m.files.nodes {
+		if n.isDir && n.name == "sub" {
+			dirIdx = i
+			break
+		}
+	}
+	if dirIdx < 0 {
+		t.Fatalf("expected a directory node named 'sub' in tree, got %#v", m.files.nodes)
+	}
+	// Y of node dirIdx inside the tree panel: appHeaderHeight + 1 (border) + dirIdx.
+	clickY := appHeaderHeight + 1 + dirIdx
+	clickX := 2
+
+	// First click selects the node and toggles the directory open — it should
+	// return no cmd (toggleDir has no async work).
+	updated, cmd1 := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: clickX, Y: clickY})
+	m = derefTestModel(t, updated)
+	if cmd1 != nil {
+		t.Fatalf("first click on folder should not return a cmd, got %#v", cmd1)
+	}
+	if m.files.cursor != dirIdx {
+		t.Fatalf("expected cursor at dir index %d after first click, got %d", dirIdx, m.files.cursor)
+	}
+
+	// Second click at the same X/Y within 400ms should hit the new
+	// double-click-on-folder branch and return the openInFileExplorer cmd.
+	// Note: the first click also calls toggleDir which expands the node and
+	// inserts children; the directory row stays at the same index in
+	// m.files.nodes, so clickY is still correct.
+	updated, cmd2 := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: clickX, Y: clickY})
+	m = derefTestModel(t, updated)
+	if cmd2 == nil {
+		t.Fatal("expected double-click on folder to return an openInFileExplorer cmd, got nil")
+	}
+	// We deliberately do NOT execute cmd2() — the closure spawns a real
+	// subprocess (`open`/`explorer`/`xdg-open`) via cmd.Start(), which on a
+	// developer's local macOS box would open a Finder window during `go test`.
+	// The non-nil assertion is sufficient to prove the cmd is wired.
+
+	// A third click at the same X/Y but more than 400ms after the second must
+	// be treated as a fresh single click — the new double-click branch must
+	// not steal it. We backdate lastClickTime to simulate "slow" and check
+	// that the directory's expanded flag (set by the first click's toggleDir)
+	// flips back to false.
+	m.lastClickTime = time.Now().Add(-time.Second)
+	updated, cmd3 := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: clickX, Y: clickY})
+	m = derefTestModel(t, updated)
+	if cmd3 != nil {
+		t.Fatalf("slow second click on folder should fall back to toggleDir (no cmd), got %#v", cmd3)
+	}
+	// The directory was expanded by the first click, so this slow click should
+	// collapse it: the directory's expanded flag must be false again.
+	if m.files.nodes[dirIdx].expanded {
+		t.Fatalf("expected slow click to collapse expanded folder; nodes[dirIdx]=%+v",
+			m.files.nodes[dirIdx])
 	}
 }
 
@@ -176,6 +264,76 @@ func TestFilesEditorOpenerExternalMode(t *testing.T) {
 	cmd2 := m.openInEditor(path)
 	if cmd2 == nil {
 		t.Fatal("expected non-nil cmd for external opener")
+	}
+}
+
+func TestFilesOpenBinaryUsesSystemOpener(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "binary.bin")
+	if err := os.WriteFile(path, []byte{0, 1, 2, 3}, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newFilesModel(dir)
+	called := false
+	m.editorOpener = func(string) tea.Cmd {
+		called = true
+		return nil
+	}
+
+	if !isBinaryFile(path) {
+		t.Fatal("expected binary detection to return true")
+	}
+	if cmd := m.openInEditor(path); cmd == nil {
+		t.Fatal("expected binary open to return a system-opener command")
+	}
+	if called {
+		t.Fatal("expected binary open to bypass editorOpener")
+	}
+}
+
+func TestFilesSearchEmptyQueryDoesNotStart(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+	m.mode = filesModeContentSearch
+	m.contentSearchQuery = ""
+	m.contentSearchLoading = false
+	m.contentSearchDone = false
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter}, 100, 30)
+	got := updated
+	if cmd != nil {
+		t.Fatal("expected empty search query to not start a search")
+	}
+	if got.contentSearchLoading {
+		t.Fatal("expected empty search query to leave loading disabled")
+	}
+	if got.statusMsg != "type a query first" {
+		t.Fatalf("expected empty query status, got %q", got.statusMsg)
+	}
+}
+
+func TestFilesSearchIgnoresStaleDoneMessage(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+	current := make(chan struct{})
+	stale := make(chan struct{})
+	m.contentSearchCancel = current
+	m.contentSearchLoading = true
+	m.contentSearchDone = false
+	m.contentSearchResults = []filesContentSearchResult{{path: "/tmp/keep", relPath: "keep", line: 1, text: "keep"}}
+
+	updated, _ := m.Update(filesContentSearchDoneMsg{cancel: stale}, 100, 30)
+	got := updated
+	if !got.contentSearchLoading {
+		t.Fatal("expected stale done message to be ignored")
+	}
+	if got.contentSearchDone {
+		t.Fatal("expected stale done message not to mark search done")
+	}
+	if got.contentSearchCancel != current {
+		t.Fatal("expected current search token to remain unchanged")
+	}
+	if len(got.contentSearchResults) != 1 {
+		t.Fatalf("expected results to remain untouched, got %#v", got.contentSearchResults)
 	}
 }
 

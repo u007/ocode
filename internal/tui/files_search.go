@@ -3,23 +3,36 @@ package tui
 import (
 	"bufio"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
-// filesContentSearchResultMsg carries the search results back to the model.
-type filesContentSearchResultMsg struct {
-	results []filesContentSearchResult
-	err     error
+// filesContentSearchBatchMsg delivers a batch of incremental search results.
+// The ch/cancel fields allow the handler to chain the next waitSearchEvent cmd.
+type filesContentSearchBatchMsg struct {
+	batch      []filesContentSearchResult
+	totalSoFar int
+	ch         chan filesContentSearchBatchMsg
+	cancel     chan struct{}
 }
 
-// contentSearchCmd walks the project tree and searches file contents in the
-// background. It returns a tea.Msg with the results.
+// filesContentSearchDoneMsg signals that the search walk has finished.
+type filesContentSearchDoneMsg struct {
+	total  int
+	err    error
+	cancel chan struct{}
+}
+
+// startContentSearchCmd launches a background goroutine that walks the
+// project tree and streams search results in batches. Returns a cmd that
+// starts the chain of waitSearchEvent reads.
 //
 // Documented limitations:
 //   - Only root .gitignore and .ignore files are consulted; nested ignore
@@ -29,16 +42,20 @@ type filesContentSearchResultMsg struct {
 //
 // When includeIgnored is false, hidden files/dirs, common ignore dirs, and
 // paths matched by .gitignore / .ignore are skipped.
-func contentSearchCmd(workDir, query, exts string, includeIgnored bool) tea.Cmd {
-	return func() tea.Msg {
-		if query == "" {
-			return filesContentSearchResultMsg{results: nil}
-		}
+func startContentSearchCmd(workDir, query, exts string, includeIgnored bool) (tea.Cmd, chan struct{}) {
+	if query == "" {
+		return nil, nil
+	}
+
+	cancel := make(chan struct{})
+	ch := make(chan filesContentSearchBatchMsg, 4)
+
+	go func() {
+		defer close(ch)
 
 		// Build the regex from the query (case-insensitive).
 		re, err := regexp.Compile(`(?i)` + regexp.QuoteMeta(query))
 		if err != nil {
-			// Fallback: literal match.
 			re = regexp.MustCompile(`(?i)` + regexp.QuoteMeta(query))
 		}
 
@@ -72,15 +89,50 @@ func contentSearchCmd(workDir, query, exts string, includeIgnored bool) tea.Cmd 
 			ignoreMatcher = gitignore.NewMatcher(patterns)
 		}
 
-		var results []filesContentSearchResult
-		const maxResults = 500
+		const (
+			maxResults    = 500
+			batchSize     = 10
+			flushInterval = 100 * time.Millisecond
+		)
 
-		_ = filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
+		var (
+			buf   []filesContentSearchResult
+			total int
+			timer *time.Timer
+		)
+
+		flush := func() {
+			if len(buf) == 0 {
+				return
+			}
+			total += len(buf)
+			sent := make([]filesContentSearchResult, len(buf))
+			copy(sent, buf)
+			select {
+			case ch <- filesContentSearchBatchMsg{batch: sent, totalSoFar: total, ch: ch, cancel: cancel}:
+			case <-cancel:
+			}
+			buf = buf[:0]
+			if timer != nil {
+				timer.Stop()
+				timer = nil
+			}
+		}
+
+		_ = filepath.WalkDir(workDir, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
-			name := info.Name()
-			if info.IsDir() {
+
+			// Check cancellation at each entry.
+			select {
+			case <-cancel:
+				return filepath.SkipAll
+			default:
+			}
+
+			name := d.Name()
+			if d.IsDir() {
 				if !includeIgnored {
 					if strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "target" || name == ".history" {
 						return filepath.SkipDir
@@ -89,11 +141,9 @@ func contentSearchCmd(workDir, query, exts string, includeIgnored bool) tea.Cmd 
 				return nil
 			}
 			if !includeIgnored {
-				// Skip hidden files.
 				if strings.HasPrefix(name, ".") {
 					return nil
 				}
-				// Skip files matched by .gitignore / .ignore.
 				rel, _ := filepath.Rel(workDir, path)
 				if rel != "" && ignoreMatcher.Match(strings.Split(rel, string(filepath.Separator)), false) {
 					return nil
@@ -124,21 +174,47 @@ func contentSearchCmd(workDir, query, exts string, includeIgnored bool) tea.Cmd 
 			rel, _ := filepath.Rel(workDir, path)
 			for i, line := range lines {
 				if re.MatchString(line) {
-					results = append(results, filesContentSearchResult{
+					buf = append(buf, filesContentSearchResult{
 						path:    path,
 						relPath: rel,
 						line:    i + 1,
 						text:    line,
 					})
-					if len(results) >= maxResults {
+					if len(buf) >= batchSize {
+						flush()
+					}
+					if total+len(buf) >= maxResults {
+						flush()
 						return filepath.SkipAll
 					}
 				}
 			}
+			// Start flush timer on first buffered result.
+			if len(buf) > 0 && timer == nil {
+				timer = time.NewTimer(flushInterval)
+			}
 			return nil
 		})
 
-		return filesContentSearchResultMsg{results: results}
+		// Flush remaining buffered results.
+		flush()
+	}()
+
+	return waitSearchEvent(ch, cancel), cancel
+}
+
+// waitSearchEvent reads the next batch from the search channel.
+func waitSearchEvent(ch chan filesContentSearchBatchMsg, cancel chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case <-cancel:
+			return filesContentSearchDoneMsg{err: nil, cancel: cancel}
+		case batch, ok := <-ch:
+			if !ok {
+				return filesContentSearchDoneMsg{cancel: cancel}
+			}
+			return batch
+		}
 	}
 }
 
@@ -183,7 +259,13 @@ func (m filesModel) updateContentSearch(msg tea.KeyPressMsg) (filesModel, tea.Cm
 	key := msg.String()
 	switch key {
 	case "esc":
+		// Cancel any running search.
+		if m.contentSearchCancel != nil {
+			close(m.contentSearchCancel)
+			m.contentSearchCancel = nil
+		}
 		m.mode = filesModeNormal
+		m.contentSearchLoading = false
 		m.statusMsg = ""
 		return m, nil
 	case "tab":
@@ -198,12 +280,18 @@ func (m filesModel) updateContentSearch(msg tea.KeyPressMsg) (filesModel, tea.Cm
 		// Toggle include-ignored and re-run search if there's a query.
 		m.contentSearchIncludeIgnored = !m.contentSearchIncludeIgnored
 		if m.contentSearchQuery != "" {
+			// Cancel any existing search.
+			if m.contentSearchCancel != nil {
+				close(m.contentSearchCancel)
+			}
 			m.contentSearchLoading = true
 			m.contentSearchDone = false
 			m.contentSearchResults = nil
 			m.contentSearchCursor = 0
 			m.statusMsg = "searching..."
-			return m, contentSearchCmd(m.workDir, m.contentSearchQuery, m.contentSearchExts, m.contentSearchIncludeIgnored)
+			cmd, cancel := startContentSearchCmd(m.workDir, m.contentSearchQuery, m.contentSearchExts, m.contentSearchIncludeIgnored)
+			m.contentSearchCancel = cancel
+			return m, cmd
 		}
 		return m, nil
 	case "enter", "ctrl+j", "ctrl+m":
@@ -215,13 +303,23 @@ func (m filesModel) updateContentSearch(msg tea.KeyPressMsg) (filesModel, tea.Cm
 			m.navigateToSearchResult(m.contentSearchResults[m.contentSearchCursor])
 			return m, nil
 		}
+		if strings.TrimSpace(m.contentSearchQuery) == "" {
+			m.statusMsg = "type a query first"
+			return m, nil
+		}
 		// Start a new search.
+		// Cancel any existing search.
+		if m.contentSearchCancel != nil {
+			close(m.contentSearchCancel)
+		}
 		m.contentSearchLoading = true
 		m.contentSearchDone = false
 		m.contentSearchResults = nil
 		m.contentSearchCursor = 0
 		m.statusMsg = "searching..."
-		return m, contentSearchCmd(m.workDir, m.contentSearchQuery, m.contentSearchExts, m.contentSearchIncludeIgnored)
+		cmd, cancel := startContentSearchCmd(m.workDir, m.contentSearchQuery, m.contentSearchExts, m.contentSearchIncludeIgnored)
+		m.contentSearchCancel = cancel
+		return m, cmd
 	case "j", "down":
 		if len(m.contentSearchResults) > 0 && m.contentSearchCursor < len(m.contentSearchResults)-1 {
 			m.contentSearchCursor++
@@ -321,7 +419,7 @@ func (m filesModel) contentView(width, height int, styles Styles) string {
 
 	// Hints
 	if m.contentSearchLoading {
-		lines = append(lines, styles.Hint.Render("Searching..."))
+		lines = append(lines, styles.Hint.Render(fmt.Sprintf("Searching... %d results so far", len(m.contentSearchResults))))
 	} else if m.contentSearchDone {
 		if len(m.contentSearchResults) == 0 {
 			lines = append(lines, styles.Hint.Render("No results found"))

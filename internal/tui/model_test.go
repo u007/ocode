@@ -2119,20 +2119,20 @@ func TestModelPickerToggleFavorite(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := model{showPicker: true, pickerKind: "model", pickerItems: []string{"openai/gpt-4o-mini"}, pickerValues: []string{"openai/gpt-4o-mini"}}
 
-	updated, _ := m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 	got := derefTestModel(t, updated)
 	if !config.IsFavorite("openai/gpt-4o-mini") {
-		t.Fatal("expected f to add selected model to favorites")
+		t.Fatal("expected ctrl+f to add selected model to favorites")
 	}
 	if !got.showPicker || got.pickerKind != "model" {
 		t.Fatalf("expected model picker to remain open, got showPicker=%v kind=%q", got.showPicker, got.pickerKind)
 	}
 
 	got.pickerIndex = 1
-	updated, _ = got.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	updated, _ = got.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl})
 	_ = updated
 	if config.IsFavorite("openai/gpt-4o-mini") {
-		t.Fatal("expected f to remove selected model from favorites")
+		t.Fatal("expected ctrl+f to remove selected model from favorites")
 	}
 }
 
@@ -2946,6 +2946,155 @@ func TestGitRightClickDeselectsActiveFile(t *testing.T) {
 	}
 }
 
+func TestGitSectionClickSelectsCorrectSection(t *testing.T) {
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			section: gitSectionChanges,
+			panel:   gitPanelSections,
+			diff:    viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+
+	panelW := m.panelWidth()
+	sectW := panelW * 20 / 100
+	gitBodyTop := appHeaderHeight + 1 // first content row inside bordered panels
+
+	// Click each section and verify the correct one is selected
+	sections := []gitSection{gitSectionChanges, gitSectionLog, gitSectionStash, gitSectionBranches}
+	for i, expected := range sections {
+		m.git.section = gitSectionChanges // reset
+		updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: sectW / 2, Y: gitBodyTop + i}, true)
+		if !ok {
+			t.Fatalf("expected click on section %d to be handled", i)
+		}
+		got := updated.(model)
+		if got.git.section != expected {
+			t.Fatalf("click on row %d: expected section %d, got %d", i, expected, got.git.section)
+		}
+	}
+}
+
+func TestGitFileListClickSkipsHeaders(t *testing.T) {
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			section: gitSectionChanges,
+			panel:   gitPanelSections,
+			stagedFiles: []gitFile{
+				{status: "M", path: "a.go"},
+				{status: "A", path: "b.go"},
+			},
+			unstagedFiles: []gitFile{
+				{status: "M", path: "c.go"},
+			},
+			diff: viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+
+	panelW := m.panelWidth()
+	sectW := panelW * 20 / 100
+	gitBodyTop := appHeaderHeight + 1
+
+	// Layout of rendered file list:
+	// Row 0: "● staged" (header)
+	// Row 1: staged file 0 (a.go)
+	// Row 2: staged file 1 (b.go)
+	// Row 3: "○ unstaged/untracked" (header)
+	// Row 4: unstaged file 0 (c.go)
+
+	clickX := sectW + 10 // inside the files panel
+
+	// Click on row 0 → "● staged" header → should NOT change cursor
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop}, true)
+	if !ok {
+		t.Fatal("expected click on staged header to be handled")
+	}
+	got := updated.(model)
+	if got.git.filesCursor != 0 {
+		t.Fatalf("click on staged header: expected cursor 0, got %d", got.git.filesCursor)
+	}
+
+	// Click on row 1 → staged file 0 (a.go) → cursor should be 0
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 1}, true)
+	if !ok {
+		t.Fatal("expected click on first file to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != 0 {
+		t.Fatalf("click on row 1: expected cursor 0, got %d", got.git.filesCursor)
+	}
+
+	// Click on row 2 → staged file 1 (b.go) → cursor should be 1
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 2}, true)
+	if !ok {
+		t.Fatal("expected click on second file to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != 1 {
+		t.Fatalf("click on row 2: expected cursor 1, got %d", got.git.filesCursor)
+	}
+
+	// Click on row 3 → "○ unstaged" header → should NOT change cursor
+	prevCursor := 0
+	m.git.filesCursor = prevCursor
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 3}, true)
+	if !ok {
+		t.Fatal("expected click on unstaged header to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != prevCursor {
+		t.Fatalf("click on unstaged header: expected cursor to stay %d, got %d", prevCursor, got.git.filesCursor)
+	}
+
+	// Click on row 4 → unstaged file 0 (c.go) → cursor should be 2
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 4}, true)
+	if !ok {
+		t.Fatal("expected click on third file to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != 2 {
+		t.Fatalf("click on row 4: expected cursor 2, got %d", got.git.filesCursor)
+	}
+}
+
+func TestGitFileListClickFilteredUsesFlatIndexing(t *testing.T) {
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			section:       gitSectionChanges,
+			panel:         gitPanelSections,
+			filterQuery:   "a",
+			stagedFiles:   []gitFile{{status: "M", path: "a.go"}},
+			unstagedFiles: []gitFile{{status: "M", path: "b.go"}},
+			diff:          viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+
+	panelW := m.panelWidth()
+	sectW := panelW * 20 / 100
+	gitBodyTop := appHeaderHeight + 1
+	clickX := sectW + 10
+
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop}, true)
+	if !ok {
+		t.Fatal("expected click in filtered file list to be handled")
+	}
+	got := updated.(model)
+	if got.git.filesCursor != 0 {
+		t.Fatalf("expected filtered click to select row 0, got cursor %d", got.git.filesCursor)
+	}
+}
+
 func TestFilesRightClickDeselectsActiveFile(t *testing.T) {
 	m := model{
 		width:     100,
@@ -3719,26 +3868,24 @@ func TestSessionRestoreScrollsToBottom(t *testing.T) {
 	}
 }
 
-func TestRerenderTranscriptAutoScrollsNearBottom(t *testing.T) {
+func TestRerenderTranscriptAutoScrollsWhenAtBottom(t *testing.T) {
 	m := model{
 		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
 		styles:   ApplyThemeColors("tokyonight"),
 		messages: []message{{role: roleAssistant, text: strings.Repeat("line\n", 60)}},
 	}
 	m.renderTranscript()
-
-	maxOffset := m.viewport.TotalLineCount() - m.viewport.VisibleLineCount()
-	m.viewport.SetYOffset((maxOffset*9 + 9) / 10)
+	m.viewport.GotoBottom()
 
 	m.messages = append(m.messages, message{role: roleAssistant, text: "new line"})
 	m.rerenderTranscriptAndMaybeScroll()
 
 	if !m.viewport.AtBottom() {
-		t.Fatalf("expected transcript to auto-scroll when already within 90%% of bottom; offset=%d max=%d", m.viewport.YOffset(), m.viewport.TotalLineCount()-m.viewport.VisibleLineCount())
+		t.Fatalf("expected transcript to keep following when pinned to bottom; offset=%d max=%d", m.viewport.YOffset(), m.viewport.TotalLineCount()-m.viewport.VisibleLineCount())
 	}
 }
 
-func TestRerenderTranscriptDoesNotAutoScrollAwayFromBottom(t *testing.T) {
+func TestRerenderTranscriptDoesNotAutoScrollWhenScrolledUp(t *testing.T) {
 	m := model{
 		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
 		styles:   ApplyThemeColors("tokyonight"),
@@ -3746,18 +3893,20 @@ func TestRerenderTranscriptDoesNotAutoScrollAwayFromBottom(t *testing.T) {
 	}
 	m.renderTranscript()
 
-	maxOffset := m.viewport.TotalLineCount() - m.viewport.VisibleLineCount()
-	before := int(float64(maxOffset) * 0.89)
+	// One notch off the bottom: following must stop and the offset must hold,
+	// even though we're still near the bottom.
+	m.viewport.GotoBottom()
+	before := m.viewport.YOffset() - 1
 	m.viewport.SetYOffset(before)
 
 	m.messages = append(m.messages, message{role: roleAssistant, text: "new line"})
 	m.rerenderTranscriptAndMaybeScroll()
 
 	if m.viewport.AtBottom() {
-		t.Fatalf("expected transcript not to auto-scroll when above 90%% threshold; offset=%d max=%d", m.viewport.YOffset(), m.viewport.TotalLineCount()-m.viewport.VisibleLineCount())
+		t.Fatalf("expected transcript not to auto-scroll when scrolled up; offset=%d max=%d", m.viewport.YOffset(), m.viewport.TotalLineCount()-m.viewport.VisibleLineCount())
 	}
 	if got := m.viewport.YOffset(); got != before {
-		t.Fatalf("expected transcript offset to stay at %d when above threshold, got %d", before, got)
+		t.Fatalf("expected transcript offset to stay at %d when scrolled up, got %d", before, got)
 	}
 }
 

@@ -356,11 +356,14 @@ func TestSaveOcodePermissionsPreservesAutoModelAndGrants(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	// Disk already has a configured model + a grant (set by another session).
+	// The model is written via SavePermissionModel — its only owner.
 	onDisk := defaultPermissionConfig()
-	onDisk.Auto.Model = "opencode/deepseek-v4-flash-free"
 	onDisk.Auto.Grants = []AutoGrant{{Kind: "tool", Tool: "bash"}}
 	if err := SaveOcodePermissions(onDisk); err != nil {
 		t.Fatalf("seed SaveOcodePermissions failed: %v", err)
+	}
+	if err := SavePermissionModel("opencode/deepseek-v4-flash-free"); err != nil {
+		t.Fatalf("seed SavePermissionModel failed: %v", err)
 	}
 
 	// A stale session persists permissions carrying only enabled (model empty,
@@ -386,6 +389,83 @@ func TestSaveOcodePermissionsPreservesAutoModelAndGrants(t *testing.T) {
 	}
 }
 
+// TestSaveOcodePermissionsNeverClobbersModelFromStaleSnapshot reproduces the
+// multi-session bug the user reported: a session that started with model "Y"
+// persists a tool-rule change while carrying a STALE non-empty model in its
+// in-memory snapshot, after another session selected model "Z" on disk via
+// /permissions model. The permissions write must not overwrite the on-disk
+// model — only SavePermissionModel owns it.
+func TestSaveOcodePermissionsNeverClobbersModelFromStaleSnapshot(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	chdirTempForConfigTest(t)
+
+	// Another session selected model "Z" on disk via /permissions model.
+	if err := SavePermissionModel("opencode/model-z"); err != nil {
+		t.Fatalf("seed SavePermissionModel failed: %v", err)
+	}
+
+	// This (older) session toggles a tool rule; its snapshot still carries the
+	// previously-loaded model "Y". It did NOT run /permissions model.
+	stale := defaultPermissionConfig()
+	stale.Tools["bash"] = "allow"
+	stale.Auto = &AutoPermissionConfig{Enabled: true, Model: "opencode/model-y"}
+	if err := SaveOcodePermissions(stale); err != nil {
+		t.Fatalf("stale SaveOcodePermissions failed: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if got := cfg.Ocode.Permissions.Auto.Model; got != "opencode/model-z" {
+		t.Fatalf("on-disk model clobbered by stale snapshot: got %q, want %q", got, "opencode/model-z")
+	}
+	if got := cfg.Ocode.Permissions.Tools["bash"]; got != "allow" {
+		t.Fatalf("caller's tool rule not applied: got %q", got)
+	}
+}
+
+// TestSaveOcodePermissionsPreservesDiskAutoWhenCallerHasNone covers branch B:
+// this session never had an auto block, but a concurrent session wrote one
+// (model + enabled) to disk. The whole disk block must survive verbatim.
+func TestSaveOcodePermissionsPreservesDiskAutoWhenCallerHasNone(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	chdirTempForConfigTest(t)
+
+	onDisk := defaultPermissionConfig()
+	onDisk.Auto = &AutoPermissionConfig{Enabled: true}
+	if err := SaveOcodePermissions(onDisk); err != nil {
+		t.Fatalf("seed SaveOcodePermissions failed: %v", err)
+	}
+	if err := SavePermissionModel("opencode/model-z"); err != nil {
+		t.Fatalf("seed SavePermissionModel failed: %v", err)
+	}
+
+	// Caller carries no auto block at all.
+	noAuto := defaultPermissionConfig()
+	noAuto.Auto = nil
+	noAuto.Tools["bash"] = "allow"
+	if err := SaveOcodePermissions(noAuto); err != nil {
+		t.Fatalf("noAuto SaveOcodePermissions failed: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if cfg.Ocode.Permissions.Auto == nil {
+		t.Fatal("disk auto block erased when caller had none")
+	}
+	if got := cfg.Ocode.Permissions.Auto.Model; got != "opencode/model-z" {
+		t.Fatalf("disk model erased: got %q", got)
+	}
+	if !cfg.Ocode.Permissions.Auto.Enabled {
+		t.Fatal("disk enabled flag overridden when caller had no opinion")
+	}
+}
+
 // TestSaveAutoPermissionEnabledKeepsOtherFields proves the targeted enabled
 // writer used by --permission-mode does not clobber model/grants/tool rules.
 func TestSaveAutoPermissionEnabledKeepsOtherFields(t *testing.T) {
@@ -394,10 +474,12 @@ func TestSaveAutoPermissionEnabledKeepsOtherFields(t *testing.T) {
 	chdirTempForConfigTest(t)
 
 	seed := defaultPermissionConfig()
-	seed.Auto.Model = "opencode/deepseek-v4-flash-free"
 	seed.Tools["bash"] = "allow"
 	if err := SaveOcodePermissions(seed); err != nil {
 		t.Fatalf("seed failed: %v", err)
+	}
+	if err := SavePermissionModel("opencode/deepseek-v4-flash-free"); err != nil {
+		t.Fatalf("seed SavePermissionModel failed: %v", err)
 	}
 
 	if err := SaveAutoPermissionEnabled(true); err != nil {

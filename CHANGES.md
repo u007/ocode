@@ -1,6 +1,29 @@
 # Changelog
 
-## [Unreleased] — 2026-06-03
+## [Unreleased]
+
+### Fixed
+- **Command File Parser** — Fixed 50-line cap in `parseCommandFile` that silently truncated command prompt bodies longer than 50 lines after frontmatter (e.g., `/git-commit-push.md` dropped its "Step 4: Stage" and "Step 5: Commit and push" sections). Now reads the full file content.
+- **Multi-Session Permission Clobbering** — `SaveOcodePermissions` no longer overwrites the on-disk `auto.permissions.model` (owned exclusively by `SavePermissionModel`). Also preserves the entire disk auto block when the calling session has no auto block.
+- **Transcript Auto-Scroll** — Changed to sticky-bottom behavior: only follows when pinned to the bottom; one wheel-up stops auto-scroll and stays put while the LLM continues streaming.
+- **Model Picker Favorite Toggle** — Changed favorite toggle keybinding from `f` (which conflicted with type-to-filter) to `ctrl+f`.
+- **Git Tab Mouse Click Mapping** — Corrected section panel and file-list click coordinate mapping (border offset, staged/unstaged header row offset); clamped negative content lines in diff click.
+- **Files Tab Content Search Cancellation** — Pressing Esc now properly cancels an in-flight content search.
+
+### Added
+- **Git Action Logging** — All terminal-state git user actions (push, pull, fetch, commit, stage/unstage, stash, branch create/delete/checkout, hunk apply) are now logged to the DebugLog with a new `GIT` kind, filterable via `5` key in the log tab.
+- **Files Tab Content Search Streaming** — Content search results are now streamed incrementally in batches (batch size 10, flush interval 100ms) via a background goroutine, with Esc cancellation support.
+- **Binary File Detection in Open** — Both Files tab and Git tab now detect binary files and route them to the system file opener instead of Vim/editor.
+- **Double-Click Folder Opens Explorer** — Double-clicking a directory in the Files tab tree opens it in the operating system's file explorer.
+- **Claude Settings Deny Rules** — Added built-in deny rules for `git push --force` and `rm -rf` destructive commands.
+- **Test Coverage** — New tests for multi-session permission model preservation, double-click folder explorer behavior, binary file opener, empty search path, stale search message filtering, and 50-line cap removal in command parser.
+
+### Changed
+- **Files Tab Keybinding** — Status bar keybinding updated from `i edit` to `o open` to reflect the new binary-aware open behavior.
+- **Gitignore** — Added `.claude/settings.local.json` to `.gitignore`.
+- **Version** — Bumped from `0.3.0` to `0.3.1`.
+
+## [0.3.1] — 2026-06-04
 
 ### Added
 - **CONTRIBUTING.md** — Development setup guide, code conventions, and PR guidelines for contributors.

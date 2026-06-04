@@ -581,18 +581,26 @@ func SaveOcodePermissions(permissions PermissionConfig) error {
 	// limits) when persisting permissions. ExportConfig only carries
 	// `enabled`; model/grants/limits are owned elsewhere and would otherwise
 	// be erased here by a session whose in-memory snapshot predates them (or a
-	// concurrent session). The caller is authoritative only for `enabled` and,
-	// when explicitly set, `model`.
-	if permissions.Auto != nil && cfg.Permissions.Auto != nil {
-		merged := *cfg.Permissions.Auto
-		merged.Enabled = permissions.Auto.Enabled
-		if permissions.Auto.Model != "" {
-			merged.Model = permissions.Auto.Model
+	// concurrent session). The caller is authoritative only for `enabled` and
+	// `grants`. The auto-permission `model` is owned EXCLUSIVELY by
+	// SavePermissionModel (the /permissions model command): a permissions write
+	// must never set or clear it, or a session that merely toggled a tool rule
+	// would clobber a model another concurrent session selected on disk.
+	if permissions.Auto != nil {
+		merged := AutoPermissionConfig{}
+		if cfg.Permissions.Auto != nil {
+			merged = *cfg.Permissions.Auto // start from disk: preserves model + limits
 		}
+		merged.Enabled = permissions.Auto.Enabled
 		if permissions.Auto.Grants != nil {
 			merged.Grants = permissions.Auto.Grants
 		}
 		permissions.Auto = &merged
+	} else if cfg.Permissions.Auto != nil {
+		// This session never had an auto block but disk gained one (a concurrent
+		// session wrote it). We hold no authoritative opinion on it — not even
+		// `enabled` — so preserve the disk block verbatim.
+		permissions.Auto = cfg.Permissions.Auto
 	}
 	cfg.Permissions = permissions
 	return SaveOcodeConfig(cfg)

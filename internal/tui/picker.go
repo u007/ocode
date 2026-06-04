@@ -496,7 +496,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
 	if m.pickerKind == "model" || m.pickerKind == "permission-model" {
-		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · f favorite · Esc cancel · type to filter")
+		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · Esc cancel · type to filter")
 	}
 
 	title := "Select model"

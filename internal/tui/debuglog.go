@@ -13,6 +13,11 @@ const (
 	DebugKindAgent   DebugEntryKind = "AGENT"
 	DebugKindError   DebugEntryKind = "ERROR"
 	DebugKindSession DebugEntryKind = "SESSION"
+	// DebugKindGit captures user-initiated git actions performed in the
+	// in-TUI Git tab (push, pull, fetch, commit, stage/unstage, stash,
+	// branch create/delete/checkout, etc.). It is filterable via key "5"
+	// in the log tab and rendered with a dedicated color.
+	DebugKindGit DebugEntryKind = "GIT"
 )
 
 type DebugEntry struct {

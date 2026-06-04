@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -79,7 +80,7 @@ type filesContentSearchResult struct {
 type filesContentSearchPanel int
 
 const (
-	filesContentSearchQuery   filesContentSearchPanel = iota
+	filesContentSearchQuery filesContentSearchPanel = iota
 	filesContentSearchExtFilter
 )
 
@@ -130,14 +131,15 @@ type filesModel struct {
 	inlineEditSize  int64
 
 	// Content search fields
-	contentSearchQuery   string
-	contentSearchExts    string // comma-separated extension patterns, e.g. "*.go,*.ts"
-	contentSearchResults []filesContentSearchResult
-	contentSearchCursor  int
-	contentSearchPanel   filesContentSearchPanel // which input is focused
-	contentSearchLoading bool
-	contentSearchDone    bool // true once search completed
-	contentSearchIncludeIgnored bool // true = search everything, false = skip .gitignore + hidden
+	contentSearchQuery          string
+	contentSearchExts           string // comma-separated extension patterns, e.g. "*.go,*.ts"
+	contentSearchResults        []filesContentSearchResult
+	contentSearchCursor         int
+	contentSearchPanel          filesContentSearchPanel // which input is focused
+	contentSearchLoading        bool
+	contentSearchDone           bool          // true once search completed
+	contentSearchCancel         chan struct{} // non-nil while a streaming search is running
+	contentSearchIncludeIgnored bool          // true = search everything, false = skip .gitignore + hidden
 }
 
 func newFilesModel(workDir string) filesModel {
@@ -201,17 +203,28 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 	case filesGitStatusUpdateMsg:
 		m.gitStatus = msg.gitStatus
 		return m, nil
-	case filesContentSearchResultMsg:
-		m.contentSearchResults = msg.results
+	case filesContentSearchBatchMsg:
+		// Discard stale messages from a previous (cancelled) search.
+		if msg.cancel != m.contentSearchCancel {
+			return m, nil
+		}
+		m.contentSearchResults = append(m.contentSearchResults, msg.batch...)
+		m.contentSearchCursor = 0
+		m.statusMsg = fmt.Sprintf("Searching... %d results", msg.totalSoFar)
+		return m, waitSearchEvent(msg.ch, msg.cancel)
+	case filesContentSearchDoneMsg:
+		if msg.cancel != m.contentSearchCancel {
+			return m, nil
+		}
 		m.contentSearchLoading = false
 		m.contentSearchDone = true
-		m.contentSearchCursor = 0
+		m.contentSearchCancel = nil
 		if msg.err != nil {
 			m.statusMsg = "search error: " + msg.err.Error()
-		} else if len(msg.results) == 0 {
+		} else if len(m.contentSearchResults) == 0 {
 			m.statusMsg = "no results found"
 		} else {
-			m.statusMsg = fmt.Sprintf("%d results found — j/k navigate  enter open", len(msg.results))
+			m.statusMsg = fmt.Sprintf("%d results found — j/k navigate  enter open", len(m.contentSearchResults))
 		}
 		return m, nil
 	case tea.KeyPressMsg:
@@ -340,6 +353,10 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		return m.startInlineEdit()
 	case "y":
 		m.copySelectedPath()
+	case "o":
+		if m.cursor >= 0 && m.cursor < len(m.nodes) {
+			return m, openInFileExplorer(m.nodes[m.cursor].path)
+		}
 	case "R", "shift+r":
 		return m, m.refreshPreviewCmd()
 	case "/":
@@ -936,6 +953,10 @@ func (m *filesModel) copySelectedPath() {
 }
 
 func (m filesModel) openInEditor(path string) tea.Cmd {
+	if isBinaryFile(path) {
+		log.Printf("[editor] files openInEditor: using system opener for binary file=%q", path)
+		return openFileWithOSDefault(path)
+	}
 	if m.editorOpener != nil {
 		log.Printf("[editor] files openInEditor: delegating to editorOpener for file=%q", path)
 		return m.editorOpener(path)
@@ -963,6 +984,67 @@ func (m filesModel) openInEditor(path string) tea.Cmd {
 		log.Printf("[editor] files openInEditor fallback finished: editor=%q file=%q err=%v", editor, path, err)
 		return editorFinishedMsg{err: err}
 	})
+}
+
+// openInFileExplorer opens the given path (file or directory) in the system's
+// native file explorer (Finder on macOS, Explorer on Windows, file manager on Linux).
+func openInFileExplorer(path string) tea.Cmd {
+	return func() tea.Msg {
+		// If it's a file, open the parent directory so the file is revealed
+		info, err := os.Stat(path)
+		if err == nil && !info.IsDir() {
+			path = filepath.Dir(path)
+		}
+		log.Printf("[explorer] opening folder: %q", path)
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			cmd = exec.Command("open", path)
+		case "windows":
+			cmd = exec.Command("explorer", path)
+		default: // linux and others
+			cmd = exec.Command("xdg-open", path)
+		}
+		if err := cmd.Start(); err != nil {
+			log.Printf("[explorer] failed to open folder %q: %v", path, err)
+		}
+		return nil
+	}
+}
+
+func openFileWithOSDefault(path string) tea.Cmd {
+	return func() tea.Msg {
+		log.Printf("[opener] opening file with system default app: %q", path)
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			cmd = exec.Command("open", path)
+		case "windows":
+			cmd = exec.Command("cmd", "/c", "start", "", path)
+		default:
+			cmd = exec.Command("xdg-open", path)
+		}
+		if err := cmd.Start(); err != nil {
+			log.Printf("[opener] failed to open file %q: %v", path, err)
+			return editorFinishedMsg{err: err}
+		}
+		return nil
+	}
+}
+
+func isBinaryFile(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 512)
+	n, _ := f.Read(buf)
+	if n <= 0 {
+		return false
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0
 }
 
 func (m *filesModel) refreshGitStatus() {
@@ -1224,7 +1306,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 
 	// Bottom status bar with keybindings (matching renderStatus in model.go)
 	statusStr := hintStyle.Width(w - 2).MaxHeight(1).Render(
-		"ctrl+f search  / fuzzy find  tab jump  i edit  ^S save  n/N new  r rename  D delete  y path  E editor",
+		"ctrl+f search  / fuzzy find  tab jump  i edit  o open  ^S save  n/N new  r rename  D delete  y path  E editor",
 	)
 	parts := []string{renderedHeader, row, statusStr}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)

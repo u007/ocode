@@ -1266,6 +1266,14 @@ func newModel(opts ...RunOptions) model {
 	workDir := m.workDir
 	m.files = newFilesModel(workDir)
 	m.git = newGitModel(workDir)
+	// Wire the Git tab's logger to the global DebugLog so every terminal-state
+	// git action (push, pull, fetch, commit, stage/unstage, stash, branch
+	// checkout/create/delete, ignore, hunk apply) lands in the log tab.
+	// DebugLog.Append is safe to call from any goroutine; the log tab will
+	// pick the new entry up via the existing debugLogMsg notification path.
+	m.git.SetLogger(func(kind DebugEntryKind, msg string) {
+		DebugLog.Append(DebugEntry{Kind: kind, Message: msg})
+	})
 	if cfg != nil {
 		m.git.generateCommitMsg = m.makeCommitMsgGenerator(cfg)
 		editor := config.ResolveEditor(&cfg.Ocode)
@@ -2588,7 +2596,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		}
-		if keyStr == "f" && (m.pickerKind == "model" || m.pickerKind == "permission-model") {
+		if keyStr == "ctrl+f" && (m.pickerKind == "model" || m.pickerKind == "permission-model") {
 			kind := m.pickerKind
 			items, values := m.pickerVisibleItems()
 			isSelectable := len(m.pickerIsHeader) == 0 || (m.pickerIndex < len(m.pickerIsHeader) && !m.pickerIsHeader[m.pickerIndex])
@@ -3128,6 +3136,8 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.toggleLogKind(DebugKindAgent)
 	case "4":
 		m.toggleLogKind(DebugKindError)
+	case "5":
+		m.toggleLogKind(DebugKindGit)
 	default:
 		if r := []rune(msg.String()); len(r) == 1 && r[0] >= 32 {
 			m.logSearch += string(r)
@@ -3144,6 +3154,7 @@ func (m *model) toggleLogKind(kind DebugEntryKind) {
 			DebugKindTool:  true,
 			DebugKindAgent: true,
 			DebugKindError: true,
+			DebugKindGit:   true,
 		}
 	}
 	m.logKindFilter[kind] = !m.logKindFilter[kind]
@@ -3374,7 +3385,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 		// section panel click
 		if mouse.X >= 0 && mouse.X < sectRight && mouse.Y >= gitBodyTop {
-			row := mouse.Y - gitBodyTop - 1 // -1 for border
+			row := mouse.Y - gitBodyTop
 			if row >= 0 && row < 4 {
 				m.git.section = gitSection(row)
 				m.git.panel = gitPanelSections
@@ -3386,7 +3397,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 		// file list panel click
 		if mouse.X >= sectRight && mouse.X < filesRight && mouse.Y >= gitBodyTop {
-			row := mouse.Y - gitBodyTop - 1 // -1 for border
+			row := mouse.Y - gitBodyTop
 			if row >= 0 {
 				isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
 				m.lastClickTime = time.Now()
@@ -3396,10 +3407,36 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				switch m.git.section {
 				case gitSectionChanges:
 					files := m.git.currentFileList()
-					if row < len(files) {
-						m.git.filesCursor = row
+					fileIdx := row
+					if m.git.filterQuery == "" {
+						// The rendered file list includes "● staged" and
+						// "○ unstaged/untracked" header rows that are not file
+						// items. Subtract those headers to map the visual row to
+						// the correct file index.
+						if len(m.git.stagedFiles) > 0 {
+							if row == 0 {
+								// Clicked the "● staged" header
+								break
+							}
+							if row <= len(m.git.stagedFiles) {
+								fileIdx = row - 1
+							} else if row == len(m.git.stagedFiles)+1 && len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
+								// Clicked the "○ unstaged/untracked" header
+								break
+							} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
+								fileIdx = row - 2 // skip both headers
+							} else {
+								fileIdx = row - 1 // skip staged header only
+							}
+						} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 && row == 0 {
+							// Clicked the "○ unstaged/untracked" header
+							break
+						}
+					}
+					if fileIdx >= 0 && fileIdx < len(files) {
+						m.git.filesCursor = fileIdx
 						if isDoubleClick {
-							path := filepath.Join(m.git.workDir, files[row].path)
+							path := filepath.Join(m.git.workDir, files[fileIdx].path)
 							return m, m.git.openInEditor(path), true
 						}
 						m.git.loadDiff()
@@ -3428,6 +3465,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		diffLeft := filesRight + 1 // after files pane border
 		if mouse.X >= diffLeft && mouse.X < scrollX && mouse.Y >= gitBodyTop {
 			contentLine := (mouse.Y - gitBodyTop - 1) + m.git.diff.YOffset()
+			if contentLine < 0 {
+				contentLine = 0
+			}
 			if contentLine >= 0 && contentLine < len(m.git.diffRawLines) {
 				m.git.panel = gitPanelDiff
 				m.gitSel = selectionState{
@@ -3491,6 +3531,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.lastClickX = mouse.X
 			m.lastClickY = mouse.Y
 			if n.isDir {
+				if isDoubleClick {
+					return m, openInFileExplorer(n.path), true
+				}
 				m.files.toggleDir(idx)
 			} else if isDoubleClick {
 				return m, m.files.openInEditor(n.path), true
@@ -7079,7 +7122,11 @@ func (m *model) shouldAutoScrollTranscript() bool {
 	if m.viewport.TotalLineCount() == 0 {
 		return true
 	}
-	return m.viewport.AtBottom() || m.viewport.ScrollPercent() >= 0.9
+	// Sticky-bottom: follow only while pinned to the bottom. Intent is captured
+	// before content grows (see rerenderTranscriptAndMaybeScroll), so one wheel-up
+	// stops auto-scroll and stays put while the LLM keeps streaming below; scrolling
+	// back to the bottom re-engages following.
+	return m.viewport.AtBottom()
 }
 
 func (m *model) rerenderTranscriptAndMaybeScroll() {

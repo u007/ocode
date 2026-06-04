@@ -89,7 +89,13 @@ func parseCommandFile(path string) (Command, error) {
 	inFrontmatter := false
 	frontmatterEnded := false
 
-	lines := strings.SplitN(content, "\n", 50)
+	// Read every line: a 50-line cap here was a long-standing latent bug
+	// that silently truncated the prompt body of any command file longer
+	// than 50 lines after frontmatter (e.g. /git-commit-push.md dropped its
+	// "Step 4: Stage" and "Step 5: Commit and push" sections). The
+	// frontmatter scan below exits early via `frontmatterEnded`, so this
+	// stays O(file) and bounded by the file size.
+	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
