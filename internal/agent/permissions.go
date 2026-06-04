@@ -643,11 +643,44 @@ func isExfiltrationRiskHTTPie(fields []string) bool {
 }
 
 // isExfiltrationRiskNetcat checks if a netcat/nc command sends data to a remote host.
+// Port-scan-only flags (-z, -zv, -zw) are not exfiltration risk — they test
+// connectivity without transmitting application data. Data-sending risk is
+// flagged when stdin is redirected or no scan-only flag is present.
 func isExfiltrationRiskNetcat(fields []string) bool {
 	if len(fields) < 2 {
 		return false
 	}
-	// nc with any args is risky — it can send arbitrary data to any host
+
+	// Check for stdin redirection: nc host port < file
+	for _, f := range fields[1:] {
+		if f == "<" {
+			return true
+		}
+	}
+
+	// Check for scan-only flags (-z, -zv, -zn, -zw, etc.)
+	// If -z is present, it's a port scan — no data sent.
+	hasScanFlag := false
+	for _, f := range fields[1:] {
+		if strings.HasPrefix(f, "-") && !strings.HasPrefix(f, "--") {
+			// Short flag group: check each char for 'z'
+			for _, ch := range f[1:] {
+				if ch == 'z' {
+					hasScanFlag = true
+					break
+				}
+			}
+		}
+		if hasScanFlag {
+			break
+		}
+	}
+
+	if hasScanFlag {
+		return false // port scan only — no data exfiltration
+	}
+
+	// nc with host+port and no scan flag: can send arbitrary data
 	return true
 }
 

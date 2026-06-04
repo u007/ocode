@@ -20,6 +20,7 @@ const (
 	detailAgentRun    detailViewKind = iota // one async subagent's transcript
 	detailProcessList                       // list of processes in a registry
 	detailProcessLog                        // one process's streamed output
+	detailReview                            // code review overlay
 )
 
 // detailView is one entry on the drill-in stack.

@@ -86,6 +86,7 @@ func init() {
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
 		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|sync [name]|update [name]|confirm|cancel]", help: "List, install, update, or sync plugins", handler: runPluginCmd},
+		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -910,4 +911,8 @@ func runUsageCmd(m *model, args []string) tea.Cmd {
 
 func runEditorModeCmd(m *model, args []string) tea.Cmd {
 	return m.handleEditorModeCmd(args)
+}
+
+func runReviewCmd(m *model, args []string) tea.Cmd {
+	return m.handleReviewCmd(args)
 }

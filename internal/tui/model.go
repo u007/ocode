@@ -292,6 +292,7 @@ type pluginUpdateMsg struct {
 type pluginUpdatedMsg struct {
 	name    string
 	source  string
+	ref     string
 	dir     string
 	enabled bool
 	err     error
@@ -641,6 +642,9 @@ type model struct {
 	// It is owned by the model so we can close it on session shutdown and
 	// during /plugin rebuilds (otherwise every rebuild leaks the gopls child).
 	lspMgr *lsp.Manager
+
+	// review holds the state for the /review command overlay.
+	review reviewState
 }
 
 type modelCleanupState struct {
@@ -1934,14 +1938,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			p, err := plugins.UpdateGit(dir, source, ref)
 			if err != nil {
-				return pluginUpdatedMsg{name: name, source: source, enabled: cfg.Enabled, err: err}
+				return pluginUpdatedMsg{name: name, source: source, ref: ref, enabled: cfg.Enabled, err: err}
 			}
 			// Persist any manifest changes (name, description, etc.).
 			cfg2 := config.PluginConfig{Source: source, Ref: ref, Dir: dir, Enabled: cfg.Enabled}
 			if saveErr := config.SavePlugin(p.Name, cfg2); saveErr != nil {
-				return pluginUpdatedMsg{name: name, source: source, enabled: cfg.Enabled, err: saveErr}
+				return pluginUpdatedMsg{name: name, source: source, ref: ref, enabled: cfg.Enabled, err: saveErr}
 			}
-			return pluginUpdatedMsg{name: p.Name, source: source, dir: dir, enabled: cfg.Enabled}
+			return pluginUpdatedMsg{name: p.Name, source: source, ref: ref, dir: dir, enabled: cfg.Enabled}
 		}
 	case pluginUpdatedMsg:
 		if msg.err != nil {
@@ -1960,7 +1964,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Dir: msg.dir, Enabled: msg.enabled}
+			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Ref: msg.ref, Dir: msg.dir, Enabled: msg.enabled}
 			refreshCustomCommands(m.config)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q updated.", msg.name)})
 			m.rerenderTranscriptAndMaybeScroll()
@@ -1997,13 +2001,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			for _, j := range jobs {
 				p, err := plugins.UpdateGit(j.dir, j.source, j.ref)
 				if err != nil {
-					results = append(results, pluginUpdatedMsg{name: j.name, source: j.source, enabled: j.enabled, err: err})
+					results = append(results, pluginUpdatedMsg{name: j.name, source: j.source, ref: j.ref, enabled: j.enabled, err: err})
 				} else {
 					cfg := config.PluginConfig{Source: j.source, Ref: j.ref, Dir: j.dir, Enabled: j.enabled}
 					if saveErr := config.SavePlugin(p.Name, cfg); saveErr != nil {
-						results = append(results, pluginUpdatedMsg{name: j.name, source: j.source, enabled: j.enabled, err: saveErr})
+						results = append(results, pluginUpdatedMsg{name: j.name, source: j.source, ref: j.ref, enabled: j.enabled, err: saveErr})
 					} else {
-						results = append(results, pluginUpdatedMsg{name: p.Name, source: j.source, dir: j.dir, enabled: j.enabled})
+						results = append(results, pluginUpdatedMsg{name: p.Name, source: j.source, ref: j.ref, dir: j.dir, enabled: j.enabled})
 					}
 				}
 			}
@@ -2025,7 +2029,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						break
 					}
 				}
-				m.config.Plugins[r.name] = config.PluginConfig{Source: r.source, Dir: r.dir, Enabled: r.enabled}
+				m.config.Plugins[r.name] = config.PluginConfig{Source: r.source, Ref: r.ref, Dir: r.dir, Enabled: r.enabled}
 				refreshCustomCommands(m.config)
 				delete(m.pluginSyncStates, r.name)
 			}
@@ -2758,6 +2762,25 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			if top.kind == detailAgentRun {
 				m.openProcessListForRun(top.runPath)
 				return m, nil
+			}
+		case "a":
+			// Accept all suggestions in review overlay
+			top := m.detail[len(m.detail)-1]
+			if top.kind == detailReview {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Accept functionality will be implemented with patch generation."})
+				return m, nil
+			}
+		case "e":
+			// Export review to file
+			top := m.detail[len(m.detail)-1]
+			if top.kind == detailReview {
+				return m, m.exportReview()
+			}
+		case "c":
+			// Copy review to clipboard
+			top := m.detail[len(m.detail)-1]
+			if top.kind == detailReview {
+				return m, m.copyReviewToClipboard()
 			}
 		case "esc":
 			// While a detail view is open: if the user has live agent work in
@@ -8191,12 +8214,16 @@ func (m model) renderDetailView(d detailView) string {
 		title = "Background processes"
 	case detailProcessLog:
 		title = "Process " + d.procID
+	case detailReview:
+		title = "Code Review"
 	}
 	hints := "esc: back · j/k: scroll · mouse: scroll · drag: select"
 	if d.kind == detailAgentRun {
 		hints += " · click: sub-agent/process · ctrl+g: processes"
 	} else if d.kind == detailProcessList {
 		hints += " · click: open process"
+	} else if d.kind == detailReview {
+		hints += " · a: accept all · e: export · c: copy"
 	}
 	header := wrapView(hintStyle.Render("◆ "+title)+hintStyle.Render("  "+hints), m.panelWidth())
 	scrollbar := renderScrollbar(d.vp.Height(), d.vp.TotalLineCount(), d.vp.VisibleLineCount(), d.vp.YOffset())
@@ -10321,4 +10348,23 @@ func (m *model) renderRetryDialog(width int) string {
 		header + "\n\n" + body + "\n\n" + dismissHint,
 	)
 
+}
+
+// handleReviewCmd implements the /review command for AI code review.
+func (m *model) handleReviewCmd(args []string) tea.Cmd {
+	// Detect what to review
+	target, arg, description := detectReviewTarget(args)
+
+	// Get the review context (git diff, file content, etc.)
+	context, err := getReviewContext(target, arg, m.workDir)
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Review error: %v", err)})
+		return nil
+	}
+
+	// Build the review prompt
+	prompt := buildReviewPrompt(target, context, description)
+
+	// Send to agent for review
+	return m.sendCustomCommandPrompt(prompt)
 }
