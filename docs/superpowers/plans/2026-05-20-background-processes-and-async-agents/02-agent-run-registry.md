@@ -99,7 +99,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // RunStatus is the lifecycle state of an async subagent run.

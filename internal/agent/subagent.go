@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // subAgentSupervisorCounter assigns each subagent a unique namespace prefix
@@ -222,7 +222,10 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 
 	tools := t.getToolsForDef(spec)
 
-	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config)
+	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
+	// Wire the sub-agent's advisor gate to the parent's atomic flag so
+	// mid-run toggles propagate immediately (reactive, not a snapshot).
+	subAgent.SetParentAdvisorEnabled(&t.mainAgent.advisorEnabled)
 	// Subagents do not inherit the parent's mode prompt — they have their own
 	// system prompt. SetSpec installs the spec AND runs applySpecModel so any
 	// Model / Temperature / TopP overrides on the registry definition actually

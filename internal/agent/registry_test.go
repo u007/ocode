@@ -290,7 +290,7 @@ func TestAgentSpecToolFiltering(t *testing.T) {
 		},
 	}
 
-	a := NewAgent(mock, nil, nil)
+	a := NewAgent(mock, nil, nil, nil)
 	a.SetSpec(&AgentSpec{
 		Name:  "debug",
 		Tools: []string{"read", "bash", "grep"},
@@ -322,7 +322,7 @@ func TestAgentPermissions(t *testing.T) {
 		},
 	}
 
-	a := NewAgent(mock, nil, nil)
+	a := NewAgent(mock, nil, nil, nil)
 	if a.Permissions() == nil {
 		t.Fatal("expected permissions manager to be initialized")
 	}
@@ -341,7 +341,7 @@ func TestAgentSpec(t *testing.T) {
 		},
 	}
 
-	a := NewAgent(mock, nil, nil)
+	a := NewAgent(mock, nil, nil, nil)
 	if a.Spec() != nil {
 		t.Error("expected nil spec initially")
 	}

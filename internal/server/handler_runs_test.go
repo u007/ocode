@@ -9,19 +9,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 )
 
 // newRunsHandler builds a Handler with one session whose agent owns a "worker"
 // run that has a nested "helper" sub-agent run.
 func newRunsHandler(t *testing.T) (*Handler, string) {
 	t.Helper()
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	worker := a.Runs().New("worker")
 
 	// Sub-agents always have a real client in production; give the test one so
 	// ModelLabel() (which reads Sub.Client().GetModel()) behaves realistically.
-	sub := agent.NewAgent(&agent.GenericClient{Model: "test-model"}, nil, nil)
+	sub := agent.NewAgent(&agent.GenericClient{Model: "test-model"}, nil, nil, nil)
 	sub.Runs().New("helper")
 	worker.Sub = sub
 

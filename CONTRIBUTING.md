@@ -12,7 +12,7 @@ Thanks for your interest in contributing! This document covers how to get set up
 ## Getting Started
 
 ```bash
-git clone https://github.com/jamesmercstudio/ocode.git
+git clone https://github.com/u007/ocode.git
 cd ocode
 go mod download
 go run .
@@ -56,11 +56,21 @@ make web-build                          # Production build
 
 ## Testing
 
+Run the full test suite before opening a pull request. The `make test` target
+runs every test in the repository via `go test ./...` and exits non-zero on
+any failure, so it is safe to gate a PR (or a pre-commit hook) on it.
+
+```bash
+make test                # Run all tests in the repo
+```
+
+The equivalent direct command (use this if you don't have `make` available):
+
 ```bash
 go test ./...
 ```
 
-Run a specific package:
+Run a specific package while iterating:
 
 ```bash
 go test ./internal/tui/...
@@ -126,7 +136,9 @@ The TUI runs in Bubble Tea's **alt-screen**. Any raw write to `os.Stdout` or `os
 
 1. Create a feature branch from `main`.
 2. Make your changes, keeping commits focused and well-described.
-3. Run `go test ./...` and `go vet ./...` before committing.
+3. Run `make test` and `go vet ./...` before committing. The `make test` target
+   runs the full suite (`go test ./...`); do not skip it, even for small changes
+   — broken tests anywhere in the repo will fail CI.
 4. Open a pull request with a clear description of what changed and why.
 
 ### Commit messages

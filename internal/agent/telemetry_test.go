@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/pricing"
+	"github.com/u007/ocode/internal/pricing"
 )
 
 func TestParseOpenAIUsage(t *testing.T) {
@@ -114,7 +114,7 @@ func TestAgentStepPreservesTelemetry(t *testing.T) {
 			Spend: &spend,
 		},
 	}
-	a := NewAgent(mock, nil, nil)
+	a := NewAgent(mock, nil, nil, nil)
 
 	msgs, err := a.Step([]Message{{Role: "user", Content: "Hi"}})
 	if err != nil {

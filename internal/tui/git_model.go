@@ -772,6 +772,8 @@ func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 	case "tab":
 		m.panel = (m.panel + 1) % 3
 		return m, nil
+	case "r":
+		return m, m.cmdRefresh()
 	case "/":
 		if m.section == gitSectionChanges {
 			m.filterActive = true
@@ -1587,26 +1589,26 @@ func (m gitModel) renderHints() string {
 	base := "tab next panel  "
 	switch m.panel {
 	case gitPanelSections:
-		return base + "j/k navigate  enter focus files"
+		return base + "j/k navigate  enter focus files  r refresh"
 	case gitPanelFiles:
 		switch m.section {
 		case gitSectionChanges:
 			if len(m.selectedFiles) > 0 {
-				return base + fmt.Sprintf("%d selected — s stage  u unstage  space toggle  esc clear", len(m.selectedFiles))
+				return base + fmt.Sprintf("%d selected — s stage  u unstage  space toggle  esc clear  r refresh", len(m.selectedFiles))
 			}
-			return base + "s stage  u unstage  i ignore file  I ignore path  space/shift+↑↓ select  d discard  E edit  S stash  c commit  / filter  f fetch  p pull  P push"
+			return base + "s stage  u unstage  i ignore file  I ignore path  space/shift+↑↓ select  d discard  E edit  S stash  c commit  / filter  r refresh  f fetch  p pull  P push"
 		case gitSectionLog:
-			return base + "j/k navigate"
+			return base + "j/k navigate  r refresh"
 		case gitSectionStash:
-			return base + "enter pop  a apply  d drop"
+			return base + "enter pop  a apply  d drop  r refresh"
 		case gitSectionBranches:
-			return base + "enter checkout  n new  x delete  f fetch  p pull  P push"
+			return base + "enter checkout  n new  x delete  r refresh  f fetch  p pull  P push"
 		}
 	case gitPanelDiff:
 		if m.section == gitSectionChanges {
-			return base + "j/k scroll  [/] prev/next hunk  s stage hunk  u unstage hunk"
+			return base + "j/k scroll  [/] prev/next hunk  s stage hunk  u unstage hunk  r refresh"
 		}
-		return base + "j/k scroll"
+		return base + "j/k scroll  r refresh"
 	}
 	return base
 }

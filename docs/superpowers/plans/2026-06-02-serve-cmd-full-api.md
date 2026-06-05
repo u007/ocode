@@ -318,10 +318,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/session"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 ```
 
@@ -372,7 +372,7 @@ func (h *Handler) HandleRedo(w http.ResponseWriter, r *http.Request) {
 
 - [ ] **Step 2: Add import to handler_files.go**
 
-Ensure `"github.com/jamesmercstudio/ocode/internal/snapshot"` is in the import block of `handler_files.go`.
+Ensure `"github.com/u007/ocode/internal/snapshot"` is in the import block of `handler_files.go`.
 
 - [ ] **Step 3: Build**
 
@@ -402,8 +402,8 @@ package server
 import (
 	"net/http"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 )
 
 // ── model ──────────────────────────────────────────────────────────────────
@@ -604,8 +604,8 @@ package server
 import (
 	"net/http"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 )
 
 func (h *Handler) HandleGetPermissions(w http.ResponseWriter, r *http.Request) {
@@ -773,7 +773,7 @@ package server
 import (
 	"net/http"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 func (h *Handler) HandleListMCP(w http.ResponseWriter, r *http.Request) {
@@ -855,8 +855,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/plugins"
 )
 
 func (h *Handler) HandleListPlugins(w http.ResponseWriter, r *http.Request) {
@@ -1051,7 +1051,7 @@ package server
 import (
 	"net/http"
 
-	"github.com/jamesmercstudio/ocode/internal/usage"
+	"github.com/u007/ocode/internal/usage"
 )
 
 func (h *Handler) HandleGetUsage(w http.ResponseWriter, r *http.Request) {
@@ -1106,7 +1106,7 @@ package server
 import (
 	"net/http"
 
-	"github.com/jamesmercstudio/ocode/internal/usage"
+	"github.com/u007/ocode/internal/usage"
 )
 
 func (h *Handler) HandleGetUsage(w http.ResponseWriter, r *http.Request) {
@@ -1179,9 +1179,9 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/jamesmercstudio/ocode/internal/commands"
-	"github.com/jamesmercstudio/ocode/internal/github"
-	"github.com/jamesmercstudio/ocode/internal/skill"
+	"github.com/u007/ocode/internal/commands"
+	"github.com/u007/ocode/internal/github"
+	"github.com/u007/ocode/internal/skill"
 )
 
 // ── skills ─────────────────────────────────────────────────────────────────

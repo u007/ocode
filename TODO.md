@@ -1,5 +1,25 @@
 # TODO
 
+## `/ide` VS Code integration — deferred backends & limits
+
+The `/ide` command (internal/ide + TUI wiring) connects to VS Code via the
+**Claude Code extension's** WebSocket+MCP lock-file protocol (`~/.claude/ide/*.lock`).
+It auto-enables when running inside a VS Code terminal (`TERM_PROGRAM=vscode`)
+unless `ide_mode` is set in ocode.json. Deferred / out of scope for now:
+
+- **opencode-extension backend not implemented.** opencode's own extension
+  (`sst-dev.opencode`) only POSTs a one-shot `@file#Lx-y` to an HTTP server
+  (`/app`, `/tui/append-prompt`) on a keypress — no live selection tracking. A
+  `/ide opencode` mode (ocode serving those endpoints + reading
+  `_EXTENSION_OPENCODE_PORT`) was scoped but not built; the Claude Code backend
+  supersedes it for live data. Add only if a user explicitly wants the opencode
+  extension path.
+- **No editor jump-to from ocode.** We read selection/open-tabs but don't yet
+  drive VS Code to a location (the extension exposes an `openFile` MCP tool we
+  could call).
+- **`at_mentioned` insert is best-effort.** Inserts `@rel#Lstart-Lend` into the
+  input; relies on the extension emitting the event (Cmd+Alt+K style).
+
 ## Clickable file paths in messages — known limitations
 
 Auto-detected, clickable file paths were added to rendered chat messages (web

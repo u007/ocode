@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jamesmercstudio/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/lsp"
 )
 
 type LSPTool struct {

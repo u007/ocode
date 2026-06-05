@@ -96,7 +96,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/jamesmercstudio/ocode/internal/commands"
+	"github.com/u007/ocode/internal/commands"
 )
 
 type slashSuggestion struct {
@@ -808,7 +808,7 @@ Manual checks:
 go test ./internal/tui/... -v 2>&1 | grep -E "PASS|FAIL|ok"
 ```
 
-Expected: all PASS, final line `ok github.com/jamesmercstudio/ocode/internal/tui`
+Expected: all PASS, final line `ok github.com/u007/ocode/internal/tui`
 
 - [ ] **Step 4: Final commit if any fixes were needed**
 

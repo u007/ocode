@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 // SmallModelPriority is the ordered list of cheap/fast models tried when

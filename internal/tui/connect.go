@@ -11,9 +11,11 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/auth"
-	providerplugin "github.com/jamesmercstudio/ocode/internal/plugin/provider"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/lsp"
+	providerplugin "github.com/u007/ocode/internal/plugin/provider"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // connectStage tracks which step of the auth flow the dialog is on.
@@ -670,16 +672,28 @@ func (m *model) rebuildAgentClient() {
 		return
 	}
 	var mcpNames []string
-	var tools = m.getInitialTools()
+	var tools []tool.Tool
+	var lspMgr *lsp.Manager
+	tools, lspMgr = m.getInitialTools()
 	if m.agent != nil {
 		mcpNames = m.agent.MCPToolNames()
 		tools = m.agent.GetTools()
+		// Keep the same LSP manager the original agent was using so the
+		// reconnect preserves diagnostic state (re-fetching the manager
+		// here would create a NEW one and the old one's stored
+		// diagnostics would be lost).
+		lspMgr = m.lspMgr
 	}
 	client := agent.NewClient(m.config, m.config.Model)
 	if client == nil {
 		return
 	}
-	m.agent = agent.NewAgent(client, tools, m.config)
+	m.agent = agent.NewAgent(client, tools, m.config, lspMgr)
+	// Apply the session-level advisor toggle so the rebuilt agent respects
+	// the same runtime state as the previous agent.
+	if m.advisorEnabledSet {
+		m.agent.SetAdvisorEnabled(m.advisorEnabled)
+	}
 	if len(mcpNames) > 0 {
 		m.agent.RestoreMCPToolNames(mcpNames)
 	}

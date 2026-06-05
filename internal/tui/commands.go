@@ -8,10 +8,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/commands"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/commands"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/plugins"
 )
 
 type commandSpec struct {
@@ -59,6 +59,8 @@ func init() {
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
 		{name: "/compact", help: "Reduce context size by removing tool history", handler: runCompactCmd},
 		{name: "/recap", help: "Summarize conversation in caveman style (uses small model)", handler: runRecapCmd},
+		{name: "/changes", help: "Analyze repo changes: diffs, LSP errors, and in-progress specs", handler: runChangesCmd},
+		{name: "/lsp", usage: "/lsp [show|open <path>|errors|all]", help: "Show current LSP diagnostics and error counts", handler: runLSPCmd},
 		{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
 		{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},
 		{name: "/export", help: "Save chat as Markdown", handler: runExportCmd},
@@ -88,6 +90,7 @@ func init() {
 		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|sync [name]|update [name]|confirm|cancel]", help: "List, install, update, or sync plugins", handler: runPluginCmd},
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
+		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -229,6 +232,11 @@ func runCompactCmd(m *model, args []string) tea.Cmd {
 
 func runRecapCmd(m *model, args []string) tea.Cmd {
 	return m.handleRecapCmd(args)
+}
+
+func runLSPCmd(m *model, args []string) tea.Cmd {
+	m.handleLSPCmd(args)
+	return nil
 }
 
 func runUndoCmd(m *model, args []string) tea.Cmd {
@@ -920,4 +928,8 @@ func runReviewCmd(m *model, args []string) tea.Cmd {
 
 func runRemoteControlCmd(m *model, args []string) tea.Cmd {
 	return m.handleRemoteControlCmd(args)
+}
+
+func runIDECmd(m *model, args []string) tea.Cmd {
+	return m.handleIDECmd(args)
 }

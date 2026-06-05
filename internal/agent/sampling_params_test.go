@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 func TestParseOptionalFloat(t *testing.T) {

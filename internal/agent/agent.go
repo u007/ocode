@@ -11,10 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/hooks"
-	"github.com/jamesmercstudio/ocode/internal/mcp"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/hooks"
+	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/mcp"
+	"github.com/u007/ocode/internal/tool"
 )
 
 var DebugAppend func(kind, msg string)
@@ -65,13 +66,18 @@ type RecapResult struct {
 }
 
 type Agent struct {
-	client      LLMClient
-	tools       map[string]tool.Tool
-	mcpTools    map[string]struct{}
-	mcpErrors   []string
-	config      *config.Config
-	mode        Mode
-	spec        *AgentSpec
+	client    LLMClient
+	tools     map[string]tool.Tool
+	mcpTools  map[string]struct{}
+	mcpErrors []string
+	config    *config.Config
+	mode      Mode
+	spec      *AgentSpec
+	// lspMgr, when non-nil, is the project-wide LSP manager. The agent
+	// loop reads its diagnostic store on every Step to build a
+	// transient system-message fragment (see injectLSPDiagnostics) — it
+	// is never persisted to message history. nil disables the inject.
+	lspMgr      *lsp.Manager
 	permissions *PermissionManager
 	activity    *ActivityTracker
 	procs       *tool.ProcessRegistry
@@ -82,8 +88,13 @@ type Agent struct {
 	// from cfg.Ocode.Advisor.Enabled at construction and can be flipped at
 	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.
 	advisorEnabled atomic.Bool
-	jobEvents   chan JobEvent
-	retryEvents chan *RetryStatusEvent
+	// parentAdvisorEnabled, when non-nil, makes the advisor gate reactive:
+	// isToolAllowed dereferences this pointer instead of reading the agent's
+	// own advisorEnabled. Sub-agents set this to point at the parent agent's
+	// advisorEnabled field so mid-run toggles propagate immediately.
+	parentAdvisorEnabled *atomic.Bool
+	jobEvents            chan JobEvent
+	retryEvents    chan *RetryStatusEvent
 	// OnMessage, if set, is invoked for each message produced during Step
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
@@ -255,7 +266,13 @@ func (a *Agent) getPreloadedContext() string {
 	return a.preloadedContext
 }
 
-func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
+// NewAgent constructs an agent. lspMgr is optional: when non-nil the
+// agent loop auto-injects a transient system-message fragment with the
+// current LSP diagnostics on every Step (see injectLSPDiagnostics). The
+// fragment is rebuilt every turn from the manager's DiagnosticStore and
+// is never persisted to message history. Pass nil to disable the
+// auto-inject (e.g. for tests with no LSP setup).
+func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *lsp.Manager) *Agent {
 	toolMap := make(map[string]tool.Tool)
 	for _, t := range tools {
 		toolMap[t.Name()] = t
@@ -266,6 +283,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 		mcpTools:    make(map[string]struct{}),
 		config:      cfg,
 		mode:        ModeBuild,
+		lspMgr:      lspMgr,
 		permissions: NewPermissionManager(),
 		activity:    newActivityTracker(),
 	}
@@ -420,9 +438,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 
 	preLen := len(messages)
 	messages = a.PrepareMessages(messages, "")
+	messages = a.injectLSPDiagnostics(messages)
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
-	emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prepare, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
+	emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prompt prep, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
 
 	// Recover orphaned tool calls from prior sessions: find the last assistant
 	// message that has ToolCalls, then check which call IDs have no following
@@ -581,6 +600,35 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	return newMsgs, nil
 }
 
+const lspDiagnosticsAutoInjectLimit = 50
+
+// injectLSPDiagnostics prepends a transient system message with the current
+// project LSP diagnostics. The message is rebuilt on every Step and is never
+// persisted to history.
+func (a *Agent) injectLSPDiagnostics(messages []Message) []Message {
+	if a == nil || a.lspMgr == nil {
+		return messages
+	}
+	store := a.lspMgr.Diagnostics()
+	if store == nil || store.IsEmpty() {
+		return messages
+	}
+	rendered := tool.RenderDiagnosticsPage(store.All(), 0, lspDiagnosticsAutoInjectLimit)
+	if strings.TrimSpace(rendered) == "" {
+		return messages
+	}
+	msg := Message{Role: "system", Content: rendered}
+	insertAt := 0
+	for insertAt < len(messages) && messages[insertAt].Role == "system" {
+		insertAt++
+	}
+	out := make([]Message, 0, len(messages)+1)
+	out = append(out, messages[:insertAt]...)
+	out = append(out, msg)
+	out = append(out, messages[insertAt:]...)
+	return out
+}
+
 // warnIfNearWindow emits a debug warning when the most recent prompt token
 // count is close to the active model's window. Mid-loop compaction is unsafe
 // (would split open tool-call pairs), so the actual compaction is deferred to
@@ -625,7 +673,7 @@ func (a *Agent) resolveCompactRuntime(force bool) compactRuntime {
 	}
 	rt.SummaryTimeoutSeconds = c.SummaryTimeoutSeconds
 	if rt.SummaryTimeoutSeconds <= 0 {
-		rt.SummaryTimeoutSeconds = 30
+		rt.SummaryTimeoutSeconds = 90
 	}
 	rt.SummaryMaxRetries = c.SummaryMaxRetries
 	if rt.SummaryMaxRetries < 0 {
@@ -853,10 +901,27 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult 
 		emitDebug("COMPACT", fmt.Sprintf("dropped %d middle msgs from summary input (size cap)", dropped))
 	}
 
-	ctx, cancel := contextWithTimeout(rt.SummaryTimeoutSeconds)
+	client := a.compactSummaryClient()
+
+	// Use an inactivity-based timeout: the timer resets each time the LLM
+	// streams data (onDelta fires). This prevents spurious timeouts while
+	// the model is actively generating a summary.
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if rt.SummaryTimeoutSeconds > 0 {
+		var reset func()
+		ctx, cancel, reset = inactivityContext(rt.SummaryTimeoutSeconds)
+		// Wire the reset into the streaming delta callback so each chunk
+		// received from the LLM extends the deadline.
+		if gc, ok := client.(*GenericClient); ok {
+			gc.SetOnDelta(func(kind, text string) { reset() })
+			defer gc.SetOnDelta(nil)
+		}
+	} else {
+		ctx, cancel = contextWithTimeout(rt.SummaryTimeoutSeconds)
+	}
 	defer cancel()
 
-	client := a.compactSummaryClient()
 	summaryText, err := runSummary(ctx, client, prompt, rt.SummaryMaxRetries)
 	if err != nil {
 		emitDebug("COMPACT", fmt.Sprintf("summary failed: %v", err))
@@ -1130,8 +1195,16 @@ func (a *Agent) GetTools() []tool.Tool {
 }
 
 func (a *Agent) isToolAllowed(name string) bool {
-	if name == "advisor" && !a.advisorEnabled.Load() {
-		return false
+	if name == "advisor" {
+		// Prefer the parent's reactive pointer so mid-run toggles propagate
+		// immediately to sub-agents. Fall back to the agent's own static flag.
+		enabled := a.advisorEnabled.Load()
+		if a.parentAdvisorEnabled != nil {
+			enabled = a.parentAdvisorEnabled.Load()
+		}
+		if !enabled {
+			return false
+		}
 	}
 	if a.spec != nil && len(a.spec.Tools) > 0 {
 		found := false
@@ -1165,8 +1238,22 @@ func (a *Agent) isToolAllowed(name string) bool {
 // not persist to config — the change lives only for the agent's lifetime.
 func (a *Agent) SetAdvisorEnabled(enabled bool) { a.advisorEnabled.Store(enabled) }
 
+// SetParentAdvisorEnabled wires this agent's advisor gate to the parent's
+// atomic flag. When set, isToolAllowed and AdvisorEnabled dereference the
+// parent pointer so mid-run toggles propagate immediately.
+func (a *Agent) SetParentAdvisorEnabled(parent *atomic.Bool) {
+	a.parentAdvisorEnabled = parent
+}
+
 // AdvisorEnabled reports whether the advisor tool is currently exposed.
-func (a *Agent) AdvisorEnabled() bool { return a.advisorEnabled.Load() }
+// When a parent pointer is set, it reads from the parent (reactive);
+// otherwise it reads the agent's own static flag.
+func (a *Agent) AdvisorEnabled() bool {
+	if a.parentAdvisorEnabled != nil {
+		return a.parentAdvisorEnabled.Load()
+	}
+	return a.advisorEnabled.Load()
+}
 
 func (a *Agent) SetSpec(spec *AgentSpec) {
 	a.spec = spec

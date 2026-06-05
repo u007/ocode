@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/plugins"
 )
 
 func (h *Handler) HandleListPlugins(w http.ResponseWriter, r *http.Request) {

@@ -11,7 +11,7 @@ import (
 	"os/exec"
 	"runtime"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 )
 
 type Server struct {

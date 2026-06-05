@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 )
 
 // runToolCallDTO is a single tool call inside an assistant message.

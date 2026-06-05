@@ -3,7 +3,7 @@ package agent
 import (
 	"encoding/json"
 
-	"github.com/jamesmercstudio/ocode/internal/pricing"
+	"github.com/u007/ocode/internal/pricing"
 )
 
 type TokenUsage struct {

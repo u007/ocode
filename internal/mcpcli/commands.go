@@ -20,9 +20,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/auth"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/mcp"
+	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/mcp"
 )
 
 func Run(args []string) error {

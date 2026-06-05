@@ -4,12 +4,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 func TestLookupCommandResolvesAliases(t *testing.T) {
@@ -50,7 +50,7 @@ func TestRenderPaletteUsesRegistryCommands(t *testing.T) {
 	m := model{width: 80}
 	got := m.renderPalette()
 
-	for _, want := range []string{"/help", "/sidebar", "/export-claude", "/exit"} {
+	for _, want := range []string{"/help", "/sidebar", "/export-claude", "/ide", "/exit"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("expected palette to include %s, got %q", want, got)
 		}
@@ -381,7 +381,7 @@ func TestContextCommandAutocompletes(t *testing.T) {
 }
 
 func TestContextCommandOutputHasNoRaw(t *testing.T) {
-	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil), config: &config.Config{}}
+	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
 	m.handleContextCmd(nil)
 	for _, msg := range m.messages {
 		if msg.raw != nil {
@@ -391,7 +391,7 @@ func TestContextCommandOutputHasNoRaw(t *testing.T) {
 }
 
 func TestContextCommandOutputsSections(t *testing.T) {
-	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil), config: &config.Config{}}
+	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
 	m.handleContextCmd(nil)
 	if len(m.messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(m.messages))
@@ -420,7 +420,7 @@ func (oneShotStreamClient) GetModel() string    { return "test-model" }
 // (e.g. /review-changes) freezing the chat: they must stream live via
 // streamStartedMsg, not run synchronously and only deliver output at the end.
 func TestCustomCommandUsesStreamingPath(t *testing.T) {
-	a := agent.NewAgent(oneShotStreamClient{}, nil, &config.Config{})
+	a := agent.NewAgent(oneShotStreamClient{}, nil, &config.Config{}, nil)
 	m := &model{agent: a, config: &config.Config{}}
 
 	cmd := m.sendCustomCommandPrompt("review please")

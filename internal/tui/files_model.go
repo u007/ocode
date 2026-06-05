@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
@@ -17,7 +18,8 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/atotto/clipboard"
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/mattn/go-runewidth"
+	"github.com/u007/ocode/internal/config"
 )
 
 type filesPreviewMsg struct {
@@ -156,15 +158,19 @@ type filesModel struct {
 	contentSearchIncludeIgnored bool          // true = search everything, false = skip .gitignore + hidden
 
 	// In-file search fields
-	inFileSearchQuery   string   // current search query
-	inFileSearchMatches [][]int  // highlight ranges: [[line, colstart, line, colend], ...]
-	inFileSearchCursor  int      // current match index
-	inFileSearchActive  bool     // true when search is active
+	inFileSearchQuery   string  // current search query
+	inFileSearchMatches [][]int // highlight ranges: [[line, colstart, line, colend], ...]
+	inFileSearchCursor  int     // current match index
+	inFileSearchActive  bool    // true when search is active
+
+	// Tree horizontal scroll offset
+	treeScrollX int // horizontal scroll offset in the tree panel (columns)
 }
 
 func newFilesModel(workDir string) filesModel {
 	m := filesModel{workDir: workDir}
 	m.preview = viewport.New()
+	m.preview.LeftGutterFunc = diffLineNumbers
 	m.promptInput = textarea.New()
 	m.nodes = loadDirChildren(workDir, 0, false)
 	m.refreshGitStatus()
@@ -248,7 +254,7 @@ func (m *filesModel) Resize(w, h int) {
 	if previewH < 1 {
 		previewH = 1
 	}
-	m.preview.SetWidth(previewW - 7)
+	m.preview.SetWidth(previewW - 14)
 	m.preview.SetHeight(previewH)
 	m.promptInput.SetWidth(previewW - 7)
 	m.promptInput.SetHeight(1)
@@ -320,17 +326,19 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 	key := msg.String()
 	switch key {
 	case "j", "down":
-		m.selectedFiles = nil
 		if m.cursor < len(m.nodes)-1 {
 			m.cursor++
+			// Reset horizontal scroll when cursor moves
+			m.treeScrollX = 0
 			if m.cursor < len(m.nodes) {
 				return m, loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
 	case "k", "up":
-		m.selectedFiles = nil
 		if m.cursor > 0 {
 			m.cursor--
+			// Reset horizontal scroll when cursor moves
+			m.treeScrollX = 0
 			if m.cursor < len(m.nodes) {
 				return m, loadPreviewCmd(m.nodes[m.cursor])
 			}
@@ -386,6 +394,14 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 				return m, loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
+	case "left":
+		m.treeScrollX -= 5
+		if m.treeScrollX < 0 {
+			m.treeScrollX = 0
+		}
+	case "right":
+		m.treeScrollX += 5
+
 	case "E", "shift+e":
 		if m.cursor >= 0 && m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			m.openEditorPicker(m.nodes[m.cursor].path)
@@ -725,7 +741,11 @@ func (m filesModel) updateEditorPicker(msg tea.KeyPressMsg) (filesModel, tea.Cmd
 			}
 		}
 		m.statusMsg = "editor: " + choice
-		return m, m.openInEditor(m.editorTarget)
+		// Route through the parent model so it can rebuild the (stale) editorOpener
+		// with the freshly chosen editor before opening. Opening directly here would
+		// delegate to the opener captured at startup and ignore the new selection.
+		target := m.editorTarget
+		return m, func() tea.Msg { return editorPickedMsg{editor: choice, target: target} }
 	}
 	return m, nil
 }
@@ -1443,7 +1463,9 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	treeW := w * 35 / 100
 	previewW := w - treeW - 3
 
-	treeLines := make([]string, 0, len(m.nodes))
+	// Build raw lines first to determine max width for horizontal scrolling
+	rawLines := make([]string, 0, len(m.nodes))
+	styledLines := make([]string, 0, len(m.nodes))
 	for i, n := range m.nodes {
 		indent := strings.Repeat("  ", n.depth)
 		icon := "  "
@@ -1457,20 +1479,51 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		// Selection marker
 		marker := "  "
 		if m.selectedFiles != nil && m.selectedFiles[i] {
-			marker = styles.Success.Render("✓ ")
+			marker = "✓ "
 		}
-		line := marker + indent + icon + n.name
+		rawLine := marker + indent + icon + n.name
+		styledLine := rawLine
 		// Dim hidden files when showHidden is enabled
 		if m.showHidden && strings.HasPrefix(n.name, ".") {
-			line = styles.Hint.Render(line)
+			styledLine = styles.Hint.Render(styledLine)
 		}
 		if rel, err := filepath.Rel(m.workDir, n.path); err == nil {
 			if badge := m.gitStatus[rel]; badge != "" {
-				line = badge + " " + line
+				rawLine = badge + " " + rawLine
+				styledLine = badge + " " + styledLine
 			}
 		}
+		rawLines = append(rawLines, rawLine)
+		styledLines = append(styledLines, styledLine)
+	}
+
+	// Calculate max content width for horizontal scrolling bounds
+	maxWidth := 0
+	for _, line := range rawLines {
+		if w := visualLineWidth(line); w > maxWidth {
+			maxWidth = w
+		}
+	}
+
+	// Clamp treeScrollX to valid range
+	availW := treeW - 4 // account for border + padding + marker
+	if maxWidth <= availW {
+		m.treeScrollX = 0
+	} else if m.treeScrollX > maxWidth-availW {
+		m.treeScrollX = maxWidth - availW
+	}
+	if m.treeScrollX < 0 {
+		m.treeScrollX = 0
+	}
+
+	// Apply horizontal scroll offset and build final tree lines
+	treeLines := make([]string, 0, len(m.nodes))
+	for i, line := range styledLines {
+		if m.treeScrollX > 0 {
+			line = skipVisibleChars(line, m.treeScrollX)
+		}
 		if i == m.cursor {
-			line = styles.Selected.Width(treeW - 2).Render(line)
+			line = styles.Selected.Width(treeW - 4).Render(line)
 		}
 		treeLines = append(treeLines, line)
 	}
@@ -1690,5 +1743,36 @@ func (m filesModel) treeHint() string {
 	if len(m.selectedFiles) > 0 {
 		return ""
 	}
-	return "j/k navigate  enter open  space select  shift+↑↓ extend  n new  N folder  r rename  D del  / search  ctrl+f grep  o reveal"
+	return "j/k navigate  enter open  space select  shift+↑↓ extend  n new  N folder  r rename  D del  / search  ctrl+f grep  o reveal  ←→ scroll"
+}
+
+// skipVisibleChars skips the first n visible characters in a string that may
+// contain ANSI escape sequences. It preserves all escape sequences intact.
+func skipVisibleChars(s string, n int) string {
+	if n <= 0 {
+		return s
+	}
+	visible := 0
+	i := 0
+	for i < len(s) && visible < n {
+		if loc := ansiEscapeIdx(s[i:]); loc[0] == 0 {
+			i += loc[1]
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		w := runewidth.RuneWidth(r)
+		if r == '\t' {
+			w = tabWidth - (visible % tabWidth)
+		}
+		if w <= 0 {
+			i += size
+			continue
+		}
+		if visible+w > n {
+			break
+		}
+		visible += w
+		i += size
+	}
+	return s[i:]
 }

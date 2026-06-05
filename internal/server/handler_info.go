@@ -7,9 +7,9 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/jamesmercstudio/ocode/internal/commands"
-	"github.com/jamesmercstudio/ocode/internal/github"
-	"github.com/jamesmercstudio/ocode/internal/skill"
+	"github.com/u007/ocode/internal/commands"
+	"github.com/u007/ocode/internal/github"
+	"github.com/u007/ocode/internal/skill"
 )
 
 func (h *Handler) HandleListSkills(w http.ResponseWriter, r *http.Request) {

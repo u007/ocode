@@ -543,7 +543,7 @@ import (
 	gogit "github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 // InstallGit clones a git URL into pluginsRoot/<derived-dir> and returns the
@@ -827,7 +827,7 @@ func (m model) renderPluginList() string {
 Add the `plugins` import to `model.go` imports:
 
 ```go
-"github.com/jamesmercstudio/ocode/internal/plugins"
+"github.com/u007/ocode/internal/plugins"
 ```
 
 - [ ] **Step 2: Add message types to `model.go`**

@@ -3,7 +3,7 @@ package server
 import (
 	"sync"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 )
 
 // RCRequest is a message from the web UI that should be forwarded to the TUI's agent.

@@ -46,6 +46,12 @@ type Manager struct {
 	// match what the LSP client itself tracks.
 	openByURI map[string]string
 	watcher   *fileWatcher
+	// diagnostics is the project-wide store of the most recently
+	// published diagnostics from every server. The readLoop in each
+	// Client invokes the per-server hook installed by ClientForExt,
+	// which funnels entries into this store. Cleared by Close so a
+	// re-launched server starts from a clean slate.
+	diagnostics *DiagnosticStore
 }
 
 // NewManager returns a Manager rooted at root (the project directory used for
@@ -58,14 +64,26 @@ func NewManager(root string) *Manager {
 		root = "."
 	}
 	m := &Manager{
-		root:      root,
-		clients:   make(map[string]*Client),
-		openByURI: make(map[string]string),
+		root:        root,
+		clients:     make(map[string]*Client),
+		openByURI:   make(map[string]string),
+		diagnostics: newDiagnosticStore(),
 	}
 	if w, err := newFileWatcher(root, m); err == nil {
 		m.watcher = w
 	}
 	return m
+}
+
+// Diagnostics returns the project-wide diagnostic store. The store is
+// safe to read without holding the manager mutex; it has its own RWMutex.
+// Returns nil only if the Manager was constructed without a store (which
+// the public constructor never does — guarded for safety).
+func (m *Manager) Diagnostics() *DiagnosticStore {
+	if m == nil {
+		return nil
+	}
+	return m.diagnostics
 }
 
 // ClientForExt returns an initialised client for the given file extension,
@@ -92,6 +110,17 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 	if err := c.Initialize(m.root, spec.langID); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("initialize %s: %w", spec.cmd, err)
+	}
+	// Install a per-server diagnostics hook that funnels publishDiagnostics
+	// frames into the manager's shared store. The handler captures the store
+	// generation so stale frames from a previous server lifecycle are ignored
+	// after Close/Restart bumps the generation.
+	store := m.diagnostics
+	if store != nil {
+		generation := store.Generation()
+		c.SetDiagnosticsHandler(func(uri string, diags []Diagnostic) {
+			store.SetURIIfGeneration(uri, diags, generation)
+		})
 	}
 	m.clients[ext] = c
 	return c, nil
@@ -166,19 +195,33 @@ func (m *Manager) handleFileChange(absPath string) {
 }
 
 // Restart closes and forgets the client for ext (next use restarts it).
+// Diagnostics published by the dying client are NOT cleared — gopls
+// typically republishes the same set on reconnect, and removing them
+// would briefly show "no errors" while the new server is initialising.
+// If the restart transitions to a *different* server (e.g. a binary
+// swap), the new server's first publishDiagnostics will overwrite them.
 func (m *Manager) Restart(ext string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if c, ok := m.clients[ext]; ok {
+		if m.diagnostics != nil {
+			m.diagnostics.BumpGeneration()
+		}
 		c.Close()
 		delete(m.clients, ext)
 	}
 }
 
 // Close shuts down every running server, the file watcher, and clears all
-// bookkeeping. Safe to call multiple times.
+// bookkeeping. Safe to call multiple times. The diagnostic store is also
+// cleared so a re-launched manager (e.g. a session restart) starts from
+// a clean slate — the agent must never see stale diagnostics from a
+// previous server lifetime.
 func (m *Manager) Close() {
 	m.mu.Lock()
+	if m.diagnostics != nil {
+		m.diagnostics.BumpGeneration()
+	}
 	for ext, c := range m.clients {
 		c.Close()
 		delete(m.clients, ext)
@@ -188,6 +231,9 @@ func (m *Manager) Close() {
 	if m.watcher != nil {
 		_ = m.watcher.Close()
 		m.watcher = nil
+	}
+	if m.diagnostics != nil {
+		m.diagnostics.clear()
 	}
 }
 

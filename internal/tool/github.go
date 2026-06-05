@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/github"
+	"github.com/u007/ocode/internal/github"
 )
 
 type GitHubPRTool struct{}

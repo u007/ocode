@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/plugins"
 )
 
 type Command struct {

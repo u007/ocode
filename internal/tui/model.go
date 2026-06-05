@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,19 +25,20 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/auth"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/hooks"
-	"github.com/jamesmercstudio/ocode/internal/lsp"
-	"github.com/jamesmercstudio/ocode/internal/plugins"
-	"github.com/jamesmercstudio/ocode/internal/server"
-	"github.com/jamesmercstudio/ocode/internal/session"
-	"github.com/jamesmercstudio/ocode/internal/skill"
-	"github.com/jamesmercstudio/ocode/internal/snapshot"
-	"github.com/jamesmercstudio/ocode/internal/tool"
-	"github.com/jamesmercstudio/ocode/internal/usage"
-	"github.com/jamesmercstudio/ocode/internal/version"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/hooks"
+	"github.com/u007/ocode/internal/ide"
+	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/server"
+	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/skill"
+	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/usage"
+	"github.com/u007/ocode/internal/version"
 
 	"github.com/atotto/clipboard"
 
@@ -93,6 +95,16 @@ func formatTok(n int) string {
 	default:
 		return strconv.Itoa(n)
 	}
+}
+
+func resolveInitialIDEMode(cfg *config.Config) string {
+	if cfg != nil && cfg.Ocode.IDEMode != "" {
+		return cfg.Ocode.IDEMode
+	}
+	if ide.InVSCode() {
+		return config.IDEModeClaude
+	}
+	return config.IDEModeOff
 }
 
 // columnPad returns spaces to pad label to width w for alignment.
@@ -168,6 +180,14 @@ type editorFinishedMsg struct {
 	err     error
 }
 
+// editorPickedMsg is emitted by the files-tab editor picker after the user
+// selects an editor. The parent model handles it so it can update the resolved
+// editor and rebuild the editorOpener before opening the target file.
+type editorPickedMsg struct {
+	editor string
+	target string
+}
+
 type permissionAskMsg struct {
 	toolName   string
 	toolArgs   json.RawMessage
@@ -218,10 +238,11 @@ type usageSummaryMsg struct {
 }
 
 type streamMsgEvent struct {
-	msg    agent.Message
-	ch     chan agent.Message
-	errCh  chan error
-	cancel chan struct{}
+	msg     agent.Message
+	ch      chan agent.Message
+	deltaCh chan deltaEvent
+	errCh   chan error
+	cancel  chan struct{}
 }
 
 type ctrlCResetMsg struct{}
@@ -250,10 +271,28 @@ type rcStartedMsg struct {
 	bridge *server.RCBridge
 }
 
+// ideStartedMsg is returned when the /ide client is created and starts connecting.
+type ideStartedMsg struct {
+	ch     chan ide.Update
+	client *ide.Client
+	cancel context.CancelFunc
+}
+
+// ideUpdateMsg delivers a VS Code editor event (selection / open-tabs /
+// connection state / mention) from the IDE client goroutine to Update.
+type ideUpdateMsg struct {
+	u ide.Update
+}
+
 // autoRefreshTickMsg fires periodically to quietly refresh the git tab and
 // files tab in the background. The refresh is non-intrusive: it never changes
 // user focus, selection, or cursor position.
 type autoRefreshTickMsg struct{}
+
+// lspDiagChangedMsg is sent when the LSP DiagnosticStore receives new
+// publishDiagnostics from a language server. The TUI handles this by
+// re-rendering so the sidebar LSP count updates proactively.
+type lspDiagChangedMsg struct{}
 
 // sidebarComputeCache memoises expensive sidebar values (context-token estimate
 // and telemetry aggregation) that walk the full message slice. The cache is
@@ -445,6 +484,11 @@ func (m *model) cleanupCurrentSession() {
 		m.lspMgr.Close()
 		m.lspMgr = nil
 	}
+	// Stop the IDE (VS Code) WebSocket client goroutine if running.
+	if m.ideCancel != nil {
+		m.ideCancel()
+		m.ideCancel = nil
+	}
 	m.cleanupAgent(m.agent)
 	// Evict stale tool-result cache files (older than 2 days).
 	_ = agent.CleanupToolResults(48 * time.Hour)
@@ -481,6 +525,9 @@ func (m *model) replaceAgent(next *agent.Agent) tea.Cmd {
 }
 
 func (m *model) installAgent(next *agent.Agent) tea.Cmd {
+	if next != nil && m.advisorEnabledSet {
+		next.SetAdvisorEnabled(m.advisorEnabled)
+	}
 	m.agent = next
 	if m.agent != nil {
 		m.agent.SetSupervisor(m.supervisor)
@@ -502,6 +549,8 @@ type model struct {
 	input               textarea.Model
 	messages            []message
 	agent               *agent.Agent
+	advisorEnabled      bool // runtime advisor state; persisted across agent rebuilds
+	advisorEnabledSet   bool // whether advisorEnabled should be applied to newly installed agents
 	config              *config.Config
 	sessionID           string
 	sessionTitle        string
@@ -611,6 +660,8 @@ type model struct {
 	toolOutputRegions        []toolOutputRegion
 	expandedThinking         map[int]bool
 	thinkingRegions          []toolOutputRegion
+	expandedCompaction       map[int]bool
+	compactionRegions        []toolOutputRegion
 	dotFrame                 int
 	sel                      selectionState
 	detail                   detailStack
@@ -633,7 +684,7 @@ type model struct {
 	gitSel                   selectionState
 	sidebarSel               selectionState
 	rawSidebarLines          []string
-	hoverSidebarFile         string // file path hovered by mouse in sidebar, empty when no hover
+	hoverSidebarFile         string         // file path hovered by mouse in sidebar, empty when no hover
 	hoverLink                pathLinkRegion // file-path link hovered in the transcript
 	hoverLinkActive          bool           // whether hoverLink is set
 	hoverDetailLink          pathLinkRegion // file-path link hovered in the agent-detail view
@@ -649,16 +700,17 @@ type model struct {
 	recapText                string // rendering-only recap, never sent to LLM
 	recapGen                 uint64 // monotonic counter; bumped on /new and each recap request so stale recap goroutines can be ignored
 	titleCh                  chan titleResult
-	deltaCh                  chan deltaEvent
-	deltaDrops               uint64 // bumped each time the deltaCh select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
+	deltaDrops               uint64 // bumped each time the delta select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
 	usageCh                  chan usageEvent
-	streamFinalOutputTokens  int64     // exact output tokens from streaming usage event (0 = not yet received)
-	streamingThinkingIdx     int       // index into m.messages of the in-flight roleThinking message; -1 when none
-	streamAssistantFinalized bool      // true once the current stream has emitted its final assistant message
+	streamFinalOutputTokens  int64 // exact output tokens from streaming usage event (0 = not yet received)
+	streamingThinkingIdx     int   // index into m.messages of the in-flight roleThinking message; -1 when none
+	streamAssistantFinalized bool  // true once the current stream has emitted its final assistant message
+	pendingStreamDeltas      []deltaEvent
 	lastDeltaRender          time.Time // throttles renderTranscript to ≥50ms cadence during streams
 	titleRequested           bool
 	titleGen                 uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
 	compacting               bool
+	queuedCompactInputs      []string // messages queued while compaction is in flight
 	cmdRunningCount          int
 	lastCompactErr           error
 	pendingCompactUIIdx      []int
@@ -686,6 +738,11 @@ type model struct {
 	// during /plugin rebuilds (otherwise every rebuild leaks the gopls child).
 	lspMgr *lsp.Manager
 
+	// lspDiagCh receives non-blocking signals when LSP diagnostics change,
+	// so the sidebar LSP count updates proactively without waiting for user
+	// interaction.
+	lspDiagCh chan struct{}
+
 	// review holds the state for the /review command overlay.
 	review reviewState
 
@@ -700,6 +757,18 @@ type model struct {
 	// rcBridge is the bridge between the server and TUI, used to push messages
 	// so the web UI can fetch existing conversation history.
 	rcBridge *server.RCBridge
+
+	// ide integration (see internal/ide). When ideMode == config.IDEModeClaude
+	// the ideClient streams VS Code editor selection / open-tabs into the TUI
+	// over a background WebSocket; updates arrive via ideCh as ideUpdateMsg.
+	ideMode          string
+	ideCh            chan ide.Update
+	ideClient        *ide.Client
+	ideCancel        context.CancelFunc
+	ideConnected     bool
+	ideSelection     *ide.Selection
+	ideOpenEditors   []ide.Editor
+	ideSelectionSent bool
 }
 
 type modelCleanupState struct {
@@ -1037,7 +1106,12 @@ func (m model) activeSubagentModel() string {
 	return ""
 }
 
-func (m *model) getInitialTools() []tool.Tool {
+// getInitialTools assembles the initial tool set and returns it together
+// with the shared LSP manager. The manager is returned (rather than
+// re-read from m.lspMgr after the call) so callers that build an Agent
+// can pass the SAME manager to NewAgent — this is what enables the
+// transient diagnostics system-message auto-inject.
+func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 	// Lazily create the shared LSP manager the first time the tool set is
 	// assembled. The model owns it for its lifetime so it can be closed on
 	// session shutdown (cleanupCurrentSession) and on /plugin rebuilds
@@ -1045,6 +1119,12 @@ func (m *model) getInitialTools() []tool.Tool {
 	// gopls child.
 	if m.lspMgr == nil {
 		m.lspMgr = lsp.NewManager(".")
+		// Wire up the diagnostics notification channel so the sidebar LSP
+		// count updates proactively when new diagnostics arrive.
+		if m.lspDiagCh == nil {
+			m.lspDiagCh = make(chan struct{}, 1)
+		}
+		m.lspMgr.Diagnostics().SetNotifyChan(m.lspDiagCh)
 	}
 	lspMgr := m.lspMgr
 	tools := []tool.Tool{
@@ -1067,6 +1147,7 @@ func (m *model) getInitialTools() []tool.Tool {
 		&tool.RepoOverviewTool{},
 		&tool.ListTool{},
 		&tool.LSPTool{Mgr: lspMgr},
+		&tool.LSPDiagnosticsTool{Mgr: lspMgr},
 		&tool.FormatTool{Config: m.config},
 	}
 	// The "ast" semantic tool is an opt-in plugin, disabled by default. It
@@ -1074,7 +1155,7 @@ func (m *model) getInitialTools() []tool.Tool {
 	if m.config != nil && m.config.Ocode.Plugins.AST {
 		tools = append(tools, &tool.AstTool{Mgr: lspMgr})
 	}
-	return tools
+	return tools, lspMgr
 }
 
 func (m *model) switchAgent(name string) {
@@ -1182,13 +1263,13 @@ func newModel(opts ...RunOptions) model {
 		}
 	}
 
-	tmp := model{}
-	tools := tmp.getInitialTools()
+	tmp := model{config: cfg}
+	tools, lspMgr := tmp.getInitialTools()
 
 	var a *agent.Agent
 	if cfg != nil && cfg.Model != "" {
 		client := agent.NewClient(cfg, cfg.Model)
-		a = agent.NewAgent(client, tools, cfg)
+		a = agent.NewAgent(client, tools, cfg, lspMgr)
 		pm := a.Permissions()
 		if o.YOLO && pm != nil {
 			pm.SetMode(agent.PermissionModeYOLO)
@@ -1241,10 +1322,20 @@ func newModel(opts ...RunOptions) model {
 	tool.ResetTodoState()
 
 	m := model{
-		viewport:     vp,
-		input:        ta,
-		messages:     []message{},
-		config:       cfg,
+		viewport: vp,
+		input:    ta,
+		messages: []message{},
+		advisorEnabled: func() bool {
+			if cfg != nil {
+				return cfg.Ocode.Advisor.Enabled
+			}
+			return true
+		}(),
+		advisorEnabledSet: true,
+		config:            cfg,
+		// IDE mode: an explicit config value wins; otherwise auto-enable the
+		// Claude Code integration only when running inside a VS Code terminal.
+		ideMode:      resolveInitialIDEMode(cfg),
 		agent:        a,
 		sessionID:    o.SessionID,
 		showThinking: true,
@@ -1272,7 +1363,6 @@ func newModel(opts ...RunOptions) model {
 		compactStartCh:       make(chan struct{}, 4),
 		recapCh:              make(chan recapFinishedMsg, 4),
 		titleCh:              make(chan titleResult, 4),
-		deltaCh:              make(chan deltaEvent, 256),
 		usageCh:              make(chan usageEvent, 16),
 		streamingThinkingIdx: -1,
 		questionInput:        questionInput,
@@ -1385,7 +1475,7 @@ func newModel(opts ...RunOptions) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitTitleEvent(m.titleCh), waitDeltaEvent(m.deltaCh), listenSubAgentPerm(m.subAgentPermCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitTitleEvent(m.titleCh), listenSubAgentPerm(m.subAgentPermCh)}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
 		cmds = append(cmds, listenRetryStatus(m.agent))
@@ -1393,8 +1483,16 @@ func (m model) Init() tea.Cmd {
 	if !agent.RegistryReady() {
 		cmds = append(cmds, waitForRegistry())
 	}
+	// Start listening for LSP diagnostic changes so the sidebar updates proactively.
+	if m.lspDiagCh != nil {
+		cmds = append(cmds, listenLSPDiags(m.lspDiagCh))
+	}
 	// Start quiet background refresh for git/files tabs.
 	cmds = append(cmds, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} }))
+	// Auto-connect to VS Code (Claude Code extension) when IDE mode is enabled.
+	if m.ideMode == config.IDEModeClaude {
+		cmds = append(cmds, m.autoConnectIDE())
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -1494,13 +1592,59 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.activeTab == tabFiles {
-			if msg.Button == tea.MouseWheelUp {
-				m.files.preview.ScrollUp(scrollSpeed)
-				return m, nil
-			}
-			if msg.Button == tea.MouseWheelDown {
-				m.files.preview.ScrollDown(scrollSpeed)
-				return m, nil
+			// Prefer panel focus first, then mouse position.
+			if m.files.panel == filesPanelPreview {
+				if msg.Button == tea.MouseWheelUp {
+					m.files.preview.ScrollUp(scrollSpeed)
+					return m, nil
+				}
+				if msg.Button == tea.MouseWheelDown {
+					m.files.preview.ScrollDown(scrollSpeed)
+					return m, nil
+				}
+			} else {
+				treeW := m.width * 35 / 100
+				mouseOverTree := msg.Mouse().X < treeW
+				shiftHeld := msg.Mouse().Mod&tea.ModShift != 0
+				if mouseOverTree {
+					if shiftHeld {
+						if msg.Button == tea.MouseWheelUp {
+							m.files.treeScrollX -= scrollSpeed
+							if m.files.treeScrollX < 0 {
+								m.files.treeScrollX = 0
+							}
+							return m, nil
+						}
+						if msg.Button == tea.MouseWheelDown {
+							m.files.treeScrollX += scrollSpeed
+							return m, nil
+						}
+					} else {
+						if msg.Button == tea.MouseWheelUp {
+							if m.files.cursor > 0 {
+								m.files.cursor--
+								m.files.treeScrollX = 0
+							}
+							return m, nil
+						}
+						if msg.Button == tea.MouseWheelDown {
+							if m.files.cursor < len(m.files.nodes)-1 {
+								m.files.cursor++
+								m.files.treeScrollX = 0
+							}
+							return m, nil
+						}
+					}
+				} else {
+					if msg.Button == tea.MouseWheelUp {
+						m.files.preview.ScrollUp(scrollSpeed)
+						return m, nil
+					}
+					if msg.Button == tea.MouseWheelDown {
+						m.files.preview.ScrollDown(scrollSpeed)
+						return m, nil
+					}
+				}
 			}
 		}
 		if m.activeTab == tabGit {
@@ -1730,7 +1874,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.config != nil && m.config.Model != "" {
 				client := agent.NewClient(m.config, m.config.Model)
 				if client != nil {
-					next := agent.NewAgent(client, m.getInitialTools(), m.config)
+					tools, lspMgr := m.getInitialTools()
+					next := agent.NewAgent(client, tools, m.config, lspMgr)
 					return m, m.replaceAgent(next)
 				}
 			}
@@ -1870,7 +2015,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			// Append mode - add to existing refs
 			m.appendSessionRefs(msg.refs, msg.total)
-			m.pickerIndex = 0
 			return m, nil
 		}
 		m.pickerSessionTotal = msg.total
@@ -2252,6 +2396,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmds = append(cmds, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} }))
 		return m, tea.Batch(cmds...)
+	case lspDiagChangedMsg:
+		// LSP diagnostics changed — re-render the sidebar with the updated
+		// count and re-arm the listener for the next change.
+		if m.lspDiagCh != nil {
+			return m, listenLSPDiags(m.lspDiagCh)
+		}
+		return m, nil
 	case streamStartedMsg:
 		m.streaming = true
 		m.cancelStream = msg.cancel
@@ -2263,6 +2414,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamOutputChars = 0
 		m.streamingThinkingIdx = -1
 		m.streamAssistantFinalized = false
+		m.pendingStreamDeltas = nil
 		m.tokenBlinkUntil = time.Time{}
 		m.dotFrame = 0
 		if !m.activityRowReserved {
@@ -2399,6 +2551,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, waitForRCRequest(m.rcCh)
 		}
 		return m, nil
+	case ideStartedMsg:
+		m.ideClient = msg.client
+		m.ideCh = msg.ch
+		m.ideCancel = msg.cancel
+		m.ideMode = config.IDEModeClaude
+		return m, waitForIDEUpdate(m.ideCh)
+	case ideUpdateMsg:
+		switch msg.u.Kind {
+		case ide.UpdateConnected:
+			m.ideConnected = true
+		case ide.UpdateDisconnected:
+			m.ideConnected = false
+		case ide.UpdateSelection:
+			if ide.SelectionKey(msg.u.Selection) != ide.SelectionKey(m.ideSelection) {
+				m.ideSelectionSent = false
+			}
+			m.ideSelection = msg.u.Selection
+		case ide.UpdateOpenEditors:
+			m.ideOpenEditors = msg.u.OpenEditors
+		case ide.UpdateMention:
+			if msg.u.Mention != nil {
+				m.insertIDEMention(msg.u.Mention)
+			}
+		}
+		if m.ideCh != nil {
+			return m, waitForIDEUpdate(m.ideCh)
+		}
+		return m, nil
 	case rcRequestMsg:
 		// Append the user message from the web UI to TUI messages
 		m.messages = append(m.messages, message{role: roleUser, text: msg.req.Content})
@@ -2411,33 +2591,43 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Run through the agent
 		return m, m.askAgent()
 	case streamMsgEvent:
-		m.appendAgentMessage(msg.msg)
-		if m.activeTab != tabChat {
-			m.chatUnread = true
-		}
-		m.rerenderTranscriptAndMaybeScroll()
-		// Relay streaming events to the /rc web UI if active
-		if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
-			if msg.msg.Role == "tool" {
+		if msg.msg.Role == "tool" {
+			m.appendAgentMessage(msg.msg)
+			if m.activeTab != tabChat {
+				m.chatUnread = true
+			}
+			m.rerenderTranscriptAndMaybeScroll()
+			// Relay streaming events to the /rc web UI if active
+			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
 				select {
 				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_result", Data: server.ToolResultEvent{Tool: "tool", Output: msg.msg.Content}}:
 				default:
 				}
-			} else if len(msg.msg.ToolCalls) > 0 {
-				for _, tc := range msg.msg.ToolCalls {
+			}
+		} else if msg.msg.Role == "assistant" {
+			m.appendAgentMessage(msg.msg)
+			if m.activeTab != tabChat {
+				m.chatUnread = true
+			}
+			m.rerenderTranscriptAndMaybeScroll()
+			// Relay streaming events to the /rc web UI if active
+			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
+				if len(msg.msg.ToolCalls) > 0 {
+					for _, tc := range msg.msg.ToolCalls {
+						select {
+						case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_start", Data: server.ToolStartEvent{Tool: tc.Function.Name, Command: tc.Function.Arguments}}:
+						default:
+						}
+					}
+				} else if msg.msg.Content != "" {
 					select {
-					case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_start", Data: server.ToolStartEvent{Tool: tc.Function.Name, Command: tc.Function.Arguments}}:
+					case m.pendingRC.StreamCh <- server.SSEEvent{Event: "text", Data: server.TextDelta{Delta: msg.msg.Content}}:
 					default:
 					}
 				}
-			} else if msg.msg.Content != "" {
-				select {
-				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "text", Data: server.TextDelta{Delta: msg.msg.Content}}:
-				default:
-				}
 			}
 		}
-		return m, waitStreamEvent(msg.ch, msg.errCh, msg.cancel)
+		return m, m.waitStreamEvent(msg.ch, msg.deltaCh, msg.errCh, msg.cancel)
 	case streamDoneMsg:
 		// If we have a pending RC request, send the final result and clear it
 		if m.pendingRC != nil {
@@ -2476,6 +2666,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// thinking block instead of appending into the prior turn's buffer.
 		m.streamingThinkingIdx = -1
 		m.streamAssistantFinalized = false
+		m.pendingStreamDeltas = nil
 		if dropped := atomic.SwapUint64(&m.deltaDrops, 0); dropped > 0 {
 			agent.DebugAppendf("stream", "dropped %d reasoning deltas under backpressure", dropped)
 		}
@@ -2574,6 +2765,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingCompactUIIdx = nil
 		}
 		m.layout()
+		// Drain messages queued during compaction.
+		if len(m.queuedCompactInputs) > 0 && m.agent != nil {
+			parts := make([]string, 0, len(m.queuedCompactInputs))
+			for _, q := range m.queuedCompactInputs {
+				parts = append(parts, strings.TrimSpace(q))
+			}
+			text := strings.Join(parts, "\n---\n")
+			m.queuedCompactInputs = nil
+			m.layout()
+			m.maybeScrollTranscriptToBottom()
+			return m, m.processFileReferences(text)
+		}
 		if resume && m.agent != nil {
 			return m, m.askAgent()
 		}
@@ -2593,8 +2796,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitTitleEvent(m.titleCh)
 	case deltaMsg:
-		m.applyThinkingDelta(msg.kind, msg.text)
-		return m, waitDeltaEvent(m.deltaCh)
+		m.applyThinkingDelta(msg.delta.kind, msg.delta.text)
+		return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
 	case usageMsg:
 		if msg.outputTokens > 0 {
 			m.streamFinalOutputTokens = msg.outputTokens
@@ -2621,6 +2824,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + permissionRequestSummary(req)})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
+	case editorPickedMsg:
+		// Persisted to disk already by the picker's saveEditor; mirror it into the
+		// in-memory config so refreshEditorOpener rebuilds both tabs' openers with
+		// the newly chosen editor, then open the target with the fresh opener.
+		if m.config != nil {
+			m.config.Ocode.Editor = msg.editor
+		}
+		m.refreshEditorOpener()
+		return m, m.files.openInEditor(msg.target)
 	case editorFinishedMsg:
 		m.layout()
 		if msg.err != nil {
@@ -3065,6 +3277,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, nil
 		case "enter":
 			runs := m.agent.Runs().Snapshot()
+			slices.Reverse(runs)
 			if m.agentStripSelected >= 0 && m.agentStripSelected < len(runs) {
 				m.openAgentDetail(runs[m.agentStripSelected].ID)
 			}
@@ -3117,6 +3330,13 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		if len(m.queuedInputs) > 0 && m.input.Value() == "" {
 			last := m.queuedInputs[len(m.queuedInputs)-1]
 			m.queuedInputs = m.queuedInputs[:len(m.queuedInputs)-1]
+			m.input.SetValue(last)
+			m.layout()
+			return m, nil
+		}
+		if len(m.queuedCompactInputs) > 0 && m.input.Value() == "" {
+			last := m.queuedCompactInputs[len(m.queuedCompactInputs)-1]
+			m.queuedCompactInputs = m.queuedCompactInputs[:len(m.queuedCompactInputs)-1]
 			m.input.SetValue(last)
 			m.layout()
 			return m, nil
@@ -3274,6 +3494,14 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 
 		if m.streaming {
 			m.queuedInputs = append(m.queuedInputs, text)
+			m.input.Reset()
+			m.layout()
+			m.maybeScrollTranscriptToBottom()
+			return m, nil
+		}
+
+		if m.compacting {
+			m.queuedCompactInputs = append(m.queuedCompactInputs, text)
 			m.input.Reset()
 			m.layout()
 			m.maybeScrollTranscriptToBottom()
@@ -3701,18 +3929,31 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// diff panel text selection
 		diffLeft := filesRight + 1 // after files pane border
 		if mouse.X >= diffLeft && mouse.X < scrollX && mouse.Y >= gitBodyTop {
-			contentLine := (mouse.Y - gitBodyTop - 1) + m.git.diff.YOffset()
-			if contentLine < 0 {
-				contentLine = 0
+			gutterWidth := 0
+			if m.git.diff.LeftGutterFunc != nil {
+				gutterWidth = lipgloss.Width(m.git.diff.LeftGutterFunc(viewport.GutterContext{Soft: m.git.diff.SoftWrap}))
 			}
+			wrapWidth := m.git.diff.Width() - gutterWidth
+			if wrapWidth < 1 {
+				wrapWidth = 1
+			}
+			cfg := viewportSelectionConfig{
+				contentTopY:  appHeaderHeight + 2,
+				contentLeftX: diffLeft,
+				yOffset:      m.git.diff.YOffset(),
+				wrapWidth:    wrapWidth,
+				gutterWidth:  gutterWidth,
+				softWrap:     m.git.diff.SoftWrap,
+			}
+			contentLine, contentCol := cfg.point(m.git.diffRawLines, mouse.X, mouse.Y)
 			if contentLine >= 0 && contentLine < len(m.git.diffRawLines) {
 				m.git.panel = gitPanelDiff
 				m.gitSel = selectionState{
 					dragging:  true,
 					startLine: contentLine,
-					startCol:  mouse.X - diffLeft,
+					startCol:  contentCol,
 					endLine:   contentLine,
-					endCol:    mouse.X - diffLeft,
+					endCol:    contentCol,
 				}
 				m.git.applyDiffSelectionHighlight(m.gitSel.startLine, m.gitSel.startCol, m.gitSel.endLine, m.gitSel.endCol)
 				return m, nil, true
@@ -3796,14 +4037,26 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		previewLeft := treeW + 2
 		previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 		if mouse.X >= previewLeft && mouse.X < scrollX && mouse.Y >= previewBodyTop && mouse.Y < previewBodyTop+m.files.preview.Height() {
-			contentLine := (mouse.Y - previewBodyTop) + m.files.preview.YOffset()
+			gutterWidth := 0
+			if m.files.preview.LeftGutterFunc != nil {
+				gutterWidth = lipgloss.Width(m.files.preview.LeftGutterFunc(viewport.GutterContext{Soft: m.files.preview.SoftWrap}))
+			}
+			cfg := viewportSelectionConfig{
+				contentTopY:  previewBodyTop,
+				contentLeftX: previewLeft,
+				yOffset:      m.files.preview.YOffset(),
+				wrapWidth:    m.files.preview.Width() - gutterWidth,
+				gutterWidth:  gutterWidth,
+				softWrap:     m.files.preview.SoftWrap,
+			}
+			contentLine, contentCol := cfg.point(m.files.previewRawLines, mouse.X, mouse.Y)
 			if contentLine >= 0 && contentLine < len(m.files.previewRawLines) {
 				m.filesSel = selectionState{
 					dragging:  true,
 					startLine: contentLine,
-					startCol:  mouse.X - previewLeft,
+					startCol:  contentCol,
 					endLine:   contentLine,
-					endCol:    mouse.X - previewLeft,
+					endCol:    contentCol,
 				}
 				m.files.applySelectionHighlight(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
 				return m, nil, true
@@ -3905,6 +4158,15 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					perm.SetMode(agent.PermissionModeNormal)
 				}
 				m.persistPermissions()
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
+			if m.sidebarAdvisorToggleForClick(mouse) && m.agent != nil {
+				// Runtime, session-lifetime toggle — not persisted to config,
+				// mirroring the server's /api/config/advisor-enabled behaviour.
+				m.advisorEnabled = !m.agent.AdvisorEnabled()
+				m.advisorEnabledSet = true
+				m.agent.SetAdvisorEnabled(m.advisorEnabled)
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
@@ -4064,6 +4326,11 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		if idx, ok := m.thinkingForClick(mouse); ok {
 			m.expandedThinking[idx] = !m.expandedThinking[idx]
+			m.renderTranscript()
+			return m, nil, true
+		}
+		if idx, ok := m.compactionForClick(mouse); ok {
+			m.expandedCompaction[idx] = !m.expandedCompaction[idx]
 			m.renderTranscript()
 			return m, nil, true
 		}
@@ -4258,17 +4525,19 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		treeW := m.width * 35 / 100
 		previewLeft := treeW + 2
 		previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
-		contentLine := (mouse.Y - previewBodyTop) + m.files.preview.YOffset()
-		if contentLine < 0 {
-			contentLine = 0
+		gutterWidth := 0
+		if m.files.preview.LeftGutterFunc != nil {
+			gutterWidth = lipgloss.Width(m.files.preview.LeftGutterFunc(viewport.GutterContext{Soft: m.files.preview.SoftWrap}))
 		}
-		if contentLine >= len(m.files.previewRawLines) && len(m.files.previewRawLines) > 0 {
-			contentLine = len(m.files.previewRawLines) - 1
+		cfg := viewportSelectionConfig{
+			contentTopY:  previewBodyTop,
+			contentLeftX: previewLeft,
+			yOffset:      m.files.preview.YOffset(),
+			wrapWidth:    m.files.preview.Width() - gutterWidth,
+			gutterWidth:  gutterWidth,
+			softWrap:     m.files.preview.SoftWrap,
 		}
-		col := mouse.X - previewLeft
-		if col < 0 {
-			col = 0
-		}
+		contentLine, col := cfg.point(m.files.previewRawLines, mouse.X, mouse.Y)
 		m.filesSel.endLine = contentLine
 		m.filesSel.endCol = col
 		m.filesSel.active = m.filesSel.startLine != m.filesSel.endLine || m.filesSel.startCol != m.filesSel.endCol
@@ -4298,21 +4567,26 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 
 	if m.gitSel.dragging {
 		panelW := m.panelWidth()
-		gitBodyTop := appHeaderHeight + 1
 		sectW := panelW * 20 / 100
 		filesW := panelW * 30 / 100
 		diffLeft := sectW + filesW + 1
-		contentLine := (mouse.Y - gitBodyTop - 1) + m.git.diff.YOffset()
-		if contentLine < 0 {
-			contentLine = 0
+		gutterWidth := 0
+		if m.git.diff.LeftGutterFunc != nil {
+			gutterWidth = lipgloss.Width(m.git.diff.LeftGutterFunc(viewport.GutterContext{Soft: m.git.diff.SoftWrap}))
 		}
-		if contentLine >= len(m.git.diffRawLines) && len(m.git.diffRawLines) > 0 {
-			contentLine = len(m.git.diffRawLines) - 1
+		wrapWidth := m.git.diff.Width() - gutterWidth
+		if wrapWidth < 1 {
+			wrapWidth = 1
 		}
-		col := mouse.X - diffLeft
-		if col < 0 {
-			col = 0
+		cfg := viewportSelectionConfig{
+			contentTopY:  appHeaderHeight + 2,
+			contentLeftX: diffLeft,
+			yOffset:      m.git.diff.YOffset(),
+			wrapWidth:    wrapWidth,
+			gutterWidth:  gutterWidth,
+			softWrap:     m.git.diff.SoftWrap,
 		}
+		contentLine, col := cfg.point(m.git.diffRawLines, mouse.X, mouse.Y)
 		m.gitSel.endLine = contentLine
 		m.gitSel.endCol = col
 		m.gitSel.active = m.gitSel.startLine != m.gitSel.endLine || m.gitSel.startCol != m.gitSel.endCol
@@ -4553,7 +4827,8 @@ func (m *model) rebuildAgentWithExternalTools() tea.Cmd {
 	if client == nil {
 		return nil
 	}
-	next := agent.NewAgent(client, m.getInitialTools(), m.config)
+	tools, lspMgr := m.getInitialTools()
+	next := agent.NewAgent(client, tools, m.config, lspMgr)
 	if m.agent != nil {
 		next.SetSpec(m.agent.Spec())
 		if m.agent.Permissions() != nil {
@@ -4891,18 +5166,23 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 		}
 		client := agent.NewClient(m.config, modelID)
 		var tools []tool.Tool
+		var lspMgr *lsp.Manager
 		if m.agent != nil {
 			tools = m.agent.GetTools()
+			// Reuse the existing LSP manager so diagnostics already in
+			// the store survive a model switch (a fresh manager would
+			// re-spawn gopls and start with an empty store).
+			lspMgr = m.lspMgr
 		} else {
-			tools = m.getInitialTools()
+			tools, lspMgr = m.getInitialTools()
 		}
 		if client != nil {
-			next := agent.NewAgent(client, tools, m.config)
+			next := agent.NewAgent(client, tools, m.config, lspMgr)
 			next.RestoreMCPToolNames(mcpNames)
 			return m.replaceAgent(next)
 		}
 		if m.agent == nil {
-			next := agent.NewAgent(nil, tools, m.config)
+			next := agent.NewAgent(nil, tools, m.config, lspMgr)
 			next.RestoreMCPToolNames(mcpNames)
 			return m.replaceAgent(next)
 		}
@@ -5192,6 +5472,9 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.streamingThinkingIdx = -1
 	m.pendingCompactManual = false
 	m.pendingCompactUIIdx = nil
+	m.pendingCompactResume = false
+	m.skipCompactPreflight = false
+	m.queuedCompactInputs = nil
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
 	m.titleRequested = false
@@ -5217,23 +5500,29 @@ func (m *model) resetSessionAgent() tea.Cmd {
 	prev := m.agent
 	var next *agent.Agent
 	if prev == nil {
-		tools := m.getInitialTools()
+		tools, lspMgr := m.getInitialTools()
 		modelName := m.currentModelName()
 		if modelName == "" && m.config != nil {
 			modelName = m.config.Model
 		}
 		client := agent.NewClient(m.config, modelName)
-		next = agent.NewAgent(client, tools, m.config)
+		next = agent.NewAgent(client, tools, m.config, lspMgr)
 		next.SetMode(agent.ModeBuild)
 		if next.Permissions() != nil {
 			next.Permissions().SetWorkDir(m.workDir)
 		}
 		next.LoadExternalTools(m.config)
 	} else {
-		tools := prev.GetTools()
-		if len(tools) == 0 {
-			tools = m.getInitialTools()
+		var tools []tool.Tool
+		if ptools := prev.GetTools(); len(ptools) > 0 {
+			tools = ptools
+		} else {
+			tools, _ = m.getInitialTools()
 		}
+		// Reuse the existing LSP manager so a session reset keeps the
+		// already-published diagnostics (a fresh manager would clear
+		// the store on construction).
+		lspMgr := m.lspMgr
 		mcpNames := prev.MCPToolNames()
 		mode := prev.Mode()
 		spec := prev.Spec()
@@ -5248,7 +5537,7 @@ func (m *model) resetSessionAgent() tea.Cmd {
 			client = prev.Client()
 		}
 
-		next = agent.NewAgent(client, tools, m.config)
+		next = agent.NewAgent(client, tools, m.config, lspMgr)
 		next.SetMode(mode)
 		next.SetSpec(spec)
 		if next.Permissions() != nil {
@@ -6173,6 +6462,30 @@ func (m model) buildSelectionContext() string {
 		}
 	}
 
+	// Live VS Code selection (via /ide). Auto-attaches the currently highlighted
+	// text + line range so the agent sees what the user is looking at.
+	if sel := m.ideSelection; sel != nil && sel.FilePath != "" {
+		writeHeader()
+		path := sel.FilePath
+		if rel, err := filepath.Rel(m.workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+			path = rel
+		}
+		b.WriteString("\n## IDE selection: ")
+		b.WriteString(path)
+		if start, end, ok := sel.LineSpan(); ok {
+			fmt.Fprintf(&b, ":L%d-%d", start, end)
+		}
+		b.WriteString("\n")
+		for _, r := range sel.Ranges {
+			if r.Text == "" {
+				continue
+			}
+			for i, line := range strings.Split(r.Text, "\n") {
+				fmt.Fprintf(&b, "%d: %s\n", r.StartLine+1+i, line)
+			}
+		}
+	}
+
 	return b.String()
 }
 
@@ -6905,6 +7218,12 @@ func (m *model) askAgent() tea.Cmd {
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
+	// The current IDE selection (if any) was just folded into the prompt via
+	// buildSelectionContext; mark it sent so the status chip reflects that.
+	if m.ideSelection != nil {
+		m.ideSelectionSent = true
+	}
+
 	// Log agent message summary for debugging
 	if m.agent != nil {
 		roleCounts := map[string]int{}
@@ -6947,31 +7266,49 @@ func (m *model) askAgent() tea.Cmd {
 // error-surfacing behaviour.
 func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 	cancel := make(chan struct{})
-	ch := make(chan agent.Message, 16)
+	msgCh := make(chan agent.Message, 16)
+	deltaCh := make(chan deltaEvent, 256)
 	errCh := make(chan error, 1)
 	a := m.agent
 	go func() {
-		// Use a non-blocking send so the goroutine cannot hang forever
-		// when the channel is drained by waitStreamEvent after cancel
-		// closes. Without this, OnMessage would block on a full ch after
-		// the TUI stops reading, leaking the goroutine and keeping the
-		// activity tracker stuck in LLMRunning=true.
+		// Keep delta streaming best-effort so a burst of reasoning tokens can
+		// never block a tool/result message behind them.
+		a.OnDelta = func(kind, text string) {
+			if text == "" {
+				return
+			}
+			select {
+			case deltaCh <- deltaEvent{kind: kind, text: text}:
+			default:
+				// drop on backpressure — visual stream may skip a token but state
+				// stays consistent because the full ReasoningContent arrives in the
+				// final assistant Message. Counter is incremented atomically because
+				// this callback fires from the LLM streaming goroutine while the TUI
+				// Update loop may read deltaDrops.
+				atomic.AddUint64(&m.deltaDrops, 1)
+			}
+		}
+		// Use a non-blocking send so the goroutine cannot hang forever when the
+		// channel is drained by waitStreamEvent after cancel closes. Without this,
+		// OnMessage would block on a full ch after the TUI stops reading, leaking
+		// the goroutine and keeping the activity tracker stuck in LLMRunning=true.
 		a.OnMessage = func(am agent.Message) {
 			select {
-			case ch <- am:
+			case msgCh <- am:
 			case <-cancel:
 				// Stream cancelled — drop to avoid blocking.
 			}
 		}
 		_, err := a.Step(agentMsgs)
 		a.SetPreloadedContext("")
+		a.OnDelta = nil
 		a.OnMessage = nil
-		close(ch)
+		close(msgCh)
 		errCh <- err
 	}()
 	return tea.Batch(
 		func() tea.Msg { return streamStartedMsg{cancel: cancel} },
-		waitStreamEvent(ch, errCh, cancel),
+		m.waitStreamEvent(msgCh, deltaCh, errCh, cancel),
 	)
 }
 
@@ -7015,16 +7352,81 @@ func isRetryableLLMError(err error) bool {
 	return strings.Contains(lower, "timeout") || strings.Contains(lower, "timed out") || strings.Contains(lower, "connection reset") || strings.Contains(lower, "connection refused") || strings.Contains(lower, "eof")
 }
 
-func waitStreamEvent(ch chan agent.Message, errCh chan error, cancel chan struct{}) tea.Cmd {
+func (m *model) waitStreamEvent(msgCh chan agent.Message, deltaCh chan deltaEvent, errCh chan error, cancel chan struct{}) tea.Cmd {
 	return func() tea.Msg {
+		if len(m.pendingStreamDeltas) > 0 {
+			select {
+			case am, ok := <-msgCh:
+				if ok {
+					return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				}
+			default:
+				delta := m.pendingStreamDeltas[0]
+				m.pendingStreamDeltas = m.pendingStreamDeltas[1:]
+				return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+			}
+		}
+
 		select {
 		case <-cancel:
 			return streamDoneMsg{err: nil}
-		case am, ok := <-ch:
+		case am, ok := <-msgCh:
 			if !ok {
+				m.pendingStreamDeltas = append(m.pendingStreamDeltas, drainStreamDeltas(deltaCh)...)
+				if len(m.pendingStreamDeltas) > 0 {
+					delta := m.pendingStreamDeltas[0]
+					m.pendingStreamDeltas = m.pendingStreamDeltas[1:]
+					return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				}
 				return streamDoneMsg{err: <-errCh}
 			}
-			return streamMsgEvent{msg: am, ch: ch, errCh: errCh, cancel: cancel}
+			return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+		case delta, ok := <-deltaCh:
+			if !ok {
+				m.pendingStreamDeltas = append(m.pendingStreamDeltas, drainStreamDeltas(deltaCh)...)
+				if len(m.pendingStreamDeltas) > 0 {
+					delta := m.pendingStreamDeltas[0]
+					m.pendingStreamDeltas = m.pendingStreamDeltas[1:]
+					return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				}
+				return streamDoneMsg{err: <-errCh}
+			}
+			// If an assistant/tool message is already buffered, prefer it and
+			// hold this delta until the message queue drains. This preserves the
+			// transcript order when fast models start the next turn before the
+			// UI has rendered the tool result(s) from the previous turn.
+			select {
+			case am, ok := <-msgCh:
+				if ok {
+					m.pendingStreamDeltas = append(m.pendingStreamDeltas, delta)
+					return streamMsgEvent{msg: am, ch: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				}
+				m.pendingStreamDeltas = append(m.pendingStreamDeltas, delta)
+				m.pendingStreamDeltas = append(m.pendingStreamDeltas, drainStreamDeltas(deltaCh)...)
+				if len(m.pendingStreamDeltas) > 0 {
+					next := m.pendingStreamDeltas[0]
+					m.pendingStreamDeltas = m.pendingStreamDeltas[1:]
+					return deltaMsg{delta: next, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+				}
+				return streamDoneMsg{err: <-errCh}
+			default:
+				return deltaMsg{delta: delta, msgCh: msgCh, deltaCh: deltaCh, errCh: errCh, cancel: cancel}
+			}
+		}
+	}
+}
+
+func drainStreamDeltas(ch chan deltaEvent) []deltaEvent {
+	var deltas []deltaEvent
+	for {
+		select {
+		case delta, ok := <-ch:
+			if !ok {
+				return deltas
+			}
+			deltas = append(deltas, delta)
+		default:
+			return deltas
 		}
 	}
 }
@@ -7037,6 +7439,17 @@ func waitForRCRequest(rcCh <-chan server.RCRequest) tea.Cmd {
 			return nil // channel closed
 		}
 		return rcRequestMsg{req: req}
+	}
+}
+
+// waitForIDEUpdate listens for VS Code editor events from the /ide client.
+func waitForIDEUpdate(ch <-chan ide.Update) tea.Cmd {
+	return func() tea.Msg {
+		u, ok := <-ch
+		if !ok {
+			return nil // channel closed
+		}
+		return ideUpdateMsg{u: u}
 	}
 }
 
@@ -7420,6 +7833,26 @@ func (m model) thinkingForClick(mouse tea.Mouse) (int, bool) {
 	return 0, false
 }
 
+func (m model) compactionForClick(mouse tea.Mouse) (int, bool) {
+	if len(m.compactionRegions) == 0 {
+		return 0, false
+	}
+	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
+		return 0, false
+	}
+	clickY := mouse.Y - appHeaderHeight - 1
+	if clickY < 0 || clickY >= m.viewport.Height() {
+		return 0, false
+	}
+	clickY += m.viewport.YOffset()
+	for _, region := range m.compactionRegions {
+		if clickY >= region.startLine && clickY <= region.endLine {
+			return region.messageIndex, true
+		}
+	}
+	return 0, false
+}
+
 func (m *model) shouldAutoScrollTranscript() bool {
 	if m.restoredPendingScroll {
 		return true
@@ -7466,11 +7899,15 @@ func (m *model) renderTranscript() {
 	}
 	m.toolOutputRegions = nil
 	m.thinkingRegions = nil
+	m.compactionRegions = nil
 	if m.expandedToolOutputs == nil {
 		m.expandedToolOutputs = make(map[int]bool)
 	}
 	if m.expandedThinking == nil {
 		m.expandedThinking = make(map[int]bool)
+	}
+	if m.expandedCompaction == nil {
+		m.expandedCompaction = make(map[int]bool)
 	}
 
 	for i, msg := range m.messages {
@@ -7540,6 +7977,17 @@ func (m *model) renderTranscript() {
 					startLine:    startLine,
 					endLine:      endLine,
 				})
+			} else if msg.raw != nil && msg.raw.Role == "system" && strings.HasPrefix(msg.raw.Content, "[ocode:compaction-summary]") {
+				// Compaction summary: render as collapsible section
+				startLine := heightNow()
+				boxContent := m.renderCompactionSummaryBox(msg.raw.Content, m.expandedCompaction[i])
+				b.WriteString(boxContent)
+				endLine := heightNow() - 1
+				m.compactionRegions = append(m.compactionRegions, toolOutputRegion{
+					messageIndex: i,
+					startLine:    startLine,
+					endLine:      endLine,
+				})
 			} else {
 				b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
 			}
@@ -7556,7 +8004,7 @@ func (m *model) renderTranscript() {
 		_ = startLine // used for click region tracking if needed later
 	}
 	// Add trailing padding so agent/permission boxes don't block the view.
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 10; i++ {
 		b.WriteString("\n")
 	}
 	m.transcriptContent = wrapView(b.String(), m.viewport.Width())
@@ -7668,6 +8116,37 @@ func (m *model) renderOrphanWarningBox(content string, expanded bool) string {
 	return b.String()
 }
 
+// renderCompactionSummaryBox renders a compaction summary as a collapsible box.
+// The content is the full [ocode:compaction-summary] prefixed text.
+func (m *model) renderCompactionSummaryBox(content string, expanded bool) string {
+	// Strip the marker prefix to get the actual summary body
+	body := strings.TrimSpace(strings.TrimPrefix(content, "[ocode:compaction-summary]"))
+	body = sanitizeForTUI(body)
+	body = strings.TrimRight(body, "\n")
+	lines := strings.Split(body, "\n")
+	boxContent := body
+	footer := m.styles.Hint.Render("  ▲ click to collapse")
+
+	if !expanded {
+		footer = ""
+		if len(lines) > toolOutputPreviewLines {
+			boxContent = strings.Join(lines[len(lines)-toolOutputPreviewLines:], "\n")
+			footer = m.styles.Hint.Render(fmt.Sprintf("  … %d earlier lines · click to expand", len(lines)-toolOutputPreviewLines))
+		}
+	}
+
+	width := m.viewport.Width() - 4
+	if width < 1 {
+		width = 1
+	}
+	box := m.styles.ToolBox.Width(width).Render(boxContent)
+	header := m.styles.Hint.Render("  📦 compaction summary")
+	if footer != "" {
+		return header + "\n" + box + "\n" + footer
+	}
+	return header + "\n" + box
+}
+
 func padViewHeight(view string, height int) string {
 	if height <= 0 {
 		return view
@@ -7765,22 +8244,6 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
-	deltaCh := m.deltaCh
-	m.agent.OnDelta = func(kind, text string) {
-		if deltaCh == nil {
-			return
-		}
-		select {
-		case deltaCh <- deltaEvent{kind: kind, text: text}:
-		default:
-			// drop on backpressure — visual stream may skip a token but state
-			// stays consistent because the full ReasoningContent arrives in the
-			// final assistant Message. Counter is incremented atomically because
-			// this callback fires from the LLM streaming goroutine while the TUI
-			// Update loop may read deltaDrops.
-			atomic.AddUint64(&m.deltaDrops, 1)
-		}
-	}
 	usageCh := m.usageCh
 	m.agent.OnUsage = func(inputTokens, outputTokens int64) {
 		if usageCh == nil {
@@ -7856,13 +8319,19 @@ type recapFinishedMsg struct {
 }
 
 // deltaEvent carries one streamed token (kind ∈ {"reasoning","text"}) from
-// the LLM HTTP goroutine to the TUI's event loop via deltaCh.
+// the LLM HTTP goroutine to the TUI's event loop.
 type deltaEvent struct {
 	kind string
 	text string
 }
 
-type deltaMsg deltaEvent
+type deltaMsg struct {
+	delta   deltaEvent
+	msgCh   chan agent.Message
+	deltaCh chan deltaEvent
+	errCh   chan error
+	cancel  chan struct{}
+}
 
 type usageEvent struct {
 	inputTokens  int64
@@ -7926,12 +8395,6 @@ func (m *model) applyThinkingDelta(kind, text string) {
 	}
 	m.rerenderTranscriptAndMaybeScroll()
 	m.lastDeltaRender = time.Now()
-}
-
-func waitDeltaEvent(ch chan deltaEvent) tea.Cmd {
-	return func() tea.Msg {
-		return deltaMsg(<-ch)
-	}
 }
 
 func waitTitleEvent(ch chan titleResult) tea.Cmd {
@@ -8088,13 +8551,19 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) bool {
 	}
 	rawCopy := r.Summary
 	replacedCount := r.ReplaceTo - r.ReplaceFrom
+	// Visual divider to clearly mark where compaction occurred.
+	divider := message{
+		role: roleAssistant,
+		text: "──────────────────────────────────────────────────",
+	}
 	banner := message{
 		role: roleAssistant,
 		text: fmt.Sprintf("📦 Compacted %d earlier messages", replacedCount),
 		raw:  &rawCopy,
 	}
-	newMsgs := make([]message, 0, len(m.messages)-(uiTo-uiFrom)+1)
+	newMsgs := make([]message, 0, len(m.messages)-(uiTo-uiFrom)+2)
 	newMsgs = append(newMsgs, m.messages[:uiFrom]...)
+	newMsgs = append(newMsgs, divider)
 	newMsgs = append(newMsgs, banner)
 	newMsgs = append(newMsgs, m.messages[uiTo:]...)
 	m.messages = newMsgs
@@ -8118,6 +8587,16 @@ func listenActivity(tracker *agent.ActivityTracker) tea.Cmd {
 	return func() tea.Msg {
 		snap := <-tracker.Notify()
 		return activityUpdateMsg{tracker: tracker, snap: snap}
+	}
+}
+
+// listenLSPDiags blocks on the LSP diagnostics notification channel and
+// re-arms itself so the next change is also caught. Returns a lspDiagChangedMsg
+// so the TUI re-renders the sidebar with the updated LSP count.
+func listenLSPDiags(ch chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		<-ch
+		return lspDiagChangedMsg{}
 	}
 }
 
@@ -8194,6 +8673,14 @@ func truncateToWidth(s string, w int) string {
 	return ansi.Truncate(s, w, "…")
 }
 
+// plural returns "s" when n != 1, for simple English pluralization.
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
 // constrainToWidth ensures every line in a multi-line string does not exceed
 // the given visual width. Lines are silently truncated; no ellipsis is added.
 // This is useful for constraining free-form rendered blocks that are joined
@@ -8224,6 +8711,9 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	if len(runs) == 0 {
 		return "", nil
 	}
+	// Reverse so newest agents render at the top — the most relevant run
+	// is always visible without scrolling down.
+	slices.Reverse(runs)
 	width := m.panelWidth() - 2
 	frame := spinnerFrames[m.dotFrame%len(spinnerFrames)]
 
@@ -8252,7 +8742,9 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	// reserved for whichever indicators are shown.
 	showUp := offset > 0
 	if showUp {
-		b.WriteString(truncateToWidth(hintStyle.Render("  ↑ more"), width) + "\n")
+		upCount := offset
+		up := fmt.Sprintf("  ⋯ %d more agent%s above (Shift+Tab to browse)", upCount, plural(upCount))
+		b.WriteString(truncateToWidth(hintStyle.Render(up), width) + "\n")
 		row++
 	}
 
@@ -8305,7 +8797,8 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 	}
 
 	if offset+rendered < len(runs) {
-		more := fmt.Sprintf("  ↓ more (%d)", len(runs)-offset-rendered)
+		moreCount := len(runs) - offset - rendered
+		more := fmt.Sprintf("  ⋯ %d more agent%s below (Shift+Tab to browse)", moreCount, plural(moreCount))
 		b.WriteString(truncateToWidth(hintStyle.Render(more), width) + "\n")
 		row++
 	}
@@ -8330,6 +8823,7 @@ func (m model) agentStripVisibleCount(offset int) int {
 	if offset < 0 || offset >= len(runs) {
 		return 0
 	}
+	slices.Reverse(runs)
 	showUp := offset > 0
 	runRows := 0
 	rendered := 0
@@ -9098,6 +9592,17 @@ func (m model) renderStoppedIndicator() string {
 }
 
 func (m model) renderQueueRow() string {
+	// Show queued compact inputs first (messages waiting for compaction).
+	if len(m.queuedCompactInputs) > 0 {
+		items := make([]string, 0, len(m.queuedCompactInputs))
+		for i, input := range m.queuedCompactInputs {
+			label := fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(input))
+			items = append(items, ansi.Truncate(label, 48, "..."))
+		}
+		text := fmt.Sprintf(" Queued (%d, waiting for compaction): %s", len(m.queuedCompactInputs), strings.Join(items, " | "))
+		w := m.statusContentWidth()
+		return m.styles.Status.Width(w).MaxHeight(1).Render(text)
+	}
 	if len(m.queuedInputs) == 0 {
 		return ""
 	}
@@ -9135,6 +9640,8 @@ type sidebarRenderData struct {
 	bottomLines            []string
 	fileScrollLinePaths    map[int]string
 	allowedHeaderBottomIdx int // index in bottomLines of the Allowed header, -1 if absent
+	advisorToggleTopIdx    int // index in topLines of the advisor on/off row, -1 if absent
+	advisorToggleRows      int // number of (possibly wrapped) rows the advisor row occupies
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -9392,7 +9899,7 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -9518,9 +10025,20 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 			pPermModel = m.config.Ocode.Permissions.Auto.Model
 		}
 	}
-	appendWrapped(&data.topLines, dimStyle.Render("advisor: ")+sidebarTextStyle.Render(advisorModel), outerBodyWidth)
+	// Advisor row doubles as an on/off toggle (click to flip the runtime gate).
+	advisorOn := m.agent == nil || m.agent.AdvisorEnabled()
+	var advisorLine string
+	if advisorOn {
+		advisorLine = dimStyle.Render("advisor: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(advisorModel)
+	} else {
+		advisorLine = dimStyle.Render("advisor: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(advisorModel)
+	}
+	data.advisorToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, advisorLine, outerBodyWidth)
+	data.advisorToggleRows = len(data.topLines) - data.advisorToggleTopIdx
 	appendWrapped(&data.topLines, dimStyle.Render("small:   ")+sidebarTextStyle.Render(smallModel), outerBodyWidth)
 	appendWrapped(&data.topLines, dimStyle.Render("perm:    ")+sidebarTextStyle.Render(pPermModel), outerBodyWidth)
+	appendWrapped(&data.topLines, m.ideSidebarStatusLine(), outerBodyWidth)
 	data.topLines = append(data.topLines, "")
 
 	// ── Git status section (scrollable) ──
@@ -9990,6 +10508,26 @@ func (m model) sidebarAllowedHeaderForClick(mouse tea.Mouse) bool {
 	layout := m.sidebarScreenLayout(data)
 	allowedY := layout.bottomScreenY + data.allowedHeaderBottomIdx
 	return mouse.Y == allowedY
+}
+
+// sidebarAdvisorToggleForClick returns true when the click lands on the advisor
+// on/off row in the pinned top area of the sidebar.
+func (m model) sidebarAdvisorToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.advisorToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	// Top lines start at contentTopY; bail if the row was trimmed by overflow.
+	if data.advisorToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.advisorToggleTopIdx
+	endY := minInt(startY+data.advisorToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
 }
 
 func (m model) tabForClick(mouse tea.Mouse) (int, bool) {
@@ -10683,17 +11221,52 @@ func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {
 }
 
 func (m model) renderLSPStatus() string {
-	if m.agent == nil {
-		return "unavailable"
+	if m.lspMgr == nil {
+		return "0 problems"
 	}
+	snap := m.lspMgr.Diagnostics().Snapshot(1)
+	if snap.Total == 0 {
+		return "available"
+	}
+	return fmt.Sprintf("%d problems", snap.Total)
+}
 
-	for _, tool := range m.agent.GetTools() {
-		if tool.Name() == "lsp" {
-			return "available"
+func (m *model) handleLSPCmd(args []string) {
+	if m.lspMgr == nil {
+		// Lazily create the shared manager so /lsp works even before any
+		// tool initialization path has touched getInitialTools().
+		m.lspMgr = lsp.NewManager(".")
+		if m.lspDiagCh == nil {
+			m.lspDiagCh = make(chan struct{}, 1)
 		}
+		m.lspMgr.Diagnostics().SetNotifyChan(m.lspDiagCh)
 	}
-
-	return "unavailable"
+	if m.lspMgr.Diagnostics() == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "LSP diagnostics unavailable."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return
+	}
+	snap := m.lspMgr.Diagnostics().Snapshot(50)
+	if snap.Total == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No LSP diagnostics found."})
+		m.rerenderTranscriptAndMaybeScroll()
+		return
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("LSP diagnostics: %d total across %d file(s).\n", snap.Total, snap.Files))
+	for i, d := range snap.FirstN {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(fmt.Sprintf("%s:%d:%d  [%s]  %s", formatSidebarFilePath(d.Path, m.workDir, 80), d.Range.Start.Line+1, d.Range.Start.Character+1, d.Severity.String(), d.Message))
+	}
+	if snap.Total > len(snap.FirstN) {
+		b.WriteString(fmt.Sprintf("\nShowing first %d of %d. Use /lsp open <path> or the lsp_diagnostics tool for more.", len(snap.FirstN), snap.Total))
+	} else {
+		b.WriteString("\nUse /lsp open <path> for a file-specific refresh or lsp_diagnostics for paging/filtering.")
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+	m.rerenderTranscriptAndMaybeScroll()
 }
 
 func (m *model) filesAddToContext() tea.Cmd {
@@ -10892,6 +11465,166 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 
 		return rcStartedMsg{url: url, bridge: bridge}
 	}
+}
+
+// handleIDECmd implements `/ide [claude|off|status]`. Default (no arg) connects
+// via the Claude Code VS Code extension.
+func (m *model) handleIDECmd(args []string) tea.Cmd {
+	sub := "claude"
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+
+	switch sub {
+	case "off", "disable", "stop":
+		if m.ideCancel != nil {
+			m.ideCancel()
+		}
+		m.ideCancel = nil
+		m.ideClient = nil
+		m.ideCh = nil
+		m.ideConnected = false
+		m.ideSelection = nil
+		m.ideOpenEditors = nil
+		m.ideMode = config.IDEModeOff
+		if err := config.SaveIDEMode(config.IDEModeOff); err != nil {
+			log.Printf("ide: save mode off: %v", err)
+		}
+		return func() tea.Msg {
+			return message{role: roleAssistant, text: "🔌 IDE integration disabled."}
+		}
+
+	case "status":
+		return func() tea.Msg { return message{role: roleAssistant, text: m.ideStatusReport()} }
+
+	case "claude", "on", "connect", "":
+		if err := config.SaveIDEMode(config.IDEModeClaude); err != nil {
+			log.Printf("ide: save mode claude: %v", err)
+		}
+		return m.connectIDE()
+
+	default:
+		return func() tea.Msg {
+			return message{role: roleAssistant, text: fmt.Sprintf("Unknown /ide option %q. Use: /ide claude | /ide off | /ide status", sub)}
+		}
+	}
+}
+
+// startIDEClient discovers the Claude Code IDE lock for the working directory
+// and, if found, starts the background WebSocket client, returning the started
+// message. Returns nil when no matching lock exists. Safe to call when a client
+// is already running (the old one is cancelled first).
+func (m *model) startIDEClient() *ideStartedMsg {
+	lock, ok := ide.Discover(m.workDir)
+	if !ok {
+		return nil
+	}
+	if m.ideCancel != nil {
+		m.ideCancel()
+	}
+	ch := make(chan ide.Update, 16)
+	client := ide.NewClient(lock, ch)
+	ctx, cancel := context.WithCancel(context.Background())
+	go client.Run(ctx)
+	return &ideStartedMsg{ch: ch, client: client, cancel: cancel}
+}
+
+// connectIDE is the explicit `/ide claude` path: it reports a helpful message
+// when no IDE connection is found.
+func (m *model) connectIDE() tea.Cmd {
+	return func() tea.Msg {
+		if started := m.startIDEClient(); started != nil {
+			return *started
+		}
+		return message{role: roleAssistant, text: fmt.Sprintf(
+			"No Claude Code IDE connection found for %s.\n\nOpen this folder in VS Code with the Claude Code extension, then run /ide again.", m.workDir)}
+	}
+}
+
+// autoConnectIDE is the startup path: it connects silently when a lock exists
+// and does nothing (no chat noise) when it doesn't.
+func (m *model) autoConnectIDE() tea.Cmd {
+	return func() tea.Msg {
+		if started := m.startIDEClient(); started != nil {
+			return *started
+		}
+		return nil
+	}
+}
+
+// ideSidebarStatusLine renders the IDE state inside the chat sidebar.
+func (m *model) ideSidebarStatusLine() string {
+	if m.ideMode != config.IDEModeClaude {
+		return sidebarTextStyle.Render("IDE: off")
+	}
+	if !m.ideConnected {
+		return sidebarTextStyle.Render("IDE: on · connecting")
+	}
+	if m.ideSelection != nil && m.ideSelection.FilePath != "" {
+		name := filepath.Base(m.ideSelection.FilePath)
+		if start, end, ok := m.ideSelection.LineSpan(); ok {
+			if start == end {
+				return sidebarTextStyle.Render(fmt.Sprintf("IDE: on · %s:L%d", name, start))
+			}
+			return sidebarTextStyle.Render(fmt.Sprintf("IDE: on · %s:L%d-%d", name, start, end))
+		}
+		return sidebarTextStyle.Render("IDE: on · " + name)
+	}
+	return sidebarTextStyle.Render("IDE: on · connected")
+}
+
+// ideStatusReport is the verbose `/ide status` output.
+func (m *model) ideStatusReport() string {
+	if m.ideMode != config.IDEModeClaude {
+		return "IDE integration is off. Run /ide claude to connect to VS Code (Claude Code extension)."
+	}
+	var b strings.Builder
+	if m.ideConnected {
+		b.WriteString("🟢 IDE connected (Claude Code extension)\n")
+	} else {
+		b.WriteString("🟡 IDE connecting…\n")
+	}
+	b.WriteString(fmt.Sprintf("Open editors: %d\n", len(m.ideOpenEditors)))
+	if sel := m.ideSelection; sel != nil && sel.FilePath != "" {
+		path := sel.FilePath
+		if rel, err := filepath.Rel(m.workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+			path = rel
+		}
+		if start, end, ok := sel.LineSpan(); ok {
+			fmt.Fprintf(&b, "Selection: %s:L%d-%d", path, start, end)
+		} else {
+			fmt.Fprintf(&b, "Selection: %s (no range)", path)
+		}
+		if m.ideSelectionSent {
+			b.WriteString(" (sent)")
+		} else {
+			b.WriteString(" (pending — attaches to next message)")
+		}
+	} else {
+		b.WriteString("Selection: none")
+	}
+	return b.String()
+}
+
+// insertIDEMention inserts an @file#Lstart-Lend reference into the input box in
+// response to an at_mentioned event (Cmd+Alt+K in VS Code).
+func (m *model) insertIDEMention(men *ide.Mention) {
+	path := men.FilePath
+	if rel, err := filepath.Rel(m.workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+		path = rel
+	}
+	ref := "@" + path
+	if men.LineStart > 0 {
+		if men.LineEnd > men.LineStart {
+			ref += fmt.Sprintf("#L%d-%d", men.LineStart, men.LineEnd)
+		} else {
+			ref += fmt.Sprintf("#L%d", men.LineStart)
+		}
+	}
+	if v := m.input.Value(); v != "" && !strings.HasSuffix(v, " ") {
+		ref = " " + ref
+	}
+	m.input.InsertString(ref + " ")
 }
 
 func openBrowser(url string) {

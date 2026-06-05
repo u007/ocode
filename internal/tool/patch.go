@@ -9,7 +9,7 @@ import (
 	"sync"
 	"unicode"
 
-	"github.com/jamesmercstudio/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 var (

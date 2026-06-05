@@ -8,8 +8,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/plugins"
-	"github.com/jamesmercstudio/ocode/internal/skill"
+	"github.com/u007/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/skill"
 )
 
 // gitShowHead reads a file from the git HEAD revision. Returns empty string if

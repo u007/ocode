@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tool"
 )
 
 const agentRunPreviewLineCount = 4

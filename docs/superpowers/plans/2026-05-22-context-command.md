@@ -274,7 +274,7 @@ Ensure these imports are present in `model.go` (most are already there):
 - `"strconv"`
 - `"strings"`
 - `"fmt"`
-- `"github.com/jamesmercstudio/ocode/internal/plugins"`
+- `"github.com/u007/ocode/internal/plugins"`
 
 - [ ] **Step 4: Run test**
 

@@ -7,10 +7,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/session"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type InputMessage struct {
@@ -135,8 +135,8 @@ func getOrCreateSession(sessions map[string]*sessionState, cfg *config.Config, s
 				return nil, fmt.Errorf("failed to create LLM client")
 			}
 
-			tools, _ := tool.LoadBuiltins(cfg)
-			ag := agent.NewAgent(client, tools, cfg)
+			tools, lspMgr := tool.LoadBuiltins(cfg)
+			ag := agent.NewAgent(client, tools, cfg, lspMgr)
 			ag.LoadExternalTools(cfg)
 
 			ss := &sessionState{
@@ -156,8 +156,8 @@ func getOrCreateSession(sessions map[string]*sessionState, cfg *config.Config, s
 		return nil, fmt.Errorf("failed to create LLM client")
 	}
 
-	tools, _ := tool.LoadBuiltins(cfg)
-	ag := agent.NewAgent(client, tools, cfg)
+	tools, lspMgr := tool.LoadBuiltins(cfg)
+	ag := agent.NewAgent(client, tools, cfg, lspMgr)
 	ag.LoadExternalTools(cfg)
 
 	ss := &sessionState{

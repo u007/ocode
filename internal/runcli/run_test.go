@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 )
 
 func withWorkingDir(t *testing.T, dir string) {
@@ -109,6 +109,19 @@ func TestResolveRunInputAppendsAttachedFiles(t *testing.T) {
 	want := "base prompt\nAttached file context.txt:\nextra context"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestParseRunArgsPromptAliasDoesNotConflictWithPassword(t *testing.T) {
+	opts, _, err := parseRunArgs([]string{"-p", "hello", "-P", "secret"})
+	if err != nil {
+		t.Fatalf("parseRunArgs failed: %v", err)
+	}
+	if opts.prompt != "hello" {
+		t.Fatalf("prompt = %q, want %q", opts.prompt, "hello")
+	}
+	if opts.password != "secret" {
+		t.Fatalf("password = %q, want %q", opts.password, "secret")
 	}
 }
 

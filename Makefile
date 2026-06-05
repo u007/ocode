@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release web-build web-dev dev production close kill-ports
+.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -49,6 +49,13 @@ release: clean
 clean:
 	rm -rf $(OUTDIR)
 	rm -f $(APP) $(APP)-darwin-* $(APP)-linux-* $(APP)-windows-*
+
+# ── Test ─────────────────────────────────────────────────────────────────────
+# Run all Go tests in the repo. Exits non-zero on any failure.
+# Usage: make test
+
+test:
+	go test ./...
 
 # ── Web UI ───────────────────────────────────────────────────────────────────
 

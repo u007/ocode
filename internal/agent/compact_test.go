@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 func tcCall(id, name string) ToolCall {
@@ -196,7 +196,7 @@ func TestForceCompactAsyncIgnoresDisabledAutoCompaction(t *testing.T) {
 	cfg.Ocode.Compact.SummaryMaxRetries = 0
 	cfg.Ocode.Compact.MaxSummaryInputTokens = 1000
 
-	a := NewAgent(fakeCompactClient{}, nil, cfg)
+	a := NewAgent(fakeCompactClient{}, nil, cfg, nil)
 	results := make(chan CompactResult, 1)
 	a.OnCompact = func(res CompactResult) {
 		results <- res

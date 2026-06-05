@@ -49,6 +49,25 @@ type Client struct {
 	closeCh  chan struct{} // closed exactly once on the first successful Close
 	closeOnce sync.Once
 	exited   chan struct{} // closed when cmd.Wait returns (reaper goroutine)
+
+	// onDiagnostics, if set, is invoked from the readLoop goroutine
+	// for every textDocument/publishDiagnostics notification. The
+	// callback runs synchronously on the reader goroutine, so it must
+	// be cheap and non-blocking (the Manager stores into a mutex-guarded
+	// map and returns immediately). Setting it is the Manager's job;
+	// tests can plug in a custom hook.
+	onDiagnostics func(uri string, diags []Diagnostic)
+}
+
+// SetDiagnosticsHandler installs a callback invoked for every
+// textDocument/publishDiagnostics notification the server pushes. It is
+// safe to call once after NewClient (the readLoop is the only caller and
+// reads the field on every frame). Used by Manager to wire per-server
+// diagnostics into the shared store.
+func (c *Client) SetDiagnosticsHandler(fn func(uri string, diags []Diagnostic)) {
+	c.mu.Lock()
+	c.onDiagnostics = fn
+	c.mu.Unlock()
 }
 
 // openedDoc tracks the LSP textDocument version (incremented on each didChange)
@@ -118,6 +137,7 @@ func (c *Client) readLoop() {
 			Method string          `json:"method"`
 			Result json.RawMessage `json:"result"`
 			Error  json.RawMessage `json:"error"`
+			Params json.RawMessage `json:"params"`
 		}
 		if err := json.Unmarshal(body, &msg); err != nil {
 			continue // skip unparseable frame
@@ -145,12 +165,28 @@ func (c *Client) readLoop() {
 			if err := c.writeMessage(map[string]interface{}{"jsonrpc": "2.0", "id": *msg.ID, "result": nil}); err != nil {
 				log.Printf("lsp: reply to server request %q failed: %v", msg.Method, err)
 			}
+		case msg.Method == "textDocument/publishDiagnostics":
+			// Server-pushed diagnostics. Hand them to the configured
+			// handler (set by the Manager when the client is created).
+			// Read the handler pointer under the mutex so a concurrent
+			// SetDiagnosticsHandler (rare, but allowed) is race-free.
+			c.mu.Lock()
+			fn := c.onDiagnostics
+			c.mu.Unlock()
+			if fn != nil {
+				var p diagnosticParams
+				if err := json.Unmarshal(msg.Params, &p); err == nil && p.URI != "" {
+					fn(p.URI, buildDiagnostics(&p))
+				}
+			}
 		default:
-			// Notification (window/logMessage, $/progress, publishDiagnostics,
-			// …) — nothing to correlate; ignore.
+			// Notification (window/logMessage, $/progress, …) —
+			// nothing to correlate; ignore.
 		}
 	}
 }
+
+
 
 func (c *Client) readFrame() ([]byte, error) {
 	contentLen := 0
@@ -397,4 +433,24 @@ func absURI(path string) (string, error) {
 		return "", err
 	}
 	return fileURI(abs), nil
+}
+
+// uriToPath converts a file:// URI back to a local filesystem path. It is
+// the inverse of fileURI; used by the diagnostics parser to translate the
+// server's URI back into a path the tool layer can display relative to
+// the working directory. Unrecognised URIs are returned with the
+// "file://" prefix stripped (best-effort).
+func uriToPath(uri string) string {
+	if u, err := url.Parse(uri); err == nil && u.Scheme == "file" {
+		// On Windows u.Path may be "/C:/foo"; TrimPrefix the leading slash
+		// only when the next char looks like a drive letter so we don't
+		// break POSIX paths that legitimately start with two slashes
+		// (//host/share). Linux/macOS paths never have a drive letter.
+		p := u.Path
+		if len(p) >= 3 && p[0] == '/' && ((p[1] >= 'A' && p[1] <= 'Z') || (p[1] >= 'a' && p[1] <= 'z')) && p[2] == ':' {
+			p = p[1:]
+		}
+		return filepath.FromSlash(p)
+	}
+	return strings.TrimPrefix(uri, "file://")
 }

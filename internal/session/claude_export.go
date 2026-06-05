@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/version"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/version"
 )
 
 // claudeNamespaceUUID is a fixed 16-byte opaque namespace value used for

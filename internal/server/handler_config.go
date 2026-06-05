@@ -3,8 +3,8 @@ package server
 import (
 	"net/http"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 )
 
 func (h *Handler) HandleGetModel(w http.ResponseWriter, r *http.Request) {

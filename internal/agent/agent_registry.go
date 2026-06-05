@@ -3,7 +3,7 @@ package agent
 import (
 	"sort"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 var DefaultAgentRegistry *AgentRegistry

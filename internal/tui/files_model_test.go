@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,8 +9,8 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
-	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestFilesPreviewShowsMetadataAndLanguage(t *testing.T) {
@@ -74,6 +75,15 @@ func TestParseGitStatusShortMapsPaths(t *testing.T) {
 	}
 	if got["renamed.txt"] != "R" {
 		t.Fatalf("expected renamed badge, got %#v", got)
+	}
+}
+
+func TestSkipVisibleCharsCountsASCIIAndWideRunes(t *testing.T) {
+	if got := skipVisibleChars("abcdef", 2); got != "cdef" {
+		t.Fatalf("ASCII scroll = %q, want %q", got, "cdef")
+	}
+	if got := skipVisibleChars("界abc", 2); got != "abc" {
+		t.Fatalf("wide-rune scroll = %q, want %q", got, "abc")
 	}
 }
 
@@ -178,12 +188,43 @@ func TestFilesTabMouseWheelScrollsPreview(t *testing.T) {
 	}
 	m.files = newFilesModel(t.TempDir())
 	m.files.Resize(100, 30)
+	m.files.panel = filesPanelPreview
 	m.files.preview.SetContent(strings.Repeat("line\n", 100))
 
-	updated, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 80, Y: 5})
+	// Mouse is over the tree area, but preview focus should win.
+	updated, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 10, Y: 5})
 	got := derefTestModel(t, updated)
 	if got.files.preview.YOffset() == 0 {
-		t.Fatal("expected files preview to scroll down on mouse wheel")
+		t.Fatal("expected files preview to scroll down on mouse wheel when preview panel is focused")
+	}
+	if got.files.treeScrollX != 0 {
+		t.Fatalf("expected tree horizontal scroll to stay at 0 when preview is focused, got %d", got.files.treeScrollX)
+	}
+}
+
+func TestFilesTabMouseWheelScrollsTreeWhenFocused(t *testing.T) {
+	m := model{
+		ready:     true,
+		width:     100,
+		height:    30,
+		activeTab: tabFiles,
+		input:     newTestTextarea(),
+		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	m.files = newFilesModel(t.TempDir())
+	m.files.Resize(100, 30)
+	m.files.panel = filesPanelPicker
+	m.files.nodes = []fileNode{{name: "a", path: "/a"}, {name: "b", path: "/b"}, {name: "c", path: "/c"}}
+	m.files.preview.SetContent(strings.Repeat("line\n", 100))
+
+	updated, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 10, Y: 5})
+	got := derefTestModel(t, updated)
+	if got.files.cursor != 1 {
+		t.Fatalf("expected tree focus wheel to move cursor down to 1, got %d", got.files.cursor)
+	}
+	if got.files.preview.YOffset() != 0 {
+		t.Fatalf("expected preview offset to stay at 0 when tree is focused, got %d", got.files.preview.YOffset())
 	}
 }
 
@@ -267,6 +308,43 @@ func TestFilesEditorOpenerExternalMode(t *testing.T) {
 	cmd2 := m.openInEditor(path)
 	if cmd2 == nil {
 		t.Fatal("expected non-nil cmd for external opener")
+	}
+}
+
+func TestFilesEditorPickerEmitsEditorPickedMsg(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	os.WriteFile(path, []byte("package main\n"), 0644)
+
+	m := newFilesModel(dir)
+	saved := ""
+	m.saveEditor = func(e string) error { saved = e; return nil }
+	m.openEditorPicker(path)
+	m.editorCursor = 0
+	choice := m.editorChoices()[0]
+
+	next, cmd := m.updateEditorPicker(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if next.choosingEditor {
+		t.Fatal("expected picker to close after selection")
+	}
+	if next.editor != choice {
+		t.Fatalf("expected editor %q, got %q", choice, next.editor)
+	}
+	if saved != choice {
+		t.Fatalf("expected saveEditor called with %q, got %q", choice, saved)
+	}
+	if cmd == nil {
+		t.Fatal("expected a command emitting editorPickedMsg")
+	}
+	picked, ok := cmd().(editorPickedMsg)
+	if !ok {
+		t.Fatalf("expected editorPickedMsg, got %T", cmd())
+	}
+	if picked.editor != choice {
+		t.Fatalf("editorPickedMsg.editor = %q, want %q", picked.editor, choice)
+	}
+	if picked.target != path {
+		t.Fatalf("editorPickedMsg.target = %q, want %q", picked.target, path)
 	}
 }
 
@@ -429,7 +507,7 @@ func TestFilesShiftDownExtendsSelection(t *testing.T) {
 	}
 }
 
-func TestFilesPlainNavClearsSelection(t *testing.T) {
+func TestFilesPlainNavPreservesSelection(t *testing.T) {
 	m := newFilesModel(t.TempDir())
 	m.nodes = []fileNode{{path: "/a/a.go", name: "a.go"}, {path: "/a/b.go", name: "b.go"}}
 	m.cursor = 0
@@ -437,8 +515,11 @@ func TestFilesPlainNavClearsSelection(t *testing.T) {
 	m.selectedFiles = map[int]bool{0: true}
 
 	got, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyDown}, 100, 30)
-	if len(got.selectedFiles) != 0 {
-		t.Fatalf("expected plain down to clear selection, got %#v", got.selectedFiles)
+	if len(got.selectedFiles) != 1 {
+		t.Fatalf("expected plain down to preserve selection, got %#v", got.selectedFiles)
+	}
+	if !got.selectedFiles[0] {
+		t.Fatalf("expected selection to still include index 0, got %#v", got.selectedFiles)
 	}
 	if got.cursor != 1 {
 		t.Fatalf("expected cursor to move to 1, got %d", got.cursor)
@@ -827,5 +908,100 @@ func TestFilesInFileSearchEnterConfirms(t *testing.T) {
 	}
 	if m.inFileSearchActive {
 		t.Fatal("expected inFileSearchActive to be false after enter")
+	}
+}
+
+func TestFilesTreeHorizontalScroll(t *testing.T) {
+	dir := t.TempDir()
+	// Create a file with a very long name to trigger horizontal scrolling
+	longName := "this_is_a_very_long_filename_that_should_trigger_horizontal_scrolling.txt"
+	path := filepath.Join(dir, longName)
+	if err := os.WriteFile(path, []byte("test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newFilesModel(dir)
+	m.Resize(50, 30) // Narrow width to make scrolling necessary
+	m.panel = filesPanelPicker
+	m.mode = filesModeNormal
+
+	// Initially, treeScrollX should be 0
+	if m.treeScrollX != 0 {
+		t.Fatalf("expected initial treeScrollX to be 0, got %d", m.treeScrollX)
+	}
+
+	// Press right to scroll horizontally
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight}, 50, 30)
+	if m.treeScrollX != 5 {
+		t.Fatalf("expected treeScrollX to be 5 after right press, got %d", m.treeScrollX)
+	}
+
+	// Press right again
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight}, 50, 30)
+	if m.treeScrollX != 10 {
+		t.Fatalf("expected treeScrollX to be 10 after second right press, got %d", m.treeScrollX)
+	}
+
+	// Press left to scroll back
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft}, 50, 30)
+	if m.treeScrollX != 5 {
+		t.Fatalf("expected treeScrollX to be 5 after left press, got %d", m.treeScrollX)
+	}
+
+	// Press left again to go to 0
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft}, 50, 30)
+	if m.treeScrollX != 0 {
+		t.Fatalf("expected treeScrollX to be 0 after second left press, got %d", m.treeScrollX)
+	}
+
+	// Press left again should stay at 0
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyLeft}, 50, 30)
+	if m.treeScrollX != 0 {
+		t.Fatalf("expected treeScrollX to stay at 0 after left at boundary, got %d", m.treeScrollX)
+	}
+}
+
+func TestFilesTreeScrollResetsOnNavigation(t *testing.T) {
+	dir := t.TempDir()
+	// Create files with long names
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("file_%d_with_very_long_name_to_test_scrolling.txt", i)
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte("test\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := newFilesModel(dir)
+	m.Resize(50, 30)
+	m.panel = filesPanelPicker
+	m.mode = filesModeNormal
+
+	// Scroll right
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight}, 50, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight}, 50, 30)
+	if m.treeScrollX != 10 {
+		t.Fatalf("expected treeScrollX to be 10, got %d", m.treeScrollX)
+	}
+
+	// Navigate down should reset scroll
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyDown}, 50, 30)
+	if m.treeScrollX != 0 {
+		t.Fatalf("expected treeScrollX to reset to 0 after navigation, got %d", m.treeScrollX)
+	}
+
+	// Navigate up should also reset scroll
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyRight}, 50, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyUp}, 50, 30)
+	if m.treeScrollX != 0 {
+		t.Fatalf("expected treeScrollX to reset to 0 after up navigation, got %d", m.treeScrollX)
+	}
+}
+
+func TestFilesTreeHintShowsScrollBinding(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+	hint := m.treeHint()
+	if !strings.Contains(hint, "←→ scroll") {
+		t.Fatalf("expected tree hint to contain scroll binding, got %q", hint)
 	}
 }

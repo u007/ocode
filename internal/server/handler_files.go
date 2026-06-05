@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 type FileNode struct {

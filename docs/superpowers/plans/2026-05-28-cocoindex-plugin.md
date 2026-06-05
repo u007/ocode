@@ -80,7 +80,7 @@ From the ocode TUI:
 Or once published to GitHub:
 
 ```
-/plugin install github.com/jamesmercstudio/ocode-cocoindex-plugin
+/plugin install github.com/u007/ocode-cocoindex-plugin
 ```
 
 The plugin installs `cocoindex-code` via pipx and registers `ccc mcp` as a

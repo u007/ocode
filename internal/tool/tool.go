@@ -3,8 +3,8 @@ package tool
 import (
 	"encoding/json"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/lsp"
 )
 
 type Tool interface {
@@ -53,6 +53,7 @@ func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
 		&PlanExitTool{},
 		&ListTool{},
 		&LSPTool{Mgr: lspMgr},
+		&LSPDiagnosticsTool{Mgr: lspMgr},
 		&FormatTool{Config: cfg},
 		&GitHubPRTool{},
 		&GitHubIssueTool{},

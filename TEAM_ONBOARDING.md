@@ -1,6 +1,6 @@
 # ocode — Team Onboarding Guide
 
-> **Project**: `github.com/jamesmercstudio/ocode` · v0.2.1  
+> **Project**: `github.com/u007/ocode` · v0.2.1  
 > **Language**: Go 1.26 · TUI: Charm (Bubble Tea, Lipgloss)  
 > **LLM Providers**: OpenAI, Anthropic, Google, Z.AI, DeepSeek, Alibaba, and more  
 > **License**: MIT

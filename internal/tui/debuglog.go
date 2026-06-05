@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"github.com/jamesmercstudio/ocode/internal/debuglog"
+	"github.com/u007/ocode/internal/debuglog"
 )
 
 // DebugEntryKind is an alias for backward compatibility.

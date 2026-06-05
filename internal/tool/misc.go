@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/skill"
+	"github.com/u007/ocode/internal/skill"
 )
 
 const (

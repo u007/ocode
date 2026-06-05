@@ -1,4 +1,4 @@
-module github.com/jamesmercstudio/ocode
+module github.com/u007/ocode
 
 go 1.26.1
 

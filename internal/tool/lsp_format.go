@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/lsp"
 )
 
 // uriToPath converts a file:// URI to a local filesystem path.

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/auth"
+	"github.com/u007/ocode/internal/auth"
 )
 
 //go:embed models-snapshot.json

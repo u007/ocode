@@ -109,6 +109,26 @@ func TestApplySelectionHighlight_multiLine(t *testing.T) {
 	}
 }
 
+func TestViewportSelectionPointSoftWrapAndGutter(t *testing.T) {
+	rawLines := []string{strings.Repeat("a", 20), "second"}
+	cfg := viewportSelectionConfig{
+		contentTopY:  10,
+		contentLeftX: 40,
+		yOffset:      1,
+		wrapWidth:    5,
+		gutterWidth:  7,
+		softWrap:     true,
+	}
+
+	lineIdx, col := cfg.point(rawLines, 40+7+2, 10)
+	if lineIdx != 0 {
+		t.Fatalf("expected wrapped selection to stay on first raw line, got %d", lineIdx)
+	}
+	if col != 7 {
+		t.Fatalf("expected wrapped selection column 7, got %d", col)
+	}
+}
+
 func TestInsertHighlight_withANSI(t *testing.T) {
 	// rendered has a colour code before "world"; raw is the plain text.
 	// Selecting "world" (cols 6-11) should inject reverse-video so that the

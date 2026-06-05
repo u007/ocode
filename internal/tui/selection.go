@@ -21,6 +21,117 @@ func stripANSI(s string) string {
 	return ansi.Strip(s)
 }
 
+// viewportSelectionConfig describes how a scrollable text surface maps screen
+// coordinates back to its underlying raw text.
+//
+// It is intentionally generic so file previews, git diffs, and future viewers
+// can share the same hit-testing logic without duplicating wrap/scroll math.
+type viewportSelectionConfig struct {
+	contentTopY  int
+	contentLeftX int
+	yOffset      int
+	wrapWidth    int
+	gutterWidth  int
+	softWrap     bool
+}
+
+// visualLineWidth returns the terminal cell width of a plain-text line,
+// accounting for wide runes and tabs.
+func visualLineWidth(line string) int {
+	col := 0
+	for i := 0; i < len(line); {
+		r, size := utf8.DecodeRuneInString(line[i:])
+		w := runewidth.RuneWidth(r)
+		if r == '\t' {
+			w = tabWidth - (col % tabWidth)
+		}
+		col += w
+		i += size
+	}
+	return col
+}
+
+// visualLineHeight returns how many wrapped terminal rows a plain-text line
+// occupies at the provided width.
+func visualLineHeight(line string, width int) int {
+	if width <= 0 {
+		width = 1
+	}
+	lineWidth := visualLineWidth(line)
+	if lineWidth <= 0 {
+		return 1
+	}
+	rows := lineWidth / width
+	if lineWidth%width != 0 {
+		rows++
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	return rows
+}
+
+// visualLineAtOffset maps a soft-wrapped visual row offset back to the raw line
+// that owns it, plus the wrapped-row offset within that line.
+func visualLineAtOffset(rawLines []string, width, offset int) (lineIdx, wrappedOffset int) {
+	if len(rawLines) == 0 {
+		return 0, 0
+	}
+	if width <= 0 {
+		width = 1
+	}
+	if offset < 0 {
+		return 0, 0
+	}
+	remaining := offset
+	for i, line := range rawLines {
+		height := visualLineHeight(line, width)
+		if remaining < height {
+			return i, remaining
+		}
+		remaining -= height
+	}
+	return len(rawLines) - 1, 0
+}
+
+// point maps a screen coordinate back to a raw line/column in the configured
+// surface.
+func (c viewportSelectionConfig) point(rawLines []string, screenX, screenY int) (lineIdx, col int) {
+	if len(rawLines) == 0 {
+		return 0, 0
+	}
+	wrapWidth := c.wrapWidth
+	if wrapWidth <= 0 {
+		wrapWidth = 1
+	}
+	row := screenY - c.contentTopY + c.yOffset
+	if row < 0 {
+		row = 0
+	}
+	if c.softWrap {
+		var wrappedOffset int
+		lineIdx, wrappedOffset = visualLineAtOffset(rawLines, wrapWidth, row)
+		col = screenX - c.contentLeftX - c.gutterWidth + wrappedOffset*wrapWidth
+	} else {
+		if row >= len(rawLines) {
+			lineIdx = len(rawLines) - 1
+		} else {
+			lineIdx = row
+		}
+		col = screenX - c.contentLeftX - c.gutterWidth
+	}
+	if lineIdx < 0 {
+		lineIdx = 0
+	}
+	if lineIdx >= len(rawLines) {
+		lineIdx = len(rawLines) - 1
+	}
+	if col < 0 {
+		col = 0
+	}
+	return lineIdx, col
+}
+
 // tabWidth is the terminal tab stop used when mapping screen columns.
 const tabWidth = 8
 

@@ -14,10 +14,11 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type Session struct {
@@ -79,14 +80,34 @@ func GetStorageDir() (string, error) {
 	return dir, nil
 }
 
+// gitToplevelCache memoizes `git rev-parse --show-toplevel` per working dir.
+// The repo root never changes within a session, so we avoid forking git on
+// every session-list call (previously once per getProjectSlug + once per
+// getClaudeProjectDir, both hit on every picker open).
+var (
+	gitToplevelMu    sync.Mutex
+	gitToplevelCache = map[string]string{}
+)
+
+func gitToplevel(wd string) string {
+	gitToplevelMu.Lock()
+	defer gitToplevelMu.Unlock()
+	if v, ok := gitToplevelCache[wd]; ok {
+		return v
+	}
+	result := wd
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = wd
+	if output, err := cmd.Output(); err == nil {
+		result = strings.TrimSpace(string(output))
+	}
+	gitToplevelCache[wd] = result
+	return result
+}
+
 func getProjectSlug() string {
 	wd, _ := os.Getwd()
-
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	if output, err := cmd.Output(); err == nil {
-		wd = strings.TrimSpace(string(output))
-	}
-
+	wd = gitToplevel(wd)
 	wd = filepath.Clean(wd)
 	if runtime.GOOS == "windows" {
 		wd = strings.ToLower(wd)
@@ -409,6 +430,124 @@ func ListRefs() ([]Ref, error) {
 	return refs, err
 }
 
+// listWorkers bounds concurrency when reading session files for the list.
+// File reads dominate listing cost; fanning them across cores turns a
+// sequential walk of the whole session dir into a parallel one.
+func listWorkers() int {
+	n := runtime.NumCPU()
+	if n > 12 {
+		n = 12
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
+}
+
+// mapDirEntries runs fn over each .json/.jsonl entry concurrently (bounded by
+// listWorkers) and returns the successful results. Order is not preserved;
+// callers sort afterwards. fn returns ok=false to drop an entry.
+func mapDirEntries[T any](dir string, entries []os.DirEntry, ext string, fn func(string, os.DirEntry) (T, bool)) []T {
+	sem := make(chan struct{}, listWorkers())
+	var (
+		wg  sync.WaitGroup
+		mu  sync.Mutex
+		out []T
+	)
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ext || e.Name() == "index.json" {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(e os.DirEntry) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			v, ok := fn(filepath.Join(dir, e.Name()), e)
+			if !ok {
+				return
+			}
+			mu.Lock()
+			out = append(out, v)
+			mu.Unlock()
+		}(e)
+	}
+	wg.Wait()
+	return out
+}
+
+// ocodeMeta holds the cheap-to-extract fields needed to list a session,
+// decoded without materializing the (potentially multi-MB) messages array.
+type ocodeMeta struct {
+	ID        string
+	Title     string
+	UpdatedAt time.Time
+	CloneOf   string // metadata.claude_original_session_id; "" when not a clone
+}
+
+// readOcodeMeta streams a session file token-by-token, capturing only the list
+// fields. The messages array is consumed as raw bytes and discarded, so we skip
+// the dominant cost of unmarshalling thousands of agent.Message structs per
+// file. It stays correct regardless of on-disk key order (older files store
+// messages mid-object, newer ones may not), so dedup of cloned Claude sessions
+// remains exact. modTime is the fallback for updated_at when the field is absent.
+func readOcodeMeta(path string, modTime time.Time) (ocodeMeta, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return ocodeMeta{}, err
+	}
+	defer f.Close()
+
+	dec := json.NewDecoder(bufio.NewReader(f))
+	// Consume the opening '{'.
+	if _, err := dec.Token(); err != nil {
+		return ocodeMeta{}, err
+	}
+
+	var meta ocodeMeta
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return ocodeMeta{}, err
+		}
+		key, _ := keyTok.(string)
+		switch key {
+		case "id":
+			if err := dec.Decode(&meta.ID); err != nil {
+				return ocodeMeta{}, err
+			}
+		case "title":
+			if err := dec.Decode(&meta.Title); err != nil {
+				return ocodeMeta{}, err
+			}
+		case "updated_at":
+			if err := dec.Decode(&meta.UpdatedAt); err != nil {
+				return ocodeMeta{}, err
+			}
+		case "metadata":
+			var m map[string]any
+			if err := dec.Decode(&m); err != nil {
+				return ocodeMeta{}, err
+			}
+			if v, ok := m["claude_original_session_id"].(string); ok {
+				meta.CloneOf = v
+			}
+		default:
+			// Skip any other value (notably the heavy "messages" array) as raw
+			// bytes — no struct allocation. Must consume exactly one value here
+			// or the decoder desyncs for every subsequent key.
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return ocodeMeta{}, err
+			}
+		}
+	}
+	if meta.UpdatedAt.IsZero() {
+		meta.UpdatedAt = modTime
+	}
+	return meta, nil
+}
+
 // ListRefsPaginated returns a page of session refs with optional limit and offset.
 // If limit <= 0, returns all refs. Returns (refs, totalCount, error).
 func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
@@ -422,39 +561,31 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 		return nil, 0, err
 	}
 
-	// Lightweight struct for partial JSON decode (no Messages)
-	type sessionMeta struct {
-		ID        string    `json:"id"`
-		Title     string    `json:"title"`
-		UpdatedAt time.Time `json:"updated_at"`
-		Metadata  map[string]any `json:"metadata,omitempty"`
-	}
-
-	var allRefs []Ref
-	clonedClaude := make(map[string]struct{})
-
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" || e.Name() == "index.json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+	metas := mapDirEntries(dir, entries, ".json", func(path string, e os.DirEntry) (ocodeMeta, bool) {
+		info, err := e.Info()
 		if err != nil {
-			continue
+			log.Printf("session list: stat %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
 		}
-		var meta sessionMeta
-		if err := json.Unmarshal(data, &meta); err != nil {
-			continue
+		meta, err := readOcodeMeta(path, info.ModTime())
+		if err != nil {
+			log.Printf("session list: read meta %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
 		}
+		return meta, true
+	})
+
+	allRefs := make([]Ref, 0, len(metas))
+	clonedClaude := make(map[string]struct{})
+	for _, meta := range metas {
 		allRefs = append(allRefs, Ref{
 			ID:        meta.ID,
 			Title:     meta.Title,
 			UpdatedAt: meta.UpdatedAt,
 			Source:    SourceOcode,
 		})
-		if meta.Metadata != nil {
-			if originalID, ok := meta.Metadata["claude_original_session_id"].(string); ok && originalID != "" {
-				clonedClaude[originalID] = struct{}{}
-			}
+		if meta.CloneOf != "" {
+			clonedClaude[meta.CloneOf] = struct{}{}
 		}
 	}
 
@@ -568,20 +699,58 @@ func listClaudeSessions() ([]Ref, error) {
 		return nil, err
 	}
 
-	refs := make([]Ref, 0, len(entries))
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".jsonl" {
-			continue
+	refs := mapDirEntries(dir, entries, ".jsonl", func(path string, e os.DirEntry) (Ref, bool) {
+		info, err := e.Info()
+		if err != nil {
+			log.Printf("session list: stat claude %s: %v", e.Name(), err)
+			return Ref{}, false
 		}
 		id := strings.TrimSuffix(e.Name(), ".jsonl")
-		path := filepath.Join(dir, e.Name())
-		ref, err := claudeRefFromFile(id, path)
-		if err != nil {
-			return nil, err
-		}
-		refs = append(refs, ref)
-	}
+		return claudeRefQuick(id, path, info.ModTime()), true
+	})
 	return refs, nil
+}
+
+// claudeRefQuick builds a list ref for a Claude transcript without parsing the
+// whole .jsonl. It reads only until the first user message (for the title) and
+// uses the file mtime for updated_at — the last append is the last activity, so
+// mtime is an accurate sort key. Full transcripts (up to multi-MB) are only
+// parsed when a session is actually opened (loadClaudeSession).
+func claudeRefQuick(id, path string, modTime time.Time) Ref {
+	title := ""
+	f, err := os.Open(path)
+	if err != nil {
+		log.Printf("session list: open claude %s: %v", id, err)
+	} else {
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+		for scanner.Scan() {
+			var entry struct {
+				Type    string          `json:"type"`
+				IsMeta  bool            `json:"isMeta"`
+				Message json.RawMessage `json:"message"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+				continue // skip malformed line; next line may still yield a title
+			}
+			if entry.IsMeta || entry.Type != "user" {
+				continue
+			}
+			role, content, _, ok := claudeMessage(entry.Message)
+			if ok && role == "user" && content != "" {
+				title = titleFromContent(content)
+				break
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			log.Printf("session list: scan claude %s: %v", id, err)
+		}
+	}
+	if title == "" {
+		title = id
+	}
+	return Ref{ID: "claude:" + id, Title: title, UpdatedAt: modTime, Source: SourceClaude}
 }
 
 func getClaudeProjectDir() (string, error) {
@@ -590,24 +759,13 @@ func getClaudeProjectDir() (string, error) {
 		return "", err
 	}
 	wd, _ := os.Getwd()
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	if output, err := cmd.Output(); err == nil {
-		wd = strings.TrimSpace(string(output))
-	}
+	wd = gitToplevel(wd)
 	return filepath.Join(home, ".claude", "projects", claudeProjectSlug(wd)), nil
 }
 
 func claudeProjectSlug(path string) string {
 	clean := filepath.ToSlash(filepath.Clean(path))
 	return strings.ReplaceAll(clean, "/", "-")
-}
-
-func claudeRefFromFile(id, path string) (Ref, error) {
-	s, err := parseClaudeSessionFile(id, path)
-	if err != nil {
-		return Ref{}, err
-	}
-	return Ref{ID: "claude:" + id, Title: s.Title, UpdatedAt: s.UpdatedAt, Source: SourceClaude}, nil
 }
 
 func loadClaudeSession(id string) (*Session, error) {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 )
 
 func TestProjectSlug(t *testing.T) {

@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	providerplugin "github.com/jamesmercstudio/ocode/internal/plugin/provider"
+	providerplugin "github.com/u007/ocode/internal/plugin/provider"
 )
 
 // TestCodexPluginRegistered guards the blank import of internal/plugin/codex in

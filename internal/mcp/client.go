@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/auth"
-	"github.com/jamesmercstudio/ocode/internal/config"
 	"github.com/r3labs/sse/v2"
+	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/config"
 )
 
 type MCPTool struct {

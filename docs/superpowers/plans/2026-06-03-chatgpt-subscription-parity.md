@@ -779,8 +779,8 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/jamesmercstudio/ocode/internal/auth"
-	providerplugin "github.com/jamesmercstudio/ocode/internal/plugin/provider"
+	"github.com/u007/ocode/internal/auth"
+	providerplugin "github.com/u007/ocode/internal/plugin/provider"
 )
 
 // version is set at build time via ldflags.
@@ -880,7 +880,7 @@ import (
 	"net/http"
 	"testing"
 
-	providerplugin "github.com/jamesmercstudio/ocode/internal/plugin/provider"
+	providerplugin "github.com/u007/ocode/internal/plugin/provider"
 )
 
 func TestCodexProvider_ID(t *testing.T) {

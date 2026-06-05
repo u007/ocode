@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/hooks"
+	"github.com/u007/ocode/internal/hooks"
 )
 
 var (

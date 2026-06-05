@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 type PermissionLevel string

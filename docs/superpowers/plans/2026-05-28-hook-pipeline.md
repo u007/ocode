@@ -247,7 +247,7 @@ hooks *hooks.Pipeline
 Add import:
 
 ```go
-"github.com/jamesmercstudio/ocode/internal/hooks"
+"github.com/u007/ocode/internal/hooks"
 ```
 
 After `NewAgent` (line ~208), add:
@@ -395,7 +395,7 @@ At the top of `process.go`, after the existing `var` blocks:
 import (
     // ... existing imports ...
     "sync"
-    "github.com/jamesmercstudio/ocode/internal/hooks"
+    "github.com/u007/ocode/internal/hooks"
 )
 
 var (
@@ -464,8 +464,8 @@ hookPipeline *hooks.Pipeline
 Import:
 
 ```go
-"github.com/jamesmercstudio/ocode/internal/hooks"
-"github.com/jamesmercstudio/ocode/internal/tool"
+"github.com/u007/ocode/internal/hooks"
+"github.com/u007/ocode/internal/tool"
 ```
 
 - [ ] **Step 2: Initialise in `newModel` (or wherever the model is first constructed)**

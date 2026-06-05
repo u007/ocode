@@ -8,7 +8,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 const (
@@ -32,6 +32,10 @@ const (
 	EditorModeExternal   = "external"
 	EditorModeTmuxSplit  = "tmux-split"
 	EditorModeTmuxWindow = "tmux-window"
+
+	// IDEMode values control the /ide VS Code integration.
+	IDEModeOff    = "off"
+	IDEModeClaude = "claude"
 )
 
 type AdvisorConfig struct {
@@ -55,6 +59,7 @@ type OcodeConfig struct {
 	ExtraAllowedPaths []string
 	Editor            string
 	EditorMode        string
+	IDEMode           string
 	SmallModel        string
 	CommitMsgModel    string
 	CommitMsgPrompt   string
@@ -163,6 +168,7 @@ type ocodeConfigFile struct {
 	ExtraAllowedPaths []string             `json:"extra_allowed_paths,omitempty"`
 	Editor            string               `json:"editor,omitempty"`
 	EditorMode        string               `json:"editor_mode,omitempty"`
+	IDEMode           string               `json:"ide_mode,omitempty"`
 	SmallModel        string               `json:"small_model,omitempty"`
 	CommitMsgModel    string               `json:"commit_msg_model,omitempty"`
 	CommitMsgPrompt   string               `json:"commit_msg_prompt,omitempty"`
@@ -175,7 +181,7 @@ func defaultCompactConfig() CompactConfig {
 		TokenThreshold:        0.85,
 		KeepRecentTurns:       3,
 		MinMessages:           8,
-		SummaryTimeoutSeconds: 30,
+		SummaryTimeoutSeconds: 90,
 		SummaryMaxRetries:     1,
 		MaxSummaryInputTokens: 50000,
 	}
@@ -336,6 +342,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.EditorMode = file.EditorMode
 		}
 		delete(raw, "editor_mode")
+	}
+
+	if _, ok := raw["ide_mode"]; ok {
+		if file.IDEMode != "" {
+			cfg.IDEMode = file.IDEMode
+		}
+		delete(raw, "ide_mode")
 	}
 
 	if _, ok := raw["small_model"]; ok {
@@ -542,6 +555,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.EditorMode != "" && cfg.EditorMode != EditorModeExternal {
 		payload["editor_mode"] = cfg.EditorMode
 	}
+	if cfg.IDEMode != "" {
+		payload["ide_mode"] = cfg.IDEMode
+	}
 	if cfg.SmallModel != "" {
 		payload["small_model"] = cfg.SmallModel
 	}
@@ -655,6 +671,22 @@ func SaveOcodeASTPlugin(enabled bool) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.Plugins.AST = enabled
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveIDEMode persists only the ide_mode field using load-modify-write so it
+// cannot clobber a concurrent session's other config.
+func SaveIDEMode(mode string) error {
+	switch mode {
+	case IDEModeOff, IDEModeClaude:
+	default:
+		return fmt.Errorf("invalid ide_mode: %q (valid: %s, %s)", mode, IDEModeOff, IDEModeClaude)
+	}
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.IDEMode = mode
 	return SaveOcodeConfig(cfg)
 }
 

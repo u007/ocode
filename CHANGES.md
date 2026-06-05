@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Fixed
+- **VS Code IDE Client Keepalive** — `notifications/initialized` now omits empty
+  params, matching the Claude Code VS Code extension's expected payload shape and
+  preventing the immediate socket churn seen during IDE connect.
 - **Command File Parser** — Fixed 50-line cap in `parseCommandFile` that silently truncated command prompt bodies longer than 50 lines after frontmatter (e.g., `/git-commit-push.md` dropped its "Step 4: Stage" and "Step 5: Commit and push" sections). Now reads the full file content.
 - **Multi-Session Permission Clobbering** — `SaveOcodePermissions` no longer overwrites the on-disk `auto.permissions.model` (owned exclusively by `SavePermissionModel`). Also preserves the entire disk auto block when the calling session has no auto block.
 - **Transcript Auto-Scroll** — Changed to sticky-bottom behavior: only follows when pinned to the bottom; one wheel-up stops auto-scroll and stays put while the LLM continues streaming.
@@ -16,6 +19,10 @@
 - **Anthropic OAuth Token POST** — `AnthropicExchange` and `AnthropicRefresh` now send `application/x-www-form-urlencoded` (per Anthropic's spec) instead of JSON, fixing token acquisition that was previously failing with a 415.
 
 ### Added
+- **VS Code `/ide` Integration** — Added lock discovery, WebSocket + MCP client,
+  selection/open-editor/mention streaming, IDE status chip, `/ide status`,
+  auto-attach into selection context, and `ide_mode` config support for Claude
+  Code in VS Code.
 - **Web UI Layout Restructure** — New tab-based navigation with `TopTabs` (chat/files/git/logs), collapsible `SessionSidebar`, `CoworkSidebar`, and `ModelDialog` components. Session history, model selection, and agent tabs separated into dedicated panels.
 - **Makefile `dev` Target** — One-command hot-reload development environment launching Go backend (`:4096`) and Vite frontend (`:5173`) in parallel with port cleanup.
 - **Makefile `production` Target** — Build web UI assets then compile and serve the Go binary on `:4096`.
@@ -56,6 +63,8 @@
 - **Test Coverage (continued)** — New tests: `pathlink_test.go` (path detection + `:line` suffix), `files_click_offset_test.go` (preview click coordinates), `detail_view_test.go` (agent drill-in rendering), `model_test.go` extensions (slash popup, model picker refresh, session delete dialog), `handler_open_test.go` (server-side open validation), `handler_runs_test.go` (run-tree serialization), `anthropic_test.go` (form-encoded token POST).
 
 ### Changed
+- **Module Path Rename** — Renamed the Go module from `github.com/jamesmercstudio/ocode` to `github.com/u007/ocode` repo-wide (go.mod + all imports + docs), aligning the import path with the canonical repository.
+- **VS Code `/ide` Status Location** — Moved IDE status out of the bottom status bar and into the chat sidebar so the enabled/disabled state and connection state stay visible even in narrow terminals.
 - **Session API Response** — `GET /api/sessions/:id` now returns `SessionDetail` (includes full message history) instead of just session metadata, enabling session resume/import in the web UI.
 - **Web API Client** — Updated `listAgents` endpoint from `/api/agents` to `/api/config/agents` for consistency with the config-based API layout. Updated `getSession` return type.
 - **Makefile `install` Target** — `install` now depends on `build`, ensuring web assets are compiled before installing the binary.

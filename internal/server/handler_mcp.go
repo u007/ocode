@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 func (h *Handler) HandleListMCP(w http.ResponseWriter, r *http.Request) {

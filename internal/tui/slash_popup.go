@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"

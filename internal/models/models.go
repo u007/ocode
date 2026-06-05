@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/pricing"
+	"github.com/u007/ocode/internal/pricing"
 )
 
 type ModelEntry struct {

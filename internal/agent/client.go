@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/auth"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	providerplugin "github.com/jamesmercstudio/ocode/internal/plugin/provider"
+	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/config"
+	providerplugin "github.com/u007/ocode/internal/plugin/provider"
 )
 
 const (

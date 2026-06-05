@@ -3,7 +3,7 @@ package server
 import (
 	"net/http"
 
-	"github.com/jamesmercstudio/ocode/internal/usage"
+	"github.com/u007/ocode/internal/usage"
 )
 
 func (h *Handler) HandleGetUsage(w http.ResponseWriter, r *http.Request) {

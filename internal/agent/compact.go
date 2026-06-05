@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -512,6 +513,44 @@ func contextWithTimeout(seconds int) (context.Context, context.CancelFunc) {
 		return context.Background(), func() {}
 	}
 	return context.WithTimeout(context.Background(), time.Duration(seconds)*time.Second)
+}
+
+// inactivityContext creates a context that only times out after `seconds` of
+// inactivity (no data received). The returned reset function must be called
+// each time data is received to extend the deadline. This is useful for long-
+// running LLM calls where the timeout should not fire while data is flowing.
+func inactivityContext(seconds int) (context.Context, context.CancelFunc, func()) {
+	if seconds <= 0 {
+		return context.Background(), func() {}, func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	deadline := time.Now().Add(time.Duration(seconds) * time.Second)
+	var mu sync.Mutex
+	reset := func() {
+		mu.Lock()
+		deadline = time.Now().Add(time.Duration(seconds) * time.Second)
+		mu.Unlock()
+	}
+	// Watchdog goroutine: periodically check if the deadline has passed.
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				mu.Lock()
+				if time.Now().After(deadline) {
+					mu.Unlock()
+					cancel()
+					return
+				}
+				mu.Unlock()
+			}
+		}
+	}()
+	return ctx, cancel, reset
 }
 
 // compactRuntime is the resolved set of knobs the compaction pass needs at

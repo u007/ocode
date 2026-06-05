@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 const defaultReadLines = 50

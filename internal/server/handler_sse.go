@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/session"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type SSEEvent struct {
@@ -167,8 +167,8 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tools, _ := tool.LoadBuiltins(h.cfg)
-		ag := agent.NewAgent(client, tools, h.cfg)
+		tools, lspMgr := tool.LoadBuiltins(h.cfg)
+		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 		ag.LoadExternalTools(h.cfg)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
 

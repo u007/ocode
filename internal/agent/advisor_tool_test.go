@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // advisorMockLLMClient implements LLMClient for testing.
@@ -205,7 +205,7 @@ func TestAdvisorTool_getAdvisorTools_NilMainAgent(t *testing.T) {
 
 func TestAdvisorTool_getAdvisorTools_WithAgent(t *testing.T) {
 	client := &advisorMockLLMClient{response: "test"}
-	agent := NewAgent(client, nil, nil)
+	agent := NewAgent(client, nil, nil, nil)
 	// NewAgent registers default tools (bash, bash_output, kill_shell, wait, etc.)
 	// and we add a few more for testing.
 	agent.tools["read"] = &advisorMockTool{name: "read"}

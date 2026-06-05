@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"github.com/jamesmercstudio/ocode/internal/github"
+	"github.com/u007/ocode/internal/github"
 )
 
 func ghGetPR(owner, repo string, prNumber int) (*github.PullRequest, error) {

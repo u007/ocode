@@ -80,7 +80,7 @@ func TestAgentRunRegistryCancelAll(t *testing.T) {
 	r := NewAgentRunRegistry()
 	run := r.New("explore")
 	cancelled := false
-	run.Sub = NewAgent(nil, nil, nil)
+	run.Sub = NewAgent(nil, nil, nil, nil)
 	run.Cancel = func() { cancelled = true }
 	r.CancelAll()
 	if !cancelled {

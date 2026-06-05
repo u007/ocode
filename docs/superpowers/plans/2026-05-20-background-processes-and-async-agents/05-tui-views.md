@@ -345,7 +345,7 @@ import (
 	"strings"
 
 	"charm.land/bubbles/v2/viewport"
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 )
 
 // renderRunTranscript formats an AgentRun's transcript for the detail viewport.
@@ -469,7 +469,7 @@ git commit -m "feat(tui): agent drill-in detail view"
 In `internal/tui/detail_view.go`, add:
 
 ```go
-import "github.com/jamesmercstudio/ocode/internal/tool"
+import "github.com/u007/ocode/internal/tool"
 
 // renderProcessList formats a registry's processes for the list view.
 func renderProcessList(reg *tool.ProcessRegistry) string {

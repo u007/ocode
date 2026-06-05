@@ -38,7 +38,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 func TestResolveSmallModel_ReturnsFirstViable(t *testing.T) {
@@ -103,7 +103,7 @@ Expected: compile error — `SmallModelPriority`, `ResolveSmallModel`, `newClien
 ```go
 package agent
 
-import "github.com/jamesmercstudio/ocode/internal/config"
+import "github.com/u007/ocode/internal/config"
 
 // SmallModelPriority is the ordered list of cheap/fast models tried when
 // auto-selecting a small model for lightweight tasks (title generation, etc.).
@@ -515,7 +515,7 @@ package agent
 
 import (
     "testing"
-    "github.com/jamesmercstudio/ocode/internal/config"
+    "github.com/u007/ocode/internal/config"
 )
 
 func TestSmallModelEligible(t *testing.T) {
@@ -624,7 +624,7 @@ import (
     "fmt"
     "strings"
 
-    "github.com/jamesmercstudio/ocode/internal/config"
+    "github.com/u007/ocode/internal/config"
 )
 ```
 

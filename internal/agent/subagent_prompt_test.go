@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // TestSubagentDoesNotInheritParentModePrompt is the regression for the bug

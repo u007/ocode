@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/session"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type Handler struct {
@@ -91,8 +91,8 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tools, _ := tool.LoadBuiltins(h.cfg)
-		ag := agent.NewAgent(client, tools, h.cfg)
+		tools, lspMgr := tool.LoadBuiltins(h.cfg)
+		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 		ag.LoadExternalTools(h.cfg)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
 
@@ -268,8 +268,8 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 
-		tools, _ := tool.LoadBuiltins(h.cfg)
-		ag := agent.NewAgent(client, tools, h.cfg)
+		tools, lspMgr := tool.LoadBuiltins(h.cfg)
+		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 		ag.LoadExternalTools(h.cfg)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
 
@@ -389,8 +389,8 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	if client == nil {
 		return nil, fmt.Errorf("failed to create LLM client")
 	}
-	tools, _ := tool.LoadBuiltins(h.cfg)
-	ag := agent.NewAgent(client, tools, h.cfg)
+	tools, lspMgr := tool.LoadBuiltins(h.cfg)
+	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 	ag.LoadExternalTools(h.cfg)
 	ag.SetAdvisorEnabled(h.advisorEnabled)
 	as := &agentSession{agent: ag, messages: s.Messages, model: model}

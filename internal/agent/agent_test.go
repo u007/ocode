@@ -15,8 +15,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -138,7 +139,7 @@ func TestStepCancellationAfterChatSkipsToolCalls(t *testing.T) {
 		release: make(chan struct{}),
 		resp:    &Message{Role: "assistant", ToolCalls: []ToolCall{tc}},
 	}
-	a := NewAgent(client, []tool.Tool{countingTool{calls: &calls}}, nil)
+	a := NewAgent(client, []tool.Tool{countingTool{calls: &calls}}, nil, nil)
 
 	done := make(chan error, 1)
 	go func() {
@@ -164,7 +165,7 @@ func TestStepCancellationAfterChatSkipsToolCalls(t *testing.T) {
 }
 
 func TestTaskToolBackgroundRunUnexpectedStopMarksFailed(t *testing.T) {
-	a := NewAgent(&panicClient{}, nil, nil)
+	a := NewAgent(&panicClient{}, nil, nil, nil)
 	taskTool, ok := a.tools["task"].(TaskTool)
 	if !ok {
 		t.Fatalf("task tool type = %T", a.tools["task"])
@@ -210,7 +211,7 @@ func TestNestedSubAgentPermissionAskCascadesToMainThread(t *testing.T) {
 		{Role: "assistant", Content: "child done"},
 	}}
 
-	a := NewAgent(client, nil, nil)
+	a := NewAgent(client, nil, nil, nil)
 	a.Permissions().SetRule("task", PermissionAllow)
 	a.Permissions().SetRule("ask_tool", PermissionAsk)
 	a.AddTools([]tool.Tool{&MockTool{name: "ask_tool", result: "approved"}})
@@ -255,7 +256,7 @@ func TestNestedSubagentPermissionCallbackCascades(t *testing.T) {
 		{Role: "assistant", Content: "child complete"},
 		{Role: "assistant", Content: "parent complete"},
 	}}
-	a := NewAgent(client, []tool.Tool{&MockTool{name: "ask_tool", result: "executed"}}, nil)
+	a := NewAgent(client, []tool.Tool{&MockTool{name: "ask_tool", result: "executed"}}, nil, nil)
 	a.Permissions().SetRule("ask_tool", PermissionAsk)
 	var asks int
 	a.SetSubAgentPermAsker(func(req PermissionRequest) PermissionResponse {
@@ -287,7 +288,7 @@ func TestNestedSubagentPermissionCallbackCascades(t *testing.T) {
 
 func TestStepIncludesModePromptWithExistingSystemMessage(t *testing.T) {
 	client := &captureClient{}
-	a := NewAgent(client, nil, nil)
+	a := NewAgent(client, nil, nil, nil)
 	a.SetMode(ModePlan)
 
 	_, err := a.Step([]Message{
@@ -310,8 +311,43 @@ func TestStepIncludesModePromptWithExistingSystemMessage(t *testing.T) {
 	}
 }
 
+func TestStepInjectsLSPDiagnostics(t *testing.T) {
+	client := &captureClient{}
+	dir := t.TempDir()
+	mgr := lsp.NewManager(dir)
+	defer mgr.Close()
+	path := filepath.Join(dir, "example.go")
+	uri := "file://" + filepath.ToSlash(path)
+	mgr.Diagnostics().SetURI(uri, []lsp.Diagnostic{{
+		URI:      uri,
+		Path:     path,
+		Range:    lsp.Range{Start: lsp.Position{Line: 1, Character: 2}},
+		Severity: lsp.SeverityWarning,
+		Message:  "unused variable",
+	}})
+
+	a := NewAgent(client, nil, nil, mgr)
+	a.SetPreloadedContext("test context")
+
+	_, err := a.Step([]Message{{Role: "user", Content: "hi"}})
+	if err != nil {
+		t.Fatalf("Step() error = %v", err)
+	}
+
+	var found bool
+	for _, msg := range client.Messages {
+		if msg.Role == "system" && strings.Contains(msg.Content, "LSP diagnostics:") && strings.Contains(msg.Content, "unused variable") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("LSP diagnostics missing from messages: %#v", client.Messages)
+	}
+}
+
 func TestPrepareMessagesDoesNotDuplicateMarkedBasePrompt(t *testing.T) {
-	a := NewAgent(&captureClient{}, nil, nil)
+	a := NewAgent(&captureClient{}, nil, nil, nil)
 	once := a.PrepareMessages([]Message{{Role: "user", Content: "hello"}}, "selected")
 	twice := a.PrepareMessages(once, "selected")
 
@@ -829,7 +865,7 @@ func TestAgentStep(t *testing.T) {
 			Content: "Hello!",
 		},
 	}
-	a := NewAgent(mock, nil, nil)
+	a := NewAgent(mock, nil, nil, nil)
 
 	msgs, err := a.Step([]Message{{Role: "user", Content: "Hi"}})
 	if err != nil {
@@ -986,7 +1022,7 @@ func TestAgentToolExecution(t *testing.T) {
 	mock := &MockToolClient{responses: []*Message{step1, step2}}
 
 	mockTool := &MockTool{name: "test_tool", result: "success"}
-	a := NewAgent(mock, nil, nil)
+	a := NewAgent(mock, nil, nil, nil)
 	a.Permissions().SetRule("test_tool", PermissionAllow)
 	a.AddTools([]tool.Tool{mockTool})
 
@@ -1009,7 +1045,7 @@ func TestAgentToolExecution(t *testing.T) {
 // acts on the returned level instead of emitting the PERMISSION_ASK sentinel.
 func TestOnPermissionAskRoutesSubAgentDecision(t *testing.T) {
 	mockTool := &MockTool{name: "ask_tool", result: "executed"}
-	a := NewAgent(nil, nil, nil)
+	a := NewAgent(nil, nil, nil, nil)
 	a.Permissions().SetRule("ask_tool", PermissionAsk)
 	a.AddTools([]tool.Tool{mockTool})
 
@@ -1046,7 +1082,7 @@ func TestOnPermissionAskRoutesSubAgentDecision(t *testing.T) {
 
 func TestOnPermissionAskPersistToolUpdatesCurrentAgent(t *testing.T) {
 	mockTool := &MockTool{name: "ask_tool", result: "executed"}
-	a := NewAgent(nil, nil, nil)
+	a := NewAgent(nil, nil, nil, nil)
 	a.Permissions().SetRule("ask_tool", PermissionAsk)
 	a.AddTools([]tool.Tool{mockTool})
 
@@ -1076,7 +1112,7 @@ func TestOnPermissionAskPersistToolUpdatesCurrentAgent(t *testing.T) {
 // TestHandleToolCallEmitsSentinelWithoutCallback verifies the main-agent path
 // is unchanged: with no OnPermissionAsk, an Ask tool yields the sentinel.
 func TestHandleToolCallEmitsSentinelWithoutCallback(t *testing.T) {
-	a := NewAgent(nil, nil, nil)
+	a := NewAgent(nil, nil, nil, nil)
 	a.Permissions().SetRule("delete", PermissionAsk)
 	res, err := a.HandleToolCall("delete", json.RawMessage(`{"path":"x"}`))
 	if err != nil {
@@ -1091,7 +1127,7 @@ func TestHandleToolCallAutoPermissionBypassesAsk(t *testing.T) {
 	mockTool := &MockTool{name: "ask_tool", result: "executed"}
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
-	a := NewAgent(nil, nil, cfg)
+	a := NewAgent(nil, nil, cfg, nil)
 	a.Permissions().SetRule("ask_tool", PermissionAsk)
 	a.Permissions().SetAutoPermissionEnabled(true)
 	a.AddTools([]tool.Tool{mockTool})
@@ -1172,7 +1208,7 @@ func (m *MockTool) Execute(args json.RawMessage) (string, error) {
 func (m *MockTool) Parallel() bool { return true }
 
 func TestNewAgentHasProcessTools(t *testing.T) {
-	a := NewAgent(nil, nil, nil)
+	a := NewAgent(nil, nil, nil, nil)
 	for _, name := range []string{"bash", "bash_output", "kill_shell"} {
 		if _, ok := a.tools[name]; !ok {
 			t.Fatalf("agent missing tool %q", name)
@@ -1184,7 +1220,7 @@ func TestNewAgentHasProcessTools(t *testing.T) {
 }
 
 func TestAgentCancelStopsBeforeNextStep(t *testing.T) {
-	a := NewAgent(nil, nil, nil) // nil client → Step returns the stub message
+	a := NewAgent(nil, nil, nil, nil) // nil client → Step returns the stub message
 	a.Cancel()
 	if !a.cancelled() {
 		t.Fatal("expected agent to report cancelled")
@@ -1192,7 +1228,7 @@ func TestAgentCancelStopsBeforeNextStep(t *testing.T) {
 }
 
 func TestAgentEmitsProcessJobEvent(t *testing.T) {
-	a := NewAgent(nil, nil, nil)
+	a := NewAgent(nil, nil, nil, nil)
 	p := a.Procs().StartBackground("echo job-evt")
 	select {
 	case ev := <-a.JobEvents():
@@ -1205,7 +1241,7 @@ func TestAgentEmitsProcessJobEvent(t *testing.T) {
 }
 
 func TestRecoverOrphanedToolCallsBasicRecovery(t *testing.T) {
-	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil, nil)
 	a.permissions = nil // Disable permission checks for testing
 
 	// Create messages with orphaned tool calls (no matching tool result).
@@ -1233,7 +1269,7 @@ func TestRecoverOrphanedToolCallsBasicRecovery(t *testing.T) {
 }
 
 func TestRecoverOrphanedToolCallsPartialRecovery(t *testing.T) {
-	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil, nil)
 	a.permissions = nil // Disable permission checks for testing
 
 	// Create messages: one call with result, one without.
@@ -1268,7 +1304,7 @@ func TestRecoverOrphanedToolCallsFailedRecovery(t *testing.T) {
 		name:  "mock_tool",
 		Error: fmt.Errorf("mock tool failed"),
 	}
-	a := NewAgent(&MockClient{}, []tool.Tool{failingTool}, nil)
+	a := NewAgent(&MockClient{}, []tool.Tool{failingTool}, nil, nil)
 	a.permissions = nil // Disable permission checks for testing
 
 	tc := ToolCall{ID: "call-1", Type: "function"}
@@ -1292,7 +1328,7 @@ func TestRecoverOrphanedToolCallsFailedRecovery(t *testing.T) {
 }
 
 func TestRecoverOrphanedToolCallsEmptyCase(t *testing.T) {
-	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil, nil)
 	a.permissions = nil // Disable permission checks for testing
 
 	// No orphaned calls — all have results.
@@ -1319,7 +1355,7 @@ func TestRecoverOrphanedToolCallsEmptyCase(t *testing.T) {
 // earlier turns are left for repairToolCallSequence to handle, avoiding
 // dangerous re-execution of side-effectful operations from prior turns.
 func TestRecoverOrphanedToolCallsOnlyLastAssistant(t *testing.T) {
-	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil, nil)
 	a.permissions = nil
 
 	tc1 := ToolCall{ID: "call-1", Type: "function"}
@@ -1356,7 +1392,7 @@ func TestRecoverOrphanedToolCallsOnlyLastAssistant(t *testing.T) {
 // are inserted right after the assistant message, before any user/assistant
 // messages that follow — NOT appended at the end.
 func TestRecoverOrphanedToolCallsInsertPosition(t *testing.T) {
-	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil)
+	a := NewAgent(&MockClient{}, []tool.Tool{&MockTool{name: "mock_tool", result: "success"}}, nil, nil)
 	a.permissions = nil
 
 	tc1 := ToolCall{ID: "call-1", Type: "function"}

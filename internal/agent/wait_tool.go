@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // waitCeiling caps any wait so the session cannot hang.

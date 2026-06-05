@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/pricing"
+	"github.com/u007/ocode/internal/pricing"
 )
 
 // Record represents a single LLM API call.

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // Default advisor model when OPENCODE_ADVISOR_MODEL is not set.
@@ -215,7 +215,7 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 		return withNotice(fallbackNotice, strings.TrimSpace(resp.Content)), nil
 	}
 
-	advisorAgent := NewAgent(client, advisorTools, t.cfg)
+	advisorAgent := NewAgent(client, advisorTools, t.cfg, t.mainAgent.lspMgr)
 
 	// Set the spec with the advisor system prompt and restrict tools to the
 	// exploration set. We set spec directly (not via SetSpec) so the resolved

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/config"
+	"github.com/u007/ocode/internal/config"
 )
 
 func TestValidateTmuxEditorMode(t *testing.T) {

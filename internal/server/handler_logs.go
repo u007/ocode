@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/debuglog"
+	"github.com/u007/ocode/internal/debuglog"
 )
 
 func (h *Handler) HandleLogStream(w http.ResponseWriter, r *http.Request) {

@@ -10,7 +10,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
+	"github.com/u007/ocode/internal/agent"
 )
 
 func TestDetailStackPushPop(t *testing.T) {
@@ -58,7 +58,7 @@ func TestBlockAtRow(t *testing.T) {
 // TestAgentStripRowCap verifies the agent strip never renders more than
 // agentStripMaxRows worth of run/indicator rows even with many runs.
 func TestAgentStripRowCap(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	for i := 0; i < 20; i++ {
 		a.Runs().New("worker")
 	}
@@ -72,15 +72,15 @@ func TestAgentStripRowCap(t *testing.T) {
 	if len(blocks) == 0 {
 		t.Fatal("expected at least one rendered block")
 	}
-	if !strings.Contains(strip, "↓ more") {
-		t.Fatal("expected a '↓ more' indicator with 20 runs")
+	if !strings.Contains(strip, "more agent") {
+		t.Fatal("expected a 'more agents below' indicator with 20 runs")
 	}
 }
 
 // TestAgentStripScrollVisibility verifies the selected run stays inside the
 // visible window after clamping.
 func TestAgentStripScrollVisibility(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	for i := 0; i < 20; i++ {
 		a.Runs().New("worker")
 	}
@@ -118,7 +118,7 @@ func TestRenderRunTranscriptUsesSingleSpacingBetweenSectionsAndEvents(t *testing
 }
 
 func TestDetailAgentViewFitsPanelWidth(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run,
 		agent.Message{Role: "user", Content: strings.Repeat("x", 120)},
@@ -170,7 +170,7 @@ func TestRenderRunTranscriptShowsThinkingLLMToolRequestAndToolResult(t *testing.
 }
 
 func TestAgentDetailClickTogglesExpandableTranscriptSection(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run,
 		agent.Message{Role: "assistant", ReasoningContent: strings.Join([]string{"line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "line 8", "line 9"}, "\n")},
@@ -205,7 +205,7 @@ func setRunTranscriptForTest(run *agent.AgentRun, msgs ...agent.Message) {
 // from agentStripTopY must match where View() actually paints the strip, and a
 // click there must open the run's detail view.
 func TestAgentStripClickOpensDetail(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "did some work"})
 
@@ -262,7 +262,7 @@ func TestAgentStripClickOpensDetail(t *testing.T) {
 // the visible strip lands above where the handler looks and is swallowed by the
 // transcript-selection handler.
 func TestAgentStripClickableAfterStripGrows(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 
 	m := model{
 		ready:       true,

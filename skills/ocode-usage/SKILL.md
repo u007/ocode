@@ -16,12 +16,12 @@ A complete reference for using ocode — the AI coding agent that lives in your 
 
 ```bash
 # From source
-git clone https://github.com/jamesmercstudio/ocode
+git clone https://github.com/u007/ocode
 cd ocode
 go build -o ocode .
 
 # Or install to PATH
-go install github.com/jamesmercstudio/ocode@latest
+go install github.com/u007/ocode@latest
 ```
 
 ### First Run
@@ -299,7 +299,7 @@ ocode skills uninstall ocode-tui
 ### Creating Custom Skills
 
 1. Create `~/.config/opencode/skills/my-skill/SKILL.md`
-2. Follow the [skill specification](https://github.com/jamesmercstudio/ocode/blob/main/skills/README.md)
+2. Follow the [skill specification](https://github.com/u007/ocode/blob/main/skills/README.md)
 3. Run `ocode skills install my-skill`
 
 ---
@@ -370,6 +370,7 @@ ocode run -attach http://server:4096 -prompt "Continue work"
 | `/lint` | Lint code |
 | `/git` | Git operations |
 | `/files` | File operations |
+| `/ide` | Connect to VS Code (Claude Code ext) for live file/selection context |
 | `/help` | Show all commands |
 
 In TUI: Type `/` to see autocomplete.
@@ -490,8 +491,8 @@ ocode  # Will prompt for setup
 
 ## 15. Resources
 
-- **GitHub**: https://github.com/jamesmercstudio/ocode
-- **Issues**: https://github.com/jamesmercstudio/ocode/issues
+- **GitHub**: https://github.com/u007/ocode
+- **Issues**: https://github.com/u007/ocode/issues
 - **Man Pages**: `man ./docs/man/ocode.1` (after build)
 - **Source**: `internal/` — Go packages
 - **TUI Code**: `internal/tui/`

@@ -9,12 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/commands"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/session"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/commands"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type stringSliceFlag []string
@@ -23,6 +24,70 @@ func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
 func (s *stringSliceFlag) Set(v string) error {
 	*s = append(*s, v)
 	return nil
+}
+
+type runOptions struct {
+	prompt         string
+	model          string
+	agentName      string
+	sessionID      string
+	cont           bool
+	fork           bool
+	files          stringSliceFlag
+	format         string
+	title          string
+	attach         string
+	port           int
+	yolo           bool
+	dangerous      bool
+	permissionMode string
+	command        string
+	share          bool
+	dir            string
+	variant        string
+	thinking       bool
+	username       string
+	password       string
+}
+
+func parseRunArgs(args []string) (runOptions, []string, error) {
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var opts runOptions
+	fs.StringVar(&opts.prompt, "prompt", "", "Prompt text")
+	fs.StringVar(&opts.prompt, "p", "", "Prompt text")
+	fs.StringVar(&opts.model, "model", "", "Model to use")
+	fs.StringVar(&opts.model, "m", "", "Model to use")
+	fs.StringVar(&opts.agentName, "agent", "", "Agent name")
+	fs.StringVar(&opts.sessionID, "session", "", "Session ID")
+	fs.StringVar(&opts.sessionID, "s", "", "Session ID")
+	fs.BoolVar(&opts.cont, "continue", false, "Continue last session")
+	fs.BoolVar(&opts.cont, "c", false, "Continue last session")
+	fs.BoolVar(&opts.fork, "fork", false, "Fork from last session")
+	fs.Var(&opts.files, "file", "File(s) to attach to message")
+	fs.Var(&opts.files, "f", "File(s) to attach to message")
+	fs.StringVar(&opts.format, "format", "default", "Output format (default/json/summary)")
+	fs.StringVar(&opts.title, "title", "", "Session title")
+	fs.StringVar(&opts.attach, "attach", "", "Attach to running serve instance URL")
+	fs.IntVar(&opts.port, "port", 0, "Serve port (for --attach)")
+	fs.BoolVar(&opts.yolo, "yolo", false, "Allow tools and shell commands without permission prompts")
+	fs.BoolVar(&opts.dangerous, "dangerously-skip-permissions", false, "Auto-approve permissions that are not explicitly denied")
+	fs.StringVar(&opts.permissionMode, "permission-mode", "", "LLM auto-permission mode: auto or off")
+	fs.StringVar(&opts.command, "command", "", "Slash command to run; positional message is used as command arguments")
+	fs.BoolVar(&opts.share, "share", false, "Share the session (accepted for OpenCode compatibility)")
+	fs.StringVar(&opts.dir, "dir", "", "Directory to run in")
+	fs.StringVar(&opts.variant, "variant", "", "Model variant (accepted for OpenCode compatibility)")
+	fs.BoolVar(&opts.thinking, "thinking", false, "Show thinking blocks (accepted for OpenCode compatibility)")
+	fs.StringVar(&opts.username, "username", "", "Basic auth username for --attach")
+	fs.StringVar(&opts.username, "u", "", "Basic auth username for --attach")
+	fs.StringVar(&opts.password, "password", "", "Basic auth password for --attach")
+	fs.StringVar(&opts.password, "P", "", "Basic auth password for --attach")
+
+	if err := fs.Parse(args); err != nil {
+		return opts, nil, err
+	}
+	return opts, fs.Args(), nil
 }
 
 func printRunUsage() {
@@ -38,17 +103,20 @@ func printRunUsage() {
 	fmt.Println("  -continue, -c             Continue the most recent session")
 	fmt.Println("  -fork                     Fork from the most recent session (new session)")
 	fmt.Println("  -file, -f <path>          File(s) to attach to message (can repeat)")
-	fmt.Println("  -format <default|json>    Output format (default: default)")
+	fmt.Println("  -format <default|json|summary>")
+	fmt.Println("                            Output format (default: default)")
 	fmt.Println("  -title <text>             Session title")
 	fmt.Println("  -attach <url>             Attach to running serve instance URL")
 	fmt.Println("  -port <port>              Serve port (for --attach)")
 	fmt.Println("  -yolo                     Allow tools and shell commands without permission prompts")
 	fmt.Println("  --dangerously-skip-permissions")
 	fmt.Println("                            Auto-approve permissions (alias for -yolo)")
+	fmt.Println("  --permission-mode <auto|off>")
+	fmt.Println("                            Enable or disable LLM auto-permission (default: off)")
 	fmt.Println("  -command <name>           Slash command to run; positional message used as args")
 	fmt.Println("  -dir <path>               Directory to run in")
 	fmt.Println("  -username, -u <name>      Basic auth username for --attach")
-	fmt.Println("  -password, -p <pass>      Basic auth password for --attach")
+	fmt.Println("  -password, -P <pass>      Basic auth password for --attach")
 	fmt.Println("  -h, --help                Show this help message")
 	fmt.Println()
 	fmt.Println("Examples:")
@@ -67,57 +135,29 @@ func Run(args []string) error {
 		}
 	}
 
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-	prompt := fs.String("prompt", "", "Prompt text")
-	model := fs.String("model", "", "Model to use")
-	fs.StringVar(model, "m", "", "Model to use")
-	agentName := fs.String("agent", "", "Agent name")
-	sessionID := fs.String("session", "", "Session ID")
-	fs.StringVar(sessionID, "s", "", "Session ID")
-	cont := fs.Bool("continue", false, "Continue last session")
-	fs.BoolVar(cont, "c", false, "Continue last session")
-	fork := fs.Bool("fork", false, "Fork from last session")
-	var files stringSliceFlag
-	fs.Var(&files, "file", "File(s) to attach to message")
-	fs.Var(&files, "f", "File(s) to attach to message")
-	format := fs.String("format", "default", "Output format (default/json)")
-	title := fs.String("title", "", "Session title")
-	attach := fs.String("attach", "", "Attach to running serve instance URL")
-	port := fs.Int("port", 0, "Serve port (for --attach)")
-	yolo := fs.Bool("yolo", false, "Allow tools and shell commands without permission prompts")
-	dangerous := fs.Bool("dangerously-skip-permissions", false, "Auto-approve permissions that are not explicitly denied")
-	command := fs.String("command", "", "Slash command to run; positional message is used as command arguments")
-	share := fs.Bool("share", false, "Share the session (accepted for OpenCode compatibility)")
-	dir := fs.String("dir", "", "Directory to run in")
-	variant := fs.String("variant", "", "Model variant (accepted for OpenCode compatibility)")
-	thinking := fs.Bool("thinking", false, "Show thinking blocks (accepted for OpenCode compatibility)")
-	username := fs.String("username", "", "Basic auth username for --attach")
-	fs.StringVar(username, "u", "", "Basic auth username for --attach")
-	password := fs.String("password", "", "Basic auth password for --attach")
-	fs.StringVar(password, "p", "", "Basic auth password for --attach")
-	if err := fs.Parse(args); err != nil {
+	opts, positional, err := parseRunArgs(args)
+	if err != nil {
 		return err
 	}
-	_ = share
-	_ = variant
-	_ = thinking
+	_ = opts.share
+	_ = opts.variant
+	_ = opts.thinking
 
-	if *dir != "" {
-		if err := os.Chdir(*dir); err != nil {
-			return fmt.Errorf("failed to change directory to %s: %w", *dir, err)
+	if opts.dir != "" {
+		if err := os.Chdir(opts.dir); err != nil {
+			return fmt.Errorf("failed to change directory to %s: %w", opts.dir, err)
 		}
 	}
 
-	if *attach != "" {
-		promptText, err := resolveRunInput(*prompt, fs.Args(), files, *command)
+	if opts.attach != "" {
+		promptText, err := resolveRunInput(opts.prompt, positional, opts.files, opts.command)
 		if err != nil {
 			return err
 		}
-		return runAttach(*attach, *port, promptText, *format, *sessionID, *username, *password)
+		return runAttach(opts.attach, opts.port, promptText, opts.format, opts.sessionID, opts.username, opts.password)
 	}
 
-	promptText, err := resolveRunInput(*prompt, fs.Args(), files, *command)
+	promptText, err := resolveRunInput(opts.prompt, positional, opts.files, opts.command)
 	if err != nil {
 		return err
 	}
@@ -131,11 +171,30 @@ func Run(args []string) error {
 	}
 	agent.ApplyAgentConfig(cfg)
 
-	if *model != "" {
-		cfg.Model = *model
+	if opts.model != "" {
+		cfg.Model = opts.model
 	}
-	if *yolo || *dangerous {
+	if opts.yolo || opts.dangerous {
 		cfg.Ocode.Permissions.Mode = string(agent.PermissionModeYOLO)
+	}
+
+	if opts.permissionMode != "" {
+		switch strings.ToLower(opts.permissionMode) {
+		case "auto":
+			if cfg.Ocode.Permissions.Auto == nil {
+				cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true}
+			} else {
+				cfg.Ocode.Permissions.Auto.Enabled = true
+			}
+		case "off":
+			if cfg.Ocode.Permissions.Auto == nil {
+				cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
+			} else {
+				cfg.Ocode.Permissions.Auto.Enabled = false
+			}
+		default:
+			return fmt.Errorf("invalid --permission-mode %q (want auto or off)", opts.permissionMode)
+		}
 	}
 
 	modelStr := cfg.Model
@@ -148,43 +207,45 @@ func Run(args []string) error {
 		return fmt.Errorf("failed to create LLM client for model %q", modelStr)
 	}
 
-	tools, _ := tool.LoadBuiltins(cfg)
-	ag := agent.NewAgent(client, tools, cfg)
+	tools, lspMgr := tool.LoadBuiltins(cfg)
+	ag := agent.NewAgent(client, tools, cfg, lspMgr)
 	ag.LoadExternalTools(cfg)
 	// Only install an OnPermissionAsk override when the user explicitly opted
 	// into yolo / dangerously-skip-permissions. Otherwise leave the callback
 	// nil so the agent's default sentinel/deny path runs and prompts surface to
 	// the caller normally.
-	if *yolo || *dangerous {
+	if opts.yolo || opts.dangerous {
 		ag.OnPermissionAsk = func(req agent.PermissionRequest) agent.PermissionResponse {
 			return agent.PermissionResponse{Level: agent.PermissionAllow}
 		}
 	}
 
-	if *agentName != "" {
-		ag.SetMode(agent.Mode(*agentName))
+	if opts.agentName != "" {
+		ag.SetMode(agent.Mode(opts.agentName))
 	}
 
 	var messages []agent.Message
 
-	if *sessionID != "" {
-		s, err := session.Load(*sessionID)
+	if opts.sessionID != "" {
+		s, err := session.Load(opts.sessionID)
 		if err != nil {
 			return fmt.Errorf("load session: %w", err)
 		}
 		messages = s.Messages
-	} else if *cont {
+	} else if opts.cont {
 		sessions, err := session.List()
 		if err == nil && len(sessions) > 0 {
 			messages = sessions[0].Messages
-			*sessionID = sessions[0].ID
+			opts.sessionID = sessions[0].ID
 		}
-	} else if *fork {
+	} else if opts.fork {
 		sessions, err := session.List()
 		if err == nil && len(sessions) > 0 {
 			messages = sessions[0].Messages
 		}
 	}
+
+	startTime := time.Now()
 
 	messages = append(messages, agent.Message{Role: "user", Content: promptText})
 
@@ -202,15 +263,18 @@ func Run(args []string) error {
 
 	allMessages := append(messages, resp...)
 
-	if *sessionID == "" {
-		*sessionID = ""
-	}
-	if err := session.Save(*sessionID, *title, allMessages, nil); err != nil {
+	if err := session.Save(opts.sessionID, opts.title, allMessages, nil); err != nil {
 		return fmt.Errorf("save session: %w", err)
 	}
 
-	if *format == "json" {
-		return outputJSONEvents(resp, *sessionID)
+	if opts.format == "json" {
+		return outputJSONEvents(resp, opts.sessionID)
+	}
+
+	if opts.format == "summary" {
+		// Pass the full history (original messages + new messages) so that
+		// every tool call across the entire run is captured.
+		return outputSummary(allMessages, opts.sessionID, modelStr, startTime)
 	}
 
 	fmt.Println(responseText.String())

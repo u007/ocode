@@ -14,7 +14,7 @@ import (
 // Anthropic-issued client IDs for the Claude Pro/Max + console flows.
 const (
 	anthropicClientID      = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	anthropicAuthorizeMax  = "https://claude.ai/oauth/authorize"
+	anthropicAuthorizeMax  = "https://claude.com/cai/oauth/authorize"
 	anthropicAuthorizeCons = "https://platform.claude.com/oauth/authorize"
 	anthropicRedirectURI   = "https://platform.claude.com/oauth/code/callback"
 )
@@ -29,7 +29,6 @@ var anthropicScopes = []string{
 	"user:inference",
 	"user:sessions:claude_code",
 	"user:mcp_servers",
-	"user:file_upload",
 }
 
 // AnthropicAuthorize starts the OAuth flow and returns the URL the user must visit.

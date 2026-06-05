@@ -219,6 +219,31 @@ func TestGitIgnoreCustomPathPromptAppendsToGitignore(t *testing.T) {
 	}
 }
 
+func TestGitRefreshShortcutReloadsState(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	writeFileForGitTest(t, dir, "new.txt", "added\n")
+	gitRunForTest(t, dir, "add", "--", "new.txt")
+
+	m := gitModel{workDir: dir, section: gitSectionChanges, panel: gitPanelFiles}
+	if got := m.renderHints(); !strings.Contains(got, "r refresh") {
+		t.Fatalf("expected refresh shortcut in hints, got %q", got)
+	}
+
+	m, cmd := m.handleKey(tea.KeyPressMsg{Code: 'r', Text: "r"}, 100, 30)
+	if cmd == nil {
+		t.Fatal("expected refresh shortcut to return a command")
+	}
+	msg := cmd()
+	refresh, ok := msg.(gitRefreshMsg)
+	if !ok {
+		t.Fatalf("expected gitRefreshMsg from refresh shortcut, got %T", msg)
+	}
+	m, _ = m.Update(refresh, 100, 30)
+	if len(m.stagedFiles) != 1 || m.stagedFiles[0].path != "new.txt" {
+		t.Fatalf("expected refreshed staged files to include new.txt, got staged=%+v unstaged=%+v", m.stagedFiles, m.unstagedFiles)
+	}
+}
+
 func TestAppendUniqueLineAvoidsDuplicateGitignoreEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".gitignore")

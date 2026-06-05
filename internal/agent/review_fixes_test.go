@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // TestTaskTool_HiddenAgentsExcludedFromEnum guards against the regression where
@@ -130,7 +130,7 @@ func TestSubAgentSpec_InheritsModelAndSamplingParams(t *testing.T) {
 		TopP:        &top,
 	}
 	// Mirror what TaskTool.Execute does after the fix:
-	sub := NewAgent(parent.client, nil, nil)
+	sub := NewAgent(parent.client, nil, nil, nil)
 	sub.SetSpec(&subAgentSpec)
 
 	if sub.spec == nil {

@@ -18,12 +18,13 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/auth"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/session"
-	"github.com/jamesmercstudio/ocode/internal/snapshot"
-	"github.com/jamesmercstudio/ocode/internal/tool"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/ide"
+	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/snapshot"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type retryTestClient struct{}
@@ -87,7 +88,7 @@ func TestLeaderTimeoutClearsActiveState(t *testing.T) {
 
 func TestInitialToolsIncludesList(t *testing.T) {
 	m := model{}
-	tools := m.getInitialTools()
+	tools, _ := m.getInitialTools()
 	for _, tool := range tools {
 		if tool.Name() == "list" {
 			return
@@ -95,6 +96,31 @@ func TestInitialToolsIncludesList(t *testing.T) {
 	}
 
 	t.Fatal("expected default tools to include list")
+}
+
+func TestResolveInitialIDEMode(t *testing.T) {
+	t.Run("explicit off wins inside vscode", func(t *testing.T) {
+		t.Setenv("TERM_PROGRAM", "vscode")
+		cfg := &config.Config{}
+		cfg.Ocode.IDEMode = config.IDEModeOff
+		if got := resolveInitialIDEMode(cfg); got != config.IDEModeOff {
+			t.Fatalf("resolveInitialIDEMode(off) = %q, want %q", got, config.IDEModeOff)
+		}
+	})
+
+	t.Run("unset auto-enables in vscode", func(t *testing.T) {
+		t.Setenv("TERM_PROGRAM", "vscode")
+		if got := resolveInitialIDEMode(&config.Config{}); got != config.IDEModeClaude {
+			t.Fatalf("resolveInitialIDEMode(unset,vscode) = %q, want %q", got, config.IDEModeClaude)
+		}
+	})
+
+	t.Run("unset defaults off outside vscode", func(t *testing.T) {
+		t.Setenv("TERM_PROGRAM", "")
+		if got := resolveInitialIDEMode(&config.Config{}); got != config.IDEModeOff {
+			t.Fatalf("resolveInitialIDEMode(unset,non-vscode) = %q, want %q", got, config.IDEModeOff)
+		}
+	})
 }
 
 func TestFormatReadToolCallHintShowsLineParams(t *testing.T) {
@@ -213,7 +239,7 @@ func TestRenderStatusReflectsCommandRunningState(t *testing.T) {
 
 func TestRenderStatusUsesActiveAgentSpec(t *testing.T) {
 	m := model{
-		agent:     agent.NewAgent(retryTestClient{}, nil, nil),
+		agent:     agent.NewAgent(retryTestClient{}, nil, nil, nil),
 		ready:     true,
 		width:     140,
 		activeTab: tabChat,
@@ -231,7 +257,7 @@ func TestRenderStatusUsesActiveAgentSpec(t *testing.T) {
 
 func TestSwitchAgentRejectsHiddenHelper(t *testing.T) {
 	m := model{
-		agent:     agent.NewAgent(retryTestClient{}, nil, nil),
+		agent:     agent.NewAgent(retryTestClient{}, nil, nil, nil),
 		ready:     true,
 		width:     140,
 		activeTab: tabChat,
@@ -261,7 +287,7 @@ func TestSwitchAgentRejectsHiddenHelper(t *testing.T) {
 
 func TestHandleCommandSlashDispatchRejectsHiddenHelper(t *testing.T) {
 	m := model{
-		agent:     agent.NewAgent(retryTestClient{}, nil, nil),
+		agent:     agent.NewAgent(retryTestClient{}, nil, nil, nil),
 		ready:     true,
 		width:     140,
 		activeTab: tabChat,
@@ -286,7 +312,7 @@ func TestHandleCommandSlashDispatchRejectsHiddenHelper(t *testing.T) {
 
 func TestRunAgentCmdRejectsHiddenHelper(t *testing.T) {
 	m := model{
-		agent:     agent.NewAgent(retryTestClient{}, nil, nil),
+		agent:     agent.NewAgent(retryTestClient{}, nil, nil, nil),
 		ready:     true,
 		width:     140,
 		activeTab: tabChat,
@@ -306,9 +332,9 @@ func TestRunAgentCmdRejectsHiddenHelper(t *testing.T) {
 }
 
 func TestRenderStatusShowsActiveSubagentModel(t *testing.T) {
-	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil)
+	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil, nil)
 	run := mainAgent.Runs().New("explore")
-	run.Sub = agent.NewAgent(retryTestClient{}, nil, nil)
+	run.Sub = agent.NewAgent(retryTestClient{}, nil, nil, nil)
 
 	m := model{
 		agent:     mainAgent,
@@ -361,7 +387,7 @@ func TestAlwaysAllowConfirmationDefersPersist(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // isolate persistPermissions disk writes
 
 	newModel := func() model {
-		a := agent.NewAgent(retryTestClient{}, []tool.Tool{askOnlyTool{}}, nil)
+		a := agent.NewAgent(retryTestClient{}, []tool.Tool{askOnlyTool{}}, nil, nil)
 		a.Permissions().SetRule("ask_tool", agent.PermissionAsk)
 		m := model{
 			agent:             a,
@@ -431,9 +457,9 @@ func TestAlwaysAllowConfirmationDefersPersist(t *testing.T) {
 }
 
 func TestRenderAgentStripShowsRunModelLabel(t *testing.T) {
-	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil)
+	mainAgent := agent.NewAgent(retryTestClient{}, nil, nil, nil)
 	run := mainAgent.Runs().New("explore")
-	run.Sub = agent.NewAgent(retryTestClient{}, nil, nil)
+	run.Sub = agent.NewAgent(retryTestClient{}, nil, nil, nil)
 
 	m := model{
 		agent:  mainAgent,
@@ -515,7 +541,7 @@ func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 		{Role: "assistant", Content: "child complete"},
 		{Role: "assistant", Content: "parent complete"},
 	}}
-	a := agent.NewAgent(client, []tool.Tool{askOnlyTool{}}, nil)
+	a := agent.NewAgent(client, []tool.Tool{askOnlyTool{}}, nil, nil)
 	a.Permissions().SetRule("task", agent.PermissionAllow)
 	a.Permissions().SetRule("ask_tool", agent.PermissionAsk)
 
@@ -687,7 +713,7 @@ func TestExecuteApprovedTool_UsesTemporaryOutOfScopePathAllowance(t *testing.T) 
 		t.Fatalf("did not expect %q to be pre-allowed", outsideRoot)
 	}
 
-	a := agent.NewAgent(nil, []tool.Tool{&tool.ReadTool{}}, nil)
+	a := agent.NewAgent(nil, []tool.Tool{&tool.ReadTool{}}, nil, nil)
 	m := model{agent: a, pendingToolCallID: "tc-1"}
 	args := json.RawMessage(`{"path":"` + target + `"}`)
 
@@ -884,6 +910,38 @@ func TestThinkingDeltaContinuesAfterAssistantToolCallMessage(t *testing.T) {
 	}
 }
 
+func TestStreamEventDefersThinkingUntilToolResultsDrain(t *testing.T) {
+	m := model{}
+	msgCh := make(chan agent.Message, 1)
+	deltaCh := make(chan deltaEvent, 1)
+	errCh := make(chan error, 1)
+	cancel := make(chan struct{})
+
+	m.pendingStreamDeltas = []deltaEvent{{kind: "reasoning", text: "next turn thinking"}}
+	msgCh <- agent.Message{Role: "tool", ToolID: "call-1", Content: "tool result"}
+
+	first := m.waitStreamEvent(msgCh, deltaCh, errCh, cancel)()
+	msgEv, ok := first.(streamMsgEvent)
+	if !ok {
+		t.Fatalf("expected tool result to be delivered before deferred delta, got %T", first)
+	}
+	if msgEv.msg.Role != "tool" || msgEv.msg.Content != "tool result" {
+		t.Fatalf("expected tool result first, got %#v", msgEv.msg)
+	}
+	if got := len(m.pendingStreamDeltas); got != 1 {
+		t.Fatalf("expected deferred delta to remain queued, got %d", got)
+	}
+
+	second := m.waitStreamEvent(msgCh, deltaCh, errCh, cancel)()
+	deltaEv, ok := second.(deltaMsg)
+	if !ok {
+		t.Fatalf("expected deferred delta after tool result, got %T", second)
+	}
+	if deltaEv.delta.kind != "reasoning" || deltaEv.delta.text != "next turn thinking" {
+		t.Fatalf("expected deferred delta payload, got %#v", deltaEv.delta)
+	}
+}
+
 func TestRenderUserTextUsesThemeBox(t *testing.T) {
 	m := model{styles: ApplyThemeColors("tokyonight")}
 	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
@@ -938,7 +996,7 @@ func TestCtrlBMovesForegroundBashToBackgroundBeforeTogglingSidebar(t *testing.T)
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX bash command setup")
 	}
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	cmd := exec.Command("bash", "-c", "sleep 30")
 	if _, err := a.Procs().RegisterForeground("sleep 30", cmd, time.Now(), nil); err != nil {
 		t.Fatalf("RegisterForeground error: %v", err)
@@ -975,7 +1033,7 @@ func TestCtrlOTogglesYoloMode(t *testing.T) {
 	m := model{
 		input:    textarea.New(),
 		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
-		agent:    agent.NewAgent(nil, nil, nil),
+		agent:    agent.NewAgent(nil, nil, nil, nil),
 	}
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'o', Mod: tea.ModCtrl})
@@ -999,7 +1057,7 @@ func TestRunOptionsYOLOSetsPermissionMode(t *testing.T) {
 	// SetMode(PermissionModeYOLO) on the constructed agent's permissions.
 	// We exercise that path on a manually-constructed model so this test
 	// is independent of NewClient's model/credential resolution.
-	m := model{agent: agent.NewAgent(retryTestClient{}, nil, nil)}
+	m := model{agent: agent.NewAgent(retryTestClient{}, nil, nil, nil)}
 	if m.agent.Permissions() == nil {
 		t.Fatal("expected constructed agent to have permissions")
 	}
@@ -1167,7 +1225,7 @@ func TestPersistPermissionsPreservesAutoBlock(t *testing.T) {
 		t.Fatalf("LoadOcodeConfig failed: %v", err)
 	}
 
-	m := model{config: &cfg, agent: agent.NewAgent(nil, nil, &cfg)}
+	m := model{config: &cfg, agent: agent.NewAgent(nil, nil, &cfg, nil)}
 	m.agent.Permissions().SetAutoPermissionEnabled(true)
 	m.agent.Permissions().SetRule("ask_tool", agent.PermissionAllow)
 	m.persistPermissions()
@@ -1207,7 +1265,7 @@ func TestMCPCmdListsConfiguredServers(t *testing.T) {
 		config: &config.Config{MCP: map[string]config.MCPConfig{
 			"demo": {Type: "local", Enabled: true},
 		}},
-		agent: agent.NewAgent(nil, nil, nil),
+		agent: agent.NewAgent(nil, nil, nil, nil),
 	}
 	m.agent.RestoreMCPToolNames([]string{"demo_search"})
 
@@ -1276,7 +1334,7 @@ func TestRunExitCmdUsesSharedCleanupPath(t *testing.T) {
 func TestCleanupCurrentSessionDeduplicatesRepeatedCalls(t *testing.T) {
 	cleanupCalls := 0
 	shutdownCalls := 0
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	m := model{
 		agent: a,
 		cleanupState: &modelCleanupState{
@@ -1688,6 +1746,42 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 	}
 }
 
+func TestSidebarViewShowsIDEStatus(t *testing.T) {
+	m := model{
+		ready:       true,
+		width:       140,
+		height:      40,
+		showSidebar: true,
+		input:       textarea.New(),
+		viewport:    viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		styles:      ApplyThemeColors("tokyonight"),
+		ideMode:     config.IDEModeClaude,
+	}
+
+	view := stripANSI(m.renderSidebar())
+	if !strings.Contains(view, "IDE: on · connecting") {
+		t.Fatalf("expected sidebar to show IDE connecting state, got %q", view)
+	}
+
+	m.ideConnected = true
+	view = stripANSI(m.renderSidebar())
+	if !strings.Contains(view, "IDE: on · connected") {
+		t.Fatalf("expected sidebar to show IDE connected state, got %q", view)
+	}
+
+	m.ideSelection = &ide.Selection{FilePath: "internal/tui/model.go", Ranges: []ide.Range{{StartLine: 11, EndLine: 13}}}
+	view = stripANSI(m.renderSidebar())
+	if !strings.Contains(view, "IDE: on · model.go:L12-14") {
+		t.Fatalf("expected sidebar to show IDE selection state, got %q", view)
+	}
+
+	m.ideMode = config.IDEModeOff
+	view = stripANSI(m.renderSidebar())
+	if !strings.Contains(view, "IDE: off") {
+		t.Fatalf("expected sidebar to show IDE off state, got %q", view)
+	}
+}
+
 func TestFormatSidebarFilePathStripsProjectPrefix(t *testing.T) {
 	tmpDir := t.TempDir()
 	absPath := filepath.Join(tmpDir, "internal", "tui", "model.go")
@@ -1753,16 +1847,16 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 
 	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
 	// Press starts sidebar selection (no file opening yet)
-	// Y accounts for: appHeader(2) + sidebar_border(1) + topLines(7) +
+	// Y accounts for: appHeader(2) + sidebar_border(1) + topLines(8) +
 	// no-title-pad(1) + git_title(1) + git_branch(1) + blank(1) + files_title(1)
-	// = 2 + 1 + 7 + 1 + 1 + 1 + 1 + 1 = 15
-	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 15})
+	// = 2 + 1 + 8 + 1 + 1 + 1 + 1 + 1 = 16
+	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 16})
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected press to start selection only, got stray command")
 	}
 	// Release on same position triggers file open (simple click, no drag)
-	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: 15})
+	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: 16})
 	_ = updated
 	if cmd == nil {
 		t.Fatal("expected release on file line to return editor command")
@@ -2384,10 +2478,10 @@ func TestModelPickerHintIncludesCtrlRForModelFamilyKinds(t *testing.T) {
 	// load-bearing; we assert on the presence of the key name and the word
 	// "refresh" so a future refactor can't silently drop the shortcut.
 	m := model{
-		styles:  ApplyThemeColors("tokyonight"),
-		width:   100,
-		height:  30,
-		input:   newTestTextarea(),
+		styles: ApplyThemeColors("tokyonight"),
+		width:  100,
+		height: 30,
+		input:  newTestTextarea(),
 	}
 	for _, kind := range []string{"model", "advisor", "permission-model"} {
 		m.showPicker = true
@@ -2402,6 +2496,85 @@ func TestModelPickerHintIncludesCtrlRForModelFamilyKinds(t *testing.T) {
 		if !strings.Contains(rendered, "refresh") {
 			t.Errorf("expected %s picker hint to mention refresh, got: %s", kind, rendered)
 		}
+	}
+}
+
+func TestModelPickerHintIncludesCtrlDForSessionKinds(t *testing.T) {
+	m := model{
+		styles: ApplyThemeColors("tokyonight"),
+		width:  100,
+		height: 30,
+		input:  newTestTextarea(),
+	}
+	for _, kind := range []string{"session"} {
+		m.showPicker = true
+		m.pickerKind = kind
+		m.pickerItems = []string{"[ocode] ses_1  First session"}
+		m.pickerValues = []string{"ses_1"}
+		m.pickerIsHeader = []bool{false}
+		rendered := stripANSI(m.renderPicker())
+		if !strings.Contains(rendered, "ctrl+d") {
+			t.Errorf("expected %s picker hint to mention ctrl+d, got: %s", kind, rendered)
+		}
+		if !strings.Contains(rendered, "delete") {
+			t.Errorf("expected %s picker hint to mention delete, got: %s", kind, rendered)
+		}
+	}
+}
+
+func TestSessionPickerCtrlDOpensConfirmation(t *testing.T) {
+	m := model{
+		showPicker:        true,
+		pickerKind:        "session",
+		pickerItems:       []string{"[ocode] ses_1  First session"},
+		pickerValues:      []string{"ses_1"},
+		styles:            ApplyThemeColors("tokyonight"),
+		input:             newTestTextarea(),
+		viewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		pickerSessionRefs: []session.Ref{{ID: "ses_1", Title: "First session"}},
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+	if cmd != nil {
+		t.Fatal("expected ctrl+d to open delete confirmation without spawning a command")
+	}
+	got := derefTestModel(t, updated)
+	if !got.showPicker {
+		t.Fatal("expected session picker to remain open while delete confirmation is active")
+	}
+	if !got.sessionDeleteConfirm {
+		t.Fatal("expected ctrl+d to open delete confirmation")
+	}
+	if got.sessionDeleteConfirmID != "ses_1" {
+		t.Fatalf("expected delete confirmation to target ses_1, got %q", got.sessionDeleteConfirmID)
+	}
+	if got.sessionDeleteConfirmTitle != "First session" {
+		t.Fatalf("expected delete confirmation title to be preserved, got %q", got.sessionDeleteConfirmTitle)
+	}
+}
+
+func TestSessionPickerDeleteConfirmationRendersInPicker(t *testing.T) {
+	m := model{
+		styles:                    ApplyThemeColors("tokyonight"),
+		width:                     100,
+		height:                    30,
+		input:                     newTestTextarea(),
+		showPicker:                true,
+		pickerKind:                "session",
+		sessionDeleteConfirm:      true,
+		sessionDeleteConfirmID:    "ses_1",
+		sessionDeleteConfirmTitle: "First session",
+	}
+
+	rendered := stripANSI(m.renderPicker())
+	if !strings.Contains(rendered, "Delete Session") {
+		t.Fatalf("expected session delete confirmation to render inside the picker, got: %s", rendered)
+	}
+	if !strings.Contains(rendered, "Press Y to delete, N/Esc to cancel") {
+		t.Fatalf("expected delete confirmation hint to render inside the picker, got: %s", rendered)
+	}
+	if !strings.Contains(rendered, "ses_1") || !strings.Contains(rendered, "First session") {
+		t.Fatalf("expected delete confirmation body to include session identity, got: %s", rendered)
 	}
 }
 
@@ -2729,6 +2902,56 @@ func TestOpenSessionPickerLoadsRefsAsync(t *testing.T) {
 	}
 }
 
+func TestSessionPickerLoadMorePreservesCursor(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+
+	total := sessionPickerPageSize + 2
+	for i := 0; i < total; i++ {
+		id := fmt.Sprintf("ses_2026-06-01-1201%02d", i)
+		title := fmt.Sprintf("Session %02d", i)
+		if err := session.Save(id, title, []agent.Message{{Role: "user", Content: "hello"}}, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := model{input: textarea.New()}
+	cmd := m.openSessionPicker()
+	updated, _ := m.Update(cmd())
+	got := updated.(model)
+	if len(got.pickerItems) != sessionPickerPageSize {
+		t.Fatalf("expected first page of sessions, got %d items", len(got.pickerItems))
+	}
+
+	wantIndex := len(got.pickerItems) - 2
+	got.pickerIndex = wantIndex
+
+	nextCmd := got.loadMoreSessions()
+	if nextCmd == nil {
+		t.Fatal("expected loadMoreSessions to return a command")
+	}
+	updated, _ = got.Update(nextCmd())
+	got = updated.(model)
+
+	if got.pickerIndex != wantIndex {
+		t.Fatalf("expected picker index to stay at %d after load more, got %d", wantIndex, got.pickerIndex)
+	}
+	if got.pickerSessionPage != 2 {
+		t.Fatalf("expected page count to advance to 2, got %d", got.pickerSessionPage)
+	}
+	if len(got.pickerItems) != total {
+		t.Fatalf("expected all sessions to be loaded after append, got %d want %d", len(got.pickerItems), total)
+	}
+	if got.pickerSessionMore {
+		t.Fatal("expected no more sessions after second page load")
+	}
+}
+
 func TestSessionPickerLoadsAllRefsWhenFilterActive(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
@@ -2905,7 +3128,7 @@ func TestCtrlYRetriesLastRetryableLLMError(t *testing.T) {
 	m := model{
 		input:               textarea.New(),
 		viewport:            viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
-		agent:               agent.NewAgent(retryTestClient{}, nil, nil),
+		agent:               agent.NewAgent(retryTestClient{}, nil, nil, nil),
 		lastRetryableLLMErr: errText,
 		messages: []message{
 			{role: roleUser, text: "please retry"},
@@ -2954,7 +3177,7 @@ func TestMouseWheelScrollsTranscriptOnlyWhenOverMessages(t *testing.T) {
 }
 
 func TestMouseWheelScrollsAgentDetailView(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	msgs := make([]agent.Message, 0, 80)
 	for i := 0; i < 40; i++ {
@@ -2991,7 +3214,7 @@ func TestMouseWheelScrollsAgentDetailView(t *testing.T) {
 }
 
 func TestAgentDetailScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	msgs := make([]agent.Message, 0, 120)
 	for i := 0; i < 60; i++ {
@@ -3037,9 +3260,9 @@ func TestAgentDetailScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
 }
 
 func TestAgentDetailClickOpensNestedSubAgent(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
-	run.Sub = agent.NewAgent(nil, nil, nil)
+	run.Sub = agent.NewAgent(nil, nil, nil, nil)
 	child := run.Sub.Runs().New("child")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "root"})
 	setRunTranscriptForTest(child, agent.Message{Role: "assistant", Content: "child"})
@@ -3071,7 +3294,7 @@ func TestAgentDetailClickOpensNestedSubAgent(t *testing.T) {
 }
 
 func TestMouseWheelScrollsAgentDetailViewport(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	msgs := make([]agent.Message, 0, 60)
 	for i := 0; i < 60; i++ {
@@ -3106,7 +3329,7 @@ func TestMouseWheelScrollsAgentDetailViewport(t *testing.T) {
 }
 
 func TestAgentDetailShowsAndOpensRunBackgroundProcess(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	run.Procs = tool.NewProcessRegistry()
 	proc := run.Procs.StartBackground("printf hello")
@@ -3136,7 +3359,7 @@ func TestAgentDetailShowsAndOpensRunBackgroundProcess(t *testing.T) {
 }
 
 func TestAgentDetailSuppressesHiddenInputEditing(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
 	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "root"})
 
@@ -3256,6 +3479,47 @@ func TestGitDiffMouseDragSelectsDiffText(t *testing.T) {
 	}
 	if !strings.Contains(got.git.diff.View(), "\x1b[7m") {
 		t.Fatalf("expected highlighted diff content, got %q", got.git.diff.View())
+	}
+}
+
+func TestGitDiffSelectionAccountsForSoftWrapScroll(t *testing.T) {
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			diff: viewport.New(viewport.WithWidth(12), viewport.WithHeight(3)),
+		},
+	}
+	m.git.diff.SoftWrap = true
+	m.git.diff.LeftGutterFunc = diffLineNumbers
+	m.git.setDiffContent(strings.Repeat("a", 20) + "\nsecond")
+	m.git.diff.SetYOffset(1)
+
+	panelW := m.panelWidth()
+	diffLeft := panelW*20/100 + panelW*30/100 + 1
+	gitContentTopY := appHeaderHeight + 2
+
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: diffLeft + 7, Y: gitContentTopY}, true)
+	if !ok {
+		t.Fatal("expected wrapped git preview press to be handled")
+	}
+	got := updated.(model)
+	if got.gitSel.startLine != 0 || got.gitSel.startCol != 5 {
+		t.Fatalf("expected press on wrapped row to map to raw line 0 col 5, got %#v", got.gitSel)
+	}
+
+	updated, _, ok = got.handleMouseMotion(tea.Mouse{Button: tea.MouseLeft, X: diffLeft + 9, Y: gitContentTopY})
+	if !ok {
+		t.Fatal("expected wrapped git preview drag motion to be handled")
+	}
+	got = updated.(model)
+	if !got.gitSel.active {
+		t.Fatalf("expected wrapped git preview selection to become active, got %#v", got.gitSel)
+	}
+	if got.gitSel.endLine != 0 || got.gitSel.endCol != 7 {
+		t.Fatalf("expected wrapped drag to stay on raw line 0 and advance within the same raw line, got %#v", got.gitSel)
 	}
 }
 
@@ -3576,7 +3840,7 @@ func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
 		width:        80,
 		height:       24,
 		streaming:    true,
-		agent:        agent.NewAgent(nil, nil, nil),
+		agent:        agent.NewAgent(nil, nil, nil, nil),
 		input:        newTestTextarea(),
 		viewport:     viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
 		styles:       ApplyThemeColors("tokyonight"),
@@ -3604,7 +3868,7 @@ func TestStreamDoneInterruptedDoesNotStartNextQueuedInput(t *testing.T) {
 		width:        80,
 		height:       24,
 		streaming:    true,
-		agent:        agent.NewAgent(nil, nil, nil),
+		agent:        agent.NewAgent(nil, nil, nil, nil),
 		input:        newTestTextarea(),
 		viewport:     viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
 		styles:       ApplyThemeColors("tokyonight"),
@@ -3664,6 +3928,26 @@ func TestRetryableLLMErrorDetection(t *testing.T) {
 	}
 	if isRetryableLLMError(os.ErrPermission) {
 		t.Fatal("expected permission error to not be retryable")
+	}
+}
+
+func TestRenderStatusOmitsIDEChip(t *testing.T) {
+	m := model{
+		width:        100,
+		height:       24,
+		styles:       ApplyThemeColors("tokyonight"),
+		ideMode:      config.IDEModeClaude,
+		ideConnected: true,
+		ideSelection: &ide.Selection{FilePath: "internal/tui/model.go", Ranges: []ide.Range{{StartLine: 1, EndLine: 2}}},
+		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
+		input:        textarea.New(),
+		activeTab:    tabChat,
+		sessionID:    "abc123",
+	}
+
+	status := stripANSI(m.renderStatus())
+	if strings.Contains(status, "IDE") {
+		t.Fatalf("expected status bar to omit IDE chip after moving it to the sidebar, got %q", status)
 	}
 }
 
@@ -3842,7 +4126,7 @@ func TestConnectMouseSelectsProviderAndMethodRows(t *testing.T) {
 
 func TestHandleModelCmdPreservesMCPProvenance(t *testing.T) {
 	m := model{config: &config.Config{Model: "gpt-4o"}}
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	a.RestoreMCPToolNames([]string{"demo_tool"})
 	m.agent = a
 
@@ -3895,7 +4179,7 @@ func TestResetSessionAgentCreatesStubAgentWhenClientMissing(t *testing.T) {
 func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 	spend := 0.5
 	cleanupCalls := 0
-	oldAgent := agent.NewAgent(nil, nil, nil)
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
 	m := model{
 		sessionTelemetry: sidebarTelemetry{
 			inputTokens:  10,
@@ -3925,7 +4209,7 @@ func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 }
 
 func TestHandleNewCmdReplacesSupervisor(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil)
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
 	oldSupervisor := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: time.Millisecond})
 	oldAgent.SetSupervisor(oldSupervisor)
 	m := model{
@@ -3950,8 +4234,8 @@ func TestHandleNewCmdReplacesSupervisor(t *testing.T) {
 }
 
 func TestActivityUpdateFromPreviousAgentIgnored(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil)
-	newAgent := agent.NewAgent(nil, nil, nil)
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	newAgent := agent.NewAgent(nil, nil, nil, nil)
 	m := model{agent: newAgent}
 
 	updated, _ := m.Update(activityUpdateMsg{
@@ -3966,8 +4250,8 @@ func TestActivityUpdateFromPreviousAgentIgnored(t *testing.T) {
 }
 
 func TestJobCompletionFromPreviousAgentIgnored(t *testing.T) {
-	oldAgent := agent.NewAgent(nil, nil, nil)
-	newAgent := agent.NewAgent(nil, nil, nil)
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	newAgent := agent.NewAgent(nil, nil, nil, nil)
 	m := model{agent: newAgent}
 
 	updated, _ := m.Update(jobCompletedMsg{
@@ -4042,7 +4326,7 @@ func TestHandleNewCmdFirstRequestTitlesSession(t *testing.T) {
 }
 
 func TestCountLoadedMCPToolsIgnoresCustomTools(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil)
+	a := agent.NewAgent(nil, nil, nil, nil)
 	a.AddTools([]tool.Tool{&tool.CustomTool{ToolName: "demo_tool"}})
 	if got := a.MCPToolCount(); got != 0 {
 		t.Fatalf("expected custom tools not to count as MCP tools, got %d", got)
@@ -4409,7 +4693,7 @@ func TestPrepareAgentMessagesSkipsWhenNoAgent(t *testing.T) {
 }
 
 func TestPrepareAgentMessagesIncludesSelectionContext(t *testing.T) {
-	m := model{workDir: "/proj", agent: agent.NewAgent(retryTestClient{}, nil, nil)}
+	m := model{workDir: "/proj", agent: agent.NewAgent(retryTestClient{}, nil, nil, nil)}
 	m.files.nodes = []fileNode{{path: "/proj/main.go", name: "main.go"}}
 	m.files.selectedFiles = map[int]bool{0: true}
 	msgs := []agent.Message{{Role: "user", Content: "hello"}}
@@ -4677,6 +4961,31 @@ func TestHandleAdvisorCmdRequiresProviderPrefix(t *testing.T) {
 	}
 }
 
+func TestInstallAgentPreservesRuntimeAdvisorToggle(t *testing.T) {
+	old := agent.NewAgent(nil, nil, nil, nil)
+	old.SetAdvisorEnabled(false)
+
+	m := model{
+		advisorEnabled:    false,
+		advisorEnabledSet: true,
+		agent:             old,
+	}
+
+	next := agent.NewAgent(nil, nil, nil, nil)
+	if !next.AdvisorEnabled() {
+		t.Fatal("test setup expected new agent to default advisor on")
+	}
+
+	m.installAgent(next)
+
+	if m.agent == nil {
+		t.Fatal("expected agent to be installed")
+	}
+	if m.agent.AdvisorEnabled() {
+		t.Fatal("expected runtime advisor toggle to persist across installAgent")
+	}
+}
+
 func TestRunPermissionsCmdModelOpensPermissionPicker(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
@@ -4684,7 +4993,7 @@ func TestRunPermissionsCmdModelOpensPermissionPicker(t *testing.T) {
 	cfg := config.Config{}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -4712,7 +5021,7 @@ func TestRunPermissionsCmdModelAutoClearsOverride(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -4736,7 +5045,7 @@ func TestRunPermissionsCmdModelRequiresProviderSlashModel(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -4764,7 +5073,7 @@ func TestRunPermissionsCmdModelRejectsProviderOnly(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 
@@ -4788,7 +5097,7 @@ func TestRunPermissionsCmdModelRejectsSlashOnly(t *testing.T) {
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: false}
 	m := model{
 		config: &cfg,
-		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg),
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
 		input:  textarea.New(),
 	}
 

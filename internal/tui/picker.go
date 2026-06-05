@@ -7,9 +7,9 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/jamesmercstudio/ocode/internal/agent"
-	"github.com/jamesmercstudio/ocode/internal/config"
-	"github.com/jamesmercstudio/ocode/internal/session"
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/session"
 )
 
 func (m *model) openAdvisorPicker() {
@@ -560,6 +560,8 @@ func (m model) renderPicker() string {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
 	} else if m.pickerKind == "advisor" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
+	} else if m.pickerKind == "session" {
+		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+d delete · Esc cancel · type to filter")
 	}
 
 	title := "Select model"
@@ -642,6 +644,9 @@ func (m model) renderPicker() string {
 	width := m.width - 4
 	if width < 40 {
 		width = 40
+	}
+	if m.pickerKind == "session" && m.sessionDeleteConfirm {
+		return borderStyle.Width(width).Render(m.renderSessionDeleteConfirmDialog(width))
 	}
 
 	filteredItems, _ := m.pickerVisibleItems()

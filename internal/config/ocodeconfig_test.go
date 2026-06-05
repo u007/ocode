@@ -215,6 +215,39 @@ func TestEditorModeLoadSave(t *testing.T) {
 	})
 }
 
+func TestIDEModeLoadSave(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	if err := SaveIDEMode(IDEModeOff); err != nil {
+		t.Fatalf("SaveIDEMode(off) failed: %v", err)
+	}
+
+	configPath := filepath.Join(tmp, ".config", "opencode", "ocodeconfig.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config failed: %v", err)
+	}
+
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		t.Fatalf("parse config failed: %v", err)
+	}
+	if got, ok := parsed["ide_mode"].(string); !ok || got != IDEModeOff {
+		t.Fatalf("saved ide_mode = %v, want %q", parsed["ide_mode"], IDEModeOff)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if cfg.Ocode.IDEMode != IDEModeOff {
+		t.Fatalf("loaded IDEMode = %q, want %q", cfg.Ocode.IDEMode, IDEModeOff)
+	}
+}
+
 func TestSaveOcodeConfigUsesProjectPathWhenAvailable(t *testing.T) {
 	projectDir := t.TempDir()
 	tmpHome := t.TempDir()

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/jamesmercstudio/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/lsp"
 )
 
 // AstTool provides symbol-name-oriented semantic code intelligence backed by a
