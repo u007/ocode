@@ -95,9 +95,12 @@ func writeCache(data map[string]providerEntry) error {
 	return os.WriteFile(path, b, 0o644)
 }
 
+// fetchRemoteClient is the HTTP client used by fetchRemote. Tests can swap
+// it for an httptest-backed client. Zero value uses a 10s-timeout default.
+var fetchRemoteClient = &http.Client{Timeout: 10 * time.Second}
+
 func fetchRemote() (map[string]providerEntry, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(modelsDevURL)
+	resp, err := fetchRemoteClient.Get(modelsDevURL)
 	if err != nil {
 		return nil, fmt.Errorf("fetch models.dev: %w", err)
 	}
@@ -199,6 +202,41 @@ func loadRegistry() map[string]providerEntry {
 // warm before the first call to ModelWindow or ProviderModels.
 func PreloadRegistry() {
 	go loadRegistry()
+}
+
+// ForceRefreshRegistry synchronously fetches the models.dev registry and
+// updates the in-memory cache, bypassing the 5-minute TTL. It does NOT bypass
+// the OPENCODE_MODELS_PATH env var or the embedded snapshot in loadRegistry —
+// the freshly-updated fetchedAt makes the TTL short-circuit in loadRegistry
+// return the new data on subsequent calls, so AllProviderModels and friends
+// see the refreshed list immediately.
+//
+// Returns the new data on success, or the existing cached data plus the
+// error on failure (so the caller can decide whether to repopulate or surface
+// the error). Returns (nil, err) only when both the remote fetch fails and
+// there is no prior in-memory data to fall back on.
+func ForceRefreshRegistry() (map[string]providerEntry, error) {
+	remote, err := fetchRemote()
+	if err != nil {
+		emitDebug("AGENT", fmt.Sprintf("force refresh: models.dev fetch failed: %v", err))
+		registry.mu.RLock()
+		existing := registry.data
+		registry.mu.RUnlock()
+		if existing != nil {
+			return existing, err
+		}
+		return nil, err
+	}
+
+	registry.mu.Lock()
+	registry.data = remote
+	registry.fetchedAt = time.Now()
+	registry.mu.Unlock()
+
+	if err := writeCache(remote); err != nil {
+		emitDebug("AGENT", fmt.Sprintf("force refresh: cache write failed: %v", err))
+	}
+	return remote, nil
 }
 
 func registrySnapshotIfReady() map[string]providerEntry {

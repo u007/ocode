@@ -87,6 +87,7 @@ func init() {
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
 		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|sync [name]|update [name]|confirm|cancel]", help: "List, install, update, or sync plugins", handler: runPluginCmd},
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
+		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -181,7 +182,7 @@ func buildCommandHelpText(specs []commandSpec) string {
 	}
 	b.WriteString("\nShortcuts:\n")
 	b.WriteString("!command       : Prefix the input with ! to run a shell command (double-esc exits shell mode)\n")
-	b.WriteString("@path          : Add file context or attach an image\n")
+	b.WriteString("@path          : Reference a file (attach an image, or pass the path to the model)\n")
 	b.WriteString("Enter          : Send message\n")
 	b.WriteString("Shift+Enter    : New line in input\n")
 	b.WriteString("Up/Down        : Navigate input history\n")
@@ -915,4 +916,8 @@ func runEditorModeCmd(m *model, args []string) tea.Cmd {
 
 func runReviewCmd(m *model, args []string) tea.Cmd {
 	return m.handleReviewCmd(args)
+}
+
+func runRemoteControlCmd(m *model, args []string) tea.Cmd {
+	return m.handleRemoteControlCmd(args)
 }

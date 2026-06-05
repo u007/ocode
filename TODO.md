@@ -1,5 +1,28 @@
 # TODO
 
+## Clickable file paths in messages — known limitations
+
+Auto-detected, clickable file paths were added to rendered chat messages (web
+`MessageBubble` + TUI transcript and agent drill-in). Open in `$EDITOR`/`$VISUAL`
+with system-opener fallback. Deferred / limited behavior:
+
+- **TUI click ignores `:line` suffix.** A path like `handler.go:42` opens the
+  file but does not jump to the line (the shared `createEditorOpener` has no
+  line-jump support). Web jumps only for code-family GUI editors (`--goto`).
+- **Web cannot open terminal editors.** The server is headless (no TTY), so
+  `vim`/`nano`/etc. can't run from a browser click — it falls back to the system
+  opener. Only GUI editors (`code`, `cursor`, `zed`, …) or the OS default work.
+- **Paths split across a visual-line wrap boundary** linkify only the first
+  segment (TUI). Acceptable; full-token reconstruction across wraps not done.
+- **Web path resolution uses the server process `os.Getwd()`** (mirrors
+  `handleFileContent`). If a session cwd ever differs from the launch dir,
+  relative paths won't resolve.
+- **Not exercised with live mouse interaction.** Verified via render-test (custom
+  `filelink` element renders to a clickable span), regex/detection unit tests,
+  server security/validation tests, and reuse of the existing working
+  selection-coordinate math — but a live hover/click walkthrough on each surface
+  was not run.
+
 ## AST/LSP semantic tool — deferred work
 
 The old ast-grep "code_rel" tool + `.sgindex` daemon were removed (they relied on a

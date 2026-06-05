@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/jamesmercstudio/ocode/internal/hooks"
 	"github.com/jamesmercstudio/ocode/internal/lsp"
 	"github.com/jamesmercstudio/ocode/internal/plugins"
+	"github.com/jamesmercstudio/ocode/internal/server"
 	"github.com/jamesmercstudio/ocode/internal/session"
 	"github.com/jamesmercstudio/ocode/internal/skill"
 	"github.com/jamesmercstudio/ocode/internal/snapshot"
@@ -226,6 +228,28 @@ type ctrlCResetMsg struct{}
 type cleanupRequestMsg struct{}
 type dotTickMsg struct{}
 
+// rcRequestMsg is delivered to Update when the /rc web UI sends a message.
+type rcRequestMsg struct {
+	req server.RCRequest
+}
+
+// rcStreamEventMsg relays a streaming event from the agent to the /rc web UI.
+type rcStreamEventMsg struct {
+	event server.SSEEvent
+}
+
+// rcDoneMsg signals that the agent has finished processing an /rc request.
+type rcDoneMsg struct {
+	messages []agent.Message
+	err      error
+}
+
+// rcStartedMsg is returned when the /rc server starts successfully.
+type rcStartedMsg struct {
+	url    string
+	bridge *server.RCBridge
+}
+
 // autoRefreshTickMsg fires periodically to quietly refresh the git tab and
 // files tab in the background. The refresh is non-intrusive: it never changes
 // user focus, selection, or cursor position.
@@ -255,9 +279,13 @@ type pickerFilterApplyMsg struct {
 	filter string
 }
 type sessionRefsLoadedMsg struct {
-	seq  int
-	refs []session.Ref
-	err  error
+	seq   int
+	refs  []session.Ref
+	total int
+	err   error
+}
+type modelsRefreshedMsg struct {
+	err error
 }
 type fileListCacheMsg struct{ items []slashSuggestion }
 type pluginInstallMsg struct {
@@ -457,6 +485,11 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	if m.agent != nil {
 		m.agent.SetSupervisor(m.supervisor)
 	}
+	// Keep the RC bridge pointed at the live agent so web-side runtime toggles
+	// (advisor on/off) follow agent switches.
+	if m.rcBridge != nil {
+		m.rcBridge.SetAgent(m.agent)
+	}
 	if m.agent == nil {
 		return nil
 	}
@@ -495,6 +528,7 @@ type model struct {
 	pickerSessionLoading  bool          // whether refs are currently being loaded
 	pickerSessionLoadSeq  int           // generation token for in-flight loads
 	pickerSessionLoadErr  string        // last load error shown in the picker
+	pickerRefreshing      bool          // true while a ctrl+r model-cache refresh is in flight
 	showSlashPopup        bool
 	slashPopupIndex       int
 	slashPopupItems       []slashSuggestion
@@ -534,6 +568,11 @@ type model struct {
 	showPermDialog        bool
 	showRetryDialog       bool
 	retryDialogMsg        string
+
+	// sessionDeleteConfirm tracks the session deletion confirmation dialog.
+	sessionDeleteConfirm      bool   // true when confirmation dialog is showing
+	sessionDeleteConfirmID    string // the session ID to delete
+	sessionDeleteConfirmTitle string // the session title for display
 
 	// retryInfo tracks the current LLM retry state for display in the activity row.
 	// Set when a retry event arrives; cleared when the next activity snapshot or
@@ -595,6 +634,10 @@ type model struct {
 	sidebarSel               selectionState
 	rawSidebarLines          []string
 	hoverSidebarFile         string // file path hovered by mouse in sidebar, empty when no hover
+	hoverLink                pathLinkRegion // file-path link hovered in the transcript
+	hoverLinkActive          bool           // whether hoverLink is set
+	hoverDetailLink          pathLinkRegion // file-path link hovered in the agent-detail view
+	hoverDetailLinkActive    bool           // whether hoverDetailLink is set
 	rawInputLines            []string
 	rawInputLinesDirty       bool
 	inputThemeApplied        bool
@@ -645,6 +688,18 @@ type model struct {
 
 	// review holds the state for the /review command overlay.
 	review reviewState
+
+	// webFS holds the embedded web assets for the /rc command.
+	webFS fs.FS
+
+	// rcCh is the channel for receiving requests from the /rc web UI.
+	// When non-nil, the TUI is in remote-control mode.
+	rcCh chan server.RCRequest
+	// pendingRC holds the currently active RC request being processed.
+	pendingRC *server.RCRequest
+	// rcBridge is the bridge between the server and TUI, used to push messages
+	// so the web UI can fetch existing conversation history.
+	rcBridge *server.RCBridge
 }
 
 type modelCleanupState struct {
@@ -1226,6 +1281,7 @@ func newModel(opts ...RunOptions) model {
 		cleanupState:         newModelCleanupState(),
 		supervisor:           sup,
 		hookPipeline:         hp,
+		webFS:                o.WebFS,
 	}
 
 	if resolvedSmallModel != "" {
@@ -1616,7 +1672,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.files, cmd = m.files.Update(msg, m.width, m.height)
 		m.filesSel = selectionState{}
 		return m, cmd
-	case gitStatusMsg, gitRefreshMsg, loadMoreLogMsg:
+	case gitStatusMsg, gitRefreshMsg, gitBranchRefreshMsg, loadMoreLogMsg:
 		var cmd tea.Cmd
 		m.git, cmd = m.git.Update(msg, m.panelWidth(), m.height)
 		return m, cmd
@@ -1806,15 +1862,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.pickerSessionLoadErr = ""
-		m.pickerSessionRefs = msg.refs
-		m.pickerSessionTotal = len(msg.refs)
-		m.pickerSessionPage = 1
-		m.pickerSessionMore = len(msg.refs) > sessionPickerPageSize
+		// Initial load or append mode
+		if len(m.pickerSessionRefs) == 0 || m.pickerSessionPage == 0 {
+			// Initial load - replace refs
+			m.pickerSessionRefs = msg.refs
+			m.pickerSessionPage = 1
+		} else {
+			// Append mode - add to existing refs
+			m.appendSessionRefs(msg.refs, msg.total)
+			m.pickerIndex = 0
+			return m, nil
+		}
+		m.pickerSessionTotal = msg.total
+		m.pickerSessionMore = len(m.pickerSessionRefs) < m.pickerSessionTotal
 		m.rebuildSessionPickerItems()
 		if m.pickerFilter != "" || m.pickerFilterPending != "" {
-			m.loadAllSessions()
+			if cmd := m.loadAllSessions(); cmd != nil {
+				return m, cmd
+			}
 		}
 		m.pickerIndex = 0
+	case modelsRefreshedMsg:
+		m.pickerRefreshing = false
+		// If the picker was closed while the refresh was in flight, just
+		// surface the result as a transcript message and skip repopulation.
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model") {
+			if msg.err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Model cache refresh failed: %v", msg.err)})
+				m.rerenderTranscriptAndMaybeScroll()
+			} else {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Model cache refreshed."})
+				m.rerenderTranscriptAndMaybeScroll()
+			}
+			return m, nil
+		}
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Model cache refresh failed: %v", msg.err)})
+		} else {
+			m.refreshModelPickerItems()
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Model cache refreshed."})
+		}
+		m.rerenderTranscriptAndMaybeScroll()
 	case pluginInstallMsg:
 		source := msg.source
 		ref := msg.ref
@@ -2154,6 +2242,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} })
 		}
 		var cmds []tea.Cmd
+		// Always refresh the branch info for the sidebar (lightweight)
+		cmds = append(cmds, m.git.cmdBranchRefresh())
 		if m.activeTab == tabGit {
 			cmds = append(cmds, m.git.cmdAutoRefresh())
 		}
@@ -2289,14 +2379,91 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, listenRetryStatus(m.agent)
 		}
 		return m, nil
+	case rcStartedMsg:
+		m.messages = append(m.messages, message{
+			role: roleAssistant,
+			text: fmt.Sprintf("🌐 Remote Control started!\n\nSession: %s\nURL: %s\n\nThe web UI is now streaming this session. You can continue chatting in the TUI or switch to the browser.", m.sessionID, msg.url),
+		})
+		m.rerenderTranscriptAndMaybeScroll()
+		// Store the bridge for pushing messages
+		m.rcBridge = msg.bridge
+		// Push current messages to the bridge so the web UI can fetch them,
+		// and hand it the live agent so web-side runtime toggles (advisor
+		// on/off) reach the agent that actually executes requests.
+		if m.rcBridge != nil {
+			m.rcBridge.SetMessages(m.persistedAgentMessages())
+			m.rcBridge.SetAgent(m.agent)
+		}
+		// Start listening for RC requests
+		if m.rcCh != nil {
+			return m, waitForRCRequest(m.rcCh)
+		}
+		return m, nil
+	case rcRequestMsg:
+		// Append the user message from the web UI to TUI messages
+		m.messages = append(m.messages, message{role: roleUser, text: msg.req.Content})
+		if m.activeTab != tabChat {
+			m.chatUnread = true
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		// Store the pending RC request so streamDoneMsg can deliver the result
+		m.pendingRC = &msg.req
+		// Run through the agent
+		return m, m.askAgent()
 	case streamMsgEvent:
 		m.appendAgentMessage(msg.msg)
 		if m.activeTab != tabChat {
 			m.chatUnread = true
 		}
 		m.rerenderTranscriptAndMaybeScroll()
+		// Relay streaming events to the /rc web UI if active
+		if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
+			if msg.msg.Role == "tool" {
+				select {
+				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_result", Data: server.ToolResultEvent{Tool: "tool", Output: msg.msg.Content}}:
+				default:
+				}
+			} else if len(msg.msg.ToolCalls) > 0 {
+				for _, tc := range msg.msg.ToolCalls {
+					select {
+					case m.pendingRC.StreamCh <- server.SSEEvent{Event: "tool_start", Data: server.ToolStartEvent{Tool: tc.Function.Name, Command: tc.Function.Arguments}}:
+					default:
+					}
+				}
+			} else if msg.msg.Content != "" {
+				select {
+				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "text", Data: server.TextDelta{Delta: msg.msg.Content}}:
+				default:
+				}
+			}
+		}
 		return m, waitStreamEvent(msg.ch, msg.errCh, msg.cancel)
 	case streamDoneMsg:
+		// If we have a pending RC request, send the final result and clear it
+		if m.pendingRC != nil {
+			rc := m.pendingRC
+			m.pendingRC = nil
+			// Build assistant messages from TUI messages
+			var assistantMsgs []agent.Message
+			for _, am := range m.messages {
+				if am.raw != nil {
+					assistantMsgs = append(assistantMsgs, *am.raw)
+				}
+			}
+			// Send result on the channel
+			select {
+			case rc.ResultCh <- server.RCResult{Messages: assistantMsgs, Error: msg.err}:
+			default:
+			}
+			// Close stream channel if it was open
+			if rc.StreamCh != nil {
+				close(rc.StreamCh)
+			}
+			// Resume listening for next RC request
+			if m.rcCh != nil {
+				return m, waitForRCRequest(m.rcCh)
+			}
+		}
 		if !m.streaming {
 			return m, nil
 		}
@@ -2319,6 +2486,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.layout()
 		m.saveSession()
+		// Push latest messages to the RC bridge so the web UI can fetch them.
+		if m.rcBridge != nil {
+			m.rcBridge.SetMessages(m.persistedAgentMessages())
+		}
 		if msg.err == nil && m.agent != nil {
 			agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 			// Only update the pending uiIdx mapping if the agent actually
@@ -2559,9 +2730,10 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 				}
 			}
 			// Infinite scroll: trigger load more when within 5 items of bottom
-			if m.pickerKind == "session" && m.pickerSessionMore {
+			if m.pickerKind == "session" && m.pickerSessionMore && !m.pickerSessionLoading {
 				if m.pickerIndex >= len(m.pickerItems)-5 {
-					m.loadMoreSessions()
+					cmd := m.loadMoreSessions()
+					return true, m, cmd
 				}
 			}
 			return true, m, nil
@@ -2572,6 +2744,15 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			newM, cmd := m.selectPickerIndex(m.pickerIndex)
 			return true, newM, cmd
+		case "ctrl+r":
+			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" {
+				if m.pickerRefreshing {
+					return true, m, nil
+				}
+				m.pickerRefreshing = true
+				return true, m, refreshModelsCacheCmd()
+			}
+			return true, m, nil
 		case "backspace":
 			if len(m.pickerFilterPending) > 0 {
 				m.pickerFilterPending = m.pickerFilterPending[:len(m.pickerFilterPending)-1]
@@ -2589,14 +2770,39 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 				m.rebuildSessionPickerItems()
 			}
 			return true, m, nil
+		case "ctrl+d":
+			// Delete session with confirmation
+			if m.pickerKind == "session" {
+				items, values := m.pickerVisibleItems()
+				if m.pickerIndex < len(items) && m.pickerIndex < len(values) {
+					sessionID := values[m.pickerIndex]
+					if sessionID != "" {
+						// Find the session title
+						title := ""
+						for _, ref := range m.pickerSessionRefs {
+							if ref.ID == sessionID {
+								title = ref.Title
+								if title == "" {
+									title = "(no title)"
+								}
+								break
+							}
+						}
+						m.sessionDeleteConfirm = true
+						m.sessionDeleteConfirmID = sessionID
+						m.sessionDeleteConfirmTitle = title
+						return true, m, nil
+					}
+				}
+			}
+			return true, m, nil
 		}
 		if keyStr == "ctrl+f" && (m.pickerKind == "model" || m.pickerKind == "permission-model") {
-			kind := m.pickerKind
 			items, values := m.pickerVisibleItems()
 			isSelectable := len(m.pickerIsHeader) == 0 || (m.pickerIndex < len(m.pickerIsHeader) && !m.pickerIsHeader[m.pickerIndex])
 			if m.pickerIndex < len(items) && m.pickerIndex < len(values) && isSelectable {
 				modelID := values[m.pickerIndex]
-				if kind == "permission-model" && modelID == "auto" {
+				if m.pickerKind == "permission-model" && modelID == "auto" {
 					return true, m, nil
 				}
 				if config.IsFavorite(modelID) {
@@ -2604,11 +2810,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 				} else {
 					_ = config.SaveFavoriteModel(modelID)
 				}
-				m.openModelPicker()
-				if kind == "permission-model" {
-					m.pickerKind = "permission-model"
-					m.prependPermissionModelClearOption()
-				}
+				m.refreshModelPickerItems()
 				return true, m, nil
 			}
 			return true, m, nil
@@ -2616,7 +2818,9 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		if len(msg.Text) > 0 {
 			// When filtering sessions, load all sessions so the filter works globally
 			if m.pickerKind == "session" && m.pickerSessionMore && m.pickerFilterPending == "" {
-				m.loadAllSessions()
+				if cmd := m.loadAllSessions(); cmd != nil {
+					return true, m, cmd
+				}
 			}
 			m.pickerFilterPending += msg.Text
 			m.pickerFilterSeq++
@@ -2741,6 +2945,45 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		switch keyStr {
 		case "enter", "esc":
 			m.showRetryDialog = false
+			return m, nil
+		}
+		return m, nil
+	}
+
+	if m.sessionDeleteConfirm {
+		switch keyStr {
+		case "y", "Y":
+			// Delete the session
+			err := session.Delete(m.sessionDeleteConfirmID)
+			if err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error deleting session: %v", err)})
+				m.sessionDeleteConfirm = false
+				m.sessionDeleteConfirmID = ""
+				m.sessionDeleteConfirmTitle = ""
+				return m, nil
+			}
+			// Remove from picker list
+			for i, ref := range m.pickerSessionRefs {
+				if ref.ID == m.sessionDeleteConfirmID {
+					m.pickerSessionRefs = append(m.pickerSessionRefs[:i], m.pickerSessionRefs[i+1:]...)
+					break
+				}
+			}
+			m.pickerSessionTotal = len(m.pickerSessionRefs)
+			m.pickerSessionMore = len(m.pickerSessionRefs) > m.pickerSessionPage*sessionPickerPageSize
+			if m.pickerIndex >= len(m.pickerSessionRefs) && m.pickerIndex > 0 {
+				m.pickerIndex = len(m.pickerSessionRefs) - 1
+			}
+			m.rebuildSessionPickerItems()
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Deleted session %s", m.sessionDeleteConfirmID)})
+			m.sessionDeleteConfirm = false
+			m.sessionDeleteConfirmID = ""
+			m.sessionDeleteConfirmTitle = ""
+			return m, nil
+		case "n", "N", "esc":
+			m.sessionDeleteConfirm = false
+			m.sessionDeleteConfirmID = ""
+			m.sessionDeleteConfirmTitle = ""
 			return m, nil
 		}
 		return m, nil
@@ -3808,6 +4051,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if !m.detail.empty() {
 			return m, nil, true
 		}
+		// A file-path link takes priority over tool-output / thinking toggles so
+		// clicking a path inside a tool box opens the file instead of collapsing
+		// the box.
+		if r, ok := m.transcriptPathLinkAt(mouse); ok {
+			return m, m.openPathInEditorCmd(r.path), true
+		}
 		if idx, ok := m.toolOutputForClick(mouse); ok {
 			m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
 			m.renderTranscript()
@@ -3887,15 +4136,40 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		// Plain hover (no button): underline the clickable sidebar file path
 		// under the cursor. Requires MouseModeAllMotion (CellMotion delivers no
 		// no-button motion), so this must run before the MouseLeft drag guard.
+		changed := false
 		prevHover := m.hoverSidebarFile
 		m.hoverSidebarFile = ""
 		if path, ok := m.sidebarFileForClick(mouse); ok {
 			m.hoverSidebarFile = path
 		}
 		if m.hoverSidebarFile != prevHover {
-			return m, nil, true
+			changed = true
 		}
-		return m, nil, false
+
+		// Underline the clickable file path under the cursor in the agent-detail
+		// drill-in or, failing that, the chat transcript.
+		if !m.detail.empty() {
+			prevActive, prevLink := m.hoverDetailLinkActive, m.hoverDetailLink
+			m.hoverDetailLinkActive = false
+			if r, ok := m.detailPathLinkAt(mouse); ok {
+				m.hoverDetailLink, m.hoverDetailLinkActive = r, true
+			}
+			if m.hoverDetailLinkActive != prevActive || m.hoverDetailLink != prevLink {
+				m.applyOrClearDetailSelectionHighlight()
+				changed = true
+			}
+		} else {
+			prevActive, prevLink := m.hoverLinkActive, m.hoverLink
+			m.hoverLinkActive = false
+			if r, ok := m.transcriptPathLinkAt(mouse); ok {
+				m.hoverLink, m.hoverLinkActive = r, true
+			}
+			if m.hoverLinkActive != prevActive || m.hoverLink != prevLink {
+				m.applyOrClearSelectionHighlight()
+				changed = true
+			}
+		}
+		return m, nil, changed
 	}
 	headerHeight := appHeaderHeight
 	trackTop := headerHeight + 1
@@ -4118,6 +4392,11 @@ func (m model) handleDetailClick(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	}
 	if !m.mouseOverDetailViewport(mouse) {
 		return m, nil, false
+	}
+	// A file-path link takes priority over expand / process / sub-agent region
+	// toggles so clicking a path opens the file.
+	if r, ok := m.detailPathLinkAt(mouse); ok {
+		return m, m.openPathInEditorCmd(r.path), true
 	}
 	top := m.detail[len(m.detail)-1]
 	contentLine := (mouse.Y - m.detailViewportContentTopY()) + top.vp.YOffset()
@@ -4502,7 +4781,10 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 			})
 
 			if foundPath != "" {
-				path = foundPath
+				// Normalize "./" prefix so the LLM sees a clean relative path it
+				// can pass to the read tool. filepath.Walk yields entries like
+				// "./src/main.go" relative to the walk root.
+				path = strings.TrimPrefix(foundPath, "./")
 			}
 
 			if agent.IsImageFile(path) {
@@ -4519,18 +4801,17 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 				return nil
 			}
 
-			content, err := os.ReadFile(path)
-			if err == nil {
-				fileCtx := fmt.Sprintf("\n--- File: %s ---\n%s\n", path, string(content))
-				msgs = append(msgs, message{
-					role: roleAssistant,
-					text: fmt.Sprintf("📎 Added context from %s", path),
-					raw: &agent.Message{
-						Role:    "system",
-						Content: fileCtx,
-					},
-				})
-			}
+			// Non-image file: do NOT read the file content. Mentioning a file
+			// (via @path or a [file: ...] shortcode) only injects the path into
+			// the user message; the LLM uses its own read tool to fetch excerpts
+			// on demand. Reading a multi-gigabyte binary here (e.g. .mov, .mp4,
+			// .iso) would slurp the entire file into a system message and OOM
+			// the process — see the memory spike when asking ocode to convert
+			// a .mov to .mp4.
+			msgs = append(msgs, message{
+				role: roleAssistant,
+				text: fmt.Sprintf("📎 Referenced %s", path),
+			})
 			return nil
 		}
 
@@ -4544,6 +4825,21 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 			path := unescapeAtPath(match[1])
 			if result := attachPath(path); result != nil {
 				return *result
+			}
+		}
+
+		// Resolve [file: <label>] shortcodes in the user-visible text so the
+		// LLM sees the actual path it can pass to the read tool. Today this
+		// works incidentally because the system message carried the file
+		// content; once we stop injecting content, the shortcode must be
+		// expanded inline or the LLM has no idea what file to read.
+		if len(m.fileShortcodePaths) > 0 {
+			for token, path := range m.fileShortcodePaths {
+				if path == "" {
+					continue
+				}
+				rel := strings.TrimPrefix(path, "./")
+				processedText = strings.ReplaceAll(processedText, token, rel)
 			}
 		}
 
@@ -6733,6 +7029,17 @@ func waitStreamEvent(ch chan agent.Message, errCh chan error, cancel chan struct
 	}
 }
 
+// waitForRCRequest listens for requests from the /rc web UI.
+func waitForRCRequest(rcCh <-chan server.RCRequest) tea.Cmd {
+	return func() tea.Msg {
+		req, ok := <-rcCh
+		if !ok {
+			return nil // channel closed
+		}
+		return rcRequestMsg{req: req}
+	}
+}
+
 func (m model) reExecutePendingTool(toolName string) tea.Cmd {
 	return func() tea.Msg {
 		if m.agent == nil {
@@ -6838,6 +7145,8 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
+	} else if m.sessionDeleteConfirm {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
@@ -7144,6 +7453,17 @@ func (m *model) renderTranscript() {
 		return
 	}
 	var b strings.Builder
+	// Running line count equivalent to lipgloss.Height(b.String()) but scanning
+	// only the bytes appended since the last call — avoids re-counting the whole
+	// (growing) transcript once per region on every streamed delta.
+	measuredLines := 1
+	measuredLen := 0
+	heightNow := func() int {
+		s := b.String()
+		measuredLines += strings.Count(s[measuredLen:], "\n")
+		measuredLen = len(s)
+		return measuredLines
+	}
 	m.toolOutputRegions = nil
 	m.thinkingRegions = nil
 	if m.expandedToolOutputs == nil {
@@ -7178,7 +7498,7 @@ func (m *model) renderTranscript() {
 			} else if totalLines > 8 {
 				header = fmt.Sprintf("⟁ thinking · %d lines [▾ click to collapse]", totalLines)
 			}
-			startLine := lipgloss.Height(b.String())
+			startLine := heightNow()
 			b.WriteString(m.styles.ThinkingHeader.Render(header))
 			b.WriteString("\n")
 			body := content
@@ -7186,7 +7506,7 @@ func (m *model) renderTranscript() {
 				body = strings.Join(lines[totalLines-8:], "\n")
 			}
 			b.WriteString(m.styles.Thinking.Render(body))
-			endLine := lipgloss.Height(b.String()) - 1
+			endLine := heightNow() - 1
 			m.thinkingRegions = append(m.thinkingRegions, toolOutputRegion{
 				messageIndex: i,
 				startLine:    startLine,
@@ -7206,7 +7526,7 @@ func (m *model) renderTranscript() {
 				if toolName == "" {
 					toolName = "tool"
 				}
-				startLine := lipgloss.Height(b.String())
+				startLine := heightNow()
 				var boxContent string
 				if strings.HasPrefix(msg.raw.Content, "ORPHAN_TOOL_ERROR:") {
 					boxContent = m.renderOrphanWarningBox(msg.raw.Content, m.expandedToolOutputs[i])
@@ -7214,7 +7534,7 @@ func (m *model) renderTranscript() {
 					boxContent = m.renderToolOutputBox(toolName, msg.raw.Content, m.expandedToolOutputs[i])
 				}
 				b.WriteString(boxContent)
-				endLine := lipgloss.Height(b.String()) - 1
+				endLine := heightNow() - 1
 				m.toolOutputRegions = append(m.toolOutputRegions, toolOutputRegion{
 					messageIndex: i,
 					startLine:    startLine,
@@ -7229,7 +7549,7 @@ func (m *model) renderTranscript() {
 		if b.Len() > 0 {
 			b.WriteString("\n\n")
 		}
-		startLine := lipgloss.Height(b.String())
+		startLine := heightNow()
 		b.WriteString(m.styles.ThinkingHeader.Render("📋 RECAP"))
 		b.WriteString("\n")
 		b.WriteString(m.styles.Thinking.Render(m.recapText))
@@ -7589,10 +7909,19 @@ func (m *model) applyThinkingDelta(kind, text string) {
 		return
 	}
 	m.messages[m.streamingThinkingIdx].text += text
-	// Throttle re-renders to ≥50ms during a stream — a long reasoning turn
-	// can emit thousands of tokens and renderTranscript walks the full
-	// message list + re-wraps. Final state always lands via appendAgentMessage.
-	if time.Since(m.lastDeltaRender) < 50*time.Millisecond {
+	// Throttle re-renders during a stream — a long reasoning turn can emit
+	// thousands of tokens and renderTranscript walks the full message list +
+	// re-wraps. Final state always lands via appendAgentMessage.
+	//
+	// When the user has scrolled up to read, the in-flight thinking block is
+	// off-screen, so re-rendering it 20×/sec is pure waste that starves the
+	// event loop and makes the wheel lag. Back off hard in that case; the
+	// viewport still refreshes often enough to keep scroll-height math fresh.
+	interval := 50 * time.Millisecond
+	if !m.shouldAutoScrollTranscript() {
+		interval = 500 * time.Millisecond
+	}
+	if time.Since(m.lastDeltaRender) < interval {
 		return
 	}
 	m.rerenderTranscriptAndMaybeScroll()
@@ -8183,13 +8512,19 @@ func (m *model) applyOrClearDetailSelectionHighlight() {
 		return
 	}
 	top := &m.detail[len(m.detail)-1]
-	if !top.sel.active {
+	if !top.sel.active && !m.hoverDetailLinkActive {
 		top.vp.SetContent(strings.Join(top.lines, "\n"))
 		return
 	}
-	sl, sc, el, ec := normaliseSelection(top.sel.startLine, top.sel.startCol, top.sel.endLine, top.sel.endCol)
-	highlighted := applySelectionHighlight(top.lines, top.rawLines, sl, sc, el, ec)
-	top.vp.SetContent(strings.Join(highlighted, "\n"))
+	lines := top.lines
+	if m.hoverDetailLinkActive {
+		lines = applyPathLinkUnderline(lines, top.rawLines, m.hoverDetailLink)
+	}
+	if top.sel.active {
+		sl, sc, el, ec := normaliseSelection(top.sel.startLine, top.sel.startCol, top.sel.endLine, top.sel.endCol)
+		lines = applySelectionHighlight(lines, top.rawLines, sl, sc, el, ec)
+	}
+	top.vp.SetContent(strings.Join(lines, "\n"))
 }
 
 func (m model) detailViewportWidth() int {
@@ -8248,7 +8583,7 @@ func findAgentRunByPath(reg *agent.AgentRunRegistry, runPath string) (*agent.Age
 
 // modalOpen reports whether any modal overlay is currently shown.
 func (m model) modalOpen() bool {
-	return m.showPicker || m.showConnect || m.showPalette || m.showPermDialog || m.showRetryDialog || m.showQuestionDialog
+	return m.showPicker || m.showConnect || m.showPalette || m.showPermDialog || m.showRetryDialog || m.sessionDeleteConfirm || m.showQuestionDialog
 }
 
 // renderDetailView renders the top-of-stack detail view.
@@ -8559,6 +8894,8 @@ func (m model) renderContent() string {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
+	} else if m.sessionDeleteConfirm {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
@@ -10014,8 +10351,22 @@ func (m model) viewportContentTopY() int {
 }
 
 // agentStripTopY returns the first row of the agent strip in screen coordinates.
+//
+// The transcript viewport height is recomputed live from bottomChromeHeight
+// rather than read from m.viewport.Height(): the strip is derived from the live
+// agent-run registry and can grow between layout() calls (the dotTick that
+// drives it never re-lays-out), at which point renderContent's safety net
+// shrinks the painted viewport to keep the frame within m.height. Reading the
+// stale m.viewport.Height() here would leave the click target rows below where
+// the strip is actually painted, swallowing the click into transcript
+// selection. m.height-bottomChromeHeight matches the painted viewport height in
+// both the overflow and clean cases (they are equal right after layout()).
 func (m model) agentStripTopY() int {
-	y := appHeaderHeight + m.viewport.Height() + 2 // +2 for transcript border
+	vph := m.height - m.bottomChromeHeight(m.panelWidth())
+	if vph < 1 {
+		vph = 1
+	}
+	y := appHeaderHeight + vph + 2 // +2 for transcript border
 	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
 		y += lipgloss.Height(m.renderSlashPopup())
 	}
@@ -10029,13 +10380,82 @@ func (m model) agentStripTopY() int {
 }
 
 func (m *model) applyOrClearSelectionHighlight() {
-	if !m.sel.active {
+	if !m.sel.active && !m.hoverLinkActive {
 		m.viewport.SetContent(m.transcriptContent)
 		return
 	}
-	sl, sc, el, ec := normaliseSelection(m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
-	highlighted := applySelectionHighlight(m.transcriptLines, m.rawTranscriptLines, sl, sc, el, ec)
-	m.viewport.SetContent(strings.Join(highlighted, "\n"))
+	lines := m.transcriptLines
+	if m.hoverLinkActive {
+		lines = applyPathLinkUnderline(lines, m.rawTranscriptLines, m.hoverLink)
+	}
+	if m.sel.active {
+		sl, sc, el, ec := normaliseSelection(m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
+		lines = applySelectionHighlight(lines, m.rawTranscriptLines, sl, sc, el, ec)
+	}
+	m.viewport.SetContent(strings.Join(lines, "\n"))
+}
+
+// transcriptPathLinkAt returns the file-path link under the mouse in the chat
+// transcript, if any. Detection is lazy — only the token under the cursor is
+// statted.
+func (m *model) transcriptPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
+	if m.activeTab != tabChat || !m.detail.empty() {
+		return pathLinkRegion{}, false
+	}
+	if mouse.X < 0 || mouse.X >= m.mainScrollbarX() {
+		return pathLinkRegion{}, false
+	}
+	topY := m.viewportContentTopY()
+	if mouse.Y < topY || mouse.Y >= topY+m.viewport.Height() {
+		return pathLinkRegion{}, false
+	}
+	contentLine := (mouse.Y - topY) + m.viewport.YOffset()
+	if contentLine < 0 || contentLine >= len(m.rawTranscriptLines) {
+		return pathLinkRegion{}, false
+	}
+	r, ok := pathLinkAtCol(m.rawTranscriptLines[contentLine], mouse.X, m.workDir)
+	if !ok {
+		return pathLinkRegion{}, false
+	}
+	r.line = contentLine
+	return r, true
+}
+
+// detailPathLinkAt returns the file-path link under the mouse in the top
+// agent-detail drill-in view, if any.
+func (m *model) detailPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
+	if m.detail.empty() || !m.mouseOverDetailViewport(mouse) || m.detailScrollbarHit(mouse) {
+		return pathLinkRegion{}, false
+	}
+	if mouse.X < detailContentLeftX {
+		return pathLinkRegion{}, false
+	}
+	top := m.detail[len(m.detail)-1]
+	contentLine := (mouse.Y - m.detailViewportContentTopY()) + top.vp.YOffset()
+	if contentLine < 0 || contentLine >= len(top.rawLines) {
+		return pathLinkRegion{}, false
+	}
+	r, ok := pathLinkAtCol(top.rawLines[contentLine], mouse.X-detailContentLeftX, m.workDir)
+	if !ok {
+		return pathLinkRegion{}, false
+	}
+	r.line = contentLine
+	return r, true
+}
+
+// openPathInEditorCmd opens a clicked file path in the configured editor,
+// falling back to the system opener for binary files. Reuses the same editor
+// launch path as the files/git views.
+func (m *model) openPathInEditorCmd(path string) tea.Cmd {
+	if isBinaryFile(path) {
+		return openFileWithOSDefault(path)
+	}
+	if m.config == nil {
+		return openFileWithOSDefault(path)
+	}
+	editor := config.ResolveEditor(&m.config.Ocode)
+	mode := m.config.Ocode.EditorMode
+	return createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor)(path)
 }
 
 func (m *model) syncRawInputLines() {
@@ -10397,6 +10817,22 @@ func (m *model) renderRetryDialog(width int) string {
 
 }
 
+func (m *model) renderSessionDeleteConfirmDialog(width int) string {
+	if !m.sessionDeleteConfirm {
+		return ""
+	}
+
+	contentWidth := max(0, width-2)
+
+	header := m.styles.Header.Render("⚠ Delete Session")
+	body := fmt.Sprintf("Are you sure you want to delete session:\n\n%s\n\n%s", m.sessionDeleteConfirmID, m.sessionDeleteConfirmTitle)
+	hint := hintStyle.Render("Press Y to delete, N/Esc to cancel")
+
+	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
+		header + "\n\n" + body + "\n\n" + hint,
+	)
+}
+
 // handleReviewCmd implements the /review command for AI code review.
 func (m *model) handleReviewCmd(args []string) tea.Cmd {
 	// Detect what to review
@@ -10414,4 +10850,61 @@ func (m *model) handleReviewCmd(args []string) tea.Cmd {
 
 	// Send to agent for review
 	return m.sendCustomCommandPrompt(prompt)
+}
+
+func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
+	return func() tea.Msg {
+		port := 4096
+		if len(args) > 0 {
+			if p, err := strconv.Atoi(args[0]); err == nil && p > 0 && p < 65536 {
+				port = p
+			}
+		}
+
+		if m.sessionID == "" {
+			return message{role: roleAssistant, text: "No active session to share. Start a conversation first."}
+		}
+
+		if m.webFS == nil {
+			return message{role: roleAssistant, text: "Web assets not available. Build with 'go build' to enable /rc."}
+		}
+
+		// Create the RC channel for proxying requests from web UI to TUI.
+		rcCh := make(chan server.RCRequest, 4)
+		m.rcCh = rcCh
+
+		addr := fmt.Sprintf("localhost:%d", port)
+		srv := server.New(addr, "", "", m.webFS)
+
+		// Register the RC bridge — server forwards requests through rcCh to TUI
+		bridge := srv.RegisterExternalSession(m.sessionID, m.config.Model, rcCh)
+
+		// Start the server in a goroutine
+		go func() {
+			if err := srv.Start(); err != nil {
+				log.Printf("RC server error: %v", err)
+			}
+		}()
+
+		// Open browser directly to this session
+		url := fmt.Sprintf("http://%s/session/%s", addr, m.sessionID)
+		go openBrowser(url)
+
+		return rcStartedMsg{url: url, bridge: bridge}
+	}
+}
+
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	}
+	if cmd != nil {
+		_ = cmd.Start()
+	}
 }

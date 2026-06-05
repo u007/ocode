@@ -1,0 +1,50 @@
+.\" Man page for ocode skills
+.TH OCODE-SKILLS 1 "June 2025" "ocode" "User Commands"
+.SH NAME
+ocode-skills \- Manage skills
+.SH SYNOPSIS
+.B ocode skills
+\fIsubcommand\fR [\fIargs\fR]
+.SH DESCRIPTION
+Manage ocode skills. Skills are markdown files that extend the agent's
+capabilities with custom tools, prompts, and workflows.
+.SH SUBCOMMANDS
+.TP
+\fBlist\fR, \fBls\fR
+List bundled + installed skills.
+.TP
+\fBinstall\fR [\fIname\fR...]
+Install bundled skills to ~/.config/opencode/skills/.
+With no name arguments, installs all bundled skills.
+.TP
+\fBupgrade\fR, \fBupdate\fR [\fIname\fR...]
+Install only when bundled content differs from installed.
+With no name arguments, upgrades all bundled skills.
+.TP
+\fBuninstall\fR, \fBremove\fR \fIname\fR...
+Remove an installed skill directory.
+.TP
+\fBhelp\fR, \fB\-h\fR, \fB\-\-help\fR
+Show this help message and exit.
+.SH EXAMPLES
+.TP
+List all skills:
+.B ocode skills list
+.TP
+Install all bundled skills:
+.B ocode skills install
+.TP
+Install specific skill:
+.B ocode skills install my-skill
+.TP
+Upgrade all skills:
+.B ocode skills upgrade
+.TP
+Uninstall a skill:
+.B ocode skills uninstall my-skill
+.SH FILES
+.TP
+\fI~/.config/opencode/skills/\fR
+User-installed skills directory.
+.SH SEE ALSO
+.BR ocode (1)

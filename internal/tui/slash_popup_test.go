@@ -459,8 +459,46 @@ func TestProcessFileReferencesResolvesCompactShortcode(t *testing.T) {
 	if got.err != nil {
 		t.Fatal(got.err)
 	}
-	if len(got.messages) != 1 || got.messages[0].raw == nil || !strings.Contains(got.messages[0].raw.Content, "hello compact") {
-		t.Fatalf("expected compact shortcode to add file context, got %#v", got.messages)
+	// The shortcode must be resolved into the real path in the user-visible
+	// text so the LLM knows which file to read. The file content must NOT be
+	// slurped into a system message — see the OOM bug when @-mentioning a
+	// multi-GB file (e.g. .mov) would inject the entire binary into context.
+	if !strings.Contains(got.processedText, path) || strings.Contains(got.processedText, "[file:") {
+		t.Fatalf("expected shortcode to be expanded to path in processedText, got %q", got.processedText)
+	}
+	if !strings.Contains(got.processedText, "summarize ") {
+		t.Fatalf("expected original prompt prefix to be preserved, got %q", got.processedText)
+	}
+	for _, msg := range got.messages {
+		if msg.raw != nil && strings.Contains(msg.raw.Content, "hello compact") {
+			t.Fatalf("did not expect file content to be injected; got %+v", msg)
+		}
+	}
+}
+
+func TestProcessFileReferencesNeverInjectsFileContent(t *testing.T) {
+	// Regression: @-mentioning a non-image file used to read the entire file
+	// into a system message, which spiked memory >18 GB for a .mov. Even when
+	// the file is huge and unreadable, we must not call os.ReadFile on it.
+	dir := t.TempDir()
+	// Write a file that contains a recognizable marker. If anything slurps it
+	// in, the assertion will catch it.
+	large := filepath.Join(dir, "movie.mov")
+	marker := "DO_NOT_INJECT_THIS_MARKER"
+	if err := os.WriteFile(large, []byte(marker), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{}
+	msg := m.processFileReferences("convert @" + filepath.Base(large) + " to mp4")()
+	got := msg.(fileSearchFinishedMsg)
+	if got.err != nil {
+		t.Fatal(got.err)
+	}
+	for _, msg := range got.messages {
+		if msg.raw != nil && strings.Contains(msg.raw.Content, marker) {
+			t.Fatalf("file content was injected into a system message; got %+v", msg)
+		}
 	}
 }
 

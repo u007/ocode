@@ -147,6 +147,14 @@ func truncate(s string, max int) string {
 }
 
 func Run(args []string) error {
+	// Check for help flag
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			printModelsUsage()
+			return nil
+		}
+	}
+
 	provider := ""
 	for i, a := range args {
 		switch a {
@@ -176,4 +184,22 @@ func Run(args []string) error {
 		fmt.Println(m.ID)
 	}
 	return nil
+}
+
+func printModelsUsage() {
+	fmt.Println("Usage: ocode models [options] [provider]")
+	fmt.Println()
+	fmt.Println("List available models.")
+	fmt.Println()
+	fmt.Println("Arguments:")
+	fmt.Println("  <provider>    Filter models by provider (e.g., openai, anthropic, google)")
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  -p, --provider <provider>    Filter models by provider")
+	fmt.Println("  -h, --help                   Show this help message")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  ocode models")
+	fmt.Println("  ocode models openai")
+	fmt.Println("  ocode models --provider anthropic")
 }

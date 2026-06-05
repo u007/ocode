@@ -15,23 +15,31 @@ import (
 )
 
 type Handler struct {
-	mu      sync.Mutex
-	agents  map[string]*agentSession
-	cfg     *config.Config
+	mu     sync.Mutex
+	agents map[string]*agentSession
+	cfg    *config.Config
+	rc     *RCBridge // set when proxying to a TUI session
+	// advisorEnabled is the runtime gate for the advisor tool, shared by all
+	// agents this handler creates. Seeded from config, flipped from the web
+	// sidebar, never persisted back to config.
+	advisorEnabled bool
 }
 
 type agentSession struct {
-	agent   *agent.Agent
+	agent    *agent.Agent
 	messages []agent.Message
-	model   string
+	model    string
+	mu       sync.Mutex
 }
 
 func NewHandler() *Handler {
 	cfg, _ := config.Load()
 	agent.ApplyAgentConfig(cfg)
+	advisorEnabled := cfg == nil || cfg.Ocode.Advisor.Enabled
 	return &Handler{
-		agents: make(map[string]*agentSession),
-		cfg:    cfg,
+		agents:         make(map[string]*agentSession),
+		cfg:            cfg,
+		advisorEnabled: advisorEnabled,
 	}
 }
 
@@ -46,9 +54,6 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	model := req.Model
 	if model == "" {
 		if h.cfg != nil && h.cfg.Model != "" {
@@ -59,6 +64,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	h.mu.Lock()
 	var as *agentSession
 	if req.SessionID != "" {
 		as = h.agents[req.SessionID]
@@ -80,6 +86,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 		client := agent.NewClient(h.cfg, model)
 		if client == nil {
+			h.mu.Unlock()
 			writeError(w, http.StatusInternalServerError, "failed to create LLM client")
 			return
 		}
@@ -87,6 +94,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		tools, _ := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg)
 		ag.LoadExternalTools(h.cfg)
+		ag.SetAdvisorEnabled(h.advisorEnabled)
 
 		as = &agentSession{
 			agent:    ag,
@@ -96,10 +104,15 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		h.agents[sid] = as
 		req.SessionID = sid
 	}
+	h.mu.Unlock()
+
+	as.mu.Lock()
+	defer as.mu.Unlock()
 
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: req.Content})
+	messages := append([]agent.Message(nil), as.messages...)
 
-	resp, err := as.agent.Step(as.messages)
+	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
@@ -145,17 +158,39 @@ func (h *Handler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id string) {
+	h.mu.Lock()
+	rc := h.rc
+	h.mu.Unlock()
+
+	// If this is the RC session, return in-memory messages from the bridge.
+	if rc != nil && rc.SessionID == id {
+		msgs := rc.GetMessages()
+		writeJSON(w, http.StatusOK, SessionDetail{
+			SessionInfo: SessionInfo{
+				ID:        rc.SessionID,
+				Title:     "",
+				CreatedAt: time.Now().Format(time.RFC3339),
+				UpdatedAt: time.Now().Format(time.RFC3339),
+			},
+			Messages: msgs,
+		})
+		return
+	}
+
 	s, err := session.Load(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, SessionInfo{
-		ID:        s.ID,
-		Title:     s.Title,
-		CreatedAt: s.CreatedAt.Format(time.RFC3339),
-		UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+	writeJSON(w, http.StatusOK, SessionDetail{
+		SessionInfo: SessionInfo{
+			ID:        s.ID,
+			Title:     s.Title,
+			CreatedAt: s.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+		},
+		Messages: s.Messages,
 	})
 }
 
@@ -173,24 +208,62 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
+
+	// If we have an RC bridge, forward to the TUI's agent instead of using our own.
+	if h.rc != nil {
+		rc := h.rc
+		h.mu.Unlock()
+
+		resultCh := make(chan RCResult, 1)
+		select {
+		case rc.RcCh <- RCRequest{Content: req.Content, ResultCh: resultCh}:
+		case <-time.After(5 * time.Second):
+			writeError(w, http.StatusServiceUnavailable, "TUI is busy, try again")
+			return
+		}
+
+		select {
+		case result := <-resultCh:
+			if result.Error != nil {
+				writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", result.Error))
+				return
+			}
+			var content strings.Builder
+			for _, m := range result.Messages {
+				if m.Role == "assistant" && m.Content != "" {
+					content.WriteString(m.Content)
+				}
+			}
+			writeJSON(w, http.StatusOK, ChatResponse{
+				Content:   content.String(),
+				SessionID: rc.SessionID,
+				Model:     rc.Model,
+			})
+		case <-time.After(5 * time.Minute):
+			writeError(w, http.StatusGatewayTimeout, "agent response timed out")
+		}
+		return
+	}
 
 	as, ok := h.agents[id]
 	if !ok {
 		s, err := session.Load(id)
 		if err != nil {
+			h.mu.Unlock()
 			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
 
 		model := h.cfg.Model
 		if model == "" {
+			h.mu.Unlock()
 			writeError(w, http.StatusBadRequest, "no model configured")
 			return
 		}
 
 		client := agent.NewClient(h.cfg, model)
 		if client == nil {
+			h.mu.Unlock()
 			writeError(w, http.StatusInternalServerError, "failed to create LLM client")
 			return
 		}
@@ -198,6 +271,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		tools, _ := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg)
 		ag.LoadExternalTools(h.cfg)
+		ag.SetAdvisorEnabled(h.advisorEnabled)
 
 		as = &agentSession{
 			agent:    ag,
@@ -206,10 +280,15 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 		h.agents[id] = as
 	}
+	h.mu.Unlock()
+
+	as.mu.Lock()
+	defer as.mu.Unlock()
 
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: req.Content})
+	messages := append([]agent.Message(nil), as.messages...)
 
-	resp, err := as.agent.Step(as.messages)
+	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
@@ -237,23 +316,58 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 	models := []ModelInfo{}
 
-	if h.cfg != nil && h.cfg.Model != "" {
+	// Mark the currently configured model as active.
+	currentModel := ""
+	if h.cfg != nil {
+		currentModel = h.cfg.Model
+	}
+
+	// Load all models from the models.dev registry.
+	allModels := agent.AllProviderModels()
+	for _, id := range allModels {
+		provider, modelName, ok := splitModelID(id)
+		if !ok {
+			provider = "other"
+			modelName = id
+		}
 		models = append(models, ModelInfo{
-			Name:     h.cfg.Model,
-			Provider: "configured",
+			Name:     id,
+			Model:    modelName,
+			Provider: provider,
+			Active:   id == currentModel,
 		})
 	}
 
-	if h.cfg != nil {
+	// If registry is empty, fall back to configured model + provider keys.
+	if len(models) == 0 && h.cfg != nil {
+		if currentModel != "" {
+			models = append(models, ModelInfo{
+				Name:     currentModel,
+				Model:    currentModel,
+				Provider: "configured",
+				Active:   true,
+			})
+		}
 		for name := range h.cfg.Provider {
 			models = append(models, ModelInfo{
 				Name:     name,
+				Model:    name,
 				Provider: name,
 			})
 		}
 	}
 
 	writeJSON(w, http.StatusOK, models)
+}
+
+// splitModelID splits "provider/model" into provider and model parts.
+func splitModelID(id string) (provider, model string, ok bool) {
+	for i := 0; i < len(id); i++ {
+		if id[i] == '/' {
+			return id[:i], id[i+1:], true
+		}
+	}
+	return "", "", false
 }
 
 // getOrCreateAgentSession returns the in-memory agent session for id,
@@ -278,6 +392,7 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	tools, _ := tool.LoadBuiltins(h.cfg)
 	ag := agent.NewAgent(client, tools, h.cfg)
 	ag.LoadExternalTools(h.cfg)
+	ag.SetAdvisorEnabled(h.advisorEnabled)
 	as := &agentSession{agent: ag, messages: s.Messages, model: model}
 	h.agents[id] = as
 	return as, nil

@@ -22,9 +22,15 @@ export interface SessionInfo {
   updated_at: string;
 }
 
+export interface SessionDetail extends SessionInfo {
+  messages: Message[];
+}
+
 export interface ModelInfo {
   name: string;
+  model: string;
   provider: string;
+  active: boolean;
 }
 
 export interface AgentInfo {
@@ -66,4 +72,26 @@ export interface SSEDoneEvent {
 
 export interface SSESessionEvent {
   session_id: string;
+}
+
+export interface AgentRunMessage {
+  role: string;
+  content: string;
+  toolCalls?: { name: string; arguments: string }[];
+  toolCallId?: string;
+}
+
+export interface AgentRun {
+  id: string;
+  name: string;
+  status: "running" | "done" | "failed" | string;
+  result?: string;
+  err?: string;
+  model?: string;
+  startedAt: string;
+  endedAt?: string;
+  inputTokens: number;
+  outputTokens: number;
+  messages: AgentRunMessage[];
+  children: AgentRun[];
 }

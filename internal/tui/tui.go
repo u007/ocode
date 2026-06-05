@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"os/signal"
@@ -14,10 +15,11 @@ import (
 // safe: the empty string for PermissionMode leaves the loaded config value
 // untouched.
 type RunOptions struct {
-	SessionID     string
-	Continue      bool
-	YOLO          bool
+	SessionID      string
+	Continue       bool
+	YOLO           bool
 	PermissionMode string // "" | "auto" | "off"
+	WebFS          fs.FS // Embedded web assets for /rc command
 }
 
 func Run(opts RunOptions) error {

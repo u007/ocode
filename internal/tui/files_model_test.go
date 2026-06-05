@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/viewport"
+	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -114,8 +115,10 @@ func TestFilesDoubleClickFolderOpensExplorer(t *testing.T) {
 	if dirIdx < 0 {
 		t.Fatalf("expected a directory node named 'sub' in tree, got %#v", m.files.nodes)
 	}
-	// Y of node dirIdx inside the tree panel: appHeaderHeight + 1 (border) + dirIdx.
-	clickY := appHeaderHeight + 1 + dirIdx
+	// Y of node dirIdx inside the tree panel: appHeaderHeight + 1 (border) + hintHeight + dirIdx.
+	treeW := 100 * 35 / 100
+	hintHeight := lipgloss.Height(hintStyle.Width(treeW - 6).Render(m.files.treeHint()))
+	clickY := appHeaderHeight + 1 + hintHeight + dirIdx
 	clickX := 2
 
 	// First click selects the node and toggles the directory open — it should
@@ -710,5 +713,119 @@ func TestFilesHintsTmuxSplitMode(t *testing.T) {
 	}
 	if !strings.Contains(view, "choose") || !strings.Contains(view, "editor") {
 		t.Fatalf("expected choose editor hint, got:\n%s", view)
+	}
+}
+
+func TestFilesInFileSearch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(path, []byte("package main\n\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newFilesModel(dir)
+	m.Resize(100, 30)
+	if result, ok := loadPreviewCmd(m.nodes[0])().(filesPreviewMsg); ok {
+		m.applyPreview(result)
+	}
+
+	// Switch to preview panel
+	m.panel = filesPanelPreview
+
+	// Press / to start search
+	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"}, 100, 30)
+	if m.mode != filesModeInFileSearch {
+		t.Fatalf("expected filesModeInFileSearch, got %v", m.mode)
+	}
+	if !m.inFileSearchActive {
+		t.Fatal("expected inFileSearchActive to be true")
+	}
+
+	// Type a search query
+	for _, ch := range "Pri" {
+		m, _ = m.Update(tea.KeyPressMsg{Code: ch, Text: string(ch)}, 100, 30)
+	}
+	if m.inFileSearchQuery != "Pri" {
+		t.Fatalf("expected query 'Pri', got %q", m.inFileSearchQuery)
+	}
+	if len(m.inFileSearchMatches) != 1 {
+		t.Fatalf("expected 1 match, got %d", len(m.inFileSearchMatches))
+	}
+
+	// Press n to navigate to next match
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"}, 100, 30)
+
+	// Press esc to cancel search
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc}, 100, 30)
+	if m.mode != filesModeNormal {
+		t.Fatalf("expected filesModeNormal after esc, got %v", m.mode)
+	}
+	if m.inFileSearchActive {
+		t.Fatal("expected inFileSearchActive to be false after esc")
+	}
+}
+
+func TestFilesInFileSearchBackspace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(path, []byte("hello world\nhello again\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newFilesModel(dir)
+	m.Resize(100, 30)
+	if result, ok := loadPreviewCmd(m.nodes[0])().(filesPreviewMsg); ok {
+		m.applyPreview(result)
+	}
+
+	m.panel = filesPanelPreview
+
+	// Start search and type a query
+	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"}, 100, 30)
+	for _, ch := range "hello" {
+		m, _ = m.Update(tea.KeyPressMsg{Code: ch, Text: string(ch)}, 100, 30)
+	}
+	if len(m.inFileSearchMatches) != 2 {
+		t.Fatalf("expected 2 matches for 'hello', got %d", len(m.inFileSearchMatches))
+	}
+
+	// Press backspace to delete last character
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyBackspace, Text: "\x7f"}, 100, 30)
+	if m.inFileSearchQuery != "hell" {
+		t.Fatalf("expected query 'hell' after backspace, got %q", m.inFileSearchQuery)
+	}
+	if len(m.inFileSearchMatches) != 2 {
+		t.Fatalf("expected 2 matches for 'hell', got %d", len(m.inFileSearchMatches))
+	}
+}
+
+func TestFilesInFileSearchEnterConfirms(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	if err := os.WriteFile(path, []byte("test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newFilesModel(dir)
+	m.Resize(100, 30)
+	if result, ok := loadPreviewCmd(m.nodes[0])().(filesPreviewMsg); ok {
+		m.applyPreview(result)
+	}
+
+	m.panel = filesPanelPreview
+
+	// Start search
+	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"}, 100, 30)
+	for _, ch := range "test" {
+		m, _ = m.Update(tea.KeyPressMsg{Code: ch, Text: string(ch)}, 100, 30)
+	}
+
+	// Press enter to confirm search
+	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter, Text: "\r"}, 100, 30)
+	if m.mode != filesModeNormal {
+		t.Fatalf("expected filesModeNormal after enter, got %v", m.mode)
+	}
+	if m.inFileSearchActive {
+		t.Fatal("expected inFileSearchActive to be false after enter")
 	}
 }

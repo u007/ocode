@@ -1,0 +1,33 @@
+.\" Man page for ocode models
+.TH OCODE-MODELS 1 "June 2025" "ocode" "User Commands"
+.SH NAME
+ocode-models \- List available models
+.SH SYNOPSIS
+.B ocode models
+[\fIoptions\fR] [\fIprovider\fR]
+.SH DESCRIPTION
+List available LLM models from various providers. Models can be filtered by
+provider name.
+.SH ARGUMENTS
+.TP
+\fIprovider\fR
+Filter models by provider (e.g., openai, anthropic, google).
+.SH OPTIONS
+.TP
+\fB\-p\fR, \fB\-\-provider\fR \fI<provider>\fR
+Filter models by provider.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show this help message and exit.
+.SH EXAMPLES
+.TP
+List all models:
+.B ocode models
+.TP
+List models from OpenAI:
+.B ocode models openai
+.TP
+Filter by provider flag:
+.B ocode models --provider anthropic
+.SH SEE ALSO
+.BR ocode (1)

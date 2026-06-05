@@ -5,9 +5,14 @@ export function useSSE() {
   const cleanupRef = useRef<(() => void) | null>(null);
 
   const send = useCallback(
-    (message: string, session: string | undefined, onEvent: SSEEventHandler) => {
+    (
+      message: string,
+      session: string | undefined,
+      model: string | undefined,
+      onEvent: SSEEventHandler,
+    ) => {
       cleanupRef.current?.();
-      cleanupRef.current = connectChatSSE(message, session, onEvent);
+      cleanupRef.current = connectChatSSE(message, session, model, onEvent);
     },
     [],
   );

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/agent"
 	"github.com/jamesmercstudio/ocode/internal/session"
@@ -50,7 +51,10 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	model := h.cfg.Model
+	model := r.URL.Query().Get("model")
+	if model == "" {
+		model = h.cfg.Model
+	}
 	if model == "" {
 		writeError(w, http.StatusBadRequest, "no model configured")
 		return
@@ -68,6 +72,75 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.mu.Lock()
+
+	// If we have an RC bridge, forward to the TUI's agent instead of using our own.
+	if h.rc != nil {
+		rc := h.rc
+		h.mu.Unlock()
+
+		// Send session info
+		sendSSE(w, flusher, "session", map[string]string{"session_id": rc.SessionID})
+
+		// Create a streaming channel to relay live events from the TUI
+		streamCh := make(chan SSEEvent, 32)
+		resultCh := make(chan RCResult, 1)
+
+		// Send request to TUI
+		select {
+		case rc.RcCh <- RCRequest{Content: message, StreamCh: streamCh, ResultCh: resultCh}:
+		case <-time.After(5 * time.Second):
+			writeError(w, http.StatusServiceUnavailable, "TUI is busy, try again")
+			return
+		}
+
+		// Relay streaming events until done
+		for {
+			select {
+			case event, ok := <-streamCh:
+				if !ok {
+					// Stream channel closed, wait for final result
+					select {
+					case result := <-resultCh:
+						if result.Error != nil {
+							sendSSE(w, flusher, "error", map[string]string{"error": result.Error.Error()})
+							return
+						}
+						sendSSE(w, flusher, "done", DoneEvent{
+							SessionID: rc.SessionID,
+							Model:     rc.Model,
+						})
+						return
+					case <-time.After(30 * time.Second):
+						sendSSE(w, flusher, "error", map[string]string{"error": "timed out waiting for agent response"})
+						return
+					}
+				}
+				sendSSE(w, flusher, event.Event, event.Data)
+			case result := <-resultCh:
+				// Drain any remaining stream events
+				for done := false; !done; {
+					select {
+					case ev := <-streamCh:
+						sendSSE(w, flusher, ev.Event, ev.Data)
+					default:
+						done = true
+					}
+				}
+				if result.Error != nil {
+					sendSSE(w, flusher, "error", map[string]string{"error": result.Error.Error()})
+					return
+				}
+				sendSSE(w, flusher, "done", DoneEvent{
+					SessionID: rc.SessionID,
+					Model:     rc.Model,
+				})
+				return
+			case <-time.After(5 * time.Minute):
+				sendSSE(w, flusher, "error", map[string]string{"error": "agent response timed out"})
+				return
+			}
+		}
+	}
 
 	var as *agentSession
 	if sessionID != "" {
@@ -97,6 +170,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		tools, _ := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg)
 		ag.LoadExternalTools(h.cfg)
+		ag.SetAdvisorEnabled(h.advisorEnabled)
 
 		as = &agentSession{
 			agent:    ag,
@@ -106,11 +180,15 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		h.agents[sessionID] = as
 	}
 
+	h.mu.Unlock()
+
+	as.mu.Lock()
+	defer as.mu.Unlock()
+
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: message})
-	messages := as.messages
+	messages := append([]agent.Message(nil), as.messages...)
 	ag := as.agent
 	sessModel := as.model
-	h.mu.Unlock()
 
 	sendSSE(w, flusher, "session", map[string]string{"session_id": sessionID})
 
@@ -144,10 +222,8 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.mu.Lock()
 	as.messages = append(as.messages, resp...)
 	_ = session.Save(sessionID, "", as.messages, nil)
-	h.mu.Unlock()
 
 	sendSSE(w, flusher, "done", DoneEvent{
 		SessionID: sessionID,

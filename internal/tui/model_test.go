@@ -2228,6 +2228,254 @@ func TestModelPickerFilterWithSeparatorsEndToEnd(t *testing.T) {
 	}
 }
 
+func TestModelPickerCtrlRTriggersRefresh(t *testing.T) {
+	// The model picker must accept ctrl+r and return a non-nil cmd that
+	// produces a modelsRefreshedMsg. We don't drive the full I/O here —
+	// that's covered by the registry-level tests in internal/agent.
+	m := model{
+		showPicker:     true,
+		pickerKind:     "model",
+		pickerItems:    []string{"openai/gpt-4o-mini"},
+		pickerValues:   []string{"openai/gpt-4o-mini"},
+		pickerIsHeader: []bool{false},
+		styles:         ApplyThemeColors("tokyonight"),
+		input:          newTestTextarea(),
+		viewport:       viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("expected ctrl+r in model picker to return a refresh cmd, got nil")
+	}
+	got := derefTestModel(t, updated)
+	if !got.pickerRefreshing {
+		t.Fatal("expected pickerRefreshing to be set to true while refresh is in flight")
+	}
+	if !got.showPicker {
+		t.Fatal("expected picker to remain open while refresh is in flight")
+	}
+	if got.pickerKind != "model" {
+		t.Fatalf("expected pickerKind to remain 'model', got %q", got.pickerKind)
+	}
+}
+
+func TestModelPickerCtrlRIgnoredForNonModelKinds(t *testing.T) {
+	// ctrl+r is gated to model-family pickers (model / advisor /
+	// permission-model). For other kinds (theme, session, etc.) it should
+	// fall through and not produce a refresh cmd.
+	m := model{
+		showPicker:   true,
+		pickerKind:   "theme",
+		pickerItems:  []string{"tokyonight"},
+		pickerValues: []string{"tokyonight"},
+		styles:       ApplyThemeColors("tokyonight"),
+		input:        newTestTextarea(),
+		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if cmd != nil {
+		t.Fatal("expected ctrl+r to be a no-op for non-model picker kinds")
+	}
+	got := derefTestModel(t, updated)
+	if got.pickerRefreshing {
+		t.Fatal("expected pickerRefreshing to remain false for non-model picker kinds")
+	}
+}
+
+func TestModelPickerCtrlRDebouncedWhileInFlight(t *testing.T) {
+	// A second ctrl+r press while a refresh is already in flight should be
+	// ignored (no new cmd returned) so users can't accidentally stampede
+	// the models.dev API.
+	m := model{
+		showPicker:       true,
+		pickerKind:       "advisor",
+		pickerItems:      []string{"openai/gpt-4o-mini"},
+		pickerValues:     []string{"openai/gpt-4o-mini"},
+		pickerIsHeader:   []bool{false},
+		pickerRefreshing: true, // simulate an in-flight refresh
+		styles:           ApplyThemeColors("tokyonight"),
+		input:            newTestTextarea(),
+		viewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if cmd != nil {
+		t.Fatal("expected ctrl+r to be a no-op while a refresh is already in flight")
+	}
+	got := derefTestModel(t, updated)
+	if !got.pickerRefreshing {
+		t.Fatal("expected pickerRefreshing to remain true (it was already in flight)")
+	}
+}
+
+func TestModelsRefreshedMsgResetsFlagAndRepopulates(t *testing.T) {
+	// Drive the Update loop with a modelsRefreshedMsg carrying no error and
+	// assert the picker is repopulated, the refreshing flag clears, and a
+	// transcript message is added.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	m := model{
+		showPicker:       true,
+		pickerKind:       "model",
+		pickerItems:      []string{"openai/gpt-4o-mini"},
+		pickerValues:     []string{"openai/gpt-4o-mini"},
+		pickerIsHeader:   []bool{false},
+		pickerRefreshing: true,
+		styles:           ApplyThemeColors("tokyonight"),
+		input:            newTestTextarea(),
+		viewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+	}
+
+	updated, _ := m.Update(modelsRefreshedMsg{})
+	got := derefTestModel(t, updated)
+	if got.pickerRefreshing {
+		t.Fatal("expected pickerRefreshing to be cleared after refresh completes")
+	}
+	if !got.showPicker {
+		t.Fatal("expected picker to remain open after refresh")
+	}
+	if got.pickerKind != "model" {
+		t.Fatalf("expected pickerKind to remain 'model', got %q", got.pickerKind)
+	}
+	if len(got.messages) == 0 {
+		t.Fatal("expected a transcript message announcing the refresh")
+	}
+	last := got.messages[len(got.messages)-1]
+	if !strings.Contains(last.text, "refreshed") {
+		t.Fatalf("expected last message to mention refresh, got %q", last.text)
+	}
+}
+
+func TestModelsRefreshedMsgErrorSurfacesFailure(t *testing.T) {
+	// On error, the flag should clear and a transcript message should
+	// mention the failure. The picker should stay open.
+	m := model{
+		showPicker:       true,
+		pickerKind:       "permission-model",
+		pickerItems:      []string{"(not set)", "openai/gpt-4o-mini"},
+		pickerValues:     []string{"auto", "openai/gpt-4o-mini"},
+		pickerIsHeader:   []bool{false, false},
+		pickerRefreshing: true,
+		styles:           ApplyThemeColors("tokyonight"),
+		input:            newTestTextarea(),
+		viewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+	}
+
+	updated, _ := m.Update(modelsRefreshedMsg{err: fmt.Errorf("boom")})
+	got := derefTestModel(t, updated)
+	if got.pickerRefreshing {
+		t.Fatal("expected pickerRefreshing to be cleared after refresh completes (even on error)")
+	}
+	if !got.showPicker {
+		t.Fatal("expected picker to remain open on refresh error")
+	}
+	if len(got.messages) == 0 {
+		t.Fatal("expected an error transcript message")
+	}
+	last := got.messages[len(got.messages)-1]
+	if !strings.Contains(last.text, "failed") || !strings.Contains(last.text, "boom") {
+		t.Fatalf("expected last message to surface the failure, got %q", last.text)
+	}
+}
+
+func TestModelPickerHintIncludesCtrlRForModelFamilyKinds(t *testing.T) {
+	// The rendered hint line for model-family pickers must mention ctrl+r
+	// refresh so users can discover the shortcut. The exact wording is not
+	// load-bearing; we assert on the presence of the key name and the word
+	// "refresh" so a future refactor can't silently drop the shortcut.
+	m := model{
+		styles:  ApplyThemeColors("tokyonight"),
+		width:   100,
+		height:  30,
+		input:   newTestTextarea(),
+	}
+	for _, kind := range []string{"model", "advisor", "permission-model"} {
+		m.showPicker = true
+		m.pickerKind = kind
+		m.pickerItems = []string{"openai/gpt-4o-mini"}
+		m.pickerValues = []string{"openai/gpt-4o-mini"}
+		m.pickerIsHeader = []bool{false}
+		rendered := stripANSI(m.renderPicker())
+		if !strings.Contains(rendered, "ctrl+r") {
+			t.Errorf("expected %s picker hint to mention ctrl+r, got: %s", kind, rendered)
+		}
+		if !strings.Contains(rendered, "refresh") {
+			t.Errorf("expected %s picker hint to mention refresh, got: %s", kind, rendered)
+		}
+	}
+}
+
+func TestRefreshModelPickerItemsPreservesFilterAndKind(t *testing.T) {
+	// refreshModelPickerItems should rebuild the picker from the live
+	// registry (here, the embedded snapshot) while keeping the filter and
+	// pickerKind intact. This is the primitive the ctrl+r handler uses to
+	// repopulate the list after the background refresh completes.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home)
+
+	m := model{}
+	m.openModelPicker()
+	originalKind := m.pickerKind
+	if originalKind != "model" {
+		t.Fatalf("expected openModelPicker to set pickerKind=model, got %q", originalKind)
+	}
+	m.pickerFilterPending = "gpt"
+	m.pickerFilter = "gpt"
+	m.pickerIndex = 2
+
+	m.refreshModelPickerItems()
+
+	if m.pickerKind != "model" {
+		t.Fatalf("expected pickerKind to remain 'model' after refresh, got %q", m.pickerKind)
+	}
+	if m.pickerFilterPending != "gpt" {
+		t.Fatalf("expected pickerFilterPending to be preserved, got %q", m.pickerFilterPending)
+	}
+	if m.pickerFilter != "gpt" {
+		t.Fatalf("expected pickerFilter to be preserved, got %q", m.pickerFilter)
+	}
+	if m.pickerIndex != 2 {
+		t.Fatalf("expected pickerIndex to be preserved, got %d", m.pickerIndex)
+	}
+}
+
+func TestRefreshModelPickerItemsPreservesPermissionModelClearOption(t *testing.T) {
+	// For the permission-model kind, the "(not set)" row must be
+	// re-prepended after refreshModelPickerItems rebuilds the picker.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home)
+
+	m := model{}
+	m.openPermissionModelPicker()
+	if m.pickerValues[0] != "auto" {
+		t.Fatalf("expected first item to be the (not set) auto row, got %#v", m.pickerValues)
+	}
+	// Simulate a state change (e.g. user typed a filter) so we can verify
+	// the save/restore path.
+	m.pickerFilter = "x"
+	m.pickerIndex = 3
+	m.refreshModelPickerItems()
+
+	if m.pickerKind != "permission-model" {
+		t.Fatalf("expected pickerKind to remain 'permission-model', got %q", m.pickerKind)
+	}
+	if len(m.pickerValues) == 0 || m.pickerValues[0] != "auto" {
+		t.Fatalf("expected (not set) row to be re-prepended, got %#v", m.pickerValues)
+	}
+	if m.pickerFilter != "x" {
+		t.Fatalf("expected filter to be preserved, got %q", m.pickerFilter)
+	}
+	if m.pickerIndex != 3 {
+		t.Fatalf("expected index to be preserved, got %d", m.pickerIndex)
+	}
+}
+
 func TestModelPickerFilterKeywordSplitting(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -2502,8 +2750,14 @@ func TestSessionPickerLoadsAllRefsWhenFilterActive(t *testing.T) {
 	m := model{input: textarea.New()}
 	m.openSessionPicker()
 	m.pickerFilter = "session"
-	cmd := loadSessionRefsCmd(m.pickerSessionLoadSeq)
-	updated, _ := m.Update(cmd())
+
+	// First load: fetches first page (sessionPickerPageSize sessions)
+	cmd := loadSessionRefsCmd(m.pickerSessionLoadSeq, sessionPickerPageSize, 0)
+	// Keep executing returned commands until loading completes
+	updated, nextCmd := m.Update(cmd())
+	for nextCmd != nil {
+		updated, nextCmd = updated.(model).Update(nextCmd())
+	}
 	got := updated.(model)
 	if got.pickerSessionLoading {
 		t.Fatal("expected loading flag to clear after refs load")

@@ -52,6 +52,7 @@ const (
 	filesModeEdit
 	filesModeContentSearch
 	filesModeFuzzy
+	filesModeInFileSearch
 )
 
 type filesPromptKind int
@@ -153,6 +154,12 @@ type filesModel struct {
 	contentSearchDone           bool          // true once search completed
 	contentSearchCancel         chan struct{} // non-nil while a streaming search is running
 	contentSearchIncludeIgnored bool          // true = search everything, false = skip .gitignore + hidden
+
+	// In-file search fields
+	inFileSearchQuery   string   // current search query
+	inFileSearchMatches [][]int  // highlight ranges: [[line, colstart, line, colend], ...]
+	inFileSearchCursor  int      // current match index
+	inFileSearchActive  bool     // true when search is active
 }
 
 func newFilesModel(workDir string) filesModel {
@@ -192,6 +199,45 @@ func (m *filesModel) SetSaveEditor(fn func(string) error) { m.saveEditor = fn }
 func (m *filesModel) SetEditorOpener(fn func(string) tea.Cmd) { m.editorOpener = fn }
 
 func (m *filesModel) SetEditorMode(mode string) { m.editorMode = mode }
+
+// performInFileSearch searches for the query in the current preview content
+// and returns highlight ranges. Each range is [line, colstart, line, colend].
+func (m *filesModel) performInFileSearch(query string) [][]int {
+	if query == "" {
+		return nil
+	}
+	var matches [][]int
+	queryLower := strings.ToLower(query)
+	for lineIdx, line := range m.previewRawLines {
+		lineLower := strings.ToLower(line)
+		start := 0
+		for {
+			idx := strings.Index(lineLower[start:], queryLower)
+			if idx == -1 {
+				break
+			}
+			colStart := start + idx
+			colEnd := colStart + len(query)
+			matches = append(matches, []int{lineIdx, colStart, lineIdx, colEnd})
+			start = colStart + 1
+		}
+	}
+	return matches
+}
+
+// applyInFileSearchHighlights highlights matches in the preview viewport.
+func (m *filesModel) applyInFileSearchHighlights() {
+	m.preview.SetHighlights(m.inFileSearchMatches)
+	if len(m.inFileSearchMatches) > 0 {
+		m.preview.HighlightNext()
+	}
+}
+
+// setInFileSearchStyles configures the viewport highlight styles for in-file search.
+func (m *filesModel) setInFileSearchStyles(styles Styles) {
+	m.preview.HighlightStyle = lipgloss.NewStyle().Background(styles.Selected.GetBackground()).Foreground(styles.Selected.GetForeground())
+	m.preview.SelectedHighlightStyle = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("0")).Bold(true)
+}
 
 func (m *filesModel) Resize(w, h int) {
 	m.width = w
@@ -258,6 +304,9 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 		}
 		if m.mode == filesModeFuzzy {
 			return m.updateFuzzy(msg)
+		}
+		if m.mode == filesModeInFileSearch {
+			return m.updateInFileSearch(msg)
 		}
 		if m.panel == filesPanelPreview {
 			return m.updatePreview(msg)
@@ -405,8 +454,89 @@ func (m filesModel) updatePreview(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 		}
 	case "i":
 		return m.startInlineEdit()
+	case "/":
+		m.mode = filesModeInFileSearch
+		m.inFileSearchQuery = ""
+		m.inFileSearchMatches = nil
+		m.inFileSearchCursor = 0
+		m.inFileSearchActive = true
+		m.preview.ClearHighlights()
+		m.statusMsg = "/ (type to search, n/p navigate, esc cancel)"
 	}
 	return m, nil
+}
+
+func (m filesModel) updateInFileSearch(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc":
+		m.mode = filesModeNormal
+		m.inFileSearchActive = false
+		m.preview.ClearHighlights()
+		m.statusMsg = ""
+		return m, nil
+	case "enter", "ctrl+j", "ctrl+m", "\r", "\n":
+		m.mode = filesModeNormal
+		m.inFileSearchActive = false
+		m.statusMsg = ""
+		return m, nil
+	case "n":
+		// Only navigate if there are matches; otherwise treat as input
+		if len(m.inFileSearchMatches) > 0 {
+			m.preview.HighlightNext()
+			return m, nil
+		}
+		// Fall through to default to add 'n' to query
+		m.inFileSearchQuery += msg.String()
+		m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
+		m.applyInFileSearchHighlights()
+		if len(m.inFileSearchMatches) > 0 {
+			m.statusMsg = fmt.Sprintf("/%s (%d matches, n/p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
+		} else {
+			m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
+		}
+		return m, nil
+	case "p":
+		// Only navigate if there are matches; otherwise treat as input
+		if len(m.inFileSearchMatches) > 0 {
+			m.preview.HighlightPrevious()
+			return m, nil
+		}
+		// Fall through to default to add 'p' to query
+		m.inFileSearchQuery += msg.String()
+		m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
+		m.applyInFileSearchHighlights()
+		if len(m.inFileSearchMatches) > 0 {
+			m.statusMsg = fmt.Sprintf("/%s (%d matches, n/p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
+		} else {
+			m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
+		}
+		return m, nil
+	case "backspace", "\x7f":
+		if len(m.inFileSearchQuery) > 0 {
+			m.inFileSearchQuery = m.inFileSearchQuery[:len(m.inFileSearchQuery)-1]
+			m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
+			m.applyInFileSearchHighlights()
+			if len(m.inFileSearchMatches) > 0 {
+				m.statusMsg = fmt.Sprintf("/%s (%d matches, n/p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
+			} else {
+				m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
+			}
+		}
+		return m, nil
+	default:
+		// Handle printable characters (exclude control characters)
+		if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] != 127 {
+			m.inFileSearchQuery += msg.String()
+			m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
+			m.applyInFileSearchHighlights()
+			if len(m.inFileSearchMatches) > 0 {
+				m.statusMsg = fmt.Sprintf("/%s (%d matches, n/p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
+			} else {
+				m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
+			}
+		}
+		return m, nil
+	}
 }
 
 func (m filesModel) updatePrompt(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
@@ -845,6 +975,13 @@ func (m filesModel) treeNodeForClick(mouse tea.Mouse, headerHeight int) (int, bo
 	}
 	// Tree content starts after header + 1 (border top line)
 	treeContentTop := headerHeight + 1
+	// Account for hint lines prepended to tree content in View().
+	// The hint text wraps inside the bordered pane, so count rendered lines.
+	if hint := m.selectionHint(); hint != "" {
+		treeContentTop += lipgloss.Height(hintStyle.Width(treeW - 6).Render(hint))
+	} else if m.panel == filesPanelPicker && m.mode == filesModeNormal && len(m.selectedFiles) == 0 {
+		treeContentTop += lipgloss.Height(hintStyle.Width(treeW - 6).Render(m.treeHint()))
+	}
 	if mouse.Y < treeContentTop {
 		return 0, false
 	}
@@ -1360,6 +1497,10 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 4).Render(treeContent)
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
+	if m.inFileSearchActive {
+		m.preview.HighlightStyle = lipgloss.NewStyle().Background(styles.Selected.GetBackground()).Foreground(styles.Selected.GetForeground())
+		m.preview.SelectedHighlightStyle = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("0")).Bold(true)
+	}
 	previewBody := m.preview.View()
 	if m.mode == filesModeEdit {
 		previewBody = m.inlineEditor.view(previewW-7, h-5)
@@ -1369,9 +1510,9 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		previewContent = styles.Hint.Render(header) + "\n" + previewContent
 	}
 	if m.mode == filesModeNormal && m.previewEditable {
-		hint := "tab jump  i vim edit  e external  E choose editor  a add to context  /editor set default"
+		hint := "tab jump  i vim edit  e external  E choose editor  a add to context  / search  /editor set default"
 		if isTmuxMode(m.editorMode) {
-			hint = "tab jump  i vim edit  e " + m.tmuxOpenHint() + "  E choose editor  a add to context  /editor set default"
+			hint = "tab jump  i vim edit  e " + m.tmuxOpenHint() + "  E choose editor  a add to context  / search  /editor set default"
 		}
 		previewContent = styles.Hint.Render(hint) + "\n" + previewContent
 	}

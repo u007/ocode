@@ -42,6 +42,10 @@ const (
 var llmHTTPClient = &http.Client{Timeout: llmRequestTimeout}
 var llmRetryBaseDelay = 500 * time.Millisecond
 
+// ErrNoResponseFromOpenAIResponses is returned when the OpenAI Responses API
+// returns an empty response (no text content and no tool calls).
+var ErrNoResponseFromOpenAIResponses = errors.New("no response from openai responses api")
+
 type Message struct {
 	Role                string                   `json:"role"`
 	Content             string                   `json:"content"`
@@ -425,6 +429,9 @@ func isRetryableLLMClientError(err error) bool {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) || os.IsTimeout(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if errors.Is(err, ErrNoResponseFromOpenAIResponses) {
 		return true
 	}
 	var netErr net.Error
@@ -1565,7 +1572,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	}
 
 	if fullText == "" && len(toolCalls) == 0 {
-		return nil, fmt.Errorf("no response from openai responses api")
+		return nil, ErrNoResponseFromOpenAIResponses
 	}
 
 	msg := &Message{

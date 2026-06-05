@@ -1,0 +1,123 @@
+.\" Man page for ocode
+.\" Generated from the help output
+.TH OCODE 1 "June 2025" "ocode" "User Commands"
+.SH NAME
+ocode \- AI coding agent
+.SH SYNOPSIS
+.B ocode
+[\fIglobal options\fR] \fIcommand\fR [\fIcommand options\fR]
+.PP
+.B ocode
+[\fITUI options\fR]
+.SH DESCRIPTION
+.B ocode
+is an AI-powered coding agent that helps you write, edit, and understand code.
+It can run interactively in a terminal UI (TUI), headlessly for automation,
+or as a server with a web interface.
+.SH GLOBAL OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show help message and exit.
+.TP
+\fB\-\-version\fR
+Show version information and exit.
+.SH COMMANDS
+.TP
+\fBrun\fR
+Run a prompt non-interactively (headless mode).
+.TP
+\fBserve\fR
+Start the HTTP server with web UI.
+.TP
+\fBweb\fR
+Start server and open browser (alias for \fBserve \-\-open\fR).
+.TP
+\fBacp\fR
+Run ACP (Agent Communication Protocol) server over stdio.
+.TP
+\fBmcp\fR
+Manage MCP (Model Context Protocol) servers.
+.TP
+\fBmodels\fR
+List available models.
+.TP
+\fBskills\fR
+Manage skills.
+.TP
+\fBversion\fR
+Show version information.
+.SH TUI MODE
+When invoked without a command, ocode starts the interactive terminal UI.
+.TP
+\fB\-session \fI<id>\fR
+Resume a specific session by ID.
+.TP
+\fB\-continue\fR
+Continue the most recent session.
+.TP
+\fB\-yolo\fR, \fB\-\-yolo\fR, \fB\-\-dangerously\-skip\-permissions\fR
+Auto-approve all permission prompts.
+.TP
+\fB\-\-permission\-mode \fI<auto|off>\fR
+Set permission mode (default: auto).
+.SH COMMAND-SPECIFIC HELP
+Run \fBocode \fIcommand\fR \fB\-h\fR for command-specific help.
+.SH FILES
+.TP
+\fI~/.config/opencode/config.json\fR
+User configuration file.
+.TP
+\fI~/.config/opencode/skills/\fR
+User-installed skills directory.
+.TP
+\fI~/.local/share/opencode/sessions/\fR
+Session storage directory.
+.SH ENVIRONMENT VARIABLES
+.TP
+\fBOPENCODE_MODEL\fR
+Default model to use (e.g., \fBgpt-4\fR, \fBclaude-3-opus\fR).
+.TP
+\fBOPENCODE_SERVER_USERNAME\fR
+Basic auth username for the HTTP server.
+.TP
+\fBOPENCODE_SERVER_PASSWORD\fR
+Basic auth password for the HTTP server.
+.TP
+\fBNO_COLOR\fR
+Disable colored output when set.
+.SH EXAMPLES
+.TP
+Start the interactive TUI:
+.B ocode
+.TP
+Run a one-off prompt:
+.B ocode run "How do I read a file in Go?"
+.TP
+Run with a specific model:
+.B ocode run -model gpt-4 -prompt "Write a hello world"
+.TP
+Start the web server and open browser:
+.B ocode web
+.TP
+List available models:
+.B ocode models
+.TP
+List models from a specific provider:
+.B ocode models --provider anthropic
+.TP
+Manage MCP servers:
+.B ocode mcp list
+.TP
+Install skills:
+.B ocode skills install
+.SH SEE ALSO
+.BR ocode-run (1),
+.BR ocode-serve (1),
+.BR ocode-mcp (1),
+.BR ocode-models (1),
+.BR ocode-skills (1),
+.BR ocode-acp (1)
+.SH AUTHORS
+The ocode authors.
+.SH BUGS
+Report bugs at: https://github.com/jamesmercstudio/ocode/issues

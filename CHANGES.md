@@ -9,6 +9,11 @@
 - **Model Picker Favorite Toggle** — Changed favorite toggle keybinding from `f` (which conflicted with type-to-filter) to `ctrl+f`.
 - **Git Tab Mouse Click Mapping** — Corrected section panel and file-list click coordinate mapping (border offset, staged/unstaged header row offset); clamped negative content lines in diff click.
 - **Files Tab Content Search Cancellation** — Pressing Esc now properly cancels an in-flight content search.
+- **Git Tab Diff Gutter & Soft-Wrap** — Diff viewport now soft-wraps long lines (no horizontal truncation) and shows line numbers in a left gutter (`4d │ ` style), so wrapped diffs stay readable.
+- **TUI Clickable File Paths** — File-path tokens (e.g. `internal/server/handler.go`, `handler.go:42`) in the chat transcript and the agent-detail drill-in are now clickable. Lazy stat-based detection (only existing files become links). Opens in `$EDITOR`/`$VISUAL` with system-opener fallback. Known limitations: TUI click ignores the `:line` suffix; paths split across a visual-line wrap boundary linkify only the first segment.
+- **Web Clickable File Paths** — Same lazy-stat path detection rendered via a custom `rehype` plugin (`rehypeFileLinks`) + `linkifyPlainText` for user messages, producing a `filelink` custom element. Web `POST /api/files/open` opens the resolved file via the system opener or `--goto`-capable GUI editor.
+- **OpenAI Responses Empty-Response Retry** — Empty Responses-API replies (no text, no tool calls) are now classified as a retryable error (`ErrNoResponseFromOpenAIResponses`) and retried with the normal backoff loop instead of failing the turn.
+- **Anthropic OAuth Token POST** — `AnthropicExchange` and `AnthropicRefresh` now send `application/x-www-form-urlencoded` (per Anthropic's spec) instead of JSON, fixing token acquisition that was previously failing with a 415.
 
 ### Added
 - **Web UI Layout Restructure** — New tab-based navigation with `TopTabs` (chat/files/git/logs), collapsible `SessionSidebar`, `CoworkSidebar`, and `ModelDialog` components. Session history, model selection, and agent tabs separated into dedicated panels.
@@ -29,6 +34,26 @@
 - **Files Tab Tree Hint Bar** — Added a keybinding hints bar at the top of the file tree panel showing available actions.
 - **Server Error Logging** — Added `log.Printf` error logging to serve handlers for agent step errors, surfacing failures in the debug panel.
 - **Test Coverage** — New tests for multi-session permission model preservation, double-click folder explorer behavior, binary file opener, empty search path, stale search message filtering, and 50-line cap removal in command parser.
+- **`/rc` (Remote Control) TUI Command** — New TUI slash command (aliases: `/remote-control`) starts an embedded web server bound to the current TUI session and opens the browser to `http://localhost:4096/session/<id>`. Web messages stream to the TUI agent via an `RCBridge`; the TUI remains the source of truth. New `tui.RunOptions.WebFS` field threads the embedded `dist/` assets to the TUI command.
+- **Advisor Runtime Toggle** — The `advisor` tool is now always registered, but its exposure to the model is gated by a runtime `atomic.Bool` (`Agent.SetAdvisorEnabled` / `AdvisorEnabled`). Default seeded from `cfg.Ocode.Advisor.Enabled`. New `GET/PUT /api/config/advisor-enabled` endpoint lets the web sidebar flip the toggle for the session's lifetime (not persisted to config).
+- **Web Agent-Runs API & Preview** — `GET /api/agents/runs` and `GET /api/agents/runs/stream` (SSE) expose the in-memory run tree (id, name, status, model, token usage, full transcript, nested sub-agent runs) for the new `AgentPreview` web component. Used by the cowork panel to show live sub-agent activity.
+- **Web Logs API & Panel** — `GET /api/logs`, `GET /api/logs/stream`, `DELETE /api/logs` expose the in-process debug log. New `Logs/LogPanel` web component renders the log with live SSE updates.
+- **Web Session Routing** — React Router added; `/session/:id` now resolves to a dedicated `SessionPage` that resumes a session, replays its full message history (via the new `SessionDetail` type), and supports in-place streaming.
+- **Web Permissions API & Dialog** — `POST /api/permissions` accepts `{ request_id, approved }` to resolve a `permission_required` SSE event. New `Chat/PermissionDialog.tsx` replaces the old `common/PermissionDialog.tsx` and lives inside the chat surface.
+- **Web Slash-Command Autocomplete** — Typing `/` in the chat input opens a `SlashCommandMenu` popup with keyboard navigation (↑/↓, Enter, Esc). Supports `/clear`, `/model`, `/compact`, `/recap`, `/export`, `/share`, `/help`.
+- **Web Model Dialog Tabs** — `ModelDialog` now has three tabs (main / small / advisor) and is the single place to switch any of the three models. Each tab is wired to its own `get/set` config endpoint.
+- **Web Advisor Status in StatusBar** — Status bar reflects the live advisor on/off state; the toggle persists across `RESET` (the reducer carries `advisorEnabled` through new sessions).
+- **Web Markdown Rendering** — Assistant messages now render through `react-markdown` + `remark-gfm` with `highlight.js` syntax highlighting, `@tailwindcss/typography` (`prose`) styles, and shadcn-styled code/blockquote/heading/list overrides.
+- **Web File Open** — `POST /api/files/open` opens a file by absolute path (or relative to the server's `os.Getwd()`), opening GUI editors with `--goto <line>` when the path includes a `:line` suffix.
+- **TUI Files In-File Search** — New `filesModeInFileSearch` mode searches within the current preview file. Matches are highlighted via `viewport.Highlights`; `n` / `N` jumps through matches. Triggered by `/` while focused on a previewed file.
+- **TUI Session Pagination** — `session.ListRefsPaginated(limit, offset)` returns a page of refs plus the total count. The session picker now loads 20 refs at a time with progressive "load more" via the new `loadSessionRefsCmd(seq, limit, offset)`.
+- **TUI Session Delete** — `session.Delete(id)` removes a session file and updates the on-disk index. New `renderSessionDeleteConfirmDialog` in the TUI for the confirmation step.
+- **`ForceRefreshRegistry`** — New `agent.ForceRefreshRegistry()` synchronously fetches the models.dev registry (bypassing the 5-minute TTL), writes through to the on-disk cache, and returns the new data. Hooked up to the TUI picker via `refreshModelsCacheCmd` + `modelsRefreshedMsg` so users can manually refresh the model list.
+- **TUI Branch-Only Refresh** — Lightweight `gitModel.cmdBranchRefresh` (no diff reload) keeps the sidebar's current-branch / ahead-behind display fresh without disturbing the active tab's scroll/selection.
+- **Debuglog Package** — `internal/debuglog` extracted from `tui/debuglog.go` so non-TUI consumers (server, agent, etc.) can write to the shared log without importing the TUI. `tui.DebugEntry`, `tui.DebugLog`, and friends remain as backward-compat aliases.
+- **CLI Help Flags** — `ocode`, `ocode acp`, `ocode mcp`, `ocode models`, and `ocode run` all accept `-h` / `--help` and print a usage block (previously the top-level help was missing and the subcommands printed usage only on bad input).
+- **Makefile `kill-ports` / `close` Targets** — Convenience target to free `:4096` (backend) and `:5173` (Vite) before `make dev`/`make production`.
+- **Test Coverage (continued)** — New tests: `pathlink_test.go` (path detection + `:line` suffix), `files_click_offset_test.go` (preview click coordinates), `detail_view_test.go` (agent drill-in rendering), `model_test.go` extensions (slash popup, model picker refresh, session delete dialog), `handler_open_test.go` (server-side open validation), `handler_runs_test.go` (run-tree serialization), `anthropic_test.go` (form-encoded token POST).
 
 ### Changed
 - **Session API Response** — `GET /api/sessions/:id` now returns `SessionDetail` (includes full message history) instead of just session metadata, enabling session resume/import in the web UI.
@@ -47,9 +72,19 @@
 - **Transcript Trailing Padding** — Added 20 lines of trailing vertical padding so agent/permission boxes at the bottom of the transcript are not obscured by the viewport.
 - **Gitignore** — Added `.claude/settings.local.json` to `.gitignore`.
 - **Version** — Bumped from `0.3.0` to `0.3.1`.
+- **Version** — Bumped from `0.3.1` to `0.3.2` for the current unreleased set of changes (`/rc`, advisor runtime toggle, web markdown rendering, debuglog package extraction, etc.).
+- **Server Chat Locking** — `Handler.HandleChat` / `HandleSendMessage` / `HandleChatStream` now hold the per-agent `agentSession.mu` (not the global `Handler.mu`) while stepping the agent, so concurrent requests to *different* sessions no longer serialize behind each other. The handler-wide lock is released as soon as the session is selected.
+- **SSE Chat Model Override** — `GET /api/chat/stream` now accepts an optional `?model=…` query param; falls back to the configured model when absent.
+- **Model Picker Refresh** — `refreshModelPickerItems` rebuilds the model-family picker in place after a force-refresh (or any other in-place mutation) without losing the user's filter text or selection. Page size for the session picker reduced 50 → 20 to smooth first-paint of large session histories.
+- **TUI Selection Helper** — `insertHighlight` is now a thin wrapper around a new `insertSGRSpan(rendered, raw, rawStart, rawEnd, openSeq, closeSeq)` helper, making arbitrary SGR spans (e.g. the file-link underline) reusable from the same single-pass escape scanner.
+- **Anthropic Token HTTP Client** — Token exchange now uses a package-level `anthropicHTTPClient` (30s timeout) instead of constructing a new client per request. Token URL is also a `var` (was `const`) so tests can override it.
+- **OAuth Token Payload Encoding** — `anthropicTokenRequest` switched from JSON to `url.Values` (form-encoded) as required by Anthropic's OAuth endpoint.
+- **`@path` Help Text** — Updated the `/` help line from "Add file context or attach an image" to "Reference a file (attach an image, or pass the path to the model)" to match the new path-linkifying behavior.
 
 ### Removed
 - **PermissionDialog** — Removed obsolete `PermissionDialog` component; permissions flow now uses API-driven inline approval in the web UI.
+- **Legacy Sidebar Components** — Removed `web/src/components/Sidebar/{AgentTabs,ModelSelector,SessionList}.tsx` as part of the layout restructure. Replaced by the new `Layout/TopTabs`, `Layout/SessionSidebar`, `Layout/CoworkSidebar`, and `Layout/ModelDialog` components.
+- **`common/PermissionDialog.tsx`** — Removed in favor of the new `Chat/PermissionDialog.tsx` colocated with the chat surface.
 
 ## [0.3.1] — 2026-06-04
 

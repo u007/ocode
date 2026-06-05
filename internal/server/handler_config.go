@@ -125,6 +125,48 @@ func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
 }
 
+// HandleGetAdvisorEnabled reports whether the advisor tool is currently exposed.
+// This is a runtime, session-lifetime toggle — it is NOT read from or written to
+// config.
+func (h *Handler) HandleGetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	enabled := h.advisorEnabled
+	if h.rc != nil {
+		if ag := h.rc.Agent(); ag != nil {
+			enabled = ag.AdvisorEnabled()
+		}
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": enabled})
+}
+
+// HandleSetAdvisorEnabled flips the advisor tool on/off for every live agent this
+// handler controls (and the bridged TUI agent, if any). It deliberately does NOT
+// persist to config — the change lasts only for the agents' lifetime.
+func (h *Handler) HandleSetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+
+	h.mu.Lock()
+	h.advisorEnabled = req.Enabled
+	for _, as := range h.agents {
+		as.agent.SetAdvisorEnabled(req.Enabled)
+	}
+	if h.rc != nil {
+		if ag := h.rc.Agent(); ag != nil {
+			ag.SetAdvisorEnabled(req.Enabled)
+		}
+	}
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
+}
+
 func (h *Handler) HandleListAgents(w http.ResponseWriter, r *http.Request) {
 	specs := agent.PrimaryAgentSpecs()
 	type agentInfo struct {

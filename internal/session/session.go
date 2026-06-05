@@ -402,17 +402,24 @@ func ListAll() ([]Ref, error) {
 	return refs, nil
 }
 
-// ListRefs returns Ref metadata for all sessions without loading full message content.
-// It is significantly faster than List/ListAll for listing operations.
+// ListRefs returns all session refs sorted by updated time (newest first).
+// For paginated access, use ListRefsPaginated.
 func ListRefs() ([]Ref, error) {
+	refs, _, err := ListRefsPaginated(0, 0)
+	return refs, err
+}
+
+// ListRefsPaginated returns a page of session refs with optional limit and offset.
+// If limit <= 0, returns all refs. Returns (refs, totalCount, error).
+func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 	dir, err := GetStorageDir()
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	// Lightweight struct for partial JSON decode (no Messages)
@@ -423,7 +430,7 @@ func ListRefs() ([]Ref, error) {
 		Metadata  map[string]any `json:"metadata,omitempty"`
 	}
 
-	refs := make([]Ref, 0, len(entries))
+	var allRefs []Ref
 	clonedClaude := make(map[string]struct{})
 
 	for _, e := range entries {
@@ -438,7 +445,7 @@ func ListRefs() ([]Ref, error) {
 		if err := json.Unmarshal(data, &meta); err != nil {
 			continue
 		}
-		refs = append(refs, Ref{
+		allRefs = append(allRefs, Ref{
 			ID:        meta.ID,
 			Title:     meta.Title,
 			UpdatedAt: meta.UpdatedAt,
@@ -451,26 +458,72 @@ func ListRefs() ([]Ref, error) {
 		}
 	}
 
-	sort.Slice(refs, func(i, j int) bool {
-		return refs[i].UpdatedAt.After(refs[j].UpdatedAt)
+	sort.Slice(allRefs, func(i, j int) bool {
+		return allRefs[i].UpdatedAt.After(allRefs[j].UpdatedAt)
 	})
 
 	claudeRefs, err := listClaudeSessions()
-	if err != nil {
-		return refs, nil // best-effort: return ocode-only refs
-	}
-	for _, ref := range claudeRefs {
-		if _, ok := clonedClaude[strings.TrimPrefix(ref.ID, "claude:")]; ok {
-			continue
+	if err == nil {
+		for _, ref := range claudeRefs {
+			if _, ok := clonedClaude[strings.TrimPrefix(ref.ID, "claude:")]; ok {
+				continue
+			}
+			allRefs = append(allRefs, ref)
 		}
-		refs = append(refs, ref)
+		sort.Slice(allRefs, func(i, j int) bool {
+			return allRefs[i].UpdatedAt.After(allRefs[j].UpdatedAt)
+		})
 	}
 
-	sort.Slice(refs, func(i, j int) bool {
-		return refs[i].UpdatedAt.After(refs[j].UpdatedAt)
-	})
+	total := len(allRefs)
 
-	return refs, nil
+	// Apply pagination
+	if limit > 0 {
+		start := offset
+		if start > total {
+			start = total
+		}
+		end := start + limit
+		if end > total {
+			end = total
+		}
+		allRefs = allRefs[start:end]
+	}
+
+	return allRefs, total, nil
+}
+
+// Delete removes a session file and updates the index.
+func Delete(id string) error {
+	dir, err := GetStorageDir()
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join(dir, id+".json")
+	if err := os.Remove(path); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	// Update index
+	indexPath := filepath.Join(dir, "index.json")
+	var idx sessionIndex
+	data, err := os.ReadFile(indexPath)
+	if err == nil {
+		json.Unmarshal(data, &idx) //nolint:errcheck
+	}
+	if idx.Sessions == nil {
+		idx.Sessions = make(map[string]string)
+	}
+	delete(idx.Sessions, id)
+
+	out, err := json.MarshalIndent(idx, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal session index: %w", err)
+	}
+	return os.WriteFile(indexPath, out, 0644)
 }
 
 func LoadAny(id string) (*Session, error) {

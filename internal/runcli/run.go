@@ -25,7 +25,48 @@ func (s *stringSliceFlag) Set(v string) error {
 	return nil
 }
 
+func printRunUsage() {
+	fmt.Println("Usage: ocode run [options] [message...]")
+	fmt.Println()
+	fmt.Println("Run a prompt non-interactively (headless mode).")
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  -prompt, -p <text>        Prompt text (can also use positional args)")
+	fmt.Println("  -model, -m <model>        Model to use (overrides config)")
+	fmt.Println("  -agent <name>             Agent name/mode to use")
+	fmt.Println("  -session, -s <id>         Session ID to resume")
+	fmt.Println("  -continue, -c             Continue the most recent session")
+	fmt.Println("  -fork                     Fork from the most recent session (new session)")
+	fmt.Println("  -file, -f <path>          File(s) to attach to message (can repeat)")
+	fmt.Println("  -format <default|json>    Output format (default: default)")
+	fmt.Println("  -title <text>             Session title")
+	fmt.Println("  -attach <url>             Attach to running serve instance URL")
+	fmt.Println("  -port <port>              Serve port (for --attach)")
+	fmt.Println("  -yolo                     Allow tools and shell commands without permission prompts")
+	fmt.Println("  --dangerously-skip-permissions")
+	fmt.Println("                            Auto-approve permissions (alias for -yolo)")
+	fmt.Println("  -command <name>           Slash command to run; positional message used as args")
+	fmt.Println("  -dir <path>               Directory to run in")
+	fmt.Println("  -username, -u <name>      Basic auth username for --attach")
+	fmt.Println("  -password, -p <pass>      Basic auth password for --attach")
+	fmt.Println("  -h, --help                Show this help message")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  ocode run \"How do I read a file in Go?\"")
+	fmt.Println("  ocode run -model gpt-4 -prompt \"Write a hello world\"")
+	fmt.Println("  ocode run -file main.go -prompt \"Explain this code\"")
+	fmt.Println("  ocode run -attach http://localhost:4096 -prompt \"Continue session\"")
+}
+
 func Run(args []string) error {
+	// Check for help flag before parsing
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			printRunUsage()
+			return nil
+		}
+	}
+
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	prompt := fs.String("prompt", "", "Prompt text")

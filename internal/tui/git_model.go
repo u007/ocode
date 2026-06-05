@@ -71,6 +71,13 @@ type gitRefreshMsg struct {
 	autoRefresh   bool // when true, skip diff reload to preserve scroll/selection
 }
 
+// gitBranchRefreshMsg is a lightweight message for updating only the current
+// branch and ahead/behind info in the sidebar, without touching other git state.
+type gitBranchRefreshMsg struct {
+	currentBranch string
+	aheadBehind   string
+}
+
 type diffHunk struct {
 	header string
 	body   string
@@ -142,9 +149,21 @@ type gitModel struct {
 	logger func(kind DebugEntryKind, msg string)
 }
 
+func diffLineNumbers(ctx viewport.GutterContext) string {
+	if ctx.Soft {
+		return "     │ "
+	}
+	if ctx.Index >= ctx.TotalLines {
+		return "   ~ │ "
+	}
+	return fmt.Sprintf("%4d │ ", ctx.Index+1)
+}
+
 func newGitModel(workDir string) gitModel {
 	m := gitModel{workDir: workDir}
 	m.diff = viewport.New()
+	m.diff.SoftWrap = true
+	m.diff.LeftGutterFunc = diffLineNumbers
 	m.commitViewport = viewport.New()
 	ci := textarea.New()
 	ci.Placeholder = "Commit message..."
@@ -177,7 +196,7 @@ func (m *gitModel) Resize(w, h int) {
 	if diffH < 1 {
 		diffH = 1
 	}
-	m.diff.SetWidth(diffW - 7)
+	m.diff.SetWidth(diffW - 14)
 	m.diff.SetHeight(diffH)
 	m.commitViewport.SetWidth(filesW - 7)
 	m.commitViewport.SetHeight(h - 5 - commitInputRows)
@@ -307,6 +326,23 @@ func (m *gitModel) cmdAutoRefresh() tea.Cmd {
 			currentBranch: tmp.currentBranch,
 			aheadBehind:   ab,
 			autoRefresh:   true,
+		}
+	}
+}
+
+// cmdBranchRefresh returns a lightweight command that only fetches the current
+// branch and ahead/behind info. This is used to keep the sidebar branch display
+// up-to-date regardless of which tab is active.
+func (m *gitModel) cmdBranchRefresh() tea.Cmd {
+	workDir := m.workDir
+	return func() tea.Msg {
+		tmp := gitModel{workDir: workDir}
+		// Only load branches to get current branch
+		tmp.loadBranches()
+		ab := tmp.aheadBehindString()
+		return gitBranchRefreshMsg{
+			currentBranch: tmp.currentBranch,
+			aheadBehind:   ab,
 		}
 	}
 }
@@ -476,6 +512,13 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 		m.statusMsg = msg.text
 		m.logGit(firstLine(msg.text))
 		return m, m.cmdRefresh()
+	case gitBranchRefreshMsg:
+		// Lightweight branch-only update for sidebar (doesn't touch other state)
+		if msg.currentBranch != "" {
+			m.currentBranch = msg.currentBranch
+		}
+		m.aheadBehind = msg.aheadBehind
+		return m, nil
 	case gitRefreshMsg:
 		m.stagedFiles = msg.staged
 		m.unstagedFiles = msg.unstaged

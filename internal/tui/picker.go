@@ -37,6 +37,46 @@ func (m *model) prependPermissionModelClearOption() {
 	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
 }
 
+// refreshModelPickerItems repopulates the current model-family picker
+// (kind = "model" | "advisor" | "permission-model") from the latest registry
+// data, preserving the user's filter text, pending filter text, and selection
+// index. Used after operations that may change the available models without
+// closing the picker — e.g. toggling a favorite, or a force refresh of the
+// models.dev cache.
+func (m *model) refreshModelPickerItems() {
+	kind := m.pickerKind
+	filterPending := m.pickerFilterPending
+	filter := m.pickerFilter
+	idx := m.pickerIndex
+
+	m.openModelPicker()
+
+	m.pickerKind = kind
+	m.pickerFilterPending = filterPending
+	m.pickerFilter = filter
+	m.pickerIndex = idx
+	if kind == "permission-model" {
+		m.prependPermissionModelClearOption()
+	}
+}
+
+// refreshModelsCacheCmd returns a tea.Cmd that force-refreshes the
+// models.dev registry (and the local LM Studio live list) on a background
+// goroutine, then sends a modelsRefreshedMsg back to the Update loop. The
+// blocking HTTP calls are deliberately off the UI goroutine; the result is
+// reported asynchronously. The caller should set m.pickerRefreshing = true
+// before returning this cmd and reset it in the message handler.
+func refreshModelsCacheCmd() tea.Cmd {
+	return func() tea.Msg {
+		_, err := agent.ForceRefreshRegistry()
+		// Always re-fetch LM Studio's live list too — the picker combines
+		// the static registry with the local API, and the user pressing
+		// "refresh" expects both to be re-checked.
+		_ = agent.FetchLMStudioModels()
+		return modelsRefreshedMsg{err: err}
+	}
+}
+
 func (m *model) openModelPicker() {
 	m.input.Blur()
 	lmsResult := agent.FetchLMStudioModels()
@@ -142,7 +182,7 @@ func (m *model) openThemePicker() {
 	m.showPicker = true
 }
 
-const sessionPickerPageSize = 50
+const sessionPickerPageSize = 20
 
 // formatPickerSession builds the display string for a session ref.
 func formatPickerSession(s session.Ref) string {
@@ -175,10 +215,10 @@ func (m *model) rebuildSessionPickerItems() {
 	m.pickerValues = values
 }
 
-func loadSessionRefsCmd(seq int) tea.Cmd {
+func loadSessionRefsCmd(seq int, limit, offset int) tea.Cmd {
 	return func() tea.Msg {
-		refs, err := session.ListRefs()
-		return sessionRefsLoadedMsg{seq: seq, refs: refs, err: err}
+		refs, total, err := session.ListRefsPaginated(limit, offset)
+		return sessionRefsLoadedMsg{seq: seq, refs: refs, total: total, err: err}
 	}
 }
 
@@ -202,27 +242,44 @@ func (m *model) openSessionPicker() tea.Cmd {
 	m.pickerFilterPending = ""
 	m.showPicker = true
 
-	return loadSessionRefsCmd(seq)
+	// Load first page of sessions (progressive loading)
+	return loadSessionRefsCmd(seq, sessionPickerPageSize, 0)
 }
 
-// loadMoreSessions loads the next page of sessions into the picker items.
-func (m *model) loadMoreSessions() {
+// loadMoreSessions loads the next page of sessions from disk and appends to the picker.
+func (m *model) loadMoreSessions() tea.Cmd {
 	if !m.pickerSessionMore {
-		return
+		return nil
 	}
+	m.pickerSessionLoading = true
+	m.pickerSessionLoadSeq++
+	seq := m.pickerSessionLoadSeq
+	offset := m.pickerSessionPage * sessionPickerPageSize
+	return loadSessionRefsCmd(seq, sessionPickerPageSize, offset)
+}
+
+// appendSessionRefs appends newly loaded session refs and rebuilds picker items.
+func (m *model) appendSessionRefs(newRefs []session.Ref, total int) {
+	m.pickerSessionRefs = append(m.pickerSessionRefs, newRefs...)
+	m.pickerSessionTotal = total
 	m.pickerSessionPage++
 	m.rebuildSessionPickerItems()
-	m.pickerSessionMore = m.pickerSessionPage*sessionPickerPageSize < len(m.pickerSessionRefs)
+	m.pickerSessionMore = len(m.pickerSessionRefs) < m.pickerSessionTotal
 }
 
 // loadAllSessions loads all sessions into the picker (used when filtering).
-func (m *model) loadAllSessions() {
+// Returns a tea.Cmd to fetch all remaining sessions from disk.
+func (m *model) loadAllSessions() tea.Cmd {
 	if !m.pickerSessionMore {
-		return
+		return nil
 	}
-	m.pickerSessionPage = (len(m.pickerSessionRefs) + sessionPickerPageSize - 1) / sessionPickerPageSize
-	m.rebuildSessionPickerItems()
-	m.pickerSessionMore = false
+	m.pickerSessionLoading = true
+	m.pickerSessionLoadSeq++
+	seq := m.pickerSessionLoadSeq
+	offset := len(m.pickerSessionRefs)
+	// Load all remaining sessions in one batch
+	remaining := m.pickerSessionTotal - offset
+	return loadSessionRefsCmd(seq, remaining, offset)
 }
 
 // pickerScrollPercent returns how far through the items the cursor is (0.0 - 1.0).
@@ -500,7 +557,9 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
 	if m.pickerKind == "model" || m.pickerKind == "permission-model" {
-		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · Esc cancel · type to filter")
+		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
+	} else if m.pickerKind == "advisor" {
+		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
 	}
 
 	title := "Select model"

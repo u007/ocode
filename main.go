@@ -47,6 +47,12 @@ func bundledSkillsFS() fs.FS {
 }
 
 func main() {
+	// Check for help flag at top level before any subcommand
+	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
+		printUsage()
+		return
+	}
+
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-version":
@@ -78,7 +84,7 @@ func main() {
 			}
 			return
 		case "acp":
-			if err := acp.Run(); err != nil {
+			if err := acp.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -111,7 +117,7 @@ func main() {
 		skill.SetBundledFS(fsys)
 	}
 
-	opts := tui.RunOptions{}
+	opts := tui.RunOptions{WebFS: webFS()}
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-session":
@@ -143,4 +149,37 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+func printUsage() {
+	fmt.Println("ocode - AI coding agent")
+	fmt.Println()
+	fmt.Println("Usage: ocode [global options] <command> [command options]")
+	fmt.Println()
+	fmt.Println("Global Options:")
+	fmt.Println("  -h, --help       Show this help message")
+	fmt.Println("  --version        Show version information")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  run              Run a prompt non-interactively (headless)")
+	fmt.Println("  serve            Start the HTTP server with web UI")
+	fmt.Println("  web              Start server and open browser (alias for 'serve --open')")
+	fmt.Println("  acp              Run ACP (Agent Communication Protocol) server")
+	fmt.Println("  mcp              Manage MCP (Model Context Protocol) servers")
+	fmt.Println("  models           List available models")
+	fmt.Println("  skills           Manage skills")
+	fmt.Println("  version          Show version information")
+	fmt.Println()
+	fmt.Println("TUI Mode (no command):")
+	fmt.Println("  ocode [options]  Start the interactive TUI")
+	fmt.Println()
+	fmt.Println("TUI Options:")
+	fmt.Println("  -session <id>    Resume a specific session by ID")
+	fmt.Println("  -continue        Continue the most recent session")
+	fmt.Println("  -yolo, --yolo, --dangerously-skip-permissions")
+	fmt.Println("                   Auto-approve all permission prompts")
+	fmt.Println("  --permission-mode <auto|off>")
+	fmt.Println("                   Set permission mode (default: auto)")
+	fmt.Println()
+	fmt.Println("Run 'ocode <command> -h' for command-specific help.")
 }

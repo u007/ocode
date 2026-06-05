@@ -6,6 +6,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -197,4 +198,129 @@ func TestAgentDetailClickTogglesExpandableTranscriptSection(t *testing.T) {
 func setRunTranscriptForTest(run *agent.AgentRun, msgs ...agent.Message) {
 	v := reflect.ValueOf(run).Elem().FieldByName("transcript")
 	reflect.NewAt(v.Type(), unsafe.Pointer(v.UnsafeAddr())).Elem().Set(reflect.ValueOf(msgs))
+}
+
+// TestAgentStripClickOpensDetail verifies the agent preview strip near the
+// bottom of the chat tab is clickable: the screen-Y the click handler derives
+// from agentStripTopY must match where View() actually paints the strip, and a
+// click there must open the run's detail view.
+func TestAgentStripClickOpensDetail(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+	run := a.Runs().New("worker")
+	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "did some work"})
+
+	m := model{
+		ready:       true,
+		width:       120,
+		height:      40,
+		activeTab:   tabChat,
+		input:       newTestTextarea(),
+		styles:      ApplyThemeColors("tokyonight"),
+		scrollSpeed: 3,
+		agent:       a,
+	}
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	m.layout()
+
+	strip, blocks := m.renderAgentStrip()
+	if strip == "" || len(blocks) == 0 {
+		t.Fatalf("expected non-empty agent strip, got strip=%q blocks=%d", strip, len(blocks))
+	}
+
+	// Where the click handler thinks the first run block sits.
+	clickY := m.agentStripTopY() + blocks[0].rowStart
+
+	// Where View() actually paints the run header line.
+	lines := strings.Split(m.renderContent(), "\n")
+	headerY := -1
+	for i, ln := range lines {
+		if strings.Contains(stripANSI(ln), "▸ worker") {
+			headerY = i
+			break
+		}
+	}
+	if headerY < 0 {
+		t.Fatal("could not find run header in rendered content")
+	}
+	if headerY != clickY {
+		t.Fatalf("geometry mismatch: View paints strip header at screen Y=%d but click handler targets Y=%d", headerY, clickY)
+	}
+
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 5, Y: clickY})
+	got := derefTestModel(t, updated)
+	if len(got.detail) == 0 {
+		t.Fatalf("expected click at strip Y=%d to open agent detail, but detail stack is empty", clickY)
+	}
+}
+
+// TestAgentStripClickableAfterStripGrows reproduces the streaming regression:
+// the strip is sized once at layout() time, but a sub-agent run grows it
+// afterwards (the 400ms dotTick that drives the strip never re-runs layout).
+// The grown strip overflows m.height, renderContent's safety net shrinks the
+// transcript viewport and paints the strip higher, while the click handler's
+// agentStripTopY still uses the stale (larger) viewport height — so a click on
+// the visible strip lands above where the handler looks and is swallowed by the
+// transcript-selection handler.
+func TestAgentStripClickableAfterStripGrows(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil)
+
+	m := model{
+		ready:       true,
+		width:       120,
+		height:      24,
+		activeTab:   tabChat,
+		input:       newTestTextarea(),
+		styles:      ApplyThemeColors("tokyonight"),
+		scrollSpeed: 3,
+		agent:       a,
+	}
+	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	// Fill the transcript so the viewport wants the whole screen — any strip
+	// growth then overflows m.height and trips the safety net.
+	var content []string
+	for i := 0; i < 200; i++ {
+		content = append(content, "transcript filler line")
+	}
+	m.transcriptContent = strings.Join(content, "\n")
+	m.viewport.SetContent(m.transcriptContent)
+
+	// One small run present when layout() sizes the viewport.
+	first := a.Runs().New("worker")
+	setRunTranscriptForTest(first, agent.Message{Role: "assistant", Content: "step one"})
+	m.layout()
+
+	// Now several more runs appear (sub-agent fan-out) WITHOUT a re-layout,
+	// growing the strip by several rows — exactly what dotTick does.
+	for i := 0; i < 5; i++ {
+		r := a.Runs().New("worker")
+		setRunTranscriptForTest(r, agent.Message{Role: "assistant", Content: "more work"})
+	}
+
+	_, blocks := m.renderAgentStrip()
+	if len(blocks) == 0 {
+		t.Fatal("expected agent strip blocks after growth")
+	}
+
+	// A real user clicks the row they SEE. Find where View() actually paints the
+	// first run-header line and click there.
+	lines := strings.Split(m.renderContent(), "\n")
+	paintedY := -1
+	for i, ln := range lines {
+		if strings.Contains(stripANSI(ln), "▸ worker") {
+			paintedY = i
+			break
+		}
+	}
+	if paintedY < 0 {
+		t.Fatal("strip not painted in rendered content")
+	}
+
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 5, Y: paintedY})
+	got := derefTestModel(t, updated)
+	if len(got.detail) == 0 {
+		t.Fatalf("strip not clickable after growth: click on the visible strip header (screen Y=%d) "+
+			"did not open detail; handler's agentStripTopY=%d drifted from the painted position "+
+			"because viewport height is stale at %d while the safety net shrank it for paint",
+			paintedY, m.agentStripTopY(), m.viewport.Height())
+	}
 }

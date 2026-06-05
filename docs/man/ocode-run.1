@@ -1,0 +1,84 @@
+.\" Man page for ocode run
+.TH OCODE-RUN 1 "June 2025" "ocode" "User Commands"
+.SH NAME
+ocode-run \- Run a prompt non-interactively (headless mode)
+.SH SYNOPSIS
+.B ocode run
+[\fIoptions\fR] [\fImessage\fR...]
+.SH DESCRIPTION
+Run a prompt non-interactively without starting the TUI. Useful for automation,
+scripting, and CI/CD pipelines.
+.SH OPTIONS
+.TP
+\fB\-prompt\fR, \fB\-p\fR \fI<text>\fR
+Prompt text. Can also be provided as positional arguments.
+.TP
+\fB\-model\fR, \fB\-m\fR \fI<model>\fR
+Model to use (overrides config).
+.TP
+\fB\-agent\fR \fI<name>\fR
+Agent name/mode to use.
+.TP
+\fB\-session\fR, \fB\-s\fR \fI<id>\fR
+Session ID to resume.
+.TP
+\fB\-continue\fR, \fB\-c\fR
+Continue the most recent session.
+.TP
+\fB\-fork\fR
+Fork from the most recent session (creates new session).
+.TP
+\fB\-file\fR, \fB\-f\fR \fI<path>\fR
+File(s) to attach to message (can repeat).
+.TP
+\fB\-format\fR \fI<default|json>\fR
+Output format (default: default).
+.TP
+\fB\-title\fR \fI<text>\fR
+Session title.
+.TP
+\fB\-attach\fR \fI<url>\fR
+Attach to running serve instance URL.
+.TP
+\fB\-port\fR \fI<port>\fR
+Serve port (for \fB\-\-attach\fR).
+.TP
+\fB\-yolo\fR
+Allow tools and shell commands without permission prompts.
+.TP
+\fB\-\-dangerously\-skip\-permissions\fR
+Auto-approve permissions (alias for \fB\-yolo\fR).
+.TP
+\fB\-command\fR \fI<name>\fR
+Slash command to run; positional message used as args.
+.TP
+\fB\-dir\fR \fI<path>\fR
+Directory to run in.
+.TP
+\fB\-username\fR, \fB\-u\fR \fI<name>\fR
+Basic auth username for \fB\-\-attach\fR.
+.TP
+\fB\-password\fR, \fB\-p\fR \fI<pass>\fR
+Basic auth password for \fB\-\-attach\fR.
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show this help message and exit.
+.SH EXAMPLES
+.TP
+Basic usage:
+.B ocode run "How do I read a file in Go?"
+.TP
+With specific model:
+.B ocode run -model gpt-4 -prompt "Write a hello world"
+.TP
+Attach file:
+.B ocode run -file main.go -prompt "Explain this code"
+.TP
+Attach to running server:
+.B ocode run -attach http://localhost:4096 -prompt "Continue session"
+.TP
+JSON output:
+.B ocode run -format json "Write a test"
+.SH SEE ALSO
+.BR ocode (1),
+.BR ocode-serve (1)

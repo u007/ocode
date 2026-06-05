@@ -33,7 +33,15 @@ type sessionState struct {
 	id       string
 }
 
-func Run() error {
+func Run(args []string) error {
+	// Check for help flag
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			printACPUsage()
+			return nil
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -169,4 +177,19 @@ func writeOutput(msg OutputMessage) {
 		return
 	}
 	fmt.Println(string(data))
+}
+
+func printACPUsage() {
+	fmt.Println("Usage: ocode acp [options]")
+	fmt.Println()
+	fmt.Println("Run ACP (Agent Communication Protocol) server over stdio.")
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  -h, --help    Show this help message")
+	fmt.Println()
+	fmt.Println("The ACP server communicates via JSON messages over stdin/stdout.")
+	fmt.Println("It expects messages of type 'message' with 'content' and optional 'sessionId' fields.")
+	fmt.Println()
+	fmt.Println("Example message:")
+	fmt.Println("  {\"type\": \"message\", \"content\": \"Hello\", \"sessionId\": \"abc123\"}")
 }

@@ -1,7 +1,6 @@
 package auth
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,9 +16,12 @@ const (
 	anthropicClientID      = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 	anthropicAuthorizeMax  = "https://claude.ai/oauth/authorize"
 	anthropicAuthorizeCons = "https://platform.claude.com/oauth/authorize"
-	anthropicTokenURL      = "https://platform.claude.com/v1/oauth/token"
 	anthropicRedirectURI   = "https://platform.claude.com/oauth/code/callback"
 )
+
+var anthropicTokenURL = "https://platform.claude.com/v1/oauth/token"
+
+var anthropicHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 var anthropicScopes = []string{
 	"org:create_api_key",
@@ -106,42 +108,35 @@ func ParseAnthropicCallback(input string) (code, state string, ok bool) {
 
 // AnthropicExchange swaps an authorization code for tokens.
 func AnthropicExchange(code, state, verifier string) (Credential, error) {
-	payload := map[string]string{
-		"grant_type":    "authorization_code",
-		"code":          code,
-		"state":         state,
-		"client_id":     anthropicClientID,
-		"redirect_uri":  anthropicRedirectURI,
-		"code_verifier": verifier,
-	}
-	return anthropicTokenRequest(payload)
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("state", state)
+	form.Set("client_id", anthropicClientID)
+	form.Set("redirect_uri", anthropicRedirectURI)
+	form.Set("code_verifier", verifier)
+	return anthropicTokenRequest(form)
 }
 
 // AnthropicRefresh exchanges a refresh token for a fresh access token.
 func AnthropicRefresh(refresh string) (Credential, error) {
-	payload := map[string]string{
-		"grant_type":    "refresh_token",
-		"refresh_token": refresh,
-		"client_id":     anthropicClientID,
-	}
-	return anthropicTokenRequest(payload)
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refresh)
+	form.Set("client_id", anthropicClientID)
+	return anthropicTokenRequest(form)
 }
 
-func anthropicTokenRequest(payload map[string]string) (Credential, error) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return Credential{}, fmt.Errorf("marshal anthropic token payload: %w", err)
-	}
-	req, err := http.NewRequest("POST", anthropicTokenURL, bytes.NewReader(body))
+func anthropicTokenRequest(form url.Values) (Credential, error) {
+	req, err := http.NewRequest("POST", anthropicTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return Credential{}, fmt.Errorf("build anthropic token request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("User-Agent", "ocode/0.1")
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := anthropicHTTPClient.Do(req)
 	if err != nil {
 		return Credential{}, fmt.Errorf("anthropic token request: %w", err)
 	}

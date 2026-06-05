@@ -26,6 +26,14 @@ import (
 )
 
 func Run(args []string) error {
+	// Check for help flag
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			printUsage()
+			return nil
+		}
+	}
+
 	if len(args) == 0 {
 		printUsage()
 		return nil
@@ -57,6 +65,8 @@ func Run(args []string) error {
 func printUsage() {
 	fmt.Println("Usage: ocode mcp <command> [args]")
 	fmt.Println()
+	fmt.Println("Manage MCP (Model Context Protocol) servers.")
+	fmt.Println()
 	fmt.Println("Commands:")
 	fmt.Println("  add <name>       Add an MCP server (interactive wizard)")
 	fmt.Println("  list, ls         List all MCP servers with status")
@@ -64,6 +74,9 @@ func printUsage() {
 	fmt.Println("  auth list        List OAuth-capable servers")
 	fmt.Println("  logout <name>    Clear stored OAuth tokens")
 	fmt.Println("  debug <name>     Diagnose connection issues")
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  -h, --help    Show this help message")
 }
 
 func runAdd(args []string) error {

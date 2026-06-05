@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+
+	"github.com/jamesmercstudio/ocode/internal/agent"
 )
 
 type Server struct {
@@ -43,9 +45,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
 	s.mux.HandleFunc("GET /api/models", s.authMiddleware(s.handleListModels))
+	s.mux.HandleFunc("GET /api/agents/runs", s.authMiddleware(s.handleListRuns))
+	s.mux.HandleFunc("GET /api/agents/runs/stream", s.authMiddleware(s.handleRunsStream))
 	s.mux.HandleFunc("GET /api/git/status", s.authMiddleware(s.handleGitStatus))
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
+	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
 
 	// Session operations
 	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.authMiddleware(s.handleCompactSession))
@@ -67,6 +72,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/small-model", s.authMiddleware(s.handleSetSmallModel))
 	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
 	s.mux.HandleFunc("PUT /api/config/advisor", s.authMiddleware(s.handleSetAdvisor))
+	s.mux.HandleFunc("GET /api/config/advisor-enabled", s.authMiddleware(s.handleGetAdvisorEnabled))
+	s.mux.HandleFunc("PUT /api/config/advisor-enabled", s.authMiddleware(s.handleSetAdvisorEnabled))
 	s.mux.HandleFunc("GET /api/config/agents", s.authMiddleware(s.handleListAgents))
 	s.mux.HandleFunc("PUT /api/config/agent", s.authMiddleware(s.handleSetAgent))
 
@@ -91,6 +98,11 @@ func (s *Server) registerRoutes() {
 
 	// Usage
 	s.mux.HandleFunc("GET /api/usage", s.authMiddleware(s.handleGetUsage))
+
+	// Logs
+	s.mux.HandleFunc("GET /api/logs", s.authMiddleware(s.handleGetLogs))
+	s.mux.HandleFunc("GET /api/logs/stream", s.authMiddleware(s.handleLogStream))
+	s.mux.HandleFunc("DELETE /api/logs", s.authMiddleware(s.handleClearLogs))
 
 	// Info
 	s.mux.HandleFunc("GET /api/skills", s.authMiddleware(s.handleListSkills))
@@ -156,12 +168,41 @@ func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleFileContent(w, r)
 }
 
+func (s *Server) handleOpenFile(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleOpenFile(w, r)
+}
+
 func (s *Server) Start() error {
 	fmt.Fprintf(os.Stderr, "serving on %s\n", s.addr)
 	return http.ListenAndServe(s.addr, s.mux)
 }
 
+// RegisterExternalSession registers an existing TUI session with the web server
+// so the web UI can stream and interact with it. Instead of creating a new agent,
+// the server forwards requests through the rcCh channel to the TUI's Update loop.
+// Returns the bridge so the caller can push messages into it.
+func (s *Server) RegisterExternalSession(sessionID, model string, rcCh chan RCRequest) *RCBridge {
+	s.handler.mu.Lock()
+	defer s.handler.mu.Unlock()
+
+	bridge := &RCBridge{
+		RcCh:      rcCh,
+		SessionID: sessionID,
+		Model:     model,
+	}
+	s.handler.rc = bridge
+	return bridge
+}
+
 func Run(args []string, webFS fs.FS) error {
+	// Check for help flag before parsing
+	for _, arg := range args {
+		if arg == "-h" || arg == "--help" {
+			printServeUsage()
+			return nil
+		}
+	}
+
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", 4096, "Port to listen on")
 	host := fs.String("host", "0.0.0.0", "Host to bind to")
@@ -272,6 +313,12 @@ func (s *Server) handleGetSmallModel(w http.ResponseWriter, r *http.Request) { s
 func (s *Server) handleSetSmallModel(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetSmallModel(w, r) }
 func (s *Server) handleGetAdvisor(w http.ResponseWriter, r *http.Request)    { s.handler.HandleGetAdvisor(w, r) }
 func (s *Server) handleSetAdvisor(w http.ResponseWriter, r *http.Request)    { s.handler.HandleSetAdvisor(w, r) }
+func (s *Server) handleGetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetAdvisorEnabled(w, r)
+}
+func (s *Server) handleSetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAdvisorEnabled(w, r)
+}
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request)    { s.handler.HandleListAgents(w, r) }
 func (s *Server) handleSetAgent(w http.ResponseWriter, r *http.Request)      { s.handler.HandleSetAgent(w, r) }
 
@@ -308,6 +355,15 @@ func (s *Server) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
 
 // Usage shims
 func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetUsage(w, r) }
+
+// Agent run shims
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request)   { s.handler.HandleListRuns(w, r) }
+func (s *Server) handleRunsStream(w http.ResponseWriter, r *http.Request) { s.handler.HandleRunsStream(w, r) }
+
+// Log shims
+func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request)    { s.handler.HandleGetLogs(w, r) }
+func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request)  { s.handler.HandleLogStream(w, r) }
+func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) { s.handler.HandleClearLogs(w, r) }
 
 // Info shims
 func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request)   { s.handler.HandleListSkills(w, r) }
@@ -350,7 +406,35 @@ type SessionInfo struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+type SessionDetail struct {
+	SessionInfo
+	Messages []agent.Message `json:"messages"`
+}
+
 type ModelInfo struct {
 	Name     string `json:"name"`
+	Model    string `json:"model"`
 	Provider string `json:"provider"`
+	Active   bool   `json:"active"`
+}
+
+func printServeUsage() {
+	fmt.Println("Usage: ocode serve [options]")
+	fmt.Println()
+	fmt.Println("Start the HTTP server with web UI.")
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  -port <port>    Port to listen on (default: 4096)")
+	fmt.Println("  -host <host>    Host to bind to (default: 0.0.0.0)")
+	fmt.Println("  -open           Open browser after starting")
+	fmt.Println("  -h, --help      Show this help message")
+	fmt.Println()
+	fmt.Println("Environment Variables:")
+	fmt.Println("  OPENCODE_SERVER_USERNAME    Basic auth username")
+	fmt.Println("  OPENCODE_SERVER_PASSWORD    Basic auth password")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  ocode serve")
+	fmt.Println("  ocode serve -port 8080 -open")
+	fmt.Println("  ocode serve -host 127.0.0.1 -port 3000")
 }

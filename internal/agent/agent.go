@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jamesmercstudio/ocode/internal/config"
@@ -77,6 +78,10 @@ type Agent struct {
 	runs        *AgentRunRegistry
 	stopCh      chan struct{}
 	stopMu      sync.Mutex
+	// advisorEnabled is a runtime gate for the "advisor" tool. It is seeded
+	// from cfg.Ocode.Advisor.Enabled at construction and can be flipped at
+	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.
+	advisorEnabled atomic.Bool
 	jobEvents   chan JobEvent
 	retryEvents chan *RetryStatusEvent
 	// OnMessage, if set, is invoked for each message produced during Step
@@ -303,10 +308,11 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config) *Agent {
 	// "agent" tool retired in favor of "task". AgentTool the type is kept
 	// only so existing transcripts/back-compat permission entries still
 	// resolve. It is no longer registered on new agents.
-	// Register the advisor tool if enabled in config (default: enabled).
-	if cfg == nil || cfg.Ocode.Advisor.Enabled {
-		a.tools["advisor"] = AdvisorTool{cfg: cfg, mainAgent: a}
-	}
+	// Always register the advisor tool; whether it is exposed to the model is
+	// gated at runtime by advisorEnabled (seeded from config, default enabled,
+	// flippable from the web sidebar without touching config).
+	a.tools["advisor"] = AdvisorTool{cfg: cfg, mainAgent: a}
+	a.advisorEnabled.Store(cfg == nil || cfg.Ocode.Advisor.Enabled)
 	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
@@ -1124,6 +1130,9 @@ func (a *Agent) GetTools() []tool.Tool {
 }
 
 func (a *Agent) isToolAllowed(name string) bool {
+	if name == "advisor" && !a.advisorEnabled.Load() {
+		return false
+	}
 	if a.spec != nil && len(a.spec.Tools) > 0 {
 		found := false
 		for _, allowed := range a.spec.Tools {
@@ -1151,6 +1160,13 @@ func (a *Agent) isToolAllowed(name string) bool {
 	}
 	return true
 }
+
+// SetAdvisorEnabled toggles the advisor tool for this agent at runtime. It does
+// not persist to config — the change lives only for the agent's lifetime.
+func (a *Agent) SetAdvisorEnabled(enabled bool) { a.advisorEnabled.Store(enabled) }
+
+// AdvisorEnabled reports whether the advisor tool is currently exposed.
+func (a *Agent) AdvisorEnabled() bool { return a.advisorEnabled.Load() }
 
 func (a *Agent) SetSpec(spec *AgentSpec) {
 	a.spec = spec

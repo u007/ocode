@@ -1,0 +1,37 @@
+.\" Man page for ocode acp
+.TH OCODE-ACP 1 "June 2025" "ocode" "User Commands"
+.SH NAME
+ocode-acp \- Run ACP (Agent Communication Protocol) server over stdio
+.SH SYNOPSIS
+.B ocode acp
+[\fIoptions\fR]
+.SH DESCRIPTION
+Run the Agent Communication Protocol (ACP) server over standard input/output.
+This allows other programs to communicate with ocode via JSON messages.
+.SH OPTIONS
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Show this help message and exit.
+.SH PROTOCOL
+The ACP server communicates via JSON messages over stdin/stdout.
+It expects messages of type "message" with "content" and optional "sessionId" fields.
+
+.TP
+Input message format:
+.B {"type": "message", "content": "Hello", "sessionId": "abc123"}
+.TP
+Output message format:
+.B {"type": "text", "content": "Response...", "sessionId": "abc123"}
+.TP
+Error format:
+.B {"type": "error", "message": "Error description"}
+.SH EXAMPLES
+.TP
+Start ACP server:
+.B ocode acp
+.TP
+Send a message (from another process):
+.B echo '{"type": "message", "content": "Hello"}' | ocode acp
+.SH SEE ALSO
+.BR ocode (1),
+.BR ocode-run (1)

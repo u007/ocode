@@ -87,10 +87,16 @@ func applySelectionHighlight(lines []string, rawLines []string, startLine, start
 	return out
 }
 
-// insertHighlight wraps the bytes [rawStart, rawEnd) of `rendered` (aligned
-// to the corresponding raw text positions) with reverse-video ANSI codes.
-// It pre-computes all ANSI escape positions to avoid O(n²) regex scanning.
+// insertHighlight wraps the bytes [rawStart, rawEnd) of `rendered` with
+// reverse-video ANSI codes (selection highlight).
 func insertHighlight(rendered, raw string, rawStart, rawEnd int) string {
+	return insertSGRSpan(rendered, raw, rawStart, rawEnd, "\x1b[7m", "\x1b[27m")
+}
+
+// insertSGRSpan wraps the bytes [rawStart, rawEnd) of `rendered` (aligned to
+// the corresponding raw text positions) with the given SGR open/close codes.
+// It pre-computes all ANSI escape positions to avoid O(n²) regex scanning.
+func insertSGRSpan(rendered, raw string, rawStart, rawEnd int, openSeq, closeSeq string) string {
 	if rawStart >= rawEnd || rawStart < 0 || rawEnd < 0 {
 		return rendered
 	}
@@ -157,9 +163,9 @@ func insertHighlight(rendered, raw string, rawStart, rawEnd int) string {
 
 	var b strings.Builder
 	b.WriteString(rendered[:renderedStart])
-	b.WriteString("\x1b[7m")
+	b.WriteString(openSeq)
 	b.WriteString(rendered[renderedStart:renderedEnd])
-	b.WriteString("\x1b[27m")
+	b.WriteString(closeSeq)
 	b.WriteString(rendered[renderedEnd:])
 	return b.String()
 }

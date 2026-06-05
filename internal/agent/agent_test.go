@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1579,4 +1580,178 @@ func keysOf[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// withFetchRemoteClient replaces the package-level fetchRemoteClient for the
+// duration of the test, restoring the prior client via t.Cleanup.
+func withFetchRemoteClient(t *testing.T, c *http.Client) {
+	t.Helper()
+	prev := fetchRemoteClient
+	fetchRemoteClient = c
+	t.Cleanup(func() { fetchRemoteClient = prev })
+}
+
+// withFetchRemoteServer wires fetchRemoteClient to a httptest server that
+// redirects every request to the test server's URL. The hardcoded
+// modelsDevURL in fetchRemote is preserved verbatim; only the host is swapped
+// so production behavior is exercised as faithfully as possible.
+func withFetchRemoteServer(t *testing.T, srv *httptest.Server) {
+	t.Helper()
+	withFetchRemoteClient(t, &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			req2 := req.Clone(req.Context())
+			req2.URL.Scheme = "http"
+			req2.URL.Host = srv.Listener.Addr().String()
+			return http.DefaultTransport.RoundTrip(req2)
+		}),
+	})
+}
+
+// withFetchRemoteError wires fetchRemoteClient to fail every request with
+// the given error. Used to simulate offline / DNS / timeout conditions.
+func withFetchRemoteError(t *testing.T, err error) {
+	t.Helper()
+	withFetchRemoteClient(t, &http.Client{
+		Timeout: 1 * time.Second,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, err
+		}),
+	})
+}
+
+func TestForceRefreshRegistrySuccess(t *testing.T) {
+	want := map[string]providerEntry{
+		"openai": {ID: "openai", Models: map[string]modelEntry{
+			"gpt-test": {ID: "gpt-test", Reasoning: true, Limit: modelLimit{Context: 16384}},
+		}},
+		"anthropic": {ID: "anthropic", Models: map[string]modelEntry{
+			"claude-test": {ID: "claude-test", Reasoning: false, Limit: modelLimit{Context: 200000}},
+		}},
+	}
+	body, _ := json.Marshal(want)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	withFetchRemoteServer(t, srv)
+
+	// HOME temp dir so writeCache() lands in a sandboxed path.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home)
+	t.Setenv(envModelsPath, "")
+
+	// Pre-populate with stale data so we can verify it gets replaced.
+	prev := map[string]providerEntry{
+		"stale": {ID: "stale", Models: map[string]modelEntry{
+			"old": {ID: "old"},
+		}},
+	}
+	withRegistryState(t, prev, time.Now().Add(-1*time.Hour))
+
+	got, err := ForceRefreshRegistry()
+	if err != nil {
+		t.Fatalf("ForceRefreshRegistry: unexpected error: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("returned data mismatch:\n got=%#v\nwant=%#v", got, want)
+	}
+
+	// The in-memory cache should now hold the fresh data, with a recent
+	// fetchedAt so the TTL short-circuit in loadRegistry returns it.
+	registry.mu.RLock()
+	data := registry.data
+	fetchedAt := registry.fetchedAt
+	registry.mu.RUnlock()
+	if !reflect.DeepEqual(data, want) {
+		t.Fatalf("registry.data not updated:\n got=%#v\nwant=%#v", data, want)
+	}
+	if time.Since(fetchedAt) > 5*time.Second {
+		t.Fatalf("registry.fetchedAt not refreshed: %v", fetchedAt)
+	}
+
+	// AllProviderModels should now see the fresh data via the TTL hit.
+	ids := AllProviderModels()
+	if len(ids) == 0 {
+		t.Fatal("expected AllProviderModels to return at least one id after refresh")
+	}
+	foundOpenAI, foundAnthropic := false, false
+	for _, id := range ids {
+		if strings.HasPrefix(id, "openai/") {
+			foundOpenAI = true
+		}
+		if strings.HasPrefix(id, "anthropic/") {
+			foundAnthropic = true
+		}
+	}
+	if !foundOpenAI || !foundAnthropic {
+		t.Fatalf("expected fresh openai and anthropic entries in AllProviderModels, got %v", ids)
+	}
+
+	// Disk cache should also be written. On darwin, cachePath joins
+	// $HOME/.config/opencode/models.json.
+	cacheFile := filepath.Join(home, ".config", "opencode", modelsCacheFile)
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("expected disk cache to be written at %s: %v", cacheFile, err)
+	}
+}
+
+func TestForceRefreshRegistryRemoteFailureKeepsExisting(t *testing.T) {
+	// Pre-populate the registry with known data and make fetchRemote fail.
+	prev := map[string]providerEntry{
+		"existing": {ID: "existing", Models: map[string]modelEntry{
+			"keep": {ID: "keep"},
+		}},
+	}
+	withRegistryState(t, prev, time.Now().Add(-1*time.Hour))
+	withFetchRemoteError(t, fmt.Errorf("simulated network down"))
+
+	got, err := ForceRefreshRegistry()
+	if err == nil {
+		t.Fatal("expected error when remote fetch fails")
+	}
+	if !reflect.DeepEqual(got, prev) {
+		t.Fatalf("expected existing data to be returned on failure:\n got=%#v\nwant=%#v", got, prev)
+	}
+
+	// Existing data should still be intact in the registry.
+	registry.mu.RLock()
+	data := registry.data
+	registry.mu.RUnlock()
+	if !reflect.DeepEqual(data, prev) {
+		t.Fatalf("registry.data should be preserved on fetch failure, got %#v", data)
+	}
+}
+
+func TestForceRefreshRegistryRemoteFailureNoExisting(t *testing.T) {
+	withRegistryState(t, nil, time.Time{})
+	withFetchRemoteError(t, fmt.Errorf("simulated network down"))
+
+	got, err := ForceRefreshRegistry()
+	if err == nil {
+		t.Fatal("expected error when remote fetch fails and no existing data")
+	}
+	if got != nil {
+		t.Fatalf("expected nil data when both remote and in-memory cache are empty, got %#v", got)
+	}
+}
+
+func TestForceRefreshRegistryNon200Status(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	withFetchRemoteServer(t, srv)
+
+	withRegistryState(t, nil, time.Time{})
+
+	got, err := ForceRefreshRegistry()
+	if err == nil {
+		t.Fatal("expected error for non-200 status")
+	}
+	if got != nil {
+		t.Fatalf("expected nil data when fetch fails and no existing data, got %#v", got)
+	}
 }

@@ -7,14 +7,25 @@ interface GitStatus {
   has_changes: boolean;
 }
 
+const REFRESH_INTERVAL = 10000; // 10 seconds
+
 export default function GitPanel() {
   const [status, setStatus] = useState<GitStatus | null>(null);
 
+  const fetchStatus = async () => {
+    try {
+      const res = await fetch("/api/git/status");
+      const data = await res.json();
+      setStatus(data);
+    } catch (err) {
+      console.error("Failed to fetch git status:", err);
+    }
+  };
+
   useEffect(() => {
-    fetch("/api/git/status")
-      .then((r) => r.json())
-      .then(setStatus)
-      .catch(console.error);
+    fetchStatus();
+    const interval = setInterval(fetchStatus, REFRESH_INTERVAL);
+    return () => clearInterval(interval);
   }, []);
 
   if (!status) return null;
