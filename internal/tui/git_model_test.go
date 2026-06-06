@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 func TestParseStatus(t *testing.T) {
@@ -46,11 +47,11 @@ func TestPendingActionConfirmation(t *testing.T) {
 		unstagedFiles: []gitFile{{status: "M", path: "a.go"}},
 		stagedFiles:   []gitFile{},
 	}
-	m2, _ := m.handleFilesKey("d")
+	m2, _ := m.handleFilesKey("ctrl+d")
 	if m2.pendingAction != gitPendingDiscard {
 		t.Fatalf("want pendingAction=discard got %q", m2.pendingAction)
 	}
-	m3, _ := m2.handleFilesKey("j")
+	m3, _ := m2.handleFilesKey("ctrl+r")
 	if m3.pendingAction != gitPendingNone {
 		t.Fatalf("want pendingAction cleared, got %q", m3.pendingAction)
 	}
@@ -140,7 +141,7 @@ func TestGitStagePathStartingWithDashUsesPathSeparator(t *testing.T) {
 		filesCursor:    1,
 		selectedFiles:  map[int]bool{1: true},
 	}
-	m, _ = m.handleFilesKey("s")
+	m, _ = m.handleFilesKey("ctrl+s")
 
 	staged := gitOutputForTest(t, dir, "diff", "--cached", "--name-only")
 	if staged != "--all" {
@@ -162,7 +163,7 @@ func TestGitUnstagePathStartingWithDashUsesPathSeparator(t *testing.T) {
 		filesCursor:   0,
 		selectedFiles: map[int]bool{0: true},
 	}
-	m, _ = m.handleFilesKey("u")
+	m, _ = m.handleFilesKey("ctrl+u")
 
 	staged := gitOutputForTest(t, dir, "diff", "--cached", "--name-only")
 	if staged != "other.txt" {
@@ -180,7 +181,7 @@ func TestGitIgnoreSelectedFileAppendsToGitignore(t *testing.T) {
 		panel:          gitPanelFiles,
 		untrackedFiles: []gitFile{{status: "?", path: "tmp.log"}},
 	}
-	got, _ := m.handleFilesKey("i")
+	got, _ := m.handleFilesKey("ctrl+l")
 
 	content, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
 	if err != nil {
@@ -198,7 +199,7 @@ func TestGitIgnoreCustomPathPromptAppendsToGitignore(t *testing.T) {
 	dir := initGitRepoForPathSeparatorTest(t)
 	m := gitModel{workDir: dir, section: gitSectionChanges, panel: gitPanelFiles}
 
-	m, _ = m.handleFilesKey("I")
+	m, _ = m.handleFilesKey("ctrl+_")
 	if !m.ignorePathInputMode {
 		t.Fatal("expected ignore path prompt to open")
 	}
@@ -225,11 +226,11 @@ func TestGitRefreshShortcutReloadsState(t *testing.T) {
 	gitRunForTest(t, dir, "add", "--", "new.txt")
 
 	m := gitModel{workDir: dir, section: gitSectionChanges, panel: gitPanelFiles}
-	if got := m.renderHints(); !strings.Contains(got, "r refresh") {
+	if got := m.renderHints(); !strings.Contains(got, "ctrl+r refresh") {
 		t.Fatalf("expected refresh shortcut in hints, got %q", got)
 	}
 
-	m, cmd := m.handleKey(tea.KeyPressMsg{Code: 'r', Text: "r"}, 100, 30)
+	m, cmd := m.handleKey(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl}, 100, 30)
 	if cmd == nil {
 		t.Fatal("expected refresh shortcut to return a command")
 	}
@@ -241,6 +242,22 @@ func TestGitRefreshShortcutReloadsState(t *testing.T) {
 	m, _ = m.Update(refresh, 100, 30)
 	if len(m.stagedFiles) != 1 || m.stagedFiles[0].path != "new.txt" {
 		t.Fatalf("expected refreshed staged files to include new.txt, got staged=%+v unstaged=%+v", m.stagedFiles, m.unstagedFiles)
+	}
+}
+
+func TestGitViewStatusBarStaysOneLine(t *testing.T) {
+	m := gitModel{
+		section:       gitSectionChanges,
+		panel:         gitPanelFiles,
+		filterActive:  true,
+		filterQuery:   strings.Repeat("very-long-filter-query-", 4),
+		stagedFiles:   []gitFile{{status: "M", path: "staged.go"}},
+		unstagedFiles: []gitFile{{status: "M", path: "unstaged.go"}},
+	}
+
+	view := m.View(42, 18, ApplyThemeColors("tokyonight"), false, false)
+	if got := lipgloss.Height(view); got > 18 {
+		t.Fatalf("expected git view to stay within 18 rows, got %d rows:\n%s", got, view)
 	}
 }
 

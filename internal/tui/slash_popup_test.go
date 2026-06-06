@@ -227,11 +227,14 @@ func TestSlashPopupEnterRunsExactCommand(t *testing.T) {
 	if got.showSlashPopup {
 		t.Fatal("expected popup closed after exact command runs")
 	}
-	if len(got.messages) != 2 {
-		t.Fatalf("expected compact command to run, got %d messages", len(got.messages))
+	if len(got.messages) != 3 {
+		t.Fatalf("expected compact command transcript plus error, got %d messages", len(got.messages))
 	}
-	if !strings.Contains(got.messages[1].text, "Compaction requires an LLM connection") {
-		t.Fatalf("expected no-connection guidance, got %q", got.messages[1].text)
+	if got.messages[1].role != roleUser || got.messages[1].text != "/compact" {
+		t.Fatalf("expected compact command to be recorded in transcript, got %#v", got.messages[1])
+	}
+	if !strings.Contains(got.messages[2].text, "Compaction requires an LLM connection") {
+		t.Fatalf("expected no-connection guidance, got %q", got.messages[2].text)
 	}
 }
 

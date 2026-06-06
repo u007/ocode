@@ -2,6 +2,34 @@
 
 ## [Unreleased]
 
+### Added
+- **Manual /compact Re-Compaction** — When manual `/compact` finds no new content after the previous summary, it now re-compacts the summary itself instead of skipping, ensuring the command always produces a result.
+- **Few-Turn Session Compaction** — Sessions with few user turns that exhaust the `KeepRecentTurns` budget now retry with `KeepRecentTurns=1`, leaving no "nothing to compact" gap.
+- **Resumed Session Compaction Fix** — `findPrefixEnd` now stops before compaction summary markers, preventing resumed sessions with multiple base prompts from absorbing the summary into the prefix.
+- **LSP Server Status API** — New `ServerStartedEvent`, `ActiveServers()`, and `SetEventChan()` in `internal/lsp/manager.go` for TUI sidebar LSP state wiring. New `lsp.ServerForExt` lookup.
+- **Debug Kind LSP** — New `debuglog.KindLSP` entry kind for language server diagnostic and lifecycle events.
+- **TUI LSP Event Listener** — TUI model now receives `lspServerStartedMsg` and `lspIndexingDoneMsg`, tracks per-server indexing state, and logs diagnostic summaries (errors/warnings per file) to the debug log. Sidebar render cache includes `lspStateSeq` to refresh on LSP state changes.
+- **LSP Manager Tests** — New `internal/lsp/manager_test.go` with test coverage.
+- **Advisor Config Persistence** — New `config.SaveAdvisorEnabled()` function to persist the advisor toggle to config.
+- **Theme Picker Live Preview** — Theme picker now previews the selected theme as the user types in the filter field.
+- **LSP Status Sidebar Plan & Spec** — New `docs/superpowers/plans/2026-06-07-lsp-status-sidebar.md` and `docs/superpowers/specs/2026-06-07-lsp-status-sidebar-design.md`.
+- **README Slash Commands** — Comprehensive slash command reference added to `README.md` with palette rendering, command table, headless examples, and `/recap` status.
+- **Slash Command Usage Skill** — Section 9 of `skills/ocode-usage/SKILL.md` updated with the full slash command documentation.
+
+### Changed
+- **Files Tab Keyboard Shortcuts** — Migrated from single-letter keys to Ctrl+letter combos across the file tree and preview panels to avoid terminal input conflicts. `j/k` → `up/down`, `e` → `ctrl+e`, `E` → `ctrl+v`, `n` → `ctrl+n`, `N` → `ctrl+b`, `r` → `ctrl+r`, `D` → `ctrl+d`, `i` → `ctrl+l`, `y` → `ctrl+y`, `o` → `ctrl+o`, `R` → `ctrl+t`, `/` → `ctrl+g` (fuzzy), `ctrl+f`/`/f` → `ctrl+f` (content search). In-file search `n`/`p` → `ctrl+n`/`ctrl+p`.
+- **Git Tab Keyboard Shortcuts** — Same Ctrl+letter migration across changes, log, stash, and branches sections. `r` → `ctrl+r`, `/` → `ctrl+f`, `s` → `ctrl+s`, `u` → `ctrl+u`, `d` → `ctrl+d`, `c` → `ctrl+\\`, `a` → `ctrl+a`, `i` → `ctrl+l`, `I` → `ctrl+_`, `f` → `ctrl+g`, `p` → `ctrl+p`, `P` → `ctrl+o`, `n` → `ctrl+n`, `x` → `ctrl+x`, `S` → `ctrl+z`, `E` → `ctrl+e`.
+- **Root Model Add-to-Context Key** — `a` key binding changed to `ctrl+a` for consistency.
+- **Files Tab Preview Layout Safety** — Hint, header, status, and prompt lines now clamped with `.Width(w).MaxHeight(1)` to prevent text wrapping from pushing bottom chrome off-screen.
+- **Git Tab Preview Layout Safety** — Same MaxHeight(1) clamping applied to hint lines.
+- **Files Tab Content Search Layout Safety** — Query, extension, ignore-toggle, and hint lines clamped with MaxHeight(1).
+- **LSP Manager Lock Contention** — `ClientForExt` now releases the mutex before long-running operations (PATH lookup, client initialize), preventing TUI stalls during LSP startup.
+- **Editor Process Group Removal** — Removed `Setpgid`/`OwnsProcessGroup` for external editor subprocesses, simplifying lifecycle management in containers and CI.
+- **Slash Commands Recorded in Transcript** — Slash commands (e.g. `/sidebar`, `/theme`, `/editor-mode`) are now recorded as transcript messages with `skipLLM=true`, so they appear in session history but are not sent to the LLM or used for title generation.
+- **Recap Result Integration** — Recap result is now added to the message list as an assistant message instead of being held as ephemeral `recapText`.
+- **Compact Result Scroll** — Manual `/compact` now scrolls the transcript to the compaction banner; auto-compact scrolls to bottom.
+- **Compact Banner Scroll** — Compaction result viewport scrolling updated to target the compaction banner specifically.
+
 ### Fixed
 - **VS Code IDE Client Keepalive** — `notifications/initialized` now omits empty
   params, matching the Claude Code VS Code extension's expected payload shape and

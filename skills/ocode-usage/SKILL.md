@@ -358,24 +358,65 @@ ocode run -attach http://server:4096 -prompt "Continue work"
 
 ---
 
-## 9. Slash Commands (TUI & Run Mode)
+## 9. Slash Commands (TUI & Web UI & Run Mode)
 
-| Command | Description |
-|---------|-------------|
-| `/explain` | Explain code |
-| `/refactor` | Refactor code |
-| `/test` | Generate tests |
-| `/review` | Code review |
-| `/fix` | Auto-fix issues |
-| `/lint` | Lint code |
-| `/git` | Git operations |
-| `/files` | File operations |
-| `/ide` | Connect to VS Code (Claude Code ext) for live file/selection context |
-| `/help` | Show all commands |
+Type `/` in the chat input to open the slash command palette with autocomplete (↑/↓, Enter, Esc).
 
-In TUI: Type `/` to see autocomplete.
+### What the Palette Looks Like
 
-In run mode: `ocode run -command explain -file main.go`
+```
+┌─────────────────────────────────────────────────────────────┐
+│  /  █                                                       │
+├─────────────────────────────────────────────────────────────┤
+│  🗑️  /clear         Clear conversation history              │
+│  ⚙️  /model         Open model selector                     │
+│  📦  /compact       Compact conversation context            │
+│  📄  /recap         Generate session recap                  │
+│  ⬇️  /export        Export session as JSON                 │
+│  🔗  /share         Share session link                      │
+│  ❓  /help          Show available commands                 │
+└─────────────────────────────────────────────────────────────┘
+  ↑/↓ navigate  Enter select  Esc cancel
+```
+
+| Command | Aliases | When to Use | Notes |
+|---------|---------|-------------|-------|
+| `/clear` | | Start a fresh conversation context in the current session | Keeps session history on disk; only clears in-memory messages |
+| `/compact` | | Manually trigger context compaction when approaching token limits | Uses the configured summary model (default: active model) |
+| `/recap` | | Generate a structured session recap (Goal, Progress, Decisions, Next Steps, Files) | **Web UI only** — backend endpoint planned but not yet implemented. In TUI, acts as a normal prompt. |
+| `/export` | | Export the full session as JSON (messages, metadata, token usage) | Output includes full transcript for backup or migration |
+| `/export-claude` | | Export session in Claude Code compatible format | For importing into Claude Code |
+| `/share` | | Generate a shareable link to the current session | Requires `ocode serve` running; creates a session URL |
+| `/model` | `/m` | Open the model picker to switch LLM providers/models | Shows recent/favorite models first; fuzzy search supported |
+| `/session` | `/s` | Switch or resume a different session | Lists recent sessions with preview |
+| `/config` | | Open configuration editor (TUI) | Edit compact, permissions, editor settings |
+| `/help` | `/?` | Show this help / available commands | |
+
+### Command Palette (`Ctrl+P`)
+
+| Palette | Trigger | Description |
+|---------|---------|-------------|
+| **Slash Commands** | `/` in chat input | Filter and execute slash commands with icons/descriptions |
+| **Command Palette** | `Ctrl+P` | Fuzzy-search all commands, sessions, models, files, git actions |
+
+### Headless Mode (`ocode run`)
+
+```bash
+# Run a slash command non-interactively
+ocode run -command compact
+ocode run -command export -session abc123
+ocode run -command recap        # Not yet implemented in headless
+```
+
+### Status of `/recap`
+
+| Interface | Status |
+|-----------|--------|
+| **Web UI** | Frontend implemented (`/recap` in palette), backend endpoint **planned** |
+| **TUI** | Accepts `/recap` as input but treats it as a normal prompt (no special handling) |
+| **Headless** | `-command recap` not yet wired |
+
+The backend implementation is tracked in [the serve full-API plan](docs/superpowers/plans/2026-06-02-serve-cmd-full-api.md). When implemented, it will generate a structured recap using the small/summary model.
 
 ---
 

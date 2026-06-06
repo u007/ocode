@@ -598,7 +598,7 @@ func TestFilesInlineVimEditWriteQuit(t *testing.T) {
 		m.applyPreview(result)
 	}
 
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}, 100, 30)
 	if m.mode != filesModeEdit {
 		t.Fatalf("expected edit mode, got %v", m.mode)
 	}
@@ -638,7 +638,7 @@ func TestFilesInlineVimQuitRefusesDirtyBuffer(t *testing.T) {
 	if result, ok := loadPreviewCmd(m.nodes[0])().(filesPreviewMsg); ok {
 		m.applyPreview(result)
 	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}, 100, 30)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'a'}, 100, 30)
 	m, _ = m.Update(tea.KeyPressMsg{Code: '!', Text: "!"}, 100, 30)
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc}, 100, 30)
@@ -689,7 +689,7 @@ func TestFilesInlineVimViewAndHints(t *testing.T) {
 		t.Fatalf("expected vim edit hint, got:\n%s", view)
 	}
 
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}, 100, 30)
 	view = m.View(100, 30, ApplyThemeColors("tokyonight"), false, false)
 	for _, want := range []string{"hello", "-- NORMAL --", ":w save"} {
 		if !strings.Contains(view, want) {
@@ -709,7 +709,7 @@ func TestFilesInlineVimRefusesDirectoryAndNonEditablePreview(t *testing.T) {
 		m.applyPreview(result)
 	}
 
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}, 100, 30)
 	if m.mode == filesModeEdit {
 		t.Fatal("expected directory edit to be refused")
 	}
@@ -726,7 +726,7 @@ func TestFilesInlineVimRefusesDirectoryAndNonEditablePreview(t *testing.T) {
 	if result, ok := loadPreviewCmd(m.nodes[m.cursor])().(filesPreviewMsg); ok {
 		m.applyPreview(result)
 	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}, 100, 30)
 	if m.mode == filesModeEdit {
 		t.Fatal("expected binary edit to be refused")
 	}
@@ -746,7 +746,7 @@ func TestFilesInlineVimSaveRefusesDiskChange(t *testing.T) {
 	if result, ok := loadPreviewCmd(m.nodes[0])().(filesPreviewMsg); ok {
 		m.applyPreview(result)
 	}
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'i'}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'l', Mod: tea.ModCtrl}, 100, 30)
 	m, _ = m.Update(tea.KeyPressMsg{Code: 'a'}, 100, 30)
 	m, _ = m.Update(tea.KeyPressMsg{Code: '!', Text: "!"}, 100, 30)
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc}, 100, 30)
@@ -814,7 +814,7 @@ func TestFilesInFileSearch(t *testing.T) {
 	m.panel = filesPanelPreview
 
 	// Press / to start search
-	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl, Text: ""}, 100, 30)
 	if m.mode != filesModeInFileSearch {
 		t.Fatalf("expected filesModeInFileSearch, got %v", m.mode)
 	}
@@ -834,7 +834,7 @@ func TestFilesInFileSearch(t *testing.T) {
 	}
 
 	// Press n to navigate to next match
-	m, _ = m.Update(tea.KeyPressMsg{Code: 'n', Text: "n"}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'n', Mod: tea.ModCtrl, Text: ""}, 100, 30)
 
 	// Press esc to cancel search
 	m, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc}, 100, 30)
@@ -862,7 +862,7 @@ func TestFilesInFileSearchBackspace(t *testing.T) {
 	m.panel = filesPanelPreview
 
 	// Start search and type a query
-	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl, Text: ""}, 100, 30)
 	for _, ch := range "hello" {
 		m, _ = m.Update(tea.KeyPressMsg{Code: ch, Text: string(ch)}, 100, 30)
 	}
@@ -896,7 +896,7 @@ func TestFilesInFileSearchEnterConfirms(t *testing.T) {
 	m.panel = filesPanelPreview
 
 	// Start search
-	m, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"}, 100, 30)
+	m, _ = m.Update(tea.KeyPressMsg{Code: 'f', Mod: tea.ModCtrl, Text: ""}, 100, 30)
 	for _, ch := range "test" {
 		m, _ = m.Update(tea.KeyPressMsg{Code: ch, Text: string(ch)}, 100, 30)
 	}
@@ -908,6 +908,23 @@ func TestFilesInFileSearchEnterConfirms(t *testing.T) {
 	}
 	if m.inFileSearchActive {
 		t.Fatal("expected inFileSearchActive to be false after enter")
+	}
+}
+
+func TestFilesContentSearchViewStaysWithinHeight(t *testing.T) {
+	m := filesModel{
+		mode:                        filesModeContentSearch,
+		contentSearchQuery:          strings.Repeat("very-long-query-", 4),
+		contentSearchExts:           strings.Repeat("*.go,", 8),
+		contentSearchPanel:          filesContentSearchExtFilter,
+		contentSearchDone:           true,
+		contentSearchResults:        []filesContentSearchResult{{path: "pkg/main.go", relPath: "pkg/main.go", line: 12, text: strings.Repeat("result text ", 8)}},
+		contentSearchIncludeIgnored: true,
+	}
+
+	view := m.contentView(40, 18, ApplyThemeColors("tokyonight"))
+	if got := lipgloss.Height(view); got > 18 {
+		t.Fatalf("expected content search view to stay within 18 rows, got %d rows:\n%s", got, view)
 	}
 }
 

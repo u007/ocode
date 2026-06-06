@@ -289,7 +289,7 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 		} else if len(m.contentSearchResults) == 0 {
 			m.statusMsg = "no results found"
 		} else {
-			m.statusMsg = fmt.Sprintf("%d results found — j/k navigate  enter open", len(m.contentSearchResults))
+			m.statusMsg = fmt.Sprintf("%d results found — ctrl+n/ctrl+p navigate  enter open", len(m.contentSearchResults))
 		}
 		return m, nil
 	case tea.KeyPressMsg:
@@ -325,7 +325,7 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.Cmd) {
 	key := msg.String()
 	switch key {
-	case "j", "down":
+	case "down":
 		if m.cursor < len(m.nodes)-1 {
 			m.cursor++
 			// Reset horizontal scroll when cursor moves
@@ -334,7 +334,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 				return m, loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
-	case "k", "up":
+	case "up":
 		if m.cursor > 0 {
 			m.cursor--
 			// Reset horizontal scroll when cursor moves
@@ -366,7 +366,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 				m.selectedFiles[m.cursor] = true
 			}
 		}
-	case "e":
+	case "ctrl+e":
 		if m.cursor >= 0 && m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			return m, m.openInEditor(m.nodes[m.cursor].path)
 		}
@@ -402,36 +402,36 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 	case "right":
 		m.treeScrollX += 5
 
-	case "E", "shift+e":
+	case "ctrl+v":
 		if m.cursor >= 0 && m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			m.openEditorPicker(m.nodes[m.cursor].path)
 		}
-	case "n":
+	case "ctrl+n":
 		m.startCreateFile()
-	case "N", "shift+n":
+	case "ctrl+b":
 		m.startCreateDir()
-	case "r":
+	case "ctrl+r":
 		m.startRename()
-	case "D", "shift+d":
+	case "ctrl+d":
 		m.startDelete()
-	case "i":
+	case "ctrl+l":
 		return m.startInlineEdit()
-	case "y":
+	case "ctrl+y":
 		m.copySelectedPath()
-	case "o":
+	case "ctrl+o":
 		if m.cursor >= 0 && m.cursor < len(m.nodes) {
 			return m, openInFileExplorer(m.nodes[m.cursor].path)
 		}
-	case "R", "shift+r":
+	case "ctrl+t":
 		return m, m.refreshPreviewCmd()
-	case "/":
+	case "ctrl+g":
 		m.mode = filesModeFuzzy
 		m.fuzzyQuery = ""
 		m.fuzzyResults = nil
 		m.fuzzyCursor = 0
 		m.buildAllPaths()
 		m.statusMsg = ""
-	case "ctrl+f", "/f":
+	case "ctrl+f":
 		m.mode = filesModeContentSearch
 		m.contentSearchQuery = ""
 		m.contentSearchExts = ""
@@ -458,26 +458,26 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 
 func (m filesModel) updatePreview(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	switch msg.String() {
-	case "j", "down":
+	case "down":
 		m.preview.ScrollDown(1)
-	case "k", "up":
+	case "up":
 		m.preview.ScrollUp(1)
 	case "tab":
 		m.panel = (m.panel + 1) % 2
-	case "e":
+	case "ctrl+e":
 		if m.cursor >= 0 && m.cursor < len(m.nodes) && !m.nodes[m.cursor].isDir {
 			return m, m.openInEditor(m.nodes[m.cursor].path)
 		}
-	case "i":
+	case "ctrl+l":
 		return m.startInlineEdit()
-	case "/":
+	case "ctrl+f":
 		m.mode = filesModeInFileSearch
 		m.inFileSearchQuery = ""
 		m.inFileSearchMatches = nil
 		m.inFileSearchCursor = 0
 		m.inFileSearchActive = true
 		m.preview.ClearHighlights()
-		m.statusMsg = "/ (type to search, n/p navigate, esc cancel)"
+		m.statusMsg = "ctrl+f (type to search, ctrl+n/ctrl+p navigate, esc cancel)"
 	}
 	return m, nil
 }
@@ -495,36 +495,16 @@ func (m filesModel) updateInFileSearch(msg tea.KeyPressMsg) (filesModel, tea.Cmd
 		m.inFileSearchActive = false
 		m.statusMsg = ""
 		return m, nil
-	case "n":
-		// Only navigate if there are matches; otherwise treat as input
+	case "ctrl+n":
+		// Only navigate if there are matches; otherwise do nothing.
 		if len(m.inFileSearchMatches) > 0 {
 			m.preview.HighlightNext()
-			return m, nil
-		}
-		// Fall through to default to add 'n' to query
-		m.inFileSearchQuery += msg.String()
-		m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
-		m.applyInFileSearchHighlights()
-		if len(m.inFileSearchMatches) > 0 {
-			m.statusMsg = fmt.Sprintf("/%s (%d matches, n/p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
-		} else {
-			m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
 		}
 		return m, nil
-	case "p":
-		// Only navigate if there are matches; otherwise treat as input
+	case "ctrl+p":
+		// Only navigate if there are matches; otherwise do nothing.
 		if len(m.inFileSearchMatches) > 0 {
 			m.preview.HighlightPrevious()
-			return m, nil
-		}
-		// Fall through to default to add 'p' to query
-		m.inFileSearchQuery += msg.String()
-		m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
-		m.applyInFileSearchHighlights()
-		if len(m.inFileSearchMatches) > 0 {
-			m.statusMsg = fmt.Sprintf("/%s (%d matches, n/p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
-		} else {
-			m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
 		}
 		return m, nil
 	case "backspace", "\x7f":
@@ -533,7 +513,7 @@ func (m filesModel) updateInFileSearch(msg tea.KeyPressMsg) (filesModel, tea.Cmd
 			m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
 			m.applyInFileSearchHighlights()
 			if len(m.inFileSearchMatches) > 0 {
-				m.statusMsg = fmt.Sprintf("/%s (%d matches, n/p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
+				m.statusMsg = fmt.Sprintf("/%s (%d matches, ctrl+n/ctrl+p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
 			} else {
 				m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
 			}
@@ -546,7 +526,7 @@ func (m filesModel) updateInFileSearch(msg tea.KeyPressMsg) (filesModel, tea.Cmd
 			m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
 			m.applyInFileSearchHighlights()
 			if len(m.inFileSearchMatches) > 0 {
-				m.statusMsg = fmt.Sprintf("/%s (%d matches, n/p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
+				m.statusMsg = fmt.Sprintf("/%s (%d matches, ctrl+n/ctrl+p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
 			} else {
 				m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
 			}
@@ -802,11 +782,11 @@ func (m filesModel) updateFuzzy(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 		m.fuzzyQuery = ""
 		m.fuzzyResults = nil
 		m.statusMsg = ""
-	case "down", "j":
+	case "down":
 		if m.fuzzyCursor < len(m.fuzzyResults)-1 {
 			m.fuzzyCursor++
 		}
-	case "up", "k":
+	case "up":
 		if m.fuzzyCursor > 0 {
 			m.fuzzyCursor--
 		}
@@ -1559,25 +1539,29 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		previewBody = m.inlineEditor.view(previewW-7, h-5)
 	}
 	previewContent := lipgloss.JoinHorizontal(lipgloss.Top, previewBody, previewSB)
+	contentWidth := previewW - 4
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
 	if header := m.previewHeader(); header != "" {
-		previewContent = styles.Hint.Render(header) + "\n" + previewContent
+		previewContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render(header)) + "\n" + previewContent
 	}
 	if m.mode == filesModeNormal && m.previewEditable {
 		hint := "tab jump  i vim edit  e external  E choose editor  a add to context  / search  /editor set default"
 		if isTmuxMode(m.editorMode) {
 			hint = "tab jump  i vim edit  e " + m.tmuxOpenHint() + "  E choose editor  a add to context  / search  /editor set default"
 		}
-		previewContent = styles.Hint.Render(hint) + "\n" + previewContent
+		previewContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render(hint)) + "\n" + previewContent
 	}
 	if m.mode == filesModeEdit {
-		previewContent = styles.Hint.Render("vim edit: i/a insert  esc normal  :w save  :q quit  :q! discard  :wq save+quit") + "\n" + previewContent
+		previewContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render("vim edit: i/a insert  esc normal  :w save  :q quit  :q! discard  :wq save+quit")) + "\n" + previewContent
 	}
 	if m.choosingEditor {
 		previewContent = m.editorPickerView(previewW-4, styles)
 	} else if m.mode == filesModePrompt {
-		promptContent := styles.Hint.Render(m.statusMsg)
+		promptContent := lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render(m.statusMsg))
 		if m.promptConfirm {
-			promptContent = styles.Error.Render("⚠ "+m.statusMsg) + "\n" + styles.Hint.Render("press enter again to confirm, esc to cancel")
+			promptContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Error.Render("⚠ "+m.statusMsg)) + "\n" + lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render("press enter again to confirm, esc to cancel"))
 		}
 		previewContent = promptContent + "\n" + m.promptInput.View()
 	} else if m.mode == filesModeDeleteConfirm {
@@ -1597,14 +1581,14 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 			}
 			deleteLines = append(deleteLines, styles.Error.Render("  "+name))
 		}
-		deleteLines = append(deleteLines, "", styles.Hint.Render("press y to confirm, esc/n to cancel"))
+		deleteLines = append(deleteLines, "", lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render("press y to confirm, esc/n to cancel")))
 		previewContent = strings.Join(deleteLines, "\n")
 	} else if m.mode == filesModeContentSearch {
 		previewContent = m.contentView(previewW-4, h, styles)
 	} else if m.statusMsg != "" {
-		previewContent = styles.Hint.Render(m.statusMsg) + "\n\n" + previewContent
+		previewContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render(m.statusMsg)) + "\n\n" + previewContent
 	} else if m.editor != "" {
-		previewContent = styles.Hint.Render("editor: "+m.editor+"  (E to change)") + "\n\n" + previewContent
+		previewContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render("editor: "+m.editor+"  (E to change)")) + "\n\n" + previewContent
 	}
 	previewPane := focusBorder(m.panel == filesPanelPreview).Width(previewW - 2).Render(previewContent)
 
@@ -1627,7 +1611,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 
 	// Bottom status bar with keybindings (matching renderStatus in model.go)
 	statusStr := hintStyle.Width(w - 2).MaxHeight(1).Render(
-		"ctrl+f search  / fuzzy find  space select  ^h hidden  tab jump  i edit  o open  n/N new  r rename  D delete  y path  E editor",
+		"ctrl+f search  ctrl+g fuzzy find  space select  ctrl+h hidden  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
 	)
 	parts := []string{renderedHeader, row, statusStr}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)

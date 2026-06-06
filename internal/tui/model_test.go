@@ -22,6 +22,7 @@ import (
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/ide"
+	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
@@ -307,6 +308,49 @@ func TestHandleCommandSlashDispatchRejectsHiddenHelper(t *testing.T) {
 	last := got.messages[len(got.messages)-1].text
 	if !strings.Contains(last, "/compaction") {
 		t.Fatalf("expected rejection message to mention /compaction, got %q", last)
+	}
+}
+
+func TestSlashCommandIsRecordedButSkippedFromLLMAndTitle(t *testing.T) {
+	m := model{input: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+
+	updated, cmd := m.handleCommand("/sidebar")
+	if cmd != nil {
+		t.Fatalf("expected /sidebar to return no command, got %T", cmd)
+	}
+
+	got := updated.(*model)
+	if len(got.messages) != 1 {
+		t.Fatalf("expected one transcript message, got %d", len(got.messages))
+	}
+	if got.messages[0].role != roleUser || got.messages[0].text != "/sidebar" {
+		t.Fatalf("expected transcript to record /sidebar, got %#v", got.messages[0])
+	}
+
+	if msgs := got.persistedAgentMessages(); len(msgs) != 1 || msgs[0].Content != "/sidebar" {
+		t.Fatalf("expected persisted history to include /sidebar, got %#v", msgs)
+	}
+
+	if snap, _ := got.buildAgentMessagesSnapshot(); len(snap) != 0 {
+		t.Fatalf("expected slash command to stay out of llm snapshot, got %#v", snap)
+	}
+
+	if got.lastUserMessageText() != "" {
+		t.Fatalf("expected last user message text to ignore slash commands, got %q", got.lastUserMessageText())
+	}
+	if got.firstUserPromptText() != "" {
+		t.Fatalf("expected first user prompt text to ignore slash commands, got %q", got.firstUserPromptText())
+	}
+
+	got.messages = append(got.messages, message{role: roleUser, text: "real request"})
+	if got.lastUserMessageText() != "real request" {
+		t.Fatalf("expected last user message to return the real request, got %q", got.lastUserMessageText())
+	}
+	if got.firstUserPromptText() != "real request" {
+		t.Fatalf("expected first user prompt text to return the real request, got %q", got.firstUserPromptText())
+	}
+	if snap, _ := got.buildAgentMessagesSnapshot(); len(snap) != 1 || snap[0].Content != "real request" {
+		t.Fatalf("expected llm snapshot to include only the real request, got %#v", snap)
 	}
 }
 
@@ -5118,13 +5162,167 @@ func TestRecapFinishedMsgIgnoresStaleGeneration(t *testing.T) {
 
 	updated, _ := m.Update(recapFinishedMsg{gen: 1, text: "stale recap"})
 	got := derefTestModel(t, updated)
+	// Stale generation: should be completely ignored
 	if got.recapText != "current recap" {
-		t.Fatalf("stale recap should be ignored, got %q", got.recapText)
+		t.Fatalf("stale recap should be ignored, recapText unchanged, got %q", got.recapText)
+	}
+	if len(got.messages) != 0 {
+		t.Fatalf("stale recap should not add any messages, got %d", len(got.messages))
 	}
 
 	updated, _ = got.Update(recapFinishedMsg{gen: 2, text: "fresh recap"})
 	got = derefTestModel(t, updated)
-	if got.recapText != "fresh recap" {
-		t.Fatalf("matching recap generation should update text, got %q", got.recapText)
+	// Fresh generation: recapText should be cleared and message added to messages
+	if got.recapText != "" {
+		t.Fatalf("recapText should be cleared, got %q", got.recapText)
+	}
+	if len(got.messages) == 0 {
+		t.Fatal("expected a recap message to be added to messages")
+	}
+	lastMsg := got.messages[len(got.messages)-1]
+	if lastMsg.role != roleAssistant || !strings.Contains(lastMsg.text, "fresh recap") {
+		t.Fatalf("expected assistant message containing 'fresh recap', got role=%d text=%q", lastMsg.role, lastMsg.text)
+	}
+}
+
+func TestCompactionSummaryRendersInTranscript(t *testing.T) {
+	// Set up model with some messages that will be "compacted"
+	m := model{
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		styles:   ApplyThemeColors("tokyonight"),
+		messages: []message{
+			{role: roleUser, text: "Hello"},
+			{role: roleAssistant, text: "Hi there"},
+			{role: roleUser, text: "How are you?"},
+			{role: roleAssistant, text: "I'm fine"},
+			{role: roleUser, text: "What about you?"},
+			{role: roleAssistant, text: "Good thanks"},
+		},
+	}
+	m.renderTranscript()
+
+	// Create a compaction result that replaces messages 1-5 (the assistant+user messages after first user)
+	result := agent.CompactResult{
+		OK:          true,
+		ReplaceFrom: 1,
+		ReplaceTo:   5,
+		Summary: agent.Message{
+			Role:    "system",
+			Content: "[ocode:compaction-summary]\nCompacted summary covering 4 messages\n\n## Goal\n- keep context for testing",
+		},
+	}
+
+	// Build a uiIdx mapping (all messages are real, no synthetic)
+	uiIdx := []int{-1, 0, 1, 2, 3, 4, 5} // -1 for base prompt, then map to real indices
+
+	if !m.applyCompactionResult(result, uiIdx) {
+		t.Fatal("expected applyCompactionResult to succeed")
+	}
+
+	m.renderTranscript()
+
+	// Verify the transcript content contains the compaction summary
+	content := m.transcriptContent
+	if !strings.Contains(content, "compaction summary") {
+		t.Fatalf("expected compaction summary box in transcript, got:\n%s", content)
+	}
+	if !strings.Contains(content, "keep context for testing") {
+		t.Fatalf("expected summary body in transcript, got:\n%s", content)
+	}
+	if !strings.Contains(content, "Compacted summary covering 4 messages") {
+		t.Fatalf("expected summary header in transcript, got:\n%s", content)
+	}
+
+	// Verify compaction regions are tracked for click handling
+	if len(m.compactionRegions) == 0 {
+		t.Fatal("expected compaction regions to be tracked")
+	}
+}
+
+func TestScrollToCompactionBannerFindsMarker(t *testing.T) {
+	m := model{
+		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		styles:   ApplyThemeColors("tokyonight"),
+		messages: []message{
+			{role: roleUser, text: "Hello"},
+			{role: roleAssistant, text: "Hi there"},
+			{role: roleUser, text: "How are you?"},
+			{role: roleAssistant, text: "I'm fine"},
+		},
+	}
+	m.renderTranscript()
+
+	// After render, rawTranscriptLines is populated.
+	// Verify scrollToCompactionBanner doesn't panic when no banner exists.
+	m.scrollToCompactionBanner()
+
+	// Now inject a compaction banner message and re-render.
+	m.messages = append([]message{
+		{role: roleUser, text: "Before"},
+	}, m.messages...)
+	// Add a compaction banner with raw (like applyCompactionResult does).
+	summaryMsg := &agent.Message{
+		Role:    "system",
+		Content: "[ocode:compaction-summary]\nCompacted summary",
+	}
+	m.messages = append(m.messages[:2], append([]message{
+		{role: roleAssistant, text: "──────────────────────────────"},
+		{role: roleAssistant, text: "📦 Compacted 5 earlier messages", raw: summaryMsg},
+	}, m.messages[2:]...)...)
+	m.renderTranscript()
+
+	// Verify compactionRegions was populated and the banner is in view.
+	if len(m.compactionRegions) == 0 {
+		t.Fatal("expected compaction regions to be tracked after inject")
+	}
+	height := m.viewport.Height()
+	offset := m.viewport.YOffset()
+	if offset < 0 {
+		t.Errorf("viewport offset is negative: %d", offset)
+	}
+	region := m.compactionRegions[len(m.compactionRegions)-1]
+	// The compaction region should be within the visible window.
+	if region.startLine < offset || region.startLine >= offset+height {
+		t.Errorf("compaction region startLine=%d not in viewport [offset=%d, end=%d)", region.startLine, offset, offset+height)
+	}
+}
+
+func TestLSPServerStartedMsgRecordsStartTime(t *testing.T) {
+	m := model{
+		lspEventCh:         make(chan lsp.ServerStartedEvent, 1),
+		lspServerStartTimes: make(map[string]time.Time),
+	}
+	before := time.Now()
+	event := lsp.ServerStartedEvent{Cmd: "gopls", LangID: "go", Root: "/tmp"}
+	updated, _ := m.Update(lspServerStartedMsg{event: event})
+	got := updated.(model)
+
+	ts, ok := got.lspServerStartTimes["gopls"]
+	if !ok {
+		t.Fatal("expected start time to be recorded for gopls")
+	}
+	if ts.Before(before) {
+		t.Errorf("start time %v is before test start %v", ts, before)
+	}
+	if got.lspStateSeq == 0 {
+		t.Error("expected lspStateSeq to be incremented")
+	}
+}
+
+func TestLSPIndexingDoneMsgClearsStartTime(t *testing.T) {
+	m := model{
+		lspServerStartTimes: map[string]time.Time{
+			"gopls": time.Now(),
+		},
+		lspStateSeq: 1,
+	}
+	updated, _ := m.Update(lspIndexingDoneMsg{cmd: "gopls"})
+	got := updated.(model)
+
+	if _, ok := got.lspServerStartTimes["gopls"]; ok {
+		t.Error("expected start time to be removed after indexing done")
+	}
+	if got.lspStateSeq <= 1 {
+		t.Error("expected lspStateSeq to be incremented")
 	}
 }

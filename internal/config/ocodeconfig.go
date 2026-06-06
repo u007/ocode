@@ -845,6 +845,16 @@ func SaveAdvisorModel(providerModel string) error {
 	return SaveOcodeConfig(cfg)
 }
 
+// SaveAdvisorEnabled persists the advisor enabled/disabled state to config.
+func SaveAdvisorEnabled(enabled bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Advisor.Enabled = enabled
+	return SaveOcodeConfig(cfg)
+}
+
 // DefaultAdvisorConfig returns the default advisor configuration.
 func DefaultAdvisorConfig() AdvisorConfig {
 	return defaultAdvisorConfig()

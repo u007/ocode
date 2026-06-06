@@ -146,6 +146,11 @@ func safeCut(msgs []Message, cut int) int {
 func findPrefixEnd(msgs []Message) int {
 	i := 0
 	for i < len(msgs) && msgs[i].Role == "system" {
+		// Stop before a compaction summary — it's conversation history,
+		// not part of the base prompt prefix.
+		if strings.HasPrefix(msgs[i].Content, compactionSummaryMarker) {
+			break
+		}
 		i++
 	}
 	if i < len(msgs) && msgs[i].Role == "user" {

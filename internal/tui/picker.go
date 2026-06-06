@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
@@ -170,7 +171,31 @@ func splitPickerModel(s string) (string, string) {
 	return "", s
 }
 
+// previewPickerTheme applies the currently-highlighted theme in the picker
+// as a live preview. Called on up/down navigation and filter changes.
+func (m *model) previewPickerTheme() {
+	if m.config == nil {
+		return
+	}
+	_, values := m.pickerVisibleItems()
+	if m.pickerIndex >= 0 && m.pickerIndex < len(values) {
+		name := values[m.pickerIndex]
+		if name != "" {
+			if _, ok := GetTheme(name); ok {
+				m.config.Ocode.TUI.Theme = name
+				m.applyTheme()
+			}
+		}
+	}
+}
+
 func (m *model) openThemePicker() {
+	// Save current theme so we can revert if the user cancels
+	if m.config != nil && m.config.Ocode.TUI.Theme != "" {
+		m.pickerSavedTheme = m.config.Ocode.TUI.Theme
+	} else {
+		m.pickerSavedTheme = "tokyonight"
+	}
 	m.input.Blur()
 	items := AvailableThemes()
 	m.pickerKind = "theme"
@@ -180,6 +205,11 @@ func (m *model) openThemePicker() {
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
+	// Preview the first theme immediately
+	if len(items) > 0 && m.config != nil {
+		m.config.Ocode.TUI.Theme = items[0]
+		m.applyTheme()
+	}
 }
 
 const sessionPickerPageSize = 20
@@ -350,6 +380,15 @@ func isRevertibleUserMessage(msg message) bool {
 }
 
 func (m *model) closePicker() {
+	// If the theme picker is cancelled (Esc/click outside, not Enter), revert
+	// to the theme that was active when the picker was opened. On Enter,
+	// selectPickerIndex closes the picker first, then /themes sets the new
+	// theme permanently — the revert is immediately overwritten.
+	if m.pickerKind == "theme" && m.pickerSavedTheme != "" && m.config != nil {
+		m.config.Ocode.TUI.Theme = m.pickerSavedTheme
+		m.applyTheme()
+	}
+	m.pickerSavedTheme = ""
 	m.showPicker = false
 	m.pickerKind = ""
 	m.pickerItems = nil
@@ -671,8 +710,64 @@ func (m model) renderPicker() string {
 		}
 		bodyLines[i] = bLine + sbCol
 	}
-	inner := header + "\n\n" + strings.Join(bodyLines, "\n") + "\n" + hintStr
+	inner := header + "\n\n" + strings.Join(bodyLines, "\n")
+	if m.pickerKind == "theme" {
+		inner += "\n\n" + m.renderThemePreview(width)
+	}
+	inner += "\n" + hintStr
 	return borderStyle.Width(width).Render(inner)
+}
+
+// renderThemePreview renders a compact chat-tab mockup using the current theme
+// styles, shown at the bottom of the theme picker so the user can see how the
+// selected theme looks on the actual chat UI.
+func (m model) renderThemePreview(width int) string {
+	// Clamp the preview to a reasonable size.
+	pw := width - 6 // leave margin on each side
+	if pw < 30 {
+		pw = 30
+	}
+	if pw > 72 {
+		pw = 72
+	}
+
+	// Build the preview pieces using the live theme styles.
+	headerLine := m.styles.Header.Render("◆ ocode") + "  " + m.styles.Hint.Render("/theme")
+
+	userLabel := m.styles.User.Render("You")
+	userMsg := m.styles.Text.Inline(true).Render(" what's new?")
+	userBubble := borderStyle.Copy().
+		BorderForeground(m.styles.User.GetForeground()).
+		Width(pw - 2).
+		Render(userLabel + " " + userMsg)
+
+	asstLabel := m.styles.Assistant.Render("Assistant")
+	asstMsg := m.styles.Text.Inline(true).Render(" I'm here to help!")
+	asstBubble := lipgloss.NewStyle().
+		Width(pw - 2).
+		Padding(0, 1).
+		Render(asstLabel + " " + asstMsg)
+
+	inputPlaceholder := m.styles.Hint.Render(" Type a message…")
+	inputPreview := m.styles.Border.Copy().
+		Width(pw - 2).
+		Render(inputPlaceholder)
+
+	// Status bar with auto-width — it should stretch to the full preview width.
+	statusStyle := m.styles.Status.Copy().Width(pw)
+
+	var preview strings.Builder
+	preview.WriteString(headerLine)
+	preview.WriteString("\n\n")
+	preview.WriteString(userBubble)
+	preview.WriteString("\n")
+	preview.WriteString(asstBubble)
+	preview.WriteString("\n")
+	preview.WriteString(inputPreview)
+	preview.WriteString("\n")
+	preview.WriteString(statusStyle.Render(" build · idle   "))
+
+	return m.styles.Dim.Render("Preview:") + "\n" + preview.String()
 }
 
 func (m *model) cycleAgentMode() {

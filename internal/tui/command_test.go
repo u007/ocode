@@ -105,6 +105,12 @@ func TestThemeCommandOpensPicker(t *testing.T) {
 	}
 
 	got := updated.(*model)
+	if len(got.messages) != 1 {
+		t.Fatalf("expected /theme to be recorded in transcript, got %d messages", len(got.messages))
+	}
+	if got.messages[0].role != roleUser || got.messages[0].text != "/theme" {
+		t.Fatalf("expected first transcript message to be /theme, got %#v", got.messages[0])
+	}
 	if !got.showPicker || got.pickerKind != "theme" {
 		t.Fatalf("expected /theme to open theme picker, got showPicker=%v kind=%q", got.showPicker, got.pickerKind)
 	}
@@ -155,7 +161,7 @@ func TestThemePickerSelectionSwitchesTheme(t *testing.T) {
 	}
 }
 
-func TestSidebarCommandTogglesStateWithoutMessage(t *testing.T) {
+func TestSidebarCommandRecordsTranscriptMessage(t *testing.T) {
 	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
 
 	updated, cmd := m.handleCommand("/sidebar")
@@ -168,8 +174,11 @@ func TestSidebarCommandTogglesStateWithoutMessage(t *testing.T) {
 		t.Fatal("expected /sidebar to toggle sidebar state on")
 	}
 
-	if len(got.messages) != 0 {
-		t.Fatalf("expected /sidebar to avoid transcript messages, got %d", len(got.messages))
+	if len(got.messages) != 1 {
+		t.Fatalf("expected /sidebar to be recorded in transcript, got %d messages", len(got.messages))
+	}
+	if got.messages[0].role != roleUser || got.messages[0].text != "/sidebar" {
+		t.Fatalf("expected transcript to include /sidebar, got %#v", got.messages[0])
 	}
 
 	updated, cmd = got.handleCommand("/sidebar")
@@ -180,6 +189,12 @@ func TestSidebarCommandTogglesStateWithoutMessage(t *testing.T) {
 	got = updated.(*model)
 	if got.showSidebar {
 		t.Fatal("expected /sidebar to toggle sidebar state off")
+	}
+	if len(got.messages) != 2 {
+		t.Fatalf("expected second /sidebar run to add another transcript entry, got %d messages", len(got.messages))
+	}
+	if got.messages[1].role != roleUser || got.messages[1].text != "/sidebar" {
+		t.Fatalf("expected second transcript entry to include /sidebar, got %#v", got.messages[1])
 	}
 }
 
@@ -283,11 +298,14 @@ func TestEditorModeCommandInvalidMode(t *testing.T) {
 	}
 
 	got := updated.(*model)
-	if len(got.messages) == 0 {
-		t.Fatal("expected error message for invalid mode")
+	if len(got.messages) != 2 {
+		t.Fatalf("expected transcript command plus error message for invalid mode, got %d messages", len(got.messages))
 	}
-	if !strings.Contains(got.messages[0].text, "Invalid editor mode") {
-		t.Fatalf("expected error to mention invalid mode, got %q", got.messages[0].text)
+	if got.messages[0].role != roleUser || got.messages[0].text != "/editor-mode bogus" {
+		t.Fatalf("expected command to be recorded first, got %#v", got.messages[0])
+	}
+	if !strings.Contains(got.messages[1].text, "Invalid editor mode") {
+		t.Fatalf("expected error to mention invalid mode, got %q", got.messages[1].text)
 	}
 }
 

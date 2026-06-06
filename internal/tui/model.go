@@ -28,6 +28,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/ide"
 	"github.com/u007/ocode/internal/lsp"
@@ -78,6 +79,7 @@ type message struct {
 	text      string
 	raw       *agent.Message
 	transient bool
+	skipLLM   bool
 }
 
 // estimateTok approximates token count as len(s)/4.
@@ -294,6 +296,15 @@ type autoRefreshTickMsg struct{}
 // re-rendering so the sidebar LSP count updates proactively.
 type lspDiagChangedMsg struct{}
 
+// lspServerStartedMsg is delivered when a language server completes its
+// initialize handshake. The TUI uses it to start the 3s indexing timer
+// and emit a KindLSP log entry.
+type lspServerStartedMsg struct{ event lsp.ServerStartedEvent }
+
+// lspIndexingDoneMsg fires 3 seconds after a server starts to clear the
+// "indexing…" sidebar state for that binary.
+type lspIndexingDoneMsg struct{ cmd string }
+
 // sidebarComputeCache memoises expensive sidebar values (context-token estimate
 // and telemetry aggregation) that walk the full message slice. The cache is
 // keyed on a coarse fingerprint of m.messages; when nothing has changed we
@@ -308,9 +319,10 @@ type sidebarComputeCache struct {
 }
 
 type sidebarCacheKey struct {
-	msgCount int
-	lastLen  int
-	model    string
+	msgCount    int
+	lastLen     int
+	model       string
+	lspStateSeq uint64
 }
 type registryReadyMsg struct{ failed bool }
 type pickerFilterApplyMsg struct {
@@ -578,6 +590,7 @@ type model struct {
 	pickerSessionLoadSeq  int           // generation token for in-flight loads
 	pickerSessionLoadErr  string        // last load error shown in the picker
 	pickerRefreshing      bool          // true while a ctrl+r model-cache refresh is in flight
+	pickerSavedTheme      string        // theme to revert to on picker cancel
 	showSlashPopup        bool
 	slashPopupIndex       int
 	slashPopupItems       []slashSuggestion
@@ -697,7 +710,7 @@ type model struct {
 	compactCh                chan agent.CompactResult
 	compactStartCh           chan struct{}
 	recapCh                  chan recapFinishedMsg
-	recapText                string // rendering-only recap, never sent to LLM
+	recapText                string // held until recap finishes, then cleared; recap result goes to m.messages
 	recapGen                 uint64 // monotonic counter; bumped on /new and each recap request so stale recap goroutines can be ignored
 	titleCh                  chan titleResult
 	deltaDrops               uint64 // bumped each time the delta select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
@@ -742,6 +755,16 @@ type model struct {
 	// so the sidebar LSP count updates proactively without waiting for user
 	// interaction.
 	lspDiagCh chan struct{}
+
+	// lspEventCh receives ServerStartedEvent when a language server completes
+	// its initialize handshake. Used to trigger the indexing timer and log entry.
+	lspEventCh chan lsp.ServerStartedEvent
+	// lspServerStartTimes tracks when each binary was started; presence in the
+	// map means the server is still in the "indexing…" phase.
+	lspServerStartTimes map[string]time.Time
+	// lspStateSeq is bumped on any LSP state change (server start, diagnostic
+	// update) to invalidate the sidebar render cache.
+	lspStateSeq uint64
 
 	// review holds the state for the /review command overlay.
 	review reviewState
@@ -1125,6 +1148,10 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 			m.lspDiagCh = make(chan struct{}, 1)
 		}
 		m.lspMgr.Diagnostics().SetNotifyChan(m.lspDiagCh)
+		if m.lspEventCh == nil {
+			m.lspEventCh = make(chan lsp.ServerStartedEvent, 16)
+		}
+		m.lspMgr.SetEventChan(m.lspEventCh)
 	}
 	lspMgr := m.lspMgr
 	tools := []tool.Tool{
@@ -1487,6 +1514,9 @@ func (m model) Init() tea.Cmd {
 	if m.lspDiagCh != nil {
 		cmds = append(cmds, listenLSPDiags(m.lspDiagCh))
 	}
+	if m.lspEventCh != nil {
+		cmds = append(cmds, listenLSPEvents(m.lspEventCh))
+	}
 	// Start quiet background refresh for git/files tabs.
 	cmds = append(cmds, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} }))
 	// Auto-connect to VS Code (Claude Code extension) when IDE mode is enabled.
@@ -1762,7 +1792,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "esc" && !m.filesHasActiveFocus() {
 				return m.handleEscKey()
 			}
-			if msg.String() == "a" && m.files.panel == filesPanelPreview && m.files.previewPath != "" {
+			if msg.String() == "ctrl+a" && m.files.panel == filesPanelPreview && m.files.previewPath != "" {
 				return m, m.filesAddToContext()
 			}
 			var cmd tea.Cmd
@@ -1982,6 +2012,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prevEmpty := m.pickerFilter == ""
 			m.pickerFilter = msg.filter
 			m.pickerIndex = 0
+			// Preview theme when the filter changes (index resets to first match)
+			if m.pickerKind == "theme" {
+				m.previewPickerTheme()
+			}
 			// When filter is cleared for sessions, go back to paginated view
 			if m.pickerKind == "session" && m.pickerSessionRefs != nil && !prevEmpty && msg.filter == "" {
 				m.pickerSessionPage = 1
@@ -2399,9 +2433,62 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case lspDiagChangedMsg:
 		// LSP diagnostics changed — re-render the sidebar with the updated
 		// count and re-arm the listener for the next change.
+		m.lspStateSeq++
+		if m.lspMgr != nil {
+			store := m.lspMgr.Diagnostics()
+			if store != nil {
+				allDiags := store.All()
+				for _, srv := range m.lspMgr.ActiveServers() {
+					// Count errors+warnings and distinct files for this binary's extensions.
+					errs, warns := 0, 0
+					files := map[string]struct{}{}
+					for _, d := range allDiags {
+						ext := filepath.Ext(d.Path)
+						cmd, _, ok := lsp.ServerForExt(ext)
+						if !ok || cmd != srv.Cmd {
+							continue
+						}
+						files[d.Path] = struct{}{}
+						switch d.Severity {
+						case lsp.SeverityError:
+							errs++
+						case lsp.SeverityWarning:
+							warns++
+						}
+					}
+					var msg string
+					if errs == 0 && warns == 0 {
+						msg = srv.Cmd + ": clean"
+					} else {
+						msg = fmt.Sprintf("%s: %d errors, %d warnings in %d files",
+							srv.Cmd, errs, warns, len(files))
+					}
+					debuglog.Log.Append(debuglog.Entry{Kind: debuglog.KindLSP, Message: msg})
+				}
+			}
+		}
 		if m.lspDiagCh != nil {
 			return m, listenLSPDiags(m.lspDiagCh)
 		}
+		return m, nil
+	case lspServerStartedMsg:
+		if m.lspServerStartTimes == nil {
+			m.lspServerStartTimes = make(map[string]time.Time)
+		}
+		m.lspServerStartTimes[msg.event.Cmd] = time.Now()
+		m.lspStateSeq++
+		debuglog.Log.Append(debuglog.Entry{
+			Kind:    debuglog.KindLSP,
+			Message: fmt.Sprintf("%s started  (%s · %s)", msg.event.Cmd, msg.event.LangID, msg.event.Root),
+		})
+		var cmds []tea.Cmd
+		cmds = append(cmds, listenLSPEvents(m.lspEventCh), lspIndexingTimer(msg.event.Cmd))
+		return m, tea.Batch(cmds...)
+	case lspIndexingDoneMsg:
+		if m.lspServerStartTimes != nil {
+			delete(m.lspServerStartTimes, msg.cmd)
+		}
+		m.lspStateSeq++
 		return m, nil
 	case streamStartedMsg:
 		m.streaming = true
@@ -2752,10 +2839,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.result.OK {
 			if m.applyCompactionResult(msg.result, m.pendingCompactUIIdx) {
 				m.pendingCompactUIIdx = nil
-				m.rerenderTranscriptAndMaybeScroll()
+				m.renderTranscript()
+				if manual {
+					m.scrollToCompactionBanner()
+				} else {
+					m.maybeScrollTranscriptToBottom()
+				}
 				m.saveSession()
 			} else {
 				m.pendingCompactUIIdx = nil
+				agent.DebugAppendf("COMPACT", "applyCompactionResult returned false (ui index mismatch); transcript unchanged")
+				if manual {
+					m.messages = append(m.messages, message{role: roleAssistant, text: "⚠ Compaction result could not be applied (try again)."})
+					m.rerenderTranscriptAndMaybeScroll()
+				}
 			}
 		} else if manual {
 			m.pendingCompactUIIdx = nil
@@ -2783,7 +2880,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 	case recapFinishedMsg:
 		if msg.gen == m.recapGen {
-			m.recapText = msg.text
+			m.recapText = ""
+			m.messages = append(m.messages, message{
+				role:      roleAssistant,
+				text:      fmt.Sprintf("📋 RECAP\n\n%s", msg.text),
+				transient: true,
+			})
 			m.rerenderTranscriptAndMaybeScroll()
 			m.layout()
 		}
@@ -2900,6 +3002,57 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 	keyStr := msg.String()
 
+	// Session delete confirmation takes precedence over picker — when the
+	// confirmation dialog is open the picker is still visible but should
+	// not consume key events (Y/N would be eaten by the filter input).
+	if m.sessionDeleteConfirm {
+		switch keyStr {
+		case "y", "Y":
+			err := session.Delete(m.sessionDeleteConfirmID)
+			if err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error deleting session: %v", err)})
+				m.sessionDeleteConfirm = false
+				m.sessionDeleteConfirmID = ""
+				m.sessionDeleteConfirmTitle = ""
+				return true, m, nil
+			}
+			// If the deleted session was the current session, start a fresh one.
+			var cmd tea.Cmd
+			if m.sessionDeleteConfirmID == m.sessionID {
+				cmd = m.handleNewCmd(nil)
+				m.closePicker()
+			}
+			// Remove from picker list
+			for i, ref := range m.pickerSessionRefs {
+				if ref.ID == m.sessionDeleteConfirmID {
+					m.pickerSessionRefs = append(m.pickerSessionRefs[:i], m.pickerSessionRefs[i+1:]...)
+					break
+				}
+			}
+			m.pickerSessionTotal = len(m.pickerSessionRefs)
+			m.pickerSessionMore = len(m.pickerSessionRefs) > m.pickerSessionPage*sessionPickerPageSize
+			if m.pickerIndex >= len(m.pickerSessionRefs) && m.pickerIndex > 0 {
+				m.pickerIndex = len(m.pickerSessionRefs) - 1
+			}
+			m.rebuildSessionPickerItems()
+			// Only append "Deleted session" message when we aren't starting fresh
+			// (handleNewCmd resets messages and adds its own "Started new session.").
+			if m.sessionDeleteConfirmID != m.sessionID {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Deleted session %s", m.sessionDeleteConfirmID)})
+			}
+			m.sessionDeleteConfirm = false
+			m.sessionDeleteConfirmID = ""
+			m.sessionDeleteConfirmTitle = ""
+			return true, m, cmd
+		case "n", "N", "esc":
+			m.sessionDeleteConfirm = false
+			m.sessionDeleteConfirmID = ""
+			m.sessionDeleteConfirmTitle = ""
+			return true, m, nil
+		}
+		return true, m, nil
+	}
+
 	if m.showPicker {
 		switch keyStr {
 		case "esc":
@@ -2919,6 +3072,9 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 						m.pickerIndex--
 					}
 				}
+			}
+			if m.pickerKind == "theme" {
+				m.previewPickerTheme()
 			}
 			return true, m, nil
 		case "down":
@@ -2940,6 +3096,10 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 					}
 					break
 				}
+			}
+			// Preview theme when navigating down in the theme picker
+			if m.pickerKind == "theme" {
+				m.previewPickerTheme()
 			}
 			// Infinite scroll: trigger load more when within 5 items of bottom
 			if m.pickerKind == "session" && m.pickerSessionMore && !m.pickerSessionLoading {
@@ -3162,45 +3322,6 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		return m, nil
 	}
 
-	if m.sessionDeleteConfirm {
-		switch keyStr {
-		case "y", "Y":
-			// Delete the session
-			err := session.Delete(m.sessionDeleteConfirmID)
-			if err != nil {
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error deleting session: %v", err)})
-				m.sessionDeleteConfirm = false
-				m.sessionDeleteConfirmID = ""
-				m.sessionDeleteConfirmTitle = ""
-				return m, nil
-			}
-			// Remove from picker list
-			for i, ref := range m.pickerSessionRefs {
-				if ref.ID == m.sessionDeleteConfirmID {
-					m.pickerSessionRefs = append(m.pickerSessionRefs[:i], m.pickerSessionRefs[i+1:]...)
-					break
-				}
-			}
-			m.pickerSessionTotal = len(m.pickerSessionRefs)
-			m.pickerSessionMore = len(m.pickerSessionRefs) > m.pickerSessionPage*sessionPickerPageSize
-			if m.pickerIndex >= len(m.pickerSessionRefs) && m.pickerIndex > 0 {
-				m.pickerIndex = len(m.pickerSessionRefs) - 1
-			}
-			m.rebuildSessionPickerItems()
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Deleted session %s", m.sessionDeleteConfirmID)})
-			m.sessionDeleteConfirm = false
-			m.sessionDeleteConfirmID = ""
-			m.sessionDeleteConfirmTitle = ""
-			return m, nil
-		case "n", "N", "esc":
-			m.sessionDeleteConfirm = false
-			m.sessionDeleteConfirmID = ""
-			m.sessionDeleteConfirmTitle = ""
-			return m, nil
-		}
-		return m, nil
-	}
-
 	if m.showQuestionDialog {
 		return m.handleQuestionKeys(msg, tiCmd, vpCmd)
 	}
@@ -3378,6 +3499,9 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
 			m.rerenderTranscriptAndMaybeScroll()
 		}
+		return m, nil
+	case "alt+t":
+		m.cycleTheme()
 		return m, nil
 	case "ctrl+b":
 		if m.backgroundLatestForegroundBash() {
@@ -3603,6 +3727,8 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.toggleLogKind(DebugKindError)
 	case "5":
 		m.toggleLogKind(DebugKindGit)
+	case "6":
+		m.toggleLogKind(DebugKindLSP)
 	default:
 		if r := []rune(msg.String()); len(r) == 1 && r[0] >= 32 {
 			m.logSearch += string(r)
@@ -3620,6 +3746,7 @@ func (m *model) toggleLogKind(kind DebugEntryKind) {
 			DebugKindAgent: true,
 			DebugKindError: true,
 			DebugKindGit:   true,
+			DebugKindLSP:   true,
 		}
 	}
 	m.logKindFilter[kind] = !m.logKindFilter[kind]
@@ -4162,11 +4289,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				return m, nil, true
 			}
 			if m.sidebarAdvisorToggleForClick(mouse) && m.agent != nil {
-				// Runtime, session-lifetime toggle — not persisted to config,
-				// mirroring the server's /api/config/advisor-enabled behaviour.
 				m.advisorEnabled = !m.agent.AdvisorEnabled()
 				m.advisorEnabledSet = true
 				m.agent.SetAdvisorEnabled(m.advisorEnabled)
+				if err := config.SaveAdvisorEnabled(m.advisorEnabled); err != nil {
+					log.Printf("save advisor enabled: %v", err)
+				}
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
@@ -4739,6 +4867,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	args := parts[1:]
 
 	m.input.Reset()
+	m.messages = append(m.messages, message{role: roleUser, text: text, skipLLM: true})
 
 	var cmdResult tea.Cmd
 	spec := lookupCommand(cmd)
@@ -4754,7 +4883,6 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 				prompt += " " + userArgs
 			}
 		}
-		m.messages = append(m.messages, message{role: roleUser, text: cmd + " " + userArgs})
 		if m.agent != nil {
 			m.agent.ResetSubagentDispatch()
 		}
@@ -4768,8 +4896,6 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	}() {
 		m.switchAgent(agentName)
 		if len(args) > 0 {
-			userText := strings.Join(args, " ")
-			m.messages = append(m.messages, message{role: roleUser, text: userText})
 			if m.agent != nil {
 				m.agent.ResetSubagentDispatch()
 			}
@@ -5805,6 +5931,31 @@ func (m *model) handleShareCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Session shared to local file: %s", filename)})
 }
 
+func (m *model) cycleTheme() {
+	themes := AvailableThemes() // already sorted
+	if len(themes) == 0 {
+		return
+	}
+	current := "tokyonight"
+	if m.config != nil && m.config.Ocode.TUI.Theme != "" {
+		current = m.config.Ocode.TUI.Theme
+	}
+	next := themes[0]
+	for i, t := range themes {
+		if t == current {
+			next = themes[(i+1)%len(themes)]
+			break
+		}
+	}
+	m.config.Ocode.TUI.Theme = next
+	m.applyTheme()
+	if err := config.SaveTUITheme(next); err != nil {
+		log.Printf("save theme: %v", err)
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme: %s", next), transient: true})
+	m.rerenderTranscriptAndMaybeScroll()
+}
+
 func (m *model) handleThemesCmd(args []string) {
 	if len(args) == 0 {
 		m.openThemePicker()
@@ -5877,7 +6028,6 @@ func (m *model) handleDetailsCmd(args []string) {
 
 func (m *model) handleInitCmd(args []string) tea.Cmd {
 	prompt := strings.ReplaceAll(initializePromptTemplate, "$ARGUMENTS", strings.Join(args, " "))
-	m.messages = append(m.messages, message{role: roleUser, text: "/init " + strings.Join(args, " ")})
 	if m.agent != nil {
 		m.agent.ResetSubagentDispatch()
 	}
@@ -6634,7 +6784,7 @@ func (m *model) persistedAgentMessages() []agent.Message {
 	}
 	var agentMsgs []agent.Message
 	for _, msg := range m.messages {
-		if msg.transient || msg.role == roleThinking {
+		if msg.transient || msg.role == roleThinking || isCommandHistoryMessage(msg) {
 			continue
 		}
 		if msg.raw != nil {
@@ -6650,10 +6800,21 @@ func (m *model) persistedAgentMessages() []agent.Message {
 	return agentMsgs
 }
 
+// isCommandHistoryMessage marks slash-command transcript entries that should
+// remain visible in history but not affect LLM context or session title
+// generation.
+func isCommandHistoryMessage(msg message) bool {
+	return msg.skipLLM || strings.HasPrefix(strings.TrimSpace(msg.text), "/")
+}
+
+func isVisibleUserMessage(msg message) bool {
+	return msg.role == roleUser && !msg.transient && !isCommandHistoryMessage(msg)
+}
+
 func countUserMessages(msgs []message) int {
 	n := 0
 	for _, msg := range msgs {
-		if msg.role == roleUser && !msg.transient {
+		if isVisibleUserMessage(msg) {
 			n++
 		}
 	}
@@ -6703,7 +6864,7 @@ func (m *model) maybeGenerateTitle(assistantContent string) {
 func (m *model) lastUserMessageText() string {
 	for i := len(m.messages) - 1; i >= 0; i-- {
 		msg := m.messages[i]
-		if msg.role == roleUser && !msg.transient {
+		if isVisibleUserMessage(msg) {
 			return msg.text
 		}
 	}
@@ -6714,7 +6875,7 @@ func (m *model) lastUserMessageText() string {
 // This serves as a fallback session title when no LLM-generated title is available.
 func (m *model) firstUserPromptText() string {
 	for _, msg := range m.messages {
-		if msg.role == roleUser && !msg.transient {
+		if isVisibleUserMessage(msg) {
 			text := strings.TrimSpace(msg.text)
 			if text != "" {
 				return text
@@ -7881,6 +8042,26 @@ func (m *model) maybeScrollTranscriptToBottom() {
 	}
 }
 
+// scrollToCompactionBanner scrolls the viewport so the compaction summary
+// (divider + banner) is visible. Called after /compact succeeds so the user
+// sees the result instead of being scrolled past it.
+func (m *model) scrollToCompactionBanner() {
+	// Use compactionRegions which tracks the line positions of compaction
+	// summaries in the rendered transcript.
+	if len(m.compactionRegions) > 0 {
+		// Scroll to show the last compaction region (the one we just created).
+		region := m.compactionRegions[len(m.compactionRegions)-1]
+		target := region.startLine - 2
+		if target < 0 {
+			target = 0
+		}
+		m.viewport.SetYOffset(target)
+		return
+	}
+	// Fallback: if no compaction region found, scroll to bottom.
+	m.viewport.GotoBottom()
+}
+
 func (m *model) renderTranscript() {
 	if len(m.messages) == 0 {
 		return
@@ -7992,16 +8173,6 @@ func (m *model) renderTranscript() {
 				b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
 			}
 		}
-	}
-	if m.recapText != "" {
-		if b.Len() > 0 {
-			b.WriteString("\n\n")
-		}
-		startLine := heightNow()
-		b.WriteString(m.styles.ThinkingHeader.Render("📋 RECAP"))
-		b.WriteString("\n")
-		b.WriteString(m.styles.Thinking.Render(m.recapText))
-		_ = startLine // used for click region tracking if needed later
 	}
 	// Add trailing padding so agent/permission boxes don't block the view.
 	for i := 0; i < 10; i++ {
@@ -8418,7 +8589,7 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 		}
 	}
 	for i, msg := range m.messages {
-		if msg.transient || msg.role == roleThinking {
+		if msg.transient || msg.role == roleThinking || isCommandHistoryMessage(msg) {
 			continue
 		}
 		if msg.raw != nil {
@@ -8549,17 +8720,23 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) bool {
 	if uiFrom < 0 || uiTo > len(m.messages) || uiFrom >= uiTo {
 		return false
 	}
-	rawCopy := r.Summary
 	replacedCount := r.ReplaceTo - r.ReplaceFrom
 	// Visual divider to clearly mark where compaction occurred.
 	divider := message{
 		role: roleAssistant,
 		text: "──────────────────────────────────────────────────",
 	}
+	// Heap-allocate the summary message so its pointer remains valid after
+	// this function returns. Taking &r.Summary (a field of the local parameter)
+	// would point to stack memory that becomes invalid.
+	summaryMsg := &agent.Message{
+		Role:    r.Summary.Role,
+		Content: r.Summary.Content,
+	}
 	banner := message{
 		role: roleAssistant,
 		text: fmt.Sprintf("📦 Compacted %d earlier messages", replacedCount),
-		raw:  &rawCopy,
+		raw:  summaryMsg,
 	}
 	newMsgs := make([]message, 0, len(m.messages)-(uiTo-uiFrom)+2)
 	newMsgs = append(newMsgs, m.messages[:uiFrom]...)
@@ -8597,6 +8774,23 @@ func listenLSPDiags(ch chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		<-ch
 		return lspDiagChangedMsg{}
+	}
+}
+
+// listenLSPEvents blocks on the LSP server-start event channel and
+// re-arms itself so subsequent starts are also caught.
+func listenLSPEvents(ch chan lsp.ServerStartedEvent) tea.Cmd {
+	return func() tea.Msg {
+		e := <-ch
+		return lspServerStartedMsg{event: e}
+	}
+}
+
+// lspIndexingTimer returns a Cmd that fires lspIndexingDoneMsg after 3 s.
+func lspIndexingTimer(cmd string) tea.Cmd {
+	return func() tea.Msg {
+		time.Sleep(3 * time.Second)
+		return lspIndexingDoneMsg{cmd: cmd}
 	}
 }
 
@@ -9324,6 +9518,12 @@ func (m model) renderContent() string {
 		return "initializing…"
 	}
 
+	// Theme picker is rendered as a centered overlay on top of the normal tab
+	// content with a dimmed backdrop, so the user can preview themes live.
+	if m.showPicker && m.pickerKind == "theme" {
+		return m.renderThemePickerOverlay()
+	}
+
 	if m.showPicker {
 		return m.renderPicker()
 	}
@@ -9336,6 +9536,12 @@ func (m model) renderContent() string {
 		return m.renderPalette()
 	}
 
+	return m.renderTabContent()
+}
+
+// renderTabContent renders the base tab content without any modal overlays.
+// This is used as the backdrop for the theme picker overlay.
+func (m model) renderTabContent() string {
 	// Drill-in detail view takes precedence over tab content (but not modals).
 	if top, ok := m.detail.top(); ok {
 		return m.renderDetailView(top)
@@ -9455,6 +9661,48 @@ func (m model) renderContent() string {
 	return result
 }
 
+// renderThemePickerOverlay renders the normal tab content behind a centered,
+// boxed theme picker dialog. The backdrop is dimmed to focus attention on
+// the picker while still showing the underlying UI (so the user can preview
+// the selected theme's effect on the chat view, file tree, etc.).
+func (m model) renderThemePickerOverlay() string {
+	// Build the picker box first.
+	pickerBox := m.renderPicker()
+
+	// Build the base tab content (the dimmed backdrop).
+	baseContent := m.renderTabContent()
+
+	// Calculate picker dimensions.
+	pickerLines := strings.Split(pickerBox, "\n")
+	pickerH := len(pickerLines)
+	pickerW := 0
+	for _, line := range pickerLines {
+		if w := lipgloss.Width(line); w > pickerW {
+			pickerW = w
+		}
+	}
+
+	// Create a canvas matching the terminal size so the base content fills
+	// the full screen and the picker is centered at known coordinates.
+	c := lipgloss.NewCanvas(m.width, m.height)
+	c.Compose(lipgloss.NewLayer(baseContent).Z(0))
+
+	centerX := (m.width - pickerW) / 2
+	centerY := (m.height - pickerH) / 2
+	if centerX < 0 {
+		centerX = 0
+	}
+	if centerY < 0 {
+		centerY = 0
+	}
+	c.Compose(lipgloss.NewLayer(pickerBox).
+		Z(1).
+		X(centerX).
+		Y(centerY))
+
+	return c.Render()
+}
+
 func (m *model) renderStatus() string {
 	agentName := "build"
 	agentColor := ""
@@ -9478,9 +9726,9 @@ func (m *model) renderStatus() string {
 	supportsReasoning := m.config != nil && agent.ModelSupportsThinking(m.config.Model)
 	switch m.activeTab {
 	case tabFiles:
-		suffix = " · i: edit · ^S: save · n/N: new · r: rename · D: delete · y: copy path · R: reload · alt+[/]: tab"
+		suffix = " · ctrl+f search · ctrl+g fuzzy · ctrl+l edit · ctrl+n new · ctrl+b folder · ctrl+r rename · ctrl+d delete · ctrl+y copy · ctrl+o open · ctrl+t reload · alt+[/]: tab"
 	case tabGit:
-		suffix = " · tab: cycle panel · s: stage · u: unstage · c: commit · alt+[/]/ctrl+shift+[/]: switch tab"
+		suffix = " · tab: cycle panel · ctrl+f filter · ctrl+s stage · ctrl+u unstage · ctrl+\\ commit · ctrl+r refresh · alt+[/]/ctrl+shift+[/]: switch tab"
 	case tabLog:
 		suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
@@ -9939,7 +10187,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	// counting heuristics). A second-by-second drift is acceptable here — the
 	// numbers refresh as soon as a message is appended or the user stops typing
 	// for one tick.
-	cacheKey := sidebarCacheKey{msgCount: len(m.messages), model: modelName}
+	cacheKey := sidebarCacheKey{msgCount: len(m.messages), model: modelName, lspStateSeq: m.lspStateSeq}
 	if n := len(m.messages); n > 0 {
 		cacheKey.lastLen = len(m.messages[n-1].text)
 	}
@@ -10149,8 +10397,11 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 
 	// ── MCP + LSP on one line ──
 	mcpLine := "MCP: " + m.renderMCPStatus()
-	lspLine := "LSP: " + m.renderLSPStatus()
-	appendScrollSection("Tools", []string{sidebarTextStyle.Render(mcpLine + "  |  " + lspLine)}, nil)
+	appendScrollSection("Tools", []string{sidebarTextStyle.Render(mcpLine)}, nil)
+
+	if lspRows := m.renderLSPSection(outerBodyWidth); len(lspRows) > 0 {
+		appendScrollSection("LSP", lspRows, nil)
+	}
 
 	// ── Bottom: usage + quick actions ──
 	data.bottomLines = append(data.bottomLines, "")
@@ -10729,6 +10980,8 @@ func (m model) renderLogTab() string {
 		{DebugKindTool, "TOOL", "2"},
 		{DebugKindAgent, "AGENT", "3"},
 		{DebugKindError, "ERROR", "4"},
+		{DebugKindGit, "GIT", "5"},
+		{DebugKindLSP, "LSP", "6"},
 	}
 	kindBar := hintStyle.Render("filter: ")
 	for _, k := range kinds {
@@ -10986,13 +11239,16 @@ func (m *model) detailPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
 // launch path as the files/git views.
 func (m *model) openPathInEditorCmd(path string) tea.Cmd {
 	if isBinaryFile(path) {
+		log.Printf("[editor] using OS default opener for binary file=%q", path)
 		return openFileWithOSDefault(path)
 	}
 	if m.config == nil {
+		log.Printf("[editor] config is nil, using OS default opener for file=%q", path)
 		return openFileWithOSDefault(path)
 	}
 	editor := config.ResolveEditor(&m.config.Ocode)
 	mode := m.config.Ocode.EditorMode
+	log.Printf("[editor] opening file=%q  editor=%q  mode=%q", path, editor, mode)
 	return createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor)(path)
 }
 
@@ -11220,15 +11476,91 @@ func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {
 	vp.SetYOffset(offset)
 }
 
-func (m model) renderLSPStatus() string {
+// renderLSPSection produces sidebar rows for the LSP section. Returns nil
+// when no servers are active (caller omits the section header).
+func (m model) renderLSPSection(outerBodyWidth int) []string {
 	if m.lspMgr == nil {
-		return "0 problems"
+		return nil
 	}
-	snap := m.lspMgr.Diagnostics().Snapshot(1)
-	if snap.Total == 0 {
-		return "available"
+	servers := m.lspMgr.ActiveServers()
+	if len(servers) == 0 {
+		return nil
 	}
-	return fmt.Sprintf("%d problems", snap.Total)
+
+	// Group diagnostics by binary cmd.
+	type diagCounts struct{ errors, warnings int }
+	byCmd := make(map[string]diagCounts)
+	if diags := m.lspMgr.Diagnostics(); diags != nil {
+		for _, d := range diags.All() {
+			ext := filepath.Ext(d.Path)
+			cmd, _, ok := lsp.ServerForExt(ext)
+			if !ok {
+				continue
+			}
+			c := byCmd[cmd]
+			switch d.Severity {
+			case lsp.SeverityError:
+				c.errors++
+			case lsp.SeverityWarning:
+				c.warnings++
+			}
+			byCmd[cmd] = c
+		}
+	}
+
+	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68"))
+	okStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
+	dimStyle := sidebarTextStyle
+
+	seen := make(map[string]bool)
+	var rows []string
+	for _, srv := range servers {
+		if seen[srv.Cmd] {
+			continue
+		}
+		seen[srv.Cmd] = true
+
+		c := byCmd[srv.Cmd]
+		var sym, label string
+		var symStyle lipgloss.Style
+
+		_, isIndexing := m.lspServerStartTimes[srv.Cmd]
+		switch {
+		case isIndexing:
+			sym, symStyle, label = "◌", dimStyle, "indexing…"
+		case c.errors > 0 && c.warnings > 0:
+			sym, symStyle = "●", errStyle
+			label = fmt.Sprintf("%d errors, %d warnings", c.errors, c.warnings)
+		case c.errors > 0:
+			sym, symStyle = "●", errStyle
+			if c.errors == 1 {
+				label = "1 error"
+			} else {
+				label = fmt.Sprintf("%d errors", c.errors)
+			}
+		case c.warnings > 0:
+			sym, symStyle = "△", warnStyle
+			if c.warnings == 1 {
+				label = "1 warning"
+			} else {
+				label = fmt.Sprintf("%d warnings", c.warnings)
+			}
+		default:
+			sym, symStyle, label = "✓", okStyle, "clean"
+		}
+
+		nameW := 14
+		name := srv.Cmd
+		if len(name) > nameW {
+			name = name[:nameW]
+		}
+		row := dimStyle.Render(fmt.Sprintf("  %-*s", nameW, name)) +
+			" " + symStyle.Render(sym) +
+			" " + dimStyle.Render(label)
+		rows = append(rows, row)
+	}
+	return rows
 }
 
 func (m *model) handleLSPCmd(args []string) {

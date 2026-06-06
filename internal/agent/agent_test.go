@@ -1001,6 +1001,57 @@ func TestRunCompactAnchoredSummaryReplacesPreviousSummaryInPlace(t *testing.T) {
 	}
 }
 
+// TestRunCompactResumedSessionMultipleBasePrompts verifies that /compact works
+// on a resumed session where BasePromptMessages (multiple system messages) are
+// prepended before a saved compaction summary. Without the fix, findPrefixEnd
+// would absorb the summary into the prefix, causing "nothing to compact".
+func TestRunCompactResumedSessionMultipleBasePrompts(t *testing.T) {
+	client := &scriptedCaptureClient{Responses: []string{"resumed summary"}}
+	a := &Agent{client: client}
+	rt := compactRuntime{
+		Enabled:               true,
+		KeepRecentTurns:       1,
+		SummaryTimeoutSeconds: 1,
+		SummaryMaxRetries:     0,
+		MaxSummaryInputTokens: 50000,
+	}
+
+	// Simulate a resumed session: multiple base prompt system messages,
+	// a previous compaction summary, then conversation turns.
+	msgs := []Message{
+		// Base prompt messages (from BasePromptMessages)
+		{Role: "system", Content: "[ocode:environment]\nenv"},
+		{Role: "system", Content: "[ocode:provider]\nprovider"},
+		{Role: "system", Content: "[ocode:mode]\nmode prompt"},
+		{Role: "system", Content: "[ocode:context]\ncontext"},
+		// Previous compaction summary (from saved session)
+		{Role: "system", Content: compactionSummaryMarker + "\nold summary body"},
+		// Conversation turns after the summary
+		{Role: "user", Content: "follow-up question"},
+		{Role: "assistant", ToolCalls: []ToolCall{tcCall("call1", "read")}},
+		{Role: "tool", ToolID: "call1", Content: "file contents"},
+		{Role: "assistant", Content: "analysis"},
+		{Role: "user", Content: "latest question"},
+		{Role: "assistant", Content: "final answer"},
+	}
+
+	result := a.runCompact(msgs, rt)
+	if !result.OK {
+		t.Fatalf("compaction on resumed session failed (nothing to compact): %#v", result)
+	}
+	// The summary should replace starting from the old summary position,
+	// not past it.
+	if result.ReplaceFrom != 4 {
+		t.Fatalf("ReplaceFrom=%d, want 4 (should anchor on old summary at idx 4)", result.ReplaceFrom)
+	}
+	if !strings.Contains(client.Prompts[0], "<previous-summary>") {
+		t.Fatalf("summary prompt should include <previous-summary> anchor block")
+	}
+	if !strings.Contains(client.Prompts[0], "old summary body") {
+		t.Fatalf("summary prompt should include previous summary content")
+	}
+}
+
 func TestAgentToolExecution(t *testing.T) {
 	// 1. Tool call from assistant
 	// 2. Tool result appended

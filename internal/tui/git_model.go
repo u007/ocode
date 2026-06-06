@@ -772,9 +772,9 @@ func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 	case "tab":
 		m.panel = (m.panel + 1) % 3
 		return m, nil
-	case "r":
+	case "ctrl+r":
 		return m, m.cmdRefresh()
-	case "/":
+	case "ctrl+f":
 		if m.section == gitSectionChanges {
 			m.filterActive = true
 			m.filterQuery = ""
@@ -858,7 +858,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 	}
 
 	// Clear pending confirmation when user presses any key other than the confirm key
-	if key != "d" && key != "x" {
+	if key != "ctrl+d" && key != "ctrl+x" {
 		m.pendingAction = gitPendingNone
 	}
 	// esc clears filter first, then multi-selection
@@ -971,7 +971,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.loadDiff()
 			}
 		}
-	case "s":
+	case "ctrl+s":
 		if m.section == gitSectionChanges {
 			if len(m.selectedFiles) > 0 {
 				unstaged := m.allUnstagedAndUntracked()
@@ -1010,7 +1010,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				}
 			}
 		}
-	case "u":
+	case "ctrl+u":
 		if m.section == gitSectionChanges {
 			if len(m.selectedFiles) > 0 {
 				var unstaged []string
@@ -1043,7 +1043,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				}
 			}
 		}
-	case "d":
+	case "ctrl+d":
 		if m.section == gitSectionChanges {
 			if m.filesCursor >= 0 && m.filesCursor >= len(m.stagedFiles) {
 				idx := m.filesCursor - len(m.stagedFiles)
@@ -1066,7 +1066,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 						}
 					} else {
 						m.pendingAction = gitPendingDiscard
-						m.statusMsg = "press d again to discard"
+						m.statusMsg = "press ctrl+d again to discard"
 					}
 				}
 			} else {
@@ -1086,17 +1086,17 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				}
 			} else {
 				m.pendingAction = gitPendingDropStash
-				m.statusMsg = "press d again to drop stash"
+				m.statusMsg = "press ctrl+d again to drop stash"
 			}
 		}
-	case "c":
+	case "ctrl+\\":
 		if m.section == gitSectionChanges {
 			m.committing = true
 			m.commitInput.Reset()
 			m.commitInput.Focus()
 			m.Resize(m.width, m.height)
 		}
-	case "a":
+	case "ctrl+a":
 		if m.section == gitSectionStash && m.stashCursor < len(m.stashes) {
 			ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
 			if _, err := m.gitRun("stash", "apply", ref); err != nil {
@@ -1108,7 +1108,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				return m, m.cmdRefresh()
 			}
 		}
-	case "i":
+	case "ctrl+l":
 		if m.section == gitSectionChanges {
 			files := m.currentFileList()
 			if len(files) == 0 || m.filesCursor < 0 || m.filesCursor >= len(files) {
@@ -1117,35 +1117,35 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			}
 			return m.ignorePath(files[m.filesCursor].path)
 		}
-	case "I":
+	case "ctrl+_":
 		if m.section == gitSectionChanges {
 			m.ignorePathInputMode = true
 			m.ignorePathInputText = ""
 			m.statusMsg = "ignore path:"
 			return m, nil
 		}
-	case "f":
+	case "ctrl+g":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
 			m.statusMsg = "fetching..."
 			return m, m.cmdNetworkOp("fetched", "fetch failed", "fetch", "--all")
 		}
-	case "p":
+	case "ctrl+p":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
 			m.statusMsg = "pulling..."
 			return m, m.cmdNetworkOp("pulled", "pull failed", "pull")
 		}
-	case "P":
+	case "ctrl+o":
 		if m.section == gitSectionChanges || m.section == gitSectionBranches {
 			m.statusMsg = "pushing..."
 			return m, m.cmdNetworkOp("pushed", "push failed", "push")
 		}
-	case "n":
+	case "ctrl+n":
 		if m.section == gitSectionBranches {
 			m.branchInputMode = true
 			m.branchInputText = ""
 			m.statusMsg = "new branch name:"
 		}
-	case "x":
+	case "ctrl+x":
 		if m.section == gitSectionBranches && m.branchCursor < len(m.branches) {
 			branch := m.branches[m.branchCursor]
 			if branch == m.currentBranch {
@@ -1164,15 +1164,15 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				return m, m.cmdRefresh()
 			}
 			m.pendingAction = gitPendingDeleteBranch
-			m.statusMsg = "press x again to delete " + branch
+			m.statusMsg = "press ctrl+x again to delete " + branch
 		}
-	case "S":
+	case "ctrl+z":
 		if m.section == gitSectionChanges {
 			m.stashInputMode = true
 			m.stashInputText = ""
 			m.statusMsg = "stash message (optional, enter to confirm):"
 		}
-	case "E":
+	case "ctrl+e":
 		if m.section == gitSectionChanges {
 			files := m.currentFileList()
 			if m.filesCursor >= 0 && m.filesCursor < len(files) {
@@ -1581,7 +1581,7 @@ func (m gitModel) renderHints() string {
 		if m.generateCommitMsg != nil {
 			genHint = "  ctrl+g ✨generate"
 		}
-		return "ctrl+enter commit" + genHint + "  esc cancel"
+		return "ctrl+\\ commit" + genHint + "  esc cancel"
 	}
 	if m.branchInputMode || m.stashInputMode || m.ignorePathInputMode {
 		return "enter confirm  esc cancel"
@@ -1589,26 +1589,26 @@ func (m gitModel) renderHints() string {
 	base := "tab next panel  "
 	switch m.panel {
 	case gitPanelSections:
-		return base + "j/k navigate  enter focus files  r refresh"
+		return base + "j/k navigate  enter focus files  ctrl+r refresh"
 	case gitPanelFiles:
 		switch m.section {
 		case gitSectionChanges:
 			if len(m.selectedFiles) > 0 {
-				return base + fmt.Sprintf("%d selected — s stage  u unstage  space toggle  esc clear  r refresh", len(m.selectedFiles))
+				return base + fmt.Sprintf("%d selected — ctrl+s stage  ctrl+u unstage  space toggle  esc clear  ctrl+r refresh", len(m.selectedFiles))
 			}
-			return base + "s stage  u unstage  i ignore file  I ignore path  space/shift+↑↓ select  d discard  E edit  S stash  c commit  / filter  r refresh  f fetch  p pull  P push"
+			return base + "ctrl+s stage  ctrl+u unstage  ctrl+l ignore file  ctrl+_ ignore path  space/shift+↑↓ select  ctrl+d discard  ctrl+e edit  ctrl+z stash  ctrl+a apply  ctrl+\\ commit  ctrl+f filter  ctrl+r refresh  ctrl+g fetch  ctrl+p pull  ctrl+o push"
 		case gitSectionLog:
-			return base + "j/k navigate  r refresh"
+			return base + "j/k navigate  ctrl+r refresh"
 		case gitSectionStash:
-			return base + "enter pop  a apply  d drop  r refresh"
+			return base + "enter pop  ctrl+a apply  ctrl+d drop  ctrl+r refresh"
 		case gitSectionBranches:
-			return base + "enter checkout  n new  x delete  r refresh  f fetch  p pull  P push"
+			return base + "enter checkout  ctrl+n new  ctrl+x delete  ctrl+r refresh  ctrl+g fetch  ctrl+p pull  ctrl+o push"
 		}
 	case gitPanelDiff:
 		if m.section == gitSectionChanges {
-			return base + "j/k scroll  [/] prev/next hunk  s stage hunk  u unstage hunk  r refresh"
+			return base + "j/k scroll  [/] prev/next hunk  ctrl+s stage hunk  ctrl+u unstage hunk  ctrl+r refresh"
 		}
-		return base + "j/k scroll  r refresh"
+		return base + "j/k scroll  ctrl+r refresh"
 	}
 	return base
 }
@@ -1676,7 +1676,8 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 		if m.filterActive {
 			cursor = "█"
 		}
-		filterLine := styles.Hint.Render("/ " + m.filterQuery + cursor)
+		filterLine := styles.Hint.Render("ctrl+f " + m.filterQuery + cursor)
+		filterLine = lipgloss.NewStyle().Width(filesW - 4).MaxHeight(1).Render(filterLine)
 		filesContent = filterLine + "\n" + filesContent
 	}
 	filesPane := focusBorder(m.panel == gitPanelFiles).Width(filesW - 2).Height(panelH).Render(filesContent)
@@ -1731,7 +1732,7 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 		if m.filterActive {
 			cursor = "█"
 		}
-		filterStr := styles.Selected.Render("/ "+m.filterQuery+cursor) + "  " + styles.Hint.Render("esc clear")
+		filterStr := styles.Selected.Render("ctrl+f "+m.filterQuery+cursor) + "  " + styles.Hint.Render("esc clear")
 		statusBar = filterStr + "   " + hints
 	} else {
 		statusBar = hints
@@ -1739,6 +1740,7 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 			statusBar = hints + "   " + errorStyle.Render(m.statusMsg)
 		}
 	}
+	statusBar = lipgloss.NewStyle().Width(w).MaxHeight(1).Render(statusBar)
 	parts = append(parts, statusBar)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }

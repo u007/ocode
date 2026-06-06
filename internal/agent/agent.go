@@ -883,8 +883,35 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult 
 	}
 	tailStart = safeCut(messages, tailStart)
 	if tailStart <= middleStart {
-		emitDebug("COMPACT", "skipped: no compactible middle after safe-cut")
-		return res
+		// When a previous summary exists but there is no new compactible
+		// middle after it, fall back to re-compacting the summary itself.
+		// This lets manual /compact always produce a result (the user
+		// explicitly asked for it), and the anchored re-compaction
+		// re-summarises the previous summary into a fresh one.
+		if prevSummaryIdx >= prefixEnd {
+			emitDebug("COMPACT", fmt.Sprintf("manual compact: no new content after summary at %d; re-compacting summary itself", prevSummaryIdx))
+			middleStart = prevSummaryIdx
+			tailStart = prevSummaryIdx + 1
+			prevSummary = "" // don't pass the old summary as <previous-summary> since we're re-compacting it
+		} else if rt.KeepRecentTurns > 1 {
+			// Sessions with few user turns (e.g. one long agentic run) exhaust
+			// the KeepRecentTurns budget before reaching the prefix end, leaving
+			// no compactible middle. Retry with KeepRecentTurns=1 so we keep
+			// only the last user turn and summarise everything before it.
+			tailStart = findTurnBoundary(messages, 1)
+			if tailStart < middleStart {
+				tailStart = middleStart
+			}
+			tailStart = safeCut(messages, tailStart)
+			if tailStart <= middleStart {
+				emitDebug("COMPACT", "skipped: no compactible middle even with KeepRecentTurns=1")
+				return res
+			}
+			emitDebug("COMPACT", fmt.Sprintf("retried with KeepRecentTurns=1: tailStart=%d middleStart=%d", tailStart, middleStart))
+		} else {
+			emitDebug("COMPACT", "skipped: no compactible middle after safe-cut")
+			return res
+		}
 	}
 
 	middle := messages[middleStart:tailStart]

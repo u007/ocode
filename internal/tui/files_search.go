@@ -11,6 +11,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
@@ -276,7 +277,7 @@ func (m filesModel) updateContentSearch(msg tea.KeyPressMsg) (filesModel, tea.Cm
 			m.contentSearchPanel = filesContentSearchQuery
 		}
 		return m, nil
-	case "i", "I":
+	case "ctrl+l":
 		// Toggle include-ignored and re-run search if there's a query.
 		m.contentSearchIncludeIgnored = !m.contentSearchIncludeIgnored
 		if m.contentSearchQuery != "" {
@@ -320,11 +321,11 @@ func (m filesModel) updateContentSearch(msg tea.KeyPressMsg) (filesModel, tea.Cm
 		cmd, cancel := startContentSearchCmd(m.workDir, m.contentSearchQuery, m.contentSearchExts, m.contentSearchIncludeIgnored)
 		m.contentSearchCancel = cancel
 		return m, cmd
-	case "j", "down":
+	case "ctrl+n", "down":
 		if len(m.contentSearchResults) > 0 && m.contentSearchCursor < len(m.contentSearchResults)-1 {
 			m.contentSearchCursor++
 		}
-	case "k", "up":
+	case "ctrl+p", "up":
 		if m.contentSearchCursor > 0 {
 			m.contentSearchCursor--
 		}
@@ -396,6 +397,7 @@ func (m filesModel) contentView(width, height int, styles Styles) string {
 		queryVal += "█"
 	}
 	queryLine := styles.Hint.Render(queryLabel) + styles.Selected.Width(width-len(queryLabel)).Render(queryVal)
+	queryLine = lipgloss.NewStyle().Width(width).MaxHeight(1).Render(queryLine)
 
 	extVal := m.contentSearchExts
 	if extVal == "" {
@@ -405,6 +407,7 @@ func (m filesModel) contentView(width, height int, styles Styles) string {
 		extVal += "█"
 	}
 	extLine := styles.Hint.Render(extLabel) + styles.Selected.Width(width-len(extLabel)).Render(extVal)
+	extLine = lipgloss.NewStyle().Width(width).MaxHeight(1).Render(extLine)
 
 	// Ignore toggle
 	ignoreIcon := "●"
@@ -413,21 +416,22 @@ func (m filesModel) contentView(width, height int, styles Styles) string {
 		ignoreIcon = "○"
 		ignoreLabel = "Skip .gitignore+hidden"
 	}
-	ignoreLine := styles.Hint.Render("  " + ignoreIcon + " " + ignoreLabel + "  (i toggle)")
+	ignoreLine := styles.Hint.Render("  " + ignoreIcon + " " + ignoreLabel + "  (ctrl+l toggle)")
+	ignoreLine = lipgloss.NewStyle().Width(width).MaxHeight(1).Render(ignoreLine)
 
 	lines = append(lines, queryLine, extLine, ignoreLine, "")
 
 	// Hints
 	if m.contentSearchLoading {
-		lines = append(lines, styles.Hint.Render(fmt.Sprintf("Searching... %d results so far", len(m.contentSearchResults))))
+		lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render(fmt.Sprintf("Searching... %d results so far", len(m.contentSearchResults)))))
 	} else if m.contentSearchDone {
 		if len(m.contentSearchResults) == 0 {
-			lines = append(lines, styles.Hint.Render("No results found"))
+			lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render("No results found")))
 		} else {
-			lines = append(lines, styles.Hint.Render(fmt.Sprintf("%d results — j/k navigate  enter open  esc back", len(m.contentSearchResults))))
+			lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render(fmt.Sprintf("%d results — ctrl+n/ctrl+p navigate  enter open  esc back", len(m.contentSearchResults)))))
 		}
 	} else {
-		lines = append(lines, styles.Hint.Render("Tab switch query/ext  Enter run  esc cancel"))
+		lines = append(lines, lipgloss.NewStyle().Width(width).MaxHeight(1).Render(styles.Hint.Render("Tab switch query/ext  Enter run  esc cancel")))
 	}
 
 	lines = append(lines, "")

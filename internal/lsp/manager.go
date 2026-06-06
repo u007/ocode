@@ -30,6 +30,20 @@ var serversByExt = map[string]serverSpec{
 	".jsx": {cmd: "typescript-language-server", args: []string{"--stdio"}, langID: "javascriptreact"},
 }
 
+// ServerStartedEvent is sent on the event channel when a language server
+// successfully completes its LSP initialize handshake.
+type ServerStartedEvent struct {
+	Cmd    string // binary name, e.g. "gopls"
+	LangID string // primary language ID, e.g. "go"
+	Root   string // project root path
+}
+
+// ServerStatus describes a running language server.
+type ServerStatus struct {
+	Cmd    string // binary name, e.g. "gopls"
+	LangID string // primary language ID
+}
+
 // Manager owns one initialised Client per language extension, lazily started
 // and reused. It also owns a single file-watcher that pushes post-edit text
 // (via textDocument/didChange) into whichever server has the file open, so
@@ -52,6 +66,9 @@ type Manager struct {
 	// which funnels entries into this store. Cleared by Close so a
 	// re-launched server starts from a clean slate.
 	diagnostics *DiagnosticStore
+	// eventCh receives ServerStartedEvent when a server completes its
+	// initialize handshake. Nil in headless mode (runcli, acp, server).
+	eventCh chan ServerStartedEvent
 }
 
 // NewManager returns a Manager rooted at root (the project directory used for
@@ -96,18 +113,21 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if c, ok := m.clients[ext]; ok {
+		m.mu.Unlock()
 		return c, nil
 	}
 	if _, err := exec.LookPath(spec.cmd); err != nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("language server %q not found in PATH (install it for %s support)", spec.cmd, ext)
 	}
 	c, err := NewClient(spec.cmd, spec.args...)
 	if err != nil {
+		m.mu.Unlock()
 		return nil, fmt.Errorf("start %s: %w", spec.cmd, err)
 	}
 	if err := c.Initialize(m.root, spec.langID); err != nil {
+		m.mu.Unlock()
 		c.Close()
 		return nil, fmt.Errorf("initialize %s: %w", spec.cmd, err)
 	}
@@ -123,6 +143,16 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 		})
 	}
 	m.clients[ext] = c
+	// Read eventCh while holding the lock, then send outside the lock.
+	eventCh := m.eventCh
+	m.mu.Unlock()
+	if eventCh != nil {
+		evt := ServerStartedEvent{Cmd: spec.cmd, LangID: spec.langID, Root: m.root}
+		select {
+		case eventCh <- evt:
+		default:
+		}
+	}
 	return c, nil
 }
 
@@ -269,4 +299,39 @@ func KnownServers() []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ActiveServers returns one ServerStatus per unique binary that has a
+// running (non-closed) client. Multiple extensions mapping to the same
+// binary (e.g. .ts/.tsx/.js/.jsx → typescript-language-server) produce
+// one entry. Results are sorted by Cmd.
+func (m *Manager) ActiveServers() []ServerStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	seen := make(map[string]ServerStatus)
+	for ext, c := range m.clients {
+		if c == nil {
+			continue
+		}
+		spec := serversByExt[ext]
+		if _, ok := seen[spec.cmd]; !ok {
+			seen[spec.cmd] = ServerStatus{Cmd: spec.cmd, LangID: spec.langID}
+		}
+	}
+	out := make([]ServerStatus, 0, len(seen))
+	for _, s := range seen {
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Cmd < out[j].Cmd })
+	return out
+}
+
+// SetEventChan registers a channel to receive ServerStartedEvent when a
+// language server successfully initialises. Call only from the TUI layer
+// after the Manager has been constructed. Headless callers (runcli, acp,
+// server) never call this; Manager treats a nil channel as a no-op.
+func (m *Manager) SetEventChan(ch chan ServerStartedEvent) {
+	m.mu.Lock()
+	m.eventCh = ch
+	m.mu.Unlock()
 }

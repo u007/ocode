@@ -14,6 +14,7 @@ const (
 	DebugKindError   = debuglog.KindError
 	DebugKindSession = debuglog.KindSession
 	DebugKindGit     = debuglog.KindGit
+	DebugKindLSP     = debuglog.KindLSP
 )
 
 // DebugEntry is an alias for backward compatibility.

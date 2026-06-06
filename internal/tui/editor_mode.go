@@ -5,10 +5,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -124,9 +122,6 @@ func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.Proc
 			}
 			cmdParts = append(cmdParts, path)
 			c := exec.Command(cmdParts[0], cmdParts[1:]...)
-			if runtime.GOOS != "windows" {
-				c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			}
 			log.Printf("[editor] launching external editor: %q  file=%q  full_cmd=%v", editor, path, cmdParts)
 			id := fmt.Sprintf("editor-%d-%d", os.Getpid(), time.Now().UnixNano())
 			if sup != nil {
@@ -135,7 +130,7 @@ func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.Proc
 					Command:          editor + " " + path,
 					Kind:             tool.ProcessKindEditor,
 					Cmd:              c,
-					OwnsProcessGroup: runtime.GOOS != "windows",
+					OwnsProcessGroup: false,
 					StartedAt:        time.Now(),
 				})
 			}

@@ -169,6 +169,16 @@ func TestFindPrefixEnd(t *testing.T) {
 		{"no system, starts with user", []Message{{Role: "user"}}, 1},
 		{"no system, starts with assistant", []Message{{Role: "assistant"}}, 0},
 		{"empty", nil, 0},
+		{"base systems then compaction summary", []Message{
+			{Role: "system", Content: "base-prompt-1"},
+			{Role: "system", Content: "base-prompt-2"},
+			{Role: "system", Content: compactionSummaryMarker + "\nsome summary"},
+			{Role: "user", Content: "hello"},
+		}, 2},
+		{"compaction summary at start", []Message{
+			{Role: "system", Content: compactionSummaryMarker + "\nsome summary"},
+			{Role: "user", Content: "hello"},
+		}, 0},
 	}
 	for _, c := range cases {
 		if got := findPrefixEnd(c.msgs); got != c.want {
