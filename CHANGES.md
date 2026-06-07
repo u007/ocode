@@ -32,6 +32,7 @@
 - **Recap Result Integration** — Recap result is now added to the message list as an assistant message instead of being held as ephemeral `recapText`.
 - **Compact Result Scroll** — Manual `/compact` now scrolls the transcript to the compaction banner; auto-compact scrolls to bottom.
 - **Compact Banner Scroll** — Compaction result viewport scrolling updated to target the compaction banner specifically.
+- **Version** — Bumped from `0.3.3` to `0.3.4`.
 
 ### Fixed
 - **VS Code IDE Client Keepalive** — `notifications/initialized` now omits empty
