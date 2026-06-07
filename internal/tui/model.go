@@ -3490,6 +3490,9 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 		return m, nil
 	case "ctrl+t":
+		m.cycleTheme()
+		return m, nil
+	case "alt+t":
 		if m.config != nil && agent.ModelSupportsThinking(m.config.Model) {
 			m.thinkingLevelIdx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
 			m.config.ThinkingBudget = thinkingBudgetLevels[m.thinkingLevelIdx]
@@ -3499,9 +3502,6 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
 			m.rerenderTranscriptAndMaybeScroll()
 		}
-		return m, nil
-	case "alt+t":
-		m.cycleTheme()
 		return m, nil
 	case "ctrl+b":
 		if m.backgroundLatestForegroundBash() {
@@ -9733,7 +9733,7 @@ func (m *model) renderStatus() string {
 		suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
 		if supportsReasoning {
-			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry · ctrl+t: reasoning"
+			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry · ctrl+t: theme"
 		} else {
 			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry"
 		}
