@@ -48,6 +48,7 @@
 - **Web Clickable File Paths** — Same lazy-stat path detection rendered via a custom `rehype` plugin (`rehypeFileLinks`) + `linkifyPlainText` for user messages, producing a `filelink` custom element. Web `POST /api/files/open` opens the resolved file via the system opener or `--goto`-capable GUI editor.
 - **OpenAI Responses Empty-Response Retry** — Empty Responses-API replies (no text, no tool calls) are now classified as a retryable error (`ErrNoResponseFromOpenAIResponses`) and retried with the normal backoff loop instead of failing the turn.
 - **Anthropic OAuth Token POST** — `AnthropicExchange` and `AnthropicRefresh` now send `application/x-www-form-urlencoded` (per Anthropic's spec) instead of JSON, fixing token acquisition that was previously failing with a 415.
+- **Detail Viewport Scroll on Resize** — `refreshTopDetailView` now preserves the scroll position when the viewport is resized: if the user was scrolled to the bottom before the resize, the viewport stays at the bottom after content is updated. Prevents jarring jumps to the top on terminal resize or panel split.
 
 ### Added
 - **VS Code `/ide` Integration** — Added lock discovery, WebSocket + MCP client,

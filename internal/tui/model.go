@@ -9194,6 +9194,7 @@ func (m *model) refreshTopDetailView() {
 	if top.sel.dragging {
 		return
 	}
+	atBottom := top.vp.AtBottom() || top.vp.TotalLineCount() == 0
 	top.vp.SetWidth(m.detailViewportWidth())
 	top.vp.SetHeight(m.detailViewportHeight())
 	switch top.kind {
@@ -9216,6 +9217,9 @@ func (m *model) refreshTopDetailView() {
 		if reg := m.processRegistryForRun(top.runPath); reg != nil {
 			setDetailContent(top, renderProcessLog(reg, top.procID))
 		}
+	}
+	if atBottom {
+		top.vp.GotoBottom()
 	}
 }
 
