@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Slash Command Queuing** — Slash commands entered while the agent is streaming or compacting are now queued in `queuedCommands []string` and executed one-at-a-time after the current work ends (behind `queuedInputs`), instead of running immediately. Only `/exit`, `/quit`, `/q` bypass the queue. The queue is drained in the `agentStreamDoneMsg` and `compactFinishedMsg` handlers after queued inputs are processed. The status bar queue counter now includes both queued inputs and queued commands.
 - **Manual /compact Re-Compaction** — When manual `/compact` finds no new content after the previous summary, it now re-compacts the summary itself instead of skipping, ensuring the command always produces a result.
 - **Few-Turn Session Compaction** — Sessions with few user turns that exhaust the `KeepRecentTurns` budget now retry with `KeepRecentTurns=1`, leaving no "nothing to compact" gap.
 - **Resumed Session Compaction Fix** — `findPrefixEnd` now stops before compaction summary markers, preventing resumed sessions with multiple base prompts from absorbing the summary into the prefix.

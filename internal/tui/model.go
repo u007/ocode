@@ -668,6 +668,7 @@ type model struct {
 	unsavedInput             string
 	inputAtFirstLineUpNotice bool
 	queuedInputs             []string
+	queuedCommands           []string // slash commands queued while agent is busy
 	pendingJobMsgs           []message
 	expandedToolOutputs      map[int]bool
 	toolOutputRegions        []toolOutputRegion
@@ -2816,6 +2817,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.maybeScrollTranscriptToBottom()
 				return m, m.processFileReferences(text)
 			}
+			if len(m.queuedCommands) > 0 {
+				cmd := m.queuedCommands[0]
+				m.queuedCommands = m.queuedCommands[1:]
+				return m.handleCommand(cmd)
+			}
 		}
 	case compactStartedMsg:
 		m.compacting = true
@@ -2873,6 +2879,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 			m.maybeScrollTranscriptToBottom()
 			return m, m.processFileReferences(text)
+		}
+		if len(m.queuedCommands) > 0 {
+			cmd := m.queuedCommands[0]
+			m.queuedCommands = m.queuedCommands[1:]
+			return m.handleCommand(cmd)
 		}
 		if resume && m.agent != nil {
 			return m, m.askAgent()
@@ -4866,6 +4877,15 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	cmd := parts[0]
 	args := parts[1:]
 
+	// Queue non-exit commands when the agent is busy so they run after the stream ends.
+	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
+	if (m.streaming || m.compacting) && !isExitCmd {
+		m.queuedCommands = append(m.queuedCommands, text)
+		m.input.Reset()
+		m.layout()
+		return m, nil
+	}
+
 	m.input.Reset()
 	m.messages = append(m.messages, message{role: roleUser, text: text, skipLLM: true})
 
@@ -5601,6 +5621,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.pendingCompactResume = false
 	m.skipCompactPreflight = false
 	m.queuedCompactInputs = nil
+	m.queuedCommands = nil
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
 	m.titleRequested = false
@@ -9851,15 +9872,16 @@ func (m model) renderQueueRow() string {
 		w := m.statusContentWidth()
 		return m.styles.Status.Width(w).MaxHeight(1).Render(text)
 	}
-	if len(m.queuedInputs) == 0 {
+	allQueued := append(append([]string{}, m.queuedInputs...), m.queuedCommands...)
+	if len(allQueued) == 0 {
 		return ""
 	}
-	items := make([]string, 0, len(m.queuedInputs))
-	for i, input := range m.queuedInputs {
+	items := make([]string, 0, len(allQueued))
+	for i, input := range allQueued {
 		label := fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(input))
 		items = append(items, ansi.Truncate(label, 48, "..."))
 	}
-	text := fmt.Sprintf(" Queued (%d): %s", len(m.queuedInputs), strings.Join(items, " | "))
+	text := fmt.Sprintf(" Queued (%d): %s", len(allQueued), strings.Join(items, " | "))
 	// Clamp to a single line so a long queue can't wrap and push the bottom
 	// chrome past the terminal height.
 	w := m.statusContentWidth()
