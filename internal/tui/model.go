@@ -1153,6 +1153,7 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 			m.lspEventCh = make(chan lsp.ServerStartedEvent, 16)
 		}
 		m.lspMgr.SetEventChan(m.lspEventCh)
+		go m.lspMgr.WarmUp(".")
 	}
 	lspMgr := m.lspMgr
 	tools := []tool.Tool{
@@ -1472,6 +1473,13 @@ func newModel(opts ...RunOptions) model {
 	m.logViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	m.logViewport.SoftWrap = true
 	m.sidebarCache = &sidebarComputeCache{}
+
+	// Transfer the LSP manager and notification channels from the temporary
+	// model used to build the tool set. Without this, m.lspMgr stays nil and
+	// the sidebar never shows the LSP section.
+	m.lspMgr = tmp.lspMgr
+	m.lspDiagCh = tmp.lspDiagCh
+	m.lspEventCh = tmp.lspEventCh
 
 	agent.DebugAppend = func(kind, msg string) {
 		DebugLog.Append(DebugEntry{Kind: DebugEntryKind(kind), Message: msg})
@@ -2476,11 +2484,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.lspServerStartTimes == nil {
 			m.lspServerStartTimes = make(map[string]time.Time)
 		}
+		if msg.event.Phase == "starting" {
+			// Server binary confirmed present; handshake in progress.
+			if _, already := m.lspServerStartTimes[msg.event.Cmd]; !already {
+				m.lspServerStartTimes[msg.event.Cmd] = time.Now()
+			}
+			m.lspStateSeq++
+			debuglog.Log.Append(debuglog.Entry{
+				Kind:    debuglog.KindLSP,
+				Message: fmt.Sprintf("%s starting…", msg.event.Cmd),
+			})
+			return m, listenLSPEvents(m.lspEventCh)
+		}
+		// Phase == "ready": initialize handshake complete.
 		m.lspServerStartTimes[msg.event.Cmd] = time.Now()
 		m.lspStateSeq++
 		debuglog.Log.Append(debuglog.Entry{
 			Kind:    debuglog.KindLSP,
-			Message: fmt.Sprintf("%s started  (%s · %s)", msg.event.Cmd, msg.event.LangID, msg.event.Root),
+			Message: fmt.Sprintf("%s ready  (%s · %s)", msg.event.Cmd, msg.event.LangID, msg.event.Root),
 		})
 		var cmds []tea.Cmd
 		cmds = append(cmds, listenLSPEvents(m.lspEventCh), lspIndexingTimer(msg.event.Cmd))
@@ -11545,12 +11566,25 @@ func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {
 }
 
 // renderLSPSection produces sidebar rows for the LSP section. Returns nil
-// when no servers are active (caller omits the section header).
+// when no servers are active or warming up (caller omits the section header).
 func (m model) renderLSPSection(outerBodyWidth int) []string {
 	if m.lspMgr == nil {
 		return nil
 	}
 	servers := m.lspMgr.ActiveServers()
+
+	// Also include servers that are warming up (binary found, handshake in
+	// progress) but not yet in ActiveServers.
+	activeSet := make(map[string]bool, len(servers))
+	for _, s := range servers {
+		activeSet[s.Cmd] = true
+	}
+	for cmd := range m.lspServerStartTimes {
+		if !activeSet[cmd] {
+			servers = append(servers, lsp.ServerStatus{Cmd: cmd})
+		}
+	}
+
 	if len(servers) == 0 {
 		return nil
 	}

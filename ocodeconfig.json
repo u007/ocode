@@ -17,7 +17,7 @@
   },
   "editor": "cat",
   "ide_mode": "claude",
-  "last_model": "opencode-go/deepseek-v4-flash",
+  "last_model": "opencode/deepseek-v4-flash-free",
   "last_thinking_budget": 16000,
   "permissions": {
     "mode": "normal",

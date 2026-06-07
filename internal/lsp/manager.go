@@ -3,6 +3,7 @@ package lsp
 import (
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -30,12 +31,15 @@ var serversByExt = map[string]serverSpec{
 	".jsx": {cmd: "typescript-language-server", args: []string{"--stdio"}, langID: "javascriptreact"},
 }
 
-// ServerStartedEvent is sent on the event channel when a language server
-// successfully completes its LSP initialize handshake.
+// ServerStartedEvent is sent on the event channel at two points in the server
+// lifecycle. Phase=="starting" fires immediately before the LSP initialize
+// handshake begins (server binary found, goroutine launched). Phase=="ready"
+// fires once initialize completes successfully.
 type ServerStartedEvent struct {
 	Cmd    string // binary name, e.g. "gopls"
 	LangID string // primary language ID, e.g. "go"
 	Root   string // project root path
+	Phase  string // "starting" | "ready"
 }
 
 // ServerStatus describes a running language server.
@@ -147,7 +151,7 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 	eventCh := m.eventCh
 	m.mu.Unlock()
 	if eventCh != nil {
-		evt := ServerStartedEvent{Cmd: spec.cmd, LangID: spec.langID, Root: m.root}
+		evt := ServerStartedEvent{Cmd: spec.cmd, LangID: spec.langID, Root: m.root, Phase: "ready"}
 		select {
 		case eventCh <- evt:
 		default:
@@ -334,4 +338,62 @@ func (m *Manager) SetEventChan(ch chan ServerStartedEvent) {
 	m.mu.Lock()
 	m.eventCh = ch
 	m.mu.Unlock()
+}
+
+// WarmUp eagerly starts language servers for every extension found under root
+// without blocking the caller. Each unique server binary is started in its own
+// goroutine; errors (missing binary, init failure) are logged and silently
+// skipped so a missing server never delays startup.
+func (m *Manager) WarmUp(root string) {
+	// Collect the set of extensions present in the project (depth-limited to
+	// avoid scanning huge vendor trees).
+	found := make(map[string]bool)
+	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if name == "vendor" || name == "node_modules" || name == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		ext := filepath.Ext(path)
+		if _, ok := serversByExt[ext]; ok {
+			found[ext] = true
+		}
+		return nil
+	})
+
+	// Read eventCh once outside the loop (avoids repeated lock).
+	m.mu.Lock()
+	eventCh := m.eventCh
+	m.mu.Unlock()
+
+	// Start one goroutine per unique server binary (not per extension).
+	launched := make(map[string]bool)
+	for ext := range found {
+		spec := serversByExt[ext]
+		if launched[spec.cmd] {
+			continue
+		}
+		launched[spec.cmd] = true
+
+		// Signal "starting" immediately so the sidebar can show a spinner
+		// before the blocking initialize handshake completes.
+		if eventCh != nil {
+			select {
+			case eventCh <- ServerStartedEvent{Cmd: spec.cmd, LangID: spec.langID, Root: root, Phase: "starting"}:
+			default:
+			}
+		}
+
+		e, s := ext, spec
+		go func() {
+			if _, err := m.ClientForExt(e); err != nil {
+				log.Printf("lsp warmup %s: %v", s.cmd, err)
+			}
+		}()
+	}
 }
