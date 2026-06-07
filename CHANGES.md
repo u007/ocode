@@ -136,7 +136,12 @@
 ### Security
 - **Exfiltration-Risk Detection for URL-Calling Commands** — `IsHarmfulBashCommand()` now detects data exfiltration risk in `curl`, `wget`, `httpie`, and `netcat` commands. Commands that could leak secrets (file upload via `-d @file`, `-F file=@secret`, `--upload-file`; env var injection via `-H "Auth: $TOKEN"`; subshell expansion `$(cat .env)`; proxy/config redirects) are flagged as **harmful** — they always require human approval and cannot be persisted as "always allow". Benign usage like `curl https://api.example.com/get` is not affected. Covers 4 detection categories across 4 tools with ~50 test cases.
 
-## [Unreleased] — 2026-06-02
+## [Unreleased]
+
+### Added
+- **Version** — Bumped from `0.3.2` to `0.3.3`.
+
+## [0.3.2] — 2026-06-07
 
 ### Added
 - **Skills Management CLI** — New `ocode skills` subcommand for installing, upgrading, listing, and uninstalling bundled skills. Skills are embedded into the binary via `//go:embed` and installed to `~/.config/opencode/skills/`. Subcommands: `list`, `install [name...]`, `upgrade [name...]`, `uninstall <name...>`. Backup-on-overwrite creates a timestamped `.bak.<timestamp>` copy of the existing SKILL.md before replacing it. Symlink safety: refuses to install into symlinked skill directories.
