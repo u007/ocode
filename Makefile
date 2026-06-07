@@ -12,35 +12,42 @@ build: web-build
 
 # ── Install ──────────────────────────────────────────────────────────────────
 
-install: build
-	go install .
+install: web-build
+	go install $(LDFLAGS) .
 
 # ── OS-specific builds (output to project root for convenience) ──────────────
 
 build-darwin:
-	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(APP)-darwin-amd64 .
-	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(APP)-darwin-arm64 .
+	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(APP)-darwin-amd64 . & \
+	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(APP)-darwin-arm64 . & \
+	wait
 
 build-linux:
-	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(APP)-linux-amd64 .
-	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(APP)-linux-arm64 .
+	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(APP)-linux-amd64 . & \
+	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(APP)-linux-arm64 . & \
+	wait
 
 build-windows:
 	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(APP)-windows-amd64.exe .
 
 # ── Build all platforms ──────────────────────────────────────────────────────
 
-build-all: build-darwin build-linux build-windows
+build-all:
+	$(MAKE) build-darwin & \
+	$(MAKE) build-linux & \
+	$(MAKE) build-windows & \
+	wait
 
 # ── Release: versioned builds in a clean directory ──────────────────────────
 
 release: clean
 	@mkdir -p $(OUTDIR)
-	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-darwin-amd64 .
-	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-darwin-arm64 .
-	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-linux-amd64 .
-	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-linux-arm64 .
-	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-windows-amd64.exe .
+	GOOS=darwin GOARCH=amd64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-darwin-amd64 . & \
+	GOOS=darwin GOARCH=arm64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-darwin-arm64 . & \
+	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-linux-amd64 . & \
+	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-linux-arm64 . & \
+	GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o $(OUTDIR)/$(APP)-$(VERSION)-windows-amd64.exe . & \
+	wait
 	cd $(OUTDIR) && sha256sum $(APP)-* > sha256sums.txt
 	@echo "\n✅ Release $(VERSION) built in $(OUTDIR)/"
 

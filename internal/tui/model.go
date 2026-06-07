@@ -4309,6 +4309,25 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
+			if m.sidebarIDEToggleForClick(mouse) {
+				var cmd tea.Cmd
+				if m.ideMode == config.IDEModeClaude {
+					m.ideConnected = false
+					m.ideSelection = nil
+					m.ideOpenEditors = nil
+					m.ideMode = config.IDEModeOff
+					if err := config.SaveIDEMode(config.IDEModeOff); err != nil {
+						log.Printf("ide: save mode off: %v", err)
+					}
+				} else {
+					if err := config.SaveIDEMode(config.IDEModeClaude); err != nil {
+						log.Printf("ide: save mode claude: %v", err)
+					}
+					cmd = m.connectIDE()
+				}
+				m.sidebarSel = selectionState{}
+				return m, cmd, true
+			}
 			m.sidebarSel = selectionState{}
 		}
 		if !m.detail.empty() {
@@ -9912,6 +9931,8 @@ type sidebarRenderData struct {
 	allowedHeaderBottomIdx int // index in bottomLines of the Allowed header, -1 if absent
 	advisorToggleTopIdx    int // index in topLines of the advisor on/off row, -1 if absent
 	advisorToggleRows      int // number of (possibly wrapped) rows the advisor row occupies
+	ideToggleTopIdx        int // index in topLines of the IDE on/off row, -1 if absent
+	ideToggleRows          int // number of (possibly wrapped) rows the IDE row occupies
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -10169,7 +10190,7 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, ideToggleTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -10308,7 +10329,9 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.advisorToggleRows = len(data.topLines) - data.advisorToggleTopIdx
 	appendWrapped(&data.topLines, dimStyle.Render("small:   ")+sidebarTextStyle.Render(smallModel), outerBodyWidth)
 	appendWrapped(&data.topLines, dimStyle.Render("perm:    ")+sidebarTextStyle.Render(pPermModel), outerBodyWidth)
+	data.ideToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, m.ideSidebarStatusLine(), outerBodyWidth)
+	data.ideToggleRows = len(data.topLines) - data.ideToggleTopIdx
 	data.topLines = append(data.topLines, "")
 
 	// ── Git status section (scrollable) ──
@@ -10800,6 +10823,25 @@ func (m model) sidebarAdvisorToggleForClick(mouse tea.Mouse) bool {
 	}
 	startY := layout.contentTopY + data.advisorToggleTopIdx
 	endY := minInt(startY+data.advisorToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
+// sidebarIDEToggleForClick returns true when the click lands on the IDE on/off
+// row in the pinned top area of the sidebar.
+func (m model) sidebarIDEToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.ideToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.ideToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.ideToggleTopIdx
+	endY := minInt(startY+data.ideToggleRows, layout.scrollScreenY)
 	return mouse.Y >= startY && mouse.Y < endY
 }
 

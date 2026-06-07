@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **IDE Sidebar Toggle** — Clicking the IDE status line in the sidebar now toggles between `IDEModeClaude` and `IDEModeOff`. Includes `ideToggleTopIdx`/`ideToggleRows` render-data tracking and a new `sidebarIDEToggleForClick` hit-test method.
 - **Slash Command Queuing** — Slash commands entered while the agent is streaming or compacting are now queued in `queuedCommands []string` and executed one-at-a-time after the current work ends (behind `queuedInputs`), instead of running immediately. Only `/exit`, `/quit`, `/q` bypass the queue. The queue is drained in the `agentStreamDoneMsg` and `compactFinishedMsg` handlers after queued inputs are processed. The status bar queue counter now includes both queued inputs and queued commands.
 - **Manual /compact Re-Compaction** — When manual `/compact` finds no new content after the previous summary, it now re-compacts the summary itself instead of skipping, ensuring the command always produces a result.
 - **Few-Turn Session Compaction** — Sessions with few user turns that exhaust the `KeepRecentTurns` budget now retry with `KeepRecentTurns=1`, leaving no "nothing to compact" gap.
@@ -18,6 +19,7 @@
 - **Slash Command Usage Skill** — Section 9 of `skills/ocode-usage/SKILL.md` updated with the full slash command documentation.
 
 ### Changed
+- **Makefile Parallel Cross-Compilation** — `build-darwin`, `build-linux`, `build-all`, and `release` targets now run per-OS/per-arch builds concurrently with `&` + `wait`, cutting total build time per target. `install` now depends on `web-build` (not `build`) and includes `$(LDFLAGS)` for versioned binaries.
 - **Files Tab Keyboard Shortcuts** — Migrated from single-letter keys to Ctrl+letter combos across the file tree and preview panels to avoid terminal input conflicts. `j/k` → `up/down`, `e` → `ctrl+e`, `E` → `ctrl+v`, `n` → `ctrl+n`, `N` → `ctrl+b`, `r` → `ctrl+r`, `D` → `ctrl+d`, `i` → `ctrl+l`, `y` → `ctrl+y`, `o` → `ctrl+o`, `R` → `ctrl+t`, `/` → `ctrl+g` (fuzzy), `ctrl+f`/`/f` → `ctrl+f` (content search). In-file search `n`/`p` → `ctrl+n`/`ctrl+p`.
 - **Git Tab Keyboard Shortcuts** — Same Ctrl+letter migration across changes, log, stash, and branches sections. `r` → `ctrl+r`, `/` → `ctrl+f`, `s` → `ctrl+s`, `u` → `ctrl+u`, `d` → `ctrl+d`, `c` → `ctrl+\\`, `a` → `ctrl+a`, `i` → `ctrl+l`, `I` → `ctrl+_`, `f` → `ctrl+g`, `p` → `ctrl+p`, `P` → `ctrl+o`, `n` → `ctrl+n`, `x` → `ctrl+x`, `S` → `ctrl+z`, `E` → `ctrl+e`.
 - **Root Model Add-to-Context Key** — `a` key binding changed to `ctrl+a` for consistency.
