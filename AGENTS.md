@@ -59,7 +59,7 @@ every click target.
 
 ## User Interaction
 - TUI supports `/commands` and `!shell`.
-- **Slash command queuing:** All slash commands entered while the agent is streaming or compacting must be queued (`queuedCommands []string`) and executed one-at-a-time after the current work ends — not run immediately. Only `/exit`, `/quit`, `/q` bypass the queue. Gate this inside `handleCommand` (single chokepoint covering all callers: enter key, palette, keybinds, leader shortcuts, hotkeys). Drain `queuedCommands` in `agentStreamDoneMsg` and `compactFinishedMsg` handlers, after `queuedInputs` are processed, so a command never fires while another stream is in flight.
+- **Slash command queuing:** All slash commands entered while the agent is streaming or compacting must be queued (`queuedCommands []string`) and executed one-at-a-time after the current work ends — not run immediately. Only `/exit`, `/quit`, `/q` bypass the queue by default. Synchronous local UI/config commands that do not start a new agent request may also bypass the queue; keep any such exceptions centralized in `handleCommand` (single chokepoint covering all callers: enter key, palette, keybinds, leader shortcuts, hotkeys) and document them here. Drain `queuedCommands` in `agentStreamDoneMsg` and `compactFinishedMsg` handlers, after `queuedInputs` are processed, so a command never fires while another stream is in flight.
 - Use `ctrl+x` for leader keys and `ctrl+p` for palette.
 - Avoid introducing raw shortcuts that are likely to conflict with host terminals like Warp, Ghostty, and iTerm2; prefer `ctrl+x` leader sequences for non-essential UI toggles.
 - Sessions are automatically saved and resumed.

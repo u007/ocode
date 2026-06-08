@@ -695,6 +695,8 @@ type model struct {
 	transcriptContent        string
 	transcriptLines          []string
 	rawTranscriptLines       []string
+	msgRenderCache           map[int]msgRenderCacheEntry // per-message rendered-block cache keyed by message index; avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta
+	themeGen                 int                         // bumped on every applyTheme so the render cache invalidates when colors change
 	filesSel                 selectionState
 	inputSel                 selectionState
 	gitSel                   selectionState
@@ -1023,6 +1025,7 @@ func (m *model) applyTheme() {
 		m.styles = ApplyThemeColors("tokyonight")
 	}
 	m.inputThemeApplied = false
+	m.themeGen++ // invalidate the per-message render cache: colors changed
 	m.applyInputTheme()
 }
 
@@ -4926,8 +4929,17 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	args := parts[1:]
 
 	// Queue non-exit commands when the agent is busy so they run after the stream ends.
+	// Instant commands are local UI / config toggles that never trigger agent
+	// streaming, so they can run immediately even while busy.
 	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
-	if (m.streaming || m.compacting) && !isExitCmd {
+	isInstantCmd := cmd == "/model" || cmd == "/models" ||
+		cmd == "/help" || cmd == "/thinking" || cmd == "/details" ||
+		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
+		cmd == "/yolo" || cmd == "/small-model" || cmd == "/editor" ||
+		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
+		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
+		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp"
+	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
 		m.layout()
@@ -7653,7 +7665,13 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req)), transient: true})
 		}
 		m.persistPermissions()
-		return m.executeToolWithRules(toolName, args, "")
+		// Execute the just-approved call via the approved path (no permission
+		// re-check). The persisted rule above governs FUTURE calls; re-running
+		// Decide on this call is what caused the dialog to loop whenever the
+		// persisted rule didn't fully cover the request (un-persistable broad
+		// prefixes, out-of-scope redirections/env vars, or compound commands
+		// where the next sub-command still needs approval).
+		return m.executeApprovedTool(toolName, args, outOfScopePathRoot(req))
 	case "t":
 		if agent.IsHarmfulRequest(req) {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful tool): tool=%s", toolName)
@@ -7667,7 +7685,9 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		m.setToolPermission(toolName, agent.PermissionAllow)
 		m.persistPermissions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing tool %q.", toolName), transient: true})
-		return m.executeToolWithRules(toolName, args, pathRoot)
+		// Approved path (no re-check) for this call; the tool rule persisted
+		// above governs future calls. See the "a" branch above for why.
+		return m.executeApprovedTool(toolName, args, pathRoot)
 	case "n", "no", "deny":
 		log.Printf("[perm] permission DENIED: tool=%s", toolName)
 		return m.permissionDeniedToolResult(toolName)
@@ -7798,24 +7818,6 @@ func (m model) executeApprovedTool(toolName string, args json.RawMessage, pathRo
 			defer tool.ReleaseTemporaryAllowedPath(pathRoot)
 		}
 		result, err := m.agent.HandleApprovedToolCall(toolName, args)
-		if err != nil {
-			result = fmt.Sprintf("Error: %v", err)
-		}
-		result = agent.TruncateToolResult(m.pendingToolCallID, result)
-		return []agent.Message{{Role: "tool", ToolID: m.pendingToolCallID, Content: result}}
-	}
-}
-
-func (m model) executeToolWithRules(toolName string, args json.RawMessage, pathRoot string) tea.Cmd {
-	return func() tea.Msg {
-		releaseAfter := false
-		if pathRoot != "" {
-			releaseAfter = tool.AcquireTemporaryAllowedPath(pathRoot)
-		}
-		if releaseAfter {
-			defer tool.ReleaseTemporaryAllowedPath(pathRoot)
-		}
-		result, err := m.agent.HandleToolCall(toolName, args)
 		if err != nil {
 			result = fmt.Sprintf("Error: %v", err)
 		}
@@ -8548,9 +8550,146 @@ func (m *model) scrollToCompactionBanner() {
 	m.viewport.GotoBottom()
 }
 
+// Block kinds returned by renderMessageBlock; the caller uses these to register
+// the matching click/hover region (tool boxes, thinking blocks, compaction
+// summaries) with the correct line span.
+const (
+	blockKindPlain = iota
+	blockKindTool
+	blockKindThinking
+	blockKindCompaction
+)
+
+// msgRenderKey captures every input that affects a single message's rendered
+// block. When the key is unchanged, renderMessageBlock returns the cached
+// string instead of re-running lipgloss/markdown rendering — the dominant cost
+// when renderTranscript walks the whole message list on every streamed delta.
+type msgRenderKey struct {
+	role      role
+	kind      int    // block kind; disambiguates compaction-summary vs plain assistant (same role/content otherwise)
+	content   string // msg.text, or msg.raw.Content for tool/compaction blocks
+	toolName  string
+	expanded  bool
+	showThink bool
+	width     int
+	themeGen  int
+}
+
+type msgRenderCacheEntry struct {
+	key   msgRenderKey
+	block string
+	kind  int
+}
+
+// renderMessageBlock renders a single transcript message into its styled
+// (unwrapped) block string and reports its block kind. Detection of the branch
+// and cache key is cheap (string prefixes + a map lookup); only a cache miss
+// pays for the expensive lipgloss/markdown render. The returned block is
+// byte-identical to the inline switch it replaced, so the caller's heightNow /
+// region bookkeeping is unaffected.
+func (m *model) renderMessageBlock(i int, msg message) (string, int) {
+	width := m.viewport.Width()
+
+	// Determine kind + key inputs without rendering.
+	kind := blockKindPlain
+	content := msg.text
+	toolName := ""
+	expanded := false
+	switch msg.role {
+	case roleThinking:
+		if strings.TrimSpace(msg.text) == "" {
+			return "", blockKindPlain // empty thinking contributes nothing
+		}
+		kind = blockKindThinking
+		expanded = m.expandedThinking[i]
+	case roleAssistant:
+		if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
+			_, isQuestion := parseQuestionPrompt(msg.raw.Content)
+			isPermAsk := strings.HasPrefix(msg.raw.Content, tool.SentinelPermissionAsk)
+			if !isQuestion && !isPermAsk {
+				kind = blockKindTool
+				content = msg.raw.Content
+				expanded = m.expandedToolOutputs[i]
+				toolName = m.lookupToolName(msg.raw.ToolID)
+				if toolName == "" {
+					toolName = "tool"
+				}
+			}
+		} else if msg.raw != nil && msg.raw.Role == "system" && strings.HasPrefix(msg.raw.Content, "[ocode:compaction-summary]") {
+			kind = blockKindCompaction
+			content = msg.raw.Content
+			expanded = m.expandedCompaction[i]
+		}
+	}
+
+	key := msgRenderKey{
+		role:      msg.role,
+		kind:      kind,
+		content:   content,
+		toolName:  toolName,
+		expanded:  expanded,
+		showThink: m.showThinking,
+		width:     width,
+		themeGen:  m.themeGen,
+	}
+	if hit, ok := m.msgRenderCache[i]; ok && hit.key == key {
+		return hit.block, hit.kind
+	}
+
+	// Cache miss — render.
+	var block string
+	switch {
+	case msg.role == roleUser:
+		block = m.renderUserText(strings.TrimRight(msg.text, "\n"))
+	case kind == blockKindThinking:
+		ctext := strings.TrimSpace(msg.text)
+		rcontent := renderThinkingContent(ctext, m.styles)
+		wrapped := wrapView(rcontent, width)
+		lines := strings.Split(wrapped, "\n")
+		totalLines := len(lines)
+		collapsed := !expanded && totalLines > 8
+		header := "⟁ thinking"
+		if collapsed {
+			header = fmt.Sprintf("⟁ thinking · %d lines [▸ click to expand]", totalLines)
+		} else if totalLines > 8 {
+			header = fmt.Sprintf("⟁ thinking · %d lines [▾ click to collapse]", totalLines)
+		}
+		body := rcontent
+		if collapsed {
+			body = strings.Join(lines[totalLines-8:], "\n")
+		}
+		block = m.styles.ThinkingHeader.Render(header) + "\n" + m.styles.Thinking.Render(body)
+	case kind == blockKindTool:
+		if strings.HasPrefix(msg.raw.Content, "ORPHAN_TOOL_ERROR:") {
+			block = m.renderOrphanWarningBox(msg.raw.Content, expanded)
+		} else {
+			block = m.renderToolOutputBox(toolName, msg.raw.Content, expanded)
+		}
+	case kind == blockKindCompaction:
+		block = m.renderCompactionSummaryBox(msg.raw.Content, expanded)
+	default:
+		block = m.renderAssistantText(strings.TrimRight(msg.text, "\n"))
+	}
+
+	m.msgRenderCache[i] = msgRenderCacheEntry{key: key, block: block, kind: kind}
+	return block, kind
+}
+
 func (m *model) renderTranscript() {
 	if len(m.messages) == 0 {
 		return
+	}
+	if m.msgRenderCache == nil {
+		m.msgRenderCache = make(map[int]msgRenderCacheEntry)
+	}
+	// Drop entries for indices no longer present (e.g. after /new shrinks the
+	// list) so stale, possibly large tool-output blocks aren't retained.
+	if len(m.msgRenderCache) > len(m.messages) {
+		for idx := range m.msgRenderCache {
+			if idx >= len(m.messages) {
+				delete(m.msgRenderCache, idx)
+			}
+		}
 	}
 	var b strings.Builder
 	// Running line count equivalent to lipgloss.Height(b.String()) but scanning
@@ -8581,83 +8720,37 @@ func (m *model) renderTranscript() {
 		if i > 0 {
 			b.WriteString("\n\n")
 		}
-		switch msg.role {
-		case roleUser:
-			b.WriteString(m.renderUserText(strings.TrimRight(msg.text, "\n")))
-		case roleThinking:
-			text := strings.TrimSpace(msg.text)
-			if text == "" {
-				continue
-			}
-			content := renderThinkingContent(text, m.styles)
-			expanded := m.expandedThinking[i]
-			width := m.viewport.Width()
-			wrapped := wrapView(content, width)
-			lines := strings.Split(wrapped, "\n")
-			totalLines := len(lines)
-			collapsed := !expanded && totalLines > 8
-			header := "⟁ thinking"
-			if collapsed {
-				header = fmt.Sprintf("⟁ thinking · %d lines [▸ click to expand]", totalLines)
-			} else if totalLines > 8 {
-				header = fmt.Sprintf("⟁ thinking · %d lines [▾ click to collapse]", totalLines)
-			}
+		block, kind := m.renderMessageBlock(i, msg)
+		switch kind {
+		case blockKindThinking:
 			startLine := heightNow()
-			b.WriteString(m.styles.ThinkingHeader.Render(header))
-			b.WriteString("\n")
-			body := content
-			if collapsed {
-				body = strings.Join(lines[totalLines-8:], "\n")
-			}
-			b.WriteString(m.styles.Thinking.Render(body))
+			b.WriteString(block)
 			endLine := heightNow() - 1
 			m.thinkingRegions = append(m.thinkingRegions, toolOutputRegion{
 				messageIndex: i,
 				startLine:    startLine,
 				endLine:      endLine,
 			})
-		case roleAssistant:
-			if msg.raw != nil && msg.raw.Role == "tool" && msg.raw.ToolID != "" {
-				if _, ok := parseQuestionPrompt(msg.raw.Content); ok {
-					b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
-					break
-				}
-				if strings.HasPrefix(msg.raw.Content, tool.SentinelPermissionAsk) {
-					b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
-					break
-				}
-				toolName := m.lookupToolName(msg.raw.ToolID)
-				if toolName == "" {
-					toolName = "tool"
-				}
-				startLine := heightNow()
-				var boxContent string
-				if strings.HasPrefix(msg.raw.Content, "ORPHAN_TOOL_ERROR:") {
-					boxContent = m.renderOrphanWarningBox(msg.raw.Content, m.expandedToolOutputs[i])
-				} else {
-					boxContent = m.renderToolOutputBox(toolName, msg.raw.Content, m.expandedToolOutputs[i])
-				}
-				b.WriteString(boxContent)
-				endLine := heightNow() - 1
-				m.toolOutputRegions = append(m.toolOutputRegions, toolOutputRegion{
-					messageIndex: i,
-					startLine:    startLine,
-					endLine:      endLine,
-				})
-			} else if msg.raw != nil && msg.raw.Role == "system" && strings.HasPrefix(msg.raw.Content, "[ocode:compaction-summary]") {
-				// Compaction summary: render as collapsible section
-				startLine := heightNow()
-				boxContent := m.renderCompactionSummaryBox(msg.raw.Content, m.expandedCompaction[i])
-				b.WriteString(boxContent)
-				endLine := heightNow() - 1
-				m.compactionRegions = append(m.compactionRegions, toolOutputRegion{
-					messageIndex: i,
-					startLine:    startLine,
-					endLine:      endLine,
-				})
-			} else {
-				b.WriteString(m.renderAssistantText(strings.TrimRight(msg.text, "\n")))
-			}
+		case blockKindTool:
+			startLine := heightNow()
+			b.WriteString(block)
+			endLine := heightNow() - 1
+			m.toolOutputRegions = append(m.toolOutputRegions, toolOutputRegion{
+				messageIndex: i,
+				startLine:    startLine,
+				endLine:      endLine,
+			})
+		case blockKindCompaction:
+			startLine := heightNow()
+			b.WriteString(block)
+			endLine := heightNow() - 1
+			m.compactionRegions = append(m.compactionRegions, toolOutputRegion{
+				messageIndex: i,
+				startLine:    startLine,
+				endLine:      endLine,
+			})
+		default:
+			b.WriteString(block)
 		}
 	}
 	// Add trailing padding so agent/permission boxes don't block the view.

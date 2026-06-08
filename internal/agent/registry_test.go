@@ -185,6 +185,91 @@ func TestPermissionPrefixBeatsSafeCommand(t *testing.T) {
 	}
 }
 
+// TestGitAlwaysAllowPersistsAtSubcommandGranularity reproduces the permission
+// dialog "reappears forever" bug: choosing "always allow" for `git push` used to
+// offer a blanket "git" prefix rule that SetBashPrefixRule deliberately refuses
+// to persist, so Decide kept returning Ask. The request must now be offered at
+// two-word granularity ("git push") so the rule actually persists and the
+// command auto-allows on the next Decide — without auto-allowing force-push or
+// other harmful git subcommands.
+func TestGitAlwaysAllowPersistsAtSubcommandGranularity(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetMode(PermissionModeNormal)
+
+	args := json.RawMessage(`{"command":"git push origin main"}`)
+	dec := pm.Decide("bash", args)
+	if dec.Level != PermissionAsk || dec.Request == nil {
+		t.Fatalf("expected initial ask for git push, got %+v", dec)
+	}
+	if dec.Request.Scope != PermissionScopeBashPrefix || dec.Request.Prefix != "git push" {
+		t.Fatalf("expected two-word bash-prefix request, got scope=%s prefix=%q", dec.Request.Scope, dec.Request.Prefix)
+	}
+
+	// Emulate "always allow this rule" persistence.
+	pm.SetBashPrefixRule(dec.Request.Prefix, PermissionAllow)
+
+	if got := pm.Decide("bash", args).Level; got != PermissionAllow {
+		t.Fatalf("git push must auto-allow after persist; got %s (dialog would loop)", got)
+	}
+	// Harmful variants must still require explicit approval.
+	if got := pm.Decide("bash", json.RawMessage(`{"command":"git push --force origin main"}`)).Level; got != PermissionAsk {
+		t.Fatalf("git push --force must still ask; got %s", got)
+	}
+	if got := pm.Decide("bash", json.RawMessage(`{"command":"git revert HEAD"}`)).Level; got != PermissionAsk {
+		t.Fatalf("git revert must still ask; got %s", got)
+	}
+	// A blanket "git" deny must still govern every subcommand.
+	pm2 := NewPermissionManager()
+	pm2.SetBashPrefixRule("git", PermissionDeny)
+	if got := pm2.Decide("bash", args).Level; got != PermissionDeny {
+		t.Fatalf("broad git deny must win over git push; got %s", got)
+	}
+}
+
+// TestRedirectFdDupParsing guards the shell-parser bug where "2>&1" was
+// tokenized as a "2>" redirect plus a "&" operator plus a "1" command word —
+// surfacing in the permission dialog as a bogus `always allow bash prefix "1"`.
+// fd-duplication and &> redirects must not produce stray "1"/"2" command words,
+// while a real background "&" must still split commands.
+func TestRedirectFdDupParsing(t *testing.T) {
+	noFdWord := func(t *testing.T, command string, wantCmds int) {
+		t.Helper()
+		cmds, err := parseShellCommandLine(command)
+		if err != nil {
+			t.Fatalf("%q: parse error %v", command, err)
+		}
+		if wantCmds >= 0 && len(cmds) != wantCmds {
+			t.Fatalf("%q: got %d sub-commands, want %d (%+v)", command, len(cmds), wantCmds, cmds)
+		}
+		for _, c := range cmds {
+			if len(c.cmdWords) > 0 && (c.cmdWords[0] == "1" || c.cmdWords[0] == "2") {
+				t.Fatalf("%q: bogus fd command word %q", command, c.cmdWords[0])
+			}
+		}
+	}
+
+	// The reported command: cd && bun ... 2>&1 | tail -20 → cd, bun, tail (no "1").
+	noFdWord(t, "cd /tmp/x && bun run lint:fix:changed 2>&1 | tail -20", 3)
+	noFdWord(t, "foo 2>&1", 1)
+	noFdWord(t, "foo 1>&2", 1)
+	noFdWord(t, "foo >&2", 1)
+	noFdWord(t, "foo 2>&-", 1)
+
+	// &> / &>> redirect both streams to a file — the file is a checkable target.
+	for _, command := range []string{"foo &> out.txt", "foo &>> out.txt", "foo > out.txt 2>&1"} {
+		cmds, err := parseShellCommandLine(command)
+		if err != nil {
+			t.Fatalf("%q: parse error %v", command, err)
+		}
+		if len(cmds) != 1 || len(cmds[0].redirections) != 1 || cmds[0].redirections[0] != "out.txt" {
+			t.Fatalf("%q: expected single redirection to out.txt, got %+v", command, cmds)
+		}
+	}
+
+	// A genuine background "&" must still split into two commands.
+	noFdWord(t, "echo hi & echo bye", 2)
+}
+
 func TestPermissionManagerYoloAllowsBash(t *testing.T) {
 	pm := NewPermissionManager()
 	pm.SetMode(PermissionModeYOLO)

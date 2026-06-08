@@ -1573,6 +1573,10 @@ func explainBashCommand(command string) string {
 		"go":     "Go toolchain",
 		"cargo":  "Rust toolchain",
 		"npm":    "Node.js package manager",
+		"npx":    "Node.js package runner (execute packages without installing)",
+		"pnpm":   "Node.js package manager",
+		"yarn":   "Node.js package manager",
+		"bun":    "JavaScript runtime & package manager",
 		"docker": "Container management",
 		"make":   "Build automation",
 		"rm":     "Delete files (DESTRUCTIVE!)",
@@ -1617,7 +1621,7 @@ func extractFilesFromCommand(command string) []string {
 		if strings.HasPrefix(f, "-") || f == "|" || f == ">" || f == ">>" || f == "<" || f == "&&" || f == ";" || f == "||" {
 			continue
 		}
-		if f == "git" || f == "go" || f == "cargo" || f == "npm" || f == "pnpm" || f == "yarn" || f == "bun" || f == "docker" || f == "make" || f == "curl" || f == "wget" || f == "echo" || f == "cd" || f == "pwd" {
+		if f == "git" || f == "go" || f == "cargo" || f == "npm" || f == "npx" || f == "pnpm" || f == "yarn" || f == "bun" || f == "docker" || f == "make" || f == "curl" || f == "wget" || f == "echo" || f == "cd" || f == "pwd" {
 			continue
 		}
 		if strings.Contains(f, ".") || strings.Contains(f, "/") {

@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **TUI Message Render Cache** — Per-message rendered-block cache (`msgRenderCache`) keyed by message index avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta. Theme changes invalidate the cache via a `themeGen` counter.
+- **Instant Slash Commands** — Synchronous local UI/config slash commands (`/model`, `/help`, `/sidebar`, `/theme`, `/lsp`, `/mcp`, etc.) now bypass the command queue and execute immediately even while the agent is streaming.
+- **Git Permission Subcommand Granularity** — Bash prefix permission rules for `git` are now offered at two-word subcommand granularity (e.g. "git push") so "always allow" persists without blanket-allowing every git subcommand. Harmful git operations (force-push, revert, etc.) always require explicit approval.
+- **Shell Redirect fd-dup Parsing** — Shell parser now correctly handles fd-duplication redirects (`2>&1`, `>&2`, `&>`, `&>>`) as single tokens, fixing bogus `bash prefix "1"` permission prompts.
 - **LSP Server Warm-Up** — New `Manager.WarmUp()` eagerly starts language servers at app init based on extensions found in the project root (scans depth-limited, skipping `vendor`/`node_modules`/`.git`). Emits a `Phase:"starting"` event before the blocking initialize handshake begins, so the sidebar can show a spinner immediately.
 - **LSP Lifecycle Phase Events** — `ServerStartedEvent` now carries a `Phase` field (`"starting"` | `"ready"`), enabling the TUI to distinguish pre-handshake and post-handshake state.
 - **IDE Sidebar Toggle** — Clicking the IDE status line in the sidebar now toggles between `IDEModeClaude` and `IDEModeOff`. Includes `ideToggleTopIdx`/`ideToggleRows` render-data tracking and a new `sidebarIDEToggleForClick` hit-test method.
@@ -21,6 +25,8 @@
 - **Slash Command Usage Skill** — Section 9 of `skills/ocode-usage/SKILL.md` updated with the full slash command documentation.
 
 ### Changed
+- **Permission Approval Path** — "Always allow" permission choices now execute via `executeApprovedTool` (no re-check) instead of `executeToolWithRules`, preventing the permission dialog from looping when the persisted rule doesn't fully cover the request.
+- **Slash Command Queuing Docs** — Updated `AGENTS.md` to document that synchronous local UI/config commands may bypass the queue.
 - **LSP Sidebar Warming Server Display** — `renderLSPSection` now includes servers whose handshake is in progress (present in `lspServerStartTimes` but not yet in `ActiveServers()`), so the sidebar shows warming servers alongside ready ones.
 - **LSP Debug Message Wording** — Event log messages for handshake completion now say "ready" instead of "started", matching the new two-phase lifecycle (`starting` → `ready`).
 - **Makefile Parallel Cross-Compilation** — `build-darwin`, `build-linux`, `build-all`, and `release` targets now run per-OS/per-arch builds concurrently with `&` + `wait`, cutting total build time per target. `install` now depends on `web-build` (not `build`) and includes `$(LDFLAGS)` for versioned binaries.
@@ -39,6 +45,7 @@
 - **Version** — Bumped from `0.3.3` to `0.3.4`.
 
 ### Fixed
+- **Permission Dialog Loop** — Broad single-word deny rules (e.g. "git" => deny) now correctly win over granular allow rules, and harmful commands always require explicit approval regardless of prefix rules.
 - **LSP Manager Lost During Model Init** — The LSP manager and event channels are now transferred from the temporary builder model to the real model, fixing a nil `lspMgr` that prevented the sidebar LSP section from rendering.
 - **VS Code IDE Client Keepalive** — `notifications/initialized` now omits empty
   params, matching the Claude Code VS Code extension's expected payload shape and

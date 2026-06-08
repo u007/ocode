@@ -1914,6 +1914,27 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 	return commands, nil
 }
 
+// absorbFdDup extends a just-emitted redirect operator (e.g. ">", "2>") to
+// include a trailing fd-duplication target like "&1", "&2" or "&-" (as in
+// "2>&1"). i points at the last consumed rune of the operator; it returns the
+// new index positioned at the last absorbed rune (so the caller's loop i++
+// advances past it). When no fd-dup follows, i and op are unchanged.
+func absorbFdDup(runes []rune, n, i int, op *string) int {
+	if i+1 >= n || runes[i+1] != '&' {
+		return i
+	}
+	j := i + 2
+	for j < n && (unicode.IsDigit(runes[j]) || runes[j] == '-') {
+		j++
+	}
+	if j == i+2 {
+		// Bare "&" with no fd target — leave it for the '&' operator handler.
+		return i
+	}
+	*op += string(runes[i+1 : j])
+	return j - 1
+}
+
 func tokenizeShell(input string) ([]shellToken, error) {
 	var tokens []shellToken
 	var current strings.Builder
@@ -2021,7 +2042,16 @@ func tokenizeShell(input string) ([]shellToken, error) {
 			}
 		case '&':
 			emitWord()
-			if i+1 < n && runes[i+1] == '&' {
+			if i+1 < n && runes[i+1] == '>' {
+				// &> / &>> : redirect both stdout and stderr to the next word.
+				if i+2 < n && runes[i+2] == '>' {
+					tokens = append(tokens, shellToken{typ: tokRedir, value: "&>>"})
+					i += 2
+				} else {
+					tokens = append(tokens, shellToken{typ: tokRedir, value: "&>"})
+					i++
+				}
+			} else if i+1 < n && runes[i+1] == '&' {
 				tokens = append(tokens, shellToken{typ: tokOp, value: "&&"})
 				i++
 			} else {
@@ -2046,25 +2076,30 @@ func tokenizeShell(input string) ([]shellToken, error) {
 			tokens = append(tokens, shellToken{typ: tokRightParen, value: ")"})
 		case '>':
 			emitWord()
+			op := ">"
 			if i+1 < n && runes[i+1] == '>' {
-				tokens = append(tokens, shellToken{typ: tokRedir, value: ">>"})
+				op = ">>"
 				i++
-			} else {
-				tokens = append(tokens, shellToken{typ: tokRedir, value: ">"})
 			}
+			i = absorbFdDup(runes, n, i, &op)
+			tokens = append(tokens, shellToken{typ: tokRedir, value: op})
 		case '<':
 			emitWord()
 			tokens = append(tokens, shellToken{typ: tokRedir, value: "<"})
 		case '1', '2':
 			if i+1 < n && runes[i+1] == '>' {
 				emitWord()
-				if i+2 < n && runes[i+2] == '>' {
-					tokens = append(tokens, shellToken{typ: tokRedir, value: string(r) + ">>"})
-					i += 2
-				} else {
-					tokens = append(tokens, shellToken{typ: tokRedir, value: string(r) + ">"})
+				op := string(r) + ">"
+				i++ // consume the '>'
+				if i+1 < n && runes[i+1] == '>' {
+					op = string(r) + ">>"
 					i++
 				}
+				// Absorb an fd-duplication target so "2>&1" is one redirect
+				// token, not a "2>" redirect plus a "&" operator plus a "1"
+				// command word (which surfaced as a bogus `bash prefix "1"`).
+				i = absorbFdDup(runes, n, i, &op)
+				tokens = append(tokens, shellToken{typ: tokRedir, value: op})
 			} else {
 				current.WriteRune(r)
 			}
@@ -2348,6 +2383,26 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 
 	prefix := cmd.cmdWords[0]
 
+	// rulePrefix is the granularity at which an "always allow" rule is offered
+	// and matched. For git it is the two-word subcommand prefix (e.g. "git push")
+	// so a rule can be persisted without blanket-allowing every git subcommand —
+	// a blanket "git" allow is deliberately rejected by SetBashPrefixRule, which
+	// would otherwise leave the permission dialog looping forever.
+	rulePrefix := prefix
+	if prefix == "git" && len(cmd.cmdWords) >= 2 {
+		rulePrefix = prefix + " " + cmd.cmdWords[1]
+	}
+
+	// Harmful operations (git revert/stash/reset/clean/checkout/restore/switch,
+	// git push/pull --force, exfiltration) always require explicit human
+	// approval and must never auto-allow — even when a broader prefix rule or a
+	// tool-level "bash" allow would otherwise permit them (e.g. a persisted
+	// "git push" rule must not auto-approve "git push --force").
+	if IsHarmfulBashCommand(command) {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (harmful): command=%q", command))
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+	}
+
 	// 1. Temp directory operations are always allowed (cross-platform)
 	// Check if all path arguments in the command reference temp directories.
 	if allArgsAreTempDirs(cmd.cmdWords) {
@@ -2363,14 +2418,28 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		}
 	}
 
-	// 3. Explicit prefix rule
-	if level, exists := pm.bashPrefixes[prefix]; exists {
+	// 3. Explicit prefix rule. A broad single-word deny (e.g. "git" => deny)
+	// governs every subcommand and must win over any granular allow.
+	if level, exists := pm.bashPrefixes[prefix]; exists && level == PermissionDeny {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (broad prefix rule): prefix=%s", prefix))
+		return PermissionDecision{Level: PermissionDeny}
+	}
+	// Then the granular rulePrefix (e.g. "git push"), which carries always-allow.
+	if level, exists := pm.bashPrefixes[rulePrefix]; exists {
 		if level == PermissionAsk {
-			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (prefix rule): prefix=%s", prefix))
-			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
+			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (prefix rule): prefix=%s", rulePrefix))
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 		}
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, prefix))
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, rulePrefix))
 		return PermissionDecision{Level: level}
+	}
+	// Finally a broad single-word ask rule (only reached when rulePrefix differs,
+	// i.e. git; a broad "git" allow cannot persist so only Ask remains here).
+	if rulePrefix != prefix {
+		if level, exists := pm.bashPrefixes[prefix]; exists && level == PermissionAsk {
+			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (broad prefix rule): prefix=%s", prefix))
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+		}
 	}
 
 	// 4. Path-scoped auto-allow
@@ -2398,8 +2467,8 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// 6. Fall through to tool-level rule
 	level := pm.Check("bash")
 	if level == PermissionAsk {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (tool rule): prefix=%s", prefix))
-		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (tool rule): prefix=%s", rulePrefix))
+		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 	}
 	emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (tool rule): prefix=%s", level, prefix))
 	return PermissionDecision{Level: level}
