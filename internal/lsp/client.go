@@ -40,15 +40,15 @@ type Client struct {
 
 	writeMu sync.Mutex // serialises writes (Call + reader answering server reqs)
 
-	mu       sync.Mutex
-	id       int
-	pending  map[int]chan rpcResult
-	opened   map[string]openedDoc // file URIs we've sent didOpen for
-	closed   bool
-	closeErr error
-	closeCh  chan struct{} // closed exactly once on the first successful Close
+	mu        sync.Mutex
+	id        int
+	pending   map[int]chan rpcResult
+	opened    map[string]openedDoc // file URIs we've sent didOpen for
+	closed    bool
+	closeErr  error
+	closeCh   chan struct{} // closed exactly once on the first successful Close
 	closeOnce sync.Once
-	exited   chan struct{} // closed when cmd.Wait returns (reaper goroutine)
+	exited    chan struct{} // closed when cmd.Wait returns (reaper goroutine)
 
 	// onDiagnostics, if set, is invoked from the readLoop goroutine
 	// for every textDocument/publishDiagnostics notification. The
@@ -185,8 +185,6 @@ func (c *Client) readLoop() {
 		}
 	}
 }
-
-
 
 func (c *Client) readFrame() ([]byte, error) {
 	contentLen := 0

@@ -28,6 +28,27 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
+// chdirTempForConfigTest changes the working directory to a fresh temp dir for
+// the duration of the test, preventing findProjectConfigDir from walking up to
+// the real project root.  This is essential for any test that uses config save
+// functions (SaveOcodeConfig, SaveAutoPermissionEnabled, etc.) which resolve
+// the write target via ActiveOcodeConfigPath → getProjectOcodeConfigPath.
+func chdirTempForConfigTest(t *testing.T) {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(orig); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	})
+}
+
 type retryTestClient struct{}
 
 func (retryTestClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
@@ -1116,6 +1137,7 @@ func TestRunOptionsYOLOSetsPermissionMode(t *testing.T) {
 }
 
 func TestRunOptionsPermissionModeOffDisablesAutoPermission(t *testing.T) {
+	chdirTempForConfigTest(t)
 	// Seed config so the agent gets constructed and the Auto block is
 	// wired through. We isolate HOME to a temp dir so SaveOcodeConfig
 	// does not pollute the user's real config.
@@ -1164,6 +1186,7 @@ func TestRunOptionsPermissionModeOffDisablesAutoPermission(t *testing.T) {
 }
 
 func TestRunOptionsPermissionModeAutoEnablesAutoPermission(t *testing.T) {
+	chdirTempForConfigTest(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
@@ -1250,6 +1273,7 @@ func TestRunOptionsPermissionModeInvalidDoesNotMutateConfig(t *testing.T) {
 }
 
 func TestPersistPermissionsPreservesAutoBlock(t *testing.T) {
+	chdirTempForConfigTest(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", home)
@@ -3973,6 +3997,16 @@ func TestRetryableLLMErrorDetection(t *testing.T) {
 	if isRetryableLLMError(os.ErrPermission) {
 		t.Fatal("expected permission error to not be retryable")
 	}
+	// 429 rate limit errors should be retryable
+	err429 := fmt.Errorf("openrouter error (429): provider returned error")
+	if !isRetryableLLMError(err429) {
+		t.Fatal("expected 429 rate limit error to be retryable")
+	}
+	// Test the full error format from client.go
+	err429Full := fmt.Errorf("llm request failed after 7 attempt(s): openrouter error (429): provider returned error")
+	if !isRetryableLLMError(err429Full) {
+		t.Fatal("expected full 429 error message to be retryable")
+	}
 }
 
 func TestRenderStatusOmitsIDEChip(t *testing.T) {
@@ -5215,7 +5249,7 @@ func TestCompactionSummaryRendersInTranscript(t *testing.T) {
 	// Build a uiIdx mapping (all messages are real, no synthetic)
 	uiIdx := []int{-1, 0, 1, 2, 3, 4, 5} // -1 for base prompt, then map to real indices
 
-	if !m.applyCompactionResult(result, uiIdx) {
+	if ok, _ := m.applyCompactionResult(result, uiIdx); !ok {
 		t.Fatal("expected applyCompactionResult to succeed")
 	}
 
@@ -5223,7 +5257,7 @@ func TestCompactionSummaryRendersInTranscript(t *testing.T) {
 
 	// Verify the transcript content contains the compaction summary
 	content := m.transcriptContent
-	if !strings.Contains(content, "compaction summary") {
+	if !strings.Contains(content, "📦") {
 		t.Fatalf("expected compaction summary box in transcript, got:\n%s", content)
 	}
 	if !strings.Contains(content, "keep context for testing") {
@@ -5289,7 +5323,7 @@ func TestScrollToCompactionBannerFindsMarker(t *testing.T) {
 
 func TestLSPServerStartedMsgRecordsStartTime(t *testing.T) {
 	m := model{
-		lspEventCh:         make(chan lsp.ServerStartedEvent, 1),
+		lspEventCh:          make(chan lsp.ServerStartedEvent, 1),
 		lspServerStartTimes: make(map[string]time.Time),
 	}
 	before := time.Now()

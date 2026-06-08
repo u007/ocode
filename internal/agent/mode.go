@@ -178,7 +178,7 @@ func gateToolCall(mode Mode, name string, args json.RawMessage) (string, bool) {
 	}
 
 	switch name {
-	case "read", "glob", "grep", "list", "lsp", "webfetch", "websearch", "todoread", "todowrite", "question", "skill":
+	case "read", "glob", "grep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "todoread", "todowrite", "question", "skill":
 		return "", true
 	case "task", "agent", "agent_status", "task_status":
 		// Plan/review/debug/docs agents may delegate to read-only subagents

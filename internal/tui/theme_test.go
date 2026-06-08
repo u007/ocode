@@ -2,6 +2,7 @@ package tui
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"charm.land/lipgloss/v2"
@@ -47,5 +48,57 @@ func TestAvailableThemesIncludesOpencodeFlexoki(t *testing.T) {
 	}
 	if _, ok := GetTheme("onedark"); !ok {
 		t.Fatalf("expected legacy onedark alias to resolve")
+	}
+}
+
+func TestGeneratedThemesHaveNonEmptyColors(t *testing.T) {
+	for _, name := range AvailableThemes() {
+		theme, ok := GetTheme(name)
+		if !ok {
+			t.Errorf("theme %q registered but GetTheme returns false", name)
+			continue
+		}
+		c := theme.Colors
+		if strings.TrimSpace(c.User) == "" {
+			t.Errorf("theme %q has empty User color", name)
+		}
+		if strings.TrimSpace(c.Assistant) == "" {
+			t.Errorf("theme %q has empty Assistant color", name)
+		}
+		if strings.TrimSpace(c.Background) == "" {
+			t.Errorf("theme %q has empty Background color", name)
+		}
+		if strings.TrimSpace(c.Text) == "" {
+			t.Errorf("theme %q has empty Text color", name)
+		}
+		if strings.TrimSpace(c.Error) == "" {
+			t.Errorf("theme %q has empty Error color", name)
+		}
+	}
+}
+
+func TestLightVariantsPresent(t *testing.T) {
+	// Spot-check a few key themes that should have light variants
+	type pair struct{ dark, light string }
+	for _, p := range []pair{
+		{"amoled", "amoled-light"},
+		{"aura", "aura-light"},
+		{"catppuccin", "catppuccin-light"},
+		{"rosepine", "rosepine-light"},
+		{"synthwave84", "synthwave84-light"},
+		{"zenburn", "zenburn-light"},
+	} {
+		if _, ok := GetTheme(p.dark); !ok {
+			t.Errorf("expected dark theme %q to exist", p.dark)
+		}
+		if _, ok := GetTheme(p.light); !ok {
+			t.Errorf("expected light theme %q to exist (dark exists)", p.light)
+		}
+		// Light should have different background than dark
+		dark := themeRegistry[p.dark].Colors
+		light := themeRegistry[p.light].Colors
+		if dark.Background == light.Background {
+			t.Errorf("%q and %q have same Background (%s), expected different for light/dark", p.dark, p.light, dark.Background)
+		}
 	}
 }

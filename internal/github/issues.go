@@ -10,11 +10,11 @@ import (
 )
 
 type Issue struct {
-	Number int    `json:"number"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	State  string `json:"state"`
-	Author string `json:"author"`
+	Number int      `json:"number"`
+	Title  string   `json:"title"`
+	Body   string   `json:"body"`
+	State  string   `json:"state"`
+	Author string   `json:"author"`
 	Labels []string `json:"labels"`
 }
 

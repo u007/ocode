@@ -13,7 +13,7 @@ func TestSmallModelEligible(t *testing.T) {
 	}{
 		{"explore", true},
 		{"general", true},
-			{"compaction", true},
+		{"compaction", true},
 		{"build", false},
 		{"plan", false},
 		{"", false},

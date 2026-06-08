@@ -14,10 +14,10 @@ import (
 type fileAction int
 
 const (
-	actNone    fileAction = iota // no known operation
-	actCreated                   // write tool (new file)
-	actModified                  // edit / multiedit / multi_file_edit / patch-update
-	actDeleted                   // delete tool / patch-delete
+	actNone     fileAction = iota // no known operation
+	actCreated                    // write tool (new file)
+	actModified                   // edit / multiedit / multi_file_edit / patch-update
+	actDeleted                    // delete tool / patch-delete
 )
 
 // outputSummary prints a structured work summary to stdout after a headless run.

@@ -195,7 +195,7 @@ func (fakeCompactClient) Chat(messages []Message, tools []map[string]interface{}
 
 func (fakeCompactClient) GetProvider() string { return "" }
 
-func (fakeCompactClient) GetModel() string    { return "fake-compact-model" }
+func (fakeCompactClient) GetModel() string { return "fake-compact-model" }
 
 func TestForceCompactAsyncIgnoresDisabledAutoCompaction(t *testing.T) {
 	cfg := &config.Config{}

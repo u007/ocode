@@ -198,6 +198,39 @@ func TestSidebarCommandRecordsTranscriptMessage(t *testing.T) {
 	}
 }
 
+func TestDrainQueuedCommandsProcessesAllSynchronousCommands(t *testing.T) {
+	m := model{
+		width:          80,
+		height:         20,
+		input:          textarea.New(),
+		viewport:       viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		queuedCommands: []string{"/theme", "/sidebar"},
+	}
+
+	cmd, drained := m.drainQueuedCommands()
+	if cmd != nil {
+		t.Fatalf("expected synchronous queued commands to return no command, got %T", cmd)
+	}
+	if !drained {
+		t.Fatal("expected queued commands to be drained")
+	}
+	if len(m.queuedCommands) != 0 {
+		t.Fatalf("expected queue to be empty after drain, got %#v", m.queuedCommands)
+	}
+	if !m.showPicker || m.pickerKind != "theme" {
+		t.Fatalf("expected /theme to open picker, got showPicker=%v kind=%q", m.showPicker, m.pickerKind)
+	}
+	if !m.showSidebar {
+		t.Fatal("expected /sidebar to toggle sidebar after /theme")
+	}
+	if len(m.messages) != 2 {
+		t.Fatalf("expected both commands to be recorded, got %#v", m.messages)
+	}
+	if m.messages[0].text != "/theme" || m.messages[1].text != "/sidebar" {
+		t.Fatalf("expected queued commands in order, got %#v", m.messages)
+	}
+}
+
 func TestCommandHelpTextShowsAliasesAndArgs(t *testing.T) {
 	help := commandHelpText()
 	for _, want := range []string{"/models [name], /model", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {

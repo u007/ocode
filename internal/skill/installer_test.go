@@ -65,14 +65,14 @@ description: beta skill (no version)
 
 func TestParseFrontmatterVersion(t *testing.T) {
 	cases := map[string]string{
-		skillA:    "1.0.0",
-		skillAv2:  "2.0.0",
-		skillB:    "",
-		"foo\n":   "",
-		"---\nversion: 1.2\n---\n":   "",
-		"---\nversion: 1.2.3.4\n---\n": "1.2.3",
+		skillA:                           "1.0.0",
+		skillAv2:                         "2.0.0",
+		skillB:                           "",
+		"foo\n":                          "",
+		"---\nversion: 1.2\n---\n":       "",
+		"---\nversion: 1.2.3.4\n---\n":   "1.2.3",
 		"---\nversion: \"1.2.3\"\n---\n": "1.2.3",
-		"---\nVERSION: 1.2.3\n---\n": "1.2.3",
+		"---\nVERSION: 1.2.3\n---\n":     "1.2.3",
 	}
 	for in, want := range cases {
 		if got := parseFrontmatterVersion(in); got != want {

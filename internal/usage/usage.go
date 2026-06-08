@@ -20,14 +20,14 @@ import (
 
 // Record represents a single LLM API call.
 type Record struct {
-	Timestamp       time.Time `json:"t"`
-	Model           string    `json:"m"`
-	Provider        string    `json:"p,omitempty"`
-	PromptTokens    int64     `json:"pt"`
-	CompletionTokens int64    `json:"ct"`
-	CacheReadTokens int64     `json:"crt,omitempty"`
-	TotalTokens     int64     `json:"tt"`
-	Spend           float64   `json:"sp,omitempty"`
+	Timestamp        time.Time `json:"t"`
+	Model            string    `json:"m"`
+	Provider         string    `json:"p,omitempty"`
+	PromptTokens     int64     `json:"pt"`
+	CompletionTokens int64     `json:"ct"`
+	CacheReadTokens  int64     `json:"crt,omitempty"`
+	TotalTokens      int64     `json:"tt"`
+	Spend            float64   `json:"sp,omitempty"`
 }
 
 // ModelSummary aggregates usage for a single model.
@@ -43,16 +43,16 @@ type ModelSummary struct {
 
 // Summary holds the full usage summary over a time range.
 type Summary struct {
-	TotalRequests    int            `json:"total_requests"`
-	TotalPromptTokens int64         `json:"total_prompt_tokens"`
-	TotalCompletionTokens int64     `json:"total_completion_tokens"`
-	TotalCacheReadTokens int64      `json:"total_cache_read_tokens"`
-	TotalTokens      int64           `json:"total_tokens"`
-	TotalSpend       float64         `json:"total_spend"`
-	ByModel          []ModelSummary `json:"by_model"`
-	StartTime        time.Time       `json:"start_time"`
-	EndTime          time.Time       `json:"end_time"`
-	Days             int             `json:"days"`
+	TotalRequests         int            `json:"total_requests"`
+	TotalPromptTokens     int64          `json:"total_prompt_tokens"`
+	TotalCompletionTokens int64          `json:"total_completion_tokens"`
+	TotalCacheReadTokens  int64          `json:"total_cache_read_tokens"`
+	TotalTokens           int64          `json:"total_tokens"`
+	TotalSpend            float64        `json:"total_spend"`
+	ByModel               []ModelSummary `json:"by_model"`
+	StartTime             time.Time      `json:"start_time"`
+	EndTime               time.Time      `json:"end_time"`
+	Days                  int            `json:"days"`
 }
 
 // DateRange describes a time range for filtering.
@@ -234,12 +234,12 @@ func Query(from, to time.Time) ([]Record, error) {
 // Summarize aggregates records into a Summary grouped by model.
 func Summarize(records []Record) Summary {
 	type acc struct {
-		count          int
-		promptTokens   int64
+		count            int
+		promptTokens     int64
 		completionTokens int64
-		cacheReadTokens int64
-		totalTokens    int64
-		spend          float64
+		cacheReadTokens  int64
+		totalTokens      int64
+		spend            float64
 	}
 	byModel := make(map[string]*acc)
 	var total Summary

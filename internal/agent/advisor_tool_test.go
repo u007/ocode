@@ -43,11 +43,13 @@ type advisorMockTool struct {
 	name string
 }
 
-func (m *advisorMockTool) Name() string                          { return m.name }
-func (m *advisorMockTool) Description() string                   { return "mock tool: " + m.name }
-func (m *advisorMockTool) Definition() map[string]interface{}    { return map[string]interface{}{"name": m.name} }
+func (m *advisorMockTool) Name() string        { return m.name }
+func (m *advisorMockTool) Description() string { return "mock tool: " + m.name }
+func (m *advisorMockTool) Definition() map[string]interface{} {
+	return map[string]interface{}{"name": m.name}
+}
 func (m *advisorMockTool) Execute(args json.RawMessage) (string, error) { return "mock result", nil }
-func (m *advisorMockTool) Parallel() bool                        { return false }
+func (m *advisorMockTool) Parallel() bool                               { return false }
 
 func TestAdvisorTool_Name(t *testing.T) {
 	tool := AdvisorTool{}

@@ -367,13 +367,13 @@ var pathScopedTools = map[string]bool{
 // (e.g. "git push" with --force) are handled separately in
 // IsHarmfulBashCommand.
 var harmfulBashPrefixes = map[string]bool{
-	"git revert":  true, // undo commits (rewrites history)
-	"git stash":   true, // stash/unstash (can lose uncommitted changes)
-	"git reset":   true, // reset HEAD/index/working-tree
-	"git clean":   true, // remove untracked files
+	"git revert":   true, // undo commits (rewrites history)
+	"git stash":    true, // stash/unstash (can lose uncommitted changes)
+	"git reset":    true, // reset HEAD/index/working-tree
+	"git clean":    true, // remove untracked files
 	"git checkout": true, // can discard working-tree changes
-	"git restore": true, // can discard working-tree changes
-	"git switch":  true, // can discard working-tree changes
+	"git restore":  true, // can discard working-tree changes
+	"git switch":   true, // can discard working-tree changes
 }
 
 // harmfulBashForceFlags lists git subcommands that are only harmful
@@ -529,7 +529,6 @@ func isExfiltrationRiskCurl(fields []string) bool {
 			i++
 			continue
 		}
-
 
 		i++
 	}
@@ -776,7 +775,7 @@ func NewPermissionManager() *PermissionManager {
 	for k, v := range bashAutoAllowDefaultModes {
 		pm.bashPrefixModes[k] = v
 	}
-	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "skill", "question", "todoread", "todowrite", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell"} {
+	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "lsp_diagnostics", "skill", "question", "todoread", "todowrite", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell"} {
 		pm.rules[name] = PermissionAllow
 	}
 	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format"} {
@@ -864,19 +863,24 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 }
 
 func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) PermissionDecision {
+	emitDebug("perm", fmt.Sprintf("Decide: tool=%s mode=%s", toolName, pm.mode))
 	if pm.mode == PermissionModeLocked {
 		if isReadOnlyTool(toolName) {
+			emitDebug("perm", fmt.Sprintf("Decide ALLOW (locked, read-only): tool=%s", toolName))
 			return PermissionDecision{Level: PermissionAllow}
 		}
+		emitDebug("perm", fmt.Sprintf("Decide DENY (locked, not read-only): tool=%s", toolName))
 		return PermissionDecision{Level: PermissionDeny}
 	}
 
 	if toolName == "bash" {
 		command := bashCommand(args)
 		if isHardBlockedCommand(command) {
+			emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionDeny}
 		}
 		if pm.mode == PermissionModeYOLO {
+			emitDebug("perm", fmt.Sprintf("Decide ALLOW (yolo): tool=bash"))
 			return PermissionDecision{Level: PermissionAllow}
 		}
 
@@ -909,10 +913,12 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if finalDecision != nil {
 			return *finalDecision
 		}
+		emitDebug("perm", fmt.Sprintf("Decide ALLOW (bash, no ask/deny): tool=bash"))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	if pm.mode == PermissionModeYOLO {
+		emitDebug("perm", fmt.Sprintf("Decide ALLOW (yolo): tool=%s", toolName))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
@@ -924,40 +930,54 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			// "deny" overrides the normal workdir/sensitive checks.
 			if level := pm.CheckPathPatterns(toolName, path); level != "" {
 				if level == PermissionAsk {
+					emitDebug("perm", fmt.Sprintf("Decide ASK (path pattern): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 						ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".path_pattern",
 					}}
 				}
+				emitDebug("perm", fmt.Sprintf("Decide %s (path pattern): tool=%s path=%s", level, toolName, path))
 				return PermissionDecision{Level: level}
 			}
 			// Relative paths and glob patterns (non-absolute) are implicitly within workDir
 			if filepath.IsAbs(path) && !isWithinWorkDir(pm, path) {
+				// Temp directories are always allowed (cross-platform)
+				if isTempDir(path) {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (temp dir): tool=%s path=%s", toolName, path))
+					return PermissionDecision{Level: PermissionAllow}
+				}
 				// Check tool-level rule first — an explicit "allow" (from "always
 				// allow this rule/tool") overrides the out-of-scope gate so the user
 				// isn't asked repeatedly for the same permitted tool.
 				if pm.Check(toolName) == PermissionAllow {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (out-of-scope, tool allowed): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
+				emitDebug("perm", fmt.Sprintf("Decide ASK (out-of-scope): tool=%s path=%s", toolName, path))
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".out_of_scope",
 				}}
 			}
 			if isSensitivePath(path) {
 				if pm.Check(toolName) == PermissionAllow {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (sensitive, tool allowed): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
+				emitDebug("perm", fmt.Sprintf("Decide ASK (sensitive): tool=%s path=%s", toolName, path))
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".sensitive_path",
 				}}
 			}
 			if toolName == "delete" {
 				if pm.Check(toolName) == PermissionAllow {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, tool allowed): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
+				emitDebug("perm", fmt.Sprintf("Decide ASK (delete): tool=%s path=%s", toolName, path))
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".delete",
 				}}
 			}
+			emitDebug("perm", fmt.Sprintf("Decide ALLOW (path in workdir): tool=%s path=%s", toolName, path))
 			return PermissionDecision{Level: PermissionAllow}
 		}
 	}
@@ -968,8 +988,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		domain := extractDomainFromURL(path)
 		if domain != "" {
 			if level, exists := pm.webfetchDomains[domain]; exists {
+				emitDebug("perm", fmt.Sprintf("Decide %s (webfetch domain cached): tool=%s domain=%s", level, toolName, domain))
 				return PermissionDecision{Level: level}
 			}
+			emitDebug("perm", fmt.Sprintf("Decide ASK (webfetch domain): tool=%s domain=%s", toolName, domain))
 			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "webfetch.domain." + domain,
 			}}
@@ -978,8 +1000,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 
 	level := pm.Check(toolName)
 	if level == PermissionAsk {
+		emitDebug("perm", fmt.Sprintf("Decide ASK (tool rule): tool=%s", toolName))
 		return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName}}
 	}
+	emitDebug("perm", fmt.Sprintf("Decide %s (tool rule): tool=%s", level, toolName))
 	return PermissionDecision{Level: level}
 }
 
@@ -1013,6 +1037,58 @@ func isWithinWorkDir(pm *PermissionManager, rawPath string) bool {
 	}
 	workDirSep := pm.workDir + string(filepath.Separator)
 	return resolved == pm.workDir || strings.HasPrefix(resolved, workDirSep)
+}
+
+// isTempDir returns true if the given path is within a well-known system temp
+// directory. Only matches well-known paths, NOT os.TempDir() (which on macOS
+// returns /var/folders/.../T/ — too broad for auto-allow).
+func isTempDir(rawPath string) bool {
+	absPath, err := filepath.Abs(rawPath)
+	if err != nil {
+		return false
+	}
+	clean := filepath.Clean(absPath)
+
+	// Well-known temp directories — these are always safe to auto-allow.
+	unixTempDirs := []string{"/tmp", "/var/tmp"}
+	for _, td := range unixTempDirs {
+		tdClean := td + string(filepath.Separator)
+		if clean == td || strings.HasPrefix(clean, tdClean) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// allArgsAreTempDirs checks if all arguments in a bash command that look like
+// absolute file paths are within temp directories. This allows commands like "ls /tmp"
+// or "cat /tmp/foo.txt" to be auto-allowed.
+func allArgsAreTempDirs(cmdWords []string) bool {
+	if len(cmdWords) < 2 {
+		return false
+	}
+	hasPathArg := false
+	// Skip the command itself (first word)
+	for _, arg := range cmdWords[1:] {
+		// Skip flags (start with -)
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		// Skip output redirections (handled separately)
+		if arg == ">" || arg == ">>" || arg == "1>" || arg == "2>" {
+			continue
+		}
+		// Only check absolute paths (must start with /)
+		if strings.HasPrefix(arg, "/") {
+			hasPathArg = true
+			if !isTempDir(arg) {
+				return false
+			}
+		}
+	}
+	// Only allow if there was at least one absolute path arg and all were temp dirs
+	return hasPathArg
 }
 
 func isSensitivePath(path string) bool {
@@ -1496,7 +1572,7 @@ func validPermissionLevel(level PermissionLevel) bool {
 
 func isReadOnlyTool(name string) bool {
 	switch name {
-	case "read", "glob", "grep", "list", "lsp", "webfetch", "websearch", "skill", "question", "todoread", "todowrite":
+	case "read", "glob", "grep", "list", "lsp", "lsp_diagnostics", "webfetch", "websearch", "skill", "question", "todoread", "todowrite":
 		return true
 	default:
 		return false
@@ -1644,7 +1720,10 @@ func canAutoAllowInRoot(pm *PermissionManager, command, prefix string) bool {
 	for _, p := range paths {
 		resolved := resolvePath(p, pm.workDir)
 		if !isWithinWorkDir(pm, resolved) {
-			return false
+			// Temp directories are always allowed (cross-platform)
+			if !isTempDir(resolved) {
+				return false
+			}
 		}
 	}
 	return true
@@ -2208,12 +2287,19 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			if isLikelyPathArg(val) {
 				resolved := resolvePath(val, pm.workDir)
 				if !isWithinWorkDir(pm, resolved) {
+					// Temp directories are always allowed (cross-platform)
+					if isTempDir(resolved) {
+						emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (env temp dir): env=%s path=%s", env, resolved))
+						continue
+					}
+					emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env out-of-scope): env=%s path=%s", env, resolved))
 					return PermissionDecision{
 						Level:   PermissionAsk,
 						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), env, false),
 					}
 				}
 				if isSensitivePath(resolved) {
+					emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env sensitive): env=%s path=%s", env, resolved))
 					return PermissionDecision{
 						Level:   PermissionAsk,
 						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), env, true),
@@ -2230,12 +2316,19 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		}
 		resolved := resolvePath(path, pm.workDir)
 		if !isWithinWorkDir(pm, resolved) {
+			// Temp directories are always allowed (cross-platform)
+			if isTempDir(resolved) {
+				emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (redirect temp dir): path=%s", resolved))
+				continue
+			}
+			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect out-of-scope): path=%s", resolved))
 			return PermissionDecision{
 				Level:   PermissionAsk,
 				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), path, false),
 			}
 		}
 		if isSensitivePath(resolved) {
+			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect sensitive): path=%s", resolved))
 			return PermissionDecision{
 				Level:   PermissionAsk,
 				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), path, true),
@@ -2249,49 +2342,66 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 
 	command := rebuildCommandLine(cmd.cmdWords)
 	if isHardBlockedCommand(command) {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (hard-blocked): command=%q", command))
 		return PermissionDecision{Level: PermissionDeny}
 	}
 
 	prefix := cmd.cmdWords[0]
 
-	// 1. Persisted in-root rule
+	// 1. Temp directory operations are always allowed (cross-platform)
+	// Check if all path arguments in the command reference temp directories.
+	if allArgsAreTempDirs(cmd.cmdWords) {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (all args are temp dirs): command=%q", command))
+		return PermissionDecision{Level: PermissionAllow}
+	}
+
+	// 2. Persisted in-root rule
 	if level, exists := pm.bashPrefixes[bashInRootKey(prefix, pm.workDir)]; exists {
 		if level == PermissionAllow && canAutoAllowInRoot(pm, command, prefix) {
+			emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (in-root): prefix=%s", prefix))
 			return PermissionDecision{Level: PermissionAllow}
 		}
 	}
 
-	// 2. Explicit prefix rule
+	// 3. Explicit prefix rule
 	if level, exists := pm.bashPrefixes[prefix]; exists {
 		if level == PermissionAsk {
+			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (prefix rule): prefix=%s", prefix))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
 		}
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, prefix))
 		return PermissionDecision{Level: level}
 	}
 
-	// 3. Path-scoped auto-allow
+	// 4. Path-scoped auto-allow
 	if bashAutoAllowPrefixes[prefix] {
 		if canAutoAllowWithMode(pm, command, prefix) {
+			emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (auto-allow): prefix=%s", prefix))
 			return PermissionDecision{Level: PermissionAllow}
 		}
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (auto-allow, not in root): prefix=%s", prefix))
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
 	}
 
 	// 4. Argless commands
 	if bashAlwaysAllow[prefix] {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (always-allow): prefix=%s", prefix))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	// 5. Subcommand-pinned allowlist
 	if matchSubcommandAllow(command) {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (subcommand allowlist): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	// 6. Fall through to tool-level rule
 	level := pm.Check("bash")
 	if level == PermissionAsk {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (tool rule): prefix=%s", prefix))
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
 	}
+	emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (tool rule): prefix=%s", level, prefix))
 	return PermissionDecision{Level: level}
 }
 

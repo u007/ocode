@@ -283,20 +283,20 @@ func versionParts(v string) *[3]int {
 type skillStatus int
 
 const (
-	statusMissing    skillStatus = iota // no skill dir at all (or no SKILL.md)
-	statusInstalled                     // SKILL.md loaded; check version/hash for up-to-date
-	statusUpToDate                      // installed, matches bundled
-	statusOutdated                      // installed, differs from bundled
-	statusSymlink                       // target path is a symlink (refuse to overwrite)
+	statusMissing   skillStatus = iota // no skill dir at all (or no SKILL.md)
+	statusInstalled                    // SKILL.md loaded; check version/hash for up-to-date
+	statusUpToDate                     // installed, matches bundled
+	statusOutdated                     // installed, differs from bundled
+	statusSymlink                      // target path is a symlink (refuse to overwrite)
 )
 
 type installedInfo struct {
-	Dir        string
-	SkillPath  string
-	Bytes      []byte
-	Version    string
-	Sha256Hex  string
-	IsSymlink  bool
+	Dir       string
+	SkillPath string
+	Bytes     []byte
+	Version   string
+	Sha256Hex string
+	IsSymlink bool
 }
 
 // loadInstalled reads <globalDir>/<name>/SKILL.md from disk and returns
@@ -389,12 +389,12 @@ func runInstallOrUpgrade(names []string, force bool) error {
 
 	if len(names) == 0 {
 		fmt.Fprintf(os.Stdout, "%s skills to %s\n",
-				ternary(force, "installing", "upgrading"),
-				target)
+			ternary(force, "installing", "upgrading"),
+			target)
 	} else {
 		fmt.Fprintf(os.Stdout, "%s %d skill(s) to %s\n",
-				ternary(force, "installing", "upgrading"),
-				len(names), target)
+			ternary(force, "installing", "upgrading"),
+			len(names), target)
 	}
 
 	selected := pickBundled(bundled, names)

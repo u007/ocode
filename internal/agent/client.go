@@ -25,7 +25,7 @@ import (
 const (
 	llmRequestTimeout = 5 * time.Minute
 	llmMaxRetries     = 3
-	llmMaxRetries429  = 6
+	llmMaxRetries429  = 5
 )
 
 // Context keys for per-call chat parameter overrides (set by hook pipeline).
@@ -87,7 +87,7 @@ type GenericClient struct {
 	Provider       string
 	UseOAuth       bool   // when true, treat APIKey as a bearer OAuth token
 	AccountID      string // cached chatgpt_account_id from OAuth credential
-	ThinkingBudget int  // >0 enables extended thinking for Anthropic models that support it
+	ThinkingBudget int    // >0 enables extended thinking for Anthropic models that support it
 	// Temperature, when non-nil, is added to the request payload for providers
 	// that accept it. Pointer so we can distinguish "unset" from explicit zero.
 	Temperature *float64

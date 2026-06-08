@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,7 +96,7 @@ type Agent struct {
 	// advisorEnabled field so mid-run toggles propagate immediately.
 	parentAdvisorEnabled *atomic.Bool
 	jobEvents            chan JobEvent
-	retryEvents    chan *RetryStatusEvent
+	retryEvents          chan *RetryStatusEvent
 	// OnMessage, if set, is invoked for each message produced during Step
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
@@ -749,7 +751,8 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, note st
 
 // RecapAsync generates a conversation recap using the small model in a
 // goroutine. Returns false if a recap is already in flight.
-func (a *Agent) RecapAsync(messages []Message, gen uint64) bool {
+// instruction is optional additional guidance appended to the recap prompt.
+func (a *Agent) RecapAsync(messages []Message, gen uint64, instruction string) bool {
 	if !a.recapMu.TryLock() {
 		return false
 	}
@@ -757,7 +760,7 @@ func (a *Agent) RecapAsync(messages []Message, gen uint64) bool {
 	copy(snapshot, messages)
 	go func() {
 		defer a.recapMu.Unlock()
-		text := a.runRecap(snapshot)
+		text := a.runRecap(snapshot, instruction)
 		if a.OnRecap != nil {
 			a.OnRecap(RecapResult{Gen: gen, Text: text})
 		}
@@ -776,11 +779,12 @@ func (a *Agent) Compact(messages []Message) (CompactResult, bool) {
 }
 
 // Recap generates a conversation recap synchronously using the small model.
-func (a *Agent) Recap(messages []Message) string {
-	return a.runRecap(messages)
+// instruction is optional additional guidance appended to the recap prompt.
+func (a *Agent) Recap(messages []Message, instruction string) string {
+	return a.runRecap(messages, instruction)
 }
 
-func (a *Agent) runRecap(messages []Message) string {
+func (a *Agent) runRecap(messages []Message, instruction string) string {
 	client := a.recapClient()
 	if client == nil {
 		return "Recap unavailable: no LLM client."
@@ -794,6 +798,9 @@ func (a *Agent) runRecap(messages []Message) string {
 	b.WriteString("3. DECISION — what decisions were made\n")
 	b.WriteString("4. DO — what was updated and tested\n\n")
 	b.WriteString("Format: use headers and bullet points. Be terse. No filler.\n\n")
+	if instruction != "" {
+		fmt.Fprintf(&b, "Additional focus: %s\n\n", instruction)
+	}
 	b.WriteString("CONVERSATION:\n")
 
 	for _, msg := range messages {
@@ -1042,12 +1049,18 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 				if decision.Request != nil {
 					req = *decision.Request
 				}
-				if IsHarmfulRequest(req) {
+				if IsHarmfulRequest(req) && !a.autoPermissionAllowsDestructive() {
 					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
-					// Fall through to human ask — harmful ops cannot be auto-allowed.
+					// Fall through to human ask unless destructive auto-permission is enabled.
 				} else {
-					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_short_circuit tool=%s model=%s request=%s", name, a.autoPermissionModelName(), permissionRequestSummary(decision.Request)))
-					return a.executeToolCall(name, args)
+					// Consult the LLM permission model.
+					allowed, reason := a.askPermissionModel(name, args, &req)
+					if allowed {
+						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						return a.executeToolCall(name, args)
+					}
+					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+					// LLM denied — fall through to human ask.
 				}
 			}
 			emitDebug("PERMISSION", fmt.Sprintf("tier=human_ask tool=%s request=%s callback=%t", name, permissionRequestSummary(decision.Request), a.OnPermissionAsk != nil))
@@ -1088,9 +1101,28 @@ func (a *Agent) autoPermissionModelName() string {
 		}
 	}
 	if model := ResolveSmallModel(a.config); model != "" {
+		return model
+	}
+	return "unavailable"
+}
+
+func (a *Agent) autoPermissionModelDisplayName() string {
+	if a == nil || a.config == nil {
+		return "unavailable"
+	}
+	if auto := a.config.Ocode.Permissions.Auto; auto != nil {
+		if model := strings.TrimSpace(auto.Model); model != "" {
+			return model
+		}
+	}
+	if model := ResolveSmallModel(a.config); model != "" {
 		return model + " (resolved small model)"
 	}
 	return "unavailable"
+}
+
+func (a *Agent) autoPermissionAllowsDestructive() bool {
+	return a != nil && a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.AllowDestructive
 }
 
 func (a *Agent) permissionDecisionTrace(name string, args json.RawMessage, decision PermissionDecision, autoEnabled bool) string {
@@ -1111,7 +1143,7 @@ func (a *Agent) permissionDecisionTrace(name string, args json.RawMessage, decis
 		parts = append(parts, "request=none")
 	}
 	if decision.Level == PermissionAsk && autoEnabled {
-		parts = append(parts, "auto_model="+a.autoPermissionModelName())
+		parts = append(parts, "auto_model="+a.autoPermissionModelDisplayName())
 	}
 	return strings.Join(parts, " ")
 }
@@ -1125,6 +1157,476 @@ func permissionRequestSummary(req *PermissionRequest) string {
 		return fmt.Sprintf("marshal_error:%v", err)
 	}
 	return truncateDebugArgs(data, 240)
+}
+
+// askPermissionModel sends a permission request to the configured LLM model
+// and returns (allowed bool, reason string). The model can only approve or
+// ask (deny falls through to human). Returns (true, "") on approval,
+// (false, reason) on denial/ask, and (false, error) on LLM failure.
+//
+// The LLM is given a read_file tool so it can explore the codebase before
+// deciding. The tool call loop is capped at maxToolCalls to prevent abuse.
+func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *PermissionRequest) (bool, string) {
+	modelName := a.autoPermissionModelName()
+	modelLabel := a.autoPermissionModelDisplayName()
+	if modelName == "unavailable" {
+		return false, "no permission model configured"
+	}
+
+	client := newClientFn(a.config, modelName)
+	if client == nil {
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=client_creation_failed", toolName, modelLabel))
+		return false, "could not create LLM client"
+	}
+
+	// Gather context limits from config.
+	maxCtxBytes := 2048
+	maxSources := 3
+	maxLinesPerSource := 40
+	if a.config != nil && a.config.Ocode.Permissions.Auto != nil {
+		if a.config.Ocode.Permissions.Auto.MaxContextBytes > 0 {
+			maxCtxBytes = a.config.Ocode.Permissions.Auto.MaxContextBytes
+		}
+		if a.config.Ocode.Permissions.Auto.MaxContextSources > 0 {
+			maxSources = a.config.Ocode.Permissions.Auto.MaxContextSources
+		}
+		if a.config.Ocode.Permissions.Auto.MaxContextLinesPerSource > 0 {
+			maxLinesPerSource = a.config.Ocode.Permissions.Auto.MaxContextLinesPerSource
+		}
+	}
+
+	// Build initial context snapshot.
+	context := a.buildPermissionContext(toolName, args, maxCtxBytes, maxSources, maxLinesPerSource)
+
+	// Build the prompt.
+	toolArgs := string(args)
+	if len(toolArgs) > 500 {
+		toolArgs = toolArgs[:500] + "...(truncated)"
+	}
+
+	rule := "tool." + toolName
+	scope := "tool"
+	if req != nil {
+		rule = req.Rule
+		scope = string(req.Scope)
+	}
+
+	prompt := fmt.Sprintf(`You are a permission gatekeeper for an AI coding assistant.
+A tool call is requesting permission. Decide whether to ALLOW or DENY it.
+
+Tool: %s
+Arguments: %s
+Rule: %s
+Scope: %s
+
+Project context:
+%s
+
+You have a read_file tool to explore the codebase before deciding. Use it to:
+- Read the target file being written/edited/deleted
+- Check project configuration files
+- Understand what a bash command would operate on
+
+After gathering enough context, respond with ONLY one of:
+ALLOW: <brief reason>
+DENY: <brief reason>`, toolName, toolArgs, rule, scope, context)
+
+	// Apply custom prompt from config if set.
+	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
+		prompt = a.config.Ocode.Permissions.Auto.Prompt + "\n\n" + prompt
+	}
+
+	// Define the read_file tool for the permission model.
+	readFileTool := map[string]interface{}{
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":        "read_file",
+			"description": "Read the contents of a file. Use this to explore the codebase before making a permission decision.",
+			"parameters": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "Path to the file to read (relative to working directory or absolute)",
+					},
+					"start_line": map[string]interface{}{
+						"type":        "integer",
+						"description": "1-based line to start reading from (default: 1)",
+					},
+					"end_line": map[string]interface{}{
+						"type":        "integer",
+						"description": "1-based last line to read inclusive (default: start_line + 49)",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+	}
+
+	tools := []map[string]interface{}{readFileTool}
+
+	messages := []Message{
+		{Role: "user", Content: prompt},
+	}
+
+	// Tool call loop — cap at maxToolCalls to prevent abuse.
+	const maxToolCalls = 5
+	for i := 0; i < maxToolCalls; i++ {
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_call tool=%s model=%s attempt=%d", toolName, modelLabel, i))
+
+		resp, err := client.Chat(messages, tools)
+		if err != nil {
+			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_error tool=%s model=%s error=%v", toolName, modelLabel, err))
+			return false, fmt.Sprintf("LLM error: %v", err)
+		}
+
+		if resp == nil {
+			return false, "nil response from LLM"
+		}
+
+		// Check if the response contains tool calls.
+		if len(resp.ToolCalls) > 0 {
+			// Append the assistant message with tool calls.
+			messages = append(messages, *resp)
+
+			// Execute each tool call.
+			for _, tc := range resp.ToolCalls {
+				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_tool_call tool=%s model=%s function=%s args=%s", toolName, modelLabel, tc.Function.Name, truncateDebugArgs([]byte(tc.Function.Arguments), 200)))
+
+				var toolResult string
+				if tc.Function.Name == "read_file" {
+					var params struct {
+						Path      string `json:"path"`
+						StartLine int    `json:"start_line"`
+						EndLine   int    `json:"end_line"`
+					}
+					if err := json.Unmarshal([]byte(tc.Function.Arguments), &params); err != nil {
+						toolResult = fmt.Sprintf("error: invalid arguments: %v", err)
+					} else {
+						toolResult = executePermissionReadFile(params.Path, params.StartLine, params.EndLine)
+					}
+				} else {
+					toolResult = fmt.Sprintf("error: unknown tool %q", tc.Function.Name)
+				}
+
+				// Truncate large results.
+				if len(toolResult) > 4000 {
+					toolResult = toolResult[:4000] + "\n...(truncated)"
+				}
+
+				// Append tool result as a tool message.
+				messages = append(messages, Message{
+					Role:    "tool",
+					ToolID:  tc.ID,
+					Content: toolResult,
+				})
+			}
+			continue
+		}
+
+		// No tool calls — this is the final decision.
+		responseText := resp.Content
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_response tool=%s model=%s response=%s", toolName, modelLabel, truncateDebugArgs([]byte(responseText), 200)))
+
+		upper := strings.ToUpper(strings.TrimSpace(responseText))
+		if strings.HasPrefix(upper, "ALLOW") {
+			reason := strings.TrimSpace(responseText[len("ALLOW"):])
+			reason = strings.TrimLeft(reason, ": ")
+			return true, reason
+		}
+		if strings.HasPrefix(upper, "DENY") {
+			reason := strings.TrimSpace(responseText[len("DENY"):])
+			reason = strings.TrimLeft(reason, ": ")
+			return false, reason
+		}
+
+		// Ambiguous — default to ask.
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_ambiguous tool=%s response=%s", toolName, truncateDebugArgs([]byte(responseText), 100)))
+		return false, "ambiguous LLM response: " + responseText
+	}
+
+	// Exhausted tool call budget without a decision.
+	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_budget_exhausted tool=%s model=%s", toolName, modelName))
+	return false, "LLM exhausted tool call budget without decision"
+}
+
+// executePermissionReadFile reads a file for the permission model LLM.
+// It resolves the path, reads the requested lines, and returns the content.
+func executePermissionReadFile(path string, startLine, endLine int) string {
+	// Resolve relative paths against working directory.
+	if !filepath.IsAbs(path) {
+		if wd, err := os.Getwd(); err == nil {
+			path = filepath.Join(wd, path)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("error reading %s: %v", path, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	total := len(lines)
+
+	if startLine <= 0 {
+		startLine = 1
+	}
+	if endLine <= 0 {
+		endLine = startLine + 49
+	}
+	if startLine > total {
+		return fmt.Sprintf("(file has %d lines, start_line=%d is out of range)", total, startLine)
+	}
+	if endLine > total {
+		endLine = total
+	}
+
+	var sb strings.Builder
+	for i := startLine; i <= endLine; i++ {
+		fmt.Fprintf(&sb, "%d\t%s\n", i, lines[i-1])
+	}
+	if endLine < total {
+		fmt.Fprintf(&sb, "... (%d more lines)\n", total-endLine)
+	}
+	return sb.String()
+}
+
+// buildPermissionContext gathers relevant code context for the permission model
+// to make informed decisions. It reads target files, identifies the project type,
+// and explains bash commands -- all within the configured byte/source/line limits.
+func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, maxCtxBytes, maxSources, maxLinesPerSource int) string {
+	var b strings.Builder
+	usedBytes := 0
+	sourcesAdded := 0
+
+	addSection := func(label, content string) bool {
+		if sourcesAdded >= maxSources || usedBytes+len(content)+len(label)+4 > maxCtxBytes {
+			return false
+		}
+		b.WriteString(label + "\n")
+		b.WriteString(content + "\n\n")
+		usedBytes += len(label) + len(content) + 4
+		sourcesAdded++
+		return true
+	}
+
+	// 1. Working directory and project type.
+	if wd, err := os.Getwd(); err == nil {
+		addSection("Working directory:", wd)
+	}
+
+	projectType := detectProjectType()
+	if projectType != "" {
+		addSection("Project type:", projectType)
+	}
+
+	// 2. File context for file-based tools.
+	if pathScopedTools[toolName] {
+		var params struct {
+			Path     string `json:"path"`
+			FilePath string `json:"file_path"`
+			Pattern  string `json:"pattern"`
+			URL      string `json:"url"`
+		}
+		if err := json.Unmarshal(args, &params); err == nil {
+			targetPath := params.Path
+			if targetPath == "" {
+				targetPath = params.FilePath
+			}
+			if targetPath != "" {
+				if content, totalLines, err := readFileSnippet(targetPath, maxLinesPerSource); err == nil {
+					label := fmt.Sprintf("Target file: %s (%d lines total, showing first %d):", targetPath, totalLines, maxLinesPerSource)
+					addSection(label, content)
+				} else if !os.IsNotExist(err) {
+					addSection(fmt.Sprintf("Target file: %s", targetPath), fmt.Sprintf("(unreadable: %v)", err))
+				} else {
+					addSection(fmt.Sprintf("Target file: %s", targetPath), "(file does not exist yet -- new file creation)")
+				}
+				if dir := filepath.Dir(targetPath); dir != "." {
+					if listing, err := listDirectory(dir, 15); err == nil {
+						addSection(fmt.Sprintf("Directory %s:", dir), listing)
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Bash command context.
+	if toolName == "bash" {
+		var params struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(args, &params); err == nil && params.Command != "" {
+			explanation := explainBashCommand(params.Command)
+			addSection("Command analysis:", explanation)
+			for _, file := range extractFilesFromCommand(params.Command) {
+				if sourcesAdded >= maxSources {
+					break
+				}
+				if content, totalLines, err := readFileSnippet(file, maxLinesPerSource); err == nil {
+					addSection(fmt.Sprintf("Referenced file: %s (%d lines):", file, totalLines), content)
+				}
+			}
+		}
+	}
+
+	// 4. Webfetch context.
+	if toolName == "webfetch" {
+		var params struct {
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal(args, &params); err == nil && params.URL != "" {
+			if parsed, err := url.Parse(params.URL); err == nil {
+				addSection("Fetch target:", fmt.Sprintf("Domain: %s\nPath: %s", parsed.Hostname(), parsed.Path))
+			}
+		}
+	}
+
+	if b.Len() == 0 {
+		return "(no context available)"
+	}
+	return b.String()
+}
+
+func detectProjectType() string {
+	for _, manifest := range []struct {
+		file string
+		kind string
+	}{
+		{"go.mod", "Go module"},
+		{"package.json", "Node.js project"},
+		{"Cargo.toml", "Rust project"},
+		{"pyproject.toml", "Python project"},
+		{"requirements.txt", "Python project"},
+		{"Gemfile", "Ruby project"},
+		{"pom.xml", "Java/Maven project"},
+		{"build.gradle", "Java/Gradle project"},
+		{"pubspec.yaml", "Dart/Flutter project"},
+	} {
+		if data, err := os.ReadFile(manifest.file); err == nil {
+			lines := strings.SplitN(string(data), "\n", 3)
+			if len(lines) > 0 {
+				return fmt.Sprintf("%s (%s)", manifest.kind, strings.TrimSpace(lines[0]))
+			}
+			return manifest.kind
+		}
+	}
+	return ""
+}
+
+func readFileSnippet(path string, maxLines int) (string, int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", 0, err
+	}
+	lines := strings.Split(string(data), "\n")
+	total := len(lines)
+	if total > maxLines {
+		lines = lines[:maxLines]
+	}
+	return strings.Join(lines, "\n"), total, nil
+}
+
+func listDirectory(dir string, maxEntries int) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	count := 0
+	for _, e := range entries {
+		if count >= maxEntries {
+			fmt.Fprintf(&b, "... (%d more entries)\n", len(entries)-maxEntries)
+			break
+		}
+		prefix := "  "
+		if e.IsDir() {
+			prefix = "d "
+		}
+		fmt.Fprintf(&b, "%s%s\n", prefix, e.Name())
+		count++
+	}
+	return b.String(), nil
+}
+
+func explainBashCommand(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return "(empty command)"
+	}
+	prefix := fields[0]
+	explanations := map[string]string{
+		"ls":     "List directory contents",
+		"cat":    "Display file contents",
+		"grep":   "Search for patterns in files",
+		"find":   "Find files matching criteria",
+		"head":   "Show first lines of a file",
+		"tail":   "Show last lines of a file",
+		"wc":     "Count lines/words/characters",
+		"diff":   "Compare files line by line",
+		"sort":   "Sort lines of text",
+		"sed":    "Stream editor (text transformation)",
+		"jq":     "JSON processor",
+		"curl":   "HTTP client (can upload data!)",
+		"wget":   "HTTP downloader (can upload data!)",
+		"git":    "Version control",
+		"go":     "Go toolchain",
+		"cargo":  "Rust toolchain",
+		"npm":    "Node.js package manager",
+		"docker": "Container management",
+		"make":   "Build automation",
+		"rm":     "Delete files (DESTRUCTIVE!)",
+		"sudo":   "Execute as root (DANGEROUS!)",
+		"echo":   "Print text to stdout",
+		"mkdir":  "Create directories",
+	}
+	if explanation, ok := explanations[prefix]; ok {
+		if prefix == "git" && len(fields) >= 2 {
+			sub := fields[1]
+			gitSubs := map[string]string{
+				"status":   "Show working tree status (read-only)",
+				"diff":     "Show changes (read-only)",
+				"log":      "Show commit history (read-only)",
+				"show":     "Show commit details (read-only)",
+				"blame":    "Show line-by-line annotations (read-only)",
+				"branch":   "List/create branches",
+				"checkout": "Switch branches or restore files (can discard changes!)",
+				"reset":    "Reset HEAD (DESTRUCTIVE!)",
+				"revert":   "Undo commits (rewrites history!)",
+				"clean":    "Remove untracked files (DESTRUCTIVE!)",
+				"stash":    "Stash/unstash changes",
+				"push":     "Push to remote",
+				"pull":     "Pull from remote",
+				"merge":    "Merge branches",
+				"add":      "Stage files",
+				"commit":   "Create a commit",
+			}
+			if desc, ok := gitSubs[sub]; ok {
+				return fmt.Sprintf("git %s: %s", sub, desc)
+			}
+		}
+		return explanation
+	}
+	return fmt.Sprintf("Execute '%s' (unknown command)", prefix)
+}
+
+func extractFilesFromCommand(command string) []string {
+	fields := strings.Fields(command)
+	var files []string
+	for _, f := range fields {
+		if strings.HasPrefix(f, "-") || f == "|" || f == ">" || f == ">>" || f == "<" || f == "&&" || f == ";" || f == "||" {
+			continue
+		}
+		if f == "git" || f == "go" || f == "cargo" || f == "npm" || f == "pnpm" || f == "yarn" || f == "bun" || f == "docker" || f == "make" || f == "curl" || f == "wget" || f == "echo" || f == "cd" || f == "pwd" {
+			continue
+		}
+		if strings.Contains(f, ".") || strings.Contains(f, "/") {
+			if !strings.HasPrefix(f, "http://") && !strings.HasPrefix(f, "https://") {
+				files = append(files, f)
+			}
+		}
+	}
+	return files
 }
 
 func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage) (string, error) {

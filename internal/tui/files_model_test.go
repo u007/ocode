@@ -34,6 +34,72 @@ func TestFilesPreviewShowsMetadataAndLanguage(t *testing.T) {
 	}
 }
 
+func TestFilesListShowsHumanizedMetadata(t *testing.T) {
+	m := newFilesModel(t.TempDir())
+	m.nodes = []fileNode{{
+		path:    "/tmp/example.txt",
+		name:    "example.txt",
+		size:    1536,
+		modTime: time.Now().Add(-2 * time.Hour),
+	}}
+
+	view := stripANSI(m.View(220, 30, ApplyThemeColors("tokyonight"), false, false))
+	for _, want := range []string{"1.5 KB", "2h"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected tree view to contain %q, got:\n%s", want, view)
+		}
+	}
+}
+
+func TestFormatModTimeHumanized(t *testing.T) {
+	now := time.Date(2026, time.June, 8, 12, 0, 0, 0, time.UTC)
+	if got := formatModTimeAt(now.Add(-2*time.Hour), now); got != "2h ago" {
+		t.Fatalf("expected 2h ago, got %q", got)
+	}
+	if got := formatModTimeAt(now.Add(-48*time.Hour), now); got != "2d ago" {
+		t.Fatalf("expected 2d ago, got %q", got)
+	}
+}
+
+func TestFilesPreviewLoadsProgressively(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big.txt")
+	var b strings.Builder
+	for i := 0; i < 6000; i++ {
+		fmt.Fprintf(&b, "line %04d: %s\n", i, strings.Repeat("x", 80))
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newFilesModel(dir)
+	m.Resize(100, 30)
+	msg, ok := loadPreviewCmd(m.nodes[0])().(filesPreviewMsg)
+	if !ok {
+		t.Fatal("expected filesPreviewMsg from preview load")
+	}
+	if msg.done {
+		t.Fatal("expected big file preview to be partial, got done=true")
+	}
+	m.applyPreview(msg)
+	initial := len(m.previewRawLines)
+	if initial == 0 || initial >= 6000 {
+		t.Fatalf("expected partial preview load, got %d lines", initial)
+	}
+	if !m.previewHasMore {
+		t.Fatal("expected big file preview to report more content available")
+	}
+
+	if cmd := m.loadMorePreviewCmd(); cmd != nil {
+		if next, ok := cmd().(filesPreviewMsg); ok {
+			m.applyPreview(next)
+		}
+	}
+	if got := len(m.previewRawLines); got <= initial {
+		t.Fatalf("expected progressive load to append more lines, before=%d after=%d", initial, got)
+	}
+}
+
 func TestFilesActionsCreateRenameAndDelete(t *testing.T) {
 	dir := t.TempDir()
 	m := newFilesModel(dir)

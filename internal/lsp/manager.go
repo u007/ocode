@@ -142,7 +142,11 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 	store := m.diagnostics
 	if store != nil {
 		generation := store.Generation()
+		cmd := spec.cmd
 		c.SetDiagnosticsHandler(func(uri string, diags []Diagnostic) {
+			for i := range diags {
+				diags[i].ServerCmd = cmd
+			}
 			store.SetURIIfGeneration(uri, diags, generation)
 		})
 	}

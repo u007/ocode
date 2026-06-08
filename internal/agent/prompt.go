@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	promptEnvMarker         = "[ocode:environment]"
-	promptProviderMarker    = "[ocode:provider]"
-	promptModeMarker        = "[ocode:mode]"
-	promptContextMarker     = "[ocode:context]"
-	promptModelCtxMarker    = "[ocode:model_context]"
-	promptSelectionMarker   = "[ocode:selection]"
+	promptEnvMarker       = "[ocode:environment]"
+	promptProviderMarker  = "[ocode:provider]"
+	promptModeMarker      = "[ocode:mode]"
+	promptContextMarker   = "[ocode:context]"
+	promptModelCtxMarker  = "[ocode:model_context]"
+	promptSelectionMarker = "[ocode:selection]"
 )
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.

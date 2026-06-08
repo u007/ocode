@@ -62,7 +62,7 @@ func TestPermissions_NoToolAllow_StillAsksForSensitive(t *testing.T) {
 			name:     "out_of_workdir_under_ask",
 			tool:     "write",
 			ruleSet:  PermissionAsk,
-			args:     `{"file_path":"/var/tmp/foreign/file","content":"x"}`,
+			args:     `{"file_path":"/home/foreign/file","content":"x"}`,
 			wantRule: "tool.write.out_of_scope",
 		},
 		{
@@ -505,11 +505,11 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 			t.Fatalf("expected allow for in-root redirection, got %s", dec.Level)
 		}
 
-		// Unsafe out-of-root redirection
+		// Temp dir redirection is now allowed (cross-platform)
 		cmd2 := `{"command":"echo hello > /tmp/out.txt"}`
 		dec2 := pm.Decide("bash", json.RawMessage(cmd2))
-		if dec2.Level != PermissionAsk {
-			t.Fatalf("expected ask for out-of-root redirection, got %s", dec2.Level)
+		if dec2.Level != PermissionAllow {
+			t.Fatalf("expected allow for temp dir redirection, got %s", dec2.Level)
 		}
 
 		// Safe /dev/null bypass
@@ -528,11 +528,11 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 			t.Fatalf("expected allow for cd to in-root, got %s", dec.Level)
 		}
 
-		// cd to out-of-root path
+		// cd to temp dir is now allowed (cross-platform)
 		cmd2 := `{"command":"cd /tmp"}`
 		dec2 := pm.Decide("bash", json.RawMessage(cmd2))
-		if dec2.Level != PermissionAsk {
-			t.Fatalf("expected ask for cd to out-of-root, got %s", dec2.Level)
+		if dec2.Level != PermissionAllow {
+			t.Fatalf("expected allow for cd to temp dir, got %s", dec2.Level)
 		}
 
 		// cd with no args (defaults to HOME, which is tempHome outside workdir)
@@ -874,6 +874,44 @@ func TestPermissions_BenignCommandsNotHarmful(t *testing.T) {
 			req := PermissionRequest{ToolName: "bash", Command: tc.command}
 			if IsHarmfulRequest(req) {
 				t.Errorf("IsHarmfulRequest should be false for benign command: %s", tc.command)
+			}
+		})
+	}
+}
+
+func TestPermissions_TempDirAutoAllowed(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+		want    PermissionLevel
+	}{
+		{"ls_tmp", "ls /tmp", PermissionAllow},
+		{"cat_tmp_file", "cat /tmp/test.txt", PermissionAllow},
+		{"echo_to_tmp", "echo hello > /tmp/out.txt", PermissionAllow},
+		{"grep_in_tmp", "grep pattern /tmp/*.log", PermissionAllow},
+		{"mkdir_tmp", "mkdir -p /tmp/subdir", PermissionAllow},
+		{"rm_tmp_file", "rm /tmp/test.txt", PermissionAllow},
+		{"ls_var_tmp", "ls /var/tmp", PermissionAllow},
+		{"read_tmp_tool", "read", PermissionAllow},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetWorkDir("/Users/test/project")
+			var args json.RawMessage
+			if tc.name == "read_tmp_tool" {
+				args = json.RawMessage(`{"path":"/tmp/test.txt"}`)
+			} else {
+				args = json.RawMessage(fmt.Sprintf(`{"command":"%s"}`, tc.command))
+			}
+			tool := "bash"
+			if tc.name == "read_tmp_tool" {
+				tool = "read"
+			}
+			dec := pm.Decide(tool, args)
+			if dec.Level != tc.want {
+				t.Errorf("Decide(%s, %s) = %s, want %s", tool, args, dec.Level, tc.want)
 			}
 		})
 	}

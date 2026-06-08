@@ -19,7 +19,7 @@ type RunOptions struct {
 	Continue       bool
 	YOLO           bool
 	PermissionMode string // "" | "auto" | "off"
-	WebFS          fs.FS // Embedded web assets for /rc command
+	WebFS          fs.FS  // Embedded web assets for /rc command
 }
 
 func Run(opts RunOptions) error {

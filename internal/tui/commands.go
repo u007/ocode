@@ -82,7 +82,7 @@ func init() {
 		{name: "/mcp", usage: "/mcp [list|enable <server>|disable <server>]", help: "List or toggle MCP servers", handler: runMCPCmd},
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
-		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions", handler: runPermissionsCmd},
+		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions (model test runs tests)", handler: runPermissionsCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
@@ -568,7 +568,7 @@ func runAgentCmd(m *model, args []string) tea.Cmd {
 }
 
 func runPermissionsCmd(m *model, args []string) tea.Cmd {
-	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status> | model [<provider/model>]]"
+	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status> | model [test|<provider/model>|auto]]"
 	if len(args) == 0 {
 		if m.agent == nil || m.agent.Permissions() == nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured.\n\n" + usage})

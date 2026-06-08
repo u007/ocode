@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -10,6 +12,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"charm.land/bubbles/v2/textarea"
@@ -23,12 +26,18 @@ import (
 )
 
 type filesPreviewMsg struct {
-	path     string
-	content  string
-	raw      string
-	size     int64
-	language string
-	editable bool
+	path        string
+	content     string
+	raw         string
+	size        int64
+	language    string
+	editable    bool
+	session     uint64
+	append      bool
+	startOffset int64
+	nextOffset  int64
+	done        bool
+	err         error
 }
 
 type filesAddToContextMsg struct {
@@ -92,45 +101,52 @@ type fileNode struct {
 	path     string
 	name     string
 	isDir    bool
+	size     int64
+	modTime  time.Time
 	depth    int
 	expanded bool
 	loaded   bool
 }
 
 type filesModel struct {
-	workDir         string
-	nodes           []fileNode
-	cursor          int
-	preview         viewport.Model
-	allPaths        []string
-	width           int
-	height          int
-	editor          string
-	saveEditor      func(string) error
-	choosingEditor  bool
-	editorCursor    int
-	editorTarget    string
-	statusMsg       string
-	mode            filesMode
-	promptInput     textarea.Model
-	promptKind      filesPromptKind
-	promptTarget    string
-	previewPath     string
-	previewSize     int64
-	previewLang     string
-	previewEditable bool
-	gitStatus       map[string]string
-	editorOpener    func(string) tea.Cmd
-	editorMode      string
-	panel           filesPanel
-	previewRaw      string
-	previewRawLines []string
-	selectedFiles   map[int]bool
-	previewLines    []string
-	inlineEditor    inlineFileEditor
-	inlineEditPath  string
-	inlineEditMtime int64
-	inlineEditSize  int64
+	workDir              string
+	nodes                []fileNode
+	cursor               int
+	preview              viewport.Model
+	allPaths             []string
+	width                int
+	height               int
+	editor               string
+	saveEditor           func(string) error
+	choosingEditor       bool
+	editorCursor         int
+	editorTarget         string
+	statusMsg            string
+	mode                 filesMode
+	promptInput          textarea.Model
+	promptKind           filesPromptKind
+	promptTarget         string
+	previewPath          string
+	previewSize          int64
+	previewLang          string
+	previewEditable      bool
+	previewSession       uint64
+	previewLoading       bool
+	previewHasMore       bool
+	previewNextOff       int64
+	previewPendingScroll int
+	gitStatus            map[string]string
+	editorOpener         func(string) tea.Cmd
+	editorMode           string
+	panel                filesPanel
+	previewRaw           string
+	previewRawLines      []string
+	selectedFiles        map[int]bool
+	previewLines         []string
+	inlineEditor         inlineFileEditor
+	inlineEditPath       string
+	inlineEditMtime      int64
+	inlineEditSize       int64
 
 	// Delete confirmation fields
 	deleteTargets []string // paths to delete (multi-select support)
@@ -188,14 +204,233 @@ func loadDirChildren(dir string, depth int, showHidden bool) []fileNode {
 		if !showHidden && strings.HasPrefix(name, ".") {
 			continue
 		}
+		info, infoErr := e.Info()
 		nodes = append(nodes, fileNode{
-			path:  filepath.Join(dir, name),
-			name:  name,
-			isDir: e.IsDir(),
-			depth: depth,
+			path:    filepath.Join(dir, name),
+			name:    name,
+			isDir:   e.IsDir(),
+			size:    fileSize(info, infoErr),
+			modTime: fileModTime(info, infoErr),
+			depth:   depth,
 		})
 	}
 	return nodes
+}
+
+const (
+	previewChunkBytes        = 256 * 1024
+	previewChunkLines        = 4096
+	previewPrefetchThreshold = 6
+	previewEditLimitBytes    = 1 * 1024 * 1024
+)
+
+func fileModTime(info os.FileInfo, err error) time.Time {
+	if err != nil || info == nil {
+		return time.Time{}
+	}
+	return info.ModTime()
+}
+
+func formatModTime(t time.Time) string {
+	return formatModTimeAt(t, time.Now())
+}
+
+func formatModTimeAt(t, now time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	d := now.Sub(t)
+	if d < 0 {
+		d = -d
+	}
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	default:
+		return t.Format("Jan 02")
+	}
+}
+
+func formatFileNodeMeta(n fileNode) string {
+	parts := make([]string, 0, 2)
+	if !n.isDir {
+		parts = append(parts, formatBytes(n.size))
+	}
+	if mtime := formatModTime(n.modTime); mtime != "" {
+		parts = append(parts, mtime)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func readPreviewChunk(path string, startOffset int64) (raw string, nextOffset int64, done bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", startOffset, false, err
+	}
+	defer f.Close()
+
+	if startOffset > 0 {
+		if _, err := f.Seek(startOffset, io.SeekStart); err != nil {
+			return "", startOffset, false, err
+		}
+	}
+
+	reader := bufio.NewReader(f)
+	var consumed = startOffset
+	var lines []string
+	var lineBuf bytes.Buffer
+	for len(lines) < previewChunkLines {
+		part, readErr := reader.ReadBytes('\n')
+		if len(part) > 0 {
+			lineBuf.Write(part)
+			consumed += int64(len(part))
+		}
+		if readErr == bufio.ErrBufferFull {
+			continue
+		}
+		if lineBuf.Len() > 0 {
+			line := lineBuf.String()
+			line = strings.TrimSuffix(line, "\n")
+			line = strings.TrimSuffix(line, "\r")
+			lines = append(lines, line)
+			lineBuf.Reset()
+		}
+		if readErr == io.EOF {
+			done = true
+			break
+		}
+		if readErr != nil {
+			return "", startOffset, false, readErr
+		}
+		if consumed-startOffset >= previewChunkBytes {
+			break
+		}
+	}
+	if len(lines) == 0 {
+		return "", consumed, done, nil
+	}
+	return strings.Join(lines, "\n"), consumed, done, nil
+}
+
+func previewLoadMessage(path string, isDir bool, startOffset int64, session uint64, appendChunk bool) tea.Msg {
+	if isDir {
+		content := "[directory]"
+		return filesPreviewMsg{
+			path:        path,
+			content:     content,
+			raw:         content,
+			size:        0,
+			language:    "directory",
+			editable:    false,
+			session:     session,
+			append:      appendChunk,
+			startOffset: startOffset,
+			nextOffset:  startOffset,
+			done:        true,
+		}
+	}
+
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		content := "[cannot read file]"
+		return filesPreviewMsg{
+			path:        path,
+			content:     content,
+			raw:         content,
+			size:        0,
+			language:    languageForPath(path),
+			editable:    false,
+			session:     session,
+			append:      appendChunk,
+			startOffset: startOffset,
+			nextOffset:  startOffset,
+			done:        true,
+			err:         statErr,
+		}
+	}
+
+	if startOffset == 0 {
+		f, err := os.Open(path)
+		if err != nil {
+			content := "[cannot read file]"
+			return filesPreviewMsg{
+				path:        path,
+				content:     content,
+				raw:         content,
+				size:        fileSize(info, statErr),
+				language:    languageForPath(path),
+				editable:    false,
+				session:     session,
+				append:      appendChunk,
+				startOffset: startOffset,
+				nextOffset:  startOffset,
+				done:        true,
+				err:         err,
+			}
+		}
+		defer f.Close()
+
+		buf := make([]byte, 512)
+		n, _ := f.Read(buf)
+		if bytes.IndexByte(buf[:n], 0) >= 0 {
+			content := "[binary file]"
+			return filesPreviewMsg{
+				path:        path,
+				content:     content,
+				raw:         content,
+				size:        fileSize(info, statErr),
+				language:    languageForPath(path),
+				editable:    false,
+				session:     session,
+				append:      appendChunk,
+				startOffset: startOffset,
+				nextOffset:  startOffset,
+				done:        true,
+			}
+		}
+	}
+
+	raw, nextOffset, done, err := readPreviewChunk(path, startOffset)
+	if err != nil {
+		content := "[cannot read file]"
+		return filesPreviewMsg{
+			path:        path,
+			content:     content,
+			raw:         content,
+			size:        fileSize(info, statErr),
+			language:    languageForPath(path),
+			editable:    false,
+			session:     session,
+			append:      appendChunk,
+			startOffset: startOffset,
+			nextOffset:  startOffset,
+			done:        true,
+			err:         err,
+		}
+	}
+
+	language := languageForPath(path)
+	editable := info.Size() <= previewEditLimitBytes
+	content := highlightContent(raw, language)
+	return filesPreviewMsg{
+		path:        path,
+		content:     content,
+		raw:         raw,
+		size:        fileSize(info, statErr),
+		language:    language,
+		editable:    editable,
+		session:     session,
+		append:      appendChunk,
+		startOffset: startOffset,
+		nextOffset:  nextOffset,
+		done:        done,
+	}
 }
 
 func (m *filesModel) SetEditor(e string) { m.editor = e }
@@ -263,8 +498,7 @@ func (m *filesModel) Resize(w, h int) {
 func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case filesPreviewMsg:
-		m.applyPreview(msg)
-		return m, nil
+		return m, m.applyPreview(msg)
 	case filesGitStatusUpdateMsg:
 		m.gitStatus = msg.gitStatus
 		return m, nil
@@ -331,7 +565,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			// Reset horizontal scroll when cursor moves
 			m.treeScrollX = 0
 			if m.cursor < len(m.nodes) {
-				return m, loadPreviewCmd(m.nodes[m.cursor])
+				return m, m.loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
 	case "up":
@@ -340,7 +574,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			// Reset horizontal scroll when cursor moves
 			m.treeScrollX = 0
 			if m.cursor < len(m.nodes) {
-				return m, loadPreviewCmd(m.nodes[m.cursor])
+				return m, m.loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
 	case "enter", "ctrl+j", "ctrl+m":
@@ -379,7 +613,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			m.cursor++
 			m.selectedFiles[m.cursor] = true
 			if m.cursor < len(m.nodes) {
-				return m, loadPreviewCmd(m.nodes[m.cursor])
+				return m, m.loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
 	case "shift+up":
@@ -391,7 +625,7 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 			m.cursor--
 			m.selectedFiles[m.cursor] = true
 			if m.cursor < len(m.nodes) {
-				return m, loadPreviewCmd(m.nodes[m.cursor])
+				return m, m.loadPreviewCmd(m.nodes[m.cursor])
 			}
 		}
 	case "left":
@@ -445,11 +679,16 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		m.showHidden = !m.showHidden
 		m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
 		m.cursor = 0
+		m.previewLoading = false
+		m.previewHasMore = false
+		m.previewNextOff = 0
+		m.previewPendingScroll = 0
 		if m.showHidden {
 			m.statusMsg = "showing hidden files"
 		} else {
 			m.statusMsg = "hiding hidden files"
 		}
+		return m, m.refreshPreviewCmd()
 	case "tab":
 		m.panel = (m.panel + 1) % 2
 	}
@@ -459,9 +698,11 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 func (m filesModel) updatePreview(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	switch msg.String() {
 	case "down":
-		m.preview.ScrollDown(1)
+		if cmd := m.scrollPreviewDown(1); cmd != nil {
+			return m, cmd
+		}
 	case "up":
-		m.preview.ScrollUp(1)
+		m.scrollPreviewUp(1)
 	case "tab":
 		m.panel = (m.panel + 1) % 2
 	case "ctrl+e":
@@ -807,7 +1048,7 @@ func (m filesModel) updateFuzzy(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 	if m.mode == filesModeFuzzy && len(m.fuzzyResults) > 0 && m.fuzzyCursor >= 0 && m.fuzzyCursor < len(m.fuzzyResults) {
 		absPath := filepath.Join(m.workDir, m.fuzzyResults[m.fuzzyCursor])
 		n := fileNode{path: absPath, name: filepath.Base(absPath), isDir: false}
-		return m, loadPreviewCmd(n)
+		return m, m.loadPreviewCmd(n)
 	}
 	return m, nil
 }
@@ -837,35 +1078,30 @@ func (m *filesModel) toggleDir(idx int) {
 
 func loadPreviewCmd(n fileNode) tea.Cmd {
 	return func() tea.Msg {
-		if n.isDir {
-			return filesPreviewMsg{path: n.path, content: "[directory]", language: "directory"}
-		}
-		info, statErr := os.Stat(n.path)
-		f, err := os.Open(n.path)
-		if err != nil {
-			return filesPreviewMsg{path: n.path, content: "[cannot read file]", language: languageForPath(n.path)}
-		}
-		defer f.Close()
+		return previewLoadMessage(n.path, n.isDir, 0, 0, false)
+	}
+}
 
-		buf := make([]byte, 1024*1024+1)
-		nr, _ := f.Read(buf)
-		data := buf[:nr]
+func (m *filesModel) loadPreviewCmd(n fileNode) tea.Cmd {
+	m.previewSession++
+	m.previewLoading = true
+	m.previewPendingScroll = 0
+	session := m.previewSession
+	return func() tea.Msg {
+		return previewLoadMessage(n.path, n.isDir, 0, session, false)
+	}
+}
 
-		probe := data
-		if len(probe) > 512 {
-			probe = probe[:512]
-		}
-		if bytes.IndexByte(probe, 0) >= 0 {
-			return filesPreviewMsg{path: n.path, content: "[binary file]", size: fileSize(info, statErr), language: languageForPath(n.path)}
-		}
-
-		content := string(data)
-		editable := nr <= 1024*1024
-		if nr > 1024*1024 {
-			content = string(data[:1024*1024]) + "\n[truncated — 1MB limit]"
-		}
-		language := languageForPath(n.path)
-		return filesPreviewMsg{path: n.path, content: highlightContent(content, language), raw: content, size: fileSize(info, statErr), language: language, editable: editable}
+func (m *filesModel) loadMorePreviewCmd() tea.Cmd {
+	if m.previewPath == "" || !m.previewHasMore || m.previewLoading {
+		return nil
+	}
+	m.previewLoading = true
+	path := m.previewPath
+	offset := m.previewNextOff
+	session := m.previewSession
+	return func() tea.Msg {
+		return previewLoadMessage(path, false, offset, session, true)
 	}
 }
 
@@ -876,19 +1112,122 @@ func fileSize(info os.FileInfo, err error) int64 {
 	return info.Size()
 }
 
-func (m *filesModel) applyPreview(msg filesPreviewMsg) {
-	m.previewPath = msg.path
-	m.previewSize = msg.size
-	m.previewLang = msg.language
-	m.previewEditable = msg.editable
-	m.preview.SetContent(msg.content)
-	m.previewRaw = msg.raw
-	m.previewRawLines = strings.Split(msg.raw, "\n")
-	m.previewLines = strings.Split(msg.content, "\n")
-	m.preview.GotoTop()
+func (m *filesModel) applyPreview(msg filesPreviewMsg) tea.Cmd {
+	if msg.session != 0 && msg.session != m.previewSession {
+		return nil
+	}
+	m.previewLoading = false
+	if msg.err != nil {
+		m.statusMsg = "preview error: " + msg.err.Error()
+		return nil
+	}
+	if !msg.append {
+		m.previewPath = msg.path
+		m.previewSize = msg.size
+		m.previewLang = msg.language
+		m.previewEditable = msg.editable
+		m.previewRaw = msg.raw
+		m.previewRawLines = nil
+		m.previewLines = nil
+		m.previewHasMore = !msg.done
+		m.previewNextOff = msg.nextOffset
+		if msg.raw != "" {
+			m.previewRawLines = strings.Split(msg.raw, "\n")
+		}
+		if msg.content != "" {
+			m.previewLines = strings.Split(msg.content, "\n")
+		}
+		m.preview.SetContent(msg.content)
+		m.preview.GotoTop()
+	} else {
+		if m.previewPath != "" && m.previewPath != msg.path {
+			return nil
+		}
+		if msg.raw != "" {
+			if m.previewRaw != "" {
+				m.previewRaw += "\n"
+			}
+			m.previewRaw += msg.raw
+			if len(m.previewRawLines) > 0 {
+				m.previewRawLines = append(m.previewRawLines, strings.Split(msg.raw, "\n")...)
+			} else {
+				m.previewRawLines = strings.Split(msg.raw, "\n")
+			}
+		}
+		if msg.content != "" {
+			if len(m.previewLines) > 0 {
+				m.previewLines = append(m.previewLines, strings.Split(msg.content, "\n")...)
+			} else {
+				m.previewLines = strings.Split(msg.content, "\n")
+			}
+		}
+		m.previewHasMore = !msg.done
+		m.previewNextOff = msg.nextOffset
+		m.preview.SetContent(strings.Join(m.previewLines, "\n"))
+	}
+
+	if m.previewPendingScroll > 0 {
+		m.preview.ScrollDown(m.previewPendingScroll)
+		m.previewPendingScroll = 0
+	}
+
+	if m.previewHasMore && !m.previewLoading && m.previewShouldLoadMore() {
+		return m.loadMorePreviewCmd()
+	}
+	return nil
+}
+
+func (m filesModel) previewAtBottom() bool {
+	if m.preview.TotalLineCount() == 0 {
+		return false
+	}
+	return m.preview.YOffset()+m.preview.VisibleLineCount() >= m.preview.TotalLineCount()
+}
+
+func (m filesModel) previewShouldLoadMore() bool {
+	if !m.previewHasMore || m.previewLoading || m.previewPath == "" {
+		return false
+	}
+	loaded := m.preview.TotalLineCount()
+	visible := m.preview.VisibleLineCount()
+	if loaded <= visible+previewPrefetchThreshold {
+		return true
+	}
+	return m.preview.YOffset()+visible >= loaded-previewPrefetchThreshold
+}
+
+func (m *filesModel) scrollPreviewDown(n int) tea.Cmd {
+	if n <= 0 {
+		return nil
+	}
+	if m.previewLoading && m.previewAtBottom() {
+		m.previewPendingScroll += n
+		return nil
+	}
+	if m.previewHasMore && !m.previewLoading && m.previewAtBottom() {
+		m.previewPendingScroll += n
+		return m.loadMorePreviewCmd()
+	}
+	m.preview.ScrollDown(n)
+	if m.previewShouldLoadMore() {
+		return m.loadMorePreviewCmd()
+	}
+	return nil
+}
+
+func (m *filesModel) scrollPreviewUp(n int) {
+	if n <= 0 {
+		return
+	}
+	m.preview.ScrollUp(n)
 }
 
 func (m *filesModel) clearActiveFile() {
+	m.previewSession++
+	m.previewLoading = false
+	m.previewHasMore = false
+	m.previewNextOff = 0
+	m.previewPendingScroll = 0
 	m.cursor = -1
 	m.previewPath = ""
 	m.previewSize = 0
@@ -951,9 +1290,8 @@ func (m *filesModel) navigateTo(relPath string) {
 					m.cursor = idx
 					// one-shot navigation at startup; sync read is acceptable here
 					if idx < len(m.nodes) {
-						if result, ok := loadPreviewCmd(m.nodes[idx])().(filesPreviewMsg); ok {
-							m.preview.SetContent(result.content)
-							m.preview.GotoTop()
+						if result, ok := m.loadPreviewCmd(m.nodes[idx])().(filesPreviewMsg); ok {
+							m.applyPreview(result)
 						}
 					}
 				}
@@ -1011,11 +1349,11 @@ func (m *filesModel) rebuildTreeKeeping(path string) {
 	}
 }
 
-func (m filesModel) refreshPreviewCmd() tea.Cmd {
+func (m *filesModel) refreshPreviewCmd() tea.Cmd {
 	if m.cursor < 0 || m.cursor >= len(m.nodes) {
 		return nil
 	}
-	return loadPreviewCmd(m.nodes[m.cursor])
+	return m.loadPreviewCmd(m.nodes[m.cursor])
 }
 
 func (m filesModel) selectedNode() (fileNode, bool) {
@@ -1372,7 +1710,10 @@ func formatBytes(n int64) string {
 	if n < 1024*1024 {
 		return fmt.Sprintf("%.1f KB", float64(n)/1024)
 	}
-	return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	if n < 1024*1024*1024 {
+		return fmt.Sprintf("%.1f MB", float64(n)/(1024*1024))
+	}
+	return fmt.Sprintf("%.1f GB", float64(n)/(1024*1024*1024))
 }
 
 func (m *filesModel) applySelectionHighlight(startLine, startCol, endLine, endCol int) {
@@ -1446,6 +1787,10 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	// Build raw lines first to determine max width for horizontal scrolling
 	rawLines := make([]string, 0, len(m.nodes))
 	styledLines := make([]string, 0, len(m.nodes))
+	treeContentWidth := treeW - 4
+	if treeContentWidth < 1 {
+		treeContentWidth = 1
+	}
 	for i, n := range m.nodes {
 		indent := strings.Repeat("  ", n.depth)
 		icon := "  "
@@ -1462,16 +1807,23 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 			marker = "✓ "
 		}
 		rawLine := marker + indent + icon + n.name
+		if rel, err := filepath.Rel(m.workDir, n.path); err == nil {
+			if badge := m.gitStatus[rel]; badge != "" {
+				rawLine = badge + " " + rawLine
+			}
+		}
+		if meta := formatFileNodeMeta(n); meta != "" {
+			gap := treeContentWidth - visualLineWidth(rawLine) - visualLineWidth(meta)
+			if gap < 1 {
+				gap = 1
+			}
+			rawLine += strings.Repeat(" ", gap) + meta
+		}
+		rawLine = truncateToWidth(rawLine, treeContentWidth)
 		styledLine := rawLine
 		// Dim hidden files when showHidden is enabled
 		if m.showHidden && strings.HasPrefix(n.name, ".") {
 			styledLine = styles.Hint.Render(styledLine)
-		}
-		if rel, err := filepath.Rel(m.workDir, n.path); err == nil {
-			if badge := m.gitStatus[rel]; badge != "" {
-				rawLine = badge + " " + rawLine
-				styledLine = badge + " " + styledLine
-			}
 		}
 		rawLines = append(rawLines, rawLine)
 		styledLines = append(styledLines, styledLine)
@@ -1486,7 +1838,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	}
 
 	// Clamp treeScrollX to valid range
-	availW := treeW - 4 // account for border + padding + marker
+	availW := treeContentWidth // account for border + padding + marker
 	if maxWidth <= availW {
 		m.treeScrollX = 0
 	} else if m.treeScrollX > maxWidth-availW {
@@ -1503,7 +1855,9 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 			line = skipVisibleChars(line, m.treeScrollX)
 		}
 		if i == m.cursor {
-			line = styles.Selected.Width(treeW - 4).Render(line)
+			line = styles.Selected.Render(truncateToWidth(line, treeContentWidth))
+		} else {
+			line = truncateToWidth(line, treeContentWidth)
 		}
 		treeLines = append(treeLines, line)
 	}

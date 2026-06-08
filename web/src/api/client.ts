@@ -9,9 +9,17 @@ import type {
 
 const BASE = "";
 
+// Auth token embedded in URL by /rc command (?token=...). Stored at load time
+// so navigation or hash changes don't lose it.
+const _token = new URLSearchParams(window.location.search).get("token") ?? "";
+
+function authHeaders(): Record<string, string> {
+  return _token ? { Authorization: `Bearer ${_token}` } : {};
+}
+
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
   if (!res.ok) {
@@ -86,6 +94,7 @@ export function connectChatSSE(
   const params = new URLSearchParams({ message });
   if (session) params.set("session", session);
   if (model) params.set("model", model);
+  if (_token) params.set("token", _token);
 
   const es = new EventSource(`/api/chat/stream?${params}`);
 
@@ -117,6 +126,7 @@ export function connectAgentRunsSSE(
 ): () => void {
   const params = new URLSearchParams();
   if (session) params.set("session", session);
+  if (_token) params.set("token", _token);
 
   const es = new EventSource(`/api/agents/runs/stream?${params}`);
   es.addEventListener("runs", (e) => {

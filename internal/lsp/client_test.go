@@ -228,4 +228,3 @@ func TestWriteMessageAfterCloseReturnsError(t *testing.T) {
 		t.Fatalf("writeMessage after Close should return an error, got nil")
 	}
 }
-

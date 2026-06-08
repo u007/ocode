@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
@@ -744,7 +744,7 @@ func (m model) renderThemePreview(width int) string {
 	asstLabel := m.styles.Assistant.Render("Assistant")
 	asstMsg := m.styles.Text.Inline(true).Render(" I'm here to help!")
 	asstBubble := lipgloss.NewStyle().
-		Width(pw - 2).
+		Width(pw-2).
 		Padding(0, 1).
 		Render(asstLabel + " " + asstMsg)
 

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -48,6 +49,43 @@ func TestAuthMiddleware(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestRealIPIgnoresForwardedHeaders(t *testing.T) {
+	r := httptest.NewRequest("GET", "/api/sessions", nil)
+	r.RemoteAddr = "203.0.113.10:4321"
+	r.Header.Set("X-Real-IP", "198.51.100.1")
+	r.Header.Set("X-Forwarded-For", "198.51.100.2, 198.51.100.3")
+
+	if got := realIP(r); got != "203.0.113.10" {
+		t.Fatalf("expected remote addr IP, got %q", got)
+	}
+}
+
+func TestAuthMiddlewareRateLimitUsesRemoteAddr(t *testing.T) {
+	s := New("localhost:0", "user", "pass", nil)
+
+	for i := 0; i < 5; i++ {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("GET", "/api/sessions", nil)
+		r.RemoteAddr = "203.0.113.10:4321"
+		r.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d", i))
+		s.mux.ServeHTTP(w, r)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: expected 401, got %d", i+1, w.Code)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/sessions", nil)
+	r.RemoteAddr = "203.0.113.10:4321"
+	r.Header.Set("X-Forwarded-For", "198.51.100.250")
+	s.mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 after repeated failures from same remote addr, got %d", w.Code)
 	}
 }
 

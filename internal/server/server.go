@@ -6,18 +6,65 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 )
+
+type rlEntry struct {
+	failures    int
+	lockedUntil time.Time
+}
+
+type rateLimiter struct {
+	mu      sync.Mutex
+	entries map[string]*rlEntry
+}
+
+func newRateLimiter() *rateLimiter {
+	return &rateLimiter{entries: make(map[string]*rlEntry)}
+}
+
+func (rl *rateLimiter) isBlocked(ip string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	e := rl.entries[ip]
+	return e != nil && time.Now().Before(e.lockedUntil)
+}
+
+func (rl *rateLimiter) recordFailure(ip string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	e := rl.entries[ip]
+	if e == nil {
+		e = &rlEntry{}
+		rl.entries[ip] = e
+	}
+	e.failures++
+	if e.failures >= 5 {
+		e.lockedUntil = time.Now().Add(time.Minute)
+		e.failures = 0
+	}
+}
+
+func (rl *rateLimiter) reset(ip string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	delete(rl.entries, ip)
+}
 
 type Server struct {
 	addr     string
 	username string
 	password string
+	rl       *rateLimiter
 	mux      *http.ServeMux
 	handler  *Handler
 	webFS    fs.FS
@@ -30,6 +77,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		addr:     addr,
 		username: username,
 		password: password,
+		rl:       newRateLimiter(),
 		mux:      mux,
 		handler:  h,
 		webFS:    webFS,
@@ -115,17 +163,51 @@ func (s *Server) registerRoutes() {
 	s.mux.Handle("/", spaHandler(s.webFS))
 }
 
+func realIP(r *http.Request) string {
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host != "" {
+		return host
+	}
+	if r.RemoteAddr != "" {
+		return r.RemoteAddr
+	}
+	return "unknown"
+}
+
+func (s *Server) checkAuth(r *http.Request) bool {
+	// Bearer token header (used by frontend fetch calls)
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
+		return auth[7:] == s.password
+	}
+	// ?token= query param (used by EventSource which can't set headers)
+	if tok := r.URL.Query().Get("token"); tok != "" {
+		return tok == s.password
+	}
+	// HTTP Basic Auth
+	user, pass, ok := r.BasicAuth()
+	if ok {
+		return (s.username == "" || user == s.username) && pass == s.password
+	}
+	return false
+}
+
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	if s.username == "" && s.password == "" {
 		return next
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		user, pass, ok := r.BasicAuth()
-		if !ok || user != s.username || pass != s.password {
+		ip := realIP(r)
+		if s.rl.isBlocked(ip) {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+		if !s.checkAuth(r) {
+			s.rl.recordFailure(ip)
 			w.Header().Set("WWW-Authenticate", `Basic realm="ocode"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		s.rl.reset(ip)
 		next(w, r)
 	}
 }
@@ -307,26 +389,46 @@ func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) { s.handler.
 func (s *Server) handleRedo(w http.ResponseWriter, r *http.Request) { s.handler.HandleRedo(w, r) }
 
 // Config shims
-func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request)      { s.handler.HandleGetModel(w, r) }
-func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request)      { s.handler.HandleSetModel(w, r) }
-func (s *Server) handleGetSmallModel(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetSmallModel(w, r) }
-func (s *Server) handleSetSmallModel(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetSmallModel(w, r) }
-func (s *Server) handleGetAdvisor(w http.ResponseWriter, r *http.Request)    { s.handler.HandleGetAdvisor(w, r) }
-func (s *Server) handleSetAdvisor(w http.ResponseWriter, r *http.Request)    { s.handler.HandleSetAdvisor(w, r) }
+func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetModel(w, r)
+}
+func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetModel(w, r)
+}
+func (s *Server) handleGetSmallModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetSmallModel(w, r)
+}
+func (s *Server) handleSetSmallModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetSmallModel(w, r)
+}
+func (s *Server) handleGetAdvisor(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetAdvisor(w, r)
+}
+func (s *Server) handleSetAdvisor(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAdvisor(w, r)
+}
 func (s *Server) handleGetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetAdvisorEnabled(w, r)
 }
 func (s *Server) handleSetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetAdvisorEnabled(w, r)
 }
-func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request)    { s.handler.HandleListAgents(w, r) }
-func (s *Server) handleSetAgent(w http.ResponseWriter, r *http.Request)      { s.handler.HandleSetAgent(w, r) }
+func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListAgents(w, r)
+}
+func (s *Server) handleSetAgent(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAgent(w, r)
+}
 
 // Permissions shims
-func (s *Server) handleGetPermissions(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetPermissions(w, r) }
-func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request)  { s.handler.HandleSetPermission(w, r) }
-func (s *Server) handleGetYolo(w http.ResponseWriter, r *http.Request)        { s.handler.HandleGetYolo(w, r) }
-func (s *Server) handleSetYolo(w http.ResponseWriter, r *http.Request)        { s.handler.HandleSetYolo(w, r) }
+func (s *Server) handleGetPermissions(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPermissions(w, r)
+}
+func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPermission(w, r)
+}
+func (s *Server) handleGetYolo(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetYolo(w, r) }
+func (s *Server) handleSetYolo(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetYolo(w, r) }
 
 // MCP shims
 func (s *Server) handleListMCP(w http.ResponseWriter, r *http.Request) { s.handler.HandleListMCP(w, r) }
@@ -338,7 +440,9 @@ func (s *Server) handleDisableMCP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Plugin shims
-func (s *Server) handleListPlugins(w http.ResponseWriter, r *http.Request) { s.handler.HandleListPlugins(w, r) }
+func (s *Server) handleListPlugins(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListPlugins(w, r)
+}
 func (s *Server) handleGetPlugin(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetPlugin(w, r, r.PathValue("name"))
 }
@@ -348,26 +452,42 @@ func (s *Server) handleEnablePlugin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDisablePlugin(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetPluginEnabled(w, r, r.PathValue("name"), false)
 }
-func (s *Server) handleInstallPlugin(w http.ResponseWriter, r *http.Request) { s.handler.HandleInstallPlugin(w, r) }
+func (s *Server) handleInstallPlugin(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleInstallPlugin(w, r)
+}
 func (s *Server) handleRemovePlugin(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleRemovePlugin(w, r, r.PathValue("name"))
 }
 
 // Usage shims
-func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetUsage(w, r) }
+func (s *Server) handleGetUsage(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetUsage(w, r)
+}
 
 // Agent run shims
-func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request)   { s.handler.HandleListRuns(w, r) }
-func (s *Server) handleRunsStream(w http.ResponseWriter, r *http.Request) { s.handler.HandleRunsStream(w, r) }
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListRuns(w, r)
+}
+func (s *Server) handleRunsStream(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRunsStream(w, r)
+}
 
 // Log shims
-func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request)    { s.handler.HandleGetLogs(w, r) }
-func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request)  { s.handler.HandleLogStream(w, r) }
-func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) { s.handler.HandleClearLogs(w, r) }
+func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetLogs(w, r) }
+func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleLogStream(w, r)
+}
+func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleClearLogs(w, r)
+}
 
 // Info shims
-func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request)   { s.handler.HandleListSkills(w, r) }
-func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) { s.handler.HandleListCommands(w, r) }
+func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListSkills(w, r)
+}
+func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListCommands(w, r)
+}
 func (s *Server) handleGitHubPR(w http.ResponseWriter, r *http.Request) {
 	owner, repo, number, ok := parseGitHubPRRoute(r)
 	if !ok {

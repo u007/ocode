@@ -46,13 +46,14 @@ func (s DiagnosticSeverity) String() string {
 // json.RawMessage) so callers — both the tool layer and the system-prompt
 // fragment — can format it directly without re-parsing.
 type Diagnostic struct {
-	URI      string             // file:// URI as received from the server
-	Path     string             // local filesystem path (URI decoded); relative to wd when possible
-	Range    Range              // primary span (0-based lines/cols)
-	Severity DiagnosticSeverity // 0 when the server omitted the field
-	Code     string             // server-supplied code (e.g. "unusedvar"); "" if absent
-	Source   string             // e.g. "gopls", "typescript"; "" if absent
-	Message  string             // human-readable description
+	URI       string             // file:// URI as received from the server
+	Path      string             // local filesystem path (URI decoded); relative to wd when possible
+	Range     Range              // primary span (0-based lines/cols)
+	Severity  DiagnosticSeverity // 0 when the server omitted the field
+	Code      string             // server-supplied code (e.g. "unusedvar"); "" if absent
+	Source    string             // e.g. "gopls", "typescript"; "" if absent
+	ServerCmd string             // binary name of the owning server (e.g. "gopls"); set by Manager
+	Message   string             // human-readable description
 }
 
 // diagnosticParams mirrors the LSP wire shape for textDocument/publishDiagnostics.

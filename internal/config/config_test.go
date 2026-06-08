@@ -266,6 +266,7 @@ func TestClearMCPAuthorizationPreservesExistingOpencodeConfig(t *testing.T) {
 }
 
 func TestSaveTUIThemeWritesOcodeConfig(t *testing.T) {
+	chdirTempForConfigTest(t)
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
@@ -291,6 +292,7 @@ func TestSaveTUIThemeWritesOcodeConfig(t *testing.T) {
 }
 
 func TestSaveTUIThemePreservesExistingOcodeConfig(t *testing.T) {
+	chdirTempForConfigTest(t)
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 	path := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
@@ -373,6 +375,7 @@ func TestLoadFromStringMalformedJSON(t *testing.T) {
 }
 
 func TestLoadWithConfigDirEnv(t *testing.T) {
+	chdirTempForConfigTest(t)
 	tmpHome, err := os.MkdirTemp("", "ocode-home")
 	if err != nil {
 		t.Fatal(err)

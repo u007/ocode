@@ -80,7 +80,7 @@ func TestSidebarClickMatchesRenderedRowUnderOverflow(t *testing.T) {
 				t.Errorf("Allowed header rendered at Y=%d but hit-test rejected that row", allowedY)
 			}
 			// And the rows immediately around it must NOT register (off-by-one guard).
-			if m.sidebarAllowedHeaderForClick(tea.Mouse{X: sidebarX, Y: allowedY+1}) {
+			if m.sidebarAllowedHeaderForClick(tea.Mouse{X: sidebarX, Y: allowedY + 1}) {
 				t.Errorf("Allowed hit-test wrongly accepted Y=%d (one below rendered row)", allowedY+1)
 			}
 

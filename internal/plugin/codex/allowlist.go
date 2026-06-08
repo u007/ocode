@@ -7,12 +7,12 @@ import (
 )
 
 var allowedCodexModels = map[string]bool{
-	"gpt-5.5":              true,
-	"gpt-5.4":              true,
-	"gpt-5.4-mini":         true,
-	"gpt-5.3-codex":        true,
-	"gpt-5.3-codex-spark":  true,
-	"gpt-5.2":              true,
+	"gpt-5.5":             true,
+	"gpt-5.4":             true,
+	"gpt-5.4-mini":        true,
+	"gpt-5.3-codex":       true,
+	"gpt-5.3-codex-spark": true,
+	"gpt-5.2":             true,
 }
 
 // versionRE matches gpt-X.Y where X and Y are single-digit integers.

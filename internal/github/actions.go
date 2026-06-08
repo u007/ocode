@@ -6,9 +6,9 @@ import (
 )
 
 type WorkflowTemplate struct {
-	Name    string
+	Name     string
 	Triggers map[string]interface{}
-	Jobs    map[string]Job
+	Jobs     map[string]Job
 }
 
 type Job struct {

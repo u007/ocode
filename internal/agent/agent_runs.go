@@ -42,11 +42,11 @@ type AgentRun struct {
 	doneOnce     sync.Once
 	inputTokens  int64
 	outputTokens int64
-		
+
 	// Retry tracking
-	RetryCount   int       // number of retries attempted
-	LastError    string    // last error message if retrying
-	RetryingAt   time.Time // when the last retry started
+	RetryCount int       // number of retries attempted
+	LastError  string    // last error message if retrying
+	RetryingAt time.Time // when the last retry started
 }
 
 // AddUsage accumulates input/output token counts reported by the provider.
@@ -179,7 +179,6 @@ func (r *AgentRun) tryFinishCancelled() {
 		r.closeDone()
 	}
 }
-
 
 // MarkRetrying records that the run is being retried after an error.
 func (r *AgentRun) MarkRetrying(errMsg string) {

@@ -362,10 +362,17 @@ func (m *filesModel) navigateToSearchResult(result filesContentSearchResult) {
 	if m.cursor >= 0 && m.cursor < len(m.nodes) {
 		n := m.nodes[m.cursor]
 		if !n.isDir {
-			if msg, ok := loadPreviewCmd(n)().(filesPreviewMsg); ok {
+			if msg, ok := m.loadPreviewCmd(n)().(filesPreviewMsg); ok {
 				m.applyPreview(msg)
-				// Scroll to the matching line (0-indexed).
 				targetLine := result.line - 1
+				for targetLine >= len(m.previewRawLines) && m.previewHasMore {
+					if nextMsg, ok := m.loadMorePreviewCmd()().(filesPreviewMsg); ok {
+						m.applyPreview(nextMsg)
+					} else {
+						break
+					}
+				}
+				// Scroll to the matching line (0-indexed).
 				totalLines := m.preview.TotalLineCount()
 				visibleLines := m.preview.Height()
 				if totalLines > visibleLines {

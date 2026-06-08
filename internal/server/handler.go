@@ -458,7 +458,7 @@ func (h *Handler) HandleRecapSession(w http.ResponseWriter, r *http.Request, id 
 	ag := as.agent
 	h.mu.Unlock()
 
-	text := ag.Recap(msgs)
+	text := ag.Recap(msgs, "")
 
 	writeJSON(w, http.StatusOK, map[string]string{"recap": text})
 }
