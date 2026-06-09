@@ -853,6 +853,13 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					emitDebug("perm", fmt.Sprintf("Decide ALLOW (temp dir): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
+				// Read-only tools on immutable, developer-trusted roots (the Go
+				// module cache, written 0444 and content-addressed) are benign —
+				// allow without prompting or consulting the permission model.
+				if isReadOnlyTool(toolName) && isImmutableReadRoot(path) {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (immutable read root): tool=%s path=%s", toolName, path))
+					return PermissionDecision{Level: PermissionAllow}
+				}
 				// Only user-confirmed allows ("always allow this tool") override the
 				// out-of-scope gate. Default allow rules do NOT bypass it — the
 				// user should be asked when writing outside the workdir.
@@ -955,11 +962,27 @@ func resolveForScopeCheck(rawPath string) (string, bool) {
 }
 
 // pathUnderRoot reports whether resolved equals root or sits beneath root/.
+// On Windows, paths are compared case-insensitively because the filesystem is
+// case-insensitive there — a case-sensitive compare would wrongly treat
+// C:\Users\… and c:\users\… as distinct and leak past scope/allow gates. We fold
+// only on Windows (the Go ecosystem convention, e.g. x/tools): macOS is also
+// case-insensitive by default but folding there risks over-matching, so we stay
+// conservative and keep the historical case-sensitive behavior off-Windows.
 func pathUnderRoot(resolved, root string) bool {
+	return pathUnderRootFold(resolved, root, runtime.GOOS == "windows")
+}
+
+// pathUnderRootFold is the case-fold-parametrized core of pathUnderRoot, split
+// out so the folding behavior is testable without depending on the host GOOS.
+func pathUnderRootFold(resolved, root string, fold bool) bool {
 	if root == "" {
 		return false
 	}
 	rootSep := root + string(filepath.Separator)
+	if fold {
+		return strings.EqualFold(resolved, root) ||
+			strings.HasPrefix(strings.ToLower(resolved), strings.ToLower(rootSep))
+	}
 	return resolved == root || strings.HasPrefix(resolved, rootSep)
 }
 
@@ -1056,8 +1079,7 @@ func isTempDirUnderRoots(rawPath string, roots []string) bool {
 		if td == "" {
 			continue
 		}
-		tdClean := filepath.Clean(td)
-		if clean == tdClean || strings.HasPrefix(clean, tdClean+string(filepath.Separator)) {
+		if pathUnderRoot(clean, filepath.Clean(td)) {
 			return true
 		}
 	}
@@ -1068,6 +1090,49 @@ func isTempDirUnderRoots(rawPath string, roots []string) bool {
 // directory.
 func isTempDir(rawPath string) bool {
 	return isTempDirUnderRoots(rawPath, tempRootsForGOOS(runtime.GOOS))
+}
+
+// goModCacheRoots returns the Go module cache directories. The module cache is
+// content-addressed and written mode 0444 by the toolchain — it is immutable by
+// design, so read-only access to it is always safe. Resolution order mirrors the
+// go tool: $GOMODCACHE, else $GOPATH/pkg/mod (GOPATH may be a list), else the
+// default $HOME/go/pkg/mod.
+func goModCacheRoots() []string {
+	if mc := strings.TrimSpace(os.Getenv("GOMODCACHE")); mc != "" {
+		return []string{mc}
+	}
+	var roots []string
+	if gp := strings.TrimSpace(os.Getenv("GOPATH")); gp != "" {
+		for _, p := range filepath.SplitList(gp) {
+			if p != "" {
+				roots = append(roots, filepath.Join(p, "pkg", "mod"))
+			}
+		}
+	}
+	if len(roots) == 0 {
+		if home, err := os.UserHomeDir(); err == nil {
+			roots = append(roots, filepath.Join(home, "go", "pkg", "mod"))
+		}
+	}
+	return roots
+}
+
+// isImmutableReadRoot reports whether rawPath lies within a known read-only,
+// developer-trusted root (currently the Go module cache). Used to auto-allow
+// read-only tools out-of-scope without consulting the permission model — listing
+// or reading a cached dependency is benign and must not require a prompt.
+func isImmutableReadRoot(rawPath string) bool {
+	absPath, err := filepath.Abs(rawPath)
+	if err != nil {
+		return false
+	}
+	clean := filepath.Clean(absPath)
+	for _, root := range goModCacheRoots() {
+		if pathUnderRoot(clean, filepath.Clean(root)) {
+			return true
+		}
+	}
+	return false
 }
 
 // allArgsAreTempDirs checks if all arguments in a bash command that look like
@@ -1290,7 +1355,11 @@ func extractHeredocs(command string) (header string, docs []heredocDoc) {
 		})
 	}
 	if len(pend) == 0 {
-		return header, nil
+		// No heredoc operators: the line-split was only needed to collect
+		// heredoc bodies. Return the full original command so multi-line
+		// payloads (e.g. `python3 -c "<newline-laden body>"`) survive intact
+		// instead of being truncated to their first line.
+		return command, nil
 	}
 	header = strings.TrimSpace(heredocOpRe.ReplaceAllString(header, ""))
 
@@ -2436,6 +2505,15 @@ func tokenizeShell(input string) ([]shellToken, error) {
 		case ';':
 			emitWord()
 			tokens = append(tokens, shellToken{typ: tokOp, value: ";"})
+		case '\n', '\r':
+			// An unquoted newline terminates a command, exactly like ';'. This
+			// makes each line of a multi-line script evaluate as its own command
+			// (so an allowed `sed` line isn't merged with the next), and lets the
+			// '#' comment-skip above drop whole comment lines. Quoted newlines
+			// (inside "...", the body of `python3 -c "..."`, etc.) never reach
+			// here — they're consumed by the inDouble/inSingle branches.
+			emitWord()
+			tokens = append(tokens, shellToken{typ: tokOp, value: ";"})
 		case '(':
 			emitWord()
 			tokens = append(tokens, shellToken{typ: tokLeftParen, value: "("})
@@ -2454,6 +2532,20 @@ func tokenizeShell(input string) ([]shellToken, error) {
 		case '<':
 			emitWord()
 			tokens = append(tokens, shellToken{typ: tokRedir, value: "<"})
+		case '#':
+			// An unquoted '#' at a word boundary begins a comment that runs to
+			// end-of-line (POSIX). Skip it so the comment isn't tokenized as a
+			// command word named "#" (which surfaced as a bogus `bash prefix "#"`
+			// ASK that escalated otherwise-allowed multi-line scripts). A '#' in
+			// the middle of a word (e.g. a URL fragment "host/#frag") stays
+			// literal.
+			if current.Len() == 0 {
+				for i+1 < n && runes[i+1] != '\n' {
+					i++
+				}
+			} else {
+				current.WriteRune(r)
+			}
 		case '1', '2':
 			if i+1 < n && runes[i+1] == '>' {
 				emitWord()

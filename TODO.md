@@ -198,9 +198,44 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
   transcript dropped 87.7ms→27.6ms per render and 62MB→2.9MB allocs (543× fewer
   allocs), collapsing the GC pressure that was stalling the event loop. Realistic
   sessions (~100 pairs) are now ~2.8ms.
-- **Residual: ~27ms at 1000 pairs is the viewport's O(N) `SetContentLines`** — it
-  rescans all lines (`ContainsAny` + `maxLineWidth`/`ansi.StringWidth`) on every
-  call. Can't be skipped via the bubbles/v2 public API. If extreme sessions
-  (1000+ pairs / ~90K lines) still feel laggy, the next lever is keeping a cached
-  assembled prefix and a viewport variant that accepts incremental tail updates
-  (avoids the full rescan). Deferred — not worth the fork risk for the common case.
+- **Residual (root cause):** the bubbles/v2 viewport's `SetContentLines` does two
+  O(N) passes over the whole transcript on every delta — a reverse `ContainsAny`
+  `\r\n` scan plus `maxLineWidth` (`ansi.StringWidth` per line). Confirmed via
+  benchmark: 18019 lines / 3001 msgs = ~35ms/render at only 180 allocs/op, i.e.
+  pure CPU in line-scanning, not allocation. Real session measured at 2747 lines /
+  381 msgs = 8–12ms/render. The chat viewport has `SoftWrap=false` and never
+  horizontal-scrolls, so `longestLineWidth` (the sole consumer of `maxLineWidth`)
+  is computed-then-never-used — both scans are dead work.
+
+- **Fixed (A + B), 2026-06-09:**
+  - **A.** Coalesced the streaming render cadence (`lastDeltaRender` throttle in
+    `applyThinkingDelta`) from 50ms→90ms while auto-scrolling, halving in-flight
+    CPU with no perceptible animation loss (~11fps vs 20fps on a thinking stream).
+  - **B.** Replaced the chat transcript's bubbles viewport with a reusable
+    pre-wrapped, no-softwrap content surface (`internal/tui/fastviewport`) whose
+    `SetContentLines` is O(1) (pointer assign, no scan) and whose `View`/scroll
+    math is O(visible window). API-compatible with the subset the chat uses
+    (Height/Width/YOffset/GotoBottom/GotoTop/AtBottom/ScrollUp/ScrollDown/
+    SetYOffset/TotalLineCount/VisibleLineCount/SetContent/SetContentLines/Update/
+    View); `scrollbarSetOffset` was made generic over a `scrollbarVP` interface so
+    it serves both viewport types. `Update` is a no-op because the chat drives
+    scrolling via explicit calls (keys are never forwarded; mouse wheel is handled
+    by the parent) — verified via `shouldForwardToTranscriptViewport`.
+  - **Result:** `renderTranscript` at 1000 pairs / 18019 lines dropped
+    30.3ms→0.73ms (~41×); 100 pairs 2.8ms→0.19ms. The benchmark attribution that
+    justified B: `SetContentLines` alone was 28.6ms of the 30.3ms (94%) at 0
+    allocs — pure CPU in the two dead scans.
+
+- **C. Deferred — tail-incremental assembly (only do if B is still not enough):**
+  Even with B's O(1) `SetContentLines`, `renderTranscript` still rebuilds the full
+  `transcriptLines`/`rawTranscriptLines` slices every delta (append loop over all
+  messages + the toolNames prebuild) — O(messages), not O(tail). For pathological
+  sessions (1000+ pairs / 90K+ lines) the next lever is to keep the assembled
+  prefix cached and only re-append the tail message(s) that changed since the last
+  render, making a streamed delta truly O(tail). This needs careful invalidation
+  (width/theme change, message edit/delete, expand/collapse toggles all dirty the
+  prefix) and must preserve the byte-identical unwrapped `nlAcc` region math that
+  the click/selection/thinking/tool hit-testing depends on. Deferred: B should
+  bring the common case (≤400 msgs) under ~2ms, below the perceptible threshold,
+  so the prefix-cache complexity isn't justified until a real session proves
+  otherwise.

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 func TestFilesPreviewShowsMetadataAndLanguage(t *testing.T) {
@@ -172,7 +172,7 @@ func TestFilesDoubleClickFolderOpensExplorer(t *testing.T) {
 		height:    30,
 		activeTab: tabFiles,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	m.files = newFilesModel(dir)
@@ -189,10 +189,8 @@ func TestFilesDoubleClickFolderOpensExplorer(t *testing.T) {
 	if dirIdx < 0 {
 		t.Fatalf("expected a directory node named 'sub' in tree, got %#v", m.files.nodes)
 	}
-	// Y of node dirIdx inside the tree panel: appHeaderHeight + 1 (border) + hintHeight + dirIdx.
-	treeW := 100 * 35 / 100
-	hintHeight := lipgloss.Height(hintStyle.Width(treeW - 6).Render(m.files.treeHint()))
-	clickY := appHeaderHeight + 1 + hintHeight + dirIdx
+	// Y of node dirIdx inside the tree panel: appHeaderHeight + 1 (border) + 2 (treeHint) + dirIdx.
+	clickY := appHeaderHeight + 1 + 2 + dirIdx
 	clickX := 2
 
 	// First click selects the node and toggles the directory open — it should
@@ -247,7 +245,7 @@ func TestFilesTabMouseWheelScrollsPreview(t *testing.T) {
 		height:    30,
 		activeTab: tabFiles,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	m.files = newFilesModel(t.TempDir())
@@ -273,7 +271,7 @@ func TestFilesTabMouseWheelScrollsTreeWhenFocused(t *testing.T) {
 		height:    30,
 		activeTab: tabFiles,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	m.files = newFilesModel(t.TempDir())
@@ -299,7 +297,7 @@ func TestNumberKeysNoLongerSwitchTabsFromFilesTab(t *testing.T) {
 		height:    30,
 		activeTab: tabFiles,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	m.files = newFilesModel(t.TempDir())
@@ -319,7 +317,7 @@ func TestNumberKeysStillTypeInChat(t *testing.T) {
 		height:    30,
 		activeTab: tabChat,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 
@@ -340,7 +338,7 @@ func TestFilesEditorErrorShowsFilesStatus(t *testing.T) {
 		height:    30,
 		activeTab: tabFiles,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	m.files = newFilesModel(t.TempDir())

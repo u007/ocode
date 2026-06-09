@@ -186,6 +186,7 @@ type filesModel struct {
 func newFilesModel(workDir string) filesModel {
 	m := filesModel{workDir: workDir}
 	m.preview = viewport.New()
+	m.preview.SoftWrap = true
 	m.preview.LeftGutterFunc = diffLineNumbers
 	m.promptInput = textarea.New()
 	m.nodes = loadDirChildren(workDir, 0, false)
@@ -1302,20 +1303,16 @@ func (m *filesModel) navigateTo(relPath string) {
 	}
 }
 
-func (m filesModel) treeNodeForClick(mouse tea.Mouse, headerHeight int) (int, bool) {
+func (m filesModel) treeNodeForClick(mouse tea.Mouse, headerHeight int, styles Styles) (int, bool) {
 	treeW := m.width * 35 / 100
 	if mouse.X >= treeW {
 		return 0, false
 	}
-	// Tree content starts after header + 1 (border top line)
-	treeContentTop := headerHeight + 1
-	// Account for hint lines prepended to tree content in View().
-	// The hint text wraps inside the bordered pane, so count rendered lines.
-	if hint := m.selectionHint(); hint != "" {
-		treeContentTop += lipgloss.Height(hintStyle.Width(treeW - 6).Render(hint))
-	} else if m.panel == filesPanelPicker && m.mode == filesModeNormal && len(m.selectedFiles) == 0 {
-		treeContentTop += lipgloss.Height(hintStyle.Width(treeW - 6).Render(m.treeHint()))
-	}
+	// Tree content starts after header + 1 (border top line), plus the hint rows
+	// prepended in View(). treeHeaderRows is the single source of truth for those
+	// rows — View renders exactly these and the click offset is their count, so
+	// the two can never drift (which previously broke hit-boxes on narrow screens).
+	treeContentTop := headerHeight + 1 + len(m.treeHeaderRows(treeW, styles))
 	if mouse.Y < treeContentTop {
 		return 0, false
 	}
@@ -1862,13 +1859,10 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		treeLines = append(treeLines, line)
 	}
 	treeContent := strings.Join(treeLines, "\n")
-	if hint := m.selectionHint(); hint != "" {
-		treeContent = styles.Hint.Render(truncateToWidth(hint, treeContentWidth)) + "\n" + treeContent
-	}
-
-	// Show keybinding hints when tree panel is focused and in normal mode
-	if m.panel == filesPanelPicker && m.mode == filesModeNormal && len(m.selectedFiles) == 0 {
-		treeContent = styles.Hint.Render(truncateToWidth(m.treeHint(), treeContentWidth)) + "\n" + treeContent
+	// Prepend hint rows. treeHeaderRows is shared with treeNodeForClick so the
+	// rendered row count and the click hit-box offset stay in lockstep.
+	if headerRows := m.treeHeaderRows(treeW, styles); len(headerRows) > 0 {
+		treeContent = strings.Join(headerRows, "\n") + "\n" + treeContent
 	}
 
 	focusBorder := func(focused bool) lipgloss.Style {
@@ -2076,12 +2070,40 @@ func (m filesModel) tmuxOpenHint() string {
 }
 
 // treeHint returns the keybinding hints shown at the top of the file tree
-// panel when in normal mode (no multi-select active).
+// panel when in normal mode (no multi-select active). It always renders as
+// exactly 2 lines so that click hit-box math is stable across screen widths.
 func (m filesModel) treeHint() string {
 	if len(m.selectedFiles) > 0 {
 		return ""
 	}
-	return "j/k navigate  enter open  space select  shift+↑↓ extend  n new  N folder  r rename  D del  / search  ctrl+f grep  o reveal  ←→ scroll"
+	line1 := "j/k navigate  enter open  space select  shift+↑↓ extend  n new  N folder"
+	line2 := "r rename  D del  / search  ctrl+f grep  o reveal  ←→ scroll"
+	return line1 + "\n" + line2
+}
+
+// treeHeaderRows returns the hint rows rendered directly above the file list.
+// Each row is clamped with MaxHeight(1) so it occupies exactly one visual line
+// regardless of screen width — this is what makes the layout deterministic and
+// keeps View() (which prepends these rows) and treeNodeForClick() (whose offset
+// is len(rows)) from ever disagreeing. It is the single source of truth for the
+// tree's top chrome.
+func (m filesModel) treeHeaderRows(treeW int, styles Styles) []string {
+	cw := treeW - 6 // pane content width: frame(treeW-2) minus border(2)+padding(2)
+	if cw < 1 {
+		cw = 1
+	}
+	clamp := func(s string) string { return styles.Hint.Width(cw).MaxHeight(1).Render(s) }
+	if hint := m.selectionHint(); hint != "" {
+		return []string{clamp(hint)}
+	}
+	if m.panel == filesPanelPicker && m.mode == filesModeNormal && len(m.selectedFiles) == 0 {
+		rows := strings.Split(m.treeHint(), "\n")
+		for i := range rows {
+			rows[i] = clamp(rows[i])
+		}
+		return rows
+	}
+	return nil
 }
 
 // skipVisibleChars skips the first n visible characters in a string that may

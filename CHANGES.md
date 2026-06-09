@@ -3,7 +3,17 @@
 ## [Unreleased]
 
 ### Added
-- **TUI Message Render Cache** — Per-message rendered-block cache (`msgRenderCache`) keyed by message index avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta. Theme changes invalidate the cache via a `themeGen` counter.
+- **Fast Viewport Component** — New `internal/tui/fastviewport` package with O(1) `SetContentLines` replaces chat transcript's bubbles viewport, reducing render time from ~30ms→0.73ms at 1000 message pairs (~41× faster).
+- **Permission Read File Enhancement** — `read_file` tool now supports directory listing when pointed at directory paths, providing better context for list/glob/grep/repo_overview operations.
+- **Transcript Render Optimization** — Coalesced streaming render cadence from 50ms→90ms while auto-scrolling, halving in-flight CPU with no perceptible animation loss (~11fps vs 20fps on thinking streams).
+
+### Changed
+- **Permission Read File Tool** — Enhanced `read_file` tool description to clarify it can read files or list directories, providing better context for permission decisions.
+- **TODO.md Documentation** — Updated with detailed performance analysis and optimization results for transcript rendering, including root cause analysis and implementation details.
+
+### Fixed
+- **Transcript Performance Bottleneck** — Replaced O(N) viewport line scanning with O(1) pointer assignment, eliminating 27-35ms per render from redundant `\r\n` scans and `maxLineWidth` calculations that were never used due to `SoftWrap=false`.
+- **Directory Permission Handling** — Permission system now properly handles directory targets for read_file tool, returning usable directory listings instead of opaque errors for list/glob/grep operations.
 - **Instant Slash Commands** — Synchronous local UI/config slash commands (`/model`, `/help`, `/sidebar`, `/theme`, `/lsp`, `/mcp`, etc.) now bypass the command queue and execute immediately even while the agent is streaming.
 - **Git Permission Subcommand Granularity** — Bash prefix permission rules for `git` are now offered at two-word subcommand granularity (e.g. "git push") so "always allow" persists without blanket-allowing every git subcommand. Harmful git operations (force-push, revert, etc.) always require explicit approval.
 - **Shell Redirect fd-dup Parsing** — Shell parser now correctly handles fd-duplication redirects (`2>&1`, `>&2`, `&>`, `&>>`) as single tokens, fixing bogus `bash prefix "1"` permission prompts.

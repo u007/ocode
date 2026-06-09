@@ -40,6 +40,7 @@ import (
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 	"github.com/u007/ocode/internal/usage"
 	"github.com/u007/ocode/internal/version"
 
@@ -559,7 +560,7 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 }
 
 type model struct {
-	viewport            viewport.Model
+	viewport            fastviewport.Model
 	input               textarea.Model
 	messages            []message
 	agent               *agent.Agent
@@ -1352,7 +1353,7 @@ func newModel(opts ...RunOptions) model {
 	questionInput.ShowLineNumbers = false
 	questionInput.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "insert newline"))
 
-	vp := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	vp := fastviewport.New(80, 20)
 	vp.SetContent(hintStyle.Render("  ocode v" + version.Version + " — opencode clone · type a message to begin\n"))
 
 	if o.SessionID == "" {
@@ -4223,7 +4224,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 		}
 		// Handle tree panel click — select/open file or toggle directory
-		if idx, ok := m.files.treeNodeForClick(mouse, appHeaderHeight); ok {
+		if idx, ok := m.files.treeNodeForClick(mouse, appHeaderHeight, m.styles); ok {
 			n := m.files.nodes[idx]
 			m.files.cursor = idx
 			isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
@@ -7410,6 +7411,14 @@ func (m *model) handleGitHubWorkflow(name string) string {
 }
 
 func (m *model) saveSession() {
+	// Ensure we have a stable session ID before persisting. When the TUI
+	// starts fresh (no -session flag), sessionID is empty. Previously
+	// session.Save("") would generate a ses_ prefixed ID internally but
+	// never write it back, so every saveSession() call created a brand-new
+	// session file — the root cause of hundreds of phantom sessions.
+	if m.sessionID == "" {
+		m.sessionID = session.NewSessionID()
+	}
 	agentMsgs := m.persistedAgentMessages()
 	if len(agentMsgs) == 0 {
 		return
@@ -7428,7 +7437,7 @@ func (m *model) persistedAgentMessages() []agent.Message {
 	}
 	var agentMsgs []agent.Message
 	for _, msg := range m.messages {
-		if msg.transient || msg.role == roleThinking {
+		if msg.transient || msg.role == roleThinking || msg.skipLLM {
 			continue
 		}
 		if msg.raw != nil {
@@ -9449,7 +9458,10 @@ func (m *model) applyThinkingDelta(kind, text string) {
 	// off-screen, so re-rendering it 20×/sec is pure waste that starves the
 	// event loop and makes the wheel lag. Back off hard in that case; the
 	// viewport still refreshes often enough to keep scroll-height math fresh.
-	interval := 50 * time.Millisecond
+	// ~11fps while auto-scrolling: indistinguishable from 20fps on a streaming
+	// thinking block, but halves the per-second renderTranscript CPU so the event
+	// loop stays responsive to keyboard/scroll on large transcripts.
+	interval := 90 * time.Millisecond
 	if !m.shouldAutoScrollTranscript() {
 		interval = 500 * time.Millisecond
 	}
@@ -12407,7 +12419,17 @@ func (m model) logScrollbarThumbOffset(mouse tea.Mouse) (int, bool) {
 	return scrollbarThumbOffset(mouse.Y, trackTop, trackHeight, m.logViewport.TotalLineCount(), m.logViewport.VisibleLineCount(), m.logViewport.YOffset())
 }
 
-func scrollbarSetOffset(vp *viewport.Model, mouseY, trackTop, trackHeight int) {
+// scrollbarVP is the slice of the scroll API that scrollbarSetOffset needs,
+// satisfied by both *viewport.Model (log/git/files/detail) and
+// *fastviewport.Model (chat transcript).
+type scrollbarVP interface {
+	TotalLineCount() int
+	VisibleLineCount() int
+	YOffset() int
+	SetYOffset(int)
+}
+
+func scrollbarSetOffset(vp scrollbarVP, mouseY, trackTop, trackHeight int) {
 	clickRow := mouseY - trackTop
 	if clickRow < 0 {
 		clickRow = 0

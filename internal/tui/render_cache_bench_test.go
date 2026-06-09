@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 // buildHeavyTranscriptModel constructs a model with a realistic, tool-heavy
@@ -19,7 +19,7 @@ import (
 func buildHeavyTranscriptModel(nPairs, thinkBytes int) model {
 	m := model{
 		input:    textarea.New(),
-		viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(30)),
+		viewport: fastviewport.New(100, 30),
 		styles:   ApplyThemeColors("tokyonight"),
 		ready:    true,
 	}
@@ -81,3 +81,29 @@ func BenchmarkStreamSweepA_Pairs1000(b *testing.B) { benchStreaming(b, 1000, 8*1
 func BenchmarkStreamSweepB_Block1KB(b *testing.B)  { benchStreaming(b, 5, 1*1024) }
 func BenchmarkStreamSweepB_Block4KB(b *testing.B)  { benchStreaming(b, 5, 4*1024) }
 func BenchmarkStreamSweepB_Block16KB(b *testing.B) { benchStreaming(b, 5, 16*1024) }
+
+// BenchmarkSetContentLinesOnly isolates the viewport's per-call O(N) cost
+// (ContainsAny + maxLineWidth scans) from renderTranscript's assembly loop, so
+// we know exactly how much a no-scan fastviewport would buy.
+func BenchmarkSetContentLinesOnly(b *testing.B) {
+	m := buildHeavyTranscriptModel(1000, 8*1024)
+	m.renderTranscript()
+	lines := m.transcriptLines
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.viewport.SetContentLines(lines)
+	}
+}
+
+// BenchmarkAssemblyOnly isolates renderTranscript's assembly (toolNames prebuild
+// + cache lookups + line appends) by NOT mutating the streaming block, so every
+// renderMessageBlock is a cache hit — the only residual is assembly + the one
+// SetContentLines. Compare against SetContentLinesOnly to attribute the 35ms.
+func BenchmarkAssemblyPlusSet(b *testing.B) {
+	m := buildHeavyTranscriptModel(1000, 8*1024)
+	m.renderTranscript()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m.renderTranscript() // all cache hits; measures assembly + SetContentLines
+	}
+}

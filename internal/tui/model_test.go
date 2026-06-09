@@ -26,6 +26,7 @@ import (
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 // chdirTempForConfigTest changes the working directory to a fresh temp dir for
@@ -173,7 +174,7 @@ func TestShellExecCommandUsesPlatformShell(t *testing.T) {
 func TestShellFinishedMessageIsRecorded(t *testing.T) {
 	m := model{
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 		sessionID: "test-shell",
 	}
@@ -192,7 +193,7 @@ func TestShellFinishedMessageIsRecorded(t *testing.T) {
 func TestCommandRunningCounterTracksOverlappingCompletions(t *testing.T) {
 	m := model{
 		input:    newTestTextarea(),
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport: fastviewport.New(80, 20),
 		styles:   ApplyThemeColors("tokyonight"),
 	}
 	m.markCmdStarted()
@@ -332,8 +333,8 @@ func TestHandleCommandSlashDispatchRejectsHiddenHelper(t *testing.T) {
 	}
 }
 
-func TestSlashCommandIsRecordedButSkippedFromLLMAndTitle(t *testing.T) {
-	m := model{input: newTestTextarea(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+func TestSlashCommandExcludedFromPersistedAndLLM(t *testing.T) {
+	m := model{input: newTestTextarea(), viewport: fastviewport.New(80, 20)}
 
 	updated, cmd := m.handleCommand("/sidebar")
 	if cmd != nil {
@@ -348,8 +349,8 @@ func TestSlashCommandIsRecordedButSkippedFromLLMAndTitle(t *testing.T) {
 		t.Fatalf("expected transcript to record /sidebar, got %#v", got.messages[0])
 	}
 
-	if msgs := got.persistedAgentMessages(); len(msgs) != 1 || msgs[0].Content != "/sidebar" {
-		t.Fatalf("expected persisted history to include /sidebar, got %#v", msgs)
+	if msgs := got.persistedAgentMessages(); len(msgs) != 0 {
+		t.Fatalf("expected persisted history to exclude slash commands, got %#v", msgs)
 	}
 
 	if snap, _ := got.buildAgentMessagesSnapshot(); len(snap) != 0 {
@@ -613,7 +614,7 @@ func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 	m := model{
 		agent:          a,
 		input:          newTestTextarea(),
-		viewport:       viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:       fastviewport.New(76, 20),
 		styles:         ApplyThemeColors("tokyonight"),
 		subAgentPermCh: make(chan subAgentPermRequest),
 		subAgentPermMu: &sync.Mutex{},
@@ -799,7 +800,7 @@ func TestExecuteApprovedTool_UsesTemporaryOutOfScopePathAllowance(t *testing.T) 
 func TestDoubleEscDisablesShellMode(t *testing.T) {
 	m := model{
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 		sessionID: "test-shell",
 	}
@@ -845,7 +846,7 @@ func TestRenderAssistantTextThinkingToggle(t *testing.T) {
 
 func TestThinkingStreamStartsCollapsed(t *testing.T) {
 	m := model{
-		viewport:     viewport.New(viewport.WithWidth(40), viewport.WithHeight(6)),
+		viewport:     fastviewport.New(40, 6),
 		styles:       ApplyThemeColors("tokyonight"),
 		showThinking: true,
 		streaming:    true,
@@ -871,7 +872,7 @@ func TestThinkingStreamStartsCollapsed(t *testing.T) {
 
 func TestLateThinkingDeltaAfterAssistantMessageIsIgnored(t *testing.T) {
 	m := model{
-		viewport:             viewport.New(viewport.WithWidth(60), viewport.WithHeight(10)),
+		viewport:             fastviewport.New(60, 10),
 		styles:               ApplyThemeColors("tokyonight"),
 		showThinking:         true,
 		streaming:            true,
@@ -902,7 +903,7 @@ func TestLateThinkingDeltaAfterAssistantMessageIsIgnored(t *testing.T) {
 
 func TestThinkingDeltaStreamsWithPriorAssistantHistory(t *testing.T) {
 	m := model{
-		viewport:             viewport.New(viewport.WithWidth(60), viewport.WithHeight(10)),
+		viewport:             fastviewport.New(60, 10),
 		styles:               ApplyThemeColors("tokyonight"),
 		showThinking:         true,
 		streaming:            true,
@@ -928,7 +929,7 @@ func TestThinkingDeltaStreamsWithPriorAssistantHistory(t *testing.T) {
 
 func TestThinkingDeltaIgnoredWhenNotStreaming(t *testing.T) {
 	m := model{
-		viewport:             viewport.New(viewport.WithWidth(60), viewport.WithHeight(10)),
+		viewport:             fastviewport.New(60, 10),
 		styles:               ApplyThemeColors("tokyonight"),
 		showThinking:         true,
 		streaming:            false,
@@ -948,7 +949,7 @@ func TestThinkingDeltaIgnoredWhenNotStreaming(t *testing.T) {
 
 func TestThinkingDeltaContinuesAfterAssistantToolCallMessage(t *testing.T) {
 	m := model{
-		viewport:             viewport.New(viewport.WithWidth(60), viewport.WithHeight(10)),
+		viewport:             fastviewport.New(60, 10),
 		styles:               ApplyThemeColors("tokyonight"),
 		showThinking:         true,
 		streaming:            true,
@@ -1009,7 +1010,7 @@ func TestStreamEventDefersThinkingUntilToolResultsDrain(t *testing.T) {
 
 func TestRenderUserTextUsesThemeBox(t *testing.T) {
 	m := model{styles: ApplyThemeColors("tokyonight")}
-	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	m.viewport = fastviewport.New(80, 20)
 	rendered := m.renderUserText("hello world")
 	plain := stripANSI(rendered)
 	if !strings.Contains(plain, "hello world") {
@@ -1025,7 +1026,7 @@ func TestRenderUserTextUsesThemeBox(t *testing.T) {
 
 func TestRenderUserTextConstrainsBubbleWidth(t *testing.T) {
 	m := model{styles: ApplyThemeColors("tokyonight")}
-	m.viewport = viewport.New(viewport.WithWidth(40), viewport.WithHeight(10))
+	m.viewport = fastviewport.New(40, 10)
 	rendered := stripANSI(m.renderUserText(strings.Repeat("word ", 20)))
 	for _, line := range strings.Split(rendered, "\n") {
 		if got := lipgloss.Width(line); got > 40 {
@@ -1035,7 +1036,7 @@ func TestRenderUserTextConstrainsBubbleWidth(t *testing.T) {
 }
 
 func TestLeaderSTogglesSidebar(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)), leaderActive: true}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20), leaderActive: true}
 
 	consumed, updated, _ := m.handleModalKeys(tea.KeyPressMsg{Code: 's'})
 	if !consumed {
@@ -1066,7 +1067,7 @@ func TestCtrlBMovesForegroundBashToBackgroundBeforeTogglingSidebar(t *testing.T)
 	if _, err := a.Procs().RegisterForeground("sleep 30", cmd, time.Now(), nil); err != nil {
 		t.Fatalf("RegisterForeground error: %v", err)
 	}
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)), agent: a}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20), agent: a}
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 	got := updated.(model)
@@ -1082,7 +1083,7 @@ func TestCtrlBMovesForegroundBashToBackgroundBeforeTogglingSidebar(t *testing.T)
 }
 
 func TestCtrlBWithoutRunningBashDoesNotToggleSidebar(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl})
 	got := updated.(model)
@@ -1097,7 +1098,7 @@ func TestCtrlBWithoutRunningBashDoesNotToggleSidebar(t *testing.T) {
 func TestCtrlOTogglesYoloMode(t *testing.T) {
 	m := model{
 		input:    textarea.New(),
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport: fastviewport.New(80, 20),
 		agent:    agent.NewAgent(nil, nil, nil, nil),
 	}
 
@@ -1353,7 +1354,7 @@ func TestMCPCmdListsConfiguredServers(t *testing.T) {
 func TestCtrlCClearsNonEmptyInputBeforeQuitConfirmation(t *testing.T) {
 	m := model{
 		input:             textarea.New(),
-		viewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:          fastviewport.New(80, 20),
 		inputHistoryIndex: 2,
 		ctrlCPressed:      true,
 		showSlashPopup:    true,
@@ -1512,7 +1513,7 @@ func TestSidebarViewUsesSplitLayoutWhenWide(t *testing.T) {
 		showSidebar: true,
 		sessionID:   "session-123",
 		input:       textarea.New(),
-		viewport:    viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		viewport:    fastviewport.New(100, 20),
 		config:      &config.Config{Model: "gpt-4o"},
 		messages: []message{{
 			role: roleAssistant,
@@ -1579,7 +1580,7 @@ func TestSidebarViewHidesOnNarrowTerminals(t *testing.T) {
 		height:      30,
 		showSidebar: true,
 		input:       textarea.New(),
-		viewport:    viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:    fastviewport.New(76, 20),
 	}
 
 	view := m.View().Content
@@ -1595,7 +1596,7 @@ func TestLayoutKeepsInputAndStatusWithinTerminalHeight(t *testing.T) {
 		height:    24,
 		sessionID: strings.Repeat("session-", 12),
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(76, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 		messages: []message{{
 			role: roleAssistant,
@@ -1625,7 +1626,7 @@ func TestLayoutHeightDoesNotChangeWhenTranscriptScrolls(t *testing.T) {
 		height:    24,
 		sessionID: strings.Repeat("session-", 12),
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(76, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 		messages: []message{{
 			role: roleAssistant,
@@ -1656,7 +1657,7 @@ func TestLayoutHeightDoesNotChangeWhenTranscriptScrolls(t *testing.T) {
 func TestInputNavigationDoesNotScrollTranscript(t *testing.T) {
 	m := model{
 		input:    textarea.New(),
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
+		viewport: fastviewport.New(80, 6),
 		styles:   ApplyThemeColors("tokyonight"),
 		messages: []message{{
 			role: roleAssistant,
@@ -1688,7 +1689,7 @@ func TestLayoutConstrainsLongTranscriptLines(t *testing.T) {
 		height:    24,
 		sessionID: "session-1",
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(76, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 		messages: []message{{
 			role: roleAssistant,
@@ -1719,7 +1720,7 @@ func TestLayoutWrapsLongInputLines(t *testing.T) {
 		height:    24,
 		sessionID: "session-1",
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(76, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 		messages: []message{{
 			role: roleAssistant,
@@ -1748,7 +1749,7 @@ func TestLayoutAccountsForSlashPopupAndActivityRow(t *testing.T) {
 		height:              24,
 		sessionID:           strings.Repeat("session-", 12),
 		input:               newTestTextarea(),
-		viewport:            viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:            fastviewport.New(76, 20),
 		styles:              ApplyThemeColors("tokyonight"),
 		showSlashPopup:      true,
 		slashPopupItems:     []slashSuggestion{{name: "/compact", display: "/compact", desc: "Reduce context"}},
@@ -1803,7 +1804,7 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 		showSidebar:   true,
 		sidebarScroll: 2,
 		input:         textarea.New(),
-		viewport:      viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		viewport:      fastviewport.New(100, 20),
 	}
 
 	view := stripANSI(m.View().Content)
@@ -1821,7 +1822,7 @@ func TestSidebarViewShowsIDEStatus(t *testing.T) {
 		height:      40,
 		showSidebar: true,
 		input:       textarea.New(),
-		viewport:    viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		viewport:    fastviewport.New(100, 20),
 		styles:      ApplyThemeColors("tokyonight"),
 		ideMode:     config.IDEModeClaude,
 	}
@@ -1913,7 +1914,7 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 		return func() tea.Msg { return nil }
 	}
 
-	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
+	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 20)}
 	// Press starts sidebar selection (no file opening yet)
 	// Y accounts for: appHeader(2) + sidebar_border(1) + topLines(8) +
 	// no-title-pad(1) + git_title(1) + git_branch(1) + blank(1) + files_title(1)
@@ -1967,7 +1968,7 @@ func TestSidebarHoverAndSelectUseScreenY(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
+	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 20)}
 
 	// Derive the on-screen Y of the "changed.go" row from buildSidebarRenderData
 	// + the helpers the click path uses, so this test doesn't have to hard-code
@@ -2058,7 +2059,7 @@ func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
 		}
 	}
 
-	m := model{ready: true, width: 140, height: 20, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
+	m := model{ready: true, width: 140, height: 20, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 20)}
 	data := m.buildSidebarRenderData()
 	targetPath := "file-11.go"
 	scrollIdx := -1
@@ -2153,7 +2154,7 @@ func TestSidebarHitTestMatchesWrappedPinnedRows(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: viewport.New(viewport.WithWidth(100), viewport.WithHeight(20))}
+			m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 20)}
 			tc.setup(&m)
 
 			// Find the file's ACTUAL rendered row within the sidebar box.
@@ -2193,6 +2194,7 @@ func TestSidebarContextWindowLookup(t *testing.T) {
 }
 
 func TestHandleModelCmdUpdatesCurrentModel(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := model{config: &config.Config{
 		Model: "gpt-4o",
 		Provider: map[string]interface{}{
@@ -2217,6 +2219,7 @@ func TestHandleModelCmdUpdatesCurrentModel(t *testing.T) {
 }
 
 func TestHandleModelCmdSwitchNoticeStaysOutOfLLMPayload(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := model{config: &config.Config{
 		Model: "gpt-4o",
 		Provider: map[string]interface{}{
@@ -2402,7 +2405,7 @@ func TestModelPickerCtrlRTriggersRefresh(t *testing.T) {
 		pickerIsHeader: []bool{false},
 		styles:         ApplyThemeColors("tokyonight"),
 		input:          newTestTextarea(),
-		viewport:       viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:       fastviewport.New(80, 20),
 	}
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
@@ -2432,7 +2435,7 @@ func TestModelPickerCtrlRIgnoredForNonModelKinds(t *testing.T) {
 		pickerValues: []string{"tokyonight"},
 		styles:       ApplyThemeColors("tokyonight"),
 		input:        newTestTextarea(),
-		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:     fastviewport.New(80, 20),
 	}
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
@@ -2458,7 +2461,7 @@ func TestModelPickerCtrlRDebouncedWhileInFlight(t *testing.T) {
 		pickerRefreshing: true, // simulate an in-flight refresh
 		styles:           ApplyThemeColors("tokyonight"),
 		input:            newTestTextarea(),
-		viewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:         fastviewport.New(80, 20),
 	}
 
 	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
@@ -2485,7 +2488,7 @@ func TestModelsRefreshedMsgResetsFlagAndRepopulates(t *testing.T) {
 		pickerRefreshing: true,
 		styles:           ApplyThemeColors("tokyonight"),
 		input:            newTestTextarea(),
-		viewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:         fastviewport.New(80, 20),
 	}
 
 	updated, _ := m.Update(modelsRefreshedMsg{})
@@ -2520,7 +2523,7 @@ func TestModelsRefreshedMsgErrorSurfacesFailure(t *testing.T) {
 		pickerRefreshing: true,
 		styles:           ApplyThemeColors("tokyonight"),
 		input:            newTestTextarea(),
-		viewport:         viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:         fastviewport.New(80, 20),
 	}
 
 	updated, _ := m.Update(modelsRefreshedMsg{err: fmt.Errorf("boom")})
@@ -2598,7 +2601,7 @@ func TestSessionPickerCtrlDOpensConfirmation(t *testing.T) {
 		pickerValues:      []string{"ses_1"},
 		styles:            ApplyThemeColors("tokyonight"),
 		input:             newTestTextarea(),
-		viewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:          fastviewport.New(80, 20),
 		pickerSessionRefs: []session.Ref{{ID: "ses_1", Title: "First session"}},
 	}
 
@@ -2909,7 +2912,7 @@ func TestModelPickerFilterExcludesUnmatchedProviderModels(t *testing.T) {
 func TestPickerSelectsSessionByValue(t *testing.T) {
 	m := model{
 		input:        textarea.New(),
-		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:     fastviewport.New(80, 20),
 		showPicker:   true,
 		pickerKind:   "session",
 		pickerItems:  []string{"session-1  First session"},
@@ -3166,7 +3169,7 @@ func TestMessagePickerRestoresBeforeSelectedInputAndPrefillsIt(t *testing.T) {
 	m := model{
 		sessionID: "restore-test",
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		messages: []message{
 			{role: roleUser, text: "first request"},
 			{role: roleAssistant, text: "first answer"},
@@ -3195,7 +3198,7 @@ func TestCtrlYRetriesLastRetryableLLMError(t *testing.T) {
 	errText := "Error: context deadline exceeded"
 	m := model{
 		input:               textarea.New(),
-		viewport:            viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:            fastviewport.New(80, 20),
 		agent:               agent.NewAgent(retryTestClient{}, nil, nil, nil),
 		lastRetryableLLMErr: errText,
 		messages: []message{
@@ -3224,7 +3227,7 @@ func TestMouseWheelScrollsTranscriptOnlyWhenOverMessages(t *testing.T) {
 		width:       80,
 		height:      24,
 		input:       newTestTextarea(),
-		viewport:    viewport.New(viewport.WithWidth(40), viewport.WithHeight(3)),
+		viewport:    fastviewport.New(40, 3),
 		styles:      ApplyThemeColors("tokyonight"),
 		scrollSpeed: 3,
 	}
@@ -3447,7 +3450,7 @@ func TestTranscriptScrollbarTrackClickJumpsWithoutStartingDrag(t *testing.T) {
 		height:    24,
 		activeTab: tabChat,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(40), viewport.WithHeight(10)),
+		viewport:  fastviewport.New(40, 10),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	m.viewport.SetContent(strings.Repeat("message line\n", 200))
@@ -3490,7 +3493,7 @@ func TestTranscriptScrollbarThumbClickDoesNotJumpScroll(t *testing.T) {
 		height:    24,
 		activeTab: tabChat,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(40), viewport.WithHeight(10)),
+		viewport:  fastviewport.New(40, 10),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	m.viewport.SetContent(strings.Repeat("message line\n", 200))
@@ -3805,7 +3808,7 @@ func TestFilesRightClickDeselectsActiveFile(t *testing.T) {
 func TestUpKeyUsesInputHistoryWithoutScrollingTranscript(t *testing.T) {
 	m := model{
 		input:             newTestTextarea(),
-		viewport:          viewport.New(viewport.WithWidth(40), viewport.WithHeight(3)),
+		viewport:          fastviewport.New(40, 3),
 		inputHistory:      []string{"first", "second"},
 		inputHistoryIndex: -1,
 		scrollSpeed:       3,
@@ -3830,7 +3833,7 @@ func TestSlashCommandAddedToInputHistory(t *testing.T) {
 		width:             80,
 		height:            24,
 		input:             newTestTextarea(),
-		viewport:          viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:          fastviewport.New(76, 20),
 		styles:            ApplyThemeColors("tokyonight"),
 		inputHistoryIndex: -1,
 	}
@@ -3854,7 +3857,7 @@ func TestShellCommandNotAddedToInputHistory(t *testing.T) {
 		width:             80,
 		height:            24,
 		input:             newTestTextarea(),
-		viewport:          viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:          fastviewport.New(76, 20),
 		styles:            ApplyThemeColors("tokyonight"),
 		inputHistoryIndex: -1,
 	}
@@ -3876,7 +3879,7 @@ func TestEnterWhileStreamingQueuesUserInput(t *testing.T) {
 		height:    24,
 		streaming: true,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(76, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	m.input.SetValue("follow up after this")
@@ -3910,7 +3913,7 @@ func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
 		streaming:    true,
 		agent:        agent.NewAgent(nil, nil, nil, nil),
 		input:        newTestTextarea(),
-		viewport:     viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:     fastviewport.New(76, 20),
 		styles:       ApplyThemeColors("tokyonight"),
 		queuedInputs: []string{"next request"},
 	}
@@ -3938,7 +3941,7 @@ func TestStreamDoneInterruptedDoesNotStartNextQueuedInput(t *testing.T) {
 		streaming:    true,
 		agent:        agent.NewAgent(nil, nil, nil, nil),
 		input:        newTestTextarea(),
-		viewport:     viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:     fastviewport.New(76, 20),
 		styles:       ApplyThemeColors("tokyonight"),
 		queuedInputs: []string{"next request"},
 	}
@@ -3970,7 +3973,7 @@ func TestStreamDonePreservesActivityRowAndShowsIdleStatus(t *testing.T) {
 		activityRowReserved: true,
 		lastActivity:        agent.ActivitySnapshot{LLMRunning: true},
 		input:               newTestTextarea(),
-		viewport:            viewport.New(viewport.WithWidth(76), viewport.WithHeight(20)),
+		viewport:            fastviewport.New(76, 20),
 		styles:              ApplyThemeColors("tokyonight"),
 	}
 	m.layout()
@@ -4017,7 +4020,7 @@ func TestRenderStatusOmitsIDEChip(t *testing.T) {
 		ideMode:      config.IDEModeClaude,
 		ideConnected: true,
 		ideSelection: &ide.Selection{FilePath: "internal/tui/model.go", Ranges: []ide.Range{{StartLine: 1, EndLine: 2}}},
-		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
+		viewport:     fastviewport.New(80, 10),
 		input:        textarea.New(),
 		activeTab:    tabChat,
 		sessionID:    "abc123",
@@ -4075,7 +4078,7 @@ func TestTabMouseReleaseUsesRightAlignedHeaderPosition(t *testing.T) {
 		height:    24,
 		activeTab: tabFiles,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(96, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	barWidth := lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread))
@@ -4098,7 +4101,7 @@ func TestTabMouseMotionSwitchesWhenTerminalReportsDrag(t *testing.T) {
 		height:    24,
 		activeTab: tabChat,
 		input:     newTestTextarea(),
-		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(96, 20),
 		styles:    ApplyThemeColors("tokyonight"),
 	}
 	barWidth := lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread))
@@ -4203,6 +4206,7 @@ func TestConnectMouseSelectsProviderAndMethodRows(t *testing.T) {
 }
 
 func TestHandleModelCmdPreservesMCPProvenance(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := model{config: &config.Config{Model: "gpt-4o"}}
 	a := agent.NewAgent(nil, nil, nil, nil)
 	a.RestoreMCPToolNames([]string{"demo_tool"})
@@ -4495,7 +4499,7 @@ func TestHandleSessionLoadRestoresSidebarUsageAndTodoState(t *testing.T) {
 		height:       40,
 		showSidebar:  true,
 		input:        textarea.New(),
-		viewport:     viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		viewport:     fastviewport.New(100, 20),
 		config:       &config.Config{Model: "gpt-4o"},
 		messages:     []message{{role: roleAssistant, text: "current reply"}},
 		sessionTelemetry: sidebarTelemetry{
@@ -4554,7 +4558,7 @@ func TestSessionRestoreScrollsToBottom(t *testing.T) {
 			{role: roleAssistant, text: "world"},
 		},
 	}
-	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(10))
+	m.viewport = fastviewport.New(80, 10)
 	m.input = textarea.New()
 	m.files = newFilesModel(".")
 	m.git = newGitModel(".")
@@ -4574,7 +4578,7 @@ func TestSessionRestoreScrollsToBottom(t *testing.T) {
 
 func TestRerenderTranscriptAutoScrollsWhenAtBottom(t *testing.T) {
 	m := model{
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
+		viewport: fastviewport.New(80, 6),
 		styles:   ApplyThemeColors("tokyonight"),
 		messages: []message{{role: roleAssistant, text: strings.Repeat("line\n", 60)}},
 	}
@@ -4591,7 +4595,7 @@ func TestRerenderTranscriptAutoScrollsWhenAtBottom(t *testing.T) {
 
 func TestRerenderTranscriptDoesNotAutoScrollWhenScrolledUp(t *testing.T) {
 	m := model{
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(6)),
+		viewport: fastviewport.New(80, 6),
 		styles:   ApplyThemeColors("tokyonight"),
 		messages: []message{{role: roleAssistant, text: strings.Repeat("line\n", 60)}},
 	}
@@ -4987,7 +4991,7 @@ func TestSidebarContextUsesCurrentEstimateNotCumulativeTotal(t *testing.T) {
 		showSidebar: true,
 		sessionID:   "session-ctx",
 		input:       textarea.New(),
-		viewport:    viewport.New(viewport.WithWidth(100), viewport.WithHeight(20)),
+		viewport:    fastviewport.New(100, 20),
 		config:      &config.Config{Model: "gpt-4o"},
 		messages: []message{
 			{
@@ -5222,7 +5226,7 @@ func TestRecapFinishedMsgIgnoresStaleGeneration(t *testing.T) {
 func TestCompactionSummaryRendersInTranscript(t *testing.T) {
 	// Set up model with some messages that will be "compacted"
 	m := model{
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport: fastviewport.New(80, 20),
 		styles:   ApplyThemeColors("tokyonight"),
 		messages: []message{
 			{role: roleUser, text: "Hello"},
@@ -5275,7 +5279,7 @@ func TestCompactionSummaryRendersInTranscript(t *testing.T) {
 
 func TestScrollToCompactionBannerFindsMarker(t *testing.T) {
 	m := model{
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport: fastviewport.New(80, 20),
 		styles:   ApplyThemeColors("tokyonight"),
 		messages: []message{
 			{role: roleUser, text: "Hello"},

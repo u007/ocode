@@ -5,9 +5,9 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/u007/ocode/internal/config"
 )
@@ -71,7 +71,7 @@ func TestSlashAutocompleteResolvesCommand(t *testing.T) {
 }
 
 func TestTabAutocompleteRunsInUpdatePath(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 	m.input.SetValue("/m")
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -86,7 +86,7 @@ func TestTabAutocompleteRunsInUpdatePath(t *testing.T) {
 }
 
 func TestTabOnModelOpensPicker(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 	m.input.SetValue("/models ")
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -97,7 +97,7 @@ func TestTabOnModelOpensPicker(t *testing.T) {
 }
 
 func TestThemeCommandOpensPicker(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 
 	updated, cmd := m.handleCommand("/theme")
 	if cmd != nil {
@@ -120,7 +120,7 @@ func TestThemeCommandOpensPicker(t *testing.T) {
 }
 
 func TestTabOnThemeOpensPicker(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 	m.input.SetValue("/theme ")
 
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
@@ -139,7 +139,7 @@ func TestThemePickerSelectionSwitchesTheme(t *testing.T) {
 	}
 	m := model{
 		input:        textarea.New(),
-		viewport:     viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:     fastviewport.New(80, 20),
 		config:       &config.Config{Ocode: config.OcodeConfig{}},
 		showPicker:   true,
 		pickerKind:   "theme",
@@ -162,7 +162,7 @@ func TestThemePickerSelectionSwitchesTheme(t *testing.T) {
 }
 
 func TestSidebarCommandRecordsTranscriptMessage(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 
 	updated, cmd := m.handleCommand("/sidebar")
 	if cmd != nil {
@@ -203,7 +203,7 @@ func TestDrainQueuedCommandsProcessesAllSynchronousCommands(t *testing.T) {
 		width:          80,
 		height:         20,
 		input:          textarea.New(),
-		viewport:       viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:       fastviewport.New(80, 20),
 		queuedCommands: []string{"/theme", "/sidebar"},
 	}
 
@@ -236,7 +236,7 @@ func TestLoginCommandBypassesBusyQueue(t *testing.T) {
 		width:     80,
 		height:    20,
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:  fastviewport.New(80, 20),
 		streaming: true,
 	}
 
@@ -259,7 +259,7 @@ func TestCompactFinishedResumesAfterQueuedLocalCommands(t *testing.T) {
 		width:                80,
 		height:               20,
 		input:                textarea.New(),
-		viewport:             viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport:             fastviewport.New(80, 20),
 		agent:                agent.NewAgent(nil, nil, &config.Config{}, nil),
 		messages:             []message{{role: roleUser, text: "hello"}},
 		pendingCompactResume: true,
@@ -290,7 +290,7 @@ func TestCommandHelpTextShowsAliasesAndArgs(t *testing.T) {
 }
 
 func TestEditorCommandOpensPicker(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)), files: newFilesModel(".")}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20), files: newFilesModel(".")}
 
 	updated, cmd := m.handleCommand("/editor")
 	if cmd != nil {
@@ -314,7 +314,7 @@ func TestEditorCommandSetsEditor(t *testing.T) {
 
 	m := model{
 		input:    newTestTextarea(),
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport: fastviewport.New(80, 20),
 		files:    newFilesModel("."),
 		config:   &config.Config{Ocode: config.OcodeConfig{}},
 	}
@@ -331,7 +331,7 @@ func TestEditorCommandSetsEditor(t *testing.T) {
 }
 
 func TestEditorModeCommandOpensPicker(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 
 	updated, cmd := m.handleCommand("/editor-mode")
 	if cmd != nil {
@@ -355,7 +355,7 @@ func TestEditorModeCommandValidMode(t *testing.T) {
 
 	m := model{
 		input:    textarea.New(),
-		viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		viewport: fastviewport.New(80, 20),
 		config:   &config.Config{Ocode: config.OcodeConfig{}},
 		files:    newFilesModel("."),
 	}
@@ -372,7 +372,7 @@ func TestEditorModeCommandValidMode(t *testing.T) {
 }
 
 func TestEditorModeCommandInvalidMode(t *testing.T) {
-	m := model{input: textarea.New(), viewport: viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))}
+	m := model{input: textarea.New(), viewport: fastviewport.New(80, 20)}
 
 	updated, cmd := m.handleCommand("/editor-mode bogus")
 	if cmd != nil {

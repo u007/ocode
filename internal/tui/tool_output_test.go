@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 func TestRenderToolResultPreservesFullOutput(t *testing.T) {
@@ -63,7 +63,7 @@ func TestToolOutputBoxHidesTruncationFooter(t *testing.T) {
 		width:               100,
 		height:              30,
 		input:               textarea.New(),
-		viewport:            viewport.New(viewport.WithWidth(96), viewport.WithHeight(24)),
+		viewport:            fastviewport.New(96, 24),
 		styles:              ApplyThemeColors("tokyonight"),
 		messages:            []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
 		sessionID:           "test",
@@ -91,7 +91,7 @@ func TestClickToolOutputExpandsInline(t *testing.T) {
 		width:     100,
 		height:    30,
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(24)),
+		viewport:  fastviewport.New(96, 24),
 		styles:    ApplyThemeColors("tokyonight"),
 		messages:  []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
 		sessionID: "test",
@@ -128,7 +128,7 @@ func TestToolOutputPreviewRespectsSanitizedLineCount(t *testing.T) {
 		width:     100,
 		height:    30,
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(96), viewport.WithHeight(24)),
+		viewport:  fastviewport.New(96, 24),
 		styles:    ApplyThemeColors("tokyonight"),
 		messages:  []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
 		sessionID: "test",

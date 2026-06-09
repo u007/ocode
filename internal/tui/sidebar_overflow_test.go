@@ -7,13 +7,13 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 // TestSidebarClickMatchesRenderedRowUnderOverflow renders the full chat content
@@ -56,7 +56,7 @@ func TestSidebarClickMatchesRenderedRowUnderOverflow(t *testing.T) {
 				workDir:      tmpDir,
 				styles:       ApplyThemeColors("tokyonight"),
 				input:        textarea.New(),
-				viewport:     viewport.New(viewport.WithWidth(100), viewport.WithHeight(h)),
+				viewport:     fastviewport.New(100, h),
 				agent:        agent.NewAgent(retryTestClient{}, nil, nil, nil),
 				config:       &config.Config{Model: "gpt-4o"},
 			}

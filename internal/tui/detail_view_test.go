@@ -6,11 +6,11 @@ import (
 	"testing"
 	"unsafe"
 
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 func TestDetailStackPushPop(t *testing.T) {
@@ -219,7 +219,7 @@ func TestAgentStripClickOpensDetail(t *testing.T) {
 		scrollSpeed: 3,
 		agent:       a,
 	}
-	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	m.viewport = fastviewport.New(80, 20)
 	m.layout()
 
 	strip, blocks := m.renderAgentStrip()
@@ -274,7 +274,7 @@ func TestAgentStripClickableAfterStripGrows(t *testing.T) {
 		scrollSpeed: 3,
 		agent:       a,
 	}
-	m.viewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	m.viewport = fastviewport.New(80, 20)
 	// Fill the transcript so the viewport wants the whole screen — any strip
 	// growth then overflows m.height and trips the safety net.
 	var content []string

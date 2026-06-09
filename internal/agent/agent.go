@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1398,7 +1399,7 @@ func permissionReadFileTool() map[string]interface{} {
 		"type": "function",
 		"function": map[string]interface{}{
 			"name":        "read_file",
-			"description": "Read the contents of a file. Use this to explore the codebase before making a permission decision.",
+			"description": "Read the contents of a file, or list a directory's entries if the path is a directory. Use this to explore the codebase before making a permission decision.",
 			"parameters": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -1494,6 +1495,15 @@ func executePermissionReadFile(path string, startLine, endLine int) string {
 		}
 	}
 
+	// A directory target is normal when the request is itself a directory
+	// operation (list/glob/grep/repo_overview). os.ReadFile would return an
+	// opaque "is a directory" error that weaker models misread as a validation
+	// failure and refuse on. Return a directory listing instead so the model
+	// gets usable context, and state plainly that this is the expected shape.
+	if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
+		return permissionListDir(path)
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		// A missing target is normal when the command/tool is creating the file
@@ -1527,6 +1537,45 @@ func executePermissionReadFile(path string, startLine, endLine int) string {
 	}
 	if endLine < total {
 		fmt.Fprintf(&sb, "... (%d more lines)\n", total-endLine)
+	}
+	return sb.String()
+}
+
+// permissionListDir returns a sorted directory listing for the permission model
+// when read_file is pointed at a directory. Listing a directory is the expected
+// operation for list/glob/grep/repo_overview tools, so this returns the entries
+// (capped) plus an explicit note that a directory target is not a reason to
+// refuse — the model should decide from the path and tool, not from "it's a dir".
+func permissionListDir(path string) string {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return fmt.Sprintf("error listing directory %s: %v", path, err)
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() {
+			name += "/"
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	const maxEntries = 100
+	truncated := 0
+	if len(names) > maxEntries {
+		truncated = len(names) - maxEntries
+		names = names[:maxEntries]
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "%s is a directory — listing a directory is the expected target for list/glob/grep operations, not a reason to refuse. Decide from the path and tool.\n\nEntries (%d):\n", path, len(entries))
+	for _, n := range names {
+		sb.WriteString("  " + n + "\n")
+	}
+	if truncated > 0 {
+		fmt.Fprintf(&sb, "  ... (%d more)\n", truncated)
 	}
 	return sb.String()
 }

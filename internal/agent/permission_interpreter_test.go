@@ -75,6 +75,73 @@ func TestExtractHeredocsUnterminated(t *testing.T) {
 	}
 }
 
+// TestMultilineInlineEvalBodyPreserved guards a regression where a multi-line
+// `python3 -c "<body with newlines>"` was truncated to its first line by
+// extractHeredocs, leaving EmbeddedBody empty. The empty body forced the
+// interpreter auto-permission path to report auto_interp_no_source and fall
+// back to a human prompt instead of analyzing the source.
+func TestMultilineInlineEvalBodyPreserved(t *testing.T) {
+	cmd := "python3 -c \"\nimport hashlib\n# compute a slug\nslug = hashlib.sha256(b'/x').hexdigest()[:12]\nprint(slug)\n\""
+	ie, ok := classifyInterpreterExecution(cmd)
+	if !ok {
+		t.Fatalf("not classified")
+	}
+	if ie.SourceMode != "inline_eval" {
+		t.Fatalf("mode=%q want inline_eval", ie.SourceMode)
+	}
+	if !strings.Contains(ie.EmbeddedBody, "import hashlib") || !strings.Contains(ie.EmbeddedBody, "print(slug)") {
+		t.Fatalf("EmbeddedBody truncated: %q", ie.EmbeddedBody)
+	}
+}
+
+// TestExtractHeredocsNoHeredocPreservesFullCommand ensures a command with
+// newlines but no heredoc operator returns the full command, not just line one.
+func TestExtractHeredocsNoHeredocPreservesFullCommand(t *testing.T) {
+	cmd := "python3 -c \"line1\nline2\""
+	header, docs := extractHeredocs(cmd)
+	if len(docs) != 0 {
+		t.Fatalf("want 0 docs, got %d", len(docs))
+	}
+	if header != cmd {
+		t.Fatalf("header=%q want full command %q", header, cmd)
+	}
+}
+
+// TestTokenizeShellSkipsComments guards a regression where a '#' comment line in
+// a multi-line bash command was tokenized as a command word named "#", producing
+// a bogus `bash.prefix.#` ASK that escalated otherwise-allowed scripts to the
+// permission prompt.
+func TestTokenizeShellSkipsComments(t *testing.T) {
+	cmd := "# Replace dynamic imports\nsed -i '' 's/a/b/g' file.tsx\n# trailing note\nhead -1 file.tsx"
+	cmds, err := parseShellCommandLine(cmd)
+	if err != nil {
+		t.Fatalf("err %v", err)
+	}
+	if len(cmds) != 2 {
+		t.Fatalf("want 2 commands (sed, head), got %d: %#v", len(cmds), cmds)
+	}
+	if cmds[0].cmdWords[0] != "sed" || cmds[1].cmdWords[0] != "head" {
+		t.Fatalf("unexpected commands: %q, %q", cmds[0].cmdWords[0], cmds[1].cmdWords[0])
+	}
+	for _, c := range cmds {
+		if c.cmdWords[0] == "#" {
+			t.Fatalf("comment leaked as command: %#v", c.cmdWords)
+		}
+	}
+}
+
+// TestTokenizeShellMidWordHashLiteral ensures a '#' inside a word (e.g. a URL
+// fragment) stays literal and does not start a comment.
+func TestTokenizeShellMidWordHashLiteral(t *testing.T) {
+	cmds, err := parseShellCommandLine("curl https://example.com/page#section")
+	if err != nil {
+		t.Fatalf("err %v", err)
+	}
+	if len(cmds) != 1 || cmds[0].cmdWords[1] != "https://example.com/page#section" {
+		t.Fatalf("mid-word '#' not preserved: %#v", cmds)
+	}
+}
+
 func TestHeredocClassificationCapturesBody(t *testing.T) {
 	ie, ok := classifyInterpreterExecution("python3 - <<'PY'\nprint('hi')\nPY")
 	if !ok || ie.SourceMode != "heredoc" {

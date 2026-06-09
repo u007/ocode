@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	"charm.land/lipgloss/v2"
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 // TestActivityRowGrowthStaysWithinHeight reproduces the bug where the activity
@@ -23,7 +23,7 @@ func TestActivityRowGrowthStaysWithinHeight(t *testing.T) {
 		height:    13, // short terminal (e.g. a split pane); transcript viewport floors at 1. 13 rows = 12 chrome + 1 viewport at the floor.
 		sessionID: strings.Repeat("session-", 12),
 		input:     textarea.New(),
-		viewport:  viewport.New(viewport.WithWidth(76), viewport.WithHeight(7)),
+		viewport:  fastviewport.New(76, 7),
 		styles:    ApplyThemeColors("tokyonight"),
 		messages: []message{{
 			role: roleAssistant,

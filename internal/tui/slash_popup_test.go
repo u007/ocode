@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
-	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
+	"github.com/u007/ocode/internal/tui/fastviewport"
 )
 
 func TestSlashSuggestionsEmptyPrefixReturnsAll(t *testing.T) {
@@ -292,7 +292,7 @@ func TestSlashPopupMouseClickUsesVisibleWindow(t *testing.T) {
 func TestSlashPopupAppearsInLayout(t *testing.T) {
 	m := model{
 		input:           newTestTextarea(),
-		viewport:        viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
+		viewport:        fastviewport.New(80, 10),
 		width:           80,
 		height:          30,
 		ready:           true,
@@ -356,7 +356,7 @@ func TestSlashPopupHidesForFilePath(t *testing.T) {
 	ta.SetValue("/tmp/screen.png")
 	m := model{
 		input:           ta,
-		viewport:        viewport.New(viewport.WithWidth(80), viewport.WithHeight(10)),
+		viewport:        fastviewport.New(80, 10),
 		width:           80,
 		height:          30,
 		ready:           true,
