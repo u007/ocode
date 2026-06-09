@@ -13,6 +13,7 @@ build: web-build
 # ── Install ──────────────────────────────────────────────────────────────────
 
 install: web-build
+	go build $(LDFLAGS) -o bin/$(APP) .
 	go install $(LDFLAGS) .
 
 # ── OS-specific builds (output to project root for convenience) ──────────────
@@ -56,6 +57,7 @@ release: clean
 clean:
 	rm -rf $(OUTDIR)
 	rm -f $(APP) $(APP)-darwin-* $(APP)-linux-* $(APP)-windows-*
+	rm -rf bin/
 
 # ── Test ─────────────────────────────────────────────────────────────────────
 # Run all Go tests in the repo. Exits non-zero on any failure.

@@ -897,6 +897,16 @@ func requiresJSONObjectArguments(provider string) bool {
 		provider == "alibaba-coding"
 }
 
+// isGLMModel reports whether the model is a Zhipu/Z.AI GLM model. GLM's
+// OpenAI-compatible endpoint is stricter than OpenAI: it emits reasoning_content
+// in responses but rejects it as a request field, and it rejects an empty-string
+// content on an assistant message that carries tool_calls (error 1214,
+// "messages parameter is illegal"). Detected by model name since GLM is served
+// through several providers (openrouter, z-ai, ...).
+func isGLMModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "glm")
+}
+
 // providerSupportsReasoningEffort returns true for providers that accept the
 // OpenAI-style reasoning_effort parameter to enable/control chain-of-thought.
 func providerSupportsReasoningEffort(provider string) bool {
@@ -1146,11 +1156,19 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 			}
 		}
 
+		glm := isGLMModel(c.Model)
 		msg := map[string]interface{}{
 			"role":    m.Role,
 			"content": sanitizeAPIText(m.Content),
 		}
-		if m.Role == "assistant" && m.ReasoningContent != "" {
+		// GLM rejects an empty-string content alongside tool_calls; omit it so the
+		// field defaults to null on its side (error 1214 otherwise).
+		if glm && m.Role == "assistant" && m.Content == "" && len(m.ToolCalls) > 0 {
+			delete(msg, "content")
+		}
+		// GLM emits reasoning_content but rejects it as a request field; only echo
+		// it back to providers that accept it.
+		if !glm && m.Role == "assistant" && m.ReasoningContent != "" {
 			msg["reasoning_content"] = sanitizeAPIText(m.ReasoningContent)
 		}
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
@@ -1177,6 +1195,19 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 			msg["tool_calls"] = calls
 		}
 		result = append(result, msg)
+	}
+	// GLM rejects a request whose message sequence ends on an assistant message
+	// (it has nothing to respond to → error 1214). This happens when the history
+	// ends on an assistant turn (resumed/interrupted session, or assistant text
+	// with no tool calls). Append a synthetic user turn — the same thing a manual
+	// "continue" does. Other providers tolerate a trailing assistant message.
+	if isGLMModel(c.Model) && len(result) > 0 {
+		if last, ok := result[len(result)-1]["role"].(string); ok && last == "assistant" {
+			result = append(result, map[string]interface{}{
+				"role":    "user",
+				"content": "continue",
+			})
+		}
 	}
 	return result, nil
 }

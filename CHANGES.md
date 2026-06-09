@@ -6,10 +6,13 @@
 - **Fast Viewport Component** — New `internal/tui/fastviewport` package with O(1) `SetContentLines` replaces chat transcript's bubbles viewport, reducing render time from ~30ms→0.73ms at 1000 message pairs (~41× faster).
 - **Permission Read File Enhancement** — `read_file` tool now supports directory listing when pointed at directory paths, providing better context for list/glob/grep/repo_overview operations.
 - **Transcript Render Optimization** — Coalesced streaming render cadence from 50ms→90ms while auto-scrolling, halving in-flight CPU with no perceptible animation loss (~11fps vs 20fps on thinking streams).
+- **GLM Model Compatibility** — New `isGLMModel()` helper in `internal/agent/client.go` detects Zhipu GLM models across providers (OpenRouter, Z.AI, etc.). `convertToOpenAIMessages` now omits empty-string `content` when an assistant message carries `tool_calls` (GLM error 1214), skips `reasoning_content` in request fields (GLM emits but rejects it), and appends a synthetic `{"role":"user","content":"continue"}` when the message sequence ends on an assistant turn.
 
 ### Changed
 - **Permission Read File Tool** — Enhanced `read_file` tool description to clarify it can read files or list directories, providing better context for permission decisions.
 - **TODO.md Documentation** — Updated with detailed performance analysis and optimization results for transcript rendering, including root cause analysis and implementation details.
+- **Makefile Build Targets** — `install` target now builds binary to `bin/` before `go install`; `clean` target now removes the `bin/` directory.
+- **Config Default Model & Prefixes** — Updated `last_model` to `opencode-go/deepseek-v4-flash`; reordered `auto_allow_prefixes` alphabetically; added `"feat:"` to bash prefix allow list.
 
 ### Fixed
 - **Transcript Performance Bottleneck** — Replaced O(N) viewport line scanning with O(1) pointer assignment, eliminating 27-35ms per render from redundant `\r\n` scans and `maxLineWidth` calculations that were never used due to `SoftWrap=false`.
