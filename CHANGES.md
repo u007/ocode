@@ -45,6 +45,7 @@
 - **Version** — Bumped from `0.3.3` to `0.3.4`.
 
 ### Fixed
+- **Commit Message Generation Model Fallback** — Git tab's `Ctrl+G` commit message generator now uses `ResolveSmallModel` fallback instead of hardcoded `openai/gpt-5.4-mini`, fixing "no LLM configured" errors when OpenAI API key is not set. Configurable via `commit_msg_model` in `ocodeconfig.json`.
 - **Permission Dialog Loop** — Broad single-word deny rules (e.g. "git" => deny) now correctly win over granular allow rules, and harmful commands always require explicit approval regardless of prefix rules.
 - **LSP Manager Lost During Model Init** — The LSP manager and event channels are now transferred from the temporary builder model to the real model, fixing a nil `lspMgr` that prevented the sidebar LSP section from rendering.
 - **VS Code IDE Client Keepalive** — `notifications/initialized` now omits empty

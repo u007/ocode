@@ -31,15 +31,18 @@ var serversByExt = map[string]serverSpec{
 	".jsx": {cmd: "typescript-language-server", args: []string{"--stdio"}, langID: "javascriptreact"},
 }
 
-// ServerStartedEvent is sent on the event channel at two points in the server
+// ServerStartedEvent is sent on the event channel at three points in the server
 // lifecycle. Phase=="starting" fires immediately before the LSP initialize
 // handshake begins (server binary found, goroutine launched). Phase=="ready"
-// fires once initialize completes successfully.
+// fires once initialize completes successfully. Phase=="failed" fires when the
+// server binary is missing or initialization fails, so the TUI can clear the
+// indexing indicator instead of showing it forever.
 type ServerStartedEvent struct {
 	Cmd    string // binary name, e.g. "gopls"
 	LangID string // primary language ID, e.g. "go"
 	Root   string // project root path
-	Phase  string // "starting" | "ready"
+	Phase  string // "starting" | "ready" | "failed"
+	Detail string // optional error detail for "failed" phase
 }
 
 // ServerStatus describes a running language server.
@@ -397,6 +400,12 @@ func (m *Manager) WarmUp(root string) {
 		go func() {
 			if _, err := m.ClientForExt(e); err != nil {
 				log.Printf("lsp warmup %s: %v", s.cmd, err)
+				if eventCh != nil {
+					select {
+					case eventCh <- ServerStartedEvent{Cmd: s.cmd, LangID: s.langID, Root: root, Phase: "failed", Detail: err.Error()}:
+					default:
+					}
+				}
 			}
 		}()
 	}

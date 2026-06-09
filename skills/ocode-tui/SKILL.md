@@ -11,9 +11,9 @@ A short, dense map of the ocode TUI so you don't re-discover it from scratch.
 ## 1. Single entry point
 
 - `tui.Run(opts RunOptions)` in `internal/tui/tui.go` — redirects `log` to a debug panel, then calls `tea.NewProgram(newModel(opts))`.
-- `newModel(opts ...RunOptions) model` in `internal/tui/model.go:1136` — assembles the `model` struct: input, viewport, tabs, sidebar, files/git sub-models, agent, theme.
-- `View() tea.View` in `internal/tui/model.go:8878` — builds `tea.NewView(m.renderContent())`, sets `AltScreen = true`, sets `MouseMode = MouseModeAllMotion` (required for hover-underline on the sidebar).
-- `Update(msg tea.Msg) (tea.Model, tea.Cmd)` in `internal/tui/model.go:1427` — value receiver. Big `switch msg := msg.(type)` for window size, key, mouse, agent, debug, etc.
+- `newModel(opts ...RunOptions) model` in `internal/tui/model.go:1239` — assembles the `model` struct: input, viewport, tabs, sidebar, files/git sub-models, agent, theme.
+- `View() tea.View` in `internal/tui/model.go:10364` — builds `tea.NewView(m.renderContent())`, sets `AltScreen = true`, sets `MouseMode = MouseModeAllMotion` (required for hover-underline on the sidebar).
+- `Update(msg tea.Msg) (tea.Model, tea.Cmd)` in `internal/tui/model.go:1557` — value receiver. Big `switch msg := msg.(type)` for window size, key, mouse, agent, debug, etc.
 
 ## 2. Screen layout (chat tab, top → bottom)
 
@@ -50,20 +50,20 @@ The **app header is 2 rows**: a leading blank pad + the title line. Always go th
 
 ## 3. Per-tab render path
 
-`m.renderContent()` in `model.go:8944` routes by `m.activeTab`:
+`m.renderContent()` in `model.go:10430` delegates to `m.renderTabContent()` which handles modals/detail view first, then routes by `m.activeTab`:
 
-- `tabFiles` → `m.files.View(w, h, styles, chatUnread, exitPending)` (`internal/tui/files_model.go:1463`)
+- `tabFiles` → `m.files.View(w, h, styles, chatUnread, exitPending)` (`internal/tui/files_model.go:1779`)
 - `tabGit`   → `m.git.View(w, h, styles, chatUnread, exitPending)` (`internal/tui/git_model.go:1628`)
-- `tabLog`   → `m.renderLogTab()` (`internal/tui/model.go:10314`)
+- `tabLog`   → `m.renderLogTab()` (`internal/tui/model.go:11908`)
 - `tabChat` (default) → inline render: header → (transcript + sidebar | status chain) → overflow re-render safety net
 
 Both `files.View` and `git.View` build their own header; **they also use `appHeaderTopPad`/`appHeaderLeftPad`/`appHeaderHintGap`** so the chrome is identical across tabs. If you tweak the constants, all four tabs change.
 
-The chat `renderContent` has a **safety net** at `model.go:9051`: if the rendered output's height exceeds `m.height`, the viewport is shrunk and the layout is re-rendered. New chrome rows that push `bottomChromeHeight` up can trip this — verify with `TestActivityRowGrowthStaysWithinHeight` in `internal/tui/overflow_repro_test.go` (uses a deliberately short 13-row terminal).
+The chat `renderContent` has a **safety net** at `model.go:10549`: if the rendered output's height exceeds `m.height`, the viewport is shrunk and the layout is re-rendered. New chrome rows that push `bottomChromeHeight` up can trip this — verify with `TestActivityRowGrowthStaysWithinHeight` in `internal/tui/overflow_repro_test.go` (uses a deliberately short 13-row terminal).
 
 ## 4. Theme + styles
 
-- `internal/tui/theme.go` defines `Styles` (`Header`, `Border`, `Hint`, `Selected`, etc.) and the 20+ built-in themes (`tokyonight`, `dracula`, `gruvbox`, …).
+- `internal/tui/theme.go` defines `ThemeColors` (color strings) and `Styles` (lipgloss.Style wrappers: `Header`, `Border`, `Hint`, `Selected`, etc.) and the 20+ built-in themes (`tokyonight`, `dracula`, `gruvbox`, …).
 - `ApplyThemeColors(name string) Styles` is the single builder; it also pushes styles into package-level singletons (`headerStyle`, `borderStyle`, `hintStyle`, `selectedStyle`, `statusStyle`, `successStyle`, `errorStyle`, `textStyle`, `thinkingStyle`, `thinkingHeaderStyle`, `sidebarTextStyle`, `dimStyle`, `toolBoxStyle`).
 - Tests must call `m.styles = ApplyThemeColors("tokyonight")` (or any name) and the singletons are also wired because `ApplyThemeColors` calls the `set*` helpers. Tests that only set `m.styles.Header` without calling `ApplyThemeColors` get the package-default `headerStyle`, which usually works for the singleton-style render calls.
 
@@ -79,7 +79,7 @@ The chat `renderContent` has a **safety net** at `model.go:9051`: if the rendere
 4. **Release** → if `active`, `extractSelectionText` + `clipboard.WriteAll` (log copy errors, never swallow); if **not active** (no drag distance), clear and **fall through to the click handler** so a plain click still toggles/opens.
 5. Track both styled and `stripANSI` raw lines so highlight and extract share the same coordinate space. Selection coords are screen-row/col relative to the content's top-left (`contentTopY`); bordered box left chrome = 2 cols (border(1) + padding(1)).
 
-See `internal/tui/selection.go`, `handleMouseAction` (`model.go:3590`) / `handleMouseMotion` (`model.go:4221`), and the per-surface sel fields on the model struct (`m.sel`, `m.logSel`, `m.filesSel`, `m.gitSel`, `m.inputSel`, `m.sidebarSel`) plus the drill-in's own `detailView.sel` (`internal/tui/detail_view.go`) for working copies.
+See `internal/tui/selection.go`, `handleMouseAction` (`model.go:3961`) / `handleMouseMotion` (`model.go:4622`), and the per-surface sel fields on the model struct (`m.sel`, `m.logSel`, `m.filesSel`, `m.gitSel`, `m.inputSel`, `m.sidebarSel`) plus the drill-in's own `detailView.sel` (`internal/tui/detail_view.go`) for working copies.
 
 ## 6. TUI output safety (alt-screen)
 
@@ -93,7 +93,7 @@ Any `fmt.Print*` / `fmt.Fprint*(os.Stdout|os.Stderr,…)` / `println` / raw `os.
 
 In `internal/tui`:
 
-- `newTestTextarea()` and `derefTestModel(t, value)` live in `slash_popup_test.go:305-321` — the textarea must be focused; `derefTestModel` unwraps the `(model, *model)` mix returned by `Update`.
+- `newTestTextarea()` and `derefTestModel(t, value)` live in `slash_popup_test.go:308-321` — the textarea must be focused; `derefTestModel` unwraps the `(model, *model)` mix returned by `Update`.
 - Common test model: `model{ready, width, height, input: newTestTextarea(), viewport: viewport.New(...), styles: ApplyThemeColors("tokyonight"), activeTab, ...}`.
 - For tests that exercise layout/mouse Y math, **always use `appHeaderHeight`** (or `appHeaderHeight + 1` for first content row inside a bordered panel) — never `lipgloss.Height(m.styles.Header.Render("◆ ocode"))`. The latter returns 1 (just the styled text) and is wrong by 1 row now.
 - For tests with a very short terminal (e.g. 13 rows for `TestActivityRowGrowthStaysWithinHeight`), remember the new top pad consumes 1 of those rows. The overflow safety net kicks in if chrome is too tall.
@@ -106,17 +106,17 @@ In `internal/tui`:
 1. New const in `internal/tui/tabs.go` (e.g. `tabFoo = 4`), bump `tabCount`.
 2. Add to `labels` in `renderTabBar`.
 3. Add a `case tabFoo: return m.foo.View(...)` in `renderContent`.
-4. Update `handleGlobalTabKeys` (alt+[/] / ctrl+shift+[/) in `model.go:2731`.
+4. Update `handleGlobalTabKeys` (alt+[/] / ctrl+shift+[/) in `model.go:3050`.
 5. Update the `lipgloss.Height(m.styles.Header.Render("◆ ocode  Foo"))` callsites — replace with `appHeaderHeight` (or add a `appHeaderHeight` alias for that tab) so a future header tweak still works.
 6. Add a foo sub-model with its own `View`, plus any click/selection fields.
 
 **Add a new mouse-handled region:** follow the §5 selection recipe. Add a `selectionState` field, a `…ForClick(mouse)` and `…ContentTopY()` helper, and wire the press/motion/release paths in `handleMouseAction` / `handleMouseMotion` (and the `scrollbarDrag*` switch).
 
-**Change a theme color:** edit the `Colors` struct in `theme.go` and the relevant `builtinThemes` entry. `ApplyThemeColors` is the only consumer; everything flows from it.
+**Change a theme color:** edit the `ThemeColors` struct in `theme.go` and the relevant `builtinThemes` entry. `ApplyThemeColors` is the only consumer; everything flows from it.
 
 ## 9. Files to know
 
-- `internal/tui/model.go` (~11.1k lines) — model struct, Update, View, renderContent, layout, mouse, scrollbar, all the chrome math.
+- `internal/tui/model.go` (~12.9k lines) — model struct, Update, View, renderContent, layout, mouse, scrollbar, all the chrome math.
 - `internal/tui/theme.go` — themes + style singletons.
 - `internal/tui/tabs.go` — tab constants + `renderTabBar`.
 - `internal/tui/selection.go` — shared `selectionState`, `applySelectionHighlight`, `extractSelectionText`, `normaliseSelection`.

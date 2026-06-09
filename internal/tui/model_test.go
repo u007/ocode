@@ -859,7 +859,7 @@ func TestThinkingStreamStartsCollapsed(t *testing.T) {
 	if m.expandedThinking[m.streamingThinkingIdx] {
 		t.Fatal("expected streaming thinking to stay collapsed by default")
 	}
-	plain := stripANSI(m.transcriptContent)
+	plain := strings.Join(m.rawTranscriptLines, "\n")
 	if !strings.Contains(plain, "click to expand") {
 		t.Fatalf("expected collapsed thinking affordance, got %q", plain)
 	}
@@ -5256,7 +5256,7 @@ func TestCompactionSummaryRendersInTranscript(t *testing.T) {
 	m.renderTranscript()
 
 	// Verify the transcript content contains the compaction summary
-	content := m.transcriptContent
+	content := strings.Join(m.transcriptLines, "\n")
 	if !strings.Contains(content, "📦") {
 		t.Fatalf("expected compaction summary box in transcript, got:\n%s", content)
 	}

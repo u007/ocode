@@ -173,3 +173,34 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
 - **Match upstream error strings where practical.** LLM behavior can be sensitive to familiar tool responses; aligning error wording may improve self-correction when a patch is malformed.
 - **Add edge-case tests.** Cover move+update in one patch, EOF insertions via `*** End of File`, multiple hunks in one file, repeated-context matching, and whitespace-tolerant matching cases.
 - **Consider importing or porting the upstream parser more literally.** If true byte-for-byte compatibility is a goal, the cleanest path is a closer structural port of the upstream opencode apply_patch parser rather than maintaining a merely compatible reimplementation.
+
+## LLM auto-permission: interpreter execution (2026-06-08)
+
+- **Surface the model's effect summary / reject reason in the human-ask prompt.**
+  Interpreter auto-permission decisions are fully functional, but when the
+  verifier declines (or the model defers) the reason currently lands only in the
+  debug panel (`tier=auto_interp_*`). `PermissionRequest` has no reason field, so
+  the TUI ask prompt does not yet show "interpreter execution (lang mode) — model
+  summary: …". Add an optional `Reason`/`Summary` to `PermissionRequest` and
+  render it in the permission dialog when present. Deferred to keep this change
+  off the (currently broken) tui package.
+- **Heredoc handling is a line-based pre-pass (`extractHeredocs`), not a
+  rune-level tokenizer state.** This is intentional (far lower blast radius on the
+  shared shell parser) and covers `<<DELIM`/`<<-`/quoted delimiters/multi-heredoc.
+  If full shell-grammar heredoc fidelity is ever needed (e.g. heredocs mid-pipeline
+  with interpreter not first word), revisit.
+
+## TUI streaming render: residual O(N) viewport cost (2026-06-09)
+
+- **renderTranscript no longer re-wraps/re-strips the whole transcript per delta.**
+  Per-message cache now stores each block's wrapped + ANSI-stripped line slices;
+  a streamed delta only re-renders the one changed message. Result: 1000-pair
+  transcript dropped 87.7ms→27.6ms per render and 62MB→2.9MB allocs (543× fewer
+  allocs), collapsing the GC pressure that was stalling the event loop. Realistic
+  sessions (~100 pairs) are now ~2.8ms.
+- **Residual: ~27ms at 1000 pairs is the viewport's O(N) `SetContentLines`** — it
+  rescans all lines (`ContainsAny` + `maxLineWidth`/`ansi.StringWidth`) on every
+  call. Can't be skipped via the bubbles/v2 public API. If extreme sessions
+  (1000+ pairs / ~90K lines) still feel laggy, the next lever is keeping a cached
+  assembled prefix and a viewport variant that accepts incremental tail updates
+  (avoids the full rescan). Deferred — not worth the fork risk for the common case.

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -133,6 +134,11 @@ type Agent struct {
 	// Sub-agents run in their own goroutines and never reach the TUI's
 	// tool-result handling, so the sentinel path is invisible to them.
 	OnPermissionAsk func(PermissionRequest) PermissionResponse
+	// OnPermissionGrant, if set, is invoked when the permission verifier derives
+	// a durable auto-grant that should be persisted by the session layer. The
+	// callback owns persistence; the agent keeps only the in-memory matcher in
+	// sync after the callback succeeds.
+	OnPermissionGrant func(config.AutoGrant) error
 	// subAgentPermAsker is the permission-ask callback the TUI installs on the
 	// main agent. It is not used by the main agent itself; it is copied onto
 	// each sub-agent's OnPermissionAsk so sub-agent asks reach the TUI.
@@ -484,8 +490,15 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		resp, err := a.chatWithDelta(stopCh, messages, toolDefs)
 		a.activity.setLLMRunning(false)
 		if err != nil {
-			emitDebug("ERROR", fmt.Sprintf("LLM error: provider=%s model=%q apiKey=%s error: %v",
-				a.client.GetProvider(), a.client.GetModel(), maskKey(getClientAPIKey(a.client)), err))
+			if isCancelled() || errors.Is(err, context.Canceled) {
+				// Expected cancellation (user interrupt / superseded request) —
+				// benign, not an error condition. Log quietly per logging rules.
+				emitDebug("LLM", fmt.Sprintf("request cancelled: provider=%s model=%q",
+					a.client.GetProvider(), a.client.GetModel()))
+			} else {
+				emitDebug("ERROR", fmt.Sprintf("LLM error: provider=%s model=%q apiKey=%s error: %v",
+					a.client.GetProvider(), a.client.GetModel(), maskKey(getClientAPIKey(a.client)), err))
+			}
 			return nil, err
 		}
 		if isCancelled() {
@@ -1040,7 +1053,7 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 		decision := a.permissions.Decide(name, args)
 		emitDebug("PERMISSION", a.permissionDecisionTrace(name, args, decision, autoEnabled))
 		if decision.Level == PermissionDeny {
-			return fmt.Sprintf("denied: tool %q is not permitted by permission rules", name), nil
+			return fmt.Sprintf("denied: tool %q is not permitted by permission rules. This call is blocked by policy — do not retry the same call; choose a different approach or ask the user.", name), nil
 		}
 		if decision.Level == PermissionAsk {
 			if autoEnabled {
@@ -1053,8 +1066,10 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
 					// Fall through to human ask unless destructive auto-permission is enabled.
 				} else {
-					// Consult the LLM permission model.
-					allowed, reason := a.askPermissionModel(name, args, &req)
+					// Consult the LLM permission model (interpreter executions
+					// take the structured effect-verification path; everything
+					// else the plain ALLOW/DENY path).
+					allowed, reason := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						return a.executeToolCall(name, args)
@@ -1078,7 +1093,7 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 					a.applyPermissionResponse(req, resp)
 					return a.executeToolCall(name, args)
 				}
-				return fmt.Sprintf("denied: tool %q denied by user", name), nil
+				return fmt.Sprintf("denied: tool %q denied by user. Do not retry the same call; ask the user how they'd like to proceed or take a different approach.", name), nil
 			}
 			payload, err := json.Marshal(decision.Request)
 			if err != nil {
@@ -1159,6 +1174,24 @@ func permissionRequestSummary(req *PermissionRequest) string {
 	return truncateDebugArgs(data, 240)
 }
 
+// consultPermissionModel routes a permission decision to the right model path:
+// a bash command that classifies as interpreter execution goes through the
+// structured effect-verification path; every other tool/command uses the plain
+// ALLOW/DENY path.
+func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *PermissionRequest) (bool, string) {
+	if name == "bash" {
+		var p struct {
+			Command string `json:"command"`
+		}
+		if err := json.Unmarshal(args, &p); err == nil && p.Command != "" {
+			if ie, ok := classifyInterpreterExecution(p.Command); ok {
+				return a.askPermissionModelInterpreter(p.Command, ie)
+			}
+		}
+	}
+	return a.askPermissionModel(name, args, req)
+}
+
 // askPermissionModel sends a permission request to the configured LLM model
 // and returns (allowed bool, reason string). The model can only approve or
 // ask (deny falls through to human). Returns (true, "") on approval,
@@ -1227,6 +1260,10 @@ You have a read_file tool to explore the codebase before deciding. Use it to:
 - Check project configuration files
 - Understand what a bash command would operate on
 
+If a target file does not exist yet, that is normal for a command that creates it
+(e.g. a heredoc/redirect that writes a new path). Do NOT treat a missing file as a
+reason to refuse — decide from the command and arguments.
+
 After gathering enough context, respond with ONLY one of:
 ALLOW: <brief reason>
 DENY: <brief reason>`, toolName, toolArgs, rule, scope, context)
@@ -1236,8 +1273,128 @@ DENY: <brief reason>`, toolName, toolArgs, rule, scope, context)
 		prompt = a.config.Ocode.Permissions.Auto.Prompt + "\n\n" + prompt
 	}
 
-	// Define the read_file tool for the permission model.
-	readFileTool := map[string]interface{}{
+	tools := []map[string]interface{}{permissionReadFileTool()}
+	messages := []Message{{Role: "user", Content: prompt}}
+
+	finalText, gotFinal, failReason := runPermissionModelLoop(client, messages, tools, modelLabel, toolName)
+	if !gotFinal {
+		return false, failReason
+	}
+
+	if decided, allow, reason := parsePermissionVerdict(finalText); decided {
+		// A model ALLOW never overrides Go's deterministic guardrails — confidence
+		// alone never auto-approves (mirrors the interpreter effect verifier).
+		if allow {
+			if ok, vreason := a.verifyAutoGrant(toolName, args, req); !ok {
+				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_guardrail_reject tool=%s reason=%s", toolName, vreason))
+				return false, vreason
+			}
+		}
+		return allow, reason
+	}
+
+	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_ambiguous tool=%s response=%s", toolName, truncateDebugArgs([]byte(finalText), 100)))
+	return false, "ambiguous LLM response: " + finalText
+}
+
+// pathConfinedAutoTools are the path-scoped tools whose auto-grant target is a
+// concrete file path that must stay inside the allowed roots and clear of
+// sensitive paths. Pattern/dir tools (glob, list, grep, repo_overview) are
+// excluded — their "path" is a glob/directory that does not resolve cleanly and
+// would over-reject to human Ask.
+var pathConfinedAutoTools = map[string]bool{
+	"read": true, "write": true, "edit": true, "delete": true,
+	"multiedit": true, "multi_file_edit": true, "replace_lines": true,
+	"apply_patch": true, "format": true, "lsp": true,
+}
+
+// verifyAutoGrant re-checks a model ALLOW verdict against Go's deterministic
+// guardrails before the plain ALLOW/DENY path auto-grants. It returns ok=false
+// (with a human-readable reason) to defer to human Ask. This is intentionally
+// narrow: for arbitrary bash it can only reject hard-blocked commands (harmful
+// bash is already gated upstream by IsHarmfulRequest before the model is
+// consulted), and it confines path-scoped file tools to the allowed roots —
+// it does NOT make the plain bash path as scrutinised as the interpreter path.
+func (a *Agent) verifyAutoGrant(toolName string, args json.RawMessage, req *PermissionRequest) (bool, string) {
+	pm := a.permissions
+	if pm == nil {
+		return true, ""
+	}
+	if toolName == "bash" {
+		cmd := ""
+		if req != nil {
+			cmd = req.Command
+		}
+		if cmd == "" {
+			cmd = bashCommand(args)
+		}
+		if isHardBlockedCommand(cmd) {
+			return false, "hard-blocked command cannot be auto-granted"
+		}
+		return true, ""
+	}
+	if pathConfinedAutoTools[toolName] {
+		if path := extractPathFromArgs(toolName, args); path != "" {
+			if !pm.IsPathWithinAllowedRoots(path) {
+				return false, "target path outside allowed roots: " + path
+			}
+			if isSensitivePath(path) {
+				return false, "target touches sensitive path: " + path
+			}
+		}
+	}
+	return true, ""
+}
+
+// parsePermissionVerdict extracts an ALLOW/DENY decision from the permission
+// model's final message. The prompt asks for a bare "ALLOW: <reason>" /
+// "DENY: <reason>", but weaker models prepend reasoning or wrap the verdict in
+// markdown (e.g. "**ALLOW: ...**"), so a strict whole-string prefix match misses
+// real verdicts and falls through to a needless human prompt. We scan lines from
+// last to first (the final stated verdict wins, matching final-answer
+// convention and failing safe to the earlier line only when the last is not a
+// verdict), strip leading markdown/quote decoration, and accept a line only when
+// the verdict word is the whole line or is immediately followed by ':'. The
+// colon requirement prevents prose like "ALLOW only if trusted" from flipping a
+// decision. decided=false means no verdict was found (caller treats as ambiguous
+// → deny).
+func parsePermissionVerdict(text string) (decided, allow bool, reason string) {
+	lines := strings.Split(text, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimLeft(strings.TrimSpace(lines[i]), " \t>*#-`\"'")
+		upper := strings.ToUpper(line)
+		if rest, ok := strings.CutPrefix(upper, "ALLOW"); ok && verdictBoundary(rest) {
+			return true, true, cleanVerdictReason(line[len("ALLOW"):])
+		}
+		if rest, ok := strings.CutPrefix(upper, "DENY"); ok && verdictBoundary(rest) {
+			return true, false, cleanVerdictReason(line[len("DENY"):])
+		}
+	}
+	return false, false, ""
+}
+
+// verdictBoundary reports whether the text following a verdict word marks it as a
+// standalone verdict: the word is the entire line, or it is immediately followed
+// by a ':' (the instructed "ALLOW: <reason>" form). This rejects longer words
+// like "ALLOWED"/"ALLOWING" and loose prose like "ALLOW only if ...".
+func verdictBoundary(rest string) bool {
+	r := strings.TrimSpace(rest)
+	return r == "" || strings.HasPrefix(r, ":")
+}
+
+// cleanVerdictReason trims the verdict word's trailing reason of its leading
+// ": " separator and any wrapping markdown/quote characters.
+func cleanVerdictReason(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimLeft(s, ": ")
+	s = strings.TrimRight(s, " *`\"'")
+	return strings.TrimSpace(s)
+}
+
+// permissionReadFileTool returns the read_file tool definition given to the
+// permission model so it can inspect the codebase before deciding.
+func permissionReadFileTool() map[string]interface{} {
+	return map[string]interface{}{
 		"type": "function",
 		"function": map[string]interface{}{
 			"name":        "read_file",
@@ -1262,34 +1419,35 @@ DENY: <brief reason>`, toolName, toolArgs, rule, scope, context)
 			},
 		},
 	}
+}
 
-	tools := []map[string]interface{}{readFileTool}
-
-	messages := []Message{
-		{Role: "user", Content: prompt},
-	}
-
-	// Tool call loop — cap at maxToolCalls to prevent abuse.
-	const maxToolCalls = 5
+// runPermissionModelLoop drives the read_file tool-call loop (capped at
+// maxToolCalls) and returns the model's final, no-tool-call message text.
+// gotFinal is false on transport error, nil response, or budget exhaustion, in
+// which case failReason carries the explanation. Shared by the plain ALLOW/DENY
+// path and the interpreter structured-effects path.
+func runPermissionModelLoop(client LLMClient, messages []Message, tools []map[string]interface{}, modelLabel, toolName string) (finalText string, gotFinal bool, failReason string) {
+	const maxToolCalls = 15
 	for i := 0; i < maxToolCalls; i++ {
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_call tool=%s model=%s attempt=%d", toolName, modelLabel, i))
 
-		resp, err := client.Chat(messages, tools)
+		// On the final attempt, withhold the read_file tool so the model is
+		// forced to emit a verdict instead of wasting the turn on another read.
+		callTools := tools
+		if i == maxToolCalls-1 {
+			callTools = nil
+		}
+		resp, err := client.Chat(messages, callTools)
 		if err != nil {
 			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_error tool=%s model=%s error=%v", toolName, modelLabel, err))
-			return false, fmt.Sprintf("LLM error: %v", err)
+			return "", false, fmt.Sprintf("LLM error: %v", err)
 		}
-
 		if resp == nil {
-			return false, "nil response from LLM"
+			return "", false, "nil response from LLM"
 		}
 
-		// Check if the response contains tool calls.
 		if len(resp.ToolCalls) > 0 {
-			// Append the assistant message with tool calls.
 			messages = append(messages, *resp)
-
-			// Execute each tool call.
 			for _, tc := range resp.ToolCalls {
 				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_tool_call tool=%s model=%s function=%s args=%s", toolName, modelLabel, tc.Function.Name, truncateDebugArgs([]byte(tc.Function.Arguments), 200)))
 
@@ -1309,45 +1467,21 @@ DENY: <brief reason>`, toolName, toolArgs, rule, scope, context)
 					toolResult = fmt.Sprintf("error: unknown tool %q", tc.Function.Name)
 				}
 
-				// Truncate large results.
 				if len(toolResult) > 4000 {
 					toolResult = toolResult[:4000] + "\n...(truncated)"
 				}
-
-				// Append tool result as a tool message.
-				messages = append(messages, Message{
-					Role:    "tool",
-					ToolID:  tc.ID,
-					Content: toolResult,
-				})
+				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_tool_result tool=%s model=%s function=%s result=%s", toolName, modelLabel, tc.Function.Name, truncateDebugArgs([]byte(toolResult), 200)))
+				messages = append(messages, Message{Role: "tool", ToolID: tc.ID, Content: toolResult})
 			}
 			continue
 		}
 
-		// No tool calls — this is the final decision.
-		responseText := resp.Content
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_response tool=%s model=%s response=%s", toolName, modelLabel, truncateDebugArgs([]byte(responseText), 200)))
-
-		upper := strings.ToUpper(strings.TrimSpace(responseText))
-		if strings.HasPrefix(upper, "ALLOW") {
-			reason := strings.TrimSpace(responseText[len("ALLOW"):])
-			reason = strings.TrimLeft(reason, ": ")
-			return true, reason
-		}
-		if strings.HasPrefix(upper, "DENY") {
-			reason := strings.TrimSpace(responseText[len("DENY"):])
-			reason = strings.TrimLeft(reason, ": ")
-			return false, reason
-		}
-
-		// Ambiguous — default to ask.
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_ambiguous tool=%s response=%s", toolName, truncateDebugArgs([]byte(responseText), 100)))
-		return false, "ambiguous LLM response: " + responseText
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_response tool=%s model=%s response=%s", toolName, modelLabel, truncateDebugArgs([]byte(resp.Content), 200)))
+		return resp.Content, true, ""
 	}
 
-	// Exhausted tool call budget without a decision.
-	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_budget_exhausted tool=%s model=%s", toolName, modelName))
-	return false, "LLM exhausted tool call budget without decision"
+	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_budget_exhausted tool=%s model=%s", toolName, modelLabel))
+	return "", false, "LLM exhausted tool call budget without decision"
 }
 
 // executePermissionReadFile reads a file for the permission model LLM.
@@ -1362,6 +1496,12 @@ func executePermissionReadFile(path string, startLine, endLine int) string {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
+		// A missing target is normal when the command/tool is creating the file
+		// (e.g. `cat > new.go <<EOF`, write to a new path). Signal this explicitly
+		// so the model does not treat "file not found" as a reason to refuse.
+		if os.IsNotExist(err) {
+			return fmt.Sprintf("%s does not exist yet — this is expected when the operation creates the file. Decide based on the command/arguments, not the missing file.", path)
+		}
 		return fmt.Sprintf("error reading %s: %v", path, err)
 	}
 
@@ -1413,6 +1553,14 @@ func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, ma
 	// 1. Working directory and project type.
 	if wd, err := os.Getwd(); err == nil {
 		addSection("Working directory:", wd)
+	}
+
+	// Allowed filesystem roots — the authoritative scope boundary. Anything
+	// outside these roots is out-of-scope and must not be auto-allowed.
+	if a.permissions != nil {
+		if roots := a.permissions.AllowedRoots(); len(roots) > 0 {
+			addSection("Allowed filesystem roots (anything outside is OUT OF SCOPE):", strings.Join(roots, "\n"))
+		}
 	}
 
 	projectType := detectProjectType()
@@ -1640,7 +1788,7 @@ func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage) (strin
 func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, error) {
 	emitDebug("TOOL", fmt.Sprintf("→ %s %s", name, truncateDebugArgs(args, 120)))
 	if !a.isToolAllowed(name) {
-		return fmt.Sprintf("denied: tool %q is not allowed for this agent", name), nil
+		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
 	}
 
 	t, ok := a.tools[name]
@@ -2001,7 +2149,7 @@ func (a *Agent) applyPermissionResponse(req PermissionRequest, resp PermissionRe
 		return
 	}
 	if resp.PersistTool {
-		a.permissions.SetRule(req.ToolName, PermissionAllow)
+		a.permissions.SetUserConfirmedRule(req.ToolName, PermissionAllow)
 		return
 	}
 	if !resp.PersistRule {
@@ -2015,7 +2163,7 @@ func (a *Agent) applyPermissionResponse(req PermissionRequest, resp PermissionRe
 		a.permissions.SetBashPrefixRule(req.Prefix, PermissionAllow)
 		return
 	}
-	a.permissions.SetRule(req.ToolName, PermissionAllow)
+	a.permissions.SetUserConfirmedRule(req.ToolName, PermissionAllow)
 }
 
 func (a *Agent) AddTools(tools []tool.Tool) {

@@ -231,6 +231,55 @@ func TestDrainQueuedCommandsProcessesAllSynchronousCommands(t *testing.T) {
 	}
 }
 
+func TestLoginCommandBypassesBusyQueue(t *testing.T) {
+	m := model{
+		width:     80,
+		height:    20,
+		input:     textarea.New(),
+		viewport:  viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		streaming: true,
+	}
+
+	updated, cmd := m.handleCommand("/login")
+	if cmd == nil {
+		t.Fatal("expected /login to run immediately while busy")
+	}
+
+	got := updated.(*model)
+	if len(got.queuedCommands) != 0 {
+		t.Fatalf("expected /login not to be queued, got %#v", got.queuedCommands)
+	}
+	if len(got.messages) == 0 || got.messages[0].role != roleUser || got.messages[0].text != "/login" {
+		t.Fatalf("expected /login to be recorded immediately, got %#v", got.messages)
+	}
+}
+
+func TestCompactFinishedResumesAfterQueuedLocalCommands(t *testing.T) {
+	m := model{
+		width:                80,
+		height:               20,
+		input:                textarea.New(),
+		viewport:             viewport.New(viewport.WithWidth(80), viewport.WithHeight(20)),
+		agent:                agent.NewAgent(nil, nil, &config.Config{}, nil),
+		messages:             []message{{role: roleUser, text: "hello"}},
+		pendingCompactResume: true,
+		queuedCommands:       []string{"/sidebar"},
+	}
+
+	updated, cmd := m.Update(compactFinishedMsg{result: agent.CompactResult{OK: false}})
+	if cmd == nil {
+		t.Fatal("expected compact finish to resume the agent after draining queued commands")
+	}
+
+	got := derefTestModel(t, updated)
+	if len(got.queuedCommands) != 0 {
+		t.Fatalf("expected queued commands to be drained, got %#v", got.queuedCommands)
+	}
+	if !got.showSidebar {
+		t.Fatal("expected queued /sidebar command to run before resuming")
+	}
+}
+
 func TestCommandHelpTextShowsAliasesAndArgs(t *testing.T) {
 	help := commandHelpText()
 	for _, want := range []string{"/models [name], /model", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {

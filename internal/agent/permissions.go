@@ -6,11 +6,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"unicode"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tool"
 )
 
 type PermissionLevel string
@@ -69,6 +72,7 @@ type pathPatternEntry struct {
 type PermissionManager struct {
 	mode                  PermissionMode
 	rules                 map[string]PermissionLevel
+	userConfirmedRules    map[string]bool // tracks explicit "always allow" decisions
 	patterns              []patternRule
 	pathPatterns          map[string][]pathPatternEntry // toolName → path-glob patterns
 	bashPrefixes          map[string]PermissionLevel
@@ -77,6 +81,7 @@ type PermissionManager struct {
 	workDir               string
 	webfetchDomains       map[string]PermissionLevel
 	autoPermissionEnabled bool
+	autoGrants            []config.AutoGrant
 }
 
 type patternRule struct {
@@ -86,116 +91,16 @@ type patternRule struct {
 
 const bashInRootPersistPrefix = "__inroot__:"
 
-// bashAutoAllowPrefixes are commands that take filesystem path arguments and
-// are auto-allowed only when every path resolves inside the current workdir.
-// All entries here MUST be safe to run on any in-root path (read-only, or
-// mutating-but-bounded like `sed -i`). Commands that can have side effects
-// outside the working tree (network, subprocess execution, package installs)
-// MUST NOT be added here — use bashSubcommandAllow instead.
-var bashAutoAllowPrefixes = map[string]bool{
-	// Text processing (reads inputs, writes to stdout)
-	"awk":      true,
-	"sed":      true,
-	"tr":       true,
-	"cat":      true,
-	"tac":      true,
-	"rev":      true,
-	"head":     true,
-	"tail":     true,
-	"less":     true,
-	"more":     true,
-	"nl":       true,
-	"sort":     true,
-	"uniq":     true,
-	"cut":      true,
-	"paste":    true,
-	"join":     true,
-	"comm":     true,
-	"column":   true,
-	"expand":   true,
-	"unexpand": true,
-	"fold":     true,
-	"wc":       true,
-	"grep":     true,
-	"rg":       true,
-	"ag":       true,
-	// File / directory inspection
-	"ls":       true,
-	"tree":     true,
-	"file":     true,
-	"stat":     true,
-	"du":       true,
-	"basename": true,
-	"dirname":  true,
-	"realpath": true,
-	"readlink": true,
-	"diff":     true,
-	"cmp":      true,
-	// Hashing
-	"md5sum":    true,
-	"sha1sum":   true,
-	"sha256sum": true,
-	"sha512sum": true,
-	"shasum":    true,
-	"cksum":     true,
-	// Binary inspection
-	"xxd":     true,
-	"hexdump": true,
-	"od":      true,
-	"strings": true,
-	// Structured data
-	"jq": true,
-	"yq": true,
-	// Path-aware search (extra flag inspection in canAutoAllowInRoot)
-	"find": true,
-	"fd":   true,
-	"cd":   true,
-}
-
 const (
 	bashPrefixModeReadOnly = "read_only"
 	bashPrefixModeMutating = "mutating"
 	bashPrefixModeNever    = "never_auto"
 )
 
-// bashAutoAllowDefaultModes defaults every entry in bashAutoAllowPrefixes to
-// read_only. Overrides for genuinely mutating commands (sed -i, etc.) are
-// listed explicitly below.
-var bashAutoAllowDefaultModes = func() map[string]string {
-	m := make(map[string]string, len(bashAutoAllowPrefixes))
-	for prefix := range bashAutoAllowPrefixes {
-		m[prefix] = bashPrefixModeReadOnly
-	}
-	m["sed"] = bashPrefixModeMutating
-	return m
-}()
+var bashAutoAllowPrefixes = buildBashAutoAllowPrefixes(runtime.GOOS)
+var bashAutoAllowDefaultModes = buildBashAutoAllowDefaultModes(runtime.GOOS)
 
-// bashAlwaysAllow are commands that have no filesystem path arguments and no
-// meaningful side effects. They auto-allow regardless of workdir.
-// Anything that can execute another program (env, command, exec, sudo, etc.)
-// MUST NOT be added here.
-var bashAlwaysAllow = map[string]bool{
-	"pwd":      true,
-	"whoami":   true,
-	"hostname": true,
-	"uname":    true,
-	"id":       true,
-	"tty":      true,
-	"date":     true,
-	"true":     true,
-	"false":    true,
-	":":        true,
-	"echo":     true,
-	"printf":   true,
-	"which":    true,
-	"type":     true,
-	"locale":   true,
-	"tput":     true,
-	"groups":   true,
-	"users":    true,
-	"uptime":   true,
-	"arch":     true,
-}
+var bashAlwaysAllow = buildBashAlwaysAllow(runtime.GOOS)
 
 // bashSubcommandAllow maps "<prefix> <subcommand>" (and optionally three-word
 // "<prefix> <sub1> <sub2>") strings to true for subcommand-pinned auto-allow.
@@ -760,14 +665,15 @@ func IsHarmfulRequest(req PermissionRequest) bool {
 
 func NewPermissionManager() *PermissionManager {
 	pm := &PermissionManager{
-		mode:            PermissionModeNormal,
-		rules:           make(map[string]PermissionLevel),
-		patterns:        make([]patternRule, 0),
-		pathPatterns:    make(map[string][]pathPatternEntry),
-		bashPrefixes:    make(map[string]PermissionLevel),
-		bashAutoAllow:   make(map[string]bool),
-		bashPrefixModes: make(map[string]string),
-		webfetchDomains: make(map[string]PermissionLevel),
+		mode:               PermissionModeNormal,
+		rules:              make(map[string]PermissionLevel),
+		userConfirmedRules: make(map[string]bool),
+		patterns:           make([]patternRule, 0),
+		pathPatterns:       make(map[string][]pathPatternEntry),
+		bashPrefixes:       make(map[string]PermissionLevel),
+		bashAutoAllow:      make(map[string]bool),
+		bashPrefixModes:    make(map[string]string),
+		webfetchDomains:    make(map[string]PermissionLevel),
 	}
 	for k, v := range bashAutoAllowPrefixes {
 		pm.bashAutoAllow[k] = v
@@ -828,8 +734,10 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 	}
 	if cfg.Auto != nil {
 		pm.SetAutoPermissionEnabled(cfg.Auto.Enabled)
+		pm.autoGrants = append([]config.AutoGrant(nil), cfg.Auto.Grants...)
 	} else {
 		pm.SetAutoPermissionEnabled(false)
+		pm.autoGrants = nil
 	}
 	for k, v := range cfg.Tools {
 		level := PermissionLevel(v)
@@ -945,11 +853,11 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					emitDebug("perm", fmt.Sprintf("Decide ALLOW (temp dir): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
-				// Check tool-level rule first — an explicit "allow" (from "always
-				// allow this rule/tool") overrides the out-of-scope gate so the user
-				// isn't asked repeatedly for the same permitted tool.
-				if pm.Check(toolName) == PermissionAllow {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (out-of-scope, tool allowed): tool=%s path=%s", toolName, path))
+				// Only user-confirmed allows ("always allow this tool") override the
+				// out-of-scope gate. Default allow rules do NOT bypass it — the
+				// user should be asked when writing outside the workdir.
+				if pm.IsUserConfirmedRule(toolName) {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (out-of-scope, user-confirmed tool): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
 				emitDebug("perm", fmt.Sprintf("Decide ASK (out-of-scope): tool=%s path=%s", toolName, path))
@@ -958,8 +866,8 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				}}
 			}
 			if isSensitivePath(path) {
-				if pm.Check(toolName) == PermissionAllow {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (sensitive, tool allowed): tool=%s path=%s", toolName, path))
+				if pm.IsUserConfirmedRule(toolName) {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (sensitive, user-confirmed tool): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
 				emitDebug("perm", fmt.Sprintf("Decide ASK (sensitive): tool=%s path=%s", toolName, path))
@@ -968,8 +876,8 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				}}
 			}
 			if toolName == "delete" {
-				if pm.Check(toolName) == PermissionAllow {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, tool allowed): tool=%s path=%s", toolName, path))
+				if pm.IsUserConfirmedRule(toolName) {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, user-confirmed tool): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
 				emitDebug("perm", fmt.Sprintf("Decide ASK (delete): tool=%s path=%s", toolName, path))
@@ -1017,48 +925,149 @@ func bashPermissionRequest(args json.RawMessage, command, prefix string) *Permis
 	return &PermissionRequest{ToolName: "bash", Args: args, Command: command, Prefix: prefix, Scope: scope, Rule: rule}
 }
 
+// resolveForScopeCheck resolves rawPath to an absolute, symlink-resolved path
+// suitable for prefix comparison against an allowed root. For a not-yet-existing
+// path (e.g. mkdir creating a deep directory or a write creating a new file) it
+// walks up until it finds the nearest existing ancestor, resolves that ancestor,
+// and rejoins the missing suffix. Returns false when no ancestor can be resolved.
+func resolveForScopeCheck(rawPath string) (string, bool) {
+	absPath, err := filepath.Abs(rawPath)
+	if err != nil {
+		return "", false
+	}
+	current := absPath
+	var suffix []string
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return resolved, true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
+}
+
+// pathUnderRoot reports whether resolved equals root or sits beneath root/.
+func pathUnderRoot(resolved, root string) bool {
+	if root == "" {
+		return false
+	}
+	rootSep := root + string(filepath.Separator)
+	return resolved == root || strings.HasPrefix(resolved, rootSep)
+}
+
 func isWithinWorkDir(pm *PermissionManager, rawPath string) bool {
 	if pm.workDir == "" {
 		return true
 	}
-	absPath, err := filepath.Abs(rawPath)
-	if err != nil {
+	resolved, ok := resolveForScopeCheck(rawPath)
+	if !ok {
 		return false
 	}
-	resolved, err := filepath.EvalSymlinks(absPath)
-	if err != nil {
-		// File may not exist yet (e.g., write creating new file); check directory
-		dir := filepath.Dir(absPath)
-		resolved, err = filepath.EvalSymlinks(dir)
-		if err != nil {
-			return false
-		}
-		resolved = filepath.Join(resolved, filepath.Base(absPath))
-	}
-	workDirSep := pm.workDir + string(filepath.Separator)
-	return resolved == pm.workDir || strings.HasPrefix(resolved, workDirSep)
+	return pathUnderRoot(resolved, pm.workDir)
 }
 
-// isTempDir returns true if the given path is within a well-known system temp
-// directory. Only matches well-known paths, NOT os.TempDir() (which on macOS
-// returns /var/folders/.../T/ — too broad for auto-allow).
-func isTempDir(rawPath string) bool {
+// AllowedRoots returns the unified set of filesystem roots that are in-scope for
+// auto-permission decisions: the working directory, every extra allowed root
+// registered with the file-tool confinement layer (tool.ExtraAllowedRoots), the
+// managed cache dirs (tool.CacheRoots — tool-results + cloned-repo cache), and
+// the well-known temp directories (including the OS-specific os.TempDir()).
+// Roots are symlink-resolved and de-duplicated. This is the single authoritative
+// scope model shared by the permission prompt, the interpreter effect verifier,
+// and tool confinement — see the 2026-06-01 design's "permissions and tool
+// confinement must share one root model" principle.
+func (pm *PermissionManager) AllowedRoots() []string {
+	seen := make(map[string]struct{})
+	var roots []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		resolved, err := filepath.EvalSymlinks(p)
+		if err != nil {
+			resolved = filepath.Clean(p)
+		}
+		if _, ok := seen[resolved]; ok {
+			return
+		}
+		seen[resolved] = struct{}{}
+		roots = append(roots, resolved)
+	}
+	if pm != nil {
+		add(pm.workDir)
+	}
+	for _, r := range tool.ExtraAllowedRoots() {
+		add(r)
+	}
+	// Managed cache dirs (truncated tool-results, cloned-repo cache). These are
+	// allowed by the read tool's confinedPath; include them here so bash reads of
+	// the same files (tail/sed/cat on a tool-results txt) are in-scope for both
+	// the static in-root auto-allow and the LLM permission prompt's allowed_roots.
+	for _, r := range tool.CacheRoots() {
+		add(r)
+	}
+	add("/tmp")
+	add("/var/tmp")
+	add(os.TempDir())
+	sort.Strings(roots)
+	return roots
+}
+
+// IsPathWithinAllowedRoots reports whether rawPath resolves inside any root
+// returned by AllowedRoots. Used by the interpreter effect verifier to confirm
+// that inferred read/write/delete targets stay within policy.
+func (pm *PermissionManager) IsPathWithinAllowedRoots(rawPath string) bool {
+	resolved, ok := resolveForScopeCheck(rawPath)
+	if !ok {
+		return false
+	}
+	for _, root := range pm.AllowedRoots() {
+		if pathUnderRoot(resolved, root) {
+			return true
+		}
+	}
+	return false
+}
+
+// tempRootsForGOOS returns the temp roots the permission engine treats as safe.
+// Linux/macOS get the conventional well-known dirs; Windows uses os.TempDir().
+func tempRootsForGOOS(goos string) []string {
+	if goos == "windows" {
+		return []string{filepath.Clean(os.TempDir())}
+	}
+	return []string{"/tmp", "/var/tmp"}
+}
+
+// isTempDirUnderRoots reports whether rawPath resolves inside any provided temp root.
+func isTempDirUnderRoots(rawPath string, roots []string) bool {
 	absPath, err := filepath.Abs(rawPath)
 	if err != nil {
 		return false
 	}
 	clean := filepath.Clean(absPath)
-
-	// Well-known temp directories — these are always safe to auto-allow.
-	unixTempDirs := []string{"/tmp", "/var/tmp"}
-	for _, td := range unixTempDirs {
-		tdClean := td + string(filepath.Separator)
-		if clean == td || strings.HasPrefix(clean, tdClean) {
+	for _, td := range roots {
+		if td == "" {
+			continue
+		}
+		tdClean := filepath.Clean(td)
+		if clean == tdClean || strings.HasPrefix(clean, tdClean+string(filepath.Separator)) {
 			return true
 		}
 	}
-
 	return false
+}
+
+// isTempDir returns true if the given path is within a well-known system temp
+// directory.
+func isTempDir(rawPath string) bool {
+	return isTempDirUnderRoots(rawPath, tempRootsForGOOS(runtime.GOOS))
 }
 
 // allArgsAreTempDirs checks if all arguments in a bash command that look like
@@ -1184,11 +1193,256 @@ func matchSubcommandAllow(command string) bool {
 	if len(fields) >= 2 {
 		key := fields[0] + " " + fields[1]
 		if bashSubcommandAllow[key] {
+			// `bun run` guard: unlike `npm/pnpm/yarn run` (which only execute a
+			// named package.json script), `bun run <path>` executes an arbitrary
+			// file. A path-like run target must not auto-allow — drop to Ask so the
+			// interpreter verifier (or a human) sees it.
+			if key == "bun run" && len(fields) >= 3 && isPathLikeScript(fields[2]) {
+				return false
+			}
 			return true
 		}
 	}
 	// Single-word match (e.g. "make", "tsc"). These accept any args.
 	return bashSubcommandAllow[fields[0]]
+}
+
+// isPathLikeScript reports whether a runner argument names a file path (rather
+// than a manifest script name) — it contains a path separator, starts with ".",
+// or has a known script extension.
+func isPathLikeScript(arg string) bool {
+	if strings.ContainsAny(arg, "/\\") || strings.HasPrefix(arg, ".") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(arg)) {
+	case ".ts", ".js", ".mjs", ".cjs", ".tsx", ".jsx", ".mts", ".cts":
+		return true
+	}
+	return false
+}
+
+// --- Interpreter-execution classification (2026-06-02 follow-up) -------------
+
+// InterpreterExec describes a classified interpreter invocation (python file.py,
+// python stdin redirection, a heredoc, an inline -e eval, or a remote runner like npx).
+// It is produced deterministically in Go from the raw command; the LLM never
+// decides classification, only effects.
+type InterpreterExec struct {
+	Language     string // python | ruby | javascript | perl
+	Binary       string // python3, node, bun, npx, "pnpm dlx", ...
+	SourceMode   string // heredoc | inline_eval | script_file | stdin_pipe | remote | unknown_source
+	Entrypoint   string // resolved script path (script_file)
+	EmbeddedBody string // heredoc / inline-eval source body
+	Delimiter    string // heredoc delimiter
+	Terminated   bool   // heredoc body was properly closed
+	RemoteSpec   string // package spec for remote runners
+	RawCommand   string
+}
+
+var interpreterLanguages = map[string]string{
+	"python":  "python",
+	"python3": "python",
+	"python2": "python",
+	"ruby":    "ruby",
+	"node":    "javascript",
+	"tsx":     "javascript",
+	"bun":     "javascript",
+	"deno":    "javascript",
+	"perl":    "perl",
+}
+
+var remoteRunners = map[string]bool{
+	"npx":  true,
+	"bunx": true,
+}
+
+var heredocOpRe = regexp.MustCompile(`<<-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)["']?`)
+
+type heredocDoc struct {
+	delim      string
+	body       string
+	quoted     bool
+	terminated bool
+}
+
+// extractHeredocs scans a (possibly multi-line) command string for heredoc
+// redirections (<<DELIM, <<-DELIM, <<'DELIM', <<"DELIM") and returns the command
+// header with the heredoc operators removed plus the bodies in delimiter order.
+// It is a bounded line-based pre-pass — not a full shell parser. Unterminated
+// heredocs are returned with terminated=false so callers can fall back to Ask.
+func extractHeredocs(command string) (header string, docs []heredocDoc) {
+	lines := strings.Split(command, "\n")
+	if len(lines) == 0 {
+		return command, nil
+	}
+	header = lines[0]
+	type pending struct {
+		delim     string
+		quoted    bool
+		stripTabs bool
+	}
+	var pend []pending
+	for _, m := range heredocOpRe.FindAllStringSubmatch(header, -1) {
+		pend = append(pend, pending{
+			delim:     m[2],
+			quoted:    m[1] != "",
+			stripTabs: strings.HasPrefix(m[0], "<<-"),
+		})
+	}
+	if len(pend) == 0 {
+		return header, nil
+	}
+	header = strings.TrimSpace(heredocOpRe.ReplaceAllString(header, ""))
+
+	idx := 1
+	for _, p := range pend {
+		var body []string
+		terminated := false
+		for idx < len(lines) {
+			line := lines[idx]
+			idx++
+			cmp := line
+			if p.stripTabs {
+				cmp = strings.TrimLeft(cmp, "\t")
+			}
+			if cmp == p.delim {
+				terminated = true
+				break
+			}
+			body = append(body, line)
+		}
+		docs = append(docs, heredocDoc{
+			delim:      p.delim,
+			body:       strings.Join(body, "\n"),
+			quoted:     p.quoted,
+			terminated: terminated,
+		})
+	}
+	return header, docs
+}
+
+// firstNonFlagArg returns the first argument that is not a flag (does not start
+// with "-"), or "" when none exists.
+func firstNonFlagArg(args []string) string {
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			continue
+		}
+		return a
+	}
+	return ""
+}
+
+var inlineEvalFlags = map[string]bool{"-e": true, "--eval": true, "-c": true, "--command": true, "-p": true, "--print": true}
+
+// inlineEvalCode extracts the inline source from an interpreter's eval flag
+// (python -c, node/bun/deno -e/--eval, ruby/perl -e). Returns (code, true) when
+// an eval flag is present, even if the code argument is missing.
+func inlineEvalCode(args []string) (string, bool) {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if inlineEvalFlags[a] {
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", true
+		}
+		// Joined short form, e.g. -e"code".
+		for f := range inlineEvalFlags {
+			if len(f) == 2 && len(a) > 2 && strings.HasPrefix(a, f) {
+				return a[2:], true
+			}
+		}
+	}
+	return "", false
+}
+
+// classifyInterpreterExecution inspects a raw bash command and, when it is an
+// interpreter invocation, returns a deterministic classification. It only
+// classifies when the interpreter is the first command word (the common agent
+// case); piped/embedded interpreters elsewhere fall through to the normal path.
+func classifyInterpreterExecution(command string) (*InterpreterExec, bool) {
+	header, docs := extractHeredocs(command)
+	cmds, err := parseShellCommandLine(header)
+	if err != nil || len(cmds) == 0 {
+		return nil, false
+	}
+	words := cmds[0].cmdWords
+	if len(words) == 0 {
+		return nil, false
+	}
+	bin := filepath.Base(words[0]) // handle /usr/bin/python3
+	args := words[1:]
+
+	// Two-word remote runners: "pnpm dlx", "bun x".
+	if len(words) >= 2 {
+		two := bin + " " + words[1]
+		if two == "pnpm dlx" || two == "bun x" {
+			spec := ""
+			if len(words) >= 3 {
+				spec = firstNonFlagArg(words[2:])
+			}
+			return &InterpreterExec{Language: "javascript", Binary: two, SourceMode: "remote", RemoteSpec: spec, RawCommand: command}, true
+		}
+	}
+
+	if remoteRunners[bin] {
+		return &InterpreterExec{Language: "javascript", Binary: bin, SourceMode: "remote", RemoteSpec: firstNonFlagArg(args), RawCommand: command}, true
+	}
+
+	lang, ok := interpreterLanguages[bin]
+	if !ok {
+		return nil, false
+	}
+	ie := &InterpreterExec{Language: lang, Binary: bin, RawCommand: command}
+
+	// Heredoc body attached.
+	if len(docs) > 0 {
+		var bodies []string
+		terminated := true
+		for _, d := range docs {
+			bodies = append(bodies, d.body)
+			if !d.terminated {
+				terminated = false
+			}
+		}
+		ie.SourceMode = "heredoc"
+		ie.EmbeddedBody = strings.Join(bodies, "\n")
+		ie.Delimiter = docs[0].delim
+		ie.Terminated = terminated
+		return ie, true
+	}
+
+	// Inline eval flag (node -e, python -c, ...).
+	if code, found := inlineEvalCode(args); found {
+		ie.SourceMode = "inline_eval"
+		ie.EmbeddedBody = code
+		ie.Terminated = true
+		return ie, true
+	}
+
+	// `bun run x.ts` / `deno run x.ts` — the file follows the run subcommand.
+	rest := args
+	if (bin == "bun" || bin == "deno") && len(rest) > 0 && rest[0] == "run" {
+		rest = rest[1:]
+	}
+	if entry := firstNonFlagArg(rest); entry != "" && entry != "-" {
+		ie.SourceMode = "script_file"
+		ie.Entrypoint = entry
+		return ie, true
+	}
+
+	if len(cmds[0].stdinRedirections) > 0 {
+		if input := cmds[0].stdinRedirections[0]; input != "" && input != "-" && input != "/dev/stdin" {
+			ie.SourceMode = "stdin_pipe"
+			ie.Entrypoint = input
+			return ie, true
+		}
+	}
+
+	// Bare interpreter / REPL / `python -` stdin — no analyzable source.
+	ie.SourceMode = "unknown_source"
+	return ie, true
 }
 
 func extractDomainFromURL(rawURL string) string {
@@ -1295,6 +1549,25 @@ func (pm *PermissionManager) SetRule(toolName string, level PermissionLevel) {
 	} else {
 		pm.rules[toolName] = level
 	}
+}
+
+// SetUserConfirmedRule marks a tool rule as having been explicitly confirmed
+// by the user (e.g. via "always allow this tool"). User-confirmed allows
+// bypass the out-of-scope and sensitive-path gates so the user isn't
+// prompted repeatedly for the same permitted tool. Default allow rules
+// (from NewPermissionManager) do NOT set this flag.
+func (pm *PermissionManager) SetUserConfirmedRule(toolName string, level PermissionLevel) {
+	pm.SetRule(toolName, level)
+	if level == PermissionAllow && !strings.Contains(toolName, "*") {
+		pm.userConfirmedRules[toolName] = true
+	}
+}
+
+// IsUserConfirmedRule returns true if the tool was explicitly allowed by the
+// user (as opposed to a default allow rule). Used by Decide() to decide
+// whether to bypass out-of-scope / sensitive-path gates.
+func (pm *PermissionManager) IsUserConfirmedRule(toolName string) bool {
+	return pm.userConfirmedRules[toolName]
 }
 
 func (pm *PermissionManager) SetPathRule(toolName, pattern string, level PermissionLevel) {
@@ -1442,6 +1715,92 @@ func (pm *PermissionManager) AutoPermissionEnabled() bool {
 	return pm.autoPermissionEnabled
 }
 
+// AddAutoGrant records a derived interpreter grant in the in-memory matcher set.
+// The session layer is responsible for the durable save; this only keeps the
+// live manager in sync so repeats within the session match without re-consulting
+// the model.
+func (pm *PermissionManager) AddAutoGrant(g config.AutoGrant) {
+	if pm == nil {
+		return
+	}
+	pm.autoGrants = append(pm.autoGrants, g)
+}
+
+// normalizeGrantCommand canonicalizes a shell command enough for exact grant
+// matching: trim outer whitespace and collapse shell-token whitespace while
+// preserving argument order.
+func normalizeGrantCommand(command string) string {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return ""
+	}
+	return strings.Join(splitShellFields(command), " ")
+}
+
+// resolvedInterpreterEntrypoint returns the absolute, symlink-resolved path for
+// a classified interpreter execution's source file, or "" when no path can be
+// resolved.
+func resolvedInterpreterEntrypoint(ie *InterpreterExec) string {
+	if ie == nil || ie.Entrypoint == "" {
+		return ""
+	}
+	full := ie.Entrypoint
+	if !filepath.IsAbs(full) {
+		if wd, err := os.Getwd(); err == nil {
+			full = filepath.Join(wd, full)
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(full); err == nil {
+		full = resolved
+	}
+	return filepath.Clean(full)
+}
+
+// MatchInterpreterGrant reports whether a persisted exact grant authorizes this
+// interpreter execution. Exact grants are keyed by language, source mode,
+// normalized command, resolved entrypoint path, cwd, and source hash. sourceHash
+// is the sha256 of the entrypoint file (script_file / stdin_pipe).
+//
+// allowDestructive reflects the current policy: destructive grants are only
+// matched when the user has opted in to destructive auto-approval. This
+// prevents a grant created under allow_destructive=true from silently
+// bypassing a later allow_destructive=false policy.
+func (pm *PermissionManager) MatchInterpreterGrant(ie *InterpreterExec, sourceHash string, allowDestructive bool) bool {
+	if pm == nil || ie == nil || sourceHash == "" {
+		return false
+	}
+	if ie.SourceMode == "heredoc" || ie.SourceMode == "inline_eval" {
+		return false
+	}
+	normalizedCommand := normalizeGrantCommand(ie.RawCommand)
+	resolvedPath := resolvedInterpreterEntrypoint(ie)
+	cwd := safeGetwd()
+	for _, g := range pm.autoGrants {
+		if g.Kind != "interpreter_exact" || g.Language != ie.Language || g.SourceMode != ie.SourceMode {
+			continue
+		}
+		if g.EntrypointSHA256 != sourceHash {
+			continue
+		}
+		if g.NormalizedCommand != "" && g.NormalizedCommand != normalizedCommand {
+			continue
+		}
+		if g.EntrypointPath != "" && g.EntrypointPath != resolvedPath {
+			continue
+		}
+		if g.CWD != "" && g.CWD != cwd {
+			continue
+		}
+		// Destructive grants require the current policy to permit destructive
+		// auto-approval; otherwise fall through to human Ask.
+		if g.Destructive && !allowDestructive {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
 func (pm *PermissionManager) SetWorkDir(path string) {
 	pm.workDir = filepath.Clean(path)
 }
@@ -1475,6 +1834,7 @@ func (pm *PermissionManager) Clone() *PermissionManager {
 		workDir:               pm.workDir,
 		webfetchDomains:       make(map[string]PermissionLevel, len(pm.webfetchDomains)),
 		autoPermissionEnabled: pm.autoPermissionEnabled,
+		autoGrants:            append([]config.AutoGrant(nil), pm.autoGrants...),
 	}
 	for k, v := range pm.rules {
 		clone.rules[k] = v
@@ -1870,9 +2230,10 @@ type shellToken struct {
 }
 
 type parsedShellCommand struct {
-	envVars      []string // "KEY=VAL"
-	cmdWords     []string // command and its arguments (e.g. ["go", "test", "./..."])
-	redirections []string // target paths
+	envVars           []string // "KEY=VAL"
+	cmdWords          []string // command and its arguments (e.g. ["go", "test", "./..."])
+	redirections      []string // target paths
+	stdinRedirections []string // target paths feeding stdin (e.g. "< file", "0< file")
 }
 
 func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
@@ -1933,6 +2294,13 @@ func absorbFdDup(runes []rune, n, i int, op *string) int {
 	}
 	*op += string(runes[i+1 : j])
 	return j - 1
+}
+
+func isInputRedirectionOp(op string) bool {
+	if op == "<" {
+		return true
+	}
+	return strings.HasSuffix(op, "<") && !strings.HasPrefix(op, "<<")
 }
 
 func tokenizeShell(input string) ([]shellToken, error) {
@@ -2231,7 +2599,11 @@ func parseSingleCommandTokens(tokens []shellToken) *parsedShellCommand {
 		tok := tokens[i]
 		if tok.typ == tokRedir {
 			if i+1 < len(tokens) && tokens[i+1].typ == tokWord {
-				cmd.redirections = append(cmd.redirections, tokens[i+1].value)
+				target := tokens[i+1].value
+				cmd.redirections = append(cmd.redirections, target)
+				if isInputRedirectionOp(tok.value) {
+					cmd.stdinRedirections = append(cmd.stdinRedirections, target)
+				}
 				i++
 			}
 		} else {

@@ -281,8 +281,8 @@ func TestAgentStripClickableAfterStripGrows(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		content = append(content, "transcript filler line")
 	}
-	m.transcriptContent = strings.Join(content, "\n")
-	m.viewport.SetContent(m.transcriptContent)
+	m.transcriptLines = content
+	m.viewport.SetContentLines(m.transcriptLines)
 
 	// One small run present when layout() sizes the viewport.
 	first := a.Runs().New("worker")

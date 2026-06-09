@@ -9,13 +9,12 @@ import (
 	"testing"
 )
 
-// TestPermissions_ToolAllow_BypassesSensitiveAndOutOfWorkdir locks in the
-// current intended Decide() semantics: a tool-level "allow" rule (typically
-// set via "always allow this rule/tool") short-circuits the sensitive-path,
-// out-of-workdir, and delete prompts. This is a deliberate UX trade-off — if
-// the policy is ever tightened so allow no longer bypasses these scopes,
-// update this test to assert the new (asking) behaviour.
-func TestPermissions_ToolAllow_BypassesSensitiveAndOutOfWorkdir(t *testing.T) {
+// TestPermissions_UserConfirmedAllow_BypassesSensitiveAndOutOfWorkdir locks in
+// the Decide() semantics: an explicit user-confirmed allow rule (set via
+// "always allow this rule/tool") short-circuits the sensitive-path,
+// out-of-workdir, and delete prompts. Default allow rules do NOT bypass
+// these gates.
+func TestPermissions_UserConfirmedAllow_BypassesSensitiveAndOutOfWorkdir(t *testing.T) {
 	cases := []struct {
 		name string
 		tool string
@@ -29,10 +28,10 @@ func TestPermissions_ToolAllow_BypassesSensitiveAndOutOfWorkdir(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pm := NewPermissionManager()
 			pm.SetWorkDir("/Users/test/project")
-			pm.SetRule(tc.tool, PermissionAllow)
+			pm.SetUserConfirmedRule(tc.tool, PermissionAllow)
 			dec := pm.Decide(tc.tool, json.RawMessage(tc.args))
 			if dec.Level != PermissionAllow {
-				t.Fatalf("tool=%s args=%s: expected Allow under tool-allow rule, got %s", tc.tool, tc.args, dec.Level)
+				t.Fatalf("tool=%s args=%s: expected Allow under user-confirmed tool-allow rule, got %s", tc.tool, tc.args, dec.Level)
 			}
 		})
 	}
@@ -205,6 +204,74 @@ func TestPermissions_BashAutoAllowInRoot_Awk(t *testing.T) {
 
 	if pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)] != PermissionAllow {
 		t.Fatalf("expected persisted project-scoped awk rule")
+	}
+}
+
+func TestPermissions_BashAutoAllowInRoot_Mkdir(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	targetPath := filepath.Join(workDir, "src", "app", "api", "admin", "site-facing-playground", "markers", "__tests__")
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	dec := pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":"mkdir -p %s"}`, targetPath)))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("expected in-root mkdir command to auto-allow, got %s", dec.Level)
+	}
+	if _, exists := pm.bashPrefixes[bashInRootKey("mkdir", resolvedWorkDir)]; exists {
+		t.Fatalf("did not expect mutating mkdir mode to persist in-root key")
+	}
+
+	dec = pm.Decide("bash", json.RawMessage(`{"command":"mkdir -p /etc/ocode-mkdir-test"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("expected out-of-root mkdir command to ask, got %s", dec.Level)
+	}
+}
+
+func TestPermissions_WindowsAutoAllowAliases(t *testing.T) {
+	prefixes := buildBashAutoAllowPrefixes("windows")
+	for _, prefix := range []string{"dir", "type", "findstr", "more", "tree", "cd", "chdir", "md", "mkdir"} {
+		if !prefixes[prefix] {
+			t.Fatalf("expected windows auto-allow prefix %q", prefix)
+		}
+	}
+
+	modes := buildBashAutoAllowDefaultModes("windows")
+	if modes["md"] != bashPrefixModeMutating {
+		t.Fatalf("expected md to be mutating, got %q", modes["md"])
+	}
+	if modes["dir"] != bashPrefixModeReadOnly {
+		t.Fatalf("expected dir to be read_only, got %q", modes["dir"])
+	}
+
+	always := buildBashAlwaysAllow("windows")
+	if always["type"] {
+		t.Fatalf("expected windows type command to be path-scoped, not always-allow")
+	}
+	for _, prefix := range []string{"cls", "ver", "where"} {
+		if !always[prefix] {
+			t.Fatalf("expected windows always-allow prefix %q", prefix)
+		}
+	}
+}
+
+func TestPermissions_WindowsTempRootsUseOSTempDir(t *testing.T) {
+	tmpRoot := t.TempDir()
+	t.Setenv("TMPDIR", tmpRoot)
+
+	roots := tempRootsForGOOS("windows")
+	if len(roots) != 1 {
+		t.Fatalf("expected exactly one windows temp root, got %v", roots)
+	}
+	if roots[0] != filepath.Clean(os.TempDir()) {
+		t.Fatalf("windows temp root = %q, want %q", roots[0], filepath.Clean(os.TempDir()))
+	}
+	if !isTempDirUnderRoots(filepath.Join(tmpRoot, "child"), roots) {
+		t.Fatalf("expected child path under windows temp root to be allowed")
 	}
 }
 
@@ -618,10 +685,10 @@ func TestPermissions_ContainsEnvVarRef(t *testing.T) {
 		{"Authorization: $TOKEN", true},
 		{"${API_KEY}", true},
 		{"$SECRET_VALUE", true},
-		{"x_Y_VAR", false},     // no $ prefix
-		{"$1", false},          // positional param
-		{"$$", false},          // PID
-		{"$?", false},          // exit code
+		{"x_Y_VAR", false}, // no $ prefix
+		{"$1", false},      // positional param
+		{"$$", false},      // PID
+		{"$?", false},      // exit code
 		{"no var here", false},
 		{"$", false},           // trailing $ alone
 		{"price is $5", false}, // $ followed by digit

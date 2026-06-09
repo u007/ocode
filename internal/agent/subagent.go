@@ -260,6 +260,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// decision bubble up to the main TUI. Set before the spec-permissions block
 	// so it applies whether or not the sub-agent gets its own PermissionManager.
 	subAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
+	subAgent.OnPermissionGrant = t.mainAgent.OnPermissionGrant
 	subAgent.SetSubAgentPermAsker(t.mainAgent.subAgentPermAsker)
 
 	// Subagents share the parent (main thread) PermissionManager directly so

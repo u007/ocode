@@ -534,6 +534,79 @@ func TestSaveAutoPermissionEnabledKeepsOtherFields(t *testing.T) {
 	}
 }
 
+// TestSaveAutoGrantRoundTrip proves the targeted grant saver persists an
+// interpreter grant (with min_confidence) and round-trips all fields, without
+// clobbering the model or other fields, and that it de-dupes only truly
+// identical grants.
+func TestSaveAutoGrantRoundTrip(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	chdirTempForConfigTest(t)
+
+	// Seed an on-disk config carrying a non-default min_confidence + model.
+	full, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig failed: %v", err)
+	}
+	if full.Permissions.Auto == nil {
+		full.Permissions.Auto = &AutoPermissionConfig{}
+	}
+	full.Permissions.Auto.Enabled = true
+	full.Permissions.Auto.MinConfidence = 0.9
+	full.Permissions.Auto.Model = "opencode/deepseek-v4-flash-free"
+	if err := SaveOcodeConfig(full); err != nil {
+		t.Fatalf("seed SaveOcodeConfig failed: %v", err)
+	}
+
+	grant := AutoGrant{
+		Kind:              "interpreter_exact",
+		Language:          "python",
+		SourceMode:        "script_file",
+		NormalizedCommand: "python job.py",
+		EntrypointPath:    "job.py",
+		EntrypointSHA256:  "deadbeef",
+		CWD:               "/work",
+		Destructive:       true,
+	}
+	if err := SaveAutoGrant(grant); err != nil {
+		t.Fatalf("SaveAutoGrant failed: %v", err)
+	}
+	// Identical grant is a no-op (dedup).
+	if err := SaveAutoGrant(grant); err != nil {
+		t.Fatalf("SaveAutoGrant (dedup) failed: %v", err)
+	}
+	// Same source hash but different path/cwd is a distinct exact grant now.
+	sameSourceDifferentPath := grant
+	sameSourceDifferentPath.EntrypointPath = "nested/job.py"
+	sameSourceDifferentPath.CWD = "/other"
+	if err := SaveAutoGrant(sameSourceDifferentPath); err != nil {
+		t.Fatalf("SaveAutoGrant (same source, different path) failed: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	auto := cfg.Ocode.Permissions.Auto
+	if auto == nil {
+		t.Fatal("auto config missing")
+	}
+	if auto.MinConfidence != 0.9 {
+		t.Fatalf("min_confidence not round-tripped: got %v", auto.MinConfidence)
+	}
+	if auto.Model != "opencode/deepseek-v4-flash-free" {
+		t.Fatalf("model erased by grant write: got %q", auto.Model)
+	}
+	if len(auto.Grants) != 2 {
+		t.Fatalf("expected 2 grants after dedup, got %d", len(auto.Grants))
+	}
+	g := auto.Grants[0]
+	if g.Kind != "interpreter_exact" || g.Language != "python" || g.SourceMode != "script_file" ||
+		g.NormalizedCommand != "python job.py" || g.EntrypointSHA256 != "deadbeef" || !g.Destructive || g.CWD != "/work" {
+		t.Fatalf("grant fields not round-tripped: %+v", g)
+	}
+}
+
 func TestSaveEditorMode(t *testing.T) {
 	chdirTempForConfigTest(t)
 

@@ -44,10 +44,8 @@ func TestFilesListShowsHumanizedMetadata(t *testing.T) {
 	}}
 
 	view := stripANSI(m.View(220, 30, ApplyThemeColors("tokyonight"), false, false))
-	for _, want := range []string{"1.5 KB", "2h"} {
-		if !strings.Contains(view, want) {
-			t.Fatalf("expected tree view to contain %q, got:\n%s", want, view)
-		}
+	if !strings.Contains(view, "1.5 KB") {
+		t.Fatalf("expected tree view to contain %q, got:\n%s", "1.5 KB", view)
 	}
 }
 

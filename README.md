@@ -239,6 +239,7 @@ This file contains ocode-exclusive runtime state and configuration. It is **crea
 - `permissions` — Permission modes, tool rules, bash prefixes
 - `editor` / `editor_mode` — External editor and open mode
 - `auto_permission_model` — Model for automated permission decisions
+- `commit_msg_model` — Model for AI-generated commit messages in the Git tab (default: uses small model fallback)
 
 Permissions live in `ocodeconfig.json` because they are ocode-only runtime policy:
 
@@ -282,6 +283,8 @@ For `permissions.bash.prefix_modes`, supported values are:
 - `never_auto`: disable auto-allow for that prefix.
 
 `permissions.bash.auto_allow_prefixes` extends the built-in safe prefix set. Added prefixes still require all detected path arguments to resolve inside the current project root.
+
+The built-in safe prefix set is OS-aware: Unix gets the usual `awk`/`sed`/`grep`/`ls` family, while Windows adds `cmd.exe`-compatible commands like `dir`, `type`, `findstr`, `more`, `tree`, `where`, `cls`, `md`, and `mkdir`. Temp-directory auto-allow also follows the host OS (`/tmp` and `/var/tmp` on Unix, `os.TempDir()` on Windows).
 
 - `normal`: follow tool and bash-prefix rules. Project-confined file writes/edits/patches/formats are allowed by default; delete, shell, network, and delegation tools still ask.
 - `yolo`: allow permission-gated tools without prompting, while still respecting agent mode restrictions and hard safety blocks.
@@ -373,6 +376,14 @@ ocode adds first-class permission modes (`normal`, `yolo`, `locked`) with per-to
 - **Background process management** with a 256KB circular output buffer and `wait` tool.
 - **Sidebar telemetry** for context window usage, cached via keystroke-debounced recompute.
 - **Extended thinking toggle** (`Ctrl+T` → off/low/med/high) on supporting Anthropic models.
+
+### Git tab features
+
+- **AI commit message generation** — Press `Ctrl+G` in the commit input to auto-generate a commit message from staged changes. Uses the small model by default (or `commit_msg_model` from config).
+- **Stage/unstage/discard** — `Ctrl+S` stage, `Ctrl+U` unstage, `Ctrl+D` discard changes.
+- **Push/pull/fetch** — `Ctrl+O` push, `Ctrl+P` pull, `Ctrl+G` (in changes section) fetch.
+- **Branch management** — Create, delete, checkout branches from the Branches section.
+- **Stash operations** — Stash and apply stashes from the Stash section.
 
 ### Compaction
 

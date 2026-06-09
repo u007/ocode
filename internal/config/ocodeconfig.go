@@ -82,14 +82,17 @@ type PermissionConfig struct {
 // cannot escalate the permission mode, and cannot widen past the static
 // guardrails (hard-blocks remain deterministic and final).
 type AutoPermissionConfig struct {
-	Enabled                  bool        `json:"enabled,omitempty"`
-	Model                    string      `json:"model,omitempty"`
-	AllowDestructive         bool        `json:"allow_destructive,omitempty"`
-	Prompt                   string      `json:"prompt,omitempty"`
-	MaxContextBytes          int         `json:"max_context_bytes,omitempty"`
-	MaxContextSources        int         `json:"max_context_sources,omitempty"`
-	MaxContextLinesPerSource int         `json:"max_context_lines_per_source,omitempty"`
-	Grants                   []AutoGrant `json:"grants,omitempty"`
+	Enabled                  bool   `json:"enabled,omitempty"`
+	Model                    string `json:"model,omitempty"`
+	AllowDestructive         bool   `json:"allow_destructive,omitempty"`
+	Prompt                   string `json:"prompt,omitempty"`
+	MaxContextBytes          int    `json:"max_context_bytes,omitempty"`
+	MaxContextSources        int    `json:"max_context_sources,omitempty"`
+	MaxContextLinesPerSource int    `json:"max_context_lines_per_source,omitempty"`
+	// MinConfidence is the strict threshold an interpreter-execution effect
+	// summary must meet for Go to auto-approve it (see the 2026-06-02 follow-up).
+	MinConfidence float64     `json:"min_confidence,omitempty"`
+	Grants        []AutoGrant `json:"grants,omitempty"`
 }
 
 type autoPermissionConfigFile struct {
@@ -100,6 +103,7 @@ type autoPermissionConfigFile struct {
 	MaxContextBytes          *int        `json:"max_context_bytes"`
 	MaxContextSources        *int        `json:"max_context_sources"`
 	MaxContextLinesPerSource *int        `json:"max_context_lines_per_source"`
+	MinConfidence            *float64    `json:"min_confidence"`
 	Grants                   []AutoGrant `json:"grants"`
 }
 
@@ -121,6 +125,15 @@ type AutoGrant struct {
 	NormalizedCommand string          `json:"normalized_command,omitempty"`
 	Destructive       bool            `json:"destructive,omitempty"`
 	Domain            string          `json:"domain,omitempty"`
+	// Interpreter-execution grant fields (kind "interpreter_exact"). The durable
+	// grant is keyed by normalized command + resolved entrypoint path + cwd +
+	// source hash so path/flag/cwd changes do not silently reuse it.
+	Language             string `json:"language,omitempty"`
+	SourceMode           string `json:"source_mode,omitempty"`
+	EntrypointPath       string `json:"entrypoint_path,omitempty"`
+	EntrypointSHA256     string `json:"entrypoint_sha256,omitempty"`
+	EmbeddedSourceSHA256 string `json:"embedded_source_sha256,omitempty"`
+	CWD                  string `json:"cwd,omitempty"`
 }
 
 type BashPermissionConfig struct {
@@ -250,6 +263,7 @@ func defaultPermissionConfig() PermissionConfig {
 			MaxContextBytes:          4096,
 			MaxContextSources:        2,
 			MaxContextLinesPerSource: 80,
+			MinConfidence:            0.85,
 			Grants:                   nil,
 		},
 	}
@@ -446,6 +460,9 @@ func applyAutoPermissionConfig(dst *AutoPermissionConfig, src *autoPermissionCon
 	}
 	if src.MaxContextLinesPerSource != nil {
 		dst.MaxContextLinesPerSource = *src.MaxContextLinesPerSource
+	}
+	if src.MinConfidence != nil {
+		dst.MinConfidence = *src.MinConfidence
 	}
 	if src.Grants != nil {
 		// Replace (not append) — Grants is the persisted auto-grant list as
@@ -652,6 +669,40 @@ func SaveExtraAllowedPath(path string) error {
 		}
 	}
 	cfg.ExtraAllowedPaths = append(cfg.ExtraAllowedPaths, cleaned)
+	return SaveOcodeConfig(cfg)
+}
+
+// autoGrantKey returns the identity used to de-duplicate auto-grants. Interpreter
+// grants are keyed by the same exact source identity used by MatchInterpreterGrant:
+// kind, language, source mode, command identity, path identity, and the relevant
+// source hash.
+func autoGrantKey(g AutoGrant) string {
+	return strings.Join([]string{
+		g.Kind, g.Language, g.SourceMode,
+		g.NormalizedCommand, g.EntrypointPath,
+		g.EntrypointSHA256, g.EmbeddedSourceSHA256,
+		g.CWD,
+	}, "\x00")
+}
+
+// SaveAutoGrant appends one narrow auto-grant to permissions.auto.grants using
+// load-modify-write (no-op if an identical grant already exists), avoiding a
+// wholesale config write that would drop concurrent changes to other fields.
+func SaveAutoGrant(grant AutoGrant) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if cfg.Permissions.Auto == nil {
+		cfg.Permissions.Auto = &AutoPermissionConfig{}
+	}
+	key := autoGrantKey(grant)
+	for _, existing := range cfg.Permissions.Auto.Grants {
+		if autoGrantKey(existing) == key {
+			return nil
+		}
+	}
+	cfg.Permissions.Auto.Grants = append(cfg.Permissions.Auto.Grants, grant)
 	return SaveOcodeConfig(cfg)
 }
 

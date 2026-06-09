@@ -692,7 +692,6 @@ type model struct {
 	streamOutputChars        int       // live output (non-thinking) character count
 	tokenBlinkUntil          time.Time // when the token-count blink effect expires (2s after last token)
 	streamWasInterrupted     bool
-	transcriptContent        string
 	transcriptLines          []string
 	rawTranscriptLines       []string
 	msgRenderCache           map[int]msgRenderCacheEntry // per-message rendered-block cache keyed by message index; avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta
@@ -739,6 +738,7 @@ type model struct {
 	agentStripOffset         int  // first visible run index in the agent strip
 	agentStripSelected       int  // selected run index in the agent strip
 	agentStripFocused        bool // whether keyboard nav is routed to the agent strip
+	permissionGrantCh        chan permissionGrantRequest
 	subAgentPermCh           chan subAgentPermRequest
 	subAgentPermMu           *sync.Mutex                   // serialises concurrent sub-agent permission asks
 	pendingSubAgentResp      chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
@@ -823,6 +823,13 @@ const autoRefreshInterval = 10 * time.Second
 type subAgentPermRequest struct {
 	req    agent.PermissionRequest
 	respCh chan agent.PermissionResponse
+}
+
+// permissionGrantRequest carries a durable auto-grant from the agent layer to
+// the TUI's event loop so persistence happens on the UI-owned path.
+type permissionGrantRequest struct {
+	grant  config.AutoGrant
+	respCh chan error
 }
 
 var thinkingBudgetLevels = []int{0, 1024, 8000, 16000}
@@ -1400,6 +1407,7 @@ func newModel(opts ...RunOptions) model {
 		usageCh:              make(chan usageEvent, 16),
 		streamingThinkingIdx: -1,
 		questionInput:        questionInput,
+		permissionGrantCh:    make(chan permissionGrantRequest),
 		subAgentPermCh:       make(chan subAgentPermRequest),
 		subAgentPermMu:       &sync.Mutex{},
 		cleanupState:         newModelCleanupState(),
@@ -1516,7 +1524,13 @@ func newModel(opts ...RunOptions) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitTitleEvent(m.titleCh), listenSubAgentPerm(m.subAgentPermCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitTitleEvent(m.titleCh)}
+	if m.permissionGrantCh != nil {
+		cmds = append(cmds, listenPermissionGrant(m.permissionGrantCh))
+	}
+	if m.subAgentPermCh != nil {
+		cmds = append(cmds, listenSubAgentPerm(m.subAgentPermCh))
+	}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
 		cmds = append(cmds, listenRetryStatus(m.agent))
@@ -2503,6 +2517,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, listenLSPEvents(m.lspEventCh)
 		}
+		if msg.event.Phase == "failed" {
+			// Server failed to start — clear the indexing indicator and
+			// log guidance so the user knows what to check.
+			delete(m.lspServerStartTimes, msg.event.Cmd)
+			m.lspStateSeq++
+			detail := msg.event.Detail
+			if detail == "" {
+				detail = "unknown error"
+			}
+			hint := lspFailureHint(msg.event.Cmd)
+			debuglog.Log.Append(debuglog.Entry{
+				Kind:    debuglog.KindLSP,
+				Message: fmt.Sprintf("%s failed to start: %s\n  → %s", msg.event.Cmd, detail, hint),
+			})
+			return m, listenLSPEvents(m.lspEventCh)
+		}
 		// Phase == "ready": initialize handshake complete.
 		m.lspServerStartTimes[msg.event.Cmd] = time.Now()
 		m.lspStateSeq++
@@ -2914,7 +2944,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.processFileReferences(text)
 		}
 		if cmd, drained := m.drainQueuedCommands(); drained {
-			return m, cmd
+			if cmd != nil {
+				return m, cmd
+			}
+			if resume && m.agent != nil {
+				return m, m.askAgent()
+			}
+			return m, nil
 		}
 		if resume && m.agent != nil {
 			return m, m.askAgent()
@@ -2969,6 +3005,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + permissionRequestSummary(req)})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
+	case permissionGrantMsg:
+		req := msg.grant
+		err := m.persistAutoGrant(req)
+		if msg.respCh != nil {
+			msg.respCh <- err
+		}
+		return m, listenPermissionGrant(m.permissionGrantCh)
 	case editorPickedMsg:
 		// Persisted to disk already by the picker's saveEditor; mirror it into the
 		// in-memory config so refreshEditorOpener rebuilds both tabs' openers with
@@ -3072,12 +3115,21 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			m.pickerSessionTotal = len(m.pickerSessionRefs)
-			m.pickerSessionMore = len(m.pickerSessionRefs) > m.pickerSessionPage*sessionPickerPageSize
+			// Decrement total (not overwrite with in-memory count which may be partial)
+			if m.pickerSessionTotal > 0 {
+				m.pickerSessionTotal--
+			}
+			m.pickerSessionMore = len(m.pickerSessionRefs) < m.pickerSessionTotal
 			if m.pickerIndex >= len(m.pickerSessionRefs) && m.pickerIndex > 0 {
 				m.pickerIndex = len(m.pickerSessionRefs) - 1
 			}
 			m.rebuildSessionPickerItems()
+			// If the page is now short and more sessions exist on disk, load the next batch
+			if m.pickerSessionMore && len(m.pickerItems) < sessionPickerPageSize {
+				if cmd := m.loadMoreSessions(); cmd != nil {
+					return true, m, cmd
+				}
+			}
 			// Only append "Deleted session" message when we aren't starting fresh
 			// (handleNewCmd resets messages and adds its own "Started new session.").
 			if m.sessionDeleteConfirmID != m.sessionID {
@@ -4427,7 +4479,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 	}
-	if pressed && m.isClickInInputArea(mouse) {
+	if pressed && !m.showPermDialog && m.isClickInInputArea(mouse) {
 		topY := m.inputAreaTopY()
 		relRow := mouse.Y - topY - 1 + m.input.ScrollYOffset() // -1 for top border
 		if relRow < 0 {
@@ -4929,11 +4981,13 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	args := parts[1:]
 
 	// Queue non-exit commands when the agent is busy so they run after the stream ends.
-	// Instant commands are local UI / config toggles that never trigger agent
-	// streaming, so they can run immediately even while busy.
+	// Instant commands are local UI / config / auth actions that never need to
+	// wait for the current stream or compaction turn, so they can run immediately
+	// even while busy.
 	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
 		cmd == "/help" || cmd == "/thinking" || cmd == "/details" ||
+		cmd == "/login" ||
 		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
 		cmd == "/yolo" || cmd == "/small-model" || cmd == "/editor" ||
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
@@ -6496,6 +6550,9 @@ func (m *model) runPermissionModelTests() tea.Cmd {
 		pm = m.agent.Permissions()
 	} else {
 		pm = agent.NewPermissionManager()
+		if m.workDir != "" {
+			pm.SetWorkDir(m.workDir)
+		}
 	}
 
 	// Define test cases: category, name, tool, JSON args, expected decision.
@@ -6540,9 +6597,9 @@ func (m *model) runPermissionModelTests() tea.Cmd {
 
 		// ── Write/Edit out of workdir (default: ask) ──────────────────────
 		{"out-of-scope", "write /etc/passwd", "write", `{"path":"/etc/passwd","content":"root:x:0:0"}`, agent.PermissionAsk},
-		{"out-of-scope", "write /tmp file", "write", `{"path":"/tmp/test.txt","content":"data"}`, agent.PermissionAsk},
+		{"out-of-scope", "write /tmp file", "write", `{"path":"/tmp/test.txt","content":"data"}`, agent.PermissionAllow},
 		{"out-of-scope", "edit /etc/hosts", "edit", `{"path":"/etc/hosts","search":"old","replace":"new"}`, agent.PermissionAsk},
-		{"out-of-scope", "delete /tmp file", "delete", `{"path":"/tmp/test.txt"}`, agent.PermissionAsk},
+		{"out-of-scope", "delete /tmp file", "delete", `{"path":"/tmp/test.txt"}`, agent.PermissionAllow},
 		{"out-of-scope", "read /etc/shadow", "read", `{"path":"/etc/shadow"}`, agent.PermissionAsk},
 
 		// ── Delete in workdir (default: ask) ──────────────────────────────
@@ -6826,6 +6883,112 @@ Respond with ONLY: ALLOW: <reason> or DENY: <reason>`, tc.tool, tc.args, tc.rule
 			}
 
 			b.WriteString(fmt.Sprintf("\nLLM Results: %d passed, %d failed out of %d tests\n", mlmPass, mlmFail, len(llmTests)))
+		}
+	}
+
+	// ── LLM Tool Call Test ─────────────────────────────────────────
+	b.WriteString("\n" + strings.Repeat("\u2550", 60) + "\n")
+	b.WriteString("LLM Tool Call Test (read file)\n")
+	b.WriteString(strings.Repeat("-", 60) + "\n")
+
+	if m.config == nil {
+		b.WriteString("Config not available — cannot test LLM tool calls.\n")
+	} else {
+		client := agent.NewClient(m.config, modelName)
+		if client == nil {
+			b.WriteString(fmt.Sprintf("FAILED: Could not create client for model %s\n", modelName))
+		} else {
+			b.WriteString(fmt.Sprintf("Model: %s\n\n", client.GetModel()))
+
+			// Find a real project file to read (README, go.mod, etc.)
+			candidates := []string{"README.md", "readme.md", "README.txt", "go.mod", "go.sum", "package.json"}
+			var testFile string
+			for _, name := range candidates {
+				if _, err := os.Stat(name); err == nil {
+					testFile = name
+					break
+				}
+			}
+			if testFile == "" {
+				// Fallback: find any .go file in current directory
+				entries, err := os.ReadDir(".")
+				if err == nil {
+					for _, e := range entries {
+						if !e.IsDir() && filepath.Ext(e.Name()) == ".go" {
+							testFile = e.Name()
+							break
+						}
+					}
+				}
+			}
+			if testFile == "" {
+				b.WriteString("SKIP: No suitable project file found to read\n")
+			} else {
+				// Get the read tool definition
+				readTool := tool.ReadTool{}
+				tools := []map[string]interface{}{
+					readTool.Definition(),
+				}
+
+				// Send a prompt asking the model to read the file
+				prompt := fmt.Sprintf(`Please read the file at %s using the read tool.`, testFile)
+				messages := []agent.Message{
+					{Role: "user", Content: prompt},
+				}
+
+				b.WriteString(fmt.Sprintf("Test file: %s\n", testFile))
+				b.WriteString("Sending tool call request...\n\n")
+				resp, err := client.Chat(messages, tools)
+				if err != nil {
+					b.WriteString(fmt.Sprintf("FAILED: %v\n", err))
+				} else if resp == nil {
+					b.WriteString("FAILED: Empty response\n")
+				} else {
+					b.WriteString("Response received.\n\n")
+
+					// Check if response contains tool calls
+					if len(resp.ToolCalls) == 0 {
+						b.WriteString("FAIL: No tool calls in response\n")
+						content := resp.Content
+						if len(content) > 200 {
+							content = content[:200] + "..."
+						}
+						b.WriteString(fmt.Sprintf("Model responded with text instead of tool call:\n%s\n", content))
+					} else {
+						// Find the read tool call
+						var readCall *agent.ToolCall
+						for i := range resp.ToolCalls {
+							if resp.ToolCalls[i].Function.Name == "read" {
+								readCall = &resp.ToolCalls[i]
+								break
+							}
+						}
+
+						if readCall == nil {
+							// Show what tool calls were made
+							names := make([]string, len(resp.ToolCalls))
+							for i, tc := range resp.ToolCalls {
+								names[i] = tc.Function.Name
+							}
+							b.WriteString(fmt.Sprintf("FAIL: Expected 'read' tool call, got: %v\n", names))
+						} else {
+							// Parse and validate the arguments
+							var args struct {
+								Path string `json:"path"`
+							}
+							if err := json.Unmarshal([]byte(readCall.Function.Arguments), &args); err != nil {
+								b.WriteString(fmt.Sprintf("FAIL: Could not parse tool arguments: %v\n", err))
+							} else if args.Path != testFile {
+								b.WriteString(fmt.Sprintf("FAIL: Wrong path — expected %q, got %q\n", testFile, args.Path))
+							} else {
+								b.WriteString("PASS: Model produced valid read tool call\n")
+								b.WriteString(fmt.Sprintf("  Tool: read\n"))
+								b.WriteString(fmt.Sprintf("  Path: %s\n", args.Path))
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -7525,8 +7688,12 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 		lines = append(lines, "Path scope: target is outside the workspace")
 		lines = append(lines, fmt.Sprintf("Path root: %s", root))
 		lines = append(lines, "[y] once = temporary path access for this one call")
-		lines = append(lines, "[a] always this rule = also persists this path root")
-		lines = append(lines, "[t] always this tool = remembers tool permission; path root is not persisted")
+		if permAlwaysRuleAvailable(req) {
+			lines = append(lines, "[a] always this rule = also persists this path root")
+		}
+		if permAlwaysToolAvailable(req) {
+			lines = append(lines, "[t] always this tool = remembers tool permission; path root is not persisted")
+		}
 	}
 	return strings.Join(lines, "\n")
 }
@@ -7535,7 +7702,13 @@ func renderPermissionPrompt(req agent.PermissionRequest) string {
 	var b strings.Builder
 	b.WriteString("Allow this action?\n\n")
 	b.WriteString(renderPermissionRequestBody(req))
-	b.WriteString("\n\n[y] once  [n] deny  [a] always this rule  [t] always this tool")
+	b.WriteString("\n\n[y] once  [n] deny")
+	if permAlwaysRuleAvailable(req) {
+		b.WriteString("  [a] always this rule")
+	}
+	if permAlwaysToolAvailable(req) {
+		b.WriteString("  [t] always this tool")
+	}
 	return b.String()
 }
 
@@ -7564,6 +7737,16 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 
 	switch choice {
 	case "a", "t":
+		// Ignore choices that aren't offered for this request (e.g. [t] on bash,
+		// [a] on a git subcommand) so a stray keypress can't persist a rule the
+		// dialog deliberately withholds.
+		req := m.pendingPermission
+		if choice == "a" && !permAlwaysRuleAvailable(req) {
+			return nil, false
+		}
+		if choice == "t" && !permAlwaysToolAvailable(req) {
+			return nil, false
+		}
 		// Defer: show what will be persisted and wait for confirmation.
 		m.permConfirm = choice
 		m.updatePermButtonRegions()
@@ -7744,6 +7927,13 @@ func (m *model) persistPermissions() {
 	if err := config.SaveOcodePermissions(permissions); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save permissions: %v", err)})
 	}
+}
+
+func (m *model) persistAutoGrant(grant config.AutoGrant) error {
+	if err := config.SaveAutoGrant(grant); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
@@ -8283,11 +8473,42 @@ var permConfirmBtnDefs = []permBtnDef{
 }
 
 // permDialogBtnDefs returns the button set for the current dialog step.
+// permAlwaysRuleAvailable reports whether the [A] "always allow rule" choice is
+// offered for req. Git mutating subcommands are excluded: a two-word `git <sub>`
+// always-allow would blanket-approve every future invocation of that subcommand
+// (e.g. all `git push ...`), so they must be approved each time. Read-only git is
+// auto-allowed and never reaches this dialog; harmful git already cannot persist.
+func permAlwaysRuleAvailable(req agent.PermissionRequest) bool {
+	if req.ToolName == "bash" && req.Scope == agent.PermissionScopeBashPrefix &&
+		strings.HasPrefix(req.Prefix, "git ") {
+		return false
+	}
+	return true
+}
+
+// permAlwaysToolAvailable reports whether the [T] "always allow tool" choice is
+// offered for req. The bash tool is excluded: a tool-level allow blanket-approves
+// every future shell command from one prompt, which is too broad to surface here.
+func permAlwaysToolAvailable(req agent.PermissionRequest) bool {
+	return req.ToolName != "bash"
+}
+
 func (m *model) permDialogBtnDefs() []permBtnDef {
 	if m.permConfirm != "" {
 		return permConfirmBtnDefs
 	}
-	return permBtnDefs
+	req := m.pendingPermission
+	defs := make([]permBtnDef, 0, len(permBtnDefs))
+	for _, b := range permBtnDefs {
+		if b.choice == "a" && !permAlwaysRuleAvailable(req) {
+			continue
+		}
+		if b.choice == "t" && !permAlwaysToolAvailable(req) {
+			continue
+		}
+		defs = append(defs, b)
+	}
+	return defs
 }
 
 // renderPermConfirmBody describes exactly what selecting "always allow" will
@@ -8579,6 +8800,15 @@ type msgRenderCacheEntry struct {
 	key   msgRenderKey
 	block string
 	kind  int
+	// Derived per-message line slices, cached alongside the block so a streamed
+	// delta re-wraps/re-strips only the one message that changed instead of the
+	// whole transcript. wrapped is wrapView(block) split on "\n"; stripped is the
+	// ANSI-stripped form of each wrapped line (the selection/click coordinate
+	// space). nl is the unwrapped newline count of block — used to advance the
+	// region line counter without re-scanning bytes.
+	wrapped  []string
+	stripped []string
+	nl       int
 }
 
 // renderMessageBlock renders a single transcript message into its styled
@@ -8587,7 +8817,7 @@ type msgRenderCacheEntry struct {
 // pays for the expensive lipgloss/markdown render. The returned block is
 // byte-identical to the inline switch it replaced, so the caller's heightNow /
 // region bookkeeping is unaffected.
-func (m *model) renderMessageBlock(i int, msg message) (string, int) {
+func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]string) msgRenderCacheEntry {
 	width := m.viewport.Width()
 
 	// Determine kind + key inputs without rendering.
@@ -8598,7 +8828,9 @@ func (m *model) renderMessageBlock(i int, msg message) (string, int) {
 	switch msg.role {
 	case roleThinking:
 		if strings.TrimSpace(msg.text) == "" {
-			return "", blockKindPlain // empty thinking contributes nothing
+			// Empty thinking contributes nothing; cache an empty block so the
+			// derived-line assembly treats it as a single empty line.
+			return msgRenderCacheEntry{kind: blockKindPlain, wrapped: []string{""}, stripped: []string{""}}
 		}
 		kind = blockKindThinking
 		expanded = m.expandedThinking[i]
@@ -8610,7 +8842,7 @@ func (m *model) renderMessageBlock(i int, msg message) (string, int) {
 				kind = blockKindTool
 				content = msg.raw.Content
 				expanded = m.expandedToolOutputs[i]
-				toolName = m.lookupToolName(msg.raw.ToolID)
+				toolName = toolNames[msg.raw.ToolID]
 				if toolName == "" {
 					toolName = "tool"
 				}
@@ -8633,7 +8865,7 @@ func (m *model) renderMessageBlock(i int, msg message) (string, int) {
 		themeGen:  m.themeGen,
 	}
 	if hit, ok := m.msgRenderCache[i]; ok && hit.key == key {
-		return hit.block, hit.kind
+		return hit
 	}
 
 	// Cache miss — render.
@@ -8671,14 +8903,43 @@ func (m *model) renderMessageBlock(i int, msg message) (string, int) {
 		block = m.renderAssistantText(strings.TrimRight(msg.text, "\n"))
 	}
 
-	m.msgRenderCache[i] = msgRenderCacheEntry{key: key, block: block, kind: kind}
-	return block, kind
+	// Pre-compute the wrapped + ANSI-stripped line slices once, on miss, so the
+	// whole-transcript wrapView/stripANSI no longer re-runs over unchanged
+	// messages on every streamed delta. Joining per-message wrapView output with
+	// the inter-message "\n\n" separator is byte-identical to wrapView over the
+	// full concatenation (wrapView is line-wise; escapes never span "\n").
+	wrapped := strings.Split(wrapView(block, width), "\n")
+	stripped := make([]string, len(wrapped))
+	for j, ln := range wrapped {
+		stripped[j] = stripANSI(ln)
+	}
+	entry := msgRenderCacheEntry{
+		key:      key,
+		block:    block,
+		kind:     kind,
+		wrapped:  wrapped,
+		stripped: stripped,
+		nl:       strings.Count(block, "\n"),
+	}
+	m.msgRenderCache[i] = entry
+	return entry
 }
 
 func (m *model) renderTranscript() {
 	if len(m.messages) == 0 {
 		return
 	}
+	// Perf probe: a slow render (>8ms) during streaming starves the event loop
+	// and shows up as input/scroll lag. Logging only above the threshold keeps
+	// the debug panel quiet at the normal ~20 renders/sec. log.Printf lands in
+	// the debug panel (never the alt-screen). Read it to learn the real session
+	// size when lag is reported: [perf] renderTranscript=Xms lines=N msgs=M.
+	renderStart := time.Now()
+	defer func() {
+		if d := time.Since(renderStart); d > 8*time.Millisecond {
+			log.Printf("[perf] renderTranscript=%v lines=%d msgs=%d", d.Round(time.Millisecond), len(m.rawTranscriptLines), len(m.messages))
+		}
+	}()
 	if m.msgRenderCache == nil {
 		m.msgRenderCache = make(map[int]msgRenderCacheEntry)
 	}
@@ -8690,18 +8951,6 @@ func (m *model) renderTranscript() {
 				delete(m.msgRenderCache, idx)
 			}
 		}
-	}
-	var b strings.Builder
-	// Running line count equivalent to lipgloss.Height(b.String()) but scanning
-	// only the bytes appended since the last call — avoids re-counting the whole
-	// (growing) transcript once per region on every streamed delta.
-	measuredLines := 1
-	measuredLen := 0
-	heightNow := func() int {
-		s := b.String()
-		measuredLines += strings.Count(s[measuredLen:], "\n")
-		measuredLen = len(s)
-		return measuredLines
 	}
 	m.toolOutputRegions = nil
 	m.thinkingRegions = nil
@@ -8716,51 +8965,61 @@ func (m *model) renderTranscript() {
 		m.expandedCompaction = make(map[int]bool)
 	}
 
+	// Resolve every tool_call name once (O(N)) instead of scanning the whole
+	// message list per tool result (the old O(N²) lookupToolName per render).
+	var toolNames map[string]string
+	for _, msg := range m.messages {
+		if msg.raw == nil || len(msg.raw.ToolCalls) == 0 {
+			continue
+		}
+		if toolNames == nil {
+			toolNames = make(map[string]string)
+		}
+		for _, tc := range msg.raw.ToolCalls {
+			toolNames[tc.ID] = tc.Function.Name
+		}
+	}
+
+	// Region line numbers are tracked in UNWRAPPED line coordinates via nlAcc —
+	// byte-identical to the old heightNow() running newline count — while the
+	// transcript line slices are assembled from each message's cached WRAPPED
+	// lines. This preserves the existing (unwrapped-region / wrapped-content)
+	// coordinate split exactly; only the redundant whole-transcript re-wrap and
+	// re-strip of unchanged messages is gone.
+	// Fresh slices: SetContentLines retains the slice we hand it, so the backing
+	// array must not be reused/truncated on the next render.
+	m.transcriptLines = make([]string, 0, len(m.messages)*2+10)
+	m.rawTranscriptLines = make([]string, 0, len(m.messages)*2+10)
+	nlAcc := 0 // cumulative unwrapped newlines written so far (heightNow == 1+nlAcc)
 	for i, msg := range m.messages {
 		if i > 0 {
-			b.WriteString("\n\n")
+			nlAcc += 2 // the "\n\n" inter-message separator
+			// "block\n\nblock" splits to one empty line between the two blocks.
+			m.transcriptLines = append(m.transcriptLines, "")
+			m.rawTranscriptLines = append(m.rawTranscriptLines, "")
 		}
-		block, kind := m.renderMessageBlock(i, msg)
-		switch kind {
+		entry := m.renderMessageBlock(i, msg, toolNames)
+		startLine := 1 + nlAcc
+		nlAcc += entry.nl
+		endLine := nlAcc
+		m.transcriptLines = append(m.transcriptLines, entry.wrapped...)
+		m.rawTranscriptLines = append(m.rawTranscriptLines, entry.stripped...)
+		switch entry.kind {
 		case blockKindThinking:
-			startLine := heightNow()
-			b.WriteString(block)
-			endLine := heightNow() - 1
-			m.thinkingRegions = append(m.thinkingRegions, toolOutputRegion{
-				messageIndex: i,
-				startLine:    startLine,
-				endLine:      endLine,
-			})
+			m.thinkingRegions = append(m.thinkingRegions, toolOutputRegion{messageIndex: i, startLine: startLine, endLine: endLine})
 		case blockKindTool:
-			startLine := heightNow()
-			b.WriteString(block)
-			endLine := heightNow() - 1
-			m.toolOutputRegions = append(m.toolOutputRegions, toolOutputRegion{
-				messageIndex: i,
-				startLine:    startLine,
-				endLine:      endLine,
-			})
+			m.toolOutputRegions = append(m.toolOutputRegions, toolOutputRegion{messageIndex: i, startLine: startLine, endLine: endLine})
 		case blockKindCompaction:
-			startLine := heightNow()
-			b.WriteString(block)
-			endLine := heightNow() - 1
-			m.compactionRegions = append(m.compactionRegions, toolOutputRegion{
-				messageIndex: i,
-				startLine:    startLine,
-				endLine:      endLine,
-			})
-		default:
-			b.WriteString(block)
+			m.compactionRegions = append(m.compactionRegions, toolOutputRegion{messageIndex: i, startLine: startLine, endLine: endLine})
 		}
 	}
-	// Add trailing padding so agent/permission boxes don't block the view.
-	for i := 0; i < 10; i++ {
-		b.WriteString("\n")
+	// Trailing padding so agent/permission boxes don't block the view: the old
+	// code appended 10 "\n" to the builder, which split into 10 empty lines.
+	for k := 0; k < 10; k++ {
+		m.transcriptLines = append(m.transcriptLines, "")
+		m.rawTranscriptLines = append(m.rawTranscriptLines, "")
 	}
-	m.transcriptContent = wrapView(b.String(), m.viewport.Width())
-	m.transcriptLines = strings.Split(m.transcriptContent, "\n")
-	m.rawTranscriptLines = strings.Split(stripANSI(m.transcriptContent), "\n")
-	m.viewport.SetContent(m.transcriptContent)
+	m.viewport.SetContentLines(m.transcriptLines)
 	m.sel = selectionState{}
 	m.updatePermButtonRegions()
 }
@@ -9023,6 +9282,25 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	grantCh := m.permissionGrantCh
+	done := m.agent.Done()
+	m.agent.OnPermissionGrant = func(grant config.AutoGrant) error {
+		if grantCh == nil {
+			return m.persistAutoGrant(grant)
+		}
+		respCh := make(chan error, 1)
+		select {
+		case grantCh <- permissionGrantRequest{grant: grant, respCh: respCh}:
+		case <-done:
+			return context.Canceled
+		}
+		select {
+		case err := <-respCh:
+			return err
+		case <-done:
+			return context.Canceled
+		}
+	}
 	// Sub-agent permission asks: the callback runs inside a sub-agent goroutine.
 	// It hands the request to the TUI Update loop and blocks for the answer. The
 	// mutex serialises concurrent asks (multiple sub-agents may ask at once) so
@@ -9034,7 +9312,6 @@ func (m *model) wireCompactCallbacks() {
 	}
 	permCh := m.subAgentPermCh
 	permMu := m.subAgentPermMu
-	done := m.agent.Done()
 	m.agent.SetSubAgentPermAsker(func(req agent.PermissionRequest) agent.PermissionResponse {
 		permMu.Lock()
 		defer permMu.Unlock()
@@ -9058,12 +9335,29 @@ func (m *model) wireCompactCallbacks() {
 // listenSubAgentPerm blocks on the sub-agent permission channel and re-arms the
 // command after each request, so the TUI keeps receiving sub-agent asks.
 func listenSubAgentPerm(ch chan subAgentPermRequest) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		return subAgentPermAskMsg(<-ch)
 	}
 }
 
+// listenPermissionGrant blocks on the auto-grant channel and re-arms the
+// command after each request, so durable grant persistence is queued through
+// the TUI event loop instead of happening inside the agent goroutine.
+func listenPermissionGrant(ch chan permissionGrantRequest) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		return permissionGrantMsg(<-ch)
+	}
+}
+
 type subAgentPermAskMsg subAgentPermRequest
+
+type permissionGrantMsg permissionGrantRequest
 
 func waitCompactEvent(startCh chan struct{}, doneCh chan agent.CompactResult) tea.Cmd {
 	return func() tea.Msg {
@@ -9392,6 +9686,24 @@ func lspIndexingTimer(cmd string) tea.Cmd {
 	return func() tea.Msg {
 		time.Sleep(3 * time.Second)
 		return lspIndexingDoneMsg{cmd: cmd}
+	}
+}
+
+// lspFailureHint returns a short, actionable hint for common LSP server
+// startup failures.  The message is shown in the log tab so users know
+// what to check.
+func lspFailureHint(cmd string) string {
+	switch cmd {
+	case "pyright-langserver":
+		return "install with: npm i -g pyright  •  or check pyrightconfig.json"
+	case "gopls":
+		return "install with: go install golang.org/x/tools/gopls@latest"
+	case "typescript-language-server":
+		return "install with: npm i -g typescript-language-server typescript"
+	case "rust-analyzer":
+		return "install with: rustup component add rust-analyzer"
+	default:
+		return "make sure the binary is on your PATH"
 	}
 }
 
@@ -9881,7 +10193,7 @@ func findAgentRunByPath(reg *agent.AgentRunRegistry, runPath string) (*agent.Age
 
 // modalOpen reports whether any modal overlay is currently shown.
 func (m model) modalOpen() bool {
-	return m.showPicker || m.showConnect || m.showPalette || m.showPermDialog || m.showRetryDialog || m.sessionDeleteConfirm || m.showQuestionDialog
+	return m.showPicker || m.showConnect || m.showPalette || m.showRetryDialog || m.sessionDeleteConfirm || m.showQuestionDialog
 }
 
 // renderDetailView renders the top-of-stack detail view.
@@ -10427,6 +10739,15 @@ func (m *model) renderStatus() string {
 
 	// Second line: session ID and hints
 	rightContent := fmt.Sprintf("Session: %s%s", m.sessionID, suffix)
+	if m.showPermDialog {
+		pending := permissionRuleLabel(m.pendingPermission)
+		if m.pendingPermission.Command != "" {
+			pending = fmt.Sprintf("permission pending: %s", pending)
+		} else {
+			pending = fmt.Sprintf("permission pending: %s", pending)
+		}
+		rightContent += " · " + pending + " · click Chat to answer"
+	}
 
 	line1 := m.styles.Status.Width(width).Render(ansi.Truncate(leftStatus, width, "..."))
 	line2 := m.styles.Hint.Render(ansi.Truncate(rightContent, width, "..."))
@@ -11812,7 +12133,7 @@ func (m model) agentStripTopY() int {
 
 func (m *model) applyOrClearSelectionHighlight() {
 	if !m.sel.active && !m.hoverLinkActive {
-		m.viewport.SetContent(m.transcriptContent)
+		m.viewport.SetContentLines(m.transcriptLines)
 		return
 	}
 	lines := m.transcriptLines
@@ -12291,7 +12612,10 @@ func (m *model) makeCommitMsgGenerator(cfg *config.Config) func(diff string) tea
 		return func() tea.Msg {
 			model := cfg.Ocode.CommitMsgModel
 			if model == "" {
-				model = "openai/gpt-5.4-mini"
+				model = agent.ResolveSmallModel(cfg)
+			}
+			if model == "" {
+				return gitCommitMsgMsg{err: fmt.Errorf("no LLM configured")}
 			}
 			client := agent.NewClient(cfg, model)
 			if client == nil {

@@ -858,3 +858,22 @@ func (t MultiFileEditTool) Execute(args json.RawMessage) (string, error) {
 func ExtraAllowedRoots() []string {
 	return getExtraAllowedRoots()
 }
+
+// CacheRoots returns the managed cache directories that confinedPath treats as
+// allowed beyond the workdir and extra roots: the tool-results cache and the
+// cloned-repo cache. Exposed so the permission scope model (AllowedRoots) and
+// tool confinement (confinedPath) agree on a single root set — bash reads of
+// truncated tool outputs must be auto-allowable just like the read tool's are.
+// Paths are symlink-normalized; unresolvable roots are skipped.
+func CacheRoots() []string {
+	var out []string
+	if root, ok := normalizeRootPath(toolResultCacheDir()); ok {
+		out = append(out, root)
+	}
+	if repoCache, err := repoCacheDir(); err == nil {
+		if root, ok := normalizeRootPath(repoCache); ok {
+			out = append(out, root)
+		}
+	}
+	return out
+}

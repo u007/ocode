@@ -258,14 +258,10 @@ func formatModTimeAt(t, now time.Time) string {
 }
 
 func formatFileNodeMeta(n fileNode) string {
-	parts := make([]string, 0, 2)
-	if !n.isDir {
-		parts = append(parts, formatBytes(n.size))
+	if n.isDir {
+		return ""
 	}
-	if mtime := formatModTime(n.modTime); mtime != "" {
-		parts = append(parts, mtime)
-	}
-	return strings.Join(parts, " · ")
+	return formatBytes(n.size)
 }
 
 func readPreviewChunk(path string, startOffset int64) (raw string, nextOffset int64, done bool, err error) {
@@ -1787,7 +1783,11 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	// Build raw lines first to determine max width for horizontal scrolling
 	rawLines := make([]string, 0, len(m.nodes))
 	styledLines := make([]string, 0, len(m.nodes))
-	treeContentWidth := treeW - 4
+	// The tree pane is rendered with Width(treeW-2); in lipgloss v2 that width is
+	// the full frame (border 2 + padding 2 are counted inside it), so the usable
+	// content area is treeW-2-4 = treeW-6. Truncating rows to anything wider makes
+	// them wrap onto a second line.
+	treeContentWidth := treeW - 6
 	if treeContentWidth < 1 {
 		treeContentWidth = 1
 	}
@@ -1863,12 +1863,12 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	}
 	treeContent := strings.Join(treeLines, "\n")
 	if hint := m.selectionHint(); hint != "" {
-		treeContent = styles.Hint.Render(hint) + "\n" + treeContent
+		treeContent = styles.Hint.Render(truncateToWidth(hint, treeContentWidth)) + "\n" + treeContent
 	}
 
 	// Show keybinding hints when tree panel is focused and in normal mode
 	if m.panel == filesPanelPicker && m.mode == filesModeNormal && len(m.selectedFiles) == 0 {
-		treeContent = styles.Hint.Render(m.treeHint()) + "\n" + treeContent
+		treeContent = styles.Hint.Render(truncateToWidth(m.treeHint(), treeContentWidth)) + "\n" + treeContent
 	}
 
 	focusBorder := func(focused bool) lipgloss.Style {
