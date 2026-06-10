@@ -64,6 +64,35 @@ func TestFileTools(t *testing.T) {
 	}
 }
 
+func TestWriteToolAllowsTempDirOutsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	targetRoot := t.TempDir()
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
+	want := "hello temp"
+	target := filepath.Join(targetRoot, "temp.txt")
+	args, _ := json.Marshal(map[string]string{
+		"path":    target,
+		"content": want,
+	})
+
+	if _, err := (WriteTool{}).Execute(args); err != nil {
+		t.Fatalf("expected temp-dir write to succeed, got %v", err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read temp file: %v", err)
+	}
+	if string(got) != want {
+		t.Fatalf("expected %q, got %q", want, string(got))
+	}
+}
+
 func TestConfinedPathAllowsConfiguredExtraRoot(t *testing.T) {
 	workspace := t.TempDir()
 	extra := t.TempDir()
@@ -321,5 +350,52 @@ func TestMultiFileEditToolAcrossFiles(t *testing.T) {
 	gotB, _ := os.ReadFile("b.txt")
 	if string(gotA) != "baz\n" || string(gotB) != "qux\nqux\n" {
 		t.Fatalf("unexpected contents: a=%q b=%q", string(gotA), string(gotB))
+	}
+}
+
+func TestExpandTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"~/foo", filepath.Join(home, "foo")},
+		{"~", home},
+		{"~/", home},
+		{"~/path/to/file.txt", filepath.Join(home, "path/to/file.txt")},
+		{"./relative", "./relative"},
+		{"/absolute/path", "/absolute/path"},
+		{"relative/path", "relative/path"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := expandTilde(tt.input)
+			if got != tt.want {
+				t.Errorf("expandTilde(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfinedPathExpandsTildeToToolResults(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine home directory")
+	}
+
+	// confinedPath should accept ~/... paths that resolve into allowed roots
+	// such as the tool-results cache directory.
+	p := filepath.Join("~", ".local", "state", "opencode", "tool-results")
+	got, err := confinedPath(p)
+	if err != nil {
+		t.Fatalf("confinedPath(%q) error: %v", p, err)
+	}
+	want := filepath.Join(home, ".local", "state", "opencode", "tool-results")
+	if got != want {
+		t.Errorf("confinedPath(%q) = %q, want %q", p, got, want)
 	}
 }

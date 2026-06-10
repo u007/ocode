@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/pathscope"
 	"github.com/u007/ocode/internal/snapshot"
 )
 
@@ -179,18 +180,43 @@ func toolResultCacheDir() string {
 	return filepath.Join(home, ".local", "state", "opencode", "tool-results")
 }
 
+// expandTilde replaces a leading ~ or ~user with the user's home directory.
+// If the input doesn't start with ~, it is returned unchanged.
+func expandTilde(p string) string {
+	if !strings.HasPrefix(p, "~") {
+		return p
+	}
+	// Exactly "~" or "~/" prefix.
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return p // can't resolve; return as-is
+		}
+		if p == "~" {
+			return home
+		}
+		return filepath.Join(home, p[2:])
+	}
+	// ~otheruser form – not supported, return as-is.
+	return p
+}
+
 // confinedPath resolves p relative to the process working directory and
-// verifies that the result is within the workspace, the tool-results cache,
-// or the managed repository cache. It returns the cleaned absolute path on
-// success, or an error if the path would escape all allowed roots.
+// verifies that the result is within the workspace, a configured extra root,
+// a well-known temp directory, the tool-results cache, or the managed
+// repository cache. It returns the cleaned absolute path on success, or an
+// error if the path would escape all allowed roots.
 func confinedPath(p string) (string, error) {
 	wd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("could not determine working directory: %w", err)
 	}
-	abs, err := filepath.Abs(p)
+	abs, err := filepath.Abs(expandTilde(p))
 	if err != nil {
 		return "", fmt.Errorf("invalid path %q: %w", p, err)
+	}
+	if pathscope.IsTempDir(abs) {
+		return abs, nil
 	}
 	resolved, err := filepath.EvalSymlinks(abs)
 	if err != nil {
@@ -214,7 +240,10 @@ func confinedPath(p string) (string, error) {
 			return resolved, nil
 		}
 	}
-	// Also allow reads from the tool-results state directory.
+	if pathscope.IsTempDir(resolved) {
+		return resolved, nil
+	}
+	// Also allow access to the tool-results state directory.
 	cacheDir := toolResultCacheDir()
 	if cacheResolved, ok := normalizeRootPath(cacheDir); ok && pathWithinRoot(resolved, cacheResolved) {
 		return resolved, nil

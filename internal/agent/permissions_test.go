@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -202,8 +203,8 @@ func TestPermissions_BashAutoAllowInRoot_Awk(t *testing.T) {
 		t.Fatalf("expected in-root awk command to auto-allow, got %s", dec.Level)
 	}
 
-	if pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)] != PermissionAllow {
-		t.Fatalf("expected persisted project-scoped awk rule")
+	if _, ok := pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)]; ok {
+		t.Fatalf("did not expect temp-dir awk rule to persist as project-scoped allow")
 	}
 }
 
@@ -264,11 +265,15 @@ func TestPermissions_WindowsTempRootsUseOSTempDir(t *testing.T) {
 	t.Setenv("TMPDIR", tmpRoot)
 
 	roots := tempRootsForGOOS("windows")
+	wantRoot, err := filepath.EvalSymlinks(filepath.Clean(os.TempDir()))
+	if err != nil {
+		wantRoot = filepath.Clean(os.TempDir())
+	}
 	if len(roots) != 1 {
 		t.Fatalf("expected exactly one windows temp root, got %v", roots)
 	}
-	if roots[0] != filepath.Clean(os.TempDir()) {
-		t.Fatalf("windows temp root = %q, want %q", roots[0], filepath.Clean(os.TempDir()))
+	if roots[0] != wantRoot {
+		t.Fatalf("windows temp root = %q, want %q", roots[0], wantRoot)
 	}
 	if !isTempDirUnderRoots(filepath.Join(tmpRoot, "child"), roots) {
 		t.Fatalf("expected child path under windows temp root to be allowed")
@@ -484,16 +489,17 @@ func TestPermissions_BashAutoAllow_NeverAutoModeAsks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve workdir: %v", err)
 	}
-	filePath := filepath.Join(workDir, "data.txt")
-	if err := os.WriteFile(filePath, []byte("hello\n"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
+
+	outsidePath := "/etc/hosts"
+	if runtime.GOOS == "windows" {
+		outsidePath = `C:\Windows\win.ini`
 	}
 
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
 	pm.bashPrefixModes["awk"] = bashPrefixModeNever
 
-	cmd := fmt.Sprintf(`{"command":"awk '{print $1}' %s"}`, filePath)
+	cmd := fmt.Sprintf(`{"command":"awk '{print $1}' %s"}`, outsidePath)
 	dec := pm.Decide("bash", json.RawMessage(cmd))
 	if dec.Level != PermissionAsk {
 		t.Fatalf("expected awk never_auto mode to ask, got %s", dec.Level)
@@ -573,7 +579,9 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 		}
 
 		// Temp dir redirection is now allowed (cross-platform)
-		cmd2 := `{"command":"echo hello > /tmp/out.txt"}`
+		tmpRoot := t.TempDir()
+		tempFile := filepath.ToSlash(filepath.Join(tmpRoot, "out.txt"))
+		cmd2 := fmt.Sprintf(`{"command":"echo hello > %s"}`, tempFile)
 		dec2 := pm.Decide("bash", json.RawMessage(cmd2))
 		if dec2.Level != PermissionAllow {
 			t.Fatalf("expected allow for temp dir redirection, got %s", dec2.Level)
@@ -596,7 +604,8 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 		}
 
 		// cd to temp dir is now allowed (cross-platform)
-		cmd2 := `{"command":"cd /tmp"}`
+		tmpRoot := t.TempDir()
+		cmd2 := fmt.Sprintf(`{"command":"cd %s"}`, filepath.ToSlash(tmpRoot))
 		dec2 := pm.Decide("bash", json.RawMessage(cmd2))
 		if dec2.Level != PermissionAllow {
 			t.Fatalf("expected allow for cd to temp dir, got %s", dec2.Level)
@@ -605,17 +614,17 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 		// cd with no args (defaults to HOME, which is tempHome outside workdir)
 		cmd3 := `{"command":"cd"}`
 		dec3 := pm.Decide("bash", json.RawMessage(cmd3))
-		if dec3.Level != PermissionAsk {
-			t.Fatalf("expected ask for cd with no args (out-of-root HOME), got %s", dec3.Level)
+		if dec3.Level != PermissionAllow {
+			t.Fatalf("expected allow for cd with no args when HOME is temp, got %s", dec3.Level)
 		}
 	})
 
 	t.Run("tilde_expansion", func(t *testing.T) {
-		// Path with ~ in HOME (outside workdir)
+		// Path with ~ in HOME (temp, so allowed)
 		cmd := `{"command":"ls ~/Downloads"}`
 		dec := pm.Decide("bash", json.RawMessage(cmd))
-		if dec.Level != PermissionAsk {
-			t.Fatalf("expected ask for ~ path outside workdir, got %s", dec.Level)
+		if dec.Level != PermissionAllow {
+			t.Fatalf("expected allow for ~ path in temp HOME, got %s", dec.Level)
 		}
 	})
 

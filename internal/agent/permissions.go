@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/pathscope"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -1063,34 +1064,18 @@ func (pm *PermissionManager) IsPathWithinAllowedRoots(rawPath string) bool {
 // tempRootsForGOOS returns the temp roots the permission engine treats as safe.
 // Linux/macOS get the conventional well-known dirs; Windows uses os.TempDir().
 func tempRootsForGOOS(goos string) []string {
-	if goos == "windows" {
-		return []string{filepath.Clean(os.TempDir())}
-	}
-	return []string{"/tmp", "/var/tmp"}
+	return pathscope.TempRootsForGOOS(goos)
 }
 
 // isTempDirUnderRoots reports whether rawPath resolves inside any provided temp root.
 func isTempDirUnderRoots(rawPath string, roots []string) bool {
-	absPath, err := filepath.Abs(rawPath)
-	if err != nil {
-		return false
-	}
-	clean := filepath.Clean(absPath)
-	for _, td := range roots {
-		if td == "" {
-			continue
-		}
-		if pathUnderRoot(clean, filepath.Clean(td)) {
-			return true
-		}
-	}
-	return false
+	return pathscope.IsTempDirUnderRoots(rawPath, roots)
 }
 
 // isTempDir returns true if the given path is within a well-known system temp
 // directory.
 func isTempDir(rawPath string) bool {
-	return isTempDirUnderRoots(rawPath, tempRootsForGOOS(runtime.GOOS))
+	return pathscope.IsTempDir(rawPath)
 }
 
 // goModCacheRoots returns the Go module cache directories. The module cache is

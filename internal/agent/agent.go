@@ -1291,7 +1291,7 @@ the final line must begin with the bare verdict word followed by a colon.`, tool
 	tools := []map[string]interface{}{permissionReadFileTool()}
 	messages := []Message{{Role: "user", Content: prompt}}
 
-	finalText, gotFinal, failReason := runPermissionModelLoop(client, messages, tools, modelLabel, toolName)
+	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, tools, modelLabel, toolName)
 	if !gotFinal {
 		return false, failReason
 	}
@@ -1517,9 +1517,28 @@ func permissionReadFileTool() map[string]interface{} {
 // gotFinal is false on transport error, nil response, or budget exhaustion, in
 // which case failReason carries the explanation. Shared by the plain ALLOW/DENY
 // path and the interpreter structured-effects path.
-func runPermissionModelLoop(client LLMClient, messages []Message, tools []map[string]interface{}, modelLabel, toolName string) (finalText string, gotFinal bool, failReason string) {
+func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages []Message, tools []map[string]interface{}, modelLabel, toolName string) (finalText string, gotFinal bool, failReason string) {
 	const maxToolCalls = 15
+	// Derive a context cancelled when the agent is stopped (Esc) so an in-flight
+	// permission-model request is aborted instead of blocking the agent for up to
+	// maxToolCalls × the client timeout — which the user experiences as an
+	// un-cancellable freeze.
+	ctx, cancel := stopChContext(stopCh)
+	defer cancel()
+	// ctxChatter is the subset of clients that honour context cancellation. The
+	// production *GenericClient implements it; test fakes implement only Chat and
+	// take the plain (uncancellable) call. This is a capability check, not error
+	// suppression.
+	type ctxChatter interface {
+		ChatWithContext(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error)
+	}
 	for i := 0; i < maxToolCalls; i++ {
+		select {
+		case <-stopCh:
+			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_cancelled tool=%s model=%s attempt=%d", toolName, modelLabel, i))
+			return "", false, "cancelled"
+		default:
+		}
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_call tool=%s model=%s attempt=%d", toolName, modelLabel, i))
 
 		// On the final attempt, withhold the read_file tool so the model is
@@ -1528,7 +1547,15 @@ func runPermissionModelLoop(client LLMClient, messages []Message, tools []map[st
 		if i == maxToolCalls-1 {
 			callTools = nil
 		}
-		resp, err := client.Chat(messages, callTools)
+		var (
+			resp *Message
+			err  error
+		)
+		if cc, ok := client.(ctxChatter); ok {
+			resp, err = cc.ChatWithContext(ctx, messages, callTools)
+		} else {
+			resp, err = client.Chat(messages, callTools)
+		}
 		if err != nil {
 			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_error tool=%s model=%s error=%v", toolName, modelLabel, err))
 			return "", false, fmt.Sprintf("LLM error: %v", err)

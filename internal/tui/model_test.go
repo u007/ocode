@@ -583,10 +583,7 @@ func TestUpdatePermButtonRegionsUsesRenderedBodyHeight(t *testing.T) {
 				t.Fatalf("expected %d permission button regions, got %d", len(permBtnDefs), len(m.permButtonRegions))
 			}
 
-			contentWidth := max(0, m.panelWidth()-4)
-			body := renderPermissionRequestBody(tt.req)
-			visibleBodyLines := permissionDialogVisibleBodyLines(body, contentWidth)
-			wantY := m.inputAreaTopY() + 4 + visibleBodyLines
+			wantY := m.inputAreaTopY() + 4 + m.permViewport.Height()
 			if got := m.permButtonRegions[0].y1; got != wantY {
 				t.Fatalf("expected permission buttons to start at y=%d, got %d", wantY, got)
 			}

@@ -254,6 +254,35 @@ func TestLoginCommandBypassesBusyQueue(t *testing.T) {
 	}
 }
 
+func TestNewCommandBypassesBusyQueue(t *testing.T) {
+	m := model{
+		width:          80,
+		height:         20,
+		input:          textarea.New(),
+		viewport:       fastviewport.New(80, 20),
+		streaming:      true,
+		sessionID:      "old-session",
+		messages:       []message{{role: roleUser, text: "keep me busy"}},
+		queuedInputs:   []string{"pending user input"},
+		queuedCommands: []string{"/sidebar"},
+	}
+
+	updated, _ := m.handleCommand("/new")
+	got := updated.(*model)
+	if len(got.queuedCommands) != 0 {
+		t.Fatalf("expected /new not to be queued, got %#v", got.queuedCommands)
+	}
+	if len(got.queuedInputs) != 0 {
+		t.Fatalf("expected /new to clear queued inputs, got %#v", got.queuedInputs)
+	}
+	if got.sessionID == "old-session" {
+		t.Fatal("expected /new to start a fresh session immediately")
+	}
+	if len(got.messages) != 1 || got.messages[0].role != roleAssistant || got.messages[0].text != "Started new session." {
+		t.Fatalf("expected /new to reset the transcript immediately, got %#v", got.messages)
+	}
+}
+
 func TestCompactFinishedResumesAfterQueuedLocalCommands(t *testing.T) {
 	m := model{
 		width:                80,

@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestPatchExecuteRejectsOutsideWorkspaceTargets(t *testing.T) {
+func TestPatchExecuteAllowsTempDirTargetsOutsideWorkspace(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
@@ -30,16 +30,24 @@ func TestPatchExecuteRejectsOutsideWorkspaceTargets(t *testing.T) {
 	}
 
 	_, err = tool.Execute(args)
-	if err == nil {
-		t.Fatal("expected patch execution to fail for external path")
+	if err != nil {
+		t.Fatalf("expected patch execution to succeed for temp-dir path, got %v", err)
+	}
+
+	got, err := os.ReadFile(externalFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "inside\n" {
+		t.Fatalf("expected patched file to contain inside, got %q", string(got))
 	}
 
 	entries, err := os.ReadDir(filepath.Join(tmpDir, ".opencode", "snapshots"))
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	if len(entries) != 0 {
-		t.Fatalf("expected no snapshots, got %d", len(entries))
+	if len(entries) == 0 {
+		t.Fatalf("expected snapshots to be created for patch execution")
 	}
 }
 

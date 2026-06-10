@@ -3390,6 +3390,11 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			cmd, closed := m.permDialogInput(keyStr)
 			if closed {
 				m.input.Reset()
+				// Restore the transcript viewport height: an async layout() (resize,
+				// activity snapshot) may have run while the tall dialog was open,
+				// shrinking the viewport to make room. Nothing else re-grows it on
+				// close, so the chat would stay shrunk after every permission ask.
+				m.layout()
 				m.rerenderTranscriptAndMaybeScroll()
 				m.saveSession()
 			}
@@ -3762,6 +3767,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			cmd, closed := m.permDialogInput(choice)
 			m.input.Reset()
 			if closed {
+				m.layout() // restore viewport height shrunk while the dialog was open
 				m.rerenderTranscriptAndMaybeScroll()
 				m.saveSession()
 			}
@@ -4447,6 +4453,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				cmd, closed := m.permDialogInput(btn.choice)
 				if closed {
 					m.input.Reset()
+					m.layout() // restore viewport height shrunk while the dialog was open
 					m.rerenderTranscriptAndMaybeScroll()
 					m.saveSession()
 				}
@@ -4989,6 +4996,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
 		cmd == "/help" || cmd == "/thinking" || cmd == "/details" ||
 		cmd == "/login" ||
+		cmd == "/new" || cmd == "/clear" ||
 		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
 		cmd == "/yolo" || cmd == "/small-model" || cmd == "/editor" ||
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
@@ -5757,6 +5765,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.pendingCompactUIIdx = nil
 	m.pendingCompactResume = false
 	m.skipCompactPreflight = false
+	m.queuedInputs = nil
 	m.queuedCompactInputs = nil
 	m.queuedCommands = nil
 	m.sessionID = time.Now().Format("2006-01-02-150405")
@@ -8561,7 +8570,7 @@ func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string)
 	return strings.Join(lines, "\n")
 }
 
-const permissionDialogMaxBodyLines = 6
+const permissionDialogMaxBodyLines = 11
 
 func permissionDialogVisibleBodyLines(body string, width int) int {
 	if width < 1 {
@@ -10800,7 +10809,9 @@ func (m model) renderStoppedIndicator() string {
 	} else {
 		label = fmt.Sprintf(" ✓ done at %s · took %s", at, elapsed)
 	}
-	return m.styles.Status.Width(m.statusContentWidth()).Render(label)
+	// Clamp to a single row so the stopped banner cannot wrap and push the
+	// bottom chrome past the terminal height.
+	return m.styles.Status.Width(m.statusContentWidth()).MaxHeight(1).Render(label)
 }
 
 func (m model) renderQueueRow() string {

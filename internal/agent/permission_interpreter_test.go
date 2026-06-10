@@ -563,3 +563,36 @@ func TestConsultPermissionModelNonInterpreterUsesPlainPath(t *testing.T) {
 		t.Fatal("expected plain ALLOW path to allow ls")
 	}
 }
+
+// failIfCalledClient fails the test if its Chat method is invoked. Used to prove
+// runPermissionModelLoop short-circuits on a cancelled stopCh without making any
+// LLM call (the un-cancellable-permission freeze fix).
+type failIfCalledClient struct{ t *testing.T }
+
+func (c failIfCalledClient) Chat([]Message, []map[string]interface{}) (*Message, error) {
+	c.t.Helper()
+	c.t.Fatal("Chat called despite an already-cancelled stopCh")
+	return nil, nil
+}
+func (c failIfCalledClient) GetProvider() string { return "fake" }
+func (c failIfCalledClient) GetModel() string    { return "fake" }
+
+func TestRunPermissionModelLoopCancelledShortCircuits(t *testing.T) {
+	stop := make(chan struct{})
+	close(stop) // already cancelled before the loop starts
+
+	_, gotFinal, reason := runPermissionModelLoop(
+		stop,
+		failIfCalledClient{t: t},
+		[]Message{{Role: "user", Content: "decide"}},
+		nil,
+		"fake-model",
+		"bash",
+	)
+	if gotFinal {
+		t.Fatalf("gotFinal = true; want false when stopCh is cancelled")
+	}
+	if reason != "cancelled" {
+		t.Fatalf("reason = %q; want %q", reason, "cancelled")
+	}
+}

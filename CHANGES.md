@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+- **Pathscope Package** — New `internal/pathscope` package extracts reusable path utilities (`TempRootsForGOOS`, `IsTempDir`, `IsTempDirUnderRoots`) from `agent/permissions` and `tool/file`, enabling shared cross-package usage.
+- **Tilde Expansion in Tools** — `confinedPath` now expands `~` and `~/` prefixes to the user's home directory, so LLM-generated paths like `~/.local/state/...` resolve correctly instead of failing.
+- **Permission Model Cancellation** — `runPermissionModelLoop` now accepts a `stopCh` channel and checks it before each LLM iteration, so pressing Esc during a long permission-model decision aborts the request immediately instead of blocking up to 15 tool-call rounds.
+- **Context-Aware LLM Calls** — Permission model loop uses `ChatWithContext` when the client supports it, enabling proper context cancellation for in-flight HTTP requests.
+
+### Changed
+- **Temp Dir Paths Now Auto-Allowed** — Tool targets and bash commands writing to temp directories (`/tmp`, `os.TempDir()`) are now auto-allowed even outside the workspace, matching real-world dev workflows. Patch, write, and file tools all honour this.
+- **Permission Dialog Size** — `permissionDialogMaxBodyLines` increased from 6 to 11 so longer permission descriptions are fully visible.
+- **`/new` Command Queue Bypass** — `/new` and `/clear` now bypass the command queue and execute immediately even while the agent is streaming, matching the behaviour of `/login` and other instant commands. `queuedInputs` is also cleared on `/new`.
+- **Stopped Indicator Row Safety** — Stopped indicator rendered with `.MaxHeight(1)` to prevent long labels from wrapping and pushing bottom chrome off-screen.
+- **Permission Dialog Viewport Restore** — Closing the permission dialog now calls `layout()` to restore the transcript viewport height that may have shrunk while the tall dialog was open.
+
+### Fixed
+- **Un-cancellable Permission Freeze** — Pressing Esc during an in-flight permission-model LLM request now cancels it immediately instead of waiting for up to 15 sequential API calls to complete.
+- **Permission Dialog Viewport Shrink** — After every permission ask, the chat transcript viewport no longer stays permanently shrunk from the dialog's height.
+- **Permission Auto-Allow Scope** — Temp-directory awk commands no longer persist as project-scoped allow rules, preventing overly broad permission grants.
+- **`cd` with No Args in Temp HOME** — Commands like `cd` (no args) with a temp-directory HOME now auto-allow instead of incorrectly prompting for permission.
+- **Tilde Path Permission Resolution** — Paths like `~/Downloads` where HOME is a temp directory now correctly resolve and auto-allow, instead of prompting.
+
 ## [0.3.5] — 2026-06-10
 
 ### Added
