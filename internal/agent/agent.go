@@ -1077,6 +1077,16 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 					}
 					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 					// LLM denied — fall through to human ask.
+					if decision.Request == nil {
+						if name == "bash" {
+							// Reuse the bash builder so the deny dialog shows the
+							// command/prefix, not a thinner args-only summary.
+							decision.Request = bashPermissionRequest(args, bashCommand(args), "")
+						} else {
+							decision.Request = &PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
+						}
+					}
+					decision.Request.DenyReason = reason
 				}
 			}
 			emitDebug("PERMISSION", fmt.Sprintf("tier=human_ask tool=%s request=%s callback=%t", name, permissionRequestSummary(decision.Request), a.OnPermissionAsk != nil))
@@ -1265,9 +1275,13 @@ If a target file does not exist yet, that is normal for a command that creates i
 (e.g. a heredoc/redirect that writes a new path). Do NOT treat a missing file as a
 reason to refuse — decide from the command and arguments.
 
-After gathering enough context, respond with ONLY one of:
+After gathering enough context, end your response with a verdict line that is
+EXACTLY one of the following — the line must START with the verdict word, with no
+reasoning before it on that line:
 ALLOW: <brief reason>
-DENY: <brief reason>`, toolName, toolArgs, rule, scope, context)
+DENY: <brief reason>
+Do not bury the words ALLOW or DENY inside a sentence (e.g. "I would ALLOW this");
+the final line must begin with the bare verdict word followed by a colon.`, toolName, toolArgs, rule, scope, context)
 
 	// Apply custom prompt from config if set.
 	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
@@ -1362,7 +1376,7 @@ func (a *Agent) verifyAutoGrant(toolName string, args json.RawMessage, req *Perm
 func parsePermissionVerdict(text string) (decided, allow bool, reason string) {
 	lines := strings.Split(text, "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
-		line := strings.TrimLeft(strings.TrimSpace(lines[i]), " \t>*#-`\"'")
+		line := stripVerdictLabel(strings.TrimLeft(strings.TrimSpace(lines[i]), " \t>*#-`\"'"))
 		upper := strings.ToUpper(line)
 		if rest, ok := strings.CutPrefix(upper, "ALLOW"); ok && verdictBoundary(rest) {
 			return true, true, cleanVerdictReason(line[len("ALLOW"):])
@@ -1371,7 +1385,83 @@ func parsePermissionVerdict(text string) (decided, allow bool, reason string) {
 			return true, false, cleanVerdictReason(line[len("DENY"):])
 		}
 	}
+	// Fallback: weak models sometimes bury the verdict mid-sentence on the final
+	// line (e.g. "Based on the above, I would DENY this operation because:").
+	// The boundary-anchored loop above intentionally rejects that to stop prose
+	// like "ALLOW only if trusted" from flipping a decision, so only as a last
+	// resort do we scan the final non-empty line for a standalone verdict word.
+	// This is a SECURITY-SENSITIVE recovery path that infers intent from prose, so
+	// it is DENY-ONLY: a buried DENY fails closed (we honour it), but a buried
+	// ALLOW is NOT auto-granted — it returns decided=false so the caller defers to
+	// a human prompt. That keeps the recovery benefit for denials without ever
+	// auto-allowing on ambiguous prose (e.g. "I would ALLOW this, but only after
+	// the user confirms"), whose conditionals the negation set cannot fully cover.
+	// Even the buried DENY is honoured only when DENY appears alone and the line
+	// carries no negation token ("I would NOT DENY", "cannot DENY") that inverts it.
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		upper := strings.ToUpper(line)
+		hasAllow := containsWord(upper, "ALLOW")
+		hasDeny := containsWord(upper, "DENY")
+		if hasDeny && !hasAllow && !hasNegation(upper) {
+			return true, false, ""
+		}
+		break
+	}
 	return false, false, ""
+}
+
+// hasNegation reports whether an upper-cased line contains a token that could
+// invert a buried verdict, so the prose-inference fallback can fail closed
+// rather than read "I would NOT ALLOW this" as an allow.
+func hasNegation(upper string) bool {
+	if strings.Contains(upper, "N'T") || strings.Contains(upper, "ONLY IF") {
+		return true
+	}
+	for _, w := range []string{"NOT", "NEVER", "CANNOT", "REFUSE", "UNLESS", "OTHERWISE", "DECLINE", "AVOID", "PROHIBIT"} {
+		if containsWord(upper, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsWord reports whether word appears in s as a standalone token (bounded
+// by non-letters), so "ALLOW" matches "I would ALLOW this" but not "ALLOWED".
+func containsWord(s, word string) bool {
+	for i := 0; i+len(word) <= len(s); i++ {
+		if s[i:i+len(word)] != word {
+			continue
+		}
+		if i > 0 && isAsciiLetter(s[i-1]) {
+			continue
+		}
+		if j := i + len(word); j < len(s) && isAsciiLetter(s[j]) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func isAsciiLetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
+}
+
+// stripVerdictLabel removes a leading prose label some models prepend to their
+// verdict (e.g. "Answer: ALLOW: ...", "Verdict: DENY") so the verdict word lands
+// at the start of the line for the prefix match. Only a single known label is
+// stripped, and any leading markdown/quote chars exposed after it are re-trimmed.
+func stripVerdictLabel(line string) string {
+	for _, label := range []string{"answer:", "verdict:", "decision:", "final answer:", "final verdict:"} {
+		if len(line) >= len(label) && strings.EqualFold(line[:len(label)], label) {
+			return strings.TrimLeft(strings.TrimSpace(line[len(label):]), " \t>*#-`\"'")
+		}
+	}
+	return line
 }
 
 // verdictBoundary reports whether the text following a verdict word marks it as a

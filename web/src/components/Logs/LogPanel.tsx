@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
+import { authToken, authHeaders } from "@/api/client";
 import { Trash2, Pause, Play, Filter } from "lucide-react";
 
 interface LogEntry {
@@ -28,7 +29,7 @@ export default function LogPanel() {
 
   useEffect(() => {
     // Load initial logs
-    fetch("/api/logs")
+    fetch("/api/logs", { headers: authHeaders() })
       .then((r) => r.json())
       .then((data) => setLogs(data as LogEntry[]))
       .catch(console.error);
@@ -40,7 +41,8 @@ export default function LogPanel() {
       return;
     }
 
-    const es = new EventSource("/api/logs/stream");
+    const token = authToken();
+    const es = new EventSource(`/api/logs/stream${token ? `?token=${token}` : ""}`);
     eventSourceRef.current = es;
 
     es.onmessage = (e) => {
@@ -70,7 +72,7 @@ export default function LogPanel() {
 
   const handleClear = async () => {
     try {
-      await fetch("/api/logs", { method: "DELETE" });
+      await fetch("/api/logs", { method: "DELETE", headers: authHeaders() });
       setLogs([]);
     } catch (err) {
       console.error("Failed to clear logs:", err);

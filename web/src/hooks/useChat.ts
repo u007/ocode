@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
 import { useSSE } from "./useSSE";
+import { authHeaders } from "../api/client";
 import type {
   SSETextEvent,
   SSESessionEvent,
@@ -68,7 +69,7 @@ export function useChat() {
       try {
         await fetch("/api/permissions", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...authHeaders() },
           body: JSON.stringify({ request_id: requestId, approved }),
         });
         dispatch({ type: "PERMISSION_RESOLVED" });

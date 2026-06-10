@@ -40,12 +40,13 @@ const (
 )
 
 type PermissionRequest struct {
-	ToolName string          `json:"tool_name"`
-	Args     json.RawMessage `json:"args,omitempty"`
-	Command  string          `json:"command,omitempty"`
-	Prefix   string          `json:"prefix,omitempty"`
-	Scope    PermissionScope `json:"scope"`
-	Rule     string          `json:"rule"`
+	ToolName   string          `json:"tool_name"`
+	Args       json.RawMessage `json:"args,omitempty"`
+	Command    string          `json:"command,omitempty"`
+	Prefix     string          `json:"prefix,omitempty"`
+	Scope      PermissionScope `json:"scope"`
+	Rule       string          `json:"rule"`
+	DenyReason string          `json:"deny_reason,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -1247,6 +1248,10 @@ func matchSubcommandAllow(command string) bool {
 	if len(fields) == 0 {
 		return false
 	}
+	// Package runner invoking an inert tool (e.g. `npx tsc`, `pnpm dlx prettier`).
+	if runnerInvokedSafeTool(fields) {
+		return true
+	}
 	// Three-word match (e.g. "docker compose ps").
 	if len(fields) >= 3 {
 		key := fields[0] + " " + fields[1] + " " + fields[2]
@@ -1270,6 +1275,70 @@ func matchSubcommandAllow(command string) bool {
 	}
 	// Single-word match (e.g. "make", "tsc"). These accept any args.
 	return bashSubcommandAllow[fields[0]]
+}
+
+// runnerSafeTools are inert, project-trusted tools (type-checkers, linters,
+// formatters, test runners) that are safe to auto-allow even when invoked
+// through a package runner like `npx`/`bunx`/`pnpm dlx`. Same trust model as
+// the bare-command entries in bashSubcommandAllow — the binary itself has no
+// destructive effect; the runner only resolves/fetches the well-known package.
+var runnerSafeTools = map[string]bool{
+	"tsc":       true,
+	"tsgo":      true,
+	"eslint":    true,
+	"prettier":  true,
+	"biome":     true,
+	"vitest":    true,
+	"jest":      true,
+	"stylelint": true,
+}
+
+// runnerBooleanFlags are valueless flags that may appear between a package
+// runner and the tool name (e.g. `npx -y tsc`). They are skipped during tool
+// resolution. Any OTHER dashed token (especially value-taking flags like
+// `-p`/`--package`, which can point the runner at an arbitrary package) makes
+// the command non-auto-allowable, so resolution fails closed.
+var runnerBooleanFlags = map[string]bool{
+	"-y": true, "--yes": true, "--no-install": true,
+	"-q": true, "--quiet": true, "--silent": true,
+	"--no": true, "--bun": true,
+}
+
+// runnerInvokedSafeTool reports whether command is a package runner invoking a
+// tool in runnerSafeTools (e.g. `npx tsc --noEmit`, `pnpm dlx prettier .`,
+// `bunx eslint`). It strips the runner prefix and any leading boolean flags,
+// then checks the first non-flag token against runnerSafeTools. Unknown dashed
+// flags between the runner and the tool fail closed (returns false) so a
+// `--package`-style override can never smuggle in an arbitrary package.
+func runnerInvokedSafeTool(fields []string) bool {
+	if len(fields) == 0 {
+		return false
+	}
+	idx := 0
+	switch {
+	case remoteRunners[fields[0]]: // npx, bunx
+		idx = 1
+	case len(fields) >= 2:
+		two := fields[0] + " " + fields[1]
+		switch two {
+		case "pnpm dlx", "pnpm exec", "yarn dlx", "yarn exec", "bun x":
+			idx = 2
+		}
+	}
+	if idx == 0 {
+		return false
+	}
+	for ; idx < len(fields); idx++ {
+		f := fields[idx]
+		if strings.HasPrefix(f, "-") {
+			if runnerBooleanFlags[f] {
+				continue
+			}
+			return false // value-taking / unknown flag → fail closed
+		}
+		return runnerSafeTools[f]
+	}
+	return false
 }
 
 // isPathLikeScript reports whether a runner argument names a file path (rather

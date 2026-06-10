@@ -143,10 +143,16 @@ func FindProvider(id string) *Provider {
 }
 
 // resolveKeyWithConfig returns the effective API key for a provider given a
-// pre-loaded config. Precedence: env var > config file options.apiKey > stored
-// credential > "". Accepts a pre-loaded config to avoid repeated disk reads
-// when called in a loop (e.g. HydrateEnv).
+// pre-loaded config. Precedence: OPENCODE_AUTH_TOKEN > env var > config file
+// options.apiKey > stored credential > "". Accepts a pre-loaded config to avoid
+// repeated disk reads when called in a loop (e.g. HydrateEnv).
 func resolveKeyWithConfig(p *Provider, id string, cfg *config.Config) string {
+	// 0. OPENCODE_AUTH_TOKEN env var — highest priority override. When set,
+	//    it takes precedence over all other resolution (env vars, config,
+	//    stored credentials) for every provider.
+	if v := os.Getenv("OPENCODE_AUTH_TOKEN"); v != "" {
+		return v
+	}
 	// 1. Environment variable (highest priority — allows env to override config).
 	if p.EnvVar != "" {
 		if v := os.Getenv(p.EnvVar); v != "" {
@@ -169,7 +175,7 @@ func resolveKeyWithConfig(p *Provider, id string, cfg *config.Config) string {
 }
 
 // ResolveKey returns the effective API key for a provider.
-// Precedence: env var > config file options.apiKey > stored credential > "".
+// Precedence: OPENCODE_AUTH_TOKEN > env var > config file options.apiKey > stored credential > "".
 func ResolveKey(id string) string {
 	p := FindProvider(id)
 	if p == nil {
@@ -197,15 +203,33 @@ func providerConfigAPIKey(cfg *config.Config, id string) string {
 	if !ok {
 		return ""
 	}
-	key, _ := opts["apiKey"].(string)
-	if strings.HasPrefix(key, "{env:") && strings.HasSuffix(key, "}") {
-		envVar := strings.TrimSuffix(strings.TrimPrefix(key, "{env:"), "}")
-		key = os.Getenv(envVar)
-		if key == "" {
-			log.Printf("warn: config provider.%s.options.apiKey references env var %s which is not set", id, envVar)
+	apiKeyVal, ok := opts["apiKey"]
+	if !ok {
+		return ""
+	}
+	rawKey, ok := apiKeyVal.(string)
+	if !ok {
+		return ""
+	}
+	key := ResolveEnvVarRef(rawKey)
+	if key == "" {
+		if envName, ok := strings.CutPrefix(rawKey, "{env:"); ok {
+			envName = strings.TrimSuffix(envName, "}")
+			log.Printf("warn: config provider.%s.options.apiKey references env var %s which is not set", id, envName)
 		}
 	}
 	return key
+}
+
+// ResolveEnvVarRef resolves a value of the form {env:VAR} to the value of
+// environment variable VAR. If the value doesn't match the pattern, it's
+// returned as-is. If the env var is not set, an empty string is returned.
+func ResolveEnvVarRef(value string) string {
+	if strings.HasPrefix(value, "{env:") && strings.HasSuffix(value, "}") {
+		envVar := strings.TrimSuffix(strings.TrimPrefix(value, "{env:"), "}")
+		return os.Getenv(envVar)
+	}
+	return value
 }
 
 // HydrateEnv loads stored credentials into the process env so existing

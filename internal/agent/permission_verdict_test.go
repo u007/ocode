@@ -44,6 +44,20 @@ func TestParsePermissionVerdict(t *testing.T) {
 			wantDecided: true, wantAllow: false, wantReason: "writes outside the repo",
 		},
 		{
+			// Captured local-model failure: verdict prefixed with an "Answer:"
+			// label inside markdown bold. The label must be stripped so the
+			// verdict word lands at line start.
+			name:        "labeled allow in bold",
+			text:        "I have read the directory listing.\n\n**Answer: ALLOW: The command is within the allowed filesystem scope and appears to be a standard build-and-run operation.**",
+			wantDecided: true, wantAllow: true,
+			wantReason: "The command is within the allowed filesystem scope and appears to be a standard build-and-run operation.",
+		},
+		{
+			name:        "labeled deny",
+			text:        "Verdict: DENY: writes outside the repo",
+			wantDecided: true, wantAllow: false, wantReason: "writes outside the repo",
+		},
+		{
 			name:        "allowed is not a verdict",
 			text:        "This would be ALLOWED in most cases but I am unsure.",
 			wantDecided: false,
@@ -57,6 +71,71 @@ func TestParsePermissionVerdict(t *testing.T) {
 			name:        "bare word allow no colon",
 			text:        "ALLOW",
 			wantDecided: true, wantAllow: true, wantReason: "",
+		},
+		{
+			// The last-line fallback is DENY-only: a buried ALLOW is NOT
+			// auto-granted (prose conditionals like "only after" cannot be fully
+			// enumerated), so it falls through to a human prompt.
+			name:        "buried allow on final line is not auto-granted",
+			text:        "The script writes models.py inside the working dir.\nBased on the information provided, I would ALLOW this operation because it is in scope.",
+			wantDecided: false,
+		},
+		{
+			// Buried DENY fails closed — the fallback honours it.
+			name:        "buried deny on final line",
+			text:        "This touches files outside the repo, so I would DENY it.",
+			wantDecided: true, wantAllow: false, wantReason: "",
+		},
+		{
+			// Conditional ALLOW phrasings the negation set does not catch must
+			// still NOT auto-allow, now guaranteed by the DENY-only fallback.
+			name:        "allow only after is conditional not a verdict",
+			text:        "I would ALLOW this, but only after the user confirms the target.",
+			wantDecided: false,
+		},
+		{
+			name:        "allow provided that is conditional not a verdict",
+			text:        "I would ALLOW this provided that the path stays in the repo.",
+			wantDecided: false,
+		},
+		{
+			name:        "allow as long as is conditional not a verdict",
+			text:        "Fine to ALLOW as long as it does not touch system files.",
+			wantDecided: false,
+		},
+		{
+			// Negation must not flip a buried DENY into an allow either.
+			name:        "negated deny does not flip to allow",
+			text:        "I would not DENY this if it stayed in scope, but it does not.",
+			wantDecided: false,
+		},
+		{
+			// Final line mentions BOTH verdict words — genuinely ambiguous, so the
+			// fallback must NOT guess; falls through to deny.
+			name:        "both words on final line is ambiguous",
+			text:        "I could ALLOW or DENY this depending on intent.",
+			wantDecided: false,
+		},
+		{
+			// Fail-closed: negation inverts a buried ALLOW. Must NOT auto-allow.
+			name:        "negated allow does not flip to allow",
+			text:        "This writes outside the repo, so I would not ALLOW this operation.",
+			wantDecided: false,
+		},
+		{
+			name:        "cannot allow contraction-free negation",
+			text:        "Given the risk I cannot ALLOW this command.",
+			wantDecided: false,
+		},
+		{
+			name:        "allow only if is conditional not a verdict",
+			text:        "I would ALLOW only if the user confirms the target.",
+			wantDecided: false,
+		},
+		{
+			name:        "wont allow contraction",
+			text:        "I won't ALLOW writes to system paths.",
+			wantDecided: false,
 		},
 	}
 	for _, tc := range cases {

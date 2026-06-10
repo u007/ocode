@@ -155,3 +155,36 @@ func TestRenderAppHeaderExtremeNarrowKeepsOneLine(t *testing.T) {
 		t.Fatalf("title row should be exactly 1 line, got %d:\n%q", lipgloss.Height(row), row)
 	}
 }
+// TestRenderAppHeaderNewlineTitleClampsToOneLine verifies that a title
+// containing newlines (e.g. from a multi-line user prompt) is collapsed to a
+// single row and does not break the header layout.
+func TestRenderAppHeaderNewlineTitleClampsToOneLine(t *testing.T) {
+	m := makeTestHeaderModel()
+	title := "◆ ocode first line\nsecond line\nthird line"
+	hint := "·  opencode clone v0.0.0"
+
+	tabBar := renderTabBar(tabChat, false)
+	exitBtn := hintStyle.Padding(0, 1).Render("✕ exit")
+	header := m.renderAppHeader(title, hint, tabBar, exitBtn, m.width)
+
+	if got := strings.Count(header, "\n") + 1; got != appHeaderHeight {
+		t.Fatalf("header should stay %d rows with newline title, got %d:\n%q", appHeaderHeight, got, header)
+	}
+	row := headerSecondLine(t, m, title, hint)
+	if lipgloss.Height(row) != 1 {
+		t.Fatalf("title row should be exactly 1 line with newline title, got %d:\n%q", lipgloss.Height(row), row)
+	}
+}
+
+// TestTruncateTitleStripsNewlines verifies that truncateTitle collapses
+// newlines to spaces so multi-line prompts produce single-line titles.
+func TestTruncateTitleStripsNewlines(t *testing.T) {
+	title := "hello\nworld\nfoo"
+	got := truncateTitle(title, 80)
+	if strings.Contains(got, "\n") {
+		t.Fatalf("truncateTitle should collapse newlines, got %q", got)
+	}
+	if got != "hello world foo" {
+		t.Fatalf("truncateTitle should join lines with spaces, got %q", got)
+	}
+}

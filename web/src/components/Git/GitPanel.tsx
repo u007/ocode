@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { authHeaders } from "@/api/client";
 
 interface GitStatus {
   branch: string;
@@ -14,7 +15,7 @@ export default function GitPanel() {
 
   const fetchStatus = async () => {
     try {
-      const res = await fetch("/api/git/status");
+      const res = await fetch("/api/git/status", { headers: authHeaders() });
       const data = await res.json();
       setStatus(data);
     } catch (err) {

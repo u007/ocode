@@ -5474,6 +5474,10 @@ const (
 )
 
 func truncateTitle(s string, maxLen int) string {
+	// Collapse newlines to spaces so multi-line user prompts don't produce
+	// multi-line titles that break the header layout (app header, sidebar).
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.TrimSpace(s)
 	runes := []rune(s)
 	if len(runes) <= maxLen {
 		return s
@@ -7689,6 +7693,11 @@ func permissionRequestSummary(req agent.PermissionRequest) string {
 
 func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	var lines []string
+	if req.DenyReason != "" {
+		lines = append(lines, "⛔ Auto-denied by LLM permission model:")
+		lines = append(lines, req.DenyReason)
+		lines = append(lines, "")
+	}
 	lines = append(lines, permissionRequestSummary(req))
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
 		lines = append(lines, fmt.Sprintf("Always-rule scope: bash prefix %q (all `%s ...` commands)", req.Prefix, req.Prefix))
@@ -7709,7 +7718,11 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 
 func renderPermissionPrompt(req agent.PermissionRequest) string {
 	var b strings.Builder
-	b.WriteString("Allow this action?\n\n")
+	if req.DenyReason != "" {
+		b.WriteString("Auto-denied — allow anyway?\n\n")
+	} else {
+		b.WriteString("Allow this action?\n\n")
+	}
 	b.WriteString(renderPermissionRequestBody(req))
 	b.WriteString("\n\n[y] once  [n] deny")
 	if permAlwaysRuleAvailable(req) {
@@ -8591,7 +8604,11 @@ func (m *model) renderPermissionDialog(width int) string {
 	contentWidth := max(0, width-2)
 
 	body := renderPermissionRequestBody(req)
-	header := m.styles.Header.Render("⚠ Permission required")
+	headerText := "⚠ Permission required"
+	if req.DenyReason != "" {
+		headerText = "⚠ Auto-denied by LLM — override?"
+	}
+	header := m.styles.Header.Render(headerText)
 	if m.permConfirm != "" {
 		body = renderPermConfirmBody(req, m.pendingToolName, m.permConfirm)
 		header = m.styles.Header.Render("⚠ Confirm always-allow")
@@ -10427,6 +10444,10 @@ const appHeaderHeight = 2
 // chrome (tab bar + exit button) and the dim hint, so the title shrinks
 // first when the terminal is narrow.
 func (m model) renderAppHeader(title string, hint string, tabBar string, exitBtn string, width int) string {
+	// Defensive: collapse any newlines that snuck in (e.g. from a session
+	// title loaded from disk or an LLM-generated title). The header must
+	// always be a single visual row to stay within appHeaderHeight.
+	title = strings.ReplaceAll(title, "\n", " ")
 	tabBarW := lipgloss.Width(tabBar)
 	exitBtnW := lipgloss.Width(exitBtn)
 	hintRendered := hintStyle.Render(hint)
@@ -11397,6 +11418,9 @@ func (m model) renderSidebar() string {
 	}
 	var header string
 	if title != "" {
+		// Defensive: collapse newlines so multi-line session titles
+		// don't produce a multi-line header row.
+		title = strings.ReplaceAll(title, "\n", " ")
 		header = sidebarHeaderStyle.Render("◆ ") + m.styles.Header.Render(title)
 		// Clamp to a single visual row. The header is rendered inside a padded,
 		// width-constrained border (inner width sidebarColumnWidth-4); without

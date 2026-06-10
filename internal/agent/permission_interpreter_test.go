@@ -176,6 +176,34 @@ func TestBunRunFileGuard(t *testing.T) {
 	}
 }
 
+// --- Package-runner safe tools ----------------------------------------------
+
+func TestRunnerInvokedSafeTool(t *testing.T) {
+	cases := []struct {
+		command string
+		allow   bool
+	}{
+		{"npx tsc --noEmit", true}, // the reported case
+		{"npx -y tsc", true},       // boolean flag skipped
+		{"bunx eslint .", true},    // bunx runner
+		{"pnpm dlx prettier --write .", true},
+		{"yarn dlx biome check", true},
+		{"pnpm exec vitest run", true},
+		{"bun x tsgo", true},
+		{"npx --package=evil tsc", false},   // value flag → fail closed
+		{"npx -p evil tsc", false},          // value flag → fail closed
+		{"npx create-react-app foo", false}, // not a safe tool
+		{"npx vite", false},                 // executes a dev server, not inert
+		{"npx", false},                      // runner with no tool
+		{"npx some-random-cli", false},      // unknown tool
+	}
+	for _, tc := range cases {
+		if got := matchSubcommandAllow(tc.command); got != tc.allow {
+			t.Errorf("matchSubcommandAllow(%q)=%v want %v", tc.command, got, tc.allow)
+		}
+	}
+}
+
 // --- Allowed roots ----------------------------------------------------------
 
 func TestAllowedRootsAndMembership(t *testing.T) {

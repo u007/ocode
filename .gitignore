@@ -1,4 +1,5 @@
 /ocode
+/bin/ocode
 *.test
 *.out
 .env

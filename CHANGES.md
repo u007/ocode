@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-06-10
+
 ### Added
 - **Fast Viewport Component** — New `internal/tui/fastviewport` package with O(1) `SetContentLines` replaces chat transcript's bubbles viewport, reducing render time from ~30ms→0.73ms at 1000 message pairs (~41× faster).
 - **Permission Read File Enhancement** — `read_file` tool now supports directory listing when pointed at directory paths, providing better context for list/glob/grep/repo_overview operations.
@@ -153,6 +155,24 @@
 - **PermissionDialog** — Removed obsolete `PermissionDialog` component; permissions flow now uses API-driven inline approval in the web UI.
 - **Legacy Sidebar Components** — Removed `web/src/components/Sidebar/{AgentTabs,ModelSelector,SessionList}.tsx` as part of the layout restructure. Replaced by the new `Layout/TopTabs`, `Layout/SessionSidebar`, `Layout/CoworkSidebar`, and `Layout/ModelDialog` components.
 - **`common/PermissionDialog.tsx`** — Removed in favor of the new `Chat/PermissionDialog.tsx` colocated with the chat surface.
+
+### Added
+- **OPENCODE_AUTH_TOKEN env var** — New `OPENCODE_AUTH_TOKEN` environment variable provides a global API key override across all providers, bypassing per-provider configuration and stored credentials. Documented in SETUP.md with usage guidance and OAuth compatibility warnings.
+- **Permission auto-deny reason display** — When the LLM permission model denies a tool, the `DenyReason` is now captured and displayed in the TUI permission dialog, showing the auto-denial reason alongside an "Auto-denied — allow anyway?" prompt so users can overrule the decision.
+- **Verdict label stripping** — `parsePermissionVerdict` now strips prefixed labels (`Answer:`, `Verdict:`, `Decision:`, `Final Answer:`, `Final Verdict:`) before matching verdict words, accommodating local/small models that prepend these labels inside markdown formatting.
+- **Buried verdict fallback (DENY-only)** — Added a security-sensitive recovery path that scans the final non-empty line for a standalone `DENY` word when no strict-format verdict line is found. Buried `ALLOW` is never auto-granted—it defers to human prompt. Negation detection prevents inverted readings (e.g. "would not DENY" is not treated as a deny).
+- **Package runner safe tool auto-allow** — New `runnerInvokedSafeTool` function auto-allows package runners (`npx`, `bunx`, `pnpm dlx`/`exec`, `yarn dlx`/`exec`, `bun x`) invoking known inert tools (`tsc`, `eslint`, `prettier`, `biome`, `vitest`, `jest`, `stylelint`). Boolean-only flags between runner and tool (e.g. `npx -y tsc`) are supported; value-taking flags like `--package`/`-p` cause the command to fail closed.
+
+### Changed
+- **Auth key resolution** — `resolveKeyWithConfig` now respects `OPENCODE_AUTH_TOKEN` as the highest-priority override above env vars, config, and stored credentials. Extracted shared `ResolveEnvVarRef` utility for `{env:VAR}` reference resolution, used in both `client.go` and `providers.go`.
+- **TUI header newline safety** — `truncateTitle` and `renderAppHeader` (plus sidebar title rendering) now collapse newlines to spaces, preventing multi-line user prompts from breaking the 2-row header layout.
+- **Config auto-allow prefixes** — Re-sorted `auto_allow_prefixes` in `ocodeconfig.json` alphabetically; removed `"feat:"` from bash allow list; added `"cat"` to bash allow list.
+- **Extra allowed paths** — Added `/Users/james/.nanobot` to `extra_allowed_paths` in config.
+- **Web UI asset rebuild** — Rebuilt web distribution with updated hash-based asset references.
+- **Version** — Bumped from `0.3.4` to `0.3.5`.
+
+### Fixed
+- **PermissionRequest nil guard** — `HandleToolCall` now populates a `PermissionRequest` when `decision.Request` is nil after an LLM auto-deny, ensuring the deny dialog shows the full tool context (command/prefix for bash, tool name for others) instead of a thinner args-only summary.
 
 ## [0.3.1] — 2026-06-04
 

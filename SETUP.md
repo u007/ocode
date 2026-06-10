@@ -60,6 +60,10 @@ Edit `opencode.json` to add API keys or provider configuration:
 
 Or use environment variables (ocode respects `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.).
 
+**Global override:** Set `OPENCODE_AUTH_TOKEN` to use a single token for all providers, bypassing per-provider configuration and stored credentials. This is useful for CI/CD or when using a proxy that handles authentication.
+
+> ⚠️ The override is sent as a **plain API key** (`Authorization`/`x-api-key` header), not via the OAuth flow. It is **not** appropriate for OAuth-subscription providers (Anthropic Max/Console, GitHub Copilot): setting it suppresses the stored OAuth credential and sends the token with the wrong scheme, producing 401s. Use it only with providers that accept a bare API-key token.
+
 ### Permissions & Safety
 
 ocode starts in **normal mode** (project-confined file writes allowed, dangerous tools ask). Configure in `ocodeconfig.json`:

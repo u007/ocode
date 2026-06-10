@@ -13,8 +13,15 @@ const BASE = "";
 // so navigation or hash changes don't lose it.
 const _token = new URLSearchParams(window.location.search).get("token") ?? "";
 
-function authHeaders(): Record<string, string> {
+/** Returns auth headers for fetch() calls. Exported for components that use raw
+ *  fetch or EventSource (which cannot set headers). */
+export function authHeaders(): Record<string, string> {
   return _token ? { Authorization: `Bearer ${_token}` } : {};
+}
+
+/** Returns the auth token string. Useful for EventSource URLs. */
+export function authToken(): string {
+  return _token;
 }
 
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {

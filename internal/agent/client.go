@@ -2355,6 +2355,13 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	}
 	emitDebug("AGENT", fmt.Sprintf("NewClient: resolved provider=%q model=%q", provider, model))
 
+	// OPENCODE_AUTH_TOKEN env var — highest priority override. When set it
+	// bypasses config, per-provider env vars, and stored credentials.
+	if v := os.Getenv("OPENCODE_AUTH_TOKEN"); v != "" {
+		apiKey = v
+		emitDebug("AGENT", fmt.Sprintf("NewClient: OPENCODE_AUTH_TOKEN override — apiKey=%s", maskKey(apiKey)))
+	}
+
 	// Use config for provider details if available
 	if cfg != nil && provider != "" {
 		if p, ok := cfg.Provider[provider]; ok {
@@ -2363,11 +2370,9 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 					if b, ok := opts["baseURL"].(string); ok {
 						baseURL = b
 					}
-					if a, ok := opts["apiKey"].(string); ok {
-						apiKey = a
-						if strings.HasPrefix(apiKey, "{env:") && strings.HasSuffix(apiKey, "}") {
-							envVar := strings.TrimSuffix(strings.TrimPrefix(apiKey, "{env:"), "}")
-							apiKey = os.Getenv(envVar)
+					if apiKey == "" {
+						if a, ok := opts["apiKey"].(string); ok {
+							apiKey = auth.ResolveEnvVarRef(a)
 						}
 					}
 				}
