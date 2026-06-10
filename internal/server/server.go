@@ -89,6 +89,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
 	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))
+	s.mux.HandleFunc("GET /api/chat/messages", s.authMiddleware(s.handleSessionMessages))
 	s.mux.HandleFunc("GET /api/sessions", s.authMiddleware(s.handleListSessions))
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
@@ -232,6 +233,10 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleChatStream(w, r)
+}
+
+func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSessionMessages(w, r)
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {

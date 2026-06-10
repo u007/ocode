@@ -1,5 +1,34 @@
 # TODO
 
+## `/rc` full live mirror — follow-ups (built, not yet run end-to-end)
+
+The 2-way live mirror (TUI↔web: user messages, thinking/text token deltas, tool
+calls/results, turn snapshot) is implemented across `internal/server`
+(`rc_bridge.go` broadcast fan-out, `handler_sse.go` `HandleSessionMessages`),
+`internal/tui/model.go` (broadcast sites in `deltaMsg`/`streamMsgEvent`/`streamDone`/
+user-submit), and the web app (`connectSessionMirror`, store `live` buffer,
+`TurnParts`/`MessageBubble`/`ChatPanel`). Compiles, typechecks, unit-tested — but
+**not verified live** (interactive TUI). Open items:
+
+- **Verify end-to-end.** Run `curl -N "http://localhost:PORT/api/chat/messages?token=TOK"`,
+  type in the TUI, confirm event order: `user_message` → `thinking`/`text` deltas
+  → `tool_start`/`tool_result` → `messages` + `turn_done`. Then both-directions
+  in the browser. If `turn_done` arrives for a TUI-originated turn, the
+  `pendingRC==nil` end-of-handler snapshot path is confirmed.
+- **Optimistic echo removed.** Web-typed messages now render only after the
+  round-trip `user_message` broadcast — invisible on localhost, a perceptible
+  delay over Tailscale. Decide whether to re-add optimistic-add with dedup.
+- **`tool_result` carries no call-id** (`Tool: "tool"`), so concurrent tool
+  results can mis-pair in the *live* view; the `turn_done` snapshot heals it.
+  Thread the tool name/call-id through `tool_result` for correct live pairing.
+- **`SET_STREAMING: true` + autoscroll fire on every token delta** — fine on
+  localhost, potentially janky on long turns over a network. Throttle if needed.
+- **Browser "Stop" is local-only** — during a TUI-originated turn it re-locks the
+  input on the next delta. No web cancel path exists; add one if desired.
+- **Committed tool rendering is per-message** (assistant `tool_calls` block +
+  separate `tool` result block) rather than paired. The live view pairs them;
+  consider pairing in `ChatPanel` for the committed snapshot too.
+
 ## `/ide` VS Code integration — deferred backends & limits
 
 The `/ide` command (internal/ide + TUI wiring) connects to VS Code via the

@@ -272,8 +272,9 @@ type rcDoneMsg struct {
 
 // rcStartedMsg is returned when the /rc server starts successfully.
 type rcStartedMsg struct {
-	url    string
-	bridge *server.RCBridge
+	url         string
+	tailscaleURL string
+	bridge      *server.RCBridge
 }
 
 // ideStartedMsg is returned when the /ide client is created and starts connecting.
@@ -1916,6 +1917,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				userMsg.raw = &raw
 			}
 			m.messages = append(m.messages, userMsg)
+			// Mirror the freshly-typed user message to the /rc web UI immediately,
+			// before the LLM answer streams in.
+			if m.rcBridge != nil {
+				m.rcBridge.SetMessages(m.persistedAgentMessages())
+				m.broadcastRC("user_message", map[string]string{"content": userMsg.text})
+			}
 			if m.agent != nil {
 				m.agent.ResetSubagentDispatch()
 			}
@@ -2680,9 +2687,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case rcStartedMsg:
+		rcText := fmt.Sprintf("🌐 Remote Control started!\n\nSession: %s\nURL: %s", m.sessionID, msg.url)
+		if msg.tailscaleURL != "" {
+			rcText += fmt.Sprintf("\n\n🔗 Tailscale URL: %s\n\nAccessible within your tailnet.", msg.tailscaleURL)
+		}
+		rcText += "\n\nThe web UI is now streaming this session. You can continue chatting in the TUI or switch to the browser."
 		m.messages = append(m.messages, message{
 			role: roleAssistant,
-			text: fmt.Sprintf("🌐 Remote Control started!\n\nSession: %s\nURL: %s\n\nThe web UI is now streaming this session. You can continue chatting in the TUI or switch to the browser.", m.sessionID, msg.url),
+			text: rcText,
 		})
 		m.rerenderTranscriptAndMaybeScroll()
 		// Store the bridge for pushing messages
@@ -2734,6 +2746,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.chatUnread = true
 		}
 		m.rerenderTranscriptAndMaybeScroll()
+		// Mirror the user message to all connected /rc web clients (including the
+		// browser that sent it, which renders purely from this stream).
+		m.broadcastRC("user_message", map[string]string{"content": msg.req.Content})
 		// Store the pending RC request so streamDoneMsg can deliver the result
 		m.pendingRC = &msg.req
 		// Run through the agent
@@ -2752,12 +2767,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				default:
 				}
 			}
+			// Mirror tool result to all connected /rc web clients.
+			m.broadcastRC("tool_result", server.ToolResultEvent{Tool: "tool", Output: msg.msg.Content})
 		} else if msg.msg.Role == "assistant" {
 			m.appendAgentMessage(msg.msg)
 			if m.activeTab != tabChat {
 				m.chatUnread = true
 			}
 			m.rerenderTranscriptAndMaybeScroll()
+			// Mirror tool calls to all connected /rc web clients (final text is
+			// already mirrored live via text deltas + the turn snapshot).
+			for _, tc := range msg.msg.ToolCalls {
+				m.broadcastRC("tool_start", server.ToolStartEvent{Tool: tc.Function.Name, Command: tc.Function.Arguments})
+			}
 			// Relay streaming events to the /rc web UI if active
 			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
 				if len(msg.msg.ToolCalls) > 0 {
@@ -2797,6 +2819,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if rc.StreamCh != nil {
 				close(rc.StreamCh)
 			}
+			// This web-initiated turn returns early below, so the end-of-handler
+			// snapshot is skipped — mirror the final transcript + turn completion
+			// here so every connected browser stays in sync.
+			if msg.err != nil {
+				m.broadcastRC("error", map[string]string{"error": msg.err.Error()})
+			}
+			m.broadcastRCSnapshot()
 			// Resume listening for next RC request
 			if m.rcCh != nil {
 				return m, waitForRCRequest(m.rcCh)
@@ -2825,10 +2854,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.layout()
 		m.saveSession()
-		// Push latest messages to the RC bridge so the web UI can fetch them.
-		if m.rcBridge != nil {
-			m.rcBridge.SetMessages(m.persistedAgentMessages())
+		// Mirror the final transcript + turn completion to the /rc web UI.
+		if msg.err != nil {
+			m.broadcastRC("error", map[string]string{"error": msg.err.Error()})
 		}
+		m.broadcastRCSnapshot()
 		if msg.err == nil && m.agent != nil {
 			agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 			// Only update the pending uiIdx mapping if the agent actually
@@ -2978,6 +3008,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitTitleEvent(m.titleCh)
 	case deltaMsg:
 		m.applyThinkingDelta(msg.delta.kind, msg.delta.text)
+		// Mirror live token deltas to the /rc web UI.
+		if msg.delta.text != "" {
+			if msg.delta.kind == "reasoning" {
+				m.broadcastRC("thinking", map[string]string{"delta": msg.delta.text})
+			} else {
+				m.broadcastRC("text", map[string]string{"delta": msg.delta.text})
+			}
+		}
 		return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
 	case usageMsg:
 		if msg.outputTokens > 0 {
@@ -7817,6 +7855,17 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			log.Printf("[perm] sub-agent permission ALLOWED once: tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Allowed sub-agent %q once.", toolName), transient: true})
 		case "a", "always", "always allow":
+			if isOutOfScopePathRequest(req) {
+				// Persist only the out-of-workspace path (registered globally via
+				// tool.AddExtraAllowedPath, so the sub-agent sees it too) — never a
+				// blanket bash/tool rule. PersistRule stays false.
+				resp = agent.PermissionResponse{Level: agent.PermissionAllow}
+				m.allowOutOfScopePath(req, true)
+				root := outOfScopePathRoot(req)
+				log.Printf("[perm] sub-agent permission ALWAYS ALLOW (out-of-scope path): tool=%s path=%s", toolName, root)
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing out-of-workspace path access for %s (sub-agent).", root), transient: true})
+				break
+			}
 			resp = agent.PermissionResponse{Level: agent.PermissionAllow, PersistRule: true}
 			log.Printf("[perm] sub-agent permission ALWAYS ALLOW (rule): tool=%s", toolName)
 			if toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain.") {
@@ -7866,14 +7915,21 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		}
 		m.allowOutOfScopePath(req, true)
 		// Special handling for webfetch domains
-		if toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain.") {
+		switch {
+		case isOutOfScopePathRequest(req):
+			// Out-of-workspace path ask: persist ONLY the path (done by
+			// allowOutOfScopePath above) — never a blanket bash-prefix/tool rule.
+			root := outOfScopePathRoot(req)
+			log.Printf("[perm] permission ALWAYS ALLOW (out-of-scope path): tool=%s path=%s", toolName, root)
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing out-of-workspace path access for %s.", root), transient: true})
+		case toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain."):
 			domain := strings.TrimPrefix(req.Rule, "webfetch.domain.")
 			log.Printf("[perm] permission ALWAYS ALLOW (webfetch domain): tool=%s domain=%s", toolName, domain)
 			if m.agent != nil && m.agent.Permissions() != nil {
 				m.agent.Permissions().SetWebfetchDomain(domain, agent.PermissionAllow)
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing webfetch for domain %q.", domain), transient: true})
-		} else {
+		default:
 			log.Printf("[perm] permission ALWAYS ALLOW (rule): tool=%s rule=%s", toolName, req.Rule)
 			m.setPermissionRule(req, agent.PermissionAllow)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Always allowing %s.", permissionRuleLabel(req)), transient: true})
@@ -7914,6 +7970,11 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 }
 
 func permissionRuleLabel(req agent.PermissionRequest) string {
+	if isOutOfScopePathRequest(req) {
+		if root := outOfScopePathRoot(req); root != "" {
+			return fmt.Sprintf("path %q", root)
+		}
+	}
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
 		return fmt.Sprintf("bash prefix %q", req.Prefix)
 	}
@@ -7998,7 +8059,18 @@ func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
 	}
 }
 
+// isOutOfScopePathRequest reports whether req is an out-of-workspace path ask
+// whose "always" answer should persist a path to extra_allowed_paths rather than
+// a bash-prefix or tool rule. It covers bash cd-target/path-arg asks (which carry
+// OutOfScopePath) and the redirection/env out-of-scope asks.
+func isOutOfScopePathRequest(req agent.PermissionRequest) bool {
+	return req.OutOfScopePath != "" || strings.HasSuffix(req.Rule, ".out_of_scope")
+}
+
 func outOfScopePathRoot(req agent.PermissionRequest) string {
+	if req.OutOfScopePath != "" {
+		return pathRootFromTarget(req.OutOfScopePath)
+	}
 	if !strings.HasSuffix(req.Rule, ".out_of_scope") {
 		return ""
 	}
@@ -8017,14 +8089,19 @@ func pathRootFromPermissionArgs(args json.RawMessage) string {
 	if target == "" {
 		target = strings.TrimSpace(params.FilePath)
 	}
+	return pathRootFromTarget(target)
+}
+
+// pathRootFromTarget normalizes an absolute target path to the directory root to
+// persist: the path itself when it is (or resolves to) a directory, else its
+// parent. Returns "" for empty or non-absolute targets.
+func pathRootFromTarget(target string) string {
+	target = strings.TrimSpace(target)
 	if target == "" || !filepath.IsAbs(target) {
 		return ""
 	}
-	if info, err := os.Stat(target); err == nil {
-		if info.IsDir() {
-			return target
-		}
-		return filepath.Dir(target)
+	if info, err := os.Stat(target); err == nil && info.IsDir() {
+		return target
 	}
 	return filepath.Dir(target)
 }
@@ -8301,6 +8378,91 @@ func drainStreamDeltas(ch chan deltaEvent) []deltaEvent {
 	}
 }
 
+// startTailscaleServe attempts to expose the given port via tailscale serve.
+// Returns the tailscale URL if successful, empty string otherwise.
+func startTailscaleServe(port int) string {
+	// Check if tailscale CLI is available
+	tailscalePath, err := exec.LookPath("tailscale")
+	if err != nil {
+		return ""
+	}
+
+	// Check if tailscale is running
+	statusCmd := exec.Command(tailscalePath, "status")
+	var statusBuf bytes.Buffer
+	statusCmd.Stdout = &statusBuf
+	statusCmd.Stderr = &statusBuf
+	if err := statusCmd.Run(); err != nil {
+		return ""
+	}
+
+	// Start tailscale serve in background
+	serveCmd := exec.Command(tailscalePath, "serve", "--bg", fmt.Sprintf("localhost:%d", port))
+	var out bytes.Buffer
+	serveCmd.Stdout = &out
+	serveCmd.Stderr = &out
+
+	if err := serveCmd.Run(); err != nil {
+		log.Printf("tailscale serve failed: %v", err)
+		return ""
+	}
+
+	// Parse the output to get the URL
+	// tailscale serve outputs something like:
+	// Available within your tailnet:
+	// https://hostname.tailnet-name.ts.net:443
+	output := out.String()
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
+			return line
+		}
+	}
+
+	// If we couldn't parse the URL, try to get it from tailscale status
+	statusCmd = exec.Command(tailscalePath, "status", "--json")
+	var statusOut bytes.Buffer
+	statusCmd.Stdout = &statusOut
+	if err := statusCmd.Run(); err == nil {
+		var status struct {
+			SELF struct {
+				DNSName string `json:"DNSName"`
+			} `json:"Self"`
+		}
+		if json.Unmarshal(statusOut.Bytes(), &status) == nil {
+			// DNSName is like "hostname.tailnet-name.ts.net."
+			dnsName := strings.TrimSuffix(status.SELF.DNSName, ".")
+			if dnsName != "" {
+				return fmt.Sprintf("https://%s", dnsName)
+			}
+		}
+	}
+
+	return ""
+}
+
+// broadcastRC pushes a live mirror event to all connected /rc web clients. It is
+// a no-op when no web UI is attached. Used to stream user messages, thinking/text
+// token deltas, tool activity, and turn-boundary snapshots to the browser.
+func (m *model) broadcastRC(event string, data interface{}) {
+	if m.rcBridge != nil {
+		m.rcBridge.Broadcast(server.SSEEvent{Event: event, Data: data})
+	}
+}
+
+// broadcastRCSnapshot pushes the authoritative current transcript to the web UI
+// and marks the turn complete. The snapshot self-heals any deltas dropped under
+// backpressure during the turn.
+func (m *model) broadcastRCSnapshot() {
+	if m.rcBridge == nil {
+		return
+	}
+	msgs := m.persistedAgentMessages()
+	m.rcBridge.SetMessages(msgs)
+	m.broadcastRC("messages", msgs)
+	m.broadcastRC("turn_done", map[string]string{})
+}
+
 // waitForRCRequest listens for requests from the /rc web UI.
 func waitForRCRequest(rcCh <-chan server.RCRequest) tea.Cmd {
 	return func() tea.Msg {
@@ -8554,6 +8716,16 @@ func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string)
 	}
 
 	// choice == "a" — always this rule.
+	// Out-of-workspace path asks persist ONLY the path root, never a tool/prefix
+	// rule, so they get a dedicated, accurate description instead of the generic
+	// "always allow the bash tool" line below.
+	if isOutOfScopePathRequest(req) {
+		if root := outOfScopePathRoot(req); root != "" {
+			lines = append(lines, fmt.Sprintf("Persist out-of-workspace path access for: %s", root))
+			lines = append(lines, "Adds this directory to extra_allowed_paths. No bash-prefix or tool rule is persisted.")
+		}
+		return strings.Join(lines, "\n")
+	}
 	switch {
 	case toolName == "webfetch" && strings.HasPrefix(req.Rule, "webfetch.domain."):
 		domain := strings.TrimPrefix(req.Rule, "webfetch.domain.")
@@ -8563,9 +8735,6 @@ func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string)
 	default:
 		lines = append(lines, fmt.Sprintf("Persist a tool rule: always allow the %q tool.", toolName))
 		lines = append(lines, "Note: for this action, \"always this rule\" and \"always this tool\" persist the same tool-level rule.")
-	}
-	if root := outOfScopePathRoot(req); root != "" {
-		lines = append(lines, fmt.Sprintf("Also persists out-of-workspace path access for: %s", root))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -12834,11 +13003,14 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 			}
 		}()
 
+		// Try to expose via tailscale if available
+		tailscaleURL := startTailscaleServe(port)
+
 		// Embed token in URL so the browser auto-authenticates on open.
 		url := fmt.Sprintf("http://%s/session/%s?token=%s", addr, m.sessionID, token)
 		go openBrowser(url)
 
-		return rcStartedMsg{url: url, bridge: bridge}
+		return rcStartedMsg{url: url, tailscaleURL: tailscaleURL, bridge: bridge}
 	}
 }
 

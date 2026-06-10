@@ -48,6 +48,12 @@ type PermissionRequest struct {
 	Scope      PermissionScope `json:"scope"`
 	Rule       string          `json:"rule"`
 	DenyReason string          `json:"deny_reason,omitempty"`
+	// OutOfScopePath is the absolute target path that puts a bash command outside
+	// the allowed roots (a cd target, redirection, env-var path, or path arg). It
+	// is carried so the human prompt can offer to persist that root to
+	// extra_allowed_paths instead of a useless bash-prefix/tool rule, and so
+	// verifyAutoGrant refuses to silently auto-grant an out-of-scope command.
+	OutOfScopePath string `json:"out_of_scope_path,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -934,6 +940,21 @@ func bashPermissionRequest(args json.RawMessage, command, prefix string) *Permis
 	return &PermissionRequest{ToolName: "bash", Args: args, Command: command, Prefix: prefix, Scope: scope, Rule: rule}
 }
 
+// bashPathPermissionRequest builds an Ask request for a bash command that
+// targets an out-of-workspace path. It carries the offending path so the human
+// prompt can offer to persist that root to extra_allowed_paths (rather than a
+// broad bash-prefix rule), and so verifyAutoGrant refuses to auto-grant it.
+func bashPathPermissionRequest(args json.RawMessage, command, outPath string) *PermissionRequest {
+	return &PermissionRequest{
+		ToolName:       "bash",
+		Args:           args,
+		Command:        command,
+		Scope:          PermissionScopeTool,
+		Rule:           "bash.path.out_of_scope",
+		OutOfScopePath: outPath,
+	}
+}
+
 // resolveForScopeCheck resolves rawPath to an absolute, symlink-resolved path
 // suitable for prefix comparison against an allowed root. For a not-yet-existing
 // path (e.g. mkdir creating a deep directory or a write creating a new file) it
@@ -997,6 +1018,18 @@ func isWithinWorkDir(pm *PermissionManager, rawPath string) bool {
 		return false
 	}
 	return pathUnderRoot(resolved, pm.workDir)
+}
+
+// isWithinAllowedScope reports whether resolved is in-scope for bash auto-allow:
+// inside the working dir, any extra allowed root (extra_allowed_paths persisted
+// via "always allow this path"), the managed cache dirs, or a well-known temp
+// dir. It is the bash-layer counterpart to IsPathWithinAllowedRoots and is the
+// single predicate both canAutoAllowInRoot and firstOutOfScopePath consult, so a
+// path that has been added to extra_allowed_paths stops re-prompting AND is never
+// reported as out-of-scope. Without this, persisting a path was a no-op for the
+// bash command that triggered it (the workdir-only check stayed blind to it).
+func isWithinAllowedScope(pm *PermissionManager, resolved string) bool {
+	return pm.IsPathWithinAllowedRoots(resolved) || isTempDir(resolved)
 }
 
 // AllowedRoots returns the unified set of filesystem roots that are in-scope for
@@ -2202,14 +2235,39 @@ func canAutoAllowInRoot(pm *PermissionManager, command, prefix string) bool {
 	// by definition, so allow.
 	for _, p := range paths {
 		resolved := resolvePath(p, pm.workDir)
-		if !isWithinWorkDir(pm, resolved) {
-			// Temp directories are always allowed (cross-platform)
-			if !isTempDir(resolved) {
-				return false
-			}
+		if !isWithinAllowedScope(pm, resolved) {
+			return false
 		}
 	}
 	return true
+}
+
+// firstOutOfScopePath returns the first path argument of an auto-allow-eligible
+// command that resolves outside the workdir (and isn't a temp dir), or "" when
+// every path is in-scope. It mirrors the scope loop in canAutoAllowInRoot so the
+// permission prompt can surface the exact out-of-workspace root to persist to
+// extra_allowed_paths instead of a useless bash-prefix rule.
+func firstOutOfScopePath(pm *PermissionManager, command, prefix string) string {
+	if pm == nil || pm.workDir == "" {
+		return ""
+	}
+	fields := splitShellFields(command)
+	if len(fields) == 0 || fields[0] != prefix {
+		return ""
+	}
+	paths := extractBashCommandPaths(prefix, fields)
+	if prefix == "cd" && len(paths) == 0 {
+		if home := os.Getenv("HOME"); home != "" {
+			paths = append(paths, home)
+		}
+	}
+	for _, p := range paths {
+		resolved := resolvePath(p, pm.workDir)
+		if !isWithinAllowedScope(pm, resolved) {
+			return resolved
+		}
+	}
+	return ""
 }
 
 func extractBashCommandPaths(prefix string, fields []string) []string {
@@ -2848,14 +2906,14 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 					emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env out-of-scope): env=%s path=%s", env, resolved))
 					return PermissionDecision{
 						Level:   PermissionAsk,
-						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), env, false),
+						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, false),
 					}
 				}
 				if isSensitivePath(resolved) {
 					emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env sensitive): env=%s path=%s", env, resolved))
 					return PermissionDecision{
 						Level:   PermissionAsk,
-						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), env, true),
+						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, true),
 					}
 				}
 			}
@@ -2877,14 +2935,14 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect out-of-scope): path=%s", resolved))
 			return PermissionDecision{
 				Level:   PermissionAsk,
-				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), path, false),
+				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, false),
 			}
 		}
 		if isSensitivePath(resolved) {
 			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect sensitive): path=%s", resolved))
 			return PermissionDecision{
 				Level:   PermissionAsk,
-				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), path, true),
+				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, true),
 			}
 		}
 	}
@@ -2967,6 +3025,10 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			return PermissionDecision{Level: PermissionAllow}
 		}
 		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (auto-allow, not in root): prefix=%s", prefix))
+		if outPath := firstOutOfScopePath(pm, command, prefix); outPath != "" {
+			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (out-of-scope path): prefix=%s path=%s", prefix, outPath))
+			return PermissionDecision{Level: PermissionAsk, Request: bashPathPermissionRequest(args, command, outPath)}
+		}
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
 	}
 
@@ -2992,32 +3054,40 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	return PermissionDecision{Level: level}
 }
 
-func redirectionPermissionRequest(args json.RawMessage, command, path string, isSensitive bool) *PermissionRequest {
+func redirectionPermissionRequest(args json.RawMessage, command, resolved string, isSensitive bool) *PermissionRequest {
 	rule := "bash.redirection.out_of_scope"
+	outPath := resolved
 	if isSensitive {
+		// Never offer to persist access to a sensitive path (e.g. ~/.ssh).
 		rule = "bash.redirection.sensitive_path"
+		outPath = ""
 	}
 	return &PermissionRequest{
-		ToolName: "bash",
-		Args:     args,
-		Command:  command,
-		Prefix:   "",
-		Scope:    PermissionScopeTool,
-		Rule:     rule,
+		ToolName:       "bash",
+		Args:           args,
+		Command:        command,
+		Prefix:         "",
+		Scope:          PermissionScopeTool,
+		Rule:           rule,
+		OutOfScopePath: outPath,
 	}
 }
 
-func envVarPermissionRequest(args json.RawMessage, command, envVar string, isSensitive bool) *PermissionRequest {
+func envVarPermissionRequest(args json.RawMessage, command, resolved string, isSensitive bool) *PermissionRequest {
 	rule := "bash.env.out_of_scope"
+	outPath := resolved
 	if isSensitive {
+		// Never offer to persist access to a sensitive path (e.g. ~/.ssh).
 		rule = "bash.env.sensitive_path"
+		outPath = ""
 	}
 	return &PermissionRequest{
-		ToolName: "bash",
-		Args:     args,
-		Command:  command,
-		Prefix:   "",
-		Scope:    PermissionScopeTool,
-		Rule:     rule,
+		ToolName:       "bash",
+		Args:           args,
+		Command:        command,
+		Prefix:         "",
+		Scope:          PermissionScopeTool,
+		Rule:           rule,
+		OutOfScopePath: outPath,
 	}
 }

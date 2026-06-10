@@ -45,6 +45,45 @@ type RCBridge struct {
 	// agent is the TUI's live agent. The handler uses it to apply runtime
 	// toggles (e.g. advisor on/off) directly to the agent executing requests.
 	agent *agent.Agent
+
+	// subscribers receive live mirror events (deltas, tool activity, snapshots)
+	// pushed by the TUI. Each persistent /api/chat/messages connection registers
+	// one. Guarded by mu.
+	subscribers map[chan SSEEvent]struct{}
+}
+
+// Subscribe registers a new live-event channel and returns it. The caller must
+// Unsubscribe when its connection ends.
+func (b *RCBridge) Subscribe() chan SSEEvent {
+	ch := make(chan SSEEvent, 256)
+	b.mu.Lock()
+	if b.subscribers == nil {
+		b.subscribers = make(map[chan SSEEvent]struct{})
+	}
+	b.subscribers[ch] = struct{}{}
+	b.mu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes a previously registered channel.
+func (b *RCBridge) Unsubscribe(ch chan SSEEvent) {
+	b.mu.Lock()
+	delete(b.subscribers, ch)
+	b.mu.Unlock()
+}
+
+// Broadcast delivers a live event to every subscriber. Sends are non-blocking:
+// a slow consumer drops the event rather than stalling the TUI. The authoritative
+// "messages" snapshot emitted at each turn boundary self-heals any dropped delta.
+func (b *RCBridge) Broadcast(ev SSEEvent) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for ch := range b.subscribers {
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
 }
 
 // SetAgent records the TUI's current live agent (called from TUI goroutine

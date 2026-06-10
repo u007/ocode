@@ -1346,6 +1346,13 @@ func (a *Agent) verifyAutoGrant(toolName string, args json.RawMessage, req *Perm
 		if isHardBlockedCommand(cmd) {
 			return false, "hard-blocked command cannot be auto-granted"
 		}
+		// A command the static decider flagged as targeting an out-of-workspace
+		// path must never be auto-granted on the model's word alone — scope
+		// expansion requires explicit human approval (mirrors the path-confined
+		// file-tool check below).
+		if req != nil && req.OutOfScopePath != "" {
+			return false, "command targets path outside allowed roots: " + req.OutOfScopePath
+		}
 		return true, ""
 	}
 	if pathConfinedAutoTools[toolName] {
@@ -1469,7 +1476,11 @@ func stripVerdictLabel(line string) string {
 // by a ':' (the instructed "ALLOW: <reason>" form). This rejects longer words
 // like "ALLOWED"/"ALLOWING" and loose prose like "ALLOW only if ...".
 func verdictBoundary(rest string) bool {
-	r := strings.TrimSpace(rest)
+	// Tolerate a markdown-emphasis run that closes between the verdict word and
+	// its colon (e.g. "**ALLOW**:" → rest is "**: ..."). Leading-junk trimming in
+	// the caller only strips the opening "**"; the closing run lands here.
+	r := strings.TrimLeft(strings.TrimSpace(rest), "*`_")
+	r = strings.TrimSpace(r)
 	return r == "" || strings.HasPrefix(r, ":")
 }
 
@@ -1477,7 +1488,7 @@ func verdictBoundary(rest string) bool {
 // ": " separator and any wrapping markdown/quote characters.
 func cleanVerdictReason(s string) string {
 	s = strings.TrimSpace(s)
-	s = strings.TrimLeft(s, ": ")
+	s = strings.TrimLeft(s, ": *`_")
 	s = strings.TrimRight(s, " *`\"'")
 	return strings.TrimSpace(s)
 }

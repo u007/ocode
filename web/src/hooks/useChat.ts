@@ -1,68 +1,45 @@
 import { useCallback } from "react";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
-import { useSSE } from "./useSSE";
-import { authHeaders } from "../api/client";
-import type {
-  SSETextEvent,
-  SSESessionEvent,
-  SSEDoneEvent,
-  SSEPermissionEvent,
-} from "../api/types";
+import { api, authHeaders } from "../api/client";
 
 export function useChat() {
   const state = useChatState();
   const dispatch = useChatDispatch();
-  const { send, close } = useSSE();
 
+  // Submit is fire-and-forget: the message is forwarded to the TUI's agent and
+  // ALL rendering (the user echo, live thinking/text tokens, tool activity, and
+  // the final answer) arrives over the persistent mirror stream in SessionPage.
+  // This keeps a single source of truth and makes the view identical whether the
+  // turn was started here or in the TUI.
   const sendMessage = useCallback(
     (content: string) => {
-      dispatch({ type: "ADD_MESSAGE", message: { role: "user", content } });
+      const sid = state.sessionId;
+      if (!sid) {
+        dispatch({ type: "SET_ERROR", error: "no active session" });
+        return;
+      }
       dispatch({ type: "SET_STREAMING", isStreaming: true });
       dispatch({ type: "SET_ERROR", error: null });
 
-      send(content, state.sessionId ?? undefined, state.model ?? undefined, (event, data) => {
-        switch (event) {
-          case "session": {
-            const sessionId = (data as SSESessionEvent).session_id;
-            dispatch({ type: "SET_SESSION", sessionId });
-            break;
-          }
-          case "text":
-            dispatch({ type: "APPEND_DELTA", delta: (data as SSETextEvent).delta });
-            break;
-          case "done":
-            dispatch({ type: "SET_MODEL", model: (data as SSEDoneEvent).model });
-            dispatch({ type: "SET_STREAMING", isStreaming: false });
-            break;
-          case "error":
-            dispatch({
-              type: "SET_ERROR",
-              error: (data as { error: string }).error,
-            });
-            dispatch({ type: "SET_STREAMING", isStreaming: false });
-            break;
-          case "permission_required": {
-            const perm = data as SSEPermissionEvent;
-            dispatch({
-              type: "PERMISSION_REQUEST",
-              permission: {
-                tool: perm.tool,
-                command: perm.command,
-                request_id: perm.request_id,
-              },
-            });
-            break;
-          }
-        }
-      });
+      // HandleSendMessage blocks until the turn completes; the mirror's turn_done
+      // is the primary completion signal. The .then is a safety net in case that
+      // frame is missed; the .catch surfaces a failed submit.
+      api
+        .sendMessage(sid, content)
+        .then(() => dispatch({ type: "SET_STREAMING", isStreaming: false }))
+        .catch((err) => {
+          dispatch({ type: "SET_ERROR", error: err.message || "send failed" });
+          dispatch({ type: "SET_STREAMING", isStreaming: false });
+        });
     },
-    [state.sessionId, send, dispatch],
+    [state.sessionId, dispatch],
   );
 
+  // Local stop: the browser can't cancel the TUI's agent, so this only releases
+  // the input. The turn continues in the TUI and the mirror will still commit it.
   const stop = useCallback(() => {
-    close();
     dispatch({ type: "SET_STREAMING", isStreaming: false });
-  }, [close, dispatch]);
+  }, [dispatch]);
 
   const resolvePermission = useCallback(
     async (requestId: string, approved: boolean) => {

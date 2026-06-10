@@ -8,6 +8,9 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // TestPermissions_UserConfirmedAllow_BypassesSensitiveAndOutOfWorkdir locks in
@@ -162,6 +165,102 @@ func TestPermissions_BashPrefixAllowStillAllowsOutsideRoot(t *testing.T) {
 	dec := pm.Decide("bash", json.RawMessage(`{"command":"sed -n '1,3p' /etc/hosts"}`))
 	if dec.Level != PermissionAllow {
 		t.Fatalf("expected explicit sed prefix allow to allow out-of-root command, got %s", dec.Level)
+	}
+}
+
+// A cd into a directory outside the workspace must Ask with a path-out-of-scope
+// request that carries the offending directory, NOT a blanket bash.prefix.cd
+// rule — so "always" can persist the path to extra_allowed_paths instead of
+// whitelisting every future `cd ...`.
+func TestPermissions_BashCdOutOfRoot_CarriesPathNotPrefixRule(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	// A non-temp absolute path outside every allowed root (temp dirs are
+	// auto-allowed, so they can't exercise the out-of-scope path).
+	resolvedOutside := "/nonexistent-root-xyz/elsewhere"
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	cmd := "cd " + resolvedOutside + " && wc -l SKILL.md"
+	dec := pm.Decide("bash", json.RawMessage(`{"command":`+jsonStr(cmd)+`}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("expected Ask for out-of-root cd, got %s", dec.Level)
+	}
+	if dec.Request == nil {
+		t.Fatal("expected a permission request")
+	}
+	if dec.Request.Rule != "bash.path.out_of_scope" {
+		t.Fatalf("rule = %q, want bash.path.out_of_scope (not a bash-prefix rule)", dec.Request.Rule)
+	}
+	if dec.Request.Prefix != "" {
+		t.Fatalf("prefix = %q, want empty (no broad cd-prefix rule)", dec.Request.Prefix)
+	}
+	if dec.Request.OutOfScopePath != resolvedOutside {
+		t.Fatalf("OutOfScopePath = %q, want %q", dec.Request.OutOfScopePath, resolvedOutside)
+	}
+}
+
+// Round-trip: once a path is persisted to extra_allowed_paths (the "always allow
+// this path" outcome), the SAME bash cd into it must stop asking — otherwise the
+// persist is a no-op and the prompt loops forever.
+func TestPermissions_BashCdIntoExtraAllowedPath_AutoAllows(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	// A real, NON-temp directory outside the workspace (the package source dir),
+	// registered as an extra allowed root. A temp dir can't isolate the mechanism
+	// because it would auto-allow via isTempDir regardless of registration.
+	extra, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	resolvedExtra, err := filepath.EvalSymlinks(extra)
+	if err != nil {
+		t.Fatalf("resolve extra: %v", err)
+	}
+	if !tool.AddExtraAllowedPath(resolvedExtra) {
+		t.Fatalf("AddExtraAllowedPath(%q) failed", resolvedExtra)
+	}
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(resolvedExtra) })
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	cmd := "cd " + resolvedExtra + " && wc -l SKILL.md"
+	dec := pm.Decide("bash", json.RawMessage(`{"command":`+jsonStr(cmd)+`}`))
+	if dec.Level != PermissionAllow {
+		rule := ""
+		if dec.Request != nil {
+			rule = dec.Request.Rule
+		}
+		t.Fatalf("cd into extra_allowed_path: level = %s (rule=%q), want allow", dec.Level, rule)
+	}
+}
+
+// verifyAutoGrant must refuse to auto-grant a bash command the static decider
+// flagged as out-of-scope, even on a model ALLOW — scope expansion is human-only.
+func TestVerifyAutoGrant_BashOutOfScopePathRejected(t *testing.T) {
+	wd := t.TempDir()
+	a := NewAgent(nil, nil, &config.Config{}, nil)
+	a.permissions.SetWorkDir(wd)
+
+	req := &PermissionRequest{
+		ToolName:       "bash",
+		Command:        "cd /nonexistent-root-xyz && wc -l f",
+		Rule:           "bash.path.out_of_scope",
+		OutOfScopePath: "/nonexistent-root-xyz",
+	}
+	ok, reason := a.verifyAutoGrant("bash", json.RawMessage(`{"command":"cd /nonexistent-root-xyz && wc -l f"}`), req)
+	if ok {
+		t.Fatalf("expected verifyAutoGrant to reject out-of-scope bash, got ok=true")
+	}
+	if !strings.Contains(reason, "/nonexistent-root-xyz") {
+		t.Fatalf("reason = %q, want it to name the out-of-scope path", reason)
 	}
 }
 

@@ -1,7 +1,23 @@
-export interface Message {
-  role: "user" | "assistant" | "system";
-  content: string;
+export interface ToolCall {
+  id: string;
+  type?: string;
+  function: { name: string; arguments: string };
 }
+
+export interface Message {
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  tool_calls?: ToolCall[];
+  tool_call_id?: string;
+  reasoning_content?: string;
+}
+
+// A part of the in-progress turn, streamed live before the authoritative
+// snapshot lands at turn_done. Ordered as produced by the agent.
+export type LivePart =
+  | { kind: "thinking"; text: string }
+  | { kind: "text"; text: string }
+  | { kind: "tool"; tool: string; command?: string; output?: string };
 
 export interface ChatRequest {
   content: string;

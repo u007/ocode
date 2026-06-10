@@ -231,6 +231,51 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleSessionMessages is the persistent live mirror of the bridged TUI session.
+// On connect it sends the full message list (history), then forwards every live
+// event the TUI broadcasts — user messages, thinking/text token deltas, tool
+// activity, and an authoritative "messages" snapshot at each turn boundary. This
+// is what makes /rc a 2-way live mirror: activity originating in the TUI (or any
+// other browser) reaches every connected browser here in real time.
+func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "streaming not supported")
+		return
+	}
+
+	h.mu.Lock()
+	rc := h.rc
+	h.mu.Unlock()
+	if rc == nil {
+		// No TUI session is bridged (plain serve mode); nothing to mirror.
+		sendSSE(w, flusher, "messages", []agent.Message{})
+		return
+	}
+
+	sub := rc.Subscribe()
+	defer rc.Unsubscribe(sub)
+
+	// Send the current history immediately so a freshly-loaded (or reconnecting)
+	// browser is in sync before live events start flowing.
+	sendSSE(w, flusher, "messages", rc.GetMessages())
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-sub:
+			sendSSE(w, flusher, ev.Event, ev.Data)
+		}
+	}
+}
+
 func sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
 	jsonData, _ := json.Marshal(data)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, jsonData)

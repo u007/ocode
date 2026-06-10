@@ -91,34 +91,43 @@ export const api = {
 
 export type SSEEventHandler = (event: string, data: unknown) => void;
 
-export function connectChatSSE(
-  message: string,
+// connectSessionMirror opens the persistent live mirror of the bridged TUI
+// session. It carries every event needed for a 2-way live view: full-list
+// snapshots (`messages`), `user_message`, token deltas (`thinking`, `text`),
+// tool activity (`tool_start`, `tool_result`), `turn_done`, and `error`. So
+// activity originating in the TUI (or any other browser) appears here live.
+// Returns a cleanup function.
+export function connectSessionMirror(
   session: string | undefined,
-  model: string | undefined,
   onEvent: SSEEventHandler,
-  onError?: (err: Error) => void,
 ): () => void {
-  const params = new URLSearchParams({ message });
+  const params = new URLSearchParams();
   if (session) params.set("session", session);
-  if (model) params.set("model", model);
   if (_token) params.set("token", _token);
 
-  const es = new EventSource(`/api/chat/stream?${params}`);
-
-  es.addEventListener("text", (e) => onEvent("text", JSON.parse(e.data)));
-  es.addEventListener("tool_start", (e) => onEvent("tool_start", JSON.parse(e.data)));
-  es.addEventListener("tool_result", (e) => onEvent("tool_result", JSON.parse(e.data)));
-  es.addEventListener("tool_error", (e) => onEvent("tool_error", JSON.parse(e.data)));
-  es.addEventListener("permission_required", (e) => onEvent("permission_required", JSON.parse(e.data)));
-  es.addEventListener("session", (e) => onEvent("session", JSON.parse(e.data)));
-  es.addEventListener("done", (e) => {
-    onEvent("done", JSON.parse(e.data));
-    es.close();
-  });
-  es.addEventListener("error", () => {
-    onEvent("error", { error: "connection lost" });
-    onError?.(new Error("SSE connection error"));
-    es.close();
+  const es = new EventSource(`/api/chat/messages?${params}`);
+  const on = (name: string) =>
+    es.addEventListener(name, (e) => {
+      try {
+        onEvent(name, JSON.parse((e as MessageEvent).data));
+      } catch (err) {
+        console.error(`failed to parse '${name}' mirror frame`, err);
+      }
+    });
+  ["messages", "user_message", "thinking", "text", "tool_start", "tool_result", "turn_done"].forEach(on);
+  // The "error" event is overloaded: a server-sent `event: error` carries data,
+  // while a transport failure (EventSource auto-reconnects) carries none.
+  es.addEventListener("error", (e) => {
+    const data = (e as MessageEvent).data;
+    if (!data) {
+      console.error("session mirror SSE connection error");
+      return;
+    }
+    try {
+      onEvent("error", JSON.parse(data));
+    } catch (err) {
+      console.error("failed to parse 'error' mirror frame", err);
+    }
   });
 
   return () => es.close();

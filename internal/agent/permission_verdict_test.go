@@ -53,6 +53,16 @@ func TestParsePermissionVerdict(t *testing.T) {
 			wantReason: "The command is within the allowed filesystem scope and appears to be a standard build-and-run operation.",
 		},
 		{
+			// Captured local-model failure: bold closes BETWEEN the verdict word
+			// and its colon ("**Allow**:"), so the closing "**" landed in the
+			// boundary check and was rejected → auto-deny → human Ask.
+			name: "bold closes before colon",
+			text: "The target path is a directory, which is suitable for a `cd` command.\n\n" +
+				"**Allow**: The command is targeting a known valid directory.",
+			wantDecided: true, wantAllow: true,
+			wantReason: "The command is targeting a known valid directory.",
+		},
+		{
 			name:        "labeled deny",
 			text:        "Verdict: DENY: writes outside the repo",
 			wantDecided: true, wantAllow: false, wantReason: "writes outside the repo",

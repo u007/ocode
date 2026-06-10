@@ -3,12 +3,17 @@
 ## [Unreleased]
 
 ### Added
+- **Live Mirror for `/rc`** — `HandleSessionMessages` SSE endpoint streams the full TUI session (user messages, thinking/text deltas, tool activity, turn snapshots) to all connected browsers in real time. `RCBridge` gains `Subscribe`/`Unsubscribe`/`Broadcast` for fan-out. The TUI mirrors every event (user submit, delta, tool start/result, stream done) to the web UI, making `/rc` a true 2-way live mirror.
+- **Out-of-Scope Path Tracking** — `PermissionRequest` gains an `OutOfScopePath` field carrying the absolute path that put a bash command outside allowed roots. `firstOutOfScopePath` identifies the culprit path so the permission prompt can offer to persist it to `extra_allowed_paths` instead of a broad bash-prefix rule. `verifyAutoGrant` now refuses to auto-grant any command flagged as out-of-scope.
+- **Allowed Scope Helper** — New `isWithinAllowedScope` unifies the workdir + extra allowed roots + temp dir check for bash auto-allow decisions.
 - **Pathscope Package** — New `internal/pathscope` package extracts reusable path utilities (`TempRootsForGOOS`, `IsTempDir`, `IsTempDirUnderRoots`) from `agent/permissions` and `tool/file`, enabling shared cross-package usage.
 - **Tilde Expansion in Tools** — `confinedPath` now expands `~` and `~/` prefixes to the user's home directory, so LLM-generated paths like `~/.local/state/...` resolve correctly instead of failing.
 - **Permission Model Cancellation** — `runPermissionModelLoop` now accepts a `stopCh` channel and checks it before each LLM iteration, so pressing Esc during a long permission-model decision aborts the request immediately instead of blocking up to 15 tool-call rounds.
 - **Context-Aware LLM Calls** — Permission model loop uses `ChatWithContext` when the client supports it, enabling proper context cancellation for in-flight HTTP requests.
 
 ### Changed
+- **Permission Verdict Parsing** — `verdictBoundary` now tolerates markdown-emphasis closing runs between the verdict word and its colon (e.g. `**ALLOW**:`), and `cleanVerdictReason` strips backtick/underscore characters, fixing local-model verdict rejection.
+- **RC Start Message** — `/rc` start message now includes a Tailscale URL when available.
 - **Temp Dir Paths Now Auto-Allowed** — Tool targets and bash commands writing to temp directories (`/tmp`, `os.TempDir()`) are now auto-allowed even outside the workspace, matching real-world dev workflows. Patch, write, and file tools all honour this.
 - **Permission Dialog Size** — `permissionDialogMaxBodyLines` increased from 6 to 11 so longer permission descriptions are fully visible.
 - **`/new` Command Queue Bypass** — `/new` and `/clear` now bypass the command queue and execute immediately even while the agent is streaming, matching the behaviour of `/login` and other instant commands. `queuedInputs` is also cleared on `/new`.
@@ -16,6 +21,8 @@
 - **Permission Dialog Viewport Restore** — Closing the permission dialog now calls `layout()` to restore the transcript viewport height that may have shrunk while the tall dialog was open.
 
 ### Fixed
+- **Out-of-Scope Bash Auto-Grant** — `verifyAutoGrant` now refuses to auto-grant bash commands that target paths outside the allowed roots, preventing silent scope expansion.
+- **Out-of-Scope Permission Requests Carry Resolved Path** — `redirectionPermissionRequest` and `envVarPermissionRequest` now carry the resolved absolute path (not the raw env-var name or unresolved redirect path) so the prompt can persist it to `extra_allowed_paths`.
 - **Un-cancellable Permission Freeze** — Pressing Esc during an in-flight permission-model LLM request now cancels it immediately instead of waiting for up to 15 sequential API calls to complete.
 - **Permission Dialog Viewport Shrink** — After every permission ask, the chat transcript viewport no longer stays permanently shrunk from the dialog's height.
 - **Permission Auto-Allow Scope** — Temp-directory awk commands no longer persist as project-scoped allow rules, preventing overly broad permission grants.
