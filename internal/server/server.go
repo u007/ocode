@@ -98,6 +98,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/agents/runs/stream", s.authMiddleware(s.handleRunsStream))
 	s.mux.HandleFunc("GET /api/git/status", s.authMiddleware(s.handleGitStatus))
 	s.mux.HandleFunc("GET /api/git/diff", s.authMiddleware(s.handleGitDiff))
+	s.mux.HandleFunc("GET /api/theme", s.authMiddleware(s.handleGetTheme))
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
@@ -250,6 +251,10 @@ func (s *Server) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGitDiff(w, r)
+}
+
+func (s *Server) handleGetTheme(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetTheme(w, r)
 }
 
 func (s *Server) handleFileTree(w http.ResponseWriter, r *http.Request) {

@@ -6,6 +6,7 @@ import type {
   AgentInfo,
   AgentRun,
   GitDiffFile,
+  ThemeResponse,
 } from "./types";
 
 const BASE = "";
@@ -62,6 +63,7 @@ export const api = {
     fetchJSON<GitDiffFile[]>(
       `/api/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,
     ),
+  getTheme: () => fetchJSON<ThemeResponse>("/api/theme"),
   getAdvisor: () =>
     fetchJSON<{ model: string }>("/api/config/advisor"),
   setAdvisor: (model: string) =>

@@ -103,6 +103,30 @@ export interface GitDiffFile {
   patch: string;
 }
 
+export interface ThemeColors {
+  user: string;
+  assistant: string;
+  header: string;
+  border: string;
+  hint: string;
+  text: string;
+  background: string;
+  status_bg: string;
+  status_fg: string;
+  selected_fg: string;
+  selected_bg: string;
+  success: string;
+  error: string;
+  accent: string;
+  dim: string;
+  thinking: string;
+}
+
+export interface ThemeResponse {
+  name: string;
+  colors: ThemeColors;
+}
+
 export interface AgentRun {
   id: string;
   name: string;
