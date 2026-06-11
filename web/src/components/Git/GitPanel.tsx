@@ -98,7 +98,7 @@ export default function GitPanel() {
                   onClick={() =>
                     setSelectedFile(isSelected ? null : file.path)
                   }
-                  className={`w-full text-left px-3 py-1.5 flex items-center gap-2 text-sm hover:bg-zinc-800/50 ${
+                  className={`w-full text-left px-3 py-1.5 flex items-center gap-2 text-sm hover:bg-zinc-800/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
                     isSelected ? "bg-zinc-800" : ""
                   }`}
                 >

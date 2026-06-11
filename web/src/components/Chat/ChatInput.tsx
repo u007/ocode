@@ -101,7 +101,7 @@ export default function ChatInput() {
       <div className="flex gap-2">
         <textarea
           ref={textareaRef}
-          className="flex-1 resize-none rounded-lg border border-zinc-600 bg-zinc-800 p-3 text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none"
+          className="flex-1 resize-none rounded-lg border border-zinc-600 bg-zinc-800 p-3 text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           rows={2}
           placeholder="Type a message... (Enter to send, Shift+Enter for newline, / for commands)"
           value={input}

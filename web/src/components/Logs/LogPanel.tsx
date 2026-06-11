@@ -115,7 +115,7 @@ export default function LogPanel() {
                 key={kind}
                 type="button"
                 onClick={() => setFilter(kind)}
-                className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
+                className={`px-2 py-1 rounded text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
                   filter === kind
                     ? "bg-zinc-700 text-white"
                     : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"

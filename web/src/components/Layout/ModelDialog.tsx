@@ -100,7 +100,7 @@ export default function ModelDialog({ open, onClose, initialTab = "main" }: Prop
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+              className={`px-3 py-1.5 text-sm rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
                 activeTab === tab.id
                   ? "bg-zinc-700 text-white"
                   : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
@@ -119,7 +119,7 @@ export default function ModelDialog({ open, onClose, initialTab = "main" }: Prop
             placeholder="Search models..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-blue-500"
+            className="w-full pl-10 pr-4 py-2 bg-zinc-800 border border-zinc-700 rounded-md text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
             autoFocus
           />
         </div>
@@ -135,7 +135,7 @@ export default function ModelDialog({ open, onClose, initialTab = "main" }: Prop
                 <button
                   key={m.name}
                   onClick={() => handleSelect(m.name)}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors ${
+                  className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
                     getCurrentModel() === m.name || m.active
                       ? "bg-blue-600/20 text-blue-400"
                       : "text-zinc-300 hover:bg-zinc-800"

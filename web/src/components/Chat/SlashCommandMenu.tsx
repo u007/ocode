@@ -51,16 +51,20 @@ export default function SlashCommandMenu({ query, selectedIndex, onSelect, onHov
   return (
     <div
       ref={menuRef}
+      role="listbox"
       className="absolute bottom-full left-0 right-0 mb-2 max-h-60 overflow-y-auto rounded-lg border border-zinc-700 bg-zinc-900 shadow-xl z-50"
     >
       {filtered.map((cmd, i) => {
         const Icon = cmd.icon;
+        const isSelected = i === selectedIndex;
         return (
           <button
             key={cmd.name}
             type="button"
-            className={`w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors ${
-              i === selectedIndex
+            role="option"
+            aria-selected={isSelected}
+            className={`w-full flex items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
+              isSelected
                 ? "bg-zinc-700 text-white"
                 : "text-zinc-300 hover:bg-zinc-800"
             }`}
