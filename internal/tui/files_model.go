@@ -1859,8 +1859,16 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		}
 		treeLines = append(treeLines, line)
 	}
-	// Calculate available height for tree lines
-	treeContentHeight := h - 4 - 2 // pane height minus top/bottom borders
+
+	// Get header rows (search hint, multi-select status, etc.)
+	headerRows := m.treeHeaderRows(treeW, styles)
+	headerRowCount := len(headerRows)
+
+	// Calculate available height for tree lines (excluding header rows and pane frame)
+	// h - 4 = pane height (h minus top header area)
+	// - 2 = pane frame (top + bottom border)
+	// - headerRowCount = header rows that will be prepended above the file list
+	treeContentHeight := h - 4 - 2 - headerRowCount
 	if treeContentHeight < 1 {
 		treeContentHeight = 1
 	}
@@ -1891,9 +1899,9 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	}
 
 	treeContent := strings.Join(visibleLines, "\n")
-	// Prepend hint rows. treeHeaderRows is shared with treeNodeForClick so the
-	// rendered row count and the click hit-box offset stay in lockstep.
-	if headerRows := m.treeHeaderRows(treeW, styles); len(headerRows) > 0 {
+	// Prepend hint rows. headerRows was calculated earlier (before height calculation)
+	// to ensure rendered row count and click hit-box offset stay in lockstep.
+	if headerRowCount > 0 {
 		treeContent = strings.Join(headerRows, "\n") + "\n" + treeContent
 	}
 
