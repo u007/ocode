@@ -658,6 +658,7 @@ type model struct {
 	pendingToolCallID        string
 	pendingPermission        agent.PermissionRequest
 	styles                   Styles
+	modalStack               *ModalStack
 	streaming                bool
 	ctrlCPressed             bool
 	exitPending              bool
@@ -1418,6 +1419,7 @@ func newModel(opts ...RunOptions) model {
 		supervisor:           sup,
 		hookPipeline:         hp,
 		webFS:                o.WebFS,
+		modalStack:           NewModalStack(),
 	}
 
 	if resolvedSmallModel != "" {
@@ -3037,6 +3039,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingSubAgentResp = msg.respCh
 		m.showPermDialog = true
 		m.permConfirm = ""
+		m.pushPermissionModal()
 		m.activeTab = tabChat
 		m.chatUnread = false
 		m.pendingPermission = req
@@ -7623,6 +7626,7 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				log.Printf("[perm] permission dialog shown: tool=%s rule=%s command=%q", req.ToolName, req.Rule, req.Command)
 				m.showPermDialog = true
 				m.permConfirm = ""
+				m.pushPermissionModal()
 				m.activeTab = tabChat
 				m.chatUnread = false
 				m.pendingPermission = req
@@ -7641,6 +7645,17 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				text: renderToolResult(toolName, am.Content, m.styles),
 				raw:  &copyMsg,
 			})
+			// Surface user-facing notices (e.g. LSP server not installed) as
+			// transient messages that are shown in the transcript but NOT sent
+			// to the LLM.
+			if am.Notice != "" {
+				noticeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68"))
+				m.messages = append(m.messages, message{
+					role:      roleAssistant,
+					text:      noticeStyle.Render("\u26a0 ") + am.Notice,
+					transient: true,
+				})
+			}
 		}
 	}
 	if am.Usage != nil || am.Spend != nil {
@@ -7778,6 +7793,7 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 			pending := m.permConfirm
 			m.permConfirm = ""
 			m.showPermDialog = false
+			m.popPermissionModal()
 			return m.handlePermissionChoice(pending), true
 		case "n", "no", "back", "esc":
 			m.permConfirm = ""
@@ -7805,10 +7821,12 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 		return nil, false
 	case "y", "yes", "allow", "once", "n", "no", "deny":
 		m.showPermDialog = false
+		m.popPermissionModal()
 		return m.handlePermissionChoice(choice), true
 	}
 	// Unknown input: re-display the prompt via handlePermissionChoice's default.
 	m.showPermDialog = false
+	m.popPermissionModal()
 	return m.handlePermissionChoice(choice), true
 }
 
@@ -7873,6 +7891,7 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		default:
 			m.showPermDialog = true
 			m.pendingSubAgentResp = respCh
+			m.pushPermissionModal()
 			m.updatePermButtonRegions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
 			return nil
@@ -7893,6 +7912,7 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful): tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow %s — this operation is considered harmful and always requires human approval.", permissionRuleLabel(req)), transient: true})
 			m.showPermDialog = true
+			m.pushPermissionModal()
 			m.updatePermButtonRegions()
 			return nil
 		}
@@ -7930,6 +7950,7 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful tool): tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow tool %q — this operation is considered harmful and always requires human approval.", toolName), transient: true})
 			m.showPermDialog = true
+			m.pushPermissionModal()
 			m.updatePermButtonRegions()
 			return nil
 		}
