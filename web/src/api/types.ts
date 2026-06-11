@@ -97,6 +97,12 @@ export interface AgentRunMessage {
   toolCallId?: string;
 }
 
+export interface GitDiffFile {
+  path: string;
+  status: string;
+  patch: string;
+}
+
 export interface AgentRun {
   id: string;
   name: string;

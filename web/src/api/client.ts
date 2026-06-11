@@ -5,6 +5,7 @@ import type {
   ModelInfo,
   AgentInfo,
   AgentRun,
+  GitDiffFile,
 } from "./types";
 
 const BASE = "";
@@ -57,6 +58,10 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  getGitDiff: (path?: string) =>
+    fetchJSON<GitDiffFile[]>(
+      `/api/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+    ),
   getAdvisor: () =>
     fetchJSON<{ model: string }>("/api/config/advisor"),
   setAdvisor: (model: string) =>
