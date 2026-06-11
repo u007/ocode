@@ -1806,8 +1806,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if shouldForwardToTranscriptViewport(msg) {
 			m.viewport, vpCmd = m.viewport.Update(msg)
 		}
-		m, popupCmd = m.updateSlashPopupState()
 	}
+	// updateSlashPopupState must run even when a modal is active, because the
+	// slash popup itself is a modal (pushed onto modalStack). If we skip this
+	// while the popup is showing, subsequent keystrokes update the textarea
+	// value but the popup items never re-filter.
+	m, popupCmd = m.updateSlashPopupState()
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:

@@ -373,6 +373,60 @@ func TestSlashPopupHidesForFilePath(t *testing.T) {
 	}
 }
 
+// TestSlashPopupFiltersAsUserTypes verifies that the popup re-filters its
+// suggestions as the user types more characters after the popup is already
+// shown. This was broken because the popup is a modal (pushed onto modalStack),
+// so modalActive was true and updateSlashPopupState() was skipped on subsequent
+// keystrokes.
+func TestSlashPopupFiltersAsUserTypes(t *testing.T) {
+	m := model{input: newTestTextarea()}
+
+	// Step 1: type "/" → popup should appear with all commands
+	m.input.SetValue("/")
+	m, _ = m.updateSlashPopupState()
+	if !m.showSlashPopup {
+		t.Fatal("expected popup to appear for '/'")
+	}
+	totalItems := len(m.slashPopupItems)
+	if totalItems == 0 {
+		t.Fatal("expected some suggestions for bare '/'")
+	}
+
+	// Step 2: type "/co" → popup should filter down (fewer items)
+	m.input.SetValue("/co")
+	m, _ = m.updateSlashPopupState()
+	if !m.showSlashPopup {
+		t.Fatal("expected popup to stay visible for '/co'")
+	}
+	coItems := len(m.slashPopupItems)
+	if coItems == 0 {
+		t.Fatal("expected some suggestions for '/co'")
+	}
+	if coItems >= totalItems {
+		t.Fatalf("expected '/co' to filter down from %d items, got %d", totalItems, coItems)
+	}
+
+	// Step 3: type "/compa" → should narrow further
+	m.input.SetValue("/compa")
+	m, _ = m.updateSlashPopupState()
+	if !m.showSlashPopup {
+		t.Fatal("expected popup to stay visible for '/compa'")
+	}
+	if len(m.slashPopupItems) == 0 {
+		t.Fatal("expected at least one suggestion for '/compa'")
+	}
+
+	// Step 4: type "/zzz" → no matches, popup should remain open but with empty list
+	m.input.SetValue("/zzz")
+	m, _ = m.updateSlashPopupState()
+	if !m.showSlashPopup {
+		t.Fatal("expected popup to remain visible for '/zzz' (no matches but still slash prefix)")
+	}
+	if len(m.slashPopupItems) != 0 {
+		t.Fatalf("expected 0 suggestions for '/zzz', got %d", len(m.slashPopupItems))
+	}
+}
+
 func TestShortcodeForPastedFilesConvertsDraggedPath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "assets", "screen shot.png")
