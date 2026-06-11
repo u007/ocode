@@ -181,6 +181,7 @@ type filesModel struct {
 
 	// Tree horizontal scroll offset
 	treeScrollX int // horizontal scroll offset in the tree panel (columns)
+	treeScrollY int // vertical scroll offset in the tree panel (lines)
 }
 
 func newFilesModel(workDir string) filesModel {

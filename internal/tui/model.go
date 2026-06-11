@@ -67,6 +67,7 @@ const (
 	scrollbarDragGitDiff
 	scrollbarDragFilesPreview
 	scrollbarDragLog
+	scrollbarDragFilesTree
 )
 
 type role int
