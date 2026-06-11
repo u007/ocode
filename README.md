@@ -91,7 +91,7 @@ Type `/` in the chat input (TUI or Web) to open the slash command palette. Comma
 | Command | Aliases | When to Use | Notes |
 |---------|---------|-------------|-------|
 | `/clear` | | Start a fresh conversation context in the current session | Keeps session history on disk; only clears in-memory messages |
-| `/compact` | | Manually trigger context compaction when approaching token limits | Uses the configured summary model (default: active model) |
+| `/compact` | `[focus]` | Manually trigger context compaction; optional focus guides the summary | Uses the configured summary model (default: active model) |
 | `/recap` | | Generate a structured session recap (Goal, Progress, Decisions, Next Steps, Files) | **Web UI only** — backend endpoint planned (`POST /api/sessions/{id}/recap`) but not yet implemented. In TUI, acts as a normal prompt. |
 | `/export` | | Export the full session as JSON (messages, metadata, token usage) | Output includes full transcript for backup or migration |
 | `/export-claude` | | Export session in Claude Code compatible format | For importing into Claude Code |
@@ -165,11 +165,14 @@ Compact defaults:
 Compaction triggers automatically when used context exceeds the configured ratio of the active model's window. Every compaction:
 
 1. **Prunes** oversized tool results in the slice being summarised (capped at ~2KB each — full output remains available via on-disk tool-result truncation, see [Tool result handling](#tool-result-handling)).
-2. **Produces a structured summary** following a fixed Markdown template (Goal / Constraints / Progress / Decisions / Next Steps / Critical Context / Relevant Files). Every section is required, even if "(none)".
-3. **Anchors to the prior summary.** When a previous compaction summary exists in the session, the next compaction passes it as `<previous-summary>` and instructs the model to update it in place — merging new facts, removing stale ones, preserving still-true context. This keeps continuity across multiple compactions in the same session.
-4. **Replaces, not appends.** The prior summary message is overwritten by the new one. After N compactions there is still exactly one summary message in the session, not N.
-5. **Drops the old history.** Once a summary replaces a range of messages, the original messages are removed from the session. They are not re-sent to the LLM on the next turn. The TUI banner ("📦 Compacted N earlier messages") only shows where the cut happened.
-6. **Safe-cuts** the boundary so every assistant `tool_call` and its matching `tool_result` end up on the same side of the cut — no orphans.
+2. **Produces a structured summary** following a fixed Markdown template (Original Request / Current Scope / User Directives (verbatim) / Constraints / Progress / Current Work / Key Decisions / Errors & Fixes / Next Steps / Critical Context / Relevant Files). Every section is required, even if "(none)". The response is validated against the template and retried once when sections are missing.
+3. **Anchors to the prior summary.** When a previous compaction summary exists in the session, the next compaction passes it as `<previous-summary>` and instructs the model to update it in place. User directives, decisions, and constraints are append-only — reversed entries are marked "(superseded)" rather than deleted. This keeps continuity across multiple compactions in the same session.
+4. **Summarises in batches when needed.** When the middle of the conversation exceeds `max_summary_input_tokens`, it is split into consecutive batches summarised in order, each anchored on the previous batch's output — nothing is dropped unsummarised. The banner notes the batch count.
+5. **Replaces, not appends.** The prior summary message is overwritten by the new one. After N compactions there is still exactly one summary message in the session, not N.
+6. **Drops the old history.** Once a summary replaces a range of messages, the original messages are removed from the session. They are not re-sent to the LLM on the next turn. The TUI banner ("📦 Compacted N earlier messages") only shows where the cut happened.
+7. **Safe-cuts** the boundary so every assistant `tool_call` and its matching `tool_result` end up on the same side of the cut — no orphans.
+
+Manual compaction accepts an optional focus: `/compact <focus>` guides the summary toward what you care about (e.g. `/compact keep the auth refactor details`).
 
 The summary is tagged with `[ocode:compaction-summary]` so subsequent compactions can find it. This tag is internal; you don't need to manage it manually.
 

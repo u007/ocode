@@ -4858,6 +4858,46 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		filesTrackTop := appHeaderHeight + 1
 		scrollbarSetOffset(&m.files.preview, mouse.Y-m.scrollbarDragOffset, filesTrackTop, m.files.preview.Height())
 		return m, nil, true
+	case scrollbarDragFilesTree:
+		treeW := m.width * 35 / 100
+		headerRowCount := len(m.files.treeHeaderRows(treeW, m.styles))
+		visibleLines := m.height - 4 - 2 - headerRowCount
+		if visibleLines < 1 {
+			visibleLines = 1
+		}
+		treeTrackTop := appHeaderHeight + 1
+		treeTrackHeight := headerRowCount + visibleLines
+		totalLines := len(m.files.nodes)
+
+		if totalLines <= visibleLines {
+			// No scrollbar needed
+			break
+		}
+
+		// Calculate new scroll position based on thumb drag
+		_, thumbSize, ok := scrollbarThumbMetrics(treeTrackHeight, totalLines, visibleLines, m.files.treeScrollY)
+		if !ok {
+			break
+		}
+
+		maxThumbTop := treeTrackHeight - thumbSize
+		if maxThumbTop <= 0 {
+			break
+		}
+
+		// Current thumb position based on where user is dragging
+		relY := mouse.Y - treeTrackTop - m.scrollbarDragOffset
+		if relY < 0 {
+			relY = 0
+		}
+		if relY > maxThumbTop {
+			relY = maxThumbTop
+		}
+
+		// Map thumb position back to scroll offset
+		maxOffset := totalLines - visibleLines
+		m.files.treeScrollY = int(float64(relY) / float64(maxThumbTop) * float64(maxOffset))
+		return m, nil, true
 	}
 
 	if m.sel.dragging {

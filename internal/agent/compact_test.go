@@ -460,7 +460,7 @@ func TestShouldCompactFallbackWithSafetyMargin(t *testing.T) {
 func TestBuildSummaryPromptIncludesStructuredTemplate(t *testing.T) {
 	middle := []Message{{Role: "user", Content: "hi"}}
 	prompt, _ := buildSummaryPrompt(middle, 50000, "", "")
-	wantSections := []string{"## Goal", "## Constraints & Preferences", "## Progress", "### Done", "### In Progress", "### Blocked", "## Key Decisions", "## Next Steps", "## Critical Context", "## Relevant Files"}
+	wantSections := append([]string{"### Done", "### In Progress", "### Blocked"}, requiredSummarySections...)
 	for _, s := range wantSections {
 		if !strings.Contains(prompt, s) {
 			t.Errorf("structured template missing section %q", s)
@@ -605,5 +605,124 @@ func TestPruneToolResultsLeavesSmallContentAlone(t *testing.T) {
 	pruned := pruneToolResults(middle, 2000)
 	if pruned[0].Content != "small output" {
 		t.Errorf("small content was modified: %q", pruned[0].Content)
+	}
+}
+
+func TestChunkMiddleByBudgetSplitsAndPreservesOrder(t *testing.T) {
+	var middle []Message
+	for i := 0; i < 6; i++ {
+		middle = append(middle, Message{Role: "user", Content: strings.Repeat("x", 2000)})
+	}
+	chunks := chunkMiddleByBudget(middle, 3000) // budget ≈ 3000*4*0.65 = 7800 chars
+	if len(chunks) < 2 {
+		t.Fatalf("expected multiple chunks, got %d", len(chunks))
+	}
+	total := 0
+	for _, c := range chunks {
+		total += len(c)
+	}
+	if total != len(middle) {
+		t.Fatalf("chunking lost messages: got %d, want %d", total, len(middle))
+	}
+}
+
+func TestRunCompactChunksLargeMiddleInsteadOfDropping(t *testing.T) {
+	client := &scriptedCaptureClient{Responses: []string{validSummaryText("batch1"), validSummaryText("batch2")}}
+	a := &Agent{client: client}
+	rt := compactRuntime{
+		Enabled:               true,
+		KeepRecentTurns:       1,
+		SummaryTimeoutSeconds: 5,
+		SummaryMaxRetries:     0,
+		MaxSummaryInputTokens: 3000,
+	}
+	msgs := []Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "original ask"},
+	}
+	for i := 0; i < 6; i++ {
+		msgs = append(msgs, Message{Role: "assistant", Content: strings.Repeat("x", 2000)})
+	}
+	msgs = append(msgs,
+		Message{Role: "user", Content: "recent tail"},
+		Message{Role: "assistant", Content: "tail response"},
+	)
+
+	res := a.runCompact(msgs, rt, "")
+	if !res.OK {
+		t.Fatalf("expected compaction success, got %#v", res)
+	}
+	if len(client.Prompts) < 2 {
+		t.Fatalf("expected multiple batch prompts, got %d", len(client.Prompts))
+	}
+	if !strings.Contains(client.Prompts[1], "<previous-summary>") || !strings.Contains(client.Prompts[1], "batch1") {
+		t.Fatalf("second batch prompt should anchor on first batch summary")
+	}
+	if !strings.Contains(res.Note, "batches") {
+		t.Fatalf("Note should report batch count, got %q", res.Note)
+	}
+	if !strings.Contains(res.Summary.Content, "batch2") {
+		t.Fatalf("final summary should be the last batch output")
+	}
+}
+
+func TestShrinkSummarySectionsKeepsAllHeaders(t *testing.T) {
+	prev := validSummaryText("keep") + "\n## Critical Context\n- " + strings.Repeat("z", 6000)
+	identity := func(s string) string { return s }
+	out := shrinkSummarySections(prev, 3000, identity)
+	if len(out) > 3000 {
+		t.Fatalf("shrunk summary still too large: %d chars", len(out))
+	}
+	for _, h := range requiredSummarySections {
+		if !strings.Contains(out, h) {
+			t.Errorf("shrink dropped section header %q", h)
+		}
+	}
+}
+
+func TestBuildSummaryPromptIncludesFocus(t *testing.T) {
+	prompt, _ := buildSummaryPrompt([]Message{{Role: "user", Content: "x"}}, 50000, "", "the auth refactor")
+	if !strings.Contains(prompt, "pay particular attention to: the auth refactor") {
+		t.Fatalf("prompt missing focus instruction: %q", prompt)
+	}
+}
+
+func TestRenderMiddleFragmentsContextAndToolNames(t *testing.T) {
+	middle := []Message{
+		{Role: "assistant", ToolCalls: []ToolCall{tcCall("call9", "grep")}},
+		{Role: "tool", ToolID: "call9", Content: "match found"},
+		{Role: "system", Content: "injected hook note"},
+	}
+	joined := strings.Join(renderMiddleFragments(middle), "\n\n")
+	if !strings.Contains(joined, "[tool_result grep]") {
+		t.Errorf("tool result should be labelled with tool name, got %q", joined)
+	}
+	if !strings.Contains(joined, "[context]: injected hook note") {
+		t.Errorf("system message should render as [context], got %q", joined)
+	}
+}
+
+func TestRunSummaryRetriesMalformedThenAcceptsValid(t *testing.T) {
+	client := &scriptedCaptureClient{Responses: []string{"not a template", validSummaryText("good")}}
+	out, err := runSummary(t.Context(), client, "prompt", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "good") {
+		t.Fatalf("expected retried valid summary, got %q", out)
+	}
+	if client.CallCount != 2 {
+		t.Fatalf("expected 2 attempts (malformed retry), got %d", client.CallCount)
+	}
+}
+
+func TestRunSummaryFallsBackToMalformedAfterRetries(t *testing.T) {
+	client := &scriptedCaptureClient{Responses: []string{"malformed one", "malformed two"}}
+	out, err := runSummary(t.Context(), client, "prompt", 0)
+	if err != nil {
+		t.Fatalf("malformed summary should still be returned, got error: %v", err)
+	}
+	if out != "malformed two" {
+		t.Fatalf("expected last malformed response, got %q", out)
 	}
 }

@@ -72,6 +72,16 @@ func (c *scriptedCaptureClient) Chat(messages []Message, tools []map[string]inte
 func (c *scriptedCaptureClient) GetProvider() string { return "mock" }
 func (c *scriptedCaptureClient) GetModel() string    { return "mock-model" }
 
+// validSummaryText returns a summary containing every required template
+// section (each bullet carrying tag) so mock responses pass validateSummary.
+func validSummaryText(tag string) string {
+	var b strings.Builder
+	for _, h := range requiredSummarySections {
+		fmt.Fprintf(&b, "%s\n- %s\n\n", h, tag)
+	}
+	return b.String()
+}
+
 type blockingToolCallClient struct {
 	started chan struct{}
 	release chan struct{}
@@ -897,7 +907,7 @@ func TestCompactSummaryClientUsesOverride(t *testing.T) {
 }
 
 func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {
-	client := &scriptedCaptureClient{Responses: []string{"summary"}}
+	client := &scriptedCaptureClient{Responses: []string{validSummaryText("summary")}}
 	a := &Agent{client: client}
 	rt := compactRuntime{
 		Enabled:               true,
@@ -930,7 +940,7 @@ func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {
 }
 
 func TestRunCompactAnchoredSummaryReplacesPreviousSummaryInPlace(t *testing.T) {
-	client := &scriptedCaptureClient{Responses: []string{"first summary", "second summary"}}
+	client := &scriptedCaptureClient{Responses: []string{validSummaryText("first summary"), validSummaryText("second summary")}}
 	a := &Agent{client: client}
 	rt := compactRuntime{
 		Enabled:               true,
@@ -1006,7 +1016,7 @@ func TestRunCompactAnchoredSummaryReplacesPreviousSummaryInPlace(t *testing.T) {
 // prepended before a saved compaction summary. Without the fix, findPrefixEnd
 // would absorb the summary into the prefix, causing "nothing to compact".
 func TestRunCompactResumedSessionMultipleBasePrompts(t *testing.T) {
-	client := &scriptedCaptureClient{Responses: []string{"resumed summary"}}
+	client := &scriptedCaptureClient{Responses: []string{validSummaryText("resumed summary")}}
 	a := &Agent{client: client}
 	rt := compactRuntime{
 		Enabled:               true,
