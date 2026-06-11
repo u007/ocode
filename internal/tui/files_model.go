@@ -1895,7 +1895,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	if m.treeScrollY < 0 {
 		m.treeScrollY = 0
 	}
-	if m.treeScrollY > len(treeLines)-1 {
+	if len(treeLines) > 0 && m.treeScrollY > len(treeLines)-1 {
 		m.treeScrollY = len(treeLines) - 1
 	}
 
