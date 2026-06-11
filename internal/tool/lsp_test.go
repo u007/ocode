@@ -2,6 +2,8 @@ package tool
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -91,5 +93,68 @@ func TestLSPTool_WorkspaceSymbolLangHint(t *testing.T) {
 	// which would mean the lang hint was ignored.
 	if strings.Contains(err.Error(), "gopls") {
 		t.Fatalf("workspaceSymbol with lang=rust should not query gopls, got: %v", err)
+	}
+}
+
+func TestNoticedError(t *testing.T) {
+	inner := fmt.Errorf("language server %q not found in PATH", "gopls")
+	ne := &NoticedError{
+		Err:    inner,
+		Notice: "LSP server \"gopls\" is not installed. Install with: go install golang.org/x/tools/gopls@latest",
+	}
+
+	// Error() delegates to inner error
+	if ne.Error() != inner.Error() {
+		t.Fatalf("Error() = %q, want %q", ne.Error(), inner.Error())
+	}
+
+	// Unwrap returns inner error
+	if !errors.Is(ne, inner) {
+		t.Fatal("errors.Is should find inner error")
+	}
+}
+
+func TestExtractServerCmd(t *testing.T) {
+	tests := []struct {
+		msg  string
+		want string
+	}{
+		{`language server "gopls" not found in PATH`, "gopls"},
+		{`language server "rust-analyzer" not found in PATH`, "rust-analyzer"},
+		{`no quotes here`, ""},
+		{`language server "pyright-langserver" not found in PATH`, "pyright-langserver"},
+	}
+	for _, tt := range tests {
+		got := extractServerCmd(tt.msg)
+		if got != tt.want {
+			t.Errorf("extractServerCmd(%q) = %q, want %q", tt.msg, got, tt.want)
+		}
+	}
+}
+
+func TestWrapLSPError(t *testing.T) {
+	// nil error stays nil
+	if wrapLSPError(nil) != nil {
+		t.Fatal("wrapLSPError(nil) should be nil")
+	}
+
+	// Non-matching error passes through unchanged
+	err := fmt.Errorf("some other error")
+	if wrapLSPError(err) != err {
+		t.Fatal("non-matching error should pass through")
+	}
+
+	// "not found in PATH" error gets wrapped with NoticedError
+	err = fmt.Errorf("language server %q not found in PATH (install it for .go support)", "gopls")
+	wrapped := wrapLSPError(err)
+	ne, ok := wrapped.(*NoticedError)
+	if !ok {
+		t.Fatalf("expected *NoticedError, got %T", wrapped)
+	}
+	if !strings.Contains(ne.Notice, "gopls") {
+		t.Fatalf("notice should mention gopls, got: %s", ne.Notice)
+	}
+	if !strings.Contains(ne.Notice, "go install") {
+		t.Fatalf("notice should contain install command, got: %s", ne.Notice)
 	}
 }

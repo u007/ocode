@@ -16,6 +16,34 @@ const (
 	scrollbarThumb = "█"
 )
 
+// Scrollbar is a unified scrollbar component consolidating renderScrollbar
+// and renderListScrollbar into a single type with drag hit-testing support.
+type Scrollbar struct{}
+
+// NewScrollbar creates a new Scrollbar instance.
+func NewScrollbar() *Scrollbar { return &Scrollbar{} }
+
+// Render renders a vertical scrollbar for continuous (offset-based) content.
+// Returns a newline-joined string of height rows.
+func (sb *Scrollbar) Render(height, totalLines, visibleLines, offsetLines int) string {
+	return renderScrollbar(height, totalLines, visibleLines, offsetLines)
+}
+
+// RenderList renders a vertical scrollbar for list-based content where
+// visibleStart is the index of the first visible item.
+func (sb *Scrollbar) RenderList(height, totalItems, visibleStart, visibleCount int) string {
+	return renderListScrollbar(height, totalItems, visibleStart, visibleCount)
+}
+
+// DragHitTest maps a mouse Y coordinate (relative to the track top) to a
+// scroll offset delta. Returns the delta from the current thumb position
+// and whether the click landed on the thumb.
+func (sb *Scrollbar) DragHitTest(mouseY, trackTop, trackHeight, totalLines, visibleLines, currentOffset int) (int, bool) {
+	return scrollbarThumbOffset(mouseY, trackTop, trackHeight, totalLines, visibleLines, currentOffset)
+}
+
+// --- legacy functions kept as wrappers for Part 2 migration ---
+
 func renderScrollbar(height, totalLines, visibleLines, offsetLines int) string {
 	if height <= 0 {
 		return ""

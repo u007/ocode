@@ -569,11 +569,16 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					a.activity.toolStarted(tc.Function.Name)
 					result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 					a.activity.toolDone(tc.Function.Name)
+					var notice string
 					if err != nil {
+						var ne *tool.NoticedError
+						if errors.As(err, &ne) {
+							notice = ne.Notice
+						}
 						result = fmt.Sprintf("Error: %v", err)
 					}
 					result = TruncateToolResult(tc.ID, result)
-					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result}
+					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result, Notice: notice}
 				}(i, resp.ToolCalls[i], isCancelled)
 			}
 			wg.Wait()
@@ -587,11 +592,16 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			a.activity.toolStarted(tc.Function.Name)
 			result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
 			a.activity.toolDone(tc.Function.Name)
+			var notice string
 			if err != nil {
+				var ne *tool.NoticedError
+				if errors.As(err, &ne) {
+					notice = ne.Notice
+				}
 				result = fmt.Sprintf("Error: %v", err)
 			}
 			result = TruncateToolResult(tc.ID, result)
-			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result}
+			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result, Notice: notice}
 		}
 		if isCancelled() {
 			return newMsgs, nil

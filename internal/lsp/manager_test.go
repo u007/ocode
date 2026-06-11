@@ -1,6 +1,7 @@
 package lsp
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -26,5 +27,24 @@ func TestSetEventChanReceivesStartEvent(t *testing.T) {
 	// Verify the channel is stored.
 	if m.eventCh != ch {
 		t.Fatal("event channel not stored")
+	}
+}
+
+func TestInstallHint(t *testing.T) {
+	tests := []struct {
+		cmd      string
+		contains string
+	}{
+		{"gopls", "go install golang.org/x/tools/gopls@latest"},
+		{"rust-analyzer", "rustup component add rust-analyzer"},
+		{"pyright-langserver", "npm install -g pyright"},
+		{"typescript-language-server", "npm install -g typescript"},
+		{"unknown-server", "check your package manager"},
+	}
+	for _, tt := range tests {
+		got := InstallHint(tt.cmd)
+		if !strings.Contains(got, tt.contains) {
+			t.Errorf("InstallHint(%q) = %q, want it to contain %q", tt.cmd, got, tt.contains)
+		}
 	}
 }

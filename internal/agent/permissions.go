@@ -800,6 +800,16 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			return PermissionDecision{Level: PermissionAllow}
 		}
 
+		// Interpreter executions (python3 << EOF, node -e "...", etc.) are
+		// handled by the structured LLM interpreter path, not the per-token
+		// prefix checker. Routing them here avoids noisy per-line ASK decisions
+		// from heredoc body content being tokenized as separate commands.
+		if ie, ok := classifyInterpreterExecution(command); ok &&
+			(ie.SourceMode == "heredoc" || ie.SourceMode == "inline_eval" || ie.SourceMode == "script_file" || ie.SourceMode == "stdin_pipe") {
+			emitDebug("perm", fmt.Sprintf("Decide ASK (interpreter): lang=%s mode=%s", ie.Language, ie.SourceMode))
+			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "bash.interpreter."+ie.Language)}
+		}
+
 		// Parse the compound command
 		parsedCmds, err := parseShellCommandLine(command)
 		if err != nil {
