@@ -1885,6 +1885,20 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		m.treeScrollY = 0
 	}
 
+	// Keep cursor visible in viewport
+	if m.cursor < m.treeScrollY {
+		m.treeScrollY = m.cursor
+	}
+	if m.cursor >= m.treeScrollY+treeContentHeight {
+		m.treeScrollY = m.cursor - treeContentHeight + 1
+	}
+	if m.treeScrollY < 0 {
+		m.treeScrollY = 0
+	}
+	if m.treeScrollY > len(treeLines)-1 {
+		m.treeScrollY = len(treeLines) - 1
+	}
+
 	// Slice visible lines
 	visibleStart := m.treeScrollY
 	visibleEnd := m.treeScrollY + treeContentHeight
