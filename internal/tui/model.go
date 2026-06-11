@@ -2696,6 +2696,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.showRetryDialog = true
+		m.pushRetryModal()
 		m.retryDialogMsg = fmt.Sprintf("⚠ Subagent %s retrying (attempt %d): %s",
 			msg.ev.Name, msg.ev.RetryCount, msg.ev.LastError)
 		if m.agent != nil {
@@ -3481,6 +3482,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		switch keyStr {
 		case "enter", "esc":
 			m.showRetryDialog = false
+			m.popRetryModal()
 			return m, nil
 		}
 		return m, nil
