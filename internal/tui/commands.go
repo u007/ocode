@@ -57,7 +57,7 @@ func init() {
 		{name: "/connect", help: "Show/Set provider API keys", handler: runConnectCmd},
 		{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
-		{name: "/compact", help: "Reduce context size by removing tool history", handler: runCompactCmd},
+		{name: "/compact", usage: "/compact [focus]", help: "Summarise older context to free tokens; optional focus guides the summary", handler: runCompactCmd},
 		{name: "/recap", help: "Summarize conversation in caveman style (uses small model)", handler: runRecapCmd},
 		{name: "/changes", help: "Analyze repo changes: diffs, LSP errors, and in-progress specs", handler: runChangesCmd},
 		{name: "/lsp", usage: "/lsp [show|open <path>|errors|all]", help: "Show current LSP diagnostics and error counts", handler: runLSPCmd},

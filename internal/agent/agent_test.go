@@ -917,7 +917,7 @@ func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {
 		{Role: "assistant", Content: "tail response"},
 	}
 
-	res := a.runCompact(msgs, rt)
+	res := a.runCompact(msgs, rt, "")
 	if !res.OK {
 		t.Fatalf("expected compaction success, got %#v", res)
 	}
@@ -951,7 +951,7 @@ func TestRunCompactAnchoredSummaryReplacesPreviousSummaryInPlace(t *testing.T) {
 		{Role: "assistant", Content: "tail response"},
 	}
 
-	first := a.runCompact(msgs, rt)
+	first := a.runCompact(msgs, rt, "")
 	if !first.OK {
 		t.Fatalf("first compaction failed: %#v", first)
 	}
@@ -967,7 +967,7 @@ func TestRunCompactAnchoredSummaryReplacesPreviousSummaryInPlace(t *testing.T) {
 		Message{Role: "assistant", Content: "latest response"},
 	)
 
-	second := a.runCompact(msgs, rt)
+	second := a.runCompact(msgs, rt, "")
 	if !second.OK {
 		t.Fatalf("second compaction failed: %#v", second)
 	}
@@ -1035,7 +1035,7 @@ func TestRunCompactResumedSessionMultipleBasePrompts(t *testing.T) {
 		{Role: "assistant", Content: "final answer"},
 	}
 
-	result := a.runCompact(msgs, rt)
+	result := a.runCompact(msgs, rt, "")
 	if !result.OK {
 		t.Fatalf("compaction on resumed session failed (nothing to compact): %#v", result)
 	}

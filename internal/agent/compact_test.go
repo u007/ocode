@@ -224,7 +224,7 @@ func TestForceCompactAsyncIgnoresDisabledAutoCompaction(t *testing.T) {
 		{Role: "assistant", Content: "a4"},
 	}
 
-	if !a.CompactAsync(msgs) {
+	if !a.CompactAsync(msgs, "") {
 		t.Fatal("expected manual compaction to start even when auto compaction is disabled")
 	}
 
@@ -254,7 +254,7 @@ func TestBuildSummaryPromptIncludesToolInfo(t *testing.T) {
 		{Role: "tool", ToolID: "c1", Content: "wrote 12 lines"},
 		{Role: "assistant", Content: "done"},
 	}
-	prompt, dropped := buildSummaryPrompt(middle, 50000, "")
+	prompt, dropped := buildSummaryPrompt(middle, 50000, "", "")
 	if dropped != 0 {
 		t.Errorf("did not expect drops; got %d", dropped)
 	}
@@ -278,7 +278,7 @@ func TestBuildSummaryPromptDropsOldestWhenOverCap(t *testing.T) {
 		{Role: "user", Content: "keepme"},
 	}
 	// maxInputTokens=1000 → maxChars=4000, so most fragments must be dropped.
-	prompt, dropped := buildSummaryPrompt(middle, 1000, "")
+	prompt, dropped := buildSummaryPrompt(middle, 1000, "", "")
 	if dropped == 0 {
 		t.Errorf("expected drops; got 0")
 	}
@@ -459,7 +459,7 @@ func TestShouldCompactFallbackWithSafetyMargin(t *testing.T) {
 
 func TestBuildSummaryPromptIncludesStructuredTemplate(t *testing.T) {
 	middle := []Message{{Role: "user", Content: "hi"}}
-	prompt, _ := buildSummaryPrompt(middle, 50000, "")
+	prompt, _ := buildSummaryPrompt(middle, 50000, "", "")
 	wantSections := []string{"## Goal", "## Constraints & Preferences", "## Progress", "### Done", "### In Progress", "### Blocked", "## Key Decisions", "## Next Steps", "## Critical Context", "## Relevant Files"}
 	for _, s := range wantSections {
 		if !strings.Contains(prompt, s) {
@@ -471,7 +471,7 @@ func TestBuildSummaryPromptIncludesStructuredTemplate(t *testing.T) {
 func TestBuildSummaryPromptIncludesPreviousSummaryWhenProvided(t *testing.T) {
 	middle := []Message{{Role: "user", Content: "new turn"}}
 	prev := "## Goal\n- prior task summary\n\n## Progress\n### Done\n- read foo.go"
-	prompt, _ := buildSummaryPrompt(middle, 50000, prev)
+	prompt, _ := buildSummaryPrompt(middle, 50000, prev, "")
 	if !strings.Contains(prompt, "<previous-summary>") {
 		t.Errorf("anchor tag missing")
 	}
@@ -484,7 +484,7 @@ func TestBuildSummaryPromptIncludesPreviousSummaryWhenProvided(t *testing.T) {
 }
 
 func TestBuildSummaryPromptCreateInstructionWhenNoPrevious(t *testing.T) {
-	prompt, _ := buildSummaryPrompt([]Message{{Role: "user", Content: "x"}}, 50000, "")
+	prompt, _ := buildSummaryPrompt([]Message{{Role: "user", Content: "x"}}, 50000, "", "")
 	if !strings.Contains(prompt, "Create a new summary") {
 		t.Errorf("create instruction missing")
 	}
@@ -501,7 +501,7 @@ func TestBuildSummaryPromptRespectsCapWithPreviousSummary(t *testing.T) {
 		{Role: "user", Content: strings.Repeat("x", 4000)},
 		{Role: "user", Content: "keepme"},
 	}
-	prompt, dropped := buildSummaryPrompt(middle, 1000, prev)
+	prompt, dropped := buildSummaryPrompt(middle, 1000, prev, "")
 	if len(prompt) > 1000*charsPerToken {
 		t.Fatalf("prompt exceeded cap: got %d want <= %d", len(prompt), 1000*charsPerToken)
 	}

@@ -4303,28 +4303,24 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// Tree scrollbar hit-test (before node click, so scrollbar has precedence)
 		treeScrollbarX := treeW - 2 - 1 // right edge of tree pane (inside border)
 		treeTrackTop := appHeaderHeight + 1
-		treeTrackHeight := m.height - 4 // pane height
+
+		// Calculate visible lines for scrollbar bounds (must match View() calculation)
+		headerRowCount := len(m.files.treeHeaderRows(treeW, m.styles))
+		visibleLines := m.height - 4 - 2 - headerRowCount // content height (matching View() calculation)
+		if visibleLines < 1 {
+			visibleLines = 1
+		}
+		treeTrackHeight := headerRowCount + visibleLines // = m.height - 6, matching View()
+
 		if mouse.X == treeScrollbarX && mouse.Y >= treeTrackTop && mouse.Y < treeTrackTop+treeTrackHeight {
 			// Click is on the tree scrollbar column
-			headerRowCount := len(m.files.treeHeaderRows(treeW, m.styles))
-			visibleLines := m.height - 4 - 2 - headerRowCount // content height (matching View() calculation)
-			if visibleLines < 1 {
-				visibleLines = 1
-			}
 			totalLines := len(m.files.nodes) // tree lines are built from nodes
 			if totalLines > visibleLines {
-				// Calculate thumb bounds for scrollbar track
-				thumbSize := visibleLines * treeTrackHeight / totalLines
-				if thumbSize < 1 {
-					thumbSize = 1
-				}
-				thumbTop := m.files.treeScrollY * (treeTrackHeight - thumbSize) / (totalLines - visibleLines)
-				thumbBottom := thumbTop + thumbSize
 				relY := mouse.Y - treeTrackTop
-				if relY >= thumbTop && relY < thumbBottom {
+				if thumbOffset, ok := scrollbarThumbOffset(mouse.Y, treeTrackTop, treeTrackHeight, totalLines, visibleLines, m.files.treeScrollY); ok {
 					// Clicked the thumb, start drag
 					m.scrollbarDrag = scrollbarDragFilesTree
-					m.scrollbarDragOffset = relY - thumbTop
+					m.scrollbarDragOffset = thumbOffset
 				} else {
 					// Clicked the track, jump to that position
 					newOffset := relY * totalLines / treeTrackHeight
@@ -5832,7 +5828,7 @@ func (m *model) handleCompactCmd(args []string) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Nothing to compact yet."})
 		return
 	}
-	if m.agent.CompactAsync(agentMsgs) {
+	if m.agent.CompactAsync(agentMsgs, strings.Join(args, " ")) {
 		m.pendingCompactManual = true
 		m.pendingCompactUIIdx = uiIdx
 		return
@@ -9994,9 +9990,13 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) (bool,
 		Role:    r.Summary.Role,
 		Content: r.Summary.Content,
 	}
+	bannerText := fmt.Sprintf("📦 Compacted %d earlier messages", replacedCount)
+	if r.Note != "" {
+		bannerText += fmt.Sprintf(" (%s)", r.Note)
+	}
 	banner := message{
 		role: roleAssistant,
-		text: fmt.Sprintf("📦 Compacted %d earlier messages", replacedCount),
+		text: bannerText,
 		raw:  summaryMsg,
 	}
 	newMsgs := make([]message, 0, len(m.messages)-(uiTo-uiFrom)+2)

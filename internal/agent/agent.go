@@ -744,21 +744,22 @@ func (a *Agent) MaybeCompactAsync(messages []Message) bool {
 	if !need {
 		return false
 	}
-	return a.startCompactAsync(messages, rt, fmt.Sprintf("triggered: ~%d tokens used, window=%d, threshold=%.2f", used, rt.WindowTokens, rt.TokenThreshold))
+	return a.startCompactAsync(messages, rt, "", fmt.Sprintf("triggered: ~%d tokens used, window=%d, threshold=%.2f", used, rt.WindowTokens, rt.TokenThreshold))
 }
 
 // CompactAsync runs a manual compaction in a goroutine, bypassing the token
 // threshold check so /compact always attempts a summary when the feature is
-// available.
-func (a *Agent) CompactAsync(messages []Message) bool {
+// available. focus is optional user guidance ("/compact <focus>") passed to
+// the summary prompt.
+func (a *Agent) CompactAsync(messages []Message, focus string) bool {
 	rt := a.resolveCompactRuntime(true)
 	if !rt.Enabled {
 		return false
 	}
-	return a.startCompactAsync(messages, rt, fmt.Sprintf("manual compaction requested: messages=%d window=%d", len(messages), rt.WindowTokens))
+	return a.startCompactAsync(messages, rt, focus, fmt.Sprintf("manual compaction requested: messages=%d window=%d", len(messages), rt.WindowTokens))
 }
 
-func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, note string) bool {
+func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, note string) bool {
 	if !a.compactMu.TryLock() {
 		emitDebug("COMPACT", "skipped: another compaction in flight")
 		return false
@@ -771,7 +772,7 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, note st
 	}
 	go func() {
 		defer a.compactMu.Unlock()
-		result := a.runCompact(snapshot, rt)
+		result := a.runCompact(snapshot, rt, focus)
 		if a.OnCompact != nil {
 			a.OnCompact(result)
 		}
@@ -805,7 +806,7 @@ func (a *Agent) Compact(messages []Message) (CompactResult, bool) {
 	if !rt.Enabled {
 		return CompactResult{}, false
 	}
-	return a.runCompact(messages, rt), true
+	return a.runCompact(messages, rt, ""), true
 }
 
 // Recap generates a conversation recap synchronously using the small model.
@@ -896,7 +897,7 @@ func (a *Agent) recapClient() LLMClient {
 	return a.client
 }
 
-func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult {
+func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string) CompactResult {
 	res := CompactResult{OriginalLen: len(messages)}
 
 	prefixEnd := findPrefixEnd(messages)
@@ -960,16 +961,13 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult 
 	// Keeps signal density high without losing tool-call structure.
 	pruned := pruneToolResults(middle, compactPruneToolMaxChars)
 
-	prompt, dropped := buildSummaryPrompt(pruned, rt.MaxSummaryInputTokens, prevSummary)
-	if dropped > 0 {
-		emitDebug("COMPACT", fmt.Sprintf("dropped %d middle msgs from summary input (size cap)", dropped))
-	}
-
 	client := a.compactSummaryClient()
 
 	// Use an inactivity-based timeout: the timer resets each time the LLM
 	// streams data (onDelta fires). This prevents spurious timeouts while
-	// the model is actively generating a summary.
+	// the model is actively generating a summary. One inactivity context
+	// covers the whole pass — each streamed chunk extends the deadline, so
+	// multi-batch summarisation does not starve later batches.
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if rt.SummaryTimeoutSeconds > 0 {
@@ -986,11 +984,39 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime) CompactResult 
 	}
 	defer cancel()
 
-	summaryText, err := runSummary(ctx, client, prompt, rt.SummaryMaxRetries)
-	if err != nil {
-		emitDebug("COMPACT", fmt.Sprintf("summary failed: %v", err))
-		res.Err = err
-		return res
+	// Chunked anchored summarisation: when the middle exceeds the per-call
+	// input budget, split it into consecutive batches and summarise each in
+	// order, feeding the running summary forward as the anchor. Nothing is
+	// dropped unsummarised — the old behaviour silently discarded the oldest
+	// middle messages once the prompt was over budget.
+	batches := chunkMiddleByBudget(pruned, rt.MaxSummaryInputTokens)
+	running := prevSummary
+	totalDropped := 0
+	for bi, batch := range batches {
+		prompt, dropped := buildSummaryPrompt(batch, rt.MaxSummaryInputTokens, running, focus)
+		if dropped > 0 {
+			totalDropped += dropped
+			emitDebug("COMPACT", fmt.Sprintf("batch %d/%d: dropped %d msgs from summary input (size cap)", bi+1, len(batches), dropped))
+		}
+		summaryText, err := runSummary(ctx, client, prompt, rt.SummaryMaxRetries)
+		if err != nil {
+			emitDebug("COMPACT", fmt.Sprintf("summary failed on batch %d/%d: %v", bi+1, len(batches), err))
+			res.Err = err
+			return res
+		}
+		running = summaryText
+	}
+	summaryText := running
+
+	if len(batches) > 1 || totalDropped > 0 {
+		var notes []string
+		if len(batches) > 1 {
+			notes = append(notes, fmt.Sprintf("summarised in %d batches", len(batches)))
+		}
+		if totalDropped > 0 {
+			notes = append(notes, fmt.Sprintf("%d messages dropped for size", totalDropped))
+		}
+		res.Note = strings.Join(notes, ", ")
 	}
 
 	header := fmt.Sprintf("Compacted summary covering %d messages", len(middle))
