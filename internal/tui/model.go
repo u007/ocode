@@ -1646,14 +1646,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.showPermDialog {
-			if msg.Button == tea.MouseWheelUp {
-				m.permViewport.ScrollUp(scrollSpeed)
-				return m, nil
+			// Only scroll the permission dialog if the mouse is over its bounds.
+			if m.modalStack != nil && m.modalStack.Top() != nil {
+				bounds := m.modalStack.Top().Bounds()
+				mouse := msg.Mouse()
+				// Center offset: dialog is centered in the terminal.
+				dialogX := (m.width - bounds.Width) / 2
+				dialogY := (m.height - bounds.Height) / 2
+				if mouse.X >= dialogX && mouse.X < dialogX+bounds.Width &&
+					mouse.Y >= dialogY && mouse.Y < dialogY+bounds.Height {
+					if msg.Button == tea.MouseWheelUp {
+						m.permViewport.ScrollUp(scrollSpeed)
+						return m, nil
+					}
+					if msg.Button == tea.MouseWheelDown {
+						m.permViewport.ScrollDown(scrollSpeed)
+						return m, nil
+					}
+				}
 			}
-			if msg.Button == tea.MouseWheelDown {
-				m.permViewport.ScrollDown(scrollSpeed)
-				return m, nil
-			}
+			// Mouse outside dialog bounds — fall through to transcript scroll.
 		}
 		if m.activeTab == tabFiles {
 			// Prefer panel focus first, then mouse position.
@@ -3428,15 +3440,23 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	}
 
 	if m.showPermDialog {
+		// Try routing through ModalStack first.
+		if m.modalStack != nil && m.modalStack.Handle(msg) {
+			// Check if the dialog was closed by the modal handler.
+			if !m.showPermDialog {
+				m.input.Reset()
+				m.layout()
+				m.rerenderTranscriptAndMaybeScroll()
+				m.saveSession()
+			}
+			return m, nil
+		}
+		// Fallback to legacy handling.
 		switch keyStr {
 		case "y", "n", "a", "t":
 			cmd, closed := m.permDialogInput(keyStr)
 			if closed {
 				m.input.Reset()
-				// Restore the transcript viewport height: an async layout() (resize,
-				// activity snapshot) may have run while the tall dialog was open,
-				// shrinking the viewport to make room. Nothing else re-grows it on
-				// close, so the chat would stay shrunk after every permission ask.
 				m.layout()
 				m.rerenderTranscriptAndMaybeScroll()
 				m.saveSession()
