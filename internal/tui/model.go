@@ -4262,9 +4262,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 	if pressed && m.activeTab == tabFiles {
+		treeW := m.width * 35 / 100
 		// Handle content search input field focus (click on query/ext line)
 		if m.files.mode == filesModeContentSearch {
-			treeW := m.width * 35 / 100
 			previewLeft := treeW + 2
 			if mouse.X >= previewLeft {
 				previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
@@ -4285,7 +4285,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		// Handle content search result click
 		if m.files.mode == filesModeContentSearch && m.files.contentSearchDone && len(m.files.contentSearchResults) > 0 {
-			treeW := m.width * 35 / 100
 			previewLeft := treeW + 2
 			previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 			if mouse.X >= previewLeft && mouse.Y >= previewBodyTop {
@@ -4300,6 +4299,42 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					return m, nil, true
 				}
 			}
+		}
+		// Tree scrollbar hit-test (before node click, so scrollbar has precedence)
+		treeScrollbarX := treeW - 2 - 1 // right edge of tree pane (inside border)
+		treeTrackTop := appHeaderHeight + 1
+		treeTrackHeight := m.height - 4 // pane height
+		if mouse.X == treeScrollbarX && mouse.Y >= treeTrackTop && mouse.Y < treeTrackTop+treeTrackHeight {
+			// Click is on the tree scrollbar column
+			headerRowCount := len(m.files.treeHeaderRows(treeW, m.styles))
+			visibleLines := m.height - 4 - 2 - headerRowCount // content height (matching View() calculation)
+			if visibleLines < 1 {
+				visibleLines = 1
+			}
+			totalLines := len(m.files.nodes) // tree lines are built from nodes
+			if totalLines > visibleLines {
+				// Calculate thumb bounds for scrollbar track
+				thumbSize := visibleLines * treeTrackHeight / totalLines
+				if thumbSize < 1 {
+					thumbSize = 1
+				}
+				thumbTop := m.files.treeScrollY * (treeTrackHeight - thumbSize) / (totalLines - visibleLines)
+				thumbBottom := thumbTop + thumbSize
+				relY := mouse.Y - treeTrackTop
+				if relY >= thumbTop && relY < thumbBottom {
+					// Clicked the thumb, start drag
+					m.scrollbarDrag = scrollbarDragFilesTree
+					m.scrollbarDragOffset = relY - thumbTop
+				} else {
+					// Clicked the track, jump to that position
+					newOffset := relY * totalLines / treeTrackHeight
+					if newOffset > totalLines-visibleLines {
+						newOffset = totalLines - visibleLines
+					}
+					m.files.treeScrollY = newOffset
+				}
+			}
+			return m, nil, true
 		}
 		// Handle tree panel click — select/open file or toggle directory
 		if idx, ok := m.files.treeNodeForClick(mouse, appHeaderHeight, m.styles); ok {
@@ -4334,7 +4369,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			return m, nil, true
 		}
-		treeW := m.width * 35 / 100
 		previewLeft := treeW + 2
 		previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 		if mouse.X >= previewLeft && mouse.X < scrollX && mouse.Y >= previewBodyTop && mouse.Y < previewBodyTop+m.files.preview.Height() {
