@@ -197,6 +197,7 @@ func (m *model) openModelPicker() {
 	m.pickerFilterPending = ""
 	m.pickerFilterSeq++
 	m.showPicker = true
+	m.pushPickerModal()
 }
 
 func splitPickerModel(s string) (string, string) {
@@ -242,6 +243,7 @@ func (m *model) openThemePicker() {
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
+	m.pushPickerModal()
 	// Preview the first theme immediately
 	if len(items) > 0 && m.config != nil {
 		m.config.Ocode.TUI.Theme = items[0]
@@ -308,6 +310,7 @@ func (m *model) openSessionPicker() tea.Cmd {
 	m.pickerFilter = ""
 	m.pickerFilterPending = ""
 	m.showPicker = true
+	m.pushPickerModal()
 
 	// Load first page of sessions (progressive loading)
 	return loadSessionRefsCmd(seq, sessionPickerPageSize, 0)
@@ -368,6 +371,7 @@ func (m *model) openEditorPicker() {
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
+	m.pushPickerModal()
 }
 
 func (m *model) openEditorModePicker() {
@@ -380,6 +384,7 @@ func (m *model) openEditorModePicker() {
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
+	m.pushPickerModal()
 }
 
 func (m *model) openMessagePicker() {
@@ -404,6 +409,7 @@ func (m *model) openMessagePicker() {
 	m.pickerIndex = 0
 	m.pickerFilter = ""
 	m.showPicker = true
+	m.pushPickerModal()
 }
 
 func isRevertibleUserMessage(msg message) bool {
@@ -427,6 +433,7 @@ func (m *model) closePicker() {
 	}
 	m.pickerSavedTheme = ""
 	m.showPicker = false
+	m.popPickerModal()
 	m.pickerKind = ""
 	m.pickerItems = nil
 	m.pickerValues = nil
