@@ -1916,7 +1916,9 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		treeContent = m.fuzzyPopupView(treeW-2, h-4, styles)
 	}
 	// Render scrollbar for tree pane
-	treeSB := renderScrollbar(treeContentHeight, len(treeLines), treeContentHeight, m.treeScrollY)
+	// Scrollbar container height = headers + file list (full pane height)
+	actualContentHeight := headerRowCount + treeContentHeight
+	treeSB := renderScrollbar(actualContentHeight, len(treeLines), treeContentHeight, m.treeScrollY)
 	// Join tree content with scrollbar
 	treeContentFull := lipgloss.JoinHorizontal(lipgloss.Top, treeContent, treeSB)
 	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 4).Render(treeContentFull)
