@@ -18,6 +18,8 @@
 - **Tilde Expansion in Tools** — `confinedPath` now expands `~` and `~/` prefixes to the user's home directory, so LLM-generated paths like `~/.local/state/...` resolve correctly instead of failing.
 - **Permission Model Cancellation** — `runPermissionModelLoop` now accepts a `stopCh` channel and checks it before each LLM iteration, so pressing Esc during a long permission-model decision aborts the request immediately instead of blocking up to 15 tool-call rounds.
 - **Context-Aware LLM Calls** — Permission model loop uses `ChatWithContext` when the client supports it, enabling proper context cancellation for in-flight HTTP requests.
+- **JSON Theme Loading** — New `opencodeThemeFile` parser in `internal/theme` loads theme definitions from opencode-format JSON files on disk, enabling custom themes without recompilation.
+- **Dedicated Theme API Handler** — New `GET /api/theme` endpoint in `internal/server/handler_theme.go` (extracted from `handler_git.go`), serving theme colors to the Web UI via a clean dedicated endpoint.
 
 ### Changed
 - **Permission Verdict Parsing** — `verdictBoundary` now tolerates markdown-emphasis closing runs between the verdict word and its colon (e.g. `**ALLOW**:`), and `cleanVerdictReason` strips backtick/underscore characters, fixing local-model verdict rejection.
@@ -34,6 +36,8 @@
 - **Transcript Selection Performance** — Selection highlight now uses `SetContentLines` (O(1)) instead of `SetContent` (O(N) join+split) per mouse-motion event.
 - **Log Viewport Word Wrap** — Log entries now wrap at space boundaries via `wordWrap` for readable multi-line display instead of hard character-boundary wrapping.
 - **`/rc` Browser-First Ordering** — Remote control now opens the browser before attempting Tailscale serve, so the URL is available even if Tailscale is slow or unavailable.
+- **Theme Package Restructure** — Theme data and logic moved from `internal/tui` to the `internal/theme` package; `theme_generated.go` relocated accordingly. `Get()` and `List()` functions expanded to include disk-loaded themes alongside builtins.
+- **Web Theme Hook Hex→HSL Fix** — `useTheme` hook now converts hex color values to HSL for CSS variable injection, fixing color rendering in the Web UI.
 
 ### Fixed
 - **Out-of-Scope Bash Auto-Grant** — `verifyAutoGrant` now refuses to auto-grant bash commands that target paths outside the allowed roots, preventing silent scope expansion.
@@ -45,6 +49,7 @@
 - **Tilde Path Permission Resolution** — Paths like `~/Downloads` where HOME is a temp directory now correctly resolve and auto-allow, instead of prompting.
 - **Browser Open Error Logging** — Failed `openBrowser` calls now log the error instead of silently swallowing it.
 - **Path Link Miss Caching** — `pathLinkAtCol` now returns the token span on a miss so callers can cache negative results, avoiding redundant regex+stat work on non-path text.
+- **`cd` Bare Relative Dir Permission** — Commands like `cd web` are now correctly recognized as path operations instead of being treated as argless and misdirected to `$HOME`, fixing the out-of-scope veto from the guardrail layer.
 
 ## [0.3.5] — 2026-06-10
 

@@ -17,6 +17,7 @@ import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import ModelDialog from "./components/Layout/ModelDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
+import { useTheme } from "./hooks/useTheme";
 import { useChat } from "./hooks/useChat";
 import SessionPage from "./pages/SessionPage";
 
@@ -129,6 +130,8 @@ function HomeApp() {
 }
 
 export default function App() {
+  // Applies the server (terminal) theme to the CSS variables once on load.
+  useTheme();
   return (
     <ErrorBoundary>
       <ChatProvider>

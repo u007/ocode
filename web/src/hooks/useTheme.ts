@@ -2,64 +2,66 @@ import { useState, useEffect } from "react";
 import { api } from "@/api/client";
 import type { ThemeColors } from "@/api/types";
 
-type Theme = "dark" | "light";
-
-// Default colors (tokyonight)
-const DEFAULT_COLORS: ThemeColors = {
-  user: "#7aa2f7",
-  assistant: "#bb9af7",
-  header: "#7dcfff",
-  border: "#3b4261",
-  hint: "#565f89",
-  text: "#c0caf5",
-  background: "#1a1b26",
-  status_bg: "#1a1b26",
-  status_fg: "#787c99",
-  selected_fg: "#1a1b26",
-  selected_bg: "#7aa2f7",
-  success: "#9ece6a",
-  error: "#f7768e",
-  accent: "#7dcfff",
-  dim: "#3b4261",
-  thinking: "#bb9af7",
-};
+// Tailwind consumes these variables as HSL component triplets — see
+// tailwind.config.js `hsl(var(--x))` wrappers and index.css `:root` defaults.
+// Server colors arrive as hex, so they must be converted to "H S% L%" form.
+function hexToHslTriplet(hex: string): string | null {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const n = parseInt(m[1], 16);
+  const r = ((n >> 16) & 0xff) / 255;
+  const g = ((n >> 8) & 0xff) / 255;
+  const b = (n & 0xff) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  let h = 0;
+  let s = 0;
+  if (max !== min) {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  const round = (v: number) => Math.round(v * 10) / 10;
+  return `${round(h * 360)} ${round(s * 100)}% ${round(l * 100)}%`;
+}
 
 function applyThemeColors(colors: ThemeColors) {
   const root = document.documentElement;
-  root.style.setProperty("--background", colors.background);
-  root.style.setProperty("--foreground", colors.text);
-  root.style.setProperty("--primary", colors.user);
-  root.style.setProperty("--accent", colors.accent);
-  root.style.setProperty("--border", colors.border);
-  root.style.setProperty("--destructive", colors.error);
-  root.style.setProperty("--muted", colors.dim);
-  root.style.setProperty("--muted-foreground", colors.hint);
-  root.style.setProperty("--card", colors.background);
-  root.style.setProperty("--card-foreground", colors.text);
-  root.style.setProperty("--popover", colors.background);
-  root.style.setProperty("--popover-foreground", colors.text);
-  root.style.setProperty("--secondary", colors.selected_bg);
-  root.style.setProperty("--secondary-foreground", colors.selected_fg);
-  root.style.setProperty("--ring", colors.user);
+  const set = (name: string, hex: string) => {
+    const triplet = hexToHslTriplet(hex);
+    if (triplet === null) {
+      console.warn(`Skipping theme variable ${name}: invalid hex color`, hex);
+      return;
+    }
+    root.style.setProperty(name, triplet);
+  };
+  set("--background", colors.background);
+  set("--foreground", colors.text);
+  set("--primary", colors.user);
+  set("--accent", colors.accent);
+  set("--border", colors.border);
+  set("--destructive", colors.error);
+  set("--muted", colors.dim);
+  set("--muted-foreground", colors.hint);
+  set("--card", colors.background);
+  set("--card-foreground", colors.text);
+  set("--popover", colors.background);
+  set("--popover-foreground", colors.text);
+  set("--secondary", colors.selected_bg);
+  set("--secondary-foreground", colors.selected_fg);
+  set("--ring", colors.user);
 }
 
 export function useTheme() {
-  const [theme, setTheme] = useState<Theme>(() => {
-    if (typeof window !== "undefined") {
-      return (localStorage.getItem("theme") as Theme) || "dark";
-    }
-    return "dark";
-  });
-
   const [serverColors, setServerColors] = useState<ThemeColors | null>(null);
 
-  // Apply dark/light mode class
-  useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    localStorage.setItem("theme", theme);
-  }, [theme]);
-
-  // Fetch server theme colors on mount
+  // Fetch server theme colors on mount. The web UI follows the terminal
+  // theme; there is no separate light/dark toggle. On fetch failure the
+  // stylesheet defaults in index.css remain untouched.
   useEffect(() => {
     api
       .getTheme()
@@ -68,12 +70,9 @@ export function useTheme() {
         applyThemeColors(resp.colors);
       })
       .catch((err) => {
-        console.warn("Failed to fetch server theme, using defaults:", err);
-        applyThemeColors(DEFAULT_COLORS);
+        console.warn("Failed to fetch server theme, keeping defaults:", err);
       });
   }, []);
 
-  const toggle = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
-
-  return { theme, toggle, serverColors };
+  return { serverColors };
 }

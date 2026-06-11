@@ -268,3 +268,7 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
   bring the common case (≤400 msgs) under ~2ms, below the perceptible threshold,
   so the prefix-cache complexity isn't justified until a real session proves
   otherwise.
+
+## UI overhaul Part 3 review gaps (Tasks 18–19)
+
+- [ ] Task 18: manual visual verification still pending — run `ocode serve`, switch theme in config, reload web, confirm colors follow (hex→HSL fix landed 2026-06-11 but was verified via unit math + typecheck only, not in a browser) (from review-changes: 2026-06-11)

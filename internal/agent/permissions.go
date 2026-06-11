@@ -2316,6 +2316,13 @@ func extractBashCommandPaths(prefix string, fields []string) []string {
 		if prefix == "awk" && i == 1 {
 			continue
 		}
+		// cd's positional args are always paths, even bare names like `cd web`
+		// that isLikelyPathArg would reject — otherwise the zero-paths HOME
+		// fallback misclassifies them as `cd` to an out-of-scope $HOME.
+		if prefix == "cd" {
+			paths = append(paths, arg)
+			continue
+		}
 		if prefix == "sed" && !sedScriptConsumed {
 			sedScriptConsumed = true
 			continue

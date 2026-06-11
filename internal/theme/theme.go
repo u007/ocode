@@ -1,5 +1,16 @@
 package theme
 
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sort"
+	"strings"
+
+	"github.com/u007/ocode/internal/config"
+)
+
 // ThemeColors holds the color values for a theme.
 type ThemeColors struct {
 	User       string `json:"user"`
@@ -25,22 +36,6 @@ type ThemeDefinition struct {
 	Colors ThemeColors `json:"colors"`
 }
 
-// Get returns the ThemeDefinition for the given name, or the default theme.
-func Get(name string) ThemeDefinition {
-	if t, ok := builtinThemes[name]; ok {
-		return t
-	}
-	return builtinThemes["tokyonight"]
-}
-
-// List returns all available theme names.
-func List() []string {
-	names := make([]string, 0, len(builtinThemes))
-	for name := range builtinThemes {
-		names = append(names, name)
-	}
-	return names
-}
 var builtinThemes = map[string]ThemeDefinition{
 	"tokyonight": {
 		Colors: ThemeColors{
@@ -442,4 +437,189 @@ var builtinThemes = map[string]ThemeDefinition{
 			Dim:        "#c8c0aa",
 		},
 	},
+}
+
+// ── Opencode-format JSON support ──
+// opencodeThemeFile matches the schema at
+// https://opencode.ai/desktop-theme.json
+type opencodeVariant struct {
+	Palette struct {
+		Neutral     string `json:"neutral"`
+		Ink         string `json:"ink"`
+		Primary     string `json:"primary"`
+		Accent      string `json:"accent,omitempty"`
+		Success     string `json:"success"`
+		Warning     string `json:"warning"`
+		Error       string `json:"error"`
+		Info        string `json:"info"`
+		Interactive string `json:"interactive,omitempty"`
+		DiffAdd     string `json:"diffAdd,omitempty"`
+		DiffDelete  string `json:"diffDelete,omitempty"`
+	} `json:"palette"`
+	Overrides map[string]string `json:"overrides"`
+}
+
+type opencodeThemeFile struct {
+	Name  string          `json:"name"`
+	ID    string          `json:"id"`
+	Light opencodeVariant `json:"light"`
+	Dark  opencodeVariant `json:"dark"`
+}
+
+// convertOpencodeVariant maps an opencode variant (dark or light) to ocode's
+// ThemeColors.  The variant parameter is "dark" or "light" for logging only.
+func convertOpencodeVariant(v opencodeVariant, variant string) ThemeColors {
+	p := v.Palette
+	o := v.Overrides
+
+	// Helper: pick first non-empty string, with fallback.
+	first := func(vals ...string) string {
+		for _, s := range vals {
+			if s != "" {
+				return s
+			}
+		}
+		return "#000000"
+	}
+
+	textWeak := first(o["text-weak"], o["syntax-comment"], p.Ink)
+	syntaxComment := first(o["syntax-comment"], o["text-weak"], p.Ink)
+	borderColor := first(o["syntax-comment"], o["text-weak"])
+	if borderColor == "" || borderColor == p.Neutral {
+		// Derive a visible border: use ink at low opacity by blending logic.
+		// Simplest: use syntaxComment if available.
+		borderColor = syntaxComment
+	}
+
+	return ThemeColors{
+		User:       p.Primary,
+		Assistant:  first(p.Accent, o["syntax-keyword"], p.Info),
+		Header:     first(p.Info, p.Primary, p.Warning),
+		Border:     borderColor,
+		Hint:       textWeak,
+		Text:       p.Ink,
+		Background: p.Neutral,
+		StatusBg:   p.Neutral,
+		StatusFg:   textWeak,
+		SelectedFg: p.Neutral,
+		SelectedBg: p.Primary,
+		Success:    p.Success,
+		Error:      p.Error,
+		Accent:     first(p.Accent, o["syntax-constant"], p.Info),
+		Dim:        borderColor,
+		Thinking:   textWeak,
+	}
+}
+
+// detectOpencodeJSON returns true if the JSON data looks like an opencode
+// desktop-theme file (has "light" and "dark" keys at the top level).
+func detectOpencodeJSON(data []byte) bool {
+	var probe struct {
+		Light json.RawMessage `json:"light"`
+		Dark  json.RawMessage `json:"dark"`
+	}
+	return json.Unmarshal(data, &probe) == nil && len(probe.Light) > 0 && len(probe.Dark) > 0
+}
+
+var themeRegistry = map[string]ThemeDefinition{}
+
+func init() {
+	for k, v := range builtinThemes {
+		themeRegistry[k] = v
+	}
+	for k, v := range generatedThemes {
+		themeRegistry[k] = v
+	}
+	loadThemesFromDir(themeRegistry)
+}
+
+func loadThemesFromDir(registry map[string]ThemeDefinition) {
+	dirs := themeSearchPaths()
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+				continue
+			}
+			path := filepath.Join(dir, entry.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			// Try ocode-native format first.
+			var theme ThemeDefinition
+			if err := json.Unmarshal(data, &theme); err == nil && theme.Colors.User != "" {
+				name := strings.TrimSuffix(entry.Name(), ".json")
+				registry[name] = theme
+				continue
+			}
+			// Fall back to opencode desktop-theme format.
+			if detectOpencodeJSON(data) {
+				var oc opencodeThemeFile
+				if err := json.Unmarshal(data, &oc); err != nil {
+					continue
+				}
+				// Register dark variant with the file's ID.
+				if oc.Dark.Palette.Neutral != "" {
+					registry[oc.ID] = ThemeDefinition{Colors: convertOpencodeVariant(oc.Dark, "dark")}
+				}
+				// Register light variant with "-light" suffix.
+				if oc.Light.Palette.Neutral != "" {
+					registry[oc.ID+"-light"] = ThemeDefinition{Colors: convertOpencodeVariant(oc.Light, "light")}
+				}
+			}
+		}
+	}
+}
+
+func themeSearchPaths() []string {
+	home, _ := os.UserHomeDir()
+	var paths []string
+
+	globalDir := filepath.Join(home, ".config", "opencode", "themes")
+	if runtime.GOOS == "windows" {
+		if appdata := os.Getenv("APPDATA"); appdata != "" {
+			globalDir = filepath.Join(appdata, "opencode", "themes")
+		}
+	}
+	paths = append(paths, globalDir)
+
+	projectDir := config.FindProjectRoot()
+	if projectDir != "" {
+		paths = append(paths, filepath.Join(projectDir, ".opencode", "themes"))
+		paths = append(paths, filepath.Join(projectDir, "themes"))
+	}
+
+	return paths
+}
+
+// GetTheme returns the ThemeDefinition for name and whether it was found in the
+// registry (builtin + generated + disk-loaded themes).
+func GetTheme(name string) (ThemeDefinition, bool) {
+	t, ok := themeRegistry[name]
+	return t, ok
+}
+
+// Get returns the ThemeDefinition for the given name, resolving against the
+// full registry (builtin + generated + disk-loaded themes). Unknown names fall
+// back to the default theme (tokyonight) — this is deliberate config
+// resolution, not a silent error swallow.
+func Get(name string) ThemeDefinition {
+	if t, ok := themeRegistry[name]; ok {
+		return t
+	}
+	return themeRegistry["tokyonight"]
+}
+
+// AvailableThemes returns all registered theme names, sorted alphabetically.
+func AvailableThemes() []string {
+	names := make([]string, 0, len(themeRegistry))
+	for k := range themeRegistry {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
 }

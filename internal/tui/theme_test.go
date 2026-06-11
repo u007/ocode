@@ -6,7 +6,31 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+
+	"github.com/u007/ocode/internal/theme"
 )
+
+// TestRegistryParityWithThemePackage guards against the tui registry and the
+// shared internal/theme registry drifting apart — the exact gap that let
+// /api/theme miss the 58 generated themes. Every name the tui exposes must
+// resolve identically through theme.Get.
+func TestRegistryParityWithThemePackage(t *testing.T) {
+	tuiNames := AvailableThemes()
+	themeNames := theme.AvailableThemes()
+	if !reflect.DeepEqual(tuiNames, themeNames) {
+		t.Fatalf("tui and theme registries disagree on names:\n  tui:   %d\n  theme: %d", len(tuiNames), len(themeNames))
+	}
+	for _, name := range tuiNames {
+		tuiDef, ok := GetTheme(name)
+		if !ok {
+			t.Errorf("tui GetTheme(%q) returned false for a listed theme", name)
+			continue
+		}
+		if got := theme.Get(name); !reflect.DeepEqual(got, tuiDef) {
+			t.Errorf("theme %q differs between tui and theme.Get", name)
+		}
+	}
+}
 
 func TestApplyThemeColorsUpdatesScrollbarStyles(t *testing.T) {
 	ApplyThemeColors("opencode")
@@ -95,8 +119,10 @@ func TestLightVariantsPresent(t *testing.T) {
 			t.Errorf("expected light theme %q to exist (dark exists)", p.light)
 		}
 		// Light should have different background than dark
-		dark := themeRegistry[p.dark].Colors
-		light := themeRegistry[p.light].Colors
+		darkDef, _ := GetTheme(p.dark)
+		lightDef, _ := GetTheme(p.light)
+		dark := darkDef.Colors
+		light := lightDef.Colors
 		if dark.Background == light.Background {
 			t.Errorf("%q and %q have same Background (%s), expected different for light/dark", p.dark, p.light, dark.Background)
 		}

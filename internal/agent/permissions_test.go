@@ -438,6 +438,43 @@ func TestPermissions_PathScopedAllowsArglessAndStdin(t *testing.T) {
 	}
 }
 
+// TestPermissions_CdBareRelativeDirAllows locks in the fix for the bug where
+// `cd web` was treated as argless: isLikelyPathArg rejected the bare name, the
+// zero-paths fallback substituted $HOME, and the in-root cd was asked as an
+// out-of-scope command (then the LLM tier's correct ALLOW was guardrail-vetoed
+// via out_of_scope_path). Every cd positional arg is a path by definition.
+func TestPermissions_CdBareRelativeDirAllows(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	allows := []string{
+		`{"command":"cd web"}`,
+		`{"command":"cd ` + resolvedWorkDir + `/web"}`,
+	}
+	for _, cmd := range allows {
+		t.Run(cmd, func(t *testing.T) {
+			dec := pm.Decide("bash", json.RawMessage(cmd))
+			if dec.Level != PermissionAllow {
+				t.Fatalf("expected allow for %s, got %s", cmd, dec.Level)
+			}
+		})
+	}
+
+	// Out-of-root cd must still ask, with the resolved path surfaced.
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"cd /etc"}`))
+	if dec.Level != PermissionAsk {
+		t.Fatalf("expected ask for cd /etc, got %s", dec.Level)
+	}
+	if dec.Request == nil || dec.Request.OutOfScopePath != "/etc" {
+		t.Fatalf("expected out_of_scope_path=/etc, got %+v", dec.Request)
+	}
+}
+
 // TestPermissions_FindUnsafeFlagsAsk verifies that find with -exec or
 // -delete is not auto-allowed even when the search path is in-root.
 func TestPermissions_FindUnsafeFlagsAsk(t *testing.T) {

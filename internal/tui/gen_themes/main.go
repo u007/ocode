@@ -81,6 +81,8 @@ func convert(v ocVariant) themeColor {
 }
 
 // themes already present in ocode's builtinThemes (dark variant names).
+// builtinThemes lives in internal/theme; the generated output (the map body
+// printed below) is written to internal/theme/theme_generated.go.
 var existing = map[string]bool{
 	"tokyonight":       true,
 	"tokyonight-storm": true,

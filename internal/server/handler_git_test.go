@@ -183,25 +183,3 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
-
-func TestGetThemeDefault(t *testing.T) {
-	h := NewHandler()
-	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/theme", nil)
-	h.HandleGetTheme(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected 200, got %d", w.Code)
-	}
-
-	var result ThemeColorsResponse
-	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
-	}
-	if result.Name == "" {
-		t.Error("expected non-empty theme name")
-	}
-	if result.Colors.Background == "" {
-		t.Error("expected non-empty background color")
-	}
-}

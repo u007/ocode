@@ -1,5 +1,4 @@
 import { useChatState } from "../../stores/chatStore";
-import { useTheme } from "../../hooks/useTheme";
 import { Button } from "@/components/ui/button";
 import { PanelRight } from "lucide-react";
 
@@ -11,7 +10,6 @@ interface Props {
 export default function StatusBar({ onCoworkToggle, onModelClick }: Props) {
   const { model, smallModel, advisorModel, advisorEnabled, isStreaming, error } =
     useChatState();
-  const { theme, toggle } = useTheme();
 
   return (
     <div className="flex items-center justify-between border-t border-zinc-700 px-4 py-1.5 text-xs text-zinc-500">
@@ -57,15 +55,6 @@ export default function StatusBar({ onCoworkToggle, onModelClick }: Props) {
             <PanelRight className="h-4 w-4" />
           </Button>
         )}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon"
-          onClick={toggle}
-          title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-        >
-          {theme === "dark" ? "☀️" : "🌙"}
-        </Button>
         <span>ocode web</span>
       </div>
     </div>
