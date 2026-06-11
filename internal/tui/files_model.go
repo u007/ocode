@@ -1859,7 +1859,38 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		}
 		treeLines = append(treeLines, line)
 	}
-	treeContent := strings.Join(treeLines, "\n")
+	// Calculate available height for tree lines
+	treeContentHeight := h - 4 - 2 // pane height minus top/bottom borders
+	if treeContentHeight < 1 {
+		treeContentHeight = 1
+	}
+
+	// Clamp treeScrollY to valid range
+	maxScrollY := len(treeLines) - treeContentHeight
+	if maxScrollY < 0 {
+		maxScrollY = 0
+	}
+	if m.treeScrollY > maxScrollY {
+		m.treeScrollY = maxScrollY
+	}
+	if m.treeScrollY < 0 {
+		m.treeScrollY = 0
+	}
+
+	// Slice visible lines
+	visibleStart := m.treeScrollY
+	visibleEnd := m.treeScrollY + treeContentHeight
+	if visibleEnd > len(treeLines) {
+		visibleEnd = len(treeLines)
+	}
+	visibleLines := treeLines[visibleStart:visibleEnd]
+
+	// Pad with empty lines if needed to fill viewport
+	for len(visibleLines) < treeContentHeight {
+		visibleLines = append(visibleLines, "")
+	}
+
+	treeContent := strings.Join(visibleLines, "\n")
 	// Prepend hint rows. treeHeaderRows is shared with treeNodeForClick so the
 	// rendered row count and the click hit-box offset stay in lockstep.
 	if headerRows := m.treeHeaderRows(treeW, styles); len(headerRows) > 0 {
@@ -1876,7 +1907,11 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	if m.mode == filesModeFuzzy {
 		treeContent = m.fuzzyPopupView(treeW-2, h-4, styles)
 	}
-	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 4).Render(treeContent)
+	// Render scrollbar for tree pane
+	treeSB := renderScrollbar(treeContentHeight, len(treeLines), treeContentHeight, m.treeScrollY)
+	// Join tree content with scrollbar
+	treeContentFull := lipgloss.JoinHorizontal(lipgloss.Top, treeContent, treeSB)
+	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 4).Render(treeContentFull)
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
 	if m.inFileSearchActive {
