@@ -10474,6 +10474,9 @@ func findAgentRunByPath(reg *agent.AgentRunRegistry, runPath string) (*agent.Age
 
 // modalOpen reports whether any modal overlay is currently shown.
 func (m model) modalOpen() bool {
+	if m.modalStack != nil && m.modalStack.Len() > 0 {
+		return true
+	}
 	return m.showPicker || m.showConnect || m.showPalette || m.showRetryDialog || m.sessionDeleteConfirm || m.showQuestionDialog
 }
 
