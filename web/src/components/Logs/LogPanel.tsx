@@ -24,15 +24,26 @@ export default function LogPanel() {
   const [streaming, setStreaming] = useState(true);
   const [filter, setFilter] = useState("ALL");
   const [autoScroll, setAutoScroll] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     // Load initial logs
     fetch("/api/logs", { headers: authHeaders() })
-      .then((r) => r.json())
-      .then((data) => setLogs(data as LogEntry[]))
-      .catch(console.error);
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((data) => {
+        setLogs(data as LogEntry[]);
+        setError(null);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch logs:", err);
+        setError("Failed to load logs");
+      });
   }, []);
 
   useEffect(() => {
@@ -56,7 +67,10 @@ export default function LogPanel() {
 
     es.onerror = () => {
       es.close();
-      setStreaming(false);
+      console.warn("SSE connection lost, reconnecting in 3s…");
+      setTimeout(() => {
+        if (streaming) setStreaming((s) => s); // trigger reconnect
+      }, 3000);
     };
 
     return () => {
@@ -71,12 +85,20 @@ export default function LogPanel() {
   }, [logs, autoScroll]);
 
   const handleClear = async () => {
+    if (!window.confirm("Clear all logs?")) return;
     try {
       await fetch("/api/logs", { method: "DELETE", headers: authHeaders() });
       setLogs([]);
     } catch (err) {
       console.error("Failed to clear logs:", err);
     }
+  };
+
+  const handleScroll = () => {
+    const el = containerRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+    setAutoScroll(atBottom);
   };
 
   const filteredLogs = filter === "ALL" ? logs : logs.filter((l) => l.kind === filter);
@@ -143,8 +165,14 @@ export default function LogPanel() {
       </div>
 
       {/* Log entries */}
-      <div className="flex-1 overflow-y-auto font-mono text-xs p-4 bg-zinc-950">
-        {filteredLogs.length === 0 ? (
+      <div
+        ref={containerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto font-mono text-xs p-4 bg-zinc-950"
+      >
+        {error ? (
+          <div className="text-red-400 text-center py-8">{error}</div>
+        ) : filteredLogs.length === 0 ? (
           <div className="text-zinc-500 text-center py-8">
             {streaming ? "Waiting for logs..." : "No log entries"}
           </div>
