@@ -23,6 +23,7 @@ type Handler struct {
 	// agents this handler creates. Seeded from config, flipped from the web
 	// sidebar, never persisted back to config.
 	advisorEnabled bool
+	workDir        string // override for git commands in tests
 }
 
 type agentSession struct {
@@ -41,6 +42,11 @@ func NewHandler() *Handler {
 		cfg:            cfg,
 		advisorEnabled: advisorEnabled,
 	}
+}
+
+// SetWorkDir sets the working directory for git commands (used in tests).
+func (h *Handler) SetWorkDir(dir string) {
+	h.workDir = dir
 }
 
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
