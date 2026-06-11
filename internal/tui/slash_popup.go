@@ -103,6 +103,7 @@ func slashSuggestions(prefix string) []slashSuggestion {
 
 func (m *model) closeSlashPopup() {
 	m.showSlashPopup = false
+	m.popSlashPopupModal()
 	m.slashPopupIndex = 0
 	m.slashPopupItems = nil
 }
@@ -299,6 +300,7 @@ func (m model) updateSlashPopupState() (model, tea.Cmd) {
 		}
 		m.slashPopupItems = filterFileCache(m.fileListCache, strings.ToLower(token))
 		m.showSlashPopup = true
+		m.pushSlashPopupModal()
 		if m.slashPopupIndex >= len(m.slashPopupItems) {
 			m.slashPopupIndex = 0
 		}
@@ -318,6 +320,7 @@ func (m model) updateSlashPopupState() (model, tea.Cmd) {
 
 	m.slashPopupItems = slashSuggestions(value)
 	m.showSlashPopup = true
+	m.pushSlashPopupModal()
 	if m.slashPopupIndex >= len(m.slashPopupItems) {
 		m.slashPopupIndex = 0
 	}
