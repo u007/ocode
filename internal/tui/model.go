@@ -11093,7 +11093,7 @@ func (m *model) renderStatus() string {
 	}
 
 	line1 := m.styles.Status.Width(width).Render(ansi.Truncate(leftStatus, width, "..."))
-	line2 := m.styles.Hint.Render(ansi.Truncate(rightContent, width, "..."))
+	line2 := m.styles.Status.Width(width).Render(ansi.Truncate(rightContent, width, "..."))
 
 	return line1 + "\n" + line2
 }

@@ -50,6 +50,7 @@
 - **Browser Open Error Logging** — Failed `openBrowser` calls now log the error instead of silently swallowing it.
 - **Path Link Miss Caching** — `pathLinkAtCol` now returns the token span on a miss so callers can cache negative results, avoiding redundant regex+stat work on non-path text.
 - **`cd` Bare Relative Dir Permission** — Commands like `cd web` are now correctly recognized as path operations instead of being treated as argless and misdirected to `$HOME`, fixing the out-of-scope veto from the guardrail layer.
+- **Status Bar Background Rendering** — Second line of the status bar now applies full-width background styling (matching the first line), eliminating the color gap that appeared in the middle of the bottom chrome.
 
 ## [0.3.5] — 2026-06-10
 
