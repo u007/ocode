@@ -711,6 +711,9 @@ type model struct {
 	hoverDetailLink          pathLinkRegion // file-path link hovered in the agent-detail view
 	hoverDetailLinkActive    bool           // whether hoverDetailLink is set
 	hoverDetailLinkProbe     pathLinkProbeCache
+	hoverPickerIdx           int  // index of hovered picker row, -1 for none
+	hoverSlashIdx            int  // index of hovered slash popup row, -1 for none
+	hoverTabIdx              int  // index of hovered tab, -1 for none
 	rawInputLines            []string
 	rawInputLinesDirty       bool
 	inputThemeApplied        bool
@@ -1416,6 +1419,9 @@ func newModel(opts ...RunOptions) model {
 		subAgentPermCh:       make(chan subAgentPermRequest),
 		subAgentPermMu:       &sync.Mutex{},
 		cleanupState:         newModelCleanupState(),
+		hoverPickerIdx:       -1,
+		hoverSlashIdx:        -1,
+		hoverTabIdx:          -1,
 		supervisor:           sup,
 		hookPipeline:         hp,
 		webFS:                o.WebFS,
@@ -4751,6 +4757,51 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 				changed = true
 			}
 		}
+
+		// Picker row hover
+		if m.showPicker {
+			prevHover := m.hoverPickerIdx
+			m.hoverPickerIdx = -1
+			if row, ok := m.pickerRowForY(mouse.Y); ok && mouse.X >= 1 && mouse.X < m.width-1 {
+				m.hoverPickerIdx = row
+			}
+			if m.hoverPickerIdx != prevHover {
+				changed = true
+			}
+		}
+
+		// Slash popup row hover (popup is above the input area)
+		if m.showSlashPopup {
+			prevHover := m.hoverSlashIdx
+			m.hoverSlashIdx = -1
+			// Slash popup renders above the input: border(1) + items...
+			// Items start at inputAreaTopY - len(items) - 1 (border)
+			popupItemCount := len(m.slashPopupItems)
+			if popupItemCount > 0 {
+				popupTopY := m.inputAreaTopY() - popupItemCount - 1
+				for i := 0; i < popupItemCount; i++ {
+					rowY := popupTopY + i
+					if mouse.Y == rowY && mouse.X >= 1 && mouse.X < m.width-1 {
+						m.hoverSlashIdx = i
+						break
+					}
+				}
+			}
+			if m.hoverSlashIdx != prevHover {
+				changed = true
+			}
+		}
+
+		// Tab hover
+		prevTabHover := m.hoverTabIdx
+		m.hoverTabIdx = -1
+		if tab, ok := m.tabForClick(mouse); ok {
+			m.hoverTabIdx = tab
+		}
+		if m.hoverTabIdx != prevTabHover {
+			changed = true
+		}
+
 		return m, nil, changed
 	}
 	headerHeight := appHeaderHeight
