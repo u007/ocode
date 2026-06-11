@@ -8590,15 +8590,14 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	}
 	header := m.renderAppHeader("\u25c6 ocode", "\u00b7  opencode clone v"+version.Version, tabBar, exitBtn, m.width)
 	var inputArea string
-	if m.showPermDialog {
-		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
-	} else if m.showRetryDialog {
+	if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
 	} else if m.sessionDeleteConfirm {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
+		// Permission dialog is now a centered overlay, not part of bottom chrome.
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	status := m.renderStatus()
@@ -10776,15 +10775,14 @@ func (m model) renderTabContent() string {
 	)
 	transcript := borderStyle.Width(panelWidth - 2).Render(transcriptContent)
 	var inputArea string
-	if m.showPermDialog {
-		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
-	} else if m.showRetryDialog {
+	if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
 	} else if m.sessionDeleteConfirm {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
+		// Permission dialog is now a centered overlay, not part of bottom chrome.
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	leftParts := []string{transcript}
@@ -10816,6 +10814,11 @@ func (m model) renderTabContent() string {
 		)
 	} else {
 		result = lipgloss.JoinVertical(lipgloss.Left, header, left)
+	}
+
+	// Permission dialog: render as centered overlay with dimmed backdrop.
+	if m.showPermDialog {
+		result = m.renderPermissionOverlay(result)
 	}
 
 	// Safety net: if the rendered output exceeds terminal height, re-render
@@ -12530,11 +12533,10 @@ func (m model) inputAreaHeight() int {
 	panelWidth := m.panelWidth()
 	m.applyInputTheme()
 	var rendered string
-	if m.showPermDialog {
-		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
-	} else if m.showQuestionDialog {
+	if m.showQuestionDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else {
+		// Permission dialog is now a centered overlay, not part of bottom chrome.
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.input.View())
 	}
 	return lipgloss.Height(rendered)
