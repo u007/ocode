@@ -157,6 +157,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=client_creation_failed", ie.Language, modelLabel))
 		return false, "could not create LLM client"
 	}
+	pinDeterministicSampling(client)
 
 	minConfidence := 0.85
 	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.MinConfidence > 0 {

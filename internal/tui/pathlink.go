@@ -90,7 +90,9 @@ func byteIdxToVisualCol(line string, byteIdx int) int {
 // pathLinkAtCol returns the file-path link under visualCol on an ANSI-stripped
 // line, if the token there resolves to an existing file. Detection is lazy
 // (only the token under the cursor is statted) to avoid scanning/stat-ing the
-// whole transcript on every render or hover event.
+// whole transcript on every render or hover event. On a miss over a candidate
+// token, the returned region still carries the token's startCol/endCol so
+// callers can cache the negative result for that span.
 func pathLinkAtCol(rawLine string, visualCol int, workDir string) (pathLinkRegion, bool) {
 	for _, loc := range pathCandidateRe.FindAllStringIndex(rawLine, -1) {
 		tok := rawLine[loc[0]:loc[1]]
@@ -106,15 +108,65 @@ func pathLinkAtCol(rawLine string, visualCol int, workDir string) (pathLinkRegio
 		}
 		pathPart, lineNo := splitPathLine(trimmed)
 		if !looksLikePathToken(pathPart) {
-			return pathLinkRegion{}, false
+			return pathLinkRegion{startCol: startCol, endCol: endCol}, false
 		}
 		abs, ok := resolveExistingFile(pathPart, workDir)
 		if !ok {
-			return pathLinkRegion{}, false
+			return pathLinkRegion{startCol: startCol, endCol: endCol}, false
 		}
 		return pathLinkRegion{startCol: startCol, endCol: endCol, path: abs, lineNo: lineNo}, true
 	}
 	return pathLinkRegion{}, false
+}
+
+// pathLinkProbeCache memoizes the last pathLinkAtCol probe per surface.
+// MouseModeAllMotion fires on every cursor move (20-60Hz), and each probe over
+// a path-like token costs a regex scan plus an os.Stat; cursor motion within
+// the same token must not repeat that. Keyed by line content, so the cache
+// self-invalidates when the transcript re-renders or the cursor changes line.
+type pathLinkProbeCache struct {
+	rawLine   string
+	startCol  int // probed token span, [startCol, endCol); empty span = no cache
+	endCol    int
+	probeCol  int // exact column probed; used for miss caching
+	r         pathLinkRegion
+	ok        bool
+	cachedMiss bool // true = the probeCol was a miss and is cached
+}
+
+// probe returns the cached result when visualCol is still inside the last
+// probed token on the same line, otherwise runs pathLinkAtCol and caches it.
+// Both hits and misses are cached to avoid redundant regex+stat work on
+// repeated mouse motion over non-path text.
+func (c *pathLinkProbeCache) probe(rawLine string, visualCol int, workDir string) (pathLinkRegion, bool) {
+	// Cache hit: cursor still inside previously probed token span.
+	if c.endCol > c.startCol && visualCol >= c.startCol && visualCol < c.endCol && rawLine == c.rawLine {
+		return c.r, c.ok
+	}
+	// Cache miss: same column on same line — return cached miss.
+	if c.cachedMiss && c.probeCol == visualCol && rawLine == c.rawLine {
+		return c.r, false
+	}
+	r, ok := pathLinkAtCol(rawLine, visualCol, workDir)
+	if ok {
+		// Hit: cache the token span.
+		c.rawLine, c.startCol, c.endCol, c.r, c.ok = rawLine, r.startCol, r.endCol, r, ok
+		c.cachedMiss = false
+	} else if r.endCol > r.startCol {
+		// Token found but file doesn't exist: cache the span so motion
+		// within the token doesn't re-stat the nonexistent file.
+		c.rawLine, c.startCol, c.endCol, c.r, c.ok = rawLine, r.startCol, r.endCol, r, false
+		c.cachedMiss = false
+	} else {
+		// No token found at all: cache the exact column to avoid
+		// re-scanning on repeated mouse motion over non-path text.
+		c.rawLine, c.probeCol = rawLine, visualCol
+		c.cachedMiss = true
+		c.r, c.ok = r, false
+		// Clear token span so the hit guard doesn't fire.
+		c.startCol, c.endCol = 0, 0
+	}
+	return r, ok
 }
 
 // applyPathLinkUnderline returns a copy of lines with the region's span

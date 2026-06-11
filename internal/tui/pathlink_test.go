@@ -67,3 +67,38 @@ func TestSplitPathLine(t *testing.T) {
 		}
 	}
 }
+
+func TestPathLinkProbeCache(t *testing.T) {
+	wd := "../.."
+	line := "edit internal/tui/pathlink.go now"
+	var c pathLinkProbeCache
+
+	r1, ok1 := c.probe(line, 12, wd)
+	if !ok1 {
+		t.Fatalf("first probe miss: %+v", r1)
+	}
+	// Poison the cached path; a hit within the same token span must return the
+	// cached value without re-running pathLinkAtCol.
+	c.r.path = "CACHED"
+	if r2, ok2 := c.probe(line, r1.startCol, wd); !ok2 || r2.path != "CACHED" {
+		t.Fatalf("expected cached hit within token span, got ok=%v r=%+v", ok2, r2)
+	}
+	// Outside the cached span → fresh probe (no token there → miss).
+	if _, ok3 := c.probe(line, 0, wd); ok3 {
+		t.Fatal("expected miss outside token span")
+	}
+	// Different line content with same col must not hit the stale cache.
+	if _, ok4 := c.probe("totally different prose here", 12, wd); ok4 {
+		t.Fatal("expected miss on different line content")
+	}
+	// Negative results over a path-like token are cached too: probe a
+	// nonexistent path, then verify the span is recorded so motion within the
+	// token skips re-statting.
+	missLine := "open does/not/exist.go here"
+	if _, ok := c.probe(missLine, 8, wd); ok {
+		t.Fatal("expected miss for nonexistent file")
+	}
+	if c.rawLine != missLine || c.endCol <= c.startCol {
+		t.Fatalf("negative probe span not cached: %+v", c)
+	}
+}

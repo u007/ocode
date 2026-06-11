@@ -706,8 +706,10 @@ type model struct {
 	hoverSidebarFile         string         // file path hovered by mouse in sidebar, empty when no hover
 	hoverLink                pathLinkRegion // file-path link hovered in the transcript
 	hoverLinkActive          bool           // whether hoverLink is set
+	hoverLinkProbe           pathLinkProbeCache
 	hoverDetailLink          pathLinkRegion // file-path link hovered in the agent-detail view
 	hoverDetailLinkActive    bool           // whether hoverDetailLink is set
+	hoverDetailLinkProbe     pathLinkProbeCache
 	rawInputLines            []string
 	rawInputLinesDirty       bool
 	inputThemeApplied        bool
@@ -3195,7 +3197,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		case "up":
 			if m.pickerIndex > 0 {
 				m.pickerIndex--
-				isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
 				if isFiltered {
 					_, values := m.pickerVisibleItems()
 					for m.pickerIndex > 0 && m.pickerIndex < len(values) && values[m.pickerIndex] == "" {
@@ -3215,7 +3217,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			items, values := m.pickerVisibleItems()
 			if m.pickerIndex < len(items)-1 {
 				m.pickerIndex++
-				isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
 				for m.pickerIndex < len(items)-1 {
 					if isFiltered {
 						if m.pickerIndex < len(values) && values[m.pickerIndex] == "" {
@@ -3244,7 +3246,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		case "enter":
-			isFiltered := m.pickerKind == "model" && m.pickerFilter != ""
+			isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
 			if !isFiltered && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
 				return true, m, nil
 			}
@@ -6212,11 +6214,16 @@ func (m *model) handleAdvisorCmd(args []string) tea.Cmd {
 	}
 	m.config.Ocode.Advisor.Provider = provider
 	m.config.Ocode.Advisor.Model = model
+	m.config.Ocode.Advisor.ClaudeCode = (provider == "claude-code")
 	if err := config.SaveAdvisorModel(modelID); err != nil {
 		log.Printf("save advisor model: %v", err)
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to set advisor model to %s: %v", modelID, err)})
 	} else {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Advisor model set to %s.", modelID)})
+		mode := ""
+		if provider == "claude-code" {
+			mode = " (Claude Code CLI, read-only)"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Advisor model set to %s%s.", modelID, mode)})
 	}
 	m.rerenderTranscriptAndMaybeScroll()
 	return nil
@@ -6411,32 +6418,8 @@ func (m *model) handleSmallModelCmd(args []string) {
 	}
 
 	if len(args) == 0 {
-		// Show current small model and available candidates
-		var b strings.Builder
-		b.WriteString("Small Model\n")
-		b.WriteString(strings.Repeat("═", 40) + "\n\n")
-		b.WriteString("Used for: title generation, explore/general/compaction subagents\n\n")
-
-		current := m.config.Ocode.SmallModel
-		if current == "" {
-			b.WriteString("Current: (not set — auto-resolving from priority list)\n")
-		} else {
-			b.WriteString(fmt.Sprintf("Current: %s\n", current))
-		}
-
-		b.WriteString("\nPriority list (auto-resolve order):\n")
-		for i, candidate := range agent.SmallModelPriority {
-			marker := "  "
-			if candidate == current {
-				marker = "→ "
-			}
-			b.WriteString(fmt.Sprintf("  %d. %s%s\n", i+1, marker, candidate))
-		}
-
-		b.WriteString("\nUsage: /small-model <provider/model>  or  /small-model auto\n")
-		b.WriteString("  auto  — clear override, re-enable auto-resolve\n")
-
-		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		// Open the model picker for small model selection
+		m.openSmallModelPicker()
 		return
 	}
 
@@ -9448,6 +9431,55 @@ func wrapView(view string, width int) string {
 	return strings.Join(wrapped, "\n")
 }
 
+// wordWrap wraps text at word (space) boundaries to fit within the given width.
+// It preserves ANSI escape codes and handles wide characters. If a single word
+// exceeds the width, it falls back to hard-wrapping at grapheme boundaries.
+func wordWrap(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+	lines := strings.Split(text, "\n")
+	var wrapped []string
+	for _, line := range lines {
+		if ansi.StringWidth(line) <= width {
+			wrapped = append(wrapped, line)
+			continue
+		}
+		// Try to break at spaces first.
+		words := strings.Fields(line)
+		var cur strings.Builder
+		var curW int
+		for _, word := range words {
+			wW := ansi.StringWidth(word)
+			if wW > width {
+				// Word too long — flush current line and hard-wrap the word.
+				if cur.Len() > 0 {
+					wrapped = append(wrapped, cur.String())
+					cur.Reset()
+					curW = 0
+				}
+				wrapped = append(wrapped, strings.Split(ansi.Hardwrap(word, width, false), "\n")...)
+			} else if curW == 0 {
+				cur.WriteString(word)
+				curW = wW
+			} else if curW+1+wW <= width {
+				cur.WriteByte(' ')
+				cur.WriteString(word)
+				curW += 1 + wW
+			} else {
+				wrapped = append(wrapped, cur.String())
+				cur.Reset()
+				cur.WriteString(word)
+				curW = wW
+			}
+		}
+		if cur.Len() > 0 {
+			wrapped = append(wrapped, cur.String())
+		}
+	}
+	return strings.Join(wrapped, "\n")
+}
+
 // wireCompactCallbacks attaches OnCompactStart and OnCompact to the active
 // agent so async compaction results flow back through the TUI's event loop.
 // Must be re-invoked whenever m.agent is replaced.
@@ -11336,7 +11368,12 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	// for one tick.
 	cacheKey := sidebarCacheKey{msgCount: len(m.messages), model: modelName, lspStateSeq: m.lspStateSeq}
 	if n := len(m.messages); n > 0 {
-		cacheKey.lastLen = len(m.messages[n-1].text)
+		// Bucketed: the last message grows on every stream delta, and a raw
+		// length here would bust the cache (and re-walk all messages) on every
+		// rendered frame while streaming. 1KB granularity keeps the token
+		// counts fresh without per-frame recompute (~256 tokens max drift
+		// at ~4 bytes/token, down from ~1024 with the prior 4KB bucket).
+		cacheKey.lastLen = len(m.messages[n-1].text) / 1024
 	}
 	cache := m.sidebarCache
 	if cache == nil {
@@ -12051,10 +12088,11 @@ func (m *model) refreshLogViewport() {
 		}
 		tag := style.Bold(true).Render(fmt.Sprintf("%-5s", string(e.Kind)))
 		// Wrap each entry to the viewport width so long messages show their
-		// full content across multiple lines instead of being clipped.
+		// full content across multiple lines instead of being clipped. Use
+		// wordWrap to break at space boundaries for readable wrapping.
 		line := tag + " " + e.Message
 		if w := m.logViewport.Width(); w > 0 {
-			line = wrapView(line, w)
+			line = wordWrap(line, w)
 		}
 		lines = append(lines, line)
 	}
@@ -12360,7 +12398,10 @@ func (m *model) applyOrClearSelectionHighlight() {
 		sl, sc, el, ec := normaliseSelection(m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
 		lines = applySelectionHighlight(lines, m.rawTranscriptLines, sl, sc, el, ec)
 	}
-	m.viewport.SetContent(strings.Join(lines, "\n"))
+	// lines is always a fresh copy here (underline/highlight both copy), so the
+	// viewport may retain it. SetContentLines avoids SetContent's O(N) join+split
+	// — this runs per mouse-motion event while hovering/selecting.
+	m.viewport.SetContentLines(lines)
 }
 
 // transcriptPathLinkAt returns the file-path link under the mouse in the chat
@@ -12381,7 +12422,7 @@ func (m *model) transcriptPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
 	if contentLine < 0 || contentLine >= len(m.rawTranscriptLines) {
 		return pathLinkRegion{}, false
 	}
-	r, ok := pathLinkAtCol(m.rawTranscriptLines[contentLine], mouse.X, m.workDir)
+	r, ok := m.hoverLinkProbe.probe(m.rawTranscriptLines[contentLine], mouse.X, m.workDir)
 	if !ok {
 		return pathLinkRegion{}, false
 	}
@@ -12403,7 +12444,7 @@ func (m *model) detailPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
 	if contentLine < 0 || contentLine >= len(top.rawLines) {
 		return pathLinkRegion{}, false
 	}
-	r, ok := pathLinkAtCol(top.rawLines[contentLine], mouse.X-detailContentLeftX, m.workDir)
+	r, ok := m.hoverDetailLinkProbe.probe(top.rawLines[contentLine], mouse.X-detailContentLeftX, m.workDir)
 	if !ok {
 		return pathLinkRegion{}, false
 	}
@@ -13003,12 +13044,12 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 			}
 		}()
 
-		// Try to expose via tailscale if available
-		tailscaleURL := startTailscaleServe(port)
-
 		// Embed token in URL so the browser auto-authenticates on open.
 		url := fmt.Sprintf("http://%s/session/%s?token=%s", addr, m.sessionID, token)
 		go openBrowser(url)
+
+		// Try to expose via tailscale if available (non-blocking — open browser first).
+		tailscaleURL := startTailscaleServe(port)
 
 		return rcStartedMsg{url: url, tailscaleURL: tailscaleURL, bridge: bridge}
 	}
@@ -13185,6 +13226,8 @@ func openBrowser(url string) {
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	}
 	if cmd != nil {
-		_ = cmd.Start()
+		if err := cmd.Start(); err != nil {
+			log.Printf("openBrowser: failed to open %s: %v", url, err)
+		}
 	}
 }

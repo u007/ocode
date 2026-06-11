@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/config"
@@ -211,4 +212,62 @@ func TestVerifyAutoGrantGuardrails(t *testing.T) {
 func jsonStr(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+// TestAskPermissionModelRepromptRecovery covers the strict-format retry: when
+// the judge's first reply has no parseable verdict, one reprompt demanding the
+// bare verdict line runs before falling through to a human prompt.
+func TestAskPermissionModelRepromptRecovery(t *testing.T) {
+	newAgentWithScript := func(responses []string) (*Agent, *scriptedCaptureClient) {
+		cfg := &config.Config{}
+		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
+		a := NewAgent(nil, nil, cfg, nil)
+		client := &scriptedCaptureClient{Responses: responses}
+		prevClientFn := newClientFn
+		t.Cleanup(func() { newClientFn = prevClientFn })
+		newClientFn = func(_ *config.Config, _ string) LLMClient { return client }
+		return a, client
+	}
+
+	t.Run("retry recovers allow", func(t *testing.T) {
+		a, client := newAgentWithScript([]string{
+			"This looks safe to me and I would approve the call.", // no parseable verdict
+			"ALLOW: safe mock tool call",                          // strict retry answer
+		})
+		allowed, reason := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
+		if !allowed {
+			t.Fatalf("expected retry to recover ALLOW, got denied: %q", reason)
+		}
+		if client.CallCount != 2 {
+			t.Fatalf("expected exactly 2 model calls (initial + reprompt), got %d", client.CallCount)
+		}
+	})
+
+	t.Run("still ambiguous after retry falls through", func(t *testing.T) {
+		a, client := newAgentWithScript([]string{
+			"This looks safe to me and I would approve the call.",
+			"I really do think this should be approved.", // still no verdict
+		})
+		allowed, reason := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
+		if allowed {
+			t.Fatal("ambiguous retry must not auto-allow")
+		}
+		if !strings.Contains(reason, "ambiguous") {
+			t.Fatalf("expected ambiguous reason, got %q", reason)
+		}
+		if client.CallCount != 2 {
+			t.Fatalf("expected exactly 2 model calls, got %d", client.CallCount)
+		}
+	})
+
+	t.Run("clean verdict skips retry", func(t *testing.T) {
+		a, client := newAgentWithScript([]string{"ALLOW: fine"})
+		allowed, _ := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
+		if !allowed {
+			t.Fatal("expected allow")
+		}
+		if client.CallCount != 1 {
+			t.Fatalf("expected single model call, got %d", client.CallCount)
+		}
+	})
 }

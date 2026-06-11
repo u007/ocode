@@ -57,6 +57,10 @@ type Message struct {
 	Model               string                   `json:"-"`
 	Usage               *TokenUsage              `json:"-"`
 	Spend               *float64                 `json:"-"`
+	// Notice carries a user-facing message that should be displayed in the
+	// transcript but NOT sent to the LLM. Used by tools that encounter
+	// recoverable problems worth surfacing (e.g. LSP server not installed).
+	Notice string `json:"notice,omitempty"`
 }
 
 type Image struct {

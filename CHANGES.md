@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- **Claude Code CLI Advisor Backend** — New `claude_code` config option routes the advisor through the `claude -p` CLI instead of an LLM API client. Supports model selection (default `claude-sonnet-4-6`), enforces read-only tool restrictions, and appends a strict read-only system prompt. Activated via the advisor picker's new "Claude Code (Read-Only CLI)" section.
+- **Permission Model Reprompt Recovery** — When the auto-permission judge returns an ambiguous verdict (no parseable ALLOW/DENY line), a single strict-format retry asks the model to restate its decision before falling through to a human prompt. Reduces unnecessary permission dialogs from weak judge models.
+- **`pinDeterministicSampling`** — Permission judge clients now have temperature forced to 0 for reproducible verdicts, preventing flaky auto-allow decisions from local/small models defaulting to temperature 1.0.
+- **Path Link Probe Cache** — New `pathLinkProbeCache` memoizes path-link hover detection per surface. Avoids redundant regex+stat work on repeated mouse motion over the same token, and caches misses so non-path text doesn't re-probe on every cursor move.
+- **Small Model Picker** — `/small-model` now opens the model picker (instead of a text summary) with an "auto (resolve from priority list)" clear option, matching the UX of `/model` and `/advisor`.
+- **`wordWrap` Utility** — New ANSI-aware word-wrap function breaks text at space boundaries for readable log entry wrapping, replacing hard `wrapView` in the log viewport.
 - **Live Mirror for `/rc`** — `HandleSessionMessages` SSE endpoint streams the full TUI session (user messages, thinking/text deltas, tool activity, turn snapshots) to all connected browsers in real time. `RCBridge` gains `Subscribe`/`Unsubscribe`/`Broadcast` for fan-out. The TUI mirrors every event (user submit, delta, tool start/result, stream done) to the web UI, making `/rc` a true 2-way live mirror.
 - **Out-of-Scope Path Tracking** — `PermissionRequest` gains an `OutOfScopePath` field carrying the absolute path that put a bash command outside allowed roots. `firstOutOfScopePath` identifies the culprit path so the permission prompt can offer to persist it to `extra_allowed_paths` instead of a broad bash-prefix rule. `verifyAutoGrant` now refuses to auto-grant any command flagged as out-of-scope.
 - **Allowed Scope Helper** — New `isWithinAllowedScope` unifies the workdir + extra allowed roots + temp dir check for bash auto-allow decisions.
@@ -20,6 +26,13 @@
 - **Stopped Indicator Row Safety** — Stopped indicator rendered with `.MaxHeight(1)` to prevent long labels from wrapping and pushing bottom chrome off-screen.
 - **Permission Dialog Viewport Restore** — Closing the permission dialog now calls `layout()` to restore the transcript viewport height that may have shrunk while the tall dialog was open.
 
+- **Permission Model Prompt Examples** — Auto-permission judge prompt now includes formatted ALLOW/DENY examples to reduce parser rejection from models that produce correct decisions but wrap them in prose.
+- **Picker Filter for Advisor/Small-Model** — Picker filter logic extended to `advisor`, `small-model`, and `permission-model` picker kinds, enabling typed search across all picker contexts.
+- **Sidebar Cache Key Bucketing** — Sidebar cache key uses 1KB granularity for last message length instead of raw length, reducing cache busting during streaming (from per-frame to ~256-token drift).
+- **Transcript Selection Performance** — Selection highlight now uses `SetContentLines` (O(1)) instead of `SetContent` (O(N) join+split) per mouse-motion event.
+- **Log Viewport Word Wrap** — Log entries now wrap at space boundaries via `wordWrap` for readable multi-line display instead of hard character-boundary wrapping.
+- **`/rc` Browser-First Ordering** — Remote control now opens the browser before attempting Tailscale serve, so the URL is available even if Tailscale is slow or unavailable.
+
 ### Fixed
 - **Out-of-Scope Bash Auto-Grant** — `verifyAutoGrant` now refuses to auto-grant bash commands that target paths outside the allowed roots, preventing silent scope expansion.
 - **Out-of-Scope Permission Requests Carry Resolved Path** — `redirectionPermissionRequest` and `envVarPermissionRequest` now carry the resolved absolute path (not the raw env-var name or unresolved redirect path) so the prompt can persist it to `extra_allowed_paths`.
@@ -28,6 +41,8 @@
 - **Permission Auto-Allow Scope** — Temp-directory awk commands no longer persist as project-scoped allow rules, preventing overly broad permission grants.
 - **`cd` with No Args in Temp HOME** — Commands like `cd` (no args) with a temp-directory HOME now auto-allow instead of incorrectly prompting for permission.
 - **Tilde Path Permission Resolution** — Paths like `~/Downloads` where HOME is a temp directory now correctly resolve and auto-allow, instead of prompting.
+- **Browser Open Error Logging** — Failed `openBrowser` calls now log the error instead of silently swallowing it.
+- **Path Link Miss Caching** — `pathLinkAtCol` now returns the token span on a miss so callers can cache negative results, avoiding redundant regex+stat work on non-path text.
 
 ## [0.3.5] — 2026-06-10
 

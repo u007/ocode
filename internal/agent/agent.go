@@ -350,6 +350,12 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	// Set workDir for path-scoped permission checks
 	if wd, err := os.Getwd(); err == nil {
 		a.permissions.SetWorkDir(wd)
+		// Pass workDir to the advisor tool so Claude Code CLI resolves paths
+		// against the project root, not the process launch directory.
+		if at, ok := a.tools["advisor"].(AdvisorTool); ok {
+			at.workDir = wd
+			a.tools["advisor"] = at
+		}
 	}
 	return a
 }
@@ -1222,6 +1228,7 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=client_creation_failed", toolName, modelLabel))
 		return false, "could not create LLM client"
 	}
+	pinDeterministicSampling(client)
 
 	// Gather context limits from config.
 	maxCtxBytes := 2048
@@ -1281,7 +1288,12 @@ reasoning before it on that line:
 ALLOW: <brief reason>
 DENY: <brief reason>
 Do not bury the words ALLOW or DENY inside a sentence (e.g. "I would ALLOW this");
-the final line must begin with the bare verdict word followed by a colon.`, toolName, toolArgs, rule, scope, context)
+the final line must begin with the bare verdict word followed by a colon.
+Keep your reply short. Examples of correctly formatted final lines:
+ALLOW: writes a test file inside the project directory
+ALLOW: read-only listing of project files
+DENY: deletes files outside the working directory
+These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, context)
 
 	// Apply custom prompt from config if set.
 	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
@@ -1296,7 +1308,32 @@ the final line must begin with the bare verdict word followed by a colon.`, tool
 		return false, failReason
 	}
 
-	if decided, allow, reason := parsePermissionVerdict(finalText); decided {
+	decided, allow, reason := parsePermissionVerdict(finalText)
+	if !decided {
+		// One strict-format reprompt before giving up: weak judge models often
+		// reach a correct decision but wrap it in prose the parser rejects. A
+		// single cheap retry demanding the bare verdict line recovers most of
+		// those instead of falling through to a needless human prompt. Tools are
+		// withheld so the model must answer, and the prior tool exchanges are
+		// not replayed — the model's own final text carries its conclusion, and
+		// the retry only asks it to restate that in the required format.
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_reprompt tool=%s response=%s", toolName, truncateDebugArgs([]byte(finalText), 100)))
+		messages = append(messages,
+			Message{Role: "assistant", Content: finalText},
+			Message{Role: "user", Content: "Your previous reply did not contain a parseable verdict. Reply with EXACTLY one line and nothing else:\nALLOW: <brief reason>\nor\nDENY: <brief reason>"})
+		// A failed retry is logged inside runPermissionModelLoop; the original
+		// ambiguous text then falls through to the human prompt below.
+		if retryText, gotRetry, retryErr := runPermissionModelLoop(a.StopCh(), client, messages, nil, modelLabel, toolName); gotRetry {
+			finalText = retryText
+			decided, allow, reason = parsePermissionVerdict(retryText)
+		} else if retryErr != "" {
+			// Surface the transport error so the user knows the retry failed
+			// rather than just seeing "ambiguous LLM response".
+			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_reprompt_error tool=%s err=%s", toolName, retryErr))
+			return false, fmt.Sprintf("permission judge retry failed: %s", retryErr)
+		}
+	}
+	if decided {
 		// A model ALLOW never overrides Go's deterministic guardrails — confidence
 		// alone never auto-approves (mirrors the interpreter effect verifier).
 		if allow {
@@ -1310,6 +1347,19 @@ the final line must begin with the bare verdict word followed by a colon.`, tool
 
 	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_ambiguous tool=%s response=%s", toolName, truncateDebugArgs([]byte(finalText), 100)))
 	return false, "ambiguous LLM response: " + finalText
+}
+
+// pinDeterministicSampling forces greedy decoding on a freshly created
+// permission-judge client. Verdicts must be reproducible; small/local models
+// (which are common as the auto-permission judge) often default to temperature
+// 1.0, which makes their already-shaky verdict formatting flake run-to-run.
+// Safe to mutate: the judge client is created per permission request, never
+// shared. applyGenerationParams skips reasoning models that reject sampling
+// tunables, so pinning here is a no-op for those.
+func pinDeterministicSampling(client LLMClient) {
+	if gc, ok := client.(*GenericClient); ok {
+		gc.Temperature = floatPtr(0)
+	}
 }
 
 // pathConfinedAutoTools are the path-scoped tools whose auto-grant target is a

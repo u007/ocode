@@ -410,3 +410,22 @@ func (m *Manager) WarmUp(root string) {
 		}()
 	}
 }
+
+// installHints maps LSP server binary names to user-friendly install
+// instructions. Used by the tool layer to surface actionable notices when
+// a server is missing from PATH.
+var installHints = map[string]string{
+	"gopls":                      "go install golang.org/x/tools/gopls@latest",
+	"rust-analyzer":              "rustup component add rust-analyzer",
+	"pyright-langserver":         "npm install -g pyright",
+	"typescript-language-server": "npm install -g typescript typescript-language-server",
+}
+
+// InstallHint returns a human-friendly install command for the given LSP
+// server binary, or a generic fallback if no hint is available.
+func InstallHint(cmd string) string {
+	if hint, ok := installHints[cmd]; ok {
+		return hint
+	}
+	return "check your package manager for a language server that supports this language"
+}

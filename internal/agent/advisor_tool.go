@@ -1,11 +1,14 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
@@ -73,6 +76,7 @@ var advisorAllowedTools = []string{
 type AdvisorTool struct {
 	cfg       *config.Config
 	mainAgent *Agent
+	workDir   string
 }
 
 func (t AdvisorTool) Name() string { return "advisor" }
@@ -172,6 +176,21 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 	}
 	defer advisorRecursionGuard.Store(false)
 
+	// Claude Code path: use the Claude Code CLI (claude -p) instead of an
+	// LLM API client when the advisor is configured for claude-code.
+	if t.cfg != nil && t.cfg.Ocode.Advisor.ClaudeCode {
+		modelName := t.cfg.Ocode.Advisor.Model
+		if modelName == "" {
+			modelName = "claude-sonnet-4-6"
+		}
+		emitDebug("ADVISOR", fmt.Sprintf("calling Claude Code CLI with model: %s", modelName))
+		result, err := executeClaudeCodeAdvisor(modelName, params.Prompt, t.workDir)
+		if err != nil {
+			return "", fmt.Errorf("claude code advisor call failed: %w", err)
+		}
+		return result, nil
+	}
+
 	// Resolve the model to use (preset via /advisor or config, not per-call).
 	modelStr := t.resolveModel()
 	emitDebug("ADVISOR", fmt.Sprintf("calling model: %s", modelStr))
@@ -270,4 +289,50 @@ func withNotice(notice, content string) string {
 		return content
 	}
 	return notice + "\n\n" + content
+}
+
+// claudeCodeAdvisorPrompt is the system prompt appended to Claude Code when
+// used as a read-only advisor. It instructs Claude to refuse file writes and
+// only provide analysis and advice.
+const claudeCodeAdvisorPrompt = `You are a READ-ONLY strategic advisor. DO NOT write, create, modify, or delete any files. DO NOT execute commands that change system state. Only read, analyze, and provide actionable advice. Respond in under 300 words. Use enumerated steps.`
+
+// executeClaudeCodeAdvisor runs the Claude Code CLI (claude -p) to obtain
+// advisor output. It passes the prompt via -p, specifies the model via
+// --model, appends a read-only system prompt, and restricts tools to
+// read-only operations via --disallowedTools.
+//
+// Notes on arg ordering:
+//   - --bare is intentionally omitted: it skips keychain reads, breaking OAuth auth.
+//   - The prompt must come after "--" because --disallowedTools consumes all
+//     subsequent positional args otherwise.
+func executeClaudeCodeAdvisor(modelName, prompt, workDir string) (string, error) {
+	args := []string{
+		"-p",
+		"--model", modelName,
+		"--append-system-prompt", claudeCodeAdvisorPrompt,
+		"--allowedTools", "Read,Glob,Grep,LS,WebFetch,WebSearch",
+		"--",
+		prompt,
+	}
+
+	// Use a 5-minute timeout to prevent hanging subprocesses from permanently
+	// locking the advisorRecursionGuard and leaking a goroutine.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "claude", args...)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("claude code advisor failed: %w\n%s", err, string(output))
+	}
+
+	result := strings.TrimSpace(string(output))
+	if result == "" {
+		return "", fmt.Errorf("claude code advisor returned empty output for model %q", modelName)
+	}
+
+	return result, nil
 }

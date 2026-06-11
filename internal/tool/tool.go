@@ -15,6 +15,23 @@ type Tool interface {
 	Parallel() bool
 }
 
+// NoticedError wraps an error with a user-facing notice that should be shown
+// in the transcript but not sent to the LLM. Tools return this when they
+// encounter a recoverable problem that the user should know about (e.g. an
+// LSP server not being installed).
+type NoticedError struct {
+	Err    error
+	Notice string // User-facing message shown in the transcript
+}
+
+func (e *NoticedError) Error() string  { return e.Err.Error() }
+func (e *NoticedError) Unwrap() error  { return e.Err }
+
+// NoticeSentinel is the prefix used in assistant messages that carry a
+// transient user-facing notice. The TUI strips this prefix and renders the
+// remainder as a non-LLM transient message.
+const NoticeSentinel = "NOTICE:"
+
 // LoadBuiltins returns the full set of built-in tools (always-on + opt-in)
 // plus the shared LSP manager that backs the `lsp` and `ast` tools. The
 // caller is responsible for closing the manager when the tool set is no

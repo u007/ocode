@@ -99,7 +99,7 @@ func (t *LSPTool) Execute(args json.RawMessage) (string, error) {
 		}
 		client, err := mgr.ClientForExt(ext)
 		if err != nil {
-			return "", err
+			return "", wrapLSPError(err)
 		}
 		syms, err := client.WorkspaceSymbols(input.Query)
 		if err != nil {
@@ -113,7 +113,7 @@ func (t *LSPTool) Execute(args json.RawMessage) (string, error) {
 	}
 	client, err := mgr.ClientForFile(input.Path)
 	if err != nil {
-		return "", err
+		return "", wrapLSPError(err)
 	}
 	// Open through the manager so the file watcher registers this URI; the
 	// positional query helpers below also call EnsureOpen internally, but
@@ -170,4 +170,38 @@ func lspStatus() string {
 		b.WriteString(fmt.Sprintf("- %s: %s\n", s, installedMark(s)))
 	}
 	return b.String()
+}
+
+// wrapLSPError wraps an LSP client error with a NoticedError when the error
+// indicates the server binary is missing from PATH. The notice includes
+// actionable install instructions so the user doesn't have to look them up.
+func wrapLSPError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	// Detect the "not found in PATH" error from the manager.
+	if strings.Contains(msg, "not found in PATH") {
+		// Extract the server binary name from the error message.
+		// Format: language server "gopls" not found in PATH (install it for .go support)
+		cmd := extractServerCmd(msg)
+		hint := lsp.InstallHint(cmd)
+		notice := fmt.Sprintf("LSP server %q is not installed. To install:\n  %s", cmd, hint)
+		return &NoticedError{Err: err, Notice: notice}
+	}
+	return err
+}
+
+// extractServerCmd extracts the LSP server binary name from an error message.
+func extractServerCmd(msg string) string {
+	// Look for the quoted server name: language server "gopls" not found...
+	start := strings.Index(msg, `"`)
+	if start < 0 {
+		return ""
+	}
+	end := strings.Index(msg[start+1:], `"`)
+	if end < 0 {
+		return ""
+	}
+	return msg[start+1 : start+1+end]
 }

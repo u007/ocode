@@ -42,6 +42,10 @@ type AdvisorConfig struct {
 	Enabled  bool   `json:"enabled"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
+	// ClaudeCode uses the Claude Code CLI (claude -p) as the advisor backend
+	// instead of an LLM API client. The model field holds the Anthropic model
+	// name (e.g. "claude-sonnet-4-6") passed to claude --model.
+	ClaudeCode bool `json:"claude_code,omitempty"`
 }
 
 // PluginsConfig gates opt-in builtin tools that ship disabled by default.
@@ -167,6 +171,7 @@ type advisorConfigFile struct {
 	Enabled  *bool  `json:"enabled"`
 	Provider string `json:"provider"`
 	Model    string `json:"model"`
+	ClaudeCode *bool `json:"claude_code,omitempty"`
 }
 
 type pluginsConfigFile struct {
@@ -504,6 +509,9 @@ func applyAdvisorConfig(dst *AdvisorConfig, src advisorConfigFile) {
 	}
 	if src.Enabled != nil {
 		dst.Enabled = *src.Enabled
+	}
+	if src.ClaudeCode != nil {
+		dst.ClaudeCode = *src.ClaudeCode
 	}
 }
 
@@ -893,6 +901,7 @@ func SaveAdvisorModel(providerModel string) error {
 	}
 	cfg.Advisor.Provider = provider
 	cfg.Advisor.Model = model
+	cfg.Advisor.ClaudeCode = (provider == "claude-code")
 	return SaveOcodeConfig(cfg)
 }
 

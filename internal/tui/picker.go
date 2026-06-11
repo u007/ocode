@@ -18,6 +18,37 @@ func (m *model) openAdvisorPicker() {
 	// saves the advisor model instead of switching the active model.
 	m.openModelPicker()
 	m.pickerKind = "advisor"
+	m.prependClaudeCodeSection()
+}
+
+// prependClaudeCodeSection inserts the "Claude Code (Read-Only CLI)" section at
+// the TOP of the model picker for the advisor kind. It is prepended (not
+// appended) because the provider list holds thousands of models — appended, the
+// section sits below all of them and is unreachable by scrolling. Called from
+// openAdvisorPicker (initial open) and refreshModelPickerItems (refresh).
+func (m *model) prependClaudeCodeSection() {
+	claudeCodeModels := []string{
+		"claude-sonnet-4-6",
+		"claude-opus-4-7",
+		"claude-haiku-4-5",
+		"claude-fable-5",
+	}
+	items := []string{"⚡ Claude Code (Read-Only CLI)"}
+	values := []string{""}
+	isHeader := []bool{true}
+	for _, model := range claudeCodeModels {
+		value := "claude-code/" + model
+		items = append(items, "  ⚡ "+value)
+		values = append(values, value)
+		isHeader = append(isHeader, false)
+	}
+	items = append(items, "") // blank separator below the section
+	values = append(values, "")
+	isHeader = append(isHeader, true)
+
+	m.pickerItems = append(items, m.pickerItems...)
+	m.pickerValues = append(values, m.pickerValues...)
+	m.pickerIsHeader = append(isHeader, m.pickerIsHeader...)
 }
 
 func (m *model) openPermissionModelPicker() {
@@ -58,6 +89,12 @@ func (m *model) refreshModelPickerItems() {
 	m.pickerIndex = idx
 	if kind == "permission-model" {
 		m.prependPermissionModelClearOption()
+	}
+	if kind == "small-model" {
+		m.prependSmallModelClearOption()
+	}
+	if kind == "advisor" {
+		m.prependClaudeCodeSection()
 	}
 }
 
@@ -440,7 +477,7 @@ func modelPickerMatches(lower, filter string) bool {
 }
 
 func (m model) pickerVisibleItems() ([]string, []string) {
-	if m.pickerKind == "model" && m.pickerFilter != "" {
+	if (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model") && m.pickerFilter != "" {
 		items := make([]string, 0, len(m.pickerItems))
 		values := make([]string, 0, len(m.pickerValues))
 		for i, item := range m.pickerItems {
@@ -530,7 +567,7 @@ func (m model) pickerRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	row := start + idx
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model") && m.pickerFilter != ""
 	if !isFiltered && row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
 		return 0, false
 	}
@@ -546,7 +583,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model") && m.pickerFilter != ""
 	if !isFiltered && index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
 		m.closePicker()
 		return m, nil
@@ -590,12 +627,15 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		}
 		return m.handleCommand("/permissions model " + selected)
 	}
+	if kind == "small-model" {
+		return m.handleCommand("/small-model " + selected)
+	}
 	return m.handleCommand("/models " + selected)
 }
 
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
-	if m.pickerKind == "model" || m.pickerKind == "permission-model" {
+	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
 	} else if m.pickerKind == "advisor" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
@@ -621,6 +661,12 @@ func (m model) renderPicker() string {
 	}
 	if m.pickerKind == "permission-model" {
 		title = "Select permission model"
+	}
+	if m.pickerKind == "small-model" {
+		title = "Select small model"
+	}
+	if m.pickerKind == "advisor" {
+		title = "Select advisor model"
 	}
 	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilterPending+"_")
 
@@ -651,7 +697,7 @@ func (m model) renderPicker() string {
 		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
-		isFiltered := (m.pickerKind == "model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model") && m.pickerFilter != ""
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
@@ -780,4 +826,21 @@ func (m *model) cycleAgentMode() {
 	if m.agent != nil {
 		m.agent.SetSpec(&spec)
 	}
+}
+
+func (m *model) openSmallModelPicker() {
+	// Reuse the model picker listing with kind="small-model" so picker
+	// selection saves the small model instead of switching the active model.
+	m.openModelPicker()
+	m.pickerKind = "small-model"
+	m.prependSmallModelClearOption()
+}
+
+func (m *model) prependSmallModelClearOption() {
+	if m.pickerKind != "small-model" {
+		return
+	}
+	m.pickerItems = append([]string{"  auto (resolve from priority list)"}, m.pickerItems...)
+	m.pickerValues = append([]string{"auto"}, m.pickerValues...)
+	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
 }
