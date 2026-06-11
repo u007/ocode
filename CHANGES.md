@@ -40,6 +40,10 @@
 - **Web Theme Hook Hex→HSL Fix** — `useTheme` hook now converts hex color values to HSL for CSS variable injection, fixing color rendering in the Web UI.
 
 ### Fixed
+- **File Tree Scrollbar Width** — Tree content width in the files tab adjusted from `treeW-6` to `treeW-7` to account for the 1-column scrollbar joined via `JoinHorizontal`, preventing line wrapping that pushed tree rows onto a second line.
+- **Permission Dialog Stale Modal Stack Pointer** — Removed `modalStack` routing from permission dialog key handling to fix a stale pointer bug where the model's value-receiver `Update()` copies caused `permDialogInput` to modify a discarded copy, requiring a second keypress to close the dialog.
+- **Permission Dialog Button Region Overlay Coordinates** — `updatePermButtonRegions` now computes button Y positions relative to the centered overlay position (matching `renderPermissionOverlay`) instead of the input area top, fixing click-hit-test mismatch when the dialog is rendered as a centered overlay.
+- **Status Bar Line Clamping** — Status bar lines now use `.MaxHeight(1)` to prevent long labels from wrapping and pushing bottom chrome off-screen.
 - **Out-of-Scope Bash Auto-Grant** — `verifyAutoGrant` now refuses to auto-grant bash commands that target paths outside the allowed roots, preventing silent scope expansion.
 - **Out-of-Scope Permission Requests Carry Resolved Path** — `redirectionPermissionRequest` and `envVarPermissionRequest` now carry the resolved absolute path (not the raw env-var name or unresolved redirect path) so the prompt can persist it to `extra_allowed_paths`.
 - **Un-cancellable Permission Freeze** — Pressing Esc during an in-flight permission-model LLM request now cancels it immediately instead of waiting for up to 15 sequential API calls to complete.

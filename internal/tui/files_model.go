@@ -1783,9 +1783,10 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	styledLines := make([]string, 0, len(m.nodes))
 	// The tree pane is rendered with Width(treeW-2); in lipgloss v2 that width is
 	// the full frame (border 2 + padding 2 are counted inside it), so the usable
-	// content area is treeW-2-4 = treeW-6. Truncating rows to anything wider makes
-	// them wrap onto a second line.
-	treeContentWidth := treeW - 6
+	// content area is treeW-2-4 = treeW-6. A 1-char scrollbar is joined horizontally
+	// with the content via JoinHorizontal, so subtract 1 more for the scrollbar.
+	// Truncating rows to anything wider makes them wrap onto a second line.
+	treeContentWidth := treeW - 7
 	if treeContentWidth < 1 {
 		treeContentWidth = 1
 	}

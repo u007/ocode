@@ -3452,18 +3452,10 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	}
 
 	if m.showPermDialog {
-		// Try routing through ModalStack first.
-		if m.modalStack != nil && m.modalStack.Handle(msg) {
-			// Check if the dialog was closed by the modal handler.
-			if !m.showPermDialog {
-				m.input.Reset()
-				m.layout()
-				m.rerenderTranscriptAndMaybeScroll()
-				m.saveSession()
-			}
-			return m, nil
-		}
-		// Fallback to legacy handling.
+		// Use legacy handling directly. The modal stack adapter (permDialogModal)
+		// stores a *model pointer that becomes stale across Update() value-receiver
+		// copies, causing permDialogInput to modify a discarded model while the
+		// current copy retains showPermDialog=true — requiring a second keypress.
 		switch keyStr {
 		case "y", "n", "a", "t":
 			cmd, closed := m.permDialogInput(keyStr)
@@ -8984,6 +8976,8 @@ func (m *model) renderPermissionDialog(width int) string {
 
 // updatePermButtonRegions computes absolute screen positions for the permission
 // dialog buttons and stores them on the model. Call from Update() after layout changes.
+// The dialog is rendered as a centered overlay (renderPermissionOverlay), so button
+// regions must be computed relative to the centered position, not the input area.
 func (m *model) updatePermButtonRegions() {
 	if !m.showPermDialog {
 		m.permButtonRegions = nil
@@ -9000,11 +8994,34 @@ func (m *model) updatePermButtonRegions() {
 	// above the rendered buttons.
 	visibleBodyLines := m.permViewport.Height()
 
-	// Top border + header(1) + blank(1) + body + blank(1)
-	buttonTopY := m.inputAreaTopY() + 4 + visibleBodyLines
+	// Compute the centered overlay position to match renderPermissionOverlay.
+	body := renderPermissionRequestBody(m.pendingPermission)
+	if m.permConfirm != "" {
+		body = renderPermConfirmBody(m.pendingPermission, m.pendingToolName, m.permConfirm)
+	}
+	bodyLines := strings.Count(body, "\n") + 1
+	if bodyLines > permissionDialogMaxBodyLines {
+		bodyLines = permissionDialogMaxBodyLines
+	}
+	// Bounds().Width = panelWidth() - 2 (content width inside the border).
+	boundsWidth := max(0, m.panelWidth()-2)
+	boundsHeight := 4 + bodyLines // header(1) + blank(1) + body + blank(1)
+
+	overlayX := (m.width - boundsWidth) / 2
+	if overlayX < 0 {
+		overlayX = 0
+	}
+	overlayY := (m.height - boundsHeight) / 2
+	if overlayY < 0 {
+		overlayY = 0
+	}
+
+	// Button row is at: header(1) + blank(1) + body(visibleBodyLines) + blank(1)
+	// from the top of the dialog.
+	buttonTopY := overlayY + visibleBodyLines + 3
 
 	m.permButtonRegions = nil
-	x := 1 // after left border
+	x := overlayX + 1 // after left border, offset by overlay position
 	for _, b := range m.permDialogBtnDefs() {
 		rendered := permBtnStyle.Render(b.label + " " + b.desc)
 		w := lipgloss.Width(rendered)
@@ -11171,8 +11188,8 @@ func (m *model) renderStatus() string {
 		rightContent += " · " + pending + " · click Chat to answer"
 	}
 
-	line1 := m.styles.Status.Width(width).Render(ansi.Truncate(leftStatus, width, "..."))
-	line2 := m.styles.Status.Width(width).Render(ansi.Truncate(rightContent, width, "..."))
+	line1 := m.styles.Status.Width(width).MaxHeight(1).Render(ansi.Truncate(leftStatus, width, "..."))
+	line2 := m.styles.Status.Width(width).MaxHeight(1).Render(ansi.Truncate(rightContent, width, "..."))
 
 	return line1 + "\n" + line2
 }
