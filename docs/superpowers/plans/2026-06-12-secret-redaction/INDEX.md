@@ -4,7 +4,7 @@
 
 **Goal:** Session-scoped secret redaction — detect secrets before any LLM send, replace with `[[OCSEC:<nonce>:<n>]]` placeholders (stored on disk), re-render real values in TUI, unmask at tool execution behind a secret-aware permission prompt.
 
-**Architecture:** New `internal/redact` package (registry + tier-1 detectors + tier-2 local-model scanner + vault) injected as a shared `Redactor` into the four ingestion carriers; regex safety net + tripwire inside `GenericClient.ChatWithContext`; display re-substitution across TUI surfaces; config persisted via targeted saver; sidebar toggle + `/secrets` command.
+**Architecture:** New `internal/redact` package (registry + tier-1 detectors + tier-2 local-model scanner + vault) injected as a shared `Redactor` into the four ingestion carriers; regex safety net + tripwire inside `GenericClient.ChatWithContext`; display re-substitution across TUI surfaces; config persisted via targeted saver; sidebar toggle + `/mask` command.
 
 **Tech Stack:** Go, Bubble Tea TUI, existing config/permission patterns.
 

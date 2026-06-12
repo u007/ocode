@@ -61,6 +61,20 @@ func TestRenderFileSearchUsesWorkspaceFiles(t *testing.T) {
 	}
 }
 
+func TestCtrlEOnFileSearchOpensSelectedFile(t *testing.T) {
+	m := model{width: 80, showFileSearch: true, fileSearchResults: []fileSearchResult{{path: "main.go", fileName: "main.go"}}}
+	m.fileSearchIndex = 0
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: ""})
+	got := updated.(model)
+	if got.showFileSearch {
+		t.Fatal("expected file search to close after ctrl+e")
+	}
+	if cmd == nil {
+		t.Fatal("expected ctrl+e to return an editor open command")
+	}
+}
+
 func TestSlashAutocompleteResolvesCommand(t *testing.T) {
 	m := model{}
 

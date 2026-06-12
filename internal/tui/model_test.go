@@ -584,9 +584,9 @@ func TestUpdatePermButtonRegionsUsesRenderedBodyHeight(t *testing.T) {
 			}
 
 			// The dialog renders inline in the bottom chrome: top border(1) +
-			// header(1) + blank(1) + body + blank(1) above the button row, plus
-			// the extra two-row offset used by the nested border layout.
-			wantY := m.inputAreaTopY() + 6 + m.permViewport.Height()
+			// header(1) + blank(1) + body + blank(1) above the button row.
+			// The button region start points to the first line of the button row (top border of the RoundedBorder button).
+			wantY := m.inputAreaTopY() + 4 + m.permViewport.Height()
 			if got := m.permButtonRegions[0].y1; got != wantY {
 				t.Fatalf("expected permission buttons to start at y=%d, got %d", wantY, got)
 			}
@@ -4788,6 +4788,78 @@ func TestBuildSelectionContextGitFiles(t *testing.T) {
 	got = m.buildSelectionContext()
 	if strings.Contains(got, "## Git diff") {
 		t.Fatalf("expected no git section when nothing selected and not on git tab, got:\n%s", got)
+	}
+}
+
+func TestBuildSelectionContextIDEActiveFileNoSelection(t *testing.T) {
+	m := model{workDir: "/proj"}
+	// IDE connected with open editors but no selection — active file should appear.
+	m.ideOpenEditors = []ide.Editor{
+		{FilePath: "/proj/main.go", Active: true},
+		{FilePath: "/proj/util.go", Active: false},
+	}
+
+	got := m.buildSelectionContext()
+	if !strings.Contains(got, "## IDE active file: main.go") {
+		t.Fatalf("expected active file in context, got:\n%s", got)
+	}
+	if strings.Contains(got, "## IDE selection:") {
+		t.Fatalf("did not expect IDE selection section, got:\n%s", got)
+	}
+}
+
+func TestBuildSelectionContextIDESelectionOverridesActiveFile(t *testing.T) {
+	m := model{workDir: "/proj"}
+	// When there is a selection, the active-file fallback must not appear.
+	m.ideSelection = &ide.Selection{
+		FilePath: "/proj/main.go",
+		Ranges:   []ide.Range{{StartLine: 0, EndLine: 2, Text: "hello"}},
+	}
+	m.ideOpenEditors = []ide.Editor{
+		{FilePath: "/proj/main.go", Active: true},
+		{FilePath: "/proj/util.go", Active: false},
+	}
+
+	got := m.buildSelectionContext()
+	if !strings.Contains(got, "## IDE selection: main.go") {
+		t.Fatalf("expected IDE selection in context, got:\n%s", got)
+	}
+	if strings.Contains(got, "## IDE active file:") {
+		t.Fatalf("active file fallback must not appear when selection exists, got:\n%s", got)
+	}
+}
+
+func TestBuildSelectionContextIDEOpenTabs(t *testing.T) {
+	m := model{workDir: "/proj"}
+	m.ideOpenEditors = []ide.Editor{
+		{FilePath: "/proj/main.go", Active: true},
+		{FilePath: "/proj/util.go", Active: false, Dirty: true},
+		{FilePath: "/proj/internal/foo.go", Active: false},
+	}
+
+	got := m.buildSelectionContext()
+	if !strings.Contains(got, "## IDE open tabs:") {
+		t.Fatalf("expected open tabs section, got:\n%s", got)
+	}
+	if !strings.Contains(got, "- *main.go") {
+		t.Fatalf("expected active tab marker, got:\n%s", got)
+	}
+	if !strings.Contains(got, "- util.go (modified)") {
+		t.Fatalf("expected dirty marker, got:\n%s", got)
+	}
+	if !strings.Contains(got, "- internal/foo.go") {
+		t.Fatalf("expected third tab in list, got:\n%s", got)
+	}
+}
+
+func TestBuildSelectionContextIDEOpenTabsEmpty(t *testing.T) {
+	m := model{workDir: "/proj"}
+	// IDE connected but no editors — no tabs section.
+	m.ideOpenEditors = []ide.Editor{}
+
+	got := m.buildSelectionContext()
+	if strings.Contains(got, "## IDE") {
+		t.Fatalf("expected no IDE section when no editors, got:\n%s", got)
 	}
 }
 

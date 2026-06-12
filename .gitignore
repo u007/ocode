@@ -43,3 +43,4 @@ build_script.sh
 web/node_modules/
 web/dist/assets/
 internal/agent/models-snapshot.json
+ocodeconfig.json

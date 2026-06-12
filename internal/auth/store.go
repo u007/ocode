@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/u007/ocode/internal/paths"
 )
 
 // CredentialKind distinguishes how a credential was obtained.
@@ -131,24 +133,15 @@ var (
 
 // authPath returns the opencode-compatible credentials path:
 //
-//	Linux / macOS: ~/.local/share/opencode/auth.json
-//	Windows:       %LOCALAPPDATA%\opencode\auth.json
+//	<GlobalDataDir>/auth.json
+//
+// See internal/paths.GlobalDataDir for the platform-specific base directory.
 func authPath() (string, error) {
-	if runtime.GOOS == "windows" {
-		localAppData := os.Getenv("LOCALAPPDATA")
-		if localAppData == "" {
-			return "", fmt.Errorf("LOCALAPPDATA not set")
-		}
-		return filepath.Join(localAppData, "opencode", "auth.json"), nil
-	}
-	home, err := os.UserHomeDir()
+	base, err := paths.GlobalDataDir()
 	if err != nil {
 		return "", err
 	}
-	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
-		return filepath.Join(xdg, "opencode", "auth.json"), nil
-	}
-	return filepath.Join(home, ".local", "share", "opencode", "auth.json"), nil
+	return filepath.Join(base, "auth.json"), nil
 }
 
 // readLegacyOcodeFormat attempts to parse the legacy ocode auth.json which

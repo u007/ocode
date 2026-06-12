@@ -63,3 +63,37 @@ every click target.
 - Use `ctrl+x` for leader keys and `ctrl+p` for palette.
 - Avoid introducing raw shortcuts that are likely to conflict with host terminals like Warp, Ghostty, and iTerm2; prefer `ctrl+x` leader sequences for non-essential UI toggles.
 - Sessions are automatically saved and resumed.
+
+## Data Storage
+All persistent state lives under a single cross-platform global directory resolved by
+`internal/paths.GlobalDataDir()`:
+
+| Platform | Path |
+|----------|------|
+| macOS | `~/Library/Application Support/opencode` |
+| Linux | `$XDG_DATA_HOME/opencode` (or `~/.local/share/opencode`) |
+| Windows | `%LOCALAPPDATA%\opencode` |
+
+Sub-directories:
+- `project/{slug}/sessions/` — chat session JSON files (one per session)
+- `usage/` — LLM token usage records (`records.jsonl`)
+- `auth.json` — provider API keys and OAuth tokens
+
+The `{slug}` is a SHA-256 prefix of the git repo root path, making sessions
+project-scoped even when working from different checkouts.
+
+## Environment Prompt
+The LLM receives environment context at the start of each session via `internal/agent/prompt.go`:
+
+```
+<env>
+  Working directory: /path/to/project
+  Workspace root folder: /path/to/project
+  Is directory a git repo: yes
+  Git branch: main
+  Platform: darwin
+  Today's date: Fri Jun 12 2026
+</env>
+```
+
+The git branch is resolved via `git rev-parse --abbrev-ref HEAD` when the workspace is a git repo.
