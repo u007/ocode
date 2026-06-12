@@ -78,6 +78,8 @@ Tier 1 — regex/heuristics (zero latency):
 
 Tier 2 — security model (**local-only, hard requirement**):
 
+- **Runs after tier 1**: receives the text with tier-1 placeholders already
+  applied, so known-format keys are never exposed even to the local model.
 - Scans new chat/paste text for contextual secrets ("my db password is
   hunter2"). Returns exact spans; ocode verifies each span exists verbatim
   before substituting; hallucinated spans dropped (debug sink logs offsets/
