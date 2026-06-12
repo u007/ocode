@@ -26,6 +26,7 @@
 - **Context-Aware LLM Calls** — Permission model loop uses `ChatWithContext` when the client supports it, enabling proper context cancellation for in-flight HTTP requests.
 - **JSON Theme Loading** — New `opencodeThemeFile` parser in `internal/theme` loads theme definitions from opencode-format JSON files on disk, enabling custom themes without recompilation.
 - **Dedicated Theme API Handler** — New `GET /api/theme` endpoint in `internal/server/handler_theme.go` (extracted from `handler_git.go`), serving theme colors to the Web UI via a clean dedicated endpoint.
+- **`hasModuleFlag` Helper** — New `hasModuleFlag()` detects `-m` flags in interpreter argument lists so module invocations (e.g. `python3 -m pytest`) can be distinguished from script file paths during permission classification.
 
 ### Changed
 - **Version Bump 0.4.1** — Version bumped from `0.4.0` to `0.4.1`.
@@ -55,6 +56,7 @@
 - **Permission Button Layout Offset** — Button Y-position in `updatePermButtonRegions` adjusted from +4 to +6 to account for the nested border/padding layout in the rendered bottom chrome.
 - **Advisor Comment Cleanup** — `cleanEnvForTerminal` comments softened from "bypass nesting guards" to "optimize environment for sub-process wrapper compatibility".
 - **auto_allow_prefixes Updated** — Added new utility commands (`stat`, `sed`, `cksum`, `comm`, `md5sum`, `od`, `diff`, `expand`, `tr`, `tree`) and removed unused entries, keeping the list alphabetically sorted.
+- **Interpreter `-m` Module Detection** — `classifyInterpreterExecution` now skips `script_file` source mode detection when a `-m` flag is present, so module invocations (e.g. `python3 -m pytest`) are correctly classified as module runs instead of script file executions.
 
 ### Fixed
 - **Tool Output Click Regression** — Fixed separator accounting in clickable tool output regions where preceding messages caused `startLine` drift. New regression test validates click targeting after multiple preceding messages.

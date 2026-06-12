@@ -1495,6 +1495,17 @@ func extractHeredocs(command string) (header string, docs []heredocDoc) {
 	return header, docs
 }
 
+// hasModuleFlag reports whether args contains a "-m" flag, indicating a module
+// invocation (e.g. python3 -m pytest) rather than a script file.
+func hasModuleFlag(args []string) bool {
+	for _, a := range args {
+		if a == "-m" {
+			return true
+		}
+	}
+	return false
+}
+
 // firstNonFlagArg returns the first argument that is not a flag (does not start
 // with "-"), or "" when none exists.
 func firstNonFlagArg(args []string) string {
@@ -1600,10 +1611,14 @@ func classifyInterpreterExecution(command string) (*InterpreterExec, bool) {
 	if (bin == "bun" || bin == "deno") && len(rest) > 0 && rest[0] == "run" {
 		rest = rest[1:]
 	}
-	if entry := firstNonFlagArg(rest); entry != "" && entry != "-" {
-		ie.SourceMode = "script_file"
-		ie.Entrypoint = entry
-		return ie, true
+	// `-m module` runs a Python/Ruby/etc. module by name, not a script file on disk.
+	// Skip script_file detection so we don't misidentify the module name as a path.
+	if !hasModuleFlag(rest) {
+		if entry := firstNonFlagArg(rest); entry != "" && entry != "-" {
+			ie.SourceMode = "script_file"
+			ie.Entrypoint = entry
+			return ie, true
+		}
 	}
 
 	if len(cmds[0].stdinRedirections) > 0 {
