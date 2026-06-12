@@ -1084,3 +1084,78 @@ func TestFilesTreeHintShowsScrollBinding(t *testing.T) {
 		t.Fatalf("expected tree hint to contain scroll binding, got %q", hint)
 	}
 }
+
+// TestFilesTreeHeaderRowsFitContentWidth verifies that hint/header rows in the
+// file tree pane are narrow enough to account for the 1-char scrollbar that
+// JoinHorizontal will place beside them. Without this, headers padded the
+// entire column to treeW-6, plus scrollbar = treeW-5, which overflows the
+// pane content area of treeW-6 and wraps every row onto two lines.
+func TestFilesTreeHeaderRowsFitContentWidth(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.go", "b.go", "c.go"} {
+		os.WriteFile(filepath.Join(dir, name), []byte("content\n"), 0644)
+	}
+
+	m := newFilesModel(dir)
+	styles := ApplyThemeColors("tokyonight")
+
+	// Test across a range of terminal widths: narrow, medium, wide, and very wide.
+	for _, w := range []int{40, 60, 80, 100, 120, 160, 200} {
+		t.Run(fmt.Sprintf("width_%d", w), func(t *testing.T) {
+			m.Resize(w, 30)
+			treeW := w * 35 / 100
+			// Content area after border(2)+padding(2)+scrollbar(1) = treeW-7
+			maxContentWidth := treeW - 7
+
+			rows := m.treeHeaderRows(treeW, styles)
+			for i, row := range rows {
+				visualWidth := visualLineWidth(stripANSI(row))
+				if visualWidth > maxContentWidth {
+					t.Errorf("header row %d: width %d exceeds max content width %d (treeW=%d)",
+						i, visualWidth, maxContentWidth, treeW)
+				}
+			}
+		})
+	}
+}
+
+// TestFilesTreeEntriesOneLinePerRow verifies that every file entry in the tree
+// occupies exactly one terminal row at various widths, by checking the rendered
+// View height against the expected row count.
+func TestFilesTreeEntriesOneLinePerRow(t *testing.T) {
+	dir := t.TempDir()
+	// Create a handful of short-named files so they all fit in the tree at every width.
+	for _, name := range []string{"a.go", "b.go", "c.go"} {
+		os.WriteFile(filepath.Join(dir, name), []byte("package main\n"), 0644)
+	}
+
+	m := newFilesModel(dir)
+	styles := ApplyThemeColors("tokyonight")
+
+	// Use widths where all three files are guaranteed visible.
+	for _, w := range []int{60, 80, 100, 120, 160} {
+		t.Run(fmt.Sprintf("width_%d", w), func(t *testing.T) {
+			h := 30
+			m.Resize(w, h)
+			m.panel = filesPanelPicker
+			m.mode = filesModeNormal
+
+			view := m.View(w, h, styles, false, false)
+			stripped := stripANSI(view)
+			lines := strings.Split(stripped, "\n")
+
+			// Each file name must appear on exactly one line — no wrapping.
+			for _, name := range []string{"a.go", "b.go", "c.go"} {
+				count := 0
+				for _, line := range lines {
+					if strings.Contains(line, name) {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Errorf("file %q appears on %d lines (expected 1) at width %d", name, count, w)
+				}
+			}
+		})
+	}
+}

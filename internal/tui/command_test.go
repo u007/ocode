@@ -46,13 +46,17 @@ func TestLookupCommandResolvesAliases(t *testing.T) {
 	}
 }
 
-func TestRenderPaletteUsesRegistryCommands(t *testing.T) {
-	m := model{width: 80}
-	got := m.renderPalette()
+func TestRenderFileSearchUsesWorkspaceFiles(t *testing.T) {
+	m := model{width: 80, fileSearchResults: []fileSearchResult{
+		{path: "main.go", dirName: ".", fileName: "main.go"},
+		{path: "internal/tui/model.go", dirName: "tui", fileName: "model.go"},
+	}}
+	m.fileSearchIndex = 0
+	got := m.renderFileSearch()
 
-	for _, want := range []string{"/help", "/sidebar", "/export-claude", "/ide", "/exit"} {
+	for _, want := range []string{"main.go", "model.go", "Search files"} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("expected palette to include %s, got %q", want, got)
+			t.Fatalf("expected file search to include %s, got %q", want, got)
 		}
 	}
 }
@@ -80,8 +84,8 @@ func TestTabAutocompleteRunsInUpdatePath(t *testing.T) {
 		t.Fatalf("expected tab to complete /m to /models, got %q", got.input.Value())
 	}
 
-	if got.showPalette {
-		t.Fatal("expected tab autocomplete to operate on the main input, not palette")
+	if got.showFileSearch {
+		t.Fatal("expected tab autocomplete to operate on the main input, not file search")
 	}
 }
 

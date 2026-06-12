@@ -203,6 +203,89 @@ func RunOnInstall(pluginDir string, p Plugin) error {
 	return nil
 }
 
+// validatePluginName rejects names that could escape the plugins root via
+// path traversal or absolute path components.
+func validatePluginName(name string) error {
+	if name == "" {
+		return fmt.Errorf("plugin name must not be empty")
+	}
+	if filepath.IsAbs(name) {
+		return fmt.Errorf("plugin name must not be an absolute path")
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return fmt.Errorf("plugin name must not contain path separators")
+	}
+	if name == "." || name == ".." {
+		return fmt.Errorf("plugin name %q is not allowed", name)
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("plugin name must not contain '..' path segments")
+	}
+	return nil
+}
+
+// ScaffoldPlugin creates a new plugin directory with a basic plugin.json manifest
+// and a commands/ subdirectory under the global plugins root. It returns the
+// absolute path to the created directory. Returns an error if the directory
+// already exists or the name is invalid.
+func ScaffoldPlugin(name, description string) (string, error) {
+	if err := validatePluginName(name); err != nil {
+		return "", err
+	}
+	root, err := PluginInstallDir()
+	if err != nil {
+		return "", fmt.Errorf("plugin install dir: %w", err)
+	}
+	dir := filepath.Join(root, name)
+	// Verify the resolved path is still inside the plugins root.
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve plugins root: %w", err)
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve plugin dir: %w", err)
+	}
+	if !strings.HasPrefix(absDir, absRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("plugin name %q resolves outside the plugins root", name)
+	}
+	if _, err := os.Stat(dir); err == nil {
+		return "", fmt.Errorf("plugin %q already exists at %s", name, dir)
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", fmt.Errorf("create plugin dir: %w", err)
+	}
+	// Create commands/ subdirectory.
+	cmdsDir := filepath.Join(dir, "commands")
+	if err := os.MkdirAll(cmdsDir, 0755); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("create commands dir: %w", err)
+	}
+	// Write plugin.json.
+	manifest := Plugin{
+		Name:        name,
+		Description: description,
+		Version:     "1.0.0",
+		Commands:    []string{},
+		Tools:       []string{},
+	}
+	data, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("marshal manifest: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plugin.json"), data, 0644); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("write plugin.json: %w", err)
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("resolve plugin dir: %w", err)
+	}
+	return abs, nil
+}
+
 // AutoRegisterMCP adds the plugin's MCP server config to ocode config if configured.
 func AutoRegisterMCP(pluginDir string, p Plugin) error {
 	if p.MCP == nil || !p.MCP.AutoRegister || len(p.MCP.Command) == 0 {

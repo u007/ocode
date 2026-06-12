@@ -53,6 +53,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 )
 
 //go:embed initialize_prompt.txt
@@ -368,6 +369,15 @@ type pluginInstallPendingMsg struct {
 	dirName     string
 	installRoot string
 }
+type pluginCreateMsg struct {
+	name        string
+	description string
+}
+type pluginCreatedMsg struct {
+	name string
+	dir  string
+	err  error
+}
 type pluginUpdateMsg struct {
 	name   string
 	source string
@@ -575,7 +585,6 @@ type model struct {
 	showDetails         bool
 	leaderActive        bool
 	leaderSeq           int
-	showPalette         bool
 	showPicker          bool
 	pickerKind          string
 	pickerItems         []string
@@ -607,7 +616,11 @@ type model struct {
 	sidebarScroll         int
 	sessionTelemetry      sidebarTelemetry
 	activeModel           string
-	paletteInput          string
+	showFileSearch        bool
+	fileSearchInput       string
+	fileSearchResults     []fileSearchResult
+	fileSearchIndex       int
+	fileSearchCache       []fileSearchResult
 	width                 int
 	height                int
 	ready                 bool
@@ -1600,7 +1613,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.questionInput, _ = m.questionInput.Update(msg)
 			return m, nil
 		}
-		if m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showPalette && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showQuestionDialog && m.detail.empty() {
+		if m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showQuestionDialog && m.detail.empty() {
 			content := msg.Content
 			if shortcode, ok := m.shortcodePastedFiles(content); ok {
 				content = shortcode
@@ -1652,24 +1665,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.clampSidebarScroll()
 			return m, nil
 		}
-		if m.showPermDialog {
-			// Only scroll the permission dialog if the mouse is over its bounds.
-			if m.modalStack != nil && m.modalStack.Top() != nil {
-				bounds := m.modalStack.Top().Bounds()
-				mouse := msg.Mouse()
-				// Center offset: dialog is centered in the terminal.
-				dialogX := (m.width - bounds.Width) / 2
-				dialogY := (m.height - bounds.Height) / 2
-				if mouse.X >= dialogX && mouse.X < dialogX+bounds.Width &&
-					mouse.Y >= dialogY && mouse.Y < dialogY+bounds.Height {
-					if msg.Button == tea.MouseWheelUp {
-						m.permViewport.ScrollUp(scrollSpeed)
-						return m, nil
-					}
-					if msg.Button == tea.MouseWheelDown {
-						m.permViewport.ScrollDown(scrollSpeed)
-						return m, nil
-					}
+		if m.showPermDialog && m.activeTab == tabChat {
+			// The dialog sits inline in the bottom chrome (input area). Only
+			// scroll its body when the mouse is over it; elsewhere fall through
+			// so the transcript stays scrollable while the dialog is open.
+			mouse := msg.Mouse()
+			topY := m.inputAreaTopY()
+			if mouse.X < m.panelWidth() && mouse.Y >= topY && mouse.Y < topY+m.inputAreaHeight() {
+				if msg.Button == tea.MouseWheelUp {
+					m.permViewport.ScrollUp(scrollSpeed)
+					return m, nil
+				}
+				if msg.Button == tea.MouseWheelDown {
+					m.permViewport.ScrollDown(scrollSpeed)
+					return m, nil
 				}
 			}
 			// Mouse outside dialog bounds — fall through to transcript scroll.
@@ -1795,7 +1804,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showPalette && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showQuestionDialog && m.detail.empty()
+	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showQuestionDialog && m.detail.empty()
 	if inputAllowed {
 		m.input, tiCmd = m.input.Update(msg)
 		m.rawInputLinesDirty = true
@@ -1906,6 +1915,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg, m.width, m.height)
 		m.filesSel = selectionState{}
+		return m, cmd
+	case filesContentSearchBatchMsg:
+		var cmd tea.Cmd
+		m.files, cmd = m.files.Update(msg, m.width, m.height)
+		return m, cmd
+	case filesContentSearchDoneMsg:
+		var cmd tea.Cmd
+		m.files, cmd = m.files.Update(msg, m.width, m.height)
 		return m, cmd
 	case gitStatusMsg, gitRefreshMsg, gitBranchRefreshMsg, loadMoreLogMsg:
 		var cmd tea.Cmd
@@ -2195,6 +2212,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		text.WriteString("\nType /plugin confirm to proceed, or /plugin cancel to abort.")
 		m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
+	case pluginCreateMsg:
+		return m, func() tea.Msg {
+			dir, err := plugins.ScaffoldPlugin(msg.name, msg.description)
+			if err != nil {
+				return pluginCreatedMsg{name: msg.name, err: err}
+			}
+			return pluginCreatedMsg{name: msg.name, dir: dir}
+		}
+	case pluginCreatedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin create failed: %v", msg.err)})
+		} else {
+			if m.config.Plugins == nil {
+				m.config.Plugins = map[string]config.PluginConfig{}
+			}
+			cfg := config.PluginConfig{Dir: msg.dir, Enabled: false}
+			if saveErr := config.SavePlugin(msg.name, cfg); saveErr != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q created at %s but failed to register: %v.\nEdit plugin.json and add commands/tools, then enable with: /plugin enable %s", msg.name, msg.dir, saveErr, msg.name)})
+			} else {
+				m.config.Plugins[msg.name] = cfg
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q created at %s.\nEdit plugin.json and add commands/tools, then enable with: /plugin enable %s", msg.name, msg.dir, msg.name)})
+			}
+			m.rerenderTranscriptAndMaybeScroll()
+		}
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
 	case pluginInstalledMsg:
@@ -3063,13 +3106,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingSubAgentResp = msg.respCh
 		m.showPermDialog = true
 		m.permConfirm = ""
-		m.pushPermissionModal()
 		m.activeTab = tabChat
 		m.chatUnread = false
 		m.pendingPermission = req
 		m.pendingToolName = req.ToolName
 		m.pendingToolArgs = req.Args
 		m.pendingToolCallID = ""
+		m.layout() // shrink the transcript viewport to make room for the dialog
 		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + permissionRequestSummary(req)})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
@@ -3373,24 +3416,77 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		return true, newM, cmd
 	}
 
-	if m.showPalette {
+	if m.showFileSearch {
 		if keyStr == "esc" || keyStr == "ctrl+p" {
-			m.showPalette = false
+			m.showFileSearch = false
 			return true, m, nil
 		}
 		if keyStr == "enter" {
-			m.showPalette = false
-			newM, cmd := m.handleCommand(m.paletteInput)
-			return true, newM, cmd
+			if len(m.fileSearchResults) > 0 && m.fileSearchIndex >= 0 && m.fileSearchIndex < len(m.fileSearchResults) {
+				selected := m.fileSearchResults[m.fileSearchIndex]
+				m.showFileSearch = false
+				m.input.SetValue("@" + selected.path + " ")
+				return true, m, nil
+			}
+			m.showFileSearch = false
+			return true, m, nil
+		}
+		if keyStr == "up" {
+			if m.fileSearchIndex > 0 {
+				m.fileSearchIndex--
+			}
+			return true, m, nil
+		}
+		if keyStr == "down" {
+			if m.fileSearchIndex < len(m.fileSearchResults)-1 {
+				m.fileSearchIndex++
+			}
+			return true, m, nil
+		}
+		if keyStr == "ctrl+n" {
+			if m.fileSearchIndex < len(m.fileSearchResults)-1 {
+				m.fileSearchIndex++
+			}
+			return true, m, nil
+		}
+		if keyStr == "ctrl+p" {
+			if m.fileSearchIndex > 0 {
+				m.fileSearchIndex--
+			}
+			return true, m, nil
+		}
+		if keyStr == "tab" {
+			if m.fileSearchIndex < len(m.fileSearchResults)-1 {
+				m.fileSearchIndex++
+			} else {
+				m.fileSearchIndex = 0
+			}
+			return true, m, nil
+		}
+		if keyStr == "shift+tab" {
+			if m.fileSearchIndex > 0 {
+				m.fileSearchIndex--
+			} else {
+				m.fileSearchIndex = len(m.fileSearchResults) - 1
+			}
+			return true, m, nil
 		}
 		if keyStr == "backspace" {
-			if len(m.paletteInput) > 0 {
-				m.paletteInput = m.paletteInput[:len(m.paletteInput)-1]
+			if len(m.fileSearchInput) > 0 {
+				m.fileSearchInput = m.fileSearchInput[:len(m.fileSearchInput)-1]
+				m.fileSearchResults = filterFileSearchResults(m.fileSearchCache, m.fileSearchInput)
+				if m.fileSearchIndex >= len(m.fileSearchResults) {
+					m.fileSearchIndex = max(0, len(m.fileSearchResults)-1)
+				}
 			}
 			return true, m, nil
 		}
 		if len(msg.Text) > 0 {
-			m.paletteInput += msg.Text
+			m.fileSearchInput += msg.Text
+			m.fileSearchResults = filterFileSearchResults(m.fileSearchCache, m.fileSearchInput)
+			if m.fileSearchIndex >= len(m.fileSearchResults) {
+				m.fileSearchIndex = max(0, len(m.fileSearchResults)-1)
+			}
 		}
 		return true, m, nil
 	}
@@ -3452,10 +3548,6 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	}
 
 	if m.showPermDialog {
-		// Use legacy handling directly. The modal stack adapter (permDialogModal)
-		// stores a *model pointer that becomes stale across Update() value-receiver
-		// copies, causing permDialogInput to modify a discarded model while the
-		// current copy retains showPermDialog=true — requiring a second keypress.
 		switch keyStr {
 		case "y", "n", "a", "t":
 			cmd, closed := m.permDialogInput(keyStr)
@@ -3584,8 +3676,13 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		m.openProcessList()
 		return m, nil
 	case "ctrl+p":
-		m.showPalette = !m.showPalette
-		m.paletteInput = ""
+		m.showFileSearch = !m.showFileSearch
+		if m.showFileSearch {
+			m.fileSearchInput = ""
+			m.fileSearchIndex = 0
+			m.fileSearchCache = scanWorkspaceFiles(".")
+			m.fileSearchResults = filterFileSearchResults(m.fileSearchCache, "")
+		}
 		return m, nil
 	case "up":
 		// If already in history mode, continue navigating history directly.
@@ -4540,7 +4637,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 
-	if pressed && m.showPermDialog {
+	if pressed && m.showPermDialog && m.activeTab == tabChat {
+		// The dialog only renders on the chat tab; on other tabs a click in
+		// its (hidden) bottom-chrome region must not answer the request.
 		// Recompute regions to match the current layout before hit-testing.
 		// The dialog can be opened from several paths; computing here (outside
 		// the render cycle) keeps the buttons clickable without each opener
@@ -4736,7 +4835,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		// Plain hover (no button) over the permission dialog: highlight the button
 		// under the cursor so the clickable target is obvious. Requires
 		// MouseModeAllMotion (CellMotion delivers no no-button motion).
-		if m.showPermDialog {
+		if m.showPermDialog && m.activeTab == tabChat {
 			m.updatePermButtonRegions()
 			prev := m.permHoverChoice
 			m.permHoverChoice = ""
@@ -7766,13 +7865,13 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				log.Printf("[perm] permission dialog shown: tool=%s rule=%s command=%q", req.ToolName, req.Rule, req.Command)
 				m.showPermDialog = true
 				m.permConfirm = ""
-				m.pushPermissionModal()
 				m.activeTab = tabChat
 				m.chatUnread = false
 				m.pendingPermission = req
 				m.pendingToolName = req.ToolName
 				m.pendingToolArgs = req.Args
 				m.pendingToolCallID = am.ToolID
+				m.layout() // shrink the transcript viewport to make room for the dialog
 				m.messages = append(m.messages, message{role: roleAssistant, text: renderPermissionPrompt(req), raw: &copyMsg})
 			}
 		} else if prompts, ok := parseQuestionPrompt(am.Content); ok {
@@ -7933,7 +8032,6 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 			pending := m.permConfirm
 			m.permConfirm = ""
 			m.showPermDialog = false
-			m.popPermissionModal()
 			return m.handlePermissionChoice(pending), true
 		case "n", "no", "back", "esc":
 			m.permConfirm = ""
@@ -7961,12 +8059,10 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 		return nil, false
 	case "y", "yes", "allow", "once", "n", "no", "deny":
 		m.showPermDialog = false
-		m.popPermissionModal()
 		return m.handlePermissionChoice(choice), true
 	}
 	// Unknown input: re-display the prompt via handlePermissionChoice's default.
 	m.showPermDialog = false
-	m.popPermissionModal()
 	return m.handlePermissionChoice(choice), true
 }
 
@@ -8031,7 +8127,6 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		default:
 			m.showPermDialog = true
 			m.pendingSubAgentResp = respCh
-			m.pushPermissionModal()
 			m.updatePermButtonRegions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid permission choice. Use y, n, a, or t.", transient: true})
 			return nil
@@ -8052,7 +8147,6 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful): tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow %s — this operation is considered harmful and always requires human approval.", permissionRuleLabel(req)), transient: true})
 			m.showPermDialog = true
-			m.pushPermissionModal()
 			m.updatePermButtonRegions()
 			return nil
 		}
@@ -8090,7 +8184,6 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 			log.Printf("[perm] permission ALWAYS ALLOW BLOCKED (harmful tool): tool=%s", toolName)
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cannot always allow tool %q — this operation is considered harmful and always requires human approval.", toolName), transient: true})
 			m.showPermDialog = true
-			m.pushPermissionModal()
 			m.updatePermButtonRegions()
 			return nil
 		}
@@ -8736,8 +8829,9 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
+	} else if m.showPermDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
-		// Permission dialog is now a centered overlay, not part of bottom chrome.
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	status := m.renderStatus()
@@ -8764,19 +8858,7 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	return height
 }
 
-func (m *model) renderPalette() string {
-	header := m.styles.Header.Render(" > ") + m.paletteInput
-	commands := commandNames()
-	var results []string
-	for _, c := range commands {
-		if strings.Contains(c, m.paletteInput) {
-			results = append(results, c)
-		}
-	}
 
-	body := strings.Join(results, "\n")
-	return borderStyle.Width(m.width - 2).Render(header + "\n\n" + body)
-}
 
 var permBtnStyle = lipgloss.NewStyle().Bold(true).Padding(0, 1).Border(lipgloss.RoundedBorder())
 
@@ -8787,6 +8869,193 @@ var permBtnHoverStyle = permBtnStyle.
 	Foreground(lipgloss.Color("0")).
 	Background(lipgloss.Color("12")).
 	BorderForeground(lipgloss.Color("12"))
+
+// fileSearchResult holds a single workspace file for the ctrl+p file search.
+type fileSearchResult struct {
+	path     string // relative path (e.g. "internal/tui/model.go")
+	dirName  string // parent directory name (e.g. "tui")
+	fileName string // file name (e.g. "model.go")
+}
+
+// scanWorkspaceFiles walks the workspace tree and returns non-ignored files.
+// Only root .gitignore and .ignore files are consulted (nested ignore files
+// are not loaded). Directories named .git, .ocode, and node_modules are
+// skipped, along with hidden directories/files and paths matched by the
+// ignore patterns.
+func scanWorkspaceFiles(root string) []fileSearchResult {
+	// Load .gitignore / .ignore patterns from root.
+	var patterns []gitignore.Pattern
+	for _, ignoreFile := range []string{".gitignore", ".ignore"} {
+		data, err := os.ReadFile(filepath.Join(root, ignoreFile))
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				patterns = append(patterns, gitignore.ParsePattern(line, nil))
+			}
+		}
+	}
+	ignoreMatcher := gitignore.NewMatcher(patterns)
+
+	var results []fileSearchResult
+	filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		name := d.Name()
+		if d.IsDir() {
+			if name == ".git" || name == ".ocode" || name == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Skip hidden files (dotfiles like .env, .DS_Store, etc.).
+		if strings.HasPrefix(name, ".") {
+			return nil
+		}
+		// Skip paths matched by .gitignore / .ignore patterns.
+		rel, _ := filepath.Rel(root, path)
+		if rel != "" && ignoreMatcher.Match(strings.Split(rel, string(filepath.Separator)), false) {
+			return nil
+		}
+		clean := strings.TrimPrefix(filepath.ToSlash(path), "./")
+		dir := filepath.Dir(clean)
+		if dir == "." {
+			dir = ""
+		}
+		results = append(results, fileSearchResult{
+			path:     clean,
+			dirName:  filepath.Base(dir),
+			fileName: d.Name(),
+		})
+		return nil
+	})
+	return results
+}
+
+// fileSearchScore computes a fuzzy score for a file search result against a query.
+// The query is matched against a combined string of "dirName/fileName".
+func fileSearchScore(r fileSearchResult, query string) int {
+	if query == "" {
+		return 1
+	}
+	combined := strings.ToLower(r.dirName + "/" + r.fileName)
+	lq := strings.ToLower(query)
+
+	// Exact match on filename
+	if strings.ToLower(r.fileName) == lq {
+		return 1_000_000
+	}
+	// Filename starts with query
+	if strings.HasPrefix(strings.ToLower(r.fileName), lq) {
+		return 500_000
+	}
+	// Combined path contains query as substring
+	if idx := strings.Index(combined, lq); idx >= 0 {
+		return 250_000 + max(0, 200-idx)
+	}
+	// Multi-token: all tokens appear in combined
+	tokens := strings.Fields(lq)
+	if len(tokens) > 1 {
+		score := 100_000
+		ok := true
+		for _, t := range tokens {
+			if !strings.Contains(combined, t) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return score + max(0, 100-len(combined))
+		}
+	}
+	// Subsequence match
+	score, ok := subsequenceScore(combined, lq)
+	if !ok {
+		return 0
+	}
+	return 10_000 + score + max(0, 100-len(combined))
+}
+
+// filterFileSearchResults filters and sorts file search results by score.
+func filterFileSearchResults(cache []fileSearchResult, query string) []fileSearchResult {
+	if strings.TrimSpace(query) == "" {
+		return cache
+	}
+	type scoredItem struct {
+		score int
+		idx   int
+	}
+	var scoredItems []scoredItem
+	for i, r := range cache {
+		if s := fileSearchScore(r, query); s > 0 {
+			scoredItems = append(scoredItems, scoredItem{score: s, idx: i})
+		}
+	}
+	sort.Slice(scoredItems, func(i, j int) bool {
+		if scoredItems[i].score != scoredItems[j].score {
+			return scoredItems[i].score > scoredItems[j].score
+		}
+		return cache[scoredItems[i].idx].path < cache[scoredItems[j].idx].path
+	})
+	results := make([]fileSearchResult, len(scoredItems))
+	for i, s := range scoredItems {
+		results[i] = cache[s.idx]
+	}
+	return results
+}
+
+// renderFileSearch renders the ctrl+p file search overlay.
+func (m model) renderFileSearch() string {
+	const maxVisible = 15
+	hintLine := hintStyle.Render("↑/↓ select · Enter open · Esc cancel · type to filter")
+	title := m.styles.Header.Render("Search files") + "  " + hintStyle.Render("filter: "+m.fileSearchInput+"_")
+
+	var body strings.Builder
+	if len(m.fileSearchResults) == 0 {
+		if m.fileSearchInput == "" {
+			body.WriteString(hintStyle.Render("(type to search workspace files)"))
+		} else {
+			body.WriteString(hintStyle.Render("(no matches)"))
+		}
+	} else {
+		start := 0
+		if m.fileSearchIndex >= maxVisible {
+			start = m.fileSearchIndex - maxVisible + 1
+		}
+		end := start + maxVisible
+		if end > len(m.fileSearchResults) {
+			end = len(m.fileSearchResults)
+		}
+		for i := start; i < end; i++ {
+			r := m.fileSearchResults[i]
+			var line string
+			if r.dirName != "" {
+				line = r.dirName + "/" + r.fileName
+			} else {
+				line = r.fileName
+			}
+			if i == m.fileSearchIndex {
+				body.WriteString(m.styles.Selected.Render(" " + line + " "))
+			} else {
+				body.WriteString("  " + line)
+			}
+			body.WriteString("\n")
+		}
+		if len(m.fileSearchResults) > maxVisible {
+			body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown", end-start, len(m.fileSearchResults))))
+		}
+	}
+
+	width := m.width - 4
+	if width < 40 {
+		width = 40
+	}
+	inner := title + "\n\n" + body.String() + "\n" + hintLine
+	return borderStyle.Width(width).Render(inner)
+}
 
 type permBtnDef struct {
 	label  string
@@ -8884,6 +9153,17 @@ func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string)
 
 const permissionDialogMaxBodyLines = 11
 
+// permDialogMaxBodyLines caps the dialog body at ~40% of the terminal height so
+// the dialog can grow on tall terminals while the transcript above stays
+// visible. Falls back to the fixed cap on small or unknown terminal sizes.
+func (m model) permDialogMaxBodyLines() int {
+	lines := m.height * 2 / 5
+	if lines < permissionDialogMaxBodyLines {
+		return permissionDialogMaxBodyLines
+	}
+	return lines
+}
+
 func permissionDialogVisibleBodyLines(body string, width int) int {
 	if width < 1 {
 		width = 1
@@ -8915,7 +9195,7 @@ func (m *model) syncPermViewport(contentWidth int) {
 	// height match what updatePermButtonRegions uses to place the clickable
 	// button regions — otherwise the buttons render below their hit-test rows.
 	bodyHeight := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render(body))
-	m.permViewport.SetHeight(min(max(1, bodyHeight), permissionDialogMaxBodyLines))
+	m.permViewport.SetHeight(min(max(1, bodyHeight), m.permDialogMaxBodyLines()))
 	m.permViewport.SetYOffset(prevYOffset)
 }
 
@@ -8976,8 +9256,8 @@ func (m *model) renderPermissionDialog(width int) string {
 
 // updatePermButtonRegions computes absolute screen positions for the permission
 // dialog buttons and stores them on the model. Call from Update() after layout changes.
-// The dialog is rendered as a centered overlay (renderPermissionOverlay), so button
-// regions must be computed relative to the centered position, not the input area.
+// The dialog is rendered inline in the bottom chrome (in place of the input area),
+// so button regions are computed relative to inputAreaTopY().
 func (m *model) updatePermButtonRegions() {
 	if !m.showPermDialog {
 		m.permButtonRegions = nil
@@ -8994,34 +9274,12 @@ func (m *model) updatePermButtonRegions() {
 	// above the rendered buttons.
 	visibleBodyLines := m.permViewport.Height()
 
-	// Compute the centered overlay position to match renderPermissionOverlay.
-	body := renderPermissionRequestBody(m.pendingPermission)
-	if m.permConfirm != "" {
-		body = renderPermConfirmBody(m.pendingPermission, m.pendingToolName, m.permConfirm)
-	}
-	bodyLines := strings.Count(body, "\n") + 1
-	if bodyLines > permissionDialogMaxBodyLines {
-		bodyLines = permissionDialogMaxBodyLines
-	}
-	// Bounds().Width = panelWidth() - 2 (content width inside the border).
-	boundsWidth := max(0, m.panelWidth()-2)
-	boundsHeight := 4 + bodyLines // header(1) + blank(1) + body + blank(1)
-
-	overlayX := (m.width - boundsWidth) / 2
-	if overlayX < 0 {
-		overlayX = 0
-	}
-	overlayY := (m.height - boundsHeight) / 2
-	if overlayY < 0 {
-		overlayY = 0
-	}
-
-	// Button row is at: header(1) + blank(1) + body(visibleBodyLines) + blank(1)
-	// from the top of the dialog.
-	buttonTopY := overlayY + visibleBodyLines + 3
+	// Top border(1) + header(1) + blank(1) + body(visibleBodyLines) + blank(1)
+	// above the button row.
+	buttonTopY := m.inputAreaTopY() + 4 + visibleBodyLines
 
 	m.permButtonRegions = nil
-	x := overlayX + 1 // after left border, offset by overlay position
+	x := 2 // border(1) + padding(1) of the bordered input area
 	for _, b := range m.permDialogBtnDefs() {
 		rendered := permBtnStyle.Render(b.label + " " + b.desc)
 		w := lipgloss.Width(rendered)
@@ -9352,28 +9610,25 @@ func (m *model) renderTranscript() {
 		}
 	}
 
-	// Region line numbers are tracked in UNWRAPPED line coordinates via nlAcc —
-	// byte-identical to the old heightNow() running newline count — while the
-	// transcript line slices are assembled from each message's cached WRAPPED
-	// lines. This preserves the existing (unwrapped-region / wrapped-content)
-	// coordinate split exactly; only the redundant whole-transcript re-wrap and
-	// re-strip of unchanged messages is gone.
+	// Region line numbers are tracked in WRAPPED line coordinates matching the
+	// viewport's YOffset space. nlAcc counts wrapped lines appended to
+	// transcriptLines so startLine/endLine align exactly with clickY in the hit
+	// testers (toolOutputForClick etc.).
 	// Fresh slices: SetContentLines retains the slice we hand it, so the backing
 	// array must not be reused/truncated on the next render.
 	m.transcriptLines = make([]string, 0, len(m.messages)*2+10)
 	m.rawTranscriptLines = make([]string, 0, len(m.messages)*2+10)
-	nlAcc := 0 // cumulative unwrapped newlines written so far (heightNow == 1+nlAcc)
+	nlAcc := 0 // wrapped lines written so far (= next index into transcriptLines)
 	for i, msg := range m.messages {
 		if i > 0 {
-			nlAcc += 2 // the "\n\n" inter-message separator
-			// "block\n\nblock" splits to one empty line between the two blocks.
+			nlAcc += 1 // one separator empty line
 			m.transcriptLines = append(m.transcriptLines, "")
 			m.rawTranscriptLines = append(m.rawTranscriptLines, "")
 		}
 		entry := m.renderMessageBlock(i, msg, toolNames)
-		startLine := 1 + nlAcc
-		nlAcc += entry.nl
-		endLine := nlAcc
+		startLine := nlAcc
+		nlAcc += len(entry.wrapped)
+		endLine := nlAcc - 1
 		m.transcriptLines = append(m.transcriptLines, entry.wrapped...)
 		m.rawTranscriptLines = append(m.rawTranscriptLines, entry.stripped...)
 		switch entry.kind {
@@ -10624,7 +10879,7 @@ func (m model) modalOpen() bool {
 	if m.modalStack != nil && m.modalStack.Len() > 0 {
 		return true
 	}
-	return m.showPicker || m.showConnect || m.showPalette || m.showRetryDialog || m.sessionDeleteConfirm || m.showQuestionDialog
+	return m.showPicker || m.showConnect || m.showFileSearch || m.showRetryDialog || m.sessionDeleteConfirm || m.showQuestionDialog
 }
 
 // renderDetailView renders the top-of-stack detail view.
@@ -10889,8 +11144,8 @@ func (m model) renderContent() string {
 		return m.renderConnect()
 	}
 
-	if m.showPalette {
-		return m.renderPalette()
+	if m.showFileSearch {
+		return m.renderFileSearch()
 	}
 
 	return m.renderTabContent()
@@ -10953,8 +11208,9 @@ func (m model) renderTabContent() string {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
+	} else if m.showPermDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
-		// Permission dialog is now a centered overlay, not part of bottom chrome.
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	leftParts := []string{transcript}
@@ -10986,11 +11242,6 @@ func (m model) renderTabContent() string {
 		)
 	} else {
 		result = lipgloss.JoinVertical(lipgloss.Left, header, left)
-	}
-
-	// Permission dialog: render as centered overlay with dimmed backdrop.
-	if m.showPermDialog {
-		result = m.renderPermissionOverlay(result)
 	}
 
 	// Safety net: if the rendered output exceeds terminal height, re-render
@@ -11094,9 +11345,9 @@ func (m *model) renderStatus() string {
 		suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
 	default:
 		if supportsReasoning {
-			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry · ctrl+t: theme"
+			suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry · ctrl+t: theme"
 		} else {
-			suffix = " · tab: agent · ctrl+p: palette · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry"
+			suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry"
 		}
 		if m.ctrlCPressed {
 			suffix = " · ctrl+c again to quit"
@@ -12707,8 +12958,9 @@ func (m model) inputAreaHeight() int {
 	var rendered string
 	if m.showQuestionDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
+	} else if m.showPermDialog {
+		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
-		// Permission dialog is now a centered overlay, not part of bottom chrome.
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.input.View())
 	}
 	return lipgloss.Height(rendered)

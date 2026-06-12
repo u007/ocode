@@ -260,3 +260,49 @@ func TestAdvisorTool_getAdvisorTools_WithAgent(t *testing.T) {
 
 // Verify the tool implements the tool.Tool interface.
 var _ tool.Tool = AdvisorTool{}
+
+func TestCleanEnvForTerminal(t *testing.T) {
+	// Set CLAUDECODE in the environment to check if it's stripped
+	t.Setenv("CLAUDECODE", "1")
+	t.Setenv("SOME_OTHER_VAR", "value")
+
+	env := cleanEnvForTerminal()
+
+	// Verify CLAUDECODE is NOT present
+	for _, e := range env {
+		if strings.HasPrefix(e, "CLAUDECODE=") {
+			t.Error("CLAUDECODE environment variable was not stripped")
+		}
+	}
+
+	// Verify fake terminal variables are present
+	var hasTermProgram, hasTerm, hasColorTerm, hasShell bool
+	for _, e := range env {
+		if strings.HasPrefix(e, "TERM_PROGRAM=") {
+			hasTermProgram = true
+		}
+		if strings.HasPrefix(e, "TERM=") {
+			hasTerm = true
+		}
+		if strings.HasPrefix(e, "COLORTERM=") {
+			hasColorTerm = true
+		}
+		if strings.HasPrefix(e, "SHELL=") {
+			hasShell = true
+		}
+	}
+
+	if !hasTermProgram {
+		t.Error("missing TERM_PROGRAM in clean env")
+	}
+	if !hasTerm {
+		t.Error("missing TERM in clean env")
+	}
+	if !hasColorTerm {
+		t.Error("missing COLORTERM in clean env")
+	}
+	if !hasShell {
+		t.Error("missing SHELL in clean env")
+	}
+}
+

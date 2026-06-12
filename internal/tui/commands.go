@@ -87,7 +87,7 @@ func init() {
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
-		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|sync [name]|update [name]|confirm|cancel]", help: "List, install, update, or sync plugins", handler: runPluginCmd},
+		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|confirm|cancel]", help: "List, install, update, or sync plugins", handler: runPluginCmd},
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
@@ -191,7 +191,7 @@ func buildCommandHelpText(specs []commandSpec) string {
 	b.WriteString("Up/Down        : Navigate input history\n")
 	b.WriteString("Tab            : Autocomplete slash commands\n")
 	b.WriteString("Shift+Tab      : Toggle agent strip focus (cycle through running agents)\n")
-	b.WriteString("Ctrl+P         : Open command palette\n")
+	b.WriteString("Ctrl+P         : Search and open files\n")
 	b.WriteString("Ctrl+X         : Leader key for quick actions (u:undo, r:redo, n:new, l:list, c:compact)\n")
 	b.WriteString("Ctrl+T         : Toggle thinking mode (when supported by model)\n")
 	b.WriteString("Ctrl+B         : Move running bash command to background\n")
@@ -453,6 +453,18 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q %s.", name, state)})
 		return m.rebuildAgentWithExternalTools()
 
+	case "create":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin create <name> [description]"})
+			return nil
+		}
+		name := args[1]
+		desc := ""
+		if len(args) > 2 {
+			desc = strings.Join(args[2:], " ")
+		}
+		return func() tea.Msg { return pluginCreateMsg{name: name, description: desc} }
+
 	case "install":
 		if len(args) < 2 {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin install <github.com/user/repo[@ref]>"})
@@ -538,7 +550,7 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		return nil
 
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|sync [name]|update [name]|confirm|cancel]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|confirm|cancel]"})
 		return nil
 	}
 }

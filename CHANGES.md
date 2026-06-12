@@ -3,6 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- **Plugin Scaffold Command** — New `/plugin create <name> [desc]` command scaffolds a plugin directory with `plugin.json` manifest and `commands/` subdirectory. Backed by `plugins.ScaffoldPlugin()` with path-traversal validation via `validatePluginName()`.
+- **Advisor Terminal Environment Sanitization** — `cleanEnvForTerminal()` strips `CLAUDECODE` env vars from the advisor subprocess environment and injects standard terminal variables (`TERM`, `TERM_PROGRAM`, `COLORTERM`, `SHELL`) to bypass Claude Code nesting guards. Subprocess stdin redirected to `/dev/null` to suppress 3-second timeout warnings.
+- **File Content Search** — New inline file content search replaces the old command palette (`Ctrl+P`). Model gains `showFileSearch`, `fileSearchInput`, `fileSearchResults`, `fileSearchIndex`, and `fileSearchCache` fields.
+- **Permission Dialog Inline Rendering** — Permission dialog now renders inline in the bottom chrome (input area) instead of as a centered overlay. Scroll handling scoped to dialog bounds within input area. Removed `perm_dialog_adapter.go`.
+- **Files Tree Content Width Safety Tests** — New `TestFilesTreeHeaderRowsFitContentWidth` and `TestFilesTreeEntriesOneLinePerRow` verify that tree header rows and entries fit within the content width accounting for the 1-column scrollbar at all terminal widths.
 - **Claude Code CLI Advisor Backend** — New `claude_code` config option routes the advisor through the `claude -p` CLI instead of an LLM API client. Supports model selection (default `claude-sonnet-4-6`), enforces read-only tool restrictions, and appends a strict read-only system prompt. Activated via the advisor picker's new "Claude Code (Read-Only CLI)" section.
 - **Permission Model Reprompt Recovery** — When the auto-permission judge returns an ambiguous verdict (no parseable ALLOW/DENY line), a single strict-format retry asks the model to restate its decision before falling through to a human prompt. Reduces unnecessary permission dialogs from weak judge models.
 - **`pinDeterministicSampling`** — Permission judge clients now have temperature forced to 0 for reproducible verdicts, preventing flaky auto-allow decisions from local/small models defaulting to temperature 1.0.
@@ -22,6 +27,10 @@
 - **Dedicated Theme API Handler** — New `GET /api/theme` endpoint in `internal/server/handler_theme.go` (extracted from `handler_git.go`), serving theme colors to the Web UI via a clean dedicated endpoint.
 
 ### Changed
+- **Version Bump 0.4.1** — Version bumped from `0.4.0` to `0.4.1`.
+- **`Ctrl+P` Opens File Search** — Keyboard shortcut now opens file search pane instead of command palette.
+- **Plugin `/plugin` Help** — Usage string and help text updated to include `create` subcommand.
+- **Default Model Updated** — `last_model` in config changed from `opencode-go/deepseek-v4-flash` to `opencode/deepseek-v4-flash-free`.
 - **auto_allow_prefixes Re-sorted** — `auto_allow_prefixes` list in `ocodeconfig.json` re-sorted into strict alphabetical order for consistency and readability.
 - **Permission Verdict Parsing** — `verdictBoundary` now tolerates markdown-emphasis closing runs between the verdict word and its colon (e.g. `**ALLOW**:`), and `cleanVerdictReason` strips backtick/underscore characters, fixing local-model verdict rejection.
 - **RC Start Message** — `/rc` start message now includes a Tailscale URL when available.
@@ -41,6 +50,9 @@
 - **Web Theme Hook Hex→HSL Fix** — `useTheme` hook now converts hex color values to HSL for CSS variable injection, fixing color rendering in the Web UI.
 
 ### Fixed
+- **Tool Output Click Regression** — Fixed separator accounting in clickable tool output regions where preceding messages caused `startLine` drift. New regression test validates click targeting after multiple preceding messages.
+- **Permission Dialog Scroll Scope** — Mouse wheel scrolling of the permission dialog body now correctly scopes to the inline input area instead of checking stale modal stack bounds.
+- **Files Content Search Message Routing** — Added `filesContentSearchBatchMsg` and `filesContentSearchDoneMsg` handling at the model level, forwarding to the files sub-model.
 - **File Tree Scrollbar Width** — Tree content width in the files tab adjusted from `treeW-6` to `treeW-7` to account for the 1-column scrollbar joined via `JoinHorizontal`, preventing line wrapping that pushed tree rows onto a second line.
 - **Permission Dialog Stale Modal Stack Pointer** — Removed `modalStack` routing from permission dialog key handling to fix a stale pointer bug where the model's value-receiver `Update()` copies caused `permDialogInput` to modify a discarded copy, requiring a second keypress to close the dialog.
 - **Permission Dialog Button Region Overlay Coordinates** — `updatePermButtonRegions` now computes button Y positions relative to the centered overlay position (matching `renderPermissionOverlay`) instead of the input area top, fixing click-hit-test mismatch when the dialog is rendered as a centered overlay.

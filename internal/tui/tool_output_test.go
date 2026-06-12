@@ -119,6 +119,62 @@ func TestClickToolOutputExpandsInline(t *testing.T) {
 	}
 }
 
+func TestClickToolOutputExpandsInlineAfterPrecedingMessages(t *testing.T) {
+	// Regression: when messages precede a tool output, separator accounting
+	// must use wrapped-line counts. The old code added 2 to nlAcc per separator
+	// but only 1 wrapped line, causing startLine to drift up by 1 per preceding
+	// message, making the first N lines of the tool output non-clickable.
+	content := strings.Repeat("process output line\n", 600)
+	text := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
+	toolID := "tool-after"
+	precedingMessages := []message{
+		{role: roleUser, text: "msg1"},
+		{role: roleAssistant, text: "response1"},
+		{role: roleUser, text: "msg2"},
+		{role: roleAssistant, text: "response2"},
+		{role: roleUser, text: "msg3"},
+	}
+	m := model{
+		ready:    true,
+		width:    100,
+		height:   50,
+		input:    textarea.New(),
+		viewport: fastviewport.New(96, 44),
+		styles:   ApplyThemeColors("tokyonight"),
+		messages: append(precedingMessages, message{
+			role: roleAssistant,
+			text: text,
+			raw:  &agent.Message{Role: "tool", ToolID: toolID, Content: content},
+		}),
+		sessionID: "test",
+	}
+	m.renderTranscript()
+
+	if len(m.toolOutputRegions) != 1 {
+		t.Fatalf("expected one tool output region, got %d", len(m.toolOutputRegions))
+	}
+
+	region := m.toolOutputRegions[0]
+	// The region's startLine must actually point to a line that contains part of
+	// the tool box, not to a separator or a preceding message's line.
+	if region.startLine >= len(m.transcriptLines) {
+		t.Fatalf("startLine %d out of range (transcriptLines len=%d)", region.startLine, len(m.transcriptLines))
+	}
+	firstLine := m.transcriptLines[region.startLine]
+	if strings.Contains(firstLine, "msg1") || strings.Contains(firstLine, "response1") {
+		t.Fatalf("startLine %d points to a preceding message line: %q", region.startLine, firstLine)
+	}
+
+	m.viewport.GotoBottom()
+	y := region.startLine - m.viewport.YOffset() + appHeaderHeight + 1
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 4, Y: y})
+	updated, _ = updated.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 4, Y: y})
+	got := derefTestModel(t, updated)
+	if !got.expandedToolOutputs[len(precedingMessages)] {
+		t.Fatalf("expected click to expand tool output at index %d", len(precedingMessages))
+	}
+}
+
 func TestToolOutputPreviewRespectsSanitizedLineCount(t *testing.T) {
 	content := strings.Repeat("progress line\r", toolOutputPreviewLines+8)
 	text := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))

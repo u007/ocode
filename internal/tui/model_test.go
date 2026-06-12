@@ -583,18 +583,9 @@ func TestUpdatePermButtonRegionsUsesRenderedBodyHeight(t *testing.T) {
 				t.Fatalf("expected %d permission button regions, got %d", len(permBtnDefs), len(m.permButtonRegions))
 			}
 
-			// Compute expected Y from the centered overlay position (matches renderPermissionOverlay).
-			body := renderPermissionRequestBody(tt.req)
-			bodyLines := strings.Count(body, "\n") + 1
-			if bodyLines > permissionDialogMaxBodyLines {
-				bodyLines = permissionDialogMaxBodyLines
-			}
-			boundsHeight := 4 + bodyLines
-			overlayY := (m.height - boundsHeight) / 2
-			if overlayY < 0 {
-				overlayY = 0
-			}
-			wantY := overlayY + m.permViewport.Height() + 3
+			// The dialog renders inline in the bottom chrome: top border(1) +
+			// header(1) + blank(1) + body + blank(1) above the button row.
+			wantY := m.inputAreaTopY() + 4 + m.permViewport.Height()
 			if got := m.permButtonRegions[0].y1; got != wantY {
 				t.Fatalf("expected permission buttons to start at y=%d, got %d", wantY, got)
 			}
@@ -824,8 +815,8 @@ func TestDoubleEscDisablesShellMode(t *testing.T) {
 	if got.input.Value() != "echo hello" {
 		t.Fatalf("expected shell prefix to be removed, got %q", got.input.Value())
 	}
-	if got.showPalette {
-		t.Fatal("expected double-esc in shell mode to not open the message picker")
+	if got.showFileSearch {
+		t.Fatal("expected double-esc in shell mode to not open the file search")
 	}
 	if got.escPressed {
 		t.Fatal("expected esc state to clear after disabling shell mode")

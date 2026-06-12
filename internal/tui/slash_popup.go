@@ -289,7 +289,7 @@ func unescapeAtPath(path string) string { return unescapeDraggedPath(path) }
 
 func (m model) updateSlashPopupState() (model, tea.Cmd) {
 	value := m.input.Value()
-	if m.showPicker || m.showConnect || m.showPalette {
+	if m.showPicker || m.showConnect || m.showFileSearch {
 		m.closeSlashPopup()
 		return m, nil
 	}
