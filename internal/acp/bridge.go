@@ -179,14 +179,10 @@ func (b *sessionBridge) prompt(
 			_, known := b.pendingTools[msg.ToolID]
 			b.pendingMu.Unlock()
 			if known {
-				status := "completed"
-				if strings.HasPrefix(msg.Content, "Error:") || strings.HasPrefix(msg.Content, "error:") {
-					status = "failed"
-				}
 				sendUpdate(sessionUpdate{
 					Kind:       "tool_call_update",
 					ToolCallID: msg.ToolID,
-					Status:     status,
+					Status:     "completed",
 					Content:    []contentBlock{{Type: "text", Text: msg.Content}},
 				})
 			}
