@@ -17,6 +17,7 @@ import (
 
 const (
 	toolOutputPreviewLines = 12
+	readToolPreviewLines   = 5
 )
 
 // formatToolCallHint returns a single-line summary of a tool call,
@@ -298,7 +299,7 @@ func renderToolResult(toolName, content string, st Styles) string {
 		return renderDiff(content, st)
 	}
 	if toolName == "read" {
-		return renderReadResult(content, st)
+		return renderReadResult(content, st, readToolPreviewLines)
 	}
 	if looksLikeUnifiedDiff(content) {
 		return renderUnifiedDiff(content, st)
@@ -384,8 +385,9 @@ func renderUnifiedDiff(content string, st Styles) string {
 
 // renderReadResult strips the "1\t" / "  12\t" line-number prefix the read
 // tool prepends, detects the language from the first path-looking line if
-// present, and applies chroma highlighting.
-func renderReadResult(content string, st Styles) string {
+// present, and applies chroma highlighting. previewLines controls the inline
+// truncation applied to read-tool output; pass 0 to render the full result.
+func renderReadResult(content string, st Styles, previewLines int) string {
 	// The read tool returns "<path>\n<numbered lines>" — first line is the
 	// path header. We syntax-highlight the body.
 	path := ""
@@ -414,11 +416,9 @@ func renderReadResult(content string, st Styles) string {
 	// Strip "<n>\t" prefix from each line if present.
 	stripped := stripLineNumbers(body)
 
-	// Show 5 lines preview; the tool already limits content via start_line/end_line.
-	const previewLines = 5
 	lines := strings.Split(stripped, "\n")
 	previewTruncated := ""
-	if len(lines) > previewLines {
+	if previewLines > 0 && len(lines) > previewLines {
 		previewTruncated = fmt.Sprintf("\n…(%d more lines)", len(lines)-previewLines)
 		stripped = strings.Join(lines[:previewLines], "\n")
 	}

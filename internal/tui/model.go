@@ -274,9 +274,9 @@ type rcDoneMsg struct {
 
 // rcStartedMsg is returned when the /rc server starts successfully.
 type rcStartedMsg struct {
-	url         string
+	url          string
 	tailscaleURL string
-	bridge      *server.RCBridge
+	bridge       *server.RCBridge
 }
 
 // ideStartedMsg is returned when the /ide client is created and starts connecting.
@@ -725,9 +725,9 @@ type model struct {
 	hoverDetailLink          pathLinkRegion // file-path link hovered in the agent-detail view
 	hoverDetailLinkActive    bool           // whether hoverDetailLink is set
 	hoverDetailLinkProbe     pathLinkProbeCache
-	hoverPickerIdx           int  // index of hovered picker row, -1 for none
-	hoverSlashIdx            int  // index of hovered slash popup row, -1 for none
-	hoverTabIdx              int  // index of hovered tab, -1 for none
+	hoverPickerIdx           int // index of hovered picker row, -1 for none
+	hoverSlashIdx            int // index of hovered slash popup row, -1 for none
+	hoverTabIdx              int // index of hovered tab, -1 for none
 	rawInputLines            []string
 	rawInputLinesDirty       bool
 	inputThemeApplied        bool
@@ -7982,9 +7982,19 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 		lines = append(lines, req.DenyReason)
 		lines = append(lines, "")
 	}
+	if req.Summary != "" {
+		lines = append(lines, "Model summary:")
+		lines = append(lines, req.Summary)
+		lines = append(lines, "")
+	}
 	lines = append(lines, permissionRequestSummary(req))
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
-		lines = append(lines, fmt.Sprintf("Always-rule scope: bash prefix %q (all `%s ...` commands)", req.Prefix, req.Prefix))
+		if strings.HasPrefix(req.Prefix, "bash.interpreter.") {
+			lang := strings.TrimPrefix(req.Prefix, "bash.interpreter.")
+			lines = append(lines, fmt.Sprintf("Always-rule scope: interpreter execution %q (stores bash prefix %q)", lang, req.Prefix))
+		} else {
+			lines = append(lines, fmt.Sprintf("Always-rule scope: bash prefix %q (all `%s ...` commands)", req.Prefix, req.Prefix))
+		}
 	}
 	if root := outOfScopePathRoot(req); root != "" {
 		lines = append(lines, "Path scope: target is outside the workspace")
@@ -8213,6 +8223,9 @@ func permissionRuleLabel(req agent.PermissionRequest) string {
 		}
 	}
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
+		if strings.HasPrefix(req.Prefix, "bash.interpreter.") {
+			return fmt.Sprintf("interpreter execution %q", strings.TrimPrefix(req.Prefix, "bash.interpreter."))
+		}
 		return fmt.Sprintf("bash prefix %q", req.Prefix)
 	}
 	return fmt.Sprintf("tool %q", req.ToolName)
@@ -8858,8 +8871,6 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	return height
 }
 
-
-
 var permBtnStyle = lipgloss.NewStyle().Bold(true).Padding(0, 1).Border(lipgloss.RoundedBorder())
 
 // permBtnHoverStyle highlights the button under the mouse. It must keep the same
@@ -9143,7 +9154,13 @@ func renderPermConfirmBody(req agent.PermissionRequest, toolName, choice string)
 		domain := strings.TrimPrefix(req.Rule, "webfetch.domain.")
 		lines = append(lines, fmt.Sprintf("Persist a webfetch rule: always allow fetching from domain %q.", domain))
 	case req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "":
-		lines = append(lines, fmt.Sprintf("Persist a bash-prefix rule: always allow `%s ...` (all commands starting with %q).", req.Prefix, req.Prefix))
+		if strings.HasPrefix(req.Prefix, "bash.interpreter.") {
+			lang := strings.TrimPrefix(req.Prefix, "bash.interpreter.")
+			lines = append(lines, fmt.Sprintf("Persist an interpreter rule: always allow %q interpreter executions.", lang))
+			lines = append(lines, fmt.Sprintf("Stores bash prefix %q for future calls.", req.Prefix))
+		} else {
+			lines = append(lines, fmt.Sprintf("Persist a bash-prefix rule: always allow `%s ...` (all commands starting with %q).", req.Prefix, req.Prefix))
+		}
 	default:
 		lines = append(lines, fmt.Sprintf("Persist a tool rule: always allow the %q tool.", toolName))
 		lines = append(lines, "Note: for this action, \"always this rule\" and \"always this tool\" persist the same tool-level rule.")
@@ -9275,8 +9292,9 @@ func (m *model) updatePermButtonRegions() {
 	visibleBodyLines := m.permViewport.Height()
 
 	// Top border(1) + header(1) + blank(1) + body(visibleBodyLines) + blank(1)
-	// above the button row.
-	buttonTopY := m.inputAreaTopY() + 4 + visibleBodyLines
+	// above the button row, plus the extra two-row offset used by the dialog's
+	// nested border/padding layout in the rendered bottom chrome.
+	buttonTopY := m.inputAreaTopY() + 6 + visibleBodyLines
 
 	m.permButtonRegions = nil
 	x := 2 // border(1) + padding(1) of the bordered input area
@@ -9680,7 +9698,13 @@ func (m *model) renderToolOutputBox(toolName, content string, expanded bool) str
 	if width < 1 {
 		width = 1
 	}
-	box := m.styles.ToolBox.Width(width).Render(renderToolResult(toolName, boxContent, m.styles))
+	var rendered string
+	if toolName == "read" {
+		rendered = renderReadResult(boxContent, m.styles, 0)
+	} else {
+		rendered = renderToolResult(toolName, boxContent, m.styles)
+	}
+	box := m.styles.ToolBox.Width(width).Render(rendered)
 	header := m.styles.Hint.Render("  " + toolName + " output")
 	if footer != "" {
 		return header + "\n" + box + "\n" + footer

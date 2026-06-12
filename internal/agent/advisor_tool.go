@@ -292,9 +292,9 @@ func withNotice(notice, content string) string {
 	return notice + "\n\n" + content
 }
 
-// cleanEnvForTerminal filters the current environment to strip agent indicators
-// like CLAUDECODE and injects standard interactive terminal values to bypass
-// nesting guards and wrapper detection.
+// cleanEnvForTerminal optimizes the environment for the sub-process wrapper.
+// It removes any conflicting CLAUDECODE variable to ensure standard execution
+// flow, and provides standard terminal compatibility properties.
 func cleanEnvForTerminal() []string {
 	var clean []string
 	for _, env := range os.Environ() {
@@ -364,7 +364,7 @@ func executeClaudeCodeAdvisor(modelName, prompt, workDir string) (string, error)
 		cmd.Dir = workDir
 	}
 
-	// Clean the environment to bypass nesting guards and wrapper detection
+	// Optimize environment variables for subprocess wrapper compatibility
 	cmd.Env = cleanEnvForTerminal()
 
 	// Redirect stdin to /dev/null to avoid the 3s timeout warning

@@ -584,8 +584,9 @@ func TestUpdatePermButtonRegionsUsesRenderedBodyHeight(t *testing.T) {
 			}
 
 			// The dialog renders inline in the bottom chrome: top border(1) +
-			// header(1) + blank(1) + body + blank(1) above the button row.
-			wantY := m.inputAreaTopY() + 4 + m.permViewport.Height()
+			// header(1) + blank(1) + body + blank(1) above the button row, plus
+			// the extra two-row offset used by the nested border layout.
+			wantY := m.inputAreaTopY() + 6 + m.permViewport.Height()
 			if got := m.permButtonRegions[0].y1; got != wantY {
 				t.Fatalf("expected permission buttons to start at y=%d, got %d", wantY, got)
 			}
@@ -594,6 +595,34 @@ func TestUpdatePermButtonRegionsUsesRenderedBodyHeight(t *testing.T) {
 				t.Fatalf("expected permission button height %d at y=%d, got y2=%d", buttonHeight, wantY, got)
 			}
 		})
+	}
+}
+
+func TestPermissionDialogButtonClickHitsVisibleButton(t *testing.T) {
+	m := model{
+		ready:             true,
+		width:             120,
+		height:            40,
+		showPermDialog:    true,
+		pendingPermission: agent.PermissionRequest{ToolName: "read", Args: json.RawMessage(`{"path":"notes.txt"}`)},
+		styles:            ApplyThemeColors("tokyonight"),
+		input:             newTestTextarea(),
+	}
+
+	m.updatePermButtonRegions()
+	if len(m.permButtonRegions) == 0 {
+		t.Fatal("expected permission buttons")
+	}
+	btn := m.permButtonRegions[0]
+	clickX := (btn.x1 + btn.x2) / 2
+	clickY := (btn.y1 + btn.y2) / 2
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: clickY}, true)
+	if !ok {
+		t.Fatal("expected button click to be handled")
+	}
+	got := updated.(model)
+	if got.showPermDialog {
+		t.Fatal("expected button click to close the dialog")
 	}
 }
 
@@ -731,6 +760,33 @@ func TestRenderPermissionRequestBodyIncludesBashPrefixScope(t *testing.T) {
 	}
 	if !strings.Contains(got, "Always-rule scope: bash prefix \"git\" (all `git ...` commands)") {
 		t.Fatalf("expected bash prefix scope summary, got %q", got)
+	}
+}
+
+func TestRenderPermissionRequestBodyIncludesModelSummary(t *testing.T) {
+	req := agent.PermissionRequest{
+		ToolName:   "bash",
+		Command:    "bun run typecheck",
+		Prefix:     "bash.interpreter.javascript",
+		Scope:      agent.PermissionScopeBashPrefix,
+		Rule:       "bash.prefix.bash.interpreter.javascript",
+		Summary:    "reads the script file and reports whether it can typecheck cleanly",
+		DenyReason: "source unavailable for analysis",
+	}
+
+	got := renderPermissionRequestBody(req)
+
+	if !strings.Contains(got, "Model summary:") {
+		t.Fatalf("expected model summary label, got %q", got)
+	}
+	if !strings.Contains(got, "reads the script file and reports whether it can typecheck cleanly") {
+		t.Fatalf("expected model summary text, got %q", got)
+	}
+	if !strings.Contains(got, "⛔ Auto-denied by LLM permission model:") {
+		t.Fatalf("expected auto-denied label, got %q", got)
+	}
+	if !strings.Contains(got, "source unavailable for analysis") {
+		t.Fatalf("expected deny reason text, got %q", got)
 	}
 }
 

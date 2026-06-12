@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Permission Model Summary Propagation** — `PermissionRequest` gains an optional `Summary` field carrying the model-generated explanation from the auto-permission flow. The interpreter auto-permission path preserves the summary on deny/ask requests, and the TUI permission dialog renders it alongside the deny reason when present.
 - **Plugin Scaffold Command** — New `/plugin create <name> [desc]` command scaffolds a plugin directory with `plugin.json` manifest and `commands/` subdirectory. Backed by `plugins.ScaffoldPlugin()` with path-traversal validation via `validatePluginName()`.
 - **Advisor Terminal Environment Sanitization** — `cleanEnvForTerminal()` strips `CLAUDECODE` env vars from the advisor subprocess environment and injects standard terminal variables (`TERM`, `TERM_PROGRAM`, `COLORTERM`, `SHELL`) to bypass Claude Code nesting guards. Subprocess stdin redirected to `/dev/null` to suppress 3-second timeout warnings.
 - **File Content Search** — New inline file content search replaces the old command palette (`Ctrl+P`). Model gains `showFileSearch`, `fileSearchInput`, `fileSearchResults`, `fileSearchIndex`, and `fileSearchCache` fields.
@@ -48,6 +49,12 @@
 - **`/rc` Browser-First Ordering** — Remote control now opens the browser before attempting Tailscale serve, so the URL is available even if Tailscale is slow or unavailable.
 - **Theme Package Restructure** — Theme data and logic moved from `internal/tui` to the `internal/theme` package; `theme_generated.go` relocated accordingly. `Get()` and `List()` functions expanded to include disk-loaded themes alongside builtins.
 - **Web Theme Hook Hex→HSL Fix** — `useTheme` hook now converts hex color values to HSL for CSS variable injection, fixing color rendering in the Web UI.
+- **Permission Model Summary Rendering** — TUI permission dialog now renders the model-generated `Summary` field alongside the deny reason when present, giving human operators full context for auto-denied interpreter executions.
+- **Read Tool Output Preview** — Read tool output box now shows a 5-line preview when collapsed and the full content when expanded, controlled via a `previewLines` parameter on `renderReadResult`.
+- **Interpreter Prefix Rule Labeling** — `bashPermissionRequest` uses the full interpreter prefix (`bash.interpreter.<lang>`) as the rule, and the TUI renders user-facing labels like `interpreter execution "python"` in permission dialogs instead of raw prefix strings.
+- **Permission Button Layout Offset** — Button Y-position in `updatePermButtonRegions` adjusted from +4 to +6 to account for the nested border/padding layout in the rendered bottom chrome.
+- **Advisor Comment Cleanup** — `cleanEnvForTerminal` comments softened from "bypass nesting guards" to "optimize environment for sub-process wrapper compatibility".
+- **auto_allow_prefixes Updated** — Added new utility commands (`stat`, `sed`, `cksum`, `comm`, `md5sum`, `od`, `diff`, `expand`, `tr`, `tree`) and removed unused entries, keeping the list alphabetically sorted.
 
 ### Fixed
 - **Tool Output Click Regression** — Fixed separator accounting in clickable tool output regions where preceding messages caused `startLine` drift. New regression test validates click targeting after multiple preceding messages.

@@ -205,14 +205,10 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
 
 ## LLM auto-permission: interpreter execution (2026-06-08)
 
-- **Surface the model's effect summary / reject reason in the human-ask prompt.**
-  Interpreter auto-permission decisions are fully functional, but when the
-  verifier declines (or the model defers) the reason currently lands only in the
-  debug panel (`tier=auto_interp_*`). `PermissionRequest` has no reason field, so
-  the TUI ask prompt does not yet show "interpreter execution (lang mode) — model
-  summary: …". Add an optional `Reason`/`Summary` to `PermissionRequest` and
-  render it in the permission dialog when present. Deferred to keep this change
-  off the (currently broken) tui package.
+- **[done] Surface the model's effect summary / reject reason in the human-ask prompt.**
+  `PermissionRequest` now carries an optional `Summary`, the interpreter auto-
+  permission path preserves it on deny/ask requests, and the TUI permission
+  dialog renders it alongside the deny reason when present.
 - **Heredoc handling is a line-based pre-pass (`extractHeredocs`), not a
   rune-level tokenizer state.** This is intentional (far lower blast radius on the
   shared shell parser) and covers `<<DELIM`/`<<-`/quoted delimiters/multi-heredoc.

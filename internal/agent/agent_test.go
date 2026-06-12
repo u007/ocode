@@ -1245,6 +1245,56 @@ func TestHandleToolCallAutoPermissionBypassesAsk(t *testing.T) {
 	}
 }
 
+func TestHandleToolCallAutoPermissionPreservesInterpreterSummaryOnAsk(t *testing.T) {
+	workspace := t.TempDir()
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	scriptPath := filepath.Join(workspace, "job.py")
+	if err := os.WriteFile(scriptPath, []byte("print('hi')\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
+	a := NewAgent(nil, nil, cfg, nil)
+	a.Permissions().SetAutoPermissionEnabled(true)
+
+	prevClientFn := newClientFn
+	t.Cleanup(func() { newClientFn = prevClientFn })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return &MockClient{Response: &Message{Role: "assistant", Content: `{"decision":"ask","confidence":0.95,"summary":"would read job.py and write out.txt","effects":{"reads":["` + scriptPath + `"],"writes":["` + filepath.Join(workspace, "out.txt") + `"],"deletes":[],"network":[],"subprocesses":[],"unknown":[]}}`}}
+	}
+
+	res, err := a.HandleToolCall("bash", json.RawMessage(`{"command":"python job.py"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(res, tool.SentinelPermissionAsk) {
+		t.Fatalf("expected permission ask sentinel, got %q", res)
+	}
+
+	var req PermissionRequest
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(res, tool.SentinelPermissionAsk)), &req); err != nil {
+		t.Fatalf("unmarshal sentinel payload: %v", err)
+	}
+	if req.DenyReason != "model deferred to human approval" {
+		t.Fatalf("expected deny reason to be preserved, got %q", req.DenyReason)
+	}
+	if req.Summary != "would read job.py and write out.txt" {
+		t.Fatalf("expected model summary to be preserved, got %q", req.Summary)
+	}
+	if req.Prefix != "bash.interpreter.python" {
+		t.Fatalf("expected interpreter prefix to be preserved, got %q", req.Prefix)
+	}
+}
+
 func TestAutoPermissionModelFallbackUsesRawModelID(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true}

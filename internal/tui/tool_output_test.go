@@ -195,3 +195,31 @@ func TestToolOutputPreviewRespectsSanitizedLineCount(t *testing.T) {
 		t.Fatalf("expected sanitized collapsed output to stay within preview lines, got view:\n%s", m.viewport.View())
 	}
 }
+
+func TestRenderReadToolOutputBoxExpandsInline(t *testing.T) {
+	lines := make([]string, 20)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("alpha line %02d", i+1)
+	}
+	content := strings.Join(lines, "\n")
+	m := model{
+		viewport: fastviewport.New(96, 24),
+		styles:   ApplyThemeColors("tokyonight"),
+	}
+
+	collapsed := m.renderToolOutputBox("read", content, false)
+	if got := strings.Count(collapsed, "alpha line"); got != toolOutputPreviewLines {
+		t.Fatalf("expected collapsed read output box to show %d lines, got %d:\n%s", toolOutputPreviewLines, got, collapsed)
+	}
+	if !strings.Contains(collapsed, "alpha line 09") || !strings.Contains(collapsed, "alpha line 20") || strings.Contains(collapsed, "alpha line 08") {
+		t.Fatalf("expected collapsed read output box to show only the last %d lines:\n%s", toolOutputPreviewLines, collapsed)
+	}
+
+	expanded := m.renderToolOutputBox("read", content, true)
+	if got := strings.Count(expanded, "alpha line"); got != len(lines) {
+		t.Fatalf("expected expanded read output box to show %d lines, got %d:\n%s", len(lines), got, expanded)
+	}
+	if !strings.Contains(expanded, "alpha line 20") {
+		t.Fatalf("expected expanded read output box to include the full result:\n%s", expanded)
+	}
+}

@@ -48,6 +48,10 @@ type PermissionRequest struct {
 	Scope      PermissionScope `json:"scope"`
 	Rule       string          `json:"rule"`
 	DenyReason string          `json:"deny_reason,omitempty"`
+	// Summary carries a short model-generated explanation for the request that
+	// the human permission prompt can surface alongside any deny reason. It is
+	// optional and only populated when the auto-permission flow has one.
+	Summary string `json:"summary,omitempty"`
 	// OutOfScopePath is the absolute target path that puts a bash command outside
 	// the allowed roots (a cd target, redirection, env-var path, or path arg). It
 	// is carried so the human prompt can offer to persist that root to
@@ -945,7 +949,11 @@ func bashPermissionRequest(args json.RawMessage, command, prefix string) *Permis
 	rule := "tool.bash"
 	if prefix != "" {
 		scope = PermissionScopeBashPrefix
-		rule = "bash.prefix." + prefix
+		if strings.HasPrefix(prefix, "bash.interpreter.") {
+			rule = prefix
+		} else {
+			rule = "bash.prefix." + prefix
+		}
 	}
 	return &PermissionRequest{ToolName: "bash", Args: args, Command: command, Prefix: prefix, Scope: scope, Rule: rule}
 }

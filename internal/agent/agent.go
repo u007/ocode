@@ -1112,23 +1112,21 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 					// Consult the LLM permission model (interpreter executions
 					// take the structured effect-verification path; everything
 					// else the plain ALLOW/DENY path).
-					allowed, reason := a.consultPermissionModel(name, args, &req)
+					allowed, reason, summary := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						return a.executeToolCall(name, args)
 					}
 					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 					// LLM denied — fall through to human ask.
-					if decision.Request == nil {
-						if name == "bash" {
-							// Reuse the bash builder so the deny dialog shows the
-							// command/prefix, not a thinner args-only summary.
-							decision.Request = bashPermissionRequest(args, bashCommand(args), "")
-						} else {
-							decision.Request = &PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
-						}
+					if decision.Request == nil && name == "bash" {
+						// Reuse the bash builder so the deny dialog shows the
+						// command/prefix, not a thinner args-only summary.
+						req = *bashPermissionRequest(args, bashCommand(args), "")
 					}
-					decision.Request.DenyReason = reason
+					req.DenyReason = reason
+					req.Summary = summary
+					decision.Request = &req
 				}
 			}
 			emitDebug("PERMISSION", fmt.Sprintf("tier=human_ask tool=%s request=%s callback=%t", name, permissionRequestSummary(decision.Request), a.OnPermissionAsk != nil))
@@ -1231,7 +1229,7 @@ func permissionRequestSummary(req *PermissionRequest) string {
 // a bash command that classifies as interpreter execution goes through the
 // structured effect-verification path; every other tool/command uses the plain
 // ALLOW/DENY path.
-func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *PermissionRequest) (bool, string) {
+func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *PermissionRequest) (bool, string, string) {
 	if name == "bash" {
 		var p struct {
 			Command string `json:"command"`
@@ -1242,7 +1240,8 @@ func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *P
 			}
 		}
 	}
-	return a.askPermissionModel(name, args, req)
+	allowed, reason := a.askPermissionModel(name, args, req)
+	return allowed, reason, ""
 }
 
 // askPermissionModel sends a permission request to the configured LLM model

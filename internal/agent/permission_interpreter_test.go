@@ -406,9 +406,12 @@ func TestAskPermissionModelInterpreterAllowsAndPersistsGrant(t *testing.T) {
 	if !ok {
 		t.Fatal("classify failed")
 	}
-	allowed, reason := a.askPermissionModelInterpreter("python job.py", ie)
+	allowed, reason, summary := a.askPermissionModelInterpreter("python job.py", ie)
 	if !allowed {
 		t.Fatalf("expected allow, got reason=%q", reason)
+	}
+	if summary != "writes out.txt" {
+		t.Fatalf("expected summary %q, got %q", "writes out.txt", summary)
 	}
 	// Grant persisted to disk and loadable.
 	var cfg config.Config
@@ -431,7 +434,7 @@ func TestAskPermissionModelInterpreterAllowsAndPersistsGrant(t *testing.T) {
 
 	// Second identical run short-circuits via the in-memory grant (model would
 	// otherwise be consulted) — still allowed.
-	allowed2, _ := a.askPermissionModelInterpreter("python job.py", ie)
+	allowed2, _, _ := a.askPermissionModelInterpreter("python job.py", ie)
 	if !allowed2 {
 		t.Fatal("expected grant short-circuit allow on repeat")
 	}
@@ -455,9 +458,12 @@ func TestAskPermissionModelInterpreterStdinPipeAllowsAndPersistsGrant(t *testing
 		t.Fatalf("unexpected classification: %+v", ie)
 	}
 
-	allowed, reason := a.askPermissionModelInterpreter("python - < job.py", ie)
+	allowed, reason, summary := a.askPermissionModelInterpreter("python - < job.py", ie)
 	if !allowed {
 		t.Fatalf("expected allow, got reason=%q", reason)
+	}
+	if summary != "reads stdin source" {
+		t.Fatalf("expected summary %q, got %q", "reads stdin source", summary)
 	}
 
 	var cfg config.Config
@@ -479,7 +485,7 @@ func TestAskPermissionModelInterpreterStdinPipeAllowsAndPersistsGrant(t *testing
 		t.Fatalf("unexpected entrypoint path: %+v", g)
 	}
 
-	allowed2, _ := a.askPermissionModelInterpreter("python - < job.py", ie)
+	allowed2, _, _ := a.askPermissionModelInterpreter("python - < job.py", ie)
 	if !allowed2 {
 		t.Fatal("expected grant short-circuit allow on repeat")
 	}
@@ -498,9 +504,12 @@ func TestAskPermissionModelInterpreterInlineCodeDoesNotPersistGrant(t *testing.T
 	if ie.SourceMode != "heredoc" {
 		t.Fatalf("unexpected source mode: %+v", ie)
 	}
-	allowed, reason := a.askPermissionModelInterpreter(cmd, ie)
+	allowed, reason, summary := a.askPermissionModelInterpreter(cmd, ie)
 	if !allowed {
 		t.Fatalf("expected allow, got reason=%q", reason)
+	}
+	if summary != "inline code" {
+		t.Fatalf("expected summary %q, got %q", "inline code", summary)
 	}
 
 	var cfg config.Config
@@ -535,11 +544,33 @@ func TestAskPermissionModelInterpreterFailClosed(t *testing.T) {
 			}
 			defer mockModelJSON(t, tc.resp)()
 			ie, _ := classifyInterpreterExecution("python job.py")
-			allowed, _ := a.askPermissionModelInterpreter("python job.py", ie)
+			allowed, _, _ := a.askPermissionModelInterpreter("python job.py", ie)
 			if allowed {
 				t.Fatal("expected fail-closed (ask), got allow")
 			}
 		})
+	}
+}
+
+func TestAskPermissionModelInterpreterReturnsSummaryOnReject(t *testing.T) {
+	a, root := newConsultAgent(t)
+	scriptPath := filepath.Join(root, "job.py")
+	if err := os.WriteFile(scriptPath, []byte("print('hi')\n"), 0o644); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	resp := `{"decision":"allow","confidence":0.99,"summary":"reads job.py but writes elsewhere","effects":{"reads":["` + scriptPath + `"],"writes":["/etc/hosts"],"deletes":[],"network":[],"subprocesses":[],"unknown":[]}}`
+	defer mockModelJSON(t, resp)()
+
+	ie, _ := classifyInterpreterExecution("python job.py")
+	allowed, reason, summary := a.askPermissionModelInterpreter("python job.py", ie)
+	if allowed {
+		t.Fatal("expected reject")
+	}
+	if summary != "reads job.py but writes elsewhere" {
+		t.Fatalf("expected summary to survive reject, got %q", summary)
+	}
+	if !strings.Contains(reason, "write path outside allowed roots") {
+		t.Fatalf("expected deterministic reject reason, got %q", reason)
 	}
 }
 
@@ -549,7 +580,7 @@ func TestAskPermissionModelInterpreterScriptOutsideRootsAsks(t *testing.T) {
 	resp := `{"decision":"allow","confidence":0.99,"summary":"x","effects":{"reads":[],"writes":[],"deletes":[],"network":[],"subprocesses":[],"unknown":[]}}`
 	defer mockModelJSON(t, resp)()
 	ie := &InterpreterExec{Language: "python", SourceMode: "script_file", Entrypoint: "/etc/hosts", RawCommand: "python /etc/hosts"}
-	if allowed, _ := a.askPermissionModelInterpreter("python /etc/hosts", ie); allowed {
+	if allowed, _, _ := a.askPermissionModelInterpreter("python /etc/hosts", ie); allowed {
 		t.Fatal("expected ask for script outside allowed roots")
 	}
 }
@@ -558,7 +589,7 @@ func TestAskPermissionModelInterpreterScriptOutsideRootsAsks(t *testing.T) {
 func TestConsultPermissionModelNonInterpreterUsesPlainPath(t *testing.T) {
 	a, _ := newConsultAgent(t)
 	defer mockModelJSON(t, "ALLOW: looks fine")()
-	allowed, _ := a.consultPermissionModel("bash", json.RawMessage(`{"command":"ls -la"}`), &PermissionRequest{ToolName: "bash"})
+	allowed, _, _ := a.consultPermissionModel("bash", json.RawMessage(`{"command":"ls -la"}`), &PermissionRequest{ToolName: "bash"})
 	if !allowed {
 		t.Fatal("expected plain ALLOW path to allow ls")
 	}
