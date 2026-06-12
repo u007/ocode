@@ -34,6 +34,18 @@ func TestClassifyInterpreterExecution(t *testing.T) {
 		{"remote_bunx", "bunx prettier .", true, "javascript", "remote", "", "prettier"},
 		{"remote_pnpm_dlx", "pnpm dlx tsx foo", true, "javascript", "remote", "", "tsx"},
 		{"bare_repl", "python", true, "python", "unknown_source", "", ""},
+		// Bun/Deno built-in subcommands (not script runners)
+		{"bun_test", `bun test`, false, "", "", "", ""},
+		{"bun_test_with_file", `bun test src/server/services/__tests__/ooh-llm-matcher.test.ts`, false, "", "", "", ""},
+		{"bun_test_watch", "bun test --watch", false, "", "", "", ""},
+		{"bun_create", "bun create next-app", false, "", "", "", ""},
+		{"bun_install", "bun install", false, "", "", "", ""},
+		{"bun_add", "bun add react", false, "", "", "", ""},
+		{"deno_test", "deno test", false, "", "", "", ""},
+		{"deno_test_with_file", "deno test src/test.ts", false, "", "", "", ""},
+		{"deno_fmt", "deno fmt", false, "", "", "", ""},
+		{"deno_compile", "deno compile app.ts", false, "", "", "", ""},
+		// Bun run still works as script_file (not a builtin)
 		{"not_interpreter", "ls -la", false, "", "", "", ""},
 		{"grep", "grep foo bar.txt", false, "", "", "", ""},
 	}

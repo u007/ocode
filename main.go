@@ -29,6 +29,9 @@ var webAssets embed.FS
 //go:embed all:skills
 var bundledSkills embed.FS
 
+//go:embed deepseek-v4-flash.OCODE.md
+var bundledModelConfigs embed.FS
+
 func webFS() fs.FS {
 	f, err := fs.Sub(webAssets, "web/dist")
 	if err != nil {
@@ -44,6 +47,14 @@ func webFS() fs.FS {
 // discovers its skills.
 func bundledSkillsFS() fs.FS {
 	return bundledSkills
+}
+
+// bundledModelConfigFS exposes the embedded model-specific OCODE.md files
+// (e.g. deepseek-v4-flash.OCODE.md) as a plain fs.FS. The agent package
+// uses these as a fallback when no disk-based model context file is found,
+// ensuring every build ships with its own model instructions baked in.
+func bundledModelConfigFS() fs.FS {
+	return bundledModelConfigs
 }
 
 func main() {
@@ -101,6 +112,9 @@ func main() {
 			if fsys := bundledSkillsFS(); fsys != nil {
 				skill.SetBundledFS(fsys)
 			}
+			if fsys := bundledModelConfigFS(); fsys != nil {
+				agent.SetBundledModelConfigFS(fsys)
+			}
 			if err := skill.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
@@ -115,6 +129,13 @@ func main() {
 	// skill package can discover bundled skills at runtime.
 	if fsys := bundledSkillsFS(); fsys != nil {
 		skill.SetBundledFS(fsys)
+	}
+
+	// Register the embedded model-specific OCODE.md files so they are
+	// available as a fallback when no disk-based model context file is
+	// found. This ensures every build ships with its own model instructions.
+	if fsys := bundledModelConfigFS(); fsys != nil {
+		agent.SetBundledModelConfigFS(fsys)
 	}
 
 	opts := tui.RunOptions{WebFS: webFS()}

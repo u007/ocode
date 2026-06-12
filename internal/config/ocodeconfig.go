@@ -55,11 +55,25 @@ type PluginsConfig struct {
 	AST bool `json:"ast"`
 }
 
+// SecurityConfig holds security-related settings.
+type SecurityConfig struct {
+	Redaction RedactionConfig `json:"redaction"`
+}
+
+// RedactionConfig controls the secret redaction feature.
+type RedactionConfig struct {
+	Enabled     bool     `json:"enabled"`
+	Model       string   `json:"model"`
+	FailMode    string   `json:"fail_mode"`    // "block" or "warn"
+	CustomWords []string `json:"custom_words"`
+}
+
 type OcodeConfig struct {
 	Compact           CompactConfig
 	Advisor           AdvisorConfig
 	Permissions       PermissionConfig
 	Plugins           PluginsConfig
+	Security          SecurityConfig
 	ExtraAllowedPaths []string
 	Editor            string
 	EditorMode        string
@@ -178,11 +192,23 @@ type pluginsConfigFile struct {
 	AST *bool `json:"ast"`
 }
 
+type redactionConfigFile struct {
+	Enabled     *bool    `json:"enabled"`
+	Model       *string  `json:"model"`
+	FailMode    *string  `json:"fail_mode"`
+	CustomWords []string `json:"custom_words"`
+}
+
+type securityConfigFile struct {
+	Redaction redactionConfigFile `json:"redaction"`
+}
+
 type ocodeConfigFile struct {
 	Compact           compactConfigFile    `json:"compact"`
 	Advisor           advisorConfigFile    `json:"advisor"`
 	Permissions       permissionConfigFile `json:"permissions"`
 	Plugins           pluginsConfigFile    `json:"plugins"`
+	Security          securityConfigFile   `json:"security"`
 	ExtraAllowedPaths []string             `json:"extra_allowed_paths,omitempty"`
 	Editor            string               `json:"editor,omitempty"`
 	EditorMode        string               `json:"editor_mode,omitempty"`
@@ -214,11 +240,22 @@ func defaultTUIConfig() TUIConfig {
 	}
 }
 
+func defaultSecurityConfig() SecurityConfig {
+	return SecurityConfig{
+		Redaction: RedactionConfig{
+			Enabled:  false,
+			Model:    "",
+			FailMode: "block",
+		},
+	}
+}
+
 func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
 		Compact:     defaultCompactConfig(),
 		Advisor:     defaultAdvisorConfig(),
 		Permissions: defaultPermissionConfig(),
+		Security:    defaultSecurityConfig(),
 		TUI:         defaultTUIConfig(),
 		Extra:       make(map[string]json.RawMessage),
 	}
@@ -342,6 +379,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.Plugins.AST = *file.Plugins.AST
 		}
 		delete(raw, "plugins")
+	}
+
+	if _, ok := raw["security"]; ok {
+		applySecurityConfig(&cfg.Security, file.Security)
+		delete(raw, "security")
 	}
 
 	if _, ok := raw["extra_allowed_paths"]; ok {
@@ -476,6 +518,21 @@ func applyAutoPermissionConfig(dst *AutoPermissionConfig, src *autoPermissionCon
 	}
 }
 
+func applySecurityConfig(dst *SecurityConfig, src securityConfigFile) {
+	if src.Redaction.Enabled != nil {
+		dst.Redaction.Enabled = *src.Redaction.Enabled
+	}
+	if src.Redaction.Model != nil {
+		dst.Redaction.Model = *src.Redaction.Model
+	}
+	if src.Redaction.FailMode != nil {
+		dst.Redaction.FailMode = *src.Redaction.FailMode
+	}
+	if src.Redaction.CustomWords != nil {
+		dst.Redaction.CustomWords = append([]string(nil), src.Redaction.CustomWords...)
+	}
+}
+
 func applyTUIConfig(dst *TUIConfig, src tuiConfigFile) {
 	if src.Theme != "" {
 		dst.Theme = src.Theme
@@ -567,6 +624,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"compact":     cfg.Compact,
 		"advisor":     cfg.Advisor,
 		"permissions": cfg.Permissions,
+		"security":    cfg.Security,
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
@@ -912,6 +970,16 @@ func SaveAdvisorEnabled(enabled bool) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.Advisor.Enabled = enabled
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveSecurityRedaction persists the security.redaction config via a targeted load-modify-save.
+func SaveSecurityRedaction(mutate func(*RedactionConfig)) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	mutate(&cfg.Security.Redaction)
 	return SaveOcodeConfig(cfg)
 }
 

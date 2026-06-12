@@ -7350,6 +7350,19 @@ func (m *model) handleContextCmd(args []string) {
 		b.WriteString("  (no ambient files found)\n")
 	}
 
+	// ── Model-Specific Context ──────────────────────
+	modelName := m.agent.Client().GetModel()
+	if mc := agent.LoadModelContext(modelName); mc != "" {
+		mcTok := estimateTok(mc)
+		baseTotal += mcTok
+		source := "built-in"
+		diskPath := modelName + ".OCODE.md"
+		if _, err := os.Stat(diskPath); err == nil {
+			source = "disk"
+		}
+		fmt.Fprintf(&b, "  Model ctx  %-20s ~%s tok (%s)\n", modelName, formatTok(mcTok), source)
+	}
+
 	plugs := plugins.LoadPlugins(nil)
 	for _, p := range plugs {
 		if p.Instructions == "" {
@@ -13674,24 +13687,26 @@ func (m *model) autoConnectIDE() tea.Cmd {
 }
 
 // ideSidebarStatusLine renders the IDE state inside the chat sidebar.
+// On/off colors follow the same pattern as the advisor toggle:
+//   - "IDE:" label in dim, "on" in success, "off" in dim, details in sidebarTextStyle.
 func (m *model) ideSidebarStatusLine() string {
 	if m.ideMode != config.IDEModeClaude {
-		return sidebarTextStyle.Render("IDE: off")
+		return dimStyle.Render("IDE: off")
 	}
 	if !m.ideConnected {
-		return sidebarTextStyle.Render("IDE: on · connecting")
+		return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(" · connecting")
 	}
 	if m.ideSelection != nil && m.ideSelection.FilePath != "" {
 		name := filepath.Base(m.ideSelection.FilePath)
 		if start, end, ok := m.ideSelection.LineSpan(); ok {
 			if start == end {
-				return sidebarTextStyle.Render(fmt.Sprintf("IDE: on · %s:L%d", name, start))
+				return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(fmt.Sprintf(" · %s:L%d", name, start))
 			}
-			return sidebarTextStyle.Render(fmt.Sprintf("IDE: on · %s:L%d-%d", name, start, end))
+			return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(fmt.Sprintf(" · %s:L%d-%d", name, start, end))
 		}
-		return sidebarTextStyle.Render("IDE: on · " + name)
+		return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(" · " + name)
 	}
-	return sidebarTextStyle.Render("IDE: on · connected")
+	return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(" · connected")
 }
 
 // ideStatusReport is the verbose `/ide status` output.
