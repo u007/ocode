@@ -140,10 +140,12 @@ func (s *server) handleInitialize(frame inFrame) {
 		_ = json.Unmarshal(frame.Params, &params)
 	}
 
-	protoVer := params.ProtocolVersion
-	if protoVer < 1 || protoVer > 1 {
-		protoVer = 1
+	if params.ProtocolVersion < 1 {
+		s.sendError(frame.ID, errInvalidParams, fmt.Sprintf("unsupported protocol version %d (minimum 1)", params.ProtocolVersion))
+		return
 	}
+	// Negotiate: min(client, 1) — clamp to our maximum supported version.
+	protoVer := 1
 
 	s.sendResult(frame.ID, initializeResult{
 		ProtocolVersion: protoVer,
@@ -239,7 +241,17 @@ func (s *server) handleSessionPrompt(frame inFrame) {
 				Options:   []string{"allow-once", "allow-always", "reject-once"},
 			})
 
-			raw := <-ch
+			// Select on both the response channel and the agent's Done channel
+			// so a session/cancel unblocks the permission waiter instead of leaking it.
+			var raw json.RawMessage
+			select {
+			case raw = <-ch:
+			case <-bridge.ag.Done():
+				s.pendingMu.Lock()
+				delete(s.pending, id)
+				s.pendingMu.Unlock()
+				return "cancelled"
+			}
 
 			s.pendingMu.Lock()
 			delete(s.pending, id)
