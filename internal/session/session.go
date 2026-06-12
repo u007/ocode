@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -55,29 +56,12 @@ func NewSessionID() string {
 	return canonicalSessionPrefix + time.Now().Format("2006-01-02-150405")
 }
 
+// GetStorageDir returns the per-project sessions directory under the
+// global data dir. It always uses the cross-platform global path
+// (see internal/paths.GlobalDataDir).
 func GetStorageDir() (string, error) {
-	localDir := filepath.Join(".ocode", "sessions")
-	if _, err := os.Stat(localDir); err == nil {
-		return localDir, nil
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-
-	base := filepath.Join(home, ".local", "share", "opencode")
-	if runtime.GOOS == "windows" {
-		base = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "opencode")
-	}
-
 	slug := getProjectSlug()
-
-	dir := filepath.Join(base, "project", slug, "sessions")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	return dir, nil
+	return paths.ProjectSessionsDir(slug)
 }
 
 // gitToplevelCache memoizes `git rev-parse --show-toplevel` per working dir.
@@ -236,18 +220,15 @@ func shouldSearchOtherProjects(id string) bool {
 	return err == nil
 }
 
+// readSessionFileAnyProject searches all project session dirs for a
+// session with the given ID (used when resuming from a different cwd).
 func readSessionFileAnyProject(id string) (string, []byte, error) {
-	home, err := os.UserHomeDir()
+	dataDir, err := paths.GlobalDataDir()
 	if err != nil {
 		return "", nil, err
 	}
 
-	base := filepath.Join(home, ".local", "share", "opencode")
-	if runtime.GOOS == "windows" {
-		base = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "opencode")
-	}
-
-	projectRoot := filepath.Join(base, "project")
+	projectRoot := filepath.Join(dataDir, "project")
 	entries, err := os.ReadDir(projectRoot)
 	if err != nil {
 		return "", nil, err

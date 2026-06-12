@@ -9,12 +9,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/pricing"
 )
 
@@ -102,19 +102,7 @@ var (
 
 // defaultDataDir returns the platform-appropriate data directory for usage records.
 func defaultDataDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	base := filepath.Join(home, ".local", "share", "opencode")
-	if runtime.GOOS == "windows" {
-		base = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "opencode")
-	}
-	dir := filepath.Join(base, "usage")
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return "", err
-	}
-	return dir, nil
+	return paths.ProjectUsageDir()
 }
 
 func dataDir() (string, error) {

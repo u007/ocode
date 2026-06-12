@@ -24,7 +24,7 @@ Prereq: none (parallel with Part 2).
 - [ ] Implement saver via `loadFullOcodeConfig()` → mutate → `SaveOcodeConfig(cfg)`; add `"security"` to the payload map in `writeOcodeConfigFile`.
 - [ ] Test PASS. Commit `feat(config): SaveSecurityRedaction targeted saver`.
 
-### Task 3.3: Sidebar "Secrets" toggle row
+### Task 3.3: Sidebar "Mask" toggle row
 
 **Files:**
 - Modify: `internal/tui/model.go` — `sidebarRenderData` (:11539), `buildSidebarRenderData` (:11799), click-hit-test helpers near `sidebarAdvisorToggleForClick` (:12432), sidebar click handler block (:4588)

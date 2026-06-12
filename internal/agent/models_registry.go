@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/auth"
+	"github.com/u007/ocode/internal/models"
 )
 
 //go:embed models-snapshot.json
@@ -307,18 +308,36 @@ func splitModelID(id string) (provider, model string, ok bool) {
 
 func allProviderModelsFromRegistry() []string {
 	ids := make([]string, 0)
+	var requestyRegistryFallback []string
 	if data := loadRegistry(); data != nil {
 		for provider, entry := range data {
 			if provider == "lmstudio" {
 				continue // handled via live API fetch below
+			}
+			if provider == "requesty" {
+				// Save registry list as fallback; prefer live API fetch.
+				for model := range entry.Models {
+					requestyRegistryFallback = append(requestyRegistryFallback, provider+"/"+model)
+				}
+				continue
 			}
 			for model := range entry.Models {
 				ids = append(ids, provider+"/"+model)
 			}
 		}
 	}
+	// LM Studio live models
 	for _, m := range fetchLMStudioModels() {
 		ids = append(ids, "lmstudio/"+m)
+	}
+	// Requesty live models — fall back to registry snapshot if API unreachable.
+	requestyLive := fetchRequestyLiveModels()
+	if len(requestyLive) > 0 {
+		for _, m := range requestyLive {
+			ids = append(ids, "requesty/"+m)
+		}
+	} else {
+		ids = append(ids, requestyRegistryFallback...)
 	}
 	if len(ids) == 0 {
 		return nil
@@ -329,9 +348,29 @@ func allProviderModelsFromRegistry() []string {
 
 func providerModelsFromRegistry(provider string) []string {
 	if provider == "lmstudio" {
-		models := fetchLMStudioModels()
-		sort.Strings(models)
-		return models
+		return fetchLMStudioModels()
+	}
+	if provider == "requesty" {
+		live := fetchRequestyLiveModels()
+		if len(live) > 0 {
+			sort.Strings(live)
+			return live
+		}
+		// Fall back to registry snapshot.
+		data := loadRegistry()
+		if data == nil {
+			return nil
+		}
+		entry, ok := data[provider]
+		if !ok {
+			return nil
+		}
+		ids := make([]string, 0, len(entry.Models))
+		for id := range entry.Models {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		return ids
 	}
 	data := loadRegistry()
 	if data == nil {
@@ -406,6 +445,27 @@ func FetchLMStudioModels() LMStudioResult {
 
 func fetchLMStudioModels() []string {
 	return FetchLMStudioModels().Models
+}
+
+// fetchRequestyLiveModels fetches models from the Requesty API and returns
+// the raw model IDs as returned by the API (e.g. "nvidia/nemotron-...",
+// "anthropic/claude-sonnet-4-6"). Returns nil silently if the API is not
+// reachable or REQUESTY_API_KEY is not set.
+func fetchRequestyLiveModels() []string {
+	apiKey := os.Getenv("REQUESTY_API_KEY")
+	entries, err := models.FetchRequestyModels(apiKey)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(entries))
+	seen := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		if !seen[e.ID] {
+			ids = append(ids, e.ID)
+			seen[e.ID] = true
+		}
+	}
+	return ids
 }
 
 // AllProviders returns provider IDs known to the registry (or empty if unavailable).

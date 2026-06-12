@@ -9,7 +9,7 @@ Detect passwords/tokens/secrets in text before it reaches any LLM (main model,
 advisor, quick/title/compact models), replace them with session-scoped indexed
 placeholders, store messages with placeholders only, and re-render real values
 in the TUI chat display. Feature is **off by default**, toggleable from the
-sidebar and configurable via a `/secrets` slash command (mirroring
+sidebar and configurable via a `/mask` slash command (mirroring
 `/permissions`).
 
 ## Decisions (user-confirmed)
@@ -213,14 +213,14 @@ debug/log sinks never receive raw values.
 
 ### 9. UI surfaces
 
-**Sidebar**: "Secrets" row showing `off` / `on (<model short name>)`,
+**Sidebar**: "Mask" row showing `off` / `on (<model short name>)`,
 click-to-toggle, persisting immediately via the targeted saver. Follows the
 advisor-toggle pattern exactly: `sidebarRenderData` row index fields
 (model.go:11539), populate in `buildSidebarRenderData` (model.go:11799),
 hit-test helper like `sidebarAdvisorToggleForClick` (model.go:12432), click
 handler (model.go:4588).
 
-**`/secrets` slash command** (modal, mirrors `/permissions`):
+**`/mask` slash command** (modal, mirrors `/permissions`):
 
 - Enable/disable toggle.
 - Security-model picker: **local providers only** — LM Studio models first,

@@ -503,6 +503,37 @@ func TestSlashPopupSessionSuggestionReturnsLoadCmd(t *testing.T) {
 	}
 }
 
+func TestSlashPopupEnterUsesSelectedWhenNavigatedAwayFromExactCommand(t *testing.T) {
+	// When the user types an exact slash command (e.g., /review) and then
+	// navigates the popup to a different suggestion (e.g., /review-changes),
+	// pressing Enter should use the selected suggestion, not the exact command.
+	m := model{input: newTestTextarea()}
+	m.input.SetValue("/review")
+	m.slashPopupItems = []slashSuggestion{
+		{name: "/review", desc: "code review"},
+		{name: "/review-changes", desc: "review changes"},
+	}
+	// Simulate navigating down to the second item
+	m.slashPopupIndex = 1
+
+	// Verify inputIsExactSlashCommand returns true for /review
+	if !m.inputIsExactSlashCommand() {
+		t.Fatal("expected /review to be recognized as exact command")
+	}
+
+	// Now simulate pressing Enter - the fix should allow the selected
+	// suggestion to be used even though the input is an exact command
+	if len(m.slashPopupItems) > 0 && m.slashPopupIndex < len(m.slashPopupItems) && (m.slashPopupIndex != 0 || !m.inputIsExactSlashCommand()) {
+		selected := m.slashPopupItems[m.slashPopupIndex]
+		m.acceptPopupSuggestion(selected)
+	}
+
+	// The input should now be /review-changes, not /review
+	if got := m.input.Value(); got != "/review-changes " {
+		t.Fatalf("expected /review-changes, got %q", got)
+	}
+}
+
 func TestProcessFileReferencesResolvesCompactShortcode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "notes.txt")

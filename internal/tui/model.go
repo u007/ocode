@@ -866,6 +866,18 @@ func thinkingLevelIndexForBudget(budget int) int {
 	return 0
 }
 
+func (m *model) cycleThinkingLevel() {
+	if m.config != nil && agent.ModelSupportsThinking(m.config.Model) {
+		m.thinkingLevelIdx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
+		m.config.ThinkingBudget = thinkingBudgetLevels[m.thinkingLevelIdx]
+		if err := config.SaveLastThinkingBudget(m.config.ThinkingBudget); err != nil {
+			log.Printf("save last thinking budget: %v", err)
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
+		m.rerenderTranscriptAndMaybeScroll()
+	}
+}
+
 func (m *model) markCmdStarted() {
 	m.cmdRunningCount++
 }
@@ -1795,7 +1807,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			case "enter":
-				if len(m.slashPopupItems) > 0 && m.slashPopupIndex < len(m.slashPopupItems) && !m.inputIsExactSlashCommand() {
+				if len(m.slashPopupItems) > 0 && m.slashPopupIndex < len(m.slashPopupItems) && (m.slashPopupIndex != 0 || !m.inputIsExactSlashCommand()) {
 					selected := m.slashPopupItems[m.slashPopupIndex]
 					cmd := m.acceptPopupSuggestion(selected)
 					return m, cmd
@@ -3421,6 +3433,15 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			m.showFileSearch = false
 			return true, m, nil
 		}
+		if keyStr == "ctrl+e" {
+			if len(m.fileSearchResults) > 0 && m.fileSearchIndex >= 0 && m.fileSearchIndex < len(m.fileSearchResults) {
+				selected := m.fileSearchResults[m.fileSearchIndex]
+				m.showFileSearch = false
+				return true, m, m.openPathInEditorCmd(selected.path)
+			}
+			m.showFileSearch = false
+			return true, m, nil
+		}
 		if keyStr == "enter" {
 			if len(m.fileSearchResults) > 0 && m.fileSearchIndex >= 0 && m.fileSearchIndex < len(m.fileSearchResults) {
 				selected := m.fileSearchResults[m.fileSearchIndex]
@@ -3525,6 +3546,9 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			if m.sessionID != "" {
 				_ = clipboard.WriteAll(m.sessionID)
 			}
+			return true, m, nil
+		case "t":
+			m.cycleThinkingLevel()
 			return true, m, nil
 		case "q":
 			m.cleanupCurrentSession()
@@ -3758,16 +3782,11 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	case "ctrl+t":
 		m.cycleTheme()
 		return m, nil
+	case "ctrl+d":
+		m.cycleThinkingLevel()
+		return m, nil
 	case "alt+t":
-		if m.config != nil && agent.ModelSupportsThinking(m.config.Model) {
-			m.thinkingLevelIdx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
-			m.config.ThinkingBudget = thinkingBudgetLevels[m.thinkingLevelIdx]
-			if err := config.SaveLastThinkingBudget(m.config.ThinkingBudget); err != nil {
-				log.Printf("save last thinking budget: %v", err)
-			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
-			m.rerenderTranscriptAndMaybeScroll()
-		}
+		m.cycleThinkingLevel()
 		return m, nil
 	case "ctrl+b":
 		if m.backgroundLatestForegroundBash() {
@@ -3783,6 +3802,8 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	case "ctrl+x":
 		m.leaderActive = true
 		m.leaderSeq++
+		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("leader: s:sidebar u:undo r:redo n:new l:list c:compact t:thinking y:copy-id q:quit"), transient: true})
+		m.rerenderTranscriptAndMaybeScroll()
 		timeout := 2000
 		if m.config != nil && m.config.Ocode.TUI.LeaderTimeout != 0 {
 			timeout = m.config.Ocode.TUI.LeaderTimeout
@@ -5283,7 +5304,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/yolo" || cmd == "/small-model" || cmd == "/editor" ||
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
-		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp"
+		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
+		cmd == "/advisor"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -7462,6 +7484,15 @@ func (m *model) handleContextCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
 
+// relPath returns a project-relative path if possible, otherwise the original path.
+// Paths outside the workDir are returned as-is (not prefixed with "../").
+func relPath(path, workDir string) string {
+	if rel, err := filepath.Rel(workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
+		return rel
+	}
+	return path
+}
+
 func (m model) buildSelectionContext() string {
 	var b strings.Builder
 	writeHeader := func() {
@@ -7483,10 +7514,7 @@ func (m model) buildSelectionContext() string {
 				continue
 			}
 			n := m.files.nodes[idx]
-			path := n.path
-			if rel, err := filepath.Rel(m.workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
-				path = rel
-			}
+			path := relPath(n.path, m.workDir)
 			if path == "" {
 				path = n.name
 			}
@@ -7498,10 +7526,7 @@ func (m model) buildSelectionContext() string {
 
 	if m.filesSel.active && m.files.previewPath != "" && len(m.files.previewRawLines) > 0 {
 		writeHeader()
-		path := m.files.previewPath
-		if rel, err := filepath.Rel(m.workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
-			path = rel
-		}
+		path := relPath(m.files.previewPath, m.workDir)
 		startLine, _, endLine, _ := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
 		b.WriteString("\n## File selection: ")
 		b.WriteString(path)
@@ -7537,10 +7562,7 @@ func (m model) buildSelectionContext() string {
 	// text + line range so the agent sees what the user is looking at.
 	if sel := m.ideSelection; sel != nil && sel.FilePath != "" {
 		writeHeader()
-		path := sel.FilePath
-		if rel, err := filepath.Rel(m.workDir, path); err == nil && !strings.HasPrefix(rel, "..") {
-			path = rel
-		}
+		path := relPath(sel.FilePath, m.workDir)
 		b.WriteString("\n## IDE selection: ")
 		b.WriteString(path)
 		if start, end, ok := sel.LineSpan(); ok {
@@ -7554,6 +7576,40 @@ func (m model) buildSelectionContext() string {
 			for i, line := range strings.Split(r.Text, "\n") {
 				fmt.Fprintf(&b, "%d: %s\n", r.StartLine+1+i, line)
 			}
+		}
+	} else if len(m.ideOpenEditors) > 0 {
+		// No selection but IDE is connected — show the active file so the agent
+		// knows what the user is looking at even without highlighted text.
+		for _, ed := range m.ideOpenEditors {
+			if !ed.Active {
+				continue
+			}
+			writeHeader()
+			path := relPath(ed.FilePath, m.workDir)
+			b.WriteString("\n## IDE active file: ")
+			b.WriteString(path)
+			b.WriteString("\n")
+			break
+		}
+	}
+
+	// Open editor tabs — always included when connected so the agent knows the
+	// broader workspace context (what other files are open).
+	if len(m.ideOpenEditors) > 0 {
+		writeHeader()
+		b.WriteString("\n## IDE open tabs:\n")
+		for _, ed := range m.ideOpenEditors {
+			path := relPath(ed.FilePath, m.workDir)
+			marker := "- "
+			if ed.Active {
+				marker = "- *" // asterisk marks the active/focused tab
+			}
+			b.WriteString(marker)
+			b.WriteString(path)
+			if ed.Dirty {
+				b.WriteString(" (modified)")
+			}
+			b.WriteString("\n")
 		}
 	}
 
@@ -9021,7 +9077,7 @@ func filterFileSearchResults(cache []fileSearchResult, query string) []fileSearc
 // renderFileSearch renders the ctrl+p file search overlay.
 func (m model) renderFileSearch() string {
 	const maxVisible = 15
-	hintLine := hintStyle.Render("↑/↓ select · Enter open · Esc cancel · type to filter")
+	hintLine := hintStyle.Render("↑/↓ select · Enter insert · Ctrl+E open · Esc cancel · type to filter")
 	title := m.styles.Header.Render("Search files") + "  " + hintStyle.Render("filter: "+m.fileSearchInput+"_")
 
 	var body strings.Builder
@@ -9292,9 +9348,9 @@ func (m *model) updatePermButtonRegions() {
 	visibleBodyLines := m.permViewport.Height()
 
 	// Top border(1) + header(1) + blank(1) + body(visibleBodyLines) + blank(1)
-	// above the button row, plus the extra two-row offset used by the dialog's
-	// nested border/padding layout in the rendered bottom chrome.
-	buttonTopY := m.inputAreaTopY() + 6 + visibleBodyLines
+	// above the button row. The button rendering itself is 3 lines tall
+	// (individual RoundedBorder per button: top, content, bottom), so the clickable region starts at the first of those 3 lines.
+	buttonTopY := m.inputAreaTopY() + 4 + visibleBodyLines
 
 	m.permButtonRegions = nil
 	x := 2 // border(1) + padding(1) of the bordered input area
@@ -11360,23 +11416,31 @@ func (m *model) renderStatus() string {
 
 	var suffix string
 	supportsReasoning := m.config != nil && agent.ModelSupportsThinking(m.config.Model)
-	switch m.activeTab {
-	case tabFiles:
-		suffix = " · ctrl+f search · ctrl+g fuzzy · ctrl+l edit · ctrl+n new · ctrl+b folder · ctrl+r rename · ctrl+d delete · ctrl+y copy · ctrl+o open · ctrl+t reload · alt+[/]: tab"
-	case tabGit:
-		suffix = " · tab: cycle panel · ctrl+f filter · ctrl+s stage · ctrl+u unstage · ctrl+\\ commit · ctrl+r refresh · alt+[/]/ctrl+shift+[/]: switch tab"
-	case tabLog:
-		suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
-	default:
+	if m.leaderActive {
 		if supportsReasoning {
-			suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry · ctrl+t: theme"
+			suffix = " · leader: s:sidebar u:undo r:redo n:new l:list c:compact t:thinking y:copy-id q:quit"
 		} else {
-			suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry"
+			suffix = " · leader: s:sidebar u:undo r:redo n:new l:list c:compact y:copy-id q:quit"
 		}
-		if m.ctrlCPressed {
-			suffix = " · ctrl+c again to quit"
-		} else if m.streaming {
-			suffix = " · esc: stop"
+	} else {
+		switch m.activeTab {
+		case tabFiles:
+			suffix = " · ctrl+f search · ctrl+g fuzzy · ctrl+l edit · ctrl+n new · ctrl+b folder · ctrl+r rename · ctrl+d delete · ctrl+y copy · ctrl+o open · ctrl+t reload · alt+[/]: tab"
+		case tabGit:
+			suffix = " · tab: cycle panel · ctrl+f filter · ctrl+s stage · ctrl+u unstage · ctrl+\\ commit · ctrl+r refresh · alt+[/]/ctrl+shift+[/]: switch tab"
+		case tabLog:
+			suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
+		default:
+			if supportsReasoning {
+				suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry · ctrl+t: theme"
+			} else {
+				suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry"
+			}
+			if m.ctrlCPressed {
+				suffix = " · ctrl+c again to quit"
+			} else if m.streaming {
+				suffix = " · esc: stop"
+			}
 		}
 	}
 	llmState := "○ idle"
