@@ -20,6 +20,7 @@ import (
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	providerplugin "github.com/u007/ocode/internal/plugin/provider"
+	"github.com/u007/ocode/internal/redact"
 )
 
 const (
@@ -134,7 +135,7 @@ type GenericClient struct {
 	// Redaction is an optional hook for the chokepoint safety net.
 	// When set, ChatWithContext scans all message contents for known-format
 	// secrets and redacts them before sending to the provider.
-	Redaction *NetHook
+	Redaction *redact.NetHook
 }
 
 // SetOnDelta installs (or clears, with nil) the streaming-token callback on
