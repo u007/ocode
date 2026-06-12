@@ -2149,7 +2149,7 @@ func (m filesModel) treeHint() string {
 // is len(rows)) from ever disagreeing. It is the single source of truth for the
 // tree's top chrome.
 func (m filesModel) treeHeaderRows(treeW int, styles Styles) []string {
-	cw := treeW - 6 // pane content width: frame(treeW-2) minus border(2)+padding(2)
+	cw := treeW - 7 // pane content width: frame(treeW-2) minus border(2)+padding(2)+scrollbar(1)
 	if cw < 1 {
 		cw = 1
 	}

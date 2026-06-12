@@ -22,6 +22,7 @@
 - **Dedicated Theme API Handler** — New `GET /api/theme` endpoint in `internal/server/handler_theme.go` (extracted from `handler_git.go`), serving theme colors to the Web UI via a clean dedicated endpoint.
 
 ### Changed
+- **auto_allow_prefixes Re-sorted** — `auto_allow_prefixes` list in `ocodeconfig.json` re-sorted into strict alphabetical order for consistency and readability.
 - **Permission Verdict Parsing** — `verdictBoundary` now tolerates markdown-emphasis closing runs between the verdict word and its colon (e.g. `**ALLOW**:`), and `cleanVerdictReason` strips backtick/underscore characters, fixing local-model verdict rejection.
 - **RC Start Message** — `/rc` start message now includes a Tailscale URL when available.
 - **Temp Dir Paths Now Auto-Allowed** — Tool targets and bash commands writing to temp directories (`/tmp`, `os.TempDir()`) are now auto-allowed even outside the workspace, matching real-world dev workflows. Patch, write, and file tools all honour this.
