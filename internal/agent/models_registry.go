@@ -314,7 +314,7 @@ func allProviderModelsFromRegistry() []string {
 			if provider == "lmstudio" {
 				continue // handled via live API fetch below
 			}
-			if provider == "requesty" {
+			if provider == models.RequestyProvider {
 				// Save registry list as fallback; prefer live API fetch.
 				for model := range entry.Models {
 					requestyRegistryFallback = append(requestyRegistryFallback, provider+"/"+model)
@@ -350,7 +350,7 @@ func providerModelsFromRegistry(provider string) []string {
 	if provider == "lmstudio" {
 		return fetchLMStudioModels()
 	}
-	if provider == "requesty" {
+	if provider == models.RequestyProvider {
 		live := fetchRequestyLiveModels()
 		if len(live) > 0 {
 			sort.Strings(live)
@@ -478,6 +478,8 @@ func AllProviders() []string {
 	for id := range data {
 		ids = append(ids, id)
 	}
+	// requesty is always available via live API fetch.
+	ids = append(ids, models.RequestyProvider)
 	sort.Strings(ids)
 	return ids
 }

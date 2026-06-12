@@ -17,7 +17,7 @@ const AppName = "opencode"
 //
 // Resolution order:
 //  1. Windows:  %LOCALAPPDATA%\opencode
-//  2. macOS:    ~/Library/Application Support/opencode
+//  2. macOS:    ~/.local/share/opencode
 //  3. Linux/other (XDG): $XDG_DATA_HOME/opencode  (falls back to ~/.local/share/opencode)
 //
 // The directory is created if it does not exist.
@@ -35,7 +35,7 @@ func GlobalDataDir() (string, error) {
 		if err != nil {
 			return "", err
 		}
-		return ensureDir(filepath.Join(home, "Library", "Application Support", AppName))
+		return ensureDir(filepath.Join(home, ".local", "share", AppName))
 
 	default: // linux, freebsd, …
 		if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
@@ -60,8 +60,8 @@ func ProjectSessionsDir(slug string) (string, error) {
 	return ensureDir(filepath.Join(base, "project", slug, "sessions"))
 }
 
-// ProjectUsageDir returns the per-project usage directory under the global data dir.
-func ProjectUsageDir() (string, error) {
+// UsageDir returns the usage data directory under the global data dir.
+func UsageDir() (string, error) {
 	base, err := GlobalDataDir()
 	if err != nil {
 		return "", err

@@ -102,7 +102,7 @@ var (
 
 // defaultDataDir returns the platform-appropriate data directory for usage records.
 func defaultDataDir() (string, error) {
-	return paths.ProjectUsageDir()
+	return paths.UsageDir()
 }
 
 func dataDir() (string, error) {

@@ -27,7 +27,7 @@ func TestGlobalDataDir(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	switch runtime.GOOS {
 	case "darwin":
-		expected := filepath.Join(home, "Library", "Application Support", AppName)
+		expected := filepath.Join(home, ".local", "share", AppName)
 		if dir != expected {
 			t.Errorf("macOS: got %s, want %s", dir, expected)
 		}
@@ -57,8 +57,8 @@ func TestProjectSessionsDir(t *testing.T) {
 	}
 }
 
-func TestProjectUsageDir(t *testing.T) {
-	dir, err := ProjectUsageDir()
+func TestUsageDir(t *testing.T) {
+	dir, err := UsageDir()
 	if err != nil {
 		t.Fatalf("ProjectUsageDir() error: %v", err)
 	}

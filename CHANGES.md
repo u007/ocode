@@ -29,6 +29,9 @@
 - **`hasModuleFlag` Helper** — New `hasModuleFlag()` detects `-m` flags in interpreter argument lists so module invocations (e.g. `python3 -m pytest`) can be distinguished from script file paths during permission classification.
 
 ### Changed
+- **macOS Data Directory Standardization** — `GlobalDataDir()` now uses `~/.local/share/opencode` on macOS instead of `~/Library/Application Support/opencode`, matching the Linux XDG fallback and keeping runtime state under one portable home-relative path. `AGENTS.md` documents the same macOS path.
+- **Requesty Provider Registry Visibility** — Exported `models.RequestyProvider` and reused it from registry/live-fetch routing; `AllProviders()` now always includes Requesty because its model list is available via the live API.
+- **Thinking Shortcut Label** — TUI status now advertises `ctrl+d: thinking` for reasoning-capable models and removed the transient leader-key hint from the chat transcript.
 - **Version Bump 0.4.1** — Version bumped from `0.4.0` to `0.4.1`.
 - **`Ctrl+P` Opens File Search** — Keyboard shortcut now opens file search pane instead of command palette.
 - **Plugin `/plugin` Help** — Usage string and help text updated to include `create` subcommand.
