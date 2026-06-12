@@ -378,7 +378,7 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`) with pe
 
 ```
 main.go                    Entry point
-internal/acp/              Anthropic prompt caching
+internal/acp/              Agent Client Protocol server (Zed / ACP integration)
 internal/agent/            LLM client, agent registry, permissions, tool truncation
 internal/auth/             Multi-provider OAuth + keychain
 internal/commands/         Custom command loader

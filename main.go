@@ -164,7 +164,7 @@ func printUsage() {
 	fmt.Println("  run              Run a prompt non-interactively (headless)")
 	fmt.Println("  serve            Start the HTTP server with web UI")
 	fmt.Println("  web              Start server and open browser (alias for 'serve --open')")
-	fmt.Println("  acp              Run ACP (Agent Communication Protocol) server")
+	fmt.Println("  acp              Run Agent Client Protocol (ACP) server (Zed integration)")
 	fmt.Println("  mcp              Manage MCP (Model Context Protocol) servers")
 	fmt.Println("  models           List available models")
 	fmt.Println("  skills           Manage skills")
