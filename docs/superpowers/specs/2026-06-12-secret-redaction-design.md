@@ -22,7 +22,7 @@ sidebar and configurable via a `/mask` slash command (mirroring
 | Tool calls containing placeholders | Unmask at execution, gated by secret-aware permission prompt + egress warning |
 | File-content detection | Known-format detectors only (no entropy heuristics, no tier-2) |
 | Placeholder format | `[[OCSEC:<6-hex session nonce>:<index>]]` — ASCII, per-session nonce, no escaping needed |
-| Default state | **Disabled**; chokepoint net runs always-on in tripwire mode; sidebar toggle + `/secrets`; persisted to `ocodeconfig.json` |
+| Default state | **Disabled**; chokepoint net runs always-on in tripwire mode; sidebar toggle + `/mask`; persisted to `ocodeconfig.json` |
 
 ## Architecture
 
@@ -87,7 +87,7 @@ Tier 2 — security model (**local-only, hard requirement**):
 - The raw-text scan request may go **only to verified local/loopback
   endpoints** (LM Studio, Ollama, localhost). No cloud model may be selected
   as security model, and there is never a fallback to a cloud model. The
-  `/secrets` picker simply does not offer non-local models.
+  `/mask` picker simply does not offer non-local models.
 
 **File-content rule:** content ingested from file reads / tool file output
 uses **known-format detectors only** — no entropy/keyword heuristics, no
@@ -163,7 +163,7 @@ to signal "vaulted". Surfaces covered:
   the web UI has no vault access (deliberate).
 - `/export-claude`: exports placeholders as-is (vault never leaves home dir).
 
-`/secrets` display toggle: show placeholders instead of values (screen-share
+`/mask` display toggle: show placeholders instead of values (screen-share
 mode). Copy-to-clipboard copies the real value (documented note: OS clipboard
 managers persist history).
 

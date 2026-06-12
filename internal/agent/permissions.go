@@ -1426,6 +1426,49 @@ var remoteRunners = map[string]bool{
 	"bunx": true,
 }
 
+// bunBuiltinSubcommands are `bun` subcommands that are NOT script-file
+// executions. These are built-in commands (test runner, package manager,
+// scaffolding, etc.) that don't run a specific script file as entrypoint.
+// They fall through to the normal bash permission flow where the two-word
+// prefix (e.g. "bun test") may be auto-allowed via bashSubcommandAllow.
+// Only "bun run" is a script runner and is handled via the script_file path.
+var bunBuiltinSubcommands = map[string]bool{
+	"test":    true,
+	"create":  true,
+	"init":    true,
+	"install": true,
+	"add":     true,
+	"remove":  true,
+	"update":  true,
+	"upgrade": true,
+	"pm":      true,
+	"plugin":  true,
+	"tool":    true,
+	"why":     true,
+}
+
+// denoBuiltinSubcommands are `deno` subcommands that are NOT script-file
+// executions. Only "deno run" is a script runner and is handled via the
+// script_file path.
+var denoBuiltinSubcommands = map[string]bool{
+	"test":        true,
+	"compile":     true,
+	"bundle":      true,
+	"fmt":         true,
+	"lint":        true,
+	"doc":         true,
+	"check":       true,
+	"coverage":    true,
+	"install":     true,
+	"uninstall":   true,
+	"cache":       true,
+	"serve":       true,
+	"task":        true,
+	"completions": true,
+	"info":        true,
+	"jupyter":     true,
+}
+
 var heredocOpRe = regexp.MustCompile(`<<-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)["']?`)
 
 type heredocDoc struct {
@@ -1611,6 +1654,18 @@ func classifyInterpreterExecution(command string) (*InterpreterExec, bool) {
 	if (bin == "bun" || bin == "deno") && len(rest) > 0 && rest[0] == "run" {
 		rest = rest[1:]
 	}
+	// Bun/Deno built-in subcommands (other than run) are not script file
+	// executions. They are handled by the normal bash permission flow
+	// where two-word prefixes (e.g. "bun test") can be auto-allowed via
+	// bashSubcommandAllow, and the script is never misidentified as a
+	// non-existent entrypoint named after the subcommand.
+	if bin == "bun" && len(args) > 0 && bunBuiltinSubcommands[args[0]] {
+		return nil, false
+	}
+	if bin == "deno" && len(args) > 0 && denoBuiltinSubcommands[args[0]] {
+		return nil, false
+	}
+
 	// `-m module` runs a Python/Ruby/etc. module by name, not a script file on disk.
 	// Skip script_file detection so we don't misidentify the module name as a path.
 	if !hasModuleFlag(rest) {

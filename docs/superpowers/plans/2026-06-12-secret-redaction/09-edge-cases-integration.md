@@ -17,7 +17,7 @@ Prereq: Parts 1–8.
 ### Task 9.2: Mid-session enable scrub
 
 **Files:**
-- Modify: enable path (sidebar toggle + `/secrets on`) — when the live session already has messages, offer one-time "scrub existing history?" action; scrub re-runs `RedactChat` (chat-mode) over stored message contents and rewrites the session file
+- Modify: enable path (sidebar toggle + `/mask on`) — when the live session already has messages, offer one-time "scrub existing history?" action; scrub re-runs `RedactChat` (chat-mode) over stored message contents and rewrites the session file
 - Test: `internal/tui/model_test.go`
 
 - [ ] Write failing test: session with plaintext secret in history → enable → accept scrub → in-memory messages and re-saved session file contain placeholder; decline → history untouched (tripwire net still covers future sends).
@@ -44,6 +44,6 @@ Prereq: Parts 1–8.
 - Modify: `README.md` (feature section), ocode-usage skill doc if present in repo, `docs/` feature docs as discovered
 - Check: `TODO.md` for any deferred items
 
-- [ ] Document: enabling (sidebar / `/secrets on`), local-only security model requirement, vault location, accepted risks (terminal scrollback, clipboard, 0600 plaintext vault), v2 items (keychain, egress hard-block).
+- [ ] Document: enabling (sidebar / `/mask on`), local-only security model requirement, vault location, accepted risks (terminal scrollback, clipboard, 0600 plaintext vault), v2 items (keychain, egress hard-block).
 - [ ] `go test ./... -race` + `go vet ./...` clean. Manual smoke per INDEX definition-of-done.
 - [ ] Commit `docs: secret redaction feature documentation`.

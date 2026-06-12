@@ -2,6 +2,7 @@ package agent
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,36 @@ import (
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/skill"
 )
+
+// bundledModelConfigFS, when set via SetBundledModelConfigFS, is an embedded
+// filesystem containing model-specific OCODE.md files (e.g.
+// deepseek-v4-flash.OCODE.md). LoadModelContext falls back to this when no
+// disk-based file matches the active model, ensuring every build ships with
+// its own model instructions baked in.
+var bundledModelConfigFS fs.FS
+
+// SetBundledModelConfigFS registers an embedded filesystem of model-specific
+// OCODE.md files. Called from main() during startup; the FS is used as a
+// fallback by LoadModelContext when no matching file is found on disk.
+func SetBundledModelConfigFS(fsys fs.FS) {
+	bundledModelConfigFS = fsys
+}
+
+// loadBundledModelContext reads the embedded OCODE.md file for the given
+// model name from bundledModelConfigFS. Returns the file content formatted
+// with the standard framing header, or empty string if no embedded file
+// matches.
+func loadBundledModelContext(modelName string) string {
+	if bundledModelConfigFS == nil {
+		return ""
+	}
+	name := modelName + ".OCODE.md"
+	content, err := fs.ReadFile(bundledModelConfigFS, name)
+	if err != nil {
+		return ""
+	}
+	return "\n--- " + name + " ---\n" + string(content) + "\n"
+}
 
 // gitShowHead reads a file from the git HEAD revision. Returns empty string if
 // the file is not tracked by git or if the repo is unavailable.
@@ -209,7 +240,9 @@ func LoadModelContext(modelName string) string {
 	}
 
 	if len(matched) == 0 {
-		return ""
+		// No disk-based file found — fall back to the embedded model config
+		// (e.g. deepseek-v4-flash.OCODE.md bundled via //go:embed in main.go).
+		return loadBundledModelContext(modelName)
 	}
 
 	var context string

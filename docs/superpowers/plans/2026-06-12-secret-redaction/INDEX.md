@@ -23,7 +23,7 @@
 | 5 | `05-chokepoint-net.md` — safety net + tripwire in ChatWithContext | 1, 3 |
 | 6 | `06-tool-unmask.md` — HandleToolCall unmask + secret-aware permission prompt | 1, 4 |
 | 7 | `07-display.md` — re-substitution across TUI render surfaces | 1, 4 |
-| 8 | `08-secrets-command.md` — /secrets modal (model picker, secret list, toggles) | 3, 7 |
+| 8 | `08-secrets-command.md` — /mask modal (model picker, secret list, toggles) | 3, 7 |
 | 9 | `09-edge-cases-integration.md` — compaction validation, mid-session scrub, end-to-end tests | all |
 
 Parts 1–3 can run independently after Part 1. Parts 4+ are sequential as listed.

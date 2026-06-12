@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 // gitInit sets up a throwaway repo with an initial commit of the named files
@@ -307,6 +308,51 @@ func TestLoadModelContext_ExactBeatsWildcardInSameDir(t *testing.T) {
 	got2 := LoadModelContext("minimax-m2.7")
 	if !strings.Contains(got2, "WILDCARD_BODY") {
 		t.Fatalf("sibling model should fall back to wildcard, got %q", got2)
+	}
+}
+
+func TestLoadModelContext_BundledFallbackReturnsContent(t *testing.T) {
+	isolateHome(t)
+	gitInit(t, map[string]string{})
+	// Register an in-memory embedded FS matching deepseek-v4-flash.
+	fsys := fstest.MapFS{
+		"deepseek-v4-flash.OCODE.md": &fstest.MapFile{
+			Data: []byte("EMBEDDED_BODY\n"),
+		},
+	}
+	SetBundledModelConfigFS(fsys)
+	t.Cleanup(func() { SetBundledModelConfigFS(nil) })
+
+	got := LoadModelContext("deepseek-v4-flash")
+	if !strings.Contains(got, "EMBEDDED_BODY") {
+		t.Fatalf("expected embedded body in result, got %q", got)
+	}
+	if !strings.Contains(got, "deepseek-v4-flash.OCODE.md") {
+		t.Fatalf("expected filename in result framing, got %q", got)
+	}
+}
+
+func TestLoadModelContext_BundledFallbackDiskWins(t *testing.T) {
+	isolateHome(t)
+	// Disk file exists for the model.
+	gitInit(t, map[string]string{
+		"deepseek-v4-flash.OCODE.md": "DISK_BODY\n",
+	})
+	// Also register an embedded file — disk should win.
+	fsys := fstest.MapFS{
+		"deepseek-v4-flash.OCODE.md": &fstest.MapFile{
+			Data: []byte("EMBEDDED_BODY\n"),
+		},
+	}
+	SetBundledModelConfigFS(fsys)
+	t.Cleanup(func() { SetBundledModelConfigFS(nil) })
+
+	got := LoadModelContext("deepseek-v4-flash")
+	if !strings.Contains(got, "DISK_BODY") {
+		t.Fatalf("expected DISK_BODY (disk wins), got %q", got)
+	}
+	if strings.Contains(got, "EMBEDDED_BODY") {
+		t.Fatalf("embedded body should not appear when disk file exists, got %q", got)
 	}
 }
 

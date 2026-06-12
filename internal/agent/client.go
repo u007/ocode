@@ -130,6 +130,11 @@ type GenericClient struct {
 	// after; subagents share the same *GenericClient and a stale callback would
 	// leak across agent boundaries.
 	RetryNotifier func(attempt, maxRetries int, delay time.Duration, err error)
+
+	// Redaction is an optional hook for the chokepoint safety net.
+	// When set, ChatWithContext scans all message contents for known-format
+	// secrets and redacts them before sending to the provider.
+	Redaction *NetHook
 }
 
 // SetOnDelta installs (or clears, with nil) the streaming-token callback on
@@ -352,6 +357,11 @@ func (c *GenericClient) Chat(messages []Message, tools []map[string]interface{})
 // HTTP requests are interrupted when the caller's context is cancelled (e.g.
 // when the user presses Escape).
 func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
+	// Chokepoint safety net: scan all messages for known-format secrets
+	if c.Redaction != nil && c.Redaction.Enabled && c.Redaction.Registry != nil {
+		messages = c.applyRedactionSafetyNet(messages)
+	}
+
 	var lastErr error
 	attempts := 0
 	for attempt := 0; ; attempt++ {
@@ -2771,4 +2781,36 @@ func mustMarshal(v interface{}) json.RawMessage {
 		panic(err)
 	}
 	return data
+}
+
+// applyRedactionSafetyNet scans all message contents for known-format secrets
+// and returns a new slice with redacted content. This is the chokepoint that
+// catches secrets in system prompts, context files, and LSP diagnostic injections.
+func (c *GenericClient) applyRedactionSafetyNet(messages []Message) []Message {
+	if c.Redaction == nil || !c.Redaction.Enabled || c.Redaction.Registry == nil {
+		return messages
+	}
+
+	result := make([]Message, len(messages))
+	for i, msg := range messages {
+		result[i] = msg
+		if msg.Content == "" {
+			continue
+		}
+
+		// Scan for known-format secrets (file mode - no keyword/entropy)
+		spans := redact.Detect(msg.Content, nil, redact.DetectOpts{FileContent: true})
+		if len(spans) == 0 {
+			continue
+		}
+
+		// Register and substitute
+		for _, span := range spans {
+			value := msg.Content[span.Start:span.End]
+			c.Redaction.Registry.GetOrAssign(value, span.Kind, "net")
+		}
+		result[i].Content = c.Redaction.Registry.Substitute(msg.Content)
+	}
+
+	return result
 }
