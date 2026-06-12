@@ -1,3 +1,9 @@
+// Package acp implements the Agent Client Protocol (ACP, agentclientprotocol.com)
+// so that `ocode acp` appears in Zed's agent panel alongside Claude Code / Codex.
+//
+// Transport: JSON-RPC 2.0 newline-delimited over stdio.
+// stdin = client → agent; stdout = agent → client (protocol frames only).
+// All diagnostics go to stderr via emitDebug / log, never stdout.
 package acp
 
 import (
@@ -5,39 +11,44 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
-	"github.com/u007/ocode/internal/session"
-	"github.com/u007/ocode/internal/tool"
+	ver "github.com/u007/ocode/internal/version"
 )
 
-type InputMessage struct {
-	Type      string `json:"type"`
-	Content   string `json:"content"`
-	SessionID string `json:"sessionId,omitempty"`
+// JSON-RPC error codes.
+const (
+	errParse         = -32700
+	errMethodNotFound = -32601
+	errInvalidParams  = -32602
+	errInternal       = -32603
+)
+
+// server holds all mutable state for the lifetime of the ACP process.
+type server struct {
+	cfg      *config.Config
+	sessions map[string]*sessionBridge
+	sessMu   sync.Mutex
+
+	// writeMu serialises all stdout writes so goroutines don't interleave frames.
+	writeMu sync.Mutex
+	writer  *bufio.Writer
+
+	// pendingMu guards the map of in-flight client-bound requests.
+	pendingMu     sync.Mutex
+	pending       map[int]chan json.RawMessage
+	nextRequestID atomic.Int64
 }
 
-type OutputMessage struct {
-	Type      string `json:"type"`
-	Content   string `json:"content,omitempty"`
-	SessionID string `json:"sessionId,omitempty"`
-	Message   string `json:"message,omitempty"`
-}
-
-type sessionState struct {
-	agent    *agent.Agent
-	messages []agent.Message
-	model    string
-	id       string
-}
-
+// Run is the entry point for `ocode acp`. It reads JSON-RPC frames from stdin
+// and writes responses/notifications to stdout until stdin is closed.
 func Run(args []string) error {
-	// Check for help flag
 	for _, arg := range args {
 		if arg == "-h" || arg == "--help" {
-			printACPUsage()
+			printUsage()
 			return nil
 		}
 	}
@@ -48,148 +59,293 @@ func Run(args []string) error {
 	}
 	agent.ApplyAgentConfig(cfg)
 
-	model := cfg.Model
-	if model == "" {
-		model = os.Getenv("OPENCODE_MODEL")
-	}
-	if model == "" {
-		return fmt.Errorf("no model configured")
+	s := &server{
+		cfg:      cfg,
+		sessions: make(map[string]*sessionBridge),
+		writer:   bufio.NewWriter(os.Stdout),
+		pending:  make(map[int]chan json.RawMessage),
 	}
 
-	sessions := make(map[string]*sessionState)
 	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 0, 4*1024*1024), 4*1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			continue
 		}
-
-		var msg InputMessage
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			writeOutput(OutputMessage{Type: "error", Message: fmt.Sprintf("invalid input: %v", err)})
-			continue
-		}
-
-		if msg.Type != "message" {
-			writeOutput(OutputMessage{Type: "error", Message: fmt.Sprintf("unknown message type: %s", msg.Type)})
-			continue
-		}
-
-		if msg.Content == "" {
-			writeOutput(OutputMessage{Type: "error", Message: "content is required"})
-			continue
-		}
-
-		ss, err := getOrCreateSession(sessions, cfg, msg.SessionID, model)
-		if err != nil {
-			writeOutput(OutputMessage{Type: "error", Message: err.Error()})
-			continue
-		}
-
-		ss.messages = append(ss.messages, agent.Message{Role: "user", Content: msg.Content})
-
-		resp, err := ss.agent.Step(ss.messages)
-		if err != nil {
-			writeOutput(OutputMessage{Type: "error", Message: fmt.Sprintf("agent error: %v", err)})
-			continue
-		}
-
-		ss.messages = append(ss.messages, resp...)
-
-		var content strings.Builder
-		for _, m := range resp {
-			if m.Role == "assistant" && m.Content != "" {
-				content.WriteString(m.Content)
-			}
-		}
-
-		_ = session.Save(ss.id, "", ss.messages, nil)
-
-		writeOutput(OutputMessage{
-			Type:      "response",
-			Content:   content.String(),
-			SessionID: ss.id,
-		})
-
-		writeOutput(OutputMessage{
-			Type:      "done",
-			SessionID: ss.id,
-		})
+		s.dispatch(line)
 	}
 
 	return scanner.Err()
 }
 
-func getOrCreateSession(sessions map[string]*sessionState, cfg *config.Config, sessionID, model string) (*sessionState, error) {
-	if sessionID != "" {
-		if ss, ok := sessions[sessionID]; ok {
-			return ss, nil
-		}
-
-		s, err := session.Load(sessionID)
-		if err == nil {
-			client := agent.NewClient(cfg, model)
-			if client == nil {
-				return nil, fmt.Errorf("failed to create LLM client")
-			}
-
-			tools, lspMgr := tool.LoadBuiltins(cfg)
-			ag := agent.NewAgent(client, tools, cfg, lspMgr)
-			ag.LoadExternalTools(cfg)
-
-			ss := &sessionState{
-				agent:    ag,
-				messages: s.Messages,
-				model:    model,
-				id:       sessionID,
-			}
-			sessions[sessionID] = ss
-			return ss, nil
-		}
-	}
-
-	id := session.NewSessionID()
-	client := agent.NewClient(cfg, model)
-	if client == nil {
-		return nil, fmt.Errorf("failed to create LLM client")
-	}
-
-	tools, lspMgr := tool.LoadBuiltins(cfg)
-	ag := agent.NewAgent(client, tools, cfg, lspMgr)
-	ag.LoadExternalTools(cfg)
-
-	ss := &sessionState{
-		agent:    ag,
-		messages: nil,
-		model:    model,
-		id:       id,
-	}
-	sessions[id] = ss
-	return ss, nil
-}
-
-func writeOutput(msg OutputMessage) {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to marshal output: %v\n", err)
+// dispatch parses one newline-delimited JSON frame and routes it.
+func (s *server) dispatch(line string) {
+	var frame inFrame
+	if err := json.Unmarshal([]byte(line), &frame); err != nil {
+		s.sendError(json.RawMessage(`null`), errParse, "parse error")
 		return
 	}
-	fmt.Println(string(data))
+
+	// Responses to our client-bound requests arrive with no Method and a known ID.
+	if frame.Method == "" {
+		s.routeResponse(frame)
+		return
+	}
+
+	// A notification has no id (or id == null); no response should be sent.
+	isNotification := len(frame.ID) == 0 || string(frame.ID) == "null"
+
+	switch frame.Method {
+	case "initialize":
+		s.handleInitialize(frame)
+
+	case "authenticate":
+		if !isNotification {
+			s.sendError(frame.ID, errMethodNotFound, "authenticate not supported")
+		}
+
+	case "session/new":
+		s.handleSessionNew(frame)
+
+	case "session/load":
+		if !isNotification {
+			s.sendError(frame.ID, errMethodNotFound, "session/load not supported in v1 (loadSession: false)")
+		}
+
+	case "session/prompt":
+		s.handleSessionPrompt(frame)
+
+	case "session/cancel":
+		// Notification — no response.
+		s.handleSessionCancel(frame)
+
+	case "session/set_mode":
+		if !isNotification {
+			s.sendError(frame.ID, errMethodNotFound, "session/set_mode not supported in v1")
+		}
+
+	default:
+		// Unknown notifications are silently ignored per JSON-RPC spec.
+		if !isNotification {
+			s.sendError(frame.ID, errMethodNotFound, fmt.Sprintf("method not found: %s", frame.Method))
+		}
+	}
 }
 
-func printACPUsage() {
+func (s *server) handleInitialize(frame inFrame) {
+	var params initializeParams
+	if len(frame.Params) > 0 {
+		_ = json.Unmarshal(frame.Params, &params)
+	}
+
+	if params.ProtocolVersion < 1 {
+		s.sendError(frame.ID, errInvalidParams, fmt.Sprintf("unsupported protocol version %d (minimum 1)", params.ProtocolVersion))
+		return
+	}
+	// Negotiate: min(client, 1) — clamp to our maximum supported version.
+	protoVer := 1
+
+	s.sendResult(frame.ID, initializeResult{
+		ProtocolVersion: protoVer,
+		AgentInfo: agentInfo{
+			Name:    "ocode",
+			Version: ver.Version,
+		},
+		AgentCapabilities: agentCapabilities{
+			LoadSession: false,
+			PromptCapabilities: promptCapabilities{
+				EmbeddedContext: true,
+				Image:           false,
+				Audio:           false,
+			},
+		},
+		AuthMethods: []interface{}{},
+	})
+}
+
+func (s *server) handleSessionNew(frame inFrame) {
+	var params sessionNewParams
+	if len(frame.Params) > 0 {
+		if err := json.Unmarshal(frame.Params, &params); err != nil {
+			s.sendError(frame.ID, errInvalidParams, "invalid params: "+err.Error())
+			return
+		}
+	}
+
+	bridge, err := newSessionBridge(s.cfg, params.CWD)
+	if err != nil {
+		s.sendError(frame.ID, errInternal, err.Error())
+		return
+	}
+
+	s.sessMu.Lock()
+	s.sessions[bridge.id] = bridge
+	s.sessMu.Unlock()
+
+	s.sendResult(frame.ID, sessionNewResult{SessionID: bridge.id})
+}
+
+func (s *server) handleSessionPrompt(frame inFrame) {
+	if len(frame.Params) == 0 {
+		s.sendError(frame.ID, errInvalidParams, "params required")
+		return
+	}
+	var params sessionPromptParams
+	if err := json.Unmarshal(frame.Params, &params); err != nil {
+		s.sendError(frame.ID, errInvalidParams, "invalid params: "+err.Error())
+		return
+	}
+
+	s.sessMu.Lock()
+	bridge, ok := s.sessions[params.SessionID]
+	s.sessMu.Unlock()
+
+	if !ok {
+		s.sendError(frame.ID, errInvalidParams, fmt.Sprintf("unknown session: %s", params.SessionID))
+		return
+	}
+
+	if !bridge.tryStartPrompt() {
+		s.sendError(frame.ID, errInvalidParams, "concurrent prompt for the same session is not allowed")
+		return
+	}
+
+	// Run the turn on a goroutine so the read loop keeps dispatching
+	// (needed for session/cancel and permission-response routing).
+	go func() {
+		defer bridge.endPrompt()
+
+		sessID := params.SessionID
+
+		sendUpdate := func(su sessionUpdate) {
+			s.sendNotify("session/update", sessionUpdateParams{
+				SessionID:     sessID,
+				SessionUpdate: su,
+			})
+		}
+
+		sendPermRequest := func(toolName, rule string) string {
+			id := int(s.nextRequestID.Add(1))
+			ch := make(chan json.RawMessage, 1)
+
+			s.pendingMu.Lock()
+			s.pending[id] = ch
+			s.pendingMu.Unlock()
+
+			s.sendClientRequest(id, "session/request_permission", permRequestParams{
+				SessionID: sessID,
+				ToolName:  toolName,
+				Rule:      rule,
+				Options:   []string{"allow-once", "allow-always", "reject-once"},
+			})
+
+			// Select on both the response channel and the agent's Done channel
+			// so a session/cancel unblocks the permission waiter instead of leaking it.
+			var raw json.RawMessage
+			select {
+			case raw = <-ch:
+			case <-bridge.ag.Done():
+				s.pendingMu.Lock()
+				delete(s.pending, id)
+				s.pendingMu.Unlock()
+				return "cancelled"
+			}
+
+			s.pendingMu.Lock()
+			delete(s.pending, id)
+			s.pendingMu.Unlock()
+
+			var result permResponseResult
+			if err := json.Unmarshal(raw, &result); err != nil {
+				return "cancelled"
+			}
+			return result.Selected
+		}
+
+		stopReason, err := bridge.prompt(params.Content, sendUpdate, sendPermRequest)
+		if err != nil {
+			s.sendError(frame.ID, errInternal, "agent error: "+err.Error())
+			return
+		}
+		s.sendResult(frame.ID, sessionPromptResult{StopReason: stopReason})
+	}()
+}
+
+func (s *server) handleSessionCancel(frame inFrame) {
+	var params sessionCancelParams
+	if len(frame.Params) > 0 {
+		_ = json.Unmarshal(frame.Params, &params)
+	}
+	s.sessMu.Lock()
+	bridge, ok := s.sessions[params.SessionID]
+	s.sessMu.Unlock()
+	if ok {
+		bridge.cancel()
+	}
+	// session/cancel is a notification — no response.
+}
+
+// routeResponse delivers a client response to the pending client-bound request.
+func (s *server) routeResponse(frame inFrame) {
+	var id int
+	if err := json.Unmarshal(frame.ID, &id); err != nil {
+		return // not one of our integer-ID requests; ignore
+	}
+	s.pendingMu.Lock()
+	ch, ok := s.pending[id]
+	s.pendingMu.Unlock()
+	if !ok {
+		return
+	}
+	if frame.Error != nil {
+		ch <- json.RawMessage(`null`)
+	} else {
+		ch <- frame.Result
+	}
+}
+
+// -- write helpers ----------------------------------------------------------
+
+func (s *server) sendResult(id json.RawMessage, result interface{}) {
+	s.writeJSON(outResponse{JSONRPC: "2.0", ID: id, Result: result})
+}
+
+func (s *server) sendError(id json.RawMessage, code int, message string) {
+	s.writeJSON(outResponse{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: message}})
+}
+
+func (s *server) sendNotify(method string, params interface{}) {
+	s.writeJSON(outNotify{JSONRPC: "2.0", Method: method, Params: params})
+}
+
+func (s *server) sendClientRequest(id int, method string, params interface{}) {
+	s.writeJSON(outRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params})
+}
+
+func (s *server) writeJSON(v interface{}) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "acp: marshal error: %v\n", err)
+		return
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	s.writer.Write(data)  //nolint:errcheck
+	s.writer.WriteByte('\n') //nolint:errcheck
+	s.writer.Flush()      //nolint:errcheck
+}
+
+func printUsage() {
 	fmt.Println("Usage: ocode acp [options]")
 	fmt.Println()
-	fmt.Println("Run ACP (Agent Communication Protocol) server over stdio.")
+	fmt.Println("Run an Agent Client Protocol (ACP) server over stdio.")
+	fmt.Println("Zed and other ACP-compatible clients can connect via the agent panel.")
+	fmt.Println()
+	fmt.Println("Transport: JSON-RPC 2.0, newline-delimited, over stdin/stdout.")
+	fmt.Println("Protocol version: 1 (agentclientprotocol.com)")
 	fmt.Println()
 	fmt.Println("Options:")
 	fmt.Println("  -h, --help    Show this help message")
-	fmt.Println()
-	fmt.Println("The ACP server communicates via JSON messages over stdin/stdout.")
-	fmt.Println("It expects messages of type 'message' with 'content' and optional 'sessionId' fields.")
-	fmt.Println()
-	fmt.Println("Example message:")
-	fmt.Println("  {\"type\": \"message\", \"content\": \"Hello\", \"sessionId\": \"abc123\"}")
 }
