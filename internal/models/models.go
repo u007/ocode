@@ -17,21 +17,21 @@ import (
 // requestyBaseURL is the Requesty API base URL for listing models.
 const requestyBaseURL = "https://router.requesty.ai/v1"
 
-// requestyProvider is the provider identifier used to trigger Requesty API routing.
-const requestyProvider = "requesty"
+// RequestyProvider is the provider identifier used to trigger Requesty API routing.
+const RequestyProvider = "requesty"
 
 // requestyModel is a model entry in the Requesty models list API response.
 // NOTE: Arch, Format, and Coding are not available from the Requesty API;
 // those fields in ModelEntry default to zero values for Requesty models.
 type requestyModel struct {
-	ID            string  `json:"id"`
-	Object        string  `json:"object"`
-	Created       int64   `json:"created"`
-	OwnedBy       string  `json:"owned_by"`
-	InputPrice    float64 `json:"input_price,omitempty"`
-	OutputPrice   float64 `json:"output_price,omitempty"`
-	ContextWindow int     `json:"context_window,omitempty"`
-	SupportsVision bool   `json:"supports_vision,omitempty"`
+	ID             string  `json:"id"`
+	Object         string  `json:"object"`
+	Created        int64   `json:"created"`
+	OwnedBy        string  `json:"owned_by"`
+	InputPrice     float64 `json:"input_price,omitempty"`
+	OutputPrice    float64 `json:"output_price,omitempty"`
+	ContextWindow  int     `json:"context_window,omitempty"`
+	SupportsVision bool    `json:"supports_vision,omitempty"`
 }
 
 // requestyModelName derives a friendly display name from a Requesty model ID.
@@ -193,7 +193,7 @@ func FetchRequestyModels(apiKey string) ([]ModelEntry, error) {
 // REQUESTY_API_KEY env var. Otherwise it fetches from OpenRouter.
 // The caller is responsible for applying filterByProvider when needed.
 func fetchModels(provider string) ([]ModelEntry, error) {
-	if provider == requestyProvider {
+	if provider == RequestyProvider {
 		apiKey := os.Getenv("REQUESTY_API_KEY")
 		return FetchRequestyModels(apiKey)
 	}
@@ -206,7 +206,7 @@ func fetchModels(provider string) ([]ModelEntry, error) {
 // filtering results. For other providers, it filters models whose ID
 // contains the provider string (case-insensitive).
 func filterByProvider(models []ModelEntry, provider string) []ModelEntry {
-	if provider == requestyProvider {
+	if provider == RequestyProvider {
 		return models
 	}
 	return filterModels(models, provider)

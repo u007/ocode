@@ -3802,8 +3802,6 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	case "ctrl+x":
 		m.leaderActive = true
 		m.leaderSeq++
-		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("leader: s:sidebar u:undo r:redo n:new l:list c:compact t:thinking y:copy-id q:quit"), transient: true})
-		m.rerenderTranscriptAndMaybeScroll()
 		timeout := 2000
 		if m.config != nil && m.config.Ocode.TUI.LeaderTimeout != 0 {
 			timeout = m.config.Ocode.TUI.LeaderTimeout
@@ -11432,7 +11430,7 @@ func (m *model) renderStatus() string {
 			suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
 		default:
 			if supportsReasoning {
-				suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry · ctrl+t: theme"
+				suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+d: thinking · ctrl+y: retry · ctrl+t: theme"
 			} else {
 				suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry"
 			}

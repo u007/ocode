@@ -70,7 +70,7 @@ All persistent state lives under a single cross-platform global directory resolv
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/Library/Application Support/opencode` |
+| macOS | `~/.local/share/opencode` |
 | Linux | `$XDG_DATA_HOME/opencode` (or `~/.local/share/opencode`) |
 | Windows | `%LOCALAPPDATA%\opencode` |
 
