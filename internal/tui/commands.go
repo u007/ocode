@@ -91,6 +91,7 @@ func init() {
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
+		{name: "/mask", usage: "/mask [on|off|status]", help: "Toggle secret redaction or show status", handler: runMaskCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -944,4 +945,46 @@ func runRemoteControlCmd(m *model, args []string) tea.Cmd {
 
 func runIDECmd(m *model, args []string) tea.Cmd {
 	return m.handleIDECmd(args)
+}
+
+func runMaskCmd(m *model, args []string) tea.Cmd {
+	if len(args) == 0 {
+		// Toggle
+		err := m.toggleRedaction()
+		if err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error toggling redaction: %v", err)})
+			return nil
+		}
+		state := "enabled"
+		if !m.redactionEnabled {
+			state = "disabled"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Secret redaction: %s", state)})
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "yes", "enable":
+		if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) { rc.Enabled = true }); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return nil
+		}
+		m.redactionEnabled = true
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Secret redaction: enabled"})
+	case "off", "false", "no", "disable":
+		if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) { rc.Enabled = false }); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return nil
+		}
+		m.redactionEnabled = false
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Secret redaction: disabled"})
+	case "status":
+		state := "disabled"
+		if m.redactionEnabled {
+			state = "enabled"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Secret redaction: %s", state)})
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status]"})
+	}
+	return nil
 }

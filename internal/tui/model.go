@@ -819,6 +819,10 @@ type model struct {
 	ideSelection     *ide.Selection
 	ideOpenEditors   []ide.Editor
 	ideSelectionSent bool
+
+	// Secret redaction state (see internal/redact).
+	redactionEnabled bool
+	redactionModel   string // local model for tier-2 scanning
 }
 
 type modelCleanupState struct {
@@ -5303,7 +5307,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
-		cmd == "/advisor"
+		cmd == "/advisor" || cmd == "/mask"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -7351,16 +7355,19 @@ func (m *model) handleContextCmd(args []string) {
 	}
 
 	// ── Model-Specific Context ──────────────────────
-	modelName := m.agent.Client().GetModel()
-	if mc := agent.LoadModelContext(modelName); mc != "" {
+	var mcModel string
+	if m.agent.Client() != nil {
+		mcModel = m.agent.Client().GetModel()
+	}
+	if mc := agent.LoadModelContext(mcModel); mc != "" {
 		mcTok := estimateTok(mc)
 		baseTotal += mcTok
 		source := "built-in"
-		diskPath := modelName + ".OCODE.md"
+		diskPath := mcModel + ".OCODE.md"
 		if _, err := os.Stat(diskPath); err == nil {
 			source = "disk"
 		}
-		fmt.Fprintf(&b, "  Model ctx  %-20s ~%s tok (%s)\n", modelName, formatTok(mcTok), source)
+		fmt.Fprintf(&b, "  Model ctx  %-20s ~%s tok (%s)\n", mcModel, formatTok(mcTok), source)
 	}
 
 	plugs := plugins.LoadPlugins(nil)
