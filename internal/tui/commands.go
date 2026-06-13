@@ -94,7 +94,7 @@ func init() {
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
-		{name: "/mask", usage: "/mask [on|off|status|model <name>|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
+		{name: "/mask", usage: "/mask [on|off|status|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -973,7 +973,7 @@ func maskStatusText(m *model, includeHint bool) string {
 	b.WriteString(fmt.Sprintf("Secret redaction: %s\n", state))
 	b.WriteString(fmt.Sprintf("Tier-2 scanning model: %s", tier2Model))
 	if includeHint {
-		b.WriteString("\n\nTry: /mask [on|off|status|model <name>|list]")
+		b.WriteString("\n\nTry: /mask [on|off|status|model [name]|list]")
 	}
 	return b.String()
 }
@@ -1011,12 +1011,8 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			m.redactionModel = args[1]
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", args[1])})
 		} else {
-			// Show current model
-			model := m.redactionModel
-			if model == "" {
-				model = "(not configured - tier-2 scanning disabled)"
-			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", model)})
+			// Open the model picker to select the tier-2 scanning model
+			m.openRedactionModelPicker()
 		}
 	case "list":
 		// List registered secrets
@@ -1041,7 +1037,7 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			}
 		}
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|model <name>|list]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|model [name]|list]"})
 	}
 	return nil
 }

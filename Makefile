@@ -127,3 +127,56 @@ production: web-build
 	go build -o $(APP) .
 	@echo "🚀 Starting production server on http://localhost:4096"
 	@./$(APP) serve --port 4096
+
+# ── Skill audit ─────────────────────────────────────────────────────────────
+# Report skills that haven't been reviewed recently.
+# Usage: make skill-audit
+
+.PHONY: skill-audit
+skill-audit:
+	@echo "=== Skills last edited >14 days ago ==="
+	@found=0; \
+	for f in skills/*/SKILL.md; do \
+	  d=$$(git log -1 --format=%cs -- "$$f" 2>/dev/null); \
+	  if [ -z "$$d" ]; then d="never"; fi; \
+	  if [ "$$d" = "never" ]; then \
+	    echo "  ⚠️  $$f (never committed)"; \
+	    found=1; \
+	  else \
+	    now=$$(date +%s); \
+	    ts=$$(date -j -f "%Y-%m-%d" "$$d" +%s 2>/dev/null || date -d "$$d" +%s 2>/dev/null); \
+	    if [ -n "$$ts" ]; then \
+	      age=$$(( (now - ts) / 86400 )); \
+	      if [ $$age -gt 14 ]; then \
+	        echo "  ⚠️  $$f ($$age days old)"; \
+	        found=1; \
+	      fi; \
+	    fi; \
+	  fi; \
+	done; \
+	if [ $$found -eq 0 ]; then echo "  ✅ All skills are current."; fi
+	@echo ""
+	@echo "=== Changes since skill last edited ==="
+	@for f in skills/*/SKILL.md; do \
+	  d=$$(git log -1 --format=%cs -- "$$f" 2>/dev/null); \
+	  if [ -n "$$d" ]; then \
+	    skill=$$(basename $$(dirname "$$f")); \
+	    case "$$skill" in \
+	      ocode-agent-architecture) pkgs="internal/agent/";; \
+	      ocode-tools) pkgs="internal/tool/ internal/agent/permissions.go";; \
+	      ocode-tui) pkgs="internal/tui/";; \
+	      ocode-permissions) pkgs="internal/agent/permissions.go internal/agent/agent_permissions.go internal/config/ocodeconfig.go";; \
+	      custom-model-prompt) pkgs="internal/agent/context.go internal/agent/prompt.go";; \
+	      ocode-usage) pkgs="internal/tui/ internal/config/ internal/agent/";; \
+	      team-onboarding) pkgs="internal/ internal/tui/ internal/agent/ internal/tool/";; \
+	      *) pkgs="";; \
+	    esac; \
+	    if [ -n "$$pkgs" ]; then \
+	      changes=$$(git log --oneline --since="$$dT00:00:00" -- $$pkgs 2>/dev/null | wc -l); \
+	      changes=$$(echo $$changes | tr -d ' '); \
+	      if [ "$$changes" -gt 0 ] && [ "$$changes" != "0" ]; then \
+	        echo "  📝 $$skill: $$changes change(s) in $$pkgs since $$d"; \
+	      fi; \
+	    fi; \
+	  fi; \
+	done
