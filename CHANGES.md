@@ -27,6 +27,8 @@
 - **JSON Theme Loading** — New `opencodeThemeFile` parser in `internal/theme` loads theme definitions from opencode-format JSON files on disk, enabling custom themes without recompilation.
 - **Dedicated Theme API Handler** — New `GET /api/theme` endpoint in `internal/server/handler_theme.go` (extracted from `handler_git.go`), serving theme colors to the Web UI via a clean dedicated endpoint.
 - **`hasModuleFlag` Helper** — New `hasModuleFlag()` detects `-m` flags in interpreter argument lists so module invocations (e.g. `python3 -m pytest`) can be distinguished from script file paths during permission classification.
+- **`/learn` Command** — New `/learn [focus]` slash command lists project-root skills and generates a structured prompt for guided skill creation, update, and gap analysis. Backed by `internal/skill/learn.go` (`LoadProjectLearnInventory`, `BuildLearnContext`) and `internal/tui/learn.go` (`buildLearnPrompt`, `handleLearnCmd`).
+- **`ProjectLocalSkillDirs` Helper** — Exported `ProjectLocalSkillDirs(root)` in `internal/skill/loader.go` returns the standard project-root skill directories (`.opencode/skills`, `.claude/skill`, `skills`); `skillSearchPaths()` now delegates to it, and `LoadProjectLearnInventory` uses it for inventory scanning.
 
 ### Changed
 - **macOS Data Directory Standardization** — `GlobalDataDir()` now uses `~/.local/share/opencode` on macOS instead of `~/Library/Application Support/opencode`, matching the Linux XDG fallback and keeping runtime state under one portable home-relative path. `AGENTS.md` documents the same macOS path.
@@ -42,6 +44,7 @@
 - **Temp Dir Paths Now Auto-Allowed** — Tool targets and bash commands writing to temp directories (`/tmp`, `os.TempDir()`) are now auto-allowed even outside the workspace, matching real-world dev workflows. Patch, write, and file tools all honour this.
 - **Permission Dialog Size** — `permissionDialogMaxBodyLines` increased from 6 to 11 so longer permission descriptions are fully visible.
 - **`/new` Command Queue Bypass** — `/new` and `/clear` now bypass the command queue and execute immediately even while the agent is streaming, matching the behaviour of `/login` and other instant commands. `queuedInputs` is also cleared on `/new`.
+- **`/mask` Command UX** — `/mask` with no args now shows the active model, redaction status, and tier-2 scanning model instead of toggling redaction. `mask model <name>` now sets the active model via the model picker; `mask status` includes tier-2 model info.
 - **Stopped Indicator Row Safety** — Stopped indicator rendered with `.MaxHeight(1)` to prevent long labels from wrapping and pushing bottom chrome off-screen.
 - **Permission Dialog Viewport Restore** — Closing the permission dialog now calls `layout()` to restore the transcript viewport height that may have shrunk while the tall dialog was open.
 

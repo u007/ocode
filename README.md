@@ -134,6 +134,7 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 
 - **On-demand skill loading** — skills are lightweight SKILL.md definitions loaded when relevant
 - **`/skills`** command to browse and activate
+- **`/learn`** command to list project-root skills and guide skill creation/update
 - **Skill installer** with status detection
 - **Custom skill creation** via the skill-creator skill
 
@@ -211,6 +212,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/github` | | PR, issue, and workflow commands |
 | `/plugin` | | Plugin management (install, sync, list, etc.) |
 | `/skills` | | Browse available skills |
+| `/learn` | | List project-root skills and guide skill creation/update |
 | `/undo` | `/redo` | Undo/redo file changes |
 | `/lsp` | | LSP diagnostics and status |
 | `/mcp` | `/mcp-auth` | MCP server management |

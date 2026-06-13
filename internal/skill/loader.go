@@ -59,6 +59,16 @@ func LoadSkills() []Skill {
 	return skills
 }
 
+// ProjectLocalSkillDirs returns the project-root skill directories that should
+// be scanned for project-local skills. root is the project root (absolute path).
+func ProjectLocalSkillDirs(root string) []string {
+	return []string{
+		filepath.Join(root, ".opencode", "skills"),
+		filepath.Join(root, ".claude", "skill"),
+		filepath.Join(root, "skills"),
+	}
+}
+
 func skillSearchPaths() []string {
 	var paths []string
 
@@ -68,11 +78,8 @@ func skillSearchPaths() []string {
 		paths = append(paths, filepath.Join(home, ".agents", "skills"))
 	}
 
-	cwd, err := os.Getwd()
-	if err == nil {
-		paths = append(paths, filepath.Join(cwd, ".opencode", "skills"))
-		paths = append(paths, filepath.Join(cwd, ".claude", "skill"))
-		paths = append(paths, filepath.Join(cwd, "skills"))
+	if cwd, err := os.Getwd(); err == nil {
+		paths = append(paths, ProjectLocalSkillDirs(cwd)...)
 	}
 
 	return paths
