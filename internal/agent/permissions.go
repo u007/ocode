@@ -1947,15 +1947,22 @@ func (pm *PermissionManager) SetMode(mode PermissionMode) {
 	switch mode {
 	case PermissionModeNormal, PermissionModeYOLO, PermissionModeLocked:
 		pm.mode = mode
+		if mode == PermissionModeYOLO {
+			// YOLO is a hard bypass: it must not retain or re-enable the
+			// LLM auto-permission layer.
+			pm.autoPermissionEnabled = false
+		}
 	}
 }
 
 // SetAutoPermissionEnabled toggles the LLM auto-permission layer at runtime.
-// The flag is independent of mode: YOLO and locked modes bypass Ask fallthrough
-// regardless of this state, and HandleToolCall short-circuits Ask decisions when
-// the auto layer is on.
+// YOLO mode is a hard bypass and cannot have auto-permission re-enabled while
+// it is active.
 func (pm *PermissionManager) SetAutoPermissionEnabled(enabled bool) {
 	if pm == nil {
+		return
+	}
+	if enabled && pm.mode == PermissionModeYOLO {
 		return
 	}
 	pm.autoPermissionEnabled = enabled

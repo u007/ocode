@@ -25,6 +25,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"testing"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
@@ -831,8 +832,8 @@ type model struct {
 	ideSelectionSent bool
 
 	// Secret redaction state (see internal/redact).
-	redactionEnabled bool
-	redactionModel   string // local model for tier-2 scanning
+	redactionEnabled  bool
+	redactionModel    string           // local model for tier-2 scanning
 	redactionRegistry *redact.Registry // session registry for token resolution
 }
 
@@ -1214,7 +1215,13 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 			m.lspEventCh = make(chan lsp.ServerStartedEvent, 16)
 		}
 		m.lspMgr.SetEventChan(m.lspEventCh)
-		go m.lspMgr.WarmUp(".")
+		// Skip eager LSP warmup under `go test`: WarmUp spawns external language
+		// servers (gopls, etc.) that inherit the test's overridden HOME and write
+		// build caches into the temp dir, racing t.TempDir cleanup. Servers still
+		// start lazily on first LSP-tool use; real runs are unaffected.
+		if !testing.Testing() {
+			go m.lspMgr.WarmUp(".")
+		}
 	}
 	lspMgr := m.lspMgr
 	tools := []tool.Tool{
@@ -1439,12 +1446,12 @@ func newModel(opts ...RunOptions) model {
 		config:            cfg,
 		// IDE mode: an explicit config value wins; otherwise auto-enable the
 		// Claude Code integration only when running inside a VS Code terminal.
-		ideMode:           resolveInitialIDEMode(cfg),
-		agent:             a,
-		sessionID:         o.SessionID,
-		showThinking:      true,
-		showSidebar:       true,
-		redactionEnabled:  cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
+		ideMode:          resolveInitialIDEMode(cfg),
+		agent:            a,
+		sessionID:        o.SessionID,
+		showThinking:     true,
+		showSidebar:      true,
+		redactionEnabled: cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
 		redactionModel: func() string {
 			if cfg != nil {
 				return cfg.Ocode.Security.Redaction.Model
@@ -8223,7 +8230,7 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 			return m.handlePermissionChoice(pending), true
 		case "n", "no", "back", "esc":
 			m.permConfirm = ""
-			m.updatePermButtonRegions()
+			m.layout()
 			return nil, false
 		}
 		return nil, false
@@ -8243,7 +8250,7 @@ func (m *model) permDialogInput(choice string) (tea.Cmd, bool) {
 		}
 		// Defer: show what will be persisted and wait for confirmation.
 		m.permConfirm = choice
-		m.updatePermButtonRegions()
+		m.layout()
 		return nil, false
 	case "y", "yes", "allow", "once", "n", "no", "deny":
 		m.showPermDialog = false
@@ -11761,6 +11768,9 @@ func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 		if msg.Usage.CacheReadTokens != nil {
 			t.cachedTokens += *msg.Usage.CacheReadTokens
 		}
+		if msg.Usage.CacheWriteTokens != nil {
+			t.cachedTokens += *msg.Usage.CacheWriteTokens
+		}
 		if msg.Usage.TotalTokens != nil {
 			messageTotal = *msg.Usage.TotalTokens
 		}
@@ -13823,7 +13833,7 @@ func (m *model) ideSidebarStatusLine() string {
 			}
 			return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(fmt.Sprintf(" · %s:L%d-%d", name, start, end))
 		}
-		return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(" · " + name)
+		return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(" · "+name)
 	}
 	return dimStyle.Render("IDE: ") + successStyle.Render("on") + sidebarTextStyle.Render(" · connected")
 }

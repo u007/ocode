@@ -799,6 +799,19 @@ func TestPermissions_AdvancedBashFeatures(t *testing.T) {
 		}
 	})
 
+	t.Run("yolo_disables_auto_permission", func(t *testing.T) {
+		pm := NewPermissionManager()
+		pm.SetAutoPermissionEnabled(true)
+		pm.SetMode(PermissionModeYOLO)
+		if pm.AutoPermissionEnabled() {
+			t.Fatal("expected YOLO mode to disable auto-permission")
+		}
+		pm.SetAutoPermissionEnabled(true)
+		if pm.AutoPermissionEnabled() {
+			t.Fatal("expected auto-permission to stay disabled while in YOLO mode")
+		}
+	})
+
 	t.Run("auto_permission_setter_nil_safe", func(t *testing.T) {
 		// nil receiver must not panic; getter on nil returns false.
 		var pm *PermissionManager

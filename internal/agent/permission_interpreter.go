@@ -200,6 +200,16 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 
 	You may call read_file to inspect local imported files before deciding.
 
+	Decision guidance:
+	- Prefer ALLOW for straightforward local file transformations when the source
+	  only reads/writes files inside the allowed roots and has no subprocesses,
+	  network, dynamic eval/exec, or unresolved imports.
+	- A heredoc or inline script is not risky by itself. Do not ask merely because
+	  the interpreter command is embedded in bash or spans multiple lines.
+	- In particular, commands like python3 <<'PYEOF' that rewrite a local project markdown file should usually be ALLOW when the effect set is fully enumerated and stays inside policy.
+	- Use decision "ask" whenever any effect is dynamic, truncated, unresolved,
+	  outside allowed roots, or otherwise not fully confident.
+
 	Respond with ONLY a single JSON object (no prose, no markdown fences):
 	{"decision":"allow|ask","confidence":0.0-1.0,"summary":"...","effects":{"reads":[],"writes":[],"deletes":[],"network":[],"subprocesses":[],"unknown":[]}}
 

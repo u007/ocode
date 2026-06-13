@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports
+.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -65,6 +65,15 @@ clean:
 
 test:
 	go test ./...
+
+# ── Models snapshot ──────────────────────────────────────────────────────────
+# Regenerate the embedded models.dev snapshot (gitignored build artifact) that
+# backs context-window and pricing lookups. Run after models.dev publishes new
+# models/prices, or after changing the retained field set in agent.modelEntry.
+# Usage: make models-snapshot
+
+models-snapshot:
+	go run ./tools/gen-models-snapshot
 
 # ── Web UI ───────────────────────────────────────────────────────────────────
 

@@ -540,6 +540,42 @@ func TestAskPermissionModelInterpreterInlineCodeDoesNotPersistGrant(t *testing.T
 	_ = root
 }
 
+func TestAskPermissionModelInterpreterPromptEncouragesLocalTransforms(t *testing.T) {
+	a, root := newConsultAgent(t)
+	client := &scriptedCaptureClient{Responses: []string{`{"decision":"allow","confidence":0.95,"summary":"local markdown rewrite","effects":{"reads":["` + filepath.Join(root, "UPA_Quotation.md") + `"],"writes":["` + filepath.Join(root, "UPA_Quotation.md") + `"],"deletes":[],"network":[],"subprocesses":[],"unknown":[]}}`}}
+	prevClientFn := newClientFn
+	newClientFn = func(_ *config.Config, _ string) LLMClient { return client }
+	t.Cleanup(func() { newClientFn = prevClientFn })
+
+	cmd := "python3 <<'PYEOF'\npath = 'UPA_Quotation.md'\nwith open(path, 'w') as f:\n    f.write('updated')\nPYEOF"
+	ie, ok := classifyInterpreterExecution(cmd)
+	if !ok {
+		t.Fatal("classify failed")
+	}
+	allowed, reason, summary := a.askPermissionModelInterpreter(cmd, ie)
+	if !allowed {
+		t.Fatalf("expected allow, got reason=%q", reason)
+	}
+	if summary != "local markdown rewrite" {
+		t.Fatalf("expected summary %q, got %q", "local markdown rewrite", summary)
+	}
+	if len(client.Prompts) != 1 {
+		t.Fatalf("expected one prompt, got %d", len(client.Prompts))
+	}
+	prompt := client.Prompts[0]
+	for _, want := range []string{
+		"Decision guidance:",
+		"Prefer ALLOW for straightforward local file transformations",
+		"A heredoc or inline script is not risky by itself",
+		"python3 <<'PYEOF'",
+		"rewrite a local project markdown file",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, prompt)
+		}
+	}
+}
+
 func TestAskPermissionModelInterpreterFailClosed(t *testing.T) {
 	cases := []struct {
 		name string

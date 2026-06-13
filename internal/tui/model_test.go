@@ -1283,6 +1283,38 @@ func TestRunOptionsPermissionModeAutoEnablesAutoPermission(t *testing.T) {
 	}
 }
 
+func TestRunOptionsYOLODisablesAutoPermission(t *testing.T) {
+	chdirTempForConfigTest(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+	t.Setenv("OPENCODE_MODEL", "test-model")
+
+	cfgDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(cfgDir, "opencode.json"),
+		[]byte(`{"permissions":{"auto":{"enabled":true}}}`),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newModel(RunOptions{YOLO: true})
+	if m.agent == nil || m.agent.Permissions() == nil {
+		t.Fatal("expected agent permissions to be initialized")
+	}
+	if got := m.agent.Permissions().Mode(); got != agent.PermissionModeYOLO {
+		t.Fatalf("expected YOLO mode, got %s", got)
+	}
+	if m.agent.Permissions().AutoPermissionEnabled() {
+		t.Fatal("expected YOLO mode to disable auto-permission")
+	}
+}
+
 func TestRunOptionsPermissionModeInvalidDoesNotMutateConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
