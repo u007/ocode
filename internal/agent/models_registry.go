@@ -15,6 +15,7 @@ import (
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/models"
+	"github.com/u007/ocode/internal/pricing"
 )
 
 //go:embed models-snapshot.json
@@ -29,12 +30,44 @@ const (
 
 type modelLimit struct {
 	Context int64 `json:"context"`
+	Output  int64 `json:"output"`
+}
+
+// modelCost holds per-million-token USD prices as published by models.dev.
+type modelCost struct {
+	Input      float64 `json:"input"`
+	Output     float64 `json:"output"`
+	CacheRead  float64 `json:"cache_read"`
+	CacheWrite float64 `json:"cache_write"`
+}
+
+type modelModalities struct {
+	Input  []string `json:"input"`
+	Output []string `json:"output"`
 }
 
 type modelEntry struct {
-	ID        string     `json:"id"`
-	Reasoning bool       `json:"reasoning"`
-	Limit     modelLimit `json:"limit"`
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Family      string          `json:"family"`
+	Attachment  bool            `json:"attachment"`
+	Reasoning   bool            `json:"reasoning"`
+	ToolCall    bool            `json:"tool_call"`
+	Temperature bool            `json:"temperature"`
+	Knowledge   string          `json:"knowledge"`
+	ReleaseDate string          `json:"release_date"`
+	LastUpdated string          `json:"last_updated"`
+	OpenWeights bool            `json:"open_weights"`
+	Modalities  modelModalities `json:"modalities"`
+	Limit       modelLimit      `json:"limit"`
+	Cost        modelCost       `json:"cost"`
+}
+
+func init() {
+	// Make models.dev pricing the primary source for every pricing.Lookup
+	// caller (spend calc, usage report, model picker). No import cycle: the
+	// pricing package stores the callback, it does not import agent.
+	pricing.RegisterRegistry(ModelCost)
 }
 
 type providerEntry struct {
@@ -273,28 +306,64 @@ func AllProviderModels() []string {
 // "provider/model" format (e.g. "openai/gpt-4o") or bare model name.
 // It checks the models.dev registry first, then falls back to 0.
 func ModelWindow(modelID string) int64 {
+	if m, ok := modelEntryFor(modelID); ok {
+		return m.Limit.Context
+	}
+	return 0
+}
+
+// modelEntryFor resolves a model ID in "provider/model" format (e.g.
+// "deepseek/deepseek-v4-flash") or bare model name to its registry entry.
+func modelEntryFor(modelID string) (modelEntry, bool) {
 	data := loadRegistry()
 	if data == nil {
-		return 0
+		return modelEntry{}, false
 	}
 
 	// Try "provider/model" format first
 	if provider, model, ok := splitModelID(modelID); ok {
 		if entry, ok := data[provider]; ok {
-			if m, ok := entry.Models[model]; ok && m.Limit.Context > 0 {
-				return m.Limit.Context
+			if m, ok := entry.Models[model]; ok {
+				return m, true
+			}
+		}
+		// Routing-prefixed ids (e.g. "opencode-go/deepseek-v4-flash") whose
+		// provider segment isn't a real models.dev provider — match the model
+		// segment across all providers.
+		for _, entry := range data {
+			if m, ok := entry.Models[model]; ok {
+				return m, true
 			}
 		}
 	}
 
 	// Try bare model name — search all providers
 	for _, entry := range data {
-		if m, ok := entry.Models[modelID]; ok && m.Limit.Context > 0 {
-			return m.Limit.Context
+		if m, ok := entry.Models[modelID]; ok {
+			return m, true
 		}
 	}
 
-	return 0
+	return modelEntry{}, false
+}
+
+// ModelCost returns models.dev pricing (USD per million tokens) for a model ID
+// in "provider/model" or bare form. Returns false when the model is unknown or
+// the registry carries no price for it.
+func ModelCost(modelID string) (pricing.ModelPricing, bool) {
+	m, ok := modelEntryFor(modelID)
+	if !ok {
+		return pricing.ModelPricing{}, false
+	}
+	if m.Cost.Input == 0 && m.Cost.Output == 0 && m.Cost.CacheRead == 0 {
+		return pricing.ModelPricing{}, false
+	}
+	return pricing.ModelPricing{
+		InputPerMillion:      m.Cost.Input,
+		OutputPerMillion:     m.Cost.Output,
+		CacheReadPerMillion:  m.Cost.CacheRead,
+		CacheWritePerMillion: m.Cost.CacheWrite,
+	}, true
 }
 
 func splitModelID(id string) (provider, model string, ok bool) {

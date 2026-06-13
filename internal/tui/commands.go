@@ -94,7 +94,7 @@ func init() {
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
-		{name: "/mask", usage: "/mask [on|off|status|model|list]", help: "Show active model, toggle secret redaction, or open model picker", handler: runMaskCmd},
+		{name: "/mask", usage: "/mask [on|off|status|model <name>|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -954,19 +954,33 @@ func runIDECmd(m *model, args []string) tea.Cmd {
 	return m.handleIDECmd(args)
 }
 
+func maskStatusText(m *model, includeHint bool) string {
+	activeModel := m.currentModelName()
+	if activeModel == "" {
+		activeModel = "(not configured)"
+	}
+	tier2Model := m.redactionModel
+	if tier2Model == "" {
+		tier2Model = "(not configured - tier-2 scanning disabled)"
+	}
+	state := "disabled"
+	if m.redactionEnabled {
+		state = "enabled"
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Active model: %s\n", activeModel))
+	b.WriteString(fmt.Sprintf("Secret redaction: %s\n", state))
+	b.WriteString(fmt.Sprintf("Tier-2 scanning model: %s", tier2Model))
+	if includeHint {
+		b.WriteString("\n\nTry: /mask [on|off|status|model <name>|list]")
+	}
+	return b.String()
+}
+
 func runMaskCmd(m *model, args []string) tea.Cmd {
 	if len(args) == 0 {
-		// Show current model and redaction status
-		model := m.currentModelName()
-		state := "disabled"
-		if m.redactionEnabled {
-			state = "enabled"
-		}
-		tier2 := m.redactionModel
-		if tier2 == "" {
-			tier2 = "(not configured)"
-		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Active model: %s\nSecret redaction: %s\nTier-2 scanning model: %s", model, state, tier2)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: maskStatusText(m, true)})
 		return nil
 	}
 	switch strings.ToLower(args[0]) {
@@ -985,22 +999,25 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 		m.redactionEnabled = false
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Secret redaction: disabled"})
 	case "status":
-		state := "disabled"
-		if m.redactionEnabled {
-			state = "enabled"
-		}
-		tier2 := m.redactionModel
-		if tier2 == "" {
-			tier2 = "(not configured)"
-		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Secret redaction: %s\nTier-2 scanning model: %s", state, tier2)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: maskStatusText(m, false)})
 	case "model":
-		// Open the model picker (no model name given) or set the active model
+		// Show or set the tier-2 scanning model
 		if len(args) > 1 {
-			return m.handleModelCmd(args[1:])
+			// Set model
+			if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) { rc.Model = args[1] }); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+				return nil
+			}
+			m.redactionModel = args[1]
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", args[1])})
+		} else {
+			// Show current model
+			model := m.redactionModel
+			if model == "" {
+				model = "(not configured - tier-2 scanning disabled)"
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", model)})
 		}
-		m.openModelPicker()
-		return nil
 	case "list":
 		// List registered secrets
 		if m.redactionRegistry == nil {
@@ -1014,13 +1031,17 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 				b.WriteString(fmt.Sprintf("Registered secrets (%d):\n", len(entries)))
 				for i, e := range entries {
 					preview := redact.MaskedPreview(e.Value)
-					b.WriteString(fmt.Sprintf("  %d. %s [%s]\n", i+1, preview, e.Kind))
+					source := e.Source
+					if source == "" {
+						source = "(unknown)"
+					}
+					b.WriteString(fmt.Sprintf("  %d. [%s] %s (source=%s)\n", i+1, e.Kind, preview, source))
 				}
 				m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 			}
 		}
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|model|list]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|model <name>|list]"})
 	}
 	return nil
 }

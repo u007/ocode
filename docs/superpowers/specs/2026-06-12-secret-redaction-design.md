@@ -220,15 +220,20 @@ advisor-toggle pattern exactly: `sidebarRenderData` row index fields
 hit-test helper like `sidebarAdvisorToggleForClick` (model.go:12432), click
 handler (model.go:4588).
 
-**`/mask` slash command** (modal, mirrors `/permissions`):
+**`/mask` slash command** (subcommand-style, mirrors `/permissions`):
 
-- Enable/disable toggle.
-- Security-model picker: **local providers only** — LM Studio models first,
-  then Ollama. Cloud models are not listed (see §2 tier-2 hard restriction).
-- Session secret list: index, kind, masked preview, source. Sorted by index
-  ascending; paginated if long.
-- Manual "add secret word" entry.
-- Display-mode toggle (real values vs placeholders).
+- `/mask` (no args) — shows status: active model, secret redaction enabled/disabled,
+  and tier-2 scanning model name.
+- `/mask on|off` — enable/disable toggle, persists via targeted saver.
+- `/mask status` — shows status without the usage hint.
+- `/mask model` (no args) — shows current tier-2 scanning model.
+- `/mask model <name>` — directly sets the tier-2 scanning model (no picker).
+  Accepts any model string; non-local models are not filtered (tier-2 scanning
+  is always performed by the locally-configured model).
+- `/mask list` — session secret list: index, kind, masked preview, source.
+  Sorted by index ascending.
+- No model picker, manual "add secret word", or display-mode toggle are implemented
+  in this iteration.
 
 ### 10. Edge cases
 

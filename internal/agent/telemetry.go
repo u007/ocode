@@ -11,6 +11,9 @@ type TokenUsage struct {
 	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
 	TotalTokens      *int64 `json:"total_tokens,omitempty"`
 	CacheReadTokens  *int64 `json:"cache_read_tokens,omitempty"`
+	// CacheWriteTokens counts tokens written to the prompt cache (Anthropic's
+	// cache_creation_input_tokens), billed at the model's cache_write rate.
+	CacheWriteTokens *int64 `json:"cache_write_tokens,omitempty"`
 }
 
 func parseOpenAIUsage(raw json.RawMessage) (*TokenUsage, error) {
@@ -52,9 +55,10 @@ func parseAnthropicUsage(raw json.RawMessage) (*TokenUsage, error) {
 	}
 
 	var payload struct {
-		InputTokens          *int64 `json:"input_tokens"`
-		OutputTokens         *int64 `json:"output_tokens"`
-		CacheReadInputTokens *int64 `json:"cache_read_input_tokens"`
+		InputTokens              *int64 `json:"input_tokens"`
+		OutputTokens             *int64 `json:"output_tokens"`
+		CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return nil, err
@@ -64,6 +68,7 @@ func parseAnthropicUsage(raw json.RawMessage) (*TokenUsage, error) {
 		PromptTokens:     payload.InputTokens,
 		CompletionTokens: payload.OutputTokens,
 		CacheReadTokens:  payload.CacheReadInputTokens,
+		CacheWriteTokens: payload.CacheCreationInputTokens,
 	}, nil
 }
 
@@ -108,12 +113,13 @@ func usageForProvider(provider string, raw json.RawMessage) (*TokenUsage, error)
 		return parseAnthropicUsage(raw)
 	default:
 		var probe struct {
-			InputTokens          *int64 `json:"input_tokens"`
-			OutputTokens         *int64 `json:"output_tokens"`
-			CacheReadInputTokens *int64 `json:"cache_read_input_tokens"`
+			InputTokens              *int64 `json:"input_tokens"`
+			OutputTokens             *int64 `json:"output_tokens"`
+			CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
 		}
 		if err := json.Unmarshal(raw, &probe); err == nil {
-			if probe.InputTokens != nil || probe.OutputTokens != nil || probe.CacheReadInputTokens != nil {
+			if probe.InputTokens != nil || probe.OutputTokens != nil || probe.CacheReadInputTokens != nil || probe.CacheCreationInputTokens != nil {
 				return parseAnthropicUsage(raw)
 			}
 		}
@@ -139,14 +145,16 @@ func (u *TokenUsage) SpendWithPricing(modelPricing pricing.ModelPricing) *float6
 		return nil
 	}
 
-	// TODO(billing): apply reduced cache-read pricing. Anthropic bills cache
-	// reads at 10% of input price and cache writes at 125%; OpenAI bills
-	// cached input at 50%. CacheReadTokens is captured on TokenUsage but not
-	// yet factored into Spend — current numbers overstate cost on
-	// cache-heavy turns. Needs a CachedInputPerMillion field on
-	// pricing.ModelPricing plus provider-aware subtraction from PromptTokens
-	// before applying the input rate.
+	// Providers report cache-read and cache-write (cache_creation) tokens
+	// separately from PromptTokens, so bill each at its dedicated rate instead
+	// of the full input rate. Anthropic input_tokens already excludes both.
 	spend := (float64(*u.PromptTokens) * modelPricing.InputPerMillion / 1_000_000) +
 		(float64(*u.CompletionTokens) * modelPricing.OutputPerMillion / 1_000_000)
+	if u.CacheReadTokens != nil && modelPricing.CacheReadPerMillion > 0 {
+		spend += float64(*u.CacheReadTokens) * modelPricing.CacheReadPerMillion / 1_000_000
+	}
+	if u.CacheWriteTokens != nil && modelPricing.CacheWritePerMillion > 0 {
+		spend += float64(*u.CacheWriteTokens) * modelPricing.CacheWritePerMillion / 1_000_000
+	}
 	return &spend
 }

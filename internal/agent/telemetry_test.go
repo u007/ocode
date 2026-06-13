@@ -74,7 +74,11 @@ func TestUsageForProviderAutoDetectsAnthropicShape(t *testing.T) {
 	}
 }
 
-func TestTokenUsageSpendUsesBundledPricing(t *testing.T) {
+// Pricing now comes from the models.dev registry (embedded snapshot) first,
+// falling back to the hardcoded map only for models the registry doesn't know.
+// gpt-4o is in the registry, so its current price (input 2.5 / output 10 per
+// million) is used rather than the stale bundled 5/15.
+func TestTokenUsageSpendUsesRegistryPricing(t *testing.T) {
 	usage := &TokenUsage{
 		PromptTokens:     int64Ptr(1000),
 		CompletionTokens: int64Ptr(2000),
@@ -85,8 +89,63 @@ func TestTokenUsageSpendUsesBundledPricing(t *testing.T) {
 		t.Fatal("expected spend, got nil")
 	}
 
-	if math.Abs(*spend-0.035) > 1e-9 {
-		t.Fatalf("expected spend 0.035, got %v", *spend)
+	// 1000*2.5/1e6 + 2000*10/1e6 = 0.0225
+	if math.Abs(*spend-0.0225) > 1e-9 {
+		t.Fatalf("expected spend 0.0225, got %v", *spend)
+	}
+}
+
+// Cache-read tokens are billed at the registry's dedicated cache_read rate,
+// added on top of input/output cost. deepseek-v4-flash: input 0.14, output
+// 0.28, cache_read 0.0028 per million.
+func TestTokenUsageSpendBillsCacheReadTokens(t *testing.T) {
+	usage := &TokenUsage{
+		PromptTokens:     int64Ptr(1_000_000),
+		CompletionTokens: int64Ptr(1_000_000),
+		CacheReadTokens:  int64Ptr(1_000_000),
+	}
+
+	spend := usage.Spend("deepseek/deepseek-v4-flash")
+	if spend == nil {
+		t.Fatal("expected spend, got nil")
+	}
+
+	// 0.14 + 0.28 + 0.0028 = 0.4228
+	if math.Abs(*spend-0.4228) > 1e-9 {
+		t.Fatalf("expected spend 0.4228, got %v", *spend)
+	}
+}
+
+// Cache-write (cache_creation) tokens are billed at the registry's cache_write
+// rate, on top of input/output/cache_read. claude-sonnet-4-6: input 3, output
+// 15, cache_read 0.3, cache_write 3.75 per million.
+func TestTokenUsageSpendBillsCacheWriteTokens(t *testing.T) {
+	usage := &TokenUsage{
+		PromptTokens:     int64Ptr(1_000_000),
+		CompletionTokens: int64Ptr(1_000_000),
+		CacheReadTokens:  int64Ptr(1_000_000),
+		CacheWriteTokens: int64Ptr(1_000_000),
+	}
+
+	spend := usage.Spend("anthropic/claude-sonnet-4-6")
+	if spend == nil {
+		t.Fatal("expected spend, got nil")
+	}
+
+	// 3 + 15 + 0.3 + 3.75 = 22.05
+	if math.Abs(*spend-22.05) > 1e-9 {
+		t.Fatalf("expected spend 22.05, got %v", *spend)
+	}
+}
+
+// Anthropic usage payloads carry cache_creation_input_tokens for cache writes.
+func TestParseAnthropicUsageCacheWrite(t *testing.T) {
+	u, err := parseAnthropicUsage(json.RawMessage(`{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}`))
+	if err != nil {
+		t.Fatalf("parseAnthropicUsage failed: %v", err)
+	}
+	if u.CacheWriteTokens == nil || *u.CacheWriteTokens != 7 {
+		t.Fatalf("expected cache write tokens 7, got %#v", u.CacheWriteTokens)
 	}
 }
 

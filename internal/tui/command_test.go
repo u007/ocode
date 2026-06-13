@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 
 	"charm.land/bubbles/v2/textarea"
@@ -65,10 +66,10 @@ func TestRenderFileSearchUsesWorkspaceFiles(t *testing.T) {
 // cross-platform system opener. Both return a command and close the search.
 func TestEnterAndCtrlEInFileSearchOpenFile(t *testing.T) {
 	for _, tc := range []struct {
-		name          string
-		msg           tea.KeyPressMsg
+		name           string
+		msg            tea.KeyPressMsg
 		wantInputValue string
-		wantCmd       bool
+		wantCmd        bool
 	}{
 		{name: "ctrl+e", msg: tea.KeyPressMsg{Code: 'e', Mod: tea.ModCtrl, Text: ""}, wantCmd: true},
 		{name: "enter", msg: tea.KeyPressMsg{Code: tea.KeyEnter}, wantCmd: true},
@@ -349,10 +350,74 @@ func TestCompactFinishedResumesAfterQueuedLocalCommands(t *testing.T) {
 
 func TestCommandHelpTextShowsAliasesAndArgs(t *testing.T) {
 	help := commandHelpText()
-	for _, want := range []string{"/models [name], /model", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {
+	for _, want := range []string{"/models [name], /model", "/mask [on|off|status|model <name>|list]", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("expected help text to include %q, got %q", want, help)
 		}
+	}
+}
+
+func TestMaskCommandShowsStatusAndHint(t *testing.T) {
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		activeModel:       "gpt-4o",
+		redactionEnabled:  true,
+		redactionModel:    "lmstudio/local-scan",
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		showSidebar:       true,
+		showThinking:      true,
+	}
+
+	updated, cmd := m.handleCommand("/mask")
+	if cmd != nil {
+		t.Fatalf("expected /mask to return no command, got %T", cmd)
+	}
+
+	got := derefTestModel(t, updated)
+	if !got.redactionEnabled {
+		t.Fatal("expected /mask with no args to leave redaction enabled")
+	}
+	if len(got.messages) == 0 {
+		t.Fatal("expected /mask to append a status message")
+	}
+	msg := got.messages[len(got.messages)-1].text
+	for _, want := range []string{"Active model: gpt-4o", "Secret redaction: enabled", "Tier-2 scanning model: lmstudio/local-scan", "Try: /mask [on|off|status|model <name>|list]"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("expected /mask output to include %q, got %q", want, msg)
+		}
+	}
+}
+
+func TestMaskListUsesIndexKindPreviewAndSource(t *testing.T) {
+	reg := redact.NewRegistry(redact.NewNonce())
+	reg.GetOrAssign("secret1234", "api_key", "session")
+	reg.GetOrAssign("token5678", "token", "tool")
+
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		redactionRegistry: reg,
+	}
+
+	updated, cmd := m.handleCommand("/mask list")
+	if cmd != nil {
+		t.Fatalf("expected /mask list to return no command, got %T", cmd)
+	}
+
+	got := derefTestModel(t, updated)
+	if len(got.messages) == 0 {
+		t.Fatal("expected /mask list to append a message")
+	}
+	msg := got.messages[len(got.messages)-1].text
+	if !strings.Contains(msg, "Registered secrets (2):") {
+		t.Fatalf("expected list header, got %q", msg)
+	}
+	if !strings.Contains(msg, "1. [api_key] "+redact.MaskedPreview("secret1234")+" (source=session)") {
+		t.Fatalf("expected first row to include index, kind, preview, and source, got %q", msg)
+	}
+	if !strings.Contains(msg, "2. [token] "+redact.MaskedPreview("token5678")+" (source=tool)") {
+		t.Fatalf("expected second row to include index, kind, preview, and source, got %q", msg)
 	}
 }
 
