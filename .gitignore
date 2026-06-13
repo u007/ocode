@@ -44,3 +44,5 @@ web/node_modules/
 web/dist/assets/
 internal/agent/models-snapshot.json
 ocodeconfig.json
+.opencode/snapshots
+
