@@ -3474,7 +3474,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			if len(m.fileSearchResults) > 0 && m.fileSearchIndex >= 0 && m.fileSearchIndex < len(m.fileSearchResults) {
 				selected := m.fileSearchResults[m.fileSearchIndex]
 				m.showFileSearch = false
-				return true, m, m.openPathInEditorCmd(selected.path)
+				return true, m, openFileWithOSDefault(selected.path)
 			}
 			m.showFileSearch = false
 			return true, m, nil
@@ -3483,8 +3483,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			if len(m.fileSearchResults) > 0 && m.fileSearchIndex >= 0 && m.fileSearchIndex < len(m.fileSearchResults) {
 				selected := m.fileSearchResults[m.fileSearchIndex]
 				m.showFileSearch = false
-				m.input.SetValue("@" + selected.path + " ")
-				return true, m, nil
+				return true, m, m.openPathInEditorCmd(selected.path)
 			}
 			m.showFileSearch = false
 			return true, m, nil
@@ -9200,7 +9199,7 @@ func filterFileSearchResults(cache []fileSearchResult, query string) []fileSearc
 // renderFileSearch renders the ctrl+p file search overlay.
 func (m model) renderFileSearch() string {
 	const maxVisible = 15
-	hintLine := hintStyle.Render("↑/↓ select · Enter insert · Ctrl+E open · Esc cancel · type to filter")
+	hintLine := hintStyle.Render("↑/↓ select · Enter edit · Ctrl+E open · Esc cancel · type to filter")
 	title := m.styles.Header.Render("Search files") + "  " + hintStyle.Render("filter: "+m.fileSearchInput+"_")
 
 	var body strings.Builder

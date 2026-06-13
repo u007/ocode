@@ -60,6 +60,9 @@
 - **Advisor Comment Cleanup** — `cleanEnvForTerminal` comments softened from "bypass nesting guards" to "optimize environment for sub-process wrapper compatibility".
 - **auto_allow_prefixes Updated** — Added new utility commands (`stat`, `sed`, `cksum`, `comm`, `md5sum`, `od`, `diff`, `expand`, `tr`, `tree`) and removed unused entries, keeping the list alphabetically sorted.
 - **Interpreter `-m` Module Detection** — `classifyInterpreterExecution` now skips `script_file` source mode detection when a `-m` flag is present, so module invocations (e.g. `python3 -m pytest`) are correctly classified as module runs instead of script file executions.
+- **Version Bump 0.5.0** — Version bumped from `0.4.1` to `0.5.0`.
+- **File Search Key Remapping** — Enter in file search now opens the selected file in the configured editor; Ctrl+E now opens with the cross-platform system opener (`openFileWithOSDefault`). Hint text updated from "Enter insert" to "Enter edit".
+- **Web Dependency Upgrades** — Vite updated from 6.x to 8.x, `@vitejs/plugin-react` from 4.x to 6.x; `pnpm-lock.yaml` adopted alongside existing `package-lock.json`.
 
 ### Fixed
 - **Tool Output Click Regression** — Fixed separator accounting in clickable tool output regions where preceding messages caused `startLine` drift. New regression test validates click targeting after multiple preceding messages.
