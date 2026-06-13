@@ -6764,17 +6764,22 @@ func (m *model) handleMaxStepCmd(args []string) {
 		var b strings.Builder
 		b.WriteString("⚙ Max Steps\n")
 		b.WriteString(strings.Repeat("─", 30) + "\n\n")
-		current := 100 // default if unset
-		if m.config != nil && m.config.Ocode.MaxSteps > 0 {
+		current := 0 // default: unlimited (0 means no override)
+		if m.config != nil {
 			current = m.config.Ocode.MaxSteps
 		}
 		if m.agent != nil {
 			agentVal := m.agent.GetMaxSteps()
-			if agentVal > 0 {
-				current = agentVal
-			}
+			current = agentVal // agent value is authoritative for this session
 		}
-		b.WriteString(fmt.Sprintf("Current max steps: %d\n\n", current))
+
+		var status string
+		if current == 0 {
+			status = "0 (unlimited — default cap of 100 applies)"
+		} else {
+			status = fmt.Sprintf("%d", current)
+		}
+		b.WriteString(fmt.Sprintf("Current max steps: %s\n\n", status))
 		b.WriteString("The agent will stop after reaching this many tool-call iterations and produce a summary.\n")
 		b.WriteString("\nUsage: /max-step <number>\n")
 		b.WriteString("  /max-step 0    — unlimited (default cap 100 applies)\n")

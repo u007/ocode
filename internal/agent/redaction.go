@@ -62,50 +62,6 @@ func (sr *SessionRedactor) Redactor() *redact.Redactor {
 	return sr.redactor
 }
 
-// ResolveToolArgs resolves OCSEC tokens in tool call arguments.
-func (sr *SessionRedactor) ResolveToolArgs(args string) (string, []redact.SecretRef) {
-	if sr == nil || sr.redactor == nil || !sr.redactor.Enabled() {
-		return args, nil
-	}
-
-	registry := sr.redactor.Registry()
-	if registry == nil {
-		return args, nil
-	}
-
-	// Find all tokens in the args
-	var refs []redact.SecretRef
-	resolved := args
-
-	// Use a regex to find and replace tokens
-	for _, token := range redact.TokenPattern.FindAllString(args, -1) {
-		// Check if this token belongs to our session
-		tokens, indexes := redact.TokensForNonce(token, sr.nonce)
-		if len(tokens) == 0 {
-			continue
-		}
-
-		// Resolve the token
-		entry, ok := registry.Lookup(indexes[0])
-		if !ok {
-			continue
-		}
-
-		// Create masked preview for the ref
-		preview := redact.MaskedPreview(entry.Value)
-		refs = append(refs, redact.SecretRef{
-			Index: indexes[0],
-			Kind:  entry.Kind,
-			Value: preview,
-		})
-
-		// Replace in resolved string
-		resolved = strings.ReplaceAll(resolved, token, entry.Value)
-	}
-
-	return resolved, refs
-}
-
 // IsEgressCommand checks if a command might exfiltrate data.
 func IsEgressCommand(cmd string) bool {
 	// Common exfiltration tools

@@ -27,66 +27,6 @@ func TestSessionRedactorDisabled(t *testing.T) {
 	}
 }
 
-func TestSessionRedactorResolveToolArgs(t *testing.T) {
-	// Create a redactor with some secrets
-	nonce := "a3f9c2"
-	reg := redact.NewRegistry(nonce)
-	reg.GetOrAssign("hunter2", "password", "test")
-
-	redactor := redact.NewRedactor(redact.RedactorConfig{Enabled: true}, "", nil)
-	redactor.SetRegistry(reg)
-
-	sr := &SessionRedactor{
-		redactor: redactor,
-		nonce:    nonce,
-	}
-
-	// Test with token in args
-	args := `{"command": "echo [[OCSEC:a3f9c2:1]]"}`
-	resolved, refs := sr.ResolveToolArgs(args)
-
-	if len(refs) != 1 {
-		t.Fatalf("Expected 1 ref, got %d", len(refs))
-	}
-
-	if refs[0].Index != 1 {
-		t.Errorf("Expected ref index 1, got %d", refs[0].Index)
-	}
-
-	if refs[0].Kind != "password" {
-		t.Errorf("Expected ref kind 'password', got %q", refs[0].Kind)
-	}
-
-	if resolved != `{"command": "echo hunter2"}` {
-		t.Errorf("Expected resolved args, got %q", resolved)
-	}
-}
-
-func TestSessionRedactorResolveToolArgsForeignNonce(t *testing.T) {
-	nonce := "a3f9c2"
-	reg := redact.NewRegistry(nonce)
-
-	redactor := redact.NewRedactor(redact.RedactorConfig{Enabled: true}, "", nil)
-	redactor.SetRegistry(reg)
-
-	sr := &SessionRedactor{
-		redactor: redactor,
-		nonce:    nonce,
-	}
-
-	// Foreign nonce token should not be resolved
-	args := `{"command": "echo [[OCSEC:deadbe:1]]"}`
-	resolved, refs := sr.ResolveToolArgs(args)
-
-	if len(refs) != 0 {
-		t.Errorf("Expected 0 refs for foreign nonce, got %d", len(refs))
-	}
-
-	if resolved != args {
-		t.Errorf("Foreign nonce should not be resolved: %q", resolved)
-	}
-}
-
 func TestIsEgressCommand(t *testing.T) {
 	tests := []struct {
 		cmd      string

@@ -81,34 +81,6 @@ func redactText(text string, reg *redact.Registry) string {
 	return reg.Substitute(text)
 }
 
-// resolveTokens resolves all OCSEC tokens in text using the session registry.
-func resolveTokens(text string, reg *redact.Registry) string {
-	if reg == nil || text == "" {
-		return text
-	}
-	return reg.Resolve(text)
-}
-
-// redactMessage redacts a message's text and stores the original for later resolution.
-func (m *model) redactMessage(msg *message, reg *redact.Registry) {
-	if reg == nil || !m.redactionEnabled || msg.text == "" {
-		return
-	}
-	// Only redact user messages
-	if msg.role != roleUser {
-		return
-	}
-	msg.text = redactText(msg.text, reg)
-}
-
-// appendUserMessage adds a user message with optional redaction.
-func (m *model) appendUserMessage(text string) {
-	msg := message{role: roleUser, text: text}
-	if m.redactionEnabled && m.redactionRegistry != nil {
-		m.redactMessage(&msg, m.redactionRegistry)
-	}
-	m.messages = append(m.messages, msg)
-}
 
 // renderSecrets replaces OCSEC tokens in text with masked previews for display.
 // The owner can see partial secrets (e.g., "AKIA***7EXAMPLE") while the
@@ -122,22 +94,15 @@ func renderSecrets(text string, reg *redact.Registry) string {
 	}
 
 	result := text
+	nonce := reg.Nonce()
 	// Find all tokens and replace with masked previews
 	for _, match := range redact.TokenPattern.FindAllString(text, -1) {
-		// Parse token to get index
-		parts := redact.TokenPattern.FindStringSubmatch(match)
-		if len(parts) < 1 {
+		// Parse token to get index using TokensForNonce
+		_, indexes := redact.TokensForNonce(match, nonce)
+		if len(indexes) == 0 {
 			continue
 		}
-		// Extract index from token [[OCSEC:nonce:idx]]
-		idxStr := match[len("[[OCSEC:")+6 : len(match)-3] // skip nonce, get :idx]
-		idxStr = idxStr[strings.Index(idxStr, ":")+1:]     // remove nonce part
-		idx := 0
-		for _, c := range idxStr {
-			if c >= '0' && c <= '9' {
-				idx = idx*10 + int(c-'0')
-			}
-		}
+		idx := indexes[0]
 
 		if entry, ok := reg.Lookup(idx); ok {
 			preview := redact.MaskedPreview(entry.Value)
