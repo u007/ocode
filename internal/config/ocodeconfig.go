@@ -82,6 +82,7 @@ type OcodeConfig struct {
 	CommitMsgModel    string
 	CommitMsgPrompt   string
 	TUI               TUIConfig
+	MaxSteps          int               `json:"max_steps,omitempty"`
 	Extra             map[string]json.RawMessage
 }
 
@@ -217,6 +218,7 @@ type ocodeConfigFile struct {
 	CommitMsgModel    string               `json:"commit_msg_model,omitempty"`
 	CommitMsgPrompt   string               `json:"commit_msg_prompt,omitempty"`
 	TUI               tuiConfigFile        `json:"tui"`
+	MaxSteps          int                  `json:"max_steps,omitempty"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -438,6 +440,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "tui")
 	}
 
+	if _, ok := raw["max_steps"]; ok {
+		if file.MaxSteps > 0 {
+			cfg.MaxSteps = file.MaxSteps
+		}
+		delete(raw, "max_steps")
+	}
+
 	if cfg.Extra == nil {
 		cfg.Extra = make(map[string]json.RawMessage)
 	}
@@ -650,11 +659,14 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.CommitMsgPrompt != "" {
 		payload["commit_msg_prompt"] = cfg.CommitMsgPrompt
 	}
+	if cfg.MaxSteps > 0 {
+		payload["max_steps"] = cfg.MaxSteps
+	}
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" || k == "max_steps" {
 			continue
 		}
 		payload[k] = v
@@ -702,6 +714,17 @@ func SaveOcodePermissions(permissions PermissionConfig) error {
 		permissions.Auto = cfg.Permissions.Auto
 	}
 	cfg.Permissions = permissions
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveMaxSteps persists the max steps setting to the ocode config.
+// 0 or negative clears the override (unlimited, default cap of 100 applies).
+func SaveMaxSteps(n int) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.MaxSteps = n
 	return SaveOcodeConfig(cfg)
 }
 

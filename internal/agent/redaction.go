@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -156,4 +157,22 @@ func RedactMessage(msg Message, sr *SessionRedactor) (Message, error) {
 	}
 
 	return redacted, err
+}
+
+// ResolveToolArgs is a standalone function that resolves OCSEC tokens in tool
+// arguments using a registry. This is used by the agent's executeToolCall.
+func ResolveToolArgs(args json.RawMessage, registry *redact.Registry) json.RawMessage {
+	if registry == nil || len(args) == 0 {
+		return args
+	}
+
+	// Check if there are any tokens in the args
+	argsStr := string(args)
+	if !redact.TokenPattern.MatchString(argsStr) {
+		return args
+	}
+
+	// Resolve the tokens
+	resolved := registry.Resolve(argsStr)
+	return json.RawMessage(resolved)
 }

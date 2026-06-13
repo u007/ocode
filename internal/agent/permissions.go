@@ -1653,6 +1653,17 @@ func classifyInterpreterExecution(command string) (*InterpreterExec, bool) {
 	rest := args
 	if (bin == "bun" || bin == "deno") && len(rest) > 0 && rest[0] == "run" {
 		rest = rest[1:]
+		// `bun run <name>` with a bare (non-path-like) argument executes a
+		// package.json script (e.g. `bun run typecheck`), NOT a file on disk.
+		// Treating it as a script_file makes the interpreter verifier try to
+		// read a non-existent file and deny. Fall through to the normal bash
+		// flow where the "bun run" two-word prefix can be auto-allowed.
+		// Only a path-like argument (`bun run ./x.ts`) is a real script file.
+		if bin == "bun" {
+			if entry := firstNonFlagArg(rest); entry == "" || !isPathLikeScript(entry) {
+				return nil, false
+			}
+		}
 	}
 	// Bun/Deno built-in subcommands (other than run) are not script file
 	// executions. They are handled by the normal bash permission flow

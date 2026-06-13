@@ -19,6 +19,7 @@ import (
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/mcp"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -88,6 +89,9 @@ type Agent struct {
 	runs        *AgentRunRegistry
 	stopCh      chan struct{}
 	stopMu      sync.Mutex
+	// redactionRegistry, when non-nil, is used to resolve OCSEC tokens in
+	// tool arguments back to original values before tool execution.
+	redactionRegistry *redact.Registry
 	// advisorEnabled is a runtime gate for the "advisor" tool. It is seeded
 	// from cfg.Ocode.Advisor.Enabled at construction and can be flipped at
 	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.
@@ -1086,6 +1090,11 @@ func (a *Agent) SetMode(m Mode) {
 	a.mode = m
 }
 
+// SetRedactionRegistry sets the registry for resolving OCSEC tokens in tool args.
+func (a *Agent) SetRedactionRegistry(reg *redact.Registry) {
+	a.redactionRegistry = reg
+}
+
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
 	if deny, ok := gateToolCall(a.Mode(), name, args); !ok {
 		return deny, nil
@@ -2078,6 +2087,13 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, erro
 		return fmt.Sprintf("pre-hook blocked: %v", err), nil
 	}
 
+	// Resolve any OCSEC tokens in tool arguments back to original values
+	// This allows tools to work with the real secrets after LLM processing
+	if a.redactionRegistry != nil {
+		resolved := a.redactionRegistry.Resolve(string(args))
+		args = json.RawMessage(resolved)
+	}
+
 	if a.pipeline != nil {
 		args = a.pipeline.RunToolBefore(name, args)
 	}
@@ -2207,6 +2223,18 @@ func (a *Agent) SetSpec(spec *AgentSpec) {
 		a.maxSteps = spec.MaxSteps
 	}
 	a.applySpecModel(spec)
+}
+
+// SetMaxSteps overrides the runtime step limit. 0 or negative means unlimited
+// (the step loop applies a default cap of 100).
+func (a *Agent) SetMaxSteps(n int) {
+	a.maxSteps = n
+}
+
+// GetMaxSteps returns the current runtime step limit. 0 means unlimited
+// (default cap of 100 applies in the step loop).
+func (a *Agent) GetMaxSteps() int {
+	return a.maxSteps
 }
 
 // applySpecModel swaps the active LLM client when the spec declares a Model

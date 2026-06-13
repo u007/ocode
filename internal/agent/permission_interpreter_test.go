@@ -27,6 +27,9 @@ func TestClassifyInterpreterExecution(t *testing.T) {
 		{"stdin_pipe", "python - < job.py", true, "python", "stdin_pipe", "job.py", ""},
 		{"node_script", "node script.js", true, "javascript", "script_file", "script.js", ""},
 		{"bun_run_file", "bun run ./x.ts", true, "javascript", "script_file", "./x.ts", ""},
+		// `bun run <name>` with a bare arg is a package.json script, not a file.
+		{"bun_run_script_name", "bun run typecheck", false, "", "", "", ""},
+		{"bun_run_script_name_args", "bun run build --watch", false, "", "", "", ""},
 		{"deno_run", "deno run app.ts", true, "javascript", "script_file", "app.ts", ""},
 		{"inline_eval", `node -e "console.log(1)"`, true, "javascript", "inline_eval", "", ""},
 		{"python_inline", `python -c "print(1)"`, true, "python", "inline_eval", "", ""},

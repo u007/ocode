@@ -12,6 +12,7 @@ import (
 	"github.com/u007/ocode/internal/commands"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/redact"
 )
 
 type commandSpec struct {
@@ -91,7 +92,8 @@ func init() {
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
-		{name: "/mask", usage: "/mask [on|off|status]", help: "Toggle secret redaction or show status", handler: runMaskCmd},
+		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
+		{name: "/mask", usage: "/mask [on|off|status|model <name>|list]", help: "Toggle secret redaction, set tier-2 model, or list registered secrets", handler: runMaskCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -983,8 +985,49 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			state = "enabled"
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Secret redaction: %s", state)})
+	case "model":
+		// Show or set the tier-2 scanning model
+		if len(args) > 1 {
+			// Set model
+			if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) { rc.Model = args[1] }); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+				return nil
+			}
+			m.redactionModel = args[1]
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", args[1])})
+		} else {
+			// Show current model
+			model := m.redactionModel
+			if model == "" {
+				model = "(not configured - tier-2 scanning disabled)"
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", model)})
+		}
+	case "list":
+		// List registered secrets
+		if m.redactionRegistry == nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "No secrets registered in this session."})
+		} else {
+			entries := m.redactionRegistry.All()
+			if len(entries) == 0 {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "No secrets registered in this session."})
+			} else {
+				var b strings.Builder
+				b.WriteString(fmt.Sprintf("Registered secrets (%d):\n", len(entries)))
+				for _, e := range entries {
+					preview := redact.MaskedPreview(e.Value)
+					b.WriteString(fmt.Sprintf("  %d. %s [%s]\n", e.FirstSeenAt, preview, e.Kind))
+				}
+				m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+			}
+		}
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|model <name>|list]"})
 	}
+	return nil
+}
+
+func runMaxStepCmd(m *model, args []string) tea.Cmd {
+	m.handleMaxStepCmd(args)
 	return nil
 }
