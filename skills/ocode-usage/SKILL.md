@@ -391,6 +391,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/session` | `/s` | Switch or resume a different session | Lists recent sessions with preview |
 | `/config` | | Open configuration editor (TUI) | Edit compact, permissions, editor settings |
 | `/help` | `/?` | Show this help / available commands | |
+| `/learn` | | List project-root skills and guide skill creation/update | Starts from current project-root skills; deeper discovery should be delegated only when needed |
 
 ### Command Palette (`Ctrl+P`)
 

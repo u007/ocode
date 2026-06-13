@@ -70,6 +70,7 @@ func init() {
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
 		{name: "/init", usage: "/init [focus]", help: "Analyze project and generate AGENTS.md", handler: runInitCmd},
+		{name: "/learn", usage: "/learn [focus]", help: "List project-root skills and guide skill creation/update", handler: runLearnCmd},
 		{name: "/help", help: "Show this help", handler: runHelpCmd},
 		{name: "/themes", aliases: []string{"/theme"}, usage: "/themes [name]", help: "Choose or switch themes", handler: runThemesCmd},
 		{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
@@ -93,7 +94,7 @@ func init() {
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
-		{name: "/mask", usage: "/mask [on|off|status|model <name>|list]", help: "Toggle secret redaction, set tier-2 model, or list registered secrets", handler: runMaskCmd},
+		{name: "/mask", usage: "/mask [on|off|status|model|list]", help: "Show active model, toggle secret redaction, or open model picker", handler: runMaskCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -286,6 +287,10 @@ func runDetailsCmd(m *model, args []string) tea.Cmd {
 
 func runInitCmd(m *model, args []string) tea.Cmd {
 	return m.handleInitCmd(args)
+}
+
+func runLearnCmd(m *model, args []string) tea.Cmd {
+	return m.handleLearnCmd(args)
 }
 
 func runHelpCmd(m *model, args []string) tea.Cmd {
@@ -951,17 +956,17 @@ func runIDECmd(m *model, args []string) tea.Cmd {
 
 func runMaskCmd(m *model, args []string) tea.Cmd {
 	if len(args) == 0 {
-		// Toggle
-		err := m.toggleRedaction()
-		if err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error toggling redaction: %v", err)})
-			return nil
+		// Show current model and redaction status
+		model := m.currentModelName()
+		state := "disabled"
+		if m.redactionEnabled {
+			state = "enabled"
 		}
-		state := "enabled"
-		if !m.redactionEnabled {
-			state = "disabled"
+		tier2 := m.redactionModel
+		if tier2 == "" {
+			tier2 = "(not configured)"
 		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Secret redaction: %s", state)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Active model: %s\nSecret redaction: %s\nTier-2 scanning model: %s", model, state, tier2)})
 		return nil
 	}
 	switch strings.ToLower(args[0]) {
@@ -984,25 +989,18 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 		if m.redactionEnabled {
 			state = "enabled"
 		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Secret redaction: %s", state)})
-	case "model":
-		// Show or set the tier-2 scanning model
-		if len(args) > 1 {
-			// Set model
-			if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) { rc.Model = args[1] }); err != nil {
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
-				return nil
-			}
-			m.redactionModel = args[1]
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", args[1])})
-		} else {
-			// Show current model
-			model := m.redactionModel
-			if model == "" {
-				model = "(not configured - tier-2 scanning disabled)"
-			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", model)})
+		tier2 := m.redactionModel
+		if tier2 == "" {
+			tier2 = "(not configured)"
 		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Secret redaction: %s\nTier-2 scanning model: %s", state, tier2)})
+	case "model":
+		// Open the model picker (no model name given) or set the active model
+		if len(args) > 1 {
+			return m.handleModelCmd(args[1:])
+		}
+		m.openModelPicker()
+		return nil
 	case "list":
 		// List registered secrets
 		if m.redactionRegistry == nil {
@@ -1022,7 +1020,7 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			}
 		}
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|model <name>|list]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|model|list]"})
 	}
 	return nil
 }
