@@ -1014,9 +1014,9 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			} else {
 				var b strings.Builder
 				b.WriteString(fmt.Sprintf("Registered secrets (%d):\n", len(entries)))
-				for _, e := range entries {
+				for i, e := range entries {
 					preview := redact.MaskedPreview(e.Value)
-					b.WriteString(fmt.Sprintf("  %d. %s [%s]\n", e.FirstSeenAt, preview, e.Kind))
+					b.WriteString(fmt.Sprintf("  %d. %s [%s]\n", i+1, preview, e.Kind))
 				}
 				m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 			}
