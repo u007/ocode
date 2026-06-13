@@ -35,6 +35,7 @@ import (
 	"github.com/u007/ocode/internal/ide"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/skill"
@@ -555,9 +556,18 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	if next != nil && m.advisorEnabledSet {
 		next.SetAdvisorEnabled(m.advisorEnabled)
 	}
+	// Apply persisted max steps override from config (takes precedence over
+	// agent-spec default).
+	if next != nil && m.config != nil && m.config.Ocode.MaxSteps > 0 {
+		next.SetMaxSteps(m.config.Ocode.MaxSteps)
+	}
 	m.agent = next
 	if m.agent != nil {
 		m.agent.SetSupervisor(m.supervisor)
+		// Wire redaction registry for tool arg resolution
+		if m.redactionRegistry != nil {
+			m.agent.SetRedactionRegistry(m.redactionRegistry)
+		}
 	}
 	// Keep the RC bridge pointed at the live agent so web-side runtime toggles
 	// (advisor on/off) follow agent switches.
@@ -823,6 +833,7 @@ type model struct {
 	// Secret redaction state (see internal/redact).
 	redactionEnabled bool
 	redactionModel   string // local model for tier-2 scanning
+	redactionRegistry *redact.Registry // session registry for token resolution
 }
 
 type modelCleanupState struct {
@@ -1359,6 +1370,11 @@ func newModel(opts ...RunOptions) model {
 		a.LoadExternalTools(cfg)
 	}
 
+	// Apply persisted max steps to the agent
+	if a != nil && cfg != nil && cfg.Ocode.MaxSteps > 0 {
+		a.SetMaxSteps(cfg.Ocode.MaxSteps)
+	}
+
 	sup := tool.NewProcessSupervisor(tool.ProcessSupervisorOptions{GracePeriod: 5 * time.Second})
 	if a != nil {
 		a.SetSupervisor(sup)
@@ -1368,6 +1384,15 @@ func newModel(opts ...RunOptions) model {
 	if a != nil {
 		a.SetHooks(hp)
 		tool.SetHookPipeline(hp)
+	}
+
+	// Initialize redaction registry
+	var reg *redact.Registry
+	if cfg != nil && cfg.Ocode.Security.Redaction.Enabled {
+		reg = redact.NewRegistry(redact.NewNonce())
+		if a != nil {
+			a.SetRedactionRegistry(reg)
+		}
 	}
 
 	ta := textarea.New()
@@ -1414,11 +1439,19 @@ func newModel(opts ...RunOptions) model {
 		config:            cfg,
 		// IDE mode: an explicit config value wins; otherwise auto-enable the
 		// Claude Code integration only when running inside a VS Code terminal.
-		ideMode:      resolveInitialIDEMode(cfg),
-		agent:        a,
-		sessionID:    o.SessionID,
-		showThinking: true,
-		showSidebar:  true,
+		ideMode:           resolveInitialIDEMode(cfg),
+		agent:             a,
+		sessionID:         o.SessionID,
+		showThinking:      true,
+		showSidebar:       true,
+		redactionEnabled:  cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
+		redactionModel: func() string {
+			if cfg != nil {
+				return cfg.Ocode.Security.Redaction.Model
+			}
+			return ""
+		}(),
+		redactionRegistry: reg,
 		activeModel: func() string {
 			if cfg != nil {
 				return cfg.Model
@@ -6725,6 +6758,58 @@ func (m *model) handleSmallModelCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model updated to %s\nPersisted to config for next session.", args[0])})
 }
 
+func (m *model) handleMaxStepCmd(args []string) {
+	if len(args) == 0 {
+		// Show current value
+		var b strings.Builder
+		b.WriteString("⚙ Max Steps\n")
+		b.WriteString(strings.Repeat("─", 30) + "\n\n")
+		current := 100 // default if unset
+		if m.config != nil && m.config.Ocode.MaxSteps > 0 {
+			current = m.config.Ocode.MaxSteps
+		}
+		if m.agent != nil {
+			agentVal := m.agent.GetMaxSteps()
+			if agentVal > 0 {
+				current = agentVal
+			}
+		}
+		b.WriteString(fmt.Sprintf("Current max steps: %d\n\n", current))
+		b.WriteString("The agent will stop after reaching this many tool-call iterations and produce a summary.\n")
+		b.WriteString("\nUsage: /max-step <number>\n")
+		b.WriteString("  /max-step 0    — unlimited (default cap 100 applies)\n")
+		b.WriteString("  /max-step 50   — limit to 50 tool-call iterations\n")
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return
+	}
+
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Invalid number: %q. Please provide a non-negative integer.", args[0])})
+		return
+	}
+
+	// Apply to the runtime agent
+	if m.agent != nil {
+		m.agent.SetMaxSteps(n)
+	}
+
+	// Persist to config
+	if m.config != nil {
+		m.config.Ocode.MaxSteps = n
+	}
+	if err := config.SaveMaxSteps(n); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to persist max steps: %v (in-memory value still active for this session)", err)})
+		return
+	}
+
+	if n == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Max steps set to 0 (unlimited — default cap of 100 steps applies).\nPersisted to config."})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Max steps set to %d.\nPersisted to config.", n)})
+	}
+}
+
 // handlePermissionModelCmd handles /permissions model [test|<provider/model>|auto].
 // With no args it shows the current permission model and opens the model picker.
 // With "test" it runs a series of permission checks against the configured model.
@@ -7673,7 +7758,16 @@ func (m model) prepareAgentMessages(msgs []agent.Message) []agent.Message {
 	if m.agent == nil {
 		return msgs
 	}
-	return m.agent.PrepareMessages(msgs, m.buildSelectionContext())
+	result := m.agent.PrepareMessages(msgs, m.buildSelectionContext())
+	// Apply secret redaction to user messages before sending to agent
+	if m.redactionEnabled && m.redactionRegistry != nil {
+		for i := range result {
+			if result[i].Role == "user" && result[i].Content != "" {
+				result[i].Content = redactText(result[i].Content, m.redactionRegistry)
+			}
+		}
+	}
+	return result
 }
 
 func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
@@ -8059,6 +8153,12 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	if req.Summary != "" {
 		lines = append(lines, "Model summary:")
 		lines = append(lines, req.Summary)
+		lines = append(lines, "")
+	}
+	// Secret redaction: warn about potential egress commands
+	if agent.IsEgressCommand(req.ToolName) {
+		lines = append(lines, "⚠️  EGRESS WARNING: This command may send data externally")
+		lines = append(lines, "Secrets will be redacted before sending to the LLM")
 		lines = append(lines, "")
 	}
 	lines = append(lines, permissionRequestSummary(req))
@@ -9744,6 +9844,10 @@ func (m *model) renderTranscript() {
 }
 
 func (m *model) renderUserText(text string) string {
+	// Apply renderSecrets to show masked previews instead of raw tokens
+	if m.redactionRegistry != nil {
+		text = renderSecrets(text, m.redactionRegistry)
+	}
 	content := renderMarkdownBold(text, m.styles.Text)
 	bubbleWidth := m.viewport.Width() - 6
 	if bubbleWidth < 12 {
@@ -11051,6 +11155,10 @@ func formatTokenCount(n int64) string {
 }
 
 func (m model) renderAssistantText(text string) string {
+	// Apply renderSecrets to show masked previews instead of raw tokens
+	if m.redactionRegistry != nil {
+		text = renderSecrets(text, m.redactionRegistry)
+	}
 	var b strings.Builder
 	for {
 		start, tagLen := findThinkingStart(text)
