@@ -101,17 +101,23 @@ func (a *Agent) environmentPrompt() string {
 	if modelID == "" {
 		modelID = "unknown"
 	}
-	return strings.Join([]string{
+	lines := []string{
 		fmt.Sprintf("You are powered by the model named %s.", modelID),
 		"Here is some useful information about the environment you are running in:",
 		"<env>",
 		fmt.Sprintf("  Working directory: %s", cwd),
 		fmt.Sprintf("  Workspace root folder: %s", root),
 		fmt.Sprintf("  Is directory a git repo: %s", yesNo(isGitRepo(root))),
+	}
+	if isGitRepo(root) {
+		lines = append(lines, "  Git worktree directory: .worktrees/ (gitignored, project root)")
+	}
+	lines = append(lines,
 		fmt.Sprintf("  Platform: %s", runtime.GOOS),
 		fmt.Sprintf("  Today's date: %s", time.Now().Format("Mon Jan 2 2006")),
 		"</env>",
-	}, "\n")
+	)
+	return strings.Join(lines, "\n")
 }
 
 func existingPromptMarkers(messages []Message) map[string]bool {

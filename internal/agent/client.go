@@ -529,6 +529,7 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 	msg.Usage = usage
 	if usage != nil {
 		msg.Spend = usage.Spend(msg.Model)
+		usage.DebugLog(msg.Model)
 	}
 	return msg, nil
 }
@@ -610,6 +611,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	msg.Usage = usage
 	if usage != nil {
 		msg.Spend = usage.Spend(msg.Model)
+		usage.DebugLog(msg.Model)
 	}
 	return msg, nil
 }
@@ -1639,6 +1641,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		} else if usage != nil {
 			msg.Usage = usage
 			msg.Spend = usage.Spend(msg.Model)
+			usage.DebugLog(msg.Model)
 		}
 	}
 	return msg, nil
@@ -2727,6 +2730,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	msg.Usage = usage
 	if usage != nil {
 		msg.Spend = usage.Spend(msg.Model)
+		usage.DebugLog(msg.Model)
 	}
 	return msg, nil
 }
