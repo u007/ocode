@@ -264,6 +264,9 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("advisor call failed: %w", err)
 	}
+	if t.mainAgent != nil {
+		t.mainAgent.RecordSideUsageFromMessages(resp)
+	}
 
 	// Extract all assistant messages into the final advice.
 	var b strings.Builder
@@ -386,4 +389,3 @@ func executeClaudeCodeAdvisor(modelName, prompt, workDir string) (string, error)
 
 	return result, nil
 }
-

@@ -199,6 +199,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/advisor` | | Set the advisor model for strategic guidance |
 | `/compact` | `[focus]` | Manually compact context; optional focus guides summary |
 | `/review` | | AI code review of working dir, file, commit, branch, or PR |
+| `/standup` | `/catchup` | Caveman summary of recent commits + pending changes, with sorted TODOs and missed stubs |
 | `/session` | `/s`, `/resume` | List, pick, resume sessions |
 | `/export` | | Export session as JSON (full transcript) |
 | `/export-claude` | | Export in Claude Code compatible format |
@@ -409,6 +410,32 @@ internal/usage/            Token usage tracking
 internal/version/          Version info
 docs/                      Design specs, plans, and enhancement proposals
 ```
+
+---
+
+## Disclaimer
+
+### `/mask` — Secret Redaction
+
+ocode includes a **secret redaction system** (`/mask`) that detects and masks common credential patterns (API keys, tokens, private keys, etc.) before they are sent to the LLM provider. It supports tier-1 regex detection, tier-2 local model scanning, and custom words in a local vault.
+
+#### `/mask mode` — Controlling LLM Scan Aggressiveness
+
+The `/mask mode` command controls how aggressively the tier-2 LLM scanner is invoked on typed user messages:
+
+| Surface | lenient (default) | full |
+|---------|-------------------|------|
+| Typed user message | tier-2 LLM only if input contains a sensitive keyword or a known value-pattern (QuickScan) | tier-2 LLM **always** |
+| Sensitive file read (`.env`, `*.pem`, …) | tier-2 **LLM** always | tier-2 **LLM** always |
+| Other tool results (DB/bash/normal reads) | chat-mode **regex** only (no LLM) | chat-mode **regex** only (no LLM) |
+| All messages, every step | tier-1 regex safety net (unchanged) | tier-1 regex safety net (unchanged) |
+
+- **Mode** governs only the *typed user message* aggressiveness.
+- **Sensitive file reads** (`.env`, `.pem`, `id_rsa*`, etc.) always use the LLM in both modes — these files often contain values without known formats that only the LLM catches.
+- **DB/bash output** uses fast keyword+entropy regex only (no LLM). Known gaps: a value after a keyword (`password`, `secret`, …) is only flagged when it is high-entropy, so low-entropy/dictionary passwords (`password=hunter2`) and values containing shell metacharacters (e.g. `$`) are missed, as is tabular output with no `=`/`:` delimiter (e.g. `| password | hunter2 |`).
+- **No model configured:** if redaction is enabled but no tier-2 model is set, scanning is regex-only (tier-1 + chat-mode tool-result regex). Set a model with `/mask model` to enable LLM tier-2.
+
+**However, no automated system is perfect.** While we actively work to improve coverage, the redactor may occasionally miss secrets, especially non-standard formats, user-specific tokens, or credentials embedded in unusual contexts. **The `/mask` feature is a best-effort safeguard — it does not guarantee 100% prevention of secret exposure.** Always review what you share with LLM providers and rotate credentials regularly.
 
 ---
 

@@ -386,6 +386,9 @@ func (t TaskTool) executeSubAgentWithTranscript(name string, subAgent *Agent, me
 	if err != nil {
 		return "", nil, err
 	}
+	if t.mainAgent != nil {
+		t.mainAgent.RecordSideUsageFromMessages(resp)
+	}
 	var b strings.Builder
 	for _, m := range resp {
 		if m.Role == "assistant" && m.Content != "" {

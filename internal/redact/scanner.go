@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -39,6 +40,46 @@ func IsLocalEndpoint(baseURL string) bool {
 	return ip.IsLoopback()
 }
 
+// QuickSecretPatterns returns a compiled regex matching common secret formats.
+// Used as a fast pre-pass before the expensive LLM tier-2 scan. When the regex
+// finds nothing the message is almost certainly clean, and the LLM scan can be
+// skipped (configurable via skip_llm_if_clean).
+var QuickSecretPatterns = regexp.MustCompile(`(?i)` +
+	// AWS keys (AKIA..., ASIA..., etc.)
+	`(?:AKIA|ASIA|ABIA|ACCA|APKA|AIDA|AIPA|ANPA|ANVA|APKA)[0-9A-Z]{16}` + `|` +
+	// OpenAI / Anthropic / generic API keys
+	`sk-[A-Za-z0-9]{20,}` + `|` +
+	`sk-ant-[A-Za-z0-9]{20,}` + `|` +
+	// GitHub tokens (ghp_, gho_, ghu_, ghs_, ghf_)
+	`gh[posuf]_[A-Za-z0-9]{36,}` + `|` +
+	// GitLab tokens
+	`glpat-[A-Za-z0-9\-]{20,}` + `|` +
+	// Slack tokens
+	`(?:xox[bprsa]-[A-Za-z0-9\-]{10,})` + `|` +
+	// Google API keys
+	`AIza[0-9A-Za-z\-_]{35}` + `|` +
+	// Heroku API keys
+	`[hH][eE][rR][oO][kK][uU].*[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}` + `|` +
+	// Generic "password", "secret", "token" assignments in code
+	`["\']?(?:password|passwd|pwd|secret|token|api[_-]?key)["\']?\s*[:=]\s*["\'][^"\']{8,}["\']` + `|` +
+	// PEM / SSH private key blocks
+	`-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----` + `|` +
+	// JWT tokens (three base64url segments separated by dots)
+	`eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_]{10,}` + `|` +
+	// Stripe live/test keys
+	`(?:rk|sk)_(?:live|test)_[A-Za-z0-9]{10,}` + `|` +
+	// Twilio / SendGrid / generic alphanumeric with prefix patterns
+	`(?:SG\.[A-Za-z0-9\-_]{20,}|SK[A-Za-z0-9]{32,})`,
+)
+
+// QuickScan runs a fast regex-based check for common secret patterns.
+// Returns true if any potential secret is found, indicating the message
+// warrants a more expensive LLM tier-2 scan (or manual review).
+// False means the message passed the quick check and is almost certainly clean.
+func QuickScan(text string) bool {
+	return QuickSecretPatterns.MatchString(text)
+}
+
 // parseIP parses an IP address string.
 func parseIP(s string) net.IP {
 	ip := net.ParseIP(s)
@@ -47,8 +88,9 @@ func parseIP(s string) net.IP {
 
 // LLMScanner scans text using a local LLM.
 type LLMScanner struct {
-	BaseURL string
-	Model   string
+	BaseURL     string
+	Model       string
+	AllowRemote bool
 }
 
 // scanRequest is the request payload for the OpenAI-compatible API.
@@ -73,7 +115,10 @@ type scanChoice struct {
 
 // Scan sends the masked text to a local LLM for tier-2 scanning.
 func (s *LLMScanner) Scan(maskedText string) ([]Span, error) {
-	if !IsLocalEndpoint(s.BaseURL) {
+	if s == nil {
+		return nil, fmt.Errorf("scanner: nil scanner")
+	}
+	if !s.AllowRemote && !IsLocalEndpoint(s.BaseURL) {
 		return nil, fmt.Errorf("scanner: endpoint %q is not local (security policy)", s.BaseURL)
 	}
 

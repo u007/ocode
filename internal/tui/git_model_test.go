@@ -127,6 +127,23 @@ func TestParseHunks(t *testing.T) {
 	}
 }
 
+func TestGitRunPreservesTrailingWhitespaceInDiff(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	writeFileForGitTest(t, dir, "spaces.txt", "   \n")
+	gitRunForTest(t, dir, "add", "--", "spaces.txt")
+	gitRunForTest(t, dir, "commit", "-m", "add spaces")
+	gitRunForTest(t, dir, "rm", "spaces.txt")
+
+	m := gitModel{workDir: dir}
+	out, err := m.gitRun("diff", "--no-color", "--cached", "--", "spaces.txt")
+	if err != nil {
+		t.Fatalf("git diff failed: %v", err)
+	}
+	if !strings.Contains(out, "-   ") {
+		t.Fatalf("expected diff to preserve whitespace-only deleted line, got:\n%s", out)
+	}
+}
+
 func TestGitStagePathStartingWithDashUsesPathSeparator(t *testing.T) {
 	dir := initGitRepoForPathSeparatorTest(t)
 	writeFileForGitTest(t, dir, "--all", "dash\n")

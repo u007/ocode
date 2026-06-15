@@ -61,6 +61,7 @@ func init() {
 		{name: "/compact", usage: "/compact [focus]", help: "Summarise older context to free tokens; optional focus guides the summary", handler: runCompactCmd},
 		{name: "/recap", help: "Summarize conversation in caveman style (uses small model)", handler: runRecapCmd},
 		{name: "/changes", help: "Analyze repo changes: diffs, LSP errors, and in-progress specs", handler: runChangesCmd},
+		{name: "/standup", aliases: []string{"/catchup"}, help: "Review recent commits + pending changes: caveman summary + sorted TODOs + missed stubs", handler: runStandupCmd},
 		{name: "/lsp", usage: "/lsp [show|open <path>|errors|all]", help: "Show current LSP diagnostics and error counts", handler: runLSPCmd},
 		{name: "/undo", help: "Revert last file change", handler: runUndoCmd},
 		{name: "/redo", help: "Restore last undone change", handler: runRedoCmd},
@@ -94,7 +95,7 @@ func init() {
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
-		{name: "/mask", usage: "/mask [on|off|status|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
+		{name: "/mask", usage: "/mask [on|off|status|mode [lenient|full]|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -967,13 +968,18 @@ func maskStatusText(m *model, includeHint bool) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Active model: %s\n", activeModel))
 	b.WriteString(fmt.Sprintf("Secret redaction: %s\n", state))
+	b.WriteString(fmt.Sprintf("Scan mode: %s\n", m.redactMode))
 
 	if m.llmScanner != nil {
+		state := "active"
+		if !m.redactionEnabled {
+			state = "inactive (redaction disabled)"
+		}
 		baseURL := m.llmScanner.BaseURL
 		if len(baseURL) > 40 {
 			baseURL = baseURL[:37] + "..."
 		}
-		b.WriteString(fmt.Sprintf("Tier-2 scanner: active (model=%s, base_url=%s)", m.redactionModel, baseURL))
+		b.WriteString(fmt.Sprintf("Tier-2 scanner: %s (model=%s, base_url=%s)", state, m.redactionModel, baseURL))
 	} else if m.redactionModel != "" {
 		b.WriteString(fmt.Sprintf("Tier-2 scanner: inactive (model=%s, base_url not configured)", m.redactionModel))
 	} else {
@@ -981,7 +987,7 @@ func maskStatusText(m *model, includeHint bool) string {
 	}
 
 	if includeHint {
-		b.WriteString("\n\nTry: /mask [on|off|status|model [name]|list]")
+		b.WriteString("\n\nTry: /mask [on|off|status|mode [lenient|full]|model [name]|list]")
 	}
 	return b.String()
 }
@@ -993,30 +999,39 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 	}
 	switch strings.ToLower(args[0]) {
 	case "on", "true", "yes", "enable":
-		if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) { rc.Enabled = true }); err != nil {
+		if err := m.setRedactionEnabled(true); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
 			return nil
 		}
-		m.redactionEnabled = true
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Secret redaction: enabled"})
 	case "off", "false", "no", "disable":
-		if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) { rc.Enabled = false }); err != nil {
+		if err := m.setRedactionEnabled(false); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
 			return nil
 		}
-		m.redactionEnabled = false
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Secret redaction: disabled"})
 	case "status":
 		m.messages = append(m.messages, message{role: roleAssistant, text: maskStatusText(m, false)})
+	case "mode":
+		// Show or set the redaction mode (lenient/full)
+		if len(args) > 1 {
+			mode := strings.ToLower(args[1])
+			if err := m.setRedactionMode(mode); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+				return nil
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Scan mode: %s", mode)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Current mode: %s\n\n• lenient — LLM scans only when input contains a sensitive keyword or value pattern\n• full — LLM scans every message", m.redactMode)})
+		}
 	case "model":
 		// Show or set the tier-2 scanning model
 		if len(args) > 1 {
 			// Set model
-			if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) { rc.Model = args[1] }); err != nil {
+			if err := m.setRedactionModel(args[1]); err != nil {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
 				return nil
 			}
-			m.redactionModel = args[1]
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", args[1])})
 		} else {
 			// Open the model picker to select the tier-2 scanning model
@@ -1045,7 +1060,7 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			}
 		}
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|model [name]|list]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mask [on|off|status|mode [lenient|full]|model [name]|list]"})
 	}
 	return nil
 }

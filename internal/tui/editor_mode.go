@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -108,6 +109,44 @@ func shellQuote(s string) string {
 }
 
 type teaCmdBuilder func() *exec.Cmd
+
+// editorArgsWithLine builds argv for opening path at lineNo in editor.
+// Returns nil when lineNo <= 0 so callers can fall back to the plain opener.
+func editorArgsWithLine(editor, path string, lineNo int) []string {
+	if lineNo <= 0 {
+		return nil
+	}
+	parts := strings.Fields(editor)
+	if len(parts) == 0 {
+		return nil
+	}
+	bin := filepath.Base(parts[0])
+	switch bin {
+	case "code", "code-insiders":
+		// VS Code: code -g file:line
+		return append(parts, "-g", fmt.Sprintf("%s:%d", path, lineNo))
+	case "vim", "nvim", "vi", "gvim", "mvim":
+		// Vim family: nvim +line file
+		args := make([]string, 0, len(parts)+2)
+		args = append(args, parts[0])
+		args = append(args, parts[1:]...)
+		args = append(args, fmt.Sprintf("+%d", lineNo), path)
+		return args
+	case "hx":
+		// Helix: hx file:line
+		return append(parts, fmt.Sprintf("%s:%d", path, lineNo))
+	case "nano", "emacs", "emacsclient":
+		// nano/emacs: binary +line [extra_args] file
+		args := make([]string, 0, len(parts)+2)
+		args = append(args, parts[0])
+		args = append(args, fmt.Sprintf("+%d", lineNo))
+		args = append(args, parts[1:]...)
+		args = append(args, path)
+		return args
+	default:
+		return nil
+	}
+}
 
 func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.ProcessSupervisor) func(string) tea.Cmd {
 	if mode != config.EditorModeTmuxSplit && mode != config.EditorModeTmuxWindow {

@@ -95,6 +95,7 @@ export interface AgentRunMessage {
   content: string;
   toolCalls?: { name: string; arguments: string }[];
   toolCallId?: string;
+  reasoningContent?: string;
 }
 
 export interface GitDiffFile {

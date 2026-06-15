@@ -248,7 +248,7 @@ func (m *gitModel) gitRun(args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = m.workDir
 	out, err := cmd.Output()
-	return strings.TrimSpace(string(out)), err
+	return strings.TrimRight(string(out), "\r\n"), err
 }
 
 func (m *gitModel) gitRunTimeout(timeout time.Duration, args ...string) (string, error) {
@@ -257,7 +257,7 @@ func (m *gitModel) gitRunTimeout(timeout time.Duration, args ...string) (string,
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = m.workDir
 	out, err := cmd.Output()
-	return strings.TrimSpace(string(out)), err
+	return strings.TrimRight(string(out), "\r\n"), err
 }
 
 func (m *gitModel) aheadBehindString() string {

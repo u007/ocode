@@ -2,10 +2,18 @@ package redact
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 func TestIsLocalEndpoint(t *testing.T) {
 	tests := []struct {
@@ -40,6 +48,41 @@ func TestLLMScannerNonLocal(t *testing.T) {
 	_, err := scanner.Scan("test text")
 	if err == nil {
 		t.Error("Expected error for non-local endpoint")
+	}
+}
+
+func TestLLMScannerRemoteAllowed(t *testing.T) {
+	oldTransport := http.DefaultClient.Transport
+	defer func() { http.DefaultClient.Transport = oldTransport }()
+
+	http.DefaultClient.Transport = roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodPost {
+			return nil, io.EOF
+		}
+		body := `{"choices":[{"message":{"role":"assistant","content":"[\"actual-secret-value\"]"}}]}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})
+
+	scanner := &LLMScanner{
+		BaseURL:     "https://api.openai.com/v1",
+		Model:       "gpt-4",
+		AllowRemote: true,
+	}
+
+	spans, err := scanner.Scan("text with actual-secret-value")
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	if len(spans) != 1 {
+		t.Fatalf("Expected 1 span, got %d", len(spans))
+	}
+	if spans[0].Kind != "model" {
+		t.Errorf("Expected kind model, got %s", spans[0].Kind)
 	}
 }
 

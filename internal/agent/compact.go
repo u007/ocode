@@ -594,7 +594,7 @@ func truncateForSummary(s string, max int) string {
 // retryable; if retries are exhausted the best malformed response is still
 // returned (with a debug warning) rather than failing the whole compaction.
 // It is intentionally synchronous; callers run it from a goroutine.
-func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries int) (string, error) {
+func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries int, recordUsage func(*Message)) (string, error) {
 	if client == nil {
 		return "", errors.New("compact: no summary client")
 	}
@@ -626,6 +626,9 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 					err     error
 				}{"", err}
 				return
+			}
+			if recordUsage != nil {
+				recordUsage(resp)
 			}
 			done <- struct {
 				content string

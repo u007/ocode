@@ -384,6 +384,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/clear` | | Start a fresh conversation context in the current session | Keeps session history on disk; only clears in-memory messages |
 | `/compact` | | Manually trigger context compaction when approaching token limits | Uses the configured summary model (default: active model) |
 | `/recap` | | Generate a structured session recap (Goal, Progress, Decisions, Next Steps, Files) | **Web UI only** — backend endpoint planned but not yet implemented. In TUI, acts as a normal prompt. |
+| `/standup` | `/catchup` | Caveman summary of recent commits + pending changes, with TODOs sorted (easy first, then high priority) and missed stubs flagged | TUI; reviews last 5 commits + working-tree changes. Works on a clean tree (commit-only summary). |
 | `/export` | | Export the full session as JSON (messages, metadata, token usage) | Output includes full transcript for backup or migration |
 | `/export-claude` | | Export session in Claude Code compatible format | For importing into Claude Code |
 | `/share` | | Generate a shareable link to the current session | Requires `ocode serve` running; creates a session URL |
@@ -392,6 +393,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/config` | | Open configuration editor (TUI) | Edit compact, permissions, editor settings |
 | `/help` | `/?` | Show this help / available commands | |
 | `/learn` | | List project-root skills and guide skill creation/update | Starts from current project-root skills; deeper discovery should be delegated only when needed |
+| `/mask` | | Toggle/configure secret redaction | See `/mask` documentation below |
 
 ### Command Palette (`Ctrl+P`)
 
@@ -427,8 +429,9 @@ The backend implementation is tracked in [the serve full-API plan](docs/superpow
 
 | Mode | Behavior |
 |------|----------|
-| `auto` (default) | Prompt for each tool use |
-| `off` | Auto-approve all (dangerous) |
+| `normal` (default) | Follow tool rules — some auto-allow, some prompt |
+| `yolo` | Auto-approve all permission-gated tools (dangerous) |
+| `locked` | Read-only — all write/edit/bash/network tools denied |
 
 ### YOLO Mode
 
@@ -439,6 +442,91 @@ ocode run --dangerously-skip-permissions "..."  # Alias
 ```
 
 **⚠️ Warning:** YOLO mode allows the agent to run any shell command without confirmation.
+
+### Auto-Permission Layer (Optional)
+
+An LLM-based layer that auto-approves/denies permission prompts without user interaction:
+
+```json
+{
+  "permissions": {
+    "auto": {
+      "enabled": true,
+      "model": "deepseek:deepseek-v4-flash",
+      "allow_destructive": false,
+      "prompt": "Custom system prompt for the auto-permission model",
+      "max_context_bytes": 4096,
+      "max_context_sources": 2,
+      "max_context_lines_per_source": 80,
+      "grants": []
+    }
+  }
+}
+```
+
+**Key constraints:**
+- The auto-permission model can only emit `allow` or `ask` — it **cannot** emit `deny` or widen scope
+- Hard blocks (destructive git, data exfiltration) are deterministic and final — the auto layer cannot override them
+- `allow_destructive: false` instructs the model to conservatively deny operations it cannot confidently approve
+
+### Tool Permission Levels
+
+Every tool/prefix rule resolves to one of:
+
+| Level | Meaning |
+|-------|----------|
+| `allow` | Auto-grant, no prompt |
+| `ask` | Prompt user for approval |
+| `deny` | Hard-block, never proceed |
+
+Default tool rules:
+```
+Always allow:  read, glob, grep, list, lsp, skill, question, todoread, todowrite,
+              advisor, task, task_status, agent_status, repo_overview, plan_enter,
+              plan_exit, wait, bash_output, kill_shell
+
+Default allow: write, edit, multiedit, multi_file_edit, replace_lines,
+              apply_patch, format
+
+Default ask:  delete, bash, webfetch, websearch, repo_clone, mcp_*
+```
+
+Override per-tool in `ocodeconfig.json`:
+```json
+{ "permissions": { "tools": { "bash": "allow", "delete": "deny" } } }
+```
+
+---
+
+## 10.5. Secret Redaction (`/mask`)
+
+ocode includes a **secret redaction system** that detects and masks common credential patterns before they are sent to the LLM provider.
+
+### `/mask` Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `/mask` | Show current redaction status (enabled/disabled, tier-2 scanner state) |
+| `/mask on` | Enable redaction |
+| `/mask off` | Disable redaction |
+| `/mask mode` | Show current scan mode |
+| `/mask mode lenient` | Set lenient mode (default) — LLM scans only when input contains sensitive keywords/value-patterns |
+| `/mask mode full` | Set full mode — LLM scans every typed user message |
+| `/mask model [name]` | Set or show the tier-2 scanning model |
+
+### Scan Modes
+
+| Surface | lenient (default) | full |
+|---------|-------------------|------|
+| Typed user message | tier-2 LLM only if input contains a sensitive keyword or known value-pattern | tier-2 LLM **always** |
+| Sensitive file read (`.env`, `*.pem`, …) | tier-2 **LLM** always | tier-2 **LLM** always |
+| Other tool results (DB/bash/normal reads) | chat-mode **regex** only (no LLM) | chat-mode **regex** only (no LLM) |
+| All messages, every step | tier-1 regex safety net | tier-1 regex safety net |
+
+**Known limitations:**
+- DB/bash secret detection is regex-only. A value after a keyword (`password`, `secret`, …) is only caught when high-entropy, so low-entropy/dictionary passwords (`password=hunter2`) and values with shell metacharacters (`$`) are missed, as is tabular/CSV output without `=`/`:` delimiters.
+- Only the `read` tool gets sensitive-file LLM treatment; `bash cat .env` is treated as generic bash output (regex-only).
+- No tier-2 model configured → scanning is regex-only; set a model with `/mask model` to enable LLM tier-2.
 
 ---
 

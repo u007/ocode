@@ -353,9 +353,11 @@ func modelEntryFor(modelID string) (modelEntry, bool) {
 func ModelCost(modelID string) (pricing.ModelPricing, bool) {
 	m, ok := modelEntryFor(modelID)
 	if !ok {
+		emitDebug("AGENT", fmt.Sprintf("ModelCost: %q not found in registry (model may be custom or unsupported; cost defaults to $0)", modelID))
 		return pricing.ModelPricing{}, false
 	}
 	if m.Cost.Input == 0 && m.Cost.Output == 0 && m.Cost.CacheRead == 0 {
+		emitDebug("AGENT", fmt.Sprintf("ModelCost: %q found but has zero cost in registry", modelID))
 		return pricing.ModelPricing{}, false
 	}
 	return pricing.ModelPricing{

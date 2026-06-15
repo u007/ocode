@@ -670,6 +670,7 @@ func TestRunPermissionModelLoopCancelledShortCircuits(t *testing.T) {
 		nil,
 		"fake-model",
 		"bash",
+		nil,
 	)
 	if gotFinal {
 		t.Fatalf("gotFinal = true; want false when stopCh is cancelled")
