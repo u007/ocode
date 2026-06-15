@@ -64,27 +64,39 @@ const roleChip: Record<string, string> = {
 function messageLine(msg: AgentRunMessage, i: number) {
   const label = msg.role === "user" ? "task" : msg.role === "assistant" ? "agent" : msg.role;
   return (
-    <div key={i} className="flex gap-2 text-xs leading-relaxed">
-      <span
-        className={`mt-px h-fit shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
-          roleChip[msg.role] ?? "bg-zinc-700/40 text-zinc-400"
-        }`}
-      >
-        {label}
-      </span>
-      <div className="min-w-0 flex-1 text-zinc-300">
-        {msg.content && <span className="whitespace-pre-wrap break-words">{msg.content}</span>}
-        {msg.toolCalls?.map((tc, j) => (
-          <div key={j} className="font-mono text-[11px] text-zinc-400">
-            <span className="text-zinc-500">→</span> {tc.name}
-            {tc.arguments ? (
-              <span className="text-zinc-600">({tc.arguments.slice(0, 120)})</span>
-            ) : (
-              <span className="text-zinc-600">()</span>
-            )}
-          </div>
-        ))}
+    <div key={i} className="space-y-1 text-xs leading-relaxed">
+      <div className="flex gap-2">
+        <span
+          className={`mt-px h-fit shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
+            roleChip[msg.role] ?? "bg-zinc-700/40 text-zinc-400"
+          }`}
+        >
+          {label}
+        </span>
+        <div className="min-w-0 flex-1 text-zinc-300">
+          {msg.content && <span className="whitespace-pre-wrap break-words">{msg.content}</span>}
+          {msg.toolCalls?.map((tc, j) => (
+            <div key={j} className="font-mono text-[11px] text-zinc-400">
+              <span className="text-zinc-500">→</span> {tc.name}
+              {tc.arguments ? (
+                <span className="text-zinc-600">({tc.arguments.slice(0, 120)})</span>
+              ) : (
+                <span className="text-zinc-600">()</span>
+              )}
+            </div>
+          ))}
+        </div>
       </div>
+      {msg.reasoningContent && (
+        <div className="ml-[1.75rem] rounded-md border border-zinc-700/60 bg-zinc-900/50 px-2 py-1.5">
+          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+            Thinking
+          </div>
+          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-zinc-400">
+            {msg.reasoningContent}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
@@ -97,9 +109,10 @@ interface RunNodeProps {
 // RunNode is one run row, individually expandable to reveal its messages and
 // nested sub-agent runs (recursively).
 function RunNode({ run, depth }: RunNodeProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const summary = childSummary(run.children);
-  const hasDetail = run.messages.length > 0 || run.children.length > 0;
+  const hasResult = Boolean(run.result?.trim());
+  const hasDetail = run.messages.length > 0 || run.children.length > 0 || hasResult;
   const s = statusStyles(run.status);
   const dur = elapsed(run.startedAt, run.endedAt);
 
@@ -144,6 +157,16 @@ function RunNode({ run, depth }: RunNodeProps) {
           {run.messages.length > 0 && (
             <div className="space-y-1.5 rounded-md bg-zinc-900/70 p-2 ring-1 ring-inset ring-zinc-800/80">
               {run.messages.map((m, i) => messageLine(m, i))}
+            </div>
+          )}
+          {hasResult && (
+            <div className="rounded-md bg-emerald-950/25 px-2 py-1.5 ring-1 ring-inset ring-emerald-900/30">
+              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-300/75">
+                Result
+              </div>
+              <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-emerald-100/90">
+                {run.result}
+              </pre>
             </div>
           )}
           {run.children.map((child) => (

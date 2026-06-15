@@ -96,6 +96,11 @@ type Agent struct {
 	// tier-1 chokepoint safety net. Stored here so it can be re-applied when
 	// the client is swapped (e.g. by applySpec).
 	redactionHook *redact.NetHook
+	// redactionScanner, when non-nil, is used for tier-2 LLM scanning of
+	// sensitive tool results (e.g. .env reads) in the aggregation loop.
+	redactionScanner redact.Scanner
+	// redactionEnabled gates all runtime redaction behaviour for the agent.
+	redactionEnabled bool
 	// advisorEnabled is a runtime gate for the "advisor" tool. It is seeded
 	// from cfg.Ocode.Advisor.Enabled at construction and can be flipped at
 	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.
@@ -148,6 +153,13 @@ type Agent struct {
 	// callback owns persistence; the agent keeps only the in-memory matcher in
 	// sync after the callback succeeds.
 	OnPermissionGrant func(config.AutoGrant) error
+	// OnSideUsage, if set, is invoked when any agent sub-path (advisor, compact,
+	// recap, title generation, sub-agent tasks, auto-permission, etc.) completes
+	// an LLM call that does NOT go through the main agent Step loop. The
+	// callback fires from arbitrary goroutines — keep handlers fast and
+	// thread-safe (push to a buffered channel). The TUI wires this to a channel
+	// so ALL LLM usage appears in the sidebar, not just main-agent chat turns.
+	OnSideUsage func(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens int64, spend *float64)
 	// subAgentPermAsker is the permission-ask callback the TUI installs on the
 	// main agent. It is not used by the main agent itself; it is copied onto
 	// each sub-agent's OnPermissionAsk so sub-agent asks reach the TUI.
@@ -203,6 +215,66 @@ func (a *Agent) ResetSubagentDispatch() {
 	a.subagentDispatchLast = ""
 	a.subagentDispatchCount = 0
 	a.subagentDispatchMu.Unlock()
+}
+
+// RecordSideUsage records token usage from a side-channel LLM call (one that
+// does NOT go through the main agent's Step loop). It computes the spend from
+// pricing and fires the OnSideUsage callback if set. model may be empty; if
+// empty, spend is not computed (pass nil/false to skip pricing lookup).
+func (a *Agent) RecordSideUsage(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens int64, model string) {
+	if a.OnSideUsage == nil {
+		return
+	}
+	usage := &TokenUsage{
+		PromptTokens:     &promptTokens,
+		CompletionTokens: &completionTokens,
+		CacheReadTokens:  &cacheReadTokens,
+		CacheWriteTokens: &cacheWriteTokens,
+	}
+	var total *int64
+	t := promptTokens + completionTokens
+	total = &t
+	usage.TotalTokens = total
+
+	var spend *float64
+	if model != "" {
+		spend = usage.Spend(model)
+	}
+	a.OnSideUsage(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, spend)
+}
+
+// RecordSideUsageFromMessage extracts usage from a single Message and calls
+// RecordSideUsage. The model is taken from msg.Model; if empty, spend is not
+// computed.
+func (a *Agent) RecordSideUsageFromMessage(msg *Message) {
+	if a.OnSideUsage == nil || msg == nil || msg.Usage == nil {
+		return
+	}
+	pt, ct, crt, cwt := int64(0), int64(0), int64(0), int64(0)
+	if msg.Usage.PromptTokens != nil {
+		pt = *msg.Usage.PromptTokens
+	}
+	if msg.Usage.CompletionTokens != nil {
+		ct = *msg.Usage.CompletionTokens
+	}
+	if msg.Usage.CacheReadTokens != nil {
+		crt = *msg.Usage.CacheReadTokens
+	}
+	if msg.Usage.CacheWriteTokens != nil {
+		cwt = *msg.Usage.CacheWriteTokens
+	}
+	a.RecordSideUsage(pt, ct, crt, cwt, msg.Model)
+}
+
+// RecordSideUsageFromMessages extracts usage from all assistant messages in
+// the slice and calls RecordSideUsage for each.
+func (a *Agent) RecordSideUsageFromMessages(msgs []Message) {
+	if a.OnSideUsage == nil {
+		return
+	}
+	for i := range msgs {
+		a.RecordSideUsageFromMessage(&msgs[i])
+	}
 }
 
 // chatWithDelta proxies client.Chat, attaching the agent's OnDelta callback
@@ -616,7 +688,14 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 
 		pauseAfterResults := false
-		for _, toolMsg := range results {
+		for i, toolMsg := range results {
+			// Scan tool results for secrets before appending.
+			// For "read" of sensitive files, run tier-2 LLM scan (both modes).
+			// For all other results, run tier-1 chat-mode regex (keyword+entropy, no LLM).
+			if i < len(resp.ToolCalls) && a.redactionRegistry != nil {
+				tc := resp.ToolCalls[i]
+				toolMsg.Content = a.scanToolResult(tc.Function.Name, tc.Function.Arguments, toolMsg.Content)
+			}
 			newMsgs = append(newMsgs, toolMsg)
 			messages = append(messages, toolMsg)
 			if a.OnMessage != nil {
@@ -872,6 +951,7 @@ func (a *Agent) runRecap(messages []Message, instruction string) string {
 			}{"", err}
 			return
 		}
+		a.RecordSideUsageFromMessage(resp)
 		done <- struct {
 			content string
 			err     error
@@ -1006,7 +1086,7 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string) 
 			totalDropped += dropped
 			emitDebug("COMPACT", fmt.Sprintf("batch %d/%d: dropped %d msgs from summary input (size cap)", bi+1, len(batches), dropped))
 		}
-		summaryText, err := runSummary(ctx, client, prompt, rt.SummaryMaxRetries)
+		summaryText, err := runSummary(ctx, client, prompt, rt.SummaryMaxRetries, a.RecordSideUsageFromMessage)
 		if err != nil {
 			emitDebug("COMPACT", fmt.Sprintf("summary failed on batch %d/%d: %v", bi+1, len(batches), err))
 			res.Err = err
@@ -1106,6 +1186,58 @@ func (a *Agent) SetRedactionHook(hook *redact.NetHook) {
 	if gc, ok := a.client.(*GenericClient); ok {
 		gc.Redaction = hook
 	}
+}
+
+// SetRedactionScanner stores the tier-2 LLM scanner for use in the tool-result
+// aggregation loop (sensitive-file reads, chat-mode regex scanning).
+func (a *Agent) SetRedactionScanner(s redact.Scanner) {
+	a.redactionScanner = s
+}
+
+// SetRedactionEnabled toggles runtime redaction behaviour for the agent.
+func (a *Agent) SetRedactionEnabled(enabled bool) {
+	a.redactionEnabled = enabled
+}
+
+// scanToolResult applies redaction to a tool result's content.
+// For "read" of sensitive files (when a tier-2 scanner is configured), runs
+// ScanAndMask via the LLM scanner (both lenient and full modes). For all other
+// results, runs tier-1 Detect in chat mode (keyword+entropy, no LLM) and
+// substitutes in-place via the registry.
+//
+// This must be called BEFORE the result is appended to messages and before
+// OnMessage fires, so the LLM never sees raw secrets.
+func (a *Agent) scanToolResult(toolName string, toolArgs string, content string) string {
+	if content == "" || !a.redactionEnabled || a.redactionRegistry == nil {
+		return content
+	}
+
+	// Determine if this is a sensitive-file read.
+	if toolName == "read" {
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal([]byte(toolArgs), &args); err == nil && redact.IsSensitiveFile(args.Path) && a.redactionScanner != nil {
+			masked := redactText(content, a.redactionRegistry)
+			masked, err := redact.ScanAndMask(masked, a.redactionScanner, a.redactionRegistry)
+			if err != nil {
+				emitDebug("REDACT", fmt.Sprintf("tier-2 scan error (read %s): %v", args.Path, err))
+				return masked
+			}
+			return masked
+		}
+	}
+
+	// All other tool results: tier-1 chat-mode regex (keyword+entropy, no LLM).
+	spans := redact.Detect(content, nil, redact.DetectOpts{FileContent: false})
+	if len(spans) == 0 {
+		return content
+	}
+	for _, span := range spans {
+		value := content[span.Start:span.End]
+		a.redactionRegistry.GetOrAssign(value, span.Kind, "tool-result")
+	}
+	return a.redactionRegistry.Substitute(content)
 }
 
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
@@ -1360,7 +1492,7 @@ These are format examples only — decide from THIS request's tool and arguments
 	tools := []map[string]interface{}{permissionReadFileTool()}
 	messages := []Message{{Role: "user", Content: prompt}}
 
-	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, tools, modelLabel, toolName)
+	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, tools, modelLabel, toolName, a.RecordSideUsageFromMessage)
 	if !gotFinal {
 		return false, failReason
 	}
@@ -1380,7 +1512,7 @@ These are format examples only — decide from THIS request's tool and arguments
 			Message{Role: "user", Content: "Your previous reply did not contain a parseable verdict. Reply with EXACTLY one line and nothing else:\nALLOW: <brief reason>\nor\nDENY: <brief reason>"})
 		// A failed retry is logged inside runPermissionModelLoop; the original
 		// ambiguous text then falls through to the human prompt below.
-		if retryText, gotRetry, retryErr := runPermissionModelLoop(a.StopCh(), client, messages, nil, modelLabel, toolName); gotRetry {
+		if retryText, gotRetry, retryErr := runPermissionModelLoop(a.StopCh(), client, messages, nil, modelLabel, toolName, a.RecordSideUsageFromMessage); gotRetry {
 			finalText = retryText
 			decided, allow, reason = parsePermissionVerdict(retryText)
 		} else if retryErr != "" {
@@ -1635,7 +1767,7 @@ func permissionReadFileTool() map[string]interface{} {
 // gotFinal is false on transport error, nil response, or budget exhaustion, in
 // which case failReason carries the explanation. Shared by the plain ALLOW/DENY
 // path and the interpreter structured-effects path.
-func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages []Message, tools []map[string]interface{}, modelLabel, toolName string) (finalText string, gotFinal bool, failReason string) {
+func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages []Message, tools []map[string]interface{}, modelLabel, toolName string, recordUsage func(*Message)) (finalText string, gotFinal bool, failReason string) {
 	const maxToolCalls = 15
 	// Derive a context cancelled when the agent is stopped (Esc) so an in-flight
 	// permission-model request is aborted instead of blocking the agent for up to
@@ -1680,6 +1812,9 @@ func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages [
 		}
 		if resp == nil {
 			return "", false, "nil response from LLM"
+		}
+		if recordUsage != nil {
+			recordUsage(resp)
 		}
 
 		if len(resp.ToolCalls) > 0 {

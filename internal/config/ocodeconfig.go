@@ -62,11 +62,14 @@ type SecurityConfig struct {
 
 // RedactionConfig controls the secret redaction feature.
 type RedactionConfig struct {
-	Enabled     bool     `json:"enabled"`
-	Model       string   `json:"model"`
-	BaseURL     string   `json:"base_url"`     // base URL of the local model server (e.g. http://localhost:11434)
-	FailMode    string   `json:"fail_mode"`    // "block" or "warn"
-	CustomWords []string `json:"custom_words"`
+	Enabled          bool     `json:"enabled"`
+	Model            string   `json:"model"`
+	BaseURL          string   `json:"base_url"`                    // base URL of the local model server (e.g. http://localhost:11434)
+	FailMode         string   `json:"fail_mode"`                   // "block" or "warn"
+	Mode             string   `json:"mode"`                        // "lenient" (default when enabled) or "full"; governs typed-user-message LLM aggressiveness
+	AllowRemoteTier2 bool     `json:"allow_remote_tier2"`          // allow non-local endpoints for tier-2 scanner
+	SkipLLMIfClean   *bool    `json:"skip_llm_if_clean,omitempty"` // DEPRECATED: use Mode; nil = derive from Mode
+	CustomWords      []string `json:"custom_words"`
 }
 
 type OcodeConfig struct {
@@ -83,7 +86,7 @@ type OcodeConfig struct {
 	CommitMsgModel    string
 	CommitMsgPrompt   string
 	TUI               TUIConfig
-	MaxSteps          int               `json:"max_steps,omitempty"`
+	MaxSteps          int `json:"max_steps,omitempty"`
 	Extra             map[string]json.RawMessage
 }
 
@@ -184,10 +187,10 @@ type tuiConfigFile struct {
 }
 
 type advisorConfigFile struct {
-	Enabled  *bool  `json:"enabled"`
-	Provider string `json:"provider"`
-	Model    string `json:"model"`
-	ClaudeCode *bool `json:"claude_code,omitempty"`
+	Enabled    *bool  `json:"enabled"`
+	Provider   string `json:"provider"`
+	Model      string `json:"model"`
+	ClaudeCode *bool  `json:"claude_code,omitempty"`
 }
 
 type pluginsConfigFile struct {
@@ -195,11 +198,14 @@ type pluginsConfigFile struct {
 }
 
 type redactionConfigFile struct {
-	Enabled     *bool    `json:"enabled"`
-	Model       *string  `json:"model"`
-	BaseURL     *string  `json:"base_url"`
-	FailMode    *string  `json:"fail_mode"`
-	CustomWords []string `json:"custom_words"`
+	Enabled          *bool    `json:"enabled"`
+	Model            *string  `json:"model"`
+	BaseURL          *string  `json:"base_url"`
+	FailMode         *string  `json:"fail_mode"`
+	Mode             *string  `json:"mode"`
+	AllowRemoteTier2 *bool    `json:"allow_remote_tier2,omitempty"`
+	SkipLLMIfClean   *bool    `json:"skip_llm_if_clean,omitempty"`
+	CustomWords      []string `json:"custom_words"`
 }
 
 type securityConfigFile struct {
@@ -247,9 +253,12 @@ func defaultTUIConfig() TUIConfig {
 func defaultSecurityConfig() SecurityConfig {
 	return SecurityConfig{
 		Redaction: RedactionConfig{
-			Enabled:  false,
-			Model:    "",
-			FailMode: "block",
+			Enabled:          false,
+			Model:            "",
+			FailMode:         "block",
+			Mode:             "",
+			AllowRemoteTier2: false,
+			SkipLLMIfClean:   nil,
 		},
 	}
 }
@@ -541,6 +550,15 @@ func applySecurityConfig(dst *SecurityConfig, src securityConfigFile) {
 	}
 	if src.Redaction.FailMode != nil {
 		dst.Redaction.FailMode = *src.Redaction.FailMode
+	}
+	if src.Redaction.Mode != nil {
+		dst.Redaction.Mode = *src.Redaction.Mode
+	}
+	if src.Redaction.AllowRemoteTier2 != nil {
+		dst.Redaction.AllowRemoteTier2 = *src.Redaction.AllowRemoteTier2
+	}
+	if src.Redaction.SkipLLMIfClean != nil {
+		dst.Redaction.SkipLLMIfClean = src.Redaction.SkipLLMIfClean
 	}
 	if src.Redaction.CustomWords != nil {
 		dst.Redaction.CustomWords = append([]string(nil), src.Redaction.CustomWords...)
@@ -999,6 +1017,20 @@ func SaveAdvisorEnabled(enabled bool) error {
 	}
 	cfg.Advisor.Enabled = enabled
 	return SaveOcodeConfig(cfg)
+}
+
+// ResolveRedactionMode returns the effective redaction mode for a RedactionConfig.
+// When Mode is set it wins; when empty the legacy SkipLLMIfClean is consulted
+// (false → "full", true/nil → "lenient"). Returns "lenient" as the ultimate default.
+func ResolveRedactionMode(rc RedactionConfig) string {
+	if rc.Mode != "" {
+		return rc.Mode
+	}
+	// Legacy back-compat: skip_llm_if_clean=false → "full"
+	if rc.SkipLLMIfClean != nil && !*rc.SkipLLMIfClean {
+		return "full"
+	}
+	return "lenient"
 }
 
 // SaveSecurityRedaction persists the security.redaction config via a targeted load-modify-save.

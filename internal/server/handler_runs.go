@@ -17,10 +17,11 @@ type runToolCallDTO struct {
 
 // runMessageDTO is one transcript entry of an agent run, serialised for the web.
 type runMessageDTO struct {
-	Role      string           `json:"role"`
-	Content   string           `json:"content"`
-	ToolCalls []runToolCallDTO `json:"toolCalls,omitempty"`
-	ToolID    string           `json:"toolCallId,omitempty"`
+	Role             string           `json:"role"`
+	Content          string           `json:"content"`
+	ToolCalls        []runToolCallDTO `json:"toolCalls,omitempty"`
+	ToolID           string           `json:"toolCallId,omitempty"`
+	ReasoningContent string           `json:"reasoningContent,omitempty"`
 }
 
 // agentRunDTO mirrors a *agent.AgentRun for the web "agent preview" strip,
@@ -66,7 +67,7 @@ func buildRunDTO(r *agent.AgentRun) agentRunDTO {
 		if m.Content == "" && len(m.ToolCalls) == 0 {
 			continue
 		}
-		md := runMessageDTO{Role: m.Role, Content: m.Content, ToolID: m.ToolID}
+		md := runMessageDTO{Role: m.Role, Content: m.Content, ToolID: m.ToolID, ReasoningContent: m.ReasoningContent}
 		for _, tc := range m.ToolCalls {
 			md.ToolCalls = append(md.ToolCalls, runToolCallDTO{
 				Name:      tc.Function.Name,

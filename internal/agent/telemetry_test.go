@@ -27,6 +27,9 @@ func TestParseOpenAIUsage(t *testing.T) {
 	if got := usage.CacheReadTokens; got == nil || *got != 8 {
 		t.Fatalf("expected cached tokens 8, got %#v", got)
 	}
+	if !usage.PromptIncludesCacheRead {
+		t.Fatalf("expected OpenAI usage to mark prompt tokens as cache-inclusive")
+	}
 }
 
 func TestParseOpenAIUsageDeepSeekCacheHitTokens(t *testing.T) {
@@ -37,6 +40,26 @@ func TestParseOpenAIUsageDeepSeekCacheHitTokens(t *testing.T) {
 
 	if got := usage.CacheReadTokens; got == nil || *got != 80 {
 		t.Fatalf("expected deepseek-style cached tokens 80, got %#v", got)
+	}
+	if !usage.PromptIncludesCacheRead {
+		t.Fatalf("expected OpenAI usage to mark prompt tokens as cache-inclusive")
+	}
+}
+
+func TestParseOpenAIResponsesUsage(t *testing.T) {
+	usage, err := parseOpenAIResponsesUsage(json.RawMessage(`{"input_tokens":12,"output_tokens":34,"total_tokens":46,"prompt_tokens_details":{"cached_tokens":8}}`))
+	if err != nil {
+		t.Fatalf("parseOpenAIResponsesUsage failed: %v", err)
+	}
+
+	if got := usage.PromptTokens; got == nil || *got != 12 {
+		t.Fatalf("expected input tokens 12, got %#v", got)
+	}
+	if got := usage.CacheReadTokens; got == nil || *got != 8 {
+		t.Fatalf("expected cached tokens 8, got %#v", got)
+	}
+	if !usage.PromptIncludesCacheRead {
+		t.Fatalf("expected OpenAI responses usage to mark prompt tokens as cache-inclusive")
 	}
 }
 
@@ -55,6 +78,9 @@ func TestParseAnthropicUsage(t *testing.T) {
 	if got := usage.CacheReadTokens; got == nil || *got != 3 {
 		t.Fatalf("expected cached tokens 3, got %#v", got)
 	}
+	if usage.PromptIncludesCacheRead {
+		t.Fatalf("expected anthropic usage input tokens to exclude cache reads")
+	}
 	if usage.TotalTokens != nil {
 		t.Fatalf("expected total tokens to stay nil when missing, got %#v", usage.TotalTokens)
 	}
@@ -71,6 +97,9 @@ func TestUsageForProviderAutoDetectsAnthropicShape(t *testing.T) {
 	}
 	if got := usage.CacheReadTokens; got == nil || *got != 3 {
 		t.Fatalf("expected cached tokens 3, got %#v", got)
+	}
+	if usage.PromptIncludesCacheRead {
+		t.Fatalf("expected anthropic-shaped usage to exclude cache reads from prompt tokens")
 	}
 }
 
@@ -95,24 +124,29 @@ func TestTokenUsageSpendUsesRegistryPricing(t *testing.T) {
 	}
 }
 
-// Cache-read tokens are billed at the registry's dedicated cache_read rate,
-// added on top of input/output cost. deepseek-v4-flash: input 0.14, output
-// 0.28, cache_read 0.0028 per million.
+// OpenAI/DeepSeek-style cache hits are included in prompt_tokens and must be
+// billed only once: uncached prompt tokens at input rate, cache hits at cache
+// read rate.
 func TestTokenUsageSpendBillsCacheReadTokens(t *testing.T) {
 	usage := &TokenUsage{
-		PromptTokens:     int64Ptr(1_000_000),
-		CompletionTokens: int64Ptr(1_000_000),
-		CacheReadTokens:  int64Ptr(1_000_000),
+		PromptTokens:            int64Ptr(1_000_000),
+		CompletionTokens:        int64Ptr(1_000_000),
+		CacheReadTokens:         int64Ptr(1_000_000),
+		PromptIncludesCacheRead: true,
 	}
 
-	spend := usage.Spend("deepseek/deepseek-v4-flash")
+	spend := usage.SpendWithPricing(pricing.ModelPricing{
+		InputPerMillion:     0.14,
+		OutputPerMillion:    0.28,
+		CacheReadPerMillion: 0.0028,
+	})
 	if spend == nil {
 		t.Fatal("expected spend, got nil")
 	}
 
-	// 0.14 + 0.28 + 0.0028 = 0.4228
-	if math.Abs(*spend-0.4228) > 1e-9 {
-		t.Fatalf("expected spend 0.4228, got %v", *spend)
+	// (1.0 - 1.0) * 0.14 + 1.0 * 0.0028 + 1.0 * 0.28 = 0.2828
+	if math.Abs(*spend-0.2828) > 1e-9 {
+		t.Fatalf("expected spend 0.2828, got %v", *spend)
 	}
 }
 
@@ -121,10 +155,11 @@ func TestTokenUsageSpendBillsCacheReadTokens(t *testing.T) {
 // 15, cache_read 0.3, cache_write 3.75 per million.
 func TestTokenUsageSpendBillsCacheWriteTokens(t *testing.T) {
 	usage := &TokenUsage{
-		PromptTokens:     int64Ptr(1_000_000),
-		CompletionTokens: int64Ptr(1_000_000),
-		CacheReadTokens:  int64Ptr(1_000_000),
-		CacheWriteTokens: int64Ptr(1_000_000),
+		PromptTokens:            int64Ptr(1_000_000),
+		CompletionTokens:        int64Ptr(1_000_000),
+		CacheReadTokens:         int64Ptr(1_000_000),
+		CacheWriteTokens:        int64Ptr(1_000_000),
+		PromptIncludesCacheRead: false,
 	}
 
 	spend := usage.Spend("anthropic/claude-sonnet-4-6")

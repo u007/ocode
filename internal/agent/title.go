@@ -72,6 +72,7 @@ func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
 			}{"", err}
 			return
 		}
+		a.RecordSideUsageFromMessage(resp)
 		done <- struct {
 			content string
 			err     error

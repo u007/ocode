@@ -11,6 +11,11 @@ type TokenUsage struct {
 	CompletionTokens *int64 `json:"completion_tokens,omitempty"`
 	TotalTokens      *int64 `json:"total_tokens,omitempty"`
 	CacheReadTokens  *int64 `json:"cache_read_tokens,omitempty"`
+	// PromptIncludesCacheRead marks providers whose prompt/input token count
+	// already includes cache-read tokens (e.g. OpenAI/DeepSeek-style usage
+	// payloads). Anthropic-style payloads keep this false because their input
+	// tokens exclude cache reads.
+	PromptIncludesCacheRead bool `json:"-"`
 	// CacheWriteTokens counts tokens written to the prompt cache (Anthropic's
 	// cache_creation_input_tokens), billed at the model's cache_write rate.
 	CacheWriteTokens *int64 `json:"cache_write_tokens,omitempty"`
@@ -42,10 +47,11 @@ func parseOpenAIUsage(raw json.RawMessage) (*TokenUsage, error) {
 	}
 
 	return &TokenUsage{
-		PromptTokens:     payload.PromptTokens,
-		CompletionTokens: payload.CompletionTokens,
-		TotalTokens:      payload.TotalTokens,
-		CacheReadTokens:  cacheRead,
+		PromptTokens:            payload.PromptTokens,
+		CompletionTokens:        payload.CompletionTokens,
+		TotalTokens:             payload.TotalTokens,
+		CacheReadTokens:         cacheRead,
+		PromptIncludesCacheRead: true,
 	}, nil
 }
 
@@ -65,10 +71,11 @@ func parseAnthropicUsage(raw json.RawMessage) (*TokenUsage, error) {
 	}
 
 	return &TokenUsage{
-		PromptTokens:     payload.InputTokens,
-		CompletionTokens: payload.OutputTokens,
-		CacheReadTokens:  payload.CacheReadInputTokens,
-		CacheWriteTokens: payload.CacheCreationInputTokens,
+		PromptTokens:            payload.InputTokens,
+		CompletionTokens:        payload.OutputTokens,
+		CacheReadTokens:         payload.CacheReadInputTokens,
+		PromptIncludesCacheRead: false,
+		CacheWriteTokens:        payload.CacheCreationInputTokens,
 	}, nil
 }
 
@@ -100,10 +107,11 @@ func parseOpenAIResponsesUsage(raw json.RawMessage) (*TokenUsage, error) {
 		cacheRead = payload.PromptCacheHitTokens
 	}
 	return &TokenUsage{
-		PromptTokens:     payload.InputTokens,
-		CompletionTokens: payload.OutputTokens,
-		TotalTokens:      payload.TotalTokens,
-		CacheReadTokens:  cacheRead,
+		PromptTokens:            payload.InputTokens,
+		CompletionTokens:        payload.OutputTokens,
+		TotalTokens:             payload.TotalTokens,
+		CacheReadTokens:         cacheRead,
+		PromptIncludesCacheRead: true,
 	}, nil
 }
 
@@ -145,13 +153,30 @@ func (u *TokenUsage) SpendWithPricing(modelPricing pricing.ModelPricing) *float6
 		return nil
 	}
 
-	// Providers report cache-read and cache-write (cache_creation) tokens
-	// separately from PromptTokens, so bill each at its dedicated rate instead
-	// of the full input rate. Anthropic input_tokens already excludes both.
-	spend := (float64(*u.PromptTokens) * modelPricing.InputPerMillion / 1_000_000) +
+	// PromptTokens semantics vary by provider:
+	// - OpenAI/DeepSeek-style payloads include cache-read tokens inside prompt
+	//   tokens and expose the cache hit count separately.
+	// - Anthropic-style payloads keep cache reads out of input_tokens.
+	// Bill cached tokens exactly once by subtracting them from prompt tokens when
+	// they are already included, otherwise add them at the dedicated cache-read
+	// rate.
+	promptTokens := float64(*u.PromptTokens)
+	cacheReadTokens := float64(0)
+	if u.CacheReadTokens != nil {
+		cacheReadTokens = float64(*u.CacheReadTokens)
+	}
+	if u.PromptIncludesCacheRead && cacheReadTokens > 0 && modelPricing.CacheReadPerMillion > 0 {
+		if promptTokens > cacheReadTokens {
+			promptTokens -= cacheReadTokens
+		} else {
+			promptTokens = 0
+		}
+	}
+
+	spend := (promptTokens * modelPricing.InputPerMillion / 1_000_000) +
 		(float64(*u.CompletionTokens) * modelPricing.OutputPerMillion / 1_000_000)
-	if u.CacheReadTokens != nil && modelPricing.CacheReadPerMillion > 0 {
-		spend += float64(*u.CacheReadTokens) * modelPricing.CacheReadPerMillion / 1_000_000
+	if cacheReadTokens > 0 && modelPricing.CacheReadPerMillion > 0 {
+		spend += cacheReadTokens * modelPricing.CacheReadPerMillion / 1_000_000
 	}
 	if u.CacheWriteTokens != nil && modelPricing.CacheWritePerMillion > 0 {
 		spend += float64(*u.CacheWriteTokens) * modelPricing.CacheWritePerMillion / 1_000_000

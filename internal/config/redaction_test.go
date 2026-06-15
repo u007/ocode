@@ -12,16 +12,17 @@ func TestRedactionConfigLoad(t *testing.T) {
   "compact": {
     "enabled": true
   },
-  "security": {
-    "redaction": {
-      "enabled": true,
-      "model": "lmstudio/x",
-      "base_url": "http://localhost:11434",
-      "fail_mode": "block",
-      "custom_words": ["word1", "word2"]
-    }
-  }
-}`
+		"security": {
+		  "redaction": {
+		    "enabled": true,
+		    "model": "lmstudio/x",
+		    "base_url": "http://localhost:11434",
+		    "fail_mode": "block",
+		    "allow_remote_tier2": true,
+		    "custom_words": ["word1", "word2"]
+		  }
+		}
+	}`
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "ocode.json")
@@ -49,6 +50,9 @@ func TestRedactionConfigLoad(t *testing.T) {
 	}
 	if cfg.Ocode.Security.Redaction.FailMode != "block" {
 		t.Errorf("Expected fail_mode 'block', got %q", cfg.Ocode.Security.Redaction.FailMode)
+	}
+	if !cfg.Ocode.Security.Redaction.AllowRemoteTier2 {
+		t.Error("Expected allow_remote_tier2 to load as true")
 	}
 	if len(cfg.Ocode.Security.Redaction.CustomWords) != 2 {
 		t.Errorf("Expected 2 custom words, got %d", len(cfg.Ocode.Security.Redaction.CustomWords))
@@ -149,6 +153,8 @@ func TestRedactionConfigRoundTrip(t *testing.T) {
 	// Modify redaction config
 	cfg.Ocode.Security.Redaction.Enabled = true
 	cfg.Ocode.Security.Redaction.Model = "lmstudio/x"
+	cfg.Ocode.Security.Redaction.Mode = "full"
+	cfg.Ocode.Security.Redaction.AllowRemoteTier2 = true
 
 	// Save config
 	if err := writeOcodeConfigFile(configPath, &cfg.Ocode); err != nil {
@@ -168,6 +174,12 @@ func TestRedactionConfigRoundTrip(t *testing.T) {
 	}
 	if cfg2.Ocode.Security.Redaction.Model != "lmstudio/x" {
 		t.Errorf("Expected model 'lmstudio/x', got %q", cfg2.Ocode.Security.Redaction.Model)
+	}
+	if cfg2.Ocode.Security.Redaction.Mode != "full" {
+		t.Errorf("Expected mode 'full' after round-trip, got %q", cfg2.Ocode.Security.Redaction.Mode)
+	}
+	if !cfg2.Ocode.Security.Redaction.AllowRemoteTier2 {
+		t.Error("Expected allow_remote_tier2 to round-trip as true")
 	}
 
 	// Verify other sections are preserved

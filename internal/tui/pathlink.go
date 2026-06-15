@@ -26,8 +26,8 @@ type pathLinkRegion struct {
 // pathCandidateRe matches path-ish tokens. Go's RE2 has no lookaround, so this
 // is deliberately permissive — candidates are filtered by looksLikePathToken
 // and verified against the filesystem (only existing files become links). A
-// trailing :line[:col] suffix is captured as part of the token.
-var pathCandidateRe = regexp.MustCompile(`[A-Za-z0-9._/+@~-]+(?::[0-9]+(?::[0-9]+)?)?`)
+// trailing :line[-endline] or :line:col suffix is captured as part of the token.
+var pathCandidateRe = regexp.MustCompile(`[A-Za-z0-9._/+@~-]+(?::[0-9]+(?:[-:][0-9]+)?)?`)
 
 // looksLikePathToken cheaply rejects ordinary words before paying for a stat.
 func looksLikePathToken(tok string) bool {
@@ -41,12 +41,14 @@ func looksLikePathToken(tok string) bool {
 	return false
 }
 
-// splitPathLine separates a trailing :line[:col] suffix from the path.
+// splitPathLine separates a trailing :line[-endline] or :line:col suffix from
+// the path. For ranges like :1213-1218 only the start line is returned.
 func splitPathLine(tok string) (string, int) {
 	if i := strings.IndexByte(tok, ':'); i >= 0 {
 		rest := tok[i+1:]
 		numPart := rest
-		if j := strings.IndexByte(rest, ':'); j >= 0 {
+		// stop at ':' (col) or '-' (end of line range)
+		if j := strings.IndexAny(rest, ":-"); j >= 0 {
 			numPart = rest[:j]
 		}
 		if n, err := strconv.Atoi(numPart); err == nil {

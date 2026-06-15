@@ -697,4 +697,5 @@ func (m *model) rebuildAgentClient() {
 	if len(mcpNames) > 0 {
 		m.agent.RestoreMCPToolNames(mcpNames)
 	}
+	m.syncRedactionRuntime()
 }

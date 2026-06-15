@@ -350,13 +350,12 @@ func TestCompactFinishedResumesAfterQueuedLocalCommands(t *testing.T) {
 
 func TestCommandHelpTextShowsAliasesAndArgs(t *testing.T) {
 	help := commandHelpText()
-	for _, want := range []string{"/models [name], /model", "/mask [on|off|status|model [name]|list]", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {
+	for _, want := range []string{"/models [name], /model", "/mask [on|off|status|mode [lenient|full]|model [name]|list]", "/session [list|load <id>], /sessions, /resume", "/new, /clear", "/exit, /quit, /q"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("expected help text to include %q, got %q", want, help)
 		}
 	}
 }
-
 func TestMaskCommandShowsStatusAndHint(t *testing.T) {
 	m := model{
 		input:             newTestTextarea(),
@@ -365,6 +364,7 @@ func TestMaskCommandShowsStatusAndHint(t *testing.T) {
 		redactionEnabled:  true,
 		redactionModel:    "lmstudio/local-scan",
 		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		redactMode:        "lenient",
 		showSidebar:       true,
 		showThinking:      true,
 	}
@@ -382,10 +382,182 @@ func TestMaskCommandShowsStatusAndHint(t *testing.T) {
 		t.Fatal("expected /mask to append a status message")
 	}
 	msg := got.messages[len(got.messages)-1].text
-	for _, want := range []string{"Active model: gpt-4o", "Secret redaction: enabled", "Tier-2 scanner: inactive (model=lmstudio/local-scan, base_url not configured)", "Try: /mask [on|off|status|model [name]|list]"} {
+	for _, want := range []string{"Active model: gpt-4o", "Secret redaction: enabled", "Scan mode: lenient", "Tier-2 scanner: inactive (model=lmstudio/local-scan, base_url not configured)", "Try: /mask [on|off|status|mode [lenient|full]|model [name]|list]"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("expected /mask output to include %q, got %q", want, msg)
 		}
+	}
+}
+
+func TestMaskModeShowsCurrentAndSetsNew(t *testing.T) {
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		redactMode:        "lenient",
+	}
+
+	// Test: /mask mode (no arg) shows current mode
+	updated, cmd := m.handleCommand("/mask mode")
+	if cmd != nil {
+		t.Fatalf("expected /mask mode to return no command, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	msg := got.messages[len(got.messages)-1].text
+	if !strings.Contains(msg, "Current mode: lenient") {
+		t.Fatalf("expected mode display, got %q", msg)
+	}
+	if !strings.Contains(msg, "lenient") || !strings.Contains(msg, "full") {
+		t.Fatalf("expected mode descriptions, got %q", msg)
+	}
+}
+
+func TestMaskModeSetFull(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		redactMode:        "lenient",
+	}
+
+	// Test: /mask mode full
+	updated, cmd := m.handleCommand("/mask mode full")
+	if cmd != nil {
+		t.Fatalf("expected /mask mode full to return no command, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	if got.redactMode != "full" {
+		t.Fatalf("expected redactMode=full, got %q", got.redactMode)
+	}
+	msg := got.messages[len(got.messages)-1].text
+	if !strings.Contains(msg, "Scan mode: full") {
+		t.Fatalf("expected scan mode confirmation, got %q", msg)
+	}
+}
+
+func TestMaskModeInvalid(t *testing.T) {
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		redactMode:        "lenient",
+	}
+
+	updated, cmd := m.handleCommand("/mask mode invalid")
+	if cmd != nil {
+		t.Fatalf("expected /mask mode invalid to return no command, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	msg := got.messages[len(got.messages)-1].text
+	if !strings.Contains(msg, "Invalid mode") {
+		t.Fatalf("expected invalid mode error, got %q", msg)
+	}
+}
+
+func TestMaskRuntimeReconfigUpdatesAgentAndScanner(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := &config.Config{}
+	cfg.Ocode.Security.Redaction.Enabled = true
+	cfg.Ocode.Security.Redaction.Model = "scan-old"
+	cfg.Ocode.Security.Redaction.BaseURL = "http://localhost:11434"
+
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		config:            cfg,
+		agent:             agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
+		redactionEnabled:  true,
+		redactionModel:    "scan-old",
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		llmScanner:        buildLLMScanner("http://localhost:11434", "scan-old", false),
+		redactMode:        "lenient",
+	}
+	m.syncRedactionRuntime()
+
+	updated, cmd := m.handleCommand("/mask off")
+	if cmd != nil {
+		t.Fatalf("expected /mask off to return no command, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	gc, ok := got.agent.Client().(*agent.GenericClient)
+	if !ok {
+		t.Fatalf("expected *agent.GenericClient, got %T", got.agent.Client())
+	}
+	if gc.Redaction != nil {
+		t.Fatal("expected redaction hook to be detached after /mask off")
+	}
+
+	updated, cmd = got.handleCommand("/mask on")
+	if cmd != nil {
+		t.Fatalf("expected /mask on to return no command, got %T", cmd)
+	}
+	got = derefTestModel(t, updated)
+	gc, ok = got.agent.Client().(*agent.GenericClient)
+	if !ok {
+		t.Fatalf("expected *agent.GenericClient, got %T", got.agent.Client())
+	}
+	if gc.Redaction == nil || !gc.Redaction.Enabled {
+		t.Fatal("expected redaction hook to be reattached after /mask on")
+	}
+
+	updated, cmd = got.handleCommand("/mask model scan-new")
+	if cmd != nil {
+		t.Fatalf("expected /mask model to return no command, got %T", cmd)
+	}
+	got = derefTestModel(t, updated)
+	if got.llmScanner == nil {
+		t.Fatal("expected llm scanner to be rebuilt after /mask model")
+	}
+	if got.llmScanner.Model != "scan-new" {
+		t.Fatalf("expected llm scanner model scan-new, got %q", got.llmScanner.Model)
+	}
+	gc, ok = got.agent.Client().(*agent.GenericClient)
+	if !ok {
+		t.Fatalf("expected *agent.GenericClient, got %T", got.agent.Client())
+	}
+	if gc.Redaction == nil {
+		t.Fatal("expected redaction hook to remain attached after /mask model")
+	}
+}
+
+func TestMaskOnRebuildsScannerWhenInitiallyDisabled(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := &config.Config{}
+	cfg.Ocode.Security.Redaction.Enabled = false
+	cfg.Ocode.Security.Redaction.Model = "scan-old"
+	cfg.Ocode.Security.Redaction.BaseURL = "http://localhost:11434"
+
+	m := model{
+		input:            newTestTextarea(),
+		viewport:         fastviewport.New(80, 20),
+		config:           cfg,
+		agent:            agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
+		redactionEnabled: false,
+		redactionModel:   "scan-old",
+		redactMode:       "lenient",
+	}
+
+	updated, cmd := m.handleCommand("/mask on")
+	if cmd != nil {
+		t.Fatalf("expected /mask on to return no command, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	if got.llmScanner == nil {
+		t.Fatal("expected llm scanner to be rebuilt when enabling redaction")
+	}
+	if got.llmScanner.Model != "scan-old" {
+		t.Fatalf("expected rebuilt scanner to use configured model, got %q", got.llmScanner.Model)
+	}
+	gc, ok := got.agent.Client().(*agent.GenericClient)
+	if !ok {
+		t.Fatalf("expected *agent.GenericClient, got %T", got.agent.Client())
+	}
+	if gc.Redaction == nil || !gc.Redaction.Enabled {
+		t.Fatal("expected redaction hook to be attached after /mask on")
 	}
 }
 

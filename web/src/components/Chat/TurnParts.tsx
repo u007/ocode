@@ -1,9 +1,9 @@
 import { useState } from "react";
 
-// ThinkingBlock renders reasoning tokens in a muted, collapsible panel. Used for
-// both the live in-progress stream and committed reasoning_content.
+// ThinkingBlock renders reasoning tokens in a muted panel. The content is shown
+// expanded by default so reasoning is visible immediately in the web UI.
 export function ThinkingBlock({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   if (!text) return null;
   return (
     <div className="mb-3 flex justify-start">
@@ -26,8 +26,8 @@ export function ThinkingBlock({ text }: { text: string }) {
   );
 }
 
-// ToolBlock renders a single tool call and (optionally) its result. Used for both
-// the live stream and committed tool_calls / tool messages.
+// ToolBlock renders a single tool call and (optionally) its result. The details
+// are expanded by default so tool output is visible immediately.
 export function ToolBlock({
   tool,
   command,
@@ -37,7 +37,7 @@ export function ToolBlock({
   command?: string;
   output?: string;
 }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const pending = output === undefined;
   return (
     <div className="mb-3 flex justify-start">

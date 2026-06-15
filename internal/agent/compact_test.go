@@ -704,7 +704,7 @@ func TestRenderMiddleFragmentsContextAndToolNames(t *testing.T) {
 
 func TestRunSummaryRetriesMalformedThenAcceptsValid(t *testing.T) {
 	client := &scriptedCaptureClient{Responses: []string{"not a template", validSummaryText("good")}}
-	out, err := runSummary(t.Context(), client, "prompt", 0)
+	out, err := runSummary(t.Context(), client, "prompt", 0, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -718,7 +718,7 @@ func TestRunSummaryRetriesMalformedThenAcceptsValid(t *testing.T) {
 
 func TestRunSummaryFallsBackToMalformedAfterRetries(t *testing.T) {
 	client := &scriptedCaptureClient{Responses: []string{"malformed one", "malformed two"}}
-	out, err := runSummary(t.Context(), client, "prompt", 0)
+	out, err := runSummary(t.Context(), client, "prompt", 0, nil)
 	if err != nil {
 		t.Fatalf("malformed summary should still be returned, got error: %v", err)
 	}

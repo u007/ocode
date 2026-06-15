@@ -565,12 +565,7 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	m.agent = next
 	if m.agent != nil {
 		m.agent.SetSupervisor(m.supervisor)
-		// Wire redaction registry for tool arg resolution and the tier-1
-		// safety-net hook onto the new client's chokepoint.
-		if m.redactionRegistry != nil {
-			m.agent.SetRedactionRegistry(m.redactionRegistry)
-			m.agent.SetRedactionHook(redact.NetHookEnabled(m.redactionRegistry))
-		}
+		m.syncRedactionRuntime()
 	}
 	// Keep the RC bridge pointed at the live agent so web-side runtime toggles
 	// (advisor on/off) follow agent switches.
@@ -754,6 +749,7 @@ type model struct {
 	titleCh                  chan titleResult
 	deltaDrops               uint64 // bumped each time the delta select-default path drops a streamed token; visual-only stat, full text still arrives via the final assistant Message
 	usageCh                  chan usageEvent
+	sideUsageCh              chan sideUsageData
 	streamFinalOutputTokens  int64 // exact output tokens from streaming usage event (0 = not yet received)
 	streamingThinkingIdx     int   // index into m.messages of the in-flight roleThinking message; -1 when none
 	streamAssistantFinalized bool  // true once the current stream has emitted its final assistant message
@@ -835,9 +831,11 @@ type model struct {
 
 	// Secret redaction state (see internal/redact).
 	redactionEnabled  bool
-	redactionModel    string              // local model for tier-2 scanning
+	redactionModel    string             // local model for tier-2 scanning
 	redactionRegistry *redact.Registry   // session registry for token resolution
 	llmScanner        *redact.LLMScanner // tier-2 scanner, nil when no model configured
+	redactFailMode    string             // "block" or "warn" — how tier-2 scanner errors are handled
+	redactMode        string             // "lenient" (default) or "full" — typed-user-message LLM aggressiveness
 }
 
 type modelCleanupState struct {
@@ -1396,21 +1394,17 @@ func newModel(opts ...RunOptions) model {
 		tool.SetHookPipeline(hp)
 	}
 
-	// Initialize redaction registry and wire tier-1/tier-2 scanners.
+	// Initialize redaction registry and tier-2 scanner; the live agent wiring
+	// happens after the model is constructed so it can be refreshed on runtime
+	// /mask toggles too.
 	var reg *redact.Registry
 	var llmScanner *redact.LLMScanner
 	if cfg != nil && cfg.Ocode.Security.Redaction.Enabled {
 		reg = redact.NewRegistry(redact.NewNonce())
-		if a != nil {
-			a.SetRedactionRegistry(reg)
-			// Wire tier-1 chokepoint: every ChatWithContext call will now
-			// run applyRedactionSafetyNet using this shared registry.
-			a.SetRedactionHook(redact.NetHookEnabled(reg))
-		}
 		// Build tier-2 LLM scanner if a local model server is configured.
 		rc := cfg.Ocode.Security.Redaction
 		if rc.BaseURL != "" && rc.Model != "" {
-			llmScanner = buildLLMScanner(rc.BaseURL, rc.Model)
+			llmScanner = buildLLMScanner(rc.BaseURL, rc.Model, rc.AllowRemoteTier2)
 		}
 	}
 
@@ -1472,6 +1466,18 @@ func newModel(opts ...RunOptions) model {
 		}(),
 		redactionRegistry: reg,
 		llmScanner:        llmScanner,
+		redactFailMode: func() string {
+			if cfg != nil {
+				return cfg.Ocode.Security.Redaction.FailMode
+			}
+			return "block"
+		}(),
+		redactMode: func() string {
+			if cfg != nil {
+				return config.ResolveRedactionMode(cfg.Ocode.Security.Redaction)
+			}
+			return "lenient"
+		}(),
 		activeModel: func() string {
 			if cfg != nil {
 				return cfg.Model
@@ -1496,6 +1502,7 @@ func newModel(opts ...RunOptions) model {
 		recapCh:              make(chan recapFinishedMsg, 4),
 		titleCh:              make(chan titleResult, 4),
 		usageCh:              make(chan usageEvent, 16),
+		sideUsageCh:          make(chan sideUsageData, 16),
 		streamingThinkingIdx: -1,
 		questionInput:        questionInput,
 		permissionGrantCh:    make(chan permissionGrantRequest),
@@ -1524,12 +1531,23 @@ func newModel(opts ...RunOptions) model {
 			transient: true,
 		})
 	}
+	m.syncRedactionRuntime()
 
 	// Show active advisor model on init.
 	if cfg != nil && cfg.Ocode.Advisor.Provider != "" && cfg.Ocode.Advisor.Model != "" {
 		m.messages = append(m.messages, message{
 			role:      roleAssistant,
 			text:      hintStyle.Render("🧠 advisor: " + cfg.Ocode.Advisor.Provider + "/" + cfg.Ocode.Advisor.Model),
+			transient: true,
+		})
+	}
+
+	// No-model startup warning: when redaction is enabled but no tier-2 scanner
+	// is configured, inform the user that scanning is regex-only.
+	if m.redactionEnabled && llmScanner == nil {
+		m.messages = append(m.messages, message{
+			role:      roleAssistant,
+			text:      hintStyle.Render("⚠ redaction: scanning is regex-only (tier-1 + chat-mode tool-result regex). Set a model with /mask model to enable LLM tier-2."),
 			transient: true,
 		})
 	}
@@ -3165,6 +3183,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (called when the message is finalized in appendAgentMessage).
 		// Do NOT set sessionTelemetry.inputTokens here — it would be
 		// double-counted when addMessage adds the same Usage data later.
+		return m, nil
+	case sideUsageData:
+		m.sessionTelemetry.addRawUsage(msg.promptTokens, msg.completionTokens, msg.cacheReadTokens, msg.cacheWriteTokens, msg.spend)
 		return m, nil
 	case subAgentPermAskMsg:
 		// A sub-agent tool call needs a permission decision. Reuse the same
@@ -4839,7 +4860,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// clicking a path inside a tool box opens the file instead of collapsing
 		// the box.
 		if r, ok := m.transcriptPathLinkAt(mouse); ok {
-			return m, m.openPathInEditorCmd(r.path), true
+			return m, m.openPathAtLineInEditorCmd(r.path, r.lineNo), true
 		}
 		if idx, ok := m.toolOutputForClick(mouse); ok {
 			m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
@@ -5277,7 +5298,7 @@ func (m model) handleDetailClick(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	// A file-path link takes priority over expand / process / sub-agent region
 	// toggles so clicking a path opens the file.
 	if r, ok := m.detailPathLinkAt(mouse); ok {
-		return m, m.openPathInEditorCmd(r.path), true
+		return m, m.openPathAtLineInEditorCmd(r.path, r.lineNo), true
 	}
 	top := m.detail[len(m.detail)-1]
 	contentLine := (mouse.Y - m.detailViewportContentTopY()) + top.vp.YOffset()
@@ -5359,7 +5380,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
-		cmd == "/advisor" || cmd == "/mask"
+		cmd == "/advisor" || cmd == "/mask" ||
+		cmd == "/rc" || cmd == "/remote-control"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -7188,6 +7210,27 @@ func (m *model) runPermissionModelTests() tea.Cmd {
 			if err != nil {
 				b.WriteString(fmt.Sprintf("FAILED: %v\n", err))
 			} else {
+				if resp != nil && resp.Usage != nil {
+					pt, ct, crt, cwt := int64(0), int64(0), int64(0), int64(0)
+					if resp.Usage.PromptTokens != nil {
+						pt = *resp.Usage.PromptTokens
+					}
+					if resp.Usage.CompletionTokens != nil {
+						ct = *resp.Usage.CompletionTokens
+					}
+					if resp.Usage.CacheReadTokens != nil {
+						crt = *resp.Usage.CacheReadTokens
+					}
+					if resp.Usage.CacheWriteTokens != nil {
+						cwt = *resp.Usage.CacheWriteTokens
+					}
+					var spend *float64
+					if resp.Spend != nil {
+						s := *resp.Spend
+						spend = &s
+					}
+					m.sessionTelemetry.addRawUsage(pt, ct, crt, cwt, spend)
+				}
 				content := ""
 				if resp != nil {
 					content = resp.Content
@@ -7259,6 +7302,27 @@ Security considerations:
 Respond with ONLY: ALLOW: <reason> or DENY: <reason>`, tc.tool, tc.args, tc.rule)
 
 				resp, err := client.Chat([]agent.Message{{Role: "user", Content: prompt}}, nil)
+				if err == nil && resp != nil && resp.Usage != nil {
+					pt, ct, crt, cwt := int64(0), int64(0), int64(0), int64(0)
+					if resp.Usage.PromptTokens != nil {
+						pt = *resp.Usage.PromptTokens
+					}
+					if resp.Usage.CompletionTokens != nil {
+						ct = *resp.Usage.CompletionTokens
+					}
+					if resp.Usage.CacheReadTokens != nil {
+						crt = *resp.Usage.CacheReadTokens
+					}
+					if resp.Usage.CacheWriteTokens != nil {
+						cwt = *resp.Usage.CacheWriteTokens
+					}
+					var spend *float64
+					if resp.Spend != nil {
+						s := *resp.Spend
+						spend = &s
+					}
+					m.sessionTelemetry.addRawUsage(pt, ct, crt, cwt, spend)
+				}
 				response := ""
 				status := "PASS"
 				if err != nil {
@@ -7349,6 +7413,28 @@ Respond with ONLY: ALLOW: <reason> or DENY: <reason>`, tc.tool, tc.args, tc.rule
 				b.WriteString(fmt.Sprintf("Test file: %s\n", testFile))
 				b.WriteString("Sending tool call request...\n\n")
 				resp, err := client.Chat(messages, tools)
+				if err == nil && resp != nil && resp.Usage != nil {
+					pt, ct, crt, cwt := int64(0), int64(0), int64(0), int64(0)
+					if resp.Usage.PromptTokens != nil {
+						pt = *resp.Usage.PromptTokens
+					}
+					if resp.Usage.CompletionTokens != nil {
+						ct = *resp.Usage.CompletionTokens
+					}
+					if resp.Usage.CacheReadTokens != nil {
+						crt = *resp.Usage.CacheReadTokens
+					}
+					if resp.Usage.CacheWriteTokens != nil {
+						cwt = *resp.Usage.CacheWriteTokens
+					}
+					var spend *float64
+					if resp.Spend != nil {
+						s := *resp.Spend
+						spend = &s
+					}
+					m.sessionTelemetry.addRawUsage(pt, ct, crt, cwt, spend)
+				}
+				resp, err = client.Chat(messages, tools)
 				if err != nil {
 					b.WriteString(fmt.Sprintf("FAILED: %v\n", err))
 				} else if resp == nil {
@@ -8694,8 +8780,15 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		// main LLM call. Secrets found here are registered into the shared
 		// registry so the tier-1 NetHook in applyRedactionSafetyNet will
 		// substitute them out when ChatWithContext fires.
+		//
+		// When failMode is "block" and the scanner errors, the error is
+		// returned and the message is NOT sent to the LLM.
 		if m.llmScanner != nil && m.redactionRegistry != nil {
-			applyTier2Scan(agentMsgs, m.llmScanner, m.redactionRegistry)
+			if err := applyTier2Scan(agentMsgs, m.llmScanner, m.redactionRegistry, m.redactFailMode, m.redactMode); err != nil {
+				close(msgCh)
+				errCh <- err
+				return
+			}
 		}
 		_, err := a.Step(agentMsgs)
 		a.SetPreloadedContext("")
@@ -10191,6 +10284,22 @@ func (m *model) wireCompactCallbacks() {
 		default:
 		}
 	}
+	sideUsageCh := m.sideUsageCh
+	m.agent.OnSideUsage = func(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens int64, spend *float64) {
+		if sideUsageCh == nil {
+			return
+		}
+		select {
+		case sideUsageCh <- sideUsageData{
+			promptTokens:     promptTokens,
+			completionTokens: completionTokens,
+			cacheReadTokens:  cacheReadTokens,
+			cacheWriteTokens: cacheWriteTokens,
+			spend:            spend,
+		}:
+		default:
+		}
+	}
 	grantCh := m.permissionGrantCh
 	done := m.agent.Done()
 	m.agent.OnPermissionGrant = func(grant config.AutoGrant) error {
@@ -10311,6 +10420,18 @@ type usageEvent struct {
 }
 
 type usageMsg usageEvent
+
+// sideUsageData carries token usage from side-channel LLM calls (advisor,
+// compact, recap, title generation, sub-agent tasks, etc.) that do NOT go
+// through the main agent Step loop. The TUI receives this on its sideUsageCh
+// and updates sessionTelemetry directly.
+type sideUsageData struct {
+	promptTokens     int64
+	completionTokens int64
+	cacheReadTokens  int64
+	cacheWriteTokens int64
+	spend            *float64
+}
 
 // applyThinkingDelta appends a streamed reasoning token to the in-flight
 // roleThinking message (creating one if none exists). Text deltas are
@@ -11804,6 +11925,22 @@ func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 	}
 }
 
+// addRawUsage accumulates raw token counts and spend into the sidebar
+// telemetry. Used for side-channel LLM calls (advisor, compact, recap, title
+// generation, sub-agent tasks, etc.) that do not produce agent.Message values.
+func (t *sidebarTelemetry) addRawUsage(promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens int64, spend *float64) {
+	t.inputTokens += promptTokens
+	t.outputTokens += completionTokens
+	t.cachedTokens += cacheReadTokens + cacheWriteTokens
+	t.totalTokens += promptTokens + completionTokens
+	if spend != nil {
+		if t.spend == nil {
+			t.spend = new(float64)
+		}
+		*t.spend += *spend
+	}
+}
+
 func (t sidebarTelemetry) metadata() map[string]any {
 	if !t.hasData() {
 		return nil
@@ -13151,6 +13288,12 @@ func (m *model) detailPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
 // falling back to the system opener for binary files. Reuses the same editor
 // launch path as the files/git views.
 func (m *model) openPathInEditorCmd(path string) tea.Cmd {
+	return m.openPathAtLineInEditorCmd(path, 0)
+}
+
+// openPathAtLineInEditorCmd opens path in the editor, jumping to lineNo when
+// lineNo > 0 and the editor supports it (VS Code, vim/nvim, helix, nano, emacs).
+func (m *model) openPathAtLineInEditorCmd(path string, lineNo int) tea.Cmd {
 	if isBinaryFile(path) {
 		log.Printf("[editor] using OS default opener for binary file=%q", path)
 		return openFileWithOSDefault(path)
@@ -13161,7 +13304,40 @@ func (m *model) openPathInEditorCmd(path string) tea.Cmd {
 	}
 	editor := config.ResolveEditor(&m.config.Ocode)
 	mode := m.config.Ocode.EditorMode
-	log.Printf("[editor] opening file=%q  editor=%q  mode=%q", path, editor, mode)
+	log.Printf("[editor] opening file=%q  line=%d  editor=%q  mode=%q", path, lineNo, editor, mode)
+
+	if lineNo > 0 && !isTmuxMode(mode) {
+		if args := editorArgsWithLine(editor, path, lineNo); args != nil {
+			c := exec.Command(args[0], args[1:]...)
+			id := fmt.Sprintf("editor-%d-%d", os.Getpid(), time.Now().UnixNano())
+			if m.supervisor != nil {
+				_, _ = m.supervisor.Register(tool.ProcessRegistration{
+					ID:               id,
+					Command:          strings.Join(args, " "),
+					Kind:             tool.ProcessKindEditor,
+					Cmd:              c,
+					OwnsProcessGroup: false,
+					StartedAt:        time.Now(),
+				})
+			}
+			return tea.ExecProcess(c, func(err error) tea.Msg {
+				if m.supervisor != nil {
+					if err == nil {
+						m.supervisor.MarkExited(id, 0)
+					} else {
+						code := 1
+						if exitErr, ok := err.(*exec.ExitError); ok {
+							code = exitErr.ExitCode()
+						}
+						m.supervisor.MarkKilled(id, code)
+					}
+				}
+				log.Printf("[editor] finished: %q  file=%q  line=%d  err=%v", editor, path, lineNo, err)
+				return editorFinishedMsg{err: err}
+			})
+		}
+	}
+
 	return createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor)(path)
 }
 
@@ -13571,6 +13747,7 @@ func (m *model) filesAddToContext() tea.Cmd {
 
 func (m *model) makeCommitMsgGenerator(cfg *config.Config) func(diff string) tea.Cmd {
 	return func(diff string) tea.Cmd {
+		sideUsageCh := m.sideUsageCh
 		return func() tea.Msg {
 			model := cfg.Ocode.CommitMsgModel
 			if model == "" {
@@ -13590,11 +13767,53 @@ func (m *model) makeCommitMsgGenerator(cfg *config.Config) func(diff string) tea
 			if prompt == "" {
 				prompt = "Write a concise git commit message (subject line only, max 72 chars) for these changes. Output only the commit message text, nothing else:"
 			}
-			msg, err := client.Chat([]agent.Message{{Role: "user", Content: prompt + "\n\n" + diff}}, nil)
+			resp, err := client.Chat([]agent.Message{{Role: "user", Content: prompt + "\n\n" + diff}}, nil)
 			if err != nil {
 				return gitCommitMsgMsg{err: err}
 			}
-			return gitCommitMsgMsg{text: strings.TrimSpace(msg.Content)}
+			if resp != nil && sideUsageCh != nil {
+				if resp.Usage != nil {
+					pt, ct, crt, cwt := int64(0), int64(0), int64(0), int64(0)
+					if resp.Usage.PromptTokens != nil {
+						pt = *resp.Usage.PromptTokens
+					}
+					if resp.Usage.CompletionTokens != nil {
+						ct = *resp.Usage.CompletionTokens
+					}
+					if resp.Usage.CacheReadTokens != nil {
+						crt = *resp.Usage.CacheReadTokens
+					}
+					if resp.Usage.CacheWriteTokens != nil {
+						cwt = *resp.Usage.CacheWriteTokens
+					}
+					var spend *float64
+					if resp.Spend != nil {
+						s := *resp.Spend
+						spend = &s
+					} else if resp.Model != "" && pt+ct > 0 {
+						usage := &agent.TokenUsage{
+							PromptTokens:     &pt,
+							CompletionTokens: &ct,
+							CacheReadTokens:  &crt,
+							CacheWriteTokens: &cwt,
+						}
+						total := pt + ct
+						usage.TotalTokens = &total
+						spend = usage.Spend(resp.Model)
+					}
+					select {
+					case sideUsageCh <- sideUsageData{
+						promptTokens:     pt,
+						completionTokens: ct,
+						cacheReadTokens:  crt,
+						cacheWriteTokens: cwt,
+						spend:            spend,
+					}:
+					default:
+					}
+				}
+			}
+			return gitCommitMsgMsg{text: strings.TrimSpace(resp.Content)}
 		}
 	}
 }
