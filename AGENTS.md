@@ -1,5 +1,14 @@
 # Agent Instructions - ocode
 
+## Git Worktrees
+The default location for `git worktree` checkouts is `.worktrees/` in the project root.
+This directory is gitignored — worktree contents are developer-local state and must
+never be committed.
+```bash
+# Example: add a worktree for a feature branch
+git worktree add .worktrees/feature-branch feature-branch
+```
+
 ## Tech Stack
 - Go 1.23
 - Charm TUI (Bubble Tea, Lipgloss)

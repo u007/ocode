@@ -10,6 +10,9 @@ opencode.json
 internal/tui/.opencode
 
 
+# Git worktrees (parallel development checkouts)
+.worktrees/
+
 # AST index (shared per-project daemon)
 .sgindex/
 

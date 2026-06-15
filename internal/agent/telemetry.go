@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/u007/ocode/internal/pricing"
 )
@@ -146,6 +147,30 @@ func (u *TokenUsage) Spend(model string) *float64 {
 	}
 
 	return u.SpendWithPricing(modelPricing)
+}
+
+func (u *TokenUsage) DebugLog(model string) {
+	if u == nil {
+		return
+	}
+	prompt := int64(0)
+	if u.PromptTokens != nil {
+		prompt = *u.PromptTokens
+	}
+	completion := int64(0)
+	if u.CompletionTokens != nil {
+		completion = *u.CompletionTokens
+	}
+	cacheRead := int64(0)
+	if u.CacheReadTokens != nil {
+		cacheRead = *u.CacheReadTokens
+	}
+	cacheWrite := int64(0)
+	if u.CacheWriteTokens != nil {
+		cacheWrite = *u.CacheWriteTokens
+	}
+	emitDebug("TOKENS", fmt.Sprintf("model=%s input=%d cache_read=%d cache_write=%d output=%d",
+		model, prompt, cacheRead, cacheWrite, completion))
 }
 
 func (u *TokenUsage) SpendWithPricing(modelPricing pricing.ModelPricing) *float64 {

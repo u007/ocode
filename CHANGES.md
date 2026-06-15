@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ### Added
+- **`TokenUsage.DebugLog` Method** — New `DebugLog()` method on `TokenUsage` emits debug-level token tracking via `emitDebug("TOKENS", ...)`, surfacing per-request input/cache_read/cache_write/output token counts in the debug panel.
+- **Environment Git Worktree Prompt** — The environment prompt now includes the git worktree directory (`.worktrees/`) when the workspace is a git repo, informing the agent of parallel checkout locations.
+- **AGENTS.md Worktree Documentation** — New "Git Worktrees" section in `AGENTS.md` documents the `.worktrees/` convention with an example `git worktree add` command.
 - **`/standup` Command** — New `/standup` (alias `/catchup`) reviews the last 5 commits (`git log --stat --date=short`, no patch) plus the pending-changes context reused from `/changes`, then sends a caveman-style prompt to the main agent. Output sections: `WHAT DONE` (work + decisions), `TODO — EASY FIRST` (low-hanging fruit, sorted easiest first), `TODO — HIGH PRIORITY`, and `MISSED STUBS` (TODO/FIXME/unimplemented/empty-catch flags). Commits are gathered independently so a clean tree still yields a commit-only summary; only errors when both commits and changes are empty. New `internal/tui/standup.go`; gathering covered by `internal/tui/standup_test.go` (clean-tree and dirty-tree cases).
 - **Redaction Tier-1 Hook Persistence** — `Agent.redactionHook` field stores the tier-1 `NetHook` so it is automatically re-applied when the LLM client is swapped by `applySpecModel` (e.g. on model switch). New `SetRedactionHook()` method wires the hook onto the active `GenericClient` and persists it for future client swaps.
 - **Redaction `base_url` Config** — `RedactionConfig` and its config-file counterpart now accept a `base_url` field for specifying the local model server endpoint (e.g. `http://localhost:11434`). This enables the tier-2 LLM scanner to call a self-hosted model for secret detection. Test coverage added in `redaction_test.go`.
@@ -43,6 +46,8 @@
 - **Project Skill Expansion** — Two new project-local skills (`ocode-agent-architecture`, `ocode-tools`) created via `/learn` documenting the agent subsystem and tool system respectively.
 
 ### Changed
+- **`.gitignore` Worktree Entry** — Added `.worktrees/` to `.gitignore` to keep parallel git worktree checkouts out of version control.
+- **Token Debug Logging** — `chatCopilot`, `chatOpenAI`, `chatOpenAIResponses`, and `chatOpenAIHTTP` now call `usage.DebugLog()` after spend computation, exposing real-time per-request token counts in the debug panel for all provider pathways.
 - **Permission Context Label** — `buildPermissionContext` now labels allowed roots as "Pre-authorized paths (read/write/delete ALLOWED inside these roots; anything outside is OUT OF SCOPE)" instead of "Allowed filesystem roots", making the pre-authorization semantics explicit to the LLM.
 - **Permission Interpreter Guidance** — Auto-permission judge prompt now clarifies that `allowed_roots` are pre-authorized by the user and that reads, writes, and deletes targeting paths inside those roots are ALLOWED.
 - **macOS Data Directory Standardization** — `GlobalDataDir()` now uses `~/.local/share/opencode` on macOS instead of `~/Library/Application Support/opencode`, matching the Linux XDG fallback and keeping runtime state under one portable home-relative path. `AGENTS.md` documents the same macOS path.
