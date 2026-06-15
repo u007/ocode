@@ -96,6 +96,7 @@ func init() {
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
 		{name: "/mask", usage: "/mask [on|off|status|mode [lenient|full]|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
+		{name: "/btw", aliases: []string{"/by-the-way"}, usage: "/btw <message>", help: "Add a quick aside to the conversation (by the way)", handler: runBtwCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -788,10 +789,8 @@ func runYoloCmd(m *model, args []string) tea.Cmd {
 }
 
 func runSmallModelCmd(m *model, args []string) tea.Cmd {
-	return func() tea.Msg {
-		m.handleSmallModelCmd(args)
-		return nil
-	}
+	m.handleSmallModelCmd(args)
+	return nil
 }
 
 func runSkillsCmd(m *model, args []string) tea.Cmd {
@@ -1067,5 +1066,10 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 
 func runMaxStepCmd(m *model, args []string) tea.Cmd {
 	m.handleMaxStepCmd(args)
+	return nil
+}
+
+func runBtwCmd(m *model, args []string) tea.Cmd {
+	m.handleBtwCmd(args)
 	return nil
 }

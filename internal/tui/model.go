@@ -5381,6 +5381,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
 		cmd == "/advisor" || cmd == "/mask" ||
+		cmd == "/btw" || cmd == "/by-the-way" ||
 		cmd == "/rc" || cmd == "/remote-control"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
@@ -6250,6 +6251,14 @@ func (m *model) handleEditorCmd(args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Invalid editor: %v", err)})
 		return nil
 	}
+	current := ""
+	if m.config != nil {
+		current = m.config.Ocode.Editor
+	}
+	if editor == current {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Editor already set to: %s", editor)})
+		return nil
+	}
 	if err := config.SaveEditor(editor); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save editor: %v", err)})
 		return nil
@@ -6576,6 +6585,15 @@ func (m *model) handleDetailsCmd(args []string) {
 		status = "visible"
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tool execution details are now %s.", status)})
+}
+
+func (m *model) handleBtwCmd(args []string) {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /btw <message> — add a quick aside to the conversation (by the way)"})
+		return
+	}
+	text := strings.Join(args, " ")
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Noted: " + text})
 }
 
 func (m *model) handleInitCmd(args []string) tea.Cmd {

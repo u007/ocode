@@ -57,6 +57,12 @@ var modelsDevPricing = map[string]ModelPricing{
 		InputPerMillion:  0.25,
 		OutputPerMillion: 1.25,
 	},
+	"deepseek-v4-flash": {
+		InputPerMillion:      0.14,
+		OutputPerMillion:     0.28,
+		CacheReadPerMillion:  0.0028,
+		CacheWritePerMillion: 0,
+	},
 }
 
 func Lookup(model string) (ModelPricing, bool) {

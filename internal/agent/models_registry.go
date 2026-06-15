@@ -314,6 +314,8 @@ func ModelWindow(modelID string) int64 {
 
 // modelEntryFor resolves a model ID in "provider/model" format (e.g.
 // "deepseek/deepseek-v4-flash") or bare model name to its registry entry.
+// When multiple providers list the same model, entries with non-zero costs
+// are preferred (some providers list the model with zero/cost-to-follow).
 func modelEntryFor(modelID string) (modelEntry, bool) {
 	data := loadRegistry()
 	if data == nil {
@@ -330,20 +332,39 @@ func modelEntryFor(modelID string) (modelEntry, bool) {
 		// Routing-prefixed ids (e.g. "opencode-go/deepseek-v4-flash") whose
 		// provider segment isn't a real models.dev provider — match the model
 		// segment across all providers.
-		for _, entry := range data {
-			if m, ok := entry.Models[model]; ok {
+		if m, ok := bestPricedEntry(data, model); ok {
+			return m, ok
+		}
+	}
+
+	// Try bare model name — search all providers, prefer non-zero cost
+	if m, ok := bestPricedEntry(data, modelID); ok {
+		return m, ok
+	}
+
+	return modelEntry{}, false
+}
+
+// bestPricedEntry searches all providers for a model by bare name and returns
+// the first entry that has non-zero costs. If every match has zero costs it
+// returns the first match anyway (so callers see "found but zero cost").
+func bestPricedEntry(data map[string]providerEntry, modelID string) (modelEntry, bool) {
+	var fallback modelEntry
+	var haveFallback bool
+	for _, entry := range data {
+		if m, ok := entry.Models[modelID]; ok {
+			if m.Cost.Input != 0 || m.Cost.Output != 0 || m.Cost.CacheRead != 0 {
 				return m, true
+			}
+			if !haveFallback {
+				fallback = m
+				haveFallback = true
 			}
 		}
 	}
-
-	// Try bare model name — search all providers
-	for _, entry := range data {
-		if m, ok := entry.Models[modelID]; ok {
-			return m, true
-		}
+	if haveFallback {
+		return fallback, true
 	}
-
 	return modelEntry{}, false
 }
 
