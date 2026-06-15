@@ -951,9 +951,10 @@ func (m filesModel) updateEditorPicker(msg tea.KeyPressMsg) (filesModel, tea.Cmd
 			return m, nil
 		}
 		choice := choices[m.editorCursor]
+		changed := choice != m.editor
 		m.editor = choice
 		m.choosingEditor = false
-		if m.saveEditor != nil {
+		if changed && m.saveEditor != nil {
 			if err := m.saveEditor(choice); err != nil {
 				m.statusMsg = "editor save failed: " + err.Error()
 				return m, nil

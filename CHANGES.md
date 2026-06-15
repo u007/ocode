@@ -44,6 +44,8 @@
 - **`/learn` Command** — New `/learn [focus]` slash command lists project-root skills and generates a structured prompt for guided skill creation, update, and gap analysis. Backed by `internal/skill/learn.go` (`LoadProjectLearnInventory`, `BuildLearnContext`) and `internal/tui/learn.go` (`buildLearnPrompt`, `handleLearnCmd`).
 - **`ProjectLocalSkillDirs` Helper** — Exported `ProjectLocalSkillDirs(root)` in `internal/skill/loader.go` returns the standard project-root skill directories (`.opencode/skills`, `.claude/skill`, `skills`); `skillSearchPaths()` now delegates to it, and `LoadProjectLearnInventory` uses it for inventory scanning.
 - **Project Skill Expansion** — Two new project-local skills (`ocode-agent-architecture`, `ocode-tools`) created via `/learn` documenting the agent subsystem and tool system respectively.
+- **`/btw` Command** — New `/btw` (alias `/by-the-way`) slash command adds a quick aside to the conversation. Backed by `handleBtwCmd`; registered as an instant command that bypasses the command queue.
+- **DeepSeek V4 Flash Pricing** — Added `deepseek-v4-flash` cost entry to the modelsdev pricing table (`$0.14/M` input, `$0.28/M` output, `$0.0028/M` cache-read read).
 
 ### Changed
 - **`.gitignore` Worktree Entry** — Added `.worktrees/` to `.gitignore` to keep parallel git worktree checkouts out of version control.
@@ -87,6 +89,10 @@
 - **Web Dependency Upgrades** — Vite updated from 6.x to 8.x, `@vitejs/plugin-react` from 4.x to 6.x; `pnpm-lock.yaml` adopted alongside existing `package-lock.json`.
 - **Gitignore Snapshots Directory** — `.opencode/snapshots/` added to `.gitignore` to prevent snapshot artifacts from being tracked.
 - **Makefile Skill-Audit Target** — New `make skill-audit` target reports skills last edited more than 14 days ago and tracks code changes since each skill was last committed.
+- **Model Registry Cost Priority** — `modelEntryFor` now uses `bestPricedEntry` to prefer model entries with non-zero costs when multiple providers list the same model, preventing zero-cost entries from shadowing real pricing.
+- **Editor Picker Idempotent Save** — Editor picker and `/editor` command now skip saving when the selection matches the current editor, avoiding redundant writes.
+- **Small Model Command Sync** — `runSmallModelCmd` refactored from async to synchronous closure, eliminating a redundant `tea.Msg` wrapper.
+- **AGENTS.md Instant Commands List** — Added `/btw` and `/by-the-way` to the documented list of instant commands that bypass the command queue.
 
 ### Fixed
 - **Tool Output Click Regression** — Fixed separator accounting in clickable tool output regions where preceding messages caused `startLine` drift. New regression test validates click targeting after multiple preceding messages.
