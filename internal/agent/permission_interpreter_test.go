@@ -321,9 +321,31 @@ func TestVerifyInterpreterEffects(t *testing.T) {
 			t.Fatal("expected ask for unapproved network host")
 		}
 	})
-	t.Run("destructive requires allow_destructive", func(t *testing.T) {
-		if ok, _ := a.verifyInterpreterEffects(ie, base(), 0.85, false, false); ok {
-			t.Fatal("expected ask: destructive without allow_destructive")
+	t.Run("file write inside roots is not destructive", func(t *testing.T) {
+		// base() writes to out.json inside the allowed root. A plain write must
+		// auto-allow even without allow_destructive.
+		if ok, reason := a.verifyInterpreterEffects(ie, base(), 0.85, false, false); !ok {
+			t.Fatalf("expected allow for in-root write, got %q", reason)
+		}
+	})
+	t.Run("delete requires allow_destructive", func(t *testing.T) {
+		r := base()
+		r.Effects.Deletes = []string{out}
+		if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, false, false); ok {
+			t.Fatal("expected ask: delete without allow_destructive")
+		}
+		if ok, reason := a.verifyInterpreterEffects(ie, r, 0.85, true, false); !ok {
+			t.Fatalf("expected allow with allow_destructive, got %q", reason)
+		}
+	})
+	t.Run("db_destructive requires allow_destructive", func(t *testing.T) {
+		r := base()
+		r.Effects.DBDestructive = []string{"DROP TABLE merged_rows"}
+		if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, false, false); ok {
+			t.Fatal("expected ask: DROP TABLE without allow_destructive")
+		}
+		if ok, reason := a.verifyInterpreterEffects(ie, r, 0.85, true, false); !ok {
+			t.Fatalf("expected allow with allow_destructive, got %q", reason)
 		}
 	})
 	t.Run("read-only allowed without destructive flag", func(t *testing.T) {

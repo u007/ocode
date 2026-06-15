@@ -15,6 +15,7 @@ const (
 	KindSession EntryKind = "SESSION"
 	KindGit     EntryKind = "GIT"
 	KindLSP     EntryKind = "LSP"
+	KindWarn    EntryKind = "WARN"
 )
 
 type Entry struct {

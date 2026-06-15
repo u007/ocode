@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **`/rc` Tailscale Session URL** — `/rc` now surfaces the full portless Tailscale session URL when `tailscale serve` is available, instead of only showing the tailnet host. The local `localhost` URL remains the default browser-open target.
 - **`TokenUsage.DebugLog` Method** — New `DebugLog()` method on `TokenUsage` emits debug-level token tracking via `emitDebug("TOKENS", ...)`, surfacing per-request input/cache_read/cache_write/output token counts in the debug panel.
 - **Environment Git Worktree Prompt** — The environment prompt now includes the git worktree directory (`.worktrees/`) when the workspace is a git repo, informing the agent of parallel checkout locations.
 - **AGENTS.md Worktree Documentation** — New "Git Worktrees" section in `AGENTS.md` documents the `.worktrees/` convention with an example `git worktree add` command.

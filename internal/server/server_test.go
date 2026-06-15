@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -98,6 +101,34 @@ func TestNoAuthWhenEmpty(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestListenFallsForwardWhenPortBusy(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+
+	_, busyPortStr, err := net.SplitHostPort(busy.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	busyPort, err := strconv.Atoi(busyPortStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := New("127.0.0.1:"+busyPortStr, "", "", nil)
+	ln, err := s.Listen()
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	if strings.HasSuffix(s.Addr(), ":"+busyPortStr) {
+		t.Fatalf("expected Listen to fall forward from busy port %d, got %s", busyPort, s.Addr())
 	}
 }
 

@@ -562,6 +562,9 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	if next != nil && m.config != nil && m.config.Ocode.MaxSteps > 0 {
 		next.SetMaxSteps(m.config.Ocode.MaxSteps)
 	}
+	if next != nil && m.config != nil {
+		next.SetMemoryEnabled(m.config.Ocode.MemoryEnabled)
+	}
 	m.agent = next
 	if m.agent != nil {
 		m.agent.SetSupervisor(m.supervisor)
@@ -580,28 +583,30 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 }
 
 type model struct {
-	viewport            fastviewport.Model
-	input               textarea.Model
-	messages            []message
-	agent               *agent.Agent
-	advisorEnabled      bool // runtime advisor state; persisted across agent rebuilds
-	advisorEnabledSet   bool // whether advisorEnabled should be applied to newly installed agents
-	config              *config.Config
-	sessionID           string
-	sessionTitle        string
-	showThinking        bool
-	showDetails         bool
-	leaderActive        bool
-	leaderSeq           int
-	showPicker          bool
-	pickerKind          string
-	pickerItems         []string
-	pickerValues        []string
-	pickerIsHeader      []bool
-	pickerIndex         int
-	pickerFilter        string
-	pickerFilterPending string
-	pickerFilterSeq     int
+	viewport             fastviewport.Model
+	input                textarea.Model
+	messages             []message
+	agent                *agent.Agent
+	advisorEnabled       bool // runtime advisor state; persisted across agent rebuilds
+	advisorEnabledSet    bool // whether advisorEnabled should be applied to newly installed agents
+	smallModelEnabled    bool // runtime small model state; persisted across agent rebuilds
+	smallModelEnabledSet bool // whether smallModelEnabled should be applied to newly installed agents
+	config               *config.Config
+	sessionID            string
+	sessionTitle         string
+	showThinking         bool
+	showDetails          bool
+	leaderActive         bool
+	leaderSeq            int
+	showPicker           bool
+	pickerKind           string
+	pickerItems          []string
+	pickerValues         []string
+	pickerIsHeader       []bool
+	pickerIndex          int
+	pickerFilter         string
+	pickerFilterPending  string
+	pickerFilterSeq      int
 
 	// Pagination state for the session picker (infinite scroll)
 	pickerSessionRefs     []session.Ref // all loaded session refs
@@ -1305,7 +1310,7 @@ func newModel(opts ...RunOptions) model {
 
 	// Auto-select a small model from the priority list if none is configured.
 	var resolvedSmallModel string
-	if cfg != nil && cfg.Ocode.SmallModel == "" {
+	if cfg != nil && cfg.Ocode.SmallModel == "" && cfg.Ocode.SmallModelEnabled {
 		if small := agent.ResolveSmallModel(cfg); small != "" {
 			cfg.Ocode.SmallModel = small
 			resolvedSmallModel = small
@@ -1449,7 +1454,14 @@ func newModel(opts ...RunOptions) model {
 			return true
 		}(),
 		advisorEnabledSet: true,
-		config:            cfg,
+		smallModelEnabled: func() bool {
+			if cfg != nil {
+				return cfg.Ocode.SmallModelEnabled
+			}
+			return true
+		}(),
+		smallModelEnabledSet: true,
+		config:               cfg,
 		// IDE mode: an explicit config value wins; otherwise auto-enable the
 		// Claude Code integration only when running inside a VS Code terminal.
 		ideMode:          resolveInitialIDEMode(cfg),
@@ -2771,6 +2783,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		ev := msg.ev
+		m.queueMemoryMaintenance(ev)
 		// For agent runs that were synchronous, the parent agent already
 		// received the full result via the task tool's return value and the
 		// LLM has already responded to it. Re-injecting the completion as a
@@ -2845,9 +2858,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case rcStartedMsg:
-		rcText := fmt.Sprintf("🌐 Remote Control started!\n\nSession: %s\nURL: %s", m.sessionID, msg.url)
+		rcText := fmt.Sprintf("🌐 Remote Control started!\n\nSession: %s\nLocal URL: %s", m.sessionID, msg.url)
 		if msg.tailscaleURL != "" {
-			rcText += fmt.Sprintf("\n\n🔗 Tailscale URL: %s\n\nAccessible within your tailnet.", msg.tailscaleURL)
+			rcText += fmt.Sprintf("\n\n🔗 Tailscale URL (portless): %s\n\nUse this from any device on your tailnet.", msg.tailscaleURL)
 		}
 		rcText += "\n\nThe web UI is now streaming this session. You can continue chatting in the TUI or switch to the browser."
 		m.messages = append(m.messages, message{
@@ -4108,6 +4121,7 @@ func (m *model) toggleLogKind(kind DebugEntryKind) {
 			DebugKindTool:  true,
 			DebugKindAgent: true,
 			DebugKindError: true,
+			DebugKindWarn:  true,
 			DebugKindGit:   true,
 			DebugKindLSP:   true,
 		}
@@ -4688,6 +4702,25 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				if err := config.SaveAdvisorEnabled(m.advisorEnabled); err != nil {
 					log.Printf("save advisor enabled: %v", err)
 				}
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
+			if m.sidebarSmallModelToggleForClick(mouse) {
+				m.smallModelEnabled = !m.smallModelEnabled
+				m.smallModelEnabledSet = true
+				if m.config != nil {
+					m.config.Ocode.SmallModelEnabled = m.smallModelEnabled
+				}
+				if err := config.SaveSmallModelEnabled(m.smallModelEnabled); err != nil {
+					log.Printf("save small model enabled: %v", err)
+				}
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
+			if m.sidebarPermModelToggleForClick(mouse) && m.agent != nil {
+				perm := m.agent.Permissions()
+				perm.SetAutoPermissionEnabled(!perm.AutoPermissionEnabled())
+				m.persistPermissions()
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
@@ -5380,7 +5413,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
-		cmd == "/advisor" || cmd == "/mask" ||
+		cmd == "/advisor" || cmd == "/mask" || cmd == "/mem" ||
 		cmd == "/btw" || cmd == "/by-the-way" ||
 		cmd == "/rc" || cmd == "/remote-control"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
@@ -5730,7 +5763,11 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 			}
 
 			if agent.IsImageFile(path) {
-				img, err := agent.NewImage(path)
+				maxDim := 0
+				if m.config != nil {
+					maxDim = m.config.Ocode.MaxImageDim
+				}
+				img, err := agent.NewImageWithMaxDim(path, maxDim)
 				if err != nil {
 					msg := fileSearchFinishedMsg{err: fmt.Errorf("attach image %s: %w", path, err)}
 					return &msg
@@ -6786,6 +6823,14 @@ func (m *model) handleSmallModelCmd(args []string) {
 	if target == "auto" {
 		// Clear override in memory so ResolveSmallModel re-probes
 		m.config.Ocode.SmallModel = ""
+		if !m.config.Ocode.SmallModelEnabled {
+			if err := config.SaveSmallModel(""); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model is disabled; failed to clear auto-resolve value: %v", err)})
+				return
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Small model is disabled. Auto-resolve remains off."})
+			return
+		}
 		// Re-resolve
 		if small := agent.ResolveSmallModel(m.config); small != "" {
 			m.config.Ocode.SmallModel = small
@@ -8709,7 +8754,11 @@ func (m *model) askAgent() tea.Cmd {
 	// Load context once — both buildAgentMessagesSnapshot and Step call
 	// BasePromptMessages, which would otherwise re-read context files twice.
 	if m.agent != nil {
-		m.agent.SetPreloadedContext(agent.LoadContext(nil))
+		memoryEnabled := m.agent.MemoryEnabled()
+		if m.config != nil {
+			memoryEnabled = m.config.Ocode.MemoryEnabled
+		}
+		m.agent.SetPreloadedContext(agent.LoadContext(nil, memoryEnabled))
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
@@ -9005,6 +9054,14 @@ func startTailscaleServe(port int) string {
 	}
 
 	return ""
+}
+
+func buildRCSessionURL(baseURL, sessionID, token string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if baseURL == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s/session/%s?token=%s", baseURL, sessionID, token)
 }
 
 // broadcastRC pushes a live mirror event to all connected /rc web clients. It is
@@ -9895,13 +9952,12 @@ func (m *model) renderTranscript() {
 	}
 	// Perf probe: a slow render (>8ms) during streaming starves the event loop
 	// and shows up as input/scroll lag. Logging only above the threshold keeps
-	// the debug panel quiet at the normal ~20 renders/sec. log.Printf lands in
-	// the debug panel (never the alt-screen). Read it to learn the real session
-	// size when lag is reported: [perf] renderTranscript=Xms lines=N msgs=M.
+	// the debug panel quiet at the normal ~20 renders/sec. Read it to learn the
+	// real session size when lag is reported: [perf] renderTranscript=Xms lines=N msgs=M.
 	renderStart := time.Now()
 	defer func() {
 		if d := time.Since(renderStart); d > 8*time.Millisecond {
-			log.Printf("[perf] renderTranscript=%v lines=%d msgs=%d", d.Round(time.Millisecond), len(m.rawTranscriptLines), len(m.messages))
+			debuglog.Log.Append(debuglog.Entry{Kind: debuglog.KindWarn, Message: fmt.Sprintf("[perf] renderTranscript=%v lines=%d msgs=%d", d.Round(time.Millisecond), len(m.rawTranscriptLines), len(m.messages))})
 		}
 	}()
 	if m.msgRenderCache == nil {
@@ -10700,6 +10756,63 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) (bool,
 type jobCompletedMsg struct {
 	agent *agent.Agent
 	ev    agent.JobEvent
+}
+
+func (m *model) queueMemoryMaintenance(ev agent.JobEvent) {
+	if m == nil || m.agent == nil || !m.memoryMaintenanceEnabled() || strings.TrimSpace(m.workDir) == "" {
+		return
+	}
+	m.agent.QueueMemoryMaintenance(agent.MemoryMaintenanceRequest{
+		WorkDir:        m.workDir,
+		Job:            ev,
+		RecentMessages: m.memoryMaintenanceContext(),
+	})
+}
+
+func (m *model) memoryMaintenanceContext() []agent.Message {
+	if m == nil || len(m.messages) == 0 {
+		return nil
+	}
+	const limit = 8
+	start := 0
+	if len(m.messages) > limit {
+		start = len(m.messages) - limit
+	}
+	out := make([]agent.Message, 0, len(m.messages)-start)
+	for _, msg := range m.messages[start:] {
+		if msg.transient || strings.TrimSpace(msg.text) == "" {
+			continue
+		}
+		role := "assistant"
+		switch msg.role {
+		case roleUser:
+			role = "user"
+		case roleAssistant:
+			role = "assistant"
+		case roleThinking:
+			continue
+		}
+		if msg.raw != nil && strings.TrimSpace(msg.raw.Content) != "" {
+			copyMsg := *msg.raw
+			if copyMsg.Role == "" {
+				copyMsg.Role = role
+			}
+			out = append(out, copyMsg)
+			continue
+		}
+		out = append(out, agent.Message{Role: role, Content: msg.text})
+	}
+	return out
+}
+
+func (m *model) memoryMaintenanceEnabled() bool {
+	if m == nil {
+		return false
+	}
+	if m.agent != nil {
+		return m.agent.MemoryEnabled()
+	}
+	return m.config != nil && m.config.Ocode.MemoryEnabled
 }
 
 // listenJobs blocks on the agent's job-events channel and re-arms itself.
@@ -11898,6 +12011,10 @@ type sidebarRenderData struct {
 	allowedHeaderBottomIdx int // index in bottomLines of the Allowed header, -1 if absent
 	advisorToggleTopIdx    int // index in topLines of the advisor on/off row, -1 if absent
 	advisorToggleRows      int // number of (possibly wrapped) rows the advisor row occupies
+	smallModelToggleTopIdx int // index in topLines of the small model on/off row, -1 if absent
+	smallModelToggleRows   int // number of (possibly wrapped) rows the small model row occupies
+	permModelToggleTopIdx  int // index in topLines of the perm model on/off row, -1 if absent
+	permModelToggleRows    int // number of (possibly wrapped) rows the perm model row occupies
 	ideToggleTopIdx        int // index in topLines of the IDE on/off row, -1 if absent
 	ideToggleRows          int // number of (possibly wrapped) rows the IDE row occupies
 }
@@ -12176,7 +12293,7 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, ideToggleTopIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -12318,8 +12435,28 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.advisorToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, advisorLine, outerBodyWidth)
 	data.advisorToggleRows = len(data.topLines) - data.advisorToggleTopIdx
-	appendWrapped(&data.topLines, dimStyle.Render("small:   ")+sidebarTextStyle.Render(smallModel), outerBodyWidth)
-	appendWrapped(&data.topLines, dimStyle.Render("perm:    ")+sidebarTextStyle.Render(pPermModel), outerBodyWidth)
+	// Small model row doubles as an on/off toggle (click to flip the runtime gate).
+	smallModelOn := m.smallModelEnabled
+	var smallModelLine string
+	if smallModelOn {
+		smallModelLine = dimStyle.Render("small: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(smallModel)
+	} else {
+		smallModelLine = dimStyle.Render("small: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(smallModel)
+	}
+	data.smallModelToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, smallModelLine, outerBodyWidth)
+	data.smallModelToggleRows = len(data.topLines) - data.smallModelToggleTopIdx
+	// Perm model row doubles as an on/off toggle (click to flip the runtime gate).
+	permModelOn := m.agent != nil && m.agent.Permissions().AutoPermissionEnabled()
+	var permModelLine string
+	if permModelOn {
+		permModelLine = dimStyle.Render("perm: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(pPermModel)
+	} else {
+		permModelLine = dimStyle.Render("perm: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(pPermModel)
+	}
+	data.permModelToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, permModelLine, outerBodyWidth)
+	data.permModelToggleRows = len(data.topLines) - data.permModelToggleTopIdx
 	data.ideToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, m.ideSidebarStatusLine(), outerBodyWidth)
 	data.ideToggleRows = len(data.topLines) - data.ideToggleTopIdx
@@ -12826,6 +12963,44 @@ func (m model) sidebarAdvisorToggleForClick(mouse tea.Mouse) bool {
 	return mouse.Y >= startY && mouse.Y < endY
 }
 
+// sidebarSmallModelToggleForClick returns true when the click lands on the small
+// model on/off row in the pinned top area of the sidebar.
+func (m model) sidebarSmallModelToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.smallModelToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.smallModelToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.smallModelToggleTopIdx
+	endY := minInt(startY+data.smallModelToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
+// sidebarPermModelToggleForClick returns true when the click lands on the perm
+// model on/off row in the pinned top area of the sidebar.
+func (m model) sidebarPermModelToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.permModelToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.permModelToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.permModelToggleTopIdx
+	endY := minInt(startY+data.permModelToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
 // sidebarIDEToggleForClick returns true when the click lands on the IDE on/off
 // row in the pinned top area of the sidebar.
 func (m model) sidebarIDEToggleForClick(mouse tea.Mouse) bool {
@@ -12921,6 +13096,7 @@ func (m *model) refreshLogViewport() {
 		DebugKindTool:  headerStyle,
 		DebugKindAgent: successStyle,
 		DebugKindError: errorStyle,
+		DebugKindWarn:  lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true),
 	}
 	var lines []string
 	for _, e := range m.logEntries {
@@ -13045,8 +13221,9 @@ func (m model) renderLogTab() string {
 		{DebugKindTool, "TOOL", "2"},
 		{DebugKindAgent, "AGENT", "3"},
 		{DebugKindError, "ERROR", "4"},
-		{DebugKindGit, "GIT", "5"},
-		{DebugKindLSP, "LSP", "6"},
+		{DebugKindWarn, "WARN", "5"},
+		{DebugKindGit, "GIT", "6"},
+		{DebugKindLSP, "LSP", "7"},
 	}
 	kindBar := hintStyle.Render("filter: ")
 	for _, k := range kinds {
@@ -13969,19 +14146,32 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		// Register the RC bridge — server forwards requests through rcCh to TUI
 		bridge := srv.RegisterExternalSession(m.sessionID, m.config.Model, rcCh)
 
-		// Start the server in a goroutine
+		ln, err := srv.Listen()
+		if err != nil {
+			return message{role: roleAssistant, text: fmt.Sprintf("Failed to start remote control server: %v", err)}
+		}
+
+		// Start the server in a goroutine using the actual bound port.
 		go func() {
-			if err := srv.Start(); err != nil {
+			if err := srv.Serve(ln); err != nil {
 				log.Printf("RC server error: %v", err)
 			}
 		}()
 
+		boundAddr := srv.Addr()
 		// Embed token in URL so the browser auto-authenticates on open.
-		url := fmt.Sprintf("http://%s/session/%s?token=%s", addr, m.sessionID, token)
+		url := fmt.Sprintf("http://%s/session/%s?token=%s", boundAddr, m.sessionID, token)
 		go openBrowser(url)
 
 		// Try to expose via tailscale if available (non-blocking — open browser first).
-		tailscaleURL := startTailscaleServe(port)
+		tailscaleURL := ""
+		if _, boundPort, splitErr := net.SplitHostPort(boundAddr); splitErr == nil {
+			if p, convErr := strconv.Atoi(boundPort); convErr == nil {
+				if baseURL := startTailscaleServe(p); baseURL != "" {
+					tailscaleURL = buildRCSessionURL(baseURL, m.sessionID, token)
+				}
+			}
+		}
 
 		return rcStartedMsg{url: url, tailscaleURL: tailscaleURL, bridge: bridge}
 	}

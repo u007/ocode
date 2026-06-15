@@ -11,6 +11,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/commands"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/redact"
 )
@@ -96,6 +97,7 @@ func init() {
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
 		{name: "/mask", usage: "/mask [on|off|status|mode [lenient|full]|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
+		{name: "/mem", usage: "/mem [on|off|status|update [user|project|global] [focus]]", help: "Toggle memory context injection, inspect memory files, or update a memory scope", handler: runMemCmd},
 		{name: "/btw", aliases: []string{"/by-the-way"}, usage: "/btw <message>", help: "Add a quick aside to the conversation (by the way)", handler: runBtwCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
@@ -989,6 +991,113 @@ func maskStatusText(m *model, includeHint bool) string {
 		b.WriteString("\n\nTry: /mask [on|off|status|mode [lenient|full]|model [name]|list]")
 	}
 	return b.String()
+}
+
+func memoryStatusText(m *model, includeHint bool) string {
+	enabled := false
+	if m.config != nil {
+		enabled = m.config.Ocode.MemoryEnabled
+	} else if m.agent != nil {
+		enabled = m.agent.MemoryEnabled()
+	}
+	state := "disabled"
+	if enabled {
+		state = "enabled"
+	}
+
+	snap, err := memory.Status(m.workDir)
+	if err != nil {
+		return fmt.Sprintf("Memory context injection: %s\nError loading memory files: %v", state, err)
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("Memory context injection: %s\n", state))
+	b.WriteString("\n")
+	for _, scope := range []memory.Scope{snap.Project, snap.User, snap.Global} {
+		b.WriteString(scope.Name)
+		b.WriteString("\n")
+		b.WriteString("  Path: ")
+		b.WriteString(scope.Path)
+		b.WriteString("\n")
+		preview := scope.Preview
+		if preview == "" {
+			if scope.Present {
+				preview = "(empty)"
+			} else {
+				preview = "(not set)"
+			}
+		}
+		b.WriteString("  Preview: ")
+		b.WriteString(preview)
+		b.WriteString("\n\n")
+	}
+	b.WriteString("Files:\n")
+	for _, path := range []string{
+		"internal/memory/memory.go",
+		"internal/tui/memory.go",
+		"internal/tui/commands.go",
+		"internal/config/ocodeconfig.go",
+		"skills/ocode-mem/SKILL.md",
+	} {
+		b.WriteString("  - ")
+		b.WriteString(path)
+		b.WriteString("\n")
+	}
+	if includeHint {
+		b.WriteString("Try: /mem on|off|status|update [user|project|global] [focus]")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func setMemoryEnabled(m *model, enabled bool) error {
+	if m.config != nil {
+		if err := config.SaveMemoryEnabled(enabled); err != nil {
+			return err
+		}
+		m.config.Ocode.MemoryEnabled = enabled
+	}
+	if m.agent != nil {
+		m.agent.SetMemoryEnabled(enabled)
+	}
+	return nil
+}
+
+func runMemCmd(m *model, args []string) tea.Cmd {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: memoryStatusText(m, true)})
+		return nil
+	}
+
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "yes", "enable":
+		if err := setMemoryEnabled(m, true); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Memory context injection: enabled."})
+	case "off", "false", "no", "disable":
+		if err := setMemoryEnabled(m, false); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error: %v", err)})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Memory context injection: disabled."})
+	case "status":
+		m.messages = append(m.messages, message{role: roleAssistant, text: memoryStatusText(m, false)})
+	case "update":
+		prompt, err := buildMemUpdatePrompt(m.workDir, args[1:])
+		if err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("/mem update: %v", err)})
+			return nil
+		}
+		if m.agent != nil {
+			m.agent.ResetSubagentDispatch()
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		return m.sendCustomCommandPrompt(prompt)
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /mem [on|off|status|update [user|project|global] [focus]]"})
+	}
+	return nil
 }
 
 func runMaskCmd(m *model, args []string) tea.Cmd {

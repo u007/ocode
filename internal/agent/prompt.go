@@ -68,7 +68,7 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 				enabled[name] = p.Enabled
 			}
 		}
-		ctx = LoadContext(enabled)
+		ctx = LoadContext(enabled, a.MemoryEnabled())
 	}
 	if strings.TrimSpace(ctx) != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptContextMarker + "\nContext and rules:\n" + ctx})
@@ -170,6 +170,11 @@ func isGitRepo(root string) bool {
 	}
 	_, err := os.Stat(filepath.Join(root, ".git"))
 	return err == nil
+}
+
+func mustGetwd() string {
+	w, _ := os.Getwd()
+	return w
 }
 
 func yesNo(ok bool) string {

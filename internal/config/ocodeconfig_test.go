@@ -880,3 +880,64 @@ func TestASTPluginLoadSave(t *testing.T) {
 		}
 	})
 }
+
+func TestMemoryEnabledLoadSave(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	t.Run("default is enabled", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.MemoryEnabled {
+			t.Fatal("memory context should default to enabled")
+		}
+	})
+
+	t.Run("load disabled from file", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"memory_enabled":false}`), 0o644)
+
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg.Ocode.MemoryEnabled {
+			t.Fatal("want memory context disabled from file")
+		}
+	})
+
+	t.Run("save round-trips", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+
+		if err := SaveMemoryEnabled(true); err != nil {
+			t.Fatalf("SaveMemoryEnabled(true) failed: %v", err)
+		}
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.MemoryEnabled {
+			t.Fatal("memory context should persist as enabled after save")
+		}
+
+		if err := SaveMemoryEnabled(false); err != nil {
+			t.Fatalf("SaveMemoryEnabled(false) failed: %v", err)
+		}
+		var cfg2 Config
+		if err := LoadOcodeConfig(&cfg2); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg2.Ocode.MemoryEnabled {
+			t.Fatal("memory context should persist as disabled after save")
+		}
+	})
+}

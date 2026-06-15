@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/memory"
 )
 
 // TestBasePromptShape_PerPrimaryAgent asserts the marker order and presence
@@ -85,6 +89,66 @@ func TestBuildModePrompt_IncludesAdvisorContextPacketGuidance(t *testing.T) {
 	} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("build mode prompt missing advisor context detail %q", want)
+		}
+	}
+}
+
+func TestBasePromptMessages_IncludesMemoryContextWhenEnabled(t *testing.T) {
+	wd := t.TempDir()
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(wd); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore working dir: %v", err)
+		}
+	})
+
+	if err := os.MkdirAll(filepath.Join(wd, "skills", "ocode-mem"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wd, "skills", "ocode-mem", "SKILL.md"), []byte("---\nname: ocode-mem\n---\n# Memory guidance\nUse the memory files.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	home := filepath.Join(wd, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	snap, err := memory.Status(wd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, body := range map[string]string{
+		snap.User.Path:    "remember user prefs\n",
+		snap.Project.Path: "remember project decisions\n",
+		snap.Global.Path:  "remember global lessons\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}, mode: ModeBuild}
+	a.SetMemoryEnabled(true)
+
+	base := a.BasePromptMessages("")
+	ctx := findMarker(base, promptContextMarker)
+	if ctx == "" {
+		t.Fatal("expected base prompt to include the context fragment")
+	}
+	for _, want := range []string{"Memory context is enabled.", "Memory guidance", "User memory", "Project memory", "Global history"} {
+		if !strings.Contains(ctx, want) {
+			t.Fatalf("memory context missing %q: %s", want, ctx)
 		}
 	}
 }

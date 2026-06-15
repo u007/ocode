@@ -73,21 +73,29 @@ type RedactionConfig struct {
 }
 
 type OcodeConfig struct {
-	Compact           CompactConfig
-	Advisor           AdvisorConfig
-	Permissions       PermissionConfig
-	Plugins           PluginsConfig
-	Security          SecurityConfig
+	Compact     CompactConfig
+	Advisor     AdvisorConfig
+	Permissions PermissionConfig
+	Plugins     PluginsConfig
+	Security    SecurityConfig
+	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
+	// into the agent prompt.
+	MemoryEnabled     bool
 	ExtraAllowedPaths []string
 	Editor            string
 	EditorMode        string
 	IDEMode           string
 	SmallModel        string
+	SmallModelEnabled bool
 	CommitMsgModel    string
 	CommitMsgPrompt   string
 	TUI               TUIConfig
 	MaxSteps          int `json:"max_steps,omitempty"`
-	Extra             map[string]json.RawMessage
+	// MaxImageDim caps the longest edge (px) of an embedded image; larger
+	// images are downscaled to fit, preserving aspect ratio. 0 means use the
+	// agent package default (2000).
+	MaxImageDim int `json:"image_max_dim,omitempty"`
+	Extra       map[string]json.RawMessage
 }
 
 type PermissionConfig struct {
@@ -194,7 +202,8 @@ type advisorConfigFile struct {
 }
 
 type pluginsConfigFile struct {
-	AST *bool `json:"ast"`
+	AST    *bool `json:"ast"`
+	Memory *bool `json:"memory"`
 }
 
 type redactionConfigFile struct {
@@ -218,15 +227,18 @@ type ocodeConfigFile struct {
 	Permissions       permissionConfigFile `json:"permissions"`
 	Plugins           pluginsConfigFile    `json:"plugins"`
 	Security          securityConfigFile   `json:"security"`
+	MemoryEnabled     *bool                `json:"memory_enabled,omitempty"`
 	ExtraAllowedPaths []string             `json:"extra_allowed_paths,omitempty"`
 	Editor            string               `json:"editor,omitempty"`
 	EditorMode        string               `json:"editor_mode,omitempty"`
 	IDEMode           string               `json:"ide_mode,omitempty"`
 	SmallModel        string               `json:"small_model,omitempty"`
+	SmallModelEnabled *bool                `json:"small_model_enabled,omitempty"`
 	CommitMsgModel    string               `json:"commit_msg_model,omitempty"`
 	CommitMsgPrompt   string               `json:"commit_msg_prompt,omitempty"`
 	TUI               tuiConfigFile        `json:"tui"`
 	MaxSteps          int                  `json:"max_steps,omitempty"`
+	MaxImageDim       int                  `json:"image_max_dim,omitempty"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -265,12 +277,14 @@ func defaultSecurityConfig() SecurityConfig {
 
 func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
-		Compact:     defaultCompactConfig(),
-		Advisor:     defaultAdvisorConfig(),
-		Permissions: defaultPermissionConfig(),
-		Security:    defaultSecurityConfig(),
-		TUI:         defaultTUIConfig(),
-		Extra:       make(map[string]json.RawMessage),
+		Compact:           defaultCompactConfig(),
+		Advisor:           defaultAdvisorConfig(),
+		Permissions:       defaultPermissionConfig(),
+		MemoryEnabled:     true,
+		SmallModelEnabled: true,
+		Security:          defaultSecurityConfig(),
+		TUI:               defaultTUIConfig(),
+		Extra:             make(map[string]json.RawMessage),
 	}
 }
 
@@ -431,6 +445,12 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		}
 		delete(raw, "small_model")
 	}
+	if _, ok := raw["small_model_enabled"]; ok {
+		if file.SmallModelEnabled != nil {
+			cfg.SmallModelEnabled = *file.SmallModelEnabled
+		}
+		delete(raw, "small_model_enabled")
+	}
 
 	if _, ok := raw["commit_msg_model"]; ok {
 		if file.CommitMsgModel != "" {
@@ -446,6 +466,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "commit_msg_prompt")
 	}
 
+	if _, ok := raw["memory_enabled"]; ok {
+		if file.MemoryEnabled != nil {
+			cfg.MemoryEnabled = *file.MemoryEnabled
+		}
+		delete(raw, "memory_enabled")
+	}
+
 	if _, ok := raw["tui"]; ok {
 		applyTUIConfig(&cfg.TUI, file.TUI)
 		delete(raw, "tui")
@@ -456,6 +483,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.MaxSteps = file.MaxSteps
 		}
 		delete(raw, "max_steps")
+	}
+
+	if _, ok := raw["image_max_dim"]; ok {
+		if file.MaxImageDim > 0 {
+			cfg.MaxImageDim = file.MaxImageDim
+		}
+		delete(raw, "image_max_dim")
 	}
 
 	if cfg.Extra == nil {
@@ -676,14 +710,19 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.SmallModel != "" {
 		payload["small_model"] = cfg.SmallModel
 	}
+	payload["small_model_enabled"] = cfg.SmallModelEnabled
 	if cfg.CommitMsgModel != "" {
 		payload["commit_msg_model"] = cfg.CommitMsgModel
 	}
 	if cfg.CommitMsgPrompt != "" {
 		payload["commit_msg_prompt"] = cfg.CommitMsgPrompt
 	}
+	payload["memory_enabled"] = cfg.MemoryEnabled
 	if cfg.MaxSteps > 0 {
 		payload["max_steps"] = cfg.MaxSteps
+	}
+	if cfg.MaxImageDim > 0 {
+		payload["image_max_dim"] = cfg.MaxImageDim
 	}
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
@@ -1019,6 +1058,16 @@ func SaveAdvisorEnabled(enabled bool) error {
 	return SaveOcodeConfig(cfg)
 }
 
+// SaveMemoryEnabled persists the memory prompt-injection toggle to config.
+func SaveMemoryEnabled(enabled bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.MemoryEnabled = enabled
+	return SaveOcodeConfig(cfg)
+}
+
 // ResolveRedactionMode returns the effective redaction mode for a RedactionConfig.
 // When Mode is set it wins; when empty the legacy SkipLLMIfClean is consulted
 // (false → "full", true/nil → "lenient"). Returns "lenient" as the ultimate default.
@@ -1073,6 +1122,16 @@ func SaveSmallModel(model string) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.SmallModel = model
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveSmallModelEnabled persists the small model enabled/disabled state to config.
+func SaveSmallModelEnabled(enabled bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.SmallModelEnabled = enabled
 	return SaveOcodeConfig(cfg)
 }
 

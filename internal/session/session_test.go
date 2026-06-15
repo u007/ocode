@@ -11,14 +11,14 @@ import (
 )
 
 func TestProjectSlug(t *testing.T) {
-	slug1 := getProjectSlug()
+	slug1 := ProjectSlug()
 	if slug1 == "" {
 		t.Error("expected non-empty slug")
 	}
 
 	origWd, _ := os.Getwd()
 	os.Chdir("/")
-	slug2 := getProjectSlug()
+	slug2 := ProjectSlug()
 	os.Chdir(origWd)
 
 	if slug1 == slug2 {

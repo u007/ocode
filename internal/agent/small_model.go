@@ -56,10 +56,10 @@ func smallModelEligible(name string) bool {
 
 // injectSmallModelIfEligible sets spec.Model to the configured small model
 // when the spec has no explicit model and the agent name is eligible.
-// No-op if cfg is nil, cfg.Ocode.SmallModel is empty, or spec already has a
-// Model set (explicit registry override takes precedence).
+// No-op if cfg is nil, cfg.Ocode.SmallModel is empty, cfg.Ocode.SmallModelEnabled
+// is false, or spec already has a Model set (explicit registry override takes precedence).
 func injectSmallModelIfEligible(a *Agent, spec *AgentSpec, cfg *config.Config) {
-	if cfg == nil || cfg.Ocode.SmallModel == "" {
+	if cfg == nil || cfg.Ocode.SmallModel == "" || !cfg.Ocode.SmallModelEnabled {
 		return
 	}
 	if spec == nil || !smallModelEligible(spec.Name) {

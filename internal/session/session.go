@@ -60,7 +60,7 @@ func NewSessionID() string {
 // global data dir. It always uses the cross-platform global path
 // (see internal/paths.GlobalDataDir).
 func GetStorageDir() (string, error) {
-	slug := getProjectSlug()
+	slug := ProjectSlug()
 	return paths.ProjectSessionsDir(slug)
 }
 
@@ -89,8 +89,17 @@ func gitToplevel(wd string) string {
 	return result
 }
 
-func getProjectSlug() string {
+// ProjectSlug returns the stable slug for the current workspace root.
+func ProjectSlug() string {
 	wd, _ := os.Getwd()
+	return ProjectSlugForPath(wd)
+}
+
+// ProjectSlugForPath returns the stable slug for the workspace containing wd.
+func ProjectSlugForPath(wd string) string {
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
 	wd = gitToplevel(wd)
 	wd = filepath.Clean(wd)
 	if runtime.GOOS == "windows" {

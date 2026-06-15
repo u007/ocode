@@ -111,6 +111,7 @@ type Agent struct {
 	// advisorEnabled field so mid-run toggles propagate immediately.
 	parentAdvisorEnabled *atomic.Bool
 	jobEvents            chan JobEvent
+	memoryMaintCh        chan MemoryMaintenanceRequest
 	retryEvents          chan *RetryStatusEvent
 	// OnMessage, if set, is invoked for each message produced during Step
 	// (assistant replies and tool results) as soon as they are generated,
@@ -180,6 +181,7 @@ type Agent struct {
 	subagentDispatchCount int
 	preloadedContextMu    sync.RWMutex
 	preloadedContext      string // set by askAgent to avoid duplicate LoadContext calls
+	memoryEnabled         bool   // whether memory prompt injection is active
 	preloadedModelContext string // cached result of LoadModelContext, set once lazily
 	// pipeline, if set, runs in-process hook callbacks for tool calls and chat
 	// requests. Field is named "pipeline" (not "hooks") because the hooks package
@@ -348,6 +350,20 @@ func (a *Agent) SetPreloadedContext(ctx string) {
 	a.preloadedContextMu.Unlock()
 }
 
+// SetMemoryEnabled toggles prompt injection of the memory guidance/context.
+func (a *Agent) SetMemoryEnabled(enabled bool) {
+	a.preloadedContextMu.Lock()
+	a.memoryEnabled = enabled
+	a.preloadedContextMu.Unlock()
+}
+
+// MemoryEnabled reports whether memory guidance is injected into prompts.
+func (a *Agent) MemoryEnabled() bool {
+	a.preloadedContextMu.RLock()
+	defer a.preloadedContextMu.RUnlock()
+	return a.memoryEnabled
+}
+
 // getPreloadedContext returns the cached context under read lock.
 func (a *Agent) getPreloadedContext() string {
 	a.preloadedContextMu.RLock()
@@ -380,7 +396,9 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	a.runs = NewAgentRunRegistry()
 	a.stopCh = make(chan struct{})
 	a.jobEvents = make(chan JobEvent, 32)
+	a.memoryMaintCh = make(chan MemoryMaintenanceRequest, 64)
 	a.retryEvents = make(chan *RetryStatusEvent, 32)
+	go a.memoryMaintenanceWorker()
 	a.procs.SetOnDone(func(p *tool.Process) {
 		text, status, code, _ := a.procs.Output(p.ID)
 		a.emitJob(JobEvent{
@@ -437,6 +455,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 			a.tools["advisor"] = at
 		}
 	}
+	a.memoryEnabled = cfg == nil || cfg.Ocode.MemoryEnabled
 	return a
 }
 
@@ -976,7 +995,7 @@ func (a *Agent) recapClient() LLMClient {
 		return a.client
 	}
 	small := strings.TrimSpace(a.config.Ocode.SmallModel)
-	if small == "" {
+	if small == "" || !a.config.Ocode.SmallModelEnabled {
 		return a.client
 	}
 	if client := NewClient(a.config, small); client != nil {
