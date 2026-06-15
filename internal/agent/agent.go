@@ -92,6 +92,10 @@ type Agent struct {
 	// redactionRegistry, when non-nil, is used to resolve OCSEC tokens in
 	// tool arguments back to original values before tool execution.
 	redactionRegistry *redact.Registry
+	// redactionHook, when non-nil, is wired onto the active LLMClient as the
+	// tier-1 chokepoint safety net. Stored here so it can be re-applied when
+	// the client is swapped (e.g. by applySpec).
+	redactionHook *redact.NetHook
 	// advisorEnabled is a runtime gate for the "advisor" tool. It is seeded
 	// from cfg.Ocode.Advisor.Enabled at construction and can be flipped at
 	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.
@@ -1095,6 +1099,15 @@ func (a *Agent) SetRedactionRegistry(reg *redact.Registry) {
 	a.redactionRegistry = reg
 }
 
+// SetRedactionHook wires the tier-1 safety-net hook onto the active LLM client
+// and stores it so it is re-applied if the client is swapped later.
+func (a *Agent) SetRedactionHook(hook *redact.NetHook) {
+	a.redactionHook = hook
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.Redaction = hook
+	}
+}
+
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
 	if deny, ok := gateToolCall(a.Mode(), name, args); !ok {
 		return deny, nil
@@ -1826,11 +1839,12 @@ func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, ma
 		addSection("Working directory:", wd)
 	}
 
-	// Allowed filesystem roots — the authoritative scope boundary. Anything
-	// outside these roots is out-of-scope and must not be auto-allowed.
+	// Allowed filesystem roots — the authoritative scope boundary. Reads, writes,
+	// and deletes within these roots are pre-authorized by the user. Anything
+	// outside is OUT OF SCOPE and must not be auto-allowed.
 	if a.permissions != nil {
 		if roots := a.permissions.AllowedRoots(); len(roots) > 0 {
-			addSection("Allowed filesystem roots (anything outside is OUT OF SCOPE):", strings.Join(roots, "\n"))
+			addSection("Pre-authorized paths (read/write/delete ALLOWED inside these roots; anything outside is OUT OF SCOPE):", strings.Join(roots, "\n"))
 		}
 	}
 
@@ -2256,6 +2270,12 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 			emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
 			a.client = client
 			a.preloadedModelContext = "" // model may have changed; reload model-specific context lazily
+			// Re-wire the tier-1 redaction hook onto the new client.
+			if a.redactionHook != nil {
+				if gc, ok := a.client.(*GenericClient); ok {
+					gc.Redaction = a.redactionHook
+				}
+			}
 		} else {
 			emitDebug("AGENT", fmt.Sprintf("spec %q model %q: NewClient returned nil; keeping current client", spec.Name, spec.Model))
 		}

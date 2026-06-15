@@ -565,9 +565,11 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	m.agent = next
 	if m.agent != nil {
 		m.agent.SetSupervisor(m.supervisor)
-		// Wire redaction registry for tool arg resolution
+		// Wire redaction registry for tool arg resolution and the tier-1
+		// safety-net hook onto the new client's chokepoint.
 		if m.redactionRegistry != nil {
 			m.agent.SetRedactionRegistry(m.redactionRegistry)
+			m.agent.SetRedactionHook(redact.NetHookEnabled(m.redactionRegistry))
 		}
 	}
 	// Keep the RC bridge pointed at the live agent so web-side runtime toggles
@@ -833,8 +835,9 @@ type model struct {
 
 	// Secret redaction state (see internal/redact).
 	redactionEnabled  bool
-	redactionModel    string           // local model for tier-2 scanning
-	redactionRegistry *redact.Registry // session registry for token resolution
+	redactionModel    string              // local model for tier-2 scanning
+	redactionRegistry *redact.Registry   // session registry for token resolution
+	llmScanner        *redact.LLMScanner // tier-2 scanner, nil when no model configured
 }
 
 type modelCleanupState struct {
@@ -1393,12 +1396,21 @@ func newModel(opts ...RunOptions) model {
 		tool.SetHookPipeline(hp)
 	}
 
-	// Initialize redaction registry
+	// Initialize redaction registry and wire tier-1/tier-2 scanners.
 	var reg *redact.Registry
+	var llmScanner *redact.LLMScanner
 	if cfg != nil && cfg.Ocode.Security.Redaction.Enabled {
 		reg = redact.NewRegistry(redact.NewNonce())
 		if a != nil {
 			a.SetRedactionRegistry(reg)
+			// Wire tier-1 chokepoint: every ChatWithContext call will now
+			// run applyRedactionSafetyNet using this shared registry.
+			a.SetRedactionHook(redact.NetHookEnabled(reg))
+		}
+		// Build tier-2 LLM scanner if a local model server is configured.
+		rc := cfg.Ocode.Security.Redaction
+		if rc.BaseURL != "" && rc.Model != "" {
+			llmScanner = buildLLMScanner(rc.BaseURL, rc.Model)
 		}
 	}
 
@@ -1459,6 +1471,7 @@ func newModel(opts ...RunOptions) model {
 			return ""
 		}(),
 		redactionRegistry: reg,
+		llmScanner:        llmScanner,
 		activeModel: func() string {
 			if cfg != nil {
 				return cfg.Model
@@ -8676,6 +8689,13 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 			case <-cancel:
 				// Stream cancelled — drop to avoid blocking.
 			}
+		}
+		// Tier-2 LLM scan: run on the most recent user message before the
+		// main LLM call. Secrets found here are registered into the shared
+		// registry so the tier-1 NetHook in applyRedactionSafetyNet will
+		// substitute them out when ChatWithContext fires.
+		if m.llmScanner != nil && m.redactionRegistry != nil {
+			applyTier2Scan(agentMsgs, m.llmScanner, m.redactionRegistry)
 		}
 		_, err := a.Step(agentMsgs)
 		a.SetPreloadedContext("")

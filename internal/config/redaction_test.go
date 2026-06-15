@@ -16,6 +16,7 @@ func TestRedactionConfigLoad(t *testing.T) {
     "redaction": {
       "enabled": true,
       "model": "lmstudio/x",
+      "base_url": "http://localhost:11434",
       "fail_mode": "block",
       "custom_words": ["word1", "word2"]
     }
@@ -42,6 +43,9 @@ func TestRedactionConfigLoad(t *testing.T) {
 	}
 	if cfg.Ocode.Security.Redaction.Model != "lmstudio/x" {
 		t.Errorf("Expected model 'lmstudio/x', got %q", cfg.Ocode.Security.Redaction.Model)
+	}
+	if cfg.Ocode.Security.Redaction.BaseURL != "http://localhost:11434" {
+		t.Errorf("Expected base_url 'http://localhost:11434', got %q", cfg.Ocode.Security.Redaction.BaseURL)
 	}
 	if cfg.Ocode.Security.Redaction.FailMode != "block" {
 		t.Errorf("Expected fail_mode 'block', got %q", cfg.Ocode.Security.Redaction.FailMode)

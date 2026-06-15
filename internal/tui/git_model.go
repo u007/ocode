@@ -1265,11 +1265,11 @@ func (m gitModel) handleDiffKey(key string) (gitModel, tea.Cmd) {
 			m.hunkCursor--
 			m.diff.SetYOffset(m.hunks[m.hunkCursor].start)
 		}
-	case "s":
+	case "ctrl+s":
 		if m.section == gitSectionChanges && m.hunkCursor < len(m.hunks) {
 			return m.applyHunk(false)
 		}
-	case "u":
+	case "ctrl+u":
 		if m.section == gitSectionChanges && m.hunkCursor < len(m.hunks) {
 			return m.applyHunk(true)
 		}

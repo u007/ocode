@@ -201,8 +201,10 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	You may call read_file to inspect local imported files before deciding.
 
 	Decision guidance:
+	- The "allowed_roots" list in the request JSON are pre-authorized by the user:
+	  reads, writes, and deletes targeting paths inside those roots are ALLOWED.
 	- Prefer ALLOW for straightforward local file transformations when the source
-	  only reads/writes files inside the allowed roots and has no subprocesses,
+	  only reads/writes/deletes files inside the allowed roots and has no subprocesses,
 	  network, dynamic eval/exec, or unresolved imports.
 	- A heredoc or inline script is not risky by itself. Do not ask merely because
 	  the interpreter command is embedded in bash or spans multiple lines.
