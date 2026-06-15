@@ -105,7 +105,7 @@ func (a *Agent) titleClient() LLMClient {
 		}
 	}
 	small := strings.TrimSpace(a.config.Ocode.SmallModel)
-	if small == "" {
+	if small == "" || !a.config.Ocode.SmallModelEnabled {
 		return a.client
 	}
 	if client := NewClient(a.config, small); client != nil {

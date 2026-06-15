@@ -90,6 +90,7 @@ type GenericClient struct {
 	Model          string
 	BaseURL        string
 	Provider       string
+	MaxImageDim    int
 	UseOAuth       bool   // when true, treat APIKey as a bearer OAuth token
 	AccountID      string // cached chatgpt_account_id from OAuth credential
 	ThinkingBudget int    // >0 enables extended thinking for Anthropic models that support it
@@ -1258,7 +1259,7 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 		if strings.HasPrefix(part, "@") {
 			filePath := strings.TrimPrefix(part, "@")
 			if IsImageFile(filePath) {
-				img, err := NewImage(filePath)
+				img, err := NewImageWithMaxDim(filePath, c.MaxImageDim)
 				if err != nil {
 					textParts = append(textParts, part)
 					continue
@@ -2234,7 +2235,7 @@ func (c *GenericClient) buildAnthropicImageContent(m Message) ([]interface{}, er
 					textParts = append(textParts, part)
 					continue
 				}
-				img, err := NewImage(filePath)
+				img, err := NewImageWithMaxDim(filePath, c.MaxImageDim)
 				if err != nil {
 					return nil, err
 				}
@@ -2478,11 +2479,16 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	}
 
 	emitDebug("AGENT", fmt.Sprintf("NewClient: OK — provider=%q model=%q apiKey=%s useOAuth=%v ws=%v", provider, model, maskKey(apiKey), useOAuth, cfg != nil && cfg.UseWebSocket))
+	maxImageDim := 0
+	if cfg != nil {
+		maxImageDim = cfg.Ocode.MaxImageDim
+	}
 	return &GenericClient{
 		APIKey:         apiKey,
 		Model:          model,
 		BaseURL:        baseURL,
 		Provider:       provider,
+		MaxImageDim:    ResolveImageMaxDim(maxImageDim),
 		UseOAuth:       useOAuth,
 		AccountID:      accountID,
 		ThinkingBudget: thinkingBudget,

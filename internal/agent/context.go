@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/skill"
 )
@@ -93,7 +94,7 @@ func readContextFile(path string) (string, bool) {
 	return string(content), true
 }
 
-func LoadContext(enabled map[string]bool) string {
+func LoadContext(enabled map[string]bool, memoryEnabled bool) string {
 	var context string
 	files := []string{"AGENTS.md", "CLAUDE.md", "OCODE.md", ".cursorrules"}
 
@@ -120,6 +121,11 @@ func LoadContext(enabled map[string]bool) string {
 	}
 	if skillCatalog := skill.BuildCatalog(); skillCatalog != "" {
 		context += skillCatalog
+	}
+	if memoryEnabled {
+		if mem := memory.PromptFragment(""); mem != "" {
+			context += mem
+		}
 	}
 
 	return context

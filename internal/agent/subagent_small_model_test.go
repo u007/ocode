@@ -30,6 +30,7 @@ func TestInjectSmallModelIfEligible(t *testing.T) {
 	t.Run("injects for eligible agent with no explicit model", func(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Ocode.SmallModel = "opencode-go/deepseek-v4-flash"
+		cfg.Ocode.SmallModelEnabled = true
 		spec := &AgentSpec{Name: "explore"}
 		injectSmallModelIfEligible(nil, spec, cfg)
 		if spec.Model != "opencode-go/deepseek-v4-flash" {
@@ -63,6 +64,17 @@ func TestInjectSmallModelIfEligible(t *testing.T) {
 		injectSmallModelIfEligible(nil, spec, cfg)
 		if spec.Model != "" {
 			t.Fatalf("should not inject when SmallModel empty, got %q", spec.Model)
+		}
+	})
+
+	t.Run("no-op when SmallModelEnabled is false", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Ocode.SmallModel = "opencode-go/deepseek-v4-flash"
+		cfg.Ocode.SmallModelEnabled = false
+		spec := &AgentSpec{Name: "explore"}
+		injectSmallModelIfEligible(nil, spec, cfg)
+		if spec.Model != "" {
+			t.Fatalf("should not inject when SmallModelEnabled is false, got %q", spec.Model)
 		}
 	})
 

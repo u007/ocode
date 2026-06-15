@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -11,8 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
@@ -269,9 +272,55 @@ func (s *Server) handleOpenFile(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleOpenFile(w, r)
 }
 
+// Listen binds a TCP listener for the server. If the requested port is already
+// in use it walks forward to the next free port (up to maxPortAttempts) and
+// updates s.addr to the address actually bound, so callers can read the real
+// port back from s.addr afterwards.
+func (s *Server) Listen() (net.Listener, error) {
+	const maxPortAttempts = 20
+
+	host, portStr, err := net.SplitHostPort(s.addr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid listen address %q: %w", s.addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port %q: %w", portStr, err)
+	}
+
+	for i := 0; i < maxPortAttempts; i++ {
+		candidate := net.JoinHostPort(host, strconv.Itoa(port+i))
+		ln, err := net.Listen("tcp", candidate)
+		if err != nil {
+			if errors.Is(err, syscall.EADDRINUSE) {
+				log.Printf("serve: port %d in use, trying %d", port+i, port+i+1)
+				continue
+			}
+			return nil, err
+		}
+		s.addr = candidate
+		return ln, nil
+	}
+	return nil, fmt.Errorf("no free port found in range %d-%d", port, port+maxPortAttempts-1)
+}
+
 func (s *Server) Start() error {
-	fmt.Fprintf(os.Stderr, "serving on %s\n", s.addr)
-	return http.ListenAndServe(s.addr, s.mux)
+	ln, err := s.Listen()
+	if err != nil {
+		return err
+	}
+	return s.Serve(ln)
+}
+
+// Addr returns the actual listen address after Listen succeeds.
+func (s *Server) Addr() string {
+	return s.addr
+}
+
+// Serve serves requests on an already-bound listener.
+func (s *Server) Serve(ln net.Listener) error {
+	log.Printf("serving on %s", s.addr)
+	return http.Serve(ln, s.mux)
 }
 
 // RegisterExternalSession registers an existing TUI session with the web server
@@ -312,13 +361,22 @@ func Run(args []string, webFS fs.FS) error {
 
 	srv := New(addr, username, password, webFS)
 
+	// Bind before opening the browser so the URL reflects the port actually
+	// bound (Listen falls forward to a free port if the requested one is busy).
+	ln, err := srv.Listen()
+	if err != nil {
+		return err
+	}
+
 	if *openBrowser {
+		_, boundPort, _ := net.SplitHostPort(srv.addr)
 		go func() {
-			openURL(fmt.Sprintf("http://localhost:%d", *port))
+			openURL(fmt.Sprintf("http://localhost:%s", boundPort))
 		}()
 	}
 
-	return srv.Start()
+	log.Printf("serving on %s", srv.addr)
+	return http.Serve(ln, srv.mux)
 }
 
 func openURL(url string) {

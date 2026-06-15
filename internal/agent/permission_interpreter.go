@@ -27,7 +27,11 @@ type interpreterEffects struct {
 	Deletes      []string `json:"deletes"`
 	Network      []string `json:"network"`
 	Subprocesses []string `json:"subprocesses"`
-	Unknown      []string `json:"unknown"`
+	// DBDestructive lists database statements that destroy or mutate existing
+	// data/schema (DROP/DELETE/TRUNCATE/ALTER). Plain file writes inside allowed
+	// roots are not destructive; these are.
+	DBDestructive []string `json:"db_destructive"`
+	Unknown       []string `json:"unknown"`
 }
 
 type interpreterModelResponse struct {
@@ -203,6 +207,13 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	Decision guidance:
 	- The "allowed_roots" list in the request JSON are pre-authorized by the user:
 	  reads, writes, and deletes targeting paths inside those roots are ALLOWED.
+	- A file WRITE inside an allowed root is NOT destructive — including opening a
+	  database read-write, creating files, or journal/WAL sidecar files. Do not
+	  treat such writes as risky and do not list them in "db_destructive".
+	- "db_destructive" is ONLY for database statements that destroy or mutate
+	  existing data or schema: DROP, DELETE, TRUNCATE, or ALTER (modify) a table.
+	  A read-only query (SELECT, PRAGMA, .schema) is never destructive even though
+	  the connection may be opened read-write.
 	- Prefer ALLOW for straightforward local file transformations when the source
 	  only reads/writes/deletes files inside the allowed roots and has no subprocesses,
 	  network, dynamic eval/exec, or unresolved imports.
@@ -213,11 +224,14 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	  outside allowed roots, or otherwise not fully confident.
 
 	Respond with ONLY a single JSON object (no prose, no markdown fences):
-	{"decision":"allow|ask","confidence":0.0-1.0,"summary":"...","effects":{"reads":[],"writes":[],"deletes":[],"network":[],"subprocesses":[],"unknown":[]}}
+	{"decision":"allow|ask","confidence":0.0-1.0,"summary":"...","effects":{"reads":[],"writes":[],"deletes":[],"network":[],"subprocesses":[],"db_destructive":[],"unknown":[]}}
 
 	Rules:
 	- Resolve relative paths against cwd; list every file the source reads/writes/deletes.
 	- List every network host and every subprocess/shell-out the source performs.
+	- Put each DROP/DELETE/TRUNCATE/ALTER (or other data/schema-destroying) DB
+	  statement into "db_destructive". Read-only queries and plain file writes do
+	  not belong there.
 	- Put ANYTHING you cannot resolve with confidence (dynamic paths, unresolved
 	  imports, eval/exec, dynamic code loading, truncated source) into "unknown".
 	- Use decision "ask" whenever you are not fully confident.`, string(payloadJSON))
@@ -318,7 +332,7 @@ func (a *Agent) verifyInterpreterEffects(ie *InterpreterExec, resp *interpreterM
 			return false, "network target not allowed by policy: " + host
 		}
 	}
-	if (len(resp.Effects.Writes) > 0 || len(resp.Effects.Deletes) > 0) && !allowDestructive {
+	if (len(resp.Effects.Deletes) > 0 || len(resp.Effects.DBDestructive) > 0) && !allowDestructive {
 		return false, "destructive effects require allow_destructive"
 	}
 	return true, ""
@@ -333,7 +347,7 @@ func (a *Agent) persistInterpreterGrant(ie *InterpreterExec, sha, command string
 		return nil
 	}
 
-	destructive := len(resp.Effects.Writes) > 0 || len(resp.Effects.Deletes) > 0
+	destructive := len(resp.Effects.Deletes) > 0 || len(resp.Effects.DBDestructive) > 0
 	var grant config.AutoGrant
 	switch ie.SourceMode {
 	case "script_file", "stdin_pipe":
