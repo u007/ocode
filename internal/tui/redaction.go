@@ -3,6 +3,7 @@ package tui
 import (
 	"strings"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/redact"
 )
@@ -81,6 +82,52 @@ func redactText(text string, reg *redact.Registry) string {
 	return reg.Substitute(text)
 }
 
+
+// buildLLMScanner creates a tier-2 LLM scanner that calls a local model server.
+// Returns nil when no base URL or model is configured.
+func buildLLMScanner(baseURL, model string) *redact.LLMScanner {
+	if baseURL == "" || model == "" {
+		return nil
+	}
+	if !redact.IsLocalEndpoint(baseURL) {
+		agent.DebugAppendf("REDACT", "tier-2 scanner: base_url %q is not a local endpoint; skipping (security policy)", baseURL)
+		return nil
+	}
+	return &redact.LLMScanner{BaseURL: baseURL, Model: model}
+}
+
+// applyTier2Scan runs the tier-2 LLM scanner on the most recent user message
+// in agentMsgs. Any newly identified secrets are registered into reg so the
+// tier-1 NetHook will substitute them before the content reaches the LLM.
+// MUTATES: overwrites msg.Content for the scanned message with token-substituted text.
+func applyTier2Scan(agentMsgs []agent.Message, scanner redact.Scanner, reg *redact.Registry) {
+	if scanner == nil {
+		return
+	}
+	// Find the last user message.
+	for i := len(agentMsgs) - 1; i >= 0; i-- {
+		msg := &agentMsgs[i]
+		if msg.Role != "user" || strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		// Apply tier-1 to get the masked text for the scanner.
+		masked := redactText(msg.Content, reg)
+		spans, err := scanner.Scan(masked)
+		if err != nil {
+			agent.DebugAppendf("REDACT", "tier-2 scan error: %v", err)
+			return
+		}
+		for _, span := range spans {
+			val := masked[span.Start:span.End]
+			if !redact.TokenPattern.MatchString(val) {
+				reg.GetOrAssign(val, "model", "scanner")
+			}
+		}
+		// Re-substitute this message with the now-expanded registry.
+		msg.Content = reg.Substitute(msg.Content)
+		return
+	}
+}
 
 // renderSecrets replaces OCSEC tokens in text with masked previews for display.
 // The owner can see partial secrets (e.g., "AKIA***7EXAMPLE") while the

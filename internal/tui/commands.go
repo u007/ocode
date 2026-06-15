@@ -959,10 +959,6 @@ func maskStatusText(m *model, includeHint bool) string {
 	if activeModel == "" {
 		activeModel = "(not configured)"
 	}
-	tier2Model := m.redactionModel
-	if tier2Model == "" {
-		tier2Model = "(not configured - tier-2 scanning disabled)"
-	}
 	state := "disabled"
 	if m.redactionEnabled {
 		state = "enabled"
@@ -971,7 +967,19 @@ func maskStatusText(m *model, includeHint bool) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Active model: %s\n", activeModel))
 	b.WriteString(fmt.Sprintf("Secret redaction: %s\n", state))
-	b.WriteString(fmt.Sprintf("Tier-2 scanning model: %s", tier2Model))
+
+	if m.llmScanner != nil {
+		baseURL := m.llmScanner.BaseURL
+		if len(baseURL) > 40 {
+			baseURL = baseURL[:37] + "..."
+		}
+		b.WriteString(fmt.Sprintf("Tier-2 scanner: active (model=%s, base_url=%s)", m.redactionModel, baseURL))
+	} else if m.redactionModel != "" {
+		b.WriteString(fmt.Sprintf("Tier-2 scanner: inactive (model=%s, base_url not configured)", m.redactionModel))
+	} else {
+		b.WriteString("Tier-2 scanner: not configured")
+	}
+
 	if includeHint {
 		b.WriteString("\n\nTry: /mask [on|off|status|model [name]|list]")
 	}

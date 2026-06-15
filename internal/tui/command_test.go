@@ -382,7 +382,7 @@ func TestMaskCommandShowsStatusAndHint(t *testing.T) {
 		t.Fatal("expected /mask to append a status message")
 	}
 	msg := got.messages[len(got.messages)-1].text
-	for _, want := range []string{"Active model: gpt-4o", "Secret redaction: enabled", "Tier-2 scanning model: lmstudio/local-scan", "Try: /mask [on|off|status|model [name]|list]"} {
+	for _, want := range []string{"Active model: gpt-4o", "Secret redaction: enabled", "Tier-2 scanner: inactive (model=lmstudio/local-scan, base_url not configured)", "Try: /mask [on|off|status|model [name]|list]"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("expected /mask output to include %q, got %q", want, msg)
 		}

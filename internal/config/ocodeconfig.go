@@ -64,6 +64,7 @@ type SecurityConfig struct {
 type RedactionConfig struct {
 	Enabled     bool     `json:"enabled"`
 	Model       string   `json:"model"`
+	BaseURL     string   `json:"base_url"`     // base URL of the local model server (e.g. http://localhost:11434)
 	FailMode    string   `json:"fail_mode"`    // "block" or "warn"
 	CustomWords []string `json:"custom_words"`
 }
@@ -196,6 +197,7 @@ type pluginsConfigFile struct {
 type redactionConfigFile struct {
 	Enabled     *bool    `json:"enabled"`
 	Model       *string  `json:"model"`
+	BaseURL     *string  `json:"base_url"`
 	FailMode    *string  `json:"fail_mode"`
 	CustomWords []string `json:"custom_words"`
 }
@@ -533,6 +535,9 @@ func applySecurityConfig(dst *SecurityConfig, src securityConfigFile) {
 	}
 	if src.Redaction.Model != nil {
 		dst.Redaction.Model = *src.Redaction.Model
+	}
+	if src.Redaction.BaseURL != nil {
+		dst.Redaction.BaseURL = *src.Redaction.BaseURL
 	}
 	if src.Redaction.FailMode != nil {
 		dst.Redaction.FailMode = *src.Redaction.FailMode
