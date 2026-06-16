@@ -3,7 +3,12 @@ import { useChat } from "../../hooks/useChat";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 
-export default function ChatInput() {
+interface ChatInputProps {
+  /** Called when a slash command is entered. Return true if handled. */
+  onSlashCommand?: (command: string) => boolean;
+}
+
+export default function ChatInput({ onSlashCommand }: ChatInputProps) {
   const [input, setInput] = useState("");
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
@@ -24,6 +29,7 @@ export default function ChatInput() {
 
   const filteredCount = showSlashMenu
     ? [
+        "/new",
         "/clear",
         "/model",
         "/compact",
@@ -39,6 +45,13 @@ export default function ChatInput() {
     if (!trimmed || isStreaming) return;
     setInput("");
     setShowSlashMenu(false);
+    
+    // Check if this is a slash command
+    if (trimmed.startsWith("/") && onSlashCommand) {
+      const handled = onSlashCommand(trimmed);
+      if (handled) return;
+    }
+    
     sendMessage(trimmed);
   };
 
@@ -63,6 +76,7 @@ export default function ChatInput() {
       if (e.key === "Enter" && filteredCount > 0) {
         e.preventDefault();
         const commands = [
+          "/new",
           "/clear",
           "/model",
           "/compact",
@@ -98,7 +112,7 @@ export default function ChatInput() {
           onHover={setSelectedIndex}
         />
       )}
-      <div className="flex gap-2">
+      <div className="flex items-end gap-2">
         <textarea
           ref={textareaRef}
           className="flex-1 resize-none rounded-lg border border-zinc-600 bg-zinc-800 p-3 text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
@@ -113,7 +127,7 @@ export default function ChatInput() {
             type="button"
             variant="destructive"
             size="sm"
-            className="self-end"
+            className="shrink-0"
             onClick={stop}
           >
             Stop
@@ -122,7 +136,7 @@ export default function ChatInput() {
           <Button
             type="button"
             size="sm"
-            className="self-end"
+            className="shrink-0"
             onClick={handleSend}
             disabled={!input.trim()}
           >

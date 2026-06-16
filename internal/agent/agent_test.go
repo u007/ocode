@@ -2018,3 +2018,37 @@ func TestForceRefreshRegistryNon200Status(t *testing.T) {
 		t.Fatalf("expected nil data when fetch fails and no existing data, got %#v", got)
 	}
 }
+
+func TestSetWorkDirUpdatesPermissionsAndAdvisorTool(t *testing.T) {
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	workspace := t.TempDir()
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewAgent(&GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, &config.Config{}, nil)
+	target := filepath.Join(workspace, "nested")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	a.SetWorkDir(target)
+	if a.workDir != target {
+		t.Fatalf("expected agent workDir %q, got %q", target, a.workDir)
+	}
+	if a.permissions == nil || a.permissions.workDir != target {
+		t.Fatalf("expected permissions workDir %q, got %#v", target, a.permissions)
+	}
+	advisor, ok := a.tools["advisor"].(AdvisorTool)
+	if !ok {
+		t.Fatalf("expected advisor tool, got %T", a.tools["advisor"])
+	}
+	if advisor.workDir != target {
+		t.Fatalf("expected advisor workDir %q, got %q", target, advisor.workDir)
+	}
+}

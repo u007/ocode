@@ -91,6 +91,10 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 
 func (a *Agent) environmentPrompt() string {
 	cwd, _ := os.Getwd()
+	// Use the workDir override if set (e.g., via /cd command)
+	if a.workDir != "" {
+		cwd = a.workDir
+	}
 	root := findWorkspaceRoot(cwd)
 	provider, model := "", ""
 	if a.client != nil {

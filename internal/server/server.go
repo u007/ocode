@@ -602,6 +602,7 @@ type SessionInfo struct {
 type SessionDetail struct {
 	SessionInfo
 	Messages []agent.Message `json:"messages"`
+	Total    int             `json:"total"`
 }
 
 type ModelInfo struct {

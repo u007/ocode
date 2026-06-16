@@ -39,10 +39,10 @@ go build -o ocode .
 
 ### Initial Setup (First Run)
 
-On first launch, ocode creates default config files in your project root:
+On first launch, ocode creates default config files:
 
-- **`opencode.json`** — LLM provider credentials and model settings (shared with opencode)
-- **`ocodeconfig.json`** — ocode-only state: permissions, editor config, session history
+- **`opencode.json`** (project root) — LLM provider credentials and model settings (shared with opencode)
+- **`ocodeconfig.json`** (`~/.config/opencode/`) — ocode-only state: permissions, editor config. This is now global-only; project-level copies are no longer loaded.
 
 You'll be prompted to authenticate with your LLM provider(s) via OAuth or API key.
 
@@ -144,7 +144,7 @@ Preferred: `xterm-256color`, `screen-256color`, `tmux-256color`, or modern termi
 
 ### Config file conflicts
 
-If `opencode.json` and `ocodeconfig.json` disagree on settings, project-level configs override global ones (`~/.config/opencode/`). Clear your global config to debug:
+`opencode.json` (project root) holds provider config; `ocodeconfig.json` (`~/.config/opencode/`) holds ocode-specific state. If you need to reset ocode settings:
 
 ```bash
 rm -rf ~/.config/opencode/
@@ -168,9 +168,10 @@ ocode recreates defaults on next run.
 │   ├── tui/                   Bubble Tea TUI
 │   └── version/               version info
 ├── docs/                      design specs
-├── opencode.json              (created at first run) provider config
-└── ocodeconfig.json           (created at first run) ocode state
+└── opencode.json              (created at first run) provider config
 ```
+
+> Global ocode state lives at `~/.config/opencode/ocodeconfig.json` (macOS/Linux).
 
 ## Next Steps
 

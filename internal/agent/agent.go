@@ -78,6 +78,10 @@ type Agent struct {
 	config    *config.Config
 	mode      Mode
 	spec      *AgentSpec
+	// workDir, when set, overrides os.Getwd() for the environment prompt.
+	// This is used by the /cd command to update the working directory shown
+	// to the LLM without changing the process working directory.
+	workDir string
 	// lspMgr, when non-nil, is the project-wide LSP manager. The agent
 	// loop reads its diagnostic store on every Step to build a
 	// transient system-message fragment (see injectLSPDiagnostics) — it
@@ -1191,6 +1195,19 @@ func (a *Agent) SetMode(m Mode) {
 		return
 	}
 	a.mode = m
+}
+
+// SetWorkDir sets the working directory override for the environment prompt.
+// When set, this directory is used instead of os.Getwd() in the <env> block.
+func (a *Agent) SetWorkDir(dir string) {
+	a.workDir = dir
+	if a.permissions != nil {
+		a.permissions.SetWorkDir(dir)
+	}
+	if at, ok := a.tools["advisor"].(AdvisorTool); ok {
+		at.workDir = dir
+		a.tools["advisor"] = at
+	}
 }
 
 // SetRedactionRegistry sets the registry for resolving OCSEC tokens in tool args.

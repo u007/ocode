@@ -278,6 +278,7 @@ type rcDoneMsg struct {
 type rcStartedMsg struct {
 	url          string
 	tailscaleURL string
+	setupHint    string
 	bridge       *server.RCBridge
 }
 
@@ -821,6 +822,14 @@ type model struct {
 	// rcBridge is the bridge between the server and TUI, used to push messages
 	// so the web UI can fetch existing conversation history.
 	rcBridge *server.RCBridge
+	// rcSrv is the HTTP server backing /rc, stored so we can shut it down.
+	rcSrv *server.Server
+	// rcLn is the listener backing /rc, stored so we can close it on stop.
+	rcLn net.Listener
+	// rcTailscaleProc is the tailscale serve/funnel process (if any) for cleanup.
+	rcTailscaleProc *exec.Cmd
+	// rcTailscaleURL is the public tailscale URL shown to the user.
+	rcTailscaleURL string
 
 	// ide integration (see internal/ide). When ideMode == config.IDEModeClaude
 	// the ideClient streams VS Code editor selection / open-tabs into the TUI
@@ -1408,8 +1417,20 @@ func newModel(opts ...RunOptions) model {
 		reg = redact.NewRegistry(redact.NewNonce())
 		// Build tier-2 LLM scanner if a local model server is configured.
 		rc := cfg.Ocode.Security.Redaction
-		if rc.BaseURL != "" && rc.Model != "" {
-			llmScanner = buildLLMScanner(rc.BaseURL, rc.Model, rc.AllowRemoteTier2)
+		baseURL := rc.BaseURL
+		model := rc.Model
+		// Auto-detect default base URL for known local providers (e.g.
+		// lmstudio → http://localhost:1234/v1) when the model is set
+		// but base_url is not yet configured.
+		if baseURL == "" && model != "" {
+			if def := defaultRedactionBaseURL(model); def != "" {
+				agent.DebugAppendf("REDACT", "auto-set tier-2 scanner base_url to %q for model %q (from config)", def, model)
+				baseURL = def
+			}
+		}
+		model = normalizeRedactionModelName(model, baseURL)
+		if baseURL != "" && model != "" {
+			llmScanner = buildLLMScanner(baseURL, model, rc.AllowRemoteTier2)
 		}
 	}
 
@@ -1469,13 +1490,19 @@ func newModel(opts ...RunOptions) model {
 		sessionID:        o.SessionID,
 		showThinking:     true,
 		showSidebar:      true,
-		redactionEnabled: cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
-		redactionModel: func() string {
-			if cfg != nil {
-				return cfg.Ocode.Security.Redaction.Model
-			}
-			return ""
-		}(),
+			redactionEnabled: cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
+			redactionModel: func() string {
+				if cfg != nil {
+					baseURL := cfg.Ocode.Security.Redaction.BaseURL
+					if baseURL == "" && cfg.Ocode.Security.Redaction.Model != "" {
+						if def := defaultRedactionBaseURL(cfg.Ocode.Security.Redaction.Model); def != "" {
+							baseURL = def
+						}
+					}
+					return normalizeRedactionModelName(cfg.Ocode.Security.Redaction.Model, baseURL)
+				}
+				return ""
+			}(),
 		redactionRegistry: reg,
 		llmScanner:        llmScanner,
 		redactFailMode: func() string {
@@ -2860,7 +2887,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case rcStartedMsg:
 		rcText := fmt.Sprintf("🌐 Remote Control started!\n\nSession: %s\nLocal URL: %s", m.sessionID, msg.url)
 		if msg.tailscaleURL != "" {
-			rcText += fmt.Sprintf("\n\n🔗 Tailscale URL (portless): %s\n\nUse this from any device on your tailnet.", msg.tailscaleURL)
+			rcText += fmt.Sprintf("\n\n🔗 Tailscale URL: %s\n\nUse this from any device on your tailnet (or the internet if funnel is enabled).", msg.tailscaleURL)
+		}
+		if msg.setupHint != "" {
+			rcText += fmt.Sprintf("\n\n⚙ Tailscale: one-time setup needed — run:\n  %s\n\nThis is a one-time step per tailnet. After enabling, tailscale serve/funnel will work automatically.", msg.setupHint)
 		}
 		rcText += "\n\nThe web UI is now streaming this session. You can continue chatting in the TUI or switch to the browser."
 		m.messages = append(m.messages, message{
@@ -3085,6 +3115,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case compactStartedMsg:
 		m.compacting = true
 		m.lastCompactErr = nil
+		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("📦 Compaction started…"), transient: true})
+		m.rerenderTranscriptAndMaybeScroll()
 		m.layout()
 		return m, tea.Batch(
 			waitCompactEvent(m.compactStartCh, m.compactCh),
@@ -3104,6 +3136,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.result.OK {
 			if ok, bannerIdx := m.applyCompactionResult(msg.result, m.pendingCompactUIIdx); ok {
 				m.pendingCompactUIIdx = nil
+				m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("✅ Compaction complete"), transient: true})
 				if manual && bannerIdx >= 0 {
 					if m.expandedCompaction == nil {
 						m.expandedCompaction = make(map[int]bool)
@@ -6540,7 +6573,9 @@ func (m *model) cycleTheme() {
 			break
 		}
 	}
-	m.config.Ocode.TUI.Theme = next
+	if m.config != nil {
+		m.config.Ocode.TUI.Theme = next
+	}
 	m.applyTheme()
 	if err := config.SaveTUITheme(next); err != nil {
 		log.Printf("save theme: %v", err)
@@ -6561,7 +6596,9 @@ func (m *model) handleThemesCmd(args []string) {
 		return
 	}
 
-	m.config.Ocode.TUI.Theme = name
+	if m.config != nil {
+		m.config.Ocode.TUI.Theme = name
+	}
 	m.applyTheme()
 	if err := config.SaveTUITheme(name); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s (save failed: %v)", name, err)})
@@ -6576,6 +6613,9 @@ func (m *model) handleModelsCmd(args []string) tea.Cmd {
 }
 
 func (m *model) handleAdvisorCmd(args []string) tea.Cmd {
+	if m.config == nil {
+		return nil
+	}
 	if len(args) == 0 {
 		m.openAdvisorPicker()
 		return nil
@@ -8843,14 +8883,27 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 				// Stream cancelled — drop to avoid blocking.
 			}
 		}
+		// Tier-1 redaction: keyword+entropy detection on the last user
+		// message. This runs unconditionally (even without a tier-2 scanner)
+		// so that common password/secret patterns are masked before reaching
+		// the LLM. The result feeds into the tier-2 scan below.
+		//
+		// applyTier1UserRedaction mutates agentMsgs in-place.
+		if m.redactionRegistry != nil {
+			applyTier1UserRedaction(agentMsgs, m.redactionRegistry)
+		}
+
 		// Tier-2 LLM scan: run on the most recent user message before the
-		// main LLM call. Secrets found here are registered into the shared
-		// registry so the tier-1 NetHook in applyRedactionSafetyNet will
-		// substitute them out when ChatWithContext fires.
+		// main LLM call. Additional secrets found here are registered into
+		// the shared registry so the NetHook in applyRedactionSafetyNet
+		// will substitute them when ChatWithContext fires.
+		//
+		// In lenient mode the LLM scan is skipped when the (already tier-1
+		// masked) message has no sensitive keywords or value patterns.
 		//
 		// When failMode is "block" and the scanner errors, the error is
 		// returned and the message is NOT sent to the LLM.
-		if m.llmScanner != nil && m.redactionRegistry != nil {
+		if m.redactionEnabled && m.llmScanner != nil && m.redactionRegistry != nil {
 			if err := applyTier2Scan(agentMsgs, m.llmScanner, m.redactionRegistry, m.redactFailMode, m.redactMode); err != nil {
 				close(msgCh)
 				errCh <- err
@@ -8993,66 +9046,137 @@ func drainStreamDeltas(ch chan deltaEvent) []deltaEvent {
 	}
 }
 
-// startTailscaleServe attempts to expose the given port via tailscale serve.
-// Returns the tailscale URL if successful, empty string otherwise.
-func startTailscaleServe(port int) string {
-	// Check if tailscale CLI is available
+// startTailscaleExpose tries to make the given port reachable via tailscale.
+// It first tries tailscale funnel (public internet), then tailscale serve
+// (tailnet-only). Returns the public URL and the background process (if any)
+// so the caller can kill it later. The setupHint is a one-time enable URL
+// shown when funnel or serve isn't enabled on the tailnet yet.
+func startTailscaleExpose(port int) (url string, proc *exec.Cmd, setupHint string) {
 	tailscalePath, err := exec.LookPath("tailscale")
 	if err != nil {
-		return ""
+		return "", nil, ""
 	}
 
-	// Check if tailscale is running
+	// Check if tailscale is running.
 	statusCmd := exec.Command(tailscalePath, "status")
-	var statusBuf bytes.Buffer
-	statusCmd.Stdout = &statusBuf
-	statusCmd.Stderr = &statusBuf
 	if err := statusCmd.Run(); err != nil {
-		return ""
+		return "", nil, ""
 	}
 
-	// Start tailscale serve in background
-	serveCmd := exec.Command(tailscalePath, "serve", "--bg", fmt.Sprintf("localhost:%d", port))
+	target := fmt.Sprintf("localhost:%d", port)
+
+	// Try tailscale funnel first — this gives a public internet URL.
+	if u, p, hint := tailscaleExpose(tailscalePath, "funnel", target); u != "" {
+		return u, p, hint
+	}
+
+	// Fall back to tailscale serve — this gives a tailnet-only URL.
+	if u, p, hint := tailscaleExpose(tailscalePath, "serve", target); u != "" {
+		return u, p, hint
+	}
+
+	// Last resort: get the tailnet DNS name from status.
+	return tailscaleDNSName(tailscalePath), nil, ""
+}
+
+// tailscaleExpose runs `tailscale <cmd> --bg <target>` and returns the URL
+// from its output plus the process handle. The process runs in the background
+// and must be killed when no longer needed. When the feature isn't enabled on
+// the tailnet, setupHint contains the one-time enable URL.
+func tailscaleExpose(tailscalePath, cmd, target string) (string, *exec.Cmd, string) {
+	serveCmd := exec.Command(tailscalePath, cmd, "--bg", target)
 	var out bytes.Buffer
 	serveCmd.Stdout = &out
 	serveCmd.Stderr = &out
 
-	if err := serveCmd.Run(); err != nil {
-		log.Printf("tailscale serve failed: %v", err)
-		return ""
+	if err := serveCmd.Start(); err != nil {
+		log.Printf("tailscale %s failed to start: %v", cmd, err)
+		return "", nil, ""
 	}
 
-	// Parse the output to get the URL
-	// tailscale serve outputs something like:
-	// Available within your tailnet:
-	// https://hostname.tailnet-name.ts.net:443
+	// Wait in background so the process is reaped; capture exit code.
+	done := make(chan error, 1)
+	go func() { done <- serveCmd.Wait() }()
+
+	// Give it a moment to output the URL, then parse.
+	select {
+	case <-time.After(2 * time.Second):
+	case <-done:
+	}
+
 	output := out.String()
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
-			return line
+			return line, serveCmd, ""
 		}
 	}
 
-	// If we couldn't parse the URL, try to get it from tailscale status
-	statusCmd = exec.Command(tailscalePath, "status", "--json")
+	// The command may have already exited successfully — it's still running in
+	// the background. If we got no URL line, check the output for the URL.
+	// tailscale funnel output looks like:
+	//   Funnel on:
+	//     https://hostname.tailnet-name.ts.net
+	// tailscale serve output looks like:
+	//   Available within your tailnet:
+	//     https://hostname.tailnet-name.ts.net:443
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "https://") || strings.HasPrefix(line, "http://") {
+			return line, serveCmd, ""
+		}
+	}
+
+	// Parse setup hint: tailscale outputs "To enable, visit:\n  <URL>" when
+	// funnel or serve isn't enabled on the tailnet yet.
+	var setupHint string
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "https://") || strings.HasPrefix(line, "http://") {
+			setupHint = line
+			break
+		}
+	}
+
+	return "", nil, setupHint
+}
+
+// tailscaleReset clears any active tailscale serve/funnel config.
+func tailscaleReset() {
+	tailscalePath, err := exec.LookPath("tailscale")
+	if err != nil {
+		return
+	}
+	for _, cmd := range []string{"funnel", "serve"} {
+		resetCmd := exec.Command(tailscalePath, cmd, "reset")
+		if err := resetCmd.Run(); err != nil {
+			// Best-effort; ignore errors.
+			log.Printf("tailscale %s reset: %v", cmd, err)
+		}
+	}
+}
+
+// tailscaleDNSName returns the tailnet DNS name (e.g. "host.tailnet.ts.net")
+// from tailscale status, or empty string on failure.
+func tailscaleDNSName(tailscalePath string) string {
+	statusCmd := exec.Command(tailscalePath, "status", "--json")
 	var statusOut bytes.Buffer
 	statusCmd.Stdout = &statusOut
-	if err := statusCmd.Run(); err == nil {
-		var status struct {
-			SELF struct {
-				DNSName string `json:"DNSName"`
-			} `json:"Self"`
-		}
-		if json.Unmarshal(statusOut.Bytes(), &status) == nil {
-			// DNSName is like "hostname.tailnet-name.ts.net."
-			dnsName := strings.TrimSuffix(status.SELF.DNSName, ".")
-			if dnsName != "" {
-				return fmt.Sprintf("https://%s", dnsName)
-			}
-		}
+	if err := statusCmd.Run(); err != nil {
+		return ""
 	}
-
+	var status struct {
+		SELF struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
+	}
+	if json.Unmarshal(statusOut.Bytes(), &status) != nil {
+		return ""
+	}
+	dnsName := strings.TrimSuffix(status.SELF.DNSName, ".")
+	if dnsName != "" {
+		return fmt.Sprintf("https://%s", dnsName)
+	}
 	return ""
 }
 
@@ -12530,7 +12654,10 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		}
 		allowedBody := []string{sidebarSectionStyle.Render("Allowed") + "  " + dimStyle.Render("Mode: ") + sidebarAccentStyle.Render(modeLabel)}
 
-		extraPaths := m.config.Ocode.ExtraAllowedPaths
+		extraPaths := []string(nil)
+		if m.config != nil {
+			extraPaths = m.config.Ocode.ExtraAllowedPaths
+		}
 		if len(extraPaths) > 0 {
 			allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Extra paths (%d):", len(extraPaths))))
 			const maxLines = 3
@@ -14110,7 +14237,17 @@ func (m *model) handleReviewCmd(args []string) tea.Cmd {
 }
 
 func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
+	// Handle /rc off — stop the server and clean up tailscale.
+	if len(args) > 0 && strings.EqualFold(args[0], "off") {
+		return m.stopRemoteControl()
+	}
+
 	return func() tea.Msg {
+		// If RC is already running, stop it first (allows restart on different port).
+		if m.rcSrv != nil {
+			m.stopRCServer()
+		}
+
 		port := 4096
 		if len(args) > 0 {
 			if p, err := strconv.Atoi(args[0]); err == nil && p > 0 && p < 65536 {
@@ -14151,6 +14288,10 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 			return message{role: roleAssistant, text: fmt.Sprintf("Failed to start remote control server: %v", err)}
 		}
 
+		// Store the server and listener for later cleanup (/rc off).
+		m.rcSrv = srv
+		m.rcLn = ln
+
 		// Start the server in a goroutine using the actual bound port.
 		go func() {
 			if err := srv.Serve(ln); err != nil {
@@ -14165,15 +14306,59 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 
 		// Try to expose via tailscale if available (non-blocking — open browser first).
 		tailscaleURL := ""
+		setupHint := ""
 		if _, boundPort, splitErr := net.SplitHostPort(boundAddr); splitErr == nil {
 			if p, convErr := strconv.Atoi(boundPort); convErr == nil {
-				if baseURL := startTailscaleServe(p); baseURL != "" {
-					tailscaleURL = buildRCSessionURL(baseURL, m.sessionID, token)
+				tsURL, tsProc, tsHint := startTailscaleExpose(p)
+				if tsURL != "" {
+					tailscaleURL = buildRCSessionURL(tsURL, m.sessionID, token)
+				}
+				m.rcTailscaleProc = tsProc
+				if tsHint != "" {
+					setupHint = tsHint
 				}
 			}
 		}
+		m.rcTailscaleURL = tailscaleURL
 
-		return rcStartedMsg{url: url, tailscaleURL: tailscaleURL, bridge: bridge}
+		return rcStartedMsg{url: url, tailscaleURL: tailscaleURL, setupHint: setupHint, bridge: bridge}
+	}
+}
+
+// stopRCServer shuts down the RC HTTP server, closes the listener, and kills
+// the tailscale serve/funnel process if one was started. Safe to call when no
+// server is running (all fields are nil-checked).
+func (m *model) stopRCServer() {
+	// Kill tailscale serve/funnel process.
+	if m.rcTailscaleProc != nil {
+		if err := m.rcTailscaleProc.Process.Kill(); err != nil {
+			log.Printf("rc: kill tailscale process: %v", err)
+		}
+		m.rcTailscaleProc = nil
+	}
+	// Reset tailscale serve state so a future /rc can re-expose cleanly.
+	tailscaleReset()
+	// Close the listener.
+	if m.rcLn != nil {
+		_ = m.rcLn.Close()
+		m.rcLn = nil
+	}
+	m.rcSrv = nil
+	m.rcCh = nil
+	m.rcBridge = nil
+	m.rcTailscaleURL = ""
+}
+
+// stopRemoteControl is the tea.Cmd returned by /rc off. It tears down the RC
+// server and returns a confirmation message.
+func (m *model) stopRemoteControl() tea.Cmd {
+	wasRunning := m.rcSrv != nil || m.rcBridge != nil
+	m.stopRCServer()
+	return func() tea.Msg {
+		if wasRunning {
+			return message{role: roleAssistant, text: "🔌 Remote control stopped."}
+		}
+		return message{role: roleAssistant, text: "Remote control is not running."}
 	}
 }
 

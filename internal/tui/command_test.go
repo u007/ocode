@@ -1,11 +1,14 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/redact"
+	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 
 	"charm.land/bubbles/v2/textarea"
@@ -382,7 +385,7 @@ func TestMaskCommandShowsStatusAndHint(t *testing.T) {
 		t.Fatal("expected /mask to append a status message")
 	}
 	msg := got.messages[len(got.messages)-1].text
-	for _, want := range []string{"Active model: gpt-4o", "Secret redaction: enabled", "Scan mode: lenient", "Tier-2 scanner: inactive (model=lmstudio/local-scan, base_url not configured)", "Try: /mask [on|off|status|mode [lenient|full]|model [name]|list]"} {
+	for _, want := range []string{"Secret redaction: enabled", "Scan mode: lenient", "Tier-2 scanner: inactive (model=lmstudio/local-scan, base_url not configured)", "Try: /mask [on|off|status|mode [lenient|full]|model [name]|list]"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("expected /mask output to include %q, got %q", want, msg)
 		}
@@ -523,6 +526,44 @@ func TestMaskRuntimeReconfigUpdatesAgentAndScanner(t *testing.T) {
 	}
 }
 
+func TestMaskModelAutoSetsBaseURLAndRebuildsScanner(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	cfg := &config.Config{}
+	cfg.Ocode.Security.Redaction.Enabled = true
+
+	m := model{
+		input:             newTestTextarea(),
+		viewport:          fastviewport.New(80, 20),
+		config:            cfg,
+		agent:             agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, cfg, nil),
+		redactionEnabled:  true,
+		redactionRegistry: redact.NewRegistry(redact.NewNonce()),
+		redactMode:        "lenient",
+	}
+
+	updated, cmd := m.handleCommand("/mask model lmstudio/scan-new")
+	if cmd != nil {
+		t.Fatalf("expected /mask model to return no command, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	if got.config.Ocode.Security.Redaction.BaseURL != "http://localhost:1234/v1" {
+		t.Fatalf("expected auto base_url, got %q", got.config.Ocode.Security.Redaction.BaseURL)
+	}
+	if got.config.Ocode.Security.Redaction.Model != "lmstudio/scan-new" {
+		t.Fatalf("expected normalized model in config, got %q", got.config.Ocode.Security.Redaction.Model)
+	}
+	if got.llmScanner == nil {
+		t.Fatal("expected llm scanner to be rebuilt after auto base_url set")
+	}
+	if got.llmScanner.BaseURL != "http://localhost:1234/v1" {
+		t.Fatalf("expected llm scanner base_url http://localhost:1234/v1, got %q", got.llmScanner.BaseURL)
+	}
+	if got.llmScanner.Model != "scan-new" {
+		t.Fatalf("expected llm scanner model scan-new, got %q", got.llmScanner.Model)
+	}
+}
+
 func TestMaskOnRebuildsScannerWhenInitiallyDisabled(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
@@ -558,6 +599,51 @@ func TestMaskOnRebuildsScannerWhenInitiallyDisabled(t *testing.T) {
 	}
 	if gc.Redaction == nil || !gc.Redaction.Enabled {
 		t.Fatal("expected redaction hook to be attached after /mask on")
+	}
+}
+
+func TestCdCommandChangesProcessAndSessionWorkspace(t *testing.T) {
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace-a")
+	target := filepath.Join(root, "workspace-b")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	m := model{
+		input:    newTestTextarea(),
+		workDir:  workspace,
+		agent:    agent.NewAgent(&agent.GenericClient{Provider: "openai", Model: "gpt-4o"}, nil, &config.Config{}, nil),
+		viewport: fastviewport.New(80, 20),
+	}
+
+	if cmd := runCdCmd(&m, []string{target}); cmd != nil {
+		t.Fatalf("expected /cd to return no command, got %T", cmd)
+	}
+	if got := m.workDir; got != target {
+		t.Fatalf("expected model workDir %q, got %q", target, got)
+	}
+	wantCwd := target
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		wantCwd = resolved
+	}
+	if got, err := os.Getwd(); err != nil || got != wantCwd {
+		t.Fatalf("expected process cwd %q, got %q (err=%v)", wantCwd, got, err)
+	}
+	if got := session.ProjectSlug(); got != session.ProjectSlugForPath(wantCwd) {
+		t.Fatalf("expected session slug to follow cwd change, got %q want %q", got, session.ProjectSlugForPath(wantCwd))
 	}
 }
 

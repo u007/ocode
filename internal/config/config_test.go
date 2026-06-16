@@ -50,23 +50,7 @@ func TestLoadCreatesOcodeConfigFiles(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpHome)
 
-	tmpDir, err := os.MkdirTemp("", "ocode-project")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	origWd, _ := os.Getwd()
-	defer os.Chdir(origWd)
-
-	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{}`), 0644); err != nil {
-		t.Fatal(err)
-	}
-
 	t.Setenv("HOME", tmpHome)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatal(err)
-	}
 
 	cfg, err := Load()
 	if err != nil {
@@ -80,13 +64,9 @@ func TestLoadCreatesOcodeConfigFiles(t *testing.T) {
 		t.Fatalf("failed to save ocode config: %v", err)
 	}
 
-	projectPath := filepath.Join(tmpDir, "ocodeconfig.json")
-	if _, err := os.Stat(projectPath); err != nil {
-		t.Fatalf("expected %s to be created: %v", projectPath, err)
-	}
 	globalPath := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
-	if _, err := os.Stat(globalPath); !os.IsNotExist(err) {
-		t.Fatalf("expected global ocode config to remain absent, got err=%v", err)
+	if _, err := os.Stat(globalPath); err != nil {
+		t.Fatalf("expected global ocode config to be created: %v", err)
 	}
 }
 

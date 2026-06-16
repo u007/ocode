@@ -190,3 +190,42 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+// TestEnvironmentPrompt_UsesWorkDirOverride verifies that when SetWorkDir is called,
+// the environment prompt uses the overridden directory instead of os.Getwd().
+func TestEnvironmentPrompt_UsesWorkDirOverride(t *testing.T) {
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := &Agent{
+		client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"},
+		mode:   ModeBuild,
+	}
+
+	// Without workDir override, should use os.Getwd()
+	msgs := a.BasePromptMessages("")
+	envMsg := findMarker(msgs, promptEnvMarker)
+	if envMsg == "" {
+		t.Fatal("environment prompt missing")
+	}
+	if !strings.Contains(envMsg, origWD) {
+		t.Errorf("expected environment prompt to contain original wd %q, got:\n%s", origWD, envMsg)
+	}
+
+	// With workDir override, should use the overridden directory
+	overrideDir := "/tmp/test-override-dir"
+	a.SetWorkDir(overrideDir)
+	msgs = a.BasePromptMessages("")
+	envMsg = findMarker(msgs, promptEnvMarker)
+	if envMsg == "" {
+		t.Fatal("environment prompt missing after SetWorkDir")
+	}
+	if !strings.Contains(envMsg, overrideDir) {
+		t.Errorf("expected environment prompt to contain override dir %q, got:\n%s", overrideDir, envMsg)
+	}
+	if strings.Contains(envMsg, origWD) {
+		t.Errorf("environment prompt should not contain original wd %q after override", origWD)
+	}
+}

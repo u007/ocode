@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/pathscope"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -875,6 +876,12 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 					emitDebug("perm", fmt.Sprintf("Decide ALLOW (temp dir): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
+				// Managed cache dirs (tool-results + cloned-repo cache) are always
+				// allowed for read operations — they contain ocode's own state.
+				if isReadOnlyTool(toolName) && isWithinAllowedScope(pm, path) {
+					emitDebug("perm", fmt.Sprintf("Decide ALLOW (allowed scope, read-only): tool=%s path=%s", toolName, path))
+					return PermissionDecision{Level: PermissionAllow}
+				}
 				// Read-only tools on immutable, developer-trusted roots (the Go
 				// module cache, written 0444 and content-addressed) are benign —
 				// allow without prompting or consulting the permission model.
@@ -1088,6 +1095,11 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	// the static in-root auto-allow and the LLM permission prompt's allowed_roots.
 	for _, r := range tool.CacheRoots() {
 		add(r)
+	}
+	// Ocode's global data dir (~/.local/share/opencode) contains memory files,
+	// sessions, auth, and usage records. Allow read/write without prompting.
+	if dataDir, err := paths.GlobalDataDir(); err == nil {
+		add(dataDir)
 	}
 	add("/tmp")
 	add("/var/tmp")

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Routes, Route } from "react-router-dom";
+import { Routes, Route, useNavigate } from "react-router-dom";
 import { ChatProvider, useChatDispatch } from "./stores/chatStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
@@ -30,8 +30,11 @@ function HomeApp() {
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [coworkOpen, setCoworkOpen] = useState(true);
+  const navigate = useNavigate();
   const dispatch = useChatDispatch();
-  const { resolvePermission, pendingPermission } = useChat();
+  const { resolvePermission, pendingPermission } = useChat({
+    onNewSession: (sessionId) => navigate(`/session/${sessionId}`),
+  });
 
   // Seed the advisor on/off state from the server so the status bar is correct on load.
   useEffect(() => {
@@ -53,9 +56,19 @@ function HomeApp() {
   };
 
   const handleCommand = (cmd: string) => {
-    if (cmd === "/clear") dispatch({ type: "RESET" });
-    if (cmd === "/model") openModelDialog("main");
-    // /compact, /recap, /export, /share are handled by the chat input
+    // Extract the base command (first word)
+    const baseCmd = cmd.split(" ")[0];
+    
+    if (baseCmd === "/clear" || baseCmd === "/new") {
+      dispatch({ type: "RESET" });
+      return true;
+    }
+    if (baseCmd === "/model") {
+      openModelDialog("main");
+      return true;
+    }
+    // For other commands, let them pass through to the LLM
+    return false;
   };
 
   return (
@@ -80,7 +93,7 @@ function HomeApp() {
             <>
               <ChatPanel />
               <AgentPreview />
-              <ChatInput />
+              <ChatInput onSlashCommand={handleCommand} />
               <StatusBar 
                 onCoworkToggle={() => setCoworkOpen(!coworkOpen)} 
                 onModelClick={() => openModelDialog("main")}

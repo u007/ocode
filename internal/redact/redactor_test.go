@@ -1,7 +1,9 @@
 package redact
 
 import (
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -169,6 +171,87 @@ func TestRedactorCustomWords(t *testing.T) {
 	resolved := r.Render(masked)
 	if resolved != text {
 		t.Errorf("Custom word should be resolved:\n  original: %q\n  resolved: %q", text, resolved)
+	}
+}
+
+// TestRedactorChatMode_Tier2 verifies that RedactChat correctly invokes
+// the tier-2 scanner on the tier-1 masked text and registers new findings.
+func TestRedactorChatMode_Tier2(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := filepath.Join(dir, "test.vault.json")
+	reg := NewRegistry("a3f9c2")
+
+	// Novel secret that tier-1 regex won't catch (no known prefix, no keyword)
+	novelSecret := "xC7kQ9mBw2pL"
+	text := "my api key is " + novelSecret
+
+	// Mock scanner that finds the novel secret at its position in the
+	// tier-1 masked text (since tier-1 didn't catch it, it's still plaintext).
+	scanner := &mockScanner{
+		spans: []Span{{Start: 14, End: 26, Kind: "custom"}},
+	}
+
+	r := NewRedactor(RedactorConfig{Enabled: true}, vaultPath, scanner)
+	r.SetRegistry(reg)
+
+	masked, err := r.RedactChat(text)
+	if err != nil {
+		t.Fatalf("RedactChat error: %v", err)
+	}
+
+	// The novel secret must be masked
+	if strings.Contains(masked, novelSecret) {
+		t.Errorf("novel secret not masked in output: %q", masked)
+	}
+
+	// The masked output should contain an OCSEC token
+	if !TokenPattern.MatchString(masked) {
+		t.Errorf("expected OCSEC token in output, got: %q", masked)
+	}
+
+	// Resolve back — should match original
+	resolved := r.Render(masked)
+	if resolved != text {
+		t.Errorf("Render mismatch:\n  original: %q\n  resolved: %q", text, resolved)
+	}
+
+	// Vault should be persisted
+	if _, err := LoadVault(vaultPath); err != nil {
+		t.Errorf("Vault should have been persisted: %v", err)
+	}
+}
+
+// TestRedactorChatMode_Tier2_ScannerError verifies that RedactChat returns
+// ErrScannerUnavailable when the tier-2 scanner fails, but still returns
+// the tier-1 masked text.
+func TestRedactorChatMode_Tier2_ScannerError(t *testing.T) {
+	dir := t.TempDir()
+	vaultPath := filepath.Join(dir, "test.vault.json")
+	reg := NewRegistry("a3f9c2")
+
+	scanner := &mockScanner{
+		err: fmt.Errorf("connection refused"),
+	}
+
+	r := NewRedactor(RedactorConfig{Enabled: true}, vaultPath, scanner)
+	r.SetRegistry(reg)
+
+	text := "my password is AKIAIOSFODNN7EXAMPLE"
+	masked, err := r.RedactChat(text)
+
+	// Should return ErrScannerUnavailable
+	if !IsScannerUnavailable(err) {
+		t.Errorf("expected ErrScannerUnavailable, got: %v", err)
+	}
+
+	// Should still return tier-1 masked text
+	if masked == text {
+		t.Error("RedactChat should have modified text (tier-1)")
+	}
+
+	// Vault should still be persisted
+	if _, err := LoadVault(vaultPath); err != nil {
+		t.Errorf("Vault should have been persisted: %v", err)
 	}
 }
 

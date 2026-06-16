@@ -7,6 +7,7 @@ import {
   Share2,
   HelpCircle,
   FileDown,
+  Plus,
 } from "lucide-react";
 
 interface Command {
@@ -16,6 +17,7 @@ interface Command {
 }
 
 const COMMANDS: Command[] = [
+  { name: "/new", description: "Start a new session", icon: Plus },
   { name: "/clear", description: "Clear conversation history", icon: Trash2 },
   { name: "/model", description: "Open model selector", icon: Settings },
   { name: "/compact", description: "Compact conversation context", icon: Archive },

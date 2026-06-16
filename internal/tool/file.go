@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/pathscope"
 	"github.com/u007/ocode/internal/snapshot"
 )
@@ -251,6 +252,12 @@ func confinedPath(p string) (string, error) {
 	// Also allow reads from the managed repository cache.
 	if repoCache, err := repoCacheDir(); err == nil {
 		if repoResolved, ok := normalizeRootPath(repoCache); ok && pathWithinRoot(resolved, repoResolved) {
+			return resolved, nil
+		}
+	}
+	// Allow access to ocode's global data dir (memory, sessions, auth, usage).
+	if dataDir, err := paths.GlobalDataDir(); err == nil {
+		if dataDirResolved, ok := normalizeRootPath(dataDir); ok && pathWithinRoot(resolved, dataDirResolved) {
 			return resolved, nil
 		}
 	}
