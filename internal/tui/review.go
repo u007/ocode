@@ -312,25 +312,73 @@ func gitRun(workDir string, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// buildReviewPrompt creates the prompt for the LLM to perform the review.
+// buildReviewPrompt creates the prompt for the orchestrator
+// (main LLM) to drive a grouped, notes-enabled code review
+// and a final reconcile pass. The /review command no longer
+// asks a single agent to review a diff end-to-end; it asks
+// the orchestrator to:
+//
+//  1. Compute a SHARED BRIEF once: change set summary, caller
+//     map, and any doc-rule digest the agents need. This is
+//     context the orchestrator already has, so every agent
+//     in the fan-out does not have to recompute it.
+//  2. SPAWN a grouped fan-out via the `task` tool, with
+//     `shared_notes: true`, partitioned by review dimension
+//     (correctness, security, style, performance). For very
+//     large diffs, partition by file instead — the brief
+//     seeds the per-agent scope. Each agent emits cross-
+//     agent-value findings to the bus and keeps own-report-
+//     only findings in its own report.
+//  3. RUN RECONCILE on the bus when the group finishes. The
+//     orchestrator dedups, ranks severity, resolves
+//     contradictions, and surfaces unreviewed partitions.
+//
+// The interactive SEVERITY/FILE/LINE/MESSAGE/SUGGESTION
+// report format is preserved so the existing TUI overlay
+// can still parse findings.
 func buildReviewPrompt(target reviewTarget, context string, description string) string {
 	var b strings.Builder
 
-	b.WriteString("Perform a comprehensive code review of the following changes.\n\n")
+	b.WriteString("Run a code review of the following changes using a grouped, notes-enabled fan-out.\n\n")
 	b.WriteString(fmt.Sprintf("## Review Target: %s\n\n", description))
 	b.WriteString("## Changes to Review\n\n")
 	b.WriteString(context)
 	b.WriteString("\n\n")
-	b.WriteString("## Review Instructions\n\n")
-	b.WriteString("Please analyze the code changes and provide:\n\n")
-	b.WriteString("1. **Summary**: A brief overview of the changes and their purpose.\n")
-	b.WriteString("2. **Findings**: A list of specific issues, concerns, or suggestions.\n")
-	b.WriteString("   - For each finding, specify the severity (error, warning, info, suggestion)\n")
-	b.WriteString("   - Include file path and line number when possible\n")
-	b.WriteString("   - Provide a clear description of the issue\n")
-	b.WriteString("   - Suggest a fix when appropriate\n\n")
-	b.WriteString("## Output Format\n\n")
-	b.WriteString("Please structure your response using the following format:\n\n")
+
+	b.WriteString("## Workflow\n\n")
+	b.WriteString("Drive this as a grouped fan-out — do NOT do the review end-to-end yourself.\n\n")
+	b.WriteString("### Step 1 — Compute a shared brief ONCE\n\n")
+	b.WriteString("Before spawning any agents, build a shared brief:\n")
+	b.WriteString("- A one-paragraph change set summary.\n")
+	b.WriteString("- A caller map for the modified symbols (who depends on them).\n")
+	b.WriteString("- Any doc-rule digest the agents need (e.g. the project's API conventions).\n")
+	b.WriteString("This is context the agents will all need; compute it once and seed it.\n\n")
+
+	b.WriteString("### Step 2 — Spawn a grouped fan-out with shared_notes: true\n\n")
+	b.WriteString("Use the `task` tool to dispatch all agents in ONE parallel batch. Each call must set:\n")
+	b.WriteString("  shared_notes: true\n")
+	b.WriteString("2+ subagent calls with shared_notes in the same batch become a group; a single call has nobody to coordinate with and gets no bus.\n\n")
+	b.WriteString("Partition by review dimension. For a typical small diff:\n")
+	b.WriteString("- one agent on correctness (logic errors, missing nil checks, off-by-one, panic paths),\n")
+	b.WriteString("- one agent on security (auth bypass, secret leakage, injection, unsafe input),\n")
+	b.WriteString("- one agent on style and API consistency,\n")
+	b.WriteString("- one agent on performance and resource use.\n\n")
+	b.WriteString("For very large diffs (>2000 lines) partition by file instead. Pass each agent a short brief describing its dimension and the file(s) it owns.\n\n")
+	b.WriteString("Each agent must:\n")
+	b.WriteString("- Emit cross-agent-value findings to the bus as <oc-note at=\"symbol-or-snippet\">caveman text</oc-note>.\n")
+	b.WriteString("- Keep own-report-only findings in its own final report.\n")
+	b.WriteString("- Treat received notes as LEADS, not facts — verify against the actual code.\n")
+	b.WriteString("- Resolve leads that turn out to be wrong with <oc-resolve ref=\"N\"/>.\n\n")
+
+	b.WriteString("### Step 3 — Reconcile the bus\n\n")
+	b.WriteString("When the group finishes, run reconcile on the bus:\n")
+	b.WriteString("- Dedup exact-duplicate notes (keep all authors in provenance).\n")
+	b.WriteString("- Resolve contradictions (cluster by file/symbol, decide severity).\n")
+	b.WriteString("- For a contradiction you cannot settle from notes alone, spawn ONE focused verify agent that re-reads the actual code (medium tier acceptable, narrow scope).\n")
+	b.WriteString("- Flag any partition whose agent failed or was cancelled as UNREVIEWED — never imply full coverage when an agent died.\n\n")
+
+	b.WriteString("## Output Format (preserved — the TUI parses this)\n\n")
+	b.WriteString("After reconcile, emit findings in this exact format so the TUI can render them:\n\n")
 	b.WriteString("### Summary\n")
 	b.WriteString("[Your summary here]\n\n")
 	b.WriteString("### Findings\n\n")
@@ -342,13 +390,14 @@ func buildReviewPrompt(target reviewTarget, context string, description string) 
 	b.WriteString("MESSAGE: [description]\n")
 	b.WriteString("SUGGESTION: [suggested fix, if applicable]\n")
 	b.WriteString("```\n\n")
-	b.WriteString("Focus on:\n")
+	b.WriteString("Focus the final reconciled report on:\n")
 	b.WriteString("- Behavioral bugs and logic errors\n")
 	b.WriteString("- Security vulnerabilities\n")
 	b.WriteString("- Performance issues\n")
 	b.WriteString("- Code style and best practices\n")
 	b.WriteString("- Missing error handling\n")
-	b.WriteString("- Potential edge cases\n")
+	b.WriteString("- Potential edge cases\n\n")
+	b.WriteString("Append a final 'Unreviewed partitions' section listing any agent that failed or was cancelled, with the dimension or file it was assigned.\n")
 
 	return b.String()
 }

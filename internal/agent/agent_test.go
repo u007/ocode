@@ -176,7 +176,7 @@ func TestStepCancellationAfterChatSkipsToolCalls(t *testing.T) {
 
 func TestTaskToolBackgroundRunUnexpectedStopMarksFailed(t *testing.T) {
 	a := NewAgent(&panicClient{}, nil, nil, nil)
-	taskTool, ok := a.tools["task"].(TaskTool)
+	taskTool, ok := a.tools["task"].(*TaskTool)
 	if !ok {
 		t.Fatalf("task tool type = %T", a.tools["task"])
 	}
@@ -232,7 +232,7 @@ func TestNestedSubAgentPermissionAskCascadesToMainThread(t *testing.T) {
 		return PermissionResponse{Level: PermissionAllow}
 	})
 
-	taskTool, ok := a.tools["task"].(TaskTool)
+	taskTool, ok := a.tools["task"].(*TaskTool)
 	if !ok {
 		t.Fatalf("task tool type = %T", a.tools["task"])
 	}

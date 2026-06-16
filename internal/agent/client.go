@@ -2070,6 +2070,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 			}
 			if len(ev.Message.Usage) > 0 {
 				resultUsage = ev.Message.Usage
+				emitDebug("TOKENS", fmt.Sprintf("message_start usage from provider=%s model=%s: %s", c.Provider, c.Model, string(ev.Message.Usage)))
 				if onUsage != nil {
 					var u struct {
 						InputTokens  int64 `json:"input_tokens"`
@@ -2116,6 +2117,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 			if len(ev.Usage) > 0 {
 				// message_delta carries cumulative output_tokens; merge by
 				// preferring it over message_start's input_tokens.
+				emitDebug("TOKENS", fmt.Sprintf("message_delta usage from provider=%s model=%s: %s", c.Provider, c.Model, string(ev.Usage)))
 				resultUsage = mergeAnthropicUsage(resultUsage, ev.Usage)
 				if onUsage != nil {
 					var u struct {
@@ -2187,6 +2189,17 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	}
 	if resMsg.Model == "" {
 		resMsg.Model = c.Model
+	}
+	// Some providers (e.g. minimax-m3 via opencode-go) omit input_tokens from
+	// their streaming usage events. Fill it in from a character-based estimate
+	// of the messages we sent so spend and context-window display are accurate.
+	if usage != nil && usage.PromptTokens == nil {
+		emitDebug("TOKENS", fmt.Sprintf("provider=%s model=%s returned no input_tokens in usage (raw=%s); estimating from message content", c.Provider, c.Model, string(resultUsage)))
+		estimated := int64(messagesTokens(messages))
+		if system != "" {
+			estimated += int64((len(system) + charsPerToken - 1) / charsPerToken)
+		}
+		usage.PromptTokens = &estimated
 	}
 	resMsg.Usage = usage
 	if usage != nil {

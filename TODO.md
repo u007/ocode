@@ -1,5 +1,20 @@
 # TODO
 
+## Shared agent notes bus — deferred production wiring (from review-changes: 2026-06-16)
+
+The notebus feature is wired into the parallel agent group (bus, per-call binding,
+write-touches, reconcile hand-off, secret redaction). Two design-mandated capabilities
+remain reachable only from tests because they require plumbing outside the agent package:
+
+- [ ] Sidecar persistence is inert: `Agent.SetNoteBusDir` has no production caller, so
+  `noteBusDir` is always empty and `maybeBuildGroupBus` never opens a `Sidecar`. Wire it
+  from the session layer (pass the session dir + `SetNoteBusSessionTag` at agent
+  construction) so a mid-group crash can be recovered. (from review-changes: 2026-06-16)
+- [ ] Brief seeding is inert: `Agent.SetNoteBusBrief` has no production caller, so children
+  never receive the orchestrator's pre-computed brief and `groupTracker` partitions stay
+  empty in prod. This is delivered by the `/review-changes` skill rewrite (plan Part 04),
+  which is the component that computes and sets the brief. (from review-changes: 2026-06-16)
+
 ## `/rc` full live mirror — follow-ups (built, not yet run end-to-end)
 
 The 2-way live mirror (TUI↔web: user messages, thinking/text token deltas, tool
