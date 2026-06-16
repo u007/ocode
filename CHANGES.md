@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Anthropic Message Merge Fix** — `chatAnthropic` no longer merges consecutive user messages when either contains `tool_result` blocks. Strict Anthropic-compatible providers (e.g. Minimax) reject mixed tool_result + text content in a single user message. New `hasToolResultBlock` helper detects tool_result blocks in content arrays.
 - **Heredoc-Aware Bash Parsing** — `parseShellCommandLine` now strips heredoc bodies before tokenizing compound commands, preventing content lines (e.g. Go source inside `cat > file << 'EOF'`) from being incorrectly split as separate shell commands by the newline→';' rule.
 - **Patch Tool Error Context** — When `deriveNewContents` fails to find expected lines or context in a file, the error message now includes nearby file content (up to 5 lines around the search position) and the expected patch lines, making it much easier to diagnose patch failures. New `getNearbyLines()` helper formats the snippet.
 
