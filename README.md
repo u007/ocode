@@ -433,6 +433,13 @@ The `/mask mode` command controls how aggressively the tier-2 LLM scanner is inv
 - **Mode** governs only the *typed user message* aggressiveness.
 - **Sensitive file reads** (`.env`, `.pem`, `id_rsa*`, etc.) always use the LLM in both modes — these files often contain values without known formats that only the LLM catches.
 - **DB/bash output** uses fast keyword+entropy regex only (no LLM). Known gaps: a value after a keyword (`password`, `secret`, …) is only flagged when it is high-entropy, so low-entropy/dictionary passwords (`password=hunter2`) and values containing shell metacharacters (e.g. `$`) are missed, as is tabular output with no `=`/`:` delimiter (e.g. `| password | hunter2 |`).
+### `/mask model` — Configuring the Tier-2 Scanning Model
+
+The `/mask model [name]` command sets the local LLM used for tier-2 contextual secret scanning.
+
+- **Provider auto-detection:** when you select a model from a known local provider (e.g. `lmstudio/ternary-bonsai-8b-mlx`), the scanner's `base_url` is automatically set to the provider's default endpoint (`http://localhost:1234/v1` for LM Studio). The persisted/display name is normalized to `lmstudio/<name>` even if you typed a bare model id, and the scanner strips the prefix when sending the request. This matches how the main `/model` command works — no manual URL configuration needed.
+- **Manual override:** set a custom `base_url` by editing `security.redaction.base_url` in your config (e.g. `"base_url": "http://localhost:11434"` for Ollama). Once manually set, the auto-detection is skipped for your custom URL.
+- **Security:** only local endpoints (localhost, 127.0.0.1, ::1) are accepted by default. To allow a remote endpoint for the tier-2 scanner, set `security.redaction.allow_remote_tier2: true` in your config.
 - **No model configured:** if redaction is enabled but no tier-2 model is set, scanning is regex-only (tier-1 + chat-mode tool-result regex). Set a model with `/mask model` to enable LLM tier-2.
 
 **However, no automated system is perfect.** While we actively work to improve coverage, the redactor may occasionally miss secrets, especially non-standard formats, user-specific tokens, or credentials embedded in unusual contexts. **The `/mask` feature is a best-effort safeguard — it does not guarantee 100% prevention of secret exposure.** Always review what you share with LLM providers and rotate credentials regularly.

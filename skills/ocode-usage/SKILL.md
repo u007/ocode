@@ -512,7 +512,7 @@ ocode includes a **secret redaction system** that detects and masks common crede
 | `/mask mode` | Show current scan mode |
 | `/mask mode lenient` | Set lenient mode (default) — LLM scans only when input contains sensitive keywords/value-patterns |
 | `/mask mode full` | Set full mode — LLM scans every typed user message |
-| `/mask model [name]` | Set or show the tier-2 scanning model |
+| `/mask model [name]` | Set or show the tier-2 scanning model. Auto-configures base_url for known local providers (e.g. lmstudio → http://localhost:1234/v1) |
 
 ### Scan Modes
 
@@ -527,6 +527,9 @@ ocode includes a **secret redaction system** that detects and masks common crede
 - DB/bash secret detection is regex-only. A value after a keyword (`password`, `secret`, …) is only caught when high-entropy, so low-entropy/dictionary passwords (`password=hunter2`) and values with shell metacharacters (`$`) are missed, as is tabular/CSV output without `=`/`:` delimiters.
 - Only the `read` tool gets sensitive-file LLM treatment; `bash cat .env` is treated as generic bash output (regex-only).
 - No tier-2 model configured → scanning is regex-only; set a model with `/mask model` to enable LLM tier-2.
+- **Provider auto-detection:** when you select a model from a known local provider (e.g. `lmstudio/...`), the scanner's `base_url` is automatically set to the provider's default endpoint (`http://localhost:1234/v1` for LM Studio). The persisted/display name is normalized to `lmstudio/<name>` even if you typed a bare model id, and the scanner strips the prefix when making the request. This matches how `/model` works.
+- **Manual override:** set a custom `base_url` via `security.redaction.base_url` in the config. Once set, auto-detection is skipped.
+- **Security:** only local endpoints are accepted by default. Set `security.redaction.allow_remote_tier2: true` to allow remote endpoints.
 
 ---
 

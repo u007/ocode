@@ -348,13 +348,6 @@ func LoadOcodeConfig(cfg *Config) error {
 		}
 	}
 
-	projectPath, err := getProjectOcodeConfigPath()
-	if err == nil {
-		if err := loadOcodeConfigFile(projectPath, &ocode); err != nil {
-			return fmt.Errorf("load project ocode config: %w", err)
-		}
-	}
-
 	if ocode.EditorMode == "" {
 		if os.Getenv("TMUX") != "" {
 			ocode.EditorMode = EditorModeTmuxSplit
@@ -378,12 +371,12 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	cleanData := stripJSONCComments(data)
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(cleanData, &raw); err != nil {
-		return err
+		return fmt.Errorf("parse ocodeconfig %s: %w", path, err)
 	}
 
 	var file ocodeConfigFile
 	if err := json.Unmarshal(cleanData, &file); err != nil {
-		return err
+		return fmt.Errorf("decode ocodeconfig %s: %w", path, err)
 	}
 
 	if _, ok := raw["compact"]; ok {
@@ -926,15 +919,7 @@ func getProjectOcodeConfigPath() (string, error) {
 }
 
 func ActiveOcodeConfigPath() (string, error) {
-	projectPath, err := getProjectOcodeConfigPath()
-	if err == nil {
-		return projectPath, nil
-	}
-	globalPath, err := getGlobalOcodeConfigPath()
-	if err != nil {
-		return "", fmt.Errorf("resolve global ocode config path: %w", err)
-	}
-	return globalPath, nil
+	return getGlobalOcodeConfigPath()
 }
 
 // SaveLastModel persists the last used provider/model string into the ocodeconfig.json
@@ -1005,13 +990,6 @@ func loadFullOcodeConfig() (*OcodeConfig, error) {
 	globalPath, err := getGlobalOcodeConfigPath()
 	if err == nil {
 		if err := loadOcodeConfigFile(globalPath, &ocode); err != nil && !os.IsNotExist(err) {
-			return nil, err
-		}
-	}
-
-	projectPath, err := getProjectOcodeConfigPath()
-	if err == nil {
-		if err := loadOcodeConfigFile(projectPath, &ocode); err != nil && !os.IsNotExist(err) {
 			return nil, err
 		}
 	}

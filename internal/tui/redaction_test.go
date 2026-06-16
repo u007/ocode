@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
@@ -63,6 +64,56 @@ func TestBuildLLMScanner_LoopbackIP(t *testing.T) {
 	got := buildLLMScanner("http://127.0.0.1:8080", "model", false)
 	if got == nil {
 		t.Fatal("expected non-nil scanner for 127.0.0.1")
+	}
+}
+
+func TestBuildLLMScannerStripsLMStudioPrefix(t *testing.T) {
+	got := buildLLMScanner("http://localhost:1234/v1", "lmstudio/scan-new", false)
+	if got == nil {
+		t.Fatal("expected non-nil scanner for LM Studio")
+	}
+	if got.Model != "scan-new" {
+		t.Errorf("Model = %q, want %q", got.Model, "scan-new")
+	}
+}
+
+func TestDefaultRedactionBaseURL_EmptyModel(t *testing.T) {
+	if got := defaultRedactionBaseURL(""); got != "" {
+		t.Errorf("expected empty for empty model, got %q", got)
+	}
+}
+
+func TestNormalizeRedactionModelName_BareLMStudio(t *testing.T) {
+	if got := normalizeRedactionModelName("scan-new", "http://localhost:1234/v1"); got != "lmstudio/scan-new" {
+		t.Errorf("normalizeRedactionModelName(scan-new) = %q, want %q", got, "lmstudio/scan-new")
+	}
+}
+
+func TestNormalizeRedactionModelName_Prefixed(t *testing.T) {
+	if got := normalizeRedactionModelName("lmstudio/scan-new", "http://localhost:1234/v1"); got != "lmstudio/scan-new" {
+		t.Errorf("normalizeRedactionModelName(prefixed) = %q, want %q", got, "lmstudio/scan-new")
+	}
+}
+
+func TestDefaultRedactionBaseURL_LMStudio(t *testing.T) {
+	got := defaultRedactionBaseURL("lmstudio/ternary-bonsai-8b-mlx")
+	want := "http://localhost:1234/v1"
+	if got != want {
+		t.Errorf("defaultRedactionBaseURL(lmstudio/...) = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultRedactionBaseURL_UnknownProvider(t *testing.T) {
+	got := defaultRedactionBaseURL("openai/gpt-4o")
+	if got != "" {
+		t.Errorf("expected empty for unknown provider, got %q", got)
+	}
+}
+
+func TestDefaultRedactionBaseURL_BareModel(t *testing.T) {
+	got := defaultRedactionBaseURL("gpt-4o")
+	if got != "" {
+		t.Errorf("expected empty for bare model without provider, got %q", got)
 	}
 }
 
@@ -257,5 +308,61 @@ func TestApplyTier2Scan_LenientSkipsAlreadyMaskedMessage(t *testing.T) {
 	}
 	if callCount != 0 {
 		t.Errorf("expected 0 scan calls (already masked), got %d", callCount)
+	}
+}
+
+func TestApplyTier1UserRedaction_MasksPasswordInUserMessage(t *testing.T) {
+	reg := redact.NewRegistry(redact.NewNonce())
+	// The keyword regex requires 16+ alphanumeric chars after "password:".
+	longPwd := "abcdefghijklmnop" // 16 chars
+	msgs := []agent.Message{
+		{Role: "user", Content: `my password: "` + longPwd + `"`},
+	}
+	applyTier1UserRedaction(msgs, reg)
+
+	if !redact.TokenPattern.MatchString(msgs[0].Content) {
+		t.Errorf("expected message to contain OCSEC token after tier-1 redaction, got: %q", msgs[0].Content)
+	}
+	// Ensure the raw value is gone
+	if strings.Contains(msgs[0].Content, longPwd) {
+		t.Errorf("expected raw password to be masked, got: %q", msgs[0].Content)
+	}
+}
+
+func TestApplyTier1UserRedaction_ShortPasswordNotMasked(t *testing.T) {
+	reg := redact.NewRegistry(redact.NewNonce())
+	// "abc123" is only 6 chars — below the 16-char threshold in keyword+entropy
+	// and below the 8-char threshold in QuickScan. It should NOT be masked.
+	msgs := []agent.Message{
+		{Role: "user", Content: `whats in this password: "abc123"`},
+	}
+	applyTier1UserRedaction(msgs, reg)
+
+	if redact.TokenPattern.MatchString(msgs[0].Content) {
+		t.Errorf("expected short password NOT to be masked (below thresholds), got OCSEC token: %q", msgs[0].Content)
+	}
+}
+
+func TestApplyTier1UserRedaction_NoopWhenRegNil(t *testing.T) {
+	msgs := []agent.Message{
+		{Role: "user", Content: "my secret password is hunter2"},
+	}
+	applyTier1UserRedaction(msgs, nil)
+	// Should not panic and should not change content.
+	if msgs[0].Content != "my secret password is hunter2" {
+		t.Errorf("expected content unchanged when reg is nil, got: %q", msgs[0].Content)
+	}
+}
+
+func TestApplyTier1UserRedaction_SkipsNonUserMessages(t *testing.T) {
+	reg := redact.NewRegistry(redact.NewNonce())
+	msgs := []agent.Message{
+		{Role: "system", Content: `password: "abc123"`},
+		{Role: "user", Content: "hello"},
+	}
+	applyTier1UserRedaction(msgs, reg)
+	// System message should not be touched.
+	if redact.TokenPattern.MatchString(msgs[0].Content) {
+		t.Errorf("expected system message to remain untouched, got: %q", msgs[0].Content)
 	}
 }

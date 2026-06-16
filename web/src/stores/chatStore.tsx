@@ -19,6 +19,10 @@ interface ChatState {
   pendingPermission: PermissionRequest | null;
   // In-progress turn, streamed live until the turn_done snapshot commits it.
   live: LivePart[];
+  // Lazy loading state
+  totalMessages: number; // total messages on server
+  hasMore: boolean; // whether older messages exist
+  loadingMore: boolean; // currently fetching older messages
 }
 
 type ChatAction =
@@ -38,6 +42,10 @@ type ChatAction =
   | { type: "LIVE_RESET" }
   | { type: "PERMISSION_REQUEST"; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED" }
+  | { type: "PREPEND_MESSAGES"; messages: Message[]; total: number }
+  | { type: "SET_LOADING_MORE"; loading: boolean }
+  | { type: "MERGE_SNAPSHOT"; messages: Message[]; total: number }
+  | { type: "SET_TOTAL"; total: number }
   | { type: "RESET" };
 
 const initialState: ChatState = {
@@ -51,6 +59,9 @@ const initialState: ChatState = {
   error: null,
   pendingPermission: null,
   live: [],
+  totalMessages: 0,
+  hasMore: false,
+  loadingMore: false,
 };
 
 function chatReducer(state: ChatState, action: ChatAction): ChatState {
@@ -125,6 +136,48 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // Preserve the advisor on/off toggle across new sessions — the server
       // keeps it for the handler's lifetime, so the status must not snap back.
       return { ...initialState, advisorEnabled: state.advisorEnabled };
+    case "PREPEND_MESSAGES": {
+      // Older messages loaded via scroll-up. Prepend and update pagination state.
+      const hasMore = action.messages.length > 0 && state.messages.length + action.messages.length < action.total;
+      return {
+        ...state,
+        messages: [...action.messages, ...state.messages],
+        totalMessages: action.total,
+        hasMore,
+        loadingMore: false,
+      };
+    }
+    case "SET_TOTAL":
+      return {
+        ...state,
+        totalMessages: action.total,
+        hasMore: state.messages.length < action.total,
+      };
+    case "SET_LOADING_MORE":
+      return { ...state, loadingMore: action.loading };
+    case "MERGE_SNAPSHOT": {
+      // Merge snapshot into current state.
+      // If action.messages is a full snapshot (length == total), replace all.
+      // If it's a paginated subset, set as initial/older messages.
+      if (action.messages.length === action.total) {
+        // Full snapshot — replace all messages
+        return { ...state, messages: action.messages, totalMessages: action.total, hasMore: false, live: [] };
+      }
+      // Paginated subset — this is either initial load or older messages
+      if (state.messages.length === 0) {
+        // Initial load: set the paginated messages
+        return {
+          ...state,
+          messages: action.messages,
+          totalMessages: action.total,
+          hasMore: action.messages.length < action.total,
+          live: [],
+        };
+      }
+      // We already have messages — this shouldn't happen with MERGE_SNAPSHOT
+      // (use PREPEND_MESSAGES for older messages). Just replace.
+      return { ...state, messages: action.messages, totalMessages: action.total, hasMore: action.messages.length < action.total, live: [] };
+    }
     default:
       return state;
   }

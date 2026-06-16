@@ -33,7 +33,7 @@ import (
 // the duration of the test, preventing findProjectConfigDir from walking up to
 // the real project root.  This is essential for any test that uses config save
 // functions (SaveOcodeConfig, SaveAutoPermissionEnabled, etc.) which resolve
-// the write target via ActiveOcodeConfigPath → getProjectOcodeConfigPath.
+// the write target via ActiveOcodeConfigPath → getGlobalOcodeConfigPath.
 func chdirTempForConfigTest(t *testing.T) {
 	t.Helper()
 	orig, err := os.Getwd()

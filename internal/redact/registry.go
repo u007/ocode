@@ -14,6 +14,12 @@ type Entry struct {
 	FirstSeenAt int64 // Unix timestamp
 }
 
+// IndexedEntry pairs an entry with its stable registry index.
+type IndexedEntry struct {
+	Index int
+	Entry Entry
+}
+
 // Registry manages the mapping between secret values and their token indexes.
 type Registry struct {
 	mu       sync.RWMutex
@@ -93,26 +99,27 @@ func (r *Registry) All() []Entry {
 	defer r.mu.RUnlock()
 
 	result := make([]Entry, 0, len(r.entries))
-	for _, e := range r.entries {
-		result = append(result, e)
+	for _, ie := range r.Snapshot() {
+		result = append(result, ie.Entry)
 	}
-	sort.Slice(result, func(i, j int) bool {
-		// We need to find the index for each entry to sort properly
-		// Since we can't easily get index from entry, we sort by value as a proxy
-		// Actually, let's iterate in index order
-		return false // placeholder
-	})
+	return result
+}
 
-	// Better: iterate by index
+// Snapshot returns a stable copy of all entries together with their registry
+// indexes, sorted by index ascending.
+func (r *Registry) Snapshot() []IndexedEntry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	indices := make([]int, 0, len(r.entries))
 	for idx := range r.entries {
 		indices = append(indices, idx)
 	}
 	sort.Ints(indices)
 
-	result = make([]Entry, 0, len(indices))
+	result := make([]IndexedEntry, 0, len(indices))
 	for _, idx := range indices {
-		result = append(result, r.entries[idx])
+		result = append(result, IndexedEntry{Index: idx, Entry: r.entries[idx]})
 	}
 	return result
 }

@@ -91,6 +91,7 @@ type LLMScanner struct {
 	BaseURL     string
 	Model       string
 	AllowRemote bool
+	APIKey      string // optional API key for providers that require authentication
 }
 
 // scanRequest is the request payload for the OpenAI-compatible API.
@@ -152,6 +153,9 @@ Rules:
 		return nil, fmt.Errorf("scanner: create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	if s.APIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+s.APIKey)
+	}
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {

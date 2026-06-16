@@ -40,6 +40,7 @@ export interface SessionInfo {
 
 export interface SessionDetail extends SessionInfo {
   messages: Message[];
+  total: number;
 }
 
 export interface ModelInfo {

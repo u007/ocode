@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,12 +95,13 @@ func init() {
 		{name: "/usage", usage: "/usage [hour|day|week|month|last-month|last-3-month|all]", help: "Show LLM token usage summary by model and date range", handler: runUsageCmd},
 		{name: "/plugin", usage: "/plugin [list|install <url[@ref]>|remove <name>|enable <name>|disable <name>|info <name>|create <name> [desc]|sync [name]|update [name]|confirm|cancel]", help: "List, install, update, or sync plugins", handler: runPluginCmd},
 		{name: "/review", usage: "/review [file|commit|branch|pr]", help: "AI code review with actionable findings", handler: runReviewCmd},
-		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port]", help: "Start web UI to remote-control this session", handler: runRemoteControlCmd},
+		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port|off]", help: "Start/stop web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
 		{name: "/mask", usage: "/mask [on|off|status|mode [lenient|full]|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
 		{name: "/mem", usage: "/mem [on|off|status|update [user|project|global] [focus]]", help: "Toggle memory context injection, inspect memory files, or update a memory scope", handler: runMemCmd},
 		{name: "/btw", aliases: []string{"/by-the-way"}, usage: "/btw <message>", help: "Add a quick aside to the conversation (by the way)", handler: runBtwCmd},
+		{name: "/cd", aliases: []string{"/cwd"}, usage: "/cd <path>", help: "Change the project root to another directory", handler: runCdCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -957,17 +960,12 @@ func runIDECmd(m *model, args []string) tea.Cmd {
 }
 
 func maskStatusText(m *model, includeHint bool) string {
-	activeModel := m.currentModelName()
-	if activeModel == "" {
-		activeModel = "(not configured)"
-	}
 	state := "disabled"
 	if m.redactionEnabled {
 		state = "enabled"
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Active model: %s\n", activeModel))
 	b.WriteString(fmt.Sprintf("Secret redaction: %s\n", state))
 	b.WriteString(fmt.Sprintf("Scan mode: %s\n", m.redactMode))
 
@@ -1180,5 +1178,61 @@ func runMaxStepCmd(m *model, args []string) tea.Cmd {
 
 func runBtwCmd(m *model, args []string) tea.Cmd {
 	m.handleBtwCmd(args)
+	return nil
+}
+
+func runCdCmd(m *model, args []string) tea.Cmd {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /cd <path> — change the project root directory"})
+		return nil
+	}
+	target := strings.Join(args, " ")
+	// Expand ~ to home directory
+	if strings.HasPrefix(target, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			target = filepath.Join(home, target[2:])
+		}
+	}
+	// Resolve relative to current workDir
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(m.workDir, target)
+	}
+	target = filepath.Clean(target)
+
+	info, err := os.Stat(target)
+	if err != nil || !info.IsDir() {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: not a directory: " + target})
+		return nil
+	}
+	if err := os.Chdir(target); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: unable to change directory: " + err.Error()})
+		return nil
+	}
+
+	m.workDir = target
+	m.files = newFilesModel(target)
+	m.git = newGitModel(target)
+	m.git.SetLogger(func(kind DebugEntryKind, msg string) {
+		DebugLog.Append(DebugEntry{Kind: kind, Message: msg})
+	})
+	if m.config != nil {
+		editor := config.ResolveEditor(&m.config.Ocode)
+		editorMode := m.config.Ocode.EditorMode
+		m.files.SetEditor(editor)
+		m.files.SetEditorMode(editorMode)
+		m.files.SetEditorOpener(createEditorOpener(editor, editorMode, func() int { return m.width }, m.supervisor))
+		m.git.SetEditor(editor)
+		m.git.SetEditorOpener(createEditorOpener(editor, editorMode, func() int { return m.width }, m.supervisor))
+		m.git.generateCommitMsg = m.makeCommitMsgGenerator(m.config)
+	}
+	m.files.SetSaveEditor(config.SaveEditor)
+	if m.agent != nil && m.agent.Permissions() != nil {
+		m.agent.Permissions().SetWorkDir(target)
+	}
+	// Update the agent's workDir so the environment prompt reflects the change
+	if m.agent != nil {
+		m.agent.SetWorkDir(target)
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Project root changed to: " + target})
 	return nil
 }

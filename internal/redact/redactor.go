@@ -77,26 +77,12 @@ func (r *Redactor) RedactChat(text string) (string, error) {
 	masked := r.registry.Substitute(text)
 
 	// Tier-2: local model scan (if scanner is configured)
-	var err error
+	// ScanAndMask handles: bounds checking, token skipping, registration,
+	// and substitution. It operates on the already-tier-1-masked text so
+	// the scanner only sees OCSEC tokens for tier-1 secrets, not raw values.
+	var scanErr error
 	if r.scanner != nil {
-		scannerSpans, scanErr := r.scanner.Scan(masked)
-		if scanErr != nil {
-			err = ErrScannerUnavailable
-			// Still return tier-1 masked text
-			return masked, err
-		}
-		// Register scanner-found secrets (they're in masked text, so we need
-		// to find the actual values in the original text)
-		for _, span := range scannerSpans {
-			// The scanner returns spans in the masked text; we need the original values
-			// For now, skip if the span is already masked
-			if !TokenPattern.MatchString(masked[span.Start:span.End]) {
-				value := masked[span.Start:span.End]
-				r.registry.GetOrAssign(value, "model", "scanner")
-			}
-		}
-		// Re-substitute with any new entries
-		masked = r.registry.Substitute(text)
+		masked, scanErr = ScanAndMask(masked, r.scanner, r.registry)
 	}
 
 	// Persist vault before returning (ordering invariant)
@@ -104,6 +90,12 @@ func (r *Redactor) RedactChat(text string) (string, error) {
 		return "", err
 	}
 
+	// Return scanner error after vault is persisted (ordering invariant).
+	// The masked text is still valid — either fully masked (scanner ok) or
+	// tier-1 only (scanner failed).
+	if scanErr != nil {
+		return masked, ErrScannerUnavailable
+	}
 	return masked, nil
 }
 

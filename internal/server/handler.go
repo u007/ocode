@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -168,9 +169,42 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 	rc := h.rc
 	h.mu.Unlock()
 
+	// Parse optional pagination params: limit (max messages from end) and
+	// offset (skip this many from the end, for loading older messages).
+	limit := 0 // 0 means return all
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	paginate := func(all []agent.Message) []agent.Message {
+		total := len(all)
+		if limit == 0 || limit >= total-offset {
+			// Return everything up to the offset point.
+			end := total - offset
+			if end < 0 {
+				end = 0
+			}
+			return all[:end]
+		}
+		start := total - offset - limit
+		if start < 0 {
+			start = 0
+		}
+		return all[start : total-offset]
+	}
+
 	// If this is the RC session, return in-memory messages from the bridge.
 	if rc != nil && rc.SessionID == id {
-		msgs := rc.GetMessages()
+		all := rc.GetMessages()
+		msgs := paginate(all)
 		writeJSON(w, http.StatusOK, SessionDetail{
 			SessionInfo: SessionInfo{
 				ID:        rc.SessionID,
@@ -179,6 +213,7 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 				UpdatedAt: time.Now().Format(time.RFC3339),
 			},
 			Messages: msgs,
+			Total:    len(all),
 		})
 		return
 	}
@@ -189,6 +224,7 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
+	msgs := paginate(s.Messages)
 	writeJSON(w, http.StatusOK, SessionDetail{
 		SessionInfo: SessionInfo{
 			ID:        s.ID,
@@ -196,7 +232,8 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 			CreatedAt: s.CreatedAt.Format(time.RFC3339),
 			UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
 		},
-		Messages: s.Messages,
+		Messages: msgs,
+		Total:    len(s.Messages),
 	})
 }
 

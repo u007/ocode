@@ -6,15 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 )
 
 // Vault stores per-session secret registry data on disk.
 type Vault struct {
-	Nonce   string                `json:"nonce"`
-	Secrets map[string]vaultEntry `json:"secrets"`
+	Nonce   string        `json:"nonce"`
+	Secrets []vaultRecord `json:"secrets"`
 }
 
-type vaultEntry struct {
+type vaultRecord struct {
+	Index       int    `json:"index"`
 	Value       string `json:"value"`
 	Kind        string `json:"kind"`
 	Source      string `json:"source"`
@@ -62,17 +64,19 @@ func SaveVault(path string, reg *Registry) error {
 	}
 
 	vault := Vault{
-		Nonce:   reg.Nonce(),
-		Secrets: make(map[string]vaultEntry),
+		Nonce: reg.Nonce(),
 	}
+	snapshot := reg.Snapshot()
+	vault.Secrets = make([]vaultRecord, 0, len(snapshot))
 
-	for _, entry := range reg.All() {
-		vault.Secrets[entry.Value] = vaultEntry{
-			Value:       entry.Value,
-			Kind:        entry.Kind,
-			Source:      entry.Source,
-			FirstSeenAt: entry.FirstSeenAt,
-		}
+	for _, indexed := range snapshot {
+		vault.Secrets = append(vault.Secrets, vaultRecord{
+			Index:       indexed.Index,
+			Value:       indexed.Entry.Value,
+			Kind:        indexed.Entry.Kind,
+			Source:      indexed.Entry.Source,
+			FirstSeenAt: indexed.Entry.FirstSeenAt,
+		})
 	}
 
 	data, err := json.MarshalIndent(vault, "", "  ")
@@ -115,14 +119,79 @@ func LoadVault(path string) (*Registry, error) {
 		return nil, err
 	}
 
-	var vault Vault
-	if err := json.Unmarshal(data, &vault); err != nil {
+	var raw struct {
+		Nonce   string          `json:"nonce"`
+		Secrets json.RawMessage `json:"secrets"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal vault: %w", err)
 	}
 
-	reg := NewRegistry(vault.Nonce)
-	for _, entry := range vault.Secrets {
-		reg.GetOrAssign(entry.Value, entry.Kind, entry.Source)
+	reg := NewRegistry(raw.Nonce)
+	if len(raw.Secrets) == 0 {
+		return reg, nil
+	}
+
+	if raw.Secrets[0] == '[' {
+		var records []vaultRecord
+		if err := json.Unmarshal(raw.Secrets, &records); err != nil {
+			return nil, fmt.Errorf("unmarshal vault secrets: %w", err)
+		}
+		sort.Slice(records, func(i, j int) bool { return records[i].Index < records[j].Index })
+		for _, entry := range records {
+			idx := reg.GetOrAssign(entry.Value, entry.Kind, entry.Source)
+			if idx != entry.Index && entry.Index > 0 {
+				reg.mu.Lock()
+				if cur, ok := reg.entries[idx]; ok {
+					delete(reg.valToIdx, cur.Value)
+					delete(reg.entries, idx)
+				}
+				reg.valToIdx[entry.Value] = entry.Index
+				reg.entries[entry.Index] = Entry{
+					Value:       entry.Value,
+					Kind:        entry.Kind,
+					Source:      entry.Source,
+					FirstSeenAt: entry.FirstSeenAt,
+				}
+				if entry.Index >= reg.nextIdx {
+					reg.nextIdx = entry.Index + 1
+				}
+				reg.mu.Unlock()
+			}
+		}
+		return reg, nil
+	}
+
+	var legacy map[string]vaultRecord
+	if err := json.Unmarshal(raw.Secrets, &legacy); err != nil {
+		return nil, fmt.Errorf("unmarshal vault secrets: %w", err)
+	}
+	keys := make([]string, 0, len(legacy))
+	for k := range legacy {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		entry := legacy[k]
+		idx := reg.GetOrAssign(entry.Value, entry.Kind, entry.Source)
+		if idx != entry.Index && entry.Index > 0 {
+			reg.mu.Lock()
+			if cur, ok := reg.entries[idx]; ok {
+				delete(reg.valToIdx, cur.Value)
+				delete(reg.entries, idx)
+			}
+			reg.valToIdx[entry.Value] = entry.Index
+			reg.entries[entry.Index] = Entry{
+				Value:       entry.Value,
+				Kind:        entry.Kind,
+				Source:      entry.Source,
+				FirstSeenAt: entry.FirstSeenAt,
+			}
+			if entry.Index >= reg.nextIdx {
+				reg.nextIdx = entry.Index + 1
+			}
+			reg.mu.Unlock()
+		}
 	}
 
 	return reg, nil

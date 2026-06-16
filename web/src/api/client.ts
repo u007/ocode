@@ -40,7 +40,15 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listSessions: () => fetchJSON<SessionInfo[]>("/api/sessions"),
-  getSession: (id: string) => fetchJSON<SessionDetail>(`/api/sessions/${id}`),
+  getSession: (id: string, opts?: { limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.offset) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    return fetchJSON<SessionDetail>(
+      `/api/sessions/${id}${qs ? `?${qs}` : ""}`,
+    );
+  },
   listModels: () => fetchJSON<ModelInfo[]>("/api/models"),
   listAgents: () => fetchJSON<AgentInfo[]>("/api/config/agents"),
   listAgentRuns: (session?: string) =>

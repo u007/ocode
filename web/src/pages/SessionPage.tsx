@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { useParams, useNavigate } from "react-router-dom";
 import { api, connectSessionMirror } from "../api/client";
-import { useChatDispatch } from "../stores/chatStore";
+import { useChatState, useChatDispatch } from "../stores/chatStore";
 import type { Message } from "../api/types";
 import ChatPanel from "../components/Chat/ChatPanel";
 import AgentPreview from "../components/Chat/AgentPreview";
@@ -16,6 +16,8 @@ type ModelDialogTab = "main" | "small" | "advisor";
 
 export default function SessionPage() {
   const { id } = useParams<{ id: string }>();
+  const navigate = useNavigate();
+  const state = useChatState();
   const dispatch = useChatDispatch();
   const { resolvePermission, pendingPermission } = useChat();
   const [loading, setLoading] = useState(true);
@@ -24,15 +26,19 @@ export default function SessionPage() {
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
 
+  // Keep a ref to the latest state for use in the SSE callback
+  const stateRef = useRef(state);
+  stateRef.current = state;
+
   useEffect(() => {
     if (!id) return;
     setLoading(true);
     setError(null);
     api
       .getSession(id)
-      .then((session) => {
+      .then((_detail) => {
         dispatch({ type: "SET_SESSION", sessionId: id });
-        dispatch({ type: "SET_MESSAGES", messages: session.messages || [] });
+        // Don't set messages here — ChatPanel handles paginated loading
       })
       .catch((err) => {
         setError(err.message || "Failed to load session");
@@ -48,9 +54,37 @@ export default function SessionPage() {
     if (!id) return;
     return connectSessionMirror(id, (event, data) => {
       switch (event) {
-        case "messages":
-          dispatch({ type: "SET_MESSAGES", messages: data as Message[] });
+        case "messages": {
+          // SSE snapshot is the authoritative full message list from the TUI.
+          // Replace all messages and update pagination state.
+          const snapshot = data as Message[];
+          const curState = stateRef.current;
+          if (curState.hasMore && curState.messages.length > 0 && snapshot.length > curState.messages.length) {
+            // We have a subset and snapshot has more — check if our messages are a prefix
+            const cur = curState.messages;
+            let isPrefix = true;
+            for (let i = 0; i < cur.length; i++) {
+              if (cur[i].content !== snapshot[i].content || cur[i].role !== snapshot[i].role) {
+                isPrefix = false;
+                break;
+              }
+            }
+            if (isPrefix) {
+              // New messages at the end — append only those
+              const newMsgs = snapshot.slice(cur.length);
+              newMsgs.forEach((msg: Message) =>
+                dispatch({ type: "ADD_MESSAGE", message: msg })
+              );
+              // Update pagination total
+              dispatch({ type: "SET_TOTAL", total: snapshot.length });
+              return;
+            }
+          }
+          // Default: replace all messages
+          dispatch({ type: "SET_MESSAGES", messages: snapshot });
+          dispatch({ type: "SET_TOTAL", total: snapshot.length });
           break;
+        }
         case "user_message":
           dispatch({
             type: "ADD_MESSAGE",
@@ -103,6 +137,28 @@ export default function SessionPage() {
     setModelDialogOpen(true);
   };
 
+  const handleCommand = (cmd: string) => {
+    // Extract the base command (first word)
+    const baseCmd = cmd.split(" ")[0];
+    
+    if (baseCmd === "/clear") {
+      dispatch({ type: "RESET" });
+      return true;
+    }
+    if (baseCmd === "/new") {
+      // Reset chat state and navigate to home page to start a new session
+      dispatch({ type: "RESET" });
+      navigate("/");
+      return true;
+    }
+    if (baseCmd === "/model") {
+      openModelDialog("main");
+      return true;
+    }
+    // For other commands, let them pass through to the LLM
+    return false;
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-screen bg-zinc-950 text-zinc-400">
@@ -125,7 +181,7 @@ export default function SessionPage() {
         <main className="flex flex-1 flex-col overflow-hidden">
           <ChatPanel />
           <AgentPreview />
-          <ChatInput />
+          <ChatInput onSlashCommand={handleCommand} />
           <StatusBar
             onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
             onModelClick={() => openModelDialog("main")}

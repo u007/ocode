@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/redact"
 )
@@ -25,7 +26,7 @@ func (m *model) initRedaction() {
 		return
 	}
 	m.redactionEnabled = m.config.Ocode.Security.Redaction.Enabled
-	m.redactionModel = m.config.Ocode.Security.Redaction.Model
+	m.redactionModel = normalizeRedactionModelName(m.config.Ocode.Security.Redaction.Model, m.config.Ocode.Security.Redaction.BaseURL)
 }
 
 // toggleRedaction enables/disables redaction and persists the setting.
@@ -126,14 +127,80 @@ func (m *model) setRedactionMode(mode string) error {
 	return nil
 }
 
+// defaultRedactionBaseURL returns the default base URL for a model if its
+// provider is a known local server (e.g. lmstudio → http://localhost:1234/v1).
+// Returns "" when the provider has no local default.
+func defaultRedactionBaseURL(modelName string) string {
+	if modelName == "" {
+		return ""
+	}
+	// Extract provider prefix: "lmstudio/ternary-bonsai-8b-mlx" → "lmstudio"
+	provider, _ := config.SplitProviderModel(modelName)
+	switch provider {
+	case "lmstudio":
+		return "http://localhost:1234/v1"
+	}
+	return ""
+}
+
+// normalizeRedactionModelName returns the canonical persisted/display name for
+// the tier-2 model. Bare LM Studio ids are normalized to lmstudio/<name> when
+// the configured base_url points at the default LM Studio endpoint.
+func normalizeRedactionModelName(modelName, baseURL string) string {
+	if modelName == "" {
+		return ""
+	}
+	if strings.Contains(modelName, "/") {
+		return modelName
+	}
+	switch strings.TrimRight(baseURL, "/") {
+	case "http://localhost:1234/v1", "http://localhost:1234":
+		return "lmstudio/" + modelName
+	}
+	return modelName
+}
+
+// scannerRequestModelName returns the model id to send to the tier-2 scanner.
+// LM Studio expects the bare model name, even when the persisted/display name
+// is lmstudio/<name>.
+func scannerRequestModelName(modelName string) string {
+	if strings.HasPrefix(modelName, "lmstudio/") {
+		return strings.TrimPrefix(modelName, "lmstudio/")
+	}
+	return modelName
+}
+
 // setRedactionModel persists the tier-2 model and refreshes the runtime scanner.
+// If the model's provider has a known local default base URL (e.g. lmstudio)
+// and no base_url is currently configured, the base_url is auto-set.
 func (m *model) setRedactionModel(modelName string) error {
+	// Compute the new base_url and normalized model from the current in-memory config.
+	// SaveSecurityRedaction reads from disk, so we must derive from m.config first,
+	// then persist the result.
+	baseURL := ""
+	if m.config != nil {
+		baseURL = m.config.Ocode.Security.Redaction.BaseURL
+	}
+	if baseURL == "" {
+		if def := defaultRedactionBaseURL(modelName); def != "" {
+			agent.DebugAppendf("REDACT", "auto-set tier-2 scanner base_url to %q for model %q", def, modelName)
+			baseURL = def
+		}
+	}
+	normalized := normalizeRedactionModelName(modelName, baseURL)
+
 	if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) {
-		rc.Model = modelName
+		rc.BaseURL = baseURL
+		rc.Model = normalized
 	}); err != nil {
 		return err
 	}
-	m.redactionModel = modelName
+	// Update in-memory config to match what was persisted.
+	if m.config != nil {
+		m.config.Ocode.Security.Redaction.BaseURL = baseURL
+		m.config.Ocode.Security.Redaction.Model = normalized
+	}
+	m.redactionModel = normalized
 	m.rebuildRedactionScanner()
 	m.syncRedactionRuntime()
 	return nil
@@ -146,14 +213,18 @@ func redactText(text string, reg *redact.Registry) string {
 		return text
 	}
 	spans := redact.Detect(text, nil, redact.DetectOpts{FileContent: false})
+	agent.DebugAppendf("REDACT", "redactText: Detect found %d spans in %q", len(spans), text)
 	if len(spans) == 0 {
 		return text
 	}
 	for _, span := range spans {
 		value := text[span.Start:span.End]
+		agent.DebugAppendf("REDACT", "redactText: registering %q kind=%q", value, span.Kind)
 		reg.GetOrAssign(value, span.Kind, "tui")
 	}
-	return reg.Substitute(text)
+	result := reg.Substitute(text)
+	agent.DebugAppendf("REDACT", "redactText: substituted → %q", result)
+	return result
 }
 
 // buildLLMScanner creates a tier-2 LLM scanner that calls a local model server.
@@ -173,7 +244,29 @@ func buildLLMScanner(baseURL, model string, allowRemote bool) *redact.LLMScanner
 	} else {
 		agent.DebugAppendf("REDACT", "tier-2 scanner: base_url %q accepted (remote endpoints allowed by config)", baseURL)
 	}
-	return &redact.LLMScanner{BaseURL: baseURL, Model: model, AllowRemote: allowRemote}
+
+	// Fetch API key from auth store for providers that require authentication.
+	// The model may have a provider prefix (e.g. "lmstudio/local-scan").
+	var apiKey string
+	provider := extractProvider(model)
+	if provider != "" {
+		if key := auth.ResolveKey(provider); key != "" {
+			apiKey = key
+			agent.DebugAppendf("REDACT", "tier-2 scanner: resolved API key for provider %q", provider)
+		} else if cred, ok := auth.Get(provider); ok && cred.Key != "" {
+			apiKey = cred.Key
+			agent.DebugAppendf("REDACT", "tier-2 scanner: using stored API key for provider %q", provider)
+		}
+	}
+
+	return &redact.LLMScanner{BaseURL: baseURL, Model: scannerRequestModelName(model), AllowRemote: allowRemote, APIKey: apiKey}
+}
+
+// extractProvider extracts the provider prefix from a model name.
+// e.g. "lmstudio/local-scan" → "lmstudio", "gpt-4o" → "".
+func extractProvider(model string) string {
+	provider, _ := config.SplitProviderModel(model)
+	return provider
 }
 
 // applyTier2Scan runs the tier-2 LLM scanner on the most recent user message
@@ -228,6 +321,35 @@ func applyTier2Scan(agentMsgs []agent.Message, scanner redact.Scanner, reg *reda
 		return nil
 	}
 	return nil
+}
+
+// applyTier1UserRedaction runs tier-1 keyword+entropy detection on the last user
+// message in agentMsgs. This is called unconditionally before the LLM call (and
+// before any tier-2 scan) so that common password/secret patterns are masked
+// even when no tier-2 scanner is configured.
+//
+// MUTATES: overwrites msg.Content for the last user message with token-substituted text.
+func applyTier1UserRedaction(agentMsgs []agent.Message, reg *redact.Registry) {
+	if reg == nil {
+		agent.DebugAppendf("REDACT", "tier-1 skip: registry is nil")
+		return
+	}
+	for i := len(agentMsgs) - 1; i >= 0; i-- {
+		msg := &agentMsgs[i]
+		if msg.Role != "user" || strings.TrimSpace(msg.Content) == "" {
+			continue
+		}
+		agent.DebugAppendf("REDACT", "tier-1 user scan: %q", msg.Content)
+		masked := redactText(msg.Content, reg)
+		changed := masked != msg.Content
+		if changed {
+			agent.DebugAppendf("REDACT", "tier-1 user redacted: %q → %q", msg.Content, masked)
+		} else {
+			agent.DebugAppendf("REDACT", "tier-1 user: no secrets found in %d chars", len(msg.Content))
+		}
+		msg.Content = masked
+		return
+	}
 }
 
 // renderSecrets replaces OCSEC tokens in text with masked previews for display.
