@@ -815,8 +815,14 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "bash.interpreter."+ie.Language)}
 		}
 
-		// Parse the compound command
-		parsedCmds, err := parseShellCommandLine(command)
+		// Parse the compound command. Strip heredoc bodies first so their
+		// content lines (e.g. Go source inside `cat > file << 'EOF'`) are not
+		// tokenized as separate shell commands by the newline→';' rule.
+		parseTarget := command
+		if header, docs := extractHeredocs(command); len(docs) > 0 {
+			parseTarget = header
+		}
+		parsedCmds, err := parseShellCommandLine(parseTarget)
 		if err != nil {
 			// Parsing error (unbalanced quotes, etc.): fallback to asking for safety
 			level := pm.Check(toolName)

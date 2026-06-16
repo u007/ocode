@@ -732,6 +732,10 @@ type model struct {
 	gitSel                   selectionState
 	sidebarSel               selectionState
 	rawSidebarLines          []string
+	statusSel                selectionState
+	statusRawLines           []string
+	statusPermColStart       int // column where permission text starts on status line 0
+	statusPermColEnd         int // column where permission text ends on status line 0
 	hoverSidebarFile         string         // file path hovered by mouse in sidebar, empty when no hover
 	hoverLink                pathLinkRegion // file-path link hovered in the transcript
 	hoverLinkActive          bool           // whether hoverLink is set
@@ -4799,6 +4803,41 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 
+	// Status bar: complete text selection drag, or handle permission click.
+	if m.statusSel.dragging {
+		// Ensure the status bar cache is populated for permission click detection.
+		m.renderStatus()
+		m.statusSel.dragging = false
+		if m.statusSel.active {
+			text := extractSelectionText(m.statusRawLines, m.statusSel.startLine, m.statusSel.startCol, m.statusSel.endLine, m.statusSel.endCol)
+			_ = clipboard.WriteAll(text)
+			m.statusSel = selectionState{}
+			return m, nil, true
+		}
+		// Plain click (no drag): check if click is on the permission text
+		// and cycle the permission mode.
+		statusTop := m.statusBarTopY()
+		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= m.statusPermColStart && mouse.X < m.statusPermColEnd && mouse.Y == statusTop && m.agent != nil {
+			perm := m.agent.Permissions()
+			// Cycle: normal → normal·auto → yolo → locked → normal
+			switch {
+			case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
+				perm.SetAutoPermissionEnabled(true)
+			case perm.Mode() == agent.PermissionModeNormal && perm.AutoPermissionEnabled():
+				perm.SetAutoPermissionEnabled(false)
+				perm.SetMode(agent.PermissionModeYOLO)
+			case perm.Mode() == agent.PermissionModeYOLO:
+				perm.SetMode(agent.PermissionModeLocked)
+			default:
+				perm.SetMode(agent.PermissionModeNormal)
+			}
+			m.persistPermissions()
+			m.statusSel = selectionState{}
+			return m, nil, true
+		}
+		m.statusSel = selectionState{}
+	}
+
 	if pressed && m.showPermDialog && m.activeTab == tabChat {
 		// The dialog only renders on the chat tab; on other tabs a click in
 		// its (hidden) bottom-chrome region must not answer the request.
@@ -4873,6 +4912,28 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			m.applyOrClearSelectionHighlight()
 			return m, nil, true
+		}
+	}
+
+	// Status bar: start text selection drag.
+	if pressed && m.activeTab == tabChat {
+		// Ensure the status bar raw lines are populated on this model value.
+		// renderStatus() stores them as a side-effect; calling it here on
+		// the value-receiver copy ensures the returned model has the cache.
+		m.renderStatus()
+		statusTop := m.statusBarTopY()
+		if mouse.Y >= statusTop && mouse.Y < statusTop+2 {
+			relRow := mouse.Y - statusTop
+			if relRow >= 0 && relRow < len(m.statusRawLines) {
+				m.statusSel = selectionState{
+					dragging:  true,
+					startLine: relRow,
+					startCol:  mouse.X,
+					endLine:   relRow,
+					endCol:    mouse.X,
+				}
+				return m, nil, true
+			}
 		}
 	}
 
@@ -5304,6 +5365,26 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		m.sidebarSel.endLine = row
 		m.sidebarSel.endCol = col
 		m.sidebarSel.active = m.sidebarSel.startLine != m.sidebarSel.endLine || m.sidebarSel.startCol != m.sidebarSel.endCol
+		return m, nil, true
+	}
+
+	// Status bar: update drag end position.
+	if m.statusSel.dragging {
+		statusTop := m.statusBarTopY()
+		relRow := mouse.Y - statusTop
+		if relRow < 0 {
+			relRow = 0
+		}
+		if relRow >= len(m.statusRawLines) && len(m.statusRawLines) > 0 {
+			relRow = len(m.statusRawLines) - 1
+		}
+		col := mouse.X
+		if col < 0 {
+			col = 0
+		}
+		m.statusSel.endLine = relRow
+		m.statusSel.endCol = col
+		m.statusSel.active = m.statusSel.startLine != m.statusSel.endLine || m.statusSel.startCol != m.statusSel.endCol
 		return m, nil, true
 	}
 
@@ -12043,7 +12124,14 @@ func (m *model) renderStatus() string {
 	width := m.statusContentWidth()
 
 	// First line: status info on left
-	leftStatus := fmt.Sprintf(" LLM: %s · Agent: %s · Model: %s%s%s%s%s", llmState, displayAgentName, m.currentModelName(), reasoningState, permissionMode, compactState, jobState)
+	// Build prefix before permissionMode to track its column position for click handling.
+	statusPrefix := fmt.Sprintf(" LLM: %s · Agent: %s · Model: %s%s", llmState, displayAgentName, m.currentModelName(), reasoningState)
+	rawPrefix := stripANSI(statusPrefix)
+	// +1 accounts for the Status style's .Padding(0, 1) left padding.
+	m.statusPermColStart = 1 + ansi.StringWidth(rawPrefix)
+	m.statusPermColEnd = m.statusPermColStart + ansi.StringWidth(permissionMode)
+
+	leftStatus := statusPrefix + permissionMode + compactState + jobState
 	if subagentModel := m.activeSubagentModel(); subagentModel != "" {
 		leftStatus += fmt.Sprintf(" · subagent: %s", subagentModel)
 	}
@@ -12060,10 +12148,20 @@ func (m *model) renderStatus() string {
 		rightContent += " · " + pending + " · click Chat to answer"
 	}
 
-	line1 := m.styles.Status.Width(width).MaxHeight(1).Render(ansi.Truncate(leftStatus, width, "..."))
-	line2 := m.styles.Status.Width(width).MaxHeight(1).Render(ansi.Truncate(rightContent, width, "..."))
+	styledLine1 := m.styles.Status.Width(width).MaxHeight(1).Render(ansi.Truncate(leftStatus, width, "..."))
+	styledLine2 := m.styles.Status.Width(width).MaxHeight(1).Render(ansi.Truncate(rightContent, width, "..."))
 
-	return line1 + "\n" + line2
+	// Store raw lines for selection hit-testing.
+	m.statusRawLines = []string{stripANSI(leftStatus), stripANSI(rightContent)}
+
+	// Apply selection highlight if active.
+	lines := []string{styledLine1, styledLine2}
+	if m.statusSel.active {
+		sl, sc, el, ec := normaliseSelection(m.statusSel.startLine, m.statusSel.startCol, m.statusSel.endLine, m.statusSel.endCol)
+		lines = applySelectionHighlight(lines, m.statusRawLines, sl, sc, el, ec)
+	}
+
+	return lines[0] + "\n" + lines[1]
 }
 
 func (m model) renderStoppedIndicator() string {
@@ -13537,6 +13635,16 @@ func (m model) agentStripTopY() int {
 		y += lipgloss.Height(row)
 	}
 	return y
+}
+
+// statusBarTopY returns the first screen row of the status bar (line 0 of 2).
+// The status bar is always the very last element in the chat-tab layout, so its
+// top row is m.height - 2 (the status bar is always 2 lines).
+func (m model) statusBarTopY() int {
+	if m.height < 2 {
+		return 0
+	}
+	return m.height - 2
 }
 
 func (m *model) applyOrClearSelectionHighlight() {

@@ -2,7 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+- **Heredoc-Aware Bash Parsing** — `parseShellCommandLine` now strips heredoc bodies before tokenizing compound commands, preventing content lines (e.g. Go source inside `cat > file << 'EOF'`) from being incorrectly split as separate shell commands by the newline→';' rule.
+- **Patch Tool Error Context** — When `deriveNewContents` fails to find expected lines or context in a file, the error message now includes nearby file content (up to 5 lines around the search position) and the expected patch lines, making it much easier to diagnose patch failures. New `getNearbyLines()` helper formats the snippet.
+
 ### Added
+- **Status Bar Text Selection** — The status bar now supports in-app text selection: press to start a drag, motion updates the highlight, release copies selected text to clipboard. Falls through to click handling when no drag occurs, so plain clicks still work.
+- **Clickable Permission Indicator** — Clicking the permission mode text (e.g. "YOLO permissions") on the status bar cycles through permission modes: normal → normal·auto → yolo → locked → normal. Tracks column bounds for the permission text segment via `statusPermColStart`/`statusPermColEnd`.
 - **`/cd` Command** — New `/cd <path>` (alias `/cwd`) changes the project root directory for the current session. Resolves relative paths and `~/` expansion, updates file/git models, permissions, and the agent's environment prompt to reflect the new working directory.
 - **`/rc off` Command** — `/rc off` now stops the web UI remote-control server, cleaning up the HTTP listener and tailscale serve process.
 - **Remote Control Tailscale Setup Hints** — When tailscale is installed but `tailscale serve` is not enabled, `/rc` shows a one-time setup hint with the command to run.

@@ -218,7 +218,9 @@ func deriveNewContents(originalLines []string, filePath string, chunks []updateC
 		if chunk.changeContext != "" {
 			idx := seekSequence(lines, []string{chunk.changeContext}, lineIdx, false)
 			if idx == -1 {
-				return nil, fmt.Errorf("failed to find context %q in %s", chunk.changeContext, filePath)
+				// Show file context around where we were searching
+				contextSnippet := getNearbyLines(lines, lineIdx, 5)
+				return nil, fmt.Errorf("failed to find context %q in %s\n\nSearched from line %d. Nearby file content:\n%s", chunk.changeContext, filePath, lineIdx+1, contextSnippet)
 			}
 			lineIdx = idx + 1
 		}
@@ -251,7 +253,10 @@ func deriveNewContents(originalLines []string, filePath string, chunks []updateC
 		}
 
 		if found == -1 {
-			return nil, fmt.Errorf("failed to find expected lines in %s:\n%s", filePath, strings.Join(chunk.oldLines, "\n"))
+			// Show the expected lines vs actual file content at the search location
+			expectedSnippet := strings.Join(chunk.oldLines[:min(len(chunk.oldLines), 3)], "\n")
+			actualSnippet := getNearbyLines(lines, lineIdx, 5)
+			return nil, fmt.Errorf("failed to find expected lines in %s:\n\nExpected (from patch):\n%s\n\nActual file content near line %d:\n%s", filePath, expectedSnippet, lineIdx+1, actualSnippet)
 		}
 		replacements = append(replacements, replacement{found, len(pattern), newSlice})
 		lineIdx = found + len(pattern)
@@ -321,6 +326,33 @@ func seekSequence(lines, pattern []string, startIdx int, eof bool) int {
 		}
 	}
 	return -1
+}
+
+
+// getNearbyLines returns a formatted snippet of lines around the given index for error context.
+func getNearbyLines(lines []string, aroundIdx, contextLines int) string {
+	if len(lines) == 0 {
+		return "(empty file)"
+	}
+
+	start := aroundIdx - contextLines
+	if start < 0 {
+		start = 0
+	}
+	end := aroundIdx + contextLines + 1
+	if end > len(lines) {
+		end = len(lines)
+	}
+
+	var sb strings.Builder
+	for i := start; i < end; i++ {
+		marker := "  "
+		if i == aroundIdx {
+			marker = "> " // Mark the expected position
+		}
+		sb.WriteString(fmt.Sprintf("%s%4d | %s\n", marker, i+1, lines[i]))
+	}
+	return sb.String()
 }
 
 func normalizeUnicode(s string) string {
