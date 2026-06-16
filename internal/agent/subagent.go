@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -112,6 +113,22 @@ type TaskTool struct {
 	registry         *AgentRegistry
 	runs             *AgentRunRegistry
 	persistChildSess func(sessionID, title string, messages []Message, metadata map[string]any) error
+
+	// Per-call bus + agent id. These are only ever set on a
+	// short-lived COPY of the task tool, created per dispatch in
+	// executeToolCall from a taskBinding; the shared instance in
+	// a.tools["task"] always leaves them nil. A non-nil groupBus
+	// means this call is part of a group and the child agent
+	// should be wired onto the bus.
+	groupBus *notebus.Bus
+	agentID  string
+
+	// Per-group completion tracker. Set on the same per-call copy
+	// alongside groupBus/agentID; nil for solo / sequential calls.
+	// The tracker is the reconcile (Part 05) input — it lists which
+	// agents completed, which failed, and which partitions they
+	// owned.
+	groupTracker *groupTracker
 }
 
 func (t TaskTool) Name() string        { return "task" }
@@ -166,6 +183,10 @@ func (t TaskTool) Definition() map[string]interface{} {
 					"type":        "boolean",
 					"description": "OpenCode-compatible alias for run_in_background.",
 				},
+				"shared_notes": map[string]interface{}{
+					"type":        "boolean",
+					"description": "When true and the parallel batch contains 2+ subagent calls with this flag, the agent will share a notes bus across the group. Has no effect on a single (non-grouped) call.",
+				},
 			},
 			"required": []string{"prompt"},
 		},
@@ -181,6 +202,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		Description     string `json:"description"`
 		RunInBackground bool   `json:"run_in_background"`
 		Background      bool   `json:"background"`
+		SharedNotes     bool   `json:"shared_notes"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -226,6 +248,27 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// Wire the sub-agent's advisor gate to the parent's atomic flag so
 	// mid-run toggles propagate immediately (reactive, not a snapshot).
 	subAgent.SetParentAdvisorEnabled(&t.mainAgent.advisorEnabled)
+	// If this call is part of a notes group, hand the bus and the
+	// per-call agent id to the child. Disabled/single calls leave
+	// groupBus nil and the child runs without a bus — same as
+	// before. The bus is set BEFORE the spec/permissions block so
+	// the bus owns the child from the moment it exists.
+	if t.groupBus != nil && t.agentID != "" {
+		subAgent.SetNoteBus(t.groupBus, t.agentID)
+		// Propagate completion status to the bus for
+		// reconcile. If the parallel block attached a
+		// tracker, also record into it (so the post-
+		// teardown reconcile hand-off can surface
+		// unreviewed partitions). The local "logged" flag
+		// is for the debug log; the tracker records in
+		// addition.
+		subAgent.SetNoteBusCompletion(func(agentID, status string, err error) {
+			emitDebug("NOTEBUS", fmt.Sprintf("agent %s status=%s err=%v", agentID, status, err))
+			if t.groupTracker != nil {
+				t.groupTracker.Record(agentID, status, err)
+			}
+		})
+	}
 	// Subagents do not inherit the parent's mode prompt — they have their own
 	// system prompt. SetSpec installs the spec AND runs applySpecModel so any
 	// Model / Temperature / TopP overrides on the registry definition actually
@@ -371,6 +414,26 @@ func (t TaskTool) executeSubAgent(name string, subAgent *Agent, messages []Messa
 }
 
 func (t TaskTool) executeSubAgentWithTranscript(name string, subAgent *Agent, messages []Message) (result string, resp []Message, err error) {
+	// Fire the bus completion callback exactly once, with the
+	// final status. We always run (defer) so panic / cancellation
+	// / error paths still report. The callback is a no-op when
+	// the agent is not in a group.
+	defer func() {
+		if subAgent.noteBus != nil {
+			status := "completed"
+			if err != nil {
+				status = "failed"
+			}
+			subAgent.noteBus.ReportCompletion(subAgent.noteAgentID, status, err)
+		}
+		if cb := subAgent.noteBusCompletion; cb != nil {
+			status := "completed"
+			if err != nil {
+				status = "failed"
+			}
+			cb(subAgent.noteAgentID, status, err)
+		}
+	}()
 	if t.mainAgent.activity != nil {
 		t.mainAgent.activity.agentStarted(name)
 		defer t.mainAgent.activity.agentDone(name)

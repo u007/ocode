@@ -676,10 +676,12 @@ func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
 		var base int64
 		if msgs[i].Usage.TotalTokens != nil && *msgs[i].Usage.TotalTokens > 0 {
 			base = *msgs[i].Usage.TotalTokens
-		} else {
-			if msgs[i].Usage.PromptTokens != nil {
-				base += *msgs[i].Usage.PromptTokens
-			}
+		} else if msgs[i].Usage.PromptTokens != nil {
+			// Only use real API data when we have the input count.
+			// CompletionTokens alone is not a context size — it's output length.
+			// Providers that omit input_tokens (e.g. minimax-m3 via opencode-go)
+			// would give a wildly wrong estimate if we fell through here.
+			base = *msgs[i].Usage.PromptTokens
 			if msgs[i].Usage.CompletionTokens != nil {
 				base += *msgs[i].Usage.CompletionTokens
 			}

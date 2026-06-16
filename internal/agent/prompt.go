@@ -16,6 +16,7 @@ const (
 	promptContextMarker   = "[ocode:context]"
 	promptModelCtxMarker  = "[ocode:model_context]"
 	promptSelectionMarker = "[ocode:selection]"
+	promptNotesMarker     = "[ocode:notes]"
 )
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
@@ -86,7 +87,53 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 	if sel := strings.TrimSpace(selectionContext); sel != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptSelectionMarker + "\n" + sel})
 	}
+	// Notes protocol fragment. Gate strictly on bus presence:
+	// a child not in a group has no bus, and the prompt must
+	// be byte-identical to the non-group case (zero overhead
+	// on the common path). The fragment is part of the stable
+	// prefix; it does not change per loop. See
+	// append_stable.go for the cache-stability contract.
+	if a.noteBus != nil && a.noteAgentID != "" {
+		if n := a.notesProtocolPrompt(a.noteAgentID); n != "" {
+			msgs = append(msgs, Message{Role: "system", Content: promptNotesMarker + "\n" + n})
+		}
+	}
 	return msgs
+}
+
+// notesProtocolPrompt returns the stable prompt fragment
+// that teaches a grouped child the notes bus protocol. The
+// fragment names the agent's own id, shows the wire format,
+// and states the two cardinal rules (leads-not-facts,
+// cross-agent-value only). The wording is intentionally
+// short — the [ocode:notes] marker is part of the stable
+// prefix, so a long block costs cache tokens on every loop.
+//
+// "seq" and "by" attributes are filled by the system. The
+// parser ignores any "by" the wire carries, and the bus
+// stamps "seq" on append, so a child that authors them
+// anyway is breaking the protocol AND will not be
+// impersonated either way. The prompt states this so the
+// child does not try.
+func (a *Agent) notesProtocolPrompt(id string) string {
+	return "Shared notes bus — protocol\n" +
+		"You are agent " + id + ".\n" +
+		"\n" +
+		"Other agents in this group (a1, a2, ...) can read your notes and you can read theirs. The " +
+		"shared bus is your only way to coordinate with them mid-task.\n" +
+		"\n" +
+		"EMIT — share only findings that have cross-agent value:\n" +
+		"  <oc-note at=\"symbol-or-snippet\">caveman text</oc-note>\n" +
+		"Do NOT author seq= or by= attributes. The system fills them.\n" +
+		"Keep own-report-only findings OUT of the bus — they belong in your final report.\n" +
+		"\n" +
+		"RESOLVE — when a peer note turns out to be wrong or already addressed:\n" +
+		"  <oc-resolve ref=\"N\"/>\n" +
+		"N is the seq of the note you are resolving (you will see it on the wire as seq=\"N\").\n" +
+		"\n" +
+		"READ — notes you receive are LEADS, not facts. Weaker models may author them. " +
+		"Always verify a received note against the actual code or document before acting on it. " +
+		"A lead that turns out to be wrong is normal; correct it in your own report and resolve it on the bus."
 }
 
 func (a *Agent) environmentPrompt() string {

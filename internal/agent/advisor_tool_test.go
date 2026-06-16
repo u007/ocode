@@ -305,4 +305,3 @@ func TestCleanEnvForTerminal(t *testing.T) {
 		t.Error("missing SHELL in clean env")
 	}
 }
-

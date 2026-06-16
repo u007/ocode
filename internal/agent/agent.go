@@ -19,6 +19,7 @@ import (
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/mcp"
+	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -191,6 +192,129 @@ type Agent struct {
 	// requests. Field is named "pipeline" (not "hooks") because the hooks package
 	// is already imported under that name.
 	pipeline *hooks.Pipeline
+
+	// noteBusFactory, when non-nil, is used to construct a per-group
+	// *notebus.Bus for parallel subagent fan-outs. The default
+	// (defaultNoteBusFactory) calls notebus.NewBus. Tests inject a
+	// counting factory to assert on bus creation.
+	noteBusFactory func(groupID string) *notebus.Bus
+
+	// noteBusDir, when non-nil, is the directory used to hydrate
+	// the bus from a sidecar on resume. nil disables the sidecar
+	// (the bus is in-memory only).
+	noteBusDir string
+
+	// noteBusSessionTag, when non-nil, is a stable string used as
+	// the prefix of a group id. It lets two groups in the same
+	// agent session have distinct sidecar files. nil/empty is
+	// fine — nextGroupID will fall back to "main".
+	noteBusSessionTag string
+
+	// noteBusBrief, when non-nil, is appended to the bus at
+	// group-construction time, BEFORE any child is spawned.
+	// The brief is the orchestrator's pre-computed shared
+	// context (change set summary, partition assignments,
+	// rule digest) — context the orchestrator already has, so
+	// every child does not have to recompute it. Children see
+	// the brief in their first-loop delta (by="main"). A nil
+	// brief is a no-op (the common case: orchestrators that do
+	// not pre-compute a brief just run the group without one).
+	// Set via SetNoteBusBrief; see brief_seeding.go for the
+	// append helper.
+	noteBusBrief []notebus.Entry
+
+	// noteBus, when non-nil, is the bus this agent participates
+	// in as a group member. nil means "not in a group" (the
+	// common case). The bus is set by TaskTool.Execute right
+	// after the child agent is constructed; on a solo or
+	// non-grouped call it stays nil.
+	noteBus *notebus.Bus
+
+	// noteAgentID is the agent's stable id within the group
+	// (a1, a2, …). Empty when not in a group. Stable across the
+	// group's lifetime and re-assigned consistently across
+	// reload via the sidecar.
+	noteAgentID string
+
+	// noteBusCompletion, when non-nil, is called once when this
+	// agent's group run ends (success / failure / cancel). The
+	// status string is one of "completed", "failed", "cancelled".
+	// The TaskTool uses this to track per-agent completion for
+	// reconcile (Part 05).
+	noteBusCompletion func(agentID, status string, err error)
+
+	// noteBusCancel cancels the context backing the current group
+	// bus's owner goroutine. Set in maybeBuildGroupBus and invoked
+	// by teardownGroupBus so the stop-channel watcher does not leak
+	// for the agent's lifetime. nil when no group is active.
+	noteBusCancel context.CancelFunc
+}
+
+// NoteBus returns the bus this agent participates in, or nil if
+// it is not in a group.
+func (a *Agent) NoteBus() *notebus.Bus { return a.noteBus }
+
+// NoteAgentID returns the agent's stable id within the group (e.g.
+// "a1"), or "" if not in a group.
+func (a *Agent) NoteAgentID() string { return a.noteAgentID }
+
+// SetNoteBus wires the bus and agent id on this agent. Called by
+// the task tool for every child in a group; safe to call on the
+// main agent as well (the bus is shared across the group).
+func (a *Agent) SetNoteBus(bus *notebus.Bus, agentID string) {
+	a.noteBus = bus
+	a.noteAgentID = agentID
+}
+
+// SetNoteBusCompletion registers a callback fired once when this
+// agent's run ends. The task tool uses this to surface completion
+// status to the bus.
+func (a *Agent) SetNoteBusCompletion(cb func(agentID, status string, err error)) {
+	a.noteBusCompletion = cb
+}
+
+// defaultNoteBusFactory is the production bus factory. It returns a
+// fresh bus and does NOT start it — the parallel block calls
+// Start(ctx) and Stop() on it.
+func defaultNoteBusFactory(groupID string) *notebus.Bus {
+	return notebus.NewBus(groupID)
+}
+
+// SetNoteBusFactory overrides the bus factory. Used by tests to
+// assert on creation; production code leaves the default in place.
+func (a *Agent) SetNoteBusFactory(f func(groupID string) *notebus.Bus) {
+	a.noteBusFactory = f
+}
+
+// SetNoteBusDir configures the directory used to persist + reload
+// the bus's sidecar file. When set, the parallel block opens a
+// Sidecar sink for the new bus and the per-group teardown flushes
+// and closes it. Empty disables persistence.
+func (a *Agent) SetNoteBusDir(dir string) {
+	a.noteBusDir = dir
+}
+
+// SetNoteBusSessionTag sets the session-scoped prefix used when
+// minting a new group id. Production code may wire the parent's
+// session id here so the sidecar file lives under that session.
+func (a *Agent) SetNoteBusSessionTag(tag string) {
+	a.noteBusSessionTag = tag
+}
+
+// SetNoteBusBrief sets the orchestrator's pre-computed shared
+// brief that is appended to the bus at group-construction
+// time, BEFORE children are spawned. The brief is a slice of
+// note entries authored as by="main" (the seedBrief helper
+// overwrites By defensively). Children see the brief in
+// their first-loop delta. A nil brief is the no-op default
+// (the common case).
+//
+// The brief is the orchestrator's pre-computed shared
+// context — change set summary, partition assignments, rule
+// digest, etc. Computing the brief is the orchestrator's
+// job; this setter is just a transport.
+func (a *Agent) SetNoteBusBrief(brief []notebus.Entry) {
+	a.noteBusBrief = brief
 }
 
 // SetHooks wires an in-process hook pipeline into this agent.
@@ -387,14 +511,15 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		toolMap[t.Name()] = t
 	}
 	a := &Agent{
-		client:      client,
-		tools:       toolMap,
-		mcpTools:    make(map[string]struct{}),
-		config:      cfg,
-		mode:        ModeBuild,
-		lspMgr:      lspMgr,
-		permissions: NewPermissionManager(),
-		activity:    newActivityTracker(),
+		client:         client,
+		tools:          toolMap,
+		mcpTools:       make(map[string]struct{}),
+		config:         cfg,
+		mode:           ModeBuild,
+		lspMgr:         lspMgr,
+		permissions:    NewPermissionManager(),
+		activity:       newActivityTracker(),
+		noteBusFactory: defaultNoteBusFactory,
 	}
 	a.procs = tool.NewProcessRegistry()
 	a.runs = NewAgentRunRegistry()
@@ -442,7 +567,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	// flippable from the web sidebar without touching config).
 	a.tools["advisor"] = AdvisorTool{cfg: cfg, mainAgent: a}
 	a.advisorEnabled.Store(cfg == nil || cfg.Ocode.Advisor.Enabled)
-	a.tools["task"] = TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
+	a.tools["task"] = &TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
 	if cfg != nil {
@@ -464,7 +589,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 }
 
 func (a *Agent) SetChildSessionPersistence(persist func(sessionID, title string, messages []Message, metadata map[string]any) error) {
-	if taskTool, ok := a.tools["task"].(TaskTool); ok {
+	if taskTool, ok := a.tools["task"].(*TaskTool); ok {
 		taskTool.persistChildSess = persist
 		a.tools["task"] = taskTool
 	}
@@ -528,10 +653,10 @@ func (t AgentTool) Execute(args json.RawMessage) (string, error) {
 	if t.mainAgent == nil {
 		return "", fmt.Errorf("no main agent configured")
 	}
-	if task, ok := t.mainAgent.tools["task"].(TaskTool); ok {
+	if task, ok := t.mainAgent.tools["task"].(*TaskTool); ok {
 		return task.Execute(args)
 	}
-	task := TaskTool{mainAgent: t.mainAgent, registry: DefaultAgentRegistry, runs: t.mainAgent.runs}
+	task := &TaskTool{mainAgent: t.mainAgent, registry: DefaultAgentRegistry, runs: t.mainAgent.runs}
 	return task.Execute(args)
 }
 
@@ -556,7 +681,21 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 
 	preLen := len(messages)
 	messages = a.PrepareMessages(messages, "")
+	// Order matters for cache stability: stable content
+	// (PrepareMessages output) is followed by the volatile
+	// tail (LSP diagnostics, notes delta). Both injectors
+	// append at the end so the prefix bytes are unchanged
+	// across loops that have no new diagnostic / no new
+	// notes. See append_stable.go for the documented
+	// contract.
 	messages = a.injectLSPDiagnostics(messages)
+	// Notes delta: when this agent is in a notes group, the
+	// bus's per-loop delta is appended as one <oc-log> system
+	// message at the very tail. The block is added ONLY when
+	// the delta is non-empty (the cache-stability invariant:
+	// nothing new → no block → no prefix change). See
+	// injectNotesTail in delta_inject.go for the render.
+	messages = injectNotesTail(messages, a)
 	toolDefs := a.GetToolDefinitions()
 	var newMsgs []Message
 	emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prompt prep, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
@@ -628,6 +767,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 
 		newMsgs = append(newMsgs, *resp)
 		messages = append(messages, *resp)
+		// Notes emit: if the child is in a group, parse
+		// <oc-note> and <oc-resolve> tags out of the
+		// assistant message and append stamped entries to
+		// the bus. No bus → no parse (zero overhead on
+		// the common non-group path).
+		handleAssistantNotesForChild(a, resp.Content)
 		if a.OnMessage != nil {
 			// Best-effort cancellation check before delivering the
 			// response. Cancel() can still race in after this check and
@@ -660,17 +805,100 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 
 		results := make([]Message, len(resp.ToolCalls))
 
+		// Group-bus detection: a "group" exists when 2+ subagent
+		// ("task" / "agent") calls in this parallel batch carry
+		// `shared_notes:true`. The detection happens here, BEFORE
+		// the goroutines spawn, so the bus can be constructed once
+		// and shared. Single calls and disabled calls do not create
+		// a bus — that is the "no bus for solo / disabled" path
+		// the plan calls out.
+		groupBus, groupAgentIDs := a.maybeBuildGroupBus(resp.ToolCalls, parallelTCs)
+
+		// Brief seeding: if the orchestrator attached a
+		// pre-computed brief to this agent, append it to the
+		// bus before any child spawns. This guarantees
+		// children see the brief in their first-loop delta
+		// (by="main", seq strictly less than any child
+		// entry). The brief is data the orchestrator
+		// computed — this code does not compute it. No brief
+		// → no-op (the common case).
+		if groupBus != nil {
+			if err := seedBrief(groupBus, a.noteBusBrief); err != nil {
+				emitDebug("NOTEBUS", fmt.Sprintf("seedBrief failed: %v", err))
+			}
+		}
+
+		// Group tracker: per-group completion ledger that
+		// reconcile reads to surface unreviewed partitions.
+		// Created on group construction; passed into the
+		// task tool so each child's SetNoteBusCompletion
+		// callback records into it.
+		var groupTracker *groupTracker
+		if groupBus != nil {
+			groupTracker = newGroupTracker()
+			// Seed partitions from the orchestrator's
+			// brief metadata (best-effort: a brief entry
+			// with at="partition:<id>" is the canonical
+			// shape; if absent, partition is empty).
+			if a.noteBusBrief != nil {
+				for _, e := range a.noteBusBrief {
+					if e.Kind == notebus.KindNote {
+						// Convention: at="partition:<agentID>"
+						// body is the partition label.
+						if strings.HasPrefix(e.At, "partition:") {
+							agentID := strings.TrimPrefix(e.At, "partition:")
+							groupTracker.SetPartition(agentID, e.Body)
+						}
+					}
+				}
+			}
+			// The tracker is handed to each child via the
+			// per-call taskBinding below — never mutated onto
+			// the shared task-tool instance.
+		}
+
 		if len(parallelTCs) > 0 {
 			var wg sync.WaitGroup
-			for _, i := range parallelTCs {
+			for k, i := range parallelTCs {
 				wg.Add(1)
-				go func(idx int, tc ToolCall, cancelled func() bool) {
+				go func(idx int, k int, tc ToolCall, cancelled func() bool) {
 					defer wg.Done()
 					if cancelled() {
 						return
 					}
 					a.activity.toolStarted(tc.Function.Name)
-					result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+					// Build the per-call group binding (bus +
+					// agent id + tracker). It is threaded through
+					// handleToolCall and applied to a COPY of the
+					// task tool, so concurrent goroutines never
+					// share mutable bus state. No group → nil
+					// binding → unchanged behavior.
+					var (
+						bus     *notebus.Bus
+						agentID string
+						binding *taskBinding
+					)
+					if groupBus != nil {
+						bus = groupBus
+						if k < len(groupAgentIDs) {
+							agentID = groupAgentIDs[k]
+						}
+						binding = &taskBinding{bus: bus, agentID: agentID, tracker: groupTracker}
+					}
+					result, err := a.handleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding)
+					// Auto-touch: if the call succeeded and was a
+					// write-class tool, append a touch to the bus
+					// so peers know this file changed. Read tools
+					// are never touched (cache-stability invariant).
+					// We only touch on the goroutine that owned
+					// the call (no extra goroutine to avoid
+					// ordering surprises with the owner).
+					if err == nil && bus != nil {
+						appendWriteTouchIfGrouped(&agentCtx{
+							noteBus:     bus,
+							noteAgentID: agentID,
+						}, tc.Function.Name, tc.Function.Arguments)
+					}
 					a.activity.toolDone(tc.Function.Name)
 					var notice string
 					if err != nil {
@@ -682,9 +910,34 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					}
 					result = TruncateToolResult(tc.ID, result)
 					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result, Notice: notice}
-				}(i, resp.ToolCalls[i], isCancelled)
+				}(i, k, resp.ToolCalls[i], isCancelled)
 			}
 			wg.Wait()
+			// Reconcile handoff: run the pre-pass on the
+			// log + tracker and append the rendered output as
+			// a [ocode:reconcile] system message. The
+			// orchestrator (main LLM) reads this in its
+			// next loop and performs the strong-model
+			// judgment. No group → no handoff.
+			//
+			// We append to BOTH newMsgs (so the transcript
+			// persists the hand-off) and messages (so the
+			// next LLM call sees it). The hand-off is the
+			// last system message, so it is part of the
+			// volatile tail, not the stable prefix — see
+			// append_stable.go.
+			if handoff := reconcileHandoffMessage(groupBus, groupTracker); handoff != nil {
+				newMsgs = append(newMsgs, *handoff)
+				messages = append(messages, *handoff)
+				if a.OnMessage != nil {
+					a.OnMessage(*handoff)
+				}
+			}
+			// Group teardown: stop the bus, close the sidecar.
+			// Even on partial failure (some goroutines panicked
+			// or returned errors) we tear down here so the bus
+			// does not leak goroutines.
+			a.teardownGroupBus(groupBus)
 		}
 
 		for _, i := range sequentialTCs {
@@ -744,9 +997,14 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 
 const lspDiagnosticsAutoInjectLimit = 50
 
-// injectLSPDiagnostics prepends a transient system message with the current
-// project LSP diagnostics. The message is rebuilt on every Step and is never
-// persisted to history.
+// injectLSPDiagnostics appends a transient system message with
+// the current project LSP diagnostics at the very tail of the
+// message list. The message is rebuilt on every Step and is
+// never persisted to history. The injection is at the tail
+// (not interleaved with stable content) so the cached prefix
+// is byte-identical across loops that have no diagnostic
+// change. See append_stable.go for the cache-stability
+// contract.
 func (a *Agent) injectLSPDiagnostics(messages []Message) []Message {
 	if a == nil || a.lspMgr == nil {
 		return messages
@@ -760,14 +1018,9 @@ func (a *Agent) injectLSPDiagnostics(messages []Message) []Message {
 		return messages
 	}
 	msg := Message{Role: "system", Content: rendered}
-	insertAt := 0
-	for insertAt < len(messages) && messages[insertAt].Role == "system" {
-		insertAt++
-	}
 	out := make([]Message, 0, len(messages)+1)
-	out = append(out, messages[:insertAt]...)
+	out = append(out, messages...)
 	out = append(out, msg)
-	out = append(out, messages[insertAt:]...)
 	return out
 }
 
@@ -1277,6 +1530,16 @@ func (a *Agent) scanToolResult(toolName string, toolArgs string, content string)
 }
 
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
+	return a.handleToolCall(name, args, nil)
+}
+
+// handleToolCall is HandleToolCall with an optional per-call group
+// binding. The binding is non-nil only on the parallel-group dispatch
+// path; it carries the bus/agent-id/tracker for this specific child so
+// they are applied to a per-call copy of the task tool rather than
+// mutated onto the shared instance (which would race across the
+// concurrent goroutines in a group).
+func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding) (string, error) {
 	if deny, ok := gateToolCall(a.Mode(), name, args); !ok {
 		return deny, nil
 	}
@@ -1305,7 +1568,7 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 					allowed, reason, summary := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
-						return a.executeToolCall(name, args)
+						return a.executeToolCall(name, args, b)
 					}
 					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 					// LLM denied — fall through to human ask.
@@ -1332,7 +1595,7 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 				resp := a.OnPermissionAsk(req)
 				if resp.Level == PermissionAllow {
 					a.applyPermissionResponse(req, resp)
-					return a.executeToolCall(name, args)
+					return a.executeToolCall(name, args, b)
 				}
 				return fmt.Sprintf("denied: tool %q denied by user. Do not retry the same call; ask the user how they'd like to proceed or take a different approach.", name), nil
 			}
@@ -1344,7 +1607,7 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 		}
 	}
 
-	return a.executeToolCall(name, args)
+	return a.executeToolCall(name, args, b)
 }
 
 func (a *Agent) autoPermissionModelName() string {
@@ -2238,10 +2501,10 @@ func extractFilesFromCommand(command string) []string {
 }
 
 func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage) (string, error) {
-	return a.executeToolCall(name, args)
+	return a.executeToolCall(name, args, nil)
 }
 
-func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, error) {
+func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBinding) (string, error) {
 	emitDebug("TOOL", fmt.Sprintf("→ %s %s", name, truncateDebugArgs(args, 120)))
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
@@ -2283,7 +2546,25 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage) (string, erro
 		args = a.pipeline.RunToolBefore(name, args)
 	}
 
-	result, err := t.Execute(args)
+	// For a grouped subagent dispatch, apply the per-call bus binding
+	// to a COPY of the task tool and execute the copy. The shared
+	// a.tools["task"] instance is never mutated, so concurrent group
+	// goroutines cannot race on (or clobber) each other's bus/agentID.
+	var result string
+	var err error
+	if b != nil && b.bus != nil {
+		if tt, ok := t.(*TaskTool); ok {
+			local := *tt
+			local.groupBus = b.bus
+			local.agentID = b.agentID
+			local.groupTracker = b.tracker
+			result, err = local.Execute(args)
+		} else {
+			result, err = t.Execute(args)
+		}
+	} else {
+		result, err = t.Execute(args)
+	}
 
 	if hooksCfg != nil {
 		resultStr := ""
