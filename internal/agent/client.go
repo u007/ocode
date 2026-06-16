@@ -892,6 +892,22 @@ func firstTagIndex(s string, tags []string) (idx int, tagLen int) {
 	return best, bestLen
 }
 
+// hasToolResultBlock reports whether any block in the content slice is a tool_result.
+// Used to prevent merging tool_result user messages with text user messages, which
+// strict Anthropic-compatible providers (e.g. Minimax) reject.
+func hasToolResultBlock(content []interface{}) bool {
+	for _, b := range content {
+		bm, ok := b.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if btype, _ := bm["type"].(string); btype == "tool_result" {
+			return true
+		}
+	}
+	return false
+}
+
 func openAITools(tools []map[string]interface{}) []map[string]interface{} {
 	openAITools := make([]map[string]interface{}, 0, len(tools))
 	for _, t := range tools {
@@ -1858,8 +1874,12 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 
 		if n := len(anthropicMsgs); n > 0 && anthropicMsgs[n-1]["role"] == role {
 			prev, _ := anthropicMsgs[n-1]["content"].([]interface{})
-			anthropicMsgs[n-1]["content"] = append(prev, content...)
-			continue
+			// Don't merge when either side has tool_result blocks — mixing tool_result
+			// with text in the same user message is rejected by strict providers (e.g. Minimax).
+			if !hasToolResultBlock(prev) && !hasToolResultBlock(content) {
+				anthropicMsgs[n-1]["content"] = append(prev, content...)
+				continue
+			}
 		}
 		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
 			"role":    role,
