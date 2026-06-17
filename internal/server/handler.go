@@ -12,6 +12,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/session"
+	shellpkg "github.com/u007/ocode/internal/shell"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -620,5 +621,49 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 		"session_id":       id,
 		"message_count":    len(s.Messages),
 		"estimated_tokens": totalChars / 4,
+	})
+}
+
+// HandleShellCommand executes a shell command and returns the output.
+// This provides cross-platform shell execution for the web UI (! prefix commands).
+//
+// The actual spawn-and-capture work is delegated to internal/shell so the
+// TUI agent loop and the server share one implementation (timeout,
+// Setpgid, exit-code extraction, error-string policy). The handler is
+// responsible for the HTTP-level concerns: input validation, response
+// shape, and the workDir defaulting chain (request → server workDir → ".").
+func (h *Handler) HandleShellCommand(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Command string `json:"command"`
+		WorkDir string `json:"workDir,omitempty"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Command == "" {
+		writeError(w, http.StatusBadRequest, "command is required")
+		return
+	}
+
+	// Use configured work directory if not specified
+	workDir := req.WorkDir
+	if workDir == "" {
+		workDir = h.workDir
+	}
+	if workDir == "" {
+		workDir = "."
+	}
+
+	res := shellpkg.Run(req.Command, workDir)
+
+	errMsg := ""
+	if res.Err != nil {
+		errMsg = res.Err.Error()
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"output":   res.Output,
+		"exitCode": res.ExitCode,
+		"error":    errMsg,
 	})
 }

@@ -475,6 +475,39 @@ func TestPermissions_CdBareRelativeDirAllows(t *testing.T) {
 	}
 }
 
+// TestPermissions_GrepSlashPatternNotTreatedAsPath locks in the fix where
+// grep's first positional arg (the search pattern) was misidentified as a
+// filesystem path when it started with "/", causing spurious out-of-scope ASKs
+// for commands like `grep -r "/review" /path/in/root`.
+func TestPermissions_GrepSlashPatternNotTreatedAsPath(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	cases := []string{
+		`{"command":"grep -r \"/review\" ` + resolvedWorkDir + `"}`,
+		`{"command":"grep -r \"/some/pattern\" ` + resolvedWorkDir + ` --include=\"*.go\""}`,
+		`{"command":"grep \"/foo/bar\" ` + resolvedWorkDir + `/file.txt"}`,
+	}
+	for _, cmd := range cases {
+		t.Run(cmd, func(t *testing.T) {
+			dec := pm.Decide("bash", json.RawMessage(cmd))
+			if dec.Level != PermissionAllow {
+				t.Fatalf("expected allow for %s, got %s (out_of_scope_path=%q)", cmd, dec.Level, func() string {
+					if dec.Request != nil {
+						return dec.Request.OutOfScopePath
+					}
+					return ""
+				}())
+			}
+		})
+	}
+}
+
 // TestPermissions_FindUnsafeFlagsAsk verifies that find with -exec or
 // -delete is not auto-allowed even when the search path is in-root.
 func TestPermissions_FindUnsafeFlagsAsk(t *testing.T) {
@@ -1101,6 +1134,152 @@ func TestPermissions_BenignCommandsNotHarmful(t *testing.T) {
 				t.Errorf("IsHarmfulRequest should be false for benign command: %s", tc.command)
 			}
 		})
+	}
+}
+
+// decideSingleCommand env-var path must use isWithinAllowedScope (not isWithinWorkDir)
+// so that commands with VAR=/extra-path/file are allowed once the path is persisted
+// to extra_allowed_paths via the "always allow this path" prompt.
+func TestPermissions_BashEnvVarInExtraAllowedPath_AutoAllows(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	// Pin "extra" to a stable temp dir + a real file we own, so the test
+	// doesn't depend on os.Getwd() or a specific source tree layout.
+	extraDir := t.TempDir()
+	resolvedExtra, err := filepath.EvalSymlinks(extraDir)
+	if err != nil {
+		t.Fatalf("resolve extra: %v", err)
+	}
+	if !tool.AddExtraAllowedPath(resolvedExtra) {
+		t.Fatalf("AddExtraAllowedPath(%q) failed", resolvedExtra)
+	}
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(resolvedExtra) })
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	// A cat command with an env var pointing into extra_allowed_paths must
+	// auto-allow (not ask) because the env var scope check now uses isWithinAllowedScope.
+	envPath := filepath.Join(resolvedExtra, "marker.txt")
+	cmd := fmt.Sprintf(`{"command":"SRC=%s cat $SRC"}`, envPath)
+	dec := pm.Decide("bash", json.RawMessage(cmd))
+	if dec.Level != PermissionAllow {
+		rule := ""
+		if dec.Request != nil {
+			rule = dec.Request.Rule
+		}
+		t.Fatalf("bash with env var in extra_allowed_path: level=%s (rule=%q), want allow", dec.Level, rule)
+	}
+}
+
+// decideSingleCommand redirection path must use isWithinAllowedScope (not isWithinWorkDir)
+// so that output redirections to extra_allowed_paths don't re-ask after "always allow".
+func TestPermissions_BashRedirectionInExtraAllowedPath_AutoAllows(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	// Pin "extra" to a stable temp dir we own.
+	extraDir := t.TempDir()
+	resolvedExtra, err := filepath.EvalSymlinks(extraDir)
+	if err != nil {
+		t.Fatalf("resolve extra: %v", err)
+	}
+	if !tool.AddExtraAllowedPath(resolvedExtra) {
+		t.Fatalf("AddExtraAllowedPath(%q) failed", resolvedExtra)
+	}
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(resolvedExtra) })
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	// echo with a redirection into extra_allowed_paths must auto-allow.
+	outPath := filepath.Join(resolvedExtra, "out.txt")
+	cmd := fmt.Sprintf(`{"command":"echo hello > %s"}`, outPath)
+	dec := pm.Decide("bash", json.RawMessage(cmd))
+	if dec.Level != PermissionAllow {
+		rule := ""
+		if dec.Request != nil {
+			rule = dec.Request.Rule
+		}
+		t.Fatalf("bash with redirect to extra_allowed_path: level=%s (rule=%q), want allow", dec.Level, rule)
+	}
+}
+
+// Read (non-bash) on extra_allowed_paths must allow: the Decide path at
+// isReadOnlyTool && isWithinAllowedScope covers cache/extra roots for read-only ops.
+func TestPermissions_ReadToolOnExtraAllowedPath_Allows(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	// Pin "extra" to a stable temp dir we own with a real file inside.
+	extraDir := t.TempDir()
+	resolvedExtra, err := filepath.EvalSymlinks(extraDir)
+	if err != nil {
+		t.Fatalf("resolve extra: %v", err)
+	}
+	if !tool.AddExtraAllowedPath(resolvedExtra) {
+		t.Fatalf("AddExtraAllowedPath(%q) failed", resolvedExtra)
+	}
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(resolvedExtra) })
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	filePath := filepath.Join(resolvedExtra, "marker.txt")
+	// The file doesn't need to exist — read/glob path resolution is the
+	// scope check, not a stat. Keeping the path inside the temp dir
+	// makes the test self-contained and order-independent.
+	args := json.RawMessage(fmt.Sprintf(`{"path":%s}`, jsonStr(filePath)))
+	for _, readTool := range []string{"read", "glob"} {
+		dec := pm.Decide(readTool, args)
+		if dec.Level != PermissionAllow {
+			t.Fatalf("Decide(%s, path in extra_allowed_paths): level=%s, want allow", readTool, dec.Level)
+		}
+	}
+}
+
+// firstOutOfScopePath must return "" when the command's path arg resolves inside
+// extra_allowed_paths (i.e. isWithinAllowedScope), so the static decider doesn't
+// surface a spurious OutOfScopePath that verifyAutoGrant would then reject.
+func TestPermissions_FirstOutOfScopePath_ExtraAllowedPath_ReturnsEmpty(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	// Pin "extra" to a stable temp dir we own.
+	extraDir := t.TempDir()
+	resolvedExtra, err := filepath.EvalSymlinks(extraDir)
+	if err != nil {
+		t.Fatalf("resolve extra: %v", err)
+	}
+	if !tool.AddExtraAllowedPath(resolvedExtra) {
+		t.Fatalf("AddExtraAllowedPath(%q) failed", resolvedExtra)
+	}
+	t.Cleanup(func() { tool.RemoveExtraAllowedPath(resolvedExtra) })
+
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	filePath := filepath.Join(resolvedExtra, "marker.txt")
+	command := "cat " + filePath
+	got := firstOutOfScopePath(pm, command, "cat")
+	if got != "" {
+		t.Fatalf("firstOutOfScopePath for path in extra_allowed_paths = %q, want empty", got)
+	}
+
+	// Sanity: a genuinely out-of-scope path must still be returned.
+	outside := "/nonexistent-root-xyz/file.txt"
+	gotOut := firstOutOfScopePath(pm, "cat "+outside, "cat")
+	if gotOut != outside {
+		t.Fatalf("firstOutOfScopePath for out-of-scope path = %q, want %q", gotOut, outside)
 	}
 }
 

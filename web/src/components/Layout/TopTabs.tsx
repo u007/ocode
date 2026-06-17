@@ -1,8 +1,9 @@
-import { MessageSquare, FolderGit2, GitBranch, ScrollText } from "lucide-react";
+import { MessageSquare, FolderGit2, GitBranch, ScrollText, Menu } from "lucide-react";
 
 interface Props {
   activeTab: string;
   onTabChange: (tab: string) => void;
+  onMenuToggle?: () => void;
 }
 
 const tabs = [
@@ -12,7 +13,7 @@ const tabs = [
   { id: "logs", label: "Logs", icon: ScrollText },
 ];
 
-export default function TopTabs({ activeTab, onTabChange }: Props) {
+export default function TopTabs({ activeTab, onTabChange, onMenuToggle }: Props) {
   return (
     <header className="flex items-center border-b border-zinc-700 bg-zinc-900 h-12 px-4">
       {/* Left: Logo */}
@@ -39,12 +40,22 @@ export default function TopTabs({ activeTab, onTabChange }: Props) {
               }`}
             >
               <Icon className="w-4 h-4" />
-              {tab.label}
+              <span className="hidden sm:inline">{tab.label}</span>
             </button>
           );
         })}
       </nav>
 
+      {/* Right: Burger menu (always visible, toggles session sidebar) */}
+      {onMenuToggle && (
+        <button
+          onClick={onMenuToggle}
+          className="p-2 rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+          title="Toggle session history"
+        >
+          <Menu className="w-5 h-5" />
+        </button>
+      )}
     </header>
   );
 }

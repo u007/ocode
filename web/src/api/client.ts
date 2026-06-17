@@ -55,6 +55,7 @@ export const api = {
     fetchJSON<AgentRun[]>(
       `/api/agents/runs${session ? `?session=${encodeURIComponent(session)}` : ""}`,
     ),
+  getConfigModel: () => fetchJSON<{ model: string }>("/api/config/model"),
   setConfigModel: (model: string) =>
     fetchJSON<{ model: string }>("/api/config/model", {
       method: "PUT",
@@ -101,6 +102,11 @@ export const api = {
     fetchJSON<{ path: string; status: string }>("/api/files/open", {
       method: "POST",
       body: JSON.stringify({ path, line }),
+    }),
+  shellCommand: (command: string, workDir?: string) =>
+    fetchJSON<{ output: string; exitCode: number; error: string }>("/api/shell", {
+      method: "POST",
+      body: JSON.stringify({ command, workDir }),
     }),
 };
 

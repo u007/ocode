@@ -69,8 +69,25 @@ export function useChat(options?: UseChatOptions) {
     [dispatch],
   );
 
+  // Execute a shell command directly (for ! prefix commands)
+  const executeShell = useCallback(
+    async (command: string): Promise<{ output: string; exitCode: number; error: string }> => {
+      try {
+        return await api.shellCommand(command);
+      } catch (err) {
+        return {
+          output: "",
+          exitCode: 1,
+          error: err instanceof Error ? err.message : "Failed to execute command",
+        };
+      }
+    },
+    [],
+  );
+
   return {
     sendMessage,
+    executeShell,
     stop,
     resolvePermission,
     isStreaming: state.isStreaming,

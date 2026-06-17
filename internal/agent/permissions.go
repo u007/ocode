@@ -2397,6 +2397,9 @@ func firstOutOfScopePath(pm *PermissionManager, command, prefix string) string {
 func extractBashCommandPaths(prefix string, fields []string) []string {
 	var paths []string
 	sedScriptConsumed := false
+	// grep/rg: pattern is the first positional arg (skip it); -e/-f consume the
+	// pattern inline, so mark it consumed when we see those flags.
+	grepPatternConsumed := false
 	for i := 1; i < len(fields); i++ {
 		arg := fields[i]
 		if arg == "--" {
@@ -2420,8 +2423,11 @@ func extractBashCommandPaths(prefix string, fields []string) []string {
 					}
 					i++
 				}
-			case "grep", "rg", "head", "tail":
+			case "grep", "rg":
+				// -e PAT / -f FILE: pattern is supplied inline, so the first
+				// positional arg (if any) is a path, not a pattern.
 				if arg == "-e" || arg == "-f" || arg == "--file" {
+					grepPatternConsumed = true
 					i++
 				}
 			}
@@ -2439,6 +2445,11 @@ func extractBashCommandPaths(prefix string, fields []string) []string {
 		}
 		if prefix == "sed" && !sedScriptConsumed {
 			sedScriptConsumed = true
+			continue
+		}
+		// grep/rg: first positional arg is the search pattern, not a path.
+		if (prefix == "grep" || prefix == "rg") && !grepPatternConsumed {
+			grepPatternConsumed = true
 			continue
 		}
 		if isLikelyPathArg(arg) {
@@ -3028,12 +3039,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			val := parts[1]
 			if isLikelyPathArg(val) {
 				resolved := resolvePath(val, pm.workDir)
-				if !isWithinWorkDir(pm, resolved) {
-					// Temp directories are always allowed (cross-platform)
-					if isTempDir(resolved) {
-						emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (env temp dir): env=%s path=%s", env, resolved))
-						continue
-					}
+				if !isWithinAllowedScope(pm, resolved) {
 					emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env out-of-scope): env=%s path=%s", env, resolved))
 					return PermissionDecision{
 						Level:   PermissionAsk,
@@ -3057,12 +3063,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			continue
 		}
 		resolved := resolvePath(path, pm.workDir)
-		if !isWithinWorkDir(pm, resolved) {
-			// Temp directories are always allowed (cross-platform)
-			if isTempDir(resolved) {
-				emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (redirect temp dir): path=%s", resolved))
-				continue
-			}
+		if !isWithinAllowedScope(pm, resolved) {
 			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect out-of-scope): path=%s", resolved))
 			return PermissionDecision{
 				Level:   PermissionAsk,

@@ -28,7 +28,9 @@ export default function ModelDialog({ open, onClose, initialTab = "main" }: Prop
       setActiveTab(initialTab);
       api.listModels().then(setModels).catch(console.error);
       setSearch("");
-      // Fetch current small and advisor models
+      api.getConfigModel().then((res) => {
+        dispatch({ type: "SET_MODEL", model: res.model });
+      }).catch(console.error);
       api.getSmallModel().then((res) => {
         dispatch({ type: "SET_SMALL_MODEL", model: res.model });
       }).catch(console.error);

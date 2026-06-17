@@ -61,6 +61,10 @@ func TestModelFamilyPrompt_ModelIDRouting(t *testing.T) {
 		{"gemini 2", "google", "gemini-2.0-flash", "Gemini"},
 		{"kimi k2", "moonshot", "kimi-k2", "Kimi"},
 		{"copilot provider only", "copilot", "", "Copilot"},
+		{"small model deepseek flash", "opencode-go", "deepseek-v4-flash", "Intent Analysis"},
+		{"small model mimo", "opencode", "mimo-v2.5-free", "Intent Analysis"},
+		{"small model qwen", "opencode-go", "qwen-3.5-plus", "Intent Analysis"},
+		{"small model deepseek chat", "deepseek", "deepseek-chat", "Intent Analysis"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -95,6 +99,43 @@ func TestIsReasoningModel(t *testing.T) {
 	for _, m := range no {
 		if isReasoningModel(m) {
 			t.Errorf("isReasoningModel(%q) = true, want false", m)
+		}
+	}
+}
+
+func TestIsSmallModel(t *testing.T) {
+	// Note: GetModel() returns just the model part (e.g., "deepseek-v4-flash"),
+	// not the full "provider/model" string. The isSmallModel function should
+	// match on just the model part.
+	yes := []string{
+		"deepseek-v4-flash",       // from "opencode-go/deepseek-v4-flash"
+		"mimo-v2.5-free",          // from "opencode/mimo-v2.5-free"
+		"qwen-3.5-plus",           // from "opencode-go/qwen-3.5-plus"
+		"deepseek-chat",           // from "deepseek/deepseek-chat"
+		"MiMo-V2.5",               // from "xiaomi-token-plan-sgp/MiMo-V2.5"
+	}
+	no := []string{
+		"",
+		"gpt-4o",
+		"gpt-5",
+		"claude-opus-4-7",
+		"claude-3-haiku",
+		"gemini-2.0-flash",
+		"gemini-2.0-pro",
+		"kimi-k2",
+		"o1",
+		"random-model",
+		"opencode-go/deepseek-v4-flash",  // Full string should NOT match (model part only)
+		"opencode/mimo-v2.5-free",        // Full string should NOT match
+	}
+	for _, m := range yes {
+		if !isSmallModel(m) {
+			t.Errorf("isSmallModel(%q) = false, want true", m)
+		}
+	}
+	for _, m := range no {
+		if isSmallModel(m) {
+			t.Errorf("isSmallModel(%q) = true, want false", m)
 		}
 	}
 }
@@ -147,5 +188,44 @@ func TestBasePromptReasoningFragmentForOSeries(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected reasoning fragment for o3-mini")
+	}
+}
+
+// TestAgentModelFamilyPrompt_NilSafe locks in the nil-agent and nil-client
+// behavior of the Agent.ModelFamilyPrompt() accessor. The TUI /context
+// command relies on this not panicking when called during early startup
+// before the LLM client is wired up.
+func TestAgentModelFamilyPrompt_NilSafe(t *testing.T) {
+	if got := (*Agent)(nil).ModelFamilyPrompt(); got != "" {
+		t.Errorf("nil agent: got %q, want empty", got)
+	}
+	a := &Agent{} // nil client
+	if got := a.ModelFamilyPrompt(); got != "" {
+		t.Errorf("nil client: got %q, want empty", got)
+	}
+}
+
+// TestAgentModelFamilyPrompt_MatchesHelper verifies the method returns the
+// same value as the unexported modelFamilyPrompt helper. This is the
+// contract the TUI /context command depends on.
+func TestAgentModelFamilyPrompt_MatchesHelper(t *testing.T) {
+	cases := []struct {
+		provider, model string
+	}{
+		{"anthropic", "claude-opus-4-7"},
+		{"openai", "gpt-5"},
+		{"openai", "o1"},
+		{"opencode-go", "deepseek-v4-flash"},
+		{"acme", "unknown"},
+	}
+	for _, c := range cases {
+		t.Run(c.provider+"/"+c.model, func(t *testing.T) {
+			a := &Agent{client: providerStubClient{provider: c.provider, model: c.model}}
+			gotMethod := a.ModelFamilyPrompt()
+			gotHelper := modelFamilyPrompt(c.provider, c.model)
+			if gotMethod != gotHelper {
+				t.Errorf("Agent.ModelFamilyPrompt() = %q, want %q (match modelFamilyPrompt)", gotMethod, gotHelper)
+			}
+		})
 	}
 }

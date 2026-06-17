@@ -13,7 +13,13 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const { sendMessage, stop, isStreaming } = useChat();
+  // shellInFlight is true while a `!cmd` shell command is being executed by
+  // the server. We block new sends during this window so the user can't fire
+  // a second message that interleaves with the in-flight shell result — the
+  // agent would otherwise answer msg2 first, then re-engage with the shell
+  // output of msg1, producing confusing turn ordering.
+  const [shellInFlight, setShellInFlight] = useState(false);
+  const { sendMessage, executeShell, stop, isStreaming } = useChat();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -40,18 +46,41 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
       ].filter((cmd) => cmd.includes(slashQuery.toLowerCase())).length
     : 0;
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const trimmed = input.trim();
-    if (!trimmed || isStreaming) return;
+    if (!trimmed || isStreaming || shellInFlight) return;
     setInput("");
     setShowSlashMenu(false);
-    
+
     // Check if this is a slash command
     if (trimmed.startsWith("/") && onSlashCommand) {
       const handled = onSlashCommand(trimmed);
       if (handled) return;
     }
-    
+
+    // Check if this is a shell command (! prefix). The shell call is async
+    // and can take many seconds; we hold shellInFlight for the duration so
+    // the user can't fire a second message in the gap. sendMessage() below
+    // enqueues the result onto the chat stream, which the agent will pick up
+    // after the current turn ends (handled by isStreaming in the store).
+    if (trimmed.startsWith("!")) {
+      const command = trimmed.slice(1).trim();
+      if (command) {
+        setShellInFlight(true);
+        try {
+          const result = await executeShell(command);
+          // Send the result as a message to the agent for display
+          const outputMessage = result.exitCode === 0
+            ? `Shell command executed successfully:\n\`\`\`\n${result.output}\n\`\`\``
+            : `Shell command failed (exit code ${result.exitCode}):\n\`\`\`\n${result.error || result.output}\n\`\`\``;
+          sendMessage(outputMessage);
+        } finally {
+          setShellInFlight(false);
+        }
+        return;
+      }
+    }
+
     sendMessage(trimmed);
   };
 
@@ -117,7 +146,7 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
           ref={textareaRef}
           className="flex-1 resize-none rounded-lg border border-zinc-600 bg-zinc-800 p-3 text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
           rows={2}
-          placeholder="Type a message... (Enter to send, Shift+Enter for newline, / for commands)"
+          placeholder="Type a message... (Enter to send, Shift+Enter for newline, / for commands, ! for shell)"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
@@ -131,6 +160,19 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
             onClick={stop}
           >
             Stop
+          </Button>
+        ) : shellInFlight ? (
+          // Shell command is mid-execution on the server. Show "Running..."
+          // so the user understands the input is being processed, even
+          // though isStreaming is still false (the result hasn't been
+          // streamed to the agent yet).
+          <Button
+            type="button"
+            size="sm"
+            className="shrink-0"
+            disabled
+          >
+            Running…
           </Button>
         ) : (
           <Button
