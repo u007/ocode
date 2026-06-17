@@ -122,13 +122,17 @@ export default function SessionPage() {
     });
   }, [id, dispatch]);
 
-  // Seed the advisor on/off state from the server.
+  // Seed advisor state and current model from the server.
   useEffect(() => {
     api
       .getAdvisorEnabled()
       .then((res) =>
         dispatch({ type: "SET_ADVISOR_ENABLED", enabled: res.enabled }),
       )
+      .catch(console.error);
+    api
+      .getConfigModel()
+      .then((res) => dispatch({ type: "SET_MODEL", model: res.model }))
       .catch(console.error);
   }, [dispatch]);
 

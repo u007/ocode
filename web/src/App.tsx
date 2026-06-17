@@ -30,17 +30,42 @@ function HomeApp() {
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [coworkOpen, setCoworkOpen] = useState(true);
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
   const navigate = useNavigate();
   const dispatch = useChatDispatch();
   const { resolvePermission, pendingPermission } = useChat({
     onNewSession: (sessionId) => navigate(`/session/${sessionId}`),
   });
 
+  // Mobile breakpoint detection. We only auto-close the sidebar on the
+  // RISING edge (desktop → mobile) so resizing back to desktop doesn't
+  // hide a sidebar the user was just looking at, and resizing mobile →
+  // desktop → mobile doesn't snap a deliberately open sidebar shut. The
+  // listener still updates isMobile every time; the auto-close is gated
+  // on the previous-vs-current transition in lastWasMobile.
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 767px)");
+    let lastWasMobile = mq.matches;
+    const handler = (e: MediaQueryListEvent) => {
+      setIsMobile(e.matches);
+      if (e.matches && !lastWasMobile) {
+        setSidebarOpen(false);
+      }
+      lastWasMobile = e.matches;
+    };
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, []);
+
   // Seed the advisor on/off state from the server so the status bar is correct on load.
   useEffect(() => {
     api
       .getAdvisorEnabled()
       .then((res) => dispatch({ type: "SET_ADVISOR_ENABLED", enabled: res.enabled }))
+      .catch(console.error);
+    api
+      .getConfigModel()
+      .then((res) => dispatch({ type: "SET_MODEL", model: res.model }))
       .catch(console.error);
   }, [dispatch]);
 
@@ -77,6 +102,7 @@ function HomeApp() {
       <TopTabs
         activeTab={activeTab}
         onTabChange={setActiveTab}
+        onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
       />
 
       {/* Main content area */}
@@ -85,6 +111,7 @@ function HomeApp() {
         <SessionSidebar
           isOpen={sidebarOpen}
           onToggle={() => setSidebarOpen(!sidebarOpen)}
+          isMobile={isMobile}
         />
 
         {/* Center content */}

@@ -24,7 +24,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -39,6 +38,7 @@ import (
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/session"
+	shellpkg "github.com/u007/ocode/internal/shell"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
@@ -964,6 +964,12 @@ var (
 	sidebarSectionStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#BB9AF7")).Bold(true)
 	sidebarAccentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true)
 	sidebarTextStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	// rcActiveStyle styles the "🌐 RC" indicator rendered on the status
+	// bar while a remote-control server is running. Kept as a package var
+	// (alongside the other style vars) so it can be tweaked centrally and
+	// isn't built fresh on every renderStatus call.
+	rcActiveStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("9ece6a")).Bold(true)
 
 	todoDoneStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("#565F89")).Strikethrough(true)
 	todoInProgressStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true)
@@ -6531,24 +6537,17 @@ func (m *model) refreshEditorOpener() {
 }
 
 // runCapturedShell runs `command` non-interactively, capturing combined
-// stdout/stderr, and emits a shellFinishedMsg with the output.
+// stdout/stderr, and emits a shellFinishedMsg with the output. The cmd is
+// built via internal/shell so the bash/cmd/Setpgid setup is shared with
+// the server-side /api/shell handler (no drift), and registered with the
+// process supervisor (if any) so the TUI can keep track of background
+// shells across `/bg` listings and clean them up on shutdown.
 func (m *model) runCapturedShell(command string, dir string, toolCallID string) tea.Cmd {
 	supervisor := m.supervisor
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
 		defer cancel()
-		var c *exec.Cmd
-		if runtime.GOOS == "windows" {
-			c = exec.CommandContext(ctx, "cmd", "/C", command)
-		} else {
-			c = exec.CommandContext(ctx, "bash", "-c", command)
-		}
-		if dir != "" {
-			c.Dir = dir
-		}
-		if runtime.GOOS != "windows" {
-			c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		}
+		c := shellpkg.Build(ctx, command, dir)
 		var buf bytes.Buffer
 		c.Stdout = &buf
 		c.Stderr = &buf
@@ -6567,6 +6566,10 @@ func (m *model) runCapturedShell(command string, dir string, toolCallID string) 
 
 		err := c.Run()
 		out := buf.String()
+		// Translate timeouts into the same "timed out after 600s" string
+		// the shell helper produces, so downstream log readers see one
+		// canonical error message regardless of which entry point ran
+		// the command.
 		if ctx.Err() == context.DeadlineExceeded {
 			err = fmt.Errorf("timed out after 600s")
 		}
@@ -6585,11 +6588,12 @@ func (m *model) runCapturedShell(command string, dir string, toolCallID string) 
 	}
 }
 
+// shellExecCommand builds a *exec.Cmd for the platform shell with the
+// given command. It exists as a thin wrapper over internal/shell.Build so
+// the platform-shell choice (bash -c vs cmd /C) lives in exactly one
+// place — see the test in model_test.go that pins the args layout.
 func shellExecCommand(command string) *exec.Cmd {
-	if runtime.GOOS == "windows" {
-		return exec.Command("cmd", "/C", command)
-	}
-	return exec.Command("bash", "-c", command)
+	return shellpkg.Build(context.Background(), command, "")
 }
 
 var openSidebarFileInEditor = openPathInEditor
@@ -7707,6 +7711,32 @@ func (m *model) handleContextCmd(args []string) {
 	baseTotal += modeTok
 	modeLabel := fmt.Sprintf("Mode (%s)", m.agent.Mode().String())
 	fmt.Fprintf(&b, "  %s%s~%s tok\n", modeLabel, columnPad(modeLabel, 28), formatTok(modeTok))
+
+	// ── Provider/Model Prompt ──────────────────────
+	var providerModel string
+	var providerPrompt string
+	if m.agent != nil && m.agent.Client() != nil {
+		provider := m.agent.Client().GetProvider()
+		model := m.agent.Client().GetModel()
+		providerModel = fmt.Sprintf("%s/%s", provider, model)
+		// Use the agent's own accessor instead of reaching around via the
+		// unexported modelFamilyPrompt helper: same value, but the agent
+		// owns the "is a client configured?" check, so this stays correct
+		// when the client is nil.
+		providerPrompt = m.agent.ModelFamilyPrompt()
+	}
+	if providerPrompt != "" {
+		ppTok := estimateTok(providerPrompt)
+		baseTotal += ppTok
+		ppLabel := fmt.Sprintf("Provider prompt (%s)", providerModel)
+		fmt.Fprintf(&b, "  %s%s~%s tok\n", ppLabel, columnPad(ppLabel, 28), formatTok(ppTok))
+		b.WriteString("\n")
+		for _, line := range strings.Split(providerPrompt, "\n") {
+			b.WriteString("  │ ")
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
 
 	ambientFiles := []string{"AGENTS.md", "CLAUDE.md", ".cursorrules"}
 	rulesDir := filepath.Join(".opencode", "rules")
@@ -9129,10 +9159,12 @@ func drainStreamDeltas(ch chan deltaEvent) []deltaEvent {
 
 // startTailscaleExpose tries to make the given port reachable via tailscale.
 // It first tries tailscale funnel (public internet), then tailscale serve
-// (tailnet-only). Returns the public URL and the background process (if any)
-// so the caller can kill it later. The setupHint is a one-time enable URL
-// shown when funnel or serve isn't enabled on the tailnet yet.
-func startTailscaleExpose(port int) (url string, proc *exec.Cmd, setupHint string) {
+// (tailnet-only). sessionID is used with --set-path so multiple ocode
+// instances can coexist without overwriting each other's tailscale config.
+// Returns the public URL and the background process (if any) so the caller
+// can kill it later. The setupHint is a one-time enable URL shown when
+// funnel or serve isn't enabled on the tailnet yet.
+func startTailscaleExpose(port int, sessionID string) (url string, proc *exec.Cmd, setupHint string) {
 	tailscalePath, err := exec.LookPath("tailscale")
 	if err != nil {
 		return "", nil, ""
@@ -9146,13 +9178,22 @@ func startTailscaleExpose(port int) (url string, proc *exec.Cmd, setupHint strin
 
 	target := fmt.Sprintf("localhost:%d", port)
 
+	// Use --set-path so each session gets its own tailscale path,
+	// avoiding the global root overwrite that breaks other instances.
+	// sessionID is sanitized to letters/digits/underscore/dash: tailscale
+	// treats "/" as a path separator and "." can break path normalization,
+	// so embedded separators would either be rejected by tailscale or, worse,
+	// silently route to a sibling path. Empty IDs fall back to a stable
+	// per-process tag to avoid all sessions collapsing onto the root.
+	pathPrefix := sanitizeTailscalePath(sessionID)
+
 	// Try tailscale funnel first — this gives a public internet URL.
-	if u, p, hint := tailscaleExpose(tailscalePath, "funnel", target); u != "" {
+	if u, p, hint := tailscaleExpose(tailscalePath, "funnel", target, pathPrefix); u != "" {
 		return u, p, hint
 	}
 
 	// Fall back to tailscale serve — this gives a tailnet-only URL.
-	if u, p, hint := tailscaleExpose(tailscalePath, "serve", target); u != "" {
+	if u, p, hint := tailscaleExpose(tailscalePath, "serve", target, pathPrefix); u != "" {
 		return u, p, hint
 	}
 
@@ -9160,12 +9201,19 @@ func startTailscaleExpose(port int) (url string, proc *exec.Cmd, setupHint strin
 	return tailscaleDNSName(tailscalePath), nil, ""
 }
 
-// tailscaleExpose runs `tailscale <cmd> --bg <target>` and returns the URL
-// from its output plus the process handle. The process runs in the background
-// and must be killed when no longer needed. When the feature isn't enabled on
-// the tailnet, setupHint contains the one-time enable URL.
-func tailscaleExpose(tailscalePath, cmd, target string) (string, *exec.Cmd, string) {
-	serveCmd := exec.Command(tailscalePath, cmd, "--bg", target)
+// tailscaleExpose runs `tailscale <cmd> --bg [--set-path /path] <target>` and
+// returns the URL from its output plus the process handle. The process runs in
+// the background and must be killed when no longer needed. When pathPrefix is
+// non-empty, --set-path is used so multiple sessions can coexist without
+// overwriting the global tailscale serve/funnel config. When the feature isn't
+// enabled on the tailnet, setupHint contains the one-time enable URL.
+func tailscaleExpose(tailscalePath, cmd, target, pathPrefix string) (string, *exec.Cmd, string) {
+	args := []string{cmd, "--bg"}
+	if pathPrefix != "" {
+		args = append(args, "--set-path", pathPrefix)
+	}
+	args = append(args, target)
+	serveCmd := exec.Command(tailscalePath, args...)
 	var out bytes.Buffer
 	serveCmd.Stdout = &out
 	serveCmd.Stderr = &out
@@ -9222,7 +9270,32 @@ func tailscaleExpose(tailscalePath, cmd, target string) (string, *exec.Cmd, stri
 	return "", nil, setupHint
 }
 
+// sanitizeTailscalePath returns a tailscale-safe path component derived from
+// sessionID. It strips characters that tailscale treats specially ("/" as a
+// path separator, "." can break normalization) and falls back to a stable
+// per-process tag when the input is empty. The returned value is prefixed with
+// "/" so it's always a valid --set-path argument.
+func sanitizeTailscalePath(sessionID string) string {
+	const fallback = "ocode"
+	cleaned := make([]rune, 0, len(sessionID))
+	for _, r := range sessionID {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-' || r == '_':
+			cleaned = append(cleaned, r)
+		}
+	}
+	if len(cleaned) == 0 {
+		cleaned = []rune(fallback)
+	}
+	return "/" + string(cleaned)
+}
+
 // tailscaleReset clears any active tailscale serve/funnel config.
+// WARNING: This is a global reset that affects ALL sessions on this node.
+// Only call it when you are certain no other ocode instance is using tailscale.
 func tailscaleReset() {
 	tailscalePath, err := exec.LookPath("tailscale")
 	if err != nil {
@@ -12131,7 +12204,17 @@ func (m *model) renderStatus() string {
 	m.statusPermColStart = 1 + ansi.StringWidth(rawPrefix)
 	m.statusPermColEnd = m.statusPermColStart + ansi.StringWidth(permissionMode)
 
+	// INVARIANT: statusPermColStart / statusPermColEnd track only the
+	// permissionMode segment. They are computed before any post-permission
+	// additions (compactState, jobState, "🌐 RC" indicator, subagent label)
+	// are appended to leftStatus, so adding new segments after this point
+	// will not affect the click region. If you ever move a segment to
+	// appear BEFORE permissionMode, you MUST update these column bounds
+	// (or the click hit-test will go to the wrong segment).
 	leftStatus := statusPrefix + permissionMode + compactState + jobState
+	if m.rcSrv != nil {
+		leftStatus += " | " + rcActiveStyle.Render("🌐 RC")
+	}
 	if subagentModel := m.activeSubagentModel(); subagentModel != "" {
 		leftStatus += fmt.Sprintf(" · subagent: %s", subagentModel)
 	}
@@ -14417,7 +14500,7 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		setupHint := ""
 		if _, boundPort, splitErr := net.SplitHostPort(boundAddr); splitErr == nil {
 			if p, convErr := strconv.Atoi(boundPort); convErr == nil {
-				tsURL, tsProc, tsHint := startTailscaleExpose(p)
+				tsURL, tsProc, tsHint := startTailscaleExpose(p, m.sessionID)
 				if tsURL != "" {
 					tailscaleURL = buildRCSessionURL(tsURL, m.sessionID, token)
 				}
@@ -14436,6 +14519,11 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 // stopRCServer shuts down the RC HTTP server, closes the listener, and kills
 // the tailscale serve/funnel process if one was started. Safe to call when no
 // server is running (all fields are nil-checked).
+//
+// Note: we do NOT call tailscaleReset() here because that is a global
+// operation that would tear down ALL sessions' tailscale exposure on this
+// node. Each session's tailscale process is killed individually, and its
+// --set-path entry becomes a harmless stale route (the server is gone).
 func (m *model) stopRCServer() {
 	// Kill tailscale serve/funnel process.
 	if m.rcTailscaleProc != nil {
@@ -14444,8 +14532,6 @@ func (m *model) stopRCServer() {
 		}
 		m.rcTailscaleProc = nil
 	}
-	// Reset tailscale serve state so a future /rc can re-expose cleanly.
-	tailscaleReset()
 	// Close the listener.
 	if m.rcLn != nil {
 		_ = m.rcLn.Close()

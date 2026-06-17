@@ -119,6 +119,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/files/undo", s.authMiddleware(s.handleUndo))
 	s.mux.HandleFunc("POST /api/files/redo", s.authMiddleware(s.handleRedo))
 
+	// Shell execution
+	s.mux.HandleFunc("POST /api/shell", s.authMiddleware(s.handleShellCommand))
+
 	// Config
 	s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
 	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
@@ -460,6 +463,7 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 // File shims
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) { s.handler.HandleUndo(w, r) }
 func (s *Server) handleRedo(w http.ResponseWriter, r *http.Request) { s.handler.HandleRedo(w, r) }
+func (s *Server) handleShellCommand(w http.ResponseWriter, r *http.Request) { s.handler.HandleShellCommand(w, r) }
 
 // Config shims
 func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
