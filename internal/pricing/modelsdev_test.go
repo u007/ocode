@@ -29,3 +29,25 @@ func TestLookupNormalizesPrefixedAndVersionedModels(t *testing.T) {
 		t.Fatalf("unexpected normalized pricing: %+v", got)
 	}
 }
+
+func TestLookupFallsBackToMiniMaxM3Pricing(t *testing.T) {
+	got, ok := Lookup("minimax/minimax-m3-20260531")
+	if !ok {
+		t.Fatal("expected minimax m3 pricing to fall back")
+	}
+
+	if got.InputPerMillion != 0.30 || got.OutputPerMillion != 1.20 {
+		t.Fatalf("unexpected minimax m3 pricing: %+v", got)
+	}
+}
+
+func TestLookupNormalizesCaseInsensitiveModelNames(t *testing.T) {
+	got, ok := Lookup("MiniMax/MiniMax-M3")
+	if !ok {
+		t.Fatal("expected case-insensitive minimax lookup to succeed")
+	}
+
+	if got.InputPerMillion != 0.30 || got.OutputPerMillion != 1.20 {
+		t.Fatalf("unexpected case-insensitive pricing: %+v", got)
+	}
+}

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
-import { authToken, authHeaders } from "@/api/client";
+import { apiPath, authToken, authHeaders } from "@/api/client";
 import { Trash2, Pause, Play, Filter } from "lucide-react";
 
 interface LogEntry {
@@ -31,7 +31,7 @@ export default function LogPanel() {
 
   useEffect(() => {
     // Load initial logs
-    fetch("/api/logs", { headers: authHeaders() })
+    fetch(apiPath("/api/logs"), { headers: authHeaders() })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -53,7 +53,7 @@ export default function LogPanel() {
     }
 
     const token = authToken();
-    const es = new EventSource(`/api/logs/stream${token ? `?token=${token}` : ""}`);
+    const es = new EventSource(apiPath(`/api/logs/stream${token ? `?token=${token}` : ""}`));
     eventSourceRef.current = es;
 
     es.onmessage = (e) => {
@@ -87,7 +87,7 @@ export default function LogPanel() {
   const handleClear = async () => {
     if (!window.confirm("Clear all logs?")) return;
     try {
-      await fetch("/api/logs", { method: "DELETE", headers: authHeaders() });
+      await fetch(apiPath("/api/logs"), { method: "DELETE", headers: authHeaders() });
       setLogs([]);
     } catch (err) {
       console.error("Failed to clear logs:", err);

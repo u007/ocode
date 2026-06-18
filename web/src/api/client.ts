@@ -7,9 +7,23 @@ import type {
   AgentRun,
   GitDiffFile,
   ThemeResponse,
+  TUIStatus,
+  LSPStatus,
+  FileStatus,
 } from "./types";
 
-const BASE = "";
+// Base path for API calls. When the SPA is served under a tailscale --set-path
+// prefix (e.g. /<sessionID>), API calls must include the prefix or the tailscale
+// proxy routes them to whichever session owns the root path. The /rc command
+// embeds the same prefix in the opened URL, so derive BASE from the current
+// location: everything before the trailing "/session/<id>" is the prefix.
+// The same value is passed to <BrowserRouter basename=...> in main.tsx so client
+// navigation stays in sync.
+export const _basePath = (() => {
+  const m = window.location.pathname.match(/^(.*?)\/session\/[^/]+$/);
+  return m && m[1] ? m[1] : "";
+})();
+const BASE = _basePath;
 
 // Auth token embedded in URL by /rc command (?token=...). Stored at load time
 // so navigation or hash changes don't lose it.
@@ -26,8 +40,13 @@ export function authToken(): string {
   return _token;
 }
 
+/** Prepends the current SPA base path to an API or SSE path. */
+export function apiPath(path: string): string {
+  return `${BASE}${path}`;
+}
+
 async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(apiPath(path), {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
@@ -88,6 +107,28 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+  // TUI status (consolidated snapshot pushed by the TUI on every state
+  // change). The web also subscribes to the "status" SSE event so the bar
+  // updates live without polling.
+  getTUIStatus: () => fetchJSON<TUIStatus>("/api/tui-status"),
+  getSpending: () =>
+    fetchJSON<{ spending_usd: number; records: number }>("/api/spending"),
+  getLSPStatuses: () =>
+    fetchJSON<{ lsp_servers: LSPStatus[] }>("/api/lsp/statuses"),
+  getModifiedFiles: () =>
+    fetchJSON<{ modified_files: FileStatus[] }>("/api/files/modified"),
+  getSessionContext: (id: string) =>
+    fetchJSON<{
+      session_id: string;
+      message_count: number;
+      estimated_tokens: number;
+      max_tokens?: number;
+      model?: string;
+    }>(`/api/sessions/${id}/context`),
+  getSmallModelWithEnabled: () =>
+    fetchJSON<{ model: string; enabled: boolean; priority: string }>(
+      "/api/config/small-model",
+    ),
   sendMessage: (sessionId: string, content: string) =>
     fetchJSON<ChatResponse>(`/api/sessions/${sessionId}/message`, {
       method: "POST",
@@ -126,7 +167,7 @@ export function connectSessionMirror(
   if (session) params.set("session", session);
   if (_token) params.set("token", _token);
 
-  const es = new EventSource(`/api/chat/messages?${params}`);
+  const es = new EventSource(apiPath(`/api/chat/messages?${params}`));
   const on = (name: string) =>
     es.addEventListener(name, (e) => {
       try {
@@ -135,7 +176,7 @@ export function connectSessionMirror(
         console.error(`failed to parse '${name}' mirror frame`, err);
       }
     });
-  ["messages", "user_message", "thinking", "text", "tool_start", "tool_result", "turn_done"].forEach(on);
+  ["messages", "user_message", "thinking", "text", "tool_start", "tool_result", "turn_done", "status", "advisor_enabled"].forEach(on);
   // The "error" event is overloaded: a server-sent `event: error` carries data,
   // while a transport failure (EventSource auto-reconnects) carries none.
   es.addEventListener("error", (e) => {
@@ -165,7 +206,7 @@ export function connectAgentRunsSSE(
   if (session) params.set("session", session);
   if (_token) params.set("token", _token);
 
-  const es = new EventSource(`/api/agents/runs/stream?${params}`);
+  const es = new EventSource(apiPath(`/api/agents/runs/stream?${params}`));
   es.addEventListener("runs", (e) => {
     try {
       onRuns(JSON.parse(e.data) as AgentRun[]);

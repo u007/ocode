@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { api, authHeaders } from "@/api/client";
+import { api, apiPath, authHeaders } from "@/api/client";
 import type { GitDiffFile } from "@/api/types";
 
 interface GitStatus {
@@ -27,7 +27,7 @@ export default function GitPanel() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/git/status", { headers: authHeaders() });
+      const res = await fetch(apiPath("/api/git/status"), { headers: authHeaders() });
       const data = await res.json();
       setStatus(data);
     } catch (err) {

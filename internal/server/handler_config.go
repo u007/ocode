@@ -44,12 +44,26 @@ func (h *Handler) HandleSetModel(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleGetSmallModel(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	current := ""
+	enabled := false
 	if h.cfg != nil {
 		current = h.cfg.Ocode.SmallModel
+		enabled = h.cfg.Ocode.SmallModelEnabled
+	}
+	// When the TUI is attached, prefer the TUI's live runtime flag — the web
+	// status bar should mirror what the user just toggled in the TUI, not the
+	// persisted config value.
+	if rc := h.rc; rc != nil {
+		if live := rc.TUIStatus(); live.SmallModelOn || live.SmallModel != "" {
+			if live.SmallModel != "" {
+				current = live.SmallModel
+			}
+			enabled = live.SmallModelOn
+		}
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"model":    current,
+		"enabled":  enabled,
 		"priority": agent.SmallModelPriority,
 	})
 }

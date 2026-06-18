@@ -26,3 +26,26 @@ func TestSanitizeTailscalePath(t *testing.T) {
 		})
 	}
 }
+
+func TestTailscaleURLWithPathPrefix(t *testing.T) {
+	cases := []struct {
+		name       string
+		baseURL    string
+		pathPrefix string
+		want       string
+	}{
+		{name: "adds prefix", baseURL: "https://alice.ts.net", pathPrefix: "/sess-123", want: "https://alice.ts.net/sess-123"},
+		{name: "preserves port", baseURL: "https://alice.ts.net:443/", pathPrefix: "/sess-123", want: "https://alice.ts.net:443/sess-123"},
+		{name: "empty prefix", baseURL: "https://alice.ts.net", pathPrefix: "", want: "https://alice.ts.net"},
+		{name: "empty base", baseURL: "", pathPrefix: "/sess-123", want: ""},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := tailscaleURLWithPathPrefix(c.baseURL, c.pathPrefix)
+			if got != c.want {
+				t.Fatalf("tailscaleURLWithPathPrefix(%q, %q) = %q, want %q", c.baseURL, c.pathPrefix, got, c.want)
+			}
+		})
+	}
+}

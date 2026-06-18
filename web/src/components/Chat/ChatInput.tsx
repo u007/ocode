@@ -2,6 +2,8 @@ import { useState, type KeyboardEvent, useRef, useEffect } from "react";
 import { useChat } from "../../hooks/useChat";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
+import { Paperclip, X } from "lucide-react";
+import { apiPath, authHeaders } from "@/api/client";
 
 interface ChatInputProps {
   /** Called when a slash command is entered. Return true if handled. */
@@ -13,6 +15,7 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [attachedFiles, setAttachedFiles] = useState<string[]>([]);
   // shellInFlight is true while a `!cmd` shell command is being executed by
   // the server. We block new sends during this window so the user can't fire
   // a second message that interleaves with the in-flight shell result — the
@@ -21,6 +24,25 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
   const [shellInFlight, setShellInFlight] = useState(false);
   const { sendMessage, executeShell, stop, isStreaming } = useChat();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const attachRef = useRef<HTMLInputElement>(null);
+
+  const handleAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    const fd = new FormData();
+    Array.from(e.target.files).forEach((f) => fd.append("file", f));
+    try {
+      const r = await fetch(apiPath("/api/uploads"), {
+        method: "POST",
+        headers: authHeaders(),
+        body: fd,
+      });
+      const saved: { name: string }[] = await r.json();
+      setAttachedFiles((prev) => [...prev, ...saved.map((f) => f.name)]);
+    } catch (err) {
+      console.error("upload failed:", err);
+    }
+    e.target.value = "";
+  };
 
   useEffect(() => {
     const value = input;
@@ -81,7 +103,10 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
       }
     }
 
-    sendMessage(trimmed);
+    const refs = attachedFiles.map((n) => `@.ocode/uploads/${n}`).join(" ");
+    const finalMessage = refs ? `${refs} ${trimmed}` : trimmed;
+    setAttachedFiles([]);
+    sendMessage(finalMessage);
   };
 
   const handleSlashSelect = (command: string) => {
@@ -141,7 +166,41 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
           onHover={setSelectedIndex}
         />
       )}
+      {attachedFiles.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {attachedFiles.map((name) => (
+            <span
+              key={name}
+              className="inline-flex items-center gap-1 text-xs bg-zinc-700 text-zinc-300 rounded px-2 py-0.5"
+            >
+              {name}
+              <button
+                type="button"
+                onClick={() => setAttachedFiles((prev) => prev.filter((n) => n !== name))}
+                className="text-zinc-500 hover:text-zinc-300"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <input
+        type="file"
+        multiple
+        ref={attachRef}
+        className="hidden"
+        onChange={handleAttach}
+      />
       <div className="flex items-end gap-2">
+        <button
+          type="button"
+          onClick={() => attachRef.current?.click()}
+          className="shrink-0 p-1.5 rounded text-zinc-500 hover:text-zinc-300 hover:bg-zinc-700"
+          title="Attach files"
+        >
+          <Paperclip className="w-4 h-4" />
+        </button>
         <textarea
           ref={textareaRef}
           className="flex-1 resize-none rounded-lg border border-zinc-600 bg-zinc-800 p-3 text-sm text-zinc-100 placeholder-zinc-500 focus:border-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"

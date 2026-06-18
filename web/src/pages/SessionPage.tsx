@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, connectSessionMirror } from "../api/client";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
-import type { Message } from "../api/types";
+import type { Message, TUIStatus } from "../api/types";
 import ChatPanel from "../components/Chat/ChatPanel";
 import AgentPreview from "../components/Chat/AgentPreview";
 import ChatInput from "../components/Chat/ChatInput";
 import StatusBar from "../components/common/StatusBar";
+import StatusPanel from "../components/Status/StatusPanel";
+import TopTabs from "../components/Layout/TopTabs";
 import CoworkSidebar from "../components/Layout/CoworkSidebar";
 import ModelDialog from "../components/Layout/ModelDialog";
 import PermissionDialog from "../components/Chat/PermissionDialog";
@@ -25,6 +27,7 @@ export default function SessionPage() {
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
+  const [activeTab, setActiveTab] = useState("chat");
 
   // Keep a ref to the latest state for use in the SSE callback
   const stateRef = useRef(state);
@@ -114,6 +117,41 @@ export default function SessionPage() {
         case "turn_done":
           dispatch({ type: "SET_STREAMING", isStreaming: false });
           break;
+        case "status":
+          // Consolidated TUI status snapshot — replaces the slice wholesale.
+          // The TUI pushes this on advisor/small toggle, IDE mode change,
+          // file edit, agent rebuild, title gen, and at every turn boundary.
+          dispatch({ type: "SET_TUI_STATUS", status: data as TUIStatus });
+          // Mirror the subset that the rest of the app already reads from
+          // individual fields so the dialog + StatusBar stay in sync without
+          // a separate fetch path.
+          {
+            const s = data as TUIStatus;
+            if (s.advisor_enabled !== undefined) {
+              dispatch({ type: "SET_ADVISOR_ENABLED", enabled: !!s.advisor_enabled });
+            }
+            if (s.advisor_model !== undefined) {
+              dispatch({ type: "SET_ADVISOR_MODEL", model: s.advisor_model });
+            }
+            if (s.small_model !== undefined) {
+              dispatch({ type: "SET_SMALL_MODEL", model: s.small_model });
+            }
+            if (s.main_model !== undefined && s.main_model !== "") {
+              dispatch({ type: "SET_MODEL", model: s.main_model });
+            }
+          }
+          break;
+        case "advisor_enabled":
+          // Lightweight per-field event from older TUI builds. Newer builds
+          // fold this into the "status" payload above; this case is kept for
+          // backward compatibility.
+          {
+            const payload = data as { enabled?: boolean };
+            if (typeof payload.enabled === "boolean") {
+              dispatch({ type: "SET_ADVISOR_ENABLED", enabled: payload.enabled });
+            }
+          }
+          break;
         case "error":
           dispatch({ type: "SET_ERROR", error: (data as { error: string }).error });
           dispatch({ type: "SET_STREAMING", isStreaming: false });
@@ -122,7 +160,10 @@ export default function SessionPage() {
     });
   }, [id, dispatch]);
 
-  // Seed advisor state and current model from the server.
+  // Seed the per-session state: advisor on/off, current model, small model,
+  // advisor model, and the consolidated TUI status snapshot. The SSE "status"
+  // event will overwrite these as the TUI pushes updates; this just gives the
+  // UI a correct value before the first frame lands.
   useEffect(() => {
     api
       .getAdvisorEnabled()
@@ -133,6 +174,22 @@ export default function SessionPage() {
     api
       .getConfigModel()
       .then((res) => dispatch({ type: "SET_MODEL", model: res.model }))
+      .catch(console.error);
+    api
+      .getSmallModelWithEnabled()
+      .then((res) => {
+        dispatch({ type: "SET_SMALL_MODEL", model: res.model || "" });
+      })
+      .catch(console.error);
+    api
+      .getAdvisor()
+      .then((res) =>
+        dispatch({ type: "SET_ADVISOR_MODEL", model: res.model || "" }),
+      )
+      .catch(console.error);
+    api
+      .getTUIStatus()
+      .then((res) => dispatch({ type: "SET_TUI_STATUS", status: res }))
       .catch(console.error);
   }, [dispatch]);
 
@@ -181,23 +238,34 @@ export default function SessionPage() {
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
+      <TopTabs activeTab={activeTab} onTabChange={setActiveTab} />
       <div className="flex flex-1 overflow-hidden">
         <main className="flex flex-1 flex-col overflow-hidden">
-          <ChatPanel />
-          <AgentPreview />
-          <ChatInput onSlashCommand={handleCommand} />
-          <StatusBar
-            onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
-            onModelClick={() => openModelDialog("main")}
-          />
+          {activeTab === "chat" && (
+            <>
+              <ChatPanel />
+              <AgentPreview />
+              <ChatInput onSlashCommand={handleCommand} />
+              <StatusBar
+                onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
+                onModelClick={() => openModelDialog("main")}
+                onStatusClick={() => setActiveTab("status")}
+              />
+            </>
+          )}
+          {activeTab === "status" && (
+            <StatusPanel key={id} onClose={() => setActiveTab("chat")} />
+          )}
         </main>
 
-        <CoworkSidebar
-          isOpen={coworkOpen}
-          onClose={() => setCoworkOpen(false)}
-          activeAgent="build"
-          onModelClick={openModelDialog}
-        />
+        {activeTab === "chat" && (
+          <CoworkSidebar
+            isOpen={coworkOpen}
+            onClose={() => setCoworkOpen(false)}
+            activeAgent="build"
+            onModelClick={openModelDialog}
+          />
+        )}
       </div>
 
       <ModelDialog

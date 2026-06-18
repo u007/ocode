@@ -63,6 +63,11 @@ var modelsDevPricing = map[string]ModelPricing{
 		CacheReadPerMillion:  0.0028,
 		CacheWritePerMillion: 0,
 	},
+	// OpenRouter's MiniMax-M3 family (e.g. minimax/minimax-m3-20260531).
+	"minimax-m3": {
+		InputPerMillion:  0.30,
+		OutputPerMillion: 1.20,
+	},
 }
 
 func Lookup(model string) (ModelPricing, bool) {
@@ -103,5 +108,5 @@ func normalizeModelName(model string) string {
 			model = parts[1]
 		}
 	}
-	return strings.TrimSpace(model)
+	return strings.ToLower(strings.TrimSpace(model))
 }

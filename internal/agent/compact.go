@@ -673,23 +673,43 @@ func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
 		if msgs[i].Usage == nil {
 			continue
 		}
+
+		hasTotalTokens := msgs[i].Usage.TotalTokens != nil && *msgs[i].Usage.TotalTokens > 0
+		hasPromptTokens := msgs[i].Usage.PromptTokens != nil
+
 		var base int64
-		if msgs[i].Usage.TotalTokens != nil && *msgs[i].Usage.TotalTokens > 0 {
+		if hasTotalTokens {
+			// TotalTokens is always cumulative (OpenAI-style). Trust it as-is.
 			base = *msgs[i].Usage.TotalTokens
-		} else if msgs[i].Usage.PromptTokens != nil {
-			// Only use real API data when we have the input count.
-			// CompletionTokens alone is not a context size — it's output length.
-			// Providers that omit input_tokens (e.g. minimax-m3 via opencode-go)
-			// would give a wildly wrong estimate if we fell through here.
+		} else if hasPromptTokens {
+			// PromptTokens may be non-cumulative (e.g. opencode-go/minimax-m3
+			// returns per-turn input_tokens, not the total context). Include
+			// CompletionTokens for completeness.
 			base = *msgs[i].Usage.PromptTokens
 			if msgs[i].Usage.CompletionTokens != nil {
 				base += *msgs[i].Usage.CompletionTokens
 			}
 		}
+
 		if base > 0 {
 			tail := messagesTokens(msgs[i+1:])
+			usageTokens := int(base)
 			if tail > 0 {
-				return int(base) + tail, "actual+tail"
+				usageTokens += tail
+			}
+
+			// When TotalTokens is absent, the PromptTokens value may come from
+			// a provider that reports per-turn (non-cumulative) counts —
+			// floor against the full message heuristic so the context gauge
+			// never shows a value below what the on-disk messages must cost.
+			if !hasTotalTokens && hasPromptTokens {
+				if fullHeuristic := messagesTokens(msgs); usageTokens < fullHeuristic {
+					return fullHeuristic, "estimated"
+				}
+			}
+
+			if tail > 0 {
+				return usageTokens, "actual+tail"
 			}
 			return int(base), "actual"
 		}
