@@ -3859,6 +3859,262 @@ func TestGitFileListClickFilteredUsesFlatIndexing(t *testing.T) {
 	}
 }
 
+func TestGitFileListClickNoStagedFiles(t *testing.T) {
+	// Regression: when there are no staged files, clicking on the first
+	// unstaged file should select index 0, not 1 (off-by-one fix).
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			section: gitSectionChanges,
+			panel:   gitPanelSections,
+			unstagedFiles: []gitFile{
+				{status: "M", path: "x.go"},
+				{status: "A", path: "y.go"},
+			},
+			untrackedFiles: []gitFile{
+				{status: "?", path: "z.go"},
+			},
+			filesCursor: 0,
+			diff:        viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+
+	panelW := m.panelWidth()
+	sectW := panelW * 20 / 100
+	gitBodyTop := appHeaderHeight + 1
+	clickX := sectW + 10
+
+	// Rendered layout (no staged files):
+	// Row 0: "○ unstaged/untracked" header
+	// Row 1: x.go (unstaged)
+	// Row 2: y.go (unstaged)
+	// Row 3: z.go (untracked)
+
+	// Click on row 0 → header → cursor should stay 0
+	m.git.filesCursor = 0
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop}, true)
+	if !ok {
+		t.Fatal("expected click on header to be handled")
+	}
+	got := updated.(model)
+	if got.git.filesCursor != 0 {
+		t.Fatalf("click on header: expected cursor 0, got %d", got.git.filesCursor)
+	}
+
+	// Click on row 1 → x.go → cursor should be 0
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 1}, true)
+	if !ok {
+		t.Fatal("expected click on first file to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != 0 {
+		t.Fatalf("click on row 1 (x.go): expected cursor 0, got %d", got.git.filesCursor)
+	}
+
+	// Click on row 2 → y.go → cursor should be 1
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 2}, true)
+	if !ok {
+		t.Fatal("expected click on second file to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != 1 {
+		t.Fatalf("click on row 2 (y.go): expected cursor 1, got %d", got.git.filesCursor)
+	}
+
+	// Click on row 3 → z.go → cursor should be 2
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 3}, true)
+	if !ok {
+		t.Fatal("expected click on third file to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != 2 {
+		t.Fatalf("click on row 3 (z.go): expected cursor 2, got %d", got.git.filesCursor)
+	}
+}
+
+func TestGitFileListClickFilterOffset(t *testing.T) {
+	// Regression: when the filter is active, the filter bar occupies row 0,
+	// so clicking the first visible file should select index 0, not 1.
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			section:     gitSectionChanges,
+			panel:       gitPanelSections,
+			filterQuery: "a",
+			unstagedFiles: []gitFile{
+				{status: "M", path: "apple.go"},
+				{status: "M", path: "apricot.go"},
+				{status: "M", path: "banana.go"},
+			},
+			filesCursor: 0,
+			diff:        viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+
+	panelW := m.panelWidth()
+	sectW := panelW * 20 / 100
+	gitBodyTop := appHeaderHeight + 1
+	clickX := sectW + 10
+
+	// Rendered layout with filter "a":
+	// Row 0: filter bar "ctrl+f a"
+	// Row 1: apple.go (filtered)
+	// Row 2: apricot.go (filtered)
+
+	// Click on row 0 → filter bar → cursor should stay 0 (no change)
+	m.git.filesCursor = 0
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop}, true)
+	if !ok {
+		t.Fatal("expected click on filter bar to be handled")
+	}
+	got := updated.(model)
+	if got.git.filesCursor != 0 {
+		t.Fatalf("click on filter bar: expected cursor 0, got %d", got.git.filesCursor)
+	}
+
+	// Click on row 1 → apple.go → cursor should be 0
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 1}, true)
+	if !ok {
+		t.Fatal("expected click on first filtered file to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != 0 {
+		t.Fatalf("click on row 1 (apple.go): expected cursor 0, got %d", got.git.filesCursor)
+	}
+
+	// Click on row 2 → apricot.go → cursor should be 1
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 2}, true)
+	if !ok {
+		t.Fatal("expected click on second filtered file to be handled")
+	}
+	got = updated.(model)
+	if got.git.filesCursor != 1 {
+		t.Fatalf("click on row 2 (apricot.go): expected cursor 1, got %d", got.git.filesCursor)
+	}
+}
+
+func TestGitLogClickAccountsForViewportOffset(t *testing.T) {
+	// Regression: clicking on the log section should account for the
+	// commitViewport's YOffset when mapping screen row to commit index.
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+		git: gitModel{
+			section: gitSectionLog,
+			panel:   gitPanelFiles,
+			commits: []gitCommit{
+				{hash: "aaa", subject: "first", age: "1m"},
+				{hash: "bbb", subject: "second", age: "2m"},
+				{hash: "ccc", subject: "third", age: "3m"},
+				{hash: "ddd", subject: "fourth", age: "4m"},
+				{hash: "eee", subject: "fifth", age: "5m"},
+			},
+			commitCursor: 0,
+			commitViewport: func() viewport.Model {
+				vp := viewport.New(viewport.WithWidth(50), viewport.WithHeight(5))
+				vp.SetContent("line0\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9")
+				vp.SetYOffset(3)
+				return vp
+			}(),
+			diff: viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+		},
+	}
+
+	panelW := m.panelWidth()
+	sectW := panelW * 20 / 100
+	gitBodyTop := appHeaderHeight + 1
+	clickX := sectW + 10
+
+	// With YOffset=3, visible row 0 = commit index 3, row 1 = index 4, etc.
+	// Click on visible row 0 → should select commit index 3
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop}, true)
+	if !ok {
+		t.Fatal("expected click on log to be handled")
+	}
+	got := updated.(model)
+	if got.git.commitCursor != 3 {
+		t.Fatalf("click on log row 0 with YOffset=3: expected commitCursor 3, got %d", got.git.commitCursor)
+	}
+
+	// Click on visible row 1 → should select commit index 4
+	updated, _, ok = m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: gitBodyTop + 1}, true)
+	if !ok {
+		t.Fatal("expected click on log row 1 to be handled")
+	}
+	got = updated.(model)
+	if got.git.commitCursor != 4 {
+		t.Fatalf("click on log row 1 with YOffset=3: expected commitCursor 4, got %d", got.git.commitCursor)
+	}
+}
+
+func TestGitClampFileListScroll(t *testing.T) {
+	// Verify that clampFileListScroll keeps the cursor visible and doesn't
+	// let the scroll go past the list bounds.
+	m := model{
+		width:  100,
+		height: 12, // panelH = 12 - 4 = 8, visible rows = 8 - 2 = 6
+		git: gitModel{
+			height:       12,
+			section: gitSectionChanges,
+			unstagedFiles: []gitFile{
+				{status: "M", path: "a.go"},
+				{status: "M", path: "b.go"},
+				{status: "M", path: "c.go"},
+				{status: "M", path: "d.go"},
+				{status: "M", path: "e.go"},
+				{status: "M", path: "f.go"},
+				{status: "M", path: "g.go"},
+				{status: "M", path: "h.go"},
+				{status: "M", path: "i.go"},
+				{status: "M", path: "j.go"},
+			},
+		},
+	}
+
+	// visibleRows = 6 (panelH=8, no filter)
+	// 10 files, maxScroll = 10 - 6 = 4
+
+	// Case 1: cursor at 9, scroll at 0 → scroll should jump to 4
+	m.git.filesCursor = 9
+	m.git.fileListScroll = 0
+	m.git.clampFileListScroll()
+	if m.git.fileListScroll != 4 {
+		t.Fatalf("cursor at 9, scroll at 0: expected scroll 4, got %d", m.git.fileListScroll)
+	}
+
+	// Case 2: cursor at 0, scroll at 4 → scroll should jump to 0
+	m.git.filesCursor = 0
+	m.git.fileListScroll = 4
+	m.git.clampFileListScroll()
+	if m.git.fileListScroll != 0 {
+		t.Fatalf("cursor at 0, scroll at 4: expected scroll 0, got %d", m.git.fileListScroll)
+	}
+
+	// Case 3: scroll beyond max → should clamp to 4
+	m.git.fileListScroll = 100
+	m.git.filesCursor = 5
+	m.git.clampFileListScroll()
+	if m.git.fileListScroll != 4 {
+		t.Fatalf("scroll at 100: expected scroll 4, got %d", m.git.fileListScroll)
+	}
+
+	// Case 4: negative scroll → should clamp to 0
+	m.git.fileListScroll = -5
+	m.git.filesCursor = 0
+	m.git.clampFileListScroll()
+	if m.git.fileListScroll != 0 {
+		t.Fatalf("scroll at -5: expected scroll 0, got %d", m.git.fileListScroll)
+	}
+}
+
 func TestFilesRightClickDeselectsActiveFile(t *testing.T) {
 	m := model{
 		width:     100,
