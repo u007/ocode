@@ -147,6 +147,7 @@ func Run(args []string) error {
 		if err := os.Chdir(opts.dir); err != nil {
 			return fmt.Errorf("failed to change directory to %s: %w", opts.dir, err)
 		}
+		session.SetWorkDir(opts.dir)
 	}
 
 	if opts.attach != "" {

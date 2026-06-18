@@ -1544,11 +1544,70 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 		return deny, nil
 	}
 
+	// For path-confined tools, temporarily register the target path's parent
+	// root with the tool confinement layer so confinedPath agrees with the
+	// permission grant. The static permission decider (Decide) matches
+	// patterns like "/Users/james/www/**:allow" and returns PermissionAllow
+	// or PermissionAsk for a path under that pattern, but the tool layer's
+	// confinedPath only allows paths inside the configured extra_allowed_paths
+	// (or an in-process temp lease). Without the lease, an approved path
+	// pattern still produces a hard "path is outside the working directory"
+	// error from the tool handler.
+	//
+	// The lease is acquired *before* the permission decision so it also covers
+	// the model-allow / human-callback-allow paths inside the PermissionAsk
+	// block, which call executeToolCall directly and would otherwise bypass
+	// the lease. The defer releases it on every return — including the
+	// Deny / Ask-falls-through-to-human-Deny early returns, where no tool
+	// call is made and the lease simply expires unused. We only register
+	// when the path is absolute, since relative paths resolve against
+	// workDir which confinedPath already handles.
+	if pathConfinedAutoTools[name] {
+		if p := extractPathFromArgs(name, args); filepath.IsAbs(p) {
+			root := filepath.Dir(filepath.Clean(p))
+			if tool.AcquireTemporaryAllowedPath(root) {
+				defer tool.ReleaseTemporaryAllowedPath(root)
+			}
+		}
+	}
+
 	if a.permissions != nil {
 		autoEnabled := a.permissions.AutoPermissionEnabled()
 		decision := a.permissions.Decide(name, args)
 		emitDebug("PERMISSION", a.permissionDecisionTrace(name, args, decision, autoEnabled))
 		if decision.Level == PermissionDeny {
+			if autoEnabled && a.permissions != nil && a.permissions.Mode() != PermissionModeLocked {
+				if !(name == "bash" && isHardBlockedCommand(bashCommand(args))) {
+					req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
+					if decision.Request != nil {
+						req = *decision.Request
+					}
+					allowed, reason, _ := a.consultPermissionModel(name, args, &req)
+					if allowed {
+						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						if a.permissions != nil {
+							prevLevel, hadLevel := a.permissions.rules[name]
+							prevConfirmed, hadConfirmed := a.permissions.userConfirmedRules[name]
+							a.permissions.SetUserConfirmedRule(name, PermissionAllow)
+							defer func() {
+								if hadLevel {
+									a.permissions.rules[name] = prevLevel
+								} else {
+									delete(a.permissions.rules, name)
+								}
+								if hadConfirmed {
+									a.permissions.userConfirmedRules[name] = prevConfirmed
+								} else {
+									delete(a.permissions.userConfirmedRules, name)
+								}
+							}()
+						}
+						return a.executeToolCall(name, args, b)
+					}
+					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+					return fmt.Sprintf("denied: tool %q was denied by the LLM permission model. Reason: %s", name, reason), nil
+				}
+			}
 			return fmt.Sprintf("denied: tool %q is not permitted by permission rules. This call is blocked by policy — do not retry the same call; choose a different approach or ask the user.", name), nil
 		}
 		if decision.Level == PermissionAsk {
@@ -1606,6 +1665,12 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 			return tool.SentinelPermissionAsk + string(payload), nil
 		}
 	}
+
+	// (The path-temp-allow lease for path-confined tools is acquired at
+	// the top of handleToolCall so it covers every allow path — direct
+	// Decide-Allow, PermissionDeny → model-allow, PermissionAsk →
+	// model-allow, and PermissionAsk → OnPermissionAsk-allow. See the
+	// comment at the top of this function for the rationale.)
 
 	return a.executeToolCall(name, args, b)
 }

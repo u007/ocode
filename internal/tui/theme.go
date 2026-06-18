@@ -21,6 +21,12 @@ type Styles struct {
 	Selected, Status, Success, Error      lipgloss.Style
 	Dim, ToolBox, UserMessageBox          lipgloss.Style
 	SidebarText                           lipgloss.Style
+	// SearchHit is the accent style used to flash a transcript message whose
+	// contents matched an in-chat /search query (and is now jumped to). It
+	// stays foreground-only and Bold so the highlight reads on every theme
+	// without dragging a background that would clash with the user/assistant
+	// bubbles it overlays.
+	SearchHit lipgloss.Style
 }
 
 // GetTheme resolves a theme by name against the shared registry.
@@ -64,6 +70,7 @@ func ApplyThemeColors(name string) Styles {
 			BorderBottom(false).
 			BorderForeground(lipgloss.Color(c.Header)).
 			Padding(0, 1),
+		SearchHit: lipgloss.NewStyle().Foreground(lipgloss.Color(c.Accent)).Bold(true),
 	}
 	setUserStyle(s.User)
 	setAssistantStyle(s.Assistant)

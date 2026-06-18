@@ -73,6 +73,47 @@ var (
 	gitToplevelCache = map[string]string{}
 )
 
+// workDirOverride overrides os.Getwd() for project slug resolution in
+// GetStorageDir and getClaudeProjectDir. Set via SetWorkDir so that session
+// storage follows the TUI's explicit workDir instead of the process-wide CWD
+// (which can change under /cd or -dir without the session package noticing).
+// Empty means fall back to os.Getwd().
+var (
+	workDirOverride   string
+	workDirOverrideMu sync.RWMutex
+)
+
+// SetWorkDir sets the working directory used for project slug resolution.
+// Symlinks are resolved so the stored path matches os.Getwd() behavior.
+// Pass "" to revert to os.Getwd().
+func SetWorkDir(dir string) {
+	if dir != "" {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = resolved
+		}
+	}
+	workDirOverrideMu.Lock()
+	workDirOverride = dir
+	workDirOverrideMu.Unlock()
+	// Invalidate the git toplevel cache — the resolved root may differ under
+	// the new workDir.
+	gitToplevelMu.Lock()
+	clear(gitToplevelCache)
+	gitToplevelMu.Unlock()
+}
+
+// effectiveWorkDir returns the configured work dir or falls back to os.Getwd().
+func effectiveWorkDir() string {
+	workDirOverrideMu.RLock()
+	dir := workDirOverride
+	workDirOverrideMu.RUnlock()
+	if dir != "" {
+		return dir
+	}
+	wd, _ := os.Getwd()
+	return wd
+}
+
 func gitToplevel(wd string) string {
 	gitToplevelMu.Lock()
 	defer gitToplevelMu.Unlock()
@@ -91,14 +132,13 @@ func gitToplevel(wd string) string {
 
 // ProjectSlug returns the stable slug for the current workspace root.
 func ProjectSlug() string {
-	wd, _ := os.Getwd()
-	return ProjectSlugForPath(wd)
+	return ProjectSlugForPath(effectiveWorkDir())
 }
 
 // ProjectSlugForPath returns the stable slug for the workspace containing wd.
 func ProjectSlugForPath(wd string) string {
 	if wd == "" {
-		wd, _ = os.Getwd()
+		wd = effectiveWorkDir()
 	}
 	wd = gitToplevel(wd)
 	wd = filepath.Clean(wd)
@@ -748,7 +788,7 @@ func getClaudeProjectDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	wd, _ := os.Getwd()
+	wd := effectiveWorkDir()
 	wd = gitToplevel(wd)
 	return filepath.Join(home, ".claude", "projects", claudeProjectSlug(wd)), nil
 }

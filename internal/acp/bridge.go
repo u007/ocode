@@ -52,6 +52,7 @@ func newSessionBridge(cfg *config.Config, cwd string) (*sessionBridge, error) {
 		if err := os.Chdir(cwd); err != nil {
 			fmt.Fprintf(os.Stderr, "acp: warning: chdir %s: %v\n", cwd, err)
 		}
+		session.SetWorkDir(cwd)
 	}
 
 	return &sessionBridge{

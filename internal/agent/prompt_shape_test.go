@@ -153,6 +153,19 @@ func TestBasePromptMessages_IncludesMemoryContextWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestBuildReferenceCatalog_IncludesLoadingGuidance(t *testing.T) {
+	cat := BuildReferenceCatalog(nil)
+	for _, want := range []string{
+		"--- Reference Guidance ---",
+		"When a slash command, skill, or agent is mentioned by name",
+		"Agent Catalog",
+	} {
+		if !strings.Contains(cat, want) {
+			t.Fatalf("reference catalog missing %q: %s", want, cat)
+		}
+	}
+}
+
 func collectMarkers(msgs []Message) []string {
 	var out []string
 	for _, m := range msgs {

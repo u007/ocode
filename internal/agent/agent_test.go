@@ -1245,6 +1245,171 @@ func TestHandleToolCallAutoPermissionBypassesAsk(t *testing.T) {
 	}
 }
 
+func TestHandleToolCallAutoPermissionConsultsModelOnDeny(t *testing.T) {
+	mockTool := &MockTool{name: "ask_tool", result: "executed"}
+	cfg := &config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "anthropic/claude-sonnet-4-6"}
+	a := NewAgent(nil, nil, cfg, nil)
+	a.Permissions().SetRule("ask_tool", PermissionDeny)
+	a.Permissions().SetAutoPermissionEnabled(true)
+	a.AddTools([]tool.Tool{mockTool})
+
+	prevClientFn := newClientFn
+	t.Cleanup(func() { newClientFn = prevClientFn })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return &MockClient{Response: &Message{Role: "assistant", Content: "ALLOW: safe tool call"}}
+	}
+
+	called := false
+	a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+		called = true
+		return PermissionResponse{Level: PermissionDeny}
+	}
+
+	res, err := a.HandleToolCall("ask_tool", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("permission callback should not run when the LLM approves a denied tool")
+	}
+	if res != "executed" {
+		t.Fatalf("expected model-approved denied tool to execute, got %q", res)
+	}
+	if got := a.Permissions().Check("ask_tool"); got != PermissionDeny {
+		t.Fatalf("expected denied rule to be restored after execution, got %s", got)
+	}
+}
+
+// TestHandleToolCallAutoPermissionBridgesConfinedPathOnAskModelAllow is the
+// regression test for the path-temp-allow lease placement. Before the fix
+// the lease was only registered after the direct Decide-Allow path, so
+// every "ask-then-approve" route (PermissionAsk → model-allow, and
+// PermissionAsk → OnPermissionAsk-allow) called executeToolCall without
+// the lease; confinedPath would then reject the path with "outside the
+// working directory" even though the model or human had just approved it.
+// With the fix, the lease is acquired at the top of handleToolCall so the
+// path is in-scope by the time Decide and executeToolCall run.
+//
+// Note: with the fix in place, the lease also widens the scope that Decide
+// sees, so the test's path actually returns PermissionAllow from Decide
+// directly (the "allowed scope, read-only" branch) rather than going
+// through the PermissionAsk → model-allow route the test name implies.
+// That is correct: the whole point of the fix is to make the in-scope
+// path succeed without bothering the model or the user. The test still
+// fails without the fix, because Decide then returns PermissionAsk, the
+// model approves, executeToolCall is called, and confinedPath rejects
+// the path — the call returns the rejection error instead of "ok".
+//
+// The test needs a writable absolute path that is OUTSIDE both the working
+// directory and the system temp roots (otherwise confinedPath accepts the
+// path on its own and the test passes for the wrong reason). macOS puts
+// the user-specific temp folder one level above os.TempDir() — walking
+// out of /var/folders/.../T/ into /var/folders/.../ lands in a non-temp
+// directory that the current user can write to. On Linux os.TempDir() is
+// /tmp whose parent is / (not writable), so we fall back to $HOME; both
+// are skipped if neither is available.
+func TestHandleToolCallAutoPermissionBridgesConfinedPathOnAskModelAllow(t *testing.T) {
+	outsideRoot := makeNonTempWritableDir(t)
+	target := filepath.Join(outsideRoot, "approved.txt")
+	if err := os.WriteFile(target, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(outsideRoot) })
+
+	workspace := t.TempDir()
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	// tool.read: ask documents the intent: a read targeting a path that
+	// is outside workDir should be ask, not allow. With the fix, the
+	// temp-allow widens scope so Decide returns Allow from the scope
+	// branch — exactly the bug-bridge we want. Without the fix, Decide
+	// returns Ask here, the model is consulted, and the call fails
+	// downstream in confinedPath.
+	cfg := &config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
+	a := NewAgent(nil, []tool.Tool{&tool.ReadTool{}}, cfg, nil)
+	a.Permissions().SetRule("read", PermissionAsk)
+	a.Permissions().SetAutoPermissionEnabled(true)
+	if tool.HasExtraAllowedPath(outsideRoot) {
+		t.Fatalf("precondition: %q should not be pre-allowed", outsideRoot)
+	}
+
+	prevClientFn := newClientFn
+	t.Cleanup(func() { newClientFn = prevClientFn })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return &MockClient{Response: &Message{Role: "assistant", Content: "ALLOW: safe read"}}
+	}
+
+	called := false
+	a.OnPermissionAsk = func(req PermissionRequest) PermissionResponse {
+		called = true
+		return PermissionResponse{Level: PermissionDeny}
+	}
+
+	res, err := a.HandleToolCall("read", json.RawMessage(`{"path":"`+target+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("OnPermissionAsk should not run when the path is in allowed scope")
+	}
+	if strings.HasPrefix(res, tool.SentinelPermissionAsk) {
+		t.Fatalf("permission ask sentinel should not be emitted on an in-scope call, got %q", res)
+	}
+	if !strings.Contains(res, "ok") {
+		t.Fatalf("expected read output to include file contents, got %q", res)
+	}
+	// The temp-allow lease must be released by the time handleToolCall
+	// returns — a leaked lease would silently widen the confinement root
+	// for every subsequent tool call.
+	if tool.HasExtraAllowedPath(outsideRoot) {
+		t.Fatalf("expected temporary path allowance for %q to be released", outsideRoot)
+	}
+}
+
+// makeNonTempWritableDir returns a freshly-created writable absolute
+// directory that is not under os.TempDir()'s root (so confinedPath
+// won't accept paths inside it via the temp-dir fast path). The result
+// is reported to t.Cleanup so callers don't need to manage the lifetime
+// unless they want to (the test above removes it explicitly so it can
+// run on systems where os.TempDir()'s parent isn't writable).
+func makeNonTempWritableDir(t *testing.T) string {
+	t.Helper()
+	candidates := []string{}
+	if d := os.TempDir(); d != "" {
+		// One level up from /var/folders/.../T/ on macOS lands in the
+		// per-user folder (e.g. /var/folders/43/<hash>), which is
+		// writable and not flagged as temp by pathscope.IsTempDir.
+		candidates = append(candidates, filepath.Dir(filepath.Clean(d)))
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, home)
+	}
+	var lastErr error
+	for _, base := range candidates {
+		if err := os.MkdirAll(base, 0o755); err != nil {
+			lastErr = err
+			continue
+		}
+		dir, err := os.MkdirTemp(base, "ocode-bridge-test-*")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		return dir
+	}
+	t.Skipf("no writable non-temp directory available (last error: %v)", lastErr)
+	return ""
+}
+
 func TestHandleToolCallAutoPermissionPreservesInterpreterSummaryOnAsk(t *testing.T) {
 	workspace := t.TempDir()
 	origWD, err := os.Getwd()

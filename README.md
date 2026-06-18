@@ -185,6 +185,10 @@ A React-based web interface that mirrors the TUI experience:
 | **Model selection** | ✅ Model dialog with main/small/advisor tabs |
 | **Permissions dialog** | ✅ Interactive allow/deny prompts |
 | **Remote control** | ✅ `/rc` command mirrors TUI session to browser in real time |
+| **Live status panel** | ✅ Real-time model, context, LSP, spending, modified files |
+| **File uploads** | ✅ Drag-and-drop or `/upload` command to set directory |
+| **Web shell** | ✅ `!` prefix runs local shell commands inline |
+| **Mobile sidebar** | ✅ Overlay with backdrop on viewports < 768px |
 | **Theme sync** | ✅ CSS variables auto-mapped from TUI theme |
 | **Agent cowork panel** | ✅ Parallel agent monitoring sidebar |
 | **Slash commands** | ✅ Autocomplete popup with keyboard navigation |
@@ -204,7 +208,12 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/export` | | Export session as JSON (full transcript) |
 | `/export-claude` | | Export in Claude Code compatible format |
 | `/share` | | Generate shareable session link |
-| `/rc` | `/remote-control` | Start web UI to mirror this session |
+| `/rc` | `/remote-control` | Start/stop web UI (`/rc off`) to mirror this session |
+| `/cd` | `/cwd` | Change the project root to another directory |
+| `/context` | | Show context window token budget and system prompt |
+| `/upload` | `/uploads` | Show or set the file upload directory |
+| `/search` | `/find` | Find a message by keyword (opens the in-chat find bar) |
+| `/add-dir` | `/add-dirs` | Add a directory to extra allowed paths |
 | `/ide` | | Connect to VS Code (Claude Code extension) |
 | `/theme` | `/themes` | Switch themes instantly |
 | `/permissions` | | View/set tool and bash permissions |
