@@ -7,8 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
+	"github.com/u007/ocode/internal/commands"
 	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/skill"
@@ -122,6 +124,9 @@ func LoadContext(enabled map[string]bool, memoryEnabled bool) string {
 	if skillCatalog := skill.BuildCatalog(); skillCatalog != "" {
 		context += skillCatalog
 	}
+	if refCatalog := BuildReferenceCatalog(enabled); refCatalog != "" {
+		context += refCatalog
+	}
 	if memoryEnabled {
 		if mem := memory.PromptFragment(""); mem != "" {
 			context += mem
@@ -129,6 +134,59 @@ func LoadContext(enabled map[string]bool, memoryEnabled bool) string {
 	}
 
 	return context
+}
+
+// BuildReferenceCatalog returns a compact prompt fragment describing the
+// currently available slash commands and agents, plus the rule that mentions
+// should trigger loading the corresponding prompt/skill before answering.
+//
+// Skills are already covered by skill.BuildCatalog(); this fragment focuses on
+// the remaining reference types so the system prompt stays concise while still
+// giving the model a clear loading rule.
+func BuildReferenceCatalog(enabled map[string]bool) string {
+	var b strings.Builder
+	b.WriteString("\n--- Reference Guidance ---\n")
+	b.WriteString("When a slash command, skill, or agent is mentioned by name, load the matching command prompt, SKILL.md, or agent system prompt before responding.\n")
+
+	cmds := commands.LoadCommands(enabled)
+	if len(cmds) > 0 {
+		sort.Slice(cmds, func(i, j int) bool {
+			return strings.ToLower(cmds[i].Name) < strings.ToLower(cmds[j].Name)
+		})
+		b.WriteString("\nSlash Command Catalog\n")
+		b.WriteString(strings.Repeat("-", 23))
+		b.WriteString("\n")
+		for _, cmd := range cmds {
+			b.WriteString("- /")
+			b.WriteString(cmd.Name)
+			if cmd.Description != "" {
+				b.WriteString(": ")
+				b.WriteString(cmd.Description)
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	agents := PrimaryAgentSpecs()
+	if len(agents) > 0 {
+		sort.Slice(agents, func(i, j int) bool {
+			return strings.ToLower(agents[i].Name) < strings.ToLower(agents[j].Name)
+		})
+		b.WriteString("\nAgent Catalog\n")
+		b.WriteString(strings.Repeat("-", 13))
+		b.WriteString("\n")
+		for _, spec := range agents {
+			b.WriteString("- ")
+			b.WriteString(spec.Name)
+			if spec.Description != "" {
+				b.WriteString(": ")
+				b.WriteString(spec.Description)
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	return b.String()
 }
 
 // globalOcodeDir returns the path to the global ocode configuration directory

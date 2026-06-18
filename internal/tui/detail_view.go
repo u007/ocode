@@ -172,7 +172,7 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 			case "user":
 				if text := strings.TrimSpace(msg.Content); text != "" {
 					appendLine(headerStyle.Render("Task"))
-					appendBlock(renderMarkdownBold(text, textStyle))
+					appendBlock(renderMarkdownInLine(text, textStyle))
 				}
 			case "assistant":
 				if msg.ReasoningContent != "" {
@@ -181,7 +181,7 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 				}
 				if text := strings.TrimSpace(msg.Content); text != "" {
 					appendLine(headerStyle.Render("LLM message"))
-					appendBlock(renderMarkdownBold(text, textStyle))
+					appendBlock(renderMarkdownInLine(text, textStyle))
 				}
 				for j, tc := range msg.ToolCalls {
 					toolNames[tc.ID] = tc.Function.Name
@@ -202,7 +202,7 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 
 	if run.Status == agent.RunDone && strings.TrimSpace(run.Result) != "" {
 		appendLine(headerStyle.Render("Result"))
-		appendLine(renderMarkdownBold(strings.TrimSpace(run.Result), textStyle))
+		appendLine(renderMarkdownInLine(strings.TrimSpace(run.Result), textStyle))
 	}
 
 	if procs := runProcesses(run); len(procs) > 0 {

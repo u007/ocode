@@ -16,6 +16,7 @@ import (
 	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/redact"
+	"github.com/u007/ocode/internal/session"
 )
 
 type commandSpec struct {
@@ -102,7 +103,9 @@ func init() {
 		{name: "/mem", usage: "/mem [on|off|status|update [user|project|global] [focus]]", help: "Toggle memory context injection, inspect memory files, or update a memory scope", handler: runMemCmd},
 		{name: "/btw", aliases: []string{"/by-the-way"}, usage: "/btw <message>", help: "Add a quick aside to the conversation (by the way)", handler: runBtwCmd},
 		{name: "/cd", aliases: []string{"/cwd"}, usage: "/cd <path>", help: "Change the project root to another directory", handler: runCdCmd},
+		{name: "/add-dir", aliases: []string{"/add-dirs"}, usage: "/add-dir <path>", help: "Add a directory to extra allowed paths so the agent can work with files there", handler: runAddDirCmd},
 		{name: "/upload", aliases: []string{"/uploads"}, usage: "/upload [path]", help: "Show or set the file upload directory used by /api/uploads", handler: runUploadCmd},
+		{name: "/search", aliases: []string{"/find"}, usage: "/search <query>", help: "Find a message by keyword (opens the in-chat find bar)", handler: runSearchCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -303,6 +306,24 @@ func runLearnCmd(m *model, args []string) tea.Cmd {
 
 func runHelpCmd(m *model, args []string) tea.Cmd {
 	m.handleHelpCmd(args)
+	return nil
+}
+
+// runSearchCmd opens the in-chat find bar. The optional <query> argument
+// prefills the query (matches go straight to the first hit, the same UX
+// as ctrl+f then enter). Instant — does not get queued while the agent is
+// streaming, so the user can pivot mid-stream.
+//
+// /search with no args is equivalent to pressing ctrl+f on the chat tab:
+// an empty bar opens, ready to type.
+func runSearchCmd(m *model, args []string) tea.Cmd {
+	if m.activeTab != tabChat {
+		// Switch to chat first so the bar is visible.
+		m.activeTab = tabChat
+		m.chatUnread = false
+	}
+	prefill := strings.TrimSpace(strings.Join(args, " "))
+	m.openChatSearch(prefill)
 	return nil
 }
 
@@ -1211,6 +1232,7 @@ func runCdCmd(m *model, args []string) tea.Cmd {
 	}
 
 	m.workDir = target
+	session.SetWorkDir(target)
 	m.files = newFilesModel(target)
 	m.git = newGitModel(target)
 	m.git.SetLogger(func(kind DebugEntryKind, msg string) {
@@ -1238,10 +1260,17 @@ func runCdCmd(m *model, args []string) tea.Cmd {
 	return nil
 }
 
+
+// runAddDirCmd adds a directory to extra_allowed_paths so the agent can read
+// and write files under that directory without re-prompting.
+func runAddDirCmd(m *model, args []string) tea.Cmd {
+	return m.handleAddDirCmd(args)
+}
 // runUploadCmd shows the configured upload directory when invoked with no
 // args, or sets a new upload directory (the same path used by /api/uploads).
 // Mirrors the layout used by runEditorCmd: a one-line status read followed by
 // a load-modify-write SaveXxx that preserves any other config fields that
+
 // might be on disk.
 func runUploadCmd(m *model, args []string) tea.Cmd {
 	effective := func() string {

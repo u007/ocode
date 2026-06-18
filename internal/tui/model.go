@@ -664,6 +664,8 @@ type model struct {
 	showPermDialog        bool
 	showRetryDialog       bool
 	retryDialogMsg        string
+	showURLDialog         bool   // URL open confirmation dialog
+	pendingURL            string // URL to open when confirmed
 
 	// sessionDeleteConfirm tracks the session deletion confirmation dialog.
 	sessionDeleteConfirm      bool   // true when confirmation dialog is showing
@@ -727,8 +729,22 @@ type model struct {
 	streamWasInterrupted     bool
 	transcriptLines          []string
 	rawTranscriptLines       []string
+	transcriptMsgStartLine   []int                       // for each message index, the first wrapped line of its block in transcriptLines (parallel to m.messages; -1 for indices past the end). Used to scroll to a chat-search match.
 	msgRenderCache           map[int]msgRenderCacheEntry // per-message rendered-block cache keyed by message index; avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta
 	themeGen                 int                         // bumped on every applyTheme so the render cache invalidates when colors change
+
+	// In-chat find (the bar that appears above the input when ctrl+f is pressed
+	// on the chat tab). Mirrors the log tab's logSearch fields: a focused
+	// textinput, the last non-empty query, the ordered list of message indices
+	// that match, the cursor into that list, and the index of the message
+	// currently being flashed (bumped to -1 once the flash window expires).
+	chatSearchActive         bool
+	chatSearchInput          textinput.Model
+	chatSearchQuery          string
+	chatSearchMatches        []int
+	chatSearchCursor         int
+	chatSearchFlashMsg       int
+	chatSearchNoMatch        bool // true when the bar is open with a non-empty query that has zero matches; used for the inline counter styling
 	filesSel                 selectionState
 	inputSel                 selectionState
 	gitSel                   selectionState
@@ -742,6 +758,9 @@ type model struct {
 	hoverLink                pathLinkRegion // file-path link hovered in the transcript
 	hoverLinkActive          bool           // whether hoverLink is set
 	hoverLinkProbe           pathLinkProbeCache
+	hoverUrlLink             urlLinkRegion // URL link (markdown or raw) hovered in the transcript
+	hoverUrlLinkActive       bool          // whether hoverUrlLink is set
+	hoverUrlLinkProbe        urlLinkProbeCache
 	hoverDetailLink          pathLinkRegion // file-path link hovered in the agent-detail view
 	hoverDetailLinkActive    bool           // whether hoverDetailLink is set
 	hoverDetailLinkProbe     pathLinkProbeCache
@@ -1466,6 +1485,17 @@ func newModel(opts ...RunOptions) model {
 	questionInput.ShowLineNumbers = false
 	questionInput.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("shift+enter"), key.WithHelp("shift+enter", "insert newline"))
 
+	// Chat search: a single-line textinput used by the ctrl+f find bar that
+	// appears above the main input. Single line, no prompt (we render our own
+	// "/" prefix), no history (chat search is ephemeral, not the message
+	// history that the main textarea walks). It is created unfocused — the
+	// main chat input keeps focus until the user opens the bar.
+	chatSearchInput := textinput.New()
+	chatSearchInput.Placeholder = "search messages…"
+	chatSearchInput.CharLimit = 200
+	chatSearchInput.Prompt = ""
+	chatSearchInput.SetWidth(40)
+
 	vp := fastviewport.New(80, 20)
 	vp.SetContent(hintStyle.Render("  ocode v" + version.Version + " — opencode clone · type a message to begin\n"))
 
@@ -1556,6 +1586,9 @@ func newModel(opts ...RunOptions) model {
 		sideUsageCh:          make(chan sideUsageData, 16),
 		streamingThinkingIdx: -1,
 		questionInput:        questionInput,
+		chatSearchInput:      chatSearchInput,
+		chatSearchCursor:     -1,
+		chatSearchFlashMsg:   -1,
 		permissionGrantCh:    make(chan permissionGrantRequest),
 		subAgentPermCh:       make(chan subAgentPermRequest),
 		subAgentPermMu:       &sync.Mutex{},
@@ -1607,6 +1640,7 @@ func newModel(opts ...RunOptions) model {
 	if m.agent != nil && m.agent.Permissions() != nil {
 		m.agent.Permissions().SetWorkDir(m.workDir)
 	}
+	session.SetWorkDir(m.workDir)
 	m.wireCompactCallbacks()
 
 	if cfg != nil && cfg.Ocode.TUI.Scroll != 0 {
@@ -1751,7 +1785,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.questionInput, _ = m.questionInput.Update(msg)
 			return m, nil
 		}
-		if m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showQuestionDialog && m.detail.empty() {
+		if m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.showQuestionDialog && m.detail.empty() {
 			content := msg.Content
 			if shortcode, ok := m.shortcodePastedFiles(content); ok {
 				content = shortcode
@@ -1942,7 +1976,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showQuestionDialog && m.detail.empty()
+	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.showQuestionDialog && m.detail.empty()
+
+	// Chat search bar takes priority over the chat input and the slash popup
+	// while it's open. The bar is only available on the chat tab; other tabs
+	// keep their own shortcuts (ctrl+f on the log tab is free today, files
+	// and git reserve it for themselves). Toggle on ctrl+f.
+	//
+	// We must also stay out of the way of every modal/overlay: the model
+	// picker binds ctrl+f to "toggle favorite" while it's open, the file
+	// search owns its own input keys, the permission/question/URL dialogs
+	// bind their own shortcuts, and the leader chord is in flight. The
+	// inputAllowed gate (defined just above) is the canonical "is the chat
+	// composer free to receive keys?" test — re-using it here means we
+	// never collide with anything that already owns ctrl+f.
+	if m.activeTab == tabChat && inputAllowed {
+		if kp, ok := msg.(tea.KeyPressMsg); ok {
+			if m.chatSearchActive {
+				newM, c, handled := m.handleChatSearchKey(kp)
+				if handled {
+					return newM, c
+				}
+			} else if kp.String() == "ctrl+f" {
+				m.openChatSearch("")
+				return m, nil
+			}
+		}
+	}
+
 	if inputAllowed {
 		m.input, tiCmd = m.input.Update(msg)
 		m.rawInputLinesDirty = true
@@ -2026,6 +2087,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case leaderTimeoutMsg:
 		if m.leaderActive && msg.seq == m.leaderSeq {
 			m.leaderActive = false
+		}
+		return m, nil
+	case chatSearchFlashExpiredMsg:
+		// The 1.2s flash window started by jumpToChatMatch has elapsed —
+		// drop the flash and let the in-app selection clear naturally on
+		// the next render.
+		if m.chatSearchFlashMsg >= 0 {
+			m.chatSearchFlashMsg = -1
+			m.sel = selectionState{}
+			m.applyOrClearSelectionHighlight()
 		}
 		return m, nil
 	case registryReadyMsg:
@@ -3323,6 +3394,7 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 	switch msg.String() {
 	case "alt+[", "ctrl+shift+[":
 		m.activeTab = (m.activeTab - 1 + tabCount) % tabCount
+		m.closeChatSearchIfLeavingChat()
 		if m.activeTab == tabChat {
 			m.chatUnread = false
 		}
@@ -3332,6 +3404,7 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		return true, m, nil
 	case "alt+]", "ctrl+shift+]":
 		m.activeTab = (m.activeTab + 1) % tabCount
+		m.closeChatSearchIfLeavingChat()
 		if m.activeTab == tabChat {
 			m.chatUnread = false
 		}
@@ -3341,6 +3414,16 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		return true, m, nil
 	}
 	return false, m, nil
+}
+
+// closeChatSearchIfLeavingChat closes the find bar when the user navigates
+// away from the chat tab. Per the design doc: "switch tab → close bar,
+// clear query." Cheap; idempotent when the bar is already closed or the
+// active tab is still chat.
+func (m *model) closeChatSearchIfLeavingChat() {
+	if m.chatSearchActive && m.activeTab != tabChat {
+		m.closeChatSearch()
+	}
 }
 
 // handleModalKeys handles overlay dialogs (picker, connect, palette, leader)
@@ -3738,6 +3821,21 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		case "enter", "esc":
 			m.showRetryDialog = false
 			m.popRetryModal()
+			return m, nil
+		}
+		return m, nil
+	}
+
+	if m.showURLDialog {
+		switch keyStr {
+		case "y", "Y", "enter":
+			url := m.pendingURL
+			m.showURLDialog = false
+			m.pendingURL = ""
+			return m, func() tea.Msg { openBrowser(url); return nil }
+		case "n", "N", "esc":
+			m.showURLDialog = false
+			m.pendingURL = ""
 			return m, nil
 		}
 		return m, nil
@@ -4926,6 +5024,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 	if !m.modalOpen() && !m.leaderActive {
 		if tab, ok := m.tabForClick(mouse); ok {
 			m.activeTab = tab
+			m.closeChatSearchIfLeavingChat()
 			if tab == tabChat {
 				m.chatUnread = false
 			}
@@ -4951,7 +5050,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 		return m, nil, true
 	}
-	if pressed && m.activeTab == tabChat && mouse.X < m.mainScrollbarX() {
+	if pressed && m.activeTab == tabChat && mouse.X < m.mainScrollbarX() && !m.chatSearchActive {
 		contentLine := (mouse.Y - m.viewportContentTopY()) + m.viewport.YOffset()
 		if contentLine >= 0 && contentLine < len(m.rawTranscriptLines) {
 			m.sel = selectionState{
@@ -5039,6 +5138,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// the box.
 		if r, ok := m.transcriptPathLinkAt(mouse); ok {
 			return m, m.openPathAtLineInEditorCmd(r.path, r.lineNo), true
+		}
+		// URL links prompt for confirmation before opening in the browser.
+		if r, ok := m.transcriptUrlLinkAt(mouse); ok {
+			m.pendingURL = r.url
+			m.showURLDialog = true
+			return m, nil, true
 		}
 		if idx, ok := m.toolOutputForClick(mouse); ok {
 			m.expandedToolOutputs[idx] = !m.expandedToolOutputs[idx]
@@ -5153,6 +5258,19 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 				m.hoverLink, m.hoverLinkActive = r, true
 			}
 			if m.hoverLinkActive != prevActive || m.hoverLink != prevLink {
+				m.applyOrClearSelectionHighlight()
+				changed = true
+			}
+			// URL link hover (markdown + raw). Independent of file-path
+			// hover — both can be active when the cursor sits over a span
+			// that happens to be both (rare in practice but well-defined:
+			// the path detector filters URLs out so they don't collide).
+			prevUrlActive, prevUrlLink := m.hoverUrlLinkActive, m.hoverUrlLink
+			m.hoverUrlLinkActive = false
+			if r, ok := m.transcriptUrlLinkAt(mouse); ok {
+				m.hoverUrlLink, m.hoverUrlLinkActive = r, true
+			}
+			if m.hoverUrlLinkActive != prevUrlActive || m.hoverUrlLink != prevUrlLink {
 				m.applyOrClearSelectionHighlight()
 				changed = true
 			}
@@ -5442,6 +5560,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	if !m.modalOpen() && !m.leaderActive {
 		if tab, ok := m.tabForClick(mouse); ok {
 			m.activeTab = tab
+			m.closeChatSearchIfLeavingChat()
 			if tab == tabChat {
 				m.chatUnread = false
 			}
@@ -5580,7 +5699,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
 		cmd == "/advisor" || cmd == "/mask" || cmd == "/mem" ||
 		cmd == "/btw" || cmd == "/by-the-way" ||
-		cmd == "/rc" || cmd == "/remote-control"
+		cmd == "/rc" || cmd == "/remote-control" ||
+		cmd == "/search" || cmd == "/find"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -7809,6 +7929,23 @@ func (m *model) handleContextCmd(args []string) {
 		b.WriteString("  (no ambient files found)\n")
 	}
 
+	refCatalog := agent.BuildReferenceCatalog(enabledPluginMap(m.config))
+	if refCatalog != "" {
+		refTok := estimateTok(refCatalog)
+		baseTotal += refTok
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Reference catalog", formatTok(refTok))
+		b.WriteString("\n")
+		for _, line := range strings.Split(refCatalog, "\n") {
+			if line == "" {
+				b.WriteString("\n")
+				continue
+			}
+			b.WriteString("  │ ")
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
+
 	// ── Model-Specific Context ──────────────────────
 	var mcModel string
 	if m.agent.Client() != nil {
@@ -8955,7 +9092,7 @@ func (m *model) askAgent() tea.Cmd {
 		if m.config != nil {
 			memoryEnabled = m.config.Ocode.MemoryEnabled
 		}
-		m.agent.SetPreloadedContext(agent.LoadContext(nil, memoryEnabled))
+		m.agent.SetPreloadedContext(agent.LoadContext(enabledPluginMap(m.config), memoryEnabled))
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
@@ -9675,6 +9812,8 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
+	} else if m.showURLDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
 	} else if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
@@ -9684,8 +9823,15 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 
 	height := lipgloss.Height(header)
 	height += 2 // transcript border
+	// The find bar (1 content row + 2 border rows) sits between the
+	// transcript and the input. Its height must be counted here so the
+	// viewport shrinks accordingly — otherwise the input would push past
+	// the terminal bottom on short terminals.
+	if m.chatSearchActive {
+		height += 3
+	}
 	height += lipgloss.Height(inputArea)
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog {
 		height += lipgloss.Height(m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -10468,6 +10614,10 @@ func (m *model) renderTranscript() {
 	// array must not be reused/truncated on the next render.
 	m.transcriptLines = make([]string, 0, len(m.messages)*2+10)
 	m.rawTranscriptLines = make([]string, 0, len(m.messages)*2+10)
+	// Parallel to m.messages: for each message index, the first wrapped line of
+	// its block in transcriptLines. -1 for indices past the end. The chat-search
+	// jump-to-match uses this to scroll the viewport to the match's first line.
+	m.transcriptMsgStartLine = make([]int, len(m.messages))
 	nlAcc := 0 // wrapped lines written so far (= next index into transcriptLines)
 	for i, msg := range m.messages {
 		if i > 0 {
@@ -10477,6 +10627,7 @@ func (m *model) renderTranscript() {
 		}
 		entry := m.renderMessageBlock(i, msg, toolNames)
 		startLine := nlAcc
+		m.transcriptMsgStartLine[i] = startLine
 		nlAcc += len(entry.wrapped)
 		endLine := nlAcc - 1
 		m.transcriptLines = append(m.transcriptLines, entry.wrapped...)
@@ -10498,6 +10649,11 @@ func (m *model) renderTranscript() {
 	}
 	m.viewport.SetContentLines(m.transcriptLines)
 	m.sel = selectionState{}
+	// If a chat-search jump is active, the in-app selection machinery was
+	// just cleared by the line above — re-paint the single-line flash on
+	// the first wrapped row of the matched message. Wrapped through a
+	// helper so the chat-search feature stays in one file.
+	m.ensureChatSearchFlashHighlight()
 	m.updatePermButtonRegions()
 }
 
@@ -10506,7 +10662,10 @@ func (m *model) renderUserText(text string) string {
 	if m.redactionRegistry != nil {
 		text = renderSecrets(text, m.redactionRegistry)
 	}
-	content := renderMarkdownBold(text, m.styles.Text)
+	// renderMarkdownInLine does bold + headings + markdown links + raw
+	// URL styling in one pass (over the original text), so the output is
+	// a single styled block ready for the user-message bubble.
+	content := renderMarkdownInLine(text, m.styles.Text)
 	bubbleWidth := m.viewport.Width() - 6
 	if bubbleWidth < 12 {
 		bubbleWidth = 12
@@ -11906,11 +12065,11 @@ func (m model) renderAssistantText(text string) string {
 	for {
 		start, tagLen := findThinkingStart(text)
 		if start < 0 {
-			b.WriteString(renderMarkdownBold(text, m.styles.Text))
+			b.WriteString(renderMarkdownInLine(text, m.styles.Text))
 			break
 		}
 		if start > 0 {
-			b.WriteString(renderMarkdownBold(text[:start], m.styles.Text))
+			b.WriteString(renderMarkdownInLine(text[:start], m.styles.Text))
 		}
 		remaining := text[start+tagLen:]
 		end, endLen := findThinkingEnd(remaining)
@@ -11928,51 +12087,8 @@ func (m model) renderAssistantText(text string) string {
 	return b.String()
 }
 
-func renderMarkdownBold(text string, normalStyle lipgloss.Style) string {
-	boldStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#da702c")).Bold(true)
-	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#3aa99f")).Bold(true)
-	var b strings.Builder
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		if strings.HasPrefix(line, "# ") {
-			b.WriteString(titleStyle.Render(strings.TrimPrefix(line, "# ")))
-		} else if strings.HasPrefix(line, "## ") {
-			b.WriteString(titleStyle.Render(strings.TrimPrefix(line, "## ")))
-		} else if strings.HasPrefix(line, "### ") {
-			b.WriteString(titleStyle.Render(strings.TrimPrefix(line, "### ")))
-		} else {
-			rendered := renderBoldInLine(line, normalStyle, boldStyle)
-			b.WriteString(rendered)
-		}
-		if i < len(lines)-1 {
-			b.WriteString("\n")
-		}
-	}
-	return b.String()
-}
-
-func renderBoldInLine(line string, normalStyle, boldStyle lipgloss.Style) string {
-	var b strings.Builder
-	for {
-		start := strings.Index(line, "**")
-		if start < 0 {
-			b.WriteString(normalStyle.Render(line))
-			break
-		}
-		if start > 0 {
-			b.WriteString(normalStyle.Render(line[:start]))
-		}
-		line = line[start+2:]
-		end := strings.Index(line, "**")
-		if end < 0 {
-			b.WriteString(normalStyle.Render("**" + line))
-			break
-		}
-		b.WriteString(boldStyle.Render(line[:end]))
-		line = line[end+2:]
-	}
-	return b.String()
-}
+// (Markdown rendering for chat text — bold, headings, links, raw URLs —
+// lives in urllink.go as renderMarkdownInLine.)
 
 func findThinkingStart(text string) (int, int) {
 	think := strings.Index(text, "<think>")
@@ -12163,7 +12279,14 @@ func (m model) renderTabContent() string {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
 	}
 	leftParts := []string{transcript}
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
+	// The find bar appears between the transcript and the slash popup /
+	// queue / input rows when ctrl+f (or /search) opens it on the chat tab.
+	// Same width as the input area (panelWidth-2) so the two bordered boxes
+	// line up exactly.
+	if m.chatSearchActive {
+		leftParts = append(leftParts, m.renderChatSearchBar(panelWidth-2))
+	}
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog {
 		leftParts = append(leftParts, m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -13890,7 +14013,7 @@ func (m model) agentStripTopY() int {
 		vph = 1
 	}
 	y := appHeaderHeight + vph + 2 // +2 for transcript border
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog {
 		y += lipgloss.Height(m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -13913,13 +14036,16 @@ func (m model) statusBarTopY() int {
 }
 
 func (m *model) applyOrClearSelectionHighlight() {
-	if !m.sel.active && !m.hoverLinkActive {
+	if !m.sel.active && !m.hoverLinkActive && !m.hoverUrlLinkActive {
 		m.viewport.SetContentLines(m.transcriptLines)
 		return
 	}
 	lines := m.transcriptLines
 	if m.hoverLinkActive {
 		lines = applyPathLinkUnderline(lines, m.rawTranscriptLines, m.hoverLink)
+	}
+	if m.hoverUrlLinkActive {
+		lines = applyUrlLinkUnderline(lines, m.rawTranscriptLines, m.hoverUrlLink)
 	}
 	if m.sel.active {
 		sl, sc, el, ec := normaliseSelection(m.sel.startLine, m.sel.startCol, m.sel.endLine, m.sel.endCol)
@@ -13955,6 +14081,53 @@ func (m *model) transcriptPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
 	}
 	r.line = contentLine
 	return r, true
+}
+
+// transcriptUrlLinkAt returns the URL link (markdown [text](url) or raw
+// https?://... in plain text) under the mouse in the chat transcript, if any.
+// Mirrors transcriptPathLinkAt but is cheaper (no filesystem stat) and
+// probes a separate cache. Also handles URLs that wrap across line boundaries
+// by combining adjacent raw lines.
+func (m *model) transcriptUrlLinkAt(mouse tea.Mouse) (urlLinkRegion, bool) {
+	if m.activeTab != tabChat || !m.detail.empty() {
+		return urlLinkRegion{}, false
+	}
+	if mouse.X < 0 || mouse.X >= m.mainScrollbarX() {
+		return urlLinkRegion{}, false
+	}
+	topY := m.viewportContentTopY()
+	if mouse.Y < topY || mouse.Y >= topY+m.viewport.Height() {
+		return urlLinkRegion{}, false
+	}
+	contentLine := (mouse.Y - topY) + m.viewport.YOffset()
+	if contentLine < 0 || contentLine >= len(m.rawTranscriptLines) {
+		return urlLinkRegion{}, false
+	}
+	rawLine := m.rawTranscriptLines[contentLine]
+
+	// 1. Try the probe cache (single-line, fast path).
+	r, ok := m.hoverUrlLinkProbe.probe(rawLine, mouse.X)
+	if ok {
+		r.line = contentLine
+		return r, true
+	}
+
+	// 2. Single-line miss — try wrapped-line detection (combine with
+	//    adjacent lines). This bypasses the probe cache since wrap
+	//    crossings are rare and the combined regex scan is cheap.
+	prevLine := ""
+	if contentLine > 0 {
+		prevLine = m.rawTranscriptLines[contentLine-1]
+	}
+	nextLine := ""
+	if contentLine < len(m.rawTranscriptLines)-1 {
+		nextLine = m.rawTranscriptLines[contentLine+1]
+	}
+	r, ok = urlLinkAtColWrapped(rawLine, prevLine, nextLine, mouse.X)
+	if ok {
+		r.line = contentLine
+	}
+	return r, ok
 }
 
 // detailPathLinkAt returns the file-path link under the mouse in the top
@@ -14077,6 +14250,8 @@ func (m model) inputAreaHeight() int {
 	var rendered string
 	if m.showQuestionDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
+	} else if m.showURLDialog {
+		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
 	} else if m.showPermDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
@@ -14112,7 +14287,7 @@ func (m model) inputAreaTopY() int {
 }
 
 func (m model) isClickInInputArea(mouse tea.Mouse) bool {
-	if m.activeTab != tabChat || m.showPermDialog || m.showQuestionDialog {
+	if m.activeTab != tabChat || m.showPermDialog || m.showQuestionDialog || m.showURLDialog {
 		return false
 	}
 	if mouse.X >= m.panelWidth() {
@@ -14590,6 +14765,23 @@ func (m *model) renderSessionDeleteConfirmDialog(width int) string {
 	)
 }
 
+// renderURLDialog renders the URL open confirmation dialog.
+func (m *model) renderURLDialog(width int) string {
+	if !m.showURLDialog {
+		return ""
+	}
+
+	contentWidth := max(0, width-2)
+
+	header := m.styles.Header.Render("🔗 Open URL?")
+	body := fmt.Sprintf("Open the following URL in your browser?\n\n%s", m.pendingURL)
+	hint := hintStyle.Render("Press Y or Enter to open, N or Esc to cancel")
+
+	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
+		header + "\n\n" + body + "\n\n" + hint,
+	)
+}
+
 // handleReviewCmd implements the /review command for AI code review.
 func (m *model) handleReviewCmd(args []string) tea.Cmd {
 	// Detect what to review
@@ -14919,4 +15111,69 @@ func openBrowser(url string) {
 			log.Printf("openBrowser: failed to open %s: %v", url, err)
 		}
 	}
+}
+
+// handleAddDirCmd implements /add-dir: adds a directory to extra_allowed_paths.
+func (m *model) handleAddDirCmd(args []string) tea.Cmd {
+	if len(args) == 0 {
+		var b strings.Builder
+		b.WriteString("Extra allowed directories:\n")
+		if m.config != nil && len(m.config.Ocode.ExtraAllowedPaths) > 0 {
+			for _, p := range m.config.Ocode.ExtraAllowedPaths {
+				b.WriteString(fmt.Sprintf("  %s\n", p))
+			}
+		} else {
+			b.WriteString("  (none)\n")
+		}
+		b.WriteString("\nUsage: /add-dir <path> — add a directory to extra allowed paths so the agent can work with files there")
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return nil
+	}
+
+	target := strings.Join(args, " ")
+	if strings.HasPrefix(target, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			target = filepath.Join(home, target[2:])
+		}
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(m.workDir, target)
+	}
+	target = filepath.Clean(target)
+
+	info, err := os.Stat(target)
+	if err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error accessing %s: %v", target, err)})
+		return nil
+	}
+	if !info.IsDir() {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%s is not a directory", target)})
+		return nil
+	}
+
+	if !tool.AddExtraAllowedPath(target) {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to add %s to extra allowed paths", target)})
+		return nil
+	}
+
+	if m.config != nil {
+		found := false
+		for _, existing := range m.config.Ocode.ExtraAllowedPaths {
+			if filepath.Clean(existing) == target {
+				found = true
+				break
+			}
+		}
+		if !found {
+			m.config.Ocode.ExtraAllowedPaths = append(m.config.Ocode.ExtraAllowedPaths, target)
+		}
+		if err := config.SaveExtraAllowedPath(target); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save extra_allowed_paths: %v", err)})
+			return nil
+		}
+	}
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Added %s to extra allowed paths. The agent can now read and write files in this directory.", target)})
+	m.broadcastTUIStatus()
+	return nil
 }

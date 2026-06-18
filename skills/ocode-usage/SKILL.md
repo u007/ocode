@@ -43,7 +43,12 @@ ocode web
 
 ### Config File Location
 
-`~/.config/opencode/config.json`
+Configuration is split across two files:
+
+| File | Location | Role |
+|------|----------|------|
+| **`opencode.json`** | Project root or `~/.config/opencode/` | Upstream-compatible settings (provider creds, model prefs). **Read-only** — ocode never writes to it. |
+| **`ocodeconfig.json`** | `~/.config/opencode/` (global only) | ocode-only state (permissions, editor, compaction, model history). Written by ocode. |
 
 ### Minimal Config
 
@@ -61,18 +66,25 @@ ocode web
 | Variable | Description |
 |----------|-------------|
 | `OPENCODE_MODEL` | Default model (e.g., `gpt-4o`, `claude-3-5-sonnet`) |
+| `OPENCODE_AUTH_TOKEN` | Single token for all providers (bypasses per-provider config) |
 | `OPENCODE_SERVER_USERNAME` | Basic auth for web server |
 | `OPENCODE_SERVER_PASSWORD` | Basic auth for web server |
 | `NO_COLOR` | Disable colored output |
 
 ### Provider API Keys
 
-Supported providers: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Z.AI**, **Alibaba (Qwen)**
+Supported providers: **OpenAI**, **Anthropic**, **Google (Gemini)**, **Z.AI**, **Alibaba (Qwen)**, **GitHub Copilot**, **DeepSeek (opencode-go)**, **Minimax**
 
 Configure via `apiKeys` in config or provider-specific env vars:
 - `OPENAI_API_KEY`
 - `ANTHROPIC_API_KEY`
 - `GOOGLE_API_KEY`
+- `ZHIPUAI_API_KEY` (Z.AI)
+- `DASHSCOPE_API_KEY` (Alibaba)
+- `GITHUB_COPILOT_TOKEN`
+- `OPENCODE_API_KEY` (opencode-go / DeepSeek)
+
+**Global override:** Set `OPENCODE_AUTH_TOKEN` to use a single token for all providers, bypassing per-provider configuration. Useful for CI/CD or proxy setups.
 
 ---
 
@@ -90,10 +102,22 @@ ocode --permission-mode off  # Disable permissions entirely
 
 **TUI Navigation:**
 - `Tab` / `Shift+Tab` — Switch tabs (chat, files, git, log)
-- `Ctrl+P` — Command palette
-- `Ctrl+X` — Leader key (then `h` for help, `t` for theme, etc.)
-- `Esc` — Exit slash popup / cancel
-- Mouse — Click tabs, scroll, select text
+- `Shift+Tab` (while agent running) — Toggle agent strip focus (cycle through running agents)
+- `Ctrl+P` — Search and open files (command palette)
+- `Ctrl+X` — Leader key (then `h` help, `u` undo, `r` redo, `n` new, `l` list, `c` compact, `t` thinking level)
+- `Ctrl+D` — Cycle thinking effort level (off → low → med → high)
+- `Ctrl+B` — Move running bash command to background
+- `Ctrl+G` — Open process list
+- `Ctrl+O` — Toggle YOLO permissions mode
+- `Ctrl+Y` — Retry last LLM timeout or I/O error
+- `Ctrl+C` — Clear input / Cancel / Double-tap to quit
+- `Esc` — Close popup / Exit shell mode / Cancel detail view
+- `Up/Down` — Navigate input history
+- `Shift+Enter` — New line in input
+- `Tab` — Autocomplete slash commands
+- Mouse — Click tabs, scroll, select text (click-drag to copy, plain click to activate)
+- `!command` — Prefix input with `!` to run a shell command (double-esc to exit shell mode)
+- `@path` — Reference a file (attach image, or pass path to model)
 
 ### 3.2 Headless Run Mode
 
@@ -143,21 +167,42 @@ ocode serve
 ocode web
 ocode serve --open
 
+# Remote control a running TUI session
+# (In TUI: /rc starts the web UI; /rc off stops it)
+
 # Custom host/port
 ocode serve -host 127.0.0.1 -port 8080
 
 # With basic auth (via env vars)
 OPENCODE_SERVER_USERNAME=admin OPENCODE_SERVER_PASSWORD=secret ocode serve
+
+# With Tailscale (auto-exposes via tailscale serve)
+ocode serve --tailscale
 ```
+
+**Web UI features:**
+- **Mobile sidebar** — Overlay with backdrop on viewports < 768px
+- **Web shell** — `!` prefix in chat input runs local shell commands
+- **Live status panel** — Real-time model, context, LSP, spending, modified files
+- **File uploads** — Drag-and-drop uploads; directory set via `/upload` command
 
 **Endpoints:**
 - `GET /` — Web UI
 - `POST /api/chat` — Send message
 - `GET /api/chat/stream` — Stream response (SSE)
-- `GET /api/sessions` — List sessions
+- `POST /api/shell` — Run a local shell command (used by `!` prefix)
+- `GET /api/sessions` — List sessions (supports `?limit=&offset=` pagination)
+- `GET /api/sessions/:id` — Session detail with live model/context info
 - `GET /api/models` — List models
+- `GET /api/small-model` — Small model status (includes `enabled` field)
 - `GET /api/files/tree` — File tree
 - `GET /api/git/status` — Git status
+- `GET /api/tui-status` — Live TUI state (model, advisor, IDE, CWD, context, LSP, modified files)
+- `GET /api/spending` — LLM token spending
+- `GET /api/lsp/statuses` — LSP server statuses
+- `GET /api/files/modified` — Modified files list
+- `POST /api/uploads` — Upload endpoint configuration
+- `POST /api/uploads/file` — File upload endpoint
 
 ### 3.4 ACP Server (Agent Communication Protocol)
 
@@ -259,11 +304,14 @@ ocode models --provider anthropic
 
 | Provider | Models |
 |----------|--------|
-| OpenAI | gpt-4o, gpt-4o-mini, o1-preview, o1-mini |
-| Anthropic | claude-3-5-sonnet, claude-3-5-haiku, claude-3-opus |
-| Google | gemini-1.5-pro, gemini-1.5-flash |
-| Z.AI | glm-4, glm-4v |
-| Alibaba | qwen-max, qwen-plus |
+| OpenAI | gpt-4o, gpt-4o-mini, o1, o1-mini, o3-mini |
+| Anthropic | claude-3-5-sonnet, claude-3-5-haiku, claude-3-opus, claude-4-5-sonnet, claude-opus-4-8 |
+| Google | gemini-1.5-pro, gemini-1.5-flash, gemini-2.0-flash |
+| Z.AI | glm-4, glm-4v, glm-4-plus |
+| Alibaba | qwen-max, qwen-plus, qwen-turbo |
+| GitHub Copilot | gpt-4o, claude-3-5-sonnet (via Copilot) |
+| DeepSeek (opencode-go) | deepseek-v4-flash, deepseek-v4 |
+| Minimax | minimax-m3 |
 
 ---
 
@@ -293,8 +341,19 @@ ocode skills uninstall ocode-tui
 | Skill | Description |
 |-------|-------------|
 | `ocode-tui` | TUI architecture guide |
-| `team-onboarding` | Team onboarding generator |
-| `custom-model-prompt` | Model-specific prompt config |
+| `ocode-tools` | Built-in tool system reference |
+| `ocode-permissions` | Permission modes, policies, and configuration |
+| `ocode-agent-architecture` | Agent loop, context loading, provider abstraction |
+| `ocode-mem` | Persistent memory workflow for user/project/global context |
+| `team-onboarding` | Team onboarding documentation generator |
+| `review-changes` | AI code review using parallel agents with shared context |
+| `custom-model-prompt` | Model-specific prompt configuration |
+| `find-docs` | Search for documentation files in the codebase |
+| `find-skills` | Discover and install skills by description |
+| `skill-creator` | Guide for creating and updating skills |
+| `agent-browser` | Browser automation CLI for AI agents |
+| `flutter` | Flutter/Dart development with Riverpod, Freezed |
+| `compress` | Workspace compression for reducing context size |
 
 ### Creating Custom Skills
 
@@ -381,19 +440,40 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 
 | Command | Aliases | When to Use | Notes |
 |---------|---------|-------------|-------|
-| `/clear` | | Start a fresh conversation context in the current session | Keeps session history on disk; only clears in-memory messages |
-| `/compact` | | Manually trigger context compaction when approaching token limits | Uses the configured summary model (default: active model) |
-| `/recap` | | Generate a structured session recap (Goal, Progress, Decisions, Next Steps, Files) | **Web UI only** — backend endpoint planned but not yet implemented. In TUI, acts as a normal prompt. |
-| `/standup` | `/catchup` | Caveman summary of recent commits + pending changes, with TODOs sorted (easy first, then high priority) and missed stubs flagged | TUI; reviews last 5 commits + working-tree changes. Works on a clean tree (commit-only summary). |
-| `/export` | | Export the full session as JSON (messages, metadata, token usage) | Output includes full transcript for backup or migration |
-| `/export-claude` | | Export session in Claude Code compatible format | For importing into Claude Code |
-| `/share` | | Generate a shareable link to the current session | Requires `ocode serve` running; creates a session URL |
-| `/model` | `/m` | Open the model picker to switch LLM providers/models | Shows recent/favorite models first; fuzzy search supported |
-| `/session` | `/s` | Switch or resume a different session | Lists recent sessions with preview |
-| `/config` | | Open configuration editor (TUI) | Edit compact, permissions, editor settings |
-| `/help` | `/?` | Show this help / available commands | |
-| `/learn` | | List project-root skills and guide skill creation/update | Starts from current project-root skills; deeper discovery should be delegated only when needed |
-| `/mask` | | Toggle/configure secret redaction | See `/mask` documentation below |
+| `/model` | `/m` | Switch LLM providers/models | Fuzzy search; shows recent/favorite models first |
+| `/advisor` | | Set the advisor model for strategic guidance | Used by the `advisor()` tool during code reviews |
+| `/small-model` | | Show or switch the small model for lightweight tasks | Small model gets an intent-analysis prompt fragment |
+| `/compact` | `[focus]` | Manually trigger context compaction | Uses configured summary model (separate from chat model) |
+| `/review` | | AI code review (working dir, file, commit, branch, or PR) | Uses parallel agents with shared notes bus |
+| `/standup` | `/catchup` | Caveman summary of recent commits + pending changes | Reviews last 5 commits + working-tree changes |
+| `/clear` | `/new` | Start a fresh conversation in the current session | Keeps session on disk; only clears in-memory messages |
+| `/session` | `/s`, `/resume` | List, pick, or resume sessions | Supports pagination with limit/offset |
+| `/export` | | Export session as JSON | Full transcript for backup or migration |
+| `/export-claude` | | Export in Claude Code compatible JSONL format | For importing into Claude Code |
+| `/share` | | Generate a shareable session link | Requires `ocode serve` running |
+| `/cd` | `/cwd` | Change the project root | Resolves relative paths and `~` expansion |
+| `/context` | | Show context window token budget and system prompt | Displays model family prompt + token estimate |
+| `/upload` | `/uploads` | Show or set the file upload directory | Persisted in config; defaults to `<workDir>/.ocode/uploads` |
+| `/rc` | `/remote-control` | Start/stop web UI to mirror this session | `/rc off` stops the server |
+| `/ide` | | Connect to VS Code (Claude Code extension) | Lock discovery, WebSocket + MCP client |
+| `/theme` | `/themes` | Switch themes instantly | Built-in themes: Tokyo Night, Storm, Catppuccin |
+| `/permissions` | | View/set tool and bash permissions | Supports per-tool rules, bash prefix rules, auto-permission model |
+| `/yolo` | | Toggle YOLO permissions mode on/off | Auto-approves permission-gated tools (respects hard blocks) |
+| `/git` | | Git operations from command line | Stage, unstage, discard, commit, push, pull, branch |
+| `/github` | | PR, issue, and workflow commands | GitHub API integration |
+| `/plugin` | | Plugin management (install, sync, list, etc.) | Git-based plugin system with registry |
+| `/skills` | | Browse available skills | Lists all installed skills |
+| `/learn` | | List project-root skills and guide creation/update | Starts from current project-root skills |
+| `/undo` | `/redo` | Undo/redo file changes | Session-level change tracking |
+| `/lsp` | | LSP diagnostics and status | Per-file error/warning counts |
+| `/mcp` | `/mcp-auth` | MCP server management | Local + remote servers with OAuth support |
+| `/editor` | `/editor-mode` | External editor configuration | Supports tmux-split, tmux-window, plain exec |
+| `/usage` | | LLM token usage by model and date range | Per-hour, day, week, month, etc. |
+| `/mask` | | Toggle/configure secret redaction | Tier-1 regex + tier-2 LLM scanning |
+| `/mem` | | Memory context injection | Inspect or toggle user/project/global memory layers |
+| `/btw` | `/by-the-way` | Add a quick aside to the conversation | Injects a note without breaking flow |
+| `/init` | | Analyze project and generate AGENTS.md | Project initialization |
+| `/help` | `/?` | Show all available commands | Auto-generated from registered command specs |
 
 ### Command Palette (`Ctrl+P`)
 
