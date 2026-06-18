@@ -4416,34 +4416,60 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.lastClickX = mouse.X
 				m.lastClickY = mouse.Y
 				m.git.panel = gitPanelFiles
+
+				// Subtract the filter bar row when the filter is active;
+				// it occupies the first content row inside the pane.
+				logicalRow := row
+				if m.git.filterQuery != "" {
+					logicalRow--
+				}
+
 				switch m.git.section {
 				case gitSectionChanges:
 					files := m.git.currentFileList()
-					fileIdx := row
+					fileIdx := -1
+					if logicalRow < 0 {
+						// Clicked the filter bar row
+						break
+					}
 					if m.git.filterQuery == "" {
 						// The rendered file list includes "● staged" and
-						// "○ unstaged/untracked" header rows that are not file
-						// items. Subtract those headers to map the visual row to
-						// the correct file index.
+						// "○ unstaged/untracked" header rows that are not
+						// file items. Subtract those headers to map the
+						// visual row to the correct file index.
 						if len(m.git.stagedFiles) > 0 {
-							if row == 0 {
+							if logicalRow == 0 {
 								// Clicked the "● staged" header
 								break
 							}
-							if row <= len(m.git.stagedFiles) {
-								fileIdx = row - 1
-							} else if row == len(m.git.stagedFiles)+1 && len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
+							if logicalRow <= len(m.git.stagedFiles) {
+								fileIdx = logicalRow - 1
+							} else if logicalRow == len(m.git.stagedFiles)+1 && len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
 								// Clicked the "○ unstaged/untracked" header
 								break
 							} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
-								fileIdx = row - 2 // skip both headers
+								fileIdx = logicalRow - 2 // skip both headers
 							} else {
-								fileIdx = row - 1 // skip staged header only
+								fileIdx = logicalRow - 1 // skip staged header only
 							}
-						} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 && row == 0 {
+						} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 && logicalRow == 0 {
 							// Clicked the "○ unstaged/untracked" header
 							break
+						} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
+							// No staged files; single header at row 0, files start at row 1.
+							fileIdx = logicalRow - 1
+						} else if len(m.git.stagedFiles)+len(m.git.unstagedFiles)+len(m.git.untrackedFiles) == 0 {
+							break // no files at all
 						}
+					} else {
+						// Filtered: flat list, no headers. Apply scroll
+						// offset so clicks map to the visible window.
+						fileIdx = logicalRow + m.git.fileListScroll
+					}
+					// When unfiltered, also apply scroll offset for the
+					// header-adjusted index.
+					if m.git.filterQuery == "" && fileIdx >= 0 {
+						fileIdx += m.git.fileListScroll
 					}
 					if fileIdx >= 0 && fileIdx < len(files) {
 						m.git.filesCursor = fileIdx
@@ -4454,18 +4480,19 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 						m.git.loadDiff()
 					}
 				case gitSectionLog:
-					if row < len(m.git.commits) {
-						m.git.commitCursor = row
+					commitIdx := logicalRow + m.git.commitViewport.YOffset()
+					if commitIdx >= 0 && commitIdx < len(m.git.commits) {
+						m.git.commitCursor = commitIdx
 						m.git.loadDiff()
 					}
 				case gitSectionStash:
-					if row < len(m.git.stashes) {
-						m.git.stashCursor = row
+					if logicalRow >= 0 && logicalRow < len(m.git.stashes) {
+						m.git.stashCursor = logicalRow
 						m.git.loadDiff()
 					}
 				case gitSectionBranches:
-					if row < len(m.git.branches) {
-						m.git.branchCursor = row
+					if logicalRow >= 0 && logicalRow < len(m.git.branches) {
+						m.git.branchCursor = logicalRow
 						m.git.loadDiff()
 					}
 				}

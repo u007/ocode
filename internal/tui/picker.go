@@ -29,6 +29,7 @@ func (m *model) openAdvisorPicker() {
 func (m *model) prependClaudeCodeSection() {
 	claudeCodeModels := []string{
 		"claude-sonnet-4-6",
+		"claude-opus-4-8",
 		"claude-opus-4-7",
 		"claude-haiku-4-5",
 		"claude-fable-5",

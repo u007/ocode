@@ -39,7 +39,7 @@ func Run(opts RunOptions) error {
 		}
 	}
 
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(m, tea.WithFilter(newInputFilter()))
 	var finalModel tea.Model
 	defer func() {
 		if finalModel == nil {
