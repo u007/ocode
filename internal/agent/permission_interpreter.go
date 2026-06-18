@@ -241,7 +241,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	}
 
 	messages := []Message{{Role: "user", Content: prompt}}
-	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, []map[string]interface{}{permissionReadFileTool()}, modelLabel, "bash", a.RecordSideUsageFromMessage)
+	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, []map[string]interface{}{permissionReadFileTool()}, modelLabel, "bash", a.RecordSideUsageFromMessage, roots)
 	if !gotFinal {
 		return false, failReason, ""
 	}

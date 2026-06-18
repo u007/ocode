@@ -534,6 +534,7 @@ func TestRenderAgentStripShowsRunModelLabel(t *testing.T) {
 		styles: ApplyThemeColors("tokyonight"),
 		input:  newTestTextarea(),
 	}
+	m.input.SetValue("x")
 	m.layout()
 
 	strip, _ := m.renderAgentStrip()
@@ -4062,7 +4063,7 @@ func TestGitClampFileListScroll(t *testing.T) {
 		width:  100,
 		height: 12, // panelH = 12 - 4 = 8, visible rows = 8 - 2 = 6
 		git: gitModel{
-			height:       12,
+			height:  12,
 			section: gitSectionChanges,
 			unstagedFiles: []gitFile{
 				{status: "M", path: "a.go"},
@@ -5777,5 +5778,79 @@ func TestLSPIndexingDoneMsgClearsStartTime(t *testing.T) {
 	}
 	if got.lspStateSeq <= 1 {
 		t.Error("expected lspStateSeq to be incremented")
+	}
+}
+
+func TestScrollbarReleaseClearsDragState(t *testing.T) {
+	m := model{
+		activeTab:   tabChat,
+		width:       80,
+		height:      24,
+		showSidebar: false,
+		input:       newTestTextarea(),
+		styles:      ApplyThemeColors("tokyonight"),
+		viewport:    fastviewport.New(80, 10),
+	}
+	m.layout()
+	lines := make([]string, 50)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	m.viewport.SetContentLines(lines)
+	m.viewport.SetYOffset(12)
+	m.scrollbarDrag = scrollbarDragTranscript
+	m.scrollbarDragOffset = 3
+
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: m.mainScrollbarX(), Y: m.viewportContentTopY() + 1}, false)
+	if !ok {
+		t.Fatalf("expected scrollbar release to be handled")
+	}
+	got := updated.(model)
+	if got.scrollbarDrag != scrollbarDragNone {
+		t.Fatalf("expected scrollbar drag to clear on release, got %v", got.scrollbarDrag)
+	}
+	if got.scrollbarDragOffset != 0 {
+		t.Fatalf("expected scrollbar drag offset to reset, got %d", got.scrollbarDragOffset)
+	}
+
+	before := got.viewport.YOffset()
+	motionUpdated, _, motionOK := got.handleMouseMotion(tea.Mouse{Button: tea.MouseNone, X: got.mainScrollbarX(), Y: got.viewportContentTopY() + got.viewport.Height() - 1})
+	if motionUpdated == nil {
+		t.Fatalf("unexpected nil model from mouse motion (handled=%v)", motionOK)
+	}
+	motion := motionUpdated.(model)
+	if motion.viewport.YOffset() != before {
+		t.Fatalf("expected viewport offset to stay at %d after release, got %d", before, motion.viewport.YOffset())
+	}
+}
+
+func TestTranscriptClickClearsStaleScrollbarDrag(t *testing.T) {
+	m := model{
+		activeTab:   tabChat,
+		width:       80,
+		height:      24,
+		showSidebar: false,
+		viewport:    fastviewport.New(80, 10),
+	}
+	lines := make([]string, 50)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line %d", i)
+	}
+	m.viewport.SetContentLines(lines)
+	m.viewport.SetYOffset(12)
+	m.scrollbarDrag = scrollbarDragTranscript
+	m.scrollbarDragOffset = 3
+
+	updated, _, _ := m.handleMouseAction(tea.Mouse{Button: tea.MouseRight, X: 2, Y: m.viewportContentTopY() + 1}, true)
+	got := derefTestModel(t, updated)
+	if got.scrollbarDrag != scrollbarDragNone {
+		t.Fatalf("expected stale scrollbar drag to clear on new transcript click, got %v", got.scrollbarDrag)
+	}
+
+	before := got.viewport.YOffset()
+	updated, _, _ = got.handleMouseMotion(tea.Mouse{Button: tea.MouseLeft, X: 2, Y: m.viewportContentTopY() + 2})
+	got = derefTestModel(t, updated)
+	if got.viewport.YOffset() != before {
+		t.Fatalf("expected transcript click to stop stale drag from scrolling, before=%d after=%d", before, got.viewport.YOffset())
 	}
 }

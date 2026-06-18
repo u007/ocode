@@ -1320,3 +1320,85 @@ func TestPermissions_TempDirAutoAllowed(t *testing.T) {
 		})
 	}
 }
+
+// TestAskPermissionModelIncludesAllowedRootsInPrompt verifies that the plain
+// LLM permission prompt includes the pre-authorized paths so the model does
+// not deny commands targeting /tmp or other allowed roots.
+func TestAskPermissionModelIncludesAllowedRootsInPrompt(t *testing.T) {
+	wd := t.TempDir()
+	cfg := &config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "test-model"}
+	a := NewAgent(nil, nil, cfg, nil)
+	a.permissions.SetWorkDir(wd)
+
+	capture := &scriptedCaptureClient{Responses: []string{"ALLOW: safe"}}
+	prevClientFn := newClientFn
+	t.Cleanup(func() { newClientFn = prevClientFn })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return capture
+	}
+
+	req := &PermissionRequest{
+		ToolName: "bash",
+		Command:  `cd /tmp && python3 -c "print('hello')"`,
+		Rule:     "bash.prefix.python3",
+		Scope:    PermissionScopeBashPrefix,
+	}
+	a.askPermissionModel("bash", json.RawMessage(`{"command":"cd /tmp && python3 -c \"print('hello')\""}`), req)
+
+	if len(capture.Prompts) == 0 {
+		t.Fatal("expected LLM to be called with a prompt")
+	}
+	prompt := capture.Prompts[0]
+	if !strings.Contains(prompt, "/tmp") {
+		t.Errorf("prompt does not include /tmp as an allowed path\nprompt:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "Pre-authorized paths") {
+		t.Errorf("prompt does not contain 'Pre-authorized paths' section\nprompt:\n%s", prompt)
+	}
+}
+
+func TestWebfetchLocalhostAutoAllow(t *testing.T) {
+	cases := []struct {
+		url  string
+		want PermissionLevel
+	}{
+		{"http://localhost:8080/api", PermissionAllow},
+		{"http://127.0.0.1:3000/health", PermissionAllow},
+		{"http://127.0.0.2/foo", PermissionAllow},
+		{"http://[::1]:9090/bar", PermissionAllow},
+		{"https://example.com/page", PermissionAsk},
+	}
+	for _, c := range cases {
+		t.Run(c.url, func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetWorkDir(t.TempDir())
+			args := json.RawMessage(`{"url":"` + c.url + `"}`)
+			dec := pm.Decide("webfetch", args)
+			if dec.Level != c.want {
+				t.Errorf("Decide(webfetch, %s) = %s, want %s", c.url, dec.Level, c.want)
+			}
+		})
+	}
+}
+
+func TestAnnotatePermissionReadResult(t *testing.T) {
+	roots := []string{"/tmp", "/home/user/project"}
+	cases := []struct {
+		path    string
+		wantTag bool
+	}{
+		{"/tmp/foo.txt", true},
+		{"/tmp", true},
+		{"/home/user/project/src/main.go", true},
+		{"/etc/passwd", false},
+		{"/var/log/syslog", false},
+	}
+	for _, c := range cases {
+		result := annotatePermissionReadResult("content", c.path, roots)
+		hasNote := strings.Contains(result, "pre-authorized root")
+		if hasNote != c.wantTag {
+			t.Errorf("annotatePermissionReadResult(%q): hasNote=%v want=%v\nresult: %s", c.path, hasNote, c.wantTag, result)
+		}
+	}
+}

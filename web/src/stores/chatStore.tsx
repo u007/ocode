@@ -1,10 +1,16 @@
 import { createContext, useContext, useReducer, type ReactNode } from "react";
-import type { Message, LivePart } from "../api/types";
+import type { Message, LivePart, TUIStatus } from "../api/types";
 
 export interface PermissionRequest {
   tool: string;
   command?: string;
   request_id: string;
+}
+
+export interface SessionContextMetrics {
+  currentTokens: number;
+  maxTokens: number;
+  model: string;
 }
 
 interface ChatState {
@@ -23,6 +29,16 @@ interface ChatState {
   totalMessages: number; // total messages on server
   hasMore: boolean; // whether older messages exist
   loadingMore: boolean; // currently fetching older messages
+  // Live TUI status (model, advisor, IDE, session, cwd, context, spending,
+  // modified files, LSP servers, extra paths). Updated by the SSE "status"
+  // event so the bar tracks the TUI without polling. Null until the first
+  // event arrives or the initial fetch resolves.
+  tuiStatus: TUIStatus | null;
+  sessionContext: SessionContextMetrics | null;
+  spendingUSD: number | null;
+  // True once the very first /api/tui-status fetch has resolved. Lets the UI
+  // show "loading…" vs. "not connected" while waiting for the first frame.
+  tuiStatusReady: boolean;
 }
 
 type ChatAction =
@@ -46,6 +62,10 @@ type ChatAction =
   | { type: "SET_LOADING_MORE"; loading: boolean }
   | { type: "MERGE_SNAPSHOT"; messages: Message[]; total: number }
   | { type: "SET_TOTAL"; total: number }
+  | { type: "SET_SESSION_CONTEXT"; context: SessionContextMetrics | null }
+  | { type: "SET_SPENDING"; spendingUSD: number | null }
+  | { type: "SET_TUI_STATUS"; status: TUIStatus }
+  | { type: "SET_TUI_STATUS_READY"; ready: boolean }
   | { type: "RESET" };
 
 const initialState: ChatState = {
@@ -62,6 +82,10 @@ const initialState: ChatState = {
   totalMessages: 0,
   hasMore: false,
   loadingMore: false,
+  tuiStatus: null,
+  sessionContext: null,
+  spendingUSD: null,
+  tuiStatusReady: false,
 };
 
 function chatReducer(state: ChatState, action: ChatAction): ChatState {
@@ -135,7 +159,23 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case "RESET":
       // Preserve the advisor on/off toggle across new sessions — the server
       // keeps it for the handler's lifetime, so the status must not snap back.
-      return { ...initialState, advisorEnabled: state.advisorEnabled };
+      // The TUI status snapshot is also preserved so the bar doesn't blank out
+      // during a /new; the next "status" SSE event will overwrite it anyway.
+      return {
+        ...initialState,
+        advisorEnabled: state.advisorEnabled,
+        tuiStatus: state.tuiStatus,
+        spendingUSD: state.spendingUSD,
+        tuiStatusReady: state.tuiStatusReady,
+      };
+    case "SET_SESSION_CONTEXT":
+      return { ...state, sessionContext: action.context };
+    case "SET_SPENDING":
+      return { ...state, spendingUSD: action.spendingUSD };
+    case "SET_TUI_STATUS":
+      return { ...state, tuiStatus: action.status, tuiStatusReady: true };
+    case "SET_TUI_STATUS_READY":
+      return { ...state, tuiStatusReady: action.ready };
     case "PREPEND_MESSAGES": {
       // Older messages loaded via scroll-up. Prepend and update pagination state.
       const hasMore = action.messages.length > 0 && state.messages.length + action.messages.length < action.total;

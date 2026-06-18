@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { authHeaders } from "@/api/client";
+import { apiPath, authHeaders } from "@/api/client";
 import { X, FileCode } from "lucide-react";
 import hljs from "highlight.js";
 import "highlight.js/styles/github-dark.css";
@@ -199,7 +199,7 @@ export default function FileTree({ onSelect }: Props) {
   const [previewFile, setPreviewFile] = useState<FileContent | null>(null);
 
   useEffect(() => {
-    fetch("/api/files/tree", { headers: authHeaders() })
+    fetch(apiPath("/api/files/tree"), { headers: authHeaders() })
       .then((r) => r.json())
       .then(setTree)
       .catch(console.error);
@@ -207,7 +207,7 @@ export default function FileTree({ onSelect }: Props) {
 
   const handlePreview = async (path: string) => {
     try {
-      const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`, { headers: authHeaders() });
+      const res = await fetch(apiPath(`/api/files/content?path=${encodeURIComponent(path)}`), { headers: authHeaders() });
       if (res.ok) {
         const data = await res.json();
         setPreviewFile(data);

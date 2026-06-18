@@ -1,16 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Routes, Route, useNavigate } from "react-router-dom";
-import { ChatProvider, useChatDispatch } from "./stores/chatStore";
+import { ChatProvider, useChatDispatch, useChatState } from "./stores/chatStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
 import AgentPreview from "./components/Chat/AgentPreview";
 import ChatInput from "./components/Chat/ChatInput";
 import StatusBar from "./components/common/StatusBar";
+import StatusPanel from "./components/Status/StatusPanel";
 import CommandPalette from "./components/common/CommandPalette";
 import GitPanel from "./components/Git/GitPanel";
 import FileTree from "./components/Files/FileTree";
 import LogPanel from "./components/Logs/LogPanel";
+import AssetsPanel from "./components/Assets/AssetsPanel";
 import TopTabs from "./components/Layout/TopTabs";
 import SessionSidebar from "./components/Layout/SessionSidebar";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
@@ -22,6 +24,62 @@ import { useChat } from "./hooks/useChat";
 import SessionPage from "./pages/SessionPage";
 
 type ModelDialogTab = "main" | "small" | "advisor";
+
+function StatusMetricsHydrator() {
+  const { tuiStatus } = useChatState();
+  const dispatch = useChatDispatch();
+  const lastSessionId = useRef<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const sessionId = tuiStatus?.session_id ?? null;
+
+    if (lastSessionId.current !== sessionId) {
+      dispatch({ type: "SET_SESSION_CONTEXT", context: null });
+      lastSessionId.current = sessionId;
+    }
+
+    const updateSpending = async () => {
+      try {
+        const res = await api.getSpending();
+        if (!cancelled) {
+          dispatch({ type: "SET_SPENDING", spendingUSD: res.spending_usd });
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+
+    updateSpending();
+
+    if (!sessionId) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    api
+      .getSessionContext(sessionId)
+      .then((res) => {
+        if (cancelled) return;
+        dispatch({
+          type: "SET_SESSION_CONTEXT",
+          context: {
+            currentTokens: res.estimated_tokens,
+            maxTokens: res.max_tokens ?? 0,
+            model: res.model ?? "",
+          },
+        });
+      })
+      .catch((err) => console.error(err));
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dispatch, tuiStatus?.session_id, tuiStatus?.updated_at]);
+
+  return null;
+}
 
 function HomeApp() {
   const [activeTab, setActiveTab] = useState("chat");
@@ -57,7 +115,10 @@ function HomeApp() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  // Seed the advisor on/off state from the server so the status bar is correct on load.
+  // Seed the advisor on/off, model, small model, advisor model, and the
+  // consolidated TUI status snapshot so the status bar is correct on load.
+  // The SSE "status" event from the bridged TUI session will overwrite these
+  // as updates arrive.
   useEffect(() => {
     api
       .getAdvisorEnabled()
@@ -66,6 +127,20 @@ function HomeApp() {
     api
       .getConfigModel()
       .then((res) => dispatch({ type: "SET_MODEL", model: res.model }))
+      .catch(console.error);
+    api
+      .getSmallModelWithEnabled()
+      .then((res) => {
+        dispatch({ type: "SET_SMALL_MODEL", model: res.model || "" });
+      })
+      .catch(console.error);
+    api
+      .getAdvisor()
+      .then((res) => dispatch({ type: "SET_ADVISOR_MODEL", model: res.model || "" }))
+      .catch(console.error);
+    api
+      .getTUIStatus()
+      .then((res) => dispatch({ type: "SET_TUI_STATUS", status: res }))
       .catch(console.error);
   }, [dispatch]);
 
@@ -121,15 +196,18 @@ function HomeApp() {
               <ChatPanel />
               <AgentPreview />
               <ChatInput onSlashCommand={handleCommand} />
-              <StatusBar 
-                onCoworkToggle={() => setCoworkOpen(!coworkOpen)} 
+              <StatusBar
+                onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
                 onModelClick={() => openModelDialog("main")}
+                onStatusClick={() => setActiveTab("status")}
               />
             </>
           )}
           {activeTab === "files" && <FileTree />}
           {activeTab === "git" && <GitPanel />}
+          {activeTab === "status" && <StatusPanel onClose={() => setActiveTab("chat")} />}
           {activeTab === "logs" && <LogPanel />}
+          {activeTab === "assets" && <AssetsPanel />}
         </main>
 
         {/* Right sidebar - cowork panel (only on chat tab) */}
@@ -175,6 +253,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <ChatProvider>
+        <StatusMetricsHydrator />
         <Routes>
           <Route path="/session/:id" element={<SessionPage />} />
           <Route path="*" element={<HomeApp />} />

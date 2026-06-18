@@ -937,6 +937,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		path := extractPathFromArgs(toolName, args)
 		domain := extractDomainFromURL(path)
 		if domain != "" {
+			if isLocalhostDomain(domain) {
+				emitDebug("perm", fmt.Sprintf("Decide ALLOW (webfetch localhost): tool=%s domain=%s", toolName, domain))
+				return PermissionDecision{Level: PermissionAllow}
+			}
 			if level, exists := pm.webfetchDomains[domain]; exists {
 				emitDebug("perm", fmt.Sprintf("Decide %s (webfetch domain cached): tool=%s domain=%s", level, toolName, domain))
 				return PermissionDecision{Level: level}
@@ -1728,6 +1732,22 @@ func extractDomainFromURL(rawURL string) string {
 		hostname = parsed.Host
 	}
 	return hostname
+}
+
+// isLocalhostDomain reports whether a hostname refers to the local machine
+// (localhost, 127.x.x.x, ::1, or any [::1]-style bracket form).
+func isLocalhostDomain(host string) bool {
+	// Strip brackets from IPv6 literals.
+	h := strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	switch h {
+	case "localhost", "::1":
+		return true
+	}
+	// 127.0.0.0/8 loopback range.
+	if strings.HasPrefix(h, "127.") {
+		return true
+	}
+	return false
 }
 
 // matchPathPattern matches a path against a glob pattern that may contain

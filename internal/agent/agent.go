@@ -1750,6 +1750,17 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		scope = string(req.Scope)
 	}
 
+	allowedRoots := ""
+	if a.permissions != nil {
+		roots := a.permissions.AllowedRoots()
+		if len(roots) > 0 {
+			allowedRoots = "\nPre-authorized paths (reads, writes, and deletes inside these roots are allowed):\n"
+			for _, r := range roots {
+				allowedRoots += "  - " + r + "\n"
+			}
+		}
+	}
+
 	prompt := fmt.Sprintf(`You are a permission gatekeeper for an AI coding assistant.
 A tool call is requesting permission. Decide whether to ALLOW or DENY it.
 
@@ -1757,7 +1768,7 @@ Tool: %s
 Arguments: %s
 Rule: %s
 Scope: %s
-
+%s
 Project context:
 %s
 
@@ -1781,7 +1792,7 @@ Keep your reply short. Examples of correctly formatted final lines:
 ALLOW: writes a test file inside the project directory
 ALLOW: read-only listing of project files
 DENY: deletes files outside the working directory
-These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, context)
+These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, context)
 
 	// Apply custom prompt from config if set.
 	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
@@ -1791,7 +1802,11 @@ These are format examples only — decide from THIS request's tool and arguments
 	tools := []map[string]interface{}{permissionReadFileTool()}
 	messages := []Message{{Role: "user", Content: prompt}}
 
-	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, tools, modelLabel, toolName, a.RecordSideUsageFromMessage)
+	var roots []string
+	if a.permissions != nil {
+		roots = a.permissions.AllowedRoots()
+	}
+	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, tools, modelLabel, toolName, a.RecordSideUsageFromMessage, roots)
 	if !gotFinal {
 		return false, failReason
 	}
@@ -2066,7 +2081,13 @@ func permissionReadFileTool() map[string]interface{} {
 // gotFinal is false on transport error, nil response, or budget exhaustion, in
 // which case failReason carries the explanation. Shared by the plain ALLOW/DENY
 // path and the interpreter structured-effects path.
-func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages []Message, tools []map[string]interface{}, modelLabel, toolName string, recordUsage func(*Message)) (finalText string, gotFinal bool, failReason string) {
+// allowedRoots, when non-nil, is used to annotate read_file results so the
+// model knows which paths are pre-authorized.
+func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages []Message, tools []map[string]interface{}, modelLabel, toolName string, recordUsage func(*Message), allowedRoots ...[]string) (finalText string, gotFinal bool, failReason string) {
+	var roots []string
+	if len(allowedRoots) > 0 {
+		roots = allowedRoots[0]
+	}
 	const maxToolCalls = 15
 	// Derive a context cancelled when the agent is stopped (Esc) so an in-flight
 	// permission-model request is aborted instead of blocking the agent for up to
@@ -2132,6 +2153,9 @@ func runPermissionModelLoop(stopCh <-chan struct{}, client LLMClient, messages [
 						toolResult = fmt.Sprintf("error: invalid arguments: %v", err)
 					} else {
 						toolResult = executePermissionReadFile(params.Path, params.StartLine, params.EndLine)
+						if len(roots) > 0 {
+							toolResult = annotatePermissionReadResult(toolResult, params.Path, roots)
+						}
 					}
 				} else {
 					toolResult = fmt.Sprintf("error: unknown tool %q", tc.Function.Name)
@@ -2208,6 +2232,26 @@ func executePermissionReadFile(path string, startLine, endLine int) string {
 		fmt.Fprintf(&sb, "... (%d more lines)\n", total-endLine)
 	}
 	return sb.String()
+}
+
+// annotatePermissionReadResult prepends a note to a read_file tool result when
+// the queried path falls within one of the pre-authorized roots. This tells the
+// LLM that the path is user-approved so it does not deny merely because the
+// path is outside the project working directory.
+func annotatePermissionReadResult(result, path string, allowedRoots []string) string {
+	if len(allowedRoots) == 0 {
+		return result
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		abs = filepath.Clean(path)
+	}
+	for _, root := range allowedRoots {
+		if pathUnderRoot(abs, root) {
+			return "Note: " + path + " is within a pre-authorized root (" + root + ") — operations here are allowed by the user.\n" + result
+		}
+	}
+	return result
 }
 
 // permissionListDir returns a sorted directory listing for the permission model

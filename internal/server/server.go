@@ -71,6 +71,7 @@ type Server struct {
 	mux      *http.ServeMux
 	handler  *Handler
 	webFS    fs.FS
+	workDir  string
 }
 
 func New(addr, username, password string, webFS fs.FS) *Server {
@@ -84,6 +85,7 @@ func New(addr, username, password string, webFS fs.FS) *Server {
 		mux:      mux,
 		handler:  h,
 		webFS:    webFS,
+		workDir:  ".",
 	}
 	s.registerRoutes()
 	return s
@@ -105,6 +107,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
+
+	// TUI status (consolidated snapshot for the web UI status bar)
+	s.mux.HandleFunc("GET /api/tui-status", s.authMiddleware(s.handleGetTUIStatus))
+	s.mux.HandleFunc("GET /api/spending", s.authMiddleware(s.handleGetSpending))
+	s.mux.HandleFunc("GET /api/lsp/statuses", s.authMiddleware(s.handleGetLSPStatuses))
+	s.mux.HandleFunc("GET /api/files/modified", s.authMiddleware(s.handleGetModifiedFiles))
 
 	// Session operations
 	s.mux.HandleFunc("POST /api/sessions/{id}/compact", s.authMiddleware(s.handleCompactSession))
@@ -167,6 +175,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/github/pr/{owner}/{repo}/{number}", s.authMiddleware(s.handleGitHubPR))
 	s.mux.HandleFunc("GET /api/github/issues/{owner}/{repo}", s.authMiddleware(s.handleGitHubIssues))
 	s.mux.HandleFunc("POST /api/init", s.authMiddleware(s.handleInit))
+
+	// Uploads (assets)
+	s.mux.HandleFunc("/api/uploads", s.authMiddleware(s.handleUploads))
+	s.mux.HandleFunc("/api/uploads/file", s.authMiddleware(s.handleUploadFile))
 
 	// Serve embedded web UI for non-API routes
 	s.mux.Handle("/", spaHandler(s.webFS))
@@ -275,6 +287,14 @@ func (s *Server) handleOpenFile(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleOpenFile(w, r)
 }
 
+func (s *Server) handleUploads(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleUploads(w, r)
+}
+
+func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleUploadFile(w, r)
+}
+
 // Listen binds a TCP listener for the server. If the requested port is already
 // in use it walks forward to the next free port (up to maxPortAttempts) and
 // updates s.addr to the address actually bound, so callers can read the real
@@ -318,6 +338,16 @@ func (s *Server) Start() error {
 // Addr returns the actual listen address after Listen succeeds.
 func (s *Server) Addr() string {
 	return s.addr
+}
+
+// SetWorkDir configures the working directory used to resolve relative paths
+// (currently only the upload directory fallback under <workDir>/.ocode/uploads).
+// The handler is updated too so its UploadDir helper sees the same root.
+func (s *Server) SetWorkDir(dir string) {
+	s.workDir = dir
+	if s.handler != nil {
+		s.handler.SetWorkDir(dir)
+	}
 }
 
 // Serve serves requests on an already-bound listener.
@@ -464,6 +494,30 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) { s.handler.HandleUndo(w, r) }
 func (s *Server) handleRedo(w http.ResponseWriter, r *http.Request) { s.handler.HandleRedo(w, r) }
 func (s *Server) handleShellCommand(w http.ResponseWriter, r *http.Request) { s.handler.HandleShellCommand(w, r) }
+
+// TUI status shims. These read from the live RCBridge (when the web is
+// attached to a TUI session) or fall back to the local handler's config when
+// the server is running headless.
+func (s *Server) handleGetTUIStatus(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetTUIStatus(w, r, s.rc())
+}
+func (s *Server) handleGetSpending(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetSpending(w, r)
+}
+func (s *Server) handleGetLSPStatuses(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetLSPStatuses(w, r, s.rc())
+}
+func (s *Server) handleGetModifiedFiles(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetModifiedFiles(w, r, s.rc())
+}
+
+// rc safely returns the handler's RCBridge (may be nil for headless /api/serve).
+func (s *Server) rc() *RCBridge {
+	if s.handler == nil {
+		return nil
+	}
+	return s.handler.RCBridge()
+}
 
 // Config shims
 func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {

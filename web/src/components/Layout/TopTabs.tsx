@@ -1,4 +1,4 @@
-import { MessageSquare, FolderGit2, GitBranch, ScrollText, Menu } from "lucide-react";
+import { MessageSquare, FolderGit2, GitBranch, ScrollText, Menu, Paperclip, Activity } from "lucide-react";
 
 interface Props {
   activeTab: string;
@@ -10,7 +10,9 @@ const tabs = [
   { id: "chat", label: "Chat", icon: MessageSquare },
   { id: "files", label: "Files", icon: FolderGit2 },
   { id: "git", label: "Git", icon: GitBranch },
+  { id: "status", label: "Status", icon: Activity },
   { id: "logs", label: "Logs", icon: ScrollText },
+  { id: "assets", label: "Assets", icon: Paperclip },
 ];
 
 export default function TopTabs({ activeTab, onTabChange, onMenuToggle }: Props) {

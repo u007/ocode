@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
-import { api, authHeaders } from "../api/client";
+import { api, apiPath, authHeaders } from "../api/client";
 
 interface UseChatOptions {
   /** Called when a new session is created (first message from Home page). */
@@ -56,7 +56,7 @@ export function useChat(options?: UseChatOptions) {
   const resolvePermission = useCallback(
     async (requestId: string, approved: boolean) => {
       try {
-        await fetch("/api/permissions", {
+        await fetch(apiPath("/api/permissions"), {
           method: "POST",
           headers: { "Content-Type": "application/json", ...authHeaders() },
           body: JSON.stringify({ request_id: requestId, approved }),

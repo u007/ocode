@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { api, authHeaders } from "../../api/client";
+import { api, apiPath, authHeaders } from "../../api/client";
 import { useChatState, useChatDispatch } from "../../stores/chatStore";
 import type { AgentInfo } from "../../api/types";
 import {
@@ -70,7 +70,7 @@ export default function CoworkSidebar({ isOpen, onClose, activeAgent, onModelCli
   useEffect(() => {
     const fetchBranch = async () => {
       try {
-        const res = await fetch("/api/git/status", { headers: authHeaders() });
+        const res = await fetch(apiPath("/api/git/status"), { headers: authHeaders() });
         const data = await res.json();
         if (data.branch) {
           setGitBranch(data.branch);
@@ -99,10 +99,10 @@ export default function CoworkSidebar({ isOpen, onClose, activeAgent, onModelCli
 
     // Fetch config
     Promise.all([
-      fetch("/api/config/model", { headers: authHeaders() }).then((r) => r.json()),
-      fetch("/api/config/small-model", { headers: authHeaders() }).then((r) => r.json()),
-      fetch("/api/config/advisor", { headers: authHeaders() }).then((r) => r.json()),
-      fetch("/api/permissions", { headers: authHeaders() }).then((r) => r.json()),
+      fetch(apiPath("/api/config/model"), { headers: authHeaders() }).then((r) => r.json()),
+      fetch(apiPath("/api/config/small-model"), { headers: authHeaders() }).then((r) => r.json()),
+      fetch(apiPath("/api/config/advisor"), { headers: authHeaders() }).then((r) => r.json()),
+      fetch(apiPath("/api/permissions"), { headers: authHeaders() }).then((r) => r.json()),
     ])
       .then(([modelRes, smallRes, advisorRes, permRes]) => {
         setConfig({

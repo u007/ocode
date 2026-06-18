@@ -51,6 +51,15 @@ func (h *Handler) SetWorkDir(dir string) {
 	h.workDir = dir
 }
 
+// RCBridge returns the bridge to a TUI session, or nil if the handler is
+// running headless. Used by the TUI status endpoints to read the live
+// snapshot the TUI pushes via the bridge.
+func (h *Handler) RCBridge() *RCBridge {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.rc
+}
+
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	var req ChatRequest
 	if err := readBodyJSON(r, &req); err != nil {
@@ -617,10 +626,29 @@ func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, i
 		}
 	}
 
+	// Prefer the live TUI values when bridged — the model name + max context
+	// come from the running model, not from a snapshot saved to disk.
+	model := ""
+	maxTokens := 0
+	if h.rc != nil {
+		if live := h.rc.TUIStatus(); live.ContextModel != "" {
+			model = live.ContextModel
+			maxTokens = live.ContextMaxTokens
+		}
+	}
+	if model == "" && h.cfg != nil {
+		model = h.cfg.Model
+	}
+	if maxTokens == 0 {
+		maxTokens = int(agent.ModelWindow(model))
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id":       id,
 		"message_count":    len(s.Messages),
 		"estimated_tokens": totalChars / 4,
+		"max_tokens":       maxTokens,
+		"model":            model,
 	})
 }
 

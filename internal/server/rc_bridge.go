@@ -50,6 +50,12 @@ type RCBridge struct {
 	// pushed by the TUI. Each persistent /api/chat/messages connection registers
 	// one. Guarded by mu.
 	subscribers map[chan SSEEvent]struct{}
+
+	// status holds the latest TUI status snapshot (model, advisor, IDE,
+	// session, cwd, context, spending, modified files, LSP servers, etc.).
+	// Updated by the TUI whenever a tracked field changes and broadcast as a
+	// `status` SSE event. Read by GET /api/tui-status for initial page loads.
+	status *tuiStatusStore
 }
 
 // Subscribe registers a new live-event channel and returns it. The caller must
@@ -115,4 +121,25 @@ func (b *RCBridge) GetMessages() []agent.Message {
 	out := make([]agent.Message, len(b.Messages))
 	copy(out, b.Messages)
 	return out
+}
+
+// StatusStore returns the live TUIStatus holder for this bridge. The TUI calls
+// .Set(snap, b) on the returned store to push a new snapshot and broadcast a
+// `status` SSE event; the REST handler calls .Snapshot() for GET /api/tui-status.
+func (b *RCBridge) StatusStore() *tuiStatusStore {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.status == nil {
+		b.status = &tuiStatusStore{}
+	}
+	return b.status
+}
+
+// TUIStatus returns the most recent TUI status snapshot. Safe to call from
+// any goroutine.
+func (b *RCBridge) TUIStatus() TUIStatus {
+	if b == nil {
+		return TUIStatus{}
+	}
+	return b.StatusStore().Snapshot()
 }

@@ -95,7 +95,11 @@ type OcodeConfig struct {
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
 	MaxImageDim int `json:"image_max_dim,omitempty"`
-	Extra       map[string]json.RawMessage
+	// UploadDir overrides the default directory used by the /upload and
+	// /api/uploads endpoints. When empty, files are stored under
+	// <workDir>/.ocode/uploads.
+	UploadDir string `json:"upload_dir,omitempty"`
+	Extra     map[string]json.RawMessage
 }
 
 type PermissionConfig struct {
@@ -239,6 +243,7 @@ type ocodeConfigFile struct {
 	TUI               tuiConfigFile        `json:"tui"`
 	MaxSteps          int                  `json:"max_steps,omitempty"`
 	MaxImageDim       int                  `json:"image_max_dim,omitempty"`
+	UploadDir         string               `json:"upload_dir,omitempty"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -485,6 +490,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "image_max_dim")
 	}
 
+	if _, ok := raw["upload_dir"]; ok {
+		cfg.UploadDir = file.UploadDir
+		delete(raw, "upload_dir")
+	}
+
 	if cfg.Extra == nil {
 		cfg.Extra = make(map[string]json.RawMessage)
 	}
@@ -717,6 +727,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.MaxImageDim > 0 {
 		payload["image_max_dim"] = cfg.MaxImageDim
 	}
+	if cfg.UploadDir != "" {
+		payload["upload_dir"] = cfg.UploadDir
+	}
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
 	}
@@ -856,6 +869,17 @@ func SaveEditor(editor string) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.Editor = editor
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveUploadDir persists only the upload_dir field using load-modify-write so
+// it cannot clobber a concurrent session's other config.
+func SaveUploadDir(dir string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.UploadDir = dir
 	return SaveOcodeConfig(cfg)
 }
 

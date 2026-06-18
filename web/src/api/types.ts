@@ -143,3 +143,42 @@ export interface AgentRun {
   messages: AgentRunMessage[];
   children: AgentRun[];
 }
+
+// TUIStatus is the consolidated snapshot pushed by the TUI whenever any
+// tracked field changes (model toggle, IDE mode, file edit, agent rebuild,
+// title gen, turn boundary, etc.). The web subscribes to the "status" SSE
+// event and reflects every field in the status bar / drill-down panel.
+export interface TUIStatus {
+  main_model?: string;
+  small_model?: string;
+  small_model_enabled?: boolean;
+  advisor_model?: string;
+  advisor_enabled?: boolean;
+  ide_mode?: string;
+  ide_status?: string;
+  subagent_model?: string;
+  session_id?: string;
+  session_title?: string;
+  cwd?: string;
+  context_current_tokens?: number;
+  context_max_tokens?: number;
+  context_model?: string;
+  spending_usd?: number;
+  modified_files?: FileStatus[];
+  lsp_servers?: LSPStatus[];
+  extra_allowed_paths?: string[];
+  updated_at?: string;
+}
+
+export interface FileStatus {
+  path: string;
+  status?: string;
+}
+
+export interface LSPStatus {
+  cmd: string;
+  lang_id?: string;
+  root?: string;
+  state: "running" | "starting" | "failed" | string;
+  detail?: string;
+}

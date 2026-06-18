@@ -102,6 +102,7 @@ func init() {
 		{name: "/mem", usage: "/mem [on|off|status|update [user|project|global] [focus]]", help: "Toggle memory context injection, inspect memory files, or update a memory scope", handler: runMemCmd},
 		{name: "/btw", aliases: []string{"/by-the-way"}, usage: "/btw <message>", help: "Add a quick aside to the conversation (by the way)", handler: runBtwCmd},
 		{name: "/cd", aliases: []string{"/cwd"}, usage: "/cd <path>", help: "Change the project root to another directory", handler: runCdCmd},
+		{name: "/upload", aliases: []string{"/uploads"}, usage: "/upload [path]", help: "Show or set the file upload directory used by /api/uploads", handler: runUploadCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -1234,5 +1235,58 @@ func runCdCmd(m *model, args []string) tea.Cmd {
 		m.agent.SetWorkDir(target)
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Project root changed to: " + target})
+	return nil
+}
+
+// runUploadCmd shows the configured upload directory when invoked with no
+// args, or sets a new upload directory (the same path used by /api/uploads).
+// Mirrors the layout used by runEditorCmd: a one-line status read followed by
+// a load-modify-write SaveXxx that preserves any other config fields that
+// might be on disk.
+func runUploadCmd(m *model, args []string) tea.Cmd {
+	effective := func() string {
+		if m.config != nil && m.config.Ocode.UploadDir != "" {
+			return m.config.Ocode.UploadDir
+		}
+		return filepath.Join(m.workDir, ".ocode", "uploads")
+	}
+
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Upload directory: %s", effective())})
+		return nil
+	}
+
+	target := strings.Join(args, " ")
+	// Expand ~ to home directory
+	if strings.HasPrefix(target, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			target = filepath.Join(home, target[2:])
+		}
+	}
+	// Resolve relative paths against the current workDir so a /upload ./foo
+	// means "relative to the project root", matching /cd's behaviour.
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(m.workDir, target)
+	}
+	target = filepath.Clean(target)
+
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create upload directory: %v", err)})
+		return nil
+	}
+
+	if m.config != nil && m.config.Ocode.UploadDir == target {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Upload directory already set to: %s", target)})
+		return nil
+	}
+
+	if err := config.SaveUploadDir(target); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save upload directory: %v", err)})
+		return nil
+	}
+	if m.config != nil {
+		m.config.Ocode.UploadDir = target
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Upload directory set to: %s", target)})
 	return nil
 }

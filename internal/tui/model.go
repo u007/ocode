@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -575,6 +576,7 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	// (advisor on/off) follow agent switches.
 	if m.rcBridge != nil {
 		m.rcBridge.SetAgent(m.agent)
+		m.broadcastTUIStatus()
 	}
 	if m.agent == nil {
 		return nil
@@ -734,8 +736,8 @@ type model struct {
 	rawSidebarLines          []string
 	statusSel                selectionState
 	statusRawLines           []string
-	statusPermColStart       int // column where permission text starts on status line 0
-	statusPermColEnd         int // column where permission text ends on status line 0
+	statusPermColStart       int            // column where permission text starts on status line 0
+	statusPermColEnd         int            // column where permission text ends on status line 0
 	hoverSidebarFile         string         // file path hovered by mouse in sidebar, empty when no hover
 	hoverLink                pathLinkRegion // file-path link hovered in the transcript
 	hoverLinkActive          bool           // whether hoverLink is set
@@ -1500,19 +1502,19 @@ func newModel(opts ...RunOptions) model {
 		sessionID:        o.SessionID,
 		showThinking:     true,
 		showSidebar:      true,
-			redactionEnabled: cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
-			redactionModel: func() string {
-				if cfg != nil {
-					baseURL := cfg.Ocode.Security.Redaction.BaseURL
-					if baseURL == "" && cfg.Ocode.Security.Redaction.Model != "" {
-						if def := defaultRedactionBaseURL(cfg.Ocode.Security.Redaction.Model); def != "" {
-							baseURL = def
-						}
+		redactionEnabled: cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
+		redactionModel: func() string {
+			if cfg != nil {
+				baseURL := cfg.Ocode.Security.Redaction.BaseURL
+				if baseURL == "" && cfg.Ocode.Security.Redaction.Model != "" {
+					if def := defaultRedactionBaseURL(cfg.Ocode.Security.Redaction.Model); def != "" {
+						baseURL = def
 					}
-					return normalizeRedactionModelName(cfg.Ocode.Security.Redaction.Model, baseURL)
 				}
-				return ""
-			}(),
+				return normalizeRedactionModelName(cfg.Ocode.Security.Redaction.Model, baseURL)
+			}
+			return ""
+		}(),
 		redactionRegistry: reg,
 		llmScanner:        llmScanner,
 		redactFailMode: func() string {
@@ -3218,6 +3220,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.gen == m.titleGen && msg.title != "" && m.sessionTitle == "" {
 			m.sessionTitle = truncateTitle(msg.title, maxExplicitTitleLen)
 			m.saveSession()
+			m.broadcastTUIStatus()
 		}
 		return m, waitTitleEvent(m.titleCh)
 	case deltaMsg:
@@ -4290,6 +4293,14 @@ func shouldForwardToTranscriptViewport(msg tea.Msg) bool {
 }
 
 func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.Cmd, bool) {
+	if pressed && m.scrollbarDrag != scrollbarDragNone {
+		// Defensive reset: some terminals only emit a click event for a scrollbar
+		// interaction and may miss the matching release. Clear any stale drag
+		// state before processing the new click so the next content click does not
+		// keep moving the viewport as if the mouse were still held down.
+		m.scrollbarDrag = scrollbarDragNone
+		m.scrollbarDragOffset = 0
+	}
 	if pressed && mouse.Button == tea.MouseRight {
 		if m.activeTab == tabGit {
 			panelW := m.panelWidth()
@@ -4668,8 +4679,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 	if !pressed {
+		wasScrollbarDrag := m.scrollbarDrag != scrollbarDragNone
 		m.scrollbarDrag = scrollbarDragNone
 		m.scrollbarDragOffset = 0
+		if wasScrollbarDrag {
+			return m, nil, true
+		}
 		if m.sel.dragging {
 			m.sel.dragging = false
 			if m.sel.active {
@@ -4772,6 +4787,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				if err := config.SaveAdvisorEnabled(m.advisorEnabled); err != nil {
 					log.Printf("save advisor enabled: %v", err)
 				}
+				m.broadcastTUIStatus()
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
@@ -4784,6 +4800,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				if err := config.SaveSmallModelEnabled(m.smallModelEnabled); err != nil {
 					log.Printf("save small model enabled: %v", err)
 				}
+				m.broadcastTUIStatus()
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
@@ -4810,6 +4827,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					}
 					cmd = m.connectIDE()
 				}
+				m.broadcastTUIStatus()
 				m.sidebarSel = selectionState{}
 				return m, cmd, true
 			}
@@ -6068,6 +6086,7 @@ func (m *model) handleTitleCmd(args []string) tea.Cmd {
 		title = truncateTitle(title, maxExplicitTitleLen)
 		m.sessionTitle = title
 		m.saveSession()
+		m.broadcastTUIStatus()
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Session title set to %q.", title)})
 		return nil
 	}
@@ -9188,8 +9207,9 @@ func drainStreamDeltas(ch chan deltaEvent) []deltaEvent {
 // It first tries tailscale funnel (public internet), then tailscale serve
 // (tailnet-only). sessionID is used with --set-path so multiple ocode
 // instances can coexist without overwriting each other's tailscale config.
-// Returns the public URL and the background process (if any) so the caller
-// can kill it later. The setupHint is a one-time enable URL shown when
+// Returns the public URL, including the session-specific tailscale path prefix,
+// and the background process (if any) so the caller can kill it later. The
+// setupHint is a one-time enable URL shown when
 // funnel or serve isn't enabled on the tailnet yet.
 func startTailscaleExpose(port int, sessionID string) (url string, proc *exec.Cmd, setupHint string) {
 	tailscalePath, err := exec.LookPath("tailscale")
@@ -9216,16 +9236,16 @@ func startTailscaleExpose(port int, sessionID string) (url string, proc *exec.Cm
 
 	// Try tailscale funnel first — this gives a public internet URL.
 	if u, p, hint := tailscaleExpose(tailscalePath, "funnel", target, pathPrefix); u != "" {
-		return u, p, hint
+		return tailscaleURLWithPathPrefix(u, pathPrefix), p, hint
 	}
 
 	// Fall back to tailscale serve — this gives a tailnet-only URL.
 	if u, p, hint := tailscaleExpose(tailscalePath, "serve", target, pathPrefix); u != "" {
-		return u, p, hint
+		return tailscaleURLWithPathPrefix(u, pathPrefix), p, hint
 	}
 
 	// Last resort: get the tailnet DNS name from status.
-	return tailscaleDNSName(tailscalePath), nil, ""
+	return tailscaleURLWithPathPrefix(tailscaleDNSName(tailscalePath), pathPrefix), nil, ""
 }
 
 // tailscaleExpose runs `tailscale <cmd> --bg [--set-path /path] <target>` and
@@ -9361,6 +9381,34 @@ func tailscaleDNSName(tailscalePath string) string {
 	return ""
 }
 
+// tailscaleURLWithPathPrefix appends the per-session tailscale mount path to the
+// public URL returned by tailscale serve/funnel.
+func tailscaleURLWithPathPrefix(baseURL, pathPrefix string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if baseURL == "" {
+		return ""
+	}
+	if pathPrefix == "" {
+		return baseURL
+	}
+
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return baseURL + pathPrefix
+	}
+
+	if u.Path == pathPrefix || strings.HasPrefix(u.Path, pathPrefix+"/") {
+		return u.String()
+	}
+
+	if u.Path == "" || u.Path == "/" {
+		u.Path = pathPrefix
+	} else {
+		u.Path = strings.TrimRight(u.Path, "/") + pathPrefix
+	}
+	return u.String()
+}
+
 func buildRCSessionURL(baseURL, sessionID, token string) string {
 	baseURL = strings.TrimRight(baseURL, "/")
 	if baseURL == "" {
@@ -9378,6 +9426,110 @@ func (m *model) broadcastRC(event string, data interface{}) {
 	}
 }
 
+// broadcastTUIStatus snapshots the live TUI state (model, advisor, IDE, session
+// metadata, cwd, context usage, spending, modified files, LSP servers, extra
+// paths) and pushes it to the web UI as a "status" SSE event. It is also stored
+// on the RCBridge so GET /api/tui-status can return the same value on initial
+// page load (before any SSE frame has arrived). Safe to call from any goroutine;
+// cheap enough to invoke on every state change.
+func (m *model) broadcastTUIStatus() {
+	if m.rcBridge == nil {
+		return
+	}
+	snap := m.buildTUIStatusSnapshot()
+	m.rcBridge.StatusStore().Set(snap, m.rcBridge)
+}
+
+// buildTUIStatusSnapshot assembles a TUIStatus from the current model fields.
+// Reads all of m's tracked state — cheap (struct copies, no IO).
+func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
+	snap := server.TUIStatus{
+		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if m.config != nil {
+		snap.MainModel = m.config.Model
+		snap.SmallModel = m.config.Ocode.SmallModel
+		snap.AdvisorModel = m.config.Ocode.Advisor.Model
+		snap.ExtraAllowedPaths = m.config.Ocode.ExtraAllowedPaths
+	}
+	snap.SessionID = m.sessionID
+	snap.SessionTitle = m.sessionTitle
+	snap.CWD = m.workDir
+	snap.SmallModelOn = m.smallModelEnabled
+	snap.AdvisorEnabled = m.advisorEnabled
+	// The runtime advisor gate can drift from the seeded value when the TUI
+	// rebuilt the agent — prefer the live agent's view if present.
+	if m.agent != nil {
+		snap.AdvisorEnabled = m.agent.AdvisorEnabled()
+	}
+	snap.IDEMode = m.ideMode
+	if m.ideConnected {
+		snap.IDEStatus = "Claude connected"
+	} else if m.ideMode == config.IDEModeClaude {
+		snap.IDEStatus = "Claude: not connected"
+	} else if m.ideMode != "" && m.ideMode != config.IDEModeOff {
+		snap.IDEStatus = "IDE: " + m.ideMode
+	} else {
+		snap.IDEStatus = "IDE off"
+	}
+	snap.SubagentModel = m.activeSubagentModel()
+	// Context usage: use the model's full window from the agent registry. The
+	// current-input count is left at zero when the TUI isn't streaming a turn;
+	// the web computes the running total from /api/sessions/{id}/context and
+	// combines it with ContextMaxTokens to render the gauge.
+	modelName := m.currentModelName()
+	snap.ContextModel = modelName
+	snap.ContextMaxTokens = int(agent.ModelWindow(modelName))
+	// Modified files + LSP servers come from the embedded helpers.
+	snap.ModifiedFiles = m.collectModifiedFiles()
+	snap.LSPServers = m.collectLSPStatuses()
+	return snap
+}
+
+// collectModifiedFiles returns the session's modified files with their git
+// status code (M/A/D/??/U) when known. Reads the embedded files model's
+// gitStatus map (path -> one-character status code). Returns nil when the map
+// is empty (so the JSON omits the field instead of emitting []).
+func (m *model) collectModifiedFiles() []server.FileStatus {
+	if len(m.files.gitStatus) == 0 {
+		return nil
+	}
+	out := make([]server.FileStatus, 0, len(m.files.gitStatus))
+	for rel, code := range m.files.gitStatus {
+		// Paths in gitStatus are relative to the workDir; the web shows the
+		// absolute form so the user can identify it across tabs.
+		abs := rel
+		if m.workDir != "" {
+			if a, err := filepath.Abs(filepath.Join(m.workDir, rel)); err == nil {
+				abs = a
+			}
+		}
+		out = append(out, server.FileStatus{Path: abs, Status: code})
+	}
+	return out
+}
+
+// collectLSPStatuses reads the live LSP manager and converts each entry to the
+// web-facing LSPStatus shape. Returns nil when no manager is attached.
+func (m *model) collectLSPStatuses() []server.LSPStatus {
+	if m.lspMgr == nil {
+		return nil
+	}
+	active := m.lspMgr.ActiveServers()
+	if len(active) == 0 {
+		return nil
+	}
+	out := make([]server.LSPStatus, 0, len(active))
+	for _, s := range active {
+		out = append(out, server.LSPStatus{
+			Cmd:    s.Cmd,
+			LangID: s.LangID,
+			State:  "running",
+		})
+	}
+	return out
+}
+
 // broadcastRCSnapshot pushes the authoritative current transcript to the web UI
 // and marks the turn complete. The snapshot self-heals any deltas dropped under
 // backpressure during the turn.
@@ -9389,6 +9541,9 @@ func (m *model) broadcastRCSnapshot() {
 	m.rcBridge.SetMessages(msgs)
 	m.broadcastRC("messages", msgs)
 	m.broadcastRC("turn_done", map[string]string{})
+	// Refresh the consolidated status bar at every turn boundary so the web
+	// can show a fresh token count, modified-files list, etc.
+	m.broadcastTUIStatus()
 }
 
 // waitForRCRequest listens for requests from the /rc web UI.
@@ -14497,6 +14652,7 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 
 		addr := fmt.Sprintf("localhost:%d", port)
 		srv := server.New(addr, "ocode", token, m.webFS)
+		srv.SetWorkDir(m.workDir)
 
 		// Register the RC bridge — server forwards requests through rcCh to TUI
 		bridge := srv.RegisterExternalSession(m.sessionID, m.config.Model, rcCh)
@@ -14520,9 +14676,9 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		boundAddr := srv.Addr()
 		// Embed token in URL so the browser auto-authenticates on open.
 		url := fmt.Sprintf("http://%s/session/%s?token=%s", boundAddr, m.sessionID, token)
-		go openBrowser(url)
 
-		// Try to expose via tailscale if available (non-blocking — open browser first).
+		// Try to expose via tailscale if available — if we get a tailscale URL,
+		// open that in the browser instead of localhost.
 		tailscaleURL := ""
 		setupHint := ""
 		if _, boundPort, splitErr := net.SplitHostPort(boundAddr); splitErr == nil {
@@ -14530,6 +14686,7 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 				tsURL, tsProc, tsHint := startTailscaleExpose(p, m.sessionID)
 				if tsURL != "" {
 					tailscaleURL = buildRCSessionURL(tsURL, m.sessionID, token)
+					url = tailscaleURL
 				}
 				m.rcTailscaleProc = tsProc
 				if tsHint != "" {
@@ -14538,6 +14695,8 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 			}
 		}
 		m.rcTailscaleURL = tailscaleURL
+
+		go openBrowser(url)
 
 		return rcStartedMsg{url: url, tailscaleURL: tailscaleURL, setupHint: setupHint, bridge: bridge}
 	}
