@@ -129,6 +129,17 @@ func (r *AgentRegistry) registerBuiltins() {
 			Hidden:       true,
 			Source:       "builtin",
 		},
+		// "orchestrator" is a picker-only entry: the TUI session intercept
+		// recognises this name and routes user messages to the orchestrator
+		// pipeline instead of starting a normal LLM turn. No system prompt
+		// is needed because the pipeline builds its own context per dispatch.
+		AgentDefinition{
+			Name:        "orchestrator",
+			Description: "Self-healing multi-agent pipeline — plans, implements, and validates coding goals",
+			Mode:        AgentModeAll,
+			Hidden:      false,
+			Source:      "builtin",
+		},
 	)
 }
 

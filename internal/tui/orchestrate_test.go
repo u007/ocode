@@ -3,6 +3,8 @@ package tui
 import (
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/agent"
 )
 
 func TestOrchestrateCommandRegistered(t *testing.T) {
@@ -35,5 +37,18 @@ func TestOrchestrateGoalExtraction(t *testing.T) {
 		if got != c.want {
 			t.Errorf("args %v → %q, want %q", c.args, got, c.want)
 		}
+	}
+}
+
+func TestOrchestratorRegisteredInRegistry(t *testing.T) {
+	def := agent.DefaultAgentRegistry.Get("orchestrator")
+	if def == nil {
+		t.Fatal("orchestrator not found in DefaultAgentRegistry")
+	}
+	if def.Hidden {
+		t.Error("orchestrator should NOT be hidden — it must appear in the agent picker")
+	}
+	if def.SystemPrompt != "" {
+		t.Error("orchestrator registry entry should have no system prompt — it is a picker-only entry")
 	}
 }
