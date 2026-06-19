@@ -10,13 +10,13 @@ func TestButtonRender(t *testing.T) {
 	_ = sb // suppress unused
 
 	tests := []struct {
-		name       string
-		label      string
-		variant    ButtonVariant
-		hovered    bool
-		focused    bool
-		wantEmpty  bool
-		wantLabel  bool // rendered output should contain the label
+		name      string
+		label     string
+		variant   ButtonVariant
+		hovered   bool
+		focused   bool
+		wantEmpty bool
+		wantLabel bool // rendered output should contain the label
 	}{
 		{
 			name:      "normal button renders label",
@@ -104,9 +104,9 @@ func TestButtonFocusedDiffersFromIdle(t *testing.T) {
 
 func TestButtonContains(t *testing.T) {
 	tests := []struct {
-		name    string
-		x, y    int
-		want    bool
+		name string
+		x, y int
+		want bool
 	}{
 		{
 			name: "inside bounds",
@@ -140,7 +140,7 @@ func TestButtonContains(t *testing.T) {
 			btn := NewButton("OK", ButtonNormal)
 			btn.X = 0
 			btn.Y = 0
-			btn.Width = 6  // len(" OK  ") padded
+			btn.Width = 6 // len(" OK  ") padded
 			btn.Height = 1
 			got := btn.Contains(tt.x, tt.y)
 			if got != tt.want {

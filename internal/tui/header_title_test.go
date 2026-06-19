@@ -155,6 +155,7 @@ func TestRenderAppHeaderExtremeNarrowKeepsOneLine(t *testing.T) {
 		t.Fatalf("title row should be exactly 1 line, got %d:\n%q", lipgloss.Height(row), row)
 	}
 }
+
 // TestRenderAppHeaderNewlineTitleClampsToOneLine verifies that a title
 // containing newlines (e.g. from a multi-line user prompt) is collapsed to a
 // single row and does not break the header layout.

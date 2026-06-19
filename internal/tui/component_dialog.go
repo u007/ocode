@@ -25,16 +25,16 @@ type Dialog struct {
 	TermHeight int
 
 	// Body scroll state.
-	scrollOffset int
+	scrollOffset  int
 	maxBodyHeight int
 
 	// Computed layout (populated by layout()).
-	width         int
-	height        int
-	bodyTop       int
-	bodyHeight    int
-	buttonRowY    int
-	contentTopY   int // first row of the dialog (after border)
+	width       int
+	height      int
+	bodyTop     int
+	bodyHeight  int
+	buttonRowY  int
+	contentTopY int // first row of the dialog (after border)
 }
 
 // NewDialog creates a new Dialog with the given title, body text, and buttons.
@@ -181,8 +181,8 @@ func (d *Dialog) layout() {
 		d.height = d.TermHeight - 2
 	}
 
-	d.contentTopY = 0    // border top
-	d.bodyTop = 1        // after top border + title
+	d.contentTopY = 0 // border top
+	d.bodyTop = 1     // after top border + title
 	d.buttonRowY = d.bodyTop + d.bodyHeight
 
 	d.clampScroll()

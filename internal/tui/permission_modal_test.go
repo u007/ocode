@@ -17,9 +17,9 @@ func TestPermissionModalImplementsModal(t *testing.T) {
 
 func TestPermissionModalRender(t *testing.T) {
 	pm := NewPermissionModal(PermissionModalConfig{
-		Title:   "Permission required",
-		Body:    "bash wants to run: rm -rf /tmp/test",
-		Buttons: []ButtonConfig{{Label: "Allow", Variant: ButtonPrimary}, {Label: "Deny", Variant: ButtonDanger}},
+		Title:      "Permission required",
+		Body:       "bash wants to run: rm -rf /tmp/test",
+		Buttons:    []ButtonConfig{{Label: "Allow", Variant: ButtonPrimary}, {Label: "Deny", Variant: ButtonDanger}},
 		TermWidth:  80,
 		TermHeight: 24,
 	})
@@ -38,11 +38,11 @@ func TestPermissionModalRender(t *testing.T) {
 
 func TestPermissionModalBounds(t *testing.T) {
 	pm := NewPermissionModal(PermissionModalConfig{
-		Title:       "Test",
-		Body:        "Body",
-		Buttons:     []ButtonConfig{{Label: "OK", Variant: ButtonNormal}},
-		TermWidth:   80,
-		TermHeight:  24,
+		Title:      "Test",
+		Body:       "Body",
+		Buttons:    []ButtonConfig{{Label: "OK", Variant: ButtonNormal}},
+		TermWidth:  80,
+		TermHeight: 24,
 	})
 
 	bounds := pm.Bounds()
@@ -106,11 +106,11 @@ func TestPermissionModalKeyNEscDeny(t *testing.T) {
 func TestPermissionModalScroll(t *testing.T) {
 	longBody := strings.Repeat("Line of permission text\n", 20)
 	pm := NewPermissionModal(PermissionModalConfig{
-		Title:       "Test",
-		Body:        longBody,
-		Buttons:     []ButtonConfig{{Label: "OK", Variant: ButtonNormal}},
-		TermWidth:   80,
-		TermHeight:  24,
+		Title:         "Test",
+		Body:          longBody,
+		Buttons:       []ButtonConfig{{Label: "OK", Variant: ButtonNormal}},
+		TermWidth:     80,
+		TermHeight:    24,
 		MaxBodyHeight: 5,
 	})
 
@@ -128,11 +128,11 @@ func TestPermissionModalScroll(t *testing.T) {
 
 func TestPermissionModalCenteredOverlay(t *testing.T) {
 	pm := NewPermissionModal(PermissionModalConfig{
-		Title:       "Test",
-		Body:        "Body text",
-		Buttons:     []ButtonConfig{{Label: "OK", Variant: ButtonNormal}},
-		TermWidth:   80,
-		TermHeight:  20,
+		Title:      "Test",
+		Body:       "Body text",
+		Buttons:    []ButtonConfig{{Label: "OK", Variant: ButtonNormal}},
+		TermWidth:  80,
+		TermHeight: 20,
 	})
 
 	// Render the dialog
@@ -172,9 +172,9 @@ func TestPermissionModalCenteredOverlay(t *testing.T) {
 
 func TestPermissionModalEmptyCallback(t *testing.T) {
 	pm := NewPermissionModal(PermissionModalConfig{
-		Title:   "Test",
-		Body:    "Body",
-		Buttons: []ButtonConfig{{Label: "OK", Variant: ButtonNormal}},
+		Title:      "Test",
+		Body:       "Body",
+		Buttons:    []ButtonConfig{{Label: "OK", Variant: ButtonNormal}},
 		TermWidth:  80,
 		TermHeight: 24,
 		// No OnChoice set

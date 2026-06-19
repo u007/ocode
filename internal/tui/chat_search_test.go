@@ -60,8 +60,8 @@ func TestChatSearchMatchesSubstring(t *testing.T) {
 		{role: roleAssistant, text: "Sure, kicking off the build."},
 		{role: roleAssistant, text: "(thinking) ...", transient: true},
 		{role: roleAssistant, text: "Build finished.", raw: &agent.Message{
-			Role:            "assistant",
-			Content:         "nope",
+			Role:             "assistant",
+			Content:          "nope",
 			ReasoningContent: "the build is the part to watch",
 		}},
 		{role: roleAssistant, text: "Tool result for build:", raw: &agent.Message{

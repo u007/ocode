@@ -180,7 +180,7 @@ func TestDialogOverflowsMaxHeight(t *testing.T) {
 	lines := strings.Split(rendered, "\n")
 
 	// Should not exceed max body height + chrome (title + borders + buttons)
-	maxExpected := 3 + 4 // body + title row + top border + bottom border + button row
+	maxExpected := 3 + 4            // body + title row + top border + bottom border + button row
 	if len(lines) > maxExpected+2 { // +2 for some slack
 		t.Errorf("render height %d exceeds expected max %d", len(lines), maxExpected+2)
 	}

@@ -113,9 +113,9 @@ func TestScrollbarRendering(t *testing.T) {
 		totalLines   int
 		visibleLines int
 		offsetLines  int
-		wantEmpty    bool   // expect empty string
-		wantAllTrack bool   // expect all track (content fits)
-		wantThumb    bool   // expect at least one thumb character
+		wantEmpty    bool // expect empty string
+		wantAllTrack bool // expect all track (content fits)
+		wantThumb    bool // expect at least one thumb character
 	}{
 		{
 			name:         "zero height returns empty",

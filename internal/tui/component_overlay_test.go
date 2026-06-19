@@ -26,7 +26,7 @@ func TestCompositeOverlayANSIBackdrop(t *testing.T) {
 	// The overlay must preserve styles on both sides.
 	left := "\x1b[1mHELLO\x1b[22m"  // "HELLO" bold
 	right := "\x1b[3mWORLD\x1b[23m" // "WORLD" italic
-	backdrop := left + " " + right   // visual width 11
+	backdrop := left + " " + right  // visual width 11
 
 	box := "XX"
 	got := compositeOverlay(backdrop, box, 6, 0)

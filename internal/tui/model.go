@@ -591,6 +591,7 @@ type model struct {
 	messages             []message
 	agent                *agent.Agent
 	advisorEnabled       bool // runtime advisor state; persisted across agent rebuilds
+	soundEnabled         bool // terminal bell on task completion / permission request
 	advisorEnabledSet    bool // whether advisorEnabled should be applied to newly installed agents
 	smallModelEnabled    bool // runtime small model state; persisted across agent rebuilds
 	smallModelEnabledSet bool // whether smallModelEnabled should be applied to newly installed agents
@@ -1545,6 +1546,7 @@ func newModel(opts ...RunOptions) model {
 		agent:            a,
 		sessionID:        o.SessionID,
 		showThinking:     true,
+		soundEnabled:       true,
 		showSidebar:      true,
 		redactionEnabled: cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
 		redactionModel: func() string {
@@ -3137,6 +3139,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastActivity = agent.ActivitySnapshot{}
 		m.streamEndedAt = time.Now()
 		m.streamWasInterrupted = msg.err != nil
+		// Ring the terminal bell on task completion (if enabled).
+		if m.soundEnabled {
+			ringBell()
+		}
 		// Reset so the next turn's first reasoning delta starts a fresh
 		// thinking block instead of appending into the prior turn's buffer.
 		m.streamingThinkingIdx = -1
@@ -5727,7 +5733,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// even while busy.
 	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
-		cmd == "/help" || cmd == "/thinking" || cmd == "/details" ||
+		cmd == "/help" || cmd == "/thinking" || cmd == "/details" || cmd == "/sound" ||
 		cmd == "/login" ||
 		cmd == "/new" || cmd == "/clear" ||
 		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
@@ -6950,7 +6956,35 @@ func (m *model) handleDetailsCmd(args []string) {
 	if m.showDetails {
 		status = "visible"
 	}
+
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tool execution details are now %s.", status)})
+}
+func (m *model) handleSoundCmd(args []string) {
+	if len(args) == 0 {
+		m.soundEnabled = !m.soundEnabled
+	} else {
+		switch strings.ToLower(args[0]) {
+		case "on", "true", "yes":
+			m.soundEnabled = true
+		case "off", "false", "no":
+			m.soundEnabled = false
+		default:
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /sound [on|off]"})
+			return
+		}
+	}
+	status := "off"
+	if m.soundEnabled {
+		status = "on"
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Terminal bell is now %s.", status)})
+}
+
+// ringBell returns a tea.Cmd that writes the terminal BEL character ( or \x07)
+// to stdout, producing an audible bell. Safe to call while the TUI is in
+// alt-screen mode — BEL is a non-printing control character.
+func ringBell() {
+	os.Stdout.Write([]byte{0x07})
 }
 
 func (m *model) handleBtwCmd(args []string) {

@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **Context Estimate After Compaction** — `CurrentContextEstimate` now ignores pre-compaction Usage data once a synthetic compaction summary is present, preventing stale large-context values from leaking into the context gauge. New `latestCompactionSummaryIndex` helper. Locked in by `TestCurrentContextEstimateAfterCompaction` and `TestCurrentContextEstimateUsesFreshUsageAfterCompaction`.
 - **Scrollbar Drag Stale State** — `handleMouseAction` now defensively clears a stale scrollbar drag on any new press event, preventing viewport drift when the terminal misses the matching release. Also short-circuits the release handler when dragging is (and was) active, avoiding a spurious click fall-through.
 - **Context Estimate Non-Cumulative Provider Floor** — `CurrentContextEstimate` now floors per-turn `PromptTokens` against the full message heuristic when the provider reports non-cumulative counts (e.g. minimax-m3 via opencode-go), preventing the context gauge from showing a value below the actual on-disk message cost.
 - **Git Files Pane Scroll Offset** — The git files pane now scrolls correctly when the file list exceeds the visible area. New `clampFileListScroll()` method keeps the cursor in view, and `renderFileList()` slices output to the visible window. Applies to both filtered and unfiltered file lists with staged/unstaged headers.
@@ -21,6 +22,8 @@
 - **Concurrent Tailscale Sessions** — `/rc` now uses `tailscale serve --set-path /<sessionID>` so multiple ocode instances can expose the same node without overwriting each other's tailscale config. The `tailscaleReset()` global teardown was removed from `stopRCServer` for the same reason. `sanitizeTailscalePath` strips `/`, `.`, and non-ASCII from sessionIDs so embedded separators can't route to a sibling path.
 
 ### Added
+- **`/sound` Command** — New `/sound [on|off|status]` slash command toggles the terminal bell on task completion. Enabled by default. `ringBell()` writes the BEL character safely in alt-screen mode. Wired as an instant (non-queued) command.
+- **Version Bump** — 0.5.11 → 0.5.12.
 - **In-Chat Search (`/search`)** — New `/search <query>` slash command (alias `/find`) opens an in-chat find bar with Ctrl+F support. Case-insensitive substring matching across all message types (text, tool calls, tool results, reasoning). Highlights matching messages and jumps to them. New `internal/tui/chat_search.go` with full test coverage. New `SearchHit` theme style.
 - **Inline URL Links** — New `internal/tui/urllink.go` detects raw URLs and markdown links in LLM output, rendering them as clickable link regions. New `renderMarkdownInLine` helper replaces `renderMarkdownBold` in the agent detail view for URL-aware rendering.
 - **`/add-dir` Command** — New `/add-dir <path>` slash command (alias `/add-dirs`) adds a directory to `extra_allowed_paths` so the agent can read and write files there without re-prompting.
