@@ -594,6 +594,7 @@ type model struct {
 	advisorEnabledSet    bool // whether advisorEnabled should be applied to newly installed agents
 	smallModelEnabled    bool // runtime small model state; persisted across agent rebuilds
 	smallModelEnabledSet bool // whether smallModelEnabled should be applied to newly installed agents
+	orchestratorMode     bool // true when user selected "orchestrator" from agent picker — next user message routes to the pipeline instead of the normal LLM turn
 	config               *config.Config
 	sessionID            string
 	sessionTitle         string
@@ -3286,6 +3287,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 		}
 		return m, waitRecapEvent(m.recapCh)
+	case orchestrateDoneMsg:
+		if msg.err != "" {
+			m.messages = append(m.messages, message{
+				role: roleAssistant,
+				text: fmt.Sprintf("[Orchestrator] Error: %s", msg.err),
+			})
+		} else {
+			m.messages = append(m.messages, message{
+				role: roleAssistant,
+				text: fmt.Sprintf("[Orchestrator] Complete:\n\n%s", msg.report),
+			})
+		}
+		m.orchestratorMode = false // reset on completion; session intercept re-enables it
+		m.rerenderTranscriptAndMaybeScroll()
+		m.saveSession()
+		return m, nil
+	case orchestrateStatusMsg:
+		m.messages = append(m.messages, message{
+			role:      roleAssistant,
+			text:      fmt.Sprintf("[Orchestrator] %s: %s", msg.state, msg.msg),
+			transient: true,
+		})
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, nil
 	case titleGeneratedMsg:
 		// Drop stale results from goroutines started before /new or /title clear.
 		if msg.gen == m.titleGen && msg.title != "" && m.sessionTitle == "" {
