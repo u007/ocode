@@ -106,6 +106,7 @@ func init() {
 		{name: "/add-dir", aliases: []string{"/add-dirs"}, usage: "/add-dir <path>", help: "Add a directory to extra allowed paths so the agent can work with files there", handler: runAddDirCmd},
 		{name: "/upload", aliases: []string{"/uploads"}, usage: "/upload [path]", help: "Show or set the file upload directory used by /api/uploads", handler: runUploadCmd},
 		{name: "/search", aliases: []string{"/find"}, usage: "/search <query>", help: "Find a message by keyword (opens the in-chat find bar)", handler: runSearchCmd},
+		{name: "/orchestrate", usage: "/orchestrate <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runOrchestrateCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -1260,12 +1261,12 @@ func runCdCmd(m *model, args []string) tea.Cmd {
 	return nil
 }
 
-
 // runAddDirCmd adds a directory to extra_allowed_paths so the agent can read
 // and write files under that directory without re-prompting.
 func runAddDirCmd(m *model, args []string) tea.Cmd {
 	return m.handleAddDirCmd(args)
 }
+
 // runUploadCmd shows the configured upload directory when invoked with no
 // args, or sets a new upload directory (the same path used by /api/uploads).
 // Mirrors the layout used by runEditorCmd: a one-line status read followed by
@@ -1318,4 +1319,24 @@ func runUploadCmd(m *model, args []string) tea.Cmd {
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Upload directory set to: %s", target)})
 	return nil
+}
+
+func runOrchestrateCmd(m *model, args []string) tea.Cmd {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{
+			role: roleAssistant,
+			text: "Usage: /orchestrate <goal>\nExample: /orchestrate add user validation to the login flow",
+		})
+		return nil
+	}
+	goal := strings.Join(args, " ")
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No active agent — cannot launch orchestrator."})
+		return nil
+	}
+	m.messages = append(m.messages, message{
+		role: roleAssistant,
+		text: fmt.Sprintf("[Orchestrator] Starting pipeline for: %s\nRunning in background — status updates will appear here.", goal),
+	})
+	return runOrchestrateBackground(m, goal, false)
 }
