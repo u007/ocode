@@ -386,4 +386,3 @@ func (m *model) ensureChatSearchFlashHighlight() {
 	}
 	m.applyOrClearSelectionHighlight()
 }
-

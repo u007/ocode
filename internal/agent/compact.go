@@ -664,11 +664,23 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 	return "", lastErr
 }
 
+// latestCompactionSummaryIndex returns the index of the most recent synthetic
+// compaction summary message, or -1 if none exists.
+func latestCompactionSummaryIndex(msgs []Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if strings.HasPrefix(msgs[i].Content, compactionSummaryMarker) {
+			return i
+		}
+	}
+	return -1
+}
+
 // CurrentContextEstimate returns the best estimate for the token count that
 // will be sent on the next LLM request (excluding any new user prompt).
 // It prefers real Usage data from the most recent API response and adds a
 // heuristic estimate for any messages appended after that response.
 func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
+	summaryIdx := latestCompactionSummaryIndex(msgs)
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Usage == nil {
 			continue
@@ -692,6 +704,13 @@ func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
 		}
 
 		if base > 0 {
+			// Usage prior to the most recent compaction summary reflects the old
+			// pre-compaction transcript shape. Ignore it and fall back to the
+			// heuristic estimate so we don't show stale large-context usage.
+			if summaryIdx >= 0 && i <= summaryIdx {
+				break
+			}
+
 			tail := messagesTokens(msgs[i+1:])
 			usageTokens := int(base)
 			if tail > 0 {

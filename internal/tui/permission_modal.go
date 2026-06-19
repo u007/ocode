@@ -20,10 +20,10 @@ type PermissionModalConfig struct {
 // PermissionModal is a Modal that wraps a Dialog for permission requests.
 // It handles keyboard shortcuts (y/n/a/esc/enter) and delegates to OnChoice.
 type PermissionModal struct {
-	Dialog    *Dialog
-	config    PermissionModalConfig
-	callback  func(string)
-	done      bool // set to true after a choice is made
+	Dialog   *Dialog
+	config   PermissionModalConfig
+	callback func(string)
+	done     bool // set to true after a choice is made
 }
 
 // NewPermissionModal creates a new PermissionModal.

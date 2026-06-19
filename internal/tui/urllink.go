@@ -434,5 +434,3 @@ func renderPlainSegment(out *strings.Builder, text string, textStyle, linkStyle 
 		i = urlStart + len(trimmed)
 	}
 }
-
-

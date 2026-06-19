@@ -30,16 +30,16 @@ type ocVariant struct {
 }
 
 type ocThemeFile struct {
-	Name  string      `json:"name"`
-	ID    string      `json:"id"`
-	Light ocVariant   `json:"light"`
-	Dark  ocVariant   `json:"dark"`
+	Name  string    `json:"name"`
+	ID    string    `json:"id"`
+	Light ocVariant `json:"light"`
+	Dark  ocVariant `json:"dark"`
 }
 
 type themeColor struct {
 	User, Assistant, Header, Border, Hint, Text, Background string
-	StatusBg, StatusFg, SelectedFg, SelectedBg               string
-	Success, Error, Accent, Dim, Thinking                    string
+	StatusBg, StatusFg, SelectedFg, SelectedBg              string
+	Success, Error, Accent, Dim, Thinking                   string
 }
 
 func first(vals ...string) string {

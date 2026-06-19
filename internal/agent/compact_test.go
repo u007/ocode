@@ -726,3 +726,58 @@ func TestRunSummaryFallsBackToMalformedAfterRetries(t *testing.T) {
 		t.Fatalf("expected last malformed response, got %q", out)
 	}
 }
+
+// TestCurrentContextEstimateAfterCompaction verifies that Usage data from the
+// pre-compaction prefix is ignored once a compaction summary is present.
+func TestCurrentContextEstimateAfterCompaction(t *testing.T) {
+	bigTokens := int64(50000)
+	// Simulate a message list that still contains a stale pre-compaction
+	// assistant Usage entry before the synthetic summary.
+	msgs := []Message{
+		{
+			Role:    "assistant",
+			Content: "we did X",
+			Usage: &TokenUsage{
+				// This Usage was recorded before compaction — reflects the old large context.
+				PromptTokens: &bigTokens,
+			},
+		},
+		{
+			Role:    "system",
+			Content: compactionSummaryMarker + "\nCompacted summary covering 30 messages\n\nsome summary text",
+		},
+		{Role: "user", Content: "what did we do?"},
+	}
+
+	tokens, source := CurrentContextEstimate(msgs)
+
+	// Should NOT use the stale 50k Usage value.
+	if source == "actual" || source == "actual+tail" {
+		t.Errorf("expected heuristic estimate after compaction, got source=%q (tokens=%d)", source, tokens)
+	}
+	if tokens >= 50000 {
+		t.Errorf("context estimate should be much smaller after compaction, got %d (stale pre-compaction Usage is leaking)", tokens)
+	}
+}
+
+// TestCurrentContextEstimateUsesFreshUsageAfterCompaction verifies that a
+// usage-bearing message after the latest compaction summary is still trusted.
+func TestCurrentContextEstimateUsesFreshUsageAfterCompaction(t *testing.T) {
+	freshTokens := int64(1200)
+	msgs := []Message{
+		{Role: "system", Content: compactionSummaryMarker + "\nCompacted summary covering 30 messages\n\nsummary text"},
+		{Role: "user", Content: "what changed?"},
+		{Role: "assistant", Content: "we did X", Usage: &TokenUsage{TotalTokens: &freshTokens}},
+		{Role: "user", Content: "follow up"},
+	}
+
+	tokens, source := CurrentContextEstimate(msgs)
+	if source != "actual+tail" {
+		t.Fatalf("expected fresh usage to be trusted after compaction, got source=%q (tokens=%d)", source, tokens)
+	}
+
+	want := int(freshTokens) + messagesTokens(msgs[3:])
+	if tokens != want {
+		t.Fatalf("tokens=%d, want %d", tokens, want)
+	}
+}

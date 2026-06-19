@@ -376,9 +376,9 @@ func dimLines(lines []string) []string {
 // content-version counter. It avoids recomputing the (potentially expensive)
 // dimming on every render when content hasn't changed.
 type dimCache struct {
-	version   int
-	lines     []string
-	dimmed    []string
+	version int
+	lines   []string
+	dimmed  []string
 }
 
 // newDimCache creates a new dimCache.

@@ -127,12 +127,12 @@ func pathLinkAtCol(rawLine string, visualCol int, workDir string) (pathLinkRegio
 // the same token must not repeat that. Keyed by line content, so the cache
 // self-invalidates when the transcript re-renders or the cursor changes line.
 type pathLinkProbeCache struct {
-	rawLine   string
-	startCol  int // probed token span, [startCol, endCol); empty span = no cache
-	endCol    int
-	probeCol  int // exact column probed; used for miss caching
-	r         pathLinkRegion
-	ok        bool
+	rawLine    string
+	startCol   int // probed token span, [startCol, endCol); empty span = no cache
+	endCol     int
+	probeCol   int // exact column probed; used for miss caching
+	r          pathLinkRegion
+	ok         bool
 	cachedMiss bool // true = the probeCol was a miss and is cached
 }
 

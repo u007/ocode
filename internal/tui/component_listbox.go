@@ -11,13 +11,13 @@ import (
 // hover, scrollbar, and mouse hit-testing. It is designed to replace the
 // inline rendering in picker.go and slash_popup.go.
 type ListBox struct {
-	items    []string
-	width    int
+	items     []string
+	width     int
 	maxHeight int // maximum visible rows (including header/footer)
 
 	// Filter state.
-	filter    string
-	filtered  []int // indices into items that match filter
+	filter   string
+	filtered []int // indices into items that match filter
 
 	// Selection state.
 	selected int // index into filtered[]
@@ -34,11 +34,11 @@ type ListBox struct {
 // NewListBox creates a new ListBox with the given items and dimensions.
 func NewListBox(items []string, width, maxHeight int) *ListBox {
 	lb := &ListBox{
-		items:       items,
-		width:       width,
-		maxHeight:   maxHeight,
+		items:         items,
+		width:         width,
+		maxHeight:     maxHeight,
 		visibleHeight: maxHeight,
-		hovered:     -1,
+		hovered:       -1,
 	}
 	lb.rebuildFiltered()
 	return lb
