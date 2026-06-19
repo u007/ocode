@@ -48,6 +48,7 @@ import (
 	"github.com/u007/ocode/internal/version"
 
 	"github.com/atotto/clipboard"
+	"github.com/gen2brain/beeep"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
@@ -6998,6 +6999,8 @@ func defaultBellNotifier() {
 	_, _ = os.Stdout.Write(bellNotificationPayload())
 	if runtime.GOOS == "darwin" && isAppleTerminal() {
 		macOSSystemBeep()
+	} else if runtime.GOOS != "darwin" && !supportsDesktopBell() {
+		_ = beeep.Beep(440, 200)
 	}
 }
 
@@ -7022,11 +7025,22 @@ func supportsDesktopBell() bool {
 	switch {
 	case strings.Contains(termProgram, "ghostty"),
 		strings.Contains(termProgram, "supacode"),
-		strings.Contains(termProgram, "iterm.app"):
+		strings.Contains(termProgram, "iterm.app"),
+		strings.Contains(termProgram, "kitty"),
+		strings.Contains(termProgram, "wezterm"),
+		strings.Contains(termProgram, "foot"),
+		strings.Contains(termProgram, "windowsterminal"),
+		strings.Contains(termProgram, "contour"),
+		strings.Contains(termProgram, "rio"):
 		return true
 	}
 	term := strings.ToLower(os.Getenv("TERM"))
-	return strings.Contains(term, "ghostty") || strings.Contains(term, "supacode")
+	return strings.Contains(term, "ghostty") ||
+		strings.Contains(term, "supacode") ||
+		strings.Contains(term, "kitty") ||
+		strings.Contains(term, "foot") ||
+		strings.Contains(term, "contour") ||
+		strings.Contains(term, "rio")
 }
 
 func isAppleTerminal() bool {
