@@ -1,15 +1,15 @@
 // internal/orchestrator/states.go
 package orchestrator
 
-// state is the current step of the pipeline state machine.
-type state string
+// State is the current step of the pipeline state machine.
+type State string
 
 const (
-	statePlanning   state = "Planning"
-	stateExploring  state = "Exploring"
-	stateDeveloping state = "Developing"
-	stateCompiling  state = "Compiling"
-	stateValidating state = "Validating"
-	stateAdvising   state = "Advising"
-	stateDone       state = "Done"
+	StatePlanning   State = "Planning"
+	StateExploring  State = "Exploring"
+	StateDeveloping State = "Developing"
+	StateCompiling  State = "Compiling"
+	StateValidating State = "Validating"
+	StateAdvising   State = "Advising"
+	StateDone       State = "Done"
 )
