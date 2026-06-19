@@ -43,9 +43,11 @@ func ResolveSmallModel(cfg *config.Config) string {
 // model. Primary coding agents (build, plan) are excluded to avoid downgrading
 // the main coding loop.
 var smallModelEligibleNames = map[string]bool{
-	"explore":    true,
-	"general":    true,
-	"compaction": true,
+	"explore":               true,
+	"general":               true,
+	"compaction":            true,
+	"orchestrator-planner":  true,
+	"orchestrator-explorer": true,
 }
 
 // smallModelEligible reports whether the named agent is a candidate for the

@@ -49,9 +49,11 @@ func TestWorktreeSetupTeardown(t *testing.T) {
 func TestWorktreePreserveOnHalt(t *testing.T) {
 	root := repoRoot(t)
 	// Clean up any stale worktree from a prior failed test run.
-	// (git worktree leaves locked entries when tests crash mid-flight.)
+	// (git worktree leaves "locked" entries when tests crash mid-flight;
+	// the dir gets removed but the registry entry sticks around.)
 	stalePath := filepath.Join(root, ".worktrees", "orchestrator-test-run-002")
 	_ = os.RemoveAll(stalePath)
+	_ = exec.Command("git", "-C", root, "worktree", "unlock", stalePath).Run()
 	_ = exec.Command("git", "-C", root, "worktree", "prune").Run()
 	wm := NewWorktreeManager(root)
 	path, err := wm.Setup("test-run-002")
