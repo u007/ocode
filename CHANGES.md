@@ -22,6 +22,8 @@
 - **Concurrent Tailscale Sessions** — `/rc` now uses `tailscale serve --set-path /<sessionID>` so multiple ocode instances can expose the same node without overwriting each other's tailscale config. The `tailscaleReset()` global teardown was removed from `stopRCServer` for the same reason. `sanitizeTailscalePath` strips `/`, `.`, and non-ASCII from sessionIDs so embedded separators can't route to a sibling path.
 
 ### Added
+- **Desktop Bell Fallback (non-macOS)** — Non-macOS systems now fall back to `beeep.Beep(440, 200)` when the terminal doesn't support the OSC 9 desktop bell sequence, providing audible notifications on Linux/Windows. New import `github.com/gen2brain/beeep`.
+- **Terminal Detection Expansion** — `supportsDesktopBell()` now recognizes kitty, wezterm, foot, Windows Terminal, contour, and rio via both `TERM_PROGRAM` and `TERM` environment variables, enabling desktop bell notifications on those terminals.
 - **`/sound` Command** — New `/sound [on|off|test]` slash command toggles the terminal bell on task completion. Enabled by default. `ringBell()` writes the BEL character safely in alt-screen mode. Wired as an instant (non-queued) command.
 - **`/sound` Enhancements** — `/sound test` dispatches a bell notification; no-args shows current status. Desktop bell (OSC 9 escape sequence) for Ghostty and iTerm2. macOS system beep for Apple Terminal. `bellNotifier` field enables test injection. New `defaultBellNotifier`, `bellNotificationPayload`, `supportsDesktopBell`, `macOSSystemBeep` helpers. Locked in by `TestHandleSoundCmdReportsStatusAndToggles` and `TestHandleSoundCmdTestDispatchesBell`.
 - **Version Bump** — 0.5.12 → 0.5.13.
