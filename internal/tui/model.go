@@ -592,6 +592,7 @@ type model struct {
 	agent                *agent.Agent
 	advisorEnabled       bool // runtime advisor state; persisted across agent rebuilds
 	soundEnabled         bool // terminal bell on task completion / permission request
+	bellNotifier         func()
 	advisorEnabledSet    bool // whether advisorEnabled should be applied to newly installed agents
 	smallModelEnabled    bool // runtime small model state; persisted across agent rebuilds
 	smallModelEnabledSet bool // whether smallModelEnabled should be applied to newly installed agents
@@ -1546,7 +1547,8 @@ func newModel(opts ...RunOptions) model {
 		agent:            a,
 		sessionID:        o.SessionID,
 		showThinking:     true,
-		soundEnabled:       true,
+		soundEnabled:     true,
+		bellNotifier:     defaultBellNotifier,
 		showSidebar:      true,
 		redactionEnabled: cfg != nil && cfg.Ocode.Security.Redaction.Enabled,
 		redactionModel: func() string {
@@ -3141,7 +3143,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streamWasInterrupted = msg.err != nil
 		// Ring the terminal bell on task completion (if enabled).
 		if m.soundEnabled {
-			ringBell()
+			m.ringBell()
 		}
 		// Reset so the next turn's first reasoning delta starts a fresh
 		// thinking block instead of appending into the prior turn's buffer.
@@ -6961,17 +6963,26 @@ func (m *model) handleDetailsCmd(args []string) {
 }
 func (m *model) handleSoundCmd(args []string) {
 	if len(args) == 0 {
-		m.soundEnabled = !m.soundEnabled
-	} else {
-		switch strings.ToLower(args[0]) {
-		case "on", "true", "yes":
-			m.soundEnabled = true
-		case "off", "false", "no":
-			m.soundEnabled = false
-		default:
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /sound [on|off]"})
-			return
+		// No args: show current status.
+		status := "off"
+		if m.soundEnabled {
+			status = "on"
 		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Terminal bell is %s.", status)})
+		return
+	}
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "yes":
+		m.soundEnabled = true
+	case "off", "false", "no":
+		m.soundEnabled = false
+	case "test":
+		m.ringBell()
+		m.messages = append(m.messages, message{role: roleAssistant, text: "🔔 Terminal bell test dispatched; your terminal may suppress bells."})
+		return
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /sound [on|off|test]"})
+		return
 	}
 	status := "off"
 	if m.soundEnabled {
@@ -6980,11 +6991,52 @@ func (m *model) handleSoundCmd(args []string) {
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Terminal bell is now %s.", status)})
 }
 
-// ringBell returns a tea.Cmd that writes the terminal BEL character ( or \x07)
-// to stdout, producing an audible bell. Safe to call while the TUI is in
-// alt-screen mode — BEL is a non-printing control character.
-func ringBell() {
-	os.Stdout.Write([]byte{0x07})
+// defaultBellNotifier writes the terminal BEL character (\a or \x07) to stdout.
+// Safe to call while the TUI is in alt-screen mode — BEL is a non-printing
+// control character.
+func defaultBellNotifier() {
+	_, _ = os.Stdout.Write(bellNotificationPayload())
+	if runtime.GOOS == "darwin" && isAppleTerminal() {
+		macOSSystemBeep()
+	}
+}
+
+func (m *model) ringBell() {
+	if m != nil && m.bellNotifier != nil {
+		m.bellNotifier()
+		return
+	}
+	defaultBellNotifier()
+}
+
+func bellNotificationPayload() []byte {
+	payload := []byte{0x07}
+	if supportsDesktopBell() {
+		payload = append(payload, []byte("\x1b]9;ocode bell\x1b\\")...)
+	}
+	return payload
+}
+
+func supportsDesktopBell() bool {
+	termProgram := strings.ToLower(os.Getenv("TERM_PROGRAM"))
+	switch {
+	case strings.Contains(termProgram, "ghostty"),
+		strings.Contains(termProgram, "supacode"),
+		strings.Contains(termProgram, "iterm.app"):
+		return true
+	}
+	term := strings.ToLower(os.Getenv("TERM"))
+	return strings.Contains(term, "ghostty") || strings.Contains(term, "supacode")
+}
+
+func isAppleTerminal() bool {
+	termProgram := strings.ToLower(os.Getenv("TERM_PROGRAM"))
+	return termProgram == "apple_terminal"
+}
+
+func macOSSystemBeep() {
+	// #nosec G204 - user can't control this argument
+	_ = exec.Command("osascript", "-e", "beep").Run()
 }
 
 func (m *model) handleBtwCmd(args []string) {
