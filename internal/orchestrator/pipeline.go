@@ -19,7 +19,7 @@ type PipelineOptions struct {
 	UseWorktree   bool                      // default true — set false for --no-worktree mode
 	WorkDir       string                    // repo root; defaults to "."
 	Backoff       BackoffPolicy             // used only when UseWorktree=false
-	StatusFunc    func(s state, msg string) // called on each state transition (may be nil)
+	StatusFunc    func(s State, msg string) // called on each state transition (may be nil)
 }
 
 // Pipeline is the orchestration engine. Create with New(), run with Run().
@@ -53,7 +53,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 	p.iterCount = 0
 
 	// Planning
-	p.emit(statePlanning, "analysing goal")
+	p.emit(StatePlanning, "analysing goal")
 	planRaw, err := p.dispatchFn("orchestrator-planner", goal)
 	if err != nil {
 		return nil, fmt.Errorf("planning failed: %w", err)
@@ -81,7 +81,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 	}
 
 	// Exploring (iteration 0)
-	p.emit(stateExploring, "gathering codebase context")
+	p.emit(StateExploring, "gathering codebase context")
 	explorePrompt := fmt.Sprintf("Goal: %s\n\nGather codebase context for a developer who will implement this.", goal)
 	if len(p.doc.ReExploreHints) > 0 {
 		explorePrompt += "\n\nRe-explore hints (files missing from prior snapshot):\n- " + strings.Join(p.doc.ReExploreHints, "\n- ")
@@ -110,7 +110,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 				break
 			}
 			// Escalate to advisor
-			p.emit(stateAdvising, fmt.Sprintf("escalating after %d iterations", p.iterCount))
+			p.emit(StateAdvising, fmt.Sprintf("escalating after %d iterations", p.iterCount))
 			advisorNote, err := p.escalateToAdvisor(ctx, lastValidatorReport)
 			if err != nil {
 				advisorNote = fmt.Sprintf("advisor unavailable: %v", err)
@@ -125,7 +125,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 
 		// Developing
 		p.iterCount++
-		p.emit(stateDeveloping, fmt.Sprintf("iteration %d", p.iterCount))
+		p.emit(StateDeveloping, fmt.Sprintf("iteration %d", p.iterCount))
 		brief := p.buildDeveloperBrief(lastValidatorReport)
 		devPrompt := p.doc.Render(brief)
 		devOut, err := p.dispatchFn("orchestrator-developer", devPrompt)
@@ -152,7 +152,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 		}
 
 		// Validating
-		p.emit(stateValidating, fmt.Sprintf("iteration %d", p.iterCount))
+		p.emit(StateValidating, fmt.Sprintf("iteration %d", p.iterCount))
 		valPrompt := p.buildValidatorPrompt(devReport)
 		valOut, err := p.dispatchFn("orchestrator-validator", valPrompt)
 		// Re-ask on malformed output (once)
@@ -191,7 +191,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 			lastFilesChanged = fileChangesFromReport(devReport)
 
 			if verdict == VerdictPassed {
-				p.emit(stateDone, "validation passed")
+				p.emit(StateDone, "validation passed")
 				if wm != nil {
 					_ = wm.Teardown(false)
 				}
@@ -208,7 +208,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 	}
 
 	// HALTED
-	p.emit(stateDone, "halted")
+	p.emit(StateDone, "halted")
 	if wm != nil {
 		_ = wm.Teardown(true) // preserve worktree on halt
 	}
@@ -222,7 +222,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 	}, nil
 }
 
-func (p *Pipeline) emit(s state, msg string) {
+func (p *Pipeline) emit(s State, msg string) {
 	if p.opts.StatusFunc != nil {
 		p.opts.StatusFunc(s, msg)
 	}
@@ -273,7 +273,7 @@ func (p *Pipeline) runCompile(ctx context.Context, verifyMode string, wm *Worktr
 			return out, nil
 		}
 		if attempt+1 < maxAttempts {
-			p.emit(stateCompiling, fmt.Sprintf("compile failed (attempt %d/%d), retrying after backoff", attempt+1, p.opts.Backoff.MaxAttempts))
+			p.emit(StateCompiling, fmt.Sprintf("compile failed (attempt %d/%d), retrying after backoff", attempt+1, p.opts.Backoff.MaxAttempts))
 			delay := p.opts.Backoff.Delay(attempt, rand.Float64())
 			select {
 			case <-time.After(delay):

@@ -16,6 +16,7 @@ import (
 	// api.openai.com/v1/chat/completions (401 missing_scope) instead of the
 	// Codex backend.
 	_ "github.com/u007/ocode/internal/plugin/codex"
+	"github.com/u007/ocode/internal/cli"
 	"github.com/u007/ocode/internal/runcli"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/skill"
@@ -96,6 +97,12 @@ func main() {
 			return
 		case "acp":
 			if err := acp.Run(os.Args[2:]); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
+		case "orchestrate":
+			if err := cli.Run(os.Args[2:]); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
