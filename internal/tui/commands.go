@@ -73,7 +73,7 @@ func init() {
 		{name: "/export-claude", help: "Append chat to Claude Code JSONL", handler: runExportClaudeCmd},
 		{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
-		{name: "/sound", usage: "/sound [on|off|status]", help: "Toggle terminal bell on task completion", handler: runSoundCmd},
+		{name: "/sound", usage: "/sound [on|off|test]", help: "Show status / toggle terminal bell on task completion", handler: runSoundCmd},
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
 		{name: "/init", usage: "/init [focus]", help: "Analyze project and generate AGENTS.md", handler: runInitCmd},
 		{name: "/learn", usage: "/learn [focus]", help: "List project-root skills and guide skill creation/update", handler: runLearnCmd},

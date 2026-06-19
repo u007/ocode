@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -4657,6 +4658,119 @@ func TestHandleNewCmdReplacesSupervisor(t *testing.T) {
 	if _, err := oldSupervisor.Register(tool.ProcessRegistration{ID: "late-proc"}); err != tool.ErrProcessSupervisorClosed {
 		t.Fatalf("old supervisor Register() error = %v, want %v", err, tool.ErrProcessSupervisorClosed)
 	}
+}
+
+func TestHandleSoundCmdReportsStatusAndToggles(t *testing.T) {
+	t.Run("status", func(t *testing.T) {
+		m := model{soundEnabled: true}
+		m.handleSoundCmd(nil)
+		if got := lastMessageText(m.messages); got != "Terminal bell is on." {
+			t.Fatalf("status message = %q, want %q", got, "Terminal bell is on.")
+		}
+	})
+
+	t.Run("toggle", func(t *testing.T) {
+		m := model{soundEnabled: false}
+
+		m.handleSoundCmd([]string{"on"})
+		if !m.soundEnabled {
+			t.Fatal("expected /sound on to enable the bell")
+		}
+		if got := lastMessageText(m.messages); got != "Terminal bell is now on." {
+			t.Fatalf("/sound on message = %q, want %q", got, "Terminal bell is now on.")
+		}
+
+		m.handleSoundCmd([]string{"off"})
+		if m.soundEnabled {
+			t.Fatal("expected /sound off to disable the bell")
+		}
+		if got := lastMessageText(m.messages); got != "Terminal bell is now off." {
+			t.Fatalf("/sound off message = %q, want %q", got, "Terminal bell is now off.")
+		}
+	})
+}
+
+func TestHandleSoundCmdTestDispatchesBell(t *testing.T) {
+	bellCalls := 0
+	m := model{
+		soundEnabled: true,
+		bellNotifier: func() { bellCalls++ },
+	}
+
+	m.handleSoundCmd([]string{"test"})
+
+	if bellCalls != 1 {
+		t.Fatalf("bell notifier called %d times, want 1", bellCalls)
+	}
+	if got := lastMessageText(m.messages); !strings.Contains(got, "Terminal bell test dispatched") {
+		t.Fatalf("test message = %q, want it to describe the dispatched test", got)
+	}
+}
+
+func TestBellNotificationPayloadIncludesGhosttyDesktopNotification(t *testing.T) {
+	t.Run("ghostty", func(t *testing.T) {
+		t.Setenv("TERM_PROGRAM", "ghostty")
+		t.Setenv("TERM", "xterm-ghostty")
+
+		payload := bellNotificationPayload()
+		if len(payload) == 0 || payload[0] != 0x07 {
+			t.Fatalf("payload should start with BEL, got %q", payload)
+		}
+		if !bytes.Contains(payload, []byte("\x1b]9;ocode bell\x1b\\")) {
+			t.Fatalf("payload = %q, want OSC 9 desktop notification for Ghostty/Supacode/iTerm2", payload)
+		}
+	})
+
+	t.Run("iterm2", func(t *testing.T) {
+		t.Setenv("TERM_PROGRAM", "iTerm.app")
+		t.Setenv("TERM", "xterm-256color")
+
+		payload := bellNotificationPayload()
+		if len(payload) == 0 || payload[0] != 0x07 {
+			t.Fatalf("payload should start with BEL, got %q", payload)
+		}
+		if !bytes.Contains(payload, []byte("\x1b]9;ocode bell\x1b\\")) {
+			t.Fatalf("payload = %q, want OSC 9 desktop notification for iTerm2", payload)
+		}
+	})
+}
+
+func TestBellNotificationPayloadFallsBackToBEL(t *testing.T) {
+	t.Setenv("TERM_PROGRAM", "")
+	t.Setenv("TERM", "xterm-256color")
+
+	payload := bellNotificationPayload()
+	if !bytes.Equal(payload, []byte{0x07}) {
+		t.Fatalf("payload = %q, want BEL only", payload)
+	}
+}
+
+func TestIsAppleTerminal(t *testing.T) {
+	t.Run("apple_terminal", func(t *testing.T) {
+		t.Setenv("TERM_PROGRAM", "Apple_Terminal")
+		if !isAppleTerminal() {
+			t.Fatal("expected isAppleTerminal() = true for Apple_Terminal")
+		}
+	})
+
+	t.Run("other", func(t *testing.T) {
+		t.Setenv("TERM_PROGRAM", "ghostty")
+		if isAppleTerminal() {
+			t.Fatal("expected isAppleTerminal() = false for ghostty")
+		}
+
+		t.Setenv("TERM_PROGRAM", "")
+		if isAppleTerminal() {
+			t.Fatal("expected isAppleTerminal() = false for empty")
+		}
+	})
+}
+
+func lastMessageText(msgs []message) string {
+	if len(msgs) == 0 {
+		return ""
+	}
+	return msgs[len(msgs)-1].text
 }
 
 func TestActivityUpdateFromPreviousAgentIgnored(t *testing.T) {

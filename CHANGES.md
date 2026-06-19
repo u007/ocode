@@ -22,7 +22,9 @@
 - **Concurrent Tailscale Sessions** — `/rc` now uses `tailscale serve --set-path /<sessionID>` so multiple ocode instances can expose the same node without overwriting each other's tailscale config. The `tailscaleReset()` global teardown was removed from `stopRCServer` for the same reason. `sanitizeTailscalePath` strips `/`, `.`, and non-ASCII from sessionIDs so embedded separators can't route to a sibling path.
 
 ### Added
-- **`/sound` Command** — New `/sound [on|off|status]` slash command toggles the terminal bell on task completion. Enabled by default. `ringBell()` writes the BEL character safely in alt-screen mode. Wired as an instant (non-queued) command.
+- **`/sound` Command** — New `/sound [on|off|test]` slash command toggles the terminal bell on task completion. Enabled by default. `ringBell()` writes the BEL character safely in alt-screen mode. Wired as an instant (non-queued) command.
+- **`/sound` Enhancements** — `/sound test` dispatches a bell notification; no-args shows current status. Desktop bell (OSC 9 escape sequence) for Ghostty and iTerm2. macOS system beep for Apple Terminal. `bellNotifier` field enables test injection. New `defaultBellNotifier`, `bellNotificationPayload`, `supportsDesktopBell`, `macOSSystemBeep` helpers. Locked in by `TestHandleSoundCmdReportsStatusAndToggles` and `TestHandleSoundCmdTestDispatchesBell`.
+- **Version Bump** — 0.5.12 → 0.5.13.
 - **Version Bump** — 0.5.11 → 0.5.12.
 - **In-Chat Search (`/search`)** — New `/search <query>` slash command (alias `/find`) opens an in-chat find bar with Ctrl+F support. Case-insensitive substring matching across all message types (text, tool calls, tool results, reasoning). Highlights matching messages and jumps to them. New `internal/tui/chat_search.go` with full test coverage. New `SearchHit` theme style.
 - **Inline URL Links** — New `internal/tui/urllink.go` detects raw URLs and markdown links in LLM output, rendering them as clickable link regions. New `renderMarkdownInLine` helper replaces `renderMarkdownBold` in the agent detail view for URL-aware rendering.
