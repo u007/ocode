@@ -3015,6 +3015,25 @@ func (a *Agent) SetSubAgentPermAsker(f func(PermissionRequest) PermissionRespons
 	a.subAgentPermAsker = f
 }
 
+// DispatchSubagent runs the named subagent synchronously with the given prompt
+// and returns its final text output. It uses the agent's configured task tool
+// so all existing subagent wiring (permissions, small model, activity tracking)
+// is applied automatically.
+func (a *Agent) DispatchSubagent(agentName, prompt string) (string, error) {
+	t, ok := a.tools["task"].(*TaskTool)
+	if !ok {
+		return "", fmt.Errorf("orchestrator: task tool not available on agent")
+	}
+	args, err := json.Marshal(map[string]any{
+		"agent":  agentName,
+		"prompt": prompt,
+	})
+	if err != nil {
+		return "", fmt.Errorf("orchestrator: failed to marshal dispatch args: %w", err)
+	}
+	return t.Execute(args)
+}
+
 func (a *Agent) applyPermissionResponse(req PermissionRequest, resp PermissionResponse) {
 	if a.permissions == nil || resp.Level != PermissionAllow {
 		return

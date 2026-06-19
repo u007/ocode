@@ -108,11 +108,11 @@ func TestIsSmallModel(t *testing.T) {
 	// not the full "provider/model" string. The isSmallModel function should
 	// match on just the model part.
 	yes := []string{
-		"deepseek-v4-flash",       // from "opencode-go/deepseek-v4-flash"
-		"mimo-v2.5-free",          // from "opencode/mimo-v2.5-free"
-		"qwen-3.5-plus",           // from "opencode-go/qwen-3.5-plus"
-		"deepseek-chat",           // from "deepseek/deepseek-chat"
-		"MiMo-V2.5",               // from "xiaomi-token-plan-sgp/MiMo-V2.5"
+		"deepseek-v4-flash", // from "opencode-go/deepseek-v4-flash"
+		"mimo-v2.5-free",    // from "opencode/mimo-v2.5-free"
+		"qwen-3.5-plus",     // from "opencode-go/qwen-3.5-plus"
+		"deepseek-chat",     // from "deepseek/deepseek-chat"
+		"MiMo-V2.5",         // from "xiaomi-token-plan-sgp/MiMo-V2.5"
 	}
 	no := []string{
 		"",
@@ -125,8 +125,8 @@ func TestIsSmallModel(t *testing.T) {
 		"kimi-k2",
 		"o1",
 		"random-model",
-		"opencode-go/deepseek-v4-flash",  // Full string should NOT match (model part only)
-		"opencode/mimo-v2.5-free",        // Full string should NOT match
+		"opencode-go/deepseek-v4-flash", // Full string should NOT match (model part only)
+		"opencode/mimo-v2.5-free",       // Full string should NOT match
 	}
 	for _, m := range yes {
 		if !isSmallModel(m) {
