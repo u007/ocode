@@ -40,8 +40,11 @@ the same rule:
 
 1. **Tool schemas** (the `tools` API param) are produced by `GetToolDefinitions()`.
    The attached set is **grow-only within an agent instance** (sticky), and the
-   output is **sorted deterministically**, so the tool block only ever grows by
-   appended entries → cache invalidates only from the growth point, not every turn.
+   output is **sorted deterministically**. Precise benefit: on a turn that attaches
+   nothing new, the tool list is byte-identical → full cache hit. A newly-attached
+   tool inserts at its sorted position and invalidates the cache from that point
+   (not "append-only"), but a no-new-attachment turn pays nothing — which is the
+   common case once the session warms up.
 2. **MCP name-index + prompt contract** are injected as a **single system message
    appended at the tail** of `messages` inside `Step()` (a new
    `injectDiscoveryContext`), exactly like `injectNotesTail`. They are **never** placed

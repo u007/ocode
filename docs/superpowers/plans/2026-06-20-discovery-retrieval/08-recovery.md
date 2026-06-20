@@ -206,14 +206,18 @@ func (a *Agent) markMCPFrom(parent *Agent) {
 
 - [ ] **Step 4: Wire into `TaskTool.Execute`**
 
-In `internal/agent/subagent.go`, after `subAgent.SetSpec(&subSpec)`, add:
+In `internal/agent/subagent.go`, after `subAgent.SetSpec(&subSpec)`, add **only**
+the MCP marking — the sub-agent's own `Step()` already calls `RunDiscovery` with
+`discoveryQueryFromMessages`, and the sub-agent's sole user message *is*
+`params.Prompt`, so an explicit `RunDiscovery` here would be redundant. What is NOT
+redundant is `markMCPFrom`: it must run before `Step` so the gate knows which of the
+sub-agent's tools are gateable (`NewAgent` drops the MCP markers).
 
 ```go
-	// Discovery: give the sub-agent its OWN sticky set, seeded from its task
-	// prompt (it does not inherit the parent's accumulated set). Mark MCP tools
-	// first so the gate knows which are gateable.
+	// Discovery: the sub-agent gets its OWN fresh sticky set (it does not inherit
+	// the parent's). NewAgent drops MCP markers, so re-mark them from the parent
+	// here; the sub-agent's Step() then ranks against params.Prompt itself.
 	subAgent.markMCPFrom(t.mainAgent)
-	subAgent.RunDiscovery(params.Prompt)
 ```
 
 - [ ] **Step 5: Run tests + build**

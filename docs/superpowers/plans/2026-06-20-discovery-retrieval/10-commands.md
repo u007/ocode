@@ -105,6 +105,13 @@ func (a *Agent) DiscoveryGatedTokens() (attached, total, gatedToks, indexToks in
 func (a *Agent) ResetDiscovery() { a.disco = nil }
 ```
 
+**Validation caveat:** `setDiscoveryEnabled(true)` calls `ResolveEmbedder`, which
+checks key *presence* (`os.Getenv`), not validity. A present-but-invalid key passes
+`/discovery on` and only surfaces on turn 1 as a fail-open `WARN` (all tools
+attached). This is acceptable (no blocking network call at toggle time) but means
+`/discovery on` succeeding is not proof the embedder works — the first turn's Log-tab
+line is.
+
 - [ ] **Step 4: Register commands + instant + handlers**
 
 In `internal/tui/commands.go` `commandSpecs`, add:
