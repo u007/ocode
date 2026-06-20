@@ -60,19 +60,34 @@ type Embedder interface {
 - **httpEmbedder** — default path. Backends: OpenAI, Voyage, Cohere, Gemini
   embeddings. Reuses existing provider auth (`internal/auth`). Batches the corpus
   in one call; the per-turn query is a single-text call.
-- **localEmbedder** — optional. Loads the LFM2-5 retriever locally. The model is
-  **downloaded at runtime** to `~/.cache/ocode/models/` only when the user enables
-  the local backend (never bundled, never auto-downloaded for HTTP users). Runtime
-  binding (ONNX/llama.cpp) is an implementation-plan decision; behind the same
-  interface so it is swappable.
-  - **Apple Silicon (darwin/arm64, M1+) → MLX build.** When the local backend is
-    enabled on Apple Silicon, the localEmbedder must select the **MLX** artifact of
-    the LFM2-5 retriever (Apple's Metal-accelerated runtime) rather than the generic
-    ONNX/CPU build. Detection: `runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"`.
-    The download manifest therefore carries per-platform artifacts (mlx vs onnx/cpu),
-    and `local_model_status` tracks whichever artifact matches the host. This is a
-    **Plan 2** concern; Plan 1 leaves the seam (backend = "local" returns a clear
-    "not available yet" error).
+- **localEmbedder** — a thin HTTP client to a **shared local model server** that
+  ocode manages as a subprocess. MLX has no Go bindings, so in-process MLX is
+  impossible; a subprocess is the only path that delivers MLX on Apple Silicon. The
+  localEmbedder reuses the same HTTP transport as `httpEmbedder`, pointed at
+  `http://localhost:<port>`.
+  - **Shared singleton, not per-agent.** One server per machine, started lazily on
+    first local use. A process-global manager (sync.Once/mutex) ensures a single
+    instance; the main agent and **all sub-agents** connect as clients to the same
+    base URL — sub-agents never spawn their own.
+  - **Probe-first, cross-process sharing.** Before spawning, probe the fixed local
+    port (the `FetchLMStudioModels` pattern). If a server already answers, connect to
+    it — so multiple ocode processes share one model load. Only spawn if nothing
+    answers.
+  - **Supervisor-owned lifecycle.** The process that spawns the server registers it
+    with **its** `ProcessSupervisor` (`agent.Supervisor().Register(ProcessRegistration{…})`
+    — never raw `exec.Command`), so it is torn down (SIGTERM→SIGKILL) when that ocode
+    process exits. Processes that merely attached re-probe / re-spawn on the next
+    embed call if the owner is gone. No detached daemon outliving all ocode processes.
+  - **Apple Silicon (darwin/arm64, M1+) → MLX build.** Artifact selection branches on
+    `runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"` → the **MLX**
+    (`mlx-embeddings`) server build; Linux/Intel → a llama.cpp/ONNX build. The
+    download manifest carries per-platform artifacts (binary + model) with sha256;
+    `local_model_status` tracks the host-matching artifact (none|downloading|ready).
+  - **Runtime download.** Artifacts download at runtime to the ocode cache dir
+    (`~/.config/opencode/discovery/` for manifest/state; model+server binary under a
+    sibling cache path) only when the user selects the local backend — never bundled,
+    never auto-downloaded for HTTP users. Download follows the existing
+    fetch→sha256-verify→atomic-write→cache pattern (`models_registry.go`).
 
 Asymmetric encoding: corpus embedded as `Passage`, query embedded as `Query`
 (instruction prefix for LFM2-5; input-type hint for HTTP backends).
@@ -158,13 +173,15 @@ follow-ups.
   front-loaded and trends down over session length while per-turn query-embed +
   name-index overhead persists. Acceptable for typical sessions; if it bites, the
   rejected "sticky-with-evict" variant is the revisit path.
-- **Gated:** MCP tools + skill-catalog entries only.
-  - **Phasing note:** Plan 1 (first implementation) gates **MCP tools only** and
-    leaves the skill catalog fully injected as today. Skill gating requires
-    suppressing `skill.BuildCatalog()` from the cached context prefix, which races
-    with ocode's context preload + snapshot + marker-dedup path — deferred to a later
-    phase since MCP tool schemas are the dominant context cost. The name index and
-    `discover_more` therefore cover MCP tools in Plan 1.
+- **Gated:** MCP tools + skill-catalog entries.
+  - **Skill gating approach:** `skill.BuildCatalog()` is suppressed from
+    `LoadContext()` based on the **config flag** `discovery.enabled` (known at
+    context-preload time, so no race with the discovery *result*). The tail injector
+    then supplies the skill **name index** (all skills) plus full descriptions for
+    **attached** skills. Fail-open compensates: if the embedder fails at runtime, the
+    tail injector emits the **full** catalog instead of the name index, so skills are
+    never lost. Suppression keys on the config flag at both call sites
+    (`BasePromptMessages` and the `askAgent` preload).
 - **Never gated (core allowlist).** An explicit constant set, never subject to
   discovery: `read, edit, write, glob, grep, list, bash, bash_output, kill_shell,
   wait, lsp, task, agent_status, task_status, advisor`, and `discover_more`.
