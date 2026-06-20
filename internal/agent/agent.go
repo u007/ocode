@@ -75,6 +75,9 @@ type Agent struct {
 	client    LLMClient
 	tools     map[string]tool.Tool
 	mcpTools  map[string]struct{}
+	// disco holds discovery (skill/MCP retrieval) state when /discovery is on.
+	// nil means discovery is off → no gating, today's behavior.
+	disco *discoveryState
 	mcpErrors []string
 	config    *config.Config
 	mode      Mode
@@ -680,6 +683,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	}
 
 	preLen := len(messages)
+	a.RunDiscovery(discoveryQueryFromMessages(messages))
 	messages = a.PrepareMessages(messages, "")
 	// Order matters for cache stability: stable content
 	// (PrepareMessages output) is followed by the volatile
@@ -696,9 +700,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// nothing new → no block → no prefix change). See
 	// injectNotesTail in delta_inject.go for the render.
 	messages = injectNotesTail(messages, a)
-	toolDefs := a.GetToolDefinitions()
+	// Note: GetToolDefinitions is invoked inside the iteration loop below so
+	// a mid-turn discover_more (Part 08) is visible on the next iteration.
 	var newMsgs []Message
-	emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prompt prep, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
 
 	// Recover orphaned tool calls from prior sessions: find the last assistant
 	// message that has ToolCalls, then check which call IDs have no following
@@ -709,6 +713,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	for i := 0; ; i++ {
 		if isCancelled() {
 			return newMsgs, nil
+		}
+		// Recompute tool defs each iteration: a mid-turn discover_more call
+		// (Part 08) only becomes visible to the LLM on the next loop.
+		toolDefs := a.GetToolDefinitions()
+		if i == 0 {
+			emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prompt prep, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
 		}
 		limit := a.maxSteps
 		if limit <= 0 {
@@ -2696,12 +2706,23 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 }
 
 func (a *Agent) GetToolDefinitions() []map[string]interface{} {
-	defs := make([]map[string]interface{}, 0, len(a.tools))
-	for _, t := range a.tools {
-		if !a.isToolAllowed(t.Name()) {
+	names := make([]string, 0, len(a.tools))
+	for name := range a.tools {
+		if !a.isToolAllowed(name) {
 			continue
 		}
-		defs = append(defs, t.Definition())
+		if !a.discoveryAllows(name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	// Deterministic order keeps the provider tool-cache prefix stable across
+	// turns (a.tools is a map → random iteration would bust the cache and
+	// defeat the sticky-set benefit).
+	sort.Strings(names)
+	defs := make([]map[string]interface{}, 0, len(names))
+	for _, name := range names {
+		defs = append(defs, a.tools[name].Definition())
 	}
 	return defs
 }
