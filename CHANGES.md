@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Sidebar Temperature & Reasoning Display** — The sidebar now shows the effective LLM temperature and thinking/reasoning budget level on a dedicated line above the context window, giving the user at-a-glance visibility of model configuration. New `Agent.EffectiveTemperature()` method exposes the configured temperature from the client or spec. Locked in by `TestEffectiveTemperature`.
 - **Model Temperature Defaults Expansion** — `defaultTemperature` extended with support for north-mini-code, claude, gemini, glm-4.5/4.6/4.7/5, deepseek-v4, grok (reasoning & non-reasoning), gemma, mistral/codestral/devstral, cohere/command, llama, nemotron, minimax-m3, mimo, and kimi-k2 (thinking & base) model families. `defaultTopP` extended with qwen and additional kimi-k2 variants. Locked in by comprehensive tests.
 - **Read Tool `offset`/`limit` Aliases** — `ReadTool.Execute` now recognizes `offset` and `limit` as aliases for `start_line`/`end_line`, preventing silent reread loops when models emit Claude-Code-style pagination keys. Locked in by `TestReadToolOffsetLimitAliases`.
 - **Detail View Text Selection** — Moved text selection initiation before the generic detail click handler, enabling text selection in the agent detail view. Selection survives live transcript refresh ticks. Locked in by `TestDetailViewMouseStartsTextSelection` and `TestDetailSelectionSurvivesLiveRefresh`.
