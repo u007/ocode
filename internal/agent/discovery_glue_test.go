@@ -86,3 +86,30 @@ func indexOf(s, sub string) int {
 	}
 	return -1
 }
+
+func TestInjectDiscoveryContextOnlyWhenActive(t *testing.T) {
+	a := newGateAgent()
+	base := []Message{{Role: "user", Content: "hi"}}
+
+	// Off: byte-identical (no-op).
+	if got := a.injectDiscoveryContext(base); len(got) != len(base) {
+		t.Fatalf("off must be a no-op, got %d msgs", len(got))
+	}
+
+	// On: appends one system message naming every MCP tool + the contract.
+	a.disco = &discoveryState{enabled: true}
+	got := a.injectDiscoveryContext(base)
+	if len(got) != len(base)+1 {
+		t.Fatalf("on must append one tail message, got %d", len(got))
+	}
+	last := got[len(got)-1]
+	if last.Role != "system" {
+		t.Fatalf("tail must be a system message")
+	}
+	if !containsSubstr(last.Content, "Notion/search") || !containsSubstr(last.Content, "Notion/update") {
+		t.Fatalf("name index must list all MCP tools: %q", last.Content)
+	}
+	if !containsSubstr(last.Content, "discover_more") {
+		t.Fatalf("prompt contract must mention discover_more")
+	}
+}

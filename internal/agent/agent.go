@@ -700,6 +700,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// nothing new → no block → no prefix change). See
 	// injectNotesTail in delta_inject.go for the render.
 	messages = injectNotesTail(messages, a)
+	// Discovery MCP name index + discover_more prompt contract: appended at the
+	// very tail so the cached prefix is unchanged. The injector is a no-op when
+	// discovery is off — bytes identical to today.
+	messages = a.injectDiscoveryContext(messages)
 	// Note: GetToolDefinitions is invoked inside the iteration loop below so
 	// a mid-turn discover_more (Part 08) is visible on the next iteration.
 	var newMsgs []Message

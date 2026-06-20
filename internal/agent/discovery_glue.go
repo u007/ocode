@@ -125,3 +125,45 @@ func discoveryQueryFromMessages(msgs []Message) string {
 	}
 	return q
 }
+
+const promptDiscoveryMarker = "[ocode:discovery]"
+
+const discoveryPromptContract = `Not every tool is currently loaded. The "Available MCP tools" index below lists every connected MCP tool by name. If you need one that is not in your current tool list, call the discover_more tool with a short description of what you need (e.g. "send an email") BEFORE telling the user you cannot do it — it will attach the matching tools for the rest of this turn.`
+
+// injectDiscoveryContext appends the name index + prompt contract as a single
+// system message at the tail (volatile, like injectNotesTail). No-op when
+// discovery is inactive — bytes are identical to today.
+func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
+	if a.disco == nil || !a.disco.enabled {
+		return messages
+	}
+	docs := a.discoveryDocs() // sorted by ID; MCP only in Plan 1
+	if len(docs) == 0 {
+		return messages
+	}
+	var b strings.Builder
+	b.WriteString(discoveryPromptContract)
+	b.WriteString("\n\nAvailable MCP tools (names only — not all loaded):\n")
+	for _, d := range docs {
+		b.WriteString("- ")
+		b.WriteString(d.Name)
+		if hint := shortHint(d.Text); hint != "" {
+			b.WriteString(" — ")
+			b.WriteString(hint)
+		}
+		b.WriteString("\n")
+	}
+	return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + b.String()})
+}
+
+// shortHint returns the description part of a doc text, trimmed to ~40 chars.
+func shortHint(text string) string {
+	if i := strings.Index(text, ": "); i >= 0 {
+		text = text[i+2:]
+	}
+	text = strings.TrimSpace(text)
+	if len(text) > 40 {
+		text = strings.TrimSpace(text[:40]) + "…"
+	}
+	return text
+}
