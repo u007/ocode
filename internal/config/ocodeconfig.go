@@ -56,6 +56,17 @@ type PluginsConfig struct {
 }
 
 // SecurityConfig holds security-related settings.
+// DiscoveryConfig gates the opt-in discovery-based skill/MCP retrieval
+// feature. When Enabled is false, the rest of the block is ignored and
+// behavior is byte-identical to a build without discovery support.
+type DiscoveryConfig struct {
+	Enabled          bool
+	EmbeddingModel   string
+	EmbeddingBackend string // "http" | "local"
+	LocalModelStatus string // none | downloading | ready
+	PinnedSkills     []string
+}
+
 type SecurityConfig struct {
 	Redaction RedactionConfig `json:"redaction"`
 }
@@ -78,6 +89,7 @@ type OcodeConfig struct {
 	Permissions PermissionConfig
 	Plugins     PluginsConfig
 	Security    SecurityConfig
+	Discovery   DiscoveryConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
 	// into the agent prompt.
 	MemoryEnabled     bool
@@ -225,12 +237,21 @@ type securityConfigFile struct {
 	Redaction redactionConfigFile `json:"redaction"`
 }
 
+type discoveryConfigFile struct {
+	Enabled          *bool    `json:"enabled,omitempty"`
+	EmbeddingModel   string   `json:"embedding_model,omitempty"`
+	EmbeddingBackend string   `json:"embedding_backend,omitempty"`
+	LocalModelStatus string   `json:"local_model_status,omitempty"`
+	PinnedSkills     []string `json:"pinned_skills,omitempty"`
+}
+
 type ocodeConfigFile struct {
 	Compact           compactConfigFile    `json:"compact"`
 	Advisor           advisorConfigFile    `json:"advisor"`
 	Permissions       permissionConfigFile `json:"permissions"`
 	Plugins           pluginsConfigFile    `json:"plugins"`
 	Security          securityConfigFile   `json:"security"`
+	Discovery         discoveryConfigFile  `json:"discovery"`
 	MemoryEnabled     *bool                `json:"memory_enabled,omitempty"`
 	ExtraAllowedPaths []string             `json:"extra_allowed_paths,omitempty"`
 	Editor            string               `json:"editor,omitempty"`
@@ -288,8 +309,19 @@ func defaultOcodeConfig() OcodeConfig {
 		MemoryEnabled:     true,
 		SmallModelEnabled: true,
 		Security:          defaultSecurityConfig(),
+		Discovery:         defaultDiscoveryConfig(),
 		TUI:               defaultTUIConfig(),
 		Extra:             make(map[string]json.RawMessage),
+	}
+}
+
+func defaultDiscoveryConfig() DiscoveryConfig {
+	return DiscoveryConfig{
+		Enabled:          false,
+		EmbeddingModel:   "",
+		EmbeddingBackend: "http",
+		LocalModelStatus: "none",
+		PinnedSkills:     []string{"brainstorming", "using-superpowers"},
 	}
 }
 
@@ -409,6 +441,11 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if _, ok := raw["security"]; ok {
 		applySecurityConfig(&cfg.Security, file.Security)
 		delete(raw, "security")
+	}
+
+	if _, ok := raw["discovery"]; ok {
+		applyDiscoveryConfig(&cfg.Discovery, file.Discovery)
+		delete(raw, "discovery")
 	}
 
 	if _, ok := raw["extra_allowed_paths"]; ok {
@@ -671,6 +708,24 @@ func applyCompactConfig(dst *CompactConfig, src compactConfigFile) {
 	}
 }
 
+func applyDiscoveryConfig(dst *DiscoveryConfig, src discoveryConfigFile) {
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.EmbeddingModel != "" {
+		dst.EmbeddingModel = src.EmbeddingModel
+	}
+	if src.EmbeddingBackend != "" {
+		dst.EmbeddingBackend = src.EmbeddingBackend
+	}
+	if src.LocalModelStatus != "" {
+		dst.LocalModelStatus = src.LocalModelStatus
+	}
+	if src.PinnedSkills != nil {
+		dst.PinnedSkills = append([]string{}, src.PinnedSkills...)
+	}
+}
+
 func SaveOcodeConfig(cfg *OcodeConfig) error {
 	path, err := ActiveOcodeConfigPath()
 	if err != nil {
@@ -694,6 +749,13 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"advisor":     cfg.Advisor,
 		"permissions": cfg.Permissions,
 		"security":    cfg.Security,
+		"discovery": map[string]interface{}{
+			"enabled":            cfg.Discovery.Enabled,
+			"embedding_model":    cfg.Discovery.EmbeddingModel,
+			"embedding_backend":  cfg.Discovery.EmbeddingBackend,
+			"local_model_status": cfg.Discovery.LocalModelStatus,
+			"pinned_skills":      cfg.Discovery.PinnedSkills,
+		},
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
@@ -734,7 +796,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" || k == "max_steps" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" {
 			continue
 		}
 		payload[k] = v
@@ -880,6 +942,41 @@ func SaveUploadDir(dir string) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.UploadDir = dir
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveDiscoveryEnabled persists only the discovery.enabled flag using
+// load-modify-write so it cannot clobber a concurrent session's other config.
+func SaveDiscoveryEnabled(enabled bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Discovery.Enabled = enabled
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveQueryEmbeddingModel persists the discovery embedding model + backend.
+// An empty backend preserves the existing on-disk value.
+func SaveQueryEmbeddingModel(modelID, backend string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Discovery.EmbeddingModel = modelID
+	if backend != "" {
+		cfg.Discovery.EmbeddingBackend = backend
+	}
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveLocalModelStatus persists the local model download status.
+func SaveLocalModelStatus(status string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Discovery.LocalModelStatus = status
 	return SaveOcodeConfig(cfg)
 }
 
