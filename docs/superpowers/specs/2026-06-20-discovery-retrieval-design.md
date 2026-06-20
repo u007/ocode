@@ -65,6 +65,14 @@ type Embedder interface {
   the local backend (never bundled, never auto-downloaded for HTTP users). Runtime
   binding (ONNX/llama.cpp) is an implementation-plan decision; behind the same
   interface so it is swappable.
+  - **Apple Silicon (darwin/arm64, M1+) → MLX build.** When the local backend is
+    enabled on Apple Silicon, the localEmbedder must select the **MLX** artifact of
+    the LFM2-5 retriever (Apple's Metal-accelerated runtime) rather than the generic
+    ONNX/CPU build. Detection: `runtime.GOOS == "darwin" && runtime.GOARCH == "arm64"`.
+    The download manifest therefore carries per-platform artifacts (mlx vs onnx/cpu),
+    and `local_model_status` tracks whichever artifact matches the host. This is a
+    **Plan 2** concern; Plan 1 leaves the seam (backend = "local" returns a clear
+    "not available yet" error).
 
 Asymmetric encoding: corpus embedded as `Passage`, query embedded as `Query`
 (instruction prefix for LFM2-5; input-type hint for HTTP backends).
@@ -151,6 +159,12 @@ follow-ups.
   name-index overhead persists. Acceptable for typical sessions; if it bites, the
   rejected "sticky-with-evict" variant is the revisit path.
 - **Gated:** MCP tools + skill-catalog entries only.
+  - **Phasing note:** Plan 1 (first implementation) gates **MCP tools only** and
+    leaves the skill catalog fully injected as today. Skill gating requires
+    suppressing `skill.BuildCatalog()` from the cached context prefix, which races
+    with ocode's context preload + snapshot + marker-dedup path — deferred to a later
+    phase since MCP tool schemas are the dominant context cost. The name index and
+    `discover_more` therefore cover MCP tools in Plan 1.
 - **Never gated (core allowlist).** An explicit constant set, never subject to
   discovery: `read, edit, write, glob, grep, list, bash, bash_output, kill_shell,
   wait, lsp, task, agent_status, task_status, advisor`, and `discover_more`.
