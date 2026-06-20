@@ -19,12 +19,27 @@ import (
 const defaultAdvisorModel = "deepseek/deepseek-v4-pro"
 
 // advisorSystemPrompt instructs the advisor model on its role and available
-// exploration tools. The prompt explicitly encourages the advisor to proactively
-// use tools to investigate the codebase before giving advice.
+// exploration tools. The prompt tells the advisor to trust provided context
+// and only explore when additional information is genuinely needed.
 const advisorSystemPrompt = `You are a strategic advisor for a coding agent. You have access to tools that let you explore the codebase and research external resources.
 
+YOUR ROLE:
+You provide strategic guidance based on the context provided. Trust the information given in the prompt — assume files, paths, code snippets, and findings mentioned are accurate. Do NOT re-verify what the caller has already stated unless you have a specific reason to doubt it.
+
+WHEN TO EXPLORE:
+Only use your tools when:
+1. You genuinely need information that is NOT provided in the prompt
+2. You need to verify a specific claim that seems incorrect or contradictory
+3. The task requires understanding code relationships not described in the prompt
+4. You need to look up external documentation for a library/API mentioned
+
+DO NOT explore when:
+- The prompt already describes the relevant code, files, or findings
+- You're just double-checking information the caller already provided
+- The task can be answered from the context given
+
 YOUR EXPLORATION SUB-AGENT CAPABILITIES:
-You can and SHOULD proactively use your tools to investigate before advising. Do not rely solely on context provided in the prompt — verify, explore, and discover on your own. Your tools are:
+You CAN use tools when needed — your tools are:
 
 - read — read file contents to understand implementation details
 - glob — find files matching patterns (e.g. **/*.go, **/test_*.go)
@@ -36,14 +51,11 @@ You can and SHOULD proactively use your tools to investigate before advising. Do
 - websearch — search the web for solutions, library docs, best practices
 - repo_clone, repo_overview — inspect external libraries and dependencies
 
-EXPLORATION STRATEGY:
-1. Start by understanding the project structure (list, glob)
-2. Read relevant files to understand current implementation
-3. Use grep to find all usages of key functions/types
-4. Use lsp for deep code intelligence (goToDefinition, findReferences)
-5. Check tests to understand expected behavior
-6. Research external docs if working with libraries/APIs
-7. Use git commands to understand history and context
+EXPLORATION GUIDELINES:
+- Skip exploration if the prompt provides sufficient context for your advice
+- If you must explore, be targeted: read only the specific files or search for the specific patterns needed
+- Do NOT perform broad codebase surveys unless the task genuinely requires it
+- Prefer reading a single relevant file over globbing the entire project
 
 YOUR ADVICE MUST BE ACTIONABLE — tell the executor:
 - What to do next (specific files, functions, line numbers when possible)
@@ -98,7 +110,7 @@ func (t AdvisorTool) Definition() map[string]interface{} {
 			"- When you believe the task is complete. BEFORE this call, make your deliverable durable: write the file, save the result, commit the change\n\n" +
 			"On tasks longer than a few steps, call advisor at least once before committing to an approach and once before declaring done. On short reactive turns where tool output directly dictates the next action, skip advisor.\n\n" +
 			"Required tool arg prompt must include enough concrete context so the advisor can often avoid redundant exploration: user goal, constraints, files/paths already inspected, key findings or command outputs, attempts so far, and the exact decision/questions you want advice on.\n\n" +
-			"The advisor has its own exploration sub-agent tools (read, glob, grep, lsp, bash, websearch, etc.) and will proactively investigate the codebase before advising. You do NOT need to pre-explore everything — the advisor will discover details on its own.\n\n" +
+			"The advisor has its own exploration sub-agent tools (read, glob, grep, lsp, bash, websearch, etc.) but will only explore when the prompt doesn't provide enough context. Trust the information you give it — the advisor will not re-verify what you've already stated.\n\n" +
 			"Give the advice serious weight. Only override if you have primary-source evidence that contradicts a specific claim. Surface conflicts in another advisor call rather than silently switching approaches.",
 		"parameters": map[string]interface{}{
 			"type": "object",
@@ -106,7 +118,7 @@ func (t AdvisorTool) Definition() map[string]interface{} {
 				"prompt": map[string]interface{}{
 					"type": "string",
 					"description": "All context the advisor needs to provide guidance — include user goal, constraints, files/lines already inspected, key evidence/outputs, attempts so far, and the exact decision/questions you want advice on. " +
-						"The advisor will proactively explore the codebase with its own exploration sub-agent tools to find details and verify assumptions — you do NOT need to pre-explore everything.",
+						"The advisor trusts the information you provide and will only explore when additional context is needed — you do NOT need to pre-explore everything.",
 				},
 			},
 			"required": []string{"prompt"},

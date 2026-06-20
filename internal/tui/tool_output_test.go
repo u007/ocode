@@ -119,6 +119,41 @@ func TestClickToolOutputExpandsInline(t *testing.T) {
 	}
 }
 
+func TestClickScrollbarDoesNotToggleToolOutput(t *testing.T) {
+	// Regression: clicking the transcript scrollbar (or the right-edge chrome
+	// between it and the panel edge) must not toggle the tool-output box behind
+	// it. The hit-tests are Y-only, so a release on the scrollbar column at the
+	// same Y as a tool region used to collapse/expand the box underneath.
+	content := strings.Repeat("process output line\n", 600)
+	text := renderToolResult("bash", content, ApplyThemeColors("tokyonight"))
+	toolID := "tool-scroll"
+	m := model{
+		ready:     true,
+		width:     100,
+		height:    30,
+		input:     textarea.New(),
+		viewport:  fastviewport.New(96, 24),
+		styles:    ApplyThemeColors("tokyonight"),
+		messages:  []message{{role: roleAssistant, text: text, raw: &agent.Message{Role: "tool", ToolID: toolID, Content: content}}},
+		sessionID: "test",
+	}
+	m.renderTranscript()
+
+	if len(m.toolOutputRegions) != 1 {
+		t.Fatalf("expected one clickable tool output region, got %d", len(m.toolOutputRegions))
+	}
+
+	y := m.toolOutputRegions[0].startLine - m.viewport.YOffset() + appHeaderHeight + 1
+	// Click on the scrollbar column rather than the content area.
+	x := m.mainScrollbarX()
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: y})
+	updated, _ = updated.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: x, Y: y})
+	got := derefTestModel(t, updated)
+	if got.expandedToolOutputs[0] {
+		t.Fatal("clicking the scrollbar must not expand the tool output")
+	}
+}
+
 func TestClickToolOutputExpandsInlineAfterPrecedingMessages(t *testing.T) {
 	// Regression: when messages precede a tool output, separator accounting
 	// must use wrapped-line counts. The old code added 2 to nlAcc per separator

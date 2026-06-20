@@ -2,6 +2,7 @@ package tool
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -61,6 +62,59 @@ func TestFileTools(t *testing.T) {
 	badArgs, _ := json.Marshal(map[string]string{"path": "../../../etc/passwd"})
 	if _, err := readTool.Execute(badArgs); err == nil {
 		t.Error("expected error for path traversal, got nil")
+	}
+}
+
+// TestReadToolOffsetLimitAliases guards against the silent-pagination bug where
+// a model emits Claude-Code-style {offset, limit} keys (instead of
+// start_line/end_line). Previously Execute ignored them, so every paginated
+// read returned lines 1..50 again — an infinite reread loop in sub-agents.
+func TestReadToolOffsetLimitAliases(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "tool-test-read")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
+	// 100 lines: "line1".."line100".
+	var b strings.Builder
+	for i := 1; i <= 100; i++ {
+		fmt.Fprintf(&b, "line%d\n", i)
+	}
+	writeArgs, _ := json.Marshal(map[string]string{"path": "big.txt", "content": b.String()})
+	if _, err := (WriteTool{}).Execute(writeArgs); err != nil {
+		t.Fatalf("WriteTool failed: %v", err)
+	}
+
+	readTool := ReadTool{}
+
+	// offset/limit aliases must advance and bound the window: lines 51..60.
+	readArgs, _ := json.Marshal(struct {
+		Path   string `json:"path"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
+	}{"big.txt", 51, 10})
+	res, err := readTool.Execute(readArgs)
+	if err != nil {
+		t.Fatalf("ReadTool failed: %v", err)
+	}
+	if !strings.Contains(res, "51\tline51\n") {
+		t.Errorf("offset=51 should return line 51, got:\n%s", res)
+	}
+	if strings.Contains(res, "1\tline1\n") {
+		t.Errorf("offset=51 must NOT return line 1 (the reread bug), got:\n%s", res)
+	}
+	if strings.Contains(res, "61\tline61\n") {
+		t.Errorf("limit=10 must stop at line 60, got:\n%s", res)
+	}
+	if !strings.Contains(res, "60\tline60\n") {
+		t.Errorf("limit=10 from offset=51 should include line 60, got:\n%s", res)
 	}
 }
 

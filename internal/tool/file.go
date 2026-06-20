@@ -288,6 +288,14 @@ func (t ReadTool) Definition() map[string]interface{} {
 					"type":        "integer",
 					"description": fmt.Sprintf("1-based last line to read inclusive (default: start_line + %d - 1, max range: %d lines)", defaultReadLines, maxReadLines),
 				},
+				"offset": map[string]interface{}{
+					"type":        "integer",
+					"description": "Alias for start_line (1-based line to start from)",
+				},
+				"limit": map[string]interface{}{
+					"type":        "integer",
+					"description": fmt.Sprintf("Alias for a line count from start: reads `limit` lines (max %d)", maxReadLines),
+				},
 			},
 			"required": []string{"path"},
 		},
@@ -299,6 +307,12 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		Path      string `json:"path"`
 		StartLine int    `json:"start_line"`
 		EndLine   int    `json:"end_line"`
+		// Claude-Code-style aliases. Models are strongly biased toward emitting
+		// {offset, limit} regardless of the advertised schema; honoring them as
+		// aliases prevents a silent reread loop where every paginated read
+		// returns lines 1..50 again. offset → start line, limit → line count.
+		Offset int `json:"offset"`
+		Limit  int `json:"limit"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
@@ -319,6 +333,9 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 
 	start := params.StartLine
 	if start <= 0 {
+		start = params.Offset
+	}
+	if start <= 0 {
 		start = 1
 	}
 	if start > total {
@@ -326,6 +343,9 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	end := params.EndLine
+	if end <= 0 && params.Limit > 0 {
+		end = start + params.Limit - 1
+	}
 	if end <= 0 {
 		end = start + defaultReadLines - 1
 	}
@@ -342,7 +362,7 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		sb.WriteString(fmt.Sprintf("%d\t%s\n", i, lines[i-1]))
 	}
 	if end < total {
-		sb.WriteString(fmt.Sprintf("…(use start_line=%d, limit=50 to continue)\n", end+1))
+		sb.WriteString(fmt.Sprintf("…(use start_line=%d, end_line=%d to continue)\n", end+1, end+defaultReadLines))
 	}
 	return sb.String(), nil
 }
