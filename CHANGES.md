@@ -2,7 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+- **Model Temperature Defaults Expansion** — `defaultTemperature` extended with support for north-mini-code, claude, gemini, glm-4.5/4.6/4.7/5, deepseek-v4, grok (reasoning & non-reasoning), gemma, mistral/codestral/devstral, cohere/command, llama, nemotron, minimax-m3, mimo, and kimi-k2 (thinking & base) model families. `defaultTopP` extended with qwen and additional kimi-k2 variants. Locked in by comprehensive tests.
+- **Read Tool `offset`/`limit` Aliases** — `ReadTool.Execute` now recognizes `offset` and `limit` as aliases for `start_line`/`end_line`, preventing silent reread loops when models emit Claude-Code-style pagination keys. Locked in by `TestReadToolOffsetLimitAliases`.
+- **Detail View Text Selection** — Moved text selection initiation before the generic detail click handler, enabling text selection in the agent detail view. Selection survives live transcript refresh ticks. Locked in by `TestDetailViewMouseStartsTextSelection` and `TestDetailSelectionSurvivesLiveRefresh`.
+- **Detail Scrollbar Column Alignment** — Fixed `detailScrollbarX()` to derive from layout constants (`detailContentLeftX` + `detailViewportWidth()`) rather than `panelWidth() - 3`, aligning the hit-test column with the rendered scrollbar. Locked in by `TestDetailScrollbarColumnMatchesHitTest` and `TestDetailScrollbarThumbDragScrolls`.
+- **Version Bump** — 0.5.13 → 0.5.15.
+
 ### Fixed
+- **Scrollbar Click on Transcript Regions** — Changed `toolOutputForClick`, `thinkingForClick`, and `compactionForClick` to use `m.mainScrollbarX()` instead of `m.panelWidth()`, preventing scrollbar-track/thumb clicks from toggling the transcript region behind the scrollbar. Locked in by `TestClickScrollbarDoesNotToggleToolOutput`.
+- **Advisor Over-Exploration** — The advisor system prompt now instructs the model to trust provided context and only explore when genuinely needed, reducing wasteful tool calls during advisory rounds.
+- **Read Tool Pagination Hint** — Changed the continue prompt from `limit=50` format to `end_line=` format, matching the tool's declared schema.
 - **Context Estimate After Compaction** — `CurrentContextEstimate` now ignores pre-compaction Usage data once a synthetic compaction summary is present, preventing stale large-context values from leaking into the context gauge. New `latestCompactionSummaryIndex` helper. Locked in by `TestCurrentContextEstimateAfterCompaction` and `TestCurrentContextEstimateUsesFreshUsageAfterCompaction`.
 - **Scrollbar Drag Stale State** — `handleMouseAction` now defensively clears a stale scrollbar drag on any new press event, preventing viewport drift when the terminal misses the matching release. Also short-circuits the release handler when dragging is (and was) active, avoiding a spurious click fall-through.
 - **Context Estimate Non-Cumulative Provider Floor** — `CurrentContextEstimate` now floors per-turn `PromptTokens` against the full message heuristic when the provider reports non-cumulative counts (e.g. minimax-m3 via opencode-go), preventing the context gauge from showing a value below the actual on-disk message cost.

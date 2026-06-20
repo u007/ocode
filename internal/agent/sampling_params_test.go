@@ -141,6 +141,174 @@ func TestDefaultTemperatureUnset(t *testing.T) {
 	}
 }
 
+func TestDefaultTemperatureNorthMiniCode(t *testing.T) {
+	v := defaultTemperature("north/north-mini-code")
+	if v == nil || *v != 1.0 {
+		t.Errorf("defaultTemperature(north-mini-code) = %v, want 1.0", v)
+	}
+}
+
+func TestDefaultTemperatureDeepseekV4(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"deepseek/deepseek-v4-pro", 0.6},
+		{"deepseek/deepseek-v4-flash", 0.6},
+	}
+	for _, tc := range tests {
+		v := defaultTemperature(tc.model)
+		if v == nil || *v != tc.want {
+			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
+		}
+	}
+}
+
+func TestDefaultTemperatureMiMo(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"xiaomi/mimo-v2-flash", 0.6},
+		{"xiaomi/mimo-v2-pro", 0.6},
+		{"xiaomi/mimo-v2.5", 0.6},
+		{"xiaomi/mimo-v2.5-pro", 0.6},
+	}
+	for _, tc := range tests {
+		v := defaultTemperature(tc.model)
+		if v == nil || *v != tc.want {
+			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
+		}
+	}
+}
+
+func TestDefaultTemperatureGrok(t *testing.T) {
+	// Non-reasoning variants get a moderate temp
+	nonReasoning := []string{
+		"x-ai/grok-4-fast-non-reasoning",
+		"x-ai/grok-4-1-fast-non-reasoning",
+	}
+	for _, m := range nonReasoning {
+		v := defaultTemperature(m)
+		if v == nil || *v != 0.7 {
+			t.Errorf("defaultTemperature(%q) = %v, want 0.7", m, v)
+		}
+	}
+	// Reasoning variants get nil (use reasoning_effort)
+	reasoning := []string{
+		"x-ai/grok-4",
+		"x-ai/grok-4.3",
+		"x-ai/grok-4-fast-reasoning",
+	}
+	for _, m := range reasoning {
+		if v := defaultTemperature(m); v != nil {
+			t.Errorf("defaultTemperature(%q) = %v, want nil", m, v)
+		}
+	}
+}
+
+func TestDefaultTemperatureGemma(t *testing.T) {
+	v := defaultTemperature("google/gemma-4-31b-it")
+	if v == nil || *v != 0.8 {
+		t.Errorf("defaultTemperature(gemma) = %v, want 0.8", v)
+	}
+}
+
+func TestDefaultTemperatureMistral(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"mistral/codestral-latest", 0.7},
+		{"mistral/devstral-latest", 0.7},
+		{"mistral/mistral-large-latest", 0.7},
+	}
+	for _, tc := range tests {
+		v := defaultTemperature(tc.model)
+		if v == nil || *v != tc.want {
+			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
+		}
+	}
+}
+
+func TestDefaultTemperatureCohere(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"cohere/command-a-03-2025", 0.75},
+		{"cohere/command-r-08-2024", 0.75},
+	}
+	for _, tc := range tests {
+		v := defaultTemperature(tc.model)
+		if v == nil || *v != tc.want {
+			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
+		}
+	}
+}
+
+func TestDefaultTemperatureLlama(t *testing.T) {
+	v := defaultTemperature("meta/llama-3.3-70b-instruct")
+	if v == nil || *v != 0.7 {
+		t.Errorf("defaultTemperature(llama) = %v, want 0.7", v)
+	}
+}
+
+func TestDefaultTemperatureNemotron(t *testing.T) {
+	v := defaultTemperature("nvidia/nemotron-3-nano-30b-a3b")
+	if v == nil || *v != 0.7 {
+		t.Errorf("defaultTemperature(nemotron) = %v, want 0.7", v)
+	}
+}
+
+func TestDefaultTemperatureGemini(t *testing.T) {
+	v := defaultTemperature("gemini/gemini-2.0-flash")
+	if v == nil || *v != 1.0 {
+		t.Errorf("defaultTemperature(gemini) = %v, want 1.0", v)
+	}
+}
+
+func TestDefaultTemperatureGLM(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"zhipu/glm-4.5", 1.0},
+		{"zhipu/glm-4.6", 1.0},
+		{"zhipu/glm-4.7", 1.0},
+		{"zai/glm-5", 1.0},
+		{"zai/glm-5.1", 1.0},
+		{"zai/glm-5.2", 1.0},
+	}
+	for _, tc := range tests {
+		v := defaultTemperature(tc.model)
+		if v == nil || *v != tc.want {
+			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
+		}
+	}
+}
+
+func TestDefaultTemperatureKimiK2(t *testing.T) {
+	tests := []struct {
+		model string
+		want  float64
+	}{
+		{"kimi/kimi-k2-thinking", 1.0},
+		{"kimi/kimi-k2.5", 1.0},
+		{"kimi/kimi-k2p5", 1.0},
+		{"kimi/kimi-k2-5", 1.0},
+		{"kimi/kimi-k2.6", 1.0},
+		{"moonshotai/kimi-k2.7-code", 1.0},
+		{"kimi/kimi-k2", 0.6},
+	}
+	for _, tc := range tests {
+		v := defaultTemperature(tc.model)
+		if v == nil || *v != tc.want {
+			t.Errorf("defaultTemperature(%q) = %v, want %v", tc.model, v, tc.want)
+		}
+	}
+}
+
 func TestDefaultTopP(t *testing.T) {
 	tests := []struct {
 		model string
@@ -151,6 +319,9 @@ func TestDefaultTopP(t *testing.T) {
 		{"kimi/kimi-k2.5", 0.95},
 		{"kimi/kimi-k2p5", 0.95},
 		{"kimi/kimi-k2-5", 0.95},
+		{"kimi/kimi-k2.6", 0.95},
+		{"moonshotai/kimi-k2.7-code", 0.95},
+		{"qwen/qwen3.7-max", 1},
 	}
 	for _, tc := range tests {
 		v := defaultTopP(tc.model)

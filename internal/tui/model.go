@@ -4490,6 +4490,24 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 		if !m.detail.empty() {
+			// Start a text-selection drag when the press lands on selectable
+			// viewport content; the drag is extended in handleMouseMotion and
+			// copied on release. Otherwise consume the press so detail-view
+			// clicks never leak to the chat handlers below.
+			if m.mouseOverDetailViewport(mouse) {
+				top := &m.detail[len(m.detail)-1]
+				contentLine := (mouse.Y - m.detailViewportContentTopY()) + top.vp.YOffset()
+				if contentLine >= 0 && contentLine < len(top.rawLines) && mouse.X >= detailContentLeftX {
+					top.sel = selectionState{
+						dragging:  true,
+						startLine: contentLine,
+						startCol:  mouse.X - detailContentLeftX,
+						endLine:   contentLine,
+						endCol:    mouse.X - detailContentLeftX,
+					}
+					m.applyOrClearDetailSelectionHighlight()
+				}
+			}
 			return m, nil, true
 		}
 		// Click on agent strip: open the clicked run's detail view.
@@ -5149,22 +5167,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.applyOrClearLogSelectionHighlight()
 				return m, nil, true
 			}
-		}
-	}
-
-	if pressed && !m.detail.empty() && m.mouseOverDetailViewport(mouse) && !m.detailScrollbarHit(mouse) {
-		top := &m.detail[len(m.detail)-1]
-		contentLine := (mouse.Y - m.detailViewportContentTopY()) + top.vp.YOffset()
-		if contentLine >= 0 && contentLine < len(top.rawLines) && mouse.X >= detailContentLeftX {
-			top.sel = selectionState{
-				dragging:  true,
-				startLine: contentLine,
-				startCol:  mouse.X - detailContentLeftX,
-				endLine:   contentLine,
-				endCol:    mouse.X - detailContentLeftX,
-			}
-			m.applyOrClearDetailSelectionHighlight()
-			return m, nil, true
 		}
 	}
 
@@ -10453,7 +10455,11 @@ func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
 	if len(m.toolOutputRegions) == 0 {
 		return 0, false
 	}
-	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
+	// Exclude the scrollbar column and the right-edge chrome to its right. These
+	// hit-tests are Y-only, so without this an X bound a release on the scrollbar
+	// (track or thumb) or its padding would land on the region underneath and
+	// toggle it. Mirrors the content boundary used for transcript selection.
+	if mouse.X >= m.mainScrollbarX() {
 		return 0, false
 	}
 	clickY := mouse.Y - appHeaderHeight - 1
@@ -10471,7 +10477,11 @@ func (m model) toolOutputForClick(mouse tea.Mouse) (int, bool) {
 }
 
 func (m model) thinkingForClick(mouse tea.Mouse) (int, bool) {
-	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
+	// Exclude the scrollbar column and the right-edge chrome to its right. These
+	// hit-tests are Y-only, so without this an X bound a release on the scrollbar
+	// (track or thumb) or its padding would land on the region underneath and
+	// toggle it. Mirrors the content boundary used for transcript selection.
+	if mouse.X >= m.mainScrollbarX() {
 		return 0, false
 	}
 	clickY := mouse.Y - appHeaderHeight - 1
@@ -10491,7 +10501,11 @@ func (m model) compactionForClick(mouse tea.Mouse) (int, bool) {
 	if len(m.compactionRegions) == 0 {
 		return 0, false
 	}
-	if m.sidebarEnabled() && mouse.X >= m.panelWidth() {
+	// Exclude the scrollbar column and the right-edge chrome to its right. These
+	// hit-tests are Y-only, so without this an X bound a release on the scrollbar
+	// (track or thumb) or its padding would land on the region underneath and
+	// toggle it. Mirrors the content boundary used for transcript selection.
+	if mouse.X >= m.mainScrollbarX() {
 		return 0, false
 	}
 	clickY := mouse.Y - appHeaderHeight - 1
@@ -14490,7 +14504,11 @@ func (m model) detailScrollbarMetrics() (top, height int) {
 }
 
 func (m model) detailScrollbarX() int {
-	return m.panelWidth() - 3
+	// renderDetailView paints the scrollbar immediately to the right of the
+	// viewport content, which itself starts at detailContentLeftX (border +
+	// padding). Deriving the column from the same layout constants keeps the
+	// drag hit-test aligned with where the scrollbar is actually drawn.
+	return detailContentLeftX + m.detailViewportWidth()
 }
 
 func (m model) mouseOverDetailViewport(mouse tea.Mouse) bool {

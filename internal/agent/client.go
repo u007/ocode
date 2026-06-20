@@ -237,27 +237,91 @@ func (c *GenericClient) applyGenerationParams(ctx context.Context, payload map[s
 }
 
 // defaultTemperature returns a model-ID-specific temperature default, or nil
-// when the model has no known preference. Matches opencode's transform.ts.
+// when the model has no known preference. Matches opencode's transform.ts
+// and models.dev entries for newer model families.
 func defaultTemperature(modelID string) *float64 {
 	m := strings.ToLower(modelID)
-	if strings.Contains(m, "minimax-m2") {
+	if strings.Contains(m, "north-mini-code") {
 		return floatPtr(1.0)
 	}
 	if strings.Contains(m, "qwen") {
 		return floatPtr(0.55)
 	}
+	if strings.Contains(m, "claude") {
+		return nil
+	}
+	if strings.Contains(m, "gemini") {
+		return floatPtr(1.0)
+	}
+	if strings.Contains(m, "glm-4.5") || strings.Contains(m, "glm-4.6") || strings.Contains(m, "glm-4.7") ||
+		strings.Contains(m, "glm-5") {
+		return floatPtr(1.0)
+	}
+	if strings.Contains(m, "minimax-m2") {
+		return floatPtr(1.0)
+	}
+	if strings.Contains(m, "deepseek-v4") {
+		return floatPtr(0.6)
+	}
+	if strings.Contains(m, "grok") {
+		// Grok reasoning variants (grok-4, grok-4.3, grok-4.20)
+		if strings.Contains(m, "non-reasoning") {
+			return floatPtr(0.7)
+		}
+		return nil // reasoning models use reasoning_effort
+	}
+	if strings.Contains(m, "gemma") {
+		return floatPtr(0.8)
+	}
+	if strings.Contains(m, "mistral") || strings.Contains(m, "codestral") || strings.Contains(m, "devstral") {
+		return floatPtr(0.7)
+	}
+	if strings.Contains(m, "cohere") || strings.Contains(m, "command") {
+		return floatPtr(0.75)
+	}
+	if strings.Contains(m, "llama") {
+		return floatPtr(0.7)
+	}
+	if strings.Contains(m, "nemotron") {
+		return floatPtr(0.7)
+	}
+	if strings.Contains(m, "minimax-m3") {
+		return floatPtr(1.0)
+	}
+	if strings.Contains(m, "mimo") {
+		return floatPtr(0.6)
+	}
+	if strings.Contains(m, "kimi-k2") {
+		// kimi-k2-thinking, kimi-k2.5, kimi-k2p5, kimi-k2-5,
+		// kimi-k2.6, kimi-k2.7, kimi-k2.7-code
+		if strings.Contains(m, "thinking") || strings.Contains(m, "k2.") ||
+			strings.Contains(m, "k2p") || strings.Contains(m, "k2-5") ||
+			strings.Contains(m, "k2.6") || strings.Contains(m, "k2.7") ||
+			strings.Contains(m, "k2-6") || strings.Contains(m, "k2-7") {
+			return floatPtr(1.0)
+		}
+		return floatPtr(0.6)
+	}
 	return nil
 }
 
 // defaultTopP returns a model-ID-specific top_p default, or nil when the model
-// has no known preference. Matches opencode's transform.ts.
+// has no known preference. Matches opencode's transform.ts and models.dev
+// entries for newer model families.
 func defaultTopP(modelID string) *float64 {
 	m := strings.ToLower(modelID)
+	if strings.Contains(m, "qwen") {
+		return floatPtr(1)
+	}
 	if strings.Contains(m, "minimax-m2") ||
 		strings.Contains(m, "gemini") ||
 		strings.Contains(m, "kimi-k2.5") ||
 		strings.Contains(m, "kimi-k2p5") ||
-		strings.Contains(m, "kimi-k2-5") {
+		strings.Contains(m, "kimi-k2-5") ||
+		strings.Contains(m, "kimi-k2.6") ||
+		strings.Contains(m, "kimi-k2.7") ||
+		strings.Contains(m, "kimi-k2-6") ||
+		strings.Contains(m, "kimi-k2-7") {
 		return floatPtr(0.95)
 	}
 	return nil

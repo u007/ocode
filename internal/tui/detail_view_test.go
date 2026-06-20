@@ -144,6 +144,153 @@ func TestDetailAgentViewFitsPanelWidth(t *testing.T) {
 	}
 }
 
+// TestDetailScrollbarColumnMatchesHitTest guards the agent-detail scrollbar
+// drag: the column where renderDetailView paints the scrollbar must equal the
+// column detailScrollbarX() hit-tests, or pressing the scrollbar never starts a
+// drag (the click falls through and is swallowed).
+func TestDetailScrollbarColumnMatchesHitTest(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	run := a.Runs().New("worker")
+	var msgs []agent.Message
+	for i := 0; i < 60; i++ {
+		msgs = append(msgs, agent.Message{Role: "assistant", Content: "transcript line content"})
+	}
+	setRunTranscriptForTest(run, msgs...)
+
+	m := model{
+		agent:  a,
+		width:  80,
+		height: 24,
+		styles: ApplyThemeColors("tokyonight"),
+	}
+	m.openAgentDetail(run.ID)
+
+	rendered := stripANSI(m.renderDetailView(m.detail[0]))
+	col := -1
+	for _, ln := range strings.Split(rendered, "\n") {
+		idx := strings.IndexAny(ln, scrollbarThumb+scrollbarTrack)
+		if idx >= 0 {
+			col = lipgloss.Width(ln[:idx])
+			break
+		}
+	}
+	if col < 0 {
+		t.Fatalf("scrollbar glyph not found in detail view:\n%s", rendered)
+	}
+	if col != m.detailScrollbarX() {
+		t.Fatalf("scrollbar rendered at column %d but detailScrollbarX()=%d", col, m.detailScrollbarX())
+	}
+}
+
+// TestDetailViewMouseStartsTextSelection guards that pressing on detail-view
+// content begins a text-selection drag (previously the press was swallowed
+// before the selection-start code ran, so text could not be selected).
+func TestDetailViewMouseStartsTextSelection(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	run := a.Runs().New("worker")
+	var msgs []agent.Message
+	for i := 0; i < 40; i++ {
+		msgs = append(msgs, agent.Message{Role: "assistant", Content: "transcript line content"})
+	}
+	setRunTranscriptForTest(run, msgs...)
+
+	m := model{ready: true, width: 80, height: 24, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
+	m.openAgentDetail(run.ID)
+
+	contentTop := m.detailViewportContentTopY()
+	pressY := contentTop + 1
+	x := detailContentLeftX + 2
+
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: pressY})
+	got := derefTestModel(t, updated)
+	top := got.detail[len(got.detail)-1]
+	if !top.sel.dragging {
+		t.Fatal("press on detail content should start a selection drag")
+	}
+
+	updated, _ = got.Update(tea.MouseMotionMsg{Button: tea.MouseLeft, X: x + 5, Y: pressY + 2})
+	got = derefTestModel(t, updated)
+	top = got.detail[len(got.detail)-1]
+	if !top.sel.active {
+		t.Fatal("dragging across rows should produce an active selection")
+	}
+	if top.sel.startLine == top.sel.endLine && top.sel.startCol == top.sel.endCol {
+		t.Fatalf("selection did not extend: start=(%d,%d) end=(%d,%d)", top.sel.startLine, top.sel.startCol, top.sel.endLine, top.sel.endCol)
+	}
+}
+
+// TestDetailSelectionSurvivesLiveRefresh guards that a live transcript tick
+// (refreshTopDetailView) does not wipe an in-progress selection drag — the
+// case that matters for a streaming orchestral sub-agent the user is watching.
+func TestDetailSelectionSurvivesLiveRefresh(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	run := a.Runs().New("worker")
+	var msgs []agent.Message
+	for i := 0; i < 40; i++ {
+		msgs = append(msgs, agent.Message{Role: "assistant", Content: "transcript line content"})
+	}
+	setRunTranscriptForTest(run, msgs...)
+
+	m := model{ready: true, width: 80, height: 24, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
+	m.openAgentDetail(run.ID)
+
+	pressY := m.detailViewportContentTopY() + 1
+	x := detailContentLeftX + 2
+	updated, _ := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: x, Y: pressY})
+	m = derefTestModel(t, updated)
+	if !m.detail[len(m.detail)-1].sel.dragging {
+		t.Fatal("precondition: press should start a selection drag")
+	}
+
+	// A live refresh tick must not clear the drag-in-progress selection.
+	m.refreshTopDetailView()
+	if !m.detail[len(m.detail)-1].sel.dragging {
+		t.Fatal("live refresh wiped the in-progress selection drag")
+	}
+}
+
+// TestDetailScrollbarThumbDragScrolls proves the column fix actually enables
+// dragging: pressing the thumb then moving the mouse changes the viewport
+// offset.
+func TestDetailScrollbarThumbDragScrolls(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	run := a.Runs().New("worker")
+	var msgs []agent.Message
+	for i := 0; i < 200; i++ {
+		msgs = append(msgs, agent.Message{Role: "assistant", Content: "transcript line content"})
+	}
+	setRunTranscriptForTest(run, msgs...)
+
+	m := model{ready: true, width: 80, height: 24, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
+	m.openAgentDetail(run.ID)
+	top := &m.detail[len(m.detail)-1]
+	top.vp.GotoTop()
+	startOffset := top.vp.YOffset()
+
+	trackTop, _ := m.detailScrollbarMetrics()
+	sbX := m.detailScrollbarX()
+
+	// Press on the thumb (top of the track, where the thumb sits at offset 0).
+	updated, _, ok := m.handleMouseAction(tea.MouseClickMsg{Button: tea.MouseLeft, X: sbX, Y: trackTop}.Mouse(), true)
+	if !ok {
+		t.Fatal("press on scrollbar thumb was not handled")
+	}
+	m = derefTestModel(t, updated)
+	if m.scrollbarDrag != scrollbarDragDetail {
+		t.Fatalf("thumb press should start a detail scrollbar drag, got %v", m.scrollbarDrag)
+	}
+
+	// Drag downward — the viewport must scroll.
+	updated, _, ok = m.handleMouseMotion(tea.MouseMotionMsg{Button: tea.MouseLeft, X: sbX, Y: trackTop + 8}.Mouse())
+	if !ok {
+		t.Fatal("scrollbar drag motion was not handled")
+	}
+	m = derefTestModel(t, updated)
+	if got := m.detail[len(m.detail)-1].vp.YOffset(); got <= startOffset {
+		t.Fatalf("dragging thumb down should increase offset: start=%d got=%d", startOffset, got)
+	}
+}
+
 func TestRenderRunTranscriptShowsThinkingLLMToolRequestAndToolResult(t *testing.T) {
 	run := &agent.AgentRun{
 		ID:     "agent-1",
