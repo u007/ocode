@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 func docsFixture() []Doc {
@@ -64,6 +65,27 @@ func TestResolveEmbedderHTTPRequiresKey(t *testing.T) {
 	}
 	if _, err := ResolveEmbedder("http", "openai/text-embedding-3-small", func(string) string { return "k" }); err != nil {
 		t.Fatalf("valid key should resolve: %v", err)
+	}
+}
+
+func TestWarmAsyncBecomesReady(t *testing.T) {
+	eng := NewEngine(FakeEmbedder{Dimension: 32}, t.TempDir())
+	if eng.Ready() {
+		t.Fatal("not ready before warm")
+	}
+	eng.WarmAsync(docsFixture())
+	// Poll briefly for readiness (the goroutine completes near-instantly with the fake).
+	deadline := 100
+	for i := 0; i < deadline && !eng.Ready(); i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if !eng.Ready() {
+		t.Fatal("WarmAsync should make the engine ready")
+	}
+	// Second call is a no-op (no panic, still ready).
+	eng.WarmAsync(docsFixture())
+	if !eng.Ready() {
+		t.Fatal("idempotent WarmAsync must keep ready")
 	}
 }
 
