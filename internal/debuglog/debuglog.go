@@ -8,14 +8,15 @@ import (
 type EntryKind string
 
 const (
-	KindLLM     EntryKind = "LLM"
-	KindTool    EntryKind = "TOOL"
-	KindAgent   EntryKind = "AGENT"
-	KindError   EntryKind = "ERROR"
-	KindSession EntryKind = "SESSION"
-	KindGit     EntryKind = "GIT"
-	KindLSP     EntryKind = "LSP"
-	KindWarn    EntryKind = "WARN"
+	KindLLM       EntryKind = "LLM"
+	KindTool      EntryKind = "TOOL"
+	KindAgent     EntryKind = "AGENT"
+	KindError     EntryKind = "ERROR"
+	KindSession   EntryKind = "SESSION"
+	KindGit       EntryKind = "GIT"
+	KindLSP       EntryKind = "LSP"
+	KindWarn      EntryKind = "WARN"
+	KindDiscovery EntryKind = "DISCOVERY"
 )
 
 type Entry struct {

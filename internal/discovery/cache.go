@@ -9,9 +9,6 @@ import (
 	"strings"
 )
 
-// TEMP stub — replaced by the real debuglog bridge in Task 12.
-var emitDiscoveryDebug = func(kind, msg string) {}
-
 // Cache is a per-model on-disk store of passage vectors keyed by DocHash.
 type Cache struct {
 	path  string

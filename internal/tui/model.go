@@ -4308,13 +4308,14 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m *model) toggleLogKind(kind DebugEntryKind) {
 	if m.logKindFilter == nil {
 		m.logKindFilter = map[DebugEntryKind]bool{
-			DebugKindLLM:   true,
-			DebugKindTool:  true,
-			DebugKindAgent: true,
-			DebugKindError: true,
-			DebugKindWarn:  true,
-			DebugKindGit:   true,
-			DebugKindLSP:   true,
+			DebugKindLLM:       true,
+			DebugKindTool:      true,
+			DebugKindAgent:     true,
+			DebugKindError:     true,
+			DebugKindWarn:      true,
+			DebugKindGit:       true,
+			DebugKindLSP:       true,
+			DebugKindDiscovery: true,
 		}
 	}
 	m.logKindFilter[kind] = !m.logKindFilter[kind]
@@ -5748,6 +5749,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
 		cmd == "/advisor" || cmd == "/mask" || cmd == "/mem" ||
 		cmd == "/btw" || cmd == "/by-the-way" ||
+		cmd == "/paths" ||
 		cmd == "/rc" || cmd == "/remote-control" ||
 		cmd == "/search" || cmd == "/find"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
@@ -11054,12 +11056,12 @@ func wrapView(view string, width int) string {
 		return view
 	}
 	lines := strings.Split(view, "\n")
-	wrapped := make([]string, 0, len(lines))
-	for _, line := range lines {
-		wrapped = append(wrapped, strings.Split(ansi.Hardwrap(line, width, false), "\n")...)
+		wrapped := make([]string, 0, len(lines))
+		for _, line := range lines {
+			wrapped = append(wrapped, strings.Split(wordWrap(line, width), "\n")...)
+		}
+		return strings.Join(wrapped, "\n")
 	}
-	return strings.Join(wrapped, "\n")
-}
 
 // wordWrap wraps text at word (space) boundaries to fit within the given width.
 // It preserves ANSI escape codes and handles wide characters. If a single word
@@ -12159,6 +12161,7 @@ func (m model) modalOpen() bool {
 
 // renderDetailView renders the top-of-stack detail view.
 func (m model) renderDetailView(d detailView) string {
+
 	var title string
 	switch d.kind {
 	case detailAgentRun:
@@ -13083,7 +13086,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	}
 	appendWrapped := func(dst *[]string, line string, width int) []int {
 		start := len(*dst)
-		wrapped := strings.Split(ansi.Hardwrap(line, width, false), "\n")
+		wrapped := strings.Split(wordWrap(line, width), "\n")
 		*dst = append(*dst, wrapped...)
 		idxs := make([]int, 0, len(wrapped))
 		for i := range wrapped {
@@ -13333,7 +13336,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 			allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Extra paths (%d):", len(extraPaths))))
 			const maxLines = 3
 			joined := strings.Join(extraPaths, ", ")
-			wrapped := strings.Split(ansi.Hardwrap(joined, outerBodyWidth-2, false), "\n")
+			wrapped := strings.Split(wordWrap(joined, outerBodyWidth-2), "\n")
 			for i, line := range wrapped {
 				if i >= maxLines {
 					remaining := len(wrapped) - i
@@ -13349,7 +13352,7 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 			allowedBody = append(allowedBody, dimStyle.Render(fmt.Sprintf("Bash (%d):", len(autoAllow))))
 			const maxLines = 3
 			joined := strings.Join(autoAllow, ", ")
-			wrapped := strings.Split(ansi.Hardwrap(joined, outerBodyWidth-2, false), "\n")
+			wrapped := strings.Split(wordWrap(joined, outerBodyWidth-2), "\n")
 			for i, line := range wrapped {
 				if i >= maxLines {
 					remaining := len(wrapped) - i
@@ -13890,11 +13893,12 @@ func tabAtX(mouseX int, barStartX int, activeTab int, unread bool) (int, bool) {
 
 func (m *model) refreshLogViewport() {
 	kindColor := map[DebugEntryKind]lipgloss.Style{
-		DebugKindLLM:   userStyle,
-		DebugKindTool:  headerStyle,
-		DebugKindAgent: successStyle,
-		DebugKindError: errorStyle,
-		DebugKindWarn:  lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true),
+		DebugKindLLM:       userStyle,
+		DebugKindTool:      headerStyle,
+		DebugKindAgent:     successStyle,
+		DebugKindError:     errorStyle,
+		DebugKindWarn:      lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true),
+		DebugKindDiscovery: lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true),
 	}
 	var lines []string
 	for _, e := range m.logEntries {
@@ -14022,6 +14026,7 @@ func (m model) renderLogTab() string {
 		{DebugKindWarn, "WARN", "5"},
 		{DebugKindGit, "GIT", "6"},
 		{DebugKindLSP, "LSP", "7"},
+		{DebugKindDiscovery, "DISCOV", "8"},
 	}
 	kindBar := hintStyle.Render("filter: ")
 	for _, k := range kinds {
