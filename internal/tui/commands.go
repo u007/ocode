@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/u007/ocode/internal/commands"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/memory"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
@@ -102,11 +104,14 @@ func init() {
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
 		{name: "/mask", usage: "/mask [on|off|status|mode [lenient|full]|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
 		{name: "/mem", usage: "/mem [on|off|status|update [user|project|global] [focus]]", help: "Toggle memory context injection, inspect memory files, or update a memory scope", handler: runMemCmd},
+		{name: "/paths", help: "Show all relevant filesystem paths: root, extra allowed paths, config files, and data directories", handler: runPathsCmd},
 		{name: "/btw", aliases: []string{"/by-the-way"}, usage: "/btw <message>", help: "Add a quick aside to the conversation (by the way)", handler: runBtwCmd},
 		{name: "/cd", aliases: []string{"/cwd"}, usage: "/cd <path>", help: "Change the project root to another directory", handler: runCdCmd},
 		{name: "/add-dir", aliases: []string{"/add-dirs"}, usage: "/add-dir <path>", help: "Add a directory to extra allowed paths so the agent can work with files there", handler: runAddDirCmd},
 		{name: "/upload", aliases: []string{"/uploads"}, usage: "/upload [path]", help: "Show or set the file upload directory used by /api/uploads", handler: runUploadCmd},
 		{name: "/search", aliases: []string{"/find"}, usage: "/search <query>", help: "Find a message by keyword (opens the in-chat find bar)", handler: runSearchCmd},
+		{name: "/discovery", usage: "/discovery [on|off]", help: "Enable/disable retrieval-based skill/MCP discovery", handler: runDiscoveryCmd},
+		{name: "/discover", usage: "/discover [status|model [name]]", help: "Show discovery status / choose the query-embedding model", handler: runDiscoverCmd},
 		{name: "/orchestrate", usage: "/orchestrate <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runOrchestrateCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
@@ -297,7 +302,6 @@ func runDetailsCmd(m *model, args []string) tea.Cmd {
 	m.handleDetailsCmd(args)
 	return nil
 }
-
 
 func runSoundCmd(m *model, args []string) tea.Cmd {
 	m.handleSoundCmd(args)
@@ -1327,6 +1331,116 @@ func runUploadCmd(m *model, args []string) tea.Cmd {
 	return nil
 }
 
+func runPathsCmd(m *model, args []string) tea.Cmd {
+	var b strings.Builder
+	b.WriteString("## Paths\n\n")
+
+	// Workspace root
+	b.WriteString("**Workspace Root:**\n")
+	b.WriteString(fmt.Sprintf("  %s\n\n", m.workDir))
+
+	// Extra allowed paths
+	b.WriteString("**Extra Allowed Paths:**\n")
+	if m.config != nil && len(m.config.Ocode.ExtraAllowedPaths) > 0 {
+		for _, p := range m.config.Ocode.ExtraAllowedPaths {
+			b.WriteString(fmt.Sprintf("  - %s\n", p))
+		}
+	} else {
+		b.WriteString("  (none)\n")
+	}
+	b.WriteString("\n")
+
+	// Config files
+	b.WriteString("**Config Files:**\n")
+
+	// Global opencode config
+	if home, err := os.UserHomeDir(); err == nil {
+		var globalCfg string
+		if runtime.GOOS == "windows" {
+			globalCfg = filepath.Join(os.Getenv("APPDATA"), "opencode", "opencode.json")
+		} else {
+			globalCfg = filepath.Join(home, ".config", "opencode", "opencode.json")
+		}
+		b.WriteString(fmt.Sprintf("  Global opencode config: %s\n", globalCfg))
+		if info, err := os.Stat(globalCfg); err == nil {
+			b.WriteString(fmt.Sprintf("    (exists, %d bytes)\n", info.Size()))
+		} else {
+			b.WriteString("    (not found)\n")
+		}
+
+		var globalOcodeCfg string
+		if runtime.GOOS == "windows" {
+			globalOcodeCfg = filepath.Join(os.Getenv("APPDATA"), "opencode", "ocodeconfig.json")
+		} else {
+			globalOcodeCfg = filepath.Join(home, ".config", "opencode", "ocodeconfig.json")
+		}
+		b.WriteString(fmt.Sprintf("  Global ocode config:   %s\n", globalOcodeCfg))
+		if info, err := os.Stat(globalOcodeCfg); err == nil {
+			b.WriteString(fmt.Sprintf("    (exists, %d bytes)\n", info.Size()))
+		} else {
+			b.WriteString("    (not found)\n")
+		}
+	} else {
+		b.WriteString("  (cannot resolve home dir)\n")
+	}
+
+	if m.config != nil {
+		if p, err := m.config.ActiveConfigPath(); err == nil {
+			b.WriteString(fmt.Sprintf("  Active opencode config: %s\n", p))
+			if info, err := os.Stat(p); err == nil {
+				b.WriteString(fmt.Sprintf("    (exists, %d bytes)\n", info.Size()))
+			}
+		}
+	}
+	if p, err := config.ActiveOcodeConfigPath(); err == nil {
+		b.WriteString(fmt.Sprintf("  Active ocode config:    %s\n", p))
+		if info, err := os.Stat(p); err == nil {
+			b.WriteString(fmt.Sprintf("    (exists, %d bytes)\n", info.Size()))
+		}
+	}
+
+	if projectRoot := config.FindProjectRoot(); projectRoot != "" {
+		b.WriteString(fmt.Sprintf("  Project root (auto-detect): %s\n", projectRoot))
+		// Check for .opencode / .opencodes project config dirs
+		for _, dirName := range []string{".opencode", ".opencodes"} {
+			dir := filepath.Join(projectRoot, dirName)
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				b.WriteString(fmt.Sprintf("  Project config dir:       %s/\n", dir))
+			}
+		}
+	}
+	b.WriteString("\n")
+
+	// Data directories
+	b.WriteString("**Data Directories:**\n")
+	if dataDir, err := paths.GlobalDataDir(); err == nil {
+		b.WriteString(fmt.Sprintf("  Global data dir:   %s\n", dataDir))
+		authPath := filepath.Join(dataDir, "auth.json")
+		b.WriteString(fmt.Sprintf("  Auth:              %s\n", authPath))
+		if info, err := os.Stat(authPath); err == nil {
+			b.WriteString(fmt.Sprintf("    (exists, %d bytes)\n", info.Size()))
+		}
+		slug := session.ProjectSlug()
+		b.WriteString(fmt.Sprintf("  Project sessions:  %s\n", filepath.Join(dataDir, "project", slug, "sessions")))
+		b.WriteString(fmt.Sprintf("  Usage data:        %s\n", filepath.Join(dataDir, "usage")))
+	} else {
+		b.WriteString(fmt.Sprintf("  (error: %v)\n", err))
+	}
+
+	// Upload dir
+	uploadDir := filepath.Join(m.workDir, ".ocode", "uploads")
+	if m.config != nil && m.config.Ocode.UploadDir != "" {
+		uploadDir = m.config.Ocode.UploadDir
+	}
+	b.WriteString(fmt.Sprintf("  Upload dir:        %s\n\n", uploadDir))
+
+	// Session info
+	b.WriteString(fmt.Sprintf("**Session ID:** %s", m.sessionID))
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+	return nil
+}
+
 func runOrchestrateCmd(m *model, args []string) tea.Cmd {
 	if len(args) == 0 {
 		m.messages = append(m.messages, message{
@@ -1345,4 +1459,13 @@ func runOrchestrateCmd(m *model, args []string) tea.Cmd {
 		text: fmt.Sprintf("[Orchestrator] Starting pipeline for: %s\nRunning in background — status updates will appear here.", goal),
 	})
 	return runOrchestrateBackground(m, goal, false)
+}
+
+func runDiscoveryCmd(m *model, args []string) tea.Cmd {
+	m.handleDiscoveryCmd(args)
+	return nil
+}
+
+func runDiscoverCmd(m *model, args []string) tea.Cmd {
+	return m.handleDiscoverCmd(args)
 }

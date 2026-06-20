@@ -10,6 +10,7 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/session"
 )
 
@@ -485,7 +486,7 @@ func modelPickerMatches(lower, filter string) bool {
 }
 
 func (m model) pickerVisibleItems() ([]string, []string) {
-	if (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "redaction-model") && m.pickerFilter != "" {
+	if (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != "" {
 		items := make([]string, 0, len(m.pickerItems))
 		values := make([]string, 0, len(m.pickerValues))
 		for i, item := range m.pickerItems {
@@ -575,7 +576,7 @@ func (m model) pickerRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	row := start + idx
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
 	if !isFiltered && row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
 		return 0, false
 	}
@@ -591,7 +592,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
 	if !isFiltered && index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
 		m.closePicker()
 		return m, nil
@@ -641,12 +642,15 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	if kind == "small-model" {
 		return m.handleCommand("/small-model " + selected)
 	}
+	if kind == "embedding-model" {
+		return m.handleCommand("/discover model " + selected)
+	}
 	return m.handleCommand("/models " + selected)
 }
 
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
-	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" {
+	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
 	} else if m.pickerKind == "advisor" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
@@ -682,6 +686,9 @@ func (m model) renderPicker() string {
 	if m.pickerKind == "advisor" {
 		title = "Select advisor model"
 	}
+	if m.pickerKind == "embedding-model" {
+		title = "Select query-embedding model"
+	}
 	header := m.styles.Header.Render(title) + "  " + hintStyle.Render("filter: "+m.pickerFilterPending+"_")
 
 	items, _ := m.pickerVisibleItems()
@@ -711,7 +718,7 @@ func (m model) renderPicker() string {
 		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
-		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model") && m.pickerFilter != ""
+		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
@@ -847,6 +854,38 @@ func (m *model) openRedactionModelPicker() {
 	// selection saves the tier-2 redaction scanning model instead of the active model.
 	m.openModelPicker()
 	m.pickerKind = "redaction-model"
+}
+
+func (m *model) openEmbeddingModelPicker() {
+	m.input.Blur()
+	var items, values []string
+	var isHeader []bool
+	appendH := func(l string) {
+		items = append(items, l)
+		values = append(values, "")
+		isHeader = append(isHeader, true)
+	}
+	appendM := func(l, v string) {
+		items = append(items, l)
+		values = append(values, v)
+		isHeader = append(isHeader, false)
+	}
+
+	appendH("HTTP embedding models")
+	for _, em := range discovery.HTTPModels { // sorted by ID in the registry
+		appendM("  "+em.ID, em.ID)
+	}
+	appendH("Local (downloaded on first use)")
+	appendM("  local/lfm2-5-retriever", "local/lfm2-5-retriever")
+
+	m.pickerKind = "embedding-model"
+	m.pickerItems = items
+	m.pickerValues = values
+	m.pickerIsHeader = isHeader
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.pickerFilterPending = ""
+	m.showPicker = true
 }
 
 func (m *model) openSmallModelPicker() {

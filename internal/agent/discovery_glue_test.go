@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -85,6 +86,24 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+func TestDiscoveryStatusAndReset(t *testing.T) {
+	a := newGateAgent()
+	a.config = &config.Config{}
+	a.config.Ocode.Discovery.EmbeddingModel = "openai/text-embedding-3-small"
+	a.config.Ocode.Discovery.EmbeddingBackend = "http"
+	a.disco = &discoveryState{enabled: true, session: discovery.NewSession(
+		discovery.NewEngine(discovery.FakeEmbedder{Dimension: 8}, t.TempDir()))}
+
+	st := a.DiscoveryStatus()
+	if !st.Active || st.Model != "openai/text-embedding-3-small" || st.MCPTotal != 2 {
+		t.Fatalf("bad status: %+v", st)
+	}
+	a.ResetDiscovery()
+	if a.disco != nil {
+		t.Fatal("ResetDiscovery must clear state so it re-inits next turn")
+	}
 }
 
 func TestMarkMCPFromParent(t *testing.T) {

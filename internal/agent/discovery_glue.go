@@ -106,6 +106,61 @@ func (a *Agent) RunDiscovery(query string) {
 		len(added), len(a.disco.session.Attached()), query))
 }
 
+type DiscoveryStatusInfo struct {
+	Active   bool
+	Model    string
+	Backend  string
+	Attached []string
+	MCPTotal int
+	InitErr  string
+}
+
+// DiscoveryStatus reports the current discovery state (for /discover status, /context).
+func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
+	st := DiscoveryStatusInfo{MCPTotal: len(a.mcpTools)}
+	if a.config != nil {
+		st.Model = a.config.Ocode.Discovery.EmbeddingModel
+		st.Backend = a.config.Ocode.Discovery.EmbeddingBackend
+	}
+	if a.disco != nil {
+		st.Active = a.disco.enabled
+		st.InitErr = a.disco.initErr
+		if a.disco.session != nil {
+			st.Attached = a.disco.session.Attached()
+		}
+	}
+	return st
+}
+
+// DiscoveryGatedTokens reports attached/total MCP counts and the estimated tokens
+// saved (schemas of unattached MCP tools) vs the name-index cost. The token
+// estimate is bytes/4 — close enough for a human-readable number in /context;
+// exact tokenization is not needed for a planning figure.
+func (a *Agent) DiscoveryGatedTokens() (attached, total, gatedToks, indexToks int) {
+	total = len(a.mcpTools)
+	indexChars := 0
+	for name := range a.mcpTools {
+		t, ok := a.tools[name]
+		if !ok {
+			continue
+		}
+		indexChars += len(name) + 1
+		if a.discoveryAllows(name) {
+			attached++
+			continue
+		}
+		if b, err := json.Marshal(t.Definition()); err == nil {
+			gatedToks += len(b) / 4
+		}
+	}
+	indexToks = indexChars / 4
+	return
+}
+
+// ResetDiscovery clears discovery state so it re-initializes on the next turn
+// (used after the embedding model changes).
+func (a *Agent) ResetDiscovery() { a.disco = nil }
+
 // markMCPFrom marks this agent's tools as MCP when the parent treats them as MCP.
 // NewAgent receives a flat tool slice and loses the MCP markers; sub-agents call
 // this so their discovery gate knows which tools are gateable.
