@@ -96,7 +96,11 @@ func readContextFile(path string) (string, bool) {
 	return string(content), true
 }
 
-func LoadContext(enabled map[string]bool, memoryEnabled bool) string {
+// LoadContext assembles the pre-cached system-prompt context. When discoveryOn
+// is true, the skill catalog is suppressed (replaced by the volatile tail
+// injector that lists only attached skills). All other context — AGENTS.md,
+// plugins, model-specific OCODE.md, etc. — is unchanged.
+func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool) string {
 	var context string
 	files := []string{"AGENTS.md", "CLAUDE.md", "OCODE.md", ".cursorrules"}
 
@@ -121,8 +125,15 @@ func LoadContext(enabled map[string]bool, memoryEnabled bool) string {
 	if pluginInstr := plugins.LoadPluginInstructions(enabled); pluginInstr != "" {
 		context += pluginInstr
 	}
-	if skillCatalog := skill.BuildCatalog(); skillCatalog != "" {
-		context += skillCatalog
+	// Skill catalog: when discovery is on, the volatile tail injector owns
+	// the catalog surface (name index + attached-skill descriptions, with
+	// fail-open re-emit of the full catalog). This guard is keyed on the
+	// CONFIG FLAG (not the live disco state) so the cached prefix is stable
+	// across turns regardless of whether the embedder has resolved yet.
+	if !discoveryOn {
+		if skillCatalog := skill.BuildCatalog(); skillCatalog != "" {
+			context += skillCatalog
+		}
 	}
 	if refCatalog := BuildReferenceCatalog(enabled); refCatalog != "" {
 		context += refCatalog

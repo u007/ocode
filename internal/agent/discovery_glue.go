@@ -9,7 +9,16 @@ import (
 	"strings"
 
 	"github.com/u007/ocode/internal/discovery"
+	"github.com/u007/ocode/internal/skill"
 )
+
+// discoveryConfigEnabled reports whether the config asks for discovery. Used
+// by callers (BasePromptMessages, injectDiscoveryContext) that gate on the
+// CONFIG FLAG (not the live disco state) so the cached prefix is stable
+// regardless of whether the embedder has resolved yet.
+func (a *Agent) discoveryConfigEnabled() bool {
+	return a.config != nil && a.config.Ocode.Discovery.Enabled
+}
 
 type discoveryState struct {
 	enabled bool
@@ -65,16 +74,26 @@ func discoveryCacheDir() string {
 	return base + "/opencode/discovery"
 }
 
-// discoveryDocs gathers the corpus: one Doc per MCP tool (Plan 1 gates MCP only).
+// discoveryDocs gathers the corpus: one Doc per skill (Name + Description +
+// WhenToUse) and one Doc per MCP tool (name + description).
 func (a *Agent) discoveryDocs() []discovery.Doc {
 	var docs []discovery.Doc
+	for _, s := range skill.LoadSkills() {
+		text := s.Name
+		if s.Description != "" {
+			text += ": " + s.Description
+		}
+		if s.WhenToUse != "" {
+			text += " When to use: " + s.WhenToUse
+		}
+		docs = append(docs, discovery.Doc{ID: "skill:" + s.Name, Kind: "skill", Name: s.Name, Text: text})
+	}
 	for name := range a.mcpTools {
 		t, ok := a.tools[name]
 		if !ok {
 			continue
 		}
-		desc := t.Description()
-		docs = append(docs, discovery.Doc{ID: "mcp:" + name, Kind: "mcp", Name: name, Text: name + ": " + desc})
+		docs = append(docs, discovery.Doc{ID: "mcp:" + name, Kind: "mcp", Name: name, Text: name + ": " + t.Description()})
 	}
 	sort.Slice(docs, func(i, j int) bool { return docs[i].ID < docs[j].ID })
 	return docs
@@ -212,27 +231,82 @@ const discoveryPromptContract = `Not every tool is currently loaded. The "Availa
 
 // injectDiscoveryContext appends the name index + prompt contract as a single
 // system message at the tail (volatile, like injectNotesTail). No-op when
-// discovery is inactive — bytes are identical to today.
+// discovery is off — bytes are identical to today.
+//
+// Three modes:
+//   - off (config flag false): no-op.
+//   - on but not yet active (e.g. embedder failed to resolve): fail-open by
+//     re-emitting the full skill catalog so skills are never lost.
+//   - on + active: name index for MCP + skills, plus full descriptions of
+//     attached skills (so the model can use them without a round-trip).
 func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
-	if a.disco == nil || !a.disco.enabled {
+	if !a.discoveryConfigEnabled() {
 		return messages
 	}
-	docs := a.discoveryDocs() // sorted by ID; MCP only in Plan 1
-	if len(docs) == 0 {
-		return messages
-	}
+	active := a.disco != nil && a.disco.enabled
 	var b strings.Builder
+
+	if !active {
+		// Fail-open: LoadContext suppressed the catalog (config flag on), but
+		// discovery isn't actually running — re-emit the full skill catalog so
+		// skills are never lost. MCP tools are all attached (gate off).
+		if cat := skill.BuildCatalog(); cat != "" {
+			b.WriteString(cat)
+		}
+		if b.Len() == 0 {
+			return messages
+		}
+		return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + b.String()})
+	}
+
+	docs := a.discoveryDocs() // sorted; skills + MCP
 	b.WriteString(discoveryPromptContract)
+
 	b.WriteString("\n\nAvailable MCP tools (names only — not all loaded):\n")
 	for _, d := range docs {
+		if d.Kind != "mcp" {
+			continue
+		}
 		b.WriteString("- ")
 		b.WriteString(d.Name)
-		if hint := shortHint(d.Text); hint != "" {
+		if h := shortHint(d.Text); h != "" {
 			b.WriteString(" — ")
-			b.WriteString(hint)
+			b.WriteString(h)
 		}
 		b.WriteString("\n")
 	}
+
+	b.WriteString("\nAvailable skills (names only — load full detail with the skill tool):\n")
+	for _, d := range docs {
+		if d.Kind != "skill" {
+			continue
+		}
+		b.WriteString("- ")
+		b.WriteString(d.Name)
+		if h := shortHint(d.Text); h != "" {
+			b.WriteString(" — ")
+			b.WriteString(h)
+		}
+		b.WriteString("\n")
+	}
+
+	// Full descriptions for attached skills only — the model uses these inline
+	// (no extra tool round-trip) when the sticky set has grown to include them.
+	var attachedSkills []string
+	for _, d := range docs {
+		if d.Kind == "skill" && a.disco.session.IsAttached(d.ID) {
+			attachedSkills = append(attachedSkills, d.Text)
+		}
+	}
+	if len(attachedSkills) > 0 {
+		b.WriteString("\nRelevant skills for this task:\n")
+		for _, s := range attachedSkills {
+			b.WriteString("- ")
+			b.WriteString(s)
+			b.WriteString("\n")
+		}
+	}
+
 	return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + b.String()})
 }
 

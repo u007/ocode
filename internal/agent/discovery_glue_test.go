@@ -88,6 +88,38 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+func TestSkillsJoinCorpusAndIndex(t *testing.T) {
+	a := newGateAgent()
+	a.config = &config.Config{}
+	a.config.Ocode.Discovery.Enabled = true
+	// Active discovery with an empty corpus engine is fine for the index test;
+	// injectDiscoveryContext lists docs from discoveryDocs(), not the corpus.
+	a.disco = &discoveryState{enabled: true,
+		session: discovery.NewSession(discovery.NewEngine(discovery.FakeEmbedder{Dimension: 8}, t.TempDir()))}
+
+	got := a.injectDiscoveryContext([]Message{{Role: "user", Content: "hi"}})
+	last := got[len(got)-1].Content
+	if !containsSubstr(last, "Notion/search") {
+		t.Fatalf("MCP tools must appear in the index: %q", last)
+	}
+	// discoveryDocs now also returns skills (from skill.LoadSkills); the section
+	// header must be present even if this test env has no skills installed.
+	if !containsSubstr(last, "Available skills") {
+		t.Fatalf("skill index section header must be present: %q", last)
+	}
+}
+
+func TestLoadContextSuppressesCatalogWhenDiscoveryOn(t *testing.T) {
+	on := LoadContext(map[string]bool{}, false, true)
+	off := LoadContext(map[string]bool{}, false, false)
+	// The catalog header only appears when there ARE skills; assert the flag at
+	// least never ADDS the catalog when on. (If skills exist, off contains it; on must not.)
+	if containsSubstr(on, "--- Skill Catalog ---") {
+		t.Fatalf("discoveryOn must suppress the skill catalog")
+	}
+	_ = off
+}
+
 func TestDiscoveryStatusAndReset(t *testing.T) {
 	a := newGateAgent()
 	a.config = &config.Config{}
@@ -156,7 +188,10 @@ func TestInjectDiscoveryContextOnlyWhenActive(t *testing.T) {
 	}
 
 	// On: appends one system message naming every MCP tool + the contract.
-	a.disco = &discoveryState{enabled: true}
+	a.disco = &discoveryState{enabled: true,
+		session: discovery.NewSession(discovery.NewEngine(discovery.FakeEmbedder{Dimension: 8}, t.TempDir()))}
+	a.config = &config.Config{}
+	a.config.Ocode.Discovery.Enabled = true
 	got := a.injectDiscoveryContext(base)
 	if len(got) != len(base)+1 {
 		t.Fatalf("on must append one tail message, got %d", len(got))

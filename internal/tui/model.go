@@ -598,7 +598,6 @@ type model struct {
 	advisorEnabledSet    bool // whether advisorEnabled should be applied to newly installed agents
 	smallModelEnabled    bool // runtime small model state; persisted across agent rebuilds
 	smallModelEnabledSet bool // whether smallModelEnabled should be applied to newly installed agents
-	orchestratorMode     bool // true when user selected "orchestrator" from agent picker — next user message routes to the pipeline instead of the normal LLM turn
 	config               *config.Config
 	sessionID            string
 	sessionTitle         string
@@ -1307,19 +1306,6 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 }
 
 func (m *model) switchAgent(name string) {
-	// Orchestrator is not a normal LLM agent — intercept and set mode flag.
-	// The next user message will be routed to the pipeline instead of
-	// starting a normal LLM turn (see askAgent / submitUserMessage branch).
-	if name == "orchestrator" {
-		m.orchestratorMode = true
-		m.messages = append(m.messages, message{
-			role: roleAssistant,
-			text: "Orchestrator mode active. Send your coding goal and the pipeline will plan, implement, and validate it automatically.",
-		})
-		return
-	}
-	m.orchestratorMode = false
-
 	var spec *agent.AgentSpec
 	if s := agent.FindAgentSpec(name); s != nil {
 		spec = s
@@ -3322,7 +3308,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text: fmt.Sprintf("[Orchestrator] Complete:\n\n%s", msg.report),
 			})
 		}
-		m.orchestratorMode = false // reset on completion; session intercept re-enables it
 		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
 		return m, nil
@@ -9363,25 +9348,6 @@ func (m *model) lookupToolName(toolID string) string {
 }
 
 func (m *model) askAgent() tea.Cmd {
-	// Orchestrator intercept: when orchestrator mode is active, route the most
-	// recent user message to the pipeline instead of starting a normal LLM turn.
-	// The message is already in m.messages; we extract the goal and clear the
-	// mode flag so subsequent turns fall back to normal flow.
-	if m.orchestratorMode {
-		goal := m.lastUserMessageText()
-		m.orchestratorMode = false
-		if goal != "" {
-			m.messages = append(m.messages, message{
-				role: roleAssistant,
-				text: fmt.Sprintf("[Orchestrator] Starting pipeline for: %s", goal),
-			})
-			m.rerenderTranscriptAndMaybeScroll()
-			return runOrchestrateBackground(m, goal, false)
-		}
-		// Empty goal — fall through to normal flow so the user can still
-		// interact; orchestratorMode has already been cleared.
-	}
-
 	// Reset any prior cancellation so a new request isn't immediately
 	// short-circuited by a stopCh that was closed by a previous Escape/Cancel.
 	if m.agent != nil {
@@ -9391,10 +9357,12 @@ func (m *model) askAgent() tea.Cmd {
 	// BasePromptMessages, which would otherwise re-read context files twice.
 	if m.agent != nil {
 		memoryEnabled := m.agent.MemoryEnabled()
+		discoveryOn := false
 		if m.config != nil {
 			memoryEnabled = m.config.Ocode.MemoryEnabled
+			discoveryOn = m.config.Ocode.Discovery.Enabled
 		}
-		m.agent.SetPreloadedContext(agent.LoadContext(enabledPluginMap(m.config), memoryEnabled))
+		m.agent.SetPreloadedContext(agent.LoadContext(enabledPluginMap(m.config), memoryEnabled, discoveryOn))
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
