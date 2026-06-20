@@ -31,6 +31,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/ide"
@@ -5751,7 +5752,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/btw" || cmd == "/by-the-way" ||
 		cmd == "/paths" ||
 		cmd == "/rc" || cmd == "/remote-control" ||
-		cmd == "/search" || cmd == "/find"
+		cmd == "/search" || cmd == "/find" ||
+		cmd == "/discovery" || cmd == "/discover"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -6268,6 +6270,123 @@ func (m *model) handleTitleCmd(args []string) tea.Cmd {
 	m.saveSession()
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Title cleared — will auto-generate from next assistant response."})
 	return nil
+}
+
+// setDiscoveryEnabled toggles the discovery config flag, validates the embedder
+// resolves on enable, and resets the agent's in-memory state so it re-initializes
+// on the next turn.
+func (m *model) setDiscoveryEnabled(on bool) error {
+	if on {
+		dc := m.config.Ocode.Discovery
+		if _, err := discovery.ResolveEmbedder(dc.EmbeddingBackend, dc.EmbeddingModel, os.Getenv); err != nil {
+			return err
+		}
+	}
+	if err := config.SaveDiscoveryEnabled(on); err != nil {
+		return err
+	}
+	m.config.Ocode.Discovery.Enabled = on
+	if m.agent != nil {
+		m.agent.ResetDiscovery()
+	}
+	return nil
+}
+
+func (m *model) handleDiscoveryCmd(args []string) {
+	if len(args) == 0 {
+		status := "off"
+		if m.config.Ocode.Discovery.Enabled {
+			status = "on"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery is " + status + "."})
+		return
+	}
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "yes":
+		if err := m.setDiscoveryEnabled(true); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot enable discovery: " + err.Error()})
+			return
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery: enabled"})
+	case "off", "false", "no":
+		if err := m.setDiscoveryEnabled(false); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery: disabled"})
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discovery [on|off]"})
+	}
+}
+
+func (m *model) setEmbeddingModel(id string) error {
+	backend := "http"
+	if id == "local" || strings.HasPrefix(id, "local/") {
+		backend = "local"
+	}
+	if err := config.SaveQueryEmbeddingModel(id, backend); err != nil {
+		return err
+	}
+	m.config.Ocode.Discovery.EmbeddingModel = id
+	m.config.Ocode.Discovery.EmbeddingBackend = backend
+	if m.agent != nil {
+		m.agent.ResetDiscovery()
+	}
+	return nil
+}
+
+func (m *model) showDiscoverStatus() {
+	var b strings.Builder
+	dc := m.config.Ocode.Discovery
+	b.WriteString("Discovery\n")
+	onoff := "off"
+	if dc.Enabled {
+		onoff = "on"
+	}
+	fmt.Fprintf(&b, "  status:  %s\n", onoff)
+	fmt.Fprintf(&b, "  backend: %s\n", dc.EmbeddingBackend)
+	model := dc.EmbeddingModel
+	if model == "" {
+		model = "(none — run /discover model)"
+	}
+	fmt.Fprintf(&b, "  model:   %s\n", model)
+	if dc.EmbeddingBackend == "local" {
+		fmt.Fprintf(&b, "  local:   %s\n", dc.LocalModelStatus)
+	}
+	if m.agent != nil {
+		st := m.agent.DiscoveryStatus()
+		if !st.Active && st.InitErr != "" {
+			fmt.Fprintf(&b, "  note:    fail-open (%s)\n", st.InitErr)
+		}
+		fmt.Fprintf(&b, "  attached this session (%d/%d MCP tools):\n", len(st.Attached), st.MCPTotal)
+		for _, id := range st.Attached { // already sorted
+			fmt.Fprintf(&b, "    - %s\n", id)
+		}
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
+	if len(args) == 0 || strings.ToLower(args[0]) == "status" {
+		m.showDiscoverStatus()
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "model":
+		if len(args) > 1 {
+			if err := m.setEmbeddingModel(args[1]); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+				return nil
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Embedding model: " + args[1]})
+			return nil
+		}
+		m.openEmbeddingModelPicker()
+		return nil
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover [status|model [name]]"})
+		return nil
+	}
 }
 
 func (m *model) handleThinkingCmd(args []string) {
@@ -11056,12 +11175,12 @@ func wrapView(view string, width int) string {
 		return view
 	}
 	lines := strings.Split(view, "\n")
-		wrapped := make([]string, 0, len(lines))
-		for _, line := range lines {
-			wrapped = append(wrapped, strings.Split(wordWrap(line, width), "\n")...)
-		}
-		return strings.Join(wrapped, "\n")
+	wrapped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		wrapped = append(wrapped, strings.Split(wordWrap(line, width), "\n")...)
 	}
+	return strings.Join(wrapped, "\n")
+}
 
 // wordWrap wraps text at word (space) boundaries to fit within the given width.
 // It preserves ANSI escape codes and handles wide characters. If a single word
