@@ -110,9 +110,11 @@ func (a *Agent) RunDiscovery(query string) {
 	if len(docs) == 0 {
 		return
 	}
-	if err := a.disco.engine.Warm(context.Background(), docs); err != nil {
-		emitDebug("DISCOVERY", fmt.Sprintf("warm failed (fail-open, all attached): %v", err))
-		a.disco.enabled = false
+	// Kick the corpus warm in the background; first turn doesn't block on
+	// cold-embed. Until Ready() flips true, the gate attaches everything.
+	a.disco.engine.WarmAsync(docs)
+	if !a.disco.engine.Ready() {
+		emitDebug("DISCOVERY", "corpus still warming — all tools attached this turn")
 		return
 	}
 	added, err := a.disco.session.Discover(context.Background(), query)
@@ -198,12 +200,17 @@ func (a *Agent) markMCPFrom(parent *Agent) {
 }
 
 // discoveryAllows gates MCP tools by the sticky set. Built-ins are never gated.
+// While the corpus is still warming (Ready() == false), attach everything so a
+// fresh session doesn't see a tool list shrink to zero on turn 1.
 func (a *Agent) discoveryAllows(name string) bool {
 	if a.disco == nil || !a.disco.enabled {
 		return true
 	}
 	if _, isMCP := a.mcpTools[name]; !isMCP {
 		return true
+	}
+	if a.disco.engine == nil || !a.disco.engine.Ready() {
+		return true // not warmed yet → don't gate
 	}
 	return a.disco.session.IsAttached("mcp:" + name)
 }
