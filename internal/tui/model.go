@@ -8352,6 +8352,28 @@ func (m *model) handleContextCmd(args []string) {
 		b.WriteString("  Usage      n/a\n")
 	}
 
+	// Discovery section: only when the user has opted in (and an agent exists).
+	// Helps the user verify the gate is active and see the net context savings
+	// vs the name-index + query-embed cost.
+	if m.config != nil && m.config.Ocode.Discovery.Enabled && m.agent != nil {
+		st := m.agent.DiscoveryStatus()
+		attached, total, gatedToks, indexToks := m.agent.DiscoveryGatedTokens()
+		b.WriteString("\nDiscovery\n")
+		fmt.Fprintf(&b, "  %-28s %s %s\n", "Backend/model", st.Backend, st.Model)
+		if !st.Active && st.InitErr != "" {
+			fmt.Fprintf(&b, "  %-28s fail-open: %s\n", "Status", st.InitErr)
+		}
+		fmt.Fprintf(&b, "  %-28s %d/%d\n", "MCP tools attached", attached, total)
+		const queryEmbedToks = 64 // rough per-turn query embedding cost
+		net := gatedToks - indexToks - queryEmbedToks
+		if net < 0 {
+			net = 0
+		}
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (gross)", formatTok(gatedToks))
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (net)", formatTok(net))
+		fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools not attached", total-attached)
+	}
+
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
 
