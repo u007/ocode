@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/skill"
 )
@@ -40,7 +41,31 @@ func (a *Agent) ensureDiscovery() {
 		return
 	}
 	dc := a.config.Ocode.Discovery
-	emb, err := discovery.ResolveEmbedder(dc.EmbeddingBackend, dc.EmbeddingModel, keyForEnv)
+	var emb discovery.Embedder
+	var err error
+	if dc.EmbeddingBackend == "local" {
+		// Local backend: spawn the shared model-server (probe-first across
+		// ocode processes) and wrap it in the HTTP transport. Supervised
+		// spawn is delegated to the agent's process registry so the
+		// subprocess participates in shutdown.
+		spawn := func(cmdline string) error {
+			if a.procs == nil {
+				return fmt.Errorf("no process registry available for local server")
+			}
+			a.procs.StartBackground(cmdline)
+			return nil
+		}
+		base, dim, e := discovery.EnsureLocalServer(spawn, discoveryCacheDir(), func(s string) {
+			_ = config.SaveLocalModelStatus(s)
+		})
+		if e != nil {
+			err = e
+		} else {
+			emb = discovery.NewLocalEmbedder(base, dc.EmbeddingModel, dim)
+		}
+	} else {
+		emb, err = discovery.ResolveEmbedder(dc.EmbeddingBackend, dc.EmbeddingModel, keyForEnv)
+	}
 	if err != nil {
 		emitDebug("DISCOVERY", fmt.Sprintf("disabled (fail-open): %v", err))
 		a.disco = &discoveryState{enabled: false, initErr: err.Error()}

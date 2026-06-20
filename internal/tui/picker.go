@@ -876,7 +876,13 @@ func (m *model) openEmbeddingModelPicker() {
 		appendM("  "+em.ID, em.ID)
 	}
 	appendH("Local (downloaded on first use)")
-	appendM("  local/lfm2-5-retriever", "local/lfm2-5-retriever")
+	localLabel := "  local/lfm2-5-retriever"
+	if m.config != nil {
+		if st := m.config.Ocode.Discovery.LocalModelStatus; st != "" && st != "none" {
+			localLabel += " (" + st + ")"
+		}
+	}
+	appendM(localLabel, "local/lfm2-5-retriever")
 
 	m.pickerKind = "embedding-model"
 	m.pickerItems = items
