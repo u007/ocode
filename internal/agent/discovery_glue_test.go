@@ -87,6 +87,24 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+func TestMarkMCPFromParent(t *testing.T) {
+	parent := newGateAgent() // has Notion/search, Notion/update as MCP
+	child := &Agent{
+		tools:    map[string]tool.Tool{"Notion/search": fakeTool{"Notion/search"}, "read": fakeTool{"read"}},
+		mcpTools: map[string]struct{}{},
+	}
+	child.markMCPFrom(parent)
+	if _, ok := child.mcpTools["Notion/search"]; !ok {
+		t.Fatal("child should inherit the MCP marker for tools it has")
+	}
+	if _, ok := child.mcpTools["Notion/update"]; ok {
+		t.Fatal("child must not mark MCP tools it doesn't have")
+	}
+	if _, ok := child.mcpTools["read"]; ok {
+		t.Fatal("read is not an MCP tool")
+	}
+}
+
 func TestDiscoverMoreAttaches(t *testing.T) {
 	a := newGateAgent()
 	eng := discovery.NewEngine(discovery.FakeEmbedder{Dimension: 128}, t.TempDir())
