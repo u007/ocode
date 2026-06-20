@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
 )
 
 // Doc is one rankable item: a skill or an MCP tool.
@@ -44,4 +45,49 @@ func BuildCorpus(ctx context.Context, e Embedder, docs []Doc) (*Corpus, error) {
 		return nil, fmt.Errorf("embedder returned %d vectors for %d docs", len(vecs), len(docs))
 	}
 	return &Corpus{Docs: docs, Vecs: vecs}, nil
+}
+
+// Scored pairs a doc with its similarity to the query.
+type Scored struct {
+	Doc   Doc
+	Score float32
+}
+
+// Rank scores every doc against the query and returns them sorted descending.
+func (c *Corpus) Rank(query []float32) []Scored {
+	out := make([]Scored, len(c.Docs))
+	for i, d := range c.Docs {
+		out[i] = Scored{Doc: d, Score: Cosine(query, c.Vecs[i])}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	return out
+}
+
+// Selection policy constants (internal — see spec; not user-tunable).
+const (
+	SelectDelta float32 = 0.15 // keep items within this of the top score
+	SelectFloor         = 5    // always attach at least this many (or all if fewer)
+	SelectCap           = 30   // never attach more than this
+)
+
+// SelectRankRelative applies the rank-relative policy to a descending-sorted slice.
+func SelectRankRelative(ranked []Scored) []Scored {
+	if len(ranked) == 0 {
+		return nil
+	}
+	top := ranked[0].Score
+	keep := 0
+	for i, s := range ranked {
+		within := top-s.Score <= SelectDelta
+		if i < SelectFloor || within {
+			keep = i + 1
+		}
+	}
+	if keep > SelectCap {
+		keep = SelectCap
+	}
+	if keep > len(ranked) {
+		keep = len(ranked)
+	}
+	return ranked[:keep]
 }
