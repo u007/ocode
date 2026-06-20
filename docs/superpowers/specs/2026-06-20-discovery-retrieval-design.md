@@ -69,6 +69,26 @@ type Embedder interface {
 Asymmetric encoding: corpus embedded as `Passage`, query embedded as `Query`
 (instruction prefix for LFM2-5; input-type hint for HTTP backends).
 
+**Embedder availability (no silent default).** Anthropic has **no embeddings API**,
+and the primary ocode user runs on an Anthropic subscription with no embedding key.
+So HTTP is *not* a safe default for that user — it requires a second vendor key
+(OpenAI/Voyage/Cohere/Gemini), and **the local backend is their only no-extra-key
+path**. Therefore:
+
+- There is **no implicit OpenAI default**. `discovery.embedding_model` starts unset.
+- `/discovery on` **validates** that a usable embedder exists — either a configured
+  HTTP embedding key for the selected model, or a downloaded/ready local model. If
+  neither, it **hard-errors** with guidance ("run `/discover model` to pick an HTTP
+  model you have a key for, or select local to download it") and discovery stays off.
+- The HTTP embedding-model list is **curated per provider** inside the discovery
+  package (each entry carries its `dim`); it is **not** sourced from the models.dev
+  chat registry, which lists chat models, not embeddings.
+
+**Scope of savings — context only.** ocode still connects every MCP server and
+calls `ListTools()` at startup (`LoadExternalTools`), because the corpus needs each
+tool's description. Discovery shrinks **context injection**, not MCP process or
+connection cost — startup is unchanged. Stated so users don't expect lighter startup.
+
 ### 2. Corpus + search (`index.go`)
 
 **Corpus granularity: per-item.** One vector per **skill**
@@ -88,22 +108,53 @@ goroutine. The first turn that runs discovery waits only if warming hasn't
 finished; otherwise it is instant. Cancellable; if the model changes before it
 finishes, the in-flight warm is discarded and restarted for the new model.
 
-**Selection policy (internal constants):** attach every item with
-`cosine ≥ 0.30`, but always at least **floor = 3** and never more than
-**cap = 12**. Empty corpus (no skills/MCP) → discovery is a no-op, no embedder call.
+**Selection policy: rank-relative (internal constants).** Absolute cosine
+thresholds are **not** portable across embedders — score scales differ (OpenAI vs
+Voyage vs LFM2-5, normalized vs not), so a fixed `0.30` is meaningless the moment
+the model changes. Instead, sort descending and keep every item within **δ = 0.15**
+of the **top score**, bounded by **floor = 5** and **cap = 30**. Deltas-from-top
+are far more portable than absolute scores; the cap is sized so a single large MCP
+server (Notion ≈ 17 tools, Gmail ≈ 12) can be fully attached for a server-focused
+task without starving. These constants are re-derived for **per-tool** granularity
+(the earlier 0.30/3/12 were calibrated for per-server) and are tuning knobs for the
+implementation plan, not user settings. Empty corpus (no skills/MCP) → discovery is
+a no-op, no embedder call.
+
+**Query construction.** The query is not the raw latest message — short follow-ups
+("yes", "continue", "fix that") embed to noise and the floor then attaches
+irrelevant tools. The per-turn query = the current user message **plus a small
+rolling window** of recent user turns, capped to ~512 tokens. Sub-agent query = its
+task prompt (already self-contained). This keeps ranking stable across terse
+follow-ups.
 
 ### 3. Attachment — sticky/monotonic, fail-open
 
 - Re-rank **per user turn** (query = the user message) and **per sub-agent spawn**
   (query = the agent's task prompt).
-- The session holds a **grow-only** attached set: the union of everything ranked
-  in this session. Later turns **add** newly-relevant items but never remove them.
-  This keeps the tool-schema block (which sits in the Anthropic prompt-cache
-  prefix) a stable, growing list — preserving cache hits while staying far smaller
-  than all-tools. The set **resets per session**.
+- Each **agent instance** holds its own **grow-only** attached set: the union of
+  everything ranked in for that instance. Later turns **add** newly-relevant items
+  but never remove them. This keeps the tool-schema block (which sits in the
+  Anthropic prompt-cache prefix) a stable, growing list — preserving cache hits
+  while staying far smaller than all-tools. The main set **resets per session**; a
+  **sub-agent starts fresh** from its own task ranking (it does **not** inherit the
+  parent's accumulated set, or the savings would be lost).
+- **Recomputed each step.** The tool list is rebuilt from the sticky set on every
+  agent step, so a `discover_more` attachment made this turn is visible to the next
+  LLM step.
+- **Resumed sessions.** On loading a session from disk, the sticky set is **seeded**
+  from the tool names actually referenced in the loaded message history, so a
+  resumed conversation keeps the tools it was already using (otherwise the first
+  post-resume turn could detach tools the history still references).
+- **Known limitation — savings decay.** With per-tool granularity, a long
+  multi-topic session accumulates toward "most tools attached"; the benefit is
+  front-loaded and trends down over session length while per-turn query-embed +
+  name-index overhead persists. Acceptable for typical sessions; if it bites, the
+  rejected "sticky-with-evict" variant is the revisit path.
 - **Gated:** MCP tools + skill-catalog entries only.
-- **Never gated:** core built-in tools (read, edit, write, glob, grep, list, bash,
-  task, etc.) and the `discover_more` tool.
+- **Never gated (core allowlist).** An explicit constant set, never subject to
+  discovery: `read, edit, write, glob, grep, list, bash, bash_output, kill_shell,
+  wait, lsp, task, agent_status, task_status, advisor`, and `discover_more`.
+  (`webfetch`/`websearch` *are* gateable — they rank like any other tool.)
 - **Pinned-always:** skills in `discovery.pinned_skills` (default
   `["brainstorming", "using-superpowers"]`) are always attached regardless of score.
 - **MCP server instructions** (the separate instructions text some servers inject)
@@ -127,6 +178,14 @@ finishes, the in-flight warm is discarded and restarted for the new model.
    a natural-language need ("I need to send email"); it re-runs retrieval against
    the corpus, hot-attaches matches for the rest of the turn (adding to the sticky
    set), and returns what was attached so the model can retry.
+
+**Prompt contract (required — recovery is inert without it).** When discovery is on,
+a system-prompt fragment is injected that tells the model: *not every tool is
+loaded; the "Available" index below lists every skill and MCP tool by name; if you
+need one that isn't currently callable, call `discover_more` with a short
+description of what you need before saying you can't do it.* Without this the model
+just reports "I can't do X" instead of summoning the tool. The name index is capped
+(names + ≤5-word hint) and itself excluded from the savings claim below.
 
 ---
 
@@ -157,7 +216,8 @@ When discovery is **on**, add a **Discovery** section showing:
 
 - backend + embedding model (+ download state if local),
 - attached vs total: `skills A/X`, `MCP tools B/Y`,
-- **tokens saved** vs attaching everything (estimated from the gated tool schemas),
+- **net tokens saved** = gated tool-schema tokens − (name-index tokens + per-turn
+  query-embed tokens). Show gross *and* net so the new overhead isn't hidden.
 - the retriever's own per-turn embedding cost (tokens/$ for HTTP; "local" otherwise),
 - an honest **"N items not attached"** line — no silent caps (per the
   no-silent-truncation rule).
@@ -170,7 +230,7 @@ New entry kind `KindDiscovery` (+ TUI alias + a filter toggle in the Log tab).
 Lines appended via `debuglog.Log.Append`:
 
 - corpus warm: doc count, ms, model, dim;
-- per-turn rank: query snippet → `K/N attached` with the floor/cap/threshold used;
+- per-turn rank: query snippet → `K/N attached` with the δ/floor/cap used;
 - per-item attach/skip decisions with scores;
 - `discover_more` calls and what they attached;
 - sticky-set growth;
@@ -186,17 +246,27 @@ sessions would erase each other):
 ```jsonc
 "discovery": {
   "enabled": false,
-  "embedding_model": "openai/text-embedding-3-small",
-  "embedding_backend": "http",          // "http" | "local"
+  "embedding_model": "",                 // unset — chosen via /discover model; no implicit default
+  "embedding_backend": "http",           // "http" | "local"
   "local_model_status": "none",          // none | downloading | ready
   "pinned_skills": ["brainstorming", "using-superpowers"]
 }
 ```
 
-Savers: `SaveDiscoveryEnabled(bool)`, `SaveQueryEmbeddingModel(id)` (also sets
-backend + triggers cache invalidation), `SaveLocalModelStatus(status)`. Load
-wiring in `loadOcodeConfigFile`, write wiring in `writeOcodeConfigFile`, defaults
-in `defaultOcodeConfig` (enabled=false).
+Savers: `SaveDiscoveryEnabled(bool)` (rejects with guidance if no usable embedder),
+`SaveQueryEmbeddingModel(id)` (also sets backend + triggers cache invalidation),
+`SaveLocalModelStatus(status)`. Load wiring in `loadOcodeConfigFile`, write wiring
+in `writeOcodeConfigFile`, defaults in `defaultOcodeConfig` (enabled=false,
+embedding_model unset). Cache files written **atomically** (temp + rename) to avoid
+the concurrent-write corruption class seen previously with config.
+
+## Testing
+
+A `fakeEmbedder` (deterministic vectors from text hashes) backs unit tests for the
+selection policy (rank-relative δ/floor/cap), sticky/monotonic growth, fail-open
+fallback, sub-agent isolation, and resumed-session seeding — no network, no model
+download. HTTP and local embedders get thin integration tests behind build
+tags/env-gated keys.
 
 ---
 
@@ -207,19 +277,21 @@ in `defaultOcodeConfig` (enabled=false).
 Corpus (embedded once, cached). Query embedded with query prefix. Cosine ranks:
 
 ```
-0.71  Notion/query-meeting-notes   ✓ attach
-0.55  Notion/search                ✓ attach
-0.48  Notion/fetch                 ✓ attach
-0.44  Gmail/create_draft           ✓ attach
-0.33  skill:agentmail              ✓ attach
-0.29  Gmail/search_threads         ✗ below 0.30, floor met
-0.18  Calendar/create_event        ✗
-0.07  context7/query-docs          ✗
+0.71  Notion/query-meeting-notes   ✓ top score
+0.66  Notion/search                ✓ within δ=0.15 of top
+0.62  Notion/fetch                 ✓ within δ
+0.58  Gmail/create_draft           ✓ within δ (0.71−0.58=0.13)
+0.57  skill:agentmail              ✓ within δ
+0.54  Gmail/search_threads         ✗ 0.71−0.54=0.17 > δ, floor(5) met
+0.40  Calendar/create_event        ✗
+0.21  context7/query-docs          ✗
 ```
 
-Policy (≥0.30, floor 3, cap 12) → 5 items attached; ~40 others stay out of the
-tool schemas but remain in the cheap name index. Sticky set =
-`{notion/query-meeting-notes, notion/search, notion/fetch, gmail/create_draft, agentmail}`.
+Rank-relative policy (within δ=0.15 of top, floor 5, cap 30) → 5 items attached;
+the rest stay out of the tool schemas but remain in the cheap name index. Sticky
+set = `{notion/query-meeting-notes, notion/search, notion/fetch, gmail/create_draft, agentmail}`.
+(Scores illustrative; absolute values vary by embedder — only deltas-from-top drive
+selection.)
 
 Mid-turn the model needs the calendar → `discover_more("schedule a follow-up on the calendar")`
 → `Calendar/create_event` scores 0.68 → hot-attached, sticky set grows to 6.
@@ -240,6 +312,14 @@ Mid-turn the model needs the calendar → `discover_more("schedule a follow-up o
 | Sub-agent over-broadening | Discovery filter ∩ existing spec whitelist |
 | Model switch dimension mismatch | Full corpus cache invalidation |
 | Embedder failure breaks task | Fail-open: attach all + WARN |
+| Absolute threshold not portable across embedders | Rank-relative (within δ of top) selection |
+| Anthropic users have no embedding key | No silent default; local first-class; `/discovery on` validates a usable embedder |
+| Short follow-ups embed to noise | Query = message + rolling recent-turn window |
+| Recovery tools ignored by the model | Required system-prompt contract that activates the index + `discover_more` |
+| Overstated savings | `/context` nets out name-index + query-embed overhead |
+| Savings decay on long sessions (per-tool sticky) | Documented limitation; evict-variant is the revisit path |
+| Concurrent corpus-cache writes corrupt the file | Atomic temp + rename |
+| Resumed session detaches in-use tools | Seed sticky set from tool names in loaded history |
 
 ## Open implementation-plan decisions (not design-level)
 
