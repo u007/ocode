@@ -13181,11 +13181,25 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		statusLine := strings.Join(statusParts, "  ")
 		appendWrapped(&data.topLines, statusLine, outerBodyWidth)
 	}
-	// ── Line 2: token / context window ──
+	// ── Line 2: temperature + reasoning level ──
+	detailsParts := make([]string, 0, 2)
+	if m.agent != nil {
+		if temp := m.agent.EffectiveTemperature(); temp != nil {
+			detailsParts = append(detailsParts, fmt.Sprintf("temp: %g", *temp))
+		}
+	}
+	supportsReasoning := m.config != nil && agent.ModelSupportsThinking(m.config.Model)
+	if supportsReasoning {
+		detailsParts = append(detailsParts, fmt.Sprintf("reason: %s", thinkingBudgetLabels[m.thinkingLevelIdx]))
+	}
+	if len(detailsParts) > 0 {
+		appendWrapped(&data.topLines, dimStyle.Render(strings.Join(detailsParts, " · ")), outerBodyWidth)
+	}
+	// ── Line 3: token / context window ──
+	cwdLabel := dimStyle.Render("cwd: ")
 	if ctxTokens > 0 {
 		appendWrapped(&data.topLines, dimStyle.Render(contextLine), outerBodyWidth)
 	}
-	cwdLabel := dimStyle.Render("cwd: ")
 	cwdMax := sidebarColumnWidth - 4 - lipgloss.Width(cwdLabel)
 	appendWrapped(&data.topLines, cwdLabel+sidebarAccentStyle.Render(compactWorkingDir(m.workDir, cwdMax)), outerBodyWidth)
 	data.topLines = append(data.topLines, "")

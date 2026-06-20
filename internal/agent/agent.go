@@ -2906,6 +2906,18 @@ func (a *Agent) SetSupervisorIDPrefix(prefix string) {
 // Runs returns the registry of async subagent runs.
 func (a *Agent) Runs() *AgentRunRegistry { return a.runs }
 
+// EffectiveTemperature returns the temperature set on the current LLM client,
+// or nil if no explicit temperature is configured (model default applies).
+func (a *Agent) EffectiveTemperature() *float64 {
+	if gc, ok := a.client.(*GenericClient); ok {
+		return gc.Temperature
+	}
+	if a.spec != nil {
+		return a.spec.Temperature
+	}
+	return nil
+}
+
 // JobEvents is the channel the TUI reads background-job completions from.
 func (a *Agent) JobEvents() chan JobEvent { return a.jobEvents }
 

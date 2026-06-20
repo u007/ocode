@@ -2217,3 +2217,59 @@ func TestSetWorkDirUpdatesPermissionsAndAdvisorTool(t *testing.T) {
 		t.Fatalf("expected advisor workDir %q, got %q", target, advisor.workDir)
 	}
 }
+
+func TestEffectiveTemperature(t *testing.T) {
+	t.Run("GenericClient with nil Temperature", func(t *testing.T) {
+		gc := &GenericClient{Temperature: nil}
+		a := &Agent{client: gc, spec: nil}
+		if got := a.EffectiveTemperature(); got != nil {
+			t.Fatalf("expected nil, got %v", *got)
+		}
+	})
+
+	t.Run("GenericClient with explicit Temperature", func(t *testing.T) {
+		v := 0.7
+		gc := &GenericClient{Temperature: &v}
+		a := &Agent{client: gc, spec: nil}
+		got := a.EffectiveTemperature()
+		if got == nil {
+			t.Fatal("expected non-nil, got nil")
+		}
+		if *got != 0.7 {
+			t.Fatalf("expected 0.7, got %v", *got)
+		}
+	})
+
+	t.Run("GenericClient falls back to client (not spec)", func(t *testing.T) {
+		clientTemp := 0.5
+		specTemp := 0.9
+		gc := &GenericClient{Temperature: &clientTemp}
+		a := &Agent{client: gc, spec: &AgentSpec{Temperature: &specTemp}}
+		got := a.EffectiveTemperature()
+		if got == nil {
+			t.Fatal("expected non-nil, got nil")
+		}
+		if *got != 0.5 {
+			t.Fatalf("expected client temperature 0.5, got %v", *got)
+		}
+	})
+
+	t.Run("non-GenericClient with nil spec", func(t *testing.T) {
+		a := &Agent{client: &MockClient{}, spec: nil}
+		if got := a.EffectiveTemperature(); got != nil {
+			t.Fatalf("expected nil, got %v", *got)
+		}
+	})
+
+	t.Run("non-GenericClient with spec Temperature", func(t *testing.T) {
+		specTemp := 0.3
+		a := &Agent{client: &MockClient{}, spec: &AgentSpec{Temperature: &specTemp}}
+		got := a.EffectiveTemperature()
+		if got == nil {
+			t.Fatal("expected non-nil, got nil")
+		}
+		if *got != 0.3 {
+			t.Fatalf("expected spec temperature 0.3, got %v", *got)
+		}
+	})
+}
