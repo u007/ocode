@@ -87,6 +87,28 @@ func indexOf(s, sub string) int {
 	return -1
 }
 
+func TestDiscoverMoreAttaches(t *testing.T) {
+	a := newGateAgent()
+	eng := discovery.NewEngine(discovery.FakeEmbedder{Dimension: 128}, t.TempDir())
+	_ = eng.Warm(context.Background(), []discovery.Doc{
+		{ID: "mcp:Notion/search", Kind: "mcp", Name: "Notion/search", Text: "search notion pages"},
+		{ID: "mcp:Notion/update", Kind: "mcp", Name: "Notion/update", Text: "update notion page content"},
+	})
+	a.disco = &discoveryState{enabled: true, engine: eng, session: discovery.NewSession(eng)}
+
+	tl := discoverMoreTool{agent: a}
+	if tl.Name() != "discover_more" {
+		t.Fatalf("name = %s", tl.Name())
+	}
+	out, err := tl.Execute([]byte(`{"need":"search notion pages"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !a.disco.session.IsAttached("mcp:Notion/search") {
+		t.Fatalf("discover_more should attach the matching tool; out=%q", out)
+	}
+}
+
 func TestInjectDiscoveryContextOnlyWhenActive(t *testing.T) {
 	a := newGateAgent()
 	base := []Message{{Role: "user", Content: "hi"}}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -41,6 +42,13 @@ func (a *Agent) ensureDiscovery() {
 		enabled: true,
 		engine:  eng,
 		session: discovery.NewSession(eng),
+	}
+	// Register the discover_more recovery tool. It is intentionally not in
+	// a.mcpTools so discoveryAllows always returns true for it. Sub-agents with
+	// a spec.Tools whitelist will exclude it via isToolAllowed — acceptable in
+	// Plan 1 (sub-agents still get the name index and seeded gating).
+	if a.tools != nil {
+		a.tools["discover_more"] = discoverMoreTool{agent: a}
 	}
 }
 
@@ -166,4 +174,58 @@ func shortHint(text string) string {
 		text = strings.TrimSpace(text[:40]) + "…"
 	}
 	return text
+}
+
+type discoverMoreTool struct{ agent *Agent }
+
+func (t discoverMoreTool) Name() string { return "discover_more" }
+func (t discoverMoreTool) Description() string {
+	return "Attach additional MCP tools relevant to a described need. Call this when you need a capability whose tool is not in your current tool list."
+}
+func (t discoverMoreTool) Parallel() bool { return false }
+func (t discoverMoreTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "discover_more",
+		"description": t.Description(),
+		"parameters": map[string]interface{}{
+			"type": "object",
+			"properties": map[string]interface{}{
+				"need": map[string]interface{}{
+					"type":        "string",
+					"description": "Natural-language description of the capability you need, e.g. 'send an email'.",
+				},
+			},
+			"required": []string{"need"},
+		},
+	}
+}
+
+func (t discoverMoreTool) Execute(args json.RawMessage) (string, error) {
+	var p struct {
+		Need string `json:"need"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("discover_more args: %w", err)
+	}
+	a := t.agent
+	if a.disco == nil || !a.disco.enabled {
+		return "Discovery is not active; all tools are already available.", nil
+	}
+	if err := a.disco.engine.Warm(context.Background(), a.discoveryDocs()); err != nil {
+		return "", fmt.Errorf("discover_more warm: %w", err)
+	}
+	added, err := a.disco.session.Discover(context.Background(), p.Need)
+	if err != nil {
+		return "", fmt.Errorf("discover_more rank: %w", err)
+	}
+	emitDebug("DISCOVERY", fmt.Sprintf("discover_more(%.40q) → +%d tools", p.Need, len(added)))
+	if len(added) == 0 {
+		return "No additional tools matched that need. Available tools are listed in the discovery index.", nil
+	}
+	names := make([]string, 0, len(added))
+	for _, d := range added {
+		names = append(names, d.Name)
+	}
+	sort.Strings(names)
+	return "Attached: " + strings.Join(names, ", ") + ". They are available on your next step.", nil
 }
