@@ -72,10 +72,13 @@ func TestStickyGrowsNeverShrinks(t *testing.T) {
 	}
 }
 
-func TestResolveEmbedderLocalDeferred(t *testing.T) {
+func TestResolveEmbedderIsHTTPOnly(t *testing.T) {
+	// ResolveEmbedder handles HTTP only; the local backend is constructed in the
+	// agent glue (it needs the process supervisor), so ResolveEmbedder("local")
+	// returns an error and is never called for local.
 	_, err := ResolveEmbedder("local", "lfm2-5", func(string) string { return "" })
 	if err == nil {
-		t.Fatal("local backend must error in Plan 1 (deferred to Plan 2 / MLX)")
+		t.Fatal("ResolveEmbedder must not handle the local backend")
 	}
 }
 
@@ -132,10 +135,10 @@ func ResolveEmbedder(backend, modelID string, keyFor func(envVar string) string)
 		}
 		return NewHTTPEmbedder(m, key), nil
 	case "local":
-		// Plan 2: load the LFM2-5 retriever locally. On Apple Silicon
-		// (darwin/arm64) this must load the MLX build; elsewhere the ONNX/CPU
-		// build. Not available in Plan 1.
-		return nil, fmt.Errorf("local embedding backend is not available in this build yet")
+		// The local backend is constructed in the agent glue (Part 13): it needs
+		// the process supervisor to spawn the shared model server, which this pure
+		// function doesn't have. So ResolveEmbedder never handles local.
+		return nil, fmt.Errorf("local backend is constructed by the agent, not ResolveEmbedder")
 	default:
 		return nil, fmt.Errorf("unknown embedding backend %q", backend)
 	}
