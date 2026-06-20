@@ -8,14 +8,15 @@ import (
 type DebugEntryKind = debuglog.EntryKind
 
 const (
-	DebugKindLLM     = debuglog.KindLLM
-	DebugKindTool    = debuglog.KindTool
-	DebugKindAgent   = debuglog.KindAgent
-	DebugKindError   = debuglog.KindError
-	DebugKindSession = debuglog.KindSession
-	DebugKindGit     = debuglog.KindGit
-	DebugKindLSP     = debuglog.KindLSP
-	DebugKindWarn    = debuglog.KindWarn
+	DebugKindLLM       = debuglog.KindLLM
+	DebugKindTool      = debuglog.KindTool
+	DebugKindAgent     = debuglog.KindAgent
+	DebugKindError     = debuglog.KindError
+	DebugKindSession   = debuglog.KindSession
+	DebugKindGit       = debuglog.KindGit
+	DebugKindLSP       = debuglog.KindLSP
+	DebugKindWarn      = debuglog.KindWarn
+	DebugKindDiscovery = debuglog.KindDiscovery
 )
 
 // DebugEntry is an alias for backward compatibility.
