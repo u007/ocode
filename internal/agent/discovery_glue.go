@@ -106,6 +106,23 @@ func (a *Agent) RunDiscovery(query string) {
 		len(added), len(a.disco.session.Attached()), query))
 }
 
+// markMCPFrom marks this agent's tools as MCP when the parent treats them as MCP.
+// NewAgent receives a flat tool slice and loses the MCP markers; sub-agents call
+// this so their discovery gate knows which tools are gateable.
+func (a *Agent) markMCPFrom(parent *Agent) {
+	if parent == nil {
+		return
+	}
+	if a.mcpTools == nil {
+		a.mcpTools = make(map[string]struct{})
+	}
+	for name := range a.tools {
+		if _, ok := parent.mcpTools[name]; ok {
+			a.mcpTools[name] = struct{}{}
+		}
+	}
+}
+
 // discoveryAllows gates MCP tools by the sticky set. Built-ins are never gated.
 func (a *Agent) discoveryAllows(name string) bool {
 	if a.disco == nil || !a.disco.enabled {

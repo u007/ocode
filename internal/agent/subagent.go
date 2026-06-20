@@ -292,6 +292,11 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	injectSmallModelIfEligible(subAgent, &subSpec, t.mainAgent.config)
 	subAgent.SetSpec(&subSpec)
 
+	// Discovery: the sub-agent gets its OWN fresh sticky set (it does not inherit
+	// the parent's). NewAgent drops MCP markers, so re-mark them from the parent
+	// here; the sub-agent's Step() then ranks against params.Prompt itself.
+	subAgent.markMCPFrom(t.mainAgent)
+
 	// Inherit the shared session supervisor so subagent processes are tracked
 	// under the same lifecycle owner as the main agent. Namespace this subagent's
 	// supervisor IDs so its "proc-N" counter cannot collide with the parent's
