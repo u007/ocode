@@ -56,6 +56,9 @@ func EnsureArtifact(a Artifact, dir string) error {
 		ok, err := extractionMarkerMatches(markerPath(dest), a.SHA256)
 		if err == nil && ok {
 			emitUserDiscoveryDebug("DISCOVERY", "artifact cached: "+a.Dest)
+			// Ensure dylib symlinks exist even for cached artifacts (handles
+			// legacy caches extracted before this fix was added).
+			ensureDylibSymlinks(dir)
 			return nil
 		}
 	}
@@ -291,7 +294,80 @@ func extractTarGZ(archivePath, destDir, leaf string) (string, error) {
 	if leafOut == "" {
 		return "", fmt.Errorf("archive did not contain a %q entry", leaf)
 	}
+	// After extraction, create macOS dylib symlinks so the dynamic linker
+	// can find version-triple-named files (e.g. libllama-common.0.0.9747.dylib)
+	// by their short install name (libllama-common.0.dylib). This is a no-op
+	// on non-macOS platforms (no .dylib files) or when no symlinks are needed.
+	ensureDylibSymlinks(destDir)
 	return leafOut, nil
+}
+
+// ensureDylibSymlinks scans destDir recursively for .dylib files whose
+// names include a full version triple (e.g. libfoo.1.2.3.dylib) and
+// creates symlinks from the short name (libfoo.1.dylib) that the macOS
+// dynamic linker expects — matching the install name recorded inside
+// each dylib. This is a no-op on non-macOS platforms (no .dylib files)
+// or when no version-triple dylibs are present.
+func ensureDylibSymlinks(destDir string) {
+	entries, err := os.ReadDir(destDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		full := filepath.Join(destDir, e.Name())
+		if e.IsDir() {
+			ensureDylibSymlinks(full)
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".dylib") {
+			continue
+		}
+		short := shortDylibName(e.Name())
+		if short == "" || short == e.Name() {
+			continue
+		}
+		shortPath := filepath.Join(destDir, short)
+		if _, err := os.Lstat(shortPath); os.IsNotExist(err) {
+			os.Symlink(e.Name(), shortPath)
+		}
+	}
+}
+
+// shortDylibName strips all but the first version component from a
+// .dylib filename. Examples:
+//
+//	libllama-common.0.0.9747.dylib → libllama-common.0.dylib
+//	libggml.0.15.2.dylib          → libggml.0.dylib
+//	libllama-server-impl.dylib    → "" (no version components)
+func shortDylibName(name string) string {
+	if !strings.HasSuffix(name, ".dylib") {
+		return ""
+	}
+	// Strip .dylib
+	base := name[:len(name)-6]
+	// Split on dots — e.g. "libllama-common.0.0.9747" → [libllama-common, 0, 0, 9747]
+	parts := strings.Split(base, ".")
+	if len(parts) < 3 {
+		// No version components (e.g. libfoo.dylib or libfoo-impl.dylib).
+		return ""
+	}
+	// parts[0] is the library name, parts[1] onward are version components.
+	// parts[1] is the major version — that's what the dynamic linker needs.
+	// Verify parts[1] is numeric so we don't create bogus symlinks for
+	// unversioned multi-part names.
+	if !isNumeric(parts[1]) {
+		return ""
+	}
+	return parts[0] + "." + parts[1] + ".dylib"
+}
+
+func isNumeric(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // sha256File streams a file through sha256 (no full-file buffering).

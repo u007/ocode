@@ -99,6 +99,146 @@ func TestEnsureArtifactRejectsBadSHA(t *testing.T) {
 	}
 }
 
+func TestShortDylibName(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"libllama-common.0.0.9747.dylib", "libllama-common.0.dylib"},
+		{"libllama.0.0.9747.dylib", "libllama.0.dylib"},
+		{"libmtmd.0.0.9747.dylib", "libmtmd.0.dylib"},
+		{"libggml.0.15.2.dylib", "libggml.0.dylib"},
+		{"libggml-base.0.15.2.dylib", "libggml-base.0.dylib"},
+		{"libggml-cpu.0.15.2.dylib", "libggml-cpu.0.dylib"},
+		{"libggml-metal.0.15.2.dylib", "libggml-metal.0.dylib"},
+		{"libggml-blas.0.15.2.dylib", "libggml-blas.0.dylib"},
+		{"libggml-rpc.0.15.2.dylib", "libggml-rpc.0.dylib"},
+		// Unversioned dylibs — no symlink needed.
+		{"libllama-server-impl.dylib", ""},
+		{"libllama-batched-bench-impl.dylib", ""},
+		{"libllama-bench-impl.dylib", ""},
+		{"libllama-cli-impl.dylib", ""},
+		{"libllama-completion-impl.dylib", ""},
+		{"libllama-fit-params-impl.dylib", ""},
+		{"libllama-perplexity-impl.dylib", ""},
+		{"libllama-quantize-impl.dylib", ""},
+		// Non-dylib files — no symlink.
+		{"llama-server", ""},
+		{"bge-m3-q4_k_m.gguf", ""},
+		{"README.md", ""},
+		// Short names that already match the expected form — no symlink needed.
+		{"libfoo.1.dylib", ""},
+		{"libbar.0.dylib", ""},
+	}
+
+	for _, tt := range tests {
+		got := shortDylibName(tt.in)
+		if got != tt.want {
+			t.Errorf("shortDylibName(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestEnsureDylibSymlinks(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create version-triple dylib files.
+	files := map[string]string{
+		"libllama-common.0.0.9747.dylib": "common",
+		"libllama.0.0.9747.dylib":        "llama",
+		"libggml.0.15.2.dylib":           "ggml",
+		"libggml-cpu.0.15.2.dylib":       "ggml-cpu",
+		"libllama-server-impl.dylib":     "server", // unversioned, no symlink expected
+		"readme.txt":                      "text",   // not a dylib
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ensureDylibSymlinks(dir)
+
+	// Verify symlinks.
+	expectedLinks := map[string]string{
+		"libllama-common.0.dylib": "libllama-common.0.0.9747.dylib",
+		"libllama.0.dylib":        "libllama.0.0.9747.dylib",
+		"libggml.0.dylib":         "libggml.0.15.2.dylib",
+		"libggml-cpu.0.dylib":     "libggml-cpu.0.15.2.dylib",
+	}
+	for link, target := range expectedLinks {
+		linkPath := filepath.Join(dir, link)
+		got, err := os.Readlink(linkPath)
+		if err != nil {
+			t.Errorf("expected symlink %s, got error: %v", link, err)
+			continue
+		}
+		if got != target {
+			t.Errorf("symlink %s -> %s, want -> %s", link, got, target)
+		}
+	}
+
+	// Verify unversioned dylib did NOT get a symlink.
+	if _, err := os.Lstat(filepath.Join(dir, "libllama-server-impl.dylib")); err != nil {
+		t.Fatal("libllama-server-impl.dylib should still exist")
+	}
+	// Ensure no bogus symlink was created for unversioned dylib.
+	if _, err := os.Lstat(filepath.Join(dir, "libllama-server-impl.0.dylib")); !os.IsNotExist(err) {
+		t.Error("unexpected symlink created for unversioned dylib")
+	}
+
+	// Ensure non-dylib files were not affected.
+	if _, err := os.Lstat(filepath.Join(dir, "readme.txt")); err != nil {
+		t.Errorf("readme.txt should still exist: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "readme.dylib")); !os.IsNotExist(err) {
+		t.Error("unexpected .dylib file created for readme.txt")
+	}
+}
+
+func TestEnsureDylibSymlinksIdempotent(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(dir, "libfoo.0.1.2.dylib"), []byte("foo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run twice.
+	ensureDylibSymlinks(dir)
+	ensureDylibSymlinks(dir)
+
+	linkPath := filepath.Join(dir, "libfoo.0.dylib")
+	got, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("expected symlink after first run: %v", err)
+	}
+	if got != "libfoo.0.1.2.dylib" {
+		t.Fatalf("symlink points to %q, want %q", got, "libfoo.0.1.2.dylib")
+	}
+}
+
+func TestEnsureDylibSymlinksRecursive(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "llama-b9747")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "libggml.0.15.2.dylib"), []byte("ggml"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ensureDylibSymlinks(dir)
+
+	linkPath := filepath.Join(sub, "libggml.0.dylib")
+	got, err := os.Readlink(linkPath)
+	if err != nil {
+		t.Fatalf("expected symlink in subdirectory: %v", err)
+	}
+	if got != "libggml.0.15.2.dylib" {
+		t.Fatalf("symlink points to %q, want %q", got, "libggml.0.15.2.dylib")
+	}
+}
+
 // makeTarGZ builds a tar.gz in memory with the given (name, content) entries.
 // Top-level directories are added implicitly. Used to simulate the llama.cpp
 // release tarball layout ("llama-b9747/llama-server" + sibling libraries).
