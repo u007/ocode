@@ -10,6 +10,7 @@ import (
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -61,7 +62,7 @@ func (a *Agent) ensureDiscovery() {
 			if err := config.SaveLocalModelStatus(s); err != nil {
 				emitDebug("DISCOVERY", fmt.Sprintf("persist local model status %q failed: %v", s, err))
 			}
-		})
+		}, discovery.LocalServerOptions{UserBaseURL: dc.LocalServerURL})
 		if e != nil {
 			err = e
 		} else {
@@ -95,12 +96,26 @@ func (a *Agent) ensureDiscovery() {
 // follow-up — see TODO.md.
 func keyForEnv(envVar string) string { return os.Getenv(envVar) }
 
+// discoveryCacheDir returns the directory under ocode's global data dir where
+// the local embed server's model + binaries are cached. Layout:
+//
+//	<GlobalDataDir>/discovery/
+//	    local-<os>-<arch>/
+//	        llama-b9747/llama-server   (extracted from llama.cpp release tarball)
+//	        llama-b9747/lib*.dylib     (sibling libraries, same dir as the binary)
+//	        lfm2-5-embedding-350m.gguf
+//
+// Uses paths.GlobalDataDir() (not os.UserConfigDir()) so the cache lives
+// alongside sessions, auth, and usage — one consistent location, not split
+// between ~/.config/opencode (XDG/Linux) and ~/Library/Application Support
+// (macOS). Falls back to os.TempDir() only if the global dir itself is
+// unresolvable, since TempDir is wiped on reboot.
 func discoveryCacheDir() string {
-	base, err := os.UserConfigDir()
+	base, err := paths.GlobalDataDir()
 	if err != nil || base == "" {
 		base = os.TempDir()
 	}
-	return base + "/opencode/discovery"
+	return base + "/discovery"
 }
 
 // discoveryDocs gathers the corpus: one Doc per skill (Name + Description +

@@ -111,8 +111,7 @@ func init() {
 		{name: "/add-dir", aliases: []string{"/add-dirs"}, usage: "/add-dir <path>", help: "Add a directory to extra allowed paths so the agent can work with files there", handler: runAddDirCmd},
 		{name: "/upload", aliases: []string{"/uploads"}, usage: "/upload [path]", help: "Show or set the file upload directory used by /api/uploads", handler: runUploadCmd},
 		{name: "/search", aliases: []string{"/find"}, usage: "/search <query>", help: "Find a message by keyword (opens the in-chat find bar)", handler: runSearchCmd},
-		{name: "/discovery", usage: "/discovery [on|off]", help: "Enable/disable retrieval-based skill/MCP discovery", handler: runDiscoveryCmd},
-		{name: "/discover", usage: "/discover [status|model [name]]", help: "Show discovery status / choose the query-embedding model", handler: runDiscoverCmd},
+		{name: "/discover", usage: "/discover [enable|disable|status|model [name]]", help: "Enable/disable retrieval-based skill/MCP discovery, show status, or choose the query-embedding model", handler: runDiscoverCmd},
 		{name: "/orchestrate", usage: "/orchestrate <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runOrchestrateCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
@@ -1460,11 +1459,6 @@ func runOrchestrateCmd(m *model, args []string) tea.Cmd {
 		text: fmt.Sprintf("[Orchestrator] Starting pipeline for: %s\nRunning in background — status updates will appear here.", goal),
 	})
 	return runOrchestrateBackground(m, goal, false)
-}
-
-func runDiscoveryCmd(m *model, args []string) tea.Cmd {
-	m.handleDiscoveryCmd(args)
-	return nil
 }
 
 func runDiscoverCmd(m *model, args []string) tea.Cmd {

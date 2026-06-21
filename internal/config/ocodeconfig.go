@@ -64,6 +64,12 @@ type DiscoveryConfig struct {
 	EmbeddingModel   string
 	EmbeddingBackend string // "http" | "local"
 	LocalModelStatus string // none | downloading | ready
+	// LocalServerURL, when set, is the OpenAI-compatible base URL of an
+	// already-running embed server (LM Studio, user-built llama-server, etc.)
+	// that the local backend should adopt instead of downloading and spawning
+	// its own. The probe validates the /v1/models response shape. Empty means
+	// "use the bundled server on the manifest port and download if needed".
+	LocalServerURL   string
 	PinnedSkills     []string
 }
 
@@ -246,6 +252,7 @@ type discoveryConfigFile struct {
 	EmbeddingModel   string   `json:"embedding_model,omitempty"`
 	EmbeddingBackend string   `json:"embedding_backend,omitempty"`
 	LocalModelStatus string   `json:"local_model_status,omitempty"`
+	LocalServerURL   string   `json:"local_server_url,omitempty"`
 	PinnedSkills     []string `json:"pinned_skills,omitempty"`
 }
 
@@ -734,6 +741,9 @@ func applyDiscoveryConfig(dst *DiscoveryConfig, src discoveryConfigFile) {
 	if src.LocalModelStatus != "" {
 		dst.LocalModelStatus = src.LocalModelStatus
 	}
+	if src.LocalServerURL != "" {
+		dst.LocalServerURL = src.LocalServerURL
+	}
 	if src.PinnedSkills != nil {
 		dst.PinnedSkills = append([]string{}, src.PinnedSkills...)
 	}
@@ -757,18 +767,26 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		return err
 	}
 
+	discoveryMap := map[string]interface{}{
+		"enabled":            cfg.Discovery.Enabled,
+		"embedding_model":    cfg.Discovery.EmbeddingModel,
+		"embedding_backend":  cfg.Discovery.EmbeddingBackend,
+		"local_model_status": cfg.Discovery.LocalModelStatus,
+		"pinned_skills":      cfg.Discovery.PinnedSkills,
+	}
+	// local_server_url is opt-in: empty stays the default (use the bundled
+	// server), a non-empty value is persisted so a user pointing at LM
+	// Studio (or a custom llama-server) doesn't have to re-set it on every
+	// run.
+	if cfg.Discovery.LocalServerURL != "" {
+		discoveryMap["local_server_url"] = cfg.Discovery.LocalServerURL
+	}
 	payload := map[string]interface{}{
 		"compact":     cfg.Compact,
 		"advisor":     cfg.Advisor,
 		"permissions": cfg.Permissions,
 		"security":    cfg.Security,
-		"discovery": map[string]interface{}{
-			"enabled":            cfg.Discovery.Enabled,
-			"embedding_model":    cfg.Discovery.EmbeddingModel,
-			"embedding_backend":  cfg.Discovery.EmbeddingBackend,
-			"local_model_status": cfg.Discovery.LocalModelStatus,
-			"pinned_skills":      cfg.Discovery.PinnedSkills,
-		},
+		"discovery":   discoveryMap,
 	}
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins

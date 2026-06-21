@@ -1,11 +1,28 @@
 <!doctype html>
 <html lang="en" class="dark">
   <head>
+    <!-- Runtime <base> injection. /rc can be exposed behind a tailscale
+         serve/funnel path prefix (e.g. /<sessionID>/session/<id>), which
+         tailscale strips before forwarding to the local server. The built
+         asset tags are emitted relative (vite base: "./"), so they only
+         resolve correctly when <base href> points at that same prefix. We
+         derive the prefix from location.pathname using the same rule as
+         api/client.ts (_basePath) and insert <base> BEFORE any asset tag is
+         parsed. Empty prefix (plain localhost) yields href="/". -->
+    <script>
+      (function () {
+        var m = location.pathname.match(/^(.*?)\/session\/[^/]+/);
+        var prefix = (m ? m[1] : "") + "/";
+        var base = document.createElement("base");
+        base.href = prefix;
+        document.head.appendChild(base);
+      })();
+    </script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ocode</title>
-    <script type="module" crossorigin src="/assets/index-ByYQL6G-.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BwWDnlES.css">
+    <script type="module" crossorigin src="./assets/index-CsFksK3p.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-BwWDnlES.css">
   </head>
   <body class="bg-zinc-900 text-zinc-100">
     <div id="root"></div>

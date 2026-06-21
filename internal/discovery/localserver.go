@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -50,26 +52,61 @@ func probeLocalServer(base, healthPath string) bool {
 	return len(models.Data) > 0 && models.Data[0].ID != ""
 }
 
+// LocalServerOptions tunes EnsureLocalServer's probe + spawn behavior.
+type LocalServerOptions struct {
+	// UserBaseURL, when set, is the first probe target — checked before the
+	// manifest port so the user can point at LM Studio (default :1234) or
+	// any pre-existing llama-server. The probe validates the /v1/models
+	// response shape (see probeLocalServer). Empty means "skip the
+	// user-URL probe and use the manifest port".
+	UserBaseURL string
+}
+
 // EnsureLocalServer guarantees a shared local embed server is running and returns
-// its base URL + embedding dimension. Probe-first (cross-process share); otherwise
-// download artifacts and spawn via the supplied supervised-spawn function. Singleton
-// within the process via localMu + localBase.
-func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setStatus func(string)) (string, int, error) {
+// its base URL + embedding dimension. Probe-first (cross-process share) in this
+// order:
+//
+//  1. opts.UserBaseURL (LM Studio, user-built llama-server) — if set + healthy.
+//  2. The manifest port (11457) — adopted if already answering, even if it
+//     was started by a different ocode process. The shared port means we
+//     don't have to download or spawn our own when another process did.
+//
+// Otherwise: download artifacts and spawn via the supplied supervised-spawn
+// function. Singleton within the process via localMu + localBase.
+func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setStatus func(string), opts LocalServerOptions) (string, int, error) {
 	man, ok := CurrentManifest()
 	if !ok {
 		return "", 0, fmt.Errorf("local embedding backend not supported on this platform (%s/%s)", goos(), goarch())
 	}
-	base := localBaseURL()
 
 	localMu.Lock()
 	defer localMu.Unlock()
 
-	if localBase != "" || probeLocalServer(base, man.HealthPath) {
+	// In-process fast path.
+	if localBase != "" {
+		return localBase, man.Dim, nil
+	}
+	// 1) User-supplied server takes priority (LM Studio :1234, custom
+	//    llama-server, etc.). We adopt any base URL whose /v1/models
+	//    endpoint returns a non-empty model list.
+	if opts.UserBaseURL != "" {
+		if probeLocalServer(opts.UserBaseURL, man.HealthPath) {
+			emitUserDiscoveryDebug("DISCOVERY", "adopted user embed server: "+opts.UserBaseURL)
+			localBase = opts.UserBaseURL
+			return localBase, man.Dim, nil
+		}
+		emitDiscoveryDebug("WARN", "user embed server did not respond at "+opts.UserBaseURL+" — falling back to bundled server")
+	}
+	// 2) Manifest port (cross-process share with other ocode instances).
+	base := localBaseURL()
+	if probeLocalServer(base, man.HealthPath) {
+		emitUserDiscoveryDebug("DISCOVERY", "adopted shared embed server: "+base)
 		localBase = base
-		return base, man.Dim, nil
+		return localBase, man.Dim, nil
 	}
 
 	// Download artifacts (idempotent; cached by sha).
+	emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("downloading %d artifact(s) for local embed server", len(man.Artifacts)))
 	if setStatus != nil {
 		setStatus("downloading")
 	}
@@ -79,7 +116,7 @@ func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setSta
 			if setStatus != nil {
 				setStatus("none")
 			}
-			return "", 0, fmt.Errorf("artifact %s: %w", a.Dest, err)
+			return "", 0, err
 		}
 	}
 
@@ -93,8 +130,24 @@ func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setSta
 		a = strings.ReplaceAll(a, "{port}", localServerPort)
 		argv[i] = shellQuote(a)
 	}
-	cmdline := strings.Join(argv, " ")
-	emitDiscoveryDebug("DISCOVERY", "spawning local embed server: "+cmdline)
+	// llama-server's release tarball puts the binary next to its sibling
+	// shared libraries (libllama.*, libggml.*). The dynamic loader needs
+	// DYLD_LIBRARY_PATH on macOS / LD_LIBRARY_PATH on Linux to find them
+	// when the binary is invoked via an absolute path that isn't in $PATH.
+	// Set the env var in the same `bash -c` line as the spawn — wrapping the
+	// command itself, not the wrapper, so it's scoped to llama-server.
+	libEnv := ""
+	if libDir := findLibDir(binDir); libDir != "" {
+		var name string
+		if runtime.GOOS == "darwin" {
+			name = "DYLD_LIBRARY_PATH"
+		} else {
+			name = "LD_LIBRARY_PATH"
+		}
+		libEnv = name + "=" + shellQuote(libDir) + " "
+	}
+	cmdline := libEnv + strings.Join(argv, " ")
+	emitUserDiscoveryDebug("DISCOVERY", "spawning local embed server: "+cmdline)
 	if err := spawn(cmdline); err != nil {
 		if setStatus != nil {
 			setStatus("none")
@@ -123,6 +176,39 @@ func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setSta
 // escaping embedded single quotes via the '\'' idiom.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// findLibDir returns the absolute path of the directory that contains
+// llama-server's sibling shared libraries. The llama.cpp release tarball
+// extracts into binDir/<version>/ (e.g. binDir/llama-b9747/) and puts both
+// the binary and the .dylib/.so files there. We detect this by globbing for
+// a directory under binDir that already contains the extracted binary — this
+// keeps the function version-agnostic (b9747, b9800, …) so the manifest only
+// needs to track the SHA, not the directory name. Returns "" if not found
+// (e.g. the binary hasn't been extracted yet, or a future release changes
+// the layout to a flat binDir). The caller treats "" as "no library path
+// needed".
+func findLibDir(binDir string) string {
+	// The most common case: a single versioned subdirectory. Walk one level
+	// down and pick the first directory that has llama-server inside.
+	entries, err := os.ReadDir(binDir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(binDir, e.Name())
+		if _, err := os.Stat(filepath.Join(candidate, "llama-server")); err == nil {
+			return candidate
+		}
+	}
+	// Fallback: maybe the binary was extracted directly into binDir.
+	if _, err := os.Stat(filepath.Join(binDir, "llama-server")); err == nil {
+		return binDir
+	}
+	return ""
 }
 
 // NewLocalEmbedder wraps the HTTP embedder transport pointed at the local server.

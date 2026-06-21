@@ -2,20 +2,35 @@ package discovery
 
 import "runtime"
 
-// Artifact is one downloadable file with integrity check.
+// ArchiveFormat tags a downloadable artifact as a compressed archive that must
+// be extracted to a single file (Dest) after download. Empty means a single
+// file download (no extraction).
+type ArchiveFormat string
+
+const (
+	ArchiveNone ArchiveFormat = "" // raw file (e.g. .gguf, .bin)
+	ArchiveGZ   ArchiveFormat = "tar.gz"
+)
+
+// Artifact is one downloadable file with integrity check. If Archive is set,
+// the downloaded bytes are a tar.gz that is extracted to destDir preserving
+// the archive's internal layout (e.g. "llama-b9747/llama-server" extracted
+// from llama-b9747-bin-macos-arm64.tar.gz lands at
+// destDir/llama-b9747/llama-server). Dest is used to find the entry inside
+// the archive and to chmod +x the resulting file when Exec is true.
 type Artifact struct {
-	URL    string
-	SHA256 string
-	// Dest is the filename under the local cache dir (Task 18 resolves the dir).
-	Dest string
-	Exec bool // chmod +x after download (server binaries)
+	URL     string
+	SHA256  string        // SHA256 of the downloaded bytes (the tarball when Archive is set)
+	Dest    string        // Basename to look for inside the archive; or final filename for raw downloads
+	Exec    bool          // chmod +x after download (server binaries)
+	Archive ArchiveFormat // extraction format; "" = single file
 }
 
 // ServerManifest describes how to obtain and launch the local embed server for one
 // platform, and how to talk to it.
 type ServerManifest struct {
 	OS, Arch string
-	ModelID  string // e.g. "local/lfm2-5-retriever"
+	ModelID  string // e.g. "local/bge-m3"
 	Dim      int
 	// Artifacts lists the files to download. The first one is conventionally the
 	// server binary (Exec=true) when the server is a single executable; the
@@ -29,52 +44,52 @@ type ServerManifest struct {
 	EmbedPath  string // e.g. "/v1/embeddings"
 }
 
-// localManifests are filled from Task 17 research. One entry per supported
-// platform. URLs and SHAs are platform-specific release artifacts and are
-// left as TODO placeholders — they are verified by the same
-// "research-and-pin" workflow that produces the LFM2-5 model card itself,
-// and the artifact downloader (EnsureArtifact) refuses to download when the
-// URL is empty, so a half-filled manifest fails closed.
+// localManifests pin concrete llama.cpp release tarballs (b9747) per supported
+// platform and the BGE-M3 Q4_K_M GGUF. The tarball is verified against its
+// SHA256, then extracted into binDir preserving the upstream "llama-b9747/"
+// prefix — LaunchArgv references that subdir so the binary's bundled sibling
+// libraries (libllama.*, libggml.*, …) resolve via DYLD_LIBRARY_PATH /
+// LD_LIBRARY_PATH (set at spawn, see localserver.go).
 //
-// Research notes (2026-06-21):
+// Updating: bump b9747 → newer llama.cpp release and recompute SHA256 of each
+// new tarball. Run `shasum -a 256 <tarball>` against the URL below; pinning
+// the SHA is the integrity guarantee that keeps the download safe.
 //
-//  1. MODEL: LiquidAI/LFM2.5-Embedding-350M
-//     - 354M parameter dense bi-encoder, multilingual retrieval
-//     - 1024-d CLS-pooled embedding vector (Dim=1024)
-//     - License: lfm1.0
-//     - MLX build: sahilchachra/LFM2.5-Embedding-350M-fp16 (and -mxfp4)
-//       — both ship a custom mlx_lfm2_encoder.py loader (causal LFM2 loaders
-//       produce wrong embeddings; verified ≥0.999 cosine vs. transformers).
-//     - GGUF build: pin a LiquidAI-published GGUF or a community quant.
+// The model: BAAI/bge-m3 via bbvch-ai/bge-m3-GGUF:Q4_K_M. bge-m3 is the
+// production-standard multilingual embedding (100+ languages, MTEB ~63 avg,
+// 1024-d, MIT license) and has explicit llama.cpp support in its HF model
+// card (`llama-server -hf bbvch-ai/bge-m3-GGUF:Q4_K_M`). It uses the BERT
+// architecture, which upstream llama.cpp b9747 supports (LLM_ARCH_BERT).
 //
-//  2. SERVER: ggml-org/llama.cpp `llama-server`
-//     - Cross-platform (macOS arm64/amd64, linux amd64) single binary.
-//     - OpenAI-compatible POST /v1/embeddings route built in.
-//     - Health probe: GET /v1/models.
-//     - Launch args: `llama-server -m {model} --port {port} --embeddings`
-//     - MLX-specific acceleration is NOT used: the model runs via llama.cpp
-//       everywhere; on Apple Silicon, llama.cpp ships an MLX/Metal backend
-//       (and CPU fallback). Using llama-server universally keeps the manifest
-//       uniform and the artifacts small (no separate Python wheel + per-arch
-//       wheel downloads).
-//
-//  3. ARTIFACT RESOLUTION: pinned at release time. The maintainer fills in
-//     the URL + SHA from the chosen llama.cpp release tarball (per-arch
-//     binary inside) and the chosen LFM2.5 GGUF before tagging a build.
-//     The downloader (EnsureArtifact) verifies the SHA and writes atomically.
+// We previously pinned LFM2.5-Embedding-350M (Dim 1024) but its
+// `lfm2-bidir` architecture is not in upstream llama.cpp — only a community
+// fork has the support, so the bundled server would fail to load the model.
+// bge-m3 was chosen as the swap because it has comparable MTEB quality, more
+// languages, an MIT license, and a first-class llama.cpp path.
 var localManifests = []ServerManifest{
 	{
 		OS: "darwin", Arch: "arm64",
-		ModelID: "local/lfm2-5-retriever", Dim: 1024,
+		ModelID: "local/bge-m3", Dim: 1024,
 		Artifacts: []Artifact{
-			// TODO: pin llama.cpp release tarball URL + SHA (extract llama-server
-			// binary from `llama-<ver>-bin-macos-arm64.zip`).
-			{URL: "", SHA256: "", Dest: "llama-server", Exec: true},
-			// TODO: pin LFM2.5-Embedding-350M GGUF (e.g. a Q4_K_M quant) URL + SHA.
-			{URL: "", SHA256: "", Dest: "lfm2-5-embedding-350m.gguf"},
+			// llama.cpp b9747 — macOS Apple Silicon.
+			{
+				URL:     "https://github.com/ggml-org/llama.cpp/releases/download/b9747/llama-b9747-bin-macos-arm64.tar.gz",
+				SHA256:  "15e1a57690addafa48309760df81c31457e2112dbfa05d02a5e2580381850641",
+				Dest:    "llama-server",
+				Exec:    true,
+				Archive: ArchiveGZ,
+			},
+			// BGE-M3, Q4_K_M quant (bbvch-ai/bge-m3-GGUF, MIT). 1024-d, 100+
+			// languages, MTEB ~63. Auto-detects pooling from GGUF metadata
+			// so no --pooling flag is needed.
+			{
+				URL:    "https://huggingface.co/bbvch-ai/bge-m3-GGUF/resolve/main/bge-m3-q4_k_m.gguf",
+				SHA256: "d164fe641fe8aecc9da3592b5f1ca46e9c97923959661a5f815bbc8e72704fb2",
+				Dest:   "bge-m3-q4_k_m.gguf",
+			},
 		},
-		LaunchArgv: []string{"{bin}/llama-server",
-			"-m", "{bin}/lfm2-5-embedding-350m.gguf",
+		LaunchArgv: []string{"{bin}/llama-b9747/llama-server",
+			"-m", "{bin}/bge-m3-q4_k_m.gguf",
 			"--port", "{port}",
 			"--embeddings",
 			"--host", "127.0.0.1"},
@@ -83,15 +98,24 @@ var localManifests = []ServerManifest{
 	},
 	{
 		OS: "darwin", Arch: "amd64",
-		ModelID: "local/lfm2-5-retriever", Dim: 1024,
+		ModelID: "local/bge-m3", Dim: 1024,
 		Artifacts: []Artifact{
-			// TODO: pin llama.cpp darwin/amd64 release artifact.
-			{URL: "", SHA256: "", Dest: "llama-server", Exec: true},
-			// TODO: pin LFM2.5-Embedding-350M GGUF.
-			{URL: "", SHA256: "", Dest: "lfm2-5-embedding-350m.gguf"},
+			// llama.cpp b9747 — macOS Intel.
+			{
+				URL:     "https://github.com/ggml-org/llama.cpp/releases/download/b9747/llama-b9747-bin-macos-x64.tar.gz",
+				SHA256:  "7a465af113733e130a2905572dd9a4596d158a9ee7bd2f4b31c219d70c31b13e",
+				Dest:    "llama-server",
+				Exec:    true,
+				Archive: ArchiveGZ,
+			},
+			{
+				URL:    "https://huggingface.co/bbvch-ai/bge-m3-GGUF/resolve/main/bge-m3-q4_k_m.gguf",
+				SHA256: "d164fe641fe8aecc9da3592b5f1ca46e9c97923959661a5f815bbc8e72704fb2",
+				Dest:   "bge-m3-q4_k_m.gguf",
+			},
 		},
-		LaunchArgv: []string{"{bin}/llama-server",
-			"-m", "{bin}/lfm2-5-embedding-350m.gguf",
+		LaunchArgv: []string{"{bin}/llama-b9747/llama-server",
+			"-m", "{bin}/bge-m3-q4_k_m.gguf",
 			"--port", "{port}",
 			"--embeddings",
 			"--host", "127.0.0.1"},
@@ -100,15 +124,24 @@ var localManifests = []ServerManifest{
 	},
 	{
 		OS: "linux", Arch: "amd64",
-		ModelID: "local/lfm2-5-retriever", Dim: 1024,
+		ModelID: "local/bge-m3", Dim: 1024,
 		Artifacts: []Artifact{
-			// TODO: pin llama.cpp linux/amd64 release artifact.
-			{URL: "", SHA256: "", Dest: "llama-server", Exec: true},
-			// TODO: pin LFM2.5-Embedding-350M GGUF.
-			{URL: "", SHA256: "", Dest: "lfm2-5-embedding-350m.gguf"},
+			// llama.cpp b9747 — Linux x86_64 (Ubuntu glibc build).
+			{
+				URL:     "https://github.com/ggml-org/llama.cpp/releases/download/b9747/llama-b9747-bin-ubuntu-x64.tar.gz",
+				SHA256:  "b865de21024c91432b6b1f29e2e2f8c3797204315b2914d43fa86d1999c8ef8c",
+				Dest:    "llama-server",
+				Exec:    true,
+				Archive: ArchiveGZ,
+			},
+			{
+				URL:    "https://huggingface.co/bbvch-ai/bge-m3-GGUF/resolve/main/bge-m3-q4_k_m.gguf",
+				SHA256: "d164fe641fe8aecc9da3592b5f1ca46e9c97923959661a5f815bbc8e72704fb2",
+				Dest:   "bge-m3-q4_k_m.gguf",
+			},
 		},
-		LaunchArgv: []string{"{bin}/llama-server",
-			"-m", "{bin}/lfm2-5-embedding-350m.gguf",
+		LaunchArgv: []string{"{bin}/llama-b9747/llama-server",
+			"-m", "{bin}/bge-m3-q4_k_m.gguf",
 			"--port", "{port}",
 			"--embeddings",
 			"--host", "127.0.0.1"},
