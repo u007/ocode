@@ -22,6 +22,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/ide"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/session"
@@ -2334,6 +2335,98 @@ func TestHandleModelCmdSwitchNoticeStaysOutOfLLMPayload(t *testing.T) {
 		if msg.Content == notice {
 			t.Fatalf("expected switch notice to stay out of llm snapshot, got %#v", snap)
 		}
+	}
+}
+
+// TestAppendDiscoveryNoticeIsTransientAndSkipsLLM verifies that the
+// user-facing discovery event promoter (called from the debugLogMsg handler
+// when a new DebugLog entry has UserFacing=true) adds a message that is
+// visible on the chat tab but is NOT included in the LLM payload or the
+// persisted session. The user asked for "show in the messages window, do
+// not send to llm" — this is the contract that holds.
+func TestAppendDiscoveryNoticeIsTransientAndSkipsLLM(t *testing.T) {
+	debuglog.Log.Clear()
+	t.Cleanup(debuglog.Log.Clear)
+
+	m := model{}
+	m.viewport = fastviewport.New(80, 20) // renderTranscript needs a viewport
+	m.appendDiscoveryNotice("downloading llama-server …")
+
+	if len(m.messages) != 1 {
+		t.Fatalf("expected one notice, got %d", len(m.messages))
+	}
+	got := m.messages[0]
+	if got.role != roleAssistant {
+		t.Fatalf("expected assistant role, got %v", got.role)
+	}
+	if !got.transient {
+		t.Fatal("discovery notice must be transient (not persisted)")
+	}
+	if !got.skipLLM {
+		t.Fatal("discovery notice must skip LLM (not sent in prompt)")
+	}
+	if !strings.Contains(got.text, "downloading llama-server") {
+		t.Fatalf("expected message text to contain the original text, got %q", got.text)
+	}
+
+	// LLM snapshot must not contain the notice.
+	snap, _ := m.buildAgentMessagesSnapshot()
+	for _, msg := range snap {
+		if strings.Contains(msg.Content, "downloading llama-server") {
+			t.Fatalf("expected discovery notice to stay out of llm snapshot, got %#v", snap)
+		}
+	}
+	// Persisted snapshot must not contain the notice.
+	for _, msg := range m.persistedAgentMessages() {
+		if strings.Contains(msg.Content, "downloading llama-server") {
+			t.Fatalf("expected discovery notice to stay out of persisted messages, got %#v", m.persistedAgentMessages())
+		}
+	}
+}
+
+// TestDebugLogMsgPromotesOnlyNewUserFacingEntries verifies the
+// debugLogMsg handler promotes only entries added since the last tick —
+// without this guard, a tick that re-snapshots would re-publish the same
+// downloads on every subsequent log event for the rest of the session.
+func TestDebugLogMsgPromotesOnlyNewUserFacingEntries(t *testing.T) {
+	debuglog.Log.Clear()
+	t.Cleanup(debuglog.Log.Clear)
+
+	m := model{}
+	m.viewport = fastviewport.New(80, 20)
+	m.lastPromotedLogIdx = 0
+	// First tick: no log entries → no notice.
+	out, _ := m.Update(debugLogMsg{})
+	m = out.(model)
+	if len(m.messages) != 0 {
+		t.Fatalf("first tick should not promote, got %d", len(m.messages))
+	}
+	// Append two entries, one user-facing.
+	debuglog.Log.Append(debuglog.Entry{Kind: debuglog.KindDiscovery, Message: "internal warm log", UserFacing: false})
+	debuglog.Log.Append(debuglog.Entry{Kind: debuglog.KindDiscovery, Message: "downloading llama-server …", UserFacing: true})
+	// Second tick: promote only the new user-facing one.
+	out, _ = m.Update(debugLogMsg{})
+	m = out.(model)
+	notices := 0
+	for _, msg := range m.messages {
+		if msg.transient && strings.Contains(msg.text, "downloading") {
+			notices++
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("expected exactly one promoted notice, got %d (messages: %#v)", notices, m.messages)
+	}
+	// Third tick: no new entries → no new promotion.
+	out, _ = m.Update(debugLogMsg{})
+	m = out.(model)
+	notices2 := 0
+	for _, msg := range m.messages {
+		if msg.transient && strings.Contains(msg.text, "downloading") {
+			notices2++
+		}
+	}
+	if notices2 != 1 {
+		t.Fatalf("re-tick re-promoted; expected 1 notice, got %d", notices2)
 	}
 }
 

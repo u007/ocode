@@ -22,6 +22,12 @@ const (
 type Entry struct {
 	Kind    EntryKind
 	Message string
+	// UserFacing tags entries that should also be surfaced in the chat
+	// transcript as a transient notice (visible to the user, not sent to
+	// the LLM). Used for download progress events (e.g. "downloading
+	// llama-server …") so a long artifact download doesn't sit silent on
+	// the Log tab while the user is on the chat tab waiting for a reply.
+	UserFacing bool
 }
 
 const cap = 500

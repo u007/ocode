@@ -38,6 +38,11 @@ func TestTailscaleURLWithPathPrefix(t *testing.T) {
 		{name: "preserves port", baseURL: "https://alice.ts.net:443/", pathPrefix: "/sess-123", want: "https://alice.ts.net:443/sess-123"},
 		{name: "empty prefix", baseURL: "https://alice.ts.net", pathPrefix: "", want: "https://alice.ts.net"},
 		{name: "empty base", baseURL: "", pathPrefix: "/sess-123", want: ""},
+		// Regression: tailscale output can echo a sibling session's existing
+		// --set-path; we must replace it, not append (which doubled the prefix
+		// and produced an unroutable URL → blank /rc page).
+		{name: "replaces stale sibling path", baseURL: "https://alice.ts.net/old-sess", pathPrefix: "/sess-123", want: "https://alice.ts.net/sess-123"},
+		{name: "idempotent when already correct", baseURL: "https://alice.ts.net/sess-123", pathPrefix: "/sess-123", want: "https://alice.ts.net/sess-123"},
 	}
 
 	for _, c := range cases {

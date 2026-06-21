@@ -651,6 +651,13 @@ type model struct {
 	logViewport           viewport.Model
 	permViewport          viewport.Model
 	logEntries            []DebugEntry
+	// lastPromotedLogIdx is the index in DebugLog.Snapshot() up to which we
+	// have already considered promoting entries to the chat transcript
+	// (transient, skipLLM notices). New entries beyond this index whose
+	// UserFacing flag is set are appended as transient transcript messages
+	// so the user sees download progress on the chat tab. Reset whenever
+	// the user clears the log or a new session starts.
+	lastPromotedLogIdx    int
 	logSearch             string
 	logKindFilter         map[DebugEntryKind]bool
 	logStatus             string
@@ -859,6 +866,10 @@ type model struct {
 	rcTailscaleProc *exec.Cmd
 	// rcTailscaleURL is the public tailscale URL shown to the user.
 	rcTailscaleURL string
+	// rcTailscalePath is the per-session --set-path prefix we registered with
+	// tailscale (e.g. "/<sessionID>"), stored so /rc off can remove exactly our
+	// own mount instead of leaking a stale route that breaks future sessions.
+	rcTailscalePath string
 
 	// ide integration (see internal/ide). When ideMode == config.IDEModeClaude
 	// the ideClient streams VS Code editor selection / open-tabs into the TUI
@@ -2115,7 +2126,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case debugLogMsg:
+		// Take the new snapshot BEFORE promoting so lastPromotedLogIdx
+		// stays a valid index into entries we just saw. If the log was
+		// cleared since the last tick, lastPromotedLogIdx will overshoot
+		// the new length and we clamp to 0 (the "everything is new"
+		// case) — duplicate promotion is impossible because each entry
+		// is at most promoted once per tick.
 		m.logEntries = DebugLog.Snapshot()
+		if m.lastPromotedLogIdx > len(m.logEntries) {
+			m.lastPromotedLogIdx = 0
+		}
+		for _, e := range m.logEntries[m.lastPromotedLogIdx:] {
+			if !e.UserFacing {
+				continue
+			}
+			m.appendDiscoveryNotice(e.Message)
+		}
+		m.lastPromotedLogIdx = len(m.logEntries)
 		if m.activeTab == tabLog {
 			atBottom := m.logViewport.AtBottom() || m.logViewport.TotalLineCount() == 0
 			m.refreshLogViewport()
@@ -4242,6 +4269,9 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.logViewport.ScrollUp(1)
 	case "c":
 		DebugLog.Clear()
+		// Resync our promotion cursor with the (now-empty) log so the next
+		// snapshot's first entry is treated as new.
+		m.lastPromotedLogIdx = 0
 		m.logEntries = nil
 		m.logSearch = ""
 		m.logStatus = ""
@@ -5725,7 +5755,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/paths" ||
 		cmd == "/rc" || cmd == "/remote-control" ||
 		cmd == "/search" || cmd == "/find" ||
-		cmd == "/discovery" || cmd == "/discover"
+		cmd == "/discover"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -6250,8 +6280,13 @@ func (m *model) handleTitleCmd(args []string) tea.Cmd {
 func (m *model) setDiscoveryEnabled(on bool) error {
 	if on {
 		dc := m.config.Ocode.Discovery
-		if _, err := discovery.ResolveEmbedder(dc.EmbeddingBackend, dc.EmbeddingModel, os.Getenv); err != nil {
-			return err
+		// The local backend is constructed lazily by the agent's ensureDiscovery
+		// (which has access to process spawning). ResolveEmbedder can't validate
+		// it, so skip the check for local.
+		if dc.EmbeddingBackend != "local" {
+			if _, err := discovery.ResolveEmbedder(dc.EmbeddingBackend, dc.EmbeddingModel, os.Getenv); err != nil {
+				return err
+			}
 		}
 	}
 	if err := config.SaveDiscoveryEnabled(on); err != nil {
@@ -6262,33 +6297,6 @@ func (m *model) setDiscoveryEnabled(on bool) error {
 		m.agent.ResetDiscovery()
 	}
 	return nil
-}
-
-func (m *model) handleDiscoveryCmd(args []string) {
-	if len(args) == 0 {
-		status := "off"
-		if m.config.Ocode.Discovery.Enabled {
-			status = "on"
-		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery is " + status + "."})
-		return
-	}
-	switch strings.ToLower(args[0]) {
-	case "on", "true", "yes":
-		if err := m.setDiscoveryEnabled(true); err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot enable discovery: " + err.Error()})
-			return
-		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery: enabled"})
-	case "off", "false", "no":
-		if err := m.setDiscoveryEnabled(false); err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
-			return
-		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery: disabled"})
-	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discovery [on|off]"})
-	}
 }
 
 func (m *model) setEmbeddingModel(id string) error {
@@ -6344,6 +6352,20 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 		return nil
 	}
 	switch strings.ToLower(args[0]) {
+	case "enable", "true", "yes", "on":
+		if err := m.setDiscoveryEnabled(true); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Cannot enable discovery: " + err.Error()})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery: enabled"})
+		return nil
+	case "disable", "false", "no", "off":
+		if err := m.setDiscoveryEnabled(false); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery: disabled"})
+		return nil
 	case "model":
 		if len(args) > 1 {
 			if err := m.setEmbeddingModel(args[1]); err != nil {
@@ -6356,7 +6378,7 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 		m.openEmbeddingModelPicker()
 		return nil
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover [status|model [name]]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover [enable|disable|status|model [name]]"})
 		return nil
 	}
 }
@@ -9751,6 +9773,28 @@ func tailscaleReset() {
 	}
 }
 
+// removeTailscaleSetPath removes a single per-session --set-path mount from the
+// tailscale serve/funnel config. pathPrefix is the value originally passed to
+// --set-path (e.g. "/<sessionID>"). We try both funnel and serve because we
+// don't track which one succeeded at start time; the unused one is a harmless
+// no-op. Best-effort: errors are logged, not surfaced.
+func removeTailscaleSetPath(pathPrefix string) {
+	if pathPrefix == "" {
+		return
+	}
+	tailscalePath, err := exec.LookPath("tailscale")
+	if err != nil {
+		return
+	}
+	for _, cmd := range []string{"funnel", "serve"} {
+		c := exec.Command(tailscalePath, cmd, "--set-path", pathPrefix, "off")
+		if err := c.Run(); err != nil {
+			// Expected for whichever mode wasn't in use; log at debug-ish level.
+			log.Printf("tailscale %s --set-path %s off: %v", cmd, pathPrefix, err)
+		}
+	}
+}
+
 // tailscaleDNSName returns the tailnet DNS name (e.g. "host.tailnet.ts.net")
 // from tailscale status, or empty string on failure.
 func tailscaleDNSName(tailscalePath string) string {
@@ -9791,15 +9835,12 @@ func tailscaleURLWithPathPrefix(baseURL, pathPrefix string) string {
 		return baseURL + pathPrefix
 	}
 
-	if u.Path == pathPrefix || strings.HasPrefix(u.Path, pathPrefix+"/") {
-		return u.String()
-	}
-
-	if u.Path == "" || u.Path == "/" {
-		u.Path = pathPrefix
-	} else {
-		u.Path = strings.TrimRight(u.Path, "/") + pathPrefix
-	}
+	// Mount at exactly pathPrefix. tailscale serve/funnel output can carry a
+	// sibling session's existing --set-path entry in the URL line we parse;
+	// appending to it would yield a doubled, unroutable prefix
+	// (…/<stale>/<ours>) that tailscale longest-prefix-matches to the stale
+	// route, breaking the page. We own the path, so replace whatever was parsed.
+	u.Path = pathPrefix
 	return u.String()
 }
 
@@ -10648,6 +10689,22 @@ func (m *model) maybeScrollTranscriptToBottom() {
 	if m.shouldAutoScrollTranscript() {
 		m.viewport.GotoBottom()
 	}
+}
+
+// appendDiscoveryNotice adds a transient, no-LLM message to the chat
+// transcript for events the user is actively waiting on (artifact
+// downloads, model-server spawn, etc.). transient keeps it out of session
+// persistence; skipLLM keeps it out of the prompt. Called from the
+// debugLogMsg handler when a new user-facing log entry arrives.
+func (m *model) appendDiscoveryNotice(text string) {
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7"))
+	m.messages = append(m.messages, message{
+		role:      roleAssistant,
+		text:      style.Render("⏳ " + text),
+		transient: true,
+		skipLLM:   true,
+	})
+	m.rerenderTranscriptAndMaybeScroll()
 }
 
 // scrollToCompactionBanner scrolls the viewport so the compaction summary
@@ -15172,6 +15229,8 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 				if tsURL != "" {
 					tailscaleURL = buildRCSessionURL(tsURL, m.sessionID, token)
 					url = tailscaleURL
+					// Remember our mount so /rc off can remove exactly this path.
+					m.rcTailscalePath = sanitizeTailscalePath(m.sessionID)
 				}
 				m.rcTailscaleProc = tsProc
 				if tsHint != "" {
@@ -15193,8 +15252,9 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 //
 // Note: we do NOT call tailscaleReset() here because that is a global
 // operation that would tear down ALL sessions' tailscale exposure on this
-// node. Each session's tailscale process is killed individually, and its
-// --set-path entry becomes a harmless stale route (the server is gone).
+// node. Instead we remove only this session's own --set-path mount, so stale
+// routes don't accumulate (a leaked sibling route gets longest-prefix-matched
+// by tailscale and silently breaks the next session's /rc page).
 func (m *model) stopRCServer() {
 	// Kill tailscale serve/funnel process.
 	if m.rcTailscaleProc != nil {
@@ -15202,6 +15262,12 @@ func (m *model) stopRCServer() {
 			log.Printf("rc: kill tailscale process: %v", err)
 		}
 		m.rcTailscaleProc = nil
+	}
+	// Remove our own tailscale --set-path mount (best-effort; the process is
+	// detached via --bg so killing it does not clear the serve/funnel config).
+	if m.rcTailscalePath != "" {
+		removeTailscaleSetPath(m.rcTailscalePath)
+		m.rcTailscalePath = ""
 	}
 	// Close the listener.
 	if m.rcLn != nil {
