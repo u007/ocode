@@ -175,6 +175,60 @@ project prompt
 	}
 }
 
+func TestReloadMarkdownAgentsHonorsEnabledPluginsAndProjectRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	projectRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectRoot, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(projectRoot, "workspace", "nested")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatal(err)
+	}
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(nested); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	pluginRoot := filepath.Join(projectRoot, ".opencode", "plugins", "sample")
+	agentsDir := filepath.Join(pluginRoot, "agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pluginRoot, "plugin.json"), []byte(`{"name":"sample"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	content := `---
+description: project plugin agent
+mode: subagent
+---
+project plugin prompt
+`
+	if err := os.WriteFile(filepath.Join(agentsDir, "sample-agent.md"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := NewAgentRegistry()
+	reg.ReloadMarkdownAgents(map[string]bool{"sample": true})
+	if got := reg.Get("sample-agent"); got == nil {
+		t.Fatal("expected enabled project plugin agent to load from the project root")
+	} else if got.SystemPrompt != "project plugin prompt\n" {
+		t.Fatalf("unexpected agent prompt: %q", got.SystemPrompt)
+	}
+
+	reg.ReloadMarkdownAgents(map[string]bool{"sample": false})
+	if got := reg.Get("sample-agent"); got != nil {
+		t.Fatalf("expected disabled plugin agent to stay hidden, got %#v", got)
+	}
+}
+
 func TestLoadMarkdownAgentsCustomOverrideBuiltin(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

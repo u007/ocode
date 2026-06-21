@@ -55,6 +55,7 @@ func refreshCustomCommands(cfg *config.Config) {
 		cmd := &loadedCustomCommands[i]
 		customCommandLookup["/"+cmd.Name] = cmd
 	}
+	agent.ApplyAgentConfig(cfg)
 }
 
 func init() {

@@ -66,7 +66,10 @@ func (e *httpEmbedder) Embed(ctx context.Context, texts []string, _ EmbedKind) (
 	if i := indexByte(bareModel, '/'); i >= 0 {
 		bareModel = bareModel[i+1:]
 	}
-	body, _ := json.Marshal(map[string]interface{}{"model": bareModel, "input": texts})
+	body, err := json.Marshal(map[string]interface{}{"model": bareModel, "input": texts})
+	if err != nil {
+		return nil, fmt.Errorf("marshal embeddings request: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.model.Endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("build embeddings request: %w", err)

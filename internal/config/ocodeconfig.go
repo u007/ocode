@@ -107,6 +107,10 @@ type OcodeConfig struct {
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
 	MaxImageDim int `json:"image_max_dim,omitempty"`
+	// RecapTimeoutSeconds controls the timeout for /recap summary generation.
+	// Defaults to 120 if not configured.
+	RecapTimeoutSeconds int `json:"recap_timeout_seconds,omitempty"`
+
 	// UploadDir overrides the default directory used by the /upload and
 	// /api/uploads endpoints. When empty, files are stored under
 	// <workDir>/.ocode/uploads.
@@ -259,6 +263,7 @@ type ocodeConfigFile struct {
 	IDEMode           string               `json:"ide_mode,omitempty"`
 	SmallModel        string               `json:"small_model,omitempty"`
 	SmallModelEnabled *bool                `json:"small_model_enabled,omitempty"`
+	RecapTimeoutSeconds *int                `json:"recap_timeout_seconds,omitempty"`
 	CommitMsgModel    string               `json:"commit_msg_model,omitempty"`
 	CommitMsgPrompt   string               `json:"commit_msg_prompt,omitempty"`
 	TUI               tuiConfigFile        `json:"tui"`
@@ -308,9 +313,10 @@ func defaultOcodeConfig() OcodeConfig {
 		Permissions:       defaultPermissionConfig(),
 		MemoryEnabled:     true,
 		SmallModelEnabled: true,
-		Security:          defaultSecurityConfig(),
-		Discovery:         defaultDiscoveryConfig(),
-		TUI:               defaultTUIConfig(),
+		Security:            defaultSecurityConfig(),
+		Discovery:           defaultDiscoveryConfig(),
+		RecapTimeoutSeconds: 120,
+		TUI:                 defaultTUIConfig(),
 		Extra:             make(map[string]json.RawMessage),
 	}
 }
@@ -499,6 +505,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.CommitMsgPrompt = file.CommitMsgPrompt
 		}
 		delete(raw, "commit_msg_prompt")
+	}
+
+	if _, ok := raw["recap_timeout_seconds"]; ok {
+		if file.RecapTimeoutSeconds != nil {
+			cfg.RecapTimeoutSeconds = *file.RecapTimeoutSeconds
+		}
+		delete(raw, "recap_timeout_seconds")
 	}
 
 	if _, ok := raw["memory_enabled"]; ok {
@@ -810,7 +823,16 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if err := snapshot.Backup(path); err != nil {
 		return fmt.Errorf("backup ocode config: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	// Atomic write: a crash mid-write must not truncate the live config (every
+	// saver re-reads this file, so a corrupt write would cascade to defaults).
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return fmt.Errorf("write ocode config tmp: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename ocode config: %w", err)
+	}
+	return nil
 }
 
 func SaveOcodePermissions(permissions PermissionConfig) error {

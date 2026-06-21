@@ -142,7 +142,21 @@ func (a *Agent) discoveryDocs() []discovery.Doc {
 }
 ```
 
-Replace `injectDiscoveryContext` (from Part 07) with the skill-aware version:
+Replace `injectDiscoveryContext` (from Part 07) with the skill-aware,
+**volatility-split** version.
+
+**Why the split (prompt cache):** ocode's Anthropic builder
+(`chatAnthropic` → `collectAndRemoveSystemMessages`) hoists *every* `system`-role
+message — tail ones included — into the top-level `system` field, which carries
+`cache_control`. So a `system`-role tail message rides the **cached** system
+block, not the uncached suffix; any per-turn change to it busts the whole cached
+system prompt. The injector therefore emits the **stable** part (contract + name
+index, a function of the doc-*set* only) as `system`-role, and the **volatile**
+part (attached-skill full descriptions, which grow with the sticky set) as a
+`user`-role message that stays in the uncached suffix and coalesces with the
+current user turn. The stable/volatile rendering is a pure helper
+(`renderDiscoveryContext`) so the cache invariant — `sys` is independent of which
+items are attached — is unit-testable without the filesystem skill loader.
 
 ```go
 func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
@@ -150,69 +164,99 @@ func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 		return messages // off → no-op, byte-identical to today
 	}
 	active := a.disco != nil && a.disco.enabled
-	var b strings.Builder
 
 	if !active {
 		// Fail-open: LoadContext suppressed the catalog (config flag on), but
-		// discovery isn't actually running — re-emit the full skill catalog so
-		// skills are never lost. MCP tools are all attached (gate off).
+		// discovery isn't actually running — re-emit the full skill catalog
+		// (system-role, stable) so skills are never lost. MCP all attached.
 		if cat := skill.BuildCatalog(); cat != "" {
-			b.WriteString(cat)
+			return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + cat})
 		}
-		if b.Len() == 0 {
-			return messages
-		}
-		return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + b.String()})
+		return messages
 	}
 
-	docs := a.discoveryDocs() // sorted; skills + MCP
-	b.WriteString(discoveryPromptContract)
+	sysContent, volContent := renderDiscoveryContext(a.discoveryDocs(), a.disco.session.IsAttached)
+	messages = append(messages, Message{Role: "system", Content: sysContent})
+	if volContent != "" {
+		messages = append(messages, Message{Role: "user", Content: volContent})
+	}
+	return messages
+}
 
-	b.WriteString("\n\nAvailable MCP tools (names only — not all loaded):\n")
+// renderDiscoveryContext splits discovery context by volatility (see "Why the
+// split" above). sysContent is a function of the doc-SET only (cache-stable);
+// volContent holds attached-skill descriptions (per-turn-volatile).
+func renderDiscoveryContext(docs []discovery.Doc, isAttached func(id string) bool) (sysContent, volContent string) {
+	var sys strings.Builder
+	sys.WriteString(promptDiscoveryMarker)
+	sys.WriteString("\n")
+	sys.WriteString(discoveryPromptContract)
+	sys.WriteString("\n\nAvailable MCP tools (names only — not all loaded):\n")
 	for _, d := range docs {
-		if d.Kind != "mcp" {
-			continue
+		if d.Kind == "mcp" {
+			writeIndexLine(&sys, d)
 		}
-		b.WriteString("- ")
-		b.WriteString(d.Name)
-		if h := shortHint(d.Text); h != "" {
-			b.WriteString(" — ")
-			b.WriteString(h)
-		}
-		b.WriteString("\n")
 	}
-
-	b.WriteString("\nAvailable skills (names only — load full detail with the skill tool):\n")
+	sys.WriteString("\nAvailable skills (names only — load full detail with the skill tool):\n")
 	for _, d := range docs {
-		if d.Kind != "skill" {
-			continue
+		if d.Kind == "skill" {
+			writeIndexLine(&sys, d)
 		}
-		b.WriteString("- ")
-		b.WriteString(d.Name)
-		if h := shortHint(d.Text); h != "" {
-			b.WriteString(" — ")
-			b.WriteString(h)
-		}
-		b.WriteString("\n")
 	}
 
-	// Full descriptions for attached skills only.
 	var attachedSkills []string
 	for _, d := range docs {
-		if d.Kind == "skill" && a.disco.session.IsAttached(d.ID) {
+		if d.Kind == "skill" && isAttached(d.ID) {
 			attachedSkills = append(attachedSkills, d.Text)
 		}
 	}
 	if len(attachedSkills) > 0 {
-		b.WriteString("\nRelevant skills for this task:\n")
+		var vol strings.Builder
+		vol.WriteString(promptDiscoveryMarker)
+		vol.WriteString(" relevant skills for this task (you may use these inline):\n")
 		for _, s := range attachedSkills {
-			b.WriteString("- ")
-			b.WriteString(s)
-			b.WriteString("\n")
+			vol.WriteString("- ")
+			vol.WriteString(s)
+			vol.WriteString("\n")
 		}
+		volContent = vol.String()
 	}
+	return sys.String(), volContent
+}
 
-	return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + b.String()})
+func writeIndexLine(b *strings.Builder, d discovery.Doc) {
+	b.WriteString("- ")
+	b.WriteString(d.Name)
+	if h := shortHint(d.Text); h != "" {
+		b.WriteString(" — ")
+		b.WriteString(h)
+	}
+	b.WriteString("\n")
+}
+```
+
+Add the cache-invariant test alongside the existing ones:
+
+```go
+func TestRenderDiscoverySplitIsCacheStable(t *testing.T) {
+	const pdfFull = "pdf: manipulate pdf documents, fill forms, merge, split, and extract pages from archives"
+	const pdfTail = "extract pages from archives"
+	docs := []discovery.Doc{
+		{ID: "mcp:Notion/search", Kind: "mcp", Name: "Notion/search", Text: "Notion/search: search notion pages"},
+		{ID: "skill:pdf", Kind: "skill", Name: "pdf", Text: pdfFull},
+		{ID: "skill:brainstorm", Kind: "skill", Name: "brainstorm", Text: "brainstorm: explore ideas into designs"},
+	}
+	sysNone, volNone := renderDiscoveryContext(docs, func(string) bool { return false })
+	sysOne, volOne := renderDiscoveryContext(docs, func(id string) bool { return id == "skill:pdf" })
+	if sysNone != sysOne {
+		t.Fatalf("system block must be independent of attachment (cache-stable)")
+	}
+	if containsSubstr(sysOne, pdfTail) {
+		t.Fatal("full attached-skill description must not be in the cached system block")
+	}
+	if volNone != "" || !containsSubstr(volOne, pdfTail) {
+		t.Fatalf("attached description must ride the volatile block only")
+	}
 }
 ```
 

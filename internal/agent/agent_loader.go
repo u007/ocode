@@ -6,6 +6,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/u007/ocode/internal/plugins"
 )
 
 func parseOptionalFloat(s string) *float64 {
@@ -22,6 +24,21 @@ func parseOptionalFloat(s string) *float64 {
 }
 
 func (r *AgentRegistry) LoadMarkdownAgents() []LoadDiagnostic {
+	return r.reloadMarkdownAgents(nil)
+}
+
+// ReloadMarkdownAgents reloads the markdown registry entries and applies plugin
+// enable filtering when enabled is non-nil. It keeps the built-ins and the
+// existing precedence order (global → project → plugin project overrides).
+func (r *AgentRegistry) ReloadMarkdownAgents(enabled map[string]bool) []LoadDiagnostic {
+	return r.reloadMarkdownAgents(enabled)
+}
+
+func (r *AgentRegistry) reloadMarkdownAgents(enabled map[string]bool) []LoadDiagnostic {
+	r.diagnostic = nil
+	r.defs = nil
+	r.registerBuiltins()
+
 	var globalLoaded []AgentDefinition
 	var projectLoaded []AgentDefinition
 
@@ -43,6 +60,27 @@ func (r *AgentRegistry) LoadMarkdownAgents() []LoadDiagnostic {
 		dir  string
 		kind string
 	}{projectDir, "project"})
+
+	if enabled != nil {
+		// Global plugin agents behave like other global markdown agents: they load
+		// before project-local markdown so project files can still override them by
+		// name.
+		for _, pluginAgentsDir := range plugins.LoadGlobalPluginAgentsDirPaths(enabled) {
+			searchPaths = append(searchPaths, struct {
+				dir  string
+				kind string
+			}{pluginAgentsDir, "global"})
+		}
+
+		// Project-local plugin agents override both global plugin agents and regular
+		// project markdown agents by loading last.
+		for _, pluginAgentsDir := range plugins.LoadProjectPluginAgentsDirPaths(enabled) {
+			searchPaths = append(searchPaths, struct {
+				dir  string
+				kind string
+			}{pluginAgentsDir, "project"})
+		}
+	}
 
 	for _, sp := range searchPaths {
 		if sp.dir == "" {

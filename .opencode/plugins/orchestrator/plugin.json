@@ -1,0 +1,7 @@
+{
+  "name": "orchestrator",
+  "description": "Multi-agent coding pipeline — plan, implement, validate, iterate",
+  "version": "1.0.0",
+  "commands": [],
+  "tools": []
+}

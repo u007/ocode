@@ -342,6 +342,37 @@ func TestAgentDetailClickTogglesExpandableTranscriptSection(t *testing.T) {
 	}
 }
 
+// TestRenderRunTranscriptWrapsMarkdownToWidth guards against the detail-view
+// markdown wrap regression: assistant/user message bodies containing long
+// lines (e.g. markdown tables) were rendered via renderMarkdownInLine — which
+// is a single-line renderer — on multi-line text, then appended WITHOUT
+// wrapping. lipgloss pads multi-line renders into a rectangular block, so a
+// short trailing line ("| ") got padded out and the following bold cell was
+// pushed far to the right, producing over-width lines and mangled output.
+// Every rendered row must fit within the requested width.
+func TestRenderRunTranscriptWrapsMarkdownToWidth(t *testing.T) {
+	run := &agent.AgentRun{ID: "agent-1", Name: "worker", Status: agent.RunRunning}
+	table := strings.Join([]string{
+		"Here is the plan:",
+		"",
+		"| Feature Area | What's Tested |",
+		"|---|---|",
+		"| **Order Management** | Create, update, cancel, track medical supply orders; backorders; partial fulfilment; order status lifecycle |",
+		"| **Logistics & Routing** | Route planning, delivery scheduling, fleet assignment, last-mile tracking, proof of delivery |",
+	}, "\n")
+	setRunTranscriptForTest(run,
+		agent.Message{Role: "user", Content: "make a plan"},
+		agent.Message{Role: "assistant", Content: table},
+	)
+	const width = 100
+	rendered := stripANSI(renderRunTranscript(run, width))
+	for _, ln := range strings.Split(rendered, "\n") {
+		if lipgloss.Width(ln) > width {
+			t.Fatalf("detail row exceeds width %d (got %d): %q", width, lipgloss.Width(ln), ln)
+		}
+	}
+}
+
 func setRunTranscriptForTest(run *agent.AgentRun, msgs ...agent.Message) {
 	v := reflect.ValueOf(run).Elem().FieldByName("transcript")
 	reflect.NewAt(v.Type(), unsafe.Pointer(v.UnsafeAddr())).Elem().Set(reflect.ValueOf(msgs))

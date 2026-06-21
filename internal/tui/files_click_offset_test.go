@@ -19,8 +19,11 @@ func TestFilesClickOffsetDiagnostic(t *testing.T) {
 	m.Resize(100, 30)
 	styles := ApplyThemeColors("tokyonight")
 
-	// treeHint() always returns exactly 2 lines, so expectedTop is fixed.
-	expectedTop := appHeaderHeight + 1 + 2
+	// Use treeHeaderRows (the single source of truth) so the offset adapts
+	// to any number of hint lines — no more hardcoded "exactly 2 lines".
+	treeW := 100 * 35 / 100
+	hintLines := len(m.treeHeaderRows(treeW, styles))
+	expectedTop := appHeaderHeight + 1 + hintLines
 
 	fmt.Printf("expectedTop=%d\n", expectedTop)
 
@@ -118,5 +121,69 @@ func TestFilesClickOffsetNarrowScreen(t *testing.T) {
 	idx, ok := m.treeNodeForClick(tea.Mouse{X: 1, Y: expectedTop}, appHeaderHeight, styles)
 	if !ok || idx != 0 {
 		t.Errorf("narrow screen: expected first node at Y=%d, got ok=%v idx=%d", expectedTop, ok, idx)
+	}
+}
+
+// TestFilesClickOffsetAfterScroll guards the regression where clicking a row
+// after scrolling the tree down selected the wrong node: the hit-test ignored
+// the persisted vertical scroll offset, so the first visible row always mapped
+// to node 0 instead of node treeScrollY.
+func TestFilesClickOffsetAfterScroll(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 40; i++ {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("file_%02d.go", i)), []byte("x\n"), 0644)
+	}
+	m := newFilesModel(dir)
+	m.Resize(100, 30)
+	m.panel = filesPanelPreview // no hint rows: offset is purely the border
+	styles := ApplyThemeColors("tokyonight")
+
+	// Scroll down by 10 rows (wheel-style: offset only, cursor unchanged).
+	m.treeScrollY = 10
+	m.reconcileTreeScroll(100, 30)
+	if m.treeScrollY != 10 {
+		t.Fatalf("expected scroll to persist at 10, got %d", m.treeScrollY)
+	}
+
+	top := appHeaderHeight + 1 + m.treeHeaderRowCount()
+	// The first visible row must now map to node 10, not node 0.
+	idx, ok := m.treeNodeForClick(tea.Mouse{X: 2, Y: top}, appHeaderHeight, styles)
+	if !ok || idx != 10 {
+		t.Fatalf("first visible row after scroll: expected node 10, got ok=%v idx=%d", ok, idx)
+	}
+	idx2, ok2 := m.treeNodeForClick(tea.Mouse{X: 2, Y: top + 3}, appHeaderHeight, styles)
+	if !ok2 || idx2 != 13 {
+		t.Fatalf("4th visible row after scroll: expected node 13, got ok=%v idx=%d", ok2, idx2)
+	}
+}
+
+// TestTreeHeaderRowCountMatchesRows pins the invariant that the style-free
+// treeHeaderRowCount (used by scroll reconcile + click hit-test) always equals
+// the number of rows treeHeaderRows actually renders, across the relevant
+// states. If these drift, hit-boxes shift by the difference.
+func TestTreeHeaderRowCountMatchesRows(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"a.go", "b.go"} {
+		os.WriteFile(filepath.Join(dir, name), []byte("x\n"), 0644)
+	}
+	styles := ApplyThemeColors("tokyonight")
+	treeW := 100 * 35 / 100
+
+	cases := []struct {
+		name  string
+		setup func(m *filesModel)
+	}{
+		{"picker-normal", func(m *filesModel) { m.panel = filesPanelPicker; m.mode = filesModeNormal }},
+		{"preview-focused", func(m *filesModel) { m.panel = filesPanelPreview }},
+		{"selection-active", func(m *filesModel) { m.panel = filesPanelPicker; m.selectedFiles = map[int]bool{0: true} }},
+	}
+	for _, tc := range cases {
+		m := newFilesModel(dir)
+		m.Resize(100, 30)
+		tc.setup(&m)
+		want := len(m.treeHeaderRows(treeW, styles))
+		if got := m.treeHeaderRowCount(); got != want {
+			t.Errorf("%s: treeHeaderRowCount=%d but treeHeaderRows rendered %d rows", tc.name, got, want)
+		}
 	}
 }

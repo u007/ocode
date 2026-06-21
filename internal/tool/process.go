@@ -112,6 +112,14 @@ func (p *Process) snapshotStatus() (ProcStatus, int) {
 	return p.Status, p.ExitCode
 }
 
+// SnapshotStatus returns the current lifecycle status under the lock. Exported
+// for callers (e.g. the discovery local-server spawn) that need to detect an
+// immediate start failure without racing on the Status field.
+func (p *Process) SnapshotStatus() ProcStatus {
+	s, _ := p.snapshotStatus()
+	return s
+}
+
 func (p *Process) snapshotViewState() (ProcStatus, int, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

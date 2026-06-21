@@ -178,6 +178,44 @@ func TestDiscoverMoreAttaches(t *testing.T) {
 	}
 }
 
+func TestRenderDiscoverySplitIsCacheStable(t *testing.T) {
+	// pdf's description is intentionally >40 chars so its name-index hint is
+	// truncated — the full tail then appears ONLY in the volatile block.
+	const pdfFull = "pdf: manipulate pdf documents, fill forms, merge, split, and extract pages from archives"
+	const pdfTail = "extract pages from archives"
+	docs := []discovery.Doc{
+		{ID: "mcp:Notion/search", Kind: "mcp", Name: "Notion/search", Text: "Notion/search: search notion pages"},
+		{ID: "skill:pdf", Kind: "skill", Name: "pdf", Text: pdfFull},
+		{ID: "skill:brainstorm", Kind: "skill", Name: "brainstorm", Text: "brainstorm: explore ideas into designs"},
+	}
+
+	// No skills attached.
+	sysNone, volNone := renderDiscoveryContext(docs, func(string) bool { return false })
+	// One skill attached.
+	sysOne, volOne := renderDiscoveryContext(docs, func(id string) bool { return id == "skill:pdf" })
+
+	// CACHE INVARIANT: attaching a skill must NOT change the system block (it is
+	// hoisted into the cached system prompt; any change busts the whole prompt).
+	if sysNone != sysOne {
+		t.Fatalf("system block must be independent of attachment (cache-stable)\nnone:\n%s\none:\n%s", sysNone, sysOne)
+	}
+	// The full description of an attached skill must live in the VOLATILE block,
+	// never the cached system block.
+	if containsSubstr(sysOne, pdfTail) {
+		t.Fatal("full attached-skill description must not be in the cached system block")
+	}
+	if volNone != "" {
+		t.Fatalf("no attachment → empty volatile block, got %q", volNone)
+	}
+	if !containsSubstr(volOne, pdfTail) {
+		t.Fatalf("attached skill full description must be in the volatile block: %q", volOne)
+	}
+	// System block still carries the full name index + contract.
+	if !containsSubstr(sysOne, "Notion/search") || !containsSubstr(sysOne, "pdf") || !containsSubstr(sysOne, "discover_more") {
+		t.Fatalf("system block must carry name index + contract: %q", sysOne)
+	}
+}
+
 func TestInjectDiscoveryContextOnlyWhenActive(t *testing.T) {
 	a := newGateAgent()
 	base := []Message{{Role: "user", Content: "hi"}}

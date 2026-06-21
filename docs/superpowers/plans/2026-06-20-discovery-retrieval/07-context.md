@@ -2,8 +2,16 @@
 
 When discovery is active, the model must (a) know every MCP tool exists even when
 its schema isn't attached, and (b) be told to call `discover_more` instead of giving
-up. Both ride the **volatile message tail** (like `injectNotesTail`), never the
-cached prefix.
+up. Both ride the message tail (like `injectNotesTail`).
+
+> **Superseded by Part 11.** This part builds the MCP-only injector as a single
+> `system`-role tail message. Part 11 (skill gating) replaces it with the
+> **volatility-split** form: the stable name index + contract stay `system`-role
+> (hoisted into the cached system block), while the volatile attached-skill
+> descriptions move to a `user`-role tail message. The note in Part 07 that the
+> injection "never touches the cached prefix" is **not** accurate for Anthropic —
+> `collectAndRemoveSystemMessages` hoists system-role tail messages into the
+> cached `system` field. See Part 11's "Why the split" for the corrected model.
 
 ## Task 9: injectDiscoveryContext
 

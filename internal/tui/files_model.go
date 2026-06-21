@@ -64,6 +64,7 @@ const (
 	filesModeContentSearch
 	filesModeFuzzy
 	filesModeInFileSearch
+	filesModeHelp
 )
 
 type filesPromptKind int
@@ -182,6 +183,11 @@ type filesModel struct {
 	// Tree horizontal scroll offset
 	treeScrollX int // horizontal scroll offset in the tree panel (columns)
 	treeScrollY int // vertical scroll offset in the tree panel (lines)
+	// lastScrollCursor is the cursor index at the last reconcileTreeScroll. It
+	// lets reconcile scroll-to-reveal ONLY when the cursor actually moved, so
+	// wheel/scrollbar scrolling (which leaves the cursor put) never snaps the
+	// view back to the selection.
+	lastScrollCursor int
 }
 
 func newFilesModel(workDir string) filesModel {
@@ -493,7 +499,11 @@ func (m *filesModel) Resize(w, h int) {
 	m.promptInput.SetHeight(1)
 }
 
-func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
+func (m filesModel) Update(msg tea.Msg, w, h int) (out filesModel, cmd tea.Cmd) {
+	// Reconcile the persisted vertical scroll on every event path (cursor
+	// moves, preview loads, search jumps, dir toggles) so the offset, the
+	// rendered window, and click hit-testing never drift apart.
+	defer func() { out.reconcileTreeScroll(w, h) }()
 	switch msg := msg.(type) {
 	case filesPreviewMsg:
 		return m, m.applyPreview(msg)
@@ -545,6 +555,9 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (filesModel, tea.Cmd) {
 		}
 		if m.mode == filesModeInFileSearch {
 			return m.updateInFileSearch(msg)
+		}
+		if m.mode == filesModeHelp {
+			return m.updateHelp(msg)
 		}
 		if m.panel == filesPanelPreview {
 			return m.updatePreview(msg)
@@ -656,6 +669,15 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		}
 	case "ctrl+t":
 		return m, m.refreshPreviewCmd()
+	case "ctrl+u":
+		m.nodes = loadDirChildren(m.workDir, 0, m.showHidden)
+		m.cursor = 0
+		m.previewLoading = false
+		m.previewHasMore = false
+		m.previewNextOff = 0
+		m.previewPendingScroll = 0
+		m.statusMsg = "file tree refreshed"
+		return m, m.refreshPreviewCmd()
 	case "ctrl+g":
 		m.mode = filesModeFuzzy
 		m.fuzzyQuery = ""
@@ -689,6 +711,16 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		return m, m.refreshPreviewCmd()
 	case "tab":
 		m.panel = (m.panel + 1) % 2
+	}
+	return m, nil
+}
+
+func (m filesModel) updateHelp(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "?", "q":
+		m.mode = filesModeNormal
+		m.statusMsg = ""
+		return m, nil
 	}
 	return m, nil
 }
@@ -1310,15 +1342,18 @@ func (m filesModel) treeNodeForClick(mouse tea.Mouse, headerHeight int, styles S
 	if mouse.X >= treeW {
 		return 0, false
 	}
-	// Tree content starts after header + 1 (border top line), plus the hint rows
-	// prepended in View(). treeHeaderRows is the single source of truth for those
-	// rows — View renders exactly these and the click offset is their count, so
-	// the two can never drift (which previously broke hit-boxes on narrow screens).
-	treeContentTop := headerHeight + 1 + len(m.treeHeaderRows(treeW, styles))
+	// Tree content starts after header + 1 (border top line), plus the hint
+	// rows prepended in View(). treeHeaderRowCount mirrors treeHeaderRows so the
+	// rendered rows and this offset can never drift (which previously broke
+	// hit-boxes on narrow screens).
+	treeContentTop := headerHeight + 1 + m.treeHeaderRowCount()
 	if mouse.Y < treeContentTop {
 		return 0, false
 	}
-	nodeIndex := mouse.Y - treeContentTop
+	// The first visible row maps to node treeScrollY, so add the persisted
+	// scroll offset — without it, clicks after scrolling down hit the wrong
+	// node.
+	nodeIndex := mouse.Y - treeContentTop + m.treeScrollY
 	if nodeIndex < 0 || nodeIndex >= len(m.nodes) {
 		return 0, false
 	}
@@ -1775,7 +1810,99 @@ func (m filesModel) previewHeader() string {
 	return strings.Join(parts, "  |  ")
 }
 
+func (m filesModel) helpView(w, h int, styles Styles) string {
+	// Center a help dialog over the available space.
+	dialogW := w - 8
+	if dialogW < 50 {
+		dialogW = 50
+	}
+	if dialogW > 72 {
+		dialogW = 72
+	}
+	dialogH := h - 4
+	if dialogH < 16 {
+		dialogH = 16
+	}
+	if dialogH > 24 {
+		dialogH = 24
+	}
+
+	title := styles.Header.Render("  File Tab Keybindings  ")
+
+	// Build help body lines
+	body := []string{
+		"",
+		styles.Header.Render("  Navigation") + "		" + styles.Hint.Render("↑ ↓  j  k  select file"),
+		"			" + styles.Hint.Render("← →  horizontal scroll"),
+		"			" + styles.Hint.Render("Enter  open dir / open file"),
+		"			" + styles.Hint.Render("Tab  focus tree / preview"),
+		"",
+		styles.Header.Render("  Selection") + "		" + styles.Hint.Render("Space  toggle select"),
+		"			" + styles.Hint.Render("Shift+↑ ↓  multi-select extend"),
+		"",
+		styles.Header.Render("  File Operations") + "		" + styles.Hint.Render("n  create file    N  create folder"),
+		"			" + styles.Hint.Render("r  rename    D  delete"),
+		"			" + styles.Hint.Render("l  inline edit    y  copy path"),
+		"",
+		styles.Header.Render("  Open / Search") + "		" + styles.Hint.Render("e  open in editor    v  pick editor"),
+		"			" + styles.Hint.Render("o  reveal in finder    /  workspace grep"),
+		"			" + styles.Hint.Render("g  fuzzy find    ctrl+f  in-file search"),
+		"",
+		styles.Header.Render("  Other") + "		" + styles.Hint.Render("h  toggle hidden files"),
+		"			" + styles.Hint.Render("u  refresh file tree    ?  this help"),
+		"",
+		styles.Hint.Render("  Press esc, ?, or q to close"),
+	}
+	bodyText := strings.Join(body, "\n")
+
+	// Compute dialog dimensions
+	bodyLines := strings.Split(bodyText, "\n")
+	bodyW := 0
+	for _, line := range bodyLines {
+		if l := runewidth.StringWidth(line); l > bodyW {
+			bodyW = l
+		}
+	}
+	contentW := bodyW + 4 // padding
+	if contentW < 54 {
+		contentW = 54
+	}
+	if contentW > dialogW-4 {
+		contentW = dialogW - 4
+	}
+
+	contentH := len(bodyLines) + 2 // title + body
+	if contentH > dialogH-2 {
+		contentH = dialogH - 2
+	}
+
+	// Build the dialog box
+	dialog := lipgloss.NewStyle().
+		Width(contentW).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(styles.Selected.GetBackground()).
+		Render(title + "\n" + bodyText)
+
+	// Center on screen
+	x := (w - contentW - 2) / 2
+	if x < 0 {
+		x = 0
+	}
+	y := (h - contentH - 2) / 2
+	if y < 0 {
+		y = 0
+	}
+
+	// Build a blank backdrop of the right size
+	backdrop := strings.Repeat("\n", h-1)
+
+	return compositeOverlay(backdrop, dialog, x, y)
+}
+
 func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) string {
+	if m.mode == filesModeHelp {
+		return m.helpView(w, h, styles)
+	}
 	treeW := w * 35 / 100
 	previewW := w - treeW - 3
 
@@ -1875,7 +2002,12 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		treeContentHeight = 1
 	}
 
-	// Clamp treeScrollY to valid range
+	// Defensive clamp only. The authoritative scroll offset (including
+	// keep-cursor-visible) is computed and persisted by reconcileTreeScroll on
+	// the event path; View is a pure renderer that must not move the selection
+	// or it would snap wheel/scrollbar scrolling back to the cursor. The clamp
+	// here just guards against a stale offset between a resize and the next
+	// reconcile so the slice below stays in bounds.
 	maxScrollY := len(treeLines) - treeContentHeight
 	if maxScrollY < 0 {
 		maxScrollY = 0
@@ -1885,20 +2017,6 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	}
 	if m.treeScrollY < 0 {
 		m.treeScrollY = 0
-	}
-
-	// Keep cursor visible in viewport
-	if m.cursor < m.treeScrollY {
-		m.treeScrollY = m.cursor
-	}
-	if m.cursor >= m.treeScrollY+treeContentHeight {
-		m.treeScrollY = m.cursor - treeContentHeight + 1
-	}
-	if m.treeScrollY < 0 {
-		m.treeScrollY = 0
-	}
-	if len(treeLines) > 0 && m.treeScrollY > len(treeLines)-1 {
-		m.treeScrollY = len(treeLines) - 1
 	}
 
 	// Slice visible lines
@@ -2132,15 +2250,17 @@ func (m filesModel) tmuxOpenHint() string {
 }
 
 // treeHint returns the keybinding hints shown at the top of the file tree
-// panel when in normal mode (no multi-select active). It always renders as
-// exactly 2 lines so that click hit-box math is stable across screen widths.
+// panel when in normal mode (no multi-select active). Each line occupies
+// exactly 1 visual row (clamped with MaxHeight(1)) so click hit-box math
+// stays stable across screen widths.
 func (m filesModel) treeHint() string {
 	if len(m.selectedFiles) > 0 {
 		return ""
 	}
 	line1 := "j/k navigate  enter open  space select  shift+↑↓ extend  n new  N folder"
 	line2 := "r rename  D del  / search  ctrl+f grep  o reveal  ←→ scroll"
-	return line1 + "\n" + line2
+	line3 := "l edit  y copy  v pick  h hidden  g fuzzy  u refresh"
+	return line1 + "\n" + line2 + "\n" + line3
 }
 
 // treeHeaderRows returns the hint rows rendered directly above the file list.
@@ -2149,6 +2269,54 @@ func (m filesModel) treeHint() string {
 // keeps View() (which prepends these rows) and treeNodeForClick() (whose offset
 // is len(rows)) from ever disagreeing. It is the single source of truth for the
 // tree's top chrome.
+// treeHeaderRowCount returns how many hint rows treeHeaderRows prepends above
+// the file list. It is the style-free authority for that count so the scroll
+// reconcile and click hit-test (neither of which has Styles) agree with
+// rendering. treeHeaderRows MUST return exactly this many rows for the same
+// model state — TestTreeHeaderRowCountMatchesRows guards the invariant.
+func (m filesModel) treeHeaderRowCount() int {
+	if m.selectionHint() != "" {
+		return 1
+	}
+	if m.panel == filesPanelPicker && m.mode == filesModeNormal && len(m.selectedFiles) == 0 {
+		return strings.Count(m.treeHint(), "\n") + 1
+	}
+	return 0
+}
+
+// reconcileTreeScroll recomputes and persists the file tree's vertical scroll
+// offset. The offset is clamped into range on every call; the cursor is only
+// scrolled back into view when it actually moved since the last reconcile, so
+// wheel and scrollbar scrolling leave the selection where it is instead of
+// snapping back to it. Persisting the offset here (rather than deriving it in
+// the value-receiver View) is what lets treeNodeForClick hit-test against the
+// same rows that are on screen.
+func (m *filesModel) reconcileTreeScroll(w, h int) {
+	treeContentHeight := h - 4 - 2 - m.treeHeaderRowCount()
+	if treeContentHeight < 1 {
+		treeContentHeight = 1
+	}
+	maxScrollY := len(m.nodes) - treeContentHeight
+	if maxScrollY < 0 {
+		maxScrollY = 0
+	}
+	if m.cursor != m.lastScrollCursor {
+		if m.cursor < m.treeScrollY {
+			m.treeScrollY = m.cursor
+		}
+		if m.cursor >= m.treeScrollY+treeContentHeight {
+			m.treeScrollY = m.cursor - treeContentHeight + 1
+		}
+		m.lastScrollCursor = m.cursor
+	}
+	if m.treeScrollY > maxScrollY {
+		m.treeScrollY = maxScrollY
+	}
+	if m.treeScrollY < 0 {
+		m.treeScrollY = 0
+	}
+}
+
 func (m filesModel) treeHeaderRows(treeW int, styles Styles) []string {
 	cw := treeW - 7 // pane content width: frame(treeW-2) minus border(2)+padding(2)+scrollbar(1)
 	if cw < 1 {

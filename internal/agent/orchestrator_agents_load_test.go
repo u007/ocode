@@ -7,7 +7,7 @@ import (
 )
 
 func TestOrchestratorAgentFilesParse(t *testing.T) {
-	// The orchestrator .md files live at <repo>/.opencode/agents/.
+	// The orchestrator .md files live at <repo>/.opencode/plugins/orchestrator/agents/.
 	// When the test runs from internal/agent/, the init() loader can't find them
 	// (it uses cwd = internal/agent/), so we test the parser directly: copy
 	// the .md files into a temp dir and load via a fresh registry.
@@ -16,7 +16,7 @@ func TestOrchestratorAgentFilesParse(t *testing.T) {
 		wd, _ := os.Getwd()
 		t.Skipf("repo root not found from cwd %s: %v", wd, err)
 	}
-	srcDir := filepath.Join(repoRoot, ".opencode", "agents")
+	srcDir := filepath.Join(repoRoot, ".opencode", "plugins", "orchestrator", "agents")
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
 		t.Fatalf("cannot read %s: %v", srcDir, err)
@@ -39,6 +39,12 @@ func TestOrchestratorAgentFilesParse(t *testing.T) {
 
 	// Build a fresh registry that searches the temp dir as its "project" location.
 	reg := NewAgentRegistry()
+	subagentNames := map[string]bool{
+		"orchestrator-planner":   true,
+		"orchestrator-explorer":  true,
+		"orchestrator-developer": true,
+		"orchestrator-validator": true,
+	}
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".md" {
 			continue
@@ -49,7 +55,7 @@ func TestOrchestratorAgentFilesParse(t *testing.T) {
 			t.Errorf("%s: parseAgentFile returned nil", name)
 			continue
 		}
-		if def.Mode != AgentModeSubagent {
+		if subagentNames[name] && def.Mode != AgentModeSubagent {
 			t.Errorf("%s: mode = %v, want subagent", name, def.Mode)
 		}
 		if def.SystemPrompt == "" {

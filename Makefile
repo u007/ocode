@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot
+.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -180,3 +180,42 @@ skill-audit:
 	    fi; \
 	  fi; \
 	done
+
+# ── Docker ─────────────────────────────────────────────────────────────────
+# Build and run ocode inside Docker with volume mounts for config + data.
+#
+# Prerequisites: Docker Engine + Docker Compose v2
+#
+# Required host directories (created automatically on first run):
+#   ~/.config/opencode/      — opencode.json + ocodeconfig.json
+#   ~/.local/share/opencode/ — sessions, auth, usage records
+#
+# Usage:
+#   make docker       # build + launch TUI interactively
+#   make docker-serve # build + start web server on :4096
+#   make docker-run   # run a headless command (set ARGS="..."):
+#                     #   make docker-run ARGS="run --model claude-sonnet-4 'hello'"
+#   make docker-build # build the image without running
+# ─────────────────────────────────────────────────────────────────────────────
+
+docker-build:
+	@echo "🔨 Building ocode Docker image..."
+	docker compose build
+
+docker: docker-build
+	@echo "🚀 Launching ocode TUI in Docker..."
+	@echo "   Config:  ~/.config/opencode/ → container"
+	@echo "   Data:    ~/.local/share/opencode/ → container"
+	@echo "   Project: $(shell pwd) → /workspace"
+	@echo ""
+	docker compose run --rm ocode
+
+docker-serve: docker-build
+	@echo "🚀 Starting ocode web server on http://localhost:4096"
+	docker compose up -d ocode-serve
+	@echo "   Logs: docker compose logs -f ocode-serve"
+	@echo "   Stop: docker compose down"
+
+docker-run: docker-build
+	@echo "🚀 Running: ocode $(ARGS)"
+	docker compose run --rm ocode $(ARGS)

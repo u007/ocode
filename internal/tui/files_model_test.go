@@ -189,8 +189,11 @@ func TestFilesDoubleClickFolderOpensExplorer(t *testing.T) {
 	if dirIdx < 0 {
 		t.Fatalf("expected a directory node named 'sub' in tree, got %#v", m.files.nodes)
 	}
-	// Y of node dirIdx inside the tree panel: appHeaderHeight + 1 (border) + 2 (treeHint) + dirIdx.
-	clickY := appHeaderHeight + 1 + 2 + dirIdx
+	// Derive hint row count from treeHeaderRows (single source of truth) so the
+	// click Y adapts automatically when treeHint gains or loses lines.
+	treeW := 100 * 35 / 100
+	hintLines := len(m.files.treeHeaderRows(treeW, m.styles))
+	clickY := appHeaderHeight + 1 + hintLines + dirIdx
 	clickX := 2
 
 	// First click selects the node and toggles the directory open — it should
@@ -277,13 +280,22 @@ func TestFilesTabMouseWheelScrollsTreeWhenFocused(t *testing.T) {
 	m.files = newFilesModel(t.TempDir())
 	m.files.Resize(100, 30)
 	m.files.panel = filesPanelPicker
-	m.files.nodes = []fileNode{{name: "a", path: "/a"}, {name: "b", path: "/b"}, {name: "c", path: "/c"}}
+	// Enough nodes that the tree can actually scroll past the viewport.
+	nodes := make([]fileNode, 40)
+	for i := range nodes {
+		nodes[i] = fileNode{name: fmt.Sprintf("f%02d", i), path: fmt.Sprintf("/f%02d", i)}
+	}
+	m.files.nodes = nodes
 	m.files.preview.SetContent(strings.Repeat("line\n", 100))
 
 	updated, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 10, Y: 5})
 	got := derefTestModel(t, updated)
-	if got.files.cursor != 1 {
-		t.Fatalf("expected tree focus wheel to move cursor down to 1, got %d", got.files.cursor)
+	// Wheel scrolls the viewport, NOT the selection: the cursor stays put.
+	if got.files.cursor != 0 {
+		t.Fatalf("expected tree wheel to leave cursor at 0, got %d", got.files.cursor)
+	}
+	if got.files.treeScrollY <= 0 {
+		t.Fatalf("expected tree wheel to scroll the viewport (treeScrollY>0), got %d", got.files.treeScrollY)
 	}
 	if got.files.preview.YOffset() != 0 {
 		t.Fatalf("expected preview offset to stay at 0 when tree is focused, got %d", got.files.preview.YOffset())
