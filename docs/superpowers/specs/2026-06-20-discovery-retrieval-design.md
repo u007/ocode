@@ -199,6 +199,29 @@ follow-ups.
   intersected with the existing `spec.Tools` whitelist / `isToolAllowed`. It never
   widens a restricted sub-agent's tool set.
 
+**Prompt-cache placement — split the tail injection by volatility.** ocode's
+Anthropic builder (`chatAnthropic` → `collectAndRemoveSystemMessages`) hoists
+**every `system`-role message — tail ones included — into the top-level `system`
+field**, which carries `cache_control`. So a `system`-role tail message is *not*
+in the uncached suffix; it rides the **cached** system block, and any per-turn
+change to it rewrites the whole cached system prompt. The injector therefore
+splits its output (`renderDiscoveryContext`):
+
+- **Stable → `system`-role.** The prompt contract + the full name index (all MCP +
+  skill *names*). A function of the doc-*set* only (stable per session), so it
+  caches; it is byte-identical regardless of which items are attached. Verified by
+  test (`TestRenderDiscoverySplitIsCacheStable`: `sys` is independent of attachment).
+- **Volatile → `user`-role.** Full descriptions of **attached** skills (the only
+  per-turn-growing part). `collectAndRemove` leaves user-role messages in the array
+  (uncached suffix), coalescing with the current user turn, so a skill-attach turn
+  no longer busts the cached system block. Wrapped in the `[ocode:discovery]`
+  marker so the model reads it as system-origin, not user speech.
+
+Residual cost: an MCP-*tool* attach still changes the `tools` array, which precedes
+`system` in the cache prefix and busts it regardless — unavoidable, but no-growth
+turns (the steady state) pay nothing. The split removes the *skill*-attach class of
+busts entirely.
+
 ### 4. Recovery — two safety nets
 
 1. **Always-visible name index.** A cheap one-line-per-item list of *all* skill +
@@ -334,6 +357,7 @@ Mid-turn the model needs the calendar → `discover_more("schedule a follow-up o
 | Risk | Resolution |
 |------|-----------|
 | Prompt-cache busting from per-turn tool churn | Sticky/monotonic grow-only set keeps prefix stable |
+| Growing skill descriptions bust the (hoisted) cached system block | Tail injection split by volatility: stable name index is `system`-role (cached), volatile attached-skill descriptions are `user`-role (uncached suffix) |
 | Superpowers/brainstorming gated out | `pinned_skills` allowlist, always attached |
 | MCP server instructions kept without their tools | Instructions gated in lockstep with the server's tools |
 | Per-turn embedding latency (~100–300ms HTTP) | Background-warmed corpus; only query embed per turn; logged |

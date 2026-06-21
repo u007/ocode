@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/plugins"
 )
@@ -87,19 +88,22 @@ func (h *Handler) HandleGetPlugin(w http.ResponseWriter, r *http.Request, name s
 
 func (h *Handler) HandleSetPluginEnabled(w http.ResponseWriter, r *http.Request, name string, enabled bool) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
 
 	if _, ok := h.cfg.Plugins[name]; !ok {
+		h.mu.Unlock()
 		writeError(w, http.StatusNotFound, "plugin not found")
 		return
 	}
 	if err := config.SavePluginEnabled(name, enabled); err != nil {
+		h.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	p := h.cfg.Plugins[name]
 	p.Enabled = enabled
 	h.cfg.Plugins[name] = p
+	h.mu.Unlock()
+	agent.ApplyAgentConfig(h.cfg)
 
 	state := "enabled"
 	if !enabled {
@@ -156,6 +160,7 @@ func (h *Handler) HandleInstallPlugin(w http.ResponseWriter, r *http.Request) {
 	}
 	h.cfg.Plugins[pl.Name] = pc
 	h.mu.Unlock()
+	agent.ApplyAgentConfig(h.cfg)
 
 	writeJSON(w, http.StatusCreated, map[string]string{"name": pl.Name, "dir": dirName, "source": req.Source})
 }
@@ -186,6 +191,7 @@ func (h *Handler) HandleRemovePlugin(w http.ResponseWriter, r *http.Request, nam
 	h.mu.Lock()
 	delete(h.cfg.Plugins, name)
 	h.mu.Unlock()
+	agent.ApplyAgentConfig(h.cfg)
 
 	w.WriteHeader(http.StatusNoContent)
 }

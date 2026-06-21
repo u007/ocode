@@ -21,9 +21,16 @@ const (
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
 // It is safe to call more than once; marked fragments are not duplicated.
+// If the environment block in messages is stale (date rolled over), it is
+// stripped first so the refreshed block is re-inserted.
 func (a *Agent) PrepareMessages(messages []Message, selectionContext string) []Message {
 	if a == nil {
 		return messages
+	}
+	// Strip stale env block before marker-dedup so the refreshed date is
+	// re-inserted. environmentPrompt() has already updated a.envPromptDate.
+	if today := time.Now().Format("Mon Jan 2 2006"); a.envPromptDate != "" && a.envPromptDate != today {
+		messages = stripMarker(messages, promptEnvMarker)
 	}
 	base := a.BasePromptMessages(selectionContext)
 	if len(base) == 0 {
@@ -40,6 +47,16 @@ func (a *Agent) PrepareMessages(messages []Message, selectionContext string) []M
 	}
 	out = append(out, messages...)
 	return out
+}
+
+// stripMarker removes the first system message with the given marker from messages.
+func stripMarker(messages []Message, marker string) []Message {
+	for i, msg := range messages {
+		if msg.Role == "system" && promptMarker(msg.Content) == marker {
+			return append(messages[:i:i], messages[i+1:]...)
+		}
+	}
+	return messages
 }
 
 // BasePromptMessages returns the base system fragments shared by TUI, CLI,
@@ -137,6 +154,10 @@ func (a *Agent) notesProtocolPrompt(id string) string {
 }
 
 func (a *Agent) environmentPrompt() string {
+	today := time.Now().Format("Mon Jan 2 2006")
+	if a.envPromptDate == today && a.envPromptStr != "" {
+		return a.envPromptStr
+	}
 	cwd, _ := os.Getwd()
 	// Use the workDir override if set (e.g., via /cd command)
 	if a.workDir != "" {
@@ -165,10 +186,13 @@ func (a *Agent) environmentPrompt() string {
 	}
 	lines = append(lines,
 		fmt.Sprintf("  Platform: %s", runtime.GOOS),
-		fmt.Sprintf("  Today's date: %s", time.Now().Format("Mon Jan 2 2006")),
+		fmt.Sprintf("  Today's date: %s", today),
 		"</env>",
 	)
-	return strings.Join(lines, "\n")
+	result := strings.Join(lines, "\n")
+	a.envPromptDate = today
+	a.envPromptStr = result
+	return result
 }
 
 func existingPromptMarkers(messages []Message) map[string]bool {

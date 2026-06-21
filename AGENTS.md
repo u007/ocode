@@ -184,6 +184,44 @@ project-scoped even when working from different checkouts. The TUI's
 can change the project root without changing the process CWD on every
 caller.
 
+## Prompt Cache Stability
+Anthropic prompt caching reads one linear prefix in a **fixed order: `tools` →
+`system` → `messages`** (breakpoints set in `internal/agent/client.go` — last
+tool ~:2013, system ~:1961, first user message ~:1971). Because tools come
+first, **any change to the tools array invalidates the `system` block and the
+message prefix too** — they sit downstream of tools in the prefix. This is the
+dominant cost when adding features that vary what gets sent.
+
+Rules for any change that touches tools or the base prompt:
+- **Never put per-turn-varying content in `tools` or `system`.** `LoadContext`
+  (system) must be a function of stable, preload-time state (config flags), not
+  of a per-turn computed result.
+- **`GetToolDefinitions` must emit a deterministic order** (`sort.Strings` over
+  names). `a.tools` is a map — unsorted iteration randomizes the tools array
+  every turn and busts the cache on every request.
+- **Tool sets that grow must be grow-only/sticky within a session** (see the
+  discovery `Session`). A no-new-attachment turn then sends a byte-identical
+  tools array → full cache hit; only growth turns pay a re-cache.
+- **Role determines caching, not array position — because of the hoist.** The
+  Anthropic builder (`chatAnthropic` → `collectAndRemoveSystemMessages` in
+  `client.go`) pulls **every `system`-role message — including tail ones — into
+  the top-level `system` field**, which carries `cache_control`. So a
+  `system`-role message appended at the tail is NOT in the uncached suffix; it
+  rides the **cached** system block. Consequence: any tail `system` injection
+  whose content **varies per turn** (e.g. growing) rewrites and busts the whole
+  cached system prompt. `injectLSPDiagnostics` and `injectNotesTail` are
+  system-role and carry this cost when their content changes — keep their content
+  stable across turns, or move the volatile part to user-role.
+- **Split tail injection by volatility (`injectDiscoveryContext` is the model):**
+  - *Stable* content (e.g. the discovery name index + prompt contract — names
+    don't change turn to turn) → **`system`-role** → hoisted into the cached
+    system block, so it caches.
+  - *Volatile* content (e.g. attached-skill full descriptions, which grow with
+    the sticky set) → **`user`-role** → `collectAndRemove` leaves it in the
+    messages array (uncached suffix), where it coalesces with the current user
+    turn and never busts the system cache. Wrap it in the `[ocode:discovery]`
+    marker so the model reads it as system-origin, not user speech.
+
 ## Environment Prompt
 The LLM receives environment context at the start of each session via
 `internal/agent/prompt.go`. The exact shape is the ` <env>...</env>` block

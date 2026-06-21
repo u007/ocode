@@ -61,21 +61,31 @@ func LoadPlugins(enabled map[string]bool) []Plugin {
 }
 
 func pluginSearchPaths() []string {
-	var paths []string
+	paths := make([]string, 0, 2)
+	if global := globalPluginSearchPath(); global != "" {
+		paths = append(paths, global)
+	}
+	if project := projectPluginSearchPath(); project != "" {
+		paths = append(paths, project)
+	}
+	return paths
+}
 
+func globalPluginSearchPath() string {
 	home, _ := os.UserHomeDir()
 	globalPath := filepath.Join(home, ".config", "opencode", "plugins")
 	if runtime.GOOS == "windows" {
 		globalPath = filepath.Join(os.Getenv("APPDATA"), "opencode", "plugins")
 	}
-	paths = append(paths, globalPath)
+	return globalPath
+}
 
+func projectPluginSearchPath() string {
 	projectRoot := findProjectRoot()
-	if projectRoot != "" {
-		paths = append(paths, filepath.Join(projectRoot, ".opencode", "plugins"))
+	if projectRoot == "" {
+		return ""
 	}
-
-	return paths
+	return filepath.Join(projectRoot, ".opencode", "plugins")
 }
 
 func findProjectRoot() string {
@@ -117,44 +127,37 @@ func LoadPluginInstructions(enabled map[string]bool) string {
 }
 
 func LoadPluginToolsDirPaths(enabled map[string]bool) []string {
-	var paths []string
-
-	for _, dir := range pluginSearchPaths() {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
-		}
-		for _, e := range entries {
-			if !e.IsDir() {
-				continue
-			}
-			if enabled != nil {
-				name := e.Name()
-				pluginPath := filepath.Join(dir, e.Name(), "plugin.json")
-				if data, err := os.ReadFile(pluginPath); err == nil {
-					var p Plugin
-					if err := json.Unmarshal(data, &p); err == nil && p.Name != "" {
-						name = p.Name
-					}
-				}
-				if on, ok := enabled[name]; ok && !on {
-					continue
-				}
-			}
-			toolsDir := filepath.Join(dir, e.Name(), "tools")
-			if _, err := os.Stat(toolsDir); err == nil {
-				paths = append(paths, toolsDir)
-			}
-		}
-	}
-
-	return paths
+	return loadPluginSubdirPaths(pluginSearchPaths(), "tools", enabled)
 }
 
 func LoadPluginCommandDirPaths(enabled map[string]bool) []string {
+	return loadPluginSubdirPaths(pluginSearchPaths(), "commands", enabled)
+}
+
+// LoadGlobalPluginAgentsDirPaths returns the agents/ subdirectories for global
+// plugins.
+func LoadGlobalPluginAgentsDirPaths(enabled map[string]bool) []string {
+	root := globalPluginSearchPath()
+	if root == "" {
+		return nil
+	}
+	return loadPluginSubdirPaths([]string{root}, "agents", enabled)
+}
+
+// LoadProjectPluginAgentsDirPaths returns the agents/ subdirectories for
+// project-local plugins under the discovered project root.
+func LoadProjectPluginAgentsDirPaths(enabled map[string]bool) []string {
+	root := projectPluginSearchPath()
+	if root == "" {
+		return nil
+	}
+	return loadPluginSubdirPaths([]string{root}, "agents", enabled)
+}
+
+func loadPluginSubdirPaths(roots []string, subdir string, enabled map[string]bool) []string {
 	var paths []string
 
-	for _, dir := range pluginSearchPaths() {
+	for _, dir := range roots {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -176,9 +179,9 @@ func LoadPluginCommandDirPaths(enabled map[string]bool) []string {
 					continue
 				}
 			}
-			cmdsDir := filepath.Join(dir, e.Name(), "commands")
-			if _, err := os.Stat(cmdsDir); err == nil {
-				paths = append(paths, cmdsDir)
+			subdirPath := filepath.Join(dir, e.Name(), subdir)
+			if info, err := os.Stat(subdirPath); err == nil && info.IsDir() {
+				paths = append(paths, subdirPath)
 			}
 		}
 	}

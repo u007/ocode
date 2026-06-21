@@ -3,6 +3,14 @@
 ## [Unreleased]
 
 ### Added
+- **Plugin Agent Loading** — Agent registry now supports plugin-aware markdown agent loading via `ReloadMarkdownAgents(enabled)`. Orchestrator agents moved from `.opencode/agents/` to `.opencode/plugins/orchestrator/agents/`. Plugin loader supports `agents/` and `commands/` subdirectories. New `LoadPluginCommandDirPaths`, `LoadGlobalPluginAgentsDirPaths`, `LoadProjectPluginAgentsDirPaths`. Locked in by `TestOrchestratorAgentFilesParse`.
+- **Discovery Volatility Split** — `injectDiscoveryContext` split into stable (system-role) and volatile (user-role) messages for Anthropic prompt cache stability. New `renderDiscoveryContext` helper with volatility-split contract. Locked in by `TestRenderDiscoveryContext`.
+- **Environment Prompt Cache** — `environmentPrompt()` now caches its result keyed by date; cache invalidated on workdir/model change via `clearEnvironmentPromptCache()`. `PrepareMessages` strips stale env block before re-insertion.
+- **Recap Timeout Configuration** — New `recap_timeout_seconds` config field (default 120). `recapTimeoutSeconds()` method on Agent reads the configured value.
+- **Docker Support** — `.dockerignore`, `Dockerfile`, `docker-compose.yml` for containerized ocode. New Docker Makefile targets (`docker`, `docker-build`, `docker-serve`, `docker-run`) with volume mounts for config, data, and workspace.
+- **Config File Atomic Write** — `writeOcodeConfigFile` uses tmp+rename atomic write, preventing corruption on crash.
+- **Prompt Cache Stability Guidance** — New `AGENTS.md` section documenting Anthropic prompt cache ordering rules, tool array determinism, stickiness for growing tool sets, and the volatility-split pattern for tail injections.
+- **Version Bump** — 0.5.15 → 0.6.0.
 - **Sidebar Temperature & Reasoning Display** — The sidebar now shows the effective LLM temperature and thinking/reasoning budget level on a dedicated line above the context window, giving the user at-a-glance visibility of model configuration. New `Agent.EffectiveTemperature()` method exposes the configured temperature from the client or spec. Locked in by `TestEffectiveTemperature`.
 - **Model Temperature Defaults Expansion** — `defaultTemperature` extended with support for north-mini-code, claude, gemini, glm-4.5/4.6/4.7/5, deepseek-v4, grok (reasoning & non-reasoning), gemma, mistral/codestral/devstral, cohere/command, llama, nemotron, minimax-m3, mimo, and kimi-k2 (thinking & base) model families. `defaultTopP` extended with qwen and additional kimi-k2 variants. Locked in by comprehensive tests.
 - **Read Tool `offset`/`limit` Aliases** — `ReadTool.Execute` now recognizes `offset` and `limit` as aliases for `start_line`/`end_line`, preventing silent reread loops when models emit Claude-Code-style pagination keys. Locked in by `TestReadToolOffsetLimitAliases`.
@@ -11,6 +19,8 @@
 - **Version Bump** — 0.5.13 → 0.5.15.
 
 ### Fixed
+- **File Tree Click After Scrolling** — `treeNodeForClick` now accounts for `treeScrollY` when mapping screen row to node index, so clicking on the file tree after scrolling down selects the correct file instead of being off-by-one.
+- **Tree Scroll Snap-Back on Wheel/Scrollbar** — `reconcileTreeScroll` now only snaps the view when the cursor actually moved (tracked via `lastScrollCursor`), so wheel/scrollbar scrolling (which leaves the cursor put) never overrides the user's scroll position.
 - **Scrollbar Click on Transcript Regions** — Changed `toolOutputForClick`, `thinkingForClick`, and `compactionForClick` to use `m.mainScrollbarX()` instead of `m.panelWidth()`, preventing scrollbar-track/thumb clicks from toggling the transcript region behind the scrollbar. Locked in by `TestClickScrollbarDoesNotToggleToolOutput`.
 - **Advisor Over-Exploration** — The advisor system prompt now instructs the model to trust provided context and only explore when genuinely needed, reducing wasteful tool calls during advisory rounds.
 - **Read Tool Pagination Hint** — Changed the continue prompt from `limit=50` format to `end_line=` format, matching the tool's declared schema.

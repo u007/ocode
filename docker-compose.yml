@@ -1,0 +1,66 @@
+# ocode Docker Compose
+# =====================
+# Two profiles:
+#   ocode           — interactive TUI mode (stdin+tty)
+#   ocode-serve     — headless web server (port 4096)
+#
+# Required volume mounts for persistent state:
+#
+#   ~/.config/opencode/      → opencode.json + ocodeconfig.json
+#   ~/.local/share/opencode/ → sessions, auth, usage records
+#   .                        → your project workspace (CWD mapped to /workspace)
+#
+# Usage:
+#
+#   # Build once
+#   docker compose build
+#
+#   # Launch TUI (interactive — use Ctrl+C to detach)
+#   docker compose run --rm ocode
+#
+#   # Start web server (daemon)
+#   docker compose up -d ocode-serve
+#
+#   # Run a headless command
+#   docker compose run --rm ocode run --model claude-sonnet-4 "explain this project"
+
+services:
+  # ── Interactive TUI mode ──────────────────────────────────────────────
+  ocode:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ocode:latest
+    stdin_open: true       # keep stdin open for TUI input
+    tty: true              # allocate a PTY for Bubble Tea
+    working_dir: /workspace
+    volumes:
+      # Config files: opencode.json + ocodeconfig.json
+      - ~/.config/opencode:/home/ocode/.config/opencode
+      # Persistent data: sessions, usage records, auth tokens
+      - ~/.local/share/opencode:/home/ocode/.local/share/opencode
+      # Your project (maps your CWD into the container)
+      - .:/workspace
+    environment:
+      - HOME=/home/ocode
+      # Uncomment to point at a project-level opencode.json in your
+      # workspace instead of the global one:
+      # - OPENCODE_CONFIG_DIR=/workspace/.opencode
+    # Default entrypoint runs `ocode` which launches the TUI
+
+  # ── Headless web server mode ──────────────────────────────────────────
+  ocode-serve:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ocode:latest
+    working_dir: /workspace
+    ports:
+      - "4096:4096"
+    volumes:
+      - ~/.config/opencode:/home/ocode/.config/opencode
+      - ~/.local/share/opencode:/home/ocode/.local/share/opencode
+      - .:/workspace
+    environment:
+      - HOME=/home/ocode
+    command: ["serve", "--host", "0.0.0.0", "--port", "4096"]

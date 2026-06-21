@@ -72,12 +72,12 @@ type RecapResult struct {
 }
 
 type Agent struct {
-	client    LLMClient
-	tools     map[string]tool.Tool
-	mcpTools  map[string]struct{}
+	client   LLMClient
+	tools    map[string]tool.Tool
+	mcpTools map[string]struct{}
 	// disco holds discovery (skill/MCP retrieval) state when /discovery is on.
 	// nil means discovery is off → no gating, today's behavior.
-	disco *discoveryState
+	disco     *discoveryState
 	mcpErrors []string
 	config    *config.Config
 	mode      Mode
@@ -191,6 +191,8 @@ type Agent struct {
 	preloadedContext      string // set by askAgent to avoid duplicate LoadContext calls
 	memoryEnabled         bool   // whether memory prompt injection is active
 	preloadedModelContext string // cached result of LoadModelContext, set once lazily
+	envPromptDate         string // date string used to build envPromptStr; stale = rebuild
+	envPromptStr          string // cached result of environmentPrompt()
 	// pipeline, if set, runs in-process hook callbacks for tool calls and chat
 	// requests. Field is named "pipeline" (not "hooks") because the hooks package
 	// is already imported under that name.
@@ -1225,7 +1227,8 @@ func (a *Agent) runRecap(messages []Message, instruction string) string {
 
 	prompt := b.String()
 
-	ctx, cancel := contextWithTimeout(60)
+	timeout := a.recapTimeoutSeconds()
+	ctx, cancel := contextWithTimeout(timeout)
 	defer cancel()
 
 	done := make(chan struct {
@@ -1259,6 +1262,15 @@ func (a *Agent) runRecap(messages []Message, instruction string) string {
 		}
 		return r.content
 	}
+}
+
+// recapTimeoutSeconds returns the configured recap timeout, falling back to 60
+// if not set in config.
+func (a *Agent) recapTimeoutSeconds() int {
+	if a.config != nil && a.config.Ocode.RecapTimeoutSeconds > 0 {
+		return a.config.Ocode.RecapTimeoutSeconds
+	}
+	return 60
 }
 
 func (a *Agent) recapClient() LLMClient {
@@ -1468,6 +1480,7 @@ func (a *Agent) SetMode(m Mode) {
 // When set, this directory is used instead of os.Getwd() in the <env> block.
 func (a *Agent) SetWorkDir(dir string) {
 	a.workDir = dir
+	a.clearEnvironmentPromptCache()
 	if a.permissions != nil {
 		a.permissions.SetWorkDir(dir)
 	}
@@ -2855,6 +2868,7 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 		} else if client := NewClient(a.config, spec.Model); client != nil {
 			emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
 			a.client = client
+			a.clearEnvironmentPromptCache()
 			a.preloadedModelContext = "" // model may have changed; reload model-specific context lazily
 			// Re-wire the tier-1 redaction hook onto the new client.
 			if a.redactionHook != nil {
@@ -2873,6 +2887,13 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 			emitDebug("AGENT", fmt.Sprintf("spec %q: sampling params temperature=%v top_p=%v", spec.Name, spec.Temperature, spec.TopP))
 		}
 	}
+}
+
+// clearEnvironmentPromptCache invalidates the cached <env> prompt so changes to
+// workDir or model/client are reflected on the next prompt build.
+func (a *Agent) clearEnvironmentPromptCache() {
+	a.envPromptDate = ""
+	a.envPromptStr = ""
 }
 
 func (a *Agent) Spec() *AgentSpec {

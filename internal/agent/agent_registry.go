@@ -195,7 +195,11 @@ func (r *AgentRegistry) addLoaded(def AgentDefinition) {
 }
 
 func ApplyAgentConfig(cfg *config.Config) {
-	if cfg == nil || cfg.Agent == nil {
+	if cfg == nil {
+		return
+	}
+	DefaultAgentRegistry.ReloadMarkdownAgents(enabledPluginMap(cfg))
+	if cfg.Agent == nil {
 		return
 	}
 	for name, raw := range cfg.Agent {
@@ -217,6 +221,17 @@ func ApplyAgentConfig(cfg *config.Config) {
 			def.MaxSteps = steps
 		}
 	}
+}
+
+func enabledPluginMap(cfg *config.Config) map[string]bool {
+	if cfg == nil || len(cfg.Plugins) == 0 {
+		return nil
+	}
+	enabled := make(map[string]bool, len(cfg.Plugins))
+	for name, p := range cfg.Plugins {
+		enabled[name] = p.Enabled
+	}
+	return enabled
 }
 
 func extractSteps(cfg map[string]interface{}) (int, bool) {

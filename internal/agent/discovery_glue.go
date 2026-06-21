@@ -11,6 +11,7 @@ import (
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/skill"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // discoveryConfigEnabled reports whether the config asks for discovery. Used
@@ -28,16 +29,11 @@ type discoveryState struct {
 	initErr string // last resolve error (fail-open reason)
 }
 
-// discoveryEnabled reports whether the config asks for discovery.
-func (a *Agent) discoveryEnabled() bool {
-	return a.config != nil && a.config.Ocode.Discovery.Enabled
-}
-
 // ensureDiscovery lazily builds discovery state on first use (by Step time, MCP
 // tools are loaded). On any resolve error it FAILS OPEN: leaves disco disabled
 // (all tools attached, today's behavior) and logs why.
 func (a *Agent) ensureDiscovery() {
-	if a.disco != nil || !a.discoveryEnabled() {
+	if a.disco != nil || !a.discoveryConfigEnabled() {
 		return
 	}
 	dc := a.config.Ocode.Discovery
@@ -52,11 +48,19 @@ func (a *Agent) ensureDiscovery() {
 			if a.procs == nil {
 				return fmt.Errorf("no process registry available for local server")
 			}
-			a.procs.StartBackground(cmdline)
+			p := a.procs.StartBackground(cmdline)
+			// StartBackground sets ProcExited synchronously when cmd.Start (or
+			// supervisor Register) fails — surface that instead of letting the
+			// caller eat the full health-loop timeout.
+			if p != nil && p.SnapshotStatus() == tool.ProcExited {
+				return fmt.Errorf("local server process exited immediately on spawn")
+			}
 			return nil
 		}
 		base, dim, e := discovery.EnsureLocalServer(spawn, discoveryCacheDir(), func(s string) {
-			_ = config.SaveLocalModelStatus(s)
+			if err := config.SaveLocalModelStatus(s); err != nil {
+				emitDebug("DISCOVERY", fmt.Sprintf("persist local model status %q failed: %v", s, err))
+			}
 		})
 		if e != nil {
 			err = e
@@ -261,85 +265,112 @@ const promptDiscoveryMarker = "[ocode:discovery]"
 
 const discoveryPromptContract = `Not every tool is currently loaded. The "Available MCP tools" index below lists every connected MCP tool by name. If you need one that is not in your current tool list, call the discover_more tool with a short description of what you need (e.g. "send an email") BEFORE telling the user you cannot do it — it will attach the matching tools for the rest of this turn.`
 
-// injectDiscoveryContext appends the name index + prompt contract as a single
-// system message at the tail (volatile, like injectNotesTail). No-op when
-// discovery is off — bytes are identical to today.
+// injectDiscoveryContext appends discovery context split by VOLATILITY so the
+// prompt cache survives sticky-set growth. No-op when discovery is off.
+//
+// Cache rationale (Anthropic): the request builder hoists EVERY system-role
+// message into the top-level `system` field, which carries cache_control (see
+// collectAndRemoveSystemMessages in client.go). So a system-role tail message is
+// NOT in the uncached suffix — it rides the cached system block. Therefore:
+//
+//   - STABLE content (prompt contract + the full name index — names don't change
+//     turn to turn) is emitted as a SYSTEM message → hoisted into the cached
+//     system prompt → caches across turns.
+//   - VOLATILE content (full descriptions of ATTACHED skills, which grow with the
+//     sticky set) is emitted as a USER message → stays in the uncached message
+//     tail (collectAndRemove only pulls system-role) → a skill-attach turn no
+//     longer rewrites/busts the cached system block. It is wrapped in the
+//     discovery marker so the model reads it as system-origin, not user speech.
 //
 // Three modes:
 //   - off (config flag false): no-op.
 //   - on but not yet active (e.g. embedder failed to resolve): fail-open by
-//     re-emitting the full skill catalog so skills are never lost.
-//   - on + active: name index for MCP + skills, plus full descriptions of
-//     attached skills (so the model can use them without a round-trip).
+//     re-emitting the full skill catalog (system-role, stable) so skills are
+//     never lost.
+//   - on + active: stable name index (system) + attached-skill descriptions (user).
 func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 	if !a.discoveryConfigEnabled() {
 		return messages
 	}
 	active := a.disco != nil && a.disco.enabled
-	var b strings.Builder
 
 	if !active {
 		// Fail-open: LoadContext suppressed the catalog (config flag on), but
 		// discovery isn't actually running — re-emit the full skill catalog so
 		// skills are never lost. MCP tools are all attached (gate off).
 		if cat := skill.BuildCatalog(); cat != "" {
-			b.WriteString(cat)
+			return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + cat})
 		}
-		if b.Len() == 0 {
-			return messages
-		}
-		return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + b.String()})
+		return messages
 	}
 
-	docs := a.discoveryDocs() // sorted; skills + MCP
-	b.WriteString(discoveryPromptContract)
+	sysContent, volContent := renderDiscoveryContext(a.discoveryDocs(), a.disco.session.IsAttached)
+	messages = append(messages, Message{Role: "system", Content: sysContent})
+	if volContent != "" {
+		messages = append(messages, Message{Role: "user", Content: volContent})
+	}
+	return messages
+}
 
-	b.WriteString("\n\nAvailable MCP tools (names only — not all loaded):\n")
+// renderDiscoveryContext builds the two discovery blocks from the (sorted) docs
+// and the attachment predicate, split by volatility:
+//
+//   - sysContent: prompt contract + full name index. A function of the doc-SET
+//     only (which is stable per session) — NOT of which docs are attached. This
+//     is what makes it cache-safe: attaching a skill mid-session must leave this
+//     string byte-identical so the hoisted system prompt stays cached.
+//   - volContent: full descriptions of attached skills (empty when none). This is
+//     the only per-turn-growing part; it rides the uncached user tail.
+//
+// Kept as a pure function so the cache invariant (sysContent is independent of
+// attachment) is unit-testable without the filesystem-backed skill loader.
+func renderDiscoveryContext(docs []discovery.Doc, isAttached func(id string) bool) (sysContent, volContent string) {
+	var sys strings.Builder
+	sys.WriteString(promptDiscoveryMarker)
+	sys.WriteString("\n")
+	sys.WriteString(discoveryPromptContract)
+	sys.WriteString("\n\nAvailable MCP tools (names only — not all loaded):\n")
 	for _, d := range docs {
-		if d.Kind != "mcp" {
-			continue
+		if d.Kind == "mcp" {
+			writeIndexLine(&sys, d)
 		}
-		b.WriteString("- ")
-		b.WriteString(d.Name)
-		if h := shortHint(d.Text); h != "" {
-			b.WriteString(" — ")
-			b.WriteString(h)
-		}
-		b.WriteString("\n")
 	}
-
-	b.WriteString("\nAvailable skills (names only — load full detail with the skill tool):\n")
+	sys.WriteString("\nAvailable skills (names only — load full detail with the skill tool):\n")
 	for _, d := range docs {
-		if d.Kind != "skill" {
-			continue
+		if d.Kind == "skill" {
+			writeIndexLine(&sys, d)
 		}
-		b.WriteString("- ")
-		b.WriteString(d.Name)
-		if h := shortHint(d.Text); h != "" {
-			b.WriteString(" — ")
-			b.WriteString(h)
-		}
-		b.WriteString("\n")
 	}
 
-	// Full descriptions for attached skills only — the model uses these inline
-	// (no extra tool round-trip) when the sticky set has grown to include them.
 	var attachedSkills []string
 	for _, d := range docs {
-		if d.Kind == "skill" && a.disco.session.IsAttached(d.ID) {
+		if d.Kind == "skill" && isAttached(d.ID) {
 			attachedSkills = append(attachedSkills, d.Text)
 		}
 	}
 	if len(attachedSkills) > 0 {
-		b.WriteString("\nRelevant skills for this task:\n")
+		var vol strings.Builder
+		vol.WriteString(promptDiscoveryMarker)
+		vol.WriteString(" relevant skills for this task (you may use these inline):\n")
 		for _, s := range attachedSkills {
-			b.WriteString("- ")
-			b.WriteString(s)
-			b.WriteString("\n")
+			vol.WriteString("- ")
+			vol.WriteString(s)
+			vol.WriteString("\n")
 		}
+		volContent = vol.String()
 	}
+	return sys.String(), volContent
+}
 
-	return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + b.String()})
+// writeIndexLine appends one "- name — hint" name-index line.
+func writeIndexLine(b *strings.Builder, d discovery.Doc) {
+	b.WriteString("- ")
+	b.WriteString(d.Name)
+	if h := shortHint(d.Text); h != "" {
+		b.WriteString(" — ")
+		b.WriteString(h)
+	}
+	b.WriteString("\n")
 }
 
 // shortHint returns the description part of a doc text, trimmed to ~40 chars.

@@ -1,7 +1,9 @@
 package discovery
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -18,8 +20,11 @@ var (
 
 func localBaseURL() string { return "http://localhost:" + localServerPort }
 
-// probeLocalServer returns true if a server already answers the health endpoint
-// (the FetchLMStudioModels pattern — enables cross-process sharing).
+// probeLocalServer returns true only if an OpenAI-compatible models endpoint
+// answers (the FetchLMStudioModels pattern — enables cross-process sharing).
+// It validates the response shape ({"data":[{"id":...}]}) rather than trusting a
+// bare 200, so a foreign process squatting the fixed port is not adopted as the
+// embed server (which would yield garbage embeddings with no error).
 func probeLocalServer(base, healthPath string) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(base + healthPath)
@@ -27,7 +32,22 @@ func probeLocalServer(base, healthPath string) bool {
 		return false
 	}
 	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false
+	}
+	var models struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &models); err != nil {
+		return false
+	}
+	return len(models.Data) > 0 && models.Data[0].ID != ""
 }
 
 // EnsureLocalServer guarantees a shared local embed server is running and returns
@@ -64,11 +84,14 @@ func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setSta
 	}
 
 	// Build the launch command line from LaunchArgv with {bin}/{port} substituted.
+	// StartBackground runs the result via `bash -c`, so each element is shell-quoted
+	// — otherwise a cache path containing a space (e.g. "/Users/Jane Doe/...") would
+	// split into multiple args.
 	argv := make([]string, len(man.LaunchArgv))
 	for i, a := range man.LaunchArgv {
 		a = strings.ReplaceAll(a, "{bin}", binDir)
 		a = strings.ReplaceAll(a, "{port}", localServerPort)
-		argv[i] = a
+		argv[i] = shellQuote(a)
 	}
 	cmdline := strings.Join(argv, " ")
 	emitDiscoveryDebug("DISCOVERY", "spawning local embed server: "+cmdline)
@@ -94,6 +117,12 @@ func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setSta
 		setStatus("none")
 	}
 	return "", 0, fmt.Errorf("local embed server did not become healthy on %s", base)
+}
+
+// shellQuote single-quotes a string for safe use in a `bash -c` command line,
+// escaping embedded single quotes via the '\'' idiom.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // NewLocalEmbedder wraps the HTTP embedder transport pointed at the local server.

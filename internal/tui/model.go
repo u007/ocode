@@ -31,8 +31,8 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
-	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/debuglog"
+	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/ide"
 	"github.com/u007/ocode/internal/lsp"
@@ -1348,7 +1348,6 @@ func newModel(opts ...RunOptions) model {
 		o = opts[0]
 	}
 	cfg, _ := config.Load()
-	agent.ApplyAgentConfig(cfg)
 	refreshCustomCommands(cfg)
 	_ = auth.HydrateEnv()
 
@@ -1892,18 +1891,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							return m, nil
 						}
 					} else {
+						// Wheel scrolls the viewport, leaving the active selection
+						// where it is. reconcileTreeScroll clamps the offset; since
+						// the cursor is unchanged it will not snap back to it.
 						if msg.Button == tea.MouseWheelUp {
-							if m.files.cursor > 0 {
-								m.files.cursor--
-								m.files.treeScrollX = 0
-							}
+							m.files.treeScrollY -= scrollSpeed
+							m.files.reconcileTreeScroll(m.width, m.height)
 							return m, nil
 						}
 						if msg.Button == tea.MouseWheelDown {
-							if m.files.cursor < len(m.files.nodes)-1 {
-								m.files.cursor++
-								m.files.treeScrollX = 0
-							}
+							m.files.treeScrollY += scrollSpeed
+							m.files.reconcileTreeScroll(m.width, m.height)
 							return m, nil
 						}
 					}
@@ -4594,43 +4592,27 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 						break
 					}
 					if m.git.filterQuery == "" {
-						// The rendered file list includes "● staged" and
-						// "○ unstaged/untracked" header rows that are not
-						// file items. Subtract those headers to map the
-						// visual row to the correct file index.
+						// Count header rows. The renderer places ALL headers
+						// first, then ALL file lines — not interleaved per
+						// section — so headerCount is the total number of
+						// section headers in the rendered output.
+						headerCount := 0
 						if len(m.git.stagedFiles) > 0 {
-							if logicalRow == 0 {
-								// Clicked the "● staged" header
-								break
-							}
-							if logicalRow <= len(m.git.stagedFiles) {
-								fileIdx = logicalRow - 1
-							} else if logicalRow == len(m.git.stagedFiles)+1 && len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
-								// Clicked the "○ unstaged/untracked" header
-								break
-							} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
-								fileIdx = logicalRow - 2 // skip both headers
-							} else {
-								fileIdx = logicalRow - 1 // skip staged header only
-							}
-						} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 && logicalRow == 0 {
-							// Clicked the "○ unstaged/untracked" header
-							break
-						} else if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
-							// No staged files; single header at row 0, files start at row 1.
-							fileIdx = logicalRow - 1
-						} else if len(m.git.stagedFiles)+len(m.git.unstagedFiles)+len(m.git.untrackedFiles) == 0 {
-							break // no files at all
+							headerCount++
 						}
+						if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
+							headerCount++
+						}
+						if logicalRow < headerCount {
+							break // clicked a header row
+						}
+						// fileListScroll accounts for scrolled-off files
+						// above the visible window.
+						fileIdx = m.git.fileListScroll + (logicalRow - headerCount)
 					} else {
 						// Filtered: flat list, no headers. Apply scroll
 						// offset so clicks map to the visible window.
 						fileIdx = logicalRow + m.git.fileListScroll
-					}
-					// When unfiltered, also apply scroll offset for the
-					// header-adjusted index.
-					if m.git.filterQuery == "" && fileIdx >= 0 {
-						fileIdx += m.git.fileListScroll
 					}
 					if fileIdx >= 0 && fileIdx < len(files) {
 						m.git.filesCursor = fileIdx
@@ -4762,6 +4744,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 						newOffset = totalLines - visibleLines
 					}
 					m.files.treeScrollY = newOffset
+					m.files.reconcileTreeScroll(m.width, m.height)
 				}
 			}
 			return m, nil, true
@@ -4770,6 +4753,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if idx, ok := m.files.treeNodeForClick(mouse, appHeaderHeight, m.styles); ok {
 			n := m.files.nodes[idx]
 			m.files.cursor = idx
+			// Keep lastScrollCursor/offset in sync with the other scroll paths
+			// (wheel, scrollbar, layout) so a later reconcile doesn't snap.
+			m.files.reconcileTreeScroll(m.width, m.height)
 			isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
 			m.lastClickTime = time.Now()
 			m.lastClickX = mouse.X
@@ -5420,6 +5406,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		// Map thumb position back to scroll offset
 		maxOffset := totalLines - visibleLines
 		m.files.treeScrollY = int(float64(relY) / float64(maxThumbTop) * float64(maxOffset))
+		m.files.reconcileTreeScroll(m.width, m.height)
 		return m, nil, true
 	}
 
@@ -10029,6 +10016,9 @@ func (m *model) layout() {
 	}
 	m.viewport.SetHeight(newHeight)
 	m.renderTranscript()
+	// Keep the file tree's persisted scroll offset valid across resizes so
+	// click hit-testing stays aligned with what View renders.
+	m.files.reconcileTreeScroll(m.width, m.height)
 	if !m.detail.empty() {
 		m.refreshTopDetailView()
 	}
