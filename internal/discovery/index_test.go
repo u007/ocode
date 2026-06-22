@@ -63,13 +63,18 @@ func TestSelectRankRelativeBounds(t *testing.T) {
 	if got := len(SelectRankRelative(ranked)); got != SelectCap {
 		t.Fatalf("cap not enforced: got %d want %d", got, SelectCap)
 	}
-	// 2 docs only → floor cannot exceed available; returns 2.
+	// 2 docs only → cannot exceed available; returns 2.
 	if got := len(SelectRankRelative(ranked[:2])); got != 2 {
-		t.Fatalf("floor must clamp to available: got %d", got)
+		t.Fatalf("must clamp to available: got %d", got)
 	}
-	// floor pulls in low scorers even outside delta.
-	spread := []Scored{{Score: 0.9}, {Score: 0.2}, {Score: 0.1}, {Score: 0.05}, {Score: 0.01}, {Score: 0.0}}
-	if got := len(SelectRankRelative(spread)); got != SelectFloor {
-		t.Fatalf("floor must apply: got %d want %d", got, SelectFloor)
+	// All scores below SelectMin → nothing passes, even with delta.
+	low := []Scored{{Score: 0.9}, {Score: 0.2}, {Score: 0.1}, {Score: 0.05}, {Score: 0.01}, {Score: 0.0}}
+	if got := len(SelectRankRelative(low)); got != 1 {
+		t.Fatalf("only top+above-min should pass: got %d want 1", got)
+	}
+	// All scores below SelectMin → empty result.
+	allLow := []Scored{{Score: 0.3}, {Score: 0.2}, {Score: 0.1}}
+	if got := len(SelectRankRelative(allLow)); got != 0 {
+		t.Fatalf("all below SelectMin should yield 0: got %d", got)
 	}
 }

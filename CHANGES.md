@@ -3,6 +3,8 @@
 ## [Unreleased]
 
 ### Added
+- **Project Type Signals in Discovery Query** — `discoveryQueryFromMessages` now accepts a `workDir` parameter and appends project type signals detected from marker files (`go.mod`, `pubspec.yaml`, `package.json`, etc.) to the discovery query, providing the embedder with project context for more relevant skill selection. Monorepo support via one-level subdirectory scanning with deduplication. New `projectSignals` helper. Locked in by `TestProjectSignals`.
+- **Shell Output `noUserMerge` Guard** — `buildAgentMessagesSnapshot` now uses a `noUserMerge` flag per message to prevent shell-command output (converted to `Role:"user"` messages) from being collapsed into adjacent real user prompts during the consecutive-user-merge pass. Locked in by `TestBuildSnapshotShellOutputDoesNotMergeIntoUserPrompts`.
 - **`/doc-sync` Slash Command** — New command that syncs AGENTS.md, rules, and skill docs to reflect current code changes using a small model. Runs on `doc-sync`-eligible small model to keep costs low. Supports `session` (changes since session start) and `all` (full diff) modes. Registered in `handleCommand` as a queued command (waits for current stream to end).
 - **Per-MCP-Tool Token Estimates** — `/context` now shows individual tool token counts per MCP server, giving visibility into which tools consume the most context budget.
 - **Skill Catalog Token Breakdown** — `/context` displays per-skill token estimates instead of a single compact catalog number, making it easier to identify heavy skills.
@@ -29,6 +31,10 @@
 - **`/discovery` Merged into `/discover`** — The `/discovery` slash command is removed; `/discover` now accepts `enable|disable` as well as `status|model`.
 - **Discovery Cache Under Global Data Dir** — `discoveryCacheDir()` uses `paths.GlobalDataDir()` (alongside sessions/auth/usage) instead of `os.UserConfigDir()`, keeping all ocode state in one consistent location.
 - **Web UI Tailscale Path Prefix Support** — `web/index.html` injects a runtime `<base>` element derived from the session path prefix, so built asset URLs resolve correctly behind `tailscale serve --set-path`. Vite `base` changed to `"./"` for relative asset references.
+
+### Changed
+- **Discovery Selection Policy** — Added `SelectMin` (0.40) as an absolute minimum similarity threshold; `SelectRankRelative` now requires items to pass BOTH the relative delta (`SelectDelta=0.15`) AND the absolute minimum (`>=SelectMin`). `SelectFloor` reduced from 5 to 0, eliminating forced low-quality skill attachments. Locked in by updated `TestSelectRankRelativeBounds`.
+- **Shell Command Output Preservation in Session Restore** — `buildAgentMessagesSnapshot` now converts shell-`*` tool_call+result pairs into `Role:"user"` messages instead of stripping them, preserving `!command` shell output in the LLM history across session restores. This avoids invalid DeepSeek message ordering (synthesized assistant tool_calls before first user message) and prevents orphaned tool results from contaminating the message stream. Locked in by `TestBuildAgentMessagesSnapshotKeepsShellOutputSeparate`.
 
 ### Fixed
 - **Memory Maintenance Client Fallback** — `memoryMaintenanceClient()` now returns the primary LLM client instead of nil when the small model is disabled, empty, or its config is missing. Previously, memory maintenance silently did nothing in these cases.

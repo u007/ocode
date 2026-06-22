@@ -192,6 +192,35 @@ func TestShellFinishedMessageIsRecorded(t *testing.T) {
 	}
 }
 
+func TestBuildAgentMessagesSnapshotKeepsShellOutputSeparate(t *testing.T) {
+	m := model{}
+	m.messages = []message{
+		{role: roleUser, text: "real request"},
+		{role: roleAssistant, text: "shell call", raw: &agent.Message{
+			Role: "assistant",
+			ToolCalls: []agent.ToolCall{
+				makeAgentToolCall("shell-1", "bash", `{"command":"echo hello"}`),
+			},
+		}},
+		{role: roleAssistant, text: "hello", raw: &agent.Message{
+			Role:    "tool",
+			ToolID:  "shell-1",
+			Content: "hello\n",
+		}},
+	}
+
+	snap, _ := m.buildAgentMessagesSnapshot()
+	if len(snap) != 2 {
+		t.Fatalf("expected shell output to stay separate from the prompt, got %#v", snap)
+	}
+	if snap[0].Role != "user" || snap[0].Content != "real request" {
+		t.Fatalf("expected first snapshot message to remain the real request, got %#v", snap[0])
+	}
+	if snap[1].Role != "user" || !strings.Contains(snap[1].Content, "Shell: `echo hello`") || !strings.Contains(snap[1].Content, "hello") {
+		t.Fatalf("expected second snapshot message to carry shell output separately, got %#v", snap[1])
+	}
+}
+
 func TestCommandRunningCounterTracksOverlappingCompletions(t *testing.T) {
 	m := model{
 		input:    newTestTextarea(),
@@ -211,6 +240,63 @@ func TestCommandRunningCounterTracksOverlappingCompletions(t *testing.T) {
 	got = updated.(model)
 	if got.cmdRunning() {
 		t.Fatal("expected command-running state to clear after all completions")
+	}
+}
+
+func TestBuildSnapshotShellOutputDoesNotMergeIntoUserPrompts(t *testing.T) {
+	// Regression: shell tool results were converted to Role:"user" messages,
+	// then the merge pass collapsed them into adjacent real user prompts,
+	// contaminating the LLM history.
+	m := model{
+		input:    newTestTextarea(),
+		viewport: fastviewport.New(80, 20),
+		styles:   ApplyThemeColors("tokyonight"),
+	}
+
+	// Build a sequence: user prompt → shell tool call → shell result → user prompt.
+	m.messages = []message{
+		{
+			role: roleUser,
+			text: "first prompt",
+			raw:  &agent.Message{Role: "user", Content: "first prompt"},
+		},
+		{
+			role: roleAssistant,
+			text: "running shell",
+			raw: &agent.Message{
+				Role: "assistant",
+				ToolCalls: []agent.ToolCall{
+					{ID: "shell-1", Function: struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					}{Name: "shell", Arguments: `{"command":"echo hi"}`}},
+				},
+			},
+		},
+		{
+			role: roleAssistant,
+			text: "hi\n",
+			raw:  &agent.Message{Role: "tool", ToolID: "shell-1", Content: "hi\n"},
+		},
+		{
+			role: roleUser,
+			text: "second prompt",
+			raw:  &agent.Message{Role: "user", Content: "second prompt"},
+		},
+	}
+
+	snap, _ := m.buildAgentMessagesSnapshot()
+	if len(snap) != 3 {
+		t.Fatalf("expected first prompt, shell output, and second prompt as separate messages, got %#v", snap)
+	}
+	if snap[0].Role != "user" || snap[0].Content != "first prompt" {
+		t.Fatalf("first prompt contaminated: %#v", snap[0])
+	}
+	if snap[1].Role != "user" || !strings.Contains(snap[1].Content, "Shell: `echo hi`") || !strings.Contains(snap[1].Content, "hi") {
+		t.Fatalf("shell output not preserved separately: %#v", snap[1])
+	}
+	if snap[2].Role != "user" || snap[2].Content != "second prompt" {
+		t.Fatalf("second prompt contaminated: %#v", snap[2])
 	}
 }
 

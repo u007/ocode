@@ -3,7 +3,10 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/config"
@@ -72,7 +75,7 @@ func TestDiscoveryQueryUsesRecentUserTurns(t *testing.T) {
 		{Role: "assistant", Content: "ok"},
 		{Role: "user", Content: "yes"},
 	}
-	q := discoveryQueryFromMessages(msgs)
+	q := discoveryQueryFromMessages(msgs, "")
 	if !containsSubstr(q, "notion") || !containsSubstr(q, "yes") {
 		t.Fatalf("query must blend recent user turns, got %q", q)
 	}
@@ -243,5 +246,49 @@ func TestInjectDiscoveryContextOnlyWhenActive(t *testing.T) {
 	}
 	if !containsSubstr(last.Content, "discover_more") {
 		t.Fatalf("prompt contract must mention discover_more")
+	}
+}
+
+func TestProjectSignals(t *testing.T) {
+	dir := t.TempDir()
+	// Empty dir → no signals.
+	if got := projectSignals(dir); got != "" {
+		t.Fatalf("empty dir should yield no signals, got %q", got)
+	}
+	// Empty workDir → no signals.
+	if got := projectSignals(""); got != "" {
+		t.Fatalf("empty workDir should yield no signals, got %q", got)
+	}
+	// Create go.mod in root.
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module foo"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := projectSignals(dir)
+	if !containsSubstr(got, "Go golang") {
+		t.Fatalf("should detect go.mod in root: %q", got)
+	}
+	// Add pubspec.yaml in subdirectory (monorepo).
+	sub := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(sub, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "pubspec.yaml"), []byte("name: flutter_app"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got = projectSignals(dir)
+	if !containsSubstr(got, "Go golang") || !containsSubstr(got, "Flutter Dart") {
+		t.Fatalf("monorepo should detect both: %q", got)
+	}
+	// Dedup: same marker in root and sub shouldn't duplicate.
+	sub2 := filepath.Join(dir, "sub2")
+	if err := os.MkdirAll(sub2, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub2, "go.mod"), []byte("module bar"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got = projectSignals(dir)
+	if strings.Count(got, "Go golang") != 1 {
+		t.Fatalf("should dedup signals: %q", got)
 	}
 }

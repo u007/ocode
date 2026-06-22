@@ -685,7 +685,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	}
 
 	preLen := len(messages)
-	a.RunDiscovery(discoveryQueryFromMessages(messages))
+	a.RunDiscovery(discoveryQueryFromMessages(messages, a.workDir))
 	messages = a.PrepareMessages(messages, "")
 	// Order matters for cache stability: stable content
 	// (PrepareMessages output) is followed by the volatile
