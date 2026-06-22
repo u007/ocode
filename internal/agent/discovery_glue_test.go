@@ -141,6 +141,53 @@ func TestDiscoveryStatusAndReset(t *testing.T) {
 	}
 }
 
+func TestOnDiscoveryCallback(t *testing.T) {
+	a := newGateAgent()
+	eng := discovery.NewEngine(discovery.FakeEmbedder{Dimension: 64}, t.TempDir())
+	_ = eng.Warm(context.Background(), []discovery.Doc{
+		{ID: "mcp:Notion/search", Kind: "mcp", Name: "Notion/search", Text: "search notion"},
+		{ID: "mcp:Notion/update", Kind: "mcp", Name: "Notion/update", Text: "update notion page"},
+	})
+	sess := discovery.NewSession(eng)
+	a.disco = &discoveryState{enabled: true, engine: eng, session: sess}
+
+	var got string
+	a.OnDiscovery = func(names string) {
+		got = names
+	}
+
+	// First call: both are new, both should be discovered
+	a.RunDiscovery("search")
+	if got == "" {
+		t.Fatalf("OnDiscovery should have been called with names, got empty")
+	}
+	if !strings.Contains(got, "Notion/search") && !strings.Contains(got, "Notion/update") {
+		t.Fatalf("expected Notion tools in discovered names, got %q", got)
+	}
+	first := got
+
+	// Second call: nothing new — OnDiscovery should not fire
+	got = ""
+	a.RunDiscovery("search")
+	if got != "" {
+		t.Fatalf("OnDiscovery should not have been called when nothing new is attached, got %q", got)
+	}
+
+	// Reset callback and test with empty string
+	got = ""
+	a.OnDiscovery = func(names string) {
+		got = names
+	}
+	// Seed a new session to clear state, then discover again
+	sess2 := discovery.NewSession(eng)
+	a.disco.session = sess2
+	a.RunDiscovery("update")
+	if got == "" {
+		t.Fatal("OnDiscovery should fire for new session")
+	}
+	_ = first // used
+}
+
 func TestMarkMCPFromParent(t *testing.T) {
 	parent := newGateAgent() // has Notion/search, Notion/update as MCP
 	child := &Agent{

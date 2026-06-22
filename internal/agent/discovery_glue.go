@@ -168,22 +168,34 @@ func (a *Agent) RunDiscovery(query string) {
 		a.disco.enabled = false
 		return
 	}
+	if len(added) > 0 && a.OnDiscovery != nil {
+		names := make([]string, 0, len(added))
+		for _, d := range added {
+			names = append(names, d.Name)
+		}
+		a.OnDiscovery(strings.Join(names, ", "))
+	}
 	emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total (q=%.60q)",
 		len(added), len(a.disco.session.Attached()), query))
 }
 
 type DiscoveryStatusInfo struct {
-	Active   bool
-	Model    string
-	Backend  string
-	Attached []string
-	MCPTotal int
-	InitErr  string
+	Active         bool
+	Model          string
+	Backend        string
+	Attached       []string // all attached IDs (skill:* and mcp:*)
+	MCPTotal       int
+	SkillTotal     int
+	AttachedSkills []string // filtered from Attached
+	AttachedMCP    []string // filtered from Attached
+	InitErr        string
 }
 
 // DiscoveryStatus reports the current discovery state (for /discover status, /context).
 func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 	st := DiscoveryStatusInfo{MCPTotal: len(a.mcpTools)}
+	allSkills := skill.LoadSkills()
+	st.SkillTotal = len(allSkills)
 	if a.config != nil {
 		st.Model = a.config.Ocode.Discovery.EmbeddingModel
 		st.Backend = a.config.Ocode.Discovery.EmbeddingBackend
@@ -193,6 +205,13 @@ func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 		st.InitErr = a.disco.initErr
 		if a.disco.session != nil {
 			st.Attached = a.disco.session.Attached()
+			for _, id := range st.Attached {
+				if strings.HasPrefix(id, "skill:") {
+					st.AttachedSkills = append(st.AttachedSkills, strings.TrimPrefix(id, "skill:"))
+				} else if strings.HasPrefix(id, "mcp:") {
+					st.AttachedMCP = append(st.AttachedMCP, strings.TrimPrefix(id, "mcp:"))
+				}
+			}
 		}
 	}
 	return st

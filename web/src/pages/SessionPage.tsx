@@ -12,6 +12,10 @@ import TopTabs from "../components/Layout/TopTabs";
 import CoworkSidebar from "../components/Layout/CoworkSidebar";
 import ModelDialog from "../components/Layout/ModelDialog";
 import PermissionDialog from "../components/Chat/PermissionDialog";
+import FileTree from "../components/Files/FileTree";
+import GitPanel from "../components/Git/GitPanel";
+import LogPanel from "../components/Logs/LogPanel";
+import AssetsPanel from "../components/Assets/AssetsPanel";
 import { useChat } from "../hooks/useChat";
 
 type ModelDialogTab = "main" | "small" | "advisor";
@@ -253,9 +257,13 @@ export default function SessionPage() {
               />
             </>
           )}
+          {activeTab === "files" && <FileTree />}
+          {activeTab === "git" && <GitPanel />}
           {activeTab === "status" && (
             <StatusPanel key={id} onClose={() => setActiveTab("chat")} />
           )}
+          {activeTab === "logs" && <LogPanel />}
+          {activeTab === "assets" && <AssetsPanel />}
         </main>
 
         {activeTab === "chat" && (
