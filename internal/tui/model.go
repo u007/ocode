@@ -616,41 +616,41 @@ type model struct {
 	pickerFilterSeq      int
 
 	// Pagination state for the session picker (infinite scroll)
-	pickerSessionRefs     []session.Ref // all loaded session refs
-	pickerSessionPage     int           // number of pages loaded so far
-	pickerSessionTotal    int           // total count of all sessions
-	pickerSessionMore     bool          // whether more pages are available
-	pickerSessionLoading  bool          // whether refs are currently being loaded
-	pickerSessionLoadSeq  int           // generation token for in-flight loads
-	pickerSessionLoadErr  string        // last load error shown in the picker
-	pickerRefreshing      bool          // true while a ctrl+r model-cache refresh is in flight
-	pickerSavedTheme      string        // theme to revert to on picker cancel
-	showSlashPopup        bool
-	slashPopupIndex       int
-	slashPopupItems       []slashSuggestion
-	fileListCache         []slashSuggestion
-	fileShortcodePaths    map[string]string
-	showConnect           bool
-	connect               *connectDialog
-	showSidebar           bool
-	sidebarScroll         int
-	sessionTelemetry      sidebarTelemetry
-	activeModel           string
-	showFileSearch        bool
-	fileSearchInput       string
-	fileSearchResults     []fileSearchResult
-	fileSearchIndex       int
-	fileSearchCache       []fileSearchResult
-	width                 int
-	height                int
-	ready                 bool
-	activeTab             int
-	chatUnread            bool
-	files                 filesModel
-	git                   gitModel
-	logViewport           viewport.Model
-	permViewport          viewport.Model
-	logEntries            []DebugEntry
+	pickerSessionRefs    []session.Ref // all loaded session refs
+	pickerSessionPage    int           // number of pages loaded so far
+	pickerSessionTotal   int           // total count of all sessions
+	pickerSessionMore    bool          // whether more pages are available
+	pickerSessionLoading bool          // whether refs are currently being loaded
+	pickerSessionLoadSeq int           // generation token for in-flight loads
+	pickerSessionLoadErr string        // last load error shown in the picker
+	pickerRefreshing     bool          // true while a ctrl+r model-cache refresh is in flight
+	pickerSavedTheme     string        // theme to revert to on picker cancel
+	showSlashPopup       bool
+	slashPopupIndex      int
+	slashPopupItems      []slashSuggestion
+	fileListCache        []slashSuggestion
+	fileShortcodePaths   map[string]string
+	showConnect          bool
+	connect              *connectDialog
+	showSidebar          bool
+	sidebarScroll        int
+	sessionTelemetry     sidebarTelemetry
+	activeModel          string
+	showFileSearch       bool
+	fileSearchInput      string
+	fileSearchResults    []fileSearchResult
+	fileSearchIndex      int
+	fileSearchCache      []fileSearchResult
+	width                int
+	height               int
+	ready                bool
+	activeTab            int
+	chatUnread           bool
+	files                filesModel
+	git                  gitModel
+	logViewport          viewport.Model
+	permViewport         viewport.Model
+	logEntries           []DebugEntry
 	// lastPromotedLogIdx is the index in DebugLog.Snapshot() up to which we
 	// have already considered promoting entries to the chat transcript
 	// (transient, skipLLM notices). New entries beyond this index whose
@@ -11583,49 +11583,88 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 		uiIdx = append(uiIdx, i)
 	}
 
-	// Strip shell-* tool_calls (from !command synthesis) that have already been
-	// responded to. DeepSeek is strict: assistant messages with tool_calls must
-	// be immediately followed by tool messages. Both the tool_call entries AND
-	// their corresponding tool result messages are stripped so orphaned tool
-	// results don't sit between remaining real tool_calls and their results.
-	strippedIDs := make(map[string]bool)
-	respondedToolIDs := make(map[string]bool)
-	for _, msg := range agentMsgs {
-		if msg.Role == "tool" && msg.ToolID != "" {
-			if strings.HasPrefix(msg.ToolID, "shell-") {
-				strippedIDs[msg.ToolID] = true
-			}
-			respondedToolIDs[msg.ToolID] = true
-		}
+	// Convert shell-* tool_call+result pairs (from !command synthesis) into user
+	// messages so the LLM sees the output. Keeping them as tool_calls is unsafe:
+	// synthesized assistant messages may appear before the first real user message
+	// (invalid for most providers), and DeepSeek requires assistant tool_calls to
+	// be immediately followed by tool messages with no intervening content.
+	type shellEntry struct {
+		command string
+		output  string
 	}
-	for i := range agentMsgs {
-		if agentMsgs[i].Role == "assistant" && len(agentMsgs[i].ToolCalls) > 0 {
-			var filtered []agent.ToolCall
-			for _, tc := range agentMsgs[i].ToolCalls {
-				isShell := strings.HasPrefix(tc.ID, "shell-")
-				if !isShell || !respondedToolIDs[tc.ID] {
-					filtered = append(filtered, tc)
+	shellCmds := make(map[string]shellEntry)
+	noUserMerge := make([]bool, 0, len(agentMsgs))
+	for _, msg := range agentMsgs {
+		if msg.Role == "assistant" {
+			for _, tc := range msg.ToolCalls {
+				if strings.HasPrefix(tc.ID, "shell-") {
+					var args struct {
+						Command string `json:"command"`
+					}
+					_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
+					e := shellCmds[tc.ID]
+					e.command = args.Command
+					shellCmds[tc.ID] = e
 				}
 			}
-			agentMsgs[i].ToolCalls = filtered
 		}
+		if msg.Role == "tool" && strings.HasPrefix(msg.ToolID, "shell-") {
+			e := shellCmds[msg.ToolID]
+			e.output = msg.Content
+			shellCmds[msg.ToolID] = e
+		}
+		noUserMerge = append(noUserMerge, false)
 	}
-	// Strip orphaned shell-* tool result messages whose matching tool_calls
-	// were removed above.
-	if len(strippedIDs) > 0 {
-		filtered := agentMsgs[:0]
-		uiFiltered := uiIdx[:0]
+	if len(shellCmds) > 0 {
+		var rebuilt []agent.Message
+		var uiRebuilt []int
+		var rebuiltNoUserMerge []bool
 		for i, msg := range agentMsgs {
-			if msg.Role == "tool" && msg.ToolID != "" && strippedIDs[msg.ToolID] {
-				continue
-			}
-			filtered = append(filtered, msg)
+			idx := -1
 			if i < len(uiIdx) {
-				uiFiltered = append(uiFiltered, uiIdx[i])
+				idx = uiIdx[i]
+			}
+			if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {
+				var filtered []agent.ToolCall
+				for _, tc := range msg.ToolCalls {
+					if !strings.HasPrefix(tc.ID, "shell-") {
+						filtered = append(filtered, tc)
+					}
+				}
+				if len(filtered) > 0 || msg.Content != "" {
+					msg.ToolCalls = filtered
+					rebuilt = append(rebuilt, msg)
+					uiRebuilt = append(uiRebuilt, idx)
+					rebuiltNoUserMerge = append(rebuiltNoUserMerge, false)
+				}
+				// else: assistant message that only had shell tool_calls — drop it
+			} else if msg.Role == "tool" && strings.HasPrefix(msg.ToolID, "shell-") {
+				entry := shellCmds[msg.ToolID]
+				var sb strings.Builder
+				if entry.command != "" {
+					sb.WriteString("Shell: `")
+					sb.WriteString(entry.command)
+					sb.WriteString("`\nOutput:\n```\n")
+					sb.WriteString(entry.output)
+					if !strings.HasSuffix(entry.output, "\n") {
+						sb.WriteByte('\n')
+					}
+					sb.WriteString("```")
+				} else {
+					sb.WriteString(entry.output)
+				}
+				rebuilt = append(rebuilt, agent.Message{Role: "user", Content: sb.String()})
+				uiRebuilt = append(uiRebuilt, idx)
+				rebuiltNoUserMerge = append(rebuiltNoUserMerge, true)
+			} else {
+				rebuilt = append(rebuilt, msg)
+				uiRebuilt = append(uiRebuilt, idx)
+				rebuiltNoUserMerge = append(rebuiltNoUserMerge, false)
 			}
 		}
-		agentMsgs = filtered
-		uiIdx = uiFiltered
+		agentMsgs = rebuilt
+		uiIdx = uiRebuilt
+		noUserMerge = rebuiltNoUserMerge
 	}
 
 	// Merge consecutive same-role user messages. Session resume can produce
@@ -11635,7 +11674,7 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 	mergedLen := 0
 	mergedUserCount := 0
 	for i, msg := range agentMsgs {
-		if mergedLen > 0 && agentMsgs[mergedLen-1].Role == msg.Role && msg.Role == "user" {
+		if mergedLen > 0 && agentMsgs[mergedLen-1].Role == msg.Role && msg.Role == "user" && !noUserMerge[mergedLen-1] && !noUserMerge[i] {
 			sep := "\n"
 			if agentMsgs[mergedLen-1].Content == "" {
 				sep = ""

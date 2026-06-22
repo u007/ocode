@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -262,7 +263,7 @@ func (a *Agent) discoveryAllows(name string) bool {
 // discoveryQueryFromMessages builds the query from the last user message plus a
 // small rolling window of prior user turns (short follow-ups embed to noise
 // otherwise). Capped to ~2048 chars.
-func discoveryQueryFromMessages(msgs []Message) string {
+func discoveryQueryFromMessages(msgs []Message, workDir string) string {
 	var userTurns []string
 	for i := len(msgs) - 1; i >= 0 && len(userTurns) < 3; i-- {
 		if msgs[i].Role == "user" {
@@ -270,10 +271,64 @@ func discoveryQueryFromMessages(msgs []Message) string {
 		}
 	}
 	q := strings.Join(userTurns, "\n")
+	// Append project type signals so the embedder can distinguish e.g. Go from
+	// Flutter when the user's text is ambiguous (e.g. "refactor this function").
+	if sig := projectSignals(workDir); sig != "" {
+		q += "\nProject context: " + sig
+	}
 	if len(q) > 2048 {
 		q = q[len(q)-2048:]
 	}
 	return q
+}
+
+// projectSignals detects the project type from marker files in workDir
+// (including one level of subdirectories for monorepo support) and returns a
+// short descriptive string for the discovery query. Empty if no markers found.
+func projectSignals(workDir string) string {
+	if workDir == "" {
+		return ""
+	}
+	// Map of marker file → signal text.
+	markers := map[string]string{
+		"go.mod":         "Go golang project, Go modules",
+		"pubspec.yaml":   "Flutter Dart project",
+		"package.json":   "JavaScript TypeScript Node.js project",
+		"Cargo.toml":     "Rust Cargo project",
+		"pyproject.toml": "Python project",
+		"pom.xml":        "Java Maven project",
+		"build.gradle":   "Java Kotlin Gradle project",
+		"Gemfile":        "Ruby project",
+		"composer.json":  "PHP project",
+		"mix.exs":        "Elixir project",
+	}
+	seen := make(map[string]bool) // dedupe signals
+	var signals []string
+	addSignals := func(dir string) {
+		for file, signal := range markers {
+			if seen[signal] {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(dir, file)); err == nil {
+				seen[signal] = true
+				signals = append(signals, signal)
+			}
+		}
+	}
+	// Check root first.
+	addSignals(workDir)
+	// Scan immediate subdirectories for monorepo support (e.g. root has go.mod,
+	// sub/flutter has pubspec.yaml). Limit to one level to avoid slow traversals.
+	entries, err := os.ReadDir(workDir)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
+			addSignals(filepath.Join(workDir, e.Name()))
+		}
+	}
+	return strings.Join(signals, ", ")
 }
 
 const promptDiscoveryMarker = "[ocode:discovery]"

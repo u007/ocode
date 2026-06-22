@@ -63,14 +63,18 @@ func (c *Corpus) Rank(query []float32) []Scored {
 	return out
 }
 
-// Selection policy constants (internal — see spec; not user-tunable).
+// Selection policy constants (internal — not user-tunable).
 const (
 	SelectDelta float32 = 0.15 // keep items within this of the top score
-	SelectFloor         = 5    // always attach at least this many (or all if fewer)
+	SelectMin   float32 = 0.40 // absolute minimum similarity to attach
+	SelectFloor         = 0    // always attach at least this many (0 = only delta+min matches)
 	SelectCap           = 30   // never attach more than this
 )
 
 // SelectRankRelative applies the rank-relative policy to a descending-sorted slice.
+// Items must pass BOTH the relative delta (within SelectDelta of top score) AND
+// the absolute minimum (>= SelectMin). SelectFloor ensures at least N items are
+// returned even when all scores are low (0 = no floor).
 func SelectRankRelative(ranked []Scored) []Scored {
 	if len(ranked) == 0 {
 		return nil
@@ -79,7 +83,8 @@ func SelectRankRelative(ranked []Scored) []Scored {
 	keep := 0
 	for i, s := range ranked {
 		within := top-s.Score <= SelectDelta
-		if i < SelectFloor || within {
+		passesMin := s.Score >= SelectMin
+		if (i < SelectFloor || within) && passesMin {
 			keep = i + 1
 		}
 	}
