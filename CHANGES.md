@@ -3,6 +3,10 @@
 ## [Unreleased]
 
 ### Added
+- **`/doc-sync` Slash Command** — New command that syncs AGENTS.md, rules, and skill docs to reflect current code changes using a small model. Runs on `doc-sync`-eligible small model to keep costs low. Supports `session` (changes since session start) and `all` (full diff) modes. Registered in `handleCommand` as a queued command (waits for current stream to end).
+- **Per-MCP-Tool Token Estimates** — `/context` now shows individual tool token counts per MCP server, giving visibility into which tools consume the most context budget.
+- **Skill Catalog Token Breakdown** — `/context` displays per-skill token estimates instead of a single compact catalog number, making it easier to identify heavy skills.
+- **Version Bump** — 0.6.0 → 0.6.1.
 - **Plugin Agent Loading** — Agent registry now supports plugin-aware markdown agent loading via `ReloadMarkdownAgents(enabled)`. Orchestrator agents moved from `.opencode/agents/` to `.opencode/plugins/orchestrator/agents/`. Plugin loader supports `agents/` and `commands/` subdirectories. New `LoadPluginCommandDirPaths`, `LoadGlobalPluginAgentsDirPaths`, `LoadProjectPluginAgentsDirPaths`. Locked in by `TestOrchestratorAgentFilesParse`.
 - **Discovery Volatility Split** — `injectDiscoveryContext` split into stable (system-role) and volatile (user-role) messages for Anthropic prompt cache stability. New `renderDiscoveryContext` helper with volatility-split contract. Locked in by `TestRenderDiscoveryContext`.
 - **Environment Prompt Cache** — `environmentPrompt()` now caches its result keyed by date; cache invalidated on workdir/model change via `clearEnvironmentPromptCache()`. `PrepareMessages` strips stale env block before re-insertion.
@@ -27,6 +31,11 @@
 - **Web UI Tailscale Path Prefix Support** — `web/index.html` injects a runtime `<base>` element derived from the session path prefix, so built asset URLs resolve correctly behind `tailscale serve --set-path`. Vite `base` changed to `"./"` for relative asset references.
 
 ### Fixed
+- **Memory Maintenance Client Fallback** — `memoryMaintenanceClient()` now returns the primary LLM client instead of nil when the small model is disabled, empty, or its config is missing. Previously, memory maintenance silently did nothing in these cases.
+- **Web UI Base Path Regex** — Fixed regex anchor in `web/index.html` and `web/dist/index.html` (`[^/]+` → `[^/]+$`) for tailscale path prefix detection, preventing partial path matches.
+- **Discovery Notice Batch Rendering** — `appendDiscoveryNotice` no longer calls `rerenderTranscriptAndMaybeScroll` internally; the caller now batches notices and re-renders once, eliminating redundant re-renders when multiple log entries arrive simultaneously.
+- **Log Promotion Scroll** — Transcript now scrolls correctly after batch-promoting user-facing discovery log entries, using a `promoted` flag to trigger a single scroll pass.
+- **Tailscale Cleanup Output Capture** — `removeTailscaleSetPath` now captures stdout/stderr from the tailscale cleanup command, including output in debug logs for easier troubleshooting.
 - **Tailscale Stale Sibling Path** — `tailscaleURLWithPathPrefix` now replaces the URL path entirely instead of appending, preventing a stale sibling session's `--set-path` from producing a doubled, unroutable prefix. `stopRCServer` now removes only this session's `--set-path` mount via `removeTailscaleSetPath`. Locked in by `TestTailscaleURLWithPathPrefix`.
 - **Local Backend Validation on Discovery Enable** — `setDiscoveryEnabled` skips `discovery.ResolveEmbedder` when the backend is `"local"`, since the local embedder is constructed lazily by the agent (which has process-spawning access). Previously, enabling discovery with the local model would fail at validation time.
 - **File Tree Click After Scrolling** — `treeNodeForClick` now accounts for `treeScrollY` when mapping screen row to node index, so clicking on the file tree after scrolling down selects the correct file instead of being off-by-one.

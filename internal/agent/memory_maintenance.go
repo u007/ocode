@@ -129,20 +129,26 @@ func (a *Agent) runMemoryMaintenance(req MemoryMaintenanceRequest) {
 }
 
 func (a *Agent) memoryMaintenanceClient() LLMClient {
-	if a == nil || a.config == nil || !a.config.Ocode.SmallModelEnabled {
+	if a == nil {
 		return nil
+	}
+	if a.config == nil {
+		return a.client
+	}
+	if !a.config.Ocode.SmallModelEnabled {
+		return a.client
 	}
 	model := strings.TrimSpace(a.config.Ocode.SmallModel)
 	if model == "" {
 		model = ResolveSmallModel(a.config)
 	}
 	if model == "" {
-		return nil
+		return a.client
 	}
 	if client := newClientFn(a.config, model); client != nil {
 		return client
 	}
-	return nil
+	return a.client
 }
 
 func (a *Agent) runMemoryMaintenancePass(client LLMClient, req MemoryMaintenanceRequest, scopes map[string]memoryScopeState, forcedScope, forcedAction string) (*memoryMaintenanceDecision, error) {
