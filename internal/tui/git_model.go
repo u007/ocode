@@ -145,6 +145,11 @@ type gitModel struct {
 	// file list scroll offset for the Changes section; items above this
 	// index are scrolled off the top of the files pane.
 	fileListScroll int
+	// lastScrollCursor tracks the cursor value at the last scroll-snap check.
+	// When the wheel scrolls fileListScroll without moving the cursor, the
+	// clamp keeps the cursor in place instead of snapping it back. Matches
+	// the pattern in filesModel.reconcileTreeScroll.
+	lastScrollCursor int
 	// logger receives a copy of every terminal-state user action (push, pull,
 	// fetch, commit, stage/unstage, stash, branch ops, etc.) so the main
 	// model can append it to the log tab. nil means "no sink installed",
@@ -784,6 +789,7 @@ func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 			m.filterQuery = ""
 			m.filesCursor = 0
 			m.fileListScroll = 0
+			m.lastScrollCursor = 0
 			m.panel = gitPanelFiles
 			return m, nil
 		}
@@ -803,6 +809,7 @@ func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 func (m *gitModel) resetCursors() {
 	m.filesCursor = 0
 	m.fileListScroll = 0
+	m.lastScrollCursor = 0
 	m.commitCursor = 0
 	m.stashCursor = 0
 	m.branchCursor = 0
@@ -845,12 +852,14 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			m.filterQuery = ""
 			m.filesCursor = 0
 			m.fileListScroll = 0
+			m.lastScrollCursor = 0
 			m.loadDiff()
 		case "backspace":
 			if len(m.filterQuery) > 0 {
 				m.filterQuery = m.filterQuery[:len(m.filterQuery)-1]
 				m.filesCursor = 0
 				m.fileListScroll = 0
+				m.lastScrollCursor = 0
 				m.loadDiff()
 			}
 		case "enter":
@@ -860,6 +869,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.filterQuery += key
 				m.filesCursor = 0
 				m.fileListScroll = 0
+				m.lastScrollCursor = 0
 				m.loadDiff()
 			}
 		}
@@ -1778,6 +1788,9 @@ func (m gitModel) fileListVisibleRows() int {
 
 // clampFileListScroll adjusts fileListScroll so that the cursor is always
 // visible inside the files pane and the scroll never exceeds the list bounds.
+// It only snaps scroll to cursor visibility when the cursor has moved since the
+// last call, preserving independent mouse-wheel scrolling (same pattern as
+// filesModel.reconcileTreeScroll).
 func (m *gitModel) clampFileListScroll() {
 	if m.section != gitSectionChanges {
 		return
@@ -1790,6 +1803,19 @@ func (m *gitModel) clampFileListScroll() {
 
 	visibleRows := m.fileListVisibleRows()
 
+	// Keep the cursor inside the visible window only when the cursor moved
+	// since the last clamp call. This decouples mouse-wheel scroll from
+	// cursor-commanded scroll.
+	if m.filesCursor != m.lastScrollCursor {
+		if m.filesCursor < m.fileListScroll {
+			m.fileListScroll = m.filesCursor
+		}
+		if m.filesCursor >= m.fileListScroll+visibleRows {
+			m.fileListScroll = m.filesCursor - visibleRows + 1
+		}
+		m.lastScrollCursor = m.filesCursor
+	}
+
 	// Clamp scroll so the view doesn't extend past the end of the list.
 	maxScroll := len(files) - visibleRows
 	if maxScroll < 0 {
@@ -1800,14 +1826,6 @@ func (m *gitModel) clampFileListScroll() {
 	}
 	if m.fileListScroll < 0 {
 		m.fileListScroll = 0
-	}
-
-	// Keep the cursor inside the visible window.
-	if m.filesCursor < m.fileListScroll {
-		m.fileListScroll = m.filesCursor
-	}
-	if m.filesCursor >= m.fileListScroll+visibleRows {
-		m.fileListScroll = m.filesCursor - visibleRows + 1
 	}
 }
 

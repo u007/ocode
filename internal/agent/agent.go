@@ -109,6 +109,11 @@ type Agent struct {
 	redactionScanner redact.Scanner
 	// redactionEnabled gates all runtime redaction behaviour for the agent.
 	redactionEnabled bool
+	// OnDiscovery, if set, is called by RunDiscovery with the names of
+	// newly attached skills/MCP tools after each turn's ranking. Names are
+	// space-separated to avoid allocating a slice per turn when only an
+	// empty discard is needed. The callback fires at most once per Step.
+	OnDiscovery func(newlyAttached string)
 	// advisorEnabled is a runtime gate for the "advisor" tool. It is seeded
 	// from cfg.Ocode.Advisor.Enabled at construction and can be flipped at
 	// runtime (e.g. from the web sidebar) WITHOUT persisting to config.

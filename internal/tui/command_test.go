@@ -896,6 +896,34 @@ func TestContextCommandOutputsSections(t *testing.T) {
 	}
 }
 
+func TestContextCommandDiscoveryOnLabels(t *testing.T) {
+	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil)}
+	m.config = &config.Config{}
+	m.config.Ocode.Discovery.Enabled = true
+	m.handleContextCmd(nil)
+	if len(m.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(m.messages))
+	}
+	want := "Skill catalog (not pre-injected — discovery active)"
+	if !strings.Contains(m.messages[0].text, want) {
+		t.Fatalf("expected %q in context output when discovery is on, got %q", want, m.messages[0].text)
+	}
+	// Should NOT contain the old label
+	if strings.Contains(m.messages[0].text, "Skill catalog (pre-injected)") {
+		t.Fatal("context output should not contain 'pre-injected' label when discovery is on")
+	}
+	// Should contain Discovery section
+	if !strings.Contains(m.messages[0].text, "Discovery") {
+		t.Fatalf("expected Discovery section in context output when discovery is on")
+	}
+	if !strings.Contains(m.messages[0].text, "Skills attached") {
+		t.Fatalf("expected 'Skills attached' in Discovery section")
+	}
+	if m.messages[0].raw != nil {
+		t.Fatal("context command output must not set raw field")
+	}
+}
+
 // oneShotStreamClient returns a single tool-free assistant message so a.Step
 // completes in one turn without retries or hanging.
 type oneShotStreamClient struct{}

@@ -1931,6 +1931,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if m.activeTab == tabGit {
+			panelW := m.panelWidth()
+			sectW := panelW * 20 / 100
+			filesW := panelW * 30 / 100
+			sectRight := sectW
+			filesRight := sectRight + filesW
+			mouseX := msg.Mouse().X
+
+			// Mouse wheel over the files column scrolls the file list.
+			if mouseX >= sectRight && mouseX < filesRight {
+				if msg.Button == tea.MouseWheelUp {
+					m.git.fileListScroll -= scrollSpeed
+					m.git.clampFileListScroll()
+					return m, nil
+				}
+				if msg.Button == tea.MouseWheelDown {
+					m.git.fileListScroll += scrollSpeed
+					m.git.clampFileListScroll()
+					return m, nil
+				}
+			}
+			// All other areas scroll the diff panel.
 			if msg.Button == tea.MouseWheelUp {
 				m.git.diff.ScrollUp(scrollSpeed)
 				return m, nil
@@ -3358,6 +3379,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitTitleEvent(m.titleCh)
 	case deltaMsg:
+		if msg.delta.kind == "discovery" {
+			m.appendDiscoveryNotice("Discovered: " + msg.delta.text)
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+		}
 		m.applyThinkingDelta(msg.delta.kind, msg.delta.text)
 		// Mirror live token deltas to the /rc web UI.
 		if msg.delta.text != "" {
@@ -6343,9 +6369,13 @@ func (m *model) showDiscoverStatus() {
 		if !st.Active && st.InitErr != "" {
 			fmt.Fprintf(&b, "  note:    fail-open (%s)\n", st.InitErr)
 		}
-		fmt.Fprintf(&b, "  attached this session (%d/%d MCP tools):\n", len(st.Attached), st.MCPTotal)
-		for _, id := range st.Attached { // already sorted
-			fmt.Fprintf(&b, "    - %s\n", id)
+		fmt.Fprintf(&b, "  attached skills (%d/%d):\n", len(st.AttachedSkills), st.SkillTotal)
+		for _, name := range st.AttachedSkills {
+			fmt.Fprintf(&b, "    - %s\n", name)
+		}
+		fmt.Fprintf(&b, "  attached MCP tools (%d/%d):\n", len(st.AttachedMCP), st.MCPTotal)
+		for _, name := range st.AttachedMCP {
+			fmt.Fprintf(&b, "    - %s\n", name)
 		}
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
@@ -8115,6 +8145,8 @@ func (m *model) handleContextCmd(args []string) {
 		return
 	}
 
+	discoveryOn := m.config != nil && m.config.Ocode.Discovery.Enabled && m.agent != nil
+
 	var b strings.Builder
 	b.WriteString("Context Budget\n")
 	b.WriteString(strings.Repeat("═", 38) + "\n")
@@ -8287,12 +8319,16 @@ func (m *model) handleContextCmd(args []string) {
 	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(toolsTotal))
 
 	injectedTotal := baseTotal + toolsTotal
-	b.WriteString("\nSkill catalog (pre-injected)\n")
 	skills := skill.LoadSkills()
+	catalogTok := 0
+	if discoveryOn {
+		b.WriteString("\nSkill catalog (not pre-injected — discovery active)\n")
+	} else {
+		b.WriteString("\nSkill catalog (pre-injected)\n")
+	}
 	if len(skills) == 0 {
 		b.WriteString("  (none found)\n")
 	} else {
-		catalogTok := 0
 		for _, s := range skills {
 			line := "- " + s.Name
 			if s.Description != "" {
@@ -8305,7 +8341,9 @@ func (m *model) handleContextCmd(args []string) {
 			catalogTok += lineTok
 			fmt.Fprintf(&b, "  %-28s ~%s tok\n", s.Name, formatTok(lineTok))
 		}
-		injectedTotal += catalogTok
+		if !discoveryOn {
+			injectedTotal += catalogTok
+		}
 	}
 	fmt.Fprintf(&b, "\n  %-28s ~%s tok\n", "Injected per request", formatTok(injectedTotal))
 
@@ -8369,18 +8407,22 @@ func (m *model) handleContextCmd(args []string) {
 		b.WriteString("  Usage      n/a\n")
 	}
 
-	// Discovery section: only when the user has opted in (and an agent exists).
-	// Helps the user verify the gate is active and see the net context savings
-	// vs the name-index + query-embed cost.
-	if m.config != nil && m.config.Ocode.Discovery.Enabled && m.agent != nil {
+	// Discovery section: attached skills and MCP tool gate status.
+	if discoveryOn {
 		st := m.agent.DiscoveryStatus()
-		attached, total, gatedToks, indexToks := m.agent.DiscoveryGatedTokens()
+		mcpAttached, mcpTotal, gatedToks, indexToks := m.agent.DiscoveryGatedTokens()
 		b.WriteString("\nDiscovery\n")
 		fmt.Fprintf(&b, "  %-28s %s %s\n", "Backend/model", st.Backend, st.Model)
 		if !st.Active && st.InitErr != "" {
 			fmt.Fprintf(&b, "  %-28s fail-open: %s\n", "Status", st.InitErr)
 		}
-		fmt.Fprintf(&b, "  %-28s %d/%d\n", "MCP tools attached", attached, total)
+		fmt.Fprintf(&b, "  %-28s %d/%d\n", "Skills attached", len(st.AttachedSkills), st.SkillTotal)
+		if len(st.AttachedSkills) > 0 {
+			for _, name := range st.AttachedSkills {
+				fmt.Fprintf(&b, "    - %s\n", name)
+			}
+		}
+		fmt.Fprintf(&b, "  %-28s %d/%d\n", "MCP tools attached", mcpAttached, mcpTotal)
 		const queryEmbedToks = 64 // rough per-turn query embedding cost
 		net := gatedToks - indexToks - queryEmbedToks
 		if net < 0 {
@@ -8388,7 +8430,7 @@ func (m *model) handleContextCmd(args []string) {
 		}
 		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (gross)", formatTok(gatedToks))
 		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (net)", formatTok(net))
-		fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools not attached", total-attached)
+		fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools not attached", mcpTotal-mcpAttached)
 	}
 
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
@@ -9470,6 +9512,18 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		}
 		// Use a non-blocking send so the goroutine cannot hang forever when the
 		// channel is drained by waitStreamEvent after cancel closes. Without this,
+		a.OnDiscovery = func(names string) {
+			if names == "" {
+				return
+			}
+			// Piggyback on the delta channel so waitStreamEvent delivers it
+			// through the normal stream path.
+			select {
+			case deltaCh <- deltaEvent{kind: "discovery", text: names}:
+			default:
+				// drop on backpressure — not critical.
+			}
+		}
 		// OnMessage would block on a full ch after the TUI stops reading, leaking
 		// the goroutine and keeping the activity tracker stuck in LLMRunning=true.
 		a.OnMessage = func(am agent.Message) {
@@ -9510,6 +9564,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		a.SetPreloadedContext("")
 		a.OnDelta = nil
 		a.OnMessage = nil
+		a.OnDiscovery = nil
 		close(msgCh)
 		errCh <- err
 	}()

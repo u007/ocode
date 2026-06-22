@@ -31,10 +31,15 @@
 - **`/discovery` Merged into `/discover`** — The `/discovery` slash command is removed; `/discover` now accepts `enable|disable` as well as `status|model`.
 - **Discovery Cache Under Global Data Dir** — `discoveryCacheDir()` uses `paths.GlobalDataDir()` (alongside sessions/auth/usage) instead of `os.UserConfigDir()`, keeping all ocode state in one consistent location.
 - **Web UI Tailscale Path Prefix Support** — `web/index.html` injects a runtime `<base>` element derived from the session path prefix, so built asset URLs resolve correctly behind `tailscale serve --set-path`. Vite `base` changed to `"./"` for relative asset references.
+- **OnDiscovery Callback** — `Agent.OnDiscovery` field fires with newly attached skill/MCP names after each discovery ranking turn. TUI `streamStep` wires it to the delta channel, surfacing real-time discovery notices in the chat transcript. Locked in by `TestOnDiscoveryCallback`.
+- **DiscoveryStatusInfo Split** — `DiscoveryStatusInfo` now exposes `SkillTotal`, `AttachedSkills`, and `AttachedMCP` separately, giving `/discover status` and `/context` clearer per-category visibility into attached skills versus MCP tools.
+- **Web UI Session Tab Panels** — `SessionPage` now renders `FileTree`, `GitPanel`, `LogPanel`, and `AssetsPanel` tab content, enabling the web UI to show files, git, logs, and asset management panels inline.
 
 ### Changed
 - **Discovery Selection Policy** — Added `SelectMin` (0.40) as an absolute minimum similarity threshold; `SelectRankRelative` now requires items to pass BOTH the relative delta (`SelectDelta=0.15`) AND the absolute minimum (`>=SelectMin`). `SelectFloor` reduced from 5 to 0, eliminating forced low-quality skill attachments. Locked in by updated `TestSelectRankRelativeBounds`.
 - **Shell Command Output Preservation in Session Restore** — `buildAgentMessagesSnapshot` now converts shell-`*` tool_call+result pairs into `Role:"user"` messages instead of stripping them, preserving `!command` shell output in the LLM history across session restores. This avoids invalid DeepSeek message ordering (synthesized assistant tool_calls before first user message) and prevents orphaned tool results from contaminating the message stream. Locked in by `TestBuildAgentMessagesSnapshotKeepsShellOutputSeparate`.
+- **`/context` Discovery-Aware Labels** — `/context` now shows `"Skill catalog (not pre-injected — discovery active)"` when discovery is enabled, and splits attached skills from MCP tools in the Discovery section. Context budget excludes skill catalog tokens when discovery is active, reflecting the net savings from gating.
+- **`/discover status` Split Output** — `/discover status` now displays attached skills and MCP tools as separate lists with per-category counts, making it easier to see what's actually attached.
 
 ### Fixed
 - **Memory Maintenance Client Fallback** — `memoryMaintenanceClient()` now returns the primary LLM client instead of nil when the small model is disabled, empty, or its config is missing. Previously, memory maintenance silently did nothing in these cases.
@@ -233,6 +238,7 @@
 - **Path Link Miss Caching** — `pathLinkAtCol` now returns the token span on a miss so callers can cache negative results, avoiding redundant regex+stat work on non-path text.
 - **`cd` Bare Relative Dir Permission** — Commands like `cd web` are now correctly recognized as path operations instead of being treated as argless and misdirected to `$HOME`, fixing the out-of-scope veto from the guardrail layer.
 - **Status Bar Background Rendering** — Second line of the status bar now applies full-width background styling (matching the first line), eliminating the color gap that appeared in the middle of the bottom chrome.
+- **Git File List Mouse Wheel Scroll Snap-Back** — Mouse wheel scrolling over the git files column now scrolls independently of cursor position. New `lastScrollCursor` field tracks cursor moves so `clampFileListScroll()` only snaps the view when the cursor actively moves, not when the wheel scrolls. Same pattern as `filesModel.reconcileTreeScroll`.
 
 ## [0.3.5] — 2026-06-10
 
