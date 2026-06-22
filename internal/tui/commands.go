@@ -80,6 +80,7 @@ func init() {
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
 		{name: "/init", usage: "/init [focus]", help: "Analyze project and generate AGENTS.md", handler: runInitCmd},
 		{name: "/learn", usage: "/learn [focus]", help: "List project-root skills and guide skill creation/update", handler: runLearnCmd},
+		{name: "/doc-sync", usage: "/doc-sync [session|all]", help: "Update AGENTS.md/rules/skills to reflect current changes (small model)", handler: runDocSyncCmd},
 		{name: "/help", help: "Show this help", handler: runHelpCmd},
 		{name: "/themes", aliases: []string{"/theme"}, usage: "/themes [name]", help: "Choose or switch themes", handler: runThemesCmd},
 		{name: "/share", help: "Export a shareable session summary", handler: runShareCmd},
@@ -254,6 +255,10 @@ func runCompactCmd(m *model, args []string) tea.Cmd {
 
 func runRecapCmd(m *model, args []string) tea.Cmd {
 	return m.handleRecapCmd(args)
+}
+
+func runDocSyncCmd(m *model, args []string) tea.Cmd {
+	return m.handleDocSyncCmd(args)
 }
 
 func runLSPCmd(m *model, args []string) tea.Cmd {

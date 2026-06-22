@@ -48,6 +48,7 @@ var smallModelEligibleNames = map[string]bool{
 	"compaction":            true,
 	"orchestrator-planner":  true,
 	"orchestrator-explorer": true,
+	"doc-sync":              true,
 }
 
 // smallModelEligible reports whether the named agent is a candidate for the

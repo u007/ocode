@@ -153,7 +153,7 @@ consolidating the dispatch.
     `/mcp`, `/advisor`, `/mask`, `/btw`, `/by-the-way`, `/rc`,
     `/remote-control`, `/search`, `/find`.
   - **Queued by design (mutates persistent state mid-stream, so it must
-    wait for the current turn to end):** `/add-dir`, `/add-dirs`.
+    wait for the current turn to end):** `/add-dir`, `/add-dirs`, `/doc-sync`.
   - The list above is the source of truth; keep the in-code check in
     `handleCommand` in sync.
 - Use `ctrl+x` for leader keys and `ctrl+p` for palette.

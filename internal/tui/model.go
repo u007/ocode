@@ -2136,11 +2136,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.lastPromotedLogIdx > len(m.logEntries) {
 			m.lastPromotedLogIdx = 0
 		}
+		var promoted bool
 		for _, e := range m.logEntries[m.lastPromotedLogIdx:] {
 			if !e.UserFacing {
 				continue
 			}
 			m.appendDiscoveryNotice(e.Message)
+			promoted = true
+		}
+		if promoted {
+			m.rerenderTranscriptAndMaybeScroll()
 		}
 		m.lastPromotedLogIdx = len(m.logEntries)
 		if m.activeTab == tabLog {
@@ -8270,25 +8275,43 @@ func (m *model) handleContextCmd(args []string) {
 		}
 		toolsTotal += srvTok
 		label := fmt.Sprintf("MCP: %s  %d tools", srv, len(defs))
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", label, formatTok(srvTok))
+		fmt.Fprintf(&b, "  %s%s~%s tok\n", label, columnPad(label, 28), formatTok(srvTok))
+		for _, def := range defs {
+			fullName, _ := def["name"].(string)
+			shortName := strings.TrimPrefix(fullName, srv+"_")
+			raw, _ := json.Marshal(def)
+			tok := estimateTok(string(raw))
+			fmt.Fprintf(&b, "    %-24s ~%s tok\n", shortName, formatTok(tok))
+		}
 	}
 	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(toolsTotal))
 
 	injectedTotal := baseTotal + toolsTotal
 	b.WriteString("\nSkill catalog (pre-injected)\n")
-	skillCatalog := skill.BuildCatalog()
-	if skillCatalog == "" {
+	skills := skill.LoadSkills()
+	if len(skills) == 0 {
 		b.WriteString("  (none found)\n")
 	} else {
-		catalogTok := estimateTok(skillCatalog)
+		catalogTok := 0
+		for _, s := range skills {
+			line := "- " + s.Name
+			if s.Description != "" {
+				line += ": " + s.Description
+			}
+			if s.WhenToUse != "" {
+				line += " When to use: " + s.WhenToUse
+			}
+			lineTok := estimateTok(line)
+			catalogTok += lineTok
+			fmt.Fprintf(&b, "  %-28s ~%s tok\n", s.Name, formatTok(lineTok))
+		}
 		injectedTotal += catalogTok
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Compact catalog", formatTok(catalogTok))
 	}
 	fmt.Fprintf(&b, "\n  %-28s ~%s tok\n", "Injected per request", formatTok(injectedTotal))
 
 	// ── Skills ───────────────────────────────────
 	b.WriteString("\nSkills (full contents available on demand, not pre-injected)\n")
-	skills := skill.LoadSkills()
+	skills = skill.LoadSkills()
 	if len(skills) == 0 {
 		b.WriteString("  (none found)\n")
 	} else {
@@ -9788,9 +9811,12 @@ func removeTailscaleSetPath(pathPrefix string) {
 	}
 	for _, cmd := range []string{"funnel", "serve"} {
 		c := exec.Command(tailscalePath, cmd, "--set-path", pathPrefix, "off")
+		var out bytes.Buffer
+		c.Stdout = &out
+		c.Stderr = &out
 		if err := c.Run(); err != nil {
 			// Expected for whichever mode wasn't in use; log at debug-ish level.
-			log.Printf("tailscale %s --set-path %s off: %v", cmd, pathPrefix, err)
+			log.Printf("tailscale %s --set-path %s off: %v\n  output: %s", cmd, pathPrefix, err, strings.TrimRight(out.String(), "\n"))
 		}
 	}
 }
@@ -10694,8 +10720,8 @@ func (m *model) maybeScrollTranscriptToBottom() {
 // appendDiscoveryNotice adds a transient, no-LLM message to the chat
 // transcript for events the user is actively waiting on (artifact
 // downloads, model-server spawn, etc.). transient keeps it out of session
-// persistence; skipLLM keeps it out of the prompt. Called from the
-// debugLogMsg handler when a new user-facing log entry arrives.
+// persistence; skipLLM keeps it out of the prompt. The caller must call
+// rerenderTranscriptAndMaybeScroll after the batch (see debugLogMsg handler).
 func (m *model) appendDiscoveryNotice(text string) {
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7"))
 	m.messages = append(m.messages, message{
@@ -10704,7 +10730,6 @@ func (m *model) appendDiscoveryNotice(text string) {
 		transient: true,
 		skipLLM:   true,
 	})
-	m.rerenderTranscriptAndMaybeScroll()
 }
 
 // scrollToCompactionBanner scrolls the viewport so the compaction summary
