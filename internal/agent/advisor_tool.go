@@ -103,22 +103,25 @@ func (t AdvisorTool) Definition() map[string]interface{} {
 		"name": "advisor",
 		"description": "Consult a strategic advisor (backed by a configurable model) that can proactively explore the codebase with tools and provide a concise plan or course correction.\n\n" +
 			"The advisor model is resolved with this priority: OPENCODE_ADVISOR_MODEL env var > ocode.json [advisor] config > built-in default. Use the /advisor command to preset which model the advisor uses.\n\n" +
-			"Call advisor BEFORE substantive work — before writing code, editing files, committing to an interpretation, or building on an assumption. If the task requires orientation first (finding files, reading code, fetching docs), do that, then call advisor. Orientation is NOT substantive work, though the advisor can also do its own orientation if you feed it limited context.\n\n" +
+			"WHEN TO CALL:\n" +
+			"Call advisor only after you have gathered concrete findings — read relevant files, ran grep/glob searches, executed tests, or inspected command output. Do NOT call advisor with just the user's goal and no evidence: the advisor cannot substitute for your own exploration and calling it empty-handed wastes a round-trip.\n\n" +
+			"The right sequence is: explore → gather findings → call advisor with those findings → implement.\n\n" +
 			"Also call advisor:\n" +
 			"- When stuck — errors recurring, approach not converging, results that don't fit\n" +
 			"- When considering a change of approach\n" +
-			"- When you believe the task is complete. BEFORE this call, make your deliverable durable: write the file, save the result, commit the change\n\n" +
-			"On tasks longer than a few steps, call advisor at least once before committing to an approach and once before declaring done. On short reactive turns where tool output directly dictates the next action, skip advisor.\n\n" +
-			"Required tool arg prompt must include enough concrete context so the advisor can often avoid redundant exploration: user goal, constraints, files/paths already inspected, key findings or command outputs, attempts so far, and the exact decision/questions you want advice on.\n\n" +
-			"The advisor has its own exploration sub-agent tools (read, glob, grep, lsp, bash, websearch, etc.) but will only explore when the prompt doesn't provide enough context. Trust the information you give it — the advisor will not re-verify what you've already stated.\n\n" +
+			"- When you believe the task is complete (make your deliverable durable first: write the file, save the result, commit the change)\n\n" +
+			"Skip advisor on short reactive turns where tool output directly dictates the next action.\n\n" +
+			"WHAT TO INCLUDE IN THE PROMPT:\n" +
+			"User goal, constraints, files/paths already read, key findings or command outputs, attempts so far, and the exact decision or questions you want advice on. The prompt must contain concrete evidence — file paths, line numbers, error messages, test output — not just a restatement of the task.\n\n" +
+			"The advisor has exploration tools (read, glob, grep, lsp, bash, websearch) but will only use them for gaps you couldn't fill yourself. It will not re-verify what you've already stated.\n\n" +
 			"Give the advice serious weight. Only override if you have primary-source evidence that contradicts a specific claim. Surface conflicts in another advisor call rather than silently switching approaches.",
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
 				"prompt": map[string]interface{}{
 					"type": "string",
-					"description": "All context the advisor needs to provide guidance — include user goal, constraints, files/lines already inspected, key evidence/outputs, attempts so far, and the exact decision/questions you want advice on. " +
-						"The advisor trusts the information you provide and will only explore when additional context is needed — you do NOT need to pre-explore everything.",
+					"description": "All context the advisor needs: user goal, files already read with key findings, grep/test/command outputs, attempts so far, and the exact decision or questions you want advice on. " +
+						"Must contain concrete evidence (file paths, line numbers, error messages, test output) gathered before this call — do not call with only the user's goal and no findings.",
 				},
 			},
 			"required": []string{"prompt"},

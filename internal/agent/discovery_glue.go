@@ -131,7 +131,7 @@ func (a *Agent) discoveryDocs() []discovery.Doc {
 		if s.WhenToUse != "" {
 			text += " When to use: " + s.WhenToUse
 		}
-		docs = append(docs, discovery.Doc{ID: "skill:" + s.Name, Kind: "skill", Name: s.Name, Text: text})
+		docs = append(docs, discovery.Doc{ID: "skill:" + s.Name, Kind: "skill", Name: s.Name, Text: text, Source: s.Source})
 	}
 	for name := range a.mcpTools {
 		t, ok := a.tools[name]
@@ -431,19 +431,25 @@ func renderDiscoveryContext(docs []discovery.Doc, isAttached func(id string) boo
 		}
 	}
 
-	var attachedSkills []string
+	var attachedDocs []discovery.Doc
 	for _, d := range docs {
 		if d.Kind == "skill" && isAttached(d.ID) {
-			attachedSkills = append(attachedSkills, d.Text)
+			attachedDocs = append(attachedDocs, d)
 		}
 	}
-	if len(attachedSkills) > 0 {
+	if len(attachedDocs) > 0 {
 		var vol strings.Builder
 		vol.WriteString(promptDiscoveryMarker)
 		vol.WriteString(" relevant skills for this task (you may use these inline):\n")
-		for _, s := range attachedSkills {
+		for _, d := range attachedDocs {
 			vol.WriteString("- ")
-			vol.WriteString(s)
+			vol.WriteString(kindIcon(d.Kind))
+			vol.WriteString(" ")
+			vol.WriteString(d.Text)
+			if d.Source != "" {
+				vol.WriteString("\n  File: ")
+				vol.WriteString(d.Source)
+			}
 			vol.WriteString("\n")
 		}
 		volContent = vol.String()
@@ -451,15 +457,29 @@ func renderDiscoveryContext(docs []discovery.Doc, isAttached func(id string) boo
 	return sys.String(), volContent
 }
 
-// writeIndexLine appends one "- name — hint" name-index line.
+// writeIndexLine appends one "- name — hint" name-index line with a kind icon.
 func writeIndexLine(b *strings.Builder, d discovery.Doc) {
 	b.WriteString("- ")
+	b.WriteString(kindIcon(d.Kind))
+	b.WriteString(" ")
 	b.WriteString(d.Name)
 	if h := shortHint(d.Text); h != "" {
 		b.WriteString(" — ")
 		b.WriteString(h)
 	}
 	b.WriteString("\n")
+}
+
+// kindIcon returns an emoji icon for a doc kind.
+func kindIcon(kind string) string {
+	switch kind {
+	case "skill":
+		return "📄" // SKILL.md file
+	case "mcp":
+		return "🔧" // MCP tool
+	default:
+		return "•"
+	}
 }
 
 // shortHint returns the description part of a doc text, trimmed to ~40 chars.

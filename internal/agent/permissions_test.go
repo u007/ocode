@@ -1283,6 +1283,53 @@ func TestPermissions_FirstOutOfScopePath_ExtraAllowedPath_ReturnsEmpty(t *testin
 	}
 }
 
+// firstOutOfScopePath must return "" for commands containing shell substitutions
+// because the evaluated path is not statically knowable.  The bug was that a
+// command like `ls "$(go env GOMODCACHE)/charm.land/bubbles"*/v2@*/viewport/`
+// had its args split by the tokenizer into ["$(go env GOMODCACHE)"] and
+// ["/charm.land/bubbles*/v2@*/viewport/"], causing the second fragment to look
+// like an absolute out-of-scope path and triggering a false verifyAutoGrant
+// rejection.
+func TestPermissions_FirstOutOfScopePath_ShellSubstReturnsEmpty(t *testing.T) {
+	workDir := t.TempDir()
+	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		t.Fatalf("resolve workdir: %v", err)
+	}
+	pm := NewPermissionManager()
+	pm.SetWorkDir(resolvedWorkDir)
+
+	cases := []struct {
+		name    string
+		command string
+		prefix  string
+	}{
+		{
+			name:    "double_quoted_subst_with_trailing_path",
+			command: `ls "$(go env GOMODCACHE)/charm.land/bubbles"*/v2@*/viewport/`,
+			prefix:  "ls",
+		},
+		{
+			name:    "unquoted_subst_with_trailing_path",
+			command: `ls $(go env GOMODCACHE)/file.txt`,
+			prefix:  "ls",
+		},
+		{
+			name:    "backtick_subst",
+			command: "cat `dirname /some/file`/out.txt",
+			prefix:  "cat",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := firstOutOfScopePath(pm, tc.command, tc.prefix)
+			if got != "" {
+				t.Fatalf("firstOutOfScopePath(%q) = %q, want empty (shell subst prevents static evaluation)", tc.command, got)
+			}
+		})
+	}
+}
+
 func TestPermissions_TempDirAutoAllowed(t *testing.T) {
 	cases := []struct {
 		name    string

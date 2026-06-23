@@ -10,10 +10,11 @@ import (
 
 // Doc is one rankable item: a skill or an MCP tool.
 type Doc struct {
-	ID   string // stable key, e.g. "skill:brainstorming" or "mcp:Notion/search"
-	Kind string // "skill" | "mcp"
-	Name string // display name, e.g. "brainstorming" or "Notion/search"
-	Text string // text embedded as a passage (name + description [+ when_to_use])
+	ID     string // stable key, e.g. "skill:brainstorming" or "mcp:Notion/search"
+	Kind   string // "skill" | "mcp"
+	Name   string // display name, e.g. "brainstorming" or "Notion/search"
+	Text   string // text embedded as a passage (name + description [+ when_to_use])
+	Source string // file path (SKILL.md path for skills, empty for MCP tools)
 }
 
 // DocHash is the per-item cache key. Changing the embedded Text invalidates it.

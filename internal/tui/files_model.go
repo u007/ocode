@@ -446,7 +446,7 @@ func (m *filesModel) SetEditorOpener(fn func(string) tea.Cmd) { m.editorOpener =
 func (m *filesModel) SetEditorMode(mode string) { m.editorMode = mode }
 
 // performInFileSearch searches for the query in the current preview content
-// and returns highlight ranges. Each range is [line, colstart, line, colend].
+// and returns highlight ranges. Each range is [line, colstart, colend].
 func (m *filesModel) performInFileSearch(query string) [][]int {
 	if query == "" {
 		return nil
@@ -463,25 +463,74 @@ func (m *filesModel) performInFileSearch(query string) [][]int {
 			}
 			colStart := start + idx
 			colEnd := colStart + len(query)
-			matches = append(matches, []int{lineIdx, colStart, lineIdx, colEnd})
+			matches = append(matches, []int{lineIdx, colStart, colEnd})
 			start = colStart + 1
 		}
 	}
 	return matches
 }
 
-// applyInFileSearchHighlights highlights matches in the preview viewport.
+// applyInFileSearchHighlights highlights matches in the preview content
+// by inserting ANSI SGR codes directly into the rendered lines, bypassing
+// the viewport's own SetHighlights/parseMatches which can't handle
+// content that already has syntax-highlighting ANSI codes.
 func (m *filesModel) applyInFileSearchHighlights() {
-	m.preview.SetHighlights(m.inFileSearchMatches)
-	if len(m.inFileSearchMatches) > 0 {
-		m.preview.HighlightNext()
+	if len(m.inFileSearchMatches) == 0 || len(m.previewLines) == 0 {
+		return
 	}
+
+	out := make([]string, len(m.previewLines))
+	copy(out, m.previewLines)
+
+	type lineMatch struct {
+		idx             int
+		colStart, colEnd int
+	}
+	byLine := make(map[int][]lineMatch)
+	for i, match := range m.inFileSearchMatches {
+		byLine[match[0]] = append(byLine[match[0]], lineMatch{i, match[1], match[2]})
+	}
+
+	for lineIdx, lms := range byLine {
+		if lineIdx < 0 || lineIdx >= len(out) || lineIdx >= len(m.previewRawLines) {
+			continue
+		}
+		raw := m.previewRawLines[lineIdx]
+
+		// Sort descending by colStart for right-to-left processing so
+		// earlier insertSGRSpan calls don't shift byte positions of
+		// later ones.
+		sort.Slice(lms, func(i, j int) bool {
+			return lms[i].colStart > lms[j].colStart
+		})
+
+		for _, lm := range lms {
+			if lm.colStart < 0 || lm.colEnd > len(raw) || lm.colStart >= lm.colEnd {
+				continue
+			}
+			isCurrent := lm.idx == m.inFileSearchCursor
+			openSeq, closeSeq := searchHighlightCodes(isCurrent)
+			out[lineIdx] = insertSGRSpan(out[lineIdx], raw, lm.colStart, lm.colEnd, openSeq, closeSeq)
+		}
+	}
+
+	m.preview.SetContent(strings.Join(out, "\n"))
 }
 
-// setInFileSearchStyles configures the viewport highlight styles for in-file search.
-func (m *filesModel) setInFileSearchStyles(styles Styles) {
-	m.preview.HighlightStyle = lipgloss.NewStyle().Background(styles.Selected.GetBackground()).Foreground(styles.Selected.GetForeground())
-	m.preview.SelectedHighlightStyle = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("0")).Bold(true)
+// clearSearchHighlights restores the original syntax-highlighted preview content.
+func (m *filesModel) clearSearchHighlights() {
+	m.preview.SetContent(strings.Join(m.previewLines, "\n"))
+}
+
+// searchHighlightCodes returns ANSI SGR open/close sequences for search
+// highlighting. isCurrent indicates whether this is the actively-selected match.
+func searchHighlightCodes(isCurrent bool) (open, close string) {
+	if isCurrent {
+		// Yellow background, black foreground — stands out from regular matches.
+		return "\x1b[48;5;220m\x1b[38;5;0m", "\x1b[49m\x1b[39m"
+	}
+	// Subtle dark gray background for regular matches.
+	return "\x1b[48;5;236m", "\x1b[49m"
 }
 
 func (m *filesModel) Resize(w, h int) {
@@ -758,35 +807,40 @@ func (m filesModel) updateInFileSearch(msg tea.KeyPressMsg) (filesModel, tea.Cmd
 	case "esc":
 		m.mode = filesModeNormal
 		m.inFileSearchActive = false
-		m.preview.ClearHighlights()
+		m.clearSearchHighlights()
 		m.statusMsg = ""
 		return m, nil
 	case "enter", "ctrl+j", "ctrl+m", "\r", "\n":
 		m.mode = filesModeNormal
 		m.inFileSearchActive = false
+		m.clearSearchHighlights()
 		m.statusMsg = ""
 		return m, nil
 	case "ctrl+n":
-		// Only navigate if there are matches; otherwise do nothing.
 		if len(m.inFileSearchMatches) > 0 {
-			m.preview.HighlightNext()
+			m.inFileSearchCursor = (m.inFileSearchCursor + 1) % len(m.inFileSearchMatches)
+			m.applyInFileSearchHighlights()
+			match := m.inFileSearchMatches[m.inFileSearchCursor]
+			m.preview.EnsureVisible(match[0], 0, 0)
 		}
 		return m, nil
 	case "ctrl+p":
-		// Only navigate if there are matches; otherwise do nothing.
 		if len(m.inFileSearchMatches) > 0 {
-			m.preview.HighlightPrevious()
+			m.inFileSearchCursor = (m.inFileSearchCursor - 1 + len(m.inFileSearchMatches)) % len(m.inFileSearchMatches)
+			m.applyInFileSearchHighlights()
+			match := m.inFileSearchMatches[m.inFileSearchCursor]
+			m.preview.EnsureVisible(match[0], 0, 0)
 		}
 		return m, nil
 	case "backspace", "\x7f":
 		if len(m.inFileSearchQuery) > 0 {
 			m.inFileSearchQuery = m.inFileSearchQuery[:len(m.inFileSearchQuery)-1]
 			m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
+			m.inFileSearchCursor = 0
 			m.applyInFileSearchHighlights()
 			if len(m.inFileSearchMatches) > 0 {
-				m.statusMsg = fmt.Sprintf("/%s (%d matches, ctrl+n/ctrl+p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
-			} else {
-				m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
+				match := m.inFileSearchMatches[0]
+				m.preview.EnsureVisible(match[0], 0, 0)
 			}
 		}
 		return m, nil
@@ -795,11 +849,11 @@ func (m filesModel) updateInFileSearch(msg tea.KeyPressMsg) (filesModel, tea.Cmd
 		if len(msg.String()) == 1 && msg.String()[0] >= 32 && msg.String()[0] != 127 {
 			m.inFileSearchQuery += msg.String()
 			m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
+			m.inFileSearchCursor = 0
 			m.applyInFileSearchHighlights()
 			if len(m.inFileSearchMatches) > 0 {
-				m.statusMsg = fmt.Sprintf("/%s (%d matches, ctrl+n/ctrl+p navigate, esc cancel)", m.inFileSearchQuery, len(m.inFileSearchMatches))
-			} else {
-				m.statusMsg = fmt.Sprintf("/%s (no matches, esc cancel)", m.inFileSearchQuery)
+				match := m.inFileSearchMatches[0]
+				m.preview.EnsureVisible(match[0], 0, 0)
 			}
 		}
 		return m, nil
@@ -2058,10 +2112,6 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 4).Render(treeContentFull)
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
-	if m.inFileSearchActive {
-		m.preview.HighlightStyle = lipgloss.NewStyle().Background(styles.Selected.GetBackground()).Foreground(styles.Selected.GetForeground())
-		m.preview.SelectedHighlightStyle = lipgloss.NewStyle().Background(lipgloss.Color("220")).Foreground(lipgloss.Color("0")).Bold(true)
-	}
 	previewBody := m.preview.View()
 	if m.mode == filesModeEdit {
 		previewBody = m.inlineEditor.view(previewW-7, h-5)
@@ -2113,6 +2163,16 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		previewContent = strings.Join(deleteLines, "\n")
 	} else if m.mode == filesModeContentSearch {
 		previewContent = m.contentView(previewW-4, h, styles)
+	} else if m.mode == filesModeInFileSearch {
+		// Search bar below the preview content
+		searchStr := "/" + m.inFileSearchQuery
+		if len(m.inFileSearchMatches) > 0 {
+			searchStr += fmt.Sprintf(" (%d/%d)  ↑/↓ next  ↵ done  esc cancel",
+				m.inFileSearchCursor+1, len(m.inFileSearchMatches))
+		} else {
+			searchStr += " (no matches)  esc cancel"
+		}
+		previewContent = previewContent + "\n" + lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("237")).Padding(0, 1).Render(searchStr)
 	} else if m.statusMsg != "" {
 		previewContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render(m.statusMsg)) + "\n\n" + previewContent
 	} else if m.editor != "" {
@@ -2138,9 +2198,16 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	renderedHeader := appHeaderTopPad + headerLeft + strings.Repeat(" ", headerPad) + tabBar + exitBtn
 
 	// Bottom status bar with keybindings (matching renderStatus in model.go)
-	statusStr := hintStyle.Width(w - 2).MaxHeight(1).Render(
-		"ctrl+f search  ctrl+g fuzzy find  space select  ctrl+h hidden  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
-	)
+	var statusStr string
+	if m.mode == filesModeInFileSearch {
+		statusStr = hintStyle.Width(w - 2).MaxHeight(1).Render(
+			"ctrl+n/ctrl+p next/prev  enter done  esc cancel  keep typing to search",
+		)
+	} else {
+		statusStr = hintStyle.Width(w - 2).MaxHeight(1).Render(
+			"ctrl+f search  ctrl+g fuzzy find  space select  ctrl+h hidden  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
+		)
+	}
 	parts := []string{renderedHeader, row, statusStr}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }

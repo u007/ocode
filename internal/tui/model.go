@@ -3901,6 +3901,10 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		case "down", "j":
 			m.permViewport.ScrollDown(m.scrollSpeed)
 			return m, nil
+		case "ctrl+y":
+			body := renderPermissionRequestBody(m.pendingPermission)
+			_ = clipboard.WriteAll(body)
+			return m, nil
 		}
 		return m, nil
 	}
@@ -10627,8 +10631,11 @@ func (m *model) renderPermissionDialog(width int) string {
 		}
 	}
 
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89"))
+	copyHint := hintStyle.Render("^y copy")
+
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
-		header + "\n\n" + bodyView + "\n\n" + buttonRow,
+		header + "\n\n" + bodyView + "\n\n" + buttonRow + "\n" + copyHint,
 	)
 }
 
