@@ -894,3 +894,64 @@ func TestMemoryEnabledLoadSave(t *testing.T) {
 		}
 	})
 }
+
+func TestDocPromptEnabledLoadSave(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	t.Run("default is disabled", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg.Ocode.DocPromptEnabled {
+			t.Fatal("doc prompt should default to disabled")
+		}
+	})
+
+	t.Run("load enabled from file", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"doc_prompt_enabled":true}`), 0o644)
+
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.DocPromptEnabled {
+			t.Fatal("want doc prompt enabled from file")
+		}
+	})
+
+	t.Run("save round-trips", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+
+		if err := SaveDocPromptEnabled(true); err != nil {
+			t.Fatalf("SaveDocPromptEnabled(true) failed: %v", err)
+		}
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.DocPromptEnabled {
+			t.Fatal("doc prompt should persist as enabled after save")
+		}
+
+		if err := SaveDocPromptEnabled(false); err != nil {
+			t.Fatalf("SaveDocPromptEnabled(false) failed: %v", err)
+		}
+		var cfg2 Config
+		if err := LoadOcodeConfig(&cfg2); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg2.Ocode.DocPromptEnabled {
+			t.Fatal("doc prompt should persist as disabled after save")
+		}
+	})
+}

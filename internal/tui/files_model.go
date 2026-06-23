@@ -538,21 +538,38 @@ func (m *filesModel) Resize(w, h int) {
 	m.height = h
 	treeW := w * 35 / 100
 	previewW := w - treeW - 3
-	previewH := h - 4 // reserve 1 row for bottom status bar
-	if previewH < 1 {
-		previewH = 1
-	}
 	m.preview.SetWidth(previewW - 14)
-	m.preview.SetHeight(previewH)
+	m.syncPreviewViewportHeight(h)
 	m.promptInput.SetWidth(previewW - 7)
 	m.promptInput.SetHeight(1)
+}
+
+// syncPreviewViewportHeight sets the preview viewport height to exactly fit the
+// pane's content area after subtracting the border (2) and any header rows
+// rendered above the viewport. Must be called after any state change that
+// affects previewHeaderLines (mode, editable, statusMsg, editor).
+func (m *filesModel) syncPreviewViewportHeight(h int) {
+	// Pane outer height = h-4 (see View); border top+bottom = 2; content area = h-6.
+	contentH := h - 6
+	headerLines := m.previewHeaderLines()
+	if m.mode == filesModeInFileSearch {
+		headerLines++ // search bar appended below viewport in View
+	}
+	vh := contentH - headerLines
+	if vh < 1 {
+		vh = 1
+	}
+	m.preview.SetHeight(vh)
 }
 
 func (m filesModel) Update(msg tea.Msg, w, h int) (out filesModel, cmd tea.Cmd) {
 	// Reconcile the persisted vertical scroll on every event path (cursor
 	// moves, preview loads, search jumps, dir toggles) so the offset, the
 	// rendered window, and click hit-testing never drift apart.
-	defer func() { out.reconcileTreeScroll(w, h) }()
+	defer func() {
+		out.reconcileTreeScroll(w, h)
+		out.syncPreviewViewportHeight(h)
+	}()
 	switch msg := msg.(type) {
 	case filesPreviewMsg:
 		return m, m.applyPreview(msg)
@@ -760,6 +777,24 @@ func (m filesModel) updateTree(msg tea.KeyPressMsg, w, h int) (filesModel, tea.C
 		return m, m.refreshPreviewCmd()
 	case "tab":
 		m.panel = (m.panel + 1) % 2
+	case "n":
+		if len(m.inFileSearchMatches) > 0 {
+			m.inFileSearchCursor = (m.inFileSearchCursor + 1) % len(m.inFileSearchMatches)
+			m.applyInFileSearchHighlights()
+			match := m.inFileSearchMatches[m.inFileSearchCursor]
+			m.preview.EnsureVisible(match[0], 0, 0)
+			m.panel = filesPanelPreview
+			m.statusMsg = fmt.Sprintf("/%s  [%d/%d]  n/N next/prev  esc clear", m.inFileSearchQuery, m.inFileSearchCursor+1, len(m.inFileSearchMatches))
+		}
+	case "N":
+		if len(m.inFileSearchMatches) > 0 {
+			m.inFileSearchCursor = (m.inFileSearchCursor - 1 + len(m.inFileSearchMatches)) % len(m.inFileSearchMatches)
+			m.applyInFileSearchHighlights()
+			match := m.inFileSearchMatches[m.inFileSearchCursor]
+			m.preview.EnsureVisible(match[0], 0, 0)
+			m.panel = filesPanelPreview
+			m.statusMsg = fmt.Sprintf("/%s  [%d/%d]  n/N next/prev  esc clear", m.inFileSearchQuery, m.inFileSearchCursor+1, len(m.inFileSearchMatches))
+		}
 	}
 	return m, nil
 }
@@ -797,7 +832,31 @@ func (m filesModel) updatePreview(msg tea.KeyPressMsg) (filesModel, tea.Cmd) {
 		m.inFileSearchCursor = 0
 		m.inFileSearchActive = true
 		m.preview.ClearHighlights()
-		m.statusMsg = "ctrl+f (type to search, ctrl+n/ctrl+p navigate, esc cancel)"
+		m.statusMsg = "ctrl+f (type to search, ctrl+n/ctrl+p or n/N navigate, enter confirm, esc cancel)"
+	case "n":
+		if len(m.inFileSearchMatches) > 0 {
+			m.inFileSearchCursor = (m.inFileSearchCursor + 1) % len(m.inFileSearchMatches)
+			m.applyInFileSearchHighlights()
+			match := m.inFileSearchMatches[m.inFileSearchCursor]
+			m.preview.EnsureVisible(match[0], 0, 0)
+			m.statusMsg = fmt.Sprintf("/%s  [%d/%d]  n/N next/prev  esc clear", m.inFileSearchQuery, m.inFileSearchCursor+1, len(m.inFileSearchMatches))
+		}
+	case "N":
+		if len(m.inFileSearchMatches) > 0 {
+			m.inFileSearchCursor = (m.inFileSearchCursor - 1 + len(m.inFileSearchMatches)) % len(m.inFileSearchMatches)
+			m.applyInFileSearchHighlights()
+			match := m.inFileSearchMatches[m.inFileSearchCursor]
+			m.preview.EnsureVisible(match[0], 0, 0)
+			m.statusMsg = fmt.Sprintf("/%s  [%d/%d]  n/N next/prev  esc clear", m.inFileSearchQuery, m.inFileSearchCursor+1, len(m.inFileSearchMatches))
+		}
+	case "esc":
+		if len(m.inFileSearchMatches) > 0 {
+			m.clearSearchHighlights()
+			m.inFileSearchMatches = nil
+			m.inFileSearchQuery = ""
+			m.inFileSearchCursor = 0
+			m.statusMsg = ""
+		}
 	}
 	return m, nil
 }
@@ -813,8 +872,12 @@ func (m filesModel) updateInFileSearch(msg tea.KeyPressMsg) (filesModel, tea.Cmd
 	case "enter", "ctrl+j", "ctrl+m", "\r", "\n":
 		m.mode = filesModeNormal
 		m.inFileSearchActive = false
-		m.clearSearchHighlights()
-		m.statusMsg = ""
+		// Keep highlights active so n/N can navigate in normal mode.
+		if len(m.inFileSearchMatches) > 0 {
+			m.statusMsg = fmt.Sprintf("/%s  [%d/%d]  n/N next/prev  esc clear", m.inFileSearchQuery, m.inFileSearchCursor+1, len(m.inFileSearchMatches))
+		} else {
+			m.statusMsg = ""
+		}
 		return m, nil
 	case "ctrl+n":
 		if len(m.inFileSearchMatches) > 0 {
@@ -1248,7 +1311,13 @@ func (m *filesModel) applyPreview(msg filesPreviewMsg) tea.Cmd {
 		}
 		m.previewHasMore = !msg.done
 		m.previewNextOff = msg.nextOffset
-		m.preview.SetContent(strings.Join(m.previewLines, "\n"))
+		if len(m.inFileSearchMatches) > 0 {
+			// Re-run search on expanded content to find matches in newly appended lines.
+			m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
+			m.applyInFileSearchHighlights()
+		} else {
+			m.preview.SetContent(strings.Join(m.previewLines, "\n"))
+		}
 	}
 
 	if m.previewPendingScroll > 0 {
@@ -1812,7 +1881,11 @@ func (m *filesModel) clearSelectionHighlight() {
 	if len(m.previewLines) == 0 {
 		return
 	}
-	m.preview.SetContent(strings.Join(m.previewLines, "\n"))
+	if len(m.inFileSearchMatches) > 0 {
+		m.applyInFileSearchHighlights()
+	} else {
+		m.preview.SetContent(strings.Join(m.previewLines, "\n"))
+	}
 }
 
 func (m filesModel) extractSelectionText(startLine, startCol, endLine, endCol int) string {
@@ -2178,7 +2251,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	} else if m.editor != "" {
 		previewContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render("editor: "+m.editor+"  (E to change)")) + "\n\n" + previewContent
 	}
-	previewPane := focusBorder(m.panel == filesPanelPreview).Width(previewW - 2).Render(previewContent)
+	previewPane := focusBorder(m.panel == filesPanelPreview).Width(previewW - 2).Height(h - 4).Render(previewContent)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, treePane, previewPane)
 

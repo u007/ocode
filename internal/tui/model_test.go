@@ -715,6 +715,88 @@ func TestPermissionDialogButtonClickHitsVisibleButton(t *testing.T) {
 	}
 }
 
+// TestPermissionDialogButtonVisualPositionMatchesHitRegion verifies that the
+// computed button hit regions align with where buttons appear in the rendered
+// output. A mismatch means clicks land in the wrong place.
+func TestPermissionDialogButtonVisualPositionMatchesHitRegion(t *testing.T) {
+	m := model{
+		ready:             true,
+		width:             120,
+		height:            40,
+		showPermDialog:    true,
+		pendingPermission: agent.PermissionRequest{ToolName: "read", Args: json.RawMessage(`{"path":"notes.txt"}`)},
+		styles:            ApplyThemeColors("tokyonight"),
+		input:             newTestTextarea(),
+	}
+	m.layout()
+
+	m.updatePermButtonRegions()
+	if len(m.permButtonRegions) == 0 {
+		t.Fatal("expected permission buttons")
+	}
+
+	// Render the full screen and split into rows.
+	rendered := stripANSI(m.View().Content)
+	rows := strings.Split(rendered, "\n")
+
+	btn := m.permButtonRegions[0]
+	// The button top border row should contain a rounded-border corner character
+	// or the button label content. Check a few rows around the expected region.
+	if btn.y1 < 0 || btn.y1 >= len(rows) {
+		t.Fatalf("button y1=%d out of range [0, %d)", btn.y1, len(rows))
+	}
+	if btn.y2 < 0 || btn.y2 >= len(rows) {
+		t.Fatalf("button y2=%d out of range [0, %d)", btn.y2, len(rows))
+	}
+	// The button content row (y1+1) should contain the button label text.
+	contentRow := rows[btn.y1+1]
+	if !strings.Contains(contentRow, permBtnDefs[0].label) && !strings.Contains(contentRow, permBtnDefs[0].desc) {
+		t.Logf("rendered rows around button (y1=%d):", btn.y1)
+		for i := max(0, btn.y1-2); i <= min(len(rows)-1, btn.y2+2); i++ {
+			t.Logf("  row %d: %q", i, rows[i])
+		}
+		t.Errorf("expected button label %q or desc %q in row %d (y1+1), got %q", permBtnDefs[0].label, permBtnDefs[0].desc, btn.y1+1, contentRow)
+	}
+}
+
+// TestPermissionDialogUppercaseKeysWork verifies that pressing uppercase Y/N/A/T
+// in the permission dialog works the same as lowercase (since button labels show
+// uppercase but users may press shift to match).
+func TestPermissionDialogUppercaseKeysWork(t *testing.T) {
+	newPerm := func() model {
+		return model{
+			ready:             true,
+			width:             120,
+			height:            40,
+			showPermDialog:    true,
+			pendingPermission: agent.PermissionRequest{ToolName: "read", Args: json.RawMessage(`{"path":"notes.txt"}`)},
+			styles:            ApplyThemeColors("tokyonight"),
+			input:             newTestTextarea(),
+		}
+	}
+
+	for _, key := range []string{"Y", "N"} {
+		m := newPerm()
+		updated, _ := m.handleChatKeys(tea.KeyPressMsg{Code: rune(key[0])}, nil, nil)
+		got := updated.(model)
+		if got.showPermDialog {
+			t.Errorf("pressing %q should close the permission dialog, but it stayed open", key)
+		}
+	}
+
+	// Pressing "A" (uppercase always-allow) should open the confirmation step,
+	// not be silently ignored.
+	m := newPerm()
+	updated, _ := m.handleChatKeys(tea.KeyPressMsg{Code: rune('A')}, nil, nil)
+	got := updated.(model)
+	if !got.showPermDialog {
+		t.Error("pressing A should keep the dialog open (in confirmation step), not close it")
+	}
+	if got.permConfirm == "" {
+		t.Error("pressing A should put the dialog into the always-allow confirmation step")
+	}
+}
+
 func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 	client := &nestedTaskClient{responses: []*agent.Message{
 		{Role: "assistant", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-parent-task", "task", `{"prompt":"spawn nested"}`)}},

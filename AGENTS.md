@@ -151,7 +151,7 @@ consolidating the dispatch.
     `/permissions`, `/yolo`, `/small-model`, `/editor`, `/editor-mode`,
     `/themes`, `/theme`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`,
     `/mcp`, `/advisor`, `/mask`, `/btw`, `/by-the-way`, `/rc`,
-    `/remote-control`, `/search`, `/find`.
+    `/remote-control`, `/search`, `/find`, `/docs`, `/doc-mode`.
   - **Queued by design (mutates persistent state mid-stream, so it must
     wait for the current turn to end):** `/add-dir`, `/add-dirs`, `/doc-sync`.
   - The list above is the source of truth; keep the in-code check in

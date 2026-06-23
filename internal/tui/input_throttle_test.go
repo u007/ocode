@@ -40,15 +40,34 @@ func TestWheelThrottleSlowScrollNeverDropped(t *testing.T) {
 	}
 }
 
-func TestInputFilterOnlyThrottlesWheel(t *testing.T) {
+func TestInputFilterOnlyThrottlesWheelAndMotion(t *testing.T) {
 	filter := newInputFilter()
-	// Non-wheel messages always pass through unchanged, even back-to-back.
+	// Non-wheel/non-motion messages always pass through unchanged.
 	for i := 0; i < 3; i++ {
 		if got := filter(nil, tea.KeyPressMsg{}); got == nil {
-			t.Fatalf("key press %d must not be dropped by the wheel filter", i)
+			t.Fatalf("key press %d must not be dropped by the filter", i)
 		}
-		if got := filter(nil, tea.MouseMotionMsg{}); got == nil {
-			t.Fatalf("mouse motion %d must not be dropped by the wheel filter", i)
+	}
+}
+
+func TestInputFilterThrottlesMotion(t *testing.T) {
+	// newInputFilter uses time.Now() internally, so we verify the shape:
+	// a rapid burst of motion events is partially dropped (first passes, rest drop
+	// until a full frame elapses).
+	filter := newInputFilter()
+	// First motion event always passes.
+	if got := filter(nil, tea.MouseMotionMsg{}); got == nil {
+		t.Fatal("first motion event must not be dropped")
+	}
+	// Immediately subsequent events (same real nanosecond) are dropped because
+	// they arrive within the same frame window.
+	dropped := 0
+	for i := 0; i < 5; i++ {
+		if filter(nil, tea.MouseMotionMsg{}) == nil {
+			dropped++
 		}
+	}
+	if dropped == 0 {
+		t.Fatal("rapid motion flood should have at least one event dropped")
 	}
 }

@@ -297,8 +297,8 @@ func renderDetailToolRequestBox(tc agent.ToolCall, width int, expanded bool) str
 	}
 	var body string
 	if toolName == "advisor" {
-		// For advisor, show the full prompt directly so it's expandable without
-		// being pre-truncated by formatToolCallHint's 5-line cap.
+		// Extract the full prompt directly for a cleaner header in the detail
+		// view instead of relying on formatToolCallHint's summary format.
 		var args map[string]interface{}
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
 			if p, ok := args["prompt"].(string); ok && p != "" {

@@ -153,6 +153,41 @@ func TestBasePromptMessages_IncludesMemoryContextWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestBasePromptMessages_IncludesDocPromptWhenEnabled(t *testing.T) {
+	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}, mode: ModeBuild}
+	a.SetDocPromptEnabled(true)
+
+	base := a.BasePromptMessages("")
+	doc := findMarker(base, promptDocPromptMarker)
+	if doc == "" {
+		t.Fatal("expected base prompt to include the doc prompt fragment when DocPromptEnabled is true")
+	}
+	if !strings.Contains(doc, "Documentation-First Development") {
+		t.Fatalf("doc prompt missing heading: %s", doc)
+	}
+	for _, want := range []string{
+		"Read existing documentation",
+		"Check documentation alignment",
+		"Update inline documentation",
+		"State explicitly if no doc updates are needed",
+	} {
+		if !strings.Contains(doc, want) {
+			t.Fatalf("doc prompt missing %q: %s", want, doc)
+		}
+	}
+}
+
+func TestBasePromptMessages_DoesNotIncludeDocPromptWhenDisabled(t *testing.T) {
+	a := &Agent{client: providerStubClient{provider: "anthropic", model: "claude-opus-4-7"}, mode: ModeBuild}
+	a.SetDocPromptEnabled(false)
+
+	base := a.BasePromptMessages("")
+	doc := findMarker(base, promptDocPromptMarker)
+	if doc != "" {
+		t.Fatal("expected base prompt to NOT include the doc prompt fragment when DocPromptEnabled is false")
+	}
+}
+
 func TestBuildReferenceCatalog_IncludesLoadingGuidance(t *testing.T) {
 	cat := BuildReferenceCatalog(nil)
 	for _, want := range []string{
