@@ -295,9 +295,24 @@ func renderDetailToolRequestBox(tc agent.ToolCall, width int, expanded bool) str
 	if toolName == "" {
 		toolName = "tool"
 	}
-	body := formatToolCallHint(tc)
-	if args := strings.TrimSpace(prettyToolArguments(tc.Function.Arguments)); args != "" && args != "{}" {
-		body += "\n\n" + args
+	var body string
+	if toolName == "advisor" {
+		// For advisor, show the full prompt directly so it's expandable without
+		// being pre-truncated by formatToolCallHint's 5-line cap.
+		var args map[string]interface{}
+		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
+			if p, ok := args["prompt"].(string); ok && p != "" {
+				body = "🧠 advisor prompt:\n" + p
+			}
+		}
+		if body == "" {
+			body = formatToolCallHint(tc)
+		}
+	} else {
+		body = formatToolCallHint(tc)
+		if args := strings.TrimSpace(prettyToolArguments(tc.Function.Arguments)); args != "" && args != "{}" {
+			body += "\n\n" + args
+		}
 	}
 	visible, footer := collapsePreviewBlock(body, 8, expanded, false)
 	box := toolBoxStyle.Width(max(1, width)).Render(textStyle.Render(visible))
@@ -314,7 +329,14 @@ func renderDetailToolResultBox(toolName, content string, width int, expanded boo
 	}
 	content = stripTruncationFooter(content)
 	content = strings.TrimRight(content, "\n")
-	visible, footer := collapsePreviewBlock(content, toolOutputPreviewLines, expanded, true)
+	previewLines := toolOutputPreviewLines
+	tail := true
+	if toolName == "advisor" {
+		// Show more lines from the top so the key advice steps are visible.
+		previewLines = 20
+		tail = false
+	}
+	visible, footer := collapsePreviewBlock(content, previewLines, expanded, tail)
 	box := toolBoxStyle.Width(max(1, width)).Render(renderToolResult(toolName, visible, currentStyles()))
 	header := hintStyle.Render("tool result · " + toolName)
 	if footer != "" {

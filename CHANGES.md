@@ -171,6 +171,11 @@
 - **Project Skill Expansion** — Two new project-local skills (`ocode-agent-architecture`, `ocode-tools`) created via `/learn` documenting the agent subsystem and tool system respectively.
 - **`/btw` Command** — New `/btw` (alias `/by-the-way`) slash command adds a quick aside to the conversation. Backed by `handleBtwCmd`; registered as an instant command that bypasses the command queue.
 - **DeepSeek V4 Flash Pricing** — Added `deepseek-v4-flash` cost entry to the modelsdev pricing table (`$0.14/M` input, `$0.28/M` output, `$0.0028/M` cache-read read).
+- **Language Dependency Cache Auto-Allow** — `languageDepRoots()` returns known dependency cache/registry directories for npm, pnpm, yarn, cargo, pip, Maven, Gradle, and Go module cache. `AllowedRoots()` now includes these paths so read-only access (list/read) to cached dependencies is auto-allowed without prompting. `isImmutableReadRoot` now covers all language dependency roots instead of just Go module cache. Locked in by `TestLanguageDepRoots_GoModCache`, `TestLanguageDepRoots_DefaultHomePaths`, `TestLanguageDepRoots_RespectsEnvVars`, `TestLanguageDepRoots_XDGCacheHome`, `TestIsImmutableReadRoot_LanguageDeps`, and `TestIsImmutableReadRoot_LanguageDeps_WithEnvOverrides`.
+- **Skill Source and Kind Icons in Discovery Context** — `Doc.Source` field carries SKILL.md file paths through to the discovery context. The name index and attached-skills listing now show kind icons (📄 skill, 🔧 MCP tool) alongside each entry, and attached skills display their file path, giving the model clearer context about skill origins.
+- **Advisor Tool Expanded Preview in Detail View** — Advisor tool calls now show the full prompt text directly in the detail view (bypassing `formatToolCallHint`'s 5-line summary cap). Advisor results display 20 preview lines from the top instead of the default tail-truncation, making advice steps visible at a glance.
+- **In-File Search ANSI-Safe Highlighting** — Rewrote in-file search highlighting to insert ANSI SGR codes directly into rendered lines instead of using the viewport's `SetHighlights`, which was incompatible with pre-existing syntax-highlighting ANSI codes. Added cursor tracking (`inFileSearchCursor`) with `EnsureVisible` scroll-to-match, match position indicator (N/M) in the status bar, and context-sensitive keybinding hints during search.
+- **Permission Dialog Copy Shortcut** — `ctrl+y` in the permission dialog copies the full permission request body to the clipboard. A "^y copy" hint is now displayed in the dialog footer for discoverability.
 
 ### Changed
 - **`.gitignore` Worktree Entry** — Added `.worktrees/` to `.gitignore` to keep parallel git worktree checkouts out of version control.
@@ -218,6 +223,8 @@
 - **Editor Picker Idempotent Save** — Editor picker and `/editor` command now skip saving when the selection matches the current editor, avoiding redundant writes.
 - **Small Model Command Sync** — `runSmallModelCmd` refactored from async to synchronous closure, eliminating a redundant `tea.Msg` wrapper.
 - **AGENTS.md Instant Commands List** — Added `/btw` and `/by-the-way` to the documented list of instant commands that bypass the command queue.
+- **Permission Path Checks Use `isWithinAllowedScope`** — `Decide()` and `decideSingleCommand` now use `isWithinAllowedScope` instead of `isWithinWorkDir` for scope confinement, so paths persisted via `extra_allowed_paths` ("always allow this path") are respected for all tools, not just read-only ones.
+- **Advisor Tool Prompt Refined** — Advisor tool definition restructured with clearer WHEN TO CALL and WHAT TO INCLUDE sections, requiring concrete evidence gathered before calling and emphasizing the explore→gather→advise→implement sequence.
 
 ### Fixed
 - **Tool Output Click Regression** — Fixed separator accounting in clickable tool output regions where preceding messages caused `startLine` drift. New regression test validates click targeting after multiple preceding messages.
@@ -239,6 +246,7 @@
 - **`cd` Bare Relative Dir Permission** — Commands like `cd web` are now correctly recognized as path operations instead of being treated as argless and misdirected to `$HOME`, fixing the out-of-scope veto from the guardrail layer.
 - **Status Bar Background Rendering** — Second line of the status bar now applies full-width background styling (matching the first line), eliminating the color gap that appeared in the middle of the bottom chrome.
 - **Git File List Mouse Wheel Scroll Snap-Back** — Mouse wheel scrolling over the git files column now scrolls independently of cursor position. New `lastScrollCursor` field tracks cursor moves so `clampFileListScroll()` only snaps the view when the cursor actively moves, not when the wheel scrolls. Same pattern as `filesModel.reconcileTreeScroll`.
+- **`firstOutOfScopePath` Shell Substitution Guard** — Commands containing `$(` or backtick substitutions now return `""` instead of attempting to extract a path fragment from the shell expression, preventing false `verifyAutoGrant` rejections when the expanded path resolves to an in-scope directory. Locked in by `TestPermissions_FirstOutOfScopePath_ShellSubstReturnsEmpty`.
 
 ## [0.3.5] — 2026-06-10
 

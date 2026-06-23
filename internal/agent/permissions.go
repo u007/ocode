@@ -875,8 +875,11 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 				emitDebug("perm", fmt.Sprintf("Decide %s (path pattern): tool=%s path=%s", level, toolName, path))
 				return PermissionDecision{Level: level}
 			}
-			// Relative paths and glob patterns (non-absolute) are implicitly within workDir
-			if filepath.IsAbs(path) && !isWithinWorkDir(pm, path) {
+			// Relative paths and glob patterns (non-absolute) are implicitly within workDir.
+			// Use isWithinAllowedScope (not isWithinWorkDir) so extra_allowed_paths
+			// persisted via "always allow this path" are respected for all tools, not
+			// just read-only ones.
+			if filepath.IsAbs(path) && !isWithinAllowedScope(pm, path) {
 				// Temp directories are always allowed (cross-platform)
 				if isTempDir(path) {
 					emitDebug("perm", fmt.Sprintf("Decide ALLOW (temp dir): tool=%s path=%s", toolName, path))
@@ -1111,6 +1114,13 @@ func (pm *PermissionManager) AllowedRoots() []string {
 	if dataDir, err := paths.GlobalDataDir(); err == nil {
 		add(dataDir)
 	}
+	// Language dependency cache/registry directories (Go module cache, npm
+	// cache, cargo registry, pip cache, Maven/Gradle caches, etc.). These are
+	// content-addressed or append-only stores; read-only access is always safe,
+	// and write access is guarded by the read-only-tool check in Decide.
+	for _, r := range languageDepRoots() {
+		add(r)
+	}
 	add("/tmp")
 	add("/var/tmp")
 	add(os.TempDir())
@@ -1176,17 +1186,90 @@ func goModCacheRoots() []string {
 	return roots
 }
 
+// languageDepRoots returns well-known global dependency cache and registry
+// directories across languages. These are content-addressed or append-only
+// stores that are safe for read-only access — listing or reading a cached
+// dependency is benign and must not require a prompt.
+func languageDepRoots() []string {
+	seen := make(map[string]struct{})
+	var roots []string
+	add := func(p string) {
+		if p == "" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		roots = append(roots, p)
+	}
+
+	// Go module cache (content-addressed, written 0444).
+	for _, r := range goModCacheRoots() {
+		add(r)
+	}
+
+	home, homeErr := os.UserHomeDir()
+	if homeErr == nil {
+		// npm content-addressable cache (respect npm_config_cache env var).
+		if nc := strings.TrimSpace(os.Getenv("npm_config_cache")); nc != "" {
+			add(nc)
+		} else {
+			add(filepath.Join(home, ".npm", "_cacache"))
+		}
+		// pnpm store (immutable, content-addressed).
+		add(filepath.Join(home, ".local", "share", "pnpm", "store"))
+		add(filepath.Join(home, ".pnpm-store"))
+		// yarn berry cache (immutable zip archives).
+		if yc := strings.TrimSpace(os.Getenv("YARN_CACHE_FOLDER")); yc != "" {
+			add(yc)
+		} else {
+			add(filepath.Join(home, ".yarn", "berry", "cache"))
+		}
+		// Rust cargo registry (append-only, immutable packages).
+		if ch := strings.TrimSpace(os.Getenv("CARGO_HOME")); ch != "" {
+			add(filepath.Join(ch, "registry"))
+		} else {
+			add(filepath.Join(home, ".cargo", "registry"))
+		}
+		// Python pip cache (content-addressed http cache).
+		if pc := strings.TrimSpace(os.Getenv("PIP_CACHE_DIR")); pc != "" {
+			add(pc)
+		} else {
+			add(filepath.Join(home, ".cache", "pip"))
+		}
+		// Maven local repository.
+		add(filepath.Join(home, ".m2", "repository"))
+		// Gradle cache.
+		if gh := strings.TrimSpace(os.Getenv("GRADLE_USER_HOME")); gh != "" {
+			add(filepath.Join(gh, "caches"))
+		} else {
+			add(filepath.Join(home, ".gradle", "caches"))
+		}
+	}
+
+	// XDG_CACHE_HOME-based paths for tools that respect the XDG spec.
+	if xdgCache := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); xdgCache != "" {
+		add(filepath.Join(xdgCache, "pip"))
+		add(filepath.Join(xdgCache, "npm", "_cacache"))
+	}
+
+	sort.Strings(roots)
+	return roots
+}
+
 // isImmutableReadRoot reports whether rawPath lies within a known read-only,
-// developer-trusted root (currently the Go module cache). Used to auto-allow
-// read-only tools out-of-scope without consulting the permission model — listing
-// or reading a cached dependency is benign and must not require a prompt.
+// developer-trusted root (currently the Go module cache and other language
+// dependency caches). Used to auto-allow read-only tools out-of-scope without
+// consulting the permission model — listing or reading a cached dependency is
+// benign and must not require a prompt.
 func isImmutableReadRoot(rawPath string) bool {
 	absPath, err := filepath.Abs(rawPath)
 	if err != nil {
 		return false
 	}
 	clean := filepath.Clean(absPath)
-	for _, root := range goModCacheRoots() {
+	for _, root := range languageDepRoots() {
 		if pathUnderRoot(clean, filepath.Clean(root)) {
 			return true
 		}
@@ -2393,6 +2476,14 @@ func canAutoAllowInRoot(pm *PermissionManager, command, prefix string) bool {
 // extra_allowed_paths instead of a useless bash-prefix rule.
 func firstOutOfScopePath(pm *PermissionManager, command, prefix string) string {
 	if pm == nil || pm.workDir == "" {
+		return ""
+	}
+	// Commands with shell substitutions ($(...) or backticks) cannot be
+	// statically evaluated to a concrete path — the resolved path depends on
+	// runtime expansion.  Return "" so the caller falls back to a generic bash
+	// ask rather than surfacing a path fragment that verifyAutoGrant would
+	// falsely reject as out-of-scope.
+	if strings.Contains(command, "$(") || strings.Contains(command, "`") {
 		return ""
 	}
 	fields := splitShellFields(command)
