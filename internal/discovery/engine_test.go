@@ -3,7 +3,6 @@ package discovery
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 func docsFixture() []Doc {
@@ -68,24 +67,23 @@ func TestResolveEmbedderHTTPRequiresKey(t *testing.T) {
 	}
 }
 
-func TestWarmAsyncBecomesReady(t *testing.T) {
+func TestWarmBecomesReady(t *testing.T) {
 	eng := NewEngine(FakeEmbedder{Dimension: 32}, t.TempDir())
 	if eng.Ready() {
 		t.Fatal("not ready before warm")
 	}
-	eng.WarmAsync(docsFixture())
-	// Poll briefly for readiness (the goroutine completes near-instantly with the fake).
-	deadline := 100
-	for i := 0; i < deadline && !eng.Ready(); i++ {
-		time.Sleep(time.Millisecond)
+	if err := eng.Warm(context.Background(), docsFixture()); err != nil {
+		t.Fatalf("Warm failed: %v", err)
 	}
 	if !eng.Ready() {
-		t.Fatal("WarmAsync should make the engine ready")
+		t.Fatal("Warm should make the engine ready")
 	}
-	// Second call is a no-op (no panic, still ready).
-	eng.WarmAsync(docsFixture())
+	// Second call with the same doc-set is a no-op (idempotent via docSetHash).
+	if err := eng.Warm(context.Background(), docsFixture()); err != nil {
+		t.Fatalf("second Warm failed: %v", err)
+	}
 	if !eng.Ready() {
-		t.Fatal("idempotent WarmAsync must keep ready")
+		t.Fatal("idempotent Warm must keep ready")
 	}
 }
 

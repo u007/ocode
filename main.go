@@ -83,12 +83,28 @@ func main() {
 			}
 			return
 		case "serve":
+			// Register the embedded skills FS so that /api/skills and the
+			// discovery system can find bundled skills.
+			if fsys := bundledSkillsFS(); fsys != nil {
+				skill.SetBundledFS(fsys)
+			}
+			if fsys := bundledModelConfigFS(); fsys != nil {
+				agent.SetBundledModelConfigFS(fsys)
+			}
 			if err := server.Run(os.Args[2:], webFS()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
 			return
 		case "web":
+			// Register the embedded skills FS so that /api/skills and the
+			// discovery system can find bundled skills.
+			if fsys := bundledSkillsFS(); fsys != nil {
+				skill.SetBundledFS(fsys)
+			}
+			if fsys := bundledModelConfigFS(); fsys != nil {
+				agent.SetBundledModelConfigFS(fsys)
+			}
 			args := append([]string{"--open"}, os.Args[2:]...)
 			if err := server.Run(args, webFS()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
