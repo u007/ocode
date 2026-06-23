@@ -39,10 +39,6 @@ type Engine struct {
 	cacheDir string
 	corpus   *Corpus
 	docHash  string // identity of the doc-set the corpus was built from
-	// warmOnce guards the background warm goroutine so WarmAsync is idempotent
-	// (safe to call every turn).
-	warmOnce sync.Once
-	warming  bool
 }
 
 func NewEngine(e Embedder, cacheDir string) *Engine {
@@ -79,25 +75,6 @@ func (eng *Engine) Ready() bool {
 	eng.mu.RLock()
 	defer eng.mu.RUnlock()
 	return eng.corpus != nil
-}
-
-// WarmAsync warms the corpus in a background goroutine, once. Safe to call every
-// turn; subsequent calls are no-ops while/after warming. Until the corpus is
-// ready, callers must treat the engine as "not gating" (Ready() returns false).
-func (eng *Engine) WarmAsync(docs []Doc) {
-	eng.warmOnce.Do(func() {
-		eng.mu.Lock()
-		eng.warming = true
-		eng.mu.Unlock()
-		go func() {
-			if err := eng.Warm(context.Background(), docs); err != nil {
-				emitDiscoveryDebug("WARN", "background warm failed: "+err.Error())
-			}
-			eng.mu.Lock()
-			eng.warming = false
-			eng.mu.Unlock()
-		}()
-	})
 }
 
 // Rank embeds the query and scores every corpus doc.

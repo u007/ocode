@@ -4218,26 +4218,16 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if strings.HasPrefix(text, "!") {
+			if m.streaming || m.compacting {
+				m.queuedCommands = append(m.queuedCommands, text)
+				m.input.Reset()
+				m.layout()
+				m.maybeScrollTranscriptToBottom()
+				return m, nil
+			}
 			m.input.Reset()
 			cmdText := strings.TrimPrefix(text, "!")
-			toolCallID := fmt.Sprintf("shell-%d", time.Now().UnixNano())
-			argsJSON, _ := json.Marshal(map[string]string{"command": cmdText})
-			tc := agent.ToolCall{ID: toolCallID, Type: "function"}
-			tc.Function.Name = "bash"
-			tc.Function.Arguments = string(argsJSON)
-			m.appendAgentMessage(agent.Message{
-				Role:      "assistant",
-				ToolCalls: []agent.ToolCall{tc},
-			})
-			m.rerenderTranscriptAndMaybeScroll()
-			m.markCmdStarted()
-			// Track shell execution for the activity-row timer.
-			m.shellCmdStart = time.Now()
-			m.shellCmdText = cmdText
-			if !m.activityRowReserved {
-				m.activityRowReserved = true
-			}
-			return m, m.runCapturedShell(cmdText, m.workDir, toolCallID)
+			return m, m.startShellExecution(cmdText)
 		}
 
 		if m.streaming {
@@ -5876,6 +5866,16 @@ func (m *model) drainQueuedCommands() (tea.Cmd, bool) {
 		cmdText := m.queuedCommands[0]
 		m.queuedCommands = m.queuedCommands[1:]
 		drained = true
+		// Shell commands queued while streaming are stored with the "!" prefix.
+		// Route them through startShellExecution instead of handleCommand.
+		if strings.HasPrefix(cmdText, "!") {
+			shellCmd := strings.TrimPrefix(cmdText, "!")
+			cmd := m.startShellExecution(shellCmd)
+			if cmd != nil {
+				return cmd, true
+			}
+			continue
+		}
 		_, cmd := m.handleCommand(cmdText)
 		if cmd != nil {
 			return cmd, true
@@ -6950,6 +6950,31 @@ func (m *model) refreshEditorOpener() {
 	m.files.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
 	m.git.SetEditor(editor)
 	m.git.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
+}
+
+// startShellExecution begins a shell command execution, recording it in the
+// transcript with a tool-call entry and returning the Cmd that runs the shell
+// via runCapturedShell. Used both from the immediate ! handler and from the
+// drainQueuedCommands path when a ! command was queued while streaming.
+func (m *model) startShellExecution(cmdText string) tea.Cmd {
+	toolCallID := fmt.Sprintf("shell-%d", time.Now().UnixNano())
+	argsJSON, _ := json.Marshal(map[string]string{"command": cmdText})
+	tc := agent.ToolCall{ID: toolCallID, Type: "function"}
+	tc.Function.Name = "bash"
+	tc.Function.Arguments = string(argsJSON)
+	m.appendAgentMessage(agent.Message{
+		Role:      "assistant",
+		ToolCalls: []agent.ToolCall{tc},
+	})
+	m.rerenderTranscriptAndMaybeScroll()
+	m.markCmdStarted()
+	// Track shell execution for the activity-row timer.
+	m.shellCmdStart = time.Now()
+	m.shellCmdText = cmdText
+	if !m.activityRowReserved {
+		m.activityRowReserved = true
+	}
+	return m.runCapturedShell(cmdText, m.workDir, toolCallID)
 }
 
 // runCapturedShell runs `command` non-interactively, capturing combined

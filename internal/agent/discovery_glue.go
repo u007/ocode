@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
@@ -155,11 +156,21 @@ func (a *Agent) RunDiscovery(query string) {
 	if len(docs) == 0 {
 		return
 	}
-	// Kick the corpus warm in the background; first turn doesn't block on
-	// cold-embed. Until Ready() flips true, the gate attaches everything.
-	a.disco.engine.WarmAsync(docs)
-	if !a.disco.engine.Ready() {
-		emitDebug("DISCOVERY", "corpus still warming — all tools attached this turn")
+	// Warm the corpus synchronously so skills are ranked and attached on the
+	// very first turn. Subsequent calls are no-ops (Warm is idempotent for
+	// the same doc-set via the docSetHash check).
+	//
+	// Tradeoff: synchronous warming blocks Step() on the embedding call.
+	// On a warm cache this is a cheap hash-check + early-return (microseconds).
+	// On a cold cache it can cost one embedding network round-trip per cache
+	// miss. To bound the first-turn latency hit we apply a 500ms deadline:
+	// if the warm doesn't finish in time we fall through and discoveryAllows
+	// returns true for everything (corpus still nil → Ready() == false),
+	// giving the user immediate response while the next turn retries warm.
+	warmCtx, warmCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer warmCancel()
+	if err := a.disco.engine.Warm(warmCtx, docs); err != nil {
+		emitDebug("DISCOVERY", fmt.Sprintf("corpus warm skipped this turn: %v", err))
 		return
 	}
 	added, err := a.disco.session.Discover(context.Background(), query)
@@ -264,8 +275,10 @@ func (a *Agent) markMCPFrom(parent *Agent) {
 }
 
 // discoveryAllows gates MCP tools by the sticky set. Built-ins are never gated.
-// While the corpus is still warming (Ready() == false), attach everything so a
-// fresh session doesn't see a tool list shrink to zero on turn 1.
+// If the corpus warm failed this turn (corpus is nil → Ready() == false), attach
+// everything to avoid a zero-tool state. Warm is now called synchronously in
+// RunDiscovery, so Ready() == false here means the warm call returned an error,
+// not that warming is still in progress.
 func (a *Agent) discoveryAllows(name string) bool {
 	if a.disco == nil || !a.disco.enabled {
 		return true
@@ -274,7 +287,7 @@ func (a *Agent) discoveryAllows(name string) bool {
 		return true
 	}
 	if a.disco.engine == nil || !a.disco.engine.Ready() {
-		return true // not warmed yet → don't gate
+		return true // warm failed → don't gate
 	}
 	return a.disco.session.IsAttached("mcp:" + name)
 }
