@@ -113,7 +113,8 @@ func init() {
 		{name: "/upload", aliases: []string{"/uploads"}, usage: "/upload [path]", help: "Show or set the file upload directory used by /api/uploads", handler: runUploadCmd},
 		{name: "/search", aliases: []string{"/find"}, usage: "/search <query>", help: "Find a message by keyword (opens the in-chat find bar)", handler: runSearchCmd},
 		{name: "/discover", usage: "/discover [enable|disable|status|model [name]]", help: "Enable/disable retrieval-based skill/MCP discovery, show status, or choose the query-embedding model", handler: runDiscoverCmd},
-		{name: "/orchestrate", usage: "/orchestrate <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runOrchestrateCmd},
+		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status]", help: "Enable/disable documentation-first development prompt (read docs before implementing, update after)", handler: runDocsCmd},
+		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -1098,6 +1099,19 @@ func setMemoryEnabled(m *model, enabled bool) error {
 	return nil
 }
 
+func setDocPromptEnabled(m *model, enabled bool) error {
+	if m.config != nil {
+		if err := config.SaveDocPromptEnabled(enabled); err != nil {
+			return err
+		}
+		m.config.Ocode.DocPromptEnabled = enabled
+	}
+	if m.agent != nil {
+		m.agent.SetDocPromptEnabled(enabled)
+	}
+	return nil
+}
+
 func runMemCmd(m *model, args []string) tea.Cmd {
 	if len(args) == 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: memoryStatusText(m, true)})
@@ -1446,11 +1460,11 @@ func runPathsCmd(m *model, args []string) tea.Cmd {
 	return nil
 }
 
-func runOrchestrateCmd(m *model, args []string) tea.Cmd {
+func runGoalCmd(m *model, args []string) tea.Cmd {
 	if len(args) == 0 {
 		m.messages = append(m.messages, message{
 			role: roleAssistant,
-			text: "Usage: /orchestrate <goal>\nExample: /orchestrate add user validation to the login flow",
+			text: "Usage: /goal <goal>\nExample: /goal add user validation to the login flow",
 		})
 		return nil
 	}
@@ -1461,11 +1475,15 @@ func runOrchestrateCmd(m *model, args []string) tea.Cmd {
 	}
 	m.messages = append(m.messages, message{
 		role: roleAssistant,
-		text: fmt.Sprintf("[Orchestrator] Starting pipeline for: %s\nRunning in background — status updates will appear here.", goal),
+		text: fmt.Sprintf("[Goal] Starting pipeline for: %s\nRunning in background — status updates will appear here.", goal),
 	})
-	return runOrchestrateBackground(m, goal, false)
+	return runGoalBackground(m, goal, false)
 }
 
 func runDiscoverCmd(m *model, args []string) tea.Cmd {
 	return m.handleDiscoverCmd(args)
+}
+
+func runDocsCmd(m *model, args []string) tea.Cmd {
+	return m.handleDocsCmd(args)
 }

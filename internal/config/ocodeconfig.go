@@ -69,8 +69,8 @@ type DiscoveryConfig struct {
 	// that the local backend should adopt instead of downloading and spawning
 	// its own. The probe validates the /v1/models response shape. Empty means
 	// "use the bundled server on the manifest port and download if needed".
-	LocalServerURL   string
-	PinnedSkills     []string
+	LocalServerURL string
+	PinnedSkills   []string
 }
 
 type SecurityConfig struct {
@@ -98,7 +98,11 @@ type OcodeConfig struct {
 	Discovery   DiscoveryConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
 	// into the agent prompt.
-	MemoryEnabled     bool
+	MemoryEnabled bool
+	// DocPromptEnabled toggles injection of a documentation-first development
+	// prompt into the agent's system prompt so it reads existing docs before
+	// implementing and updates them afterward.
+	DocPromptEnabled  bool
 	ExtraAllowedPaths []string
 	Editor            string
 	EditorMode        string
@@ -257,26 +261,27 @@ type discoveryConfigFile struct {
 }
 
 type ocodeConfigFile struct {
-	Compact           compactConfigFile    `json:"compact"`
-	Advisor           advisorConfigFile    `json:"advisor"`
-	Permissions       permissionConfigFile `json:"permissions"`
-	Plugins           pluginsConfigFile    `json:"plugins"`
-	Security          securityConfigFile   `json:"security"`
-	Discovery         discoveryConfigFile  `json:"discovery"`
-	MemoryEnabled     *bool                `json:"memory_enabled,omitempty"`
-	ExtraAllowedPaths []string             `json:"extra_allowed_paths,omitempty"`
-	Editor            string               `json:"editor,omitempty"`
-	EditorMode        string               `json:"editor_mode,omitempty"`
-	IDEMode           string               `json:"ide_mode,omitempty"`
-	SmallModel        string               `json:"small_model,omitempty"`
-	SmallModelEnabled *bool                `json:"small_model_enabled,omitempty"`
-	RecapTimeoutSeconds *int                `json:"recap_timeout_seconds,omitempty"`
-	CommitMsgModel    string               `json:"commit_msg_model,omitempty"`
-	CommitMsgPrompt   string               `json:"commit_msg_prompt,omitempty"`
-	TUI               tuiConfigFile        `json:"tui"`
-	MaxSteps          int                  `json:"max_steps,omitempty"`
-	MaxImageDim       int                  `json:"image_max_dim,omitempty"`
-	UploadDir         string               `json:"upload_dir,omitempty"`
+	Compact             compactConfigFile    `json:"compact"`
+	Advisor             advisorConfigFile    `json:"advisor"`
+	Permissions         permissionConfigFile `json:"permissions"`
+	Plugins             pluginsConfigFile    `json:"plugins"`
+	Security            securityConfigFile   `json:"security"`
+	Discovery           discoveryConfigFile  `json:"discovery"`
+	MemoryEnabled       *bool                `json:"memory_enabled,omitempty"`
+	DocPromptEnabled    *bool                `json:"doc_prompt_enabled,omitempty"`
+	ExtraAllowedPaths   []string             `json:"extra_allowed_paths,omitempty"`
+	Editor              string               `json:"editor,omitempty"`
+	EditorMode          string               `json:"editor_mode,omitempty"`
+	IDEMode             string               `json:"ide_mode,omitempty"`
+	SmallModel          string               `json:"small_model,omitempty"`
+	SmallModelEnabled   *bool                `json:"small_model_enabled,omitempty"`
+	RecapTimeoutSeconds *int                 `json:"recap_timeout_seconds,omitempty"`
+	CommitMsgModel      string               `json:"commit_msg_model,omitempty"`
+	CommitMsgPrompt     string               `json:"commit_msg_prompt,omitempty"`
+	TUI                 tuiConfigFile        `json:"tui"`
+	MaxSteps            int                  `json:"max_steps,omitempty"`
+	MaxImageDim         int                  `json:"image_max_dim,omitempty"`
+	UploadDir           string               `json:"upload_dir,omitempty"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -315,16 +320,16 @@ func defaultSecurityConfig() SecurityConfig {
 
 func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
-		Compact:           defaultCompactConfig(),
-		Advisor:           defaultAdvisorConfig(),
-		Permissions:       defaultPermissionConfig(),
-		MemoryEnabled:     true,
-		SmallModelEnabled: true,
+		Compact:             defaultCompactConfig(),
+		Advisor:             defaultAdvisorConfig(),
+		Permissions:         defaultPermissionConfig(),
+		MemoryEnabled:       true,
+		SmallModelEnabled:   true,
 		Security:            defaultSecurityConfig(),
 		Discovery:           defaultDiscoveryConfig(),
 		RecapTimeoutSeconds: 120,
 		TUI:                 defaultTUIConfig(),
-		Extra:             make(map[string]json.RawMessage),
+		Extra:               make(map[string]json.RawMessage),
 	}
 }
 
@@ -526,6 +531,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.MemoryEnabled = *file.MemoryEnabled
 		}
 		delete(raw, "memory_enabled")
+	}
+
+	if _, ok := raw["doc_prompt_enabled"]; ok {
+		if file.DocPromptEnabled != nil {
+			cfg.DocPromptEnabled = *file.DocPromptEnabled
+		}
+		delete(raw, "doc_prompt_enabled")
 	}
 
 	if _, ok := raw["tui"]; ok {
@@ -814,6 +826,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["commit_msg_prompt"] = cfg.CommitMsgPrompt
 	}
 	payload["memory_enabled"] = cfg.MemoryEnabled
+	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
 	if cfg.MaxSteps > 0 {
 		payload["max_steps"] = cfg.MaxSteps
 	}
@@ -1184,6 +1197,16 @@ func SaveAdvisorModel(providerModel string) error {
 	cfg.Advisor.Provider = provider
 	cfg.Advisor.Model = model
 	cfg.Advisor.ClaudeCode = (provider == "claude-code")
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveDocPromptEnabled persists the doc-prompt toggle to config.
+func SaveDocPromptEnabled(enabled bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.DocPromptEnabled = enabled
 	return SaveOcodeConfig(cfg)
 }
 

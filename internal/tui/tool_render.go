@@ -104,14 +104,7 @@ func formatToolCallHint(tc agent.ToolCall) string {
 	case "advisor":
 		p := first("prompt")
 		if p != "" {
-			lines := strings.Split(p, "\n")
-			const maxLines = 5
-			if len(lines) > maxLines {
-				lines = lines[:maxLines]
-				p = strings.Join(lines, "\n") + "\n..."
-			} else {
-				p = strings.Join(lines, "\n")
-			}
+			p = strings.TrimSpace(p)
 		}
 		return fmt.Sprintf("🧠 advisor:\n%s", p)
 	case "question":

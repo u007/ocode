@@ -80,8 +80,8 @@ func TestAdvisorTool_Definition(t *testing.T) {
 		t.Errorf("definition name should be 'advisor', got %v", def["name"])
 	}
 	desc, _ := def["description"].(string)
-	if !strings.Contains(desc, "avoid redundant exploration") {
-		t.Errorf("definition description should guide prompt quality to avoid redundant exploration")
+	if !strings.Contains(desc, "gathered concrete findings") {
+		t.Errorf("definition description should guide gathering concrete findings before calling advisor")
 	}
 	params, ok := def["parameters"].(map[string]interface{})
 	if !ok {
@@ -103,7 +103,7 @@ func TestAdvisorTool_Definition(t *testing.T) {
 	}
 	promptProp, _ := props["prompt"].(map[string]interface{})
 	promptDesc, _ := promptProp["description"].(string)
-	for _, want := range []string{"files/lines already inspected", "key evidence/outputs", "exact decision/questions"} {
+	for _, want := range []string{"files already read with key findings", "grep/test/command outputs", "exact decision or questions"} {
 		if !strings.Contains(promptDesc, want) {
 			t.Errorf("prompt description missing %q", want)
 		}

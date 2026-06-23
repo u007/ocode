@@ -568,6 +568,7 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	}
 	if next != nil && m.config != nil {
 		next.SetMemoryEnabled(m.config.Ocode.MemoryEnabled)
+		next.SetDocPromptEnabled(m.config.Ocode.DocPromptEnabled)
 	}
 	m.agent = next
 	if m.agent != nil {
@@ -802,6 +803,8 @@ type model struct {
 	compacting               bool
 	queuedCompactInputs      []string // messages queued while compaction is in flight
 	cmdRunningCount          int
+	shellCmdStart            time.Time // non-zero = a !shell command is running; used for elapsed timer
+	shellCmdText             string    // the shell command text, for display in the activity row
 	lastCompactErr           error
 	pendingCompactUIIdx      []int
 	pendingCompactManual     bool
@@ -2311,6 +2314,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case shellFinishedMsg:
 		m.markCmdFinished()
+		// Clear the shell activity-row indicator.
+		m.shellCmdStart = time.Time{}
+		m.shellCmdText = ""
 		content := msg.output
 		if msg.err != nil {
 			if content == "" {
@@ -3347,25 +3353,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 		}
 		return m, waitRecapEvent(m.recapCh)
-	case orchestrateDoneMsg:
+	case goalDoneMsg:
 		if msg.err != "" {
 			m.messages = append(m.messages, message{
 				role: roleAssistant,
-				text: fmt.Sprintf("[Orchestrator] Error: %s", msg.err),
+				text: fmt.Sprintf("[Goal] Error: %s", msg.err),
 			})
 		} else {
 			m.messages = append(m.messages, message{
 				role: roleAssistant,
-				text: fmt.Sprintf("[Orchestrator] Complete:\n\n%s", msg.report),
+				text: fmt.Sprintf("[Goal] Complete:\n\n%s", msg.report),
 			})
 		}
 		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
 		return m, nil
-	case orchestrateStatusMsg:
+	case goalStatusMsg:
 		m.messages = append(m.messages, message{
 			role:      roleAssistant,
-			text:      fmt.Sprintf("[Orchestrator] %s: %s", msg.state, msg.msg),
+			text:      fmt.Sprintf("[Goal] %s: %s", msg.state, msg.msg),
 			transient: true,
 		})
 		m.rerenderTranscriptAndMaybeScroll()
@@ -3881,8 +3887,8 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 
 	if m.showPermDialog {
 		switch keyStr {
-		case "y", "n", "a", "t":
-			cmd, closed := m.permDialogInput(keyStr)
+		case "y", "Y", "n", "N", "a", "A", "t", "T":
+			cmd, closed := m.permDialogInput(strings.ToLower(keyStr))
 			if closed {
 				m.input.Reset()
 				m.layout()
@@ -4225,6 +4231,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			})
 			m.rerenderTranscriptAndMaybeScroll()
 			m.markCmdStarted()
+			// Track shell execution for the activity-row timer.
+			m.shellCmdStart = time.Now()
+			m.shellCmdText = cmdText
+			if !m.activityRowReserved {
+				m.activityRowReserved = true
+			}
 			return m, m.runCapturedShell(cmdText, m.workDir, toolCallID)
 		}
 
@@ -4818,6 +4830,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if idx, ok := m.files.treeNodeForClick(mouse, appHeaderHeight, m.styles); ok {
 			n := m.files.nodes[idx]
 			m.files.cursor = idx
+			m.files.panel = filesPanelPicker
 			// Keep lastScrollCursor/offset in sync with the other scroll paths
 			// (wheel, scrollbar, layout) so a later reconcile doesn't snap.
 			m.files.reconcileTreeScroll(m.width, m.height)
@@ -4837,9 +4850,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			return m, nil, true
 		}
-		previewRight := m.width - 1
-		scrollX := previewRight - 1
-		filesTrackTop := appHeaderHeight + 1
+		// scrollbar renders right after viewport: pane starts at (treeW-2), left overhead=2, so scrollX = treeW + preview.Width()
+		scrollX := treeW + m.files.preview.Width()
+		filesTrackTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 		filesTrackH := m.files.preview.Height()
 		if mouse.X == scrollX && mouse.Y >= filesTrackTop && mouse.Y < filesTrackTop+filesTrackH {
 			if thumbOffset, ok := scrollbarThumbOffset(mouse.Y, filesTrackTop, filesTrackH, m.files.preview.TotalLineCount(), m.files.preview.VisibleLineCount(), m.files.preview.YOffset()); ok {
@@ -4853,6 +4866,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		previewLeft := treeW + 2
 		previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 		if mouse.X >= previewLeft && mouse.X < scrollX && mouse.Y >= previewBodyTop && mouse.Y < previewBodyTop+m.files.preview.Height() {
+			m.files.panel = filesPanelPreview
 			gutterWidth := 0
 			if m.files.preview.LeftGutterFunc != nil {
 				gutterWidth = lipgloss.Width(m.files.preview.LeftGutterFunc(viewport.GutterContext{Soft: m.files.preview.SoftWrap}))
@@ -5429,7 +5443,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		scrollbarSetOffset(&m.git.diff, mouse.Y-m.scrollbarDragOffset, gitTrackTop, m.git.diff.Height())
 		return m, nil, true
 	case scrollbarDragFilesPreview:
-		filesTrackTop := appHeaderHeight + 1
+		filesTrackTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 		scrollbarSetOffset(&m.files.preview, mouse.Y-m.scrollbarDragOffset, filesTrackTop, m.files.preview.Height())
 		return m, nil, true
 	case scrollbarDragFilesTree:
@@ -5790,7 +5804,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/paths" ||
 		cmd == "/rc" || cmd == "/remote-control" ||
 		cmd == "/search" || cmd == "/find" ||
-		cmd == "/discover"
+		cmd == "/discover" ||
+		cmd == "/docs" || cmd == "/doc-mode"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -6385,6 +6400,36 @@ func (m *model) showDiscoverStatus() {
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
 
+func (m *model) handleDocsCmd(args []string) tea.Cmd {
+	if len(args) == 0 || strings.ToLower(args[0]) == "status" {
+		status := "disabled"
+		if m.agent != nil && m.agent.DocPromptEnabled() {
+			status = "enabled"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Documentation-first development prompt: %s.", status)})
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "on", "true", "yes", "enable":
+		if err := setDocPromptEnabled(m, true); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Documentation-first development prompt: enabled."})
+		return nil
+	case "off", "false", "no", "disable":
+		if err := setDocPromptEnabled(m, false); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Documentation-first development prompt: disabled."})
+		return nil
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /docs [on|off|status]"})
+		return nil
+	}
+}
+
 func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 	if len(args) == 0 || strings.ToLower(args[0]) == "status" {
 		m.showDiscoverStatus()
@@ -6692,6 +6737,8 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.inputHistory = nil
 	m.inputHistoryIndex = -1
 	m.recapText = ""
+	m.shellCmdStart = time.Time{}
+	m.shellCmdText = ""
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session.", transient: true})
 	return cmd
 }
@@ -11954,7 +12001,7 @@ func (m model) renderActivityRow() string {
 		return ""
 	}
 	snap := m.lastActivity
-	if !snap.LLMRunning && len(snap.ActiveTools) == 0 && len(snap.ActiveAgents) == 0 {
+	if !snap.LLMRunning && len(snap.ActiveTools) == 0 && len(snap.ActiveAgents) == 0 && m.shellCmdStart.IsZero() {
 		return m.styles.Status.Width(m.statusContentWidth()).Render("")
 	}
 	var parts []string
@@ -11975,6 +12022,19 @@ func (m model) renderActivityRow() string {
 		parts = append(parts, fmt.Sprintf("⚠ %s — retry %d/%d in %s",
 			errShort, m.retryInfo.attempt, m.retryInfo.max,
 			remaining.Round(time.Second)))
+	}
+	if !m.shellCmdStart.IsZero() {
+		elapsed := time.Since(m.shellCmdStart).Round(time.Second)
+		shellParts := []string{fmt.Sprintf("⚡ bash [%s]", formatDuration(elapsed))}
+		if m.shellCmdText != "" {
+			// Truncate long commands for the activity row.
+			label := m.shellCmdText
+			if len(label) > 40 {
+				label = label[:37] + "..."
+			}
+			shellParts = append(shellParts, label)
+		}
+		parts = append(parts, strings.Join(shellParts, " "))
 	}
 	if len(snap.ActiveTools) > 0 {
 		toolParts := make([]string, len(snap.ActiveTools))

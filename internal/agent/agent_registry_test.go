@@ -30,6 +30,12 @@ func TestAgentRegistryBuiltins(t *testing.T) {
 	if got := reg.Get("scout"); got == nil || got.Mode != AgentModeSubagent {
 		t.Fatalf("expected scout subagent, got %#v", got)
 	}
+	if got := reg.Get("orchestrator"); got == nil || got.Mode != AgentModeAll {
+		t.Fatalf("expected orchestrator all-mode agent, got %#v", got)
+	}
+	if got := reg.Get("orchestrator"); got != nil && got.Hidden {
+		t.Error("orchestrator should NOT be hidden — it must appear in the agent picker")
+	}
 	if got := reg.Get("nonexistent"); got != nil {
 		t.Fatalf("expected nil for nonexistent agent, got %#v", got)
 	}

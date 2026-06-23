@@ -195,6 +195,7 @@ type Agent struct {
 	preloadedContextMu    sync.RWMutex
 	preloadedContext      string // set by askAgent to avoid duplicate LoadContext calls
 	memoryEnabled         bool   // whether memory prompt injection is active
+	docPromptEnabled      bool   // whether doc-first development prompt is injected
 	preloadedModelContext string // cached result of LoadModelContext, set once lazily
 	envPromptDate         string // date string used to build envPromptStr; stale = rebuild
 	envPromptStr          string // cached result of environmentPrompt()
@@ -502,6 +503,16 @@ func (a *Agent) MemoryEnabled() bool {
 	return a.memoryEnabled
 }
 
+// SetDocPromptEnabled toggles injection of the doc-first development prompt.
+func (a *Agent) SetDocPromptEnabled(enabled bool) {
+	a.docPromptEnabled = enabled
+}
+
+// DocPromptEnabled reports whether the doc-first development prompt is active.
+func (a *Agent) DocPromptEnabled() bool {
+	return a.docPromptEnabled
+}
+
 // getPreloadedContext returns the cached context under read lock.
 func (a *Agent) getPreloadedContext() string {
 	a.preloadedContextMu.RLock()
@@ -595,6 +606,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		}
 	}
 	a.memoryEnabled = cfg == nil || cfg.Ocode.MemoryEnabled
+	a.docPromptEnabled = cfg != nil && cfg.Ocode.DocPromptEnabled
 	return a
 }
 

@@ -1,4 +1,4 @@
-// internal/cli/orchestrate.go
+// internal/cli/goal.go
 package cli
 
 import (
@@ -14,8 +14,8 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
-// OrchestrateOptions mirrors orchestrator.PipelineOptions for CLI parsing.
-type OrchestrateOptions struct {
+// GoalOptions mirrors orchestrator.PipelineOptions for CLI parsing.
+type GoalOptions struct {
 	UseWorktree   bool
 	VerifyMode    string
 	MaxIterations int
@@ -24,11 +24,11 @@ type OrchestrateOptions struct {
 	YOLO          bool
 }
 
-// ParseOrchestrateArgs parses CLI args for the orchestrate subcommand.
+// ParseGoalArgs parses CLI args for the goal subcommand.
 // Flags: --no-worktree, --verify <mode>, --max-iterations <n>, --model <name>, --dir <path>, --yolo
 // Remaining args after flags are joined as the goal.
-func ParseOrchestrateArgs(args []string) (OrchestrateOptions, string, error) {
-	opts := OrchestrateOptions{UseWorktree: true}
+func ParseGoalArgs(args []string) (GoalOptions, string, error) {
+	opts := GoalOptions{UseWorktree: true}
 	var remaining []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -69,7 +69,7 @@ func ParseOrchestrateArgs(args []string) (OrchestrateOptions, string, error) {
 		}
 	}
 	if len(remaining) == 0 {
-		return opts, "", fmt.Errorf("goal is required: ocode orchestrate \"<goal>\"")
+		return opts, "", fmt.Errorf("goal is required: ocode goal \"<goal>\"")
 	}
 	goal := ""
 	for i, r := range remaining {
@@ -88,9 +88,9 @@ func ParseOrchestrateArgs(args []string) (OrchestrateOptions, string, error) {
 // the same pattern as `ocode run`: load config, build a client, instantiate
 // an agent, and let the pipeline drive it via DispatchSubagent.
 func Run(args []string) error {
-	opts, goal, err := ParseOrchestrateArgs(args)
+	opts, goal, err := ParseGoalArgs(args)
 	if err != nil {
-		return fmt.Errorf("usage error: %w\n\nUsage: ocode orchestrate [--no-worktree] [--verify MODE] [--max-iterations N] [--model MODEL] [--dir PATH] [--yolo] \"<goal>\"", err)
+		return fmt.Errorf("usage error: %w\n\nUsage: ocode goal [--no-worktree] [--verify MODE] [--max-iterations N] [--model MODEL] [--dir PATH] [--yolo] \"<goal>\"", err)
 	}
 
 	if opts.Dir != "" {
@@ -132,9 +132,9 @@ func Run(args []string) error {
 		}
 	}
 
-	fmt.Printf("[Orchestrator] Goal: %s\n", goal)
-	fmt.Printf("[Orchestrator] Model: %s\n", modelStr)
-	fmt.Printf("[Orchestrator] Worktree: %v\n", opts.UseWorktree)
+	fmt.Printf("[Goal] Goal: %s\n", goal)
+	fmt.Printf("[Goal] Model: %s\n", modelStr)
+	fmt.Printf("[Goal] Worktree: %v\n", opts.UseWorktree)
 
 	pipelineOpts := orchestrator.PipelineOptions{
 		UseWorktree:   opts.UseWorktree,
@@ -148,7 +148,7 @@ func Run(args []string) error {
 	pipeline := orchestrator.New(parent, pipelineOpts)
 	report, err := pipeline.Run(context.Background(), goal)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[Orchestrator] Error: %v\n", err)
+		fmt.Fprintf(os.Stderr, "[Goal] Error: %v\n", err)
 		return err
 	}
 
@@ -156,7 +156,7 @@ func Run(args []string) error {
 	fmt.Println(report.FormatMarkdown())
 
 	if !report.Passed {
-		return fmt.Errorf("orchestrator halted: see report above")
+		return fmt.Errorf("goal halted: see report above")
 	}
 	return nil
 }

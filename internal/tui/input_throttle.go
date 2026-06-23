@@ -17,6 +17,13 @@ import (
 // triggers a wasted full re-render and pegs a CPU core until momentum decays.
 const wheelRenderInterval = time.Second / 60
 
+// motionRenderInterval caps mouse-motion–driven re-renders to 60fps.
+// VS Code terminal sends MouseMotionMsg at pixel resolution (effectively
+// unlimited Hz), where native terminals fire only on cell boundaries. Each
+// motion event triggers a full View() re-render; at sub-millisecond rates this
+// pegs a CPU core and makes the TUI feel sluggish in VS Code.
+const motionRenderInterval = time.Second / 60
+
 // wheelThrottle coalesces a flood of mouse-wheel events down to at most one per
 // frame. The clock is passed in (rather than read internally) so the policy is
 // deterministically testable.
@@ -38,15 +45,21 @@ func (w *wheelThrottle) allow(now time.Time) bool {
 }
 
 // newInputFilter returns a bubbletea message filter that coalesces flooding
-// mouse-wheel events. Returning nil from a filter makes the event loop skip
-// both Update and the post-Update render for that message, which is exactly
-// what bounds the render rate during a momentum flood. All other messages pass
-// through untouched.
+// mouse-wheel and mouse-motion events. Returning nil from a filter makes the
+// event loop skip both Update and the post-Update render for that message,
+// which is exactly what bounds the render rate during a flood. All other
+// messages pass through untouched.
 func newInputFilter() func(tea.Model, tea.Msg) tea.Msg {
-	throttle := wheelThrottle{interval: wheelRenderInterval}
+	wheelT := wheelThrottle{interval: wheelRenderInterval}
+	motionT := wheelThrottle{interval: motionRenderInterval}
 	return func(_ tea.Model, msg tea.Msg) tea.Msg {
-		if _, ok := msg.(tea.MouseWheelMsg); ok {
-			if !throttle.allow(time.Now()) {
+		switch msg.(type) {
+		case tea.MouseWheelMsg:
+			if !wheelT.allow(time.Now()) {
+				return nil
+			}
+		case tea.MouseMotionMsg:
+			if !motionT.allow(time.Now()) {
 				return nil
 			}
 		}

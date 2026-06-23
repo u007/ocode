@@ -17,7 +17,23 @@ const (
 	promptModelCtxMarker  = "[ocode:model_context]"
 	promptSelectionMarker = "[ocode:selection]"
 	promptNotesMarker     = "[ocode:notes]"
+	promptDocPromptMarker = "[ocode:doc_prompt]"
 )
+
+// docPromptContent is the documentation-first development prompt injected
+// when DocPromptEnabled is true. It instructs the agent to consult existing
+// docs before implementing and to update them afterward.
+const docPromptContent = `## Documentation-First Development
+
+Before writing any code:
+1. **Read existing documentation** — look for README, CLAUDE.md, ARCHITECTURE.md, API docs, style guides, and schema definitions related to your changes.
+2. **Check documentation alignment** — if existing docs describe behavior your changes will affect, verify there is no conflict. If there is a conflict, ask the user before proceeding.
+3. **Build a mental model** of affected code paths and dependencies.
+
+After implementing, update documentation to reflect your changes:
+1. **Update inline documentation** — function/type comments, docstrings.
+2. **Update project documentation** — README, API docs, architecture docs, migration notes if your changes affect public APIs, config, setup steps, or data flow.
+3. **State explicitly if no doc updates are needed** and explain why.`
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
 // It is safe to call more than once; marked fragments are not duplicated.
@@ -100,6 +116,9 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 		if mc != "" {
 			msgs = append(msgs, Message{Role: "system", Content: promptModelCtxMarker + "\nModel-specific context:\n" + mc})
 		}
+	}
+	if a.DocPromptEnabled() {
+		msgs = append(msgs, Message{Role: "system", Content: promptDocPromptMarker + "\n" + docPromptContent})
 	}
 	if sel := strings.TrimSpace(selectionContext); sel != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptSelectionMarker + "\n" + sel})
