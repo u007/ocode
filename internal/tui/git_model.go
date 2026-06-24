@@ -40,6 +40,7 @@ const (
 	gitPendingDiscard      gitPendingAction = "discard"
 	gitPendingDropStash    gitPendingAction = "drop-stash"
 	gitPendingDeleteBranch gitPendingAction = "delete-branch"
+	gitPendingMergeBranch  gitPendingAction = "merge-branch"
 )
 
 type gitFile struct {
@@ -139,6 +140,8 @@ type gitModel struct {
 	// ai commit message generation
 	generateCommitMsg func(diff string) tea.Cmd
 	generatingMsg     bool
+	// log section: toggle between stat and full diff
+	logFullDiff bool
 	// file list filter
 	filterActive bool
 	filterQuery  string
@@ -943,6 +946,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		case gitSectionLog:
 			if m.commitCursor < len(m.commits)-1 {
 				m.commitCursor++
+				m.logFullDiff = false
 				if m.commitCursor >= m.commitViewport.YOffset()+m.commitViewport.VisibleLineCount() {
 					m.commitViewport.ScrollDown(1)
 				}
@@ -977,6 +981,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		case gitSectionLog:
 			if m.commitCursor > 0 {
 				m.commitCursor--
+				m.logFullDiff = false
 				if m.commitCursor < m.commitViewport.YOffset() {
 					m.commitViewport.ScrollUp(1)
 				}
@@ -1203,8 +1208,33 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				return m, m.openInEditor(path)
 			}
 		}
+	case "ctrl+m":
+		if m.section == gitSectionBranches && m.branchCursor < len(m.branches) {
+			branch := m.branches[m.branchCursor]
+			if branch == m.currentBranch {
+				m.statusMsg = "cannot merge current branch into itself"
+				return m, nil
+			}
+			if m.pendingAction == gitPendingMergeBranch {
+				m.pendingAction = gitPendingNone
+				if _, err := m.gitRun("merge", branch); err != nil {
+					m.statusMsg = "merge failed: " + err.Error()
+					m.logGit("merge failed: " + firstLine(err.Error()))
+				} else {
+					m.statusMsg = "merged " + branch
+					m.logGit("merge: " + branch)
+					return m, m.cmdRefresh()
+				}
+			} else {
+				m.pendingAction = gitPendingMergeBranch
+				m.statusMsg = "press ctrl+m again to merge " + branch + " into " + m.currentBranch
+			}
+		}
 	case "enter":
 		switch m.section {
+		case gitSectionLog:
+			m.logFullDiff = !m.logFullDiff
+			m.loadDiff()
 		case gitSectionBranches:
 			if m.branchCursor < len(m.branches) {
 				branch := m.branches[m.branchCursor]
@@ -1515,15 +1545,27 @@ func (m *gitModel) loadDiff() {
 			return
 		}
 		c := m.commits[m.commitCursor]
-		out, err := m.gitRun("show", "--no-color", "--stat", c.hash)
+		var out string
+		var err error
+		if m.logFullDiff {
+			out, err = m.gitRun("show", "--no-color", c.hash)
+		} else {
+			out, err = m.gitRun("show", "--no-color", "--stat", c.hash)
+		}
 		if err != nil {
 			out = "error: " + err.Error()
 		}
 		m.setDiffContent(renderUnifiedDiff(out, currentStyles()))
 		m.diff.GotoTop()
-		m.hunks = nil
-		m.hunkCursor = 0
-		m.diffHeader = ""
+		if m.logFullDiff {
+			m.hunks = parseHunks(out)
+			m.hunkCursor = 0
+			m.diffHeader = extractDiffHeader(out)
+		} else {
+			m.hunks = nil
+			m.hunkCursor = 0
+			m.diffHeader = ""
+		}
 	case gitSectionStash:
 		if m.stashCursor >= len(m.stashes) {
 			m.setDiffContent("")
@@ -1620,11 +1662,14 @@ func (m gitModel) renderHints() string {
 			}
 			return base + "ctrl+s stage  ctrl+u unstage  ctrl+l ignore file  ctrl+_ ignore path  space/shift+↑↓ select  ctrl+d discard  ctrl+e edit  ctrl+z stash  ctrl+a apply  ctrl+\\ commit  ctrl+f filter  ctrl+r refresh  ctrl+g fetch  ctrl+p pull  ctrl+o push"
 		case gitSectionLog:
-			return base + "j/k navigate  ctrl+r refresh"
+			if m.logFullDiff {
+				return base + "j/k navigate  enter stat view  ctrl+r refresh"
+			}
+			return base + "j/k navigate  enter full diff  ctrl+r refresh"
 		case gitSectionStash:
 			return base + "enter pop  ctrl+a apply  ctrl+d drop  ctrl+r refresh"
 		case gitSectionBranches:
-			return base + "enter checkout  ctrl+n new  ctrl+x delete  ctrl+r refresh  ctrl+g fetch  ctrl+p pull  ctrl+o push"
+			return base + "enter checkout  ctrl+n new  ctrl+m merge  ctrl+x delete  ctrl+r refresh  ctrl+g fetch  ctrl+p pull  ctrl+o push"
 		}
 	case gitPanelDiff:
 		if m.section == gitSectionChanges {

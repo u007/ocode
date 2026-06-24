@@ -216,11 +216,25 @@ Rules for any change that touches tools or the base prompt:
   - *Stable* content (e.g. the discovery name index + prompt contract — names
     don't change turn to turn) → **`system`-role** → hoisted into the cached
     system block, so it caches.
-  - *Volatile* content (e.g. attached-skill full descriptions, which grow with
-    the sticky set) → **`user`-role** → `collectAndRemove` leaves it in the
-    messages array (uncached suffix), where it coalesces with the current user
-    turn and never busts the system cache. Wrap it in the `[ocode:discovery]`
-    marker so the model reads it as system-origin, not user speech.
+  - *Volatile* content (e.g. attached-skill full descriptions and attached
+    project-doc full file content, which grow with the sticky set) →
+    **`user`-role** → `collectAndRemove` leaves it in the messages array
+    (uncached suffix), where it coalesces with the current user turn and never
+    busts the system cache. Wrap it in the `[ocode:discovery]` marker so the
+    model reads it as system-origin, not user speech.
+- **Markdown docs are part of the discovery corpus (`md_discovery.go`).** Every
+  project `*.md` except the always-on briefing set (`AGENTS.md`, `CLAUDE.md`,
+  `OCODE.md`, `.cursorrules`, `.opencode/rules/*.md`, which `LoadContext` injects
+  in full) is a `Kind:"md"` Doc whose `Text` is an LLM summary (small model when
+  configured, else the main client), cached at `.ocode/md-summaries.json` keyed
+  by file content (mtime+size gate, then sha256). The first activation runs a
+  **blocking** pass (`mdSummarizePass`, bounded concurrency `mdSummaryWorkers`)
+  so the corpus is fully summarized before the turn proceeds; failed
+  summarizations are negative-cached (`mdFailBackoff`) and never become
+  placeholders. The names-index lists `path — summary`; the full file content is
+  attached to the volatile tail only on query match. Editing a doc invalidates
+  its summary on the next throttled scan (`mdScanThrottle`), so `/doc-sync` edits
+  are reflected automatically.
 
 ## Environment Prompt
 The LLM receives environment context at the start of each session via
