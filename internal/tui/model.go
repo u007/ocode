@@ -3496,6 +3496,9 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		if m.activeTab == tabLog {
 			m.refreshLogViewport()
 		}
+		if m.activeTab == tabGit {
+			return true, m, m.git.cmdAutoRefresh()
+		}
 		return true, m, nil
 	case "alt+]", "ctrl+shift+]":
 		m.activeTab = (m.activeTab + 1) % tabCount
@@ -3505,6 +3508,9 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		}
 		if m.activeTab == tabLog {
 			m.refreshLogViewport()
+		}
+		if m.activeTab == tabGit {
+			return true, m, m.git.cmdAutoRefresh()
 		}
 		return true, m, nil
 	}
@@ -5139,6 +5145,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.refreshLogViewport()
 				m.logViewport.GotoBottom()
 			}
+			if tab == tabGit {
+				return m, m.git.cmdAutoRefresh(), true
+			}
 			return m, nil, true
 		}
 	}
@@ -5659,6 +5668,9 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 			if tab == tabLog {
 				m.refreshLogViewport()
 				m.logViewport.GotoBottom()
+			}
+			if tab == tabGit {
+				return m, m.git.cmdAutoRefresh(), true
 			}
 			return m, nil, true
 		}
@@ -6388,13 +6400,33 @@ func (m *model) showDiscoverStatus() {
 		if !st.Active && st.InitErr != "" {
 			fmt.Fprintf(&b, "  note:    fail-open (%s)\n", st.InitErr)
 		}
-		fmt.Fprintf(&b, "  attached skills (%d/%d):\n", len(st.AttachedSkills), st.SkillTotal)
+		// All names below are injected into the names-index; ● marks docs whose
+		// full summary is also injected (attached), ○ marks name-only.
+		attachedSet := make(map[string]bool, len(st.Attached))
 		for _, name := range st.AttachedSkills {
-			fmt.Fprintf(&b, "    - %s\n", name)
+			attachedSet["skill:"+name] = true
 		}
-		fmt.Fprintf(&b, "  attached MCP tools (%d/%d):\n", len(st.AttachedMCP), st.MCPTotal)
 		for _, name := range st.AttachedMCP {
-			fmt.Fprintf(&b, "    - %s\n", name)
+			attachedSet["mcp:"+name] = true
+		}
+		for _, name := range st.AttachedMD {
+			attachedSet["md:"+name] = true
+		}
+		writeInjected := func(label, kind string, names []string, attachedCount int) {
+			fmt.Fprintf(&b, "  injected %s (%d attached / %d names):\n", label, attachedCount, len(names))
+			for _, name := range names {
+				mark := "○"
+				if attachedSet[kind+":"+name] {
+					mark = "●"
+				}
+				fmt.Fprintf(&b, "    %s %s\n", mark, name)
+			}
+		}
+		writeInjected("skills", "skill", st.AllSkills, len(st.AttachedSkills))
+		writeInjected("MCP tools", "mcp", st.AllMCP, len(st.AttachedMCP))
+		writeInjected("project docs", "md", st.AllMD, len(st.AttachedMD))
+		if st.MDPending > 0 {
+			fmt.Fprintf(&b, "    (%d doc summaries still generating…)\n", st.MDPending)
 		}
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})

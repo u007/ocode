@@ -84,6 +84,9 @@ func (a *Agent) ensureDiscovery() {
 		engine:  eng,
 		session: discovery.NewSession(eng),
 	}
+	// Seed the markdown corpus from the on-disk cache and kick off background
+	// summarization of new/changed files.
+	a.ensureMDState()
 	// Register the discover_more recovery tool. It is intentionally not in
 	// a.mcpTools so discoveryAllows always returns true for it. Sub-agents with
 	// a spec.Tools whitelist will exclude it via isToolAllowed — acceptable in
@@ -141,6 +144,9 @@ func (a *Agent) discoveryDocs() []discovery.Doc {
 		}
 		docs = append(docs, discovery.Doc{ID: "mcp:" + name, Kind: "mcp", Name: name, Text: name + ": " + t.Description()})
 	}
+	// Project markdown docs (summaries generated in the background; only files
+	// with a ready cached summary appear here).
+	docs = append(docs, a.mdDocs()...)
 	sort.Slice(docs, func(i, j int) bool { return docs[i].ID < docs[j].ID })
 	return docs
 }
@@ -152,6 +158,8 @@ func (a *Agent) RunDiscovery(query string) {
 	if a.disco == nil || !a.disco.enabled || strings.TrimSpace(query) == "" {
 		return
 	}
+	// Re-scan project markdown for new/changed files (throttled, background).
+	a.refreshMDSummaries()
 	docs := a.discoveryDocs()
 	if len(docs) == 0 {
 		return
@@ -199,6 +207,11 @@ type DiscoveryStatusInfo struct {
 	SkillTotal     int
 	AttachedSkills []string // filtered from Attached
 	AttachedMCP    []string // filtered from Attached
+	AttachedMD     []string // filtered from Attached
+	AllSkills      []string // full corpus skill names (every name injected into the names-index)
+	AllMCP         []string // full corpus MCP tool names (every name injected into the names-index)
+	AllMD          []string // project-doc names with a ready summary (injected into the names-index)
+	MDPending      int      // md files discovered but not yet summarized (background in flight)
 	InitErr        string
 }
 
@@ -221,10 +234,25 @@ func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 					st.AttachedSkills = append(st.AttachedSkills, strings.TrimPrefix(id, "skill:"))
 				} else if strings.HasPrefix(id, "mcp:") {
 					st.AttachedMCP = append(st.AttachedMCP, strings.TrimPrefix(id, "mcp:"))
+				} else if strings.HasPrefix(id, "md:") {
+					st.AttachedMD = append(st.AttachedMD, strings.TrimPrefix(id, "md:"))
 				}
 			}
 		}
 	}
+	// Full corpus: every doc whose name is injected into the names-index, whether
+	// or not it is attached. Independent of session/embedder warm state.
+	for _, d := range a.discoveryDocs() {
+		switch d.Kind {
+		case "skill":
+			st.AllSkills = append(st.AllSkills, d.Name)
+		case "mcp":
+			st.AllMCP = append(st.AllMCP, d.Name)
+		case "md":
+			st.AllMD = append(st.AllMD, d.Name)
+		}
+	}
+	st.MDPending = a.mdPending()
 	return st
 }
 
@@ -406,10 +434,17 @@ func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 		return messages
 	}
 
-	sysContent, volContent := renderDiscoveryContext(a.discoveryDocs(), a.disco.session.IsAttached)
+	docs := a.discoveryDocs()
+	sysContent, volContent := renderDiscoveryContext(docs, a.disco.session.IsAttached)
 	messages = append(messages, Message{Role: "system", Content: sysContent})
 	if volContent != "" {
 		messages = append(messages, Message{Role: "user", Content: volContent})
+	}
+	// Attached project-doc full content rides the volatile (uncached) tail, same
+	// cache rationale as attached skills: the names-index stays byte-stable while
+	// matched docs expand only the user tail.
+	if mdContent := a.renderAttachedMarkdown(docs, a.disco.session.IsAttached); mdContent != "" {
+		messages = append(messages, Message{Role: "user", Content: mdContent})
 	}
 	return messages
 }
@@ -441,6 +476,21 @@ func renderDiscoveryContext(docs []discovery.Doc, isAttached func(id string) boo
 	for _, d := range docs {
 		if d.Kind == "skill" {
 			writeIndexLine(&sys, d)
+		}
+	}
+	hasMD := false
+	for _, d := range docs {
+		if d.Kind == "md" {
+			hasMD = true
+			break
+		}
+	}
+	if hasMD {
+		sys.WriteString("\nProject docs (summaries — read the file for full content):\n")
+		for _, d := range docs {
+			if d.Kind == "md" {
+				writeIndexLine(&sys, d)
+			}
 		}
 	}
 
@@ -490,6 +540,8 @@ func kindIcon(kind string) string {
 		return "📄" // SKILL.md file
 	case "mcp":
 		return "🔧" // MCP tool
+	case "md":
+		return "📕" // project markdown doc
 	default:
 		return "•"
 	}
