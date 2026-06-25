@@ -513,7 +513,7 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 			m.statusMsg = "generate failed: " + msg.err.Error()
 		} else {
 			m.commitInput.SetValue(msg.text)
-			m.statusMsg = "✨ generated"
+			m.statusMsg = "✦ generated"
 		}
 		return m, nil
 	case gitStatusMsg:
@@ -624,7 +624,7 @@ func (m gitModel) updateCommitInput(msg tea.Msg) (gitModel, tea.Cmd) {
 					return m, nil
 				}
 				m.generatingMsg = true
-				m.statusMsg = "✨ generating..."
+				m.statusMsg = "✦ generating..."
 				return m, m.generateCommitMsg(diff)
 			}
 			return m, nil
@@ -1643,7 +1643,7 @@ func (m gitModel) renderHints() string {
 	if m.committing {
 		genHint := ""
 		if m.generateCommitMsg != nil {
-			genHint = "  ctrl+g ✨generate"
+			genHint = "  ctrl+g ✦generate"
 		}
 		return "ctrl+\\ commit" + genHint + "  esc cancel"
 	}

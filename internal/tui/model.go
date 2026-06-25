@@ -1004,7 +1004,7 @@ var (
 	sidebarAccentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true)
 	sidebarTextStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
 
-	// rcActiveStyle styles the "🌐 RC" indicator rendered on the status
+	// rcActiveStyle styles the "⊕ RC" indicator rendered on the status
 	// bar while a remote-control server is running. Kept as a package var
 	// (alongside the other style vars) so it can be tweaked centrally and
 	// isn't built fresh on every renderStatus call.
@@ -1624,13 +1624,13 @@ func newModel(opts ...RunOptions) model {
 	if resolvedSmallModel != "" {
 		m.messages = append(m.messages, message{
 			role:      roleAssistant,
-			text:      hintStyle.Render("⚡ small model: " + resolvedSmallModel),
+			text:      hintStyle.Render("› small model: " + resolvedSmallModel),
 			transient: true,
 		})
 	} else if cfg != nil && cfg.Ocode.SmallModel != "" {
 		m.messages = append(m.messages, message{
 			role:      roleAssistant,
-			text:      hintStyle.Render("⚡ small model: " + cfg.Ocode.SmallModel),
+			text:      hintStyle.Render("› small model: " + cfg.Ocode.SmallModel),
 			transient: true,
 		})
 	}
@@ -1640,7 +1640,7 @@ func newModel(opts ...RunOptions) model {
 	if cfg != nil && cfg.Ocode.Advisor.Provider != "" && cfg.Ocode.Advisor.Model != "" {
 		m.messages = append(m.messages, message{
 			role:      roleAssistant,
-			text:      hintStyle.Render("🧠 advisor: " + cfg.Ocode.Advisor.Provider + "/" + cfg.Ocode.Advisor.Model),
+			text:      hintStyle.Render("◆ advisor: " + cfg.Ocode.Advisor.Provider + "/" + cfg.Ocode.Advisor.Model),
 			transient: true,
 		})
 	}
@@ -3031,9 +3031,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case rcStartedMsg:
-		rcText := fmt.Sprintf("🌐 Remote Control started!\n\nSession: %s\nLocal URL: %s", m.sessionID, msg.url)
+		rcText := fmt.Sprintf("⊕ Remote Control started!\n\nSession: %s\nLocal URL: %s", m.sessionID, msg.url)
 		if msg.tailscaleURL != "" {
-			rcText += fmt.Sprintf("\n\n🔗 Tailscale URL: %s\n\nUse this from any device on your tailnet (or the internet if funnel is enabled).", msg.tailscaleURL)
+			rcText += fmt.Sprintf("\n\n~ Tailscale URL: %s\n\nUse this from any device on your tailnet (or the internet if funnel is enabled).", msg.tailscaleURL)
 		}
 		if msg.setupHint != "" {
 			rcText += fmt.Sprintf("\n\n⚙ Tailscale: one-time setup needed — run:\n  %s\n\nThis is a one-time step per tailnet. After enabling, tailscale serve/funnel will work automatically.", msg.setupHint)
@@ -3265,7 +3265,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case compactStartedMsg:
 		m.compacting = true
 		m.lastCompactErr = nil
-		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("📦 Compaction started…"), transient: true})
+		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("▣ Compaction started…"), transient: true})
 		m.rerenderTranscriptAndMaybeScroll()
 		m.layout()
 		return m, tea.Batch(
@@ -3286,7 +3286,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.result.OK {
 			if ok, bannerIdx := m.applyCompactionResult(msg.result, m.pendingCompactUIIdx); ok {
 				m.pendingCompactUIIdx = nil
-				m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("✅ Compaction complete"), transient: true})
+				m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("✓ Compaction complete"), transient: true})
 				if manual && bannerIdx >= 0 {
 					if m.expandedCompaction == nil {
 						m.expandedCompaction = make(map[int]bool)
@@ -3346,7 +3346,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.recapText = ""
 			m.messages = append(m.messages, message{
 				role:      roleAssistant,
-				text:      fmt.Sprintf("📋 RECAP\n\n%s", msg.text),
+				text:      fmt.Sprintf("≡ RECAP\n\n%s", msg.text),
 				transient: true,
 			})
 			m.rerenderTranscriptAndMaybeScroll()
@@ -3387,6 +3387,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case deltaMsg:
 		if msg.delta.kind == "discovery" {
 			m.appendDiscoveryNotice("Discovered: " + msg.delta.text)
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+		}
+		if msg.delta.kind == "md-indexing" {
+			m.appendDiscoveryNotice("Indexing: " + msg.delta.text)
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
 		}
@@ -4268,7 +4273,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		if pendingToolCallID != "" {
 			m.messages = append(m.messages, message{
 				role: roleAssistant,
-				text: fmt.Sprintf("✅ tool result: %s", text),
+				text: fmt.Sprintf("✓ tool result: %s", text),
 				raw: &agent.Message{
 					Role:    "tool",
 					Content: text,
@@ -6177,7 +6182,7 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 				images = append(images, img)
 				msgs = append(msgs, message{
 					role: roleAssistant,
-					text: fmt.Sprintf("📎 Attached image %s", path),
+					text: fmt.Sprintf("+ Attached image %s", path),
 				})
 				return nil
 			}
@@ -6191,7 +6196,7 @@ func (m *model) processFileReferences(text string) tea.Cmd {
 			// a .mov to .mp4.
 			msgs = append(msgs, message{
 				role: roleAssistant,
-				text: fmt.Sprintf("📎 Referenced %s", path),
+				text: fmt.Sprintf("+ Referenced %s", path),
 			})
 			return nil
 		}
@@ -6395,6 +6400,9 @@ func (m *model) showDiscoverStatus() {
 	if dc.EmbeddingBackend == "local" {
 		fmt.Fprintf(&b, "  local:   %s\n", dc.LocalModelStatus)
 	}
+	if len(dc.IgnorePaths) > 0 {
+		fmt.Fprintf(&b, "  ignore:  %s\n", strings.Join(dc.IgnorePaths, ", "))
+	}
 	if m.agent != nil {
 		st := m.agent.DiscoveryStatus()
 		if !st.Active && st.InitErr != "" {
@@ -6493,10 +6501,86 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 		}
 		m.openEmbeddingModelPicker()
 		return nil
+	case "ignore":
+		return m.handleDiscoverIgnoreCmd(args[1:])
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover [enable|disable|status|model [name]]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover [enable|disable|status|model [name]|ignore [add|remove|clear] [path]]"})
 		return nil
 	}
+}
+
+func (m *model) handleDiscoverIgnoreCmd(args []string) tea.Cmd {
+	dc := &m.config.Ocode.Discovery
+	if len(args) == 0 {
+		if len(dc.IgnorePaths) == 0 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore: (none)"})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore:\n  " + strings.Join(dc.IgnorePaths, "\n  ")})
+		}
+		return nil
+	}
+	sub := strings.ToLower(args[0])
+	switch sub {
+	case "add":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover ignore add <path>"})
+			return nil
+		}
+		p := args[1]
+		for _, existing := range dc.IgnorePaths {
+			if existing == p {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Already ignored: " + p})
+				return nil
+			}
+		}
+		dc.IgnorePaths = append(dc.IgnorePaths, p)
+		if err := config.SaveDiscoveryIgnorePaths(dc.IgnorePaths); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		if m.agent != nil {
+			m.agent.ResetDiscovery()
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore added: " + p})
+	case "remove", "rm":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover ignore remove <path>"})
+			return nil
+		}
+		p := args[1]
+		newPaths := dc.IgnorePaths[:0:0]
+		for _, existing := range dc.IgnorePaths {
+			if existing != p {
+				newPaths = append(newPaths, existing)
+			}
+		}
+		if len(newPaths) == len(dc.IgnorePaths) {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Not in ignore list: " + p})
+			return nil
+		}
+		dc.IgnorePaths = newPaths
+		if err := config.SaveDiscoveryIgnorePaths(dc.IgnorePaths); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		if m.agent != nil {
+			m.agent.ResetDiscovery()
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore removed: " + p})
+	case "clear":
+		dc.IgnorePaths = nil
+		if err := config.SaveDiscoveryIgnorePaths(nil); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		if m.agent != nil {
+			m.agent.ResetDiscovery()
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore list cleared"})
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover ignore [add|remove|clear] [path]"})
+	}
+	return nil
 }
 
 func (m *model) handleThinkingCmd(args []string) {
@@ -6611,14 +6695,14 @@ func tuiRoleForAgentMessage(msg agent.Message) role {
 
 func displayTextForAgentMessage(msg agent.Message) string {
 	if msg.Role == "system" && strings.HasPrefix(msg.Content, "[Compacted summary of ") {
-		return "📦 " + msg.Content
+		return "▣ " + msg.Content
 	}
 	if msg.Role == "system" && strings.HasPrefix(msg.Content, "[ocode:compaction-summary]") {
 		body := strings.TrimSpace(strings.TrimPrefix(msg.Content, "[ocode:compaction-summary]"))
 		if body == "" {
-			return "📦 Compacted summary"
+			return "▣ Compacted summary"
 		}
-		return "📦 " + body
+		return "▣ " + body
 	}
 	var text string
 	if len(msg.Images) == 0 {
@@ -6909,7 +6993,7 @@ func (m *model) handleUsageCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
 		// Show a help message with options
 		var b strings.Builder
-		b.WriteString("📊 Usage Summary\n\n")
+		b.WriteString("≡ Usage Summary\n\n")
 		b.WriteString("Available date ranges:\n")
 		for _, dr := range usage.DateRanges {
 			fmt.Fprintf(&b, "  /usage %s\n", dr.Label)
@@ -7239,7 +7323,7 @@ func (m *model) handleSoundCmd(args []string) {
 		m.soundEnabled = false
 	case "test":
 		m.ringBell()
-		m.messages = append(m.messages, message{role: roleAssistant, text: "🔔 Terminal bell test dispatched; your terminal may suppress bells."})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "♪ Terminal bell test dispatched; your terminal may suppress bells."})
 		return
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /sound [on|off|test]"})
@@ -9095,9 +9179,9 @@ func permissionRequestSummary(req agent.PermissionRequest) string {
 		return formatToolCallHint(makeToolCall(req.ToolName, string(req.Args)))
 	}
 	if req.ToolName != "" {
-		return "🔧 " + req.ToolName
+		return "⚙ " + req.ToolName
 	}
-	return "🔧 tool action"
+	return "⚙ tool action"
 }
 
 func renderPermissionRequestBody(req agent.PermissionRequest) string {
@@ -9114,7 +9198,7 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	}
 	// Secret redaction: warn about potential egress commands
 	if agent.IsEgressCommand(req.ToolName) {
-		lines = append(lines, "⚠️  EGRESS WARNING: This command may send data externally")
+		lines = append(lines, "⚠  EGRESS WARNING: This command may send data externally")
 		lines = append(lines, "Secrets will be redacted before sending to the LLM")
 		lines = append(lines, "")
 	}
@@ -9601,6 +9685,16 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 	errCh := make(chan error, 1)
 	a := m.agent
 	go func() {
+		// Ensure callbacks are cleaned up on every exit path (normal return,
+		// tier-2 scan error, or any future early return) so stale references
+		// are never left on the agent between streamStep calls.
+		defer func() {
+			a.OnDelta = nil
+			a.OnMessage = nil
+			a.OnDiscovery = nil
+			a.OnMDIndexing = nil
+		}()
+
 		// Keep delta streaming best-effort so a burst of reasoning tokens can
 		// never block a tool/result message behind them.
 		a.OnDelta = func(kind, text string) {
@@ -9630,6 +9724,12 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 			case deltaCh <- deltaEvent{kind: "discovery", text: names}:
 			default:
 				// drop on backpressure — not critical.
+			}
+		}
+		a.OnMDIndexing = func(rel string) {
+			select {
+			case deltaCh <- deltaEvent{kind: "md-indexing", text: rel}:
+			default:
 			}
 		}
 		// OnMessage would block on a full ch after the TUI stops reading, leaking
@@ -9670,9 +9770,6 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		}
 		_, err := a.Step(agentMsgs)
 		a.SetPreloadedContext("")
-		a.OnDelta = nil
-		a.OnMessage = nil
-		a.OnDiscovery = nil
 		close(msgCh)
 		errCh <- err
 	}()
@@ -10892,7 +10989,7 @@ func (m *model) appendDiscoveryNotice(text string) {
 	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7"))
 	m.messages = append(m.messages, message{
 		role:      roleAssistant,
-		text:      style.Render("⏳ " + text),
+		text:      style.Render("~ " + text),
 		transient: true,
 		skipLLM:   true,
 	})
@@ -11334,7 +11431,7 @@ func (m *model) renderCompactionSummaryBox(content string, expanded bool) string
 	} else if expanded && len(lines) > toolOutputPreviewLines {
 		expandHint = " [▾ click to collapse]"
 	}
-	header := m.styles.Hint.Render(fmt.Sprintf("  📦 %s%s", headerText, expandHint))
+	header := m.styles.Hint.Render(fmt.Sprintf("  ▣ %s%s", headerText, expandHint))
 	if footer != "" {
 		return header + "\n" + box + "\n" + footer
 	}
@@ -11912,7 +12009,7 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) (bool,
 		Role:    r.Summary.Role,
 		Content: r.Summary.Content,
 	}
-	bannerText := fmt.Sprintf("📦 Compacted %d earlier messages", replacedCount)
+	bannerText := fmt.Sprintf("▣ Compacted %d earlier messages", replacedCount)
 	if r.Note != "" {
 		bannerText += fmt.Sprintf(" (%s)", r.Note)
 	}
@@ -12082,7 +12179,7 @@ func (m model) renderActivityRow() string {
 	}
 	if !m.shellCmdStart.IsZero() {
 		elapsed := time.Since(m.shellCmdStart).Round(time.Second)
-		shellParts := []string{fmt.Sprintf("⚡ bash [%s]", formatDuration(elapsed))}
+		shellParts := []string{fmt.Sprintf("› bash [%s]", formatDuration(elapsed))}
 		if m.shellCmdText != "" {
 			// Truncate long commands for the activity row.
 			label := m.shellCmdText
@@ -12102,7 +12199,7 @@ func (m model) renderActivityRow() string {
 		parts = append(parts, "⚙ "+strings.Join(toolParts, ", "))
 	}
 	if len(snap.ActiveAgents) > 0 {
-		parts = append(parts, "🤖 "+strings.Join(snap.ActiveAgents, ", "))
+		parts = append(parts, "@ "+strings.Join(snap.ActiveAgents, ", "))
 	}
 	// Clamp to a single line: this is a one-line status indicator, and letting
 	// Width().Render() wrap a long tool list grows the bottom chrome past the
@@ -13062,7 +13159,7 @@ func (m *model) renderStatus() string {
 	compactState := ""
 	if m.compacting {
 		dots := []string{".  ", ".. ", "...", " ..", "  ."}
-		compactState = fmt.Sprintf(" | 📦 compacting%s", dots[m.dotFrame%len(dots)])
+		compactState = fmt.Sprintf(" | ▣ compacting%s", dots[m.dotFrame%len(dots)])
 	}
 	jobState := ""
 	if jc := m.renderJobCounts(); jc != "" {
@@ -13084,14 +13181,14 @@ func (m *model) renderStatus() string {
 
 	// INVARIANT: statusPermColStart / statusPermColEnd track only the
 	// permissionMode segment. They are computed before any post-permission
-	// additions (compactState, jobState, "🌐 RC" indicator, subagent label)
+	// additions (compactState, jobState, "⊕ RC" indicator, subagent label)
 	// are appended to leftStatus, so adding new segments after this point
 	// will not affect the click region. If you ever move a segment to
 	// appear BEFORE permissionMode, you MUST update these column bounds
 	// (or the click hit-test will go to the wrong segment).
 	leftStatus := statusPrefix + permissionMode + compactState + jobState
 	if m.rcSrv != nil {
-		leftStatus += " | " + rcActiveStyle.Render("🌐 RC")
+		leftStatus += " | " + rcActiveStyle.Render("⊕ RC")
 	}
 	if subagentModel := m.activeSubagentModel(); subagentModel != "" {
 		leftStatus += fmt.Sprintf(" · subagent: %s", subagentModel)
@@ -13133,7 +13230,7 @@ func (m model) renderStoppedIndicator() string {
 	at := m.streamEndedAt.Format("3:04:05 PM")
 	var label string
 	if m.streamWasInterrupted {
-		label = fmt.Sprintf(" ⚡ interrupted at %s · took %s", at, elapsed)
+		label = fmt.Sprintf(" › interrupted at %s · took %s", at, elapsed)
 	} else {
 		label = fmt.Sprintf(" ✓ done at %s · took %s", at, elapsed)
 	}
@@ -15366,7 +15463,7 @@ func (m *model) renderURLDialog(width int) string {
 
 	contentWidth := max(0, width-2)
 
-	header := m.styles.Header.Render("🔗 Open URL?")
+	header := m.styles.Header.Render("~ Open URL?")
 	body := fmt.Sprintf("Open the following URL in your browser?\n\n%s", m.pendingURL)
 	hint := hintStyle.Render("Press Y or Enter to open, N or Esc to cancel")
 
@@ -15530,7 +15627,7 @@ func (m *model) stopRemoteControl() tea.Cmd {
 	m.stopRCServer()
 	return func() tea.Msg {
 		if wasRunning {
-			return message{role: roleAssistant, text: "🔌 Remote control stopped."}
+			return message{role: roleAssistant, text: "⊕ Remote control stopped."}
 		}
 		return message{role: roleAssistant, text: "Remote control is not running."}
 	}
@@ -15560,7 +15657,7 @@ func (m *model) handleIDECmd(args []string) tea.Cmd {
 			log.Printf("ide: save mode off: %v", err)
 		}
 		return func() tea.Msg {
-			return message{role: roleAssistant, text: "🔌 IDE integration disabled."}
+			return message{role: roleAssistant, text: "⊕ IDE integration disabled."}
 		}
 
 	case "status":
@@ -15651,9 +15748,9 @@ func (m *model) ideStatusReport() string {
 	}
 	var b strings.Builder
 	if m.ideConnected {
-		b.WriteString("🟢 IDE connected (Claude Code extension)\n")
+		b.WriteString("● IDE connected (Claude Code extension)\n")
 	} else {
-		b.WriteString("🟡 IDE connecting…\n")
+		b.WriteString("◐ IDE connecting…\n")
 	}
 	b.WriteString(fmt.Sprintf("Open editors: %d\n", len(m.ideOpenEditors)))
 	if sel := m.ideSelection; sel != nil && sel.FilePath != "" {

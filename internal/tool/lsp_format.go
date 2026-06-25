@@ -101,9 +101,9 @@ func formatSymbols(syms []lsp.SymbolInformation) string {
 
 func installedMark(cmd string) string {
 	if _, err := exec.LookPath(cmd); err == nil {
-		return "✅ installed"
+		return "✓ installed"
 	}
-	return "❌ not found"
+	return "✗ not found"
 }
 
 // extForLang maps a language name to a representative file extension.

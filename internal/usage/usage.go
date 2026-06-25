@@ -293,7 +293,7 @@ func FormatSummary(summary Summary) string {
 			dateRange = summary.StartTime.Format("2006-01-02 15:04")
 		}
 	}
-	fmt.Fprintf(&b, "📊 Usage Summary: %s\n\n", dateRange)
+	fmt.Fprintf(&b, "≡ Usage Summary: %s\n\n", dateRange)
 
 	if summary.TotalRequests == 0 {
 		b.WriteString("No usage records found in this period.\n")

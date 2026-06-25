@@ -479,13 +479,13 @@ func parseReviewOutput(raw string) reviewResult {
 func severityIcon(s reviewSeverity) string {
 	switch s {
 	case reviewSeverityError:
-		return "❌"
+		return "✗"
 	case reviewSeverityWarning:
-		return "⚠️"
+		return "⚠"
 	case reviewSeveritySuggestion:
-		return "💡"
+		return "◆"
 	case reviewSeverityInfo:
-		return "ℹ️"
+		return "ℹ"
 	default:
 		return "•"
 	}

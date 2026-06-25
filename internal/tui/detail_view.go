@@ -302,7 +302,7 @@ func renderDetailToolRequestBox(tc agent.ToolCall, width int, expanded bool) str
 		var args map[string]interface{}
 		if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err == nil {
 			if p, ok := args["prompt"].(string); ok && p != "" {
-				body = "🧠 advisor prompt:\n" + p
+				body = "◆ advisor prompt:\n" + p
 			}
 		}
 		if body == "" {

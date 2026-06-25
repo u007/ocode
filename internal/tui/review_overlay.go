@@ -49,7 +49,7 @@ func renderReviewContent(result reviewResult, width int) string {
 	var b strings.Builder
 
 	// Header
-	header := fmt.Sprintf("🔍 Code Review — %s", result.Timestamp.Format("2006-01-02 15:04:05"))
+	header := fmt.Sprintf("⌾ Code Review — %s", result.Timestamp.Format("2006-01-02 15:04:05"))
 	b.WriteString(headerStyle.Render(header))
 	b.WriteString("\n\n")
 

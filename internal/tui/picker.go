@@ -35,12 +35,12 @@ func (m *model) prependClaudeCodeSection() {
 		"claude-haiku-4-5",
 		"claude-fable-5",
 	}
-	items := []string{"⚡ Claude Code (Read-Only CLI)"}
+	items := []string{"› Claude Code (Read-Only CLI)"}
 	values := []string{""}
 	isHeader := []bool{true}
 	for _, model := range claudeCodeModels {
 		value := "claude-code/" + model
-		items = append(items, "  ⚡ "+value)
+		items = append(items, "  › "+value)
 		values = append(values, value)
 		isHeader = append(isHeader, false)
 	}
