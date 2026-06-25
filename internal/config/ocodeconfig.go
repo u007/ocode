@@ -71,6 +71,11 @@ type DiscoveryConfig struct {
 	// "use the bundled server on the manifest port and download if needed".
 	LocalServerURL string
 	PinnedSkills   []string
+	// IgnorePaths is a list of path prefixes (relative to the work dir) that the
+	// markdown discovery walker will skip. Supports both plain prefixes and glob
+	// patterns (matched via filepath.Match against the repo-relative slash path).
+	// "skills/" is always included by default.
+	IgnorePaths []string
 }
 
 type SecurityConfig struct {
@@ -258,6 +263,7 @@ type discoveryConfigFile struct {
 	LocalModelStatus string   `json:"local_model_status,omitempty"`
 	LocalServerURL   string   `json:"local_server_url,omitempty"`
 	PinnedSkills     []string `json:"pinned_skills,omitempty"`
+	IgnorePaths      []string `json:"ignore_paths,omitempty"`
 }
 
 type ocodeConfigFile struct {
@@ -340,6 +346,7 @@ func defaultDiscoveryConfig() DiscoveryConfig {
 		EmbeddingBackend: "http",
 		LocalModelStatus: "none",
 		PinnedSkills:     []string{"brainstorming", "using-superpowers"},
+		IgnorePaths:      []string{"skills/"},
 	}
 }
 
@@ -759,6 +766,9 @@ func applyDiscoveryConfig(dst *DiscoveryConfig, src discoveryConfigFile) {
 	if src.PinnedSkills != nil {
 		dst.PinnedSkills = append([]string{}, src.PinnedSkills...)
 	}
+	if src.IgnorePaths != nil {
+		dst.IgnorePaths = append([]string{}, src.IgnorePaths...)
+	}
 }
 
 func SaveOcodeConfig(cfg *OcodeConfig) error {
@@ -785,6 +795,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		"embedding_backend":  cfg.Discovery.EmbeddingBackend,
 		"local_model_status": cfg.Discovery.LocalModelStatus,
 		"pinned_skills":      cfg.Discovery.PinnedSkills,
+		"ignore_paths":       cfg.Discovery.IgnorePaths,
 	}
 	// local_server_url is opt-in: empty stays the default (use the bundled
 	// server), a non-empty value is persisted so a user pointing at LM
@@ -1020,6 +1031,16 @@ func SaveQueryEmbeddingModel(modelID, backend string) error {
 	if backend != "" {
 		cfg.Discovery.EmbeddingBackend = backend
 	}
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveDiscoveryIgnorePaths persists the discovery ignore-paths list.
+func SaveDiscoveryIgnorePaths(paths []string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Discovery.IgnorePaths = paths
 	return SaveOcodeConfig(cfg)
 }
 

@@ -4767,7 +4767,7 @@ func TestDisplayTextForAgentMessageStripsCompactionMarker(t *testing.T) {
 		Role:    "system",
 		Content: "[ocode:compaction-summary]\nCompacted anchored summary (updated)\n\n## Goal\n- keep context",
 	})
-	if !strings.HasPrefix(got, "📦 Compacted anchored summary (updated)") {
+	if !strings.HasPrefix(got, "▣ Compacted anchored summary (updated)") {
 		t.Fatalf("expected compaction banner, got %q", got)
 	}
 	if strings.Contains(got, "[ocode:compaction-summary]") {
@@ -6054,7 +6054,7 @@ func TestCompactionSummaryRendersInTranscript(t *testing.T) {
 
 	// Verify the transcript content contains the compaction summary
 	content := strings.Join(m.transcriptLines, "\n")
-	if !strings.Contains(content, "📦") {
+	if !strings.Contains(content, "▣") {
 		t.Fatalf("expected compaction summary box in transcript, got:\n%s", content)
 	}
 	if !strings.Contains(content, "keep context for testing") {
@@ -6091,15 +6091,15 @@ func TestScrollToCompactionBannerFindsMarker(t *testing.T) {
 	m.messages = append([]message{
 		{role: roleUser, text: "Before"},
 	}, m.messages...)
-	// Add a compaction banner with raw (like applyCompactionResult does).
-	summaryMsg := &agent.Message{
-		Role:    "system",
-		Content: "[ocode:compaction-summary]\nCompacted summary",
-	}
-	m.messages = append(m.messages[:2], append([]message{
-		{role: roleAssistant, text: "──────────────────────────────"},
-		{role: roleAssistant, text: "📦 Compacted 5 earlier messages", raw: summaryMsg},
-	}, m.messages[2:]...)...)
+		// Add a compaction banner with raw (like applyCompactionResult does).
+		summaryMsg := &agent.Message{
+			Role:    "system",
+			Content: "[ocode:compaction-summary]\nCompacted summary",
+		}
+		m.messages = append(m.messages[:2], append([]message{
+			{role: roleAssistant, text: "──────────────────────────────"},
+			{role: roleAssistant, text: "▣ Compacted 5 earlier messages", raw: summaryMsg},
+		}, m.messages[2:]...)...)
 	m.renderTranscript()
 
 	// Verify compactionRegions was populated and the banner is in view.

@@ -84,17 +84,17 @@ func outputSummary(messages []agent.Message, sessionID, modelName string, startT
 		}
 		fmt.Println()
 	}
-	printGroup("📄", "Files Created", created)
-	printGroup("✏️ ", "Files Modified", modified)
-	printGroup("🗑️ ", "Files Deleted", deleted)
+	printGroup("▸", "Files Created", created)
+	printGroup("✏ ", "Files Modified", modified)
+	printGroup("∅ ", "Files Deleted", deleted)
 
 	if len(created)+len(modified)+len(deleted) == 0 {
-		fmt.Println("  📁 No file changes detected.")
+		fmt.Println("  ▸ No file changes detected.")
 		fmt.Println()
 	}
 
 	// Tool usage.
-	fmt.Println("  🔧 Tool Usage")
+	fmt.Println("  ⚙ Tool Usage")
 	for _, name := range toolNames {
 		n := toolCounts[name]
 		padded := name
@@ -108,17 +108,17 @@ func outputSummary(messages []agent.Message, sessionID, modelName string, startT
 	// Metadata.
 	fmt.Printf("  ⏱  Duration: %v\n", duration)
 	if sessionID != "" {
-		fmt.Printf("  🔖 Session:  %s\n", sessionID)
+		fmt.Printf("  § Session:  %s\n", sessionID)
 	}
 	if modelName != "" {
-		fmt.Printf("  🤖 Model:    %s\n", modelName)
+		fmt.Printf("  @ Model:    %s\n", modelName)
 	}
 	fmt.Println()
 
 	// Assistant response.
 	if len(responseParts) > 0 {
 		response := strings.Join(responseParts, "\n\n")
-		fmt.Println("  💬 Assistant Response")
+		fmt.Println("  » Assistant Response")
 		fmt.Println("  ─────────────────────")
 		fmt.Println()
 		for _, line := range strings.Split(strings.TrimSpace(response), "\n") {

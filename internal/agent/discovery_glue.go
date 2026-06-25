@@ -537,11 +537,11 @@ func writeIndexLine(b *strings.Builder, d discovery.Doc) {
 func kindIcon(kind string) string {
 	switch kind {
 	case "skill":
-		return "📄" // SKILL.md file
+		return "▸" // SKILL.md file
 	case "mcp":
-		return "🔧" // MCP tool
+		return "⚙" // MCP tool
 	case "md":
-		return "📕" // project markdown doc
+		return "▸" // project markdown doc
 	default:
 		return "•"
 	}

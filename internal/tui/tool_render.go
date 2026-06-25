@@ -53,15 +53,15 @@ func formatToolCallHint(tc agent.ToolCall) string {
 		offset := first("offset", "start_line")
 		limit := first("limit")
 		if offset != "" && limit != "" {
-			return fmt.Sprintf("📖 read %s offset=%s limit=%s", p, offset, limit)
+			return fmt.Sprintf("≫ read %s offset=%s limit=%s", p, offset, limit)
 		}
 		if offset != "" {
-			return fmt.Sprintf("📖 read %s offset=%s", p, offset)
+			return fmt.Sprintf("≫ read %s offset=%s", p, offset)
 		}
 		if limit != "" {
-			return fmt.Sprintf("📖 read %s limit=%s", p, limit)
+			return fmt.Sprintf("≫ read %s limit=%s", p, limit)
 		}
-		return fmt.Sprintf("📖 read %s", p)
+		return fmt.Sprintf("≫ read %s", p)
 	case "write":
 		return fmt.Sprintf("✏  write %s", first("path", "file_path"))
 	case "edit":
@@ -76,18 +76,18 @@ func formatToolCallHint(tc agent.ToolCall) string {
 		end := str("end_line")
 		return fmt.Sprintf("✏  replace_lines %s:%s-%s", p, start, end)
 	case "delete":
-		return fmt.Sprintf("🗑  delete %s", first("path", "file_path"))
+		return fmt.Sprintf("∅  delete %s", first("path", "file_path"))
 	case "bash":
 		cmd := first("command")
 		return fmt.Sprintf("$ %s", cmd)
 	case "grep":
-		return fmt.Sprintf("🔎 grep %q", first("pattern"))
+		return fmt.Sprintf("⌾ grep %q", first("pattern"))
 	case "glob":
-		return fmt.Sprintf("🔎 glob %s", first("pattern"))
+		return fmt.Sprintf("⌾ glob %s", first("pattern"))
 	case "list":
-		return fmt.Sprintf("📁 list %s", first("path"))
+		return fmt.Sprintf("▸ list %s", first("path"))
 	case "web":
-		return fmt.Sprintf("🌐 web %s", first("url"))
+		return fmt.Sprintf("⊕ web %s", first("url"))
 	case "agent", "task":
 		p := first("prompt")
 		if p != "" {
@@ -100,13 +100,13 @@ func formatToolCallHint(tc agent.ToolCall) string {
 				p = strings.Join(lines, "\n")
 			}
 		}
-		return fmt.Sprintf("🤖 %s:\n%s", name, p)
+		return fmt.Sprintf("@ %s:\n%s", name, p)
 	case "advisor":
 		p := first("prompt")
 		if p != "" {
 			p = strings.TrimSpace(p)
 		}
-		return fmt.Sprintf("🧠 advisor:\n%s", p)
+		return fmt.Sprintf("◆ advisor:\n%s", p)
 	case "question":
 		return fmt.Sprintf("❓ %s", first("question", "prompt"))
 	case "skill":
@@ -114,7 +114,7 @@ func formatToolCallHint(tc agent.ToolCall) string {
 	}
 	// Fallback: name + raw args.
 	a := strings.TrimSpace(tc.Function.Arguments)
-	return fmt.Sprintf("🔧 %s %s", name, a)
+	return fmt.Sprintf("⚙ %s %s", name, a)
 }
 
 func makeToolCall(name, argsJSON string) agent.ToolCall {
@@ -184,7 +184,7 @@ func parseThinkingToolCall(block string) string {
 	if strings.HasPrefix(block, "<function=") {
 		end := strings.Index(block, ">")
 		if end < 0 {
-			return "🔧 " + block
+			return "⚙ " + block
 		}
 		name := block[len("<function="):end]
 		rest := block[end+1:]
@@ -251,7 +251,7 @@ func parseThinkingToolCall(block string) string {
 		}
 	}
 	if name == "" {
-		return "🔧 " + strings.TrimSpace(block)
+		return "⚙ " + strings.TrimSpace(block)
 	}
 	argsJSON, _ := json.Marshal(args)
 	return formatToolCallHint(makeToolCall(name, string(argsJSON)))

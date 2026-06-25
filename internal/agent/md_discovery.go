@@ -165,7 +165,11 @@ func (a *Agent) refreshMDSummaries() {
 // until every file is resolved, then publishes the snapshot and persists the
 // cache. Deleted files drop out (next is rebuilt from the current walk).
 func (a *Agent) mdSummarizePass(root string) {
-	refs := walkMarkdownFiles(root)
+	var ignorePaths []string
+	if a.config != nil {
+		ignorePaths = a.config.Ocode.Discovery.IgnorePaths
+	}
+	refs := walkMarkdownFiles(root, ignorePaths...)
 
 	// Snapshot the current cache under lock so we can decide what needs work
 	// without holding the lock across model calls.
@@ -218,6 +222,9 @@ func (a *Agent) mdSummarizePass(root string) {
 		sem := make(chan struct{}, mdSummaryWorkers)
 		var wg sync.WaitGroup
 		for i, r := range jobs {
+			if a.OnMDIndexing != nil {
+				a.OnMDIndexing(r.rel)
+			}
 			wg.Add(1)
 			sem <- struct{}{}
 			go func(i int, r mdRef) {
@@ -382,8 +389,10 @@ func sanitizeMDSummary(s string) string {
 }
 
 // walkMarkdownFiles returns every *.md file under root, excluding the always-on
-// briefing set, hidden files, vendored/ignored dirs, and .gitignore matches.
-func walkMarkdownFiles(root string) []mdRef {
+// briefing set, hidden files, vendored/ignored dirs, .gitignore matches, and
+// any paths matched by ignorePaths (prefix or glob against the repo-relative
+// slash path).
+func walkMarkdownFiles(root string, ignorePaths ...string) []mdRef {
 	matcher := loadGitignore(root)
 	var refs []mdRef
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -398,6 +407,14 @@ func walkMarkdownFiles(root string) []mdRef {
 			// Skip hidden dirs except .opencode (which holds rules/skills).
 			if strings.HasPrefix(name, ".") && name != "." && name != ".opencode" {
 				return filepath.SkipDir
+			}
+			// Skip dirs that match an ignore prefix/pattern.
+			rel, relErr := filepath.Rel(root, path)
+			if relErr == nil {
+				rel = filepath.ToSlash(rel) + "/"
+				if mdMatchesIgnorePaths(rel, ignorePaths) {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}
@@ -415,6 +432,9 @@ func walkMarkdownFiles(root string) []mdRef {
 		if matcher != nil && matcher.Match(strings.Split(rel, "/"), false) {
 			return nil
 		}
+		if mdMatchesIgnorePaths(rel, ignorePaths) {
+			return nil
+		}
 		info, statErr := d.Info()
 		if statErr != nil {
 			return nil
@@ -423,6 +443,23 @@ func walkMarkdownFiles(root string) []mdRef {
 		return nil
 	})
 	return refs
+}
+
+// mdMatchesIgnorePaths reports whether rel (repo-relative slash path) matches
+// any entry in ignorePaths. Each entry is tried as a prefix first; if it
+// contains a glob character it is also tried via filepath.Match.
+func mdMatchesIgnorePaths(rel string, ignorePaths []string) bool {
+	for _, p := range ignorePaths {
+		if strings.HasPrefix(rel, p) {
+			return true
+		}
+		if strings.ContainsAny(p, "*?[") {
+			if matched, _ := filepath.Match(p, rel); matched {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // loadGitignore builds a matcher from the repo's .gitignore / .ignore, or nil.

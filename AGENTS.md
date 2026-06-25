@@ -72,6 +72,7 @@ session, plugins, auth, config reload):
 - **Clamp one-line status/activity rows** with `.Width(w).MaxHeight(1)` so
   long content can't wrap and grow the bottom chrome past the terminal
   height.
+- **Never use double-width emoji as inline status prefixes** (e.g. `⏳`, `⌛`, `⚙️`). Wide emoji are 2-cell characters; VS Code's terminal renderer shifts all following text right, making rows appear crooked/misaligned. Use single-width ASCII symbols (`~`, `*`, `>`) for inline status indicators in `appendDiscoveryNotice` and similar helpers.
 
 ## TUI Mouse: clickable chrome vs selectable content
 Terminal mouse capture is **global per frame** — `tea.View.MouseMode` is

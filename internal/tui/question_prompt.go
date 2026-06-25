@@ -330,7 +330,7 @@ func (m model) submitQuestionAnswers() (tea.Model, tea.Cmd) {
 	toolMsg := agent.Message{Role: "tool", ToolID: m.questionToolCallID, Content: string(payload)}
 	m.messages = append(m.messages, message{
 		role: roleAssistant,
-		text: "✅ answered question prompt",
+		text: "✓ answered question prompt",
 		raw:  &toolMsg,
 	})
 	m.clearQuestionPrompt()
