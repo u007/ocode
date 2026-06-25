@@ -6511,6 +6511,15 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 
 func (m *model) handleDiscoverIgnoreCmd(args []string) tea.Cmd {
 	dc := &m.config.Ocode.Discovery
+	defaults := config.DefaultDiscoveryIgnorePaths()
+	isBuiltIn := func(p string) bool {
+		for _, def := range defaults {
+			if def == p {
+				return true
+			}
+		}
+		return false
+	}
 	if len(args) == 0 {
 		if len(dc.IgnorePaths) == 0 {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore: (none)"})
@@ -6548,6 +6557,10 @@ func (m *model) handleDiscoverIgnoreCmd(args []string) tea.Cmd {
 			return nil
 		}
 		p := args[1]
+		if isBuiltIn(p) {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Built-in discovery ignore cannot be removed: " + p})
+			return nil
+		}
 		newPaths := dc.IgnorePaths[:0:0]
 		for _, existing := range dc.IgnorePaths {
 			if existing != p {
@@ -6568,15 +6581,15 @@ func (m *model) handleDiscoverIgnoreCmd(args []string) tea.Cmd {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore removed: " + p})
 	case "clear":
-		dc.IgnorePaths = nil
-		if err := config.SaveDiscoveryIgnorePaths(nil); err != nil {
+		dc.IgnorePaths = defaults
+		if err := config.SaveDiscoveryIgnorePaths(dc.IgnorePaths); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
 			return nil
 		}
 		if m.agent != nil {
 			m.agent.ResetDiscovery()
 		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore list cleared"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Discovery ignore list reset to built-in defaults"})
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /discover ignore [add|remove|clear] [path]"})
 	}

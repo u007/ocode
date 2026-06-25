@@ -62,6 +62,7 @@ go build -o ocode .
 | Tool | Description |
 |------|-------------|
 | `read`, `write`, `edit`, `delete` | Full file I/O with path confinement and permissions |
+| `undo_file_change` | Roll back a previous `write`/`edit`/`multi_edit`/`multi_file_edit`/`replace_lines`/`delete` by `tool_call_id` (2-agent-step window, conflicts with newer same-file writes are detected and refused) |
 | `bash` | Shell execution with background support, circular output buffer (256KB), and `Ctrl+B` to foreground→background |
 | `grep`, `glob`, `repo_overview` | Advanced search and repository analysis |
 | `lsp` | Go-to-definition, hover docs, symbol search, diagnostics |
@@ -411,7 +412,7 @@ internal/runcli/           Headless CLI mode
 internal/server/           HTTP server (web UI, APIs, SSE, /rc)
 internal/session/          Session management (save, resume, export, migrate)
 internal/skill/            Skill loader and installer
-internal/snapshot/         Session snapshotting
+internal/snapshot/         Per-agent snapshot store: file backups keyed by `tool_call_id` for `undo_file_change`, with cross-agent and same-agent write-conflict detection
 internal/theme/            Theme system (JSON loading, definitions)
 internal/tool/             Built-in tools (read, write, edit, bash, grep, glob, LSP, etc.)
 internal/tui/              Bubble Tea TUI (model, view, update, components)

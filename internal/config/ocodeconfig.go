@@ -74,7 +74,8 @@ type DiscoveryConfig struct {
 	// IgnorePaths is a list of path prefixes (relative to the work dir) that the
 	// markdown discovery walker will skip. Supports both plain prefixes and glob
 	// patterns (matched via filepath.Match against the repo-relative slash path).
-	// "skills/" is always included by default.
+	// The built-in defaults always include skills/, .opencode/, .claude/, .qwen/,
+	// .agent/, .pnpm/, node_modules/, vendor/, .git/, dist/, build/, and target/.
 	IgnorePaths []string
 }
 
@@ -346,7 +347,26 @@ func defaultDiscoveryConfig() DiscoveryConfig {
 		EmbeddingBackend: "http",
 		LocalModelStatus: "none",
 		PinnedSkills:     []string{"brainstorming", "using-superpowers"},
-		IgnorePaths:      []string{"skills/"},
+		IgnorePaths:      DefaultDiscoveryIgnorePaths(),
+	}
+}
+
+// DefaultDiscoveryIgnorePaths returns the built-in discovery ignore list.
+// Callers receive a copy and may mutate it freely.
+func DefaultDiscoveryIgnorePaths() []string {
+	return []string{
+		"skills/",
+		".opencode/",
+		".claude/",
+		".qwen/",
+		".agent/",
+		".pnpm/",
+		"node_modules/",
+		"vendor/",
+		".git/",
+		"dist/",
+		"build/",
+		"target/",
 	}
 }
 
@@ -767,8 +787,28 @@ func applyDiscoveryConfig(dst *DiscoveryConfig, src discoveryConfigFile) {
 		dst.PinnedSkills = append([]string{}, src.PinnedSkills...)
 	}
 	if src.IgnorePaths != nil {
-		dst.IgnorePaths = append([]string{}, src.IgnorePaths...)
+		dst.IgnorePaths = mergeDiscoveryIgnorePaths(DefaultDiscoveryIgnorePaths(), src.IgnorePaths)
 	}
+}
+
+func mergeDiscoveryIgnorePaths(base, extra []string) []string {
+	seen := make(map[string]struct{}, len(base)+len(extra))
+	out := make([]string, 0, len(base)+len(extra))
+	add := func(paths []string) {
+		for _, p := range paths {
+			if p == "" {
+				continue
+			}
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	add(base)
+	add(extra)
+	return out
 }
 
 func SaveOcodeConfig(cfg *OcodeConfig) error {

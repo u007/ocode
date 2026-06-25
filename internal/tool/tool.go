@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/u007/ocode/internal/config"
@@ -13,6 +14,15 @@ type Tool interface {
 	Definition() map[string]interface{}
 	Execute(args json.RawMessage) (string, error)
 	Parallel() bool
+}
+
+// ContextualTool is an optional extension of Tool for tools that need a
+// context to access the per-agent snapshot store and tool call ID. The agent
+// calls ExecuteCtx when available; Execute is the fallback for callers that
+// have no context (tests, TUI direct calls).
+type ContextualTool interface {
+	Tool
+	ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error)
 }
 
 // NoticedError wraps an error with a user-facing notice that should be shown
@@ -48,6 +58,7 @@ func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
 	lspMgr := lsp.NewManager(".")
 	builtins := []Tool{
 		&ReadTool{},
+		&UndoTool{},
 		&WriteTool{Config: cfg},
 		&ReplaceLinesToolImpl{Config: cfg},
 		&DeleteTool{},

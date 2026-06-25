@@ -21,6 +21,7 @@ import (
 	"github.com/u007/ocode/internal/mcp"
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/redact"
+	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -267,6 +268,11 @@ type Agent struct {
 	// by teardownGroupBus so the stop-channel watcher does not leak
 	// for the agent's lifetime. nil when no group is active.
 	noteBusCancel context.CancelFunc
+
+	// snapshotStore is the per-agent snapshot store used by write tools via
+	// context. It tracks tool-call-ID-keyed backups for undo_file_change and
+	// isolates this agent's write history from concurrent agents.
+	snapshotStore *snapshot.Store
 }
 
 // NoteBus returns the bus this agent participates in, or nil if
@@ -552,6 +558,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	}
 	a.procs = tool.NewProcessRegistry()
 	a.runs = NewAgentRunRegistry()
+	a.snapshotStore = snapshot.NewStore(snapshot.NewAgentID())
 	a.stopCh = make(chan struct{})
 	a.jobEvents = make(chan JobEvent, 32)
 	a.memoryMaintCh = make(chan MemoryMaintenanceRequest, 64)
@@ -745,6 +752,9 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		if isCancelled() {
 			return newMsgs, nil
 		}
+		if a.snapshotStore != nil {
+			a.snapshotStore.AdvanceStep()
+		}
 		// Recompute tool defs each iteration: a mid-turn discover_more call
 		// (Part 08) only becomes visible to the LLM on the next loop.
 		toolDefs := a.GetToolDefinitions()
@@ -926,7 +936,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 						}
 						binding = &taskBinding{bus: bus, agentID: agentID, tracker: groupTracker}
 					}
-					result, err := a.handleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding)
+					result, err := a.handleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding, tc.ID)
 					// Auto-touch: if the call succeeded and was a
 					// write-class tool, append a touch to the bus
 					// so peers know this file changed. Read tools
@@ -987,7 +997,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			tc := resp.ToolCalls[i]
 			a.activity.toolStarted(tc.Function.Name)
-			result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+			result, err := a.handleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
 			a.activity.toolDone(tc.Function.Name)
 			var notice string
 			if err != nil {
@@ -1582,16 +1592,14 @@ func (a *Agent) scanToolResult(toolName string, toolArgs string, content string)
 }
 
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
-	return a.handleToolCall(name, args, nil)
+	return a.handleToolCall(name, args, nil, "")
 }
 
 // handleToolCall is HandleToolCall with an optional per-call group
-// binding. The binding is non-nil only on the parallel-group dispatch
-// path; it carries the bus/agent-id/tracker for this specific child so
-// they are applied to a per-call copy of the task tool rather than
-// mutated onto the shared instance (which would race across the
-// concurrent goroutines in a group).
-func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding) (string, error) {
+// binding and the originating tool call ID. toolCallID is non-empty only
+// when dispatched from the Step loop (where tc.ID is available); it is ""
+// for direct/test callers (HandleToolCall, HandleApprovedToolCall).
+func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
 	if deny, ok := gateToolCall(a.Mode(), name, args); !ok {
 		return deny, nil
 	}
@@ -1654,7 +1662,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 								}
 							}()
 						}
-						return a.executeToolCall(name, args, b)
+						return a.executeToolCall(name, args, b, toolCallID)
 					}
 					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 					return fmt.Sprintf("denied: tool %q was denied by the LLM permission model. Reason: %s", name, reason), nil
@@ -1679,7 +1687,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 					allowed, reason, summary := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
-						return a.executeToolCall(name, args, b)
+						return a.executeToolCall(name, args, b, toolCallID)
 					}
 					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 					// LLM denied — fall through to human ask.
@@ -1706,7 +1714,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 				resp := a.OnPermissionAsk(req)
 				if resp.Level == PermissionAllow {
 					a.applyPermissionResponse(req, resp)
-					return a.executeToolCall(name, args, b)
+					return a.executeToolCall(name, args, b, toolCallID)
 				}
 				return fmt.Sprintf("denied: tool %q denied by user. Do not retry the same call; ask the user how they'd like to proceed or take a different approach.", name), nil
 			}
@@ -1724,7 +1732,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 	// model-allow, and PermissionAsk → OnPermissionAsk-allow. See the
 	// comment at the top of this function for the rationale.)
 
-	return a.executeToolCall(name, args, b)
+	return a.executeToolCall(name, args, b, toolCallID)
 }
 
 func (a *Agent) autoPermissionModelName() string {
@@ -2662,10 +2670,10 @@ func extractFilesFromCommand(command string) []string {
 }
 
 func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage) (string, error) {
-	return a.executeToolCall(name, args, nil)
+	return a.executeToolCall(name, args, nil, "")
 }
 
-func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBinding) (string, error) {
+func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
 	emitDebug("TOOL", fmt.Sprintf("→ %s %s", name, truncateDebugArgs(args, 120)))
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
@@ -2711,6 +2719,15 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 	// to a COPY of the task tool and execute the copy. The shared
 	// a.tools["task"] instance is never mutated, so concurrent group
 	// goroutines cannot race on (or clobber) each other's bus/agentID.
+	// Build a context carrying the per-agent snapshot store and tool call ID
+	// so ContextualTool implementations (write tools, undo_file_change) can
+	// track writes per-agent without touching the global store.
+	toolCtx := context.Background()
+	if a.snapshotStore != nil && toolCallID != "" {
+		toolCtx = snapshot.WithStore(toolCtx, a.snapshotStore)
+		toolCtx = snapshot.WithToolCallID(toolCtx, toolCallID)
+	}
+
 	var result string
 	var err error
 	if b != nil && b.bus != nil {
@@ -2719,10 +2736,18 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 			local.groupBus = b.bus
 			local.agentID = b.agentID
 			local.groupTracker = b.tracker
-			result, err = local.Execute(args)
+			if ct, ok := tool.Tool(&local).(tool.ContextualTool); ok {
+				result, err = ct.ExecuteCtx(toolCtx, args)
+			} else {
+				result, err = local.Execute(args)
+			}
+		} else if ct, ok := t.(tool.ContextualTool); ok {
+			result, err = ct.ExecuteCtx(toolCtx, args)
 		} else {
 			result, err = t.Execute(args)
 		}
+	} else if ct, ok := t.(tool.ContextualTool); ok {
+		result, err = ct.ExecuteCtx(toolCtx, args)
 	} else {
 		result, err = t.Execute(args)
 	}
@@ -3007,6 +3032,12 @@ func (a *Agent) Shutdown() {
 	a.Cancel()
 	if a.runs != nil {
 		a.runs.CancelAll()
+	}
+	// Drop this agent's entries from the global cross-agent write registry so
+	// surviving agents' UndoByToolCallID doesn't see stale same-agent writes
+	// blocking them. Safe to call multiple times (Reset is idempotent).
+	if a.snapshotStore != nil {
+		a.snapshotStore.Reset()
 	}
 }
 

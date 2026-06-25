@@ -233,16 +233,29 @@ func TestRenderDiscoverySplitIsCacheStable(t *testing.T) {
 	// truncated — the full tail then appears ONLY in the volatile block.
 	const pdfFull = "pdf: manipulate pdf documents, fill forms, merge, split, and extract pages from archives"
 	const pdfTail = "extract pages from archives"
+	const guideSummary = "how to deploy and roll back"
+	const guideBody = "REAL FILE BODY SHOULD NOT APPEAR"
+	root := t.TempDir()
+	guidePath := filepath.Join(root, "docs", "guide.md")
+	if err := os.MkdirAll(filepath.Dir(guidePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(guidePath, []byte(guideBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	docs := []discovery.Doc{
 		{ID: "mcp:Notion/search", Kind: "mcp", Name: "Notion/search", Text: "Notion/search: search notion pages"},
 		{ID: "skill:pdf", Kind: "skill", Name: "pdf", Text: pdfFull},
 		{ID: "skill:brainstorm", Kind: "skill", Name: "brainstorm", Text: "brainstorm: explore ideas into designs"},
+		{ID: "md:docs/guide.md", Kind: "md", Name: "docs/guide.md", Text: "docs/guide.md: " + guideSummary, Source: guidePath},
+		{ID: "md:docs/notes.md", Kind: "md", Name: "docs/notes.md", Text: "docs/notes.md: meeting notes and backlog", Source: filepath.Join(root, "docs", "notes.md")},
 	}
 
 	// No skills attached.
 	sysNone, volNone := renderDiscoveryContext(docs, func(string) bool { return false })
 	// One skill attached.
 	sysOne, volOne := renderDiscoveryContext(docs, func(id string) bool { return id == "skill:pdf" })
+	mdVol := (&Agent{}).renderAttachedMarkdown(docs, func(id string) bool { return id == "md:docs/guide.md" })
 
 	// CACHE INVARIANT: attaching a skill must NOT change the system block (it is
 	// hoisted into the cached system prompt; any change busts the whole prompt).
@@ -254,11 +267,26 @@ func TestRenderDiscoverySplitIsCacheStable(t *testing.T) {
 	if containsSubstr(sysOne, pdfTail) {
 		t.Fatal("full attached-skill description must not be in the cached system block")
 	}
+	if containsSubstr(sysOne, "docs/guide.md") || containsSubstr(sysOne, guideSummary) || containsSubstr(sysOne, "docs/notes.md") {
+		t.Fatalf("unattached md docs must not appear in the cached system block: %q", sysOne)
+	}
 	if volNone != "" {
 		t.Fatalf("no attachment → empty volatile block, got %q", volNone)
 	}
 	if !containsSubstr(volOne, pdfTail) {
 		t.Fatalf("attached skill full description must be in the volatile block: %q", volOne)
+	}
+	if containsSubstr(volOne, "docs/guide.md") || containsSubstr(volOne, guideSummary) || containsSubstr(volOne, "docs/notes.md") {
+		t.Fatalf("md docs must not be emitted in the skills volatile block: %q", volOne)
+	}
+	if !containsSubstr(mdVol, "docs/guide.md") || !containsSubstr(mdVol, guideSummary) {
+		t.Fatalf("attached md docs must emit filename+summary only: %q", mdVol)
+	}
+	if containsSubstr(mdVol, guideBody) {
+		t.Fatalf("attached md docs must not emit full file content: %q", mdVol)
+	}
+	if containsSubstr(mdVol, "docs/notes.md") {
+		t.Fatalf("unattached md docs must not be emitted: %q", mdVol)
 	}
 	// System block still carries the full name index + contract.
 	if !containsSubstr(sysOne, "Notion/search") || !containsSubstr(sysOne, "pdf") || !containsSubstr(sysOne, "discover_more") {
