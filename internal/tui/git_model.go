@@ -90,6 +90,14 @@ type gitCommitMsgMsg struct {
 	err  error
 }
 
+type diffReadyMsg struct {
+	seq     int
+	workDir string
+	content string
+	hunks   []diffHunk
+	header  string
+}
+
 type gitModel struct {
 	workDir        string
 	width          int
@@ -140,6 +148,9 @@ type gitModel struct {
 	// ai commit message generation
 	generateCommitMsg func(diff string) tea.Cmd
 	generatingMsg     bool
+	// async diff loading
+	diffLoadSeq int
+	diffLoading bool
 	// log section: toggle between stat and full diff
 	logFullDiff bool
 	// file list filter
@@ -170,7 +181,7 @@ func diffLineNumbers(ctx viewport.GutterContext) string {
 	return fmt.Sprintf("%4d │ ", ctx.Index+1)
 }
 
-func newGitModel(workDir string) gitModel {
+func newGitModel(workDir string) (gitModel, tea.Cmd) {
 	m := gitModel{workDir: workDir}
 	m.diff = viewport.New()
 	m.diff.SoftWrap = true
@@ -182,11 +193,11 @@ func newGitModel(workDir string) gitModel {
 	m.commitInput = ci
 	if _, err := m.gitRun("rev-parse", "--git-dir"); err != nil {
 		m.statusMsg = "not a git repository"
-		return m
+		return m, nil
 	}
 	m.refresh()
-	m.loadDiff()
-	return m
+	st := currentStyles()
+	return m, m.startLoadDiff(st)
 }
 
 func (m *gitModel) SetEditor(e string) { m.editor = e }
@@ -254,10 +265,16 @@ func firstLine(s string) string {
 }
 
 func (m *gitModel) gitRun(args ...string) (string, error) {
+	return gitRunInDir(m.workDir, args...)
+}
+
+// gitRunInDir is a package-level helper used by async goroutines that cannot
+// safely access the gitModel receiver. It mirrors gitRun's behaviour exactly.
+func gitRunInDir(dir string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = m.workDir
+	cmd.Dir = dir
 	out, err := cmd.Output()
 	return strings.TrimRight(string(out), "\r\n"), err
 }
@@ -507,6 +524,17 @@ func (m *gitModel) loadBranches() {
 
 func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 	switch msg := msg.(type) {
+	case diffReadyMsg:
+		if msg.seq != m.diffLoadSeq || msg.workDir != m.workDir {
+			return m, nil // stale, discard
+		}
+		m.diffLoading = false
+		m.setDiffContent(msg.content)
+		m.diff.GotoTop()
+		m.hunks = msg.hunks
+		m.hunkCursor = 0
+		m.diffHeader = msg.header
+		return m, nil
 	case gitCommitMsgMsg:
 		m.generatingMsg = false
 		if msg.err != nil {
@@ -551,7 +579,8 @@ func (m gitModel) Update(msg tea.Msg, w, h int) (gitModel, tea.Cmd) {
 		// During auto-refresh, skip diff reload to preserve scroll position
 		// and any active text selection.
 		if !msg.autoRefresh {
-			m.loadDiff()
+			st := currentStyles()
+			return m, m.startLoadDiff(st)
 		}
 		return m, nil
 	case loadMoreLogMsg:
@@ -826,13 +855,15 @@ func (m gitModel) handleSectionKey(key string) (gitModel, tea.Cmd) {
 		if cur < len(sections)-1 {
 			m.section = sections[cur+1]
 			m.resetCursors()
-			m.loadDiff()
+			st := currentStyles()
+			return m, m.startLoadDiff(st)
 		}
 	case "k", "up":
 		if cur > 0 {
 			m.section = sections[cur-1]
 			m.resetCursors()
-			m.loadDiff()
+			st := currentStyles()
+			return m, m.startLoadDiff(st)
 		}
 	case "enter":
 		m.panel = gitPanelFiles
@@ -856,14 +887,16 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			m.filesCursor = 0
 			m.fileListScroll = 0
 			m.lastScrollCursor = 0
-			m.loadDiff()
+			st := currentStyles()
+			return m, m.startLoadDiff(st)
 		case "backspace":
 			if len(m.filterQuery) > 0 {
 				m.filterQuery = m.filterQuery[:len(m.filterQuery)-1]
 				m.filesCursor = 0
 				m.fileListScroll = 0
 				m.lastScrollCursor = 0
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		case "enter":
 			m.filterActive = false
@@ -873,7 +906,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.filesCursor = 0
 				m.fileListScroll = 0
 				m.lastScrollCursor = 0
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		}
 		return m, nil
@@ -889,8 +923,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		m.filterQuery = ""
 		m.filesCursor = 0
 		m.fileListScroll = 0
-		m.loadDiff()
-		return m, nil
+		st := currentStyles()
+		return m, m.startLoadDiff(st)
 	}
 	// esc clears multi-selection if active
 	if key == "esc" && len(m.selectedFiles) > 0 {
@@ -916,7 +950,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.selectedFiles[m.filesCursor] = true
 				m.filesCursor++
 				m.selectedFiles[m.filesCursor] = true
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		}
 		return m, nil
@@ -927,7 +962,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				m.selectedFiles[m.filesCursor] = true
 				m.filesCursor--
 				m.selectedFiles[m.filesCursor] = true
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		}
 		return m, nil
@@ -941,7 +977,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			if m.filesCursor < len(files)-1 {
 				m.filesCursor++
 				m.clampFileListScroll()
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		case gitSectionLog:
 			if m.commitCursor < len(m.commits)-1 {
@@ -950,21 +987,25 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				if m.commitCursor >= m.commitViewport.YOffset()+m.commitViewport.VisibleLineCount() {
 					m.commitViewport.ScrollDown(1)
 				}
-				m.loadDiff()
+				st := currentStyles()
+				cmd := m.startLoadDiff(st)
 				if !m.loadingLog && m.logsMore && m.commitCursor >= len(m.commits)-5 {
 					m.loadingLog = true
-					return m, m.cmdLoadMoreLog()
+					return m, tea.Batch(cmd, m.cmdLoadMoreLog())
 				}
+				return m, cmd
 			}
 		case gitSectionStash:
 			if m.stashCursor < len(m.stashes)-1 {
 				m.stashCursor++
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		case gitSectionBranches:
 			if m.branchCursor < len(m.branches)-1 {
 				m.branchCursor++
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		}
 	case "k", "up":
@@ -976,7 +1017,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			if m.filesCursor > 0 {
 				m.filesCursor--
 				m.clampFileListScroll()
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		case gitSectionLog:
 			if m.commitCursor > 0 {
@@ -985,17 +1027,20 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				if m.commitCursor < m.commitViewport.YOffset() {
 					m.commitViewport.ScrollUp(1)
 				}
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		case gitSectionStash:
 			if m.stashCursor > 0 {
 				m.stashCursor--
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		case gitSectionBranches:
 			if m.branchCursor > 0 {
 				m.branchCursor--
-				m.loadDiff()
+				st := currentStyles()
+				return m, m.startLoadDiff(st)
 			}
 		}
 	case "ctrl+s":
@@ -1234,7 +1279,8 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		switch m.section {
 		case gitSectionLog:
 			m.logFullDiff = !m.logFullDiff
-			m.loadDiff()
+			st := currentStyles()
+			return m, m.startLoadDiff(st)
 		case gitSectionBranches:
 			if m.branchCursor < len(m.branches) {
 				branch := m.branches[m.branchCursor]
@@ -1505,138 +1551,145 @@ func extractDiffHeader(diff string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func (m *gitModel) loadDiff() {
-	switch m.section {
-	case gitSectionChanges:
-		files := m.currentFileList()
-		if m.filesCursor < 0 || m.filesCursor >= len(files) {
-			m.setDiffContent("")
-			m.hunks = nil
-			m.hunkCursor = 0
-			m.diffHeader = ""
-			return
-		}
-		f := files[m.filesCursor]
-		if f.status == "?" && !f.staged {
-			m.loadFilePreview(f)
-			return
-		}
-		var out string
-		var err error
-		if f.staged {
-			out, err = m.gitRun("diff", "--no-color", "--cached", "--", f.path)
-		} else {
-			out, err = m.gitRun("diff", "--no-color", "--", f.path)
-		}
-		if err != nil {
-			out = "error: " + err.Error()
-		}
-		m.setDiffContent(renderUnifiedDiff(out, currentStyles()))
-		m.diff.GotoTop()
-		m.hunks = parseHunks(out)
-		m.hunkCursor = 0
-		m.diffHeader = extractDiffHeader(out)
-	case gitSectionLog:
-		if m.commitCursor >= len(m.commits) {
-			m.setDiffContent("")
-			m.hunks = nil
-			m.hunkCursor = 0
-			m.diffHeader = ""
-			return
-		}
-		c := m.commits[m.commitCursor]
-		var out string
-		var err error
-		if m.logFullDiff {
-			out, err = m.gitRun("show", "--no-color", c.hash)
-		} else {
-			out, err = m.gitRun("show", "--no-color", "--stat", c.hash)
-		}
-		if err != nil {
-			out = "error: " + err.Error()
-		}
-		m.setDiffContent(renderUnifiedDiff(out, currentStyles()))
-		m.diff.GotoTop()
-		if m.logFullDiff {
-			m.hunks = parseHunks(out)
-			m.hunkCursor = 0
-			m.diffHeader = extractDiffHeader(out)
-		} else {
-			m.hunks = nil
-			m.hunkCursor = 0
-			m.diffHeader = ""
-		}
-	case gitSectionStash:
-		if m.stashCursor >= len(m.stashes) {
-			m.setDiffContent("")
-			m.hunks = nil
-			m.hunkCursor = 0
-			m.diffHeader = ""
-			return
-		}
-		ref := fmt.Sprintf("stash@{%d}", m.stashCursor)
-		out, err := m.gitRun("stash", "show", "--no-color", "-p", ref)
-		if err != nil {
-			out = "error: " + err.Error()
-		}
-		m.setDiffContent(renderUnifiedDiff(out, currentStyles()))
-		m.diff.GotoTop()
-		m.hunks = nil
-		m.hunkCursor = 0
-		m.diffHeader = ""
-	case gitSectionBranches:
-		if m.branchCursor >= len(m.branches) {
-			m.setDiffContent("")
-			m.hunks = nil
-			m.hunkCursor = 0
-			m.diffHeader = ""
-			return
-		}
-		out, err := m.gitRun("log", "--oneline", "-20", m.branches[m.branchCursor])
-		if err != nil {
-			out = "error: " + err.Error()
-		}
-		m.setDiffContent(out)
-		m.diff.GotoTop()
-		m.hunks = nil
-		m.hunkCursor = 0
-		m.diffHeader = ""
+// diffSizeLimit is the maximum byte length of a raw diff that will be fully
+// rendered. Diffs larger than this are truncated before processing to prevent
+// renderUnifiedDiff + viewport.SetContent from blocking the TUI event loop.
+const diffSizeLimit = 256 * 1024 // 256 KB
+
+// capDiff truncates raw diff output to diffSizeLimit and appends a notice.
+func capDiff(out string) string {
+	if len(out) <= diffSizeLimit {
+		return out
 	}
+	// Find the last newline within the limit so we don't cut mid-line.
+	cut := strings.LastIndexByte(out[:diffSizeLimit], '\n')
+	if cut <= 0 {
+		cut = diffSizeLimit
+	}
+	return out[:cut] + "\n\n[diff truncated — too large to display fully]"
 }
 
-func (m *gitModel) loadFilePreview(f gitFile) {
-	path := filepath.Join(m.workDir, f.path)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		m.setDiffContent("error: " + err.Error())
-		m.diff.GotoTop()
-		m.hunks = nil
-		m.hunkCursor = 0
-		m.diffHeader = ""
-		return
-	}
-	probe := data
-	if len(probe) > 512 {
-		probe = probe[:512]
-	}
-	if strings.ContainsRune(string(probe), '\x00') {
-		m.setDiffContent("[binary file]")
-		m.diff.GotoTop()
-		m.hunks = nil
-		m.hunkCursor = 0
-		m.diffHeader = ""
-		return
-	}
-	content := string(data)
-	if len(data) > 1024*1024 {
-		content = string(data[:1024*1024]) + "\n[truncated — 1MB limit]"
-	}
-	header := hintStyle.Render("Preview: "+f.path+"  (E edit)") + "\n\n"
-	m.setDiffContent(header + highlightContent(content, languageForPath(f.path)))
-	m.diff.GotoTop()
+// startLoadDiff replaces the old synchronous loadDiff. It increments the load
+// sequence, shows a "loading…" placeholder immediately, and returns a tea.Cmd
+// that runs the git/file-read work off the event loop. The result arrives as a
+// diffReadyMsg which Update handles; stale messages (seq mismatch) are dropped.
+func (m *gitModel) startLoadDiff(styles Styles) tea.Cmd {
+	m.diffLoadSeq++
+	m.diffLoading = true
 	m.hunks = nil
 	m.hunkCursor = 0
 	m.diffHeader = ""
+	m.setDiffContent(hintStyle.Render("loading…"))
+
+	// Capture everything the goroutine needs from m before spawning.
+	seq := m.diffLoadSeq
+	section := m.section
+	workDir := m.workDir
+	filesCursor := m.filesCursor
+	commitCursor := m.commitCursor
+	stashCursor := m.stashCursor
+	branchCursor := m.branchCursor
+	logFullDiff := m.logFullDiff
+	files := m.currentFileList()
+	commits := m.commits
+	stashes := m.stashes
+	branches := m.branches
+
+	return func() tea.Msg {
+		switch section {
+		case gitSectionChanges:
+			if filesCursor < 0 || filesCursor >= len(files) {
+				return diffReadyMsg{seq: seq, workDir: workDir, content: "", hunks: nil, header: ""}
+			}
+			f := files[filesCursor]
+			if f.status == "?" && !f.staged {
+				// File preview path
+				path := filepath.Join(workDir, f.path)
+				data, err := os.ReadFile(path)
+				if err != nil {
+					return diffReadyMsg{seq: seq, workDir: workDir, content: "error: " + err.Error()}
+				}
+				probe := data
+				if len(probe) > 512 {
+					probe = probe[:512]
+				}
+				if strings.ContainsRune(string(probe), '\x00') {
+					return diffReadyMsg{seq: seq, workDir: workDir, content: "[binary file]"}
+				}
+				content := string(data)
+				if len(data) > 1024*1024 {
+					content = string(data[:1024*1024]) + "\n[truncated — 1MB limit]"
+				}
+				header := hintStyle.Render("Preview: "+f.path+"  (E edit)") + "\n\n"
+				return diffReadyMsg{seq: seq, workDir: workDir, content: header + highlightContent(content, languageForPath(f.path))}
+			}
+			// Git diff path
+			var out string
+			var err error
+			if f.staged {
+				out, err = gitRunInDir(workDir, "diff", "--no-color", "--cached", "--", f.path)
+			} else {
+				out, err = gitRunInDir(workDir, "diff", "--no-color", "--", f.path)
+			}
+			if err != nil {
+				out = "error: " + err.Error()
+			}
+			out = capDiff(out)
+			rendered := renderUnifiedDiff(out, styles)
+			hunks := parseHunks(out)
+			hdr := extractDiffHeader(out)
+			return diffReadyMsg{seq: seq, workDir: workDir, content: rendered, hunks: hunks, header: hdr}
+
+		case gitSectionLog:
+			if commitCursor >= len(commits) {
+				return diffReadyMsg{seq: seq, workDir: workDir, content: ""}
+			}
+			c := commits[commitCursor]
+			var out string
+			var err error
+			if logFullDiff {
+				out, err = gitRunInDir(workDir, "show", "--no-color", c.hash)
+			} else {
+				out, err = gitRunInDir(workDir, "show", "--no-color", "--stat", c.hash)
+			}
+			if err != nil {
+				out = "error: " + err.Error()
+			}
+			out = capDiff(out)
+			rendered := renderUnifiedDiff(out, styles)
+			var hunks []diffHunk
+			var hdr string
+			if logFullDiff {
+				hunks = parseHunks(out)
+				hdr = extractDiffHeader(out)
+			}
+			return diffReadyMsg{seq: seq, workDir: workDir, content: rendered, hunks: hunks, header: hdr}
+
+		case gitSectionStash:
+			if stashCursor >= len(stashes) {
+				return diffReadyMsg{seq: seq, workDir: workDir, content: ""}
+			}
+			ref := fmt.Sprintf("stash@{%d}", stashCursor)
+			out, err := gitRunInDir(workDir, "stash", "show", "--no-color", "-p", ref)
+			if err != nil {
+				out = "error: " + err.Error()
+			}
+			out = capDiff(out)
+			rendered := renderUnifiedDiff(out, styles)
+			return diffReadyMsg{seq: seq, workDir: workDir, content: rendered}
+
+		case gitSectionBranches:
+			if branchCursor >= len(branches) {
+				return diffReadyMsg{seq: seq, workDir: workDir, content: ""}
+			}
+			out, err := gitRunInDir(workDir, "log", "--oneline", "-20", branches[branchCursor])
+			if err != nil {
+				out = "error: " + err.Error()
+			}
+			return diffReadyMsg{seq: seq, workDir: workDir, content: out}
+		}
+		return diffReadyMsg{seq: seq, workDir: workDir}
+	}
 }
 
 func (m gitModel) renderHints() string {

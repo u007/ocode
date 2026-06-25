@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -259,6 +260,47 @@ func TestGitRefreshShortcutReloadsState(t *testing.T) {
 	m, _ = m.Update(refresh, 100, 30)
 	if len(m.stagedFiles) != 1 || m.stagedFiles[0].path != "new.txt" {
 		t.Fatalf("expected refreshed staged files to include new.txt, got staged=%+v unstaged=%+v", m.stagedFiles, m.unstagedFiles)
+	}
+}
+
+func TestDiffReadyMsgRejectsStaleWorkDir(t *testing.T) {
+	m := gitModel{
+		workDir:     "/repo-a",
+		diffLoadSeq: 3,
+		diffLoading: true,
+		diffHeader:  "old header\n",
+		hunks:       []diffHunk{{header: "old hunk"}},
+		diff:        viewport.New(viewport.WithWidth(40), viewport.WithHeight(10)),
+	}
+
+	stale := diffReadyMsg{
+		seq:     3,
+		workDir: "/repo-b",
+		content: "stale content",
+		hunks:   []diffHunk{{header: "stale hunk"}},
+		header:  "stale header\n",
+	}
+	m, _ = m.Update(stale, 40, 10)
+	if !m.diffLoading {
+		t.Fatal("expected stale diffReadyMsg to be ignored")
+	}
+	if m.diffHeader != "old header\n" || len(m.hunks) != 1 || m.hunks[0].header != "old hunk" {
+		t.Fatalf("stale diffReadyMsg changed state: header=%q hunks=%+v", m.diffHeader, m.hunks)
+	}
+
+	current := diffReadyMsg{
+		seq:     3,
+		workDir: "/repo-a",
+		content: "fresh content",
+		hunks:   []diffHunk{{header: "fresh hunk"}},
+		header:  "fresh header\n",
+	}
+	m, _ = m.Update(current, 40, 10)
+	if m.diffLoading {
+		t.Fatal("expected matching diffReadyMsg to clear loading state")
+	}
+	if m.diffHeader != "fresh header\n" || len(m.hunks) != 1 || m.hunks[0].header != "fresh hunk" {
+		t.Fatalf("matching diffReadyMsg did not update state: header=%q hunks=%+v", m.diffHeader, m.hunks)
 	}
 }
 

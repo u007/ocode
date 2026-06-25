@@ -5282,7 +5282,7 @@ func TestSessionRestoreScrollsToBottom(t *testing.T) {
 	m.viewport = fastviewport.New(80, 10)
 	m.input = textarea.New()
 	m.files = newFilesModel(".")
-	m.git = newGitModel(".")
+	m.git, _ = newGitModel(".")
 	m.width = 100
 	m.height = 30
 

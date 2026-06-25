@@ -649,6 +649,7 @@ type model struct {
 	chatUnread           bool
 	files                filesModel
 	git                  gitModel
+	initDiffCmd          tea.Cmd // initial async diff load, fired from Init()
 	logViewport          viewport.Model
 	permViewport         viewport.Model
 	logEntries           []DebugEntry
@@ -1670,7 +1671,7 @@ func newModel(opts ...RunOptions) model {
 
 	workDir := m.workDir
 	m.files = newFilesModel(workDir)
-	m.git = newGitModel(workDir)
+	m.git, m.initDiffCmd = newGitModel(workDir)
 	// Wire the Git tab's logger to the global DebugLog so every terminal-state
 	// git action (push, pull, fetch, commit, stage/unstage, stash, branch
 	// checkout/create/delete, ignore, hunk apply) lands in the log tab.
@@ -1764,6 +1765,10 @@ func (m model) Init() tea.Cmd {
 	}
 	// Start quiet background refresh for git/files tabs.
 	cmds = append(cmds, tea.Tick(autoRefreshInterval, func(time.Time) tea.Msg { return autoRefreshTickMsg{} }))
+	// Fire the initial async diff load if the git model queued one during construction.
+	if m.initDiffCmd != nil {
+		cmds = append(cmds, m.initDiffCmd)
+	}
 	// Auto-connect to VS Code (Claude Code extension) when IDE mode is enabled.
 	if m.ideMode == config.IDEModeClaude {
 		cmds = append(cmds, m.autoConnectIDE())
@@ -2193,7 +2198,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.files, cmd = m.files.Update(msg, m.width, m.height)
 		return m, cmd
-	case gitStatusMsg, gitRefreshMsg, gitBranchRefreshMsg, loadMoreLogMsg:
+	case gitStatusMsg, gitRefreshMsg, gitBranchRefreshMsg, loadMoreLogMsg, diffReadyMsg:
 		var cmd tea.Cmd
 		m.git, cmd = m.git.Update(msg, m.panelWidth(), m.height)
 		return m, cmd
@@ -4635,13 +4640,15 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// section panel click
 		if mouse.X >= 0 && mouse.X < sectRight && mouse.Y >= gitBodyTop {
 			row := mouse.Y - gitBodyTop
+			var diffCmd tea.Cmd
 			if row >= 0 && row < 4 {
 				m.git.section = gitSection(row)
 				m.git.panel = gitPanelSections
 				m.git.resetCursors()
-				m.git.loadDiff()
+				st := currentStyles()
+				diffCmd = m.git.startLoadDiff(st)
 			}
-			return m, nil, true
+			return m, diffCmd, true
 		}
 
 		// file list panel click
@@ -4698,23 +4705,27 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 							path := filepath.Join(m.git.workDir, files[fileIdx].path)
 							return m, m.git.openInEditor(path), true
 						}
-						m.git.loadDiff()
+						st := currentStyles()
+						return m, m.git.startLoadDiff(st), true
 					}
 				case gitSectionLog:
 					commitIdx := logicalRow + m.git.commitViewport.YOffset()
 					if commitIdx >= 0 && commitIdx < len(m.git.commits) {
 						m.git.commitCursor = commitIdx
-						m.git.loadDiff()
+						st := currentStyles()
+						return m, m.git.startLoadDiff(st), true
 					}
 				case gitSectionStash:
 					if logicalRow >= 0 && logicalRow < len(m.git.stashes) {
 						m.git.stashCursor = logicalRow
-						m.git.loadDiff()
+						st := currentStyles()
+						return m, m.git.startLoadDiff(st), true
 					}
 				case gitSectionBranches:
 					if logicalRow >= 0 && logicalRow < len(m.git.branches) {
 						m.git.branchCursor = logicalRow
-						m.git.loadDiff()
+						st := currentStyles()
+						return m, m.git.startLoadDiff(st), true
 					}
 				}
 			}
@@ -10343,7 +10354,7 @@ func (m *model) layout() {
 	if m.showPermDialog {
 		m.syncPermViewport(max(0, panelWidth-4))
 	}
-	innerWidth := panelWidth - 7
+	innerWidth := panelWidth - 8 // -8 not -7: 1-col right margin guards against terminal double-width shift (VS Code known bug)
 	if innerWidth < 1 {
 		innerWidth = 1
 	}
@@ -14630,26 +14641,29 @@ func formatSidebarFilePath(path string, workDir string, max int) string {
 		path = rel
 	}
 	path = strings.TrimPrefix(filepath.ToSlash(path), "./")
-	if len(path) <= max {
+	// Use visual width (ansi.StringWidth) instead of byte len() so CJK/emoji
+	// characters in file paths don't produce truncated strings that render wider
+	// than the available space and push the sidebar out of alignment.
+	if ansi.StringWidth(path) <= max {
 		return path
 	}
 	if max <= 3 {
-		return path[:max]
+		return ansi.Truncate(path, max, "")
 	}
 
 	file := filepath.ToSlash(filepath.Base(path))
-	if len(file) >= max-3 {
-		return "..." + file[len(file)-(max-3):]
+	fileW := ansi.StringWidth(file)
+	if fileW >= max-3 {
+		// Keep the rightmost (max-3) visual columns of the filename.
+		rightmost := ansi.TruncateLeft(file, fileW-(max-3), "")
+		return "..." + rightmost
 	}
 
-	prefixMax := max - len(file) - 4
+	prefixMax := max - fileW - 4
 	if prefixMax < 0 {
 		prefixMax = 0
 	}
-	prefix := path
-	if len(prefix) > prefixMax {
-		prefix = prefix[:prefixMax]
-	}
+	prefix := ansi.Truncate(path, prefixMax, "")
 	return prefix + ".../" + file
 }
 
