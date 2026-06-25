@@ -1264,7 +1264,8 @@ func runCdCmd(m *model, args []string) tea.Cmd {
 	m.workDir = target
 	session.SetWorkDir(target)
 	m.files = newFilesModel(target)
-	m.git = newGitModel(target)
+	var initDiffCmd tea.Cmd
+	m.git, initDiffCmd = newGitModel(target)
 	m.git.SetLogger(func(kind DebugEntryKind, msg string) {
 		DebugLog.Append(DebugEntry{Kind: kind, Message: msg})
 	})
@@ -1287,7 +1288,7 @@ func runCdCmd(m *model, args []string) tea.Cmd {
 		m.agent.SetWorkDir(target)
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Project root changed to: " + target})
-	return nil
+	return initDiffCmd
 }
 
 // runAddDirCmd adds a directory to extra_allowed_paths so the agent can read

@@ -9,6 +9,9 @@ opencode.json
 .opencode/snapshots
 internal/tui/.opencode
 
+# Markdown discovery corpus (auto-generated cache)
+.ocode/md-summaries.json
+
 
 # Git worktrees (parallel development checkouts)
 .worktrees/
