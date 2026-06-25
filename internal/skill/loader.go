@@ -129,8 +129,8 @@ func parseSkillMetadata(content string) Skill {
 		}
 	}
 
-	skill.Description = clampSentence(skill.Description, 160)
-	skill.WhenToUse = clampSentence(skill.WhenToUse, 160)
+	skill.Description = clampSentence(skill.Description, 400)
+	skill.WhenToUse = clampSentence(skill.WhenToUse, 400)
 	return skill
 }
 

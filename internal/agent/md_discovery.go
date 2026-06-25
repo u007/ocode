@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
 )
 
@@ -389,10 +390,12 @@ func sanitizeMDSummary(s string) string {
 }
 
 // walkMarkdownFiles returns every *.md file under root, excluding the always-on
-// briefing set, hidden files, vendored/ignored dirs, .gitignore matches, and
-// any paths matched by ignorePaths (prefix or glob against the repo-relative
-// slash path).
+// briefing set, built-in discovery ignore dirs (.agent, .claude, .git, .opencode,
+// .pnpm, .qwen, build, dist, node_modules, target, vendor, and the full skills/
+// tree), hidden files, .gitignore matches, and any paths matched by ignorePaths
+// (prefix or glob against the repo-relative slash path).
 func walkMarkdownFiles(root string, ignorePaths ...string) []mdRef {
+	ignorePaths = append(config.DefaultDiscoveryIgnorePaths(), ignorePaths...)
 	matcher := loadGitignore(root)
 	var refs []mdRef
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -401,10 +404,10 @@ func walkMarkdownFiles(root string, ignorePaths ...string) []mdRef {
 		}
 		name := d.Name()
 		if d.IsDir() {
-			if name == ".git" || name == ".ocode" || name == "node_modules" || name == "vendor" {
+			if name == ".git" || name == ".ocode" || name == ".opencode" || name == ".claude" || name == ".qwen" || name == ".agent" || name == ".pnpm" || name == "node_modules" || name == "vendor" || name == "dist" || name == "build" || name == "target" {
 				return filepath.SkipDir
 			}
-			// Skip hidden dirs except .opencode (which holds rules/skills).
+			// Skip other hidden dirs.
 			if strings.HasPrefix(name, ".") && name != "." && name != ".opencode" {
 				return filepath.SkipDir
 			}
@@ -524,29 +527,19 @@ func saveMDCache(path string, cache map[string]mdEntry) error {
 	return nil
 }
 
-// renderAttachedMarkdown builds the volatile-tail block of full file content for
-// every attached md doc. Returns "" when none are attached. Files are read fresh
-// so the agent sees current content (the cached summary only drives ranking).
+// renderAttachedMarkdown builds the volatile-tail block of filename+summary lines
+// for every attached md doc. Returns "" when none are attached.
 func (a *Agent) renderAttachedMarkdown(docs []discovery.Doc, isAttached func(id string) bool) string {
 	var b strings.Builder
 	for _, d := range docs {
 		if d.Kind != "md" || !isAttached(d.ID) {
 			continue
 		}
-		content, err := os.ReadFile(d.Source)
-		if err != nil {
-			emitDebug("MD-DISCOVERY", fmt.Sprintf("read attached %s failed: %v", d.Name, err))
-			continue
-		}
 		if b.Len() == 0 {
 			b.WriteString(promptDiscoveryMarker)
 			b.WriteString(" relevant project docs for this task:\n")
 		}
-		b.WriteString("\n--- ")
-		b.WriteString(d.Name)
-		b.WriteString(" ---\n")
-		b.Write(content)
-		b.WriteString("\n")
+		writeIndexLine(&b, d)
 	}
 	return b.String()
 }

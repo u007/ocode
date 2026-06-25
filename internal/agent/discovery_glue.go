@@ -406,18 +406,20 @@ const discoveryPromptContract = `Not every tool is currently loaded. The "Availa
 //   - STABLE content (prompt contract + the full name index — names don't change
 //     turn to turn) is emitted as a SYSTEM message → hoisted into the cached
 //     system prompt → caches across turns.
-//   - VOLATILE content (full descriptions of ATTACHED skills, which grow with the
-//     sticky set) is emitted as a USER message → stays in the uncached message
-//     tail (collectAndRemove only pulls system-role) → a skill-attach turn no
-//     longer rewrites/busts the cached system block. It is wrapped in the
-//     discovery marker so the model reads it as system-origin, not user speech.
+//   - VOLATILE content (full descriptions of ATTACHED skills and attached project
+//     doc summaries, which grow with the sticky set) is emitted as USER messages
+//     → stays in the uncached message tail (collectAndRemove only pulls
+//     system-role) → attachment turns no longer rewrite/bust the cached system
+//     block. Each block is wrapped in the discovery marker so the model reads it
+//     as system-origin, not user speech.
 //
 // Three modes:
 //   - off (config flag false): no-op.
 //   - on but not yet active (e.g. embedder failed to resolve): fail-open by
 //     re-emitting the full skill catalog (system-role, stable) so skills are
 //     never lost.
-//   - on + active: stable name index (system) + attached-skill descriptions (user).
+//   - on + active: stable name index (system) + attached-skill descriptions
+//     (user) + attached project-doc summaries (user).
 func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 	if !a.discoveryConfigEnabled() {
 		return messages
@@ -440,7 +442,7 @@ func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 	if volContent != "" {
 		messages = append(messages, Message{Role: "user", Content: volContent})
 	}
-	// Attached project-doc full content rides the volatile (uncached) tail, same
+	// Attached project-doc summaries ride the volatile (uncached) tail, same
 	// cache rationale as attached skills: the names-index stays byte-stable while
 	// matched docs expand only the user tail.
 	if mdContent := a.renderAttachedMarkdown(docs, a.disco.session.IsAttached); mdContent != "" {
@@ -449,8 +451,8 @@ func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 	return messages
 }
 
-// renderDiscoveryContext builds the two discovery blocks from the (sorted) docs
-// and the attachment predicate, split by volatility:
+// renderDiscoveryContext builds the discovery blocks from the (sorted) docs and
+// the attachment predicate, split by volatility:
 //
 //   - sysContent: prompt contract + full name index. A function of the doc-SET
 //     only (which is stable per session) — NOT of which docs are attached. This
@@ -478,22 +480,6 @@ func renderDiscoveryContext(docs []discovery.Doc, isAttached func(id string) boo
 			writeIndexLine(&sys, d)
 		}
 	}
-	hasMD := false
-	for _, d := range docs {
-		if d.Kind == "md" {
-			hasMD = true
-			break
-		}
-	}
-	if hasMD {
-		sys.WriteString("\nProject docs (summaries — read the file for full content):\n")
-		for _, d := range docs {
-			if d.Kind == "md" {
-				writeIndexLine(&sys, d)
-			}
-		}
-	}
-
 	var attachedDocs []discovery.Doc
 	for _, d := range docs {
 		if d.Kind == "skill" && isAttached(d.ID) {

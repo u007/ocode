@@ -56,7 +56,7 @@ func TestGroupDispatch_NoRaceAndCorrectAttribution(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			binding := &taskBinding{bus: bus, agentID: ids[i], tracker: tracker}
-			if _, err := a.executeToolCall(tcs[i].Function.Name, json.RawMessage(tcs[i].Function.Arguments), binding); err != nil {
+			if _, err := a.executeToolCall(tcs[i].Function.Name, json.RawMessage(tcs[i].Function.Arguments), binding, ""); err != nil {
 				t.Errorf("dispatch %s failed: %v", ids[i], err)
 			}
 		}(i)

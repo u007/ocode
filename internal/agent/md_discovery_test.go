@@ -55,6 +55,9 @@ func TestWalkMarkdownFiles(t *testing.T) {
 	write("docs/guide.md", "# guide")
 	write("AGENTS.md", "briefing")             // always-on → excluded
 	write(".opencode/rules/r.md", "rule")      // always-on → excluded
+	write(".opencode/notes.md", "opencode")    // discovery default ignore → excluded
+	write(".claude/notes.md", "claude")        // discovery default ignore → excluded
+	write(".qwen/notes.md", "qwen")            // discovery default ignore → excluded
 	write("node_modules/pkg/doc.md", "vendor") // ignored dir → excluded
 	write("build/out.md", "generated")         // gitignored → excluded
 	write("notes.txt", "not markdown")         // not md → excluded
@@ -211,7 +214,7 @@ func TestMDSummarizeFailureBacksOff(t *testing.T) {
 	}
 }
 
-func TestRenderDiscoveryIncludesMDSectionAndAttachedContent(t *testing.T) {
+func TestRenderDiscoveryShowsAttachedMDSummariesOnly(t *testing.T) {
 	root := t.TempDir()
 	docPath := filepath.Join(root, "docs", "arch.md")
 	if err := os.MkdirAll(filepath.Dir(docPath), 0o755); err != nil {
@@ -227,24 +230,23 @@ func TestRenderDiscoveryIncludesMDSectionAndAttachedContent(t *testing.T) {
 		{ID: "md:docs/arch.md", Kind: "md", Name: "docs/arch.md", Text: "docs/arch.md: architecture overview", Source: docPath},
 	}
 
-	// Names-index (system block) lists the md doc by name; it must NOT contain the
-	// full file body (that would bust the cache and bloat the system prompt).
+	// Names-index (system block) must not contain md docs at all.
 	sys, _ := renderDiscoveryContext(docs, func(string) bool { return false })
-	if !strings.Contains(sys, "Project docs") || !strings.Contains(sys, "docs/arch.md") {
-		t.Fatalf("system block must list md doc name: %q", sys)
-	}
-	if strings.Contains(sys, "full architecture detail") {
-		t.Fatal("full md body must not be in the cached system block")
+	if strings.Contains(sys, "Project docs") || strings.Contains(sys, "docs/arch.md") || strings.Contains(sys, "architecture overview") {
+		t.Fatalf("system block must not list md docs: %q", sys)
 	}
 
 	a := &Agent{}
-	// Not attached → no full content.
+	// Not attached → no content.
 	if got := a.renderAttachedMarkdown(docs, func(string) bool { return false }); got != "" {
 		t.Fatalf("unattached md must produce no content, got %q", got)
 	}
-	// Attached → full file content in the volatile tail.
+	// Attached → filename + summary only in the volatile tail.
 	got := a.renderAttachedMarkdown(docs, func(id string) bool { return id == "md:docs/arch.md" })
-	if !strings.Contains(got, "full architecture detail") || !strings.Contains(got, "docs/arch.md") {
-		t.Fatalf("attached md must inject full file content: %q", got)
+	if !strings.Contains(got, "docs/arch.md") || !strings.Contains(got, "architecture overview") {
+		t.Fatalf("attached md must inject filename+summary: %q", got)
+	}
+	if strings.Contains(got, "full architecture detail") {
+		t.Fatal("attached md must not inject full file content")
 	}
 }

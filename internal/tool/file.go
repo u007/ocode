@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -401,6 +402,10 @@ func (t WriteTool) Definition() map[string]interface{} {
 }
 
 func (t WriteTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t WriteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -417,7 +422,13 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 
 	prev, _ := os.ReadFile(safe)
 
-	snapshot.Backup(safe) //nolint:errcheck
+	tcID := snapshot.ToolCallIDFromContext(ctx)
+	store := snapshot.FromContext(ctx)
+	if tcID != "" {
+		_ = store.Backup(safe, tcID) //nolint:errcheck
+	} else {
+		_ = store.Backup(safe, "") //nolint:errcheck
+	}
 
 	if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
 		return "", fmt.Errorf("failed to create directories for %s: %w", params.Path, err)
@@ -440,6 +451,10 @@ func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 			return "", fmt.Errorf("failed to write file %s: %w", params.Path, err)
 		}
 		newContent = params.Content
+	}
+
+	if tcID != "" {
+		store.RegisterWrite(safe, tcID)
 	}
 
 	var formatters map[string]config.FormatterConfig
@@ -491,6 +506,10 @@ func (t ReplaceLinesToolImpl) Definition() map[string]interface{} {
 }
 
 func (t ReplaceLinesToolImpl) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t ReplaceLinesToolImpl) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path      string `json:"path"`
 		StartLine int    `json:"start_line"`
@@ -537,10 +556,20 @@ func (t ReplaceLinesToolImpl) Execute(args json.RawMessage) (string, error) {
 
 	newContent := strings.Join(updated, "\n")
 
-	snapshot.Backup(safe) //nolint:errcheck
+	tcID := snapshot.ToolCallIDFromContext(ctx)
+	store := snapshot.FromContext(ctx)
+	if tcID != "" {
+		_ = store.Backup(safe, tcID) //nolint:errcheck
+	} else {
+		_ = store.Backup(safe, "") //nolint:errcheck
+	}
 
 	if err := os.WriteFile(safe, []byte(newContent), 0644); err != nil {
 		return "", fmt.Errorf("failed to write file %s: %w", params.Path, err)
+	}
+
+	if tcID != "" {
+		store.RegisterWrite(safe, tcID)
 	}
 
 	var formatters map[string]config.FormatterConfig
@@ -575,6 +604,10 @@ func (t DeleteTool) Definition() map[string]interface{} {
 }
 
 func (t DeleteTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t DeleteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path string `json:"path"`
 	}
@@ -587,10 +620,20 @@ func (t DeleteTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	snapshot.Backup(safe) //nolint:errcheck
+	tcID := snapshot.ToolCallIDFromContext(ctx)
+	store := snapshot.FromContext(ctx)
+	if tcID != "" {
+		_ = store.Backup(safe, tcID) //nolint:errcheck
+	} else {
+		_ = store.Backup(safe, "") //nolint:errcheck
+	}
 
 	if err := os.RemoveAll(safe); err != nil {
 		return "", fmt.Errorf("failed to delete %s: %w", params.Path, err)
+	}
+
+	if tcID != "" {
+		store.RegisterWrite(safe, tcID)
 	}
 
 	return fmt.Sprintf("Successfully deleted %s", params.Path), nil
@@ -624,6 +667,10 @@ func (t EditTool) Definition() map[string]interface{} {
 }
 
 func (t EditTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t EditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path       string `json:"path"`
 		Search     string `json:"search"`
@@ -653,7 +700,14 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("search block appears %d times; must be unique or set replace_all=true", count)
 	}
 
-	snapshot.Backup(safe) //nolint:errcheck
+	tcID := snapshot.ToolCallIDFromContext(ctx)
+	store := snapshot.FromContext(ctx)
+	if tcID != "" {
+		_ = store.Backup(safe, tcID) //nolint:errcheck
+	} else {
+		_ = store.Backup(safe, "") //nolint:errcheck
+	}
+
 	var newContent string
 	if params.ReplaceAll {
 		newContent = strings.ReplaceAll(fileContent, params.Search, params.Replace)
@@ -662,6 +716,10 @@ func (t EditTool) Execute(args json.RawMessage) (string, error) {
 	}
 	if err = os.WriteFile(safe, []byte(newContent), 0644); err != nil {
 		return "", err
+	}
+
+	if tcID != "" {
+		store.RegisterWrite(safe, tcID)
 	}
 
 	var formatters map[string]config.FormatterConfig
@@ -709,6 +767,10 @@ func (t MultiEditTool) Definition() map[string]interface{} {
 }
 
 func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t MultiEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		FilePath string `json:"file_path"`
 		Edits    []struct {
@@ -769,13 +831,24 @@ func (t MultiEditTool) Execute(args json.RawMessage) (string, error) {
 		}
 	}
 
-	snapshot.Backup(safe) //nolint:errcheck
+	tcID := snapshot.ToolCallIDFromContext(ctx)
+	store := snapshot.FromContext(ctx)
+	if tcID != "" {
+		_ = store.Backup(safe, tcID) //nolint:errcheck
+	} else {
+		_ = store.Backup(safe, "") //nolint:errcheck
+	}
+
 	if err := os.MkdirAll(filepath.Dir(safe), 0755); err != nil {
 		return "", fmt.Errorf("failed to create directories for %s: %w", params.FilePath, err)
 	}
 	if err := os.WriteFile(safe, []byte(newContent), 0644); err != nil {
-		_ = snapshot.Restore(safe)
+		_ = store.Restore(safe)
 		return "", fmt.Errorf("failed to write %s: %w", params.FilePath, err)
+	}
+
+	if tcID != "" {
+		store.RegisterWrite(safe, tcID)
 	}
 
 	var formatters map[string]config.FormatterConfig
@@ -823,6 +896,10 @@ func (t MultiFileEditTool) Definition() map[string]interface{} {
 }
 
 func (t MultiFileEditTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Edits []struct {
 			Path       string `json:"path"`
@@ -883,9 +960,16 @@ func (t MultiFileEditTool) Execute(args json.RawMessage) (string, error) {
 		}
 	}
 
+	tcID := snapshot.ToolCallIDFromContext(ctx)
+	store := snapshot.FromContext(ctx)
+
 	var backedUp []string
 	for _, safe := range fileOrder {
-		snapshot.Backup(safe) //nolint:errcheck
+		if tcID != "" {
+			_ = store.Backup(safe, tcID) //nolint:errcheck
+		} else {
+			_ = store.Backup(safe, "") //nolint:errcheck
+		}
 		backedUp = append(backedUp, safe)
 	}
 
@@ -901,9 +985,12 @@ func (t MultiFileEditTool) Execute(args json.RawMessage) (string, error) {
 		}
 		if err := os.WriteFile(safe, []byte(fe.newContent), 0644); err != nil {
 			for _, bu := range backedUp {
-				_ = snapshot.Restore(bu)
+				_ = store.Restore(bu)
 			}
 			return "", fmt.Errorf("failed to write %s: %w", fe.safe, err)
+		}
+		if tcID != "" {
+			store.RegisterWrite(safe, tcID)
 		}
 		FormatAfterWrite(safe, formatters)
 	}
