@@ -154,7 +154,7 @@ func TestFormatReadToolCallHintShowsLineParams(t *testing.T) {
 	tc.Function.Arguments = `{"filePath":"/tmp/model.go","offset":400,"limit":51}`
 
 	got := formatToolCallHint(tc)
-	want := "📖 read /tmp/model.go offset=400 limit=51"
+	want := "≫ read /tmp/model.go offset=400 limit=51"
 	if got != want {
 		t.Fatalf("expected %q, got %q", want, got)
 	}
@@ -906,7 +906,7 @@ func TestRenderPermissionPromptIsConciseAndNotJSON(t *testing.T) {
 	if strings.Contains(got, `{"path"`) {
 		t.Fatalf("expected permission prompt to avoid raw JSON, got %q", got)
 	}
-	if !strings.Contains(got, "📖 read internal/tui/model.go") {
+	if !strings.Contains(got, "≫ read internal/tui/model.go") {
 		t.Fatalf("expected concise tool summary, got %q", got)
 	}
 	if !strings.Contains(got, "[y] once  [n] deny  [a] always this rule  [t] always this tool") {
@@ -1556,7 +1556,8 @@ func TestPersistPermissionsPreservesAutoBlock(t *testing.T) {
 
 	m := model{config: &cfg, agent: agent.NewAgent(nil, nil, &cfg, nil)}
 	m.agent.Permissions().SetAutoPermissionEnabled(true)
-	m.agent.Permissions().SetRule("ask_tool", agent.PermissionAllow)
+	m.permDirty.autoEnabled = true
+	m.setToolPermission("ask_tool", agent.PermissionAllow)
 	m.persistPermissions()
 
 	data, err := os.ReadFile(filepath.Join(cfgDir, "ocodeconfig.json"))
@@ -1586,6 +1587,57 @@ func TestPersistPermissionsPreservesAutoBlock(t *testing.T) {
 	}
 	if got := auto["prompt"]; got != "keep me" {
 		t.Fatalf("expected auto prompt to be preserved, got %v", got)
+	}
+}
+
+func TestPersistPermissionsKeepsDirtyOnSaveFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based permission failure is not reliable on windows")
+	}
+
+	chdirTempForConfigTest(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("APPDATA", home)
+
+	cfgDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "ocodeconfig.json"), []byte(`{"permissions":{"auto":{"enabled":false}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg config.Config
+	if err := config.LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_ = os.Chmod(cfgDir, 0o755)
+	})
+	if err := os.Chmod(cfgDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{config: &cfg, agent: agent.NewAgent(nil, nil, &cfg, nil)}
+	m.agent.Permissions().SetAutoPermissionEnabled(true)
+	m.permDirty.autoEnabled = true
+	m.persistPermissions()
+
+	if !m.permDirty.autoEnabled {
+		t.Fatal("expected dirty autoEnabled flag to remain set after a failed save")
+	}
+	if len(m.messages) == 0 {
+		t.Fatal("expected a generic failure message")
+	}
+	got := m.messages[len(m.messages)-1].text
+	if !strings.Contains(got, "Failed to save permissions") {
+		t.Fatalf("expected generic failure message, got %q", got)
+	}
+	if strings.Contains(got, cfgDir) {
+		t.Fatalf("expected generic failure message without paths, got %q", got)
 	}
 }
 
@@ -6091,15 +6143,15 @@ func TestScrollToCompactionBannerFindsMarker(t *testing.T) {
 	m.messages = append([]message{
 		{role: roleUser, text: "Before"},
 	}, m.messages...)
-		// Add a compaction banner with raw (like applyCompactionResult does).
-		summaryMsg := &agent.Message{
-			Role:    "system",
-			Content: "[ocode:compaction-summary]\nCompacted summary",
-		}
-		m.messages = append(m.messages[:2], append([]message{
-			{role: roleAssistant, text: "──────────────────────────────"},
-			{role: roleAssistant, text: "▣ Compacted 5 earlier messages", raw: summaryMsg},
-		}, m.messages[2:]...)...)
+	// Add a compaction banner with raw (like applyCompactionResult does).
+	summaryMsg := &agent.Message{
+		Role:    "system",
+		Content: "[ocode:compaction-summary]\nCompacted summary",
+	}
+	m.messages = append(m.messages[:2], append([]message{
+		{role: roleAssistant, text: "──────────────────────────────"},
+		{role: roleAssistant, text: "▣ Compacted 5 earlier messages", raw: summaryMsg},
+	}, m.messages[2:]...)...)
 	m.renderTranscript()
 
 	// Verify compactionRegions was populated and the banner is in view.

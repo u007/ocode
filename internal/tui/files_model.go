@@ -483,7 +483,7 @@ func (m *filesModel) applyInFileSearchHighlights() {
 	copy(out, m.previewLines)
 
 	type lineMatch struct {
-		idx             int
+		idx              int
 		colStart, colEnd int
 	}
 	byLine := make(map[int][]lineMatch)
@@ -2109,7 +2109,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 			line = skipVisibleChars(line, m.treeScrollX)
 		}
 		if i == m.cursor {
-			line = styles.Selected.Render(truncateToWidth(line, treeContentWidth))
+			line = styles.Selected.Width(treeContentWidth).Render(truncateToWidth(line, treeContentWidth))
 		} else {
 			line = truncateToWidth(line, treeContentWidth)
 		}

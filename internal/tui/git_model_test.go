@@ -320,6 +320,35 @@ func TestGitViewStatusBarStaysOneLine(t *testing.T) {
 	}
 }
 
+func TestGitPreviewShowsTruncationNotice(t *testing.T) {
+	dir := initGitRepoForPathSeparatorTest(t)
+	writeFileForGitTest(t, dir, "big.txt", strings.Repeat("abcdefghijklmnopqrstuvwxyz\n", 3000))
+
+	m := gitModel{
+		workDir:        dir,
+		section:        gitSectionChanges,
+		panel:          gitPanelFiles,
+		untrackedFiles: []gitFile{{status: "?", path: "big.txt"}},
+		filesCursor:    0,
+		diff:           viewport.New(viewport.WithWidth(80), viewport.WithHeight(12)),
+	}
+
+	cmd := m.startLoadDiff(ApplyThemeColors("tokyonight"))
+	if cmd == nil {
+		t.Fatal("expected a diff load command")
+	}
+	msg, ok := cmd().(diffReadyMsg)
+	if !ok {
+		t.Fatalf("expected diffReadyMsg, got %T", msg)
+	}
+	m, _ = m.Update(msg, 80, 12)
+
+	got := stripANSI(m.diff.View())
+	if !strings.Contains(got, "[truncated — 1MB limit]") {
+		t.Fatalf("expected truncation notice in diff preview, got %q", got)
+	}
+}
+
 func TestAppendUniqueLineAvoidsDuplicateGitignoreEntries(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".gitignore")

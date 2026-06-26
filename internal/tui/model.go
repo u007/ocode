@@ -824,7 +824,8 @@ type model struct {
 	lastClickX               int
 	lastClickY               int
 	permButtonRegions        []permButtonRegion
-	permHoverChoice          string // choice of the permission button under the mouse, "" when none
+	permHoverChoice          string         // choice of the permission button under the mouse, "" when none
+	permDirty                permDirtyFlags // tracks permission fields changed by this session
 	cleanupState             *modelCleanupState
 	supervisor               *tool.ProcessSupervisor
 	hookPipeline             *hooks.Pipeline
@@ -4995,13 +4996,18 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				switch {
 				case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
 					perm.SetAutoPermissionEnabled(true)
+					m.permDirty.autoEnabled = true
 				case perm.Mode() == agent.PermissionModeNormal && perm.AutoPermissionEnabled():
 					perm.SetAutoPermissionEnabled(false)
+					m.permDirty.autoEnabled = true
 					perm.SetMode(agent.PermissionModeYOLO)
+					m.permDirty.mode = true
 				case perm.Mode() == agent.PermissionModeYOLO:
 					perm.SetMode(agent.PermissionModeLocked)
+					m.permDirty.mode = true
 				default:
 					perm.SetMode(agent.PermissionModeNormal)
+					m.permDirty.mode = true
 				}
 				m.persistPermissions()
 				m.sidebarSel = selectionState{}
@@ -5034,6 +5040,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			if m.sidebarPermModelToggleForClick(mouse) && m.agent != nil {
 				perm := m.agent.Permissions()
 				perm.SetAutoPermissionEnabled(!perm.AutoPermissionEnabled())
+				m.permDirty.autoEnabled = true
 				m.persistPermissions()
 				m.sidebarSel = selectionState{}
 				return m, nil, true
@@ -5101,13 +5108,18 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			switch {
 			case perm.Mode() == agent.PermissionModeNormal && !perm.AutoPermissionEnabled():
 				perm.SetAutoPermissionEnabled(true)
+				m.permDirty.autoEnabled = true
 			case perm.Mode() == agent.PermissionModeNormal && perm.AutoPermissionEnabled():
 				perm.SetAutoPermissionEnabled(false)
+				m.permDirty.autoEnabled = true
 				perm.SetMode(agent.PermissionModeYOLO)
+				m.permDirty.mode = true
 			case perm.Mode() == agent.PermissionModeYOLO:
 				perm.SetMode(agent.PermissionModeLocked)
+				m.permDirty.mode = true
 			default:
 				perm.SetMode(agent.PermissionModeNormal)
+				m.permDirty.mode = true
 			}
 			m.persistPermissions()
 			m.statusSel = selectionState{}
@@ -9470,11 +9482,27 @@ func permissionRuleLabel(req agent.PermissionRequest) string {
 	return fmt.Sprintf("tool %q", req.ToolName)
 }
 
+// permDirtyFlags records which permission fields were explicitly modified in
+// this session. Only dirty fields are flushed by persistPermissions, preventing
+// stale in-memory snapshots from clobbering concurrent sessions' changes.
+type permDirtyFlags struct {
+	autoEnabled    bool
+	mode           bool
+	toolRules      map[string]string // tool -> level for each changed rule
+	bashPrefixes   map[string]string // prefix -> level for each changed rule
+	bashAutoAllow  map[string]bool   // prefix -> add(true)/remove(false)
+	bashPrefixMode map[string]string // prefix -> mode for each changed entry
+}
+
 func (m *model) setPermissionRule(req agent.PermissionRequest, level agent.PermissionLevel) {
 	if req.Scope == agent.PermissionScopeBashPrefix && req.Prefix != "" {
 		if m.agent != nil && m.agent.Permissions() != nil {
 			m.agent.Permissions().SetBashPrefixRule(req.Prefix, level)
 		}
+		if m.permDirty.bashPrefixes == nil {
+			m.permDirty.bashPrefixes = make(map[string]string)
+		}
+		m.permDirty.bashPrefixes[req.Prefix] = string(level)
 		return
 	}
 	m.setToolPermission(req.ToolName, level)
@@ -9484,29 +9512,84 @@ func (m *model) setToolPermission(toolName string, level agent.PermissionLevel) 
 	if m.agent != nil && m.agent.Permissions() != nil {
 		m.agent.Permissions().SetRule(toolName, level)
 	}
+	if m.permDirty.toolRules == nil {
+		m.permDirty.toolRules = make(map[string]string)
+	}
+	m.permDirty.toolRules[toolName] = string(level)
 }
 
+// persistPermissions flushes only the permission fields that were explicitly
+// changed in this session. Each field uses a targeted load-modify-write saver
+// so concurrent sessions' changes to other fields are never clobbered.
 func (m *model) persistPermissions() {
 	if m.agent == nil || m.agent.Permissions() == nil {
 		return
 	}
-	permissions := m.agent.Permissions().ExportConfig()
-	if m.config != nil {
-		if existing := m.config.Ocode.Permissions.Auto; existing != nil {
-			auto := *existing
-			if permissions.Auto != nil {
-				auto.Enabled = permissions.Auto.Enabled
-			} else {
-				auto.Enabled = m.agent.Permissions().AutoPermissionEnabled()
-			}
-			permissions.Auto = &auto
-		} else if m.agent.Permissions().AutoPermissionEnabled() {
-			permissions.Auto = &config.AutoPermissionConfig{Enabled: true}
+	pm := m.agent.Permissions()
+	var errs []string
+
+	if m.permDirty.autoEnabled {
+		if err := config.SaveAutoPermissionEnabled(pm.AutoPermissionEnabled()); err != nil {
+			errs = append(errs, "auto-enabled: "+err.Error())
+		} else {
+			m.permDirty.autoEnabled = false
 		}
-		m.config.Ocode.Permissions = permissions
 	}
-	if err := config.SaveOcodePermissions(permissions); err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save permissions: %v", err)})
+	if m.permDirty.mode {
+		if err := config.SavePermissionModeSwitch(string(pm.Mode())); err != nil {
+			errs = append(errs, "mode: "+err.Error())
+		} else {
+			m.permDirty.mode = false
+		}
+	}
+	toolRulesDirty := len(m.permDirty.toolRules) > 0
+	for tool, level := range m.permDirty.toolRules {
+		if err := config.SaveSingleToolRule(tool, level); err != nil {
+			errs = append(errs, tool+": "+err.Error())
+			continue
+		}
+		delete(m.permDirty.toolRules, tool)
+	}
+	if toolRulesDirty && len(m.permDirty.toolRules) == 0 {
+		m.permDirty.toolRules = nil
+	}
+	bashPrefixesDirty := len(m.permDirty.bashPrefixes) > 0
+	for prefix, level := range m.permDirty.bashPrefixes {
+		if err := config.SaveSingleBashPrefixRule(prefix, level); err != nil {
+			errs = append(errs, prefix+": "+err.Error())
+			continue
+		}
+		delete(m.permDirty.bashPrefixes, prefix)
+	}
+	if bashPrefixesDirty && len(m.permDirty.bashPrefixes) == 0 {
+		m.permDirty.bashPrefixes = nil
+	}
+	bashAutoAllowDirty := len(m.permDirty.bashAutoAllow) > 0
+	for prefix, add := range m.permDirty.bashAutoAllow {
+		if err := config.SaveBashAutoAllowPrefixEntry(prefix, add); err != nil {
+			errs = append(errs, prefix+": "+err.Error())
+			continue
+		}
+		delete(m.permDirty.bashAutoAllow, prefix)
+	}
+	if bashAutoAllowDirty && len(m.permDirty.bashAutoAllow) == 0 {
+		m.permDirty.bashAutoAllow = nil
+	}
+	bashPrefixModeDirty := len(m.permDirty.bashPrefixMode) > 0
+	for prefix, mode := range m.permDirty.bashPrefixMode {
+		if err := config.SaveSingleBashPrefixMode(prefix, mode); err != nil {
+			errs = append(errs, prefix+": "+err.Error())
+			continue
+		}
+		delete(m.permDirty.bashPrefixMode, prefix)
+	}
+	if bashPrefixModeDirty && len(m.permDirty.bashPrefixMode) == 0 {
+		m.permDirty.bashPrefixMode = nil
+	}
+
+	if len(errs) > 0 {
+		log.Printf("[perm] failed to save permissions: %s", strings.Join(errs, "; "))
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Failed to save permissions. Check the debug log for details."})
 	}
 }
 
@@ -11259,6 +11342,15 @@ func (m *model) renderTranscript() {
 	// its block in transcriptLines. -1 for indices past the end. The chat-search
 	// jump-to-match uses this to scroll the viewport to the match's first line.
 	m.transcriptMsgStartLine = make([]int, len(m.messages))
+	// Build a fast membership set for chat-search matches so the inner loop
+	// can decide in O(1) whether to apply term highlighting.
+	var searchMatchSet map[int]struct{}
+	if m.chatSearchQuery != "" && len(m.chatSearchMatches) > 0 {
+		searchMatchSet = make(map[int]struct{}, len(m.chatSearchMatches))
+		for _, idx := range m.chatSearchMatches {
+			searchMatchSet[idx] = struct{}{}
+		}
+	}
 	nlAcc := 0 // wrapped lines written so far (= next index into transcriptLines)
 	for i, msg := range m.messages {
 		if i > 0 {
@@ -11271,7 +11363,13 @@ func (m *model) renderTranscript() {
 		m.transcriptMsgStartLine[i] = startLine
 		nlAcc += len(entry.wrapped)
 		endLine := nlAcc - 1
-		m.transcriptLines = append(m.transcriptLines, entry.wrapped...)
+		wrappedLines := entry.wrapped
+		if searchMatchSet != nil {
+			if _, ok := searchMatchSet[i]; ok {
+				wrappedLines = highlightSearchTermsInLines(entry.wrapped, entry.stripped, m.chatSearchQuery)
+			}
+		}
+		m.transcriptLines = append(m.transcriptLines, wrappedLines...)
 		m.rawTranscriptLines = append(m.rawTranscriptLines, entry.stripped...)
 		switch entry.kind {
 		case blockKindThinking:
@@ -14700,7 +14798,7 @@ func (m model) renderMCPStatus() string {
 }
 
 func (m model) mainScrollbarX() int {
-	return m.panelWidth() - 5
+	return m.panelWidth() - 6
 }
 
 func (m model) viewportContentTopY() int {

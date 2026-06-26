@@ -338,9 +338,106 @@ func TestChatSearchCloseOnTabSwitch(t *testing.T) {
 }
 
 // TestChatSearchRenderBarIncludesCount is a render smoke test: the bar
+func TestHighlightSearchTermsInLines(t *testing.T) {
+	// Plain text, single match.
+	wrapped := []string{"hello world"}
+	stripped := []string{"hello world"}
+	out := highlightSearchTermsInLines(wrapped, stripped, "world")
+	if stripANSI(out[0]) != "hello world" {
+		t.Errorf("stripping ANSI from highlighted line should equal original text, got %q", out[0])
+	}
+	if out[0] == wrapped[0] {
+		t.Error("highlighted line should differ from input (no SGR inserted)")
+	}
+
+	// ANSI-styled input, multiple matches on one line.
+	styledLine := "\x1b[32mfoo\x1b[0m bar foo"
+	rawLine := "foo bar foo"
+	out2 := highlightSearchTermsInLines([]string{styledLine}, []string{rawLine}, "foo")
+	if stripANSI(out2[0]) != rawLine {
+		t.Errorf("strip(highlighted) should equal raw text, got %q", stripANSI(out2[0]))
+	}
+
+	// Empty query: lines unchanged.
+	out3 := highlightSearchTermsInLines(wrapped, stripped, "")
+	if &out3[0] != &wrapped[0] {
+		// returned the same underlying slice via copy, check values equal
+		if out3[0] != wrapped[0] {
+			t.Error("empty query should return unchanged lines")
+		}
+	}
+
+	// No match: line unchanged.
+	out4 := highlightSearchTermsInLines(wrapped, stripped, "zzz")
+	if out4[0] != wrapped[0] {
+		t.Error("no-match line should be unchanged")
+	}
+}
+
 // must contain the match count string. A full golden render test is
 // overkill for this feature — if the count disappears, the user notices
 // in one second.
+// TestChatSearchTypingReRendersTranscriptWithHighlight verifies that when the
+// user types a printable character in the find bar, the model calls
+// renderTranscript so the bold+underline+bg-color highlighting appears on
+// matched words in the viewport content. This is a regression test against
+// the bug where handleChatSearchKey only called rebuildChatSearchMatches
+// but never re-rendered the transcript, leaving the viewport stale.
+func TestChatSearchTypingReRendersTranscriptWithHighlight(t *testing.T) {
+	msgs := []message{
+		{role: roleUser, text: "Build the docker image"},
+		{role: roleAssistant, text: "Sure, building the image now."},
+		{role: roleUser, text: "Does not match"},
+	}
+	m := buildChatSearchTestModel(msgs)
+	m.transcriptMsgStartLine = []int{0, 1, 2}
+	// Set up pre-rendered transcript lines like a real session would have.
+	// We need mock styles so that the rendering actually produces styled lines
+	// that stripANSI can work with meaningfully.
+	m.styles = ApplyThemeColors("tokyonight")
+	m.transcriptMsgStartLine = []int{0, 1, 2}
+	m.renderTranscript()
+
+	// Open the bar with an empty query — no highlighting.
+	m.openChatSearch("")
+	// Verify initial viewport content has NO bold/underline/bg ANSI codes.
+	initialView := m.viewport.View()
+	if strings.Contains(initialView, "\x1b[1m") || strings.Contains(initialView, "\x1b[4m") || strings.Contains(initialView, "\x1b[48;5;237m") {
+		t.Fatal("initial viewport should have no search highlighting codes")
+	}
+
+	// Simulate typing 'b' in the find bar.
+	handledM, _, handled := m.handleChatSearchKey(tea.KeyPressMsg{
+		Text: "b",
+		Code: 'b',
+	})
+	if !handled {
+		t.Fatal("key should be handled")
+	}
+	got := derefTestModel(t, handledM)
+
+	// After typing, the viewport should have bold+underline+bg for 'b' matches.
+	viewportContent := got.viewport.View()
+	if !strings.Contains(viewportContent, "\x1b[1m") {
+		t.Fatal("viewport should contain bold ANSI codes after typing query")
+	}
+	if !strings.Contains(viewportContent, "\x1b[4m") {
+		t.Fatal("viewport should contain underline ANSI codes after typing query")
+	}
+	if !strings.Contains(viewportContent, "\x1b[48;5;237m") {
+		t.Fatal("viewport should contain background-color ANSI codes after typing query")
+	}
+	// Verify the ANSI codes surround matching text, not the whole line.
+	stripped := stripANSI(viewportContent)
+	if !strings.Contains(stripped, "Build") || !strings.Contains(stripped, "building") {
+		t.Fatalf("viewport should still contain the original text, got %q", stripped)
+	}
+	// Verify the cursor was reset (no active flash from stale match).
+	if got.chatSearchFlashMsg != -1 {
+		t.Fatalf("typing should clear flash, got %d", got.chatSearchFlashMsg)
+	}
+}
+
 func TestChatSearchRenderBarIncludesCount(t *testing.T) {
 	m := buildChatSearchTestModel([]message{{role: roleUser, text: "needle"}})
 	m.styles = ApplyThemeColors("tokyonight")

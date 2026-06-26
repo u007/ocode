@@ -276,6 +276,26 @@
 - **Git File List Mouse Wheel Scroll Snap-Back** — Mouse wheel scrolling over the git files column now scrolls independently of cursor position. New `lastScrollCursor` field tracks cursor moves so `clampFileListScroll()` only snaps the view when the cursor actively moves, not when the wheel scrolls. Same pattern as `filesModel.reconcileTreeScroll`.
 - **`firstOutOfScopePath` Shell Substitution Guard** — Commands containing `$(` or backtick substitutions now return `""` instead of attempting to extract a path fragment from the shell expression, preventing false `verifyAutoGrant` rejections when the expanded path resolves to an in-scope directory. Locked in by `TestPermissions_FirstOutOfScopePath_ShellSubstReturnsEmpty`.
 
+### Added
+- **Targeted Permission Config Save Functions** — Added `SavePermissionModeSwitch`, `SaveSingleToolRule`, `SaveSingleBashPrefixRule`, `SaveBashAutoAllowPrefixEntry`, and `SaveSingleBashPrefixMode` to `internal/config/ocodeconfig.go` for concurrent-session-safe permission persistence via load-modify-write.
+- **Chat Search In-Line Highlighting** — New `highlightSearchTermsInLines` function applies bold+underline+dark-background SGR codes to matching search terms within already-styled transcript lines. Integrated into `renderTranscript` via a fast match-set lookup, so matched words now visually highlight as the user types in the find bar. Locked in by `TestChatSearchTypingReRendersTranscriptWithHighlight`.
+- **`permDirtyFlags` Permission Tracking** — New `permDirtyFlags` struct in the TUI model tracks which permission fields were explicitly modified in the current session across all mutation paths (permission dialog, sidebar toggle, commands, mouse actions).
+- **Git Preview Truncation Test** — `TestGitPreviewShowsTruncationNotice` verifies the truncation notice appears when previewing large untracked files.
+- **Permission Persistence Failure Test** — `TestPersistPermissionsKeepsDirtyOnSaveFailure` verifies dirty flags survive failed saves and no paths leak in error messages.
+
+### Fixed
+- **Permission Persistence Safety** — Rewrote `persistPermissions` to use targeted load-modify-write save functions for each permission field (mode, auto-enabled, tool rules, bash prefixes, bash auto-allow, bash prefix modes), preventing stale in-memory snapshots from clobbering concurrent sessions' changes. Dirty flags now survive transient save failures instead of silently dropping unsaved changes. Error messages are generic; concrete errors go to the debug log.
+- **Permission HTTP Endpoint Error Leak** — `handler_permissions.go` now returns a generic 500 error message and logs the concrete error server-side, preventing filesystem/config details from being exposed to the client.
+- **Git Diff Viewport Dimensions** — Corrected diff viewport height and width calculations to account for border frame (RoundedBorder=2) and scrollbar, preventing Lipgloss word-wrap artifacts between diff lines.
+- **Git File Preview Truncation & Footer Omission** — Capped file reads at 1MB and syntax highlighting input at 64KB. Truncation notice (`[truncated — 1MB limit]`) now rendered after the cap, so truncated files no longer appear complete.
+- **Chat Search Highlight Re-Render** — Typing in the find bar now calls `renderTranscript()`, so ANSI highlighting on matched words appears immediately instead of only on the next external re-render.
+- **Files Panel Selected Line Rendering** — Corrected the selected tree row to use `.Width(treeContentWidth).Render()` method chain instead of inline `Render(truncateToWidth(...))`.
+- **Main Scrollbar Position Alignment** — `mainScrollbarX()` changed from `panelWidth() - 5` to `panelWidth() - 6` to align the scrollbar column with the rendered position.
+
+### Changed
+- **Emoji-to-ASCII Status Symbols** — Replaced wide-emoji `📖` with single-width `≫` in permission prompts and tool-call hints to prevent VS Code terminal rendering shifts.
+- **Version Bump** — 0.6.7 → 0.6.8.
+
 ## [0.3.5] — 2026-06-10
 
 ### Added
