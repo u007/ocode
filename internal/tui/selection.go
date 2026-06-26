@@ -1,12 +1,67 @@
 package tui
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/mattn/go-runewidth"
 )
+
+// selectionHighlightOpen and selectionHighlightClose are the ANSI SGR
+// sequences used by insertHighlight to mark the selected range. They are
+// set from the theme's SelectedBg/SelectedFg in ApplyThemeColors so that
+// text selection on any surface (transcript, file preview, git diff, log,
+// etc.) uses a visible background highlight that respects the current theme,
+// rather than reverse-video (\x1b[7m) which can be invisible on
+// syntax-highlighted content.
+//
+// Default values provide a visible background before theme application.
+var selectionHighlightOpen, selectionHighlightClose = "\x1b[48;2;122;162;247m", "\x1b[49m"
+
+// SetSelectionHighlightCodes updates the ANSI open/close sequences used
+// for selection highlighting. Called from ApplyThemeColors.
+func SetSelectionHighlightCodes(open, close string) {
+	selectionHighlightOpen = open
+	selectionHighlightClose = close
+}
+
+// hexColorToANSIBackground converts a "#RRGGBB" hex string to an ANSI SGR
+// true-color background sequence ("\x1b[48;2;R;G;Bm"). Returns the empty
+// string if the input cannot be parsed.
+func hexColorToANSIBackground(hex string) string {
+	r, g, b, ok := parseHexColor(hex)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("\x1b[48;2;%d;%d;%dm", r, g, b)
+}
+
+// hexColorToANSIForeground converts a "#RRGGBB" hex string to an ANSI SGR
+// true-color foreground sequence ("\x1b[38;2;R;G;Bm"). Returns the empty
+// string if the input cannot be parsed.
+func hexColorToANSIForeground(hex string) string {
+	r, g, b, ok := parseHexColor(hex)
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("\x1b[38;2;%d;%d;%dm", r, g, b)
+}
+
+// parseHexColor parses a "#RRGGBB" string into (R,G,B,true) or
+// (0,0,0,false) on failure.
+func parseHexColor(s string) (r, g, b int, ok bool) {
+	if len(s) != 7 || s[0] != '#' {
+		return 0, 0, 0, false
+	}
+	v, err := strconv.ParseUint(s[1:], 16, 24)
+	if err != nil {
+		return 0, 0, 0, false
+	}
+	return int(v >> 16), int((v >> 8) & 0xFF), int(v & 0xFF), true
+}
 
 type selectionState struct {
 	active    bool
@@ -167,7 +222,8 @@ func normaliseSelection(startLine, startCol, endLine, endCol int) (int, int, int
 	return startLine, startCol, endLine, endCol
 }
 
-// applySelectionHighlight injects reverse-video ANSI codes over the selected
+// applySelectionHighlight injects selection-highlight ANSI codes (theme's
+// SelectedFg/SelectedBg foreground+background colors) over the selected
 // range in the rendered ANSI lines. rawLines provides the stripped text for
 // column-to-byte mapping. Returns a new slice; input is not modified.
 func applySelectionHighlight(lines []string, rawLines []string, startLine, startCol, endLine, endCol int) []string {
@@ -199,9 +255,13 @@ func applySelectionHighlight(lines []string, rawLines []string, startLine, start
 }
 
 // insertHighlight wraps the bytes [rawStart, rawEnd) of `rendered` with
-// reverse-video ANSI codes (selection highlight).
+// the currently-configured selection highlight ANSI codes (foreground +
+// background from the theme's SelectedFg/SelectedBg, set in
+// ApplyThemeColors). Unlike reverse-video (\x1b[7m), explicit foreground
+// and background highlighting is reliably visible on
+// syntax-highlighted content.
 func insertHighlight(rendered, raw string, rawStart, rawEnd int) string {
-	return insertSGRSpan(rendered, raw, rawStart, rawEnd, "\x1b[7m", "\x1b[27m")
+	return insertSGRSpan(rendered, raw, rawStart, rawEnd, selectionHighlightOpen, selectionHighlightClose)
 }
 
 // insertSGRSpan wraps the bytes [rawStart, rawEnd) of `rendered` (aligned to

@@ -78,6 +78,29 @@ func ApplyThemeColors(name string) Styles {
 	setBorderStyle(s.Border)
 	setHintStyle(s.Hint)
 	setSelectedStyle(s.Selected)
+	// Update selection highlight ANSI codes from the theme's SelectedFg/
+	// SelectedBg so that text selection on every surface (transcript, file
+	// preview, git diff, log, etc.) uses explicit foreground and background
+	// colours that respect the current theme, rather than reverse video
+	// (\x1b[7m) which can be invisible on syntax-highlighted content.
+	// Falls back to a dark background if the hex parse fails.
+	fg := hexColorToANSIForeground(c.SelectedFg)
+	bg := hexColorToANSIBackground(c.SelectedBg)
+	open := ""
+	close := ""
+	if fg != "" {
+		open += fg
+		close += "\x1b[39m"
+	}
+	if bg != "" {
+		open += bg
+		close += "\x1b[49m"
+	} else {
+		// Fallback background colour when SelectedBg can't be parsed.
+		open += "\x1b[48;5;236m"
+		close += "\x1b[49m"
+	}
+	SetSelectionHighlightCodes(open, close)
 	setStatusStyle(s.Status)
 	setSuccessStyle(s.Success)
 	setErrorStyle(s.Error)

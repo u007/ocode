@@ -1564,19 +1564,33 @@ func (a *Agent) scanToolResult(toolName string, toolArgs string, content string)
 	}
 
 	// Determine if this is a sensitive-file read.
+	isSensitiveRead := false
+	var sensitiveReadPath string
+
 	if toolName == "read" {
 		var args struct {
 			Path string `json:"path"`
 		}
-		if err := json.Unmarshal([]byte(toolArgs), &args); err == nil && redact.IsSensitiveFile(args.Path) && a.redactionScanner != nil {
-			masked := redactText(content, a.redactionRegistry)
-			masked, err := redact.ScanAndMask(masked, a.redactionScanner, a.redactionRegistry)
-			if err != nil {
-				emitDebug("REDACT", fmt.Sprintf("tier-2 scan error (read %s): %v", args.Path, err))
-				return masked
-			}
+		if err := json.Unmarshal([]byte(toolArgs), &args); err == nil && redact.IsSensitiveFile(args.Path) {
+			isSensitiveRead = true
+			sensitiveReadPath = args.Path
+		}
+	} else if toolName == "bash" {
+		// Detect file-reading bash commands (cat, head, tail, etc.) targeting sensitive files.
+		if path := bashSensitiveFilePath(toolArgs); path != "" {
+			isSensitiveRead = true
+			sensitiveReadPath = path
+		}
+	}
+
+	if isSensitiveRead && a.redactionScanner != nil {
+		masked := redactText(content, a.redactionRegistry)
+		masked, err := redact.ScanAndMask(masked, a.redactionScanner, a.redactionRegistry)
+		if err != nil {
+			emitDebug("REDACT", fmt.Sprintf("tier-2 scan error (read %s): %v", sensitiveReadPath, err))
 			return masked
 		}
+		return masked
 	}
 
 	// All other tool results: tier-1 chat-mode regex (keyword+entropy, no LLM).
@@ -1589,6 +1603,56 @@ func (a *Agent) scanToolResult(toolName string, toolArgs string, content string)
 		a.redactionRegistry.GetOrAssign(value, span.Kind, "tool-result")
 	}
 	return a.redactionRegistry.Substitute(content)
+}
+
+// bashFileReadCmds are shell commands that read and print file contents.
+var bashFileReadCmds = map[string]bool{
+	"cat": true, "head": true, "tail": true,
+	"bat": true, "less": true, "more": true,
+}
+
+// bashSensitiveFilePath extracts the first sensitive file path from a bash
+// file-reading command (cat, head, tail, etc.). Returns "" if not detected.
+func bashSensitiveFilePath(toolArgs string) string {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(toolArgs), &args); err != nil || args.Command == "" {
+		return ""
+	}
+	cmd := strings.TrimSpace(args.Command)
+	// Skip compound commands (pipes, &&, ||, ;) — too complex to parse safely.
+	for _, sep := range []string{"|", "&&", "||", ";"} {
+		if strings.Contains(cmd, sep) {
+			return ""
+		}
+	}
+	fields := strings.Fields(cmd)
+	if len(fields) < 2 {
+		return ""
+	}
+	// Strip leading env vars (FOO=bar cmd ...)
+	i := 0
+	for i < len(fields) && strings.Contains(fields[i], "=") {
+		i++
+	}
+	if i >= len(fields) {
+		return ""
+	}
+	bin := filepath.Base(fields[i])
+	if !bashFileReadCmds[bin] {
+		return ""
+	}
+	// Scan remaining args for the first non-flag file path.
+	for _, arg := range fields[i+1:] {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if redact.IsSensitiveFile(arg) {
+			return arg
+		}
+	}
+	return ""
 }
 
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {

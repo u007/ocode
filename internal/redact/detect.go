@@ -146,8 +146,8 @@ func addSpansFromKeywordMatches(spans *[]Span, text string, matches [][]int) {
 			continue
 		}
 
-		// The full match span
-		*spans = append(*spans, Span{Start: m[0], End: m[1], Kind: "keyword_entropy: " + keyword})
+		// Only the value part (capture group 2), not the full keyword=value span
+		*spans = append(*spans, Span{Start: m[4], End: m[5], Kind: "keyword_entropy: " + keyword})
 	}
 }
 
