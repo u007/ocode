@@ -3952,7 +3952,7 @@ func TestGitDiffMouseDragSelectsDiffText(t *testing.T) {
 	if got.gitSel.startLine != 0 || got.gitSel.endLine != 0 || got.gitSel.startCol != 0 || got.gitSel.endCol != 4 {
 		t.Fatalf("unexpected selection state: %#v", got.gitSel)
 	}
-	if !strings.Contains(got.git.diff.View(), "\x1b[7m") {
+	if !strings.Contains(got.git.diff.View(), selectionHighlightOpen) {
 		t.Fatalf("expected highlighted diff content, got %q", got.git.diff.View())
 	}
 }

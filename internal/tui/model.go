@@ -3907,7 +3907,6 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		case "y", "Y", "n", "N", "a", "A", "t", "T":
 			cmd, closed := m.permDialogInput(strings.ToLower(keyStr))
 			if closed {
-				m.input.Reset()
 				m.layout()
 				m.rerenderTranscriptAndMaybeScroll()
 				m.saveSession()
@@ -4295,7 +4294,6 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		if m.showPermDialog {
 			choice := strings.ToLower(strings.TrimSpace(text))
 			cmd, closed := m.permDialogInput(choice)
-			m.input.Reset()
 			if closed {
 				m.layout() // restore viewport height shrunk while the dialog was open
 				m.rerenderTranscriptAndMaybeScroll()
@@ -5140,7 +5138,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			if mouse.Y >= btn.y1 && mouse.Y <= btn.y2 && mouse.X >= btn.x1 && mouse.X <= btn.x2 {
 				cmd, closed := m.permDialogInput(btn.choice)
 				if closed {
-					m.input.Reset()
 					m.layout() // restore viewport height shrunk while the dialog was open
 					m.rerenderTranscriptAndMaybeScroll()
 					m.saveSession()

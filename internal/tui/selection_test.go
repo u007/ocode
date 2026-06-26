@@ -85,8 +85,8 @@ func TestApplySelectionHighlight_plainText(t *testing.T) {
 	if len(out) != 1 {
 		t.Fatalf("expected 1 line, got %d", len(out))
 	}
-	if !strings.Contains(out[0], "\x1b[7m") || !strings.Contains(out[0], "\x1b[27m") {
-		t.Errorf("expected reverse-video codes in %q", out[0])
+	if !strings.Contains(out[0], selectionHighlightOpen) || !strings.Contains(out[0], selectionHighlightClose) {
+		t.Errorf("expected selection highlight codes in %q", out[0])
 	}
 	stripped := stripANSI(out[0])
 	if stripped != "hello world" {
@@ -98,13 +98,13 @@ func TestApplySelectionHighlight_multiLine(t *testing.T) {
 	lines := []string{"line one", "line two", "line three"}
 	rawLines := lines
 	out := applySelectionHighlight(lines, rawLines, 0, 5, 1, 4)
-	if !strings.Contains(out[0], "\x1b[7m") {
+	if !strings.Contains(out[0], selectionHighlightOpen) {
 		t.Errorf("first line should have highlight")
 	}
-	if !strings.Contains(out[1], "\x1b[7m") {
+	if !strings.Contains(out[1], selectionHighlightOpen) {
 		t.Errorf("second line should have highlight")
 	}
-	if strings.Contains(out[2], "\x1b[7m") {
+	if strings.Contains(out[2], selectionHighlightOpen) {
 		t.Errorf("third line should not have highlight")
 	}
 }
@@ -131,41 +131,41 @@ func TestViewportSelectionPointSoftWrapAndGutter(t *testing.T) {
 
 func TestInsertHighlight_withANSI(t *testing.T) {
 	// rendered has a colour code before "world"; raw is the plain text.
-	// Selecting "world" (cols 6-11) should inject reverse-video so that the
-	// terminal sees the colour code, then enters reverse-video, then the text.
-	// This means the colour escape ends up BEFORE \x1b[7m (not inside it),
+	// Selecting "world" (cols 6-11) should inject selection highlight codes so that the
+	// terminal sees the colour code, then applies background highlight, then the text.
+	// This means the colour escape ends up BEFORE the selection highlight open (not inside it),
 	// which is correct: the terminal stacks both attributes.
 	raw := "hello world"
 	rendered := "hello \x1b[32mworld\x1b[m"
 
 	got := insertHighlight(rendered, raw, 6, 11)
 
-	// Reverse-video codes must be present.
-	if !strings.Contains(got, "\x1b[7m") || !strings.Contains(got, "\x1b[27m") {
-		t.Fatalf("expected reverse-video codes, got %q", got)
+	// Selection highlight codes must be present.
+	if !strings.Contains(got, selectionHighlightOpen) || !strings.Contains(got, selectionHighlightClose) {
+		t.Fatalf("expected selection highlight codes, got %q", got)
 	}
 	// Stripping all ANSI leaves the original plain text intact.
 	if stripANSI(got) != raw {
 		t.Errorf("stripped result should equal raw text, got %q", stripANSI(got))
 	}
-	// The colour code must come before the reverse-video open tag so that
+	// The colour code must come before the selection highlight open tag so that
 	// both attributes are active for "world".
 	colourPos := strings.Index(got, "\x1b[32m")
-	rvPos := strings.Index(got, "\x1b[7m")
+	selPos := strings.Index(got, selectionHighlightOpen)
 	if colourPos == -1 {
 		t.Errorf("colour code missing from output, got %q", got)
 	}
-	if rvPos == -1 {
-		t.Errorf("reverse-video open missing from output, got %q", got)
+	if selPos == -1 {
+		t.Errorf("selection highlight open missing from output, got %q", got)
 	}
-	if colourPos > rvPos {
-		t.Errorf("colour code should appear before reverse-video open; colourPos=%d rvPos=%d in %q", colourPos, rvPos, got)
+	if colourPos > selPos {
+		t.Errorf("colour code should appear before selection highlight open; colourPos=%d selPos=%d in %q", colourPos, selPos, got)
 	}
 }
 
 func TestInsertHighlight_noANSI(t *testing.T) {
 	got := insertHighlight("hello world", "hello world", 0, 5)
-	want := "\x1b[7mhello\x1b[27m world"
+	want := selectionHighlightOpen + "hello" + selectionHighlightClose + " world"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -177,5 +177,82 @@ func TestInsertHighlight_emptyRange(t *testing.T) {
 	got := insertHighlight(rendered, "hello", 2, 2)
 	if got != rendered {
 		t.Errorf("empty range should return unchanged, got %q", got)
+	}
+}
+
+func TestParseHexColor(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantR    int
+		wantG    int
+		wantB    int
+		wantOK   bool
+	}{
+		{"#7aa2f7", 122, 162, 247, true},
+		{"#000000", 0, 0, 0, true},
+		{"#FFFFFF", 255, 255, 255, true},
+		{"#1a1b26", 26, 27, 38, true},
+		{"", 0, 0, 0, false},
+		{"123456", 0, 0, 0, false},
+		{"#12345", 0, 0, 0, false},
+		{"#GGGGGG", 0, 0, 0, false},
+		{"not a color", 0, 0, 0, false},
+	}
+	for _, tc := range tests {
+		r, g, b, ok := parseHexColor(tc.input)
+		if r != tc.wantR || g != tc.wantG || b != tc.wantB || ok != tc.wantOK {
+			t.Errorf("parseHexColor(%q) = (%d,%d,%d,%v), want (%d,%d,%d,%v)",
+				tc.input, r, g, b, ok, tc.wantR, tc.wantG, tc.wantB, tc.wantOK)
+		}
+	}
+}
+
+func TestHexColorToANSIBackground(t *testing.T) {
+	got := hexColorToANSIBackground("#7aa2f7")
+	want := "\x1b[48;2;122;162;247m"
+	if got != want {
+		t.Errorf("hexColorToANSIBackground(#7aa2f7) = %q, want %q", got, want)
+	}
+
+	// Invalid hex should return empty string
+	if got := hexColorToANSIBackground("invalid"); got != "" {
+		t.Errorf("expected empty for invalid hex, got %q", got)
+	}
+}
+
+func TestHexColorToANSIForeground(t *testing.T) {
+	got := hexColorToANSIForeground("#7aa2f7")
+	want := "\x1b[38;2;122;162;247m"
+	if got != want {
+		t.Errorf("hexColorToANSIForeground(#7aa2f7) = %q, want %q", got, want)
+	}
+
+	// Invalid hex should return empty string
+	if got := hexColorToANSIForeground("invalid"); got != "" {
+		t.Errorf("expected empty for invalid hex, got %q", got)
+	}
+}
+
+func TestSetSelectionHighlightCodes(t *testing.T) {
+	// Save current values and restore after test
+	saveOpen := selectionHighlightOpen
+	saveClose := selectionHighlightClose
+	defer func() {
+		selectionHighlightOpen = saveOpen
+		selectionHighlightClose = saveClose
+	}()
+
+	SetSelectionHighlightCodes("OPEN", "CLOSE")
+	if selectionHighlightOpen != "OPEN" {
+		t.Errorf("selectionHighlightOpen = %q, want OPEN", selectionHighlightOpen)
+	}
+	if selectionHighlightClose != "CLOSE" {
+		t.Errorf("selectionHighlightClose = %q, want CLOSE", selectionHighlightClose)
+	}
+	
+	// Verify insertHighlight uses the new codes
+	got := insertHighlight("hello world", "hello world", 0, 5)
+	if !strings.Contains(got, "OPEN") || !strings.Contains(got, "CLOSE") {
+		t.Errorf("expected OPEN/CLOSE in result, got %q", got)
 	}
 }
