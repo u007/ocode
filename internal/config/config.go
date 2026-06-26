@@ -488,6 +488,17 @@ func FindProjectRoot() string {
 	return ""
 }
 
+// getProjectSettingsPath returns the path to .ocode/settings.json in the
+// project root, or empty string if no project root found.
+// Does not require the file to exist; returns the path where it would be.
+func getProjectSettingsPath() string {
+	root := FindProjectRoot()
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, ".ocode", "settings.json")
+}
+
 func loadFromDir(dir string, config *Config) error {
 	path := filepath.Join(dir, "opencode.json")
 	if _, err := os.Stat(path); err != nil {

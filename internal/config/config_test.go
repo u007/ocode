@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -649,5 +650,64 @@ func TestLoadPrefersLastThinkingBudget(t *testing.T) {
 	}
 	if cfg.ThinkingBudget != 16000 {
 		t.Fatalf("expected last thinking budget, got %d", cfg.ThinkingBudget)
+	}
+}
+
+func TestGetProjectSettingsPath(t *testing.T) {
+	// Test: result is either empty or contains .ocode/settings.json
+	path := getProjectSettingsPath()
+	if path != "" && !strings.Contains(path, ".ocode/settings.json") {
+		t.Errorf("expected path to contain .ocode/settings.json or be empty, got %s", path)
+	}
+}
+
+func TestGetProjectSettingsPath_InProject(t *testing.T) {
+	// Create a temporary project directory with .git
+	projectDir := t.TempDir()
+	gitDir := filepath.Join(projectDir, ".git")
+	if err := os.Mkdir(gitDir, 0755); err != nil {
+		t.Fatalf("create .git: %v", err)
+	}
+
+	// Save original working directory
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	// Change to the project directory
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir to project: %v", err)
+	}
+
+	// Now getProjectSettingsPath should return the path
+	path := getProjectSettingsPath()
+	
+	// On macOS, /var is a symlink to /private/var. Compare the last
+	// components (.ocode/settings.json) and verify the path contains the
+	// project dir base name rather than exact match.
+	if filepath.Base(path) != "settings.json" || !strings.Contains(path, ".ocode") {
+		t.Errorf("expected path to end with .ocode/settings.json, got %s", path)
+	}
+	if !strings.HasPrefix(path, projectDir) && !strings.HasPrefix(path, "/private"+projectDir) {
+		t.Errorf("expected path to be under project dir, got %s (projectDir=%s)", path, projectDir)
+	}
+}
+
+func TestGetProjectSettingsPath_NoProject(t *testing.T) {
+	// Create a temporary directory without .git or opencode.json
+	tmpDir := t.TempDir()
+
+	// Save original working directory
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+
+	// Change to the temporary directory
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("chdir to temp: %v", err)
+	}
+
+	// Now getProjectSettingsPath should return empty string
+	path := getProjectSettingsPath()
+	if path != "" {
+		t.Errorf("expected empty string for no project, got %s", path)
 	}
 }
