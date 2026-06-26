@@ -717,6 +717,10 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 				return nil
 			}
 			m.agent.Permissions().SetBashAutoAllowPrefix(prefix, true)
+			if m.permDirty.bashAutoAllow == nil {
+				m.permDirty.bashAutoAllow = make(map[string]bool)
+			}
+			m.permDirty.bashAutoAllow[prefix] = true
 			m.persistPermissions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Added bash auto-allow prefix %q.", prefix)})
 			return nil
@@ -731,6 +735,10 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 				return nil
 			}
 			m.agent.Permissions().SetBashAutoAllowPrefix(prefix, false)
+			if m.permDirty.bashAutoAllow == nil {
+				m.permDirty.bashAutoAllow = make(map[string]bool)
+			}
+			m.permDirty.bashAutoAllow[prefix] = false
 			m.persistPermissions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Removed bash auto-allow prefix %q.", prefix)})
 			return nil
@@ -745,6 +753,10 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 				m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid mode. Use read_only, mutating, or never_auto."})
 				return nil
 			}
+			if m.permDirty.bashPrefixMode == nil {
+				m.permDirty.bashPrefixMode = make(map[string]string)
+			}
+			m.permDirty.bashPrefixMode[prefix] = mode
 			m.persistPermissions()
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Set bash prefix mode for %q to %q.", prefix, mode)})
 			return nil
@@ -757,10 +769,12 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			switch sub {
 			case "on", "true", "yes", "1":
 				m.agent.Permissions().SetAutoPermissionEnabled(true)
+				m.permDirty.autoEnabled = true
 				m.persistPermissions()
 				m.messages = append(m.messages, message{role: roleAssistant, text: "LLM auto-allow enabled."})
 			case "off", "false", "no", "0":
 				m.agent.Permissions().SetAutoPermissionEnabled(false)
+				m.permDirty.autoEnabled = true
 				m.persistPermissions()
 				m.messages = append(m.messages, message{role: roleAssistant, text: "LLM auto-allow disabled."})
 			case "status":
@@ -783,9 +797,14 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 			return nil
 		}
 		if strings.HasPrefix(toolName, "bash:") {
-			m.agent.Permissions().SetBashPrefixRule(strings.TrimPrefix(toolName, "bash:"), level)
+			prefix := strings.TrimPrefix(toolName, "bash:")
+			m.agent.Permissions().SetBashPrefixRule(prefix, level)
+			if m.permDirty.bashPrefixes == nil {
+				m.permDirty.bashPrefixes = make(map[string]string)
+			}
+			m.permDirty.bashPrefixes[prefix] = string(level)
 		} else {
-			m.agent.Permissions().SetRule(toolName, level)
+			m.setToolPermission(toolName, level)
 		}
 		m.persistPermissions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Set %s permission for %q to %s.", level, toolName, level)})
@@ -809,6 +828,7 @@ func runYoloCmd(m *model, args []string) tea.Cmd {
 			m.agent.Permissions().SetMode(agent.PermissionModeYOLO)
 			mode = agent.PermissionModeYOLO
 		}
+		m.permDirty.mode = true
 		m.persistPermissions()
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", mode)})
 		return nil
@@ -827,6 +847,7 @@ func runYoloCmd(m *model, args []string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /yolo [on|off|status]"})
 		return nil
 	}
+	m.permDirty.mode = true
 	m.persistPermissions()
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission mode: %s", m.agent.Permissions().Mode())})
 	return nil

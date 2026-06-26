@@ -71,17 +71,15 @@ func (h *Handler) HandleSetPermission(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	perms := h.cfg.Ocode.Permissions
-	if perms.Tools == nil {
-		perms.Tools = map[string]string{}
-	}
-	perms.Tools[req.Tool] = req.Level
-	h.cfg.Ocode.Permissions = perms
-
-	if err := config.SaveOcodePermissions(perms); err != nil {
+	if err := config.SaveSingleToolRule(req.Tool, req.Level); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Keep in-memory snapshot consistent.
+	if h.cfg.Ocode.Permissions.Tools == nil {
+		h.cfg.Ocode.Permissions.Tools = map[string]string{}
+	}
+	h.cfg.Ocode.Permissions.Tools[req.Tool] = req.Level
 
 	for _, as := range h.agents {
 		if pm := as.agent.Permissions(); pm != nil {

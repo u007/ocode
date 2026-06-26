@@ -1372,6 +1372,87 @@ func SavePermissionModel(providerModel string) error {
 	return SaveOcodeConfig(cfg)
 }
 
+// SavePermissionModeSwitch persists the permission mode (normal/yolo/locked)
+// via load-modify-write, so it cannot clobber a concurrent session's rules or
+// auto-permission state.
+func SavePermissionModeSwitch(mode string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Permissions.Mode = mode
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveSingleToolRule sets one entry in permissions.tools via load-modify-write.
+// Only the named tool's entry is touched; all other rules and permissions fields
+// are preserved from disk.
+func SaveSingleToolRule(tool, level string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if cfg.Permissions.Tools == nil {
+		cfg.Permissions.Tools = make(map[string]string)
+	}
+	cfg.Permissions.Tools[tool] = level
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveSingleBashPrefixRule sets one entry in permissions.bash.prefixes via
+// load-modify-write. Only the named prefix entry is touched.
+func SaveSingleBashPrefixRule(prefix, level string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if cfg.Permissions.Bash.Prefixes == nil {
+		cfg.Permissions.Bash.Prefixes = make(map[string]string)
+	}
+	cfg.Permissions.Bash.Prefixes[prefix] = level
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveBashAutoAllowPrefixEntry adds or removes a single entry from
+// permissions.bash.auto_allow_prefixes via load-modify-write.
+func SaveBashAutoAllowPrefixEntry(prefix string, add bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if add {
+		for _, p := range cfg.Permissions.Bash.AutoAllowPrefixes {
+			if p == prefix {
+				return nil // already present
+			}
+		}
+		cfg.Permissions.Bash.AutoAllowPrefixes = append(cfg.Permissions.Bash.AutoAllowPrefixes, prefix)
+	} else {
+		kept := cfg.Permissions.Bash.AutoAllowPrefixes[:0]
+		for _, p := range cfg.Permissions.Bash.AutoAllowPrefixes {
+			if p != prefix {
+				kept = append(kept, p)
+			}
+		}
+		cfg.Permissions.Bash.AutoAllowPrefixes = kept
+	}
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveSingleBashPrefixMode sets one entry in permissions.bash.prefix_modes via
+// load-modify-write. Only the named prefix mode entry is touched.
+func SaveSingleBashPrefixMode(prefix, mode string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if cfg.Permissions.Bash.PrefixModes == nil {
+		cfg.Permissions.Bash.PrefixModes = make(map[string]string)
+	}
+	cfg.Permissions.Bash.PrefixModes[prefix] = mode
+	return SaveOcodeConfig(cfg)
+}
+
 // ResolveEditor returns the editor to use for opening files.
 // Priority: ocodeconfig.json "editor" field > $VISUAL > $EDITOR > "vi"
 func ResolveEditor(cfg *OcodeConfig) string {

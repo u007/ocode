@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -214,11 +215,16 @@ func (m *gitModel) Resize(w, h int) {
 	if m.committing {
 		commitInputRows = m.commitInput.Height() + 2
 	}
-	diffH := h - 5 - commitInputRows
+	// diffH and diffW account for the border's horizontal frame
+	// (RoundedBorder=2 + Padding(0,1)=2) and vertical frame (border=2),
+	// plus the scrollbar (1 char). Without this, lipgloss word-wraps the
+	// content at the narrower inner width, creating extra wrapping lines
+	// between every diff line.
+	diffH := h - 6 - commitInputRows
 	if diffH < 1 {
 		diffH = 1
 	}
-	m.diff.SetWidth(diffW - 14)
+	m.diff.SetWidth(diffW - 7)
 	m.diff.SetHeight(diffH)
 	m.commitViewport.SetWidth(filesW - 7)
 	m.commitViewport.SetHeight(h - 5 - commitInputRows)
@@ -1603,9 +1609,15 @@ func (m *gitModel) startLoadDiff(styles Styles) tea.Cmd {
 			}
 			f := files[filesCursor]
 			if f.status == "?" && !f.staged {
-				// File preview path
+				// File preview path — read at most 1MB to avoid blocking on huge files.
+				const previewReadLimit = 1024 * 1024
 				path := filepath.Join(workDir, f.path)
-				data, err := os.ReadFile(path)
+				fh, err := os.Open(path)
+				if err != nil {
+					return diffReadyMsg{seq: seq, workDir: workDir, content: "error: " + err.Error()}
+				}
+				data, err := io.ReadAll(io.LimitReader(fh, previewReadLimit+1))
+				fh.Close()
 				if err != nil {
 					return diffReadyMsg{seq: seq, workDir: workDir, content: "error: " + err.Error()}
 				}
@@ -1616,12 +1628,23 @@ func (m *gitModel) startLoadDiff(styles Styles) tea.Cmd {
 				if strings.ContainsRune(string(probe), '\x00') {
 					return diffReadyMsg{seq: seq, workDir: workDir, content: "[binary file]"}
 				}
+				previewTooLarge := len(data) > previewReadLimit
+				if previewTooLarge {
+					data = data[:previewReadLimit]
+				}
+				// Cap syntax highlighting to 64KB; chroma is slow on large buffers.
 				content := string(data)
-				if len(data) > 1024*1024 {
-					content = string(data[:1024*1024]) + "\n[truncated — 1MB limit]"
+				highlightSrc := content
+				const highlightLimit = 64 * 1024
+				if len(highlightSrc) > highlightLimit {
+					highlightSrc = highlightSrc[:highlightLimit]
 				}
 				header := hintStyle.Render("Preview: "+f.path+"  (E edit)") + "\n\n"
-				return diffReadyMsg{seq: seq, workDir: workDir, content: header + highlightContent(content, languageForPath(f.path))}
+				notice := ""
+				if previewTooLarge || len(content) > highlightLimit {
+					notice = styles.Hint.Render("[truncated — 1MB limit]") + "\n\n"
+				}
+				return diffReadyMsg{seq: seq, workDir: workDir, content: header + notice + highlightContent(highlightSrc, languageForPath(f.path))}
 			}
 			// Git diff path
 			var out string

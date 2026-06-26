@@ -9,6 +9,47 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
+// highlightSearchTermsInLines applies in-line highlighting to all occurrences
+// of query within the matched display lines. wrapped contains the ANSI-styled
+// display text; stripped contains the corresponding plain-text (one per line).
+// Returns a new slice with bold+underline+bg-color SGR codes wrapping each
+// match. Lines with no match are returned unchanged (shared with the original
+// slice).
+func highlightSearchTermsInLines(wrapped, stripped []string, query string) []string {
+	if query == "" || len(wrapped) == 0 {
+		return wrapped
+	}
+	needle := strings.ToLower(query)
+	out := make([]string, len(wrapped))
+	copy(out, wrapped)
+	for j := range out {
+		if j >= len(stripped) {
+			break
+		}
+		raw := stripped[j]
+		rawLow := strings.ToLower(raw)
+		if !strings.Contains(rawLow, needle) {
+			continue
+		}
+		pos := 0
+		for {
+			idx := strings.Index(rawLow[pos:], needle)
+			if idx < 0 {
+				break
+			}
+			start := pos + idx
+			end := start + len(needle)
+			// insertSGRSpan uses raw as the positional anchor and skips any
+			// ANSI codes already in out[j], so repeated calls compose safely.
+			// Use a dark-gray background (48;5;237) + bold + underline for
+			// a visible but theme-neutral highlight.
+			out[j] = insertSGRSpan(out[j], raw, start, end, "\x1b[48;5;237m\x1b[1m\x1b[4m", "\x1b[24m\x1b[22m\x1b[49m")
+			pos = end
+		}
+	}
+	return out
+}
+
 // chatSearchFlashExpiredMsg is sent by the tea.Tick started in
 // jumpToChatMatch; the handler clears chatSearchFlashMsg so the highlight
 // doesn't linger forever.
@@ -275,6 +316,8 @@ func (m model) handleChatSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, boo
 	}
 	if m.chatSearchInput.Value() != prevValue {
 		m.rebuildChatSearchMatches()
+		m.chatSearchFlashMsg = -1
+		m.renderTranscript()
 	}
 	keyStr := msg.String()
 	switch keyStr {
