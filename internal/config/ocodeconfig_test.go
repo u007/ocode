@@ -1312,3 +1312,38 @@ func TestSaveExtraAllowedPath_FallsBackToGlobal(t *testing.T) {
 		t.Errorf("expected /global/path in global config, got %v", cfg.ExtraAllowedPaths)
 	}
 }
+
+func TestLoadFullOcodeConfig_MergesProjectPaths(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectDir, ".git"), 0755); err != nil {
+		t.Fatalf("create .git: %v", err)
+	}
+	ocodeDir := filepath.Join(projectDir, ".ocode")
+	if err := os.Mkdir(ocodeDir, 0755); err != nil {
+		t.Fatalf("create .ocode: %v", err)
+	}
+	settingsPath := filepath.Join(ocodeDir, "settings.json")
+	testData := `{"extra_allowed_paths": ["/project/path"]}`
+	if err := os.WriteFile(settingsPath, []byte(testData), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(projectDir)
+
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig failed: %v", err)
+	}
+	var found bool
+	for _, p := range cfg.ExtraAllowedPaths {
+		if p == "/project/path" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected /project/path in merged config, got %v", cfg.ExtraAllowedPaths)
+	}
+}
