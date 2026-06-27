@@ -430,6 +430,19 @@ func LoadOcodeConfig(cfg *Config) error {
 		}
 	}
 
+	// Load project-level settings from .ocode/settings.json.
+	// These supplement (not replace) the global config; project settings are
+	// optional — the file may not exist, and that is not an error.
+	if settingsPath := getProjectSettingsPath(); settingsPath != "" {
+		extraPaths, pErr := loadProjectSettings(settingsPath)
+		if pErr != nil {
+			return fmt.Errorf("load project settings: %w", pErr)
+		}
+		if len(extraPaths) > 0 {
+			ocode.ExtraAllowedPaths = append(ocode.ExtraAllowedPaths, extraPaths...)
+		}
+	}
+
 	if ocode.EditorMode == "" {
 		if os.Getenv("TMUX") != "" {
 			ocode.EditorMode = EditorModeTmuxSplit
@@ -438,6 +451,84 @@ func LoadOcodeConfig(cfg *Config) error {
 		}
 	}
 	cfg.Ocode = ocode
+	return nil
+}
+
+// loadProjectSettings loads extra_allowed_paths from .ocode/settings.json.
+// Returns an empty slice if the file does not exist.
+// Uses map[string]json.RawMessage to preserve unknown fields.
+func loadProjectSettings(path string) ([]string, error) {
+	if path == "" {
+		return []string{}, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil // File doesn't exist, not an error
+		}
+		return nil, fmt.Errorf("read project settings: %w", err)
+	}
+
+	// Decode into generic map to preserve unknown keys
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse project settings: %w", err)
+	}
+
+	// Extract extra_allowed_paths if present
+	var paths []string
+	if pathsRaw, ok := raw["extra_allowed_paths"]; ok {
+		if err := json.Unmarshal(pathsRaw, &paths); err != nil {
+			return nil, fmt.Errorf("parse extra_allowed_paths: %w", err)
+		}
+	}
+
+	return paths, nil
+}
+
+// saveProjectSettings persists extra_allowed_paths to .ocode/settings.json.
+// Uses key-preserving merge (map[string]json.RawMessage) to avoid data loss.
+// Creates .ocode directory and file if they don't exist.
+func saveProjectSettings(path string, paths []string) error {
+	if path == "" {
+		return fmt.Errorf("empty path")
+	}
+
+	// Ensure .ocode directory exists
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create .ocode directory: %w", err)
+	}
+
+	// Load existing file (if it exists) to preserve unknown fields
+	var raw map[string]json.RawMessage
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parse existing settings: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("read settings file: %w", err)
+	} else {
+		raw = make(map[string]json.RawMessage)
+	}
+
+	// Update only extra_allowed_paths
+	pathsData, err := json.Marshal(paths)
+	if err != nil {
+		return fmt.Errorf("marshal paths: %w", err)
+	}
+	raw["extra_allowed_paths"] = pathsData
+
+	// Write back
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal settings: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("write settings file: %w", err)
+	}
+
 	return nil
 }
 
@@ -977,20 +1068,46 @@ func SaveAutoPermissionEnabled(enabled bool) error {
 	return SaveOcodeConfig(cfg)
 }
 
-// SaveExtraAllowedPath appends one cleaned path to extra_allowed_paths using
-// load-modify-write (no-op if already present), avoiding a wholesale config
-// write that would drop concurrent changes to other fields.
+// SaveExtraAllowedPath appends one cleaned path to extra_allowed_paths.
+// If in a project, persists to .ocode/settings.json; otherwise to global config.
+// Deduplicates before saving (skips if path already present).
 func SaveExtraAllowedPath(path string) error {
+	cleaned := filepath.Clean(path)
+
+	// Try to save to project settings first
+	projectSettingsPath := getProjectSettingsPath()
+	if projectSettingsPath != "" {
+		projectPaths, err := loadProjectSettings(projectSettingsPath)
+		if err != nil {
+			return fmt.Errorf("load project settings: %w", err)
+		}
+
+		// Deduplicate
+		for _, p := range projectPaths {
+			if p == cleaned {
+				return nil // Already present
+			}
+		}
+
+		// Append and save to project config
+		projectPaths = append(projectPaths, cleaned)
+		return saveProjectSettings(projectSettingsPath, projectPaths)
+	}
+
+	// Fall back to global config
 	cfg, err := loadFullOcodeConfig()
 	if err != nil {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
-	cleaned := filepath.Clean(path)
-	for _, existing := range cfg.ExtraAllowedPaths {
-		if filepath.Clean(existing) == cleaned {
-			return nil
+
+	// Deduplicate
+	for _, p := range cfg.ExtraAllowedPaths {
+		if filepath.Clean(p) == cleaned {
+			return nil // Already present
 		}
 	}
+
+	// Append and save
 	cfg.ExtraAllowedPaths = append(cfg.ExtraAllowedPaths, cleaned)
 	return SaveOcodeConfig(cfg)
 }

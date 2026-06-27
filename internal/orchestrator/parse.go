@@ -54,8 +54,8 @@ func ExtractDeveloperReport(s string) *DeveloperReport {
 	return dr
 }
 
-// ExtractPlanJSON delegates to ParsePlan — convenience wrapper used by the pipeline.
-func ExtractPlanJSON(s string) (*Plan, error) {
+// ExtractPlanJSON delegates to ParsePlan — kept for compatibility with pipeline.
+func ExtractPlanJSON(s string) *Plan {
 	return ParsePlan(s)
 }
 

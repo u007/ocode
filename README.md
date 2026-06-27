@@ -265,6 +265,8 @@ Configuration lives in two files, loaded from `~/.config/opencode/` and the near
 | **`opencode.json`** | Upstream-compatible settings (provider creds, model prefs). **Read-only** — ocode never writes to it. Can be checked into git. |
 | **`ocodeconfig.json`** | ocode-only state (permissions, editor, compaction, model history). **Written by ocode** to persist runtime state. `.gitignore`-friendly. |
 
+Project-scoped `extra_allowed_paths` are stored separately in `.ocode/settings.json` and merged additively with the global `ocodeconfig.json` entries.
+
 ### Quick config examples
 
 ```jsonc

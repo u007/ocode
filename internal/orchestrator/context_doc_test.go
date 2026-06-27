@@ -9,8 +9,7 @@ import (
 func baseDoc() *ContextDoc {
 	return &ContextDoc{
 		Plan: Plan{
-			Goal:            "add user validation",
-			SuccessCriteria: []string{"nil input returns error", "valid input passes"},
+			Text: "add user validation\n\nSuccess criteria:\n- nil input returns error\n- valid input passes",
 		},
 		ExploreSnapshot: "## auth.go\nfunc Validate(u *User) error { ... }",
 	}
@@ -19,17 +18,14 @@ func baseDoc() *ContextDoc {
 func TestRender_noIterations(t *testing.T) {
 	doc := baseDoc()
 	out := doc.Render("implement validation")
-	if !strings.Contains(out, "[GOAL]") {
-		t.Error("missing [GOAL]")
+	if !strings.Contains(out, "[PLAN]") {
+		t.Error("missing [PLAN]")
 	}
 	if !strings.Contains(out, "add user validation") {
-		t.Error("missing goal text")
-	}
-	if !strings.Contains(out, "[SUCCESS CRITERIA]") {
-		t.Error("missing [SUCCESS CRITERIA]")
+		t.Error("missing plan text")
 	}
 	if !strings.Contains(out, "nil input returns error") {
-		t.Error("missing criterion")
+		t.Error("missing criterion in plan text")
 	}
 	if !strings.Contains(out, "[CODEBASE CONTEXT]") {
 		t.Error("missing [CODEBASE CONTEXT]")

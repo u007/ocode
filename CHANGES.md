@@ -286,6 +286,9 @@
 - **`permDirtyFlags` Permission Tracking** — New `permDirtyFlags` struct in the TUI model tracks which permission fields were explicitly modified in the current session across all mutation paths (permission dialog, sidebar toggle, commands, mouse actions).
 - **Git Preview Truncation Test** — `TestGitPreviewShowsTruncationNotice` verifies the truncation notice appears when previewing large untracked files.
 - **Permission Persistence Failure Test** — `TestPersistPermissionsKeepsDirtyOnSaveFailure` verifies dirty flags survive failed saves and no paths leak in error messages.
+- **Pipboy Theme** — New "pipboy" theme with retro CRT green monitor aesthetics (`internal/theme/theme.go`). Vault Boy ASCII art (`internal/tui/pipboy_art.go`) rendered as an empty-state background when the pipboy theme is active. `currentThemeName()` helper in `internal/tui/model.go`; `renderTranscript()` renders pipboy art when theme is "pipboy" and transcript is empty.
+- **Detail View Find Bar** — `ctrl+f` on a detail view opens an in-view find bar with text input, search highlighting, and match navigation. New `detailView` fields (`searchActive`, `searchInput`, `searchQuery`, `searchMatches`, `searchCursor`, `searchNoMatch`) in `internal/tui/detail_view.go`. `openDetailSearch()`, `handleDetailSearchKey()`, `renderDetailSearchBar()` in `internal/tui/chat_search.go`. Detail viewport height adjusted when find bar is active. Locked in by tests.
+- **Per-Project Extra Allowed Paths** — `extra_allowed_paths` can now be stored per-project in `.ocode/settings.json` and merged additively with global config entries. New `loadProjectSettings()`, `saveProjectSettings()`, `getProjectSettingsPath()` in `internal/config/ocodeconfig.go`. `LoadOcodeConfig` merges project paths. `SaveExtraAllowedPath()` saves to `.ocode/settings.json` when in a project. Locked in by comprehensive tests in `ocodeconfig_test.go`.
 
 ### Fixed
 - **Permission Persistence Safety** — Rewrote `persistPermissions` to use targeted load-modify-write save functions for each permission field (mode, auto-enabled, tool rules, bash prefixes, bash auto-allow, bash prefix modes), preventing stale in-memory snapshots from clobbering concurrent sessions' changes. Dirty flags now survive transient save failures instead of silently dropping unsaved changes. Error messages are generic; concrete errors go to the debug log.
@@ -297,8 +300,9 @@
 - **Main Scrollbar Position Alignment** — `mainScrollbarX()` changed from `panelWidth() - 5` to `panelWidth() - 6` to align the scrollbar column with the rendered position.
 
 ### Changed
+- **Orchestrator Plan Simplification** — `Plan` struct replaced JSON-based fields (`Intent`, `Goal`, `SuccessCriteria`) with a single `Text` field containing natural-language planner output. `ParsePlan` uses keyword-line scanning for `verify_mode`/`max_iterations` instead of JSON parsing, and never returns an error. `ContextDoc.Render` outputs `[PLAN]` section instead of separate `[GOAL]` and `[SUCCESS CRITERIA]` sections. `orchestrator-planner` excluded from `smallModelEligibleNames` (requires reliable JSON output).
 - **Emoji-to-ASCII Status Symbols** — Replaced wide-emoji `📖` with single-width `≫` in permission prompts and tool-call hints to prevent VS Code terminal rendering shifts.
-- **Version Bump** — 0.6.7 → 0.6.8.
+- **Version Bump** — 0.6.8 → 0.6.9.
 
 ## [0.3.5] — 2026-06-10
 

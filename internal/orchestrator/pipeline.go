@@ -52,16 +52,13 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 	p.doc = &ContextDoc{}
 	p.iterCount = 0
 
-	// Planning
+	// Planning — planner returns natural language; any non-error response is valid.
 	p.emit(StatePlanning, "analysing goal")
 	planRaw, err := p.dispatchFn("orchestrator-planner", goal)
 	if err != nil {
 		return nil, fmt.Errorf("planning failed: %w", err)
 	}
-	plan, err := ExtractPlanJSON(planRaw)
-	if err != nil {
-		return nil, fmt.Errorf("planning failed: %w", err)
-	}
+	plan := ExtractPlanJSON(planRaw)
 	// Apply option overrides
 	if p.opts.VerifyMode != "" {
 		plan.VerifyMode = p.opts.VerifyMode

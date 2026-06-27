@@ -44,19 +44,10 @@ func (c *ContextDoc) AddIteration(iter Iteration) {
 func (c *ContextDoc) Render(brief string) string {
 	var b strings.Builder
 
-	// Goal
-	b.WriteString("[GOAL]\n")
-	b.WriteString(c.Plan.Goal)
+	// Plan
+	b.WriteString("[PLAN]\n")
+	b.WriteString(c.Plan.Text)
 	b.WriteString("\n\n")
-
-	// Success criteria
-	b.WriteString("[SUCCESS CRITERIA]\n")
-	for _, sc := range c.Plan.SuccessCriteria {
-		b.WriteString("- ")
-		b.WriteString(sc)
-		b.WriteString("\n")
-	}
-	b.WriteString("\n")
 
 	// Codebase context
 	b.WriteString("[CODEBASE CONTEXT]\n")

@@ -37,7 +37,7 @@ func newTestPipeline(stub *stubDispatcher) *Pipeline {
 func TestPipeline_successOnFirstIteration(t *testing.T) {
 	stub := &stubDispatcher{
 		responses: map[string]string{
-			"orchestrator-planner":   `{"intent":"bugfix","goal":"fix nil panic","success_criteria":["no panic"],"verify_mode":"llm_only","max_iterations":4}`,
+			"orchestrator-planner":   "Fix the nil panic in auth.go.\n\nverify_mode: llm_only\nmax_iterations: 4",
 			"orchestrator-explorer":  "## auth.go\nfunc Validate() {}",
 			"orchestrator-developer": "### Developer Completion Report\n- **Files Changed:** [auth.go]\n- **What Was Done:** Added nil check\n- **What Was NOT Done:** nothing\n- **Confidence:** high\n- **Suggested Validator Focus:** line 12",
 			"orchestrator-validator": "VALIDATION_PASSED",
@@ -60,7 +60,7 @@ func TestPipeline_retryOnValidationFail(t *testing.T) {
 	callCount := 0
 	stub := &stubDispatcher{
 		responses: map[string]string{
-			"orchestrator-planner":  `{"intent":"feature","goal":"add auth","success_criteria":["works"],"verify_mode":"llm_only","max_iterations":4}`,
+			"orchestrator-planner":  "Add auth feature.\n\nverify_mode: llm_only\nmax_iterations: 4",
 			"orchestrator-explorer": "snapshot",
 		},
 	}
@@ -96,7 +96,7 @@ func TestPipeline_retryOnValidationFail(t *testing.T) {
 func TestPipeline_haltAfterMaxIterations(t *testing.T) {
 	stub := &stubDispatcher{
 		responses: map[string]string{
-			"orchestrator-planner":   `{"intent":"feature","goal":"g","success_criteria":["x"],"verify_mode":"llm_only","max_iterations":2}`,
+			"orchestrator-planner":   "Implement feature g.\n\nverify_mode: llm_only\nmax_iterations: 2",
 			"orchestrator-explorer":  "snap",
 			"orchestrator-developer": "### Developer Completion Report\n- **Files Changed:** [f.go]\n- **What Was Done:** done\n- **What Was NOT Done:** -\n- **Confidence:** low\n- **Suggested Validator Focus:** -",
 			"orchestrator-validator": "### Validation Failure Report\n- **Issue:** still broken",

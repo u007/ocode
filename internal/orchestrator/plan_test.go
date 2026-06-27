@@ -4,78 +4,67 @@ import (
 	"testing"
 )
 
-func TestParsePlan_valid(t *testing.T) {
-	raw := `{
-		"intent": "feature",
-		"goal": "add user validation",
-		"success_criteria": ["nil input returns error", "valid input passes"],
-		"verify_mode": "build_test_llm",
-		"max_iterations": 4
-	}`
-	p, err := ParsePlan(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if p.Intent != "feature" {
-		t.Errorf("intent = %q, want feature", p.Intent)
-	}
-	if p.Goal != "add user validation" {
-		t.Errorf("goal = %q", p.Goal)
-	}
-	if len(p.SuccessCriteria) != 2 {
-		t.Errorf("success_criteria len = %d, want 2", len(p.SuccessCriteria))
-	}
+func TestParsePlan_naturalLanguage(t *testing.T) {
+	raw := `We need to add input validation to the user handler.
+
+Key files: internal/handler/user.go, internal/handler/user_test.go
+
+Success criteria:
+- nil input returns an error
+- empty username returns an error
+- valid input is accepted
+
+verify_mode: build_test_llm
+max_iterations: 4`
+	p := ParsePlan(raw)
 	if p.VerifyMode != "build_test_llm" {
-		t.Errorf("verify_mode = %q", p.VerifyMode)
+		t.Errorf("verify_mode = %q, want build_test_llm", p.VerifyMode)
 	}
 	if p.MaxIterations != 4 {
 		t.Errorf("max_iterations = %d, want 4", p.MaxIterations)
 	}
+	if p.Text == "" {
+		t.Error("expected non-empty plan text")
+	}
 }
 
-func TestParsePlan_defaultMaxIterations(t *testing.T) {
-	raw := `{"intent":"bugfix","goal":"fix crash","success_criteria":["no panic"],"verify_mode":"build_llm"}`
-	p, err := ParsePlan(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestParsePlan_defaults(t *testing.T) {
+	// No keyword lines — fall back to safe defaults
+	p := ParsePlan("Just fix the bug in the handler.")
+	if p.VerifyMode != "build_test_llm" {
+		t.Errorf("default verify_mode = %q, want build_test_llm", p.VerifyMode)
 	}
 	if p.MaxIterations != 4 {
 		t.Errorf("default max_iterations = %d, want 4", p.MaxIterations)
 	}
 }
 
-func TestParsePlan_missingGoal(t *testing.T) {
-	raw := `{"intent":"feature","success_criteria":["x"],"verify_mode":"llm_only"}`
-	_, err := ParsePlan(raw)
-	if err == nil {
-		t.Fatal("expected error for missing goal")
+func TestParsePlan_boldKeywordStyle(t *testing.T) {
+	// Planner may use markdown bold: **verify_mode:** build_llm
+	raw := "Fix the crash.\n\n**verify_mode:** build_llm\n**max_iterations:** 3"
+	p := ParsePlan(raw)
+	if p.VerifyMode != "build_llm" {
+		t.Errorf("verify_mode = %q, want build_llm", p.VerifyMode)
+	}
+	if p.MaxIterations != 3 {
+		t.Errorf("max_iterations = %d, want 3", p.MaxIterations)
 	}
 }
 
-func TestParsePlan_unknownIntent(t *testing.T) {
-	raw := `{"intent":"refactor","goal":"g","success_criteria":["x"],"verify_mode":"llm_only"}`
-	_, err := ParsePlan(raw)
-	if err == nil {
-		t.Fatal("expected error for unknown intent")
+func TestParsePlan_invalidVerifyModeFallsBack(t *testing.T) {
+	raw := "Plan text.\nverify_mode: everything\nmax_iterations: 2"
+	p := ParsePlan(raw)
+	if p.VerifyMode != "build_test_llm" {
+		t.Errorf("invalid verify_mode should fall back to build_test_llm, got %q", p.VerifyMode)
 	}
 }
 
-func TestParsePlan_unknownVerifyMode(t *testing.T) {
-	raw := `{"intent":"feature","goal":"g","success_criteria":["x"],"verify_mode":"everything"}`
-	_, err := ParsePlan(raw)
-	if err == nil {
-		t.Fatal("expected error for unknown verify_mode")
+func TestParsePlan_emptyInputReturnsDefaults(t *testing.T) {
+	p := ParsePlan("")
+	if p.VerifyMode != "build_test_llm" {
+		t.Errorf("empty input: verify_mode = %q", p.VerifyMode)
 	}
-}
-
-func TestParsePlan_embeddedInProse(t *testing.T) {
-	// Planner may wrap JSON in prose — we extract the first JSON object
-	raw := `Here is the plan:\n{"intent":"bugfix","goal":"fix nil","success_criteria":["no crash"],"verify_mode":"build_llm"}`
-	p, err := ParsePlan(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if p.Intent != "bugfix" {
-		t.Errorf("intent = %q", p.Intent)
+	if p.MaxIterations != 4 {
+		t.Errorf("empty input: max_iterations = %d", p.MaxIterations)
 	}
 }

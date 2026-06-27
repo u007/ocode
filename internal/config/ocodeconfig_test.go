@@ -397,6 +397,10 @@ func TestSaveOcodePermissionsNeverClobbersModelFromStaleSnapshot(t *testing.T) {
 	t.Setenv("HOME", tmpHome)
 	chdirTempForConfigTest(t)
 
+	onDisk := defaultPermissionConfig()
+	if err := SaveOcodePermissions(onDisk); err != nil {
+		t.Fatalf("seed SaveOcodePermissions failed: %v", err)
+	}
 	// Another session selected model "Z" on disk via /permissions model.
 	if err := SavePermissionModel("opencode/model-z"); err != nil {
 		t.Fatalf("seed SavePermissionModel failed: %v", err)
@@ -954,4 +958,357 @@ func TestDocPromptEnabledLoadSave(t *testing.T) {
 			t.Fatal("doc prompt should persist as disabled after save")
 		}
 	})
+}
+
+func TestLoadProjectSettings(t *testing.T) {
+	// Test: empty path returns empty slice
+	paths, err := loadProjectSettings("")
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Error("expected empty paths for empty path")
+	}
+
+	// Test: valid settings file with extra_allowed_paths
+	tmpFile := t.TempDir()
+	settingsPath := filepath.Join(tmpFile, "settings.json")
+	testData := `{"extra_allowed_paths": ["/foo", "/bar"], "future_field": "preserved"}`
+	if err := os.WriteFile(settingsPath, []byte(testData), 0644); err != nil {
+		t.Fatalf("write test settings: %v", err)
+	}
+	paths, err = loadProjectSettings(settingsPath)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(paths) != 2 {
+		t.Errorf("expected 2 paths, got %d", len(paths))
+	}
+	if paths[0] != "/foo" || paths[1] != "/bar" {
+		t.Errorf("unexpected paths: %v", paths)
+	}
+
+	// Test: settings file without extra_allowed_paths
+	testData = `{"other_field": "value"}`
+	if err := os.WriteFile(settingsPath, []byte(testData), 0644); err != nil {
+		t.Fatalf("write test settings: %v", err)
+	}
+	paths, err = loadProjectSettings(settingsPath)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("expected empty paths when field missing, got %v", paths)
+	}
+
+	// Test: non-existent file returns empty slice (not error)
+	paths, err = loadProjectSettings(filepath.Join(tmpFile, "nonexistent.json"))
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+	}
+	if len(paths) != 0 {
+		t.Error("expected empty paths for non-existent file")
+	}
+}
+
+func TestLoadOcodeConfigReturnsErrorForInvalidProjectSettings(t *testing.T) {
+	projectDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectDir, ".git"), 0755); err != nil {
+		t.Fatalf("create .git: %v", err)
+	}
+
+	ocodeDir := filepath.Join(projectDir, ".ocode")
+	if err := os.Mkdir(ocodeDir, 0755); err != nil {
+		t.Fatalf("create .ocode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(ocodeDir, "settings.json"), []byte(`{"extra_allowed_paths": [`), 0644); err != nil {
+		t.Fatalf("write invalid settings: %v", err)
+	}
+
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	globalConfigDir := filepath.Join(homeDir, ".config", "opencode")
+	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
+		t.Fatalf("create global config dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(globalConfigDir, "ocodeconfig.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(origWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err == nil {
+		t.Fatal("expected LoadOcodeConfig to fail for invalid project settings")
+	}
+}
+
+func TestLoadOcodeConfigMergesProjectSettings(t *testing.T) {
+	// Create project directory with .git so FindProjectRoot finds it
+	projectDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(projectDir, ".git"), 0755); err != nil {
+		t.Fatalf("create .git: %v", err)
+	}
+
+	// Create .ocode/settings.json with extra_allowed_paths
+	ocodeDir := filepath.Join(projectDir, ".ocode")
+	if err := os.Mkdir(ocodeDir, 0755); err != nil {
+		t.Fatalf("create .ocode: %v", err)
+	}
+	settingsData := `{"extra_allowed_paths": ["/project/path1", "/project/path2"]}`
+	if err := os.WriteFile(filepath.Join(ocodeDir, "settings.json"), []byte(settingsData), 0644); err != nil {
+		t.Fatalf("write settings: %v", err)
+	}
+
+	// Isolate HOME so we don't load real global config
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	globalConfigDir := filepath.Join(homeDir, ".config", "opencode")
+	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
+		t.Fatalf("create global config dir: %v", err)
+	}
+	// Empty global config (so getGlobalOcodeConfigPath succeeds, no extra paths)
+	if err := os.WriteFile(filepath.Join(globalConfigDir, "ocodeconfig.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	// Chdir to project dir so FindProjectRoot picks it up
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(origWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+
+	// Verify project paths are present in ExtraAllowedPaths
+	found1, found2 := false, false
+	for _, p := range cfg.Ocode.ExtraAllowedPaths {
+		if p == "/project/path1" {
+			found1 = true
+		}
+		if p == "/project/path2" {
+			found2 = true
+		}
+	}
+	if !found1 || !found2 {
+		t.Errorf("expected /project/path1 and /project/path2 in ExtraAllowedPaths, got %v", cfg.Ocode.ExtraAllowedPaths)
+	}
+}
+
+// Test project-scoped save via saveProjectSettings with reload verification.
+func TestSaveProjectSettings_BasicSaveAndReload(t *testing.T) {
+	projectDir := t.TempDir()
+	ocodeDir := filepath.Join(projectDir, ".ocode")
+	if err := os.Mkdir(ocodeDir, 0755); err != nil {
+		t.Fatalf("create .ocode: %v", err)
+	}
+	settingsPath := filepath.Join(ocodeDir, "settings.json")
+
+	// Save first path
+	if err := saveProjectSettings(settingsPath, []string{"/project/path1"}); err != nil {
+		t.Fatalf("save /project/path1: %v", err)
+	}
+	paths, err := loadProjectSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("load after save: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/project/path1" {
+		t.Errorf("expected [/project/path1], got %v", paths)
+	}
+
+	// Save additional path (load-modify-write)
+	paths, _ = loadProjectSettings(settingsPath)
+	paths = append(paths, "/project/path2")
+	if err := saveProjectSettings(settingsPath, paths); err != nil {
+		t.Fatalf("save paths: %v", err)
+	}
+	paths, _ = loadProjectSettings(settingsPath)
+	if len(paths) != 2 {
+		t.Errorf("expected 2 paths, got %d: %v", len(paths), paths)
+	}
+}
+
+// Test key preservation: unknown fields in .ocode/settings.json survive saves.
+func TestSaveProjectSettings_KeyPreservation(t *testing.T) {
+	projectDir := t.TempDir()
+	ocodeDir := filepath.Join(projectDir, ".ocode")
+	if err := os.MkdirAll(ocodeDir, 0755); err != nil {
+		t.Fatalf("create .ocode: %v", err)
+	}
+	settingsPath := filepath.Join(ocodeDir, "settings.json")
+
+	// Pre-populate with an unknown field + existing paths
+	rawSettings := map[string]json.RawMessage{
+		"extra_allowed_paths": json.RawMessage(`["/old/path"]`),
+		"future_setting":      json.RawMessage(`"preserved_value"`),
+	}
+	data, _ := json.Marshal(rawSettings)
+	if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+		t.Fatalf("write pre-populated settings: %v", err)
+	}
+
+	// Save new paths (this should preserve future_setting)
+	if err := saveProjectSettings(settingsPath, []string{"/old/path", "/new/path"}); err != nil {
+		t.Fatalf("save with merge: %v", err)
+	}
+
+	// Verify both updated paths and unknown field are preserved
+	savedData, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("read saved file: %v", err)
+	}
+	var result map[string]json.RawMessage
+	if err := json.Unmarshal(savedData, &result); err != nil {
+		t.Fatalf("unmarshal saved: %v", err)
+	}
+	if _, ok := result["future_setting"]; !ok {
+		t.Error("expected future_setting to be preserved, but it was lost")
+	}
+	var savedPaths []string
+	if err := json.Unmarshal(result["extra_allowed_paths"], &savedPaths); err != nil {
+		t.Fatalf("unmarshal saved paths: %v", err)
+	}
+	if len(savedPaths) != 2 {
+		t.Errorf("expected 2 paths, got %d: %v", len(savedPaths), savedPaths)
+	}
+	if savedPaths[0] != "/old/path" || savedPaths[1] != "/new/path" {
+		t.Errorf("unexpected paths: %v", savedPaths)
+	}
+}
+
+// Test SaveExtraAllowedPath writes to project config when in a project.
+func TestSaveExtraAllowedPath_SavesToProjectConfig(t *testing.T) {
+	projectDir := t.TempDir()
+
+	// Create .git to make it a project
+	gitDir := filepath.Join(projectDir, ".git")
+	if err := os.Mkdir(gitDir, 0755); err != nil {
+		t.Fatalf("create .git: %v", err)
+	}
+
+	// Create .ocode directory
+	ocodeDir := filepath.Join(projectDir, ".ocode")
+	if err := os.Mkdir(ocodeDir, 0755); err != nil {
+		t.Fatalf("create .ocode: %v", err)
+	}
+	settingsPath := filepath.Join(ocodeDir, "settings.json")
+
+	// Save working directory and chdir into project so FindProjectRoot picks it up
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(origWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Isolate HOME so we don't load real global config
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	globalConfigDir := filepath.Join(homeDir, ".config", "opencode")
+	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
+		t.Fatalf("create global config dir: %v", err)
+	}
+	// Empty global config
+	if err := os.WriteFile(filepath.Join(globalConfigDir, "ocodeconfig.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	// Save a path — should go to .ocode/settings.json
+	if err := SaveExtraAllowedPath("/project/path1"); err != nil {
+		t.Fatalf("SaveExtraAllowedPath: %v", err)
+	}
+	paths, err := loadProjectSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("load project settings: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/project/path1" {
+		t.Errorf("expected [/project/path1], got %v", paths)
+	}
+
+	// Attempt duplicate — should be no-op
+	if err := SaveExtraAllowedPath("/project/path1"); err != nil {
+		t.Fatalf("save duplicate: %v", err)
+	}
+	paths, _ = loadProjectSettings(settingsPath)
+	if len(paths) != 1 {
+		t.Errorf("expected 1 path after dedup, got %d: %v", len(paths), paths)
+	}
+}
+
+// Test SaveExtraAllowedPath falls back to global config when not in a project.
+func TestSaveExtraAllowedPath_FallsBackToGlobal(t *testing.T) {
+	// Isolate in a temp dir with HOME isolated so no project is found
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	globalConfigDir := filepath.Join(homeDir, ".config", "opencode")
+	if err := os.MkdirAll(globalConfigDir, 0755); err != nil {
+		t.Fatalf("create global config dir: %v", err)
+	}
+	// Empty global config
+	if err := os.WriteFile(filepath.Join(globalConfigDir, "ocodeconfig.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+
+	isolatedDir := t.TempDir()
+	origWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(origWd); err != nil {
+			t.Fatalf("restore wd: %v", err)
+		}
+	}()
+	if err := os.Chdir(isolatedDir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	// Save a path — should fall back to global config
+	if err := SaveExtraAllowedPath("/global/path"); err != nil {
+		t.Fatalf("SaveExtraAllowedPath: %v", err)
+	}
+
+	// Verify it was saved to global config
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	var found bool
+	for _, p := range cfg.ExtraAllowedPaths {
+		if p == "/global/path" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected /global/path in global config, got %v", cfg.ExtraAllowedPaths)
+	}
 }

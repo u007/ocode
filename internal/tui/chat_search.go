@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -41,9 +42,8 @@ func highlightSearchTermsInLines(wrapped, stripped []string, query string) []str
 			end := start + len(needle)
 			// insertSGRSpan uses raw as the positional anchor and skips any
 			// ANSI codes already in out[j], so repeated calls compose safely.
-			// Use a dark-gray background (48;5;237) + bold + underline for
-			// a visible but theme-neutral highlight.
-			out[j] = insertSGRSpan(out[j], raw, start, end, "\x1b[48;5;237m\x1b[1m\x1b[4m", "\x1b[24m\x1b[22m\x1b[49m")
+			// Use the theme selection highlight (same bg as file-tab search matches).
+			out[j] = insertSGRSpan(out[j], raw, start, end, selectionHighlightOpen, selectionHighlightClose)
 			pos = end
 		}
 	}
@@ -428,4 +428,215 @@ func (m *model) ensureChatSearchFlashHighlight() {
 		endCol:    endCol,
 	}
 	m.applyOrClearSelectionHighlight()
+}
+
+// ── Detail-view find bar ──────────────────────────────────────────────────────
+
+// openDetailSearch activates the find bar on the top-of-stack detail view.
+// Pass "" for a blank bar or a pre-filled query string.
+func (m *model) openDetailSearch(prefill string) {
+	if len(m.detail) == 0 {
+		return
+	}
+	top := &m.detail[len(m.detail)-1]
+	ti := textinput.New()
+	ti.Placeholder = "search…"
+	ti.CharLimit = 200
+	ti.Prompt = ""
+	ti.SetWidth(40)
+	ti.SetValue(prefill)
+	top.searchActive = true
+	top.searchInput = ti
+	top.searchCursor = -1
+	top.searchNoMatch = false
+	if m.input.Width() > 0 {
+		top.searchInput.CursorEnd()
+		top.searchInput.Focus()
+	}
+	// Resize the detail viewport now; refreshTopDetailView() will keep it
+	// correct on subsequent ticks via the updated detailViewportHeight().
+	top.vp.SetHeight(m.detailViewportHeight())
+	m.rebuildDetailSearchMatches()
+	if prefill != "" && len(top.searchMatches) > 0 {
+		top.searchCursor = 0
+		m.jumpToDetailMatch(top.searchMatches[0])
+	}
+}
+
+// closeDetailSearch hides the find bar on the top-of-stack detail view.
+func (m *model) closeDetailSearch() {
+	if len(m.detail) == 0 {
+		return
+	}
+	top := &m.detail[len(m.detail)-1]
+	if !top.searchActive {
+		return
+	}
+	top.searchActive = false
+	top.searchQuery = ""
+	top.searchMatches = nil
+	top.searchCursor = -1
+	top.searchNoMatch = false
+	// Restore viewport height (searchActive is now false so detailViewportHeight
+	// returns the full height again).
+	top.vp.SetHeight(m.detailViewportHeight())
+	// Re-render content without highlights.
+	m.applyOrClearDetailSelectionHighlight()
+}
+
+// rebuildDetailSearchMatches recomputes line-index matches in the top detail view.
+func (m *model) rebuildDetailSearchMatches() {
+	if len(m.detail) == 0 {
+		return
+	}
+	top := &m.detail[len(m.detail)-1]
+	q := strings.TrimSpace(top.searchInput.Value())
+	top.searchQuery = q
+	if q == "" {
+		top.searchMatches = nil
+		top.searchCursor = -1
+		top.searchNoMatch = false
+		m.applyOrClearDetailSelectionHighlight()
+		return
+	}
+	needle := strings.ToLower(q)
+	matches := make([]int, 0, 8)
+	for i, line := range top.rawLines {
+		if strings.Contains(strings.ToLower(line), needle) {
+			matches = append(matches, i)
+		}
+	}
+	top.searchMatches = matches
+	top.searchNoMatch = len(matches) == 0
+	if top.searchCursor >= len(matches) {
+		top.searchCursor = -1
+	}
+	m.applyOrClearDetailSelectionHighlight()
+}
+
+// jumpToDetailMatch scrolls the top detail viewport to the given line index.
+func (m *model) jumpToDetailMatch(lineIdx int) {
+	if len(m.detail) == 0 {
+		return
+	}
+	top := &m.detail[len(m.detail)-1]
+	if lineIdx < 0 || lineIdx >= len(top.rawLines) {
+		return
+	}
+	top.vp.SetYOffset(lineIdx)
+	m.applyOrClearDetailSelectionHighlight()
+}
+
+// detailSearchNext advances the match cursor forward and scrolls.
+func (m model) detailSearchNext() model {
+	if len(m.detail) == 0 {
+		return m
+	}
+	top := &m.detail[len(m.detail)-1]
+	if len(top.searchMatches) == 0 {
+		return m
+	}
+	if top.searchCursor < 0 {
+		top.searchCursor = 0
+	} else {
+		top.searchCursor = (top.searchCursor + 1) % len(top.searchMatches)
+	}
+	m.jumpToDetailMatch(top.searchMatches[top.searchCursor])
+	return m
+}
+
+// detailSearchPrev moves the match cursor backward and scrolls.
+func (m model) detailSearchPrev() model {
+	if len(m.detail) == 0 {
+		return m
+	}
+	top := &m.detail[len(m.detail)-1]
+	if len(top.searchMatches) == 0 {
+		return m
+	}
+	if top.searchCursor < 0 {
+		top.searchCursor = len(top.searchMatches) - 1
+	} else {
+		top.searchCursor = (top.searchCursor - 1 + len(top.searchMatches)) % len(top.searchMatches)
+	}
+	m.jumpToDetailMatch(top.searchMatches[top.searchCursor])
+	return m
+}
+
+// handleDetailSearchKey is the key dispatcher for the detail-view find bar.
+// Returns (model, cmd, handled).
+func (m model) handleDetailSearchKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd, bool) {
+	if len(m.detail) == 0 {
+		return m, nil, false
+	}
+	top := &m.detail[len(m.detail)-1]
+	ks := msg.String()
+	switch ks {
+	case "esc", "ctrl+g":
+		m.closeDetailSearch()
+		return m, nil, true
+	case "enter":
+		nm := m.detailSearchNext()
+		return nm, nil, true
+	case "shift+enter":
+		nm := m.detailSearchPrev()
+		return nm, nil, true
+	}
+	prevValue := top.searchInput.Value()
+	var tiCmd tea.Cmd
+	if m.input.Width() > 0 {
+		top.searchInput, tiCmd = top.searchInput.Update(msg)
+	} else {
+		switch ks {
+		case "backspace":
+			v := top.searchInput.Value()
+			if len(v) > 0 {
+				top.searchInput.SetValue(v[:len(v)-1])
+			}
+		default:
+			r := []rune(ks)
+			if len(r) == 1 && r[0] >= 32 && r[0] != 127 {
+				top.searchInput.SetValue(top.searchInput.Value() + string(r))
+			}
+		}
+	}
+	if top.searchInput.Value() != prevValue {
+		m.rebuildDetailSearchMatches()
+	}
+	return m, tiCmd, true
+}
+
+// renderDetailSearchBar returns the bordered find bar for the detail view.
+func (m model) renderDetailSearchBar(width int) string {
+	if len(m.detail) == 0 {
+		return ""
+	}
+	top := m.detail[len(m.detail)-1]
+	prompt := hintStyle.Render("/")
+	tiView := top.searchInput.View()
+	sep := hintStyle.Render("  ·  ")
+	var count string
+	if top.searchQuery == "" {
+		count = hintStyle.Render("type to search")
+	} else {
+		total := len(top.searchMatches)
+		countStr := fmt.Sprintf("%d match", total)
+		if total != 1 {
+			countStr += "es"
+		}
+		if total == 0 {
+			count = errorStyle.Render(countStr)
+		} else if top.searchCursor >= 0 {
+			count = successStyle.Render(fmt.Sprintf("%d/%d", top.searchCursor+1, total))
+		} else {
+			count = hintStyle.Render(countStr)
+		}
+	}
+	hint := hintStyle.Render("  ⏎ next · ⇧⏎ prev · esc close")
+	inner := prompt + " " + tiView + sep + count + hint
+	w := width - 2
+	if w < 10 {
+		w = 10
+	}
+	return borderStyle.Width(w).Render(inner)
 }

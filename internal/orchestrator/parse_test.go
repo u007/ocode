@@ -65,13 +65,13 @@ func TestExtractDeveloperReport_noSentinel(t *testing.T) {
 	}
 }
 
-func TestExtractPlanJSON_valid(t *testing.T) {
-	raw := `{"intent":"feature","goal":"add auth","success_criteria":["works"],"verify_mode":"build_llm"}`
-	p, err := ExtractPlanJSON(raw)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+func TestExtractPlanJSON_natural(t *testing.T) {
+	raw := "Add auth feature.\n\nverify_mode: build_llm\nmax_iterations: 3"
+	p := ExtractPlanJSON(raw)
+	if p.VerifyMode != "build_llm" {
+		t.Errorf("verify_mode = %q", p.VerifyMode)
 	}
-	if p.Intent != "feature" {
-		t.Errorf("intent = %q", p.Intent)
+	if p.MaxIterations != 3 {
+		t.Errorf("max_iterations = %d", p.MaxIterations)
 	}
 }

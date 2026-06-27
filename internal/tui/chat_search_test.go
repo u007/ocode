@@ -416,16 +416,12 @@ func TestChatSearchTypingReRendersTranscriptWithHighlight(t *testing.T) {
 	}
 	got := derefTestModel(t, handledM)
 
-	// After typing, the viewport should have bold+underline+bg for 'b' matches.
+	// After typing, the viewport should have the theme selection highlight applied to 'b' matches.
+	// The highlight codes come from selectionHighlightOpen/Close (set by ApplyThemeColors above),
+	// not hardcoded ANSI escape sequences.
 	viewportContent := got.viewport.View()
-	if !strings.Contains(viewportContent, "\x1b[1m") {
-		t.Fatal("viewport should contain bold ANSI codes after typing query")
-	}
-	if !strings.Contains(viewportContent, "\x1b[4m") {
-		t.Fatal("viewport should contain underline ANSI codes after typing query")
-	}
-	if !strings.Contains(viewportContent, "\x1b[48;5;237m") {
-		t.Fatal("viewport should contain background-color ANSI codes after typing query")
+	if !strings.Contains(viewportContent, selectionHighlightOpen) {
+		t.Fatalf("viewport should contain selection highlight ANSI codes after typing query; open=%q content=%q", selectionHighlightOpen, viewportContent)
 	}
 	// Verify the ANSI codes surround matching text, not the whole line.
 	stripped := stripANSI(viewportContent)
