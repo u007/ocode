@@ -1150,6 +1150,11 @@ func (m *model) applyTheme() {
 	m.inputThemeApplied = false
 	m.themeGen++ // invalidate the per-message render cache: colors changed
 	m.applyInputTheme()
+	// Refresh the empty-state viewport when switching to/from pipboy so the
+	// art (or plain hint) appears immediately without waiting for a resize.
+	if len(m.messages) == 0 && m.viewport.Width() > 0 {
+		m.renderTranscript()
+	}
 }
 
 func (m *model) applyInputTheme() {
@@ -3962,6 +3967,17 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 
 	// Route j/k/scroll inside a detail view before normal chat keys.
 	if !m.detail.empty() {
+		top := &m.detail[len(m.detail)-1]
+		// Detail-view find bar takes priority when active.
+		if top.searchActive {
+			newM, c, handled := m.handleDetailSearchKey(msg)
+			if handled {
+				return newM, c
+			}
+		} else if keyStr == "ctrl+f" {
+			m.openDetailSearch("")
+			return m, nil
+		}
 		switch keyStr {
 		case "j", "down":
 			m.detail[len(m.detail)-1].vp.ScrollDown(m.scrollSpeed)
@@ -11273,8 +11289,18 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 	return entry
 }
 
+func (m *model) currentThemeName() string {
+	if m.config != nil && m.config.Ocode.TUI.Theme != "" {
+		return m.config.Ocode.TUI.Theme
+	}
+	return "tokyonight"
+}
+
 func (m *model) renderTranscript() {
 	if len(m.messages) == 0 {
+		if m.currentThemeName() == "pipboy" && m.viewport.Width() > 0 {
+			m.viewport.SetContent(renderPipboyBackground(m.viewport.Width(), m.viewport.Height(), m.styles.Hint))
+		}
 		return
 	}
 	// Perf probe: a slow render (>8ms) during streaming starves the event loop
@@ -12697,11 +12723,14 @@ func (m *model) applyOrClearDetailSelectionHighlight() {
 		return
 	}
 	top := &m.detail[len(m.detail)-1]
-	if !top.sel.active && !m.hoverDetailLinkActive {
+	if !top.sel.active && !m.hoverDetailLinkActive && top.searchQuery == "" {
 		top.vp.SetContent(strings.Join(top.lines, "\n"))
 		return
 	}
 	lines := top.lines
+	if top.searchQuery != "" {
+		lines = highlightSearchTermsInLines(lines, top.rawLines, top.searchQuery)
+	}
 	if m.hoverDetailLinkActive {
 		lines = applyPathLinkUnderline(lines, top.rawLines, m.hoverDetailLink)
 	}
@@ -12717,7 +12746,11 @@ func (m model) detailViewportWidth() int {
 }
 
 func (m model) detailViewportHeight() int {
-	return max(1, m.height-6)
+	h := m.height - 6
+	if len(m.detail) > 0 && m.detail[len(m.detail)-1].searchActive {
+		h -= 3 // find bar: top border + content + bottom border
+	}
+	return max(1, h)
 }
 
 func (m model) processRegistryForRun(runID string) *tool.ProcessRegistry {
@@ -12788,7 +12821,7 @@ func (m model) renderDetailView(d detailView) string {
 	case detailReview:
 		title = "Code Review"
 	}
-	hints := "esc: back · j/k: scroll · mouse: scroll · drag: select"
+	hints := "esc: back · j/k: scroll · mouse: scroll · drag: select · ctrl+f: find"
 	if d.kind == detailAgentRun {
 		hints += " · click: sub-agent/process · ctrl+g: processes"
 	} else if d.kind == detailProcessList {
@@ -12804,10 +12837,14 @@ func (m model) renderDetailView(d detailView) string {
 	)
 	body := borderStyle.Width(m.panelWidth() - 2).Render(bodyContent)
 	statusBar := m.renderDetailStatusBar(d)
-	if statusBar == "" {
-		return lipgloss.JoinVertical(lipgloss.Left, header, body)
+	parts := []string{header, body}
+	if d.searchActive {
+		parts = append(parts, m.renderDetailSearchBar(m.panelWidth()))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, header, body, statusBar)
+	if statusBar != "" {
+		parts = append(parts, statusBar)
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
 
 // renderDetailStatusBar shows live status + token usage for an agent-run detail

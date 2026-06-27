@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/textinput"
 	"charm.land/bubbles/v2/viewport"
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/tool"
@@ -38,6 +39,13 @@ type detailView struct {
 	procs    []detailProcBlock
 	expanded map[string]bool
 	regions  []detailExpandRegion
+	// in-view find bar (ctrl+f while the detail card is open)
+	searchActive  bool
+	searchInput   textinput.Model
+	searchQuery   string
+	searchMatches []int // rawLines indices containing the query
+	searchCursor  int   // index into searchMatches of the current jump, -1 = none
+	searchNoMatch bool  // true when query is non-empty but has zero matches
 }
 
 type detailExpandRegion struct {

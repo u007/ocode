@@ -46,7 +46,7 @@ var smallModelEligibleNames = map[string]bool{
 	"explore":               true,
 	"general":               true,
 	"compaction":            true,
-	"orchestrator-planner":  true,
+	// orchestrator-planner intentionally excluded: requires reliable JSON output
 	"orchestrator-explorer": true,
 	"doc-sync":              true,
 }

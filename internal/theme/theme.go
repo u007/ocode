@@ -437,6 +437,25 @@ var builtinThemes = map[string]ThemeDefinition{
 			Dim:        "#c8c0aa",
 		},
 	},
+	"pipboy": {
+		Colors: ThemeColors{
+			User:       "#00ff9f",
+			Assistant:  "#50fa7b",
+			Header:     "#39ff14",
+			Border:     "#1e3c1e",
+			Hint:       "#3a6b3a",
+			Text:       "#75fb4c",
+			Background: "#0a110a",
+			StatusBg:   "#0a110a",
+			StatusFg:   "#4a8a4a",
+			SelectedFg: "#0a110a",
+			SelectedBg: "#75fb4c",
+			Success:    "#39ff14",
+			Error:      "#ff5555",
+			Accent:     "#00e5ff",
+			Dim:        "#1e3c1e",
+		},
+	},
 }
 
 // ── Opencode-format JSON support ──

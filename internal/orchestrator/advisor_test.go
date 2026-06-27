@@ -12,7 +12,7 @@ func TestEscalateToAdvisor_promptContainsContext(t *testing.T) {
 	stub := &stubDispatcher{responses: map[string]string{}}
 	p := newTestPipeline(stub)
 	p.doc = &ContextDoc{
-		Plan:            Plan{Goal: "add validation", SuccessCriteria: []string{"nil safe"}},
+		Plan:            Plan{Text: "add validation\n\nSuccess criteria:\n- nil safe"},
 		ExploreSnapshot: "## auth.go",
 	}
 	p.doc.AddIteration(Iteration{

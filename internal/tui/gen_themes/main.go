@@ -106,6 +106,8 @@ var existing = map[string]bool{
 	"nord-light":       true,
 	"solarized-light":  true,
 	"everforest-light": true,
+	// ocode-exclusive themes (not from opencode theme registry)
+	"pipboy": true,
 }
 
 func quote(s string) string {

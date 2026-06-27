@@ -80,10 +80,12 @@ func TestOrchestratorAgentFilesParse(t *testing.T) {
 }
 
 func TestOrchestratorAgentsSmallModelEligible(t *testing.T) {
-	for _, name := range []string{"orchestrator-planner", "orchestrator-explorer"} {
-		if !smallModelEligible(name) {
-			t.Errorf("%s should be small-model eligible", name)
-		}
+	// orchestrator-planner is excluded: must use main model for reliable JSON output
+	if smallModelEligible("orchestrator-planner") {
+		t.Error("orchestrator-planner must not be small-model eligible")
+	}
+	if !smallModelEligible("orchestrator-explorer") {
+		t.Error("orchestrator-explorer should be small-model eligible")
 	}
 }
 

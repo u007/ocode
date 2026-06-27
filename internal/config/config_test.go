@@ -680,7 +680,7 @@ func TestGetProjectSettingsPath_InProject(t *testing.T) {
 
 	// Now getProjectSettingsPath should return the path
 	path := getProjectSettingsPath()
-	
+
 	// On macOS, /var is a symlink to /private/var. Compare the last
 	// components (.ocode/settings.json) and verify the path contains the
 	// project dir base name rather than exact match.
