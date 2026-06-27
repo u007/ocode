@@ -300,23 +300,20 @@ func applyUrlLinkUnderline(lines, rawLines []string, r urlLinkRegion) []string {
 	return out
 }
 
-// urlLinkStyle is the canonical link style: blue + underlined. Held as a
-// package-level var so tests and call sites don't each instantiate it.
-// Kept independent of theme.ApplyThemeColors because link color is a
-// cross-cutting visual element (same color regardless of user/assistant
-// role) and adding a new theme field is out of scope for this change.
+// urlLinkStyle is the canonical link style: underlined with the theme's header
+// foreground color. Updated by ApplyThemeColors via setMarkdownStyles.
 var urlLinkStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#7da9f0")).
 	Underline(true)
 
-// markdownBoldStyle is the style applied to **bold** runs. Mirrors the
-// hard-coded color used by the previous renderMarkdownBold implementation
-// in model.go so existing message styling is preserved.
+// markdownBoldStyle is the style applied to **bold** runs. Updated by
+// ApplyThemeColors via setMarkdownStyles.
 var markdownBoldStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#da702c")).
 	Bold(true)
 
 // markdownTitleStyle is applied to "# ", "## ", and "### " headings.
+// Updated by ApplyThemeColors via setMarkdownStyles.
 var markdownTitleStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#3aa99f")).
 	Bold(true)

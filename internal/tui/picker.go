@@ -14,12 +14,13 @@ import (
 	"github.com/u007/ocode/internal/session"
 )
 
-func (m *model) openAdvisorPicker() {
+func (m *model) openAdvisorPicker() tea.Cmd {
 	// Reuse the model picker listing with kind="advisor" so picker selection
 	// saves the advisor model instead of switching the active model.
-	m.openModelPicker()
+	cmd := m.openModelPicker()
 	m.pickerKind = "advisor"
 	m.prependClaudeCodeSection()
+	return cmd
 }
 
 // prependClaudeCodeSection inserts the "Claude Code (Read-Only CLI)" section at
@@ -53,13 +54,14 @@ func (m *model) prependClaudeCodeSection() {
 	m.pickerIsHeader = append(isHeader, m.pickerIsHeader...)
 }
 
-func (m *model) openPermissionModelPicker() {
+func (m *model) openPermissionModelPicker() tea.Cmd {
 	// Reuse the model picker listing with kind="permission-model" so picker
 	// selection saves the auto-permission model instead of switching the
 	// active model.
-	m.openModelPicker()
+	cmd := m.openModelPicker()
 	m.pickerKind = "permission-model"
 	m.prependPermissionModelClearOption()
+	return cmd
 }
 
 func (m *model) prependPermissionModelClearOption() {
@@ -83,8 +85,9 @@ func (m *model) refreshModelPickerItems() {
 	filter := m.pickerFilter
 	idx := m.pickerIndex
 
-	m.openModelPicker()
-
+	// Use synchronous full build — the cache was just refreshed so provider
+	// data is in memory and won't block.
+	m.buildFullModelPickerItems()
 	m.pickerKind = kind
 	m.pickerFilterPending = filterPending
 	m.pickerFilter = filter
@@ -117,7 +120,127 @@ func refreshModelsCacheCmd() tea.Cmd {
 	}
 }
 
-func (m *model) openModelPicker() {
+// openModelPicker opens the model picker showing favorites and recently used
+// models immediately, then loads the full provider model list in the background.
+// Returns a tea.Cmd for the async load so the caller can return it from Update.
+func (m *model) openModelPicker() tea.Cmd {
+	m.input.Blur()
+	favorites := config.LoadFavorites()
+	recents := config.LoadRecentModels()
+
+	shown := make(map[string]bool)
+	var items, values []string
+	var isHeader []bool
+
+	appendHeader := func(label string) {
+		items = append(items, label)
+		values = append(values, "")
+		isHeader = append(isHeader, true)
+	}
+	appendModel := func(label, value string) {
+		items = append(items, label)
+		values = append(values, value)
+		isHeader = append(isHeader, false)
+		shown[value] = true
+	}
+
+	if len(favorites) > 0 {
+		appendHeader("★ Favorites")
+		for _, f := range favorites {
+			appendModel("  ★ "+f, f)
+		}
+		appendHeader("")
+	}
+
+	var recentModels []string
+	for _, r := range recents {
+		if !shown[r] {
+			recentModels = append(recentModels, r)
+		}
+	}
+	if len(recentModels) > 0 {
+		appendHeader("Recently Used")
+		for _, r := range recentModels {
+			appendModel("  "+r, r)
+		}
+		appendHeader("")
+	}
+
+	m.pickerKind = "model"
+	m.pickerItems = items
+	m.pickerValues = values
+	m.pickerIsHeader = isHeader
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.pickerFilterPending = ""
+	m.pickerFilterSeq++
+	m.showPicker = true
+	m.pushPickerModal()
+
+	// Start async load of the full provider model list.
+	m.pickerLoadingAll = true
+	return loadFullModelPickerCmd(shown)
+}
+
+// loadFullModelPickerCmd returns a tea.Cmd that loads all provider models in a
+// background goroutine and sends a modelPickerFullModelsLoadedMsg with the
+// provider sections (excluding models already shown in favorites/recents).
+func loadFullModelPickerCmd(shown map[string]bool) tea.Cmd {
+	return func() tea.Msg {
+		allModels := agent.AllProviderModels()
+		lmsResult := agent.FetchLMStudioModels()
+
+		var items, values []string
+		var isHeader []bool
+
+		appendHeader := func(label string) {
+			items = append(items, label)
+			values = append(values, "")
+			isHeader = append(isHeader, true)
+		}
+		appendModel := func(label, value string) {
+			items = append(items, label)
+			values = append(values, value)
+			isHeader = append(isHeader, false)
+		}
+
+		providerMap := make(map[string][]string)
+		for _, modelID := range allModels {
+			if shown[modelID] {
+				continue
+			}
+			provider, model := splitPickerModel(modelID)
+			providerMap[provider] = append(providerMap[provider], model)
+		}
+		providers := make([]string, 0, len(providerMap))
+		for provider := range providerMap {
+			providers = append(providers, provider)
+		}
+		sort.Strings(providers)
+		for _, provider := range providers {
+			appendHeader(provider)
+			models := providerMap[provider]
+			sort.Strings(models)
+			for _, model := range models {
+				appendModel("  "+provider+"/"+model, provider+"/"+model)
+			}
+		}
+		if lmsResult.NeedsAPIKey && len(providerMap["lmstudio"]) == 0 {
+			appendHeader("lmstudio")
+			items = append(items, "  ⚠ API key required — set LMSTUDIO_API_KEY")
+			values = append(values, "")
+			isHeader = append(isHeader, true)
+		}
+
+		return modelPickerFullModelsLoadedMsg{items: items, values: values, isHeader: isHeader}
+	}
+}
+
+// buildFullModelPickerItems rebuilds the model picker items synchronously with
+// the full model list (favorites + recents + all provider sections). Used by
+// refreshModelPickerItems when the cache has just been refreshed and data is
+// already in memory.
+func (m *model) buildFullModelPickerItems() {
 	m.input.Blur()
 	lmsResult := agent.FetchLMStudioModels()
 	allModels := agent.AllProviderModels()
@@ -190,16 +313,9 @@ func (m *model) openModelPicker() {
 		isHeader = append(isHeader, true)
 	}
 
-	m.pickerKind = "model"
 	m.pickerItems = items
 	m.pickerValues = values
 	m.pickerIsHeader = isHeader
-	m.pickerIndex = 0
-	m.pickerFilter = ""
-	m.pickerFilterPending = ""
-	m.pickerFilterSeq++
-	m.showPicker = true
-	m.pushPickerModal()
 }
 
 func splitPickerModel(s string) (string, string) {
@@ -451,6 +567,8 @@ func (m *model) closePicker() {
 	m.pickerSessionLoading = false
 	m.pickerSessionLoadErr = ""
 	m.pickerSessionLoadSeq++
+	m.pickerLoadingAll = false
+	m.pickerRefreshing = false
 	m.input.Focus()
 }
 
@@ -745,8 +863,11 @@ func (m model) renderPicker() string {
 		} else if m.pickerKind == "session" && m.pickerSessionMore {
 			body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown ↓ scroll for more", end-start, m.pickerSessionTotal)))
 		}
-	}
+		if m.pickerLoadingAll && (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model") {
+			body.WriteString(hintStyle.Render("  ~ loading all models\u2026"))
+		}
 
+	}
 	width := m.width - 4
 	if width < 40 {
 		width = 40
@@ -849,11 +970,12 @@ func (m *model) cycleAgentMode() {
 	}
 }
 
-func (m *model) openRedactionModelPicker() {
+func (m *model) openRedactionModelPicker() tea.Cmd {
 	// Reuse the model picker listing with kind="redaction-model" so picker
 	// selection saves the tier-2 redaction scanning model instead of the active model.
-	m.openModelPicker()
+	cmd := m.openModelPicker()
 	m.pickerKind = "redaction-model"
+	return cmd
 }
 
 func (m *model) openEmbeddingModelPicker() {
@@ -902,12 +1024,13 @@ func (m *model) openEmbeddingModelPicker() {
 	m.showPicker = true
 }
 
-func (m *model) openSmallModelPicker() {
+func (m *model) openSmallModelPicker() tea.Cmd {
 	// Reuse the model picker listing with kind="small-model" so picker
 	// selection saves the small model instead of switching the active model.
-	m.openModelPicker()
+	cmd := m.openModelPicker()
 	m.pickerKind = "small-model"
 	m.prependSmallModelClearOption()
+	return cmd
 }
 
 func (m *model) prependSmallModelClearOption() {

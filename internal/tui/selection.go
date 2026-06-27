@@ -332,10 +332,41 @@ func insertSGRSpan(rendered, raw string, rawStart, rawEnd int, openSeq, closeSeq
 		return rendered
 	}
 
+	// The content between renderedStart and renderedEnd may contain
+	// comprehensive SGR resets (\x1b[m or \x1b[0m) that were injected by
+	// lipgloss styling — for example, after a styled tag like
+	// "\x1b[1;38;2;R;G;BmLLM  \x1b[m message".  A reset wipes all
+	// attributes including the selection colours that openSeq just set.
+	// Scan for resets inside the selected segment and re-insert openSeq
+	// after each one so the highlight is preserved across the entire
+	// selected range.
+	selSegment := rendered[renderedStart:renderedEnd]
+	var segmentBuf strings.Builder
+	segmentBuf.Grow(len(selSegment) * 11 / 10) // modest growth for re-inserts
+	segPos := 0
+	for {
+		loc := ansiEscapeIdx(selSegment[segPos:])
+		if loc[0] < 0 {
+			break
+		}
+		absEnd := segPos + loc[1]
+		// Write everything from segPos up to the end of this escape
+		// (the non-escaped text + the escape itself).
+		segmentBuf.WriteString(selSegment[segPos:absEnd])
+		esc := selSegment[segPos+loc[0] : absEnd]
+		if esc == "\x1b[m" || esc == "\x1b[0m" {
+			// Comprehensive reset — re-apply selection colours so the
+			// highlight survives the reset.
+			segmentBuf.WriteString(openSeq)
+		}
+		segPos = absEnd
+	}
+	segmentBuf.WriteString(selSegment[segPos:])
+
 	var b strings.Builder
 	b.WriteString(rendered[:renderedStart])
 	b.WriteString(openSeq)
-	b.WriteString(rendered[renderedStart:renderedEnd])
+	b.WriteString(segmentBuf.String())
 	b.WriteString(closeSeq)
 	b.WriteString(rendered[renderedEnd:])
 	return b.String()

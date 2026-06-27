@@ -854,8 +854,7 @@ func runYoloCmd(m *model, args []string) tea.Cmd {
 }
 
 func runSmallModelCmd(m *model, args []string) tea.Cmd {
-	m.handleSmallModelCmd(args)
-	return nil
+	return m.handleSmallModelCmd(args)
 }
 
 func runSkillsCmd(m *model, args []string) tea.Cmd {
@@ -1214,7 +1213,7 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Tier-2 model: %s", args[1])})
 		} else {
 			// Open the model picker to select the tier-2 scanning model
-			m.openRedactionModelPicker()
+			return m.openRedactionModelPicker()
 		}
 	case "list":
 		// List registered secrets
