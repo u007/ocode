@@ -1334,8 +1334,9 @@ func GetLastThinkingBudget() int {
 	return 0
 }
 
-// loadFullOcodeConfig loads the full ocode config from the global and project
-// ocodeconfig.json files, merging them together.
+// loadFullOcodeConfig loads the global ocode config and merges project settings.
+// Used by Save* functions to load current state before modifying a specific field.
+// Returns merged config (global + project paths) suitable for inspection and update.
 func loadFullOcodeConfig() (*OcodeConfig, error) {
 	ocode := defaultOcodeConfig()
 
@@ -1343,6 +1344,18 @@ func loadFullOcodeConfig() (*OcodeConfig, error) {
 	if err == nil {
 		if err := loadOcodeConfigFile(globalPath, &ocode); err != nil && !os.IsNotExist(err) {
 			return nil, err
+		}
+	}
+
+	// Load and merge project settings
+	projectSettingsPath := getProjectSettingsPath()
+	if projectSettingsPath != "" {
+		projectPaths, err := loadProjectSettings(projectSettingsPath)
+		if err != nil {
+			return nil, fmt.Errorf("load project settings: %w", err)
+		}
+		if len(projectPaths) > 0 {
+			ocode.ExtraAllowedPaths = append(ocode.ExtraAllowedPaths, projectPaths...)
 		}
 	}
 
