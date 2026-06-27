@@ -1959,7 +1959,7 @@ func (m filesModel) helpView(w, h int, styles Styles) string {
 	// Build help body lines
 	body := []string{
 		"",
-		styles.Header.Render("  Navigation") + "		" + styles.Hint.Render("↑ ↓  j  k  select file"),
+		styles.Header.Render("  Navigation") + "		" + styles.Hint.Render("↑ ↓  select file"),
 		"			" + styles.Hint.Render("← →  horizontal scroll"),
 		"			" + styles.Hint.Render("Enter  open dir / open file"),
 		"			" + styles.Hint.Render("Tab  focus tree / preview"),
@@ -1967,16 +1967,16 @@ func (m filesModel) helpView(w, h int, styles Styles) string {
 		styles.Header.Render("  Selection") + "		" + styles.Hint.Render("Space  toggle select"),
 		"			" + styles.Hint.Render("Shift+↑ ↓  multi-select extend"),
 		"",
-		styles.Header.Render("  File Operations") + "		" + styles.Hint.Render("n  create file    N  create folder"),
-		"			" + styles.Hint.Render("r  rename    D  delete"),
-		"			" + styles.Hint.Render("l  inline edit    y  copy path"),
+		styles.Header.Render("  File Operations") + "		" + styles.Hint.Render("ctrl+n  create file    ctrl+b  create folder"),
+		"			" + styles.Hint.Render("ctrl+r  rename    ctrl+d  delete"),
+		"			" + styles.Hint.Render("ctrl+l  inline edit    ctrl+y  copy path"),
 		"",
-		styles.Header.Render("  Open / Search") + "		" + styles.Hint.Render("e  open in editor    v  pick editor"),
-		"			" + styles.Hint.Render("o  reveal in finder    /  workspace grep"),
-		"			" + styles.Hint.Render("g  fuzzy find    ctrl+f  in-file search"),
+		styles.Header.Render("  Open / Search") + "		" + styles.Hint.Render("ctrl+e  open in editor    ctrl+v  pick editor"),
+		"			" + styles.Hint.Render("ctrl+o  reveal in finder    ctrl+f  content search"),
+		"			" + styles.Hint.Render("ctrl+g  fuzzy find"),
 		"",
-		styles.Header.Render("  Other") + "		" + styles.Hint.Render("h  toggle hidden files"),
-		"			" + styles.Hint.Render("u  refresh file tree    ?  this help"),
+		styles.Header.Render("  Other") + "		" + styles.Hint.Render("ctrl+h  toggle hidden files"),
+		"			" + styles.Hint.Render("ctrl+u  refresh file tree    ?  this help"),
 		"",
 		styles.Hint.Render("  Press esc, ?, or q to close"),
 	}
@@ -2245,7 +2245,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		} else {
 			searchStr += " (no matches)  esc cancel"
 		}
-		previewContent = previewContent + "\n" + lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("237")).Padding(0, 1).Render(searchStr)
+		previewContent = previewContent + "\n" + lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Foreground(styles.Header.GetForeground()).Background(styles.Dim.GetForeground()).Padding(0, 1).Render(searchStr)
 	} else if m.statusMsg != "" {
 		previewContent = lipgloss.NewStyle().Width(contentWidth).MaxHeight(1).Render(styles.Hint.Render(m.statusMsg)) + "\n\n" + previewContent
 	} else if m.editor != "" {
@@ -2258,7 +2258,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	tabBar := renderTabBar(tabFiles, chatUnread)
 	var exitBtn string
 	if exitPending {
-		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("u2715 exit?")
 	} else {
 		exitBtn = styles.Hint.Padding(0, 1).Render("\u2715 exit")
 	}
@@ -2278,7 +2278,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		)
 	} else {
 		statusStr = hintStyle.Width(w - 2).MaxHeight(1).Render(
-			"ctrl+f search  ctrl+g fuzzy find  space select  ctrl+h hidden  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
+			"ctrl+h hidden  ctrl+f search  ctrl+g fuzzy  space select  tab jump  ctrl+l edit  ctrl+o open  ctrl+n new file  ctrl+b new folder  ctrl+r rename  ctrl+d delete  ctrl+y path  ctrl+e editor",
 		)
 	}
 	parts := []string{renderedHeader, row, statusStr}
@@ -2397,9 +2397,9 @@ func (m filesModel) treeHint() string {
 	if len(m.selectedFiles) > 0 {
 		return ""
 	}
-	line1 := "j/k navigate  enter open  space select  shift+↑↓ extend  n new  N folder"
-	line2 := "r rename  D del  / search  ctrl+f grep  o reveal  ←→ scroll"
-	line3 := "l edit  y copy  v pick  h hidden  g fuzzy  u refresh"
+	line1 := "↑/↓ navigate  enter open  space select  shift+↑↓ extend  ctrl+n new  ctrl+b folder"
+	line2 := "ctrl+r rename  ctrl+d del  ctrl+f search  ctrl+g fuzzy  ctrl+o reveal  ←→ scroll"
+	line3 := "ctrl+l edit  ctrl+y copy  ctrl+v pick  ctrl+h hidden  ctrl+u refresh"
 	return line1 + "\n" + line2 + "\n" + line3
 }
 

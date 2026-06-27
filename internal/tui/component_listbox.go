@@ -3,7 +3,6 @@ package tui
 import (
 	"strings"
 
-	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -213,12 +212,8 @@ func (lb *ListBox) styles() Styles {
 // defaultStyles returns a basic set of styles for the ListBox.
 func defaultStyles() Styles {
 	return Styles{
-		Selected: lipgloss.NewStyle().
-			Background(lipgloss.Color("#7AA2F7")).
-			Foreground(lipgloss.Color("#1a1b26")).
-			Bold(true),
-		Hint: lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#565f89")),
+		Selected: selectedStyle,
+		Hint:     hintStyle,
 	}
 }
 

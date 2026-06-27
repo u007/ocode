@@ -1834,7 +1834,7 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 	tabBar := renderTabBar(tabGit, chatUnread)
 	var exitBtn string
 	if exitPending {
-		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("✕ exit?")
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("✕ exit?")
 	} else {
 		exitBtn = styles.Hint.Padding(0, 1).Render("✕ exit")
 	}

@@ -458,6 +458,12 @@ The `/mask model [name]` command sets the local LLM used for tier-2 contextual s
 
 ---
 
+## Credits
+
+- **Pip-Boy / Vault Boy ASCII art** — three variants shown randomly on the pipboy theme empty screen, sourced from [emojicombos.com/fallout-ascii-art](https://emojicombos.com/fallout-ascii-art)
+
+---
+
 ## License
 
 MIT

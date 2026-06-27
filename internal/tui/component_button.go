@@ -89,9 +89,9 @@ func buttonBaseStyle(v ButtonVariant) lipgloss.Style {
 		Border(lipgloss.RoundedBorder())
 	switch v {
 	case ButtonPrimary:
-		return base.Foreground(lipgloss.Color("#7AA2F7"))
+		return base.Foreground(userStyle.GetForeground())
 	case ButtonDanger:
-		return base.Foreground(lipgloss.Color("#F7768E"))
+		return base.Foreground(errorStyle.GetForeground())
 	default:
 		return base
 	}
@@ -105,11 +105,17 @@ func buttonHoverStyle(v ButtonVariant) lipgloss.Style {
 		Border(lipgloss.RoundedBorder())
 	switch v {
 	case ButtonPrimary:
-		return base.Foreground(lipgloss.Color("#1a1b26")).Background(lipgloss.Color("#7AA2F7"))
+		return base.
+			Foreground(selectedStyle.GetForeground()).
+			Background(selectedStyle.GetBackground())
 	case ButtonDanger:
-		return base.Foreground(lipgloss.Color("#1a1b26")).Background(lipgloss.Color("#F7768E"))
+		return base.
+			Foreground(selectedStyle.GetForeground()).
+			Background(errorStyle.GetForeground())
 	default:
-		return base.Foreground(lipgloss.Color("#1a1b26")).Background(lipgloss.Color("#7AA2F7"))
+		return base.
+			Foreground(selectedStyle.GetForeground()).
+			Background(userStyle.GetForeground())
 	}
 }
 
@@ -121,10 +127,16 @@ func buttonFocusStyle(v ButtonVariant) lipgloss.Style {
 		Border(lipgloss.RoundedBorder())
 	switch v {
 	case ButtonPrimary:
-		return base.Foreground(lipgloss.Color("#7AA2F7")).BorderForeground(lipgloss.Color("#7AA2F7"))
+		return base.
+			Foreground(userStyle.GetForeground()).
+			BorderForeground(userStyle.GetForeground())
 	case ButtonDanger:
-		return base.Foreground(lipgloss.Color("#F7768E")).BorderForeground(lipgloss.Color("#F7768E"))
+		return base.
+			Foreground(errorStyle.GetForeground()).
+			BorderForeground(errorStyle.GetForeground())
 	default:
-		return base.Foreground(lipgloss.Color("#7AA2F7")).BorderForeground(lipgloss.Color("#7AA2F7"))
+		return base.
+			Foreground(userStyle.GetForeground()).
+			BorderForeground(userStyle.GetForeground())
 	}
 }

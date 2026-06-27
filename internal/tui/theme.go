@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"image/color"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -57,7 +58,7 @@ func ApplyThemeColors(name string) Styles {
 		Error:          lipgloss.NewStyle().Foreground(lipgloss.Color(c.Error)),
 		Text:           lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)),
 		Thinking:       lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)),
-		ThinkingHeader: lipgloss.NewStyle().Foreground(lipgloss.Color(c.Accent)).Bold(true),
+		ThinkingHeader: lipgloss.NewStyle().Foreground(lipgloss.Color(themeColor(c.Thinking, c.Accent))).Bold(true),
 		Dim:            lipgloss.NewStyle().Foreground(lipgloss.Color(c.Dim)),
 		SidebarText:    lipgloss.NewStyle().Foreground(lipgloss.Color(c.Hint)),
 		ToolBox:        lipgloss.NewStyle().Foreground(lipgloss.Color(c.Text)).Background(lipgloss.Color(c.Background)).Padding(0, 1).Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(c.Border)),
@@ -86,21 +87,21 @@ func ApplyThemeColors(name string) Styles {
 	// Falls back to a dark background if the hex parse fails.
 	fg := hexColorToANSIForeground(c.SelectedFg)
 	bg := hexColorToANSIBackground(c.SelectedBg)
-	open := ""
-	close := ""
+	openSeq := ""
+	closeSeq := ""
 	if fg != "" {
-		open += fg
-		close += "\x1b[39m"
+		openSeq += fg
+		closeSeq += "\x1b[39m"
 	}
 	if bg != "" {
-		open += bg
-		close += "\x1b[49m"
+		openSeq += bg
+		closeSeq += "\x1b[49m"
 	} else {
 		// Fallback background colour when SelectedBg can't be parsed.
-		open += "\x1b[48;5;236m"
-		close += "\x1b[49m"
+		openSeq += "\x1b[48;5;236m"
+		closeSeq += "\x1b[49m"
 	}
-	SetSelectionHighlightCodes(open, close)
+	SetSelectionHighlightCodes(openSeq, closeSeq)
 	setStatusStyle(s.Status)
 	setSuccessStyle(s.Success)
 	setErrorStyle(s.Error)
@@ -112,6 +113,11 @@ func ApplyThemeColors(name string) Styles {
 	setToolBoxStyle(s.ToolBox)
 	setTodoStyles(s.Dim, s.Header, s.Text)
 	setScrollbarStyles(s.Dim, s.Selected)
+	setMarkdownStyles(s.Header.GetForeground(), s.ThinkingHeader.GetForeground(), s.Header.GetForeground())
+	setSidebarHeaderStyle(s.Header)
+	setSidebarSectionStyle(s.Assistant)
+	setSidebarAccentStyle(s.User)
+	setTodoProgressStyle(s.Success)
 	return s
 }
 
@@ -180,6 +186,34 @@ func setDimStyle(s lipgloss.Style) {
 
 func setToolBoxStyle(s lipgloss.Style) {
 	toolBoxStyle = s
+}
+
+func setSidebarHeaderStyle(s lipgloss.Style) {
+	sidebarHeaderStyle = s
+}
+
+func setSidebarSectionStyle(s lipgloss.Style) {
+	sidebarSectionStyle = s
+}
+
+func setSidebarAccentStyle(s lipgloss.Style) {
+	sidebarAccentStyle = s
+}
+
+func setTodoProgressStyle(s lipgloss.Style) {
+	todoProgressStyle = lipgloss.NewStyle().Foreground(s.GetForeground())
+}
+
+func setMarkdownStyles(linkFg, boldFg, titleFg color.Color) {
+	urlLinkStyle = lipgloss.NewStyle().
+		Foreground(linkFg).
+		Underline(true)
+	markdownBoldStyle = lipgloss.NewStyle().
+		Foreground(boldFg).
+		Bold(true)
+	markdownTitleStyle = lipgloss.NewStyle().
+		Foreground(titleFg).
+		Bold(true)
 }
 
 func currentStyles() Styles {

@@ -350,6 +350,16 @@ type sessionRefsLoadedMsg struct {
 type modelsRefreshedMsg struct {
 	err error
 }
+
+// modelPickerFullModelsLoadedMsg is sent by the background model picker loader
+// when the full provider model list has been fetched and can be added to the
+// picker items. The handler appends provider sections below the favorites and
+// recent sections that were shown immediately.
+type modelPickerFullModelsLoadedMsg struct {
+	items    []string
+	values   []string
+	isHeader []bool
+}
 type fileListCacheMsg struct{ items []slashSuggestion }
 type pluginInstallMsg struct {
 	source string
@@ -625,6 +635,7 @@ type model struct {
 	pickerSessionLoadSeq int           // generation token for in-flight loads
 	pickerSessionLoadErr string        // last load error shown in the picker
 	pickerRefreshing     bool          // true while a ctrl+r model-cache refresh is in flight
+	pickerLoadingAll     bool          // true while initial async load of all provider models is in flight
 	pickerSavedTheme     string        // theme to revert to on picker cancel
 	showSlashPopup       bool
 	slashPopupIndex      int
@@ -638,6 +649,7 @@ type model struct {
 	sessionTelemetry     sidebarTelemetry
 	activeModel          string
 	showFileSearch       bool
+	fileSearchShowHidden bool
 	fileSearchInput      string
 	fileSearchResults    []fileSearchResult
 	fileSearchIndex      int
@@ -745,6 +757,7 @@ type model struct {
 	transcriptMsgStartLine   []int                       // for each message index, the first wrapped line of its block in transcriptLines (parallel to m.messages; -1 for indices past the end). Used to scroll to a chat-search match.
 	msgRenderCache           map[int]msgRenderCacheEntry // per-message rendered-block cache keyed by message index; avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta
 	themeGen                 int                         // bumped on every applyTheme so the render cache invalidates when colors change
+	pipboyArtLines           []string                    // current pipboy art lines, randomized per session
 
 	// In-chat find (the bar that appears above the input when ctrl+f is pressed
 	// on the chat tab). Mirrors the log tab's logSearch fields: a focused
@@ -1150,9 +1163,17 @@ func (m *model) applyTheme() {
 	m.inputThemeApplied = false
 	m.themeGen++ // invalidate the per-message render cache: colors changed
 	m.applyInputTheme()
+	// Randomise the pipboy art every time the theme is applied (startup,
+	// /theme switch) so a new session or theme toggle shows a fresh variant.
+	if m.currentThemeName() == "pipboy" {
+		m.pipboyArtLines = RandomPipboyArt()
+	} else {
+		m.pipboyArtLines = nil
+	}
 	// Refresh the empty-state viewport when switching to/from pipboy so the
 	// art (or plain hint) appears immediately without waiting for a resize.
-	if len(m.messages) == 0 && m.viewport.Width() > 0 {
+	// Use Width>0 guard only; renderTranscript handles the real-vs-transient check.
+	if m.viewport.Width() > 0 {
 		m.renderTranscript()
 	}
 }
@@ -2427,7 +2448,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.pickerIndex = 0
-	case modelsRefreshedMsg:
+	case modelPickerFullModelsLoadedMsg:
+			m.pickerLoadingAll = false
+			if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model") {
+				return m, nil
+			}
+			// Append provider sections below the existing favs+recents items.
+			if len(msg.items) > 0 {
+				m.pickerItems = append(m.pickerItems, msg.items...)
+				m.pickerValues = append(m.pickerValues, msg.values...)
+				m.pickerIsHeader = append(m.pickerIsHeader, msg.isHeader...)
+			}
+		case modelsRefreshedMsg:
 		m.pickerRefreshing = false
 		// If the picker was closed while the refresh was in flight, just
 		// surface the result as a transcript message and skip repopulation.
@@ -3828,6 +3860,13 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		}
+		if keyStr == "ctrl+h" {
+			m.fileSearchShowHidden = !m.fileSearchShowHidden
+			m.fileSearchCache = scanWorkspaceFiles(".", m.fileSearchShowHidden)
+			m.fileSearchResults = filterFileSearchResults(m.fileSearchCache, m.fileSearchInput)
+			m.fileSearchIndex = 0
+			return true, m, nil
+		}
 		if keyStr == "backspace" {
 			if len(m.fileSearchInput) > 0 {
 				m.fileSearchInput = m.fileSearchInput[:len(m.fileSearchInput)-1]
@@ -4069,7 +4108,8 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		if m.showFileSearch {
 			m.fileSearchInput = ""
 			m.fileSearchIndex = 0
-			m.fileSearchCache = scanWorkspaceFiles(".")
+			m.fileSearchShowHidden = false
+			m.fileSearchCache = scanWorkspaceFiles(".", false)
 			m.fileSearchResults = filterFileSearchResults(m.fileSearchCache, "")
 		}
 		return m, nil
@@ -6286,8 +6326,8 @@ func (m *model) compactFileReferencePaths(text string) []string {
 
 func (m *model) handleModelCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
-		m.openModelPicker()
-		return nil
+		cmd := m.openModelPicker()
+		return cmd
 	}
 	if len(args) > 0 {
 		modelID := args[0]
@@ -6904,6 +6944,10 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.recapText = ""
 	m.shellCmdStart = time.Time{}
 	m.shellCmdText = ""
+	// Randomise the pipboy art for the new session.
+	if m.currentThemeName() == "pipboy" {
+		m.pipboyArtLines = RandomPipboyArt()
+	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session.", transient: true})
 	return cmd
 }
@@ -7292,9 +7336,9 @@ func (m *model) handleThemesCmd(args []string) {
 	}
 	m.applyTheme()
 	if err := config.SaveTUITheme(name); err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s (save failed: %v)", name, err)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s (save failed: %v)", name, err), transient: true})
 	} else {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s", name)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s", name), transient: true})
 	}
 }
 
@@ -7628,16 +7672,15 @@ func (m *model) runInstaller(subcmd string, names []string) string {
 	return out
 }
 
-func (m *model) handleSmallModelCmd(args []string) {
+func (m *model) handleSmallModelCmd(args []string) tea.Cmd {
 	if m.config == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "No config loaded."})
-		return
+		return nil
 	}
 
 	if len(args) == 0 {
 		// Open the model picker for small model selection
-		m.openSmallModelPicker()
-		return
+		return m.openSmallModelPicker()
 	}
 
 	target := strings.ToLower(args[0])
@@ -7648,40 +7691,41 @@ func (m *model) handleSmallModelCmd(args []string) {
 		if !m.config.Ocode.SmallModelEnabled {
 			if err := config.SaveSmallModel(""); err != nil {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model is disabled; failed to clear auto-resolve value: %v", err)})
-				return
+				return nil
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Small model is disabled. Auto-resolve remains off."})
-			return
+			return nil
 		}
 		// Re-resolve
 		if small := agent.ResolveSmallModel(m.config); small != "" {
 			m.config.Ocode.SmallModel = small
 			if err := config.SaveSmallModel(small); err != nil {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model resolved to %s but failed to persist: %v. In-memory value stays for this session.", small, err)})
-				return
+				return nil
 			}
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model set to auto-resolve → %s", small)})
 		} else {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Small model cleared. No viable candidate found in priority list."})
 		}
-		return
+		return nil
 	}
 
 	// Validate that the model is available
 	client := agent.NewClient(m.config, args[0])
 	if client == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", args[0])})
-		return
+		return nil
 	}
 
 	// Set and persist
 	m.config.Ocode.SmallModel = args[0]
 	if err := config.SaveSmallModel(args[0]); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save small model: %v", err)})
-		return
+		return nil
 	}
 
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Small model updated to %s\nPersisted to config for next session.", args[0])})
+	return nil
 }
 
 func (m *model) handleMaxStepCmd(args []string) {
@@ -9146,7 +9190,7 @@ func (m *model) appendAgentMessage(am agent.Message) {
 			// transient messages that are shown in the transcript but NOT sent
 			// to the LLM.
 			if am.Notice != "" {
-				noticeStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68"))
+				noticeStyle := thinkingHeaderStyle
 				m.messages = append(m.messages, message{
 					role:      roleAssistant,
 					text:      noticeStyle.Render("\u26a0 ") + am.Notice,
@@ -10507,7 +10551,7 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	tabBar := renderTabBar(m.activeTab, m.chatUnread)
 	var exitBtn string
 	if m.exitPending {
-		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("u2715 exit?")
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
 	}
@@ -10579,7 +10623,7 @@ type fileSearchResult struct {
 // are not loaded). Directories named .git, .ocode, and node_modules are
 // skipped, along with hidden directories/files and paths matched by the
 // ignore patterns.
-func scanWorkspaceFiles(root string) []fileSearchResult {
+func scanWorkspaceFiles(root string, showHidden bool) []fileSearchResult {
 	// Load .gitignore / .ignore patterns from root.
 	var patterns []gitignore.Pattern
 	for _, ignoreFile := range []string{".gitignore", ".ignore"} {
@@ -10606,10 +10650,13 @@ func scanWorkspaceFiles(root string) []fileSearchResult {
 			if name == ".git" || name == ".ocode" || name == "node_modules" {
 				return filepath.SkipDir
 			}
+			if !showHidden && strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
 			return nil
 		}
-		// Skip hidden files (dotfiles like .env, .DS_Store, etc.).
-		if strings.HasPrefix(name, ".") {
+		// Skip hidden files (dotfiles like .env, .DS_Store, etc.) unless showHidden.
+		if !showHidden && strings.HasPrefix(name, ".") {
 			return nil
 		}
 		// Skip paths matched by .gitignore / .ignore patterns.
@@ -10707,7 +10754,7 @@ func filterFileSearchResults(cache []fileSearchResult, query string) []fileSearc
 // renderFileSearch renders the ctrl+p file search overlay.
 func (m model) renderFileSearch() string {
 	const maxVisible = 15
-	hintLine := hintStyle.Render("↑/↓ select · Enter edit · Ctrl+E open · Esc cancel · type to filter")
+	hintLine := hintStyle.Render("↑/↓ select · Enter edit · Ctrl+E open · Ctrl+H hidden · Esc cancel · type to filter")
 	title := m.styles.Header.Render("Search files") + "  " + hintStyle.Render("filter: "+m.fileSearchInput+"_")
 
 	var body strings.Builder
@@ -10922,7 +10969,15 @@ func (m *model) renderPermissionDialog(width int) string {
 	for _, b := range m.permDialogBtnDefs() {
 		style := permBtnStyle
 		if b.choice == m.permHoverChoice {
-			style = permBtnHoverStyle
+			// Use Selected fg/bg from the current theme for hover
+			// highlight, instead of the init-time hardcoded ANSI colors
+			// in permBtnHoverStyle (which never change with theme).
+			selFg := m.styles.Selected.GetForeground()
+			selBg := m.styles.Selected.GetBackground()
+			style = permBtnStyle.
+				Foreground(selFg).
+				Background(selBg).
+				BorderForeground(selBg)
 		}
 		btnParts = append(btnParts, style.Render(b.label+" "+b.desc))
 	}
@@ -10952,7 +11007,6 @@ func (m *model) renderPermissionDialog(width int) string {
 		}
 	}
 
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#565f89"))
 	copyHint := hintStyle.Render("^y copy")
 
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
@@ -11106,7 +11160,7 @@ func (m *model) maybeScrollTranscriptToBottom() {
 // persistence; skipLLM keeps it out of the prompt. The caller must call
 // rerenderTranscriptAndMaybeScroll after the batch (see debugLogMsg handler).
 func (m *model) appendDiscoveryNotice(text string) {
-	style := lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7"))
+	style := headerStyle
 	m.messages = append(m.messages, message{
 		role:      roleAssistant,
 		text:      style.Render("~ " + text),
@@ -11297,9 +11351,19 @@ func (m *model) currentThemeName() string {
 }
 
 func (m *model) renderTranscript() {
-	if len(m.messages) == 0 {
+	// "Empty" for art purposes means no real conversation content exists yet.
+	// Transient notices (startup hints, "Started new session.", "Theme: pipboy")
+	// and skipLLM command echoes (/theme, /new, etc.) are UI chrome, not content.
+	hasRealContent := false
+	for _, msg := range m.messages {
+		if !msg.transient && !msg.skipLLM {
+			hasRealContent = true
+			break
+		}
+	}
+	if !hasRealContent {
 		if m.currentThemeName() == "pipboy" && m.viewport.Width() > 0 {
-			m.viewport.SetContent(renderPipboyBackground(m.viewport.Width(), m.viewport.Height(), m.styles.Hint))
+			m.viewport.SetContent(renderPipboyBackground(m.pipboyArtLines, m.viewport.Width(), m.viewport.Height(), m.styles.Text))
 		}
 		return
 	}
@@ -11473,11 +11537,12 @@ func (m *model) renderToolOutputBox(toolName, content string, expanded bool) str
 // after the recovery retry. Format: "ORPHAN_TOOL_ERROR:<name>:<err>\n<detail>"
 func (m *model) renderOrphanWarningBox(content string, expanded bool) string {
 	const maxLines = 10
-	warnColor := lipgloss.Color("#E5A50A")
-	warnStyle := lipgloss.NewStyle().Foreground(warnColor).Bold(true)
+	// Use theme accent color for warning icon and border.
+	warnFg := thinkingHeaderStyle.GetForeground()
+	warnStyle := lipgloss.NewStyle().Foreground(warnFg).Bold(true)
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(warnColor).
+		BorderForeground(warnFg).
 		Padding(0, 1)
 
 	// Parse "ORPHAN_TOOL_ERROR:<name>:<err>\n<detail>"
@@ -13073,7 +13138,7 @@ func (m model) renderTabContent() string {
 	tabBar := renderTabBar(m.activeTab, m.chatUnread)
 	var exitBtn string
 	if m.exitPending {
-		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("u2715 exit?")
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
 	}
@@ -13286,9 +13351,9 @@ func (m *model) renderStatus() string {
 					prefix = "" // exact count from API — no tilde
 				}
 				if time.Now().Before(m.tokenBlinkUntil) {
-					colors := []string{"#7dcfff", "#9ece6a"}
-					c := colors[m.dotFrame%len(colors)]
-					tokStr = lipgloss.NewStyle().Foreground(lipgloss.Color(c)).Bold(true).Render(fmt.Sprintf(" · %s%s tok", prefix, formatTok(totalTok)))
+					blinkStyles := []lipgloss.Style{headerStyle, successStyle}
+					s := blinkStyles[m.dotFrame%len(blinkStyles)]
+					tokStr = s.Bold(true).Render(fmt.Sprintf(" · %s%s tok", prefix, formatTok(totalTok)))
 				} else {
 					tokStr = fmt.Sprintf(" · %s%s tok", prefix, formatTok(totalTok))
 				}
@@ -14153,7 +14218,7 @@ func (m model) renderSidebar() string {
 		sections = constrainViewPreservingBottom(sections, sidebarColumnWidth-4, contentHeight, len(data.bottomLines))
 	}
 	return borderStyle.
-		BorderForeground(lipgloss.Color("#7AA2F7")).
+		BorderForeground(headerStyle.GetForeground()).
 		Width(sidebarColumnWidth).
 		Render(header + "\n" + sections)
 }
@@ -14285,7 +14350,7 @@ func (m model) renderSidebarWithTabBar() string {
 	tabBar := renderTabBar(m.activeTab, m.chatUnread)
 	var exitBtn string
 	if m.exitPending {
-		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("✕ exit?")
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("✕ exit?")
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("✕ exit")
 	}
@@ -14496,7 +14561,7 @@ func (m model) tabBarStartX() int {
 func (m model) tabBarStartXs(tabBarWidth int) []int {
 	var exitBtnWidth int
 	if m.exitPending {
-		exitBtnWidth = lipgloss.Width(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?"))
+		exitBtnWidth = lipgloss.Width(lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("u2715 exit?"))
 	} else {
 		exitBtnWidth = lipgloss.Width(hintStyle.Padding(0, 1).Render("\u2715 exit"))
 	}
@@ -14514,7 +14579,7 @@ func (m model) exitButtonForClick(mouse tea.Mouse) bool {
 	}
 	var exitBtn string
 	if m.exitPending {
-		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("\u2715 exit?")
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("u2715 exit?")
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
 	}
@@ -14549,8 +14614,8 @@ func (m *model) refreshLogViewport() {
 		DebugKindTool:      headerStyle,
 		DebugKindAgent:     successStyle,
 		DebugKindError:     errorStyle,
-		DebugKindWarn:      lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68")).Bold(true),
-		DebugKindDiscovery: lipgloss.NewStyle().Foreground(lipgloss.Color("#7AA2F7")).Bold(true),
+		DebugKindWarn:      thinkingHeaderStyle,
+		DebugKindDiscovery: headerStyle,
 	}
 	var lines []string
 	for _, e := range m.logEntries {
@@ -14651,7 +14716,7 @@ func (m model) renderLogTab() string {
 	tabBar := renderTabBar(tabLog, m.chatUnread)
 	var exitBtn string
 	if m.exitPending {
-		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1")).Padding(0, 1).Render("✕ exit?")
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("✕ exit?")
 	} else {
 		exitBtn = m.styles.Hint.Padding(0, 1).Render("✕ exit")
 	}
@@ -15337,9 +15402,9 @@ func (m model) renderLSPSection(outerBodyWidth int) []string {
 		}
 	}
 
-	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#E0AF68"))
-	okStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#9ECE6A"))
+	errStyle := errorStyle
+	warnStyle := thinkingHeaderStyle
+	okStyle := successStyle
 	dimStyle := sidebarTextStyle
 
 	seen := make(map[string]bool)
