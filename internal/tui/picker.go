@@ -355,7 +355,11 @@ func (m *model) openThemePicker() {
 	m.input.Blur()
 	items := AvailableThemes()
 	m.pickerKind = "theme"
-	m.pickerItems = items
+	displayItems := make([]string, len(items))
+	for i, name := range items {
+		displayItems[i] = ThemeDisplayName(name)
+	}
+	m.pickerItems = displayItems
 	m.pickerValues = items
 	m.pickerIsHeader = nil
 	m.pickerIndex = 0

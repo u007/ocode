@@ -9,6 +9,7 @@ import (
 // ThemeColorsResponse is the response for GET /api/theme.
 type ThemeColorsResponse struct {
 	Name   string            `json:"name"`
+	Label  string            `json:"label,omitempty"`
 	Colors theme.ThemeColors `json:"colors"`
 }
 
@@ -21,6 +22,7 @@ func (h *Handler) HandleGetTheme(w http.ResponseWriter, r *http.Request) {
 	t := theme.Get(name)
 	writeJSON(w, http.StatusOK, ThemeColorsResponse{
 		Name:   name,
+		Label:  theme.DisplayName(name),
 		Colors: t.Colors,
 	})
 }

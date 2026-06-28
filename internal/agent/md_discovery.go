@@ -508,10 +508,22 @@ func loadMDCache(path string) map[string]mdEntry {
 }
 
 // saveMDCache writes the cache atomically (temp + rename) so concurrent sessions
-// never observe a half-written file.
+// never observe a half-written file. Before writing, it merges the current
+// on-disk contents so that entries produced by a concurrent ocode instance on
+// the same project are not lost — only keys absent from `cache` are carried
+// over, so our freshly-generated summaries always win for the files we walked.
 func saveMDCache(path string, cache map[string]mdEntry) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("mkdir md cache dir: %w", err)
+	}
+	// Merge: pull in any entries written by a concurrent instance that we
+	// did not process ourselves. Our entries take precedence.
+	if existing := loadMDCache(path); len(existing) > 0 {
+		for k, v := range existing {
+			if _, have := cache[k]; !have {
+				cache[k] = v
+			}
+		}
 	}
 	data, err := json.Marshal(cache)
 	if err != nil {

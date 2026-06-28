@@ -75,6 +75,23 @@ func TestAvailableThemesIncludesOpencodeFlexoki(t *testing.T) {
 	}
 }
 
+func TestAvailableThemesIncludesLCARS(t *testing.T) {
+	found := false
+	for _, name := range AvailableThemes() {
+		if name == "lcars" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected lcars in ocode theme list")
+	}
+
+	if _, ok := GetTheme("lcars"); !ok {
+		t.Fatalf("expected lcars theme to resolve")
+	}
+}
+
 func TestGeneratedThemesHaveNonEmptyColors(t *testing.T) {
 	for _, name := range AvailableThemes() {
 		theme, ok := GetTheme(name)

@@ -40,6 +40,12 @@ func AvailableThemes() []string {
 	return theme.AvailableThemes()
 }
 
+// ThemeDisplayName returns the human-readable label for a theme, falling back to
+// the internal name if no label is set.
+func ThemeDisplayName(name string) string {
+	return theme.DisplayName(name)
+}
+
 func ApplyThemeColors(name string) Styles {
 	def, ok := GetTheme(name)
 	if !ok {

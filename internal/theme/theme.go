@@ -34,6 +34,7 @@ type ThemeColors struct {
 // ThemeDefinition wraps a theme's color palette.
 type ThemeDefinition struct {
 	Colors ThemeColors `json:"colors"`
+	Label  string      `json:"label,omitempty"` // optional display label (e.g. "lcars (Star Trek OS)")
 }
 
 var builtinThemes = map[string]ThemeDefinition{
@@ -457,6 +458,27 @@ var builtinThemes = map[string]ThemeDefinition{
 			Thinking:   "#00ff9f",
 		},
 	},
+	"lcars": {
+		Label:  "lcars (Star Trek OS)",
+		Colors: ThemeColors{
+			User:       "#FF9F1C",
+			Assistant:  "#77C8FF",
+			Header:     "#D98CFF",
+			Border:     "#FF7A1A",
+			Hint:       "#8E6E55",
+			Text:       "#F7D28B",
+			Background: "#070912",
+			StatusBg:   "#0E1020",
+			StatusFg:   "#FFB84D",
+			SelectedFg: "#070912",
+			SelectedBg: "#FFB84D",
+			Success:    "#B7FF7A",
+			Error:      "#FF4D4D",
+			Accent:     "#77C8FF",
+			Dim:        "#3A2B1A",
+			Thinking:   "#77C8FF",
+		},
+	},
 }
 
 // ── Opencode-format JSON support ──
@@ -642,4 +664,13 @@ func AvailableThemes() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// DisplayName returns the human-readable label for a theme, falling back to
+// the internal name if no label is set.
+func DisplayName(name string) string {
+	if t, ok := themeRegistry[name]; ok && t.Label != "" {
+		return t.Label
+	}
+	return name
 }

@@ -226,6 +226,12 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	Respond with ONLY a single JSON object (no prose, no markdown fences):
 	{"decision":"allow|ask","confidence":0.0-1.0,"summary":"...","effects":{"reads":[],"writes":[],"deletes":[],"network":[],"subprocesses":[],"db_destructive":[],"unknown":[]}}
 
+	CRITICAL — array field types: every array field ("reads", "writes", "deletes",
+	"network", "subprocesses", "db_destructive", "unknown") must contain STRINGS only.
+	Never nest arrays inside arrays. Each subprocess entry is a single string,
+	e.g. "subprocesses": ["docker exec foo bar", "git commit -m msg"]
+	not "subprocesses": [["docker","exec","foo","bar"]].
+
 	Rules:
 	- Resolve relative paths against cwd; list every file the source reads/writes/deletes.
 	- List every network host and every subprocess/shell-out the source performs.
@@ -248,9 +254,20 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 
 	var resp interpreterModelResponse
 	if err := json.Unmarshal([]byte(extractJSONObject(finalText)), &resp); err != nil {
-		// Fail closed: an unparseable structured response defers to human Ask.
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_parse_fail err=%v resp=%s", err, truncateDebugArgs([]byte(finalText), 200)))
-		return false, "interpreter effect summary was not valid JSON", ""
+		// Retry once: tell the model exactly what was wrong and demand a corrected reply.
+		messages = append(messages,
+			Message{Role: "assistant", Content: finalText},
+			Message{Role: "user", Content: buildPermissionInterpreterRetryPrompt(err, finalText)})
+		retryText, gotRetry, _ := runPermissionModelLoop(a.StopCh(), client, messages, nil, modelLabel, "bash", a.RecordSideUsageFromMessage, roots)
+		if !gotRetry {
+			return false, "interpreter effect summary was not valid JSON", ""
+		}
+		if err2 := json.Unmarshal([]byte(extractJSONObject(retryText)), &resp); err2 != nil {
+			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_parse_fail_retry err=%v resp=%s", err2, truncateDebugArgs([]byte(retryText), 200)))
+			return false, "interpreter effect summary was not valid JSON after retry", ""
+		}
+		finalText = retryText
 	}
 	summary := strings.TrimSpace(resp.Summary)
 
@@ -274,6 +291,14 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 
 	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_allow lang=%s mode=%s conf=%.2f", ie.Language, ie.SourceMode, resp.Confidence))
 	return true, resp.Summary, summary
+}
+
+func buildPermissionInterpreterRetryPrompt(parseErr error, finalText string) string {
+	return fmt.Sprintf(
+		"Your response could not be parsed: %v\n\nHere is the output you produced:\n```text\n%s\n```\n\nCommon cause: array fields (reads, writes, deletes, network, subprocesses, db_destructive, unknown) must contain flat strings, never nested arrays.\nReply with ONLY the corrected JSON object and nothing else.",
+		parseErr,
+		finalText,
+	)
 }
 
 // verifyInterpreterEffects applies the deterministic acceptance rules. All must
