@@ -617,7 +617,7 @@ func TestFilesTreeHintShowsSelectionFlow(t *testing.T) {
 	m := newFilesModel(t.TempDir())
 
 	hint := m.treeHint()
-	for _, want := range []string{"space select", "shift+↑↓ extend", "D del"} {
+	for _, want := range []string{"space select", "shift+↑↓ extend", "ctrl+d del"} {
 		if !strings.Contains(hint, want) {
 			t.Fatalf("expected tree hint to contain %q, got %q", want, hint)
 		}

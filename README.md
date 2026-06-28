@@ -106,7 +106,7 @@ A full-featured tree-based file explorer with:
 
 ### 🎨 Theme System
 
-- **Built-in themes:** Tokyo Night, Tokyo Night Storm, Catppuccin Mocha
+- **Built-in themes:** Tokyo Night, Tokyo Night Storm, Catppuccin Mocha, LCARS (Star Trek-inspired)
 - **JSON theme loading** — drop custom themes on disk, no recompilation needed
 - **Live theme preview** in the picker as you type
 - **Theme sync endpoint** — Web UI maps theme colors to CSS variables
@@ -461,6 +461,7 @@ The `/mask model [name]` command sets the local LLM used for tier-2 contextual s
 ## Credits
 
 - **Pip-Boy / Vault Boy ASCII art** — three variants shown randomly on the pipboy theme empty screen, sourced from [emojicombos.com/fallout-ascii-art](https://emojicombos.com/fallout-ascii-art)
+- **LCARS / Star Trek ASCII art** — five variants shown randomly on the lcars theme empty screen
 
 ---
 

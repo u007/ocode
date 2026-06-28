@@ -757,7 +757,8 @@ type model struct {
 	transcriptMsgStartLine   []int                       // for each message index, the first wrapped line of its block in transcriptLines (parallel to m.messages; -1 for indices past the end). Used to scroll to a chat-search match.
 	msgRenderCache           map[int]msgRenderCacheEntry // per-message rendered-block cache keyed by message index; avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta
 	themeGen                 int                         // bumped on every applyTheme so the render cache invalidates when colors change
-	pipboyArtLines           []string                    // current pipboy art lines, randomized per session
+	pipboyArtLines           []string                    // current pipboy art lines, randomized per session when pipboy theme is active
+	lcarsArtLines            []string                    // current LCARS art lines, randomized per session when lcars theme is active
 
 	// In-chat find (the bar that appears above the input when ctrl+f is pressed
 	// on the chat tab). Mirrors the log tab's logSearch fields: a focused
@@ -1163,15 +1164,12 @@ func (m *model) applyTheme() {
 	m.inputThemeApplied = false
 	m.themeGen++ // invalidate the per-message render cache: colors changed
 	m.applyInputTheme()
-	// Randomise the pipboy art every time the theme is applied (startup,
-	// /theme switch) so a new session or theme toggle shows a fresh variant.
-	if m.currentThemeName() == "pipboy" {
-		m.pipboyArtLines = RandomPipboyArt()
-	} else {
-		m.pipboyArtLines = nil
-	}
-	// Refresh the empty-state viewport when switching to/from pipboy so the
-	// art (or plain hint) appears immediately without waiting for a resize.
+	// Randomise the themed empty-state art every time the theme is applied
+	// (startup, /theme switch) so a new session or theme toggle shows a fresh
+	// variant.
+	m.refreshThemeArt()
+	// Refresh the empty-state viewport when switching theme so the art (or
+	// plain hint) appears immediately without waiting for a resize.
 	// Use Width>0 guard only; renderTranscript handles the real-vs-transient check.
 	if m.viewport.Width() > 0 {
 		m.renderTranscript()
@@ -2449,17 +2447,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pickerIndex = 0
 	case modelPickerFullModelsLoadedMsg:
-			m.pickerLoadingAll = false
-			if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model") {
-				return m, nil
-			}
-			// Append provider sections below the existing favs+recents items.
-			if len(msg.items) > 0 {
-				m.pickerItems = append(m.pickerItems, msg.items...)
-				m.pickerValues = append(m.pickerValues, msg.values...)
-				m.pickerIsHeader = append(m.pickerIsHeader, msg.isHeader...)
-			}
-		case modelsRefreshedMsg:
+		m.pickerLoadingAll = false
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model") {
+			return m, nil
+		}
+		// Append provider sections below the existing favs+recents items.
+		if len(msg.items) > 0 {
+			m.pickerItems = append(m.pickerItems, msg.items...)
+			m.pickerValues = append(m.pickerValues, msg.values...)
+			m.pickerIsHeader = append(m.pickerIsHeader, msg.isHeader...)
+		}
+	case modelsRefreshedMsg:
 		m.pickerRefreshing = false
 		// If the picker was closed while the refresh was in flight, just
 		// surface the result as a transcript message and skip repopulation.
@@ -6917,6 +6915,9 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	}
 	cmd := m.resetSessionAgent()
 	m.messages = []message{}
+	m.transcriptLines = nil
+	m.rawTranscriptLines = nil
+	m.sel = selectionState{}
 	m.streamingThinkingIdx = -1
 	m.pendingCompactManual = false
 	m.pendingCompactUIIdx = nil
@@ -6944,10 +6945,8 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.recapText = ""
 	m.shellCmdStart = time.Time{}
 	m.shellCmdText = ""
-	// Randomise the pipboy art for the new session.
-	if m.currentThemeName() == "pipboy" {
-		m.pipboyArtLines = RandomPipboyArt()
-	}
+	// Randomise the themed empty-state art for the new session.
+	m.refreshThemeArt()
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Started new session.", transient: true})
 	return cmd
 }
@@ -7315,7 +7314,7 @@ func (m *model) cycleTheme() {
 	if err := config.SaveTUITheme(next); err != nil {
 		log.Printf("save theme: %v", err)
 	}
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme: %s", next), transient: true})
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme: %s", ThemeDisplayName(next)), transient: true})
 	m.rerenderTranscriptAndMaybeScroll()
 }
 
@@ -7336,10 +7335,11 @@ func (m *model) handleThemesCmd(args []string) {
 	}
 	m.applyTheme()
 	if err := config.SaveTUITheme(name); err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s (save failed: %v)", name, err), transient: true})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s (save failed: %v)", ThemeDisplayName(name), err), transient: true})
 	} else {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s", name), transient: true})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Theme switched to %s", ThemeDisplayName(name)), transient: true})
 	}
+	m.rerenderTranscriptAndMaybeScroll()
 }
 
 // handleModelsCmd is an alias for handleModelCmd; see commandSpecs for the /model ↔ /models aliasing.
@@ -10650,7 +10650,7 @@ func scanWorkspaceFiles(root string, showHidden bool) []fileSearchResult {
 			if name == ".git" || name == ".ocode" || name == "node_modules" {
 				return filepath.SkipDir
 			}
-			if !showHidden && strings.HasPrefix(name, ".") {
+			if !showHidden && path != root && strings.HasPrefix(name, ".") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -11350,9 +11350,37 @@ func (m *model) currentThemeName() string {
 	return "tokyonight"
 }
 
+func (m *model) refreshThemeArt() {
+	switch m.currentThemeName() {
+	case "pipboy":
+		m.pipboyArtLines = RandomPipboyArt()
+		m.lcarsArtLines = nil
+	case "lcars":
+		m.lcarsArtLines = RandomStartrekArt()
+		m.pipboyArtLines = nil
+	default:
+		m.pipboyArtLines = nil
+		m.lcarsArtLines = nil
+	}
+}
+
+func (m *model) renderEmptyStateBackground() string {
+	if m.viewport.Width() <= 0 || m.viewport.Height() <= 0 {
+		return ""
+	}
+	switch m.currentThemeName() {
+	case "pipboy":
+		return renderPipboyBackground(m.pipboyArtLines, m.viewport.Width(), m.viewport.Height(), m.styles.Text)
+	case "lcars":
+		return renderStartrekBackground(m.lcarsArtLines, m.viewport.Width(), m.viewport.Height(), m.styles.Text)
+	default:
+		return ""
+	}
+}
+
 func (m *model) renderTranscript() {
 	// "Empty" for art purposes means no real conversation content exists yet.
-	// Transient notices (startup hints, "Started new session.", "Theme: pipboy")
+	// Transient notices (startup hints, "Started new session.", "Theme: pipboy/lcars")
 	// and skipLLM command echoes (/theme, /new, etc.) are UI chrome, not content.
 	hasRealContent := false
 	for _, msg := range m.messages {
@@ -11362,8 +11390,15 @@ func (m *model) renderTranscript() {
 		}
 	}
 	if !hasRealContent {
-		if m.currentThemeName() == "pipboy" && m.viewport.Width() > 0 {
-			m.viewport.SetContent(renderPipboyBackground(m.pipboyArtLines, m.viewport.Width(), m.viewport.Height(), m.styles.Text))
+		// Clear stale rendered state (handleNewCmd handles the common
+		// case; this defends against other paths that lead here).
+		m.transcriptLines = nil
+		m.rawTranscriptLines = nil
+		m.sel = selectionState{}
+		if art := m.renderEmptyStateBackground(); art != "" {
+			m.viewport.SetContent(art)
+		} else {
+			m.viewport.SetContent("")
 		}
 		return
 	}

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -699,5 +700,22 @@ func TestRunPermissionModelLoopCancelledShortCircuits(t *testing.T) {
 	}
 	if reason != "cancelled" {
 		t.Fatalf("reason = %q; want %q", reason, "cancelled")
+	}
+}
+
+func TestBuildPermissionInterpreterRetryPromptIncludesPriorOutput(t *testing.T) {
+	prompt := buildPermissionInterpreterRetryPrompt(errors.New("unexpected token"), `{"decision":"allow",`)
+
+	for _, want := range []string{
+		"Your response could not be parsed: unexpected token",
+		"Here is the output you produced:",
+		"```text",
+		`{"decision":"allow",`,
+		"Common cause: array fields (reads, writes, deletes, network, subprocesses, db_destructive, unknown) must contain flat strings, never nested arrays.",
+		"Reply with ONLY the corrected JSON object and nothing else.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("expected retry prompt to contain %q, got:\n%s", want, prompt)
+		}
 	}
 }

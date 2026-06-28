@@ -92,8 +92,10 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 	// Main loop
 	advisorConsulted := false
 	postAdvisorAttempt := false
+	advisorNote := ""
 	var lastValidatorReport string
 	var lastFilesChanged []FileDiff
+	var lastCompileOutput string // last non-empty compile output (for the silent-halt case)
 
 	for {
 		if ctx.Err() != nil {
@@ -108,10 +110,11 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 			}
 			// Escalate to advisor
 			p.emit(StateAdvising, fmt.Sprintf("escalating after %d iterations", p.iterCount))
-			advisorNote, err := p.escalateToAdvisor(ctx, lastValidatorReport)
+			note, err := p.escalateToAdvisor(ctx, lastValidatorReport)
 			if err != nil {
-				advisorNote = fmt.Sprintf("advisor unavailable: %v", err)
+				note = fmt.Sprintf("advisor unavailable: %v", err)
 			}
+			advisorNote = note
 			advisorConsulted = true
 			postAdvisorAttempt = true
 			// Add advisor note to next iteration context
@@ -141,12 +144,21 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 		compileOut, compileErr := p.runCompile(ctx, plan.VerifyMode, wm)
 		iter.CompilerOutput = compileOut
 		if compileErr != nil {
-			// Compile failed — add iteration and loop back to developer
+			// Compile failed — add iteration and loop back to developer.
+			// Capture the compile output so the HALT report can show the
+			// user *why* the pipeline halted when the validator never ran.
 			p.doc.AddIteration(iter)
 			lastValidatorReport = ""
 			lastFilesChanged = nil
+			// Assign unconditionally so an empty-output compile failure also clears
+			// any stale output from an earlier attempt.
+			lastCompileOutput = compileOut
 			continue
 		}
+		// A successful compile means the final halt reason, if any, is no
+		// longer a compile failure. Clear any earlier compile-only output so a
+		// later validation halt does not surface stale compile state.
+		lastCompileOutput = ""
 
 		// Validating
 		p.emit(StateValidating, fmt.Sprintf("iteration %d", p.iterCount))
@@ -196,6 +208,7 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 					Goal:             goal,
 					TotalIterations:  p.iterCount,
 					AdvisorConsulted: advisorConsulted,
+					AdvisorNote:      advisorNote,
 					Passed:           true,
 				}, nil
 			}
@@ -213,9 +226,12 @@ func (p *Pipeline) Run(ctx context.Context, goal string) (*StructuredReport, err
 		Goal:                 goal,
 		TotalIterations:      p.iterCount,
 		AdvisorConsulted:     advisorConsulted,
+		AdvisorNote:          advisorNote,
 		Passed:               false,
 		FinalValidatorReport: lastValidatorReport,
+		LastCompileOutput:    lastCompileOutput,
 		FilesChanged:         lastFilesChanged,
+		Iterations:           p.doc.Iterations,
 	}, nil
 }
 
