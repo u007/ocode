@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Skills as Slash Commands** — All loaded skills are now registered as slash commands (e.g. `/git-commit-push`). The directory name is used as the command key. Built-in and custom commands take priority — if a command with the same name already exists, the skill is not registered. Deduplication follows skill search-path order: `.opencode/skills/` wins over `.claude/skill/`. (`internal/tui/commands.go`)
 - **LCARS Theme + Empty-State Art** — New `lcars` theme with Star Trek / LCARS-inspired warm amber panels and five random empty-state ASCII art variants (`internal/tui/startrek_art.go`) selected on session start, `/new`, and `/theme` switch. Locked in by `startrek_art_test.go` and `theme_test.go`.
 - **Theme Display Names** — Themes now support an optional `Label` field for human-readable display names (e.g. "lcars (Star Trek OS)"). Theme picker, `/theme` cycle, and theme switch messages use display names. Exposed via `GET /api/theme` with a new `label` response field. (`internal/theme/theme.go`, `internal/tui/theme.go`, `internal/tui/picker.go`, `internal/tui/model.go`, `internal/server/handler_theme.go`)
 - **Empty-State Art Abstraction** — Refactored pipboy-only art into a general `m.refreshThemeArt()` and `m.renderEmptyStateBackground()` switch, enabling any theme to provide empty-state art. Selection state, `transcriptLines`, and `rawTranscriptLines` now cleared on `/new` to prevent stale render artifacts. (`internal/tui/model.go`)
