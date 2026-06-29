@@ -64,10 +64,8 @@ const startrekArt2 = `
                    ,XX+.=+++iitVVXXXRXVtXXVRRV++=,..... .,, .              .
             ....       +XX+|i,,||tXRRRXVXti|+++,,. .,,. . . .. .      . ....
   . .          .      ..  .(C):JE:.....++,,..,...,.... ..             .. ...
-
                 Captain Jean-Luc Picard
             https://asciiart.website/art/4202
-
 `
 
 const startrekArt3 = `

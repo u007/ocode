@@ -86,11 +86,11 @@ func printSkillsUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "subcommands:")
 	fmt.Fprintln(w, "  list                       List bundled + installed skills")
-	fmt.Fprintln(w, "  install [<name>...]        Install bundled skills to ~/.config/opencode/skills/")
-	fmt.Fprintln(w, "  upgrade  [<name>...]       Install only when bundled content differs from installed")
+	fmt.Fprintln(w, "  install [<name>|all ...]   Install bundled skills to ~/.config/opencode/skills/")
+	fmt.Fprintln(w, "  upgrade  [<name>|all ...]  Install only when bundled content differs from installed")
 	fmt.Fprintln(w, "  uninstall <name>...        Remove an installed skill directory")
 	fmt.Fprintln(w, "")
-	fmt.Fprintln(w, "With no <name> arguments, install/upgrade operate on every bundled skill.")
+	fmt.Fprintln(w, "With no <name> arguments, or with \"all\", install/upgrade operate on every bundled skill.")
 }
 
 // ---------------------------------------------------------------------------
@@ -283,11 +283,12 @@ func versionParts(v string) *[3]int {
 type skillStatus int
 
 const (
-	statusMissing   skillStatus = iota // no skill dir at all (or no SKILL.md)
-	statusInstalled                    // SKILL.md loaded; check version/hash for up-to-date
-	statusUpToDate                     // installed, matches bundled
-	statusOutdated                     // installed, differs from bundled
-	statusSymlink                      // target path is a symlink (refuse to overwrite)
+	statusMissing        skillStatus = iota // no skill dir at all (or no SKILL.md)
+	statusInstalled                         // SKILL.md loaded; check version/hash for up-to-date
+	statusUpToDate                          // installed, matches bundled
+	statusOutdated                          // installed, bundled has changed, file untouched
+	statusCustomModified                    // installed, bundled has changed, AND user edited the file
+	statusSymlink                           // target path is a symlink (refuse to overwrite)
 )
 
 type installedInfo struct {
@@ -340,7 +341,11 @@ func loadInstalled(name, globalDir string) (installedInfo, skillStatus, error) {
 }
 
 // classifyInstalled combines loadInstalled with a bundled-skill to produce
-// the final status (missing / up-to-date / outdated / symlink).
+// the final status (missing / up-to-date / outdated / custom-modified / symlink).
+//
+// The custom-modified vs outdated distinction uses the .bundled-hash sidecar
+// written at install time. When it exists and the installed hash differs from
+// it, the user (or an external tool) edited the file.
 func classifyInstalled(b bundledSkill, globalDir string) (installedInfo, skillStatus, error) {
 	inst, status, err := loadInstalled(b.Name, globalDir)
 	if err != nil || status == statusMissing || status == statusSymlink {
@@ -349,6 +354,15 @@ func classifyInstalled(b bundledSkill, globalDir string) (installedInfo, skillSt
 	// status == statusInstalled
 	if isUpToDate(b, inst) {
 		return inst, statusUpToDate, nil
+	}
+	// Not up-to-date: check the .bundled-hash sidecar to distinguish
+	// "outdated" (bundled changed, file untouched) from
+	// "custom-modified" (user edited the file).
+	//
+	// If no sidecar exists (pre-feature install), fall back to outdated
+	// so we do upgrade — safer to err on the side of updating.
+	if bh := readBundledHash(inst.Dir); bh != "" && bh != inst.Sha256Hex {
+		return inst, statusCustomModified, nil
 	}
 	return inst, statusOutdated, nil
 }
@@ -428,6 +442,16 @@ func runInstallOrUpgrade(names []string, force bool) error {
 			// the user wants to refresh the on-disk copy even if hash/version
 			// match. Falls through to the outdated branch.
 
+		case statusCustomModified:
+			if !force && isBulkUpgrade(names) {
+				fmt.Fprintf(os.Stdout, "  ~ %s: custom-modified, skipped\n", b.Name)
+				skipped++
+				continue
+			}
+			// force mode (install) or named upgrade: still overwrite
+			// (with backup). The user explicitly asked for this skill.
+			// Falls through to installOne.
+
 		case statusMissing:
 			// proceed to install
 		}
@@ -455,9 +479,30 @@ func runInstallOrUpgrade(names []string, force bool) error {
 	return nil
 }
 
+// isBulkUpgrade returns true when the upgrade request targets all skills
+// implicitly (no names given) or explicitly ("all" is in the list).
+// Used to decide whether to skip custom-modified skills.
+func isBulkUpgrade(names []string) bool {
+	if len(names) == 0 {
+		return true
+	}
+	for _, n := range names {
+		if n == "all" {
+			return true
+		}
+	}
+	return false
+}
+
 func pickBundled(bundled []bundledSkill, names []string) []bundledSkill {
 	if len(names) == 0 {
 		return bundled
+	}
+	// The magic name "all" always selects every bundled skill.
+	for _, n := range names {
+		if n == "all" {
+			return bundled
+		}
 	}
 	want := make(map[string]bool, len(names))
 	for _, n := range names {
@@ -698,26 +743,32 @@ func GetSkillStatus() ([]SkillStatusEntry, error) {
 
 	if dirEntries, err := os.ReadDir(target); err == nil {
 		for _, de := range dirEntries {
-			if !de.IsDir() {
-				continue
-			}
 			name := de.Name()
 			if seen[name] {
 				continue
 			}
-			seen[name] = true
 
 			dir := filepath.Join(target, name)
 			info, lerr := os.Lstat(dir)
-			if lerr != nil || info.Mode()&os.ModeSymlink != 0 {
-				// Symlinked skill — show as-is, don't classify.
-				entries = append(entries, SkillStatusEntry{
-					Name:   name,
-					Status: SkillMissing,
-					Source: dir,
-				})
+			if lerr != nil {
 				continue
 			}
+
+			// Resolve symlinks to find the real skill directory.
+			// This catches skills installed via symlink (e.g. from
+			// ~/.claude/skills/) that os.ReadDir does not report as
+			// directories.
+			if info.Mode()&os.ModeSymlink != 0 {
+				resolved, err := filepath.EvalSymlinks(dir)
+				if err != nil {
+					continue // broken symlink
+				}
+				dir = resolved
+			} else if !info.IsDir() {
+				continue // plain file, not a skill
+			}
+
+			seen[name] = true
 
 			skillPath := filepath.Join(dir, "SKILL.md")
 			body, err := os.ReadFile(skillPath)

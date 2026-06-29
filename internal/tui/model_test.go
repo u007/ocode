@@ -2227,17 +2227,37 @@ func TestSidebarFileClickLaunchesEditor(t *testing.T) {
 	}
 
 	m := model{ready: true, width: 140, height: 40, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 20)}
+
+	// Derive the on-screen Y of the "changed.go" row from the same
+	// helpers the click path uses, instead of hard-coding topLines
+	// counts (which change as the sidebar evolves).
+	data := m.buildSidebarRenderData()
+	scrollIdx := -1
+	for i := range data.scrollLines {
+		if data.fileScrollLinePaths[i] == "changed.go" {
+			scrollIdx = i
+			break
+		}
+	}
+	if scrollIdx < 0 {
+		t.Fatal("could not find changed.go in sidebar scroll data")
+	}
+	visible := m.sidebarVisibleScrollLines(data, m.sidebarHeaderHeight())
+	if scrollIdx >= visible {
+		t.Fatalf("file row scrollIdx=%d not in first visible scroll window (visible=%d); raise test height",
+			scrollIdx, visible)
+	}
+	_, contentTopY := m.sidebarSelectableLines()
+	fileScreenY := contentTopY + len(data.topLines) + scrollIdx
+
 	// Press starts sidebar selection (no file opening yet)
-	// Y accounts for: appHeader(2) + sidebar_border(1) + topLines(8) +
-	// no-title-pad(1) + git_title(1) + git_branch(1) + blank(1) + files_title(1)
-	// = 2 + 1 + 8 + 1 + 1 + 1 + 1 + 1 = 16
-	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: 16})
+	updated, cmd := m.Update(tea.MouseClickMsg{Button: tea.MouseLeft, X: 120, Y: fileScreenY})
 	m = updated.(model)
 	if cmd != nil {
 		t.Fatal("expected press to start selection only, got stray command")
 	}
 	// Release on same position triggers file open (simple click, no drag)
-	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: 16})
+	updated, cmd = m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 120, Y: fileScreenY})
 	_ = updated
 	if cmd == nil {
 		t.Fatal("expected release on file line to return editor command")
@@ -2828,6 +2848,61 @@ func TestModelPickerCtrlRTriggersRefresh(t *testing.T) {
 	}
 }
 
+// TestModelPickerCtrlRWorksForRecapModel guards against regressing the
+// `recap-model` picker into the same "ctrl+r does nothing" hole the small
+// picker family has: the picker advertises ctrl+r in its hint, so the
+// handler must honor it.
+func TestModelPickerCtrlRWorksForRecapModel(t *testing.T) {
+	m := model{
+		showPicker:     true,
+		pickerKind:     "recap-model",
+		pickerItems:    []string{"  auto (resolve from priority list)", "openai/gpt-4o-mini"},
+		pickerValues:   []string{"auto", "openai/gpt-4o-mini"},
+		pickerIsHeader: []bool{false, false},
+		styles:         ApplyThemeColors("tokyonight"),
+		input:          newTestTextarea(),
+		viewport:       fastviewport.New(80, 20),
+	}
+
+	updated, cmd := m.Update(tea.KeyPressMsg{Code: 'r', Mod: tea.ModCtrl})
+	if cmd == nil {
+		t.Fatal("expected ctrl+r in recap-model picker to return a refresh cmd, got nil")
+	}
+	got := derefTestModel(t, updated)
+	if !got.pickerRefreshing {
+		t.Fatal("expected pickerRefreshing to be set to true for recap-model refresh")
+	}
+}
+
+// TestModelPickerFullModelsLoadedForRecapModel guards against the async model
+// load dropping the recap-model kind. The handler must accept the message
+// and append the provider sections, not return early.
+func TestModelPickerFullModelsLoadedForRecapModel(t *testing.T) {
+	m := model{
+		showPicker:       true,
+		pickerKind:       "recap-model",
+		pickerItems:      []string{"  auto (resolve from priority list)"},
+		pickerValues:     []string{"auto"},
+		pickerIsHeader:   []bool{false},
+		styles:           ApplyThemeColors("tokyonight"),
+		input:            newTestTextarea(),
+		viewport:         fastviewport.New(80, 20),
+	}
+	updated, _ := m.Update(modelPickerFullModelsLoadedMsg{
+		items:    []string{"openai", "  openai/gpt-4o-mini"},
+		values:   []string{"", "openai/gpt-4o-mini"},
+		isHeader: []bool{true, false},
+	})
+	got := derefTestModel(t, updated)
+	if got.pickerLoadingAll {
+		t.Fatal("pickerLoadingAll must clear after the async load message")
+	}
+	// Provider section must be appended below the auto line.
+	if len(got.pickerItems) < 2 || got.pickerItems[1] != "openai" {
+		t.Fatalf("expected provider section appended, got %#v", got.pickerItems)
+	}
+}
+
 func TestModelPickerCtrlRIgnoredForNonModelKinds(t *testing.T) {
 	// ctrl+r is gated to model-family pickers (model / advisor /
 	// permission-model). For other kinds (theme, session, etc.) it should
@@ -3290,7 +3365,22 @@ func TestModelPickerFilterRejectsSubsequenceOnlyMatches(t *testing.T) {
 // that filters for "claude" and verifies NO non-claude models leak through.
 func TestModelPickerFilterExcludesUnmatchedProviderModels(t *testing.T) {
 	m := model{}
-	m.openModelPicker()
+	// openModelPicker returns a tea.Cmd that loads the full provider list
+	// asynchronously. Drive it to completion so pickerItems is populated
+	// before the filter is applied — without this, the test would only see
+	// the favorites/recents rows that the sync part of openModelPicker
+	// seeded, and the filter would always be empty.
+	cmd := m.openModelPicker()
+	if cmd == nil {
+		t.Fatal("openModelPicker returned nil cmd; expected the async load cmd")
+	}
+	msg := cmd()
+	updated, _ := m.Update(msg)
+	m = updated.(model)
+	if !m.showPicker || m.pickerKind != "model" {
+		t.Fatalf("picker not open after async load: showPicker=%v kind=%q", m.showPicker, m.pickerKind)
+	}
+
 	m.pickerFilter = "claude"
 
 	items, values := m.pickerVisibleItems()

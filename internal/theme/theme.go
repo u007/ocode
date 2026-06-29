@@ -475,7 +475,7 @@ var builtinThemes = map[string]ThemeDefinition{
 			Success:    "#B7FF7A",
 			Error:      "#FF4D4D",
 			Accent:     "#77C8FF",
-			Dim:        "#3A2B1A",
+			Dim:        "#6B5A48",
 			Thinking:   "#77C8FF",
 		},
 	},

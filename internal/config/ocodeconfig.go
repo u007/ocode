@@ -115,6 +115,8 @@ type OcodeConfig struct {
 	IDEMode           string
 	SmallModel        string
 	SmallModelEnabled bool
+	RecapModel        string
+	RecapModelEnabled bool
 	CommitMsgModel    string
 	CommitMsgPrompt   string
 	TUI               TUIConfig
@@ -282,6 +284,8 @@ type ocodeConfigFile struct {
 	IDEMode             string               `json:"ide_mode,omitempty"`
 	SmallModel          string               `json:"small_model,omitempty"`
 	SmallModelEnabled   *bool                `json:"small_model_enabled,omitempty"`
+	RecapModel          string               `json:"recap_model,omitempty"`
+	RecapModelEnabled   *bool                `json:"recap_model_enabled,omitempty"`
 	RecapTimeoutSeconds *int                 `json:"recap_timeout_seconds,omitempty"`
 	CommitMsgModel      string               `json:"commit_msg_model,omitempty"`
 	CommitMsgPrompt     string               `json:"commit_msg_prompt,omitempty"`
@@ -332,6 +336,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Permissions:         defaultPermissionConfig(),
 		MemoryEnabled:       true,
 		SmallModelEnabled:   true,
+		RecapModelEnabled:   false,
 		Security:            defaultSecurityConfig(),
 		Discovery:           defaultDiscoveryConfig(),
 		RecapTimeoutSeconds: 120,
@@ -621,6 +626,19 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.SmallModelEnabled = *file.SmallModelEnabled
 		}
 		delete(raw, "small_model_enabled")
+	}
+
+	if _, ok := raw["recap_model"]; ok {
+		if file.RecapModel != "" {
+			cfg.RecapModel = file.RecapModel
+		}
+		delete(raw, "recap_model")
+	}
+	if _, ok := raw["recap_model_enabled"]; ok {
+		if file.RecapModelEnabled != nil {
+			cfg.RecapModelEnabled = *file.RecapModelEnabled
+		}
+		delete(raw, "recap_model_enabled")
 	}
 
 	if _, ok := raw["commit_msg_model"]; ok {
@@ -946,7 +964,15 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["plugins"] = cfg.Plugins
 	}
 	if len(cfg.ExtraAllowedPaths) > 0 {
-		payload["extra_allowed_paths"] = cfg.ExtraAllowedPaths
+		seen := make(map[string]struct{}, len(cfg.ExtraAllowedPaths))
+		deduped := cfg.ExtraAllowedPaths[:0:0]
+		for _, p := range cfg.ExtraAllowedPaths {
+			if _, ok := seen[p]; !ok {
+				seen[p] = struct{}{}
+				deduped = append(deduped, p)
+			}
+		}
+		payload["extra_allowed_paths"] = deduped
 	}
 	if cfg.Editor != "" {
 		payload["editor"] = cfg.Editor
@@ -961,6 +987,10 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["small_model"] = cfg.SmallModel
 	}
 	payload["small_model_enabled"] = cfg.SmallModelEnabled
+	if cfg.RecapModel != "" {
+		payload["recap_model"] = cfg.RecapModel
+	}
+	payload["recap_model_enabled"] = cfg.RecapModelEnabled
 	if cfg.CommitMsgModel != "" {
 		payload["commit_msg_model"] = cfg.CommitMsgModel
 	}
@@ -982,7 +1012,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" {
 			continue
 		}
 		payload[k] = v
@@ -1334,9 +1364,10 @@ func GetLastThinkingBudget() int {
 	return 0
 }
 
-// loadFullOcodeConfig loads the global ocode config and merges project settings.
+// loadFullOcodeConfig loads the global ocode config only.
 // Used by Save* functions to load current state before modifying a specific field.
-// Returns merged config (global + project paths) suitable for inspection and update.
+// Project paths are NOT merged here — merging would cause them to be written back
+// to the global config on every save, leaking per-project paths into the global file.
 func loadFullOcodeConfig() (*OcodeConfig, error) {
 	ocode := defaultOcodeConfig()
 
@@ -1344,18 +1375,6 @@ func loadFullOcodeConfig() (*OcodeConfig, error) {
 	if err == nil {
 		if err := loadOcodeConfigFile(globalPath, &ocode); err != nil && !os.IsNotExist(err) {
 			return nil, err
-		}
-	}
-
-	// Load and merge project settings
-	projectSettingsPath := getProjectSettingsPath()
-	if projectSettingsPath != "" {
-		projectPaths, err := loadProjectSettings(projectSettingsPath)
-		if err != nil {
-			return nil, fmt.Errorf("load project settings: %w", err)
-		}
-		if len(projectPaths) > 0 {
-			ocode.ExtraAllowedPaths = append(ocode.ExtraAllowedPaths, projectPaths...)
 		}
 	}
 
@@ -1485,6 +1504,39 @@ func SaveSmallModelEnabled(enabled bool) error {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
 	cfg.SmallModelEnabled = enabled
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveRecapModel persists the recap model override to config.
+// Set to empty string to clear the override and fall back to the small model.
+func SaveRecapModel(model string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.RecapModel = model
+	return SaveOcodeConfig(cfg)
+}
+
+// SaveRecapModelEnabled persists the recap model enabled/disabled state to config.
+func SaveRecapModelEnabled(enabled bool) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.RecapModelEnabled = enabled
+	return SaveOcodeConfig(cfg)
+}
+
+// SavePinnedSkills persists the list of permanently-discovered skill names.
+// The list lives under the discovery block in the config file — there is a
+// single source of truth (`Discovery.PinnedSkills`) so load/save are symmetric.
+func SavePinnedSkills(skills []string) error {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	cfg.Discovery.PinnedSkills = append([]string{}, skills...)
 	return SaveOcodeConfig(cfg)
 }
 

@@ -123,6 +123,61 @@ func TestLoadContextSuppressesCatalogWhenDiscoveryOn(t *testing.T) {
 	_ = off
 }
 
+func TestSyncPinnedSkillsSeedsAndUnpins(t *testing.T) {
+	a := newGateAgent()
+	a.config = &config.Config{}
+	eng := discovery.NewEngine(discovery.FakeEmbedder{Dimension: 8}, t.TempDir())
+	a.disco = &discoveryState{
+		enabled:    true,
+		engine:     eng,
+		session:    discovery.NewSession(eng),
+		lastPinned: map[string]struct{}{},
+	}
+
+	// Pin two skills. After SyncPinnedSkills, the session should report them
+	// as attached, and lastPinned should reflect the new set.
+	a.config.Ocode.Discovery.PinnedSkills = []string{"alpha", "beta"}
+	a.SyncPinnedSkills()
+	attached := a.disco.session.Attached()
+	if !containsStr(attached, "skill:alpha") || !containsStr(attached, "skill:beta") {
+		t.Fatalf("expected alpha and beta to be attached, got %v", attached)
+	}
+
+	// Now simulate a discover_more attaching an unrelated MCP. It must
+	// survive a subsequent SyncPinnedSkills that only re-seeds the pinned
+	// set.
+	a.disco.session.Seed([]string{"mcp:notion/notes"})
+	a.SyncPinnedSkills() // no change to pinned set → must be a no-op
+	attached = a.disco.session.Attached()
+	if !containsStr(attached, "mcp:notion/notes") {
+		t.Fatalf("discover_more MCP must be preserved across a no-op SyncPinnedSkills; got %v", attached)
+	}
+
+	// Unpin alpha. SyncPinnedSkills must drop skill:alpha from the
+	// attached set while keeping skill:beta and the MCP.
+	a.config.Ocode.Discovery.PinnedSkills = []string{"beta"}
+	a.SyncPinnedSkills()
+	attached = a.disco.session.Attached()
+	if containsStr(attached, "skill:alpha") {
+		t.Fatalf("unpinned alpha must be removed; got %v", attached)
+	}
+	if !containsStr(attached, "skill:beta") {
+		t.Fatalf("still-pinned beta must remain; got %v", attached)
+	}
+	if !containsStr(attached, "mcp:notion/notes") {
+		t.Fatalf("discover_more MCP must remain after re-seed; got %v", attached)
+	}
+}
+
+func containsStr(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestDiscoveryStatusAndReset(t *testing.T) {
 	a := newGateAgent()
 	a.config = &config.Config{}

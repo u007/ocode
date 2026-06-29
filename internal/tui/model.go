@@ -609,6 +609,8 @@ type model struct {
 	advisorEnabledSet    bool // whether advisorEnabled should be applied to newly installed agents
 	smallModelEnabled    bool // runtime small model state; persisted across agent rebuilds
 	smallModelEnabledSet bool // whether smallModelEnabled should be applied to newly installed agents
+	recapModelEnabled    bool // runtime recap model state; persisted across agent rebuilds
+	recapModelEnabledSet bool // whether recapModelEnabled should be applied to newly installed agents
 	config               *config.Config
 	sessionID            string
 	sessionTitle         string
@@ -1567,6 +1569,13 @@ func newModel(opts ...RunOptions) model {
 			return true
 		}(),
 		smallModelEnabledSet: true,
+		recapModelEnabled: func() bool {
+			if cfg != nil {
+				return cfg.Ocode.RecapModelEnabled
+			}
+			return false
+		}(),
+		recapModelEnabledSet: true,
 		config:               cfg,
 		// IDE mode: an explicit config value wins; otherwise auto-enable the
 		// Claude Code integration only when running inside a VS Code terminal.
@@ -2448,7 +2457,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerIndex = 0
 	case modelPickerFullModelsLoadedMsg:
 		m.pickerLoadingAll = false
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model") {
 			return m, nil
 		}
 		// Append provider sections below the existing favs+recents items.
@@ -2461,7 +2470,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerRefreshing = false
 		// If the picker was closed while the refresh was in flight, just
 		// surface the result as a transcript message and skip repopulation.
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model") {
 			if msg.err != nil {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Model cache refresh failed: %v", msg.err)})
 				m.rerenderTranscriptAndMaybeScroll()
@@ -3302,6 +3311,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd, drained := m.drainQueuedCommands(); drained {
 				return m, cmd
 			}
+			// Auto-recap when stream completes successfully and recap is enabled.
+			// Require at least 4 messages so trivial single-turn exchanges don't trigger a recap call.
+			if msg.err == nil && m.agent != nil && m.recapModelEnabled {
+				agentMsgs, _ := m.buildAgentMessagesSnapshot()
+				if len(agentMsgs) >= 4 {
+					newGen := m.recapGen + 1
+					if m.agent.RecapAsync(agentMsgs, newGen, "") {
+						m.recapGen = newGen
+					}
+				}
+			}
 		}
 	case compactStartedMsg:
 		m.compacting = true
@@ -3702,7 +3722,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			newM, cmd := m.selectPickerIndex(m.pickerIndex)
 			return true, newM, cmd
 		case "ctrl+r":
-			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" {
+			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "recap-model" {
 				if m.pickerRefreshing {
 					return true, m, nil
 				}
@@ -5117,6 +5137,19 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, cmd, true
 			}
+			if m.sidebarRecapModelToggleForClick(mouse) {
+				m.recapModelEnabled = !m.recapModelEnabled
+				m.recapModelEnabledSet = true
+				if m.config != nil {
+					m.config.Ocode.RecapModelEnabled = m.recapModelEnabled
+				}
+				if err := config.SaveRecapModelEnabled(m.recapModelEnabled); err != nil {
+					log.Printf("save recap model enabled: %v", err)
+				}
+				m.broadcastTUIStatus()
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
 			m.sidebarSel = selectionState{}
 		}
 		if !m.detail.empty() {
@@ -5886,7 +5919,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/rc" || cmd == "/remote-control" ||
 		cmd == "/search" || cmd == "/find" ||
 		cmd == "/discover" ||
-		cmd == "/docs" || cmd == "/doc-mode"
+		cmd == "/docs" || cmd == "/doc-mode" ||
+		cmd == "/recap"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -6845,6 +6879,21 @@ func (m *model) handleCompactCmd(args []string) {
 }
 
 func (m *model) handleRecapCmd(args []string) tea.Cmd {
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "model":
+			return m.handleRecapModelSub(args[1:])
+		case "status":
+			m.handleRecapStatus()
+			return nil
+		case "enable", "on":
+			return m.handleRecapEnable(true)
+		case "disable", "off":
+			return m.handleRecapEnable(false)
+		}
+	}
+
+	// Default: run recap.
 	if m.agent == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Recap requires an LLM connection. Run /connect first."})
 		return nil
@@ -6861,6 +6910,112 @@ func (m *model) handleRecapCmd(args []string) tea.Cmd {
 		return nil
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Recap could not start right now. Try again in a moment."})
+	return nil
+}
+
+func (m *model) handleRecapModelSub(args []string) tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Recap model requires a config. Run /connect first."})
+		return nil
+	}
+	if len(args) == 0 {
+		return m.openRecapModelPicker()
+	}
+
+	target := strings.ToLower(args[0])
+
+	if target == "auto" {
+		m.config.Ocode.RecapModel = ""
+		if !m.recapModelEnabled {
+			if err := config.SaveRecapModel(""); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Recap model is disabled; failed to clear value: %v", err)})
+				return nil
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Recap model is disabled. Auto-resolve remains off."})
+			return nil
+		}
+		// Re-resolve — reuse small model resolution since recap falls back to it.
+		if small := agent.ResolveSmallModel(m.config); small != "" {
+			m.config.Ocode.RecapModel = small
+			if err := config.SaveRecapModel(small); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Recap model resolved to %s but failed to persist: %v. In-memory value stays for this session.", small, err)})
+				return nil
+			}
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Recap model set to auto-resolve → %s", small)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Recap model cleared. No viable candidate found in priority list."})
+		}
+		return nil
+	}
+
+	// Validate that the model is available
+	client := agent.NewClient(m.config, args[0])
+	if client == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", args[0])})
+		return nil
+	}
+
+	// Set and persist
+	m.config.Ocode.RecapModel = args[0]
+	if err := config.SaveRecapModel(args[0]); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to save recap model: %v", err)})
+		return nil
+	}
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Recap model updated to %s\nPersisted to config for next session.", args[0])})
+	return nil
+}
+
+func (m *model) handleRecapStatus() {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Recap status requires a config. Run /connect first."})
+		return
+	}
+	var b strings.Builder
+	b.WriteString("≡ Recap Status\n")
+	b.WriteString(strings.Repeat("─", 30) + "\n\n")
+
+	recapModel := m.config.Ocode.RecapModel
+	if recapModel == "" {
+		recapModel = "(not set — will use small model, then main model)"
+	}
+	b.WriteString(fmt.Sprintf("Model:   %s\n", recapModel))
+
+	enabled := m.recapModelEnabled
+	if enabled {
+		b.WriteString("Status:  ● enabled\n")
+	} else {
+		b.WriteString("Status:  ○ disabled\n")
+	}
+
+	b.WriteString(fmt.Sprintf("Timeout: %ds\n", m.config.Ocode.RecapTimeoutSeconds))
+	b.WriteString("\nUsage:\n")
+	b.WriteString("  /recap            — run recap now\n")
+	b.WriteString("  /recap model      — pick recap model\n")
+	b.WriteString("  /recap model <id> — set recap model directly\n")
+	b.WriteString("  /recap enable     — enable auto-recap\n")
+	b.WriteString("  /recap disable    — disable auto-recap\n")
+	b.WriteString("  /recap status     — show this status\n")
+
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m *model) handleRecapEnable(enable bool) tea.Cmd {
+	m.recapModelEnabled = enable
+	m.recapModelEnabledSet = true
+	if m.config != nil {
+		m.config.Ocode.RecapModelEnabled = enable
+	}
+	if err := config.SaveRecapModelEnabled(enable); err != nil {
+		log.Printf("save recap model enabled: %v", err)
+	}
+	m.broadcastTUIStatus()
+	m.sidebarSel = selectionState{}
+	label := "enabled"
+	if !enable {
+		label = "disabled"
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Recap model %s.", label)})
 	return nil
 }
 
@@ -7513,7 +7668,7 @@ func (m *model) handleHelpCmd(args []string) {
 }
 
 func (m *model) handleSkillsCmd(args []string) {
-	// Subcommands: /skills [list|install [name...]|upgrade [name...]|info <name>]
+	// Subcommands: /skills [list|install [name...|all]|upgrade [name...|all]|info <name>|pin <name>|unpin <name>|pinned]
 	sub := "list"
 	if len(args) > 0 {
 		sub = strings.ToLower(args[0])
@@ -7528,6 +7683,20 @@ func (m *model) handleSkillsCmd(args []string) {
 			return
 		}
 		m.handleSkillsInfo(args[1])
+	case "pin":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /skills pin <name>"})
+			return
+		}
+		m.handleSkillsPin(args[1])
+	case "unpin":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /skills unpin <name>"})
+			return
+		}
+		m.handleSkillsUnpin(args[1])
+	case "pinned":
+		m.handleSkillsPinned()
 	case "help":
 		m.handleSkillsHelp()
 	default:
@@ -7540,9 +7709,12 @@ func (m *model) handleSkillsHelp() {
 	m.messages = append(m.messages, message{role: roleAssistant, text: `Skills Commands
 ═══════════════
   /skills                  List all skills with status
-  /skills install [name...]  Install bundled skills (all if no name)
-  /skills upgrade [name...]  Upgrade outdated skills (all if no name)
+  /skills install [name...|all]  Install bundled skills (all if no name or "all")
+  /skills upgrade [name...|all]  Upgrade outdated skills (all if no name or "all")
   /skills info <name>      Show details for a specific skill
+  /skills pin <name>       Pin skill so it is always discovered
+  /skills unpin <name>     Remove a pinned skill
+  /skills pinned           List all pinned skills
   /skills help             Show this help
 
 Status indicators:
@@ -7629,6 +7801,77 @@ func (m *model) handleSkillsInfo(name string) {
 	}
 	m.messages = append(m.messages, message{role: roleAssistant,
 		text: fmt.Sprintf("Skill %q not found. Use /skills to list all.", name)})
+}
+
+func (m *model) handleSkillsPin(name string) {
+	pinned := m.config.Ocode.Discovery.PinnedSkills
+	if pinned == nil {
+		pinned = []string{}
+	}
+	for _, existing := range pinned {
+		if strings.EqualFold(existing, name) {
+			m.messages = append(m.messages, message{role: roleAssistant,
+				text: fmt.Sprintf("Skill %q is already pinned.", name)})
+			return
+		}
+	}
+	pinned = append(pinned, name)
+	m.config.Ocode.Discovery.PinnedSkills = pinned
+	if err := config.SavePinnedSkills(pinned); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant,
+			text: fmt.Sprintf("Error saving pinned skills: %v", err)})
+		return
+	}
+	if m.agent != nil {
+		m.agent.SyncPinnedSkills()
+	}
+	m.messages = append(m.messages, message{role: roleAssistant,
+		text: fmt.Sprintf("Pinned skill %q — it will always be discovered in this project.", name)})
+}
+
+func (m *model) handleSkillsUnpin(name string) {
+	pinned := m.config.Ocode.Discovery.PinnedSkills
+	var kept []string
+	found := false
+	for _, existing := range pinned {
+		if strings.EqualFold(existing, name) {
+			found = true
+			continue
+		}
+		kept = append(kept, existing)
+	}
+	if !found {
+		m.messages = append(m.messages, message{role: roleAssistant,
+			text: fmt.Sprintf("Skill %q is not pinned.", name)})
+		return
+	}
+	m.config.Ocode.Discovery.PinnedSkills = kept
+	if err := config.SavePinnedSkills(kept); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant,
+			text: fmt.Sprintf("Error saving pinned skills: %v", err)})
+		return
+	}
+	if m.agent != nil {
+		m.agent.SyncPinnedSkills()
+	}
+	m.messages = append(m.messages, message{role: roleAssistant,
+		text: fmt.Sprintf("Unpinned skill %q.", name)})
+}
+
+func (m *model) handleSkillsPinned() {
+	pinned := m.config.Ocode.Discovery.PinnedSkills
+	if len(pinned) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant,
+			text: "No skills are pinned. Use /skills pin <name> to pin a skill."})
+		return
+	}
+	var b strings.Builder
+	b.WriteString("Pinned skills (always discovered):\n")
+	for _, name := range pinned {
+		b.WriteString(fmt.Sprintf("  • %s\n", name))
+	}
+	b.WriteString("\nUse /skills unpin <name> to remove.")
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
 
 // runInstaller invokes the skill installer and captures its output. It
@@ -10336,11 +10579,13 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		snap.SmallModel = m.config.Ocode.SmallModel
 		snap.AdvisorModel = m.config.Ocode.Advisor.Model
 		snap.ExtraAllowedPaths = m.config.Ocode.ExtraAllowedPaths
+		snap.RecapModel = m.config.Ocode.RecapModel
 	}
 	snap.SessionID = m.sessionID
 	snap.SessionTitle = m.sessionTitle
 	snap.CWD = m.workDir
 	snap.SmallModelOn = m.smallModelEnabled
+	snap.RecapModelOn = m.recapModelEnabled
 	snap.AdvisorEnabled = m.advisorEnabled
 	// The runtime advisor gate can drift from the seeded value when the TUI
 	// rebuilt the agent — prefer the live agent's view if present.
@@ -10822,15 +11067,30 @@ var permConfirmBtnDefs = []permBtnDef{
 }
 
 // permDialogBtnDefs returns the button set for the current dialog step.
+// shellControlKeywords are bash/sh constructs that are not real commands and
+// make no sense as an "always allow prefix" rule.
+var shellControlKeywords = map[string]bool{
+	"if": true, "else": true, "elif": true, "fi": true,
+	"then": true, "while": true, "do": true, "done": true,
+	"for": true, "case": true, "esac": true, "until": true,
+	"function": true, "select": true, "time": true,
+}
+
 // permAlwaysRuleAvailable reports whether the [A] "always allow rule" choice is
 // offered for req. Git mutating subcommands are excluded: a two-word `git <sub>`
 // always-allow would blanket-approve every future invocation of that subcommand
 // (e.g. all `git push ...`), so they must be approved each time. Read-only git is
 // auto-allowed and never reaches this dialog; harmful git already cannot persist.
+// Shell control-flow keywords (if, else, while, …) are also excluded: they are
+// not real commands and an always-allow prefix for them is meaningless.
 func permAlwaysRuleAvailable(req agent.PermissionRequest) bool {
-	if req.ToolName == "bash" && req.Scope == agent.PermissionScopeBashPrefix &&
-		strings.HasPrefix(req.Prefix, "git ") {
-		return false
+	if req.ToolName == "bash" && req.Scope == agent.PermissionScopeBashPrefix {
+		if strings.HasPrefix(req.Prefix, "git ") {
+			return false
+		}
+		if shellControlKeywords[req.Prefix] {
+			return false
+		}
 	}
 	return true
 }
@@ -13553,6 +13813,8 @@ type sidebarRenderData struct {
 	permModelToggleRows    int // number of (possibly wrapped) rows the perm model row occupies
 	ideToggleTopIdx        int // index in topLines of the IDE on/off row, -1 if absent
 	ideToggleRows          int // number of (possibly wrapped) rows the IDE row occupies
+	recapModelToggleTopIdx int // index in topLines of the recap model on/off row, -1 if absent
+	recapModelToggleRows   int // number of (possibly wrapped) rows the recap model row occupies
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -13829,7 +14091,7 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -14007,6 +14269,24 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.permModelToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, permModelLine, outerBodyWidth)
 	data.permModelToggleRows = len(data.topLines) - data.permModelToggleTopIdx
+	// Recap model row doubles as an on/off toggle (click to flip the runtime gate).
+	recapModelOn := m.recapModelEnabled
+	recapModel := ""
+	if m.config != nil {
+		recapModel = m.config.Ocode.RecapModel
+	}
+	if recapModel == "" {
+		recapModel = "(auto)"
+	}
+	var recapModelLine string
+	if recapModelOn {
+		recapModelLine = dimStyle.Render("recap: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(recapModel)
+	} else {
+		recapModelLine = dimStyle.Render("recap: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(recapModel)
+	}
+	data.recapModelToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, recapModelLine, outerBodyWidth)
+	data.recapModelToggleRows = len(data.topLines) - data.recapModelToggleTopIdx
 	data.ideToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, m.ideSidebarStatusLine(), outerBodyWidth)
 	data.ideToggleRows = len(data.topLines) - data.ideToggleTopIdx
@@ -14570,6 +14850,25 @@ func (m model) sidebarIDEToggleForClick(mouse tea.Mouse) bool {
 	}
 	startY := layout.contentTopY + data.ideToggleTopIdx
 	endY := minInt(startY+data.ideToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
+// sidebarRecapModelToggleForClick returns true when the click lands on the recap
+// model on/off row in the pinned top area of the sidebar.
+func (m model) sidebarRecapModelToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.recapModelToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.recapModelToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.recapModelToggleTopIdx
+	endY := minInt(startY+data.recapModelToggleRows, layout.scrollScreenY)
 	return mouse.Y >= startY && mouse.Y < endY
 }
 

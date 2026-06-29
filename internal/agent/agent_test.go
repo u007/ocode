@@ -888,6 +888,12 @@ func TestAgentStep(t *testing.T) {
 }
 
 func TestCompactSummaryClientUsesOverride(t *testing.T) {
+	// NewClient refuses to build a client for keyed providers (e.g. openai)
+	// when no API key is available, falling back to a.client (the mock
+	// here). Set OPENAI_API_KEY so the override resolves to a real
+	// GenericClient and the test can inspect provider/model.
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
 	a := &Agent{
 		client: &MockClient{},
 		config: &config.Config{Ocode: config.OcodeConfig{Compact: config.CompactConfig{

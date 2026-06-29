@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -26,10 +27,11 @@ func (a *Agent) discoveryConfigEnabled() bool {
 }
 
 type discoveryState struct {
-	enabled bool
-	engine  *discovery.Engine
-	session *discovery.Session
-	initErr string // last resolve error (fail-open reason)
+	enabled    bool
+	engine     *discovery.Engine
+	session    *discovery.Session
+	initErr    string // last resolve error (fail-open reason)
+	lastPinned map[string]struct{}
 }
 
 // ensureDiscovery lazily builds discovery state on first use (by Step time, MCP
@@ -80,10 +82,14 @@ func (a *Agent) ensureDiscovery() {
 	}
 	eng := discovery.NewEngine(emb, discoveryCacheDir())
 	a.disco = &discoveryState{
-		enabled: true,
-		engine:  eng,
-		session: discovery.NewSession(eng),
+		enabled:    true,
+		engine:     eng,
+		session:    discovery.NewSession(eng),
+		lastPinned: map[string]struct{}{},
 	}
+	// Seed permanently-pinned skills into the discovery session so they are
+	// always treated as "attached" regardless of embedding rank.
+	a.SyncPinnedSkills()
 	// Seed the markdown corpus from the on-disk cache and kick off background
 	// summarization of new/changed files.
 	a.ensureMDState()
@@ -94,6 +100,86 @@ func (a *Agent) ensureDiscovery() {
 	if a.tools != nil {
 		a.tools["discover_more"] = discoverMoreTool{agent: a}
 	}
+}
+
+// SyncPinnedSkills re-seeds the discovery session so it matches the current
+// pinned-skill set in config. Pinned skills bypass embedding ranking and are
+// always treated as "attached" — they always appear in the volatile
+// skill-description block injected by injectDiscoveryContext.
+//
+// The discovery session is grow-only by design (see internal/discovery), so
+// unpinning a skill cannot remove an existing attachment. We work around that
+// by rebuilding the session from scratch whenever the pinned set changes.
+// Non-pinned attachments (skills and MCPs discovered via embedding) are
+// preserved by re-seeding the union of current attached IDs that were NOT
+// pinned before plus the new pinned IDs.
+//
+// No-op when discovery is off or the session has not been created yet.
+// Safe to call mid-session (e.g. after the user pins or unpins a skill).
+func (a *Agent) SyncPinnedSkills() {
+	if a.disco == nil || !a.disco.enabled || a.disco.session == nil {
+		return
+	}
+	pinned := a.pinnedSkillIDs()
+	pinnedSet := make(map[string]struct{}, len(pinned))
+	for _, id := range pinned {
+		pinnedSet[id] = struct{}{}
+	}
+
+	// If the previously-known pinned set matches the current one, the
+	// session is already in sync (or will grow organically). No need to
+	// rebuild — that would drop the user's discover_more results.
+	if maps.Equal(a.disco.lastPinned, pinnedSet) {
+		return
+	}
+
+	// Compute the desired attached set: existing non-stale attachments +
+	// current pinned IDs. An attachment is "stale" if it was pinned before
+	// but is no longer pinned now.
+	existing := a.disco.session.Attached()
+	kept := make([]string, 0, len(existing)+len(pinned))
+	seen := make(map[string]struct{}, len(existing)+len(pinned))
+	for _, id := range existing {
+		if a.disco.lastPinned != nil {
+			if _, wasPinned := a.disco.lastPinned[id]; wasPinned {
+				if _, stillPinned := pinnedSet[id]; !stillPinned {
+					continue // stale pinned id, drop it
+				}
+			}
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		kept = append(kept, id)
+	}
+	for _, id := range pinned {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		kept = append(kept, id)
+	}
+	a.disco.session = discovery.NewSession(a.disco.engine)
+	a.disco.session.Seed(kept)
+	a.disco.lastPinned = pinnedSet
+}
+
+
+// pinnedSkillIDs returns the configured pinned-skill IDs ("skill:<name>").
+func (a *Agent) pinnedSkillIDs() []string {
+	if a.config == nil {
+		return nil
+	}
+	pinned := a.config.Ocode.Discovery.PinnedSkills
+	if len(pinned) == 0 {
+		return nil
+	}
+	ids := make([]string, len(pinned))
+	for i, name := range pinned {
+		ids[i] = "skill:" + name
+	}
+	return ids
 }
 
 // keyForEnv resolves an embedding API key. Env var is primary (matches the

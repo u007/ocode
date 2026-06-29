@@ -70,6 +70,16 @@ func ProjectLocalSkillDirs(root string) []string {
 }
 
 func skillSearchPaths() []string {
+	root := ""
+	if cwd, err := os.Getwd(); err == nil {
+		root = cwd
+	}
+	return SkillSearchPathsForRoot(root)
+}
+
+// SkillSearchPathsForRoot returns the ordered list of directories searched for
+// skills, using root as the project root (may be empty).
+func SkillSearchPathsForRoot(root string) []string {
 	var paths []string
 
 	home, err := os.UserHomeDir()
@@ -78,7 +88,9 @@ func skillSearchPaths() []string {
 		paths = append(paths, filepath.Join(home, ".agents", "skills"))
 	}
 
-	if cwd, err := os.Getwd(); err == nil {
+	if root != "" {
+		paths = append(paths, ProjectLocalSkillDirs(root)...)
+	} else if cwd, err := os.Getwd(); err == nil {
 		paths = append(paths, ProjectLocalSkillDirs(cwd)...)
 	}
 
