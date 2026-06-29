@@ -98,6 +98,9 @@ func (m *model) refreshModelPickerItems() {
 	if kind == "small-model" {
 		m.prependSmallModelClearOption()
 	}
+	if kind == "recap-model" {
+		m.prependRecapModelClearOption()
+	}
 	if kind == "advisor" {
 		m.prependClaudeCodeSection()
 	}
@@ -698,7 +701,7 @@ func (m model) pickerRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	row := start + idx
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
 	if !isFiltered && row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
 		return 0, false
 	}
@@ -714,7 +717,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
 	if !isFiltered && index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
 		m.closePicker()
 		return m, nil
@@ -764,6 +767,9 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	if kind == "small-model" {
 		return m.handleCommand("/small-model " + selected)
 	}
+	if kind == "recap-model" {
+		return m.handleCommand("/recap model " + selected)
+	}
 	if kind == "embedding-model" {
 		return m.handleCommand("/discover model " + selected)
 	}
@@ -772,7 +778,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
-	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" {
+	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
 	} else if m.pickerKind == "advisor" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
@@ -840,7 +846,7 @@ func (m model) renderPicker() string {
 		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
-		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
+		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model") && m.pickerFilter != ""
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
@@ -1039,6 +1045,24 @@ func (m *model) openSmallModelPicker() tea.Cmd {
 
 func (m *model) prependSmallModelClearOption() {
 	if m.pickerKind != "small-model" {
+		return
+	}
+	m.pickerItems = append([]string{"  auto (resolve from priority list)"}, m.pickerItems...)
+	m.pickerValues = append([]string{"auto"}, m.pickerValues...)
+	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
+}
+
+func (m *model) openRecapModelPicker() tea.Cmd {
+	// Reuse the model picker listing with kind="recap-model" so picker
+	// selection saves the recap model instead of switching the active model.
+	cmd := m.openModelPicker()
+	m.pickerKind = "recap-model"
+	m.prependRecapModelClearOption()
+	return cmd
+}
+
+func (m *model) prependRecapModelClearOption() {
+	if m.pickerKind != "recap-model" {
 		return
 	}
 	m.pickerItems = append([]string{"  auto (resolve from priority list)"}, m.pickerItems...)

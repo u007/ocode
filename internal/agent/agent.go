@@ -1248,6 +1248,12 @@ func (a *Agent) runRecap(messages []Message, instruction string) string {
 	}
 	b.WriteString("CONVERSATION:\n")
 
+	// Track total character budget (~4 chars per token heuristic, capped at 48k
+	// chars / ~12k tokens to stay well within small/recap model context windows).
+	const maxRecapChars = 48_000
+	baseLen := b.Len() + 100 // account for role prefixes and newlines
+	budget := maxRecapChars - baseLen
+
 	for _, msg := range messages {
 		role := "user"
 		if msg.Role == "assistant" {
@@ -1257,7 +1263,12 @@ func (a *Agent) runRecap(messages []Message, instruction string) string {
 		if len(content) > 2000 {
 			content = content[:2000] + "... (truncated)"
 		}
-		fmt.Fprintf(&b, "[%s] %s\n\n", role, content)
+		line := fmt.Sprintf("[%s] %s\n\n", role, content)
+		if budget-len(line) < 0 {
+			break // stop adding — we've hit the budget
+		}
+		b.WriteString(line)
+		budget -= len(line)
 	}
 
 	prompt := b.String()
@@ -1312,6 +1323,14 @@ func (a *Agent) recapClient() LLMClient {
 	if a.config == nil {
 		return a.client
 	}
+	// Prefer recap model when enabled and set.
+	recap := strings.TrimSpace(a.config.Ocode.RecapModel)
+	if recap != "" && a.config.Ocode.RecapModelEnabled {
+		if client := NewClient(a.config, recap); client != nil {
+			return client
+		}
+	}
+	// Fall back to small model.
 	small := strings.TrimSpace(a.config.Ocode.SmallModel)
 	if small == "" || !a.config.Ocode.SmallModelEnabled {
 		return a.client
@@ -1870,14 +1889,15 @@ func permissionRequestSummary(req *PermissionRequest) string {
 // consultPermissionModel routes a permission decision to the right model path:
 // a bash command that classifies as interpreter execution goes through the
 // structured effect-verification path; every other tool/command uses the plain
-// ALLOW/DENY path.
+// ALLOW/DENY path. Remote runners (npx, bunx) can't have their source analyzed,
+// so they skip the interpreter path and fall through to the plain path.
 func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *PermissionRequest) (bool, string, string) {
 	if name == "bash" {
 		var p struct {
 			Command string `json:"command"`
 		}
 		if err := json.Unmarshal(args, &p); err == nil && p.Command != "" {
-			if ie, ok := classifyInterpreterExecution(p.Command); ok {
+			if ie, ok := classifyInterpreterExecution(p.Command); ok && ie.SourceMode != "remote" {
 				return a.askPermissionModelInterpreter(p.Command, ie)
 			}
 		}

@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/u007/ocode/internal/skill"
 )
 
 const (
@@ -192,6 +194,23 @@ func (a *Agent) environmentPrompt() string {
 	if modelID == "" {
 		modelID = "unknown"
 	}
+	// Resolve config and skill paths for the LLM.
+	home, _ := os.UserHomeDir()
+	var globalConfigBase string
+	if runtime.GOOS == "windows" {
+		globalConfigBase = filepath.Join(os.Getenv("APPDATA"), "opencode")
+	} else {
+		globalConfigBase = filepath.Join(home, ".config", "opencode")
+	}
+	globalOpencodeCfg := filepath.Join(globalConfigBase, "opencode.json")
+	globalOcodeCfg := filepath.Join(globalConfigBase, "ocodeconfig.json")
+
+	skillDirs := skill.SkillSearchPathsForRoot(root)
+	var skillDirLines []string
+	for _, d := range skillDirs {
+		skillDirLines = append(skillDirLines, "    - "+d)
+	}
+
 	lines := []string{
 		fmt.Sprintf("You are powered by the model named %s.", modelID),
 		"Here is some useful information about the environment you are running in:",
@@ -206,8 +225,14 @@ func (a *Agent) environmentPrompt() string {
 	lines = append(lines,
 		fmt.Sprintf("  Platform: %s", runtime.GOOS),
 		fmt.Sprintf("  Today's date: %s", today),
-		"</env>",
+		fmt.Sprintf("  Global opencode config (MCP servers, model, providers): %s", globalOpencodeCfg),
+		fmt.Sprintf("  Global ocode config (permissions, extra paths, settings): %s", globalOcodeCfg),
+		fmt.Sprintf("  Project ocode settings: %s", filepath.Join(root, ".ocode", "settings.json")),
+		fmt.Sprintf("  Project opencode config: %s", filepath.Join(root, "opencode.json")),
+		"  Skills search paths (checked in order):",
 	)
+	lines = append(lines, skillDirLines...)
+	lines = append(lines, "</env>")
 	result := strings.Join(lines, "\n")
 	a.envPromptDate = today
 	a.envPromptStr = result

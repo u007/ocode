@@ -349,6 +349,14 @@ func TestPickBundledFiltersByName(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("pickBundled with no names should return all; got %+v", got)
 	}
+	got = pickBundled(bundled, []string{"all"})
+	if len(got) != 3 {
+		t.Fatalf("pickBundled with [\"all\"] should return all; got %+v", got)
+	}
+	got = pickBundled(bundled, []string{"all", "beta"})
+	if len(got) != 3 {
+		t.Fatalf("pickBundled with [\"all\", \"beta\"] should return all; got %+v", got)
+	}
 }
 
 func TestUninstallRemovesDir(t *testing.T) {
@@ -675,6 +683,72 @@ func TestGetSkillStatusCustomModifiedThenBundledChanges(t *testing.T) {
 	}
 	if found.Status != SkillCustomModified {
 		t.Fatalf("expected SkillCustomModified (user edits preserved), got %v", found.Status)
+	}
+}
+
+func TestUpgradeSkipsCustomModifiedWhenBulk(t *testing.T) {
+	// Use skillB (no version — relies on hash comparison) so we exercise
+	// the .bundled-hash sidecar path.
+	withBundledFS(t, fstest.MapFS{
+		"skills/beta/SKILL.md": &fstest.MapFile{Data: []byte(skillB)},
+	})
+	target := withTempHome(t)
+
+	// Install (force=true writes .bundled-hash).
+	if err := runInstallOrUpgrade(nil, true); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	// User modifies the installed file.
+	skillPath := filepath.Join(target, "beta", "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte(skillB+"# my edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Upgrade all (bulk, no names) should skip because it's custom-modified.
+	if err := runInstallOrUpgrade(nil, false); err != nil {
+		t.Fatalf("upgrade all: %v", err)
+	}
+
+	// Read back — should still contain the user's edit.
+	got, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(got), "# my edit") {
+		t.Fatalf("expected user edit preserved, got: %s", got)
+	}
+}
+
+func TestUpgradeProceedsCustomModifiedWhenNamed(t *testing.T) {
+	withBundledFS(t, fstest.MapFS{
+		"skills/beta/SKILL.md": &fstest.MapFile{Data: []byte(skillB)},
+	})
+	target := withTempHome(t)
+
+	// Install (force=true writes .bundled-hash).
+	if err := runInstallOrUpgrade(nil, true); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+
+	// User modifies the installed file.
+	skillPath := filepath.Join(target, "beta", "SKILL.md")
+	if err := os.WriteFile(skillPath, []byte(skillB+"# my edit\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Named upgrade should still overwrite.
+	if err := runInstallOrUpgrade([]string{"beta"}, false); err != nil {
+		t.Fatalf("upgrade beta: %v", err)
+	}
+
+	// Read back — should be the bundled version (user edit overwritten).
+	got, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(got), "# my edit") {
+		t.Fatalf("named upgrade should have overwritten user edit, got: %s", got)
 	}
 }
 

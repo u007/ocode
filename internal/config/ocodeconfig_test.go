@@ -1313,7 +1313,10 @@ func TestSaveExtraAllowedPath_FallsBackToGlobal(t *testing.T) {
 	}
 }
 
-func TestLoadFullOcodeConfig_MergesProjectPaths(t *testing.T) {
+// TestLoadFullOcodeConfig_DoesNotMergeProjectPaths verifies that loadFullOcodeConfig
+// (used by Save* helpers) does NOT merge project paths. If it did, every save operation
+// (theme change, model change, etc.) would leak per-project paths into the global config.
+func TestLoadFullOcodeConfig_DoesNotMergeProjectPaths(t *testing.T) {
 	projectDir := t.TempDir()
 	if err := os.Mkdir(filepath.Join(projectDir, ".git"), 0755); err != nil {
 		t.Fatalf("create .git: %v", err)
@@ -1336,14 +1339,46 @@ func TestLoadFullOcodeConfig_MergesProjectPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadFullOcodeConfig failed: %v", err)
 	}
-	var found bool
 	for _, p := range cfg.ExtraAllowedPaths {
 		if p == "/project/path" {
-			found = true
-			break
+			t.Errorf("loadFullOcodeConfig must not merge project paths into global config (would leak on next Save* call); got %v", cfg.ExtraAllowedPaths)
 		}
 	}
-	if !found {
-		t.Errorf("expected /project/path in merged config, got %v", cfg.ExtraAllowedPaths)
+}
+
+// TestSavePinnedSkillsRoundTrip proves the SavePinnedSkills / load cycle uses
+// Discovery.PinnedSkills as a single source of truth. Regression test for the
+// duplicate-field bug where SavePinnedSkills wrote to a stale top-level field
+// that loadOcodeConfigFile never read back, so pin/unpin changes were lost on
+// restart.
+func TestSavePinnedSkillsRoundTrip(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	// Pin two skills.
+	want := []string{"brainstorming", "review-changes"}
+	if err := SavePinnedSkills(want); err != nil {
+		t.Fatalf("SavePinnedSkills: %v", err)
+	}
+
+	// Reload and confirm the discovery field has them.
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig: %v", err)
+	}
+	if got := cfg.Discovery.PinnedSkills; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("Discovery.PinnedSkills = %v, want %v", got, want)
+	}
+
+	// Unpin one.
+	if err := SavePinnedSkills([]string{"review-changes"}); err != nil {
+		t.Fatalf("SavePinnedSkills (unpin): %v", err)
+	}
+	cfg, err = loadFullOcodeConfig()
+	if err != nil {
+		t.Fatalf("loadFullOcodeConfig after unpin: %v", err)
+	}
+	if got := cfg.Discovery.PinnedSkills; len(got) != 1 || got[0] != "review-changes" {
+		t.Fatalf("Discovery.PinnedSkills = %v, want [review-changes]", got)
 	}
 }

@@ -17,6 +17,9 @@ type TUIStatus struct {
 	// Advisor model + runtime on/off.
 	AdvisorModel   string `json:"advisor_model,omitempty"`
 	AdvisorEnabled bool   `json:"advisor_enabled"`
+	// Recap model name + runtime on/off.
+	RecapModel   string `json:"recap_model,omitempty"`
+	RecapModelOn bool   `json:"recap_model_enabled"`
 	// IDE integration: mode is "off" | "claude" | ...; status is a short
 	// human-readable string for the status bar.
 	IDEMode   string `json:"ide_mode,omitempty"`

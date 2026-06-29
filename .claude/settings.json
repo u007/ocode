@@ -10,5 +10,8 @@
       "Bash(rm -rf ~)",
       "Bash(rm -rf $HOME)"
     ]
+  },
+  "enabledPlugins": {
+    "cognee-memory@cognee": true
   }
 }
