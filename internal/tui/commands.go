@@ -19,6 +19,7 @@ import (
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/skill"
 )
 
 type commandSpec struct {
@@ -55,6 +56,32 @@ func refreshCustomCommands(cfg *config.Config) {
 		cmd := &loadedCustomCommands[i]
 		customCommandLookup["/"+cmd.Name] = cmd
 	}
+
+	// Register skills as slash commands. Skills loaded later in the search path
+	// (e.g. .claude/skill) are already deduplicated by LoadSkills (first-seen
+	// wins, .opencode/skills comes before .claude/skill). We only register a
+	// skill if no built-in command or custom command already claims that name.
+	for _, s := range skill.LoadSkills() {
+		// Use the directory name as the command key so names with spaces still
+		// produce valid slash commands.
+		dirName := filepath.Base(filepath.Dir(s.Source))
+		key := "/" + dirName
+		if _, isBuiltin := commandLookup[key]; isBuiltin {
+			continue
+		}
+		if _, isCustom := customCommandLookup[key]; isCustom {
+			continue
+		}
+		sc := s // capture
+		cmd := &commands.Command{
+			Name:        dirName,
+			Description: sc.Description,
+			Prompt:      sc.Content,
+			HasArgs:     strings.Contains(sc.Content, "{{args}}") || strings.Contains(sc.Content, "{args}"),
+		}
+		customCommandLookup[key] = cmd
+	}
+
 	agent.ApplyAgentConfig(cfg)
 }
 
@@ -66,7 +93,7 @@ func init() {
 		{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
 		{name: "/compact", usage: "/compact [focus]", help: "Summarise older context to free tokens; optional focus guides the summary", handler: runCompactCmd},
-		{name: "/recap", help: "Summarize conversation in caveman style (uses small model)", handler: runRecapCmd},
+		{name: "/recap", usage: "/recap [model|status|enable|disable]", help: "Summarize conversation / manage recap model", handler: runRecapCmd},
 		{name: "/changes", help: "Analyze repo changes: diffs, LSP errors, and in-progress specs", handler: runChangesCmd},
 		{name: "/standup", aliases: []string{"/catchup"}, help: "Review recent commits + pending changes: caveman summary + sorted TODOs + missed stubs", handler: runStandupCmd},
 		{name: "/lsp", usage: "/lsp [show|open <path>|errors|all]", help: "Show current LSP diagnostics and error counts", handler: runLSPCmd},
