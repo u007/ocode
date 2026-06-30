@@ -68,8 +68,9 @@ type JobEvent struct {
 // RecapResult carries an async recap response plus a generation tag so callers
 // can ignore stale results after a session reset.
 type RecapResult struct {
-	Gen  uint64
-	Text string
+	Gen   uint64
+	Text  string
+	Short bool // true for 1-line auto-recap, false for full /recap
 }
 
 type Agent struct {
@@ -1194,10 +1195,21 @@ func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, 
 	return true
 }
 
-// RecapAsync generates a conversation recap using the small model in a
-// goroutine. Returns false if a recap is already in flight.
+// RecapAsync generates a full conversation recap (caveman style, multi-section)
+// using the small model in a goroutine. Returns false if a recap is already in flight.
 // instruction is optional additional guidance appended to the recap prompt.
 func (a *Agent) RecapAsync(messages []Message, gen uint64, instruction string) bool {
+	return a.recapAsync(messages, gen, instruction, false)
+}
+
+// RecapAsyncShort generates a one-line conversation recap using the small model
+// in a goroutine. Returns false if a recap is already in flight.
+// instruction is optional additional guidance appended to the recap prompt.
+func (a *Agent) RecapAsyncShort(messages []Message, gen uint64, instruction string) bool {
+	return a.recapAsync(messages, gen, instruction, true)
+}
+
+func (a *Agent) recapAsync(messages []Message, gen uint64, instruction string, short bool) bool {
 	if !a.recapMu.TryLock() {
 		return false
 	}
@@ -1205,9 +1217,9 @@ func (a *Agent) RecapAsync(messages []Message, gen uint64, instruction string) b
 	copy(snapshot, messages)
 	go func() {
 		defer a.recapMu.Unlock()
-		text := a.runRecap(snapshot, instruction)
+		text := a.runRecap(snapshot, instruction, short)
 		if a.OnRecap != nil {
-			a.OnRecap(RecapResult{Gen: gen, Text: text})
+			a.OnRecap(RecapResult{Gen: gen, Text: text, Short: short})
 		}
 	}()
 	return true
@@ -1223,28 +1235,36 @@ func (a *Agent) Compact(messages []Message) (CompactResult, bool) {
 	return a.runCompact(messages, rt, ""), true
 }
 
-// Recap generates a conversation recap synchronously using the small model.
+// Recap generates a full conversation recap synchronously using the small model.
 // instruction is optional additional guidance appended to the recap prompt.
 func (a *Agent) Recap(messages []Message, instruction string) string {
-	return a.runRecap(messages, instruction)
+	return a.runRecap(messages, instruction, false)
 }
 
-func (a *Agent) runRecap(messages []Message, instruction string) string {
+func (a *Agent) runRecap(messages []Message, instruction string, short bool) string {
 	client := a.recapClient()
 	if client == nil {
 		return "Recap unavailable: no LLM client."
 	}
 
 	var b strings.Builder
-	b.WriteString("You are a conversation recap assistant. Summarize the following conversation in caveman style — short, punchy, no fluff.\n\n")
-	b.WriteString("Cover these sections:\n")
-	b.WriteString("1. WHAT USER WANT — what was asked\n")
-	b.WriteString("2. WHAT FIND — what was found or discovered\n")
-	b.WriteString("3. DECISION — what decisions were made\n")
-	b.WriteString("4. DO — what was updated and tested\n\n")
-	b.WriteString("Format: use headers and bullet points. Be terse. No filler.\n\n")
+	if short {
+		b.WriteString("You are a concise conversation summarizer. Summarize the conversation in ONE SENTENCE. Max 100 characters. Be terse. No headers, no bullets, no formatting.\n\n")
+	} else {
+		b.WriteString("You are a conversation recap assistant. Summarize the following conversation in caveman style — short, punchy, no fluff.\n\n")
+		b.WriteString("Cover these sections:\n")
+		b.WriteString("1. WHAT USER WANT — what was asked\n")
+		b.WriteString("2. WHAT FIND — what was found or discovered\n")
+		b.WriteString("3. DECISION — what decisions were made\n")
+		b.WriteString("4. DO — what was updated and tested\n\n")
+		b.WriteString("Format: use headers and bullet points. Be terse. No filler.\n\n")
+	}
 	if instruction != "" {
-		fmt.Fprintf(&b, "Additional focus: %s\n\n", instruction)
+		tag := "Additional focus"
+		if short {
+			tag = "Focus"
+		}
+		fmt.Fprintf(&b, "%s: %s\n\n", tag, instruction)
 	}
 	b.WriteString("CONVERSATION:\n")
 

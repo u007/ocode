@@ -3317,7 +3317,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				agentMsgs, _ := m.buildAgentMessagesSnapshot()
 				if len(agentMsgs) >= 4 {
 					newGen := m.recapGen + 1
-					if m.agent.RecapAsync(agentMsgs, newGen, "") {
+					if m.agent.RecapAsyncShort(agentMsgs, newGen, "") {
 						m.recapGen = newGen
 					}
 				}
@@ -3404,12 +3404,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 	case recapFinishedMsg:
 		if msg.gen == m.recapGen {
-			m.recapText = ""
-			m.messages = append(m.messages, message{
-				role:      roleAssistant,
-				text:      fmt.Sprintf("≡ RECAP\n\n%s", msg.text),
-				transient: true,
-			})
+			m.recapText = msg.text
+			if msg.short {
+				// Auto-recap: 1-liner in the transcript.
+				m.messages = append(m.messages, message{
+					role:      roleAssistant,
+					text:      fmt.Sprintf("recap: %s", msg.text),
+					transient: true,
+				})
+			} else {
+				// Manual /recap: full format.
+				m.messages = append(m.messages, message{
+					role:      roleAssistant,
+					text:      fmt.Sprintf("≡ RECAP\n\n%s", msg.text),
+					transient: true,
+				})
+			}
 			m.rerenderTranscriptAndMaybeScroll()
 			m.layout()
 		}
@@ -12085,7 +12095,7 @@ func (m *model) wireCompactCallbacks() {
 	recapDoneCh := m.recapCh
 	m.agent.OnRecap = func(result agent.RecapResult) {
 		select {
-		case recapDoneCh <- recapFinishedMsg{gen: result.Gen, text: result.Text}:
+		case recapDoneCh <- recapFinishedMsg{gen: result.Gen, text: result.Text, short: result.Short}:
 		default:
 		}
 	}
@@ -12210,8 +12220,9 @@ func waitRecapEvent(doneCh chan recapFinishedMsg) tea.Cmd {
 }
 
 type recapFinishedMsg struct {
-	gen  uint64
-	text string
+	gen   uint64
+	text  string
+	short bool // true for 1-line auto-recap, false for manual /recap
 }
 
 // deltaEvent carries one streamed token (kind ∈ {"reasoning","text"}) from
