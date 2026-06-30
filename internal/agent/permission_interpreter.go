@@ -222,6 +222,14 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	- In particular, commands like python3 <<'PYEOF' that rewrite a local project markdown file should usually be ALLOW when the effect set is fully enumerated and stays inside policy.
 	- Use decision "ask" whenever any effect is dynamic, truncated, unresolved,
 	  outside allowed roots, or otherwise not fully confident.
+	- CRITICAL — string literals are NOT execution: Python string literals
+	  (text inside r'''...''', '''...''', r"""...""", """...""", r'...', '...', "...")
+	  may contain shell command text as DATA — this is NOT subprocess execution.
+	  Only report entries in "subprocesses" when the Python code itself CALLS
+	  subprocess.run(), subprocess.Popen(), os.system(), os.popen(), or a similar
+	  execution API. Arguments to str.replace(), variable assignments, or raw string
+	  constants that happen to contain "docker run", "curl", "tar", etc. are NEVER
+	  subprocesses — leave "subprocesses" empty in those cases.
 
 	Respond with ONLY a single JSON object (no prose, no markdown fences):
 	{"decision":"allow|ask","confidence":0.0-1.0,"summary":"...","effects":{"reads":[],"writes":[],"deletes":[],"network":[],"subprocesses":[],"db_destructive":[],"unknown":[]}}
@@ -345,8 +353,35 @@ func (a *Agent) verifyInterpreterEffects(ie *InterpreterExec, resp *interpreterM
 	if okp, r := checkPaths("delete", resp.Effects.Deletes); !okp {
 		return false, r
 	}
-	if len(resp.Effects.Subprocesses) > 0 {
-		return false, "inferred subprocess execution: " + strings.Join(resp.Effects.Subprocesses, ", ")
+	// Subprocesses are allowed only when they are clearly local utilities.
+	// Network-capable subprocesses (curl/wget/nc/httpie, etc.) fall back to
+	// human/LLM review unless they are explicitly targeting localhost.
+	// Shells, interpreters, and privilege-escalation wrappers are always
+	// escalated because they can execute arbitrary code or hide the real binary.
+	for _, sub := range resp.Effects.Subprocesses {
+		sub = strings.TrimSpace(sub)
+		if sub == "" {
+			continue
+		}
+		bin, wrappedAsk := classifyInterpreterSubprocess(sub)
+		if wrappedAsk {
+			return false, "subprocess requires review: " + sub
+		}
+		if bin == "" {
+			continue
+		}
+		if isHardBlockedCommand(sub) {
+			return false, "subprocess hard-blocked: " + sub
+		}
+		if IsHarmfulBashCommand(sub) {
+			return false, "subprocess harmful: " + sub
+		}
+		if isInterpreterSubprocessBinary(bin) {
+			return false, "subprocess spawns shell/interpreter: " + sub
+		}
+		if isNetworkSubprocessBinary(bin) && !subprocessTargetsLocalhost(sub) {
+			return false, "subprocess has network capability: " + sub
+		}
 	}
 	for _, host := range resp.Effects.Network {
 		host = strings.TrimSpace(host)
@@ -403,6 +438,161 @@ func (a *Agent) persistInterpreterGrant(ie *InterpreterExec, sha, command string
 	return nil
 }
 
+// stripPythonTripleQuotedBodies replaces the body of Python triple-quoted
+// strings (”'...”' and """...""" with optional r/b/f prefix) with empty
+// text, leaving the delimiters intact. This prevents shell-like text stored
+// inside raw string literals from being misidentified as executable code.
+func stripPythonTripleQuotedBodies(source string) string {
+	var result strings.Builder
+	i := 0
+	n := len(source)
+	for i < n {
+		// Consume optional string prefix (r, b, f, rb, br, fr, etc. — up to 2 chars)
+		j := i
+		for j < n && j-i < 2 && (source[j] == 'r' || source[j] == 'R' || source[j] == 'b' || source[j] == 'B' || source[j] == 'f' || source[j] == 'F') {
+			j++
+		}
+		if j > i && j < n && (source[j] == '"' || source[j] == '\'') {
+			// Potential string with prefix — check for triple quote
+			q := source[j]
+			if j+2 < n && source[j+1] == q && source[j+2] == q {
+				delim := source[j : j+3]
+				result.WriteString(source[i:j]) // prefix
+				result.WriteString(delim)       // opening delimiter
+				i = j + 3
+				for i+2 < n {
+					if source[i] == q && source[i+1] == q && source[i+2] == q {
+						result.WriteString(delim) // closing delimiter
+						i += 3
+						break
+					}
+					i++
+				}
+				continue
+			}
+			// Single-quoted with prefix — write prefix + quote normally
+			result.WriteString(source[i : j+1])
+			i = j + 1
+			continue
+		}
+		// Check for triple-quoted string without prefix
+		if i+2 < n && (source[i] == '"' || source[i] == '\'') {
+			q := source[i]
+			if source[i+1] == q && source[i+2] == q {
+				delim := source[i : i+3]
+				result.WriteString(delim)
+				i += 3
+				for i+2 < n {
+					if source[i] == q && source[i+1] == q && source[i+2] == q {
+						result.WriteString(delim)
+						i += 3
+						break
+					}
+					i++
+				}
+				continue
+			}
+		}
+		result.WriteByte(source[i])
+		i++
+	}
+	return result.String()
+}
+
+// pythonIsLikelyPureFileOp returns true when Python source, after stripping
+// triple-quoted string bodies, contains no subprocess, network, eval, or
+// dynamic-import patterns. It is conservative: any ambiguous pattern returns
+// false, falling through to the LLM check.
+func pythonIsLikelyPureFileOp(source string) bool {
+	stripped := strings.ToLower(stripPythonTripleQuotedBodies(source))
+	dangerous := []string{
+		"subprocess.",
+		"os.system(",
+		"os.popen(",
+		"popen(",
+		"commands.getoutput(",
+		"commands.getstatusoutput(",
+		"urllib.",
+		"requests.",
+		"http.client",
+		"socket.",
+		"eval(",
+		"exec(",
+		"__import__(",
+		"importlib.",
+		"ctypes.",
+		"cffi.",
+	}
+	for _, pat := range dangerous {
+		if strings.Contains(stripped, pat) {
+			return false
+		}
+	}
+	return true
+}
+
+var pyOpenPathRe = regexp.MustCompile(`\bopen\s*\(\s*r?["']([^"'\r\n]+)["']`)
+
+// interpSubprocessBinaries lists shell/interpreter binaries that must not be
+// auto-allowed when invoked as subprocesses from an interpreter script. They
+// can execute arbitrary code and defeat interpreter-level permission analysis.
+var interpSubprocessBinaries = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "ksh": true, "csh": true, "tcsh": true,
+	"python": true, "python3": true, "python2": true,
+	"perl": true, "ruby": true, "node": true, "nodejs": true,
+	"php": true, "lua": true, "rscript": true, "julia": true,
+}
+
+// pyOpenCallRe counts open() call sites in stripped (triple-body-removed) source,
+// used to detect whether all open() calls have string-literal paths.
+var pyOpenCallRe = regexp.MustCompile(`\bopen\s*\(`)
+
+// extractPythonOpenPaths extracts file path string literals from Python
+// open() calls. Paths expressed as variables or expressions are not captured;
+// callers must treat the returned list as a partial picture.
+func extractPythonOpenPaths(source string) []string {
+	var paths []string
+	for _, m := range pyOpenPathRe.FindAllStringSubmatch(source, -1) {
+		if len(m) > 1 && m[1] != "" {
+			paths = append(paths, m[1])
+		}
+	}
+	return paths
+}
+
+var interpreterSubprocessAskWrappers = map[string]bool{
+	"sudo":    true,
+	"doas":    true,
+	"pkexec":  true,
+	"timeout": true,
+}
+
+var interpreterSubprocessTransparentWrappers = map[string]bool{
+	"env":     true,
+	"command": true,
+	"time":    true,
+}
+
+var interpreterSubprocessNetworkBinaries = map[string]bool{
+	"curl":  true,
+	"wget":  true,
+	"nc":    true,
+	"ncat":  true,
+	"http":  true,
+	"https": true,
+	"ftp":   true,
+	"sftp":  true,
+}
+
+var interpreterSubprocessBinaryPrefixes = []string{
+	"python",
+	"perl",
+	"ruby",
+	"node",
+	"php",
+	"lua",
+}
+
 // extractJSONObject returns the substring from the first '{' to the last '}'
 // (inclusive), so a model that wraps its JSON in stray prose still parses. The
 // original string is returned unchanged when no object delimiters are found.
@@ -413,4 +603,98 @@ func extractJSONObject(s string) string {
 		return s
 	}
 	return s[start : end+1]
+}
+
+func isEnvAssignmentToken(token string) bool {
+	if token == "" || strings.HasPrefix(token, "-") {
+		return false
+	}
+	eq := strings.IndexByte(token, '=')
+	if eq <= 0 {
+		return false
+	}
+	prefix := token[:eq]
+	return !strings.ContainsAny(prefix, "/\\")
+}
+
+// classifyInterpreterSubprocess identifies the actual binary named by a
+// subprocess effect. It skips leading env assignments, neutral wrappers
+// (env/command/time), and returns wrappedAsk=true for wrappers that should
+// always fall back to human review because they can hide privilege changes or
+// command rewriting.
+func classifyInterpreterSubprocess(command string) (bin string, wrappedAsk bool) {
+	fields := splitShellFields(command)
+	seenTransparentWrapper := false
+	for i := 0; i < len(fields); i++ {
+		token := fields[i]
+		if token == "" {
+			continue
+		}
+		if isEnvAssignmentToken(token) {
+			continue
+		}
+		base := strings.ToLower(filepath.Base(token))
+		if interpreterSubprocessAskWrappers[base] {
+			return base, true
+		}
+		if interpreterSubprocessTransparentWrappers[base] {
+			seenTransparentWrapper = true
+			continue
+		}
+		if seenTransparentWrapper && strings.HasPrefix(token, "-") {
+			// We don't try to parse wrapper flags/arguments here. As soon as a
+			// neutral wrapper starts mutating the invocation, fall back to review.
+			return base, true
+		}
+		return base, false
+	}
+	return "", false
+}
+
+func isInterpreterSubprocessBinary(bin string) bool {
+	lower := strings.ToLower(bin)
+	if interpSubprocessBinaries[lower] {
+		return true
+	}
+	for _, prefix := range interpreterSubprocessBinaryPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isNetworkSubprocessBinary(bin string) bool {
+	return interpreterSubprocessNetworkBinaries[strings.ToLower(bin)]
+}
+
+func subprocessTargetsLocalhost(command string) bool {
+	fields := splitShellFields(command)
+	for _, token := range fields[1:] {
+		if isLocalhostSubprocessToken(token) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLocalhostSubprocessToken(token string) bool {
+	t := strings.Trim(token, `"'<>`)
+	if t == "" {
+		return false
+	}
+	if strings.Contains(t, "://") {
+		if isLocalhostDomain(extractDomainFromURL(t)) {
+			return true
+		}
+	}
+	host := t
+	if at := strings.LastIndex(host, "@"); at >= 0 {
+		host = host[at+1:]
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if colon := strings.IndexByte(host, ':'); colon > 0 && !strings.ContainsAny(host[:colon], "/\\") {
+		host = host[:colon]
+	}
+	return isLocalhostDomain(host) || host == "0.0.0.0"
 }

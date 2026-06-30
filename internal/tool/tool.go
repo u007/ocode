@@ -87,9 +87,15 @@ func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
 		&GitHubIssueTool{},
 		&GitHubWorkflowTool{},
 	}
-	// The "ast" semantic tool is an opt-in plugin, disabled by default.
-	if cfg != nil && cfg.Ocode.Plugins.AST {
+	// The "ast" semantic tool (LSP-backed) is registered by default whenever a
+	// language server is available on PATH — no plugin toggle required.
+	if lsp.AnyServerInstalled() {
 		builtins = append(builtins, &AstTool{Mgr: lspMgr})
+	}
+	// ast-grep (structural search/rewrite via the ast-grep CLI) is the opt-in
+	// plugin, gated by plugins.ast (toggle with /plugin enable ast).
+	if cfg != nil && cfg.Ocode.Plugins.AST {
+		builtins = append(builtins, &AstGrepTool{})
 	}
 	return builtins, lspMgr
 }

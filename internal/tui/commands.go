@@ -512,7 +512,7 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 			if !enabled {
 				state = "disabled"
 			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q %s (LSP-backed semantic navigation).", name, state)})
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q %s (ast-grep structural search/rewrite; requires the ast-grep CLI on PATH). The LSP-backed 'ast' tool is always on when a language server is installed.", name, state)})
 			return m.rebuildAgentWithExternalTools()
 		}
 		if _, ok := m.config.Plugins[name]; !ok {
