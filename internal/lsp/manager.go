@@ -298,6 +298,18 @@ func ServerForExt(ext string) (cmd string, installed bool, ok bool) {
 	return spec.cmd, err == nil, true
 }
 
+// AnyServerInstalled reports whether at least one known language-server
+// binary is present on PATH. Used to decide whether to register the
+// semantic "ast" tool by default (no plugin toggle when LSP is available).
+func AnyServerInstalled() bool {
+	for _, cmd := range KnownServers() {
+		if _, err := exec.LookPath(cmd); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // KnownServers returns the distinct configured server commands, sorted.
 func KnownServers() []string {
 	seen := map[string]bool{}

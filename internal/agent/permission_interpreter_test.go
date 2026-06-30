@@ -307,11 +307,73 @@ func TestVerifyInterpreterEffects(t *testing.T) {
 			t.Fatal("expected ask for sensitive path")
 		}
 	})
-	t.Run("subprocess asks", func(t *testing.T) {
+	t.Run("subprocess shell still asks", func(t *testing.T) {
 		r := base()
 		r.Effects.Subprocesses = []string{"sh -c rm"}
 		if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, true, false); ok {
-			t.Fatal("expected ask for subprocess")
+			t.Fatal("expected ask: subprocess is a shell binary")
+		}
+	})
+	t.Run("subprocess safe tool allowed", func(t *testing.T) {
+		// ffmpeg, pdf2html, pdftotext, grep etc. are local system tools — same as
+		// running them in bash directly. LLM-approved subprocess calls to these
+		// are allowed.
+		r := base()
+		r.Effects.Subprocesses = []string{
+			"ffmpeg -i input.mp4 output.webm",
+			"pdf2html report.pdf",
+		}
+		if ok, reason := a.verifyInterpreterEffects(ie, r, 0.85, true, false); !ok {
+			t.Fatalf("expected allow for safe tool subprocess, got %q", reason)
+		}
+	})
+	t.Run("subprocess localhost curl allowed", func(t *testing.T) {
+		r := base()
+		r.Effects.Subprocesses = []string{"curl http://localhost:8080/health"}
+		if ok, reason := a.verifyInterpreterEffects(ie, r, 0.85, true, false); !ok {
+			t.Fatalf("expected allow for localhost curl, got %q", reason)
+		}
+	})
+	t.Run("subprocess localhost wget allowed", func(t *testing.T) {
+		r := base()
+		r.Effects.Subprocesses = []string{"wget http://127.0.0.1/status"}
+		if ok, reason := a.verifyInterpreterEffects(ie, r, 0.85, true, false); !ok {
+			t.Fatalf("expected allow for localhost wget, got %q", reason)
+		}
+	})
+	t.Run("subprocess network curl asks", func(t *testing.T) {
+		r := base()
+		r.Effects.Subprocesses = []string{"curl https://example.com"}
+		if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, true, false); ok {
+			t.Fatal("expected ask for external curl")
+		}
+	})
+	t.Run("subprocess env wrapped curl asks", func(t *testing.T) {
+		r := base()
+		r.Effects.Subprocesses = []string{"env curl https://example.com"}
+		if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, true, false); ok {
+			t.Fatal("expected ask for env-wrapped curl")
+		}
+	})
+	t.Run("subprocess sudo wrapped curl asks", func(t *testing.T) {
+		r := base()
+		r.Effects.Subprocesses = []string{"sudo curl https://example.com"}
+		if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, true, false); ok {
+			t.Fatal("expected ask for sudo-wrapped curl")
+		}
+	})
+	t.Run("subprocess versioned python asks", func(t *testing.T) {
+		r := base()
+		r.Effects.Subprocesses = []string{"python3.11 script.py"}
+		if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, true, false); ok {
+			t.Fatal("expected ask for versioned python binary")
+		}
+	})
+	t.Run("subprocess hard-blocked asks", func(t *testing.T) {
+		r := base()
+		r.Effects.Subprocesses = []string{"rm -rf /"}
+		if ok, _ := a.verifyInterpreterEffects(ie, r, 0.85, true, false); ok {
+			t.Fatal("expected ask: subprocess is hard-blocked")
 		}
 	})
 	t.Run("network without policy asks", func(t *testing.T) {
@@ -700,6 +762,107 @@ func TestRunPermissionModelLoopCancelledShortCircuits(t *testing.T) {
 	}
 	if reason != "cancelled" {
 		t.Fatalf("reason = %q; want %q", reason, "cancelled")
+	}
+}
+
+func TestStripPythonTripleQuotedBodies(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "raw triple single-quoted body stripped",
+			input: "x = r'''docker run --rm curl -fsSL'''\nopen('f.txt')",
+			want:  "x = r''''''\nopen('f.txt')",
+		},
+		{
+			name:  "triple double-quoted body stripped",
+			input: `x = """subprocess.run(['sh'])""" `,
+			want:  `x = """""" `,
+		},
+		{
+			name:  "prefix-less triple single-quoted",
+			input: "s = '''exec(dangerous)'''\nf.write(s)",
+			want:  "s = ''''''\nf.write(s)",
+		},
+		{
+			name:  "multiline triple body stripped",
+			input: "s = r'''\nline1\nline2\n'''\nprint(s)",
+			want:  "s = r''''''\nprint(s)",
+		},
+		{
+			name:  "no triple strings — unchanged",
+			input: "open('Makefile', 'r')\nf.read()",
+			want:  "open('Makefile', 'r')\nf.read()",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stripPythonTripleQuotedBodies(tc.input)
+			if got != tc.want {
+				t.Fatalf("stripPythonTripleQuotedBodies(%q)\n got  %q\nwant %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPythonIsLikelyPureFileOp(t *testing.T) {
+	// Should return true: plain file read/write, no dangerous patterns in code.
+	pure := []string{
+		`with open('Makefile', 'r') as f: content = f.read()
+old = r'''docker run --rm\ncurl -fsSL'''
+new = r'''docker run --cached\ncurl -fsSL'''
+content = content.replace(old, new)
+with open('Makefile', 'w') as f: f.write(content)`,
+		"import re\nwith open('f.txt') as f:\n    data = f.read()\nwith open('out.txt', 'w') as g:\n    g.write(data)",
+	}
+	for _, src := range pure {
+		if !pythonIsLikelyPureFileOp(src) {
+			t.Errorf("expected pure file-op for:\n%s", src)
+		}
+	}
+
+	// Should return false: actual dangerous patterns present in code.
+	dangerous := []string{
+		"import subprocess\nsubprocess.run(['ls'])",
+		"import os\nos.system('rm -rf /')",
+		// eval( as a string is the Python SOURCE being analyzed, not a Go call
+		"eval('__import__(\"os\").system(\"x\")')",
+		"import urllib.request\nurllib.request.urlopen('http://x')",
+	}
+	for _, src := range dangerous {
+		if pythonIsLikelyPureFileOp(src) {
+			t.Errorf("expected dangerous for:\n%s", src)
+		}
+	}
+}
+
+func TestExtractPythonOpenPaths(t *testing.T) {
+	src := `
+with open('Makefile', 'r') as f:
+    content = f.read()
+with open("output.json", 'w') as g:
+    g.write(content)
+with open(dynamic_var) as h:
+    pass
+`
+	paths := extractPythonOpenPaths(src)
+	want := map[string]bool{"Makefile": true, "output.json": true}
+	for _, p := range paths {
+		if !want[p] {
+			t.Errorf("unexpected path %q", p)
+		}
+		delete(want, p)
+	}
+	if len(want) > 0 {
+		t.Errorf("missing paths: %v", want)
+	}
+	// dynamic_var should not be captured
+	for _, p := range paths {
+		if p == "dynamic_var" {
+			t.Error("dynamic variable path should not be captured")
+		}
 	}
 }
 

@@ -1339,10 +1339,16 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 		&tool.LSPDiagnosticsTool{Mgr: lspMgr},
 		&tool.FormatTool{Config: m.config},
 	}
-	// The "ast" semantic tool is an opt-in plugin, disabled by default. It
-	// shares the single LSP manager so only one gopls runs per project.
-	if m.config != nil && m.config.Ocode.Plugins.AST {
+	// The "ast" semantic tool (LSP-backed) is default-on whenever a language
+	// server is available on PATH — no plugin toggle. It shares the single LSP
+	// manager so only one gopls runs per project.
+	if lsp.AnyServerInstalled() {
 		tools = append(tools, &tool.AstTool{Mgr: lspMgr})
+	}
+	// ast-grep (structural search via the ast-grep CLI) is the opt-in plugin,
+	// gated by plugins.ast (toggle with /plugin enable ast).
+	if m.config != nil && m.config.Ocode.Plugins.AST {
+		tools = append(tools, &tool.AstGrepTool{})
 	}
 	return tools, lspMgr
 }
@@ -6123,7 +6129,8 @@ func (m model) renderPluginList() string {
 		astState, astIcon, astToggle = "enabled", "●", "/plugin disable ast"
 	}
 	builtins.WriteString(fmt.Sprintf("  %s ast [%s]\n", astIcon, astState))
-	builtins.WriteString("      LSP-backed semantic navigation (references/definition/callers).\n")
+	builtins.WriteString("      ast-grep structural search/rewrite (needs the ast-grep CLI on PATH).\n")
+	builtins.WriteString("      The LSP-backed 'ast' tool is always on when a language server is installed.\n")
 	builtins.WriteString("      " + astToggle + "\n\n")
 
 	if m.config == nil || len(m.config.Plugins) == 0 {

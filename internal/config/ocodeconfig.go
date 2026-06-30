@@ -51,7 +51,9 @@ type AdvisorConfig struct {
 // PluginsConfig gates opt-in builtin tools that ship disabled by default.
 // Toggled at runtime via `/plugin enable|disable <name>` and persisted here.
 type PluginsConfig struct {
-	// AST enables the LSP-backed semantic code-navigation tool ("ast").
+	// AST enables the opt-in "ast_grep" structural search/rewrite tool (which
+	// shells out to the ast-grep CLI). The LSP-backed semantic "ast" tool is
+	// registered separately and is always on when a language server is present.
 	AST bool `json:"ast"`
 }
 
