@@ -6145,9 +6145,9 @@ func TestRecapFinishedMsgIgnoresStaleGeneration(t *testing.T) {
 
 	updated, _ = got.Update(recapFinishedMsg{gen: 2, text: "fresh recap"})
 	got = derefTestModel(t, updated)
-	// Fresh generation: recapText should be cleared and message added to messages
-	if got.recapText != "" {
-		t.Fatalf("recapText should be cleared, got %q", got.recapText)
+	// Fresh generation (full /recap): recapText stores the result, message is appended with ≡ RECAP header
+	if got.recapText != "fresh recap" {
+		t.Fatalf("recapText should be set to the recap result, got %q", got.recapText)
 	}
 	if len(got.messages) == 0 {
 		t.Fatal("expected a recap message to be added to messages")
@@ -6155,6 +6155,31 @@ func TestRecapFinishedMsgIgnoresStaleGeneration(t *testing.T) {
 	lastMsg := got.messages[len(got.messages)-1]
 	if lastMsg.role != roleAssistant || !strings.Contains(lastMsg.text, "fresh recap") {
 		t.Fatalf("expected assistant message containing 'fresh recap', got role=%d text=%q", lastMsg.role, lastMsg.text)
+	}
+	if !strings.Contains(lastMsg.text, "≡ RECAP") {
+		t.Fatalf("expected full recap to have ≡ RECAP header, got %q", lastMsg.text)
+	}
+
+	// Short (auto-recap): 1-liner, uses "recap:" prefix instead of "≡ RECAP".
+	m2 := model{recapGen: 3}
+	m2.messages = nil // fresh slate
+	updated2, _ := m2.Update(recapFinishedMsg{gen: 3, text: "did foo bar", short: true})
+	got2 := derefTestModel(t, updated2)
+	if got2.recapText != "did foo bar" {
+		t.Fatalf("short recap: recapText should be set, got %q", got2.recapText)
+	}
+	if len(got2.messages) != 1 {
+		t.Fatalf("short recap: expected 1 message, got %d", len(got2.messages))
+	}
+	lastMsg2 := got2.messages[0]
+	if !strings.Contains(lastMsg2.text, "did foo bar") {
+		t.Fatalf("short recap: expected text containing 'did foo bar', got %q", lastMsg2.text)
+	}
+	if strings.Contains(lastMsg2.text, "≡ RECAP") {
+		t.Fatalf("short recap: should NOT have ≡ RECAP header, got %q", lastMsg2.text)
+	}
+	if !strings.HasPrefix(lastMsg2.text, "recap:") {
+		t.Fatalf("short recap: expected 'recap:' prefix, got %q", lastMsg2.text)
 	}
 }
 
