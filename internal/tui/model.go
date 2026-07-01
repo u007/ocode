@@ -11480,21 +11480,31 @@ const (
 // block. When the key is unchanged, renderMessageBlock returns the cached
 // string instead of re-running lipgloss/markdown rendering — the dominant cost
 // when renderTranscript walks the whole message list on every streamed delta.
-type msgRenderKey struct {
+// msgRenderRawKey holds the width-independent part of the cache key. Two
+// entries with the same rawKey but different widths mean "only the viewport
+// resized" — expensive Chroma/markdown renders are identical and can be reused;
+// only the box-border layout step needs to run again.
+type msgRenderRawKey struct {
 	role      role
 	kind      int    // block kind; disambiguates compaction-summary vs plain assistant (same role/content otherwise)
 	content   string // msg.text, or msg.raw.Content for tool/compaction blocks
 	toolName  string
 	expanded  bool
 	showThink bool
-	width     int
 	themeGen  int
 }
 
+type msgRenderKey struct {
+	msgRenderRawKey
+	width int
+}
+
 type msgRenderCacheEntry struct {
-	key   msgRenderKey
-	block string
-	kind  int
+	key          msgRenderKey
+	innerContent string // width-independent render before boxing (Chroma output for tool blocks, markdown for user blocks)
+	rawLineCount int    // for tool blocks: total lines in tool output (determines footer text on resize fast-path)
+	block        string
+	kind         int
 	// Derived per-message line slices, cached alongside the block so a streamed
 	// delta re-wraps/re-strips only the one message that changed instead of the
 	// whole transcript. wrapped is wrapView(block) split on "\n"; stripped is the
@@ -11549,25 +11559,74 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 		}
 	}
 
-	key := msgRenderKey{
+	rawKey := msgRenderRawKey{
 		role:      msg.role,
 		kind:      kind,
 		content:   content,
 		toolName:  toolName,
 		expanded:  expanded,
 		showThink: m.showThinking,
-		width:     width,
 		themeGen:  m.themeGen,
 	}
+	key := msgRenderKey{msgRenderRawKey: rawKey, width: width}
 	if hit, ok := m.msgRenderCache[i]; ok && hit.key == key {
 		return hit
 	}
 
-	// Cache miss — render.
+	// Width-only fast paths: if rawKey matches but width changed, skip the
+	// expensive Chroma/markdown render and only redo the cheap box-layout step.
+	if hit, ok := m.msgRenderCache[i]; ok && hit.key.msgRenderRawKey == rawKey {
+		var block string
+		switch {
+		case hit.kind == blockKindTool && hit.innerContent != "":
+			// Tool blocks: Chroma output is cached in innerContent; only redo box borders.
+			block = m.buildToolOutputBox(toolName, hit.innerContent, hit.rawLineCount, expanded)
+		case hit.kind == blockKindPlain && msg.role != roleUser:
+			// Assistant text blocks have no width-baked borders; re-wrap the cached block.
+			wrapped := strings.Split(wrapView(hit.block, width), "\n")
+			stripped := make([]string, len(wrapped))
+			for j, ln := range wrapped {
+				stripped[j] = stripANSI(ln)
+			}
+			entry := msgRenderCacheEntry{
+				key: key, innerContent: hit.innerContent,
+				block: hit.block, kind: hit.kind,
+				wrapped: wrapped, stripped: stripped, nl: hit.nl,
+			}
+			m.msgRenderCache[i] = entry
+			return entry
+		case hit.kind == blockKindPlain && msg.role == roleUser && hit.innerContent != "":
+			// User text: markdown is cached in innerContent; only redo bubble box.
+			bubbleWidth := width - 6
+			if bubbleWidth < 12 {
+				bubbleWidth = 12
+			}
+			block = m.styles.UserMessageBox.Width(bubbleWidth).Render(hit.innerContent)
+		}
+		if block != "" {
+			wrapped := strings.Split(wrapView(block, width), "\n")
+			stripped := make([]string, len(wrapped))
+			for j, ln := range wrapped {
+				stripped[j] = stripANSI(ln)
+			}
+			entry := msgRenderCacheEntry{
+				key: key, innerContent: hit.innerContent, rawLineCount: hit.rawLineCount,
+				block: block, kind: hit.kind,
+				wrapped: wrapped, stripped: stripped, nl: strings.Count(block, "\n"),
+			}
+			m.msgRenderCache[i] = entry
+			return entry
+		}
+		// Other kinds (thinking, compaction, orphan): fall through to full re-render.
+	}
+
+	// Full cache miss — expensive render.
 	var block string
+	var innerContent string
+	var rawLineCount int
 	switch {
 	case msg.role == roleUser:
-		block = m.renderUserText(strings.TrimRight(msg.text, "\n"))
+		innerContent, block = m.renderUserTextWithInner(strings.TrimRight(msg.text, "\n"))
 	case kind == blockKindThinking:
 		ctext := strings.TrimSpace(msg.text)
 		rcontent := renderThinkingContent(ctext, m.styles)
@@ -11590,7 +11649,7 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 		if strings.HasPrefix(msg.raw.Content, "ORPHAN_TOOL_ERROR:") {
 			block = m.renderOrphanWarningBox(msg.raw.Content, expanded)
 		} else {
-			block = m.renderToolOutputBox(toolName, msg.raw.Content, expanded)
+			innerContent, rawLineCount, block = m.renderToolOutputBoxWithInner(toolName, msg.raw.Content, expanded)
 		}
 	case kind == blockKindCompaction:
 		block = m.renderCompactionSummaryBox(msg.raw.Content, expanded)
@@ -11609,12 +11668,14 @@ func (m *model) renderMessageBlock(i int, msg message, toolNames map[string]stri
 		stripped[j] = stripANSI(ln)
 	}
 	entry := msgRenderCacheEntry{
-		key:      key,
-		block:    block,
-		kind:     kind,
-		wrapped:  wrapped,
-		stripped: stripped,
-		nl:       strings.Count(block, "\n"),
+		key:          key,
+		innerContent: innerContent,
+		rawLineCount: rawLineCount,
+		block:        block,
+		kind:         kind,
+		wrapped:      wrapped,
+		stripped:     stripped,
+		nl:           strings.Count(block, "\n"),
 	}
 	m.msgRenderCache[i] = entry
 	return entry
@@ -11795,54 +11856,79 @@ func (m *model) renderTranscript() {
 	m.updatePermButtonRegions()
 }
 
-func (m *model) renderUserText(text string) string {
-	// Apply renderSecrets to show masked previews instead of raw tokens
+// renderUserTextWithInner returns the markdown-rendered inner content and the
+// final bubble-boxed block. Splitting them lets renderMessageBlock cache the
+// inner content so a viewport resize only redoes the cheap box-layout step.
+func (m *model) renderUserTextWithInner(text string) (innerContent, block string) {
 	if m.redactionRegistry != nil {
 		text = renderSecrets(text, m.redactionRegistry)
 	}
 	// renderMarkdownInLine does bold + headings + markdown links + raw
 	// URL styling in one pass (over the original text), so the output is
 	// a single styled block ready for the user-message bubble.
-	content := renderMarkdownInLine(text, m.styles.Text)
+	innerContent = renderMarkdownInLine(text, m.styles.Text)
 	bubbleWidth := m.viewport.Width() - 6
 	if bubbleWidth < 12 {
 		bubbleWidth = 12
 	}
-	body := m.styles.UserMessageBox.Width(bubbleWidth).Render(content)
-	return body
+	block = m.styles.UserMessageBox.Width(bubbleWidth).Render(innerContent)
+	return innerContent, block
 }
 
-func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
+// renderUserText is a thin wrapper kept for call sites that don't need innerContent.
+func (m *model) renderUserText(text string) string {
+	_, block := m.renderUserTextWithInner(text)
+	return block
+}
+
+// renderToolOutputBoxWithInner runs the expensive Chroma/color render and
+// returns (innerContent, rawLineCount, block). innerContent is the rendered
+// text before boxing; rawLineCount is the total source-line count (for footer
+// reconstruction on resize). These two values are stored in the cache entry so
+// a later width-only miss can call buildToolOutputBox instead of re-running Chroma.
+func (m *model) renderToolOutputBoxWithInner(toolName, content string, expanded bool) (innerContent string, rawLineCount int, block string) {
 	content = sanitizeForTUI(stripTruncationFooter(content))
 	content = strings.TrimRight(content, "\n")
 	lines := strings.Split(content, "\n")
+	rawLineCount = len(lines)
 	boxContent := content
-	footer := m.styles.Hint.Render("  ▲ click to collapse")
-
-	if !expanded {
-		footer = ""
-		if len(lines) > toolOutputPreviewLines {
-			boxContent = strings.Join(lines[len(lines)-toolOutputPreviewLines:], "\n")
-			footer = m.styles.Hint.Render(fmt.Sprintf("  … %d earlier lines · click to expand", len(lines)-toolOutputPreviewLines))
-		}
+	if !expanded && rawLineCount > toolOutputPreviewLines {
+		boxContent = strings.Join(lines[rawLineCount-toolOutputPreviewLines:], "\n")
 	}
-
-	width := m.viewport.Width() - 4
-	if width < 1 {
-		width = 1
-	}
-	var rendered string
 	if toolName == "read" {
-		rendered = renderReadResult(boxContent, m.styles, 0)
+		innerContent = renderReadResult(boxContent, m.styles, 0)
 	} else {
-		rendered = renderToolResult(toolName, boxContent, m.styles)
+		innerContent = renderToolResult(toolName, boxContent, m.styles)
 	}
-	box := m.styles.ToolBox.Width(width).Render(rendered)
+	block = m.buildToolOutputBox(toolName, innerContent, rawLineCount, expanded)
+	return innerContent, rawLineCount, block
+}
+
+// buildToolOutputBox assembles the tool-output box from a pre-rendered
+// innerContent string. This is the cheap layout step: it only runs Chroma
+// if called from the full-miss path; the resize fast-path calls it directly.
+func (m *model) buildToolOutputBox(toolName, innerContent string, rawLineCount int, expanded bool) string {
+	vWidth := m.viewport.Width() - 4
+	if vWidth < 1 {
+		vWidth = 1
+	}
+	box := m.styles.ToolBox.Width(vWidth).Render(innerContent)
 	header := m.styles.Hint.Render("  " + toolName + " output")
-	if footer != "" {
+	if expanded {
+		footer := m.styles.Hint.Render("  ▲ click to collapse")
+		return header + "\n" + box + "\n" + footer
+	}
+	if rawLineCount > toolOutputPreviewLines {
+		footer := m.styles.Hint.Render(fmt.Sprintf("  … %d earlier lines · click to expand", rawLineCount-toolOutputPreviewLines))
 		return header + "\n" + box + "\n" + footer
 	}
 	return header + "\n" + box
+}
+
+// renderToolOutputBox is a thin wrapper kept for call sites that don't need the inner parts.
+func (m *model) renderToolOutputBox(toolName, content string, expanded bool) string {
+	_, _, block := m.renderToolOutputBoxWithInner(toolName, content, expanded)
+	return block
 }
 
 // renderOrphanWarningBox renders a warning box for tool calls that failed even

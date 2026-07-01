@@ -107,3 +107,50 @@ func BenchmarkAssemblyPlusSet(b *testing.B) {
 		m.renderTranscript() // all cache hits; measures assembly + SetContentLines
 	}
 }
+
+// BenchmarkResize measures the cost of a terminal width change — all messages
+// miss the cache simultaneously because width is in msgRenderKey. This is the
+// suspected cause of the real-world 33ms stall.
+func BenchmarkResize_Pairs17(b *testing.B) {
+	m := buildHeavyTranscriptModel(17, 8*1024) // ~51 messages, matches the real log
+	m.renderTranscript()                        // prime cache at width=100
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Alternate between two widths so every iteration is a full bulk cache miss.
+		if i%2 == 0 {
+			m.viewport.SetWidth(99)
+		} else {
+			m.viewport.SetWidth(100)
+		}
+		m.renderTranscript()
+	}
+}
+
+// BenchmarkHugeMessage measures a single enormous tool result re-rendering on
+// a cache miss. Tests whether one large message can account for the 33ms.
+func BenchmarkHugeMessage_500KB(b *testing.B) {
+	m := model{
+		input:    textarea.New(),
+		viewport: fastviewport.New(100, 30),
+		styles:   ApplyThemeColors("tokyonight"),
+		ready:    true,
+	}
+	hugeBody := strings.Repeat("output line with quite a bit of text to process\n", 10000) // ~500KB
+	toolID := "tool-huge"
+	tc := agent.ToolCall{ID: toolID}
+	tc.Function.Name = "bash"
+	m.messages = append(m.messages, message{
+		role: roleAssistant,
+		raw:  &agent.Message{Role: "assistant", ToolCalls: []agent.ToolCall{tc}},
+	})
+	m.messages = append(m.messages, message{
+		role: roleAssistant,
+		raw:  &agent.Message{Role: "tool", ToolID: toolID, Content: hugeBody},
+	})
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Force a cache miss every iteration by clearing the cache.
+		m.msgRenderCache = nil
+		m.renderTranscript()
+	}
+}
