@@ -91,19 +91,24 @@ type viewportSelectionConfig struct {
 }
 
 // visualLineWidth returns the terminal cell width of a plain-text line,
-// accounting for wide runes and tabs.
+// accounting for wide runes, grapheme clusters (e.g. emoji with variation
+// selectors), and tabs. Tabs are handled by measuring the runs between them
+// with ansi.StringWidth, which is grapheme-cluster-aware — a naive per-rune
+// runewidth.RuneWidth sum undercounts sequences like "🗺️" (base rune +
+// U+FE0F) by one cell, which is what caused misaligned borders on lines
+// containing such emoji.
 func visualLineWidth(line string) int {
 	col := 0
-	for i := 0; i < len(line); {
-		r, size := utf8.DecodeRuneInString(line[i:])
-		w := runewidth.RuneWidth(r)
-		if r == '\t' {
-			w = tabWidth - (col % tabWidth)
+	for {
+		idx := strings.IndexByte(line, '\t')
+		if idx < 0 {
+			col += ansi.StringWidth(line)
+			return col
 		}
-		col += w
-		i += size
+		col += ansi.StringWidth(line[:idx])
+		col += tabWidth - (col % tabWidth)
+		line = line[idx+1:]
 	}
-	return col
 }
 
 // visualLineHeight returns how many wrapped terminal rows a plain-text line
