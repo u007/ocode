@@ -10,8 +10,8 @@ import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker"
 // fully offline in the ocode-desktop webview — no CDN fetch. Without this,
 // Monaco falls back to running language services on the main thread (UI
 // freezes) and warns "must define MonacoEnvironment.getWorker".
-self.MonacoEnvironment = {
-  getWorker(_workerId, label) {
+const monacoEnv: monaco.Environment = {
+  getWorker(_workerId: string, label: string) {
     switch (label) {
       case "json":
         return new jsonWorker();
@@ -31,6 +31,7 @@ self.MonacoEnvironment = {
     }
   },
 };
+(self as unknown as { MonacoEnvironment: monaco.Environment }).MonacoEnvironment = monacoEnv;
 
 // Use the locally bundled monaco instance instead of loading it from a CDN,
 // which keeps the editor version in lockstep with the `monaco-editor` package.
