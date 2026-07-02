@@ -285,3 +285,11 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
 - [ ] Task 18: manual visual verification still pending — run `ocode serve`, switch theme in config, reload web, confirm colors follow (hex→HSL fix landed 2026-06-11 but was verified via unit math + typecheck only, not in a browser) (from review-changes: 2026-06-11)
 
 - Discovery embedder key resolution uses `os.Getenv` only (internal/agent/discovery_glue.go:keyForEnv). Wire the stored-credential/keyring fallback (same source `/connect` populates) so users who authed via OAuth/keyring rather than env vars can use HTTP embedders.
+
+## Desktop shell (ocode-desktop) — plan gaps from review
+
+- [x] `internal/server/run_states.go` + tests — fixed 2026-07-02: moved out of server.go, added `Handler.RunStates()`, rc-bridge runs, sorted session keys, Status-derived Ended/Failed, 3 tests (from review-changes: 2026-07-02)
+- [x] `internal/desktop/watch.go` + tests — fixed 2026-07-02: exported `Diff(prev, cur)` keyed by (SessionID, ID), emit-on-change contract (incl. count-drop-to-zero), 5 tests incl. race pass (from review-changes: 2026-07-02)
+- [x] `go mod tidy` — fixed 2026-07-02: wails/v3 now a direct require (from review-changes: 2026-07-02)
+- [ ] `cmd/ocode-desktop/native.go` (plan Part 03 Task 6) not implemented: no dock badge (RunningCount unused), no notifications (finished runs only log.Printf), no window-focus tracking, no menu roles (AppMenu/EditMenu/WindowMenu — DefaultApplicationMenu used instead), no native error dialog on boot failure (from review-changes: 2026-07-02)
+- [ ] Task 7 (plan Part 04) mostly missing: no `desktop-app` Makefile target, no `scripts/bundle-macos.sh`, CHANGES.md not updated, README.md not updated (still says "No desktop frontends — terminal and web UI only"), spec packaging section not updated, deferred items still open: permission-prompt badge (needs a pending-permissions snapshot on internal/server), Windows/Linux installers, macOS signing/notarization, notification-click focus, external-links-in-browser verification (from review-changes: 2026-07-02)

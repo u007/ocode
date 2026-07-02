@@ -22,24 +22,14 @@ import (
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tui"
 	"github.com/u007/ocode/internal/version"
+	"github.com/u007/ocode/web"
 )
-
-//go:embed all:web/dist
-var webAssets embed.FS
 
 //go:embed all:skills
 var bundledSkills embed.FS
 
 //go:embed deepseek-v4-flash.OCODE.md
 var bundledModelConfigs embed.FS
-
-func webFS() fs.FS {
-	f, err := fs.Sub(webAssets, "web/dist")
-	if err != nil {
-		return nil
-	}
-	return f
-}
 
 // bundledSkillsFS exposes the embedded skills/ tree to the skill package
 // as a plain fs.FS rooted at the repo root (the natural embed shape).
@@ -91,7 +81,7 @@ func main() {
 			if fsys := bundledModelConfigFS(); fsys != nil {
 				agent.SetBundledModelConfigFS(fsys)
 			}
-			if err := server.Run(os.Args[2:], webFS()); err != nil {
+			if err := server.Run(os.Args[2:], web.FS()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -106,7 +96,7 @@ func main() {
 				agent.SetBundledModelConfigFS(fsys)
 			}
 			args := append([]string{"--open"}, os.Args[2:]...)
-			if err := server.Run(args, webFS()); err != nil {
+			if err := server.Run(args, web.FS()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -161,7 +151,7 @@ func main() {
 		agent.SetBundledModelConfigFS(fsys)
 	}
 
-	opts := tui.RunOptions{WebFS: webFS()}
+	opts := tui.RunOptions{WebFS: web.FS()}
 	for i := 1; i < len(os.Args); i++ {
 		switch os.Args[i] {
 		case "-session":
