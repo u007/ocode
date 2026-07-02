@@ -138,27 +138,58 @@ func (s *Server) RunStates() []RunState
 
 - [ ] **Step 1: Write the failing test**
 
-`internal/server/run_states_test.go` — build agents the same way existing handler tests do. First read `internal/server/handler_runs_test.go` and copy its fixture pattern for creating a `Handler` with a fake/real agent session (reuse its helper if one exists; do not invent a new fixture style). The test asserts:
+`internal/server/run_states_test.go` — uses the same fixture pattern as `newRunsHandler` in `handler_runs_test.go` (`agent.NewAgent(nil, nil, nil, nil)`, `a.Runs().New(name)`, `h.agents[id] = &agentSession{agent: a}`). `AgentRun.Status` is an exported field, and the run-finishing methods (`finishOK`/`finishErr`) are unexported in package agent, so the test sets `Status` directly — same access level `buildRunDTO` uses for reads.
 
 ```go
 package server
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/u007/ocode/internal/agent"
+)
 
 func TestRunStatesEmptyWhenNoAgents(t *testing.T) {
 	h := NewHandler()
-	states := h.RunStates()
-	if len(states) != 0 {
+	if states := h.RunStates(); len(states) != 0 {
 		t.Fatalf("expected no run states, got %d", len(states))
 	}
 }
 
-// TestRunStatesReportsSessionRuns: using the fixture pattern from
-// handler_runs_test.go, register an agent session with one running and one
-// done run, then assert: len==2; the running run has Ended==false; the done
-// run has Ended==true, Failed==false; SessionID matches the session key.
-// Sort/order must follow registry (chronological) order, same as
-// runsSnapshot. Write this test concretely against the fixtures you found.
+func TestRunStatesReportsSessionRuns(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	running := a.Runs().New("worker")
+	done := a.Runs().New("finished-worker")
+	done.Status = agent.RunDone
+	failed := a.Runs().New("broken-worker")
+	failed.Status = agent.RunFailed
+	_ = running
+
+	h := NewHandler()
+	const sessionID = "sess-1"
+	h.agents[sessionID] = &agentSession{agent: a}
+
+	states := h.RunStates()
+	if len(states) != 3 {
+		t.Fatalf("expected 3 run states, got %d: %+v", len(states), states)
+	}
+	byName := map[string]RunState{}
+	for _, s := range states {
+		if s.SessionID != sessionID {
+			t.Fatalf("SessionID = %q, want %q", s.SessionID, sessionID)
+		}
+		byName[s.Name] = s
+	}
+	if s := byName["worker"]; s.Ended || s.Failed {
+		t.Fatalf("running run misreported: %+v", s)
+	}
+	if s := byName["finished-worker"]; !s.Ended || s.Failed {
+		t.Fatalf("done run misreported: %+v", s)
+	}
+	if s := byName["broken-worker"]; !s.Ended || !s.Failed {
+		t.Fatalf("failed run misreported: %+v", s)
+	}
+}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -237,7 +268,7 @@ func (s *Server) RunStates() []RunState {
 }
 ```
 
-Add the missing `"sort"` import. IMPORTANT: `r.Status` is read outside the run's own mutex in `runsSnapshot` too — but check `agent_runs.go` for `statusValue()` (line ~95); if a locked accessor exists, use `r.statusValue()`-equivalent exported accessor instead of the raw field. If only the raw field is exported, match `buildRunDTO`'s existing access pattern exactly.
+Add the missing `"sort"` import. Note on locking: `agent.AgentRun` has an unexported locked accessor (`statusValue()`, agent_runs.go:95) that package server cannot call; reading the exported `r.Status` field directly is exactly what the existing `buildRunDTO` does — match that pattern, do not add new accessors to package agent.
 
 - [ ] **Step 4: Run tests**
 
