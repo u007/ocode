@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tool"
 )
 
 func TestRunStatesEmptyWhenNoAgents(t *testing.T) {
@@ -45,6 +46,34 @@ func TestRunStatesReportsSessionRuns(t *testing.T) {
 	}
 	if s := byName["broken-worker"]; !s.Ended || !s.Failed {
 		t.Fatalf("failed run misreported: %+v", s)
+	}
+}
+
+func TestPendingPermissionAsks(t *testing.T) {
+	h := NewHandler()
+	if got := h.PendingPermissionAsks(); got != 0 {
+		t.Fatalf("empty handler: PendingPermissionAsks = %d, want 0", got)
+	}
+
+	ask := agent.Message{Role: "tool", Content: tool.SentinelPermissionAsk + `{"toolName":"bash"}`}
+
+	// Session blocked on an ask (sentinel is the newest message).
+	h.agents["blocked"] = &agentSession{messages: []agent.Message{
+		{Role: "user", Content: "run it"},
+		ask,
+	}}
+	// Session whose ask was already resolved (messages after the sentinel).
+	h.agents["resolved"] = &agentSession{messages: []agent.Message{
+		ask,
+		{Role: "assistant", Content: "done"},
+	}}
+	// Session with no ask at all.
+	h.agents["clean"] = &agentSession{messages: []agent.Message{
+		{Role: "user", Content: "hi"},
+	}}
+
+	if got := h.PendingPermissionAsks(); got != 1 {
+		t.Fatalf("PendingPermissionAsks = %d, want 1 (only the blocked session)", got)
 	}
 }
 

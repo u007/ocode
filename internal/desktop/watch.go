@@ -11,6 +11,8 @@ import (
 // desktop shell's badge and notification logic.
 type Summary struct {
 	RunningCount int
+	// PendingAsks is the number of sessions blocked on a permission prompt.
+	PendingAsks int
 	// Finished lists runs that transitioned running→ended since the
 	// previous poll. Nil prev (first poll) yields none: startup must not
 	// replay history as notifications.
@@ -22,7 +24,8 @@ type Summary struct {
 // session must be part of the key.
 type runKey struct{ session, id string }
 
-// Diff compares two RunStates snapshots.
+// Diff compares two RunStates snapshots. PendingAsks is not derived here —
+// Watch fills it from its source.
 func Diff(prev, cur []server.RunState) Summary {
 	sum := Summary{}
 	prevRunning := make(map[runKey]bool, len(prev))
@@ -44,22 +47,24 @@ func Diff(prev, cur []server.RunState) Summary {
 }
 
 // Watch polls source on interval and invokes onChange when the running
-// count changed or runs finished — the same poll-and-diff pattern
-// HandleRunsStream uses over SSE. It always emits one baseline summary on
-// the first poll, then stays quiet while nothing changes. Blocks until ctx
-// is done.
-func Watch(ctx context.Context, interval time.Duration, source func() []server.RunState, onChange func(Summary)) {
+// count or pending-prompt count changed, or runs finished — the same
+// poll-and-diff pattern HandleRunsStream uses over SSE. It always emits one
+// baseline summary on the first poll, then stays quiet while nothing
+// changes. Blocks until ctx is done.
+func Watch(ctx context.Context, interval time.Duration, source func() ([]server.RunState, int), onChange func(Summary)) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	var prev []server.RunState
-	lastRunning := -1 // sentinel: force the baseline emit
+	lastRunning, lastPending := -1, -1 // sentinels: force the baseline emit
 	for {
-		cur := source()
+		cur, pending := source()
 		sum := Diff(prev, cur)
-		if sum.RunningCount != lastRunning || len(sum.Finished) > 0 {
+		sum.PendingAsks = pending
+		if sum.RunningCount != lastRunning || sum.PendingAsks != lastPending || len(sum.Finished) > 0 {
 			onChange(sum)
 			lastRunning = sum.RunningCount
+			lastPending = sum.PendingAsks
 		}
 		prev = cur
 

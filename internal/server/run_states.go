@@ -2,8 +2,10 @@ package server
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // RunState is a minimal cross-package view of one top-level agent run.
@@ -68,4 +70,42 @@ func (h *Handler) RunStates() []RunState {
 // consumers (the desktop shell).
 func (s *Server) RunStates() []RunState {
 	return s.handler.RunStates()
+}
+
+// PendingPermissionAsks counts sessions currently blocked on a permission
+// prompt: the agent pauses a turn after emitting a PERMISSION_ASK: tool
+// message (see Agent.Step's pauseAfterResults), so a session is pending
+// exactly when its transcript tail is such a message with nothing after it.
+func (h *Handler) PendingPermissionAsks() int {
+	h.mu.Lock()
+	sessions := make([][]agent.Message, 0, len(h.agents))
+	for _, as := range h.agents {
+		sessions = append(sessions, as.messages)
+	}
+	h.mu.Unlock()
+
+	count := 0
+	for _, msgs := range sessions {
+		if tailIsPermissionAsk(msgs) {
+			count++
+		}
+	}
+	return count
+}
+
+// tailIsPermissionAsk reports whether the newest message is an unanswered
+// permission ask. Any later message (user answer, assistant follow-up)
+// means the ask was resolved.
+func tailIsPermissionAsk(msgs []agent.Message) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	last := msgs[len(msgs)-1]
+	return last.Role == "tool" && strings.HasPrefix(last.Content, tool.SentinelPermissionAsk)
+}
+
+// PendingPermissionAsks exposes the pending-prompt count at the Server level
+// for in-process consumers (the desktop shell badge).
+func (s *Server) PendingPermissionAsks() int {
+	return s.handler.PendingPermissionAsks()
 }
