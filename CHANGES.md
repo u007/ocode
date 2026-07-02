@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Redaction Awareness in Discovery Context** — When the session redactor is active, `injectDiscoveryContext` now appends a system message explaining that `[[OCSEC:...]]` tokens are redacted secrets (not placeholder text). New `redactionAwarenessPrompt` constant and conditional injection gated by `redactionEnabled` and `redactionRegistry`. Locked in by `TestInjectDiscoveryContextRedactionAwareness`. (`internal/agent/discovery_glue.go`, `internal/agent/discovery_glue_test.go`)
 - **Recap Pending Tasks** — `runRecap()` now includes a numbered "5. TASKS" section and calls `pendingTasksForRecap()` to enumerate running background processes and sub-agent runs (with ID, command/name, and duration). New `Agent.pendingTasksForRecap()` helper. Short recap shows pending count only. (`internal/agent/agent.go`)
 - **Version Bump** — 0.6.15 → 0.6.16.
 - **Grapheme-Cluster-Aware Line Width Measurement** — Refactored `visualLineWidth` in `internal/tui/selection.go` from per-rune `runewidth.RuneWidth` iteration to `ansi.StringWidth` which correctly handles grapheme clusters (e.g. emoji with variation selectors like "🗺️"). The old naive sum undercounted such sequences by one cell, causing misaligned borders on lines containing them. Tab handling refactored to work cleanly with the new approach.

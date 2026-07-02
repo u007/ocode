@@ -11,6 +11,7 @@ import (
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
+	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -376,6 +377,36 @@ func TestInjectDiscoveryContextOnlyWhenActive(t *testing.T) {
 	}
 	if !containsSubstr(last.Content, "discover_more") {
 		t.Fatalf("prompt contract must mention discover_more")
+	}
+}
+
+func TestInjectDiscoveryContextRedactionAwareness(t *testing.T) {
+	a := newGateAgent()
+	a.disco = &discoveryState{enabled: true,
+		session: discovery.NewSession(discovery.NewEngine(discovery.FakeEmbedder{Dimension: 8}, t.TempDir()))}
+	a.config = &config.Config{}
+	a.config.Ocode.Discovery.Enabled = true
+	base := []Message{{Role: "user", Content: "hi"}}
+
+	// Discovery on, redaction off: no redaction awareness.
+	got := a.injectDiscoveryContext(base)
+	if containsSubstr(got[len(got)-1].Content, "OCSEC") {
+		t.Fatalf("redaction off must not include OCSEC awareness, got: %q", got[len(got)-1].Content)
+	}
+
+	// Discovery on, redaction on: includes redaction awareness as an extra system message.
+	a.redactionEnabled = true
+	a.redactionRegistry = redact.NewRegistry("test123")
+	got = a.injectDiscoveryContext(base)
+	last := got[len(got)-1]
+	if last.Role != "system" {
+		t.Fatalf("last message must be system when redaction is active, got role %q", last.Role)
+	}
+	if !containsSubstr(last.Content, "OCSEC") {
+		t.Fatalf("redaction on must include OCSEC awareness, got: %q", last.Content)
+	}
+	if !containsSubstr(last.Content, "Redacted Secrets") {
+		t.Fatalf("redaction awareness must mention Redacted Secrets, got: %q", last.Content)
 	}
 }
 

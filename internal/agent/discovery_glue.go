@@ -481,6 +481,12 @@ const promptDiscoveryMarker = "[ocode:discovery]"
 
 const discoveryPromptContract = `Not every tool is currently loaded. The "Available MCP tools" index below lists every connected MCP tool by name. If you need one that is not in your current tool list, call the discover_more tool with a short description of what you need (e.g. "send an email") BEFORE telling the user you cannot do it — it will attach the matching tools for the rest of this turn.`
 
+// redactionAwarenessPrompt explains the OCSEC token format to the LLM so it
+// understands that [[OCSEC:...]] values are redacted secrets, not placeholder
+// text. It is appended to the discovery system block when the session redactor
+// is active.
+const redactionAwarenessPrompt = "## Redacted Secrets\n\nValues matching [[OCSEC:xxxx:N]] have been redacted because they appear to be sensitive (passwords, tokens, API keys, secrets, or other credentials). When you see a [[OCSEC:...]] token in the input, treat it as the actual secret value \u2014 the system will resolve it automatically when passed to a tool call. Do not treat it as a placeholder or generate a replacement value."
+
 // injectDiscoveryContext appends discovery context split by VOLATILITY so the
 // prompt cache survives sticky-set growth. No-op when discovery is off.
 //
@@ -533,6 +539,14 @@ func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 	// matched docs expand only the user tail.
 	if mdContent := a.renderAttachedMarkdown(docs, a.disco.session.IsAttached); mdContent != "" {
 		messages = append(messages, Message{Role: "user", Content: mdContent})
+	}
+	// Redaction awareness: when the session redactor is active, tell the LLM
+	// that [[OCSEC:...]] tokens are redacted secrets so it does not treat them
+	// as placeholder text. Appended as a system message so it is hoisted into
+	// the cached system block (stable across turns when redaction status does
+	// not change).
+	if a.redactionEnabled && a.redactionRegistry != nil {
+		messages = append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + redactionAwarenessPrompt})
 	}
 	return messages
 }
