@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop
+.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -38,6 +38,10 @@ desktop: web-build
 
 install-desktop: web-build desktop
 	$(DESKTOP_INSTALL)
+
+## desktop-app: build and bundle ocode.app (macOS only)
+desktop-app: desktop
+	./scripts/bundle-macos.sh bin/ocode-desktop bin/ocode.app
 
 # ── OS-specific builds (output to project root for convenience) ──────────────
 

@@ -76,8 +76,9 @@ consumers.
 
 - `OCODE_DESKTOP_DEV_URL` env var points the window at the Vite dev server for
   frontend hot reload; the API server still runs in-process.
-- Packaging via Wails v3 task tooling → `.app` (macOS), `.exe` + WebView2
-  (Windows), binary (Linux). Makefile target `make desktop`.
+- Packaging: `make desktop` builds the binary; `make desktop-app` bundles a
+  macOS `.app` via `scripts/bundle-macos.sh`. Installer packaging (Windows,
+  Linux) and signing are deferred — tracked in TODO.md.
 
 ## Testing
 

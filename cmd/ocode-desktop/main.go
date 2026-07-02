@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/services/dock"
+	"github.com/wailsapp/wails/v3/pkg/services/notifications"
+
 	"github.com/u007/ocode/internal/desktop"
 	"github.com/u007/ocode/web"
 )
@@ -31,13 +33,39 @@ func main() {
 	}
 
 	// Boot the ocode API server on a random loopback port with a fresh token.
-	handle, err := desktop.StartServer(web.FS(), workDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ocode-desktop: server boot failed: %v\n", err)
-		os.Exit(1)
+	// On failure a native dialog is shown after the app is created below —
+	// stderr alone is invisible from a Finder-launched .app.
+	handle, bootErr := desktop.StartServer(web.FS(), workDir)
+	if bootErr != nil {
+		log.Printf("ocode-desktop: server boot failed: %v", bootErr)
+	} else {
+		log.Printf("ocode-desktop: server running at %s", handle.URL)
 	}
 
-	log.Printf("ocode-desktop: server running at %s", handle.URL)
+	// Create the Wails application with the badge + notification services.
+	// The notifier is only created when supported: on macOS, touching
+	// UNUserNotificationCenter from a non-.app binary aborts the process.
+	dockSvc := dock.New()
+	services := []application.Service{application.NewService(dockSvc)}
+	var notifier *notifications.NotificationService
+	if notificationsSupported() {
+		notifier = notifications.New()
+		services = append(services, application.NewService(notifier))
+	}
+	app := application.New(application.Options{
+		Name:        "ocode",
+		Description: "AI coding agent",
+		Services:    services,
+	})
+
+	if bootErr != nil {
+		// Native dialog so a double-clicked .app surfaces the failure.
+		app.Dialog.Error().
+			SetTitle("ocode failed to start").
+			SetMessage(bootErr.Error()).
+			Show()
+		os.Exit(1)
+	}
 
 	// Build the webview URL with the auth token (same ?token= param the TUI /rc
 	// command and EventSource use).
@@ -49,12 +77,6 @@ func main() {
 		log.Printf("ocode-desktop: using dev URL %s", devURL)
 		desktopURL = devURL
 	}
-
-	// Create the Wails application.
-	app := application.New(application.Options{
-		Name:        "ocode",
-		Description: "AI coding agent",
-	})
 
 	// Set up the application menu (native Edit menu for Cmd+C/V etc.).
 	app.Menu.SetApplicationMenu(application.DefaultApplicationMenu())
@@ -84,18 +106,8 @@ func main() {
 		}),
 	))
 
-	// Run-state watcher for dock badge count and notifications.
-	// TODO(desktop Task 6): wire Summary.RunningCount to the dock badge and
-	// Finished to native notifications; log-only until then (tracked in TODO.md).
-	go desktop.Watch(app.Context(), 750*time.Millisecond, handle.Srv.RunStates, func(summary desktop.Summary) {
-		for _, r := range summary.Finished {
-			if r.Failed {
-				log.Printf("Run %q failed", r.Name)
-			} else {
-				log.Printf("Run %q completed", r.Name)
-			}
-		}
-	})
+	// Dock badge, notifications, and focus tracking driven by run state.
+	wireNative(app.Context(), window, handle, notifier, dockSvc)
 
 	// Run the application (blocks until the window closes).
 	if err := app.Run(); err != nil {
