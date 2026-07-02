@@ -176,6 +176,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/github/issues/{owner}/{repo}", s.authMiddleware(s.handleGitHubIssues))
 	s.mux.HandleFunc("POST /api/init", s.authMiddleware(s.handleInit))
 
+		// Projects (multi-project desktop UI)
+		s.mux.HandleFunc("GET /api/projects", s.authMiddleware(s.handleListProjects))
+		s.mux.HandleFunc("POST /api/projects", s.authMiddleware(s.handleAddProject))
+		s.mux.HandleFunc("DELETE /api/projects/{path...}", s.authMiddleware(s.handleRemoveProject))
+		s.mux.HandleFunc("GET /api/projects/sessions", s.authMiddleware(s.handleListProjectSessions))
+
 	// Uploads (assets)
 	s.mux.HandleFunc("/api/uploads", s.authMiddleware(s.handleUploads))
 	s.mux.HandleFunc("/api/uploads/file", s.authMiddleware(s.handleUploadFile))
@@ -638,6 +644,10 @@ func (s *Server) handleGitHubIssues(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) { s.handler.HandleInit(w, r) }
 
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) { s.handler.HandleListProjects(w, r) }
+func (s *Server) handleAddProject(w http.ResponseWriter, r *http.Request) { s.handler.HandleAddProject(w, r) }
+func (s *Server) handleRemoveProject(w http.ResponseWriter, r *http.Request) { s.handler.HandleRemoveProject(w, r) }
+func (s *Server) handleListProjectSessions(w http.ResponseWriter, r *http.Request) { s.handler.HandleListProjectSessions(w, r) }
 type ChatRequest struct {
 	Content   string `json:"content"`
 	SessionID string `json:"sessionId,omitempty"`

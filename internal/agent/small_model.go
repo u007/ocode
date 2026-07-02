@@ -14,7 +14,7 @@ import (
 var SmallModelPriority = []string{
 	"opencode-go/deepseek-v4-flash",
 	"opencode/mimo-v2.5-free",
-	"opencode-go/qwen-3.5-plus",
+	"opencode-go/qwen3.5-plus",
 	"deepseek/deepseek-chat",
 	"xiaomi-token-plan-sgp/MiMo-V2.5",
 }

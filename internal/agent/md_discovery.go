@@ -71,11 +71,15 @@ const mdFailBackoff = 30 * time.Minute
 // so a large repo summarizes in parallel without flooding the provider.
 const mdSummaryWorkers = 6
 
-// mdSummaryClient resolves the model used for markdown summaries: the configured
-// small model when available, falling back to the main client (same precedence as
-// titleClient). Returns nil only when there is no client at all.
+// mdSummaryClient resolves the model used for markdown summaries: the highest-
+// precedence title client (title agent model > recap model > small model, else
+// main client). Returns nil only when there is no client at all.
 func (a *Agent) mdSummaryClient() LLMClient {
-	return a.titleClient()
+	clients := a.titleClients()
+	if len(clients) == 0 {
+		return nil
+	}
+	return clients[0]
 }
 
 // mdRef is a markdown file discovered on disk during a scan.

@@ -23,12 +23,17 @@ import (
 )
 
 type Session struct {
-	ID        string          `json:"id"`
-	Title     string          `json:"title"`
-	Messages  []agent.Message `json:"messages"`
-	CreatedAt time.Time       `json:"created_at"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	Metadata  map[string]any  `json:"metadata,omitempty"`
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	// TitleGenerated is true when Title was set explicitly (LLM-generated or
+	// user /title), false when it is the auto-title fallback derived from the
+	// first user message. Callers use it to decide whether title generation
+	// should still run for a resumed session.
+	TitleGenerated bool            `json:"title_generated,omitempty"`
+	Messages       []agent.Message `json:"messages"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	Metadata       map[string]any  `json:"metadata,omitempty"`
 }
 
 type Source string
@@ -61,6 +66,14 @@ func NewSessionID() string {
 // (see internal/paths.GlobalDataDir).
 func GetStorageDir() (string, error) {
 	slug := ProjectSlug()
+	return paths.ProjectSessionsDir(slug)
+}
+
+// GetStorageDirForPath returns the per-project sessions directory for a given
+// working directory path. Unlike GetStorageDir, this does not depend on the
+// global workDir override or os.Getwd().
+func GetStorageDirForPath(wd string) (string, error) {
+	slug := ProjectSlugForPath(wd)
 	return paths.ProjectSessionsDir(slug)
 }
 
@@ -175,6 +188,7 @@ func Save(id string, title string, messages []agent.Message, metadata map[string
 
 	if title != "" {
 		s.Title = title
+		s.TitleGenerated = true
 	} else if s.Title == "" && len(messages) > 0 {
 		// Auto-title from first user message
 		for _, m := range messages {
@@ -391,6 +405,39 @@ func isIncompleteToolResult(content string) bool {
 
 func List() ([]Session, error) {
 	dir, err := GetStorageDir()
+	if err != nil {
+		return nil, err
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var sessions []Session
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" && e.Name() != "index.json" {
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err == nil {
+				var s Session
+				if err := json.Unmarshal(data, &s); err == nil {
+					s.Messages = removeIncompleteToolRequests(s.Messages)
+					sessions = append(sessions, s)
+				}
+			}
+		}
+	}
+
+	sort.Slice(sessions, func(i, j int) bool {
+		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	})
+
+	return sessions, nil
+}
+
+// ListForDir returns all sessions scoped to a specific working directory.
+func ListForDir(wd string) ([]Session, error) {
+	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return nil, err
 	}

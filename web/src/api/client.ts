@@ -10,6 +10,7 @@ import type {
   TUIStatus,
   LSPStatus,
   FileStatus,
+  Project,
 } from "./types";
 
 // Base path for API calls. When the SPA is served under a tailscale --set-path
@@ -149,6 +150,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ command, workDir }),
     }),
+  listProjects: () => fetchJSON<Project[]>("/api/projects"),
+  addProject: (path: string) =>
+    fetchJSON<{ status: string }>("/api/projects", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  removeProject: (path: string) =>
+    fetchJSON<{ status: string }>("/api/projects/" + encodeURIComponent(path), {
+      method: "DELETE",
+    }),
+  listProjectSessions: (path: string) =>
+    fetchJSON<SessionInfo[]>("/api/projects/sessions?path=" + encodeURIComponent(path)),
 };
 
 export type SSEEventHandler = (event: string, data: unknown) => void;

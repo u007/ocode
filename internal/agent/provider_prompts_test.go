@@ -63,7 +63,7 @@ func TestModelFamilyPrompt_ModelIDRouting(t *testing.T) {
 		{"copilot provider only", "copilot", "", "Copilot"},
 		{"small model deepseek flash", "opencode-go", "deepseek-v4-flash", "Intent Analysis"},
 		{"small model mimo", "opencode", "mimo-v2.5-free", "Intent Analysis"},
-		{"small model qwen", "opencode-go", "qwen-3.5-plus", "Intent Analysis"},
+		{"small model qwen", "opencode-go", "qwen3.5-plus", "Intent Analysis"},
 		{"small model deepseek chat", "deepseek", "deepseek-chat", "Intent Analysis"},
 	}
 	for _, c := range cases {
@@ -110,7 +110,7 @@ func TestIsSmallModel(t *testing.T) {
 	yes := []string{
 		"deepseek-v4-flash", // from "opencode-go/deepseek-v4-flash"
 		"mimo-v2.5-free",    // from "opencode/mimo-v2.5-free"
-		"qwen-3.5-plus",     // from "opencode-go/qwen-3.5-plus"
+		"qwen3.5-plus",      // from "opencode-go/qwen3.5-plus"
 		"deepseek-chat",     // from "deepseek/deepseek-chat"
 		"MiMo-V2.5",         // from "xiaomi-token-plan-sgp/MiMo-V2.5"
 	}

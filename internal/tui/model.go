@@ -816,6 +816,7 @@ type model struct {
 	pendingStreamDeltas      []deltaEvent
 	lastDeltaRender          time.Time // throttles renderTranscript to ≥50ms cadence during streams
 	titleRequested           bool
+	titleAttempts            int    // failed generation attempts this session; capped at maxTitleAttempts
 	titleGen                 uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
 	compacting               bool
 	queuedCompactInputs      []string // messages queued while compaction is in flight
@@ -1759,8 +1760,11 @@ func newModel(opts ...RunOptions) model {
 	if shouldLoad {
 		sess, err := session.Load(o.SessionID)
 		if err == nil {
-			m.sessionTitle = sess.Title
-			if sess.Title != "" {
+			// Only a generated (or user-set) title is final. The auto-title
+			// fallback (raw first prompt) stays in the file for picker display
+			// but leaves generation eligible on the next assistant response.
+			if sess.TitleGenerated {
+				m.sessionTitle = sess.Title
 				m.titleRequested = true
 			}
 			m.sessionTelemetry = telemetryFromSessionMetadata(sess.Metadata)
@@ -3455,10 +3459,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case titleGeneratedMsg:
 		// Drop stale results from goroutines started before /new or /title clear.
-		if msg.gen == m.titleGen && msg.title != "" && m.sessionTitle == "" {
-			m.sessionTitle = truncateTitle(msg.title, maxExplicitTitleLen)
-			m.saveSession()
-			m.broadcastTUIStatus()
+		if msg.gen == m.titleGen && m.sessionTitle == "" {
+			if msg.title != "" {
+				m.sessionTitle = truncateTitle(msg.title, maxExplicitTitleLen)
+				m.saveSession()
+				m.broadcastTUIStatus()
+			} else {
+				// Generation failed; unlatch so the next assistant response
+				// retries (maybeGenerateTitle caps total attempts).
+				m.titleRequested = false
+			}
 		}
 		return m, waitTitleEvent(m.titleCh)
 	case deltaMsg:
@@ -6429,6 +6439,7 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 
 const (
 	maxExplicitTitleLen = 80
+	maxTitleAttempts    = 3
 )
 
 func truncateTitle(s string, maxLen int) string {
@@ -6460,6 +6471,7 @@ func (m *model) handleTitleCmd(args []string) tea.Cmd {
 
 	m.sessionTitle = ""
 	m.titleRequested = false
+	m.titleAttempts = 0
 	m.titleGen++
 	m.saveSession()
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Title cleared — will auto-generate from next assistant response."})
@@ -6796,8 +6808,14 @@ func (m *model) handleSessionCmd(args []string) tea.Cmd {
 		} else {
 			m.saveSession()
 			m.sessionID = sess.ID
-			m.sessionTitle = sess.Title
-			m.titleRequested = sess.Title != ""
+			m.sessionTitle = ""
+			m.titleRequested = false
+			m.titleAttempts = 0
+			m.titleGen++ // invalidate any in-flight title from the previous session
+			if sess.TitleGenerated {
+				m.sessionTitle = sess.Title
+				m.titleRequested = true
+			}
 			tool.SetTodoSession(m.sessionID)
 			snapshot.Reset()
 			tool.ResetTodoState()
@@ -7101,6 +7119,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
 	m.titleRequested = false
+	m.titleAttempts = 0
 	m.titleGen++
 	m.recapGen++
 	tool.SetTodoSession(m.sessionID)
@@ -9334,6 +9353,9 @@ func (m *model) maybeGenerateTitle(assistantContent string) {
 	if m.agent == nil || m.titleRequested || m.sessionTitle != "" {
 		return
 	}
+	if m.titleAttempts >= maxTitleAttempts {
+		return
+	}
 	if strings.TrimSpace(assistantContent) == "" {
 		return
 	}
@@ -9342,6 +9364,7 @@ func (m *model) maybeGenerateTitle(assistantContent string) {
 		return
 	}
 	m.titleRequested = true
+	m.titleAttempts++
 	ch := m.titleCh
 	gen := m.titleGen
 	m.agent.GenerateTitleAsync(userMsg, assistantContent, func(t string) {
@@ -10763,10 +10786,13 @@ func (m *model) layout() {
 	m.input.SetWidth(innerWidth)
 	m.input.MaxWidth = innerWidth
 	m.viewport.SetWidth(innerWidth)
-	newHeight := m.height - m.bottomChromeHeight(panelWidth)
+	chrome := m.bottomChromeHeight(panelWidth)
+	newHeight := m.height - chrome
 	if newHeight < 1 {
 		newHeight = 1
 	}
+	layoutDebugf("layout: h=%d chrome=%d vp=%d perm=%v conf=%q %s",
+		m.height, chrome, newHeight, m.showPermDialog, m.permConfirm, m.chromeBreakdown(panelWidth))
 	m.viewport.SetHeight(newHeight)
 	m.renderTranscript()
 	// Keep the file tree's persisted scroll offset valid across resizes so
@@ -10804,6 +10830,60 @@ func (m *model) layoutLogViewport() {
 	m.logViewport.SetHeight(logHeight)
 	// Re-wrap entries to the new width.
 	m.refreshLogViewport()
+}
+
+// --- TEMPORARY layout diagnostics (gated by OCODE_LAYOUT_DEBUG) ---
+
+var layoutDebugOnce sync.Once
+var layoutDebugEnabled bool
+
+func layoutDebugf(format string, args ...any) {
+	layoutDebugOnce.Do(func() {
+		layoutDebugEnabled = os.Getenv("OCODE_LAYOUT_DEBUG") != ""
+	})
+	if !layoutDebugEnabled {
+		return
+	}
+	f, err := os.OpenFile(filepath.Join(os.TempDir(), "ocode-layout-debug.log"),
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return // intentionally not logged: diagnostic-only path
+	}
+	defer f.Close()
+	fmt.Fprintf(f, time.Now().Format("15:04:05.000")+" "+format+"\n", args...)
+}
+
+// chromeBreakdown reports the height of each optional bottom-chrome row so the
+// layout log shows which element is inflating the chrome. TEMPORARY diagnostic.
+func (m model) chromeBreakdown(panelWidth int) string {
+	var b strings.Builder
+	var inputArea string
+	if m.showPermDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
+	}
+	fmt.Fprintf(&b, "input=%d", lipgloss.Height(inputArea))
+	if m.chatSearchActive {
+		b.WriteString(" find=3")
+	}
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog {
+		fmt.Fprintf(&b, " slash=%d", lipgloss.Height(m.renderSlashPopup()))
+	}
+	if row := m.renderQueueRow(); row != "" {
+		fmt.Fprintf(&b, " queue=%d", lipgloss.Height(row))
+	}
+	if row := m.renderStoppedIndicator(); row != "" {
+		fmt.Fprintf(&b, " stopped=%d", lipgloss.Height(row))
+	}
+	if strip, _ := m.renderAgentStrip(); strip != "" {
+		fmt.Fprintf(&b, " strip=%d", lipgloss.Height(strip))
+	}
+	if row := m.renderActivityRow(); row != "" {
+		fmt.Fprintf(&b, " activity=%d(reserved=%v)", lipgloss.Height(row), m.activityRowReserved)
+	}
+	fmt.Fprintf(&b, " status=%d", lipgloss.Height(m.renderStatus()))
+	return b.String()
 }
 
 func (m model) bottomChromeHeight(panelWidth int) int {
@@ -13612,6 +13692,8 @@ func (m model) renderTabContent() string {
 	// truncating the whole view, which would lose the slash popup or status bar.
 	if m.height > 0 && lipgloss.Height(result) > m.height {
 		overflow := lipgloss.Height(result) - m.height
+		layoutDebugf("View SAFETY NET: result=%d h=%d overflow=%d vp=%d perm=%v",
+			lipgloss.Height(result), m.height, overflow, m.viewport.Height(), m.showPermDialog)
 		newVPH := max(1, m.viewport.Height()-overflow)
 		m.viewport.SetHeight(newVPH)
 		transcriptSB := renderScrollbar(m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), m.viewport.YOffset())
