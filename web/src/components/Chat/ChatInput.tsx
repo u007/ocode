@@ -2,12 +2,13 @@ import { useState, type KeyboardEvent, useRef, useEffect } from "react";
 import { useChat } from "../../hooks/useChat";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
+import { COMMANDS } from "./commands";
 import { Paperclip, X } from "lucide-react";
 import { apiPath, authHeaders } from "@/api/client";
 
 interface ChatInputProps {
-  /** Called when a slash command is entered. Return true if handled. */
-  onSlashCommand?: (command: string) => boolean;
+  /** Called when a slash command is entered. Return true if handled (async). */
+  onSlashCommand?: (command: string) => boolean | Promise<boolean>;
 }
 
 export default function ChatInput({ onSlashCommand }: ChatInputProps) {
@@ -55,18 +56,10 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
     }
   }, [input]);
 
-  const filteredCount = showSlashMenu
-    ? [
-        "/new",
-        "/clear",
-        "/model",
-        "/compact",
-        "/recap",
-        "/export",
-        "/share",
-        "/help",
-      ].filter((cmd) => cmd.includes(slashQuery.toLowerCase())).length
-    : 0;
+  const filteredCommandNames = showSlashMenu
+    ? COMMANDS.filter((cmd) => cmd.name.includes(slashQuery.toLowerCase())).map((c) => c.name)
+    : [];
+  const filteredCount = filteredCommandNames.length;
 
   const handleSend = async () => {
     const trimmed = input.trim();
@@ -74,9 +67,9 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
     setInput("");
     setShowSlashMenu(false);
 
-    // Check if this is a slash command
+    // Check if this is a slash command (handler may be async)
     if (trimmed.startsWith("/") && onSlashCommand) {
-      const handled = onSlashCommand(trimmed);
+      const handled = await onSlashCommand(trimmed);
       if (handled) return;
     }
 
@@ -129,18 +122,8 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
       }
       if (e.key === "Enter" && filteredCount > 0) {
         e.preventDefault();
-        const commands = [
-          "/new",
-          "/clear",
-          "/model",
-          "/compact",
-          "/recap",
-          "/export",
-          "/share",
-          "/help",
-        ].filter((cmd) => cmd.includes(slashQuery.toLowerCase()));
-        if (commands[selectedIndex]) {
-          handleSlashSelect(commands[selectedIndex]);
+        if (filteredCommandNames[selectedIndex]) {
+          handleSlashSelect(filteredCommandNames[selectedIndex]);
         }
         return;
       }

@@ -100,6 +100,12 @@ func main() {
 			window.Show()
 			window.Focus()
 		}),
+		// Web inspector for debugging the frontend. Also available from the
+		// native menu bar (View → Open Developer Tools, ⌥⌘I) in non-production
+		// builds; the tray entry makes it discoverable.
+		application.NewMenuItem("Open DevTools").OnClick(func(ctx *application.Context) {
+			window.OpenDevTools()
+		}),
 		application.NewMenuItemSeparator(),
 		application.NewMenuItem("Quit").OnClick(func(ctx *application.Context) {
 			app.Quit()

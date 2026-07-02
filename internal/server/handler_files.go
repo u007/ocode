@@ -28,7 +28,12 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, node)
+	// Return only the children (top-level entries) so the frontend receives
+	// an array of FileNode that it can iterate with .map().
+	if node.Children == nil {
+		node.Children = []FileNode{}
+	}
+	writeJSON(w, http.StatusOK, node.Children)
 }
 
 func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {

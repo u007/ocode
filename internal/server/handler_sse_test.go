@@ -112,18 +112,22 @@ func TestRCBridgeUnsubscribeStopsDelivery(t *testing.T) {
 	}
 }
 
-// TestHandleSessionMessagesNoBridge verifies the endpoint returns an empty list
-// (never blocks) when no TUI session is bridged.
+// TestHandleSessionMessagesNoBridge verifies the endpoint returns an initial
+// messages frame (may be empty) without blocking forever when no TUI session
+// is bridged and the context is cancelled.
 func TestHandleSessionMessagesNoBridge(t *testing.T) {
 	h := NewHandler()
+	ctx, cancel := context.WithCancel(context.Background())
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest("GET", "/api/chat/messages", nil)
+	r := httptest.NewRequest("GET", "/api/chat/messages", nil).WithContext(ctx)
 
 	done := make(chan struct{})
 	go func() {
 		h.HandleSessionMessages(w, r)
 		close(done)
 	}()
+	time.Sleep(60 * time.Millisecond)
+	cancel()
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
@@ -134,6 +138,6 @@ func TestHandleSessionMessagesNoBridge(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	if !strings.Contains(w.Body.String(), "event: messages") {
-		t.Fatalf("expected empty messages frame, got: %q", w.Body.String())
+		t.Fatalf("expected messages frame, got: %q", w.Body.String())
 	}
 }

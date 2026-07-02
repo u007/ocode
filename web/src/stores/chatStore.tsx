@@ -20,6 +20,8 @@ interface ChatState {
   smallModel: string | null;
   advisorModel: string | null;
   advisorEnabled: boolean;
+  ocrModel: string | null;
+  ocrEnabled: boolean;
   isStreaming: boolean;
   error: string | null;
   pendingPermission: PermissionRequest | null;
@@ -49,6 +51,8 @@ type ChatAction =
   | { type: "SET_SMALL_MODEL"; model: string }
   | { type: "SET_ADVISOR_MODEL"; model: string }
   | { type: "SET_ADVISOR_ENABLED"; enabled: boolean }
+  | { type: "SET_OCR_MODEL"; model: string }
+  | { type: "SET_OCR_ENABLED"; enabled: boolean }
   | { type: "SET_STREAMING"; isStreaming: boolean }
   | { type: "SET_ERROR"; error: string | null }
   | { type: "APPEND_DELTA"; delta: string }
@@ -75,6 +79,8 @@ const initialState: ChatState = {
   smallModel: null,
   advisorModel: null,
   advisorEnabled: true,
+  ocrModel: null,
+  ocrEnabled: false,
   isStreaming: false,
   error: null,
   pendingPermission: null,
@@ -106,6 +112,10 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, advisorModel: action.model };
     case "SET_ADVISOR_ENABLED":
       return { ...state, advisorEnabled: action.enabled };
+    case "SET_OCR_MODEL":
+      return { ...state, ocrModel: action.model };
+    case "SET_OCR_ENABLED":
+      return { ...state, ocrEnabled: action.enabled };
     case "SET_STREAMING":
       return { ...state, isStreaming: action.isStreaming };
     case "SET_ERROR":

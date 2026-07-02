@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { useProjectState } from "../../stores/projectStore";
-import { FolderGit2, Plus, Trash2, ChevronLeft, FolderOpen, Loader2 } from "lucide-react";
+import { FolderGit2, Plus, Trash2, ChevronLeft, FolderOpen, Loader2, FolderSearch } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "../ui/tooltip";
 import { Separator } from "../ui/separator";
+import DirectoryBrowser from "./DirectoryBrowser";
 
 interface Props {
   isOpen: boolean;
@@ -16,6 +17,7 @@ export default function ProjectSidebar({ isOpen, onToggle }: Props) {
   const { state, selectProject, addProject, removeProject } = useProjectState();
   const [adding, setAdding] = useState(false);
   const [newPath, setNewPath] = useState("");
+  const [browserOpen, setBrowserOpen] = useState(false);
 
   const handleAdd = async () => {
     const path = newPath.trim();
@@ -56,7 +58,7 @@ export default function ProjectSidebar({ isOpen, onToggle }: Props) {
                       size="sm"
                       className={`p-2 h-9 w-9 ${
                         state.activeProject?.path === p.path
-                          ? "bg-primary/20 text-primary"
+                          ? "bg-primary/15 text-primary"
                           : "text-muted-foreground"
                       }`}
                       onClick={() => selectProject(p)}
@@ -105,8 +107,8 @@ export default function ProjectSidebar({ isOpen, onToggle }: Props) {
                   variant="ghost"
                   className={`w-full justify-start gap-3 px-3 h-auto py-2.5 text-sm ${
                     state.activeProject?.path === project.path
-                      ? "bg-accent text-accent-foreground"
-                      : "text-muted-foreground"
+                      ? "bg-accent text-accent-foreground border-l-2 border-primary"
+                      : "text-muted-foreground border-l-2 border-transparent"
                   }`}
                   onClick={() => selectProject(project)}
                 >
@@ -141,18 +143,29 @@ export default function ProjectSidebar({ isOpen, onToggle }: Props) {
       <div className="border-t border-border p-3">
         {adding ? (
           <div className="flex flex-col gap-2">
-            <Input
-              type="text"
-              value={newPath}
-              onChange={(e) => setNewPath(e.target.value)}
-              placeholder="/path/to/project"
-              className="h-8 text-xs"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleAdd();
-                if (e.key === "Escape") setAdding(false);
-              }}
-              autoFocus
-            />
+            <div className="flex gap-2">
+              <Input
+                type="text"
+                value={newPath}
+                onChange={(e) => setNewPath(e.target.value)}
+                placeholder="/path/to/project"
+                className="h-8 text-xs flex-1"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleAdd();
+                  if (e.key === "Escape") setAdding(false);
+                }}
+                autoFocus
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 w-8 p-0 shrink-0"
+                onClick={() => setBrowserOpen(true)}
+                title="Browse for folder"
+              >
+                <FolderSearch className="w-3.5 h-3.5" />
+              </Button>
+            </div>
             <div className="flex gap-2">
               <Button size="sm" className="flex-1 h-7 text-xs" onClick={handleAdd}>
                 Add
@@ -179,6 +192,14 @@ export default function ProjectSidebar({ isOpen, onToggle }: Props) {
           </Button>
         )}
       </div>
+      <DirectoryBrowser
+        open={browserOpen}
+        onOpenChange={setBrowserOpen}
+        onSelect={(path) => {
+          setNewPath(path);
+          setBrowserOpen(false);
+        }}
+      />
     </div>
   );
 }

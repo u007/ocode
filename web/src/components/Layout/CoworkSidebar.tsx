@@ -63,7 +63,7 @@ export default function CoworkSidebar({ isOpen, onClose, activeAgent, onModelCli
     git: true,
   });
   const [gitBranch, setGitBranch] = useState<string>("");
-  const { model, smallModel, advisorModel, advisorEnabled, sessionId } = useChatState();
+  const { model, smallModel, advisorModel, advisorEnabled, ocrModel, ocrEnabled, sessionId } = useChatState();
   const dispatch = useChatDispatch();
 
   // Fetch git branch periodically
@@ -91,6 +91,16 @@ export default function CoworkSidebar({ isOpen, onClose, activeAgent, onModelCli
       console.error("failed to toggle advisor", err);
       // Roll back optimistic update on failure so the UI stays truthful.
       dispatch({ type: "SET_ADVISOR_ENABLED", enabled: advisorEnabled });
+    });
+  };
+
+  const toggleOcr = () => {
+    const next = !ocrEnabled;
+    dispatch({ type: "SET_OCR_ENABLED", enabled: next });
+    api.setOcrEnabled(next).catch((err) => {
+      console.error("failed to toggle ocr", err);
+      // Roll back optimistic update on failure so the UI stays truthful.
+      dispatch({ type: "SET_OCR_ENABLED", enabled: ocrEnabled });
     });
   };
 
@@ -263,6 +273,37 @@ export default function CoworkSidebar({ isOpen, onClose, activeAgent, onModelCli
                     <span
                       className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
                         advisorEnabled ? "translate-x-3.5" : "translate-x-0.5"
+                      }`}
+                    />
+                  </span>
+                </span>
+              </button>
+              {/* OCR tool on/off toggle */}
+              <div className="mt-1 mb-1 border-t border-zinc-700/50" />
+              <div className="text-zinc-500 mb-1 text-xs">OCR</div>
+              <button
+                type="button"
+                onClick={toggleOcr}
+                className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800"
+                title="Enable or disable the OCR tool"
+              >
+                <span className="text-zinc-400 truncate font-mono">
+                  {ocrModel || "Not set"}
+                </span>
+                <span className="flex items-center gap-2">
+                  <span
+                    className={`font-mono ${ocrEnabled ? "text-emerald-400" : "text-zinc-500"}`}
+                  >
+                    {ocrEnabled ? "on" : "off"}
+                  </span>
+                  <span
+                    className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
+                      ocrEnabled ? "bg-emerald-500/80" : "bg-zinc-600"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                        ocrEnabled ? "translate-x-3.5" : "translate-x-0.5"
                       }`}
                     />
                   </span>

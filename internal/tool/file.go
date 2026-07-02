@@ -1,14 +1,23 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+
+	// Register decoders so image.DecodeConfig can report dimensions in the
+	// image stub for the common raster formats.
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/paths"
@@ -273,7 +282,7 @@ func (t ReadTool) Parallel() bool      { return true }
 func (t ReadTool) Definition() map[string]interface{} {
 	return map[string]interface{}{
 		"name":        "read",
-		"description": fmt.Sprintf("Read file contents. Returns up to %d lines by default (max %d). Use start_line/end_line to paginate large files.", defaultReadLines, maxReadLines),
+		"description": fmt.Sprintf("Read file contents. Returns up to %d lines by default (max %d). Use start_line/end_line to paginate large files. Image files (png/jpg/gif/webp/etc.) are handled automatically: a vision-capable model receives the image itself, others get a text description — no need to route images to a separate tool.", defaultReadLines, maxReadLines),
 		"parameters": map[string]interface{}{
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -329,6 +338,15 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("failed to read file %s: %w", params.Path, err)
 	}
 
+	// Images are not text: splitting binary into "lines" ships garbage. Return
+	// a concise description instead. When the active model has vision, the agent
+	// layer additionally attaches the pixels as a vision block (see
+	// handleToolCallWithImages) — this stub is what non-vision models and
+	// text-only tool paths (orphan recovery, permission checks) see.
+	if mime := sniffImageMIME(content); mime != "" {
+		return imageStub(params.Path, content, mime), nil
+	}
+
 	lines := strings.Split(string(content), "\n")
 	total := len(lines)
 
@@ -366,6 +384,76 @@ func (t ReadTool) Execute(args json.RawMessage) (string, error) {
 		sb.WriteString(fmt.Sprintf("…(use start_line=%d, end_line=%d to continue)\n", end+1, end+defaultReadLines))
 	}
 	return sb.String(), nil
+}
+
+// ExecuteImage implements tool.ImageResultTool. It reads an image file through
+// the same path-confinement as Execute and returns the raw bytes plus the
+// sniffed content type. The agent layer calls this only after deciding the
+// target is a decodable image and the active model can see images; it then
+// resizes and embeds the bytes as a vision block.
+func (t ReadTool) ExecuteImage(args json.RawMessage) ([]byte, string, error) {
+	var params struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, "", err
+	}
+	safe, err := confinedPath(params.Path)
+	if err != nil {
+		return nil, "", err
+	}
+	raw, err := os.ReadFile(safe)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read image %s: %w", params.Path, err)
+	}
+	if len(raw) > maxImageBytes {
+		return nil, "", fmt.Errorf("image %s is %d bytes, exceeds the %d byte embed limit", params.Path, len(raw), maxImageBytes)
+	}
+	mime := sniffImageMIME(raw)
+	if mime == "" {
+		return nil, "", fmt.Errorf("file %s is not a recognized image", params.Path)
+	}
+	return raw, mime, nil
+}
+
+// sniffImageMIME returns the image content type of raw via content sniffing, or
+// "" when the bytes are not an image. Content sniffing (not extension) keeps
+// this robust to mislabeled files and needs no format list to maintain.
+func sniffImageMIME(raw []byte) string {
+	ct := http.DetectContentType(raw)
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	if strings.HasPrefix(ct, "image/") {
+		return ct
+	}
+	return ""
+}
+
+// imageStub renders a one-line textual description of an image file for callers
+// that cannot display pixels (non-vision models, text-only tool paths).
+func imageStub(path string, raw []byte, mime string) string {
+	dims := ""
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil {
+		dims = fmt.Sprintf("%dx%d ", cfg.Width, cfg.Height)
+	}
+	return fmt.Sprintf(
+		"[image file: %s — %s%s, %s — not shown as text. A vision-capable model receives the image automatically when reading it; otherwise use the ocr tool to extract any text it contains.]",
+		path, dims, mime, humanBytes(len(raw)),
+	)
+}
+
+func humanBytes(n int) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%dB", n)
+	}
+	div, exp := int64(unit), 0
+	for x := int64(n) / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f%cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 type WriteTool struct {

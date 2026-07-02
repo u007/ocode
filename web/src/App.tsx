@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { ChatProvider, useChatDispatch, useChatState } from "./stores/chatStore";
 import { ProjectProvider } from "./stores/projectStore";
-import { api } from "./api/client";
+import { api, apiPath, authHeaders } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
 import AgentPreview from "./components/Chat/AgentPreview";
@@ -12,6 +12,7 @@ import StatusPanel from "./components/Status/StatusPanel";
 import CommandPalette from "./components/common/CommandPalette";
 import GitPanel from "./components/Git/GitPanel";
 import FileTree from "./components/Files/FileTree";
+import FileEditor from "./components/Files/FileEditor";
 import LogPanel from "./components/Logs/LogPanel";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import TopTabs from "./components/Layout/TopTabs";
@@ -23,6 +24,7 @@ import PermissionDialog from "./components/Chat/PermissionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
 import { useTheme } from "./hooks/useTheme";
 import { useChat } from "./hooks/useChat";
+import { dispatchCommand } from "./components/Chat/commands";
 import SessionPage from "./pages/SessionPage";
 
 type ModelDialogTab = "main" | "small" | "advisor";
@@ -63,8 +65,22 @@ function StatusMetricsHydrator() {
   return null;
 }
 
+/** Trigger a browser file download from an in-memory string. */
+function triggerDownload(filename: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function HomeApp() {
   const dispatch = useChatDispatch();
+  const { messages: chatMessages, sessionId: currentSessionId } = useChatState();
   const { resolvePermission, pendingPermission } = useChat();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
@@ -72,6 +88,41 @@ function HomeApp() {
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const [cmdOpen, setCmdOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("chat");
+
+  // Editor tabs state — each open file gets its own tab with Monaco editor
+  interface EditorTab {
+    id: string;
+    path: string;
+    content: string;
+  }
+  const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
+  const openFileIdsRef = useRef<Set<string>>(new Set());
+
+  const handleOpenFile = useCallback(async (path: string) => {
+    const id = `editor-${path}`;
+    if (openFileIdsRef.current.has(id)) {
+      setActiveTab(id);
+      return;
+    }
+    try {
+      const res = await fetch(apiPath(`/api/files/content?path=${encodeURIComponent(path)}`), {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error("Failed to load file");
+      const data = await res.json();
+      openFileIdsRef.current.add(id);
+      setEditorTabs((prev) => [...prev, { id, path, content: data.content }]);
+      setActiveTab(id);
+    } catch (err) {
+      console.error("Failed to open file:", err);
+    }
+  }, []);
+
+  const handleCloseEditorTab = useCallback((id: string) => {
+    openFileIdsRef.current.delete(id);
+    setEditorTabs((prev) => prev.filter((t) => t.id !== id));
+    setActiveTab((prev) => (prev === id ? "files" : prev));
+  }, []);
 
   // Mobile responsive
   useEffect(() => {
@@ -122,8 +173,9 @@ function HomeApp() {
     setModelDialogOpen(true);
   };
 
-  const handleCommand = (cmd: string) => {
+  const handleCommand = async (cmd: string) => {
     const baseCmd = cmd.split(" ")[0];
+    // Built-in quick actions that don't need the dispatch pipeline
     if (baseCmd === "/clear" || baseCmd === "/new") {
       dispatch({ type: "RESET" });
       return true;
@@ -132,7 +184,48 @@ function HomeApp() {
       openModelDialog("main");
       return true;
     }
-    return false;
+
+    // Delegate to the shared command dispatch
+    const result = await dispatchCommand(cmd, {
+      commandName: baseCmd,
+      args: cmd.slice(baseCmd.length).trim(),
+      api: {
+        listSessions: () => api.listSessions(),
+        getSession: (id) => api.getSession(id),
+        getOcrEnabled: () => api.getOcrEnabled(),
+        setOcrEnabled: (enabled) => api.setOcrEnabled(enabled),
+        setOcrModel: (model) => api.setOcrModel(model),
+        compactSession: (id) => api.compactSession(id),
+        recapSession: (id) => api.recapSession(id),
+        shareSession: (id) => api.shareSession(id),
+        btwSession: (id, content) => api.btwSession(id, content),
+        getMaskConfig: () => api.getMaskConfig(),
+        setMaskEnabled: (enabled) => api.setMaskEnabled(enabled),
+        setMaskMode: (mode) => api.setMaskMode(mode),
+        setMaskModel: (model) => api.setMaskModel(model),
+      },
+      getMessages: () => chatMessages,
+      getSessionId: () => currentSessionId,
+    });
+
+    if (!result.handled) return false;
+
+    // Apply result effects
+    if (result.messages) {
+      for (const msg of result.messages) {
+        dispatch({ type: "ADD_MESSAGE", message: msg });
+      }
+    }
+    if (result.sessionId) {
+      dispatch({ type: "SET_SESSION", sessionId: result.sessionId });
+    }
+    if (result.newSession) {
+      dispatch({ type: "RESET" });
+    }
+    if (result.download) {
+      triggerDownload(result.download.filename, result.download.content, result.download.mimeType);
+    }
+    return true;
   };
 
   return (
@@ -150,15 +243,32 @@ function HomeApp() {
 
         {/* Center content */}
         <main className="flex flex-1 flex-col overflow-hidden">
-          {/* Content navigation tabs (chat/files/git/status/logs/assets) */}
+          {/* Content navigation tabs (chat/files/git/status/logs/assets + editor tabs) */}
           <TopTabs
             activeTab={activeTab}
             onTabChange={setActiveTab}
+            editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path }))}
+            onEditorTabClose={handleCloseEditorTab}
             onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
           />
 
           {/* Tab content */}
           <div className="flex-1 overflow-hidden">
+            {/* Editor tab — opened when a file is clicked from files/git/chat */}
+            {activeTab.startsWith("editor-") &&
+              (() => {
+                const editorTab = editorTabs.find((t) => t.id === activeTab);
+                if (!editorTab) return null;
+                return (
+                  <FileEditor
+                    key={editorTab.id}
+                    path={editorTab.path}
+                    content={editorTab.content}
+                    readOnly={false}
+                  />
+                );
+              })()}
+            {/* Main tabs */}
             {activeTab === "chat" && (
               <div className="flex flex-col h-full">
                 <ChatPanel />
@@ -166,8 +276,8 @@ function HomeApp() {
                 <ChatInput onSlashCommand={handleCommand} />
               </div>
             )}
-            {activeTab === "files" && <FileTree />}
-            {activeTab === "git" && <GitPanel />}
+            {activeTab === "files" && <FileTree onOpenFile={handleOpenFile} />}
+            {activeTab === "git" && <GitPanel onOpenFile={handleOpenFile} />}
             {activeTab === "status" && <StatusPanel onClose={() => setActiveTab("chat")} />}
             {activeTab === "logs" && <LogPanel />}
             {activeTab === "assets" && <AssetsPanel />}

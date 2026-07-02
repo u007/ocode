@@ -156,6 +156,8 @@ export interface TUIStatus {
   advisor_enabled?: boolean;
   ide_mode?: string;
   ide_status?: string;
+  ocr_model?: string;
+  ocr_enabled?: boolean;
   subagent_model?: string;
   session_id?: string;
   session_title?: string;
@@ -188,4 +190,15 @@ export interface Project {
   name: string;
   added_at: string;
   last_used_at: string;
+}
+
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+}
+
+export interface BrowseResponse {
+  current_path: string;
+  parent_path: string;
+  directories: DirectoryEntry[];
 }

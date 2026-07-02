@@ -16,6 +16,18 @@ type Tool interface {
 	Parallel() bool
 }
 
+// ImageResultTool is an optional extension of Tool for tools that can return
+// the raw bytes of an image file (subject to the tool's own path confinement).
+// The agent calls ExecuteImage only after it has decided the target is a
+// decodable image and the active model can see images; it then resizes and
+// embeds the bytes as a vision block. Keeping the read inside the tool
+// preserves confinement — the agent never opens an arbitrary model-supplied
+// path itself.
+type ImageResultTool interface {
+	Tool
+	ExecuteImage(args json.RawMessage) (raw []byte, mimeType string, err error)
+}
+
 // ContextualTool is an optional extension of Tool for tools that need a
 // context to access the per-agent snapshot store and tool call ID. The agent
 // calls ExecuteCtx when available; Execute is the fallback for callers that
@@ -97,5 +109,9 @@ func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
 	if cfg != nil && cfg.Ocode.Plugins.AST {
 		builtins = append(builtins, &AstGrepTool{})
 	}
+	// OCR tool — registered when enabled and an OCR model is configured.
+	// The runtime gate (/ocr enable|disable) controls the tool's availability
+	// via the config, so the tool itself double-checks before executing.
+	builtins = append(builtins, &OcrTool{Config: cfg})
 	return builtins, lspMgr
 }

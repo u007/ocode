@@ -937,7 +937,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 						}
 						binding = &taskBinding{bus: bus, agentID: agentID, tracker: groupTracker}
 					}
-					result, err := a.handleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding, tc.ID)
+					result, images, err := a.handleToolCallWithImages(tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding, tc.ID)
 					// Auto-touch: if the call succeeded and was a
 					// write-class tool, append a touch to the bus
 					// so peers know this file changed. Read tools
@@ -961,7 +961,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 						result = fmt.Sprintf("Error: %v", err)
 					}
 					result = TruncateToolResult(tc.ID, result)
-					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result, Notice: notice}
+					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice}
 				}(i, k, resp.ToolCalls[i], isCancelled)
 			}
 			wg.Wait()
@@ -998,7 +998,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			tc := resp.ToolCalls[i]
 			a.activity.toolStarted(tc.Function.Name)
-			result, err := a.handleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
+			result, images, err := a.handleToolCallWithImages(tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
 			a.activity.toolDone(tc.Function.Name)
 			var notice string
 			if err != nil {
@@ -1009,7 +1009,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				result = fmt.Sprintf("Error: %v", err)
 			}
 			result = TruncateToolResult(tc.ID, result)
-			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result, Notice: notice}
+			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice}
 		}
 		if isCancelled() {
 			return newMsgs, nil
@@ -1408,9 +1408,10 @@ func (a *Agent) recapClient() LLMClient {
 	if a.config == nil {
 		return a.client
 	}
-	// Prefer recap model when enabled and set.
+	// Prefer recap model when set (always used if non-empty; RecapModelEnabled
+	// only controls whether auto-recap runs after each response).
 	recap := strings.TrimSpace(a.config.Ocode.RecapModel)
-	if recap != "" && a.config.Ocode.RecapModelEnabled {
+	if recap != "" {
 		if client := NewClient(a.config, recap); client != nil {
 			return client
 		}
@@ -1761,6 +1762,85 @@ func bashSensitiveFilePath(toolArgs string) string {
 
 func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error) {
 	return a.handleToolCall(name, args, nil, "")
+}
+
+// handleToolCallWithImages runs a tool call and, for a read of a decodable
+// image on a vision-capable model, additionally returns the image so the
+// caller can embed it as a vision block on the tool-result message. In every
+// other case images is nil and the returned text is exactly handleToolCall's
+// result — an image read on a non-vision model yields the textual image stub
+// from ReadTool.Execute, so text-only providers still get a useful description.
+func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, []Image, error) {
+	text, err := a.handleToolCall(name, args, b, toolCallID)
+	if err != nil {
+		return text, nil, err
+	}
+	if !a.currentModelSupportsVision() {
+		return text, nil, nil
+	}
+	irt, ok := a.tools[name].(tool.ImageResultTool)
+	if !ok {
+		return text, nil, nil
+	}
+	path, ok := imageReadPath(args)
+	if !ok {
+		return text, nil, nil
+	}
+	raw, mime, ierr := irt.ExecuteImage(args)
+	if ierr != nil {
+		// The pixels are a best-effort enrichment; the textual stub in `text`
+		// still describes the image, so degrade to it rather than failing the
+		// whole tool call.
+		emitDebug("ERROR", fmt.Sprintf("read image %s: reading bytes for vision block: %v", path, ierr))
+		return text, nil, nil
+	}
+	enc, ierr := NewImageFromBytes(raw, mime, a.imageMaxDim())
+	if ierr != nil {
+		emitDebug("ERROR", fmt.Sprintf("read image %s: encoding vision block: %v", path, ierr))
+		return text, nil, nil
+	}
+	note := fmt.Sprintf("[image file: %s — shown below]", path)
+	if enc.Scaled {
+		// The model sees the downscaled pixels; tell it the true resolution so
+		// it doesn't reason about the image at the wrong scale.
+		note = fmt.Sprintf("[image file: %s — original %dx%d, downscaled to %dx%d for viewing — shown below]",
+			path, enc.OrigWidth, enc.OrigHeight, enc.Width, enc.Height)
+	}
+	return note, []Image{enc.Image}, nil
+}
+
+func (a *Agent) currentModelSupportsVision() bool {
+	if a.client == nil {
+		return false
+	}
+	model := a.client.GetModel()
+	if p := a.client.GetProvider(); p != "" {
+		model = p + "/" + model
+	}
+	return ModelSupportsVision(model)
+}
+
+func (a *Agent) imageMaxDim() int {
+	if a.config != nil {
+		return a.config.Ocode.MaxImageDim
+	}
+	return 0
+}
+
+// imageReadPath extracts the path from read-tool args when it points to a
+// decodable raster image (png/jpeg/gif/webp/bmp/tiff). svg/ico are excluded:
+// they have no decoder here and providers reject svg image blocks.
+func imageReadPath(args json.RawMessage) (string, bool) {
+	var p struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil || p.Path == "" {
+		return "", false
+	}
+	if !IsImageFile(p.Path) || !IsDecodableImage(p.Path) {
+		return "", false
+	}
+	return p.Path, true
 }
 
 // handleToolCall is HandleToolCall with an optional per-call group

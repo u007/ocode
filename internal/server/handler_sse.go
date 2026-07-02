@@ -252,18 +252,42 @@ func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) 
 	h.mu.Lock()
 	rc := h.rc
 	h.mu.Unlock()
-	if rc == nil {
-		// No TUI session is bridged (plain serve mode); nothing to mirror.
-		sendSSE(w, flusher, "messages", []agent.Message{})
-		return
+
+	sessionID := r.URL.Query().Get("session")
+
+	if rc != nil {
+		// RC bridge mode: subscribe to the TUI's broadcast channel.
+		sub := rc.Subscribe()
+		defer rc.Unsubscribe(sub)
+
+		// Send the current history immediately so a freshly-loaded (or reconnecting)
+		// browser is in sync before live events start flowing.
+		sendSSE(w, flusher, "messages", rc.GetMessages())
+
+		ctx := r.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-sub:
+				sendSSE(w, flusher, ev.Event, ev.Data)
+			}
+		}
 	}
 
-	sub := rc.Subscribe()
-	defer rc.Unsubscribe(sub)
+	// Headless/serve mode: subscribe to the handler's local event bus.
+	// Load current messages from disk so the browser gets history immediately.
+	var initMsgs []agent.Message
+	if sessionID != "" {
+		s, err := session.Load(sessionID)
+		if err == nil {
+			initMsgs = s.Messages
+		}
+	}
+	sendSSE(w, flusher, "messages", initMsgs)
 
-	// Send the current history immediately so a freshly-loaded (or reconnecting)
-	// browser is in sync before live events start flowing.
-	sendSSE(w, flusher, "messages", rc.GetMessages())
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
 
 	ctx := r.Context()
 	for {

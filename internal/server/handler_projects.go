@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/u007/ocode/internal/projects"
@@ -110,4 +113,140 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+// DirectoryEntry is a single directory in a browse listing.
+type DirectoryEntry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+}
+
+// BrowseResponse is returned by the directory browser endpoint.
+type BrowseResponse struct {
+	CurrentPath string           `json:"current_path"`
+	ParentPath  string           `json:"parent_path"`
+	Directories []DirectoryEntry `json:"directories"`
+}
+
+// HandleBrowseDirectory lists subdirectories at the given path for the
+// folder browser UI. The path is provided as a query parameter.
+func (h *Handler) HandleBrowseDirectory(w http.ResponseWriter, r *http.Request) {
+	path := r.URL.Query().Get("path")
+
+	// Determine which directory to list.
+	dir := path
+	if dir == "" {
+		// No path → list filesystem roots (platform-dependent).
+		entries, err := listRoots()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf("list roots: %v", err))
+			return
+		}
+		writeJSON(w, http.StatusOK, BrowseResponse{
+			CurrentPath: "",
+			ParentPath:  "",
+			Directories: entries,
+		})
+		return
+	}
+
+	// Resolve to absolute, clean path.
+	absPath, err := filepath.Abs(dir)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid path: %v", err))
+		return
+	}
+
+	// Verify it's a directory.
+	info, err := os.Stat(absPath)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("path not found: %v", err))
+		return
+	}
+	if !info.IsDir() {
+		writeError(w, http.StatusBadRequest, "path is not a directory")
+		return
+	}
+
+	// Read directory contents.
+	f, err := os.Open(absPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("open directory: %v", err))
+		return
+	}
+	defer f.Close()
+
+	names, err := f.Readdirnames(-1)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("read directory: %v", err))
+		return
+	}
+
+	var dirs []DirectoryEntry
+	for _, name := range names {
+		// Skip hidden directories on Unix.
+		if name[0] == '.' {
+			continue
+		}
+		fullPath := filepath.Join(absPath, name)
+		if fi, sterr := os.Stat(fullPath); sterr == nil && fi.IsDir() {
+			// Check readability.
+			readable := true
+			df, oerr := os.Open(fullPath)
+			if oerr != nil {
+				readable = false
+			} else {
+				df.Close()
+			}
+			if readable {
+				dirs = append(dirs, DirectoryEntry{Name: name, Path: fullPath})
+			}
+		}
+	}
+
+	sort.Slice(dirs, func(i, j int) bool {
+		return dirs[i].Name < dirs[j].Name
+	})
+
+	parentPath := filepath.Dir(absPath)
+	// If parent is same as current (root directory), clear it so the UI
+	// knows there is no parent to navigate to.
+	if parentPath == absPath {
+		parentPath = ""
+	}
+
+	writeJSON(w, http.StatusOK, BrowseResponse{
+		CurrentPath: absPath,
+		ParentPath:  parentPath,
+		Directories: dirs,
+	})
+}
+
+// listRoots returns the filesystem root directories for the current platform.
+func listRoots() ([]DirectoryEntry, error) {
+	var roots []DirectoryEntry
+
+	// Unix-like: single root "/".
+	if filepath.VolumeName("/") == "" {
+		roots = append(roots, DirectoryEntry{Name: "/", Path: "/"})
+	} else {
+		// Windows: enumerate drives A:-Z.
+		for d := 'A'; d <= 'Z'; d++ {
+			root := string(d) + ":\\"
+			if _, err := os.Stat(root); err == nil {
+				roots = append(roots, DirectoryEntry{Name: root, Path: root})
+			}
+		}
+	}
+
+	// Also include the user's home directory for convenience.
+	if home, err := os.UserHomeDir(); err == nil {
+		homeName := filepath.Base(home)
+		if homeName == "" {
+			homeName = home
+		}
+		roots = append(roots, DirectoryEntry{Name: "~ (" + homeName + ")", Path: home})
+	}
+
+	return roots, nil
 }

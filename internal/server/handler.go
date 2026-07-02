@@ -11,6 +11,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/monaco"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 	shellpkg "github.com/u007/ocode/internal/shell"
@@ -28,6 +29,14 @@ type Handler struct {
 	advisorEnabled bool
 	workDir        string // override for git commands in tests
 	projects       *projects.Store
+	monaco         *monaco.Store
+
+	// headlessSubs is the subscriber list for broadcasting live SSE events
+	// in headless/serve mode (when no RC bridge is active). The SSE mirror
+	// endpoint subscribes here and chat endpoints broadcast deltas through
+	// this list, so the browser receives streaming tokens even without a TUI.
+	headlessSubs map[chan SSEEvent]struct{}
+	headlessMu   sync.Mutex
 }
 
 type agentSession struct {
@@ -47,11 +56,18 @@ func NewHandler() *Handler {
 		log.Printf("handler: init project store: %v (multi-project UI disabled)", err)
 	}
 
+	monacoStore, err := monaco.NewStore()
+	if err != nil {
+		log.Printf("handler: init monaco store: %v (editor config disabled)", err)
+	}
+
 	return &Handler{
 		agents:         make(map[string]*agentSession),
 		cfg:            cfg,
 		advisorEnabled: advisorEnabled,
 		projects:       projStore,
+		monaco:         monacoStore,
+		headlessSubs:   make(map[chan SSEEvent]struct{}),
 	}
 }
 
@@ -67,6 +83,44 @@ func (h *Handler) RCBridge() *RCBridge {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.rc
+}
+
+// subscribeHeadless registers a new channel for live SSE events in headless
+// mode and returns it. The caller must call unsubscribeHeadless when done.
+func (h *Handler) subscribeHeadless() chan SSEEvent {
+	ch := make(chan SSEEvent, 256)
+	h.headlessMu.Lock()
+	if h.headlessSubs == nil {
+		h.headlessSubs = make(map[chan SSEEvent]struct{})
+	}
+	h.headlessSubs[ch] = struct{}{}
+	h.headlessMu.Unlock()
+	return ch
+}
+
+// unsubscribeHeadless removes a previously registered subscriber channel.
+func (h *Handler) unsubscribeHeadless(ch chan SSEEvent) {
+	h.headlessMu.Lock()
+	delete(h.headlessSubs, ch)
+	h.headlessMu.Unlock()
+}
+
+// broadcastEvent delivers a live event to all subscribers. In headless mode
+// it goes to headlessSubs; when an RC bridge is active it goes through the
+// bridge instead (which the TUI uses to push events). Sends are non-blocking:
+// a slow consumer drops the event rather than stalling the caller.
+func (h *Handler) broadcastEvent(ev SSEEvent) {
+	// When an RC bridge is active, the TUI pushes events through the bridge.
+	// Our local streaming callbacks should not also push directly — the TUI
+	// already handles broadcasting. Only broadcast locally in headless mode.
+	h.headlessMu.Lock()
+	defer h.headlessMu.Unlock()
+	for ch := range h.headlessSubs {
+		select {
+		case ch <- ev:
+		default:
+		}
+	}
 }
 
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +192,49 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: req.Content})
 	messages := append([]agent.Message(nil), as.messages...)
 
+	// In headless mode (no RC bridge), wire up streaming callbacks so live
+	// tokens and tool activity are broadcast to SSE mirror subscribers.
+	if h.rc == nil {
+		// Broadcast the user message so the SSE mirror can echo it.
+		h.broadcastEvent(SSEEvent{
+			Event: "user_message",
+			Data:  map[string]string{"content": req.Content},
+		})
+
+		ag := as.agent
+		// Map OnDelta kinds to SSE event names matching the TUI RC bridge
+		// pattern: "reasoning" → "thinking", "text" → "text".
+		ag.OnDelta = func(kind, text string) {
+			event := kind
+			if kind == "reasoning" {
+				event = "thinking"
+			}
+			h.broadcastEvent(SSEEvent{
+				Event: event,
+				Data:  TextDelta{Delta: text},
+			})
+		}
+		ag.OnMessage = func(m agent.Message) {
+			if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+				for _, tc := range m.ToolCalls {
+					h.broadcastEvent(SSEEvent{
+						Event: "tool_start",
+						Data: ToolStartEvent{
+							Tool:    tc.Function.Name,
+							Command: tc.Function.Arguments,
+						},
+					})
+				}
+			}
+			if m.Role == "tool" {
+				h.broadcastEvent(SSEEvent{
+					Event: "tool_result",
+					Data:  ToolResultEvent{Tool: "tool", Output: m.Content},
+				})
+			}
+		}
+	}
+
 	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
@@ -155,6 +252,19 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = session.Save(req.SessionID, "", as.messages, nil)
+
+	// Broadcast the authoritative message snapshot and turn_done so the SSE
+	// mirror (and any connected browser) is in sync.
+	if h.rc == nil {
+		h.broadcastEvent(SSEEvent{
+			Event: "messages",
+			Data:  as.messages,
+		})
+		h.broadcastEvent(SSEEvent{
+			Event: "turn_done",
+			Data:  DoneEvent{SessionID: req.SessionID, Model: as.model},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, ChatResponse{
 		Content:   content.String(),
@@ -350,6 +460,49 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: req.Content})
 	messages := append([]agent.Message(nil), as.messages...)
 
+	// In headless mode (no RC bridge), wire up streaming callbacks so live
+	// tokens and tool activity are broadcast to SSE mirror subscribers.
+	if h.rc == nil {
+		// Broadcast the user message so the SSE mirror can echo it.
+		h.broadcastEvent(SSEEvent{
+			Event: "user_message",
+			Data:  map[string]string{"content": req.Content},
+		})
+
+		ag := as.agent
+		// Map OnDelta kinds to SSE event names matching the TUI RC bridge
+		// pattern: "reasoning" → "thinking", "text" → "text".
+		ag.OnDelta = func(kind, text string) {
+			event := kind
+			if kind == "reasoning" {
+				event = "thinking"
+			}
+			h.broadcastEvent(SSEEvent{
+				Event: event,
+				Data:  TextDelta{Delta: text},
+			})
+		}
+		ag.OnMessage = func(m agent.Message) {
+			if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+				for _, tc := range m.ToolCalls {
+					h.broadcastEvent(SSEEvent{
+						Event: "tool_start",
+						Data: ToolStartEvent{
+							Tool:    tc.Function.Name,
+							Command: tc.Function.Arguments,
+						},
+					})
+				}
+			}
+			if m.Role == "tool" {
+				h.broadcastEvent(SSEEvent{
+					Event: "tool_result",
+					Data:  ToolResultEvent{Tool: "tool", Output: m.Content},
+				})
+			}
+		}
+	}
+
 	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
@@ -367,6 +520,19 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	_ = session.Save(id, "", as.messages, nil)
+
+	// Broadcast the authoritative message snapshot and turn_done so the SSE
+	// mirror (and any connected browser) is in sync.
+	if h.rc == nil {
+		h.broadcastEvent(SSEEvent{
+			Event: "messages",
+			Data:  as.messages,
+		})
+		h.broadcastEvent(SSEEvent{
+			Event: "turn_done",
+			Data:  DoneEvent{SessionID: id, Model: as.model},
+		})
+	}
 
 	writeJSON(w, http.StatusOK, ChatResponse{
 		Content:   content.String(),
@@ -592,6 +758,35 @@ func (h *Handler) HandleShareSession(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"markdown": b.String()})
+}
+
+// HandleBtw appends a "By the way" user message to a session.
+func (h *Handler) HandleBtw(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := readBodyJSON(r, &req); err != nil || req.Content == "" {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+
+	s, err := session.Load(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	msg := agent.Message{
+		Role:    "user",
+		Content: "By the way: " + req.Content,
+	}
+	s.Messages = append(s.Messages, msg)
+
+	if err := session.Save(id, s.Title, s.Messages, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "noted"})
 }
 
 func (h *Handler) HandleSetSessionTitle(w http.ResponseWriter, r *http.Request, id string) {

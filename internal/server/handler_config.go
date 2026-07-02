@@ -181,6 +181,58 @@ func (h *Handler) HandleSetAdvisorEnabled(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
 }
 
+// HandleGetOcrEnabled reports whether the OCR tool is currently enabled and
+// which model it uses. Reads from the handler's cached config which is kept
+// in sync with the TUI config.
+func (h *Handler) HandleGetOcrEnabled(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	enabled := false
+	model := ""
+	if h.cfg != nil {
+		enabled = h.cfg.Ocode.OcrEnabled
+		model = h.cfg.Ocode.OcrModel
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": enabled, "model": model})
+}
+
+// HandleSetOcrEnabled flips the OCR tool on/off. This is persisted to config
+// (unlike the advisor toggle, which is session-only).
+func (h *Handler) HandleSetOcrEnabled(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.OcrEnabled = req.Enabled
+	config.SaveOcrEnabled(req.Enabled)
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
+}
+
+// HandleSetOcrModel sets the OCR model. This is persisted to config.
+func (h *Handler) HandleSetOcrModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.OcrModel = req.Model
+	config.SaveOcrModel(req.Model)
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
+}
+
 func (h *Handler) HandleListAgents(w http.ResponseWriter, r *http.Request) {
 	specs := agent.PrimaryAgentSpecs()
 	type agentInfo struct {
@@ -192,6 +244,87 @@ func (h *Handler) HandleListAgents(w http.ResponseWriter, r *http.Request) {
 		out[i] = agentInfo{Name: s.Name, Description: s.Description}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ── Mask (secret redaction) config ─────────────────────────────────────────
+
+// HandleGetMaskConfig returns the current mask/redaction config.
+func (h *Handler) HandleGetMaskConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	enabled := false
+	mode := "lenient"
+	model := ""
+	if h.cfg != nil {
+		enabled = h.cfg.Ocode.Security.Redaction.Enabled
+		mode = config.ResolveRedactionMode(h.cfg.Ocode.Security.Redaction)
+		model = h.cfg.Ocode.Security.Redaction.Model
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"enabled": enabled,
+		"mode":    mode,
+		"model":   model,
+	})
+}
+
+// HandleSetMaskEnabled toggles secret redaction on/off.
+func (h *Handler) HandleSetMaskEnabled(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "enabled is required")
+		return
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.Security.Redaction.Enabled = req.Enabled
+	config.SaveSecurityRedaction(func(rc *config.RedactionConfig) {
+		rc.Enabled = req.Enabled
+	})
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
+}
+
+// HandleSetMaskMode sets the redaction mode (lenient/full).
+func (h *Handler) HandleSetMaskMode(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := readBodyJSON(r, &req); err != nil || (req.Mode != "lenient" && req.Mode != "full") {
+		writeError(w, http.StatusBadRequest, "mode must be 'lenient' or 'full'")
+		return
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.Security.Redaction.Mode = req.Mode
+	config.SaveSecurityRedaction(func(rc *config.RedactionConfig) {
+		rc.Mode = req.Mode
+	})
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]string{"mode": req.Mode})
+}
+
+// HandleSetMaskModel sets the tier-2 scanning model for secret redaction.
+func (h *Handler) HandleSetMaskModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model string `json:"model"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.Security.Redaction.Model = req.Model
+	config.SaveSecurityRedaction(func(rc *config.RedactionConfig) {
+		rc.Model = req.Model
+	})
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
 }
 
 func (h *Handler) HandleSetAgent(w http.ResponseWriter, r *http.Request) {

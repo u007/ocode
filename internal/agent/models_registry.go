@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -312,6 +313,25 @@ func ModelWindow(modelID string) int64 {
 	return 0
 }
 
+// ModelSupportsVision reports whether a model can accept image input. The
+// models.dev registry (Modalities.Input containing "image") is authoritative
+// when it knows the model. For models absent from the registry (cold cache,
+// offline, or brand-new IDs) it falls back to the IsVisionModel heuristic,
+// which fails open for the current model families so we never wrongly stub out
+// images for a capable default like Claude Opus.
+func ModelSupportsVision(modelID string) bool {
+	if m, ok := modelEntryFor(modelID); ok {
+		for _, in := range m.Modalities.Input {
+			if in == "image" {
+				return true
+			}
+		}
+		// Registry knows this model and it lists no image input → text-only.
+		return false
+	}
+	return IsVisionModel(modelID)
+}
+
 // modelEntryFor resolves a model ID in "provider/model" format (e.g.
 // "deepseek/deepseek-v4-flash") or bare model name to its registry entry.
 // When multiple providers list the same model, entries with non-zero costs
@@ -537,6 +557,30 @@ func FetchLMStudioModels() LMStudioResult {
 
 func fetchLMStudioModels() []string {
 	return FetchLMStudioModels().Models
+}
+
+// OcrModelsFromLMStudio returns LM Studio model IDs that look like OCR/vision
+// models (matching names containing "ocr", "paddle", "vision", "read", "caption").
+// Returns nil silently if LM Studio is not running.
+func OcrModelsFromLMStudio() []string {
+	all := FetchLMStudioModels().Models
+	if len(all) == 0 {
+		return nil
+	}
+	var ocrModels []string
+	for _, m := range all {
+		lower := strings.ToLower(m)
+		if strings.Contains(lower, "ocr") || strings.Contains(lower, "paddle") ||
+			strings.Contains(lower, "vision") || strings.Contains(lower, "caption") {
+			ocrModels = append(ocrModels, m)
+		}
+	}
+	// If no OCR-specific models found but LM Studio is running, return all models
+	// so the user can still select one.
+	if len(ocrModels) == 0 {
+		return all
+	}
+	return ocrModels
 }
 
 // fetchRequestyLiveModels fetches models from the Requesty API and returns
