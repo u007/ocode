@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run
+.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -15,6 +15,29 @@ build: web-build
 install: web-build
 	go build $(LDFLAGS) -o bin/$(APP) .
 	go install $(LDFLAGS) .
+
+# ── Desktop (Wails v3 shell) ────────────────────────────────────────────────
+# Build the ocode-desktop binary. Requires cgo and native platform SDKs:
+#   macOS: Xcode Command Line Tools
+#   Linux: webkit2gtk-4.1-dev, libgtk-3-dev, etc.
+#   Windows: WebView2 runtime
+# See https://wails.io/docs/guides/platform-installation
+
+DESKTOP_BUILD := go build $(LDFLAGS) -o bin/ocode-desktop ./cmd/ocode-desktop
+DESKTOP_INSTALL := go install $(LDFLAGS) ./cmd/ocode-desktop
+
+# macOS: Wails CGo objects may be compiled with a newer SDK; silence the
+# version-mismatch linker warnings by matching the min version.
+ifeq ($(shell uname), Darwin)
+DESKTOP_BUILD := CGO_LDFLAGS="-mmacosx-version-min=26.0" $(DESKTOP_BUILD)
+DESKTOP_INSTALL := CGO_LDFLAGS="-mmacosx-version-min=26.0" $(DESKTOP_INSTALL)
+endif
+
+desktop: web-build
+	$(DESKTOP_BUILD)
+
+install-desktop: web-build desktop
+	$(DESKTOP_INSTALL)
 
 # ── OS-specific builds (output to project root for convenience) ──────────────
 
