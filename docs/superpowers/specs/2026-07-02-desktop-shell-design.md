@@ -30,27 +30,45 @@ browser uses today.
 ```
 cmd/ocode-desktop (Wails v3 app, cgo)
   ├─ starts internal/server on 127.0.0.1:0 + fresh auth token
-  ├─ WebviewWindow → http://127.0.0.1:<port>/ (token attached same as browser flow)
-  └─ native features subscribe to internal/notebus (Go-side, in-process)
+  ├─ WebviewWindow → http://127.0.0.1:<port>/?token=... (same flow as TUI /rc)
+  └─ native features poll the same Handler snapshot accessors the SSE
+     handlers use (Go-side, in-process)
 
 web/ SPA and internal/server handlers run unchanged.
 ```
+
+**Embedded assets:** the `//go:embed all:web/dist` directive currently lives in
+the root `main.go`; `go:embed` cannot reach `../..`, so a second main package
+cannot reuse it. Add `web/embed.go` (package `web`, embeds `dist/`) and have
+both binaries import it — single embed point, DRY.
 
 ## Native features (all Go-side, no JS bridge)
 
 - **Menus:** native app menu including Edit menu (fixes Cmd+C/V in macOS
   webviews), window/quit shortcuts.
 - **Tray:** icon with show/hide window and quit.
-- **Dock badge:** count of pending permission prompts / running agents, driven
-  by `internal/notebus` events.
+- **Dock badge:** count of pending permission prompts / running agents.
+  macOS/Windows only (Wails v3 badge service has no Linux support).
 - **Notifications:** run finished / permission needed, emitted only when the
   window is unfocused; clicking a notification focuses the window.
+
+There is no push-based app event bus (`internal/notebus` is the subagent
+notes/handoff bus — not usable here). Run state is exposed by polling the
+agent run registry, exactly as `HandleRunsStream` does (750ms poll +
+snapshot diff). Badge/notification logic reuses the same `Handler` snapshot
+accessors with the same poll-and-diff pattern — one data source, two
+consumers.
 - **External links:** open in the OS default browser, not the webview.
 
 ## Lifecycle & error handling
 
-- Window close = app quit = server shutdown via context cancel.
+- Window close = app quit = process exit (the listener dies with the
+  process). `internal/server` has no graceful-shutdown API (`http.Serve`
+  without a retained `http.Server`); process exit is sufficient for a
+  desktop app and avoids touching the server package.
 - Port bind or server startup failure → native error dialog, exit non-zero.
+- Implementation verify item: confirm `Server.Listen` handles `:0` random
+  ports (its retry loop scans `port..port+N`).
 - Windows: Wails handles the WebView2 bootstrap. Linux: WebKitGTK is a
   documented package prerequisite.
 
@@ -64,7 +82,8 @@ web/ SPA and internal/server handlers run unchanged.
 ## Testing
 
 - Unit test: server-boot helper (port selection, token generation, readiness).
-- Unit test: notebus-event → badge/notification mapping, using a fake bus.
+- Unit test: run-snapshot diff → badge/notification mapping, using fake
+  snapshots.
 - Window/tray/menus: manual smoke checklist per platform (Wails v3 alpha has
   no headless test story).
 
