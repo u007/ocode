@@ -16,6 +16,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
 	"github.com/u007/ocode/internal/desktop"
+	"github.com/u007/ocode/internal/server"
 )
 
 // notificationsSupported reports whether native notifications can be used at
@@ -66,12 +67,17 @@ func wireNative(ctx context.Context, win *application.WebviewWindow, handle *des
 		log.Printf("ocode-desktop: native notifications disabled (not running from a .app bundle)")
 	}
 
-	go desktop.Watch(ctx, 750*time.Millisecond, handle.Srv.RunStates, func(sum desktop.Summary) {
-		// Dock badge: running-agent count. macOS/Windows only; errors on
-		// unsupported platforms are logged, never fatal.
-		if sum.RunningCount > 0 {
-			if err := dockSvc.SetBadge(fmt.Sprintf("%d", sum.RunningCount)); err != nil {
-				log.Printf("ocode-desktop: set badge %d: %v", sum.RunningCount, err)
+	source := func() ([]server.RunState, int) {
+		return handle.Srv.RunStates(), handle.Srv.PendingPermissionAsks()
+	}
+	lastAsks := 0
+	go desktop.Watch(ctx, 750*time.Millisecond, source, func(sum desktop.Summary) {
+		// Dock badge: running agents + sessions blocked on a permission
+		// prompt. macOS/Windows only; errors on unsupported platforms are
+		// logged, never fatal.
+		if badgeCount := sum.RunningCount + sum.PendingAsks; badgeCount > 0 {
+			if err := dockSvc.SetBadge(fmt.Sprintf("%d", badgeCount)); err != nil {
+				log.Printf("ocode-desktop: set badge %d: %v", badgeCount, err)
 			}
 		} else {
 			if err := dockSvc.RemoveBadge(); err != nil {
@@ -79,9 +85,25 @@ func wireNative(ctx context.Context, win *application.WebviewWindow, handle *des
 			}
 		}
 
+		askDelta := sum.PendingAsks - lastAsks
+		lastAsks = sum.PendingAsks
+
 		if notifier == nil || focused.Load() {
 			return // unsupported, or user is looking at the window
 		}
+
+		// New permission prompt(s) appeared while unfocused.
+		if askDelta > 0 {
+			err := notifier.SendNotification(notifications.NotificationOptions{
+				ID:    fmt.Sprintf("permission-ask-%d", sum.PendingAsks),
+				Title: "Agent needs permission",
+				Body:  fmt.Sprintf("%d session(s) waiting for your approval", sum.PendingAsks),
+			})
+			if err != nil {
+				log.Printf("ocode-desktop: send permission notification: %v", err)
+			}
+		}
+
 		for _, run := range sum.Finished {
 			title := "Agent finished"
 			if run.Failed {

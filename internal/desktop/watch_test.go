@@ -12,6 +12,18 @@ func rs(session, id string, ended bool) server.RunState {
 	return server.RunState{SessionID: session, ID: id, Ended: ended}
 }
 
+// scriptedSource returns a Watch source that steps through the given states
+// (with matching pending-ask counts), then keeps returning the last one.
+func scriptedSource(states [][]server.RunState, pending []int) func() ([]server.RunState, int) {
+	i := -1
+	return func() ([]server.RunState, int) {
+		if i < len(states)-1 {
+			i++
+		}
+		return states[i], pending[i]
+	}
+}
+
 func TestDiffCountsRunning(t *testing.T) {
 	cur := []server.RunState{rs("s1", "a", false), rs("s1", "b", true), rs("s2", "c", false)}
 	sum := Diff(nil, cur)
@@ -45,67 +57,78 @@ func TestDiffKeysBySessionAndID(t *testing.T) {
 	}
 }
 
-func TestWatchEmitsOnChangeOnly(t *testing.T) {
-	states := make(chan []server.RunState, 3)
-	states <- []server.RunState{rs("s1", "a", false)} // baseline: 1 running
-	states <- []server.RunState{rs("s1", "a", false)} // no change → no emit
-	states <- []server.RunState{rs("s1", "a", true)}  // finished → emit
-
-	var current []server.RunState
-	source := func() []server.RunState {
-		select {
-		case s := <-states:
-			current = s
-		default: // keep returning last state once the script is exhausted
-		}
-		return current
-	}
-
+func collectSummaries(t *testing.T, source func() ([]server.RunState, int)) chan Summary {
+	t.Helper()
 	got := make(chan Summary, 10)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+	t.Cleanup(cancel)
 	go Watch(ctx, 10*time.Millisecond, source, func(s Summary) { got <- s })
+	return got
+}
 
-	first := <-got // baseline emit: RunningCount 1
+func assertNoMoreEmits(t *testing.T, got chan Summary) {
+	t.Helper()
+	select {
+	case extra := <-got:
+		t.Fatalf("unexpected extra emit: %+v", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestWatchEmitsOnChangeOnly(t *testing.T) {
+	got := collectSummaries(t, scriptedSource(
+		[][]server.RunState{
+			{rs("s1", "a", false)}, // baseline: 1 running
+			{rs("s1", "a", false)}, // no change → no emit
+			{rs("s1", "a", true)},  // finished → emit
+		},
+		[]int{0, 0, 0},
+	))
+
+	first := <-got
 	if first.RunningCount != 1 || len(first.Finished) != 0 {
 		t.Fatalf("first emit = %+v, want RunningCount 1, no Finished", first)
 	}
-	second := <-got // the finish transition
+	second := <-got
 	if second.RunningCount != 0 || len(second.Finished) != 1 {
 		t.Fatalf("second emit = %+v, want RunningCount 0, 1 Finished", second)
 	}
-	select {
-	case extra := <-got:
-		t.Fatalf("unexpected third emit: %+v", extra)
-	case <-time.After(100 * time.Millisecond):
-	}
+	assertNoMoreEmits(t, got)
 }
 
 func TestWatchEmitsWhenRunsVanish(t *testing.T) {
 	// A running run disappearing from the snapshot (session deleted) must
 	// still emit the count drop so the badge clears.
-	states := make(chan []server.RunState, 2)
-	states <- []server.RunState{rs("s1", "a", false)} // baseline: 1 running
-	states <- []server.RunState{}                     // session gone: 0 running, no Finished
-
-	var current []server.RunState
-	source := func() []server.RunState {
-		select {
-		case s := <-states:
-			current = s
-		default:
-		}
-		return current
-	}
-
-	got := make(chan Summary, 10)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	go Watch(ctx, 10*time.Millisecond, source, func(s Summary) { got <- s })
+	got := collectSummaries(t, scriptedSource(
+		[][]server.RunState{
+			{rs("s1", "a", false)}, // baseline: 1 running
+			{},                     // session gone: 0 running, no Finished
+		},
+		[]int{0, 0},
+	))
 
 	<-got // baseline: 1 running
 	second := <-got
 	if second.RunningCount != 0 || len(second.Finished) != 0 {
 		t.Fatalf("second emit = %+v, want RunningCount 0 with no Finished", second)
 	}
+}
+
+func TestWatchEmitsOnPendingAskChange(t *testing.T) {
+	// A pending-permission change with no run activity must emit so the
+	// badge picks it up, and resolve back to quiet when answered.
+	got := collectSummaries(t, scriptedSource(
+		[][]server.RunState{{}, {}, {}},
+		[]int{0, 1, 1}, // baseline 0 → ask appears → unchanged
+	))
+
+	first := <-got
+	if first.PendingAsks != 0 {
+		t.Fatalf("first emit = %+v, want PendingAsks 0", first)
+	}
+	second := <-got
+	if second.PendingAsks != 1 || second.RunningCount != 0 {
+		t.Fatalf("second emit = %+v, want PendingAsks 1", second)
+	}
+	assertNoMoreEmits(t, got)
 }
