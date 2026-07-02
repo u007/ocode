@@ -11,6 +11,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/session"
 	shellpkg "github.com/u007/ocode/internal/shell"
 	"github.com/u007/ocode/internal/tool"
@@ -26,6 +27,7 @@ type Handler struct {
 	// sidebar, never persisted back to config.
 	advisorEnabled bool
 	workDir        string // override for git commands in tests
+	projects       *projects.Store
 }
 
 type agentSession struct {
@@ -39,10 +41,17 @@ func NewHandler() *Handler {
 	cfg, _ := config.Load()
 	agent.ApplyAgentConfig(cfg)
 	advisorEnabled := cfg == nil || cfg.Ocode.Advisor.Enabled
+
+	projStore, err := projects.NewStore()
+	if err != nil {
+		log.Printf("handler: init project store: %v (multi-project UI disabled)", err)
+	}
+
 	return &Handler{
 		agents:         make(map[string]*agentSession),
 		cfg:            cfg,
 		advisorEnabled: advisorEnabled,
+		projects:       projStore,
 	}
 }
 

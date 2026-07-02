@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -72,5 +73,58 @@ func TestGenerateTitleAsync_EmptyUserSkipsCall(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("callback never fired")
+	}
+}
+
+type titleErrClient struct{ calls *int }
+
+func (c titleErrClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	*c.calls++
+	return nil, errRateLimited
+}
+func (c titleErrClient) GetProvider() string { return "err" }
+func (c titleErrClient) GetModel() string    { return "err-model" }
+func (c titleErrClient) StreamChat(messages []Message, tools []map[string]interface{}, onChunk func(string)) (*Message, error) {
+	return c.Chat(messages, tools)
+}
+
+var errRateLimited = fmt.Errorf("429 rate limited")
+
+func TestGenerateTitleWithClients_FallsBackOnError(t *testing.T) {
+	a := &Agent{}
+	calls := 0
+	clients := []LLMClient{
+		titleErrClient{calls: &calls},
+		titleStubClient{reply: "Fallback Title"},
+	}
+	got := a.generateTitleWithClients(clients, "sys", "prompt")
+	if got != "Fallback Title" {
+		t.Fatalf("expected fallback client result, got %q", got)
+	}
+	if calls != 1 {
+		t.Fatalf("expected first client to be tried once, got %d", calls)
+	}
+}
+
+func TestGenerateTitleWithClients_FallsBackOnEmptyReply(t *testing.T) {
+	a := &Agent{}
+	clients := []LLMClient{
+		titleStubClient{reply: "   "},
+		titleStubClient{reply: "Second Choice"},
+	}
+	if got := a.generateTitleWithClients(clients, "sys", "prompt"); got != "Second Choice" {
+		t.Fatalf("expected empty reply to fall through, got %q", got)
+	}
+}
+
+func TestGenerateTitleWithClients_AllFailReturnsEmpty(t *testing.T) {
+	a := &Agent{}
+	calls := 0
+	clients := []LLMClient{titleErrClient{calls: &calls}, titleErrClient{calls: &calls}}
+	if got := a.generateTitleWithClients(clients, "sys", "prompt"); got != "" {
+		t.Fatalf("expected empty title when all clients fail, got %q", got)
+	}
+	if calls != 2 {
+		t.Fatalf("expected both clients tried, got %d", calls)
 	}
 }

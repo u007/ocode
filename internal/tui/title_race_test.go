@@ -2,6 +2,8 @@ package tui
 
 import (
 	"testing"
+
+	"github.com/u007/ocode/internal/agent"
 )
 
 // TestTitleGen_RejectsStaleResult guards against the regression where a title
@@ -44,5 +46,45 @@ func TestTitleGen_RejectsStaleResult(t *testing.T) {
 	}
 	if m.sessionTitle != "fresh title" {
 		t.Errorf("fresh title not applied, got %q", m.sessionTitle)
+	}
+}
+
+// TestTitleGen_FailureUnlatchesAndCapsRetries covers the retry path: a failed
+// generation (empty title result) resets titleRequested so the next assistant
+// response can retry, but maybeGenerateTitle stops after maxTitleAttempts.
+func TestTitleGen_FailureUnlatchesAndCapsRetries(t *testing.T) {
+	m := &model{
+		agent:    &agent.Agent{},
+		titleCh:  make(chan titleResult, 4),
+		titleGen: 1,
+		messages: []message{{role: roleUser, text: "fix the bug"}},
+	}
+
+	for i := 1; i <= maxTitleAttempts; i++ {
+		m.maybeGenerateTitle("assistant reply")
+		if !m.titleRequested {
+			t.Fatalf("attempt %d: expected titleRequested latch", i)
+		}
+		if m.titleAttempts != i {
+			t.Fatalf("attempt %d: titleAttempts = %d", i, m.titleAttempts)
+		}
+		// Mirror the Update handler's failure branch: empty title unlatches.
+		if m.sessionTitle == "" {
+			m.titleRequested = false
+		}
+	}
+
+	// Cap reached: no further attempts.
+	m.maybeGenerateTitle("assistant reply")
+	if m.titleRequested || m.titleAttempts != maxTitleAttempts {
+		t.Fatalf("expected retries capped at %d, got attempts=%d requested=%v",
+			maxTitleAttempts, m.titleAttempts, m.titleRequested)
+	}
+
+	// A successful result still applies and saves nothing extra here.
+	m.sessionTitle = "Bug Fix"
+	m.maybeGenerateTitle("assistant reply")
+	if m.titleAttempts != maxTitleAttempts {
+		t.Fatal("attempts must not grow once a title exists")
 	}
 }

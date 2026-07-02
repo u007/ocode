@@ -42,17 +42,33 @@ func (a *Agent) GenerateTitleAsync(userMsg, assistantMsg string, onResult func(s
 }
 
 func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
-	client := a.titleClient()
-	if client == nil {
-		return ""
-	}
-
 	system := titleSystemPrompt
 	if def := lookupHiddenAgent("title"); def != nil && strings.TrimSpace(def.SystemPrompt) != "" {
 		system = def.SystemPrompt
 	}
-
 	prompt := buildTitlePrompt(userMsg, assistantMsg)
+	return a.generateTitleWithClients(a.titleClients(), system, prompt)
+}
+
+// generateTitleWithClients tries each client in order until one returns a
+// non-empty sanitized title. A failing or empty result falls through to the
+// next client so a rate-limited small model doesn't lose the title.
+func (a *Agent) generateTitleWithClients(clients []LLMClient, system, prompt string) string {
+	for _, client := range clients {
+		content, err := a.titleChat(client, system, prompt)
+		if err != nil {
+			emitDebug("TITLE", fmt.Sprintf("%s/%s error: %v", client.GetProvider(), client.GetModel(), err))
+			continue
+		}
+		if t := sanitizeTitle(content); t != "" {
+			return t
+		}
+		emitDebug("TITLE", fmt.Sprintf("%s/%s returned empty title", client.GetProvider(), client.GetModel()))
+	}
+	return ""
+}
+
+func (a *Agent) titleChat(client LLMClient, system, prompt string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), titleTimeoutSeconds*time.Second)
 	defer cancel()
 
@@ -81,37 +97,44 @@ func (a *Agent) generateTitle(userMsg, assistantMsg string) string {
 
 	select {
 	case <-ctx.Done():
-		emitDebug("TITLE", fmt.Sprintf("timeout: %v", ctx.Err()))
-		return ""
+		return "", ctx.Err()
 	case r := <-done:
-		if r.err != nil {
-			emitDebug("TITLE", fmt.Sprintf("error: %v", r.err))
-			return ""
-		}
-		return sanitizeTitle(r.content)
+		return r.content, r.err
 	}
 }
 
-func (a *Agent) titleClient() LLMClient {
-	if a.config == nil {
-		return a.client
-	}
-	// Precedence: registry "title" agent's Model > Ocode.SmallModel > main client.
-	if def := lookupHiddenAgent("title"); def != nil {
-		if m := strings.TrimSpace(def.Model); m != "" {
+// titleClients returns candidate clients in precedence order:
+// registry "title" agent's Model > Ocode.RecapModel > Ocode.SmallModel > main
+// client. Duplicate model strings are collapsed; the main client is always the
+// final fallback.
+func (a *Agent) titleClients() []LLMClient {
+	var clients []LLMClient
+	if a.config != nil {
+		var models []string
+		if def := lookupHiddenAgent("title"); def != nil {
+			models = append(models, strings.TrimSpace(def.Model))
+		}
+		if a.config.Ocode.RecapModelEnabled {
+			models = append(models, strings.TrimSpace(a.config.Ocode.RecapModel))
+		}
+		if a.config.Ocode.SmallModelEnabled {
+			models = append(models, strings.TrimSpace(a.config.Ocode.SmallModel))
+		}
+		seen := map[string]bool{}
+		for _, m := range models {
+			if m == "" || seen[m] {
+				continue
+			}
+			seen[m] = true
 			if c := NewClient(a.config, m); c != nil {
-				return c
+				clients = append(clients, c)
 			}
 		}
 	}
-	small := strings.TrimSpace(a.config.Ocode.SmallModel)
-	if small == "" || !a.config.Ocode.SmallModelEnabled {
-		return a.client
+	if a.client != nil {
+		clients = append(clients, a.client)
 	}
-	if client := NewClient(a.config, small); client != nil {
-		return client
-	}
-	return a.client
+	return clients
 }
 
 // lookupHiddenAgent fetches a hidden agent definition by name from the default

@@ -406,10 +406,11 @@ func (c *GenericClient) usesAnthropicMessagesAPI() bool {
 	if c.Provider == "anthropic" {
 		return true
 	}
-	// opencode-go routes per-model: minimax & qwen use /v1/messages (Anthropic API),
-	// everything else (deepseek, glm, kimi, mimo) uses /v1/chat/completions (OpenAI).
+	// opencode-go routes per-model: minimax uses /v1/messages (Anthropic API);
+	// everything else (deepseek, glm, kimi, mimo, qwen) uses
+	// /v1/chat/completions (OpenAI).
 	if c.Provider == "opencode" || c.Provider == "opencode-go" {
-		return strings.HasPrefix(c.Model, "minimax-") || strings.HasPrefix(c.Model, "qwen3.")
+		return strings.HasPrefix(c.Model, "minimax-")
 	}
 	baseURL := strings.ToLower(strings.TrimRight(c.BaseURL, "/"))
 	return strings.HasSuffix(baseURL, "/anthropic") || strings.Contains(baseURL, "/anthropic/")

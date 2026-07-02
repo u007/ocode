@@ -182,3 +182,10 @@ export interface LSPStatus {
   state: "running" | "starting" | "failed" | string;
   detail?: string;
 }
+
+export interface Project {
+  path: string;
+  name: string;
+  added_at: string;
+  last_used_at: string;
+}

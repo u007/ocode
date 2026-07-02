@@ -483,3 +483,53 @@ func TestAppendClaudeSessionWritesClaudeJsonl(t *testing.T) {
 		t.Fatalf("appended entry uuid collides with earlier entry: third=%#v first=%#v second=%#v", third["uuid"], first["uuid"], second["uuid"])
 	}
 }
+
+func TestSaveTitleGeneratedFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	msgs := []agent.Message{{Role: "user", Content: "fix the login bug in auth.ts"}}
+
+	// Fallback auto-title (empty title param) must NOT be marked generated.
+	if err := Save("flag-test", "", msgs, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	sess, err := Load("flag-test")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if sess.TitleGenerated {
+		t.Fatal("fallback auto-title must not set TitleGenerated")
+	}
+	if sess.Title == "" {
+		t.Fatal("expected fallback title from first user message")
+	}
+
+	// Explicit title marks the session as generated.
+	if err := Save("flag-test", "Login Bug Fix", msgs, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	sess, err = Load("flag-test")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !sess.TitleGenerated || sess.Title != "Login Bug Fix" {
+		t.Fatalf("expected generated title to persist, got %q generated=%v", sess.Title, sess.TitleGenerated)
+	}
+
+	// Subsequent save without a title keeps the generated title and flag.
+	if err := Save("flag-test", "", msgs, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	sess, err = Load("flag-test")
+	if err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+	if !sess.TitleGenerated || sess.Title != "Login Bug Fix" {
+		t.Fatalf("empty re-save must keep generated title, got %q generated=%v", sess.Title, sess.TitleGenerated)
+	}
+}

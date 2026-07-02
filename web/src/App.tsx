@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Routes, Route, useNavigate } from "react-router-dom";
+import { Routes, Route } from "react-router-dom";
 import { ChatProvider, useChatDispatch, useChatState } from "./stores/chatStore";
+import { ProjectProvider } from "./stores/projectStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -14,7 +15,8 @@ import FileTree from "./components/Files/FileTree";
 import LogPanel from "./components/Logs/LogPanel";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import TopTabs from "./components/Layout/TopTabs";
-import SessionSidebar from "./components/Layout/SessionSidebar";
+import ProjectSidebar from "./components/Layout/ProjectSidebar";
+import SessionTabs from "./components/Layout/SessionTabs";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import ModelDialog from "./components/Layout/ModelDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
@@ -51,61 +53,31 @@ function StatusMetricsHydrator() {
     };
 
     updateSpending();
-
-    if (!sessionId) {
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    api
-      .getSessionContext(sessionId)
-      .then((res) => {
-        if (cancelled) return;
-        dispatch({
-          type: "SET_SESSION_CONTEXT",
-          context: {
-            currentTokens: res.estimated_tokens,
-            maxTokens: res.max_tokens ?? 0,
-            model: res.model ?? "",
-          },
-        });
-      })
-      .catch((err) => console.error(err));
-
+    const interval = setInterval(updateSpending, 60000);
     return () => {
       cancelled = true;
+      clearInterval(interval);
     };
-  }, [dispatch, tuiStatus?.session_id, tuiStatus?.updated_at]);
+  }, [tuiStatus?.session_id, dispatch]);
 
   return null;
 }
 
 function HomeApp() {
-  const [activeTab, setActiveTab] = useState("chat");
-  const [cmdOpen, setCmdOpen] = useState(false);
+  const dispatch = useChatDispatch();
+  const { resolvePermission, pendingPermission } = useChat();
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [coworkOpen, setCoworkOpen] = useState(true);
-  const [isMobile, setIsMobile] = useState(() => window.innerWidth < 768);
-  const navigate = useNavigate();
-  const dispatch = useChatDispatch();
-  const { resolvePermission, pendingPermission } = useChat({
-    onNewSession: (sessionId) => navigate(`/session/${sessionId}`),
-  });
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [activeTab, setActiveTab] = useState("chat");
 
-  // Mobile breakpoint detection. We only auto-close the sidebar on the
-  // RISING edge (desktop → mobile) so resizing back to desktop doesn't
-  // hide a sidebar the user was just looking at, and resizing mobile →
-  // desktop → mobile doesn't snap a deliberately open sidebar shut. The
-  // listener still updates isMobile every time; the auto-close is gated
-  // on the previous-vs-current transition in lastWasMobile.
+  // Mobile responsive
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 767px)");
     let lastWasMobile = mq.matches;
     const handler = (e: MediaQueryListEvent) => {
-      setIsMobile(e.matches);
       if (e.matches && !lastWasMobile) {
         setSidebarOpen(false);
       }
@@ -115,10 +87,7 @@ function HomeApp() {
     return () => mq.removeEventListener("change", handler);
   }, []);
 
-  // Seed the advisor on/off, model, small model, advisor model, and the
-  // consolidated TUI status snapshot so the status bar is correct on load.
-  // The SSE "status" event from the bridged TUI session will overwrite these
-  // as updates arrive.
+  // Seed config values
   useEffect(() => {
     api
       .getAdvisorEnabled()
@@ -130,9 +99,7 @@ function HomeApp() {
       .catch(console.error);
     api
       .getSmallModelWithEnabled()
-      .then((res) => {
-        dispatch({ type: "SET_SMALL_MODEL", model: res.model || "" });
-      })
+      .then((res) => dispatch({ type: "SET_SMALL_MODEL", model: res.model || "" }))
       .catch(console.error);
     api
       .getAdvisor()
@@ -156,9 +123,7 @@ function HomeApp() {
   };
 
   const handleCommand = (cmd: string) => {
-    // Extract the base command (first word)
     const baseCmd = cmd.split(" ")[0];
-    
     if (baseCmd === "/clear" || baseCmd === "/new") {
       dispatch({ type: "RESET" });
       return true;
@@ -167,47 +132,55 @@ function HomeApp() {
       openModelDialog("main");
       return true;
     }
-    // For other commands, let them pass through to the LLM
     return false;
   };
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
-      {/* Top navigation with tabs */}
-      <TopTabs
-        activeTab={activeTab}
-        onTabChange={setActiveTab}
-        onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
-      />
+      {/* Session tabs bar (multi-project session management) */}
+      <SessionTabs />
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left sidebar - session history (collapsible) */}
-        <SessionSidebar
+        {/* Left sidebar - project roots */}
+        <ProjectSidebar
           isOpen={sidebarOpen}
           onToggle={() => setSidebarOpen(!sidebarOpen)}
-          isMobile={isMobile}
         />
 
         {/* Center content */}
         <main className="flex flex-1 flex-col overflow-hidden">
-          {activeTab === "chat" && (
-            <>
-              <ChatPanel />
-              <AgentPreview />
-              <ChatInput onSlashCommand={handleCommand} />
-              <StatusBar
-                onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
-                onModelClick={() => openModelDialog("main")}
-                onStatusClick={() => setActiveTab("status")}
-              />
-            </>
-          )}
-          {activeTab === "files" && <FileTree />}
-          {activeTab === "git" && <GitPanel />}
-          {activeTab === "status" && <StatusPanel onClose={() => setActiveTab("chat")} />}
-          {activeTab === "logs" && <LogPanel />}
-          {activeTab === "assets" && <AssetsPanel />}
+          {/* Content navigation tabs (chat/files/git/status/logs/assets) */}
+          <TopTabs
+            activeTab={activeTab}
+            onTabChange={setActiveTab}
+            onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
+          />
+
+          {/* Tab content */}
+          <div className="flex-1 overflow-hidden">
+            {activeTab === "chat" && (
+              <div className="flex flex-col h-full">
+                <ChatPanel />
+                <AgentPreview />
+                <ChatInput onSlashCommand={handleCommand} />
+              </div>
+            )}
+            {activeTab === "files" && <FileTree />}
+            {activeTab === "git" && <GitPanel />}
+            {activeTab === "status" && <StatusPanel onClose={() => setActiveTab("chat")} />}
+            {activeTab === "logs" && <LogPanel />}
+            {activeTab === "assets" && <AssetsPanel />}
+          </div>
+
+          {/* Status bar */}
+          <StatusBar
+            onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
+            onModelClick={() => openModelDialog("main")}
+            onStatusClick={() => {
+              setActiveTab("status");
+            }}
+          />
         </main>
 
         {/* Right sidebar - cowork panel (only on chat tab) */}
@@ -253,11 +226,13 @@ export default function App() {
   return (
     <ErrorBoundary>
       <ChatProvider>
-        <StatusMetricsHydrator />
-        <Routes>
-          <Route path="/session/:id" element={<SessionPage />} />
-          <Route path="*" element={<HomeApp />} />
-        </Routes>
+        <ProjectProvider>
+          <StatusMetricsHydrator />
+          <Routes>
+            <Route path="/session/:id" element={<SessionPage />} />
+            <Route path="*" element={<HomeApp />} />
+          </Routes>
+        </ProjectProvider>
       </ChatProvider>
     </ErrorBoundary>
   );
