@@ -1256,7 +1256,8 @@ func (a *Agent) runRecap(messages []Message, instruction string, short bool) str
 		b.WriteString("1. WHAT USER WANT — what was asked\n")
 		b.WriteString("2. WHAT FIND — what was found or discovered\n")
 		b.WriteString("3. DECISION — what decisions were made\n")
-		b.WriteString("4. DO — what was updated and tested\n\n")
+		b.WriteString("4. DO — what was updated and tested\n")
+		b.WriteString("5. TASKS — current open tasks and their status\n\n")
 		b.WriteString("Format: use headers and bullet points. Be terse. No filler.\n\n")
 	}
 	if instruction != "" {
@@ -1265,6 +1266,19 @@ func (a *Agent) runRecap(messages []Message, instruction string, short bool) str
 			tag = "Focus"
 		}
 		fmt.Fprintf(&b, "%s: %s\n\n", tag, instruction)
+	}
+	// Include pending tasks (running background processes + sub-agent runs).
+	pendingCount, pendingDetail := a.pendingTasksForRecap()
+	if pendingCount > 0 {
+		if short {
+			b.WriteString("TASKS: ")
+			b.WriteString(strconv.Itoa(pendingCount))
+			b.WriteString(" pending.\n\n")
+		} else {
+			b.WriteString("PENDING TASKS:\n")
+			b.WriteString(pendingDetail)
+			b.WriteString("\n\n")
+		}
 	}
 	b.WriteString("CONVERSATION:\n")
 
@@ -1337,6 +1351,57 @@ func (a *Agent) recapTimeoutSeconds() int {
 		return a.config.Ocode.RecapTimeoutSeconds
 	}
 	return 60
+}
+
+// pendingTasksForRecap returns a count and formatted detail string of currently
+// running background processes and sub-agent runs for inclusion in the recap.
+func (a *Agent) pendingTasksForRecap() (count int, detail string) {
+	var b strings.Builder
+
+	// Background processes.
+	procs := a.procs
+	if procs != nil {
+		for _, pi := range procs.Snapshot() {
+			if pi.Status != tool.ProcRunning {
+				continue
+			}
+			count++
+			b.WriteString("  • proc ")
+			b.WriteString(pi.ID)
+			b.WriteString(": ")
+			b.WriteString(pi.Command)
+			b.WriteString("\n")
+		}
+	}
+
+	// Sub-agent runs.
+	runs := a.runs
+	if runs != nil {
+		for _, run := range runs.Snapshot() {
+			if run.Status != RunRunning {
+				continue
+			}
+			count++
+			b.WriteString("  • agent ")
+			b.WriteString(run.Name)
+			if run.ID != "" {
+				b.WriteString(" (")
+				b.WriteString(run.ID)
+				b.WriteString(")")
+			}
+			if !run.StartedAt.IsZero() {
+				elapsed := time.Since(run.StartedAt).Truncate(time.Second)
+				b.WriteString(" running ")
+				b.WriteString(elapsed.String())
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	if count > 0 {
+		detail = b.String()
+	}
+	return count, detail
 }
 
 func (a *Agent) recapClient() LLMClient {
