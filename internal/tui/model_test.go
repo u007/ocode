@@ -2393,6 +2393,7 @@ func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
 
 	m := model{ready: true, width: 140, height: 20, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 20)}
 	data := m.buildSidebarRenderData()
+	layout := m.sidebarScreenLayout(data)
 	targetPath := "file-11.go"
 	scrollIdx := -1
 	for i, path := range data.fileScrollLinePaths {
@@ -2406,11 +2407,7 @@ func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
 	}
 
 	headerHeight := m.sidebarHeaderHeight()
-	effectiveHeaderHeight := maxInt(1, headerHeight)
-	contentHeight := m.height - 2 - effectiveHeaderHeight
-	spaceForScroll := maxInt(3, contentHeight-len(data.topLines)-len(data.bottomLines))
-	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
-	visible := minInt(scrollBoxHeight, spaceForScroll)
+	visible := m.sidebarVisibleScrollLines(data, headerHeight)
 	if visible < 1 {
 		t.Fatal("expected a visible sidebar scroll window")
 	}
@@ -2419,8 +2416,7 @@ func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
 	}
 
 	m.sidebarScroll = scrollIdx - (visible - 1)
-	contentTopY := appHeaderHeight + 1 + effectiveHeaderHeight
-	fileScreenY := contentTopY + len(data.topLines) + (scrollIdx - m.sidebarScroll)
+	fileScreenY := layout.contentTopY + layout.topCount + (scrollIdx - m.sidebarScroll)
 
 	rendered := strings.Split(stripANSI(m.renderSidebar()), "\n")
 	sidebarLine := fileScreenY - appHeaderHeight
@@ -2879,14 +2875,14 @@ func TestModelPickerCtrlRWorksForRecapModel(t *testing.T) {
 // and append the provider sections, not return early.
 func TestModelPickerFullModelsLoadedForRecapModel(t *testing.T) {
 	m := model{
-		showPicker:       true,
-		pickerKind:       "recap-model",
-		pickerItems:      []string{"  auto (resolve from priority list)"},
-		pickerValues:     []string{"auto"},
-		pickerIsHeader:   []bool{false},
-		styles:           ApplyThemeColors("tokyonight"),
-		input:            newTestTextarea(),
-		viewport:         fastviewport.New(80, 20),
+		showPicker:     true,
+		pickerKind:     "recap-model",
+		pickerItems:    []string{"  auto (resolve from priority list)"},
+		pickerValues:   []string{"auto"},
+		pickerIsHeader: []bool{false},
+		styles:         ApplyThemeColors("tokyonight"),
+		input:          newTestTextarea(),
+		viewport:       fastviewport.New(80, 20),
 	}
 	updated, _ := m.Update(modelPickerFullModelsLoadedMsg{
 		items:    []string{"openai", "  openai/gpt-4o-mini"},

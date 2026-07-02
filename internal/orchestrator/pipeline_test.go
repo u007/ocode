@@ -123,14 +123,13 @@ func TestPipeline_haltAfterMaxIterations(t *testing.T) {
 }
 
 func TestPipeline_haltOnCompileFailureSurfacesReason(t *testing.T) {
-	// Regression: the original pipeline produced a HALT report with NO
-	// failure reason when the most recent iteration failed at compile, because
-	// FinalValidatorReport was empty and the renderer had no compile-output
-	// fallback. The user saw only "HALTED — Validation did not pass" with
-	// no explanation. This test forces compile failure (via a temp dir
-	// containing no Go module) and asserts that the report now surfaces
-	// LastCompileOutput and the full iteration history.
 	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.23\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {\n\tmissing()\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	stub := &stubDispatcher{
 		responses: map[string]string{
 			"orchestrator-planner":   "Implement feature.\n\nverify_mode: llm_only\nmax_iterations: 1",
@@ -173,6 +172,18 @@ func TestPipeline_haltOnCompileFailureSurfacesReason(t *testing.T) {
 	}
 	if !strings.Contains(out, "compile-fail") {
 		t.Errorf("rendered iteration history missing compile-fail status:\n%s", out)
+	}
+}
+
+func TestPipeline_skipsCompileWhenNoGoMod(t *testing.T) {
+	dir := t.TempDir()
+	p := &Pipeline{opts: PipelineOptions{WorkDir: dir}, runID: "test-run"}
+	out, err := p.runCompile(context.Background(), "build_llm", nil)
+	if err != nil {
+		t.Fatalf("runCompile returned error: %v", err)
+	}
+	if !strings.Contains(out, "skipping Go compile") {
+		t.Fatalf("expected skip note in output, got %q", out)
 	}
 }
 

@@ -114,9 +114,7 @@ func (a *Agent) titleClients() []LLMClient {
 		if def := lookupHiddenAgent("title"); def != nil {
 			models = append(models, strings.TrimSpace(def.Model))
 		}
-		if a.config.Ocode.RecapModelEnabled {
-			models = append(models, strings.TrimSpace(a.config.Ocode.RecapModel))
-		}
+		models = append(models, strings.TrimSpace(a.config.Ocode.RecapModel))
 		if a.config.Ocode.SmallModelEnabled {
 			models = append(models, strings.TrimSpace(a.config.Ocode.SmallModel))
 		}

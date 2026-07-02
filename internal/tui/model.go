@@ -611,6 +611,8 @@ type model struct {
 	smallModelEnabledSet bool // whether smallModelEnabled should be applied to newly installed agents
 	recapModelEnabled    bool // runtime recap model state; persisted across agent rebuilds
 	recapModelEnabledSet bool // whether recapModelEnabled should be applied to newly installed agents
+	ocrEnabled           bool // runtime OCR tool state; persisted across agent rebuilds
+	ocrEnabledSet        bool // whether ocrEnabled should be applied to newly installed agents
 	config               *config.Config
 	sessionID            string
 	sessionTitle         string
@@ -1583,7 +1585,14 @@ func newModel(opts ...RunOptions) model {
 			return false
 		}(),
 		recapModelEnabledSet: true,
-		config:               cfg,
+		ocrEnabled: func() bool {
+			if cfg != nil {
+				return cfg.Ocode.OcrEnabled
+			}
+			return false
+		}(),
+		ocrEnabledSet: true,
+		config:        cfg,
 		// IDE mode: an explicit config value wins; otherwise auto-enable the
 		// Claude Code integration only when running inside a VS Code terminal.
 		ideMode:          resolveInitialIDEMode(cfg),
@@ -5176,6 +5185,19 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, nil, true
 			}
+			if m.sidebarOcrToggleForClick(mouse) {
+				m.ocrEnabled = !m.ocrEnabled
+				m.ocrEnabledSet = true
+				if m.config != nil {
+					m.config.Ocode.OcrEnabled = m.ocrEnabled
+				}
+				if err := config.SaveOcrEnabled(m.ocrEnabled); err != nil {
+					log.Printf("save ocr enabled: %v", err)
+				}
+				m.broadcastTUIStatus()
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
 			m.sidebarSel = selectionState{}
 		}
 		if !m.detail.empty() {
@@ -5946,7 +5968,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/search" || cmd == "/find" ||
 		cmd == "/discover" ||
 		cmd == "/docs" || cmd == "/doc-mode" ||
-		cmd == "/recap"
+		cmd == "/recap" ||
+		cmd == "/ocr"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
@@ -6577,6 +6600,104 @@ func (m *model) showDiscoverStatus() {
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
 
+func (m *model) handleOcrCmd(args []string) tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR requires a configuration. Run /connect first."})
+		return nil
+	}
+	if len(args) == 0 || strings.ToLower(args[0]) == "status" {
+		return m.showOcrStatus()
+	}
+	switch strings.ToLower(args[0]) {
+	case "enable", "true", "yes", "on":
+		m.config.Ocode.OcrEnabled = true
+		if err := config.SaveOcrEnabled(true); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.ocrEnabled = true
+		m.ocrEnabledSet = true
+		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR: enabled."})
+		return nil
+	case "disable", "false", "no", "off":
+		m.config.Ocode.OcrEnabled = false
+		if err := config.SaveOcrEnabled(false); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.ocrEnabled = false
+		m.ocrEnabledSet = true
+		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR: disabled."})
+		return nil
+	case "model":
+		if len(args) > 1 {
+			return m.handleOcrModel(args[1])
+		}
+		return m.openOcrModelPicker()
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /ocr [status|enable|disable|model [name]]"})
+		return nil
+	}
+}
+
+func (m *model) showOcrStatus() tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR requires a configuration."})
+		return nil
+	}
+	status := "disabled"
+	if m.config.Ocode.OcrEnabled {
+		status = "enabled"
+	}
+	modelText := m.config.Ocode.OcrModel
+	if modelText == "" {
+		modelText = "(not set)"
+	}
+	// Check LM Studio connectivity
+	lmsResult := agent.FetchLMStudioModels()
+	lmsStatus := "not running"
+	if len(lmsResult.Models) > 0 {
+		lmsStatus = fmt.Sprintf("running (%d models)", len(lmsResult.Models))
+	} else if lmsResult.NeedsAPIKey {
+		lmsStatus = "needs API key"
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf(
+		"OCR: %s\nModel: %s\nLM Studio: %s\n\nUse /ocr enable to turn on, /ocr model to select a model.", status, modelText, lmsStatus)})
+	return nil
+}
+
+func (m *model) handleOcrModel(modelName string) tea.Cmd {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR requires a configuration."})
+		return nil
+	}
+	m.config.Ocode.OcrModel = modelName
+	if err := config.SaveOcrModel(modelName); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error saving OCR model: %v", err)})
+		return nil
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("OCR model set to: %s", modelName)})
+	return nil
+}
+
+func (m *model) openOcrModelPicker() tea.Cmd {
+	// Fetch OCR models from LM Studio
+	ocrModels := agent.OcrModelsFromLMStudio()
+	if len(ocrModels) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No LM Studio models found. Make sure LM Studio is running."})
+		return nil
+	}
+	// List available OCR models in the chat
+	var b strings.Builder
+	b.WriteString("Available LM Studio OCR models:\n")
+	for _, model := range ocrModels {
+		b.WriteString(fmt.Sprintf("  • %s\n", model))
+	}
+	b.WriteString("\nUse /ocr model <name> to select one.")
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+	return nil
+}
+
 func (m *model) handleDocsCmd(args []string) tea.Cmd {
 	if len(args) == 0 || strings.ToLower(args[0]) == "status" {
 		status := "disabled"
@@ -6961,15 +7082,7 @@ func (m *model) handleRecapModelSub(args []string) tea.Cmd {
 
 	if target == "auto" {
 		m.config.Ocode.RecapModel = ""
-		if !m.recapModelEnabled {
-			if err := config.SaveRecapModel(""); err != nil {
-				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Recap model is disabled; failed to clear value: %v", err)})
-				return nil
-			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Recap model is disabled. Auto-resolve remains off."})
-			return nil
-		}
-		// Re-resolve — reuse small model resolution since recap falls back to it.
+		// Always resolve a model; RecapModelEnabled only controls auto-recap.
 		if small := agent.ResolveSmallModel(m.config); small != "" {
 			m.config.Ocode.RecapModel = small
 			if err := config.SaveRecapModel(small); err != nil {
@@ -7018,9 +7131,9 @@ func (m *model) handleRecapStatus() {
 
 	enabled := m.recapModelEnabled
 	if enabled {
-		b.WriteString("Status:  ● enabled\n")
+		b.WriteString("Auto-recap:  ● enabled\n")
 	} else {
-		b.WriteString("Status:  ○ disabled\n")
+		b.WriteString("Auto-recap:  ○ disabled\n")
 	}
 
 	b.WriteString(fmt.Sprintf("Timeout: %ds\n", m.config.Ocode.RecapTimeoutSeconds))
@@ -10620,12 +10733,14 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		snap.AdvisorModel = m.config.Ocode.Advisor.Model
 		snap.ExtraAllowedPaths = m.config.Ocode.ExtraAllowedPaths
 		snap.RecapModel = m.config.Ocode.RecapModel
+		snap.OcrModel = m.config.Ocode.OcrModel
 	}
 	snap.SessionID = m.sessionID
 	snap.SessionTitle = m.sessionTitle
 	snap.CWD = m.workDir
 	snap.SmallModelOn = m.smallModelEnabled
 	snap.RecapModelOn = m.recapModelEnabled
+	snap.OcrEnabled = m.ocrEnabled
 	snap.AdvisorEnabled = m.advisorEnabled
 	// The runtime advisor gate can drift from the seeded value when the TUI
 	// rebuilt the agent — prefer the live agent's view if present.
@@ -11943,10 +12058,10 @@ func (m *model) renderUserTextWithInner(text string) (innerContent, block string
 	if m.redactionRegistry != nil {
 		text = renderSecrets(text, m.redactionRegistry)
 	}
-	// renderMarkdownInLine does bold + headings + markdown links + raw
-	// URL styling in one pass (over the original text), so the output is
-	// a single styled block ready for the user-message bubble.
-	innerContent = renderMarkdownInLine(text, m.styles.Text)
+	// renderMarkdown does bold + headings + markdown links + raw URL
+	// styling + tables in one pass (over the original text), so the output
+	// is a single styled block ready for the user-message bubble.
+	innerContent = renderMarkdown(text, m.styles.Text)
 	bubbleWidth := m.viewport.Width() - 6
 	if bubbleWidth < 12 {
 		bubbleWidth = 12
@@ -13435,11 +13550,11 @@ func (m model) renderAssistantText(text string) string {
 	for {
 		start, tagLen := findThinkingStart(text)
 		if start < 0 {
-			b.WriteString(renderMarkdownInLine(text, m.styles.Text))
+			b.WriteString(renderMarkdown(text, m.styles.Text))
 			break
 		}
 		if start > 0 {
-			b.WriteString(renderMarkdownInLine(text[:start], m.styles.Text))
+			b.WriteString(renderMarkdown(text[:start], m.styles.Text))
 		}
 		remaining := text[start+tagLen:]
 		end, endLen := findThinkingEnd(remaining)
@@ -13457,8 +13572,8 @@ func (m model) renderAssistantText(text string) string {
 	return b.String()
 }
 
-// (Markdown rendering for chat text — bold, headings, links, raw URLs —
-// lives in urllink.go as renderMarkdownInLine.)
+// (Markdown rendering for chat text — bold, headings, links, raw URLs,
+// tables — lives in urllink.go as renderMarkdown.)
 
 func findThinkingStart(text string) (int, int) {
 	think := strings.Index(text, "<think>")
@@ -14001,6 +14116,8 @@ type sidebarRenderData struct {
 	ideToggleRows          int // number of (possibly wrapped) rows the IDE row occupies
 	recapModelToggleTopIdx int // index in topLines of the recap model on/off row, -1 if absent
 	recapModelToggleRows   int // number of (possibly wrapped) rows the recap model row occupies
+	ocrToggleTopIdx        int // index in topLines of the OCR on/off row, -1 if absent
+	ocrToggleRows          int // number of (possibly wrapped) rows the OCR row occupies
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -14277,7 +14394,7 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, ocrToggleTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -14476,6 +14593,24 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.ideToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, m.ideSidebarStatusLine(), outerBodyWidth)
 	data.ideToggleRows = len(data.topLines) - data.ideToggleTopIdx
+	// OCR row doubles as an on/off toggle (click to flip the runtime gate).
+	ocrModel := ""
+	if m.config != nil {
+		ocrModel = m.config.Ocode.OcrModel
+	}
+	if ocrModel == "" {
+		ocrModel = "(not set)"
+	}
+	ocrOn := m.ocrEnabled
+	var ocrLine string
+	if ocrOn {
+		ocrLine = dimStyle.Render("ocr: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(ocrModel)
+	} else {
+		ocrLine = dimStyle.Render("ocr: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(ocrModel)
+	}
+	data.ocrToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, ocrLine, outerBodyWidth)
+	data.ocrToggleRows = len(data.topLines) - data.ocrToggleTopIdx
 	data.topLines = append(data.topLines, "")
 
 	// ── Git status section (scrollable) ──
@@ -14661,15 +14796,19 @@ func (m model) renderSidebar() string {
 		contentHeight = 1
 	}
 
-	// Reserve space for topLines and bottomLines, rest goes to scrollBox
-	minScrollHeight := 3
-	spaceForScroll := maxInt(minScrollHeight, contentHeight-len(data.topLines)-len(data.bottomLines))
+	// Reserve space for topLines and bottomLines, rest goes to scrollBox.
+	// Clamp to the actual free rows so the sidebar never overflows and gets
+	// trimmed from the bottom of the scroll region.
+	spaceForScroll := contentHeight - len(data.topLines) - len(data.bottomLines)
+	if spaceForScroll < 0 {
+		spaceForScroll = 0
+	}
 
 	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
 	// User requested: no border — scrollBoxHeight IS the visible height
 	visibleScrollLines := minInt(scrollBoxHeight, spaceForScroll)
 	if visibleScrollLines < 1 {
-		visibleScrollLines = 1
+		visibleScrollLines = 0
 	}
 	scrollOffset := clampInt(m.sidebarScroll, 0, maxInt(0, len(data.scrollLines)-visibleScrollLines))
 	visible := sliceLines(data.scrollLines, scrollOffset, visibleScrollLines)
@@ -14685,7 +14824,7 @@ func (m model) renderSidebar() string {
 		}
 	}
 
-	if len(data.scrollLines) > visibleScrollLines {
+	if visibleScrollLines > 0 && len(data.scrollLines) > visibleScrollLines {
 		marker := fmt.Sprintf(" %d/%d", scrollOffset+1, len(data.scrollLines))
 		if len(visible) > 0 {
 			visible[0] = ansi.Truncate(visible[0], maxInt(1, sidebarColumnWidth-4-lipgloss.Width(marker)), "") + hintStyle.Render(marker)
@@ -14794,7 +14933,10 @@ func (m model) sidebarScreenLayout(data sidebarRenderData) sidebarScreenLayout {
 func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight int) int {
 	effectiveHeaderHeight := maxInt(1, headerHeight)
 	contentHeight := m.height - 2 - effectiveHeaderHeight
-	spaceForScroll := maxInt(3, contentHeight-len(data.topLines)-len(data.bottomLines))
+	spaceForScroll := contentHeight - len(data.topLines) - len(data.bottomLines)
+	if spaceForScroll < 0 {
+		spaceForScroll = 0
+	}
 	scrollBoxHeight := m.sidebarScrollBoxHeight(data, headerHeight)
 	return minInt(scrollBoxHeight, spaceForScroll)
 }
@@ -15041,6 +15183,23 @@ func (m model) sidebarIDEToggleForClick(mouse tea.Mouse) bool {
 
 // sidebarRecapModelToggleForClick returns true when the click lands on the recap
 // model on/off row in the pinned top area of the sidebar.
+func (m model) sidebarOcrToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.ocrToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.ocrToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.ocrToggleTopIdx
+	endY := minInt(startY+data.ocrToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
 func (m model) sidebarRecapModelToggleForClick(mouse tea.Mouse) bool {
 	if !m.mouseOverSidebar(mouse) {
 		return false

@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, connectSessionMirror } from "../api/client";
+import { api, apiPath, authHeaders, connectSessionMirror } from "../api/client";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
 import type { Message, TUIStatus } from "../api/types";
 import ChatPanel from "../components/Chat/ChatPanel";
@@ -12,11 +12,26 @@ import TopTabs from "../components/Layout/TopTabs";
 import CoworkSidebar from "../components/Layout/CoworkSidebar";
 import ModelDialog from "../components/Layout/ModelDialog";
 import PermissionDialog from "../components/Chat/PermissionDialog";
+import FileEditor from "../components/Files/FileEditor";
 import FileTree from "../components/Files/FileTree";
 import GitPanel from "../components/Git/GitPanel";
 import LogPanel from "../components/Logs/LogPanel";
 import AssetsPanel from "../components/Assets/AssetsPanel";
 import { useChat } from "../hooks/useChat";
+import { dispatchCommand } from "../components/Chat/commands";
+
+/** Trigger a browser file download from an in-memory string. */
+function triggerDownload(filename: string, content: string, mimeType: string) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
 type ModelDialogTab = "main" | "small" | "advisor";
 
@@ -32,6 +47,41 @@ export default function SessionPage() {
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const [activeTab, setActiveTab] = useState("chat");
+
+  // Editor tabs state
+  interface EditorTab {
+    id: string;
+    path: string;
+    content: string;
+  }
+  const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
+  const openFileIdsRef = useRef<Set<string>>(new Set());
+
+  const handleOpenFile = useCallback(async (path: string) => {
+    const id = `editor-${path}`;
+    if (openFileIdsRef.current.has(id)) {
+      setActiveTab(id);
+      return;
+    }
+    try {
+      const res = await fetch(apiPath(`/api/files/content?path=${encodeURIComponent(path)}`), {
+        headers: authHeaders(),
+      });
+      if (!res.ok) throw new Error("Failed to load file");
+      const data = await res.json();
+      openFileIdsRef.current.add(id);
+      setEditorTabs((prev) => [...prev, { id, path, content: data.content }]);
+      setActiveTab(id);
+    } catch (err) {
+      console.error("Failed to open file:", err);
+    }
+  }, []);
+
+  const handleCloseEditorTab = useCallback((id: string) => {
+    openFileIdsRef.current.delete(id);
+    setEditorTabs((prev) => prev.filter((t) => t.id !== id));
+    setActiveTab((prev) => (prev === id ? "files" : prev));
+  }, []);
 
   // Keep a ref to the latest state for use in the SSE callback
   const stateRef = useRef(state);
@@ -143,6 +193,12 @@ export default function SessionPage() {
             if (s.main_model !== undefined && s.main_model !== "") {
               dispatch({ type: "SET_MODEL", model: s.main_model });
             }
+            if (s.ocr_enabled !== undefined) {
+              dispatch({ type: "SET_OCR_ENABLED", enabled: !!s.ocr_enabled });
+            }
+            if (s.ocr_model !== undefined) {
+              dispatch({ type: "SET_OCR_MODEL", model: s.ocr_model });
+            }
           }
           break;
         case "advisor_enabled":
@@ -195,6 +251,13 @@ export default function SessionPage() {
       .getTUIStatus()
       .then((res) => dispatch({ type: "SET_TUI_STATUS", status: res }))
       .catch(console.error);
+    api
+      .getOcrEnabled()
+      .then((res) => {
+        dispatch({ type: "SET_OCR_ENABLED", enabled: res.enabled });
+        dispatch({ type: "SET_OCR_MODEL", model: res.model || "" });
+      })
+      .catch(console.error);
   }, [dispatch]);
 
   const openModelDialog = (tab: ModelDialogTab = "main") => {
@@ -202,16 +265,14 @@ export default function SessionPage() {
     setModelDialogOpen(true);
   };
 
-  const handleCommand = (cmd: string) => {
-    // Extract the base command (first word)
+  const handleCommand = async (cmd: string) => {
     const baseCmd = cmd.split(" ")[0];
-    
+
     if (baseCmd === "/clear") {
       dispatch({ type: "RESET" });
       return true;
     }
     if (baseCmd === "/new") {
-      // Reset chat state and navigate to home page to start a new session
       dispatch({ type: "RESET" });
       navigate("/");
       return true;
@@ -220,8 +281,47 @@ export default function SessionPage() {
       openModelDialog("main");
       return true;
     }
-    // For other commands, let them pass through to the LLM
-    return false;
+
+    // Delegate to the shared command dispatch
+    const result = await dispatchCommand(cmd, {
+      commandName: baseCmd,
+      args: cmd.slice(baseCmd.length).trim(),
+      api: {
+        listSessions: () => api.listSessions(),
+        getSession: (id) => api.getSession(id),
+        getOcrEnabled: () => api.getOcrEnabled(),
+        setOcrEnabled: (enabled) => api.setOcrEnabled(enabled),
+        setOcrModel: (model) => api.setOcrModel(model),
+        compactSession: (id) => api.compactSession(id),
+        recapSession: (id) => api.recapSession(id),
+        shareSession: (id) => api.shareSession(id),
+        btwSession: (id, content) => api.btwSession(id, content),
+        getMaskConfig: () => api.getMaskConfig(),
+        setMaskEnabled: (enabled) => api.setMaskEnabled(enabled),
+        setMaskMode: (mode) => api.setMaskMode(mode),
+        setMaskModel: (model) => api.setMaskModel(model),
+      },
+      getMessages: () => state.messages,
+      getSessionId: () => state.sessionId,
+    });
+
+    if (!result.handled) return false;
+
+    if (result.messages) {
+      for (const msg of result.messages) {
+        dispatch({ type: "ADD_MESSAGE", message: msg });
+      }
+    }
+    if (result.sessionId) {
+      dispatch({ type: "SET_SESSION", sessionId: result.sessionId });
+    }
+    if (result.newSession) {
+      dispatch({ type: "RESET" });
+    }
+    if (result.download) {
+      triggerDownload(result.download.filename, result.download.content, result.download.mimeType);
+    }
+    return true;
   };
 
   if (loading) {
@@ -242,9 +342,28 @@ export default function SessionPage() {
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
-      <TopTabs activeTab={activeTab} onTabChange={setActiveTab} />
+      <TopTabs
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path }))}
+        onEditorTabClose={handleCloseEditorTab}
+      />
       <div className="flex flex-1 overflow-hidden">
         <main className="flex flex-1 flex-col overflow-hidden">
+          {/* Editor tab — opened when a file is clicked from files/git/chat */}
+          {activeTab.startsWith("editor-") &&
+            (() => {
+              const editorTab = editorTabs.find((t) => t.id === activeTab);
+              if (!editorTab) return null;
+              return (
+                <FileEditor
+                  key={editorTab.id}
+                  path={editorTab.path}
+                  content={editorTab.content}
+                  readOnly={false}
+                />
+              );
+            })()}
           {activeTab === "chat" && (
             <>
               <ChatPanel />
@@ -257,8 +376,8 @@ export default function SessionPage() {
               />
             </>
           )}
-          {activeTab === "files" && <FileTree />}
-          {activeTab === "git" && <GitPanel />}
+          {activeTab === "files" && <FileTree onOpenFile={handleOpenFile} />}
+          {activeTab === "git" && <GitPanel onOpenFile={handleOpenFile} />}
           {activeTab === "status" && (
             <StatusPanel key={id} onClose={() => setActiveTab("chat")} />
           )}

@@ -5,7 +5,9 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -262,6 +264,16 @@ func (p *Pipeline) runCompile(ctx context.Context, verifyMode string, wm *Worktr
 	workDir := p.opts.WorkDir
 	if wm != nil && wm.Path() != "" {
 		workDir = wm.Path()
+	}
+	if workDir == "" {
+		workDir = "."
+	}
+
+	if _, err := os.Stat(filepath.Join(workDir, "go.mod")); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Sprintf("skipping Go compile: no go.mod found in %s", workDir), nil
+		}
+		return "", fmt.Errorf("check go.mod: %w", err)
 	}
 
 	cmds := [][]string{{"go", "build", "./..."}, {"go", "vet", "./..."}}

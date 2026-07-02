@@ -1,31 +1,5 @@
 import { useEffect, useRef } from "react";
-import {
-  Trash2,
-  Settings,
-  Archive,
-  FileText,
-  Share2,
-  HelpCircle,
-  FileDown,
-  Plus,
-} from "lucide-react";
-
-interface Command {
-  name: string;
-  description: string;
-  icon: React.ElementType;
-}
-
-const COMMANDS: Command[] = [
-  { name: "/new", description: "Start a new session", icon: Plus },
-  { name: "/clear", description: "Clear conversation history", icon: Trash2 },
-  { name: "/model", description: "Open model selector", icon: Settings },
-  { name: "/compact", description: "Compact conversation context", icon: Archive },
-  { name: "/recap", description: "Generate session recap", icon: FileText },
-  { name: "/export", description: "Export session as JSON", icon: FileDown },
-  { name: "/share", description: "Share session link", icon: Share2 },
-  { name: "/help", description: "Show available commands", icon: HelpCircle },
-];
+import { COMMANDS } from "./commands";
 
 interface Props {
   query: string;

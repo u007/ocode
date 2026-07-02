@@ -67,6 +67,10 @@ func (s *Store) save() error {
 	if err != nil {
 		return fmt.Errorf("marshal projects: %w", err)
 	}
+	// Ensure the directory exists (first save after fresh install).
+	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
+		return fmt.Errorf("mkdir: %w", err)
+	}
 	if err := os.WriteFile(s.path, data, 0644); err != nil {
 		return fmt.Errorf("write %s: %w", s.path, err)
 	}

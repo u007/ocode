@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func TestLooksLikeURL(t *testing.T) {
@@ -387,5 +388,248 @@ func TestRenderMarkdown_multiline(t *testing.T) {
 	gotLines := strings.Split(got, "\n")
 	if len(gotLines) != 4 {
 		t.Errorf("expected 4 lines, got %d", len(gotLines))
+	}
+}
+
+// --- Table rendering ---
+
+func TestIsTableLine(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"| a | b |", true},
+		{"  | a | b |  ", true},
+		{"| --- | --- |", true},
+		{"not a table", false},
+		{"", false},
+		{"|", true}, // degenerate but starts with |
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := isTableLine(tc.input)
+			if got != tc.want {
+				t.Errorf("isTableLine(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsTableSeparator(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"| --- | --- |", true},
+		{"|:---|:---:|---:|", true},
+		{"| a | b |", false},
+		{"not a separator", false},
+		{"", false},
+		{"|---|", true},
+		{"| - |", true},
+		{"|-", false}, // doesn't end with |
+	}
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := isTableSeparator(tc.input)
+			if got != tc.want {
+				t.Errorf("isTableSeparator(%q) = %v, want %v", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseTableRow(t *testing.T) {
+	input := "| a | b | c |"
+	got := parseTableRow(input)
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("cell[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseTableRowNoLeadingPipe(t *testing.T) {
+	// Standard markdown allows omitting leading/trailing pipes in some parsers,
+	// but our parser only handles fully-piped rows.
+	input := "a | b | c"
+	got := parseTableRow(input)
+	want := []string{"a", "b", "c"}
+	if len(got) != len(want) {
+		t.Fatalf("len = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("cell[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestRenderTable_basic(t *testing.T) {
+	lines := []string{
+		"| Feature | Status |",
+		"|---------|--------|",
+		"| Login   | ✅ Done |",
+		"| Logout  | ✅ Done |",
+	}
+	got := renderTable(lines, textStyle, markdownBoldStyle)
+	if got == "" {
+		t.Fatal("expected non-empty table output")
+	}
+	stripped := stripANSI(got)
+	// Verify header present
+	if !strings.Contains(stripped, "Feature") {
+		t.Error("expected 'Feature' in output")
+	}
+	if !strings.Contains(stripped, "Status") {
+		t.Error("expected 'Status' in output")
+	}
+	// Verify data present
+	if !strings.Contains(stripped, "Login") {
+		t.Error("expected 'Login' in output")
+	}
+	// Verify box-drawing characters present
+	if !strings.Contains(stripped, "│") {
+		t.Error("expected box-drawing vertical bar in output")
+	}
+	if !strings.Contains(stripped, "├") || !strings.Contains(stripped, "┤") {
+		t.Error("expected separator junctions in output")
+	}
+	// Verify all lines same width (columns aligned)
+	gotLines := strings.Split(stripped, "\n")
+	if len(gotLines) < 3 {
+		t.Fatalf("expected at least 3 lines, got %d", len(gotLines))
+	}
+	widths := make([]int, len(gotLines))
+	for i, ln := range gotLines {
+		widths[i] = ansi.StringWidth(ln)
+	}
+	for i := 1; i < len(widths); i++ {
+		if widths[i] != widths[0] {
+			t.Errorf("line %d width %d differs from line 0 width %d", i, widths[i], widths[0])
+		}
+	}
+}
+
+func TestRenderTable_noSeparator(t *testing.T) {
+	// Table without a separator row — should still render as data rows.
+	lines := []string{
+		"| A | B |",
+		"| C | D |",
+	}
+	got := renderTable(lines, textStyle, markdownBoldStyle)
+	if got == "" {
+		t.Fatal("expected non-empty table output")
+	}
+	stripped := stripANSI(got)
+	if !strings.Contains(stripped, "A") || !strings.Contains(stripped, "B") {
+		t.Error("expected header cells in output")
+	}
+	if !strings.Contains(stripped, "C") || !strings.Contains(stripped, "D") {
+		t.Error("expected data cells in output")
+	}
+}
+
+func TestRenderTable_singleRow(t *testing.T) {
+	lines := []string{
+		"| Only | Row |",
+	}
+	got := renderTable(lines, textStyle, markdownBoldStyle)
+	if got != "" {
+		t.Error("expected empty output for single row (needs at least 2 lines)")
+	}
+}
+
+func TestRenderMarkdown_tableEmbedded(t *testing.T) {
+	normal := lipgloss.NewStyle()
+	input := "Here is a table:\n\n| Col1 | Col2 |\n|------|------|\n| A    | B    |\n| C    | D    |\n\nAnd some text after."
+	got := renderMarkdown(input, normal)
+	if got == "" {
+		t.Fatal("expected non-empty output")
+	}
+	stripped := stripANSI(got)
+	// Verify the surrounding text is preserved
+	if !strings.Contains(stripped, "Here is a table") {
+		t.Error("expected pre-table text")
+	}
+	if !strings.Contains(stripped, "And some text after") {
+		t.Error("expected post-table text")
+	}
+	// Verify table content
+	if !strings.Contains(stripped, "Col1") || !strings.Contains(stripped, "Col2") {
+		t.Error("expected table header cells")
+	}
+	// Verify box-drawing characters
+	if !strings.Contains(stripped, "│") {
+		t.Error("expected box-drawing vertical bar")
+	}
+}
+
+func TestRenderTable_withInlineMarkdown(t *testing.T) {
+	lines := []string{
+		"| **Feature** | **Description** |",
+		"|-------------|-----------------|",
+		"| Login       | User **login**  |",
+		"| [Docs](https://example.com) | See link |",
+	}
+	got := renderTable(lines, textStyle, markdownBoldStyle)
+	if got == "" {
+		t.Fatal("expected non-empty table output")
+	}
+	stripped := stripANSI(got)
+	if !strings.Contains(stripped, "Feature") {
+		t.Error("expected 'Feature' in output")
+	}
+	if !strings.Contains(stripped, "login") {
+		t.Error("expected 'login' in output")
+	}
+	if !strings.Contains(stripped, "Docs") {
+		t.Error("expected 'Docs' in output")
+	}
+}
+
+func TestRenderTable_wideTableFitsWidth(t *testing.T) {
+	// The user's example table from the issue.
+	lines := []string{
+		"| `RecapModelEnabled` | `RecapModel` set | Auto-recap | Manual recap uses | Title gen uses |",
+		"|---|---|---|---|---|",
+		"| `true` | yes | ✅ runs | recap model | recap model |",
+		"| `true` | no | ✅ runs | small → main | small → main |",
+		"| `false` | yes | ❌ skipped | recap model | recap model |",
+		"| `false` | no | ❌ skipped | small → main | small → main |",
+	}
+	got := renderTable(lines, textStyle, markdownBoldStyle)
+	if got == "" {
+		t.Fatal("expected non-empty table output")
+	}
+	stripped := stripANSI(got)
+	// Verify header row (backtick-code markers are not stripped by
+	// renderMarkdownInLine, so check for raw substrings).
+	for _, h := range []string{"RecapModelEnabled", "RecapModel", "Auto-recap", "Manual recap uses", "Title gen uses"} {
+		if !strings.Contains(stripped, h) {
+			t.Errorf("expected header %q in output", h)
+		}
+	}
+	// Verify data cells
+	if !strings.Contains(stripped, "✅ runs") {
+		t.Error("expected checkmark in output")
+	}
+	// Verify all lines are same width
+	gotLines := strings.Split(stripped, "\n")
+	if len(gotLines) < 5 {
+		t.Fatalf("expected at least 5 lines, got %d", len(gotLines))
+	}
+	widths := make([]int, len(gotLines))
+	for i, ln := range gotLines {
+		widths[i] = ansi.StringWidth(ln)
+	}
+	for i := 1; i < len(widths); i++ {
+		if widths[i] != widths[0] {
+			t.Errorf("line %d width %d differs from line 0 width %d", i, widths[i], widths[0])
+		}
 	}
 }

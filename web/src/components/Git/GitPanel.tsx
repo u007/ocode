@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { ExternalLink } from "lucide-react";
 import { api, apiPath, authHeaders } from "@/api/client";
 import type { GitDiffFile } from "@/api/types";
 
@@ -19,7 +20,11 @@ const STATUS_BADGES: Record<string, { label: string; color: string }> = {
 
 const REFRESH_INTERVAL = 10000;
 
-export default function GitPanel() {
+interface Props {
+  onOpenFile?: (path: string) => void;
+}
+
+export default function GitPanel({ onOpenFile }: Props) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [files, setFiles] = useState<GitDiffFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -121,8 +126,18 @@ export default function GitPanel() {
       {selectedDiff && (
         <div className="border-t border-zinc-700 max-h-[40vh] overflow-y-auto">
           <div className="p-2">
-            <div className="text-xs text-zinc-500 mb-2 font-mono">
-              {selectedDiff.path}
+            <div className="text-xs text-zinc-500 mb-2 font-mono flex items-center justify-between">
+              <span>{selectedDiff.path}</span>
+              {onOpenFile && (
+                <button
+                  onClick={() => onOpenFile(selectedDiff.path)}
+                  className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"
+                  title="Open file in editor tab"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  <span>Open</span>
+                </button>
+              )}
             </div>
             <pre className="text-xs font-mono whitespace-pre-wrap">
               {selectedDiff.patch.split("\n").map((line, i) => {

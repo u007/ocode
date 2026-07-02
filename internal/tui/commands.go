@@ -80,6 +80,7 @@ func refreshCustomCommands(cfg *config.Config) {
 			HasArgs:     strings.Contains(sc.Content, "{{args}}") || strings.Contains(sc.Content, "{args}"),
 		}
 		customCommandLookup[key] = cmd
+		loadedCustomCommands = append(loadedCustomCommands, *cmd)
 	}
 
 	agent.ApplyAgentConfig(cfg)
@@ -142,6 +143,7 @@ func init() {
 		{name: "/discover", usage: "/discover [enable|disable|status|model [name]|ignore [add|remove|clear] [path]]", help: "Enable/disable retrieval-based skill/MCP discovery, show status, choose the query-embedding model, or manage ignored paths", handler: runDiscoverCmd},
 		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status]", help: "Enable/disable documentation-first development prompt (read docs before implementing, update after)", handler: runDocsCmd},
 		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
+		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -1534,4 +1536,8 @@ func runDiscoverCmd(m *model, args []string) tea.Cmd {
 
 func runDocsCmd(m *model, args []string) tea.Cmd {
 	return m.handleDocsCmd(args)
+}
+
+func runOcrCmd(m *model, args []string) tea.Cmd {
+	return m.handleOcrCmd(args)
 }

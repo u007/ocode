@@ -1231,13 +1231,46 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 	messages = hoistSystemMessages(messages)
 	messages = mergeLeadingSystemMessages(messages)
 	var result []map[string]interface{}
+	// OpenAI tool-role messages are string-only and must stay contiguous under
+	// the assistant that made the tool calls, so image bytes cannot ride a tool
+	// result. Buffer any images returned by tool calls and flush them as a
+	// single user message right before the next non-tool message (typically the
+	// assistant turn) — a user message after a run of tool results is valid.
+	var pendingImageBlocks []map[string]interface{}
+	vision := c.supportsVision()
+	flushPendingImages := func() {
+		if len(pendingImageBlocks) == 0 {
+			return
+		}
+		content := make([]map[string]interface{}, 0, len(pendingImageBlocks)+1)
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": "Image(s) returned by the preceding read tool call(s):",
+		})
+		content = append(content, pendingImageBlocks...)
+		result = append(result, map[string]interface{}{"role": "user", "content": content})
+		pendingImageBlocks = nil
+	}
 	for _, m := range messages {
+		if m.Role != "tool" {
+			flushPendingImages()
+		}
 		if m.Role == "tool" {
 			result = append(result, map[string]interface{}{
 				"role":         "tool",
 				"content":      sanitizeAPIText(m.Content),
 				"tool_call_id": m.ToolID,
 			})
+			if vision {
+				for _, img := range m.Images {
+					pendingImageBlocks = append(pendingImageBlocks, map[string]interface{}{
+						"type": "image_url",
+						"image_url": map[string]interface{}{
+							"url": "data:" + img.MIMEType + ";base64," + img.Data,
+						},
+					})
+				}
+			}
 			continue
 		}
 
@@ -1297,6 +1330,10 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 	}
 	// GLM rejects a request whose message sequence ends on an assistant message
 	// (it has nothing to respond to → error 1214). This happens when the history
+	// Flush images from a trailing run of tool results (conversation ends on the
+	// tool turn — e.g. building the request right after a read).
+	flushPendingImages()
+
 	// ends on an assistant turn (resumed/interrupted session, or assistant text
 	// with no tool calls). Append a synthetic user turn — the same thing a manual
 	// "continue" does. Other providers tolerate a trailing assistant message.
@@ -1886,70 +1923,9 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 
 	system, messages := collectAndRemoveSystemMessages(messages)
 
-	var anthropicMsgs []map[string]interface{}
-	for _, m := range messages {
-		role := m.Role
-		if role == "tool" {
-			role = "user"
-		}
-
-		var content []interface{}
-
-		if m.Role == "tool" {
-			content = []interface{}{
-				map[string]interface{}{
-					"type":        "tool_result",
-					"tool_use_id": m.ToolID,
-					"content":     sanitizeAPIText(m.Content),
-				},
-			}
-		} else {
-			if m.Role == "user" && (len(m.Images) > 0 || strings.Contains(m.Content, "@")) {
-				imgBlocks, err := c.buildAnthropicImageContent(m)
-				if err != nil {
-					return nil, err
-				}
-				if imgBlocks != nil {
-					content = imgBlocks
-				}
-			}
-			if content == nil {
-				if m.Content != "" {
-					content = append(content, map[string]interface{}{
-						"type": "text",
-						"text": sanitizeAPIText(m.Content),
-					})
-				}
-			}
-			for _, tc := range m.ToolCalls {
-				var input interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &input) //nolint:errcheck
-				content = append(content, map[string]interface{}{
-					"type":  "tool_use",
-					"id":    tc.ID,
-					"name":  tc.Function.Name,
-					"input": input,
-				})
-			}
-		}
-
-		if len(content) == 0 {
-			continue
-		}
-
-		if n := len(anthropicMsgs); n > 0 && anthropicMsgs[n-1]["role"] == role {
-			prev, _ := anthropicMsgs[n-1]["content"].([]interface{})
-			// Don't merge when either side has tool_result blocks — mixing tool_result
-			// with text in the same user message is rejected by strict providers (e.g. Minimax).
-			if !hasToolResultBlock(prev) && !hasToolResultBlock(content) {
-				anthropicMsgs[n-1]["content"] = append(prev, content...)
-				continue
-			}
-		}
-		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
-			"role":    role,
-			"content": content,
-		})
+	anthropicMsgs, err := c.buildAnthropicMessages(messages)
+	if err != nil {
+		return nil, err
 	}
 
 	// Build system payload with cache_control for prompt caching
@@ -2295,6 +2271,111 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 		return resMsg, nil
 	}
 	return nil, fmt.Errorf("no response from anthropic")
+}
+
+// supportsVision reports whether the client's active model can accept image
+// input. Serialization gates image blocks on this so a mid-session switch to a
+// text-only model does not re-send baked-in read images and get the turn
+// rejected.
+func (c *GenericClient) supportsVision() bool {
+	m := c.Model
+	if c.Provider != "" {
+		m = c.Provider + "/" + c.Model
+	}
+	return ModelSupportsVision(m)
+}
+
+// buildAnthropicMessages converts the ocode message slice (already stripped of
+// system messages) into the Anthropic messages array. Extracted from
+// chatAnthropic so the tool_result / image-block serialization is unit-testable
+// without an HTTP round trip.
+func (c *GenericClient) buildAnthropicMessages(messages []Message) ([]map[string]interface{}, error) {
+	vision := c.supportsVision()
+	var anthropicMsgs []map[string]interface{}
+	for _, m := range messages {
+		role := m.Role
+		if role == "tool" {
+			role = "user"
+		}
+
+		var content []interface{}
+
+		if m.Role == "tool" {
+			toolResult := map[string]interface{}{
+				"type":        "tool_result",
+				"tool_use_id": m.ToolID,
+			}
+			if len(m.Images) > 0 && vision {
+				// Anthropic tool_result.content accepts an array of text + image
+				// blocks — carry the read image inline so the model can see it.
+				blocks := make([]interface{}, 0, len(m.Images)+1)
+				if txt := sanitizeAPIText(m.Content); txt != "" {
+					blocks = append(blocks, map[string]interface{}{"type": "text", "text": txt})
+				}
+				for _, img := range m.Images {
+					blocks = append(blocks, map[string]interface{}{
+						"type": "image",
+						"source": map[string]interface{}{
+							"type":       "base64",
+							"media_type": img.MIMEType,
+							"data":       img.Data,
+						},
+					})
+				}
+				toolResult["content"] = blocks
+			} else {
+				toolResult["content"] = sanitizeAPIText(m.Content)
+			}
+			content = []interface{}{toolResult}
+		} else {
+			if m.Role == "user" && (len(m.Images) > 0 || strings.Contains(m.Content, "@")) {
+				imgBlocks, err := c.buildAnthropicImageContent(m)
+				if err != nil {
+					return nil, err
+				}
+				if imgBlocks != nil {
+					content = imgBlocks
+				}
+			}
+			if content == nil {
+				if m.Content != "" {
+					content = append(content, map[string]interface{}{
+						"type": "text",
+						"text": sanitizeAPIText(m.Content),
+					})
+				}
+			}
+			for _, tc := range m.ToolCalls {
+				var input interface{}
+				json.Unmarshal([]byte(tc.Function.Arguments), &input) //nolint:errcheck
+				content = append(content, map[string]interface{}{
+					"type":  "tool_use",
+					"id":    tc.ID,
+					"name":  tc.Function.Name,
+					"input": input,
+				})
+			}
+		}
+
+		if len(content) == 0 {
+			continue
+		}
+
+		if n := len(anthropicMsgs); n > 0 && anthropicMsgs[n-1]["role"] == role {
+			prev, _ := anthropicMsgs[n-1]["content"].([]interface{})
+			// Don't merge when either side has tool_result blocks — mixing tool_result
+			// with text in the same user message is rejected by strict providers (e.g. Minimax).
+			if !hasToolResultBlock(prev) && !hasToolResultBlock(content) {
+				anthropicMsgs[n-1]["content"] = append(prev, content...)
+				continue
+			}
+		}
+		anthropicMsgs = append(anthropicMsgs, map[string]interface{}{
+			"role":    role,
+			"content": content,
+		})
+	}
+	return anthropicMsgs, nil
 }
 
 func (c *GenericClient) buildAnthropicImageContent(m Message) ([]interface{}, error) {

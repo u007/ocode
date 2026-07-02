@@ -1,8 +1,11 @@
 package tool
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -115,6 +118,62 @@ func TestReadToolOffsetLimitAliases(t *testing.T) {
 	}
 	if !strings.Contains(res, "60\tline60\n") {
 		t.Errorf("limit=10 from offset=51 should include line 60, got:\n%s", res)
+	}
+}
+
+func TestReadToolImageReturnsStubNotBinary(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "tool-test-img")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	origWd, _ := os.Getwd()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origWd) //nolint:errcheck
+
+	// A 3x2 PNG written straight to disk.
+	img := image.NewRGBA(image.Rect(0, 0, 3, 2))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("pic.png", buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	readArgs, _ := json.Marshal(map[string]string{"path": "pic.png"})
+
+	// Text path must return a description, never split binary into "lines".
+	res, err := (ReadTool{}).Execute(readArgs)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !strings.Contains(res, "image file: pic.png") || !strings.Contains(res, "3x2") || !strings.Contains(res, "image/png") {
+		t.Errorf("stub missing expected fields, got: %q", res)
+	}
+	if strings.Contains(res, "1\t") {
+		t.Errorf("image must not be rendered as numbered text lines, got: %q", res)
+	}
+
+	// ExecuteImage returns the raw bytes and sniffed mime for the vision path.
+	raw, mime, err := (ReadTool{}).ExecuteImage(readArgs)
+	if err != nil {
+		t.Fatalf("ExecuteImage: %v", err)
+	}
+	if mime != "image/png" {
+		t.Errorf("mime = %q, want image/png", mime)
+	}
+	if !bytes.Equal(raw, buf.Bytes()) {
+		t.Errorf("ExecuteImage returned %d bytes, want the %d source bytes", len(raw), buf.Len())
+	}
+}
+
+func TestReadToolNonImageIsNotSniffedAsImage(t *testing.T) {
+	if got := sniffImageMIME([]byte("package main\n\nfunc main() {}\n")); got != "" {
+		t.Errorf("Go source sniffed as image: %q", got)
 	}
 }
 

@@ -155,6 +155,7 @@ In `internal/tui`:
 ### Commands & links
 - `internal/tui/commands.go` — slash-command registry/dispatch.
 - `internal/tui/pathlink.go` — clickable `file:line` path detection in the transcript.
+- `internal/tui/urllink.go` (643 lines) — clickable URL link regions and markdown table rendering.
 - `internal/tui/changes.go` (236 lines) — changes/diff display.
 
 ### Review & GitHub

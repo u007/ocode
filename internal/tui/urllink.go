@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // urlLinkRegion marks a clickable URL span on one visual (wrapped) line.
@@ -318,22 +319,231 @@ var markdownTitleStyle = lipgloss.NewStyle().
 	Foreground(lipgloss.Color("#3aa99f")).
 	Bold(true)
 
+// --- Table rendering for markdown tables ---
+
+// isTableLine reports whether the line looks like part of a markdown table
+// (starts with "|" after trimming whitespace).
+func isTableLine(line string) bool {
+	return strings.HasPrefix(strings.TrimSpace(line), "|")
+}
+
+// isTableSeparator reports whether line is a markdown table separator row
+// of the form |---|---| (possibly with : for alignment).
+func isTableSeparator(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	if !strings.HasPrefix(trimmed, "|") || !strings.HasSuffix(trimmed, "|") {
+		return false
+	}
+	inner := trimmed[1 : len(trimmed)-1]
+	hasDash := false
+	for _, r := range inner {
+		if r == '-' {
+			hasDash = true
+		} else if r != ':' && r != ' ' && r != '|' {
+			return false
+		}
+	}
+	return hasDash
+}
+
+// parseTableRow splits a markdown table row (e.g. "| a | b | c |") into its
+// cell contents with surrounding whitespace trimmed.
+func parseTableRow(line string) []string {
+	trimmed := strings.TrimSpace(line)
+	trimmed = strings.TrimPrefix(trimmed, "|")
+	trimmed = strings.TrimSuffix(trimmed, "|")
+	parts := strings.Split(trimmed, "|")
+	cells := make([]string, len(parts))
+	for i, p := range parts {
+		cells[i] = strings.TrimSpace(p)
+	}
+	return cells
+}
+
+// renderTable renders a block of markdown table lines with proper column
+// alignment, padded cells, box-drawing separators, and a bold header row.
+// normalStyle is the base text style for data cells; boldStyle is used for
+// the header row (typically markdownBoldStyle).
+func renderTable(lines []string, normalStyle, boldStyle lipgloss.Style) string {
+	if len(lines) < 2 {
+		return "" // not a valid table
+	}
+
+	// Phase 1: parse out header, separator, and data rows.
+	var headerCells []string
+	var dataRows [][]string
+	seenSeparator := false
+
+	for _, line := range lines {
+		if !isTableLine(line) {
+			continue
+		}
+		if !seenSeparator && isTableSeparator(line) {
+			seenSeparator = true
+			continue
+		}
+		if isTableSeparator(line) {
+			continue // skip duplicate/intra separators
+		}
+		if headerCells == nil {
+			headerCells = parseTableRow(line)
+		} else {
+			dataRows = append(dataRows, parseTableRow(line))
+		}
+	}
+	if len(headerCells) == 0 {
+		return ""
+	}
+
+	// Phase 2: determine column count and widths.
+	// A colWidth entry is the visual width of the widest cell in that column.
+	numCols := len(headerCells)
+	for _, r := range dataRows {
+		if len(r) > numCols {
+			numCols = len(r)
+		}
+	}
+	// Extend headerCells if data rows have more columns.
+	for len(headerCells) < numCols {
+		headerCells = append(headerCells, "")
+	}
+
+	colWidths := make([]int, numCols)
+	// Measure header cells.
+	for j, cell := range headerCells {
+		rendered := renderMarkdownInLine(cell, boldStyle)
+		w := ansi.StringWidth(stripANSI(rendered))
+		if w > colWidths[j] {
+			colWidths[j] = w
+		}
+	}
+	// Measure data cells.
+	for _, r := range dataRows {
+		for j, cell := range r {
+			if j >= numCols {
+				break
+			}
+			rendered := renderMarkdownInLine(cell, normalStyle)
+			w := ansi.StringWidth(stripANSI(rendered))
+			if w > colWidths[j] {
+				colWidths[j] = w
+			}
+		}
+	}
+
+	// Phase 3: build the rendered output.
+	var b strings.Builder
+
+	// --- Header row ---
+	renderTableRow(&b, headerCells, colWidths, boldStyle, true)
+	b.WriteString("\n")
+
+	// --- Header separator ---
+	b.WriteString(hintStyle.Render(renderTableSeparator(colWidths)))
+	b.WriteString("\n")
+
+	// --- Data rows ---
+	for i, r := range dataRows {
+		if i > 0 && i < len(dataRows) {
+			// Optional: row separator for multi-row tables adds visual structure.
+			// Skipping for cleaner look.
+		}
+		renderTableRow(&b, r, colWidths, normalStyle, false)
+		if i < len(dataRows)-1 {
+			b.WriteString("\n")
+		}
+	}
+
+	return b.String()
+}
+
+// renderTableRow writes a single styled table row to b, with cells padded to
+// colWidths and separated by box-drawing vertical bars.
+func renderTableRow(b *strings.Builder, cells []string, colWidths []int, cellStyle lipgloss.Style, isHeader bool) {
+	b.WriteString("│ ")
+	for j := 0; j < len(colWidths); j++ {
+		var cellText string
+		if j < len(cells) {
+			cellText = renderMarkdownInLine(cells[j], cellStyle)
+		}
+		if isHeader {
+			cellText = markdownBoldStyle.Render(stripANSI(renderMarkdownInLine(cells[j], cellStyle)))
+		}
+		// Pad to column width.
+		padded := lipgloss.NewStyle().Width(colWidths[j]).Render(cellText)
+		b.WriteString(padded)
+		if j < len(colWidths)-1 {
+			b.WriteString(" │ ")
+		}
+	}
+	b.WriteString(" │")
+}
+
+// renderTableSeparator builds the horizontal rule between header and data
+// rows, e.g. "├──────┼──────┼──────┤".
+func renderTableSeparator(colWidths []int) string {
+	var b strings.Builder
+	b.WriteString("├")
+	for j := 0; j < len(colWidths); j++ {
+		b.WriteString(strings.Repeat("─", colWidths[j]+2))
+		if j < len(colWidths)-1 {
+			b.WriteString("┼")
+		}
+	}
+	b.WriteString("┤")
+	return b.String()
+}
+
 // renderMarkdown renders a possibly multi-line string (chat text) with
-// bold, headings, markdown links, and raw URL styling. Wraps
-// renderMarkdownInLine for each line and joins with "\n" — byte-identical
-// to the previous renderMarkdownBold behavior for plain text without
-// links, and adds link styling for text that does contain them.
+// bold, headings, markdown links, raw URL styling, and — new — markdown
+// tables. It detects contiguous table blocks (groups of lines starting with
+// "|") and renders them through renderTable, routing everything else through
+// the existing renderMarkdownInLine.
+//
+// The table block is rendered with markdownBoldStyle for the header row and
+// with the table-border characters styled via hintStyle.
 func renderMarkdown(text string, normalStyle lipgloss.Style) string {
 	if text == "" {
 		return ""
 	}
 	lines := strings.Split(text, "\n")
 	var b strings.Builder
-	for i, line := range lines {
-		if i > 0 {
+	i := 0
+	for i < len(lines) {
+		line := lines[i]
+		// Detect start of a table block (line starts with "|").
+		if isTableLine(line) {
+			// Collect all contiguous table lines.
+			tableLines := []string{line}
+			i++
+			for i < len(lines) && isTableLine(lines[i]) {
+				tableLines = append(tableLines, lines[i])
+				i++
+			}
+			// Render the table block.
+			tableRendered := renderTable(tableLines, normalStyle, markdownBoldStyle)
+			if tableRendered != "" {
+				if b.Len() > 0 {
+					b.WriteString("\n")
+				}
+				b.WriteString(tableRendered)
+			} else {
+				// If not a valid table, fall through to inline rendering.
+				for j, tl := range tableLines {
+					if j > 0 || b.Len() > 0 {
+						b.WriteString("\n")
+					}
+					b.WriteString(renderMarkdownInLine(tl, normalStyle))
+				}
+			}
+			continue
+		}
+		// Non-table line: render as before.
+		if b.Len() > 0 {
 			b.WriteString("\n")
 		}
 		b.WriteString(renderMarkdownInLine(line, normalStyle))
+		i++
 	}
 	return b.String()
 }

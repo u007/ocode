@@ -11,6 +11,7 @@ import type {
   LSPStatus,
   FileStatus,
   Project,
+  BrowseResponse,
 } from "./types";
 
 // Base path for API calls. When the SPA is served under a tailscale --set-path
@@ -130,6 +131,19 @@ export const api = {
     fetchJSON<{ model: string; enabled: boolean; priority: string }>(
       "/api/config/small-model",
     ),
+  // OCR runtime on/off and model toggle.
+  getOcrEnabled: () =>
+    fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocr-enabled"),
+  setOcrEnabled: (enabled: boolean) =>
+    fetchJSON<{ enabled: boolean }>("/api/config/ocr-enabled", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  setOcrModel: (model: string) =>
+    fetchJSON<{ model: string }>("/api/config/ocr-model", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
   sendMessage: (sessionId: string, content: string) =>
     fetchJSON<ChatResponse>(`/api/sessions/${sessionId}/message`, {
       method: "POST",
@@ -162,6 +176,64 @@ export const api = {
     }),
   listProjectSessions: (path: string) =>
     fetchJSON<SessionInfo[]>("/api/projects/sessions?path=" + encodeURIComponent(path)),
+  // Monaco editor settings and extensions
+  getMonacoSettings: () => fetchJSON<{ theme: string; font_size: number; tab_size: number; word_wrap: boolean; minimap: boolean; line_numbers: boolean }>("/api/monaco/settings"),
+  setMonacoSettings: (settings: Record<string, unknown>) =>
+    fetchJSON<{ status: string }>("/api/monaco/settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
+  listMonacoExtensions: () =>
+    fetchJSON<Array<{ name: string; label: string; enabled: boolean; builtin: boolean }>>("/api/monaco/extensions"),
+  toggleMonacoExtension: (name: string) =>
+    fetchJSON<{ name: string; label: string; enabled: boolean; builtin: boolean }[]>("/api/monaco/extensions/" + encodeURIComponent(name) + "/toggle", {
+      method: "PUT",
+    }),
+  // Directory browser for the project sidebar folder picker.
+  browseDirectory: (path?: string) =>
+    fetchJSON<BrowseResponse>(
+      "/api/browse" + (path ? "?path=" + encodeURIComponent(path) : ""),
+    ),
+  // Session operations
+  compactSession: (id: string) =>
+    fetchJSON<{ original_len: number; compacted_len: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/compact`, { method: "POST" },
+    ),
+  recapSession: (id: string) =>
+    fetchJSON<{ recap: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/recap`,
+    ),
+  shareSession: (id: string) =>
+    fetchJSON<{ markdown: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/share`,
+    ),
+  btwSession: (id: string, content: string) =>
+    fetchJSON<{ status: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/btw`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      },
+    ),
+
+  // Mask (secret redaction) config
+  getMaskConfig: () =>
+    fetchJSON<{ enabled: boolean; mode: string; model: string }>("/api/config/mask"),
+  setMaskEnabled: (enabled: boolean) =>
+    fetchJSON<{ enabled: boolean }>("/api/config/mask/enabled", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  setMaskMode: (mode: string) =>
+    fetchJSON<{ mode: string }>("/api/config/mask/mode", {
+      method: "PUT",
+      body: JSON.stringify({ mode }),
+    }),
+  setMaskModel: (model: string) =>
+    fetchJSON<{ model: string }>("/api/config/mask/model", {
+      method: "PUT",
+      body: JSON.stringify({ model }),
+    }),
+
 };
 
 export type SSEEventHandler = (event: string, data: unknown) => void;

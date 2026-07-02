@@ -40,17 +40,28 @@ func ResolveImageMaxDim(n int) int {
 	return defaultMaxImageDim
 }
 
+// visionModels is the OFFLINE FALLBACK for ModelSupportsVision — used only when
+// the models.dev registry has no entry for a model. Prefix-matched via
+// IsVisionModel, so family prefixes (e.g. "claude-opus") cover every point
+// release. All current Claude/GPT/Gemini frontier families are multimodal, so
+// listing the family is safe and fails open for new point releases.
 var visionModels = map[string]bool{
-	"gpt-4o":            true,
-	"gpt-4o-mini":       true,
-	"gpt-4-vision":      true,
-	"claude-3-opus":     true,
-	"claude-3-sonnet":   true,
-	"claude-3-haiku":    true,
-	"claude-3-5-sonnet": true,
-	"gemini-1.5-pro":    true,
-	"gemini-1.5-flash":  true,
-	"gemini-2.0-flash":  true,
+	// OpenAI
+	"gpt-4o":       true,
+	"gpt-4-vision": true,
+	"gpt-4.1":      true,
+	"gpt-5":        true,
+	"o3":           true,
+	"o4":           true,
+	// Anthropic (all Claude 3+ families accept images)
+	"claude-3":      true,
+	"claude-opus":   true,
+	"claude-sonnet": true,
+	"claude-haiku":  true,
+	// Google
+	"gemini-1.5": true,
+	"gemini-2":   true,
+	"gemini-3":   true,
 }
 
 func IsVisionModel(model string) bool {
@@ -134,6 +145,18 @@ func isDecodableImage(path string) bool {
 	return decodableImageExt[strings.ToLower(filepath.Ext(path))]
 }
 
+// providerSafeImageMime reports whether an image MIME type can be embedded as a
+// vision block as-is. Anthropic and OpenAI both accept only these four; other
+// decodable formats (bmp, tiff) must be re-encoded to png before embedding.
+func providerSafeImageMime(mime string) bool {
+	switch mime {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
 func NewImage(path string) (Image, error) {
 	return NewImageWithMaxDim(path, defaultMaxImageDim)
 }
@@ -157,6 +180,52 @@ func NewImageWithMaxDim(path string, maxDim int) (Image, error) {
 		return Image{}, fmt.Errorf("process image %s: %w", path, err)
 	}
 	return Image{Path: path, MIMEType: outMime, Data: base64.StdEncoding.EncodeToString(out)}, nil
+}
+
+// EncodedImage is an embeddable Image plus the source and embedded pixel
+// dimensions, so callers can report when (and by how much) an image was
+// downscaled to fit the provider size cap.
+type EncodedImage struct {
+	Image
+	OrigWidth  int
+	OrigHeight int
+	Width      int
+	Height     int
+	Scaled     bool // embedded dimensions differ from the source
+}
+
+// NewImageFromBytes builds an embeddable image from already-read raw bytes
+// (e.g. bytes a confined tool read from disk), applying the same
+// decode/salvage/resize pipeline as NewImage. mimeHint should be the source
+// content type; the final MIME may differ if the image is re-encoded during
+// resize/salvage. The caller must ensure the bytes are a decodable raster
+// format — svg/ico have no decoder and are not supported here.
+func NewImageFromBytes(raw []byte, mimeHint string, maxDim int) (EncodedImage, error) {
+	out, outMime, err := processImage(raw, mimeHint, true, ResolveImageMaxDim(maxDim))
+	if err != nil {
+		return EncodedImage{}, err
+	}
+	enc := EncodedImage{
+		Image: Image{MIMEType: outMime, Data: base64.StdEncoding.EncodeToString(out)},
+	}
+	// DecodeConfig reads only the header, so these are cheap. Best-effort:
+	// dimensions are informational, so a decode miss just leaves them zero.
+	if cfg, _, e := image.DecodeConfig(bytes.NewReader(raw)); e == nil {
+		enc.OrigWidth, enc.OrigHeight = cfg.Width, cfg.Height
+		enc.Width, enc.Height = cfg.Width, cfg.Height
+	}
+	if cfg, _, e := image.DecodeConfig(bytes.NewReader(out)); e == nil {
+		enc.Width, enc.Height = cfg.Width, cfg.Height
+	}
+	enc.Scaled = enc.OrigWidth > 0 && (enc.Width != enc.OrigWidth || enc.Height != enc.OrigHeight)
+	return enc, nil
+}
+
+// IsDecodableImage reports whether the file at path is a raster image format we
+// can decode (and therefore resize and embed as a vision block). svg/ico are
+// accepted image types but not decodable here.
+func IsDecodableImage(path string) bool {
+	return isDecodableImage(path)
 }
 
 // processImage validates, salvages, and right-sizes raw image bytes before
@@ -189,8 +258,13 @@ func processImage(raw []byte, mimeType string, decodable bool, maxDim int) ([]by
 	oversized := w > maxDim || h > maxDim
 	partial := derr != nil // decoded some pixels but hit an error → salvageable
 
-	if !oversized && !partial {
-		return raw, mimeType, nil // valid and within bounds — embed original bytes
+	// Providers accept only jpeg/png/gif/webp image blocks. A decodable-but-
+	// unsupported format (bmp, tiff) must be re-encoded to png even when it is
+	// within bounds and otherwise valid, or the API rejects the whole turn.
+	unsafeMime := !providerSafeImageMime(mimeType)
+
+	if !oversized && !partial && !unsafeMime {
+		return raw, mimeType, nil // valid, supported, and within bounds — embed original bytes
 	}
 	if partial {
 		log.Printf("processImage: salvaging partially corrupt image by re-encoding decoded pixels: %v", derr)

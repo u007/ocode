@@ -6,23 +6,13 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { COMMANDS } from "../Chat/commands";
 
 interface Props {
   open: boolean;
   onClose: () => void;
   onExecute: (command: string) => void;
 }
-
-const COMMANDS = [
-  { name: "/clear", description: "Clear chat history" },
-  { name: "/model", description: "Switch model" },
-  { name: "/compact", description: "Compact conversation context" },
-  { name: "/recap", description: "Generate session recap" },
-  { name: "/export", description: "Export session as JSON" },
-  { name: "/share", description: "Share session link" },
-  { name: "/session", description: "Switch session" },
-  { name: "/help", description: "Show help" },
-];
 
 export default function CommandPalette({ open, onClose, onExecute }: Props) {
   return (

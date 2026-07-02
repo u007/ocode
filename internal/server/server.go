@@ -120,6 +120,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/sessions/{id}/export", s.authMiddleware(s.handleExportSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/export-claude", s.authMiddleware(s.handleExportClaudeSession))
 	s.mux.HandleFunc("GET /api/sessions/{id}/share", s.authMiddleware(s.handleShareSession))
+	s.mux.HandleFunc("POST /api/sessions/{id}/btw", s.authMiddleware(s.handleBtw))
 	s.mux.HandleFunc("PUT /api/sessions/{id}/title", s.authMiddleware(s.handleSetSessionTitle))
 	s.mux.HandleFunc("GET /api/sessions/{id}/context", s.authMiddleware(s.handleSessionContext))
 
@@ -139,6 +140,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/advisor", s.authMiddleware(s.handleSetAdvisor))
 	s.mux.HandleFunc("GET /api/config/advisor-enabled", s.authMiddleware(s.handleGetAdvisorEnabled))
 	s.mux.HandleFunc("PUT /api/config/advisor-enabled", s.authMiddleware(s.handleSetAdvisorEnabled))
+	s.mux.HandleFunc("GET /api/config/ocr-enabled", s.authMiddleware(s.handleGetOcrEnabled))
+	s.mux.HandleFunc("PUT /api/config/ocr-enabled", s.authMiddleware(s.handleSetOcrEnabled))
+	s.mux.HandleFunc("PUT /api/config/ocr-model", s.authMiddleware(s.handleSetOcrModel))
+	// Mask (secret redaction) config
+	s.mux.HandleFunc("GET /api/config/mask", s.authMiddleware(s.handleGetMaskConfig))
+	s.mux.HandleFunc("PUT /api/config/mask/enabled", s.authMiddleware(s.handleSetMaskEnabled))
+	s.mux.HandleFunc("PUT /api/config/mask/mode", s.authMiddleware(s.handleSetMaskMode))
+	s.mux.HandleFunc("PUT /api/config/mask/model", s.authMiddleware(s.handleSetMaskModel))
 	s.mux.HandleFunc("GET /api/config/agents", s.authMiddleware(s.handleListAgents))
 	s.mux.HandleFunc("PUT /api/config/agent", s.authMiddleware(s.handleSetAgent))
 
@@ -181,6 +190,15 @@ func (s *Server) registerRoutes() {
 		s.mux.HandleFunc("POST /api/projects", s.authMiddleware(s.handleAddProject))
 		s.mux.HandleFunc("DELETE /api/projects/{path...}", s.authMiddleware(s.handleRemoveProject))
 		s.mux.HandleFunc("GET /api/projects/sessions", s.authMiddleware(s.handleListProjectSessions))
+
+		// Directory browser for the project sidebar folder picker.
+		s.mux.HandleFunc("GET /api/browse", s.authMiddleware(s.handleBrowseDirectory))
+
+		// Monaco editor settings and extensions
+		s.mux.HandleFunc("GET /api/monaco/settings", s.authMiddleware(s.handleGetMonacoSettings))
+		s.mux.HandleFunc("PUT /api/monaco/settings", s.authMiddleware(s.handleSetMonacoSettings))
+		s.mux.HandleFunc("GET /api/monaco/extensions", s.authMiddleware(s.handleListMonacoExtensions))
+		s.mux.HandleFunc("PUT /api/monaco/extensions/{name}/toggle", s.authMiddleware(s.handleToggleMonacoExtension))
 
 	// Uploads (assets)
 	s.mux.HandleFunc("/api/uploads", s.authMiddleware(s.handleUploads))
@@ -489,6 +507,9 @@ func (s *Server) handleExportClaudeSession(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleShareSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleShareSession(w, r, r.PathValue("id"))
 }
+func (s *Server) handleBtw(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleBtw(w, r, r.PathValue("id"))
+}
 func (s *Server) handleSetSessionTitle(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetSessionTitle(w, r, r.PathValue("id"))
 }
@@ -549,6 +570,27 @@ func (s *Server) handleGetAdvisorEnabled(w http.ResponseWriter, r *http.Request)
 }
 func (s *Server) handleSetAdvisorEnabled(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetAdvisorEnabled(w, r)
+}
+func (s *Server) handleGetOcrEnabled(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetOcrEnabled(w, r)
+}
+func (s *Server) handleSetOcrEnabled(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetOcrEnabled(w, r)
+}
+func (s *Server) handleSetOcrModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetOcrModel(w, r)
+}
+func (s *Server) handleGetMaskConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetMaskConfig(w, r)
+}
+func (s *Server) handleSetMaskEnabled(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetMaskEnabled(w, r)
+}
+func (s *Server) handleSetMaskMode(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetMaskMode(w, r)
+}
+func (s *Server) handleSetMaskModel(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetMaskModel(w, r)
 }
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListAgents(w, r)
@@ -648,7 +690,14 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) { s.
 func (s *Server) handleAddProject(w http.ResponseWriter, r *http.Request) { s.handler.HandleAddProject(w, r) }
 func (s *Server) handleRemoveProject(w http.ResponseWriter, r *http.Request) { s.handler.HandleRemoveProject(w, r) }
 func (s *Server) handleListProjectSessions(w http.ResponseWriter, r *http.Request) { s.handler.HandleListProjectSessions(w, r) }
+func (s *Server) handleBrowseDirectory(w http.ResponseWriter, r *http.Request) { s.handler.HandleBrowseDirectory(w, r) }
+
+func (s *Server) handleGetMonacoSettings(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetMonacoSettings(w, r) }
+func (s *Server) handleSetMonacoSettings(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetMonacoSettings(w, r) }
+func (s *Server) handleListMonacoExtensions(w http.ResponseWriter, r *http.Request) { s.handler.HandleListMonacoExtensions(w, r) }
+func (s *Server) handleToggleMonacoExtension(w http.ResponseWriter, r *http.Request) { s.handler.HandleToggleMonacoExtension(w, r) }
 type ChatRequest struct {
+
 	Content   string `json:"content"`
 	SessionID string `json:"sessionId,omitempty"`
 	Model     string `json:"model,omitempty"`

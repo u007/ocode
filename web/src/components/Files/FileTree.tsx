@@ -1,9 +1,7 @@
-import { useState, useEffect } from "react";
-import { Button } from "@/components/ui/button";
+import { useEffect, useState } from "react";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { ChevronRight, File, Folder, FolderOpen } from "lucide-react";
 import { apiPath, authHeaders } from "@/api/client";
-import { X, FileCode } from "lucide-react";
-import hljs from "highlight.js";
-import "highlight.js/styles/github-dark.css";
 
 interface FileNode {
   name: string;
@@ -12,49 +10,76 @@ interface FileNode {
   children?: FileNode[];
 }
 
-interface FileContent {
-  path: string;
-  content: string;
+interface FileTreeProps {
+  onOpenFile: (path: string) => void;
 }
 
-interface Props {
-  onSelect?: (path: string) => void;
-}
+const langIcons: Record<string, string> = {
+  ts: "🔷",
+  tsx: "⚛️",
+  js: "🟨",
+  jsx: "⚛️",
+  go: "🐹",
+  py: "🐍",
+  rs: "🦀",
+  json: "📋",
+  md: "📝",
+  css: "🎨",
+  html: "🌐",
+  yaml: "⚙️",
+  toml: "⚙️",
+};
 
-function TreeNode({
-  node,
-  depth,
-  onSelect,
-  onPreview,
-}: {
+interface TreeNodeProps {
   node: FileNode;
   depth: number;
-  onSelect?: (path: string) => void;
-  onPreview?: (path: string) => void;
-}) {
+  selectedPath: string | null;
+  onSelect: (path: string) => void;
+}
+
+function FileIcon({ name, isDir, expanded }: { name: string; isDir: boolean; expanded: boolean }) {
+  if (isDir) {
+    return expanded ? (
+      <FolderOpen className="w-4 h-4 text-amber-500 shrink-0" />
+    ) : (
+      <Folder className="w-4 h-4 text-amber-500 shrink-0" />
+    );
+  }
+  const ext = name.split(".").pop()?.toLowerCase() || "";
+  const icon = langIcons[ext];
+  if (icon) {
+    return <span className="w-4 h-4 text-[10px] shrink-0 leading-none">{icon}</span>;
+  }
+  return <File className="w-4 h-4 text-blue-400 shrink-0" />;
+}
+
+function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(depth < 2);
 
   if (node.is_dir) {
     return (
       <div>
-        <Button
-          type="button"
-          variant="ghost"
-          onClick={() => setExpanded(!expanded)}
-          className="h-7 w-full justify-start rounded-none px-2 text-sm text-zinc-400 hover:bg-zinc-800"
+        <button
+          className="w-full justify-start h-7 px-2 text-xs gap-1.5 font-normal flex items-center hover:bg-zinc-800 transition-colors"
           style={{ paddingLeft: `${depth * 12 + 8}px` }}
+          onClick={() => setExpanded(!expanded)}
         >
-          <span className="text-zinc-600 mr-1">{expanded ? "▼" : "▶"}</span>
-          {node.name}
-        </Button>
+          <ChevronRight
+            className={`w-3 h-3 shrink-0 text-muted-foreground transition-transform ${
+              expanded ? "rotate-90" : ""
+            }`}
+          />
+          <FileIcon name={node.name} isDir expanded={expanded} />
+          <span className="truncate text-muted-foreground">{node.name}</span>
+        </button>
         {expanded &&
           node.children?.map((child) => (
             <TreeNode
               key={child.path}
               node={child}
               depth={depth + 1}
+              selectedPath={selectedPath}
               onSelect={onSelect}
-              onPreview={onPreview}
             />
           ))}
       </div>
@@ -62,194 +87,74 @@ function TreeNode({
   }
 
   return (
-    <div className="flex items-center">
-      <Button
-        type="button"
-        variant="ghost"
-        onClick={() => onSelect?.(node.path)}
-        onDoubleClick={() => onPreview?.(node.path)}
-        className="h-7 flex-1 justify-start rounded-none px-2 text-sm text-zinc-300 hover:bg-zinc-800"
-        style={{ paddingLeft: `${depth * 12 + 20}px` }}
-      >
-        {node.name}
-      </Button>
-      <button
-        type="button"
-        onClick={() => onPreview?.(node.path)}
-        className="h-7 px-2 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 transition-colors"
-        title="Preview file"
-      >
-        <FileCode className="w-3.5 h-3.5" />
-      </button>
-    </div>
+    <button
+      className={`w-full justify-start h-7 px-2 text-xs gap-1.5 font-normal flex items-center hover:bg-zinc-800 transition-colors ${
+        selectedPath === node.path
+          ? "bg-zinc-800 text-zinc-200"
+          : "text-muted-foreground"
+      }`}
+      style={{ paddingLeft: `${depth * 12 + 20}px` }}
+      onClick={() => onSelect(node.path)}
+    >
+      <FileIcon name={node.name} isDir={false} expanded={false} />
+      <span className="truncate">{node.name}</span>
+    </button>
   );
 }
 
-function getLanguage(filename: string): string {
-  const ext = filename.split(".").pop()?.toLowerCase();
-  const langMap: Record<string, string> = {
-    ts: "typescript",
-    tsx: "typescript",
-    js: "javascript",
-    jsx: "javascript",
-    py: "python",
-    go: "go",
-    rs: "rust",
-    rb: "ruby",
-    java: "java",
-    c: "c",
-    cpp: "cpp",
-    h: "c",
-    hpp: "cpp",
-    css: "css",
-    scss: "scss",
-    html: "html",
-    json: "json",
-    yaml: "yaml",
-    yml: "yaml",
-    toml: "toml",
-    md: "markdown",
-    sh: "bash",
-    bash: "bash",
-    zsh: "bash",
-    sql: "sql",
-    graphql: "graphql",
-    xml: "xml",
-    php: "php",
-    swift: "swift",
-    kt: "kotlin",
-    scala: "scala",
-    r: "r",
-    R: "r",
-    lua: "lua",
-    dart: "dart",
-  };
-  return langMap[ext || ""] || "plaintext";
-}
+export default function FileTree({ onOpenFile }: FileTreeProps) {
+  const [tree, setTree] = useState<FileNode[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
 
-function highlightCode(code: string, language: string): string {
-  try {
-    if (language && hljs.getLanguage(language)) {
-      return hljs.highlight(code, { language }).value;
-    }
-    return hljs.highlightAuto(code).value;
-  } catch {
-    return code
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  }
-}
-
-function FilePreview({
-  file,
-  onClose,
-}: {
-  file: FileContent;
-  onClose: () => void;
-}) {
-  const language = getLanguage(file.path);
-  const lines = file.content.split("\n");
-
-  return (
-    <div className="flex flex-col h-full border-l border-zinc-700">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-700 bg-zinc-900">
-        <div className="flex items-center gap-2 min-w-0">
-          <FileCode className="w-4 h-4 text-zinc-500 flex-shrink-0" />
-          <span className="text-xs text-zinc-300 font-mono truncate">
-            {file.path}
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 rounded"
-        >
-          <X className="w-4 h-4" />
-        </button>
-      </div>
-
-      {/* Code */}
-      <div className="flex-1 overflow-auto bg-zinc-950">
-        <pre className="p-4 text-xs leading-relaxed">
-          <code className={`language-${language}`}>
-            {lines.map((line, i) => (
-              <div key={i} className="flex">
-                <span className="w-12 flex-shrink-0 text-right pr-4 text-zinc-600 select-none">
-                  {i + 1}
-                </span>
-                <span
-                  className="flex-1"
-                  dangerouslySetInnerHTML={{
-                    __html: highlightCode(line, language),
-                  }}
-                />
-              </div>
-            ))}
-          </code>
-        </pre>
-      </div>
-    </div>
-  );
-}
-
-export default function FileTree({ onSelect }: Props) {
-  const [tree, setTree] = useState<FileNode | null>(null);
-  const [previewFile, setPreviewFile] = useState<FileContent | null>(null);
-
+  // Load tree on mount
   useEffect(() => {
-    fetch(apiPath("/api/files/tree"), { headers: authHeaders() })
-      .then((r) => r.json())
-      .then(setTree)
-      .catch(console.error);
+    (async () => {
+      try {
+        const res = await fetch(apiPath("/api/files/tree"), { headers: authHeaders() });
+        if (!res.ok) throw new Error("Failed to load file tree");
+        setTree(await res.json());
+      } catch (err) {
+        console.error("File tree error:", err);
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
-  const handlePreview = async (path: string) => {
-    try {
-      const res = await fetch(apiPath(`/api/files/content?path=${encodeURIComponent(path)}`), { headers: authHeaders() });
-      if (res.ok) {
-        const data = await res.json();
-        setPreviewFile(data);
-      }
-    } catch (err) {
-      console.error("Failed to load file:", err);
-    }
+  const handleSelect = (path: string) => {
+    setSelectedPath(path);
+    onOpenFile(path);
   };
 
-  if (!tree) return null;
-
   return (
-    <div className="flex h-full">
-      {/* File tree */}
-      <div className={`${previewFile ? "w-64" : "w-full"} flex flex-col overflow-hidden border-r border-zinc-700`}>
-        <div className="p-3 border-b border-zinc-700">
-          <label className="text-xs text-zinc-500 uppercase tracking-wider">
-            Files
-          </label>
-        </div>
-        <div className="flex-1 overflow-y-auto">
-          {tree.children?.map((child) => (
-            <TreeNode
-              key={child.path}
-              node={child}
-              depth={0}
-              onSelect={onSelect}
-              onPreview={handlePreview}
-            />
-          ))}
-        </div>
+    <div className="flex flex-col h-full">
+      <div className="flex items-center justify-between px-3 h-9 border-b border-border shrink-0">
+        <h3 className="text-xs font-medium text-muted-foreground">Files</h3>
       </div>
-
-      {/* File preview */}
-      {previewFile && (
-        <div className="flex-1 overflow-hidden">
-          <FilePreview
-            file={previewFile}
-            onClose={() => setPreviewFile(null)}
-          />
-        </div>
-      )}
+      <ScrollArea className="flex-1">
+        {loading ? (
+          <div className="flex items-center justify-center py-12 text-xs text-muted-foreground">
+            Loading…
+          </div>
+        ) : tree.length === 0 ? (
+          <div className="px-4 py-12 text-center text-xs text-muted-foreground">
+            No files
+          </div>
+        ) : (
+          <div className="py-1">
+            {tree.map((node) => (
+              <TreeNode
+                key={node.path}
+                node={node}
+                depth={0}
+                selectedPath={selectedPath}
+                onSelect={handleSelect}
+              />
+            ))}
+          </div>
+        )}
+      </ScrollArea>
     </div>
   );
 }

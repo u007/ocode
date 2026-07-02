@@ -2,6 +2,7 @@
   "extra_allowed_paths": [
     "/Users/james/.agents/skills",
     "/Users/james/.config/opencode/skills",
-    "/Users/james/www"
+    "/Users/james/www",
+    "/Users/james/.claude"
   ]
 }

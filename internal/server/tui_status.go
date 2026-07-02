@@ -20,6 +20,9 @@ type TUIStatus struct {
 	// Recap model name + runtime on/off.
 	RecapModel   string `json:"recap_model,omitempty"`
 	RecapModelOn bool   `json:"recap_model_enabled"`
+	// OCR tool model + runtime on/off.
+	OcrModel   string `json:"ocr_model,omitempty"`
+	OcrEnabled bool   `json:"ocr_enabled"`
 	// IDE integration: mode is "off" | "claude" | ...; status is a short
 	// human-readable string for the status bar.
 	IDEMode   string `json:"ide_mode,omitempty"`
