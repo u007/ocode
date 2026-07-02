@@ -194,6 +194,32 @@ A React-based web interface that mirrors the TUI experience:
 | **Agent cowork panel** | ✅ Parallel agent monitoring sidebar |
 | **Slash commands** | ✅ Autocomplete popup with keyboard navigation |
 
+### 🪟 Desktop App (Beta)
+
+A native desktop shell (`cmd/ocode-desktop`) that opens the same web UI in a
+Wails v3 window over an in-process server — no separate `ocode serve` step.
+The server binds `127.0.0.1` on a random port with a fresh per-launch auth
+token; all app logic stays behind the same HTTP/SSE API the browser uses.
+
+Native extras: system tray (show/quit), dock badge with the running-agent
+count (macOS/Windows), and finished/failed-run notifications when the window
+is unfocused (clicking one focuses the window).
+
+```bash
+make desktop        # build bin/ocode-desktop (requires cgo + platform SDK)
+make desktop-app    # macOS: bundle bin/ocode.app via scripts/bundle-macos.sh
+```
+
+Platform prerequisites: macOS — Xcode Command Line Tools; Linux —
+`webkit2gtk-4.1-dev`, `libgtk-3-dev` (no dock badge on Linux); Windows —
+WebView2 runtime (bootstrapped by Wails). Pinned to
+`github.com/wailsapp/wails/v3 v3.0.0-alpha2.111` (alpha — API may drift).
+
+Dev hot-reload: set `OCODE_DESKTOP_DEV_URL` to your Vite dev server; the API
+still runs in-process and its address + token are logged on startup for the
+Vite `/api` proxy. The macOS bundle is unsigned (Gatekeeper prompts on other
+machines); signing/installers are tracked in `TODO.md`.
+
 ### 🎮 Slash Commands
 
 Type `/` in the chat input to open the palette. Commands execute inline or via `ocode run -command <name>`:
@@ -372,7 +398,6 @@ ocode adds **first-class permission modes** (`normal`, `yolo`, `locked`) with pe
 
 ### What ocode does **not** have (vs opencode)
 
-- No desktop frontends — terminal and web UI only
 - No plugin marketplace (plugin system is Git-based)
 - Smaller skill ecosystem
 - No `plan-reminder` / `build-switch` prompt overlays
