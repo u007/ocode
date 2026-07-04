@@ -63,7 +63,7 @@ export default function CoworkSidebar({ isOpen, onClose, activeAgent, onModelCli
     git: true,
   });
   const [gitBranch, setGitBranch] = useState<string>("");
-  const { model, smallModel, advisorModel, advisorEnabled, ocrModel, ocrEnabled, sessionId } = useChatState();
+  const { model, smallModel, advisorModel, advisorEnabled, ocrModel, ocrEnabled, ocrBackend, sessionId } = useChatState();
   const dispatch = useChatDispatch();
 
   // Fetch git branch periodically
@@ -281,6 +281,7 @@ export default function CoworkSidebar({ isOpen, onClose, activeAgent, onModelCli
               {/* OCR tool on/off toggle */}
               <div className="mt-1 mb-1 border-t border-zinc-700/50" />
               <div className="text-zinc-500 mb-1 text-xs">OCR</div>
+              <div className="text-zinc-600 text-xs mb-1">{ocrBackend || "openai-compat"}</div>
               <button
                 type="button"
                 onClick={toggleOcr}

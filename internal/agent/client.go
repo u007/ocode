@@ -1348,7 +1348,20 @@ func (c *GenericClient) convertToOpenAIMessages(messages []Message) ([]map[strin
 	return result, nil
 }
 
+// imageStubForTextModel is the text placeholder substituted for an image when
+// the active model has no vision support, mirroring the read tool's text-only
+// degradation. A text-only provider (e.g. DeepSeek) 400s on an image_url block,
+// so we never emit the base64 — the model instead learns an image was attached
+// and how to view it.
+func imageStubForTextModel(path string) string {
+	if path != "" {
+		return fmt.Sprintf("[image omitted: %s — active model has no vision support; switch to a vision-capable model or OCR the image first]", path)
+	}
+	return "[image omitted — active model has no vision support; switch to a vision-capable model or OCR the image first]"
+}
+
 func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]interface{}, error) {
+	vision := c.supportsVision()
 	var content []map[string]interface{}
 	if len(m.Images) > 0 {
 		if m.Content != "" {
@@ -1358,6 +1371,13 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 			})
 		}
 		for _, img := range m.Images {
+			if !vision {
+				content = append(content, map[string]interface{}{
+					"type": "text",
+					"text": imageStubForTextModel(img.Path),
+				})
+				continue
+			}
 			content = append(content, map[string]interface{}{
 				"type": "image_url",
 				"image_url": map[string]interface{}{
@@ -1377,6 +1397,15 @@ func (c *GenericClient) buildOpenAIContentWithImages(m Message) ([]map[string]in
 		if strings.HasPrefix(part, "@") {
 			filePath := strings.TrimPrefix(part, "@")
 			if IsImageFile(filePath) {
+				if !vision {
+					// Text-only model: never load/embed base64. Replace the
+					// @path token with a stub and force the rebuilt-content path
+					// (hasImage) so the stub is emitted instead of falling
+					// through to plain text that would send the raw @path.
+					textParts = append(textParts, imageStubForTextModel(filePath))
+					hasImage = true
+					continue
+				}
 				img, err := NewImageWithMaxDim(filePath, c.MaxImageDim)
 				if err != nil {
 					textParts = append(textParts, part)
@@ -1465,7 +1494,15 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 					"text": m.Content,
 				})
 			}
+			vision := c.supportsVision()
 			for _, img := range m.Images {
+				if !vision {
+					parts = append(parts, map[string]interface{}{
+						"type": "input_text",
+						"text": imageStubForTextModel(img.Path),
+					})
+					continue
+				}
 				parts = append(parts, map[string]interface{}{
 					"type":      "input_image",
 					"image_url": "data:" + img.MIMEType + ";base64," + img.Data,

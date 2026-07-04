@@ -143,6 +143,9 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/config/ocr-enabled", s.authMiddleware(s.handleGetOcrEnabled))
 	s.mux.HandleFunc("PUT /api/config/ocr-enabled", s.authMiddleware(s.handleSetOcrEnabled))
 	s.mux.HandleFunc("PUT /api/config/ocr-model", s.authMiddleware(s.handleSetOcrModel))
+	s.mux.HandleFunc("GET /api/config/ocr", s.authMiddleware(s.handleGetOcrConfig))
+	s.mux.HandleFunc("PUT /api/config/ocr", s.authMiddleware(s.handleSetOcrConfig))
+	s.mux.HandleFunc("GET /api/ocr/models", s.authMiddleware(s.handleGetOcrModels))
 	// Mask (secret redaction) config
 	s.mux.HandleFunc("GET /api/config/mask", s.authMiddleware(s.handleGetMaskConfig))
 	s.mux.HandleFunc("PUT /api/config/mask/enabled", s.authMiddleware(s.handleSetMaskEnabled))
@@ -580,6 +583,16 @@ func (s *Server) handleSetOcrEnabled(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSetOcrModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetOcrModel(w, r)
 }
+func (s *Server) handleGetOcrConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetOcrConfig(w, r)
+}
+func (s *Server) handleSetOcrConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetOcrConfig(w, r)
+}
+func (s *Server) handleGetOcrModels(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetOcrModels(w, r)
+}
+
 func (s *Server) handleGetMaskConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetMaskConfig(w, r)
 }

@@ -1,4 +1,4 @@
-import type { Message } from "../../api/types";
+import type { Message, OcrConfig, OcrModelsResponse } from "../../api/types";
 import type { LucideIcon } from "lucide-react";
 
 // ─── Formatting helpers ─────────────────────────────────────────────────────
@@ -125,6 +125,9 @@ export interface CommandContext {
   api: {
     listSessions: () => Promise<{ id: string; title: string }[]>;
     getSession: (id: string) => Promise<{ messages?: Message[]; title?: string }>;
+    getOcrConfig: () => Promise<OcrConfig>;
+    setOcrConfig: (cfg: OcrConfig) => Promise<OcrConfig>;
+    getOcrModels: () => Promise<OcrModelsResponse>;
     getOcrEnabled: () => Promise<{ enabled: boolean; model: string }>;
     setOcrEnabled: (enabled: boolean) => Promise<unknown>;
     setOcrModel: (model: string) => Promise<unknown>;
@@ -265,16 +268,23 @@ async function handleOcr(
   args: string,
   ctx: CommandContext,
 ): Promise<CommandResult> {
-  const sub = args.toLowerCase();
+  const trimmed = args.trim();
+  const spaceIdx = trimmed.indexOf(" ");
+  const sub = (spaceIdx >= 0 ? trimmed.slice(0, spaceIdx) : trimmed).toLowerCase();
+  const rest = spaceIdx >= 0 ? trimmed.slice(spaceIdx + 1).trim() : "";
 
   if (sub === "" || sub === "status") {
     try {
-      const status = await ctx.api.getOcrEnabled();
+      const cfg = await ctx.api.getOcrConfig();
+      const backend = cfg.backend || "openai-compat";
+      const modelName = backend === "paddle"
+        ? cfg.paddle.variant
+        : cfg.openai.model;
       return {
         handled: true,
         messages: [{
           role: "assistant",
-          content: `**OCR status:** ${status.enabled ? "✅ enabled" : "❌ disabled"}\n**Model:** ${status.model || "(not set)"}`,
+          content: `**OCR status:** ${cfg.enabled ? "✅ enabled" : "❌ disabled"}\n**Backend:** ${backend}\n**Model:** ${modelName || "(not set)"}`,
         }],
       };
     } catch (err) {
@@ -290,7 +300,9 @@ async function handleOcr(
 
   if (sub === "on" || sub === "enable" || sub === "true" || sub === "yes") {
     try {
-      await ctx.api.setOcrEnabled(true);
+      const cfg = await ctx.api.getOcrConfig();
+      cfg.enabled = true;
+      await ctx.api.setOcrConfig(cfg);
       return {
         handled: true,
         messages: [{ role: "assistant", content: "OCR: **enabled.**" }],
@@ -308,7 +320,9 @@ async function handleOcr(
 
   if (sub === "off" || sub === "disable" || sub === "false" || sub === "no") {
     try {
-      await ctx.api.setOcrEnabled(false);
+      const cfg = await ctx.api.getOcrConfig();
+      cfg.enabled = false;
+      await ctx.api.setOcrConfig(cfg);
       return {
         handled: true,
         messages: [{ role: "assistant", content: "OCR: **disabled.**" }],
@@ -324,28 +338,68 @@ async function handleOcr(
     }
   }
 
-  // /ocr model <name>
-  if (sub.startsWith("model ")) {
-    const modelName = sub.slice(6).trim();
-    if (modelName) {
+  // /ocr model [backend/model | modelName]
+  if (sub === "model") {
+    const modelArg = rest;
+    if (!modelArg) {
+      // No arg — show available models
       try {
-        await ctx.api.setOcrModel(modelName);
-        return {
-          handled: true,
-          messages: [{
-            role: "assistant",
-            content: `OCR model set to **${modelName}**.`,
-          }],
-        };
-      } catch (err) {
-        return {
-          handled: true,
-          messages: [{
-            role: "assistant",
-            content: `**Error setting OCR model:** ${err instanceof Error ? err.message : String(err)}`,
-          }],
-        };
+        const modelsResp = await ctx.api.getOcrModels();
+        const lines: string[] = ["**Available OCR models:**"];
+        for (const be of modelsResp.backends) {
+          lines.push(`\n**${be.name}**`);
+          if (be.error) {
+            lines.push(`  ⚠️ unavailable: ${be.error}`);
+            continue;
+          }
+          if (be.models.length === 0) {
+            lines.push("  _(no models)_");
+            continue;
+          }
+          for (const m of be.models) {
+            lines.push(`  • \`${m}\``);
+          }
+        }
+        lines.push("\nUse \`/ocr model <backend>/<name>\` to select one.");
+        return { handled: true, messages: [{ role: "assistant", content: lines.join("\n") }] };
+      } catch {
+        return { handled: true, messages: [{ role: "assistant", content: "Could not fetch OCR models. Is the backend running?" }] };
       }
+    }
+
+    // Parse "backend/model" format
+    let backend = "openai-compat";
+    let modelName = modelArg;
+    if (modelArg.includes("/")) {
+      const parts = modelArg.split("/", 2);
+      backend = parts[0];
+      modelName = parts[1];
+    }
+
+    try {
+      const cfg = await ctx.api.getOcrConfig();
+      cfg.backend = backend as "openai-compat" | "paddle" | "lmstudio";
+      if (backend === "paddle") {
+        cfg.paddle.variant = modelName;
+      } else {
+        cfg.openai.model = modelName;
+      }
+      await ctx.api.setOcrConfig(cfg);
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `OCR model set to **${backend}/${modelName}**.`,
+        }],
+      };
+    } catch (err) {
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `**Error setting OCR model:** ${err instanceof Error ? err.message : String(err)}`,
+        }],
+      };
     }
   }
 
@@ -353,7 +407,7 @@ async function handleOcr(
     handled: true,
     messages: [{
       role: "assistant",
-      content: "Usage: `/ocr [status\\|enable\\|disable\\|model <name>]`",
+      content: "Usage: \`/ocr [status\\|enable\\|disable\\|model [<backend>/]<name>]\`",
     }],
   };
 }

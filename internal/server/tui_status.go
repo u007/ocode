@@ -12,8 +12,8 @@ type TUIStatus struct {
 	// Main chat model (provider/model).
 	MainModel string `json:"main_model,omitempty"`
 	// Small model name + runtime on/off (the web should mirror both).
-	SmallModel      string `json:"small_model,omitempty"`
-	SmallModelOn    bool   `json:"small_model_enabled"`
+	SmallModel   string `json:"small_model,omitempty"`
+	SmallModelOn bool   `json:"small_model_enabled"`
 	// Advisor model + runtime on/off.
 	AdvisorModel   string `json:"advisor_model,omitempty"`
 	AdvisorEnabled bool   `json:"advisor_enabled"`
@@ -21,6 +21,7 @@ type TUIStatus struct {
 	RecapModel   string `json:"recap_model,omitempty"`
 	RecapModelOn bool   `json:"recap_model_enabled"`
 	// OCR tool model + runtime on/off.
+	OcrBackend string `json:"ocr_backend,omitempty"`
 	OcrModel   string `json:"ocr_model,omitempty"`
 	OcrEnabled bool   `json:"ocr_enabled"`
 	// IDE integration: mode is "off" | "claude" | ...; status is a short
@@ -34,8 +35,8 @@ type TUIStatus struct {
 	SessionTitle string `json:"session_title,omitempty"`
 	CWD          string `json:"cwd,omitempty"`
 	// Context window usage.
-	ContextCurrentTokens int `json:"context_current_tokens,omitempty"`
-	ContextMaxTokens     int `json:"context_max_tokens,omitempty"`
+	ContextCurrentTokens int    `json:"context_current_tokens,omitempty"`
+	ContextMaxTokens     int    `json:"context_max_tokens,omitempty"`
 	ContextModel         string `json:"context_model,omitempty"`
 	// Spending (USD) accumulated for the current session / day. Sourced from
 	// the usage package; nil if no usage has been recorded yet.
@@ -71,7 +72,7 @@ type LSPStatus struct {
 // tuiStatusStore is a thread-safe holder for the latest snapshot. It is set
 // on the RCBridge so the SSE path and the REST handler see the same value.
 type tuiStatusStore struct {
-	mu  sync.RWMutex
+	mu   sync.RWMutex
 	snap TUIStatus
 }
 

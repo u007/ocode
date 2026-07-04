@@ -560,8 +560,9 @@ func fetchLMStudioModels() []string {
 }
 
 // OcrModelsFromLMStudio returns LM Studio model IDs that look like OCR/vision
-// models (matching names containing "ocr", "paddle", "vision", "read", "caption").
+// models. Uses the same expanded keyword matching as the openai-compat backend.
 // Returns nil silently if LM Studio is not running.
+// Deprecated: Use ocr.Get("openai-compat").ListModels() instead.
 func OcrModelsFromLMStudio() []string {
 	all := FetchLMStudioModels().Models
 	if len(all) == 0 {
@@ -570,8 +571,7 @@ func OcrModelsFromLMStudio() []string {
 	var ocrModels []string
 	for _, m := range all {
 		lower := strings.ToLower(m)
-		if strings.Contains(lower, "ocr") || strings.Contains(lower, "paddle") ||
-			strings.Contains(lower, "vision") || strings.Contains(lower, "caption") {
+		if ocrKeywordMatch(lower) {
 			ocrModels = append(ocrModels, m)
 		}
 	}
@@ -581,6 +581,31 @@ func OcrModelsFromLMStudio() []string {
 		return all
 	}
 	return ocrModels
+}
+
+// ocrKeywordMatch returns true if the lower-cased string matches known
+// OCR or vision model name patterns.
+func ocrKeywordMatch(lower string) bool {
+	keywords := []string{
+		"ocr", "paddle", "deepseek", "vision", "caption",
+		"moondream", "florence", "cogvlm", "pixtral", "paligemma",
+		"minicpm", "internvl", "llava", "clip", "phi",
+		"gemma", "qwen",
+	}
+	for _, kw := range keywords {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	// Check for "vl" suffix/prefix patterns (e.g. "qwen2-vl", "internvl")
+	if strings.Contains(lower, "vl") {
+		return true
+	}
+	// Check for "vlm" (vision language model)
+	if strings.Contains(lower, "vlm") {
+		return true
+	}
+	return false
 }
 
 // fetchRequestyLiveModels fetches models from the Requesty API and returns

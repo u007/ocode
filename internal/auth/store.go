@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 
@@ -286,6 +287,46 @@ func List() map[string]Credential {
 		out[k] = v
 	}
 	return out
+}
+
+// FindByBaseURL returns the first credential whose BaseURL matches the given
+// OpenAI-compatible endpoint, normalized to the same /v1 suffix convention
+// used by the OCR/OpenAI compatibility paths. Matching is deterministic: when
+// multiple credentials share the same endpoint, provider names are sorted and
+// the first match wins.
+func FindByBaseURL(baseURL string) (Credential, bool) {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	if err := ensureLoadedLocked(); err != nil {
+		return Credential{}, false
+	}
+	target := normalizeBaseURLForMatch(baseURL)
+	if target == "" {
+		return Credential{}, false
+	}
+	names := make([]string, 0, len(cache))
+	for name := range cache {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cred := cache[name]
+		if normalizeBaseURLForMatch(cred.BaseURL) == target {
+			return cred, true
+		}
+	}
+	return Credential{}, false
+}
+
+func normalizeBaseURLForMatch(baseURL string) string {
+	baseURL = strings.TrimSpace(strings.TrimRight(baseURL, "/"))
+	if baseURL == "" {
+		return ""
+	}
+	if !strings.HasSuffix(baseURL, "/v1") {
+		baseURL += "/v1"
+	}
+	return baseURL
 }
 
 // Set writes a credential for a provider, persisting to disk at 0600.

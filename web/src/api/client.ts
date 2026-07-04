@@ -131,7 +131,18 @@ export const api = {
     fetchJSON<{ model: string; enabled: boolean; priority: string }>(
       "/api/config/small-model",
     ),
-  // OCR runtime on/off and model toggle.
+  // ── OCR (new structured API) ──
+  getOcrConfig: () =>
+    fetchJSON<import("../api/types").OcrConfig>("/api/config/ocr"),
+  setOcrConfig: (cfg: import("../api/types").OcrConfig) =>
+    fetchJSON<import("../api/types").OcrConfig>("/api/config/ocr", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  getOcrModels: () =>
+    fetchJSON<import("../api/types").OcrModelsResponse>("/api/ocr/models"),
+
+  // ── OCR (legacy API, deprecated) ──
   getOcrEnabled: () =>
     fetchJSON<{ enabled: boolean; model: string }>("/api/config/ocr-enabled"),
   setOcrEnabled: (enabled: boolean) =>

@@ -71,6 +71,17 @@ export interface SSEToolResultEvent {
   output: string;
 }
 
+export interface OcrConfig {
+  enabled: boolean;
+  backend: "openai-compat" | "paddle" | "lmstudio";
+  openai: { base_url: string; model: string };
+  paddle: { endpoint: string; variant: string };
+}
+
+export interface OcrModelsResponse {
+  backends: { name: string; models: string[]; error?: string }[];
+}
+
 export interface SSEToolErrorEvent {
   tool: string;
   error: string;
@@ -156,6 +167,7 @@ export interface TUIStatus {
   advisor_enabled?: boolean;
   ide_mode?: string;
   ide_status?: string;
+  ocr_backend?: string;
   ocr_model?: string;
   ocr_enabled?: boolean;
   subagent_model?: string;

@@ -1,10 +1,14 @@
 package server
 
 import (
+	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/ocr"
 )
 
 func (h *Handler) HandleGetModel(w http.ResponseWriter, r *http.Request) {
@@ -189,8 +193,17 @@ func (h *Handler) HandleGetOcrEnabled(w http.ResponseWriter, r *http.Request) {
 	enabled := false
 	model := ""
 	if h.cfg != nil {
-		enabled = h.cfg.Ocode.OcrEnabled
-		model = h.cfg.Ocode.OcrModel
+		enabled = h.cfg.Ocode.Ocr.Enabled
+		backend := h.cfg.Ocode.Ocr.Backend
+		if backend == "" {
+			backend = "openai-compat"
+		}
+		switch backend {
+		case "paddle":
+			model = h.cfg.Ocode.Ocr.Paddle.Variant
+		default:
+			model = h.cfg.Ocode.Ocr.OpenAI.Model
+		}
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]interface{}{"enabled": enabled, "model": model})
@@ -208,8 +221,8 @@ func (h *Handler) HandleSetOcrEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.mu.Lock()
-	h.cfg.Ocode.OcrEnabled = req.Enabled
-	config.SaveOcrEnabled(req.Enabled)
+	h.cfg.Ocode.Ocr.Enabled = req.Enabled
+	config.SaveOcrConfig(h.cfg.Ocode.Ocr)
 	h.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]bool{"enabled": req.Enabled})
@@ -226,11 +239,123 @@ func (h *Handler) HandleSetOcrModel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.mu.Lock()
-	h.cfg.Ocode.OcrModel = req.Model
-	config.SaveOcrModel(req.Model)
+	backend := h.cfg.Ocode.Ocr.Backend
+	if backend == "" {
+		backend = "openai-compat"
+	}
+	switch backend {
+	case "paddle":
+		h.cfg.Ocode.Ocr.Paddle.Variant = req.Model
+	default:
+		h.cfg.Ocode.Ocr.OpenAI.Model = req.Model
+	}
+	config.SaveOcrConfig(h.cfg.Ocode.Ocr)
 	h.mu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
+}
+
+// HandleGetOcrConfig returns the full OCR configuration.
+func (h *Handler) HandleGetOcrConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := ocr.DefaultOcrConfig()
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.Ocr
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleSetOcrConfig updates the full OCR configuration.
+func (h *Handler) HandleSetOcrConfig(w http.ResponseWriter, r *http.Request) {
+	var req ocr.OcrConfig
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	h.mu.Lock()
+	h.cfg.Ocode.Ocr = req
+	config.SaveOcrConfig(req)
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, req)
+}
+
+// HandleGetOcrModels returns the list of available models from each OCR backend.
+func (h *Handler) HandleGetOcrModels(w http.ResponseWriter, r *http.Request) {
+	type backendModels struct {
+		Name   string   `json:"name"`
+		Models []string `json:"models"`
+		Error  string   `json:"error,omitempty"`
+	}
+	var result struct {
+		Backends []backendModels `json:"backends"`
+	}
+
+	// Read the configured OCR base URLs so we contact the user's actual
+	// endpoint, not always the default localhost:1234.
+	var ocrCfg ocr.OcrConfig
+	h.mu.Lock()
+	if h.cfg != nil {
+		ocrCfg = h.cfg.Ocode.Ocr
+	} else {
+		ocrCfg = ocr.DefaultOcrConfig()
+	}
+	h.mu.Unlock()
+
+	for _, name := range ocr.List() {
+		be := ocr.Get(name)
+		if be == nil {
+			continue
+		}
+		// Pass the backend-specific base URL so ListModels contacts the
+		// user's configured endpoint instead of the built-in default.
+		baseURL := ""
+		apiKey := ""
+		switch name {
+		case "openai-compat":
+			baseURL = ocrCfg.OpenAI.BaseURL
+			apiKey = ocrCfg.OpenAI.APIKey
+			// If OCR config does not carry its own token, deterministically
+			// reuse the credential whose BaseURL matches the configured OCR
+			// endpoint. This keeps LM Studio / vLLM lookups stable without
+			// depending on map iteration order or unrelated credentials.
+			if apiKey == "" {
+				if cred, ok := auth.FindByBaseURL(baseURL); ok {
+					apiKey = cred.Key
+				}
+			}
+		case "paddle":
+			baseURL = ocrCfg.Paddle.Endpoint
+		}
+		models, err := be.ListModels(r.Context(), baseURL, apiKey)
+		if err != nil {
+			// Surface the reason instead of silently dropping the backend:
+			// the most common cause of an "empty" OCR model list is that the
+			// configured endpoint (e.g. LM Studio at base_url) is unreachable.
+			log.Printf("ocr: backend %q ListModels failed (baseURL=%q): %v", name, baseURL, err)
+			result.Backends = append(result.Backends, backendModels{
+				Name:  name,
+				Error: err.Error(),
+			})
+			continue
+		}
+		if len(models) == 0 {
+			log.Printf("ocr: backend %q returned no models (baseURL=%q)", name, baseURL)
+			result.Backends = append(result.Backends, backendModels{
+				Name:  name,
+				Error: "no models available at " + baseURL,
+			})
+			continue
+		}
+		result.Backends = append(result.Backends, backendModels{
+			Name:   name,
+			Models: models,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) HandleListAgents(w http.ResponseWriter, r *http.Request) {

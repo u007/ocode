@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"image"
 	"image/png"
+	"strings"
 	"testing"
 )
 
@@ -178,6 +179,66 @@ func TestConvertToOpenAIMessages_ToolImageBecomesTrailingUserMessage(t *testing.
 	}
 	if !sawImage {
 		t.Errorf("no image_url block in flushed user message: %+v", blocks)
+	}
+}
+
+// A user-attached image sent to a text-only OpenAI-compatible model (e.g.
+// DeepSeek) must never serialize as an image_url block — DeepSeek's API rejects
+// the unknown variant and 400s the whole turn. Instead the image degrades to a
+// text stub, mirroring the read tool, so the model still learns an image was
+// attached and what to do about it.
+func TestConvertToOpenAIMessages_NonVisionUserImageStubbed(t *testing.T) {
+	c := &GenericClient{Provider: "deepseek", Model: "deepseek-chat"}
+	if c.supportsVision() {
+		t.Fatal("precondition: deepseek-chat must be treated as text-only")
+	}
+	msgs := []Message{
+		{Role: "user", Content: "what is this", Images: []Image{{Path: "pic.png", MIMEType: "image/png", Data: "AAAA"}}},
+	}
+
+	out, err := c.convertToOpenAIMessages(msgs)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	var user map[string]interface{}
+	for _, m := range out {
+		if m["role"] == "user" {
+			user = m
+		}
+	}
+	if user == nil {
+		t.Fatalf("no user message produced: %+v", out)
+	}
+
+	// Content may be a plain string or a block array; either way it must carry
+	// the stub and never a base64 image_url block.
+	sawStub := false
+	assertNoImageURL := func(text string) {
+		if strings.Contains(text, "image omitted") {
+			sawStub = true
+		}
+	}
+	switch v := user["content"].(type) {
+	case string:
+		if strings.Contains(v, "base64") {
+			t.Errorf("text-only model received base64 image data: %q", v)
+		}
+		assertNoImageURL(v)
+	case []map[string]interface{}:
+		for _, b := range v {
+			if b["type"] == "image_url" {
+				t.Errorf("text-only model received an image_url block: %+v", b)
+			}
+			if b["type"] == "text" {
+				assertNoImageURL(b["text"].(string))
+			}
+		}
+	default:
+		t.Fatalf("unexpected content type %T", user["content"])
+	}
+	if !sawStub {
+		t.Errorf("expected a vision-unsupported stub in the user content, got %+v", user["content"])
 	}
 }
 

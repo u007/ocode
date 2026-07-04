@@ -660,6 +660,17 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 
 	_ = session.Save(id, "", as.messages, nil)
 
+	// Broadcast the compacted snapshot so the SSE mirror (and every connected
+	// browser) replaces its stale message list — otherwise the web transcript
+	// keeps showing the pre-compaction messages and its context size never
+	// drops. Matches the chat handler's post-turn broadcast.
+	if h.rc == nil {
+		h.broadcastEvent(SSEEvent{
+			Event: "messages",
+			Data:  as.messages,
+		})
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"original_len":  result.OriginalLen,
 		"compacted_len": len(as.messages),

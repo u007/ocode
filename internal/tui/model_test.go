@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +27,7 @@ import (
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/ide"
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
@@ -1638,6 +1641,25 @@ func TestPersistPermissionsKeepsDirtyOnSaveFailure(t *testing.T) {
 	}
 	if strings.Contains(got, cfgDir) {
 		t.Fatalf("expected generic failure message without paths, got %q", got)
+	}
+}
+
+func TestBuildTUIStatusSnapshotIncludesOcrBackendAndBackendModel(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Ocode.Ocr.Backend = "paddle"
+	cfg.Ocode.Ocr.Enabled = true
+	cfg.Ocode.Ocr.Paddle.Variant = "vl"
+	m := model{config: &cfg, ocrEnabled: true}
+
+	snap := m.buildTUIStatusSnapshot()
+	if snap.OcrBackend != "paddle" {
+		t.Fatalf("OcrBackend = %q, want %q", snap.OcrBackend, "paddle")
+	}
+	if snap.OcrModel != "vl" {
+		t.Fatalf("OcrModel = %q, want %q", snap.OcrModel, "vl")
+	}
+	if !snap.OcrEnabled {
+		t.Fatal("expected OcrEnabled to be true")
 	}
 }
 
@@ -6392,5 +6414,71 @@ func TestTranscriptClickClearsStaleScrollbarDrag(t *testing.T) {
 	got = derefTestModel(t, updated)
 	if got.viewport.YOffset() != before {
 		t.Fatalf("expected transcript click to stop stale drag from scrolling, before=%d after=%d", before, got.viewport.YOffset())
+	}
+}
+
+func TestHandleOcrModelAcceptsLMStudioPrefix(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	chdirTempForConfigTest(t)
+
+	m := model{config: &config.Config{Ocode: config.OcodeConfig{Ocr: ocr.DefaultOcrConfig()}}}
+	m.handleOcrModel("lmstudio/deepseek-ocr")
+
+	if got, want := m.config.Ocode.Ocr.Backend, "lmstudio"; got != want {
+		t.Fatalf("expected backend %q, got %q", want, got)
+	}
+	if got, want := m.config.Ocode.Ocr.OpenAI.Model, "deepseek-ocr"; got != want {
+		t.Fatalf("expected OCR model %q, got %q", want, got)
+	}
+}
+
+func TestOpenOcrModelPickerLabelsLMStudioBackend(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	chdirTempForConfigTest(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/models") {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"deepseek-ocr"},{"id":"qwen2-vl"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	m := model{config: &config.Config{Ocode: config.OcodeConfig{Ocr: ocr.OcrConfig{
+		Enabled: true,
+		Backend: "lmstudio",
+		OpenAI:  ocr.OpenAICfg{BaseURL: srv.URL},
+	}}}}
+
+	msg := m.openOcrModelPicker()()
+	loaded, ok := msg.(modelPickerFullModelsLoadedMsg)
+	if !ok {
+		t.Fatalf("expected modelPickerFullModelsLoadedMsg, got %T", msg)
+	}
+
+	if !containsString(loaded.items, "› lmstudio") {
+		t.Fatalf("expected lmstudio section in picker items: %v", loaded.items)
+	}
+	if !containsString(loaded.values, "lmstudio/deepseek-ocr") {
+		t.Fatalf("expected lmstudio-prefixed model in picker values: %v", loaded.values)
+	}
+}
+
+func TestLooksLikeLMStudioBaseURL(t *testing.T) {
+	if !looksLikeLMStudioBaseURL("") {
+		t.Fatal("expected empty base URL to count as LM Studio")
+	}
+	for _, baseURL := range []string{
+		"http://localhost:1234/v1",
+		"http://127.0.0.1:1234/v1",
+		"https://lmstudio.local/v1",
+	} {
+		if !looksLikeLMStudioBaseURL(baseURL) {
+			t.Fatalf("expected %q to look like LM Studio", baseURL)
+		}
+	}
+	if looksLikeLMStudioBaseURL("http://example.com/v1") {
+		t.Fatal("expected generic base URL to not count as LM Studio")
 	}
 }

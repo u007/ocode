@@ -36,6 +36,7 @@ import (
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/ide"
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/server"
@@ -1587,7 +1588,7 @@ func newModel(opts ...RunOptions) model {
 		recapModelEnabledSet: true,
 		ocrEnabled: func() bool {
 			if cfg != nil {
-				return cfg.Ocode.OcrEnabled
+				return cfg.Ocode.Ocr.Enabled
 			}
 			return false
 		}(),
@@ -3053,7 +3054,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			text: body,
 			raw:  &agent.Message{Role: "system", Content: body},
 		}
-		if m.streaming {
+		// Defer the completion while a turn is streaming OR a compaction is in
+		// flight / pending application. Injecting it now would call askAgent(),
+		// which starts a new turn and re-runs the compaction preflight — that
+		// overwrites pendingCompactUIIdx and makes the in-flight compaction's
+		// result splice against the wrong (or nil) mapping, silently discarding
+		// it. pendingCompactUIIdx is set synchronously at compaction start, so
+		// it covers the whole window (including before compactStartedMsg lands).
+		if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 {
 			m.pendingJobMsgs = append(m.pendingJobMsgs, injected)
 		} else {
 			m.messages = append(m.messages, message{
@@ -3279,7 +3287,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.broadcastRC("error", map[string]string{"error": msg.err.Error()})
 		}
 		m.broadcastRCSnapshot()
-		if msg.err == nil && m.agent != nil {
+		// Skip when a compaction is already pending application: its
+		// pendingCompactUIIdx must not be overwritten before its result is
+		// spliced, or the result applies against the wrong mapping and is
+		// silently discarded (context never shrinks → compaction runs forever).
+		if msg.err == nil && m.agent != nil && len(m.pendingCompactUIIdx) == 0 {
 			agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 			// Only update the pending uiIdx mapping if the agent actually
 			// started a compaction goroutine. Otherwise an earlier in-flight
@@ -3381,8 +3393,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.saveSession()
 			} else {
+				agent.DebugAppendf("COMPACT", "applyCompactionResult returned false (ui index mismatch); transcript unchanged — from=%d to=%d len(uiIdx)=%d len(messages)=%d manual=%v",
+					msg.result.ReplaceFrom, msg.result.ReplaceTo, len(m.pendingCompactUIIdx), len(m.messages), manual)
 				m.pendingCompactUIIdx = nil
-				agent.DebugAppendf("COMPACT", "applyCompactionResult returned false (ui index mismatch); transcript unchanged")
 				if manual {
 					m.messages = append(m.messages, message{role: roleAssistant, text: "⚠ Compaction result could not be applied (try again)."})
 					m.rerenderTranscriptAndMaybeScroll()
@@ -3396,6 +3409,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pendingCompactUIIdx = nil
 		}
 		m.layout()
+		// Drain background-job completions deferred during compaction (see the
+		// jobCompletedMsg handler). Resume the agent turn so it reacts to them,
+		// mirroring the streamDone drain path.
+		if len(m.pendingJobMsgs) > 0 && m.agent != nil {
+			m.messages = append(m.messages, message{
+				role:      roleAssistant,
+				text:      hintStyle.Render("↩ background job(s) completed — resuming"),
+				transient: true,
+			})
+			m.messages = append(m.messages, m.pendingJobMsgs...)
+			m.pendingJobMsgs = nil
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
+		}
 		// Drain messages queued during compaction.
 		if len(m.queuedCompactInputs) > 0 && m.agent != nil {
 			parts := make([]string, 0, len(m.queuedCompactInputs))
@@ -3406,19 +3433,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queuedCompactInputs = nil
 			m.layout()
 			m.maybeScrollTranscriptToBottom()
-			return m, m.processFileReferences(text)
+			return m, tea.Batch(m.processFileReferences(text), waitCompactEvent(m.compactStartCh, m.compactCh))
 		}
 		if cmd, drained := m.drainQueuedCommands(); drained {
 			if cmd != nil {
-				return m, cmd
+				return m, tea.Batch(cmd, waitCompactEvent(m.compactStartCh, m.compactCh))
 			}
 			if resume && m.agent != nil {
-				return m, m.askAgent()
+				return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
 			}
-			return m, nil
+			return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 		}
 		if resume && m.agent != nil {
-			return m, m.askAgent()
+			return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
 		}
 		return m, waitCompactEvent(m.compactStartCh, m.compactCh)
 	case recapFinishedMsg:
@@ -3701,7 +3728,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		case "up":
 			if m.pickerIndex > 0 {
 				m.pickerIndex--
-				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
 				if isFiltered {
 					_, values := m.pickerVisibleItems()
 					for m.pickerIndex > 0 && m.pickerIndex < len(values) && values[m.pickerIndex] == "" {
@@ -3721,7 +3748,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			items, values := m.pickerVisibleItems()
 			if m.pickerIndex < len(items)-1 {
 				m.pickerIndex++
-				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
 				for m.pickerIndex < len(items)-1 {
 					if isFiltered {
 						if m.pickerIndex < len(values) && values[m.pickerIndex] == "" {
@@ -3750,7 +3777,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		case "enter":
-			isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model") && m.pickerFilter != ""
+			isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
 			if !isFiltered && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
 				return true, m, nil
 			}
@@ -5189,9 +5216,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.ocrEnabled = !m.ocrEnabled
 				m.ocrEnabledSet = true
 				if m.config != nil {
-					m.config.Ocode.OcrEnabled = m.ocrEnabled
+					m.config.Ocode.Ocr.Enabled = m.ocrEnabled
 				}
-				if err := config.SaveOcrEnabled(m.ocrEnabled); err != nil {
+				if err := config.SaveOcrConfig(m.config.Ocode.Ocr); err != nil {
 					log.Printf("save ocr enabled: %v", err)
 				}
 				m.broadcastTUIStatus()
@@ -5278,6 +5305,28 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					m.saveSession()
 				}
 				return m, cmd, true
+			}
+		}
+	}
+
+	// Question dialog: handle submit button click
+	if pressed && m.showQuestionDialog && m.activeTab == tabChat && len(m.questionPrompts) > 0 {
+		// Compute the submit button's Y position based on the dialog layout
+		// The input area contains the question dialog. The submit button is at the bottom.
+		inputTopY := m.inputAreaTopY()
+		q := m.questionPrompts[m.questionTab]
+		contentWidth := max(1, m.panelWidth()-4)
+		questionTextLines := lipgloss.Height(wrapView(q.Question, contentWidth))
+		// Layout: header(1) + blank(1) + questionText(lines) + blank(1) + options(N) + blank(1) + hint(1) + blank(2) + submit(1)
+		submitRow := 1 + 1 + questionTextLines + 1 + questionOptionCount(q) + 1 + 1 + 2
+		submitBtnY := inputTopY + submitRow
+		if mouse.Y == submitBtnY {
+			// Check if click is within the submit button horizontal bounds
+			// The submit button is rendered with 2-char indent + "[Submit]" (8 chars)
+			// so it spans columns 2-9 (0-indexed: 2 to 9 inclusive)
+			if mouse.X >= 2 && mouse.X <= 9 {
+				newM, cmd := m.submitQuestionAnswers()
+				return newM, cmd, true
 			}
 		}
 	}
@@ -6610,23 +6659,25 @@ func (m *model) handleOcrCmd(args []string) tea.Cmd {
 	}
 	switch strings.ToLower(args[0]) {
 	case "enable", "true", "yes", "on":
-		m.config.Ocode.OcrEnabled = true
-		if err := config.SaveOcrEnabled(true); err != nil {
+		m.config.Ocode.Ocr.Enabled = true
+		if err := config.SaveOcrConfig(m.config.Ocode.Ocr); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
 			return nil
 		}
 		m.ocrEnabled = true
 		m.ocrEnabledSet = true
+		m.broadcastTUIStatus()
 		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR: enabled."})
 		return nil
 	case "disable", "false", "no", "off":
-		m.config.Ocode.OcrEnabled = false
-		if err := config.SaveOcrEnabled(false); err != nil {
+		m.config.Ocode.Ocr.Enabled = false
+		if err := config.SaveOcrConfig(m.config.Ocode.Ocr); err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
 			return nil
 		}
 		m.ocrEnabled = false
 		m.ocrEnabledSet = true
+		m.broadcastTUIStatus()
 		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR: disabled."})
 		return nil
 	case "model":
@@ -6634,8 +6685,21 @@ func (m *model) handleOcrCmd(args []string) tea.Cmd {
 			return m.handleOcrModel(args[1])
 		}
 		return m.openOcrModelPicker()
+	case "key":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /ocr key <token>  (Bearer token for a token-protected endpoint, e.g. LM Studio)"})
+			return nil
+		}
+		m.config.Ocode.Ocr.OpenAI.APIKey = args[1]
+		if err := config.SaveOcrConfig(m.config.Ocode.Ocr); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.broadcastTUIStatus()
+		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR: API key set."})
+		return nil
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /ocr [status|enable|disable|model [name]]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /ocr [status|enable|disable|model [backend/model]|key <token>]"})
 		return nil
 	}
 }
@@ -6645,24 +6709,31 @@ func (m *model) showOcrStatus() tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR requires a configuration."})
 		return nil
 	}
+	ocrCfg := m.config.Ocode.Ocr
 	status := "disabled"
-	if m.config.Ocode.OcrEnabled {
+	if ocrCfg.Enabled {
 		status = "enabled"
 	}
-	modelText := m.config.Ocode.OcrModel
-	if modelText == "" {
-		modelText = "(not set)"
+	backend := ocrCfg.Backend
+	if backend == "" {
+		backend = "openai-compat"
 	}
-	// Check LM Studio connectivity
-	lmsResult := agent.FetchLMStudioModels()
-	lmsStatus := "not running"
-	if len(lmsResult.Models) > 0 {
-		lmsStatus = fmt.Sprintf("running (%d models)", len(lmsResult.Models))
-	} else if lmsResult.NeedsAPIKey {
-		lmsStatus = "needs API key"
+	if backend == "openai-compat" && looksLikeLMStudioBaseURL(ocrCfg.OpenAI.BaseURL) {
+		backend = "lmstudio"
+	}
+	modelText := "(not set)"
+	switch backend {
+	case "paddle":
+		if ocrCfg.Paddle.Variant != "" {
+			modelText = ocrCfg.Paddle.Variant
+		}
+	default:
+		if ocrCfg.OpenAI.Model != "" {
+			modelText = ocrCfg.OpenAI.Model
+		}
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf(
-		"OCR: %s\nModel: %s\nLM Studio: %s\n\nUse /ocr enable to turn on, /ocr model to select a model.", status, modelText, lmsStatus)})
+		"OCR: %s\nBackend: %s\nModel: %s\n\nUse /ocr enable to turn on, /ocr model to select a model.\nLM Studio selections are shown as lmstudio/<model>.", status, backend, modelText)})
 	return nil
 }
 
@@ -6671,31 +6742,130 @@ func (m *model) handleOcrModel(modelName string) tea.Cmd {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "OCR requires a configuration."})
 		return nil
 	}
-	m.config.Ocode.OcrModel = modelName
-	if err := config.SaveOcrModel(modelName); err != nil {
+	// Support "backend/model" format (e.g. "openai-compat/deepseek-ocr", "paddle/vl")
+	backend := m.config.Ocode.Ocr.Backend
+	if backend == "" {
+		backend = "openai-compat"
+	}
+	if backend == "openai-compat" && looksLikeLMStudioBaseURL(m.config.Ocode.Ocr.OpenAI.BaseURL) {
+		backend = "lmstudio"
+	}
+	if strings.Contains(modelName, "/") {
+		parts := strings.SplitN(modelName, "/", 2)
+		backend = parts[0]
+		modelName = parts[1]
+	}
+	if backend == "lmstudio" {
+		m.config.Ocode.Ocr.Backend = "lmstudio"
+	} else {
+		m.config.Ocode.Ocr.Backend = backend
+	}
+	switch backend {
+	case "paddle":
+		m.config.Ocode.Ocr.Paddle.Variant = modelName
+	default:
+		m.config.Ocode.Ocr.OpenAI.Model = modelName
+	}
+	if err := config.SaveOcrConfig(m.config.Ocode.Ocr); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error saving OCR model: %v", err)})
 		return nil
 	}
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("OCR model set to: %s", modelName)})
+	m.broadcastTUIStatus()
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("OCR model set to: %s/%s", backend, modelName)})
 	return nil
 }
 
+func looksLikeLMStudioBaseURL(baseURL string) bool {
+	if baseURL == "" {
+		return true
+	}
+	lower := strings.ToLower(baseURL)
+	return strings.Contains(lower, "lmstudio") || strings.Contains(lower, "localhost:1234") || strings.Contains(lower, "127.0.0.1:1234")
+}
+
 func (m *model) openOcrModelPicker() tea.Cmd {
-	// Fetch OCR models from LM Studio
-	ocrModels := agent.OcrModelsFromLMStudio()
-	if len(ocrModels) == 0 {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "No LM Studio models found. Make sure LM Studio is running."})
-		return nil
+	m.input.Blur()
+	m.pickerKind = "ocr-model"
+	m.pickerItems = nil
+	m.pickerValues = nil
+	m.pickerIsHeader = nil
+	m.pickerIndex = 0
+	m.pickerFilter = ""
+	m.pickerFilterPending = ""
+	m.pickerFilterSeq++
+	m.showPicker = true
+	m.pushPickerModal()
+
+	// Fetch models from all registered backends asynchronously
+	return func() tea.Msg {
+		var items, values []string
+		var isHeader []bool
+
+		// Read the configured OCR base URLs so we contact the user's
+		// actual endpoint, not always the default localhost:1234.
+		ocrCfg := m.config.Ocode.Ocr
+
+		for _, name := range ocr.List() {
+			be := ocr.Get(name)
+			if be == nil {
+				continue
+			}
+			displayName := name
+			if name == "openai-compat" && (ocrCfg.Backend == "lmstudio" || looksLikeLMStudioBaseURL(ocrCfg.OpenAI.BaseURL)) {
+				displayName = "lmstudio"
+			}
+			// Pass the backend-specific base URL so ListModels
+			// contacts the user's configured endpoint.
+			baseURL := ""
+			apiKey := ""
+			switch name {
+			case "openai-compat":
+				baseURL = ocrCfg.OpenAI.BaseURL
+				apiKey = ocrCfg.OpenAI.APIKey
+				// If OCR config does not carry its own token, deterministically
+				// reuse the credential whose BaseURL matches the configured OCR
+				// endpoint. This keeps lookups stable without depending on map
+				// iteration order or unrelated credentials.
+				if apiKey == "" {
+					if cred, ok := auth.FindByBaseURL(baseURL); ok {
+						apiKey = cred.Key
+					}
+				}
+			case "paddle":
+				baseURL = ocrCfg.Paddle.Endpoint
+			}
+			models, err := be.ListModels(context.Background(), baseURL, apiKey)
+
+			// Always show the backend section header so an empty/unreachable
+			// backend explains itself instead of silently vanishing.
+			items = append(items, "\u203a "+displayName)
+			values = append(values, "")
+			isHeader = append(isHeader, true)
+
+			if err != nil {
+				log.Printf("ocr: backend %q ListModels failed (baseURL=%q): %v", displayName, baseURL, err)
+				items = append(items, "  \u26a0 unavailable: "+err.Error())
+				values = append(values, "")
+				isHeader = append(isHeader, true)
+				continue
+			}
+			if len(models) == 0 {
+				log.Printf("ocr: backend %q returned no models (baseURL=%q)", displayName, baseURL)
+				items = append(items, "  (no models at "+baseURL+")")
+				values = append(values, "")
+				isHeader = append(isHeader, true)
+				continue
+			}
+
+			for _, model := range models {
+				items = append(items, "  "+model)
+				values = append(values, displayName+"/"+model)
+				isHeader = append(isHeader, false)
+			}
+		}
+
+		return modelPickerFullModelsLoadedMsg{items: items, values: values, isHeader: isHeader}
 	}
-	// List available OCR models in the chat
-	var b strings.Builder
-	b.WriteString("Available LM Studio OCR models:\n")
-	for _, model := range ocrModels {
-		b.WriteString(fmt.Sprintf("  • %s\n", model))
-	}
-	b.WriteString("\nUse /ocr model <name> to select one.")
-	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
-	return nil
 }
 
 func (m *model) handleDocsCmd(args []string) tea.Cmd {
@@ -10217,7 +10387,10 @@ func (m *model) askAgent() tea.Cmd {
 
 	if m.skipCompactPreflight {
 		m.skipCompactPreflight = false
-	} else if m.agent != nil {
+	} else if m.agent != nil && len(m.pendingCompactUIIdx) == 0 {
+		// Never overwrite a still-pending compaction mapping (see stream-done
+		// preflight and applyCompactionResult): doing so discards the pending
+		// compaction's result and leaves context oversized.
 		if m.agent.MaybeCompactAsync(agentMsgs) {
 			m.agent.SetPreloadedContext("")
 			m.pendingCompactUIIdx = uiIdx
@@ -10725,7 +10898,8 @@ func (m *model) broadcastTUIStatus() {
 // Reads all of m's tracked state — cheap (struct copies, no IO).
 func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	snap := server.TUIStatus{
-		UpdatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+		OcrBackend: "openai-compat",
+		UpdatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if m.config != nil {
 		snap.MainModel = m.config.Model
@@ -10733,7 +10907,16 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		snap.AdvisorModel = m.config.Ocode.Advisor.Model
 		snap.ExtraAllowedPaths = m.config.Ocode.ExtraAllowedPaths
 		snap.RecapModel = m.config.Ocode.RecapModel
-		snap.OcrModel = m.config.Ocode.OcrModel
+		snap.OcrBackend = m.config.Ocode.Ocr.Backend
+		if snap.OcrBackend == "" {
+			snap.OcrBackend = "openai-compat"
+		}
+		switch snap.OcrBackend {
+		case "paddle":
+			snap.OcrModel = m.config.Ocode.Ocr.Paddle.Variant
+		default:
+			snap.OcrModel = m.config.Ocode.Ocr.OpenAI.Model
+		}
 	}
 	snap.SessionID = m.sessionID
 	snap.SessionTitle = m.sessionTitle
@@ -14596,7 +14779,10 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	// OCR row doubles as an on/off toggle (click to flip the runtime gate).
 	ocrModel := ""
 	if m.config != nil {
-		ocrModel = m.config.Ocode.OcrModel
+		ocrModel = m.config.Ocode.Ocr.OpenAI.Model
+		if m.config.Ocode.Ocr.Backend == "paddle" {
+			ocrModel = m.config.Ocode.Ocr.Paddle.Variant
+		}
 	}
 	if ocrModel == "" {
 		ocrModel = "(not set)"
@@ -16057,6 +16243,12 @@ func (m model) renderLSPSection(outerBodyWidth int) []string {
 			servers = append(servers, lsp.ServerStatus{Cmd: cmd})
 		}
 	}
+
+	// Sort the combined list so the order is deterministic.
+	// ActiveServers is already sorted, but warming-up servers appended above
+	// come from a map iteration (non-deterministic in Go) and would otherwise
+	// reorder on every render cycle when 2+ servers are warming up.
+	sort.Slice(servers, func(i, j int) bool { return servers[i].Cmd < servers[j].Cmd })
 
 	if len(servers) == 0 {
 		return nil

@@ -190,6 +190,9 @@ export default function SessionPage() {
             if (s.small_model !== undefined) {
               dispatch({ type: "SET_SMALL_MODEL", model: s.small_model });
             }
+            if (s.ocr_backend !== undefined) {
+              dispatch({ type: "SET_OCR_BACKEND", backend: s.ocr_backend || "openai-compat" });
+            }
             if (s.main_model !== undefined && s.main_model !== "") {
               dispatch({ type: "SET_MODEL", model: s.main_model });
             }
@@ -249,7 +252,18 @@ export default function SessionPage() {
       .catch(console.error);
     api
       .getTUIStatus()
-      .then((res) => dispatch({ type: "SET_TUI_STATUS", status: res }))
+      .then((res) => {
+        dispatch({ type: "SET_TUI_STATUS", status: res });
+        if (res.ocr_backend !== undefined) {
+          dispatch({ type: "SET_OCR_BACKEND", backend: res.ocr_backend || "openai-compat" });
+        }
+        if (res.ocr_enabled !== undefined) {
+          dispatch({ type: "SET_OCR_ENABLED", enabled: !!res.ocr_enabled });
+        }
+        if (res.ocr_model !== undefined) {
+          dispatch({ type: "SET_OCR_MODEL", model: res.ocr_model || "" });
+        }
+      })
       .catch(console.error);
     api
       .getOcrEnabled()
@@ -289,6 +303,9 @@ export default function SessionPage() {
       api: {
         listSessions: () => api.listSessions(),
         getSession: (id) => api.getSession(id),
+        getOcrConfig: () => api.getOcrConfig(),
+        setOcrConfig: (cfg) => api.setOcrConfig(cfg),
+        getOcrModels: () => api.getOcrModels(),
         getOcrEnabled: () => api.getOcrEnabled(),
         setOcrEnabled: (enabled) => api.setOcrEnabled(enabled),
         setOcrModel: (model) => api.setOcrModel(model),

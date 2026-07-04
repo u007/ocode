@@ -158,7 +158,18 @@ function HomeApp() {
       .catch(console.error);
     api
       .getTUIStatus()
-      .then((res) => dispatch({ type: "SET_TUI_STATUS", status: res }))
+      .then((res) => {
+        dispatch({ type: "SET_TUI_STATUS", status: res });
+        if (res.ocr_backend !== undefined) {
+          dispatch({ type: "SET_OCR_BACKEND", backend: res.ocr_backend || "openai-compat" });
+        }
+        if (res.ocr_enabled !== undefined) {
+          dispatch({ type: "SET_OCR_ENABLED", enabled: !!res.ocr_enabled });
+        }
+        if (res.ocr_model !== undefined) {
+          dispatch({ type: "SET_OCR_MODEL", model: res.ocr_model || "" });
+        }
+      })
       .catch(console.error);
   }, [dispatch]);
 
@@ -192,6 +203,9 @@ function HomeApp() {
       api: {
         listSessions: () => api.listSessions(),
         getSession: (id) => api.getSession(id),
+        getOcrConfig: () => api.getOcrConfig(),
+        setOcrConfig: (cfg) => api.setOcrConfig(cfg),
+        getOcrModels: () => api.getOcrModels(),
         getOcrEnabled: () => api.getOcrEnabled(),
         setOcrEnabled: (enabled) => api.setOcrEnabled(enabled),
         setOcrModel: (model) => api.setOcrModel(model),

@@ -96,9 +96,11 @@ default; toggle with `/plugin enable ast` (persisted in ocode config `plugins.as
 
 Incomplete / best-effort:
 - **Only gopls is validated end-to-end.** `internal/lsp/manager.go` maps `.rs`,
-  `.py`, `.ts/.tsx/.js/.jsx` to rust-analyzer / pyright-langserver / typescript-language-server
-  with correct stdio invocations, but these are **untested here**. Verify per-language
-  before relying on them.
+  `.py`, `.ts/.tsx/.js/.jsx` to rust-analyzer / pyright-langserver / typescript-language-server,
+  and `.dart`/`.php`/`.java`/`.cs`/`.rb`/`.c`/`.h`/`.cpp`/`.hpp`/`.cc` to dart language-server /
+  intelephense / jdtls / csharp-ls / solargraph / clangd, with correct stdio invocations, but
+  these are **untested here**. Verify per-language before relying on them. Note: jdtls needs a
+  JDK 17+ on PATH; clangd wants a `compile_commands.json` for accurate cross-file results.
 - **`callers` (incoming call hierarchy) is best-effort.** Requires the server to support
   `textDocument/prepareCallHierarchy` + `callHierarchy/incomingCalls`. gopls does; many
   servers don't, in which case it returns an error rather than results.

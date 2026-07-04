@@ -194,3 +194,26 @@ func TestOcodeOAuthFormat(t *testing.T) {
 		t.Errorf("ExpiresAt = %d, want %d", cred.ExpiresAt, futureSec)
 	}
 }
+
+func TestFindByBaseURLDeterministicAndNormalized(t *testing.T) {
+	resetStoreForTest(t)
+
+	if err := Set("z-provider", Credential{Kind: KindAPIKey, Key: "z-key", BaseURL: "http://localhost:1234/v1/"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := Set("a-provider", Credential{Kind: KindAPIKey, Key: "a-key", BaseURL: "http://localhost:1234"}); err != nil {
+		t.Fatal(err)
+	}
+
+	cred, ok := FindByBaseURL("http://localhost:1234/v1")
+	if !ok {
+		t.Fatal("expected credential match")
+	}
+	if cred.Key != "a-key" {
+		t.Fatalf("Key = %q, want %q", cred.Key, "a-key")
+	}
+
+	if _, ok := FindByBaseURL("http://localhost:9999/v1"); ok {
+		t.Fatal("expected no match for different endpoint")
+	}
+}

@@ -1593,30 +1593,40 @@ func extractHeredocs(command string) (header string, docs []heredocDoc) {
 	if len(lines) == 0 {
 		return command, nil
 	}
-	header = lines[0]
 	type pending struct {
 		delim     string
 		quoted    bool
 		stripTabs bool
 	}
+	// Find the first line carrying a heredoc operator — it need not be lines[0]
+	// when the command starts with a leading `#` comment line.
+	headerIdx := -1
 	var pend []pending
-	for _, m := range heredocOpRe.FindAllStringSubmatch(header, -1) {
-		pend = append(pend, pending{
-			delim:     m[2],
-			quoted:    m[1] != "",
-			stripTabs: strings.HasPrefix(m[0], "<<-"),
-		})
+	for i, line := range lines {
+		matches := heredocOpRe.FindAllStringSubmatch(line, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		headerIdx = i
+		for _, m := range matches {
+			pend = append(pend, pending{
+				delim:     m[2],
+				quoted:    m[1] != "",
+				stripTabs: strings.HasPrefix(m[0], "<<-"),
+			})
+		}
+		break
 	}
-	if len(pend) == 0 {
+	if headerIdx < 0 {
 		// No heredoc operators: the line-split was only needed to collect
 		// heredoc bodies. Return the full original command so multi-line
 		// payloads (e.g. `python3 -c "<newline-laden body>"`) survive intact
 		// instead of being truncated to their first line.
 		return command, nil
 	}
-	header = strings.TrimSpace(heredocOpRe.ReplaceAllString(header, ""))
+	header = strings.TrimSpace(heredocOpRe.ReplaceAllString(strings.Join(lines[:headerIdx+1], "\n"), ""))
 
-	idx := 1
+	idx := headerIdx + 1
 	for _, p := range pend {
 		var body []string
 		terminated := false

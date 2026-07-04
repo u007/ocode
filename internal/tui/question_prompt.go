@@ -134,6 +134,20 @@ func (m *model) renderQuestionDialog(width int) string {
 		hint = "↑/↓ move · Space/Enter toggle · →/Tab confirm · Esc cancel"
 	}
 	body.WriteString(m.styles.Hint.Render(hint))
+
+	// Submit button
+	body.WriteString("\n\n")
+	submitCursor := "  "
+	if m.questionCursor[m.questionTab] == questionSubmitIndex(q) {
+		submitCursor = "› "
+	}
+	submitStyle := m.styles.Hint
+	if m.questionCursor[m.questionTab] == questionSubmitIndex(q) {
+		submitStyle = m.styles.Selected
+	}
+	body.WriteString(submitStyle.Render(submitCursor + "[Submit]"))
+
+
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(body.String())
 }
 
@@ -187,7 +201,8 @@ func (m model) handleQuestionKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (te
 		}
 		return m, nil
 	case "down", "j":
-		if m.questionCursor[m.questionTab] < questionOptionCount(m.questionPrompts[m.questionTab])-1 {
+		submitIdx := questionSubmitIndex(m.questionPrompts[m.questionTab])
+		if m.questionCursor[m.questionTab] < submitIdx {
 			m.questionCursor[m.questionTab]++
 		}
 		return m, nil
@@ -199,6 +214,9 @@ func (m model) handleQuestionKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (te
 		m.toggleQuestionSelection(m.questionTab, m.questionCursor[m.questionTab])
 		return m, nil
 	case "enter":
+		if m.questionCursorIsSubmit() {
+			return m.submitQuestionAnswers()
+		}
 		if m.questionCursorIsOther() {
 			m.activateQuestionTextInput()
 			return m, nil
@@ -233,8 +251,9 @@ func (m *model) clampQuestionCursor() {
 	if m.questionCursor[m.questionTab] < 0 {
 		m.questionCursor[m.questionTab] = 0
 	}
-	if m.questionCursor[m.questionTab] >= count {
-		m.questionCursor[m.questionTab] = count - 1
+	submitIdx := questionSubmitIndex(m.questionPrompts[m.questionTab])
+	if m.questionCursor[m.questionTab] > submitIdx {
+		m.questionCursor[m.questionTab] = submitIdx
 	}
 }
 
@@ -243,6 +262,13 @@ func (m model) questionCursorIsOther() bool {
 		return false
 	}
 	return m.questionCursor[m.questionTab] == questionOtherIndex(m.questionPrompts[m.questionTab])
+}
+
+func (m model) questionCursorIsSubmit() bool {
+	if len(m.questionPrompts) == 0 || m.questionTab < 0 || m.questionTab >= len(m.questionPrompts) {
+		return false
+	}
+	return m.questionCursor[m.questionTab] == questionSubmitIndex(m.questionPrompts[m.questionTab])
 }
 
 func (m *model) selectQuestionOption(qIdx, optionIdx int) {
@@ -407,6 +433,10 @@ func questionExistingOtherIndex(q tool.QuestionPrompt) int {
 		}
 	}
 	return -1
+}
+
+func questionSubmitIndex(q tool.QuestionPrompt) int {
+	return questionOptionCount(q)
 }
 
 func isQuestionOtherLabel(label string) bool {

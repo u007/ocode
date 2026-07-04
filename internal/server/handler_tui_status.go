@@ -21,6 +21,7 @@ func (h *Handler) HandleGetTUIStatus(w http.ResponseWriter, r *http.Request, rc 
 	// Headless fallback — populate the fields that don't need a live session.
 	snap := TUIStatus{
 		AdvisorEnabled: h.advisorEnabled,
+		OcrBackend:     "openai-compat",
 		UpdatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	if h.cfg != nil {
@@ -29,6 +30,17 @@ func (h *Handler) HandleGetTUIStatus(w http.ResponseWriter, r *http.Request, rc 
 		snap.SmallModelOn = h.cfg.Ocode.SmallModelEnabled
 		snap.AdvisorModel = h.cfg.Ocode.Advisor.Model
 		snap.ExtraAllowedPaths = h.cfg.Ocode.ExtraAllowedPaths
+		snap.OcrBackend = h.cfg.Ocode.Ocr.Backend
+		if snap.OcrBackend == "" {
+			snap.OcrBackend = "openai-compat"
+		}
+		switch snap.OcrBackend {
+		case "paddle":
+			snap.OcrModel = h.cfg.Ocode.Ocr.Paddle.Variant
+		default:
+			snap.OcrModel = h.cfg.Ocode.Ocr.OpenAI.Model
+		}
+		snap.OcrEnabled = h.cfg.Ocode.Ocr.Enabled
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		snap.CWD = cwd

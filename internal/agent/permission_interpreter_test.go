@@ -171,6 +171,19 @@ func TestHeredocClassificationCapturesBody(t *testing.T) {
 	}
 }
 
+func TestHeredocClassificationSkipsLeadingCommentLine(t *testing.T) {
+	ie, ok := classifyInterpreterExecution("# a note about what this does\npython3 << 'PY'\nprint('hi')\nPY")
+	if !ok || ie.SourceMode != "heredoc" {
+		t.Fatalf("ok=%v ie=%+v", ok, ie)
+	}
+	if !ie.Terminated {
+		t.Fatal("expected terminated heredoc")
+	}
+	if strings.TrimSpace(ie.EmbeddedBody) != "print('hi')" {
+		t.Fatalf("body=%q", ie.EmbeddedBody)
+	}
+}
+
 // --- bun run guard ----------------------------------------------------------
 
 func TestBunRunFileGuard(t *testing.T) {

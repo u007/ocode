@@ -27,6 +27,7 @@ import (
 
 const defaultReadLines = 50
 const maxReadLines = 250
+const maxImageBytes = 20 * 1024 * 1024 // 20 MB — max embedded image size
 
 var (
 	extraAllowedRootsMu    sync.RWMutex

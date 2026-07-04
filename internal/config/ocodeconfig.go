@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/snapshot"
 )
 
@@ -135,11 +136,10 @@ type OcodeConfig struct {
 	// /api/uploads endpoints. When empty, files are stored under
 	// <workDir>/.ocode/uploads.
 	UploadDir string `json:"upload_dir,omitempty"`
-	// OcrModel is the LM Studio model ID used for OCR (e.g. "paddle-ocr-1.6").
-	OcrModel string `json:"ocr_model,omitempty"`
-	// OcrEnabled toggles the OCR tool on/off.
-	OcrEnabled bool `json:"ocr_enabled,omitempty"`
-	Extra     map[string]json.RawMessage
+	// Ocr holds the OCR tool configuration (backend, model, endpoint).
+	// Backend accepts openai-compat, paddle, and the lmstudio alias.
+	Ocr   ocr.OcrConfig `json:"ocr"`
+	Extra map[string]json.RawMessage
 }
 
 type PermissionConfig struct {
@@ -299,8 +299,10 @@ type ocodeConfigFile struct {
 	MaxSteps            int                  `json:"max_steps,omitempty"`
 	MaxImageDim         int                  `json:"image_max_dim,omitempty"`
 	UploadDir           string               `json:"upload_dir,omitempty"`
-	OcrModel            string               `json:"ocr_model,omitempty"`
-	OcrEnabled          *bool                `json:"ocr_enabled,omitempty"`
+	Ocr                 *ocr.OcrConfig       `json:"ocr,omitempty"`
+	// Legacy fields (read from old configs for migration)
+	OcrModel   string `json:"ocr_model,omitempty"`
+	OcrEnabled *bool  `json:"ocr_enabled,omitempty"`
 }
 
 func defaultCompactConfig() CompactConfig {
@@ -349,7 +351,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Discovery:           defaultDiscoveryConfig(),
 		RecapTimeoutSeconds: 120,
 		TUI:                 defaultTUIConfig(),
-		OcrEnabled:          false,
+		Ocr:                 ocr.DefaultOcrConfig(),
 		Extra:               make(map[string]json.RawMessage),
 	}
 }
@@ -709,17 +711,32 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "upload_dir")
 	}
 
-	if _, ok := raw["ocr_model"]; ok {
-		if file.OcrModel != "" {
-			cfg.OcrModel = file.OcrModel
+	if rawOcr, ok := raw["ocr"]; ok && rawOcr != nil {
+		var ocrCfg ocr.OcrConfig
+		if data, err := json.Marshal(rawOcr); err == nil {
+			if json.Unmarshal(data, &ocrCfg) == nil {
+				cfg.Ocr = ocrCfg
+			}
 		}
-		delete(raw, "ocr_model")
-	}
-	if _, ok := raw["ocr_enabled"]; ok {
-		if file.OcrEnabled != nil {
-			cfg.OcrEnabled = *file.OcrEnabled
+		delete(raw, "ocr")
+	} else {
+		// Legacy migration: ocr_model + ocr_enabled
+		if _, ok := raw["ocr_model"]; ok {
+			if file.Ocr != nil {
+				cfg.Ocr.OpenAI.Model = file.Ocr.OpenAI.Model
+			} else if file.OcrModel != "" {
+				cfg.Ocr.OpenAI.Model = file.OcrModel
+			}
+			delete(raw, "ocr_model")
 		}
-		delete(raw, "ocr_enabled")
+		if _, ok := raw["ocr_enabled"]; ok {
+			if file.Ocr != nil {
+				cfg.Ocr.Enabled = file.Ocr.Enabled
+			} else if file.OcrEnabled != nil {
+				cfg.Ocr.Enabled = *file.OcrEnabled
+			}
+			delete(raw, "ocr_enabled")
+		}
 	}
 
 	if cfg.Extra == nil {
@@ -1030,15 +1047,12 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.UploadDir != "" {
 		payload["upload_dir"] = cfg.UploadDir
 	}
-	if cfg.OcrModel != "" {
-		payload["ocr_model"] = cfg.OcrModel
-	}
-	payload["ocr_enabled"] = cfg.OcrEnabled
+	payload["ocr"] = cfg.Ocr
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr_model" || k == "ocr_enabled" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" {
 			continue
 		}
 		payload[k] = v
@@ -1554,24 +1568,37 @@ func SaveRecapModelEnabled(enabled bool) error {
 	return SaveOcodeConfig(cfg)
 }
 
-// SaveOcrModel persists the OCR model to config.
-func SaveOcrModel(model string) error {
-	cfg, err := loadFullOcodeConfig()
+// SaveOcrConfig persists the full OCR configuration via load-modify-write.
+// Only the OCR sub-tree is touched; all other fields are preserved from disk.
+func SaveOcrConfig(cfg ocr.OcrConfig) error {
+	ocode, err := loadFullOcodeConfig()
 	if err != nil {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
-	cfg.OcrModel = model
-	return SaveOcodeConfig(cfg)
+	ocode.Ocr = cfg
+	return SaveOcodeConfig(ocode)
 }
 
-// SaveOcrEnabled persists the OCR tool enabled/disabled state to config.
-func SaveOcrEnabled(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
+// SaveOcrModel persists just the OCR model ID to config (legacy compatibility).
+// Writes to whichever backend is currently active.
+func SaveOcrModel(model string) error {
+	ocode, err := loadFullOcodeConfig()
 	if err != nil {
 		return fmt.Errorf("load ocode config: %w", err)
 	}
-	cfg.OcrEnabled = enabled
-	return SaveOcodeConfig(cfg)
+	ocode.Ocr.OpenAI.Model = model
+	ocode.Ocr.Paddle.Variant = model
+	return SaveOcodeConfig(ocode)
+}
+
+// SaveOcrEnabled persists just the OCR tool enabled/disabled state (legacy compatibility).
+func SaveOcrEnabled(enabled bool) error {
+	ocode, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	ocode.Ocr.Enabled = enabled
+	return SaveOcodeConfig(ocode)
 }
 
 // SavePinnedSkills persists the list of permanently-discovered skill names.
