@@ -801,7 +801,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			return PermissionDecision{Level: PermissionDeny}
 		}
 		if pm.mode == PermissionModeYOLO {
-			emitDebug("perm", fmt.Sprintf("Decide ALLOW (yolo): tool=bash"))
+			emitDebug("perm", "Decide ALLOW (yolo): tool=bash")
 			return PermissionDecision{Level: PermissionAllow}
 		}
 
@@ -850,7 +850,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if finalDecision != nil {
 			return *finalDecision
 		}
-		emitDebug("perm", fmt.Sprintf("Decide ALLOW (bash, no ask/deny): tool=bash"))
+		emitDebug("perm", "Decide ALLOW (bash, no ask/deny): tool=bash")
 		return PermissionDecision{Level: PermissionAllow}
 	}
 

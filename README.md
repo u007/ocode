@@ -68,6 +68,7 @@ go build -o ocode .
 | `lsp` | Go-to-definition, hover docs, symbol search, diagnostics |
 | `agent` | Delegate work to sub-agents with permission isolation |
 | `websearch`, `webfetch` | Web search and page fetching via DuckDuckGo |
+| `ocr` | Extract text from images with openai-compat, LM Studio native chat, or paddle; LM Studio reuses stored credentials from `auth.json` when available |
 | `question` | Interactive user prompts with selectable options |
 | `apply_patch` | Structured multi-file diff patching |
 | `skill` | Load skill definitions on demand |

@@ -16,6 +16,7 @@ interface ProjectState {
   sessionsLoading: boolean;
   tabs: Tab[];
   activeTabId: string | null;
+  sessionPickerOpen: boolean;
 }
 
 type ProjectAction =
@@ -27,7 +28,9 @@ type ProjectAction =
   | { type: "ADD_TAB"; tab: Tab }
   | { type: "REMOVE_TAB"; id: string }
   | { type: "SET_ACTIVE_TAB"; id: string | null }
-  | { type: "UPDATE_TAB_TITLE"; id: string; title: string };
+  | { type: "UPDATE_TAB_TITLE"; id: string; title: string }
+  | { type: "UPDATE_TAB_ID"; oldId: string; newId: string; newTitle?: string }
+  | { type: "SET_SESSION_PICKER"; open: boolean };
 
 const initialState: ProjectState = {
   projects: [],
@@ -37,6 +40,7 @@ const initialState: ProjectState = {
   sessionsLoading: false,
   tabs: [],
   activeTabId: null,
+  sessionPickerOpen: false,
 };
 
 function projectReducer(state: ProjectState, action: ProjectAction): ProjectState {
@@ -68,12 +72,25 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     }
     case "SET_ACTIVE_TAB":
       return { ...state, activeTabId: action.id };
+    case "SET_SESSION_PICKER":
+      return { ...state, sessionPickerOpen: action.open };
     case "UPDATE_TAB_TITLE": {
       return {
         ...state,
         tabs: state.tabs.map((t) =>
           t.id === action.id ? { ...t, title: action.title } : t
         ),
+      };
+    }
+    case "UPDATE_TAB_ID": {
+      // Replace a tab's old temp ID with a new real ID
+      const tab = state.tabs.find((t) => t.id === action.oldId);
+      if (!tab) return state;
+      const newTab = { ...tab, id: action.newId, title: action.newTitle || tab.title };
+      return {
+        ...state,
+        tabs: state.tabs.map((t) => (t.id === action.oldId ? newTab : t)),
+        activeTabId: state.activeTabId === action.oldId ? action.newId : state.activeTabId,
       };
     }
     default:
@@ -90,6 +107,7 @@ interface ProjectContextType {
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
   removeProject: (path: string) => Promise<void>;
+  toggleSessionPicker: () => void;
 }
 
 const ProjectContext = createContext<ProjectContextType | null>(null);
@@ -151,6 +169,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [refreshProjects]);
 
+  const toggleSessionPicker = useCallback(() => {
+    dispatch({ type: "SET_SESSION_PICKER", open: !state.sessionPickerOpen });
+  }, [state.sessionPickerOpen]);
+
   // Load projects on mount
   useEffect(() => {
     refreshProjects();
@@ -167,6 +189,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         closeSessionTab,
         addProject,
         removeProject,
+        toggleSessionPicker,
       }}
     >
       {children}

@@ -2413,7 +2413,10 @@ func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
 		}
 	}
 
-	m := model{ready: true, width: 140, height: 20, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 20)}
+	// Height 22 (not 20): the sidebar budget subtracts appHeaderHeight, so a
+	// 20-row terminal leaves no visible scroll window with this much pinned
+	// content — the test needs at least one visible scroll row to hover.
+	m := model{ready: true, width: 140, height: 22, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 22)}
 	data := m.buildSidebarRenderData()
 	layout := m.sidebarScreenLayout(data)
 	targetPath := "file-11.go"
@@ -2918,6 +2921,35 @@ func TestModelPickerFullModelsLoadedForRecapModel(t *testing.T) {
 	// Provider section must be appended below the auto line.
 	if len(got.pickerItems) < 2 || got.pickerItems[1] != "openai" {
 		t.Fatalf("expected provider section appended, got %#v", got.pickerItems)
+	}
+}
+
+func TestModelPickerFullModelsLoadedForOcrModel(t *testing.T) {
+	// Regression: the OCR picker's async loader sends the same
+	// modelPickerFullModelsLoadedMsg, but "ocr-model" was missing from the
+	// handler's allow-list, so fetched models were dropped and the picker
+	// showed "(no models — check provider auth or network)".
+	m := model{
+		showPicker:     true,
+		pickerKind:     "ocr-model",
+		pickerItems:    nil,
+		pickerValues:   nil,
+		pickerIsHeader: nil,
+		styles:         ApplyThemeColors("tokyonight"),
+		input:          newTestTextarea(),
+		viewport:       fastviewport.New(80, 20),
+	}
+	updated, _ := m.Update(modelPickerFullModelsLoadedMsg{
+		items:    []string{"› lmstudio", "  paddleocr-vl-1.6"},
+		values:   []string{"", "lmstudio/paddleocr-vl-1.6"},
+		isHeader: []bool{true, false},
+	})
+	got := derefTestModel(t, updated)
+	if got.pickerLoadingAll {
+		t.Fatal("pickerLoadingAll must clear after the async load message")
+	}
+	if len(got.pickerItems) != 2 || got.pickerValues[1] != "lmstudio/paddleocr-vl-1.6" {
+		t.Fatalf("expected OCR models appended, got items=%#v values=%#v", got.pickerItems, got.pickerValues)
 	}
 }
 
@@ -6466,7 +6498,7 @@ func TestOpenOcrModelPickerLabelsLMStudioBackend(t *testing.T) {
 }
 
 func TestLooksLikeLMStudioBaseURL(t *testing.T) {
-	if !looksLikeLMStudioBaseURL("") {
+	if !ocr.LooksLikeLMStudioBaseURL("") {
 		t.Fatal("expected empty base URL to count as LM Studio")
 	}
 	for _, baseURL := range []string{
@@ -6474,11 +6506,42 @@ func TestLooksLikeLMStudioBaseURL(t *testing.T) {
 		"http://127.0.0.1:1234/v1",
 		"https://lmstudio.local/v1",
 	} {
-		if !looksLikeLMStudioBaseURL(baseURL) {
+		if !ocr.LooksLikeLMStudioBaseURL(baseURL) {
 			t.Fatalf("expected %q to look like LM Studio", baseURL)
 		}
 	}
-	if looksLikeLMStudioBaseURL("http://example.com/v1") {
+	if ocr.LooksLikeLMStudioBaseURL("http://example.com/v1") {
 		t.Fatal("expected generic base URL to not count as LM Studio")
+	}
+}
+
+// TestGetInitialToolsMatchesCanonicalList verifies that the TUI's
+// getInitialTools returns exactly the same tool names as the canonical
+// InitBuiltinTools. If this test fails, the two lists have diverged —
+// update InitBuiltinTools (not the TUI list) and keep expectedBuiltinTools
+// in internal/tool/tool_test.go in sync.
+func TestGetInitialToolsMatchesCanonicalList(t *testing.T) {
+	m := model{}
+	tuiTools, _ := m.getInitialTools()
+	tuiNames := make([]string, len(tuiTools))
+	for i, tt := range tuiTools {
+		tuiNames[i] = tt.Name()
+	}
+
+	canonTools := tool.InitBuiltinTools(m.lspMgr, m.config)
+	canonNames := make([]string, len(canonTools))
+	for i, tt := range canonTools {
+		canonNames[i] = tt.Name()
+	}
+
+	if len(tuiNames) != len(canonNames) {
+		t.Fatalf("tool count mismatch: TUI has %d, canonical has %d",
+			len(tuiNames), len(canonNames))
+	}
+	for i := range tuiNames {
+		if tuiNames[i] != canonNames[i] {
+			t.Fatalf("tool name mismatch at index %d: TUI has %q, canonical has %q",
+				i, tuiNames[i], canonNames[i])
+		}
 	}
 }

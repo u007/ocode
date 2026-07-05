@@ -54,7 +54,7 @@ function FileIcon({ name, isDir, expanded }: { name: string; isDir: boolean; exp
 }
 
 function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
-  const [expanded, setExpanded] = useState(depth < 2);
+  const [expanded, setExpanded] = useState(depth < 1);
 
   if (node.is_dir) {
     return (

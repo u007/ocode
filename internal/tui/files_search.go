@@ -391,6 +391,45 @@ func (m *filesModel) navigateToSearchResult(result filesContentSearchResult) {
 	}
 }
 
+// handlePasteMsg handles paste events in text-input modes on the files tab.
+// It routes pasted content to the active input field based on the current mode.
+func (m filesModel) handlePasteMsg(msg tea.PasteMsg) (filesModel, tea.Cmd) {
+	switch m.mode {
+	case filesModeContentSearch:
+		if m.contentSearchPanel == filesContentSearchQuery {
+			m.contentSearchQuery += msg.Content
+		} else {
+			m.contentSearchExts += msg.Content
+		}
+		return m, nil
+	case filesModeFuzzy:
+		m.fuzzyQuery += msg.Content
+		m.fuzzyResults = fuzzyFilter(m.allPaths, m.fuzzyQuery)
+		m.fuzzyCursor = 0
+		return m, nil
+	case filesModeInFileSearch:
+		m.inFileSearchQuery += msg.Content
+		m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
+		m.inFileSearchCursor = 0
+		m.applyInFileSearchHighlights()
+		if len(m.inFileSearchMatches) > 0 {
+			match := m.inFileSearchMatches[0]
+			m.preview.EnsureVisible(match[0], 0, 0)
+		}
+		return m, nil
+	case filesModePrompt:
+		// textarea.Model handles PasteMsg natively
+		var cmd tea.Cmd
+		m.promptInput, cmd = m.promptInput.Update(msg)
+		return m, cmd
+	case filesModeEdit:
+		// paste in the inline editor is not supported — it uses
+		// per-character KeyPressMsg handling rather than a textarea model
+		return m, nil
+	}
+	return m, nil
+}
+
 // contentView renders the content search UI in the preview panel.
 func (m filesModel) contentView(width, height int, styles Styles) string {
 	var lines []string

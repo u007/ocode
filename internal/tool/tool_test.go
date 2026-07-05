@@ -11,7 +11,133 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/lsp"
 )
+
+// expectedBuiltinTools lists the canonical tool names in the order they
+// must appear. Any addition or removal from InitBuiltinTools must update
+// this list — it is the single source of truth for "what tools exist".
+var expectedBuiltinTools = []string{
+	"read",
+	"undo_file_change",
+	"write",
+	"replace_lines",
+	"delete",
+	"glob",
+	"grep",
+	"bash",
+	"edit",
+	"multiedit",
+	"multi_file_edit",
+	"apply_patch",
+	"todowrite",
+	"todoread",
+	"skill",
+	"question",
+	"webfetch",
+	"websearch",
+	"repo_clone",
+	"repo_overview",
+	"plan_enter",
+	"plan_exit",
+	"list",
+	"lsp",
+	"lsp_diagnostics",
+	"format",
+	"github_pr",
+	"github_issue",
+	"github_workflow",
+	"ocr",
+}
+
+// ast and ast_grep are conditionally appended; they are tested separately
+// in TestBuiltinToolsIncludesConditionalNames.
+
+func TestInitBuiltinToolsReturnsAllTools(t *testing.T) {
+	lspMgr := lsp.NewManager(".")
+	tools := InitBuiltinTools(lspMgr, nil)
+
+	// Collect unconditionally-registered names up to the conditional append
+	// point. We verify the full conditional set separately below.
+	got := make([]string, 0, len(tools))
+	for _, tt := range tools {
+		got = append(got, tt.Name())
+	}
+
+	// Check all expected tools are present (regardless of conditional adds).
+	for _, want := range expectedBuiltinTools {
+		found := false
+		for _, g := range got {
+			if g == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("InitBuiltinTools missing expected tool %q", want)
+		}
+	}
+
+	// Verify no unexpected tools either.
+	for _, g := range got {
+		if g == "ast" || g == "ast_grep" {
+			continue // handled by TestBuiltinToolsIncludesConditionalNames
+		}
+		found := false
+		for _, want := range expectedBuiltinTools {
+			if g == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("InitBuiltinTools returned unexpected tool %q", g)
+		}
+	}
+}
+
+func TestBuiltinToolsIncludesConditionalNames(t *testing.T) {
+	lspMgr := lsp.NewManager(".")
+	tools := InitBuiltinTools(lspMgr, nil)
+
+	got := make([]string, 0, len(tools))
+	for _, tt := range tools {
+		got = append(got, tt.Name())
+	}
+
+	hasAST := false
+	hasAstGrep := false
+	for _, g := range got {
+		if g == "ast" {
+			hasAST = true
+		}
+		if g == "ast_grep" {
+			hasAstGrep = true
+		}
+	}
+
+	// ast is included when LSP is installed on PATH (varies per environment).
+	// We can't predict it here, but verify it's present at most once.
+	astCount := 0
+	for _, g := range got {
+		if g == "ast" {
+			astCount++
+		}
+	}
+	if astCount > 1 {
+		t.Errorf("ast appears %d times (should be 0 or 1)", astCount)
+	}
+
+	// ast_grep requires plugins.ast to be enabled; nil config means disabled,
+	// so it should NOT appear.
+	if hasAstGrep {
+		t.Error("ast_grep should not be present when config is nil (plugins.ast disabled)")
+	}
+
+	// ast is included when lsp.AnyServerInstalled() is true.
+	_ = hasAST // environment-dependent; just check it didn't duplicate
+}
 
 func TestToolResultCacheDirWindowsFallbackUsesLocalAppData(t *testing.T) {
 	if runtime.GOOS != "windows" {

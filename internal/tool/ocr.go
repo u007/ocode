@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/ocr"
 )
@@ -83,7 +84,12 @@ func (t *OcrTool) Execute(args json.RawMessage) (string, error) {
 	default:
 		beCfg.BaseURL = ocrCfg.OpenAI.BaseURL
 		beCfg.Model = ocrCfg.OpenAI.Model
-		beCfg.APIKey = ocrCfg.OpenAI.APIKey
+		beCfg.APIKey = auth.ResolveOpenAICompatKey(
+			ocrCfg.OpenAI.APIKey,
+			beCfg.BaseURL,
+			ocrCfg.Backend == "lmstudio" || ocr.LooksLikeLMStudioBaseURL(beCfg.BaseURL),
+		)
+		beCfg.LMStudioNative = ocrCfg.Backend == "lmstudio" || ocr.LooksLikeLMStudioBaseURL(beCfg.BaseURL)
 	}
 	if beCfg.Model == "" {
 		return "", &NoticedError{

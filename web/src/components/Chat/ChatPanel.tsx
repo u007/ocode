@@ -19,11 +19,16 @@ export default function ChatPanel() {
   // Track the session ID from the store
   const storeSessionId = useChatState().sessionId;
 
-  // Initial load: fetch last 50 messages and scroll to bottom
+  // Initial load: fetch last 50 messages and scroll to bottom.
+  // When no session is active (storeSessionId is null), mark as initialized
+  // so the empty-state "Start a conversation" placeholder is shown instead of
+  // a blank panel.
   useEffect(() => {
-    if (!storeSessionId) return;
+    if (!storeSessionId) {
+      setInitialized(true);
+      return;
+    }
     setSessionId(storeSessionId);
-    setInitialized(false);
 
     api
       .getSession(storeSessionId, { limit: PAGE_SIZE })

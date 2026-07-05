@@ -2659,7 +2659,7 @@ func permissionListDir(path string) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s is a directory — listing a directory is the expected target for list/glob/grep operations, not a reason to refuse. Decide from the path and tool.\n\nEntries (%d):\n", path, len(entries))
 	for _, n := range names {
-		sb.WriteString("  " + n + "\n")
+		fmt.Fprintf(&sb, "  %s\n", n)
 	}
 	if truncated > 0 {
 		fmt.Fprintf(&sb, "  ... (%d more)\n", truncated)
@@ -2679,8 +2679,10 @@ func (a *Agent) buildPermissionContext(toolName string, args json.RawMessage, ma
 		if sourcesAdded >= maxSources || usedBytes+len(content)+len(label)+4 > maxCtxBytes {
 			return false
 		}
-		b.WriteString(label + "\n")
-		b.WriteString(content + "\n\n")
+		b.WriteString(label)
+		b.WriteByte('\n')
+		b.WriteString(content)
+		b.WriteString("\n\n")
 		usedBytes += len(label) + len(content) + 4
 		sourcesAdded++
 		return true
@@ -2930,6 +2932,16 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 
 	t, ok := a.tools[name]
 	if !ok {
+		agentID := "main"
+		if a.spec != nil {
+			agentID = a.spec.Name
+		}
+		keys := make([]string, 0, len(a.tools))
+		for k := range a.tools {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		emitDebug("TOOL", fmt.Sprintf("tool %q not found for agent %q — available: %v", name, agentID, keys))
 		return "", fmt.Errorf("tool %s not found", name)
 	}
 
@@ -3024,23 +3036,49 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 func (a *Agent) GetToolDefinitions() []map[string]interface{} {
 	names := make([]string, 0, len(a.tools))
 	for name := range a.tools {
-		if !a.isToolAllowed(name) {
-			continue
-		}
-		if !a.discoveryAllows(name) {
+		if !a.discoveryAllows(name) || !a.isToolAllowed(name) {
 			continue
 		}
 		names = append(names, name)
+	}
+	if exists := a.tools["ocr"] != nil; exists {
+		exposed := false
+		for _, name := range names {
+			if name == "ocr" {
+				exposed = true
+				break
+			}
+		}
+		if !exposed {
+			emitDebug("TOOLS", fmt.Sprintf("ocr not exposed: exists=%v allowed=%v discovery=%v specTools=%d deniedTools=%d", exists, a.isToolAllowed("ocr"), a.discoveryAllows("ocr"), len(getSpecTools(a.spec)), len(getDeniedSpecTools(a.spec))))
+		}
+	} else {
+		emitDebug("TOOLS", "ocr not exposed: missing from a.tools")
 	}
 	// Deterministic order keeps the provider tool-cache prefix stable across
 	// turns (a.tools is a map → random iteration would bust the cache and
 	// defeat the sticky-set benefit).
 	sort.Strings(names)
+	emitDebug("TOOLS", fmt.Sprintf("exposing %d tools: %s", len(names), strings.Join(names, ", ")))
 	defs := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
 		defs = append(defs, a.tools[name].Definition())
 	}
 	return defs
+}
+
+func getSpecTools(spec *AgentSpec) []string {
+	if spec == nil {
+		return nil
+	}
+	return spec.Tools
+}
+
+func getDeniedSpecTools(spec *AgentSpec) []string {
+	if spec == nil {
+		return nil
+	}
+	return spec.DeniedTools
 }
 
 func (a *Agent) GetProvider() string {
@@ -3101,6 +3139,14 @@ func (a *Agent) isToolAllowed(name string) bool {
 		if level == PermissionDeny {
 			return false
 		}
+	}
+	// If the tool doesn't exist in a.tools, it was never advertised to the
+	// model and should never be callable (model-hallucination guard). Without
+	// this check, isToolAllowed returns true for unknown tools, which causes
+	// executeToolCall to emit a confusing "tool not found" error instead of
+	// the clearer "not allowed" message.
+	if _, exists := a.tools[name]; !exists {
+		return false
 	}
 	return true
 }

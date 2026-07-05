@@ -1,4 +1,4 @@
-import { MessageSquare, FolderGit2, GitBranch, ScrollText, Menu, Paperclip, Activity, FileCode, X } from "lucide-react";
+import { MessageSquare, FolderGit2, GitBranch, ScrollText, Paperclip, Activity, FileCode, X } from "lucide-react";
 
 export interface EditorTabInfo {
   id: string;
@@ -10,7 +10,6 @@ interface Props {
   onTabChange: (tab: string) => void;
   editorTabs: EditorTabInfo[];
   onEditorTabClose: (id: string) => void;
-  onMenuToggle?: () => void;
 }
 
 const mainTabs = [
@@ -34,7 +33,7 @@ function fileNameFromPath(path: string): string {
   return path.split("/").pop() || path;
 }
 
-export default function TopTabs({ activeTab, onTabChange, editorTabs, onEditorTabClose, onMenuToggle }: Props) {
+export default function TopTabs({ activeTab, onTabChange, editorTabs, onEditorTabClose }: Props) {
   return (
     <header className="flex items-center border-b border-zinc-700 bg-zinc-900 h-12 px-4 overflow-hidden">
       {/* Left: Logo */}
@@ -105,16 +104,7 @@ export default function TopTabs({ activeTab, onTabChange, editorTabs, onEditorTa
         </>
       )}
 
-      {/* Right: Burger menu (always visible, toggles session sidebar) */}
-      {onMenuToggle && (
-        <button
-          onClick={onMenuToggle}
-          className="p-2 rounded-md text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-          title="Toggle session history"
-        >
-          <Menu className="w-5 h-5" />
-        </button>
-      )}
+
     </header>
   );
 }

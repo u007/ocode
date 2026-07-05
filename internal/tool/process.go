@@ -1,10 +1,10 @@
 package tool
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"runtime"
@@ -15,6 +15,13 @@ import (
 
 	"github.com/u007/ocode/internal/hooks"
 )
+
+type processOutputWriter struct{ p *Process }
+
+func (w processOutputWriter) Write(b []byte) (int, error) {
+	w.p.appendOutput(b)
+	return len(b), nil
+}
 
 var (
 	processHooksMu sync.RWMutex
@@ -304,10 +311,8 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 	}
 
 	pump := func(rc io.Reader) {
-		sc := bufio.NewScanner(rc)
-		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for sc.Scan() {
-			p.appendOutput(append(sc.Bytes(), '\n'))
+		if _, err := io.Copy(processOutputWriter{p: p}, rc); err != nil {
+			log.Printf("process: copy error for %q: %v", p.Command, err)
 		}
 	}
 	var wg sync.WaitGroup

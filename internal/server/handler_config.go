@@ -316,16 +316,13 @@ func (h *Handler) HandleGetOcrModels(w http.ResponseWriter, r *http.Request) {
 		switch name {
 		case "openai-compat":
 			baseURL = ocrCfg.OpenAI.BaseURL
-			apiKey = ocrCfg.OpenAI.APIKey
-			// If OCR config does not carry its own token, deterministically
-			// reuse the credential whose BaseURL matches the configured OCR
-			// endpoint. This keeps LM Studio / vLLM lookups stable without
-			// depending on map iteration order or unrelated credentials.
-			if apiKey == "" {
-				if cred, ok := auth.FindByBaseURL(baseURL); ok {
-					apiKey = cred.Key
-				}
-			}
+			// Resolve the token in priority order (explicit config → base-URL
+			// match → "lmstudio"-named credential). The last step is what makes
+			// an already-connected LM Studio work: its credential is saved by
+			// provider name with no base_url, so a base-URL match alone misses
+			// it and the request 401s, yielding an empty model list.
+			apiKey = auth.ResolveOpenAICompatKey(ocrCfg.OpenAI.APIKey, baseURL,
+				ocrCfg.Backend == "lmstudio" || ocr.LooksLikeLMStudioBaseURL(baseURL))
 		case "paddle":
 			baseURL = ocrCfg.Paddle.Endpoint
 		}

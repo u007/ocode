@@ -570,17 +570,21 @@ func (t AgentStatusTool) Execute(args json.RawMessage) (string, error) {
 		if len(lines) > 0 {
 			b.WriteString("\nLatest output:\n")
 			for _, ln := range lines {
-				b.WriteString("  " + ln + "\n")
+				b.WriteString("  ")
+				b.WriteString(ln)
+				b.WriteByte('\n')
 			}
 		} else {
 			b.WriteString("\n(no output yet)")
 		}
 	}
 	if status == RunDone {
-		b.WriteString("\nResult: " + run.Result)
+		b.WriteString("\nResult: ")
+		b.WriteString(run.Result)
 	}
 	if status == RunFailed {
-		b.WriteString("\nError: " + run.Err)
+		b.WriteString("\nError: ")
+		b.WriteString(run.Err)
 	}
 	return b.String(), nil
 }

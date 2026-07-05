@@ -1319,42 +1319,8 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 			go m.lspMgr.WarmUp(".")
 		}
 	}
-	lspMgr := m.lspMgr
-	tools := []tool.Tool{
-		&tool.ReadTool{},
-		&tool.WriteTool{Config: m.config},
-		&tool.DeleteTool{},
-		&tool.GlobTool{},
-		&tool.GrepTool{},
-		&tool.BashTool{},
-		&tool.EditTool{Config: m.config},
-		&tool.MultiEditTool{Config: m.config},
-		&tool.MultiFileEditTool{Config: m.config},
-		&tool.PatchTool{},
-		&tool.TodoWriteTool{},
-		&tool.SkillTool{},
-		&tool.QuestionTool{},
-		&tool.WebFetchTool{},
-		&tool.WebSearchTool{},
-		&tool.RepoCloneTool{},
-		&tool.RepoOverviewTool{},
-		&tool.ListTool{},
-		&tool.LSPTool{Mgr: lspMgr},
-		&tool.LSPDiagnosticsTool{Mgr: lspMgr},
-		&tool.FormatTool{Config: m.config},
-	}
-	// The "ast" semantic tool (LSP-backed) is default-on whenever a language
-	// server is available on PATH — no plugin toggle. It shares the single LSP
-	// manager so only one gopls runs per project.
-	if lsp.AnyServerInstalled() {
-		tools = append(tools, &tool.AstTool{Mgr: lspMgr})
-	}
-	// ast-grep (structural search via the ast-grep CLI) is the opt-in plugin,
-	// gated by plugins.ast (toggle with /plugin enable ast).
-	if m.config != nil && m.config.Ocode.Plugins.AST {
-		tools = append(tools, &tool.AstGrepTool{})
-	}
-	return tools, lspMgr
+	tools := tool.InitBuiltinTools(m.lspMgr, m.config)
+	return tools, m.lspMgr
 }
 
 func (m *model) switchAgent(name string) {
@@ -1872,6 +1838,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rawInputLinesDirty = true
 			var cmd tea.Cmd
 			m, cmd = m.updateSlashPopupState()
+			return m, cmd
+		}
+		// Route paste to the files tab when in a text-input mode.
+		if m.activeTab == tabFiles && m.files.mode != filesModeNormal {
+			var cmd tea.Cmd
+			m.files, cmd = m.files.Update(msg, m.width, m.height)
 			return m, cmd
 		}
 	case tea.MouseClickMsg:
@@ -2477,7 +2449,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerIndex = 0
 	case modelPickerFullModelsLoadedMsg:
 		m.pickerLoadingAll = false
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "ocr-model") {
 			return m, nil
 		}
 		// Append provider sections below the existing favs+recents items.
@@ -3791,6 +3763,18 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 				m.pickerRefreshing = true
 				return true, m, refreshModelsCacheCmd()
 			}
+			if m.pickerKind == "ocr-model" {
+				if m.pickerLoadingAll {
+					return true, m, nil
+				}
+				// The loaded-models handler appends, so clear first to replace
+				// the current list instead of duplicating it.
+				m.pickerItems = nil
+				m.pickerValues = nil
+				m.pickerIsHeader = nil
+				m.pickerIndex = 0
+				return true, m, m.loadOcrModelsCmd()
+			}
 			return true, m, nil
 		case "backspace":
 			if len(m.pickerFilterPending) > 0 {
@@ -4455,7 +4439,7 @@ func (m model) handleLogKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.logViewport.ScrollDown(1)
 	case "k", "up":
 		m.logViewport.ScrollUp(1)
-	case "c":
+	case "C":
 		DebugLog.Clear()
 		// Resync our promotion cursor with the (now-empty) log so the next
 		// snapshot's first entry is treated as new.
@@ -5409,6 +5393,35 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				}
 				return m, nil, true
 			}
+		}
+	}
+
+	// Mouse click on the kind filter bar toggles the clicked filter.
+	if pressed && m.activeTab == tabLog && mouse.Y == appHeaderHeight+1 {
+		kindDefs := []struct {
+			kind  DebugEntryKind
+			label string
+		}{
+			{DebugKindLLM, "LLM"},
+			{DebugKindTool, "TOOL"},
+			{DebugKindAgent, "AGENT"},
+			{DebugKindError, "ERROR"},
+			{DebugKindWarn, "WARN"},
+			{DebugKindGit, "GIT"},
+			{DebugKindLSP, "LSP"},
+			{DebugKindDiscovery, "DISCOV"},
+		}
+		// "filter: " is 8 chars rendered with hintStyle (no padding).
+		x := 8
+		for i, k := range kindDefs {
+			keyStr := strconv.Itoa(i + 1)
+			label := "[" + keyStr + "]" + k.label + " "
+			labelLen := len([]rune(label))
+			if mouse.X >= x && mouse.X < x+labelLen {
+				m.toggleLogKind(k.kind)
+				return m, nil, true
+			}
+			x += labelLen
 		}
 	}
 
@@ -6718,7 +6731,7 @@ func (m *model) showOcrStatus() tea.Cmd {
 	if backend == "" {
 		backend = "openai-compat"
 	}
-	if backend == "openai-compat" && looksLikeLMStudioBaseURL(ocrCfg.OpenAI.BaseURL) {
+	if backend == "openai-compat" && ocr.LooksLikeLMStudioBaseURL(ocrCfg.OpenAI.BaseURL) {
 		backend = "lmstudio"
 	}
 	modelText := "(not set)"
@@ -6747,7 +6760,7 @@ func (m *model) handleOcrModel(modelName string) tea.Cmd {
 	if backend == "" {
 		backend = "openai-compat"
 	}
-	if backend == "openai-compat" && looksLikeLMStudioBaseURL(m.config.Ocode.Ocr.OpenAI.BaseURL) {
+	if backend == "openai-compat" && ocr.LooksLikeLMStudioBaseURL(m.config.Ocode.Ocr.OpenAI.BaseURL) {
 		backend = "lmstudio"
 	}
 	if strings.Contains(modelName, "/") {
@@ -6775,14 +6788,6 @@ func (m *model) handleOcrModel(modelName string) tea.Cmd {
 	return nil
 }
 
-func looksLikeLMStudioBaseURL(baseURL string) bool {
-	if baseURL == "" {
-		return true
-	}
-	lower := strings.ToLower(baseURL)
-	return strings.Contains(lower, "lmstudio") || strings.Contains(lower, "localhost:1234") || strings.Contains(lower, "127.0.0.1:1234")
-}
-
 func (m *model) openOcrModelPicker() tea.Cmd {
 	m.input.Blur()
 	m.pickerKind = "ocr-model"
@@ -6796,14 +6801,21 @@ func (m *model) openOcrModelPicker() tea.Cmd {
 	m.showPicker = true
 	m.pushPickerModal()
 
-	// Fetch models from all registered backends asynchronously
+	return m.loadOcrModelsCmd()
+}
+
+// loadOcrModelsCmd fetches models from every registered OCR backend and returns
+// them as a modelPickerFullModelsLoadedMsg. Shared by the initial picker open
+// and the ctrl+r refresh so both contact the user's configured endpoints.
+func (m *model) loadOcrModelsCmd() tea.Cmd {
+	m.pickerLoadingAll = true
+	// Read the configured OCR base URLs so we contact the user's actual
+	// endpoint, not always the default localhost:1234.
+	ocrCfg := m.config.Ocode.Ocr
 	return func() tea.Msg {
 		var items, values []string
 		var isHeader []bool
 
-		// Read the configured OCR base URLs so we contact the user's
-		// actual endpoint, not always the default localhost:1234.
-		ocrCfg := m.config.Ocode.Ocr
 
 		for _, name := range ocr.List() {
 			be := ocr.Get(name)
@@ -6811,7 +6823,7 @@ func (m *model) openOcrModelPicker() tea.Cmd {
 				continue
 			}
 			displayName := name
-			if name == "openai-compat" && (ocrCfg.Backend == "lmstudio" || looksLikeLMStudioBaseURL(ocrCfg.OpenAI.BaseURL)) {
+			if name == "openai-compat" && (ocrCfg.Backend == "lmstudio" || ocr.LooksLikeLMStudioBaseURL(ocrCfg.OpenAI.BaseURL)) {
 				displayName = "lmstudio"
 			}
 			// Pass the backend-specific base URL so ListModels
@@ -6821,16 +6833,13 @@ func (m *model) openOcrModelPicker() tea.Cmd {
 			switch name {
 			case "openai-compat":
 				baseURL = ocrCfg.OpenAI.BaseURL
-				apiKey = ocrCfg.OpenAI.APIKey
-				// If OCR config does not carry its own token, deterministically
-				// reuse the credential whose BaseURL matches the configured OCR
-				// endpoint. This keeps lookups stable without depending on map
-				// iteration order or unrelated credentials.
-				if apiKey == "" {
-					if cred, ok := auth.FindByBaseURL(baseURL); ok {
-						apiKey = cred.Key
-					}
-				}
+				// Resolve the token in priority order (explicit config →
+				// base-URL match → "lmstudio"-named credential). The last step
+				// is what makes an already-connected LM Studio work: its
+				// credential is saved by provider name with no base_url, so a
+				// base-URL match alone misses it and the request 401s.
+				apiKey = auth.ResolveOpenAICompatKey(ocrCfg.OpenAI.APIKey, baseURL,
+					ocrCfg.Backend == "lmstudio" || ocr.LooksLikeLMStudioBaseURL(baseURL))
 			case "paddle":
 				baseURL = ocrCfg.Paddle.Endpoint
 			}
@@ -14977,7 +14986,14 @@ func (m model) renderSidebar() string {
 
 	headerHeight := lipgloss.Height(header)
 	effectiveHeaderHeight := maxInt(1, headerHeight)
-	contentHeight := m.height - 2 - effectiveHeaderHeight
+	// The sidebar column renders BELOW the app header (appHeaderHeight rows),
+	// so its total height budget is m.height - appHeaderHeight. Omitting that
+	// term makes the composed view exceed the terminal by exactly
+	// appHeaderHeight rows, which trips the View() safety net and silently
+	// shrinks the chat transcript every frame while clipping the sidebar's
+	// pinned bottom lines. sidebarScrollBoxHeight / sidebarScreenLayout /
+	// sidebarVisibleScrollLines mirror this budget — keep them in lockstep.
+	contentHeight := m.height - appHeaderHeight - 2 - effectiveHeaderHeight
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
@@ -15051,12 +15067,12 @@ func (m model) renderSidebar() string {
 
 func (m model) sidebarScrollBoxHeight(data sidebarRenderData, headerHeight int) int {
 	effectiveHeaderHeight := maxInt(1, headerHeight)
-	available := m.height - 2 - effectiveHeaderHeight - len(data.topLines) - len(data.bottomLines)
+	available := m.height - appHeaderHeight - 2 - effectiveHeaderHeight - len(data.topLines) - len(data.bottomLines)
 	if available < 3 {
 		return 3
 	}
 
-	contentHeight := m.height - 2 - effectiveHeaderHeight
+	contentHeight := m.height - appHeaderHeight - 2 - effectiveHeaderHeight
 	maxScrollBoxHeight := contentHeight * 40 / 100
 	if maxScrollBoxHeight < 3 {
 		maxScrollBoxHeight = 3
@@ -15088,7 +15104,7 @@ func (m model) sidebarScreenLayout(data sidebarRenderData) sidebarScreenLayout {
 	// First sections row sits below the app header, the sidebar's top border, and
 	// the sidebar header line(s) — the same Y renderSidebar composes from.
 	contentTopY := appHeaderHeight + 1 + effectiveHeaderHeight
-	contentHeight := maxInt(1, m.height-2-effectiveHeaderHeight)
+	contentHeight := maxInt(1, m.height-appHeaderHeight-2-effectiveHeaderHeight)
 	visibleScroll := m.sidebarVisibleScrollLines(data, headerHeight)
 	top := len(data.topLines)
 	bottom := len(data.bottomLines)
@@ -15118,7 +15134,7 @@ func (m model) sidebarScreenLayout(data sidebarRenderData) sidebarScreenLayout {
 // in the sidebar. This matches the logic in renderSidebar for consistent hit-testing.
 func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight int) int {
 	effectiveHeaderHeight := maxInt(1, headerHeight)
-	contentHeight := m.height - 2 - effectiveHeaderHeight
+	contentHeight := m.height - appHeaderHeight - 2 - effectiveHeaderHeight
 	spaceForScroll := contentHeight - len(data.topLines) - len(data.bottomLines)
 	if spaceForScroll < 0 {
 		spaceForScroll = 0

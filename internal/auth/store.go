@@ -318,6 +318,34 @@ func FindByBaseURL(baseURL string) (Credential, bool) {
 	return Credential{}, false
 }
 
+// ResolveOpenAICompatKey returns the Bearer token to use for an
+// OpenAI-compatible endpoint (e.g. the OCR openai-compat backend), resolving it
+// in priority order:
+//
+//  1. explicitKey, when the caller already has one configured;
+//  2. a stored credential whose base URL matches baseURL;
+//  3. when isLMStudio is true, the credential stored under the "lmstudio"
+//     provider name.
+//
+// Step 3 is the important fallback: LM Studio credentials are commonly saved by
+// provider name with no base_url field, so a base-URL match alone misses them
+// and the request goes out unauthenticated (HTTP 401), which surfaces to the
+// user as an empty OCR model list. Returns "" when nothing resolves.
+func ResolveOpenAICompatKey(explicitKey, baseURL string, isLMStudio bool) string {
+	if explicitKey != "" {
+		return explicitKey
+	}
+	if cred, ok := FindByBaseURL(baseURL); ok && cred.Key != "" {
+		return cred.Key
+	}
+	if isLMStudio {
+		if cred, ok := Get("lmstudio"); ok && cred.Key != "" {
+			return cred.Key
+		}
+	}
+	return ""
+}
+
 func normalizeBaseURLForMatch(baseURL string) string {
 	baseURL = strings.TrimSpace(strings.TrimRight(baseURL, "/"))
 	if baseURL == "" {

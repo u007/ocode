@@ -17,7 +17,8 @@ import LogPanel from "./components/Logs/LogPanel";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import TopTabs from "./components/Layout/TopTabs";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
-import SessionTabs from "./components/Layout/SessionTabs";
+import SessionDialog from "./components/Layout/SessionDialog";
+import OpenSessionBar from "./components/Layout/OpenSessionBar";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import ModelDialog from "./components/Layout/ModelDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
@@ -244,8 +245,6 @@ function HomeApp() {
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
-      {/* Session tabs bar (multi-project session management) */}
-      <SessionTabs />
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
@@ -263,8 +262,10 @@ function HomeApp() {
             onTabChange={setActiveTab}
             editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path }))}
             onEditorTabClose={handleCloseEditorTab}
-            onMenuToggle={() => setSidebarOpen(!sidebarOpen)}
           />
+
+          {/* Open session tabs */}
+          <OpenSessionBar />
 
           {/* Tab content */}
           <div className="flex-1 overflow-hidden">
@@ -319,6 +320,7 @@ function HomeApp() {
       </div>
 
       {/* Dialogs */}
+      <SessionDialog />
       <CommandPalette
         open={cmdOpen}
         onClose={() => setCmdOpen(false)}

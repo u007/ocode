@@ -150,9 +150,7 @@ func parseAddFileContent(lines []string, start, end int) (string, int) {
 		i++
 	}
 	content := sb.String()
-	if strings.HasSuffix(content, "\n") {
-		content = content[:len(content)-1]
-	}
+	content = strings.TrimSuffix(content, "\n")
 	return content, i
 }
 
@@ -327,7 +325,6 @@ func seekSequence(lines, pattern []string, startIdx int, eof bool) int {
 	}
 	return -1
 }
-
 
 // getNearbyLines returns a formatted snippet of lines around the given index for error context.
 func getNearbyLines(lines []string, aroundIdx, contextLines int) string {

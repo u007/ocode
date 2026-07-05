@@ -62,7 +62,8 @@ func (t GitHubPRTool) Execute(args json.RawMessage) (string, error) {
 	b.WriteString(fmt.Sprintf("PR #%d: %s\n", pr.Number, pr.Title))
 	b.WriteString(fmt.Sprintf("State: %s | Author: %s\n\n", pr.State, pr.User.Login))
 	if pr.Body != "" {
-		b.WriteString(pr.Body + "\n\n")
+		b.WriteString(pr.Body)
+		b.WriteString("\n\n")
 	}
 	b.WriteString("--- DIFF ---\n")
 	b.WriteString(diff)

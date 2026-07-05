@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -48,10 +49,15 @@ var llmRetryBaseDelay = 500 * time.Millisecond
 var ErrNoResponseFromOpenAIResponses = errors.New("no response from openai responses api")
 
 type Message struct {
-	Role                string                   `json:"role"`
-	Content             string                   `json:"content"`
-	Images              []Image                  `json:"images,omitempty"`
-	ReasoningContent    string                   `json:"reasoning_content,omitempty"`
+	Role             string  `json:"role"`
+	Content          string  `json:"content"`
+	Images           []Image `json:"images,omitempty"`
+	ReasoningContent string  `json:"reasoning_content,omitempty"`
+	// Signature carries the thought signature from Gemini Interactions API or
+	// Anthropic extended-thinking signature_delta. The signature is an encrypted
+	// representation of the model's internal reasoning state and MUST be
+	// re-sent on subsequent turns to maintain reasoning continuity.
+	Signature           string                   `json:"signature,omitempty"`
 	ToolCalls           []ToolCall               `json:"tool_calls,omitempty"`
 	ToolID              string                   `json:"tool_call_id,omitempty"`
 	OpenAIResponseItems []map[string]interface{} `json:"openai_response_items,omitempty"`
@@ -71,9 +77,13 @@ type Image struct {
 }
 
 type ToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	// Signature carries the Gemini Interactions API function_call step signature.
+	// Unlike thought signatures (stored on Message), each tool call has its own
+	// encrypted signature that must be re-sent on subsequent turns.
+	Signature string `json:"signature,omitempty"`
+	Function  struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
@@ -402,6 +412,10 @@ func (c *GenericClient) GetModel() string {
 	return c.Model
 }
 
+func (c *GenericClient) isGoogleProvider() bool {
+	return c.Provider == "google" || c.Provider == "google-vertex"
+}
+
 func (c *GenericClient) usesAnthropicMessagesAPI() bool {
 	if c.Provider == "anthropic" {
 		return true
@@ -444,6 +458,8 @@ func (c *GenericClient) ChatWithContext(ctx context.Context, messages []Message,
 			msg, err = c.chatAnthropic(ctx, messages, tools)
 		} else if c.Provider == "copilot" {
 			msg, err = c.chatCopilot(ctx, messages, tools)
+		} else if c.isGoogleProvider() {
+			msg, err = c.chatGoogle(ctx, messages, tools)
 		} else {
 			msg, err = c.chatOpenAI(ctx, messages, tools)
 		}
@@ -682,6 +698,530 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	return msg, nil
 }
 
+// chatGoogle speaks the Gemini Interactions API (v1beta/interactions).
+// Unlike the OpenAI-compatible endpoint, this API uses an SSE format with
+// explicit event types (interaction.created, step.start, step.delta,
+// step.stop, interaction.completed) and requires thought signatures to be
+// preserved across turns for reasoning continuity.
+func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
+	url := c.BaseURL
+	if url == "" {
+		url = "https://generativelanguage.googleapis.com/v1beta/interactions"
+	} else {
+		// Allow user-supplied base URL; strip trailing /openai if present
+		// (the OpenAI-compatible endpoint prefix) and ensure we reach the
+		// Interactions API at /v1beta/interactions.
+		url = strings.TrimRight(url, "/")
+		url = strings.TrimSuffix(url, "/openai")
+		if !strings.HasSuffix(url, "/interactions") {
+			// Avoid duplicating /v1beta if the base URL already includes it
+			// (e.g. "https://generativelanguage.googleapis.com/v1beta" after
+			// stripping the default OpenAI-compat suffix).
+			if strings.HasSuffix(url, "/v1beta") {
+				url += "/interactions"
+			} else {
+				url += "/v1beta/interactions"
+			}
+		}
+	}
+
+	// Convert ocode messages to Interactions API input steps.
+	inputSteps, err := c.convertToGoogleSteps(messages)
+	if err != nil {
+		return nil, fmt.Errorf("google: convert steps: %w", err)
+	}
+
+	payload := map[string]interface{}{
+		"model":  c.Model,
+		"input":  inputSteps,
+		"stream": true,
+	}
+
+	if len(tools) > 0 {
+		payload["tools"] = googleTools(tools)
+	}
+
+	// Build generation_config
+	genConfig := map[string]interface{}{}
+	c.applyGenerationParams(ctx, genConfig)
+	if c.ThinkingBudget > 0 {
+		genConfig["thinking_level"] = googleThinkingLevel(c.ThinkingBudget)
+	}
+	if len(genConfig) > 0 {
+		payload["generation_config"] = genConfig
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if c.APIKey != "" {
+		req.Header.Set("x-goog-api-key", c.APIKey)
+	}
+	emitDebug("LLM", fmt.Sprintf("chatGoogle: url=%s model=%q", url, c.Model))
+
+	resp, err := llmHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
+		emitDebug("ERROR", fmt.Sprintf("chatGoogle: status=%d url=%s", resp.StatusCode, url))
+		return nil, fmt.Errorf("%s", msg)
+	}
+
+	msg, usageRaw, err := parseGoogleInteractionsStream(resp.Body, c.onDelta(), c.onUsage())
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil {
+		return nil, fmt.Errorf("no response from %s", c.Provider)
+	}
+	if msg.Model == "" {
+		msg.Model = c.Model
+	}
+	usage, err := usageForProvider(c.Provider, usageRaw)
+	if err != nil {
+		return nil, err
+	}
+	msg.Usage = usage
+	if usage != nil {
+		msg.Spend = usage.Spend(msg.Model)
+		usage.DebugLog(msg.Model)
+	}
+	return msg, nil
+}
+
+// convertToGoogleSteps converts ocode Message history into the Interactions API
+// input Step array. Each ocode Message may map to one or more Steps:
+//
+//	assistant + ReasoningContent + Signature → thought step (with signature)
+//	assistant + Content → model_output step
+//	assistant + ToolCalls → function_call steps
+//	user → user_input step(s)
+//	tool → function_result step
+func (c *GenericClient) convertToGoogleSteps(messages []Message) ([]map[string]interface{}, error) {
+	var steps []map[string]interface{}
+
+	for _, m := range messages {
+		switch m.Role {
+		case "system":
+			// System instructions are handled as system_instruction in the request,
+			// not as input steps. Skip them here.
+			continue
+
+		case "user":
+			content := buildGoogleContent(m)
+			steps = append(steps, map[string]interface{}{
+				"type":    "user_input",
+				"content": content,
+			})
+
+		case "assistant":
+			// Emit thought step first if we have reasoning content and a signature.
+			if m.ReasoningContent != "" {
+				thoughtContent := []map[string]interface{}{
+					{"type": "text", "text": m.ReasoningContent},
+				}
+				step := map[string]interface{}{
+					"type":    "thought",
+					"summary": thoughtContent,
+				}
+				if m.Signature != "" {
+					step["signature"] = m.Signature
+				}
+				steps = append(steps, step)
+			}
+
+			// Emit model_output step for text content.
+			if m.Content != "" {
+				steps = append(steps, map[string]interface{}{
+					"type": "model_output",
+					"content": []map[string]interface{}{
+						{"type": "text", "text": m.Content},
+					},
+				})
+			}
+
+			// Emit function_call steps for tool calls.
+			for _, tc := range m.ToolCalls {
+				var args interface{}
+				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
+					args = map[string]interface{}{}
+				}
+				step := map[string]interface{}{
+					"type":      "function_call",
+					"id":        tc.ID,
+					"name":      tc.Function.Name,
+					"arguments": args,
+				}
+				if tc.Signature != "" {
+					step["signature"] = tc.Signature
+				}
+				steps = append(steps, step)
+			}
+
+		case "tool":
+			// Gemini Interactions API expects result as content array.
+			result := []map[string]interface{}{
+				{"type": "text", "text": m.Content},
+			}
+			step := map[string]interface{}{
+				"type":    "function_result",
+				"call_id": m.ToolID,
+				"result":  result,
+			}
+			// Include tool name if available (optional but helpful).
+			for _, tc := range msgToolCalls(messages, m.ToolID) {
+				step["name"] = tc.Function.Name
+				break
+			}
+			steps = append(steps, step)
+		}
+	}
+
+	return steps, nil
+}
+
+// msgToolCalls searches the messages slice for a tool call that matches the given
+// tool ID, returning all matching tool calls (typically one). Used to look up
+// the function name when constructing function_result steps.
+func msgToolCalls(messages []Message, toolID string) []ToolCall {
+	var calls []ToolCall
+	for _, m := range messages {
+		for _, tc := range m.ToolCalls {
+			if tc.ID == toolID {
+				calls = append(calls, tc)
+			}
+		}
+	}
+	return calls
+}
+
+// buildGoogleContent creates the content array for a user step, handling images.
+func buildGoogleContent(m Message) []map[string]interface{} {
+	var content []map[string]interface{}
+	if m.Content != "" {
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": m.Content,
+		})
+	}
+	for _, img := range m.Images {
+		content = append(content, map[string]interface{}{
+			"type":     "image",
+			"data":     img.Data,
+			"mimeType": img.MIMEType,
+		})
+	}
+	return content
+}
+
+// googleStreamEvent is a raw SSE frame from the Interactions API.
+type googleStreamEvent struct {
+	Event string
+	Data  json.RawMessage
+}
+
+// parseGoogleSSE reads the Interactions API SSE stream and returns a channel
+// of typed events.
+func parseGoogleSSE(body io.Reader, out chan<- googleStreamEvent) {
+	defer close(out)
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+
+	var currentEvent string
+	var dataBuf strings.Builder
+	done := false
+
+	flushData := func() {
+		if dataBuf.Len() > 0 {
+			out <- googleStreamEvent{
+				Event: currentEvent,
+				Data:  json.RawMessage(dataBuf.String()),
+			}
+			dataBuf.Reset()
+		}
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "event: ") {
+			flushData()
+			currentEvent = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			data := strings.TrimPrefix(line, "data: ")
+			if data == "[DONE]" {
+				flushData()
+				done = true
+				break
+			}
+			dataBuf.WriteString(data)
+		} else if line == "" {
+			flushData()
+			currentEvent = ""
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		log.Printf("google SSE scanner error: %v", err)
+	}
+	flushData()
+	_ = done
+}
+
+// stepAccum accumulates data for a single Interactions API step during streaming.
+type stepAccum struct {
+	typ         string
+	text        strings.Builder
+	thoughtText strings.Builder
+	signature   string
+	callID      string
+	callName    string
+	callArgs    strings.Builder
+	isError     bool
+}
+
+// parseGoogleInteractionsStream parses the Gemini Interactions API SSE stream
+// and assembles a single assistant Message from the steps.
+func parseGoogleInteractionsStream(body io.Reader, onDelta func(kind, text string), onUsage func(inputTokens, outputTokens int64)) (*Message, json.RawMessage, error) {
+	eventCh := make(chan googleStreamEvent, 64)
+	go parseGoogleSSE(body, eventCh)
+
+	msg := &Message{Role: "assistant"}
+
+	// Per-step accumulators
+	var currentStep *stepAccum
+	var usageRaw json.RawMessage
+
+	for evt := range eventCh {
+		switch evt.Event {
+		case "interaction.created":
+			// Extract model name from the interaction object.
+			var created struct {
+				Interaction struct {
+					Model string `json:"model"`
+				} `json:"interaction"`
+			}
+			if json.Unmarshal(evt.Data, &created) == nil && created.Interaction.Model != "" {
+				msg.Model = created.Interaction.Model
+			}
+
+		case "step.start":
+			if currentStep != nil {
+				finalizeStep(msg, currentStep, onDelta)
+			}
+			var start struct {
+				Index int                    `json:"index"`
+				Step  map[string]interface{} `json:"step"`
+			}
+			if err := json.Unmarshal(evt.Data, &start); err != nil {
+				continue
+			}
+			stepType, _ := start.Step["type"].(string)
+			currentStep = &stepAccum{typ: stepType}
+
+			// Extract signature from thought or function_call steps.
+			// Gemini attaches signatures to these step types for reasoning
+			// continuity across multi-turn tool-calling interactions.
+			if stepType == "thought" || stepType == "function_call" {
+				if sig, ok := start.Step["signature"].(string); ok {
+					currentStep.signature = sig
+				}
+			}
+			// function_call steps carry the tool name and call id in the
+			// step.start frame; arguments stream later via arguments_delta.
+			// Without capturing these here the finalized tool call has an
+			// empty name and the agent rejects it ("tool \"\" is not allowed").
+			if stepType == "function_call" {
+				if name, ok := start.Step["name"].(string); ok {
+					currentStep.callName = name
+				}
+				if id, ok := start.Step["id"].(string); ok {
+					currentStep.callID = id
+				}
+			}
+			// thought steps may have initial summary content embedded.
+			if stepType == "thought" {
+				_ = start.Step["summary"] // processed via deltas
+			}
+
+		case "step.delta":
+			if currentStep == nil {
+				continue
+			}
+			// The delta payload has a "type" discriminator in a nested structure.
+			// We need to extract the delta object and dispatch by its type field.
+			var deltaFrame struct {
+				Index int             `json:"index"`
+				Delta json.RawMessage `json:"delta"`
+			}
+			if err := json.Unmarshal(evt.Data, &deltaFrame); err != nil {
+				continue
+			}
+
+			// Determine delta type from the raw delta object.
+			var deltaType struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(deltaFrame.Delta, &deltaType); err != nil {
+				continue
+			}
+
+			switch deltaType.Type {
+			case "text":
+				var td struct {
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(deltaFrame.Delta, &td) == nil {
+					currentStep.text.WriteString(td.Text)
+					if onDelta != nil {
+						onDelta("text", td.Text)
+					}
+				}
+
+			case "thought_summary":
+				var tsd struct {
+					Content struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				}
+				if json.Unmarshal(deltaFrame.Delta, &tsd) == nil {
+					currentStep.thoughtText.WriteString(tsd.Content.Text)
+					if onDelta != nil {
+						onDelta("reasoning", tsd.Content.Text)
+					}
+				}
+
+			case "thought_signature":
+				var tsig struct {
+					Signature string `json:"signature"`
+				}
+				if json.Unmarshal(deltaFrame.Delta, &tsig) == nil {
+					currentStep.signature = tsig.Signature
+				}
+
+			case "arguments_delta":
+				var ad struct {
+					Arguments string `json:"arguments"`
+				}
+				if json.Unmarshal(deltaFrame.Delta, &ad) == nil {
+					currentStep.callArgs.WriteString(ad.Arguments)
+					if onDelta != nil {
+						onDelta("text", ad.Arguments) // emit tool arguments as text
+					}
+				}
+			}
+
+		case "step.stop":
+			if currentStep != nil {
+				finalizeStep(msg, currentStep, onDelta)
+				currentStep = nil
+			}
+
+		case "interaction.completed":
+			// Extract usage from the interaction object.
+			var completed struct {
+				Interaction struct {
+					Usage json.RawMessage `json:"usage"`
+				} `json:"interaction"`
+			}
+			if json.Unmarshal(evt.Data, &completed) == nil && len(completed.Interaction.Usage) > 0 {
+				usageRaw = completed.Interaction.Usage
+				if onUsage != nil {
+					var u struct {
+						InputTokens  int64 `json:"total_input_tokens"`
+						OutputTokens int64 `json:"total_output_tokens"`
+					}
+					if err := json.Unmarshal(usageRaw, &u); err == nil {
+						if u.InputTokens > 0 || u.OutputTokens > 0 {
+							onUsage(u.InputTokens, u.OutputTokens)
+						}
+					}
+				}
+			}
+
+		case "error":
+			var errEvt struct {
+				Error struct {
+					Code    int    `json:"code"`
+					Message string `json:"message"`
+					Status  string `json:"status"`
+				} `json:"error"`
+			}
+			if json.Unmarshal(evt.Data, &errEvt) == nil {
+				return nil, nil, fmt.Errorf("google api error: %s (code=%d, status=%s)", errEvt.Error.Message, errEvt.Error.Code, errEvt.Error.Status)
+			}
+		}
+	}
+
+	// If no content and no tool calls, this is an empty heartbeat.
+	if msg.Content == "" && msg.ReasoningContent == "" && len(msg.ToolCalls) == 0 {
+		return nil, nil, nil
+	}
+	return msg, usageRaw, nil
+}
+
+// finalizeStep accumulates a completed step's data into the result Message.
+func finalizeStep(msg *Message, step *stepAccum, onDelta func(kind, text string)) {
+	switch step.typ {
+	case "thought":
+		if step.thoughtText.Len() > 0 {
+			if msg.ReasoningContent != "" {
+				msg.ReasoningContent += "\n"
+			}
+			msg.ReasoningContent += step.thoughtText.String()
+		}
+		if step.signature != "" {
+			msg.Signature = step.signature
+		}
+
+	case "model_output":
+		msg.Content += step.text.String()
+
+	case "function_call":
+		args := step.callArgs.String()
+		if args == "" {
+			args = "{}"
+		} else if !json.Valid([]byte(args)) {
+			// Fragments didn't assemble; attempt to fix by wrapping.
+			if !strings.HasPrefix(args, "{") {
+				args = "{" + args
+			}
+			if !strings.HasSuffix(args, "}") {
+				args += "}"
+			}
+			if !json.Valid([]byte(args)) {
+				args = "{}"
+			}
+		}
+		tc := ToolCall{
+			ID:   step.callID,
+			Type: "function",
+			Function: struct {
+				Name      string `json:"name"`
+				Arguments string `json:"arguments"`
+			}{
+				Name:      step.callName,
+				Arguments: args,
+			},
+		}
+		if step.signature != "" {
+			tc.Signature = step.signature
+		}
+		msg.ToolCalls = append(msg.ToolCalls, tc)
+	}
+}
+
 // parseOpenAIChatCompletionsStream parses a Server-Sent Events stream in the
 // OpenAI chat-completions format and returns the assembled assistant Message
 // plus the raw usage payload (last `data:` line with non-empty usage). Used by
@@ -872,8 +1412,8 @@ type inlineThinkingSplitter struct {
 }
 
 var (
-	inlineThinkOpenTags  = []string{"<thinking>", "<think>"}
-	inlineThinkCloseTags = []string{"</thinking>", "</think>"}
+	inlineThinkOpenTags  = []string{"<thinking>", "<think>", "<thought>"}
+	inlineThinkCloseTags = []string{"</thinking>", "</think>", "</thought>"}
 )
 
 func (s *inlineThinkingSplitter) Feed(fragment string) []inlineDeltaPart {
@@ -973,6 +1513,49 @@ func hasToolResultBlock(content []interface{}) bool {
 	return false
 }
 
+// googleTools converts the ocode generic tool descriptors into the Gemini
+// Interactions API tool format. Each tool gets flattened: name/description/
+// parameters (or input_schema) are hoisted from the nested function object.
+func googleTools(tools []map[string]interface{}) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(tools))
+	for _, t := range tools {
+		if t["type"] == "function" {
+			// Flatten "function" wrapper: extract inner fields.
+			if fn, ok := t["function"].(map[string]interface{}); ok {
+				gt := map[string]interface{}{
+					"type": "function",
+					"name": fn["name"],
+				}
+				if desc, ok := fn["description"]; ok {
+					gt["description"] = desc
+				}
+				if params, ok := fn["parameters"]; ok {
+					gt["parameters"] = params
+				} else if schema, ok := fn["input_schema"]; ok {
+					gt["parameters"] = schema
+				}
+				out = append(out, gt)
+				continue
+			}
+		}
+		// Already flat (name/description at top level).
+		gt := map[string]interface{}{
+			"type": "function",
+			"name": t["name"],
+		}
+		if desc, ok := t["description"]; ok {
+			gt["description"] = desc
+		}
+		if params, ok := t["parameters"]; ok {
+			gt["parameters"] = params
+		} else if schema, ok := t["input_schema"]; ok {
+			gt["parameters"] = schema
+		}
+		out = append(out, gt)
+	}
+	return out
+}
+
 func openAITools(tools []map[string]interface{}) []map[string]interface{} {
 	openAITools := make([]map[string]interface{}, 0, len(tools))
 	for _, t := range tools {
@@ -1011,7 +1594,21 @@ func isGLMModel(model string) bool {
 func providerSupportsReasoningEffort(provider string) bool {
 	return provider == "openai" ||
 		provider == "openrouter" ||
+		provider == "google" ||
 		strings.HasPrefix(provider, "xiaomi")
+}
+
+// googleThinkingLevel maps ThinkingBudget to Gemini's thinking_level values.
+// Maps to the same budget thresholds as reasoningEffortForBudget for consistency.
+func googleThinkingLevel(budget int) string {
+	switch {
+	case budget >= 16000:
+		return "high"
+	case budget >= 8000:
+		return "medium"
+	default:
+		return "low"
+	}
 }
 
 func reasoningEffortForBudget(budget int) string {

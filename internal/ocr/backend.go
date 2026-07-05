@@ -37,6 +37,10 @@ type BackendConfig struct {
 	BaseURL string // API base URL (default varies by backend)
 	Model   string // model ID, variant, or endpoint path
 	APIKey  string // Bearer token; empty means no auth header
+	// LMStudioNative switches the openai-compat backend over to LM Studio's
+	// native /api/v1/chat endpoint, which avoids the OpenAI chat template path
+	// that can fail on some vision models.
+	LMStudioNative bool
 }
 
 var (

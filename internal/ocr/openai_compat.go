@@ -13,7 +13,9 @@ import (
 	"time"
 )
 
-const openaiTimeout = 60 * time.Second
+// Local vision models can take minutes: cold model load (~16s observed) plus
+// large-image inference (~36s warm for a phone-photo receipt).
+const openaiTimeout = 5 * time.Minute
 const maxImageBytes = 20 * 1024 * 1024 // 20 MB
 
 type openaiCompatBackend struct{}
@@ -57,6 +59,10 @@ func (b *openaiCompatBackend) Execute(ctx context.Context, imagePath string, cfg
 	}
 	if strings.HasPrefix(model, "lmstudio/") {
 		model = strings.TrimPrefix(model, "lmstudio/")
+	}
+
+	if cfg.LMStudioNative || LooksLikeLMStudioBaseURL(baseURL) {
+		return b.executeLMStudioNative(ctx, imagePath, baseURL, model, cfg.APIKey)
 	}
 
 	apiURL := baseURL + "/chat/completions"
@@ -140,6 +146,113 @@ func (b *openaiCompatBackend) Execute(ctx context.Context, imagePath string, cfg
 		return "No text was extracted from the image.", nil
 	}
 	return text, nil
+}
+
+func (b *openaiCompatBackend) executeLMStudioNative(ctx context.Context, imagePath, baseURL, model, apiKey string) (string, error) {
+	imageData, err := os.ReadFile(imagePath)
+	if err != nil {
+		return "", fmt.Errorf("cannot read image file %q: %w", imagePath, err)
+	}
+	if len(imageData) > maxImageBytes {
+		return "", fmt.Errorf("image too large (%d bytes, max %d)", len(imageData), maxImageBytes)
+	}
+
+	contentType := detectContentType(imagePath)
+	b64Data := base64.StdEncoding.EncodeToString(imageData)
+	dataURL := fmt.Sprintf("data:%s;base64,%s", contentType, b64Data)
+
+	baseURL = normalizeLMStudioBaseURL(baseURL)
+	apiURL := baseURL + "/chat"
+
+	// The instruction rides in the text input item instead of system_prompt:
+	// some vision-model jinja templates (e.g. paddleocr-vl) iterate over
+	// message content parts and fail to render LM Studio's string-typed
+	// system message ("Expected iterable or object type in for loop").
+	payload := map[string]interface{}{
+		"model": model,
+		"input": []map[string]interface{}{
+			{
+				"type": "text",
+				"content": "You are an OCR engine. Extract all text from the image exactly as seen. " +
+					"Return only the extracted text, no commentary. Preserve the original formatting, " +
+					"line breaks, and structure as closely as possible.\n\n" +
+					"Extract all text from this image.",
+			},
+			{
+				"type":     "image",
+				"data_url": dataURL,
+			},
+		},
+		"context_length": 4096,
+		"temperature":    0.0,
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	client := &http.Client{Timeout: openaiTimeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("API returned HTTP %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var chatResp struct {
+		Output []struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(respBody, &chatResp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	var parts []string
+	for _, item := range chatResp.Output {
+		if item.Type == "message" && strings.TrimSpace(item.Content) != "" {
+			parts = append(parts, item.Content)
+		}
+	}
+	text := strings.TrimSpace(strings.Join(parts, "\n"))
+	if text == "" {
+		return "", fmt.Errorf("API returned no output text")
+	}
+	return text, nil
+}
+
+func normalizeLMStudioBaseURL(baseURL string) string {
+	baseURL = strings.TrimRight(baseURL, "/")
+	if baseURL == "" {
+		return "http://localhost:1234/api/v1"
+	}
+	switch {
+	case strings.HasSuffix(baseURL, "/api/v1"):
+		return baseURL
+	case strings.HasSuffix(baseURL, "/v1"):
+		return strings.TrimSuffix(baseURL, "/v1") + "/api/v1"
+	default:
+		return baseURL + "/api/v1"
+	}
 }
 
 func (b *openaiCompatBackend) ListModels(ctx context.Context, baseURL, apiKey string) ([]string, error) {

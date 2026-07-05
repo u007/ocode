@@ -5,5 +5,11 @@
       "Bash(python3 -c \"import json,sys; [print\\(f['name']\\) for f in json.load\\(sys.stdin\\)]\")",
       "Bash(curl -s \"https://raw.githubusercontent.com/openai/codex/main/codex-rs/chatgpt/src/chatgpt_client.rs\")"
     ]
+  },
+  "enabledPlugins": {
+    "cognee-memory@cognee": false
+  },
+  "skillOverrides": {
+    "cognee": "off"
   }
 }

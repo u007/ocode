@@ -600,6 +600,9 @@ func (m filesModel) Update(msg tea.Msg, w, h int) (out filesModel, cmd tea.Cmd) 
 			m.statusMsg = fmt.Sprintf("%d results found — ctrl+n/ctrl+p navigate  enter open", len(m.contentSearchResults))
 		}
 		return m, nil
+	case tea.PasteMsg:
+		m, cmd = m.handlePasteMsg(msg)
+		return m, cmd
 	case tea.KeyPressMsg:
 		if m.choosingEditor {
 			return m.updateEditorPicker(msg)

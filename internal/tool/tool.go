@@ -54,20 +54,16 @@ func (e *NoticedError) Unwrap() error  { return e.Err }
 // remainder as a non-LLM transient message.
 const NoticeSentinel = "NOTICE:"
 
-// LoadBuiltins returns the full set of built-in tools (always-on + opt-in)
-// plus the shared LSP manager that backs the `lsp` and `ast` tools. The
-// caller is responsible for closing the manager when the tool set is no
-// longer in use (typically when the agent/session that owns it is torn down)
-// — failing to do so leaks the underlying language-server processes.
-func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
+// InitBuiltinTools builds the canonical set of built-in tools using an
+// existing LSP manager and config. This is the single source of truth for
+// which tools are available — both LoadBuiltins and the TUI's
+// getInitialTools call this to keep the tool list in sync.
+func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config) []Tool {
 	if cfg != nil {
 		setExtraAllowedPaths(cfg.Ocode.ExtraAllowedPaths)
 	} else {
 		setExtraAllowedPaths(nil)
 	}
-	// One shared LSP manager so the lsp + ast tools reuse a single server per
-	// project instead of each spawning its own.
-	lspMgr := lsp.NewManager(".")
 	builtins := []Tool{
 		&ReadTool{},
 		&UndoTool{},
@@ -109,9 +105,24 @@ func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
 	if cfg != nil && cfg.Ocode.Plugins.AST {
 		builtins = append(builtins, &AstGrepTool{})
 	}
-	// OCR tool — registered when enabled and an OCR model is configured.
-	// The runtime gate (/ocr enable|disable) controls the tool's availability
-	// via the config, so the tool itself double-checks before executing.
+	// OCR tool — always registered so the model knows it exists. When OCR
+	// is disabled or no model is configured, the tool's Execute method
+	// returns a NoticedError telling the user to use /ocr enable and
+	// /ocr model to configure it.
 	builtins = append(builtins, &OcrTool{Config: cfg})
-	return builtins, lspMgr
+	return builtins
+}
+
+// LoadBuiltins returns the full set of built-in tools (always-on + opt-in)
+// plus a fresh shared LSP manager that backs the `lsp` and `ast` tools. The
+// caller is responsible for closing the manager when the tool set is no
+// longer in use (typically when the agent/session that owns it is torn down)
+// — failing to do so leaks the underlying language-server processes.
+//
+// Prefer InitBuiltinTools when you already have an LSP manager (e.g. the
+// TUI caches one per session) so both the manager and the tool list come
+// from a single source of truth.
+func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
+	lspMgr := lsp.NewManager(".")
+	return InitBuiltinTools(lspMgr, cfg), lspMgr
 }
