@@ -8,3 +8,4 @@
 * **Update**: Plugin System ([plugins.md](/plugins.md))
 * **Update**: Zed-compatible ACP Mode Specification ([acp-zed-spec.md](/acp-zed-spec.md))
 * **Update**: Using ocode with Zed ([zed.md](/zed.md))
+* **Creation**: Knowledge Bundle System ([knowledge-bundle.md](/knowledge-bundle.md))

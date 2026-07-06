@@ -886,13 +886,62 @@ func TestContextCommandOutputsSections(t *testing.T) {
 	if len(m.messages) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(m.messages))
 	}
-	for _, want := range []string{"Context Budget", "Base Prompt", "Tools (injected every request)", "MCP: (none)", "Skill catalog (pre-injected)", "Skills (full contents available on demand, not pre-injected)", "Session Messages"} {
+	for _, want := range []string{"Context Budget", "Base Prompt", "Knowledge Bundle", "Memory", "Tools (injected every request)", "MCP: (none)", "Skill catalog (pre-injected)", "Skills (full contents available on demand, not pre-injected)", "Session Messages"} {
 		if !strings.Contains(m.messages[0].text, want) {
 			t.Fatalf("expected %q in context output, got %q", want, m.messages[0].text)
 		}
 	}
 	if m.messages[0].raw != nil {
 		t.Fatal("context command output must not set raw field")
+	}
+}
+
+func TestContextCommandDisabledStates(t *testing.T) {
+	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
+	m.agent.SetDocPromptEnabled(false)
+	m.agent.SetMemoryEnabled(false)
+	m.handleContextCmd(nil)
+	if len(m.messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(m.messages))
+	}
+	output := m.messages[0].text
+	if !strings.Contains(output, "Disabled (/docs off") {
+		t.Fatalf("expected Disabled (/docs off) in output, got %q", output)
+	}
+	if !strings.Contains(output, "Disabled (/mem off") {
+		t.Fatalf("expected Disabled (/mem off) in output, got %q", output)
+	}
+}
+
+func TestContextCommandKnowledgeBundleInactive(t *testing.T) {
+	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
+	m.agent.SetDocPromptEnabled(true)
+	m.agent.SetMemoryEnabled(false)
+	m.handleContextCmd(nil)
+	output := m.messages[0].text
+	if !strings.Contains(output, "Inactive (no OKF bundle") {
+		t.Fatalf("expected 'Inactive (no OKF bundle)' in context output, got %q", output)
+	}
+}
+
+func TestContextCommandMemoryEnabled(t *testing.T) {
+	m := model{width: 80, agent: agent.NewAgent(nil, nil, nil, nil), config: &config.Config{}}
+	m.agent.SetDocPromptEnabled(false)
+	m.agent.SetMemoryEnabled(true)
+	m.workDir = t.TempDir()
+	m.handleContextCmd(nil)
+	output := m.messages[0].text
+	if !strings.Contains(output, "Project memory") {
+		t.Fatalf("expected 'Project memory' in context output, got %q", output)
+	}
+	if !strings.Contains(output, "User memory") {
+		t.Fatalf("expected 'User memory' in context output, got %q", output)
+	}
+	if !strings.Contains(output, "Global history") {
+		t.Fatalf("expected 'Global history' in context output, got %q", output)
+	}
+	if strings.Contains(output, "Error:") {
+		t.Fatalf("unexpected error in context output: %q", output)
 	}
 }
 
@@ -912,12 +961,21 @@ func TestContextCommandDiscoveryOnLabels(t *testing.T) {
 	if strings.Contains(m.messages[0].text, "Skill catalog (pre-injected)") {
 		t.Fatal("context output should not contain 'pre-injected' label when discovery is on")
 	}
-	// Should contain Discovery section
+	// Should contain Discovery section with corpus info
 	if !strings.Contains(m.messages[0].text, "Discovery") {
 		t.Fatalf("expected Discovery section in context output when discovery is on")
 	}
+	if !strings.Contains(m.messages[0].text, "Skills in index") {
+		t.Fatalf("expected 'Skills in index' in Discovery section")
+	}
+	if !strings.Contains(m.messages[0].text, "Project docs in index") {
+		t.Fatalf("expected 'Project docs in index' in Discovery section")
+	}
 	if !strings.Contains(m.messages[0].text, "Skills attached") {
 		t.Fatalf("expected 'Skills attached' in Discovery section")
+	}
+	if !strings.Contains(m.messages[0].text, "Project docs attached") {
+		t.Fatalf("expected 'Project docs attached' in Discovery section")
 	}
 	if m.messages[0].raw != nil {
 		t.Fatal("context command output must not set raw field")

@@ -35,7 +35,9 @@ import (
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/ide"
+	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/lsp"
+	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/redact"
@@ -9252,10 +9254,66 @@ func (m *model) handleContextCmd(args []string) {
 		baseTotal += tok
 		fmt.Fprintf(&b, "  Plugin: %-20s ~%s tok\n", p.Name, formatTok(tok))
 	}
-	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(baseTotal))
+	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Base subtotal", formatTok(baseTotal))
+
+	// ── Knowledge Bundle (OKF) ──────────────────────
+	b.WriteString("\nKnowledge Bundle\n")
+	if m.agent != nil && m.agent.DocPromptEnabled() {
+		wd := m.workDir
+		if wd == "" {
+			wd, _ = os.Getwd()
+		}
+		if bundle, ok := knowledge.DetectBundle(wd); ok {
+			indexPath := filepath.Join(bundle.Root, "index.md")
+			if content, err := os.ReadFile(indexPath); err == nil {
+				tok := estimateTok(string(content))
+				baseTotal += tok
+				fmt.Fprintf(&b, "  Active\n")
+				fmt.Fprintf(&b, "  Source: %s\n", indexPath)
+				fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Index (docs/index.md)", formatTok(tok))
+			} else {
+				fmt.Fprintf(&b, "  Active (bundle detected, index unreadable: %v)\n", err)
+			}
+		} else {
+			b.WriteString("  Inactive (no OKF bundle at docs/ — run /docs init)\n")
+		}
+	} else {
+		b.WriteString("  Disabled (/docs off — run /docs on to enable)\n")
+	}
+
+	// ── Memory ────────────────────────────────
+	b.WriteString("\nMemory\n")
+	if m.agent != nil && m.agent.MemoryEnabled() {
+		snap, err := memory.Status(m.workDir)
+		if err == nil {
+			for _, ms := range []struct {
+				title string
+				s     memory.Scope
+			}{
+				{"Project memory", snap.Project},
+				{"User memory", snap.User},
+				{"Global history", snap.Global},
+			} {
+				status := "present"
+				if !ms.s.Present {
+					status = "not found"
+				}
+				fmt.Fprintf(&b, "  %-16s %s\n", ms.title, status)
+				fmt.Fprintf(&b, "    %s\n", ms.s.Path)
+			}
+		} else {
+			fmt.Fprintf(&b, "  Error: %v\n", err)
+		}
+	} else {
+		b.WriteString("  Disabled (/mem off — run /mem on to enable)\n")
+	}
 
 	// ── Tools ────────────────────────────────────
-	b.WriteString("\nTools (injected every request)\n")
+	toolsSubtitle := "\nTools (injected every request)"
+	if discoveryOn {
+		toolsSubtitle = "\nTools (built-in always injected, MCP gated by discovery)"
+	}
+	b.WriteString(toolsSubtitle + "\n")
 	toolsTotal := 0
 	allDefs := m.agent.GetToolDefinitions()
 	mcpSet := make(map[string]struct{})
@@ -9396,31 +9454,46 @@ func (m *model) handleContextCmd(args []string) {
 		b.WriteString("  Usage      n/a\n")
 	}
 
-	// Discovery section: attached skills and MCP tool gate status.
-	if discoveryOn {
-		st := m.agent.DiscoveryStatus()
-		mcpAttached, mcpTotal, gatedToks, indexToks := m.agent.DiscoveryGatedTokens()
-		b.WriteString("\nDiscovery\n")
-		fmt.Fprintf(&b, "  %-28s %s %s\n", "Backend/model", st.Backend, st.Model)
-		if !st.Active && st.InitErr != "" {
-			fmt.Fprintf(&b, "  %-28s fail-open: %s\n", "Status", st.InitErr)
-		}
-		fmt.Fprintf(&b, "  %-28s %d/%d\n", "Skills attached", len(st.AttachedSkills), st.SkillTotal)
-		if len(st.AttachedSkills) > 0 {
-			for _, name := range st.AttachedSkills {
-				fmt.Fprintf(&b, "    - %s\n", name)
+		// Discovery section: full corpus index, attached skills, MCP tools, and project docs.
+		if discoveryOn {
+			st := m.agent.DiscoveryStatus()
+			mcpAttached, mcpTotal, gatedToks, indexToks := m.agent.DiscoveryGatedTokens()
+			b.WriteString("\nDiscovery — [ocode:discovery] injected block\n")
+			fmt.Fprintf(&b, "  %-28s %s %s\n", "Backend/model", st.Backend, st.Model)
+			if !st.Active && st.InitErr != "" {
+				fmt.Fprintf(&b, "  %-28s fail-open: %s\n", "Status", st.InitErr)
 			}
+			fmt.Fprintf(&b, "\n  Corpus (names-index, stable — injected every turn)\n")
+			fmt.Fprintf(&b, "  %-28s %d\n", "Skills in index", len(st.AllSkills))
+			fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools in index", len(st.AllMCP))
+			fmt.Fprintf(&b, "  %-28s %d\n", "Project docs in index", len(st.AllMD))
+			if st.MDPending > 0 {
+				fmt.Fprintf(&b, "  %-28s %d\n", "Docs pending summarization", st.MDPending)
+			}
+			fmt.Fprintf(&b, "\n  Attached to volatile tail (per-turn, grows with sticky set)\n")
+			fmt.Fprintf(&b, "  %-28s %d/%d\n", "Skills attached", len(st.AttachedSkills), st.SkillTotal)
+			if len(st.AttachedSkills) > 0 {
+				for _, name := range st.AttachedSkills {
+					fmt.Fprintf(&b, "    - %s\n", name)
+				}
+			}
+			fmt.Fprintf(&b, "  %-28s %d/%d\n", "MCP tools attached", mcpAttached, mcpTotal)
+			fmt.Fprintf(&b, "  %-28s %d/%d\n", "Project docs attached", len(st.AttachedMD), len(st.AllMD))
+			if len(st.AttachedMD) > 0 {
+				for _, name := range st.AttachedMD {
+					fmt.Fprintf(&b, "    - %s\n", name)
+				}
+			}
+			const queryEmbedToks = 64 // rough per-turn query embedding cost
+			net := gatedToks - indexToks - queryEmbedToks
+			if net < 0 {
+				net = 0
+			}
+			fmt.Fprintf(&b, "\n  Efficiency\n")
+			fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (gross)", formatTok(gatedToks))
+			fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (net)", formatTok(net))
+			fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools not attached", mcpTotal-mcpAttached)
 		}
-		fmt.Fprintf(&b, "  %-28s %d/%d\n", "MCP tools attached", mcpAttached, mcpTotal)
-		const queryEmbedToks = 64 // rough per-turn query embedding cost
-		net := gatedToks - indexToks - queryEmbedToks
-		if net < 0 {
-			net = 0
-		}
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (gross)", formatTok(gatedToks))
-		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (net)", formatTok(net))
-		fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools not attached", mcpTotal-mcpAttached)
-	}
 
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
