@@ -41,6 +41,11 @@ func TestWarrantsLLMScanPrefixes(t *testing.T) {
 		{"MY_APP_SECRET=xyz", true, "suffix: _SECRET"},
 		{"DATABASE_TOKEN=abc", true, "suffix: _TOKEN"},
 		{"SERVICE_API_KEY=abc", true, "suffix: _API_KEY"},
+		{"OPENROUTER_KEY=or-abc", true, "suffix: _KEY (and prefix: OPENROUTER_)"},
+		{"DEEPINFRA_KEY=abc", true, "suffix: _KEY (and prefix: DEEPINFRA_)"},
+		{"SECRETMAN_KEY=abc", true, "suffix: _KEY (secret in prefix)"},
+		{"OPENROUTER_API_KEY=or-abc", true, "prefix: OPENROUTER_"},
+		{"DEEPINFRA_TOKEN=abc", true, "prefix: DEEPINFRA_"},
 		{"just a normal variable", false, "benign"},
 	}
 	for _, tc := range cases {

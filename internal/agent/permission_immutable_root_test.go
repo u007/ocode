@@ -92,6 +92,15 @@ func TestLanguageDepRoots_DefaultHomePaths(t *testing.T) {
 		"/home/testuser/.m2/repository",
 		"/home/testuser/.gradle/caches",
 		"/home/testuser/go/pkg/mod",
+		"/usr/local/go",
+		"/usr/lib/go",
+		"/home/testuser/.gem",
+		"/home/testuser/.cache/composer",
+		"/home/testuser/.composer",
+		"/usr/lib/ruby/gems",
+		"/usr/local/lib/ruby/gems",
+		"/usr/lib/jvm",
+		"/Library/Java/JavaVirtualMachines",
 	}
 
 	for _, exp := range expected {
@@ -117,6 +126,10 @@ func TestLanguageDepRoots_RespectsEnvVars(t *testing.T) {
 	t.Setenv("CARGO_HOME", "/custom/cargo")
 	t.Setenv("PIP_CACHE_DIR", "/custom/pip/cache")
 	t.Setenv("GRADLE_USER_HOME", "/custom/gradle")
+	t.Setenv("GEM_HOME", "/custom/gems")
+	t.Setenv("COMPOSER_HOME", "/custom/composer")
+	t.Setenv("JAVA_HOME", "/custom/java")
+	t.Setenv("GOROOT", "/custom/go")
 
 	roots := languageDepRoots()
 
@@ -129,6 +142,10 @@ func TestLanguageDepRoots_RespectsEnvVars(t *testing.T) {
 		"/home/testuser/.local/share/pnpm/store",
 		"/home/testuser/.pnpm-store",
 		"/home/testuser/.m2/repository",
+		"/custom/gems",
+		"/custom/composer/cache",
+		"/custom/java",
+		"/custom/go",
 	}
 
 	for _, exp := range expected {
@@ -145,12 +162,18 @@ func TestLanguageDepRoots_RespectsEnvVars(t *testing.T) {
 	}
 
 	// When env vars are set, the fallback home paths should NOT appear.
+	// Ruby ~/.gem is always a valid gem path (gempaths are additive) so it
+	// stays even when GEM_HOME is set.
 	notExpected := []string{
 		"/home/testuser/.npm/_cacache",
 		"/home/testuser/.yarn/berry/cache",
 		"/home/testuser/.cargo/registry",
 		"/home/testuser/.cache/pip",
 		"/home/testuser/.gradle/caches",
+		"/home/testuser/.cache/composer",
+		"/home/testuser/.composer",
+		"/usr/local/go",
+		"/usr/lib/go",
 	}
 	for _, ne := range notExpected {
 		for _, r := range roots {
@@ -222,6 +245,16 @@ func TestIsImmutableReadRoot_LanguageDeps(t *testing.T) {
 		{"/home/testuser/.m2/repository/com/foo/bar/1.0/bar-1.0.jar", true},
 		// gradle
 		{"/home/testuser/.gradle/caches/modules-2/files/foo/bar.jar", true},
+		// Go GOROOT standard library
+		{"/usr/local/go/src/fmt/format.go", true},
+		{"/usr/lib/go/src/net/http/server.go", true},
+		// Ruby gem paths
+		{"/usr/lib/ruby/gems/3.2.0/gems/rails-7.0.0/lib/foo.rb", true},
+		{"/usr/local/lib/ruby/gems/3.2.0/gems/bundler/bundler.rb", true},
+		{"/home/testuser/.gem/ruby/3.2.0/gems/foo-1.0/lib/foo.rb", true},
+		// Java JDK
+		{"/usr/lib/jvm/java-17-openjdk-amd64/lib/src.zip", true},
+		{"/Library/Java/JavaVirtualMachines/jdk-17.jdk/Contents/Home/lib/src.zip", true},
 		// false positives
 		{"/home/testuser/.npm/other/file", false},
 		{"/home/testuser/.cargo/bin/cargo", false},
@@ -229,6 +262,8 @@ func TestIsImmutableReadRoot_LanguageDeps(t *testing.T) {
 		{"/home/testuser/.gradle/other/file", false},
 		{"/home/testuser/go/src/foo", false},
 		{"/etc/passwd", false},
+		{"/usr/local/bin/curl", false},
+		{"/usr/lib/firmware/foo", false},
 	}
 	for _, c := range cases {
 		if got := isImmutableReadRoot(c.path); got != c.want {

@@ -1714,10 +1714,17 @@ func (a *Agent) scanToolResult(toolName string, toolArgs string, content string)
 var bashFileReadCmds = map[string]bool{
 	"cat": true, "head": true, "tail": true,
 	"bat": true, "less": true, "more": true,
+	"grep": true, "awk": true, "sed": true,
 }
 
 // bashSensitiveFilePath extracts the first sensitive file path from a bash
-// file-reading command (cat, head, tail, etc.). Returns "" if not detected.
+// file-reading command (cat, head, tail, grep, etc.). Returns "" if not detected.
+//
+// Compound commands separated by &&, ||, or ; are skipped entirely (too complex
+// to parse safely). For pipes, we check only the first segment before the real
+// shell pipe — so `grep pattern .env | head` still detects the sensitive file
+// read in the grep segment. Escaped pipes (\\| in grep/awk/sed patterns) are
+// normalized before checking for real shell pipes.
 func bashSensitiveFilePath(toolArgs string) string {
 	var args struct {
 		Command string `json:"command"`
@@ -1726,13 +1733,26 @@ func bashSensitiveFilePath(toolArgs string) string {
 		return ""
 	}
 	cmd := strings.TrimSpace(args.Command)
-	// Skip compound commands (pipes, &&, ||, ;) — too complex to parse safely.
-	for _, sep := range []string{"|", "&&", "||", ";"} {
-		if strings.Contains(cmd, sep) {
+
+	// Normalize escaped pipes (\\|) common in grep/awk/sed regex patterns
+	// before checking for real shell pipes. Replace with a space so field
+	// splitting still produces sensible tokens.
+	cleanCmd := strings.ReplaceAll(cmd, "\\|", " ")
+
+	// Skip true compound commands (&&, ||, ;) — too complex to parse safely.
+	for _, sep := range []string{"&&", "||", ";"} {
+		if strings.Contains(cleanCmd, sep) {
 			return ""
 		}
 	}
-	fields := strings.Fields(cmd)
+
+	// For shell pipes (|), try the first segment before the pipe.
+	seg := cleanCmd
+	if idx := strings.Index(cleanCmd, "|"); idx >= 0 {
+		seg = cleanCmd[:idx]
+	}
+
+	fields := strings.Fields(seg)
 	if len(fields) < 2 {
 		return ""
 	}

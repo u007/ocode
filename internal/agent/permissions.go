@@ -1248,6 +1248,80 @@ func languageDepRoots() []string {
 		}
 	}
 
+	// Go standard library (GOROOT). Respect the env var; fall back to common
+	// install directories when it is unset (the standard binary distribution
+	// installs to /usr/local/go, while some Linux distros use /usr/lib/go).
+	if goroot := strings.TrimSpace(os.Getenv("GOROOT")); goroot != "" {
+		add(goroot)
+	} else {
+		add("/usr/local/go") // Official binary distribution
+		add("/usr/lib/go")   // Some Linux distributions (e.g. Debian golang-go package)
+	}
+
+	if homeErr == nil {
+		// Ruby gem installation directories.
+		if gemHome := strings.TrimSpace(os.Getenv("GEM_HOME")); gemHome != "" {
+			add(gemHome)
+		}
+		if gemPath := strings.TrimSpace(os.Getenv("GEM_PATH")); gemPath != "" {
+			for _, p := range filepath.SplitList(gemPath) {
+				if p != "" {
+					add(p)
+				}
+			}
+		}
+		add(filepath.Join(home, ".gem"))
+
+		// PHP Composer cache (respect COMPOSER_HOME, fall back to defaults).
+		if ch := strings.TrimSpace(os.Getenv("COMPOSER_HOME")); ch != "" {
+			add(filepath.Join(ch, "cache"))
+		} else {
+			add(filepath.Join(home, ".cache", "composer"))
+			add(filepath.Join(home, ".composer")) // Older default location
+		}
+	}
+
+	// System Ruby gem paths (Linux/macOS common install directories).
+	add("/usr/lib/ruby/gems")
+	add("/usr/local/lib/ruby/gems")
+
+	// Java JDK/JRE system paths.
+	if javaHome := strings.TrimSpace(os.Getenv("JAVA_HOME")); javaHome != "" {
+		add(javaHome)
+	}
+	add("/usr/lib/jvm")                      // Linux OpenJDK
+	add("/Library/Java/JavaVirtualMachines") // macOS JDK
+
+	// Python site-packages — system and user-installed library directories.
+	// System paths use glob to match versioned subdirectories (python3.12, etc.)
+	// without hardcoding a specific Python version.
+	if libDirs, err := filepath.Glob("/usr/lib/python3.*/site-packages"); err == nil {
+		for _, d := range libDirs {
+			add(d)
+		}
+	}
+	if libDirs, err := filepath.Glob("/usr/local/lib/python3.*/site-packages"); err == nil {
+		for _, d := range libDirs {
+			add(d)
+		}
+	}
+	if homeErr == nil {
+		// User site-packages (PEP 370): ~/.local/lib/pythonX.Y/site-packages.
+		if libDirs, err := filepath.Glob(filepath.Join(home, ".local", "lib", "python3.*", "site-packages")); err == nil {
+			for _, d := range libDirs {
+				add(d)
+			}
+		}
+		// pyenv-installed Python shims and versions.
+		add(filepath.Join(home, ".pyenv", "versions"))
+	}
+	// macOS Homebrew Python on ARM Macs.
+	if libDirs, err := filepath.Glob("/opt/homebrew/lib/python3.*/site-packages"); err == nil {
+		for _, d := range libDirs {
+			add(d)
+		}
+	}
+
 	// XDG_CACHE_HOME-based paths for tools that respect the XDG spec.
 	if xdgCache := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); xdgCache != "" {
 		add(filepath.Join(xdgCache, "pip"))

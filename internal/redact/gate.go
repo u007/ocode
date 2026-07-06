@@ -16,9 +16,9 @@ var sensitiveKeywordRe = regexp.MustCompile(
 // at a word boundary, case-insensitively.
 var sensitivePrefixRe = regexp.MustCompile(
 	`(?i)(?:` +
-		`(?:AWS|ANTHROPIC|GEMINI|OPENAI)_\w+` + // concrete prefixes
+		`(?:AWS|ANTHROPIC|GEMINI|OPENAI|OPENROUTER|DEEPINFRA)_\w+` + // concrete prefixes
 		`|` +
-		`\w+(?:_API_KEY|_TOKEN|_SECRET)` + // generic suffix patterns
+		`\w+(?:_API_KEY|_TOKEN|_SECRET|_KEY)` + // generic suffix patterns
 		`)`,
 )
 

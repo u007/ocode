@@ -202,3 +202,95 @@ func TestRedactMessage(t *testing.T) {
 		t.Error("Nil redactor should not modify message")
 	}
 }
+
+func TestBashSensitiveFilePath(t *testing.T) {
+	tests := []struct {
+		name    string
+		toolArgs string
+		want    string // empty means no sensitive file detected
+	}{
+		{
+			name:    "grep on .env",
+			toolArgs: `{"command":"grep OPENAI /proj/.env"}`,
+			want:    "/proj/.env",
+		},
+		{
+			name:    "grep with escaped pipes in pattern on .env",
+			toolArgs: `{"command":"grep -n 'SECRETMAN\\|OPENAI' /proj/.env"}`,
+			want:    "/proj/.env",
+		},
+		{
+			name:    "grep piped to head on .env",
+			toolArgs: `{"command":"grep OPENAI /proj/.env | head -20"}`,
+			want:    "/proj/.env",
+		},
+		{
+			name:    "cat on .env (existing behavior)",
+			toolArgs: `{"command":"cat /proj/.env"}`,
+			want:    "/proj/.env",
+		},
+		{
+			name:    "awk on .env",
+			toolArgs: `{"command":"awk -F= '{print $1}' /proj/.env"}`,
+			want:    "/proj/.env",
+		},
+		{
+			name:    "sed on .env",
+			toolArgs: `{"command":"sed 's/secret/***/g' /proj/.env"}`,
+			want:    "/proj/.env",
+		},
+		{
+			name:    "non-file-read command on .env",
+			toolArgs: `{"command":"echo /proj/.env"}`,
+			want:    "",
+		},
+		{
+			name:    "grep on non-sensitive file",
+			toolArgs: `{"command":"grep foo /proj/main.go"}`,
+			want:    "",
+		},
+		{
+			name:    "compound command with && should bail",
+			toolArgs: `{"command":"grep OPENAI /proj/.env && echo done"}`,
+			want:    "",
+		},
+		{
+			name:    "compound command with ; should bail",
+			toolArgs: `{"command":"cat /proj/.env; echo done"}`,
+			want:    "",
+		},
+		{
+			name:    "empty command",
+			toolArgs: `{"command":""}`,
+			want:    "",
+		},
+		{
+			name:    "invalid json",
+			toolArgs: `not json`,
+			want:    "",
+		},
+		{
+			name:    "grep with stderr redirect on .env",
+			toolArgs: `{"command":"grep OPENAI /proj/.env 2>/dev/null"}`,
+			want:    "/proj/.env",
+		},
+		{
+			name:    "cat first in pipe chain on .env",
+			toolArgs: `{"command":"cat /proj/.env | grep OPENAI"}`,
+			want:    "/proj/.env",
+		},
+		{
+			name:    "second segment after pipe is not checked",
+			toolArgs: `{"command":"echo hello | grep OPENAI /proj/.env"}`,
+			want:    "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := bashSensitiveFilePath(tt.toolArgs)
+			if got != tt.want {
+				t.Errorf("bashSensitiveFilePath(%s) = %q, want %q", tt.toolArgs, got, tt.want)
+			}
+		})
+	}
+}

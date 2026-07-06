@@ -1796,6 +1796,29 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
+// maxPasteFilterLen caps paste length for single-line filter inputs. The
+// search/filter renderers render these as one line, so longer pastes
+// would either overflow the title row or wrap. 256 runes is more than
+// enough for any realistic search query.
+const maxPasteFilterLen = 256
+
+// pasteForFilter normalises paste content for a single-line filter input.
+// Newlines become spaces (so a multi-line paste still produces a usable
+// single-line filter), and the result is capped to maxPasteFilterLen runes
+// to keep the title line from overflowing the panel width.
+func pasteForFilter(content string) string {
+	if content == "" {
+		return ""
+	}
+	content = strings.ReplaceAll(content, "\n", " ")
+	content = strings.ReplaceAll(content, "\r", " ")
+	content = strings.ReplaceAll(content, "\t", " ")
+	if r := []rune(content); len(r) > maxPasteFilterLen {
+		content = string(r[:maxPasteFilterLen])
+	}
+	return content
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var (
 		tiCmd    tea.Cmd
@@ -1829,7 +1852,75 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.questionInput, _ = m.questionInput.Update(msg)
 			return m, nil
 		}
-		if m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.showQuestionDialog && m.detail.empty() {
+		// Route paste to the picker filter when the picker is open.
+		if m.showPicker {
+			content := pasteForFilter(msg.Content)
+			if len(content) > 0 {
+				// Session picker: load all sessions so the filter works globally.
+				if m.pickerKind == "session" && m.pickerSessionMore && m.pickerFilterPending == "" {
+					if cmd := m.loadAllSessions(); cmd != nil {
+						m.pickerFilterPending += content
+						m.pickerFilterSeq++
+						seq := m.pickerFilterSeq
+						pending := m.pickerFilterPending
+						return m, tea.Batch(cmd, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+							return pickerFilterApplyMsg{seq: seq, filter: pending}
+						}))
+					}
+				}
+				m.pickerFilterPending += content
+				m.pickerFilterSeq++
+				seq := m.pickerFilterSeq
+				pending := m.pickerFilterPending
+				return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+					return pickerFilterApplyMsg{seq: seq, filter: pending}
+				})
+			}
+			return m, nil
+		}
+		// Route paste to the file search filter when Ctrl+P search is open.
+		if m.showFileSearch {
+			content := pasteForFilter(msg.Content)
+			if len(content) > 0 {
+				m.fileSearchInput += content
+				m.fileSearchResults = filterFileSearchResults(m.fileSearchCache, m.fileSearchInput)
+				if m.fileSearchIndex >= len(m.fileSearchResults) {
+					m.fileSearchIndex = max(0, len(m.fileSearchResults)-1)
+				}
+			}
+			return m, nil
+		}
+		// Route paste to the chat search bar when Ctrl+F search is active.
+		if m.chatSearchActive {
+			if m.input.Width() > 0 {
+				m.chatSearchInput, _ = m.chatSearchInput.Update(msg)
+				m.rebuildChatSearchMatches()
+				m.chatSearchFlashMsg = -1
+				m.renderTranscript()
+			}
+			return m, nil
+		}
+		// Route paste to the detail view search bar when active.
+		if !m.detail.empty() {
+			top := &m.detail[len(m.detail)-1]
+			if top.searchActive {
+				if m.input.Width() > 0 {
+					top.searchInput, _ = top.searchInput.Update(msg)
+					m.rebuildDetailSearchMatches()
+				}
+				return m, nil
+			}
+		}
+		// Route paste to the log tab search when on the log tab.
+		if m.activeTab == tabLog {
+			content := pasteForFilter(msg.Content)
+			if len(content) > 0 {
+				m.logSearch += content
+				m.refreshLogViewport()
+			}
+			return m, nil
+		}
+		if m.activeTab == tabChat && !m.showConnect && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.showQuestionDialog && m.detail.empty() {
 			content := msg.Content
 			if shortcode, ok := m.shortcodePastedFiles(content); ok {
 				content = shortcode
@@ -3839,10 +3930,19 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			return true, m, nil
 		}
 		if len(msg.Text) > 0 {
-			// When filtering sessions, load all sessions so the filter works globally
+			// When filtering sessions, load all sessions so the filter works
+			// globally. Match the paste path: keep the typed character so the
+			// first keystroke isn't dropped, and batch the load with the
+			// debounce tick so the filter applies once the load completes.
 			if m.pickerKind == "session" && m.pickerSessionMore && m.pickerFilterPending == "" {
 				if cmd := m.loadAllSessions(); cmd != nil {
-					return true, m, cmd
+					m.pickerFilterPending += msg.Text
+					m.pickerFilterSeq++
+					seq := m.pickerFilterSeq
+					pending := m.pickerFilterPending
+					return true, m, tea.Batch(cmd, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+						return pickerFilterApplyMsg{seq: seq, filter: pending}
+					}))
 				}
 			}
 			m.pickerFilterPending += msg.Text
