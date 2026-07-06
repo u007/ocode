@@ -135,6 +135,11 @@ type Agent struct {
 	parentAdvisorEnabled *atomic.Bool
 	jobEvents            chan JobEvent
 	memoryMaintCh        chan MemoryMaintenanceRequest
+	docMaintCh           chan DocMaintenanceRequest
+	docMaintShutdownOnce sync.Once
+	docMaintMu           sync.Mutex // guards docMaintClosing + the close
+	docMaintClosing      bool       // true after shutdown initiated
+	docMaintDone         chan struct{}
 	retryEvents          chan *RetryStatusEvent
 	// OnMessage, if set, is invoked for each message produced during Step
 	// (assistant replies and tool results) as soon as they are generated,
@@ -563,8 +568,11 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	a.stopCh = make(chan struct{})
 	a.jobEvents = make(chan JobEvent, 32)
 	a.memoryMaintCh = make(chan MemoryMaintenanceRequest, 64)
+	a.docMaintCh = make(chan DocMaintenanceRequest, docMaintChannelCap)
+	a.docMaintDone = make(chan struct{})
 	a.retryEvents = make(chan *RetryStatusEvent, 32)
 	go a.memoryMaintenanceWorker()
+	go a.docMaintenanceWorker()
 	a.procs.SetOnDone(func(p *tool.Process) {
 		text, status, code, _ := a.procs.Output(p.ID)
 		a.emitJob(JobEvent{
@@ -607,6 +615,16 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	a.tools["task"] = &TaskTool{mainAgent: a, registry: DefaultAgentRegistry, runs: a.runs}
 	a.tools["agent_status"] = AgentStatusTool{runs: a.runs}
 	a.tools["task_status"] = TaskStatusTool{runs: a.runs}
+	a.tools["knowledge_lookup"] = &KnowledgeLookupTool{mainAgent: a}
+	a.tools["task_cancel"] = &TaskCancelTool{
+		runs: a.runs,
+		dispatcherForCall: func() string {
+			if a.spec != nil {
+				return a.spec.Name
+			}
+			return ""
+		},
+	}
 	if cfg != nil {
 		a.permissions.LoadFromConfig(cfg.Permission)
 		a.permissions.LoadFromOcode(cfg.Ocode.Permissions)
@@ -3112,6 +3130,11 @@ func (a *Agent) Client() LLMClient {
 	return a.client
 }
 
+func (a *Agent) GetTool(name string) (tool.Tool, bool) {
+	t, ok := a.tools[name]
+	return t, ok
+}
+
 func (a *Agent) GetTools() []tool.Tool {
 	tools := make([]tool.Tool, 0, len(a.tools))
 	for _, t := range a.tools {
@@ -3348,6 +3371,8 @@ func (a *Agent) Shutdown() {
 	if a.runs != nil {
 		a.runs.CancelAll()
 	}
+	// Shut down doc maintenance worker (drains current item, drops queued).
+	a.docMaintShutdown()
 	// Drop this agent's entries from the global cross-agent write registry so
 	// surviving agents' UndoByToolCallID doesn't see stale same-agent writes
 	// blocking them. Safe to call multiple times (Reset is idempotent).

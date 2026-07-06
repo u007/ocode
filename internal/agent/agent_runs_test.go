@@ -123,10 +123,105 @@ func TestAgentRunTerminalStateIsStickyAfterCancel(t *testing.T) {
 	r.CancelAll()
 
 	run.finishOK("late success")
-	if run.statusValue() != RunFailed {
-		t.Fatalf("status after late finishOK = %s, want %s", run.statusValue(), RunFailed)
+	if run.statusValue() != RunCancelled {
+		t.Fatalf("status after late finishOK = %s, want %s", run.statusValue(), RunCancelled)
 	}
 	if run.Result != "" {
 		t.Fatalf("late finishOK should not set result, got %q", run.Result)
 	}
 }
+
+func TestCancelOwnedUnknownID(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.New("explore")
+	err := r.CancelOwned("agent-run-999", "build")
+	if err == nil {
+		t.Fatal("expected error for unknown task id")
+	}
+	if !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("error = %q, want 'unknown'", err)
+	}
+}
+
+func TestCancelOwnedWrongDispatcher(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.Dispatcher = "build"
+	err := r.CancelOwned(run.ID, "attacker")
+	if err == nil {
+		t.Fatal("expected error for wrong dispatcher")
+	}
+	if !strings.Contains(err.Error(), "not owned by") {
+		t.Fatalf("error = %q, want 'not owned by'", err)
+	}
+}
+
+func TestCancelOwnedCorrectDispatcher(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.Dispatcher = "build"
+	cancelled := false
+	run.Cancel = func() { cancelled = true }
+
+	err := r.CancelOwned(run.ID, "build")
+	if err != nil {
+		t.Fatalf("CancelOwned err: %v", err)
+	}
+	if !cancelled {
+		t.Fatal("CancelOwned did not invoke Cancel func")
+	}
+	if run.statusValue() != RunCancelled {
+		t.Fatalf("status = %s, want %s", run.statusValue(), RunCancelled)
+	}
+	if run.Err != "cancelled" {
+		t.Fatalf("Err = %q, want 'cancelled'", run.Err)
+	}
+}
+
+func TestCancelOwnedAlreadyDoneIsNoOp(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.Dispatcher = "build"
+	run.finishOK("already done")
+
+	err := r.CancelOwned(run.ID, "build")
+	if err != nil {
+		t.Fatalf("CancelOwned err: %v", err)
+	}
+	if run.statusValue() != RunDone {
+		t.Fatalf("status = %s, want %s", run.statusValue(), RunDone)
+	}
+	if run.Result != "already done" {
+		t.Fatalf("result changed to %q", run.Result)
+	}
+}
+
+func TestCancelAllMarksRunCancelled(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.Sub = NewAgent(nil, nil, nil, nil)
+	run.Cancel = func() {}
+	r.CancelAll()
+
+	if run.statusValue() != RunCancelled {
+		t.Fatalf("CancelAll status = %s, want %s", run.statusValue(), RunCancelled)
+	}
+	if run.Err != "cancelled" {
+		t.Fatalf("CancelAll Err = %q, want 'cancelled'", run.Err)
+	}
+}
+
+func TestCancelOwnedEmptyDispatcherOnRun(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	// Dispatcher is empty string -- only a caller with empty dispatcher can cancel.
+	run.Dispatcher = ""
+	err := r.CancelOwned(run.ID, "")
+	if err != nil {
+		t.Fatalf("CancelOwned err: %v", err)
+	}
+	if run.statusValue() != RunCancelled {
+		t.Fatalf("status = %s, want %s", run.statusValue(), RunCancelled)
+	}
+}
+

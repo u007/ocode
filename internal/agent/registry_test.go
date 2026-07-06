@@ -281,14 +281,15 @@ func TestPermissionManagerYoloAllowsBash(t *testing.T) {
 }
 
 func TestSubAgentSpecs(t *testing.T) {
-	if len(DefaultSubAgents) != 3 {
-		t.Fatalf("expected 3 default sub-agents, got %d", len(DefaultSubAgents))
+	if len(DefaultSubAgents) != 4 {
+		t.Fatalf("expected 4 default sub-agents, got %d", len(DefaultSubAgents))
 	}
 
 	names := map[string]bool{
 		"general": false,
 		"explore": false,
 		"scout":   false,
+		"context": false,
 	}
 
 	for _, sa := range DefaultSubAgents {

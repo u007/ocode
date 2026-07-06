@@ -1,3 +1,15 @@
+---
+type: Decision
+title: Zed-compatible ACP Mode Specification
+description: Approved architecture spec for implementing 'ocode acp' using the Agent Client Protocol, enabling ocode as a Zed editor agent.
+tags:
+  - acp
+  - zed
+  - protocol
+  - architecture
+  - json-rpc
+timestamp: 2026-07-06T08:34:53Z
+---
 # Spec: Zed-compatible ACP mode (`ocode acp`)
 
 Status: draft, approved for implementation
@@ -42,7 +54,7 @@ Target protocol version: `1` (integer, per ACP schema).
 
 Errors use standard JSON-RPC codes: `-32700` parse error, `-32601` method not
 found, `-32602` invalid params, `-32603` internal. Unknown **notifications**
-are ignored silently (no error reply), per JSON-RPC.
+are ignored silently (per JSON-RPC).
 
 ### Prompt content mapping (client → agent)
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/skill"
 )
 
@@ -121,6 +122,17 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 	}
 	if a.DocPromptEnabled() {
 		msgs = append(msgs, Message{Role: "system", Content: promptDocPromptMarker + "\n" + docPromptContent})
+		// Inject the [ocode:knowledge] index when the knowledge bundle is active.
+		wd := a.workDir
+		if wd == "" {
+			wd, _ = os.Getwd()
+		}
+		if bundle, ok := knowledge.DetectBundle(wd); ok {
+			indexPath := filepath.Join(bundle.Root, "index.md")
+			if content, err := os.ReadFile(indexPath); err == nil {
+				msgs = append(msgs, Message{Role: "system", Content: "[ocode:knowledge]\n" + string(content)})
+			}
+		}
 	}
 	if sel := strings.TrimSpace(selectionContext); sel != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptSelectionMarker + "\n" + sel})

@@ -1,3 +1,14 @@
+---
+type: Guide
+title: Using ocode with Zed
+description: Setup guide and feature matrix for integrating ocode with the Zed editor via ACP (Agent Client Protocol).
+tags:
+  - zed
+  - acp
+  - editor-integration
+  - setup
+timestamp: 2026-07-06T08:34:47Z
+---
 # Using ocode with Zed
 
 ocode implements the [Agent Client Protocol (ACP)](https://agentclientprotocol.com)

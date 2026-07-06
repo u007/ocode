@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,14 +15,14 @@ import (
 type RunStatus string
 
 const (
-	RunRunning RunStatus = "running"
-	RunDone    RunStatus = "done"
-	RunFailed  RunStatus = "failed"
+	RunRunning   RunStatus = "running"
+	RunDone      RunStatus = "done"
+	RunFailed    RunStatus = "failed"
+	RunCancelled RunStatus = "cancelled"
 )
 
 // transcriptCap bounds the per-run stored message count.
 const transcriptCap = 200
-
 // AgentRun is one async subagent execution.
 type AgentRun struct {
 	ID         string
@@ -35,6 +37,7 @@ type AgentRun struct {
 	Cancel     func()                // cancels the subagent's Step loop
 	Background bool                  // true if the LLM launched this with run_in_background; false means the parent's task tool call already received the full result synchronously
 	ToolCallID string                // the originating task tool_call id (best-effort; empty if unknown)
+	Dispatcher string                // identity of the agent that dispatched this run
 
 	mu           sync.Mutex
 	transcript   []Message
@@ -162,14 +165,14 @@ func (r *AgentRun) finishErr(err string) {
 	r.closeDone()
 }
 
-// tryFinishCancelled marks the run as Failed only if it is still Running.
-// Used by CancelAll so the TUI reflects the cancelled state immediately,
-// without racing with the goroutine that may call finishOK later.
+// tryFinishCancelled marks the run as Cancelled only if it is still Running.
+// Used by CancelAll and CancelOwned so the TUI reflects the cancelled state
+// immediately, without racing with the goroutine that may call finishOK later.
 func (r *AgentRun) tryFinishCancelled() {
 	r.mu.Lock()
 	cancelled := false
 	if r.Status == RunRunning {
-		r.Status = RunFailed
+		r.Status = RunCancelled
 		r.Err = "cancelled"
 		r.EndedAt = time.Now()
 		cancelled = true
@@ -248,9 +251,59 @@ func (r *AgentRunRegistry) Get(id string) (*AgentRun, bool) {
 	return run, ok
 }
 
+// PruneCompleted removes completed (done/failed) runs beyond keepMax, keeping
+// the most recently finished ones. Running runs are never removed. The number
+// of removed runs is returned.
+func (r *AgentRunRegistry) PruneCompleted(keepMax int) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.pruneCompletedLocked(keepMax)
+}
+
+// pruneCompletedLocked is the lock-holding half of PruneCompleted.
+func (r *AgentRunRegistry) pruneCompletedLocked(keepMax int) int {
+	type entry struct {
+		id  string
+		end time.Time
+	}
+	var completed []entry
+	for id, run := range r.runs {
+		if run.statusValue() != RunRunning {
+			completed = append(completed, entry{id: id, end: run.EndedAt})
+		}
+	}
+	if len(completed) <= keepMax {
+		return 0
+	}
+	// Sort by end time descending (newest first).
+	sort.Slice(completed, func(i, j int) bool {
+		return completed[i].end.After(completed[j].end)
+	})
+	toRemove := completed[keepMax:]
+	removed := 0
+	for _, e := range toRemove {
+		delete(r.runs, e.id)
+		removed++
+	}
+	if removed > 0 {
+		newOrder := make([]string, 0, len(r.runs))
+		for _, id := range r.order {
+			if _, ok := r.runs[id]; ok {
+				newOrder = append(newOrder, id)
+			}
+		}
+		r.order = newOrder
+	}
+	return removed
+}
+
 func (r *AgentRunRegistry) Snapshot() []*AgentRun {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Auto-prune: keep at most 30 completed runs so the list doesn't grow
+	// unbounded. This is called on every TUI render cycle; the overhead of
+	// pruning 50-odd entries is negligible.
+	r.pruneCompletedLocked(30)
 	out := make([]*AgentRun, 0, len(r.order))
 	for _, id := range r.order {
 		out = append(out, r.runs[id])
@@ -268,6 +321,31 @@ func (r *AgentRunRegistry) RunningCount() int {
 		}
 	}
 	return count
+}
+
+// CancelOwned cancels a subagent run if and only if the caller's dispatcher
+// identity matches the run's Dispatcher field. Returns an error for unknown
+// task IDs or dispatcher mismatches. Cancelling an already-terminated run is
+// a reported no-op (no error). On success, invokes the run's Cancel func and
+// marks it as RunCancelled.
+func (r *AgentRunRegistry) CancelOwned(taskID, dispatcher string) error {
+	r.mu.Lock()
+	run, ok := r.runs[taskID]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("unknown task: %s", taskID)
+	}
+	if run.Dispatcher != dispatcher {
+		return fmt.Errorf("task %s is not owned by %q", taskID, dispatcher)
+	}
+	if run.statusValue() != RunRunning {
+		return nil // already terminal; no-op
+	}
+	if run.Cancel != nil {
+		run.Cancel()
+	}
+	run.tryFinishCancelled()
+	return nil
 }
 
 // CancelAll cancels every running subagent and marks it cancelled immediately.

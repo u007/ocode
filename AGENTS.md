@@ -46,9 +46,105 @@ git worktree add .worktrees/feature-branch feature-branch
 - When reading files, show only the relevant excerpts needed for the
   current task — do not dump entire files.
 
+## Knowledge System (OKF Bundle)
+The project supports an **OKF v0.1 knowledge bundle** at `docs/` — a curated set of
+markdown files with YAML frontmatter (type, title, description, tags, timestamp,
+status). The system activates when both `/docs on` is set AND `docs/index.md`
+frontmatter contains `okf_version: "0.1"` (created by `/docs init`).
+
+### Agents
+
+| Agent | Role | Tools |
+|-------|------|-------|
+| `context` | Knowledge curator and retriever — answers why/decision/playbook questions, sole automated writer | `grep`, `glob`, `read`, `list`, `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` |
+| `explore` | Code-level exploration — where/how/what in source | `read`, `glob`, `grep`, `list`, `lsp`, `bash`, `webfetch`, `websearch` |
+
+Guidance in the `DocPromptEnabled` prompt fragment: try `knowledge_lookup` first
+for why/decision/playbook questions; use `explore` for code-level questions; for
+mixed questions dispatch both in background concurrently, take the first
+sufficient answer, `task_cancel` the other.
+
+### Tools
+
+| Tool | Availability | Description |
+|------|-------------|-------------|
+| `knowledge_lookup` | Always registered | Dispatches the `context` sub-agent to answer knowledge questions. Soft-fails (hints `/docs init`) when inactive. |
+| `task_cancel` | Always registered | Cancels a background task **you** dispatched. Cooperative — stops at the next step boundary. Ownership enforced by dispatcher identity. |
+| `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` | Context sub-agent only | Full CRUD on the knowledge bundle. Write/deprecate auto-update `log.md` and regenerate `index.md` under cross-instance file lock. |
+
+### `/docs` subcommands
+
+| Subcommand | Behavior |
+|------------|----------|
+| `on` / `off` | Toggle doc-first development prompt (master switch for knowledge system) |
+| `status` | Bundle presence, doc counts (conforming/non-conforming/deprecated), last log entry, active state |
+| `init` | Bootstrap `docs/` into an OKF bundle — add frontmatter, generate index + log, emit staleness report. Non-destructive, idempotent. |
+| `update [focus]` | Force a maintenance pass (checks transcript for durable knowledge) |
+| `cleanup [--yes]` | List deprecated docs; `--yes` deletes them under lock with log+index update |
+
+### Maintenance
+A post-job doc maintenance worker mirrors memory maintenance:
+1. **Triage (small model):** Decides if the last turn produced durable knowledge (decisions, gotchas, playbooks, schema changes). Q&A and routine edits are noops.
+2. **Execute:** Dispatches the `context` sub-agent to apply create/update/deprecate actions.
+3. All mutations go through `knowledge.WithBundleLock` (`docs/.okf.lock`, flock-style).
+4. Worker drains on `Agent.Shutdown()` — drops queued items, finishes the current one.
+
+### Relationships
+- **`docs` primary agent** (ModeDocs) has the `task` tool so it can dispatch `context` for knowledge lookups, but has no direct doc tools.
+- **`/doc-sync`** (rules/skills sync) is unrelated — its scope is `AGENTS.md`, rules, skills, never `docs/`.
+- **Memory scopes** (`/mem`) are orthogonal — knowledge bundle is project docs, memory is agent state.
+
 ## File Reading
 When reading files, show only the relevant excerpts needed for the current
 task. Whole-file dumps waste the context window and obscure the signal.
+
+## OKF Knowledge Bundle (`docs/`)
+The project supports an optional **OKF (Open Knowledge Format) knowledge
+bundle** rooted at `docs/`. When active, the agent receives a
+`[ocode:knowledge]` index in its system prompt and gains the
+`knowledge_lookup` tool for semantic retrieval.
+
+**Activation** (two gates, both required):
+1. `DocPromptEnabled` flag — toggled via `/docs on` (persisted in config).
+2. Bundle marker — `docs/index.md` must have `okf_version: "0.1"`
+   frontmatter, created only by `/docs init`.
+
+**`context` subagent** (the sole automated writer):
+- `task(agent="context", prompt="...")` dispatches a small-model subagent that
+  has exclusive write access to the bundle via injected doc tools
+  (`doc_search`, `doc_get`, `doc_write`, `doc_deprecate`).
+- The `context` agent verifies doc claims against code before writing, prefers
+  updating existing docs over creating near-duplicates, and deprecates rather
+  than deletes. It is the only code path that can mutate the bundle.
+- Use for "what/why did we decide X", "find the playbook for Y", "update the
+  schema doc for Z".
+- The `explore` subagent is for general codebase research; `context` is pinned
+  to the knowledge bundle.
+
+**`knowledge_lookup` tool**: injected into every agent turn when the bundle is
+active. Performs semantic search across the bundle index. Results are injected
+into the `[ocode:knowledge]` system block.
+
+**`task_cancel` tool**: cancels a running sub-agent (including async context
+agents) by run ID. Available to the main agent whenever sub-agents are active.
+
+**Sole-automated-writer invariant**: No agent path outside the `context`
+subagent may write to the bundle. The main agent's tool set never includes
+`doc_write` or `doc_deprecate`. Deletion happens only via `/docs cleanup`
+(per-file confirmation required).
+
+**`/docs` subcommands** (TUI):
+- `/docs on|off` — toggle the knowledge system flag.
+- `/docs status` — show bundle presence, doc counts (conforming / non-conforming
+  / deprecated), last log entry date, whether the system is active.
+- `/docs init` — create bundle marker (`docs/index.md` + `docs/log.md`) and
+  dispatch the `context` subagent to scan & annotate existing docs. Idempotent
+  (re-run re-audits without clobbering).
+- `/docs update [focus]` — force a maintenance pass (scan for staleness,
+  duplicates, orphans). Queued asynchronously.
+- `/docs cleanup` — list deprecated docs with path and reason; use `--yes` to
+  confirm deletion. Deletes files under bundle lock, logs deletions, regenerates
+  index.
 
 ## TUI Output Safety (alt-screen)
 The TUI runs in Bubble Tea's alt-screen. Any raw write to `os.Stdout` /

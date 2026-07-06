@@ -48,7 +48,7 @@ var DefaultAgents = []AgentSpec{
 	{
 		Name:        "docs",
 		Description: "Documentation writing with file operations",
-		Tools:       []string{"read", "write", "edit", "glob", "grep", "list", "delete", "webfetch", "websearch", "skill"},
+		Tools:       []string{"read", "write", "edit", "glob", "grep", "list", "delete", "task", "webfetch", "websearch", "skill", "knowledge_lookup"},
 		Mode:        ModeDocs,
 		Color:       "#BB9AF7", // purple: writing
 	},

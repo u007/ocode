@@ -193,6 +193,12 @@ type editorFinishedMsg struct {
 	err     error
 }
 
+// docsInitFinishedMsg is emitted when an async /docs init operation completes.
+type docsInitFinishedMsg struct {
+	text string // result text to display (or error)
+	err  error  // non-nil when the operation failed
+}
+
 // editorPickedMsg is emitted by the files-tab editor picker after the user
 // selects an editor. The parent model handles it so it can update the resolved
 // editor and rebuild the editorOpener before opening the target file.
@@ -1673,10 +1679,12 @@ func newModel(opts ...RunOptions) model {
 		})
 	}
 
-	// Set workDir for path-scoped permission checks
-	if m.agent != nil && m.agent.Permissions() != nil {
-		m.agent.Permissions().SetWorkDir(m.workDir)
-	}
+		// Set workDir on the agent so subagent dispatches (context agent doc
+		// tools, knowledge_lookup) can detect the bundle. SetWorkDir also
+		// propagates to permissions and advisor tools.
+		if m.agent != nil {
+			m.agent.SetWorkDir(m.workDir)
+		}
 	session.SetWorkDir(m.workDir)
 	m.wireCompactCallbacks()
 
@@ -2389,6 +2397,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
 		m.rerenderTranscriptAndMaybeScroll()
+	case docsInitFinishedMsg:
+		text := msg.text
+		if msg.err != nil {
+			text = fmt.Sprintf("Error initializing bundle: %v", msg.err)
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: text})
+		m.rerenderTranscriptAndMaybeScroll()
 	case usageSummaryMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error querying usage: %v", msg.err)})
@@ -3090,8 +3105,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		ev := msg.ev
 		m.queueMemoryMaintenance(ev)
+		m.queueDocMaintenance(ev)
 		// For agent runs that were synchronous, the parent agent already
-		// received the full result via the task tool's return value and the
 		// LLM has already responded to it. Re-injecting the completion as a
 		// fresh user/system message causes infinite re-dispatch loops with
 		// small models. Just listen for the next job and bail.
@@ -4214,13 +4229,10 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 				return m, m.copyReviewToClipboard()
 			}
 		case "esc":
-			// While a detail view is open: if the user has live agent work in
-			// flight (streaming or running sub-agents), Esc cancels that first
-			// so the gesture matches its meaning on the chat tab; otherwise
-			// pop the detail card.
-			if m.hasActiveAgentWork() {
-				return m.handleEscKey()
-			}
+			// In a detail view, Esc always pops back to the parent view.
+			// Canceling the agent is meaningful only on the main chat tab
+			// where the full agent context is visible. Popping the detail
+			// is a navigation action, not a cancellation action.
 			m.detail.pop()
 			return m, nil
 		}
@@ -6916,7 +6928,6 @@ func (m *model) loadOcrModelsCmd() tea.Cmd {
 		var items, values []string
 		var isHeader []bool
 
-
 		for _, name := range ocr.List() {
 			be := ocr.Get(name)
 			if be == nil {
@@ -6979,11 +6990,7 @@ func (m *model) loadOcrModelsCmd() tea.Cmd {
 
 func (m *model) handleDocsCmd(args []string) tea.Cmd {
 	if len(args) == 0 || strings.ToLower(args[0]) == "status" {
-		status := "disabled"
-		if m.agent != nil && m.agent.DocPromptEnabled() {
-			status = "enabled"
-		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Documentation-first development prompt: %s.", status)})
+		m.messages = append(m.messages, message{role: roleAssistant, text: m.docsStatus()})
 		return nil
 	}
 	switch strings.ToLower(args[0]) {
@@ -6992,7 +6999,7 @@ func (m *model) handleDocsCmd(args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
 			return nil
 		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Documentation-first development prompt: enabled."})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Documentation-first development prompt: enabled. Use /docs init to set up the OKF knowledge bundle."})
 		return nil
 	case "off", "false", "no", "disable":
 		if err := setDocPromptEnabled(m, false); err != nil {
@@ -7001,8 +7008,34 @@ func (m *model) handleDocsCmd(args []string) tea.Cmd {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Documentation-first development prompt: disabled."})
 		return nil
+	case "init":
+		// Run /docs init asynchronously (C7). The old synchronous path
+		// called InitBundle + dispatchContextAgent inside the Bubble Tea
+		// update loop, freezing the TUI for minutes.
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Initializing OKF knowledge bundle..."})
+		return func() tea.Msg {
+			result := m.docsInit()
+			return docsInitFinishedMsg{text: result}
+		}
+	case "update":
+		focus := ""
+		if len(args) > 1 {
+			focus = strings.Join(args[1:], " ")
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: m.docsUpdate(focus)})
+		return nil
+	case "cleanup":
+		confirm := false
+		for _, a := range args[1:] {
+			if a == "--yes" || a == "-y" {
+				confirm = true
+				break
+			}
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: m.docsCleanup(confirm)})
+		return nil
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /docs [on|off|status]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /docs [on|off|status|init|update|cleanup]"})
 		return nil
 	}
 }
@@ -13140,6 +13173,16 @@ func (m *model) queueMemoryMaintenance(ev agent.JobEvent) {
 	})
 }
 
+func (m *model) queueDocMaintenance(ev agent.JobEvent) {
+	if m == nil || m.agent == nil || strings.TrimSpace(m.workDir) == "" {
+		return
+	}
+	m.agent.QueueDocMaintenance(agent.DocMaintenanceRequest{
+		WorkDir:        m.workDir,
+		RecentMessages: m.memoryMaintenanceContext(),
+	})
+}
+
 func (m *model) memoryMaintenanceContext() []agent.Message {
 	if m == nil || len(m.messages) == 0 {
 		return nil
@@ -13443,6 +13486,9 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 		}
 		if lbl := ri.ModelLabel(); lbl != "" {
 			head += " [" + lbl + "]"
+		}
+		if in, out := ri.Usage(); in > 0 || out > 0 {
+			head += fmt.Sprintf(" · \u2193%s \u2191%s", formatTokenCount(in), formatTokenCount(out))
 		}
 		selected := m.agentStripFocused && i == m.agentStripSelected
 		if selected {
@@ -14295,7 +14341,13 @@ func (m *model) renderStatus() string {
 	// will not affect the click region. If you ever move a segment to
 	// appear BEFORE permissionMode, you MUST update these column bounds
 	// (or the click hit-test will go to the wrong segment).
-	leftStatus := statusPrefix + permissionMode + compactState + jobState
+	tokUsage := ""
+	if m.sessionTelemetry.hasData() {
+		in := formatTokenCount(m.sessionTelemetry.inputTokens)
+		out := formatTokenCount(m.sessionTelemetry.outputTokens)
+		tokUsage = fmt.Sprintf(" · \u2193%s \u2191%s", in, out)
+	}
+	leftStatus := statusPrefix + tokUsage + permissionMode + compactState + jobState
 	if m.rcSrv != nil {
 		leftStatus += " | " + rcActiveStyle.Render("⊕ RC")
 	}
@@ -14907,6 +14959,46 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	appendWrapped(&data.topLines, ocrLine, outerBodyWidth)
 	data.ocrToggleRows = len(data.topLines) - data.ocrToggleTopIdx
 	data.topLines = append(data.topLines, "")
+
+	// ── Agents section (scrollable) ──
+	if m.agent != nil && m.agent.Runs() != nil {
+		runs := m.agent.Runs().Snapshot()
+		if len(runs) > 0 {
+			var agentLines []string
+			running := 0
+			completed := 0
+			for _, run := range runs {
+				if run.Status == agent.RunRunning {
+					if running >= 5 {
+						completed++
+						continue
+					}
+					running++
+				} else {
+					completed++
+					continue
+				}
+				// Running runs — show full detail.
+				icon := statusIcon(run.Status, "●")
+				lbl := run.ModelLabel()
+				line := fmt.Sprintf(" %s %s", icon, run.Name)
+				if lbl != "" {
+					line += " [" + lbl + "]"
+				}
+				if in, out := run.Usage(); in > 0 || out > 0 {
+					line += fmt.Sprintf(" \u2193%s \u2191%s", formatTokenCount(in), formatTokenCount(out))
+				}
+				agentLines = append(agentLines, sidebarTextStyle.Render(line))
+			}
+			if completed > 0 {
+				line := dimStyle.Render(fmt.Sprintf(" \u2022 %d completed agent%s", completed, plural(completed)))
+				agentLines = append(agentLines, line)
+			}
+			if len(agentLines) > 0 {
+				appendScrollSection("Agents", agentLines, nil)
+			}
+		}
+	}
 
 	// ── Git status section (scrollable) ──
 	gitBranch := m.git.currentBranch

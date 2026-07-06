@@ -141,7 +141,7 @@ func init() {
 		{name: "/upload", aliases: []string{"/uploads"}, usage: "/upload [path]", help: "Show or set the file upload directory used by /api/uploads", handler: runUploadCmd},
 		{name: "/search", aliases: []string{"/find"}, usage: "/search <query>", help: "Find a message by keyword (opens the in-chat find bar)", handler: runSearchCmd},
 		{name: "/discover", usage: "/discover [enable|disable|status|model [name]|ignore [add|remove|clear] [path]]", help: "Enable/disable retrieval-based skill/MCP discovery, show status, choose the query-embedding model, or manage ignored paths", handler: runDiscoverCmd},
-		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status]", help: "Enable/disable documentation-first development prompt (read docs before implementing, update after)", handler: runDocsCmd},
+		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status|init|update|cleanup]", help: "Manage documentation-first development and OKF knowledge bundle: on/off toggle, status show counts, init create bundle, update force maintenance, cleanup remove deprecated docs", handler: runDocsCmd},
 		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},

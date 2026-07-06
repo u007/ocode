@@ -73,6 +73,9 @@ go build -o ocode .
 | `apply_patch` | Structured multi-file diff patching |
 | `skill` | Load skill definitions on demand |
 | `plan`, `todo` | Project planning and todo list management |
+| `doc_search`, `doc_get`, `doc_write`, `doc_deprecate` | OKF knowledge bundle CRUD — search, read, write, and deprecate curated project docs with frontmatter round-trip and auto-maintained index/log |
+| `knowledge_lookup` | Dispatch the `context` sub-agent to answer why/decision/playbook questions from the knowledge bundle |
+| `task_cancel` | Cancel a background task you dispatched (cooperative, ownership-guarded) |
 
 ### Git Integration
 
@@ -195,6 +198,26 @@ A React-based web interface that mirrors the TUI experience:
 | **Agent cowork panel** | ✅ Parallel agent monitoring sidebar |
 | **Slash commands** | ✅ Autocomplete popup with keyboard navigation |
 
+### 📚 Knowledge Bundle (`/docs`)
+
+An optional **OKF (Open Knowledge Format)** knowledge bundle at `docs/` that
+the agent curates automatically. When active, the agent's system prompt
+includes a `[ocode:knowledge]` index and a `knowledge_lookup` tool for
+semantic retrieval.
+
+| Command | Purpose |
+|---------|---------|
+| `/docs on` / `/docs off` | Toggle the knowledge system flag |
+| `/docs init` | Create bundle marker + dispatch the `context` subagent to annotate existing docs |
+| `/docs status` | Show bundle presence, doc counts, last log entry |
+| `/docs update [focus]` | Force a maintenance pass (scan for staleness, duplicates) |
+| `/docs cleanup` | List deprecated docs; `--yes` confirms deletion |
+
+Knowledge curation happens via the dedicated `context` subagent (the sole
+automated writer), which verifies doc claims against code before writing and
+deprecates rather than deletes. The main agent never gains `doc_write` or
+`doc_deprecate` tools.
+
 ### 🪟 Desktop App (Beta)
 
 A native desktop shell (`cmd/ocode-desktop`) that opens the same web UI in a
@@ -239,6 +262,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/rc` | `/remote-control` | Start/stop web UI (`/rc off`) to mirror this session |
 | `/cd` | `/cwd` | Change the project root to another directory |
 | `/context` | | Show context window token budget and system prompt |
+| `/docs` | `/doc-mode` | Manage OKF knowledge bundle (on, off, status, init, update, cleanup) |
 | `/upload` | `/uploads` | Show or set the file upload directory |
 | `/search` | `/find` | Find a message by keyword (opens the in-chat find bar) |
 | `/add-dir` | `/add-dirs` | Add a directory to extra allowed paths |

@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
@@ -48,6 +49,20 @@ Output:
 - End with a "remaining unknowns" section listing anything you could not verify within scope.
 - Do not propose fixes or write design discussion; you are a research agent.`
 
+const contextSubAgentPrompt = `You are context, the knowledge curator for this project's OKF (Open Knowledge Format) bundle under docs/. Your job is to answer "why/what did we decide/do we have a playbook for X" questions from curated docs, and to be the sole automated writer of the bundle.
+
+Approach:
+- Start by checking the bundle index (doc_search with a broad query) to find relevant documents before reading code.
+- Verify doc claims against code before answering or writing — use grep/glob/read to cross-reference.
+- Write only through the doc tools (doc_write, doc_deprecate). Never edit docs/ files directly.
+- Prefer updating an existing document over creating a near-duplicate.
+- Deprecate rather than delete — set status=deprecated with a reason.
+- When the knowledge system is not initialized, say so and suggest /docs init.
+
+Output:
+- Lead with the answer, citing document paths.
+- When writing, summarise what changed and why in one paragraph.`
+
 const scoutSubAgentPrompt = `You are scout, a read-only research agent for code OUTSIDE this workspace — external libraries, dependency source, vendor docs, and reference repositories.
 
 Use the right source for the question:
@@ -85,6 +100,12 @@ var DefaultSubAgents = []SubAgentSpec{
 		Description:  "External docs, dependency research",
 		SystemPrompt: scoutSubAgentPrompt,
 		Tools:        []string{"repo_clone", "repo_overview", "glob", "grep", "list", "read", "webfetch", "websearch"},
+	},
+	{
+		Name:         "context",
+		Description:  "knowledge curator and retriever for the project's OKF docs/ bundle — answers why/decision/playbook questions from curated docs, cites doc paths, sole automated writer of the bundle",
+		SystemPrompt: contextSubAgentPrompt,
+		Tools:        []string{"grep", "glob", "read", "list"},
 	},
 }
 
@@ -244,6 +265,31 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 
 	tools := t.getToolsForDef(spec)
 
+	// Track doc tool names injected for the context subagent so we can
+	// extend the spec's allowlist. Without this, isToolAllowed rejects
+	// the injected tools because the context spec only lists grep/glob/
+	// read/list (C1: OCSEC:31f59a:1).
+	var injectedDocToolNames []string
+
+	// Inject doc tools for the context subagent at dispatch time so the
+	// main agent never gains write access to the bundle. If the bundle is
+	// absent, dispatch without doc tools (the agent prompt tells it to say
+	// the knowledge system is not initialized).
+	if spec.Name == "context" {
+		wd := t.mainAgent.workDir
+		if wd == "" {
+			wd, _ = os.Getwd()
+		}
+		if docTools, err := newDocTools(wd); err == nil {
+			for _, dt := range docTools {
+				tools = append(tools, dt)
+				injectedDocToolNames = append(injectedDocToolNames, dt.Name())
+			}
+		} else {
+			emitDebug("KNOWLEDGE", fmt.Sprintf("context agent dispatched without doc tools: %v", err))
+		}
+	}
+
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
 	// Wire the sub-agent's advisor gate to the parent's atomic flag so
 	// mid-run toggles propagate immediately (reactive, not a snapshot).
@@ -286,6 +332,13 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		Color:        spec.Color,
 		Temperature:  spec.Temperature,
 		TopP:         spec.TopP,
+	}
+	// Extend the spec's allowlist with any doc tools injected for the
+	// context agent (C1). Without this, isToolAllowed blocks them even
+	// though they exist in the tools array — the spec's Tools field is
+	// the source of truth for the allowlist filter.
+	if len(injectedDocToolNames) > 0 {
+		subSpec.Tools = append(spec.Tools, injectedDocToolNames...)
 	}
 	// Inject the small model for lightweight agents (explore, general, compaction)
 	// when no explicit model override is present on the spec.
@@ -361,6 +414,9 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		run.Procs = subAgent.Procs()
 		run.Sub = subAgent
 		run.Cancel = subAgent.Cancel
+		if t.mainAgent != nil && t.mainAgent.spec != nil {
+			run.Dispatcher = t.mainAgent.spec.Name
+		}
 		attachRunTranscript(run)
 
 		go func() {
@@ -384,6 +440,9 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		run.Procs = subAgent.Procs()
 		run.Sub = subAgent
 		run.Cancel = subAgent.Cancel
+		if t.mainAgent != nil && t.mainAgent.spec != nil {
+			run.Dispatcher = t.mainAgent.spec.Name
+		}
 		attachRunTranscript(run)
 	}
 	result, resp, err := t.executeSubAgentWithTranscript(spec.Name, subAgent, subAgentMsgs)
@@ -482,6 +541,17 @@ func (t TaskTool) registrySubAgents() []AgentDefinition {
 		})
 	}
 	return result
+}
+
+// ExecuteRaw dispatches a subagent by name synchronously with the given prompt.
+// Used by the KnowledgeLookupTool for synchronous knowledge lookups.
+func (t TaskTool) ExecuteRaw(agentName, prompt string, background bool) (string, error) {
+	args, _ := json.Marshal(map[string]interface{}{
+		"agent":             agentName,
+		"prompt":            prompt,
+		"run_in_background": background,
+	})
+	return t.Execute(args)
 }
 
 func (t TaskTool) findAgent(name string) *AgentDefinition {

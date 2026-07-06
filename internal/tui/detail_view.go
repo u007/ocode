@@ -161,12 +161,18 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 	if childSummary != "" {
 		header += " · " + childSummary
 	}
+	if in, out := run.Usage(); in > 0 || out > 0 {
+		header += fmt.Sprintf(" · \u2193%s \u2191%s", formatTokenCount(in), formatTokenCount(out))
+	}
 	cardStart := currentRow
 	appendLine(header)
 	appendLine(hintStyle.Render(run.ID))
 
 	if run.Status == agent.RunFailed && strings.TrimSpace(run.Err) != "" {
 		appendLine(errorStyle.Render("Error: " + strings.TrimSpace(run.Err)))
+	}
+	if run.Status == agent.RunCancelled && strings.TrimSpace(run.Err) != "" {
+		appendLine(errorStyle.Render("Cancelled: " + strings.TrimSpace(run.Err)))
 	}
 
 	if messages := run.TranscriptPublic(); len(messages) > 0 {
@@ -206,6 +212,16 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 		}
 	} else {
 		appendLine(hintStyle.Render("No user-visible activity yet."))
+	}
+
+	// ── Agent-scoped todo (from todowrite calls in transcript) ──
+	if msgs := run.TranscriptPublic(); len(msgs) > 0 {
+		if todoText := extractAgentRunTodo(msgs); todoText != "" {
+			appendLine(headerStyle.Render("Todo"))
+			for _, todoLine := range renderSidebarTodo(todoText, innerWidth) {
+				appendLine(todoLine)
+			}
+		}
 	}
 
 	if run.Status == agent.RunDone && strings.TrimSpace(run.Result) != "" {
@@ -456,7 +472,7 @@ func formatChildSummary(children []*agent.AgentRun) string {
 	if len(children) == 0 {
 		return ""
 	}
-	running, done, failed := 0, 0, 0
+	running, done, failed, cancelled := 0, 0, 0, 0
 	for _, child := range children {
 		switch child.Status {
 		case agent.RunRunning:
@@ -465,6 +481,8 @@ func formatChildSummary(children []*agent.AgentRun) string {
 			done++
 		case agent.RunFailed:
 			failed++
+		case agent.RunCancelled:
+			cancelled++
 		}
 	}
 	parts := []string{fmt.Sprintf("%d sub", len(children))}
@@ -476,6 +494,9 @@ func formatChildSummary(children []*agent.AgentRun) string {
 	}
 	if failed > 0 {
 		parts = append(parts, fmt.Sprintf("%d failed", failed))
+	}
+	if cancelled > 0 {
+		parts = append(parts, fmt.Sprintf("%d cancelled", cancelled))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -518,6 +539,29 @@ func formatRunElapsed(run *agent.AgentRun) string {
 		return "<1s"
 	}
 	return d.String()
+}
+
+// extractAgentRunTodo scans the transcript for the last todowrite tool call and
+// returns its todoText content, or "" if none found.
+func extractAgentRunTodo(messages []agent.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		if msg.Role != "assistant" {
+			continue
+		}
+		for _, tc := range msg.ToolCalls {
+			if tc.Function.Name != "todowrite" {
+				continue
+			}
+			var params struct {
+				TodoText string `json:"todoText"`
+			}
+			if err := json.Unmarshal([]byte(tc.Function.Arguments), &params); err == nil && params.TodoText != "" {
+				return params.TodoText
+			}
+		}
+	}
+	return ""
 }
 
 func statusIcon(status agent.RunStatus, running string) string {

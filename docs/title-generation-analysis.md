@@ -1,3 +1,16 @@
+---
+type: Gotcha
+title: Session Title Generation & UI Update Root Cause Analysis
+description: Root cause analysis of session title delay/mismatch between generation and UI rendering, covering regex anchoring, Anthropic thinking blocks, and rendering cycle timing.
+tags:
+  - session
+  - title-generation
+  - regex
+  - ui
+  - anthropic
+  - bubble-tea
+timestamp: 2026-07-06T08:35:17Z
+---
 # Session Title Generation & UI Update Analysis
 
 ## Issue Description
@@ -299,99 +312,13 @@ The check `m.sessionTitle == ""` means title extraction only happens once. If th
 
 | Component | File | Key Lines |
 |-----------|------|-----------|
-| Title state field | `internal/tui/model.go` | 149 |
-| Title extraction regex | `internal/tui/model.go` | 2341 |
-| Title extraction function | `internal/tui/model.go` | 2343-2351 |
-| Title extraction usage | `internal/tui/model.go` | 2363-2371 |
-| Title prompt injection | `internal/tui/model.go` | 2603-2607 |
-| First message detection | `internal/tui/model.go` | 2574 |
+| Title prompt injection | `internal/tui/model.go` | 2574, 2603-2607 |
+| Regex pattern | `internal/tui/model.go` | 2341 |
+| Extraction function | `internal/tui/model.go` | 2343-2351 |
+| Extraction call site | `internal/tui/model.go` | 2363-2371 |
+| Session state field | `internal/tui/model.go` | 149 |
 | Header rendering | `internal/tui/model.go` | 3071-3076 |
 | Sidebar rendering | `internal/tui/model.go` | 3407-3408, 3449-3452 |
-| Stream message handling | `internal/tui/model.go` | 828-835 |
 | Fallback auto-title | `internal/session/session.go` | 115-128 |
-| Anthropic response parsing | `internal/agent/client.go` | 754-770 |
-| OpenAI chat implementation | `internal/agent/client.go` | 200-272 |
-| Agent Step function | `internal/agent/agent.go` | 141-266 |
-| OnMessage callback | `internal/agent/agent.go` | 199-201 |
-
----
-
-## 6. Recommendations
-
-### 6.1 Fix Regex Anchoring (High Priority)
-Remove the `^` anchor or use `\s*` before the tag to allow leading whitespace:
-```go
-// Option 1: Remove anchor
-var ocodeTitleRe = regexp.MustCompile(`(?s)<ocode-title>(.*?)</ocode-title>\s*\n?`)
-
-// Option 2: Allow leading whitespace/newlines
-var ocodeTitleRe = regexp.MustCompile(`(?s)[\s\n]*<ocode-title>(.*?)</ocode-title>\s*\n?`)
-```
-
-### 6.2 Handle Anthropic Thinking Blocks (High Priority)
-Add handling for thinking blocks in `chatAnthropic`:
-```go
-for _, block := range result.Content {
-    switch block.Type {
-    case "text":
-        resMsg.Content += block.Text
-    case "thinking":
-        resMsg.ReasoningContent += block.Text  // Add this
-    case "tool_use":
-        // existing code
-    }
-}
-```
-
-### 6.3 Search Entire Content for Title (Medium Priority)
-Instead of requiring the title at the start, search the entire response:
-```go
-func extractSessionTitle(content string) (title, rest string) {
-    // Remove ^ anchor to search anywhere in content
-    m := ocodeTitleRe.FindStringSubmatchIndex(content)
-    if m == nil {
-        return "", content
-    }
-    title = strings.TrimSpace(content[m[2]:m[3]])
-    // Remove the title tag from content
-    rest = content[:m[0]] + strings.TrimSpace(content[m[1]:])
-    return title, rest
-}
-```
-
-### 6.4 Add Debug Logging (Low Priority)
-Add logging when title extraction succeeds/fails to aid debugging:
-```go
-if title, rest := extractSessionTitle(content); title != "" {
-    log.Printf("Extracted session title: %q", title)
-    m.sessionTitle = title
-    // ...
-} else if content != "" {
-    log.Printf("Title extraction failed, content starts with: %q", content[:min(50, len(content))])
-}
-```
-
----
-
-## 7. Testing Strategy
-
-1. **Test regex with various LLM response formats**:
-   - Title at start: `<ocode-title>Test</ocode-title>rest`
-   - Title after whitespace: `\n<ocode-title>Test</ocode-title>rest`
-   - Title after greeting: `Hello!\n<ocode-title>Test</ocode-title>rest`
-   - Title after thinking: `<think>...</think>\n<ocode-title>Test</ocode-title>rest`
-   - No title: `Just a normal response`
-
-2. **Test with different providers**: OpenAI, Anthropic, Copilot
-
-3. **Test timing**: Verify UI updates immediately after title extraction
-
-4. **Test fallback**: Verify session save fallback works when LLM doesn't provide title
-
----
-
-## 8. Conclusion
-
-The most likely cause of the issue is the **regex anchor (`^`)** preventing title extraction when LLMs output any content before the `<ocode-title>` tag. This is compounded by **missing handling of Anthropic thinking blocks**, which could cause thinking content to interfere with title detection.
-
-The fix is straightforward: modify the regex to not require the title tag at the start of the content, and ensure all provider-specific response parsers handle reasoning/thinking content correctly.
+| Anthropic thinking blocks | `internal/agent/client.go` | 754-770 |
+| LLM client (blocking) | `internal/agent/client.go` | 79-103, 200-272, 590-789 |

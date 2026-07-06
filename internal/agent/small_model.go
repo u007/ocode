@@ -45,6 +45,7 @@ func ResolveSmallModel(cfg *config.Config) string {
 var smallModelEligibleNames = map[string]bool{
 	"explore":               true,
 	"general":               true,
+	"context":               true,
 	"compaction":            true,
 	// orchestrator-planner intentionally excluded: requires reliable JSON output
 	"orchestrator-explorer": true,
