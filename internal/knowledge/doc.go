@@ -452,6 +452,14 @@ func extractFrontmatter(raw []byte) ([]byte, string, bool) {
 		closingIdx = strings.Index(rest, "\n---\r\n")
 		if closingIdx >= 0 {
 			delimLen = 6
+		} else if strings.HasSuffix(rest, "\n---") {
+			// Closing "---" at EOF (no trailing newline) with LF line endings.
+			closingIdx = len(rest) - 4
+			delimLen = 4
+		} else if strings.HasSuffix(rest, "\r\n---") {
+			// Closing "---" at EOF (no trailing newline) with CRLF line endings.
+			closingIdx = len(rest) - 5
+			delimLen = 5
 		} else if strings.HasPrefix(rest, "---") {
 			// Closing "---" at the very start of rest (no preceding frontmatter
 			// content). The delimiter length is just the 3 dashes.

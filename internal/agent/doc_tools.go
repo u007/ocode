@@ -90,7 +90,10 @@ func (t *DocSearchTool) Execute(args json.RawMessage) (string, error) {
 		params.Page = 1
 	}
 
-	results, total, err := t.store.Search(params.Query, params.Tags, params.DocType, params.Page, 20)
+	// Convert 1-based page to 0-based for Search (paginate uses 0-based).
+	zeroBasedPage := params.Page - 1
+
+	results, total, err := t.store.Search(params.Query, params.Tags, params.DocType, zeroBasedPage, 20)
 	if err != nil {
 		return "", fmt.Errorf("doc_search failed: %w", err)
 	}

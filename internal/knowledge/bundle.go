@@ -146,12 +146,16 @@ func excludedFile(relPath, name string, ignorePatterns []string) bool {
 // excludedDir returns true when a directory matches an exclusion pattern,
 // in which case the walker should skip the entire directory. Only .okfignore
 // patterns are checked (default patterns are file-specific globs that don't
-// naturally match directory names).
-func excludedDir(name string, ignorePatterns []string) bool {
+// naturally match directory names). Patterns are matched against both the
+// basename and the bundle-relative path, similar to excludedFile.
+func excludedDir(relPath, name string, ignorePatterns []string) bool {
 	for _, p := range ignorePatterns {
 		// Allow patterns ending in / to match directory names.
 		p = strings.TrimSuffix(p, "/")
 		if ok, _ := filepath.Match(p, name); ok {
+			return true
+		}
+		if ok, _ := filepath.Match(p, relPath); ok {
 			return true
 		}
 	}
@@ -180,7 +184,6 @@ func (b *Bundle) Docs() ([]*Doc, error) {
 		if err != nil {
 			return err
 		}
-
 		// Skip hidden files and directories (starting with ".").
 		if strings.HasPrefix(d.Name(), ".") {
 			if d.IsDir() {
@@ -189,10 +192,19 @@ func (b *Bundle) Docs() ([]*Doc, error) {
 			return nil
 		}
 
+		// Compute bundle-relative path early so it's available for both
+		// directory and file exclusion checks.
+		relPath, err := filepath.Rel(b.Root, path)
+		if err != nil {
+			slog.Debug("knowledge: failed to compute relative path", "path", path, "err", err)
+			relPath = d.Name()
+		}
+
 		// For directories, check if they match .okfignore patterns
-		// before descending into them.
+		// (against both the basename and the relative path) before
+		// descending into them.
 		if d.IsDir() {
-			if excludedDir(d.Name(), ignorePatterns) {
+			if excludedDir(relPath, d.Name(), ignorePatterns) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -204,20 +216,12 @@ func (b *Bundle) Docs() ([]*Doc, error) {
 		}
 
 		// Skip reserved files.
-		baseName := d.Name()
-		if baseName == "index.md" || baseName == "log.md" {
+		if d.Name() == "index.md" || d.Name() == "log.md" {
 			return nil
 		}
 
-		// Compute bundle-relative path (needed for exclusion check).
-		relPath, err := filepath.Rel(b.Root, path)
-		if err != nil {
-			slog.Debug("knowledge: failed to compute relative path", "path", path, "err", err)
-			relPath = baseName
-		}
-
 		// Check exclusion patterns (default + .okfignore).
-		if excludedFile(relPath, baseName, ignorePatterns) {
+		if excludedFile(relPath, d.Name(), ignorePatterns) {
 			return nil
 		}
 
