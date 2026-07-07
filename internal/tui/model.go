@@ -14395,7 +14395,7 @@ func (m *model) renderStatus() string {
 	}
 	reasoningState := ""
 	if supportsReasoning {
-		reasoningState = fmt.Sprintf(" | Reasoning: %s", thinkingBudgetLabels[m.thinkingLevelIdx])
+		reasoningState = fmt.Sprintf(" | %s", thinkingBudgetLabels[m.thinkingLevelIdx])
 	}
 	width := m.statusContentWidth()
 
