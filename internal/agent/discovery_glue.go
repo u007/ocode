@@ -240,6 +240,13 @@ func (a *Agent) discoveryDocs() []discovery.Doc {
 // RunDiscovery ranks the query and grows the sticky set. No-op when discovery is
 // off or has failed open. Fail-open on any error.
 func (a *Agent) RunDiscovery(query string) {
+	// The "context" knowledge sub-agent already has dedicated doc_search/
+	// doc_get tools over the OKF bundle; it does not need the repo-wide
+	// markdown summarization pass (mdSummarizePass) or embedder warm-up.
+	// Skipping here removes a major source of knowledge_lookup latency.
+	if a.skipDiscovery {
+		return
+	}
 	a.ensureDiscovery()
 	if a.disco == nil || !a.disco.enabled || strings.TrimSpace(query) == "" {
 		return

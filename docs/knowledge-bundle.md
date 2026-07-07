@@ -101,6 +101,20 @@ The `Search()` method provides case-insensitive word-level AND matching across t
 
 **After the fix**: `DocSearchTool` converts to 0-based (`zeroBasedPage := params.Page - 1`) before calling `Search()`.
 
+### doc_search `get_top` (inline content retrieval)
+
+`DocSearchTool` accepts an optional `get_top` integer. When `> 0`, the tool
+returns the full body of the top `min(get_top, 5, len(results))` matches inline,
+after the metadata list. This lets a single `doc_search` both find and read
+documents, avoiding a separate `doc_get` round-trip for the common case.
+
+When `get_top` is `0` (the default), behaviour is unchanged — metadata only —
+so the change is fully backward-compatible with existing callers and the
+documented search contract. Long bodies are truncated (4000 chars) with a
+pointer to `doc_get` for the remainder. `doc_get` remains the way to read a
+specific document's full, untruncated text (e.g. to verify an exact claim or
+before writing).
+
 ## Store CRUD
 
 ### Write

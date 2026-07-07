@@ -32,6 +32,15 @@ func Run(opts RunOptions) error {
 
 	m := newModel(opts)
 
+	// If an explicitly requested session (-session / -continue) failed to
+	// load, abort before the TUI starts. Continuing here would silently open
+	// a fresh session and, on the next save, write a placeholder file that
+	// shadows the missing ID in the session picker.
+	if m.sessionLoadErr != nil {
+		fmt.Fprintf(os.Stderr, "ocode: cannot resume session: %v\n", m.sessionLoadErr)
+		return m.sessionLoadErr
+	}
+
 	if m.config != nil {
 		if err := validateStartupEditorConfig(&m.config.Ocode); err != nil {
 			fmt.Fprintf(os.Stderr, "ocode: %v\n", err)

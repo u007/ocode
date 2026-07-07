@@ -82,13 +82,18 @@ func (r *AgentRun) closeDone() {
 func (r *AgentRun) Done() <-chan struct{} { return r.done }
 
 // ModelLabel returns "provider/model" (or just "model" when no provider) for
-// the subagent backing this run. Returns "" when Sub is nil.
+// the subagent backing this run. Returns "" when Sub is nil or its client has
+// not been initialized yet (e.g. a run still being set up).
 func (r *AgentRun) ModelLabel() string {
 	if r.Sub == nil {
 		return ""
 	}
+	c := r.Sub.Client()
+	if c == nil {
+		return ""
+	}
 	p := r.Sub.GetProvider()
-	m := r.Sub.Client().GetModel()
+	m := c.GetModel()
 	if p != "" {
 		return p + "/" + m
 	}

@@ -933,7 +933,7 @@ func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {
 		{Role: "assistant", Content: "tail response"},
 	}
 
-	res := a.runCompact(msgs, rt, "")
+	res := a.runCompact(msgs, rt, "", false)
 	if !res.OK {
 		t.Fatalf("expected compaction success, got %#v", res)
 	}
@@ -967,7 +967,7 @@ func TestRunCompactAnchoredSummaryReplacesPreviousSummaryInPlace(t *testing.T) {
 		{Role: "assistant", Content: "tail response"},
 	}
 
-	first := a.runCompact(msgs, rt, "")
+	first := a.runCompact(msgs, rt, "", false)
 	if !first.OK {
 		t.Fatalf("first compaction failed: %#v", first)
 	}
@@ -983,7 +983,7 @@ func TestRunCompactAnchoredSummaryReplacesPreviousSummaryInPlace(t *testing.T) {
 		Message{Role: "assistant", Content: "latest response"},
 	)
 
-	second := a.runCompact(msgs, rt, "")
+	second := a.runCompact(msgs, rt, "", false)
 	if !second.OK {
 		t.Fatalf("second compaction failed: %#v", second)
 	}
@@ -1051,7 +1051,7 @@ func TestRunCompactResumedSessionMultipleBasePrompts(t *testing.T) {
 		{Role: "assistant", Content: "final answer"},
 	}
 
-	result := a.runCompact(msgs, rt, "")
+	result := a.runCompact(msgs, rt, "", false)
 	if !result.OK {
 		t.Fatalf("compaction on resumed session failed (nothing to compact): %#v", result)
 	}
@@ -1065,6 +1065,69 @@ func TestRunCompactResumedSessionMultipleBasePrompts(t *testing.T) {
 	}
 	if !strings.Contains(client.Prompts[0], "old summary body") {
 		t.Fatalf("summary prompt should include previous summary content")
+	}
+}
+
+// TestRunCompactForceSummarisesWholeConversation reproduces the reported bug:
+// after resuming a session whose entire history still fits within the
+// recent-token budget (e.g. a single-turn agentic run or a short session),
+// /compact previously reported "nothing to compact yet" because the budget
+// short-circuit bailed before summarising. With force=true (manual /compact)
+// it must now summarise the whole conversation after the prompt prefix.
+func TestRunCompactForceSummarisesWholeConversation(t *testing.T) {
+	client := &scriptedCaptureClient{Responses: []string{validSummaryText("forced")}}
+
+	// Recent-token budget large enough that the whole conversation fits, so the
+	// auto path would skip it ("nothing to compact").
+	rt := compactRuntime{
+		Enabled:               true,
+		KeepRecentTurns:       3,
+		KeepRecentTokens:      100000,
+		SummaryTimeoutSeconds: 1,
+		SummaryMaxRetries:     0,
+		MaxSummaryInputTokens: 50000,
+	}
+
+	// A single-turn agentic run: one user ask followed by a long tool-call
+	// trail — exactly the shape that fits in budget but should still compact.
+	msgs := []Message{
+		{Role: "system", Content: "[ocode:environment]\nenv"},
+		{Role: "system", Content: "[ocode:context]\ncontext"},
+		{Role: "user", Content: "investigate the auth bug and fix it"},
+		{Role: "assistant", ToolCalls: []ToolCall{tcCall("c1", "grep")}},
+		{Role: "tool", ToolID: "c1", Content: "many matches"},
+		{Role: "assistant", ToolCalls: []ToolCall{tcCall("c2", "read")}},
+		{Role: "tool", ToolID: "c2", Content: "file contents"},
+		{Role: "assistant", ToolCalls: []ToolCall{tcCall("c3", "edit")}},
+		{Role: "tool", ToolID: "c3", Content: "patched"},
+		{Role: "assistant", Content: "fixed the auth bug"},
+	}
+
+	// Auto path (force=false) must still skip — there is nothing old to
+	// summarise when the recent tail already covers the whole conversation.
+	auto := (&Agent{client: client}).runCompact(msgs, rt, "", false)
+	if auto.OK {
+		t.Fatalf("auto compaction unexpectedly produced a result for a conversation within budget")
+	}
+
+	// Manual path (force=true) must summarise the whole conversation.
+	manual := (&Agent{client: client}).runCompact(msgs, rt, "", true)
+	if !manual.OK {
+		t.Fatalf("manual /compact on a within-budget conversation failed (nothing to compact): %#v", manual)
+	}
+	// prefixEnd keeps the two system messages + the first user ask as the
+	// anchor, so the summary replaces everything from index 3 to the end.
+	if manual.ReplaceFrom != 3 {
+		t.Fatalf("ReplaceFrom=%d, want 3 (anchor = 2 system + 1 user)", manual.ReplaceFrom)
+	}
+	if manual.ReplaceTo != len(msgs) {
+		t.Fatalf("ReplaceTo=%d, want %d (should summarise the entire conversation)", manual.ReplaceTo, len(msgs))
+	}
+	if !strings.Contains(manual.Summary.Content, compactionSummaryMarker) {
+		t.Fatalf("summary missing compaction marker: %q", manual.Summary.Content)
+	}
+	if client.CallCount == 0 {
+		t.Fatalf("expected the summary model to be invoked for a forced compact")
 	}
 }
 

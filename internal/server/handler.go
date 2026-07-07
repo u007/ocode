@@ -173,7 +173,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 		tools, lspMgr := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-		ag.LoadExternalTools(h.cfg)
+		ag.LoadExternalToolsWithMCP(h.cfg)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
 
 		as = &agentSession{
@@ -442,7 +442,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 
 		tools, lspMgr := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-		ag.LoadExternalTools(h.cfg)
+		ag.LoadExternalToolsWithMCP(h.cfg)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
 
 		as = &agentSession{
@@ -619,7 +619,7 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	}
 	tools, lspMgr := tool.LoadBuiltins(h.cfg)
 	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-	ag.LoadExternalTools(h.cfg)
+	ag.LoadExternalToolsWithMCP(h.cfg)
 	ag.SetAdvisorEnabled(h.advisorEnabled)
 	as := &agentSession{agent: ag, messages: s.Messages, model: model}
 	h.agents[id] = as

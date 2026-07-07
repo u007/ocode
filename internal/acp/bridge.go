@@ -44,16 +44,16 @@ func newSessionBridge(cfg *config.Config, cwd string) (*sessionBridge, error) {
 		return nil, fmt.Errorf("failed to create LLM client for model %q", model)
 	}
 
-	tools, lspMgr := tool.LoadBuiltins(cfg)
-	ag := agent.NewAgent(client, tools, cfg, lspMgr)
-	ag.LoadExternalTools(cfg)
-
 	if cwd != "" {
 		if err := os.Chdir(cwd); err != nil {
 			fmt.Fprintf(os.Stderr, "acp: warning: chdir %s: %v\n", cwd, err)
 		}
 		session.SetWorkDir(cwd)
 	}
+
+	tools, lspMgr := tool.LoadBuiltins(cfg)
+	ag := agent.NewAgent(client, tools, cfg, lspMgr)
+	ag.LoadExternalToolsWithMCP(cfg)
 
 	return &sessionBridge{
 		id:           session.NewSessionID(),

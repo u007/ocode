@@ -169,7 +169,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 
 		tools, lspMgr := tool.LoadBuiltins(h.cfg)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-		ag.LoadExternalTools(h.cfg)
+		ag.LoadExternalToolsWithMCP(h.cfg)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
 
 		as = &agentSession{

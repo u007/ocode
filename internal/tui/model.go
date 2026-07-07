@@ -194,7 +194,7 @@ func (m *model) currentContextEstimate() (int64, string) {
 	if len(agentMsgs) == 0 {
 		return 0, "empty"
 	}
-	tokens, source := agent.CurrentContextEstimate(agentMsgs)
+	tokens, source := agent.CurrentContextEstimate(agentMsgs, m.agent.CharsPerToken())
 	return int64(tokens), source
 }
 
@@ -595,6 +595,7 @@ func (m *model) replaceAgent(next *agent.Agent) tea.Cmd {
 }
 
 func (m *model) installAgent(next *agent.Agent) tea.Cmd {
+	prev := m.agent
 	if next != nil && m.advisorEnabledSet {
 		next.SetAdvisorEnabled(m.advisorEnabled)
 	}
@@ -618,11 +619,30 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 		m.rcBridge.SetAgent(m.agent)
 		m.broadcastTUIStatus()
 	}
+	if prev != nil && prev != next && m.pendingSubmit != "" && m.pendingSubmitAgent == prev {
+		m.pendingSubmit = ""
+		m.pendingSubmitAgent = nil
+		m.messages = append(m.messages, message{
+			role:      roleAssistant,
+			text:      hintStyle.Render("Queued message cleared because the agent changed before MCP tools finished loading."),
+			transient: true,
+		})
+		m.rerenderTranscriptAndMaybeScroll()
+	}
 	if m.agent == nil {
 		return nil
 	}
+	// (Re)start the background MCP tool enumeration for the freshly installed
+	// agent and gate chat submission until it completes.
+	loadCmd := m.startMCPLoad()
 	m.wireCompactCallbacks()
-	return listenJobs(m.agent)
+	if loadCmd == nil {
+		if queued := m.flushQueuedSubmit(); queued != nil {
+			return tea.Batch(listenJobs(m.agent), queued)
+		}
+		return listenJobs(m.agent)
+	}
+	return tea.Batch(listenJobs(m.agent), loadCmd)
 }
 
 type model struct {
@@ -643,19 +663,29 @@ type model struct {
 	config               *config.Config
 	sessionID            string
 	sessionTitle         string
-	showThinking         bool
-	showDetails          bool
-	leaderActive         bool
-	leaderSeq            int
-	showPicker           bool
-	pickerKind           string
-	pickerItems          []string
-	pickerValues         []string
-	pickerIsHeader       []bool
-	pickerIndex          int
-	pickerFilter         string
-	pickerFilterPending  string
-	pickerFilterSeq      int
+	// sessionLoadErr records a failure to load an explicitly requested
+	// session (via -session or -continue). When set, Run aborts before the
+	// TUI starts instead of silently continuing with a placeholder file.
+	sessionLoadErr error
+	showThinking   bool
+	showDetails    bool
+	leaderActive   bool
+	// MCP tool loading state. mcpReady gates user chat submission until the
+	// background MCP tool enumeration (LoadMCPTools) has applied its results.
+	mcpReady            bool         // true once MCP tools are loaded (or none configured)
+	mcpLoading          bool         // true while the background MCP load is in flight
+	pendingSubmit       string       // user message queued until MCP tools are ready
+	pendingSubmitAgent  *agent.Agent // agent that owns the queued submit
+	leaderSeq           int
+	showPicker          bool
+	pickerKind          string
+	pickerItems         []string
+	pickerValues        []string
+	pickerIsHeader      []bool
+	pickerIndex         int
+	pickerFilter        string
+	pickerFilterPending string
+	pickerFilterSeq     int
 
 	// Pagination state for the session picker (infinite scroll)
 	pickerSessionRefs    []session.Ref // all loaded session refs
@@ -1593,9 +1623,13 @@ func newModel(opts ...RunOptions) model {
 		config:        cfg,
 		// IDE mode: an explicit config value wins; otherwise auto-enable the
 		// Claude Code integration only when running inside a VS Code terminal.
-		ideMode:          resolveInitialIDEMode(cfg),
-		agent:            a,
-		sessionID:        o.SessionID,
+		agent:     a,
+		sessionID: o.SessionID,
+		// MCP tools load in the background (Init kicks off LoadMCPTools); the
+		// UI paints immediately and chat submission is gated on mcpReady until
+		// the enumeration completes (or when there is no agent / no MCP servers).
+		mcpReady:         (a == nil) || !hasEnabledMCPServers(cfg),
+		mcpLoading:       (a != nil) && hasEnabledMCPServers(cfg),
 		showThinking:     true,
 		soundEnabled:     true,
 		bellNotifier:     defaultBellNotifier,
@@ -1788,6 +1822,10 @@ func newModel(opts ...RunOptions) model {
 			}
 		} else {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error loading session %s: %v", o.SessionID, err)})
+			// An explicitly requested session could not be loaded. Record the
+			// error so Run() aborts instead of starting a fresh session and
+			// writing a placeholder file under the (missing) session ID.
+			m.sessionLoadErr = err
 		}
 	}
 
@@ -1821,6 +1859,12 @@ func (m model) Init() tea.Cmd {
 	// Fire the initial async diff load if the git model queued one during construction.
 	if m.initDiffCmd != nil {
 		cmds = append(cmds, m.initDiffCmd)
+	}
+	// Kick off the background MCP tool enumeration so the TUI paints before
+	// slow/spawning MCP servers answer ListTools. Chat submission is gated on
+	// m.mcpReady until this completes (or when no MCP servers are configured).
+	if !m.mcpReady && m.agent != nil {
+		cmds = append(cmds, m.mcpLoadCmd())
 	}
 	// Auto-connect to VS Code (Claude Code extension) when IDE mode is enabled.
 	if m.ideMode == config.IDEModeClaude {
@@ -2978,6 +3022,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: text.String()})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
+	case mcpToolsLoadedMsg:
+		m.mcpLoading = false
+		if m.agent == nil {
+			// No agent to apply to; nothing to wait for.
+			m.mcpReady = true
+			return m, nil
+		}
+		if m.agent != msg.agent {
+			// The agent was swapped while this load was in flight; let the new
+			// agent's own load flip mcpReady. Any queued submit owned by the old
+			// agent is stale and gets dropped.
+			if m.pendingSubmitAgent == msg.agent {
+				m.pendingSubmit = ""
+				m.pendingSubmitAgent = nil
+			}
+			return m, nil
+		}
+		// Apply results on the main goroutine (no concurrent map writes).
+		m.agent.AddMCPTools(msg.tools)
+		m.agent.AddMCPErrors(msg.errors)
+		m.mcpReady = true
+		return m, m.flushQueuedSubmit()
+
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
 	case cleanupRequestMsg:
@@ -4620,6 +4687,22 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, cmd
 		}
 
+		// Gate chat submission until the background MCP tools are loaded. The
+		// user can keep typing; the message is queued and auto-sent on completion.
+		if !m.mcpReady {
+			m.pendingSubmit = text
+			m.pendingSubmitAgent = m.agent
+			m.input.Reset()
+			m.layout()
+			m.maybeScrollTranscriptToBottom()
+			m.messages = append(m.messages, message{
+				role:      roleAssistant,
+				text:      hintStyle.Render("MCP tools still loading - your message is queued and will send automatically."),
+				transient: true,
+			})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		}
 		m.input.Reset()
 		return m, m.processFileReferences(text)
 	}
@@ -10811,7 +10894,7 @@ func (m *model) askAgent() tea.Cmd {
 				roleCounts["tool:"+m.ToolID]++
 			}
 		}
-		tokens, source := agent.CurrentContextEstimate(agentMsgs)
+		tokens, source := agent.CurrentContextEstimate(agentMsgs, m.agent.CharsPerToken())
 		modelName := m.agent.GetProvider()
 		if cl := m.agent.Client(); cl != nil {
 			modelName += "/" + cl.GetModel()
@@ -14656,6 +14739,9 @@ func (m *model) renderStatus() string {
 		tokUsage = fmt.Sprintf(" · \u2193%s \u2191%s", in, out)
 	}
 	leftStatus := statusPrefix + tokUsage + permissionMode + compactState + jobState
+	if m.mcpLoading {
+		leftStatus += " · ~MCP"
+	}
 	if m.rcSrv != nil {
 		leftStatus += " | " + rcActiveStyle.Render("⊕ RC")
 	}
@@ -17490,4 +17576,84 @@ func (m *model) handleAddDirCmd(args []string) tea.Cmd {
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Added %s to extra allowed paths. The agent can now read and write files in this directory.", target)})
 	m.broadcastTUIStatus()
 	return nil
+}
+
+// mcpToolsLoadedMsg is delivered when the background MCP tool enumeration
+// (LoadMCPTools) completes. tools/errors are applied on the main goroutine.
+type mcpToolsLoadedMsg struct {
+	tools  []tool.Tool
+	errors []string
+	agent  *agent.Agent
+}
+
+// hasEnabledMCPServers reports whether any MCP server is enabled in config.
+func hasEnabledMCPServers(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	for _, mc := range cfg.MCP {
+		if mc.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+// mcpLoadCmd runs the blocking MCP tool enumeration off the main goroutine and
+// returns its result as an mcpToolsLoadedMsg. The agent captured here is the
+// one the load belongs to, so the handler can ignore stale loads after an
+// agent swap.
+func (m *model) mcpLoadCmd() tea.Cmd {
+	a := m.agent
+	return func() tea.Msg {
+		res := a.LoadMCPTools()
+		return mcpToolsLoadedMsg{tools: res.Tools, errors: res.Errors, agent: a}
+	}
+}
+
+// startMCPLoad kicks off the background MCP tool enumeration for the current
+// agent and returns the tea.Cmd that will deliver its result. It is a no-op
+// (mcpReady set true immediately) when there is no agent, no enabled MCP
+// servers, or the agent already carries MCP tools (e.g. reused on /new reset).
+func (m *model) startMCPLoad() tea.Cmd {
+	if m.agent == nil || !hasEnabledMCPServers(m.config) {
+		m.mcpReady = true
+		m.mcpLoading = false
+		return nil
+	}
+	if len(m.agent.MCPToolNames()) > 0 {
+		m.mcpReady = true
+		m.mcpLoading = false
+		return nil
+	}
+	m.mcpReady = false
+	m.mcpLoading = true
+	return m.mcpLoadCmd()
+}
+
+// flushQueuedSubmit sends the user's queued chat input once MCP tools are
+// ready for the current agent. If the queue belongs to a stale agent, it is
+// dropped — installAgent already emits a transient note on the swap path.
+func (m *model) flushQueuedSubmit() tea.Cmd {
+	if m.pendingSubmit == "" {
+		return nil
+	}
+	if !m.mcpReady || m.agent == nil {
+		return nil
+	}
+	if m.pendingSubmitAgent != nil && m.pendingSubmitAgent != m.agent {
+		m.pendingSubmit = ""
+		m.pendingSubmitAgent = nil
+		return nil
+	}
+	text := m.pendingSubmit
+	m.pendingSubmit = ""
+	m.pendingSubmitAgent = nil
+	m.messages = append(m.messages, message{
+		role:      roleAssistant,
+		text:      hintStyle.Render("MCP tools ready - sending queued message."),
+		transient: true,
+	})
+	m.rerenderTranscriptAndMaybeScroll()
+	return m.processFileReferences(text)
 }

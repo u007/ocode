@@ -4,10 +4,14 @@ import (
 	"bufio"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/config"
 )
 
 // testServer creates a server with in-memory pipes and returns a writer for
@@ -178,6 +182,61 @@ func TestAuthenticateNotSupported(t *testing.T) {
 		t.Errorf("expected method-not-found, got %+v", f.Error)
 	}
 	w.Close()
+}
+
+func TestNewSessionBridgeAppliesCwdBeforeLoadingMCP(t *testing.T) {
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(origWD) })
+
+	root := t.TempDir()
+	cwd := filepath.Join(root, "workspace")
+	if err := os.MkdirAll(cwd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outFile := filepath.Join(root, "mcp-cwd.txt")
+
+	cfg := &config.Config{
+		Model: "lmstudio/local",
+		MCP: map[string]config.MCPConfig{
+			"cwd-check": {
+				Type:        "local",
+				Command:     []string{"/bin/sh", "-c", "pwd > \"$OUT\"; sleep 0.2"},
+				Environment: map[string]string{"OUT": outFile},
+				Enabled:     true,
+				Timeout:     50,
+			},
+		},
+	}
+
+	if _, err := newSessionBridge(cfg, cwd); err != nil {
+		t.Fatalf("newSessionBridge error: %v", err)
+	}
+	normPath := func(p string) string {
+		if s, err := filepath.EvalSymlinks(p); err == nil {
+			return s
+		}
+		return filepath.Clean(p)
+	}
+	var data []byte
+	for i := 0; i < 50; i++ {
+		data, err = os.ReadFile(outFile)
+		if err == nil {
+			break
+		}
+		if !os.IsNotExist(err) {
+			t.Fatalf("read cwd file: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("read cwd file: %v", err)
+	}
+	if got := normPath(strings.TrimSpace(string(data))); got != normPath(cwd) {
+		t.Fatalf("MCP server started in %q, want %q", got, cwd)
+	}
 }
 
 func TestSessionNewUnknownSession(t *testing.T) {

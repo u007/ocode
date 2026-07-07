@@ -125,7 +125,7 @@ func Run(args []string) error {
 
 	tools, lspMgr := tool.LoadBuiltins(cfg)
 	parent := agent.NewAgent(client, tools, cfg, lspMgr)
-	parent.LoadExternalTools(cfg)
+	parent.LoadExternalToolsWithMCP(cfg)
 	if opts.YOLO {
 		parent.OnPermissionAsk = func(req agent.PermissionRequest) agent.PermissionResponse {
 			return agent.PermissionResponse{Level: agent.PermissionAllow}

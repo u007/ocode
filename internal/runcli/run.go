@@ -210,7 +210,7 @@ func Run(args []string) error {
 
 	tools, lspMgr := tool.LoadBuiltins(cfg)
 	ag := agent.NewAgent(client, tools, cfg, lspMgr)
-	ag.LoadExternalTools(cfg)
+	ag.LoadExternalToolsWithMCP(cfg)
 	// Only install an OnPermissionAsk override when the user explicitly opted
 	// into yolo / dangerously-skip-permissions. Otherwise leave the callback
 	// nil so the agent's default sentinel/deny path runs and prompts surface to

@@ -2890,7 +2890,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	// of the messages we sent so spend and context-window display are accurate.
 	if usage != nil && usage.PromptTokens == nil {
 		emitDebug("TOKENS", fmt.Sprintf("provider=%s model=%s returned no input_tokens in usage (raw=%s); estimating from message content", c.Provider, c.Model, string(resultUsage)))
-		estimated := int64(messagesTokens(messages))
+		estimated := int64(messagesTokens(messages, charsPerTokenFor(c.Provider, c.Model)))
 		if system != "" {
 			estimated += int64((len(system) + charsPerToken - 1) / charsPerToken)
 		}

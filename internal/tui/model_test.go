@@ -3548,6 +3548,24 @@ func TestPickerSelectsSessionByValue(t *testing.T) {
 	}
 }
 
+// When -session points at a session that does not exist, newModel must record
+// the load error so Run() can abort (instead of silently starting a fresh
+// session and writing a placeholder file that shadows the missing ID).
+func TestNewModelRecordsMissingSessionLoadError(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", filepath.Join(tmpDir, "home"))
+
+	m := newModel(RunOptions{SessionID: "this-session-does-not-exist-xyz"})
+	if m.sessionLoadErr == nil {
+		t.Fatal("expected sessionLoadErr to be set when the requested session is missing")
+	}
+}
+
 func TestOpenSessionPickerLoadsRefsAsync(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
@@ -5198,10 +5216,61 @@ func TestConnectMouseSelectsProviderAndMethodRows(t *testing.T) {
 	}
 }
 
+func TestFlushQueuedSubmitSendsWhenReady(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() { a.Shutdown() })
+	m := model{
+		input:              textarea.New(),
+		viewport:           fastviewport.New(80, 20),
+		agent:              a,
+		mcpReady:           true,
+		pendingSubmit:      "hello world",
+		pendingSubmitAgent: a,
+	}
+
+	cmd := m.flushQueuedSubmit()
+	if cmd == nil {
+		t.Fatal("expected queued submit to produce a command")
+	}
+	if m.pendingSubmit != "" || m.pendingSubmitAgent != nil {
+		t.Fatalf("expected queued submit to be cleared, got pending=%q agent=%v", m.pendingSubmit, m.pendingSubmitAgent)
+	}
+	if len(m.messages) == 0 || !strings.Contains(m.messages[len(m.messages)-1].text, "MCP tools ready - sending queued message.") {
+		t.Fatalf("expected queued-submit notice, got %#v", m.messages)
+	}
+}
+
+func TestInstallAgentClearsQueuedSubmitOnSwap(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, nil, nil)
+	nextAgent := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() {
+		oldAgent.Shutdown()
+		nextAgent.Shutdown()
+	})
+	m := model{
+		input:              textarea.New(),
+		viewport:           fastviewport.New(80, 20),
+		config:             &config.Config{},
+		agent:              oldAgent,
+		pendingSubmit:      "queued message",
+		pendingSubmitAgent: oldAgent,
+	}
+
+	m.installAgent(nextAgent)
+
+	if m.pendingSubmit != "" || m.pendingSubmitAgent != nil {
+		t.Fatalf("expected stale queued submit to be cleared, got pending=%q agent=%v", m.pendingSubmit, m.pendingSubmitAgent)
+	}
+	if len(m.messages) == 0 || !strings.Contains(m.messages[len(m.messages)-1].text, "Queued message cleared because the agent changed") {
+		t.Fatalf("expected queued-submit clear notice, got %#v", m.messages)
+	}
+}
+
 func TestHandleModelCmdPreservesMCPProvenance(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	m := model{config: &config.Config{Model: "gpt-4o"}}
 	a := agent.NewAgent(nil, nil, nil, nil)
+	t.Cleanup(func() { a.Shutdown() })
 	a.RestoreMCPToolNames([]string{"demo_tool"})
 	m.agent = a
 

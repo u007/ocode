@@ -66,9 +66,29 @@ func (a *Agent) QueueMemoryMaintenance(req MemoryMaintenanceRequest) {
 }
 
 func (a *Agent) memoryMaintenanceWorker() {
+	defer close(a.memoryMaintDone)
 	for req := range a.memoryMaintCh {
 		a.runMemoryMaintenance(req)
 	}
+}
+
+// memoryMaintShutdown closes the memory-maintenance channel so the worker
+// goroutine exits, then waits (bounded) for it to finish. Idempotent.
+// Mirrors docMaintShutdown. The channel is never sent to by a discarded
+// sub-agent (QueueMemoryMaintenance has no callers on sub-agents), so closing
+// it cannot race a late send.
+func (a *Agent) memoryMaintShutdown() {
+	if a.memoryMaintCh == nil {
+		return
+	}
+	a.memoryMaintShutdownOnce.Do(func() {
+		close(a.memoryMaintCh)
+		select {
+		case <-a.memoryMaintDone:
+		case <-time.After(5 * time.Second):
+			emitDebug("MEMORY", "shutdown: worker did not exit within 5s, proceeding")
+		}
+	})
 }
 
 func (a *Agent) runMemoryMaintenance(req MemoryMaintenanceRequest) {

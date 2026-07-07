@@ -9,6 +9,14 @@ import (
 	"github.com/u007/ocode/internal/knowledge"
 )
 
+// doc_search get_top bounds: maximum number of match bodies returned inline,
+// and the per-body truncation length. Both exist to keep a single
+// search-with-content call's output size bounded.
+const (
+	docSearchMaxTop       = 5
+	docSearchMaxBodyChars = 4000
+)
+
 // newDocTools resolves the OKF bundle and returns doc tools wrapping a Store.
 // Returns error when no bundle is found at workDir.
 func newDocTools(workDir string) ([]DocTool, error) {
@@ -67,6 +75,10 @@ func (t *DocSearchTool) Definition() map[string]interface{} {
 					"type":        "integer",
 					"description": "Page number (1-based, default 1).",
 				},
+				"get_top": map[string]interface{}{
+					"type":        "integer",
+					"description": "Number of top-ranked matches to also return the full document body for (0 = metadata only, the default). Bounded to 5. Lets a single call both find and read docs, avoiding a separate doc_get round-trip.",
+				},
 			},
 			"required": []string{"query"},
 		},
@@ -79,6 +91,7 @@ func (t *DocSearchTool) Execute(args json.RawMessage) (string, error) {
 		Tags    []string `json:"tags"`
 		DocType string   `json:"type"`
 		Page    int      `json:"page"`
+		GetTop  int      `json:"get_top"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", fmt.Errorf("invalid doc_search arguments: %w", err)
@@ -118,6 +131,29 @@ func (t *DocSearchTool) Execute(args json.RawMessage) (string, error) {
 			b.WriteString(fmt.Sprintf(", Tags: %s", strings.Join(doc.Tags, ", ")))
 		}
 		b.WriteString("\n\n")
+	}
+	// Optional: return the full body of the top-N matches inline so a single
+	// doc_search can both find AND read docs, avoiding a separate doc_get
+	// round-trip. Backward-compatible: get_top defaults to 0 (metadata only),
+	// identical to prior behaviour. Bounded (docSearchMaxTop) and each body is
+	// truncated (docSearchMaxBodyChars) with a pointer to doc_get for the rest.
+	if params.GetTop > 0 {
+		top := params.GetTop
+		if top > docSearchMaxTop {
+			top = docSearchMaxTop
+		}
+		if top > len(results) {
+			top = len(results)
+		}
+		b.WriteString(fmt.Sprintf("\n--- Full content of top %d match(es) ---\n\n", top))
+		for i := 0; i < top; i++ {
+			doc := results[i]
+			body := doc.Body
+			if len(body) > docSearchMaxBodyChars {
+				body = body[:docSearchMaxBodyChars] + fmt.Sprintf("\n… [truncated; full text via doc_get `%s`]", doc.Path)
+			}
+			b.WriteString(fmt.Sprintf("### %s\nPath: `%s`\n\n%s\n\n", doc.Title, doc.Path, body))
+		}
 	}
 	if total > params.Page*20 {
 		b.WriteString(fmt.Sprintf("(More results available — use page %d)\n", params.Page+1))

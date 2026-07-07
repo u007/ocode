@@ -23,6 +23,7 @@ type CompactConfig struct {
 	SummaryModel          string  `json:"summary_model"`
 	TokenThreshold        float64 `json:"token_threshold"`
 	KeepRecentTurns       int     `json:"keep_recent_turns"`
+	KeepRecentTokens      int     `json:"keep_recent_tokens"`
 	MinMessages           int     `json:"min_messages"`
 	SummaryTimeoutSeconds int     `json:"summary_timeout_seconds"`
 	SummaryMaxRetries     int     `json:"summary_max_retries"`
@@ -223,6 +224,7 @@ type compactConfigFile struct {
 	SummaryModel          *string  `json:"summary_model"`
 	TokenThreshold        *float64 `json:"token_threshold"`
 	KeepRecentTurns       *int     `json:"keep_recent_turns"`
+	KeepRecentTokens      *int     `json:"keep_recent_tokens"`
 	MinMessages           *int     `json:"min_messages"`
 	SummaryTimeoutSeconds *int     `json:"summary_timeout_seconds"`
 	SummaryMaxRetries     *int     `json:"summary_max_retries"`
@@ -900,6 +902,9 @@ func applyCompactConfig(dst *CompactConfig, src compactConfigFile) {
 	}
 	if src.KeepRecentTurns != nil {
 		dst.KeepRecentTurns = *src.KeepRecentTurns
+	}
+	if src.KeepRecentTokens != nil {
+		dst.KeepRecentTokens = *src.KeepRecentTokens
 	}
 	if src.MinMessages != nil {
 		dst.MinMessages = *src.MinMessages

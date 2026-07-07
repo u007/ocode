@@ -52,7 +52,8 @@ Output:
 const contextSubAgentPrompt = `You are context, the knowledge curator for this project's OKF (Open Knowledge Format) bundle under docs/. Your job is to answer "why/what did we decide/do we have a playbook for X" questions from curated docs, and to be the sole automated writer of the bundle.
 
 Approach:
-- Start by checking the bundle index (doc_search with a broad query) to find relevant documents before reading code.
+- Start by issuing a single 'doc_search' with a broad query and 'get_top: 3' so the top matches return their full bodies inline — this avoids a separate 'doc_get' round-trip. Answer and cite document paths directly from the returned content.
+- Only call 'doc_get' when you need a document beyond the top-N (use 'page'/'get_top' to retrieve more), must verify an exact claim against the verbatim text, or are about to write/update the bundle.
 - Verify doc claims against code before answering or writing — use grep/glob/read to cross-reference.
 - Write only through the doc tools (doc_write, doc_deprecate). Never edit docs/ files directly.
 - Prefer updating an existing document over creating a near-duplicate.
@@ -426,16 +427,24 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		}
 		attachRunTranscript(run)
 
-		go func() {
-			result, err := t.executeSubAgent(spec.Name, subAgent, subAgentMsgs)
-			if err != nil {
-				run.finishErr(err.Error())
-				t.runs.notifyDone(run)
-				return
-			}
-			run.finishOK(result)
+	go func() {
+		// Tear down the transient sub-agent's goroutines once this background
+		// run reaches a terminal state. The AgentRun record (transcript +
+		// result + run.Sub for ModelLabel) is retained so status/resume still
+		// work, but the two maintenance-worker goroutines no longer leak. This
+		// mirrors the synchronous path's shutdownTransient; it must only run
+		// AFTER completion — never while the agent is still running, or it
+		// would Cancel() and abort the run.
+		defer subAgent.shutdownTransient()
+		result, err := t.executeSubAgent(spec.Name, subAgent, subAgentMsgs)
+		if err != nil {
+			run.finishErr(err.Error())
 			t.runs.notifyDone(run)
-		}()
+			return
+		}
+		run.finishOK(result)
+		t.runs.notifyDone(run)
+	}()
 
 		return fmt.Sprintf("task_id: %s (agent: %s)\nstate: running\n\n<task_result>\nBackground task started. Poll with task_status or agent_status.\n</task_result>", run.ID, spec.Name), nil
 	}
@@ -452,6 +461,15 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		}
 		attachRunTranscript(run)
 	}
+	// Each synchronous sub-agent dispatch builds a fresh Agent with two
+	// maintenance-worker goroutines (memory + doc) that would otherwise leak
+	// forever — memoryMaintCh is never closed by the caller and the sync path
+	// never calls Shutdown. Tear the transient agent down once this call
+	// returns so we don't accumulate one leaked Agent + goroutines per
+	// knowledge_lookup / synchronous task. The sub-agent shares the parent's
+	// snapshotStore, so shutdownTransient stops only the goroutines/loop and
+	// must NOT Reset the shared store.
+	defer subAgent.shutdownTransient()
 	result, resp, err := t.executeSubAgentWithTranscript(spec.Name, subAgent, subAgentMsgs)
 	if err != nil {
 		if run != nil {

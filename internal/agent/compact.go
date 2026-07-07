@@ -7,18 +7,131 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
-// Token estimation constants. The base heuristic is ~4 chars per token for regular text.
-// Extended thinking / reasoning content is billed separately and costs ~2-3x more per
-// character due to different tokenization and special handling by the LLM provider.
-// Message framing overhead (role markers, JSON structure) adds ~50-100 tokens per message.
+// Token estimation constants. The base heuristic is ~4 chars per token for regular
+// (non-CJK) text. Extended thinking / reasoning content is billed separately and costs
+// ~2-3x more per character due to different tokenization and special handling by the LLM
+// provider. Message framing overhead (role markers, JSON structure) adds ~50-100 tokens
+// per message.
+//
+// The active chars-per-token ratio is resolved per provider/model by charsPerTokenFor so
+// the estimate tracks each family's tokenizer. When the provider/model is unknown we fall
+// back to defaultCharsPerToken (a conservative 4) rather than fail — see charsPerTokenFor.
 const (
-	charsPerToken                = 4
-	reasoningCharsPerToken       = 2   // Reasoning is more expensive; use ~2 chars per token
+	charsPerToken = 4 // used only for the summary-prompt *budget* (summary model window); kept conservative
+
+	// defaultCharsPerToken is the ratio used when provider/model is unknown.
+	// Conservative (slightly over-counts English) so the compaction threshold
+	// check stays safe — compacting a little early beats risking an overflow.
+	defaultCharsPerToken = 4.0
+	// cjkCharsPerToken: CJK scripts pack ~2 chars per token. Mixed content is
+	// split and each part estimated with its own ratio.
+	cjkCharsPerToken = 2.0
+
 	framingOverheadPerMessage    = 75  // ~75 tokens for role, content key, JSON overhead
 	messageStructureCharOverhead = 300 // ~300 chars worth of overhead per message for structure
 )
+
+// charsPerTokenFor returns a chars-per-token ratio appropriate for the given
+// provider and model. Tokenizers differ by family; an exact match is unnecessary
+// for a threshold estimate, but using a family-appropriate ratio keeps the result
+// within ~10-15% of the true count for all major SOTA models.
+//
+// Matching is deliberately prefix/substring-based so it tolerates common suffixes
+// and qualifiers that providers append to model ids (e.g. "-free", "-preview",
+// "-latest", snapshot/build tags) — "gpt-4o-free", "claude-3-5-sonnet-free", and
+// "deepseek-chat-free" all still resolve to their family. Unknown providers/models
+// fall back to defaultCharsPerToken (4), which is safe for the compaction decision.
+func charsPerTokenFor(provider, model string) float64 {
+	p := strings.ToLower(provider)
+	m := strings.ToLower(model)
+	// Model-name brand matches first (provider may be a generic router).
+	switch {
+	case strings.Contains(m, "claude"):
+		return 3.4 // Anthropic tokenizes English code efficiently
+	case strings.Contains(m, "gpt") || strings.HasPrefix(m, "o1") ||
+		strings.HasPrefix(m, "o3") || strings.HasPrefix(m, "o4"):
+		return 4.0 // OpenAI
+	case strings.Contains(m, "gemini") || strings.Contains(m, "gemma"):
+		return 4.0 // Google
+	case strings.Contains(m, "deepseek"):
+		return 3.8
+	case strings.Contains(m, "minimax") || strings.Contains(m, "abab"):
+		return 3.5
+	case strings.Contains(m, "glm") || strings.Contains(m, "z.ai") || strings.Contains(m, "zai"):
+		return 3.6 // Z.AI / ChatGLM
+	case strings.Contains(m, "qwen") || strings.Contains(m, "tongyi"):
+		return 3.6 // Alibaba
+	case strings.Contains(m, "kimi"):
+		return 3.6 // Moonshot Kimi
+	case strings.Contains(m, "hunyuan") || strings.Contains(m, "hy3"):
+		return 3.6 // Tencent Hunyuan
+	case strings.Contains(m, "mimo"):
+		return 3.8 // Xiaomi Mimo
+	case strings.Contains(m, "llama") || strings.Contains(m, "mistral") ||
+		strings.Contains(m, "mixtral") || strings.Contains(m, "grok"):
+		return 3.8
+	case strings.Contains(m, "yi-") || strings.Contains(m, "yi1"):
+		return 3.8 // 01.AI
+	case strings.Contains(m, "phi"):
+		return 3.8 // Microsoft Phi
+	}
+	// Fall back to provider for routers that expose it (e.g. "opencode-go"
+	// routes to DeepSeek; "copilot" is OpenAI-backed).
+	switch {
+	case strings.Contains(p, "anthropic"):
+		return 3.4
+	case strings.Contains(p, "openai"), strings.Contains(p, "copilot"):
+		return 4.0
+	case strings.Contains(p, "google"), strings.Contains(p, "gemini"):
+		return 4.0
+	case strings.Contains(p, "deepseek"), strings.Contains(p, "opencode"):
+		return 3.8
+	case strings.Contains(p, "minimax"):
+		return 3.5
+	case strings.Contains(p, "z.ai"), strings.Contains(p, "zai"):
+		return 3.6
+	case strings.Contains(p, "alibaba"), strings.Contains(p, "qwen"):
+		return 3.6
+	case strings.Contains(p, "moonshot"):
+		return 3.6 // Moonshot Kimi
+	case strings.Contains(p, "tencent"):
+		return 3.6 // Tencent Hunyuan
+	case strings.Contains(p, "xiaomi"):
+		return 3.8 // Xiaomi Mimo
+	case strings.Contains(p, "meta"), strings.Contains(p, "llama"):
+		return 3.8
+	case strings.Contains(p, "x-ai"), strings.Contains(p, "grok"):
+		return 3.8
+	}
+	// Unknown model AND unknown provider (local LM Studio, custom endpoints,
+	// future SOTA models we haven't enumerated): conservative default.
+	return defaultCharsPerToken
+}
+
+// isCJK reports whether r is a CJK/Hangul/Kana rune. Used to split mixed text so
+// each script is estimated with its own chars-per-token ratio.
+func isCJK(r rune) bool {
+	return unicode.Is(unicode.Han, r) ||
+		unicode.Is(unicode.Hiragana, r) ||
+		unicode.Is(unicode.Katakana, r) ||
+		unicode.Is(unicode.Hangul, r)
+}
+
+// splitCJK counts CJK vs non-CJK runes in s. Rune-based (not byte-based) so the
+// estimate is correct for multi-byte scripts.
+func splitCJK(s string) (cjk, non int) {
+	for _, r := range s {
+		if isCJK(r) {
+			cjk++
+		} else {
+			non++
+		}
+	}
+	return
+}
 
 // CompactResult describes the outcome of a compaction pass.
 //
@@ -39,33 +152,39 @@ type CompactResult struct {
 }
 
 // tokenEstimate is a coarse heuristic used when real Usage data is unavailable.
-// It properly separates regular text (~4 chars/token) from extended thinking
-// content (~2 chars/token) which is billed at a higher rate. Includes message
-// framing overhead. WARNING: This is unreliable and can be off by 20-40%;
-// prefer real Usage data from the API when available.
-func tokenEstimate(m Message) int {
-	regularChars := len(m.Content)
-	reasoningChars := len(m.ReasoningContent)
-
-	for _, tc := range m.ToolCalls {
-		regularChars += len(tc.Function.Name) + len(tc.Function.Arguments)
+// It splits text by script (CJK vs non-CJK), applies the provider/model ratio
+// (cpt) to non-CJK and cjkCharsPerToken to CJK, and bills extended-thinking
+// reasoning content at ~2x density. Includes per-message framing overhead.
+// WARNING: off by ~10-15%; prefer real Usage data from the API when available.
+func tokenEstimate(m Message, cpt float64) int {
+	if cpt <= 0 {
+		cpt = defaultCharsPerToken
 	}
-
-	// Calculate tokens for each content type with appropriate multiplier
-	regularTokens := (regularChars + charsPerToken - 1) / charsPerToken
-	reasoningTokens := (reasoningChars + reasoningCharsPerToken - 1) / reasoningCharsPerToken
-
-	// Add message framing overhead
-	return regularTokens + reasoningTokens + framingOverheadPerMessage
+	cjk, non := splitCJK(m.Content)
+	rcjk, rnon := splitCJK(m.ReasoningContent)
+	for _, tc := range m.ToolCalls {
+		c, n := splitCJK(tc.Function.Name + tc.Function.Arguments)
+		cjk += c
+		non += n
+	}
+	// Non-CJK uses the family ratio; CJK packs ~2 chars/token. Reasoning content
+	// is more token-dense, so halve the divisor for each script.
+	nonTokens := int(float64(non) / cpt)
+	cjkTokens := int(float64(cjk) / cjkCharsPerToken)
+	reasoningTokens := int(float64(rnon)/(cpt/2.0)) + int(float64(rcjk)/(cjkCharsPerToken/2.0))
+	return nonTokens + cjkTokens + reasoningTokens + framingOverheadPerMessage
 }
 
-func messagesTokens(msgs []Message) int {
+func messagesTokens(msgs []Message, cpt float64) int {
+	if cpt <= 0 {
+		cpt = defaultCharsPerToken
+	}
 	n := 0
 	for _, m := range msgs {
-		n += tokenEstimate(m)
+		n += tokenEstimate(m, cpt)
 	}
-	// Add aggregate overhead for message structure and separators
-	n += len(msgs) * (messageStructureCharOverhead / charsPerToken)
+	// Add aggregate overhead for message structure and separators.
+	n += len(msgs) * int(float64(messageStructureCharOverhead)/cpt)
 	return n
 }
 
@@ -86,6 +205,36 @@ func findTurnBoundary(msgs []Message, recentTurns int) int {
 		}
 	}
 	return 0
+}
+
+// findTokenTail walks backward from the end of msgs accumulating a token
+// estimate, and returns the index of the first message such that the suffix
+// msgs[idx:] stays within maxTokens. This bounds the retained "recent" context
+// by size rather than by user-turn count — necessary for long single-user-turn
+// agentic runs, where KeepRecentTurns resolves to the whole conversation and
+// would otherwise never compact. The caller must still run safeCut so tool-call
+// pairs stay intact. Returns start when maxTokens <= 0 (budget disabled) or
+// when the entire tail already fits within the budget.
+func findTokenTail(msgs []Message, start, maxTokens int, cpt float64) int {
+	if maxTokens <= 0 {
+		return start
+	}
+	if start < 0 {
+		start = 0
+	}
+	i := len(msgs) - 1
+	acc := 0
+	for i >= start {
+		acc += tokenEstimate(msgs[i], cpt)
+		if acc > maxTokens {
+			break
+		}
+		i--
+	}
+	if i < start {
+		i = start
+	}
+	return i
 }
 
 // safeCut walks `cut` backward until messages[cut:] is a self-contained API
@@ -222,7 +371,8 @@ const compactionSystemPrompt = `You are an anchored context summariser for an on
 	`If a <previous-summary> block is supplied, update it: merge in new facts from the conversation segment and keep it current. ` +
 	`Entries under "User Directives (verbatim)", "Key Decisions", and "Constraints & Preferences" are append-only: never remove, weaken, or paraphrase them away unless the conversation segment shows the user explicitly reversing them — mark such entries "(superseded: <why>)" instead of deleting. ` +
 	`If no previous summary is supplied, create a fresh summary from the conversation segment. ` +
-	`Do not narrate that you are summarising. Do not include filler. Preserve exact file paths, function names, command strings, identifiers, and error text.`
+	`Do not narrate that you are summarising. Do not include filler. Preserve exact file paths, function names, command strings, identifiers, and error text. ` +
+	`Keep the ENTIRE summary compact: target under roughly 1500 tokens (~6000 characters). When updating a previous summary, COMPRESS rather than append — merge related bullets, drop or shorten obsolete and low-signal entries, and never let the summary grow unbounded across repeated compactions. You decide what to shorten; preserve the headers, the user's verbatim directives, and the most recent, still-relevant signal.`
 
 // summaryTemplate is the fixed Markdown structure every summary must follow.
 // Every section must appear, even if its content is "(none)". Keeping the
@@ -274,6 +424,7 @@ Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, commands, error strings, and identifiers when known.
+- Keep the whole summary under ~6000 characters / ~1500 tokens. When extending a previous summary, compress old bullets instead of appending — you choose what to shorten.
 - Do not mention the summary process or that context was compacted.`
 
 // requiredSummarySections lists the headers a well-formed summary must
@@ -679,7 +830,7 @@ func latestCompactionSummaryIndex(msgs []Message) int {
 // will be sent on the next LLM request (excluding any new user prompt).
 // It prefers real Usage data from the most recent API response and adds a
 // heuristic estimate for any messages appended after that response.
-func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
+func CurrentContextEstimate(msgs []Message, cpt float64) (tokens int, source string) {
 	summaryIdx := latestCompactionSummaryIndex(msgs)
 	for i := len(msgs) - 1; i >= 0; i-- {
 		if msgs[i].Usage == nil {
@@ -711,7 +862,7 @@ func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
 				break
 			}
 
-			tail := messagesTokens(msgs[i+1:])
+			tail := messagesTokens(msgs[i+1:], cpt)
 			usageTokens := int(base)
 			if tail > 0 {
 				usageTokens += tail
@@ -722,7 +873,7 @@ func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
 			// floor against the full message heuristic so the context gauge
 			// never shows a value below what the on-disk messages must cost.
 			if !hasTotalTokens && hasPromptTokens {
-				if fullHeuristic := messagesTokens(msgs); usageTokens < fullHeuristic {
+				if fullHeuristic := messagesTokens(msgs, cpt); usageTokens < fullHeuristic {
 					return fullHeuristic, "estimated"
 				}
 			}
@@ -733,7 +884,7 @@ func CurrentContextEstimate(msgs []Message) (tokens int, source string) {
 			return int(base), "actual"
 		}
 	}
-	return messagesTokens(msgs), "estimated"
+	return messagesTokens(msgs, cpt), "estimated"
 }
 
 // shouldCompact decides whether the current message list warrants compaction.
@@ -749,7 +900,7 @@ func shouldCompact(msgs []Message, cfg compactRuntime) (bool, int) {
 		return false, 0
 	}
 
-	usedTokens, source := CurrentContextEstimate(msgs)
+	usedTokens, source := CurrentContextEstimate(msgs, charsPerTokenFor(cfg.Provider, cfg.Model))
 	if source == "estimated" {
 		// Apply 15% safety margin to account for reasoning content and message
 		// framing overhead that may be underestimated in the heuristic
@@ -817,12 +968,23 @@ func inactivityContext(seconds int) (context.Context, context.CancelFunc, func()
 // compactRuntime is the resolved set of knobs the compaction pass needs at
 // runtime, derived from CompactConfig + the active model's window size.
 type compactRuntime struct {
-	Enabled               bool
-	TokenThreshold        float64
-	KeepRecentTurns       int
+	Enabled         bool
+	TokenThreshold  float64
+	KeepRecentTurns int
+	// KeepRecentTokens bounds the retained "recent" suffix by token estimate
+	// rather than by user-turn count. 0 means "unbounded by tokens" (turn-based
+	// tail only). The tail is the later (smaller) of the turn-based boundary and
+	// the token boundary, so the recent context is bounded by whichever is
+	// stricter — this is what lets long single-user-turn agentic runs compact.
+	KeepRecentTokens      int
 	MinMessages           int
 	SummaryTimeoutSeconds int
 	SummaryMaxRetries     int
 	MaxSummaryInputTokens int
 	WindowTokens          int
+	// Provider/Model identify the active model so the token estimate can use a
+	// family-appropriate chars-per-token ratio. Empty means "unknown" -> a
+	// conservative default ratio (see charsPerTokenFor).
+	Provider string
+	Model    string
 }

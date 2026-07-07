@@ -115,6 +115,13 @@ func TestAgentRun_ModelLabel(t *testing.T) {
 			t.Fatalf("ModelLabel = %q, want empty", got)
 		}
 	})
+
+	t.Run("returns empty string when Sub client is nil", func(t *testing.T) {
+		run := &AgentRun{Sub: &Agent{client: nil}}
+		if got := run.ModelLabel(); got != "" {
+			t.Fatalf("ModelLabel = %q, want empty", got)
+		}
+	})
 }
 
 func TestAgentRunTerminalStateIsStickyAfterCancel(t *testing.T) {

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -341,7 +342,7 @@ func TestTokenEstimateHandlesExtendedThinking(t *testing.T) {
 		Content:          "",                         // no regular content
 		ReasoningContent: strings.Repeat("x", 10000), // 10k chars of thinking
 	}
-	est := tokenEstimate(m)
+	est := tokenEstimate(m, 4)
 
 	// Expected: (10000 / 2) + framingOverheadPerMessage = 5000 + 75 = 5075
 	// Old behavior would calculate: (10000 / 4) + 75 = 2500 + 75 = 2575
@@ -355,7 +356,7 @@ func TestTokenEstimateHandlesExtendedThinking(t *testing.T) {
 // framing overhead (role, JSON structure) is accounted for.
 func TestTokenEstimateIncludesFramingOverhead(t *testing.T) {
 	m := Message{Role: "user", Content: "hello"}
-	est := tokenEstimate(m)
+	est := tokenEstimate(m, 4)
 
 	// Expected: (5 chars / 4) + framingOverheadPerMessage = 1 + 75 = 76
 	if est < framingOverheadPerMessage {
@@ -399,7 +400,7 @@ func TestCurrentContextEstimateSkipsZeroUsage(t *testing.T) {
 		{Role: "assistant", Usage: &TokenUsage{PromptTokens: &t0}},
 		{Role: "user", Content: strings.Repeat("x", 400)},
 	}
-	_, source := CurrentContextEstimate(msgs)
+	_, source := CurrentContextEstimate(msgs, 4)
 	if source != "estimated" {
 		t.Errorf("expected source=%q for zero Usage, got %q", "estimated", source)
 	}
@@ -648,7 +649,7 @@ func TestRunCompactChunksLargeMiddleInsteadOfDropping(t *testing.T) {
 		Message{Role: "assistant", Content: "tail response"},
 	)
 
-	res := a.runCompact(msgs, rt, "")
+	res := a.runCompact(msgs, rt, "", false)
 	if !res.OK {
 		t.Fatalf("expected compaction success, got %#v", res)
 	}
@@ -749,7 +750,7 @@ func TestCurrentContextEstimateAfterCompaction(t *testing.T) {
 		{Role: "user", Content: "what did we do?"},
 	}
 
-	tokens, source := CurrentContextEstimate(msgs)
+	tokens, source := CurrentContextEstimate(msgs, 4)
 
 	// Should NOT use the stale 50k Usage value.
 	if source == "actual" || source == "actual+tail" {
@@ -771,13 +772,178 @@ func TestCurrentContextEstimateUsesFreshUsageAfterCompaction(t *testing.T) {
 		{Role: "user", Content: "follow up"},
 	}
 
-	tokens, source := CurrentContextEstimate(msgs)
+	tokens, source := CurrentContextEstimate(msgs, 4)
 	if source != "actual+tail" {
 		t.Fatalf("expected fresh usage to be trusted after compaction, got source=%q (tokens=%d)", source, tokens)
 	}
 
-	want := int(freshTokens) + messagesTokens(msgs[3:])
+	want := int(freshTokens) + messagesTokens(msgs[3:], 4)
 	if tokens != want {
 		t.Fatalf("tokens=%d, want %d", tokens, want)
+	}
+}
+
+// TestRunCompactSingleUserTurnAgenticRun verifies the headline fix: a long
+// agentic run with a SINGLE user message (the initial request) followed by a
+// long assistant<->tool loop must still compact. Before the token-budget tail
+// was added, findTurnBoundary(..., KeepRecentTurns) resolved to index 0 and the
+// whole conversation was kept verbatim, so compaction was silently skipped even
+// when the context far exceeded the threshold.
+func TestRunCompactSingleUserTurnAgenticRun(t *testing.T) {
+	client := &scriptedCaptureClient{Responses: []string{validSummaryText("single-turn")}}
+	a := &Agent{client: client}
+	rt := compactRuntime{
+		Enabled:               true,
+		KeepRecentTurns:       3,
+		KeepRecentTokens:      4000, // small budget so the long run is trimmed
+		SummaryTimeoutSeconds: 5,
+		SummaryMaxRetries:     0,
+		MaxSummaryInputTokens: 50000,
+	}
+	msgs := []Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "build the feature"},
+	}
+	// One long agentic loop: many assistant tool calls + tool results.
+	for i := 0; i < 20; i++ {
+		msgs = append(msgs,
+			Message{Role: "assistant", ToolCalls: []ToolCall{tcCall(fmt.Sprintf("c%d", i), "bash")}, Content: "running step"},
+			Message{Role: "tool", ToolID: fmt.Sprintf("c%d", i), Content: strings.Repeat("o", 3000)},
+		)
+	}
+
+	res := a.runCompact(msgs, rt, "", false)
+	if !res.OK {
+		t.Fatalf("expected single-turn agentic run to compact, got skipped result %#v", res)
+	}
+	// The splice must drop a meaningful chunk of the middle (not just 1 message).
+	if res.ReplaceTo-res.ReplaceFrom < 10 {
+		t.Fatalf("expected a large middle to be compacted, got range %d:%d", res.ReplaceFrom, res.ReplaceTo)
+	}
+	if !strings.Contains(res.Summary.Content, "single-turn") {
+		t.Fatalf("summary should carry the model output, got %q", res.Summary.Content)
+	}
+	// A recent suffix must remain (the token budget kept the tail).
+	if res.ReplaceTo >= len(msgs) {
+		t.Fatalf("suffix must be retained, ReplaceTo=%d len=%d", res.ReplaceTo, len(msgs))
+	}
+}
+
+// TestFindTokenTailBoundsSuffix verifies the helper returns a later (smaller)
+// boundary as the token budget shrinks, and never returns below start.
+func TestFindTokenTailBoundsSuffix(t *testing.T) {
+	msgs := []Message{
+		{Role: "user", Content: "start"},
+	}
+	for i := 0; i < 10; i++ {
+		msgs = append(msgs, Message{Role: "assistant", Content: strings.Repeat("x", 1000)})
+	}
+	start := 1
+
+	// Budget of 0 disables the tail (returns start).
+	if got := findTokenTail(msgs, start, 0, 4); got != start {
+		t.Fatalf("budget 0 should return start, got %d", got)
+	}
+	// A tiny budget keeps only the last message.
+	if got := findTokenTail(msgs, start, 50, 4); got != len(msgs)-1 {
+		t.Fatalf("tiny budget should keep only the last message, got %d want %d", got, len(msgs)-1)
+	}
+	// A huge budget keeps everything from start.
+	if got := findTokenTail(msgs, start, 1_000_000, 4); got != start {
+		t.Fatalf("huge budget should keep everything from start, got %d", got)
+	}
+}
+
+// TestCharsPerTokenForCoversSOTAModels verifies the ratio table resolves every
+// major SOTA family (including the "-free" suffix some providers append) and
+// falls back to the conservative default for unknown models instead of failing.
+func TestCharsPerTokenForCoversSOTAModels(t *testing.T) {
+	cases := []struct {
+		provider, model string
+		want            float64
+	}{
+		{"anthropic", "claude-3-5-sonnet-free", 3.4},
+		{"anthropic", "claude-opus-4", 3.4},
+		{"openai", "gpt-4o-free", 4.0},
+		{"openai", "gpt-4o", 4.0},
+		{"openai", "o3-mini", 4.0},
+		{"", "o4-mini", 4.0},
+		{"google", "gemini-2.5-pro", 4.0},
+		{"", "gemini-1.5-flash", 4.0},
+		{"", "deepseek-chat-free", 3.8},
+		{"opencode-go", "deepseek-v4-flash", 3.8},
+		{"", "minimax-m2.1", 3.5},
+		{"", "abab-7", 3.5},
+		{"", "glm-4-plus", 3.6},
+		{"z.ai", "glm-4", 3.6},
+		{"", "qwen2.5-coder-free", 3.6},
+		{"alibaba", "qwen-max", 3.6},
+		{"moonshot", "kimi-k2", 3.6},
+		{"moonshot", "kimi-k2.5", 3.6},
+		{"", "kimi-k2-7-code", 3.6},
+		{"tencent", "hunyuan-t1", 3.6},
+		{"", "hy3", 3.6},
+		{"tencent", "hy3-pro", 3.6},
+		{"xiaomi", "MiMo-V2.5", 3.8},
+		{"", "mimo-v2.5-free", 3.8},
+		{"opencode", "mimo-v2.5-free", 3.8},
+		{"", "llama-3.1-70b", 3.8},
+		{"", "mistral-large", 3.8},
+		{"", "grok-2", 3.8},
+		{"x-ai", "grok-3", 3.8},
+		{"", "yi-1.5-34b", 3.8},
+		{"", "phi-3-mini", 3.8},
+	}
+	for _, c := range cases {
+		if got := charsPerTokenFor(c.provider, c.model); got != c.want {
+			t.Errorf("charsPerTokenFor(%q,%q) = %v, want %v", c.provider, c.model, got, c.want)
+		}
+	}
+}
+
+// Unknown provider AND unknown model must fall back to the conservative default
+// rather than 0 (which would divide-by-zero) or panic.
+func TestCharsPerTokenForUnknownFallsBack(t *testing.T) {
+	if got := charsPerTokenFor("", ""); got != defaultCharsPerToken {
+		t.Errorf("unknown model should fall back to default %v, got %v", defaultCharsPerToken, got)
+	}
+	if got := charsPerTokenFor("some-future-provider", "some-future-model-x"); got != defaultCharsPerToken {
+		t.Errorf("future unknown model should fall back to default %v, got %v", defaultCharsPerToken, got)
+	}
+}
+
+func TestResolveCompactRuntimeDefaultsKeepRecentTokens(t *testing.T) {
+	if ModelWindow("openai/gpt-4o") <= 0 {
+		t.Skip("model registry unavailable for openai/gpt-4o")
+	}
+	client := &GenericClient{Provider: "openai", Model: "gpt-4o"}
+	a := &Agent{
+		client: client,
+		config: &config.Config{Ocode: config.OcodeConfig{Compact: config.CompactConfig{Enabled: true}}},
+	}
+	rt := a.resolveCompactRuntime(false)
+	if rt.WindowTokens <= 0 {
+		t.Fatalf("expected positive window tokens, got %d", rt.WindowTokens)
+	}
+	if rt.KeepRecentTokens <= 0 {
+		t.Fatalf("expected default keep_recent_tokens to be set, got %d", rt.KeepRecentTokens)
+	}
+	if rt.KeepRecentTokens > rt.WindowTokens {
+		t.Fatalf("expected keep_recent_tokens to stay within window, got %d > %d", rt.KeepRecentTokens, rt.WindowTokens)
+	}
+}
+
+// TestTokenEstimateCJK verifies that CJK text is estimated at ~2 chars/token
+// while Latin text uses the family ratio, so mixed content is not skewed.
+func TestTokenEstimateCJK(t *testing.T) {
+	latin := Message{Content: strings.Repeat("a", 100)}
+	// 100 latin chars / 4 = 25 tokens + 75 framing overhead = 100.
+	if got := tokenEstimate(latin, 4); got < 90 || got > 110 {
+		t.Errorf("latin estimate out of expected band: %d", got)
+	}
+	cjk := Message{Content: strings.Repeat("中", 100)}
+	// 100 CJK chars / 2 = 50 tokens + 75 framing overhead = 125.
+	if got := tokenEstimate(cjk, 4); got < 115 || got > 140 {
+		t.Errorf("cjk estimate out of expected band: %d", got)
 	}
 }
