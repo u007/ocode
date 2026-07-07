@@ -37,6 +37,20 @@ type ContextualTool interface {
 	ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error)
 }
 
+// StreamingTool is an optional extension of Tool for tools that can emit
+// incremental output as they execute (e.g. a long-running shell command).
+// When a tool implements StreamingTool, the agent loop calls ExecuteStream
+// with an emit callback instead of the synchronous Execute, and the TUI
+// renders each chunk live alongside the tool call. Tools that do not
+// implement it fall back to the synchronous Execute (the emit callback is
+// nil in that path). The final string returned by ExecuteStream is the
+// canonical, complete result used for the conversation; the streamed chunks
+// are a live preview that the TUI replaces with that canonical result.
+type StreamingTool interface {
+	Tool
+	ExecuteStream(args json.RawMessage, emit func(chunk string)) (string, error)
+}
+
 // NoticedError wraps an error with a user-facing notice that should be shown
 // in the transcript but not sent to the LLM. Tools return this when they
 // encounter a recoverable problem that the user should know about (e.g. an
@@ -46,8 +60,8 @@ type NoticedError struct {
 	Notice string // User-facing message shown in the transcript
 }
 
-func (e *NoticedError) Error() string  { return e.Err.Error() }
-func (e *NoticedError) Unwrap() error  { return e.Err }
+func (e *NoticedError) Error() string { return e.Err.Error() }
+func (e *NoticedError) Unwrap() error { return e.Err }
 
 // NoticeSentinel is the prefix used in assistant messages that carry a
 // transient user-facing notice. The TUI strips this prefix and renders the

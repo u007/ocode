@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -50,6 +51,15 @@ func (t BashTool) Definition() map[string]interface{} {
 }
 
 func (t BashTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteStream(args, nil)
+}
+
+// ExecuteStream runs the bash command and, when emit is non-nil, streams
+// incremental stdout/stderr chunks to it as they are produced. The returned
+// string is the canonical, complete result captured into the buffer ring and
+// supervisor. Background and move-to-background paths return immediately and
+// stop streaming (the live output shown up to that point is preserved).
+func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (string, error) {
 	var params struct {
 		Command         string `json:"command"`
 		Timeout         int    `json:"timeout"`
@@ -91,11 +101,29 @@ func (t BashTool) Execute(args json.RawMessage) (string, error) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
 
+	// streaming gates live emission. Once the command is moved to the
+	// background we stop emitting so the transcript keeps the output produced
+	// before the move and is not polluted by trailing background output.
+	var streaming atomic.Bool
+	if emit != nil {
+		streaming.Store(true)
+	}
+	safeEmit := func(b []byte) {
+		if emit == nil || len(b) == 0 || !streaming.Load() {
+			return
+		}
+		emit(string(b))
+	}
+
 	var stdout, stderr bytes.Buffer
 	var proc *Process
 	if t.Procs == nil {
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
+		if emit != nil {
+			cmd.Stdout = io.MultiWriter(&stdout, emitWriter{emit: safeEmit})
+			cmd.Stderr = io.MultiWriter(&stderr, emitWriter{emit: safeEmit})
+		}
 	}
 
 	var sup *ProcessSupervisor
@@ -140,7 +168,11 @@ func (t BashTool) Execute(args json.RawMessage) (string, error) {
 		var pumpWg sync.WaitGroup
 		pump := func(dst *bytes.Buffer, rc io.Reader) {
 			defer pumpWg.Done()
-			_, _ = io.Copy(io.MultiWriter(dst, processWriter{p: proc}), rc)
+			if emit != nil {
+				_, _ = io.Copy(io.MultiWriter(dst, processWriter{p: proc}, emitWriter{emit: safeEmit}), rc)
+			} else {
+				_, _ = io.Copy(io.MultiWriter(dst, processWriter{p: proc}), rc)
+			}
 		}
 		pumpWg.Add(2)
 		go pump(&stdout, stdoutPipe)
@@ -164,6 +196,7 @@ func (t BashTool) Execute(args json.RawMessage) (string, error) {
 			finalizeManagedProcess(proc, sup, onDone, err)
 			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout), nil
 		case <-proc.bgRequestCh:
+			streaming.Store(false)
 			shouldCancel = false
 			go func() {
 				err := waitState.Wait()
@@ -178,6 +211,15 @@ func (t BashTool) Execute(args json.RawMessage) (string, error) {
 	err := cmd.Run()
 	res := joinStdoutStderr(stdout.String(), stderr.String())
 	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout), nil
+}
+
+// emitWriter adapts a chunk-emitting callback to io.Writer so it can be
+// composed into an io.MultiWriter pipeline alongside the buffer/ring sinks.
+type emitWriter struct{ emit func(b []byte) }
+
+func (w emitWriter) Write(b []byte) (int, error) {
+	w.emit(b)
+	return len(b), nil
 }
 
 // joinStdoutStderr concatenates the captured stdout and stderr into a single

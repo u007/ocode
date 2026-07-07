@@ -35,8 +35,15 @@ git worktree add .worktrees/feature-branch feature-branch
   `git clean -fd` as a default coping strategy.** They destroy user state
   the user may not be unable to recover. If a change conflicts, stop and
   ask; do not unwind the user's working tree.
+- **Never overwrite production or remote `.env` files** (`.env`,
+  `.env.production`, `.env.local`, or any environment-specific variant used
+  in deployed/remote contexts) unless the user explicitly requests it.
+  These files often contain secrets, API keys, or configuration that is
+  different from local dev — blindly replacing them can break deployments
+  or leak credentials. When in doubt, ask.
 
 ## Context Loading
+
 - `AGENTS.md`, `CLAUDE.md`, `OCODE.md`, and `.cursorrules` are loaded at
   session start by `internal/agent/context.go::LoadContext`.
 - If a context file is tracked by git AND has unstaged modifications, the

@@ -151,6 +151,14 @@ type Agent struct {
 	// channel). Subagents do not inherit OnDelta, preventing pollution of the
 	// parent TUI.
 	OnDelta func(kind, text string)
+	// OnToolOutput, if set, is invoked with incremental output from a tool that
+	// implements tool.StreamingTool (e.g. live bash stdout/stderr) as it runs.
+	// toolCallID identifies the tool call so the UI can attach the stream to the
+	// right entry. The callback fires on the agent's Step goroutine — keep
+	// handlers fast and non-blocking (push to a buffered channel). Subagents do
+	// not set OnToolOutput, so their streaming tools fall back to the synchronous
+	// Execute path.
+	OnToolOutput func(toolCallID, chunk string)
 	// OnUsage, if set, is invoked when the provider streams token usage
 	// information during a Chat call. The callback fires on the HTTP goroutine
 	// — keep handlers fast and non-blocking. Not all providers support streaming
@@ -3040,7 +3048,16 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 
 	var result string
 	var err error
-	if b != nil && b.bus != nil {
+	// If the tool can stream incremental output and the UI has registered a
+	// sink, run it via ExecuteStream so chunks render live. Otherwise fall back
+	// to the synchronous Execute.
+	if st, ok := t.(tool.StreamingTool); ok && a.OnToolOutput != nil {
+		result, err = st.ExecuteStream(args, func(chunk string) {
+			if chunk != "" {
+				a.OnToolOutput(toolCallID, chunk)
+			}
+		})
+	} else if b != nil && b.bus != nil {
 		if tt, ok := t.(*TaskTool); ok {
 			local := *tt
 			local.groupBus = b.bus

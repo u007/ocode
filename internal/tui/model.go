@@ -94,6 +94,13 @@ type message struct {
 	raw       *agent.Message
 	transient bool
 	skipLLM   bool
+	// streamFinalized marks a tool-result message whose canonical (final)
+	// content has already replaced the live-streamed output. Once set, late
+	// streamed chunks that were buffered before the final message arrived are
+	// ignored by appendShellOutput instead of being appended to the canonical
+	// result (which would duplicate the trailing output in the transcript and
+	// the LLM prompt). See the streaming bash-tool path.
+	streamFinalized bool
 }
 
 // estimateTok approximates token count as len(s)/4.
@@ -3300,9 +3307,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.askAgent()
 	case streamMsgEvent:
 		if msg.msg.Role == "tool" {
-			m.appendAgentMessage(msg.msg)
-			if m.activeTab != tabChat {
-				m.chatUnread = true
+			if idx := m.findToolMessageIndexByToolID(msg.msg.ToolID); idx >= 0 {
+				// This tool already streamed its output live (e.g. bash). If the
+				// final message is a background handoff notice (not the actual
+				// command output), keep the streamed output and append the notice
+				// instead of overwriting the live output. Otherwise replace the
+				// provisional content with the canonical (redacted/truncated)
+				// result instead of appending a duplicate.
+				if strings.Contains(msg.msg.Content, "to background as") ||
+					strings.HasPrefix(msg.msg.Content, "Started background process") {
+					m.appendAgentMessage(msg.msg)
+					if m.activeTab != tabChat {
+						m.chatUnread = true
+					}
+				} else {
+					existing := &m.messages[idx]
+					toolName := m.lookupToolName(msg.msg.ToolID)
+					existing.raw = &msg.msg
+					existing.text = renderToolResult(toolName, msg.msg.Content, m.styles)
+					// Mark finalized so any tool deltas still buffered in
+					// deltaCh/pendingStreamDeltas are dropped by appendShellOutput
+					// rather than appended onto the canonical result.
+					existing.streamFinalized = true
+				}
+			} else {
+				m.appendAgentMessage(msg.msg)
+				if m.activeTab != tabChat {
+					m.chatUnread = true
+				}
 			}
 			m.rerenderTranscriptAndMaybeScroll()
 			// Relay streaming events to the /rc web UI if active
@@ -3433,7 +3465,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.lastRetryableLLMErr = ""
 			}
-			m.messages = append(m.messages, message{role: roleAssistant, text: errorText})
+			// Render the failure as a transcript message for the user, but mark
+			// it skipLLM so it is NOT folded back into the prompt on the next
+			// turn or retry. A server error / no-response / network failure is a
+			// transport error, not assistant content — sending it to the model
+			// as if it were a prior assistant turn corrupts the conversation.
+			m.messages = append(m.messages, message{role: roleAssistant, text: errorText, skipLLM: true})
 			m.rerenderTranscriptAndMaybeScroll()
 		} else {
 			m.lastRetryableLLMErr = ""
@@ -3629,6 +3666,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, waitTitleEvent(m.titleCh)
 	case deltaMsg:
+		if msg.delta.kind == "tool" {
+			// Live incremental output from a streaming tool (e.g. bash).
+			// Append it to the tool's transcript entry as it arrives.
+			m.appendShellOutput(msg.delta.toolCallID, msg.delta.text)
+			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+		}
 		if msg.delta.kind == "discovery" {
 			m.appendDiscoveryNotice("Discovered: " + msg.delta.text)
 			m.rerenderTranscriptAndMaybeScroll()
@@ -10148,11 +10191,18 @@ func (m *model) appendShellOutput(toolCallID, chunk string) {
 	toolName := m.lookupToolName(toolCallID)
 	if idx < 0 {
 		m.appendAgentMessage(agent.Message{Role: "tool", ToolID: toolCallID, Content: chunk})
-	} else {
-		msg := &m.messages[idx]
-		msg.raw.Content += chunk
-		msg.text = renderToolResult(toolName, msg.raw.Content, m.styles)
+		return
 	}
+	// If the canonical tool result has already replaced the live stream
+	// (streamFinalized), any remaining buffered chunk is a stale tail that
+	// arrived after the final message — appending it would duplicate output in
+	// the transcript and the LLM prompt. Drop it.
+	if m.messages[idx].streamFinalized {
+		return
+	}
+	msg := &m.messages[idx]
+	msg.raw.Content += chunk
+	msg.text = renderToolResult(toolName, msg.raw.Content, m.styles)
 	m.rerenderTranscriptAndMaybeScroll()
 }
 
@@ -10810,6 +10860,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 			a.OnMessage = nil
 			a.OnDiscovery = nil
 			a.OnMDIndexing = nil
+			a.OnToolOutput = nil
 		}()
 
 		// Keep delta streaming best-effort so a burst of reasoning tokens can
@@ -10827,6 +10878,20 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 				// this callback fires from the LLM streaming goroutine while the TUI
 				// Update loop may read deltaDrops.
 				atomic.AddUint64(&m.deltaDrops, 1)
+			}
+		}
+		// Stream incremental tool output (e.g. live bash stdout/stderr) to the
+		// same delta channel so waitStreamEvent delivers it through the normal
+		// stream path and the TUI can render it live under the tool call.
+		a.OnToolOutput = func(toolCallID, chunk string) {
+			if chunk == "" {
+				return
+			}
+			select {
+			case deltaCh <- deltaEvent{kind: "tool", text: chunk, toolCallID: toolCallID}:
+			default:
+				// drop on backpressure — the canonical full result still arrives
+				// in the final tool message, so the transcript stays consistent.
 			}
 		}
 		// Use a non-blocking send so the goroutine cannot hang forever when the
@@ -13083,8 +13148,9 @@ type recapFinishedMsg struct {
 // deltaEvent carries one streamed token (kind ∈ {"reasoning","text"}) from
 // the LLM HTTP goroutine to the TUI's event loop.
 type deltaEvent struct {
-	kind string
-	text string
+	kind       string
+	text       string
+	toolCallID string
 }
 
 type deltaMsg struct {

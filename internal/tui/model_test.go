@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -3836,6 +3837,124 @@ func TestCtrlYRetriesLastRetryableLLMError(t *testing.T) {
 	}
 	if len(got.messages) != 1 || got.messages[0].text != "please retry" {
 		t.Fatalf("expected transient error removed before retry, got %#v", got.messages)
+	}
+}
+
+func TestLLMStreamErrorIsRenderedButNotSentToLLM(t *testing.T) {
+	// Regression test for the bug: when an LLM call fails with a server error,
+	// no-response, or any network issue, the failure must be shown in the
+	// transcript but must NOT be folded back into the prompt on the next turn
+	// or retry. Sending a transport error to the model as if it were a prior
+	// assistant turn corrupts the conversation.
+	err := errors.New("503 service unavailable: upstream connection reset")
+	m := model{
+		viewport:  fastviewport.New(80, 24),
+		styles:    ApplyThemeColors("tokyonight"),
+		streaming: true,
+		sessionID: "test-llm-stream-error",
+		messages: []message{
+			{role: roleUser, text: "do the thing"},
+		},
+	}
+
+	updated, _ := m.Update(streamDoneMsg{err: err})
+	got := derefTestModel(t, updated)
+
+	// 1. The error must be rendered in the transcript.
+	if len(got.messages) != 2 {
+		t.Fatalf("expected user msg + error msg, got %#v", got.messages)
+	}
+	errMsg := got.messages[len(got.messages)-1]
+	if errMsg.role != roleAssistant {
+		t.Fatalf("expected error as assistant message, got role %v", errMsg.role)
+	}
+	if !strings.Contains(errMsg.text, "503 service unavailable") {
+		t.Fatalf("expected error text rendered, got %q", errMsg.text)
+	}
+	// 2. The error must be marked skipLLM so it is excluded from the prompt.
+	if !errMsg.skipLLM {
+		t.Fatal("expected LLM error message to be skipLLM (not sent to model)")
+	}
+	// 3. The error must NOT appear in the next prompt snapshot.
+	snap, _ := got.buildAgentMessagesSnapshot()
+	for _, am := range snap {
+		if strings.Contains(am.Content, "503 service unavailable") {
+			t.Fatalf("error leaked into LLM prompt: %#v", snap)
+		}
+	}
+	// 4. The prior user message must still reach the model.
+	foundUser := false
+	for _, am := range snap {
+		if am.Role == "user" && am.Content == "do the thing" {
+			foundUser = true
+		}
+	}
+	if !foundUser {
+		t.Fatalf("expected prior user message to remain in prompt, got %#v", snap)
+	}
+}
+
+// TestStreamedToolOutputLateDeltaNotAppendedAfterFinal is a regression test for
+// the live-bash-streaming ordering bug: when the canonical final tool message
+// arrives while streamed chunks are still buffered in deltaCh/pendingStreamDeltas,
+// those late chunks must NOT be appended onto the canonical result. Appending
+// them would duplicate the trailing output in both the transcript and the LLM
+// prompt. The streamMsgEvent handler marks the message streamFinalized; the
+// guard in appendShellOutput then drops any subsequent chunk.
+func TestStreamedToolOutputLateDeltaNotAppendedAfterFinal(t *testing.T) {
+	toolCallID := "call-stream-1"
+	m := model{
+		viewport:  fastviewport.New(80, 24),
+		styles:    ApplyThemeColors("tokyonight"),
+		streaming: true,
+		sessionID: "test-stream-order",
+		messages: []message{
+			{role: roleUser, text: "run the script"},
+		},
+	}
+
+	// 1. Stream two chunks live — this creates the tool-result transcript entry.
+	m.appendShellOutput(toolCallID, "line-one\n")
+	m.appendShellOutput(toolCallID, "line-two\n")
+
+	// 2. The canonical final tool message arrives and replaces the streamed content.
+	updated, _ := m.Update(streamMsgEvent{msg: agent.Message{Role: "tool", ToolID: toolCallID, Content: "CANONICAL"}})
+	got := derefTestModel(t, updated)
+
+	idx := got.findToolMessageIndexByToolID(toolCallID)
+	if idx < 0 {
+		t.Fatalf("expected streamed tool message to exist")
+	}
+	if got.messages[idx].raw.Content != "CANONICAL" {
+		t.Fatalf("expected canonical content, got %q", got.messages[idx].raw.Content)
+	}
+	if !got.messages[idx].streamFinalized {
+		t.Fatalf("expected streamFinalized set after final message")
+	}
+
+	// 3. A late chunk that was buffered before the final message arrives after
+	// finalization. It must be dropped, not appended.
+	pm := &got
+	pm.appendShellOutput(toolCallID, "line-two\n")
+
+	if pm.messages[idx].raw.Content != "CANONICAL" {
+		t.Fatalf("late chunk was appended to canonical result, content=%q", pm.messages[idx].raw.Content)
+	}
+
+	// 4. The LLM prompt must contain exactly the canonical result, once, and must
+	// NOT contain the late chunk text.
+	snap, _ := pm.buildAgentMessagesSnapshot()
+	foundCanonical := 0
+	for _, am := range snap {
+		if am.Role == "tool" && strings.Contains(am.Content, "CANONICAL") {
+			foundCanonical++
+		}
+		if strings.Contains(am.Content, "line-two") {
+			t.Fatalf("late chunk leaked into LLM prompt: %#v", snap)
+		}
+	}
+	if foundCanonical != 1 {
+		t.Fatalf("expected canonical tool result exactly once in prompt, got %d", foundCanonical)
 	}
 }
 
