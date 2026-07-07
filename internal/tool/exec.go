@@ -194,7 +194,7 @@ func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (
 			// supervisor exited/killed — the inline MarkExited/MarkKilled
 			// block that used to live here duplicated that work.
 			finalizeManagedProcess(proc, sup, onDone, err)
-			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout), nil
+			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, emit == nil), nil
 		case <-proc.bgRequestCh:
 			streaming.Store(false)
 			shouldCancel = false
@@ -210,7 +210,7 @@ func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (
 
 	err := cmd.Run()
 	res := joinStdoutStderr(stdout.String(), stderr.String())
-	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout), nil
+	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, emit == nil), nil
 }
 
 // emitWriter adapts a chunk-emitting callback to io.Writer so it can be
@@ -237,21 +237,32 @@ func joinStdoutStderr(stdoutStr, stderrStr string) string {
 
 // finalizeExecResult formats the user-facing output string for a finished
 // shell command, identical for the registry-managed and registry-less paths.
-func finalizeExecResult(res string, err error, timedOut bool, timeout time.Duration) string {
+// When capAtMax is false (i.e. the command streamed its output live), the
+// 30000-char hard cap is skipped so the canonical result keeps the full output
+// that was already shown to the user; the agent truncates for the LLM prompt
+// separately via TruncateToolResult, and the full text is carried to the UI
+// through Message.DisplayContent.
+func finalizeExecResult(res string, err error, timedOut bool, timeout time.Duration, capAtMax bool) string {
+	applyCap := func(s string) string {
+		if capAtMax {
+			return truncateOutput(s)
+		}
+		return s
+	}
 	if timedOut {
-		return fmt.Sprintf("Command timed out after %v. Output so far:\n%s", timeout, truncateOutput(res))
+		return fmt.Sprintf("Command timed out after %v. Output so far:\n%s", timeout, applyCap(res))
 	}
 	if err != nil {
 		code := commandExitCode(err)
 		if res == "" {
 			return fmt.Sprintf("Command failed (exit code %d): %v", code, err)
 		}
-		return fmt.Sprintf("Command failed (exit code %d). Output:\n%s", code, truncateOutput(res))
+		return fmt.Sprintf("Command failed (exit code %d). Output:\n%s", code, applyCap(res))
 	}
 	if strings.TrimSpace(res) == "" {
 		return "Command executed successfully (no output)."
 	}
-	return truncateOutput(res)
+	return applyCap(res)
 }
 
 func truncateOutput(s string) string {

@@ -3390,8 +3390,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					existing := &m.messages[idx]
 					toolName := m.lookupToolName(msg.msg.ToolID)
+					// The canonical message Content is truncated by TruncateToolResult
+					// (bounded head + a "[output truncated: showing X/Y lines, …]"
+					// notice with the saved-file path and read/sed retrieval
+					// instructions) to protect the LLM context window. That
+					// truncated Content must stay intact on msg.raw so the LLM
+					// prompt keeps receiving the notice on the next turn
+					// (buildAgentMessagesSnapshot feeds *msg.raw to the agent).
+					// For a large result the live stream already rendered the FULL
+					// output, so we keep raw.Content truncated but render the full
+					// DisplayContent in the transcript so the streamed chunks are
+					// not lost on finalize.
 					existing.raw = &msg.msg
-					existing.text = renderToolResult(toolName, msg.msg.Content, m.styles)
+					if msg.msg.DisplayContent != "" {
+						existing.text = renderToolResult(toolName, msg.msg.DisplayContent, m.styles)
+					} else {
+						existing.text = renderToolResult(toolName, msg.msg.Content, m.styles)
+					}
 					// Mark finalized so any tool deltas still buffered in
 					// deltaCh/pendingStreamDeltas are dropped by appendShellOutput
 					// rather than appended onto the canonical result.
@@ -10970,11 +10985,15 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 			if chunk == "" {
 				return
 			}
+			// Block until the TUI drains the delta channel (or the run is
+			// cancelled). Unlike LLM text deltas, dropping a tool chunk would
+			// permanently lose part of the command's output for large/fast
+			// commands, so we backpressure the bash pipe instead of dropping.
+			// The pipe simply stalls until the TUI catches up — no data loss.
 			select {
 			case deltaCh <- deltaEvent{kind: "tool", text: chunk, toolCallID: toolCallID}:
-			default:
-				// drop on backpressure — the canonical full result still arrives
-				// in the final tool message, so the transcript stays consistent.
+			case <-cancel:
+				return
 			}
 		}
 		// Use a non-blocking send so the goroutine cannot hang forever when the

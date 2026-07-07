@@ -68,6 +68,12 @@ type Message struct {
 	// transcript but NOT sent to the LLM. Used by tools that encounter
 	// recoverable problems worth surfacing (e.g. LSP server not installed).
 	Notice string `json:"notice,omitempty"`
+	// DisplayContent, when set, carries the FULL (untruncated) tool result for
+	// transcript/UI display. The LLM prompt always uses Content (which may be
+	// truncated by TruncateToolResult to protect the context window). This lets
+	// a large result render in full in the UI while the model still receives a
+	// bounded prefix. It is runtime-only (json:"-") and never sent to the LLM.
+	DisplayContent string `json:"-"`
 }
 
 type Image struct {

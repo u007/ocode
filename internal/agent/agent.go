@@ -1012,8 +1012,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 						}
 						result = fmt.Sprintf("Error: %v", err)
 					}
+					fullResult := result
 					result = TruncateToolResult(tc.ID, result)
 					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice}
+					if fullResult != result {
+						results[idx].DisplayContent = fullResult
+					}
 				}(i, k, resp.ToolCalls[i], isCancelled)
 			}
 			wg.Wait()
@@ -1060,8 +1064,12 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 				}
 				result = fmt.Sprintf("Error: %v", err)
 			}
+			fullResult := result
 			result = TruncateToolResult(tc.ID, result)
 			results[i] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice}
+			if fullResult != result {
+				results[i].DisplayContent = fullResult
+			}
 		}
 		if isCancelled() {
 			return newMsgs, nil

@@ -107,3 +107,57 @@ func TestBashTool_ExecuteFallsBackWithoutEmit(t *testing.T) {
 		t.Fatalf("expected hello-world in result, got %q", out)
 	}
 }
+
+// TestBashTool_StreamKeepsFullOutput verifies the chunked-tool-result fix:
+// when the command streams its output live (emit != nil), the canonical
+// returned result is NOT capped at bashMaxOutputLength (30000), so the full
+// output is carried to the UI. The synchronous Execute path still caps at
+// 30000. Without this, a large streamed result would be clobbered by the cap
+// on completion and the live chunks would appear "not applied".
+func TestBashTool_StreamKeepsFullOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses bash -c")
+	}
+	procs := NewProcessRegistry()
+	bt := BashTool{Procs: procs}
+
+	// Generate ~50000 chars — well above the 30000 cap.
+	cmd := `yes "0123456789ABCDEFGHIJ" | head -n 2000`
+	args, _ := json.Marshal(map[string]interface{}{"command": cmd})
+
+	var mu sync.Mutex
+	var chunks []string
+	streamed, err := bt.ExecuteStream(args, func(chunk string) {
+		mu.Lock()
+		chunks = append(chunks, chunk)
+		mu.Unlock()
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream returned error: %v", err)
+	}
+	// The live-streamed path must keep the FULL output (no 30000 cap), so it
+	// must NOT carry the truncation notice and must exceed the cap.
+	if strings.Contains(streamed, "exceeds 30000 chars") {
+		t.Fatalf("streamed result must not be capped, but got truncation notice; len=%d", len(streamed))
+	}
+	if len(streamed) <= bashMaxOutputLength {
+		t.Fatalf("expected streamed result to exceed the %d cap (full output), got %d", bashMaxOutputLength, len(streamed))
+	}
+
+	// The synchronous path caps at bashMaxOutputLength and carries the notice.
+	syncOut, err := bt.Execute(args)
+	if err != nil {
+		t.Fatalf("Execute returned error: %v", err)
+	}
+	if !strings.Contains(syncOut, "exceeds 30000 chars") {
+		t.Fatalf("synchronous result must be capped at %d, got no notice; len=%d", bashMaxOutputLength, len(syncOut))
+	}
+	// Content portion is capped: strip the notice and confirm bounded length.
+	capped := syncOut
+	if idx := strings.Index(syncOut, "\n\n... [output truncated"); idx >= 0 {
+		capped = syncOut[:idx]
+	}
+	if len(capped) != bashMaxOutputLength {
+		t.Fatalf("expected capped content length %d, got %d", bashMaxOutputLength, len(capped))
+	}
+}

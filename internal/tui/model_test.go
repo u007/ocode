@@ -6807,3 +6807,81 @@ func TestGetInitialToolsMatchesCanonicalList(t *testing.T) {
 		}
 	}
 }
+
+// TestStreamedToolOutputDisplayContentPreferred is a regression test for the
+// "chunked tool result not applied when over a certain size" bug. When a
+// streamed tool (e.g. bash) produces output larger than the LLM-side
+// truncation budget (maxToolResultChars = 12000), the agent sends a truncated
+// Content plus the full text in DisplayContent. The finalize handler must
+// render the full DisplayContent in the transcript (so the live-streamed
+// chunks are not clobbered on completion) while keeping raw.Content truncated
+// so the LLM prompt still receives the bounded head + truncation notice.
+func TestStreamedToolOutputDisplayContentPreferred(t *testing.T) {
+	toolCallID := "call-display-1"
+	// Truncated Content (what the LLM sees, with the notice) + full
+	// DisplayContent (what the UI must show).
+	full := strings.Repeat("x", 20000)
+	truncated := full[:12000] + "\n\n[output truncated: showing 100/20000 lines"
+	m := model{
+		viewport:  fastviewport.New(80, 24),
+		styles:    ApplyThemeColors("tokyonight"),
+		streaming: true,
+		sessionID: "test-display-content",
+		messages: []message{
+			{role: roleUser, text: "cat the big file"},
+		},
+	}
+
+	// Stream the full output live so the entry exists and accumulates it.
+	m.appendShellOutput(toolCallID, full)
+
+	updated, _ := m.Update(streamMsgEvent{msg: agent.Message{
+		Role:           "tool",
+		ToolID:         toolCallID,
+		Content:        truncated,
+		DisplayContent: full,
+	}})
+	got := derefTestModel(t, updated)
+
+	idx := got.findToolMessageIndexByToolID(toolCallID)
+	if idx < 0 {
+		t.Fatalf("expected streamed tool message to exist")
+	}
+	// raw.Content MUST stay truncated (LLM-facing). The full text lives only in
+	// DisplayContent / the rendered text.
+	if got.messages[idx].raw.Content != truncated {
+		t.Fatalf("raw.Content must stay truncated for the LLM, got len=%d (head=%q)",
+			len(got.messages[idx].raw.Content), got.messages[idx].raw.Content[:40])
+	}
+	if !strings.Contains(got.messages[idx].raw.Content, "[output truncated") {
+		t.Fatalf("raw.Content must carry the truncation notice for the LLM")
+	}
+	// The rendered transcript must show the FULL streamed output, not the
+	// truncated copy. renderToolResult wraps the content with header/footer, so
+	// assert on containment of the full body rather than an exact suffix.
+	if !strings.Contains(got.messages[idx].text, full) {
+		t.Fatalf("rendered text does not contain the full streamed output (len=%d)", len(got.messages[idx].text))
+	}
+
+	// The LLM prompt snapshot must receive the truncated Content (with notice),
+	// NOT the full DisplayContent — otherwise the 12000-char cap is defeated.
+	snap, _ := got.buildAgentMessagesSnapshot()
+	var llmToolContent string
+	for _, am := range snap {
+		if am.Role == "tool" && am.ToolID == toolCallID {
+			llmToolContent = am.Content
+		}
+	}
+	if llmToolContent != truncated {
+		t.Fatalf("LLM snapshot must receive truncated Content (with notice), got len=%d (head=%q)",
+			len(llmToolContent), llmToolContent[:min(40, len(llmToolContent))])
+	}
+	// The truncated head still contains a short run of x's, but the FULL output
+	// (a 20000-char run) must NOT appear in the LLM prompt.
+	if strings.Contains(llmToolContent, strings.Repeat("x", 13000)) {
+		t.Fatalf("LLM snapshot leaked the full output past the truncation cap (len=%d)", len(llmToolContent))
+	}
+	if len(llmToolContent) > 13000 {
+		t.Fatalf("LLM snapshot content exceeds the truncation budget, len=%d", len(llmToolContent))
+	}
+}
