@@ -1681,12 +1681,12 @@ func newModel(opts ...RunOptions) model {
 		})
 	}
 
-		// Set workDir on the agent so subagent dispatches (context agent doc
-		// tools, knowledge_lookup) can detect the bundle. SetWorkDir also
-		// propagates to permissions and advisor tools.
-		if m.agent != nil {
-			m.agent.SetWorkDir(m.workDir)
-		}
+	// Set workDir on the agent so subagent dispatches (context agent doc
+	// tools, knowledge_lookup) can detect the bundle. SetWorkDir also
+	// propagates to permissions and advisor tools.
+	if m.agent != nil {
+		m.agent.SetWorkDir(m.workDir)
+	}
 	session.SetWorkDir(m.workDir)
 	m.wireCompactCallbacks()
 
@@ -9454,46 +9454,46 @@ func (m *model) handleContextCmd(args []string) {
 		b.WriteString("  Usage      n/a\n")
 	}
 
-		// Discovery section: full corpus index, attached skills, MCP tools, and project docs.
-		if discoveryOn {
-			st := m.agent.DiscoveryStatus()
-			mcpAttached, mcpTotal, gatedToks, indexToks := m.agent.DiscoveryGatedTokens()
-			b.WriteString("\nDiscovery — [ocode:discovery] injected block\n")
-			fmt.Fprintf(&b, "  %-28s %s %s\n", "Backend/model", st.Backend, st.Model)
-			if !st.Active && st.InitErr != "" {
-				fmt.Fprintf(&b, "  %-28s fail-open: %s\n", "Status", st.InitErr)
-			}
-			fmt.Fprintf(&b, "\n  Corpus (names-index, stable — injected every turn)\n")
-			fmt.Fprintf(&b, "  %-28s %d\n", "Skills in index", len(st.AllSkills))
-			fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools in index", len(st.AllMCP))
-			fmt.Fprintf(&b, "  %-28s %d\n", "Project docs in index", len(st.AllMD))
-			if st.MDPending > 0 {
-				fmt.Fprintf(&b, "  %-28s %d\n", "Docs pending summarization", st.MDPending)
-			}
-			fmt.Fprintf(&b, "\n  Attached to volatile tail (per-turn, grows with sticky set)\n")
-			fmt.Fprintf(&b, "  %-28s %d/%d\n", "Skills attached", len(st.AttachedSkills), st.SkillTotal)
-			if len(st.AttachedSkills) > 0 {
-				for _, name := range st.AttachedSkills {
-					fmt.Fprintf(&b, "    - %s\n", name)
-				}
-			}
-			fmt.Fprintf(&b, "  %-28s %d/%d\n", "MCP tools attached", mcpAttached, mcpTotal)
-			fmt.Fprintf(&b, "  %-28s %d/%d\n", "Project docs attached", len(st.AttachedMD), len(st.AllMD))
-			if len(st.AttachedMD) > 0 {
-				for _, name := range st.AttachedMD {
-					fmt.Fprintf(&b, "    - %s\n", name)
-				}
-			}
-			const queryEmbedToks = 64 // rough per-turn query embedding cost
-			net := gatedToks - indexToks - queryEmbedToks
-			if net < 0 {
-				net = 0
-			}
-			fmt.Fprintf(&b, "\n  Efficiency\n")
-			fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (gross)", formatTok(gatedToks))
-			fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (net)", formatTok(net))
-			fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools not attached", mcpTotal-mcpAttached)
+	// Discovery section: full corpus index, attached skills, MCP tools, and project docs.
+	if discoveryOn {
+		st := m.agent.DiscoveryStatus()
+		mcpAttached, mcpTotal, gatedToks, indexToks := m.agent.DiscoveryGatedTokens()
+		b.WriteString("\nDiscovery — [ocode:discovery] injected block\n")
+		fmt.Fprintf(&b, "  %-28s %s %s\n", "Backend/model", st.Backend, st.Model)
+		if !st.Active && st.InitErr != "" {
+			fmt.Fprintf(&b, "  %-28s fail-open: %s\n", "Status", st.InitErr)
 		}
+		fmt.Fprintf(&b, "\n  Corpus (names-index, stable — injected every turn)\n")
+		fmt.Fprintf(&b, "  %-28s %d\n", "Skills in index", len(st.AllSkills))
+		fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools in index", len(st.AllMCP))
+		fmt.Fprintf(&b, "  %-28s %d\n", "Project docs in index", len(st.AllMD))
+		if st.MDPending > 0 {
+			fmt.Fprintf(&b, "  %-28s %d\n", "Docs pending summarization", st.MDPending)
+		}
+		fmt.Fprintf(&b, "\n  Attached to volatile tail (per-turn, grows with sticky set)\n")
+		fmt.Fprintf(&b, "  %-28s %d/%d\n", "Skills attached", len(st.AttachedSkills), st.SkillTotal)
+		if len(st.AttachedSkills) > 0 {
+			for _, name := range st.AttachedSkills {
+				fmt.Fprintf(&b, "    - %s\n", name)
+			}
+		}
+		fmt.Fprintf(&b, "  %-28s %d/%d\n", "MCP tools attached", mcpAttached, mcpTotal)
+		fmt.Fprintf(&b, "  %-28s %d/%d\n", "Project docs attached", len(st.AttachedMD), len(st.AllMD))
+		if len(st.AttachedMD) > 0 {
+			for _, name := range st.AttachedMD {
+				fmt.Fprintf(&b, "    - %s\n", name)
+			}
+		}
+		const queryEmbedToks = 64 // rough per-turn query embedding cost
+		net := gatedToks - indexToks - queryEmbedToks
+		if net < 0 {
+			net = 0
+		}
+		fmt.Fprintf(&b, "\n  Efficiency\n")
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (gross)", formatTok(gatedToks))
+		fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Context saved (net)", formatTok(net))
+		fmt.Fprintf(&b, "  %-28s %d\n", "MCP tools not attached", mcpTotal-mcpAttached)
+	}
 
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
 }
@@ -15106,7 +15106,12 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	}
 
 	// ── Files section (scrollable) ──
-	changed := snapshot.ChangedFiles()
+	var changed []string
+	if m.agent != nil {
+		changed = m.agent.ChangedFiles()
+	} else {
+		changed = snapshot.ChangedFiles()
+	}
 	if len(changed) == 0 {
 		appendScrollSection("Files", []string{sidebarTextStyle.Render("No files changed this session.")}, nil)
 	} else {
@@ -15122,7 +15127,6 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		}
 		appendScrollSection("Files", body, changed)
 	}
-
 	// ── TODO section (scrollable) ──
 	todo := tool.TodoState()
 	if todo == "" {

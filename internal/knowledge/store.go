@@ -36,12 +36,15 @@ func (s *Store) Get(relPath string) (*Doc, error) {
 }
 
 // Search searches the bundle for docs matching a query, filtered by tags and/or
-// docType. Matches against title, description, and body using case-insensitive
-// substring matching.
+// docType. Queries are tokenized into words and require ALL words to appear
+// somewhere in the title, description, or body (case-insensitive AND matching).
+// This avoids the brittleness of exact substring matching for natural-language
+// queries like "OKF knowledge bundle" or "knowledge bundle system architecture".
 //
-// Results are sorted by relevance: title match > description match > body match.
-// Pagination uses 0-based page arithmetic (page 0 = first results). Returns the
-// matching docs and the total count before pagination.
+// Results are sorted by relevance: tokens found in title (weight 3), description
+// (weight 2), and body (weight 1). Pagination uses 0-based page arithmetic
+// (page 0 = first results). Returns the matching docs and the total count before
+// pagination.
 func (s *Store) Search(query string, tags []string, docType string, page, pageSize int) ([]*Doc, int, error) {
 	allDocs, err := s.bundle.Docs()
 	if err != nil {
@@ -54,6 +57,10 @@ func (s *Store) Search(query string, tags []string, docType string, page, pageSi
 	hasTags := len(tags) > 0
 	hasType := docType != ""
 
+	// Tokenize query into words for word-level AND matching.
+	queryTokens := strings.Fields(queryLower)
+	hasTokens := len(queryTokens) > 0
+
 	// If no filters at all, return all docs (paginated).
 	if !hasQuery && !hasTags && !hasType {
 		total := len(allDocs)
@@ -63,7 +70,7 @@ func (s *Store) Search(query string, tags []string, docType string, page, pageSi
 
 	type scoredDoc struct {
 		doc   *Doc
-		score int // 3=title, 2=description, 1=body, 0=no match
+		score int
 	}
 
 	var matched []scoredDoc
@@ -84,22 +91,65 @@ func (s *Store) Search(query string, tags []string, docType string, page, pageSi
 		}
 
 		// If no query, any doc that passed filters is a match (score 0).
-		if !hasQuery {
+		if !hasQuery || !hasTokens {
 			matched = append(matched, scoredDoc{doc: doc, score: 0})
 			continue
 		}
 
-		// Score by where the query matches.
-		score := 0
-		if strings.Contains(strings.ToLower(doc.Title), queryLower) {
-			score = 3
-		} else if strings.Contains(strings.ToLower(doc.Description), queryLower) {
-			score = 2
-		} else if strings.Contains(strings.ToLower(doc.Body), queryLower) {
-			score = 1
+		// For single-token queries, use fast-path substring check (avoids
+		// per-token allocation of ToLower on all fields).
+		if len(queryTokens) == 1 {
+			tok := queryTokens[0]
+			score := 0
+			if strings.Contains(strings.ToLower(doc.Title), tok) {
+				score = 3
+			} else if strings.Contains(strings.ToLower(doc.Description), tok) {
+				score = 2
+			} else if strings.Contains(strings.ToLower(doc.Body), tok) {
+				score = 1
+			}
+			if score > 0 {
+				matched = append(matched, scoredDoc{doc: doc, score: score})
+			}
+			continue
 		}
 
-		if score > 0 {
+		// Multi-token: require ALL tokens to appear somewhere in the doc,
+		// scoring by weighted token count per field.
+		titleLower := strings.ToLower(doc.Title)
+		descLower := strings.ToLower(doc.Description)
+		bodyLower := strings.ToLower(doc.Body)
+
+		allFound := true
+		titleScore := 0
+		descScore := 0
+		bodyScore := 0
+
+		for _, token := range queryTokens {
+			if token == "" {
+				continue
+			}
+			inTitle := strings.Contains(titleLower, token)
+			inDesc := strings.Contains(descLower, token)
+			inBody := strings.Contains(bodyLower, token)
+
+			if !inTitle && !inDesc && !inBody {
+				allFound = false
+				break
+			}
+			if inTitle {
+				titleScore++
+			}
+			if inDesc {
+				descScore++
+			}
+			if inBody {
+				bodyScore++
+			}
+		}
+
+		if allFound {
+			score := titleScore*3 + descScore*2 + bodyScore*1
 			matched = append(matched, scoredDoc{doc: doc, score: score})
 		}
 	}

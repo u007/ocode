@@ -349,6 +349,12 @@ func modelEntryFor(modelID string) (modelEntry, bool) {
 				return m, true
 			}
 		}
+		// Check Novita live cache for novita-ai/ prefixed models.
+		if provider == "novita-ai" {
+			if m, ok := novitaLiveModelEntry(model); ok {
+				return m, true
+			}
+		}
 		// Routing-prefixed ids (e.g. "opencode-go/deepseek-v4-flash") whose
 		// provider segment isn't a real models.dev provider — match the model
 		// segment across all providers.
@@ -362,7 +368,24 @@ func modelEntryFor(modelID string) (modelEntry, bool) {
 		return m, ok
 	}
 
+	// Fall back to Novita live cache for bare model names.
+	if m, ok := novitaLiveModelEntry(modelID); ok {
+		return m, ok
+	}
+
 	return modelEntry{}, false
+}
+
+// novitaLiveModelEntry returns a model entry from the Novita live cache.
+// Returns false if the cache is empty or the model is not found.
+func novitaLiveModelEntry(name string) (modelEntry, bool) {
+	novitaLiveData.mu.RLock()
+	defer novitaLiveData.mu.RUnlock()
+	if novitaLiveData.models == nil {
+		return modelEntry{}, false
+	}
+	m, ok := novitaLiveData.models[name]
+	return m, ok
 }
 
 // bestPricedEntry searches all providers for a model by bare name and returns
@@ -423,7 +446,7 @@ func allProviderModelsFromRegistry() []string {
 	var requestyRegistryFallback []string
 	if data := loadRegistry(); data != nil {
 		for provider, entry := range data {
-			if provider == "lmstudio" {
+			if provider == "lmstudio" || provider == "novita-ai" {
 				continue // handled via live API fetch below
 			}
 			if provider == models.RequestyProvider {
@@ -451,13 +474,25 @@ func allProviderModelsFromRegistry() []string {
 	} else {
 		ids = append(ids, requestyRegistryFallback...)
 	}
+	// Novita AI live models — fall back to registry snapshot if API unreachable.
+	novitaLive := fetchNovitaLiveModels()
+	if len(novitaLive) > 0 {
+		for m := range novitaLive {
+			ids = append(ids, "novita-ai/"+m)
+		}
+	} else if data := loadRegistry(); data != nil {
+		if entry, ok := data["novita-ai"]; ok {
+			for m := range entry.Models {
+				ids = append(ids, "novita-ai/"+m)
+			}
+		}
+	}
 	if len(ids) == 0 {
 		return nil
 	}
 	sort.Strings(ids)
 	return ids
 }
-
 func providerModelsFromRegistry(provider string) []string {
 	if provider == "lmstudio" {
 		return fetchLMStudioModels()
@@ -468,22 +503,27 @@ func providerModelsFromRegistry(provider string) []string {
 			sort.Strings(live)
 			return live
 		}
-		// Fall back to registry snapshot.
-		data := loadRegistry()
-		if data == nil {
-			return nil
-		}
-		entry, ok := data[provider]
-		if !ok {
-			return nil
-		}
-		ids := make([]string, 0, len(entry.Models))
-		for id := range entry.Models {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		return ids
+		return providerModelsFromSnapshot(provider)
 	}
+	if provider == "novita-ai" {
+		live := fetchNovitaLiveModels()
+		if len(live) > 0 {
+			ids := make([]string, 0, len(live))
+			for id := range live {
+				ids = append(ids, id)
+			}
+			sort.Strings(ids)
+			return ids
+		}
+		return providerModelsFromSnapshot(provider)
+	}
+	return providerModelsFromSnapshot(provider)
+}
+
+// providerModelsFromSnapshot loads models for the given provider from the
+// models.dev snapshot. Returns nil if the registry is unavailable or the
+// provider is unknown.
+func providerModelsFromSnapshot(provider string) []string {
 	data := loadRegistry()
 	if data == nil {
 		return nil
@@ -506,8 +546,6 @@ type LMStudioResult struct {
 	NeedsAPIKey bool // true when LM Studio returned 401
 }
 
-// FetchLMStudioModels queries the local LM Studio API for available models.
-// Returns an empty result silently if LM Studio is not running.
 func FetchLMStudioModels() LMStudioResult {
 	base := os.Getenv("LMSTUDIO_BASE_URL")
 	if base == "" {
@@ -629,7 +667,166 @@ func fetchRequestyLiveModels() []string {
 	return ids
 }
 
+const novitaCacheTTL = 30 * time.Second
+
+// novitaLiveData caches live-fetched Novita AI models (with pricing/context)
+// so that ModelCost can resolve cost info for models fetched from Novita's API.
+var novitaLiveData struct {
+	mu        sync.RWMutex
+	models    map[string]modelEntry // model name → entry with cost/context
+	lastFetch time.Time             // last successful fetch
+}
+
+// fetchNovitaLiveModels fetches the model list from Novita's OpenAI-compatible
+// API and returns the model IDs. Returns nil silently if:
+//   - NOVITA_API_KEY env var is not set AND no stored credential exists
+//   - The API is unreachable or returns an error
+//
+// The returned map contains modelName → modelEntry with pricing converted from
+// Novita's internal units (1/10000th of $ per M tokens) to USD per M tokens.
+func fetchNovitaLiveModels() map[string]modelEntry {
+	// Return cached models if the cache is still fresh.
+	novitaLiveData.mu.RLock()
+	if novitaLiveData.models != nil && time.Since(novitaLiveData.lastFetch) < novitaCacheTTL {
+		models := novitaLiveData.models
+		novitaLiveData.mu.RUnlock()
+		return models
+	}
+	novitaLiveData.mu.RUnlock()
+
+	apiKey := os.Getenv("NOVITA_API_KEY")
+	if apiKey == "" {
+		apiKey = auth.ResolveKey("novita-ai")
+	}
+	if apiKey == "" {
+		return nil
+	}
+
+	// Use the v3 model listing endpoint which returns rich data with pricing
+	// and context size. Note: this is different from the chat-completions base
+	// URL (https://api.novita.ai/openai/v1), because Novita serves model
+	// metadata under a different path.
+	modelsURL := "https://api.novita.ai/v3/openai/v1/models"
+	// Check config for a custom model-list URL override.
+	if cred, ok := auth.Get("novita-ai"); ok && cred.BaseURL != "" {
+		modelsURL = strings.TrimRight(cred.BaseURL, "/") + "/models"
+	}
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest(http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	if err != nil {
+		return nil
+	}
+	var apiResp struct {
+		Data []struct {
+			ID                  string   `json:"id"`
+			ContextSize         int64    `json:"context_size"`
+			MaxOutputTokens     int64    `json:"max_output_tokens"`
+			InputTokenPricePerM float64  `json:"input_token_price_per_m"`
+			OutputTokenPricePer float64  `json:"output_token_price_per_m"`
+			Features            []string `json:"features"`
+			InputModalities     []string `json:"input_modalities"`
+			OutputModalities    []string `json:"output_modalities"`
+			Pricing             struct {
+				Prompt struct {
+					PricePerM float64 `json:"price_per_m"`
+				} `json:"prompt"`
+				Completion struct {
+					PricePerM float64 `json:"price_per_m"`
+				} `json:"completion"`
+				InputCacheRead *struct {
+					PricePerM float64 `json:"price_per_m"`
+				} `json:"input_cache_read"`
+			} `json:"pricing"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(body, &apiResp); err != nil {
+		return nil
+	}
+
+	models := make(map[string]modelEntry, len(apiResp.Data))
+	for _, m := range apiResp.Data {
+		if m.ID == "" {
+			continue
+		}
+
+		// Convert pricing: Novita API returns units of 1/10000th of $ per M tokens.
+		// E.g., 2690 → $0.269/M, 4000 → $0.400/M.
+		priceInput := m.InputTokenPricePerM / 10000.0
+		priceOutput := m.OutputTokenPricePer / 10000.0
+		var priceCacheRead float64
+		if m.Pricing.InputCacheRead != nil {
+			priceCacheRead = m.Pricing.InputCacheRead.PricePerM / 10000.0
+		}
+
+		// Determine features
+		hasReasoning := false
+		hasToolCall := false
+		for _, f := range m.Features {
+			switch f {
+			case "reasoning":
+				hasReasoning = true
+			case "function-calling":
+				hasToolCall = true
+			}
+		}
+
+		modalities := modelModalities{
+			Input:  m.InputModalities,
+			Output: m.OutputModalities,
+		}
+		if len(modalities.Input) == 0 {
+			modalities.Input = []string{"text"}
+		}
+		if len(modalities.Output) == 0 {
+			modalities.Output = []string{"text"}
+		}
+
+		models[m.ID] = modelEntry{
+			ID:          m.ID,
+			Name:        m.ID,
+			ToolCall:    hasToolCall,
+			Reasoning:   hasReasoning,
+			Temperature: true,
+			Limit: modelLimit{
+				Context: m.ContextSize,
+				Output:  m.MaxOutputTokens,
+			},
+			Cost: modelCost{
+				Input:     priceInput,
+				Output:    priceOutput,
+				CacheRead: priceCacheRead,
+			},
+			Modalities: modalities,
+		}
+	}
+
+	// Update the cache
+	novitaLiveData.mu.Lock()
+	novitaLiveData.models = models
+	novitaLiveData.lastFetch = time.Now()
+	novitaLiveData.mu.Unlock()
+
+	return models
+}
+
 // AllProviders returns provider IDs known to the registry (or empty if unavailable).
+
 func AllProviders() []string {
 	data := loadRegistry()
 	if data == nil {
@@ -641,6 +838,10 @@ func AllProviders() []string {
 	}
 	// requesty is always available via live API fetch.
 	ids = append(ids, models.RequestyProvider)
+	// novita-ai is available when credentials are configured (live API fetch).
+	if os.Getenv("NOVITA_API_KEY") != "" || auth.ResolveKey("novita-ai") != "" {
+		ids = append(ids, "novita-ai")
+	}
 	sort.Strings(ids)
 	return ids
 }

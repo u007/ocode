@@ -82,9 +82,10 @@ Unknown frontmatter keys are preserved in a `yaml.Node` tree (`Extra` field) for
 
 ## Doc Search (`Store.Search`)
 
-The `Search()` method provides case-insensitive substring matching across title, description, and body fields:
+The `Search()` method provides case-insensitive word-level AND matching across title, description, and body fields:
 
-- **Scoring**: title match = 3 points, description match = 2 points, body match = 1 point
+- **Query tokenization**: The query is split into whitespace-separated words. A doc matches only if ALL words appear somewhere in the doc (title, description, or body). This avoids the brittleness of exact substring matching — `"OKF knowledge bundle"` will match even though no single field contains that exact contiguous string.
+- **Scoring**: For single-token queries: title match = 3, description = 2, body = 1. For multi-token queries: each token found in the title adds 3 to the score, each in the description adds 2, each in the body adds 1.
 - **Tag filtering**: AND logic — a doc must have ALL requested tags
 - **DocType filtering**: exact match on the `type` field
 - **Sorting**: score descending (higher relevance first), then by path for stable order

@@ -3131,6 +3131,7 @@ var providers = map[string]providerInfo{
 	"deepseek":              {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
 	"groq":                  {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
 	"mistral":               {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
+	"novita-ai":             {"NOVITA_API_KEY", "https://api.novita.ai/openai/v1"},
 	"opencode":              {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
 	"opencode-go":           {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
 	"copilot":               {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},

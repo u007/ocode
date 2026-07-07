@@ -291,6 +291,13 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
+	// Share the parent's snapshot store so file writes flow to the same
+	// store that the TUI sidebar reads from. Without this, every sub-agent
+	// creates its own isolated store (via NewAgent → NewStore), and the
+	// sidebar — which reads from the main agent's store — would never
+	// reflect sub-agent file changes.
+	subAgent.snapshotStore = t.mainAgent.snapshotStore
+
 	// Wire the sub-agent's advisor gate to the parent's atomic flag so
 	// mid-run toggles propagate immediately (reactive, not a snapshot).
 	subAgent.SetParentAdvisorEnabled(&t.mainAgent.advisorEnabled)

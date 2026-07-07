@@ -40,7 +40,7 @@ type DocSearchTool struct {
 }
 
 func (t *DocSearchTool) Name() string        { return "doc_search" }
-func (t *DocSearchTool) Description() string { return "Search the project's OKF knowledge bundle for documents matching a query, filtered by tags and/or type. Results are ranked by relevance (title match > description > body match) and paginated." }
+func (t *DocSearchTool) Description() string { return "Search the project's OKF knowledge bundle for documents matching a query, filtered by tags and/or type. Queries are tokenized into words (ALL must appear somewhere in the doc). Results are ranked by relevance and paginated." }
 func (t *DocSearchTool) Parallel() bool      { return true }
 
 func (t *DocSearchTool) Definition() map[string]interface{} {

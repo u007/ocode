@@ -100,6 +100,7 @@ var Providers = []Provider{
 	{ID: "alibaba-coding", Label: "Alibaba Coding", EnvVar: "DASHSCOPE_CODING_API_KEY"},
 	{ID: "chutes", Label: "Chutes", EnvVar: "CHUTES_API_KEY"},
 	{ID: "deepseek", Label: "DeepSeek", EnvVar: "DEEPSEEK_API_KEY"},
+	{ID: "novita-ai", Label: "Novita AI", EnvVar: "NOVITA_API_KEY"},
 	{ID: "requesty", Label: "Requesty", EnvVar: "REQUESTY_API_KEY"},
 	{ID: "deepinfra", Label: "DeepInfra", EnvVar: "DEEPINFRA_API_KEY"},
 	{ID: "nvidia", Label: "NVIDIA NIM", EnvVar: "NVIDIA_API_KEY"},

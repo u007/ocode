@@ -281,6 +281,17 @@ type Agent struct {
 	snapshotStore *snapshot.Store
 }
 
+// ChangedFiles returns the deduplicated sorted list of file paths that
+// have been backed up (modified or created) by this agent's tools.
+// Returns nil if the agent has no snapshot store (should not happen in
+// normal operation).
+func (a *Agent) ChangedFiles() []string {
+	if a.snapshotStore != nil {
+		return a.snapshotStore.ChangedFiles()
+	}
+	return nil
+}
+
 // NoteBus returns the bus this agent participates in, or nil if
 // it is not in a group.
 func (a *Agent) NoteBus() *notebus.Bus { return a.noteBus }
