@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 type Skill struct {
@@ -16,11 +18,59 @@ type Skill struct {
 	Source      string
 }
 
-func LoadSkills() []Skill {
+// skillCache caches LoadSkillsForRoot results keyed by the search-path set, so
+// repeated command dispatch does not re-scan every SKILL.md on disk each time.
+// A short TTL bounds staleness; skills installed/upgraded at runtime invalidate
+// the cache via InvalidateSkillCache.
+var (
+	skillCacheMu sync.Mutex
+	skillCache   = map[string]skillCacheEntry{}
+)
+
+type skillCacheEntry struct {
+	skills []Skill
+	ts     time.Time
+}
+
+const skillCacheTTL = 3 * time.Second
+
+// LoadSkillsForRoot loads and parses every skill discoverable from the given
+// project root (matching SkillSearchPathsForRoot). An empty root falls back to
+// the current working directory.
+func LoadSkillsForRoot(root string) []Skill {
+	paths := SkillSearchPathsForRoot(root)
+	key := strings.Join(paths, "\x00")
+
+	skillCacheMu.Lock()
+	if e, ok := skillCache[key]; ok && time.Since(e.ts) < skillCacheTTL {
+		out := append([]Skill(nil), e.skills...)
+		skillCacheMu.Unlock()
+		return out
+	}
+	skillCacheMu.Unlock()
+
+	skills := loadSkillsFromPaths(paths)
+
+	skillCacheMu.Lock()
+	skillCache[key] = skillCacheEntry{skills: skills, ts: time.Now()}
+	skillCacheMu.Unlock()
+	return skills
+}
+
+// InvalidateSkillCache clears the skill-load cache. Call after skills are
+// installed, upgraded, or removed on disk so subsequent loads reflect the
+// change immediately instead of waiting for the TTL to expire.
+func InvalidateSkillCache() {
+	skillCacheMu.Lock()
+	skillCache = map[string]skillCacheEntry{}
+	skillCacheMu.Unlock()
+}
+
+func loadSkillsFromPaths(paths []string) []Skill {
 	var skills []Skill
 	seen := make(map[string]bool)
 
-	for _, dir := range skillSearchPaths() {
+	for _, dir := range paths {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
@@ -57,6 +107,15 @@ func LoadSkills() []Skill {
 	})
 
 	return skills
+}
+
+// LoadSkills loads skills discoverable from the current working directory.
+func LoadSkills() []Skill {
+	root := ""
+	if cwd, err := os.Getwd(); err == nil {
+		root = cwd
+	}
+	return LoadSkillsForRoot(root)
 }
 
 // ProjectLocalSkillDirs returns the project-root skill directories that should

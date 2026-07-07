@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -225,6 +226,16 @@ type shellFinishedMsg struct {
 	output     string
 	toolCallID string
 	err        error
+}
+
+// shellChunkMsg carries one incremental chunk of a streaming `!` shell
+// command's combined stdout/stderr. The runner goroutine emits these as the
+// process produces output; the model appends each chunk to the in-transcript
+// tool result so the user sees live output. When the stream ends, a final
+// shellFinishedMsg is emitted to finalize (error state, cleanup).
+type shellChunkMsg struct {
+	toolCallID string
+	chunk      string
 }
 
 type connectOAuthFinishedMsg struct {
@@ -856,7 +867,12 @@ type model struct {
 	permDirty                permDirtyFlags // tracks permission fields changed by this session
 	cleanupState             *modelCleanupState
 	supervisor               *tool.ProcessSupervisor
-	hookPipeline             *hooks.Pipeline
+	// shellStreamCmd is the in-flight streaming `!` shell reader command.
+	// While non-nil a `!` command is actively streaming its output; new `!`
+	// commands are queued rather than run concurrently. It is cleared when the
+	// stream's final shellFinishedMsg is processed.
+	shellStreamCmd tea.Cmd
+	hookPipeline   *hooks.Pipeline
 	// lspMgr is the shared LSP manager backing the `lsp` and `ast` tools.
 	// It is owned by the model so we can close it on session shutdown and
 	// during /plugin rebuilds (otherwise every rebuild leaks the gopls child).
@@ -2453,26 +2469,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case shellFinishedMsg:
 		m.markCmdFinished()
+		// Clear the in-flight streaming command indicator.
+		m.shellStreamCmd = nil
 		// Clear the shell activity-row indicator.
 		m.shellCmdStart = time.Time{}
 		m.shellCmdText = ""
-		content := msg.output
-		if msg.err != nil {
-			if content == "" {
-				content = fmt.Sprintf("Command failed: %v", msg.err)
-			} else {
-				content = fmt.Sprintf("Command failed (%v). Output:\n%s", msg.err, content)
+		// If the command streamed output, the tool-result message already
+		// exists in the transcript; just append any error note. Otherwise
+		// (no output, or the run failed before streaming started) fall back
+		// to the historical single-message behavior driven by msg.output.
+		if idx := m.findToolMessageIndexByToolID(msg.toolCallID); idx >= 0 {
+			msgp := &m.messages[idx]
+			if msg.err != nil {
+				msgp.raw.Content += fmt.Sprintf("\n[error] %v", msg.err)
+				toolName := m.lookupToolName(msg.toolCallID)
+				msgp.text = renderToolResult(toolName, msgp.raw.Content, m.styles)
 			}
-		} else if strings.TrimSpace(content) == "" {
-			content = "Command executed successfully (no output)."
+			m.rerenderTranscriptAndMaybeScroll()
+		} else {
+			content := msg.output
+			if msg.err != nil {
+				if content == "" {
+					content = fmt.Sprintf("Command failed: %v", msg.err)
+				} else {
+					content = fmt.Sprintf("Command failed (%v). Output:\n%s", msg.err, content)
+				}
+			} else if strings.TrimSpace(content) == "" {
+				content = "Command executed successfully (no output)."
+			}
+			m.appendAgentMessage(agent.Message{
+				Role:    "tool",
+				ToolID:  msg.toolCallID,
+				Content: content,
+			})
+			m.rerenderTranscriptAndMaybeScroll()
 		}
-		m.appendAgentMessage(agent.Message{
-			Role:    "tool",
-			ToolID:  msg.toolCallID,
-			Content: content,
-		})
-		m.rerenderTranscriptAndMaybeScroll()
 		m.saveSession()
+	case shellChunkMsg:
+		// A streaming chunk of a `!` shell command arrived. Append it to the
+		// transcript and re-dispatch the same reader command to keep the
+		// stream flowing until the process exits (signaled by shellFinishedMsg).
+		m.appendShellOutput(msg.toolCallID, msg.chunk)
+		if m.shellStreamCmd != nil {
+			return m, m.shellStreamCmd
+		}
+		return m, nil
 	case []agent.Message:
 		for _, am := range msg {
 			m.appendAgentMessage(am)
@@ -4468,7 +4509,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if strings.HasPrefix(text, "!") {
-			if m.streaming || m.compacting {
+			if m.streaming || m.compacting || m.shellStreamCmd != nil {
 				m.queuedCommands = append(m.queuedCommands, text)
 				m.input.Reset()
 				m.layout()
@@ -6115,6 +6156,18 @@ func (m model) mouseOverTranscriptViewport(msg tea.MouseWheelMsg) bool {
 	return mouse.Y >= transcriptTop && mouse.Y < transcriptBottom
 }
 
+// findSkillByName returns the skill whose name matches name (case-insensitive),
+// or nil if none of the provided skills match. It is the matching primitive
+// used by the /<skill-name> command dispatch in handleCommand.
+func findSkillByName(skills []skill.Skill, name string) *skill.Skill {
+	for i := range skills {
+		if strings.EqualFold(skills[i].Name, name) {
+			return &skills[i]
+		}
+	}
+	return nil
+}
+
 func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	parts := strings.Fields(text)
 	if len(parts) == 0 {
@@ -6198,6 +6251,30 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("▸ Switched to agent: __%s__", agentName)})
 			}
 			m.rerenderTranscriptAndMaybeScroll()
+		}
+	} else if skillName := strings.TrimPrefix(cmd, "/"); skillName != "" {
+		// Check if the command matches a loaded skill name — treat as
+		// "activate this skill with any remaining args as context".
+		// Resolve against the project work dir: m.workDir is the source of
+		// truth for project resolution (not os.Getwd), so skills installed
+		// under a /cd target are matched even when the process cwd differs.
+		if matched := findSkillByName(skill.LoadSkillsForRoot(m.workDir), skillName); matched != nil {
+			if m.agent != nil {
+				m.agent.ResetSubagentDispatch()
+				skillPrompt := fmt.Sprintf("Run the **%s** skill.\n\n%s", matched.Name, matched.Content)
+				if len(args) > 0 {
+					userArgs := strings.Join(args, " ")
+					skillPrompt += "\n\nContext: " + userArgs
+				}
+				m.rerenderTranscriptAndMaybeScroll()
+				return m, m.sendCustomCommandPrompt(skillPrompt)
+			}
+			// Skill matched but no agent is configured to run it — say so
+			// instead of reporting a misleading "Unknown command".
+			m.messages = append(m.messages, message{role: roleAssistant,
+				text: fmt.Sprintf("Skill %q was found, but no agent is configured to run it.", matched.Name)})
+		} else {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
 		}
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown command: %s", cmd)})
@@ -7780,7 +7857,7 @@ func (m *model) refreshEditorOpener() {
 
 // startShellExecution begins a shell command execution, recording it in the
 // transcript with a tool-call entry and returning the Cmd that runs the shell
-// via runCapturedShell. Used both from the immediate ! handler and from the
+// via runStreamingShell. Used both from the immediate ! handler and from the
 // drainQueuedCommands path when a ! command was queued while streaming.
 func (m *model) startShellExecution(cmdText string) tea.Cmd {
 	toolCallID := fmt.Sprintf("shell-%d", time.Now().UnixNano())
@@ -7800,59 +7877,118 @@ func (m *model) startShellExecution(cmdText string) tea.Cmd {
 	if !m.activityRowReserved {
 		m.activityRowReserved = true
 	}
-	return m.runCapturedShell(cmdText, m.workDir, toolCallID)
+	return m.runStreamingShell(cmdText, m.workDir, toolCallID)
 }
 
-// runCapturedShell runs `command` non-interactively, capturing combined
-// stdout/stderr, and emits a shellFinishedMsg with the output. The cmd is
-// built via internal/shell so the bash/cmd/Setpgid setup is shared with
-// the server-side /api/shell handler (no drift), and registered with the
-// process supervisor (if any) so the TUI can keep track of background
-// shells across `/bg` listings and clean them up on shutdown.
-func (m *model) runCapturedShell(command string, dir string, toolCallID string) tea.Cmd {
+// streamPipeLines reads r line-by-line and forwards each complete (or trailing)
+// line as a chunk on ch. It runs in its own goroutine per pipe (stdout/stderr)
+// so neither stream can block the other while a `!` shell command streams.
+func streamPipeLines(r io.Reader, ch chan<- string, wg *sync.WaitGroup) {
+	defer wg.Done()
+	reader := bufio.NewReader(r)
+	for {
+		line, err := reader.ReadString('\n')
+		if len(line) > 0 {
+			ch <- line
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// runStreamingShell runs `command` non-interactively and streams its combined
+// stdout/stderr into the transcript as it is produced. Unlike the old
+// runCapturedShell (which buffered everything and emitted a single message on
+// completion), this wires the command's stdout/stderr to pipes, fans the
+// output into a channel, and returns a tea.Cmd that yields one shellChunkMsg
+// per line. On EOF/error the final read yields a shellFinishedMsg. The TUI
+// Update loop re-dispatches the same command after each chunk so the stream
+// keeps flowing until the process exits. The cmd is built via internal/shell
+// (shared with the server-side /api/shell handler) and registered with the
+// process supervisor so the TUI can track/clean it up.
+func (m *model) runStreamingShell(command string, dir string, toolCallID string) tea.Cmd {
 	supervisor := m.supervisor
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
+	c := shellpkg.Build(ctx, command, dir)
+
+	stdout, errOut := c.StdoutPipe()
+	stderr, errErr := c.StderrPipe()
+	if errOut != nil || errErr != nil {
+		cancel()
+		startErr := errOut
+		if startErr == nil {
+			startErr = errErr
+		}
+		return func() tea.Msg {
+			return shellFinishedMsg{command: command, output: "", toolCallID: toolCallID, err: fmt.Errorf("failed to open shell pipes: %v", startErr)}
+		}
+	}
+
+	id := fmt.Sprintf("shell-cmd-%d-%d", os.Getpid(), time.Now().UnixNano())
+	if supervisor != nil {
+		_, _ = supervisor.Register(tool.ProcessRegistration{
+			ID:               id,
+			Command:          command,
+			Kind:             tool.ProcessKindBackgroundBash,
+			Cmd:              c,
+			OwnsProcessGroup: runtime.GOOS != "windows",
+			StartedAt:        time.Now(),
+		})
+	}
+
+	if startErr := c.Start(); startErr != nil {
+		cancel()
+		if supervisor != nil {
+			supervisor.MarkKilled(id, 1)
+		}
+		return func() tea.Msg {
+			return shellFinishedMsg{command: command, output: "", toolCallID: toolCallID, err: startErr}
+		}
+	}
+
+	ch := make(chan string, 64)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go streamPipeLines(stdout, ch, &wg)
+	go streamPipeLines(stderr, ch, &wg)
+
+	var runErr error
+	go func() {
 		defer cancel()
-		c := shellpkg.Build(ctx, command, dir)
-		var buf bytes.Buffer
-		c.Stdout = &buf
-		c.Stderr = &buf
-
-		id := fmt.Sprintf("shell-cmd-%d-%d", os.Getpid(), time.Now().UnixNano())
-		if supervisor != nil {
-			_, _ = supervisor.Register(tool.ProcessRegistration{
-				ID:               id,
-				Command:          command,
-				Kind:             tool.ProcessKindBackgroundBash,
-				Cmd:              c,
-				OwnsProcessGroup: runtime.GOOS != "windows",
-				StartedAt:        time.Now(),
-			})
-		}
-
-		err := c.Run()
-		out := buf.String()
-		// Translate timeouts into the same "timed out after 600s" string
-		// the shell helper produces, so downstream log readers see one
-		// canonical error message regardless of which entry point ran
-		// the command.
+		wg.Wait()
+		runErr = c.Wait()
+		// Translate timeouts into the same "timed out after 600s" string the
+		// shell helper produces, so downstream log readers see one canonical
+		// error regardless of entry point.
 		if ctx.Err() == context.DeadlineExceeded {
-			err = fmt.Errorf("timed out after 600s")
+			runErr = fmt.Errorf("timed out after 600s")
 		}
 		if supervisor != nil {
-			if err == nil {
+			if runErr == nil {
 				supervisor.MarkExited(id, 0)
 			} else {
 				code := 1
-				if exitErr, ok := err.(*exec.ExitError); ok {
+				if exitErr, ok := runErr.(*exec.ExitError); ok {
 					code = exitErr.ExitCode()
 				}
 				supervisor.MarkKilled(id, code)
 			}
 		}
-		return shellFinishedMsg{command: command, output: out, toolCallID: toolCallID, err: err}
+		close(ch)
+	}()
+
+	// The streaming reader command: each invocation returns the next chunk, or
+	// the final shellFinishedMsg once the channel is closed (process done).
+	streamCmd := func() tea.Msg {
+		chunk, ok := <-ch
+		if !ok {
+			return shellFinishedMsg{command: command, output: "", toolCallID: toolCallID, err: runErr}
+		}
+		return shellChunkMsg{toolCallID: toolCallID, chunk: chunk}
 	}
+	m.shellStreamCmd = streamCmd
+	return streamCmd
 }
 
 // shellExecCommand builds a *exec.Cmd for the platform shell with the
@@ -8184,7 +8320,9 @@ Status indicators:
   ✓ installed         — up to date with bundled version
   ↑ outdated          — bundled has changed, file untouched
   ✎ custom-modified   — you (or a tool) edited the file
-  ✗ missing           — not installed`})
+  ✗ missing           — not installed
+
+Tip: Type /<skill-name> (e.g. /webapp-qa) to invoke any skill as a slash command.`})
 }
 
 func (m *model) handleSkillsList() {
@@ -8366,6 +8504,8 @@ func (m *model) runInstaller(subcmd string, names []string) string {
 	}()
 
 	runErr := skill.Run(args)
+	// Skills changed on disk (install/upgrade): drop cache so /<skill-name> sees updates.
+	skill.InvalidateSkillCache()
 
 	w.Close()
 	<-drainDone
@@ -9366,7 +9506,7 @@ func (m *model) handleContextCmd(args []string) {
 	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(toolsTotal))
 
 	injectedTotal := baseTotal + toolsTotal
-	skills := skill.LoadSkills()
+	skills := skill.LoadSkillsForRoot(m.workDir)
 	catalogTok := 0
 	if discoveryOn {
 		b.WriteString("\nSkill catalog (not pre-injected — discovery active)\n")
@@ -9396,7 +9536,7 @@ func (m *model) handleContextCmd(args []string) {
 
 	// ── Skills ───────────────────────────────────
 	b.WriteString("\nSkills (full contents available on demand, not pre-injected)\n")
-	skills = skill.LoadSkills()
+	skills = skill.LoadSkillsForRoot(m.workDir)
 	if len(skills) == 0 {
 		b.WriteString("  (none found)\n")
 	} else {
@@ -9985,6 +10125,35 @@ func (m *model) appendAgentMessage(am agent.Message) {
 		// Record usage to persistent storage
 		m.recordUsage(am)
 	}
+}
+
+// findToolMessageIndexByToolID returns the index of the tool-result transcript
+// message carrying ToolID, or -1 if none exists yet. Used by the streaming
+// `!` shell path to extend an already-emitted result in place.
+func (m *model) findToolMessageIndexByToolID(toolCallID string) int {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		raw := m.messages[i].raw
+		if raw != nil && raw.Role == "tool" && raw.ToolID == toolCallID {
+			return i
+		}
+	}
+	return -1
+}
+
+// appendShellOutput appends one streamed chunk of `!` shell output to the
+// transcript. The first chunk creates the tool-result message; subsequent
+// chunks extend it in place and re-render, producing live streaming output.
+func (m *model) appendShellOutput(toolCallID, chunk string) {
+	idx := m.findToolMessageIndexByToolID(toolCallID)
+	toolName := m.lookupToolName(toolCallID)
+	if idx < 0 {
+		m.appendAgentMessage(agent.Message{Role: "tool", ToolID: toolCallID, Content: chunk})
+	} else {
+		msg := &m.messages[idx]
+		msg.raw.Content += chunk
+		msg.text = renderToolResult(toolName, msg.raw.Content, m.styles)
+	}
+	m.rerenderTranscriptAndMaybeScroll()
 }
 
 // recordUsage persists a usage record for a message that has token usage data.

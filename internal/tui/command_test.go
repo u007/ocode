@@ -9,6 +9,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/session"
+	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 
 	"charm.land/bubbles/v2/textarea"
@@ -1022,3 +1023,107 @@ func TestCustomCommandUsesStreamingPath(t *testing.T) {
 		t.Fatal("custom command did not emit streamStartedMsg — it is not using the streaming path")
 	}
 }
+
+func TestFindSkillByName(t *testing.T) {
+	skills := []skill.Skill{
+		{Name: "webapp-qa"},
+		{Name: "GWS-Gmail"},
+	}
+	if got := findSkillByName(skills, "webapp-qa"); got == nil || got.Name != "webapp-qa" {
+		t.Fatalf("expected exact match for webapp-qa, got %#v", got)
+	}
+	if got := findSkillByName(skills, "WEBAPP-QA"); got == nil || got.Name != "webapp-qa" {
+		t.Fatalf("expected case-insensitive match for WEBAPP-QA, got %#v", got)
+	}
+	if got := findSkillByName(skills, "gws-gmail"); got == nil || got.Name != "GWS-Gmail" {
+		t.Fatalf("expected case-insensitive match for gws-gmail, got %#v", got)
+	}
+	if got := findSkillByName(skills, "nope"); got != nil {
+		t.Fatalf("expected no match for unknown name, got %#v", got)
+	}
+}
+
+func TestSkillAsCommandDispatch(t *testing.T) {
+	// Set up a throwaway project root with one discoverable skill so the
+	// /<skill-name> command-dispatch branch resolves it via LoadSkillsForRoot.
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "skills", "demo-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	skillMD := "---\nname: demo-skill\ndescription: a demo skill\n---\n# demo-skill\nDo the demo thing.\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillMD), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent is intentionally nil: this makes the skill branch append a clear
+	// message instead of spawning the streaming goroutine via
+	// sendCustomCommandPrompt, keeping the test hermetic.
+	m := model{input: newTestTextarea(), workDir: root, viewport: fastviewport.New(80, 20)}
+	updated, cmd := m.handleCommand("/demo-skill")
+	if cmd != nil {
+		t.Fatalf("expected no command when agent is nil, got %T", cmd)
+	}
+	got := derefTestModel(t, updated)
+	matched := false
+	for _, msg := range got.messages {
+		if strings.Contains(msg.text, `Skill "demo-skill" was found, but no agent is configured to run it.`) {
+			matched = true
+		}
+	}
+	if !matched {
+		t.Fatalf("expected 'skill found but no agent' message, got: %#v", got.messages)
+	}
+
+	// An unrecognized command must fall through to "Unknown command".
+	m2 := model{input: newTestTextarea(), workDir: root, viewport: fastviewport.New(80, 20)}
+	upd2, _ := m2.handleCommand("/no-such-skill")
+	got2 := derefTestModel(t, upd2)
+	found := false
+	for _, msg := range got2.messages {
+		if strings.Contains(msg.text, "Unknown command: /no-such-skill") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected unknown command fallthrough, got: %#v", got2.messages)
+	}
+}
+
+func TestSkillAsCommandDispatchWithAgentReturnsCommand(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, "skills", "demo-skill")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte("---\nname: demo-skill\n---\n# demo-skill\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := model{
+		input:    newTestTextarea(),
+		workDir:  root,
+		viewport: fastviewport.New(80, 20),
+		agent:    agent.NewAgent(&staticLLMClient{}, nil, &config.Config{}, nil),
+	}
+
+	updated, cmd := m.handleCommand("/demo-skill some context")
+	if cmd == nil {
+		t.Fatal("expected skill dispatch to return a command when an agent is configured")
+	}
+	got := derefTestModel(t, updated)
+	if len(got.messages) == 0 || got.messages[len(got.messages)-1].role != roleUser {
+		t.Fatalf("expected user command transcript entry, got %#v", got.messages)
+	}
+}
+
+// staticLLMClient is a tiny LLMClient used by the skill-dispatch test so we
+// can construct a real agent without reaching out to any provider.
+type staticLLMClient struct{}
+
+func (c *staticLLMClient) Chat(messages []agent.Message, tools []map[string]interface{}) (*agent.Message, error) {
+	return &agent.Message{Role: "assistant", Content: "ok"}, nil
+}
+
+func (c *staticLLMClient) GetProvider() string { return "mock" }
+func (c *staticLLMClient) GetModel() string    { return "mock-model" }

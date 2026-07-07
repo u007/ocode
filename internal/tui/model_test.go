@@ -224,6 +224,80 @@ func TestBuildAgentMessagesSnapshotKeepsShellOutputSeparate(t *testing.T) {
 	}
 }
 
+// TestShellStreamChunksAccumulate verifies that the `!` shell command streams
+// output incrementally: each shellChunkMsg extends the in-transcript tool
+// result in place (no extra messages), the streaming command keeps being
+// re-dispatched, and the final shellFinishedMsg finalizes without appending a
+// duplicate message. An error at the end appends an [error] note.
+func TestShellStreamChunksAccumulate(t *testing.T) {
+	m := model{
+		input:     textarea.New(),
+		viewport:  fastviewport.New(80, 20),
+		styles:    ApplyThemeColors("tokyonight"),
+		sessionID: "test-shell-stream",
+	}
+	// Mimic startShellExecution's leading assistant tool-call entry so the
+	// streaming path can resolve the tool name for rendering.
+	m.appendAgentMessage(agent.Message{
+		Role:      "assistant",
+		ToolCalls: []agent.ToolCall{makeAgentToolCall("shell-stream-1", "bash", `{"command":"echo a; echo b"}`)},
+	})
+	// A real run sets this via runStreamingShell; the test arms a dummy so the
+	// chunk handler re-dispatches the (dummy) reader command.
+	dummyStream := func() tea.Msg { return nil }
+	m.shellStreamCmd = dummyStream
+
+	// First chunk creates the tool-result message and re-arms the stream.
+	upd, cmd := m.Update(shellChunkMsg{toolCallID: "shell-stream-1", chunk: "a\n"})
+	got := upd.(model)
+	if cmd == nil {
+		t.Fatalf("expected streaming command to be re-dispatched after a chunk")
+	}
+	if got.shellStreamCmd == nil {
+		t.Fatalf("expected shellStreamCmd to remain set while streaming")
+	}
+	if len(got.messages) != 2 {
+		t.Fatalf("expected 2 messages after first chunk, got %d", len(got.messages))
+	}
+	if got.messages[1].raw == nil || got.messages[1].raw.Content != "a\n" {
+		gotc := ""
+		if got.messages[1].raw != nil {
+			gotc = got.messages[1].raw.Content
+		}
+		t.Fatalf("expected first chunk content, got %q", gotc)
+	}
+
+	// Second chunk extends the existing message in place (still 2 messages).
+	upd2, _ := got.Update(shellChunkMsg{toolCallID: "shell-stream-1", chunk: "b\n"})
+	got2 := upd2.(model)
+	if len(got2.messages) != 2 {
+		t.Fatalf("expected still 2 messages after second chunk, got %d", len(got2.messages))
+	}
+	if got2.messages[1].raw.Content != "a\nb\n" {
+		t.Fatalf("expected accumulated chunk content, got %q", got2.messages[1].raw.Content)
+	}
+
+	// Successful finish clears the stream and does NOT append a new message.
+	upd3, _ := got2.Update(shellFinishedMsg{command: "echo a; echo b", output: "", toolCallID: "shell-stream-1", err: nil})
+	got3 := upd3.(model)
+	if got3.shellStreamCmd != nil {
+		t.Fatalf("expected shellStreamCmd cleared after finish")
+	}
+	if len(got3.messages) != 2 {
+		t.Fatalf("expected 2 messages after finish (no duplicate), got %d", len(got3.messages))
+	}
+
+	// An error at the end appends an [error] note to the streamed output.
+	upd4, _ := got3.Update(shellFinishedMsg{command: "x", output: "", toolCallID: "shell-stream-1", err: fmt.Errorf("exit status 1")})
+	got4 := upd4.(model)
+	if !strings.Contains(got4.messages[1].raw.Content, "[error]") {
+		t.Fatalf("expected error note appended to streamed output, got %q", got4.messages[1].raw.Content)
+	}
+	if len(got4.messages) != 2 {
+		t.Fatalf("expected error note added in place, not as a new message, got %d", len(got4.messages))
+	}
+}
+
 func TestCommandRunningCounterTracksOverlappingCompletions(t *testing.T) {
 	m := model{
 		input:    newTestTextarea(),
