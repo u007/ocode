@@ -59,9 +59,23 @@ func splitPathLine(tok string) (string, int) {
 }
 
 // resolveExistingFile resolves a (possibly relative) path against workDir and
-// confirms it points to an existing regular file.
+// confirms it points to an existing regular file. A leading "~" or "~/" is
+// expanded to the user's home directory first, so shell-style paths such as
+// ~/.config/opencode/auth.json are recognized and become clickable links.
+// (Go's filepath treats "~" as non-absolute, so without this expansion the
+// path would be joined onto workDir and the stat would fail.)
 func resolveExistingFile(path, workDir string) (string, bool) {
-	abs := path
+	expanded := path
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			if path == "~" {
+				expanded = home
+			} else {
+				expanded = filepath.Join(home, path[2:])
+			}
+		}
+	}
+	abs := expanded
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(workDir, abs)
 	}

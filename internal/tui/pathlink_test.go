@@ -1,6 +1,11 @@
 package tui
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 func TestPathLinkAtCol(t *testing.T) {
 	// workDir is the package dir; main.go lives two levels up. Use repo-relative
@@ -47,6 +52,43 @@ func TestPathLinkAtCol(t *testing.T) {
 
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
+
+// TestPathLinkAtColTilde verifies that a leading "~"/"~/" is expanded to the
+// user's home directory so shell-style paths become clickable links instead of
+// being joined onto workDir (which would make the stat fail).
+func TestPathLinkAtColTilde(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home dir available: %v", err)
+	}
+	// Create a real file under home so the resolution succeeds.
+	name := ".ocode-pathlink-test-" + filepath.Base(t.Name())
+	target := filepath.Join(home, name)
+	if err := os.WriteFile(target, []byte("x"), 0o600); err != nil {
+		t.Skipf("cannot create test file under home: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(target) })
+
+	line := "see ~/.ocode-pathlink-test-whatever.md here"
+	// Build the line with the actual generated name so the suffix matches.
+	line = "see ~/" + name + " here"
+	col := strings.Index(line, "~")
+
+	r, ok := pathLinkAtCol(line, col, "../..")
+	if !ok {
+		t.Fatalf("expected ~ path to resolve to a link, got ok=false (region=%+v)", r)
+	}
+	want := filepath.Join(home, name)
+	if r.path != want {
+		t.Errorf("path = %q, want %q", r.path, want)
+	}
+
+	// A bare "~" alone should resolve to the home dir but be rejected as a link
+	// because it is a directory, not a regular file.
+	if _, ok := pathLinkAtCol("~", 0, "../.."); ok {
+		t.Errorf("bare ~ should not become a link (it is a directory)")
+	}
 }
 
 func TestSplitPathLine(t *testing.T) {

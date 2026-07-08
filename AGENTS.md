@@ -329,7 +329,10 @@ Rules for any change that touches tools or the base prompt:
 - **Markdown docs are part of the discovery corpus (`md_discovery.go`).** Every
   project `*.md` except the always-on briefing set (`AGENTS.md`, `CLAUDE.md`,
   `OCODE.md`, `.cursorrules`, `.opencode/rules/*.md`, which `LoadContext` injects
-  in full) is a `Kind:"md"` Doc whose `Text` is an LLM summary (small model when
+  in full) **and files inside an active OKF knowledge bundle's `docs/` directory**
+  (owned by the knowledge system — `docs/index.md` is injected as the
+  `[ocode:knowledge]` TOC and `knowledge_lookup` retrieves any concept doc on
+  demand) is a `Kind:"md"` Doc whose `Text` is an LLM summary (small model when
   configured, else the main client), cached at `.ocode/md-summaries.json` keyed
   by file content (mtime+size gate, then sha256). The first activation runs a
   **blocking** pass (`mdSummarizePass`, bounded concurrency `mdSummaryWorkers`)

@@ -68,3 +68,71 @@ func TestUsageDir(t *testing.T) {
 		t.Errorf("got %s, want %s", dir, expected)
 	}
 }
+
+func TestProjectSlug(t *testing.T) {
+	// Deterministic for the same input.
+	a := ProjectSlug("/some/project")
+	b := ProjectSlug("/some/project")
+	if a != b {
+		t.Fatalf("slug not deterministic: %q != %q", a, b)
+	}
+	// 12-char hex.
+	if len(a) != 12 {
+		t.Fatalf("slug length = %d, want 12", len(a))
+	}
+	for _, c := range a {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("slug %q contains non-hex char %q", a, c)
+		}
+	}
+	// Different paths yield different slugs (they are not in the same git repo
+	// within this test, so gitToplevel falls back to the path itself).
+	c := ProjectSlug("/other/project")
+	if c == a {
+		t.Fatalf("different paths produced identical slug %q", a)
+	}
+	// Empty input falls back to the current working directory and still works.
+	if got := ProjectSlug(""); got == "" {
+		t.Fatalf("empty input produced empty slug")
+	}
+	// On Windows the slug is case-insensitive.
+	if runtime.GOOS == "windows" {
+		if ProjectSlug("C:\\Proj") != ProjectSlug("c:\\proj") {
+			t.Fatalf("windows slug is not case-insensitive")
+		}
+	}
+}
+
+func TestProjectSlugFollowsSymlinkAlias(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "real")
+	alias := filepath.Join(root, "alias")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, alias); err != nil {
+		t.Skipf("symlink test unavailable: %v", err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(alias)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", alias, err)
+	}
+	if got := ProjectRoot(alias); got != wantRoot {
+		t.Fatalf("ProjectRoot(%q) = %q, want %q", alias, got, wantRoot)
+	}
+	if gotAlias, gotReal := ProjectSlug(alias), ProjectSlug(real); gotAlias != gotReal {
+		t.Fatalf("ProjectSlug should ignore symlink aliases: alias=%q real=%q", gotAlias, gotReal)
+	}
+}
+
+func TestProjectSlugFollowsSymlink(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link-to-target")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if gotTarget, gotLink := ProjectSlug(target), ProjectSlug(link); gotTarget != gotLink {
+		t.Fatalf("symlink slug mismatch: target=%q link=%q", gotTarget, gotLink)
+	}
+}

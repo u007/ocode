@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -96,6 +97,133 @@ func (askOnlyTool) Definition() map[string]interface{} {
 }
 func (askOnlyTool) Execute(args json.RawMessage) (string, error) { return "executed", nil }
 func (askOnlyTool) Parallel() bool                               { return false }
+
+// panickingClient makes Chat panic, simulating an agent.Step panic (e.g. from a
+// provider SDK bug or a mustMarshal panic in the client path).
+type panickingClient struct{}
+
+func (panickingClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
+	panic("simulated stream panic")
+}
+func (panickingClient) GetProvider() string { return "test" }
+func (panickingClient) GetModel() string    { return "test-model" }
+
+func TestSilenceCmdOutput(t *testing.T) {
+	cmd := exec.Command("ignored-command-for-test")
+	silenceCmdOutput(cmd)
+	if cmd.Stdout != io.Discard {
+		t.Fatalf("Stdout = %T, want io.Discard", cmd.Stdout)
+	}
+	if cmd.Stderr != io.Discard {
+		t.Fatalf("Stderr = %T, want io.Discard", cmd.Stderr)
+	}
+}
+
+// TestStreamStepRecoversFromPanic verifies the goroutine-deadlock fix: if the
+// agent loop (a.Step) panics inside streamStep's goroutine, the panic must be
+// recovered, msgCh closed, and errCh written — otherwise waitStreamEvent blocks
+// forever on <-msgCh/<-errCh and the TUI hangs. The test runs the ACTUAL
+// waitStreamEvent command produced by streamStep and asserts it terminates with
+// a panic error instead of hanging.
+func TestStreamStepRecoversFromPanic(t *testing.T) {
+	m := model{
+		agent:  agent.NewAgent(panickingClient{}, nil, nil, nil),
+		styles: ApplyThemeColors("tokyonight"),
+	}
+	batch := m.streamStep([]agent.Message{{Role: "user", Content: "hi"}})
+	batchMsg, ok := batch().(tea.BatchMsg)
+	if !ok {
+		t.Fatalf("expected BatchMsg from streamStep, got %T", batch())
+	}
+	if len(batchMsg) != 2 {
+		t.Fatalf("expected 2 commands in batch, got %d", len(batchMsg))
+	}
+	waitCmd := batchMsg[1] // waitStreamEvent
+
+	done := make(chan tea.Msg, 1)
+	go func() { done <- waitCmd() }()
+
+	select {
+	case msg := <-done:
+		sdm, ok := msg.(streamDoneMsg)
+		if !ok {
+			t.Fatalf("expected streamDoneMsg, got %T", msg)
+		}
+		if sdm.err == nil {
+			t.Fatal("expected non-nil error after panic recovery")
+		}
+		if !strings.Contains(sdm.err.Error(), "stream panic") {
+			t.Fatalf("expected panic error, got %v", sdm.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("waitStreamEvent hung — streamStep panic not recovered (deadlock)")
+	}
+}
+
+func TestArmActivityListenerCancelsPrevious(t *testing.T) {
+	m := model{
+		agent:  agent.NewAgent(retryTestClient{}, nil, nil, nil),
+		styles: ApplyThemeColors("tokyonight"),
+	}
+	cmd1 := m.armActivityListener()
+	// Run cmd1; it blocks on tracker.Notify() (no activity published yet).
+	done1 := make(chan tea.Msg, 1)
+	go func() { done1 <- cmd1() }()
+
+	// Re-arm: this must cancel cmd1's context so the old goroutine terminates
+	// instead of leaking / multiplying.
+	cmd2 := m.armActivityListener()
+	_ = cmd2
+
+	select {
+	case msg := <-done1:
+		if msg != nil {
+			t.Fatalf("expected nil from cancelled listener, got %#v", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("previous listenActivity goroutine not cancelled — leak/deadlock")
+	}
+}
+
+func TestListenSubAgentPermKeepAliveOnTimeout(t *testing.T) {
+	ch := make(chan subAgentPermRequest, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cmd := listenSubAgentPerm(ch, ctx)
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+
+	select {
+	case msg := <-done:
+		if _, ok := msg.(subAgentPermKeepAliveMsg); !ok {
+			t.Fatalf("expected subAgentPermKeepAliveMsg on timeout, got %T", msg)
+		}
+	case <-time.After(subAgentPermListenTimeout + 3*time.Second):
+		t.Fatal("listenSubAgentPerm did not re-arm via keep-alive on timeout — would block forever")
+	}
+}
+
+func TestArmSubAgentPermListenerCancelsPrevious(t *testing.T) {
+	m := model{
+		subAgentPermCh: make(chan subAgentPermRequest, 1),
+		styles:         ApplyThemeColors("tokyonight"),
+	}
+	cmd1 := m.armSubAgentPermListener()
+	done1 := make(chan tea.Msg, 1)
+	go func() { done1 <- cmd1() }()
+
+	cmd2 := m.armSubAgentPermListener()
+	_ = cmd2
+
+	select {
+	case msg := <-done1:
+		if msg != nil {
+			t.Fatalf("expected nil from cancelled listener, got %#v", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("previous listenSubAgentPerm goroutine not cancelled — leak/deadlock")
+	}
+}
 
 func makeAgentToolCall(id, name, args string) agent.ToolCall {
 	tc := agent.ToolCall{ID: id, Type: "function"}
@@ -915,7 +1043,7 @@ func TestNestedSubagentPermissionPromptSurfacesToMainTUI(t *testing.T) {
 		stepDone <- msgs
 	}()
 
-	listenCmd := listenSubAgentPerm(m.subAgentPermCh)
+	listenCmd := listenSubAgentPerm(m.subAgentPermCh, context.Background())
 	if listenCmd == nil {
 		t.Fatal("expected permission listener command")
 	}
@@ -4271,6 +4399,32 @@ func TestTranscriptScrollbarThumbClickDoesNotJumpScroll(t *testing.T) {
 	}
 }
 
+func TestGitDiffMouseWheelScrolls(t *testing.T) {
+	m := model{
+		width:     100,
+		height:    30,
+		activeTab: tabGit,
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	m.git = gitModel{diff: viewport.New(viewport.WithWidth(45), viewport.WithHeight(10))}
+	var sb strings.Builder
+	for i := 0; i < 100; i++ {
+		sb.WriteString(fmt.Sprintf("line %d\n", i))
+	}
+	m.git.setDiffContent(sb.String())
+	panelW := m.panelWidth()
+	diffX := panelW*20/100 + panelW*30/100 + 2 // inside diff column
+	before := m.git.diff.YOffset()
+	updated, _ := m.Update(tea.MouseWheelMsg{
+		X: diffX, Y: appHeaderHeight + 5, Button: tea.MouseWheelDown,
+	})
+	got := derefTestModel(t, updated)
+	after := got.git.diff.YOffset()
+	if after <= before {
+		t.Fatalf("expected git diff YOffset to increase after wheel down, before=%d after=%d", before, after)
+	}
+}
+
 func TestGitDiffMouseDragSelectsDiffText(t *testing.T) {
 	m := model{
 		width:     100,
@@ -5424,32 +5578,32 @@ func TestHandleSoundCmdTestDispatchesBell(t *testing.T) {
 	}
 }
 
-func TestBellNotificationPayloadIncludesGhosttyDesktopNotification(t *testing.T) {
-	t.Run("ghostty", func(t *testing.T) {
-		t.Setenv("TERM_PROGRAM", "ghostty")
-		t.Setenv("TERM", "xterm-ghostty")
-
-		payload := bellNotificationPayload()
-		if len(payload) == 0 || payload[0] != 0x07 {
-			t.Fatalf("payload should start with BEL, got %q", payload)
-		}
-		if !bytes.Contains(payload, []byte("\x1b]9;ocode bell\x1b\\")) {
-			t.Fatalf("payload = %q, want OSC 9 desktop notification for Ghostty/Supacode/iTerm2", payload)
-		}
-	})
-
-	t.Run("iterm2", func(t *testing.T) {
-		t.Setenv("TERM_PROGRAM", "iTerm.app")
-		t.Setenv("TERM", "xterm-256color")
-
-		payload := bellNotificationPayload()
-		if len(payload) == 0 || payload[0] != 0x07 {
-			t.Fatalf("payload should start with BEL, got %q", payload)
-		}
-		if !bytes.Contains(payload, []byte("\x1b]9;ocode bell\x1b\\")) {
-			t.Fatalf("payload = %q, want OSC 9 desktop notification for iTerm2", payload)
-		}
-	})
+func TestBellNotificationPayloadIsAlwaysBEL(t *testing.T) {
+	// bellNotificationPayload must return only the BEL character (0x07) —
+	// no OSC sequences or other visible escape codes that would paint over
+	// the alt-screen or leak into scrollback on exit.
+	terminals := []struct {
+		name     string
+		termProg string
+		term     string
+	}{
+		{"ghostty", "ghostty", "xterm-ghostty"},
+		{"supacode", "supacode", "xterm-ghostty"},
+		{"iterm2", "iTerm.app", "xterm-256color"},
+		{"kitty", "kitty", "xterm-kitty"},
+		{"apple_terminal", "apple_terminal", "xterm-256color"},
+		{"unknown", "", "xterm-256color"},
+	}
+	for _, tc := range terminals {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TERM_PROGRAM", tc.termProg)
+			t.Setenv("TERM", tc.term)
+			payload := bellNotificationPayload()
+			if !bytes.Equal(payload, []byte{0x07}) {
+				t.Fatalf("payload = %q, want BEL only (0x07)", payload)
+			}
+		})
+	}
 }
 
 func TestBellNotificationPayloadFallsBackToBEL(t *testing.T) {

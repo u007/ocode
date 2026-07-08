@@ -21,6 +21,7 @@ type Snapshot struct {
 	ToolCallID   string // LLM tool call that triggered this backup; "" for non-agent callers
 	AgentStep    int    // agent loop iteration at backup time
 	WriteSeq     uint64 // monotonic sequence number assigned by RegisterWrite after the write
+	BaseDir      string // snapshot store base dir at backup time (provenance for undo/redo)
 }
 
 // Store is a per-agent snapshot store. Each agent creates one via NewStore.
@@ -31,12 +32,21 @@ type Store struct {
 	redoStack []Snapshot
 	step      int
 	agentID   string
+	baseDir   string // where backup files are written; empty => legacy ".opencode/snapshots"
 }
 
 // NewStore creates a Store for one agent. agentID must be unique across all
 // concurrent agents in the process (use NewAgentID).
-func NewStore(agentID string) *Store {
-	return &Store{agentID: agentID}
+func NewStore(agentID, baseDir string) *Store {
+	return &Store{agentID: agentID, baseDir: baseDir}
+}
+
+// SetBaseDir points the store at the directory where backup files are written.
+// An empty dir falls back to the legacy relative ".opencode/snapshots" path.
+func (s *Store) SetBaseDir(dir string) {
+	s.mu.Lock()
+	s.baseDir = dir
+	s.mu.Unlock()
 }
 
 // NewAgentID returns a random hex string suitable as a unique Store identifier.
@@ -136,7 +146,7 @@ func crossAgentWriteAfterSeq(path, myAgentID string, afterSeq uint64) *fileWrite
 
 // -------- global store (backward compat for TUI undo/redo and ocodeconfig) --------
 
-var globalStore = NewStore("global")
+var globalStore = NewStore("global", "")
 
 // Package-level functions delegate to the global store so existing call sites
 // (TUI undo/redo, config backup) continue to work unchanged.
@@ -148,13 +158,22 @@ func Redo() (string, error)         { return globalStore.Redo() }
 func DiscardRecent(count int) error { return globalStore.DiscardRecent(count) }
 func Restore(path string) error     { return globalStore.Restore(path) }
 
-
 // -------- Store methods --------
 
 // Backup saves a copy of path before a write. toolCallID may be "" for
 // non-agent callers. The backup content is written to disk (.opencode/snapshots/)
 // so large files are safe — only metadata lives in RAM.
 func (s *Store) Backup(path, toolCallID string) error {
+	s.mu.Lock()
+	baseDir := s.baseDir
+	s.mu.Unlock()
+	return s.backupAtDir(path, toolCallID, baseDir)
+}
+
+// backupAtDir is the implementation behind Backup. Passing an explicit baseDir
+// lets callers such as Redo keep the snapshot history pinned to the project
+// that originally owned the file, even if the store's active base dir changes.
+func (s *Store) backupAtDir(path, toolCallID, baseDir string) error {
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -162,12 +181,17 @@ func (s *Store) Backup(path, toolCallID string) error {
 	newFile := os.IsNotExist(err)
 
 	var backupPath string
+	dir := baseDir
+	if dir == "" {
+		dir = filepath.Join(".opencode", "snapshots") // legacy fallback
+	}
 	if !newFile {
-		dir := filepath.Join(".opencode", "snapshots")
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return err
 		}
-		backupName := fmt.Sprintf("%d_%s", time.Now().UnixNano(), filepath.Base(path))
+		// Include agentID so concurrent agents editing same-basename files in
+		// the same project at the same nanosecond cannot collide on disk.
+		backupName := fmt.Sprintf("%d_%s_%s", time.Now().UnixNano(), s.agentID, filepath.Base(path))
 		backupPath = filepath.Join(dir, backupName)
 		if err := os.WriteFile(backupPath, data, 0644); err != nil {
 			return err
@@ -178,6 +202,7 @@ func (s *Store) Backup(path, toolCallID string) error {
 	s.snapshots = append(s.snapshots, Snapshot{
 		OriginalPath: path,
 		BackupPath:   backupPath,
+		BaseDir:      dir,
 		Timestamp:    time.Now(),
 		ToolCallID:   toolCallID,
 		AgentStep:    s.step,
@@ -363,9 +388,13 @@ func (s *Store) Undo() (string, error) {
 	s.mu.Unlock()
 
 	// Save current state for redo before restoring.
+	redoDir := last.BaseDir
+	if redoDir == "" {
+		redoDir = filepath.Join(".opencode", "snapshots") // legacy fallback
+	}
 	redoBase := last.BackupPath
 	if redoBase == "" {
-		redoBase = filepath.Join(".opencode", "snapshots",
+		redoBase = filepath.Join(redoDir,
 			fmt.Sprintf("%d_%s", time.Now().UnixNano(), filepath.Base(last.OriginalPath)))
 	}
 	redoBackupPath := redoBase + ".redo"
@@ -380,6 +409,7 @@ func (s *Store) Undo() (string, error) {
 	s.redoStack = append(s.redoStack, Snapshot{
 		OriginalPath: last.OriginalPath,
 		BackupPath:   redoBackupPath,
+		BaseDir:      redoDir,
 		Timestamp:    time.Now(),
 	})
 	s.mu.Unlock()
@@ -417,7 +447,7 @@ func (s *Store) Redo() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to read redo file %s: %w", last.BackupPath, err)
 	}
-	if err := s.Backup(last.OriginalPath, ""); err != nil {
+	if err := s.backupAtDir(last.OriginalPath, "", last.BaseDir); err != nil {
 		return "", fmt.Errorf("failed to backup before redo: %w", err)
 	}
 	if err := os.WriteFile(last.OriginalPath, data, 0644); err != nil {

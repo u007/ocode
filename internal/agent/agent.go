@@ -20,6 +20,7 @@ import (
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/mcp"
 	"github.com/u007/ocode/internal/notebus"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/snapshot"
 	"github.com/u007/ocode/internal/tool"
@@ -597,7 +598,8 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	}
 	a.procs = tool.NewProcessRegistry()
 	a.runs = NewAgentRunRegistry()
-	a.snapshotStore = snapshot.NewStore(snapshot.NewAgentID())
+	snapDir := a.projectSnapshotsDir()
+	a.snapshotStore = snapshot.NewStore(snapshot.NewAgentID(), snapDir)
 	a.stopCh = make(chan struct{})
 	a.jobEvents = make(chan JobEvent, 32)
 	a.memoryMaintCh = make(chan MemoryMaintenanceRequest, 64)
@@ -1743,6 +1745,14 @@ func (a *Agent) SetMode(m Mode) {
 func (a *Agent) SetWorkDir(dir string) {
 	a.workDir = dir
 	a.clearEnvironmentPromptCache()
+	// Re-point file-edit snapshots and markdown discovery at the new project.
+	// Backups/undo must follow /cd so they never land in the previous project's
+	// global dir, and discovery must re-summarize the new repo.
+	snapDir := a.projectSnapshotsDir()
+	if a.snapshotStore != nil {
+		a.snapshotStore.SetBaseDir(snapDir)
+	}
+	a.mdState = nil
 	if a.permissions != nil {
 		a.permissions.SetWorkDir(dir)
 	}
@@ -1750,6 +1760,22 @@ func (a *Agent) SetWorkDir(dir string) {
 		at.workDir = dir
 		a.tools["advisor"] = at
 	}
+}
+
+// projectSnapshotsDir returns the global, project-scoped directory where this
+// agent's file-edit backups are stored: GlobalDataDir()/project/{slug}/snapshots.
+// An empty result (e.g. GlobalDataDir unavailable) makes the store fall back to
+// the legacy relative ".opencode/snapshots" path.
+func (a *Agent) projectSnapshotsDir() string {
+	base, err := paths.GlobalDataDir()
+	if err != nil {
+		return ""
+	}
+	wd := a.workDir
+	if wd == "" {
+		wd, _ = os.Getwd()
+	}
+	return filepath.Join(base, "project", paths.ProjectSlug(wd), "snapshots")
 }
 
 // SetRedactionRegistry sets the registry for resolving OCSEC tokens in tool args.

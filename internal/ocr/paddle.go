@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const paddleTimeout = 120 * time.Second
+const paddleTimeout = 600 * time.Second
 
 type paddleBackend struct{}
 

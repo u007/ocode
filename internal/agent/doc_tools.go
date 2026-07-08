@@ -112,7 +112,7 @@ func (t *DocSearchTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	if len(results) == 0 {
-		return fmt.Sprintf("No matching documents found (0 total)."), nil
+		return "No matching documents found (0 total).", nil
 	}
 
 	var b strings.Builder
@@ -221,7 +221,7 @@ func (t *DocGetTool) Execute(args json.RawMessage) (string, error) {
 		b.WriteString(fmt.Sprintf("**Tags:** %s  \n", strings.Join(doc.Tags, ", ")))
 	}
 	if doc.Status == "deprecated" {
-		b.WriteString(fmt.Sprintf("**Status:** deprecated  \n"))
+		b.WriteString("**Status:** deprecated  \n")
 		if doc.DeprecatedReason != "" {
 			b.WriteString(fmt.Sprintf("**Deprecated reason:** %s  \n", doc.DeprecatedReason))
 		}

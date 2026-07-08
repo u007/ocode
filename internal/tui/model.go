@@ -364,6 +364,12 @@ type sidebarCacheKey struct {
 	lspStateSeq uint64
 }
 type registryReadyMsg struct{ failed bool }
+
+// novitaReadyMsg is emitted once the Novita live model cache has been populated
+// at startup, so the sidebar can re-render and show the resolved context window
+// for novita-ai models that aren't present in the models.dev registry.
+type novitaReadyMsg struct{ failed bool }
+
 type pickerFilterApplyMsg struct {
 	seq    int
 	filter string
@@ -500,6 +506,22 @@ func waitForRegistry() tea.Cmd {
 			time.Sleep(100 * time.Millisecond)
 		}
 		return registryReadyMsg{failed: true}
+	}
+}
+
+// waitForNovitaReady polls until the Novita live model cache has been populated
+// (or the poll budget is exhausted), then emits novitaReadyMsg so the sidebar
+// re-renders and can resolve the context window for novita-ai models.
+func waitForNovitaReady(modelName string) tea.Cmd {
+	return func() tea.Msg {
+		const maxPolls = 50
+		for i := 0; i < maxPolls; i++ {
+			if agent.NovitaModelsLoaded() {
+				return novitaReadyMsg{}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return novitaReadyMsg{failed: true}
 	}
 }
 
@@ -783,6 +805,7 @@ type model struct {
 	cancelStream             chan struct{}
 	lastActivity             agent.ActivitySnapshot
 	activityRowReserved      bool
+	activityCancel           context.CancelFunc // cancels the active listenActivity goroutine so re-arming doesn't multiply goroutines / leak on cancel
 	escPressed               bool
 	escPressTime             time.Time
 	lastRetryableLLMErr      string
@@ -815,6 +838,7 @@ type model struct {
 	streamWasInterrupted     bool
 	transcriptLines          []string
 	rawTranscriptLines       []string
+	urlLinkRegions           []urlLinkRegion             // clickable [text](url) markdown-link targets, indexed by absolute transcript line. Markdown links drop the URL during rendering (so rawTranscriptLines can't detect them); these regions restore clickability.
 	transcriptMsgStartLine   []int                       // for each message index, the first wrapped line of its block in transcriptLines (parallel to m.messages; -1 for indices past the end). Used to scroll to a chat-search match.
 	msgRenderCache           map[int]msgRenderCacheEntry // per-message rendered-block cache keyed by message index; avoids re-running lipgloss/markdown render for unchanged messages on every streamed delta
 	themeGen                 int                         // bumped on every applyTheme so the render cache invalidates when colors change
@@ -843,6 +867,7 @@ type model struct {
 	statusPermColStart       int            // column where permission text starts on status line 0
 	statusPermColEnd         int            // column where permission text ends on status line 0
 	hoverSidebarFile         string         // file path hovered by mouse in sidebar, empty when no hover
+	hoverSidebarCWD          bool           // true when the mouse hovers the clickable "cwd:" sidebar row
 	hoverLink                pathLinkRegion // file-path link hovered in the transcript
 	hoverLinkActive          bool           // whether hoverLink is set
 	hoverLinkProbe           pathLinkProbeCache
@@ -893,6 +918,7 @@ type model struct {
 	agentStripFocused        bool // whether keyboard nav is routed to the agent strip
 	permissionGrantCh        chan permissionGrantRequest
 	subAgentPermCh           chan subAgentPermRequest
+	subAgentPermCancel       context.CancelFunc            // cancels the active listenSubAgentPerm goroutine so re-arming doesn't multiply goroutines / leak on cancel
 	subAgentPermMu           *sync.Mutex                   // serialises concurrent sub-agent permission asks
 	pendingSubAgentResp      chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
 	permConfirm              string                        // "a"/"t" while the always-allow confirmation step is shown; "" otherwise. Meaningful only while showPermDialog.
@@ -996,6 +1022,12 @@ const agentStripMaxRows = 8
 // autoRefreshInterval is how often the git/files tabs quietly refresh in the
 // background. 10 s balances responsiveness against unnecessary git spawns.
 const autoRefreshInterval = 10 * time.Second
+
+// subAgentPermListenTimeout bounds how long listenSubAgentPerm blocks on the
+// sub-agent permission channel. A sub-agent cancelled mid-permission-ask never
+// sends a request, so without this bound the listener goroutine would block
+// forever; on expiry it re-arms via subAgentPermKeepAliveMsg.
+const subAgentPermListenTimeout = 15 * time.Second
 
 // subAgentPermRequest carries a sub-agent permission ask from the sub-agent's
 // goroutine to the TUI Update loop, plus the channel the answer is sent back on.
@@ -1838,7 +1870,7 @@ func (m model) Init() tea.Cmd {
 		cmds = append(cmds, listenPermissionGrant(m.permissionGrantCh))
 	}
 	if m.subAgentPermCh != nil {
-		cmds = append(cmds, listenSubAgentPerm(m.subAgentPermCh))
+		cmds = append(cmds, m.armSubAgentPermListener())
 	}
 	if m.agent != nil {
 		cmds = append(cmds, listenJobs(m.agent))
@@ -1846,6 +1878,15 @@ func (m model) Init() tea.Cmd {
 	}
 	if !agent.RegistryReady() {
 		cmds = append(cmds, waitForRegistry())
+	}
+	// Preload Novita's live model metadata (context window / pricing) in the
+	// background so the sidebar can resolve novita-ai models that are absent
+	// from the models.dev registry. Trigger a re-render once it is loaded so
+	// the sidebar's "context used / max context" line is populated instead of
+	// showing "n/a" at startup.
+	agent.PreloadNovitaModels()
+	if strings.HasPrefix(m.currentModelName(), "novita-ai/") && !agent.NovitaModelsLoaded() {
+		cmds = append(cmds, waitForNovitaReady(m.currentModelName()))
 	}
 	// Start listening for LSP diagnostic changes so the sidebar updates proactively.
 	if m.lspDiagCh != nil {
@@ -2265,7 +2306,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.layout()
 		m.files.Resize(m.width, m.height)
-		m.git.Resize(m.width, m.height)
+		m.git.Resize(m.panelWidth(), m.height)
 		m.layoutLogViewport()
 		m.ready = true
 		if m.restoredPendingScroll {
@@ -2345,6 +2386,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			DebugLog.Append(DebugEntry{
 				Kind:    DebugKindError,
 				Message: "models registry failed to load within deadline; continuing with defaults",
+			})
+		}
+		return m, nil
+	case novitaReadyMsg:
+		// Novita live model metadata loaded (or load timed out) — re-render so
+		// the sidebar reflects the resolved context window for novita-ai models
+		// instead of "n/a". On failure the UI keeps whatever default it had.
+		if msg.failed {
+			DebugLog.Append(DebugEntry{
+				Kind:    DebugKindError,
+				Message: "novita model metadata failed to load within deadline; context window may show n/a",
 			})
 		}
 		return m, nil
@@ -3184,7 +3236,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		cmd := tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		if m.agent != nil {
-			return m, tea.Batch(listenActivity(m.agent.Activity()), cmd)
+			return m, tea.Batch(m.armActivityListener(), cmd)
 		}
 		return m, cmd
 	case activityUpdateMsg:
@@ -3199,7 +3251,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// from before the cancellation.
 		if !m.streaming && msg.snap.LLMRunning {
 			if m.agent != nil {
-				return m, listenActivity(m.agent.Activity())
+				return m, m.armActivityListener()
 			}
 			return m, nil
 		}
@@ -3214,7 +3266,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 		}
 		if m.agent != nil {
-			return m, listenActivity(m.agent.Activity())
+			return m, m.armActivityListener()
 		}
 	case jobCompletedMsg:
 		if msg.agent != m.agent {
@@ -3556,31 +3608,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rerenderTranscriptAndMaybeScroll()
 		} else {
 			m.lastRetryableLLMErr = ""
-			if len(m.pendingJobMsgs) > 0 && m.agent != nil {
-				m.messages = append(m.messages, message{
-					role:      roleAssistant,
-					text:      hintStyle.Render("↩ background job(s) completed — resuming"),
-					transient: true,
-				})
-				m.messages = append(m.messages, m.pendingJobMsgs...)
-				m.pendingJobMsgs = nil
-				m.rerenderTranscriptAndMaybeScroll()
-				return m, m.askAgent()
-			}
-			if len(m.queuedInputs) > 0 && m.agent != nil {
-				// Concatenate all queued inputs into a single combined message.
-				parts := make([]string, 0, len(m.queuedInputs))
-				for _, q := range m.queuedInputs {
-					parts = append(parts, strings.TrimSpace(q))
+			// While a question dialog is active the agent has paused waiting
+			// for the user's answer. Do NOT drain queued inputs/commands or
+			// resume on background jobs yet — that would inject queued text
+			// into the LLM before the question is answered. The queue is
+			// preserved and processed on the streamDoneMsg that fires after
+			// the user answers (submitQuestionAnswers calls askAgent again).
+			if !m.queueDrainBlocked() {
+				if len(m.pendingJobMsgs) > 0 && m.agent != nil {
+					m.messages = append(m.messages, message{
+						role:      roleAssistant,
+						text:      hintStyle.Render("↩ background job(s) completed — resuming"),
+						transient: true,
+					})
+					m.messages = append(m.messages, m.pendingJobMsgs...)
+					m.pendingJobMsgs = nil
+					m.rerenderTranscriptAndMaybeScroll()
+					return m, m.askAgent()
 				}
-				text := strings.Join(parts, "\n---\n")
-				m.queuedInputs = nil
-				m.layout()
-				m.maybeScrollTranscriptToBottom()
-				return m, m.processFileReferences(text)
-			}
-			if cmd, drained := m.drainQueuedCommands(); drained {
-				return m, cmd
+				if len(m.queuedInputs) > 0 && m.agent != nil {
+					// Concatenate all queued inputs into a single combined message.
+					parts := make([]string, 0, len(m.queuedInputs))
+					for _, q := range m.queuedInputs {
+						parts = append(parts, strings.TrimSpace(q))
+					}
+					text := strings.Join(parts, "\n---\n")
+					m.queuedInputs = nil
+					m.layout()
+					m.maybeScrollTranscriptToBottom()
+					return m, m.processFileReferences(text)
+				}
+				if cmd, drained := m.drainQueuedCommands(); drained {
+					return m, cmd
+				}
 			}
 			// Auto-recap when stream completes successfully and recap is enabled.
 			// Require at least 4 messages so trivial single-turn exchanges don't trigger a recap call.
@@ -3805,6 +3865,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "↳ sub-agent: " + permissionRequestSummary(req)})
 		m.rerenderTranscriptAndMaybeScroll()
 		return m, nil
+	case subAgentPermKeepAliveMsg:
+		// Re-arm the listener. The previous listenSubAgentPerm goroutine
+		// timed out (no sub-agent ask arrived, e.g. a cancelled sub-agent)
+		// and returned this keep-alive; arming a fresh listener cancels the
+		// expired one so we never leak a blocked goroutine.
+		return m, m.armSubAgentPermListener()
 	case permissionGrantMsg:
 		req := msg.grant
 		err := m.persistAutoGrant(req)
@@ -4338,7 +4404,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			url := m.pendingURL
 			m.showURLDialog = false
 			m.pendingURL = ""
-			return m, func() tea.Msg { openBrowser(url); return nil }
+			return m, openBrowserCmd(url)
 		case "n", "N", "esc":
 			m.showURLDialog = false
 			m.pendingURL = ""
@@ -5404,6 +5470,13 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, openSidebarFileInEditor(path), true
 			}
+			// Plain click on the "cwd:" row opens the working directory in the
+			// OS file explorer. A drag there still selects/copies the text
+			// (the active branch above returns first).
+			if path, ok := m.sidebarCWDForClick(mouse); ok {
+				m.sidebarSel = selectionState{}
+				return m, openInFileExplorer(path), true
+			}
 			if m.sidebarAllowedHeaderForClick(mouse) && m.agent != nil {
 				perm := m.agent.Permissions()
 				// Cycle: normal → normal·auto → yolo → locked → normal
@@ -5744,6 +5817,24 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		m.applyOrClearSelectionHighlight()
 	}
 
+	// While the URL confirmation dialog is open, a click in the input area
+	// confirms and opens the URL. This lets a mouse-driven user who clicked the
+	// link complete the action without reaching for the keyboard — previously
+	// the dialog was keyboard-only (Y/N/Esc), so the input looked "frozen" and
+	// the browser never launched. Esc still cancels via the keyboard path.
+	if m.showURLDialog && m.activeTab == tabChat {
+		if pressed {
+			return m, nil, true
+		}
+		if mouse.Y >= m.inputAreaTopY() && mouse.X < m.panelWidth() {
+			url := m.pendingURL
+			m.showURLDialog = false
+			m.pendingURL = ""
+			return m, openBrowserCmd(url), true
+		}
+		return m, nil, true
+	}
+
 	if !pressed && !m.sel.active {
 		if updated, cmd, ok := m.handleDetailClick(mouse); ok {
 			return updated, cmd, true
@@ -5854,6 +5945,16 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 			m.hoverSidebarFile = path
 		}
 		if m.hoverSidebarFile != prevHover {
+			changed = true
+		}
+
+		// Underline the clickable "cwd:" row under the cursor.
+		prevHoverCWD := m.hoverSidebarCWD
+		m.hoverSidebarCWD = false
+		if _, ok := m.sidebarCWDForClick(mouse); ok {
+			m.hoverSidebarCWD = true
+		}
+		if m.hoverSidebarCWD != prevHoverCWD {
 			changed = true
 		}
 
@@ -6423,6 +6524,17 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 
 	m.rerenderTranscriptAndMaybeScroll()
 	return m, cmdResult
+}
+
+// queueDrainBlocked reports whether the post-stream queue (queued user
+// inputs, queued slash commands, and background-job resume) must be held
+// back instead of being processed on a streamDoneMsg. It is true while a
+// question dialog (the `question` tool) is active: the agent has paused
+// awaiting the user's answer, so any queued input must not be injected into
+// the LLM until the answer is submitted (submitQuestionAnswers calls
+// askAgent again, which fires a later streamDoneMsg that processes the queue).
+func (m *model) queueDrainBlocked() bool {
+	return m.showQuestionDialog
 }
 
 func (m *model) drainQueuedCommands() (tea.Cmd, bool) {
@@ -7752,6 +7864,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.messages = []message{}
 	m.transcriptLines = nil
 	m.rawTranscriptLines = nil
+	m.urlLinkRegions = nil
 	m.sel = selectionState{}
 	m.streamingThinkingIdx = -1
 	m.pendingCompactManual = false
@@ -8344,12 +8457,17 @@ func (m *model) ringBell() {
 	defaultBellNotifier()
 }
 
+// bellNotificationPayload returns the terminal BEL character (\a / 0x07).
+// BEL is a non-printing control character — it produces an audible beep
+// without painting any visible output to the alt-screen.
+//
+// Previous versions appended an OSC 9 notification sequence
+// (\x1b]9;ocode bell\x1b\\) for desktop notifications on supported
+// terminals. This caused garbled text on terminals that don't recognise
+// the sequence and leaked visible escape codes into the scrollback on
+// exit. The OSC notification is no longer sent; BEL alone is safe.
 func bellNotificationPayload() []byte {
-	payload := []byte{0x07}
-	if supportsDesktopBell() {
-		payload = append(payload, []byte("\x1b]9;ocode bell\x1b\\")...)
-	}
-	return payload
+	return []byte{0x07}
 }
 
 func supportsDesktopBell() bool {
@@ -8357,6 +8475,7 @@ func supportsDesktopBell() bool {
 	switch {
 	case strings.Contains(termProgram, "ghostty"),
 		strings.Contains(termProgram, "supacode"),
+
 		strings.Contains(termProgram, "iterm.app"),
 		strings.Contains(termProgram, "kitty"),
 		strings.Contains(termProgram, "wezterm"),
@@ -8382,7 +8501,16 @@ func isAppleTerminal() bool {
 
 func macOSSystemBeep() {
 	// #nosec G204 - user can't control this argument
-	_ = exec.Command("osascript", "-e", "beep").Run()
+	cmd := exec.Command("osascript", "-e", "beep")
+	silenceCmdOutput(cmd)
+	_ = cmd.Run()
+}
+
+// silenceCmdOutput prevents a subprocess from inheriting the terminal while
+// the TUI owns the alt-screen.
+func silenceCmdOutput(cmd *exec.Cmd) {
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
 }
 
 func (m *model) handleBtwCmd(args []string) {
@@ -10549,7 +10677,7 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		}
 		respCh <- resp
 		// Re-arm the listener so subsequent sub-agent asks are still received.
-		return listenSubAgentPerm(m.subAgentPermCh)
+		return m.armSubAgentPermListener()
 	}
 
 	switch choice {
@@ -10950,6 +11078,23 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 	errCh := make(chan error, 1)
 	a := m.agent
 	go func() {
+		// Panic recovery: if a.Step (or any callback) panics, the goroutine
+		// would otherwise exit without closing msgCh or writing errCh, leaving
+		// waitStreamEvent blocked forever on <-msgCh / <-errCh — a permanent
+		// TUI hang. Recover here, close the channels, and surface the panic as
+		// an error so the stream terminates cleanly.
+		defer func() {
+			if r := recover(); r != nil {
+				select {
+				case errCh <- fmt.Errorf("stream panic: %v", r):
+				default:
+				}
+				// msgCh must be closed so waitStreamEvent's <-msgCh returns.
+				// Guard against double-close (normal path already closed it).
+				defer func() { _ = recover() }()
+				close(msgCh)
+			}
+		}()
 		// Ensure callbacks are cleaned up on every exit path (normal return,
 		// tier-2 scan error, or any future early return) so stale references
 		// are never left on the agent between streamStep calls.
@@ -11746,7 +11891,7 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	} else {
 		exitBtn = hintStyle.Padding(0, 1).Render("\u2715 exit")
 	}
-	header := m.renderAppHeader("\u25c6 ocode", "\u00b7  opencode clone v"+version.Version, tabBar, exitBtn, m.width)
+	header := m.renderAppHeader("\u25c6 ocode", "\u00b7  opencode clone++ v"+version.Version, tabBar, exitBtn, m.width)
 	var inputArea string
 	if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
@@ -12661,6 +12806,7 @@ func (m *model) renderTranscript() {
 		// case; this defends against other paths that lead here).
 		m.transcriptLines = nil
 		m.rawTranscriptLines = nil
+		m.urlLinkRegions = nil
 		m.sel = selectionState{}
 		if art := m.renderEmptyStateBackground(); art != "" {
 			m.viewport.SetContent(art)
@@ -12775,6 +12921,12 @@ func (m *model) renderTranscript() {
 		m.transcriptLines = append(m.transcriptLines, "")
 		m.rawTranscriptLines = append(m.rawTranscriptLines, "")
 	}
+	// Recover clickable targets for markdown links ([text](url)): the markdown
+	// renderer drops the URL from the visible/stripped text, so the generic
+	// URL detector can't see them. Parse the original message text and locate
+	// each link's visible label in the rendered lines, recording a region that
+	// maps the label's column span to the URL.
+	m.buildURLLinkRegions()
 	m.viewport.SetContentLines(m.transcriptLines)
 	m.sel = selectionState{}
 	// If a chat-search jump is active, the in-app selection machinery was
@@ -12783,6 +12935,84 @@ func (m *model) renderTranscript() {
 	// helper so the chat-search feature stays in one file.
 	m.ensureChatSearchFlashHighlight()
 	m.updatePermButtonRegions()
+}
+
+// messageSourceText returns the original, pre-render text of a message so
+// markdown links ([text](url)) can be located after rendering strips the URL.
+func messageSourceText(msg message) string {
+	if msg.raw != nil && msg.raw.Content != "" {
+		return msg.raw.Content
+	}
+	return msg.text
+}
+
+// buildURLLinkRegions recovers clickable targets for markdown links. The
+// markdown renderer rewrites "[text](url)" to just "text", discarding the URL
+// from the visible/stripped transcript — so the generic URL detector (which
+// only sees literal text) can never open them. Here we parse the original
+// message text for links, then find each link's visible label in the rendered
+// stripped lines and record a region mapping that label's column span to the
+// URL. Clicking the label then opens url, exactly like a raw URL.
+//
+// Edge cases (label wrapped across lines, or the label text appearing
+// elsewhere) degrade gracefully: we map links to successive visible label
+// occurrences within the message's line range, which is correct for the
+// common single-line label.
+func (m *model) buildURLLinkRegions() {
+	m.urlLinkRegions = nil
+	for i, msg := range m.messages {
+		src := messageSourceText(msg)
+		if !strings.Contains(src, "](") {
+			continue
+		}
+		// Bounds of this message's rendered line range.
+		lineStart := 0
+		if i < len(m.transcriptMsgStartLine) && m.transcriptMsgStartLine[i] >= 0 {
+			lineStart = m.transcriptMsgStartLine[i]
+		}
+		lineEnd := len(m.rawTranscriptLines)
+		if i+1 < len(m.transcriptMsgStartLine) && m.transcriptMsgStartLine[i+1] >= 0 {
+			lineEnd = m.transcriptMsgStartLine[i+1]
+		}
+		// Advance through the rendered transcript in source order so repeated
+		// markdown labels (e.g. two "[docs](...)" links in one message) map to
+		// successive visible occurrences instead of always taking the first one.
+		searchLine := lineStart
+		searchByte := 0
+		for _, loc := range markdownLinkRe.FindAllStringSubmatchIndex(src, -1) {
+			text := src[loc[2]:loc[3]]
+			url := src[loc[4]:loc[5]]
+			if text == "" {
+				continue
+			}
+			// Locate the visible label within this message's rendered lines.
+			for li := searchLine; li < lineEnd; li++ {
+				line := m.rawTranscriptLines[li]
+				fromByte := 0
+				if li == searchLine {
+					fromByte = searchByte
+				}
+				if fromByte >= len(line) {
+					fromByte = len(line)
+				}
+				idx := strings.Index(line[fromByte:], text)
+				if idx < 0 {
+					continue
+				}
+				byteStart := fromByte + idx
+				m.urlLinkRegions = append(m.urlLinkRegions, urlLinkRegion{
+					line:     li,
+					startCol: byteIdxToVisualCol(line, byteStart),
+					endCol:   byteIdxToVisualCol(line, byteStart+len(text)),
+					url:      url,
+					markdown: true,
+				})
+				searchLine = li
+				searchByte = byteStart + len(text)
+				break
+			}
+		}
+	}
 }
 
 // renderUserTextWithInner returns the markdown-rendered inner content and the
@@ -13199,13 +13429,43 @@ func (m *model) wireCompactCallbacks() {
 
 // listenSubAgentPerm blocks on the sub-agent permission channel and re-arms the
 // command after each request, so the TUI keeps receiving sub-agent asks.
-func listenSubAgentPerm(ch chan subAgentPermRequest) tea.Cmd {
+func listenSubAgentPerm(ch chan subAgentPermRequest, ctx context.Context) tea.Cmd {
 	if ch == nil {
 		return nil
 	}
 	return func() tea.Msg {
-		return subAgentPermAskMsg(<-ch)
+		select {
+		case req := <-ch:
+			return subAgentPermAskMsg(req)
+		case <-ctx.Done():
+			// Cancelled by armSubAgentPermListener (re-arm) or model shutdown.
+			return nil
+		case <-time.After(subAgentPermListenTimeout):
+			// A sub-agent cancelled mid-permission-ask never sends a request,
+			// so without this timeout the goroutine would block forever on
+			// <-ch. Re-arm via a keep-alive message that cancels the old
+			// (now-expired) listener and starts a fresh one.
+			return subAgentPermKeepAliveMsg{}
+		}
 	}
+}
+
+type subAgentPermKeepAliveMsg struct{}
+
+// armSubAgentPermListener cancels any previously-armed listener so re-arming
+// (after each ask, on Init, or on keep-alive timeout) does not multiply
+// goroutines or leak a goroutine that blocks forever when a sub-agent is
+// cancelled mid-ask.
+func (m *model) armSubAgentPermListener() tea.Cmd {
+	if m.subAgentPermCh == nil {
+		return nil
+	}
+	if m.subAgentPermCancel != nil {
+		m.subAgentPermCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.subAgentPermCancel = cancel
+	return listenSubAgentPerm(m.subAgentPermCh, ctx)
 }
 
 // listenPermissionGrant blocks on the auto-grant channel and re-arms the
@@ -13647,11 +13907,37 @@ func listenJobs(a *agent.Agent) tea.Cmd {
 	}
 }
 
-func listenActivity(tracker *agent.ActivityTracker) tea.Cmd {
+func listenActivity(tracker *agent.ActivityTracker, ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		snap := <-tracker.Notify()
-		return activityUpdateMsg{tracker: tracker, snap: snap}
+		select {
+		case snap := <-tracker.Notify():
+			return activityUpdateMsg{tracker: tracker, snap: snap}
+		case <-ctx.Done():
+			// Cancelled by armActivityListener (re-arm) or model shutdown.
+			// Returning nil terminates this goroutine instead of blocking
+			// forever on tracker.Notify() when the agent is cancelled with
+			// no further activity.
+			return nil
+		}
 	}
+}
+
+// armActivityListener cancels any previously-armed listenActivity goroutine
+// and starts a fresh one. This prevents goroutine multiplication: every
+// activityUpdateMsg / streamStartedMsg / streamDoneMsg used to re-arm a NEW
+// listenActivity while the old one was still blocking on tracker.Notify(),
+// leaking a goroutine per activity event. The cancellation context ensures
+// only one listener is ever live.
+func (m *model) armActivityListener() tea.Cmd {
+	if m.agent == nil {
+		return nil
+	}
+	if m.activityCancel != nil {
+		m.activityCancel()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	m.activityCancel = cancel
+	return listenActivity(m.agent.Activity(), ctx)
 }
 
 // listenLSPDiags blocks on the LSP diagnostics notification channel and
@@ -14462,7 +14748,7 @@ func (m model) renderTabContent() string {
 	case tabFiles:
 		return m.files.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
 	case tabGit:
-		return m.git.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
+		return m.git.View(m.panelWidth(), m.height, m.styles, m.chatUnread, m.exitPending)
 	case tabLog:
 		return m.renderLogTab()
 	}
@@ -14862,19 +15148,23 @@ type sidebarRenderData struct {
 	scrollLines            []string
 	bottomLines            []string
 	fileScrollLinePaths    map[int]string
-	allowedHeaderBottomIdx int // index in bottomLines of the Allowed header, -1 if absent
-	advisorToggleTopIdx    int // index in topLines of the advisor on/off row, -1 if absent
-	advisorToggleRows      int // number of (possibly wrapped) rows the advisor row occupies
-	smallModelToggleTopIdx int // index in topLines of the small model on/off row, -1 if absent
-	smallModelToggleRows   int // number of (possibly wrapped) rows the small model row occupies
-	permModelToggleTopIdx  int // index in topLines of the perm model on/off row, -1 if absent
-	permModelToggleRows    int // number of (possibly wrapped) rows the perm model row occupies
-	ideToggleTopIdx        int // index in topLines of the IDE on/off row, -1 if absent
-	ideToggleRows          int // number of (possibly wrapped) rows the IDE row occupies
-	recapModelToggleTopIdx int // index in topLines of the recap model on/off row, -1 if absent
-	recapModelToggleRows   int // number of (possibly wrapped) rows the recap model row occupies
-	ocrToggleTopIdx        int // index in topLines of the OCR on/off row, -1 if absent
-	ocrToggleRows          int // number of (possibly wrapped) rows the OCR row occupies
+	allowedHeaderBottomIdx int    // index in bottomLines of the Allowed header, -1 if absent
+	advisorToggleTopIdx    int    // index in topLines of the advisor on/off row, -1 if absent
+	advisorToggleRows      int    // number of (possibly wrapped) rows the advisor row occupies
+	smallModelToggleTopIdx int    // index in topLines of the small model on/off row, -1 if absent
+	smallModelToggleRows   int    // number of (possibly wrapped) rows the small model row occupies
+	permModelToggleTopIdx  int    // index in topLines of the perm model on/off row, -1 if absent
+	permModelToggleRows    int    // number of (possibly wrapped) rows the perm model row occupies
+	ideToggleTopIdx        int    // index in topLines of the IDE on/off row, -1 if absent
+	ideToggleRows          int    // number of (possibly wrapped) rows the IDE row occupies
+	recapModelToggleTopIdx int    // index in topLines of the recap model on/off row, -1 if absent
+	recapModelToggleRows   int    // number of (possibly wrapped) rows the recap model row occupies
+	ocrToggleTopIdx        int    // index in topLines of the OCR on/off row, -1 if absent
+	ocrToggleRows          int    // number of (possibly wrapped) rows the OCR row occupies
+	cwdTopIdx              int    // index in topLines of the "cwd:" row, -1 if absent
+	cwdRows                int    // number of (possibly wrapped) rows the cwd row occupies
+	cwdLabel               string // dim "cwd: " label (ANSI styled), kept for hover underline
+	cwdPath                string // raw working-dir path text (unstyled), for hover underline
 }
 
 func (t sidebarTelemetry) usedTokens() int64 {
@@ -15151,7 +15441,7 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, ocrToggleTopIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, ocrToggleTopIdx: -1, cwdTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -15277,8 +15567,14 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	if ctxTokens > 0 {
 		appendWrapped(&data.topLines, dimStyle.Render(contextLine), outerBodyWidth)
 	}
+	cwdTopIdx := len(data.topLines)
 	cwdMax := sidebarColumnWidth - 4 - lipgloss.Width(cwdLabel)
-	appendWrapped(&data.topLines, cwdLabel+sidebarAccentStyle.Render(compactWorkingDir(m.workDir, cwdMax)), outerBodyWidth)
+	cwdPath := compactWorkingDir(m.workDir, cwdMax)
+	appendWrapped(&data.topLines, cwdLabel+sidebarAccentStyle.Render(cwdPath), outerBodyWidth)
+	data.cwdTopIdx = cwdTopIdx
+	data.cwdRows = len(data.topLines) - cwdTopIdx
+	data.cwdLabel = cwdLabel
+	data.cwdPath = cwdPath
 	data.topLines = append(data.topLines, "")
 
 	// ── Model configuration (pinned) ──
@@ -15571,6 +15867,13 @@ func gitFileStatus(g gitModel, path string) string {
 
 func (m model) renderSidebar() string {
 	data := m.buildSidebarRenderData()
+
+	// Hover underline for the clickable "cwd:" row (underline only the path
+	// portion, keep the dim "cwd: " label unchanged).
+	if m.hoverSidebarCWD && data.cwdTopIdx >= 0 && data.cwdTopIdx < len(data.topLines) && data.cwdPath != "" {
+		hoverStyle := sidebarAccentStyle.Copy().Underline(true)
+		data.topLines[data.cwdTopIdx] = data.cwdLabel + hoverStyle.Render(data.cwdPath)
+	}
 
 	title := m.sessionTitle
 	if title == "" {
@@ -15894,6 +16197,33 @@ func (m model) sidebarFileForClick(mouse tea.Mouse) (string, bool) {
 	scrollLine := m.sidebarScroll + (mouse.Y - layout.scrollScreenY)
 	if path, ok := data.fileScrollLinePaths[scrollLine]; ok {
 		return path, true
+	}
+	return "", false
+}
+
+// sidebarCWDForClick returns the working directory path when the click lands on
+// the "cwd: <path>" row in the pinned top area of the sidebar. A plain click on
+// this row opens the directory in the OS file explorer. Like the other sidebar
+// click helpers it only matches the row's on-screen Y, so a click-drag there
+// still selects/copies text (the press/release handler only opens on a
+// non-dragging click).
+func (m model) sidebarCWDForClick(mouse tea.Mouse) (string, bool) {
+	if !m.mouseOverSidebar(mouse) || m.workDir == "" {
+		return "", false
+	}
+	data := m.buildSidebarRenderData()
+	if data.cwdTopIdx < 0 {
+		return "", false
+	}
+	layout := m.sidebarScreenLayout(data)
+	// Bail if the row was trimmed away by overflow (it isn't painted).
+	if data.cwdTopIdx >= layout.topCount {
+		return "", false
+	}
+	startY := layout.contentTopY + data.cwdTopIdx
+	endY := minInt(startY+data.cwdRows, layout.scrollScreenY)
+	if mouse.Y >= startY && mouse.Y < endY {
+		return m.workDir, true
 	}
 	return "", false
 }
@@ -16504,6 +16834,15 @@ func (m *model) transcriptUrlLinkAt(mouse tea.Mouse) (urlLinkRegion, bool) {
 		return urlLinkRegion{}, false
 	}
 	rawLine := m.rawTranscriptLines[contentLine]
+
+	// 0. Markdown-link regions (URLs are stripped from the visible text during
+	//    rendering, so the literal detector below can't see them). These
+	//    regions map a link label's column span back to its URL.
+	for _, reg := range m.urlLinkRegions {
+		if reg.line == contentLine && mouse.X >= reg.startCol && mouse.X < reg.endCol {
+			return reg, true
+		}
+	}
 
 	// 1. Try the probe cache (single-line, fast path).
 	r, ok := m.hoverUrlLinkProbe.probe(rawLine, mouse.X)
@@ -17185,7 +17524,7 @@ func (m *model) renderURLDialog(width int) string {
 
 	header := m.styles.Header.Render("~ Open URL?")
 	body := fmt.Sprintf("Open the following URL in your browser?\n\n%s", m.pendingURL)
-	hint := hintStyle.Render("Press Y or Enter to open, N or Esc to cancel")
+	hint := hintStyle.Render("Click here or press Y/Enter to open · N/Esc to cancel")
 
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
 		header + "\n\n" + body + "\n\n" + hint,
@@ -17515,7 +17854,10 @@ func (m *model) insertIDEMention(men *ide.Mention) {
 	m.input.InsertString(ref + " ")
 }
 
-func openBrowser(url string) {
+// openBrowser launches the OS default handler for url (a browser for http(s)
+// URLs). It returns an error if no handler is available or the launch fails,
+// so callers can surface the failure to the user instead of failing silently.
+func openBrowser(url string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
@@ -17524,11 +17866,25 @@ func openBrowser(url string) {
 		cmd = exec.Command("xdg-open", url)
 	case "windows":
 		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return fmt.Errorf("no URL opener for OS %s", runtime.GOOS)
 	}
-	if cmd != nil {
-		if err := cmd.Start(); err != nil {
-			log.Printf("openBrowser: failed to open %s: %v", url, err)
+	silenceCmdOutput(cmd)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to open %s: %w", url, err)
+	}
+	return nil
+}
+
+// openBrowserCmd is a tea.Cmd that opens url in the OS browser and, on
+// failure, posts an assistant message so the user sees why nothing happened
+// (previously the error was only logged to the debug panel).
+func openBrowserCmd(url string) tea.Cmd {
+	return func() tea.Msg {
+		if err := openBrowser(url); err != nil {
+			return message{role: roleAssistant, text: fmt.Sprintf("Could not open URL %s: %v", url, err)}
 		}
+		return nil
 	}
 }
 

@@ -26,7 +26,7 @@ func withTempWorkdir(t *testing.T) string {
 
 func TestUndoTool_RoundTrip(t *testing.T) {
 	_ = withTempWorkdir(t)
-	store := snapshot.NewStore(snapshot.NewAgentID())
+	store := snapshot.NewStore(snapshot.NewAgentID(), "")
 	ctx := snapshot.WithStore(context.Background(), store)
 	ctx = snapshot.WithToolCallID(ctx, "write-tc1")
 
@@ -67,7 +67,7 @@ func TestUndoTool_RoundTrip(t *testing.T) {
 
 func TestUndoTool_DeleteRoundTrip(t *testing.T) {
 	_ = withTempWorkdir(t)
-	store := snapshot.NewStore(snapshot.NewAgentID())
+	store := snapshot.NewStore(snapshot.NewAgentID(), "")
 	ctx := snapshot.WithStore(context.Background(), store)
 	ctx = snapshot.WithToolCallID(ctx, "delete-tc1")
 
@@ -116,7 +116,7 @@ func TestUndoTool_UnknownToolCallID(t *testing.T) {
 
 func TestMultiFileEdit_AtomicRollbackUsesPerAgentStore(t *testing.T) {
 	_ = withTempWorkdir(t)
-	store := snapshot.NewStore(snapshot.NewAgentID())
+	store := snapshot.NewStore(snapshot.NewAgentID(), "")
 	ctx := snapshot.WithStore(context.Background(), store)
 	ctx = snapshot.WithToolCallID(ctx, "mfe-tc1")
 

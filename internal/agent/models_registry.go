@@ -239,6 +239,23 @@ func PreloadRegistry() {
 	go loadRegistry()
 }
 
+// PreloadNovitaModels fetches Novita's live model list in the background so the
+// context window / pricing / vision info for novita-ai models (which are not in
+// the models.dev registry) is available as soon as the UI needs it — in
+// particular the sidebar's "context used / max context" line. It is a no-op when
+// no Novita credential is configured or a fetch is already cached.
+func PreloadNovitaModels() {
+	go fetchNovitaLiveModels()
+}
+
+// NovitaModelsLoaded reports whether the Novita live model cache has been
+// populated (fetched successfully at least once). Safe for concurrent use.
+func NovitaModelsLoaded() bool {
+	novitaLiveData.mu.RLock()
+	defer novitaLiveData.mu.RUnlock()
+	return novitaLiveData.models != nil
+}
+
 // ForceRefreshRegistry synchronously fetches the models.dev registry and
 // updates the in-memory cache, bypassing the 5-minute TTL. It does NOT bypass
 // the OPENCODE_MODELS_PATH env var or the embedded snapshot in loadRegistry —

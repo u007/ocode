@@ -17,7 +17,7 @@ func newTempStore(t *testing.T) (*Store, string) {
 	if err := os.Chdir(dir); err != nil {
 		t.Fatal(err)
 	}
-	return NewStore(NewAgentID()), dir
+	return NewStore(NewAgentID(), ""), dir
 }
 
 // resetGlobalStore wipes the package-level global store for tests that need a
@@ -27,6 +27,7 @@ func resetGlobalStore() {
 	globalStore.snapshots = nil
 	globalStore.redoStack = nil
 	globalStore.step = 0
+	globalStore.baseDir = ""
 	globalStore.mu.Unlock()
 }
 
@@ -240,7 +241,7 @@ func TestStoreUndoByToolCallID_CrossAgentConflict(t *testing.T) {
 	s.RegisterWrite("a.txt", "tc1")
 
 	// Another agent writes the same file after our write.
-	other := NewStore("other-agent")
+	other := NewStore("other-agent", "")
 	if err := other.Backup("a.txt", "tc-other"); err != nil {
 		t.Fatal(err)
 	}
@@ -298,7 +299,7 @@ func TestStoreResetUnregistersFromGlobalRegistry(t *testing.T) {
 
 	// After reset, our stale entry should be removed; a fresh "other agent"
 	// write for the same path is unblocked.
-	other := NewStore("other-agent")
+	other := NewStore("other-agent", "")
 	if err := other.Backup("a.txt", "tc-other"); err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +313,7 @@ func TestStoreResetUnregistersFromGlobalRegistry(t *testing.T) {
 func TestSnapshotContextHelpers(t *testing.T) {
 	_, dir := newTempStore(t)
 	_ = dir
-	s := NewStore(NewAgentID())
+	s := NewStore(NewAgentID(), "")
 	ctx := WithStore(context.Background(), s)
 	ctx = WithToolCallID(ctx, "tc-x")
 	if got := FromContext(ctx); got != s {
@@ -353,5 +354,53 @@ func TestStoreAdvanceStep(t *testing.T) {
 	// After undo, restoreSnapshot has removed the backup file. Verify it's gone.
 	if _, err := os.Stat(filepath.Join(".opencode", "snapshots", backupPath)); !os.IsNotExist(err) {
 		t.Fatalf("expected backup file removed after undo, err = %v", err)
+	}
+}
+
+func TestRedoKeepsOriginalProjectBaseDir(t *testing.T) {
+	s, root := newTempStore(t)
+	dirA := filepath.Join(root, "project-a", "snapshots")
+	dirB := filepath.Join(root, "project-b", "snapshots")
+	s.SetBaseDir(dirA)
+
+	if err := os.WriteFile("redo.txt", []byte("one\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Backup("redo.txt", "tc-redo"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("redo.txt", []byte("two\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Undo(); err != nil {
+		t.Fatalf("undo: %v", err)
+	}
+	s.SetBaseDir(dirB)
+
+	if got, err := os.ReadFile("redo.txt"); err != nil {
+		t.Fatal(err)
+	} else if string(got) != "one\n" {
+		t.Fatalf("after undo content = %q, want one", got)
+	}
+
+	if _, err := s.Redo(); err != nil {
+		t.Fatalf("redo: %v", err)
+	}
+	got, err := os.ReadFile("redo.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "two\n" {
+		t.Fatalf("after redo content = %q, want two", got)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.snapshots) != 1 {
+		t.Fatalf("expected 1 snapshot after redo, got %d", len(s.snapshots))
+	}
+	if s.snapshots[0].BaseDir != dirA {
+		t.Fatalf("redo snapshot base dir = %q, want %q", s.snapshots[0].BaseDir, dirA)
 	}
 }

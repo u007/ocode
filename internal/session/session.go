@@ -2,14 +2,11 @@ package session
 
 import (
 	"bufio"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -77,15 +74,6 @@ func GetStorageDirForPath(wd string) (string, error) {
 	return paths.ProjectSessionsDir(slug)
 }
 
-// gitToplevelCache memoizes `git rev-parse --show-toplevel` per working dir.
-// The repo root never changes within a session, so we avoid forking git on
-// every session-list call (previously once per getProjectSlug + once per
-// getClaudeProjectDir, both hit on every picker open).
-var (
-	gitToplevelMu    sync.Mutex
-	gitToplevelCache = map[string]string{}
-)
-
 // workDirOverride overrides os.Getwd() for project slug resolution in
 // GetStorageDir and getClaudeProjectDir. Set via SetWorkDir so that session
 // storage follows the TUI's explicit workDir instead of the process-wide CWD
@@ -108,11 +96,6 @@ func SetWorkDir(dir string) {
 	workDirOverrideMu.Lock()
 	workDirOverride = dir
 	workDirOverrideMu.Unlock()
-	// Invalidate the git toplevel cache — the resolved root may differ under
-	// the new workDir.
-	gitToplevelMu.Lock()
-	clear(gitToplevelCache)
-	gitToplevelMu.Unlock()
 }
 
 // effectiveWorkDir returns the configured work dir or falls back to os.Getwd().
@@ -127,22 +110,6 @@ func effectiveWorkDir() string {
 	return wd
 }
 
-func gitToplevel(wd string) string {
-	gitToplevelMu.Lock()
-	defer gitToplevelMu.Unlock()
-	if v, ok := gitToplevelCache[wd]; ok {
-		return v
-	}
-	result := wd
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Dir = wd
-	if output, err := cmd.Output(); err == nil {
-		result = strings.TrimSpace(string(output))
-	}
-	gitToplevelCache[wd] = result
-	return result
-}
-
 // ProjectSlug returns the stable slug for the current workspace root.
 func ProjectSlug() string {
 	return ProjectSlugForPath(effectiveWorkDir())
@@ -153,14 +120,7 @@ func ProjectSlugForPath(wd string) string {
 	if wd == "" {
 		wd = effectiveWorkDir()
 	}
-	wd = gitToplevel(wd)
-	wd = filepath.Clean(wd)
-	if runtime.GOOS == "windows" {
-		wd = strings.ToLower(wd)
-	}
-
-	hash := sha256.Sum256([]byte(wd))
-	return hex.EncodeToString(hash[:])[:12]
+	return paths.ProjectSlug(wd)
 }
 
 func Save(id string, title string, messages []agent.Message, metadata map[string]any) error {
@@ -835,8 +795,7 @@ func getClaudeProjectDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	wd := effectiveWorkDir()
-	wd = gitToplevel(wd)
+	wd := paths.ProjectRoot(effectiveWorkDir())
 	return filepath.Join(home, ".claude", "projects", claudeProjectSlug(wd)), nil
 }
 

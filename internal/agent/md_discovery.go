@@ -15,6 +15,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/format/gitignore"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
+	"github.com/u007/ocode/internal/knowledge"
+	"github.com/u007/ocode/internal/paths"
 )
 
 // Markdown discovery: every project *.md file (except the always-on briefing
@@ -22,6 +24,13 @@ import (
 // a small-model-generated summary. The index lists "path — summary"; the full
 // file content is attached to the volatile tail only when the query matches.
 //
+// Files owned by an active OKF knowledge bundle (the docs/ directory) are
+// EXCLUDED: docs/index.md — a curated TOC of every concept doc — is injected
+// into the system prompt when /docs is on, and knowledge_lookup retrieves any
+// concept doc on demand. Re-discovering them would produce a redundant
+// "path — summary" TOC (duplicate mention of the same docs) and waste
+// small-model summarization calls on files the knowledge system already owns.
+// Non-bundle *.md (README, CHANGELOG, project docs) remain discoverable.
 // Summaries are expensive (one small-model call each), so generation runs in a
 // background goroutine and is cached on disk keyed by file content. discoveryDocs()
 // — called every Step under a 500ms warm deadline — only ever reads the in-memory
@@ -116,6 +125,18 @@ func mdIsAlwaysOn(rel string) bool {
 	return strings.HasPrefix(rel, ".opencode/rules/")
 }
 
+// mdSummaryCachePath returns the global, project-scoped path for the markdown
+// discovery summary cache: GlobalDataDir()/project/{slug}/md-summaries.json.
+// It is shared with tests so they track the relocated cache. If the global data
+// dir is unavailable it falls back to the legacy repo-relative location.
+func mdSummaryCachePath(root string) string {
+	base, err := paths.GlobalDataDir()
+	if err != nil {
+		return filepath.Join(root, ".ocode", "md-summaries.json")
+	}
+	return filepath.Join(base, "project", paths.ProjectSlug(root), "md-summaries.json")
+}
+
 // ensureMDState lazily initializes the markdown corpus: loads the on-disk summary
 // cache, then runs the (blocking) summarize pass to generate any missing/stale
 // summaries before the corpus is first used. Called once, when discovery becomes
@@ -130,7 +151,7 @@ func (a *Agent) ensureMDState() {
 		return
 	}
 	root := a.effectiveWorkDir()
-	cachePath := filepath.Join(root, ".ocode", "md-summaries.json")
+	cachePath := mdSummaryCachePath(root)
 	st := &mdDiscoveryState{
 		cache:     loadMDCache(cachePath),
 		cachePath: cachePath,
@@ -401,6 +422,15 @@ func sanitizeMDSummary(s string) string {
 func walkMarkdownFiles(root string, ignorePaths ...string) []mdRef {
 	ignorePaths = append(config.DefaultDiscoveryIgnorePaths(), ignorePaths...)
 	matcher := loadGitignore(root)
+	// When an OKF knowledge bundle is active, its docs/ directory is owned by
+	// the knowledge system: docs/index.md (a curated TOC) is injected into the
+	// system prompt and knowledge_lookup retrieves any concept doc on demand.
+	// Skip those files in markdown discovery to avoid a redundant "path —
+	// summary" TOC and duplicate small-model summarization.
+	var bundleRoot string
+	if b, ok := knowledge.DetectBundle(root); ok {
+		bundleRoot = b.Root
+	}
 	var refs []mdRef
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -434,6 +464,10 @@ func walkMarkdownFiles(root string, ignorePaths ...string) []mdRef {
 		}
 		rel = filepath.ToSlash(rel)
 		if mdIsAlwaysOn(rel) {
+			return nil
+		}
+		// Skip files owned by an active knowledge bundle (see header note).
+		if bundleRoot != "" && (path == bundleRoot || strings.HasPrefix(path, bundleRoot+string(os.PathSeparator))) {
 			return nil
 		}
 		if matcher != nil && matcher.Match(strings.Split(rel, "/"), false) {

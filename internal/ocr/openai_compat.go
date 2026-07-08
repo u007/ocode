@@ -15,7 +15,7 @@ import (
 
 // Local vision models can take minutes: cold model load (~16s observed) plus
 // large-image inference (~36s warm for a phone-photo receipt).
-const openaiTimeout = 5 * time.Minute
+const openaiTimeout = 600 * time.Second
 const maxImageBytes = 20 * 1024 * 1024 // 20 MB
 
 type openaiCompatBackend struct{}

@@ -84,6 +84,21 @@ func TestQuestionPromptOtherOpensTextInput(t *testing.T) {
 	}
 }
 
+// TestQueueDrainBlockedWhileQuestionActive locks in the contract that the
+// post-stream queue (queued inputs, queued commands, background-job resume)
+// is NOT processed while a question dialog is active. The handler gates on
+// !m.queueDrainBlocked(), so this test fails if the guard is removed.
+func TestQueueDrainBlockedWhileQuestionActive(t *testing.T) {
+	m := model{}
+	if m.queueDrainBlocked() {
+		t.Fatal("queue must not be blocked when no question dialog is active")
+	}
+	m.showQuestionDialog = true
+	if !m.queueDrainBlocked() {
+		t.Fatal("queue must be blocked while a question dialog is active")
+	}
+}
+
 func TestQuestionPromptLeftRightTabs(t *testing.T) {
 	content := `QUESTION_PROMPT:
 [{"header":"First","question":"Pick first","options":[{"label":"A","description":"Alpha"}],"multiple":false},{"header":"Second","question":"Pick second","options":[{"label":"B","description":"Beta"}],"multiple":false}]

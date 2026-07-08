@@ -1734,6 +1734,7 @@ func openInFileExplorer(path string) tea.Cmd {
 		default: // linux and others
 			cmd = exec.Command("xdg-open", path)
 		}
+		silenceCmdOutput(cmd)
 		if err := cmd.Start(); err != nil {
 			log.Printf("[explorer] failed to open folder %q: %v", path, err)
 		}

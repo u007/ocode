@@ -75,6 +75,37 @@ func TestWalkMarkdownFiles(t *testing.T) {
 	}
 }
 
+func TestWalkMarkdownFilesSkipsActiveBundle(t *testing.T) {
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Active OKF bundle: docs/index.md carries the okf_version marker.
+	write("docs/index.md", "---\nokf_version: \"0.1\"\n---\n# Index\n")
+	write("docs/knowledge-bundle.md", "# bundle")
+	write("docs/plugins.md", "# plugins")
+	// Non-bundle docs must remain discoverable.
+	write("README.md", "# readme")
+	write("CHANGELOG.md", "# changes")
+
+	got := walkMarkdownFiles(root)
+	var rels []string
+	for _, r := range got {
+		rels = append(rels, r.rel)
+	}
+	sort.Strings(rels)
+	want := []string{"CHANGELOG.md", "README.md"}
+	if strings.Join(rels, ",") != strings.Join(want, ",") {
+		t.Fatalf("walk with active bundle = %v, want %v (docs/ must be excluded)", rels, want)
+	}
+}
+
 func TestMDSummaryCacheRoundtrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "md-summaries.json")
@@ -124,7 +155,7 @@ func TestMDSummarizePassBuildsSnapshotAndCachesByContent(t *testing.T) {
 	// pass); drive the pass synchronously for determinism.
 	a.mdState = &mdDiscoveryState{
 		cache:     map[string]mdEntry{},
-		cachePath: filepath.Join(root, ".ocode", "md-summaries.json"),
+		cachePath: mdSummaryCachePath(root),
 		root:      root,
 		client:    client,
 	}
@@ -195,7 +226,7 @@ func TestMDSummarizeFailureBacksOff(t *testing.T) {
 	a := &Agent{client: client, workDir: root}
 	a.mdState = &mdDiscoveryState{
 		cache:     map[string]mdEntry{},
-		cachePath: filepath.Join(root, ".ocode", "md-summaries.json"),
+		cachePath: mdSummaryCachePath(root),
 		root:      root,
 		client:    client,
 	}
