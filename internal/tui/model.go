@@ -370,6 +370,12 @@ type registryReadyMsg struct{ failed bool }
 // for novita-ai models that aren't present in the models.dev registry.
 type novitaReadyMsg struct{ failed bool }
 
+// openRouterReadyMsg is emitted once the OpenRouter live model cache has been
+// populated at startup, so the sidebar can re-render and show the resolved
+// context window for openrouter models (e.g. "openrouter/tencent/hy3:free")
+// that aren't present in the models.dev registry.
+type openRouterReadyMsg struct{ failed bool }
+
 type pickerFilterApplyMsg struct {
 	seq    int
 	filter string
@@ -522,6 +528,23 @@ func waitForNovitaReady(modelName string) tea.Cmd {
 			time.Sleep(100 * time.Millisecond)
 		}
 		return novitaReadyMsg{failed: true}
+	}
+}
+
+// waitForOpenRouterReady polls until the OpenRouter live model cache has been
+// populated (or the poll budget is exhausted), then emits openRouterReadyMsg so
+// the sidebar re-renders and can resolve the context window for openrouter models
+// that aren't present in the models.dev registry.
+func waitForOpenRouterReady(modelName string) tea.Cmd {
+	return func() tea.Msg {
+		const maxPolls = 50
+		for i := 0; i < maxPolls; i++ {
+			if agent.OpenRouterModelsLoaded() {
+				return openRouterReadyMsg{}
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		return openRouterReadyMsg{failed: true}
 	}
 }
 
@@ -1888,6 +1911,15 @@ func (m model) Init() tea.Cmd {
 	if strings.HasPrefix(m.currentModelName(), "novita-ai/") && !agent.NovitaModelsLoaded() {
 		cmds = append(cmds, waitForNovitaReady(m.currentModelName()))
 	}
+	// Preload OpenRouter's live model metadata (context window / pricing) in the
+	// background so the sidebar can resolve openrouter models that are absent
+	// from the models.dev registry (e.g. "openrouter/tencent/hy3:free"). Trigger a
+	// re-render once it is loaded so the "context used / max context" line is
+	// populated instead of showing "n/a" at startup.
+	agent.PreloadOpenRouterModels()
+	if strings.HasPrefix(m.currentModelName(), "openrouter/") && !agent.OpenRouterModelsLoaded() {
+		cmds = append(cmds, waitForOpenRouterReady(m.currentModelName()))
+	}
 	// Start listening for LSP diagnostic changes so the sidebar updates proactively.
 	if m.lspDiagCh != nil {
 		cmds = append(cmds, listenLSPDiags(m.lspDiagCh))
@@ -2397,6 +2429,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			DebugLog.Append(DebugEntry{
 				Kind:    DebugKindError,
 				Message: "novita model metadata failed to load within deadline; context window may show n/a",
+			})
+		}
+		return m, nil
+	case openRouterReadyMsg:
+		// OpenRouter live model metadata loaded (or load timed out) — re-render
+		// so the sidebar reflects the resolved context window for openrouter
+		// models (e.g. "openrouter/tencent/hy3:free") instead of "n/a". On
+		// failure the UI keeps whatever default it had.
+		if msg.failed {
+			DebugLog.Append(DebugEntry{
+				Kind:    DebugKindError,
+				Message: "openrouter model metadata failed to load within deadline; context window may show n/a",
 			})
 		}
 		return m, nil

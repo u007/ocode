@@ -246,7 +246,7 @@ func loadFullModelPickerCmd(shown map[string]bool) tea.Cmd {
 func (m *model) buildFullModelPickerItems() {
 	m.input.Blur()
 	lmsResult := agent.FetchLMStudioModels()
-	allModels := agent.AllProviderModels()
+	allModels := agent.AllProviderModelsCached()
 	favorites := config.LoadFavorites()
 	recents := config.LoadRecentModels()
 

@@ -309,15 +309,28 @@ func RegistryReady() bool {
 }
 
 // ProviderModels returns model IDs for a provider from the loaded registry.
+// It may refresh live model sources (OpenRouter, Novita) over the network — only
+// call it from background goroutines, never the TUI main loop.
 // Returns nil if the registry is not available.
 func ProviderModels(provider string) []string {
-	return providerModelsFromRegistry(provider)
+	return providerModelsFromRegistry(provider, true)
 }
 
 // AllProviderModels returns opencode-style provider/model IDs for model pickers.
+// It may refresh live model sources over the network — only call it from background
+// goroutines (e.g. the async model-picker loader), never the TUI main loop.
 // Returns nil if the registry is not available.
 func AllProviderModels() []string {
-	return allProviderModelsFromRegistry()
+	return allProviderModelsFromRegistry(true)
+}
+
+// AllProviderModelsCached returns the same list as AllProviderModels but never
+// blocks on a network call: it only consults live caches that are already fresh
+// (e.g. populated by the Init-time PreloadOpenRouterModels / async picker loader)
+// and falls back to the snapshot otherwise. Safe to call on the TUI main loop
+// (model-picker refresh, slash-command autocomplete).
+func AllProviderModelsCached() []string {
+	return allProviderModelsFromRegistry(false)
 }
 
 // ModelWindow returns the context window size for a given model ID in
@@ -372,6 +385,12 @@ func modelEntryFor(modelID string) (modelEntry, bool) {
 				return m, true
 			}
 		}
+		// Check OpenRouter live cache for openrouter/ prefixed models.
+		if provider == "openrouter" {
+			if m, ok := openRouterLiveModelEntry(model); ok {
+				return m, true
+			}
+		}
 		// Routing-prefixed ids (e.g. "opencode-go/deepseek-v4-flash") whose
 		// provider segment isn't a real models.dev provider — match the model
 		// segment across all providers.
@@ -387,6 +406,11 @@ func modelEntryFor(modelID string) (modelEntry, bool) {
 
 	// Fall back to Novita live cache for bare model names.
 	if m, ok := novitaLiveModelEntry(modelID); ok {
+		return m, ok
+	}
+
+	// Fall back to OpenRouter live cache for bare model names.
+	if m, ok := openRouterLiveModelEntry(modelID); ok {
 		return m, ok
 	}
 
@@ -458,7 +482,13 @@ func splitModelID(id string) (provider, model string, ok bool) {
 	return "", "", false
 }
 
-func allProviderModelsFromRegistry() []string {
+// allProviderModelsFromRegistry returns opencode-style "provider/model" IDs for the
+// model picker. When refresh is true it may hit the network to refresh live model
+// sources (used by background goroutines, e.g. the async model-picker loader, where
+// a brief blocking fetch is acceptable). When refresh is false it only consults live
+// caches that are already fresh, so it is safe to call on the TUI main loop — it will
+// never block on a network call.
+func allProviderModelsFromRegistry(refresh bool) []string {
 	ids := make([]string, 0)
 	var requestyRegistryFallback []string
 	if data := loadRegistry(); data != nil {
@@ -504,13 +534,39 @@ func allProviderModelsFromRegistry() []string {
 			}
 		}
 	}
+	// OpenRouter live models — supplement the snapshot so free/colon-variant
+	// models (e.g. "openrouter/tencent/hy3:free") appear in the picker even when
+	// absent from the models.dev snapshot. Dedup against the snapshot list.
+	// When refresh is false (main-loop callers) only read the cache if it is still
+	// fresh, so we never block the UI on a network fetch. The async picker loader
+	// passes refresh=true and refreshes the cache in a background goroutine.
+	if refresh || openRouterCacheFresh() {
+		if openRouterLive := fetchOpenRouterLiveModels(); len(openRouterLive) > 0 {
+			have := make(map[string]bool, len(ids))
+			for _, id := range ids {
+				have[id] = true
+			}
+			for key := range openRouterLive {
+				id := "openrouter/" + key
+				if !have[id] {
+					ids = append(ids, id)
+					have[id] = true
+				}
+			}
+		}
+	}
 	if len(ids) == 0 {
 		return nil
 	}
 	sort.Strings(ids)
 	return ids
 }
-func providerModelsFromRegistry(provider string) []string {
+
+// providerModelsFromRegistry returns model IDs for a single provider. The refresh
+// flag behaves as in allProviderModelsFromRegistry: when false it only reads an
+// already-fresh live cache (safe for the TUI main loop); when true it may refresh
+// live sources over the network.
+func providerModelsFromRegistry(provider string, refresh bool) []string {
 	if provider == "lmstudio" {
 		return fetchLMStudioModels()
 	}
@@ -531,6 +587,22 @@ func providerModelsFromRegistry(provider string) []string {
 			}
 			sort.Strings(ids)
 			return ids
+		}
+		return providerModelsFromSnapshot(provider)
+	}
+	if provider == "openrouter" {
+		// On the main loop (refresh=false) only consult the cache when it is still
+		// fresh so we never block on a network re-fetch; otherwise refresh it.
+		if refresh || openRouterCacheFresh() {
+			live := fetchOpenRouterLiveModels()
+			if len(live) > 0 {
+				ids := make([]string, 0, len(live))
+				for id := range live {
+					ids = append(ids, id)
+				}
+				sort.Strings(ids)
+				return ids
+			}
 		}
 		return providerModelsFromSnapshot(provider)
 	}
@@ -840,6 +912,130 @@ func fetchNovitaLiveModels() map[string]modelEntry {
 	novitaLiveData.mu.Unlock()
 
 	return models
+}
+
+const openRouterCacheTTL = 30 * time.Second
+
+// openRouterLiveData caches live-fetched OpenRouter models (with pricing/context)
+// so that ModelWindow / ModelCost can resolve metadata for models that are absent
+// from the models.dev registry — in particular the free and colon-variant models
+// OpenRouter publishes (e.g. "tencent/hy3:free", which models.dev lists as
+// "tencent/hy3-free" or omits entirely). The OpenRouter models endpoint is public
+// and requires no API key.
+var openRouterLiveData struct {
+	mu        sync.RWMutex
+	models    map[string]modelEntry // bare model id (after openrouter/) → entry
+	lastFetch time.Time             // last successful fetch
+}
+
+// fetchOpenRouterLiveModels fetches the model list from OpenRouter's public API and
+// returns a map of bare model id → modelEntry (cost converted to USD per million
+// tokens, context window carried over). Returns nil silently if the API is
+// unreachable or returns an error so callers degrade to the 0/missing default
+// rather than blocking on a failed network call.
+func fetchOpenRouterLiveModels() map[string]modelEntry {
+	// Return cached models if the cache is still fresh.
+	openRouterLiveData.mu.RLock()
+	if openRouterLiveData.models != nil && time.Since(openRouterLiveData.lastFetch) < openRouterCacheTTL {
+		models := openRouterLiveData.models
+		openRouterLiveData.mu.RUnlock()
+		return models
+	}
+	openRouterLiveData.mu.RUnlock()
+
+	entries, err := models.FetchAll()
+	if err != nil || len(entries) == 0 {
+		return nil
+	}
+
+	out := make(map[string]modelEntry, len(entries))
+	for _, e := range entries {
+		if e.ID == "" {
+			continue
+		}
+		// OpenRouter IDs are already "provider/model" style (e.g.
+		// "tencent/hy3:free"); the ocode model id prefixes them with "openrouter/".
+		// Key the cache by the bare id (after any openrouter/ prefix) so lookups
+		// from modelEntryFor match both forms.
+		key := strings.TrimPrefix(e.ID, "openrouter/")
+		entry := modelEntry{
+			ID:          e.ID,
+			Name:        e.Name,
+			ToolCall:    e.Coding,
+			Temperature: true,
+			Limit: modelLimit{
+				Context: int64(e.ContextLen),
+			},
+			Cost: modelCost{
+				Input:  e.Pricing.Prompt * 1_000_000,
+				Output: e.Pricing.Comp * 1_000_000,
+			},
+		}
+		if e.Vision {
+			entry.Modalities.Input = []string{"image"}
+		}
+		out[key] = entry
+		if key != e.ID {
+			out[e.ID] = entry
+		}
+	}
+
+	openRouterLiveData.mu.Lock()
+	openRouterLiveData.models = out
+	openRouterLiveData.lastFetch = time.Now()
+	openRouterLiveData.mu.Unlock()
+
+	return out
+}
+
+// openRouterLiveModelEntry returns a model entry from the OpenRouter live cache.
+// Accepts either a bare model id ("tencent/hy3:free") or a fully-qualified
+// "openrouter/..." id. Returns false if the cache is empty or the model is
+// not found.
+func openRouterLiveModelEntry(name string) (modelEntry, bool) {
+	openRouterLiveData.mu.RLock()
+	defer openRouterLiveData.mu.RUnlock()
+	if openRouterLiveData.models == nil {
+		return modelEntry{}, false
+	}
+	if m, ok := openRouterLiveData.models[name]; ok {
+		return m, true
+	}
+	if trimmed := strings.TrimPrefix(name, "openrouter/"); trimmed != name {
+		if m, ok := openRouterLiveData.models[trimmed]; ok {
+			return m, true
+		}
+	}
+	return modelEntry{}, false
+}
+
+// PreloadOpenRouterModels fetches OpenRouter's live model list in the background
+// so the context window / pricing / vision info for openrouter models (which are
+// frequently absent from or differently-named in the models.dev registry) is
+// available as soon as the UI needs it — in particular the sidebar's "context used
+// / max context" line. It is a no-op once the cache is populated, and degrades
+// gracefully when the network is unavailable.
+func PreloadOpenRouterModels() {
+	go fetchOpenRouterLiveModels()
+}
+
+// OpenRouterModelsLoaded reports whether the OpenRouter live model cache has been
+// populated (fetched successfully at least once). Safe for concurrent use.
+func OpenRouterModelsLoaded() bool {
+	openRouterLiveData.mu.RLock()
+	defer openRouterLiveData.mu.RUnlock()
+	return openRouterLiveData.models != nil
+}
+
+// openRouterCacheFresh reports whether the OpenRouter live cache is populated AND
+// still within its TTL. Unlike OpenRouterModelsLoaded (which is true forever once
+// the cache has been populated at least once), this also reflects staleness so
+// callers on the TUI main loop can read cached metadata WITHOUT triggering a
+// blocking network re-fetch. Safe for concurrent use.
+func openRouterCacheFresh() bool {
+	openRouterLiveData.mu.RLock()
+	defer openRouterLiveData.mu.RUnlock()
+	return openRouterLiveData.models != nil && time.Since(openRouterLiveData.lastFetch) < openRouterCacheTTL
 }
 
 // AllProviders returns provider IDs known to the registry (or empty if unavailable).

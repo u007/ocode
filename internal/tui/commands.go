@@ -220,7 +220,9 @@ func autocompleteSlashInput(m *model, text string) []string {
 }
 
 func modelSuggestions(m *model) []string {
-	return agent.AllProviderModels()
+	// Called on the main loop during slash-input autocomplete — use the cached
+	// variant so we never block on a network fetch.
+	return agent.AllProviderModelsCached()
 }
 
 func commandHelpText() string {
