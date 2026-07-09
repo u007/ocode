@@ -56,3 +56,11 @@ ocodeconfig.json
 
 .ocode/md-summaries.json
 
+
+# Desktop embedded assets — generated at build time by `make desktop`.
+# The embedded-assets/ dir itself (with .gitkeep) is committed so a bare
+# `go build ./cmd/ocode-desktop` still compiles; only the copied content is
+# ignored.
+cmd/ocode-desktop/embedded-assets/skills/
+cmd/ocode-desktop/embedded-assets/.opencode/
+cmd/ocode-desktop/embedded-assets/*.OCODE.md

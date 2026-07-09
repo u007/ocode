@@ -1,10 +1,15 @@
 import { createContext, useContext, useReducer, type ReactNode } from "react";
-import type { Message, LivePart, TUIStatus } from "../api/types";
+import type { Message, LivePart, TUIStatus, QuestionPrompt } from "../api/types";
 
 export interface PermissionRequest {
   tool: string;
   command?: string;
   request_id: string;
+}
+
+export interface QuestionRequest {
+  request_id: string;
+  questions: QuestionPrompt[];
 }
 
 export interface SessionContextMetrics {
@@ -26,6 +31,7 @@ interface ChatState {
   isStreaming: boolean;
   error: string | null;
   pendingPermission: PermissionRequest | null;
+  pendingQuestion: QuestionRequest | null;
   // In-progress turn, streamed live until the turn_done snapshot commits it.
   live: LivePart[];
   // Lazy loading state
@@ -64,6 +70,8 @@ type ChatAction =
   | { type: "LIVE_RESET" }
   | { type: "PERMISSION_REQUEST"; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED" }
+  | { type: "QUESTION_REQUEST"; question: QuestionRequest }
+  | { type: "QUESTION_RESOLVED" }
   | { type: "PREPEND_MESSAGES"; messages: Message[]; total: number }
   | { type: "SET_LOADING_MORE"; loading: boolean }
   | { type: "MERGE_SNAPSHOT"; messages: Message[]; total: number }
@@ -87,6 +95,7 @@ const initialState: ChatState = {
   isStreaming: false,
   error: null,
   pendingPermission: null,
+  pendingQuestion: null,
   live: [],
   totalMessages: 0,
   hasMore: false,
@@ -171,6 +180,10 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, pendingPermission: action.permission };
     case "PERMISSION_RESOLVED":
       return { ...state, pendingPermission: null };
+    case "QUESTION_REQUEST":
+      return { ...state, pendingQuestion: action.question };
+    case "QUESTION_RESOLVED":
+      return { ...state, pendingQuestion: null };
     case "RESET":
       // Preserve the advisor on/off toggle across new sessions — the server
       // keeps it for the handler's lifetime, so the status must not snap back.

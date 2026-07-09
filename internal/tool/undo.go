@@ -17,10 +17,10 @@ const undoMaxAgeDelta = 2
 // It implements ContextualTool so it can access the per-agent snapshot store.
 type UndoTool struct{}
 
-func (t *UndoTool) Name() string    { return "undo_file_change" }
-func (t *UndoTool) Parallel() bool  { return false }
+func (t *UndoTool) Name() string   { return "undo_file_change" }
+func (t *UndoTool) Parallel() bool { return false }
 func (t *UndoTool) Description() string {
-	return "Undo a previous write tool call by its tool_call_id. Reverts all files changed by that call to their pre-edit state. Only available within 2 agent steps of the original write."
+	return "Undo a previous write tool call by its tool_call_id. Reverts all files changed by that call to their pre-edit state. Prefer this over `git checkout`/`git restore` for reverting a file edit you just made — call it promptly, as it is only available within 2 agent steps of the original write."
 }
 
 func (t *UndoTool) Definition() map[string]interface{} {

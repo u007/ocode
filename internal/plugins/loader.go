@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/u007/ocode/internal/bundled"
 )
 
 type PluginMCPConfig struct {
@@ -26,6 +28,9 @@ type Plugin struct {
 
 func LoadPlugins(enabled map[string]bool) []Plugin {
 	var plugins []Plugin
+	// seen dedupes by plugin name so a disk copy (listed first in
+	// pluginSearchPaths) wins over the bundled/embedded copy.
+	seen := make(map[string]bool)
 
 	for _, dir := range pluginSearchPaths() {
 		entries, err := os.ReadDir(dir)
@@ -48,11 +53,15 @@ func LoadPlugins(enabled map[string]bool) []Plugin {
 			if p.Name == "" {
 				p.Name = e.Name()
 			}
+			if seen[p.Name] {
+				continue
+			}
 			if enabled != nil {
 				if on, ok := enabled[p.Name]; ok && !on {
 					continue
 				}
 			}
+			seen[p.Name] = true
 			plugins = append(plugins, p)
 		}
 	}
@@ -61,14 +70,30 @@ func LoadPlugins(enabled map[string]bool) []Plugin {
 }
 
 func pluginSearchPaths() []string {
-	paths := make([]string, 0, 2)
+	paths := make([]string, 0, 3)
 	if global := globalPluginSearchPath(); global != "" {
 		paths = append(paths, global)
 	}
 	if project := projectPluginSearchPath(); project != "" {
 		paths = append(paths, project)
 	}
+	// Embedded (bundled) plugins — lowest precedence; disk copies above win.
+	if bundled.PluginsDir != "" {
+		paths = append(paths, bundled.PluginsDir)
+	}
 	return paths
+}
+
+// LoadBundledPluginAgentsDirPaths returns the agents/ subdirectories for the
+// embedded (bundled) plugins. The agent registry consumes it as the
+// lowest-precedence source so any disk-based plugin agent always overrides the
+// bundled copy.
+func LoadBundledPluginAgentsDirPaths(enabled map[string]bool) []string {
+	root := bundled.PluginsDir
+	if root == "" {
+		return nil
+	}
+	return loadPluginSubdirPaths([]string{root}, "agents", enabled)
 }
 
 func globalPluginSearchPath() string {

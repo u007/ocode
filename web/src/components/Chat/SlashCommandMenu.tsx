@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { COMMANDS } from "./commands";
+import { useCommands } from "./commands";
 
 interface Props {
   query: string;
@@ -10,8 +10,9 @@ interface Props {
 
 export default function SlashCommandMenu({ query, selectedIndex, onSelect, onHover }: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const commands = useCommands();
 
-  const filtered = COMMANDS.filter((cmd) =>
+  const filtered = commands.filter((cmd) =>
     cmd.name.toLowerCase().includes(query.toLowerCase())
   );
 

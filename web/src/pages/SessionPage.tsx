@@ -12,12 +12,14 @@ import TopTabs from "../components/Layout/TopTabs";
 import CoworkSidebar from "../components/Layout/CoworkSidebar";
 import ModelDialog from "../components/Layout/ModelDialog";
 import PermissionDialog from "../components/Chat/PermissionDialog";
+import QuestionDialog from "../components/Chat/QuestionDialog";
 import FileEditor from "../components/Files/FileEditor";
 import FileTree from "../components/Files/FileTree";
 import GitPanel from "../components/Git/GitPanel";
 import LogPanel from "../components/Logs/LogPanel";
 import AssetsPanel from "../components/Assets/AssetsPanel";
 import { useChat } from "../hooks/useChat";
+import { useIsMobile } from "../hooks/useIsMobile";
 import { dispatchCommand } from "../components/Chat/commands";
 
 /** Trigger a browser file download from an in-memory string. */
@@ -40,7 +42,7 @@ export default function SessionPage() {
   const navigate = useNavigate();
   const state = useChatState();
   const dispatch = useChatDispatch();
-  const { resolvePermission, pendingPermission } = useChat();
+  const { resolvePermission, pendingPermission, submitQuestionAnswers, pendingQuestion } = useChat();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [coworkOpen, setCoworkOpen] = useState(true);
@@ -56,6 +58,8 @@ export default function SessionPage() {
   }
   const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
   const openFileIdsRef = useRef<Set<string>>(new Set());
+
+  const isMobile = useIsMobile();
 
   const handleOpenFile = useCallback(async (path: string) => {
     const id = `editor-${path}`;
@@ -214,6 +218,29 @@ export default function SessionPage() {
               dispatch({ type: "SET_ADVISOR_ENABLED", enabled: payload.enabled });
             }
           }
+          break;
+        case "question": {
+          // Agent paused on a question prompt. Show the dialog; the raw sentinel
+          // tool message that also arrives in the `messages` snapshot is filtered
+          // from the transcript (ChatPanel), so we don't double-render it.
+          const q = data as { request_id: string; questions: import("../api/types").QuestionPrompt[] };
+          dispatch({ type: "QUESTION_REQUEST", question: { request_id: q.request_id, questions: q.questions } });
+          break;
+        }
+        case "question_resolved":
+          dispatch({ type: "QUESTION_RESOLVED" });
+          break;
+        case "permission": {
+          // Agent paused on a PERMISSION_ASK. Show the approve/deny dialog.
+          const p = data as { request_id: string; tool: string; command?: string };
+          dispatch({
+            type: "PERMISSION_REQUEST",
+            permission: { request_id: p.request_id, tool: p.tool, command: p.command },
+          });
+          break;
+        }
+        case "permission_resolved":
+          dispatch({ type: "PERMISSION_RESOLVED" });
           break;
         case "error":
           dispatch({ type: "SET_ERROR", error: (data as { error: string }).error });
@@ -408,6 +435,7 @@ export default function SessionPage() {
             onClose={() => setCoworkOpen(false)}
             activeAgent="build"
             onModelClick={openModelDialog}
+            isMobile={isMobile}
           />
         )}
       </div>
@@ -425,6 +453,15 @@ export default function SessionPage() {
           command={pendingPermission.command}
           requestId={pendingPermission.request_id}
           onApprove={resolvePermission}
+        />
+      )}
+
+      {pendingQuestion && (
+        <QuestionDialog
+          open={true}
+          requestId={pendingQuestion.request_id}
+          questions={pendingQuestion.questions}
+          onSubmit={submitQuestionAnswers}
         />
       )}
     </div>

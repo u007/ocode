@@ -13,7 +13,7 @@ interface Props {
   tool: string;
   command?: string;
   requestId: string;
-  onApprove: (requestId: string, approved: boolean) => void;
+  onApprove: (requestId: string, approved: boolean) => Promise<boolean>;
 }
 
 export default function PermissionDialog({
@@ -28,16 +28,27 @@ export default function PermissionDialog({
   const handleResponse = async (approved: boolean) => {
     setLoading(true);
     try {
-      onApprove(requestId, approved);
-    } finally {
+      const ok = await onApprove(requestId, approved);
+      if (!ok) {
+        setLoading(false);
+      }
+    } catch {
       setLoading(false);
     }
   };
 
-  const toolIcon = tool === "bash" || tool === "bash_output" ? Terminal : FileCode;
+  const toolIcon =
+    tool === "bash" || tool === "bash_output" ? Terminal : FileCode;
 
   return (
-    <Dialog open={open} onOpenChange={(isOpen) => !isOpen && handleResponse(false)}>
+    <Dialog
+      open={open}
+      onOpenChange={(isOpen) => {
+        if (!isOpen && !loading) {
+          void handleResponse(false);
+        }
+      }}
+    >
       <DialogContent className="sm:max-w-md bg-zinc-900 border-zinc-700">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-zinc-100">
@@ -69,7 +80,7 @@ export default function PermissionDialog({
             <Button
               type="button"
               variant="destructive"
-              onClick={() => handleResponse(false)}
+              onClick={() => void handleResponse(false)}
               disabled={loading}
             >
               <X className="w-4 h-4 mr-2" />
@@ -77,7 +88,7 @@ export default function PermissionDialog({
             </Button>
             <Button
               type="button"
-              onClick={() => handleResponse(true)}
+              onClick={() => void handleResponse(true)}
               disabled={loading}
             >
               <Check className="w-4 h-4 mr-2" />

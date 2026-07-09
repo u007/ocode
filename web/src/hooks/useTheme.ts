@@ -29,7 +29,7 @@ function hexToHslTriplet(hex: string): string | null {
   return `${round(h * 360)} ${round(s * 100)}% ${round(l * 100)}%`;
 }
 
-function applyThemeColors(colors: ThemeColors) {
+export function applyThemeColors(colors: ThemeColors) {
   const root = document.documentElement;
   const set = (name: string, hex: string) => {
     const triplet = hexToHslTriplet(hex);

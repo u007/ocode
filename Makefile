@@ -33,7 +33,19 @@ DESKTOP_BUILD := CGO_LDFLAGS="-mmacosx-version-min=26.0" $(DESKTOP_BUILD)
 DESKTOP_INSTALL := CGO_LDFLAGS="-mmacosx-version-min=26.0" $(DESKTOP_INSTALL)
 endif
 
-desktop: web-build
+# bundle-desktop-assets copies the bundled skills/plugins/model-configs next to
+# the desktop main package so they can be embedded (go:embed cannot reach
+# repo-root paths via ".."). The generated content is gitignored; a bare
+# `go build ./cmd/ocode-desktop` still compiles against the committed .gitkeep.
+bundle-desktop-assets:
+	rm -rf cmd/ocode-desktop/embedded-assets
+	mkdir -p cmd/ocode-desktop/embedded-assets/skills
+	mkdir -p cmd/ocode-desktop/embedded-assets/.opencode/plugins
+	cp -R skills/. cmd/ocode-desktop/embedded-assets/skills
+	cp -R .opencode/plugins/. cmd/ocode-desktop/embedded-assets/.opencode/plugins
+	cp deepseek-v4-flash.OCODE.md cmd/ocode-desktop/embedded-assets/deepseek-v4-flash.OCODE.md
+
+desktop: web-build bundle-desktop-assets
 	$(DESKTOP_BUILD)
 
 install-desktop: web-build desktop

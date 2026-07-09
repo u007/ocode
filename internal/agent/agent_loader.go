@@ -43,16 +43,32 @@ func (r *AgentRegistry) reloadMarkdownAgents(enabled map[string]bool) []LoadDiag
 	var projectLoaded []AgentDefinition
 
 	home, _ := os.UserHomeDir()
+	globalAgentsDir := filepath.Join(home, ".config", "opencode", "agents")
+	if runtime.GOOS == "windows" {
+		globalAgentsDir = filepath.Join(os.Getenv("APPDATA"), "opencode", "agents")
+	}
+
 	searchPaths := []struct {
 		dir  string
 		kind string
-	}{
-		{filepath.Join(home, ".config", "opencode", "agents"), "global"},
+	}{}
+
+	// Embedded (bundled) plugin agents — lowest precedence. Added first so every
+	// disk-based agent definition (global markdown, project markdown, global
+	// plugin, project plugin) overrides them by name via addLoaded's
+	// last-wins semantics. When enabled is nil, the bundled agents load
+	// unfiltered so the normal startup path sees them too.
+	for _, bundledAgentsDir := range plugins.LoadBundledPluginAgentsDirPaths(enabled) {
+		searchPaths = append(searchPaths, struct {
+			dir  string
+			kind string
+		}{bundledAgentsDir, "global"})
 	}
 
-	if runtime.GOOS == "windows" {
-		searchPaths[0].dir = filepath.Join(os.Getenv("APPDATA"), "opencode", "agents")
-	}
+	searchPaths = append(searchPaths, struct {
+		dir  string
+		kind string
+	}{globalAgentsDir, "global"})
 
 	cwd, _ := os.Getwd()
 	projectDir := filepath.Join(cwd, ".opencode", "agents")
@@ -61,25 +77,23 @@ func (r *AgentRegistry) reloadMarkdownAgents(enabled map[string]bool) []LoadDiag
 		kind string
 	}{projectDir, "project"})
 
-	if enabled != nil {
-		// Global plugin agents behave like other global markdown agents: they load
-		// before project-local markdown so project files can still override them by
-		// name.
-		for _, pluginAgentsDir := range plugins.LoadGlobalPluginAgentsDirPaths(enabled) {
-			searchPaths = append(searchPaths, struct {
-				dir  string
-				kind string
-			}{pluginAgentsDir, "global"})
-		}
+	// Global plugin agents behave like other global markdown agents: they load
+	// before project-local markdown so project files can still override them by
+	// name. When enabled is nil, all plugin agents load unfiltered.
+	for _, pluginAgentsDir := range plugins.LoadGlobalPluginAgentsDirPaths(enabled) {
+		searchPaths = append(searchPaths, struct {
+			dir  string
+			kind string
+		}{pluginAgentsDir, "global"})
+	}
 
-		// Project-local plugin agents override both global plugin agents and regular
-		// project markdown agents by loading last.
-		for _, pluginAgentsDir := range plugins.LoadProjectPluginAgentsDirPaths(enabled) {
-			searchPaths = append(searchPaths, struct {
-				dir  string
-				kind string
-			}{pluginAgentsDir, "project"})
-		}
+	// Project-local plugin agents override both global plugin agents and regular
+	// project markdown agents by loading last.
+	for _, pluginAgentsDir := range plugins.LoadProjectPluginAgentsDirPaths(enabled) {
+		searchPaths = append(searchPaths, struct {
+			dir  string
+			kind string
+		}{pluginAgentsDir, "project"})
 	}
 
 	for _, sp := range searchPaths {

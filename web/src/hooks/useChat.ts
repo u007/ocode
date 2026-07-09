@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
-import { api, apiPath, authHeaders } from "../api/client";
+import { api } from "../api/client";
+import type { QuestionAnswerPayload } from "../api/types";
 
 interface UseChatOptions {
   /** Called when a new session is created (first message from Home page). */
@@ -53,32 +54,63 @@ export function useChat(options?: UseChatOptions) {
     dispatch({ type: "SET_STREAMING", isStreaming: false });
   }, [dispatch]);
 
+  // Resolve a pending agent permission ask via the dedicated resolve endpoint
+  // (NOT the config POST /api/permissions, which sets a tool rule). Only a
+  // confirmed success dismisses the dialog; failures keep it open so the user
+  // can retry.
   const resolvePermission = useCallback(
     async (requestId: string, approved: boolean) => {
       try {
-        await fetch(apiPath("/api/permissions"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json", ...authHeaders() },
-          body: JSON.stringify({ request_id: requestId, approved }),
-        });
+        await api.resolvePermission(requestId, state.sessionId, approved);
         dispatch({ type: "PERMISSION_RESOLVED" });
+        return true;
       } catch (err) {
-        console.error("Failed to send permission response:", err);
+        console.error("Failed to resolve permission:", err);
+        dispatch({
+          type: "SET_ERROR",
+          error:
+            err instanceof Error ? err.message : "permission resolve failed",
+        });
+        return false;
       }
     },
-    [dispatch],
+    [dispatch, state.sessionId],
+  );
+
+  // Submit answers to a pending agent question prompt. Mirrors the TUI's
+  // submitQuestionAnswers: all answers go in one POST, and only a confirmed
+  // success dismisses the dialog. Failures keep it open and surface an error.
+  const submitQuestionAnswers = useCallback(
+    async (requestId: string, answers: QuestionAnswerPayload[]) => {
+      try {
+        await api.answerQuestion(requestId, state.sessionId, answers);
+        dispatch({ type: "QUESTION_RESOLVED" });
+        return true;
+      } catch (err) {
+        console.error("Failed to answer question:", err);
+        dispatch({
+          type: "SET_ERROR",
+          error: err instanceof Error ? err.message : "question answer failed",
+        });
+        return false;
+      }
+    },
+    [dispatch, state.sessionId],
   );
 
   // Execute a shell command directly (for ! prefix commands)
   const executeShell = useCallback(
-    async (command: string): Promise<{ output: string; exitCode: number; error: string }> => {
+    async (
+      command: string,
+    ): Promise<{ output: string; exitCode: number; error: string }> => {
       try {
         return await api.shellCommand(command);
       } catch (err) {
         return {
           output: "",
           exitCode: 1,
-          error: err instanceof Error ? err.message : "Failed to execute command",
+          error:
+            err instanceof Error ? err.message : "Failed to execute command",
         };
       }
     },
@@ -90,7 +122,9 @@ export function useChat(options?: UseChatOptions) {
     executeShell,
     stop,
     resolvePermission,
+    submitQuestionAnswers,
     isStreaming: state.isStreaming,
     pendingPermission: state.pendingPermission,
+    pendingQuestion: state.pendingQuestion,
   };
 }

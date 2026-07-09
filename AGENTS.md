@@ -33,8 +33,21 @@ git worktree add .worktrees/feature-branch feature-branch
 - Follow Go best practices and standard formatting (`gofmt`, `go vet`).
 - **Avoid `git stash` / `git reset --hard` / `git checkout -- <file>` /
   `git clean -fd` as a default coping strategy.** They destroy user state
-  the user may not be unable to recover. If a change conflicts, stop and
-  ask; do not unwind the user's working tree.
+  the user may not be unable to recover.
+  - To *revert a file edit you just made*, prefer the **`undo_file_change`**
+    tool: pass the `tool_call_id` of the write/edit/patch/delete/multi-edit/
+    replace that produced the change, and it restores exactly the files that
+    call touched to their pre-edit state. It is valid only within your **2
+    most recent steps**, so call it promptly after a bad edit. (Every file
+    write is backed up automatically by the snapshot store, so no extra setup
+    is needed.)
+  - Only fall back to git (`git checkout`/`git restore`/`git revert`) when you
+    specifically need to undo a *commit*, switch branches, or restore files
+    the write-snapshot did not capture (e.g. untracked files). Never use
+    `git checkout -- <file>` / `git clean -fd` just to undo your own recent
+    edits.
+  - If a change conflicts, stop and ask; do not unwind the user's working
+    tree.
 - **Never overwrite production or remote `.env` files** (`.env`,
   `.env.production`, `.env.local`, or any environment-specific variant used
   in deployed/remote contexts) unless the user explicitly requests it.
@@ -255,7 +268,8 @@ consolidating the dispatch.
     `/permissions`, `/yolo`, `/small-model`, `/editor`, `/editor-mode`,
     `/themes`, `/theme`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`,
     `/mcp`, `/advisor`, `/mask`, `/btw`, `/by-the-way`, `/rc`,
-    `/remote-control`, `/search`, `/find`, `/docs`, `/doc-mode`, `/recap`.
+    `/remote-control`, `/search`, `/find`, `/docs`, `/doc-mode`, `/recap`,
+    `/goal`.
   - **Queued by design (mutates persistent state mid-stream, so it must
     wait for the current turn to end):** `/add-dir`, `/add-dirs`, `/doc-sync`.
   - The list above is the source of truth; keep the in-code check in

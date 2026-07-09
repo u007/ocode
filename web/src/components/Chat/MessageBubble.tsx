@@ -7,9 +7,13 @@ import {
   linkifyPlainText,
 } from "../../lib/fileLinks";
 import { ThinkingBlock, ToolBlock } from "./TurnParts";
+import { highlightMatches } from "./ChatSearchBar";
 
 interface Props {
   message: Message;
+  // Active find-bar query. When set, plaintext regions (user text, thinking,
+  // tool args/output) wrap matches in <mark>. Empty string = no highlight.
+  highlight?: string;
 }
 
 // AssistantText renders markdown assistant output. Shared by committed messages
@@ -17,7 +21,7 @@ interface Props {
 export function AssistantText({ content }: { content: string }) {
   return (
     <div className="flex justify-start mb-3">
-      <div className="max-w-[80%] rounded-lg px-4 py-2 bg-zinc-800 text-zinc-100">
+      <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-zinc-800 text-zinc-100">
         <div className="prose prose-invert prose-sm max-w-none text-sm">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
@@ -108,10 +112,10 @@ export function AssistantText({ content }: { content: string }) {
   );
 }
 
-export default function MessageBubble({ message }: Props) {
+export default function MessageBubble({ message, highlight = "" }: Props) {
   // Tool result message (role "tool"): no tool name is carried, only the output.
   if (message.role === "tool") {
-    return <ToolBlock tool="result" output={message.content} />;
+    return <ToolBlock tool="result" output={message.content} highlight={highlight} />;
   }
 
   // Assistant turn that issued tool calls and/or carried reasoning.
@@ -122,7 +126,7 @@ export default function MessageBubble({ message }: Props) {
     return (
       <>
         {message.reasoning_content ? (
-          <ThinkingBlock text={message.reasoning_content} />
+          <ThinkingBlock text={message.reasoning_content} highlight={highlight} />
         ) : null}
         {message.tool_calls?.map((tc, i) => (
           <ToolBlock
@@ -130,6 +134,7 @@ export default function MessageBubble({ message }: Props) {
             tool={tc.function.name}
             command={tc.function.arguments}
             output=""
+            highlight={highlight}
           />
         ))}
         {message.content ? <AssistantText content={message.content} /> : null}
@@ -140,9 +145,11 @@ export default function MessageBubble({ message }: Props) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end mb-3">
-        <div className="max-w-[80%] rounded-lg px-4 py-2 bg-blue-600 text-white">
+        <div className="max-w-[95%] md:max-w-[80%] rounded-lg px-4 py-2 bg-blue-600 text-white">
           <pre className="whitespace-pre-wrap font-sans text-sm">
-            {linkifyPlainText(message.content)}
+            {highlight.trim()
+              ? highlightMatches(message.content, highlight)
+              : linkifyPlainText(message.content)}
           </pre>
         </div>
       </div>

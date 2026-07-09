@@ -67,6 +67,10 @@ type LSPStatus struct {
 	Root   string `json:"root,omitempty"`
 	State  string `json:"state"` // "running" | "starting" | "failed"
 	Detail string `json:"detail,omitempty"`
+	// Aggregated diagnostic counts across the project, attributed to the
+	// owning server by its binary name.
+	DiagnosticsErrors   int `json:"diagnostics_errors"`
+	DiagnosticsWarnings int `json:"diagnostics_warnings"`
 }
 
 // tuiStatusStore is a thread-safe holder for the latest snapshot. It is set

@@ -3,6 +3,11 @@
 
 
 
+
+## 2026-07-09
+
+* **Creation**: Sidebar TUI/Web Parity Gaps ([architecture/sidebar-tui-parity-gaps.md](/architecture/sidebar-tui-parity-gaps.md))
+* **Creation**: ChatPanel Autoscroll Bounce/Freeze ([gotchas/autoscroll-bounce.md](/gotchas/autoscroll-bounce.md))
 ## 2026-07-08
 
 * **Creation**: File-Edit Snapshot & Undo Mechanism ([file-edit-snapshot.md](/file-edit-snapshot.md))

@@ -98,6 +98,39 @@ export interface SSEDoneEvent {
   model: string;
 }
 
+// ── Agent question prompts (mirrors internal/tool QuestionPrompt) ──
+export interface QuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface QuestionPrompt {
+  header: string;
+  question: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+}
+
+// `question` SSE frame emitted when the agent pauses on a question prompt.
+export interface SSEQuestionEvent {
+  request_id: string;
+  questions: QuestionPrompt[];
+}
+
+// One selected answer sent back to POST /api/questions. `custom` marks the
+// free-text "Something else" option, whose typed value rides in `text`.
+export interface QuestionAnswerValue {
+  label: string;
+  text?: string;
+  custom?: boolean;
+}
+
+export interface QuestionAnswerPayload {
+  header?: string;
+  question: string;
+  answers: QuestionAnswerValue[];
+}
+
 export interface SSESessionEvent {
   session_id: string;
 }
@@ -165,6 +198,8 @@ export interface TUIStatus {
   small_model_enabled?: boolean;
   advisor_model?: string;
   advisor_enabled?: boolean;
+  recap_model?: string;
+  recap_model_enabled?: boolean;
   ide_mode?: string;
   ide_status?: string;
   ocr_backend?: string;
@@ -195,6 +230,19 @@ export interface LSPStatus {
   root?: string;
   state: "running" | "starting" | "failed" | string;
   detail?: string;
+  diagnostics_errors?: number;
+  diagnostics_warnings?: number;
+}
+
+export interface MCPStatus {
+  name: string;
+  type: string;
+  enabled: boolean;
+}
+
+export interface ThemesListResponse {
+  current: string;
+  themes: { name: string; label: string }[];
 }
 
 export interface Project {
@@ -202,6 +250,65 @@ export interface Project {
   name: string;
   added_at: string;
   last_used_at: string;
+}
+
+// ── Permissions ──
+export interface PermissionRule {
+  tool: string;
+  level: string;
+}
+
+export interface PermissionsResponse {
+  mode: string;
+  auto_allow: boolean;
+  rules: PermissionRule[];
+  bash_rules: PermissionRule[];
+}
+
+// ── Usage summary (GET /api/usage) ──
+export interface UsageModelSummary {
+  model: string;
+  request_count: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  spend: number;
+}
+
+export interface UsageSummary {
+  total_requests: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_cache_read_tokens: number;
+  total_tokens: number;
+  total_spend: number;
+  by_model: UsageModelSummary[];
+  start_time: string;
+  end_time: string;
+  days: number;
+}
+
+// ── Plugins ──
+export interface PluginInfo {
+  name: string;
+  source: string;
+  dir: string;
+  enabled: boolean;
+  description?: string;
+}
+
+// ── Dynamic commands / skills (GET /api/commands, /api/skills) ──
+export interface CommandEntry {
+  name: string;
+  description?: string;
+}
+
+export interface SkillEntry {
+  name: string;
+  description?: string;
+  status?: string;
+  source?: string;
 }
 
 export interface DirectoryEntry {

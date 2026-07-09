@@ -1,33 +1,14 @@
-import type { Message, OcrConfig, OcrModelsResponse } from "../../api/types";
+import type {
+  Message,
+  OcrConfig,
+  OcrModelsResponse,
+  UsageSummary,
+  PermissionsResponse,
+} from "../../api/types";
 import type { LucideIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { api } from "../../api/client";
 
-// ─── Formatting helpers ─────────────────────────────────────────────────────
-
-/** Format a list of messages as a rich Markdown export string. */
-function formatMessagesAsMarkdown(
-  messages: Message[],
-  sessionId?: string,
-): string {
-  const lines: string[] = [];
-  lines.push("# Chat Export");
-  if (sessionId) {
-    lines.push(`Session: \`${sessionId}\``);
-  }
-  lines.push(`Exported: ${new Date().toISOString()}`);
-  lines.push("");
-
-  for (const msg of messages) {
-    const role = msg.role === "user" ? "**You**" : msg.role === "assistant" ? "**Assistant**" : `**${msg.role}**`;
-    lines.push(`---\n${role}\n\n${msg.content}\n`);
-    if (msg.tool_calls?.length) {
-      for (const tc of msg.tool_calls) {
-        lines.push(`> \`🛠 ${tc.function.name}(${tc.function.arguments})\`\n`);
-      }
-    }
-  }
-
-  return lines.join("\n");
-}
 import {
   Plus,
   Trash2,
@@ -42,6 +23,15 @@ import {
   Search,
   MessageCircle,
   Shield,
+  Undo2,
+  Redo2,
+  Type,
+  BarChart3,
+  Sparkles,
+  Zap,
+  Bot,
+  Puzzle,
+  Terminal,
 } from "lucide-react";
 
 // ─── Command Definition ────────────────────────────────────────────────────
@@ -67,17 +57,106 @@ export const COMMANDS: CommandDef[] = [
   { name: "/new", description: "Start a new session", icon: Plus },
   { name: "/clear", description: "Clear conversation history", icon: Trash2 },
   { name: "/model", description: "Open model selector", icon: Settings },
+  { name: "/agent", description: "List or switch the active agent", icon: Bot },
   { name: "/session", description: "List, load, or resume sessions", icon: History },
+  { name: "/title", description: "Set the current session title", icon: Type },
   { name: "/ocr", description: "Show OCR status, enable/disable, set model", icon: Eye },
   { name: "/search", description: "Find a message by keyword", icon: Search },
   { name: "/btw", description: "Add a quick aside to the conversation", icon: MessageCircle },
   { name: "/mask", description: "Show secret redaction status", icon: Shield },
+  { name: "/permissions", description: "Show permission rules", icon: Shield },
+  { name: "/yolo", description: "Toggle YOLO (auto-approve) mode", icon: Zap },
+  { name: "/undo", description: "Undo the last file change", icon: Undo2 },
+  { name: "/redo", description: "Redo the last undone file change", icon: Redo2 },
   { name: "/compact", description: "Compact conversation context", icon: Archive },
   { name: "/recap", description: "Generate session recap", icon: FileText },
-  { name: "/export", description: "Export session as JSON", icon: FileDown },
+  { name: "/usage", description: "Show token usage & spend", icon: BarChart3 },
+  { name: "/export", description: "Export session as Markdown", icon: FileDown },
+  { name: "/export-claude", description: "Append session to Claude history", icon: FileDown },
+  { name: "/init", description: "Create an AGENTS.md for this project", icon: Sparkles },
+  { name: "/plugin", description: "List, enable, install, or remove plugins", icon: Puzzle },
   { name: "/share", description: "Share session link", icon: Share2 },
   { name: "/help", description: "Show available commands", icon: HelpCircle },
 ];
+
+// ─── Dynamic commands (custom commands + skills from the server) ──────────────
+//
+// Custom slash commands (GET /api/commands) and skills (GET /api/skills) are
+// merged into the shared COMMANDS array so they surface in every consumer
+// (SlashCommandMenu, CommandPalette, and ChatInput's inline autocomplete, which
+// all read the same array reference). They are NOT dispatched locally — when
+// selected they fall through to the LLM as a chat message (handled: false).
+//
+// Names are lowercased so ChatInput's case-sensitive `.includes()` filter and
+// SlashCommandMenu's lowercased filter stay index-aligned.
+
+let dynamicLoaded = false;
+let dynamicLoadPromise: Promise<void> | null = null;
+
+/** Fetch custom commands + skills once and append them (deduped, sorted) to
+ *  the shared COMMANDS array. Safe to call from multiple mount points — the
+ *  fetch runs at most once. */
+export function loadDynamicCommands(): Promise<void> {
+  if (dynamicLoaded) return Promise.resolve();
+  if (dynamicLoadPromise) return dynamicLoadPromise;
+
+  dynamicLoadPromise = (async () => {
+    const [commands, skills] = await Promise.all([
+      api.listCommands().catch((err) => {
+        console.error("failed to load custom commands", err);
+        return [] as { name: string; description?: string }[];
+      }),
+      api.listSkills().catch((err) => {
+        console.error("failed to load skills", err);
+        return [] as { name: string; description?: string }[];
+      }),
+    ]);
+
+    const existing = new Set(COMMANDS.map((c) => c.name.toLowerCase()));
+    const additions: CommandDef[] = [];
+
+    const add = (rawName: string, description: string, icon: LucideIcon) => {
+      const name = ("/" + rawName.replace(/^\//, "")).toLowerCase();
+      if (existing.has(name)) return;
+      existing.add(name);
+      additions.push({ name, description, icon });
+    };
+
+    for (const c of commands) {
+      add(c.name, c.description || "Custom command", Terminal);
+    }
+    for (const s of skills) {
+      add(s.name, s.description || "Skill", Sparkles);
+    }
+
+    additions.sort((a, b) => a.name.localeCompare(b.name));
+    COMMANDS.push(...additions);
+    dynamicLoaded = true;
+  })();
+
+  return dynamicLoadPromise;
+}
+
+/** React hook: ensures dynamic commands are loaded and returns the merged
+ *  command list (built-ins + custom commands + skills). Re-renders the caller
+ *  once the async load completes. */
+export function useCommands(): CommandDef[] {
+  const [commands, setCommands] = useState<CommandDef[]>(COMMANDS);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadDynamicCommands().then(() => {
+      // Copy the shared array into local state so React re-renders with the
+      // merged list. Guard against setState-after-unmount.
+      if (!cancelled) setCommands([...COMMANDS]);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return commands;
+}
 
 /** Return a `Message` (assistant role) describing the available commands. */
 export function helpMessage(): Message {
@@ -168,9 +247,46 @@ export async function dispatchCommand(
     case "/ocr":
       return handleOcr(args, ctx);
 
-    // ── Frontend-handled with local data ──
+    // ── Session export (server-side) ──
     case "/export":
       return handleExport(ctx);
+
+    case "/export-claude":
+      return handleExportClaude(ctx);
+
+    // ── Session title ──
+    case "/title":
+      return handleTitle(args, ctx);
+
+    // ── File edit history ──
+    case "/undo":
+      return handleUndo();
+
+    case "/redo":
+      return handleRedo();
+
+    // ── Usage / init ──
+    case "/usage":
+      return handleUsage(args);
+
+    case "/init":
+      return handleInit();
+
+    // ── Permissions ──
+    case "/permissions":
+      return handlePermissions();
+
+    case "/yolo":
+      return handleYolo(args);
+
+    // ── Agent selection ──
+    case "/agent":
+      return handleAgent(args, ctx);
+
+    // ── Plugins ──
+    case "/plugin":
+    case "/plugins":
+      return handlePlugin(args);
 
     // ── Frontend-handled via API ──
     case "/mask":
@@ -413,32 +529,342 @@ async function handleOcr(
 }
 
 async function handleExport(ctx: CommandContext): Promise<CommandResult> {
-  const messages = ctx.getMessages?.() ?? [];
-  if (messages.length === 0) {
+  const sessionId = ctx.getSessionId?.();
+  if (!sessionId) {
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "No active session to export." }],
+    };
+  }
+
+  try {
+    const markdown = await api.exportSessionMarkdown(sessionId);
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "Exported session as Markdown." }],
+      download: {
+        filename: `ocode_export_${sessionId}.md`,
+        content: markdown,
+        mimeType: "text/markdown;charset=utf-8",
+      },
+    };
+  } catch (err) {
+    return errorMessage("Export failed", err);
+  }
+}
+
+async function handleExportClaude(ctx: CommandContext): Promise<CommandResult> {
+  const sessionId = ctx.getSessionId?.();
+  if (!sessionId) {
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "No active session to export." }],
+    };
+  }
+
+  try {
+    const { path } = await api.exportClaudeSession(sessionId);
     return {
       handled: true,
       messages: [{
         role: "assistant",
-        content: "No messages to export. Start a conversation first.",
+        content: `Appended session to Claude history:\n\`${path}\``,
+      }],
+    };
+  } catch (err) {
+    return errorMessage("Claude export failed", err);
+  }
+}
+
+async function handleTitle(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const title = args.trim();
+  if (!title) {
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: "Usage: `/title <text>` — set a title for the current session.",
       }],
     };
   }
 
-  const sessionId = ctx.getSessionId?.() ?? undefined;
-  const markdown = formatMessagesAsMarkdown(messages, sessionId);
+  const sessionId = ctx.getSessionId?.();
+  if (!sessionId) {
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "No active session to title." }],
+    };
+  }
 
+  try {
+    await api.setSessionTitle(sessionId, title);
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: `Session title set to **${title}**.` }],
+    };
+  } catch (err) {
+    return errorMessage("Failed to set title", err);
+  }
+}
+
+async function handleUndo(): Promise<CommandResult> {
+  try {
+    const res = await api.undoFileChange();
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: `Undid last change to \`${res.path}\`.` }],
+    };
+  } catch (err) {
+    return errorMessage("Undo failed", err);
+  }
+}
+
+async function handleRedo(): Promise<CommandResult> {
+  try {
+    const res = await api.redoFileChange();
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: `Redid change to \`${res.path}\`.` }],
+    };
+  } catch (err) {
+    return errorMessage("Redo failed", err);
+  }
+}
+
+async function handleUsage(args: string): Promise<CommandResult> {
+  const range = args.trim() || undefined;
+  try {
+    const summary = await api.getUsage(range);
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: formatUsage(summary) }],
+    };
+  } catch (err) {
+    return errorMessage("Failed to fetch usage", err);
+  }
+}
+
+async function handleInit(): Promise<CommandResult> {
+  try {
+    const res = await api.initProject();
+    const verb = res.status === "created" ? "Created" : "Found existing";
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: `${verb} \`${res.path}\`.` }],
+    };
+  } catch (err) {
+    return errorMessage("Init failed", err);
+  }
+}
+
+async function handlePermissions(): Promise<CommandResult> {
+  try {
+    const p = await api.getPermissions();
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: formatPermissions(p) }],
+    };
+  } catch (err) {
+    return errorMessage("Failed to fetch permissions", err);
+  }
+}
+
+async function handleYolo(args: string): Promise<CommandResult> {
+  const sub = args.trim().toLowerCase();
+
+  try {
+    if (sub === "" || sub === "status") {
+      const { yolo } = await api.getYolo();
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `**YOLO mode:** ${yolo ? "on (tools auto-approved)" : "off"}`,
+        }],
+      };
+    }
+    if (sub === "on" || sub === "enable" || sub === "true") {
+      await api.setYolo(true);
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "YOLO mode: **on** — tools are auto-approved." }],
+      };
+    }
+    if (sub === "off" || sub === "disable" || sub === "false") {
+      await api.setYolo(false);
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "YOLO mode: **off**." }],
+      };
+    }
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "Usage: `/yolo [on\\|off\\|status]`" }],
+    };
+  } catch (err) {
+    return errorMessage("YOLO command failed", err);
+  }
+}
+
+async function handleAgent(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const name = args.trim();
+  try {
+    if (!name) {
+      const agents = await api.listAgents();
+      const lines = agents
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((a) => `- **${a.name}** — ${a.description || "(no description)"}`);
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `## Agents\n\n${lines.join("\n")}\n\nUse \`/agent <name>\` to switch.`,
+        }],
+      };
+    }
+
+    const sessionId = ctx.getSessionId?.() ?? undefined;
+    const res = await api.setAgent(name, sessionId);
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `Switched to agent **${res.name}** — ${res.description || ""}`.trim(),
+      }],
+    };
+  } catch (err) {
+    return errorMessage("Agent command failed", err);
+  }
+}
+
+async function handlePlugin(args: string): Promise<CommandResult> {
+  const trimmed = args.trim();
+  const spaceIdx = trimmed.indexOf(" ");
+  const sub = (spaceIdx >= 0 ? trimmed.slice(0, spaceIdx) : trimmed).toLowerCase();
+  const rest = spaceIdx >= 0 ? trimmed.slice(spaceIdx + 1).trim() : "";
+
+  try {
+    if (sub === "" || sub === "list") {
+      const plugins = await api.listPlugins();
+      if (plugins.length === 0) {
+        return {
+          handled: true,
+          messages: [{ role: "assistant", content: "No plugins installed." }],
+        };
+      }
+      const lines = plugins.map(
+        (p) => `- **${p.name}** ${p.enabled ? "✅" : "❌"} — ${p.description || p.source}`,
+      );
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `## Plugins\n\n${lines.join("\n")}\n\n\`/plugin enable\\|disable <name>\`, \`/plugin install <source>\`, \`/plugin remove <name>\``,
+        }],
+      };
+    }
+
+    if ((sub === "enable" || sub === "disable") && rest) {
+      const res = await api.setPluginEnabled(rest, sub === "enable");
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: `Plugin **${res.name}**: ${res.status}.` }],
+      };
+    }
+
+    if (sub === "install" && rest) {
+      const res = await api.installPlugin(rest);
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: `Installed plugin **${res.name}** from \`${res.source}\`.` }],
+      };
+    }
+
+    if (sub === "remove" && rest) {
+      await api.removePlugin(rest);
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: `Removed plugin **${rest}**.` }],
+      };
+    }
+
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: "Usage: `/plugin [list\\|enable <name>\\|disable <name>\\|install <source>\\|remove <name>]`",
+      }],
+    };
+  } catch (err) {
+    return errorMessage("Plugin command failed", err);
+  }
+}
+
+// ─── Rendering helpers ───────────────────────────────────────────────────────
+
+function errorMessage(prefix: string, err: unknown): CommandResult {
   return {
     handled: true,
     messages: [{
       role: "assistant",
-      content: `Exported **${messages.length}** message${messages.length === 1 ? "" : "s"} as Markdown.`,
+      content: `**${prefix}:** ${err instanceof Error ? err.message : String(err)}`,
     }],
-    download: {
-      filename: `chat-export-${sessionId || "unknown"}.md`,
-      content: markdown,
-      mimeType: "text/markdown;charset=utf-8",
-    },
   };
+}
+
+function formatUsage(s: UsageSummary): string {
+  const lines: string[] = ["## Token Usage"];
+  lines.push("");
+  lines.push(`**Requests:** ${s.total_requests.toLocaleString()}  `);
+  lines.push(`**Total tokens:** ${s.total_tokens.toLocaleString()}  `);
+  lines.push(`**Spend:** $${s.total_spend.toFixed(4)}`);
+  lines.push("");
+
+  if (s.by_model.length > 0) {
+    lines.push("| Model | Requests | Prompt | Completion | Cache read | Total | Spend |");
+    lines.push("|---|--:|--:|--:|--:|--:|--:|");
+    for (const m of s.by_model) {
+      lines.push(
+        `| ${m.model} | ${m.request_count.toLocaleString()} | ${m.prompt_tokens.toLocaleString()} | ${m.completion_tokens.toLocaleString()} | ${m.cache_read_tokens.toLocaleString()} | ${m.total_tokens.toLocaleString()} | $${m.spend.toFixed(4)} |`,
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatPermissions(p: PermissionsResponse): string {
+  const lines: string[] = ["## Permissions"];
+  lines.push("");
+  lines.push(`**Mode:** ${p.mode}  `);
+  lines.push(`**Auto-allow:** ${p.auto_allow ? "on" : "off"}`);
+  lines.push("");
+
+  if (p.rules.length > 0) {
+    lines.push("**Tool rules**");
+    lines.push("");
+    lines.push("| Tool | Level |");
+    lines.push("|---|---|");
+    for (const r of p.rules) {
+      lines.push(`| \`${r.tool}\` | ${r.level} |`);
+    }
+    lines.push("");
+  }
+
+  if (p.bash_rules.length > 0) {
+    lines.push("**Bash prefix rules**");
+    lines.push("");
+    lines.push("| Prefix | Level |");
+    lines.push("|---|---|");
+    for (const r of p.bash_rules) {
+      lines.push(`| \`${r.tool}\` | ${r.level} |`);
+    }
+  }
+
+  if (p.rules.length === 0 && p.bash_rules.length === 0) {
+    lines.push("_No explicit rules configured._");
+  }
+  return lines.join("\n");
 }
 
 async function handleMask(args: string, ctx: CommandContext): Promise<CommandResult> {

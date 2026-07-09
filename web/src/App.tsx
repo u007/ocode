@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
+import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatState } from "./stores/chatStore";
 import { ProjectProvider } from "./stores/projectStore";
 import { api, apiPath, authHeaders } from "./api/client";
@@ -126,6 +127,7 @@ function HomeApp() {
   }, []);
 
   // Mobile responsive
+  const isMobile = useIsMobile();
   useEffect(() => {
     const mq = window.matchMedia("(max-width: 767px)");
     let lastWasMobile = mq.matches;
@@ -315,6 +317,7 @@ function HomeApp() {
             onClose={() => setCoworkOpen(false)}
             activeAgent="build"
             onModelClick={openModelDialog}
+            isMobile={isMobile}
           />
         )}
       </div>

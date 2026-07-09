@@ -6,7 +6,9 @@
 package main
 
 import (
+	"embed"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 
@@ -14,9 +16,15 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/services/dock"
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
+	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/desktop"
+	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/web"
 )
+
+//go:embed all:embedded-assets
+var embeddedAssets embed.FS
 
 func main() {
 	// Resolve the working directory the server anchors relative paths to.
@@ -30,6 +38,21 @@ func main() {
 			log.Printf("ocode-desktop: resolve home dir (cwd err %v): %v", err, homeErr)
 			workDir = "."
 		}
+	}
+
+	// Register the embedded skills/plugins so the server can serve them even
+	// when no disk copy exists. The assets are copied into embedded-assets/ by
+	// the build (make desktop); a bare `go build` embeds only the placeholder
+	// and the fallback becomes a no-op.
+	assetsSub, _ := fs.Sub(embeddedAssets, "embedded-assets")
+	skill.SetBundledFS(assetsSub)
+	bundled.SetEmbeddedSkills(embeddedAssets)
+	bundled.SetEmbeddedPlugins(embeddedAssets)
+	if err := bundled.EnsureExtracted(); err != nil {
+		log.Printf("ocode-desktop: bundled asset extraction failed: %v", err)
+	}
+	if assetsSub != nil {
+		agent.SetBundledModelConfigFS(assetsSub)
 	}
 
 	// Boot the ocode API server on a random loopback port with a fresh token.

@@ -1,7 +1,7 @@
 import { useChatState } from "../../stores/chatStore";
 import { api } from "../../api/client";
 import { useEffect, useState } from "react";
-import type { LSPStatus, FileStatus } from "../../api/types";
+import type { LSPStatus, FileStatus, MCPStatus } from "../../api/types";
 
 interface Props {
   onClose?: () => void;
@@ -16,6 +16,8 @@ export default function StatusPanel({ onClose }: Props) {
   const [files, setFiles] = useState<FileStatus[]>([]);
   const [lsps, setLsps] = useState<LSPStatus[]>([]);
   const [spending, setSpending] = useState<{ spending_usd: number; records: number } | null>(null);
+  const [mcp, setMcp] = useState<MCPStatus[]>([]);
+  const [mcpBusy, setMcpBusy] = useState<string | null>(null);
 
   // Fetch the dedicated file/lsp/spending endpoints on mount — these are
   // cheaper than re-fetching the whole tui-status, and the user only opens
@@ -40,10 +42,35 @@ export default function StatusPanel({ onClose }: Props) {
         if (!cancelled) setSpending(res);
       })
       .catch(console.error);
+    api
+      .getMCP()
+      .then((res) => {
+        if (!cancelled) setMcp(res);
+      })
+      .catch(console.error);
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // Enable/disable an MCP server with an optimistic toggle (rolled back on
+  // failure).
+  const toggleMcp = (server: MCPStatus) => {
+    const next = !server.enabled;
+    setMcpBusy(server.name);
+    setMcp((prev) =>
+      prev.map((m) => (m.name === server.name ? { ...m, enabled: next } : m)),
+    );
+    api
+      .setMCPEnabled(server.name, next)
+      .catch((err) => {
+        console.error("failed to toggle MCP server", err);
+        setMcp((prev) =>
+          prev.map((m) => (m.name === server.name ? { ...m, enabled: server.enabled } : m)),
+        );
+      })
+      .finally(() => setMcpBusy(null));
+  };
 
   const snap = tuiStatus;
   const sessionTitle = snap?.session_title || "(untitled)";
@@ -239,6 +266,53 @@ export default function StatusPanel({ onClose }: Props) {
                       {s.root}
                     </span>
                   )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+
+        {/* MCP servers */}
+        <section>
+          <h3 className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+            MCP servers ({mcp.length})
+          </h3>
+          {mcp.length === 0 ? (
+            <p className="text-zinc-600">(none)</p>
+          ) : (
+            <ul className="space-y-1">
+              {mcp.map((m) => (
+                <li key={m.name} className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-xs truncate" title={m.name}>
+                    {m.name}
+                    {m.type ? (
+                      <span className="text-zinc-600"> · {m.type}</span>
+                    ) : null}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => toggleMcp(m)}
+                    disabled={mcpBusy === m.name}
+                    className="flex items-center gap-2 shrink-0 disabled:opacity-50"
+                    title={m.enabled ? "Disable MCP server" : "Enable MCP server"}
+                  >
+                    <span
+                      className={`text-[10px] ${m.enabled ? "text-emerald-400" : "text-zinc-500"}`}
+                    >
+                      {m.enabled ? "on" : "off"}
+                    </span>
+                    <span
+                      className={`relative inline-flex h-4 w-7 shrink-0 items-center rounded-full transition-colors ${
+                        m.enabled ? "bg-emerald-500/80" : "bg-zinc-600"
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                          m.enabled ? "translate-x-3.5" : "translate-x-0.5"
+                        }`}
+                      />
+                    </span>
+                  </button>
                 </li>
               ))}
             </ul>

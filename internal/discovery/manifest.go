@@ -1,6 +1,9 @@
 package discovery
 
-import "runtime"
+import (
+	"runtime"
+	"strings"
+)
 
 // ArchiveFormat tags a downloadable artifact as a compressed archive that must
 // be extracted to a single file (Dest) after download. Empty means a single
@@ -30,8 +33,13 @@ type Artifact struct {
 // platform, and how to talk to it.
 type ServerManifest struct {
 	OS, Arch string
-	ModelID  string // e.g. "local/bge-m3"
+	ModelID  string // e.g. "local/bge-m3" or "local/lfm2.5-embedding"
 	Dim      int
+	// Backend selects how the model is served. "" or "llamacpp" = bundled
+	// llama-server with a GGUF; "mlx" = Apple-Silicon MLX Python server.
+	Backend string
+	// MLXRepo is the HuggingFace repo id the MLX server loads (Backend=="mlx").
+	MLXRepo string
 	// Artifacts lists the files to download. The first one is conventionally the
 	// server binary (Exec=true) when the server is a single executable; the
 	// second is the model.
@@ -69,7 +77,7 @@ type ServerManifest struct {
 var localManifests = []ServerManifest{
 	{
 		OS: "darwin", Arch: "arm64",
-		ModelID: "local/bge-m3", Dim: 1024,
+		ModelID: "local/bge-m3", Dim: 1024, Backend: BackendLlamaCpp,
 		Artifacts: []Artifact{
 			// llama.cpp b9747 — macOS Apple Silicon.
 			{
@@ -98,7 +106,7 @@ var localManifests = []ServerManifest{
 	},
 	{
 		OS: "darwin", Arch: "amd64",
-		ModelID: "local/bge-m3", Dim: 1024,
+		ModelID: "local/bge-m3", Dim: 1024, Backend: BackendLlamaCpp,
 		Artifacts: []Artifact{
 			// llama.cpp b9747 — macOS Intel.
 			{
@@ -124,7 +132,7 @@ var localManifests = []ServerManifest{
 	},
 	{
 		OS: "linux", Arch: "amd64",
-		ModelID: "local/bge-m3", Dim: 1024,
+		ModelID: "local/bge-m3", Dim: 1024, Backend: BackendLlamaCpp,
 		Artifacts: []Artifact{
 			// llama.cpp b9747 — Linux x86_64 (Ubuntu glibc build).
 			{
@@ -148,6 +156,21 @@ var localManifests = []ServerManifest{
 		HealthPath: "/v1/models",
 		EmbedPath:  "/v1/embeddings",
 	},
+	{
+		// LFM2.5-Embedding-350M via Apple-Silicon MLX. Verified end-to-end:
+		// mlx_lm loads mlx-community/LFM2.5-Embedding-350M-4bit (1024-d, lfm2-bidir
+		// arch); mean-pooling the last hidden state yields semantically correct
+		// embeddings. Runs only on darwin/arm64. The model is fetched by the server
+		// on first use, so no static SHA pin is needed (unlike GGUF artifacts).
+		OS:      "darwin", Arch: "arm64",
+		ModelID: "local/lfm2.5-embedding", Dim: 1024,
+		Backend: BackendMLX,
+		MLXRepo: "mlx-community/LFM2.5-Embedding-350M-4bit",
+		Artifacts: nil,
+		LaunchArgv: []string{"python3", "{script}", "--repo", "mlx-community/LFM2.5-Embedding-350M-4bit", "--model-id", "local/lfm2.5-embedding", "--port", "{port}"},
+		HealthPath: "/v1/models",
+		EmbedPath:  "/v1/embeddings",
+	},
 }
 
 // CurrentManifest returns the manifest matching the host, if supported.
@@ -164,3 +187,50 @@ func CurrentManifest() (ServerManifest, bool) {
 // import runtime directly.
 func goos() string  { return runtime.GOOS }
 func goarch() string { return runtime.GOARCH }
+
+// DefaultLocalModelID returns the local embedding model we recommend for this
+// host. On Apple Silicon we default to the MLX-backed LFM2.5 embedding model
+// (fast, on-device); elsewhere we fall back to the llama.cpp BGE-M3 GGUF.
+func DefaultLocalModelID() string {
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		return "local/lfm2.5-embedding"
+	}
+	return "local/bge-m3"
+}
+
+// ManifestForModel returns the manifest whose ModelID matches, or false.
+func ManifestForModel(modelID string) (ServerManifest, bool) {
+	for _, m := range localManifests {
+		if m.ModelID == modelID {
+			return m, true
+		}
+	}
+	return ServerManifest{}, false
+}
+
+// LocalManifestsForHost returns every manifest that can run on this host
+// (used by the embedding-model picker to list selectable local models).
+func LocalManifestsForHost() []ServerManifest {
+	var out []ServerManifest
+	for _, m := range localManifests {
+		if m.OS == runtime.GOOS && m.Arch == runtime.GOARCH {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// ExpectedServeID is the model id the running server must report in
+// /v1/models for us to adopt it. llama.cpp reports the GGUF path, so we match
+// on the GGUF basename; the MLX server reports the discovery ModelID directly.
+func (m ServerManifest) ExpectedServeID() string {
+	if m.Backend == BackendMLX {
+		return m.ModelID
+	}
+	for _, a := range m.Artifacts {
+		if strings.HasSuffix(a.Dest, ".gguf") {
+			return a.Dest
+		}
+	}
+	return m.ModelID
+}

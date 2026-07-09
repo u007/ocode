@@ -32,6 +32,13 @@ Rules:
 - Do not repeat changes that already failed in a prior iteration.
 - If you must change a file not obviously related to the goal, explain why.
 - If you cannot implement something, say so explicitly — do not fake it.
+- Ship NO silent stubs. Never leave `panic("not implemented")`, `// TODO`,
+  empty function bodies, or placeholder returns that compile but do nothing.
+  Either implement it fully or put it in "What Was NOT Done" with a concrete
+  reason. The orchestrator and validator will FAIL any change containing a real
+  stub, so a stub is worse than an honest deferral.
+- Be radically honest in "What Was NOT Done". The pipeline verifies your claims
+  against the real git diff; a mismatch is treated as a trust failure.
 
 Output exactly this format and nothing else after it:
 

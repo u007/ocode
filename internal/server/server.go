@@ -104,6 +104,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/git/status", s.authMiddleware(s.handleGitStatus))
 	s.mux.HandleFunc("GET /api/git/diff", s.authMiddleware(s.handleGitDiff))
 	s.mux.HandleFunc("GET /api/theme", s.authMiddleware(s.handleGetTheme))
+	s.mux.HandleFunc("GET /api/themes", s.authMiddleware(s.handleListThemes))
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
@@ -157,6 +158,8 @@ func (s *Server) registerRoutes() {
 	// Permissions
 	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))
 	s.mux.HandleFunc("POST /api/permissions", s.authMiddleware(s.handleSetPermission))
+	s.mux.HandleFunc("POST /api/questions", s.authMiddleware(s.handleAnswerQuestion))
+	s.mux.HandleFunc("POST /api/permissions/resolve", s.authMiddleware(s.handleResolvePermission))
 	s.mux.HandleFunc("GET /api/permissions/yolo", s.authMiddleware(s.handleGetYolo))
 	s.mux.HandleFunc("PUT /api/permissions/yolo", s.authMiddleware(s.handleSetYolo))
 
@@ -188,20 +191,20 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/github/issues/{owner}/{repo}", s.authMiddleware(s.handleGitHubIssues))
 	s.mux.HandleFunc("POST /api/init", s.authMiddleware(s.handleInit))
 
-		// Projects (multi-project desktop UI)
-		s.mux.HandleFunc("GET /api/projects", s.authMiddleware(s.handleListProjects))
-		s.mux.HandleFunc("POST /api/projects", s.authMiddleware(s.handleAddProject))
-		s.mux.HandleFunc("DELETE /api/projects/{path...}", s.authMiddleware(s.handleRemoveProject))
-		s.mux.HandleFunc("GET /api/projects/sessions", s.authMiddleware(s.handleListProjectSessions))
+	// Projects (multi-project desktop UI)
+	s.mux.HandleFunc("GET /api/projects", s.authMiddleware(s.handleListProjects))
+	s.mux.HandleFunc("POST /api/projects", s.authMiddleware(s.handleAddProject))
+	s.mux.HandleFunc("DELETE /api/projects/{path...}", s.authMiddleware(s.handleRemoveProject))
+	s.mux.HandleFunc("GET /api/projects/sessions", s.authMiddleware(s.handleListProjectSessions))
 
-		// Directory browser for the project sidebar folder picker.
-		s.mux.HandleFunc("GET /api/browse", s.authMiddleware(s.handleBrowseDirectory))
+	// Directory browser for the project sidebar folder picker.
+	s.mux.HandleFunc("GET /api/browse", s.authMiddleware(s.handleBrowseDirectory))
 
-		// Monaco editor settings and extensions
-		s.mux.HandleFunc("GET /api/monaco/settings", s.authMiddleware(s.handleGetMonacoSettings))
-		s.mux.HandleFunc("PUT /api/monaco/settings", s.authMiddleware(s.handleSetMonacoSettings))
-		s.mux.HandleFunc("GET /api/monaco/extensions", s.authMiddleware(s.handleListMonacoExtensions))
-		s.mux.HandleFunc("PUT /api/monaco/extensions/{name}/toggle", s.authMiddleware(s.handleToggleMonacoExtension))
+	// Monaco editor settings and extensions
+	s.mux.HandleFunc("GET /api/monaco/settings", s.authMiddleware(s.handleGetMonacoSettings))
+	s.mux.HandleFunc("PUT /api/monaco/settings", s.authMiddleware(s.handleSetMonacoSettings))
+	s.mux.HandleFunc("GET /api/monaco/extensions", s.authMiddleware(s.handleListMonacoExtensions))
+	s.mux.HandleFunc("PUT /api/monaco/extensions/{name}/toggle", s.authMiddleware(s.handleToggleMonacoExtension))
 
 	// Uploads (assets)
 	s.mux.HandleFunc("/api/uploads", s.authMiddleware(s.handleUploads))
@@ -300,6 +303,10 @@ func (s *Server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetTheme(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetTheme(w, r)
+}
+
+func (s *Server) handleListThemes(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListThemes(w, r)
 }
 
 func (s *Server) handleFileTree(w http.ResponseWriter, r *http.Request) {
@@ -523,7 +530,9 @@ func (s *Server) handleSessionContext(w http.ResponseWriter, r *http.Request) {
 // File shims
 func (s *Server) handleUndo(w http.ResponseWriter, r *http.Request) { s.handler.HandleUndo(w, r) }
 func (s *Server) handleRedo(w http.ResponseWriter, r *http.Request) { s.handler.HandleRedo(w, r) }
-func (s *Server) handleShellCommand(w http.ResponseWriter, r *http.Request) { s.handler.HandleShellCommand(w, r) }
+func (s *Server) handleShellCommand(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleShellCommand(w, r)
+}
 
 // TUI status shims. These read from the live RCBridge (when the web is
 // attached to a TUI session) or fall back to the local handler's config when
@@ -621,6 +630,12 @@ func (s *Server) handleSetPermission(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleGetYolo(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetYolo(w, r) }
 func (s *Server) handleSetYolo(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetYolo(w, r) }
+func (s *Server) handleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleAnswerQuestion(w, r)
+}
+func (s *Server) handleResolvePermission(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleResolvePermission(w, r)
+}
 
 // MCP shims
 func (s *Server) handleListMCP(w http.ResponseWriter, r *http.Request) { s.handler.HandleListMCP(w, r) }
@@ -699,18 +714,36 @@ func (s *Server) handleGitHubIssues(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) { s.handler.HandleInit(w, r) }
 
-func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) { s.handler.HandleListProjects(w, r) }
-func (s *Server) handleAddProject(w http.ResponseWriter, r *http.Request) { s.handler.HandleAddProject(w, r) }
-func (s *Server) handleRemoveProject(w http.ResponseWriter, r *http.Request) { s.handler.HandleRemoveProject(w, r) }
-func (s *Server) handleListProjectSessions(w http.ResponseWriter, r *http.Request) { s.handler.HandleListProjectSessions(w, r) }
-func (s *Server) handleBrowseDirectory(w http.ResponseWriter, r *http.Request) { s.handler.HandleBrowseDirectory(w, r) }
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListProjects(w, r)
+}
+func (s *Server) handleAddProject(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleAddProject(w, r)
+}
+func (s *Server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRemoveProject(w, r)
+}
+func (s *Server) handleListProjectSessions(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListProjectSessions(w, r)
+}
+func (s *Server) handleBrowseDirectory(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleBrowseDirectory(w, r)
+}
 
-func (s *Server) handleGetMonacoSettings(w http.ResponseWriter, r *http.Request) { s.handler.HandleGetMonacoSettings(w, r) }
-func (s *Server) handleSetMonacoSettings(w http.ResponseWriter, r *http.Request) { s.handler.HandleSetMonacoSettings(w, r) }
-func (s *Server) handleListMonacoExtensions(w http.ResponseWriter, r *http.Request) { s.handler.HandleListMonacoExtensions(w, r) }
-func (s *Server) handleToggleMonacoExtension(w http.ResponseWriter, r *http.Request) { s.handler.HandleToggleMonacoExtension(w, r) }
+func (s *Server) handleGetMonacoSettings(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetMonacoSettings(w, r)
+}
+func (s *Server) handleSetMonacoSettings(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetMonacoSettings(w, r)
+}
+func (s *Server) handleListMonacoExtensions(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListMonacoExtensions(w, r)
+}
+func (s *Server) handleToggleMonacoExtension(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleToggleMonacoExtension(w, r)
+}
+
 type ChatRequest struct {
-
 	Content   string `json:"content"`
 	SessionID string `json:"sessionId,omitempty"`
 	Model     string `json:"model,omitempty"`

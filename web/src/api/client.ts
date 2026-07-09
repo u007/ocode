@@ -9,9 +9,16 @@ import type {
   ThemeResponse,
   TUIStatus,
   LSPStatus,
+  MCPStatus,
+  ThemesListResponse,
   FileStatus,
   Project,
   BrowseResponse,
+  PermissionsResponse,
+  UsageSummary,
+  PluginInfo,
+  CommandEntry,
+  SkillEntry,
 } from "./types";
 
 // Base path for API calls. When the SPA is served under a tailscale --set-path
@@ -93,7 +100,12 @@ export const api = {
     fetchJSON<GitDiffFile[]>(
       `/api/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,
     ),
-  getTheme: () => fetchJSON<ThemeResponse>("/api/theme"),
+  getTheme: (name?: string) =>
+    fetchJSON<ThemeResponse>(
+      name ? `/api/theme?name=${encodeURIComponent(name)}` : "/api/theme",
+    ),
+  getThemes: () => fetchJSON<ThemesListResponse>("/api/themes"),
+  getMCP: () => fetchJSON<MCPStatus[]>("/api/mcp"),
   getAdvisor: () =>
     fetchJSON<{ model: string }>("/api/config/advisor"),
   setAdvisor: (model: string) =>
@@ -245,6 +257,138 @@ export const api = {
       body: JSON.stringify({ model }),
     }),
 
+  // ── File edit history ──
+  undoFileChange: () =>
+    fetchJSON<{ path: string; action: string }>("/api/files/undo", {
+      method: "POST",
+    }),
+  redoFileChange: () =>
+    fetchJSON<{ path: string; action: string }>("/api/files/redo", {
+      method: "POST",
+    }),
+
+  // ── Session title / export ──
+  setSessionTitle: (id: string, title: string) =>
+    fetchJSON<{ title: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/title`,
+      { method: "PUT", body: JSON.stringify({ title }) },
+    ),
+  // The server returns raw markdown (text/markdown), not JSON, so this uses a
+  // raw fetch and reads the body as text.
+  exportSessionMarkdown: async (id: string): Promise<string> => {
+    const res = await fetch(
+      apiPath(`/api/sessions/${encodeURIComponent(id)}/export`),
+      { headers: authHeaders() },
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || res.statusText);
+    }
+    return res.text();
+  },
+  exportClaudeSession: (id: string) =>
+    fetchJSON<{ path: string }>(
+      `/api/sessions/${encodeURIComponent(id)}/export-claude`,
+    ),
+
+  // ── Usage ──
+  getUsage: (range?: string) =>
+    fetchJSON<UsageSummary>(
+      `/api/usage${range ? `?range=${encodeURIComponent(range)}` : ""}`,
+    ),
+
+  // ── Init ──
+  initProject: () =>
+    fetchJSON<{ path: string; status: string }>("/api/init", {
+      method: "POST",
+    }),
+
+  // ── Permissions ──
+  getPermissions: () => fetchJSON<PermissionsResponse>("/api/permissions"),
+  getYolo: () => fetchJSON<{ yolo: boolean }>("/api/permissions/yolo"),
+  setYolo: (enabled: boolean) =>
+    fetchJSON<{ yolo: boolean }>("/api/permissions/yolo", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+
+  // ── Agent selection ──
+  setAgent: (name: string, sessionId?: string) =>
+    fetchJSON<{ name: string; description: string }>("/api/config/agent", {
+      method: "PUT",
+      body: JSON.stringify({ name, session_id: sessionId }),
+    }),
+
+  // ── MCP enable/disable ──
+  setMCPEnabled: (name: string, enabled: boolean) =>
+    fetchJSON<{ name: string; status: string }>(
+      `/api/mcp/${encodeURIComponent(name)}/${enabled ? "enable" : "disable"}`,
+      { method: "PUT" },
+    ),
+
+  // ── Plugins ──
+  listPlugins: () => fetchJSON<PluginInfo[]>("/api/plugins"),
+  setPluginEnabled: (name: string, enabled: boolean) =>
+    fetchJSON<{ name: string; status: string }>(
+      `/api/plugins/${encodeURIComponent(name)}/${enabled ? "enable" : "disable"}`,
+      { method: "PUT" },
+    ),
+  installPlugin: (source: string) =>
+    fetchJSON<{ name: string; dir: string; source: string }>("/api/plugins", {
+      method: "POST",
+      body: JSON.stringify({ source }),
+    }),
+  removePlugin: async (name: string): Promise<void> => {
+    const res = await fetch(
+      apiPath(`/api/plugins/${encodeURIComponent(name)}`),
+      { method: "DELETE", headers: authHeaders() },
+    );
+    // 204 No Content on success; any 2xx is acceptable.
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: res.statusText }));
+      throw new Error(err.error || res.statusText);
+    }
+  },
+
+  // ── Dynamic commands / skills ──
+  listCommands: () => fetchJSON<CommandEntry[]>("/api/commands"),
+  listSkills: () => fetchJSON<SkillEntry[]>("/api/skills"),
+
+  // ── Agent question prompts ──
+  // Answer a pending `question` prompt raised by the agent. Throws on 404/409
+  // so callers can surface the failure and dismiss the dialog.
+  answerQuestion: (
+    requestId: string,
+    sessionId: string | null,
+    answers: import("./types").QuestionAnswerPayload[],
+  ) =>
+    fetchJSON<ChatResponse>("/api/questions", {
+      method: "POST",
+      body: JSON.stringify({
+        request_id: requestId,
+        session_id: sessionId ?? undefined,
+        answers,
+      }),
+    }),
+
+  // ── Agent permission prompts ──
+  // Resolve a pending PERMISSION_ASK raised by the agent (headless serve mode).
+  // Distinct from the config POST /api/permissions (which sets a tool rule).
+  // Throws on 404/409 so callers can surface the failure and dismiss the dialog.
+  resolvePermission: (
+    requestId: string,
+    sessionId: string | null,
+    approved: boolean,
+  ) =>
+    fetchJSON<ChatResponse>("/api/permissions/resolve", {
+      method: "POST",
+      body: JSON.stringify({
+        request_id: requestId,
+        session_id: sessionId ?? undefined,
+        approved,
+      }),
+    }),
+
 };
 
 export type SSEEventHandler = (event: string, data: unknown) => void;
@@ -272,7 +416,7 @@ export function connectSessionMirror(
         console.error(`failed to parse '${name}' mirror frame`, err);
       }
     });
-  ["messages", "user_message", "thinking", "text", "tool_start", "tool_result", "turn_done", "status", "advisor_enabled"].forEach(on);
+  ["messages", "user_message", "thinking", "text", "tool_start", "tool_result", "turn_done", "status", "advisor_enabled", "question", "question_resolved", "permission", "permission_resolved"].forEach(on);
   // The "error" event is overloaded: a server-sent `event: error` carries data,
   // while a transport failure (EventSource auto-reconnects) carries none.
   es.addEventListener("error", (e) => {

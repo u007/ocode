@@ -6,7 +6,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
-import { COMMANDS } from "../Chat/commands";
+import { useCommands } from "../Chat/commands";
 
 interface Props {
   open: boolean;
@@ -15,13 +15,14 @@ interface Props {
 }
 
 export default function CommandPalette({ open, onClose, onExecute }: Props) {
+  const commands = useCommands();
   return (
     <CommandDialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <CommandInput placeholder="Type a command..." />
       <CommandList>
         <CommandEmpty>No commands found</CommandEmpty>
         <CommandGroup heading="Commands">
-          {COMMANDS.map((cmd) => (
+          {commands.map((cmd) => (
             <CommandItem
               key={cmd.name}
               onSelect={() => {

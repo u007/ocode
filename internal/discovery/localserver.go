@@ -15,9 +15,17 @@ import (
 
 const localServerPort = "11457" // fixed port so separate ocode processes share one server
 
+// Embedding backend identifiers (mirror manifest.Backend*; defined here so
+// callers in this file don't reach across for the constants).
+const (
+	BackendLlamaCpp = "llamacpp"
+	BackendMLX      = "mlx"
+)
+
 var (
-	localMu   sync.Mutex
-	localBase string // set once a server is confirmed up
+	localMu      sync.Mutex
+	localBase    string // set once a server is confirmed up
+	localModelID string // model id currently served by localBase (guards model switch)
 )
 
 func localBaseURL() string { return "http://localhost:" + localServerPort }
@@ -73,46 +81,72 @@ type LocalServerOptions struct {
 //
 // Otherwise: download artifacts and spawn via the supplied supervised-spawn
 // function. Singleton within the process via localMu + localBase.
-func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setStatus func(string), opts LocalServerOptions) (string, int, error) {
-	man, ok := CurrentManifest()
+// EnsureLocalServer guarantees a shared local embed server is running and returns
+// its base URL + embedding dimension. Unlike the original, it is model-aware:
+// it only adopts/reuses a server that actually serves the requested modelID,
+// so switching embedding models can never silently query a wrong-model server
+// (which would produce garbage embeddings). Probe-first order:
+//
+//  1. opts.UserBaseURL (LM Studio, user-built llama-server, MLX server) — if set + healthy + matching model.
+//  2. The manifest port (11457) — adopted if already answering with the right model
+//     (even if started by a different ocode process).
+//
+// Otherwise: download artifacts (llamacpp) or write the MLX server script, then
+// spawn via the supplied supervised-spawn function. Singleton within the process
+// via localMu + localBase + localModelID.
+func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDir string, setStatus func(string), opts LocalServerOptions) (string, int, error) {
+	man, ok := ManifestForModel(modelID)
 	if !ok {
-		return "", 0, fmt.Errorf("local embedding backend not supported on this platform (%s/%s)", goos(), goarch())
+		return "", 0, fmt.Errorf("no local embed manifest for model %q on %s/%s", modelID, goos(), goarch())
 	}
+	expect := man.ExpectedServeID()
 
 	localMu.Lock()
 	defer localMu.Unlock()
 
-	// In-process fast path.
+	// In-process fast path: only reuse if it serves the requested model.
 	if localBase != "" {
-		return localBase, man.Dim, nil
+		if localModelID == modelID {
+			return localBase, man.Dim, nil
+		}
+		// A different model's server holds the slot; cannot reuse it.
+		localBase = ""
 	}
-	// 1) User-supplied server takes priority (LM Studio :1234, custom
-	//    llama-server, etc.). We adopt any base URL whose /v1/models
-	//    endpoint returns a non-empty model list.
+
+	base := localBaseURL()
+	// 1) User-supplied server takes priority — but only if it serves the model.
 	if opts.UserBaseURL != "" {
-		if probeLocalServer(opts.UserBaseURL, man.HealthPath) {
-			emitUserDiscoveryDebug("DISCOVERY", "adopted user embed server: "+opts.UserBaseURL)
-			localBase = opts.UserBaseURL
+		if healthy, served := probeLocalServerModel(opts.UserBaseURL, man.HealthPath, expect); healthy {
+			if !modelMatches(served, expect) {
+				return "", 0, fmt.Errorf("user embed server at %s serves %v, not %s", opts.UserBaseURL, served, modelID)
+			}
+			emitDiscoveryDebug("DISCOVERY", "adopted user embed server: "+opts.UserBaseURL)
+			localBase, localModelID = opts.UserBaseURL, modelID
 			return localBase, man.Dim, nil
 		}
 		emitDiscoveryDebug("WARN", "user embed server did not respond at "+opts.UserBaseURL+" — falling back to bundled server")
 	}
 	// 2) Manifest port (cross-process share with other ocode instances).
-	base := localBaseURL()
-	if probeLocalServer(base, man.HealthPath) {
-		emitUserDiscoveryDebug("DISCOVERY", "adopted shared embed server: "+base)
-		localBase = base
+	if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
+		if !modelMatches(served, expect) {
+			return "", 0, fmt.Errorf("local embed server already on %s serves %v, not %s; stop it or restart ocode to switch models", base, served, modelID)
+		}
+		emitDiscoveryDebug("DISCOVERY", "adopted shared embed server: "+base)
+		localBase, localModelID = base, modelID
 		return localBase, man.Dim, nil
 	}
 
-	// Download artifacts (idempotent; cached by sha).
-	emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("downloading %d artifact(s) for local embed server", len(man.Artifacts)))
-	if setStatus != nil {
-		setStatus("downloading")
-	}
-	binDir := filepath.Join(cacheDir, "local-"+man.OS+"-"+man.Arch)
-	for _, a := range man.Artifacts {
-		if err := EnsureArtifact(a, binDir); err != nil {
+	// 3) Spawn our own.
+	switch man.Backend {
+	case BackendMLX:
+		if err := spawnMLXServer(spawn, man, cacheDir, setStatus); err != nil {
+			if setStatus != nil {
+				setStatus("none")
+			}
+			return "", 0, err
+		}
+	default: // llamacpp (and empty Backend default)
+		if err := spawnLlamaCppServer(spawn, man, cacheDir, setStatus); err != nil {
 			if setStatus != nil {
 				setStatus("none")
 			}
@@ -120,22 +154,49 @@ func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setSta
 		}
 	}
 
-	// Build the launch command line from LaunchArgv with {bin}/{port} substituted.
-	// StartBackground runs the result via `bash -c`, so each element is shell-quoted
-	// — otherwise a cache path containing a space (e.g. "/Users/Jane Doe/...") would
-	// split into multiple args.
+	// Wait for health (model load can take seconds). Reject a wrong-model server.
+	for i := 0; i < 60; i++ {
+		if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
+			if !modelMatches(served, expect) {
+				if setStatus != nil {
+					setStatus("none")
+				}
+				return "", 0, fmt.Errorf("spawned embed server on %s serves %v, not %s", base, served, modelID)
+			}
+			localBase, localModelID = base, modelID
+			if setStatus != nil {
+				setStatus("ready")
+			}
+			return base, man.Dim, nil
+		}
+		time.Sleep(time.Second)
+	}
+	if setStatus != nil {
+		setStatus("none")
+	}
+	return "", 0, fmt.Errorf("local embed server did not become healthy on %s", base)
+}
+
+// spawnLlamaCppServer downloads the GGUF + server binary (idempotent, sha-pinned)
+// and spawns the bundled llama-server via the supervised spawn function.
+func spawnLlamaCppServer(spawn func(cmdline string) error, man ServerManifest, cacheDir string, setStatus func(string)) error {
+	emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("downloading %d artifact(s) for local embed server", len(man.Artifacts)))
+	if setStatus != nil {
+		setStatus("downloading")
+	}
+	binDir := filepath.Join(cacheDir, "local-"+man.OS+"-"+man.Arch)
+	for _, a := range man.Artifacts {
+		if err := EnsureArtifact(a, binDir); err != nil {
+			return err
+		}
+	}
+
 	argv := make([]string, len(man.LaunchArgv))
 	for i, a := range man.LaunchArgv {
 		a = strings.ReplaceAll(a, "{bin}", binDir)
 		a = strings.ReplaceAll(a, "{port}", localServerPort)
 		argv[i] = shellQuote(a)
 	}
-	// llama-server's release tarball puts the binary next to its sibling
-	// shared libraries (libllama.*, libggml.*). The dynamic loader needs
-	// DYLD_LIBRARY_PATH on macOS / LD_LIBRARY_PATH on Linux to find them
-	// when the binary is invoked via an absolute path that isn't in $PATH.
-	// Set the env var in the same `bash -c` line as the spawn — wrapping the
-	// command itself, not the wrapper, so it's scoped to llama-server.
 	libEnv := ""
 	if libDir := findLibDir(binDir); libDir != "" {
 		var name string
@@ -149,27 +210,95 @@ func EnsureLocalServer(spawn func(cmdline string) error, cacheDir string, setSta
 	cmdline := libEnv + strings.Join(argv, " ")
 	emitUserDiscoveryDebug("DISCOVERY", "spawning local embed server: "+cmdline)
 	if err := spawn(cmdline); err != nil {
-		if setStatus != nil {
-			setStatus("none")
-		}
-		return "", 0, fmt.Errorf("spawn local embed server: %w", err)
+		return fmt.Errorf("spawn local embed server: %w", err)
 	}
+	return nil
+}
 
-	// Wait for health (model load can take seconds).
-	for i := 0; i < 60; i++ {
-		if probeLocalServer(base, man.HealthPath) {
-			localBase = base
-			if setStatus != nil {
-				setStatus("ready")
-			}
-			return base, man.Dim, nil
-		}
-		time.Sleep(time.Second)
-	}
+// spawnMLXServer writes the bundled MLX server script (if needed) and spawns it
+// via the supervised spawn function. The model is fetched by mlx_lm on first
+// load, so there is no static artifact to download here.
+func spawnMLXServer(spawn func(cmdline string) error, man ServerManifest, cacheDir string, setStatus func(string)) error {
 	if setStatus != nil {
-		setStatus("none")
+		setStatus("downloading") // mlx_lm fetches the model on first load
 	}
-	return "", 0, fmt.Errorf("local embed server did not become healthy on %s", base)
+	scriptPath, err := WriteMLXServerScript(cacheDir)
+	if err != nil {
+		return fmt.Errorf("write MLX server script: %w", err)
+	}
+	argv := make([]string, len(man.LaunchArgv))
+	for i, a := range man.LaunchArgv {
+		a = strings.ReplaceAll(a, "{script}", scriptPath)
+		a = strings.ReplaceAll(a, "{port}", localServerPort)
+		argv[i] = shellQuote(a)
+	}
+	cmdline := strings.Join(argv, " ")
+	emitUserDiscoveryDebug("DISCOVERY", "spawning MLX embed server: "+cmdline)
+	if err := spawn(cmdline); err != nil {
+		return fmt.Errorf("spawn MLX embed server: %w", err)
+	}
+	return nil
+}
+
+// probeLocalServerModel probes the /v1/models endpoint and returns whether it
+// answered with at least one model id, plus the served ids. Unlike probeLocalServer
+// it surfaces the ids so callers can verify the served model matches the request.
+func probeLocalServerModel(base, healthPath, expect string) (bool, []string) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(base + healthPath)
+	if err != nil {
+		return false, nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false, nil
+	}
+	var models struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &models); err != nil {
+		return false, nil
+	}
+	ids := make([]string, 0, len(models.Data))
+	for _, d := range models.Data {
+		if d.ID != "" {
+			ids = append(ids, d.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return false, nil
+	}
+	return true, ids
+}
+
+// modelMatches reports whether one of the served ids contains expect. llama.cpp
+// reports the GGUF path, so we substring-match the GGUF basename; the MLX server
+// reports the discovery ModelID verbatim.
+func modelMatches(served []string, expect string) bool {
+	for _, id := range served {
+		if strings.Contains(id, expect) {
+			return true
+		}
+	}
+	return false
+}
+
+// StopLocalServer forgets the in-process server handle. Call this when the
+// embedding model changes so the next EnsureLocalServer re-probes instead of
+// reusing a server that serves a different model. It does not kill a
+// cross-process server; if one is squatting the port with the wrong model,
+// EnsureLocalServer returns a clear error telling the user to restart ocode.
+func StopLocalServer() {
+	localMu.Lock()
+	localBase = ""
+	localModelID = ""
+	localMu.Unlock()
 }
 
 // shellQuote single-quotes a string for safe use in a `bash -c` command line,
@@ -213,13 +342,11 @@ func findLibDir(binDir string) string {
 
 // NewLocalEmbedder wraps the HTTP embedder transport pointed at the local server.
 func NewLocalEmbedder(baseURL, modelID string, dim int) Embedder {
-	embedPath := "/v1/embeddings"
-	if man, ok := CurrentManifest(); ok && man.EmbedPath != "" {
-		embedPath = man.EmbedPath
-	}
+	// Both the llama.cpp and MLX local backends expose OpenAI-compatible
+	// /v1/embeddings, so the path is constant regardless of which model serves it.
 	return NewHTTPEmbedder(HTTPModel{
 		ID:        modelID,
-		Endpoint:  baseURL + embedPath,
+		Endpoint:  baseURL + "/v1/embeddings",
 		Dimension: dim,
 	}, "") // local server needs no API key
 }

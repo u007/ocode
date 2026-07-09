@@ -2,8 +2,11 @@ package skill
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/bundled"
 )
 
 func TestParseSkillMetadataFromFrontmatter(t *testing.T) {
@@ -86,5 +89,70 @@ Full content here.
 	}
 	if strings.Contains(catalog, "Full content here") {
 		t.Fatalf("catalog should not include full skill content, got:\n%s", catalog)
+	}
+}
+
+func writeNested(t *testing.T, parts ...string) string {
+	t.Helper()
+	p := filepath.Join(parts...)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func findSkill(skills []Skill, name string) *Skill {
+	for i := range skills {
+		if skills[i].Name == name {
+			return &skills[i]
+		}
+	}
+	return nil
+}
+
+// TestBundledSkillsFallbackAndDiskWins checks two things:
+//  1. When no disk copy exists, the embedded (bundled) skill is served.
+//  2. When a disk copy exists, it overrides the bundled copy (bundled is the
+//     lowest-precedence path, appended last in SkillSearchPathsForRoot).
+func TestBundledSkillsFallbackAndDiskWins(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	bundledDir := t.TempDir()
+	writeNested(t, bundledDir, "orchestrator", "SKILL.md")
+	if err := os.WriteFile(filepath.Join(bundledDir, "orchestrator", "SKILL.md"), []byte("BUNDLED"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	diskRoot := t.TempDir()
+	writeNested(t, diskRoot, "skills", "orchestrator", "SKILL.md")
+	if err := os.WriteFile(filepath.Join(diskRoot, "skills", "orchestrator", "SKILL.md"), []byte("DISK"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := bundled.SkillsDir
+	bundled.SkillsDir = bundledDir
+	defer func() { bundled.SkillsDir = prev }()
+
+	// Disk copy present -> disk wins.
+	skills := LoadSkillsForRoot(diskRoot)
+	got := findSkill(skills, "orchestrator")
+	if got == nil {
+		t.Fatal("orchestrator skill not found")
+	}
+	if got.Content != "DISK" {
+		t.Fatalf("disk should override bundled, got %q", got.Content)
+	}
+
+	// No disk copy -> bundled fallback used.
+	skills2 := LoadSkillsForRoot(t.TempDir())
+	got2 := findSkill(skills2, "orchestrator")
+	if got2 == nil {
+		t.Fatal("bundled orchestrator skill not found when disk absent")
+	}
+	if got2.Content != "BUNDLED" {
+		t.Fatalf("expected bundled fallback, got %q", got2.Content)
 	}
 }

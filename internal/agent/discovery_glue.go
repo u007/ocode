@@ -62,7 +62,13 @@ func (a *Agent) ensureDiscovery() {
 			}
 			return nil
 		}
-		base, dim, e := discovery.EnsureLocalServer(spawn, discoveryCacheDir(), func(s string) {
+		// Resolve which local model to serve. If the user hasn't picked one,
+		// fall back to the host default (LFM2.5/MLX on Apple Silicon, BGE elsewhere).
+		modelID := dc.EmbeddingModel
+		if modelID == "" {
+			modelID = discovery.DefaultLocalModelID()
+		}
+		base, dim, e := discovery.EnsureLocalServer(spawn, modelID, discoveryCacheDir(), func(s string) {
 			if err := config.SaveLocalModelStatus(s); err != nil {
 				emitDebug("DISCOVERY", fmt.Sprintf("persist local model status %q failed: %v", s, err))
 			}
@@ -70,7 +76,7 @@ func (a *Agent) ensureDiscovery() {
 		if e != nil {
 			err = e
 		} else {
-			emb = discovery.NewLocalEmbedder(base, dc.EmbeddingModel, dim)
+			emb = discovery.NewLocalEmbedder(base, modelID, dim)
 		}
 	} else {
 		emb, err = discovery.ResolveEmbedder(dc.EmbeddingBackend, dc.EmbeddingModel, keyForEnv)

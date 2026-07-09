@@ -123,6 +123,62 @@ func (h *Handler) broadcastEvent(ev SSEEvent) {
 	}
 }
 
+// wireHeadlessAgentCallbacks installs the OnDelta/OnMessage hooks that stream
+// live agent activity to the SSE mirror subscribers in headless mode. Shared by
+// the chat, send-message, and question-answer handlers so all three broadcast
+// identically. When a `question` tool prompt pauses the turn, the OnMessage tool
+// branch also emits a `question` frame so a connected browser can render the
+// prompt. The per-call `user_message` broadcast stays at each call site — a
+// question-answer re-Step has no user message to echo. Likewise, when a tool
+// call pauses on a PERMISSION_ASK sentinel (no OnPermissionAsk callback is wired
+// in headless mode), the tool branch emits a `permission` frame so a connected
+// browser can render the approve/deny dialog.
+func (h *Handler) wireHeadlessAgentCallbacks(ag *agent.Agent) {
+	// Map OnDelta kinds to SSE event names matching the TUI RC bridge pattern:
+	// "reasoning" → "thinking", "text" → "text".
+	ag.OnDelta = func(kind, text string) {
+		event := kind
+		if kind == "reasoning" {
+			event = "thinking"
+		}
+		h.broadcastEvent(SSEEvent{
+			Event: event,
+			Data:  TextDelta{Delta: text},
+		})
+	}
+	ag.OnMessage = func(m agent.Message) {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				h.broadcastEvent(SSEEvent{
+					Event: "tool_start",
+					Data: ToolStartEvent{
+						Tool:    tc.Function.Name,
+						Command: tc.Function.Arguments,
+					},
+				})
+			}
+		}
+		if m.Role == "tool" {
+			h.broadcastEvent(SSEEvent{
+				Event: "tool_result",
+				Data:  ToolResultEvent{Tool: "tool", Output: m.Content},
+			})
+			if prompts, ok := parseQuestionAsk(m.Content); ok {
+				h.broadcastEvent(SSEEvent{
+					Event: "question",
+					Data:  QuestionEvent{RequestID: m.ToolID, Questions: prompts},
+				})
+			}
+			if req, ok := parsePermissionAsk(m.Content); ok {
+				h.broadcastEvent(SSEEvent{
+					Event: "permission",
+					Data:  newPermissionEvent(m.ToolID, req),
+				})
+			}
+		}
+	}
+}
+
 func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	var req ChatRequest
 	if err := readBodyJSON(r, &req); err != nil {
@@ -200,39 +256,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			Event: "user_message",
 			Data:  map[string]string{"content": req.Content},
 		})
-
-		ag := as.agent
-		// Map OnDelta kinds to SSE event names matching the TUI RC bridge
-		// pattern: "reasoning" → "thinking", "text" → "text".
-		ag.OnDelta = func(kind, text string) {
-			event := kind
-			if kind == "reasoning" {
-				event = "thinking"
-			}
-			h.broadcastEvent(SSEEvent{
-				Event: event,
-				Data:  TextDelta{Delta: text},
-			})
-		}
-		ag.OnMessage = func(m agent.Message) {
-			if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-				for _, tc := range m.ToolCalls {
-					h.broadcastEvent(SSEEvent{
-						Event: "tool_start",
-						Data: ToolStartEvent{
-							Tool:    tc.Function.Name,
-							Command: tc.Function.Arguments,
-						},
-					})
-				}
-			}
-			if m.Role == "tool" {
-				h.broadcastEvent(SSEEvent{
-					Event: "tool_result",
-					Data:  ToolResultEvent{Tool: "tool", Output: m.Content},
-				})
-			}
-		}
+		h.wireHeadlessAgentCallbacks(as.agent)
 	}
 
 	resp, err := as.agent.Step(messages)
@@ -468,39 +492,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			Event: "user_message",
 			Data:  map[string]string{"content": req.Content},
 		})
-
-		ag := as.agent
-		// Map OnDelta kinds to SSE event names matching the TUI RC bridge
-		// pattern: "reasoning" → "thinking", "text" → "text".
-		ag.OnDelta = func(kind, text string) {
-			event := kind
-			if kind == "reasoning" {
-				event = "thinking"
-			}
-			h.broadcastEvent(SSEEvent{
-				Event: event,
-				Data:  TextDelta{Delta: text},
-			})
-		}
-		ag.OnMessage = func(m agent.Message) {
-			if m.Role == "assistant" && len(m.ToolCalls) > 0 {
-				for _, tc := range m.ToolCalls {
-					h.broadcastEvent(SSEEvent{
-						Event: "tool_start",
-						Data: ToolStartEvent{
-							Tool:    tc.Function.Name,
-							Command: tc.Function.Arguments,
-						},
-					})
-				}
-			}
-			if m.Role == "tool" {
-				h.broadcastEvent(SSEEvent{
-					Event: "tool_result",
-					Data:  ToolResultEvent{Tool: "tool", Output: m.Content},
-				})
-			}
-		}
+		h.wireHeadlessAgentCallbacks(as.agent)
 	}
 
 	resp, err := as.agent.Step(messages)

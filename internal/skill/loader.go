@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/u007/ocode/internal/bundled"
 )
 
 type Skill struct {
@@ -151,6 +153,12 @@ func SkillSearchPathsForRoot(root string) []string {
 		paths = append(paths, ProjectLocalSkillDirs(root)...)
 	} else if cwd, err := os.Getwd(); err == nil {
 		paths = append(paths, ProjectLocalSkillDirs(cwd)...)
+	}
+
+	// Embedded (bundled) skills — appended LAST so disk skills (global and
+	// project, above) win via loadSkillsFromPaths' first-wins-on-name rule.
+	if bundled.SkillsDir != "" {
+		paths = append(paths, bundled.SkillsDir)
 	}
 
 	return paths

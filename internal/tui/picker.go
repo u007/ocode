@@ -1013,21 +1013,27 @@ func (m *model) openEmbeddingModelPicker() {
 	for _, em := range discovery.HTTPModels { // sorted by ID in the registry
 		appendM("  "+em.ID, em.ID)
 	}
-	// The local backend's model id is whatever the current platform's manifest
-	// pins (e.g. "local/bge-m3"). We don't hardcode a model name in the picker
-	// — that would silently drift from the manifest when artifacts are bumped.
-	// If the host has no local manifest, skip the section entirely so the
-	// picker doesn't show a model that will fail with "not supported on this
-	// platform" at spawn time.
-	if man, ok := discovery.CurrentManifest(); ok {
+	// The local backend offers one model per host manifest (e.g. BGE-M3 via
+	// llama.cpp, LFM2.5-Embedding via MLX on Apple Silicon). We list them all
+	// rather than hardcoding a name, and mark the recommended default so the
+	// picker can't silently drift from the manifest. If the host has no local
+	// manifest, skip the section so we don't show a model that will fail with
+	// "not supported on this platform" at spawn time.
+	if mans := discovery.LocalManifestsForHost(); len(mans) > 0 {
 		appendH("Local (downloaded on first use)")
-		localLabel := "  " + man.ModelID
-		if m.config != nil {
-			if st := m.config.Ocode.Discovery.LocalModelStatus; st != "" && st != "none" {
-				localLabel += " (" + st + ")"
+		def := discovery.DefaultLocalModelID()
+		for _, man := range mans {
+			localLabel := "  " + man.ModelID
+			if man.ModelID == def {
+				localLabel += " (default)"
 			}
+			if m.config != nil {
+				if st := m.config.Ocode.Discovery.LocalModelStatus; st != "" && st != "none" {
+					localLabel += " (" + st + ")"
+				}
+			}
+			appendM(localLabel, man.ModelID)
 		}
-		appendM(localLabel, man.ModelID)
 	}
 
 	m.pickerKind = "embedding-model"

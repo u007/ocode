@@ -215,18 +215,18 @@ func (m *gitModel) Resize(w, h int) {
 	if m.committing {
 		commitInputRows = m.commitInput.Height() + 2
 	}
-	// diffH and diffW account for the border's horizontal frame
-	// (RoundedBorder=2 + Padding(0,1)=2) and vertical frame (border=2),
-	// plus the scrollbar (1 char). Without this, lipgloss word-wraps the
-	// content at the narrower inner width, creating extra wrapping lines
-	// between every diff line.
+	// The diff/commit viewport widths must match the inner content width of
+	// their bordered panes so lipgloss does not word-wrap diff lines. Each
+	// pane's outer width is sectW/filesW/diffW; the inner content area is that
+	// minus the 1-char border (each side) and 1-char padding (each side) = 4,
+	// and the scrollbar takes 1 more char. So inner text width = paneW - 5.
 	diffH := h - 6 - commitInputRows
 	if diffH < 1 {
 		diffH = 1
 	}
-	m.diff.SetWidth(diffW - 7)
+	m.diff.SetWidth(diffW - 5)
 	m.diff.SetHeight(diffH)
-	m.commitViewport.SetWidth(filesW - 7)
+	m.commitViewport.SetWidth(filesW - 5)
 	m.commitViewport.SetHeight(h - 5 - commitInputRows)
 	// full width minus border
 	m.commitInput.SetWidth(w - 4)
@@ -1799,14 +1799,14 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 			sectionLines[i] = name
 		}
 	}
-	sectPane := focusBorder(m.panel == gitPanelSections).Width(sectW - 2).Height(panelH).Render(
+	sectPane := focusBorder(m.panel == gitPanelSections).Width(sectW).Height(panelH).Render(
 		strings.Join(sectionLines, "\n"),
 	)
 
 	var filesContent string
 	if m.section == gitSectionLog {
 		savedOffset := m.commitViewport.YOffset()
-		m.buildCommitViewport(filesW - 7)
+		m.buildCommitViewport(filesW - 5)
 		m.commitViewport.SetYOffset(savedOffset)
 		logSB := renderScrollbar(m.commitViewport.Height(), m.commitViewport.TotalLineCount(), m.commitViewport.VisibleLineCount(), m.commitViewport.YOffset())
 		filesContent = lipgloss.JoinHorizontal(lipgloss.Top, m.commitViewport.View(), logSB)
@@ -1823,11 +1823,11 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 		filterLine = lipgloss.NewStyle().Width(filesW - 4).MaxHeight(1).Render(filterLine)
 		filesContent = filterLine + "\n" + filesContent
 	}
-	filesPane := focusBorder(m.panel == gitPanelFiles).Width(filesW - 2).Height(panelH).Render(filesContent)
+	filesPane := focusBorder(m.panel == gitPanelFiles).Width(filesW).Height(panelH).Render(filesContent)
 
 	diffSB := renderScrollbar(m.diff.Height(), m.diff.TotalLineCount(), m.diff.VisibleLineCount(), m.diff.YOffset())
 	diffContent := lipgloss.JoinHorizontal(lipgloss.Top, m.diff.View(), diffSB)
-	diffPane := focusBorder(m.panel == gitPanelDiff).Width(diffW - 2).Height(panelH).Render(diffContent)
+	diffPane := focusBorder(m.panel == gitPanelDiff).Width(diffW).Height(panelH).Render(diffContent)
 
 	row := lipgloss.JoinHorizontal(lipgloss.Top, sectPane, filesPane, diffPane)
 

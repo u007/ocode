@@ -4,10 +4,12 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 
 	"github.com/u007/ocode/internal/acp"
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/mcpcli"
 	"github.com/u007/ocode/internal/models"
 	// Registers the OpenAI/Codex provider plugin via its init(). Without this
@@ -28,6 +30,9 @@ import (
 //go:embed all:skills
 var bundledSkills embed.FS
 
+//go:embed all:.opencode/plugins
+var bundledPlugins embed.FS
+
 //go:embed deepseek-v4-flash.OCODE.md
 var bundledModelConfigs embed.FS
 
@@ -46,6 +51,21 @@ func bundledSkillsFS() fs.FS {
 // ensuring every build ships with its own model instructions baked in.
 func bundledModelConfigFS() fs.FS {
 	return bundledModelConfigs
+}
+
+// registerBundled wires the embedded skills and plugins file systems into the
+// runtime loaders and materializes them to disk as the lowest-precedence
+// fallback. This lets a bare binary serve its bundled skills/agents even when
+// no disk copy exists, while any disk copy still overrides the embedded one.
+func registerBundled() {
+	if fsys := bundledSkillsFS(); fsys != nil {
+		skill.SetBundledFS(fsys)
+		bundled.SetEmbeddedSkills(fsys)
+	}
+	bundled.SetEmbeddedPlugins(bundledPlugins)
+	if err := bundled.EnsureExtracted(); err != nil {
+		log.Printf("ocode: bundled asset extraction failed: %v", err)
+	}
 }
 
 func main() {
@@ -75,9 +95,7 @@ func main() {
 		case "serve":
 			// Register the embedded skills FS so that /api/skills and the
 			// discovery system can find bundled skills.
-			if fsys := bundledSkillsFS(); fsys != nil {
-				skill.SetBundledFS(fsys)
-			}
+			registerBundled()
 			if fsys := bundledModelConfigFS(); fsys != nil {
 				agent.SetBundledModelConfigFS(fsys)
 			}
@@ -89,9 +107,7 @@ func main() {
 		case "web":
 			// Register the embedded skills FS so that /api/skills and the
 			// discovery system can find bundled skills.
-			if fsys := bundledSkillsFS(); fsys != nil {
-				skill.SetBundledFS(fsys)
-			}
+			registerBundled()
 			if fsys := bundledModelConfigFS(); fsys != nil {
 				agent.SetBundledModelConfigFS(fsys)
 			}
@@ -122,9 +138,7 @@ func main() {
 		case "skills":
 			// Register the embedded skills tree before delegating.
 			// Safe to call here: no goroutines have started yet.
-			if fsys := bundledSkillsFS(); fsys != nil {
-				skill.SetBundledFS(fsys)
-			}
+			registerBundled()
 			if fsys := bundledModelConfigFS(); fsys != nil {
 				agent.SetBundledModelConfigFS(fsys)
 			}
@@ -140,9 +154,7 @@ func main() {
 
 	// Register the embedded skills FS once so both the TUI and the
 	// skill package can discover bundled skills at runtime.
-	if fsys := bundledSkillsFS(); fsys != nil {
-		skill.SetBundledFS(fsys)
-	}
+	registerBundled()
 
 	// Register the embedded model-specific OCODE.md files so they are
 	// available as a fallback when no disk-based model context file is

@@ -11,3 +11,15 @@ okf_version: 0.1
 - [Using ocode with Zed](zed.md) - Setup guide and feature matrix for integrating ocode with the Zed editor via ACP (Agent Client Protocol).
 - [Zed-compatible ACP Mode Specification](acp-zed-spec.md) - Approved architecture spec for implementing 'ocode acp' using the Agent Client Protocol, enabling ocode as a Zed editor agent.
 
+# architecture
+
+- [Sidebar TUI/Web Parity Gaps](architecture/sidebar-tui-parity-gaps.md) - Gap analysis of web frontend sidebar features missing relative to the TUI sidebar, covering backend fields not consumed and missing TS types.
+
+# gotchas
+
+- [ChatPanel Autoscroll Bounce/Freeze](gotchas/autoscroll-bounce.md) - Root cause analysis of the autoscroll bounce/freeze bug: smooth-scrolling every live token without at-bottom state tracking causes competing animations that lock up the scroll position.
+
+# Unclassified
+
+- [2026-07-08-global-runtime-artifacts-design.md](superpowers/specs/2026-07-08-global-runtime-artifacts-design.md)
+

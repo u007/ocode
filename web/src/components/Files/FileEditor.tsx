@@ -4,6 +4,13 @@ import { Loader2, Settings2 } from "lucide-react";
 import type { editor } from "monaco-editor";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "../ui/dialog";
+import MonacoSettingsPanel from "./MonacoSettingsPanel";
 
 // Ensure Monaco is configured before any editor mounts.
 import "../../lib/monaco-setup";
@@ -72,6 +79,9 @@ export default function FileEditor({
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   const [persistedSettings, setPersistedSettings] = useState<editor.IStandaloneEditorConstructionOptions | null>(null);
   const [persistedTheme, setPersistedTheme] = useState<string>("ocode-dark");
+  // When the parent doesn't provide onOpenSettings (the current default), the
+  // Settings button opens the Monaco settings/extensions panel in a dialog.
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const lang = language || extensionToLanguage(path);
 
   // Load persisted Monaco settings on mount
@@ -158,7 +168,7 @@ export default function FileEditor({
             variant="ghost"
             size="sm"
             className="h-6 px-1.5 gap-1 text-muted-foreground hover:text-foreground"
-            onClick={onOpenSettings}
+            onClick={() => (onOpenSettings ? onOpenSettings() : setSettingsOpen(true))}
             title="Editor settings & extensions"
           >
             <Settings2 className="w-3.5 h-3.5" />
@@ -166,6 +176,19 @@ export default function FileEditor({
           </Button>
         </div>
       </div>
+
+      {/* Editor settings & extensions panel (opened by the Settings button when
+          the parent doesn't handle onOpenSettings itself). */}
+      <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <DialogContent className="max-w-md h-[70vh] p-0 overflow-hidden gap-0 !flex flex-col">
+          <DialogHeader className="px-4 py-2 border-b border-border">
+            <DialogTitle className="text-sm">Editor Settings</DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-hidden">
+            <MonacoSettingsPanel />
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* Monaco editor */}
       <div className="flex-1 overflow-hidden">

@@ -2338,7 +2338,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.layout()
 		m.files.Resize(m.width, m.height)
-		m.git.Resize(m.panelWidth(), m.height)
+		m.git.Resize(m.width, m.height)
 		m.layoutLogViewport()
 		m.ready = true
 		if m.restoredPendingScroll {
@@ -2386,7 +2386,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleEscKey()
 			}
 			var cmd tea.Cmd
-			m.git, cmd = m.git.Update(msg, m.panelWidth(), m.height)
+			m.git, cmd = m.git.Update(msg, m.width, m.height)
 			return m, cmd
 		case tabLog:
 			return m.handleLogKeys(msg)
@@ -2490,7 +2490,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case gitStatusMsg, gitRefreshMsg, gitBranchRefreshMsg, loadMoreLogMsg, diffReadyMsg:
 		var cmd tea.Cmd
-		m.git, cmd = m.git.Update(msg, m.panelWidth(), m.height)
+		m.git, cmd = m.git.Update(msg, m.width, m.height)
 		return m, cmd
 	case filesAddToContextMsg:
 		label := ""
@@ -6462,6 +6462,15 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	cmd := parts[0]
 	args := parts[1:]
 
+	// /goal is a convenience alias for the orchestrator pipeline. It behaves
+	// exactly like `/orchestrator <goal>`: switch to the orchestrator primary
+	// agent and immediately send <goal> as its first prompt, which runs the
+	// plan -> explore -> develop -> validate -> goal-alignment pipeline that is
+	// hardened to distrust the executor. Tracked as a separate flag so /goal
+	// stays instant (like /agent) while the rewrite is applied after the
+	// queue-decision below.
+	goalAlias := cmd == "/goal"
+
 	// Queue non-exit commands when the agent is busy so they run after the stream ends.
 	// Instant commands are local UI / config / auth actions that never need to
 	// wait for the current stream or compaction turn, so they can run immediately
@@ -6484,12 +6493,21 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/discover" ||
 		cmd == "/docs" || cmd == "/doc-mode" ||
 		cmd == "/recap" ||
-		cmd == "/ocr"
+		cmd == "/ocr" ||
+		cmd == "/goal"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
 		m.input.Reset()
 		m.layout()
 		return m, nil
+	}
+
+	// Apply the /goal alias now that the queue-decision is resolved: rewrite to
+	// `/orchestrator <goal>` so the generic agent-switch path below switches to
+	// the orchestrator primary agent and sends the goal as its first prompt.
+	if goalAlias {
+		cmd = "/orchestrator"
+		args = parts[1:]
 	}
 
 	m.input.Reset()
@@ -7080,6 +7098,13 @@ func (m *model) setEmbeddingModel(id string) error {
 	backend := "http"
 	if id == "local" || strings.HasPrefix(id, "local/") {
 		backend = "local"
+	}
+	// Switching the local model invalidates the in-process server singleton,
+	// which is keyed to a single model on the shared port. Forget it so the
+	// next ensureDiscovery re-probes instead of reusing a server that serves a
+	// different model (which would produce garbage embeddings).
+	if backend == "local" {
+		discovery.StopLocalServer()
 	}
 	if err := config.SaveQueryEmbeddingModel(id, backend); err != nil {
 		return err
@@ -11728,11 +11753,31 @@ func (m *model) collectLSPStatuses() []server.LSPStatus {
 		return nil
 	}
 	out := make([]server.LSPStatus, 0, len(active))
+
+	// Aggregate diagnostics per owning server so the web can show error/warning
+	// counts per LSP. Diagnostics is nil only if the Manager was built without a
+	// store, which the public constructor never does — guard anyway.
+	var errByCmd, warnByCmd map[string]int
+	if ds := m.lspMgr.Diagnostics(); ds != nil {
+		errByCmd = make(map[string]int)
+		warnByCmd = make(map[string]int)
+		for _, d := range ds.All() {
+			switch d.Severity {
+			case lsp.SeverityError:
+				errByCmd[d.ServerCmd]++
+			case lsp.SeverityWarning:
+				warnByCmd[d.ServerCmd]++
+			}
+		}
+	}
+
 	for _, s := range active {
 		out = append(out, server.LSPStatus{
-			Cmd:    s.Cmd,
-			LangID: s.LangID,
-			State:  "running",
+			Cmd:                 s.Cmd,
+			LangID:              s.LangID,
+			State:               "running",
+			DiagnosticsErrors:   errByCmd[s.Cmd],
+			DiagnosticsWarnings: warnByCmd[s.Cmd],
 		})
 	}
 	return out
@@ -14792,7 +14837,7 @@ func (m model) renderTabContent() string {
 	case tabFiles:
 		return m.files.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
 	case tabGit:
-		return m.git.View(m.panelWidth(), m.height, m.styles, m.chatUnread, m.exitPending)
+		return m.git.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
 	case tabLog:
 		return m.renderLogTab()
 	}
@@ -16183,7 +16228,10 @@ func (m *model) clampSidebarScroll() {
 }
 
 func (m model) mouseOverSidebar(mouse tea.Mouse) bool {
-	return m.sidebarEnabled() && mouse.X >= m.panelWidth()
+	// The git tab renders full-width (no sidebar), so its right edge is diff
+	// content, not the sidebar — don't let wheel events there scroll the
+	// (hidden) sidebar.
+	return m.activeTab != tabGit && m.sidebarEnabled() && mouse.X >= m.panelWidth()
 }
 
 func clampInt(v, lo, hi int) int {
