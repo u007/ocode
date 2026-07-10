@@ -49,9 +49,19 @@ a documented follow-up — see the repo `TODO.md`.
 | `rust/` | 31 | `Cargo.toml` |
 | `tanstack/` | 31 | `@tanstack/react-query` or `-router` dep |
 | `nextjs/` | 34 | `next` dep or `next.config.*` |
+| `conduct/` | 39 | **universal** (any repo) |
 
 `react/` also carries a worked example scorecard + derived skill (illustrative).
-The other four have corpora only — no evaluations run yet.
+The others have corpora only — no evaluations run yet.
+
+**`conduct/` is special:** it tests engineering *behavior* (fail-fast, no silent
+fallbacks, no empty catch, always-log-errors, TDD, surgical changes, docs-first,
+verification, code-review rigor, root-cause debugging, git/db safety) rather than
+framework knowledge. It is anchored to this project's house rules
+(`CLAUDE.md` + `AGENTS.md`) and applies to **every** repo — so its derived skill
+activates for the tuned model universally, gated only on exact model id, not on a
+stack marker. This is the corpus that catches "different models behave
+differently while coding."
 
 ## Layout
 

@@ -1,0 +1,31 @@
+stack: conduct
+title: Engineering Conduct (how a model should behave while coding)
+corpus_rev: 1
+# NOT a tech stack — this corpus tests coding *behavior/discipline*, which
+# applies to every repo regardless of language. Answers are anchored to this
+# project's house rules (CLAUDE.md + AGENTS.md). Where a rule is stricter than
+# general senior-engineer consensus it is flagged "(house rule)" in the answer,
+# so a grader can tell "diverges from consensus" from "diverges from OUR rules".
+version_scope: "n/a"
+
+# Tag vocabulary — each is a subscore axis (a behavior a model can be weak at).
+tags:
+  - validation       # input validation, guard clauses, boundary/serialization correctness
+  - fail-fast        # fail loudly; no silent fallbacks/defaults that hide missing values
+  - error-handling   # no empty catch; always log with context; fix root cause not bypass
+  - hallucination    # admit uncertainty; verify before claiming; don't invent APIs/paths
+  - testing          # TDD / reproduce-then-fix; don't delete tests; tests fail loudly
+  - simplicity       # YAGNI; minimum code; no speculative flags/abstractions
+  - surgical-changes # minimal diff; match style; clean only your own mess; DRY
+  - lifecycle        # docs-first; clarify ambiguity; track incomplete work
+  - verification     # evidence before claiming done; report outcomes faithfully
+  - safety           # git/db/.env/secrets/destructive-op discipline
+  - code-review      # giving & receiving review: rigor over agreement, severity, self-review
+  - debugging        # bug fixing: root cause over symptom; reproduce; hypothesis-driven
+
+# Universal: applies to ANY repo. There is no marker file — the future
+# enforcement hook treats `mode: universal` corpora as always-active for the
+# tuned model (gated on exact model id only, never a stack marker). It is
+# deliberately absent from internal/stackdetect's registry for that reason.
+detection:
+  mode: universal
