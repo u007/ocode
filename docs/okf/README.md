@@ -37,6 +37,19 @@ Steps 1–3 are manual today. A future grader/harness can parse `questions.yaml`
 (it is structured YAML for exactly this reason). The step-4 detection wiring is
 a documented follow-up — see the repo `TODO.md`.
 
+## Available stacks
+
+| stack | records | detection marker |
+|-------|--------:|------------------|
+| `react/` | 26 | `react` dep |
+| `golang/` | 33 | `go.mod` |
+| `rust/` | 31 | `Cargo.toml` |
+| `tanstack/` | 31 | `@tanstack/react-query` or `-router` dep |
+| `nextjs/` | 34 | `next` dep or `next.config.*` |
+
+`react/` also carries a worked example scorecard + derived skill (illustrative).
+The other four have corpora only — no evaluations run yet.
+
 ## Layout
 
 ```
