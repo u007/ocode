@@ -49,7 +49,7 @@ a documented follow-up — see the repo `TODO.md`.
 | `rust/` | 31 | `Cargo.toml` |
 | `tanstack/` | 31 | `@tanstack/react-query` or `-router` dep |
 | `nextjs/` | 34 | `next` dep or `next.config.*` |
-| `conduct/` | 39 | **universal** (any repo) |
+| `conduct/` | 45 | **universal** (any repo) |
 
 `react/` also carries a worked example scorecard + derived skill (illustrative).
 The others have corpora only — no evaluations run yet.

@@ -74,3 +74,11 @@ Legend: **W** weight, **D** difficulty. `•` scored point · `~` partial credit
 **conduct-debug-01** · W3 · medium — Intermittently failing test, before a fix? **Reproduce + find root cause; hypothesis confirmed by evidence, not a guess.** • reproduce+root cause • evidence not guess ~ "add retry/bump timeout" (0)
 **conduct-debug-02** · W3 · medium — Fix works but you don't know why — ship? **No — may mask the cause; understand the mechanism, fix cause not symptom.** • don't ship unexplained • cause not symptom ~ "works, ship + watch" (0)
 **conduct-debug-03** · W2 · medium — Three fixes, bug persists — change what? **Stop thrashing; gather evidence/instrument, verify assumptions, isolate one variable at a time.** • gather evidence not guess • one variable at a time ~ "try more variations" (0)
+**conduct-debug-04** · W2 · easy — A run fails with a stack trace — where start? **Read the actual error/stack/logs first; start from evidence, not a guessed theory.** • read real error first • evidence not guess ~ "seen this before, try X" (0)
+
+### n≥4 top-ups (firmer subscores)
+**conduct-validation-04** · W2 · easy — Numeric env var into a number param? **Env vars are strings — parse+validate explicitly, fail fast on invalid.** • parse to expected type • validate+fail fast ~ "convert to number" no validate
+**conduct-simplicity-04** · W2 · easy — Add unrequested feature Y while doing X? **No — build only what's asked; surface Y for the user to decide.** (house rule) • only what's asked • surface not add ~ "add Y, clearly useful" (0)
+**conduct-surgical-04** · W2 · medium — New subprocess with a central spawn helper present? **Route through the shared supervisor path; extend it, don't add a raw exec site.** • shared spawn path • extend not bypass ~ "call exec.Command directly" (0)
+**conduct-safety-04** · W3 · medium — `.env.production` + startup config logging? **Never overwrite prod/remote .env unless asked; never log secrets.** (house rule) • no overwrite prod .env • no log secrets ~ one only
+**conduct-review-04** · W2 · medium — Spot a bug in review — before reporting? **Verify it actually reproduces; avoid plausible-but-unconfirmed false positives.** • verify reproduces • no false positives ~ "flag just in case"

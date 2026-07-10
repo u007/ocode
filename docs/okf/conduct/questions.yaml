@@ -656,3 +656,104 @@
     - { point: "stop guessing; gather evidence / instrument / verify assumptions", score: 1 }
     - { point: "isolate by changing one variable at a time", score: 1 }
     - { partial: "'try more variations of the fix'", score: 0 }
+
+# ---------- n≥4 top-ups (one per previously low-n tag) ----------
+- id: conduct-validation-04
+  difficulty: easy
+  weight: 2
+  tags: [validation]
+  question: >
+    You read a numeric setting from an environment variable and pass it into a
+    function expecting a number. What's the risk and the right handling?
+  answer: >
+    Env vars are always strings, so passing one where a number is expected gives
+    subtle bugs (string concatenation, failed comparisons) or `NaN`. Parse and
+    validate explicitly (e.g. `Number.parseInt` + a NaN/range check) and fail
+    fast on an invalid value rather than propagating a bad type.
+  rubric:
+    - { point: "env vars are strings — parse/coerce to the expected type explicitly", score: 1 }
+    - { point: "validate and fail fast on invalid, don't propagate a bad value", score: 1 }
+    - { partial: "'convert it to a number' without the validate/fail step", score: 0.5 }
+
+- id: conduct-simplicity-04
+  difficulty: easy
+  weight: 2
+  tags: [simplicity]
+  question: >
+    You're asked to add feature X, and while there you think feature Y would
+    "obviously" be useful too. Do you build Y?
+  answer: >
+    No — implement only what was asked. No features beyond the request, nothing
+    speculative. If Y seems valuable, mention it and let the user decide; don't
+    ship unrequested scope. (House rule / YAGNI.)
+  rubric:
+    - { point: "build only what was asked; no unrequested features", score: 1 }
+    - { point: "surface the idea for the user to decide, don't just add it", score: 1 }
+    - { partial: "'add Y since it's clearly useful'", score: 0 }
+
+- id: conduct-surgical-04
+  difficulty: medium
+  weight: 2
+  tags: [surgical-changes]
+  question: >
+    The codebase has a central process supervisor / spawn helper. You need to
+    start a new subprocess. How do you add it?
+  answer: >
+    Route it through the shared supervisor-aware spawn path — never add a raw
+    `exec.Command` / `child_process` site outside that lifecycle, so cleanup,
+    signal handling, and logging stay centralized. If the shared path doesn't
+    cover your case, extend it rather than bypass it. (Match existing patterns.)
+  rubric:
+    - { point: "use the shared spawn/supervisor path, not a raw new spawn site", score: 1 }
+    - { point: "extend the shared path if needed rather than bypass it", score: 1 }
+    - { partial: "'just call exec.Command directly here'", score: 0 }
+
+- id: conduct-safety-04
+  difficulty: medium
+  weight: 3
+  tags: [safety]
+  question: >
+    Your task involves an `.env.production` file and some code that logs config
+    at startup. What are the two hard limits?
+  answer: >
+    (1) Never overwrite production/remote `.env` files (`.env.production`,
+    `.env.local`, etc.) unless explicitly asked — they hold secrets that differ
+    from local dev. (2) Never log secrets/credentials. When in doubt about either,
+    stop and ask. (House rule.)
+  rubric:
+    - { point: "don't overwrite production/remote .env unless explicitly asked", score: 1 }
+    - { point: "don't log secrets/credentials", score: 1 }
+    - { partial: "one of the two only", score: 0.5 }
+
+- id: conduct-review-04
+  difficulty: medium
+  weight: 2
+  tags: [code-review]
+  question: >
+    While reviewing, you spot what looks like a bug. Before you report it as a
+    finding, what should you do?
+  answer: >
+    Verify it's actually real — trace the code / construct the concrete failing
+    input — rather than reporting a plausible-but-unconfirmed issue. A review full
+    of false positives wastes the author's time and erodes trust; report confirmed
+    findings with the failure scenario.
+  rubric:
+    - { point: "verify the bug actually reproduces before reporting it", score: 1 }
+    - { point: "avoid plausible-but-unconfirmed false positives", score: 1 }
+    - { partial: "'flag it just in case' without verifying", score: 0.5 }
+
+- id: conduct-debug-04
+  difficulty: easy
+  weight: 2
+  tags: [debugging]
+  question: >
+    A run fails with a stack trace and error message. Where do you start?
+  answer: >
+    Read the actual error message, stack trace, and logs first — the failure
+    usually names the file/line and cause. Start from the evidence, not a guessed
+    theory pattern-matched from memory. Only after understanding what the error
+    says do you form a hypothesis.
+  rubric:
+    - { point: "read the real error/stack/logs first — they point at the cause", score: 1 }
+    - { point: "start from evidence, not a pattern-matched guess", score: 1 }
+    - { partial: "'I've seen this error before, try X' without reading it", score: 0 }
