@@ -5757,30 +5757,32 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 	}
-	if pressed && !m.showPermDialog && m.isClickInInputArea(mouse) {
+	if pressed && !m.showPermDialog && m.isClickInInputArea(mouse) && mouse.X >= inputContentLeftX {
 		topY := m.inputAreaTopY()
 		relRow := mouse.Y - topY - 1 + m.input.ScrollYOffset() // -1 for top border
 		if relRow < 0 {
 			relRow = 0
 		}
+		col := mouse.X - inputContentLeftX
 		m.inputSel = selectionState{
 			dragging:  true,
 			startLine: relRow,
-			startCol:  mouse.X,
+			startCol:  col,
 			endLine:   relRow,
-			endCol:    mouse.X,
+			endCol:    col,
 		}
 		return m, nil, true
 	}
-	if pressed && m.activeTab == tabChat && mouse.X < m.mainScrollbarX() && !m.chatSearchActive {
+	if pressed && m.activeTab == tabChat && mouse.X >= transcriptContentLeftX && mouse.X < m.mainScrollbarX() && !m.chatSearchActive {
+		col := mouse.X - transcriptContentLeftX
 		contentLine := (mouse.Y - m.viewportContentTopY()) + m.viewport.YOffset()
 		if contentLine >= 0 && contentLine < len(m.rawTranscriptLines) {
 			m.sel = selectionState{
 				dragging:  true,
 				startLine: contentLine,
-				startCol:  mouse.X,
+				startCol:  col,
 				endLine:   contentLine,
-				endCol:    mouse.X,
+				endCol:    col,
 			}
 			m.applyOrClearSelectionHighlight()
 			return m, nil, true
@@ -5794,15 +5796,16 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		// the value-receiver copy ensures the returned model has the cache.
 		m.renderStatus()
 		statusTop := m.statusBarTopY()
-		if mouse.Y >= statusTop && mouse.Y < statusTop+2 {
+		if mouse.Y >= statusTop && mouse.Y < statusTop+2 && mouse.X >= statusContentLeftX {
 			relRow := mouse.Y - statusTop
+			col := mouse.X - statusContentLeftX
 			if relRow >= 0 && relRow < len(m.statusRawLines) {
 				m.statusSel = selectionState{
 					dragging:  true,
 					startLine: relRow,
-					startCol:  mouse.X,
+					startCol:  col,
 					endLine:   relRow,
-					endCol:    mouse.X,
+					endCol:    col,
 				}
 				return m, nil, true
 			}
@@ -5892,8 +5895,12 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		if r, ok := m.transcriptPathLinkAt(mouse); ok {
 			return m, m.openPathAtLineInEditorCmd(r.path, r.lineNo), true
 		}
-		// URL links prompt for confirmation before opening in the browser.
+		// URL links prompt for confirmation before opening in the browser,
+		// unless the user holds Ctrl (or Cmd on macOS) to open directly.
 		if r, ok := m.transcriptUrlLinkAt(mouse); ok {
+			if mouse.Mod&tea.ModCtrl != 0 || mouse.Mod&tea.ModSuper != 0 {
+				return m, openBrowserCmd(r.url), true
+			}
 			m.pendingURL = r.url
 			m.showURLDialog = true
 			return m, nil, true
@@ -6159,7 +6166,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		if contentLine >= len(m.rawTranscriptLines) && len(m.rawTranscriptLines) > 0 {
 			contentLine = len(m.rawTranscriptLines) - 1
 		}
-		col := mouse.X
+		col := mouse.X - transcriptContentLeftX
 		if col < 0 {
 			col = 0
 		}
@@ -6243,7 +6250,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		if relRow >= len(m.rawInputLines) && len(m.rawInputLines) > 0 {
 			relRow = len(m.rawInputLines) - 1
 		}
-		col := mouse.X
+		col := mouse.X - inputContentLeftX
 		if col < 0 {
 			col = 0
 		}
@@ -6311,7 +6318,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		if relRow >= len(m.statusRawLines) && len(m.statusRawLines) > 0 {
 			relRow = len(m.statusRawLines) - 1
 		}
-		col := mouse.X
+		col := mouse.X - statusContentLeftX
 		if col < 0 {
 			col = 0
 		}
@@ -14516,6 +14523,20 @@ func setDetailContent(top *detailView, content string) {
 
 const detailContentLeftX = 2 // border(1) + padding(1) of the detail body box
 
+// transcriptContentLeftX is the screen column of the first transcript character:
+// the panel's left border plus one column of horizontal padding
+// (borderStyle has Padding(0,1) and RoundedBorder).
+const transcriptContentLeftX = 2
+
+// inputContentLeftX is the screen column of the first input-area character:
+// the panel's left border plus one column of horizontal padding
+// (input area uses the same borderStyle as the transcript).
+const inputContentLeftX = 2
+
+// statusContentLeftX is the screen column of the first status-bar character:
+// statusStyle has Padding(0,1), so content starts 1 column from the left edge.
+const statusContentLeftX = 1
+
 // applyOrClearDetailSelectionHighlight re-renders the top detail viewport with
 // the current selection highlighted, or restores the plain styled content when
 // no selection is active.
@@ -16922,9 +16943,10 @@ func (m *model) transcriptPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
 	if m.activeTab != tabChat || !m.detail.empty() {
 		return pathLinkRegion{}, false
 	}
-	if mouse.X < 0 || mouse.X >= m.mainScrollbarX() {
+	if mouse.X < transcriptContentLeftX || mouse.X >= m.mainScrollbarX() {
 		return pathLinkRegion{}, false
 	}
+	col := mouse.X - transcriptContentLeftX
 	topY := m.viewportContentTopY()
 	if mouse.Y < topY || mouse.Y >= topY+m.viewport.Height() {
 		return pathLinkRegion{}, false
@@ -16933,7 +16955,7 @@ func (m *model) transcriptPathLinkAt(mouse tea.Mouse) (pathLinkRegion, bool) {
 	if contentLine < 0 || contentLine >= len(m.rawTranscriptLines) {
 		return pathLinkRegion{}, false
 	}
-	r, ok := m.hoverLinkProbe.probe(m.rawTranscriptLines[contentLine], mouse.X, m.workDir)
+	r, ok := m.hoverLinkProbe.probe(m.rawTranscriptLines[contentLine], col, m.workDir)
 	if !ok {
 		return pathLinkRegion{}, false
 	}
@@ -16950,9 +16972,10 @@ func (m *model) transcriptUrlLinkAt(mouse tea.Mouse) (urlLinkRegion, bool) {
 	if m.activeTab != tabChat || !m.detail.empty() {
 		return urlLinkRegion{}, false
 	}
-	if mouse.X < 0 || mouse.X >= m.mainScrollbarX() {
+	if mouse.X < transcriptContentLeftX || mouse.X >= m.mainScrollbarX() {
 		return urlLinkRegion{}, false
 	}
+	col := mouse.X - transcriptContentLeftX
 	topY := m.viewportContentTopY()
 	if mouse.Y < topY || mouse.Y >= topY+m.viewport.Height() {
 		return urlLinkRegion{}, false
@@ -16967,13 +16990,13 @@ func (m *model) transcriptUrlLinkAt(mouse tea.Mouse) (urlLinkRegion, bool) {
 	//    rendering, so the literal detector below can't see them). These
 	//    regions map a link label's column span back to its URL.
 	for _, reg := range m.urlLinkRegions {
-		if reg.line == contentLine && mouse.X >= reg.startCol && mouse.X < reg.endCol {
+		if reg.line == contentLine && col >= reg.startCol && col < reg.endCol {
 			return reg, true
 		}
 	}
 
 	// 1. Try the probe cache (single-line, fast path).
-	r, ok := m.hoverUrlLinkProbe.probe(rawLine, mouse.X)
+	r, ok := m.hoverUrlLinkProbe.probe(rawLine, col)
 	if ok {
 		r.line = contentLine
 		return r, true
@@ -16990,7 +17013,7 @@ func (m *model) transcriptUrlLinkAt(mouse tea.Mouse) (urlLinkRegion, bool) {
 	if contentLine < len(m.rawTranscriptLines)-1 {
 		nextLine = m.rawTranscriptLines[contentLine+1]
 	}
-	r, ok = urlLinkAtColWrapped(rawLine, prevLine, nextLine, mouse.X)
+	r, ok = urlLinkAtColWrapped(rawLine, prevLine, nextLine, col)
 	if ok {
 		r.line = contentLine
 	}

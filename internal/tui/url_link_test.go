@@ -186,3 +186,57 @@ func TestURLDuplicateMarkdownLabelsMapsBothLinks(t *testing.T) {
 		t.Fatalf("duplicate markdown labels should map both URLs, got %v", urls)
 	}
 }
+
+// TestURLModClickOpensDirectly verifies that ctrl+click (and cmd+click) on a
+// URL bypasses the confirmation dialog and returns a browser-open command
+// immediately — the plain-click path keeps the confirm dialog.
+func TestURLModClickOpensDirectly(t *testing.T) {
+	for _, mod := range []tea.KeyMod{tea.ModCtrl, tea.ModSuper} {
+		m := model{
+			ready:     true,
+			width:     100,
+			height:    30,
+			sessionID: "s1",
+			input:     textarea.New(),
+			viewport:  fastviewport.New(96, 20),
+			styles:    ApplyThemeColors("tokyonight"),
+			messages:  []message{{role: roleUser, text: "see https://example.com now"}},
+		}
+		m.layout()
+		m.renderTranscript()
+		m.viewport.GotoBottom()
+
+		topY := m.viewportContentTopY()
+		var clickY, hitX int
+		found := false
+		for li := 0; li < len(m.rawTranscriptLines); li++ {
+			y := topY + (li - m.viewport.YOffset())
+			for x := 0; x < m.width; x++ {
+				if _, ok := m.transcriptUrlLinkAt(tea.Mouse{X: x, Y: y}); ok {
+					clickY, hitX, found = y, x, true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			t.Fatal("no clickable URL found in transcript")
+		}
+
+		out1, _, _ := m.handleMouseAction(tea.Mouse{X: hitX, Y: clickY, Mod: mod}, true)
+		m1 := out1.(model)
+		out2, cmd, handled := m1.handleMouseAction(tea.Mouse{X: hitX, Y: clickY, Mod: mod}, false)
+		m2 := out2.(model)
+		if !handled {
+			t.Errorf("mod=%v: release on URL should be handled", mod)
+		}
+		if m2.showURLDialog {
+			t.Errorf("mod=%v: mod+click must NOT open the confirmation dialog", mod)
+		}
+		if cmd == nil {
+			t.Errorf("mod=%v: mod+click should return a browser-open command", mod)
+		}
+	}
+}
