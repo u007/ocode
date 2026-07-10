@@ -20,6 +20,10 @@ skill). Not yet done:
   today's illustrative placeholders would ship inert/dead code. Compute
   detection ONCE from stable inputs (workdir+model) to respect the prefix-cache
   contract in `internal/agent/append_stable.go` / `provider_prompts.go`.
+  NOTE: the `conduct` corpus is `detection.mode: universal` — its derived skill
+  must be admitted for the tuned model in EVERY repo (gated on model id only, no
+  stack marker). The hook needs a universal branch, not just stackdetect
+  matching; `conduct` is intentionally absent from stackdetect's registry.
 - [ ] **Decide the embed home for derived skills** (existing `//go:embed
   all:skills` tree vs a `skills/okf/` subtree) and move a real derived skill
   there once one exists from a genuine evaluation.
