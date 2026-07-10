@@ -1,0 +1,24 @@
+stack: react
+title: React (v18 / v19)
+corpus_rev: 1
+# Version scope this corpus grades against. Answers assume React 18+ with the
+# React 19 additions (Actions, `use`, RSC) called out where relevant.
+version_scope: ">=18 <20"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - hooks           # rules of hooks, useState/useReducer/useMemo/useCallback
+  - reconciliation  # keys, diffing, element identity
+  - effects         # useEffect timing, cleanup, deps, effect misuse
+  - rsc             # server components / client boundary / "use client"
+  - context         # context API, provider re-render behavior
+  - perf            # memoization, re-render cost, profiling
+  - refs            # useRef, forwardRef, imperative handles, DOM
+  - suspense        # Suspense, transitions, concurrent rendering
+  - state           # state modeling, derived vs stored state, batching
+
+detection:
+  mode: any
+  markers:
+    - { type: dep, manifest: package.json, name: react }
+    - { type: content, glob: "**/*.{jsx,tsx}", pattern: "from ['\"]react['\"]" }

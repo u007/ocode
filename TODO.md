@@ -1,5 +1,27 @@
 # TODO
 
+## Kaizen per-model stack benchmark — deferred wiring & corpus (from docs/okf: 2026-07-11)
+
+The benchmark corpus + scoring system is built under `docs/okf/` (design:
+`docs/superpowers/specs/2026-07-11-model-stack-benchmark-design.md`). React is a
+fully-built exemplar (26 Q&A + rubric, one worked scorecard, one example derived
+skill). Not yet done:
+
+- [ ] **Wire stack detection + skill injection into the agent.** Contract is in
+  `docs/okf/_schema/stack-detection.md`: read a repo's marker files/deps, and
+  when a stack is detected AND the active model id exactly matches a derived
+  skill's `tuned_for`, inject that skill. Today detection/activation is manual.
+- [ ] **Decide the embed home for derived skills** (existing `//go:embed
+  all:skills` tree vs a `skills/okf/` subtree) and move a real derived skill
+  there once one exists from a genuine evaluation.
+- [ ] **Populate remaining stacks**: tanstack, nextjs, golang, rust (same schema
+  as `docs/okf/react/`). Add subcategories as nested folders where useful.
+- [ ] **Real evaluations.** The `claude-opus-4-8` scorecard + derived skill are
+  illustrative placeholders — re-grade against `docs/okf/react/questions.yaml`
+  and regenerate before anything ships in the binary.
+- [ ] **Optional: a `questions.yaml → questions.md` generator** to kill the
+  hand-sync drift risk noted in the design.
+
 ## Shared agent notes bus — deferred production wiring (from review-changes: 2026-06-16)
 
 The notebus feature is wired into the parallel agent group (bus, per-call binding,

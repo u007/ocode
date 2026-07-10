@@ -1,11 +1,11 @@
-# Model Stack Benchmark (Design)
+# Kaizen — Per-Model Tech-Stack Benchmark (Design)
 
 Date: 2026-07-11
 Status: approved-pending-review
 
-> Lives under `docs/okf/`. This is a per-tech-stack model benchmark; it is **not**
-> branded as a framework/acronym (avoid collision with Google OKF). Refer to it
-> as "the stack benchmark" or by its path.
+> Branded **"Kaizen"** (continuous improvement). Lives under `docs/okf/`. Do
+> **not** use the acronym "OKF" as a name (avoid collision with Google OKF);
+> the folder path is `docs/okf/` but the system is called Kaizen in prose.
 
 ## Purpose
 

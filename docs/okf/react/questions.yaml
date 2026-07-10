@@ -1,0 +1,461 @@
+# React benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+
+- id: react-recon-keys-01
+  difficulty: medium
+  weight: 2
+  tags: [reconciliation]
+  question: >
+    Why does React need a `key` on items in a list, and why is the array index
+    usually a bad key?
+  answer: >
+    Keys give each element a stable identity across renders so React can match
+    old and new children instead of destroying and re-creating them. The array
+    index breaks when the list reorders, or when items are inserted/removed at
+    the front: the same index now points at a different item, so component
+    state and uncontrolled DOM (inputs, focus) stick to the wrong row.
+  rubric:
+    - { point: "stable identity across renders / lets React match children", score: 1 }
+    - { point: "index breaks on reorder or insert/remove (state attaches to wrong item)", score: 1 }
+    - { partial: "says keys are for performance only", score: 0.5 }
+
+- id: react-recon-diff-02
+  difficulty: medium
+  weight: 2
+  tags: [reconciliation]
+  question: >
+    When React re-renders, how does it decide whether to reuse an existing
+    component instance or throw it away and mount a new one?
+  answer: >
+    It compares the element at each position by type and key. Same type + same
+    key → reuse the instance and update props (state preserved). Different type,
+    or same position but different key → unmount the old subtree and mount a new
+    one (state lost). This is why changing an element's type or key resets state.
+  rubric:
+    - { point: "compares by element type", score: 1 }
+    - { point: "and by key", score: 1 }
+    - { point: "type/key change unmounts + remounts (state reset)", score: 1 }
+    - { partial: "mentions only 'diffing' without type/key", score: 0.5 }
+
+- id: react-recon-remount-03
+  difficulty: medium
+  weight: 2
+  tags: [reconciliation, state]
+  question: >
+    You want a form component to fully reset its internal state when the
+    selected user changes. What's the idiomatic React way?
+  answer: >
+    Give the component a `key` tied to the user id (`<Form key={userId} />`).
+    When the key changes React unmounts the old instance and mounts a fresh one,
+    resetting all internal state — no manual reset-in-effect needed.
+  rubric:
+    - { point: "set key={userId} to force remount", score: 1 }
+    - { point: "explains remount resets internal state", score: 1 }
+    - { partial: "resets each field manually in useEffect", score: 0.5 }
+
+- id: react-hooks-rules-01
+  difficulty: easy
+  weight: 3
+  tags: [hooks]
+  question: >
+    State the Rules of Hooks and explain why calling a hook conditionally
+    breaks React.
+  answer: >
+    Only call hooks at the top level of a React function (never in conditions,
+    loops, or nested functions), and only from React function components or
+    custom hooks. React tracks hook state by call order, not by name; a
+    conditional call shifts the order between renders so state lands in the
+    wrong slot.
+  rubric:
+    - { point: "top level only, not in conditions/loops", score: 1 }
+    - { point: "only from components or custom hooks", score: 1 }
+    - { point: "React identifies hooks by call order/index", score: 1 }
+    - { partial: "states the rule but not the call-order reason", score: 0.5 }
+
+- id: react-hooks-updater-02
+  difficulty: medium
+  weight: 2
+  tags: [hooks, state]
+  question: >
+    Why can `setCount(count + 1)` produce a stale result, and how does the
+    functional updater form fix it?
+  answer: >
+    `count` is captured from the render's closure, so multiple updates in the
+    same tick all read the same stale value and collapse to one increment.
+    `setCount(c => c + 1)` receives the latest queued state, so batched updates
+    compose correctly.
+  rubric:
+    - { point: "count is captured stale from the render closure", score: 1 }
+    - { point: "functional updater gets latest/queued state", score: 1 }
+    - { partial: "says 'use the callback form' without the stale-closure why", score: 0.5 }
+
+- id: react-hooks-memo-03
+  difficulty: medium
+  weight: 2
+  tags: [hooks, perf]
+  question: >
+    What is the difference between `useMemo` and `useCallback`, and when does
+    memoizing actually help?
+  answer: >
+    `useMemo(fn, deps)` caches a computed value; `useCallback(fn, deps)` caches
+    a function identity (it's `useMemo(() => fn, deps)`). They help when the
+    memoized value/function is an expensive computation, or is passed as a prop
+    to a `React.memo` child or as an effect dependency where a new identity each
+    render would cause needless re-renders/re-runs. Otherwise the bookkeeping
+    can cost more than it saves.
+  rubric:
+    - { point: "useMemo caches a value, useCallback caches a function identity", score: 1 }
+    - { point: "helps for expensive compute OR stable identity to memo'd child / effect dep", score: 1 }
+    - { point: "not free — can cost more than it saves when unnecessary", score: 1 }
+    - { partial: "explains the two but not when it actually helps", score: 0.5 }
+
+- id: react-hooks-reducer-04
+  difficulty: medium
+  weight: 1
+  tags: [hooks, state]
+  question: >
+    When would you reach for `useReducer` instead of `useState`?
+  answer: >
+    When the next state depends on the previous in non-trivial ways, when
+    several values update together, or when update logic is complex enough to
+    benefit from being centralized in a pure reducer you can test in isolation.
+    It also keeps `dispatch` stable across renders.
+  rubric:
+    - { point: "complex/interdependent state transitions in one place", score: 1 }
+    - { point: "reducer is pure/testable OR dispatch is stable", score: 1 }
+    - { partial: "'for complex state' with no concrete reason", score: 0.5 }
+
+- id: react-hooks-use-05
+  difficulty: medium
+  weight: 1
+  tags: [hooks, rsc, suspense]
+  question: >
+    What is the React 19 `use` API, and how does it differ from the other hooks?
+  answer: >
+    `use(resource)` reads a value from a Promise (suspending until it resolves)
+    or from a Context. Unlike other hooks it may be called conditionally and
+    inside loops, because it doesn't rely on fixed call order. Reading a Promise
+    with `use` integrates with Suspense.
+  rubric:
+    - { point: "reads a Promise (suspends) or Context", score: 1 }
+    - { point: "may be called conditionally / in loops (unlike other hooks)", score: 1 }
+    - { partial: "vaguely 'new hook for promises' without the conditional-call point", score: 0.5 }
+
+- id: react-effects-deps-01
+  difficulty: medium
+  weight: 3
+  tags: [effects]
+  question: >
+    What belongs in a `useEffect` dependency array, and what goes wrong if you
+    lie about it (omit a used value)?
+  answer: >
+    Every reactive value the effect reads — props, state, and values derived
+    from them — must be listed. Omitting one makes the effect run with a stale
+    captured value and skip re-running when that value changes, causing
+    out-of-sync behavior. The exhaustive-deps lint rule enforces this; the fix
+    is usually to include it, or move the value so it isn't a dependency.
+  rubric:
+    - { point: "every reactive value the effect reads (props/state/derived)", score: 1 }
+    - { point: "omitting → stale closure / effect doesn't re-run when it should", score: 1 }
+    - { partial: "mentions the array but not the stale-value consequence", score: 0.5 }
+
+- id: react-effects-cleanup-02
+  difficulty: medium
+  weight: 2
+  tags: [effects]
+  question: >
+    When does an effect's cleanup function run, and why is it needed for
+    subscriptions or timers?
+  answer: >
+    Cleanup runs before the effect re-runs (deps changed) and on unmount. For
+    subscriptions/timers/listeners it tears down the previous one so you don't
+    leak resources or stack duplicate handlers each time the deps change.
+  rubric:
+    - { point: "runs before next effect run AND on unmount", score: 1 }
+    - { point: "prevents leaks / duplicate subscriptions", score: 1 }
+    - { partial: "'runs on unmount' only (misses the before-re-run case)", score: 0.5 }
+
+- id: react-effects-misuse-03
+  difficulty: hard
+  weight: 3
+  tags: [effects, state]
+  question: >
+    Give two common cases where developers use `useEffect` but shouldn't, and
+    what to do instead.
+  answer: >
+    (1) Computing derived state — e.g. syncing a `fullName` into state from
+    first/last name. Just compute it during render (a plain variable or
+    useMemo); no effect/extra state. (2) Running logic in response to a user
+    action — e.g. POSTing on button click. Do it in the event handler, not an
+    effect watching state. Effects are for synchronizing with external systems,
+    not for reacting to renders or events.
+  rubric:
+    - { point: "derived state → compute during render, don't store+sync via effect", score: 1 }
+    - { point: "event-driven logic → put in the event handler, not an effect", score: 1 }
+    - { point: "effects are for syncing with external systems", score: 1 }
+    - { partial: "one correct case only", score: 0.5 }
+
+- id: react-effects-strictmode-04
+  difficulty: medium
+  weight: 2
+  tags: [effects]
+  question: >
+    In development, StrictMode runs your effects twice on mount. Why, and what
+    does it tell you to fix?
+  answer: >
+    In dev, StrictMode mounts, runs setup + cleanup, then runs setup again, to
+    surface effects that aren't resilient to being re-run — i.e. missing or
+    incorrect cleanup. If your effect breaks when double-invoked, it has a
+    cleanup bug. It does not happen in production.
+  rubric:
+    - { point: "dev-only; simulates unmount/remount to surface missing cleanup", score: 1 }
+    - { point: "the fix is correct cleanup / idempotent setup, not disabling StrictMode", score: 1 }
+    - { partial: "'it's a StrictMode dev thing' with no cleanup insight", score: 0.5 }
+
+- id: react-rsc-boundary-01
+  difficulty: hard
+  weight: 3
+  tags: [rsc]
+  question: >
+    Explain the difference between a Server Component and a Client Component,
+    and what `"use client"` actually marks.
+  answer: >
+    Server Components render on the server only: no state, effects, or browser
+    APIs, but they can be async and access server resources directly, and they
+    ship no JS for themselves. Client Components run in the browser and can use
+    state/effects/events. `"use client"` at the top of a file marks the entry
+    point into the client bundle — that module and everything it imports become
+    client code. It's a boundary marker, not a per-component toggle.
+  rubric:
+    - { point: "server: no hooks/state/effects, can be async, ships no JS", score: 1 }
+    - { point: "client: interactivity (state/effects/events), runs in browser", score: 1 }
+    - { point: "'use client' marks the boundary/entry into the client bundle (module-level)", score: 1 }
+    - { partial: "server vs client stated but 'use client' misdescribed as per-component", score: 0.5 }
+
+- id: react-rsc-props-02
+  difficulty: hard
+  weight: 2
+  tags: [rsc]
+  question: >
+    What kinds of props can a Server Component pass down across the client
+    boundary, and what can't cross?
+  answer: >
+    Props passed from a Server Component to a Client Component must be
+    serializable: primitives, plain objects/arrays, and React elements
+    (including server-rendered `children`). Functions, class instances, Dates in
+    some setups, and other non-serializable values cannot cross — you can't pass
+    an event handler down from server to client. Pass server-rendered elements
+    as `children` instead of trying to pass callbacks up.
+  rubric:
+    - { point: "props must be serializable (primitives/plain objects/elements)", score: 1 }
+    - { point: "functions/handlers/class instances can't cross the boundary", score: 1 }
+    - { partial: "'serializable' without the no-functions consequence", score: 0.5 }
+
+- id: react-rsc-data-03
+  difficulty: medium
+  weight: 2
+  tags: [rsc, suspense]
+  question: >
+    How do you fetch data in a Server Component, and how does that differ from
+    the classic `useEffect` fetch?
+  answer: >
+    A Server Component can be an `async` function and `await` the data directly
+    during render — the fetch runs on the server, so there's no client-side
+    loading waterfall or effect, and no data-fetching JS ships to the browser.
+    The classic `useEffect` fetch runs after mount on the client, causing a
+    render-then-fetch-then-render loading state.
+  rubric:
+    - { point: "server component is async; await data during render on the server", score: 1 }
+    - { point: "avoids client fetch-after-mount / no data-fetch JS shipped", score: 1 }
+    - { partial: "'fetch on the server' with no contrast to useEffect timing", score: 0.5 }
+
+- id: react-context-rerender-01
+  difficulty: medium
+  weight: 2
+  tags: [context, perf]
+  question: >
+    A context provider's value is `{ user, setUser }` created inline. Why might
+    this hurt performance, and how do you fix it?
+  answer: >
+    A new object literal each render is a new reference, so every consumer
+    re-renders on every provider render even if `user` didn't change. Memoize
+    the value with `useMemo(() => ({ user, setUser }), [user])`, and/or split
+    frequently-changing and stable data into separate contexts.
+  rubric:
+    - { point: "new object identity each render forces all consumers to re-render", score: 1 }
+    - { point: "fix: useMemo the value (and/or split contexts)", score: 1 }
+    - { partial: "notices re-render issue but no concrete fix", score: 0.5 }
+
+- id: react-context-usage-02
+  difficulty: easy
+  weight: 1
+  tags: [context, state]
+  question: >
+    When is Context the right tool, and when is it the wrong one?
+  answer: >
+    Right for low-frequency, widely-read global-ish values: theme, current user,
+    locale, auth. Wrong as a general state manager for high-frequency updates
+    (it re-renders all consumers) — reach for local state, lifting state, or a
+    dedicated store there. Context solves prop drilling, not state management.
+  rubric:
+    - { point: "good for low-frequency shared values (theme/auth/locale)", score: 1 }
+    - { point: "bad for high-frequency updates / not a state manager", score: 1 }
+    - { partial: "'for global state' with no frequency caveat", score: 0.5 }
+
+- id: react-perf-memo-01
+  difficulty: medium
+  weight: 2
+  tags: [perf]
+  question: >
+    What does `React.memo` do, and why does wrapping a component in it sometimes
+    fail to prevent re-renders?
+  answer: >
+    `React.memo` skips re-rendering a component when its props are shallowly
+    equal to the previous render. It fails when props are new references each
+    time — inline objects, arrays, or functions from the parent — so the shallow
+    comparison always sees a change. You need stable prop identities (useMemo/
+    useCallback) for memo to actually help.
+  rubric:
+    - { point: "skips re-render when props are shallowly equal", score: 1 }
+    - { point: "fails when parent passes new object/array/function identities each render", score: 1 }
+    - { partial: "'memoizes the component' with no shallow-equality/identity detail", score: 0.5 }
+
+- id: react-perf-list-02
+  difficulty: hard
+  weight: 2
+  tags: [perf, reconciliation]
+  question: >
+    A list of 10,000 rows is janky. Before reaching for memoization, what is the
+    higher-impact fix and why?
+  answer: >
+    Virtualize (windowing): render only the rows in/near the viewport instead of
+    all 10,000. The cost is dominated by the number of mounted DOM nodes and
+    elements, so memoization of individual rows barely helps if you're still
+    creating 10k of them. Windowing cuts the work by orders of magnitude.
+  rubric:
+    - { point: "virtualization / windowing — render only visible rows", score: 1 }
+    - { point: "cost is dominated by node count; memo won't fix rendering all 10k", score: 1 }
+    - { partial: "'add React.memo to rows' as the primary fix", score: 0.5 }
+
+- id: react-refs-useref-01
+  difficulty: easy
+  weight: 2
+  tags: [refs]
+  question: >
+    Name the two main uses of `useRef`, and explain why mutating `ref.current`
+    doesn't re-render.
+  answer: >
+    (1) Hold a reference to a DOM node (`<input ref={r} />`). (2) Hold a mutable
+    value that persists across renders without being render state (timers,
+    previous value, instance flags). Mutating `ref.current` doesn't schedule a
+    render — refs are an escape hatch from the render cycle — so use state, not a
+    ref, for anything the UI must reflect.
+  rubric:
+    - { point: "DOM access and persistent mutable non-render value", score: 1 }
+    - { point: "mutating ref.current does not trigger a re-render", score: 1 }
+    - { partial: "only one use, or says it does trigger render", score: 0.5 }
+
+- id: react-refs-forward-02
+  difficulty: medium
+  weight: 1
+  tags: [refs]
+  question: >
+    How do you let a parent attach a ref to a child's DOM node, and what changed
+    in React 19?
+  answer: >
+    Historically you wrapped the child in `forwardRef` so it could receive and
+    forward the `ref` to an inner element. In React 19, `ref` can be passed as a
+    normal prop to function components, so `forwardRef` is no longer required for
+    that (and is being deprecated).
+  rubric:
+    - { point: "forwardRef forwards ref to an inner DOM node (pre-19)", score: 1 }
+    - { point: "React 19: ref is a regular prop, forwardRef no longer needed", score: 1 }
+    - { partial: "explains forwardRef but misses the React 19 change", score: 0.5 }
+
+- id: react-suspense-01
+  difficulty: hard
+  weight: 2
+  tags: [suspense]
+  question: >
+    What does `<Suspense fallback={...}>` do, and what actually causes a
+    component to "suspend"?
+  answer: >
+    Suspense shows the fallback while a descendant is not yet ready, then swaps
+    in the real content when it is. A component suspends when it reads a resource
+    that isn't available yet — a thrown/pending Promise, e.g. via `use()`, a
+    Suspense-enabled data library, or `lazy()` for code-splitting. Suspense
+    catches that and renders the nearest fallback.
+  rubric:
+    - { point: "shows fallback until descendants are ready, then swaps in content", score: 1 }
+    - { point: "suspends on a pending resource/Promise (use/lazy/data lib)", score: 1 }
+    - { partial: "'shows a loading spinner' with no mechanism", score: 0.5 }
+
+- id: react-suspense-transition-02
+  difficulty: hard
+  weight: 2
+  tags: [suspense, perf]
+  question: >
+    What problem does `useTransition` / `startTransition` solve, and how does it
+    change how an update is scheduled?
+  answer: >
+    It marks a state update as non-urgent ("transition") so React can keep the
+    UI responsive to urgent updates (typing, clicks) and render the expensive
+    update in the background, without blocking. `isPending` lets you show a
+    subtle loading state instead of freezing. It's for expensive re-renders or
+    Suspense-triggering navigation, not for I/O throttling.
+  rubric:
+    - { point: "marks an update as non-urgent/interruptible so urgent updates stay responsive", score: 1 }
+    - { point: "isPending for pending UI / doesn't block input", score: 1 }
+    - { partial: "'makes it async/faster' with no urgent-vs-transition model", score: 0.5 }
+
+- id: react-state-batching-01
+  difficulty: medium
+  weight: 2
+  tags: [state]
+  question: >
+    What is automatic batching in React 18, and how do you force a synchronous
+    update when you truly need one?
+  answer: >
+    React 18 batches multiple state updates into a single re-render even inside
+    promises, timeouts, and native event handlers (React 17 only batched inside
+    React event handlers). To opt out for a specific update — e.g. you must read
+    the resulting DOM immediately — wrap it in `flushSync`.
+  rubric:
+    - { point: "18 batches updates everywhere (promises/timeouts/native), not just React events", score: 1 }
+    - { point: "flushSync forces a synchronous flush when needed", score: 1 }
+    - { partial: "describes batching but not the 17→18 scope change", score: 0.5 }
+
+- id: react-state-lifting-02
+  difficulty: easy
+  weight: 1
+  tags: [state]
+  question: >
+    Two sibling components need to stay in sync. What's the standard React
+    pattern?
+  answer: >
+    Lift the shared state up to their closest common parent and pass it down as
+    props (plus a setter/callback). The parent becomes the single source of
+    truth; siblings read and update through it.
+  rubric:
+    - { point: "lift state to closest common ancestor, pass down as props", score: 1 }
+    - { point: "single source of truth", score: 1 }
+    - { partial: "'share state' without naming lifting/common parent", score: 0.5 }
+
+- id: react-state-derived-03
+  difficulty: medium
+  weight: 2
+  tags: [state, effects]
+  question: >
+    A prop `items` comes in and you keep a separate `useState` copy to render.
+    Why is that an anti-pattern, and what's the fix?
+  answer: >
+    Copying props into state duplicates the source of truth: the state goes
+    stale when the prop changes unless you sync it with an effect, which is
+    fragile and causes extra renders. Instead derive during render — compute
+    directly from the prop, or use `useMemo` if the transform is expensive. Only
+    store in state what the component itself owns/changes.
+  rubric:
+    - { point: "duplicates source of truth → goes stale / needs effect sync", score: 1 }
+    - { point: "derive during render (or useMemo); only store owned state", score: 1 }
+    - { partial: "'just use the prop' without the stale/source-of-truth reasoning", score: 0.5 }

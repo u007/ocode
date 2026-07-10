@@ -1,0 +1,48 @@
+# Stack Detection
+
+How ocode decides a repo "uses" a stack, so a derived skill can be gated on it.
+Each stack declares its markers in its `meta.yaml` under `detection:`.
+
+## Marker types
+
+| type      | meaning                                          | example |
+|-----------|--------------------------------------------------|---------|
+| `dep`     | a dependency present in a manifest                | `react` in `package.json` deps/devDeps |
+| `file`    | a marker file exists (glob allowed)               | `go.mod`, `Cargo.toml`, `next.config.*` |
+| `content` | a regex matches inside a file                     | `from 'react'` in `**/*.tsx` |
+
+A stack is "detected" when **any** of its markers matches (OR semantics), unless
+`meta.yaml` sets `detection.mode: all`.
+
+## `meta.yaml` detection block
+
+```yaml
+detection:
+  mode: any            # any (default) | all
+  markers:
+    - { type: dep,  manifest: package.json, name: react }
+    - { type: file, glob: "next.config.*" }        # (nextjs example)
+    - { type: file, glob: "go.mod" }               # (golang example)
+    - { type: file, glob: "Cargo.toml" }           # (rust example)
+```
+
+## Reference markers per planned stack
+
+| stack    | primary marker                                   |
+|----------|--------------------------------------------------|
+| react    | `dep: react` in `package.json`                   |
+| tanstack | `dep: @tanstack/*` in `package.json`             |
+| nextjs   | `dep: next` OR `file: next.config.*`             |
+| golang   | `file: go.mod`                                    |
+| rust     | `file: Cargo.toml`                                |
+
+## Activation gate (the whole point)
+
+A derived skill `derived/<stack>.<model_id>.SKILL.md` activates when **both**:
+
+1. the stack is detected in the current repo (rules above), AND
+2. the active model id **exactly** equals the skill's `tuned_for`.
+
+> **Status:** the runtime that reads these markers and injects the matching
+> skill is **not yet wired** into the agent. This file is the contract for that
+> follow-up work; see the repo `TODO.md`. Until then, detection is manual.
