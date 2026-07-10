@@ -23,13 +23,24 @@ skill). Not yet done:
 - [ ] **Decide the embed home for derived skills** (existing `//go:embed
   all:skills` tree vs a `skills/okf/` subtree) and move a real derived skill
   there once one exists from a genuine evaluation.
-- [ ] **Populate remaining stacks**: tanstack, nextjs, golang, rust (same schema
-  as `docs/okf/react/`). Add subcategories as nested folders where useful.
-- [ ] **Real evaluations.** The `claude-opus-4-8` scorecard + derived skill are
-  illustrative placeholders — re-grade against `docs/okf/react/questions.yaml`
-  and regenerate before anything ships in the binary.
+- [x] **Populate stacks**: golang (33), rust (31), tanstack (31), nextjs (34)
+  built to the `docs/okf/react/` schema — 129 records, validated, version-
+  sensitive facts checked via ctx7. Subcategories (nested folders) still open
+  where a stack warrants finer axes.
+- [ ] **Run the first REAL evaluation (the next actionable step; unblocks the
+  enforcement hook above).** Pick one stack + one exact model id we actually
+  route to, ask the model every question in that stack's `questions.yaml`, grade
+  each answer against its rubric (`_schema/rubric-guide.md`), and write a real
+  `<stack>/scores/<exact-model-id>.md` + a real `<stack>/derived/<stack>.<model>.SKILL.md`
+  covering only the below-threshold tags. Everything shipped today (the
+  `react/scores/claude-opus-4-8.md` + derived skill) is an illustrative
+  placeholder and must be replaced before anything ships in the binary.
+- [ ] **Build a grading harness (optional, speeds real evals).** A small tool
+  that reads `questions.yaml`, sends each question to a target model, and emits a
+  pre-filled scorecard for human rubric-grading (or LLM-judge-assisted grading).
+  Must record the exact `model_id` + `model_version` + `stack_corpus_rev`.
 - [ ] **Optional: a `questions.yaml → questions.md` generator** to kill the
-  hand-sync drift risk noted in the design.
+  hand-sync drift risk noted in the design (5 stacks now hand-synced).
 
 ## Shared agent notes bus — deferred production wiring (from review-changes: 2026-06-16)
 
