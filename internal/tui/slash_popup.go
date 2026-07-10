@@ -12,6 +12,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type slashSuggestion struct {
@@ -508,12 +509,19 @@ func (m model) renderSlashPopup() string {
 	sb := renderListScrollbar(visibleCount, len(items), start, visibleCount)
 	bodyLines := strings.Split(strings.TrimRight(body.String(), "\n"), "\n")
 	sbLines := strings.Split(sb, "\n")
+	// One rendered row per item: truncate to the border's content width
+	// (width - 2 border - 2 padding - 1 scrollbar col) instead of letting the
+	// border wrap long descriptions. Wrapped rows silently multiplied the
+	// popup height (8 items → 20+ rows), and the popup opens without a
+	// layout() pass, so the oversized rows pushed the frame past the terminal
+	// height while typing a slash command.
+	contentWidth := max(1, width-5)
 	for i, bLine := range bodyLines {
 		sbCol := scrollbarTrackStyle.Render(scrollbarTrack)
 		if i < len(sbLines) {
 			sbCol = sbLines[i]
 		}
-		bodyLines[i] = bLine + sbCol
+		bodyLines[i] = ansi.Truncate(bLine, contentWidth, "…") + sbCol
 	}
 	return borderStyle.Width(width).Render(strings.Join(bodyLines, "\n"))
 }

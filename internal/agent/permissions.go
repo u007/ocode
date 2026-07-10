@@ -568,6 +568,14 @@ func isExfiltrationRiskNetcat(fields []string) bool {
 		return false
 	}
 
+	// Loopback connections (127.0.0.0/8, ::1, localhost) stay on-host and
+	// cannot exfiltrate data off-machine, so they are never harmful — even
+	// when sending data (e.g. `nc 127.0.0.1 12143 < file`). Check this before
+	// the redirection/scan logic so loopback always wins.
+	if netcatHostIsLoopback(fields) {
+		return false
+	}
+
 	// Check for stdin redirection: nc host port < file
 	for _, f := range fields[1:] {
 		if f == "<" {
@@ -597,8 +605,68 @@ func isExfiltrationRiskNetcat(fields []string) bool {
 		return false // port scan only — no data exfiltration
 	}
 
-	// nc with host+port and no scan flag: can send arbitrary data
+	// nc with a non-loopback host+port and no scan flag: can send arbitrary data
 	return true
+}
+
+// netcatHostIsLoopback reports whether any positional (non-flag, non-port)
+// argument of an nc command is a loopback host (127.0.0.0/8, ::1, localhost).
+func netcatHostIsLoopback(fields []string) bool {
+	for _, f := range fields[1:] {
+		if strings.HasPrefix(f, "-") {
+			continue // flag, not a host
+		}
+		if isAllDigits(f) {
+			continue // pure port number
+		}
+		if isLoopbackHost(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// isLoopbackHost reports whether host is a loopback address.
+func isLoopbackHost(host string) bool {
+	h := strings.TrimPrefix(host, "[")
+	h = strings.TrimSuffix(h, "]")
+	switch h {
+	case "localhost", "::1":
+		return true
+	}
+	// 127.0.0.0/8 — all loopback per RFC 3330/6598-era conventions
+	if strings.HasPrefix(h, "127.") {
+		return true
+	}
+	return false
+}
+
+// isAllDigits reports whether s consists only of ASCII digits.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isLoopbackNetcat reports whether command is a netcat (nc/ncat) connection to
+// a loopback host. Used by decideSingleCommand to auto-allow local-only
+// connections, which cannot exfiltrate data off-machine.
+func isLoopbackNetcat(command string) bool {
+	fields := splitShellFields(command)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "nc", "ncat":
+		return netcatHostIsLoopback(fields)
+	}
+	return false
 }
 
 // isExfiltrationRiskCommand checks if a bash command has data exfiltration
@@ -3304,6 +3372,14 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	if IsHarmfulBashCommand(command) {
 		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (harmful): command=%q", command))
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
+	}
+
+	// Loopback netcat (127.0.0.0/8, ::1, localhost) stays on-host and cannot
+	// exfiltrate data off-machine, so it is auto-allowed without prompting —
+	// this is the one nc variant we treat as safe (it is never "harmful").
+	if isLoopbackNetcat(command) {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback nc): command=%q", command))
+		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	// 1. Temp directory operations are always allowed (cross-platform)

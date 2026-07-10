@@ -11920,11 +11920,17 @@ func (m *model) layoutLogViewport() {
 var layoutDebugOnce sync.Once
 var layoutDebugEnabled bool
 
-func layoutDebugf(format string, args ...any) {
+// layoutDebugOn reports whether OCODE_LAYOUT_DEBUG logging is active. Use it
+// to guard log calls whose arguments are expensive to compute (extra renders).
+func layoutDebugOn() bool {
 	layoutDebugOnce.Do(func() {
 		layoutDebugEnabled = os.Getenv("OCODE_LAYOUT_DEBUG") != ""
 	})
-	if !layoutDebugEnabled {
+	return layoutDebugEnabled
+}
+
+func layoutDebugf(format string, args ...any) {
+	if !layoutDebugOn() {
 		return
 	}
 	f, err := os.OpenFile(filepath.Join(os.TempDir(), "ocode-layout-debug.log"),
@@ -12386,6 +12392,19 @@ func (m *model) syncPermViewport(contentWidth int) {
 	// button regions — otherwise the buttons render below their hit-test rows.
 	bodyHeight := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render(body))
 	m.permViewport.SetHeight(min(max(1, bodyHeight), m.permDialogMaxBodyLines()))
+	// The cap above is a fraction of the terminal height and ignores the rest
+	// of the bottom chrome (header, status, stopped/activity rows, borders).
+	// On short terminals the full dialog can push the frame past the terminal
+	// height; the View() safety net cannot shrink the transcript below 1 row,
+	// and every over-tall frame scrolls the real terminal — corruption that
+	// outlives the dialog, compounds with each popup, and is only repaired by
+	// a resize. Rebudget: shrink the body until the chrome plus a 1-row
+	// transcript fits the terminal.
+	if m.height > 0 && m.showPermDialog {
+		if deficit := m.bottomChromeHeight(m.panelWidth()) + 1 - m.height; deficit > 0 {
+			m.permViewport.SetHeight(max(1, m.permViewport.Height()-deficit))
+		}
+	}
 	m.permViewport.SetYOffset(prevYOffset)
 }
 
@@ -14930,8 +14949,12 @@ func (m model) renderTabContent() string {
 	// truncating the whole view, which would lose the slash popup or status bar.
 	if m.height > 0 && lipgloss.Height(result) > m.height {
 		overflow := lipgloss.Height(result) - m.height
-		layoutDebugf("View SAFETY NET: result=%d h=%d overflow=%d vp=%d perm=%v",
-			lipgloss.Height(result), m.height, overflow, m.viewport.Height(), m.showPermDialog)
+		if layoutDebugOn() {
+			layoutDebugf("View SAFETY NET: result=%d h=%d overflow=%d vp=%d perm=%v header=%d transcript=%d left=%d sidebar=%d %s",
+				lipgloss.Height(result), m.height, overflow, m.viewport.Height(), m.showPermDialog,
+				lipgloss.Height(header), lipgloss.Height(transcript), lipgloss.Height(left),
+				lipgloss.Height(m.renderSidebar()), m.chromeBreakdown(panelWidth))
+		}
 		newVPH := max(1, m.viewport.Height()-overflow)
 		m.viewport.SetHeight(newVPH)
 		transcriptSB := renderScrollbar(m.viewport.Height(), m.viewport.TotalLineCount(), m.viewport.VisibleLineCount(), m.viewport.YOffset())
@@ -14950,6 +14973,19 @@ func (m model) renderTabContent() string {
 		} else {
 			result = lipgloss.JoinVertical(lipgloss.Left, header, left)
 		}
+	}
+
+	// Hard guarantee: never emit a frame taller than the terminal. The safety
+	// net above cannot shrink the transcript below 1 row, so when the bottom
+	// chrome alone exceeds the terminal (tiny terminals, chrome that appeared
+	// without a layout() call) the frame would still overflow. An over-tall
+	// frame scrolls the real terminal one row per repaint; the corruption
+	// outlives whatever caused it and only a resize repaint clears it.
+	// Dropping the bottom rows for a frame is strictly less damage.
+	if m.height > 0 && lipgloss.Height(result) > m.height {
+		lines := strings.Split(result, "\n")
+		layoutDebugf("View HARD CLAMP: result=%d h=%d dropped=%d", len(lines), m.height, len(lines)-m.height)
+		result = strings.Join(lines[:m.height], "\n")
 	}
 
 	return result

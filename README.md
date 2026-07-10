@@ -18,7 +18,7 @@ JS-based coding agents routinely consume 500MB+ just to sit in a terminal. ocode
 Our custom **FastViewport** component renders 1000 message pairs in **0.73ms** — a 41× improvement over the standard bubbles viewport. While other agents stutter on long conversations, ocode stays buttery smooth.
 
 ### 🧠 Multi-provider, multi-model, zero lock-in
-OpenAI, Anthropic, Google Gemini, Zhipu Z.AI, Alibaba, GitHub Copilot — bring your own model or use the one best suited to the task. Switch mid-conversation with `/model`. Use a cheap model for compaction and a powerful one for code. No vendor lock-in, no gatekeeping.
+OpenAI, Anthropic, Google Gemini, Zhipu Z.AI, Alibaba, GitHub Copilot, Novita AI, OpenRouter — bring your own model or use the one best suited to the task. Switch mid-conversation with `/model`. Use a cheap model for compaction and a powerful one for code. No vendor lock-in, no gatekeeping.
 
 ### 🔒 Permissions you can trust
 First-class permission modes (`normal` / `yolo` / `locked`) with per-tool rules, bash-prefix granularity, scope confinement, and an optional **LLM auto-permission model** that makes smart allow/deny decisions so you stay in flow. The advisor module catches risky operations before they happen. No silent `rm -rf`.
@@ -48,7 +48,8 @@ go build -o ocode .
 
 | Feature | Detail |
 |---------|--------|
-| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking/extended thinking), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot |
+| **Multi-Provider LLM** | OpenAI, Anthropic (Claude thinking/extended thinking), Google Gemini, Z.AI (GLM), Alibaba (Qwen), GitHub Copilot, Novita AI, OpenRouter |
+| **Live Model Resolution** | OpenRouter and Novita AI models are resolved from each provider's live API at startup (30s TTL cache, graceful fallback to the static registry) so context sizes, pricing, and vision support are accurate for models absent from or renamed in models.dev (e.g. `openrouter/tencent/hy3:free`) |
 | **Extended Thinking** | Toggle thinking budget on Claude models via `Alt+T` (off/low/med/high) |
 | **Prompt Caching** | Anthropic `cache_control` markers on system messages and large tool results; OpenAI server-side caching |
 | **Context-Aware Compaction** | Ratio-triggered automatic summarization with custom model support, anchor-update across multiple compactions, `safeCut` invariant, and `max_summary_input_tokens` batching |
@@ -63,7 +64,7 @@ go build -o ocode .
 |------|-------------|
 | `read`, `write`, `edit`, `delete` | Full file I/O with path confinement and permissions |
 | `undo_file_change` | Roll back a previous `write`/`edit`/`multi_edit`/`multi_file_edit`/`replace_lines`/`delete` by `tool_call_id` (2-agent-step window, conflicts with newer same-file writes are detected and refused) |
-| `bash` | Shell execution with background support, circular output buffer (256KB), and `Ctrl+B` to foreground→background |
+| `bash` | Shell execution with background support, circular output buffer (256KB), `Ctrl+B` to foreground→background, and **live streaming** of combined stdout/stderr into the transcript as the command runs |
 | `grep`, `glob`, `repo_overview` | Advanced search and repository analysis |
 | `lsp` | Go-to-definition, hover docs, symbol search, diagnostics |
 | `agent` | Delegate work to sub-agents with permission isolation |
@@ -140,6 +141,8 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 - **On-demand skill loading** — skills are lightweight SKILL.md definitions loaded when relevant
 - **`/skills`** command to browse and activate
 - **`/learn`** command to list project-root skills and guide skill creation/update
+- **Skill-as-command** — any installed skill is also available directly as a slash command: typing `/<skill-name>` (e.g. `/agent-browser`, `/pdf`) activates that skill, loading its SKILL.md as the run prompt (extra words become context). Resolves against the current project root, so skills installed under a `/cd` target are matched
+- **Bundled skill library** — ~58 bundled skills covering Google Workspace (`gws-*`), PDF tooling, context compression (`compress`, `caveman*`), browser automation (`agent-browser`, `htrcli`), web QA/testing (`webapp-qa`, `webapp-testing`), framework migration (`nextjs-to-tanstack`), and skill authoring (`skill-creator`)
 - **Skill installer** with status detection
 - **Custom skill creation** via the skill-creator skill
 
@@ -189,10 +192,11 @@ A React-based web interface that mirrors the TUI experience:
 | **Session management** | ✅ Resume, history, routing |
 | **Model selection** | ✅ Model dialog with main/small/advisor tabs |
 | **Permissions dialog** | ✅ Interactive allow/deny prompts |
+| **Question dialog** | ✅ Interactive `question` tool prompts with selectable options, server-bridged via `POST /api/questions` |
 | **Remote control** | ✅ `/rc` command mirrors TUI session to browser in real time |
 | **Live status panel** | ✅ Real-time model, context, LSP, spending, modified files |
 | **File uploads** | ✅ Drag-and-drop or `/upload` command to set directory |
-| **Web shell** | ✅ `!` prefix runs local shell commands inline |
+| **Web shell** | ✅ `!` prefix runs local shell commands inline with live stdout/stderr streaming |
 | **Mobile sidebar** | ✅ Overlay with backdrop on viewports < 768px |
 | **Theme sync** | ✅ CSS variables auto-mapped from TUI theme |
 | **Agent cowork panel** | ✅ Parallel agent monitoring sidebar |
@@ -261,7 +265,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/share` | | Generate shareable session link |
 | `/rc` | `/remote-control` | Start/stop web UI (`/rc off`) to mirror this session |
 | `/cd` | `/cwd` | Change the project root to another directory |
-| `/context` | | Show context window token budget and system prompt |
+| `/context` | | Show context window token budget and system prompt, plus Knowledge Bundle, Memory, and Discovery (corpus index vs volatile tail, context-saved metrics) sections |
 | `/docs` | `/doc-mode` | Manage OKF knowledge bundle (on, off, status, init, update, cleanup) |
 | `/upload` | `/uploads` | Show or set the file upload directory |
 | `/search` | `/find` | Find a message by keyword (opens the in-chat find bar) |
