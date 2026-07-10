@@ -7,10 +7,19 @@ The benchmark corpus + scoring system is built under `docs/okf/` (design:
 fully-built exemplar (26 Q&A + rubric, one worked scorecard, one example derived
 skill). Not yet done:
 
-- [ ] **Wire stack detection + skill injection into the agent.** Contract is in
-  `docs/okf/_schema/stack-detection.md`: read a repo's marker files/deps, and
-  when a stack is detected AND the active model id exactly matches a derived
-  skill's `tuned_for`, inject that skill. Today detection/activation is manual.
+- [x] **Detection engine** — `internal/stackdetect` (`Detect(root) []string`)
+  reads package.json deps + marker files per `stack-detection.md`. Tested. This
+  is the reusable core; nothing consumes it yet.
+- [ ] **Wire the enforcement hook (deferred until the first REAL eval).** Chosen
+  approach = **skill-catalog filter** (keeps full SKILL.md): extend the skill
+  parser to capture Kaizen frontmatter (`tuned_for`, `stack`), give
+  `skill.BuildCatalog` the active model id + `stackdetect.Detect(workdir)`, and
+  include a Kaizen-tagged skill only when its `stack` is detected AND its
+  `tuned_for` exactly equals the active model. Do NOT build this until one
+  genuine evaluation has produced one real derived SKILL.md — wiring against
+  today's illustrative placeholders would ship inert/dead code. Compute
+  detection ONCE from stable inputs (workdir+model) to respect the prefix-cache
+  contract in `internal/agent/append_stable.go` / `provider_prompts.go`.
 - [ ] **Decide the embed home for derived skills** (existing `//go:embed
   all:skills` tree vs a `skills/okf/` subtree) and move a real derived skill
   there once one exists from a genuine evaluation.

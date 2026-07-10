@@ -166,6 +166,22 @@ tuned exact version)**. Body = corrective guidance for the weak tags only.
   **follow-up** — documented here, logged in `TODO.md`, not half-implemented
   this round.
 
+### Update (2026-07-11): detection built, enforcement deferred
+
+- **Detection engine shipped:** `internal/stackdetect.Detect(root) []string`
+  detects react/tanstack/nextjs/golang/rust from package.json deps + marker
+  files. Tested. It is the runtime mirror of the `meta.yaml` detection blocks.
+- **Enforcement approach chosen = skill-catalog filter** (keeps full SKILL.md,
+  the user's artifact choice). The skill parser gains `tuned_for`/`stack`
+  fields; `skill.BuildCatalog` takes the active model id + detected stacks and
+  admits a Kaizen skill only when `stack ∈ detected` AND `tuned_for == model`.
+  This enforces in code what a bare catalog (advisory `when_to_use`) cannot.
+- **Deferred on purpose:** the hook is NOT built yet, because every derived
+  artifact today is an illustrative placeholder. Wiring enforcement before a
+  real evaluation exists would ship dead code and invite demoing "it works" on
+  known-fake content. Order: corpora → one real eval → one real derived skill →
+  wire. Tracked in `TODO.md`.
+
 ## Deliverables this round
 
 1. `docs/okf/README.md`
