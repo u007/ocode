@@ -1,0 +1,29 @@
+stack: nextjs
+title: Next.js (App Router)
+corpus_rev: 1
+# Version scope this corpus grades against. App Router (>=13.4) is the focus;
+# Pages Router is referenced only for contrast. The big caching foot-gun is
+# version-dependent: Next 14 cached `fetch` (and GET route handlers) by DEFAULT,
+# Next 15 made both UNcached by default. Next 16 keeps the Next 15 model (fetch
+# uncached by default; `cacheComponents`/`'use cache'` is opt-in), so caching
+# answers are phrased "Next 15+ (unchanged through 16)".
+version_scope: ">=14 <17"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim >=4 questions/tag.
+tags:
+  - app-router        # file conventions: layout/page/loading/error/route, nesting
+  - server-components # RSC default in app dir, "use client" boundary, no hooks
+  - data-fetching     # fetch in server components, no getServerSideProps in app dir
+  - caching           # fetch data cache, revalidate, no-store, cache layers (v14 vs v15)
+  - rendering         # static vs dynamic, generateStaticParams, dynamic APIs, segment config
+  - server-actions    # "use server", form mutations, revalidate, security
+  - route-handlers    # route.ts, Request/Response, GET caching default
+  - streaming         # loading.tsx, Suspense, streaming SSR
+  - metadata          # metadata API, generateMetadata, file-based metadata
+  - navigation        # Link, useRouter, redirect, notFound
+
+detection:
+  mode: any
+  markers:
+    - { type: dep, manifest: package.json, name: next }
+    - { type: file, glob: "next.config.*" }

@@ -1,0 +1,583 @@
+# TanStack (Query v5 + Router v1) benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+# Version: TanStack Query v5 (gcTime, isPending, useSuspenseQuery) + Router v1.
+
+- id: tanstack-query-keys-01
+  difficulty: easy
+  weight: 2
+  tags: [query-keys]
+  question: >
+    What is a query key in TanStack Query, and how does the client decide that
+    two keys refer to the same cache entry?
+  answer: >
+    A query key is a serializable array that uniquely identifies a query's cached
+    data, e.g. `['todos', { status: 'done' }]`. The client hashes the key
+    deterministically: arrays are order-sensitive but object keys are sorted, so
+    `{ a: 1, b: 2 }` and `{ b: 2, a: 1 }` hash the same. Equal hashes share one
+    cache entry; different keys are separate entries.
+  rubric:
+    - { point: "key is a serializable array identifying the cache entry", score: 1 }
+    - { point: "hashed deterministically; object key order ignored, array order matters", score: 1 }
+    - { partial: "'it's an id for the query' without the deterministic-hash detail", score: 0.5 }
+
+- id: tanstack-query-keys-02
+  difficulty: medium
+  weight: 3
+  tags: [query-keys, invalidation]
+  question: >
+    Why should query keys be structured hierarchically (e.g. `['todos']`,
+    `['todos', todoId]`), and how does that interact with invalidation?
+  answer: >
+    Invalidation matches keys by prefix (fuzzy match): invalidating `['todos']`
+    also invalidates `['todos', 1]`, `['todos', 2]`, and `['todos', { done: true }]`.
+    Structuring keys from generic to specific lets you invalidate a whole subtree
+    with one call, or a single item precisely. A flat/inconsistent key scheme
+    forces you to invalidate everything or track keys manually.
+  rubric:
+    - { point: "invalidation matches by prefix, so a parent key invalidates its children", score: 1 }
+    - { point: "hierarchy = generic→specific enables both broad and precise invalidation", score: 1 }
+    - { partial: "'keeps keys organized' without the prefix-invalidation payoff", score: 0.5 }
+
+- id: tanstack-query-keys-03
+  difficulty: medium
+  weight: 2
+  tags: [query-keys, query-fn]
+  question: >
+    A query's `queryFn` reads a `userId` variable, but the key is just
+    `['projects']`. What breaks, and what is the rule?
+  answer: >
+    The key is the query's dependency array: every value the `queryFn` uses to
+    fetch must be in the key. With `['projects']` fixed, data for different
+    `userId`s collides in one cache entry and the query won't refetch when
+    `userId` changes. Fix: `['projects', userId]` so each user gets its own
+    entry and changing `userId` triggers a fetch.
+  rubric:
+    - { point: "the key is the dependency array; every fetch input belongs in it", score: 1 }
+    - { point: "omitting userId → cache collision / no refetch when it changes", score: 1 }
+    - { partial: "says 'add userId to the key' without the dependency-array reasoning", score: 0.5 }
+
+- id: tanstack-query-keys-04
+  difficulty: medium
+  weight: 2
+  tags: [query-keys, caching]
+  question: >
+    Two components mount `useQuery` with the same key `['user', 5]` at the same
+    time. How many network requests fire, and why?
+  answer: >
+    One. The key identifies a single cache entry, so concurrent observers of the
+    same key share one in-flight request (deduplication) and both read the same
+    cached result. Freshness (staleTime) and garbage collection are also tracked
+    per key, not per component.
+  rubric:
+    - { point: "one request — same key deduplicates concurrent fetches", score: 1 }
+    - { point: "cache/staleTime/gc are tracked per key, shared across observers", score: 1 }
+    - { partial: "'they share data' without naming request deduplication", score: 0.5 }
+
+- id: tanstack-caching-01
+  difficulty: hard
+  weight: 3
+  tags: [caching]
+  question: >
+    Explain the difference between `staleTime` and `gcTime` (formerly
+    `cacheTime`). This is the most common point of confusion.
+  answer: >
+    `staleTime` is how long fetched data is considered fresh; while fresh, mounts
+    and refetch triggers reuse it without hitting the network. After staleTime it
+    is stale and eligible to refetch. `gcTime` is how long an *inactive* query's
+    data stays in the cache after the last observer unmounts, before it is
+    garbage collected. staleTime governs freshness/refetching; gcTime governs how
+    long unused data survives in memory. Defaults: `staleTime: 0`, `gcTime: 5min`.
+  rubric:
+    - { point: "staleTime = how long data is fresh (controls refetching)", score: 1 }
+    - { point: "gcTime = how long inactive/unused data stays cached before GC", score: 1 }
+    - { point: "they are independent axes (freshness vs retention); defaults 0 / 5min", score: 1 }
+    - { partial: "gets one right but conflates the two (e.g. gcTime as freshness)", score: 0.5 }
+
+- id: tanstack-caching-02
+  difficulty: medium
+  weight: 2
+  tags: [caching]
+  question: >
+    With the default `staleTime: 0`, what happens when a component remounts and
+    reads a query it fetched a moment ago? Describe the user-visible behavior.
+  answer: >
+    Because staleTime is 0 the data is immediately stale, so on remount the query
+    returns the cached data instantly (no loading spinner) and refetches in the
+    background; if the server data changed, the UI updates when it arrives. This
+    is stale-while-revalidate: show cached data now, revalidate silently. Raising
+    staleTime suppresses the background refetch while data is still fresh.
+  rubric:
+    - { point: "returns cached data instantly AND refetches in background (stale-while-revalidate)", score: 1 }
+    - { point: "staleTime: 0 means always stale → refetches on remount/refocus; raising it suppresses that", score: 1 }
+    - { partial: "'it uses the cache' without the background-refetch half", score: 0.5 }
+
+- id: tanstack-invalidation-01
+  difficulty: medium
+  weight: 2
+  tags: [invalidation]
+  question: >
+    What does `queryClient.invalidateQueries({ queryKey: ['todos'] })` actually
+    do to matching queries?
+  answer: >
+    It marks every query whose key matches (by prefix) as stale, and immediately
+    refetches the ones that are currently active (mounted). Inactive matching
+    queries are just flagged stale and will refetch the next time they're used.
+    Invalidation doesn't delete cached data — stale data is still shown while the
+    refetch runs.
+  rubric:
+    - { point: "marks matching queries stale (prefix match)", score: 1 }
+    - { point: "refetches active ones now; inactive refetch on next use (data not removed)", score: 1 }
+    - { partial: "'it refetches the data' without the stale-mark/active-vs-inactive nuance", score: 0.5 }
+
+- id: tanstack-invalidation-02
+  difficulty: medium
+  weight: 2
+  tags: [invalidation, caching]
+  question: >
+    After a successful update, when would you use `setQueryData` instead of
+    `invalidateQueries`, and what's the tradeoff?
+  answer: >
+    `setQueryData` writes the new value straight into the cache — no network
+    round-trip, instant UI update — good when the mutation response already
+    contains the authoritative new data. `invalidateQueries` refetches from the
+    server, which is safer when other fields/derived data may have changed but
+    costs a request. Many flows do both: `setQueryData` for immediacy, then
+    invalidate to reconcile. The trap is trusting `setQueryData` alone when the
+    server may have computed values you didn't set.
+  rubric:
+    - { point: "setQueryData writes cache directly (no refetch); use when you have the new data", score: 1 }
+    - { point: "invalidateQueries refetches (authoritative but costs a request)", score: 1 }
+    - { partial: "describes one but not the tradeoff/when-to-pick", score: 0.5 }
+
+- id: tanstack-mutations-01
+  difficulty: easy
+  weight: 2
+  tags: [mutations]
+  question: >
+    How does `useMutation` differ from `useQuery`, and how do you trigger and
+    track a mutation? (Watch the v5 status naming.)
+  answer: >
+    `useQuery` runs automatically to read/cache server state; `useMutation`
+    represents an imperative write (create/update/delete) that you fire by calling
+    `mutate(variables)` (or `mutateAsync`). It doesn't run on mount or cache by
+    key. Track it via the returned status: `isPending`, `isError`, `isSuccess`
+    (in v5 the in-flight flag is `isPending`, not the old `isLoading`), plus
+    `data`/`error` and lifecycle callbacks (`onSuccess`, `onError`, `onSettled`).
+  rubric:
+    - { point: "mutation is imperative (call mutate); query auto-runs and caches by key", score: 1 }
+    - { point: "v5 in-flight state is isPending (not isLoading); has onSuccess/onError/onSettled", score: 1 }
+    - { partial: "correct query-vs-mutation idea but uses v4 isLoading for the mutation", score: 0.5 }
+
+- id: tanstack-mutations-02
+  difficulty: medium
+  weight: 2
+  tags: [mutations, invalidation]
+  question: >
+    After a mutation succeeds, why is it common to call
+    `queryClient.invalidateQueries` in `onSuccess`, and what does it accomplish?
+  answer: >
+    A mutation changes server state, but the cached queries showing that state
+    are now out of date. Invalidating the affected keys in `onSuccess` marks them
+    stale and refetches, so the UI reflects the server's authoritative new state
+    without manually threading the response into every list/detail view. It's the
+    standard way to keep reads in sync after a write.
+  rubric:
+    - { point: "the write changed server state; cached reads are now stale", score: 1 }
+    - { point: "invalidate in onSuccess refetches affected queries to resync the UI", score: 1 }
+    - { partial: "'refresh the data' without linking write→stale reads", score: 0.5 }
+
+- id: tanstack-mutations-03
+  difficulty: hard
+  weight: 3
+  tags: [mutations]
+  question: >
+    Describe a correct optimistic update with rollback using
+    `onMutate`/`onError`/`onSettled`. What is each step responsible for?
+  answer: >
+    In `onMutate`: cancel in-flight refetches for the key (`cancelQueries`) so a
+    late response can't clobber the optimistic value, snapshot the current data
+    (`getQueryData`), optimistically write the expected value (`setQueryData`),
+    and return the snapshot as context. In `onError`: roll back by writing the
+    snapshotted value back with `setQueryData`. In `onSettled` (runs on success
+    or error): `invalidateQueries` to reconcile with the server's real state.
+  rubric:
+    - { point: "onMutate cancels in-flight refetches (cancelQueries) then snapshots current data", score: 1 }
+    - { point: "onMutate optimistically setQueryData and returns the snapshot as context", score: 1 }
+    - { point: "onError rolls back from the snapshot; onSettled invalidates to reconcile", score: 1 }
+    - { partial: "optimistic setQueryData with no cancelQueries and/or no rollback path", score: 0.5 }
+
+- id: tanstack-mutations-04
+  difficulty: medium
+  weight: 2
+  tags: [mutations, query-fn]
+  question: >
+    What's the difference between `mutate` and `mutateAsync`, and how does a
+    mutation know it failed?
+  answer: >
+    Both trigger the mutation. `mutate` is fire-and-forget: it returns nothing and
+    surfaces errors through the `onError` callback and `isError` state (unhandled
+    rejections don't escape). `mutateAsync` returns a Promise you can `await`/
+    `try/catch`, useful for sequencing. Either way, a mutation is considered
+    failed when its `mutationFn` throws or returns a rejected Promise — same
+    contract as a `queryFn`.
+  rubric:
+    - { point: "mutate returns void (errors via onError/isError); mutateAsync returns an awaitable Promise", score: 1 }
+    - { point: "failure = mutationFn throws / rejects (must throw, not return an error)", score: 1 }
+    - { partial: "names the two but not the throw-to-fail contract", score: 0.5 }
+
+- id: tanstack-query-fn-01
+  difficulty: medium
+  weight: 3
+  tags: [query-fn]
+  question: >
+    A `queryFn` uses `fetch`, and 500 responses never show as errors in the UI.
+    Why, and what's the fix?
+  answer: >
+    A query only enters the error state if its `queryFn` throws or returns a
+    rejected Promise. `fetch` does *not* reject on HTTP 4xx/5xx — it resolves with
+    `res.ok === false` — so the "error" is treated as successful data. Fix: check
+    `res.ok` in the queryFn and `throw new Error(...)` (or reject) on failure so
+    TanStack Query sees the failure, sets `isError`, and applies retry logic.
+  rubric:
+    - { point: "query errors only when queryFn throws / returns a rejected promise", score: 1 }
+    - { point: "fetch doesn't reject on 4xx/5xx → must check res.ok and throw", score: 1 }
+    - { partial: "'handle the error' without the must-throw / fetch-doesn't-reject insight", score: 0.5 }
+
+- id: tanstack-query-fn-02
+  difficulty: medium
+  weight: 2
+  tags: [query-fn]
+  question: >
+    Why is it a mistake to call `setState` (or otherwise cause side effects) from
+    inside a `queryFn`? What should you do instead?
+  answer: >
+    A `queryFn` should be a pure async data fetch that returns the data; TanStack
+    Query calls it on its own schedule (refetch, retry, background revalidation,
+    dedup), so setState inside it causes surprising/duplicated renders and ties UI
+    state to fetch timing. Instead return the data and read it declaratively from
+    `data`, derive during render, or use lifecycle callbacks (`onSuccess` at the
+    query-observer/mutation level) for genuine side effects.
+  rubric:
+    - { point: "queryFn should just fetch and return data (pure); QC controls when it runs", score: 1 }
+    - { point: "setState there causes unpredictable/duplicated effects — read from data / derive instead", score: 1 }
+    - { partial: "'don't do side effects' with no reason about QC controlling invocation", score: 0.5 }
+
+- id: tanstack-query-fn-03
+  difficulty: medium
+  weight: 2
+  tags: [query-fn]
+  question: >
+    You have a query that must only run once `userId` is known (dependent query).
+    How do you express that, and what state is the query in until then?
+  answer: >
+    Set `enabled: !!userId` on the dependent query so it doesn't run until the
+    dependency exists. While disabled the query does not call its `queryFn` and
+    sits in a pending state (`status: 'pending'`, `fetchStatus: 'idle'`), so guard
+    your render on the data rather than assuming it fetched. When `enabled` flips
+    true it fetches automatically.
+  rubric:
+    - { point: "use enabled (e.g. !!userId) to gate the dependent query", score: 1 }
+    - { point: "while disabled it doesn't run queryFn and stays pending/idle (fetchStatus idle)", score: 1 }
+    - { partial: "names enabled but not the pending/idle state while gated", score: 0.5 }
+
+- id: tanstack-suspense-01
+  difficulty: medium
+  weight: 2
+  tags: [suspense]
+  question: >
+    What does `useSuspenseQuery` change compared to `useQuery`, and what must
+    wrap the component?
+  answer: >
+    `useSuspenseQuery` suspends the component until data is available, so `data`
+    is guaranteed defined (never `undefined`) and there's no `isPending`/`isLoading`
+    branch to handle in the component. The loading state is delegated to a
+    `<Suspense fallback>` boundary above it, and errors to an `<ErrorBoundary>`.
+    You must render it under a Suspense boundary or the suspend has nothing to
+    catch it.
+  rubric:
+    - { point: "data is guaranteed defined; no loading branch in the component", score: 1 }
+    - { point: "loading handled by an ancestor <Suspense> boundary (errors by ErrorBoundary)", score: 1 }
+    - { partial: "'it uses Suspense' without the data-never-undefined guarantee", score: 0.5 }
+
+- id: tanstack-suspense-02
+  difficulty: medium
+  weight: 2
+  tags: [suspense, query-fn]
+  question: >
+    With `useSuspenseQuery`, where do fetch errors surface, and how do you handle
+    them?
+  answer: >
+    Because there's no `isError` branch in a suspenseful component, a thrown/
+    rejected `queryFn` (after retries) throws during render and propagates to the
+    nearest React `<ErrorBoundary>`, which renders its fallback. So you pair a
+    `<Suspense>` (loading) with an `<ErrorBoundary>` (failure) around the query
+    component. This is why the queryFn still must throw on failure.
+  rubric:
+    - { point: "errors are thrown to the nearest ErrorBoundary (no isError branch)", score: 1 }
+    - { point: "pair Suspense (loading) + ErrorBoundary (error); queryFn must still throw", score: 1 }
+    - { partial: "'handle with try/catch in the component' — wrong mechanism", score: 0.5 }
+
+- id: tanstack-suspense-03
+  difficulty: hard
+  weight: 2
+  tags: [suspense, prefetch]
+  question: >
+    Two sibling components each call `useSuspenseQuery` for independent data. Why
+    can this create a request waterfall, and how do you avoid it?
+  answer: >
+    If the second component only mounts after the first resolves (e.g. they're
+    nested, or Suspense suspends the parent before the sibling renders), their
+    fetches run sequentially — a waterfall. Avoid it by kicking off both requests
+    up front: prefetch/`ensureQueryData` for both (typically in a route loader) so
+    the data is in flight/ready before render, or hoist the queries so they mount
+    and suspend together in parallel.
+  rubric:
+    - { point: "sequential mount/suspend → fetches run one-after-another (waterfall)", score: 1 }
+    - { point: "prefetch/ensureQueryData up front (e.g. in a loader) or hoist to fetch in parallel", score: 1 }
+    - { partial: "notices the waterfall but no concrete parallelization fix", score: 0.5 }
+
+- id: tanstack-suspense-04
+  difficulty: medium
+  weight: 2
+  tags: [suspense]
+  question: >
+    Can you make a `useSuspenseQuery` conditional with `enabled: false` to build a
+    dependent query? Why or why not?
+  answer: >
+    No — `useSuspenseQuery` does not accept `enabled` (a suspense query must
+    always be able to produce data or suspend; a permanently-disabled one would
+    suspend forever). For conditional/dependent data you restructure: gate at the
+    component level so the suspense query only mounts once its inputs exist (e.g.
+    render the child after the parent has the id), or use a regular `useQuery`
+    with `enabled`. Trying to gate with `enabled` on a suspense query is the
+    common gotcha.
+  rubric:
+    - { point: "useSuspenseQuery has no enabled — can't be conditionally disabled that way", score: 1 }
+    - { point: "restructure: only mount the suspense component once inputs exist (or use useQuery+enabled)", score: 1 }
+    - { partial: "'just set enabled: false' — the wrong answer this question targets", score: 0 }
+
+- id: tanstack-prefetch-01
+  difficulty: medium
+  weight: 2
+  tags: [prefetch]
+  question: >
+    In a router loader you want the data guaranteed available before the component
+    renders. Do you use `prefetchQuery` or `ensureQueryData`, and what's the
+    difference?
+  answer: >
+    Use `ensureQueryData`: it returns the cached data if present (and fresh) or
+    fetches, awaits, and returns it — so `await`ing it in a loader guarantees the
+    data is ready. `prefetchQuery` is fire-and-forget and returns `void`, so it
+    warms the cache but gives you nothing to await/return. For loader-driven
+    data-before-render (often paired with `useSuspenseQuery`), `ensureQueryData`
+    is the right tool.
+  rubric:
+    - { point: "ensureQueryData returns the data (cached-or-fetched) and can be awaited", score: 1 }
+    - { point: "prefetchQuery returns void (fire-and-forget); ensureQueryData for guaranteed-ready loader data", score: 1 }
+    - { partial: "picks ensureQueryData but can't say why (the return/await difference)", score: 0.5 }
+
+- id: tanstack-prefetch-02
+  difficulty: medium
+  weight: 2
+  tags: [prefetch]
+  question: >
+    Contrast `prefetchQuery` with `fetchQuery`. When does the error-handling
+    behavior matter?
+  answer: >
+    Both fetch and cache by key and respect `staleTime`. `fetchQuery` returns the
+    data as a Promise and *rejects/throws* on failure, so you can `await` it and
+    handle errors. `prefetchQuery` returns `void` and *swallows* errors — it's
+    fire-and-forget warming where a failed prefetch shouldn't break the flow (the
+    real query will surface the error later). Use `fetchQuery` when you need the
+    value or must react to failure; `prefetchQuery` for best-effort warming.
+  rubric:
+    - { point: "fetchQuery returns data and throws on error; prefetchQuery returns void and swallows errors", score: 1 }
+    - { point: "both respect staleTime; pick fetchQuery when you need the value/error, prefetch for best-effort", score: 1 }
+    - { partial: "'both prefetch' without the returns-data/throws vs void/swallows distinction", score: 0.5 }
+
+- id: tanstack-router-loaders-01
+  difficulty: medium
+  weight: 3
+  tags: [router-loaders, router-typesafety]
+  question: >
+    What is a route `loader` in TanStack Router, how does the component read its
+    result, and how does this differ from a `useEffect` fetch?
+  answer: >
+    A route's `loader` runs before the route's component renders; it returns data
+    that the component reads with the route's typed `useLoaderData()` (the return
+    type flows through automatically). Because loading happens during route
+    matching, data is ready at first render — no mount-then-fetch spinner and no
+    client-side waterfall like the classic `useEffect` fetch, which runs after the
+    component mounts. Loaders also participate in caching and preloading.
+  rubric:
+    - { point: "loader runs before render; component reads via typed useLoaderData()", score: 1 }
+    - { point: "data ready at first render (vs useEffect fetch-after-mount waterfall)", score: 1 }
+    - { partial: "'loads data for the route' without the before-render / useEffect contrast", score: 0.5 }
+
+- id: tanstack-router-loaders-02
+  difficulty: medium
+  weight: 2
+  tags: [router-loaders, prefetch]
+  question: >
+    How do you integrate TanStack Query with a Router loader so the two share one
+    cache instead of double-fetching?
+  answer: >
+    Put the shared `QueryClient` on the router `context`, then in the loader call
+    `context.queryClient.ensureQueryData(queryOptions)` to fetch/prime the cache,
+    and in the component call `useSuspenseQuery(queryOptions)` (or `useQuery`) with
+    the same options. The loader warms the exact cache entry the component reads,
+    so there's one fetch, one cache, data ready before render, and Query still
+    owns revalidation/invalidation.
+  rubric:
+    - { point: "loader calls queryClient.ensureQueryData; component uses the same queryOptions", score: 1 }
+    - { point: "shared QueryClient (via router context) → one cache, no double fetch", score: 1 }
+    - { partial: "'call the query in the loader' without ensureQueryData / shared-options detail", score: 0.5 }
+
+- id: tanstack-router-loaders-03
+  difficulty: medium
+  weight: 2
+  tags: [router-loaders, prefetch]
+  question: >
+    TanStack Router preloads routes on link hover by default. What does that do,
+    and which route functions run during a preload?
+  answer: >
+    With intent preloading (`defaultPreload: 'intent'`), hovering/touching a
+    `<Link>` runs the target route's `beforeLoad` and `loader` ahead of the actual
+    click, warming its data (and any `ensureQueryData` caches) so navigation feels
+    instant. It's still gated by staleTime/loader caching so it won't refetch
+    fresh data. Note `beforeLoad` guards (auth/redirects) also run during preload.
+  rubric:
+    - { point: "intent preloading runs the route's beforeLoad + loader on hover/intent to warm data", score: 1 }
+    - { point: "makes navigation instant; respects caching/staleTime (and guards run too)", score: 1 }
+    - { partial: "'it preloads the page' without naming loader/beforeLoad running early", score: 0.5 }
+
+- id: tanstack-router-loaders-04
+  difficulty: medium
+  weight: 2
+  tags: [router-loaders, router-typesafety]
+  question: >
+    What is `beforeLoad` for, how does it differ from `loader`, and what is router
+    `context`?
+  answer: >
+    `beforeLoad` runs before `loader` (top-down through the route tree) and is
+    where you do auth checks, `throw redirect(...)`, and build/extend `context` —
+    the typed dependency object (e.g. `{ queryClient, auth }`) passed down to child
+    routes' `beforeLoad`, `loader`, and components. `loader` is for fetching the
+    route's data. What `beforeLoad` returns is merged into `context` for
+    descendants, which is how you inject shared services and guard routes.
+  rubric:
+    - { point: "beforeLoad runs before loader; used for auth/guards and throw redirect()", score: 1 }
+    - { point: "context is a typed object threaded down the tree; beforeLoad can extend it (loader = data)", score: 1 }
+    - { partial: "describes beforeLoad OR context but not the before-loader ordering / merge", score: 0.5 }
+
+- id: tanstack-router-search-01
+  difficulty: hard
+  weight: 3
+  tags: [router-search]
+  question: >
+    How do you get typed, validated search params on a route with
+    `validateSearch`, and why validate at all?
+  answer: >
+    A route defines `validateSearch` (commonly a Zod schema or a function) that
+    parses the raw query string into a typed object; the result is what
+    `Route.useSearch()` returns and what typed navigation requires. You validate
+    because the URL is untrusted user-editable input — validation coerces types
+    (strings→numbers), applies defaults/`.catch()` for missing/garbage values, and
+    gives you end-to-end types instead of `string | undefined` everywhere.
+  rubric:
+    - { point: "validateSearch (e.g. Zod) parses raw query into a typed search object", score: 1 }
+    - { point: "URL is untrusted input → validation coerces/defaults and yields end-to-end types", score: 1 }
+    - { partial: "'define a schema for search' without the untrusted-input / typing rationale", score: 0.5 }
+
+- id: tanstack-router-search-02
+  difficulty: medium
+  weight: 2
+  tags: [router-search]
+  question: >
+    In TanStack Router, how should you store and update a UI filter that belongs
+    in the URL (e.g. a page number), and what's the anti-pattern?
+  answer: >
+    Treat search params as the state: read them with the route's `useSearch()` and
+    update them with typed navigation — `navigate({ search: prev => ({ ...prev,
+    page: 2 }) })` or a `<Link search={...}>`. The URL is the single source of
+    truth, so it's shareable, bookmarkable, and survives reload. The anti-pattern
+    is duplicating it into `useState` and syncing to the URL by hand, which
+    desyncs and loses the URL-as-state benefits.
+  rubric:
+    - { point: "read via useSearch, update via typed navigate/Link search (URL is source of truth)", score: 1 }
+    - { point: "don't mirror it into useState and hand-sync (shareable/bookmarkable is the point)", score: 1 }
+    - { partial: "'put it in the URL' without read-via-useSearch / update-via-navigate", score: 0.5 }
+
+- id: tanstack-router-search-03
+  difficulty: medium
+  weight: 2
+  tags: [router-search, router-loaders]
+  question: >
+    A route's `loader` needs to fetch based on a search param (e.g. `page`). Why
+    doesn't the loader see search params automatically, and what do you add?
+  answer: >
+    Loaders are keyed/reloaded by their dependencies, and by default only path
+    params are tracked — search params are not, so the loader won't re-run when
+    they change. You declare `loaderDeps: ({ search }) => ({ page: search.page })`;
+    those deps become the loader's `deps` argument and part of its cache identity,
+    so the loader receives the value and reloads when it changes.
+  rubric:
+    - { point: "search params aren't loader deps by default (only path params are tracked)", score: 1 }
+    - { point: "add loaderDeps to expose them as deps → loader gets them and reloads on change", score: 1 }
+    - { partial: "'read search in the loader' without loaderDeps / the reload-tracking reason", score: 0.5 }
+
+- id: tanstack-router-search-04
+  difficulty: medium
+  weight: 2
+  tags: [router-search, router-typesafety]
+  question: >
+    Once `validateSearch` is in place, what type-safety do you get across the app
+    when linking to that route?
+  answer: >
+    The validated search shape becomes part of the route's types, so `<Link to>`
+    and `navigate()` to that route require a `search` matching the schema —
+    missing/mis-typed params are compile errors — and `useSearch()` returns the
+    fully-typed object. Renaming or changing a search field surfaces as type
+    errors at every navigation and read site, so the URL contract stays in sync.
+  rubric:
+    - { point: "Link/navigate to the route require a schema-matching search (type-checked)", score: 1 }
+    - { point: "useSearch is fully typed; changing the schema breaks call sites at compile time", score: 1 }
+    - { partial: "'it's typed' without naming Link/navigate/useSearch enforcement", score: 0.5 }
+
+- id: tanstack-router-typesafety-01
+  difficulty: medium
+  weight: 2
+  tags: [router-typesafety]
+  question: >
+    How does file-based routing produce TanStack Router's end-to-end type safety,
+    and what is `routeTree.gen.ts`?
+  answer: >
+    Files under the routes directory (each exporting a route via
+    `createFileRoute('/path')`) are compiled by the Router plugin/CLI into a
+    generated `routeTree.gen.ts` that registers every path, its params, and its
+    search types. Because the router is typed from that generated tree, `<Link>`,
+    `navigate`, params, and search are all checked against real routes — a typo in
+    a path or a missing param is a compile error, not a runtime 404.
+  rubric:
+    - { point: "route files (createFileRoute) generate routeTree.gen.ts with all paths/params/search", score: 1 }
+    - { point: "the typed tree makes Link/navigate/params compile-checked against real routes", score: 1 }
+    - { partial: "'files become routes' without the generated-tree / type-checking payoff", score: 0.5 }
+
+- id: tanstack-router-typesafety-02
+  difficulty: medium
+  weight: 2
+  tags: [router-typesafety]
+  question: >
+    Show what typed navigation buys you: what does `<Link to="/posts/$postId"
+    params={{ postId: '5' }} />` check at compile time?
+  answer: >
+    It checks that `/posts/$postId` is a real route, and that you supply exactly
+    the params that path declares — `postId` here — with the right types; omitting
+    it or adding an unknown param is a type error. The same applies to `navigate`
+    and to required `search`. So refactoring a route's path/params propagates type
+    errors to every `Link`/`navigate` that references it.
+  rubric:
+    - { point: "path must be a real route and required params ($postId) are enforced by type", score: 1 }
+    - { point: "same for navigate/search; refactors surface at all call sites", score: 1 }
+    - { partial: "'links are typed' without the params-required / refactor-safety detail", score: 0.5 }

@@ -1,0 +1,600 @@
+# Rust benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+
+- id: rust-ownership-01
+  difficulty: medium
+  weight: 3
+  tags: [ownership]
+  question: >
+    What happens when you assign a `String` to another variable
+    (`let b = a;`) and then try to use `a`, and why?
+  answer: >
+    Assigning a non-`Copy` type moves ownership: `b` now owns the heap buffer
+    and `a` is invalidated, so using `a` is a compile error ("value borrowed
+    after move"). Rust moves instead of shallow-copying so exactly one owner is
+    responsible for freeing the buffer — this is how it prevents double-free
+    without a garbage collector. Use `a.clone()` if you genuinely need two
+    owners.
+  rubric:
+    - { point: "assignment moves ownership; the old binding is invalidated", score: 1 }
+    - { point: "one owner / prevents double-free (frees on drop)", score: 1 }
+    - { partial: "says 'a is gone' but no move-vs-copy or single-owner reason", score: 0.5 }
+
+- id: rust-ownership-02
+  difficulty: easy
+  weight: 2
+  tags: [ownership]
+  question: >
+    What is the difference between the `Copy` and `Clone` traits, and why can't
+    a type that implements `Drop` also be `Copy`?
+  answer: >
+    `Copy` means a value is duplicated implicitly with a cheap bitwise copy on
+    assignment/pass (no move) — only for simple stack types like integers.
+    `Clone` is an explicit, potentially expensive `.clone()` that can deep-copy
+    heap data. `Copy` requires `Clone`. A `Drop` type can't be `Copy` because
+    implicit bit-copies would create multiple values all running the same
+    destructor on the same resource.
+  rubric:
+    - { point: "Copy = implicit cheap bitwise duplicate; Clone = explicit, maybe deep", score: 1 }
+    - { point: "Copy: no move happens (both bindings usable); Copy requires Clone", score: 1 }
+    - { point: "Drop + Copy conflict: implicit copies would double-drop the resource", score: 1 }
+    - { partial: "'Copy is automatic, Clone is manual' with no Drop/cost detail", score: 0.5 }
+
+- id: rust-ownership-03
+  difficulty: medium
+  weight: 2
+  tags: [ownership, borrowing]
+  question: >
+    You pass a `Vec<T>` to a function and then want to use it afterward, but the
+    compiler complains. What did passing by value do, and what are your options?
+  answer: >
+    Passing by value moved the `Vec` into the function, which now owns it, so the
+    caller can't use it afterward. Options: borrow instead — take `&Vec<T>`
+    (or `&[T]`) for read-only or `&mut Vec<T>` to mutate — so ownership stays with
+    the caller; return the value back out of the function; or `clone()` if you
+    truly need an independent copy. Borrowing is the idiomatic default.
+  rubric:
+    - { point: "passing by value moves ownership into the function", score: 1 }
+    - { point: "fix: borrow (&T / &mut T) so caller keeps ownership (or return it back)", score: 1 }
+    - { partial: "'just clone it' without recognizing borrowing is the idiomatic fix", score: 0.5 }
+
+- id: rust-borrowing-01
+  difficulty: medium
+  weight: 3
+  tags: [borrowing]
+  question: >
+    State Rust's core borrowing rule and explain what class of bugs it prevents
+    at compile time.
+  answer: >
+    At any time you may have either any number of shared/immutable references
+    (`&T`) OR exactly one mutable reference (`&mut T`) to a value — never both,
+    and never two `&mut` (aliasing XOR mutability). This statically prevents data
+    races and iterator/pointer invalidation: no one can mutate data while another
+    party holds a reference to it, so there are no dangling references or
+    unsynchronized concurrent writes.
+  rubric:
+    - { point: "many &T XOR one &mut T at a time (no aliasing + mutation)", score: 1 }
+    - { point: "prevents data races / use-after-free / iterator invalidation at compile time", score: 1 }
+    - { partial: "'one mutable borrow' without the shared-XOR-mutable framing", score: 0.5 }
+
+- id: rust-lifetimes-01
+  difficulty: medium
+  weight: 2
+  tags: [lifetimes]
+  question: >
+    What does a lifetime annotation like `'a` actually express? Does it change
+    how long a value lives?
+  answer: >
+    No — a lifetime is a compile-time-only label describing a constraint: the
+    region of code for which a reference must stay valid. Annotations like
+    `fn f<'a>(x: &'a T) -> &'a T` don't change how long anything lives; they tell
+    the borrow checker how the input and output references' validity relate, so it
+    can reject a returned reference that would outlive the data it points to. They
+    are erased before codegen.
+  rubric:
+    - { point: "a lifetime describes a region/constraint for which a reference is valid", score: 1 }
+    - { point: "it does NOT change/extend how long a value actually lives (compile-time only)", score: 1 }
+    - { partial: "'how long a variable lives' — treats it as controlling runtime lifetime", score: 0.5 }
+
+- id: rust-lifetimes-02
+  difficulty: medium
+  weight: 2
+  tags: [lifetimes]
+  question: >
+    Rust often lets you write `fn first(s: &str) -> &str` with no explicit
+    lifetimes. What are the lifetime elision rules that make this work?
+  answer: >
+    Three rules the compiler applies to elided references: (1) each elided input
+    reference gets its own distinct lifetime parameter; (2) if there is exactly
+    one input lifetime, it is assigned to all elided output lifetimes; (3) if
+    there are multiple inputs but one is `&self`/`&mut self` (a method), the
+    lifetime of `self` is assigned to all elided outputs. If none applies, you
+    must annotate explicitly.
+  rubric:
+    - { point: "each input ref gets its own lifetime", score: 1 }
+    - { point: "one input lifetime → applied to all outputs", score: 1 }
+    - { point: "&self's lifetime is applied to outputs for methods", score: 1 }
+    - { partial: "'the compiler infers it' without naming the single-input / self rules", score: 0.5 }
+
+- id: rust-lifetimes-03
+  difficulty: hard
+  weight: 2
+  tags: [lifetimes, borrowing]
+  question: >
+    Explain the two distinct meanings of `'static` in Rust: `&'static T` versus a
+    bound `T: 'static`.
+  answer: >
+    `&'static T` is a reference that is valid for the entire program (e.g. string
+    literals, leaked/`const` data). `T: 'static` is a bound meaning the type `T`
+    contains no non-'static references — i.e. it can be held for as long as you
+    like, which any owned type (`String`, `Vec<u8>`) satisfies. So `T: 'static`
+    does NOT mean the value lives forever; it means it borrows nothing short-lived.
+  rubric:
+    - { point: "&'static T = a reference valid for the whole program", score: 1 }
+    - { point: "T: 'static = the type holds no short-lived borrows (owned types qualify)", score: 1 }
+    - { partial: "conflates the two / thinks T: 'static means 'lives forever'", score: 0.5 }
+
+- id: rust-lifetimes-04
+  difficulty: hard
+  weight: 1
+  tags: [lifetimes, traits]
+  question: >
+    When you write `Box<dyn Error>` versus storing a trait object with a borrowed
+    reference inside, what is the default lifetime bound and when do you need
+    `+ 'a`?
+  answer: >
+    A trait object like `Box<dyn Trait>` carries an implicit `+ 'static` lifetime
+    bound by default, meaning the erased concrete type may not borrow anything
+    short-lived. If the underlying type holds a non-'static reference, you must
+    spell out the shorter bound explicitly, e.g. `Box<dyn Trait + 'a>`, so the
+    trait object can't outlive the data it borrows.
+  rubric:
+    - { point: "boxed/dyn trait objects default to a '+ 'static' lifetime bound", score: 1 }
+    - { point: "use '+ 'a' to allow the trait object to hold a shorter-lived borrow", score: 1 }
+    - { partial: "notices a lifetime issue with dyn but not the default-'static rule", score: 0.5 }
+
+- id: rust-traits-01
+  difficulty: medium
+  weight: 3
+  tags: [traits]
+  question: >
+    Contrast static dispatch via generics (`fn f<T: Trait>`) with dynamic
+    dispatch via trait objects (`&dyn Trait`). What's the tradeoff?
+  answer: >
+    Generics are monomorphized: the compiler emits a specialized copy per
+    concrete type, so calls are statically dispatched and inlinable (fast) at the
+    cost of code bloat and only one type per call site. `&dyn Trait`/
+    `Box<dyn Trait>` is a fat pointer (data + vtable) resolved at runtime via the
+    vtable — one code path, allows heterogeneous collections (`Vec<Box<dyn T>>`),
+    but each call is an indirect, non-inlined jump. Choose dyn when you need
+    runtime polymorphism/heterogeneity, generics when you want speed and know the
+    type at compile time.
+  rubric:
+    - { point: "generics = monomorphized, static dispatch, inlinable (code bloat)", score: 1 }
+    - { point: "dyn = fat pointer + vtable, runtime dispatch, enables heterogeneous collections", score: 1 }
+    - { point: "tradeoff: speed/inlining vs runtime flexibility/one code path", score: 1 }
+    - { partial: "names both but no monomorphization/vtable mechanism", score: 0.5 }
+
+- id: rust-traits-02
+  difficulty: medium
+  weight: 2
+  tags: [traits]
+  question: >
+    What does `impl Trait` mean in argument position versus return position, and
+    who chooses the concrete type in each?
+  answer: >
+    In argument position `fn f(x: impl Trait)` is sugar for an anonymous generic
+    parameter — it's universal: the caller picks any type implementing `Trait`.
+    In return position `fn g() -> impl Trait` is existential: the function returns
+    one specific, hidden concrete type that the callee chooses, and every return
+    path must produce that same type. Return-position `impl Trait` is how you
+    return an unnameable type like a closure or iterator without boxing.
+  rubric:
+    - { point: "arg position = anonymous generic; caller chooses the type (universal)", score: 1 }
+    - { point: "return position = one hidden concrete type chosen by the callee (existential)", score: 1 }
+    - { point: "return impl Trait: all branches must be the same type / avoids boxing closures-iterators", score: 1 }
+    - { partial: "'it's a trait bound shorthand' with no arg-vs-return distinction", score: 0.5 }
+
+- id: rust-traits-03
+  difficulty: medium
+  weight: 2
+  tags: [traits]
+  question: >
+    What is the orphan rule (coherence), and why can't you `impl Display for Vec<T>`
+    in your own crate?
+  answer: >
+    Coherence requires at most one implementation of a trait for a type; the
+    orphan rule enforces it by letting you `impl Trait for Type` only if the trait
+    OR the type is local to your crate. `Display` and `Vec` are both foreign
+    (std), so implementing `Display for Vec<T>` is forbidden — it would let two
+    crates define conflicting impls. The usual workaround is the newtype pattern:
+    wrap it in a local struct and implement on that.
+  rubric:
+    - { point: "orphan rule: the trait or the type must be local to your crate", score: 1 }
+    - { point: "ensures coherence / no conflicting impls across crates", score: 1 }
+    - { partial: "mentions the newtype workaround but not why the rule exists", score: 0.5 }
+
+- id: rust-error-01
+  difficulty: easy
+  weight: 2
+  tags: [error-handling]
+  question: >
+    When should a function return `Option<T>` versus `Result<T, E>`?
+  answer: >
+    `Option<T>` models simple absence where there is only one obvious reason a
+    value could be missing and no useful error to report (e.g. a lookup miss,
+    end of iteration). `Result<T, E>` models operations that can fail for reasons
+    the caller needs to distinguish or handle, carrying an error value `E`
+    explaining what went wrong (I/O, parsing). Rough rule: no-error absence →
+    `Option`; something failed → `Result`.
+  rubric:
+    - { point: "Option = plain absence, no error info needed", score: 1 }
+    - { point: "Result = failure that carries a meaningful error value E", score: 1 }
+    - { partial: "'Option for none, Result for errors' with no distinguishing reasoning", score: 0.5 }
+
+- id: rust-error-02
+  difficulty: medium
+  weight: 3
+  tags: [error-handling]
+  question: >
+    Explain exactly what the `?` operator does on a `Result`, including the
+    conversion it performs.
+  answer: >
+    `expr?` on a `Result` evaluates it: on `Ok(v)` it unwraps to `v` and
+    continues; on `Err(e)` it returns early from the enclosing function with
+    `Err(e)`, first converting the error via `From::from` into the function's
+    declared error type. That `From` conversion is why `?` composes different
+    error types into one return type. On `Option`, `?` early-returns `None`
+    instead.
+  rubric:
+    - { point: "Ok → unwrap and continue; Err → early return from the function", score: 1 }
+    - { point: "converts the error via From::from into the function's error type", score: 1 }
+    - { partial: "'unwraps or returns the error' but misses the From conversion", score: 0.5 }
+
+- id: rust-error-03
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    When is it appropriate to `panic!` (or `.unwrap()`) versus returning a
+    `Result`?
+  answer: >
+    Return a `Result` for expected, recoverable failures the caller should be
+    able to handle — I/O errors, bad input, missing data. `panic!`/`unwrap` is for
+    unrecoverable bugs and broken invariants that indicate a programming error,
+    or throwaway code (prototypes, tests, examples). A panic unwinds/aborts the
+    thread, so it must not be your normal control flow for anticipated errors.
+  rubric:
+    - { point: "Result for expected/recoverable errors the caller can handle", score: 1 }
+    - { point: "panic/unwrap for bugs/broken invariants (or tests/prototypes), not normal flow", score: 1 }
+    - { partial: "'panic is bad, use Result' with no recoverable-vs-bug distinction", score: 0.5 }
+
+- id: rust-error-04
+  difficulty: medium
+  weight: 2
+  tags: [error-handling, traits]
+  question: >
+    In a library you want one error type that can wrap several underlying errors
+    and work with `?`. What does the error type need, and how do crates like
+    `thiserror` help?
+  answer: >
+    Make a custom enum with a variant per failure mode, and implement (or derive)
+    `std::error::Error` plus `Display`, and `From` conversions from each source
+    error so `?` can auto-convert into it. `thiserror` derives `Error`, `Display`
+    (via `#[error("...")]`), and `#[from]` conversions for you, eliminating the
+    boilerplate. For application code that doesn't need to match on variants,
+    `Box<dyn Error>` or `anyhow` is the lighter choice.
+  rubric:
+    - { point: "custom enum implementing Error + Display", score: 1 }
+    - { point: "From impls for each source error so ? converts into it", score: 1 }
+    - { point: "thiserror derives Error/Display/From (or Box<dyn Error>/anyhow for apps)", score: 1 }
+    - { partial: "'make an enum' without the Error/From/? machinery", score: 0.5 }
+
+- id: rust-iterators-01
+  difficulty: medium
+  weight: 3
+  tags: [iterators]
+  question: >
+    Why does `v.iter().map(|x| expensive(x)).filter(|x| cond(x))` do no work on
+    its own, and what makes it run?
+  answer: >
+    Iterator adapters like `map` and `filter` are lazy: they just build a new
+    iterator that describes the pipeline and produce no values until something
+    pulls on them. A consuming operation drives it — `collect()`, `for`, `sum()`,
+    `count()`, `.next()`, `for_each()` — pulling elements one at a time through
+    the whole chain. Without a consumer the closures never run (you'd get an
+    unused-`must_use` warning).
+  rubric:
+    - { point: "adapters are lazy — they build a pipeline and compute nothing yet", score: 1 }
+    - { point: "a consumer (collect/for/sum/next) drives it, pulling one element at a time", score: 1 }
+    - { partial: "'iterators are lazy' with no consumer/terminal-operation to trigger it", score: 0.5 }
+
+- id: rust-iterators-02
+  difficulty: medium
+  weight: 2
+  tags: [iterators, ownership]
+  question: >
+    What's the difference between `iter()`, `iter_mut()`, and `into_iter()` on a
+    collection, in terms of what you get and what happens to the collection?
+  answer: >
+    `iter()` yields shared references `&T` and borrows the collection immutably.
+    `iter_mut()` yields `&mut T` and borrows it mutably so you can modify
+    elements in place. `into_iter()` consumes the collection by value and yields
+    owned `T`, so the collection is moved and unusable afterward. (A `for x in
+    &v` desugars to `iter()`; `for x in v` to `into_iter()`.)
+  rubric:
+    - { point: "iter() → &T (immutable borrow); iter_mut() → &mut T (mutable borrow)", score: 1 }
+    - { point: "into_iter() → owned T, consumes/moves the collection", score: 1 }
+    - { partial: "gets one or two right but confuses into_iter's consuming/ownership behavior", score: 0.5 }
+
+- id: rust-iterators-03
+  difficulty: medium
+  weight: 2
+  tags: [iterators]
+  question: >
+    `collect()` sometimes fails to compile with "type annotations needed." Why,
+    and how do you tell it what to build? What's special about collecting into a
+    `Result`?
+  answer: >
+    `collect()` is generic over any `FromIterator` target, so the compiler can't
+    infer which collection you want — you specify it via a type annotation
+    (`let v: Vec<_> = ...`) or the turbofish (`.collect::<Vec<_>>()`). Collecting
+    an iterator of `Result<T, E>` into `Result<Vec<T>, E>` is special: it
+    short-circuits, returning the first `Err`, or `Ok` of all values if none
+    failed.
+  rubric:
+    - { point: "collect is generic over FromIterator; must annotate target type (turbofish or let-binding)", score: 1 }
+    - { point: "iterator of Result → Result<Vec<_>, E> short-circuits on first Err", score: 1 }
+    - { partial: "explains the annotation but not the Result-collecting behavior", score: 0.5 }
+
+- id: rust-iterators-04
+  difficulty: medium
+  weight: 2
+  tags: [iterators]
+  question: >
+    You return a closure/iterator from a function that captures a local variable,
+    and the compiler suggests `move`. What does `move` change about the closure?
+  answer: >
+    By default a closure borrows the variables it captures. `move` forces it to
+    take ownership of (move/copy) those captures into the closure instead. You
+    need it when the closure outlives the current scope — returned from the
+    function, sent to another thread (`thread::spawn`), or stored — because a
+    borrowing closure would hold a dangling reference to a local that's about to
+    be dropped.
+  rubric:
+    - { point: "default closures borrow captures; move takes ownership of them", score: 1 }
+    - { point: "needed when the closure outlives the scope (returned/spawned/stored) to avoid dangling borrows", score: 1 }
+    - { partial: "'move captures by value' with no outlives-the-scope reason", score: 0.5 }
+
+- id: rust-smartptr-01
+  difficulty: easy
+  weight: 2
+  tags: [smart-pointers]
+  question: >
+    What does `Box<T>` give you, and name a case where you genuinely need it.
+  answer: >
+    `Box<T>` is a single-owner smart pointer that stores its value on the heap
+    with a fixed-size pointer on the stack; it drops the value when the box drops.
+    You need it for recursive types (`enum List { Cons(i32, Box<List>) }`) that
+    would otherwise be infinitely sized, for trait objects (`Box<dyn Trait>`), and
+    to move large values cheaply or store an unsized type behind a pointer.
+  rubric:
+    - { point: "single-owner heap allocation with a fixed-size handle", score: 1 }
+    - { point: "a real need: recursive types / trait objects / unsized or large values", score: 1 }
+    - { partial: "'puts data on the heap' with no concrete need", score: 0.5 }
+
+- id: rust-smartptr-02
+  difficulty: medium
+  weight: 2
+  tags: [smart-pointers, concurrency]
+  question: >
+    `Rc<T>` and `Arc<T>` both give shared ownership. What's the difference, and
+    why not always use `Arc`?
+  answer: >
+    Both are reference-counted shared-ownership pointers that free the value when
+    the last clone drops. `Rc<T>` uses a plain (non-atomic) counter and is
+    single-threaded only — it is `!Send`/`!Sync`. `Arc<T>` uses atomic
+    increments/decrements so it's safe to share across threads. You don't always
+    use `Arc` because the atomic operations have a real cost; in single-threaded
+    code `Rc` is cheaper.
+  rubric:
+    - { point: "both = shared ownership via reference counting", score: 1 }
+    - { point: "Rc non-atomic/single-thread (!Send+!Sync); Arc atomic/thread-safe", score: 1 }
+    - { point: "Arc's atomics cost more, so prefer Rc when single-threaded", score: 1 }
+    - { partial: "'Arc is the thread-safe one' with no atomic-counter/cost detail", score: 0.5 }
+
+- id: rust-smartptr-03
+  difficulty: medium
+  weight: 3
+  tags: [smart-pointers, borrowing]
+  question: >
+    What is interior mutability, and how does `RefCell<T>` provide it? What's the
+    cost compared to a normal `&mut`?
+  answer: >
+    Interior mutability lets you mutate data through a shared/`&` reference, which
+    the normal borrow rules forbid. `RefCell<T>` allows this by moving the
+    aliasing-XOR-mutability check from compile time to run time: `borrow()` and
+    `borrow_mut()` hand out guards and track borrows dynamically. The cost is that
+    a violation (e.g. a `borrow_mut` while a `borrow` is live) isn't a compile
+    error — it panics at runtime.
+  rubric:
+    - { point: "interior mutability = mutate through a shared/& reference", score: 1 }
+    - { point: "RefCell enforces the borrow rules at runtime, not compile time", score: 1 }
+    - { point: "cost: a borrow conflict panics at runtime instead of failing to compile", score: 1 }
+    - { partial: "'RefCell lets you mutate' without the runtime-check/panic tradeoff", score: 0.5 }
+
+- id: rust-smartptr-04
+  difficulty: hard
+  weight: 3
+  tags: [smart-pointers, concurrency]
+  question: >
+    Why is `Rc<RefCell<T>>` the idiom for shared mutable state in single-threaded
+    code, and what's the multi-threaded equivalent?
+  answer: >
+    `Rc` gives shared ownership but only hands out immutable access; `RefCell`
+    adds interior mutability. Composing them — `Rc<RefCell<T>>` — gives multiple
+    owners that can each mutate the shared value, which neither provides alone.
+    It's single-threaded because both are non-atomic/`!Sync`. The multi-threaded
+    equivalent is `Arc<Mutex<T>>` (or `Arc<RwLock<T>>`): `Arc` for atomic shared
+    ownership, `Mutex` for synchronized interior mutability across threads.
+  rubric:
+    - { point: "Rc = shared ownership (immutable), RefCell = interior mutability; combine for shared mutation", score: 1 }
+    - { point: "Rc<RefCell> is single-threaded (non-atomic / !Sync)", score: 1 }
+    - { point: "multi-threaded equivalent is Arc<Mutex<T>> (or Arc<RwLock<T>>)", score: 1 }
+    - { partial: "names Rc<RefCell> or Arc<Mutex> but not why each layer is needed", score: 0.5 }
+
+- id: rust-concurrency-01
+  difficulty: hard
+  weight: 3
+  tags: [concurrency]
+  question: >
+    Explain the `Send` and `Sync` marker traits. What does each guarantee, and
+    how does Rust use them to make data races a compile error?
+  answer: >
+    `Send` means a type can be safely moved/transferred to another thread; `Sync`
+    means `&T` is `Send`, i.e. the type can be safely shared by reference across
+    threads. They're auto-traits: the compiler derives them structurally.
+    Thread-spawning APIs require these bounds (e.g. `thread::spawn` needs the
+    closure `Send`), so a type that isn't safe to share — like `Rc` (`!Send`) or
+    a `RefCell` behind a shared ref (`!Sync`) — simply won't compile in a
+    cross-thread context, eliminating data races at compile time.
+  rubric:
+    - { point: "Send = safe to transfer ownership to another thread", score: 1 }
+    - { point: "Sync = &T is Send / safe to share by reference across threads", score: 1 }
+    - { point: "auto-traits enforced as bounds by thread APIs → data races won't compile", score: 1 }
+    - { partial: "'they're about thread safety' without distinguishing Send from Sync", score: 0.5 }
+
+- id: rust-async-01
+  difficulty: medium
+  weight: 3
+  tags: [async]
+  question: >
+    In Rust, calling an `async fn` doesn't run it. What does it return, and what
+    is required to actually make it execute?
+  answer: >
+    An `async fn` returns a `Future` — an inert state machine that does nothing
+    until polled. Futures are lazy: you must drive them, either by `.await`ing
+    inside another async context or by handing the top-level future to an executor
+    that polls it to completion. Rust ships no built-in executor, so you need a
+    runtime like Tokio or async-std (`#[tokio::main]`, `block_on`, `spawn`) to run
+    async code.
+  rubric:
+    - { point: "async fn returns a lazy Future (state machine), runs nothing when called", score: 1 }
+    - { point: "must be driven by .await or an executor that polls it", score: 1 }
+    - { point: "std has no executor — need a runtime (Tokio/async-std)", score: 1 }
+    - { partial: "'it returns a future' but implies it runs on its own", score: 0.5 }
+
+- id: rust-async-02
+  difficulty: hard
+  weight: 2
+  tags: [async, concurrency]
+  question: >
+    You hold a `Rc` (or `MutexGuard`) across an `.await` and then `tokio::spawn`
+    the future — it won't compile. Why?
+  answer: >
+    Everything a future holds across an `.await` point becomes part of its
+    generated state machine, so if a non-`Send` value (like `Rc`, or a
+    `MutexGuard`) is alive across an await, the whole future is `!Send`.
+    `tokio::spawn` (a multi-threaded, work-stealing runtime) requires the future
+    to be `Send` because it may resume on a different thread, so it's rejected.
+    Fix: drop the non-`Send` value before the await, or use a `Send` type
+    (`Arc`, an async mutex).
+  rubric:
+    - { point: "values held across .await are captured in the future's state machine", score: 1 }
+    - { point: "a non-Send value across await makes the whole future !Send; spawn needs Send", score: 1 }
+    - { partial: "'Rc isn't thread-safe' without the held-across-await → !Send-future mechanism", score: 0.5 }
+
+- id: rust-async-03
+  difficulty: medium
+  weight: 2
+  tags: [async]
+  question: >
+    Why is calling a blocking operation (like `std::thread::sleep` or heavy CPU
+    work) directly inside an async task harmful, and what should you do instead?
+  answer: >
+    Async tasks are cooperatively scheduled: a task only yields control at
+    `.await` points. A blocking call never yields, so it monopolizes the executor
+    thread and stalls every other task scheduled on it, hurting throughput.
+    Instead use the async equivalent (`tokio::time::sleep(...).await`) for I/O, or
+    offload CPU-bound/blocking work to a dedicated pool (`tokio::task::
+    spawn_blocking`).
+  rubric:
+    - { point: "async is cooperative — tasks yield only at .await, blocking never yields", score: 1 }
+    - { point: "blocking stalls the executor thread / other tasks; use async equivalents or spawn_blocking", score: 1 }
+    - { partial: "'it's slow' without the cooperative-scheduling / thread-starvation reason", score: 0.5 }
+
+- id: rust-match-01
+  difficulty: easy
+  weight: 2
+  tags: [pattern-matching]
+  question: >
+    What does it mean that `match` must be exhaustive, and why is this especially
+    valuable when matching an enum?
+  answer: >
+    A `match` must have arms covering every possible value of the scrutinee, or it
+    won't compile (you use `_` or a catch-all binding for the rest). For enums
+    this means adding a new variant later causes every non-exhaustive `match` on
+    that enum to fail to compile, forcing you to handle the new case instead of
+    silently falling through — the compiler turns a whole class of "forgot to
+    handle X" bugs into build errors.
+  rubric:
+    - { point: "match must cover every possible case or it fails to compile", score: 1 }
+    - { point: "adding an enum variant breaks incomplete matches → forces handling the new case", score: 1 }
+    - { partial: "'you must handle all cases' without the add-a-variant safety benefit", score: 0.5 }
+
+- id: rust-match-02
+  difficulty: medium
+  weight: 2
+  tags: [pattern-matching]
+  question: >
+    When would you use `if let` versus `let ... else` versus a full `match`?
+  answer: >
+    `if let Some(x) = opt { ... }` handles one pattern and ignores the rest —
+    concise when you only care about a single case. `let Some(x) = opt else {
+    return; }` (let-else) binds `x` in the enclosing scope for the happy path and
+    requires the `else` block to diverge (return/break/panic) when the pattern
+    doesn't match — great for early-exit guards without nesting. A full `match` is
+    for handling several cases exhaustively.
+  rubric:
+    - { point: "if let: handle a single pattern, ignore others", score: 1 }
+    - { point: "let-else: bind for the happy path, else must diverge — flattens early-return guards", score: 1 }
+    - { partial: "describes if let but not let-else's diverging-else / binding-in-scope behavior", score: 0.5 }
+
+- id: rust-match-03
+  difficulty: hard
+  weight: 2
+  tags: [pattern-matching, borrowing]
+  question: >
+    When you `match` on a reference — `match &opt { Some(x) => ... }` — what is
+    the type of `x`, and what feature causes that?
+  answer: >
+    `x` is a reference (`&T`), not an owned `T`. Match ergonomics (default binding
+    modes) make this work: when you match a reference value against a
+    non-reference pattern, the compiler automatically binds the inner variables by
+    reference, so you don't have to write `Some(ref x)` or dereference manually. If
+    you bound by value instead you'd be trying to move out of borrowed data, which
+    the borrow checker rejects.
+  rubric:
+    - { point: "x is a reference (&T), not an owned value", score: 1 }
+    - { point: "match ergonomics / default binding modes auto-bind by reference", score: 1 }
+    - { partial: "knows you can't move out of a borrow but not the auto-ref binding mechanism", score: 0.5 }
+
+- id: rust-match-04
+  difficulty: medium
+  weight: 1
+  tags: [pattern-matching]
+  question: >
+    Show what destructuring, match guards, and `@` bindings each add to pattern
+    matching.
+  answer: >
+    Destructuring pulls apart structs, tuples, and enum payloads directly in the
+    pattern (`Point { x, y }`, `(a, b)`, `Some(n)`), binding the pieces. A match
+    guard adds a runtime condition to an arm (`Some(n) if n > 0 => ...`) that must
+    also hold for the arm to fire. An `@` binding captures the whole matched value
+    while also testing its shape (`id @ 1..=5 => ...` binds `id` and requires it be
+    in range).
+  rubric:
+    - { point: "destructuring binds inner fields of structs/tuples/enum variants", score: 1 }
+    - { point: "match guard = extra 'if' condition on an arm; @ binds the value while pattern-testing it", score: 1 }
+    - { partial: "explains destructuring only, misses guards and @", score: 0.5 }

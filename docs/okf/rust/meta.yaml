@@ -1,0 +1,25 @@
+stack: rust
+title: Rust (2021 edition, stable)
+corpus_rev: 1
+# Version scope this corpus grades against. Stable Rust; features referenced
+# (let-else 1.65, GATs-free trait objects, std async) are all available on the
+# floor below. Edition-2021 semantics assumed.
+version_scope: ">=1.75"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - ownership         # move semantics, Copy vs Clone, who owns the value
+  - borrowing         # shared vs mutable refs, aliasing XOR mutability, borrow checker
+  - lifetimes         # 'a annotations, elision, 'static, references in structs
+  - traits            # generics vs dyn, impl Trait, coherence/orphan rule
+  - error-handling    # Result/Option, ? operator, panic vs Result, custom errors
+  - iterators         # lazy adapters, collect, iter/into_iter, closures
+  - smart-pointers    # Box/Rc/Arc/RefCell, interior mutability
+  - concurrency       # Send/Sync, Arc<Mutex>, thread safety, data races
+  - async             # Future/await, executors, Send bounds across .await
+  - pattern-matching  # match exhaustiveness, if let / let-else, destructuring
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "Cargo.toml" }

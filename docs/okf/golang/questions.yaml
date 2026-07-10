@@ -1,0 +1,633 @@
+# Go (Golang) benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1). Version scope: Go >=1.21; version-gated
+# behavior is stated inline in the affected answers.
+
+- id: go-concurrency-01
+  difficulty: medium
+  weight: 2
+  tags: [concurrency]
+  question: >
+    What is the difference between an unbuffered and a buffered channel, and
+    when does a send block on each?
+  answer: >
+    An unbuffered channel has no capacity: a send blocks until another goroutine
+    is ready to receive, so it synchronizes the two goroutines (a rendezvous). A
+    buffered channel (`make(chan T, n)`) holds up to n values; a send blocks only
+    when the buffer is full, and a receive blocks only when it is empty. Buffering
+    decouples sender and receiver up to n items but does not make sends
+    non-blocking in general.
+  rubric:
+    - { point: "unbuffered: send blocks until a receiver is ready (synchronizes)", score: 1 }
+    - { point: "buffered: send blocks only when the buffer is full", score: 1 }
+    - { partial: "says buffered is 'async' / never blocks", score: 0.5 }
+
+- id: go-concurrency-02
+  difficulty: medium
+  weight: 2
+  tags: [concurrency, goroutine-leaks]
+  question: >
+    What does `select` do, how does a `default` case change its behavior, and
+    what happens if a `select` has no ready case and no default?
+  answer: >
+    `select` waits on multiple channel operations and proceeds with one that is
+    ready (choosing randomly if several are). A `default` case makes the select
+    non-blocking: if no other case is ready, `default` runs immediately. With no
+    default and no ready case, the select blocks; if nothing will ever become
+    ready that goroutine is blocked forever — a leak. An empty `select {}` blocks
+    the goroutine permanently.
+  rubric:
+    - { point: "select proceeds with a ready case (random among several ready)", score: 1 }
+    - { point: "default makes it non-blocking / runs when nothing else is ready", score: 1 }
+    - { point: "no default + no ready case blocks (potential leak / select{} blocks forever)", score: 1 }
+    - { partial: "describes select but not the default vs blocking distinction", score: 0.5 }
+
+- id: go-concurrency-03
+  difficulty: medium
+  weight: 3
+  tags: [concurrency, goroutine-leaks]
+  question: >
+    Explain the rules around closing a channel: who should close it, what
+    happens on send/receive after close, and why closing is used.
+  answer: >
+    Only the sender should close a channel, and only once — closing signals "no
+    more values". Sending on a closed channel panics, and closing an already
+    closed (or nil) channel panics. Receiving from a closed channel never blocks:
+    it drains buffered values then yields the zero value with `ok == false`
+    (`v, ok := <-ch`), which is how a `for range` over the channel terminates.
+    Never close from the receiver side or from multiple senders without
+    coordination.
+  rubric:
+    - { point: "only the sender closes, once; send on closed channel panics", score: 1 }
+    - { point: "receive from closed returns zero value + ok=false (drains buffer first)", score: 1 }
+    - { point: "closing signals completion / terminates `for range` over the channel", score: 1 }
+    - { partial: "knows receiving from closed is safe but misses send-on-closed panic", score: 0.5 }
+
+- id: go-concurrency-04
+  difficulty: medium
+  weight: 3
+  tags: [concurrency, sync]
+  question: >
+    A loop launches a goroutine per iteration that reads the loop variable.
+    Historically all goroutines saw the same final value. What caused this, and
+    what changed in Go 1.22?
+  answer: >
+    Before Go 1.22 the `for` loop variable was declared once and shared across
+    all iterations, so every goroutine's closure captured the same variable and
+    read whatever value it held when the goroutine finally ran — usually the last.
+    Because the goroutines and the loop touched that shared variable concurrently
+    it was also a data race. As of Go 1.22 each iteration gets a fresh copy of the
+    loop variable, so the capture is per-iteration and the bug is gone. Pre-1.22
+    the fix was to shadow it (`v := v`) or pass it as an argument.
+  rubric:
+    - { point: "pre-1.22 the loop variable was shared/reused across iterations, so closures captured one variable (last value)", score: 1 }
+    - { point: "Go 1.22 gives each iteration its own copy — bug fixed", score: 1 }
+    - { point: "pre-1.22 workaround: shadow `v := v` or pass as an argument", score: 1 }
+    - { partial: "describes the bug but attributes no version or fix", score: 0.5 }
+
+- id: go-sync-01
+  difficulty: medium
+  weight: 3
+  tags: [sync]
+  question: >
+    What is a data race in Go, and what is the minimal correct way to protect a
+    counter incremented by many goroutines?
+  answer: >
+    A data race is two or more goroutines accessing the same memory concurrently
+    with at least one write and no synchronization; the result is undefined
+    behavior, not just a wrong number. Guard the shared counter with a
+    `sync.Mutex` — `mu.Lock(); count++; mu.Unlock()` — or use `sync/atomic`
+    (`atomic.AddInt64` / `atomic.Int64`). The unsynchronized `count++` (a
+    read-modify-write) is the classic race.
+  rubric:
+    - { point: "data race = concurrent access, ≥1 write, no synchronization (undefined behavior)", score: 1 }
+    - { point: "protect with a Mutex (Lock/Unlock) around the access, or atomic", score: 1 }
+    - { partial: "'use a mutex' without naming the concurrent-write/race condition", score: 0.5 }
+
+- id: go-sync-02
+  difficulty: easy
+  weight: 2
+  tags: [sync, testing]
+  question: >
+    What does the `-race` flag do, and what are its limitations?
+  answer: >
+    `go test -race` (or `go run/build -race`) enables the race detector, which
+    instruments memory accesses at runtime and reports read/write races with the
+    conflicting stack traces. It only finds races that actually execute during the
+    run — it is a dynamic detector, not a proof of correctness — and it adds
+    significant CPU and memory overhead, so it is used in tests/CI rather than
+    production.
+  rubric:
+    - { point: "instruments memory accesses at runtime to detect races that occur", score: 1 }
+    - { point: "only catches races that actually execute (dynamic) / has runtime overhead", score: 1 }
+    - { partial: "'detects races' with no dynamic/only-what-runs caveat", score: 0.5 }
+
+- id: go-sync-03
+  difficulty: medium
+  weight: 2
+  tags: [sync]
+  question: >
+    When would you use `sync/atomic` instead of a `sync.Mutex`, and what is the
+    trade-off?
+  answer: >
+    Atomics do lock-free operations on a single word (counters, flags, a swapped
+    pointer) and are cheaper than a mutex for those narrow cases. A mutex is the
+    right tool when you must keep several fields consistent together or guard a
+    multi-step critical section — atomics cannot make a group of updates
+    atomic as a unit. Go 1.19+ offers typed atomics (`atomic.Int64`,
+    `atomic.Pointer[T]`) which are safer than the bare functions.
+  rubric:
+    - { point: "atomic for single-word lock-free ops (counter/flag/pointer)", score: 1 }
+    - { point: "mutex when guarding multiple fields / a multi-step critical section", score: 1 }
+    - { partial: "'atomic is faster' with no scope/critical-section distinction", score: 0.5 }
+
+- id: go-sync-04
+  difficulty: medium
+  weight: 2
+  tags: [sync, concurrency]
+  question: >
+    How do you use `sync.WaitGroup` to wait for a set of goroutines, and what is
+    the common misuse that causes a race or a panic?
+  answer: >
+    Call `wg.Add(n)` before starting the goroutines, have each goroutine
+    `defer wg.Done()`, and call `wg.Wait()` to block until the counter hits zero.
+    The classic bug is calling `wg.Add(1)` inside the goroutine instead of before
+    launching it: `Wait` can return before those `Add`s run. Also, a counter
+    driven negative (more `Done`s than `Add`s) panics, and a `WaitGroup` must not
+    be copied after first use.
+  rubric:
+    - { point: "Add before launching, Done (usually deferred) per goroutine, Wait blocks to zero", score: 1 }
+    - { point: "misuse: Add inside the goroutine races with Wait (or negative counter panics)", score: 1 }
+    - { partial: "describes Add/Done/Wait but not the Add-before-launch requirement", score: 0.5 }
+
+- id: go-errors-01
+  difficulty: medium
+  weight: 3
+  tags: [errors]
+  question: >
+    What does the `%w` verb in `fmt.Errorf` do, and how does it differ from `%v`
+    or `%s`?
+  answer: >
+    `fmt.Errorf("...: %w", err)` wraps `err`, producing a new error that both
+    carries the message and keeps a link to the original so `errors.Unwrap`,
+    `errors.Is`, and `errors.As` can still reach it. `%v`/`%s` only interpolate
+    the error's text — the chain is broken and the original error is no longer
+    programmatically recoverable. `%w` has been available since Go 1.13 (Go 1.20
+    allows multiple `%w` in one call).
+  rubric:
+    - { point: "%w wraps and preserves the underlying error (unwrappable chain)", score: 1 }
+    - { point: "%v/%s only format the text, breaking the chain for Is/As", score: 1 }
+    - { partial: "'%w wraps the error' without contrasting the lost chain of %v/%s", score: 0.5 }
+
+- id: go-errors-02
+  difficulty: medium
+  weight: 3
+  tags: [errors]
+  question: >
+    What is the difference between `errors.Is` and `errors.As`, and when do you
+    reach for each?
+  answer: >
+    Both walk the wrapped-error chain. `errors.Is(err, target)` tests whether any
+    error in the chain equals a specific sentinel value (e.g.
+    `errors.Is(err, sql.ErrNoRows)`). `errors.As(err, &target)` finds the first
+    error in the chain that matches a concrete type and assigns it to `target`, so
+    you can read its fields (e.g. a `*os.PathError`). Use `Is` to compare against
+    a known value, `As` to extract a typed error.
+  rubric:
+    - { point: "errors.Is compares against a sentinel value in the chain", score: 1 }
+    - { point: "errors.As matches/extracts a concrete error type via a pointer target", score: 1 }
+    - { partial: "knows both walk the chain but swaps or blurs value-vs-type", score: 0.5 }
+
+- id: go-errors-03
+  difficulty: medium
+  weight: 2
+  tags: [errors]
+  question: >
+    What is a sentinel error, how is it declared, and what should callers compare
+    against it with?
+  answer: >
+    A sentinel is a predefined, exported error value used to signal a specific
+    condition, declared at package level with `var ErrNotFound = errors.New("...")`
+    (e.g. `io.EOF`, `sql.ErrNoRows`). Callers should test it with
+    `errors.Is(err, ErrNotFound)` rather than `err == ErrNotFound`, because `==`
+    fails once the error has been wrapped with `%w`. Sentinels couple callers to a
+    value, so prefer typed errors or behavior when you need to carry data.
+  rubric:
+    - { point: "package-level exported error value signaling a condition (errors.New)", score: 1 }
+    - { point: "compare with errors.Is, not ==, so it survives wrapping", score: 1 }
+    - { partial: "defines a sentinel but says compare with == ", score: 0.5 }
+
+- id: go-errors-04
+  difficulty: hard
+  weight: 3
+  tags: [errors, interfaces]
+  question: >
+    A function returns `*MyError` typed as `error`. Even when it returns a nil
+    pointer, `err != nil` is true at the call site. Why?
+  answer: >
+    An interface value is a (type, value) pair and is nil only when BOTH are nil.
+    Returning a nil `*MyError` into an `error` return produces an interface whose
+    type is `*MyError` and whose value is nil — the type slot is non-nil, so the
+    interface itself is not nil and `err != nil` is true. The fix is to declare
+    the return as `error` and return a literal `nil` on the success path, never a
+    typed nil pointer.
+  rubric:
+    - { point: "an interface is nil only if both its type and value are nil", score: 1 }
+    - { point: "a typed nil pointer boxed in an interface has a non-nil type slot → not nil", score: 1 }
+    - { point: "fix: return untyped nil / don't return a typed nil pointer as error", score: 1 }
+    - { partial: "notices the surprise but can't explain the (type,value) pair", score: 0.5 }
+
+- id: go-interfaces-01
+  difficulty: easy
+  weight: 2
+  tags: [interfaces]
+  question: >
+    How does a type satisfy an interface in Go, and what does "accept interfaces,
+    return structs" mean?
+  answer: >
+    Satisfaction is implicit (structural): a type satisfies an interface simply by
+    having all the interface's methods — there is no `implements` keyword and no
+    declared relationship. "Accept interfaces, return structs" means functions
+    should take interface parameters (so callers can pass any conforming type and
+    the boundary stays flexible) but return concrete types (so callers get the
+    full API and you don't prematurely narrow it).
+  rubric:
+    - { point: "implicit/structural satisfaction — has the methods, no explicit declaration", score: 1 }
+    - { point: "accept interface params (flexible input), return concrete types", score: 1 }
+    - { partial: "knows it's implicit but can't articulate the accept/return guidance", score: 0.5 }
+
+- id: go-interfaces-02
+  difficulty: medium
+  weight: 2
+  tags: [interfaces]
+  question: >
+    What is the empty interface (`any`), and what is the danger of a type
+    assertion like `x.(int)` versus the two-result form?
+  answer: >
+    The empty interface — `interface{}`, aliased to `any` since Go 1.18 — is
+    satisfied by every type, so it holds a value of any type. `v := x.(int)`
+    panics if the dynamic type isn't `int`; the comma-ok form `v, ok := x.(int)`
+    never panics — it sets `ok` to false and `v` to the zero value on mismatch.
+    Use comma-ok (or a type switch) whenever the concrete type isn't guaranteed.
+  rubric:
+    - { point: "any/interface{} holds any type (satisfied by everything)", score: 1 }
+    - { point: "single-result assertion panics on mismatch; comma-ok returns ok=false safely", score: 1 }
+    - { partial: "defines `any` but misses the panic-vs-comma-ok distinction", score: 0.5 }
+
+- id: go-generics-01
+  difficulty: medium
+  weight: 2
+  tags: [generics, interfaces]
+  question: >
+    When should you use generics (type parameters) versus a plain interface
+    parameter?
+  answer: >
+    Use an interface when you only need to call a fixed set of methods and don't
+    care about the concrete type — it gives runtime polymorphism. Use generics
+    when the type relationship must be preserved: returning the same type you were
+    given, working over any element type of a slice/map, or enforcing that two
+    arguments share a type. Generics keep static type information and avoid
+    `any` + assertions; interfaces are simpler when a method set is all you need.
+  rubric:
+    - { point: "interface: fixed method set / runtime polymorphism, concrete type irrelevant", score: 1 }
+    - { point: "generics: preserve the type relationship (same in/out, element types, avoid any+assert)", score: 1 }
+    - { partial: "'generics avoid repetition' with no interface-vs-generic distinction", score: 0.5 }
+
+- id: go-generics-02
+  difficulty: medium
+  weight: 2
+  tags: [generics]
+  question: >
+    Write the shape of a generic function and explain what a constraint is.
+  answer: >
+    A type parameter list follows the function name in brackets:
+    `func Map[T any, U any](s []T, f func(T) U) []U`. The identifier after each
+    type parameter (`any`, or a named constraint) is its constraint — an interface
+    describing the permitted type set and the operations allowed on that type
+    parameter. `any` allows every type; a constraint like `constraints.Ordered`
+    (or `cmp.Ordered` since Go 1.21) permits `<`/`>`. You can only do to a type
+    parameter what its constraint guarantees.
+  rubric:
+    - { point: "type params in brackets after the name: func F[T Constraint](...)", score: 1 }
+    - { point: "a constraint is an interface bounding the allowed types and operations", score: 1 }
+    - { partial: "shows [T any] syntax but can't explain what a constraint restricts", score: 0.5 }
+
+- id: go-generics-03
+  difficulty: medium
+  weight: 2
+  tags: [generics]
+  question: >
+    What does the `comparable` constraint allow, and what does the `~` token mean
+    in a constraint like `~int`?
+  answer: >
+    `comparable` is a predeclared constraint permitting types that support `==`
+    and `!=` (so the type parameter can be used as a map key or compared). The `~`
+    token means "any type whose underlying type is this": `~int` matches `int` and
+    any defined type like `type Celsius int`, whereas plain `int` in a constraint
+    would match only `int` itself. `~` is what lets a constraint cover named types
+    built on a base type.
+  rubric:
+    - { point: "comparable = types usable with == / !=  (e.g. map keys)", score: 1 }
+    - { point: "~T matches any type whose underlying type is T (named types included)", score: 1 }
+    - { partial: "gets one of comparable or ~ but not both", score: 0.5 }
+
+- id: go-generics-04
+  difficulty: medium
+  weight: 1
+  tags: [generics]
+  question: >
+    What is type-argument inference in generics, and when must you specify the
+    type arguments explicitly?
+  answer: >
+    When you call a generic function, the compiler usually infers the type
+    arguments from the ordinary (value) arguments, so `Map(nums, f)` needs no
+    `[int, string]`. You must state them explicitly when they can't be inferred —
+    typically when a type parameter appears only in the return type or in no value
+    argument at all, e.g. `New[int]()` — or to disambiguate.
+  rubric:
+    - { point: "compiler infers type args from the value arguments", score: 1 }
+    - { point: "must specify when a type param isn't determined by any argument (e.g. only in return)", score: 1 }
+    - { partial: "'you can omit types' without the when-you-can't case", score: 0.5 }
+
+- id: go-context-01
+  difficulty: medium
+  weight: 3
+  tags: [context, goroutine-leaks]
+  question: >
+    How does `context` cancellation stop a running goroutine, and whose
+    responsibility is it to actually stop?
+  answer: >
+    Cancellation is cooperative: cancelling a context closes its `Done()` channel,
+    and cancellation propagates to all derived child contexts. A goroutine must
+    watch for it — typically `select { case <-ctx.Done(): return ... }` or
+    checking `ctx.Err()` in its loop — and return on its own. The context does not
+    forcibly kill a goroutine; code that ignores `ctx.Done()` keeps running and
+    leaks.
+  rubric:
+    - { point: "cancel closes ctx.Done() and propagates to child contexts", score: 1 }
+    - { point: "the goroutine must observe Done()/ctx.Err() and return itself (cooperative)", score: 1 }
+    - { point: "context can't force-kill a goroutine; ignoring it leaks", score: 1 }
+    - { partial: "'context cancels it' implying it stops the goroutine automatically", score: 0.5 }
+
+- id: go-context-02
+  difficulty: medium
+  weight: 3
+  tags: [context]
+  question: >
+    What is the difference between `context.WithTimeout`/`WithDeadline` and
+    `WithCancel`, and why must you always call the returned `cancel`?
+  answer: >
+    `WithCancel` returns a context you cancel manually; `WithTimeout` (a deadline
+    relative to now) and `WithDeadline` (an absolute time) additionally cancel
+    themselves when the time is reached. All three return a `cancel` function that
+    must be called — normally `defer cancel()` — because it releases the context's
+    resources and stops its timer; skipping it leaks the context (and, until GC,
+    the timer) even after the work completes. Calling `cancel` after natural
+    completion is harmless.
+  rubric:
+    - { point: "WithTimeout/WithDeadline auto-cancel at a time; WithCancel is manual only", score: 1 }
+    - { point: "always call cancel (defer) to release resources / stop the timer, else leak", score: 1 }
+    - { partial: "knows the timeout variants but not why cancel must always be called", score: 0.5 }
+
+- id: go-context-03
+  difficulty: medium
+  weight: 2
+  tags: [context]
+  question: >
+    What is `context.WithValue` for, and what should it NOT be used for?
+  answer: >
+    `WithValue` attaches request-scoped data that crosses API boundaries — trace
+    IDs, request IDs, auth principal — keyed by an unexported custom key type to
+    avoid collisions. It should not be used to pass optional function parameters
+    or dependencies: values are untyped (`any`), invisible in the function
+    signature, and looked up at runtime, so real arguments belong in the function
+    signature, not in the context.
+  rubric:
+    - { point: "for request-scoped data crossing boundaries (trace/request/auth), custom key type", score: 1 }
+    - { point: "not for passing optional params/dependencies (should be explicit args)", score: 1 }
+    - { partial: "'stores values in context' with no request-scoped-only caveat", score: 0.5 }
+
+- id: go-context-04
+  difficulty: easy
+  weight: 1
+  tags: [context]
+  question: >
+    State the conventions for passing `context.Context` around a codebase.
+  answer: >
+    Pass it as the first parameter, named `ctx`, of any function that does I/O or
+    can block; do not store a context in a struct field. Never pass a nil
+    context — use `context.TODO()` when you don't yet have one and
+    `context.Background()` at the top of a call tree. Contexts are immutable and
+    safe for concurrent use; deriving a child never mutates the parent.
+  rubric:
+    - { point: "first param named ctx; don't store it in a struct", score: 1 }
+    - { point: "don't pass nil — use context.TODO()/Background()", score: 1 }
+    - { partial: "one convention only", score: 0.5 }
+
+- id: go-slices-01
+  difficulty: hard
+  weight: 3
+  tags: [slices-maps]
+  question: >
+    Why can appending to a slice silently overwrite data seen through another
+    slice, and why is `append`'s return value load-bearing?
+  answer: >
+    A slice is a view (pointer, length, capacity) over a backing array. If it has
+    spare capacity, `append` writes into that shared array in place — so another
+    slice or a re-slice pointing at the same array sees the mutation. When capacity
+    is exceeded, `append` allocates a new array and the slices diverge. Because
+    `append` may or may not reallocate, you must use its return value
+    (`s = append(s, x)`); reslicing a shared array (or passing a slice to a func
+    that appends) is the classic aliasing foot-gun. `slices.Clone` or `copy` gives
+    an independent slice.
+  rubric:
+    - { point: "slices share a backing array; in-capacity append mutates it in place (aliasing)", score: 1 }
+    - { point: "append may reallocate, so you must assign its return value", score: 1 }
+    - { point: "copy / slices.Clone (or full-slice expr) to get an independent slice", score: 1 }
+    - { partial: "'always use s = append(...)' without the shared-backing-array why", score: 0.5 }
+
+- id: go-slices-02
+  difficulty: easy
+  weight: 3
+  tags: [slices-maps]
+  question: >
+    What happens when you read from and write to a nil map, and how does that
+    differ from a nil slice?
+  answer: >
+    Reading a nil map is fine — it returns the value type's zero value (and
+    `ok == false` with the comma-ok form). Writing to a nil map panics with
+    "assignment to entry in nil map"; you must initialize it with `make` or a
+    literal first. A nil slice is more forgiving: you can `append` to it (append
+    allocates) and `len`/`range` treat it as empty, so nil slices are usable as-is
+    while nil maps are not.
+  rubric:
+    - { point: "reading a nil map returns the zero value (no panic)", score: 1 }
+    - { point: "writing to a nil map panics — must make/initialize first", score: 1 }
+    - { partial: "knows nil map write panics but claims reads panic too, or conflates with slice", score: 0.5 }
+
+- id: go-slices-03
+  difficulty: medium
+  weight: 2
+  tags: [slices-maps]
+  question: >
+    What does `copy(dst, src)` actually copy, and why does slicing (`s[1:3]`) not
+    give you an independent slice?
+  answer: >
+    `copy` copies `min(len(dst), len(src))` elements — it is bounded by the
+    destination's length, so a zero-length or too-short `dst` silently copies
+    little or nothing; size `dst` correctly first. Slicing with `s[1:3]` creates a
+    new slice header but reuses the same backing array, so writes through it affect
+    the original. To detach, allocate and `copy`, or use `slices.Clone`. Note this
+    is a shallow copy — element pointers/slices are still shared.
+  rubric:
+    - { point: "copy copies min(len(dst),len(src)) — dst must be sized appropriately", score: 1 }
+    - { point: "s[i:j] reuses the same backing array (not independent); clone/copy to detach", score: 1 }
+    - { partial: "'copy copies the slice' without the min-length or shared-array point", score: 0.5 }
+
+- id: go-slices-04
+  difficulty: medium
+  weight: 2
+  tags: [slices-maps]
+  question: >
+    What is the iteration order of a Go map, and why can't you take the address of
+    a map element (`&m[k]`)?
+  answer: >
+    Map iteration order is deliberately randomized — it is unspecified and varies
+    each run, so you must sort the keys if you need a stable order. You can't take
+    the address of a map value because the map may rehash and move entries, so
+    `&m[k]` would be a dangling pointer; consequently you also can't mutate a field
+    of a struct value stored directly in a map (`m[k].field = ...` is a compile
+    error) — reassign the whole value or store pointers.
+  rubric:
+    - { point: "map iteration order is randomized/unspecified — sort keys for stable order", score: 1 }
+    - { point: "can't take &m[k] / mutate a struct-value field in place (entries can move)", score: 1 }
+    - { partial: "knows order is random but not the addressability constraint", score: 0.5 }
+
+- id: go-defer-01
+  difficulty: medium
+  weight: 3
+  tags: [defer-panic]
+  question: >
+    When are the arguments to a deferred call evaluated, and in what order do
+    multiple deferred calls run?
+  answer: >
+    A deferred call's arguments (and its function value) are evaluated immediately
+    when the `defer` statement executes, not when the call actually runs at return
+    — so `defer fmt.Println(i)` captures `i`'s value at that moment, and to defer
+    reading a later value you wrap it in a closure. Deferred calls run in
+    last-in-first-out order as the function returns.
+  rubric:
+    - { point: "deferred args are evaluated at the defer statement, not at return", score: 1 }
+    - { point: "deferred calls run in LIFO order", score: 1 }
+    - { partial: "gets LIFO but thinks args are evaluated at return time", score: 0.5 }
+
+- id: go-defer-02
+  difficulty: medium
+  weight: 2
+  tags: [defer-panic]
+  question: >
+    How does `recover` work, and what are its constraints on where it can be
+    called and which goroutine it covers?
+  answer: >
+    `recover` stops a panic and returns the panic value, but only when called
+    directly inside a deferred function running during the panic; called anywhere
+    else it returns nil and does nothing. It only recovers a panic in its own
+    goroutine — a panic in another goroutine that isn't recovered there crashes the
+    whole program. After a successful recover, execution continues in the caller
+    (the panicking function still unwinds).
+  rubric:
+    - { point: "recover only works inside a deferred function (else returns nil)", score: 1 }
+    - { point: "only recovers panics in the same goroutine (other goroutines crash the program)", score: 1 }
+    - { partial: "'recover catches panics' without the deferred-only or same-goroutine constraint", score: 0.5 }
+
+- id: go-defer-03
+  difficulty: medium
+  weight: 2
+  tags: [defer-panic, goroutine-leaks]
+  question: >
+    Why is `defer file.Close()` inside a long-running loop a problem, and what do
+    you do instead?
+  answer: >
+    `defer` runs at function return, not at the end of the loop iteration, so a
+    `defer` inside a loop stacks up one deferred call per iteration and none of
+    them run until the whole function returns — file handles or other resources
+    accumulate and can exhaust limits. Either close explicitly at the end of each
+    iteration, or move the per-iteration work into its own function so `defer`
+    fires each time that function returns.
+  rubric:
+    - { point: "defer fires at function return, so loop defers accumulate (resources not released per iteration)", score: 1 }
+    - { point: "fix: close explicitly per iteration or extract the body into a function", score: 1 }
+    - { partial: "notices resources pile up but no correct fix", score: 0.5 }
+
+- id: go-defer-04
+  difficulty: medium
+  weight: 2
+  tags: [defer-panic, errors]
+  question: >
+    How can a deferred function change a function's return value, and what is this
+    commonly used for?
+  answer: >
+    Only when the return values are named: a deferred closure can read and assign
+    the named return variables (e.g. `func f() (err error) { defer func(){ err =
+    ... }() }`), and that assignment is what the caller sees because the return
+    values already exist as variables. It's commonly used to wrap or annotate an
+    error on the way out (`defer func(){ if err != nil { err = fmt.Errorf("...:
+    %w", err) } }()`) or to translate a recovered panic into an error.
+  rubric:
+    - { point: "requires named return values; the deferred func assigns them", score: 1 }
+    - { point: "used to wrap/annotate the error or convert a recovered panic to an error", score: 1 }
+    - { partial: "'defer can change returns' without the named-return requirement", score: 0.5 }
+
+- id: go-testing-01
+  difficulty: easy
+  weight: 2
+  tags: [testing]
+  question: >
+    What is a table-driven test in Go, and why is it the idiomatic pattern?
+  answer: >
+    A table-driven test defines a slice of case structs (name, inputs, expected
+    output) and loops over them, usually running each as a subtest with
+    `t.Run(tc.name, ...)`. It keeps one assertion body while covering many cases,
+    makes adding a case trivial, and gives each case an isolated, named failure via
+    the subtest so you see exactly which case failed.
+  rubric:
+    - { point: "a slice of cases (inputs + expected) iterated with one assertion body", score: 1 }
+    - { point: "run each as a named t.Run subtest for isolation/clear failures", score: 1 }
+    - { partial: "'loop over test cases' without the subtest / named-case benefit", score: 0.5 }
+
+- id: go-testing-02
+  difficulty: medium
+  weight: 2
+  tags: [testing]
+  question: >
+    What does `t.Parallel()` do inside a subtest, and what loop-variable pitfall
+    did it historically create?
+  answer: >
+    Calling `t.Parallel()` in a subtest signals it to run concurrently with other
+    parallel subtests: those subtests pause until the parent test function
+    returns, then run together. Before Go 1.22 the loop variable in a
+    range-over-cases table test was shared, so parallel subtests capturing `tc`
+    would all see the last case; the fix was to shadow it (`tc := tc`). As of Go
+    1.22 the per-iteration loop variable makes that shadowing unnecessary.
+  rubric:
+    - { point: "t.Parallel marks the subtest to run concurrently (after the parent returns)", score: 1 }
+    - { point: "pre-1.22 shared loop var meant parallel subtests captured the last case; shadow tc := tc (unneeded in 1.22+)", score: 1 }
+    - { partial: "explains t.Parallel but misses the loop-variable capture pitfall", score: 0.5 }
+
+- id: go-testing-03
+  difficulty: easy
+  weight: 1
+  tags: [testing]
+  question: >
+    What do `t.Cleanup` and `t.Helper` do?
+  answer: >
+    `t.Cleanup(fn)` registers a function to run when the test (and its subtests)
+    finish, in LIFO order — a robust alternative to `defer` for teardown that also
+    works across helper boundaries. `t.Helper()` marks the calling function as a
+    test helper so that when it reports a failure the file:line points at the
+    caller of the helper, not at the line inside it, making failures easier to
+    locate.
+  rubric:
+    - { point: "t.Cleanup registers teardown run at test end (LIFO)", score: 1 }
+    - { point: "t.Helper makes failure line numbers point at the caller, not inside the helper", score: 1 }
+    - { partial: "gets one of the two correctly", score: 0.5 }

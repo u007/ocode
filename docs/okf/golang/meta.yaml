@@ -1,0 +1,27 @@
+stack: golang
+title: Go (Golang)
+corpus_rev: 1
+# Version scope this corpus grades against. Go 1.21+. Version-dependent behavior
+# (e.g. per-iteration loop variables landed in 1.22, errors.Join in 1.20) is
+# called out explicitly in the affected answers so a grader can tell a correct
+# answer from a stale one.
+version_scope: ">=1.21"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - concurrency      # goroutines, channels, select, buffered vs unbuffered
+  - sync             # mutex, WaitGroup, atomic, data races, -race
+  - errors           # error wrapping (%w), errors.Is/As, sentinel errors
+  - interfaces       # implicit satisfaction, empty interface/any, type assertions
+  - generics         # type parameters, constraints, comparable, ~underlying, inference
+  - context          # cancellation, deadline/timeout, values, conventions
+  - slices-maps      # append aliasing, nil maps, copy semantics, iteration order
+  - defer-panic      # defer eval timing, LIFO, recover, named returns
+  - goroutine-leaks  # blocked goroutines, missing cancellation, unclosed channels
+  - testing          # table-driven tests, t.Parallel, subtests, t.Cleanup/Helper
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "go.mod" }
+    - { type: content, glob: "**/*.go", pattern: "^package " }

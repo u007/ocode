@@ -1,0 +1,27 @@
+stack: tanstack
+title: TanStack (Query v5 + Router v1, React)
+corpus_rev: 1
+# Version scope this corpus grades against. TanStack Query v5 (cacheTime renamed
+# to gcTime; isLoading→isPending; useSuspenseQuery) and TanStack Router v1
+# (file-based, end-to-end typesafe, validated search params). Do NOT grade v4-era
+# Query facts (cacheTime, status:'loading') as current.
+version_scope: "@tanstack/react-query >=5 <6, @tanstack/react-router >=1 <2"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - query-keys        # key structure, hierarchy, keys as the dependency array
+  - caching           # staleTime vs gcTime, cache lifecycle, stale-while-revalidate
+  - invalidation      # invalidateQueries / refetch / setQueryData, fuzzy matching
+  - mutations         # useMutation, optimistic updates, onMutate/onError/onSettled
+  - query-fn          # queryFn contract, throwing on error, enabled, side effects
+  - suspense          # useSuspenseQuery, ErrorBoundary, waterfalls
+  - prefetch          # prefetchQuery / ensureQueryData / fetchQuery
+  - router-loaders    # Route loader, beforeLoad, router context, loaderDeps
+  - router-search     # validated typesafe search params, search as URL state
+  - router-typesafety # file-based routing, typed Link/navigate/useParams/useSearch
+
+detection:
+  mode: any
+  markers:
+    - { type: dep, manifest: package.json, name: "@tanstack/react-query" }
+    - { type: dep, manifest: package.json, name: "@tanstack/react-router" }
