@@ -41,7 +41,27 @@ detection:
 A derived skill `derived/<stack>.<model_id>.SKILL.md` activates when **both**:
 
 1. the stack is detected in the current repo (rules above), AND
-2. the active model id **exactly** equals the skill's `tuned_for`.
+2. the active model's **canonical id** exactly equals the skill's `tuned_for`.
+
+### Canonical model id (provider-independent)
+
+The key is the model, not the host that serves it. ocode already parses its
+`model` string by stripping a recognized provider prefix
+(`internal/agent/client.go` — `SplitN(model, "/", 2)`), so the canonical id is
+simply **ocode's resolved `model`** after that strip:
+
+| runtime `model` string        | provider (stripped) | canonical id → `tuned_for` |
+|-------------------------------|---------------------|----------------------------|
+| `novita/tencent/hy3`          | `novita`            | `tencent/hy3`              |
+| `openrouter/tencent/hy3`      | `openrouter`        | `tencent/hy3`  (same skill)|
+| `anthropic/claude-opus-4-8`   | `anthropic`         | `claude-opus-4-8`          |
+
+So one eval of `tencent/hy3` covers that model on **any** host. `tuned_for`
+carries the canonical id verbatim (slashes kept, matches the runtime `model`
+var); the filename flattens `/` → `__`. The provider is recorded in the
+scorecard's `evaluated_via` for provenance only — with one exception: a host
+serving a materially different **quantization** can shift behavior, so treat
+that as a distinct eval.
 
 > **Status:** the runtime that reads these markers and injects the matching
 > skill is **not yet wired** into the agent. This file is the contract for that

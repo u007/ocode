@@ -96,7 +96,7 @@ Configure via `apiKeys` in config or provider-specific env vars:
 ocode                    # Start fresh session
 ocode -continue          # Resume last session
 ocode -session <id>      # Resume specific session
-ocode -yolo              # Auto-approve all permissions
+ocode -yolo              # Auto-approve all (last resort — prefer the auto-permission layer)
 ocode --permission-mode off  # Disable permissions entirely
 ```
 
@@ -154,7 +154,7 @@ ocode run -command explain -file main.go
 | `-fork` | | Fork from last session |
 | `-file` | `-f` | Attach file(s) |
 | `-format` | | `default` or `json` |
-| `-yolo` | | Auto-approve permissions |
+| `-yolo` | | Auto-approve permissions (last resort — prefer the auto-permission layer) |
 | `-command` | | Run slash command |
 
 ### 3.3 Web Server Mode
@@ -401,7 +401,7 @@ ocode run -format json -command test > tests.json
 # Check for issues
 ocode run -command lint -file main.go
 
-# Auto-fix
+# Auto-fix (prefer the auto-permission layer; use -yolo only as a last resort)
 ocode run -yolo -command fix -file main.go
 ```
 
@@ -458,7 +458,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/ide` | | Connect to VS Code (Claude Code extension) | Lock discovery, WebSocket + MCP client |
 | `/theme` | `/themes` | Switch themes instantly | Built-in themes: Tokyo Night, Storm, Catppuccin |
 | `/permissions` | | View/set tool and bash permissions | Supports per-tool rules, bash prefix rules, auto-permission model |
-| `/yolo` | | Toggle YOLO permissions mode on/off | Auto-approves permission-gated tools (respects hard blocks) |
+| `/yolo` | | Toggle YOLO permissions mode on/off (**last resort** — prefer the auto-permission layer) | Auto-approves permission-gated tools (respects hard blocks) |
 | `/git` | | Git operations from command line | Stage, unstage, discard, commit, push, pull, branch |
 | `/github` | | PR, issue, and workflow commands | GitHub API integration |
 | `/plugin` | | Plugin management (install, sync, list, etc.) | Git-based plugin system with registry |
@@ -507,13 +507,18 @@ The backend implementation is tracked in [the serve full-API plan](docs/superpow
 
 ### Permission Modes
 
+> **Recommendation:** prefer the **auto-permission layer** (see below) over YOLO mode. Auto-approval removes most confirmation interruptions while still prompting (or falling back to `ask`) for anything it cannot confidently vet, and it can never override hard safety blocks. YOLO mode blindly approves *everything* and should be reserved as a last resort.
+
 | Mode | Behavior |
 |------|----------|
 | `normal` (default) | Follow tool rules — some auto-allow, some prompt |
-| `yolo` | Auto-approve all permission-gated tools (dangerous) |
+| `auto` (**recommended**) | LLM-based auto-approval layer — auto-allows routine/low-risk ops, prompts for risky ones, respects hard blocks |
+| `yolo` (last resort) | Auto-approve all permission-gated tools (dangerous) |
 | `locked` | Read-only — all write/edit/bash/network tools denied |
 
-### YOLO Mode
+### YOLO Mode (last resort)
+
+> Prefer the **auto-permission layer** (next section) instead: it removes most confirmation interruptions automatically while keeping a safety net. Use YOLO only when you fully trust the session and need zero prompts.
 
 ```bash
 ocode -yolo                    # TUI
@@ -521,11 +526,11 @@ ocode run -yolo "..."          # Run mode
 ocode run --dangerously-skip-permissions "..."  # Alias
 ```
 
-**⚠️ Warning:** YOLO mode allows the agent to run any shell command without confirmation.
+**⚠️ Warning:** YOLO mode allows the agent to run any shell command without confirmation. It still respects hard safety blocks (destructive git, data exfiltration), but otherwise approves everything.
 
-### Auto-Permission Layer (Optional)
+### Auto-Permission Layer (Recommended)
 
-An LLM-based layer that auto-approves/denies permission prompts without user interaction:
+The **recommended** way to cut down on permission interruptions. An LLM-based layer that auto-approves low-risk permission prompts without user interaction, while still prompting for anything it cannot confidently vet:
 
 ```json
 {
@@ -646,7 +651,7 @@ ocode run -fork "New direction"
 |---------|----------|
 | "No model configured" | Set `OPENCODE_MODEL` or `model` in config |
 | "API key invalid" | Check `apiKeys` in config or env vars |
-| "Permission denied" | Check file permissions or use `-yolo` |
+| "Permission denied" | Check file permissions, or enable the auto-permission layer (recommended) instead of `-yolo` |
 | "Connection refused" | Ensure server is running (`ocode serve`) |
 | TUI rendering issues | Resize terminal, check `TERM` env var |
 

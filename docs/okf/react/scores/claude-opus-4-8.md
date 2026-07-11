@@ -1,7 +1,7 @@
 ---
 model_id: claude-opus-4-8
 model_version: "4.8"
-provider: anthropic
+evaluated_via: anthropic
 evaluated_on: 2026-07-11
 stack: react
 stack_corpus_rev: 1

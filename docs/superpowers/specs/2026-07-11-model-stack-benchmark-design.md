@@ -104,13 +104,20 @@ Field rules:
 
 ## Scorecard (`_schema/scorecard.template.md`)
 
-One file per **exact model version**, filename = exact model id (e.g.
-`claude-opus-4-8.md`). Front matter carries:
+One file per **exact model version**, filename = the provider-stripped model id
+with `/` flattened to `__` (e.g. `claude-opus-4-8.md`, `tencent__hy3.md`). The
+key is the model, NOT the host that serves it: ocode already resolves its
+`model` string by stripping a recognized provider prefix
+(`client.go` `SplitN(model, "/", 2)`), so `novita/tencent/hy3` and
+`openrouter/tencent/hy3` share one key `tencent/hy3` and one scorecard. Front
+matter carries:
 
 ```yaml
-model_id: claude-opus-4-8    # exact — never a family
-model_version: "4.8"
-provider: anthropic
+model_id: tencent/hy3        # provider-stripped, exact — never a family
+model_version: "3.0"
+evaluated_via: novita        # host the eval ran through — provenance only, NOT
+                             # part of the key. Exception: a materially different
+                             # quantization on a host is a distinct eval.
 evaluated_on: 2026-07-11
 stack: react
 stack_corpus_rev: 1          # which questions.yaml revision was used
@@ -142,7 +149,8 @@ Standard ocode skill format (`name`, `description`, `when_to_use` front matter),
 plus benchmark metadata:
 
 ```yaml
-tuned_for: claude-opus-4-8   # exact model id(s)
+tuned_for: claude-opus-4-8   # provider-stripped model id (slashes kept; matches
+                             # ocode's runtime `model` var). e.g. tencent/hy3
 tuned_version: "4.8"
 stack: react
 source_scorecard: scores/claude-opus-4-8.md
@@ -157,8 +165,8 @@ tuned exact version)**. Body = corrective guidance for the weak tags only.
 - Embedding: derived skills live under the existing `//go:embed all:skills`
   tree (or a `skills/okf/` subtree), so they ship in the binary with no new
   embed directive.
-- Activation gate = **stack detected in repo** AND **active model id matches
-  `tuned_for`**.
+- Activation gate = **stack detected in repo** AND **active model's canonical
+  (provider-stripped) id matches `tuned_for`**.
 - Stack detection contract (`_schema/stack-detection.md`): marker files/deps per
   stack — React = `package.json` with a `react` dependency; golang = `go.mod`;
   rust = `Cargo.toml`; etc.
@@ -174,7 +182,8 @@ tuned exact version)**. Body = corrective guidance for the weak tags only.
 - **Enforcement approach chosen = skill-catalog filter** (keeps full SKILL.md,
   the user's artifact choice). The skill parser gains `tuned_for`/`stack`
   fields; `skill.BuildCatalog` takes the active model id + detected stacks and
-  admits a Kaizen skill only when `stack ∈ detected` AND `tuned_for == model`.
+  admits a Kaizen skill only when `stack ∈ detected` AND `tuned_for ==
+  provider-stripped(model)`.
   This enforces in code what a bare catalog (advisory `when_to_use`) cannot.
 - **Deferred on purpose:** the hook is NOT built yet, because every derived
   artifact today is an illustrative placeholder. Wiring enforcement before a

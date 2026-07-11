@@ -16,6 +16,14 @@ Models change dramatically between versions. `claude-opus-4-7` and
 derived skill is keyed on the **exact** model id + version — never a family like
 "claude". A version bump invalidates the scorecard; re-benchmark.
 
+**The key is the model, not the provider that serves it.** The same open model
+is often hosted by many providers (`novita/tencent/hy3`, `openrouter/tencent/hy3`,
+…). Kaizen keys on ocode's **provider-stripped** model id — `tencent/hy3` — so
+one eval covers that model on every host. The serving host is recorded in each
+scorecard's `evaluated_via` for provenance only (the one caveat: a host serving a
+materially different *quantization* can behave differently — treat that as a
+separate eval). See `_schema/stack-detection.md` for the exact canonical-id rule.
+
 This is deliberately finer-grained than ocode's existing family-level routing in
 `internal/agent/provider_prompts.go` (which matches `strings.Contains(model,
 "claude")`). Kaizen sits on top of that, targeting the exact version.
@@ -23,7 +31,9 @@ This is deliberately finer-grained than ocode's existing family-level routing in
 ## The workflow
 
 ```
-1. BENCH   Ask a model every question in <stack>/questions.yaml.
+1. BENCH   Ask a model every question — CLOSED-BOOK. The model sees ONLY the
+           answer-free sheet <_prompts/<stack>.md>, never <stack>/questions.yaml
+           (which carries the answer key). See Rule 0 in HOW-TO-EVALUATE.md.
 2. SCORE   Grade each answer against its rubric → fill a scorecard in
            <stack>/scores/<exact-model-id>.md. Compute per-tag subscores.
 3. DERIVE  For tags the model scored LOW on, write a corrective skill in
@@ -68,11 +78,16 @@ differently while coding."
 ```
 docs/okf/
   README.md                 ← you are here
+  HOW-TO-EVALUATE.md        ← runbook; Rule 0 = closed-book answerer/grader split
   _schema/                  ← the format specs + templates (read these first)
     question-format.md
     rubric-guide.md
     scorecard.template.md
     stack-detection.md
+  _prompts/                 ← GENERATED answer-free question sheets (answerer input)
+    <stack>.md              ← id + question only; NEVER shows answers/rubric
+  _tools/
+    gen-prompt-sheets.py    ← regenerates _prompts/ from each questions.yaml
   react/                    ← the fully-built exemplar stack
     meta.yaml               ← stack id + detection markers + version scope
     questions.yaml          ← SOURCE OF TRUTH: structured Q&A + rubric

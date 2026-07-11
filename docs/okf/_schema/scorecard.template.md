@@ -1,12 +1,27 @@
 ---
-model_id: EXACT-MODEL-ID       # e.g. claude-opus-4-8 — NEVER a family ("claude")
+model_id: EXACT-MODEL-ID       # canonical model identity, PROVIDER-STRIPPED.
+                               # = ocode's resolved `model` after it removes a
+                               # recognized provider prefix (see client.go split).
+                               # `novita/tencent/hy3` → `tencent/hy3`.
+                               # `anthropic/claude-opus-4-8` → `claude-opus-4-8`.
+                               # NEVER a family ("claude"); NEVER include provider.
 model_version: "X.Y"           # exact version string
-provider: PROVIDER             # anthropic | openai | google | ...
+evaluated_via: PROVIDER        # host used to RUN the eval — informational, NOT
+                               # part of the key. novita | openrouter | anthropic
+                               # | together | ... An eval done via one host
+                               # applies to the same model on any host. Exception:
+                               # if a host serves a materially different
+                               # quantization (fp8 vs fp16 vs int4), treat that as
+                               # a distinct eval and note it here.
 evaluated_on: YYYY-MM-DD
 stack: STACK                   # e.g. react
 stack_corpus_rev: 1            # meta.yaml corpus_rev the answers were graded against
 threshold: 0.75                # derivation threshold used
 ---
+
+<!-- Filename: model_id with "/" flattened to "__" so it is one valid path
+     segment. `tencent/hy3` → tencent__hy3.md ; `claude-opus-4-8` unchanged. -->
+
 
 # Scorecard — {model_id} on {stack}
 
@@ -41,4 +56,4 @@ stack_score = Σ(normalized×weight) / Σ(weight) = NN%
 ## Derivation targets
 
 Tags below threshold (`< 0.75`): **tagB, tagC** → feed into
-`derived/{stack}.{model_id}.SKILL.md`.
+`derived/{stack}.{model_id-flattened}.SKILL.md` (`/` → `__` in the filename).

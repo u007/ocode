@@ -4,6 +4,10 @@
 
 
 
+
+## 2026-07-11
+
+* **Creation**: Subagent Feedback-Loop Guard (task tool) ([gotchas/subagent-feedback-loop-guard.md](/gotchas/subagent-feedback-loop-guard.md))
 ## 2026-07-09
 
 * **Creation**: Sidebar TUI/Web Parity Gaps ([architecture/sidebar-tui-parity-gaps.md](/architecture/sidebar-tui-parity-gaps.md))
