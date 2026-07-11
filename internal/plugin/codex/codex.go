@@ -52,8 +52,16 @@ func (c *CodexProvider) AdjustModel(m providerplugin.Model) providerplugin.Model
 
 func (c *CodexProvider) RequestHeaders(ctx providerplugin.RequestContext) http.Header {
 	h := http.Header{}
-	h.Set("originator", "opencode")
-	h.Set("User-Agent", "opencode/"+version+" ("+runtime.GOOS+" "+runtime.GOARCH+")")
+	if usesResponsesLite(ctx.Model) {
+		// The codex backend resolves GPT-5.6 models only for requests that
+		// identify as Codex CLI; any other originator/User-Agent gets
+		// 404 "Model not found".
+		h.Set("originator", "codex_cli_rs")
+		h.Set("User-Agent", "codex_cli_rs/1.0.0 ("+runtime.GOOS+" "+runtime.GOARCH+")")
+	} else {
+		h.Set("originator", "opencode")
+		h.Set("User-Agent", "opencode/"+version+" ("+runtime.GOOS+" "+runtime.GOARCH+")")
+	}
 	if ctx.SessionID != "" {
 		h.Set("session-id", ctx.SessionID)
 	}

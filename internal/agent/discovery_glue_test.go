@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -451,5 +452,54 @@ func TestProjectSignals(t *testing.T) {
 	got = projectSignals(dir)
 	if strings.Count(got, "Go golang") != 1 {
 		t.Fatalf("should dedup signals: %q", got)
+	}
+}
+
+// hy3Client reports the novita-hosted tencent/hy3 model so the Kaizen gate
+// (modelMatchesTuned) admits the conduct tuning skill.
+type hy3Client struct{ MockClient }
+
+func (*hy3Client) GetModel() string { return "novita-ai/tencent/hy3" }
+
+// repoRootForTest resolves the repo root from this test file's location so the
+// project-local skills/kaizen tree is on the skill search path.
+func repoRootForTest() string {
+	_, f, _, _ := runtime.Caller(0) // internal/agent/discovery_glue_test.go
+	return filepath.Clean(filepath.Join(filepath.Dir(f), "..", ".."))
+}
+
+// TestKaizenSkillAdvertisedInDiscovery proves the delivery fix: with discovery
+// enabled, the model-gated conduct tuning skill appears (names only) in BOTH the
+// fail-open catalog and the active names-index — never dependent on the embedder.
+func TestKaizenSkillAdvertisedInDiscovery(t *testing.T) {
+	a := newGateAgent()
+	a.client = &hy3Client{}
+	a.workDir = repoRootForTest()
+	a.config = &config.Config{}
+	a.config.Ocode.Discovery.Enabled = true
+
+	base := []Message{{Role: "user", Content: "hi"}}
+
+	// Fail-open (embedder never resolved: a.disco == nil).
+	failOpen := a.injectDiscoveryContext(base)
+	if len(failOpen) != len(base)+1 {
+		t.Fatalf("fail-open must append one catalog message, got %d", len(failOpen))
+	}
+	if !containsSubstr(failOpen[len(failOpen)-1].Content, "conduct-tuning-tencent-hy3") {
+		t.Fatalf("fail-open catalog must advertise the tuning skill:\n%s", failOpen[len(failOpen)-1].Content)
+	}
+
+	// Active discovery: names-index (system message) must list it too.
+	a.disco = &discoveryState{enabled: true,
+		session: discovery.NewSession(discovery.NewEngine(discovery.FakeEmbedder{Dimension: 8}, t.TempDir()))}
+	active := a.injectDiscoveryContext(base)
+	var names string
+	for _, m := range active {
+		if m.Role == "system" {
+			names += m.Content
+		}
+	}
+	if !containsSubstr(names, "conduct-tuning-tencent-hy3") {
+		t.Fatalf("active names-index must list the tuning skill:\n%s", names)
 	}
 }

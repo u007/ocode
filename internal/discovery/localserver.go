@@ -122,6 +122,9 @@ func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDi
 			}
 			emitDiscoveryDebug("DISCOVERY", "adopted user embed server: "+opts.UserBaseURL)
 			localBase, localModelID = opts.UserBaseURL, modelID
+			if setStatus != nil {
+				setStatus("ready")
+			}
 			return localBase, man.Dim, nil
 		}
 		emitDiscoveryDebug("WARN", "user embed server did not respond at "+opts.UserBaseURL+" — falling back to bundled server")
@@ -133,6 +136,9 @@ func EnsureLocalServer(spawn func(cmdline string) error, modelID string, cacheDi
 		}
 		emitDiscoveryDebug("DISCOVERY", "adopted shared embed server: "+base)
 		localBase, localModelID = base, modelID
+		if setStatus != nil {
+			setStatus("ready")
+		}
 		return localBase, man.Dim, nil
 	}
 

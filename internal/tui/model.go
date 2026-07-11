@@ -6528,10 +6528,11 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		prompt := customCmd.Prompt
 		userArgs := strings.Join(args, " ")
 		if userArgs != "" {
-			prompt = strings.ReplaceAll(prompt, "{{args}}", userArgs)
-			prompt = strings.ReplaceAll(prompt, "{args}", userArgs)
-			if !strings.HasSuffix(prompt, "\n") && !strings.HasSuffix(prompt, " ") {
-				prompt += " " + userArgs
+			if strings.Contains(prompt, "{{args}}") || strings.Contains(prompt, "{args}") {
+				prompt = strings.ReplaceAll(prompt, "{{args}}", userArgs)
+				prompt = strings.ReplaceAll(prompt, "{args}", userArgs)
+			} else {
+				prompt += "\n\n<user instruction>\n" + userArgs + "\n</user instruction>"
 			}
 		}
 		if m.agent != nil {
@@ -6575,7 +6576,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 				skillPrompt := fmt.Sprintf("Run the **%s** skill.\n\n%s", matched.Name, matched.Content)
 				if len(args) > 0 {
 					userArgs := strings.Join(args, " ")
-					skillPrompt += "\n\nContext: " + userArgs
+					skillPrompt += "\n\n<user instruction>\n" + userArgs + "\n</user instruction>"
 				}
 				m.rerenderTranscriptAndMaybeScroll()
 				return m, m.sendCustomCommandPrompt(skillPrompt)

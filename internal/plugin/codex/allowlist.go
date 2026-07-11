@@ -7,6 +7,9 @@ import (
 )
 
 var allowedCodexModels = map[string]bool{
+	"gpt-5.6-sol":         true,
+	"gpt-5.6-terra":       true,
+	"gpt-5.6-luna":        true,
 	"gpt-5.5":             true,
 	"gpt-5.4":             true,
 	"gpt-5.4-mini":        true,
@@ -19,6 +22,17 @@ var allowedCodexModels = map[string]bool{
 // Multi-digit minor versions (e.g. "5.40") are rejected to avoid
 // confusion with float comparison ("5.40" == 5.4).
 var versionRE = regexp.MustCompile(`^gpt-(\d+)\.(\d)$`)
+
+// usesResponsesLite reports whether the codex backend serves this model on
+// the "responses lite" path. The GPT-5.6 family (sol/terra/luna) requires it;
+// the backend also gates these models on a codex_cli_rs client identity.
+func usesResponsesLite(modelID string) bool {
+	m := modelID
+	if idx := strings.LastIndex(m, "/"); idx >= 0 {
+		m = m[idx+1:]
+	}
+	return strings.HasPrefix(m, "gpt-5.6")
+}
 
 // isAllowed returns true if the model is in the explicit allowlist or
 // passes the semantic filter (major.minor > 5.4).

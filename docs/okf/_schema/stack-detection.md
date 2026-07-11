@@ -68,4 +68,13 @@ that as a distinct eval.
 > admits a derived skill only when its `stack` is active AND the active model
 > matches its `tuned_for` (case-insensitive exact, or provider-prefixed
 > `.../tuned_for`). The universal `conduct` corpus is admitted on model match
-> alone (no stack marker). See the repo `TODO.md`.
+> alone (no stack marker).
+>
+> **Delivery (both discovery states).** An admitted derived skill is always
+> **advertised by name** (name + description) so the model can see it — never
+> its full body forced into context, and never dependent on the semantic
+> embedder ranking it. With discovery OFF, `LoadContext` → `BuildCatalogForModel`
+> lists it. With discovery ON, `discoveryDocs()` appends `KaizenSkillsForModel`
+> to the always-visible names-index (and the fail-open path uses
+> `BuildCatalogForModel`). The model loads the full `SKILL.md` on demand via the
+> `skill` tool. See the repo `TODO.md`.

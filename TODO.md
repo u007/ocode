@@ -25,8 +25,22 @@ skill). Not yet done:
   (workdir+model) inputs, respecting the prefix-cache contract. Wired into
   `internal/agent/context.go` `LoadContext(...)` (now takes `activeModel, root`,
   threaded from `prompt.go` and `tui/model.go`) → `BuildCatalogForModel`.
-  Scope note: Kaizen skills inject only when discovery is OFF (the discovery
-  path uses its own `LoadSkills()` name-index, which stays Kaizen-free).
+- [x] **Deliver Kaizen skills under discovery (was a no-op).** Verified
+  2026-07-11 by running hy3 headless with the shipped binary, no skill mention:
+  discovery is ENABLED by default, so `LoadContext` skipped `BuildCatalogForModel`
+  and the discovery glue built its catalog from the Kaizen-free
+  `skill.LoadSkills()` (`discovery_glue.go`) with a fail-open to
+  `skill.BuildCatalog()` — both stripped `tuned_for` skills, so
+  `conduct-tuning-tencent-hy3` was never advertised. FIX (delivery = advertise,
+  not force-load, per user): new `skill.KaizenSkillsForModel(root, activeModel)`
+  returns ONLY the admitted tuned skills; `discoveryDocs()` appends them to the
+  corpus so they ALWAYS sit in the always-visible names-index (never dependent on
+  the embedder's rank), and the fail-open path now calls `BuildCatalogForModel`.
+  The full SKILL.md body still loads on demand via the `skill` tool — the LLM
+  decides. Guarded by `TestKaizenSkillAdvertisedInDiscovery` (fail-open + active
+  paths both list it) and `internal/skill.TestKaizenDelivery_hy3_conduct`
+  (admit/exclude/wrong-model). Note: discovery is NOT required — with discovery
+  off, `LoadContext`'s `BuildCatalogForModel` already advertised it.
 - [x] **Embed home for derived skills** = `skills/kaizen/<name>/SKILL.md` inside
   the existing `//go:embed all:skills` tree. `docs/okf/_tools/sync-derived-skills.py`
   copies every `docs/okf/*/derived/*.SKILL.md` there (dir = frontmatter `name`),

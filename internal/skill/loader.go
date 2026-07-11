@@ -155,6 +155,27 @@ func LoadSkillsForModel(root, activeModel string) []Skill {
 	return out
 }
 
+// KaizenSkillsForModel returns ONLY the Kaizen (per-model tuned) skills admitted
+// for the active model + detected stack — normal skills are excluded (use
+// LoadSkills for those). The discovery corpus calls this so a gated tuning skill
+// is ALWAYS listed in the always-visible names-index regardless of embedding
+// rank; its full SKILL.md body still loads on demand via the skill tool.
+func KaizenSkillsForModel(root, activeModel string) []Skill {
+	all := LoadSkillsForRoot(root)
+	detected := stackdetect.Detect(root)
+
+	out := make([]Skill, 0, 2)
+	for _, s := range all {
+		if s.TunedFor == "" {
+			continue
+		}
+		if kaizenAdmitted(s, activeModel, detected) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // excludeKaizen returns the subset of skills that are NOT Kaizen skills
 // (empty TunedFor). It never mutates the input slice.
 func excludeKaizen(in []Skill) []Skill {

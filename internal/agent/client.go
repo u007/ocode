@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2166,14 +2168,25 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		}
 	}
 
+	model := normalizeOpenAICodexModel(c.Model)
+	liteMode := c.UseOAuth && c.Provider == "openai" && openAICodexResponsesLite(model)
+
 	payload := map[string]interface{}{
-		"model":        normalizeOpenAICodexModel(c.Model),
+		"model":        model,
 		"instructions": strings.Join(instructions, "\n\n"),
 		"input":        input,
 		"store":        false,
 		"stream":       true,
 		"include":      []string{"reasoning.encrypted_content"},
 		"text":         map[string]interface{}{"verbosity": "medium"},
+	}
+	// The codex backend keys its prompt cache on this; mirror Codex CLI which
+	// sends its thread id. Session id when available, else a process-stable
+	// key so consecutive turns in one run still hit the cache.
+	if c.UseOAuth && c.Provider == "openai" {
+		if key := codexPromptCacheKey(); key != "" {
+			payload["prompt_cache_key"] = key
+		}
 	}
 	c.applyGenerationParams(ctx, payload)
 	if c.ThinkingBudget > 0 {
@@ -2182,23 +2195,56 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 			"summary": "auto",
 		}
 	}
+	if liteMode {
+		// The lite header makes reasoning.context=all_turns mandatory,
+		// with or without a reasoning effort.
+		reasoning, ok := payload["reasoning"].(map[string]interface{})
+		if !ok {
+			reasoning = map[string]interface{}{}
+			payload["reasoning"] = reasoning
+		}
+		reasoning["context"] = "all_turns"
+	}
 
-	if len(tools) > 0 {
-		respTools := make([]map[string]interface{}, 0, len(tools))
-		for _, t := range tools {
-			fn := t
-			if t["type"] == "function" {
-				if f, ok := t["function"].(map[string]interface{}); ok {
-					fn = f
-				}
+	respTools := make([]map[string]interface{}, 0, len(tools))
+	for _, t := range tools {
+		fn := t
+		if t["type"] == "function" {
+			if f, ok := t["function"].(map[string]interface{}); ok {
+				fn = f
 			}
-			respTools = append(respTools, map[string]interface{}{
-				"type":        "function",
-				"name":        fn["name"],
-				"description": fn["description"],
-				"parameters":  fn["parameters"],
+		}
+		respTools = append(respTools, map[string]interface{}{
+			"type":        "function",
+			"name":        fn["name"],
+			"description": fn["description"],
+			"parameters":  fn["parameters"],
+		})
+	}
+	if liteMode {
+		// Responses-lite models (GPT-5.6 family) take tools and system
+		// instructions as developer items at the head of input, with the
+		// top-level instructions/tools fields empty. Mirrors Codex CLI's
+		// build_responses_request, which sends additional_tools even when
+		// the tool list is empty.
+		prefix := []map[string]interface{}{{
+			"type":  "additional_tools",
+			"role":  "developer",
+			"tools": respTools,
+		}}
+		if instr, _ := payload["instructions"].(string); instr != "" {
+			prefix = append(prefix, map[string]interface{}{
+				"type": "message",
+				"role": "developer",
+				"content": []map[string]interface{}{
+					{"type": "input_text", "text": instr},
+				},
 			})
 		}
+		payload["input"] = append(prefix, input...)
+		payload["instructions"] = ""
+		payload["parallel_tool_calls"] = false
+	} else if len(respTools) > 0 {
 		payload["tools"] = respTools
 	}
 
@@ -2227,6 +2273,11 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	if accountID != "" {
 		req.Header.Set("ChatGPT-Account-ID", accountID)
+	}
+	if liteMode {
+		// Required for GPT-5.6 models; without it the codex backend
+		// reports "Model not found".
+		req.Header.Set("x-openai-internal-codex-responses-lite", "true")
 	}
 	// Plugin headers
 	if plugin, ok := providerplugin.Get("openai"); ok && c.UseOAuth {
@@ -2476,6 +2527,29 @@ func normalizeOpenAICodexModel(model string) string {
 		}
 	}
 	return model
+}
+
+// codexPromptCacheKey returns the key the codex backend uses to scope its
+// prompt cache. Prefers the session id env (set by external drivers), else a
+// process-stable random key generated once at first use.
+var codexPromptCacheKey = sync.OnceValue(func() string {
+	if sid := os.Getenv("OPENCODE_SESSION_ID"); sid != "" {
+		return sid
+	}
+	buf := make([]byte, 16)
+	if _, err := cryptorand.Read(buf); err != nil {
+		// intentionally not logged: crypto/rand failure is unrecoverable
+		// noise here; an empty key just disables prompt caching.
+		return ""
+	}
+	return hex.EncodeToString(buf)
+})
+
+// openAICodexResponsesLite reports whether the ChatGPT Codex backend serves
+// this model on the "responses lite" path. Per Codex CLI's models.json, the
+// GPT-5.6 family (sol/terra/luna) sets use_responses_lite; older models do not.
+func openAICodexResponsesLite(model string) bool {
+	return strings.HasPrefix(model, "gpt-5.6")
 }
 
 func openAIResponseText(response map[string]interface{}) string {

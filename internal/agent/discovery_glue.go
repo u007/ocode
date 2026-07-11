@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/u007/ocode/internal/config"
@@ -32,7 +33,14 @@ type discoveryState struct {
 	session    *discovery.Session
 	initErr    string // last resolve error (fail-open reason)
 	lastPinned map[string]struct{}
+	warming    atomic.Bool // a background corpus warm is in flight (single-flight)
 }
+
+// discoveryWarmTimeout bounds a background corpus warm. Generous because a local
+// embedder (MLX/llama.cpp) needs seconds to embed the cold corpus + load its
+// model into RAM — far more than the per-turn synchronous budget. Once this
+// completes the cache is hot and per-turn warms early-return in microseconds.
+const discoveryWarmTimeout = 20 * time.Second
 
 // ensureDiscovery lazily builds discovery state on first use (by Step time, MCP
 // tools are loaded). On any resolve error it FAILS OPEN: leaves disco disabled
@@ -215,19 +223,49 @@ func discoveryCacheDir() string {
 	return base + "/discovery"
 }
 
+// discoveryModelRoot returns the active model id and project root used to gate
+// Kaizen (per-model tuned) skills. Mirrors the resolution in prompt.go so the
+// discovery corpus admits the same tuned skills LoadContext would.
+func (a *Agent) discoveryModelRoot() (activeModel, root string) {
+	if a.client != nil {
+		activeModel = a.client.GetModel()
+	}
+	root = a.workDir
+	if root == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			root = cwd
+		}
+	}
+	return activeModel, root
+}
+
+// skillDoc builds the discovery corpus Doc for a skill (Name + Description +
+// WhenToUse). Shared by the normal and Kaizen skill passes so both index lines
+// render identically.
+func skillDoc(s skill.Skill) discovery.Doc {
+	text := s.Name
+	if s.Description != "" {
+		text += ": " + s.Description
+	}
+	if s.WhenToUse != "" {
+		text += " When to use: " + s.WhenToUse
+	}
+	return discovery.Doc{ID: "skill:" + s.Name, Kind: "skill", Name: s.Name, Text: text, Source: s.Source}
+}
+
 // discoveryDocs gathers the corpus: one Doc per skill (Name + Description +
-// WhenToUse) and one Doc per MCP tool (name + description).
+// WhenToUse) and one Doc per MCP tool (name + description). Kaizen (per-model
+// tuned) skills admitted for the active model+stack are appended so they always
+// appear in the names-index (never dependent on embedding rank); the model still
+// loads their full body on demand via the skill tool.
 func (a *Agent) discoveryDocs() []discovery.Doc {
 	var docs []discovery.Doc
 	for _, s := range skill.LoadSkills() {
-		text := s.Name
-		if s.Description != "" {
-			text += ": " + s.Description
-		}
-		if s.WhenToUse != "" {
-			text += " When to use: " + s.WhenToUse
-		}
-		docs = append(docs, discovery.Doc{ID: "skill:" + s.Name, Kind: "skill", Name: s.Name, Text: text, Source: s.Source})
+		docs = append(docs, skillDoc(s))
+	}
+	activeModel, root := a.discoveryModelRoot()
+	for _, s := range skill.KaizenSkillsForModel(root, activeModel) {
+		docs = append(docs, skillDoc(s))
 	}
 	for name := range a.mcpTools {
 		t, ok := a.tools[name]
@@ -263,21 +301,26 @@ func (a *Agent) RunDiscovery(query string) {
 	if len(docs) == 0 {
 		return
 	}
-	// Warm the corpus synchronously so skills are ranked and attached on the
-	// very first turn. Subsequent calls are no-ops (Warm is idempotent for
-	// the same doc-set via the docSetHash check).
+	// Warm the corpus before ranking. On a hot cache (unchanged doc-set) Warm is
+	// a microsecond hash-check + early-return, so we try it synchronously under a
+	// tight budget to attach skills on the same turn. On a COLD cache a local
+	// embedder needs seconds — far more than any per-turn budget — so we defer to
+	// a background warm (generous deadline) that actually completes and persists
+	// the cache. This turn stays fail-open (corpus nil → everything attached);
+	// once the background warm lands, every later turn hits the fast path.
 	//
-	// Tradeoff: synchronous warming blocks Step() on the embedding call.
-	// On a warm cache this is a cheap hash-check + early-return (microseconds).
-	// On a cold cache it can cost one embedding network round-trip per cache
-	// miss. To bound the first-turn latency hit we apply a 500ms deadline:
-	// if the warm doesn't finish in time we fall through and discoveryAllows
-	// returns true for everything (corpus still nil → Ready() == false),
-	// giving the user immediate response while the next turn retries warm.
+	// The all-or-nothing cache (BuildCorpusCached persists only on full success)
+	// is why a too-tight synchronous budget could never make progress on a local
+	// embedder — the background warm breaks that deadlock.
+	if a.disco.warming.Load() {
+		return // a background warm is in flight; stay fail-open until it lands
+	}
 	warmCtx, warmCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer warmCancel()
-	if err := a.disco.engine.Warm(warmCtx, docs); err != nil {
-		emitDebug("DISCOVERY", fmt.Sprintf("corpus warm skipped this turn: %v", err))
+	err := a.disco.engine.Warm(warmCtx, docs)
+	warmCancel()
+	if err != nil {
+		a.startBackgroundWarm(docs)
+		emitDebug("DISCOVERY", fmt.Sprintf("corpus warm deferred to background: %v", err))
 		return
 	}
 	added, err := a.disco.session.Discover(context.Background(), query)
@@ -295,6 +338,28 @@ func (a *Agent) RunDiscovery(query string) {
 	}
 	emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total (q=%.60q)",
 		len(added), len(a.disco.session.Attached()), query))
+}
+
+// startBackgroundWarm warms the corpus off the turn's critical path with a
+// generous deadline, so a slow local embedder can finish embedding + persist the
+// cache without blocking the response. Single-flight via disco.warming: repeated
+// per-turn calls while a warm is running are no-ops. Once it completes the cache
+// is hot and the synchronous per-turn warm early-returns.
+func (a *Agent) startBackgroundWarm(docs []discovery.Doc) {
+	d := a.disco
+	if d == nil || !d.warming.CompareAndSwap(false, true) {
+		return // already warming
+	}
+	go func() {
+		defer d.warming.Store(false)
+		ctx, cancel := context.WithTimeout(context.Background(), discoveryWarmTimeout)
+		defer cancel()
+		if err := d.engine.Warm(ctx, docs); err != nil {
+			emitDebug("DISCOVERY", fmt.Sprintf("background corpus warm failed: %v", err))
+			return
+		}
+		emitDebug("DISCOVERY", "background corpus warm complete (cache hot; ranking resumes next turn)")
+	}()
 }
 
 type DiscoveryStatusInfo struct {
@@ -534,8 +599,11 @@ func (a *Agent) injectDiscoveryContext(messages []Message) []Message {
 	if !active {
 		// Fail-open: LoadContext suppressed the catalog (config flag on), but
 		// discovery isn't actually running — re-emit the full skill catalog so
-		// skills are never lost. MCP tools are all attached (gate off).
-		if cat := skill.BuildCatalog(); cat != "" {
+		// skills are never lost. MCP tools are all attached (gate off). Uses the
+		// model-aware catalog so the gated Kaizen tuning skill is still advertised
+		// (names only) even on the fail-open path.
+		activeModel, root := a.discoveryModelRoot()
+		if cat := skill.BuildCatalogForModel(root, activeModel); cat != "" {
 			return append(messages, Message{Role: "system", Content: promptDiscoveryMarker + "\n" + cat})
 		}
 		return messages
