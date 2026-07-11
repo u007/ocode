@@ -1,0 +1,25 @@
+stack: php
+title: PHP (8.2+ / Composer)
+corpus_rev: 1
+# Version scope this corpus grades against. Answers assume modern PHP 8.2+.
+# Newer-version features (8.3 typed class constants & #[\Override], 8.4 property
+# hooks & asymmetric visibility) are called out inline in the affected answers so
+# a grader can tell a correct answer from a stale one.
+version_scope: ">=8.2 <9"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - types           # union/intersection/nullable/never/mixed, strict_types, == vs ===, typed class constants (8.3)
+  - enums           # pure vs backed (8.1), methods/constants, interfaces, cases()/from()/tryFrom()
+  - oop             # promotion (8.0), readonly (8.1/8.2), hooks & asymmetric visibility (8.4), static/self/$this, #[\Override] (8.3)
+  - closures        # closures vs arrow fns, first-class callable (8.1), Closure::bind/bindTo/$this
+  - error-handling  # Throwable (Error vs Exception), try/catch/finally, chaining, set_error_handler
+  - arrays          # list vs assoc, spread/unpacking (8.1), destructuring, copy-on-write vs &, key coercion
+  - null-safety     # ?? vs ?:, nullsafe ?->, ??=, isset/empty/null
+  - match-control   # match vs switch (strict ===, no fallthrough, expression, UnhandledMatchError)
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "composer.json" }
+    - { type: content, glob: "**/*.php", pattern: "<\\?php" }

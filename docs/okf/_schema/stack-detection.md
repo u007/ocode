@@ -63,6 +63,9 @@ scorecard's `evaluated_via` for provenance only — with one exception: a host
 serving a materially different **quantization** can shift behavior, so treat
 that as a distinct eval.
 
-> **Status:** the runtime that reads these markers and injects the matching
-> skill is **not yet wired** into the agent. This file is the contract for that
-> follow-up work; see the repo `TODO.md`. Until then, detection is manual.
+> **Status:** WIRED. `internal/skill` (`LoadSkillsForModel` /
+> `BuildCatalogForModel`) reads these markers via `stackdetect.Detect(root)` and
+> admits a derived skill only when its `stack` is active AND the active model
+> matches its `tuned_for` (case-insensitive exact, or provider-prefixed
+> `.../tuned_for`). The universal `conduct` corpus is admitted on model match
+> alone (no stack marker). See the repo `TODO.md`.

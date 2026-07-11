@@ -1,0 +1,629 @@
+# Ruby benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1). LANGUAGE corpus (not Rails — see `ror`).
+# Version scope: Ruby >=3.2 <3.5; version-gated behavior (keyword/positional
+# separation in 3.0, Data.define in 3.2) is stated inline in the affected answers.
+
+- id: ruby-blocks-procvslambda-01
+  difficulty: medium
+  weight: 3
+  tags: [blocks-procs]
+  question: >
+    What are the two main behavioral differences between a Proc and a lambda in
+    Ruby?
+  answer: >
+    (1) `return` semantics: a `return` inside a lambda returns only from the
+    lambda (like a method); a `return` inside a non-lambda Proc returns from the
+    enclosing method, which can surprise you if the Proc outlives its defining
+    method. (2) Arity strictness: a lambda checks argument count like a method
+    and raises `ArgumentError` on a mismatch; a Proc is lenient — it fills
+    missing params with `nil` and silently discards extras. `lambda?` and the
+    behavior of `break`/`next` also differ, but return and arity are the core.
+  rubric:
+    - { point: "lambda return exits the lambda; proc return exits the enclosing method", score: 1 }
+    - { point: "lambda is strict on arity (ArgumentError); proc is lenient (nil-fills / discards extra)", score: 1 }
+    - { partial: "says 'they're basically the same / both callable' with no return-or-arity difference", score: 0.5 }
+
+- id: ruby-blocks-yield-02
+  difficulty: easy
+  weight: 2
+  tags: [blocks-procs]
+  question: >
+    How does `yield` work, and what does `block_given?` protect against?
+  answer: >
+    Every method can be passed an implicit block; `yield` invokes that block,
+    passing any arguments to it and returning its value. If a method calls
+    `yield` when no block was passed, Ruby raises `LocalJumpError`. `block_given?`
+    tests whether a block was supplied so you can branch (e.g. return an
+    Enumerator, or use a default) instead of blindly yielding.
+  rubric:
+    - { point: "yield invokes the implicitly-passed block (passing args / returning its value)", score: 1 }
+    - { point: "block_given? checks a block was passed; calling yield without one raises LocalJumpError", score: 1 }
+    - { partial: "explains yield but not what block_given? guards against", score: 0.5 }
+
+- id: ruby-blocks-ampblock-03
+  difficulty: medium
+  weight: 2
+  tags: [blocks-procs]
+  question: >
+    What does the `&` do in `def m(&block)` and in a call like `arr.map(&:to_s)`?
+  answer: >
+    `&` bridges blocks and Proc objects. In a parameter list `&block` captures
+    the passed-in block as an explicit `Proc` object you can store, pass on, or
+    call with `block.call`. At a call site `&obj` converts `obj` into the block:
+    if `obj` isn't already a Proc, Ruby calls `to_proc` on it — that is why
+    `map(&:to_s)` works, `Symbol#to_proc` turns `:to_s` into `{ |x| x.to_s }`.
+  rubric:
+    - { point: "&block in params captures the block as an explicit Proc object", score: 1 }
+    - { point: "&obj at a call site converts obj to a block via to_proc (Symbol#to_proc for &:sym)", score: 1 }
+    - { partial: "'passes the block' without the to_proc / Symbol#to_proc mechanism", score: 0.5 }
+
+- id: ruby-blocks-create-04
+  difficulty: easy
+  weight: 1
+  tags: [blocks-procs]
+  question: >
+    Show the ways to create a lambda and to invoke a Proc/lambda.
+  answer: >
+    Create a lambda with the arrow literal `add = ->(a, b) { a + b }` or with
+    `lambda { |a, b| a + b }`; create a plain Proc with `proc { ... }` or
+    `Proc.new { ... }`. Invoke any of them with `.call(args)`, the shorthand
+    `.(args)`, or the index form `[args]` (`.yield` also works on any Proc).
+    `->` always produces a lambda (strict arity/return), `proc`/`Proc.new` a
+    non-lambda.
+  rubric:
+    - { point: "lambda via ->(...){ } or lambda { }; proc via proc { } / Proc.new { }", score: 1 }
+    - { point: "invoke with .call / .() / [] (-> is a lambda, proc is not)", score: 1 }
+    - { partial: "only one creation or one invocation form", score: 0.5 }
+
+- id: ruby-modules-includeextendprepend-01
+  difficulty: hard
+  weight: 3
+  tags: [modules-mixins]
+  question: >
+    Contrast `include`, `extend`, and `prepend` for mixing a module into a class,
+    in terms of where the methods land and the ancestor chain.
+  answer: >
+    `include M` adds M's methods as instance methods, inserting M into the
+    ancestor chain right after the class in lookup order (so the class's own
+    methods are found first and win over M's). `prepend M` also adds instance
+    methods but inserts M before the class in lookup order, so M's methods are
+    found first and override the class's, and M can call `super` to reach them
+    (the basis of method wrapping / around-decoration). `extend M` adds M's
+    methods as singleton (class-level or per-object) methods rather than instance
+    methods — `obj.extend(M)` puts them on that object's singleton class.
+  rubric:
+    - { point: "include: instance methods, module sits above the class (class overrides module)", score: 1 }
+    - { point: "prepend: instance methods but below the class — module overrides and can super into it", score: 1 }
+    - { point: "extend: adds methods to the singleton class (class/object level), not instance methods", score: 1 }
+    - { partial: "include vs extend right but prepend missing or same as include", score: 0.5 }
+
+- id: ruby-modules-ancestors-super-02
+  difficulty: medium
+  weight: 2
+  tags: [modules-mixins]
+  question: >
+    How does `super` decide which method to call, and how do included modules fit
+    into method lookup?
+  answer: >
+    Ruby resolves a method by walking the ancestor chain (`SomeClass.ancestors`):
+    singleton class, prepended modules, the class itself, included modules (last
+    `include` wins, nearest first), then the superclass and its modules, up to
+    `Object`/`BasicObject`. `super` re-dispatches the same method name to the next
+    entry after the current one in that chain — so `super` from a class method can
+    land in an included module, and `super` from a module can land in the
+    superclass. Bare `super` forwards the current arguments; `super()` passes none.
+  rubric:
+    - { point: "method lookup walks the ordered ancestor chain (prepend, self, include, superclass)", score: 1 }
+    - { point: "super calls the same method name in the NEXT ancestor (can be a module, not just superclass)", score: 1 }
+    - { partial: "'super calls the parent class' with no ancestor-chain / module insight", score: 0.5 }
+
+- id: ruby-modules-namespace-03
+  difficulty: easy
+  weight: 1
+  tags: [modules-mixins]
+  question: >
+    Besides mixins, what is the other primary use of a `module`, and how do you
+    define a callable module function?
+  answer: >
+    A module is also a namespace: it groups related constants, classes, and
+    methods under a name to avoid collisions, referenced with `::` (e.g.
+    `MyLib::Client`, `MyLib::VERSION`). For utility methods you call on the module
+    itself, define them as `module_function` methods or `def self.method` — e.g.
+    `Math.sqrt`. Modules can't be instantiated and have no superclass, which is
+    why they're used for namespacing and mixins rather than as object templates.
+  rubric:
+    - { point: "module as a namespace grouping constants/classes/methods, referenced with ::", score: 1 }
+    - { point: "module-level callable via module_function / def self.x (module can't be instantiated)", score: 1 }
+    - { partial: "'modules group code' with no namespace-vs-mixin or module_function detail", score: 0.5 }
+
+- id: ruby-modules-refinements-04
+  difficulty: hard
+  weight: 1
+  tags: [modules-mixins]
+  question: >
+    What problem do refinements solve compared with reopening a class
+    ("monkey-patching"), and how are they activated?
+  answer: >
+    Monkey-patching a core class (reopening `String`, `Integer`, …) changes it
+    globally for the whole process, which can silently break unrelated code.
+    Refinements scope such changes: you put the modifications inside
+    `refine SomeClass do ... end` in a module, and they take effect only where you
+    write `using ThatModule` — lexically, in that file/module from that point on.
+    Outside the `using` scope the class is unchanged, so the patch can't leak into
+    the rest of the program.
+  rubric:
+    - { point: "monkey-patching changes a class globally (can break unrelated code)", score: 1 }
+    - { point: "refine + using scopes the change lexically to where using appears", score: 1 }
+    - { partial: "'refinements are scoped monkey-patches' without refine/using mechanics", score: 0.5 }
+
+- id: ruby-objects-methodmissing-01
+  difficulty: hard
+  weight: 3
+  tags: [objects-methods]
+  question: >
+    How does `method_missing` work, and why must you also define
+    `respond_to_missing?` when you use it?
+  answer: >
+    When a method call finds no matching method anywhere in the ancestor chain,
+    Ruby calls `method_missing(name, *args, &block)` on the receiver, letting you
+    handle the call dynamically (delegation, dynamic finders, proxies); you should
+    `super` for names you don't handle so real NoMethodErrors still surface. But
+    `respond_to?` and `method(...)` don't know about those dynamic names, so you
+    must also override `respond_to_missing?(name, include_private)` to return true
+    for them — otherwise the object lies about what it responds to, and things
+    like `respond_to?` checks and `&method(:x)` break.
+  rubric:
+    - { point: "method_missing is called when no method matches; handle dynamically and super for the rest", score: 1 }
+    - { point: "respond_to_missing? keeps respond_to?/method() honest for the dynamic names", score: 1 }
+    - { partial: "explains method_missing but omits respond_to_missing? / the super fallthrough", score: 0.5 }
+
+- id: ruby-objects-send-02
+  difficulty: medium
+  weight: 2
+  tags: [objects-methods]
+  question: >
+    What do `send` and `public_send` do, and when do they differ?
+  answer: >
+    Both invoke a method by name given as a symbol/string, with arguments —
+    `obj.send(:meth, arg)` — which is how you call a method chosen at runtime.
+    They differ on visibility: `send` can call private and protected methods
+    (bypassing visibility), while `public_send` respects visibility and raises
+    `NoMethodError` for a non-public method. Prefer `public_send` when the method
+    name comes from outside/untrusted input so you don't expose internals.
+  rubric:
+    - { point: "both call a method by dynamic name (symbol/string) with args", score: 1 }
+    - { point: "send bypasses private/protected; public_send enforces visibility", score: 1 }
+    - { partial: "knows send calls by name but not the visibility difference", score: 0.5 }
+
+- id: ruby-objects-attr-03
+  difficulty: easy
+  weight: 2
+  tags: [objects-methods]
+  question: >
+    What do `attr_reader`, `attr_writer`, and `attr_accessor` generate, and what
+    is `define_method` for?
+  answer: >
+    They are metaprogramming helpers that generate instance-variable accessor
+    methods: `attr_reader :x` defines `x` (getter), `attr_writer :x` defines `x=`
+    (setter), `attr_accessor :x` defines both, all backed by `@x`. `define_method`
+    is the general form — it defines a method from a block at runtime, capturing
+    surrounding scope, so you can generate methods programmatically (e.g. a loop
+    over field names) instead of writing each `def`.
+  rubric:
+    - { point: "attr_reader=getter, attr_writer=setter (x=), attr_accessor=both, over @ivar", score: 1 }
+    - { point: "define_method defines a method dynamically from a block at runtime", score: 1 }
+    - { partial: "gets the attr_* trio but not define_method (or vice versa)", score: 0.5 }
+
+- id: ruby-objects-visibility-04
+  difficulty: medium
+  weight: 1
+  tags: [objects-methods]
+  question: >
+    What is the difference between `private` and `protected` methods in Ruby, and
+    what does that mean for calling them with an explicit receiver?
+  answer: >
+    A private method cannot be called with an explicit receiver (historically not
+    even `self.`, though `self.foo=` setters have always been allowed) — you call
+    it bare, `foo`. A protected method may be called with an explicit receiver,
+    but only from within a method of the same class or a subclass — typically to
+    compare two instances (`self.value <=> other.value`). Public is the default.
+    Visibility is enforced at call time based on the caller's context, not baked
+    into the object.
+  rubric:
+    - { point: "private: no explicit receiver (call bare); public is default", score: 1 }
+    - { point: "protected: explicit receiver allowed, but only from same class/subclass (e.g. comparing instances)", score: 1 }
+    - { partial: "'private = internal' with no explicit-receiver / protected distinction", score: 0.5 }
+
+- id: ruby-enumerable-include-01
+  difficulty: medium
+  weight: 3
+  tags: [enumerable]
+  question: >
+    What do you have to implement to make your own class `include Enumerable`, and
+    what do you get for it?
+  answer: >
+    You define an `each` method that yields each element; `include Enumerable`
+    then builds all the collection methods — `map`, `select`, `reduce`, `to_a`,
+    `sort`, `min`/`max`, `include?`, `find`, etc. — on top of your `each`.
+    (`sort`/`min`/`max` also need the elements to be comparable via `<=>`.) So one
+    `each` gives you the whole Enumerable API for free.
+  rubric:
+    - { point: "define each (that yields elements) and include Enumerable", score: 1 }
+    - { point: "you then get map/select/reduce/sort/etc. built on that each", score: 1 }
+    - { partial: "'include Enumerable' without naming the required each method", score: 0.5 }
+
+- id: ruby-enumerable-reduce-02
+  difficulty: medium
+  weight: 2
+  tags: [enumerable]
+  question: >
+    Explain `reduce`/`inject` and when `each_with_object` is a better fit.
+  answer: >
+    `reduce(init) { |acc, x| ... }` folds a collection into a single value: the
+    block's return value becomes the next `acc`, so you must return the
+    accumulator each iteration (`[1,2,3].reduce(0) { |s, x| s + x }`). It has the
+    symbol shorthand `reduce(:+)`. `each_with_object(obj) { |x, memo| ... }` is
+    better when you're building up a mutable object (a Hash or Array): `memo` is a
+    fixed object you mutate, and the block's return value is ignored — so you can't
+    accidentally break the fold by forgetting to return the accumulator.
+  rubric:
+    - { point: "reduce folds to one value; block return becomes the next accumulator (must return acc)", score: 1 }
+    - { point: "each_with_object passes a fixed mutable object you mutate; block return is ignored", score: 1 }
+    - { partial: "describes reduce but not the each_with_object 'return-is-ignored' advantage", score: 0.5 }
+
+- id: ruby-enumerable-lazy-03
+  difficulty: medium
+  weight: 2
+  tags: [enumerable]
+  question: >
+    What does `.lazy` do to an Enumerable chain, and why does it matter for large
+    or infinite sequences?
+  answer: >
+    Normally each Enumerable method builds a full intermediate array before the
+    next runs, so a chain makes several passes and materializes everything.
+    `.lazy` returns a lazy enumerator that pulls elements through the whole chain
+    one at a time on demand, computing nothing until a terminal call like `first`
+    or `to_a`. That lets you work with huge or infinite sequences —
+    `(1..Float::INFINITY).lazy.select(&:even?).first(5)` — and stop early without
+    building an intermediate collection.
+  rubric:
+    - { point: "eager chains build intermediate arrays each step; lazy pulls one element through the whole chain on demand", score: 1 }
+    - { point: "enables infinite/huge sequences and early termination (nothing computed until a terminal call)", score: 1 }
+    - { partial: "'lazy is more efficient' with no on-demand / infinite-sequence detail", score: 0.5 }
+
+- id: ruby-enumerable-comparable-04
+  difficulty: medium
+  weight: 2
+  tags: [enumerable]
+  question: >
+    How do you make instances of your class sortable and comparable with `<`,
+    `>`, `clamp`, etc.?
+  answer: >
+    Define the spaceship operator `<=>` to return -1, 0, or 1 (or nil if not
+    comparable), then `include Comparable`. Comparable builds `<`, `<=`, `==`,
+    `>`, `>=`, `between?`, and `clamp` on top of your `<=>`. Sorting with `sort`
+    (and `min`/`max`) also relies on `<=>`, so defining it makes your objects
+    sortable too.
+  rubric:
+    - { point: "define <=> returning -1/0/1 (nil if incomparable)", score: 1 }
+    - { point: "include Comparable to get </<=/>/>=/between?/clamp (and sort uses <=>)", score: 1 }
+    - { partial: "mentions <=> OR Comparable but not both together", score: 0.5 }
+
+- id: ruby-metaprogramming-singleton-01
+  difficulty: hard
+  weight: 2
+  tags: [metaprogramming]
+  question: >
+    What is a singleton class (eigenclass), and what does `class << self` inside a
+    class body do?
+  answer: >
+    Every object has a hidden per-object singleton class that holds methods
+    defined on just that object. `class << self` opens the singleton class of the
+    current `self`; written inside a class body, `self` is the class object, so it
+    opens the class's singleton class — methods defined there become class
+    methods. `def self.foo` and defining `foo` inside `class << self` are two ways
+    to write the same class method; the `class << self` block is handy for
+    grouping several class methods or applying `private`/`attr_accessor` to them.
+  rubric:
+    - { point: "singleton/eigenclass holds methods for a single object", score: 1 }
+    - { point: "class << self opens self's singleton class; in a class body that defines class methods", score: 1 }
+    - { partial: "'it defines class methods' without the singleton-class explanation", score: 0.5 }
+
+- id: ruby-metaprogramming-ivar-02
+  difficulty: medium
+  weight: 1
+  tags: [metaprogramming]
+  question: >
+    What do `instance_variable_get` and `instance_variable_set` do, and when are
+    they appropriate?
+  answer: >
+    They read and write an instance variable by name at runtime:
+    `obj.instance_variable_get(:@x)` and `obj.instance_variable_set(:@x, 42)`,
+    with the `@` included in the symbol. They bypass any accessor methods and
+    reach the ivar directly, so they're useful for serialization, test setup,
+    generic introspection, or building generic tooling — but reaching into another
+    object's ivars breaks encapsulation, so prefer accessors in normal code.
+  rubric:
+    - { point: "get/set an instance variable by symbol name at runtime (@ in the name)", score: 1 }
+    - { point: "bypasses accessors / used for introspection-serialization but breaks encapsulation", score: 1 }
+    - { partial: "knows they access ivars but not the by-name-at-runtime / encapsulation point", score: 0.5 }
+
+- id: ruby-metaprogramming-definemethod-vs-mm-03
+  difficulty: hard
+  weight: 2
+  tags: [metaprogramming]
+  question: >
+    When defining methods dynamically, what is the trade-off between
+    `define_method` and `method_missing`?
+  answer: >
+    `define_method` creates real, named methods up front, so they're fast on each
+    call, show up in `respond_to?`/`methods`, and are introspectable — best when
+    you know the set of names in advance (e.g. generating accessors from a list).
+    `method_missing` intercepts calls lazily at invocation time, so it handles an
+    open-ended or unpredictable name space, but each call pays the failed-lookup +
+    dispatch cost, the methods are invisible to introspection unless you also add
+    `respond_to_missing?`, and errors are harder to trace. Rule of thumb: prefer
+    `define_method` when the names are known; fall back to `method_missing` only
+    for truly dynamic names.
+  rubric:
+    - { point: "define_method makes real methods up front: faster, introspectable, needs names known in advance", score: 1 }
+    - { point: "method_missing handles open-ended names lazily but is slower, invisible to introspection, needs respond_to_missing?", score: 1 }
+    - { partial: "describes one of the two but draws no trade-off between them", score: 0.5 }
+
+- id: ruby-metaprogramming-classnew-04
+  difficulty: medium
+  weight: 1
+  tags: [metaprogramming]
+  question: >
+    What does `Class.new` do, and how does assigning it to a constant matter?
+  answer: >
+    `Class.new(superclass) { ... }` creates an anonymous class at runtime; the
+    block is the class body, so you can build classes programmatically. The class
+    stays anonymous until it is first assigned to a constant — at that point Ruby
+    gives it that name (so `Foo = Class.new` makes its `name` return `"Foo"`).
+    This is how you generate classes dynamically (e.g. factories, DSLs). The
+    analogous `Module.new` does the same for modules.
+  rubric:
+    - { point: "Class.new creates an anonymous class at runtime; the block is its body (optional superclass arg)", score: 1 }
+    - { point: "it gets its name when first assigned to a constant", score: 1 }
+    - { partial: "'creates a class dynamically' without the constant-assignment naming detail", score: 0.5 }
+
+- id: ruby-error-standarderror-01
+  difficulty: hard
+  weight: 3
+  tags: [error-handling]
+  question: >
+    A bare `rescue` (or `rescue => e`) catches `StandardError`, not `Exception`.
+    Why is rescuing `Exception` almost always wrong?
+  answer: >
+    The exception hierarchy is rooted at `Exception`; `StandardError` is the
+    subtree for ordinary, recoverable errors (`ArgumentError`, `RuntimeError`,
+    `IOError`, …). Non-StandardError exceptions like `SignalInterrupt`
+    (Ctrl-C/`Interrupt`), `SystemExit` (from `exit`), and `NoMemoryError` /
+    `ScriptError` are meant to pass through and stop or restart the program.
+    Rescuing `Exception` swallows those too — you can't Ctrl-C the process, `exit`
+    stops working — so you almost always want the default `rescue` /
+    `rescue StandardError`, and custom exceptions should subclass `StandardError`.
+  rubric:
+    - { point: "bare rescue catches StandardError; Exception is the broader root of the hierarchy", score: 1 }
+    - { point: "rescuing Exception also swallows SignalException/SystemExit/etc. (breaks Ctrl-C, exit)", score: 1 }
+    - { point: "so rescue StandardError (and custom errors subclass StandardError)", score: 1 }
+    - { partial: "'rescue Exception is bad practice' with no what-it-swallows reason", score: 0.5 }
+
+- id: ruby-error-ensure-retry-02
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    In a `begin/rescue/ensure` block, when does `ensure` run, and what does
+    `retry` do?
+  answer: >
+    `ensure` always runs when the block exits — whether it completed normally,
+    raised and was rescued, or is unwinding from an unrescued/re-raised exception
+    — so it's where you release resources (close files, unlock). `retry`, used
+    inside a `rescue` clause, jumps back to the top of the `begin` block and runs
+    it again from the start; it's used for transient failures, and you must add a
+    counter/backoff or it can loop forever.
+  rubric:
+    - { point: "ensure always runs on exit (success, rescued, or propagating exception) — for cleanup", score: 1 }
+    - { point: "retry (in a rescue) re-runs the begin block from the top; needs a bound or it loops forever", score: 1 }
+    - { partial: "gets ensure OR retry but not both", score: 0.5 }
+
+- id: ruby-error-custom-03
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    How do you define and raise a custom exception, and what forms can `raise`
+    take?
+  answer: >
+    Define a class that subclasses `StandardError` (so a bare `rescue` catches
+    it): `class NotFoundError < StandardError; end`, optionally adding an
+    initializer or extra data. Raise it with `raise NotFoundError, "message"` or
+    `raise NotFoundError.new("message")`. `raise "text"` is shorthand for
+    `raise RuntimeError, "text"`; a bare `raise` inside a `rescue` re-raises the
+    current exception, preserving its backtrace. You rescue specific classes with
+    `rescue NotFoundError => e`.
+  rubric:
+    - { point: "subclass StandardError for a custom exception (so bare rescue catches it)", score: 1 }
+    - { point: "raise Class, 'msg' / raise obj; raise 'str' is RuntimeError; bare raise re-raises current", score: 1 }
+    - { partial: "subclasses Exception instead of StandardError, or only shows raise 'string'", score: 0.5 }
+
+- id: ruby-error-elserescue-04
+  difficulty: easy
+  weight: 1
+  tags: [error-handling]
+  question: >
+    You can write `rescue` directly in a method body without `begin`. What does
+    the optional `else` clause of a begin/rescue add?
+  answer: >
+    A method (or `def`, block, class body) has an implicit `begin`, so you can put
+    `rescue`/`ensure`/`else` at the method level without an explicit `begin`. The
+    `else` clause runs only if the protected code raised no exception — it holds
+    the "success path" code that you deliberately don't want protected by the
+    `rescue`, keeping the `begin` body minimal so you rescue only where an error
+    is actually expected.
+  rubric:
+    - { point: "def/method body has an implicit begin — rescue/ensure/else work without explicit begin", score: 1 }
+    - { point: "else runs only when no exception was raised (the success path, not covered by rescue)", score: 1 }
+    - { partial: "one of the two (implicit begin, or what else does)", score: 0.5 }
+
+- id: ruby-strings-symbols-01
+  difficulty: medium
+  weight: 3
+  tags: [strings-symbols]
+  question: >
+    What is the difference between a Symbol and a String in Ruby, especially
+    regarding identity, mutability, and typical use?
+  answer: >
+    A String is a mutable sequence of characters; each literal usually creates a
+    new object (`"a".object_id != "a".object_id`). A Symbol (`:name`) is an
+    immutable, interned identifier — every `:name` in the program is the same
+    single object (`:a.object_id == :a.object_id`), so comparisons are fast and no
+    new allocation happens. Use symbols for fixed names/keys (hash keys, method
+    names, states) and strings for text/data you build or mutate. Modern Ruby no
+    longer leaks memory from dynamically created symbols because they can be
+    garbage-collected.
+  rubric:
+    - { point: "String is mutable and typically a new object per literal", score: 1 }
+    - { point: "Symbol is immutable and interned — all occurrences are the same object (fast identity compare)", score: 1 }
+    - { partial: "'symbols are like lightweight strings' without the interned/immutable-vs-mutable distinction", score: 0.5 }
+
+- id: ruby-strings-frozen-02
+  difficulty: medium
+  weight: 2
+  tags: [strings-symbols]
+  question: >
+    What does the `# frozen_string_literal: true` magic comment do, and what is a
+    subtlety about interpolated strings?
+  answer: >
+    Placed at the top of a file, `# frozen_string_literal: true` freezes all
+    plain string literals in that file, so they're immutable and can be reused
+    rather than re-allocated each time — a common memory/perf win and a guard
+    against accidental mutation. Subtlety: since Ruby 3.0 dynamic (interpolated)
+    string literals like `"hi #{name}"` are NOT frozen even under the pragma,
+    because their content varies at runtime — only static literals are frozen. To
+    freeze/mutate explicitly regardless of the pragma, use `.freeze` or `+"..."`
+    / `String.new`.
+  rubric:
+    - { point: "the magic comment freezes (makes immutable/reusable) the file's string literals", score: 1 }
+    - { point: "since 3.0 interpolated/dynamic literals are not frozen even with it (only static literals)", score: 1 }
+    - { partial: "knows the comment freezes literals but not the interpolation caveat", score: 0.5 }
+
+- id: ruby-strings-quotes-03
+  difficulty: easy
+  weight: 1
+  tags: [strings-symbols]
+  question: >
+    What is the difference between single- and double-quoted string literals, and
+    what is string interpolation?
+  answer: >
+    Double-quoted strings support interpolation — `"Hello #{name}"` evaluates the
+    embedded expression and inserts its `to_s` — and interpret escape sequences
+    like `\n`, `\t`. Single-quoted strings are (almost) literal: no
+    interpolation, and only `\\` and `\'` are special, so `'a\nb'` is a backslash-n,
+    not a newline. Use single quotes when you want the raw text and double quotes
+    when you need interpolation or escapes.
+  rubric:
+    - { point: "double quotes: interpolation (#{}) and escape sequences (\\n etc.)", score: 1 }
+    - { point: "single quotes: literal, no interpolation, only \\\\ and \\' escaped", score: 1 }
+    - { partial: "mentions interpolation but claims single quotes also interpolate", score: 0.5 }
+
+- id: ruby-strings-percent-04
+  difficulty: easy
+  weight: 1
+  tags: [strings-symbols]
+  question: >
+    What do the `%w[...]` and `%i[...]` literals produce?
+  answer: >
+    They are shorthand array literals split on whitespace: `%w[a b c]` produces an
+    array of strings `["a", "b", "c"]`, and `%i[a b c]` produces an array of
+    symbols `[:a, :b, :c]` — no commas or quotes needed. Any bracket pair works
+    (`%w() %w{} %w//`). The uppercase `%W`/`%I` variants additionally allow
+    interpolation and escapes. They're used for concise lists of words or symbol
+    keys.
+  rubric:
+    - { point: "%w[...] = array of strings split on whitespace", score: 1 }
+    - { point: "%i[...] = array of symbols", score: 1 }
+    - { partial: "gets one of %w/%i or says 'array literal' without which produces symbols", score: 0.5 }
+
+- id: ruby-collections-hashdefault-01
+  difficulty: medium
+  weight: 2
+  tags: [collections-idioms]
+  question: >
+    What is the difference between `Hash.new(0)` and `Hash.new { |h, k| h[k] = [] }`,
+    and why does the difference matter?
+  answer: >
+    `Hash.new(0)` sets a single default value returned for any missing key — great
+    for counters (`h[k] += 1`), but every missing key shares the same object, so a
+    mutable default is a trap. `Hash.new { |h, k| ... }` runs the block on each
+    missing-key access; using `h[k] = []` inside it both returns a fresh object
+    and stores it, which is the correct idiom for a hash of arrays/hashes.
+    Important: a plain default (and the block, unless it assigns) does not insert
+    the key — reading a missing key returns the default but leaves the hash empty.
+  rubric:
+    - { point: "Hash.new(0): one shared default value (good for counters; mutable default is shared/buggy)", score: 1 }
+    - { point: "block form runs per missing key; h[k] = [] returns AND stores a fresh object", score: 1 }
+    - { partial: "'sets a default' without the shared-object / per-key-block distinction", score: 0.5 }
+
+- id: ruby-collections-kwargs-02
+  difficulty: hard
+  weight: 3
+  tags: [collections-idioms]
+  question: >
+    Ruby 3.0 made keyword arguments a distinct thing from a trailing Hash. What
+    changed, and how do you pass a hash as keywords now?
+  answer: >
+    Through Ruby 2.x a trailing Hash was auto-converted to keyword arguments and
+    vice versa. Ruby 2.7 deprecated this and 3.0 removed it: keyword arguments and
+    positional Hash arguments are now separate. So calling `def m(key:)` with a
+    plain `{key: 1}` positional hash no longer works — you must splat it as
+    keywords with `m(**hash)`, and to accept arbitrary keywords a method uses
+    `def m(**opts)`. Passing `{...}` where positionals are expected now stays a
+    Hash rather than being reinterpreted as keywords.
+  rubric:
+    - { point: "pre-3.0 a trailing Hash auto-converted to/from keyword args; 3.0 made them separate", score: 1 }
+    - { point: "pass a hash as keywords with ** (m(**hash)); collect keywords with def m(**opts)", score: 1 }
+    - { partial: "knows ** splats a hash but not the 3.0 separation change", score: 0.5 }
+
+- id: ruby-collections-splat-03
+  difficulty: medium
+  weight: 2
+  tags: [collections-idioms]
+  question: >
+    What do the splat `*` and double-splat `**` operators do in method definitions
+    and calls?
+  answer: >
+    In a parameter list `*args` gathers extra positional arguments into an Array
+    and `**kwargs` gathers extra keyword arguments into a Hash; they don't overlap
+    (`*` never captures keywords). At a call site they spread: `*array` expands an
+    array into positional arguments and `**hash` expands a hash into keyword
+    arguments — `m(*[1,2], **{a: 3})`. `*` also destructures in assignment
+    (`first, *rest = list`). Ruby 3.0+ also has `...` to forward all arguments
+    (`def m(...) = other(...)`).
+  rubric:
+    - { point: "in params: *args collects positionals into an Array, **kwargs collects keywords into a Hash", score: 1 }
+    - { point: "at a call site: *arr / **hash spread the array/hash back into args", score: 1 }
+    - { partial: "'splat handles variable args' without the positional-vs-keyword or gather-vs-spread detail", score: 0.5 }
+
+- id: ruby-collections-safenav-data-04
+  difficulty: medium
+  weight: 2
+  tags: [collections-idioms]
+  question: >
+    What does the safe-navigation operator `&.` do, and what is `Data.define`
+    (Ruby 3.2)?
+  answer: >
+    `a&.b` calls `b` only if `a` is not nil; if `a` is nil the whole expression
+    short-circuits to nil instead of raising `NoMethodError` — a concise
+    nil-guard, unlike `.` which would blow up on nil. `Data.define(:x, :y)`
+    (introduced in Ruby 3.2) creates an immutable value-object class: instances
+    are frozen, have reader methods but no setters, support positional or keyword
+    construction, and offer `#with(x: ...)` to produce an updated copy. It's like
+    a leaner, strictly-immutable `Struct`.
+  rubric:
+    - { point: "&. calls the method only if receiver isn't nil, else returns nil (nil-safe, avoids NoMethodError)", score: 1 }
+    - { point: "Data.define (3.2) builds an immutable value-object class (frozen, readers only, #with for copies)", score: 1 }
+    - { partial: "gets &. but Data.define wrong/missing, or calls Data mutable like Struct", score: 0.5 }

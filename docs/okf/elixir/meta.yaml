@@ -1,0 +1,27 @@
+stack: elixir
+title: Elixir (1.16+/OTP)
+corpus_rev: 1
+# Version scope this corpus grades against: the Elixir language + core OTP
+# (GenServer, Supervisor, Task, Agent, ETS). Phoenix and other framework
+# libraries are out of scope — a future sub-stack. Version-gated behavior
+# (e.g. Duration / to_timeout/1 and the set-theoretic type-checking preview,
+# both Elixir 1.17+) is called out inline in the affected answers so a grader
+# can tell a correct answer from a stale one.
+version_scope: ">=1.16 <2"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - pattern-matching       # = match operator, function-head clauses & guards, pin ^, destructuring, case/with
+  - processes-otp          # spawn/send/receive, GenServer callbacks, supervisors & strategies, child specs
+  - immutability-data      # immutable data, maps vs keyword lists vs structs, map update, put_in/update_in
+  - pipe-with              # |> pipe idioms, with for happy-path chaining, function composition
+  - error-handling         # {:ok,_}/{:error,_} vs raise/rescue, try/rescue/after, let-it-crash, ! bang
+  - enum-stream            # Enum eager vs Stream lazy, comprehensions for, reduce, when Stream wins
+  - protocols-behaviours   # protocols + defimpl, behaviours + @callback + @impl, the difference
+  - concurrency            # BEAM process isolation, Task async/await, Agent, ETS, Task.Supervisor
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "mix.exs" }
+    - { type: content, glob: "**/*.ex", pattern: "defmodule " }

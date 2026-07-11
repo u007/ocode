@@ -41,6 +41,44 @@ func TestDetect(t *testing.T) {
 			want:  []string{"rust"},
 		},
 		{
+			name:  "composer.json → php",
+			files: map[string]string{"composer.json": `{"require":{"php":">=8.2"}}`},
+			want:  []string{"php"},
+		},
+		{
+			name:  "nestjs via @nestjs/core dep",
+			files: map[string]string{"package.json": `{"dependencies":{"@nestjs/core":"^11.0.0"}}`},
+			want:  []string{"nestjs"},
+		},
+		{
+			name:  "pyproject.toml → python",
+			files: map[string]string{"pyproject.toml": "[project]\nname='x'\n"},
+			want:  []string{"python"},
+		},
+		{
+			name:  "mix.exs → elixir",
+			files: map[string]string{"mix.exs": "defmodule X.MixProject do\nend\n"},
+			want:  []string{"elixir"},
+		},
+		{
+			name:  "*.csproj → csharp AND dotnet (umbrella)",
+			files: map[string]string{"App.csproj": "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>"},
+			want:  []string{"csharp", "dotnet"},
+		},
+		{
+			name:  "*.vbproj → vbnet AND dotnet (umbrella)",
+			files: map[string]string{"App.vbproj": "<Project Sdk=\"Microsoft.NET.Sdk\"></Project>"},
+			want:  []string{"dotnet", "vbnet"},
+		},
+		{
+			name: "Rails repo → ruby AND ror",
+			files: map[string]string{
+				"Gemfile":               "source 'https://rubygems.org'\ngem 'rails'\n",
+				"config/application.rb": "module App\nend\n",
+			},
+			want: []string{"ror", "ruby"},
+		},
+		{
 			name:  "react dep in dependencies",
 			files: map[string]string{"package.json": `{"dependencies":{"react":"^19.0.0"}}`},
 			want:  []string{"react"},

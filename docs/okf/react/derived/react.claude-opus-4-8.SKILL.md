@@ -9,6 +9,7 @@ stack: react
 source_scorecard: ../scores/claude-opus-4-8.md
 threshold: 0.75
 revalidate_when: model_version changes   # STALE on any version bump — re-benchmark
+illustrative: true   # teaching placeholder, NOT a real eval — never embedded/shipped
 ---
 
 # React tuning — claude-opus-4-8

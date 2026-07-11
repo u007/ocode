@@ -1,0 +1,27 @@
+stack: csharp
+title: C# (12/13)
+corpus_rev: 1
+# Version scope this corpus grades against. Answers assume C# 12 on .NET 8, with
+# the C# 13 / .NET 9 additions (params collections, `System.Threading.Lock`, `\e`)
+# called out inline where relevant. This corpus is the LANGUAGE — the .NET
+# platform / BCL (runtime, GC internals, ASP.NET, EF) lives in the separate
+# `dotnet` corpus. Version-gated features state their introducing C# version in
+# the affected answer so a grader can tell a correct answer from a stale one.
+version_scope: ">=12"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - types-nullability   # NRT (?/!/#nullable), value vs reference, record/struct/class, init/required, struct copy
+  - pattern-matching    # switch expressions, property/positional/list/relational/logical patterns, is, exhaustiveness
+  - linq                # deferred vs immediate, IEnumerable vs IQueryable, multiple enumeration, First vs FirstOrDefault
+  - async               # Task vs ValueTask, state machine, ConfigureAwait(false), sync-over-async, CancellationToken, IAsyncEnumerable
+  - generics            # constraints (where), variance (in/out), generic methods & inference, default(T)
+  - delegates-events    # Func/Action, event vs delegate field, closure capture in loops, multicast
+  - disposal            # IDisposable/using, IAsyncDisposable/await using, finalizer vs Dispose, dispose pattern
+  - collections-spans   # collection expressions [..], Span/ReadOnlySpan/Memory, stackalloc, array vs List, params collections
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "*.csproj" }
+    - { type: content, glob: "**/*.cs", pattern: "namespace |using " }

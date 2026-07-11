@@ -86,6 +86,73 @@ var registry = []stack{
 			{kind: markerFile, glob: "Cargo.toml"},
 		},
 	},
+	{
+		id: "php",
+		markers: []marker{
+			{kind: markerFile, glob: "composer.json"},
+		},
+	},
+	{
+		id: "nestjs",
+		markers: []marker{
+			{kind: markerDep, dep: "@nestjs/core"},
+		},
+	},
+	{
+		id: "python",
+		markers: []marker{
+			{kind: markerFile, glob: "pyproject.toml"},
+			{kind: markerFile, glob: "requirements.txt"},
+			{kind: markerFile, glob: "setup.py"},
+		},
+	},
+	{
+		id: "ruby",
+		markers: []marker{
+			{kind: markerFile, glob: "Gemfile"},
+			{kind: markerFile, glob: "*.gemspec"},
+		},
+	},
+	{
+		// Rails-specific literal paths so it does not fire on plain Ruby repos.
+		// A Rails repo also has a Gemfile, so it detects as both ruby + ror
+		// (framework-atop-language, like nextjs + react).
+		id: "ror",
+		markers: []marker{
+			{kind: markerFile, glob: "config/application.rb"},
+			{kind: markerFile, glob: "bin/rails"},
+		},
+	},
+	{
+		id: "elixir",
+		markers: []marker{
+			{kind: markerFile, glob: "mix.exs"},
+		},
+	},
+	{
+		// .NET umbrella: any .NET project marker. A C#/VB.NET project detects as
+		// both dotnet (platform) and csharp/vbnet (language).
+		id: "dotnet",
+		markers: []marker{
+			{kind: markerFile, glob: "*.sln"},
+			{kind: markerFile, glob: "global.json"},
+			{kind: markerFile, glob: "*.csproj"},
+			{kind: markerFile, glob: "*.vbproj"},
+			{kind: markerFile, glob: "Directory.Build.props"},
+		},
+	},
+	{
+		id: "csharp",
+		markers: []marker{
+			{kind: markerFile, glob: "*.csproj"},
+		},
+	},
+	{
+		id: "vbnet",
+		markers: []marker{
+			{kind: markerFile, glob: "*.vbproj"},
+		},
+	},
 }
 
 // Detect returns the sorted ids of every known stack the repo at root uses.

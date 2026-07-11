@@ -1,0 +1,27 @@
+stack: ror
+title: Ruby on Rails (7.1+/8)
+corpus_rev: 1
+# Version scope this corpus grades against. Rails is a framework atop Ruby —
+# the Ruby *language* is graded by the separate `ruby` corpus; this corpus is
+# framework-only. Answers assume Rails 7.1+, with version-gated behavior called
+# out inline (e.g. `normalizes` is Rails 7.1; the built-in `bin/rails generate
+# authentication` generator is Rails 8.0; `form_with` generates local forms by
+# default since Rails 6.1).
+version_scope: ">=7.1 <9"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - activerecord            # associations, validations, model design
+  - querying                # N+1, includes/preload/eager_load, laziness, find vs find_by, pluck
+  - callbacks-transactions  # callback order, after_commit vs after_save, transactions & rollback, save!
+  - migrations-schema       # reversible migrations, change vs up/down, indexes/constraints, schema.rb vs structure.sql
+  - controllers-routing     # RESTful resources, strong params, before_action, member/collection, status codes
+  - views-helpers           # ERB, partials + locals, form_with, CSRF, content_for, N+1 in views
+  - concerns-services       # concerns, service objects, skinny-controller/fat-model, POROs
+  - caching-jobs            # fragment/russian-doll caching, cache keys, ActiveJob + adapters, idempotency
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "config/application.rb" }
+    - { type: file, glob: "bin/rails" }

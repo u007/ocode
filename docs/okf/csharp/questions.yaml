@@ -1,0 +1,667 @@
+# C# benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1). Scope: C# 12 on .NET 8 with C# 13 additions.
+# Version-gated behavior (features introduced in a specific C# version) is called
+# out inline in the affected answers so a grader can tell a correct answer from a
+# stale one. This is the LANGUAGE corpus — platform/BCL lives in `dotnet`.
+
+- id: csharp-null-01
+  difficulty: medium
+  weight: 3
+  tags: [types-nullability]
+  question: >
+    What do nullable reference types give you, and what is the runtime effect of
+    the `?` annotation, the `!` operator, and `#nullable enable`?
+  answer: >
+    Nullable reference types (C# 8) are a compile-time static-analysis feature, not
+    a runtime one. `string?` declares a reference that may be null and `string` one
+    that shouldn't be; the compiler warns on a possible null dereference. The `!`
+    null-forgiving operator suppresses that warning at one expression — it emits no
+    runtime check and no code. `#nullable enable`/`disable`/`restore` (or project-wide
+    `<Nullable>enable</Nullable>`) toggles the annotation context. The annotations
+    are erased at runtime: they add no null checks and never change behavior. The
+    proposed `!!` parameter-null-check operator was slated for C# 11 but removed
+    before release and never shipped.
+  rubric:
+    - { point: "NRT is compile-time static analysis (C# 8); annotations are erased at runtime, add no checks", score: 1 }
+    - { point: "`?` = may-be-null, bare = shouldn't-be-null; `!` suppresses the warning with no runtime effect", score: 1 }
+    - { point: "`#nullable enable` / <Nullable> toggles the context; `!!` param-check never shipped", score: 1 }
+    - { partial: "thinks `?`/NRT adds a runtime null check or changes behavior", score: 0.5 }
+
+- id: csharp-null-02
+  difficulty: medium
+  weight: 3
+  tags: [types-nullability]
+  question: >
+    What is the difference between value and reference types, and what surprising
+    thing happens when you mutate a struct held in a readonly field or a collection?
+  answer: >
+    A value type (struct, enum, primitive) holds its data inline and is copied on
+    assignment, argument passing, and return; a reference type (class, interface,
+    array, delegate, record class) holds a reference to a heap object, so copying
+    the variable shares the same object. Because a struct is copied, mutating it
+    through a member call acts on a copy: mutating a struct in a `readonly` field
+    mutates a defensive copy and silently no-ops, and `foreach (var s in list)
+    s.X = ...` mutates a per-iteration copy, not the element. This is why mutable
+    structs are discouraged (prefer `readonly struct`). The default of a value type
+    is a zeroed instance (never null unless `Nullable<T>`); the default of a
+    reference type is null.
+  rubric:
+    - { point: "value types copied on assignment/pass; reference types share the heap object", score: 1 }
+    - { point: "mutating a struct acts on a copy — readonly-field / foreach-element mutation hits a defensive copy", score: 1 }
+    - { point: "default: value type = zeroed non-null instance, reference type = null", score: 1 }
+    - { partial: "only says stack vs heap without copy-vs-share semantics", score: 0.5 }
+
+- id: csharp-null-03
+  difficulty: medium
+  weight: 3
+  tags: [types-nullability]
+  question: >
+    Distinguish `record` (record class), `record struct`, and a plain `class`,
+    especially around equality and mutability.
+  answer: >
+    A `record` / `record class` (C# 9) is a reference type for which the compiler
+    generates value-based equality (`Equals`/`GetHashCode` over all members), a
+    readable `ToString`, and a nondestructive `with` copy. A `record struct` (C# 10)
+    is a value type with that same generated value equality (structs already have
+    value equality, but records generate a faster typed one). A plain `class` has
+    reference equality by default. Mutability differs too: positional members of a
+    `record class` are init-only (immutable), but positional members of a
+    `record struct` are mutable unless you declare `readonly record struct`.
+  rubric:
+    - { point: "record (class) = reference type with compiler-generated value equality + `with` (C# 9)", score: 1 }
+    - { point: "record struct = value type with value equality (C# 10); plain class = reference equality", score: 1 }
+    - { point: "record class positional members are init-only, but record struct members are mutable unless readonly record struct", score: 1 }
+    - { partial: "'record is a class with less boilerplate' with no value-equality point", score: 0.5 }
+
+- id: csharp-null-04
+  difficulty: medium
+  weight: 2
+  tags: [types-nullability]
+  question: >
+    What do `init`-only properties and `required` members each do, and how do they
+    combine?
+  answer: >
+    An `init` accessor (C# 9) lets a property be set only during construction — in a
+    constructor or an object initializer — and then be immutable, so you get
+    immutable objects that still use initializer syntax. `required` (C# 11) forces
+    the caller to set that member in an object initializer (or via a constructor
+    marked `[SetsRequiredMembers]`), a compile error otherwise, enforcing
+    initialization without adding a constructor parameter. Combining them
+    (`required` + `init`) gives a member that must be supplied at creation and can
+    never change afterward.
+  rubric:
+    - { point: "init: settable only during construction/initializer, immutable thereafter (C# 9)", score: 1 }
+    - { point: "required: compiler forces the member be initialized or it's a compile error (C# 11)", score: 1 }
+    - { partial: "conflates the two, e.g. 'init means readonly' / 'required means non-null'", score: 0.5 }
+
+- id: csharp-pattern-01
+  difficulty: medium
+  weight: 2
+  tags: [pattern-matching]
+  question: >
+    How does a switch expression differ from a switch statement, and what happens
+    if its arms are not exhaustive?
+  answer: >
+    A switch expression (C# 8) is an expression that yields a value from
+    `pattern => result` arms (with `_` as the discard/default), usable inline and
+    more concise than a switch statement. Exhaustiveness is not enforced as a hard
+    error: if the arms don't cover every possible input the compiler emits warning
+    CS8509, and at runtime an unmatched value throws a `SwitchExpressionException`
+    — a warning plus a runtime throw, not a compile-time error. Add a `_ =>` arm to
+    make it exhaustive.
+  rubric:
+    - { point: "switch expression yields a value via `pattern => result` arms (C# 8), `_` is default", score: 1 }
+    - { point: "non-exhaustive → compiler warning (CS8509) + runtime SwitchExpressionException, not a compile error", score: 1 }
+    - { partial: "'switch expression is just nicer syntax' with no exhaustiveness behavior", score: 0.5 }
+
+- id: csharp-pattern-02
+  difficulty: medium
+  weight: 2
+  tags: [pattern-matching]
+  question: >
+    What are property patterns and positional patterns, and how do they bind values?
+  answer: >
+    A property pattern matches on member values: `p is { Age: > 18, Name.Length: > 0 }`
+    (the nested/extended `Name.Length` form is C# 10+). A positional pattern
+    deconstructs a value via its `Deconstruct` method or tuple shape and matches each
+    component: `point is (0, var y)`. Both are recursive (their sub-patterns can be
+    any pattern), can bind matched parts with `var` or a declaration, and can be
+    combined (`is Customer { Age: >= 18 } c`). Property patterns arrived with pattern
+    matching in C# 8.
+  rubric:
+    - { point: "property pattern matches member values `{ Prop: pattern }` (nested since C# 10)", score: 1 }
+    - { point: "positional pattern deconstructs via Deconstruct/tuple `(a, b)` and can bind with var", score: 1 }
+    - { partial: "knows the `is` type check but not property/positional forms", score: 0.5 }
+
+- id: csharp-pattern-03
+  difficulty: medium
+  weight: 2
+  tags: [pattern-matching]
+  question: >
+    Explain relational patterns, logical patterns, and list patterns.
+  answer: >
+    Relational patterns (C# 9) match against a constant with `<`, `>`, `<=`, `>=`
+    (`is >= 0`). Logical patterns (C# 9) combine patterns with `and`, `or`, and
+    `not` (`is >= 0 and < 100`, `is not null`). List patterns (C# 11) match sequences
+    and arrays by shape: `[1, 2, _]` matches a three-element list, and the slice
+    pattern `..` matches any span of elements, so `[first, .., last]` binds the ends
+    of a list of any length ≥ 2. Elements and the slice can bind to variables.
+  rubric:
+    - { point: "relational `< > <= >=` (C# 9) and logical `and`/`or`/`not` (C# 9) compose patterns", score: 1 }
+    - { point: "list patterns `[...]` with the slice pattern `..` match/deconstruct sequences (C# 11)", score: 1 }
+    - { partial: "describes only one of relational / logical / list patterns", score: 0.5 }
+
+- id: csharp-pattern-04
+  difficulty: easy
+  weight: 2
+  tags: [pattern-matching]
+  question: >
+    What does the `is` declaration pattern (`obj is Customer c`) do that a plain
+    type check plus a cast does not, and where is the bound variable in scope?
+  answer: >
+    `if (obj is Customer c)` tests the runtime type and, on success, binds `c` to the
+    cast value in one step — replacing the old test-then-cast (`is` followed by
+    `(Customer)obj`) that checks the type twice, and avoiding an
+    `InvalidCastException` or a null. The bound variable is definitely assigned only
+    on the path where the pattern matched: with `if (obj is not Customer c) return;`
+    the inverse holds, so `c` is usable on the fall-through after the guard.
+  rubric:
+    - { point: "`is T x` combines the type test and binding in one, avoiding a separate cast", score: 1 }
+    - { point: "the bound variable is scoped/definitely-assigned only on the matching path (incl. `is not` inverting it)", score: 1 }
+    - { partial: "'`is` checks the type' with no mention of the binding", score: 0.5 }
+
+- id: csharp-linq-01
+  difficulty: medium
+  weight: 3
+  tags: [linq]
+  question: >
+    What is deferred versus immediate execution in LINQ, and which operators trigger
+    each?
+  answer: >
+    Most LINQ operators — `Where`, `Select`, `OrderBy`, `Take` — are deferred: they
+    build a query object and run nothing until the sequence is enumerated (a
+    `foreach`, or a materializing call). Immediate/materializing operators —
+    `ToList`, `ToArray`, `Count`, `First`, `Sum`, `Any` — execute the query on the
+    spot. Because a deferred query holds the pipeline, it re-executes every time you
+    enumerate it and reflects the source as it is at enumeration time, not when the
+    query was defined. Call `ToList`/`ToArray` to snapshot the results once.
+  rubric:
+    - { point: "Where/Select/OrderBy etc. are deferred — execute on enumeration, not when defined", score: 1 }
+    - { point: "ToList/ToArray/Count/First/Sum force immediate execution", score: 1 }
+    - { point: "a deferred query re-runs on each enumeration / reflects the source at enumeration time", score: 1 }
+    - { partial: "knows 'lazy' but not that it re-executes each enumeration", score: 0.5 }
+
+- id: csharp-linq-02
+  difficulty: hard
+  weight: 3
+  tags: [linq]
+  question: >
+    What is the difference between LINQ over `IEnumerable<T>` and over
+    `IQueryable<T>`, and what is the danger of mixing them?
+  answer: >
+    `IEnumerable<T>` (LINQ to Objects) runs in-process using compiled delegates: the
+    whole source is pulled into memory and each operator filters/projects client-side.
+    `IQueryable<T>` builds an expression tree that a provider (e.g. EF Core)
+    translates into another language such as SQL and executes at the source, so a
+    `Where` runs in the database and only matching rows come back. The trap is
+    switching an `IQueryable` to `IEnumerable` mid-query — calling
+    `AsEnumerable()`, or a method the provider can't translate — which forces
+    client-side evaluation: every row is fetched and then filtered in memory.
+  rubric:
+    - { point: "IEnumerable = in-memory delegates (LINQ to Objects), executes client-side", score: 1 }
+    - { point: "IQueryable = expression tree translated by a provider (EF → SQL), executes at the source", score: 1 }
+    - { point: "switching to IEnumerable mid-query forces client-side evaluation (pulls all rows first)", score: 1 }
+    - { partial: "knows one runs in the DB but not the expression-tree-vs-delegate reason", score: 0.5 }
+
+- id: csharp-linq-03
+  difficulty: medium
+  weight: 2
+  tags: [linq]
+  question: >
+    Why is enumerating the same LINQ query variable more than once a pitfall, and
+    how do you avoid it?
+  answer: >
+    A deferred sequence backed by a query or generator re-runs its entire pipeline
+    each time it is enumerated. Enumerating the same variable twice — say `.Any()`
+    then a `foreach`, or `.Count()` then iterating — executes the underlying work
+    (a database round-trip, an HTTP call, file IO) twice, and can be outright wrong
+    if the source is a one-shot stream that's already been consumed. Materialize once
+    with `ToList()`/`ToArray()` when you will enumerate more than once; analyzers flag
+    this as "possible multiple enumeration".
+  rubric:
+    - { point: "enumerating a deferred sequence twice re-runs the whole pipeline (double IO/query)", score: 1 }
+    - { point: "materialize once with ToList/ToArray when enumerating multiple times", score: 1 }
+    - { partial: "notices it's inefficient but not the re-execution / no materialize fix", score: 0.5 }
+
+- id: csharp-linq-04
+  difficulty: medium
+  weight: 2
+  tags: [linq]
+  question: >
+    What is the difference between `First` and `FirstOrDefault` (and `Single`), and
+    what value-type gotcha does `FirstOrDefault` have?
+  answer: >
+    `First()` and `Single()` throw `InvalidOperationException` when nothing matches
+    (`Single` also throws if more than one matches); `FirstOrDefault()` and
+    `SingleOrDefault()` return `default(T)` instead of throwing. Use the OrDefault
+    forms when "no match" is a valid outcome. The gotcha: `default(T)` is null only
+    for reference types — for a value type it is `0`/`false`/a zeroed struct, so
+    `FirstOrDefault()` over `IEnumerable<int>` returns `0` on no match, and a `== null`
+    or "is it the default?" check can't distinguish "found a real 0" from "found
+    nothing".
+  rubric:
+    - { point: "First/Single throw on empty (Single also on >1); FirstOrDefault/SingleOrDefault return default(T)", score: 1 }
+    - { point: "default(T) is null only for reference types — a value-type default (0/false) can hide 'not found'", score: 1 }
+    - { partial: "knows OrDefault doesn't throw but misses the value-type default gotcha", score: 0.5 }
+
+- id: csharp-async-01
+  difficulty: hard
+  weight: 3
+  tags: [async]
+  question: >
+    When would you return `ValueTask`/`ValueTask<T>` instead of `Task<T>`, and what
+    rules constrain how a `ValueTask` may be consumed?
+  answer: >
+    `Task`/`Task<T>` is a heap-allocated reference type created per async operation.
+    `ValueTask<T>` is a struct that avoids that allocation when the result is often
+    already available synchronously (a cache hit / hot path). But it comes with
+    strict rules: a `ValueTask` must be awaited exactly once — never await it twice,
+    never await it concurrently, and don't read `.Result` before it has completed.
+    If you need to await it repeatedly, store it, or fan it out, call `.AsTask()`
+    first to get a normal Task. Use `ValueTask` only on measured hot paths; default
+    to `Task`.
+  rubric:
+    - { point: "Task is a heap-allocated reference type; ValueTask is a struct avoiding the allocation when the result is often synchronous", score: 1 }
+    - { point: "a ValueTask must be consumed once — no double/concurrent await, no `.Result` before completion", score: 1 }
+    - { point: "to store / await repeatedly / fan out, convert with `.AsTask()` first", score: 1 }
+    - { partial: "'ValueTask is a faster Task' with no consume-once rule", score: 0.5 }
+
+- id: csharp-async-02
+  difficulty: hard
+  weight: 3
+  tags: [async]
+  question: >
+    What does the compiler do with `async`/`await`, and how does blocking on an
+    async call (`.Result`/`.Wait()`) cause a deadlock?
+  answer: >
+    `async`/`await` (C# 5) rewrites the method into a state machine: at each `await`
+    of an incomplete task it captures the current `SynchronizationContext` (present
+    in UI and classic ASP.NET), returns control to the caller, and schedules the rest
+    of the method as a continuation that resumes when the awaited task completes.
+    Blocking on that task with `.Result`, `.Wait()`, or `.GetAwaiter().GetResult()`
+    on a single-threaded context deadlocks: the continuation is queued to run on the
+    very context the blocked thread is holding, so neither can proceed. The fix is to
+    await all the way up ("async all the way") rather than block.
+  rubric:
+    - { point: "await compiles to a state machine that returns to the caller and resumes via a continuation", score: 1 }
+    - { point: "sync-over-async (.Result/.Wait) deadlocks by blocking the captured SynchronizationContext the continuation needs", score: 1 }
+    - { point: "fix: async all the way / don't block on an async call", score: 1 }
+    - { partial: "'await pauses and waits' with no state-machine or deadlock mechanism", score: 0.5 }
+
+- id: csharp-async-03
+  difficulty: medium
+  weight: 2
+  tags: [async]
+  question: >
+    What does `ConfigureAwait(false)` do, and why is it recommended in library code?
+  answer: >
+    `await task.ConfigureAwait(false)` tells the continuation not to capture and
+    resume on the original `SynchronizationContext`, resuming on a thread-pool thread
+    instead. In library code you don't control the caller's context, so
+    `ConfigureAwait(false)` avoids marshaling back to it — preventing the
+    sync-over-async deadlock and cutting per-await overhead. In application code with
+    no sync context (modern ASP.NET Core has none) it is usually unnecessary, and in
+    UI code that touches controls after the await you must keep the context, so you
+    do not use it there.
+  rubric:
+    - { point: "ConfigureAwait(false) resumes off the captured context (on a thread-pool thread)", score: 1 }
+    - { point: "use in library code to avoid capturing the caller's context (deadlock + overhead)", score: 1 }
+    - { partial: "'add it in libraries' without saying what it actually does", score: 0.5 }
+
+- id: csharp-async-04
+  difficulty: medium
+  weight: 2
+  tags: [async]
+  question: >
+    How does `CancellationToken` cancellation work, and what are `IAsyncEnumerable<T>`
+    and `await foreach` for?
+  answer: >
+    Cancellation is cooperative: you pass a `CancellationToken` into async APIs, and
+    the callee observes it (via `ThrowIfCancellationRequested()`, polling
+    `IsCancellationRequested`, or forwarding it downstream) and throws
+    `OperationCanceledException` when the owning `CancellationTokenSource` is
+    cancelled — code that ignores the token is never cancelled. `IAsyncEnumerable<T>`
+    (C# 8) is an asynchronous stream consumed with `await foreach`, yielding items as
+    they become available (paged IO, a channel) without buffering the whole sequence;
+    the producer's token parameter is marked `[EnumeratorCancellation]` and a token is
+    supplied with `.WithCancellation(token)`.
+  rubric:
+    - { point: "CancellationToken is cooperative — the callee must observe it; cancel throws OperationCanceledException", score: 1 }
+    - { point: "IAsyncEnumerable<T> + await foreach streams items asynchronously (C# 8), token via WithCancellation/[EnumeratorCancellation]", score: 1 }
+    - { partial: "explains only one of cancellation or async streams", score: 0.5 }
+
+- id: csharp-generics-01
+  difficulty: medium
+  weight: 2
+  tags: [generics]
+  question: >
+    What does a `where` constraint do on a type parameter, and what are the main
+    kinds?
+  answer: >
+    A `where T : ...` clause restricts what types can be substituted for `T` and, in
+    return, unlocks the operations the compiler will allow on `T`. The main kinds:
+    `where T : class` (a reference type), `struct` (a non-nullable value type),
+    `new()` (a public parameterless constructor, so you can `new T()`), a base class
+    or interface (so you can call its members), plus `notnull`, `unmanaged`, and
+    `where T : U` (T must derive from another type parameter). Without a constraint
+    you can only do what `object` allows.
+  rubric:
+    - { point: "`where T:` restricts the type argument and enables the corresponding operations (call members, `new T()`, …)", score: 1 }
+    - { point: "names concrete kinds: class / struct / new() / base-class-or-interface", score: 1 }
+    - { partial: "knows `where` exists but not that it unlocks operations on T", score: 0.5 }
+
+- id: csharp-generics-02
+  difficulty: hard
+  weight: 2
+  tags: [generics]
+  question: >
+    Explain generic variance: what do `out` and `in` mean, and where do they apply?
+  answer: >
+    Variance lets a generic type with related type arguments be assignment-compatible,
+    and applies only to generic interfaces and delegates (not classes). `out T`
+    (covariance) — `T` appears only in output positions — makes
+    `IEnumerable<string>` assignable to `IEnumerable<object>`. `in T`
+    (contravariance) — `T` appears only in input positions — makes `Action<object>`
+    assignable to `Action<string>`. A parameter with no modifier is invariant (e.g.
+    `List<T>`, `IList<T>`), allowing neither direction. Variance works only for
+    reference conversions.
+  rubric:
+    - { point: "out = covariance (output only): IEnumerable<string> → IEnumerable<object>", score: 1 }
+    - { point: "in = contravariance (input only): Action<object> → Action<string>", score: 1 }
+    - { point: "applies only to interfaces/delegates (reference conversions); classes/List<T> are invariant", score: 1 }
+    - { partial: "gets covariance but flips or omits contravariance", score: 0.5 }
+
+- id: csharp-generics-03
+  difficulty: medium
+  weight: 2
+  tags: [generics]
+  question: >
+    How does type inference work for a generic method, and when must you specify the
+    type arguments explicitly?
+  answer: >
+    A generic method declares its own type parameters (`T Max<T>(T a, T b)`). When you
+    call it the compiler infers the type arguments from the ordinary (value)
+    arguments, so `Max(1, 2)` needs no `<int>`. You must state them explicitly when
+    they can't be inferred — typically when a type parameter appears only in the
+    return type or in no argument at all (`Create<Customer>()`), or to disambiguate.
+    Inference is driven by the arguments, not by the return-type context you assign to.
+  rubric:
+    - { point: "a generic method declares `<T>`; type arguments are inferred from the value arguments", score: 1 }
+    - { point: "must specify explicitly when a param isn't determined by any argument (e.g. appears only in the return type)", score: 1 }
+    - { partial: "shows the syntax but no inference / when-to-specify point", score: 0.5 }
+
+- id: csharp-generics-04
+  difficulty: easy
+  weight: 1
+  tags: [generics]
+  question: >
+    What does `default(T)` produce, and why does generic code need it?
+  answer: >
+    `default(T)` (or the target-typed `default` since C# 7.1) yields the zero value
+    of `T`: `null` for reference types and nullable value types, and a zeroed instance
+    (`0`, `false`, `'\0'`, an all-zero struct) for value types. Generic code uses it
+    to produce a "no value" result without knowing whether `T` is a class or a struct.
+    Note that `default(T) == null` is meaningful only when `T` is a reference type, so
+    to compare an arbitrary `T` against its default you generally use
+    `EqualityComparer<T>.Default`.
+  rubric:
+    - { point: "default(T) = zero value: null for reference/nullable types, a zeroed instance for value types", score: 1 }
+    - { point: "lets generic code yield a default without knowing T; compare via EqualityComparer<T>.Default", score: 1 }
+    - { partial: "says default(T) is always null", score: 0.5 }
+
+- id: csharp-delegate-01
+  difficulty: easy
+  weight: 2
+  tags: [delegates-events, linq]
+  question: >
+    What are `Func`, `Action`, and `Predicate`, and what is a delegate?
+  answer: >
+    A delegate is a type-safe reference to a method — you can hold it in a variable
+    and pass it around. The built-in generic delegates cover the common shapes:
+    `Action`/`Action<T,…>` references a method returning `void`; `Func<…,TResult>`
+    references one returning a value (the last type argument is the return type);
+    `Predicate<T>` is just `Func<T, bool>`. Lambdas and method groups convert to the
+    matching delegate type, which is what lets you pass behavior to LINQ operators,
+    callbacks, and event handlers.
+  rubric:
+    - { point: "Action = void-returning delegate; Func<…,TResult> = value-returning (last type arg is the return)", score: 1 }
+    - { point: "a delegate is a type-safe method reference passed as a value (lambdas/method groups convert to it)", score: 1 }
+    - { partial: "vaguely 'function pointers' without the Action-vs-Func distinction", score: 0.5 }
+
+- id: csharp-delegate-02
+  difficulty: medium
+  weight: 2
+  tags: [delegates-events]
+  question: >
+    What does the `event` keyword add over a plain public delegate field?
+  answer: >
+    An `event` wraps a delegate but restricts what outside code can do with it: from
+    outside the declaring type you can only subscribe/unsubscribe with `+=`/`-=`; you
+    cannot assign it with `=` (which would wipe every other subscriber) and you cannot
+    invoke it. A plain public delegate field lets any caller overwrite the whole
+    invocation list or raise it themselves, breaking encapsulation. The event is the
+    encapsulated publish/subscribe form; the declaring type raises it, typically with
+    the null-conditional `Handler?.Invoke(this, e)`. The compiler generates
+    `add`/`remove` accessors behind the event.
+  rubric:
+    - { point: "an event restricts outside access to += / -= — you can't assign-over or invoke it externally", score: 1 }
+    - { point: "a plain delegate field can be overwritten or invoked by any caller (no encapsulation)", score: 1 }
+    - { partial: "'an event is just a delegate' with no access-restriction distinction", score: 0.5 }
+
+- id: csharp-delegate-03
+  difficulty: hard
+  weight: 3
+  tags: [delegates-events]
+  question: >
+    A loop creates a lambda each iteration that reads the loop variable. When do all
+    the lambdas end up seeing the same final value, and when are they safe?
+  answer: >
+    A lambda captures the variable itself, by reference, not a snapshot of its value.
+    In a C-style `for` loop there is a single loop variable shared across all
+    iterations, so every lambda created in the loop closes over that one variable and
+    later reads its final value (the classic "they all print N"). The fix is to copy
+    into a fresh per-iteration local (`int copy = i;`) and capture that. A `foreach`
+    loop is different: its iteration variable has been a fresh per-iteration variable
+    since C# 5, so capturing the `foreach` variable is safe — only the `for` variable
+    is the trap. (Note this is unlike Go, where the loop variable changed in 1.22.)
+  rubric:
+    - { point: "a lambda captures the variable by reference, not its value at capture time", score: 1 }
+    - { point: "a `for` loop's single shared variable makes all lambdas see the final value; fix with a per-iteration copy", score: 1 }
+    - { point: "a `foreach` variable is per-iteration (since C# 5), so capturing it is safe", score: 1 }
+    - { partial: "'closures capture the loop var' but thinks foreach is also broken / no per-iteration-copy fix", score: 0.5 }
+
+- id: csharp-delegate-04
+  difficulty: medium
+  weight: 2
+  tags: [delegates-events]
+  question: >
+    What is a multicast delegate, and what happens to return values and exceptions
+    when you invoke one?
+  answer: >
+    Delegates are multicast: `+=` combines several methods into one invocation list,
+    and invoking the delegate calls them in order on a single call (`-=` removes the
+    last matching one; delegates are immutable, so combining returns a new delegate).
+    For a non-void delegate only the last invoked method's return value is kept — the
+    earlier ones are discarded. If any handler throws, the exception propagates
+    immediately and the remaining handlers in the list are not called. To collect
+    every result or run all handlers regardless, iterate `GetInvocationList()`
+    yourself.
+  rubric:
+    - { point: "multicast: += builds an invocation list invoked in order on one call", score: 1 }
+    - { point: "only the last return value is kept; a throwing handler stops the rest", score: 1 }
+    - { partial: "knows += chains handlers but not the last-return / throw-stops-the-rest behavior", score: 0.5 }
+
+- id: csharp-dispose-01
+  difficulty: medium
+  weight: 3
+  tags: [disposal]
+  question: >
+    What does `IDisposable` do, and how does a `using` statement differ from a `using`
+    declaration?
+  answer: >
+    `IDisposable.Dispose()` deterministically releases resources that the GC won't
+    handle promptly — file handles, sockets, DB connections. A `using` statement,
+    `using (var f = ...) { }`, calls `Dispose` at the end of the block, and does so
+    even if the block throws (it compiles to a try/finally). A `using` declaration
+    (C# 8), `using var f = ...;`, disposes at the end of the enclosing scope instead,
+    cutting nesting. Prefer `using` over calling `Dispose` by hand so it still runs on
+    an exception.
+  rubric:
+    - { point: "using calls Dispose deterministically at block end, even on exception (try/finally)", score: 1 }
+    - { point: "a using declaration (C# 8) `using var x = …;` disposes at the end of the enclosing scope", score: 1 }
+    - { partial: "'using calls Dispose' without the exception-safety or the declaration form", score: 0.5 }
+
+- id: csharp-dispose-02
+  difficulty: medium
+  weight: 2
+  tags: [disposal, async]
+  question: >
+    What are `IAsyncDisposable` and `await using` for, and when do you use them over
+    `IDisposable`?
+  answer: >
+    `IAsyncDisposable.DisposeAsync()` (C# 8, .NET Core 3.0+) performs cleanup that is
+    itself asynchronous — flushing a buffered stream, closing a network connection —
+    without blocking a thread. You consume it with `await using` (statement or
+    declaration), which awaits `DisposeAsync` at the end of the scope. Use it when the
+    disposal work does IO; a type may implement both `IDisposable` and
+    `IAsyncDisposable`, and `await foreach` over an `IAsyncEnumerable` disposes its
+    enumerator through `DisposeAsync` too.
+  rubric:
+    - { point: "IAsyncDisposable.DisposeAsync enables asynchronous cleanup, consumed with `await using` (C# 8)", score: 1 }
+    - { point: "use it when disposal itself does IO (flush/close) so it doesn't block a thread", score: 1 }
+    - { partial: "knows `await using` exists but not DisposeAsync / why it must be async", score: 0.5 }
+
+- id: csharp-dispose-03
+  difficulty: medium
+  weight: 2
+  tags: [disposal]
+  question: >
+    What is the difference between a finalizer and `Dispose`, and when does a type
+    actually need a finalizer?
+  answer: >
+    `Dispose` is deterministic cleanup the caller triggers (normally via `using`). A
+    finalizer (`~Type()`) is a GC-run safety net that reclaims unmanaged resources if
+    `Dispose` was never called — it runs non-deterministically on the finalizer
+    thread, delays the object's collection by an extra GC cycle, and cannot be relied
+    on for timing. Most types should not have a finalizer; only a class that directly
+    owns an unmanaged handle needs one, and even then wrapping the handle in a
+    `SafeHandle` is preferred. When a type has both, `Dispose` should call
+    `GC.SuppressFinalize(this)` so the finalizer is skipped after a clean disposal.
+  rubric:
+    - { point: "Dispose = deterministic caller-driven; finalizer = non-deterministic GC safety net for unmanaged resources", score: 1 }
+    - { point: "only a type owning an unmanaged resource needs a finalizer (prefer SafeHandle); Dispose calls GC.SuppressFinalize", score: 1 }
+    - { partial: "thinks every IDisposable needs a finalizer / that a finalizer runs deterministically", score: 0.5 }
+
+- id: csharp-dispose-04
+  difficulty: hard
+  weight: 2
+  tags: [disposal]
+  question: >
+    Describe the full dispose pattern for a class that owns both managed and unmanaged
+    resources.
+  answer: >
+    The classic pattern: a public `Dispose()` calls a protected virtual
+    `Dispose(bool disposing)` and then `GC.SuppressFinalize(this)`; a finalizer
+    `~Type()` calls `Dispose(false)`. In `Dispose(bool)`, when `disposing` is true you
+    release both managed and unmanaged resources; when it is false (the finalizer
+    path) you release only the unmanaged ones, because the managed references may
+    already have been collected. Guard the body with a `_disposed` flag so it is
+    idempotent. In modern C# most types need only implement `IDisposable`/
+    `IAsyncDisposable` and hold a `SafeHandle`; the full pattern with a finalizer is
+    reserved for direct unmanaged ownership.
+  rubric:
+    - { point: "Dispose() → virtual Dispose(bool disposing) + GC.SuppressFinalize; the finalizer calls Dispose(false)", score: 1 }
+    - { point: "disposing=true frees managed+unmanaged, false frees only unmanaged; guard with a disposed flag (idempotent)", score: 1 }
+    - { partial: "implements Dispose() but not the Dispose(bool)/finalizer split", score: 0.5 }
+
+- id: csharp-span-01
+  difficulty: medium
+  weight: 2
+  tags: [collections-spans]
+  question: >
+    What are collection expressions, and what does the spread element `..` do?
+  answer: >
+    Collection expressions (C# 12) give one bracketed `[...]` syntax to create many
+    collection kinds — arrays, `List<T>`, `Span<T>`, and other collection types:
+    `int[] a = [1, 2, 3];`, `List<int> l = [1, 2, 3];`. The target type decides the
+    concrete collection and the compiler picks an efficient construction, replacing
+    `new[] { … }`, `new List<int> { … }`, and similar. The spread element `..`
+    inlines all of another sequence's items into the new collection, e.g.
+    `int[] both = [.. first, .. second, 99];`.
+  rubric:
+    - { point: "collection expressions `[...]` (C# 12) build arrays/List/Span/etc, target-typed", score: 1 }
+    - { point: "the spread element `..` inlines another collection's elements", score: 1 }
+    - { partial: "knows `[1,2,3]` array syntax but not target-typing or the spread element", score: 0.5 }
+
+- id: csharp-span-02
+  difficulty: hard
+  weight: 3
+  tags: [collections-spans]
+  question: >
+    What are `Span<T>`, `ReadOnlySpan<T>`, and `Memory<T>`, and why can't you store a
+    `Span<T>` in a field or use it across an `await`?
+  answer: >
+    `Span<T>` is a `ref struct` — a stack-only view over a contiguous block of memory
+    (an array, a `stackalloc` buffer, or unmanaged memory) that lets you slice it
+    without copying or allocating; `ReadOnlySpan<T>` is the read-only form (a `string`
+    is effectively a `ReadOnlySpan<char>`). Because it is a `ref struct` it must stay
+    on the stack: it can't be boxed, stored in a class field, captured by a lambda, or
+    live across an `await` or `yield`. `Memory<T>` is the heap-storable counterpart
+    with none of those restrictions; when you need to touch the data you get a span
+    from it via `.Span`. Use `Memory<T>` when the view must persist in a field or
+    across `await`.
+  rubric:
+    - { point: "Span<T>/ReadOnlySpan<T> = allocation-free slice/view over contiguous memory (a stack-only ref struct)", score: 1 }
+    - { point: "being a ref struct, it can't be a field, boxed, captured, or live across await/yield", score: 1 }
+    - { point: "Memory<T> is the heap-storable form for async/fields; obtain a Span via `.Span`", score: 1 }
+    - { partial: "'Span is a fast array slice' with no ref-struct / stack-only restriction", score: 0.5 }
+
+- id: csharp-span-03
+  difficulty: medium
+  weight: 2
+  tags: [collections-spans]
+  question: >
+    What does `stackalloc` do, and what must you be careful about when using it?
+  answer: >
+    `stackalloc` allocates a block of memory on the stack rather than the heap,
+    avoiding a GC allocation; since C# 7.2/8 it is assigned to a `Span<T>`:
+    `Span<int> buf = stackalloc int[16];`. That memory is freed automatically when the
+    method returns, so you must never return it or store it beyond the current frame,
+    and you must keep the size small and bounded — a large or loop-driven `stackalloc`
+    can overflow the stack. It's ideal for short-lived scratch buffers on hot paths.
+  rubric:
+    - { point: "stackalloc allocates on the stack (no GC allocation), used as a Span<T>", score: 1 }
+    - { point: "freed when the method returns — don't leak it out of the frame; keep the size bounded (stack-overflow risk)", score: 1 }
+    - { partial: "'stackalloc is fast' with no lifetime or stack-overflow caveat", score: 0.5 }
+
+- id: csharp-span-04
+  difficulty: medium
+  weight: 2
+  tags: [collections-spans]
+  question: >
+    What is the difference between an array (`T[]`) and `List<T>`, and what are
+    `params` collections?
+  answer: >
+    An array `T[]` is fixed-length contiguous storage; `List<T>` wraps a growable
+    array with amortized O(1) `Add`, resizing by allocating a larger backing array and
+    copying when it fills. Use an array for a known fixed size, interop, or spans;
+    use `List<T>` when the collection grows. As for `params`: historically a `params`
+    parameter had to be a `T[]`, forcing an array allocation on each call. C# 13 adds
+    params collections, letting a `params` parameter be `Span<T>`, `ReadOnlySpan<T>`,
+    `IEnumerable<T>`, `List<T>`, and other collection types — so the compiler can pass
+    a stack-allocated `Span` and skip the array allocation.
+  rubric:
+    - { point: "array = fixed length; List<T> = growable (amortized Add, resizes by reallocating + copying)", score: 1 }
+    - { point: "params collections (C# 13) let `params` be Span/ReadOnlySpan/IEnumerable/etc, not just T[] — avoiding the array allocation", score: 1 }
+    - { partial: "gives the array-vs-List size difference but nothing on params collections", score: 0.5 }

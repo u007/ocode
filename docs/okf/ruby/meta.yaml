@@ -1,0 +1,27 @@
+stack: ruby
+title: Ruby (3.2+)
+corpus_rev: 1
+# Version scope this corpus grades against. This is the LANGUAGE corpus — Rails
+# is the separate `ror` corpus, not covered here. Answers assume Ruby 3.2+ with
+# the 3.3/3.4 additions called out inline in the affected answers (e.g.
+# Data.define landed in 3.2, the keyword/positional separation in 3.0) so a
+# grader can tell a correct answer from a stale one.
+version_scope: ">=3.2 <3.5"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - blocks-procs        # blocks, yield, block_given?, &block, Proc vs lambda (return/arity), ->
+  - modules-mixins      # module, include vs extend vs prepend, ancestor chain/super, refinements
+  - objects-methods     # method_missing + respond_to_missing?, send/public_send, define_method, attr_*
+  - enumerable          # Enumerable, map/select/reduce/each_with_object, lazy, Comparable
+  - metaprogramming     # class << self, instance_variable_get/set, define_method vs method_missing, Class.new
+  - error-handling      # begin/rescue/ensure/retry, raise, custom exceptions, StandardError vs Exception
+  - strings-symbols     # symbols vs strings, immutability/interning, frozen string literals, %w/%i
+  - collections-idioms  # Hash.new defaults, keyword vs positional (3.0), splat/double-splat, &., Data.define
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "Gemfile" }
+    - { type: file, glob: "*.gemspec" }
+    - { type: content, glob: "**/*.rb", pattern: "def |require " }

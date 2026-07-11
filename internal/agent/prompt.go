@@ -105,7 +105,17 @@ func (a *Agent) BasePromptMessages(selectionContext string) []Message {
 				enabled[name] = p.Enabled
 			}
 		}
-		ctx = LoadContext(enabled, a.MemoryEnabled(), a.discoveryConfigEnabled())
+		activeModel := ""
+		if a.client != nil {
+			activeModel = a.client.GetModel()
+		}
+		root := a.workDir
+		if root == "" {
+			if cwd, err := os.Getwd(); err == nil {
+				root = cwd
+			}
+		}
+		ctx = LoadContext(enabled, a.MemoryEnabled(), a.discoveryConfigEnabled(), activeModel, root)
 	}
 	if strings.TrimSpace(ctx) != "" {
 		msgs = append(msgs, Message{Role: "system", Content: promptContextMarker + "\nContext and rules:\n" + ctx})

@@ -16,7 +16,10 @@ import yaml
 
 OKF = pathlib.Path(__file__).resolve().parent.parent          # docs/okf
 OUT = OKF / "_prompts"
-STACKS = ["react", "rust", "tanstack", "nextjs", "golang", "conduct"]
+STACKS = [
+    "react", "rust", "tanstack", "nextjs", "golang", "conduct", "php",
+    "csharp", "vbnet", "dotnet", "nestjs", "python", "ruby", "ror", "elixir",
+]
 
 HEADER = """# {title} — Kaizen blind answer sheet (questions only)
 
@@ -60,6 +63,11 @@ def render(stack: str) -> str:
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     for stack in STACKS:
+        # Skip stacks whose corpus isn't authored yet (incremental rollout) —
+        # logged, never silent, so a genuinely-missing corpus is still visible.
+        if not (OKF / stack / "questions.yaml").exists():
+            print(f"skip {stack}: no questions.yaml yet (corpus not authored)")
+            continue
         sheet = render(stack)
         dest = OUT / f"{stack}.md"
         dest.write_text(sheet)

@@ -1,0 +1,27 @@
+stack: vbnet
+title: VB.NET (VB 16, .NET Framework 4.x / .NET 8)
+corpus_rev: 1
+# Version scope this corpus grades against. VB.NET is feature-stable: Microsoft
+# supports the language but is not adding new language features (the last real
+# additions were ~VB 15/16 on .NET Core 3), so answers assume modern VB on
+# current .NET and version-gating rarely matters. What DOES matter is VB idiom —
+# VB syntax differs sharply from C#, so answers must be genuinely-correct VB, not
+# C# translated. The .NET platform/BCL is graded by the separate `dotnet` corpus.
+version_scope: "VB 16 (.NET Framework 4.x and .NET 8)"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - syntax-basics       # Dim..As, Option Strict/Explicit/Infer, modules vs classes, Sub vs Function, no semicolons, line continuation
+  - properties          # full vs auto-implemented, ReadOnly/WriteOnly, default properties, backing fields
+  - nullability         # Nothing (value-type default vs null), Nullable(Of T)/?, If(a,b) vs IIf, Is/IsNot Nothing
+  - error-handling      # Try/Catch/Finally, Catch..When filters, Throw/rethrow, structured vs On Error Goto/Err
+  - linq-query          # query syntax (From/Where/Select/Group By Into/Aggregate), method syntax, deferred execution
+  - events              # WithEvents+Handles, AddHandler/RemoveHandler, RaiseEvent, Event declaration, AddressOf
+  - oop                 # Inherits/Implements, Overridable/Overrides/MustInherit/NotOverridable, Shared, Me/MyBase/MyClass, Overloads
+  - conversions-arrays  # Option Strict conversions, CType/DirectCast/TryCast, widening vs narrowing, 0-based arrays, ReDim Preserve, CInt/CStr, & concat
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "*.vbproj" }
+    - { type: content, glob: "**/*.vb", pattern: "Imports |Namespace " }

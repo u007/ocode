@@ -1,0 +1,675 @@
+# Ruby on Rails benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+# Framework only — the Ruby language is graded by the separate `ruby` corpus.
+# Version-gated behavior is stated inline (Rails 7.1 `normalizes`, Rails 8.0
+# authentication generator, form_with local-by-default since 6.1).
+
+- id: ror-activerecord-01
+  difficulty: easy
+  weight: 3
+  tags: [activerecord]
+  question: >
+    In modern Rails, is a `belongs_to` association required by default? What
+    happens if the parent is missing, and how do you make it optional?
+  answer: >
+    Yes. Since Rails 5 `config.active_record.belongs_to_required_by_default` is
+    true, so `belongs_to :author` adds a presence validation — saving a record
+    with no author fails validation. Declare `belongs_to :author, optional: true`
+    to allow a nil foreign key (e.g. a nullable/polymorphic-optional parent).
+  rubric:
+    - { point: "belongs_to is required by default (adds a presence validation) in modern Rails", score: 1 }
+    - { point: "optional: true makes it allow a nil parent", score: 1 }
+    - { partial: "says belongs_to is optional by default (pre-5 behavior)", score: 0.5 }
+
+- id: ror-activerecord-02
+  difficulty: medium
+  weight: 2
+  tags: [activerecord]
+  question: >
+    What is the difference between `has_many :through` and
+    `has_and_belongs_to_many`, and which should you reach for?
+  answer: >
+    `has_and_belongs_to_many` uses a bare join table with no model — you can't
+    add columns, validations, or callbacks to the association itself.
+    `has_many :through` goes through a real join model (e.g. `Membership`), so
+    the join row is a first-class record you can validate, timestamp, and add
+    attributes to. Prefer `:through` in almost all cases; reach for HABTM only
+    for a truly attributeless many-to-many.
+  rubric:
+    - { point: "HABTM = join table with no model; can't add columns/validations/callbacks", score: 1 }
+    - { point: "has_many :through = real join model you can add attributes/validations to", score: 1 }
+    - { point: "prefer :through except for a pure attributeless join", score: 1 }
+    - { partial: "names both but doesn't explain the join-model difference", score: 0.5 }
+
+- id: ror-activerecord-03
+  difficulty: medium
+  weight: 2
+  tags: [activerecord]
+  question: >
+    On a `has_many`, what is the difference between `dependent: :destroy`,
+    `dependent: :delete_all`, and `dependent: :nullify`?
+  answer: >
+    `:destroy` loads each associated record and calls `destroy` on it, so their
+    callbacks/validations and nested `dependent:` cascades run — safe but N
+    queries. `:delete_all` issues a single `DELETE` in SQL, skipping callbacks
+    entirely — fast but bypasses child cleanup. `:nullify` just sets the child
+    foreign key to NULL, leaving the rows. Choose `:destroy` when children have
+    their own cleanup, `:delete_all` for speed when they don't.
+  rubric:
+    - { point: ":destroy instantiates and runs each child's destroy callbacks (per-record)", score: 1 }
+    - { point: ":delete_all is a single SQL DELETE that skips callbacks", score: 1 }
+    - { point: ":nullify sets the child FK to NULL instead of deleting", score: 1 }
+    - { partial: "says destroy vs delete without the callbacks distinction", score: 0.5 }
+
+- id: ror-activerecord-04
+  difficulty: hard
+  weight: 3
+  tags: [activerecord]
+  question: >
+    `validates :email, uniqueness: true` is on your model. Why is it not enough
+    to guarantee uniqueness, and what must you add?
+  answer: >
+    The uniqueness validator does a SELECT before INSERT, so two concurrent
+    requests can both pass the check and both insert — a race condition. You must
+    back it with a database unique index (`add_index :users, :email, unique:
+    true`); the DB then rejects the duplicate and Rails surfaces it as an
+    `ActiveRecord::RecordNotUnique`. The validation is for friendly error
+    messages; the index is the real guarantee.
+  rubric:
+    - { point: "validator SELECT-then-INSERT has a race → two concurrent inserts can both pass", score: 1 }
+    - { point: "add a DB unique index as the real guarantee", score: 1 }
+    - { partial: "notices duplicates can slip through but no unique-index fix", score: 0.5 }
+
+- id: ror-activerecord-05
+  difficulty: medium
+  weight: 1
+  tags: [activerecord]
+  question: >
+    What does the `normalizes` macro (Rails 7.1) do, and why is it better than
+    doing the same work in a `before_save` callback?
+  answer: >
+    `normalizes :email, with: ->(e) { e.strip.downcase }` (Rails 7.1+)
+    declaratively transforms an attribute whenever it is assigned or the record
+    is saved. Crucially it also normalizes values used in finders — e.g.
+    `User.find_by(email: " A@B.com ")` normalizes the query — which a plain
+    `before_save` doesn't. It centralizes the rule instead of scattering
+    `strip`/`downcase` across callbacks and lookups.
+  rubric:
+    - { point: "normalizes (Rails 7.1) declaratively transforms an attribute on assignment/save", score: 1 }
+    - { point: "also applies to finder queries (find_by), unlike a before_save callback", score: 1 }
+    - { partial: "'it downcases the field' without the finder or version detail", score: 0.5 }
+
+- id: ror-querying-01
+  difficulty: hard
+  weight: 3
+  tags: [querying]
+  question: >
+    Explain the difference between `includes`, `preload`, and `eager_load` for
+    loading an association, and how each hits the database.
+  answer: >
+    `preload` always loads the association in a SEPARATE query (one per
+    association) — it can't be referenced in a WHERE. `eager_load` uses a single
+    `LEFT OUTER JOIN`, so you CAN filter/order on the joined table. `includes` is
+    the smart default: it preloads (separate queries) normally, but if you
+    reference the association in a `where`/`order` — via `references(:x)` or an
+    SQL-string condition — it automatically switches to `eager_load` (the JOIN).
+    All three solve N+1 by loading the association up front.
+  rubric:
+    - { point: "preload = separate query per association (can't filter on it)", score: 1 }
+    - { point: "eager_load = single LEFT OUTER JOIN (can filter/order on the association)", score: 1 }
+    - { point: "includes preloads by default but promotes to eager_load when the association is referenced", score: 1 }
+    - { partial: "'they all fix N+1' without the separate-query vs JOIN distinction", score: 0.5 }
+
+- id: ror-querying-02
+  difficulty: medium
+  weight: 3
+  tags: [querying]
+  question: >
+    `@posts.each { |p| puts p.author.name }` fires one query per post for the
+    author. What is this called and how do you fix it?
+  answer: >
+    It's the N+1 query problem: one query for the posts, then N more (one per
+    post) to lazy-load each author. Fix it by eager loading the association up
+    front — `Post.includes(:author)` — so the authors come back in one (or a
+    JOIN) query instead of N. Tools like the Bullet gem or the built-in
+    `ActiveRecord` strict-loading mode help catch these.
+  rubric:
+    - { point: "identifies it as the N+1 query problem (1 + N lazy loads)", score: 1 }
+    - { point: "fix with includes/preload/eager_load to load the association up front", score: 1 }
+    - { partial: "'add includes' without naming/explaining N+1", score: 0.5 }
+
+- id: ror-querying-03
+  difficulty: medium
+  weight: 2
+  tags: [querying]
+  question: >
+    Contrast `find`, `find_by`, and `where`. Which return a record vs a relation,
+    and what does each do when nothing matches?
+  answer: >
+    `find(id)` looks up by primary key and RAISES `ActiveRecord::RecordNotFound`
+    if missing. `find_by(attrs)` returns the first matching record or `nil`.
+    `where(attrs)` returns a lazy `ActiveRecord::Relation` (zero or more) — it
+    doesn't hit the DB until you enumerate/`to_a`/`first` it, and returns an empty
+    relation, never nil, when nothing matches. So `where(...).first` ≈ `find_by`.
+  rubric:
+    - { point: "find raises RecordNotFound; find_by returns nil when missing", score: 1 }
+    - { point: "where returns a lazy Relation (not a record); empty relation, not nil, on no match", score: 1 }
+    - { partial: "distinguishes find vs find_by but misses the lazy-relation point", score: 0.5 }
+
+- id: ror-querying-04
+  difficulty: medium
+  weight: 2
+  tags: [querying]
+  question: >
+    You only need the email column of every user. Why is `User.pluck(:email)`
+    better than `User.all.map(&:email)`?
+  answer: >
+    `pluck` selects only that column and returns a plain array of values —
+    `SELECT email FROM users` — never instantiating ActiveRecord objects.
+    `User.all.map(&:email)` loads every column, builds a full model object per
+    row, then throws all but the email away — far more memory and allocation.
+    Use `pluck` (or `select(:email)` if you still need model objects) to avoid
+    materializing whole records you don't need.
+  rubric:
+    - { point: "pluck selects only the column(s) and returns raw values, no model objects instantiated", score: 1 }
+    - { point: "map(&:email) loads all columns and builds a full object per row (wasteful)", score: 1 }
+    - { partial: "'pluck is faster' with no instantiation/column-selection reason", score: 0.5 }
+
+- id: ror-callbacks-transactions-01
+  difficulty: hard
+  weight: 3
+  tags: [callbacks-transactions]
+  question: >
+    You need to enqueue an email / call an external API after a record is saved.
+    Why is `after_commit` the right hook and `after_save` the wrong one?
+  answer: >
+    `after_save` runs INSIDE the still-open DB transaction. If anything later in
+    the transaction rolls back, the record is gone but your email/job already
+    fired — and jobs can even run before the row is visible/committed.
+    `after_commit` runs only after the transaction actually commits, so the data
+    is durable and visible before you trigger the side effect. Use `after_commit`
+    (or `after_create_commit`/`after_update_commit`) for anything that touches
+    the world outside the DB.
+  rubric:
+    - { point: "after_save runs inside the transaction; a later rollback leaves the side effect fired but the row gone", score: 1 }
+    - { point: "after_commit runs only after commit → data durable/visible before the external effect", score: 1 }
+    - { partial: "'use after_commit for external stuff' with no transaction/rollback reason", score: 0.5 }
+
+- id: ror-callbacks-transactions-02
+  difficulty: easy
+  weight: 2
+  tags: [callbacks-transactions]
+  question: >
+    What is the difference between `save` and `save!` (and `create` vs
+    `create!`)?
+  answer: >
+    `save` returns `true`/`false`: on a validation failure it returns false and
+    you must check the return value (errors sit in `record.errors`). `save!`
+    RAISES `ActiveRecord::RecordInvalid` on failure instead of returning false.
+    Use `save!` when a failure is exceptional and should abort (e.g. inside a
+    transaction/service), and `save` when you're branching on success in a
+    controller. Same relationship for `create`/`create!` and `update`/`update!`.
+  rubric:
+    - { point: "save returns true/false (must check); save! raises RecordInvalid on failure", score: 1 }
+    - { point: "use save! when failure should abort (e.g. in a transaction/service)", score: 1 }
+    - { partial: "'! raises an error' without the check-return-value contrast", score: 0.5 }
+
+- id: ror-callbacks-transactions-03
+  difficulty: hard
+  weight: 3
+  tags: [callbacks-transactions]
+  question: >
+    Inside `ActiveRecord::Base.transaction do ... end`, how do you force a
+    rollback, and what is special about raising `ActiveRecord::Rollback`?
+  answer: >
+    Any exception that escapes the block rolls the transaction back and then
+    propagates to the caller. `ActiveRecord::Rollback` is the exception: it also
+    rolls back, but Rails SWALLOWS it at the transaction boundary, so the block
+    returns normally (nil) without re-raising — useful to abort silently. To wrap
+    multiple writes atomically, do them in one `transaction` block so all commit
+    or all roll back together; `save!`/`create!` inside it convert failures into
+    rollbacks.
+  rubric:
+    - { point: "any escaping exception rolls back and re-propagates", score: 1 }
+    - { point: "ActiveRecord::Rollback rolls back but is swallowed (not re-raised) at the boundary", score: 1 }
+    - { partial: "'raise to roll back' without the Rollback-is-swallowed distinction", score: 0.5 }
+
+- id: ror-callbacks-transactions-04
+  difficulty: medium
+  weight: 1
+  tags: [callbacks-transactions]
+  question: >
+    State the order in which the create callbacks fire when you call
+    `record.save` on a new record, and why heavy callbacks are a design smell.
+  answer: >
+    Order: before_validation → after_validation → before_save → before_create
+    → (the INSERT) → after_create → after_save → after_commit (around_* wrap the
+    save/create). Heavy callbacks (sending mail, calling APIs, touching other
+    models) couple persistence to side effects, run implicitly on every save,
+    fire in tests/seeds/imports unexpectedly, and are hard to skip — extracting
+    that logic into an explicit service object or `after_commit` job is cleaner.
+  rubric:
+    - { point: "order: before_validation → after_validation → before_save → before_create → after_create → after_save → after_commit", score: 1 }
+    - { point: "heavy/side-effecting callbacks are a smell (implicit, fire everywhere, hard to skip) → prefer a service/after_commit", score: 1 }
+    - { partial: "roughly right order but misplaces validation or commit steps", score: 0.5 }
+
+- id: ror-migrations-schema-01
+  difficulty: medium
+  weight: 2
+  tags: [migrations-schema]
+  question: >
+    When can a migration use a single `change` method, and when do you need
+    separate `up`/`down` methods?
+  answer: >
+    Use `change` when every operation is reversible and Rails can auto-invert it
+    — `create_table`, `add_column`, `add_index`, `add_reference`, etc. Rails
+    figures out the `down` automatically. Drop to explicit `up`/`down` (or wrap
+    the irreversible bit in `reversible`) when an operation can't be
+    auto-reversed — raw `execute` SQL, data backfills, or a `remove_column`
+    without its type/options — so `db:rollback` knows how to undo it. An
+    un-invertible `change` raises `IrreversibleMigration` on rollback.
+  rubric:
+    - { point: "change works for auto-reversible operations (Rails infers the down)", score: 1 }
+    - { point: "use up/down (or reversible) for irreversible ops: raw SQL, data changes, un-invertible removes", score: 1 }
+    - { partial: "'change is simpler' without knowing when it can't be reversed", score: 0.5 }
+
+- id: ror-migrations-schema-02
+  difficulty: medium
+  weight: 2
+  tags: [migrations-schema]
+  question: >
+    What is the difference between `schema.rb` and `structure.sql`, and when
+    would you switch to `structure.sql`?
+  answer: >
+    Both are the generated canonical dump of the current schema, loaded by
+    `db:schema:load` to build a fresh/test DB without replaying every migration.
+    `schema.rb` is database-agnostic Ruby but can only express what the Rails DSL
+    supports. Switch to `structure.sql` (set `config.active_record.schema_format
+    = :sql`) when you use DB-specific features the Ruby dump can't represent —
+    Postgres check constraints, triggers, functions, custom types, partial/exotic
+    indexes. Both should be committed to git.
+  rubric:
+    - { point: "both are the canonical schema dump loaded to build a fresh/test DB (not replaying migrations)", score: 1 }
+    - { point: "switch to structure.sql for DB-specific features the Ruby DSL can't express (constraints/triggers/types)", score: 1 }
+    - { partial: "'one is Ruby one is SQL' without the DSL-limitation reason", score: 0.5 }
+
+- id: ror-migrations-schema-03
+  difficulty: hard
+  weight: 3
+  tags: [migrations-schema]
+  question: >
+    Name two migration operations that are dangerous on a large table in
+    production and how to do them safely.
+  answer: >
+    (1) `add_column ..., default: X, null: false` on a big table: on older
+    Postgres/MySQL this rewrites/locks every row. Add the column, backfill in
+    batches, then add the NOT NULL constraint separately (modern Postgres 11+
+    makes constant defaults cheap, but backfilling a computed value still needs
+    batching). (2) `add_index` takes a write lock while it builds — use
+    `add_index ..., algorithm: :concurrently` (with
+    `disable_ddl_transaction!`) on Postgres so it doesn't block writes. Also never
+    do data backfills in the same transaction as the DDL. The `strong_migrations`
+    gem flags these.
+  rubric:
+    - { point: "adding a column with default / NOT NULL can lock-rewrite a large table → backfill in batches, add constraint separately", score: 1 }
+    - { point: "building an index locks writes → add_index algorithm: :concurrently (disable_ddl_transaction!)", score: 1 }
+    - { partial: "names a risk but no safe approach (batching / concurrently)", score: 0.5 }
+
+- id: ror-migrations-schema-04
+  difficulty: easy
+  weight: 2
+  tags: [migrations-schema]
+  question: >
+    What does `add_reference :comments, :post, foreign_key: true` generate, and
+    why add a foreign key AND an index?
+  answer: >
+    It adds a `post_id` bigint column, an index on it, and a database foreign-key
+    constraint to `posts`. The index makes lookups/joins on `post_id` fast (and
+    Rails adds it by default for references). The FK constraint enforces
+    referential integrity at the DB level — you can't insert a comment pointing at
+    a nonexistent post, and it complements (doesn't replace) the `belongs_to`
+    association in the model. Use `null: false` if the reference is required.
+  rubric:
+    - { point: "adds post_id column + an index on it + a DB foreign-key constraint", score: 1 }
+    - { point: "index for fast lookups/joins; FK enforces referential integrity at the DB level", score: 1 }
+    - { partial: "'adds the column' without the index or FK-integrity purpose", score: 0.5 }
+
+- id: ror-controllers-routing-01
+  difficulty: easy
+  weight: 3
+  tags: [controllers-routing]
+  question: >
+    What does `resources :photos` create, and which controller actions do the
+    routes map to?
+  answer: >
+    It generates the seven RESTful routes mapping HTTP verb + path to controller
+    actions: GET /photos → index, GET /photos/new → new, POST /photos → create,
+    GET /photos/:id → show, GET /photos/:id/edit → edit,
+    PATCH/PUT /photos/:id → update, DELETE /photos/:id → destroy. It also creates
+    named URL helpers (`photos_path`, `photo_path(id)`, `new_photo_path`, etc.).
+    `resource :account` (singular) omits index and the `:id`.
+  rubric:
+    - { point: "seven RESTful actions: index/new/create/show/edit/update/destroy", score: 1 }
+    - { point: "maps HTTP verb + path to each action (and generates named path helpers)", score: 1 }
+    - { partial: "'it makes REST routes' without listing the actions/verbs", score: 0.5 }
+
+- id: ror-controllers-routing-02
+  difficulty: medium
+  weight: 3
+  tags: [controllers-routing]
+  question: >
+    What problem do Strong Parameters solve, and how do `require` and `permit`
+    work in a `params.require(:user).permit(:name, :email)` call?
+  answer: >
+    They prevent mass-assignment vulnerabilities: you can't pass a raw params
+    hash to `update`/`create` because an attacker could set fields you didn't
+    intend (e.g. `admin`). `require(:user)` asserts the `:user` key is present
+    (raising `ParameterMissing` if not) and returns that nested hash; `permit`
+    whitelists exactly which attributes may pass through — anything not listed is
+    filtered out. For arrays/nested params you permit them explicitly, e.g.
+    `permit(:name, tag_ids: [])`.
+  rubric:
+    - { point: "prevent mass-assignment: only whitelisted attributes reach the model", score: 1 }
+    - { point: "require asserts/extracts the key (raises if missing); permit whitelists the allowed attributes", score: 1 }
+    - { partial: "'they filter params' without the mass-assignment security reason", score: 0.5 }
+
+- id: ror-controllers-routing-03
+  difficulty: easy
+  weight: 2
+  tags: [controllers-routing]
+  question: >
+    What is `before_action`, and what does returning early / rendering or
+    redirecting inside one do to the action?
+  answer: >
+    `before_action :method` runs a filter before controller actions (scope it
+    with `only:`/`except:`). It's used for shared setup (`set_post` to load a
+    record) and gatekeeping (`require_login`). If the filter renders or redirects
+    (or throws `:abort`), Rails HALTS the chain — the action itself never runs.
+    That's how `require_login` redirects unauthenticated users without the action
+    executing. Filters run in declaration order.
+  rubric:
+    - { point: "runs before actions for shared setup/auth (scoped with only:/except:)", score: 1 }
+    - { point: "rendering/redirecting in a before_action halts the chain → the action doesn't run", score: 1 }
+    - { partial: "'runs before the action' without the halt-on-render behavior", score: 0.5 }
+
+- id: ror-controllers-routing-04
+  difficulty: medium
+  weight: 2
+  tags: [controllers-routing]
+  question: >
+    In a routes block, what is the difference between a `member` route and a
+    `collection` route, and what HTTP status should a successful API `create`
+    return?
+  answer: >
+    Inside `resources :photos`, a `member` route acts on a single record and
+    includes the `:id` (e.g. `PATCH /photos/:id/publish`); a `collection` route
+    acts on the whole set with no id (e.g. `GET /photos/search`). For a
+    successful create that made a resource, return `201 Created` (with a Location
+    header); a successful update/read is `200 OK`, a no-body success `204 No
+    Content`, validation failure `422 Unprocessable Entity`, and missing `404`.
+  rubric:
+    - { point: "member = per-record route with :id; collection = whole-set route without :id", score: 1 }
+    - { point: "successful create returns 201 Created (not 200)", score: 1 }
+    - { partial: "gets member/collection but wrong/absent status code (or vice versa)", score: 0.5 }
+
+- id: ror-controllers-routing-05
+  difficulty: medium
+  weight: 1
+  tags: [controllers-routing]
+  question: >
+    What does Rails 8's built-in authentication generator give you, and how does
+    it differ from reaching for Devise?
+  answer: >
+    Rails 8.0 ships `bin/rails generate authentication`, which scaffolds a
+    session-based auth system: a `User` with `has_secure_password` (bcrypt),
+    `Session` model, sign-in/out controllers, a `Current` object, and password
+    reset with mailer — all editable app code you own, no gem. It's deliberately
+    minimal versus Devise's larger, configuration-heavy, modular engine. Use the
+    generator for a simple app you want full control over; Devise when you need
+    its breadth (confirmable, OmniAuth, lockable, etc.).
+  rubric:
+    - { point: "Rails 8 `bin/rails generate authentication` scaffolds session-based auth (has_secure_password, sessions, password reset) as owned app code", score: 1 }
+    - { point: "it's minimal/no-gem vs Devise's larger configurable engine", score: 1 }
+    - { partial: "'Rails 8 has auth now' without what it generates or the Devise contrast", score: 0.5 }
+
+- id: ror-views-helpers-01
+  difficulty: easy
+  weight: 2
+  tags: [views-helpers]
+  question: >
+    How do you render a partial with local variables, and what does
+    `render @posts` (a collection) do?
+  answer: >
+    `render partial: "post", locals: { post: @post }` (or the shorthand
+    `render "post", post: @post`) renders `_post.html.erb` with `post` available
+    as a local. `render @posts` renders `_post` once per element, assigning each
+    to the `post` local automatically (inferred from the partial name) and
+    inserting them in order — the idiomatic way to render a list. Prefer explicit
+    `locals:` over instance variables in partials for reusability.
+  rubric:
+    - { point: "render partial with locals: {} (or shorthand) passes local vars to _partial", score: 1 }
+    - { point: "render @posts renders the collection: _post partial once per element with the item as a local", score: 1 }
+    - { partial: "knows partials but not collection rendering or locals passing", score: 0.5 }
+
+- id: ror-views-helpers-02
+  difficulty: medium
+  weight: 2
+  tags: [views-helpers]
+  question: >
+    What does `form_with` unify, and does it generate a remote (AJAX) or a local
+    (standard) form by default in current Rails?
+  answer: >
+    `form_with` (Rails 5.1+) unified the older `form_for` (model-backed) and
+    `form_tag` (URL-backed) into one helper — `form_with model: @post` infers the
+    URL and method (POST for new, PATCH for persisted) and namespaces fields.
+    Since Rails 6.1 it generates a LOCAL (standard, full-page) form by default;
+    earlier (5.1) it defaulted to remote/`data-remote` (AJAX). Add
+    `data: { turbo: false }` or `local:`-style opts to change submission behavior.
+  rubric:
+    - { point: "form_with unifies form_for + form_tag (model- or url-backed) into one helper", score: 1 }
+    - { point: "defaults to a local/standard form since Rails 6.1 (was remote/AJAX in 5.1)", score: 1 }
+    - { partial: "explains form_with but says it defaults to remote/AJAX in current Rails", score: 0.5 }
+
+- id: ror-views-helpers-03
+  difficulty: medium
+  weight: 3
+  tags: [views-helpers]
+  question: >
+    How does Rails protect against CSRF, and what does `form_with` do for you
+    automatically?
+  answer: >
+    Rails embeds a per-session authenticity token; `protect_from_forgery`
+    (on by default via `ApplicationController`) verifies it on every
+    non-GET request and rejects mismatches
+    (`ActionController::InvalidAuthenticityToken`). `form_with` (and `form_tag`)
+    automatically inject the token as a hidden `authenticity_token` field, so
+    forms just work. For JS/AJAX, the token is also in a `<meta
+    name="csrf-token">` tag; for JSON APIs authenticated by token/header instead
+    of cookies you typically skip CSRF (`null_session`).
+  rubric:
+    - { point: "per-session authenticity token verified on non-GET requests (protect_from_forgery, on by default)", score: 1 }
+    - { point: "form_with auto-includes the hidden authenticity_token field", score: 1 }
+    - { partial: "'Rails has CSRF protection' without the token / form_with auto-inclusion", score: 0.5 }
+
+- id: ror-views-helpers-04
+  difficulty: medium
+  weight: 2
+  tags: [views-helpers]
+  question: >
+    A view iterates `@posts` and prints `post.author.name`, causing N+1 queries.
+    Where does the fix belong, and why not "fix" it in the view?
+  answer: >
+    The fix belongs in the controller/query, not the template: eager-load the
+    association where the collection is built — `@posts =
+    Post.includes(:author)`. Views should stay declarative; trying to patch it in
+    the template (e.g. preloading manually mid-loop) hides the data access and
+    still triggers per-row queries. Keep queries in the model/controller so the
+    view just renders already-loaded data. Rendering a collection partial doesn't
+    fix N+1 by itself — the eager load does.
+  rubric:
+    - { point: "eager-load in the controller/query (Post.includes(:author)), not in the view", score: 1 }
+    - { point: "views should render already-loaded data; query logic stays out of templates", score: 1 }
+    - { partial: "'add includes' without noting it belongs in the controller not the view", score: 0.5 }
+
+- id: ror-concerns-services-01
+  difficulty: medium
+  weight: 2
+  tags: [concerns-services]
+  question: >
+    What is an `ActiveSupport::Concern`, and what does its `included do ... end`
+    block let you do that a plain module mixin doesn't cleanly?
+  answer: >
+    A concern is a module (in `app/models/concerns` or `controllers/concerns`)
+    extended with `ActiveSupport::Concern` to package reusable model/controller
+    behavior. `included do ... end` runs in the context of the including CLASS, so
+    the concern can call class-level macros — `validates`, `has_many`,
+    `before_action`, scopes — on the host. It also auto-handles module
+    dependencies and gives a clean `class_methods do ... end` block, avoiding the
+    manual `self.included(base)` / `base.extend` boilerplate.
+  rubric:
+    - { point: "a module (ActiveSupport::Concern) packaging reusable model/controller behavior", score: 1 }
+    - { point: "included do block runs in the host class → can call class macros (validates/has_many/scopes); avoids self.included boilerplate", score: 1 }
+    - { partial: "'it's a shared module' without the included-block / class-macro capability", score: 0.5 }
+
+- id: ror-concerns-services-02
+  difficulty: medium
+  weight: 2
+  tags: [concerns-services]
+  question: >
+    What is a service object (a PORO service), and when should you extract one
+    instead of adding another model or controller method?
+  answer: >
+    A service object is a plain Ruby object (no framework base class) that
+    encapsulates one business operation/use-case — e.g. `RegisterUser.call(...)`
+    or `ProcessPayment.new(order).call` — coordinating multiple models,
+    transactions, and external calls behind a single entry point. Extract one
+    when logic spans several models, involves multi-step workflows/side effects,
+    or is too fat for a controller yet doesn't belong to a single model's core
+    responsibility. It keeps controllers thin and models focused, and is easy to
+    test in isolation.
+  rubric:
+    - { point: "a PORO encapsulating one business operation/use-case (single call entry point)", score: 1 }
+    - { point: "extract when logic spans multiple models / multi-step workflow / doesn't fit one model — keeps controllers thin", score: 1 }
+    - { partial: "'a class for business logic' without when/why to extract it", score: 0.5 }
+
+- id: ror-concerns-services-03
+  difficulty: easy
+  weight: 2
+  tags: [concerns-services]
+  question: >
+    Explain the "skinny controller, fat model" guideline and the failure mode it
+    can lead to if taken too far.
+  answer: >
+    Controllers should only handle HTTP concerns — params, auth, invoking
+    logic, choosing a response — and delegate business logic downward, keeping
+    actions short. "Fat model" pushes that logic into ActiveRecord models.
+    Overdone, models become God objects: thousands of lines, tangled callbacks,
+    and unrelated responsibilities crammed into one class. The modern refinement
+    is skinny controller + focused models, with extra logic split into concerns,
+    service objects, form objects, and query objects rather than one giant model.
+  rubric:
+    - { point: "controllers stay thin (HTTP/params/response) and delegate business logic out of the action", score: 1 }
+    - { point: "over-fat models become God objects → split into concerns/services/POROs instead", score: 1 }
+    - { partial: "states the slogan without the God-object failure mode / modern refinement", score: 0.5 }
+
+- id: ror-concerns-services-04
+  difficulty: medium
+  weight: 1
+  tags: [concerns-services]
+  question: >
+    A concern and a service object both hold logic out of the controller. What is
+    the key difference in how they're used?
+  answer: >
+    A concern is a MIXIN: its methods become instance/class methods ON the model
+    or controller that includes it, sharing that object's state — good for
+    cross-cutting behavior reused across several models (e.g. `Taggable`,
+    `Archivable`). A service object is a SEPARATE object you instantiate/call to
+    run a specific operation; it doesn't add methods to a model and holds its own
+    collaborators. Use a concern to share behavior across records, a service to
+    orchestrate a use-case across records.
+  rubric:
+    - { point: "concern is a mixin adding methods to the host class (shares its state) for shared behavior across models", score: 1 }
+    - { point: "service is a standalone object you call for one operation (doesn't extend the model)", score: 1 }
+    - { partial: "'both hold logic' without the mixin-vs-standalone distinction", score: 0.5 }
+
+- id: ror-caching-jobs-01
+  difficulty: hard
+  weight: 2
+  tags: [caching-jobs]
+  question: >
+    What is Russian-doll caching in Rails views, and why does using the record
+    itself in the cache key make invalidation automatic?
+  answer: >
+    Russian-doll caching nests fragment caches: `<% cache post do %>` around a
+    post, with each comment cached inside. Passing an object to `cache`
+    (`cache post`) builds a key from its `cache_key_with_version` — the id plus
+    `updated_at` — so when the post is touched/updated its key changes and the
+    fragment is regenerated automatically; unchanged inner fragments stay cached.
+    Use `touch: true` on associations so a child update bumps the parent's
+    `updated_at` and busts the outer doll. No manual expiry needed.
+  rubric:
+    - { point: "nested fragment caches; cache key derived from the record (id + updated_at / cache_key_with_version)", score: 1 }
+    - { point: "updating the record changes its key → auto-invalidation; touch: true propagates to parent fragments", score: 1 }
+    - { partial: "'caches view fragments' without the record-keyed auto-invalidation", score: 0.5 }
+
+- id: ror-caching-jobs-02
+  difficulty: medium
+  weight: 2
+  tags: [caching-jobs]
+  question: >
+    What does ActiveJob provide, and what is the role of the queue adapter? Is
+    the default adapter suitable for production?
+  answer: >
+    ActiveJob is a uniform interface for declaring and enqueuing background jobs
+    independent of the queuing backend. The queue adapter is the actual engine —
+    Sidekiq, Solid Queue, Resque, Delayed Job, etc. — set via
+    `config.active_job.queue_adapter`; you write jobs once and swap backends.
+    The default `:async` adapter runs jobs on an in-process thread pool and DROPS
+    pending jobs on restart, so it's fine for development but NOT production —
+    use a persistent adapter (Solid Queue ships as the Rails 8 default, Sidekiq,
+    etc.) there.
+  rubric:
+    - { point: "ActiveJob = backend-agnostic interface for enqueuing background jobs", score: 1 }
+    - { point: "adapter is the real backend (Sidekiq/Solid Queue/...); default :async is in-memory/loses jobs → not for production", score: 1 }
+    - { partial: "describes ActiveJob but thinks the default adapter is production-ready", score: 0.5 }
+
+- id: ror-caching-jobs-03
+  difficulty: hard
+  weight: 2
+  tags: [caching-jobs]
+  question: >
+    Background jobs can run more than once (retries, at-least-once delivery). Why
+    must jobs be idempotent, and how do you make one idempotent?
+  answer: >
+    A worker can crash after doing work but before acking, or a job can be
+    retried on error, so the same job may execute multiple times — a
+    non-idempotent job (e.g. "charge the card", "send email") would double-charge
+    or double-send. Make jobs idempotent: guard on state before acting (skip if
+    already processed), use a unique/idempotency key or a DB unique constraint,
+    or upsert instead of insert, so a re-run is a no-op. Pass IDs (not whole
+    objects) as arguments and re-load the record so you act on current data.
+  rubric:
+    - { point: "jobs can run >1 time (retries / at-least-once) → non-idempotent work double-charges/double-sends", score: 1 }
+    - { point: "make idempotent: guard on state / idempotency key / unique constraint / upsert so re-runs are no-ops", score: 1 }
+    - { partial: "'jobs should be idempotent' without why (retries) or how", score: 0.5 }
+
+- id: ror-caching-jobs-04
+  difficulty: easy
+  weight: 1
+  tags: [caching-jobs]
+  question: >
+    What is the difference between `MyJob.perform_later` and
+    `MyJob.perform_now`, and why pass a record's id rather than the record?
+  answer: >
+    `perform_later` ENQUEUES the job to run asynchronously on a worker via the
+    queue adapter; `perform_now` runs `perform` synchronously in the current
+    process/thread, right away (useful in tests or when you truly need it inline).
+    Pass an id, not the record: ActiveJob serializes arguments (GlobalID for
+    models), and passing the id and re-fetching inside the job avoids stale data
+    and serialization issues, so the job acts on the record's current state when
+    it actually runs.
+  rubric:
+    - { point: "perform_later enqueues for async execution; perform_now runs synchronously inline", score: 1 }
+    - { point: "pass the id and reload → avoids stale data / serialization issues (job sees current state)", score: 1 }
+    - { partial: "gets later-vs-now but no reason to pass id over the object", score: 0.5 }

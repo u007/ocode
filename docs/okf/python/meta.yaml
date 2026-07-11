@@ -1,0 +1,27 @@
+stack: python
+title: Python (3.11+)
+corpus_rev: 1
+# Version scope this corpus grades against. This is a language corpus (no single
+# framework); answers assume CPython 3.11+ with 3.12/3.13 additions called out
+# inline where relevant. 3.10 baseline features (PEP 604 unions, dataclass
+# slots) are also version-noted inline.
+version_scope: ">=3.11 <3.14"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - types-hints          # type hints, Optional/Union/X|Y (PEP 604), TypeVar/generics, Protocol, Self, type statement
+  - dataclasses          # @dataclass, field/default_factory, frozen, __post_init__, slots, vs NamedTuple/TypedDict
+  - async                # asyncio, async/await, event loop, gather vs TaskGroup, blocking-in-async, cancellation
+  - iterators-generators # generators, yield, genexprs vs list comps, itertools, lazy evaluation
+  - context-managers     # with, __enter__/__exit__, contextlib.contextmanager, ExitStack, async with
+  - decorators           # function+class decorators, functools.wraps, decorators with args, stacking order
+  - data-model           # dunder methods, __eq__/__hash__, __slots__, descriptors, mutable default arg, is vs ==
+  - errors-exceptions    # exception hierarchy, try/except/else/finally, custom exceptions, raise from, ExceptionGroup/except*
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "pyproject.toml" }
+    - { type: file, glob: "requirements.txt" }
+    - { type: file, glob: "setup.py" }
+    - { type: content, glob: "**/*.py", pattern: "import |def " }

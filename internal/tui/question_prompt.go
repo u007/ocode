@@ -55,6 +55,7 @@ func (m *model) startQuestionPrompt(toolCallID string, prompts []tool.QuestionPr
 		m.questionSelected[i] = map[int]bool{}
 	}
 	m.questionInput.Reset()
+	m.layout() // shrink the transcript viewport to make room for the dialog
 }
 
 func (m *model) renderQuestionDialog(width int) string {
@@ -153,7 +154,7 @@ func (m *model) renderQuestionDialog(width int) string {
 
 func (m model) handleQuestionKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Model, tea.Cmd) {
 	if len(m.questionPrompts) == 0 {
-		m.showQuestionDialog = false
+		m.clearQuestionPrompt()
 		return m, tea.Batch(tiCmd, vpCmd)
 	}
 
@@ -402,6 +403,7 @@ func (m *model) clearQuestionPrompt() {
 	m.questionTextActive = false
 	m.questionInput.Reset()
 	m.input.Focus()
+	m.layout() // restore viewport height shrunk while the dialog was open
 }
 
 func questionOptionCount(q tool.QuestionPrompt) int {

@@ -114,8 +114,8 @@ func TestSkillsJoinCorpusAndIndex(t *testing.T) {
 }
 
 func TestLoadContextSuppressesCatalogWhenDiscoveryOn(t *testing.T) {
-	on := LoadContext(map[string]bool{}, false, true)
-	off := LoadContext(map[string]bool{}, false, false)
+	on := LoadContext(map[string]bool{}, false, true, "", "")
+	off := LoadContext(map[string]bool{}, false, false, "", "")
 	// The catalog header only appears when there ARE skills; assert the flag at
 	// least never ADDS the catalog when on. (If skills exist, off contains it; on must not.)
 	if containsSubstr(on, "--- Skill Catalog ---") {

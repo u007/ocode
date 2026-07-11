@@ -9851,7 +9851,15 @@ func (m *model) handleContextCmd(args []string) {
 	fmt.Fprintf(&b, "  %-28s ~%s tok\n", "Subtotal", formatTok(toolsTotal))
 
 	injectedTotal := baseTotal + toolsTotal
-	skills := skill.LoadSkillsForRoot(m.workDir)
+	// Model-aware set: the pre-injected catalog uses BuildCatalogForModel, which
+	// gates Kaizen (per-model tuned) skills, so the token estimate must too.
+	catalogModel := ""
+	if m.agent != nil {
+		if c := m.agent.Client(); c != nil {
+			catalogModel = c.GetModel()
+		}
+	}
+	skills := skill.LoadSkillsForModel(m.workDir, catalogModel)
 	catalogTok := 0
 	if discoveryOn {
 		b.WriteString("\nSkill catalog (not pre-injected — discovery active)\n")
@@ -11094,7 +11102,11 @@ func (m *model) askAgent() tea.Cmd {
 			memoryEnabled = m.config.Ocode.MemoryEnabled
 			discoveryOn = m.config.Ocode.Discovery.Enabled
 		}
-		m.agent.SetPreloadedContext(agent.LoadContext(enabledPluginMap(m.config), memoryEnabled, discoveryOn))
+		activeModel := ""
+		if c := m.agent.Client(); c != nil {
+			activeModel = c.GetModel()
+		}
+		m.agent.SetPreloadedContext(agent.LoadContext(enabledPluginMap(m.config), memoryEnabled, discoveryOn, activeModel, m.workDir))
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 

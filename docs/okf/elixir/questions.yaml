@@ -1,0 +1,636 @@
+# Elixir (1.16+/OTP) benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1). Version scope: Elixir >=1.16; the few
+# version-gated bits (Duration / to_timeout/1, set-theoretic type preview — both
+# 1.17+) are stated inline in the affected answers.
+
+- id: elixir-pm-01
+  difficulty: medium
+  weight: 3
+  tags: [pattern-matching]
+  question: >
+    In Elixir, `=` is the match operator, not assignment. What does
+    `{:ok, value} = fetch()` actually do, and what happens if the right side is
+    `{:error, :notfound}`?
+  answer: >
+    `=` asserts that the left pattern matches the right value; when it does, any
+    variables in the pattern get bound (here `value`). It is a match, not a
+    store: `1 = x` is legal and checks that `x` equals 1. If `fetch()` returns
+    `{:error, :notfound}` the shapes don't match, so it raises `MatchError` and
+    `value` is never bound. Matching is thus also a runtime assertion of shape.
+  rubric:
+    - { point: "= matches a pattern against a value and binds variables in the pattern", score: 1 }
+    - { point: "it is not assignment (e.g. 1 = x checks equality)", score: 1 }
+    - { point: "a failed match raises MatchError", score: 1 }
+    - { partial: "calls it assignment that can also destructure, no MatchError", score: 0.5 }
+
+- id: elixir-pm-02
+  difficulty: medium
+  weight: 3
+  tags: [pattern-matching]
+  question: >
+    How do multiple function-head clauses plus guards replace conditional logic?
+    Show what decides which clause runs.
+  answer: >
+    You define the same function several times with different argument patterns
+    and optional `when` guards. At call time clauses are tried top to bottom; the
+    first whose pattern matches and whose guard passes runs. E.g.
+    `def area({:circle, r}), do: ...` vs `def area({:square, s}), do: ...`, or
+    `def f(n) when n > 0`. Guards are limited to a whitelist of pure functions
+    and operators (no arbitrary calls). If no clause matches, `FunctionClauseError`.
+  rubric:
+    - { point: "clauses tried top-to-bottom; first matching pattern+guard wins", score: 1 }
+    - { point: "guards use when with a restricted set of allowed expressions", score: 1 }
+    - { point: "no matching clause raises FunctionClauseError", score: 1 }
+    - { partial: "mentions multiple clauses but not ordering or guard restrictions", score: 0.5 }
+
+- id: elixir-pm-03
+  difficulty: medium
+  weight: 2
+  tags: [pattern-matching]
+  question: >
+    What does the pin operator `^` do in a pattern, and how does `^x` differ from
+    a bare `x` on the left of a match?
+  answer: >
+    A bare variable in a pattern rebinds: `x = 2` then `x = 3` succeeds and `x`
+    becomes 3. Pinning with `^` uses the variable's current value as part of the
+    pattern instead of rebinding it: after `x = 1`, `^x = 2` tries to match 1
+    against 2 and raises `MatchError`. Use `^` to match against an existing
+    value — e.g. `case p do ^expected -> ... end`.
+  rubric:
+    - { point: "bare variable in a pattern rebinds it", score: 1 }
+    - { point: "^ matches against the variable's existing value instead of rebinding", score: 1 }
+    - { partial: "says ^ 'freezes'/'is a constant' with no rebinding contrast", score: 0.5 }
+
+- id: elixir-pm-04
+  difficulty: medium
+  weight: 2
+  tags: [pattern-matching, immutability-data]
+  question: >
+    How does map pattern matching differ from list/tuple matching — specifically,
+    does `%{name: n} = user` require the map to have exactly those keys?
+  answer: >
+    Map patterns match a subset: `%{name: n}` matches any map that has at least a
+    `:name` key (binding `n`), ignoring other keys — great for extracting a few
+    fields. Tuple and list patterns match by exact shape/size: `{a, b}` only
+    matches a 2-tuple, and `[h | t]` splits head/tail of a non-empty list. The
+    empty map pattern `%{}` therefore matches every map.
+  rubric:
+    - { point: "map pattern matches a subset of keys (partial match)", score: 1 }
+    - { point: "tuple/list patterns match exact shape/size (e.g. [h | t] head/tail)", score: 1 }
+    - { partial: "shows destructuring but implies maps must match all keys", score: 0.5 }
+
+- id: elixir-otp-01
+  difficulty: medium
+  weight: 2
+  tags: [processes-otp, concurrency]
+  question: >
+    Describe the raw process primitives `spawn`, `send`, and `receive`. What does
+    `receive` do when no message matches?
+  answer: >
+    `spawn(fn -> ... end)` starts a new lightweight process and returns its pid.
+    `send(pid, msg)` puts a message in that process's mailbox asynchronously (it
+    never blocks). `receive do pattern -> ... end` pattern-matches messages out of
+    the current process's mailbox; non-matching messages stay queued. If no
+    message matches, `receive` blocks until one arrives, unless an `after
+    timeout` clause is given.
+  rubric:
+    - { point: "spawn returns a pid; send is async and delivers to the mailbox", score: 1 }
+    - { point: "receive pattern-matches messages from the mailbox", score: 1 }
+    - { point: "receive blocks when nothing matches (until a match or after clause)", score: 1 }
+    - { partial: "describes spawn/send/receive but says send blocks or receive drops non-matches", score: 0.5 }
+
+- id: elixir-otp-02
+  difficulty: medium
+  weight: 3
+  tags: [processes-otp]
+  question: >
+    In a GenServer, what is the difference between `handle_call` and
+    `handle_cast`, and what does each callback return?
+  answer: >
+    `handle_call(msg, from, state)` handles synchronous requests: the caller
+    blocks (default 5s timeout) until you reply. It returns `{:reply, reply,
+    new_state}` (or `{:noreply, new_state}` if you reply later). `handle_cast(msg,
+    state)` handles fire-and-forget asynchronous requests: the caller does not
+    wait, there is no reply, and it returns `{:noreply, new_state}`. Both can also
+    return `{:stop, reason, ...}` to terminate.
+  rubric:
+    - { point: "call is synchronous (caller blocks/awaits a reply); cast is async fire-and-forget", score: 1 }
+    - { point: "handle_call returns {:reply, reply, state}", score: 1 }
+    - { point: "handle_cast returns {:noreply, state} (no reply)", score: 1 }
+    - { partial: "call vs cast sync/async right but return shapes wrong or missing", score: 0.5 }
+
+- id: elixir-otp-03
+  difficulty: medium
+  weight: 2
+  tags: [processes-otp]
+  question: >
+    What kind of messages does `handle_info` handle, and how does that differ
+    from `handle_call`/`handle_cast`?
+  answer: >
+    `handle_info(msg, state)` handles all messages that arrive in the GenServer
+    mailbox that did not come through `GenServer.call/cast` — i.e. out-of-band
+    messages: a plain `send`, monitor/link notifications like `{:DOWN, ...}`,
+    node events, and `Process.send_after` timeouts. It returns the same
+    `{:noreply, state}` / `{:stop, ...}` shapes as cast. Call/cast are for your
+    server's defined API; info is for everything else that lands in the mailbox.
+  rubric:
+    - { point: "handle_info handles non-call/cast (out-of-band) messages in the mailbox", score: 1 }
+    - { point: "examples: plain send, :DOWN monitors, timers/send_after; returns {:noreply, state}", score: 1 }
+    - { partial: "'handles other messages' with no concrete example or source distinction", score: 0.5 }
+
+- id: elixir-otp-04
+  difficulty: hard
+  weight: 3
+  tags: [processes-otp]
+  question: >
+    Name the three main Supervisor restart strategies and what each does when one
+    child crashes. What is a child spec?
+  answer: >
+    `:one_for_one` restarts only the child that terminated. `:one_for_all`
+    terminates and restarts all children when any one dies. `:rest_for_one`
+    restarts the terminated child and every child started after it (in start
+    order), leaving earlier ones alone. A child spec is the map/tuple describing
+    how to start and manage a child — its `:id`, the `{module, function, args}`
+    start call, restart policy (`:permanent`/`:temporary`/`:transient`), and
+    shutdown; `use GenServer` generates a default `child_spec/1`.
+  rubric:
+    - { point: ":one_for_one restarts only the crashed child", score: 1 }
+    - { point: ":one_for_all restarts all children when one dies", score: 1 }
+    - { point: ":rest_for_one restarts the crashed child and those started after it", score: 1 }
+    - { point: "child spec describes how to start/restart a child (id, start MFA, restart type)", score: 1 }
+    - { partial: "names the strategies but conflates one_for_all and rest_for_one", score: 0.5 }
+
+- id: elixir-data-01
+  difficulty: easy
+  weight: 2
+  tags: [immutability-data]
+  question: >
+    Elixir data is immutable. If `list = [1, 2, 3]` and you call
+    `List.delete(list, 2)`, what happens to `list`? What does rebinding a variable
+    actually do?
+  answer: >
+    Nothing is mutated: `List.delete/2` returns a new list `[1, 3]` and the
+    original `list` is unchanged. Data structures can never be modified in place.
+    Rebinding — `list = List.delete(list, 2)` — doesn't change the old value; it
+    just points the name `list` at the new value. Old references keep seeing the
+    old data, which is what makes sharing across processes safe.
+  rubric:
+    - { point: "the original data is unchanged; the function returns a new value", score: 1 }
+    - { point: "rebinding a variable repoints the name, it does not mutate the value", score: 1 }
+    - { partial: "'it's immutable' without distinguishing rebinding from mutation", score: 0.5 }
+
+- id: elixir-data-02
+  difficulty: medium
+  weight: 2
+  tags: [immutability-data]
+  question: >
+    Compare maps, keyword lists, and structs. When do you use each?
+  answer: >
+    A map `%{k => v}` is the general key/value store: any-type keys, unique keys,
+    fast lookup, unordered. A keyword list `[key: val]` is a list of
+    `{atom, value}` tuples — ordered, allows duplicate keys, keys must be atoms;
+    used for function options and DSLs (e.g. `Repo.all(order_by: ...)`). A struct
+    is a map with a fixed, compile-time-known set of fields and a `__struct__`
+    tag (`defstruct`), giving named types with defaults and no dynamic keys.
+  rubric:
+    - { point: "map: general key/value, any keys, unique, unordered, fast lookup", score: 1 }
+    - { point: "keyword list: ordered list of {atom, value}, allows duplicates, used for options", score: 1 }
+    - { point: "struct: map with fixed compile-time fields + __struct__ tag (defstruct)", score: 1 }
+    - { partial: "distinguishes two of the three correctly", score: 0.5 }
+
+- id: elixir-data-03
+  difficulty: medium
+  weight: 2
+  tags: [immutability-data]
+  question: >
+    What is the difference between `%{map | key: val}` and `Map.put(map, key,
+    val)` when `key` does not already exist?
+  answer: >
+    The update syntax `%{map | key: val}` only updates existing keys: if `key`
+    isn't already present it raises `KeyError` (and for a struct, an unknown field
+    is a compile-time error). `Map.put(map, key, val)` inserts or overwrites,
+    adding the key if missing. Both return a new map — neither mutates. Use the
+    `|` form when you intend to update a key you know exists and want that safety.
+  rubric:
+    - { point: "%{m | k: v} only updates existing keys and raises KeyError if missing", score: 1 }
+    - { point: "Map.put inserts or overwrites (adds the key)", score: 1 }
+    - { point: "both return a new map (no mutation)", score: 1 }
+    - { partial: "says they're equivalent / both just set the key", score: 0.5 }
+
+- id: elixir-data-04
+  difficulty: medium
+  weight: 2
+  tags: [immutability-data]
+  question: >
+    How do `put_in`, `update_in`, and `get_in` help with nested immutable data,
+    and why are they better than manual nesting?
+  answer: >
+    They read/rewrite a value deep inside nested maps/structs/keyword lists by
+    path, returning a whole new structure with just that path updated (structural
+    sharing keeps the rest). `put_in(user.address.city, "NYC")` replaces a nested
+    value; `update_in(user.orders, &[new | &1])` transforms one with a function;
+    `get_in` reads by path. Without them you'd hand-rebuild every intermediate
+    map (`%{user | address: %{user.address | city: ...}}`), which is verbose and
+    error-prone.
+  rubric:
+    - { point: "put_in/update_in return a new nested structure updated at a path", score: 1 }
+    - { point: "update_in takes a function; get_in reads by path (avoids manual re-nesting)", score: 1 }
+    - { partial: "'they update nested maps' with no immutability/new-structure point", score: 0.5 }
+
+- id: elixir-pipe-01
+  difficulty: easy
+  weight: 2
+  tags: [pipe-with]
+  question: >
+    What does the pipe operator `|>` do, and what is the one rule about how the
+    piped value is passed to the next function?
+  answer: >
+    `a |> f(b)` rewrites to `f(a, b)` — it passes the value on the left as the
+    FIRST argument of the function on the right. Chaining pipes reads top-to-
+    bottom as a data-transformation pipeline instead of deeply nested calls
+    (`Enum.sum(Enum.filter(Enum.map(list, ...), ...))` becomes `list |>
+    Enum.map(...) |> Enum.filter(...) |> Enum.sum()`). This is why core APIs
+    consistently take the data as their first argument.
+  rubric:
+    - { point: "x |> f(args) becomes f(x, args) — value is inserted as the FIRST argument", score: 1 }
+    - { point: "flattens nested calls into a readable left-to-right pipeline", score: 1 }
+    - { partial: "'chains functions' but wrong/omitted about first-argument insertion", score: 0.5 }
+
+- id: elixir-pipe-02
+  difficulty: medium
+  weight: 3
+  tags: [pipe-with, error-handling]
+  question: >
+    What problem does the `with` special form solve, and how does it chain a
+    sequence of `{:ok, _}` steps?
+  answer: >
+    `with` chains operations that each return a tagged result, keeping the
+    happy path flat instead of deeply nested `case`s. Each clause uses `<-`:
+    `with {:ok, a} <- step1(), {:ok, b} <- step2(a) do ... end`. As long as every
+    left pattern matches, it proceeds and runs the `do` block. The first clause
+    that does NOT match short-circuits: `with` stops and returns that
+    non-matching value (unless an `else` handles it).
+  rubric:
+    - { point: "with chains steps via <- keeping the happy path flat (vs nested case)", score: 1 }
+    - { point: "proceeds while each pattern matches", score: 1 }
+    - { point: "first non-matching clause short-circuits and returns that value", score: 1 }
+    - { partial: "'like a pipe for ok tuples' without the short-circuit behavior", score: 0.5 }
+
+- id: elixir-pipe-03
+  difficulty: medium
+  weight: 2
+  tags: [pipe-with, error-handling]
+  question: >
+    In a `with` expression, what happens to a value that fails to match a `<-`
+    clause, and what is the `else` block for?
+  answer: >
+    When a `<-` pattern fails, that non-matching value becomes the result of the
+    whole `with` — by default it is returned as-is (so an `{:error, reason}` from
+    any step flows straight out). An `else` block lets you pattern-match on those
+    failure values to transform them, e.g. `else {:error, :enoent} -> {:error,
+    :not_found}`. Beware over-stuffing `else` with many clauses from different
+    steps — it obscures which step failed.
+  rubric:
+    - { point: "a failed <- value is returned as the with result (as-is when no else)", score: 1 }
+    - { point: "else matches those failure values to transform/handle them", score: 1 }
+    - { partial: "mentions else but implies unmatched values raise instead of returning", score: 0.5 }
+
+- id: elixir-pipe-04
+  difficulty: medium
+  weight: 1
+  tags: [pipe-with]
+  question: >
+    Give a case where piping is the wrong tool or reads badly, and how you'd fix
+    it.
+  answer: >
+    Piping is awkward when the value shouldn't be the first argument, or for a
+    single call — `x |> f()` adds nothing over `f(x)`. It also hides which
+    argument is flowing when a step needs an anonymous function or reordering; use
+    `then(x, fn v -> g(a, v) end)` (or a named intermediate variable) to feed the
+    value into a non-first position. Pipelines that mix unrelated concerns are
+    clearer split into named steps.
+  rubric:
+    - { point: "don't pipe a single call / when value isn't the first argument", score: 1 }
+    - { point: "use then/2 or a named variable to place the value in a non-first position", score: 1 }
+    - { partial: "'sometimes it's less clear' with no concrete fix", score: 0.5 }
+
+- id: elixir-error-01
+  difficulty: medium
+  weight: 3
+  tags: [error-handling]
+  question: >
+    Elixir favors `{:ok, value}` / `{:error, reason}` tuples over exceptions.
+    When do you use tagged tuples versus raising?
+  answer: >
+    Return tagged tuples for expected, recoverable outcomes the caller should
+    decide about — a file might be missing, input might be invalid — so failure
+    is an ordinary value handled with `case`/`with`. Raise exceptions for
+    truly exceptional, unexpected conditions or programmer errors (bad arguments,
+    invariant violations) that the immediate caller usually can't sensibly
+    handle. Control flow shouldn't depend on rescuing; exceptions are for the
+    exceptional.
+  rubric:
+    - { point: "tagged tuples for expected/recoverable failures the caller handles (case/with)", score: 1 }
+    - { point: "raise for exceptional/unexpected conditions or programmer errors", score: 1 }
+    - { partial: "'use tuples' or 'use exceptions' without the expected-vs-exceptional line", score: 0.5 }
+
+- id: elixir-error-02
+  difficulty: easy
+  weight: 2
+  tags: [error-handling]
+  question: >
+    What is the convention behind a trailing `!` in function names like
+    `File.read!` versus `File.read`?
+  answer: >
+    A pair of functions is offered: the plain one (`File.read/1`) returns a tagged
+    tuple — `{:ok, contents}` or `{:error, reason}` — for you to handle; the bang
+    version (`File.read!/1`) returns the bare value on success and RAISES an
+    exception on failure instead of returning `{:error, _}`. Use the bang form
+    when a failure is unexpected and you'd rather crash than thread an error;
+    use the non-bang form when you want to handle the error.
+  rubric:
+    - { point: "non-bang returns {:ok,_}/{:error,_}; bang returns the raw value or raises", score: 1 }
+    - { point: "choose bang when you'd rather crash than handle the error", score: 1 }
+    - { partial: "'! means it can error' without the returns-value-vs-raises contrast", score: 0.5 }
+
+- id: elixir-error-03
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    Explain `try/rescue/after` and how `rescue` differs from a `catch`. When is
+    `after` guaranteed to run?
+  answer: >
+    `try` runs a body; `rescue` handles exceptions raised with `raise` (matching
+    on the exception struct/type); `catch` handles values from `throw` or process
+    exits (`:exit`), which are a separate mechanism from exceptions; `after` runs
+    afterward for cleanup whether the body succeeded, raised, or threw — like a
+    finally. In practice explicit `try` is rare: function-body errors already
+    unwind, and you usually prefer tagged tuples or let-it-crash over rescuing.
+  rubric:
+    - { point: "rescue handles raised exceptions; catch handles throw/exit (different mechanism)", score: 1 }
+    - { point: "after always runs for cleanup (success or failure)", score: 1 }
+    - { partial: "describes try/rescue but conflates rescue and catch", score: 0.5 }
+
+- id: elixir-error-04
+  difficulty: medium
+  weight: 3
+  tags: [error-handling, processes-otp]
+  question: >
+    Explain the "let it crash" philosophy. Why is crashing a process often better
+    than defensively rescuing every error?
+  answer: >
+    Because processes are isolated and supervised, you let a process that hits an
+    unexpected state crash, and its supervisor restarts it from a known-good
+    initial state — self-healing without corrupt intermediate state. So you code
+    the happy path and don't litter defensive `try/rescue` around every call for
+    errors you can't meaningfully handle. It applies to unexpected faults;
+    expected errors still use tagged tuples. Crashes are isolated to one process
+    and don't take down the system.
+  rubric:
+    - { point: "a crashed process is restarted by its supervisor from a clean state", score: 1 }
+    - { point: "isolation means one crash doesn't corrupt/kill the whole system", score: 1 }
+    - { point: "avoids defensive rescuing; still use tuples for expected errors", score: 1 }
+    - { partial: "'just let it crash' with no supervisor/restart or isolation reason", score: 0.5 }
+
+- id: elixir-enum-01
+  difficulty: medium
+  weight: 3
+  tags: [enum-stream]
+  question: >
+    What is the core difference between the `Enum` and `Stream` modules regarding
+    when work happens?
+  answer: >
+    `Enum` is eager: every function walks the whole enumerable immediately and
+    returns a concrete result (usually a list), so chaining `Enum.map |>
+    Enum.filter` builds a full intermediate list at each step. `Stream` is lazy:
+    its functions return a stream that just records the composed computation and
+    does nothing until a terminal `Enum` function (e.g. `Enum.to_list`,
+    `Enum.sum`) runs it — then elements flow through all steps one at a time, with
+    no intermediate lists.
+  rubric:
+    - { point: "Enum is eager: computes immediately, returns a concrete result", score: 1 }
+    - { point: "Stream is lazy: composes work, runs only when a terminal Enum consumes it", score: 1 }
+    - { point: "Enum chains build intermediate lists; Stream avoids them (element-at-a-time)", score: 1 }
+    - { partial: "'Stream is lazy' without the intermediate-list / deferred-execution detail", score: 0.5 }
+
+- id: elixir-enum-02
+  difficulty: medium
+  weight: 2
+  tags: [enum-stream]
+  question: >
+    Give two situations where `Stream` is clearly the right choice over `Enum`.
+  answer: >
+    (1) Large or infinite sources — reading a huge file line by line
+    (`File.stream!`) or `Stream.cycle`/`Stream.iterate` — where materializing the
+    whole thing would blow memory or never finish. (2) Multi-step pipelines over
+    big collections where eager `Enum` would allocate an intermediate list per
+    step; a stream passes each element through all steps once. Also when you only
+    need part of the result (`Stream.take`) so you avoid computing the rest. For
+    small collections or a single pass, plain `Enum` is simpler and often faster.
+  rubric:
+    - { point: "large/infinite sources (file streaming, infinite generators) to bound memory", score: 1 }
+    - { point: "multi-step pipelines over big data to avoid intermediate lists / early termination", score: 1 }
+    - { partial: "one valid case, or 'streams are faster' with no memory/laziness reason", score: 0.5 }
+
+- id: elixir-enum-03
+  difficulty: medium
+  weight: 2
+  tags: [enum-stream]
+  question: >
+    What does `Enum.reduce/3` do, and why is it considered the fundamental
+    building block behind `map`, `filter`, `sum`, etc.?
+  answer: >
+    `Enum.reduce(enum, acc, fn element, acc -> new_acc end)` folds a collection
+    into a single accumulated value: it starts from the initial `acc` and threads
+    an updated accumulator through every element, returning the final one. It's
+    fundamental because almost every other Enum operation can be expressed as a
+    reduce — `map` accumulates a list, `sum` accumulates a number, `filter`
+    conditionally accumulates — reduce is the general fold they specialize.
+  rubric:
+    - { point: "reduce folds a collection into one accumulated value via (element, acc) -> acc", score: 1 }
+    - { point: "threads the accumulator through all elements from an initial value", score: 1 }
+    - { point: "other Enum functions (map/filter/sum) are special cases of reduce", score: 1 }
+    - { partial: "'it sums/combines' without the accumulator-threading generality", score: 0.5 }
+
+- id: elixir-enum-04
+  difficulty: medium
+  weight: 2
+  tags: [enum-stream]
+  question: >
+    Explain the parts of a comprehension like
+    `for x <- list, rem(x, 2) == 0, into: %{}, do: {x, x * x}`.
+  answer: >
+    `x <- list` is a generator (also pattern-matches, so non-matching elements
+    are skipped); you can have several generators, which nest like loops. Bare
+    boolean expressions like `rem(x, 2) == 0` are filters — elements failing them
+    are dropped. `do:` builds each result element. `into:` chooses the collectable
+    to build (default a list; here a map), so this yields `%{2 => 4, ...}`. `for`
+    is thus generators + filters + a mapping, collected `into` a target.
+  rubric:
+    - { point: "x <- list is a generator (and filters via pattern match); multiple generators nest", score: 1 }
+    - { point: "bare boolean expressions are filters that drop elements", score: 1 }
+    - { point: "into: sets the collectable/result type (default list); do: builds each element", score: 1 }
+    - { partial: "'it's a loop that maps' without generator/filter/into breakdown", score: 0.5 }
+
+- id: elixir-proto-01
+  difficulty: medium
+  weight: 2
+  tags: [protocols-behaviours]
+  question: >
+    What is a protocol in Elixir, and how do `defprotocol` and `defimpl` provide
+    polymorphism?
+  answer: >
+    A protocol defines a set of functions (`defprotocol Size do def size(data)
+    end`) whose implementation is dispatched at runtime based on the data type of
+    the first argument. You provide per-type implementations with `defimpl Size,
+    for: List` / `for: Map`, and Elixir picks the right one by the value's type.
+    This is open polymorphism: new types (including third-party structs) can
+    implement an existing protocol without modifying it, and `@derive`/`Any` can
+    supply fallbacks.
+  rubric:
+    - { point: "protocol defines functions dispatched at runtime on the first arg's data type", score: 1 }
+    - { point: "defimpl provides a per-type implementation; new types can implement it (open/extensible)", score: 1 }
+    - { partial: "'it's an interface' without the runtime data-type dispatch", score: 0.5 }
+
+- id: elixir-proto-02
+  difficulty: medium
+  weight: 2
+  tags: [protocols-behaviours]
+  question: >
+    What is a behaviour, and what do `@callback`, `@behaviour`, and `@impl` each
+    do?
+  answer: >
+    A behaviour specifies a contract of functions a module must implement.
+    `@callback name(args) :: return` declares the required functions with
+    typespecs in the behaviour module. An implementing module writes `@behaviour
+    MyBehaviour` (the compiler then warns about missing callbacks) and marks each
+    implementing function with `@impl MyBehaviour` (or `@impl true`), which
+    documents intent and warns if the function isn't actually a callback. GenServer
+    and Supervisor are themselves behaviours.
+  rubric:
+    - { point: "behaviour is a module contract; @callback declares required functions (with specs)", score: 1 }
+    - { point: "@behaviour adopts it (warns on missing); @impl marks a callback implementation", score: 1 }
+    - { partial: "'like an interface' but @callback/@behaviour/@impl roles unclear", score: 0.5 }
+
+- id: elixir-proto-03
+  difficulty: hard
+  weight: 3
+  tags: [protocols-behaviours]
+  question: >
+    Protocols and behaviours both look like "interfaces." What is the fundamental
+    difference between them?
+  answer: >
+    A protocol is runtime polymorphism dispatched on the DATA TYPE of a value:
+    one function name, many per-type implementations, and Elixir chooses at call
+    time by the first argument's type (like ad-hoc polymorphism over data). A
+    behaviour is a compile-time contract for a MODULE: it lists callbacks a module
+    must implement, and you dispatch by naming that module explicitly (e.g.
+    passing an adapter module). Protocols extend behavior across data types;
+    behaviours standardize an API that interchangeable modules provide.
+  rubric:
+    - { point: "protocol dispatches at runtime on a value's data type", score: 1 }
+    - { point: "behaviour is a compile-time contract on a module; dispatch is by explicit module", score: 1 }
+    - { point: "data-type polymorphism vs swappable-module API is the core axis", score: 1 }
+    - { partial: "'both are interfaces' with only one side of the distinction", score: 0.5 }
+
+- id: elixir-proto-04
+  difficulty: medium
+  weight: 1
+  tags: [protocols-behaviours]
+  question: >
+    Why annotate a callback implementation with `@impl true` (or `@impl
+    MyBehaviour`) — what does it buy you?
+  answer: >
+    It tells the compiler this function is a deliberate callback implementation.
+    You get warnings if you typo the name/arity so it no longer matches a declared
+    callback, or if you forget `@impl` on some callbacks while using it on others
+    (Elixir requires consistency once you start). It also documents to readers
+    that the function satisfies a behaviour rather than being a plain public
+    function. `@impl MyBehaviour` additionally records which behaviour it fulfills.
+  rubric:
+    - { point: "compiler verifies the function actually matches a declared @callback (warns on mismatch/typo)", score: 1 }
+    - { point: "documents intent / must be used consistently across callbacks", score: 1 }
+    - { partial: "'it's documentation' without the compile-time verification benefit", score: 0.5 }
+
+- id: elixir-conc-01
+  difficulty: medium
+  weight: 3
+  tags: [concurrency]
+  question: >
+    Describe the BEAM concurrency model. Why is there no shared mutable memory
+    between processes, and why does that matter?
+  answer: >
+    BEAM processes are lightweight (not OS threads), scheduled by the VM across
+    cores, and completely isolated: each has its own heap and stack, shares
+    nothing, and communicates only by asynchronous message passing (copying data
+    into the recipient's mailbox). Because there's no shared mutable state, there
+    are no data races or locks over in-memory data, one process crashing can't
+    corrupt another's memory, and each process is garbage-collected independently —
+    which is what makes massive concurrency and fault isolation practical.
+  rubric:
+    - { point: "lightweight isolated processes, own heap, share nothing", score: 1 }
+    - { point: "communicate only by copying messages (no shared mutable memory)", score: 1 }
+    - { point: "consequence: no data races/locks and crash isolation", score: 1 }
+    - { partial: "'processes send messages' without the isolation/no-shared-state consequence", score: 0.5 }
+
+- id: elixir-conc-02
+  difficulty: medium
+  weight: 2
+  tags: [concurrency]
+  question: >
+    How do `Task.async` and `Task.await` run work concurrently, and what happens
+    if the task raises or times out?
+  answer: >
+    `Task.async(fn -> work end)` spawns a linked, monitored process that runs the
+    function concurrently and returns a `%Task{}` struct. `Task.await(task,
+    timeout)` blocks the caller until the task sends its result, then returns it —
+    letting you fan out several tasks and await them in parallel. Because the task
+    is linked, if it raises the failure propagates to the caller; if it doesn't
+    finish within the timeout (default 5000ms), `await` exits. For fire-and-forget
+    or unlinked work under a supervisor, use `Task.Supervisor`.
+  rubric:
+    - { point: "Task.async spawns a concurrent (linked) process returning a Task; await blocks for the result", score: 1 }
+    - { point: "supports running several in parallel and awaiting them", score: 1 }
+    - { point: "linked failure propagates to the caller; await has a timeout (default 5s)", score: 1 }
+    - { partial: "'runs stuff in the background' without await/linking/timeout detail", score: 0.5 }
+
+- id: elixir-conc-03
+  difficulty: medium
+  weight: 1
+  tags: [concurrency, processes-otp]
+  question: >
+    What is an `Agent`, and how does it differ from writing a full `GenServer`?
+  answer: >
+    An `Agent` is a tiny wrapper around a process that holds state: you
+    `Agent.start_link(fn -> initial end)` and then `Agent.get(pid, fn s -> s
+    end)` / `Agent.update(pid, fn s -> new end)` to read and change it. It's the
+    simple choice when all you need is shared, concurrent-safe state behind a
+    process, with no custom message protocol. A GenServer is the general server
+    behaviour you reach for when you need custom call/cast/info handling, side
+    effects, or lifecycle logic beyond just holding a value.
+  rubric:
+    - { point: "Agent is a process that holds state, accessed via get/update functions", score: 1 }
+    - { point: "use it for simple shared state; GenServer for custom message handling/logic", score: 1 }
+    - { partial: "'stores state' without the GenServer contrast", score: 0.5 }
+
+- id: elixir-conc-04
+  difficulty: medium
+  weight: 2
+  tags: [concurrency]
+  question: >
+    What is ETS and when would you use it instead of a process (GenServer/Agent)
+    to hold shared data?
+  answer: >
+    ETS (Erlang Term Storage) is an in-memory key/value table owned by a process
+    but readable/writable by others directly, without message-passing through the
+    owner. Because reads don't serialize through a single process mailbox, it
+    scales for high-concurrency, read-heavy shared data (caches, lookup tables,
+    counters) where a single GenServer would become a bottleneck. Trade-offs:
+    data lives outside the immutable world, tables vanish when the owner dies, and
+    concurrent writers need care (`:public`, atomic `update_counter`).
+  rubric:
+    - { point: "ETS is an in-memory table read/written directly by many processes (no single-owner mailbox)", score: 1 }
+    - { point: "use it for high-concurrency/read-heavy shared data where a GenServer would bottleneck", score: 1 }
+    - { partial: "'it's a fast store' without the avoid-the-process-bottleneck reason", score: 0.5 }

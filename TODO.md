@@ -10,26 +10,29 @@ skill). Not yet done:
 - [x] **Detection engine** — `internal/stackdetect` (`Detect(root) []string`)
   reads package.json deps + marker files per `stack-detection.md`. Tested. This
   is the reusable core; nothing consumes it yet.
-- [ ] **Wire the enforcement hook (deferred until the first REAL eval).** Chosen
-  approach = **skill-catalog filter** (keeps full SKILL.md): extend the skill
-  parser to capture Kaizen frontmatter (`tuned_for`, `stack`), give
-  `skill.BuildCatalog` the active model id + `stackdetect.Detect(workdir)`, and
-  include a Kaizen-tagged skill only when its `stack` is detected AND its
-  `tuned_for` exactly equals the **provider-stripped** active model id — i.e.
-  ocode's resolved `model` var after `client.go`'s `SplitN(model, "/", 2)`
-  prefix strip, so `novita/tencent/hy3` matches a skill tuned for `tencent/hy3`.
-  Do NOT build this until one
-  genuine evaluation has produced one real derived SKILL.md — wiring against
-  today's illustrative placeholders would ship inert/dead code. Compute
-  detection ONCE from stable inputs (workdir+model) to respect the prefix-cache
-  contract in `internal/agent/append_stable.go` / `provider_prompts.go`.
-  NOTE: the `conduct` corpus is `detection.mode: universal` — its derived skill
-  must be admitted for the tuned model in EVERY repo (gated on model id only, no
-  stack marker). The hook needs a universal branch, not just stackdetect
-  matching; `conduct` is intentionally absent from stackdetect's registry.
-- [ ] **Decide the embed home for derived skills** (existing `//go:embed
-  all:skills` tree vs a `skills/okf/` subtree) and move a real derived skill
-  there once one exists from a genuine evaluation.
+- [x] **Wire the enforcement hook.** Implemented as the **skill-catalog filter**
+  (keeps full SKILL.md). `internal/skill/loader.go`: the parser now captures
+  Kaizen frontmatter (`tuned_for`, `stack`); a skill with non-empty `tuned_for`
+  is a Kaizen skill. New `LoadSkillsForModel(root, activeModel)` +
+  `BuildCatalogForModel(root, activeModel)` admit a Kaizen skill only when
+  `modelMatchesTuned(activeModel, tuned_for)` (case-insensitive exact OR
+  provider-prefixed `.../tuned_for`, so `novita/tencent/hy3` matches
+  `tencent/hy3`) AND its stack is active (`conduct`/empty = universal, else in
+  `stackdetect.Detect(root)`). The **default** `LoadSkills()`/`BuildCatalog()`
+  now EXCLUDE all Kaizen skills, so no ungated caller can leak them;
+  `LoadSkill(name)` still resolves them by exact name (explicit request).
+  `stackdetect.Detect(root)` is computed ONCE per build from stable
+  (workdir+model) inputs, respecting the prefix-cache contract. Wired into
+  `internal/agent/context.go` `LoadContext(...)` (now takes `activeModel, root`,
+  threaded from `prompt.go` and `tui/model.go`) → `BuildCatalogForModel`.
+  Scope note: Kaizen skills inject only when discovery is OFF (the discovery
+  path uses its own `LoadSkills()` name-index, which stays Kaizen-free).
+- [x] **Embed home for derived skills** = `skills/kaizen/<name>/SKILL.md` inside
+  the existing `//go:embed all:skills` tree. `docs/okf/_tools/sync-derived-skills.py`
+  copies every `docs/okf/*/derived/*.SKILL.md` there (dir = frontmatter `name`),
+  idempotent + prunes stale dirs. Re-run it after adding a derived skill. The
+  loader gained `kaizen/` subtree search paths because `loadSkillsFromPaths`
+  only descends one level.
 - [x] **Populate stacks**: golang (33), rust (31), tanstack (31), nextjs (34)
   built to the `docs/okf/react/` schema — 129 records, validated, version-
   sensitive facts checked via ctx7. Subcategories (nested folders) still open

@@ -44,8 +44,11 @@ This is deliberately finer-grained than ocode's existing family-level routing in
 ```
 
 Steps 1–3 are manual today. A future grader/harness can parse `questions.yaml`
-(it is structured YAML for exactly this reason). The step-4 detection wiring is
-a documented follow-up — see the repo `TODO.md`.
+(it is structured YAML for exactly this reason). Step 4 (detection wiring) is now
+implemented — derived skills are synced into the embed tree by
+`_tools/sync-derived-skills.py` and gated at runtime by `internal/skill`
+(`LoadSkillsForModel` / `BuildCatalogForModel`) on model + stack. See the repo
+`TODO.md` for the full note.
 
 **To actually run steps 1–3 (or hand them to an AI), follow
 [HOW-TO-EVALUATE.md](./HOW-TO-EVALUATE.md)** — it includes a paste-ready prompt.

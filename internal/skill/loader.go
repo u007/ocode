@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/bundled"
+	"github.com/u007/ocode/internal/stackdetect"
 )
 
 type Skill struct {
@@ -18,6 +19,15 @@ type Skill struct {
 	WhenToUse   string
 	Content     string
 	Source      string
+	// TunedFor is the Kaizen `tuned_for` frontmatter: the provider-stripped
+	// canonical model id this skill was derived for (e.g. "tencent/hy3"). A
+	// non-empty TunedFor marks this as a Kaizen skill, which is gated by
+	// model + stack and must NEVER appear in an ungated listing.
+	TunedFor string
+	// Stack is the Kaizen `stack` frontmatter (e.g. "react", "conduct"). The
+	// special value "conduct" (and an empty value) is universal — active in
+	// every repo; any other value gates on stackdetect.Detect(root).
+	Stack string
 }
 
 // skillCache caches LoadSkillsForRoot results keyed by the search-path set, so
@@ -111,13 +121,91 @@ func loadSkillsFromPaths(paths []string) []Skill {
 	return skills
 }
 
-// LoadSkills loads skills discoverable from the current working directory.
+// LoadSkills loads skills discoverable from the current working directory,
+// EXCLUDING all Kaizen (per-model tuned) skills. This is the default ungated
+// listing path: no Kaizen skill may leak into a catalog that is not model-aware.
+// Callers that want the tuned skills gated in must use LoadSkillsForModel.
 func LoadSkills() []Skill {
 	root := ""
 	if cwd, err := os.Getwd(); err == nil {
 		root = cwd
 	}
-	return LoadSkillsForRoot(root)
+	return excludeKaizen(LoadSkillsForRoot(root))
+}
+
+// LoadSkillsForModel loads every skill discoverable from root and returns the
+// set admissible for a session running activeModel: all normal skills, plus any
+// Kaizen skill whose gate passes (model matches its tuned_for AND its stack is
+// active). stackdetect.Detect(root) is computed ONCE here so the result is
+// stable for a fixed (root, activeModel) — respecting the prefix-cache contract.
+func LoadSkillsForModel(root, activeModel string) []Skill {
+	all := LoadSkillsForRoot(root)
+	detected := stackdetect.Detect(root)
+
+	out := make([]Skill, 0, len(all))
+	for _, s := range all {
+		if s.TunedFor == "" {
+			out = append(out, s) // normal skill: always admitted
+			continue
+		}
+		if kaizenAdmitted(s, activeModel, detected) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// excludeKaizen returns the subset of skills that are NOT Kaizen skills
+// (empty TunedFor). It never mutates the input slice.
+func excludeKaizen(in []Skill) []Skill {
+	out := make([]Skill, 0, len(in))
+	for _, s := range in {
+		if s.TunedFor != "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// kaizenAdmitted reports whether a Kaizen skill is admitted for the session:
+// the active model must match the skill's tuned_for AND the skill's stack must
+// be active (universal "conduct"/"" or present in the detected stacks).
+func kaizenAdmitted(s Skill, activeModel string, detected []string) bool {
+	if !modelMatchesTuned(activeModel, s.TunedFor) {
+		return false
+	}
+	return stackActive(s.Stack, detected)
+}
+
+// stackActive reports whether a Kaizen skill's stack is active for this repo.
+// The universal conduct corpus (and an empty stack) is always active; any other
+// stack must appear in the detected set.
+func stackActive(stack string, detected []string) bool {
+	if strings.TrimSpace(stack) == "" || strings.EqualFold(stack, "conduct") {
+		return true
+	}
+	for _, d := range detected {
+		if strings.EqualFold(d, stack) {
+			return true
+		}
+	}
+	return false
+}
+
+// modelMatchesTuned reports whether the active model corresponds to a Kaizen
+// skill's tuned_for canonical id. Matching is case-insensitive and provider-
+// aware: the active model matches when it equals tunedFor exactly, or when it
+// carries a provider prefix and ends in "/"+tunedFor. So both
+// "novita-ai/tencent/hy3" and "openrouter/tencent/hy3" match "tencent/hy3",
+// but a bare "hy3" does NOT match "tencent/hy3" (no "/" boundary).
+func modelMatchesTuned(activeModel, tunedFor string) bool {
+	a := strings.ToLower(strings.TrimSpace(activeModel))
+	t := strings.ToLower(strings.TrimSpace(tunedFor))
+	if a == "" || t == "" {
+		return false
+	}
+	return a == t || strings.HasSuffix(a, "/"+t)
 }
 
 // ProjectLocalSkillDirs returns the project-root skill directories that should
@@ -161,6 +249,17 @@ func SkillSearchPathsForRoot(root string) []string {
 		paths = append(paths, bundled.SkillsDir)
 	}
 
+	// Kaizen (per-model tuned) skills live one level deeper, under a `kaizen/`
+	// subtree of each skills root (skills/kaizen/<name>/SKILL.md). Because they
+	// are gate-filtered separately, they are grouped there rather than mixed in
+	// with normal skills. loadSkillsFromPaths only descends a single level
+	// (<path>/<name>/SKILL.md), so each `kaizen` subtree must be its own search
+	// path or the tuned skills would never load. Append after the base roots so
+	// the same first-wins-on-name precedence holds.
+	for _, p := range append([]string(nil), paths...) {
+		paths = append(paths, filepath.Join(p, "kaizen"))
+	}
+
 	return paths
 }
 
@@ -179,6 +278,14 @@ func parseSkillMetadata(content string) Skill {
 			cleanMetadataValue(frontmatter["when-to-use"]),
 			cleanMetadataValue(frontmatter["when"]),
 		)
+		// Kaizen (per-model tuned) frontmatter. A non-empty TunedFor promotes
+		// this skill to gated-only; see LoadSkillsForModel / the exclusion in
+		// LoadSkills.
+		skill.TunedFor = firstNonEmpty(
+			cleanMetadataValue(frontmatter["tuned_for"]),
+			cleanMetadataValue(frontmatter["tuned-for"]),
+		)
+		skill.Stack = cleanMetadataValue(frontmatter["stack"])
 	}
 
 	for _, raw := range lines {
@@ -213,8 +320,21 @@ func parseSkillMetadata(content string) Skill {
 	return skill
 }
 
+// BuildCatalog renders the ungated skill catalog. It never lists Kaizen skills
+// (LoadSkills excludes them); use BuildCatalogForModel for the model-aware
+// catalog that gates the tuned skills in.
 func BuildCatalog() string {
-	skills := LoadSkills()
+	return renderCatalog(LoadSkills())
+}
+
+// BuildCatalogForModel renders the catalog for a session running activeModel:
+// identical to BuildCatalog, but built from the model-aware set that admits any
+// Kaizen skill whose model+stack gate passes.
+func BuildCatalogForModel(root, activeModel string) string {
+	return renderCatalog(LoadSkillsForModel(root, activeModel))
+}
+
+func renderCatalog(skills []Skill) string {
 	if len(skills) == 0 {
 		return ""
 	}
@@ -238,8 +358,16 @@ func BuildCatalog() string {
 	return b.String()
 }
 
+// LoadSkill resolves a skill by exact name (or containing directory name). It
+// scans the UNFILTERED set (LoadSkillsForRoot), so an explicit load-by-name can
+// still resolve a Kaizen skill — that is an explicit request, distinct from
+// advertising it in an ungated catalog.
 func LoadSkill(name string) (*Skill, error) {
-	for _, s := range LoadSkills() {
+	root := ""
+	if cwd, err := os.Getwd(); err == nil {
+		root = cwd
+	}
+	for _, s := range LoadSkillsForRoot(root) {
 		if s.Name == name || filepath.Base(filepath.Dir(s.Source)) == name {
 			skill := s
 			return &skill, nil

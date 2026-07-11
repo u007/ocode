@@ -1,0 +1,646 @@
+# Python benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1). Language corpus: CPython 3.11+.
+# Version-gated behavior (3.10/3.11/3.12 additions) is stated inline in the
+# affected answers.
+
+- id: python-types-union-01
+  difficulty: easy
+  weight: 2
+  tags: [types-hints]
+  question: >
+    What does `Optional[int]` mean, and how do you write the same thing with the
+    PEP 604 syntax?
+  answer: >
+    `Optional[int]` is exactly `Union[int, None]` — a value that is either an
+    `int` or `None`. It does NOT mean "optional argument"; it only widens the
+    type to include `None`. Since Python 3.10 (PEP 604) you can write unions with
+    the `|` operator: `int | None`, and `Union[int, str]` becomes `int | str`.
+    The `|` form needs no import from `typing`.
+  rubric:
+    - { point: "Optional[int] == Union[int, None] (may be None), not 'optional arg'", score: 1 }
+    - { point: "PEP 604 (3.10): int | None / int | str with the | operator", score: 1 }
+    - { partial: "reads Optional as 'the argument can be omitted'", score: 0.5 }
+
+- id: python-types-generics-02
+  difficulty: medium
+  weight: 2
+  tags: [types-hints]
+  question: >
+    How do you write a generic function that returns the same type it receives,
+    and what did Python 3.12 change about declaring type parameters?
+  answer: >
+    Classically you declare a `TypeVar` and reuse it: `T = TypeVar("T")` then
+    `def first(x: list[T]) -> T: ...`. The `T` links the parameter and return so
+    a `list[int]` yields an `int`. Python 3.12 (PEP 695) adds inline type-param
+    syntax: `def first[T](x: list[T]) -> T: ...` and `class Box[T]: ...`, which
+    declares `T` scoped to that function/class without a separate `TypeVar`.
+  rubric:
+    - { point: "TypeVar links input and output type (same T in and out)", score: 1 }
+    - { point: "3.12/PEP 695 inline syntax: def first[T](...) / class Box[T]", score: 1 }
+    - { partial: "uses TypeVar correctly but unaware of 3.12 [T] syntax", score: 0.5 }
+
+- id: python-types-protocol-03
+  difficulty: medium
+  weight: 2
+  tags: [types-hints]
+  question: >
+    What is a `typing.Protocol`, and how does it differ from inheriting an
+    abstract base class?
+  answer: >
+    A `Protocol` defines an interface by structure: any class with the required
+    methods/attributes is considered compatible (structural / "duck" typing),
+    without declaring or importing the protocol. An ABC uses nominal typing — a
+    class must explicitly subclass it to be an instance. Protocols let you type
+    third-party or built-in objects you can't make subclass your interface;
+    checking is done by the type checker (or at runtime with
+    `@runtime_checkable`).
+  rubric:
+    - { point: "Protocol = structural typing: matches by shape, no explicit subclassing", score: 1 }
+    - { point: "ABC = nominal: must subclass to conform", score: 1 }
+    - { partial: "'like an interface' without the structural-vs-nominal contrast", score: 0.5 }
+
+- id: python-types-self-04
+  difficulty: medium
+  weight: 1
+  tags: [types-hints]
+  question: >
+    You have a method that returns `self` for chaining on a subclassable class.
+    How do you annotate its return type accurately, and what newer tools help?
+  answer: >
+    Annotate the return as `Self` (from `typing`, added in Python 3.11 / PEP
+    673): `def set_x(self, x) -> Self: ...`. On a subclass the checker infers the
+    subclass type, which annotating `-> MyClass` would not do (it would widen to
+    the base). Before 3.11 you emulated this with a `TypeVar` bound to the class.
+    Related 3.12 addition: the `type Alias = ...` statement (PEP 695) for named
+    type aliases.
+  rubric:
+    - { point: "return Self (typing.Self, 3.11) so subclasses get the right type", score: 1 }
+    - { point: "hardcoding -> BaseClass loses the subclass type / pre-3.11 used bound TypeVar", score: 1 }
+    - { partial: "'return the class name' without noticing subclass widening", score: 0.5 }
+
+- id: python-dataclasses-basics-01
+  difficulty: easy
+  weight: 2
+  tags: [dataclasses]
+  question: >
+    What does `@dataclass` generate for you, and why must a list default use
+    `field(default_factory=list)` instead of `= []`?
+  answer: >
+    `@dataclass` auto-generates `__init__`, `__repr__`, and `__eq__` from the
+    annotated class attributes (and more, e.g. ordering with `order=True`). A
+    bare `= []` default would be a single mutable list shared by every instance
+    (the mutable-default problem) — dataclasses actually reject a mutable default
+    and raise `ValueError`. `field(default_factory=list)` calls the factory once
+    per instance, giving each its own list.
+  rubric:
+    - { point: "generates __init__/__repr__/__eq__ from annotated fields", score: 1 }
+    - { point: "default_factory runs per-instance; a shared/mutable default is wrong (dataclass raises)", score: 1 }
+    - { partial: "names the generated methods but not why default_factory is needed", score: 0.5 }
+
+- id: python-dataclasses-frozen-02
+  difficulty: medium
+  weight: 2
+  tags: [dataclasses]
+  question: >
+    What does `@dataclass(frozen=True)` do, and what is `__post_init__` for?
+  answer: >
+    `frozen=True` makes instances immutable: assigning to a field after creation
+    raises `FrozenInstanceError`, and the class gets a `__hash__` so it can be
+    used in sets/dict keys (a normal mutable dataclass is unhashable). To set a
+    derived field on a frozen instance you must use
+    `object.__setattr__`. `__post_init__` runs right after the generated
+    `__init__` — the place to compute derived fields or validate arguments,
+    since you don't write `__init__` yourself.
+  rubric:
+    - { point: "frozen=True: immutable (assignment raises), becomes hashable", score: 1 }
+    - { point: "__post_init__ runs after __init__ for derived-field computation / validation", score: 1 }
+    - { partial: "describes frozen OR __post_init__ but not both", score: 0.5 }
+
+- id: python-dataclasses-slots-03
+  difficulty: medium
+  weight: 1
+  tags: [dataclasses]
+  question: >
+    What does `@dataclass(slots=True)` give you, and what is the trade-off?
+  answer: >
+    `slots=True` (added in Python 3.10) generates the class with `__slots__`, so
+    instances store fields in a fixed layout instead of a per-instance `__dict__`.
+    That lowers memory use and speeds attribute access. Trade-offs: you can't add
+    new attributes not declared as fields, and `__slots__` interacts awkwardly
+    with multiple inheritance and default values that reference other slots.
+  rubric:
+    - { point: "slots=True (3.10) → __slots__: less memory, faster attr access, no per-instance __dict__", score: 1 }
+    - { point: "cost: can't set undeclared attributes (and __slots__/inheritance caveats)", score: 1 }
+    - { partial: "'saves memory' without mentioning the no-new-attributes cost", score: 0.5 }
+
+- id: python-dataclasses-vs-04
+  difficulty: medium
+  weight: 2
+  tags: [dataclasses]
+  question: >
+    When would you choose a `@dataclass`, a `NamedTuple`, and a `TypedDict`?
+  answer: >
+    `dataclass`: a mutable (or frozen) regular object with named typed fields and
+    generated methods — the default for a small record with behavior.
+    `NamedTuple`: an immutable tuple subclass — use when you want tuple semantics
+    (indexing, unpacking, hashable, lightweight) and immutability. `TypedDict`:
+    NOT a class instance at all — it types the shape of a plain `dict` (string
+    keys), for JSON-like data you keep as dicts. So: object → dataclass, tuple →
+    NamedTuple, dict → TypedDict.
+  rubric:
+    - { point: "dataclass = mutable/frozen object with methods (general record)", score: 1 }
+    - { point: "NamedTuple = immutable tuple (indexable/unpackable/hashable)", score: 1 }
+    - { point: "TypedDict types a plain dict's shape, not an instance", score: 1 }
+    - { partial: "distinguishes only two of the three", score: 0.5 }
+
+- id: python-async-await-01
+  difficulty: medium
+  weight: 3
+  tags: [async]
+  question: >
+    What does calling an `async def` function return, and why does nothing happen
+    until you `await` it or schedule it on the event loop?
+  answer: >
+    Calling an `async def` returns a coroutine object; it does not run the body.
+    A coroutine only makes progress when driven by the event loop — via `await`,
+    `asyncio.run(coro)`, or `asyncio.create_task(coro)`. `await` suspends the
+    current coroutine and yields control back to the loop, which can run other
+    tasks until the awaited thing is ready. A coroutine you neither await nor
+    schedule produces a "coroutine was never awaited" warning and never executes.
+  rubric:
+    - { point: "async def call returns a coroutine object; body doesn't run yet", score: 1 }
+    - { point: "runs only when driven by the loop (await / run / create_task); await yields control", score: 1 }
+    - { partial: "'await runs it' without the coroutine-object / loop-scheduling model", score: 0.5 }
+
+- id: python-async-taskgroup-02
+  difficulty: hard
+  weight: 3
+  tags: [async]
+  question: >
+    Contrast `asyncio.gather` with `asyncio.TaskGroup` for running several
+    coroutines concurrently, especially in how they handle a failure.
+  answer: >
+    Both run coroutines concurrently. With `gather(*coros)` (default
+    `return_exceptions=False`), if one raises, `gather` propagates that one
+    exception but the OTHER tasks keep running (they are not cancelled), which
+    can leak work. `asyncio.TaskGroup` (added in Python 3.11) is an
+    `async with` block: `tg.create_task(...)` for each coro, and on exit it
+    awaits all of them; if any task raises, the group cancels the remaining tasks
+    and raises an `ExceptionGroup` bundling every error. TaskGroup is the
+    recommended structured-concurrency default in 3.11+.
+  rubric:
+    - { point: "gather: one failure propagates but siblings keep running (not cancelled)", score: 1 }
+    - { point: "TaskGroup (3.11) async with: on failure cancels remaining tasks", score: 1 }
+    - { point: "TaskGroup bundles multiple errors into an ExceptionGroup", score: 1 }
+    - { partial: "'both run things concurrently' without the failure-handling contrast", score: 0.5 }
+
+- id: python-async-blocking-03
+  difficulty: hard
+  weight: 3
+  tags: [async]
+  question: >
+    Why is calling `time.sleep(5)` or a synchronous `requests.get(...)` inside an
+    async coroutine a bug, and what should you do instead?
+  answer: >
+    They are blocking calls: they don't yield to the event loop, so they freeze
+    the ENTIRE loop — every other task, not just this coroutine — for the whole
+    duration. `async` gives concurrency only at `await` points that hand control
+    back. Fix: use the async equivalent (`await asyncio.sleep(5)`, an async HTTP
+    client like `aiohttp`/`httpx`), or push genuinely blocking/CPU work off the
+    loop with `await asyncio.to_thread(fn, ...)` (or a run-in-executor call).
+  rubric:
+    - { point: "blocking call stalls the whole event loop (all tasks), not just this coroutine", score: 1 }
+    - { point: "fix: async equivalent (asyncio.sleep/async client) or asyncio.to_thread/executor", score: 1 }
+    - { partial: "'it's slow' without understanding it blocks the whole loop", score: 0.5 }
+
+- id: python-async-cancel-04
+  difficulty: hard
+  weight: 2
+  tags: [async, errors-exceptions]
+  question: >
+    How does task cancellation work in asyncio, and why should you avoid
+    swallowing `asyncio.CancelledError`?
+  answer: >
+    `task.cancel()` schedules a `CancelledError` to be raised inside the task at
+    its next `await` point. Cancellation is cooperative — it only takes effect
+    where the coroutine suspends. In 3.8+ `CancelledError` derives from
+    `BaseException`, not `Exception`, so a bare `except Exception` won't catch it.
+    If you do catch it (e.g. for cleanup) you must re-raise it; swallowing it
+    breaks cancellation, leaves the task "uncancellable", and can hang shutdown or
+    a `TaskGroup`. Use `try/finally` for cleanup rather than suppressing it.
+  rubric:
+    - { point: "cancel() raises CancelledError at the next await; cooperative", score: 1 }
+    - { point: "don't swallow it — re-raise (it breaks cancellation); it's a BaseException", score: 1 }
+    - { partial: "'you can cancel tasks' without the must-re-raise point", score: 0.5 }
+
+- id: python-itergen-yield-01
+  difficulty: easy
+  weight: 3
+  tags: [iterators-generators]
+  question: >
+    What makes a function a generator, and how does its execution differ from a
+    function that builds and returns a list?
+  answer: >
+    Any function containing `yield` is a generator function; calling it returns a
+    a generator object and runs none of the body. Each `next()` (or loop step)
+    runs until the next `yield`, produces that value, and suspends with all local
+    state frozen; it resumes there next time. So values are produced lazily,
+    one at a time, using O(1) memory regardless of how many are produced — unlike
+    a list-building function that computes and holds every element up front. A
+    generator can also be infinite.
+  rubric:
+    - { point: "yield makes it a generator; each next() runs to the next yield then suspends (state frozen)", score: 1 }
+    - { point: "lazy / one-at-a-time / constant memory vs list materializes everything", score: 1 }
+    - { partial: "'yield returns multiple values' without the lazy/suspend mechanism", score: 0.5 }
+
+- id: python-itergen-genexpr-02
+  difficulty: easy
+  weight: 2
+  tags: [iterators-generators]
+  question: >
+    What is the difference between `[x*x for x in data]` and `(x*x for x in
+    data)`, and when does the second matter?
+  answer: >
+    Square brackets are a list comprehension: it builds the whole list in memory
+    immediately. Parentheses are a generator expression: it produces items lazily
+    on demand and stores only the current one. The generator matters for large or
+    infinite sequences and when you pipe straight into a consumer that iterates
+    once — e.g. `sum(x*x for x in data)` avoids building an intermediate list. A
+    generator is single-use (exhausted after one pass); a list can be re-iterated.
+  rubric:
+    - { point: "list comp materializes all items; genexpr is lazy, holds one at a time", score: 1 }
+    - { point: "genexpr wins for large/infinite data or feeding a one-pass consumer (e.g. sum)", score: 1 }
+    - { partial: "notes the () vs [] syntax but not eager-vs-lazy memory behavior", score: 0.5 }
+
+- id: python-itergen-itertools-03
+  difficulty: medium
+  weight: 1
+  tags: [iterators-generators]
+  question: >
+    Give two `itertools` tools and why they are preferable to a manual loop that
+    builds a list.
+  answer: >
+    Examples: `itertools.chain(a, b)` iterates several iterables as one without
+    concatenating them into a new list; `itertools.islice(it, 10)` takes the
+    first N lazily (works on infinite iterators); `count`, `cycle`, `groupby`,
+    `accumulate`, `batched` (3.12) are others. They are lazy C-level iterators:
+    they use constant memory, compose into pipelines, and work on unbounded
+    streams — a list-building loop would materialize everything and can't handle
+    an infinite source.
+  rubric:
+    - { point: "names ≥2 real itertools functions with what they do", score: 1 }
+    - { point: "lazy/constant-memory/composable vs materializing a list", score: 1 }
+    - { partial: "names tools but no memory/laziness rationale", score: 0.5 }
+
+- id: python-itergen-protocol-04
+  difficulty: medium
+  weight: 2
+  tags: [iterators-generators, data-model]
+  question: >
+    What methods make an object iterable vs an iterator, and why does the
+    distinction matter (e.g. iterating the same object twice)?
+  answer: >
+    An iterable defines `__iter__`, which returns a fresh iterator. An iterator
+    defines `__next__` (returning the next value or raising `StopIteration`) and
+    an `__iter__` that returns `self`. `for` calls `__iter__` first, then
+    `__next__` repeatedly. The distinction matters because an iterator is stateful
+    and single-pass: once exhausted it stays exhausted. A container (iterable)
+    returns a new iterator each `for`, so it can be looped many times; a raw
+    generator/iterator cannot be re-iterated.
+  rubric:
+    - { point: "iterable: __iter__ returns an iterator; iterator: __next__ (+ StopIteration) and __iter__ returns self", score: 1 }
+    - { point: "iterator is single-pass/stateful; iterable yields a fresh iterator so it re-iterates", score: 1 }
+    - { partial: "conflates iterable and iterator / only names __iter__", score: 0.5 }
+
+- id: python-context-with-01
+  difficulty: easy
+  weight: 3
+  tags: [context-managers]
+  question: >
+    What does the `with` statement guarantee, and which dunder methods implement
+    a context manager?
+  answer: >
+    `with cm as x:` calls `cm.__enter__()` (its return value is bound to `x`) on
+    entry, and guarantees `cm.__exit__(exc_type, exc, tb)` runs on the way out —
+    whether the block finishes normally, returns, or raises. That's why it's the
+    correct way to manage resources (files, locks, connections): cleanup can't be
+    skipped. `__exit__` receives any exception's details and can suppress it by
+    returning `True` (normally you return `None`/falsy so it propagates).
+  rubric:
+    - { point: "__enter__ on entry (bound to as-var); __exit__ always runs on exit even on exception", score: 1 }
+    - { point: "guarantees cleanup / __exit__ gets exc info and can suppress by returning True", score: 1 }
+    - { partial: "'with closes files' without naming __enter__/__exit__ or the guarantee", score: 0.5 }
+
+- id: python-context-contextmanager-02
+  difficulty: medium
+  weight: 2
+  tags: [context-managers, decorators]
+  question: >
+    How does `@contextlib.contextmanager` let you write a context manager as a
+    generator, and where do setup and teardown go?
+  answer: >
+    You decorate a single-`yield` generator with `@contextmanager`. Everything
+    before the `yield` is the setup (runs on `__enter__`); the value you `yield`
+    becomes the `as` target; everything after the `yield` is the teardown (runs
+    on `__exit__`). To make cleanup run even when the block raises, put the
+    `yield` in a `try/finally` — an exception in the body is re-raised at the
+    `yield`, so teardown outside a `finally` would be skipped.
+  rubric:
+    - { point: "before yield = setup/enter, after yield = teardown/exit; yielded value is the as-target", score: 1 }
+    - { point: "wrap yield in try/finally so teardown runs on exception", score: 1 }
+    - { partial: "knows it turns a generator into a CM but misses the try/finally for errors", score: 0.5 }
+
+- id: python-context-exitstack-03
+  difficulty: medium
+  weight: 1
+  tags: [context-managers]
+  question: >
+    What problem does `contextlib.ExitStack` solve that a plain nested `with`
+    does not?
+  answer: >
+    `ExitStack` manages a dynamic, variable number of context managers whose
+    count isn't known at compile time — e.g. opening a list of files. You
+    `stack.enter_context(cm)` for each inside one `with ExitStack() as stack:`,
+    and every one is unwound (in reverse order) on exit, even if you added them in
+    a loop. Nested `with` requires a fixed, statically-known set. It also lets you
+    register arbitrary cleanup callbacks with `stack.callback(...)`.
+  rubric:
+    - { point: "manages a dynamic/variable number of context managers (not statically known)", score: 1 }
+    - { point: "all entered CMs are cleaned up in reverse on exit / enter_context in a loop", score: 1 }
+    - { partial: "'combines context managers' without the dynamic-count point", score: 0.5 }
+
+- id: python-context-async-04
+  difficulty: medium
+  weight: 2
+  tags: [context-managers, async]
+  question: >
+    What is `async with`, which dunder methods does it use, and why can't a
+    regular `with` do the job for async resources?
+  answer: >
+    `async with cm as x:` is the async context-manager form: it `await`s
+    `cm.__aenter__()` on entry and `await`s `cm.__aexit__(...)` on exit. It's for
+    resources whose setup/teardown are themselves coroutines — async DB
+    connections, `aiohttp` sessions, async locks. A plain `with` calls the
+    synchronous `__enter__`/`__exit__`, which can't `await`, so it can't drive
+    coroutine-based acquire/release. `async with` is only valid inside an
+    `async def`.
+  rubric:
+    - { point: "async with awaits __aenter__/__aexit__ (async setup/teardown)", score: 1 }
+    - { point: "plain with uses sync __enter__/__exit__ which can't await; needs async for coroutine resources", score: 1 }
+    - { partial: "'it's with for async' without naming __aenter__/__aexit__ or why sync fails", score: 0.5 }
+
+- id: python-decorators-basics-01
+  difficulty: medium
+  weight: 3
+  tags: [decorators]
+  question: >
+    What is a decorator fundamentally, and why should the wrapper use
+    `functools.wraps`?
+  answer: >
+    A decorator is a callable that takes a function (or class) and returns a
+    replacement; `@deco` above `def f` is just `f = deco(f)`. The usual shape
+    returns an inner `wrapper` closure that calls the original. The problem: the
+    returned wrapper replaces the original, so `f.__name__`, `__doc__`,
+    signature, etc. become the wrapper's. `@functools.wraps(func)` on the wrapper
+    copies that metadata across, keeping introspection, help(), and debugging
+    accurate.
+  rubric:
+    - { point: "decorator takes a function and returns a replacement; @deco == f = deco(f)", score: 1 }
+    - { point: "functools.wraps copies __name__/__doc__/metadata from original to wrapper", score: 1 }
+    - { partial: "explains the decorator but not why @wraps matters", score: 0.5 }
+
+- id: python-decorators-args-02
+  difficulty: hard
+  weight: 2
+  tags: [decorators]
+  question: >
+    Why does a decorator that takes its own arguments — e.g. `@retry(times=3)` —
+    need an extra layer of nesting compared to a plain decorator?
+  answer: >
+    A plain decorator is one function taking `func`. A parameterized decorator
+    needs three levels: the outer call `retry(times=3)` is a decorator FACTORY —
+    it takes the arguments and returns the actual decorator, which then takes
+    `func` and returns the `wrapper`. So `@retry(times=3)` evaluates `retry(3)`
+    first to get a decorator, then applies it: `f = retry(3)(f)`. The arguments
+    are captured in the closure that the inner wrapper reads.
+  rubric:
+    - { point: "outer call is a factory returning the real decorator (3 nested levels)", score: 1 }
+    - { point: "@retry(3) == retry(3)(f); args captured in the closure", score: 1 }
+    - { partial: "'add another function' without the factory-returns-decorator model", score: 0.5 }
+
+- id: python-decorators-stacking-03
+  difficulty: medium
+  weight: 2
+  tags: [decorators]
+  question: >
+    Given `@a` then `@b` stacked above `def f`, in what order are the decorators
+    applied and in what order do their wrappers run when `f` is called?
+  answer: >
+    Application is bottom-up: `@a @b def f` desugars to `f = a(b(f))`, so `b`
+    (closest to the function) wraps first, then `a` wraps that. At CALL time the
+    outermost wrapper runs first, so `a`'s wrapper executes before `b`'s, which
+    finally calls the original `f`. In short: decorators apply nearest-first but
+    execute outermost-first — the two orders are opposite.
+  rubric:
+    - { point: "applied bottom-up: f = a(b(f)) (nearest decorator wraps first)", score: 1 }
+    - { point: "at call time outermost (a) runs first, then b, then f", score: 1 }
+    - { partial: "gives one order without distinguishing apply-time vs call-time", score: 0.5 }
+
+- id: python-decorators-class-04
+  difficulty: medium
+  weight: 1
+  tags: [decorators]
+  question: >
+    What can a class decorator do, and give a real example from the standard
+    library.
+  answer: >
+    A class decorator takes the class object and returns a (usually the same,
+    modified) class — `@deco class C` is `C = deco(C)`. It can add or replace
+    methods/attributes, register the class somewhere, or wrap it. The canonical
+    stdlib example is `@dataclass`, which inspects the annotated fields and
+    injects `__init__`, `__repr__`, `__eq__`, etc. `functools.total_ordering` is
+    another: it fills in the missing comparison methods from the ones you defined.
+  rubric:
+    - { point: "class decorator takes the class and returns/modifies it (@deco class C == C = deco(C))", score: 1 }
+    - { point: "concrete stdlib example (@dataclass / @total_ordering) and what it injects", score: 1 }
+    - { partial: "'decorates a class' with no example or mechanism", score: 0.5 }
+
+- id: python-datamodel-eqhash-01
+  difficulty: hard
+  weight: 3
+  tags: [data-model]
+  question: >
+    If you define `__eq__` on a class, what happens to its hashability, and why
+    must `__eq__` and `__hash__` be kept consistent?
+  answer: >
+    Defining `__eq__` causes Python to set `__hash__` to `None`, making instances
+    UNHASHABLE — you can't put them in a set or use them as dict keys until you
+    also define `__hash__`. The invariant is: objects that compare equal must have
+    the same hash (`a == b` ⇒ `hash(a) == hash(b)`); otherwise sets/dicts silently
+    lose or duplicate entries because they bucket by hash first. So base the hash
+    on the same fields as equality, and only make hashable objects that are
+    effectively immutable in those fields.
+  rubric:
+    - { point: "defining __eq__ sets __hash__ to None → instances become unhashable", score: 1 }
+    - { point: "equal objects must hash equal (a==b ⇒ hash equal); base both on same fields", score: 1 }
+    - { partial: "'define both together' without the __hash__=None or the equal-hash invariant", score: 0.5 }
+
+- id: python-datamodel-slots-02
+  difficulty: medium
+  weight: 2
+  tags: [data-model]
+  question: >
+    What does declaring `__slots__` on a class do at the data-model level, and
+    what do you give up?
+  answer: >
+    `__slots__ = ("x", "y")` tells Python to store those attributes in a fixed
+    per-instance layout (descriptors on the class) instead of a per-instance
+    `__dict__`. Benefit: less memory per instance and slightly faster attribute
+    access. Cost: you can no longer assign arbitrary new attributes not listed in
+    `__slots__` (you get `AttributeError`), there's no `__dict__` unless you add
+    it, and `__weakref__` and multiple inheritance with other slotted classes
+    need care.
+  rubric:
+    - { point: "__slots__ = fixed layout instead of per-instance __dict__ → less memory / faster access", score: 1 }
+    - { point: "can't add attributes outside the slot list (AttributeError); no __dict__ by default", score: 1 }
+    - { partial: "'saves memory' with no mechanism or no-new-attributes cost", score: 0.5 }
+
+- id: python-datamodel-mutable-03
+  difficulty: medium
+  weight: 3
+  tags: [data-model]
+  question: >
+    Why is `def add(item, target=[]):` a classic Python bug, and what's the
+    correct pattern?
+  answer: >
+    The default `[]` is evaluated ONCE, when the `def` executes, not on each call.
+    Every call that omits `target` shares that same list object, so items
+    accumulate across calls — a surprising, stateful default. Same trap for `{}`
+    and any mutable default. The fix is the `None` sentinel:
+    `def add(item, target=None): target = [] if target is None else target`,
+    which builds a fresh list per call.
+  rubric:
+    - { point: "default is evaluated once at def time and shared across all calls", score: 1 }
+    - { point: "fix: default to None sentinel and create the mutable inside the function", score: 1 }
+    - { partial: "notices the shared-state bug but gives no correct fix", score: 0.5 }
+
+- id: python-datamodel-is-04
+  difficulty: easy
+  weight: 2
+  tags: [data-model]
+  question: >
+    What is the difference between `is` and `==`, and why can `a is b` be
+    surprisingly True or False for small ints and strings?
+  answer: >
+    `==` compares VALUE (via `__eq__`); `is` compares IDENTITY (same object in
+    memory, i.e. same `id()`). Use `is` only for singletons like `None`
+    (`x is None`), never for value comparison. The confusion: CPython caches small
+    integers (about -5..256) and interns some strings, so `a is b` may be True for
+    equal small values purely as an implementation detail — you must not rely on
+    it. For larger or computed values `is` will be False even when `==` is True.
+  rubric:
+    - { point: "== compares value (__eq__), is compares identity (same object / id)", score: 1 }
+    - { point: "use is only for None/singletons; small-int/string interning is an impl detail not to rely on", score: 1 }
+    - { partial: "value vs identity but claims is/== are interchangeable", score: 0.5 }
+
+- id: python-datamodel-descriptor-05
+  difficulty: hard
+  weight: 1
+  tags: [data-model]
+  question: >
+    What is a descriptor, and how does it explain the behavior of `property` and
+    methods?
+  answer: >
+    A descriptor is an object stored as a class attribute that defines
+    `__get__` (and optionally `__set__`/`__delete__`); Python routes attribute
+    access on instances through those methods. `property` is a descriptor: reading
+    `obj.x` calls the property's `__get__`, which runs your getter. Functions are
+    also descriptors — `__get__` is what binds a plain function into a bound
+    method (injecting `self`) when accessed via an instance. Data descriptors
+    (with `__set__`) take precedence over the instance `__dict__`.
+  rubric:
+    - { point: "descriptor = class attr with __get__/__set__/__delete__ intercepting attribute access", score: 1 }
+    - { point: "property is a descriptor; functions use __get__ to bind methods (self)", score: 1 }
+    - { partial: "'like property' without the __get__/attribute-protocol mechanism", score: 0.5 }
+
+- id: python-errors-elsefinally-01
+  difficulty: medium
+  weight: 2
+  tags: [errors-exceptions]
+  question: >
+    In `try/except/else/finally`, when do the `else` and `finally` blocks run,
+    and why prefer `else` over putting the code in the `try`?
+  answer: >
+    `else` runs only if the `try` body completed with NO exception (and before
+    `finally`). `finally` always runs — normal exit, handled exception, unhandled
+    exception, even `return`/`break` — and is for cleanup that must happen no
+    matter what. Prefer `else` for the "success only" follow-up code so it's
+    outside the `try`: that keeps the `try` scope minimal, so you don't
+    accidentally catch an exception raised by the follow-up code with the same
+    `except`.
+  rubric:
+    - { point: "else runs only when try raised nothing; finally always runs (incl. return/exception)", score: 1 }
+    - { point: "else narrows the try so unrelated code's errors aren't caught by the except", score: 1 }
+    - { partial: "describes finally but not else's no-exception semantics", score: 0.5 }
+
+- id: python-errors-custom-02
+  difficulty: easy
+  weight: 2
+  tags: [errors-exceptions]
+  question: >
+    How should you define a custom exception, and why catch specific exception
+    types rather than a bare `except:`?
+  answer: >
+    Subclass `Exception` (not `BaseException`): `class ConfigError(Exception):
+    ...`, often with an app-wide base like `class AppError(Exception)` and
+    specific subclasses so callers can catch broadly or narrowly. Catch specific
+    types because a bare `except:` (or `except BaseException`) also swallows
+    `KeyboardInterrupt` and `SystemExit`, hides real bugs, and makes failures
+    invisible. Catch the narrowest exception you can actually handle and let the
+    rest propagate.
+  rubric:
+    - { point: "subclass Exception (app base + specific subclasses)", score: 1 }
+    - { point: "bare except swallows KeyboardInterrupt/SystemExit and hides bugs; catch narrow", score: 1 }
+    - { partial: "how to define it but no reason to avoid bare except", score: 0.5 }
+
+- id: python-errors-raisefrom-03
+  difficulty: medium
+  weight: 2
+  tags: [errors-exceptions]
+  question: >
+    What does `raise NewError(...) from err` do, and how does it differ from a
+    plain `raise NewError(...)` inside an `except` block?
+  answer: >
+    `from err` sets the new exception's `__cause__` to `err`, producing an
+    explicit chain shown as "The above exception was the direct cause of the
+    following exception" — you deliberately translate a low-level error into a
+    domain one while preserving the original. A plain `raise` inside `except`
+    still implicitly chains (`__context__`, "During handling ... another
+    occurred"), but `from` makes the causal link explicit and intentional. Use
+    `from None` to suppress the chain entirely.
+  rubric:
+    - { point: "from err sets __cause__ → explicit 'direct cause' chain, preserves original", score: 1 }
+    - { point: "plain raise still implicitly chains via __context__; from None suppresses", score: 1 }
+    - { partial: "'it keeps the original error' without the cause-vs-context/explicit distinction", score: 0.5 }
+
+- id: python-errors-group-04
+  difficulty: hard
+  weight: 2
+  tags: [errors-exceptions]
+  question: >
+    What are `ExceptionGroup` and `except*`, why were they added, and how does
+    `except*` differ from a normal `except`?
+  answer: >
+    Added in Python 3.11 (PEP 654) to represent MULTIPLE unrelated exceptions
+    raised together — the motivating case is `asyncio.TaskGroup`, where several
+    concurrent tasks can each fail. An `ExceptionGroup` bundles them. `except*`
+    handles groups: each `except* ValueError` extracts and handles the matching
+    exceptions from the group while letting the non-matching ones continue to
+    other `except*` clauses (so several `except*` blocks can each run for one
+    group). A normal `except` matches only a single exception and would catch the
+    whole group as one object.
+  rubric:
+    - { point: "ExceptionGroup (3.11/PEP 654) bundles multiple simultaneous exceptions (e.g. TaskGroup)", score: 1 }
+    - { point: "except* splits a group by type; multiple except* clauses can each fire", score: 1 }
+    - { partial: "'new way to catch multiple errors' without the group/split mechanism or 3.11", score: 0.5 }

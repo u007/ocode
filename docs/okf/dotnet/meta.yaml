@@ -1,0 +1,27 @@
+stack: dotnet
+title: .NET (8/9 — runtime, BCL, ASP.NET Core, EF Core)
+corpus_rev: 1
+# Platform corpus: the .NET runtime/BCL + the framework stack (ASP.NET Core, EF
+# Core, generic host/DI). .NET 9 changes are called out inline. Languages are
+# graded separately (csharp / vbnet corpora), so keep questions language-neutral.
+version_scope: ">=8 <10"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - hosting-di            # generic/web host, IServiceCollection, lifetimes, captive deps, keyed services
+  - configuration-options # IConfiguration layering, options pattern (IOptions/Snapshot/Monitor), secrets vs env
+  - aspnetcore-pipeline   # minimal APIs, middleware order/short-circuit, Use vs Map, results, filters
+  - efcore                # DbContext lifetime/threading, change tracking, N+1/Include, migrations, SaveChanges
+  - memory-gc             # GC generations & LOH, IDisposable vs finalizer, Span/ArrayPool/stackalloc, struct vs class
+  - serialization         # System.Text.Json options/source gen/polymorphism, STJ vs Newtonsoft, options reuse
+  - resilience-http       # HttpClient socket exhaustion, IHttpClientFactory/typed clients, DNS, retries/timeouts
+  - logging-diagnostics   # ILogger structured templates, levels/filtering, scopes, LoggerMessage, OpenTelemetry
+
+detection:
+  mode: any
+  markers:
+    - { type: file, glob: "*.sln" }
+    - { type: file, glob: "global.json" }
+    - { type: file, glob: "*.csproj" }
+    - { type: file, glob: "*.vbproj" }
+    - { type: file, glob: "Directory.Build.props" }

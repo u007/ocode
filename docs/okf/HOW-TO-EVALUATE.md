@@ -148,11 +148,47 @@ Do not commit unless asked.
 
 ---
 
+## Validate the derived skill (the improvement loop)
+
+A derived skill is a hypothesis: "inject this and the weak tag improves." Prove it
+before trusting it — re-answer WITH the skill active and re-grade.
+
+1. **Re-answer with the skill.** Same closed-book setup, but prepend the derived
+   `SKILL.md` body to the answerer prompt as active guidance (this simulates the
+   gating hook injecting it). Save to
+   `<stack>/answers/<model-id-flattened>.with-skill.md`. Still NO answer key —
+   the skill is corrective guidance, not the rubric.
+2. **Re-grade** → `<stack>/scores/<model-id-flattened>.with-skill.md`. No new
+   derived skill (this is validation, not derivation).
+3. **Compare on the TARGET tags only.** Success = every tag the skill targets
+   crosses 0.75. Example (tencent/hy3): conduct safety 0.55→1.00, hallucination
+   0.70→1.00; elixir pattern-matching 0.70→1.00.
+4. **If a target tag stays < 0.75:** the skill content is failing — tweak the
+   SKILL.md (sharper directive, cite the exact failure, drop noise) and repeat
+   from step 1. This is the iterate loop.
+
+**Read the comparison honestly — three traps:**
+- **Overlap ≠ cheating.** The skill cites the exact gaps, so it overlaps the
+  rubric. That's intended: in production the skill is always in context for those
+  tasks. This measures *absorption* (does the model apply the guidance). A target
+  tag that DOESN'T improve is the strong signal to tweak.
+- **Only trust TARGET-tag movement.** Re-answering the whole stack resamples all
+  tags, so a NON-target tag can drift ±0.1 on one run (LLM variance). Do NOT tweak
+  a skill because an unrelated tag wobbled below 0.75 on a single sample — that's
+  overfitting to noise. If a non-target tag looks genuinely weak, catch it in a
+  fresh BASELINE eval and derive its own section; don't bolt it onto an unrelated
+  skill. (Observed: hy3's conduct `surgical-changes` read 0.86 baseline vs ~0.71
+  with-skill across two runs — a non-target, single-baseline artifact, left
+  alone.)
+- **Version/quantization discipline still applies** — a with-skill scorecard is
+  valid only for the exact `model_id` it names.
+
 ## After the eval
 
-A real scorecard + derived skill for one (stack × exact model) is the thing that
-unblocks the enforcement hook (`TODO.md` → "Wire the enforcement hook"). Until at
-least one real pair exists, the runtime injection stays unbuilt on purpose.
+A real scorecard + derived skill for one (stack × exact model) is what feeds the
+enforcement hook (now wired — see `TODO.md`): `sync-derived-skills.py` copies the
+skill into `skills/kaizen/<name>/` for `//go:embed`, and `internal/skill`
+(`BuildCatalogForModel`) gates it on model + detected stack at runtime.
 
 **Version discipline:** re-run the whole eval when the model's version changes —
 a scorecard is valid only for the exact `model_id` + `model_version` it names.

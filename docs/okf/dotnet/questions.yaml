@@ -1,0 +1,708 @@
+# .NET platform benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+# Platform corpus (runtime/BCL + ASP.NET Core + EF Core + host/DI); language is
+# graded in the csharp corpus. Answers target .NET 8; .NET 9 deltas inline.
+
+# ─────────────────────────────── hosting-di ───────────────────────────────
+
+- id: dotnet-di-lifetimes-01
+  difficulty: easy
+  weight: 3
+  tags: [hosting-di]
+  question: >
+    Explain the three built-in DI service lifetimes — transient, scoped, and
+    singleton — and when each is resolved to a new instance.
+  answer: >
+    Transient: a new instance every time the service is requested. Scoped: one
+    instance per DI scope — in ASP.NET Core a scope is created per HTTP request,
+    so it's effectively per-request, and the same instance is reused within that
+    request. Singleton: one instance for the whole application lifetime, shared
+    across all requests/threads, created once (on first resolve, or from the
+    instance you register). Registered via AddTransient/AddScoped/AddSingleton
+    on IServiceCollection.
+  rubric:
+    - { point: "transient = new instance per resolve", score: 1 }
+    - { point: "scoped = one per scope / per HTTP request", score: 1 }
+    - { point: "singleton = one for the whole app lifetime, shared", score: 1 }
+    - { partial: "names the three but conflates scoped with singleton or per-call", score: 0.5 }
+
+- id: dotnet-di-captive-02
+  difficulty: hard
+  weight: 3
+  tags: [hosting-di]
+  question: >
+    What is a "captive dependency" in .NET DI, and why is injecting a scoped
+    service into a singleton a bug?
+  answer: >
+    A captive dependency is when a longer-lived service holds a reference to a
+    shorter-lived one, freezing it past its intended lifetime. Injecting a scoped
+    (or transient) service into a singleton captures the first-resolved instance
+    for the whole app: it never gets a fresh per-request instance, and a scoped
+    resource like a DbContext gets shared across requests/threads (not
+    thread-safe) causing state corruption. The default provider's scope
+    validation throws on this when building the host in Development. Fix: inject
+    IServiceScopeFactory (or a factory) and create a scope when you need the
+    scoped service.
+  rubric:
+    - { point: "longer-lived service captures a shorter-lived one past its lifetime", score: 1 }
+    - { point: "singleton holding scoped → shared across requests/threads, no fresh instance (corruption/not thread-safe)", score: 1 }
+    - { point: "fix: IServiceScopeFactory/CreateScope (or scope validation catches it)", score: 1 }
+    - { partial: "'lifetime mismatch is bad' without the capture/sharing consequence", score: 0.5 }
+
+- id: dotnet-di-scope-in-singleton-03
+  difficulty: medium
+  weight: 2
+  tags: [hosting-di]
+  question: >
+    A singleton background service needs to use a scoped service (e.g. a
+    DbContext) on each iteration. How do you do it correctly?
+  answer: >
+    Don't inject the scoped service into the singleton's constructor (that
+    captures it). Inject IServiceScopeFactory, and inside each unit of work call
+    `using var scope = scopeFactory.CreateScope();` then resolve the scoped
+    service from `scope.ServiceProvider` for that iteration, disposing the scope
+    when done. Each iteration gets a fresh, correctly-scoped instance.
+  rubric:
+    - { point: "inject IServiceScopeFactory, not the scoped service directly", score: 1 }
+    - { point: "CreateScope() per unit of work, resolve from scope.ServiceProvider, dispose scope", score: 1 }
+    - { partial: "'use a scope' without naming IServiceScopeFactory / per-iteration create+dispose", score: 0.5 }
+
+- id: dotnet-di-keyed-04
+  difficulty: medium
+  weight: 2
+  tags: [hosting-di]
+  question: >
+    You need two different implementations of the same interface resolvable by
+    name. What DI feature (and which .NET version) supports this, and how do you
+    consume it?
+  answer: >
+    Keyed services, introduced in .NET 8. Register with AddKeyedSingleton/
+    AddKeyedScoped/AddKeyedTransient passing a key (e.g. "fast"/"slow"). Consume
+    by annotating a constructor parameter with [FromKeyedServices("fast")], or
+    resolve via IServiceProvider.GetRequiredKeyedService<T>(key). In .NET 9 the
+    resolution was tightened: [FromKeyedServices] throws InvalidOperationException
+    if no matching keyed service is registered (previously it could fall back to a
+    non-keyed registration).
+  rubric:
+    - { point: "keyed services, added in .NET 8", score: 1 }
+    - { point: "AddKeyed{Singleton,Scoped,Transient} with a key; consume via [FromKeyedServices(key)] or GetRequiredKeyedService", score: 1 }
+    - { partial: "'register two and inject IEnumerable<T>' (works but isn't the keyed feature asked for)", score: 0.5 }
+
+# ─────────────────────────── configuration-options ─────────────────────────
+
+- id: dotnet-config-precedence-01
+  difficulty: medium
+  weight: 3
+  tags: [configuration-options]
+  question: >
+    IConfiguration composes multiple sources. What is the default precedence in a
+    typical host, and what wins when the same key exists in several sources?
+  answer: >
+    Configuration providers are layered in registration order and last-registered
+    wins for a given key. The default host builder adds, in order:
+    appsettings.json, appsettings.{Environment}.json, User Secrets (Development
+    only), environment variables, then command-line arguments. So command-line
+    overrides env vars, which override the environment-specific JSON, which
+    overrides the base JSON. Keys are case-insensitive; nested keys use `:` (or
+    `__` in environment-variable names).
+  rubric:
+    - { point: "providers layered in order; last one to set a key wins", score: 1 }
+    - { point: "default order: appsettings → appsettings.{Env} → user secrets → env vars → command line", score: 1 }
+    - { point: "nested keys via ':' (or '__' in env var names)", score: 1 }
+    - { partial: "'later sources override earlier' without the actual default order", score: 0.5 }
+
+- id: dotnet-config-options-interfaces-02
+  difficulty: hard
+  weight: 3
+  tags: [configuration-options]
+  question: >
+    Contrast IOptions<T>, IOptionsSnapshot<T>, and IOptionsMonitor<T> — their
+    lifetimes, whether they see config reloads, and where each can be injected.
+  answer: >
+    IOptions<T>: singleton, computed once, never reflects post-startup changes;
+    no named-options support at resolve time; inject anywhere. IOptionsSnapshot<T>:
+    scoped, recomputed once per request/scope so it picks up reloaded config on
+    the next request, and supports named options — but being scoped it cannot be
+    injected into a singleton. IOptionsMonitor<T>: singleton, exposes CurrentValue
+    plus OnChange notifications, always reflects the latest reloaded config, and
+    can be injected into any lifetime (including singletons) — use it for
+    long-lived services that must react to config changes.
+  rubric:
+    - { point: "IOptions = singleton, one-time value, no reload", score: 1 }
+    - { point: "IOptionsSnapshot = scoped, per-request recompute (sees reloads), named options, NOT injectable into singleton", score: 1 }
+    - { point: "IOptionsMonitor = singleton, CurrentValue + OnChange, reflects reloads, injectable anywhere", score: 1 }
+    - { partial: "distinguishes only one pair (e.g. IOptions vs the rest) without the snapshot/monitor lifetime split", score: 0.5 }
+
+- id: dotnet-config-secrets-03
+  difficulty: medium
+  weight: 2
+  tags: [configuration-options]
+  question: >
+    Where should local development secrets (e.g. a connection string with a
+    password) live, and how does that differ from production?
+  answer: >
+    In development use the Secret Manager (User Secrets): `dotnet user-secrets
+    set`, stored in a per-user file OUTSIDE the project tree keyed by a
+    UserSecretsId, so secrets never land in source control. It's only loaded in
+    the Development environment. It is not encrypted and is not for production —
+    in production supply configuration via environment variables or a real secret
+    store (Azure Key Vault, AWS/HashiCorp secrets), injected as env vars or a
+    dedicated configuration provider. Never commit secrets to appsettings.json.
+  rubric:
+    - { point: "dev: User Secrets / Secret Manager, stored outside the project (not in source control), Development-only", score: 1 }
+    - { point: "prod: env vars or a real secret store (Key Vault etc.); user secrets are not for production", score: 1 }
+    - { partial: "'use user secrets' without the not-for-prod / out-of-repo point", score: 0.5 }
+
+- id: dotnet-config-options-binding-04
+  difficulty: medium
+  weight: 2
+  tags: [configuration-options]
+  question: >
+    How do you bind a configuration section to a strongly-typed options class,
+    and how do you make the app fail fast on invalid options?
+  answer: >
+    Register with the options pattern: `services.AddOptions<MyOptions>()
+    .Bind(config.GetSection("My")).ValidateDataAnnotations().ValidateOnStart();`
+    (or the shorthand `services.Configure<MyOptions>(config.GetSection("My"))`).
+    Bind maps the section's keys onto the POCO's properties. ValidateOnStart
+    forces validation at host startup so bad configuration throws immediately
+    instead of on first injection deep in a request. Then inject IOptions<MyOptions>
+    (or Snapshot/Monitor) to consume it.
+  rubric:
+    - { point: "bind a section to a POCO via AddOptions<T>().Bind(section) / Configure<T>(section)", score: 1 }
+    - { point: "ValidateDataAnnotations + ValidateOnStart to fail fast at startup", score: 1 }
+    - { partial: "'use Configure<T>' without the validation / fail-fast half", score: 0.5 }
+
+# ─────────────────────────── aspnetcore-pipeline ───────────────────────────
+
+- id: dotnet-pipeline-order-01
+  difficulty: hard
+  weight: 3
+  tags: [aspnetcore-pipeline]
+  question: >
+    Middleware in ASP.NET Core is order-sensitive. Explain how the pipeline
+    executes and why, for example, UseAuthentication/UseAuthorization must sit in
+    a specific place relative to UseRouting and the endpoints.
+  answer: >
+    Middleware forms a chain: each component runs code, calls `await next()` to
+    invoke the rest of the pipeline, then runs code on the way back out (an
+    onion/two-pass model). Order in Program.cs is the order of execution, so a
+    component only affects what comes after it. UseRouting must run before
+    UseAuthorization so the endpoint (and its auth metadata) is selected first;
+    UseAuthentication/UseAuthorization must run before the endpoint executes
+    (UseEndpoints/Map...) so an unauthenticated/unauthorized request is rejected
+    before hitting the handler. Getting the order wrong silently disables auth or
+    breaks routing.
+  rubric:
+    - { point: "onion model: each middleware runs, awaits next(), then runs on the way back", score: 1 }
+    - { point: "registration order = execution order; a middleware only affects what's after it", score: 1 }
+    - { point: "UseRouting before UseAuthorization, and auth before the endpoint runs", score: 1 }
+    - { partial: "'order matters' without the next()/two-pass model or a concrete ordering", score: 0.5 }
+
+- id: dotnet-pipeline-use-vs-map-02
+  difficulty: medium
+  weight: 2
+  tags: [aspnetcore-pipeline]
+  question: >
+    In configuring the pipeline, what's the difference between `Use`, `Run`, and
+    `Map`, and what does it mean for a middleware to short-circuit?
+  answer: >
+    `Use` adds a middleware that can call `next` to continue the pipeline or omit
+    it to short-circuit (stop and start returning the response back up the chain).
+    `Run` is a terminal middleware — it never calls next, ending the pipeline.
+    `Map`/`MapWhen` branches the pipeline based on a path prefix or predicate,
+    running a separate middleware sub-pipeline for matching requests. Short-
+    circuiting means a middleware produces the response itself and doesn't invoke
+    the rest of the chain (e.g. auth returning 401, or a cache hit).
+  rubric:
+    - { point: "Use = can call next or short-circuit; Run = terminal (no next)", score: 1 }
+    - { point: "Map/MapWhen branches the pipeline by path/predicate", score: 1 }
+    - { point: "short-circuit = respond without calling next / skip the rest of the pipeline", score: 1 }
+    - { partial: "explains one (e.g. only short-circuit) without the Use/Run/Map distinction", score: 0.5 }
+
+- id: dotnet-pipeline-minimal-results-03
+  difficulty: medium
+  weight: 2
+  tags: [aspnetcore-pipeline]
+  question: >
+    In a minimal API, how does a handler's return value become an HTTP response,
+    and what do Results/TypedResults give you over returning a raw object?
+  answer: >
+    A minimal API endpoint's return value is turned into a response by the
+    framework: a raw object/POCO is serialized to JSON with a 200; a string
+    becomes text; returning an IResult lets you control status/headers. Results
+    (e.g. Results.Ok(x), Results.NotFound(), Results.BadRequest()) and the typed
+    equivalent TypedResults.Ok(x) produce those IResult values explicitly.
+    TypedResults returns a concrete type (e.g. Ok<T>) which makes the response
+    strongly typed — better for testing and for OpenAPI metadata via
+    `.Produces`/union return types — whereas Results is untyped IResult.
+  rubric:
+    - { point: "return value is auto-converted: object → JSON+200, IResult controls status/headers", score: 1 }
+    - { point: "Results/TypedResults produce explicit status results; TypedResults is strongly typed (testing/OpenAPI)", score: 1 }
+    - { partial: "'return Results.Ok' without the auto-serialization or TypedResults-typing point", score: 0.5 }
+
+- id: dotnet-pipeline-filters-vs-middleware-04
+  difficulty: hard
+  weight: 2
+  tags: [aspnetcore-pipeline]
+  question: >
+    When should you use an endpoint filter (or MVC action filter) versus a piece
+    of middleware? What can a filter do that middleware can't?
+  answer: >
+    Middleware runs for every request across the whole app (or a mapped branch)
+    and works at the raw HttpContext level, before routing/endpoint selection —
+    use it for cross-cutting concerns like logging, exception handling, CORS,
+    auth. A filter runs only for a specific endpoint/route after model binding, so
+    it has access to the bound arguments and the endpoint result and can
+    short-circuit or transform them (e.g. validation on the parsed parameters).
+    Prefer a filter when the logic is endpoint-specific and needs the bound
+    inputs/result; prefer middleware for app-wide, routing-agnostic concerns.
+  rubric:
+    - { point: "middleware = app-wide, raw HttpContext, before routing; filter = per-endpoint, after model binding", score: 1 }
+    - { point: "filters can see the bound arguments and the endpoint result (middleware can't)", score: 1 }
+    - { partial: "'both intercept requests' without the routing/binding scope distinction", score: 0.5 }
+
+# ───────────────────────────────── efcore ──────────────────────────────────
+
+- id: dotnet-efcore-context-lifetime-01
+  difficulty: hard
+  weight: 3
+  tags: [efcore]
+  question: >
+    What is the correct lifetime for a DbContext, and why is a DbContext instance
+    not safe to share across threads or concurrent async operations?
+  answer: >
+    A DbContext should be short-lived — one unit of work — and AddDbContext
+    registers it as scoped by default, so in ASP.NET Core you get one per HTTP
+    request. DbContext is NOT thread-safe: it does not support multiple parallel
+    operations on the same instance, including running two async queries
+    concurrently. If a second operation starts before the previous finishes EF
+    throws InvalidOperationException ("A second operation started on this context
+    before a previous operation completed"); undetected concurrent use can corrupt
+    its change-tracker state. So always await each call before the next, and for
+    parallel work use separate context instances (each in its own scope), e.g. via
+    IDbContextFactory.
+  rubric:
+    - { point: "short-lived / one unit of work; scoped (per request) by default via AddDbContext", score: 1 }
+    - { point: "not thread-safe: no parallel/concurrent operations on one instance (throws / corrupts state)", score: 1 }
+    - { point: "for parallel work use separate instances (own scope) / IDbContextFactory; await each op", score: 1 }
+    - { partial: "'use scoped' without the thread-safety / no-concurrent-ops reason", score: 0.5 }
+
+- id: dotnet-efcore-notracking-02
+  difficulty: medium
+  weight: 3
+  tags: [efcore]
+  question: >
+    What does EF Core's change tracker do, and when and why would you add
+    AsNoTracking() to a query?
+  answer: >
+    By default EF tracks the entities a query returns (identity resolution +
+    snapshots) so SaveChanges can detect modifications and persist them, and so
+    repeated queries return the same instance. That tracking costs memory and CPU.
+    For read-only queries where you won't modify and save the results — typical
+    for GET/list endpoints — add AsNoTracking() so EF skips creating tracking
+    entries, which is faster and lighter. Use tracking (the default) when you
+    intend to update entities and call SaveChanges.
+  rubric:
+    - { point: "change tracker snapshots entities so SaveChanges knows what to persist", score: 1 }
+    - { point: "AsNoTracking for read-only queries → skips tracking, faster/less memory; keep tracking when you'll update+save", score: 1 }
+    - { partial: "'AsNoTracking is faster' without why (no tracking overhead / read-only)", score: 0.5 }
+
+- id: dotnet-efcore-nplus1-03
+  difficulty: hard
+  weight: 3
+  tags: [efcore]
+  question: >
+    Explain deferred execution of an IQueryable versus ToListAsync(), and how the
+    N+1 query problem arises and is fixed.
+  answer: >
+    An IQueryable is deferred/lazy: composing Where/Select/OrderBy builds an
+    expression tree and executes nothing until you enumerate it (ToListAsync,
+    FirstAsync, foreach). ToListAsync() forces execution and materializes the rows
+    now. N+1 happens when you load a list (1 query) and then, per row, trigger
+    another query for a related navigation — e.g. lazy loading inside a loop, or
+    projecting a related property that wasn't loaded — producing 1 + N round
+    trips. Fix by eager-loading the relation in the original query with
+    Include()/ThenInclude() (or a projection with Select) so it's fetched in one
+    (or a bounded number of) queries.
+  rubric:
+    - { point: "IQueryable is deferred — builds an expression, executes only on enumeration; ToListAsync forces execution", score: 1 }
+    - { point: "N+1 = 1 query for the list then one per row for a related navigation (e.g. lazy loading in a loop)", score: 1 }
+    - { point: "fix with Include()/ThenInclude() (or projection) to load the relation in one query", score: 1 }
+    - { partial: "defines N+1 but no deferred-execution or Include fix", score: 0.5 }
+
+- id: dotnet-efcore-savechanges-tx-04
+  difficulty: medium
+  weight: 2
+  tags: [efcore]
+  question: >
+    Is a single SaveChangesAsync() call transactional? And what is a migration's
+    role in EF Core?
+  answer: >
+    Yes — by default a single SaveChanges/SaveChangesAsync wraps all its INSERT/
+    UPDATE/DELETE statements in one database transaction, so they all commit or all
+    roll back; you only need an explicit transaction (BeginTransaction) to span
+    multiple SaveChanges or other commands atomically. Migrations are the
+    versioned schema-change mechanism: `dotnet ef migrations add` diffs the model
+    against a snapshot and generates code to evolve the database schema, and
+    `dotnet ef database update` (or migrate at startup) applies pending migrations
+    — keeping the DB schema in sync with the model over time.
+  rubric:
+    - { point: "one SaveChanges is atomic — all its changes in a single transaction (all-or-nothing)", score: 1 }
+    - { point: "explicit transaction needed to span multiple SaveChanges/commands", score: 1 }
+    - { point: "migrations = versioned schema evolution (add generates, database update applies)", score: 1 }
+    - { partial: "answers only the transactional half OR only migrations", score: 0.5 }
+
+# ──────────────────────────────── memory-gc ────────────────────────────────
+
+- id: dotnet-gc-generations-loh-01
+  difficulty: hard
+  weight: 2
+  tags: [memory-gc]
+  question: >
+    Describe the generational GC (gen 0/1/2) and the Large Object Heap. Why are
+    large, short-lived allocations especially costly?
+  answer: >
+    The GC is generational: new objects start in gen 0, which is collected
+    frequently and cheaply; survivors are promoted to gen 1 then gen 2. The
+    generational hypothesis is that most objects die young, so collecting gen 0
+    often reclaims most garbage cheaply, and gen 2 (long-lived) is collected
+    rarely because full collections are expensive. Objects ≥ ~85 KB go on the
+    Large Object Heap, which is collected only with gen 2 and is not compacted by
+    default, so churning large short-lived buffers triggers expensive full GCs and
+    fragments the LOH. Prefer pooling/reusing large buffers (ArrayPool) over
+    allocating them repeatedly.
+  rubric:
+    - { point: "gen 0 cheap/frequent, survivors promoted to gen1→gen2; gen2 collected rarely (expensive)", score: 1 }
+    - { point: "objects ≥ ~85 KB go on the LOH, collected with gen 2 and not compacted (fragmentation)", score: 1 }
+    - { partial: "mentions generations but not the LOH threshold/full-GC cost", score: 0.5 }
+
+- id: dotnet-gc-dispose-finalizer-02
+  difficulty: hard
+  weight: 3
+  tags: [memory-gc]
+  question: >
+    Contrast IDisposable/Dispose with a finalizer. When do you need each, and what
+    does IAsyncDisposable add?
+  answer: >
+    IDisposable.Dispose is deterministic cleanup you (or a `using` block) call to
+    release unmanaged resources and other IDisposables immediately, at a known
+    point. A finalizer (~Type) is a non-deterministic safety net the GC runs
+    before reclaiming an object that still holds an unmanaged resource; finalizable
+    objects survive an extra GC (promoted, run on the finalizer thread), so they're
+    costly — only add a finalizer when you directly own an unmanaged handle, and
+    implement the full Dispose pattern that calls GC.SuppressFinalize(this) so
+    disposing skips finalization. Most managed types need only Dispose, not a
+    finalizer (prefer SafeHandle for the unmanaged bit). IAsyncDisposable/DisposeAsync
+    lets cleanup await async work (flush a stream, close a connection) via
+    `await using`, instead of blocking in Dispose.
+  rubric:
+    - { point: "Dispose = deterministic, caller/using-invoked; finalizer = GC-run, non-deterministic safety net", score: 1 }
+    - { point: "finalizers are costly (extra GC survival) — only for directly-owned unmanaged resources; SuppressFinalize when disposed", score: 1 }
+    - { point: "IAsyncDisposable/DisposeAsync (await using) for async cleanup", score: 1 }
+    - { partial: "'Dispose frees resources' without the finalizer contrast or async-dispose", score: 0.5 }
+
+- id: dotnet-gc-span-arraypool-03
+  difficulty: hard
+  weight: 2
+  tags: [memory-gc]
+  question: >
+    Name allocation-reducing tools in modern .NET — Span<T>, stackalloc, and
+    ArrayPool<T> — and what each avoids.
+  answer: >
+    Span<T>/ReadOnlySpan<T> is a stack-only view over contiguous memory (array,
+    stackalloc buffer, or slice) that lets you slice and process data without
+    allocating new arrays or copying — e.g. parsing a substring with no string
+    allocation. `stackalloc` allocates a small buffer on the stack (used as a
+    Span<T>) so it's freed on return with zero GC pressure — good for small,
+    short-lived scratch buffers. ArrayPool<T>.Shared rents and returns reusable
+    arrays so hot paths reuse buffers instead of allocating (and GC-collecting)
+    large arrays repeatedly — you must return what you rent. Together they cut
+    gen-0 churn and LOH allocations on hot paths.
+  rubric:
+    - { point: "Span<T> = allocation-free view/slice over memory (no new array/copy)", score: 1 }
+    - { point: "stackalloc = small stack buffer (no GC); ArrayPool = rent/return reusable arrays instead of allocating", score: 1 }
+    - { partial: "names them but doesn't say what allocation each avoids", score: 0.5 }
+
+- id: dotnet-gc-struct-vs-class-04
+  difficulty: medium
+  weight: 2
+  tags: [memory-gc]
+  question: >
+    From an allocation standpoint, how do a struct (value type) and a class
+    (reference type) differ, and what is boxing?
+  answer: >
+    A class is a reference type: instances live on the heap and are GC-tracked, and
+    variables hold references. A struct is a value type: it's copied by value and,
+    as a local or field, can live on the stack or inline in its container with no
+    separate heap allocation and no GC bookkeeping — good for small, short-lived,
+    immutable values on hot paths. But structs copy on assignment/passing (large
+    structs are expensive to copy), and boxing — converting a value type to
+    object/an interface — allocates a heap box and copies the value into it,
+    reintroducing the allocation you used a struct to avoid.
+  rubric:
+    - { point: "class = heap-allocated reference type (GC-tracked); struct = value type, copied, can avoid heap allocation", score: 1 }
+    - { point: "boxing = value type → object/interface allocates a heap box (defeats the struct win)", score: 1 }
+    - { partial: "struct-vs-class stated without boxing, or 'structs are faster' with no allocation reason", score: 0.5 }
+
+# ────────────────────────────── serialization ──────────────────────────────
+
+- id: dotnet-json-stj-defaults-01
+  difficulty: medium
+  weight: 2
+  tags: [serialization]
+  question: >
+    Using System.Text.Json, how do you get camelCase JSON property names, and how
+    do you override the serialized name of a single property?
+  answer: >
+    Set JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase to
+    write (and, with case-insensitive matching, read) camelCase names — note
+    ASP.NET Core's default JSON options already use camelCase. For a specific
+    property, annotate it with [JsonPropertyName("custom_name")], which overrides
+    the naming policy for just that member. Related knobs live on the same options:
+    DefaultIgnoreCondition, WriteIndented, converters, etc.
+  rubric:
+    - { point: "PropertyNamingPolicy = JsonNamingPolicy.CamelCase for camelCase output", score: 1 }
+    - { point: "[JsonPropertyName(\"...\")] overrides a single property's name", score: 1 }
+    - { partial: "names one (policy or attribute) but not both", score: 0.5 }
+
+- id: dotnet-json-sourcegen-02
+  difficulty: hard
+  weight: 2
+  tags: [serialization]
+  question: >
+    What is System.Text.Json source generation, and why does it matter for
+    performance and for trimming / Native AOT?
+  answer: >
+    Instead of using runtime reflection to discover a type's shape, the STJ source
+    generator emits serialization metadata/logic at compile time. You declare a
+    `partial class MyContext : JsonSerializerContext` annotated with
+    [JsonSerializable(typeof(MyType))] and pass the generated context (or its
+    TypeInfo) to Serialize/Deserialize. Benefits: no reflection at runtime (faster
+    startup, less allocation) and — crucially — it's trim/Native-AOT safe, because
+    the types and members are statically referenced so the trimmer won't remove
+    them and there's no dynamic reflection that AOT forbids.
+  rubric:
+    - { point: "generates serialization metadata at compile time instead of runtime reflection (JsonSerializerContext + [JsonSerializable])", score: 1 }
+    - { point: "faster/less-alloc AND trim/Native-AOT safe (no runtime reflection)", score: 1 }
+    - { partial: "'it's faster' without the AOT/trimming or compile-time-metadata reason", score: 0.5 }
+
+- id: dotnet-json-stj-vs-newtonsoft-03
+  difficulty: medium
+  weight: 2
+  tags: [serialization]
+  question: >
+    System.Text.Json is the default in modern .NET, but people still reach for
+    Newtonsoft.Json. What are the trade-offs?
+  answer: >
+    System.Text.Json is built in, faster, lower-allocation, Span-based, supports
+    source generation/AOT, and is the ASP.NET Core default — but it is stricter and
+    historically lacked some features. Newtonsoft.Json (Json.NET) is more permissive
+    and feature-rich (things like reference-loop handling / $id-$ref preservation,
+    broader converter ecosystem, more lenient parsing, dynamic/JObject workflows,
+    populate-existing-object) — reach for it when you need those features or must
+    match legacy behavior. Default to STJ for new code and performance; drop to
+    Newtonsoft only for a feature it genuinely lacks.
+  rubric:
+    - { point: "STJ: built-in, faster/lower-alloc, AOT/source-gen, ASP.NET default — but stricter/fewer features", score: 1 }
+    - { point: "Newtonsoft: more permissive & feature-rich (ref loops, converters, dynamic) — use when you need those", score: 1 }
+    - { partial: "'STJ is faster' without the feature/permissiveness trade-off", score: 0.5 }
+
+- id: dotnet-json-options-reuse-04
+  difficulty: medium
+  weight: 2
+  tags: [serialization]
+  question: >
+    Why should a JsonSerializerOptions instance be created once and reused, and
+    how does System.Text.Json handle polymorphic (base/derived) serialization?
+  answer: >
+    The first serialization with a given JsonSerializerOptions builds and caches
+    per-type metadata on that instance; creating a fresh options object on every
+    call rebuilds that cache each time, which is slow and allocation-heavy (and
+    options become effectively immutable once used). So construct one static/shared
+    options instance and reuse it. For polymorphism, STJ serializes by the
+    declared (compile-time) type by default, omitting derived-only members; to
+    include the runtime type you opt in with [JsonDerivedType(typeof(Derived),
+    "discriminator")] (and [JsonPolymorphic]) on the base type so a type
+    discriminator is written and round-trips — or serialize as `object`.
+  rubric:
+    - { point: "options cache per-type metadata on first use; reuse one instance (per-call new options rebuilds cache — slow)", score: 1 }
+    - { point: "STJ serializes by declared type by default; opt into polymorphism with [JsonDerivedType]/[JsonPolymorphic] (discriminator)", score: 1 }
+    - { partial: "covers only reuse OR only polymorphism", score: 0.5 }
+
+# ────────────────────────────── resilience-http ────────────────────────────
+
+- id: dotnet-http-socket-exhaustion-01
+  difficulty: hard
+  weight: 3
+  tags: [resilience-http]
+  question: >
+    Why does `using (var client = new HttpClient())` per request cause socket
+    exhaustion, and how does IHttpClientFactory solve it?
+  answer: >
+    HttpClient is meant to be reused; each new HttpClient (with its own handler)
+    opens new connections, and disposing it leaves the underlying sockets in
+    TIME_WAIT for a while — under load you exhaust available ports/sockets. The
+    naive fix, one long-lived static HttpClient, avoids exhaustion but never picks
+    up DNS changes. IHttpClientFactory manages a pool of HttpMessageHandlers with a
+    rotating handler lifetime: it hands you cheap, short-lived HttpClient instances
+    that share pooled handlers (so no socket exhaustion) while rotating handlers
+    periodically so connections respect DNS changes. Register with
+    AddHttpClient(...) and inject IHttpClientFactory (or a typed/named client).
+  rubric:
+    - { point: "new-per-request + dispose leaves sockets in TIME_WAIT → port/socket exhaustion under load", score: 1 }
+    - { point: "single static HttpClient avoids exhaustion but ignores DNS changes", score: 1 }
+    - { point: "IHttpClientFactory pools/rotates handlers → no exhaustion AND respects DNS", score: 1 }
+    - { partial: "'reuse HttpClient / use the factory' without the socket-exhaustion or DNS reasoning", score: 0.5 }
+
+- id: dotnet-http-typed-clients-02
+  difficulty: medium
+  weight: 2
+  tags: [resilience-http]
+  question: >
+    What are named clients and typed clients with IHttpClientFactory, and why
+    prefer a typed client?
+  answer: >
+    A named client is configured with AddHttpClient("github", c => ...) and
+    resolved by name via IHttpClientFactory.CreateClient("github"). A typed client
+    is AddHttpClient<GitHubClient>(...): you inject GitHubClient directly and it
+    receives a configured HttpClient in its constructor, encapsulating the base
+    address, headers, and the API calls behind strongly-typed methods. Prefer typed
+    clients because they're strongly typed, testable, keep endpoint logic in one
+    place, and avoid magic string names — while still getting the factory's handler
+    pooling/lifetime management.
+  rubric:
+    - { point: "named = CreateClient(\"name\") from a named registration; typed = AddHttpClient<T>, inject T with its HttpClient", score: 1 }
+    - { point: "prefer typed: strongly typed / testable / encapsulates config, no magic strings, still factory-managed", score: 1 }
+    - { partial: "describes one without the named-vs-typed distinction or the preference reason", score: 0.5 }
+
+- id: dotnet-http-lifetime-dns-03
+  difficulty: hard
+  weight: 2
+  tags: [resilience-http]
+  question: >
+    Even factory-created HttpClients can serve stale DNS if held too long. Explain
+    the handler-lifetime issue and the SocketsHttpHandler alternative.
+  answer: >
+    An HttpClient is bound to the HttpMessageHandler it was created with; the
+    factory rotates handlers on a HandlerLifetime (default ~2 minutes) so new
+    clients pick up refreshed connections/DNS. But if you cache a factory client in
+    a long-lived (singleton) field, it keeps using its original handler and never
+    sees the rotation — so request a fresh client near each use rather than caching
+    one. The modern alternative is to configure SocketsHttpHandler.
+    PooledConnectionLifetime (which recycles pooled connections on a timer to
+    respect DNS) and disable factory handler rotation
+    (SetHandlerLifetime(Timeout.InfiniteTimeSpan)), letting the handler manage
+    connection recycling itself.
+  rubric:
+    - { point: "a client is tied to its handler; factory rotates handlers on HandlerLifetime — caching a client in a singleton defeats it", score: 1 }
+    - { point: "alternative: SocketsHttpHandler.PooledConnectionLifetime to recycle connections for DNS (can disable factory rotation)", score: 1 }
+    - { partial: "'don't cache the client' without the handler-lifetime or PooledConnectionLifetime detail", score: 0.5 }
+
+- id: dotnet-http-resilience-04
+  difficulty: medium
+  weight: 2
+  tags: [resilience-http]
+  question: >
+    How do you add retries, timeouts, and a circuit breaker to an HttpClient in
+    modern .NET, and how do cancellation tokens fit in?
+  answer: >
+    Use the Microsoft.Extensions.Http.Resilience package (built on Polly v8):
+    chain .AddStandardResilienceHandler() onto an AddHttpClient registration to get
+    a sensible default pipeline — retries with backoff, a total request timeout,
+    a per-attempt timeout, and a circuit breaker — or AddResilienceHandler(...) to
+    compose a custom pipeline. (Older code uses Polly directly via
+    AddTransientHttpErrorPolicy / AddPolicyHandler.) Pass a CancellationToken into
+    the SendAsync/HTTP call so the caller (or the request-aborted token / a
+    CancellationTokenSource timeout) can cancel in-flight work cooperatively;
+    resilience timeouts are enforced via linked cancellation under the hood.
+  rubric:
+    - { point: "Microsoft.Extensions.Http.Resilience (Polly-based): AddStandardResilienceHandler for retry/timeout/circuit-breaker (.NET 8)", score: 1 }
+    - { point: "flow a CancellationToken into the request for cooperative cancellation/timeouts", score: 1 }
+    - { partial: "'use Polly' without the resilience handler or cancellation-token half", score: 0.5 }
+
+# ───────────────────────────── logging-diagnostics ─────────────────────────
+
+- id: dotnet-log-templates-01
+  difficulty: medium
+  weight: 3
+  tags: [logging-diagnostics]
+  question: >
+    Why should you write `logger.LogInformation("Order {OrderId} shipped",
+    orderId)` instead of interpolating the value into the string?
+  answer: >
+    ILogger uses structured logging with message templates: the named placeholders
+    ({OrderId}) plus the arguments are captured as key/value pairs on the log
+    record, so providers can index and query by OrderId, and the constant template
+    string is preserved for grouping/aggregation. String interpolation
+    ($"Order {orderId} shipped") destroys that — it produces a formatted string
+    with no structured fields, so you lose queryability, and the string is built
+    eagerly even when the log level is disabled (wasted work/allocation). Always
+    pass values as message-template arguments, not interpolated.
+  rubric:
+    - { point: "message templates capture named key/value pairs (structured) — queryable, grouped by template", score: 1 }
+    - { point: "interpolation loses structure AND formats eagerly even when the level is disabled (waste)", score: 1 }
+    - { partial: "'templates are structured' without the eager-format / disabled-level cost", score: 0.5 }
+
+- id: dotnet-log-levels-02
+  difficulty: easy
+  weight: 2
+  tags: [logging-diagnostics]
+  question: >
+    List the ILogger log levels in order and explain how per-category level
+    filtering (e.g. quieting EF Core logs) is configured.
+  answer: >
+    From least to most severe: Trace, Debug, Information, Warning, Error, Critical
+    (plus None to disable). Filtering is configured in the Logging configuration
+    (appsettings "Logging:LogLevel" or AddFilter): a "Default" minimum level plus
+    per-category overrides keyed by namespace prefix, where the most specific
+    prefix wins. E.g. set Default=Information but
+    "Microsoft.EntityFrameworkCore"=Warning to suppress EF's chatty Information
+    logs. Levels below the effective minimum for a category are dropped cheaply.
+  rubric:
+    - { point: "order: Trace < Debug < Information < Warning < Error < Critical (None disables)", score: 1 }
+    - { point: "per-category filtering via Logging:LogLevel/AddFilter with a Default + namespace-prefix overrides (most specific wins)", score: 1 }
+    - { partial: "lists levels but not the category-based filtering config", score: 0.5 }
+
+- id: dotnet-log-highperf-03
+  difficulty: hard
+  weight: 2
+  tags: [logging-diagnostics]
+  question: >
+    What is the LoggerMessage source generator (`[LoggerMessage]`), and why is it
+    preferred over calling logger.LogInformation directly on hot paths?
+  answer: >
+    [LoggerMessage] (the compile-time source generator, and the older
+    LoggerMessage.Define) generates a strongly-typed, cached logging delegate for a
+    given template and arguments. Direct LogInformation calls parse the template
+    and box value-type arguments (into an object[]/params) on every call, even when
+    the level is disabled; the generated method avoids that — it does an
+    IsEnabled-guarded, allocation-free, boxing-free write and pre-parses the
+    template once — so it's cheaper on high-frequency log paths. You declare a
+    partial method with the attribute (id, level, message) and call it.
+  rubric:
+    - { point: "[LoggerMessage] source-generates a cached, strongly-typed logging method (pre-parsed template)", score: 1 }
+    - { point: "avoids per-call template parsing/boxing/allocation (and guards IsEnabled) — cheaper on hot paths", score: 1 }
+    - { partial: "'it's faster logging' without the allocation/boxing or caching reason", score: 0.5 }
+
+- id: dotnet-log-scopes-otel-04
+  difficulty: medium
+  weight: 1
+  tags: [logging-diagnostics]
+  question: >
+    What are logging scopes (BeginScope) for, and at a high level how does .NET
+    expose distributed tracing and metrics (OpenTelemetry)?
+  answer: >
+    logger.BeginScope(state) attaches contextual key/value data (e.g. a correlation
+    or order id) to every log written inside the `using` scope, so related logs
+    across methods share that context without threading it through every call
+    (scope-capable providers must be enabled). For distributed tracing/metrics,
+    .NET has built-in primitives — System.Diagnostics.Activity/ActivitySource for
+    spans/traces and System.Diagnostics.Metrics.Meter for metrics — which
+    OpenTelemetry (the OpenTelemetry.* packages) collects and exports to backends,
+    giving traces, metrics, and correlated logs across services.
+  rubric:
+    - { point: "BeginScope attaches contextual key/values to all logs within the using block (e.g. correlation id)", score: 1 }
+    - { point: "tracing/metrics via Activity/ActivitySource + Meter, collected/exported by OpenTelemetry", score: 1 }
+    - { partial: "explains scopes but nothing on tracing/metrics (or vice versa)", score: 0.5 }

@@ -1,0 +1,23 @@
+stack: nestjs
+title: NestJS (v10/v11)
+corpus_rev: 1
+# Version scope this corpus grades against. NestJS is a framework atop
+# Node/TypeScript; version-gated behaviour (v10 vs v11 — e.g. reverse-order
+# shutdown hooks, Express 5 routing) is called out inline in the answers.
+version_scope: ">=10 <12"
+
+# Tag vocabulary — keep small; each tag is a subscore axis. Aim ≥4 questions/tag.
+tags:
+  - modules              # @Module, imports/exports/providers, dynamic modules forRoot/forFeature
+  - di                   # providers, @Injectable, custom/injection tokens, scopes (SINGLETON/REQUEST/TRANSIENT), bubbling
+  - controllers-routing  # @Controller, method decorators, @Body/@Param/@Query, sub-paths, DTOs
+  - lifecycle            # OnModuleInit/OnApplicationBootstrap/OnModuleDestroy/beforeApplicationShutdown, order
+  - pipes-validation     # ValidationPipe, class-validator + class-transformer, whitelist/transform, global vs route pipes
+  - guards-interceptors  # CanActivate guards, interceptors, execution order guard→interceptor→pipe→handler, @UseGuards
+  - exception-filters    # HttpException, custom exception filters, global filters, built-ins
+  - providers-async      # async providers useFactory/useValue/useClass, ConfigModule, @nestjs/testing
+
+detection:
+  mode: any
+  markers:
+    - { type: dep, manifest: package.json, name: "@nestjs/core" }

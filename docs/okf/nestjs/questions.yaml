@@ -1,0 +1,624 @@
+# NestJS benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1).
+# NestJS runs atop Node/TypeScript; version-gated behaviour (v10 vs v11) is
+# called out inline. Answers target v10/v11 (@nestjs/* v10–11).
+
+- id: nestjs-modules-01
+  difficulty: easy
+  weight: 3
+  tags: [modules]
+  question: >
+    What does the `@Module()` decorator's metadata (`imports`, `controllers`,
+    `providers`, `exports`) each declare, and what is a Nest module for?
+  answer: >
+    A module groups a slice of the app. `providers` are the injectables Nest
+    instantiates and makes available inside this module; `controllers` are the
+    HTTP controllers instantiated for it; `imports` pulls in other modules so
+    their exported providers become available here; `exports` is the subset of
+    this module's providers made visible to modules that import it. Every app
+    has at least a root module; Nest builds the DI container from the module
+    graph.
+  rubric:
+    - { point: "providers = injectables instantiated/available in the module", score: 1 }
+    - { point: "controllers = HTTP controllers; imports = pull in other modules", score: 1 }
+    - { point: "exports = providers made visible to importing modules", score: 1 }
+    - { partial: "names the fields but doesn't explain imports/exports wiring", score: 0.5 }
+
+- id: nestjs-modules-02
+  difficulty: medium
+  weight: 3
+  tags: [modules, di]
+  question: >
+    Modules are encapsulated. If `AuthModule` provides `AuthService` and
+    `UsersModule` wants to inject it, what must be true, and what happens if you
+    forget?
+  answer: >
+    Providers are private to their module by default. `AuthModule` must list
+    `AuthService` in its `exports`, and `UsersModule` must `imports: [AuthModule]`.
+    Merely declaring `AuthService` in `AuthModule`'s `providers` is not enough —
+    without the export it stays encapsulated. Forgetting either yields a
+    "Nest can't resolve dependencies" / "not found in context" error at bootstrap.
+  rubric:
+    - { point: "AuthService must be in AuthModule's exports", score: 1 }
+    - { point: "UsersModule must import AuthModule", score: 1 }
+    - { point: "otherwise unresolved-dependency error (providers are encapsulated)", score: 1 }
+    - { partial: "says 'import the module' but omits the export requirement", score: 0.5 }
+
+- id: nestjs-modules-03
+  difficulty: medium
+  weight: 2
+  tags: [modules, providers-async]
+  question: >
+    What is a dynamic module, and what is the conventional difference between a
+    `forRoot()` and a `forFeature()` static method?
+  answer: >
+    A dynamic module is a module whose metadata is built at runtime by a static
+    method returning a `DynamicModule` object (`{ module, providers, exports,
+    imports }`), so callers can pass configuration. By convention `forRoot()`
+    (or `forRootAsync()`) configures the module once at the root with global
+    options (e.g. a DB connection), while `forFeature()` registers
+    feature-scoped pieces against that root config (e.g. specific entities /
+    repositories) in each consuming module.
+  rubric:
+    - { point: "dynamic module returns DynamicModule built at runtime with config", score: 1 }
+    - { point: "forRoot = configure once with global/root options", score: 1 }
+    - { point: "forFeature = register feature-scoped pieces per module", score: 1 }
+    - { partial: "describes dynamic module but not the forRoot vs forFeature split", score: 0.5 }
+
+- id: nestjs-modules-04
+  difficulty: easy
+  weight: 1
+  tags: [modules]
+  question: >
+    What does the `@Global()` decorator do to a module, and why should it be
+    used sparingly?
+  answer: >
+    `@Global()` makes the module's exported providers available app-wide without
+    each consumer importing it — it registers them in the global scope once (the
+    module still needs to be imported once, typically by the root module).
+    Overusing it defeats module encapsulation and hides dependencies, making the
+    graph harder to reason about; prefer explicit imports and reserve `@Global()`
+    for truly cross-cutting things (config, logging).
+  rubric:
+    - { point: "@Global makes exports available everywhere without re-importing", score: 1 }
+    - { point: "use sparingly — breaks encapsulation / hides dependencies", score: 1 }
+    - { partial: "'makes it global' with no encapsulation caveat", score: 0.5 }
+
+- id: nestjs-di-01
+  difficulty: easy
+  weight: 3
+  tags: [di]
+  question: >
+    How does Nest's dependency injection resolve a class dependency? Walk
+    through `@Injectable()`, provider registration, and constructor injection.
+  answer: >
+    `@Injectable()` marks a class as a provider Nest can manage. You register it
+    in a module's `providers`. When Nest instantiates a consumer (controller or
+    another provider), it reads the constructor parameter types (via emitted
+    metadata) and injects the matching provider from the DI container, creating
+    and caching a single instance by default. The token for a class provider is
+    the class itself.
+  rubric:
+    - { point: "@Injectable marks a manageable provider; registered in module providers", score: 1 }
+    - { point: "Nest reads constructor param types and injects matching provider by token", score: 1 }
+    - { point: "class is its own token; instance cached (singleton) by default", score: 1 }
+    - { partial: "'Nest injects it automatically' with no token/registration detail", score: 0.5 }
+
+- id: nestjs-di-02
+  difficulty: medium
+  weight: 2
+  tags: [di, providers-async]
+  question: >
+    You need to inject a value that isn't a class (a config object, a string, a
+    third-party instance). How do you register and inject it with a custom
+    token?
+  answer: >
+    Use a custom provider with a non-class token (string or symbol):
+    `{ provide: 'CONFIG_OPTIONS', useValue: {...} }` (or `useFactory`/`useClass`).
+    Because the token isn't a type Nest can infer from the constructor, inject it
+    explicitly with `@Inject('CONFIG_OPTIONS')`. Symbol tokens avoid string
+    collisions.
+  rubric:
+    - { point: "register a custom provider with a string/symbol token (useValue/useFactory)", score: 1 }
+    - { point: "inject it with @Inject(token) since the type can't be inferred", score: 1 }
+    - { partial: "mentions custom provider but omits @Inject at the injection site", score: 0.5 }
+
+- id: nestjs-di-03
+  difficulty: medium
+  weight: 3
+  tags: [di]
+  question: >
+    Name Nest's three injection scopes and what instance lifetime each gives.
+    Which is the default and why is it recommended?
+  answer: >
+    `DEFAULT` (singleton): one shared instance cached for the whole app —
+    created once at bootstrap. `REQUEST`: a new instance per incoming request.
+    `TRANSIENT`: a new dedicated instance for each consumer that injects it (not
+    shared). Set via `@Injectable({ scope: Scope.REQUEST })`. Singleton is the
+    default and recommended because instances are cached and cheap; other scopes
+    trade performance for isolation.
+  rubric:
+    - { point: "DEFAULT = singleton, one shared cached instance (the default)", score: 1 }
+    - { point: "REQUEST = new instance per request", score: 1 }
+    - { point: "TRANSIENT = new instance per consumer (not shared)", score: 1 }
+    - { partial: "names scopes but mixes up REQUEST vs TRANSIENT semantics", score: 0.5 }
+
+- id: nestjs-di-04
+  difficulty: hard
+  weight: 3
+  tags: [di]
+  question: >
+    Why does making one provider `REQUEST`-scoped tend to make others
+    request-scoped too, and what's the performance implication? Does `TRANSIENT`
+    behave the same way?
+  answer: >
+    REQUEST scope bubbles UP the injection chain: any provider (or controller)
+    that depends on a request-scoped provider becomes request-scoped itself, so
+    Nest must instantiate that whole chain per request instead of once. That
+    adds per-request instantiation cost (docs cite up to ~5% latency in a
+    well-designed app) — so keep the request-scoped surface small. TRANSIENT
+    does NOT bubble: a singleton injecting a transient provider gets its own
+    fresh instance but stays a singleton.
+  rubric:
+    - { point: "REQUEST scope propagates up the chain (dependents become request-scoped)", score: 1 }
+    - { point: "per-request instantiation cost / perf hit — keep it minimal", score: 1 }
+    - { point: "TRANSIENT does not bubble up to dependents", score: 1 }
+    - { partial: "notes bubbling but claims TRANSIENT bubbles too", score: 0.5 }
+
+- id: nestjs-routing-01
+  difficulty: easy
+  weight: 3
+  tags: [controllers-routing]
+  question: >
+    In a controller, what does `@Controller('cats')` set, and how do
+    `@Get()/@Post()`, `@Param()`, `@Query()`, and `@Body()` map an HTTP request
+    to a handler?
+  answer: >
+    `@Controller('cats')` sets a route prefix so all handlers live under
+    `/cats`. Method decorators (`@Get()`, `@Post()`, `@Put()`, `@Delete()`…) bind
+    a handler to an HTTP verb and optional sub-path. `@Param('id')` reads a route
+    parameter (`:id`), `@Query('q')` reads a query-string field, and `@Body()`
+    reads the (parsed) request body. Nest wires these param decorators to the
+    handler arguments.
+  rubric:
+    - { point: "@Controller sets a route prefix/base path", score: 1 }
+    - { point: "method decorators bind a verb (+ sub-path) to a handler", score: 1 }
+    - { point: "@Param=route param, @Query=query field, @Body=request body", score: 1 }
+    - { partial: "explains @Controller and verbs but muddles the param decorators", score: 0.5 }
+
+- id: nestjs-routing-02
+  difficulty: medium
+  weight: 2
+  tags: [controllers-routing]
+  question: >
+    How do you declare a route with a path parameter and a nested sub-path, and
+    what changed about wildcard routes in NestJS 11?
+  answer: >
+    Put the parameter in the method decorator path with a colon:
+    `@Get(':id/profile')` combined with the controller prefix gives
+    `/cats/:id/profile`, and `@Param('id')` reads it. NestJS 11 moved to Express
+    v5, whose path-matching changed: the old `*` wildcard syntax (e.g.
+    `@Get('users/*')`) is discouraged — named wildcards like `*splat` are the
+    v5-correct form (v11 auto-converts the legacy syntax but you shouldn't rely
+    on it).
+  rubric:
+    - { point: "param via ':id' in the path; @Param('id') reads it; sub-path appends to prefix", score: 1 }
+    - { point: "NestJS 11 / Express 5 changed wildcard route syntax (bare '*' discouraged)", score: 1 }
+    - { partial: "shows the param route but misses the v11 wildcard change", score: 0.5 }
+
+- id: nestjs-routing-03
+  difficulty: medium
+  weight: 2
+  tags: [controllers-routing, pipes-validation]
+  question: >
+    Why are request DTOs defined as classes rather than TypeScript interfaces in
+    NestJS?
+  answer: >
+    Interfaces are erased at compile time, so nothing survives at runtime for
+    Nest to use. DTOs must be classes because (1) classes are real runtime values
+    Nest can reference as a metatype, and (2) validation/transformation
+    (class-validator decorators like `@IsString()`, class-transformer) attach
+    metadata to the class and operate on instances — impossible on an erased
+    interface.
+  rubric:
+    - { point: "interfaces are erased at compile time (no runtime presence)", score: 1 }
+    - { point: "classes persist at runtime so decorators/metadata + validation work", score: 1 }
+    - { partial: "'use classes' with no compile-time-erasure reasoning", score: 0.5 }
+
+- id: nestjs-routing-04
+  difficulty: easy
+  weight: 1
+  tags: [controllers-routing]
+  question: >
+    What is the default HTTP status code for a handler, how do you override it,
+    and how does Nest handle a handler that returns a Promise or observable?
+  answer: >
+    By default Nest sends 200 for most verbs and 201 for `@Post()`. Override with
+    `@HttpCode(204)`. If a handler returns a value Nest serializes it as the
+    response body; if it returns a Promise (async) or an RxJS observable, Nest
+    awaits/subscribes and responds with the resolved/emitted value automatically.
+  rubric:
+    - { point: "default 200 (201 for POST); @HttpCode overrides", score: 1 }
+    - { point: "returned value is the body; Promise/observable is awaited/subscribed", score: 1 }
+    - { partial: "gets the status default but not the async return handling (or vice versa)", score: 0.5 }
+
+- id: nestjs-lifecycle-01
+  difficulty: medium
+  weight: 2
+  tags: [lifecycle]
+  question: >
+    What is the difference between `OnModuleInit` and `OnApplicationBootstrap`,
+    and when does each fire?
+  answer: >
+    `onModuleInit()` runs once a module's own dependencies have been resolved —
+    per module, as the container initializes. `onApplicationBootstrap()` runs
+    later, after ALL modules have been initialized but before the app starts
+    listening for connections. Use `onModuleInit` for module-local setup and
+    `onApplicationBootstrap` when you need every other module ready first.
+  rubric:
+    - { point: "onModuleInit = after that module's dependencies are resolved", score: 1 }
+    - { point: "onApplicationBootstrap = after ALL modules initialized, before listening", score: 1 }
+    - { partial: "'both run at startup' without the all-modules-ready distinction", score: 0.5 }
+
+- id: nestjs-lifecycle-02
+  difficulty: medium
+  weight: 2
+  tags: [lifecycle]
+  question: >
+    Name the shutdown lifecycle hooks in order, and what must you enable for
+    them to fire on a SIGTERM/SIGINT.
+  answer: >
+    On termination Nest calls `onModuleDestroy()`, then
+    `beforeApplicationShutdown()` (which receives the signal), then — after
+    connections close — `onApplicationShutdown()`. These fire on `app.close()`
+    automatically, but to react to OS signals like SIGTERM you must opt in with
+    `app.enableShutdownHooks()`. Useful for graceful drain in Kubernetes etc.
+  rubric:
+    - { point: "order: onModuleDestroy → beforeApplicationShutdown → onApplicationShutdown", score: 1 }
+    - { point: "must call app.enableShutdownHooks() to respond to OS signals", score: 1 }
+    - { partial: "lists the hooks but omits enableShutdownHooks", score: 0.5 }
+
+- id: nestjs-lifecycle-03
+  difficulty: hard
+  weight: 2
+  tags: [lifecycle]
+  question: >
+    If initialization hooks run modules in order C → B → A (dependency order),
+    in what order do the destroy hooks run, and did this change in NestJS 11?
+  answer: >
+    In NestJS 11 termination hooks run in the REVERSE order of their init
+    counterparts: init C → B → A means `onModuleDestroy` (and the other shutdown
+    hooks) run A → B → C, so a module tears down before its dependencies.
+    Global modules are treated as a dependency of all others — initialized first,
+    destroyed last. This reverse-order guarantee is a v11 change (earlier
+    versions did not guarantee it).
+  rubric:
+    - { point: "destroy runs in reverse of init order (A → B → C)", score: 1 }
+    - { point: "this reverse-order behaviour is a NestJS 11 change", score: 1 }
+    - { partial: "says 'reverse order' but doesn't attribute it to v11", score: 0.5 }
+
+- id: nestjs-lifecycle-04
+  difficulty: easy
+  weight: 1
+  tags: [lifecycle]
+  question: >
+    What triggers the init lifecycle hooks, and does Nest wait for an async
+    hook (one returning a Promise) before continuing?
+  answer: >
+    The init hooks (`onModuleInit`, `onApplicationBootstrap`) are triggered by
+    `app.init()` — which `app.listen()` calls internally. Nest awaits async
+    hooks: if a hook returns a Promise, bootstrapping does not proceed to the
+    next phase until it resolves, so you can safely do async setup there.
+  rubric:
+    - { point: "init hooks fire on app.init()/app.listen()", score: 1 }
+    - { point: "Nest awaits a Promise-returning hook before continuing", score: 1 }
+    - { partial: "one half only (trigger OR await)", score: 0.5 }
+
+- id: nestjs-validation-01
+  difficulty: easy
+  weight: 3
+  tags: [pipes-validation]
+  question: >
+    What does the built-in `ValidationPipe` do, what two libraries does it rely
+    on, and how do you apply it to the whole app?
+  answer: >
+    `ValidationPipe` validates and (optionally) transforms incoming payloads
+    against a DTO class. It relies on `class-validator` (decorator-based rules
+    like `@IsEmail()`) and `class-transformer` (plain object ↔ class instance) —
+    both must be installed. Apply it globally with
+    `app.useGlobalPipes(new ValidationPipe())`, or per-route/param with
+    `@UsePipes()` / on the parameter.
+  rubric:
+    - { point: "validates/transforms request payloads against the DTO", score: 1 }
+    - { point: "uses class-validator + class-transformer (must be installed)", score: 1 }
+    - { point: "register globally via app.useGlobalPipes(new ValidationPipe())", score: 1 }
+    - { partial: "'it validates DTOs' without naming both libraries", score: 0.5 }
+
+- id: nestjs-validation-02
+  difficulty: medium
+  weight: 2
+  tags: [pipes-validation]
+  question: >
+    What do the ValidationPipe options `whitelist` and `forbidNonWhitelisted`
+    do, and why use them?
+  answer: >
+    `whitelist: true` strips any properties from the payload that have no
+    validation decorator on the DTO, so unknown fields are silently removed —
+    protecting handlers from unexpected input (e.g. mass-assignment). Adding
+    `forbidNonWhitelisted: true` changes strip-silently into reject: the request
+    errors out (400) when non-whitelisted properties are present instead of
+    dropping them.
+  rubric:
+    - { point: "whitelist strips properties with no validation decorator", score: 1 }
+    - { point: "forbidNonWhitelisted rejects (errors) instead of stripping", score: 1 }
+    - { partial: "gets whitelist but conflates it with forbidNonWhitelisted", score: 0.5 }
+
+- id: nestjs-validation-03
+  difficulty: medium
+  weight: 2
+  tags: [pipes-validation]
+  question: >
+    What does `transform: true` on the ValidationPipe do, including what happens
+    to a `@Param('id')` typed as `number`?
+  answer: >
+    `transform: true` makes the pipe return real DTO class instances (via
+    class-transformer) rather than plain objects, and it performs implicit
+    primitive conversion: a route/query param that arrives as a string is
+    coerced to the type declared in the handler signature. So `@Param('id') id:
+    number` yields an actual `number`, not the string `"5"`.
+  rubric:
+    - { point: "returns DTO class instances instead of plain objects", score: 1 }
+    - { point: "implicit primitive conversion — string param coerced to declared type (number)", score: 1 }
+    - { partial: "'it transforms the payload' without the primitive-conversion detail", score: 0.5 }
+
+- id: nestjs-validation-04
+  difficulty: medium
+  weight: 2
+  tags: [pipes-validation]
+  question: >
+    Besides ValidationPipe, what does a built-in pipe like `ParseIntPipe` do,
+    and what is the practical difference between a globally-registered pipe and
+    one bound to a single route parameter?
+  answer: >
+    `ParseIntPipe` transforms/validates a single value — it parses a param to an
+    integer and throws a 400 if it isn't one (e.g. `@Param('id', ParseIntPipe)`).
+    A global pipe (`useGlobalPipes`) runs on every handler's inputs across the
+    app; a route/param-bound pipe runs only for that handler or that one
+    parameter, letting you apply narrow parsing/validation without affecting
+    everything else.
+  rubric:
+    - { point: "ParseIntPipe parses a value to int and throws on invalid input", score: 1 }
+    - { point: "global pipe applies app-wide; route/param pipe is scoped to that handler/param", score: 1 }
+    - { partial: "describes ParseIntPipe but not the global-vs-scoped distinction", score: 0.5 }
+
+- id: nestjs-guards-01
+  difficulty: easy
+  weight: 3
+  tags: [guards-interceptors]
+  question: >
+    What is a guard, what interface does it implement, and how does its return
+    value control the request?
+  answer: >
+    A guard is a class implementing `CanActivate` with a `canActivate(context)`
+    method. It returns a boolean (or Promise/observable of one): `true` lets the
+    request proceed to the handler, `false` denies it (Nest throws a 403
+    ForbiddenException). Guards get the `ExecutionContext`, so they're used for
+    authentication/authorization decisions. Attach with `@UseGuards(MyGuard)`.
+  rubric:
+    - { point: "implements CanActivate / canActivate(context)", score: 1 }
+    - { point: "returns boolean — true proceeds, false denies (403)", score: 1 }
+    - { point: "attached via @UseGuards; used for authz/authn", score: 1 }
+    - { partial: "'it protects routes' without the CanActivate/boolean mechanism", score: 0.5 }
+
+- id: nestjs-guards-02
+  difficulty: medium
+  weight: 3
+  tags: [guards-interceptors, pipes-validation]
+  question: >
+    Put the request pipeline in order: middleware, guards, interceptors, pipes,
+    the route handler, and exception filters. Where do interceptors run relative
+    to the handler?
+  answer: >
+    Order: middleware → guards → interceptors (pre-handler) → pipes → route
+    handler → interceptors (post-handler) → exception filters → response.
+    Interceptors WRAP the handler: their logic runs both before pipes/handler
+    and again after the handler produces a result (they can transform the
+    response via RxJS). Guards run before any interceptor or pipe; filters catch
+    anything thrown along the way.
+  rubric:
+    - { point: "middleware → guards → interceptor(pre) → pipes → handler", score: 1 }
+    - { point: "interceptors wrap the handler (also run post-handler), before filters/response", score: 1 }
+    - { point: "guards run before interceptors and pipes", score: 1 }
+    - { partial: "lists guard→interceptor→pipe→handler but misses the interceptor post-phase (wrap)", score: 0.5 }
+
+- id: nestjs-guards-03
+  difficulty: medium
+  weight: 2
+  tags: [guards-interceptors]
+  question: >
+    What is an interceptor, what interface does it implement, and give two
+    things interceptors are good for.
+  answer: >
+    An interceptor implements `NestInterceptor` with `intercept(context, next)`.
+    Calling `next.handle()` returns an RxJS `Observable` of the handler's result,
+    so the interceptor can run logic before the handler and transform/extend the
+    stream after via operators (`map`, `tap`, `catchError`, `timeout`). Good for:
+    shaping/wrapping responses, logging & timing, caching, and mapping errors —
+    cross-cutting concerns around the handler.
+  rubric:
+    - { point: "implements NestInterceptor / intercept(context, next)", score: 1 }
+    - { point: "next.handle() gives an Observable — run before and transform after (RxJS)", score: 1 }
+    - { point: "two valid uses (logging/timing, response shaping, caching, etc.)", score: 1 }
+    - { partial: "'it intercepts requests' with no next.handle/Observable detail", score: 0.5 }
+
+- id: nestjs-guards-04
+  difficulty: medium
+  weight: 2
+  tags: [guards-interceptors, di]
+  question: >
+    How does a roles guard read per-route metadata set by a custom decorator
+    like `@Roles('admin')`, and what class does it use?
+  answer: >
+    `@Roles('admin')` attaches metadata via `SetMetadata` (or a `Reflector`-
+    created decorator). The guard injects `Reflector` and reads it with
+    `reflector.getAllAndOverride(ROLES_KEY, [context.getHandler(),
+    context.getClass()])`, which lets method-level metadata override
+    class-level. It then compares the required roles against the authenticated
+    user (from `context.switchToHttp().getRequest()`) and returns true/false.
+  rubric:
+    - { point: "metadata set via SetMetadata / custom decorator", score: 1 }
+    - { point: "guard uses Reflector (getAllAndOverride/get) to read handler+class metadata", score: 1 }
+    - { partial: "'it checks roles' without Reflector/metadata mechanism", score: 0.5 }
+
+- id: nestjs-filters-01
+  difficulty: easy
+  weight: 2
+  tags: [exception-filters]
+  question: >
+    What is `HttpException`, how do the built-in exception classes relate to it,
+    and what does throwing one produce?
+  answer: >
+    `HttpException` is Nest's base HTTP error, constructed with a message/body
+    and a status code. Built-ins like `NotFoundException`, `BadRequestException`,
+    `UnauthorizedException`, `ForbiddenException` extend it with the right status.
+    Throwing one anywhere in the request flow is caught by Nest's built-in
+    exception layer and turned into a proper JSON HTTP response with that status
+    code — you don't manually format the error response.
+  rubric:
+    - { point: "HttpException is the base HTTP error (message + status)", score: 1 }
+    - { point: "built-ins (NotFound/BadRequest/…) extend it; throwing yields the right HTTP response", score: 1 }
+    - { partial: "names HttpException but not the built-in subclasses / auto response", score: 0.5 }
+
+- id: nestjs-filters-02
+  difficulty: medium
+  weight: 2
+  tags: [exception-filters]
+  question: >
+    How do you write a custom exception filter? Name the decorator, the
+    interface, and the argument the catch method receives.
+  answer: >
+    Decorate a class with `@Catch(SomeException)` (or bare `@Catch()` to catch
+    everything) and implement `ExceptionFilter` with
+    `catch(exception, host: ArgumentsHost)`. `ArgumentsHost` gives access to the
+    underlying context — e.g. `host.switchToHttp().getResponse()` — so you can
+    build a custom response (status, shape, logging). Bind it with `@UseFilters()`
+    on a handler/controller or globally.
+  rubric:
+    - { point: "@Catch(Exception) decorator selects what it handles", score: 1 }
+    - { point: "implements ExceptionFilter / catch(exception, host: ArgumentsHost)", score: 1 }
+    - { point: "ArgumentsHost → access response to build custom output; bind via @UseFilters", score: 1 }
+    - { partial: "mentions @Catch but not ExceptionFilter/ArgumentsHost", score: 0.5 }
+
+- id: nestjs-filters-03
+  difficulty: medium
+  weight: 2
+  tags: [exception-filters]
+  question: >
+    Guards, interceptors, and pipes resolve global → controller → route. In what
+    order do exception filters resolve, and how do you register a global filter?
+  answer: >
+    Exception filters resolve in the OPPOSITE direction: route-bound filters
+    first, then controller-level, then global — the most specific filter wins,
+    and an exception caught by a lower-level filter isn't re-caught higher up
+    (unless you extend a base filter). Register a global filter with
+    `app.useGlobalFilters(new AllExceptionsFilter())`, or via an `APP_FILTER`
+    provider when it needs dependency injection.
+  rubric:
+    - { point: "filters resolve route → controller → global (reverse of guards/pipes)", score: 1 }
+    - { point: "register global via app.useGlobalFilters (or APP_FILTER provider for DI)", score: 1 }
+    - { partial: "knows global registration but gets the resolution order wrong", score: 0.5 }
+
+- id: nestjs-filters-04
+  difficulty: easy
+  weight: 1
+  tags: [exception-filters]
+  question: >
+    If your code throws a plain `Error` (not an `HttpException`) and no custom
+    filter handles it, what does the client receive?
+  answer: >
+    Nest's built-in global exception filter catches any unhandled exception. If
+    it isn't an `HttpException` (or subclass) it can't infer a status, so the
+    client gets a generic `500 Internal Server Error` with a standard JSON body,
+    and the real error is logged server-side rather than leaked. To return a
+    meaningful status, throw an `HttpException` or add a custom filter.
+  rubric:
+    - { point: "unrecognized error → default 500 Internal Server Error", score: 1 }
+    - { point: "handled by built-in global filter; details not leaked / throw HttpException for a real status", score: 1 }
+    - { partial: "'it errors' without naming the 500 default", score: 0.5 }
+
+- id: nestjs-providers-01
+  difficulty: medium
+  weight: 2
+  tags: [providers-async]
+  question: >
+    How do you create an async provider whose value depends on a Promise (e.g. a
+    DB connection), and does Nest wait for it before the app is ready?
+  answer: >
+    Use `useFactory` and make the factory `async` (or return a Promise):
+    `{ provide: 'DB', useFactory: async () => await createConnection() }`, with
+    `inject: [...]` for any dependencies the factory needs. Nest awaits the
+    Promise during bootstrap and won't instantiate providers that depend on the
+    token until it resolves, so the connection is ready before the app starts
+    handling requests.
+  rubric:
+    - { point: "async useFactory returning a Promise (inject deps via inject: [])", score: 1 }
+    - { point: "Nest awaits it during bootstrap before dependents/app are ready", score: 1 }
+    - { partial: "mentions useFactory but not that Nest awaits the Promise", score: 0.5 }
+
+- id: nestjs-providers-02
+  difficulty: easy
+  weight: 2
+  tags: [providers-async]
+  question: >
+    Contrast the custom-provider forms `useValue`, `useClass`, and `useFactory`.
+    When would you pick each?
+  answer: >
+    `useValue` binds a ready-made constant/instance/mock to a token (config
+    objects, test doubles). `useClass` binds a class to a token and lets Nest
+    instantiate it — useful to swap implementations per environment behind one
+    token. `useFactory` computes the value with a function that can `inject`
+    other providers and be async — for values that need runtime construction or
+    dependencies.
+  rubric:
+    - { point: "useValue = provide a constant/existing instance (or mock)", score: 1 }
+    - { point: "useClass = Nest instantiates a class (swappable impl per env)", score: 1 }
+    - { point: "useFactory = computed, can inject deps / be async", score: 1 }
+    - { partial: "defines one or two but conflates the others", score: 0.5 }
+
+- id: nestjs-providers-03
+  difficulty: medium
+  weight: 2
+  tags: [providers-async, modules]
+  question: >
+    How does `@nestjs/config`'s `ConfigModule` expose configuration, and what
+    does `isGlobal: true` change?
+  answer: >
+    `ConfigModule.forRoot()` loads env/config (`.env` files, `process.env`,
+    optional validation) and registers a `ConfigService` you inject and read via
+    `configService.get('KEY')`. Passing `forRoot({ isGlobal: true })` marks the
+    module global, so every module can inject `ConfigService` without importing
+    `ConfigModule` in each one.
+  rubric:
+    - { point: "ConfigModule.forRoot loads config; inject ConfigService and .get('KEY')", score: 1 }
+    - { point: "isGlobal: true makes it global — no per-module import needed", score: 1 }
+    - { partial: "mentions ConfigService but not forRoot/isGlobal", score: 0.5 }
+
+- id: nestjs-providers-04
+  difficulty: medium
+  weight: 2
+  tags: [providers-async, di]
+  question: >
+    Using `@nestjs/testing`, how do you build a module for a unit test and
+    replace a real provider with a mock?
+  answer: >
+    Build it with `Test.createTestingModule({ providers/imports... })`, chain
+    `.overrideProvider(RealService).useValue(mock)` (or `useClass`/`useFactory`)
+    to swap dependencies, then `await ...compile()` to get a `TestingModule`.
+    Pull instances out with `moduleRef.get(Token)` (or `resolve()` for scoped
+    providers) and assert against them.
+  rubric:
+    - { point: "Test.createTestingModule({...}).compile() builds the module", score: 1 }
+    - { point: "overrideProvider(X).useValue(mock) swaps a dependency", score: 1 }
+    - { point: "retrieve instances via moduleRef.get() (resolve() for scoped)", score: 1 }
+    - { partial: "mentions createTestingModule but not overrideProvider", score: 0.5 }

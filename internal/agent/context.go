@@ -100,7 +100,14 @@ func readContextFile(path string) (string, bool) {
 // is true, the skill catalog is suppressed (replaced by the volatile tail
 // injector that lists only attached skills). All other context — AGENTS.md,
 // plugins, model-specific OCODE.md, etc. — is unchanged.
-func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool) string {
+//
+// activeModel is the session's active model id (as returned by the LLM client)
+// and root is the project root used for stack detection. Both feed the
+// model-aware skill catalog (BuildCatalogForModel), which admits a Kaizen
+// (per-model tuned) skill only when the model matches and its stack is active.
+// They must be stable for a fixed session so the cached prefix stays stable
+// across turns (see the prefix-cache contract).
+func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool, activeModel, root string) string {
 	var context string
 	files := []string{"AGENTS.md", "CLAUDE.md", "OCODE.md", ".cursorrules"}
 
@@ -131,7 +138,7 @@ func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool) 
 	// CONFIG FLAG (not the live disco state) so the cached prefix is stable
 	// across turns regardless of whether the embedder has resolved yet.
 	if !discoveryOn {
-		if skillCatalog := skill.BuildCatalog(); skillCatalog != "" {
+		if skillCatalog := skill.BuildCatalogForModel(root, activeModel); skillCatalog != "" {
 			context += skillCatalog
 		}
 	}

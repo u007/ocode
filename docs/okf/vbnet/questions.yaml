@@ -1,0 +1,631 @@
+# VB.NET benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1). VB.NET is feature-stable, so answers are
+# graded on VB idiom-accuracy, not version. Grade genuinely-correct VB — reject
+# C# translated into VB keywords.
+
+- id: vbnet-syntax-01
+  difficulty: easy
+  weight: 2
+  tags: [syntax-basics]
+  question: >
+    How do you declare a variable in VB, how are statements terminated, and how
+    do you continue one statement across multiple lines?
+  answer: >
+    Declare with `Dim name As Type` (e.g. `Dim count As Integer = 0`); the
+    `As Type` clause names the type and an optional `=` initializes it.
+    Statements are terminated by the end of the line — VB has no semicolons; one
+    statement per line. To split a long statement across lines use a trailing
+    line-continuation underscore ` _`, though since VB 10 most line breaks
+    (after commas, operators, `(`, `<`, etc.) are implicit continuations and
+    need no underscore.
+  rubric:
+    - { point: "Dim name As Type [= value]", score: 1 }
+    - { point: "line-terminated, no semicolons (one statement per line)", score: 1 }
+    - { point: "trailing ` _` continues a line (implicit continuation since VB 10)", score: 1 }
+    - { partial: "shows Dim..As but misses termination/continuation", score: 0.5 }
+
+- id: vbnet-syntax-02
+  difficulty: medium
+  weight: 3
+  tags: [syntax-basics, conversions-arrays]
+  question: >
+    What do `Option Strict`, `Option Explicit`, and `Option Infer` control, and
+    why does `Option Strict On` matter?
+  answer: >
+    `Option Explicit On` requires every variable to be declared before use.
+    `Option Infer On` lets `Dim x = 3` infer the type from the initializer (x is
+    Integer). `Option Strict On` disallows implicit narrowing conversions and
+    late binding (Object member calls resolved at runtime): narrowing must be an
+    explicit cast, and every conversion that could lose data or fail is a compile
+    error instead of a silent runtime surprise. Strict On is the single most
+    important setting for type safety — it catches accidental narrowing and
+    late-bound typos at compile time.
+  rubric:
+    - { point: "Explicit = must declare variables; Infer = infer type from initializer", score: 1 }
+    - { point: "Strict On disallows implicit narrowing conversions AND late binding", score: 1 }
+    - { point: "Strict On turns type-unsafe conversions/late-bind into compile errors (type safety)", score: 1 }
+    - { partial: "describes Strict vaguely as 'stricter' without narrowing/late-binding", score: 0.5 }
+
+- id: vbnet-syntax-03
+  difficulty: medium
+  weight: 2
+  tags: [syntax-basics, oop]
+  question: >
+    What is the difference between a `Module` and a `Class` in VB?
+  answer: >
+    A `Module` is a reference type whose members are all implicitly `Shared`
+    (static): you cannot instantiate it, and its members are called without
+    qualification (`DoThing()`), acting like a namespace-wide function/constant
+    holder. A `Class` is a normal type you instantiate with `New`, holding
+    instance members with state. Modules also expose their public members
+    project-wide without needing the module name, so they're used for global
+    helpers and extension methods; classes model objects.
+  rubric:
+    - { point: "Module members are implicitly Shared / cannot be instantiated", score: 1 }
+    - { point: "Class is instantiated with New and holds instance state", score: 1 }
+    - { partial: "says 'module = static, class = normal' without the not-instantiable detail", score: 0.5 }
+
+- id: vbnet-syntax-04
+  difficulty: easy
+  weight: 2
+  tags: [syntax-basics]
+  question: >
+    What is the difference between a `Sub` and a `Function` in VB, and how does a
+    `Function` return a value?
+  answer: >
+    A `Sub` performs work and returns nothing; a `Function` returns a value and
+    is declared with a return type (`Function Add(...) As Integer`). A Function
+    returns either with `Return value`, or by assigning the value to the
+    function's own name (`Add = x + y`) and falling through to `End Function`.
+    You call a Sub as a statement; a Function can be used in an expression.
+  rubric:
+    - { point: "Sub returns nothing; Function has a return type / returns a value", score: 1 }
+    - { point: "returns via Return value OR by assigning to the function name", score: 1 }
+    - { partial: "Sub vs Function distinction but misses name-assignment return form", score: 0.5 }
+
+- id: vbnet-props-01
+  difficulty: easy
+  weight: 2
+  tags: [properties]
+  question: >
+    What is an auto-implemented property, and how does it differ from a full
+    property with a backing field?
+  answer: >
+    An auto-implemented property (`Public Property Name As String`) makes the
+    compiler generate a hidden backing field and trivial Get/Set. A full property
+    spells out the backing field and a `Get`/`Set` block so you can add logic
+    (validation, change notification, lazy init). Use auto when there's no logic;
+    switch to full when Get or Set needs to do more than read/write the field.
+  rubric:
+    - { point: "auto-property: compiler generates backing field + trivial Get/Set", score: 1 }
+    - { point: "full property: explicit Get/Set block for custom logic", score: 1 }
+    - { partial: "names auto-property but not the compiler-generated field", score: 0.5 }
+
+- id: vbnet-props-02
+  difficulty: medium
+  weight: 2
+  tags: [properties]
+  question: >
+    What is the backing field of an auto-implemented property named, and how do
+    you initialize an auto-property with a default value?
+  answer: >
+    The compiler generates a backing field named with a leading underscore plus
+    the property name: `Public Property Name As String` produces a private field
+    `_Name`. You can read/write `_Name` directly from inside the class. Give a
+    default with an initializer on the declaration: `Public Property Name As
+    String = "unset"`, which sets the backing field.
+  rubric:
+    - { point: "backing field is _<PropertyName> (leading underscore)", score: 1 }
+    - { point: "default via `= value` on the Property declaration", score: 1 }
+    - { partial: "knows there's a hidden field but not the _Name convention", score: 0.5 }
+
+- id: vbnet-props-03
+  difficulty: medium
+  weight: 2
+  tags: [properties]
+  question: >
+    How do you declare a read-only or write-only property in VB, and can an
+    auto-implemented property be `ReadOnly`?
+  answer: >
+    Mark it `ReadOnly` (only a `Get`) or `WriteOnly` (only a `Set`):
+    `Public ReadOnly Property Total As Decimal` with just a `Get`. An
+    auto-implemented property CAN be `ReadOnly` — it still generates a backing
+    field, settable only in the constructor or via the field initializer; there
+    is no auto `WriteOnly` (a write-only auto-property would be pointless, so it
+    must be a full property).
+  rubric:
+    - { point: "ReadOnly = Get only, WriteOnly = Set only", score: 1 }
+    - { point: "ReadOnly auto-property is allowed (backing field set in ctor/initializer)", score: 1 }
+    - { partial: "ReadOnly/WriteOnly keywords named but not the auto-property nuance", score: 0.5 }
+
+- id: vbnet-props-04
+  difficulty: hard
+  weight: 1
+  tags: [properties]
+  question: >
+    What is a default property in VB, and what constraint does it have?
+  answer: >
+    A `Default` property lets an instance be indexed directly:
+    `Default Public ReadOnly Property Item(i As Integer) As T` allows
+    `obj(3)` as shorthand for `obj.Item(3)`. The constraint: a default property
+    MUST take at least one parameter (it must be parameterized/indexed) — you
+    can't mark a parameterless property `Default`. A type can have only one
+    default property.
+  rubric:
+    - { point: "Default property enables obj(i) indexer syntax", score: 1 }
+    - { point: "must take at least one parameter (parameterized)", score: 1 }
+    - { partial: "describes indexer use but misses the parameter requirement", score: 0.5 }
+
+- id: vbnet-null-01
+  difficulty: medium
+  weight: 3
+  tags: [nullability]
+  question: >
+    In VB, what does `Nothing` mean, and how does its meaning differ for a
+    reference type versus a value type?
+  answer: >
+    `Nothing` is the default value of any type. For a reference type it is the
+    null reference. For a (non-nullable) value type it is that type's default
+    value — `Nothing` assigned to an Integer gives 0, to a Boolean gives False,
+    to a Date gives the zero date. So `Nothing` does NOT universally mean "null":
+    `Dim i As Integer = Nothing` leaves `i = 0`, and `i Is Nothing` isn't even
+    valid for a plain Integer. Only nullable value types can actually hold "no
+    value".
+  rubric:
+    - { point: "Nothing = default value of the type", score: 1 }
+    - { point: "reference type → null reference", score: 1 }
+    - { point: "value type → its default (Integer→0, Boolean→False), NOT null", score: 1 }
+    - { partial: "'Nothing means null' without the value-type default caveat", score: 0.5 }
+
+- id: vbnet-null-02
+  difficulty: medium
+  weight: 2
+  tags: [nullability]
+  question: >
+    How do you declare a nullable value type in VB, and how do you check it and
+    read its value safely?
+  answer: >
+    Use `Nullable(Of T)` or the shorthand `Dim age As Integer?`. Check with
+    `age.HasValue` (or `age IsNot Nothing`) before reading `age.Value`; reading
+    `.Value` when it has none throws `InvalidOperationException`. Assigning
+    `Nothing` to a nullable sets it to the no-value state (unlike a plain value
+    type, where Nothing sets the default).
+  rubric:
+    - { point: "Nullable(Of T) or T? shorthand", score: 1 }
+    - { point: "check HasValue / IsNot Nothing before reading .Value", score: 1 }
+    - { partial: "declares Integer? but doesn't mention HasValue/.Value safety", score: 0.5 }
+
+- id: vbnet-null-03
+  difficulty: hard
+  weight: 3
+  tags: [nullability]
+  question: >
+    Contrast the `If(a, b)` operator with the `IIf(a, b, c)` function. Why is
+    `If` preferred for null-coalescing and conditional selection?
+  answer: >
+    The two-argument `If(a, b)` is a null-coalescing operator: it returns `a`
+    unless `a` is Nothing, in which case it returns `b`. The three-argument
+    `If(cond, t, f)` is a short-circuiting ternary: only the taken branch is
+    evaluated. `IIf(cond, t, f)` is an ordinary function, so it ALWAYS evaluates
+    BOTH `t` and `f` before returning one — meaning side effects run and
+    `IIf(x IsNot Nothing, x.Value, 0)` can still blow up when x is Nothing.
+    `IIf` also returns Object (loses type). Prefer `If` because it short-circuits
+    and is type-safe.
+  rubric:
+    - { point: "If(a,b) = null-coalescing; If(c,t,f) = short-circuit ternary", score: 1 }
+    - { point: "IIf is a function that evaluates BOTH branches (no short-circuit)", score: 1 }
+    - { point: "so IIf runs side effects / can throw; If is safe (and type-safe vs IIf's Object)", score: 1 }
+    - { partial: "'If is newer/better' without the both-branches evaluation reason", score: 0.5 }
+
+- id: vbnet-null-04
+  difficulty: easy
+  weight: 2
+  tags: [nullability]
+  question: >
+    Why do you test a reference for null with `Is Nothing` / `IsNot Nothing`
+    rather than `= Nothing`?
+  answer: >
+    `Is`/`IsNot` compare reference identity, which is the correct way to ask "is
+    this reference null". `= Nothing` invokes value equality: for a String it
+    compares against `Nothing` treated as an empty string (so `"" = Nothing` is
+    True), and for a type with no `=` operator it fails to compile — it does not
+    reliably test for null. Always use `obj Is Nothing` / `obj IsNot Nothing`.
+  rubric:
+    - { point: "Is/IsNot test reference identity (the correct null test)", score: 1 }
+    - { point: "= Nothing does value comparison (e.g. String treats it as \"\") / wrong or won't compile", score: 1 }
+    - { partial: "says use Is Nothing without explaining why = is wrong", score: 0.5 }
+
+- id: vbnet-errors-01
+  difficulty: easy
+  weight: 2
+  tags: [error-handling]
+  question: >
+    Describe the structure of a `Try/Catch/Finally` block in VB and when the
+    `Finally` block runs.
+  answer: >
+    `Try` wraps the protected code; one or more `Catch [ex As ExceptionType]`
+    blocks handle exceptions (most specific first); an optional `Finally` block
+    runs unconditionally afterward — whether or not an exception was thrown or
+    caught, and even if the Try/Catch exits early — so it's used for cleanup
+    (closing files, releasing locks). The block ends with `End Try`.
+  rubric:
+    - { point: "Try wraps code; Catch ex As Type handles (specific first)", score: 1 }
+    - { point: "Finally always runs (exception or not) — used for cleanup", score: 1 }
+    - { partial: "names Try/Catch but misses the always-runs Finally", score: 0.5 }
+
+- id: vbnet-errors-02
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    What does a `Catch ... When` filter do, and why use it instead of catching
+    then re-checking inside the block?
+  answer: >
+    `Catch ex As SomeException When condition` is an exception filter: the Catch
+    only handles the exception if `condition` is True; otherwise the exception
+    keeps propagating as if this Catch weren't there. Unlike catching and then
+    `If ... Throw`-ing again, the filter evaluates BEFORE the stack unwinds, so
+    it doesn't disturb the stack for exceptions it declines, and it doesn't
+    re-throw (which would reset context). Good for conditions like a specific
+    error code or HResult.
+  rubric:
+    - { point: "When adds a boolean filter; Catch only fires if it's True, else propagates", score: 1 }
+    - { point: "filter runs before unwinding / avoids catch-and-rethrow", score: 1 }
+    - { partial: "'conditional catch' without the before-unwind / no-rethrow benefit", score: 0.5 }
+
+- id: vbnet-errors-03
+  difficulty: hard
+  weight: 3
+  tags: [error-handling]
+  question: >
+    Inside a `Catch ex As Exception`, what is the difference between `Throw` and
+    `Throw ex` when you want to rethrow, and why does it matter?
+  answer: >
+    A bare `Throw` (no operand) rethrows the current exception preserving its
+    original stack trace. `Throw ex` throws it again but resets the stack trace
+    to the current line, discarding where it actually originated. So to rethrow
+    after logging, use bare `Throw` — `Throw ex` destroys the diagnostic trail.
+    To add context, wrap in a new exception passing `ex` as the InnerException.
+  rubric:
+    - { point: "bare Throw preserves the original stack trace", score: 1 }
+    - { point: "Throw ex resets/overwrites the stack trace to the rethrow line", score: 1 }
+    - { partial: "'use Throw' without the stack-trace reason, or gets them backwards partially", score: 0.5 }
+
+- id: vbnet-errors-04
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    What is the legacy `On Error Goto` / `Err` error handling, and why is
+    structured `Try/Catch` preferred in modern VB?
+  answer: >
+    `On Error Goto label` (with `Err` object, `Err.Number`, `Resume`/`Resume
+    Next`) is the unstructured, VB6-inherited error model: a single per-procedure
+    handler reached by a jump, with global-ish `Err` state. It's discouraged
+    because it doesn't nest, mixes control flow with jumps, is hard to reason
+    about, and can't be combined with `Try/Catch` in the same method. Structured
+    `Try/Catch/Finally` gives scoped, nestable, typed handling and is the modern
+    standard; `On Error` remains only for backward compatibility.
+  rubric:
+    - { point: "On Error Goto/Err is the legacy unstructured (VB6) per-procedure jump model", score: 1 }
+    - { point: "Try/Catch is structured: scoped, nestable, typed — preferred; can't mix the two in one method", score: 1 }
+    - { partial: "'On Error is old' without contrasting structured scoping/typing", score: 0.5 }
+
+- id: vbnet-linq-01
+  difficulty: medium
+  weight: 2
+  tags: [linq-query]
+  question: >
+    Write the shape of a basic VB LINQ query expression that filters and
+    projects, and name the keywords involved.
+  answer: >
+    VB query syntax reads `From x In xs Where predicate Select projection`, e.g.
+    `Dim q = From n In numbers Where n > 0 Select n * 2`. Core keywords: `From`
+    (range variable + source), `Where` (filter), `Select` (projection), plus
+    `Order By`, `Distinct`, `Take`/`Skip`, `Group By`, `Join`, `Aggregate`.
+    A VB query must begin with `From` or `Aggregate`, but unlike C# it can END
+    with any clause and `Select` is optional (omitting it projects the range
+    variable).
+  rubric:
+    - { point: "From x In xs Where ... Select ... shape", score: 1 }
+    - { point: "names the keywords (From/Where/Select, Order By etc.)", score: 1 }
+    - { partial: "recognizes it's query syntax but garbles VB keywords (uses C# form)", score: 0.5 }
+
+- id: vbnet-linq-02
+  difficulty: hard
+  weight: 2
+  tags: [linq-query]
+  question: >
+    How do you group and aggregate in VB query syntax? Show the `Group By ...
+    Into` form.
+  answer: >
+    `Group By` uses an `Into` clause to name the group and its aggregates:
+    `From p In people Group By p.City Into Group, Count(), Avg = Average(p.Age)`.
+    `Into Group` binds the grouped sequence; aggregate functions (`Count()`,
+    `Sum()`, `Average()`, `Max()`, `Min()`) go in the `Into` clause with optional
+    aliases. There's also `Aggregate ... Into` for computing an aggregate over a
+    whole query (e.g. `Aggregate n In nums Into Sum(n)`).
+  rubric:
+    - { point: "Group By <key> Into Group [, aggregates]", score: 1 }
+    - { point: "aggregate functions live in the Into clause (Count/Sum/Average, aliasable)", score: 1 }
+    - { partial: "mentions Group By but not the VB-specific Into clause", score: 0.5 }
+
+- id: vbnet-linq-03
+  difficulty: medium
+  weight: 1
+  tags: [linq-query]
+  question: >
+    What is the `Aggregate` query keyword in VB, and how does it differ from
+    `From`?
+  answer: >
+    `Aggregate` starts a query whose result is a single aggregate value rather
+    than a sequence: `Dim total = Aggregate n In nums Into Sum(n)` returns the
+    sum directly. It can carry `Where`/other clauses and one or more aggregate
+    functions in its `Into` clause. `From` starts a query that yields a sequence;
+    `Aggregate` folds a query down to a scalar (or a set of scalars). It's a VB
+    query keyword with no direct C# query-syntax equivalent.
+  rubric:
+    - { point: "Aggregate yields a single scalar aggregate (Into Sum/Count/...)", score: 1 }
+    - { point: "vs From which yields a sequence", score: 1 }
+    - { partial: "'it aggregates' without the scalar-vs-sequence contrast", score: 0.5 }
+
+- id: vbnet-linq-04
+  difficulty: medium
+  weight: 2
+  tags: [linq-query]
+  question: >
+    What is deferred (lazy) execution in LINQ, and how do you force a query to
+    execute immediately in VB?
+  answer: >
+    A LINQ query defined with `From ... Select` (or the equivalent method calls)
+    doesn't run when declared — it executes when enumerated, e.g. by a
+    `For Each`, and re-executes each time you iterate it, reflecting current
+    source data. Force immediate execution / snapshot by materializing:
+    `.ToList()`, `.ToArray()`, or a scalar operator like `.Count()`/`.First()`.
+    This matters when the source changes between definition and use, or when
+    iterating twice is expensive.
+  rubric:
+    - { point: "query runs on enumeration, not at definition (and re-runs each iteration)", score: 1 }
+    - { point: "force with ToList/ToArray/Count (materialize)", score: 1 }
+    - { partial: "'lazy' without how to force execution", score: 0.5 }
+
+- id: vbnet-events-01
+  difficulty: medium
+  weight: 3
+  tags: [events]
+  question: >
+    Explain the `WithEvents` + `Handles` mechanism for handling events in VB.
+  answer: >
+    Declare the event source field with `WithEvents` (`Private WithEvents btn As
+    Button`), then a handler method ends with a `Handles btn.Click` clause. The
+    compiler wires the handler to the event automatically — no explicit
+    AddHandler call — and rewires if you assign a new object to the WithEvents
+    field. One handler can handle several events (`Handles a.Click, b.Click`).
+    `WithEvents` can't be used on a local variable or on a `Structure`; the field
+    must be a class-level member.
+  rubric:
+    - { point: "WithEvents field + method with Handles clause auto-wires the event", score: 1 }
+    - { point: "no explicit AddHandler needed; can list multiple events in Handles", score: 1 }
+    - { partial: "names WithEvents/Handles but doesn't explain the auto-wiring", score: 0.5 }
+
+- id: vbnet-events-02
+  difficulty: medium
+  weight: 2
+  tags: [events]
+  question: >
+    What do `AddHandler` and `RemoveHandler` do, what role does `AddressOf` play,
+    and when must you use them instead of `Handles`?
+  answer: >
+    `AddHandler source.Event, AddressOf Handler` dynamically attaches a handler
+    at runtime; `RemoveHandler` detaches it. `AddressOf` produces a delegate
+    pointing at the method (you can also pass a lambda). Unlike `Handles`, this
+    lets you add/remove handlers dynamically, wire up objects not held in a
+    WithEvents field, and it's REQUIRED for `Shared` events and for events raised
+    by `Structure`s (which can't have WithEvents fields). Always RemoveHandler to
+    avoid leaks when the subscriber outlives the need.
+  rubric:
+    - { point: "AddHandler/RemoveHandler attach/detach at runtime; AddressOf gives the delegate", score: 1 }
+    - { point: "needed for dynamic wiring / Shared events / Structures (where Handles can't be used)", score: 1 }
+    - { partial: "describes AddHandler but omits AddressOf or the when-required cases", score: 0.5 }
+
+- id: vbnet-events-03
+  difficulty: medium
+  weight: 2
+  tags: [events]
+  question: >
+    How do you declare a custom event on a class and raise it, and how do
+    handlers receive arguments?
+  answer: >
+    Declare it with `Event`: either `Public Event Completed As EventHandler`
+    (using a delegate type) or `Public Event Completed(sender As Object, e As
+    EventArgs)` (implicit delegate). Raise it with `RaiseEvent Completed(Me,
+    args)` — `RaiseEvent` calls all attached handlers with those arguments, and
+    is a no-op if none are attached. Handlers match the event's delegate
+    signature.
+  rubric:
+    - { point: "declare with Event [As DelegateType]", score: 1 }
+    - { point: "raise with RaiseEvent Name(args) (no-op if no handlers)", score: 1 }
+    - { partial: "declares Event but uses C#-style invoke instead of RaiseEvent", score: 0.5 }
+
+- id: vbnet-events-04
+  difficulty: easy
+  weight: 1
+  tags: [events]
+  question: >
+    When would you choose `WithEvents`/`Handles` over `AddHandler`/`RemoveHandler`,
+    and vice versa?
+  answer: >
+    Use `WithEvents`/`Handles` for static, declarative wiring known at compile
+    time — it's concise and the designer uses it. Use `AddHandler`/`RemoveHandler`
+    when wiring is dynamic (attach/detach at runtime), when the source isn't a
+    WithEvents field, for handlers on many transient objects, and when you
+    specifically need to unsubscribe. `Handles` connections live for the object's
+    lifetime; AddHandler gives explicit control (and the duty to RemoveHandler).
+  rubric:
+    - { point: "WithEvents/Handles: static/declarative compile-time wiring", score: 1 }
+    - { point: "AddHandler/RemoveHandler: dynamic runtime attach/detach + explicit unsubscribe", score: 1 }
+    - { partial: "states a preference without the static-vs-dynamic reasoning", score: 0.5 }
+
+- id: vbnet-oop-01
+  difficulty: easy
+  weight: 3
+  tags: [oop]
+  question: >
+    What is the difference between `Inherits` and `Implements` in VB, and how
+    many of each can a class have?
+  answer: >
+    `Inherits BaseClass` sets the single base class the type derives from — VB
+    has single inheritance, so at most one `Inherits`. `Implements IFoo, IBar`
+    declares one or more interfaces the class implements, and VB additionally
+    requires each member to state `... Implements IFoo.Method` on its own line to
+    bind it to the interface member (which lets you rename or implement
+    conflicting members explicitly). A class can implement many interfaces but
+    inherit one base.
+  rubric:
+    - { point: "Inherits = single base class (one only); Implements = interfaces (many)", score: 1 }
+    - { point: "VB binds each member with a per-member `Implements IFoo.Member` clause", score: 1 }
+    - { partial: "distinguishes the two keywords but misses the per-member Implements clause", score: 0.5 }
+
+- id: vbnet-oop-02
+  difficulty: hard
+  weight: 3
+  tags: [oop]
+  question: >
+    Explain `Overridable`, `Overrides`, `MustOverride`, `MustInherit`, and
+    `NotOverridable` in VB's inheritance model.
+  answer: >
+    `Overridable` marks a base method as virtual (methods are NOT virtual by
+    default in VB). `Overrides` in a derived class replaces an Overridable base
+    member. `MustOverride` is an abstract member — signature only, no body — and
+    forces derived classes to override it; a class containing one must be
+    `MustInherit`. `MustInherit` marks an abstract class that can't be
+    instantiated. `NotOverridable` seals an overriding member so no further
+    subclass can override it (only meaningful on an `Overrides` member).
+  rubric:
+    - { point: "Overridable = virtual (methods aren't virtual by default); Overrides = replace it", score: 1 }
+    - { point: "MustOverride = abstract member; MustInherit = abstract class (not instantiable)", score: 1 }
+    - { point: "NotOverridable = sealed override (no further overriding)", score: 1 }
+    - { partial: "gets 2 of the keywords right but confuses/omits the others", score: 0.5 }
+
+- id: vbnet-oop-03
+  difficulty: medium
+  weight: 2
+  tags: [oop]
+  question: >
+    What does `Shared` mean on a member, and how does it differ from an instance
+    member? How is a shared member accessed?
+  answer: >
+    `Shared` (VB's equivalent of C# `static`) means the member belongs to the
+    type, not to any instance: there's one copy shared by all instances, and it
+    can't touch instance state (`Me`) or non-shared members. Access it through
+    the type name (`MyClass.Count`) rather than an instance. Module members are
+    all implicitly Shared. Shared constructors (`Shared Sub New()`) run once to
+    initialize shared state.
+  rubric:
+    - { point: "Shared = belongs to the type not an instance (one copy; VB's static)", score: 1 }
+    - { point: "accessed via type name; can't access instance state/Me", score: 1 }
+    - { partial: "'like static' without the no-instance-state / type-name access detail", score: 0.5 }
+
+- id: vbnet-oop-04
+  difficulty: hard
+  weight: 2
+  tags: [oop]
+  question: >
+    Distinguish `Me`, `MyBase`, and `MyClass` in VB. When does `MyClass` differ
+    from `Me`?
+  answer: >
+    `Me` refers to the current instance (like `this`). `MyBase` refers to the
+    immediate base class, used to call base implementations (`MyBase.New(...)`,
+    `MyBase.Method()`). `MyClass` calls a member as implemented in THIS class,
+    bypassing virtual dispatch — so even if a derived class overrides the method,
+    `MyClass.Method()` calls this class's version, whereas `Me.Method()` would
+    dispatch to the derived override. `MyClass` differs from `Me` only for
+    Overridable members that a subclass has overridden.
+  rubric:
+    - { point: "Me = current instance; MyBase = base class member access", score: 1 }
+    - { point: "MyClass calls this class's implementation, bypassing override (non-virtual)", score: 1 }
+    - { partial: "Me/MyBase right but MyClass wrong or omitted", score: 0.5 }
+
+- id: vbnet-convarr-01
+  difficulty: hard
+  weight: 3
+  tags: [conversions-arrays]
+  question: >
+    Compare `CType`, `DirectCast`, and `TryCast` — what each does and when to
+    use it.
+  answer: >
+    All three convert types. `CType(x, T)` performs any widening OR narrowing
+    conversion, invoking runtime conversion helpers / conversion operators (e.g.
+    String→Integer parse, Object→Integer unbox+convert); throws
+    InvalidCastException on failure. `DirectCast(x, T)` only converts when a real
+    inheritance/implementation relationship exists (or identical type) — it does
+    NO converting, just reinterprets the reference/unboxes to the exact type, so
+    it's faster but throws if x isn't already that type. `TryCast(x, T)` is like
+    DirectCast but for reference types only and returns `Nothing` instead of
+    throwing on failure. Use DirectCast when you know the exact type, TryCast to
+    test-and-cast without exceptions, CType when a genuine conversion is needed.
+  rubric:
+    - { point: "CType does any widening/narrowing conversion via runtime helpers", score: 1 }
+    - { point: "DirectCast requires an inheritance/exact-type relationship (no conversion), throws otherwise", score: 1 }
+    - { point: "TryCast = reference types only, returns Nothing on failure (no exception)", score: 1 }
+    - { partial: "gets CType vs DirectCast OR TryCast right but conflates the other two", score: 0.5 }
+
+- id: vbnet-convarr-02
+  difficulty: medium
+  weight: 2
+  tags: [conversions-arrays]
+  question: >
+    What is the difference between a widening and a narrowing conversion, and how
+    does `Option Strict On` treat each?
+  answer: >
+    A widening conversion always succeeds without data loss (e.g. Integer→Long,
+    Derived→Base). A narrowing conversion may lose data or fail at runtime (e.g.
+    Long→Integer, Object→String, String→Integer). Under `Option Strict On`,
+    widening conversions may be implicit, but narrowing conversions MUST be
+    explicit (`CType`/`CInt`/`DirectCast`/`TryCast`) — an implicit narrowing is a
+    compile error. Under `Option Strict Off` narrowing happens implicitly and can
+    blow up at runtime.
+  rubric:
+    - { point: "widening = always safe/no loss; narrowing = may lose data or fail", score: 1 }
+    - { point: "Strict On: widening implicit OK, narrowing must be explicit (else compile error)", score: 1 }
+    - { partial: "defines widening/narrowing but not the Option Strict rule", score: 0.5 }
+
+- id: vbnet-convarr-03
+  difficulty: medium
+  weight: 2
+  tags: [conversions-arrays]
+  question: >
+    In VB, are arrays 0-based, and how do you resize one while keeping its
+    contents? What does the array bound in `Dim a(n)` mean?
+  answer: >
+    VB arrays are 0-based. Crucially, `Dim a(n)` declares an array whose upper
+    BOUND is n, i.e. n+1 elements (indices 0..n) — the number in parentheses is
+    the last index, not the length. Resize with `ReDim a(newUpper)`, which
+    creates a new array and DISCARDS existing contents; use `ReDim Preserve
+    a(newUpper)` to copy the old elements into the resized array (only the last
+    dimension may change size when preserving).
+  rubric:
+    - { point: "arrays are 0-based; Dim a(n) = upper bound n → n+1 elements", score: 1 }
+    - { point: "ReDim resizes (discards); ReDim Preserve keeps existing contents", score: 1 }
+    - { partial: "says 0-based but treats Dim a(n) as n elements, or omits Preserve", score: 0.5 }
+
+- id: vbnet-convarr-04
+  difficulty: easy
+  weight: 2
+  tags: [conversions-arrays, syntax-basics]
+  question: >
+    What are the `CInt`/`CStr`/`CDbl` conversion functions, and why use `&` (not
+    `+`) for string concatenation in VB?
+  answer: >
+    `CInt`, `CStr`, `CDbl`, `CBool`, etc. are compact built-in conversion
+    operators for the intrinsic types (`CInt(x)` converts to Integer, rounding
+    for fractions using banker's rounding). Use `&` for string concatenation
+    because `&` always treats operands as strings, whereas `+` is overloaded:
+    under `Option Strict Off` `"1" + 2` can attempt numeric addition or throw,
+    giving ambiguous results. `&` is unambiguous and the idiomatic VB
+    concatenation operator.
+  rubric:
+    - { point: "CInt/CStr/CDbl are intrinsic type-conversion operators", score: 1 }
+    - { point: "& always concatenates as strings; + is ambiguous (numeric vs string)", score: 1 }
+    - { partial: "names the converters but not the &-vs-+ concatenation reason", score: 0.5 }

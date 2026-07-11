@@ -1,0 +1,690 @@
+# PHP benchmark corpus — SOURCE OF TRUTH.
+# Format: docs/okf/_schema/question-format.md. Grade with rubric-guide.md.
+# corpus_rev must match meta.yaml (1). Version scope: PHP >=8.2 <9. Version-gated
+# behavior (typed class constants & #[\Override] in 8.3, property hooks &
+# asymmetric visibility in 8.4, enums/readonly/first-class-callable in 8.1) is
+# stated inline in the affected answers so a grader can tell a correct answer
+# from a stale one.
+
+- id: php-types-01
+  difficulty: medium
+  weight: 3
+  tags: [types]
+  question: >
+    What does `declare(strict_types=1)` do, where must it go, and how does it
+    change argument handling compared to the default coercive mode?
+  answer: >
+    It must be the very first statement of the file. It only affects scalar type
+    declarations for calls made *from* that file: in strict mode an `int`
+    parameter rejects a `"5"` string or a float and throws a `TypeError`, whereas
+    coercive (default) mode silently coerces compatible scalars (e.g. `"5"` → 5).
+    It is per-file (the callee's file setting does not matter — the caller's
+    does), and the sole documented exception is that `int` is still accepted where
+    `float` is declared, widening to float.
+  rubric:
+    - { point: "must be the first statement in the file / is per-file", score: 1 }
+    - { point: "strict: no scalar coercion, mismatches throw TypeError", score: 1 }
+    - { point: "coercive default silently coerces compatible scalars", score: 1 }
+    - { partial: "says 'enforces types' without the coercion contrast", score: 0.5 }
+
+- id: php-types-02
+  difficulty: easy
+  weight: 3
+  tags: [types]
+  question: >
+    What is the difference between `==` and `===`, and give a case where type
+    juggling with `==` produces a surprising result.
+  answer: >
+    `===` is identity: equal value AND same type, no conversion. `==` is loose:
+    it coerces operands to a common type first. As of PHP 8.0 a number-vs-string
+    comparison where the string is non-numeric compares as strings (so
+    `0 == "foo"` is now false, unlike PHP 7). Classic foot-guns remain:
+    `"1e2" == "100"` is true (both numeric strings), `null == false` is true,
+    `0 == ""` is false in 8.0+. Prefer `===` unless you deliberately want
+    coercion.
+  rubric:
+    - { point: "=== compares value and type with no coercion", score: 1 }
+    - { point: "== coerces to a common type first", score: 1 }
+    - { point: "a concrete juggling example (e.g. numeric-string equality / 8.0 change to 0==\"foo\")", score: 1 }
+    - { partial: "'=== is stricter' with no coercion mechanism or example", score: 0.5 }
+
+- id: php-types-03
+  difficulty: medium
+  weight: 2
+  tags: [types]
+  question: >
+    Explain union, intersection, and nullable type declarations, and how `?T`
+    relates to `T|null`.
+  answer: >
+    A union `A|B` accepts any listed type (since 8.0). An intersection `A&B`
+    requires a value satisfying all listed class/interface types simultaneously
+    (since 8.1; only class/interface types, no scalars). `?T` is shorthand for
+    the union `T|null` — a nullable single type. You cannot mix them naively; the
+    combined "DNF" form like `(A&B)|null` is allowed since 8.2. `?T` and `T|null`
+    are equivalent, but `?` cannot be combined with a multi-member union.
+  rubric:
+    - { point: "union A|B = any of the listed types", score: 1 }
+    - { point: "intersection A&B = satisfies all (class/interface types only)", score: 1 }
+    - { point: "?T is shorthand for T|null", score: 1 }
+    - { partial: "defines union but conflates ?T with a broader union or omits intersection", score: 0.5 }
+
+- id: php-types-04
+  difficulty: medium
+  weight: 2
+  tags: [types]
+  question: >
+    Contrast the `never`, `void`, and `mixed` type declarations. When is each
+    correct?
+  answer: >
+    `void` (8.0) means the function returns no value (it may `return;` but not a
+    value). `never` (8.1) means the function never returns normally at all — it
+    always throws or exits (e.g. a redirect helper or `fail()`); it is a bottom
+    type and callers know execution stops. `mixed` (8.0) is the top type,
+    equivalent to `object|resource|array|string|float|int|bool|null` — it accepts
+    anything and is implicitly nullable. `never` is not the same as `void`: void
+    returns (with no value), never does not return.
+  rubric:
+    - { point: "void = returns but yields no value", score: 1 }
+    - { point: "never = function never returns (always throws/exits); bottom type", score: 1 }
+    - { point: "mixed = accepts any type (top type, includes null)", score: 1 }
+    - { partial: "confuses never with void, or 'mixed = anything' only", score: 0.5 }
+
+- id: php-types-05
+  difficulty: medium
+  weight: 1
+  tags: [types]
+  question: >
+    What are typed class constants, which PHP version added them, and what rule
+    applies when a subclass overrides a typed constant?
+  answer: >
+    Since PHP 8.3, class, interface, enum, and trait constants may carry an
+    explicit type declaration: `const string VERSION = '1.0';`. Before 8.3 a
+    constant's type was implicit from its value. The declared type is enforced at
+    compile time, and an overriding constant in a child class (or implementing
+    class) must be type-compatible with the parent's declaration — you cannot
+    widen or change it to an incompatible type. `self`/`static`/`parent` and
+    `never`/`void`/`callable` are not permitted as constant types.
+  rubric:
+    - { point: "class/interface/enum constants can be explicitly typed since PHP 8.3", score: 1 }
+    - { point: "an overriding child constant must be type-compatible with the parent's declared type", score: 1 }
+    - { partial: "'constants can have types' without the version or the override-compatibility rule", score: 0.5 }
+
+- id: php-enums-01
+  difficulty: easy
+  weight: 2
+  tags: [enums]
+  question: >
+    What is the difference between a pure enum and a backed enum in PHP 8.1, and
+    when do you need a backed one?
+  answer: >
+    Enums arrived in PHP 8.1. A pure enum (`enum Suit { case Hearts; ... }`) has
+    cases with identity only — no scalar value. A backed enum
+    (`enum Suit: string { case Hearts = 'H'; ... }`) gives every case an `int` or
+    `string` backing value, exposed via the readonly `->value` property. Use a
+    backed enum when you must serialize/persist the value or map to/from DB rows,
+    API payloads, or config; use a pure enum when the cases are just a closed set
+    of named options.
+  rubric:
+    - { point: "pure enum has no scalar value (identity only)", score: 1 }
+    - { point: "backed enum has an int/string ->value; used for persistence/serialization", score: 1 }
+    - { partial: "'enums are named constants' without the pure/backed distinction", score: 0.5 }
+
+- id: php-enums-02
+  difficulty: medium
+  weight: 2
+  tags: [enums]
+  question: >
+    Describe `cases()`, `from()`, and `tryFrom()` on enums, including how
+    `from()` and `tryFrom()` differ on an invalid value.
+  answer: >
+    All enums have the static `cases()` returning an array of every case in
+    declaration order. Backed enums add `from($value)` and `tryFrom($value)`:
+    both look a case up by its backing value using strict comparison. On an
+    invalid value `from()` throws a `\ValueError`, while `tryFrom()` returns
+    `null` (pairs naturally with `?? $default`). `cases()` exists on pure enums
+    too, but `from`/`tryFrom` are backed-only.
+  rubric:
+    - { point: "cases() returns all cases in declaration order", score: 1 }
+    - { point: "from() throws \\ValueError on an invalid value", score: 1 }
+    - { point: "tryFrom() returns null on an invalid value", score: 1 }
+    - { partial: "knows the methods but swaps the from/tryFrom failure behavior", score: 0.5 }
+
+- id: php-enums-03
+  difficulty: medium
+  weight: 2
+  tags: [enums]
+  question: >
+    Can an enum have methods, constants, and implement interfaces? What are the
+    key restrictions versus a normal class?
+  answer: >
+    Yes: enums can declare methods (including in `$this`, which is the current
+    case), constants, and static methods, and they can implement interfaces
+    (backed enums implicitly implement `BackedEnum`, all implement `UnitEnum`).
+    They can use traits (without properties). The restrictions: enums cannot have
+    object state — no non-constant properties — cannot be instantiated with `new`,
+    and cannot be extended (they are implicitly final). So they model behavior on
+    a fixed set of cases, not stateful objects.
+  rubric:
+    - { point: "may have methods/constants and implement interfaces", score: 1 }
+    - { point: "no instance properties/state; cannot be instantiated with new", score: 1 }
+    - { point: "implicitly final / cannot be extended", score: 1 }
+    - { partial: "'yes to methods' without the no-state / cannot-instantiate restriction", score: 0.5 }
+
+- id: php-enums-04
+  difficulty: medium
+  weight: 1
+  tags: [enums]
+  question: >
+    Two variables hold `Suit::Hearts`. Are they the same instance, and how does
+    that affect comparison and use in `match`?
+  answer: >
+    Yes — each enum case is a singleton, so every reference to `Suit::Hearts` is
+    the same object instance. That means `===` (identity) works to compare cases
+    and is the idiomatic check, and cases are safe as `match` subjects/arms since
+    `match` uses `===`. You never need `==` for enum cases, and you cannot clone
+    a case.
+  rubric:
+    - { point: "each case is a singleton — same instance everywhere", score: 1 }
+    - { point: "so === / match (strict) is the correct way to compare cases", score: 1 }
+    - { partial: "'compare with ==' without the singleton/identity insight", score: 0.5 }
+
+- id: php-oop-01
+  difficulty: easy
+  weight: 2
+  tags: [oop]
+  question: >
+    What is constructor property promotion (PHP 8.0), and what does it replace?
+  answer: >
+    Promotion lets you declare and assign a property directly in the constructor
+    signature by adding a visibility (or `readonly`) modifier to a parameter:
+    `public function __construct(private string $name) {}`. PHP creates the
+    `private $name` property and assigns the argument automatically, replacing the
+    boilerplate of declaring the property, listing the parameter, and writing
+    `$this->name = $name;`. Only constructor parameters with a visibility modifier
+    are promoted; you can still mix promoted and plain parameters.
+  rubric:
+    - { point: "a visibility/readonly modifier on a constructor param declares+assigns the property", score: 1 }
+    - { point: "removes the declare + $this->x = $x boilerplate", score: 1 }
+    - { partial: "'shorthand in the constructor' without the modifier-triggers-promotion detail", score: 0.5 }
+
+- id: php-oop-02
+  difficulty: medium
+  weight: 3
+  tags: [oop]
+  question: >
+    Explain `readonly` properties (8.1) and `readonly` classes (8.2): when can a
+    readonly property be written, and what does marking the whole class add?
+  answer: >
+    A `readonly` property (8.1) must be typed and can be initialized exactly once,
+    from within the declaring class's scope (typically the constructor); any later
+    write — even inside the class — throws an `Error`. It is not the same as a
+    constant: the value is set at runtime. A `readonly` class (8.2) implicitly
+    marks every declared property readonly and forbids dynamic properties; such a
+    class may only be extended by another readonly class, and its properties must
+    be typed and non-static. Note 8.3 allows re-initializing a readonly property
+    during `__clone` for deep copies.
+  rubric:
+    - { point: "readonly property: typed, write-once from the declaring class scope, then Error on rewrite", score: 1 }
+    - { point: "readonly class (8.2) makes all properties readonly / forbids dynamic properties", score: 1 }
+    - { point: "runtime-set (not a constant) OR readonly class extended only by readonly class", score: 1 }
+    - { partial: "'like a constant / can't change it' without the write-once-in-scope nuance", score: 0.5 }
+
+- id: php-oop-03
+  difficulty: hard
+  weight: 2
+  tags: [oop]
+  question: >
+    Distinguish `self`, `static`, and `$this` in a method, and explain what late
+    static binding solves.
+  answer: >
+    `$this` is the current object instance (unavailable in a static method).
+    `self` resolves to the class in which the code is *written* — it is fixed at
+    compile time. `static` resolves to the class that was actually *called* at
+    runtime (the runtime type), which is late static binding. LSB matters with
+    inheritance: `new self()` in a parent always builds the parent, while
+    `new static()` builds the actual subclass — the fix for factory/fluent
+    methods on subclasses. `static::method()` likewise dispatches to the called
+    class's override.
+  rubric:
+    - { point: "$this = the instance; self = compile-time defining class", score: 1 }
+    - { point: "static = runtime called class (late static binding)", score: 1 }
+    - { point: "new static() builds the subclass where new self() builds the parent", score: 1 }
+    - { partial: "self vs static noted but 'compile-time vs runtime' not made explicit", score: 0.5 }
+
+- id: php-oop-04
+  difficulty: hard
+  weight: 1
+  tags: [oop]
+  question: >
+    What are asymmetric visibility and property hooks, which PHP version
+    introduced them, and what do they let you avoid?
+  answer: >
+    Both landed in PHP 8.4. Asymmetric visibility lets a property have a wider
+    read scope than write scope, e.g. `public private(set) int $calls;` — readable
+    everywhere but settable only from inside the class — removing hand-written
+    getters that only guard writes. Property hooks let a property define `get`
+    and/or `set` behavior inline (`public string $name { get => ...; set => ...; }`)
+    so a property can be computed or validated without a backing field and without
+    a separate getter/setter method. Together they replace much boilerplate
+    get/set method code with declared property behavior.
+  rubric:
+    - { point: "both introduced in PHP 8.4", score: 1 }
+    - { point: "asymmetric visibility = wider read than write scope (e.g. public private(set))", score: 1 }
+    - { point: "property hooks = inline get/set on a property, no separate getter/setter", score: 1 }
+    - { partial: "describes one feature correctly but gets the version wrong or omits the other", score: 0.5 }
+
+- id: php-oop-05
+  difficulty: medium
+  weight: 1
+  tags: [oop]
+  question: >
+    What does the `#[\Override]` attribute (PHP 8.3) do, and what class of bug
+    does it catch?
+  answer: >
+    `#[\Override]` (8.3) declares that a method is intended to override a parent
+    method or implement an interface method. At compile time the engine verifies a
+    matching parent/interface method exists; if none does, it errors. It catches
+    the silent bug where a typo in the method name, or a renamed/removed parent
+    method, means your "override" is actually a brand-new method that is never
+    called — the same intent as Java's `@Override`. It cannot be applied to the
+    constructor.
+  rubric:
+    - { point: "asserts the method overrides a parent/interface method (8.3)", score: 1 }
+    - { point: "compile-time error if no matching parent method exists (catches typos/renames)", score: 1 }
+    - { partial: "'marks an override' without the no-parent-method-errors guarantee", score: 0.5 }
+
+- id: php-closures-01
+  difficulty: medium
+  weight: 2
+  tags: [closures]
+  question: >
+    What is the difference between a closure (`function () use (...) {}`) and an
+    arrow function (`fn () => ...`) with respect to variable capture?
+  answer: >
+    An arrow function (`fn`, since 7.4) automatically captures variables from the
+    enclosing scope by value, on use — no `use` clause. A classic closure captures
+    nothing implicitly; you list captured variables explicitly in `use (...)`, and
+    they are captured by value at definition time unless you write `use (&$x)` for
+    by-reference. Both capture by value by default (a later change to the outer
+    variable is not seen); arrow fns just make it implicit and are limited to a
+    single expression body.
+  rubric:
+    - { point: "arrow fn auto-captures enclosing vars by value (no use clause)", score: 1 }
+    - { point: "closure needs explicit use(...) and captures by value at definition time", score: 1 }
+    - { partial: "'fn is shorthand' without the auto-capture-by-value point", score: 0.5 }
+
+- id: php-closures-02
+  difficulty: medium
+  weight: 2
+  tags: [closures]
+  question: >
+    What is the first-class callable syntax `strlen(...)` (PHP 8.1), and what
+    does it produce?
+  answer: >
+    Since 8.1, appending `(...)` to a callable creates a `Closure` object from it
+    without calling it — `strlen(...)`, `$obj->method(...)`, `Foo::stat(...)`,
+    `$obj(...)`. It replaces the old string/array callable forms (`'strlen'`,
+    `[$obj, 'method']`) with a type-safe, IDE-analyzable reference, and unlike the
+    string forms it respects scope and works with private methods from inside the
+    class. The result is a normal Closure you can pass to `array_map`, store, etc.
+  rubric:
+    - { point: "(...) makes a Closure from a callable without invoking it (8.1)", score: 1 }
+    - { point: "replaces string/array callables with a type-safe reference", score: 1 }
+    - { partial: "'it's a way to call a function' — misses that it produces a Closure", score: 0.5 }
+
+- id: php-closures-03
+  difficulty: hard
+  weight: 1
+  tags: [closures]
+  question: >
+    What do `Closure::bind` / `bindTo` do, and how do they affect `$this` and
+    scope inside a closure?
+  answer: >
+    They return a *new* closure bound to a given object as `$this` and, optionally,
+    to a class scope — closures are immutable, so the original is unchanged.
+    `$c->bindTo($obj, Scope::class)` (instance method) and
+    `Closure::bind($c, $obj, scope)` (static) are equivalent. Binding the scope is
+    what lets the closure access the object's private/protected members; binding
+    only the object without the scope gives public access. Arrow functions and
+    closures capture `$this` automatically when defined inside a method, but
+    binding lets you retarget it explicitly.
+  rubric:
+    - { point: "returns a NEW closure with $this bound to the given object (original unchanged)", score: 1 }
+    - { point: "binding the scope grants access to private/protected members", score: 1 }
+    - { partial: "'sets $this' without the returns-a-new-closure or scope point", score: 0.5 }
+
+- id: php-closures-04
+  difficulty: medium
+  weight: 2
+  tags: [closures]
+  question: >
+    In `use ($x)` versus `use (&$x)`, what is the difference, and what value does
+    the closure see if `$x` changes after the closure is defined?
+  answer: >
+    `use ($x)` captures by value: the closure snapshots `$x` at the moment it is
+    defined, so a later change to the outer `$x` is invisible inside it.
+    `use (&$x)` captures by reference: the closure and the outer scope share the
+    same variable, so it sees later changes and can mutate `$x` for the caller.
+    Capturing loop variables by value is the usual fix for the "all closures see
+    the last value" bug that by-reference capture causes.
+  rubric:
+    - { point: "use($x) = by value, snapshot at definition time (later changes invisible)", score: 1 }
+    - { point: "use(&$x) = by reference, sees/mutates the shared outer variable", score: 1 }
+    - { partial: "knows one direction but not the snapshot-vs-shared consequence", score: 0.5 }
+
+- id: php-error-01
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    Describe the PHP throwable hierarchy. What is the difference between `Error`
+    and `Exception`, and how do you catch both?
+  answer: >
+    Everything catchable implements the `Throwable` interface. It has two main
+    branches: `Exception` (and its subclasses) for application-level conditions
+    you are expected to handle, and `Error` (e.g. `TypeError`, `ValueError`,
+    `DivisionByZeroError`, `UnhandledMatchError`) for engine-level faults —
+    formerly fatal errors — that usually indicate a bug. Neither extends the
+    other; to catch anything you `catch (\Throwable $e)`. Catching `\Exception`
+    alone does NOT catch `Error`s.
+  rubric:
+    - { point: "Throwable is the root interface; Error and Exception are sibling branches", score: 1 }
+    - { point: "Error = engine/bug-level faults (TypeError etc.), Exception = app-level conditions", score: 1 }
+    - { point: "catch (\\Throwable) to catch both; catching Exception misses Error", score: 1 }
+    - { partial: "'both are exceptions' without the Error-vs-Exception distinction", score: 0.5 }
+
+- id: php-error-02
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    Explain `try`/`catch`/`finally` semantics: when does `finally` run, and what
+    happens if both the `try`/`catch` and the `finally` block have a `return`?
+  answer: >
+    `finally` always runs after the try (and any matching catch), whether the try
+    succeeded, threw, or returned — even on an uncaught exception (it runs before
+    the exception propagates). If both the `try`/`catch` and `finally` contain a
+    `return`, the `finally` return wins and overrides the earlier one; likewise a
+    `throw` in `finally` supersedes a pending exception. Use it for cleanup
+    (closing handles, releasing locks) that must happen on every path.
+  rubric:
+    - { point: "finally always runs (success, exception, or return)", score: 1 }
+    - { point: "a return/throw in finally overrides the try/catch return or pending exception", score: 1 }
+    - { partial: "'finally runs cleanup' without the override behavior", score: 0.5 }
+
+- id: php-error-03
+  difficulty: medium
+  weight: 2
+  tags: [error-handling]
+  question: >
+    How do you define a custom exception and chain a lower-level exception to it,
+    and why chain?
+  answer: >
+    Extend `\Exception` (or a more specific subclass like `\RuntimeException`).
+    The base constructor is `__construct(string $message = "", int $code = 0,
+    ?Throwable $previous = null)`, so to chain you pass the caught exception as the
+    third `$previous` argument: `throw new DomainException('...', 0, $e);`. You
+    retrieve it later with `$e->getPrevious()`. Chaining preserves the original
+    cause (and its stack trace) while letting you rethrow a domain-meaningful type,
+    instead of swallowing the root error.
+  rubric:
+    - { point: "extend \\Exception (or a subclass) for a custom type", score: 1 }
+    - { point: "pass the original as the $previous (3rd) constructor arg to chain", score: 1 }
+    - { point: "getPrevious() retrieves it / chaining preserves the root cause", score: 1 }
+    - { partial: "extends Exception but no mention of $previous chaining", score: 0.5 }
+
+- id: php-error-04
+  difficulty: hard
+  weight: 2
+  tags: [error-handling]
+  question: >
+    What is the difference between `set_error_handler` and `try`/`catch`, and how
+    do you make PHP warnings (e.g. from `fopen`) catchable as exceptions?
+  answer: >
+    `try`/`catch` only catches thrown `Throwable`s; it does NOT catch classic PHP
+    errors like `E_WARNING`/`E_NOTICE` (e.g. a failed `fopen`), which by default
+    just emit a diagnostic and continue. `set_error_handler(callable)` registers a
+    global handler that intercepts those non-fatal engine errors. The standard way
+    to make them catchable is to have that handler throw an `\ErrorException`
+    (built for exactly this) — then a surrounding `try`/`catch` can handle the
+    warning. Note some engine failures are already `Error`s (e.g. division by
+    zero throws `DivisionByZeroError` in 8.0+) and need no handler.
+  rubric:
+    - { point: "try/catch catches thrown Throwables, not E_WARNING/E_NOTICE diagnostics", score: 1 }
+    - { point: "set_error_handler intercepts those non-fatal errors globally", score: 1 }
+    - { point: "throw \\ErrorException from the handler to make warnings catchable", score: 1 }
+    - { partial: "'use set_error_handler' without the throw-ErrorException bridge", score: 0.5 }
+
+- id: php-arrays-01
+  difficulty: easy
+  weight: 2
+  tags: [arrays]
+  question: >
+    In PHP there is a single `array` type. What is the difference between a "list"
+    and an "associative array", and how is a PHP array actually structured?
+  answer: >
+    PHP has one array type: an ordered map from keys to values. A "list" is just
+    an array whose keys are the sequential integers 0,1,2,… with no gaps (what
+    `array_is_list()`, added in 8.1, checks); an "associative array" uses string
+    (or arbitrary/sparse int) keys. Both are the same underlying ordered
+    hash-map — insertion order is preserved for iteration regardless of key type —
+    so "list vs assoc" is a usage convention, not two distinct types.
+  rubric:
+    - { point: "one array type = an ordered map/hash of key→value", score: 1 }
+    - { point: "list = consecutive 0-based int keys; assoc = string/sparse keys (same underlying type)", score: 1 }
+    - { partial: "'lists are indexed, maps are keyed' without the single ordered-map insight", score: 0.5 }
+
+- id: php-arrays-02
+  difficulty: medium
+  weight: 2
+  tags: [arrays]
+  question: >
+    How does the spread operator work for array unpacking, including string keys
+    (PHP 8.1), and how does keyed destructuring with `[...]`/`list()` work?
+  answer: >
+    `[...$a, ...$b]` unpacks arrays into a new array. Before 8.1 only integer keys
+    could be unpacked; since 8.1 string keys are allowed too, with later duplicate
+    string keys overwriting earlier ones (integer keys are always renumbered
+    sequentially, not preserved). Destructuring is the inverse: `[$x, $y] = $arr`
+    binds by position, and `['id' => $id, 'name' => $n] = $arr` binds by key
+    (order-independent). You can nest and skip elements (`[, $second] = $arr`).
+  rubric:
+    - { point: "[...$a] unpacks; string-key unpacking allowed since 8.1 (dupes overwrite, int keys renumbered)", score: 1 }
+    - { point: "destructuring binds by position, or by key with ['k' => $v] syntax", score: 1 }
+    - { partial: "knows spread OR destructuring but not the 8.1 string-key detail", score: 0.5 }
+
+- id: php-arrays-03
+  difficulty: hard
+  weight: 3
+  tags: [arrays]
+  question: >
+    PHP arrays are value types with copy-on-write. What does assigning or passing
+    an array actually do, and how does that differ from `&` references?
+  answer: >
+    Arrays have value semantics: `$b = $a` (or passing an array to a function by
+    value) logically copies it, but PHP defers the physical copy until one side is
+    written — copy-on-write — so reads are cheap and share storage. Once either is
+    modified, they diverge; changes to `$b` never affect `$a`. A reference
+    (`$b = &$a`, or a `&$param`) instead makes both names the same variable, so a
+    write through one is seen by the other. This is why mutating an array passed by
+    value inside a function does not affect the caller's array unless the parameter
+    is `&$arr`.
+  rubric:
+    - { point: "assignment/pass-by-value logically copies the array (copy-on-write defers the physical copy)", score: 1 }
+    - { point: "modifying the copy does not affect the original (value semantics)", score: 1 }
+    - { point: "& reference makes both names the same variable; a write is shared", score: 1 }
+    - { partial: "'arrays are copied' without the COW or the &-reference contrast", score: 0.5 }
+
+- id: php-arrays-04
+  difficulty: medium
+  weight: 2
+  tags: [arrays]
+  question: >
+    How does PHP coerce array keys? What key do `"1"`, `1.9`, `true`, and `null`
+    end up as?
+  answer: >
+    Only `int` and `string` are valid array keys, and PHP coerces others: a string
+    that is a canonical decimal integer (like `"1"`) becomes the int `1` (so
+    `$a["1"]` and `$a[1]` are the same slot; but `"01"` or `"1.0"` stay strings);
+    floats are truncated toward zero (`1.9` → `1`), with a deprecation notice in
+    8.1+; `true`→`1`, `false`→`0`; `null`→the empty string `""`. This is why
+    `[true => 'a', 1 => 'b']` collapses to a single element.
+  rubric:
+    - { point: "keys are only int or string; integer-like strings become ints (\"1\" → 1)", score: 1 }
+    - { point: "float truncates (1.9 → 1), bool → 1/0, null → \"\"", score: 1 }
+    - { partial: "'keys get coerced' with only one correct case", score: 0.5 }
+
+- id: php-null-01
+  difficulty: easy
+  weight: 3
+  tags: [null-safety]
+  question: >
+    What is the difference between `??` (null coalescing) and `?:` (the short
+    ternary / "elvis")?
+  answer: >
+    `$a ?? $b` yields `$a` if it is set and not null, else `$b`; crucially it does
+    NOT emit a notice when `$a` is undefined (it is isset-based), so it is the safe
+    default-value operator. `$a ?: $b` yields `$a` if it is truthy, else `$b`, and
+    it evaluates `$a` for truthiness — so `0`, `""`, `"0"`, `[]`, and `false` all
+    fall through to `$b`, and it warns on an undefined variable. Use `??` for
+    "maybe-null/maybe-missing", `?:` only when you truly want a truthiness test.
+  rubric:
+    - { point: "?? checks null/unset (isset-based), no notice on undefined", score: 1 }
+    - { point: "?: checks truthiness — 0/\"\"/[]/false fall through", score: 1 }
+    - { partial: "'both give a default' without the null-vs-falsy distinction", score: 0.5 }
+
+- id: php-null-02
+  difficulty: medium
+  weight: 2
+  tags: [null-safety]
+  question: >
+    What does the nullsafe operator `?->` (PHP 8.0) do, and what does
+    "short-circuiting" mean for a chain like `$a?->b()->c`?
+  answer: >
+    `$obj?->method()` (or `?->prop`) evaluates to `null` instead of erroring when
+    the left side is null, otherwise it behaves like `->`. Short-circuiting means
+    that as soon as one link in the chain is null, the REST of the chain is skipped
+    and the whole expression is null — so in `$a?->b()->c`, if `$a` is null, `b()`
+    is never called and `->c` is never evaluated. It is for reads/calls only; you
+    cannot use `?->` as the target of an assignment.
+  rubric:
+    - { point: "?-> yields null when the left operand is null instead of throwing (8.0)", score: 1 }
+    - { point: "short-circuits: a null anywhere skips the rest of the chain → whole expr is null", score: 1 }
+    - { partial: "'avoids null errors' without the short-circuit-the-rest-of-chain semantics", score: 0.5 }
+
+- id: php-null-03
+  difficulty: easy
+  weight: 1
+  tags: [null-safety]
+  question: >
+    What does the `??=` operator do, and how does it differ from `$x = $x ?? $y`?
+  answer: >
+    `$x ??= $y` is the null coalescing assignment: it assigns `$y` to `$x` only if
+    `$x` is null or unset, otherwise it leaves `$x` unchanged. It differs from
+    `$x = $x ?? $y` in that the right-hand side `$y` is evaluated (and `$x`
+    written) only when needed — lazy — and it evaluates the `$x` target once. It is
+    the idiomatic "set a default if not already set", e.g. `$opts['timeout'] ??= 30`.
+  rubric:
+    - { point: "assigns the right side only if the left is null/unset (else no-op)", score: 1 }
+    - { point: "short-circuits: right side evaluated only when needed", score: 1 }
+    - { partial: "'sets a default' without the only-if-null / no-op-otherwise detail", score: 0.5 }
+
+- id: php-null-04
+  difficulty: medium
+  weight: 2
+  tags: [null-safety]
+  question: >
+    Distinguish `isset($x)`, `empty($x)`, and `$x === null`. Give a value where
+    `isset` and `empty` disagree.
+  answer: >
+    `isset($x)` is true when `$x` exists and is not null (and does not warn on an
+    undefined variable/index). `empty($x)` is true when `$x` is falsy OR unset —
+    `0`, `"0"`, `""`, `null`, `false`, `[]`, `0.0` are all empty. `$x === null`
+    strictly tests for null but warns if `$x` is undefined. They disagree on e.g.
+    `$x = 0`: `isset($x)` is true (it is set) while `empty($x)` is also true (0 is
+    falsy) — so `empty` is not "not set", it is "falsy-or-unset". Use `isset` for
+    existence, `empty` only when a falsy value should count as "nothing".
+  rubric:
+    - { point: "isset = set and not null (no notice on undefined)", score: 1 }
+    - { point: "empty = falsy or unset (0/\"0\"/\"\"/[]/false/null)", score: 1 }
+    - { point: "a value where they disagree, e.g. 0/\"0\" (isset true, empty true)", score: 1 }
+    - { partial: "'isset checks existence, empty checks emptiness' with no falsy-set example", score: 0.5 }
+
+- id: php-match-01
+  difficulty: medium
+  weight: 3
+  tags: [match-control]
+  question: >
+    How does `match` differ from `switch`? Cover comparison type, fallthrough,
+    expression-vs-statement, and unmatched values.
+  answer: >
+    `match` (8.0) compares with strict `===` (no type juggling), whereas `switch`
+    uses loose `==`. `match` has no fallthrough — each arm is independent and needs
+    no `break`; multiple values share an arm via commas (`1, 2 => ...`). `match` is
+    an expression that returns a value (you can assign its result), while `switch`
+    is a statement. If no arm matches and there is no `default`, `match` throws an
+    `\UnhandledMatchError`, whereas `switch` silently does nothing — so `match` is
+    exhaustive/safer by default.
+  rubric:
+    - { point: "match uses strict === ; switch uses loose ==", score: 1 }
+    - { point: "match has no fallthrough (no break); is an expression that returns a value", score: 1 }
+    - { point: "unmatched match with no default throws \\UnhandledMatchError (switch does nothing)", score: 1 }
+    - { partial: "'match is the modern switch' with only one concrete difference", score: 0.5 }
+
+- id: php-match-02
+  difficulty: medium
+  weight: 2
+  tags: [match-control]
+  question: >
+    Because `match` uses strict comparison, what surprises can it produce that a
+    `switch` would not, e.g. matching the value `0`?
+  answer: >
+    Since `match` uses `===`, there is no type juggling: `match("1")` will NOT hit
+    a `1 =>` arm (int vs string), and `match(0)` will NOT hit a `"foo" =>` or
+    `false =>` arm the way loose `switch` would. This is usually what you want, but
+    it bites when you pass a string from input and expect it to match integer arms,
+    or vice versa — you must match the exact type (or cast first). The upside: none
+    of `switch`'s classic `0 == "abc"`-style false matches occur.
+  rubric:
+    - { point: "=== means no type juggling: \"1\" won't match a 1 arm (and vice versa)", score: 1 }
+    - { point: "must match the exact type / cast, but avoids switch's loose false-matches", score: 1 }
+    - { partial: "'match is strict' without a concrete type-mismatch consequence", score: 0.5 }
+
+- id: php-match-03
+  difficulty: medium
+  weight: 1
+  tags: [match-control]
+  question: >
+    Given `match` is usually preferred, when is `switch` still the better fit?
+  answer: >
+    Prefer `switch` when you genuinely want fallthrough (several cases sharing a
+    tail of statements by omitting `break`), when each branch runs a block of
+    statements rather than producing a single value (match arms are single
+    expressions), or when you deliberately want loose `==` comparison. `match`
+    wins for value-returning, exhaustive, single-expression dispatch;
+    `switch` wins for multi-statement, side-effect-heavy, or fallthrough control
+    flow.
+  rubric:
+    - { point: "switch fits when you want fallthrough or multi-statement branches", score: 1 }
+    - { point: "match is single-expression/value-returning, so switch fits statement blocks", score: 1 }
+    - { partial: "'switch for old code' with no real fallthrough/statement reason", score: 0.5 }
+
+- id: php-match-04
+  difficulty: medium
+  weight: 1
+  tags: [match-control]
+  question: >
+    How do you use `match(true)` to replace an if/elseif chain of conditions, and
+    why does it work?
+  answer: >
+    `match (true)` uses `true` as the subject and puts a boolean condition in each
+    arm; the first arm whose condition is `=== true` is selected, so it reads as an
+    if/elseif chain that returns a value: `match (true) { $n < 0 => 'neg', $n === 0
+    => 'zero', default => 'pos' }`. It works because match evaluates arms top to
+    bottom against the subject with strict comparison, and each arm expression here
+    evaluates to a real boolean. It is a concise, expression-form alternative to
+    `if/elseif` for range/condition dispatch.
+  rubric:
+    - { point: "match(true) selects the first arm whose boolean condition === true", score: 1 }
+    - { point: "gives an expression-form if/elseif chain (returns a value, top-to-bottom)", score: 1 }
+    - { partial: "'use match(true)' without explaining the true-subject strict match", score: 0.5 }
