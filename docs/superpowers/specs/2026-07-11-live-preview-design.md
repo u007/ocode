@@ -123,7 +123,7 @@ Scan `Path` (in order, first match wins):
 | Signal | Framework | Start command (port p, id) | Notes |
 |--------|-----------|----------------------------|-------|
 | `package.json` with `dev` script (Vite/CRA/Vue) | `vite` | `npm run dev -- --port p --host 127.0.0.1 --base /preview/<id>/` | base injected so absolute asset URLs resolve through proxy |
-| `package.json` with `dev`/`start` (Next) | `next` | `npx next dev -p p` with `BASE_PATH=/preview/<id>` env + `next.config` `basePath`/`assetPrefix` | Next needs `basePath`; set via env-to-config shim or `--base-path` if supported |
+| `package.json` with `dev`/`start` (Next) | `next` | `npx next dev -p p` with a derived `next.config` that adds `basePath:'/preview/<id>'` + `assetPrefix` | Next has **no** env/CLI for basePath — auto-detect writes a sidecar `next.config.<id>.mjs` that re-exports the user's config (or a fresh one) with `basePath` set; if the existing config can't be safely extended, fall back to requiring a manual command |
 | `package.json` `start` only (generic node) | `node` | `npm start -- --port p` (+ best-effort base) | unsupported base → requires manual cmd |
 | `index.html` present, no build | `static` | `npx serve -l p .` or `python3 -m http.server p` | plain HTML: inject `<base href="/preview/<id>/">` by buffering HTML responses (HTML only, never JS/CSS/binary) |
 | `requirements.txt` / `main.py` | `python` | `python3 -m http.server p` or `uvicorn main:app --port p` | heuristic |
@@ -132,10 +132,12 @@ Scan `Path` (in order, first match wins):
 
 Detection returns `{Framework, Cmd, SuggestedPort}`. The caller fills the port (auto or explicit).
 
-**No generic response-body rewriting.** We only support frameworks that can be launched with a
-real URL prefix (Vite `--base`, Next `basePath`). This is the deliberate tradeoff that keeps HMR
-and absolute URLs correct both locally and remotely. Anything else must be started with an explicit
-command (manual mode).
+**Primary supported framework: Vite** (the bolt.new default — `--base` makes sub-path previewing
+and HMR correct with zero extra work). Next, static, python, and docker are supported with the
+caveats in the table; Next in particular needs a sidecar config. **Anything we cannot launch with a
+real URL prefix falls back to requiring an explicit manual command** — there is no generic
+response-body rewriter. This is the deliberate tradeoff that keeps HMR and absolute URLs correct both
+locally and remotely.
 
 ### 4.4 Port allocation (`ports.go`)
 
