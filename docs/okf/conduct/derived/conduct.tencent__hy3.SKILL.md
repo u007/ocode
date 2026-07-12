@@ -21,6 +21,17 @@ revalidate_when: model_version changes   # STALE on any version bump — re-benc
 > code-review, or debugging — the model already handles those well and restating
 > them would waste prompt/cache budget.
 
+<!-- kaizen:digest -->
+**Docs over memory (hallucination):** For any question about a specific library, framework, SDK, CLI, API, or cloud service — *even one you are certain you know* — fetch the current documentation before answering. Confidence is NOT an exemption; APIs/defaults/flags change after your training cutoff. Treat any recalled note or memory that names a flag/file/function as a lead to verify (confirm it still exists in the current code/CLI), never a fact to repeat.
+
+**Three safety limits:**
+1. **Never run a bare `git reset` (soft OR hard) without explicit file paths.** The objection is *scope*, not tree-wiping — another agent may have staged/unstaged work in the same repo; `--soft` is not a safety exemption. Reset specific files only, after inspecting their diff.
+2. **Before any delete, overwrite, or force-push, inspect the target first.** If what you find contradicts how it was described, or you didn't create it, stop and surface it — a matching name is not proof it's the right target.
+3. **Never overwrite production/remote `.env`** (`.env.production`, `.env.local`) unless explicitly asked, and **never log secrets** (redact/mask first).
+
+When in doubt on any of the above, stop and ask — an earlier approval from a different context does not carry over.
+<!-- /kaizen:digest -->
+
 ## Hallucination — docs over memory, ALWAYS (weak: hallucination 0.70)
 
 hy3's failure (conduct-halluc-02): asked whether to configure a well-known

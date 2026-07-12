@@ -104,6 +104,7 @@ func init() {
 		{name: "/export-claude", help: "Append chat to Claude Code JSONL", handler: runExportClaudeCmd},
 		{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
+		{name: "/effort", usage: "/effort [off|low|med|high]", help: "Show or set the reasoning effort (thinking budget) level", handler: runEffortCmd},
 		{name: "/sound", usage: "/sound [on|off|test]", help: "Show status / toggle terminal bell on task completion", handler: runSoundCmd},
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
 		{name: "/init", usage: "/init [focus]", help: "Analyze project and generate AGENTS.md", handler: runInitCmd},
@@ -324,6 +325,11 @@ func runNewCmd(m *model, args []string) tea.Cmd {
 
 func runThinkingCmd(m *model, args []string) tea.Cmd {
 	m.handleThinkingCmd(args)
+	return nil
+}
+
+func runEffortCmd(m *model, args []string) tea.Cmd {
+	m.handleEffortCmd(args)
 	return nil
 }
 

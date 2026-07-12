@@ -215,7 +215,7 @@ func extractionMarkerMatches(markerPath, archiveSHA string) (bool, error) {
 //
 // Sibling libraries in the same top-level prefix are extracted too so the
 // dynamic loader can find them via DYLD_LIBRARY_PATH / LD_LIBRARY_PATH set
-// at spawn (see findLibDir in localserver.go).
+// at spawn (see libDirForBinary in localserver.go).
 func extractTarGZ(archivePath, destDir, leaf string) (string, error) {
 	f, err := os.Open(archivePath)
 	if err != nil {

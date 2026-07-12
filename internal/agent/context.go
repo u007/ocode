@@ -142,6 +142,16 @@ func LoadContext(enabled map[string]bool, memoryEnabled bool, discoveryOn bool, 
 			context += skillCatalog
 		}
 	}
+	// Model-specific directive digest: a per-model Kaizen tuning skill's hard
+	// rules, force-injected as authoritative instructions. UNCONDITIONAL (not
+	// gated on discoveryOn) — advertising the skill in the catalog/name-index is
+	// not enough because an overconfident model may never load the body. Keyed on
+	// (activeModel, root), stable per session; "" for any model without an
+	// admitted digest-carrying tuning skill, so non-matching prefixes are
+	// unchanged. See docs/okf/_schema/stack-detection.md (delivery exception).
+	if digest := skill.KaizenDigestBlock(root, activeModel); digest != "" {
+		context += digest
+	}
 	if refCatalog := BuildReferenceCatalog(enabled); refCatalog != "" {
 		context += refCatalog
 	}

@@ -198,13 +198,17 @@ func spawnLlamaCppServer(spawn func(cmdline string) error, man ServerManifest, c
 	}
 
 	argv := make([]string, len(man.LaunchArgv))
+	var binPath string
 	for i, a := range man.LaunchArgv {
 		a = strings.ReplaceAll(a, "{bin}", binDir)
 		a = strings.ReplaceAll(a, "{port}", localServerPort)
+		if i == 0 {
+			binPath = a // resolved server binary path (argv[0])
+		}
 		argv[i] = shellQuote(a)
 	}
 	libEnv := ""
-	if libDir := findLibDir(binDir); libDir != "" {
+	if libDir := libDirForBinary(binPath); libDir != "" {
 		var name string
 		if runtime.GOOS == "darwin" {
 			name = "DYLD_LIBRARY_PATH"
@@ -308,42 +312,32 @@ func StopLocalServer() {
 }
 
 // shellQuote single-quotes a string for safe use in a `bash -c` command line,
-// escaping embedded single quotes via the '\'' idiom.
+// escaping embedded single quotes via the '\” idiom.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// findLibDir returns the absolute path of the directory that contains
-// llama-server's sibling shared libraries. The llama.cpp release tarball
-// extracts into binDir/<version>/ (e.g. binDir/llama-b9747/) and puts both
-// the binary and the .dylib/.so files there. We detect this by globbing for
-// a directory under binDir that already contains the extracted binary — this
-// keeps the function version-agnostic (b9747, b9800, …) so the manifest only
-// needs to track the SHA, not the directory name. Returns "" if not found
-// (e.g. the binary hasn't been extracted yet, or a future release changes
-// the layout to a flat binDir). The caller treats "" as "no library path
-// needed".
-func findLibDir(binDir string) string {
-	// The most common case: a single versioned subdirectory. Walk one level
-	// down and pick the first directory that has llama-server inside.
-	entries, err := os.ReadDir(binDir)
-	if err != nil {
+// libDirForBinary returns the directory that holds the server binary and its
+// sibling shared libraries (.dylib/.so) — simply the binary's own parent dir.
+// The llama.cpp release tarball extracts into binDir/<version>/ (e.g.
+// binDir/llama-b9777/) with the binary and its libraries together, and
+// LaunchArgv[0] points straight at that binary, so filepath.Dir(binPath) is the
+// exact lib dir for the version being launched.
+//
+// This is derived from the RESOLVED binary path, not by scanning binDir, on
+// purpose: after a version bump binDir can contain MULTIPLE llama-b<ver>/ dirs
+// (the old one plus the new one), and a directory scan would pair the new binary
+// with an older version's libraries — an ABI mismatch that fails to load.
+// Returns "" if binPath is empty or not a real file (the caller treats "" as
+// "no library path needed").
+func libDirForBinary(binPath string) string {
+	if binPath == "" {
 		return ""
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		candidate := filepath.Join(binDir, e.Name())
-		if _, err := os.Stat(filepath.Join(candidate, "llama-server")); err == nil {
-			return candidate
-		}
+	if _, err := os.Stat(binPath); err != nil {
+		return "" // not extracted yet, or a flat layout with no sibling libs
 	}
-	// Fallback: maybe the binary was extracted directly into binDir.
-	if _, err := os.Stat(filepath.Join(binDir, "llama-server")); err == nil {
-		return binDir
-	}
-	return ""
+	return filepath.Dir(binPath)
 }
 
 // NewLocalEmbedder wraps the HTTP embedder transport pointed at the local server.

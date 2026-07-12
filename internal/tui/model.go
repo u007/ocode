@@ -1079,15 +1079,24 @@ func thinkingLevelIndexForBudget(budget int) int {
 }
 
 func (m *model) cycleThinkingLevel() {
-	if m.config != nil && agent.ModelSupportsThinking(m.config.Model) {
-		m.thinkingLevelIdx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
-		m.config.ThinkingBudget = thinkingBudgetLevels[m.thinkingLevelIdx]
-		if err := config.SaveLastThinkingBudget(m.config.ThinkingBudget); err != nil {
-			log.Printf("save last thinking budget: %v", err)
-		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx]), transient: true})
-		m.rerenderTranscriptAndMaybeScroll()
+	// Unlike before, this is not gated on ModelSupportsThinking: the user can
+	// always set the reasoning effort (mirroring the /effort command), even if
+	// the active model isn't detected as a reasoning model. When it isn't, a
+	// note warns the budget may be ignored by the provider.
+	if m.config == nil {
+		return
 	}
+	m.thinkingLevelIdx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
+	m.config.ThinkingBudget = thinkingBudgetLevels[m.thinkingLevelIdx]
+	if err := config.SaveLastThinkingBudget(m.config.ThinkingBudget); err != nil {
+		log.Printf("save last thinking budget: %v", err)
+	}
+	msg := fmt.Sprintf("thinking: %s", thinkingBudgetLabels[m.thinkingLevelIdx])
+	if !agent.ModelSupportsThinking(m.config.Model) {
+		msg += fmt.Sprintf(" (note: %s is not detected as a reasoning model; the budget may be ignored)", m.config.Model)
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: msg, transient: true})
+	m.rerenderTranscriptAndMaybeScroll()
 }
 
 func (m *model) markCmdStarted() {
@@ -1476,6 +1485,30 @@ func (m *model) switchAgent(name string) {
 	}
 }
 
+// newComposerInput builds the main chat composer textarea. It starts from the
+// textarea default keymap but unbinds the chords that are ALSO global chat-tab
+// shortcuts:
+//
+//	ctrl+d  cycle thinking level   (default: delete character forward)
+//	ctrl+b  move bash to background (default: cursor backward)
+//	ctrl+t  cycle theme            (default: transpose characters backward)
+//	ctrl+p  open file search       (default: previous line)
+//
+// Without this, the textarea would swallow those chords as local text-editing
+// actions - most visibly ctrl+d deletes the character under the cursor - so the
+// global shortcut never fires and the user's input is silently mutated. ctrl+f
+// is intercepted before the input in Update, so it does not need to be unbound
+// here. The remaining readline-style bindings (ctrl+a/e/k/u/w, etc.) are kept
+// for in-composer editing.
+func newComposerInput() textarea.Model {
+	ta := textarea.New()
+	ta.KeyMap.DeleteCharacterForward = key.NewBinding()     // ctrl+d -> thinking level
+	ta.KeyMap.CharacterBackward = key.NewBinding()          // ctrl+b -> background bash
+	ta.KeyMap.TransposeCharacterBackward = key.NewBinding() // ctrl+t -> cycle theme
+	ta.KeyMap.LinePrevious = key.NewBinding()               // ctrl+p -> file search
+	return ta
+}
+
 func newModel(opts ...RunOptions) model {
 	var o RunOptions
 	if len(opts) > 0 {
@@ -1602,7 +1635,7 @@ func newModel(opts ...RunOptions) model {
 		}
 	}
 
-	ta := textarea.New()
+	ta := newComposerInput()
 	ta.Placeholder = "Ask anything…  (prefix with ! to run a shell command, enter to send, shift+enter for newline, tab autocomplete, ctrl+c clears input, double-esc opens picker / exits shell mode)"
 	ta.Focus()
 	ta.Prompt = "▍ "
@@ -7582,6 +7615,64 @@ func (m *model) handleThinkingCmd(args []string) {
 		status = "visible"
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Thinking blocks are now %s.", status)})
+}
+
+// handleEffortCmd shows or sets the reasoning effort (thinking budget) level.
+// With no args it prints the current level and the accepted parameters; with a
+// level argument it sets the level (and persists it). Unlike the ctrl+d shortcut
+// it is not gated on model detection, so it works even when the active model
+// isn't recognised as a reasoning model — in that case a note is appended
+// warning the budget may be ignored by the provider.
+func (m *model) handleEffortCmd(args []string) {
+	if m.config == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No config loaded."})
+		return
+	}
+
+	if len(args) == 0 {
+		var b strings.Builder
+		fmt.Fprintf(&b, "Reasoning effort: %s (%d tokens)\n", thinkingBudgetLabels[m.thinkingLevelIdx], thinkingBudgetLevels[m.thinkingLevelIdx])
+		b.WriteString("Set with: /effort <level>\n")
+		b.WriteString("Levels:\n")
+		for i, lvl := range thinkingBudgetLabels {
+			fmt.Fprintf(&b, "  %s — %d tokens\n", lvl, thinkingBudgetLevels[i])
+		}
+		if !agent.ModelSupportsThinking(m.config.Model) {
+			fmt.Fprintf(&b, "Note: %s is not detected as a reasoning model, so this budget may be ignored by the provider.\n", m.config.Model)
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return
+	}
+
+	arg := strings.ToLower(strings.TrimSpace(args[0]))
+	idx := -1
+	switch arg {
+	case "off", "none", "0":
+		idx = 0
+	case "low", "1024":
+		idx = 1
+	case "med", "medium", "8000":
+		idx = 2
+	case "high", "16000":
+		idx = 3
+	case "next", "cycle", "+":
+		idx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown effort level %q. Use one of: off, low, med, high.", args[0])})
+		return
+	}
+
+	m.thinkingLevelIdx = idx
+	m.config.ThinkingBudget = thinkingBudgetLevels[idx]
+	if err := config.SaveLastThinkingBudget(m.config.ThinkingBudget); err != nil {
+		log.Printf("save last thinking budget: %v", err)
+	}
+	msg := fmt.Sprintf("Reasoning effort set to %s (%d tokens).", thinkingBudgetLabels[idx], thinkingBudgetLevels[idx])
+	if !agent.ModelSupportsThinking(m.config.Model) {
+		msg += fmt.Sprintf("\nNote: %s is not detected as a reasoning model, so this budget may be ignored by the provider.", m.config.Model)
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: msg})
+	m.rerenderTranscriptAndMaybeScroll()
 }
 
 func maskKey(key string) string {
@@ -15103,11 +15194,9 @@ func (m *model) renderStatus() string {
 		case tabLog:
 			suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
 		default:
-			if supportsReasoning {
-				suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+d: thinking · ctrl+y: retry · ctrl+t: theme"
-			} else {
-				suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+y: retry"
-			}
+			// ctrl+d cycles the reasoning effort level regardless of model
+			// detection (see cycleThinkingLevel), so always advertise it.
+			suffix = " · tab: agent · ctrl+p: files · ctrl+x: leader [y:copy-id] · ctrl+o: yolo · ctrl+d: thinking · ctrl+y: retry · ctrl+t: theme"
 			if m.ctrlCPressed {
 				suffix = " · ctrl+c again to quit"
 			} else if m.streaming {
@@ -15176,9 +15265,10 @@ func (m *model) renderStatus() string {
 		jobState = " | " + jc
 	}
 	reasoningState := ""
-	if supportsReasoning {
-		reasoningState = fmt.Sprintf(" | %s", thinkingBudgetLabels[m.thinkingLevelIdx])
-	}
+	// Always show the reasoning effort level, matching the now-unconditional
+	// /effort command and ctrl+d shortcut (a model not detected as reasoning
+	// still has its budget set; the user is warned at set time).
+	reasoningState = fmt.Sprintf(" | %s", thinkingBudgetLabels[m.thinkingLevelIdx])
 	width := m.statusContentWidth()
 
 	// First line: status info on left
@@ -15714,10 +15804,9 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 			detailsParts = append(detailsParts, fmt.Sprintf("temp: %g", *temp))
 		}
 	}
-	supportsReasoning := m.config != nil && agent.ModelSupportsThinking(m.config.Model)
-	if supportsReasoning {
-		detailsParts = append(detailsParts, fmt.Sprintf("reason: %s", thinkingBudgetLabels[m.thinkingLevelIdx]))
-	}
+	// Always show the reasoning effort level (see reasoningState in the status
+	// bar); a model not detected as reasoning-capable still has its budget set.
+	detailsParts = append(detailsParts, fmt.Sprintf("reason: %s", thinkingBudgetLabels[m.thinkingLevelIdx]))
 	if len(detailsParts) > 0 {
 		appendWrapped(&data.topLines, dimStyle.Render(strings.Join(detailsParts, " · ")), outerBodyWidth)
 	}

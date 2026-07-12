@@ -87,3 +87,16 @@ stack_score = Σ(normalized×weight) / Σ(weight) = 73.0 / 74 = 98.6%
 Tags below threshold (`< 0.75`): **none** — every tag scores ≥ 0.75
 (lowest is slices-maps at 0.90). No `derived/golang.tencent__hy3.SKILL.md`
 is generated (no derivation).
+
+## Demo derivation attempt — 2026-07-12 (reverted)
+
+A narrow demonstration skill (`golang-tuning-tencent-hy3`) was hand-derived from
+the single partial miss `go-slices-01` (0.67 — omitted the `slices.Clone`/`copy`
+independent-copy point) to show the stack-gated Kaizen flow live. It was
+**reverted** as a null result: re-run closed-book, hy3 scored the SAME question
+**1.00 both with and without** the skill — it produced the independent-copy fix
+(`make`+`copy`, `append([]int(nil), …)`) unaided. `go-slices-01`'s 0.67 was a
+single-sample dip, not a reliable failure, so there was no gap for a skill to
+close. Conclusion stands: hy3 needs no golang derivation. Stack-gating mechanics
+remain unit-proven (`internal/skill.TestKaizenStackGating`); there is simply no
+golang question hy3 fails to demonstrate a live lift on.

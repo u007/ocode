@@ -28,6 +28,13 @@ type Skill struct {
 	// special value "conduct" (and an empty value) is universal — active in
 	// every repo; any other value gates on stackdetect.Detect(root).
 	Stack string
+	// Digest is the compact directive block carved from a SKILL.md between the
+	// `<!-- kaizen:digest -->` … `<!-- /kaizen:digest -->` markers. For a Kaizen
+	// tuning skill it is force-injected into the base prompt on model match
+	// (KaizenDigestBlock) — advertising alone doesn't reliably make an
+	// overconfident model load the body. Empty when the skill has no such
+	// section (all normal skills, and any tuning skill that omits it).
+	Digest string
 }
 
 // skillCache caches LoadSkillsForRoot results keyed by the search-path set, so
@@ -284,6 +291,29 @@ func SkillSearchPathsForRoot(root string) []string {
 	return paths
 }
 
+// digestStart / digestEnd delimit the force-injected directive block in a
+// SKILL.md body. HTML comments so they are invisible in rendered markdown.
+const (
+	digestStart = "<!-- kaizen:digest -->"
+	digestEnd   = "<!-- /kaizen:digest -->"
+)
+
+// extractDigest returns the trimmed text between the digest markers, or "" if
+// the markers are absent or malformed (start without end). It never returns a
+// header-only/whitespace block: an empty body yields "".
+func extractDigest(content string) string {
+	i := strings.Index(content, digestStart)
+	if i < 0 {
+		return ""
+	}
+	rest := content[i+len(digestStart):]
+	j := strings.Index(rest, digestEnd)
+	if j < 0 {
+		return "" // unterminated marker: treat as no digest rather than swallow the rest of the file
+	}
+	return strings.TrimSpace(rest[:j])
+}
+
 func parseSkillMetadata(content string) Skill {
 	var skill Skill
 	lines := strings.Split(content, "\n")
@@ -308,6 +338,7 @@ func parseSkillMetadata(content string) Skill {
 		)
 		skill.Stack = cleanMetadataValue(frontmatter["stack"])
 	}
+	skill.Digest = extractDigest(content)
 
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
@@ -353,6 +384,36 @@ func BuildCatalog() string {
 // Kaizen skill whose model+stack gate passes.
 func BuildCatalogForModel(root, activeModel string) string {
 	return renderCatalog(LoadSkillsForModel(root, activeModel))
+}
+
+// KaizenDigestBlock renders the force-injected directive digests of every Kaizen
+// skill admitted for (root, activeModel) that carries a `<!-- kaizen:digest -->`
+// section. Unlike the catalog (which advertises a skill the model MAY load),
+// this puts the skill's hard rules directly in the base prompt as authoritative
+// instructions — the fix for an overconfident model that never loads the body.
+//
+// Returns exactly "" when no admitted tuning skill has a digest, so a
+// non-matching model's cached prefix is byte-identical to having no tuning skill
+// at all. Kaizen skills without a digest section contribute nothing.
+func KaizenDigestBlock(root, activeModel string) string {
+	skills := KaizenSkillsForModel(root, activeModel)
+	var parts []string
+	for _, s := range skills {
+		if s.Digest != "" {
+			parts = append(parts, s.Digest)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n--- Model-Specific Directives (always in effect) ---\n")
+	b.WriteString("These are corrective rules tuned for the active model. Follow them as hard requirements, not optional guidance.\n")
+	for _, d := range parts {
+		b.WriteString(d)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 func renderCatalog(skills []Skill) string {

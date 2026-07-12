@@ -649,7 +649,12 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
 	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
-		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+		// Novita only accepts reasoning_effort on its reasoning-capable models
+		// (e.g. tencent/hy3); gate on model detection so non-reasoning Novita
+		// models never receive a param they would reject.
+		if c.Provider != "novita-ai" || ModelSupportsThinking(c.Model) {
+			payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+		}
 	}
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)
@@ -1603,6 +1608,7 @@ func providerSupportsReasoningEffort(provider string) bool {
 	return provider == "openai" ||
 		provider == "openrouter" ||
 		provider == "google" ||
+		provider == "novita-ai" ||
 		strings.HasPrefix(provider, "xiaomi")
 }
 
@@ -3436,7 +3442,11 @@ func ModelSupportsThinking(modelID string) bool {
 		strings.HasPrefix(model, "glm-4.6") ||
 		strings.HasPrefix(model, "glm-4.7") ||
 		strings.Contains(model, "mimo") ||
-		(strings.Contains(model, "grok-4") && strings.Contains(model, "reasoning"))
+		(strings.Contains(model, "grok-4") && strings.Contains(model, "reasoning")) ||
+		// Tencent Hy3 (and the Hunyuan reasoning family) expose configurable
+		// reasoning modes via the Novita/OpenAI-compatible reasoning_effort param.
+		strings.Contains(model, "tencent") ||
+		strings.Contains(model, "hy3")
 }
 
 func modelSupportsThinkingFromRegistry(modelID string) (bool, bool) {
@@ -3456,6 +3466,17 @@ func modelSupportsThinkingFromRegistry(modelID string) (bool, bool) {
 	for _, entry := range data {
 		if m, ok := entry.Models[modelID]; ok {
 			return m.Reasoning, true
+		}
+	}
+
+	// Novita's live model list (features sourced from the Novita API) is the
+	// authoritative reasoning signal for novita-ai models absent from the
+	// models.dev registry (e.g. tencent/hy3). It is only populated when a Novita
+	// key is configured, so an empty cache harmlessly falls through to the
+	// heuristics above.
+	if provider, model, ok := splitModelID(modelID); ok && provider == "novita-ai" {
+		if entry, ok := novitaLiveModelEntry(model); ok {
+			return entry.Reasoning, true
 		}
 	}
 
@@ -3541,7 +3562,12 @@ func (c *GenericClient) chatOpenAIWebSocket(ctx context.Context, messages []Mess
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
 	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
-		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+		// Novita only accepts reasoning_effort on its reasoning-capable models
+		// (e.g. tencent/hy3); gate on model detection so non-reasoning Novita
+		// models never receive a param they would reject.
+		if c.Provider != "novita-ai" || ModelSupportsThinking(c.Model) {
+			payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+		}
 	}
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)
@@ -3578,7 +3604,12 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
 	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
-		payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+		// Novita only accepts reasoning_effort on its reasoning-capable models
+		// (e.g. tencent/hy3); gate on model detection so non-reasoning Novita
+		// models never receive a param they would reject.
+		if c.Provider != "novita-ai" || ModelSupportsThinking(c.Model) {
+			payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+		}
 	}
 	if len(tools) > 0 {
 		payload["tools"] = openAITools(tools)

@@ -379,3 +379,31 @@ func TestLoadModelContext_WildcardProjectRootWinsOverOpencodeDirExact(t *testing
 		t.Fatalf(".opencode/ exact should not beat project root wildcard, got %q", got)
 	}
 }
+
+// TestLoadContext_KaizenDigestInjected locks Option B: a per-model tuning skill's
+// directive digest is force-injected into the base prompt on model match,
+// UNCONDITIONALLY (present even when discovery is on), and is absent for a
+// non-matching model so the cached prefix stays byte-identical.
+func TestLoadContext_KaizenDigestInjected(t *testing.T) {
+	_, f, _, _ := runtime.Caller(0)
+	repo := filepath.Clean(filepath.Join(filepath.Dir(f), "..", "..")) // repo root: has skills/kaizen
+
+	// Chdir to a clean temp dir so LoadContext's CWD doc reads (AGENTS.md etc.)
+	// don't pollute the assertion; pass repo as `root` so the embedded skill
+	// resolves. discoveryOn=true suppresses the catalog, isolating the digest.
+	wd, _ := os.Getwd()
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+
+	match := LoadContext(nil, false, true, "novita-ai/tencent/hy3", repo)
+	if !strings.Contains(match, "Model-Specific Directives") || !strings.Contains(match, "Confidence is NOT an exemption") {
+		t.Fatalf("matching model: digest not injected into base prompt.\n%s", match)
+	}
+	nonMatch := LoadContext(nil, false, true, "anthropic/claude-opus-4-8", repo)
+	if strings.Contains(nonMatch, "Model-Specific Directives") {
+		t.Fatalf("non-matching model got a digest block (prefix drift):\n%s", nonMatch)
+	}
+}

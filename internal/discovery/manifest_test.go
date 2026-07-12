@@ -7,11 +7,12 @@ func TestManifestForModel(t *testing.T) {
 		t.Fatalf("bge-m3 manifest not found/incorrect: %+v ok=%v", m, ok)
 	}
 	// LFM2.5 only has a manifest on darwin/arm64, but ManifestForModel is
-	// platform-independent — it must still resolve regardless of host.
+	// platform-independent — it must still resolve regardless of host. It is now
+	// served via llama.cpp (b9777+ added the lfm2-bidir arch), not MLX.
 	if m, ok := ManifestForModel("local/lfm2.5-embedding"); !ok {
 		t.Fatalf("lfm2.5-embedding manifest not found")
-	} else if m.Backend != BackendMLX || m.MLXRepo == "" {
-		t.Fatalf("lfm2.5 manifest wrong backend/repo: %+v", m)
+	} else if m.Backend != BackendLlamaCpp {
+		t.Fatalf("lfm2.5 manifest wrong backend: %+v", m)
 	}
 	if _, ok := ManifestForModel("local/does-not-exist"); ok {
 		t.Fatalf("expected unknown model to be absent")
@@ -48,8 +49,8 @@ func TestExpectedServeID(t *testing.T) {
 		t.Fatalf("bge ExpectedServeID = %q, want gguf basename", got)
 	}
 	lfm, _ := ManifestForModel("local/lfm2.5-embedding")
-	if got := lfm.ExpectedServeID(); got != "local/lfm2.5-embedding" {
-		t.Fatalf("lfm ExpectedServeID = %q, want discovery model id", got)
+	if got := lfm.ExpectedServeID(); got != "lfm2.5-embedding-350m-q4_k_m.gguf" {
+		t.Fatalf("lfm ExpectedServeID = %q, want gguf basename", got)
 	}
 }
 

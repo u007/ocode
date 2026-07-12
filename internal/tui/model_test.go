@@ -7039,3 +7039,236 @@ func TestStreamedToolOutputDisplayContentPreferred(t *testing.T) {
 		t.Fatalf("LLM snapshot content exceeds the truncation budget, len=%d", len(llmToolContent))
 	}
 }
+
+// TestComposerInputFreesGlobalShortcutChords verifies that the main chat
+// composer's textarea does not bind the chords that are also global chat-tab
+// shortcuts (ctrl+d thinking, ctrl+b background, ctrl+t theme, ctrl+p file
+// search). Previously the textarea's default keymap claimed these (e.g.
+// ctrl+d = delete character forward), so pressing them while composing silently
+// edited the user's text and the global shortcut never fired.
+func TestComposerInputFreesGlobalShortcutChords(t *testing.T) {
+	in := newComposerInput()
+	in.SetValue("hello world")
+	in.SetCursorColumn(5) // cursor in the middle, just before the space
+
+	cases := []struct {
+		name string
+		key  tea.KeyPressMsg
+	}{
+		{"ctrl+d", tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}},
+		{"ctrl+b", tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}},
+		{"ctrl+t", tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl}},
+		{"ctrl+p", tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl}},
+	}
+	for _, tc := range cases {
+		updated, _ := in.Update(tc.key)
+		if got := updated.Value(); got != "hello world" {
+			t.Errorf("%s should not edit composer text (it is a global shortcut), but the value changed to %q", tc.name, got)
+		}
+	}
+}
+
+// TestNewComposerInputKeymapUnbindsConflicts checks the keymap directly so a
+// regression is caught even if textarea's Update behavior changes.
+func TestNewComposerInputKeymapUnbindsConflicts(t *testing.T) {
+	in := newComposerInput()
+	checks := []struct {
+		name    string
+		enabled bool
+	}{
+		{"ctrl+d", in.KeyMap.DeleteCharacterForward.Enabled()},
+		{"ctrl+b", in.KeyMap.CharacterBackward.Enabled()},
+		{"ctrl+t", in.KeyMap.TransposeCharacterBackward.Enabled()},
+		{"ctrl+p", in.KeyMap.LinePrevious.Enabled()},
+	}
+	for _, c := range checks {
+		if c.enabled {
+			t.Errorf("%s must be unbound in the composer keymap, but it is still enabled (would shadow the global shortcut)", c.name)
+		}
+	}
+}
+
+// TestCtrlDCyclesThinkingLevel verifies the end-to-end behavior: when the
+// composer no longer swallows ctrl+d, the global chat key handler cycles the
+// thinking/reasoning level for a reasoning-capable model. This is the user-
+// visible fix for "ctrl+d not working to change reason level".
+func TestCtrlDCyclesThinkingLevel(t *testing.T) {
+	m := model{
+		ready:            true,
+		width:            120,
+		height:           40,
+		activeTab:        tabChat,
+		input:            newComposerInput(),
+		viewport:         fastviewport.New(80, 20),
+		config:           &config.Config{Model: "claude-sonnet-4-6"},
+		thinkingLevelIdx: 0,
+		styles:           ApplyThemeColors("tokyonight"),
+	}
+	updated, _ := m.handleChatKeys(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl}, nil, nil)
+	got := updated.(model)
+	if got.thinkingLevelIdx != 1 {
+		t.Fatalf("ctrl+d should advance thinkingLevelIdx 0->1, got %d", got.thinkingLevelIdx)
+	}
+	if got.config.ThinkingBudget != 1024 {
+		t.Fatalf("ctrl+d should set ThinkingBudget to 1024 (low), got %d", got.config.ThinkingBudget)
+	}
+}
+
+// TestSidebarShowsReasoningLevelForNonReasoningModel verifies the sidebar (and
+// status bar via reasoningState) always reflects the reasoning effort level,
+// even for a model not detected as reasoning-capable. Previously the level was
+// hidden behind a ModelSupportsThinking gate, so /effort high left the status
+// bar looking unchanged (the visible "normal" was the permission-mode badge).
+func TestSidebarShowsReasoningLevelForNonReasoningModel(t *testing.T) {
+	m := model{
+		ready:            true,
+		width:            140,
+		height:           40,
+		showSidebar:      true,
+		input:            textarea.New(),
+		viewport:         fastviewport.New(100, 20),
+		config:           &config.Config{Model: "gpt-4o"},
+		thinkingLevelIdx: 3,
+		styles:           ApplyThemeColors("tokyonight"),
+	}
+	data := m.buildSidebarRenderData()
+	found := false
+	for _, line := range data.topLines {
+		if strings.Contains(line, "reason: high") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("sidebar should always show 'reason: high' for a non-reasoning model, got topLines=%v", data.topLines)
+	}
+}
+
+// TestCtrlDWorksForNonReasoningModel verifies ctrl+d cycles the reasoning
+// effort level even when the active model is NOT detected as a reasoning model
+// (previously it was a silent no-op behind a ModelSupportsThinking gate). A
+// note is appended warning the budget may be ignored.
+func TestCtrlDWorksForNonReasoningModel(t *testing.T) {
+	m := model{
+		viewport:         fastviewport.New(80, 20),
+		config:           &config.Config{Model: "gpt-4o"},
+		thinkingLevelIdx: 0,
+		styles:           ApplyThemeColors("tokyonight"),
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+	got := updated.(model)
+	if got.thinkingLevelIdx != 1 {
+		t.Fatalf("ctrl+d should cycle 0->1 even on a non-reasoning model, got %d", got.thinkingLevelIdx)
+	}
+	if got.config.ThinkingBudget != 1024 {
+		t.Fatalf("ctrl+d should set ThinkingBudget 1024, got %d", got.config.ThinkingBudget)
+	}
+	last := got.messages[len(got.messages)-1].text
+	if !strings.Contains(last, "not detected as a reasoning model") {
+		t.Fatalf("expected a non-reasoning-model note, got %q", last)
+	}
+}
+
+// TestEffortCommand exercises the /effort slash command: no-arg shows the
+// current level + accepted params, a valid level sets it, and an invalid level
+// is rejected without changing state.
+func TestEffortCommand(t *testing.T) {
+	newM := func() model {
+		return model{
+			viewport:         fastviewport.New(80, 20),
+			config:           &config.Config{Model: "claude-sonnet-4-6"},
+			thinkingLevelIdx: 0,
+			styles:           ApplyThemeColors("tokyonight"),
+		}
+	}
+
+	// No args: shows current level + help.
+	m := newM()
+	m.handleEffortCmd(nil)
+	got := m.messages[len(m.messages)-1].text
+	if !strings.Contains(got, "Reasoning effort: off") {
+		t.Fatalf("expected current level in output, got %q", got)
+	}
+	if !strings.Contains(got, "Levels:") || !strings.Contains(got, "high") {
+		t.Fatalf("expected level help in output, got %q", got)
+	}
+
+	// Valid level: high.
+	m = newM()
+	m.handleEffortCmd([]string{"high"})
+	if m.thinkingLevelIdx != 3 {
+		t.Fatalf("expected thinkingLevelIdx 3 for high, got %d", m.thinkingLevelIdx)
+	}
+	if m.config.ThinkingBudget != 16000 {
+		t.Fatalf("expected ThinkingBudget 16000 for high, got %d", m.config.ThinkingBudget)
+	}
+	if !strings.Contains(m.messages[len(m.messages)-1].text, "Reasoning effort set to high") {
+		t.Fatalf("expected confirmation message, got %q", m.messages[len(m.messages)-1].text)
+	}
+
+	// Numeric alias: 1024 -> low (idx 1).
+	m = newM()
+	m.handleEffortCmd([]string{"1024"})
+	if m.thinkingLevelIdx != 1 || m.config.ThinkingBudget != 1024 {
+		t.Fatalf("expected low (idx 1, budget 1024) for '1024', got idx=%d budget=%d", m.thinkingLevelIdx, m.config.ThinkingBudget)
+	}
+
+	// Invalid level: rejected, state unchanged.
+	m = newM()
+	m.handleEffortCmd([]string{"bogus"})
+	if m.thinkingLevelIdx != 0 {
+		t.Fatalf("invalid level should not change idx, got %d", m.thinkingLevelIdx)
+	}
+	if !strings.Contains(m.messages[len(m.messages)-1].text, "Unknown effort level") {
+		t.Fatalf("expected unknown-level message, got %q", m.messages[len(m.messages)-1].text)
+	}
+
+	// next: cycles from current idx.
+	m = newM()
+	m.handleEffortCmd([]string{"next"})
+	if m.thinkingLevelIdx != 1 {
+		t.Fatalf("expected 'next' to cycle to idx 1, got %d", m.thinkingLevelIdx)
+	}
+}
+
+// TestEffortCommandNonReasoningModel verifies /effort still works (and warns)
+// for a model not detected as reasoning-capable, so the level can be set even
+// when ctrl+d is a no-op.
+func TestEffortCommandNonReasoningModel(t *testing.T) {
+	m := model{
+		viewport:         fastviewport.New(80, 20),
+		config:           &config.Config{Model: "gpt-4o"},
+		thinkingLevelIdx: 0,
+		styles:           ApplyThemeColors("tokyonight"),
+	}
+	m.handleEffortCmd([]string{"high"})
+	if m.thinkingLevelIdx != 3 || m.config.ThinkingBudget != 16000 {
+		t.Fatalf("expected level set even on non-reasoning model, got idx=%d budget=%d", m.thinkingLevelIdx, m.config.ThinkingBudget)
+	}
+	if !strings.Contains(m.messages[len(m.messages)-1].text, "not detected as a reasoning model") {
+		t.Fatalf("expected a non-reasoning-model note, got %q", m.messages[len(m.messages)-1].text)
+	}
+}
+
+// TestCtrlDInFocusedInputCyclesThinking drives the real Update path with the
+// composer present (i.e. focused/inputAllowed) to confirm that, after the
+// composer keymap no longer claims ctrl+d, the global shortcut reaches
+// handleChatKeys and cycles the thinking level. This reproduces the exact
+// "ctrl+d doesn't work while I'm typing in the input" scenario.
+func TestCtrlDInFocusedInputCyclesThinking(t *testing.T) {
+	m := model{
+		input:            newComposerInput(),
+		viewport:         fastviewport.New(80, 20),
+		config:           &config.Config{Model: "claude-sonnet-4-6"},
+		thinkingLevelIdx: 0,
+		styles:           ApplyThemeColors("tokyonight"),
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'd', Mod: tea.ModCtrl})
+	got := updated.(model)
+	if got.thinkingLevelIdx != 1 {
+		t.Fatalf("ctrl+d while composer is focused should cycle thinking level 0->1, got %d", got.thinkingLevelIdx)
+	}
+	if got.config.ThinkingBudget != 1024 {
+		t.Fatalf("ctrl+d should set ThinkingBudget to 1024 (low), got %d", got.config.ThinkingBudget)
+	}
+}

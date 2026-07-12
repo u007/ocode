@@ -41,6 +41,33 @@ skill). Not yet done:
   paths both list it) and `internal/skill.TestKaizenDelivery_hy3_conduct`
   (admit/exclude/wrong-model). Note: discovery is NOT required — with discovery
   off, `LoadContext`'s `BuildCatalogForModel` already advertised it.
+- [x] **Force-inject a directive digest (Option B — advertise-only wasn't enough).**
+  2026-07-12: re-running hy3 closed-book showed it sees the advertised tuning
+  skill but never calls the `skill` tool to load the body (overconfident — one
+  round-trip, answered from base knowledge). Since a per-model tuning skill is
+  relevant on EVERY turn that model is active, its hard rules must be *present*,
+  not merely *offered*. A tuning `SKILL.md` may now carry a compact digest between
+  `<!-- kaizen:digest -->` … `<!-- /kaizen:digest -->`; `skill.KaizenDigestBlock`
+  collects admitted digests and `LoadContext` force-injects them into the base
+  prompt as authoritative rules — UNCONDITIONAL (independent of the discovery
+  flag), keyed on `(activeModel, root)` for prefix-cache stability, and exactly
+  `""` for any non-matching model or digest-less skill (no prefix drift). Doc
+  exception recorded in `docs/okf/_schema/stack-detection.md`. Guarded by
+  `TestExtractDigest`, `TestKaizenDigestBlock_hy3` (asserts the counterintuitive
+  cruxes survive compression), and `TestLoadContext_KaizenDigestInjected`.
+  - [x] **EFFECTIVENESS VALIDATED (partial) — 2026-07-12, live on the real
+    machine.** Ran hy3 closed-book on the two originally-failing weak tags (see
+    `docs/okf/conduct/answers/tencent__hy3.digest-spotcheck.md` +
+    scores re-test log). Result: **conduct-halluc-02 0.00 → 1.00** (answer echoes
+    the digest crux "confidence is not an exemption") — the digest demonstrably
+    works on-topic. **conduct-safety-03 stayed 0.00** across BOTH a rule-only
+    digest AND a second digest that named the exact banned commands verbatim;
+    hy3 recommended `git reset` / `git restore --staged .` both times. That is a
+    hard model-APPLICATION ceiling (the rule was provably in-context), not a
+    delivery gap — more digest weight doesn't move it, so the safety-03 worked
+    example was reverted and the digest is capped at its lean effective form.
+    Delivery mechanism (Option B) is proven; per-tag effectiveness is
+    framing-dependent and bounded by the model.
 - [x] **Embed home for derived skills** = `skills/kaizen/<name>/SKILL.md` inside
   the existing `//go:embed all:skills` tree. `docs/okf/_tools/sync-derived-skills.py`
   copies every `docs/okf/*/derived/*.SKILL.md` there (dir = frontmatter `name`),
@@ -73,6 +100,67 @@ skill). Not yet done:
 - [ ] **Optional: a `questions.yaml → questions.md` generator** to kill the
   hand-sync drift risk noted in the design (6 stacks now hand-synced). The
   `_tools/gen-prompt-sheets.py` script is a starting point (same parse).
+
+## Local discovery embedder — `0 attached` fix + bge-m3 default (from Bug C: 2026-07-12)
+
+Fixed `/discover` showing `local: none` / `0 attached` on Apple Silicon. Root
+causes, all addressed and runtime-verified (the `0 attached` diagnosis was
+corrected mid-investigation — see Bug C below):
+- [x] **Stale status (Bug A)** — `EnsureLocalServer` adopt paths never called
+  `setStatus("ready")`; added to both branches (`localserver.go`). Regression:
+  `TestEnsureLocalServer_adoptSetsReady`.
+- [x] **Warm deadlock (Bug B)** — a 500ms synchronous warm budget vs a local
+  embedder that needs 0.5–1.6s meant the corpus never warmed (all-or-nothing
+  cache never persisted). Now defers a cold warm to a single-flight background
+  goroutine (`discovery_glue.go`, `warming atomic.Bool` + `startBackgroundWarm`).
+  Regression: `TestStartBackgroundWarm_singleFlight`.
+- [x] **`0 attached` (Bug C) — CORRECTED DIAGNOSIS, resolved by defaulting to
+  bge-m3.** First blamed on the MLX server running LFM2.5 (`lfm2-bidir`, bidir +
+  CLS) through mlx_lm's CAUSAL forward + MEAN pooling (real degradation:
+  CLS/position-0 cosine = 1.0000 across inputs → causal). That fix shipped —
+  LFM2.5 moved to **llama.cpp b9777** (added `lfm2-bidir`, PR #24913; b9747
+  rejects it) + the official **Q4_K_M GGUF** (`pooling_type=2` CLS), `manifest.go`
+  + `cache.go` `cacheFormatVersion=2` (regression `TestCacheInvalidatesOnFormatVersion`).
+  BUT it did NOT fix `0 attached`: measured live, the correctly-pooled llama.cpp
+  model scores a strong conduct match at **0.18–0.26** (LOWER than causal MLX's
+  0.31), still far below `SelectMin=0.40`; `query:`/`document:` prefixes didn't
+  help. **Real cause: LFM2.5's naturally COMPRESSED cosine band** (matches ~0.2–0.3,
+  off-topic ~0.05–0.09) vs a `SelectMin=0.40` tuned for bge-m3's wide band.
+  **Fix: `DefaultLocalModelID` → `local/bge-m3` on all platforms.** Measured live:
+  bge-m3 scores the same conduct match at **0.49** (clears 0.40), off-topic ~0.29–0.34
+  (below) → attaches correctly. LFM2.5 stays opt-in via `/discover model
+  local/lfm2.5-embedding`. Did NOT lower the global `SelectMin` (would mis-calibrate
+  bge-m3/http); a per-model floor (~0.15) is the alternative if LFM2.5 attachment is
+  ever wanted.
+- [x] **`libDirForBinary` (migration correctness).** After the b9747→b9777 bump,
+  `binDir` holds BOTH version dirs; the old `findLibDir` scanned and grabbed the
+  first (b9747), pairing the new binary with old dylibs → ABI mismatch. Now the lib
+  dir is the launched binary's OWN parent dir. Regression: `TestLibDirForBinary`.
+  Verified live: the spawn used `DYLD_LIBRARY_PATH=.../llama-b9777` with the b9777
+  binary.
+- [x] **RUNTIME-VERIFIED 2026-07-12** on Apple Silicon: b9777 + both GGUFs download
+  + spawn (SHA-verified); cache re-embeds to `version:2`; `/discover` `local: ready`;
+  bge-m3 attaches (`0.49 ≥ 0.40`), LFM2.5 does not (`≤0.26`). The gated
+  `OCODE_LIVE_RETEST=1 go test ./internal/discovery/ -run TestLiveRetest` runs
+  against a live server on 11457.
+- [ ] **Migration wrinkle (STILL OPEN).** `EnsureLocalServer` fail-opens when a
+  FOREIGN-model server squats the shared port 11457 (served id ≠ `ExpectedServeID`)
+  instead of replacing it — so switching local models (or the MLX→llama.cpp
+  migration) needs a manual `pkill -f llama-server` + restart. Hit repeatedly this
+  session. Consider: when a wrong-model server occupies OUR fixed port 11457, stop
+  it and spawn the right one (guard against killing a user's own LM Studio on a
+  different port — 11457 is ocode-owned, so a wrong model there is almost certainly
+  a stale ocode spawn).
+- Note: `mlx_embed_server.py` + the `BackendMLX` spawn path are retained (dormant)
+  for any future MLX-only model; no default local model uses MLX now.
+- [ ] **Optional (measured NOT worth it for attachment):** the http/local embedder
+  ignores `EmbedKind` (`httpEmbedder.Embed(..., _ EmbedKind)`), so no asymmetric
+  `query:`/`document:` prompt is applied. Tested live against the llama.cpp CLS
+  LFM2.5 server: the documented `query:`/`document:` prefixes scored a match at 0.20
+  vs 0.26 bare — WORSE, not better. So per-kind prefixes do NOT rescue LFM2.5's
+  band and are not the `0 attached` fix. Could still marginally sharpen ranking for
+  some models, but low priority; if pursued, needs a per-model prompt field + a
+  `cacheFormatVersion` bump (passage text changes).
 
 ## Shared agent notes bus — deferred production wiring (from review-changes: 2026-06-16)
 

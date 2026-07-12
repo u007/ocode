@@ -9,12 +9,22 @@ import (
 	"strings"
 )
 
+// cacheFormatVersion is bumped whenever the embedding pipeline changes in a way
+// that makes previously-cached vectors incompatible for the SAME model id + dim.
+// A load whose stored version differs is discarded (re-embed). v2: the local
+// LFM2.5 backend moved from MLX (causal + mean pooling) to llama.cpp (bidir +
+// CLS pooling) under the same "local/lfm2.5-embedding" id and dim 1024, and the
+// bge-m3 llama.cpp build was bumped b9747→b9777 — both produce different vectors
+// that the id+dim check alone would not catch.
+const cacheFormatVersion = 2
+
 // Cache is a per-model on-disk store of passage vectors keyed by DocHash.
 type Cache struct {
-	path  string
-	Model string               `json:"model"`
-	Dim   int                  `json:"dim"`
-	Items map[string][]float32 `json:"items"`
+	path    string
+	Version int                  `json:"version"`
+	Model   string               `json:"model"`
+	Dim     int                  `json:"dim"`
+	Items   map[string][]float32 `json:"items"`
 }
 
 func sanitizeModelID(id string) string {
@@ -22,11 +32,11 @@ func sanitizeModelID(id string) string {
 }
 
 // LoadCache reads the cache file for modelID. A missing file, or a file whose
-// model/dim don't match, yields an empty (fresh) cache — that is the
-// invalidation path.
+// format version / model / dim don't match, yields an empty (fresh) cache —
+// that is the invalidation path.
 func LoadCache(dir, modelID string, dim int) (*Cache, error) {
 	path := filepath.Join(dir, "corpus-"+sanitizeModelID(modelID)+".json")
-	fresh := &Cache{path: path, Model: modelID, Dim: dim, Items: map[string][]float32{}}
+	fresh := &Cache{path: path, Version: cacheFormatVersion, Model: modelID, Dim: dim, Items: map[string][]float32{}}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -42,7 +52,7 @@ func LoadCache(dir, modelID string, dim int) (*Cache, error) {
 		emitDiscoveryDebug("WARN", fmt.Sprintf("discovery cache %s unreadable, rebuilding: %v", path, err))
 		return fresh, nil
 	}
-	if loaded.Model != modelID || loaded.Dim != dim || loaded.Items == nil {
+	if loaded.Version != cacheFormatVersion || loaded.Model != modelID || loaded.Dim != dim || loaded.Items == nil {
 		return fresh, nil
 	}
 	loaded.path = path
@@ -50,7 +60,7 @@ func LoadCache(dir, modelID string, dim int) (*Cache, error) {
 }
 
 func (c *Cache) Get(hash string) ([]float32, bool) { v, ok := c.Items[hash]; return v, ok }
-func (c *Cache) Put(hash string, vec []float32)   { c.Items[hash] = vec }
+func (c *Cache) Put(hash string, vec []float32)    { c.Items[hash] = vec }
 
 // Save writes the cache atomically (temp + rename) so concurrent sessions can't
 // observe a half-written file.

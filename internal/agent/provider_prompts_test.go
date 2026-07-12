@@ -103,6 +103,34 @@ func TestIsReasoningModel(t *testing.T) {
 	}
 }
 
+func TestProviderSupportsReasoningEffortNovita(t *testing.T) {
+	// novita-ai must accept the OpenAI-style reasoning_effort param so the
+	// thinking budget is actually transmitted (see client.go gate).
+	if !providerSupportsReasoningEffort("novita-ai") {
+		t.Errorf("providerSupportsReasoningEffort(%q) = false, want true", "novita-ai")
+	}
+	// Sanity: a provider that genuinely does not support it stays false.
+	if providerSupportsReasoningEffort("anthropic") {
+		t.Errorf("providerSupportsReasoningEffort(%q) = true, want false", "anthropic")
+	}
+}
+
+func TestModelSupportsThinkingTencentHy3(t *testing.T) {
+	// tencent/hy3 is a reasoning model; the TUI should surface the effort
+	// control even though models.dev has no novita-ai/tencent/hy3 entry.
+	if !ModelSupportsThinking("novita-ai/tencent/hy3") {
+		t.Errorf("ModelSupportsThinking(%q) = false, want true", "novita-ai/tencent/hy3")
+	}
+	if !ModelSupportsThinking("novita-ai/tencent/hy3-preview") {
+		t.Errorf("ModelSupportsThinking(%q) = false, want true", "novita-ai/tencent/hy3-preview")
+	}
+	// A generic non-reasoning Novita model must NOT be flagged, so the
+	// request path never sends reasoning_effort to it.
+	if ModelSupportsThinking("novita-ai/llama-3.1-8b-instruct") {
+		t.Errorf("ModelSupportsThinking(%q) = true, want false", "novita-ai/llama-3.1-8b-instruct")
+	}
+}
+
 func TestIsSmallModel(t *testing.T) {
 	// Note: GetModel() returns just the model part (e.g., "deepseek-v4-flash"),
 	// not the full "provider/model" string. The isSmallModel function should

@@ -149,7 +149,7 @@ func TestEnsureDylibSymlinks(t *testing.T) {
 		"libggml.0.15.2.dylib":           "ggml",
 		"libggml-cpu.0.15.2.dylib":       "ggml-cpu",
 		"libllama-server-impl.dylib":     "server", // unversioned, no symlink expected
-		"readme.txt":                      "text",   // not a dylib
+		"readme.txt":                     "text",   // not a dylib
 	}
 	for name, content := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
@@ -420,28 +420,41 @@ func TestExtractTarGZRejectsZipSlip(t *testing.T) {
 	}
 }
 
-func TestFindLibDir(t *testing.T) {
+func TestLibDirForBinary(t *testing.T) {
 	dir := t.TempDir()
-	if got := findLibDir(dir); got != "" {
-		t.Fatalf("empty dir: want \"\", got %q", got)
+	// Missing/empty inputs → "".
+	if got := libDirForBinary(""); got != "" {
+		t.Fatalf("empty path: want \"\", got %q", got)
 	}
-	// Versioned subdir with the binary.
-	sub := filepath.Join(dir, "llama-b9747")
-	if err := os.MkdirAll(sub, 0o755); err != nil {
-		t.Fatal(err)
+	if got := libDirForBinary(filepath.Join(dir, "llama-b9777", "llama-server")); got != "" {
+		t.Fatalf("nonexistent binary: want \"\", got %q", got)
 	}
-	if err := os.WriteFile(filepath.Join(sub, "llama-server"), []byte("bin"), 0o755); err != nil {
-		t.Fatal(err)
+
+	// Migration case (the bug this guards): binDir holds BOTH an old and a new
+	// versioned dir. The lib dir MUST be the launched binary's OWN dir, never the
+	// other version's — a scan would return the alphabetically-first (b9747).
+	oldDir := filepath.Join(dir, "llama-b9747")
+	newDir := filepath.Join(dir, "llama-b9777")
+	for _, d := range []string{oldDir, newDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "llama-server"), []byte("bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := findLibDir(dir); got != sub {
-		t.Fatalf("versioned subdir: want %q, got %q", sub, got)
+	newBin := filepath.Join(newDir, "llama-server")
+	if got := libDirForBinary(newBin); got != newDir {
+		t.Fatalf("multi-version: want %q (binary's own dir), got %q", newDir, got)
 	}
-	// Flat layout fallback.
+
+	// Flat layout: binary directly in binDir → binDir.
 	flat := t.TempDir()
-	if err := os.WriteFile(filepath.Join(flat, "llama-server"), []byte("bin"), 0o755); err != nil {
+	flatBin := filepath.Join(flat, "llama-server")
+	if err := os.WriteFile(flatBin, []byte("bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if got := findLibDir(flat); got != flat {
+	if got := libDirForBinary(flatBin); got != flat {
 		t.Fatalf("flat layout: want %q, got %q", flat, got)
 	}
 }
