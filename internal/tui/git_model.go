@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -143,9 +144,15 @@ type gitModel struct {
 	// diff text selection
 	diffRawLines []string
 	diffLines    []string
+	// diffLineMap maps a diff viewport line index (0-based) to the
+	// corresponding source file line number (1-based), or 0 if the line has
+	// no source counterpart (headers, removed lines, notices).
+	diffLineMap []int
 	// external editor integration
 	editor       string
 	editorOpener func(string) tea.Cmd
+	// editorOpenerAtLine is like editorOpener but opens the file at a line.
+	editorOpenerAtLine func(string, int) tea.Cmd
 	// ai commit message generation
 	generateCommitMsg func(diff string) tea.Cmd
 	generatingMsg     bool
@@ -182,11 +189,35 @@ func diffLineNumbers(ctx viewport.GutterContext) string {
 	return fmt.Sprintf("%4d │ ", ctx.Index+1)
 }
 
+// activeDiffLineMap mirrors the source-line map of the currently displayed git
+// diff so the diff gutter (which only receives a GutterContext, not the model)
+// can render real source line numbers. The TUI renders at most one git diff at
+// a time, so a single package-level mirror is safe; it is rewritten on every
+// diff content load.
+var activeDiffLineMap []int
+
+// gitDiffLineGutter renders the source-file line number for each diff viewport
+// line. Lines with no source counterpart (headers, removed lines, notices)
+// show a blank gutter so they don't imply a jumpable line.
+func gitDiffLineGutter(ctx viewport.GutterContext) string {
+	if ctx.Soft {
+		return "     │ "
+	}
+	if ctx.Index >= len(activeDiffLineMap) {
+		return "   ~ │ "
+	}
+	ln := activeDiffLineMap[ctx.Index]
+	if ln <= 0 {
+		return "     │ "
+	}
+	return fmt.Sprintf("%4d │ ", ln)
+}
+
 func newGitModel(workDir string) (gitModel, tea.Cmd) {
 	m := gitModel{workDir: workDir}
 	m.diff = viewport.New()
 	m.diff.SoftWrap = true
-	m.diff.LeftGutterFunc = diffLineNumbers
+	m.diff.LeftGutterFunc = gitDiffLineGutter
 	m.commitViewport = viewport.New()
 	ci := textarea.New()
 	ci.Placeholder = "Commit message..."
@@ -204,6 +235,8 @@ func newGitModel(workDir string) (gitModel, tea.Cmd) {
 func (m *gitModel) SetEditor(e string) { m.editor = e }
 
 func (m *gitModel) SetEditorOpener(fn func(string) tea.Cmd) { m.editorOpener = fn }
+
+func (m *gitModel) SetEditorOpenerAtLine(fn func(string, int) tea.Cmd) { m.editorOpenerAtLine = fn }
 
 func (m *gitModel) Resize(w, h int) {
 	m.width = w
@@ -1353,6 +1386,37 @@ func (m gitModel) openInEditor(path string) tea.Cmd {
 	})
 }
 
+// openInEditorAtLine opens the file in the external editor jump to lineNo.
+// lineNo <= 0 falls back to a plain open (best-effort per editor support).
+func (m gitModel) openInEditorAtLine(path string, lineNo int) tea.Cmd {
+	if isBinaryFile(path) {
+		log.Printf("[editor] git openInEditorAtLine: binary file=%q, using system opener", path)
+		return openFileWithOSDefault(path)
+	}
+	if m.editorOpenerAtLine != nil {
+		log.Printf("[editor] git openInEditorAtLine: delegating to editorOpenerAtLine for file=%q line=%d", path, lineNo)
+		return m.editorOpenerAtLine(path, lineNo)
+	}
+	// Fallback: build the command directly with line support.
+	editor := m.editor
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	args := editorArgsWithLine(editor, path, lineNo)
+	if args == nil {
+		args = append(strings.Fields(editor), path)
+	}
+	c := exec.Command(args[0], args[1:]...)
+	log.Printf("[editor] git openInEditorAtLine fallback: editor=%q file=%q line=%d full_cmd=%v", editor, path, lineNo, args)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		log.Printf("[editor] git openInEditorAtLine fallback finished: file=%q line=%d err=%v", path, lineNo, err)
+		return editorFinishedMsg{err: err}
+	})
+}
+
 func (m gitModel) handleDiffKey(key string) (gitModel, tea.Cmd) {
 	switch key {
 	case "j", "down":
@@ -1490,6 +1554,83 @@ func (m *gitModel) setDiffContent(content string) {
 	raw := stripANSI(content)
 	m.diffRawLines = strings.Split(raw, "\n")
 	m.diffLines = strings.Split(content, "\n")
+	m.diffLineMap = buildDiffLineMap(m.diffRawLines)
+	activeDiffLineMap = m.diffLineMap
+}
+
+// buildDiffLineMap maps each displayed diff line (index into rawLines) to the
+// corresponding source file line number (1-based). For added/context lines the
+// number comes from the enclosing hunk header's new-file start; removed lines
+// map to the next surviving new-file line; everything else maps to 0.
+func buildDiffLineMap(rawLines []string) []int {
+	out := make([]int, len(rawLines))
+	newLine := 0
+	seenHeader := false
+	for i, line := range rawLines {
+		switch {
+		case strings.HasPrefix(line, "@@"):
+			if n, ok := parseHunkNewStart(line); ok {
+				newLine = n
+			}
+			seenHeader = true
+			out[i] = 0
+		case strings.HasPrefix(line, "---"), strings.HasPrefix(line, "+++"),
+			strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "index "),
+			strings.HasPrefix(line, "Binary "), strings.HasPrefix(line, "old mode"),
+			strings.HasPrefix(line, "new mode"), strings.HasPrefix(line, "rename "),
+			strings.HasPrefix(line, "similarity "), strings.HasPrefix(line, "dissimilarity "):
+			out[i] = 0
+		case !seenHeader:
+			// Preamble or an untracked-file preview (raw file content): there is
+			// no hunk structure, so treat each line as a plain file line.
+			out[i] = i + 1
+		case len(line) == 0:
+			out[i] = 0
+		case line[0] == '+' || line[0] == ' ':
+			out[i] = newLine
+			newLine++
+		case line[0] == '-':
+			// Removed line: jump to the next surviving new-file line.
+			out[i] = newLine
+		default:
+			// e.g. "\ No newline at end of file"
+			out[i] = 0
+		}
+	}
+	return out
+}
+
+// parseHunkNewStart extracts the new-file start line from a hunk header such as
+// "@@ -3,3 +3,2 @@".
+func parseHunkNewStart(header string) (int, bool) {
+	plus := strings.IndexByte(header, '+')
+	if plus < 0 {
+		return 0, false
+	}
+	rest := header[plus+1:]
+	end := strings.IndexAny(rest, ", ")
+	if end < 0 {
+		end = len(rest)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(rest[:end]))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// currentDiffFilePath returns the absolute path of the file whose diff is
+// currently shown, or "" when there is no single resolvable file (e.g. a commit
+// full-diff spanning multiple files).
+func (m *gitModel) currentDiffFilePath() string {
+	if m.section != gitSectionChanges {
+		return ""
+	}
+	files := m.currentFileList()
+	if m.filesCursor < 0 || m.filesCursor >= len(files) {
+		return ""
+	}
+	return filepath.Join(m.workDir, files[m.filesCursor].path)
 }
 
 func (m *gitModel) clearActiveFile() {

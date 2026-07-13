@@ -227,11 +227,19 @@ func stackActive(stack string, detected []string) bool {
 // carries a provider prefix and ends in "/"+tunedFor. So both
 // "novita-ai/tencent/hy3" and "openrouter/tencent/hy3" match "tencent/hy3",
 // but a bare "hy3" does NOT match "tencent/hy3" (no "/" boundary).
+//
+// OpenRouter-style route variants after a colon (":free", ":nitro",
+// ":extended", …) are stripped before compare so
+// "openrouter/tencent/hy3:free" matches tuned_for "tencent/hy3".
 func modelMatchesTuned(activeModel, tunedFor string) bool {
 	a := strings.ToLower(strings.TrimSpace(activeModel))
 	t := strings.ToLower(strings.TrimSpace(tunedFor))
 	if a == "" || t == "" {
 		return false
+	}
+	// Strip OpenRouter (and similar) variant suffixes: "id:free" → "id".
+	if i := strings.IndexByte(a, ':'); i >= 0 {
+		a = a[:i]
 	}
 	return a == t || strings.HasSuffix(a, "/"+t)
 }

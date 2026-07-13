@@ -71,6 +71,25 @@ type QuestionPrompt struct {
 	Multiple bool             `json:"multiple"`
 }
 
+// QuestionAnswer is a single selected answer to a QuestionPrompt. It is the
+// shared wire type between the agent, the TUI, the web UI, and external clients
+// (e.g. the Telegram bot) so every surface submits answers identically.
+type QuestionAnswer struct {
+	Label  string `json:"label"`
+	Text   string `json:"text,omitempty"`
+	Custom bool   `json:"custom,omitempty"`
+}
+
+// QuestionAnswerSet is the full answer to one QuestionPrompt: every selected
+// option (multiple when the prompt allows it). It is the RC bridge wire type so
+// multi-question prompts and multi-select questions survive end-to-end, instead
+// of collapsing to a single answer per question.
+type QuestionAnswerSet struct {
+	Header   string           `json:"header,omitempty"`
+	Question string           `json:"question"`
+	Answers  []QuestionAnswer `json:"answers"`
+}
+
 type QuestionTool struct{}
 
 func (t QuestionTool) Name() string        { return "question" }

@@ -91,9 +91,23 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	}
 
 	h.mu.Lock()
-	if h.rc != nil {
+	rc := h.rc
+	if rc != nil {
 		h.mu.Unlock()
-		writeError(w, http.StatusConflict, "permission answering over the web is not supported while a TUI session is bridged; answer in the TUI")
+		// A TUI session is bridged: the TUI owns the agent, so forward the
+		// decision to its RC bridge instead of resolving on the server.
+		decision := "allow"
+		if !req.Approved {
+			decision = "deny"
+		}
+		if !rc.SendResolution(RCResolution{RequestID: req.RequestID, Decision: decision}) {
+			writeError(w, http.StatusServiceUnavailable, "resolve channel full; try again")
+			return
+		}
+		// Dismiss the web dialog; the TUI will also broadcast this once it
+		// applies the resolution, but sending it now keeps the UI snappy.
+		h.broadcastEvent(SSEEvent{Event: "permission_resolved", Data: map[string]string{"request_id": req.RequestID}})
+		writeJSON(w, http.StatusOK, ChatResponse{})
 		return
 	}
 

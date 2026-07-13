@@ -104,14 +104,18 @@ type LLMClient interface {
 }
 
 type GenericClient struct {
-	APIKey         string
-	Model          string
-	BaseURL        string
-	Provider       string
-	MaxImageDim    int
-	UseOAuth       bool   // when true, treat APIKey as a bearer OAuth token
-	AccountID      string // cached chatgpt_account_id from OAuth credential
-	ThinkingBudget int    // >0 enables extended thinking for Anthropic models that support it
+	APIKey      string
+	Model       string
+	BaseURL     string
+	Provider    string
+	MaxImageDim int
+	UseOAuth    bool   // when true, treat APIKey as a bearer OAuth token
+	AccountID   string // cached chatgpt_account_id from OAuth credential
+	// CookieAuthToken and CookieCt0 carry the x.com session cookies for the
+	// Grok subscription flow (sent alongside the grok.com SSO bearer token).
+	CookieAuthToken string
+	CookieCt0       string
+	ThinkingBudget  int // >0 enables extended thinking for Anthropic models that support it
 	// Temperature, when non-nil, is added to the request payload for providers
 	// that accept it. Pointer so we can distinguish "unset" from explicit zero.
 	Temperature *float64
@@ -624,10 +628,118 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 	return msg, nil
 }
 
+// chatGrokSubscription calls the grok.com OpenAI-compatible backend using a
+// Grok subscription SSO token. The x.com session cookies are sent alongside the
+// bearer token because grok.com requires them for subscription-backed access.
+// The request/response shape is identical to the standard OpenAI chat
+// completions API, so we reuse the same SSE parser as chatOpenAI.
+func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
+	url := c.BaseURL + "/chat/completions"
+
+	openAIMessages, err := c.convertToOpenAIMessages(messages)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := map[string]interface{}{
+		"model":    c.Model,
+		"messages": openAIMessages,
+		"stream":   true,
+	}
+	c.applyGenerationParams(ctx, payload)
+	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
+		if c.Provider != "novita-ai" || ModelSupportsThinking(c.Model) {
+			payload["reasoning_effort"] = reasoningEffortForBudget(c.ThinkingBudget)
+		}
+	}
+	if len(tools) > 0 {
+		payload["tools"] = openAITools(tools)
+	}
+	// Plugin params (e.g. subscription-specific overrides).
+	if plugin, ok := providerplugin.Get("grok"); ok {
+		for k, v := range plugin.RequestParams(providerplugin.RequestContext{}) {
+			if v == nil {
+				delete(payload, k)
+			} else {
+				payload[k] = v
+			}
+		}
+	}
+
+	jsonData, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.CookieAuthToken != "" && c.CookieCt0 != "" {
+		req.Header.Set("Cookie", fmt.Sprintf("auth_token=%s; ct0=%s", c.CookieAuthToken, c.CookieCt0))
+	}
+	// Plugin headers (originator / User-Agent / session-id).
+	if plugin, ok := providerplugin.Get("grok"); ok {
+		for k, vs := range plugin.RequestHeaders(providerplugin.RequestContext{
+			Provider:  c.Provider,
+			Model:     c.Model,
+			SessionID: os.Getenv("OPENCODE_SESSION_ID"),
+		}) {
+			req.Header[k] = vs
+		}
+	}
+	emitDebug("LLM", fmt.Sprintf("chatGrokSubscription: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
+
+	resp, err := llmHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("Grok subscription session expired — run /connect to re-authenticate")
+		}
+		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
+		emitDebug("ERROR", fmt.Sprintf("chatGrokSubscription: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
+		return nil, fmt.Errorf("%s", msg)
+	}
+
+	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
+	if err != nil {
+		return nil, err
+	}
+	if msg == nil {
+		return nil, fmt.Errorf("no response from %s", c.Provider)
+	}
+	if msg.Model == "" {
+		msg.Model = c.Model
+	}
+	usage, err := usageForProvider(c.Provider, usageRaw)
+	if err != nil {
+		return nil, err
+	}
+	msg.Usage = usage
+	if usage != nil {
+		msg.Spend = usage.Spend(msg.Model)
+		usage.DebugLog(msg.Model)
+	}
+	return msg, nil
+}
+
 func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tools []map[string]interface{}) (*Message, error) {
 	if c.UseOAuth && c.Provider == "openai" {
 		if plugin, ok := providerplugin.Get("openai"); ok && plugin.ModelAllowed(c.Model) {
 			return c.chatOpenAIResponses(ctx, messages, tools)
+		}
+	}
+	if c.UseOAuth && c.Provider == "grok" {
+		if plugin, ok := providerplugin.Get("grok"); ok && plugin.ModelAllowed(c.Model) {
+			return c.chatGrokSubscription(ctx, messages, tools)
 		}
 	}
 	// Use WebSocket transport if enabled for OpenAI
@@ -1609,6 +1721,7 @@ func providerSupportsReasoningEffort(provider string) bool {
 		provider == "openrouter" ||
 		provider == "google" ||
 		provider == "novita-ai" ||
+		provider == "grok" ||
 		strings.HasPrefix(provider, "xiaomi")
 }
 
@@ -3215,6 +3328,7 @@ var providers = map[string]providerInfo{
 	"nvidia":                {"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"},
 	"302ai":                 {"302AI_API_KEY", "https://api.302.ai/v1"},
 	"deepseek":              {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
+	"grok":                  {"XAI_API_KEY", "https://api.x.ai/v1"},
 	"groq":                  {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
 	"mistral":               {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
 	"novita-ai":             {"NOVITA_API_KEY", "https://api.novita.ai/openai/v1"},
@@ -3250,6 +3364,10 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	baseURL := ""
 	useOAuth := false
 	accountID := ""
+	// grokAuthToken/grokCt0 carry the x.com cookies for a Grok subscription
+	// credential; they are attached to requests against the grok.com backend.
+	grokAuthToken := ""
+	grokCt0 := ""
 
 	// Handle provider/model and provider:model formats.
 	// Check slash first so that OpenRouter models like
@@ -3317,13 +3435,34 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 				case auth.KindAPIKey:
 					apiKey = cred.Key
 				case auth.KindOAuth:
-					if tok, refreshed := auth.OAuthAccessToken(provider); refreshed {
-						apiKey = tok
+					if provider == "grok" {
+						// Grok subscription: SSO bearer token routes to the
+						// grok.com backend, authenticated with the x.com cookies.
+						// Route the access token through OAuthAccessToken so the
+						// cookie-based refresh runs when the short-lived SSO token
+						// is expired; reading cred.AccessToken directly would skip
+						// the refresh and send a stale token.
+						if tok, ok := auth.OAuthAccessToken(provider); ok {
+							apiKey = tok
+						} else {
+							apiKey = cred.AccessToken
+						}
+						useOAuth = true
+						accountID = cred.AccountID
+						if cred.BaseURL != "" {
+							baseURL = cred.BaseURL
+						}
+						grokAuthToken = cred.CookieAuthToken
+						grokCt0 = cred.CookieCt0
 					} else {
-						apiKey = cred.AccessToken
+						if tok, refreshed := auth.OAuthAccessToken(provider); refreshed {
+							apiKey = tok
+						} else {
+							apiKey = cred.AccessToken
+						}
+						useOAuth = true
+						accountID = cred.AccountID
 					}
-					useOAuth = true
-					accountID = cred.AccountID
 				}
 				emitDebug("AGENT", fmt.Sprintf("NewClient: credential check — kind=%s apiKey=%s useOAuth=%v", cred.Kind, maskKey(apiKey), useOAuth))
 			} else {
@@ -3384,15 +3523,17 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		maxImageDim = cfg.Ocode.MaxImageDim
 	}
 	return &GenericClient{
-		APIKey:         apiKey,
-		Model:          model,
-		BaseURL:        baseURL,
-		Provider:       provider,
-		MaxImageDim:    ResolveImageMaxDim(maxImageDim),
-		UseOAuth:       useOAuth,
-		AccountID:      accountID,
-		ThinkingBudget: thinkingBudget,
-		UseWebSocket:   cfg != nil && cfg.UseWebSocket,
+		APIKey:          apiKey,
+		Model:           model,
+		BaseURL:         baseURL,
+		Provider:        provider,
+		MaxImageDim:     ResolveImageMaxDim(maxImageDim),
+		UseOAuth:        useOAuth,
+		AccountID:       accountID,
+		CookieAuthToken: grokAuthToken,
+		CookieCt0:       grokCt0,
+		ThinkingBudget:  thinkingBudget,
+		UseWebSocket:    cfg != nil && cfg.UseWebSocket,
 	}
 }
 

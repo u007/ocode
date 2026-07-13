@@ -41,6 +41,7 @@ import (
 	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/plugins"
+	"github.com/u007/ocode/internal/rc"
 	"github.com/u007/ocode/internal/redact"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/session"
@@ -67,6 +68,20 @@ import (
 
 //go:embed initialize_prompt.txt
 var initializePromptTemplate string
+
+// rcPendingPerm records a permission ask awaiting a remote (Telegram) decision.
+type rcPendingPerm struct {
+	req       agent.PermissionRequest
+	toolName  string
+	args      json.RawMessage
+	requestID string
+}
+
+// rcPendingQuestion records a question prompt awaiting remote answers.
+type rcPendingQuestion struct {
+	requestID string
+	questions []tool.QuestionPrompt
+}
 
 type scrollbarDragTarget int
 
@@ -705,9 +720,13 @@ type model struct {
 	recapModelEnabledSet bool // whether recapModelEnabled should be applied to newly installed agents
 	ocrEnabled           bool // runtime OCR tool state; persisted across agent rebuilds
 	ocrEnabledSet        bool // whether ocrEnabled should be applied to newly installed agents
-	config               *config.Config
-	sessionID            string
-	sessionTitle         string
+	// kaizenAnnounced is the sorted set of digest-contributing Kaizen skill
+	// names last announced in the transcript, so the "directives active" notice
+	// is emitted once per active-model change rather than on every request.
+	kaizenAnnounced string
+	config          *config.Config
+	sessionID       string
+	sessionTitle    string
 	// sessionLoadErr records a failure to load an explicitly requested
 	// session (via -session or -continue). When set, Run aborts before the
 	// TUI starts instead of silently continuing with a placeholder file.
@@ -993,6 +1012,17 @@ type model struct {
 	// rcBridge is the bridge between the server and TUI, used to push messages
 	// so the web UI can fetch existing conversation history.
 	rcBridge *server.RCBridge
+	// rcInstanceID uniquely identifies this /rc registration in the local
+	// instance registry (consumed by external clients such as the Telegram bot).
+	rcInstanceID string
+	// rcHBStop closes the heartbeat goroutine that keeps the registry entry fresh.
+	rcHBStop chan struct{}
+	// rcResolveCh carries permission/question resolutions from external clients
+	// (Telegram bot) back to the TUI while a remote-controlled turn is paused.
+	rcResolveCh chan server.RCResolution
+	// rcPendingPerm / rcPendingQuestion hold the ask awaiting a remote decision.
+	rcPendingPerm     *rcPendingPerm
+	rcPendingQuestion *rcPendingQuestion
 	// rcSrv is the HTTP server backing /rc, stored so we can shut it down.
 	rcSrv *server.Server
 	// rcLn is the listener backing /rc, stored so we can close it on stop.
@@ -1515,7 +1545,15 @@ func newModel(opts ...RunOptions) model {
 		o = opts[0]
 	}
 	cfg, _ := config.Load()
-	refreshCustomCommands(cfg)
+	// Skills-as-slash (incl. Kaizen admit) need workDir + active model; use
+	// cwd + config model here before m is constructed. Re-refreshed below once
+	// m.workDir / m.activeModel are set, and again on /model or /cd.
+	initWD, _ := os.Getwd()
+	initModel := ""
+	if cfg != nil {
+		initModel = cfg.Model
+	}
+	refreshCustomCommands(cfg, initWD, initModel)
 	_ = auth.HydrateEnv()
 
 	// Auto-select a small model from the priority list if none is configured.
@@ -1866,6 +1904,12 @@ func newModel(opts ...RunOptions) model {
 		))
 		m.git.SetEditor(editor)
 		m.git.SetEditorOpener(createEditorOpener(
+			editor,
+			editorMode,
+			func() int { return m.width },
+			sup,
+		))
+		m.git.SetEditorOpenerAtLine(createEditorOpenerAtLine(
 			editor,
 			editorMode,
 			func() int { return m.width },
@@ -2891,7 +2935,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.config.Plugins = map[string]config.PluginConfig{}
 			}
 			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Ref: msg.ref, Dir: msg.dir, Enabled: true}
-			refreshCustomCommands(m.config)
+			m.refreshCustomCommands()
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q installed.", msg.name)})
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.rebuildAgentWithExternalTools()
@@ -2937,7 +2981,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin remove failed: %v", msg.err)})
 		} else {
 			delete(m.config.Plugins, msg.name)
-			refreshCustomCommands(m.config)
+			m.refreshCustomCommands()
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q removed.", msg.name)})
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.rebuildAgentWithExternalTools()
@@ -2992,7 +3036,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.config.Plugins[msg.name] = config.PluginConfig{Source: msg.source, Ref: msg.ref, Dir: msg.dir, Enabled: msg.enabled}
-			refreshCustomCommands(m.config)
+			m.refreshCustomCommands()
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Plugin %q updated.", msg.name)})
 			m.rerenderTranscriptAndMaybeScroll()
 			// Clear cached sync state so list refreshes.
@@ -3057,7 +3101,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.config.Plugins[r.name] = config.PluginConfig{Source: r.source, Ref: r.ref, Dir: r.dir, Enabled: r.enabled}
-				refreshCustomCommands(m.config)
+				m.refreshCustomCommands()
 				delete(m.pluginSyncStates, r.name)
 			}
 		}
@@ -3454,9 +3498,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rcBridge.SetMessages(m.persistedAgentMessages())
 			m.rcBridge.SetAgent(m.agent)
 		}
-		// Start listening for RC requests
+		// Start listening for RC requests and, in parallel, for remote
+		// permission/question resolutions (Telegram bot). The resolve listener
+		// is re-armed after each resolve, so exactly one is ever active.
 		if m.rcCh != nil {
-			return m, waitForRCRequest(m.rcCh)
+			cmds := []tea.Cmd{waitForRCRequest(m.rcCh)}
+			if m.rcResolveCh != nil {
+				cmds = append(cmds, waitForRCResolve(m.rcResolveCh))
+			}
+			return m, tea.Batch(cmds...)
 		}
 		return m, nil
 	case ideStartedMsg:
@@ -3501,6 +3551,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingRC = &msg.req
 		// Run through the agent
 		return m, m.askAgent()
+	case rcResolveMsg:
+		// A permission/question resolution arrived from an external client
+		// (Telegram bot) for a paused RC turn. Reuse the same resume paths the
+		// local dialog uses, then re-arm the resolve listener.
+		res := msg.Resolution
+		if m.rcPendingPerm != nil && res.RequestID == m.rcPendingPerm.requestID {
+			pend := m.rcPendingPerm
+			m.rcPendingPerm = nil
+			// Drive handlePermissionChoice, which implements the full allow/deny/
+			// always logic (harmful-request blocking, persistence, etc.).
+			m.pendingPermission = pend.req
+			m.pendingToolName = pend.toolName
+			m.pendingToolArgs = pend.args
+			m.pendingToolCallID = pend.requestID
+			m.showPermDialog = false
+			choice := "y"
+			switch res.Decision {
+			case "deny":
+				choice = "n"
+			case "always":
+				choice = "a"
+			}
+			cmd := m.handlePermissionChoice(choice)
+			m.broadcastRC("permission_resolved", map[string]string{"request_id": res.RequestID})
+			return m, tea.Batch(cmd, waitForRCResolve(m.rcResolveCh))
+		}
+		if m.rcPendingQuestion != nil && res.RequestID == m.rcPendingQuestion.requestID {
+			pend := m.rcPendingQuestion
+			m.rcPendingQuestion = nil
+			cmd := m.submitRCQuestionAnswers(pend.requestID, pend.questions, res.Answers)
+			m.broadcastRC("question_resolved", map[string]string{"request_id": res.RequestID})
+			return m, tea.Batch(cmd, waitForRCResolve(m.rcResolveCh))
+		}
+		// Stale/unmatched resolution: keep listening, do not stall the turn.
+		return m, waitForRCResolve(m.rcResolveCh)
 	case streamMsgEvent:
 		if msg.msg.Role == "tool" {
 			if idx := m.findToolMessageIndexByToolID(msg.msg.ToolID); idx >= 0 {
@@ -5311,6 +5396,26 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 			contentLine, contentCol := cfg.point(m.git.diffRawLines, mouse.X, mouse.Y)
 			if contentLine >= 0 && contentLine < len(m.git.diffRawLines) {
+				// Double-click a diff line to open the editor at the matching
+				// source line. Track timing/position the same way the files
+				// list does for its own double-click-to-edit behaviour.
+				isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
+				m.lastClickTime = time.Now()
+				m.lastClickX = mouse.X
+				m.lastClickY = mouse.Y
+				if isDoubleClick {
+					if path := m.git.currentDiffFilePath(); path != "" {
+						var lineNo int
+						if contentLine < len(m.git.diffLineMap) {
+							lineNo = m.git.diffLineMap[contentLine]
+						}
+						if lineNo > 0 {
+							m.git.clearDiffSelectionHighlight()
+							m.gitSel = selectionState{}
+							return m, m.git.openInEditorAtLine(path, lineNo), true
+						}
+					}
+				}
 				m.git.panel = gitPanelDiff
 				m.gitSel = selectionState{
 					dragging:  true,
@@ -7027,6 +7132,8 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 		if m.config != nil {
 			m.config.Model = modelID
 		}
+		// Kaizen skill-as-slash admit depends on active model — rebuild popup list.
+		m.refreshCustomCommands()
 		// Persist the user's selection even when the new client cannot be built yet
 		// (e.g. provider credentials are not connected). The UI model name should
 		// still reflect the chosen model so the picker / status line stay in sync.
@@ -8275,6 +8382,7 @@ func (m *model) refreshEditorOpener() {
 	m.files.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
 	m.git.SetEditor(editor)
 	m.git.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
+	m.git.SetEditorOpenerAtLine(createEditorOpenerAtLine(editor, mode, func() int { return m.width }, m.supervisor))
 }
 
 // startShellExecution begins a shell command execution, recording it in the
@@ -9977,6 +10085,23 @@ func (m *model) handleContextCmd(args []string) {
 			injectedTotal += catalogTok
 		}
 	}
+
+	// Kaizen digest: per-model tuned directives force-injected into the base
+	// prompt (KaizenDigestBlock), UNCONDITIONALLY — unlike the catalog, it is not
+	// gated by discovery. "" for a non-matching model. Count its tokens toward the
+	// per-request total, which otherwise under-reports injected cost for a tuned model.
+	if digest := skill.KaizenDigestBlock(m.workDir, catalogModel); digest != "" {
+		digestTok := estimateTok(digest)
+		injectedTotal += digestTok
+		b.WriteString("\nModel directives (kaizen digest, force-injected)\n")
+		for _, s := range skill.KaizenSkillsForModel(m.workDir, catalogModel) {
+			if s.Digest == "" {
+				continue
+			}
+			label := fmt.Sprintf("%s → %s", s.Name, s.TunedFor)
+			fmt.Fprintf(&b, "  %s%s~%s tok\n", label, columnPad(label, 28), formatTok(estimateTok(s.Digest)))
+		}
+	}
 	fmt.Fprintf(&b, "\n  %-28s ~%s tok\n", "Injected per request", formatTok(injectedTotal))
 
 	// ── Skills ───────────────────────────────────
@@ -10530,6 +10655,37 @@ func (m *model) appendAgentMessage(am agent.Message) {
 	} else if am.Role == "tool" {
 		if strings.HasPrefix(am.Content, tool.SentinelPermissionAsk) {
 			if req, ok := parsePermissionRequest(am.Content); ok {
+				// Surface the ask to any external client (web /rc UI and the
+				// Telegram bot) via the SSE stream so they can render inline
+				// approve/deny buttons. The sentinel tool message stays in the
+				// transcript (raw: &copyMsg) so the resumed turn can find/replace it.
+				if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
+					ev := server.PermissionEvent{
+						RequestID: am.ToolID,
+						Tool:      req.ToolName,
+						Command:   req.Command,
+						Rule:      req.Rule,
+						Summary:   req.Summary,
+					}
+					select {
+					case m.pendingRC.StreamCh <- server.SSEEvent{Event: "permission", Data: ev}:
+					default:
+					}
+					// Also surface it to the web /rc UI (mirror SSE) so it can
+					// render the same inline approve/deny dialog.
+					m.broadcastRC("permission", ev)
+					m.rcPendingPerm = &rcPendingPerm{req: req, toolName: req.ToolName, args: req.Args, requestID: am.ToolID}
+				}
+				// Telegram drives this request with no one at the terminal: pause
+				// and wait for the remote decision; do not open the local dialog.
+				if m.pendingRC != nil && m.pendingRC.RemoteApproval && m.pendingRC.StreamCh != nil {
+					m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("⏳ Permission request (%s) sent to Telegram for approval.", req.ToolName), raw: &copyMsg})
+					m.rerenderTranscriptAndMaybeScroll()
+					return
+				}
+				// Otherwise open the local TUI dialog. (Web /rc users also get the
+				// inline buttons from the event above, so this is a terminal-side
+				// fallback they can use instead.)
 				log.Printf("[perm] permission dialog shown: tool=%s rule=%s command=%q", req.ToolName, req.Rule, req.Command)
 				m.showPermDialog = true
 				m.permConfirm = ""
@@ -10543,6 +10699,24 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				m.messages = append(m.messages, message{role: roleAssistant, text: renderPermissionPrompt(req), raw: &copyMsg})
 			}
 		} else if prompts, ok := parseQuestionPrompt(am.Content); ok {
+			// Surface the question to any external client via the SSE stream.
+			if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
+				ev := server.QuestionEvent{RequestID: am.ToolID, Questions: prompts}
+				select {
+				case m.pendingRC.StreamCh <- server.SSEEvent{Event: "question", Data: ev}:
+				default:
+				}
+				// Also surface it to the web /rc UI (mirror SSE) so it can
+				// render the same inline question dialog.
+				m.broadcastRC("question", ev)
+				m.rcPendingQuestion = &rcPendingQuestion{requestID: am.ToolID, questions: prompts}
+			}
+			// Telegram: pause for the remote answer; do not open the local dialog.
+			if m.pendingRC != nil && m.pendingRC.RemoteApproval && m.pendingRC.StreamCh != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "❓ Question sent to Telegram.", raw: &copyMsg})
+				m.rerenderTranscriptAndMaybeScroll()
+				return
+			}
 			m.startQuestionPrompt(am.ToolID, prompts)
 			m.messages = append(m.messages, message{role: roleAssistant, text: renderQuestionTranscriptNotice(prompts), raw: &copyMsg})
 		} else {
@@ -10854,6 +11028,14 @@ func (m *model) handlePermissionChoice(choice string) tea.Cmd {
 		respCh <- resp
 		// Re-arm the listener so subsequent sub-agent asks are still received.
 		return m.armSubAgentPermListener()
+	}
+
+	// A local terminal decision resolves (and supersedes) any pending remote
+	// (Telegram/RC) permission resolution for this request. Clear it so a
+	// delayed or duplicated remote resolution carrying the same request_id
+	// cannot re-execute the tool call after the local user already decided.
+	if m.rcPendingPerm != nil && m.rcPendingPerm.requestID == m.pendingToolCallID {
+		m.rcPendingPerm = nil
 	}
 
 	switch choice {
@@ -11199,6 +11381,9 @@ func (m *model) askAgent() tea.Cmd {
 			activeModel = c.GetModel()
 		}
 		m.agent.SetPreloadedContext(agent.LoadContext(enabledPluginMap(m.config), memoryEnabled, discoveryOn, activeModel, m.workDir))
+		// Surface the otherwise-invisible force-injected Kaizen digest once per
+		// active-model change, so the user can see the tuning is in effect.
+		m.announceKaizenDigest(activeModel)
 	}
 	agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 
@@ -11919,6 +12104,64 @@ func waitForRCRequest(rcCh <-chan server.RCRequest) tea.Cmd {
 		}
 		return rcRequestMsg{req: req}
 	}
+}
+
+// rcResolveMsg delivers a permission/question resolution from an external
+// client (Telegram bot) back to the TUI.
+type rcResolveMsg struct {
+	Resolution server.RCResolution
+}
+
+// waitForRCResolve listens for a resolution on the RC resolve channel. It is
+// armed once when /rc starts and re-armed after each resolve (see the
+// rcResolveMsg handler), so exactly one listener is ever active.
+func waitForRCResolve(ch chan server.RCResolution) tea.Cmd {
+	return func() tea.Msg {
+		res, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return rcResolveMsg{Resolution: res}
+	}
+}
+
+// submitRCQuestionAnswers builds the question-answer tool result from remotely
+// provided answers and resumes the agent, mirroring submitQuestionAnswers but
+// without touching the local question-dialog state. Each entry in `answers` is
+// the full set of selected options for one question (supports multi-select).
+func (m *model) submitRCQuestionAnswers(requestID string, questions []tool.QuestionPrompt, answers []tool.QuestionAnswerSet) tea.Cmd {
+	payload := make([]questionAnswerPayload, 0, len(answers))
+	for i, set := range answers {
+		ans := make([]questionAnswerValue, 0, len(set.Answers))
+		for _, sel := range set.Answers {
+			ans = append(ans, questionAnswerValue{Label: sel.Label, Text: sel.Text, Custom: sel.Custom})
+		}
+		// Prefer the labels carried in the set; fall back to the original prompt
+		// (index-aligned) so the tool result renders correctly.
+		header := set.Header
+		question := set.Question
+		if i < len(questions) {
+			if header == "" {
+				header = questions[i].Header
+			}
+			if question == "" {
+				question = questions[i].Question
+			}
+		}
+		payload = append(payload, questionAnswerPayload{Header: header, Question: question, Answers: ans})
+	}
+	b, _ := json.Marshal(payload)
+	toolMsg := agent.Message{Role: "tool", ToolID: requestID, Content: string(b)}
+	m.messages = append(m.messages, message{
+		role: roleAssistant,
+		text: "✓ answered question prompt (remote)",
+		raw:  &toolMsg,
+	})
+	m.saveSession()
+	if m.agent == nil {
+		return nil
+	}
+	return m.askAgent()
 }
 
 // waitForIDEUpdate listens for VS Code editor events from the /ide client.
@@ -12737,6 +12980,37 @@ func (m *model) appendDiscoveryNotice(text string) {
 		transient: true,
 		skipLLM:   true,
 	})
+}
+
+// announceKaizenDigest emits a one-time transcript notice naming the per-model
+// Kaizen tuning skills whose force-injected digest is now in the base prompt for
+// activeModel. The digest is otherwise invisible (it never surfaces as a skill
+// tool call or catalog entry), so users cannot tell it is active. Deduped by the
+// sorted skill-name set: it re-announces only when the active model changes the
+// admitted set. Sourced from the same KaizenSkillsForModel the digest uses, so
+// the notice can never disagree with what was actually injected.
+func (m *model) announceKaizenDigest(activeModel string) {
+	var names []string
+	for _, s := range skill.KaizenSkillsForModel(m.workDir, activeModel) {
+		if s.Digest == "" {
+			continue // only digest-bearing skills are force-injected
+		}
+		stack := s.Stack
+		if strings.TrimSpace(stack) == "" {
+			stack = "conduct"
+		}
+		names = append(names, fmt.Sprintf("%s → %s (%s)", s.Name, s.TunedFor, stack))
+	}
+	sort.Strings(names)
+	key := strings.Join(names, "\x00")
+	if key == m.kaizenAnnounced {
+		return
+	}
+	m.kaizenAnnounced = key
+	if len(names) == 0 {
+		return // model switched to one with no tuning; nothing to announce
+	}
+	m.appendDiscoveryNotice("Kaizen directives active (force-injected): " + strings.Join(names, ", "))
 }
 
 // scrollToCompactionBanner scrolls the viewport so the compaction summary
@@ -17849,7 +18123,10 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		srv.SetWorkDir(m.workDir)
 
 		// Register the RC bridge — server forwards requests through rcCh to TUI
-		bridge := srv.RegisterExternalSession(m.sessionID, m.config.Model, rcCh)
+		// and receives permission/question resolutions via resolveCh.
+		resolveCh := make(chan server.RCResolution, 4)
+		m.rcResolveCh = resolveCh
+		bridge := srv.RegisterExternalSession(m.sessionID, m.config.Model, rcCh, resolveCh, token)
 
 		ln, err := srv.Listen()
 		if err != nil {
@@ -17868,6 +18145,31 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		}()
 
 		boundAddr := srv.Addr()
+
+		// Register this /rc instance in the local registry so external clients
+		// (e.g. the Telegram bot) can discover and drive it. A heartbeat goroutine
+		// keeps the entry fresh until /rc off tears it down.
+		if id, err := newRCInstanceID(); err == nil {
+			m.rcInstanceID = id
+			entry := rc.Entry{
+				InstanceID: id,
+				SessionID:  m.sessionID,
+				Model:      m.config.Model,
+				CWD:        m.workDir,
+				Addr:       boundAddr,
+				Token:      token,
+				PID:        os.Getpid(),
+				StartedAt:  time.Now().Unix(),
+				LastSeen:   time.Now().Unix(),
+			}
+			if err := rc.Register(entry); err != nil {
+				log.Printf("rc: register instance: %v", err)
+			}
+			m.rcHBStop = make(chan struct{})
+			go m.rcHeartbeat(id)
+		} else {
+			log.Printf("rc: generate instance id: %v", err)
+		}
 		// Embed token in URL so the browser auto-authenticates on open.
 		url := fmt.Sprintf("http://%s/session/%s?token=%s", boundAddr, m.sessionID, token)
 
@@ -17930,6 +18232,53 @@ func (m *model) stopRCServer() {
 	m.rcCh = nil
 	m.rcBridge = nil
 	m.rcTailscaleURL = ""
+
+	// Tear down the registry heartbeat and remove this instance's entry so
+	// external clients stop offering it as a target.
+	if m.rcHBStop != nil {
+		close(m.rcHBStop)
+		m.rcHBStop = nil
+	}
+	if m.rcInstanceID != "" {
+		if err := rc.Unregister(m.rcInstanceID); err != nil {
+			log.Printf("rc: unregister instance: %v", err)
+		}
+		m.rcInstanceID = ""
+	}
+
+	// Drop any in-flight remote approval/question state and detach the resolve
+	// channel. We nil it (never close it) so a concurrent HTTP handler cannot
+	// panic sending to a closed channel; the TUI's resolve listener then blocks
+	// harmlessly on a nil channel.
+	m.rcResolveCh = nil
+	m.rcPendingPerm = nil
+	m.rcPendingQuestion = nil
+}
+
+// newRCInstanceID returns a short random hex id used to key this /rc instance
+// in the local registry.
+func newRCInstanceID() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// rcHeartbeat keeps this instance's registry entry fresh until stopped.
+func (m *model) rcHeartbeat(id string) {
+	t := time.NewTicker(rc.HeartbeatInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.rcHBStop:
+			return
+		case <-t.C:
+			if err := rc.Touch(id); err != nil {
+				log.Printf("rc: heartbeat: %v", err)
+			}
+		}
+	}
 }
 
 // stopRemoteControl is the tea.Cmd returned by /rc off. It tears down the RC

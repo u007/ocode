@@ -30,23 +30,27 @@ const (
 	connectStageDeviceCode  // Copilot: show user_code, await poll
 	connectStageAccountID   // Cloudflare Workers: collect account ID before API key
 	connectStageGatewayURL  // Cloudflare AI Gateway: collect gateway URL before API key
+	connectStageGrokCookies // Grok subscription: collect x.com auth_token + ct0 cookies
 	connectStageMessage
 )
 
 type connectDialog struct {
-	stage           connectStage
-	providerIdx     int
-	methodIdx       int
-	provider        *auth.Provider
-	methods         []connectMethod
-	keyInput        textinput.Model
-	codeInput       textinput.Model
-	accountIDInput  textinput.Model
-	accountID       string
-	gatewayURLInput textinput.Model
-	gatewayURL      string
-	message         string
-	messageOK       bool
+	stage              connectStage
+	providerIdx        int
+	methodIdx          int
+	provider           *auth.Provider
+	methods            []connectMethod
+	keyInput           textinput.Model
+	codeInput          textinput.Model
+	accountIDInput     textinput.Model
+	accountID          string
+	gatewayURLInput    textinput.Model
+	gatewayURL         string
+	grokAuthTokenInput textinput.Model
+	grokCt0Input       textinput.Model
+	grokCookieField    int // 0 = auth_token, 1 = ct0
+	message            string
+	messageOK          bool
 
 	// OAuth-flow scratch state.
 	anthropicFlow auth.AnthropicFlow
@@ -82,13 +86,26 @@ func (m *model) openConnectDialog() {
 	gwIn.Placeholder = "Cloudflare AI Gateway URL (e.g. https://gateway.ai.cloudflare.com/v1/account/gateway)"
 	gwIn.CharLimit = 256
 
+	grokAt := textinput.New()
+	grokAt.Placeholder = "x.com cookie: auth_token"
+	grokAt.CharLimit = 2048
+	grokAt.EchoMode = textinput.EchoPassword
+	grokAt.EchoCharacter = '•'
+	grokCt0 := textinput.New()
+	grokCt0.Placeholder = "x.com cookie: ct0"
+	grokCt0.CharLimit = 2048
+	grokCt0.EchoMode = textinput.EchoPassword
+	grokCt0.EchoCharacter = '•'
+
 	m.connect = &connectDialog{
-		stage:           connectStageProvider,
-		providerIdx:     0,
-		keyInput:        ti,
-		codeInput:       codeIn,
-		accountIDInput:  acctIn,
-		gatewayURLInput: gwIn,
+		stage:              connectStageProvider,
+		providerIdx:        0,
+		keyInput:           ti,
+		codeInput:          codeIn,
+		accountIDInput:     acctIn,
+		gatewayURLInput:    gwIn,
+		grokAuthTokenInput: grokAt,
+		grokCt0Input:       grokCt0,
 	}
 	m.showConnect = true
 }
@@ -114,7 +131,14 @@ func (m *model) buildMethods() []connectMethod {
 			if am.Run == nil {
 				continue
 			}
-			out = append(out, connectMethod{id: "plugin_" + am.Label, label: am.Label})
+			id := "plugin_" + am.Label
+			// Grok's x.com subscription needs cookies collected by the TUI,
+			// so it gets a dedicated method id handled outside the generic
+			// plugin dispatch.
+			if p.ID == "grok" && strings.Contains(am.Label, "Subscription") {
+				id = "grok_subscription"
+			}
+			out = append(out, connectMethod{id: id, label: am.Label})
 		}
 	} else {
 		switch p.OAuthFlow {
@@ -212,6 +236,13 @@ func (m model) renderConnect() string {
 		header = m.styles.Header.Render("Connect " + m.connect.provider.Label)
 		body = m.connect.gatewayURLInput.View()
 		hint = hintStyle.Render("Enter your Cloudflare AI Gateway URL, then press Enter")
+
+	case connectStageGrokCookies:
+		header = m.styles.Header.Render("Grok Subscription — x.com cookies")
+		body = "Paste the x.com session cookies from your browser after signing in to grok.com.\n\n" +
+			m.connect.grokAuthTokenInput.View() + "\n" +
+			m.connect.grokCt0Input.View() + "\n"
+		hint = hintStyle.Render("Enter each field · after ct0 press Enter to connect · Esc back")
 
 	case connectStagePasteCode:
 		header = m.styles.Header.Render("Anthropic OAuth: " + strings.ToUpper(m.connect.anthropicMode))
@@ -443,6 +474,44 @@ func (m model) updateConnectDialog(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		d.gatewayURLInput, cmd = d.gatewayURLInput.Update(msg)
 		return m, cmd
 
+	case connectStageGrokCookies:
+		switch keyStr {
+		case "esc":
+			d.stage = connectStageMethod
+			return m, nil
+		case "enter":
+			if d.grokCookieField == 0 {
+				if strings.TrimSpace(d.grokAuthTokenInput.Value()) == "" {
+					d.message = "x.com auth_token cannot be empty."
+					d.messageOK = false
+					d.stage = connectStageMessage
+					return m, nil
+				}
+				d.grokCookieField = 1
+				d.grokCt0Input.Focus()
+				return m, nil
+			}
+			authToken := strings.TrimSpace(d.grokAuthTokenInput.Value())
+			ct0 := strings.TrimSpace(d.grokCt0Input.Value())
+			if authToken == "" || ct0 == "" {
+				d.message = "Both x.com cookies (auth_token and ct0) are required."
+				d.messageOK = false
+				d.stage = connectStageMessage
+				return m, nil
+			}
+			d.message = "Exchanging x.com cookies for a Grok subscription token…"
+			d.messageOK = true
+			d.stage = connectStageMessage
+			return m, m.startGrokSubscription(authToken, ct0)
+		}
+		var cmd tea.Cmd
+		if d.grokCookieField == 0 {
+			d.grokAuthTokenInput, cmd = d.grokAuthTokenInput.Update(msg)
+		} else {
+			d.grokCt0Input, cmd = d.grokCt0Input.Update(msg)
+		}
+		return m, cmd
+
 	case connectStagePasteCode:
 		switch keyStr {
 		case "esc":
@@ -548,6 +617,14 @@ func (m model) applyConnectMethod() (tea.Model, tea.Cmd) {
 		auth.OpenURL(flow.URL)
 		return m, nil
 
+	case "grok_subscription":
+		d.grokCookieField = 0
+		d.grokAuthTokenInput.SetValue("")
+		d.grokCt0Input.SetValue("")
+		d.grokAuthTokenInput.Focus()
+		d.stage = connectStageGrokCookies
+		return m, nil
+
 	case "remove":
 		if err := auth.Remove(d.provider.ID); err != nil {
 			d.message = fmt.Sprintf("Failed to remove: %v", err)
@@ -630,6 +707,18 @@ func (m model) startCopilotDevice() tea.Cmd {
 			cred.Account = auth.CopilotFetchAccount(cred.AccessToken)
 		}
 		return connectOAuthFinishedMsg{provider: "copilot", cred: cred, err: err}
+	}
+}
+
+// startGrokSubscription exchanges the supplied x.com cookies for a Grok
+// subscription SSO token and reports back via connectOAuthFinishedMsg.
+func (m model) startGrokSubscription(authToken, ct0 string) tea.Cmd {
+	return func() tea.Msg {
+		cred, err := auth.GrokSubscriptionLogin(context.Background(), authToken, ct0)
+		if err != nil {
+			return connectOAuthFinishedMsg{provider: "grok", err: err}
+		}
+		return connectOAuthFinishedMsg{provider: "grok", cred: cred, err: nil}
 	}
 }
 

@@ -542,8 +542,11 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 		currentModel = h.cfg.Model
 	}
 
-	// Load all models from the models.dev registry.
-	allModels := agent.AllProviderModels()
+	// Load all models from the models.dev registry. Use the non-blocking
+	// variant: it consults the embedded snapshot plus any live caches already
+	// populated by the background preload (see Server.Serve), and never performs
+	// a synchronous network fetch inside the HTTP handler.
+	allModels := agent.AllProviderModelsCached()
 	for _, id := range allModels {
 		provider, modelName, ok := splitModelID(id)
 		if !ok {

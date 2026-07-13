@@ -49,7 +49,12 @@ func enabledPluginMap(cfg *config.Config) map[string]bool {
 	return enabled
 }
 
-func refreshCustomCommands(cfg *config.Config) {
+// refreshCustomCommands reloads plugin commands + skill-as-slash entries for
+// the given project root and active model. Kaizen (tuned_for) skills are
+// admitted only when activeModel matches (see skill.LoadSkillsForModel), so
+// switching model/workDir must call this again for the slash popup to update.
+// Empty workDir falls back to cwd; empty activeModel excludes all Kaizen skills.
+func refreshCustomCommands(cfg *config.Config, workDir, activeModel string) {
 	loadedCustomCommands = commands.LoadCommands(enabledPluginMap(cfg))
 	customCommandLookup = make(map[string]*commands.Command, len(loadedCustomCommands))
 	for i := range loadedCustomCommands {
@@ -58,10 +63,10 @@ func refreshCustomCommands(cfg *config.Config) {
 	}
 
 	// Register skills as slash commands. Skills loaded later in the search path
-	// (e.g. .claude/skill) are already deduplicated by LoadSkills (first-seen
-	// wins, .opencode/skills comes before .claude/skill). We only register a
+	// (e.g. .claude/skill) are already deduplicated by LoadSkillsForRoot
+	// (first-seen wins). Kaizen skills gate on activeModel. We only register a
 	// skill if no built-in command or custom command already claims that name.
-	for _, s := range skill.LoadSkills() {
+	for _, s := range skill.LoadSkillsForModel(workDir, activeModel) {
 		// Use the directory name as the command key so names with spaces still
 		// produce valid slash commands.
 		dirName := filepath.Base(filepath.Dir(s.Source))
@@ -84,6 +89,16 @@ func refreshCustomCommands(cfg *config.Config) {
 	}
 
 	agent.ApplyAgentConfig(cfg)
+}
+
+// refreshCustomCommands reloads slash skill entries for this model's workDir
+// and current model (Kaizen admit depends on both).
+func (m *model) refreshCustomCommands() {
+	if m == nil {
+		refreshCustomCommands(nil, "", "")
+		return
+	}
+	refreshCustomCommands(m.config, m.workDir, m.currentModelName())
 }
 
 func init() {
@@ -158,7 +173,7 @@ func init() {
 	}
 
 	commandHelpOutput = buildCommandHelpText(commandSpecs)
-	refreshCustomCommands(nil)
+	refreshCustomCommands(nil, "", "")
 }
 
 func lookupCommand(name string) *commandSpec {
@@ -536,7 +551,7 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 		p := m.config.Plugins[name]
 		p.Enabled = enabled
 		m.config.Plugins[name] = p
-		refreshCustomCommands(m.config)
+		m.refreshCustomCommands()
 		state := "enabled"
 		if !enabled {
 			state = "disabled"
@@ -1320,6 +1335,8 @@ func runCdCmd(m *model, args []string) tea.Cmd {
 
 	m.workDir = target
 	session.SetWorkDir(target)
+	// Re-register skills for the new root (project-local + Kaizen stack gate).
+	m.refreshCustomCommands()
 	m.files = newFilesModel(target)
 	var initDiffCmd tea.Cmd
 	m.git, initDiffCmd = newGitModel(target)

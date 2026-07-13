@@ -39,6 +39,13 @@ func TestCredential(ctx context.Context, id string) error {
 		_, err := CopilotExchangeAPIToken(ctx, cred.AccessToken)
 		return err
 	}
+	// Provider plugins may supply a provider-specific probe (e.g. Grok's
+	// subscription SSO probe). Prefer it over the generic fallback.
+	if c, ok := Get(id); ok {
+		if handled, err := probeViaHook(id, c); handled {
+			return err
+		}
+	}
 	// Generic openai-compatible providers: try /models with bearer.
 	if k := ResolveKey(id); k != "" {
 		return nil // unknown endpoint — assume ok rather than fail

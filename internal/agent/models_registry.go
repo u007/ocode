@@ -508,24 +508,48 @@ func allProviderModelsFromRegistry(refresh bool) []string {
 			}
 		}
 	}
-	// LM Studio live models
-	for _, m := range fetchLMStudioModels() {
-		ids = append(ids, "lmstudio/"+m)
+	// LM Studio, Requesty and Novita live models are only fetched on a live
+	// refresh (async picker loader, background preload). The cached path used by
+	// synchronous HTTP handlers and the TUI main loop must never block on the
+	// network, so it falls back to the embedded snapshot entries for those
+	// providers instead.
+	if refresh {
+		for _, m := range fetchLMStudioModels() {
+			ids = append(ids, "lmstudio/"+m)
+		}
+	} else if data := loadRegistry(); data != nil {
+		if entry, ok := data["lmstudio"]; ok {
+			for m := range entry.Models {
+				ids = append(ids, "lmstudio/"+m)
+			}
+		}
 	}
 	// Requesty live models — fall back to registry snapshot if API unreachable.
-	requestyLive := fetchRequestyLiveModels()
-	if len(requestyLive) > 0 {
-		for _, m := range requestyLive {
-			ids = append(ids, "requesty/"+m)
+	if refresh {
+		requestyLive := fetchRequestyLiveModels()
+		if len(requestyLive) > 0 {
+			for _, m := range requestyLive {
+				ids = append(ids, "requesty/"+m)
+			}
+		} else {
+			ids = append(ids, requestyRegistryFallback...)
 		}
 	} else {
 		ids = append(ids, requestyRegistryFallback...)
 	}
 	// Novita AI live models — fall back to registry snapshot if API unreachable.
-	novitaLive := fetchNovitaLiveModels()
-	if len(novitaLive) > 0 {
-		for m := range novitaLive {
-			ids = append(ids, "novita-ai/"+m)
+	if refresh {
+		novitaLive := fetchNovitaLiveModels()
+		if len(novitaLive) > 0 {
+			for m := range novitaLive {
+				ids = append(ids, "novita-ai/"+m)
+			}
+		} else if data := loadRegistry(); data != nil {
+			if entry, ok := data["novita-ai"]; ok {
+				for m := range entry.Models {
+					ids = append(ids, "novita-ai/"+m)
+				}
+			}
 		}
 	} else if data := loadRegistry(); data != nil {
 		if entry, ok := data["novita-ai"]; ok {

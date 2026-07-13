@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/snapshot"
@@ -972,6 +973,65 @@ func SaveOcodeConfig(cfg *OcodeConfig) error {
 	return writeOcodeConfigFile(path, cfg)
 }
 
+// lockOcodeConfig acquires a cross-process advisory lock on ocodeconfig.json
+// via an exclusive-create lock file, so a read-modify-write from one ocode
+// session can't interleave with another's and silently drop its change.
+// Returns an unlock func; on timeout it gives up waiting and returns a no-op
+// unlock rather than hanging the caller indefinitely.
+func lockOcodeConfig() (func(), error) {
+	path, err := ActiveOcodeConfigPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, err
+	}
+	lockPath := path + ".lock"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if err == nil {
+			f.Close()
+			return func() { os.Remove(lockPath) }, nil
+		}
+		if !os.IsExist(err) {
+			return nil, err
+		}
+		// A crashed process can leave the lock file behind forever; steal it
+		// once it's clearly stale rather than deadlocking every future save.
+		if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > 10*time.Second {
+			os.Remove(lockPath)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return func() {}, nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// withOcodeConfigLock loads the current config under lockOcodeConfig, lets fn
+// mutate it, and writes it back before releasing — the standard shape for
+// every Save* setter below. This closes the load-modify-write race that a
+// bare loadFullOcodeConfig()+SaveOcodeConfig() pair leaves open between two
+// concurrent ocode sessions.
+func withOcodeConfigLock(fn func(cfg *OcodeConfig) error) error {
+	unlock, err := lockOcodeConfig()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return fmt.Errorf("load ocode config: %w", err)
+	}
+	if err := fn(cfg); err != nil {
+		return err
+	}
+	return SaveOcodeConfig(cfg)
+}
+
 func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg == nil {
 		d := defaultOcodeConfig()
@@ -1084,63 +1144,57 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 }
 
 func SaveOcodePermissions(permissions PermissionConfig) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	// Preserve the on-disk auto-permission block (model, grants, context
-	// limits) when persisting permissions. ExportConfig only carries
-	// `enabled`; model/grants/limits are owned elsewhere and would otherwise
-	// be erased here by a session whose in-memory snapshot predates them (or a
-	// concurrent session). The caller is authoritative only for `enabled` and
-	// `grants`. The auto-permission `model` is owned EXCLUSIVELY by
-	// SavePermissionModel (the /permissions model command): a permissions write
-	// must never set or clear it, or a session that merely toggled a tool rule
-	// would clobber a model another concurrent session selected on disk.
-	if permissions.Auto != nil {
-		merged := AutoPermissionConfig{}
-		if cfg.Permissions.Auto != nil {
-			merged = *cfg.Permissions.Auto // start from disk: preserves model + limits
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		// Preserve the on-disk auto-permission block (model, grants, context
+		// limits) when persisting permissions. ExportConfig only carries
+		// `enabled`; model/grants/limits are owned elsewhere and would otherwise
+		// be erased here by a session whose in-memory snapshot predates them (or a
+		// concurrent session). The caller is authoritative only for `enabled` and
+		// `grants`. The auto-permission `model` is owned EXCLUSIVELY by
+		// SavePermissionModel (the /permissions model command): a permissions write
+		// must never set or clear it, or a session that merely toggled a tool rule
+		// would clobber a model another concurrent session selected on disk.
+		if permissions.Auto != nil {
+			merged := AutoPermissionConfig{}
+			if cfg.Permissions.Auto != nil {
+				merged = *cfg.Permissions.Auto // start from disk: preserves model + limits
+			}
+			merged.Enabled = permissions.Auto.Enabled
+			if permissions.Auto.Grants != nil {
+				merged.Grants = permissions.Auto.Grants
+			}
+			permissions.Auto = &merged
+		} else if cfg.Permissions.Auto != nil {
+			// This session never had an auto block but disk gained one (a concurrent
+			// session wrote it). We hold no authoritative opinion on it — not even
+			// `enabled` — so preserve the disk block verbatim.
+			permissions.Auto = cfg.Permissions.Auto
 		}
-		merged.Enabled = permissions.Auto.Enabled
-		if permissions.Auto.Grants != nil {
-			merged.Grants = permissions.Auto.Grants
-		}
-		permissions.Auto = &merged
-	} else if cfg.Permissions.Auto != nil {
-		// This session never had an auto block but disk gained one (a concurrent
-		// session wrote it). We hold no authoritative opinion on it — not even
-		// `enabled` — so preserve the disk block verbatim.
-		permissions.Auto = cfg.Permissions.Auto
-	}
-	cfg.Permissions = permissions
-	return SaveOcodeConfig(cfg)
+		cfg.Permissions = permissions
+		return nil
+	})
 }
 
 // SaveMaxSteps persists the max steps setting to the ocode config.
 // 0 or negative clears the override (unlimited, default cap of 100 applies).
 func SaveMaxSteps(n int) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.MaxSteps = n
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.MaxSteps = n
+		return nil
+	})
 }
 
 // SaveAutoPermissionEnabled persists only the auto-permission `enabled` flag
 // using load-modify-write, so it cannot clobber a concurrent session's
 // model/grants/tool rules the way a wholesale config write would.
 func SaveAutoPermissionEnabled(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	if cfg.Permissions.Auto == nil {
-		cfg.Permissions.Auto = &AutoPermissionConfig{}
-	}
-	cfg.Permissions.Auto.Enabled = enabled
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Auto == nil {
+			cfg.Permissions.Auto = &AutoPermissionConfig{}
+		}
+		cfg.Permissions.Auto.Enabled = enabled
+		return nil
+	})
 }
 
 // SaveExtraAllowedPath appends one cleaned path to extra_allowed_paths.
@@ -1170,21 +1224,17 @@ func SaveExtraAllowedPath(path string) error {
 	}
 
 	// Fall back to global config
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-
-	// Deduplicate
-	for _, p := range cfg.ExtraAllowedPaths {
-		if filepath.Clean(p) == cleaned {
-			return nil // Already present
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		// Deduplicate; re-saving unchanged content when already present is
+		// harmless (identical bytes on disk), so no special-case skip is needed.
+		for _, p := range cfg.ExtraAllowedPaths {
+			if filepath.Clean(p) == cleaned {
+				return nil
+			}
 		}
-	}
-
-	// Append and save
-	cfg.ExtraAllowedPaths = append(cfg.ExtraAllowedPaths, cleaned)
-	return SaveOcodeConfig(cfg)
+		cfg.ExtraAllowedPaths = append(cfg.ExtraAllowedPaths, cleaned)
+		return nil
+	})
 }
 
 // autoGrantKey returns the identity used to de-duplicate auto-grants. Interpreter
@@ -1204,96 +1254,80 @@ func autoGrantKey(g AutoGrant) string {
 // load-modify-write (no-op if an identical grant already exists), avoiding a
 // wholesale config write that would drop concurrent changes to other fields.
 func SaveAutoGrant(grant AutoGrant) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	if cfg.Permissions.Auto == nil {
-		cfg.Permissions.Auto = &AutoPermissionConfig{}
-	}
-	key := autoGrantKey(grant)
-	for _, existing := range cfg.Permissions.Auto.Grants {
-		if autoGrantKey(existing) == key {
-			return nil
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Auto == nil {
+			cfg.Permissions.Auto = &AutoPermissionConfig{}
 		}
-	}
-	cfg.Permissions.Auto.Grants = append(cfg.Permissions.Auto.Grants, grant)
-	return SaveOcodeConfig(cfg)
+		key := autoGrantKey(grant)
+		for _, existing := range cfg.Permissions.Auto.Grants {
+			if autoGrantKey(existing) == key {
+				return nil
+			}
+		}
+		cfg.Permissions.Auto.Grants = append(cfg.Permissions.Auto.Grants, grant)
+		return nil
+	})
 }
 
 func SaveEditor(editor string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Editor = editor
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Editor = editor
+		return nil
+	})
 }
 
 // SaveUploadDir persists only the upload_dir field using load-modify-write so
 // it cannot clobber a concurrent session's other config.
 func SaveUploadDir(dir string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.UploadDir = dir
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.UploadDir = dir
+		return nil
+	})
 }
 
 // SaveDiscoveryEnabled persists only the discovery.enabled flag using
 // load-modify-write so it cannot clobber a concurrent session's other config.
 func SaveDiscoveryEnabled(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Discovery.Enabled = enabled
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Discovery.Enabled = enabled
+		return nil
+	})
 }
 
 // SaveQueryEmbeddingModel persists the discovery embedding model + backend.
 // An empty backend preserves the existing on-disk value.
 func SaveQueryEmbeddingModel(modelID, backend string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Discovery.EmbeddingModel = modelID
-	if backend != "" {
-		cfg.Discovery.EmbeddingBackend = backend
-	}
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Discovery.EmbeddingModel = modelID
+		if backend != "" {
+			cfg.Discovery.EmbeddingBackend = backend
+		}
+		return nil
+	})
 }
 
 // SaveDiscoveryIgnorePaths persists the discovery ignore-paths list.
 func SaveDiscoveryIgnorePaths(paths []string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Discovery.IgnorePaths = paths
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Discovery.IgnorePaths = paths
+		return nil
+	})
 }
 
 // SaveLocalModelStatus persists the local model download status.
 func SaveLocalModelStatus(status string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Discovery.LocalModelStatus = status
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Discovery.LocalModelStatus = status
+		return nil
+	})
 }
 
 // SaveOcodeASTPlugin persists the enabled state of the opt-in "ast" tool.
 func SaveOcodeASTPlugin(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Plugins.AST = enabled
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Plugins.AST = enabled
+		return nil
+	})
 }
 
 // SaveIDEMode persists only the ide_mode field using load-modify-write so it
@@ -1304,12 +1338,10 @@ func SaveIDEMode(mode string) error {
 	default:
 		return fmt.Errorf("invalid ide_mode: %q (valid: %s, %s)", mode, IDEModeOff, IDEModeClaude)
 	}
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.IDEMode = mode
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.IDEMode = mode
+		return nil
+	})
 }
 
 func SaveEditorMode(mode string) error {
@@ -1318,12 +1350,10 @@ func SaveEditorMode(mode string) error {
 	default:
 		return fmt.Errorf("invalid editor_mode: %q (valid: %s, %s, %s)", mode, EditorModeExternal, EditorModeTmuxSplit, EditorModeTmuxWindow)
 	}
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.EditorMode = mode
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.EditorMode = mode
+		return nil
+	})
 }
 
 func getGlobalOcodeConfigPath() (string, error) {
@@ -1352,15 +1382,11 @@ func ActiveOcodeConfigPath() (string, error) {
 // SaveLastModel persists the last used provider/model string into the ocodeconfig.json
 // file so it can be restored across sessions.
 func SaveLastModel(providerModel string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-
-	raw, _ := json.Marshal(providerModel)
-	cfg.Extra[lastModelKey] = json.RawMessage(raw)
-
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		raw, _ := json.Marshal(providerModel)
+		cfg.Extra[lastModelKey] = json.RawMessage(raw)
+		return nil
+	})
 }
 
 // GetLastModel retrieves the last saved provider/model string from ocodeconfig.json.
@@ -1382,15 +1408,11 @@ func GetLastModel() string {
 // SaveLastThinkingBudget persists the last used thinking budget into ocodeconfig.json
 // so it can be restored across sessions.
 func SaveLastThinkingBudget(budget int) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-
-	raw, _ := json.Marshal(budget)
-	cfg.Extra[lastThinkingBudgetKey] = json.RawMessage(raw)
-
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		raw, _ := json.Marshal(budget)
+		cfg.Extra[lastThinkingBudgetKey] = json.RawMessage(raw)
+		return nil
+	})
 }
 
 // GetLastThinkingBudget retrieves the last saved thinking budget from
@@ -1427,62 +1449,54 @@ func loadFullOcodeConfig() (*OcodeConfig, error) {
 }
 
 func SaveTUITheme(theme string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.TUI.Theme = theme
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.TUI.Theme = theme
+		return nil
+	})
 }
 
 func SaveAdvisorModel(providerModel string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
+	if providerModel != "" {
+		if provider, model := SplitProviderModel(providerModel); provider == "" || model == "" {
+			return fmt.Errorf("advisor model must be in provider/model format")
+		}
 	}
-	if providerModel == "" {
-		// Reset to defaults.
-		cfg.Advisor = defaultAdvisorConfig()
-		return SaveOcodeConfig(cfg)
-	}
-	provider, model := SplitProviderModel(providerModel)
-	if provider == "" || model == "" {
-		return fmt.Errorf("advisor model must be in provider/model format")
-	}
-	cfg.Advisor.Provider = provider
-	cfg.Advisor.Model = model
-	cfg.Advisor.ClaudeCode = (provider == "claude-code")
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if providerModel == "" {
+			// Reset to defaults.
+			cfg.Advisor = defaultAdvisorConfig()
+			return nil
+		}
+		provider, model := SplitProviderModel(providerModel)
+		cfg.Advisor.Provider = provider
+		cfg.Advisor.Model = model
+		cfg.Advisor.ClaudeCode = (provider == "claude-code")
+		return nil
+	})
 }
 
 // SaveDocPromptEnabled persists the doc-prompt toggle to config.
 func SaveDocPromptEnabled(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.DocPromptEnabled = enabled
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.DocPromptEnabled = enabled
+		return nil
+	})
 }
 
 // SaveAdvisorEnabled persists the advisor enabled/disabled state to config.
 func SaveAdvisorEnabled(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Advisor.Enabled = enabled
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Advisor.Enabled = enabled
+		return nil
+	})
 }
 
 // SaveMemoryEnabled persists the memory prompt-injection toggle to config.
 func SaveMemoryEnabled(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.MemoryEnabled = enabled
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.MemoryEnabled = enabled
+		return nil
+	})
 }
 
 // ResolveRedactionMode returns the effective redaction mode for a RedactionConfig.
@@ -1501,12 +1515,10 @@ func ResolveRedactionMode(rc RedactionConfig) string {
 
 // SaveSecurityRedaction persists the security.redaction config via a targeted load-modify-save.
 func SaveSecurityRedaction(mutate func(*RedactionConfig)) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	mutate(&cfg.Security.Redaction)
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		mutate(&cfg.Security.Redaction)
+		return nil
+	})
 }
 
 // DefaultAdvisorConfig returns the default advisor configuration.
@@ -1534,183 +1546,155 @@ func SplitProviderModel(s string) (string, string) {
 }
 
 func SaveSmallModel(model string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.SmallModel = model
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.SmallModel = model
+		return nil
+	})
 }
 
 // SaveSmallModelEnabled persists the small model enabled/disabled state to config.
 func SaveSmallModelEnabled(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.SmallModelEnabled = enabled
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.SmallModelEnabled = enabled
+		return nil
+	})
 }
 
 // SaveRecapModel persists the recap model override to config.
 // Set to empty string to clear the override and fall back to the small model.
 func SaveRecapModel(model string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.RecapModel = model
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.RecapModel = model
+		return nil
+	})
 }
 
 // SaveRecapModelEnabled persists the recap model enabled/disabled state to config.
 func SaveRecapModelEnabled(enabled bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.RecapModelEnabled = enabled
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.RecapModelEnabled = enabled
+		return nil
+	})
 }
 
 // SaveOcrConfig persists the full OCR configuration via load-modify-write.
 // Only the OCR sub-tree is touched; all other fields are preserved from disk.
-func SaveOcrConfig(cfg ocr.OcrConfig) error {
-	ocode, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	ocode.Ocr = cfg
-	return SaveOcodeConfig(ocode)
+func SaveOcrConfig(ocrCfg ocr.OcrConfig) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Ocr = ocrCfg
+		return nil
+	})
 }
 
 // SaveOcrModel persists just the OCR model ID to config (legacy compatibility).
 // Writes to whichever backend is currently active.
 func SaveOcrModel(model string) error {
-	ocode, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	ocode.Ocr.OpenAI.Model = model
-	ocode.Ocr.Paddle.Variant = model
-	return SaveOcodeConfig(ocode)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Ocr.OpenAI.Model = model
+		cfg.Ocr.Paddle.Variant = model
+		return nil
+	})
 }
 
 // SaveOcrEnabled persists just the OCR tool enabled/disabled state (legacy compatibility).
 func SaveOcrEnabled(enabled bool) error {
-	ocode, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	ocode.Ocr.Enabled = enabled
-	return SaveOcodeConfig(ocode)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Ocr.Enabled = enabled
+		return nil
+	})
 }
 
 // SavePinnedSkills persists the list of permanently-discovered skill names.
 // The list lives under the discovery block in the config file — there is a
 // single source of truth (`Discovery.PinnedSkills`) so load/save are symmetric.
 func SavePinnedSkills(skills []string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Discovery.PinnedSkills = append([]string{}, skills...)
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Discovery.PinnedSkills = append([]string{}, skills...)
+		return nil
+	})
 }
 
 // SavePermissionModel persists the auto-permission model override.
 // Set to empty string to clear the override and fall back to the small model.
 func SavePermissionModel(providerModel string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	if cfg.Permissions.Auto == nil {
-		cfg.Permissions.Auto = &AutoPermissionConfig{Enabled: false}
-	}
-	cfg.Permissions.Auto.Model = providerModel
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Auto == nil {
+			cfg.Permissions.Auto = &AutoPermissionConfig{Enabled: false}
+		}
+		cfg.Permissions.Auto.Model = providerModel
+		return nil
+	})
 }
 
 // SavePermissionModeSwitch persists the permission mode (normal/yolo/locked)
 // via load-modify-write, so it cannot clobber a concurrent session's rules or
 // auto-permission state.
 func SavePermissionModeSwitch(mode string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	cfg.Permissions.Mode = mode
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.Permissions.Mode = mode
+		return nil
+	})
 }
 
 // SaveSingleToolRule sets one entry in permissions.tools via load-modify-write.
 // Only the named tool's entry is touched; all other rules and permissions fields
 // are preserved from disk.
 func SaveSingleToolRule(tool, level string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	if cfg.Permissions.Tools == nil {
-		cfg.Permissions.Tools = make(map[string]string)
-	}
-	cfg.Permissions.Tools[tool] = level
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Tools == nil {
+			cfg.Permissions.Tools = make(map[string]string)
+		}
+		cfg.Permissions.Tools[tool] = level
+		return nil
+	})
 }
 
 // SaveSingleBashPrefixRule sets one entry in permissions.bash.prefixes via
 // load-modify-write. Only the named prefix entry is touched.
 func SaveSingleBashPrefixRule(prefix, level string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	if cfg.Permissions.Bash.Prefixes == nil {
-		cfg.Permissions.Bash.Prefixes = make(map[string]string)
-	}
-	cfg.Permissions.Bash.Prefixes[prefix] = level
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Bash.Prefixes == nil {
+			cfg.Permissions.Bash.Prefixes = make(map[string]string)
+		}
+		cfg.Permissions.Bash.Prefixes[prefix] = level
+		return nil
+	})
 }
 
 // SaveBashAutoAllowPrefixEntry adds or removes a single entry from
 // permissions.bash.auto_allow_prefixes via load-modify-write.
 func SaveBashAutoAllowPrefixEntry(prefix string, add bool) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	if add {
-		for _, p := range cfg.Permissions.Bash.AutoAllowPrefixes {
-			if p == prefix {
-				return nil // already present
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if add {
+			for _, p := range cfg.Permissions.Bash.AutoAllowPrefixes {
+				if p == prefix {
+					return nil // already present
+				}
 			}
-		}
-		cfg.Permissions.Bash.AutoAllowPrefixes = append(cfg.Permissions.Bash.AutoAllowPrefixes, prefix)
-	} else {
-		kept := cfg.Permissions.Bash.AutoAllowPrefixes[:0]
-		for _, p := range cfg.Permissions.Bash.AutoAllowPrefixes {
-			if p != prefix {
-				kept = append(kept, p)
+			cfg.Permissions.Bash.AutoAllowPrefixes = append(cfg.Permissions.Bash.AutoAllowPrefixes, prefix)
+		} else {
+			kept := cfg.Permissions.Bash.AutoAllowPrefixes[:0]
+			for _, p := range cfg.Permissions.Bash.AutoAllowPrefixes {
+				if p != prefix {
+					kept = append(kept, p)
+				}
 			}
+			cfg.Permissions.Bash.AutoAllowPrefixes = kept
 		}
-		cfg.Permissions.Bash.AutoAllowPrefixes = kept
-	}
-	return SaveOcodeConfig(cfg)
+		return nil
+	})
 }
 
 // SaveSingleBashPrefixMode sets one entry in permissions.bash.prefix_modes via
 // load-modify-write. Only the named prefix mode entry is touched.
 func SaveSingleBashPrefixMode(prefix, mode string) error {
-	cfg, err := loadFullOcodeConfig()
-	if err != nil {
-		return fmt.Errorf("load ocode config: %w", err)
-	}
-	if cfg.Permissions.Bash.PrefixModes == nil {
-		cfg.Permissions.Bash.PrefixModes = make(map[string]string)
-	}
-	cfg.Permissions.Bash.PrefixModes[prefix] = mode
-	return SaveOcodeConfig(cfg)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.Permissions.Bash.PrefixModes == nil {
+			cfg.Permissions.Bash.PrefixModes = make(map[string]string)
+		}
+		cfg.Permissions.Bash.PrefixModes[prefix] = mode
+		return nil
+	})
 }
 
 // ResolveEditor returns the editor to use for opening files.

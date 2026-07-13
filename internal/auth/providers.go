@@ -26,12 +26,52 @@ func getRefreshMu(provider string) *sync.Mutex {
 	return m
 }
 
+// RefreshLocked runs a provider-specific credential refresh while holding the
+// per-provider refresh mutex, so concurrent refreshes for the same provider are
+// serialized instead of racing. It mirrors the lock-then-re-check pattern used
+// by refreshIfExpiring and additionally re-reads the stored credential after
+// acquiring the lock, so a refresh already performed by another goroutine is
+// reused rather than repeated.
+//
+// refresh performs the actual provider-specific refresh (e.g.
+// GrokSubscriptionRefresh) and returns the refreshed credential. On success the
+// refreshed credential is persisted via Set and returned. The second return
+// value is always true (handled) so callers do not fall through to the generic
+// refresh-token path.
+func RefreshLocked(id string, cred Credential, refresh func() (Credential, error)) (Credential, bool) {
+	mu := getRefreshMu(id)
+	mu.Lock()
+	defer mu.Unlock()
+
+	const skew = 60 * time.Second
+	// Another goroutine may have finished refreshing this credential while we
+	// were waiting on the lock. Re-read it from storage and reuse the fresh
+	// result instead of issuing a redundant refresh.
+	if current, ok := Get(id); ok && current.ExpiresAt != 0 {
+		if time.Until(time.Unix(current.ExpiresAt, 0)) > skew {
+			return current, true
+		}
+	}
+	refreshed, err := refresh()
+	if err != nil || refreshed.AccessToken == "" {
+		return cred, true
+	}
+	_ = Set(id, refreshed)
+	return refreshed, true
+}
+
 // refreshIfExpiring returns a fresh credential if the stored OAuth token is
 // expired or within the skew window. Falls back to the original credential
 // on refresh failure (caller decides whether to surface the error).
 func refreshIfExpiring(id string, cred Credential) Credential {
 	if cred.Kind != KindOAuth {
 		return cred
+	}
+	// Provider-specific refresh (e.g. Grok's cookie-based x.com SSO refresh)
+	// is delegated to a hook registered by the provider plugin, keeping the
+	// shared auth layer free of per-provider special-casing.
+	if refreshed, handled := refreshViaHook(id, cred); handled {
+		return refreshed
 	}
 	if cred.ExpiresAt == 0 || cred.RefreshToken == "" {
 		return cred
@@ -100,6 +140,7 @@ var Providers = []Provider{
 	{ID: "alibaba-coding", Label: "Alibaba Coding", EnvVar: "DASHSCOPE_CODING_API_KEY"},
 	{ID: "chutes", Label: "Chutes", EnvVar: "CHUTES_API_KEY"},
 	{ID: "deepseek", Label: "DeepSeek", EnvVar: "DEEPSEEK_API_KEY"},
+	{ID: "grok", Label: "Grok (xAI)", EnvVar: "XAI_API_KEY"},
 	{ID: "novita-ai", Label: "Novita AI", EnvVar: "NOVITA_API_KEY"},
 	{ID: "requesty", Label: "Requesty", EnvVar: "REQUESTY_API_KEY"},
 	{ID: "deepinfra", Label: "DeepInfra", EnvVar: "DEEPINFRA_API_KEY"},

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/tool"
@@ -123,16 +124,25 @@ func TestHandleAnswerQuestionValidation(t *testing.T) {
 	}
 }
 
-func TestHandleAnswerQuestionRejectedWhenBridged(t *testing.T) {
+func TestHandleAnswerQuestionForwardsToBridgeWhenBridged(t *testing.T) {
+	resolveCh := make(chan RCResolution, 1)
 	h := NewHandler()
-	h.rc = &RCBridge{SessionID: "tui-sess"}
+	h.rc = &RCBridge{SessionID: "tui-sess", ResolveCh: resolveCh}
 
 	body := `{"request_id":"call-1","answers":[{"question":"q","answers":[{"label":"Staging"}]}]}`
 	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.HandleAnswerQuestion(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	select {
+	case res := <-resolveCh:
+		if res.RequestID != "call-1" || len(res.Answers) != 1 || len(res.Answers[0].Answers) != 1 || res.Answers[0].Answers[0].Label != "Staging" {
+			t.Fatalf("unexpected resolution: %+v", res)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("no resolution forwarded to the bridge")
 	}
 }
 
@@ -200,5 +210,33 @@ func TestHandleAnswerQuestionResolvesAndContinues(t *testing.T) {
 	}
 	if !sawResolved {
 		t.Fatalf("expected a question_resolved mirror event")
+	}
+}
+
+// TestHandleAnswerQuestionForwardsMultipleSelection verifies the RC bridge keeps
+// every selected answer for a multi-select question (it must not collapse to the
+// first selection as the old code did).
+func TestHandleAnswerQuestionForwardsMultipleSelection(t *testing.T) {
+	resolveCh := make(chan RCResolution, 1)
+	h := NewHandler()
+	h.rc = &RCBridge{SessionID: "tui-sess", ResolveCh: resolveCh}
+
+	body := `{"request_id":"call-1","answers":[{"question":"q","answers":[{"label":"A","text":"A"},{"label":"B","text":"B"}]}]}`
+	req := httptest.NewRequest("POST", "/api/questions", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.HandleAnswerQuestion(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	select {
+	case res := <-resolveCh:
+		if len(res.Answers) != 1 || len(res.Answers[0].Answers) != 2 {
+			t.Fatalf("multi-select collapsed: %+v", res)
+		}
+		if res.Answers[0].Answers[0].Label != "A" || res.Answers[0].Answers[1].Label != "B" {
+			t.Fatalf("unexpected multi-select answers: %+v", res.Answers[0].Answers)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("no resolution forwarded to the bridge")
 	}
 }

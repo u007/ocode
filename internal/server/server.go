@@ -162,6 +162,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/permissions/resolve", s.authMiddleware(s.handleResolvePermission))
 	s.mux.HandleFunc("GET /api/permissions/yolo", s.authMiddleware(s.handleGetYolo))
 	s.mux.HandleFunc("PUT /api/permissions/yolo", s.authMiddleware(s.handleSetYolo))
+	// Remote-control (external client, e.g. Telegram) permission/question
+	// resolution. These target the live TUI agent via the RC bridge.
+	s.mux.HandleFunc("POST /api/rc/permission/resolve", s.authMiddleware(s.handler.handleRCPermissionResolve))
+	s.mux.HandleFunc("POST /api/rc/question/answer", s.authMiddleware(s.handler.handleRCQuestionAnswer))
 
 	// MCP
 	s.mux.HandleFunc("GET /api/mcp", s.authMiddleware(s.handleListMCP))
@@ -386,6 +390,12 @@ func (s *Server) SetWorkDir(dir string) {
 
 // Serve serves requests on an already-bound listener.
 func (s *Server) Serve(ln net.Listener) error {
+	// Populate the live model caches (OpenRouter, Novita) in the background so
+	// the model-list endpoint can enrich the embedded snapshot with live models
+	// without ever blocking a request on a network fetch. The Preload* helpers
+	// are idempotent and degrade gracefully when the network is unavailable.
+	go agent.PreloadOpenRouterModels()
+	go agent.PreloadNovitaModels()
 	log.Printf("serving on %s", s.addr)
 	return http.Serve(ln, s.mux)
 }
@@ -394,12 +404,14 @@ func (s *Server) Serve(ln net.Listener) error {
 // so the web UI can stream and interact with it. Instead of creating a new agent,
 // the server forwards requests through the rcCh channel to the TUI's Update loop.
 // Returns the bridge so the caller can push messages into it.
-func (s *Server) RegisterExternalSession(sessionID, model string, rcCh chan RCRequest) *RCBridge {
+func (s *Server) RegisterExternalSession(sessionID, model string, rcCh chan RCRequest, resolveCh chan RCResolution, token string) *RCBridge {
 	s.handler.mu.Lock()
 	defer s.handler.mu.Unlock()
 
 	bridge := &RCBridge{
 		RcCh:      rcCh,
+		ResolveCh: resolveCh,
+		Token:     token,
 		SessionID: sessionID,
 		Model:     model,
 	}

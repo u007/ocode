@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/tool"
@@ -105,16 +107,34 @@ func TestHandleResolvePermissionValidation(t *testing.T) {
 	}
 }
 
-func TestHandleResolvePermissionRejectedWhenBridged(t *testing.T) {
+func TestHandleResolvePermissionForwardsToBridgeWhenBridged(t *testing.T) {
+	resolveCh := make(chan RCResolution, 1)
 	h := NewHandler()
-	h.rc = &RCBridge{SessionID: "tui-sess"}
+	h.rc = &RCBridge{SessionID: "tui-sess", ResolveCh: resolveCh}
 
-	body := `{"request_id":"call-1","approved":true}`
-	req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	h.HandleResolvePermission(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want %d (body=%s)", rec.Code, http.StatusConflict, rec.Body.String())
+	// Approve must forward an "allow" resolution; deny an explicit "deny".
+	for _, tc := range []struct {
+		approved bool
+		want     string
+	}{
+		{true, "allow"},
+		{false, "deny"},
+	} {
+		body := `{"request_id":"call-1","approved":` + strconv.FormatBool(tc.approved) + `}`
+		req := httptest.NewRequest("POST", "/api/permissions/resolve", strings.NewReader(body))
+		rec := httptest.NewRecorder()
+		h.HandleResolvePermission(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("approved=%v status = %d, want 200 (body=%s)", tc.approved, rec.Code, rec.Body.String())
+		}
+		select {
+		case res := <-resolveCh:
+			if res.RequestID != "call-1" || res.Decision != tc.want {
+				t.Fatalf("approved=%v unexpected resolution: %+v", tc.approved, res)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("approved=%v no resolution forwarded to the bridge", tc.approved)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/tool"
 )
 
 // RCRequest is a message from the web UI that should be forwarded to the TUI's agent.
@@ -12,6 +13,23 @@ type RCRequest struct {
 	Content  string
 	StreamCh chan<- SSEEvent // for live SSE deltas (nil for non-streaming)
 	ResultCh chan<- RCResult // final response
+	// RemoteApproval marks a request driven by an external client (e.g. the
+	// Telegram bot) that wants to handle permission asks / question prompts
+	// itself rather than via the TUI's local dialog. The TUI branches on this
+	// so the web /rc UI (RemoteApproval=false) keeps its existing behavior.
+	RemoteApproval bool
+}
+
+// RCResolution carries a decision for a permission ask or the answers to a
+// question prompt back from an external client (Telegram bot) to the TUI.
+type RCResolution struct {
+	// RequestID is the tool-call id of the paused permission/question ask.
+	RequestID string `json:"request_id"`
+	// Decision is "allow", "deny", or "always" (persist an allow rule).
+	Decision string `json:"decision"`
+	// Answers answers a question prompt; one set per question, preserving
+	// multiple selections (see tool.QuestionAnswerSet).
+	Answers []tool.QuestionAnswerSet `json:"answers"`
 }
 
 // RCResult is the final response from the TUI's agent after processing an RCRequest.
@@ -27,6 +45,19 @@ type RCBridge struct {
 	// RcCh is the channel to send RCRequests to the TUI.
 	// The TUI reads from this and processes requests through its own agent.
 	RcCh chan RCRequest
+
+	// ResolveCh carries permission/question resolutions from external clients
+	// (e.g. the Telegram bot) back to the TUI. The TUI reads from this while a
+	// remote-controlled turn is paused on an ask. Never closed while the server
+	// is alive — an HTTP handler sending to a closed channel would panic.
+	ResolveCh chan RCResolution
+
+	// Token is the per-instance RC auth token that external clients (Telegram
+	// bot, web UI) must present to drive this session. It is the same secret as
+	// the server password and the rc.Registry entry token. The permission/
+	// question resolution handlers require it so that only an authenticated
+	// client can approve, deny, or mint permission decisions.
+	Token string
 
 	// SessionID is the TUI session being controlled.
 	SessionID string
@@ -105,6 +136,22 @@ func (b *RCBridge) Agent() *agent.Agent {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.agent
+}
+
+// SendResolution queues a permission/question resolution for the TUI. It is
+// non-blocking: if the TUI is not currently listening (or the buffer is full)
+// it returns false and the caller should surface a 503. Never blocks, so an
+// HTTP handler cannot hang the server.
+func (b *RCBridge) SendResolution(res RCResolution) bool {
+	if b.ResolveCh == nil {
+		return false
+	}
+	select {
+	case b.ResolveCh <- res:
+		return true
+	default:
+		return false
+	}
 }
 
 // SetMessages updates the bridge's message list (called from TUI goroutine).

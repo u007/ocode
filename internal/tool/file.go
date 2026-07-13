@@ -490,6 +490,14 @@ func (t WriteTool) Definition() map[string]interface{} {
 	}
 }
 
+// undoHint appends a reminder of how to revert this edit, if a tool_call_id was captured.
+func undoHint(result, tcID string) string {
+	if tcID == "" {
+		return result
+	}
+	return fmt.Sprintf("%s\n\n(you may undo: undo_file_change tool_call_id=%q)", result, tcID)
+}
+
 func (t WriteTool) Execute(args json.RawMessage) (string, error) {
 	return t.ExecuteCtx(context.Background(), args)
 }
@@ -552,7 +560,7 @@ func (t WriteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 	}
 	FormatAfterWrite(safe, formatters)
 
-	return FormatDiff(params.Path, string(prev), newContent), nil
+	return undoHint(FormatDiff(params.Path, string(prev), newContent), tcID), nil
 }
 
 // ReplaceLinesTool replaces a line range with new content — positional, no string search.
@@ -667,7 +675,7 @@ func (t ReplaceLinesToolImpl) ExecuteCtx(ctx context.Context, args json.RawMessa
 	}
 	FormatAfterWrite(safe, formatters)
 
-	return FormatDiff(params.Path, string(prev), newContent), nil
+	return undoHint(FormatDiff(params.Path, string(prev), newContent), tcID), nil
 }
 
 type DeleteTool struct{}
@@ -725,7 +733,7 @@ func (t DeleteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (strin
 		store.RegisterWrite(safe, tcID)
 	}
 
-	return fmt.Sprintf("Successfully deleted %s", params.Path), nil
+	return undoHint(fmt.Sprintf("Successfully deleted %s", params.Path), tcID), nil
 }
 
 type EditTool struct {
@@ -817,7 +825,7 @@ func (t EditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	}
 	FormatAfterWrite(safe, formatters)
 
-	return FormatDiff(params.Path, fileContent, newContent), nil
+	return undoHint(FormatDiff(params.Path, fileContent, newContent), tcID), nil
 }
 
 type MultiEditTool struct {
@@ -946,7 +954,7 @@ func (t MultiEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 	}
 	FormatAfterWrite(safe, formatters)
 
-	return FormatDiff(params.FilePath, origContent, newContent), nil
+	return undoHint(FormatDiff(params.FilePath, origContent, newContent), tcID), nil
 }
 
 type MultiFileEditTool struct {
@@ -1084,7 +1092,7 @@ func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage)
 		FormatAfterWrite(safe, formatters)
 	}
 
-	return fmt.Sprintf("Successfully performed %d edits across %d file(s)", len(params.Edits), len(fileOrder)), nil
+	return undoHint(fmt.Sprintf("Successfully performed %d edits across %d file(s)", len(params.Edits), len(fileOrder)), tcID), nil
 }
 
 func ExtraAllowedRoots() []string {

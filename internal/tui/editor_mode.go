@@ -101,6 +101,31 @@ func buildTmuxOpenCmd(mode string, editor string, path string, width int) teaCmd
 	}
 }
 
+// buildTmuxOpenCmdAtLine is like buildTmuxOpenCmd but opens path at lineNo when
+// the editor supports it (lineNo <= 0 falls back to a plain open).
+func buildTmuxOpenCmdAtLine(mode string, editor string, path string, width, lineNo int) teaCmdBuilder {
+	return func() *exec.Cmd {
+		var editorCmd string
+		if args := editorArgsWithLine(editor, path, lineNo); args != nil {
+			editorCmd = strings.Join(args, " ")
+		} else {
+			editorCmd = editor + " " + shellQuote(path)
+		}
+		waitToken := fmt.Sprintf("ocode-editor-%d-%d", os.Getpid(), atomic.AddUint64(&tmuxWaitSeq, 1))
+		paneCmd := editorCmd + "; tmux wait-for -S " + shellQuote(waitToken)
+
+		switch mode {
+		case config.EditorModeTmuxWindow:
+			return exec.Command(tmuxExecutable, "new-window", paneCmd, ";", "wait-for", waitToken)
+		default:
+			if width >= 120 {
+				return exec.Command(tmuxExecutable, "split-window", "-h", paneCmd, ";", "wait-for", waitToken)
+			}
+			return exec.Command(tmuxExecutable, "split-window", "-v", paneCmd, ";", "wait-for", waitToken)
+		}
+	}
+}
+
 func shellQuote(s string) string {
 	if s == "" {
 		return "''"
@@ -201,6 +226,68 @@ func createEditorOpener(editor, mode string, getWidth func() int, sup *tool.Proc
 		log.Printf("[editor] launching tmux editor: mode=%q editor=%q file=%q cmd=%v", mode, editor, path, c.Args)
 		return tea.ExecProcess(c, func(err error) tea.Msg {
 			log.Printf("[editor] tmux editor finished: mode=%q editor=%q file=%q err=%v", mode, editor, path, err)
+			return editorFinishedMsg{err: err}
+		})
+	}
+}
+
+// createEditorOpenerAtLine is like createEditorOpener but opens the file at the
+// given line number when the configured editor supports it.
+func createEditorOpenerAtLine(editor, mode string, getWidth func() int, sup *tool.ProcessSupervisor) func(string, int) tea.Cmd {
+	if mode != config.EditorModeTmuxSplit && mode != config.EditorModeTmuxWindow {
+		return func(path string, lineNo int) tea.Cmd {
+			cmdParts := strings.Fields(editor)
+			if _, err := exec.LookPath(cmdParts[0]); err != nil {
+				log.Printf("[editor] editor binary not found in PATH: %q (file: %q line: %d)", cmdParts[0], path, lineNo)
+				return func() tea.Msg {
+					return editorFinishedMsg{err: fmt.Errorf("editor %q not found in PATH: %w", cmdParts[0], err)}
+				}
+			}
+			args := editorArgsWithLine(editor, path, lineNo)
+			if args == nil {
+				args = append(cmdParts, path)
+			}
+			c := exec.Command(args[0], args[1:]...)
+			log.Printf("[editor] launching external editor at line: editor=%q file=%q line=%d cmd=%v", editor, path, lineNo, args)
+			id := fmt.Sprintf("editor-%d-%d", os.Getpid(), time.Now().UnixNano())
+			if sup != nil {
+				_, _ = sup.Register(tool.ProcessRegistration{
+					ID:               id,
+					Command:          editor + " " + path,
+					Kind:             tool.ProcessKindEditor,
+					Cmd:              c,
+					OwnsProcessGroup: false,
+					StartedAt:        time.Now(),
+				})
+			}
+			return tea.ExecProcess(c, func(err error) tea.Msg {
+				if sup != nil {
+					if err == nil {
+						sup.MarkExited(id, 0)
+					} else {
+						code := 1
+						if exitErr, ok := err.(*exec.ExitError); ok {
+							code = exitErr.ExitCode()
+						}
+						sup.MarkKilled(id, code)
+					}
+				}
+				log.Printf("[editor] finished at line: file=%q line=%d err=%v", path, lineNo, err)
+				return editorFinishedMsg{err: err}
+			})
+		}
+	}
+
+	return func(path string, lineNo int) tea.Cmd {
+		width := 80
+		if getWidth != nil {
+			width = getWidth()
+		}
+		builder := buildTmuxOpenCmdAtLine(mode, editor, path, width, lineNo)
+		c := builder()
+		log.Printf("[editor] launching tmux editor at line: mode=%q editor=%q file=%q line=%d cmd=%v", mode, editor, path, lineNo, c.Args)
+		return tea.ExecProcess(c, func(err error) tea.Msg {
+			log.Printf("[editor] tmux editor finished at line: file=%q line=%d err=%v", path, lineNo, err)
 			return editorFinishedMsg{err: err}
 		})
 	}

@@ -42,19 +42,85 @@ func TestRefreshCustomCommandsRespectsEnabledPlugins(t *testing.T) {
 		t.Fatalf("WriteFile command: %v", err)
 	}
 
-	refreshCustomCommands(nil)
+	refreshCustomCommands(nil, "", "")
 	if _, ok := customCommandLookup["/hello"]; !ok {
 		t.Fatalf("expected plugin command to be loaded without filter")
 	}
 
-	refreshCustomCommands(&config.Config{Plugins: map[string]config.PluginConfig{"sample": {Enabled: false}}})
+	refreshCustomCommands(&config.Config{Plugins: map[string]config.PluginConfig{"sample": {Enabled: false}}}, "", "")
 	if _, ok := customCommandLookup["/hello"]; ok {
 		t.Fatalf("expected disabled plugin command to be hidden")
 	}
 
-	refreshCustomCommands(&config.Config{Plugins: map[string]config.PluginConfig{"sample": {Enabled: true}}})
+	refreshCustomCommands(&config.Config{Plugins: map[string]config.PluginConfig{"sample": {Enabled: true}}}, "", "")
 	if _, ok := customCommandLookup["/hello"]; !ok {
 		t.Fatalf("expected enabled plugin command to be loaded")
+	}
+}
+
+// TestRefreshCustomCommandsKaizenSlashAdmit: Kaizen skills appear as slash
+// commands only when activeModel matches (incl. OpenRouter :free variant).
+func TestRefreshCustomCommandsKaizenSlashAdmit(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	// Isolate from real bundled + project skills.
+	// skill package uses HOME + ProjectLocalSkillDirs(root) + bundled.
+	// Write a Kaizen conduct skill under root/skills/kaizen/<name>/.
+	skillDir := filepath.Join(root, "skills", "kaizen", "conduct-tuning-tencent-hy3")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\nname: conduct-tuning-tencent-hy3\n" +
+		"description: kaizen conduct for hy3.\n" +
+		"tuned_for: tencent/hy3\nstack: conduct\n---\n\n# body\n"
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Normal skill always admitted.
+	normalDir := filepath.Join(root, "skills", "normal-skill")
+	if err := os.MkdirAll(normalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(normalDir, "SKILL.md"),
+		[]byte("---\nname: normal-skill\ndescription: always on.\n---\n\n# n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wrong model: Kaizen hidden, normal present.
+	refreshCustomCommands(nil, root, "anthropic/claude-opus-4-8")
+	if _, ok := customCommandLookup["/conduct-tuning-tencent-hy3"]; ok {
+		t.Fatal("Kaizen skill must not appear for non-matching model")
+	}
+	if _, ok := customCommandLookup["/normal-skill"]; !ok {
+		t.Fatal("normal skill must appear regardless of model")
+	}
+
+	// OpenRouter free variant: Kaizen admitted.
+	refreshCustomCommands(nil, root, "openrouter/tencent/hy3:free")
+	if _, ok := customCommandLookup["/conduct-tuning-tencent-hy3"]; !ok {
+		t.Fatal("expected /conduct-tuning-tencent-hy3 for openrouter/tencent/hy3:free")
+	}
+	// Slash popup must surface it on /conduct prefix.
+	found := false
+	for _, s := range slashSuggestions("/conduct") {
+		if s.name == "/conduct-tuning-tencent-hy3" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("slashSuggestions(/conduct) missing conduct-tuning-tencent-hy3")
+	}
+
+	// Empty model: Kaizen hidden again.
+	refreshCustomCommands(nil, root, "")
+	if _, ok := customCommandLookup["/conduct-tuning-tencent-hy3"]; ok {
+		t.Fatal("Kaizen skill must not appear when activeModel empty")
 	}
 }
 

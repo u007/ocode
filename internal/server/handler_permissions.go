@@ -8,6 +8,25 @@ import (
 	"github.com/u007/ocode/internal/config"
 )
 
+// allAgents returns every live agent the handler controls: the per-session
+// server-owned agents plus, when proxying, the TUI's RC agent. Permission and
+// YOLO toggles from external clients (web UI, Telegram bot) must reach the RC
+// agent too, otherwise /rc instances ignore remote mode changes.
+func (h *Handler) allAgents() []*agent.Agent {
+	out := make([]*agent.Agent, 0, len(h.agents)+1)
+	for _, as := range h.agents {
+		if as.agent != nil {
+			out = append(out, as.agent)
+		}
+	}
+	if h.rc != nil {
+		if a := h.rc.Agent(); a != nil {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 func (h *Handler) HandleGetPermissions(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -81,8 +100,8 @@ func (h *Handler) HandleSetPermission(w http.ResponseWriter, r *http.Request) {
 	}
 	h.cfg.Ocode.Permissions.Tools[req.Tool] = req.Level
 
-	for _, as := range h.agents {
-		if pm := as.agent.Permissions(); pm != nil {
+	for _, a := range h.allAgents() {
+		if pm := a.Permissions(); pm != nil {
 			pm.SetRule(req.Tool, level)
 		}
 	}
@@ -95,8 +114,8 @@ func (h *Handler) HandleGetYolo(w http.ResponseWriter, r *http.Request) {
 	defer h.mu.Unlock()
 
 	enabled := false
-	for _, as := range h.agents {
-		if pm := as.agent.Permissions(); pm != nil {
+	for _, a := range h.allAgents() {
+		if pm := a.Permissions(); pm != nil {
 			enabled = pm.Mode() == agent.PermissionModeYOLO
 			break
 		}
@@ -120,8 +139,8 @@ func (h *Handler) HandleSetYolo(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled {
 		mode = agent.PermissionModeYOLO
 	}
-	for _, as := range h.agents {
-		if pm := as.agent.Permissions(); pm != nil {
+	for _, a := range h.allAgents() {
+		if pm := a.Permissions(); pm != nil {
 			pm.SetMode(mode)
 		}
 	}

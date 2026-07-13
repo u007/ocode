@@ -85,9 +85,12 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		streamCh := make(chan SSEEvent, 32)
 		resultCh := make(chan RCResult, 1)
 
-		// Send request to TUI
+		// Send request to TUI. External clients (e.g. the Telegram bot) pass
+		// ?remote=telegram so the TUI knows to handle permission/question asks
+		// remotely instead of opening its local dialog (which would otherwise
+		// pause the turn with no one at the terminal to approve).
 		select {
-		case rc.RcCh <- RCRequest{Content: message, StreamCh: streamCh, ResultCh: resultCh}:
+		case rc.RcCh <- RCRequest{Content: message, StreamCh: streamCh, ResultCh: resultCh, RemoteApproval: r.URL.Query().Get("remote") == "telegram"}:
 		case <-time.After(5 * time.Second):
 			writeError(w, http.StatusServiceUnavailable, "TUI is busy, try again")
 			return

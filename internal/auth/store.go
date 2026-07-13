@@ -34,21 +34,27 @@ type Credential struct {
 	Account      string         `json:"account,omitempty"`
 	BaseURL      string         `json:"baseURL,omitempty"`    // endpoint override
 	AccountID    string         `json:"account_id,omitempty"` // Cloudflare
+	// CookieAuthToken and CookieCt0 hold the x.com session cookies used by the
+	// Grok subscription flow. ocode-only extension; opencode ignores unknown fields.
+	CookieAuthToken string `json:"cookie_auth_token,omitempty"`
+	CookieCt0       string `json:"cookie_ct0,omitempty"`
 }
 
 // credentialJSON handles both ocode (access_token, refresh_token, expires_at,
 // account_id) and opencode (access, refresh, expires, accountId) field naming.
 type credentialJSON struct {
-	Type         string `json:"type"`
-	Kind         string `json:"kind"`
-	Key          string `json:"key,omitempty"`
-	AccessToken  string `json:"access_token,omitempty"`
-	RefreshToken string `json:"refresh_token,omitempty"`
-	ExpiresAt    int64  `json:"expires_at,omitempty"`
-	Account      string `json:"account,omitempty"`
-	BaseURL      string `json:"baseURL,omitempty"`
-	BaseURLOld   string `json:"base_url,omitempty"`
-	AccountID    string `json:"account_id,omitempty"`
+	Type            string `json:"type"`
+	Kind            string `json:"kind"`
+	Key             string `json:"key,omitempty"`
+	AccessToken     string `json:"access_token,omitempty"`
+	RefreshToken    string `json:"refresh_token,omitempty"`
+	ExpiresAt       int64  `json:"expires_at,omitempty"`
+	Account         string `json:"account,omitempty"`
+	BaseURL         string `json:"baseURL,omitempty"`
+	BaseURLOld      string `json:"base_url,omitempty"`
+	AccountID       string `json:"account_id,omitempty"`
+	CookieAuthToken string `json:"cookie_auth_token,omitempty"`
+	CookieCt0       string `json:"cookie_ct0,omitempty"`
 	// opencode aliases (no underscores, expires in milliseconds)
 	AccessOc   string `json:"access,omitempty"`
 	RefreshOc  string `json:"refresh,omitempty"`
@@ -98,14 +104,16 @@ func (c *Credential) UnmarshalJSON(data []byte) error {
 	}
 
 	*c = Credential{
-		Kind:         normalizeCredentialKind(kind),
-		Key:          raw.Key,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ExpiresAt:    expiresAt,
-		Account:      raw.Account,
-		BaseURL:      raw.BaseURL,
-		AccountID:    accountID,
+		Kind:            normalizeCredentialKind(kind),
+		Key:             raw.Key,
+		AccessToken:     accessToken,
+		RefreshToken:    refreshToken,
+		ExpiresAt:       expiresAt,
+		Account:         raw.Account,
+		BaseURL:         raw.BaseURL,
+		AccountID:       accountID,
+		CookieAuthToken: raw.CookieAuthToken,
+		CookieCt0:       raw.CookieCt0,
 	}
 	if c.BaseURL == "" {
 		c.BaseURL = raw.BaseURLOld
@@ -115,14 +123,16 @@ func (c *Credential) UnmarshalJSON(data []byte) error {
 
 func (c Credential) MarshalJSON() ([]byte, error) {
 	return json.Marshal(credentialJSON{
-		Type:         string(normalizeCredentialKind(string(c.Kind))),
-		Key:          c.Key,
-		AccessToken:  c.AccessToken,
-		RefreshToken: c.RefreshToken,
-		ExpiresAt:    c.ExpiresAt,
-		Account:      c.Account,
-		BaseURL:      c.BaseURL,
-		AccountID:    c.AccountID,
+		Type:            string(normalizeCredentialKind(string(c.Kind))),
+		Key:             c.Key,
+		AccessToken:     c.AccessToken,
+		RefreshToken:    c.RefreshToken,
+		ExpiresAt:       c.ExpiresAt,
+		Account:         c.Account,
+		BaseURL:         c.BaseURL,
+		AccountID:       c.AccountID,
+		CookieAuthToken: c.CookieAuthToken,
+		CookieCt0:       c.CookieCt0,
 	})
 }
 

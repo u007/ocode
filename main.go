@@ -17,8 +17,9 @@ import (
 	// returns ok=false and ChatGPT OAuth tokens are misrouted to
 	// api.openai.com/v1/chat/completions (401 missing_scope) instead of the
 	// Codex backend.
-	_ "github.com/u007/ocode/internal/plugin/codex"
 	"github.com/u007/ocode/internal/cli"
+	_ "github.com/u007/ocode/internal/plugin/codex"
+	_ "github.com/u007/ocode/internal/plugin/grok"
 	"github.com/u007/ocode/internal/runcli"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/skill"

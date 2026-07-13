@@ -125,9 +125,26 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.mu.Lock()
-	if h.rc != nil {
+	rc := h.rc
+	if rc != nil {
 		h.mu.Unlock()
-		writeError(w, http.StatusConflict, "question answering over the web is not supported while a TUI session is bridged; answer in the TUI")
+		// TUI session bridged: forward the answers to the TUI's RC bridge, which
+		// owns the agent and its question dialog. Preserve every selected answer
+		// (multi-select questions) instead of collapsing to the first.
+		answers := make([]tool.QuestionAnswerSet, 0, len(req.Answers))
+		for _, a := range req.Answers {
+			set := tool.QuestionAnswerSet{Header: a.Header, Question: a.Question}
+			for _, v := range a.Answers {
+				set.Answers = append(set.Answers, tool.QuestionAnswer{Label: v.Label, Text: v.Text, Custom: v.Custom})
+			}
+			answers = append(answers, set)
+		}
+		if !rc.SendResolution(RCResolution{RequestID: req.RequestID, Answers: answers}) {
+			writeError(w, http.StatusServiceUnavailable, "resolve channel full; try again")
+			return
+		}
+		h.broadcastEvent(SSEEvent{Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
+		writeJSON(w, http.StatusOK, ChatResponse{})
 		return
 	}
 
@@ -136,7 +153,9 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	var as *agentSession
 	var sessID string
 	if req.SessionID != "" {
-		if cand, ok := h.agents[req.SessionID]; ok && tailIsQuestionAsk(cand.messages) {
+		if cand, ok := h.agents[req.SessionID]; ok &&
+			tailIsQuestionAsk(cand.messages) &&
+			cand.messages[len(cand.messages)-1].ToolID == req.RequestID {
 			as, sessID = cand, req.SessionID
 		}
 	} else {

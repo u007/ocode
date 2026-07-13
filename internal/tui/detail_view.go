@@ -332,6 +332,13 @@ func renderDetailToolRequestBox(tc agent.ToolCall, width int, expanded bool) str
 		if body == "" {
 			body = formatToolCallHint(tc)
 		}
+	} else if toolName == "apply_patch" {
+		// Render the patch as a readable colorized diff instead of raw JSON.
+		if pr := renderPatchRequest(tc, currentStyles()); pr != "" {
+			body = pr
+		} else {
+			body = formatToolCallHint(tc)
+		}
 	} else {
 		body = formatToolCallHint(tc)
 		if args := strings.TrimSpace(prettyToolArguments(tc.Function.Arguments)); args != "" && args != "{}" {
