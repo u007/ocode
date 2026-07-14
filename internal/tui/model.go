@@ -789,6 +789,8 @@ type model struct {
 	initDiffCmd          tea.Cmd // initial async diff load, fired from Init()
 	logViewport          viewport.Model
 	permViewport         viewport.Model
+	agentsViewport       viewport.Model     // scrollable agent-run list on the agents tab
+	agentsBlocks         []agentStripBlock  // content-line ranges → runID for agents-tab click-to-open
 	logEntries           []DebugEntry
 	// lastPromotedLogIdx is the index in DebugLog.Snapshot() up to which we
 	// have already considered promoting entries to the chat transcript
@@ -1919,6 +1921,8 @@ func newModel(opts ...RunOptions) model {
 	m.files.SetSaveEditor(config.SaveEditor)
 	m.logViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	m.logViewport.SoftWrap = true
+	m.agentsViewport = viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
+	m.agentsViewport.SoftWrap = true
 	m.sidebarCache = &sidebarComputeCache{}
 
 	// Transfer the LSP manager and notification channels from the temporary
@@ -2323,6 +2327,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		if m.activeTab == tabAgents {
+			if msg.Button == tea.MouseWheelUp {
+				m.agentsViewport.ScrollUp(scrollSpeed)
+				return m, nil
+			}
+			if msg.Button == tea.MouseWheelDown {
+				m.agentsViewport.ScrollDown(scrollSpeed)
+				return m, nil
+			}
+		}
 		if !m.mouseOverTranscriptViewport(msg) {
 			return m, nil
 		}
@@ -2442,6 +2456,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch m.activeTab {
 		case tabChat:
 			return m.handleChatKeys(msg, tiCmd, vpCmd)
+		case tabAgents:
+			return m.handleAgentsKeys(msg)
 		case tabFiles:
 			if msg.String() == "ctrl+c" {
 				return m.handleTabCtrlC()
@@ -3229,6 +3245,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Refresh live detail view content.
 			if !m.detail.empty() {
 				m.refreshTopDetailView()
+			}
+			// Keep the agents tab live: runs mutate in place (status, tokens,
+			// transcript), so rebuild its content each tick while it's active.
+			// Only rebuild when at least one run is still running to avoid
+			// redundant rebuilds on every tick for a static list.
+			if m.activeTab == tabAgents && m.agent != nil && m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0 {
+				m.refreshAgentsViewport()
 			}
 			return m, tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 		}
@@ -4095,6 +4118,10 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		if m.activeTab == tabChat {
 			m.chatUnread = false
 		}
+		if m.activeTab == tabAgents {
+			m.layoutAgentsViewport()
+			m.agentsViewport.GotoTop()
+		}
 		if m.activeTab == tabLog {
 			m.refreshLogViewport()
 		}
@@ -4107,6 +4134,10 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		m.closeChatSearchIfLeavingChat()
 		if m.activeTab == tabChat {
 			m.chatUnread = false
+		}
+		if m.activeTab == tabAgents {
+			m.layoutAgentsViewport()
+			m.agentsViewport.GotoTop()
 		}
 		if m.activeTab == tabLog {
 			m.refreshLogViewport()
@@ -5222,18 +5253,21 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 		// Click on agent strip: open the clicked run's detail view.
-		if strip, blocks := m.renderAgentStrip(); strip != "" {
-			stripTop := m.agentStripTopY()
-			stripH := lipgloss.Height(strip)
-			relY := mouse.Y - stripTop
-			if relY >= 0 && relY < stripH {
-				for _, blk := range blocks {
-					if relY >= blk.rowStart && relY < blk.rowEnd {
-						m.openAgentDetail(blk.runID)
-						return m, nil, true
+		// Only on the chat tab — the agents tab has its own click handler.
+		if m.activeTab != tabAgents {
+			if strip, blocks := m.renderAgentStrip(); strip != "" {
+				stripTop := m.agentStripTopY()
+				stripH := lipgloss.Height(strip)
+				relY := mouse.Y - stripTop
+				if relY >= 0 && relY < stripH {
+					for _, blk := range blocks {
+						if relY >= blk.rowStart && relY < blk.rowEnd {
+							m.openAgentDetail(blk.runID)
+							return m, nil, true
+						}
 					}
+					return m, nil, true
 				}
-				return m, nil, true
 			}
 		}
 		if thumbOffset, ok := m.transcriptScrollbarThumbOffset(mouse); ok {
@@ -5885,6 +5919,10 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			if tab == tabChat {
 				m.chatUnread = false
 			}
+			if tab == tabAgents {
+				m.layoutAgentsViewport()
+				m.agentsViewport.GotoTop()
+			}
 			if tab == tabLog {
 				m.refreshLogViewport()
 				m.logViewport.GotoBottom()
@@ -5992,6 +6030,21 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					endCol:    mouse.X - logContentLeftX,
 				}
 				m.applyOrClearLogSelectionHighlight()
+				return m, nil, true
+			}
+		}
+	}
+
+	// Click on an agent card in the agents tab opens its transcript drill-in.
+	// The viewport is joined with a scrollbar to its right, so exclude the
+	// scrollbar column (mouse.X >= m.agentsViewport.Width()) to prevent
+	// scrollbar clicks from opening a run card.
+	if pressed && m.activeTab == tabAgents {
+		top := m.agentsContentTopY()
+		if mouse.Y >= top && mouse.Y < top+m.agentsViewport.Height() && mouse.X < m.agentsViewport.Width() {
+			contentLine := (mouse.Y - top) + m.agentsViewport.YOffset()
+			if runID := blockAtRow(m.agentsBlocks, contentLine); runID != "" {
+				m.openAgentDetail(runID)
 				return m, nil, true
 			}
 		}
@@ -6472,6 +6525,10 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 			m.closeChatSearchIfLeavingChat()
 			if tab == tabChat {
 				m.chatUnread = false
+			}
+			if tab == tabAgents {
+				m.layoutAgentsViewport()
+				m.agentsViewport.GotoTop()
 			}
 			if tab == tabLog {
 				m.refreshLogViewport()
@@ -10248,20 +10305,26 @@ func (m model) buildSelectionContext() string {
 		}
 	}
 
-	if m.filesSel.active && m.files.previewPath != "" && len(m.files.previewRawLines) > 0 {
-		writeHeader()
-		path := relPath(m.files.previewPath, m.workDir)
-		startLine, _, endLine, _ := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
-		b.WriteString("\n## File selection: ")
-		b.WriteString(path)
-		b.WriteString("\n")
-		for i := startLine; i <= endLine && i < len(m.files.previewRawLines); i++ {
-			if i < 0 {
-				continue
+		if m.filesSel.active && m.files.previewPath != "" && len(m.files.previewRawLines) > 0 {
+			writeHeader()
+			path := relPath(m.files.previewPath, m.workDir)
+			startLine, _, endLine, _ := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
+			b.WriteString("\n## File selection: ")
+			b.WriteString(path)
+			b.WriteString("\n")
+			// startLine/endLine are selection indices resolved against
+			// previewRawLines (mouse hit-testing uses that slice, see
+			// cfg.point(m.files.previewRawLines, ...) above), so index into it
+			// directly. For markdown that means rendered-line numbers, not
+			// source-file line numbers, but the copied text matches what was
+			// actually selected on screen.
+			for i := startLine; i <= endLine && i < len(m.files.previewRawLines); i++ {
+				if i < 0 {
+					continue
+				}
+				fmt.Fprintf(&b, "%d: %s\n", i+1, m.files.previewRawLines[i])
 			}
-			fmt.Fprintf(&b, "%d: %s\n", i+1, m.files.previewRawLines[i])
 		}
-	}
 
 	if len(m.git.selectedFiles) > 0 {
 		allFiles := m.git.currentFileList()
@@ -12239,6 +12302,7 @@ func (m *model) layout() {
 		m.refreshTopDetailView()
 	}
 	m.layoutLogViewport()
+	m.layoutAgentsViewport()
 	if m.showPermDialog {
 		m.updatePermButtonRegions()
 	}
@@ -14667,29 +14731,10 @@ func (m model) renderAgentStrip() (string, []agentStripBlock) {
 		}
 
 		start := row
-		status := string(ri.Status)
-		icon := statusIcon(ri.Status, frame)
-		head := fmt.Sprintf("▸ %-10s %s %s · %s", ri.Name, icon, status, formatRunElapsed(ri))
-		if summary := formatChildSummary(agentRunChildren(ri)); summary != "" {
-			head += " · " + summary
-		}
-		if lbl := ri.ModelLabel(); lbl != "" {
-			head += " [" + lbl + "]"
-		}
-		if in, out := ri.Usage(); in > 0 || out > 0 {
-			head += fmt.Sprintf(" · \u2193%s \u2191%s", formatTokenCount(in), formatTokenCount(out))
-		}
 		selected := m.agentStripFocused && i == m.agentStripSelected
-		if selected {
-			b.WriteString(selectedStyle.Render(truncateToWidth(head, width)) + "\n")
-		} else {
-			b.WriteString(hintStyle.Render(truncateToWidth(head, width)) + "\n")
-		}
-		row++
-		for _, ln := range lines {
-			b.WriteString(hintStyle.Render("  │ "+truncateToWidth(stripANSI(ln), width-4)) + "\n")
-			row++
-		}
+		card, cardRows := renderAgentRunStripCard(ri, width, frame, selected, agentRunPreviewLineCount)
+		b.WriteString(card + "\n")
+		row += cardRows
 		blocks = append(blocks, agentStripBlock{runID: ri.ID, rowStart: start, rowEnd: row})
 		runRows += blockRows
 		rendered++
@@ -15252,6 +15297,8 @@ func (m model) renderTabContent() string {
 
 	// Route non-modal views by active tab
 	switch m.activeTab {
+	case tabAgents:
+		return m.renderAgentsTab()
 	case tabFiles:
 		return m.files.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
 	case tabGit:
@@ -15461,6 +15508,8 @@ func (m *model) renderStatus() string {
 		}
 	} else {
 		switch m.activeTab {
+		case tabAgents:
+			suffix = " · j/k: scroll · click: open agent · alt+[/]/ctrl+shift+[/]: switch tab"
 		case tabFiles:
 			suffix = " · ctrl+f search · ctrl+g fuzzy · ctrl+l edit · ctrl+n new · ctrl+b folder · ctrl+r rename · ctrl+d delete · ctrl+y copy · ctrl+o open · ctrl+t reload · alt+[/]: tab"
 		case tabGit:
@@ -16933,7 +16982,7 @@ func (m model) exitButtonForClick(mouse tea.Mouse) bool {
 }
 
 func tabAtX(mouseX int, barStartX int, activeTab int, unread bool) (int, bool) {
-	labels := []string{"chat", "files", "git", "log"}
+	labels := []string{"chat", "agents", "files", "git", "log"}
 	if unread && activeTab != 0 {
 		labels[0] = "chat●"
 	}
@@ -17024,6 +17073,164 @@ func (m model) logContentTopY() int {
 // logContentLeftX is the screen column of the first log character: the panel's
 // left border plus one column of horizontal padding (styles.Border Padding(0,1)).
 const logContentLeftX = 2
+
+// agentsTabPreviewLines is how many latest transcript events each agent card
+// shows on the agents tab. Larger than the chat-tab strip's cap so the tab is
+// more informative; the full transcript lives in the click-through drill-in.
+const agentsTabPreviewLines = 8
+
+// agentsContentTopY is the screen row of the first agent-list line inside the
+// bordered panel: app header (top pad + title = 2 rows) + the panel's top
+// border. Unlike the log tab there is no search/filter bar.
+func (m model) agentsContentTopY() int {
+	return appHeaderHeight + 1
+}
+
+// layoutAgentsViewport sizes the agents-tab viewport to the terminal and rebuilds
+// its content. Mirrors layoutLogViewport but without the search/kind-filter rows.
+func (m *model) layoutAgentsViewport() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+	statusH := lipgloss.Height(m.renderStatus())
+	// Rows above/below the viewport: app header (2) + the bordered panel's top
+	// and bottom borders (2) + the status bar.
+	h := m.height - (appHeaderHeight + 2 + statusH)
+	if h < 1 {
+		h = 1
+	}
+	// Same column reservation as the log viewport: 4 outer margin + 2 border + 2
+	// padding + 1 scrollbar.
+	m.agentsViewport.SetWidth(max(1, m.width-9))
+	m.agentsViewport.SetHeight(h)
+	m.refreshAgentsViewport()
+}
+
+// refreshAgentsViewport rebuilds the agents-tab list content (newest first) and
+// the line→runID click map. Called on tab-enter, resize, and the live tick so
+// running agents' status/tokens/transcripts stay current without a keypress.
+func (m *model) refreshAgentsViewport() {
+	empty := hintStyle.Render("  No agents dispatched yet. Delegated agents appear here newest-first.")
+	if m.agent == nil || m.agent.Runs() == nil {
+		m.agentsViewport.SetContent(empty)
+		m.agentsBlocks = nil
+		return
+	}
+	runs := m.agent.Runs().Snapshot()
+	if len(runs) == 0 {
+		m.agentsViewport.SetContent(empty)
+		m.agentsBlocks = nil
+		return
+	}
+	// Newest first so the most recent run is at the top without scrolling.
+	slices.Reverse(runs)
+	frame := spinnerFrames[m.dotFrame%len(spinnerFrames)]
+	width := max(1, m.agentsViewport.Width()-2)
+
+	var b strings.Builder
+	var blocks []agentStripBlock
+	row := 0
+	for i, ri := range runs {
+		start := row
+		card, cardRows := renderAgentRunStripCard(ri, width, frame, false, agentsTabPreviewLines)
+		b.WriteString(card + "\n")
+		row += cardRows
+		blocks = append(blocks, agentStripBlock{runID: ri.ID, rowStart: start, rowEnd: row})
+		if i < len(runs)-1 {
+			// Blank separator row between cards; it belongs to no block so a
+			// click on it is a no-op.
+			b.WriteString("\n")
+			row++
+		}
+	}
+	m.agentsBlocks = blocks
+	m.agentsViewport.SetContent(strings.TrimRight(b.String(), "\n"))
+}
+
+// renderAgentsTab renders the agents tab: a header plus a scrollable, newest-first
+// list of agent-run cards. Clone of renderLogTab's frame without the search/filter
+// bars.
+func (m model) renderAgentsTab() string {
+	tabBar := renderTabBar(tabAgents, m.chatUnread)
+	var exitBtn string
+	if m.exitPending {
+		exitBtn = lipgloss.NewStyle().Bold(true).Foreground(errorStyle.GetForeground()).Padding(0, 1).Render("✕ exit?")
+	} else {
+		exitBtn = m.styles.Hint.Padding(0, 1).Render("✕ exit")
+	}
+	total := m.agentStripRunCount()
+	running := 0
+	if m.agent != nil && m.agent.Runs() != nil {
+		running = m.agent.Runs().RunningCount()
+	}
+	hint := fmt.Sprintf("  ·  %d agent%s · %d running · click to open · j/k scroll", total, plural(total), running)
+	header := m.renderAppHeader("◆ ocode", hint, tabBar, exitBtn, m.width)
+
+	sb := renderScrollbar(m.agentsViewport.Height(), m.agentsViewport.TotalLineCount(), m.agentsViewport.VisibleLineCount(), m.agentsViewport.YOffset())
+	viewportContent := lipgloss.JoinHorizontal(lipgloss.Top,
+		constrainView(m.agentsViewport.View(), m.agentsViewport.Width(), m.agentsViewport.Height()),
+		sb,
+	)
+	contentWidth := max(1, m.width-4)
+	content := m.styles.Border.Width(contentWidth).Height(m.agentsViewport.Height() + 2).Render(viewportContent)
+	status := m.renderStatus()
+
+	return lipgloss.JoinVertical(lipgloss.Left, header, content, status)
+}
+
+// handleAgentsKeys handles key bindings for the agents tab: scroll the list and
+// esc to cancel an active stream / leave.
+func (m model) handleAgentsKeys(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	// When a detail view is open, route navigation keys to the detail
+	// viewport so the drill-in is keyboard-scrollable.
+	if !m.detail.empty() {
+		switch msg.String() {
+		case "j", "down":
+			m.detail[len(m.detail)-1].vp.ScrollDown(m.scrollSpeed)
+			return m, nil
+		case "k", "up":
+			m.detail[len(m.detail)-1].vp.ScrollUp(m.scrollSpeed)
+			return m, nil
+		case "g", "home":
+			m.detail[len(m.detail)-1].vp.GotoTop()
+			return m, nil
+		case "G", "end":
+			m.detail[len(m.detail)-1].vp.GotoBottom()
+			return m, nil
+		case "pgdown", " ":
+			m.detail[len(m.detail)-1].vp.ScrollDown(m.detail[len(m.detail)-1].vp.Height())
+			return m, nil
+		case "pgup":
+			m.detail[len(m.detail)-1].vp.ScrollUp(m.detail[len(m.detail)-1].vp.Height())
+			return m, nil
+		case "esc":
+			m.detail.pop()
+			return m, nil
+		}
+		return m, nil
+	}
+	switch msg.String() {
+	case "ctrl+c":
+		return m.handleTabCtrlC()
+	case "j", "down":
+		m.agentsViewport.ScrollDown(1)
+	case "k", "up":
+		m.agentsViewport.ScrollUp(1)
+	case "g", "home":
+		m.agentsViewport.GotoTop()
+	case "G", "end":
+		m.agentsViewport.GotoBottom()
+	case "pgdown", " ":
+		m.agentsViewport.ScrollDown(m.agentsViewport.Height())
+	case "pgup":
+		m.agentsViewport.ScrollUp(m.agentsViewport.Height())
+	case "esc":
+		if m.streaming {
+			return m.handleEscKey()
+		}
+	}
+	return m, nil
+}
 
 // filteredLogText returns the currently visible (filtered) log entries as plain
 // text — no ANSI styling — for copying to the clipboard.

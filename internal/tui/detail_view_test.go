@@ -93,6 +93,56 @@ func TestAgentStripScrollVisibility(t *testing.T) {
 	}
 }
 
+// TestAgentsTabListsRunsNewestFirstAndClickOpens verifies the agents tab lists
+// every run newest-first and that clicking a card opens its transcript drill-in.
+func TestAgentsTabListsRunsNewestFirstAndClickOpens(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	r1 := a.Runs().New("alpha")
+	r2 := a.Runs().New("beta") // newest
+
+	m := model{
+		agent:     a,
+		width:     100,
+		height:    40,
+		activeTab: tabAgents,
+		input:     newTestTextarea(),
+		viewport:  fastviewport.New(96, 20),
+		styles:    ApplyThemeColors("tokyonight"),
+	}
+	m.layoutAgentsViewport() // sizes the viewport and rebuilds content + click map
+
+	content := stripANSI(m.agentsViewport.View())
+	if !strings.Contains(content, "alpha") || !strings.Contains(content, "beta") {
+		t.Fatalf("expected both runs listed, got:\n%s", content)
+	}
+	if strings.Index(content, "beta") > strings.Index(content, "alpha") {
+		t.Fatalf("expected newest-first order (beta before alpha):\n%s", content)
+	}
+
+	if len(m.agentsBlocks) < 2 {
+		t.Fatalf("expected 2 click blocks, got %d", len(m.agentsBlocks))
+	}
+	if id := blockAtRow(m.agentsBlocks, m.agentsBlocks[0].rowStart); id != r2.ID {
+		t.Fatalf("expected top card to map to newest run %s, got %s", r2.ID, id)
+	}
+
+	// A click on the top card row opens that run's drill-in (YOffset is 0 here).
+	top := m.agentsContentTopY()
+	updated, _, ok := m.handleMouseAction(tea.Mouse{Button: tea.MouseLeft, X: 5, Y: top}, true)
+	if !ok {
+		t.Fatal("expected the click to be handled")
+	}
+	gm := derefTestModel(t, updated)
+	dv, present := gm.detail.top()
+	if !present {
+		t.Fatal("expected a detail view after clicking a card")
+	}
+	if dv.runID != r2.ID {
+		t.Fatalf("expected drill-in for newest run %s, got %s", r2.ID, dv.runID)
+	}
+	_ = r1
+}
+
 func TestRenderRunTranscriptUsesSingleSpacingBetweenSectionsAndEvents(t *testing.T) {
 	run := &agent.AgentRun{
 		ID:     "agent-1",

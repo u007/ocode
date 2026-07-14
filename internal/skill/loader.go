@@ -231,6 +231,13 @@ func stackActive(stack string, detected []string) bool {
 // OpenRouter-style route variants after a colon (":free", ":nitro",
 // ":extended", …) are stripped before compare so
 // "openrouter/tencent/hy3:free" matches tuned_for "tencent/hy3".
+//
+// opencode-zen marks free-tier models with a hyphenated "-free" suffix on the
+// base id instead of a colon variant (a different provider's convention living
+// in the same function). That suffix is also stripped, so
+// "opencode/deepseek-v4-flash-free" matches tuned_for "deepseek-v4-flash".
+// Only the literal trailing "-free" token is removed — never everything after
+// the last hyphen — so "deepseek-v4-flash" is never mangled to "deepseek-v4".
 func modelMatchesTuned(activeModel, tunedFor string) bool {
 	a := strings.ToLower(strings.TrimSpace(activeModel))
 	t := strings.ToLower(strings.TrimSpace(tunedFor))
@@ -241,7 +248,16 @@ func modelMatchesTuned(activeModel, tunedFor string) bool {
 	if i := strings.IndexByte(a, ':'); i >= 0 {
 		a = a[:i]
 	}
-	return a == t || strings.HasSuffix(a, "/"+t)
+	if a == t || strings.HasSuffix(a, "/"+t) {
+		return true
+	}
+	// Retry with an opencode-zen "-free" tier suffix stripped. Raw match is
+	// tried first (above) so a tuned_for that genuinely ends in "-free" still
+	// matches without the suffix being dropped.
+	if base := strings.TrimSuffix(a, "-free"); base != a {
+		return base == t || strings.HasSuffix(base, "/"+t)
+	}
+	return false
 }
 
 // ProjectLocalSkillDirs returns the project-root skill directories that should

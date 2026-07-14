@@ -5249,9 +5249,10 @@ func TestTabMouseReleaseUsesRightAlignedHeaderPosition(t *testing.T) {
 	barWidth := lipgloss.Width(renderTabBar(m.activeTab, m.chatUnread))
 	barStart := m.tabBarStartXs(barWidth)[0]
 	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("chat"))
+	agentsWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("agents"))
 	filesWidth := lipgloss.Width(selectedStyle.Padding(0, 1).Render("files"))
 
-	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + filesWidth + 1, Y: 1})
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + agentsWidth + filesWidth + 1, Y: 1})
 	got := derefTestModel(t, updated)
 
 	if got.activeTab != tabGit {
@@ -5276,8 +5277,8 @@ func TestTabMouseMotionSwitchesWhenTerminalReportsDrag(t *testing.T) {
 	updated, _ := m.Update(tea.MouseMotionMsg{Button: tea.MouseLeft, X: barStart + chatWidth + 1, Y: 1})
 	got := derefTestModel(t, updated)
 
-	if got.activeTab != tabFiles {
-		t.Fatalf("expected files tab after left-button motion, got %d", got.activeTab)
+	if got.activeTab != tabAgents {
+		t.Fatalf("expected agents tab after left-button motion, got %d", got.activeTab)
 	}
 }
 

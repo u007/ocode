@@ -468,6 +468,39 @@ func agentRunEvents(run *agent.AgentRun, limit int) []string {
 	return events
 }
 
+// renderAgentRunStripCard renders one collapsed agent-run card shared by the
+// chat-tab agent strip and the agents tab: a header line (name, status icon,
+// elapsed, child summary, model, tokens) plus up to previewLines latest
+// transcript events. width is the header truncation budget; preview lines
+// truncate to width-4. When selected, the header uses selectedStyle. Returns
+// the block (no trailing newline) and its row count.
+func renderAgentRunStripCard(ri *agent.AgentRun, width int, frame string, selected bool, previewLines int) (string, int) {
+	lines := agentRunEvents(ri, previewLines)
+	var b strings.Builder
+	rows := 0
+	head := fmt.Sprintf("▸ %-10s %s %s · %s", ri.Name, statusIcon(ri.Status, frame), string(ri.Status), formatRunElapsed(ri))
+	if summary := formatChildSummary(agentRunChildren(ri)); summary != "" {
+		head += " · " + summary
+	}
+	if lbl := ri.ModelLabel(); lbl != "" {
+		head += " [" + lbl + "]"
+	}
+	if in, out := ri.Usage(); in > 0 || out > 0 {
+		head += fmt.Sprintf(" · ↓%s ↑%s", formatTokenCount(in), formatTokenCount(out))
+	}
+	if selected {
+		b.WriteString(selectedStyle.Render(truncateToWidth(head, width)) + "\n")
+	} else {
+		b.WriteString(hintStyle.Render(truncateToWidth(head, width)) + "\n")
+	}
+	rows++
+	for _, ln := range lines {
+		b.WriteString(hintStyle.Render("  │ "+truncateToWidth(stripANSI(ln), width-4)) + "\n")
+		rows++
+	}
+	return strings.TrimRight(b.String(), "\n"), rows
+}
+
 func agentRunChildren(run *agent.AgentRun) []*agent.AgentRun {
 	if run == nil || run.Sub == nil || run.Sub.Runs() == nil {
 		return nil

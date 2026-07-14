@@ -76,6 +76,18 @@ func stripANSI(s string) string {
 	return ansi.Strip(s)
 }
 
+// stripSliceANSI returns a new slice with ANSI escape codes removed from each
+// element. Used to keep a plain-text mirror of rendered (ANSI-styled) lines so
+// selection, in-file search, and mouse hit-testing stay aligned with what is
+// actually drawn on screen.
+func stripSliceANSI(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = ansi.Strip(l)
+	}
+	return out
+}
+
 // viewportSelectionConfig describes how a scrollable text surface maps screen
 // coordinates back to its underlying raw text.
 //

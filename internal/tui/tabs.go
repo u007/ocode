@@ -1,15 +1,16 @@
 package tui
 
 const (
-	tabChat  = 0
-	tabFiles = 1
-	tabGit   = 2
-	tabLog   = 3
-	tabCount = 4
+	tabChat   = 0
+	tabAgents = 1
+	tabFiles  = 2
+	tabGit    = 3
+	tabLog    = 4
+	tabCount  = 5
 )
 
 func renderTabBar(active int, unread bool) string {
-	labels := []string{"chat", "files", "git", "log"}
+	labels := []string{"chat", "agents", "files", "git", "log"}
 	if unread && active != tabChat {
 		labels[0] = "chat●"
 	}

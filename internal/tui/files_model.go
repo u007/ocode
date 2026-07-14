@@ -1288,7 +1288,19 @@ func (m *filesModel) applyPreview(msg filesPreviewMsg) tea.Cmd {
 		if msg.content != "" {
 			m.previewLines = strings.Split(msg.content, "\n")
 		}
-		m.preview.SetContent(msg.content)
+		if m.previewLang == "markdown" {
+			// Render markdown (headings, bold, links, tables) instead of raw
+			// chroma-highlighted source so tables display as real tables.
+			// previewRawLines is kept as the ANSI-stripped rendered text so
+			// selection, in-file search, and mouse hit-testing stay aligned
+			// with what is actually drawn on screen.
+			rendered := renderMarkdown(msg.raw, lipgloss.NewStyle())
+			m.previewLines = strings.Split(rendered, "\n")
+			m.previewRawLines = stripSliceANSI(m.previewLines)
+			m.preview.SetContent(rendered)
+		} else {
+			m.preview.SetContent(msg.content)
+		}
 		m.preview.GotoTop()
 	} else {
 		if m.previewPath != "" && m.previewPath != msg.path {
@@ -1299,21 +1311,38 @@ func (m *filesModel) applyPreview(msg filesPreviewMsg) tea.Cmd {
 				m.previewRaw += "\n"
 			}
 			m.previewRaw += msg.raw
-			if len(m.previewRawLines) > 0 {
-				m.previewRawLines = append(m.previewRawLines, strings.Split(msg.raw, "\n")...)
-			} else {
-				m.previewRawLines = strings.Split(msg.raw, "\n")
-			}
-		}
-		if msg.content != "" {
-			if len(m.previewLines) > 0 {
-				m.previewLines = append(m.previewLines, strings.Split(msg.content, "\n")...)
-			} else {
-				m.previewLines = strings.Split(msg.content, "\n")
-			}
 		}
 		m.previewHasMore = !msg.done
 		m.previewNextOff = msg.nextOffset
+		if m.previewLang == "markdown" {
+			// Render only the new chunk and append to existing rendered lines,
+			// avoiding O(n²) from re-rendering the entire accumulated source
+			// on every chunk. Tables that span chunk boundaries may lose some
+			// alignment, but this is far more performant for large files.
+			rendered := renderMarkdown(msg.raw, lipgloss.NewStyle())
+			newLines := strings.Split(rendered, "\n")
+			if len(m.previewLines) > 0 {
+				m.previewLines = append(m.previewLines, newLines...)
+			} else {
+				m.previewLines = newLines
+			}
+			m.previewRawLines = append(m.previewRawLines, stripSliceANSI(newLines)...)
+		} else {
+			if msg.raw != "" {
+				if len(m.previewRawLines) > 0 {
+					m.previewRawLines = append(m.previewRawLines, strings.Split(msg.raw, "\n")...)
+				} else {
+					m.previewRawLines = strings.Split(msg.raw, "\n")
+				}
+			}
+			if msg.content != "" {
+				if len(m.previewLines) > 0 {
+					m.previewLines = append(m.previewLines, strings.Split(msg.content, "\n")...)
+				} else {
+					m.previewLines = strings.Split(msg.content, "\n")
+				}
+			}
+		}
 		if len(m.inFileSearchMatches) > 0 {
 			// Re-run search on expanded content to find matches in newly appended lines.
 			m.inFileSearchMatches = m.performInFileSearch(m.inFileSearchQuery)
@@ -2369,11 +2398,17 @@ func (m filesModel) addToContextCmd() tea.Cmd {
 		if err != nil {
 			rel = m.previewPath
 		}
+		// For markdown, previewRawLines holds rendered line count; use the
+		// raw source line count so the range label matches source coordinates.
+		endLine := len(m.previewRawLines)
+		if m.previewLang == "markdown" {
+			endLine = len(strings.Split(m.previewRaw, "\n"))
+		}
 		return filesAddToContextMsg{
 			path:      rel,
 			content:   m.previewRaw,
 			startLine: 0,
-			endLine:   len(m.previewRawLines),
+			endLine:   endLine,
 		}
 	}
 }

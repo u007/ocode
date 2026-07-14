@@ -372,6 +372,15 @@ func (m *filesModel) navigateToSearchResult(result filesContentSearchResult) {
 						break
 					}
 				}
+				// For markdown, previewRawLines holds rendered lines whose count
+				// differs from source lines. Estimate the rendered line position
+				// proportionally so content-search jumps land in the right area.
+				if m.previewLang == "markdown" && len(m.previewRawLines) > 0 {
+					sourceLineCount := len(strings.Split(m.previewRaw, "\n"))
+					if sourceLineCount > 0 {
+						targetLine = targetLine * len(m.previewRawLines) / sourceLineCount
+					}
+				}
 				// Scroll to the matching line (0-indexed).
 				totalLines := m.preview.TotalLineCount()
 				visibleLines := m.preview.Height()
