@@ -1013,6 +1013,15 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 							notice = ne.Notice
 						}
 						result = fmt.Sprintf("Error: %v", err)
+					} else if tc.Function.Name == "imagegen" {
+						// Only imagegen currently embeds a display-only cost
+						// notice behind SuccessNoticeSeparator. Gate the split to
+						// that tool so the shared result path is not parsed for
+						// every tool call.
+						if idx2 := strings.Index(result, tool.SuccessNoticeSeparator); idx2 >= 0 {
+							notice = result[:idx2]
+							result = result[idx2+len(tool.SuccessNoticeSeparator):]
+						}
 					}
 					fullResult := result
 					result = TruncateToolResult(tc.ID, result)
@@ -1065,6 +1074,14 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 					notice = ne.Notice
 				}
 				result = fmt.Sprintf("Error: %v", err)
+			} else if tc.Function.Name == "imagegen" {
+				// Only imagegen currently embeds a display-only cost notice
+				// behind SuccessNoticeSeparator. Gate the split to that tool so
+				// the shared result path is not parsed for every tool call.
+				if idx := strings.Index(result, tool.SuccessNoticeSeparator); idx >= 0 {
+					notice = result[:idx]
+					result = result[idx+len(tool.SuccessNoticeSeparator):]
+				}
 			}
 			fullResult := result
 			result = TruncateToolResult(tc.ID, result)

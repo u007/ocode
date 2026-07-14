@@ -4,6 +4,8 @@
 
 > Started as an opencode clone, now diverged. See [Differences from opencode](#differences-from-opencode) for what changed and why.
 
+> **Built with the Tencent HY3 model** — this repository was developed and maintained with assistance from Tencent's HY3 large language model.
+
 [![Go Version](https://img.shields.io/badge/Go-1.26.1-00ADD8?logo=go)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 

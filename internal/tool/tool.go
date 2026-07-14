@@ -63,6 +63,15 @@ type NoticedError struct {
 func (e *NoticedError) Error() string { return e.Err.Error() }
 func (e *NoticedError) Unwrap() error { return e.Err }
 
+// SuccessNoticeSeparator, when present in a successful Execute() result,
+// splits the string into a leading user-facing notice and the trailing
+// canonical result (everything after the separator). Tools use this to
+// surface derived, display-only metadata (e.g. image-generation cost)
+// without storing it on the tool instance — Tool instances are shared
+// across concurrently-running agents/sub-agents, so instance state would
+// race and could be read by the wrong caller.
+const SuccessNoticeSeparator = "\x00OCODE_NOTICE\x00"
+
 // NoticeSentinel is the prefix used in assistant messages that carry a
 // transient user-facing notice. The TUI strips this prefix and renders the
 // remainder as a non-LLM transient message.

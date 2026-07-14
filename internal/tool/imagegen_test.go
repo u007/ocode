@@ -153,6 +153,9 @@ func TestExecuteGeminiViaTestServer(t *testing.T) {
 		t.Errorf("request body missing responseModalities: %q", gotBody)
 	}
 
+	if idx := strings.Index(res, SuccessNoticeSeparator); idx >= 0 {
+		res = res[idx+len(SuccessNoticeSeparator):]
+	}
 	var summary struct {
 		Provider string `json:"provider"`
 		Model    string `json:"model"`
@@ -257,5 +260,51 @@ func TestDefinitionSchema(t *testing.T) {
 	}
 	if _, ok := props["provider"]; !ok {
 		t.Errorf("provider param missing")
+	}
+}
+
+func TestImgPerImagePriceUSD(t *testing.T) {
+	cases := []struct {
+		provider, model, size, quality string
+		want                          float64
+	}{
+		{"openai", "dall-e-3", "1024x1024", "", 0.040},
+		{"openai", "dall-e-3", "1024x1024", "hd", 0.080},
+		{"openai", "dall-e-2", "", "", 0.020},
+		{"openai", "gpt-image-1", "", "low", 0.011},
+		{"openai", "gpt-image-1", "", "high", 0.083},
+		{"openai", "gpt-image-1", "", "medium", 0.016},
+		{"gemini", "gemini-3.1-flash-image", "", "", 0.039},
+		{"gemini", "gemini-3-pro-image", "", "", 0.10},
+		{"novita", "dall-e-3", "", "", 0.040},
+		{"novita", "flux-schnell", "", "", 0.012},
+		{"deepinfra", "flux-schnell", "", "", 0.003},
+		{"mystery", "unknown-model", "", "", 0}, // unknown provider -> $0
+	}
+	for _, c := range cases {
+		got := imgPerImagePriceUSD(c.provider, c.model, c.size, c.quality)
+		if got != c.want {
+			t.Errorf("imgPerImagePriceUSD(%q,%q,%q,%q) = %.4f, want %.4f", c.provider, c.model, c.size, c.quality, got, c.want)
+		}
+	}
+}
+
+func TestImageGenToolNotice(t *testing.T) {
+	tool := &ImageGenTool{}
+	notice := tool.recordCost(imgGenParams{Provider: "openai", Model: "dall-e-3", Quality: "hd", Size: "1024x1024"}, "dall-e-3", 2)
+	if notice == "" {
+		t.Fatal("expected non-empty notice after recordCost")
+	}
+	if !strings.Contains(notice, "provider=openai") || !strings.Contains(notice, "model=dall-e-3") {
+		t.Errorf("notice missing provider/model: %q", notice)
+	}
+	if !strings.Contains(notice, "$0.1600") {
+		t.Errorf("notice missing expected total for 2x $0.08 images: %q", notice)
+	}
+
+	// Unknown provider yields an "unknown" notice rather than a dollar amount.
+	tool2 := &ImageGenTool{}
+	if notice2 := tool2.recordCost(imgGenParams{Provider: "mystery"}, "x", 1); !strings.Contains(notice2, "unknown") {
+		t.Errorf("expected unknown-price notice, got %q", notice2)
 	}
 }

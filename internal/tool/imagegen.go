@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/paths"
 )
 
 // ImageGenTool generates images from a text prompt (and optionally an input
@@ -40,6 +42,120 @@ import (
 // config provider.<id>.options.apiKey > stored credential in auth.json.
 type ImageGenTool struct {
 	Config *config.Config
+}
+
+// imgCostRecord is a single logged image-generation cost event.
+type imgCostRecord struct {
+	Timestamp time.Time `json:"t"`
+	Provider  string    `json:"provider"`
+	Model     string    `json:"model"`
+	Count     int       `json:"count"`
+	UnitPrice float64   `json:"unit_price"`
+	Cost      float64   `json:"cost"`
+	Size      string    `json:"size,omitempty"`
+	Quality   string    `json:"quality,omitempty"`
+}
+
+// imgPerImagePriceUSD returns the representative list price (USD) for a single
+// generated image of the given model. For OpenAI image models size/quality
+// refine the price. Prices are editable constants and may drift from provider
+// list pricing — update them as needed.
+func imgPerImagePriceUSD(provider, model, size, quality string) float64 {
+	switch strings.ToLower(provider) {
+	case "openai":
+		switch strings.ToLower(model) {
+		case "dall-e-3":
+			if strings.EqualFold(quality, "hd") {
+				return 0.080
+			}
+			return 0.040
+		case "dall-e-2":
+			return 0.020
+		default: // gpt-image-1 and friends: size/quality tiers
+			switch strings.ToLower(quality) {
+			case "high":
+				return 0.083
+			case "low":
+				return 0.011
+			default: // medium / auto / empty
+				return 0.016
+			}
+		}
+	case "gemini", "google":
+		if strings.Contains(strings.ToLower(model), "pro") {
+			return 0.10
+		}
+		return 0.039
+	case "novita", "novita-ai":
+		if strings.Contains(strings.ToLower(model), "flux") {
+			return 0.012
+		}
+		return 0.040
+	case "deepinfra":
+		return 0.003
+	default:
+		return 0
+	}
+}
+
+// logImageGenCost writes the cost event to a JSONL file under the global data
+// dir and emits a debug log line. Writing to the log (not stdout) keeps the
+// TUI alt-screen safe.
+func logImageGenCost(rec imgCostRecord) {
+	dir, err := paths.GlobalDataDir()
+	if err != nil {
+		log.Printf("[IMAGEGEN] cost not logged (no data dir): %v", err)
+		return
+	}
+	path := filepath.Join(dir, "imagegen_costs.jsonl")
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("[IMAGEGEN] cost log write failed: %v", err)
+		return
+	}
+	defer f.Close()
+	line, err := json.Marshal(rec)
+	if err != nil {
+		log.Printf("[IMAGEGEN] cost log marshal failed: %v", err)
+		return
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		log.Printf("[IMAGEGEN] cost log write failed: %v", err)
+		return
+	}
+	log.Printf("[IMAGEGEN] cost=$%.4f provider=%s model=%s images=%d", rec.Cost, rec.Provider, rec.Model, rec.Count)
+}
+
+// recordCost computes the estimated generation cost, logs it to a file, and
+// returns a display-only notice describing it. The notice travels with the
+// return value (rather than being stored on the tool instance, which is
+// shared across concurrently-running agents/sub-agents) so it can never be
+// clobbered by or leaked to a concurrent call.
+func (t *ImageGenTool) recordCost(p imgGenParams, model string, count int) string {
+	if count <= 0 {
+		return ""
+	}
+	unit := imgPerImagePriceUSD(p.Provider, model, p.Size, p.Quality)
+	var notice string
+	if unit > 0 {
+		total := unit * float64(count)
+		notice = fmt.Sprintf("Image generation cost: $%.4f (provider=%s model=%s images=%d @ $%.4f/image)",
+			total, p.Provider, model, count, unit)
+	} else {
+		notice = fmt.Sprintf("Image generation cost: unknown (no price configured for provider=%s model=%s)",
+			p.Provider, model)
+	}
+	logImageGenCost(imgCostRecord{
+		Timestamp: time.Now(),
+		Provider:  p.Provider,
+		Model:     model,
+		Count:     count,
+		UnitPrice: unit,
+		Cost:      unit * float64(count),
+		Size:      p.Size,
+		Quality:   p.Quality,
+	})
+	return notice
 }
 
 // imgProvider describes how to talk to a backend.
@@ -281,6 +397,13 @@ func (t *ImageGenTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
+	// Compute, display, and log the estimated generation cost. This is
+	// display-only: prefixed onto the result behind SuccessNoticeSeparator so
+	// the agent can split it into Message.Notice (shown in the transcript,
+	// never sent to the LLM) without the tool storing any per-call state on
+	// itself. It is intentionally NOT in the JSON result.
+	notice := t.recordCost(p, model, len(saved))
+
 	summary := map[string]interface{}{
 		"provider": p.Provider,
 		"model":    model,
@@ -293,6 +416,9 @@ func (t *ImageGenTool) Execute(args json.RawMessage) (string, error) {
 	out, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal result: %w", err)
+	}
+	if notice != "" {
+		return notice + SuccessNoticeSeparator + string(out), nil
 	}
 	return string(out), nil
 }
