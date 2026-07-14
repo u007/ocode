@@ -205,6 +205,9 @@ export interface TUIStatus {
   ocr_backend?: string;
   ocr_model?: string;
   ocr_enabled?: boolean;
+  image_gen_enabled?: boolean;
+  image_gen_provider?: string;
+  image_gen_model?: string;
   subagent_model?: string;
   session_id?: string;
   session_title?: string;

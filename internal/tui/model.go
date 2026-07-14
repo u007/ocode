@@ -723,10 +723,11 @@ type model struct {
 	// kaizenAnnounced is the sorted set of digest-contributing Kaizen skill
 	// names last announced in the transcript, so the "directives active" notice
 	// is emitted once per active-model change rather than on every request.
-	kaizenAnnounced string
-	config          *config.Config
-	sessionID       string
-	sessionTitle    string
+	kaizenAnnounced   string
+	config            *config.Config
+	sessionID         string
+	sessionTitle      string
+	titleRegenerating bool // true while a manual title regeneration (gen button) is in flight
 	// sessionLoadErr records a failure to load an explicitly requested
 	// session (via -session or -continue). When set, Run aborts before the
 	// TUI starts instead of silently continuing with a placeholder file.
@@ -789,8 +790,8 @@ type model struct {
 	initDiffCmd          tea.Cmd // initial async diff load, fired from Init()
 	logViewport          viewport.Model
 	permViewport         viewport.Model
-	agentsViewport       viewport.Model     // scrollable agent-run list on the agents tab
-	agentsBlocks         []agentStripBlock  // content-line ranges → runID for agents-tab click-to-open
+	agentsViewport       viewport.Model    // scrollable agent-run list on the agents tab
+	agentsBlocks         []agentStripBlock // content-line ranges → runID for agents-tab click-to-open
 	logEntries           []DebugEntry
 	// lastPromotedLogIdx is the index in DebugLog.Snapshot() up to which we
 	// have already considered promoting entries to the chat transcript
@@ -912,6 +913,7 @@ type model struct {
 	statusPermColEnd         int            // column where permission text ends on status line 0
 	hoverSidebarFile         string         // file path hovered by mouse in sidebar, empty when no hover
 	hoverSidebarCWD          bool           // true when the mouse hovers the clickable "cwd:" sidebar row
+	hoverSidebarTitleGen     bool           // true when the mouse hovers the clickable "gen" title button
 	hoverLink                pathLinkRegion // file-path link hovered in the transcript
 	hoverLinkActive          bool           // whether hoverLink is set
 	hoverLinkProbe           pathLinkProbeCache
@@ -1316,6 +1318,13 @@ func renderSidebarTodo(todo string, width int) []string {
 const (
 	sidebarMinWidth    = 120
 	sidebarColumnWidth = 38
+	// sidebarTitleGenBtn is the clickable "magic gen" button rendered at the
+	// right edge of the sidebar title row. Its visual width is fixed so the
+	// click hit-box stays stable across hover/regenerating states.
+	sidebarTitleGenBtn = " ✦ gen"
+	// sidebarMaxTitleLines caps how many rows the (wrapped) session title may
+	// occupy in the sidebar header so it never crowds the scrollable sections.
+	sidebarMaxTitleLines = 3
 )
 
 func (m *model) applyTheme() {
@@ -1534,10 +1543,18 @@ func (m *model) switchAgent(name string) {
 // for in-composer editing.
 func newComposerInput() textarea.Model {
 	ta := textarea.New()
-	ta.KeyMap.DeleteCharacterForward = key.NewBinding()     // ctrl+d -> thinking level
-	ta.KeyMap.CharacterBackward = key.NewBinding()          // ctrl+b -> background bash
-	ta.KeyMap.TransposeCharacterBackward = key.NewBinding() // ctrl+t -> cycle theme
-	ta.KeyMap.LinePrevious = key.NewBinding()               // ctrl+p -> file search
+	ta.KeyMap.DeleteCharacterForward = key.NewBinding() // ctrl+d -> thinking level
+	// Unbind ONLY the ctrl chords that are also global chat-tab shortcuts. The
+	// default textarea bindings pair each arrow key with a ctrl chord
+	// (CharacterBackward=["left","ctrl+b"], LinePrevious=["up","ctrl+p"]). An
+	// empty key.NewBinding() matches nothing, so it would silently kill the
+	// arrow navigation too — which is why left/up stopped moving the cursor.
+	// Rebind keeping the arrow key and dropping the ctrl chord so the global
+	// shortcut (background bash / file search) still fires and the arrows still
+	// navigate the text.
+	ta.KeyMap.CharacterBackward = key.NewBinding(key.WithKeys("left"), key.WithHelp("left", "character backward")) // ctrl+b -> background bash
+	ta.KeyMap.LinePrevious = key.NewBinding(key.WithKeys("up"), key.WithHelp("up", "previous line"))                // ctrl+p -> file search
+	ta.KeyMap.TransposeCharacterBackward = key.NewBinding()                                                                 // ctrl+t -> cycle theme
 	return ta
 }
 
@@ -3237,7 +3254,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ctrlCResetMsg:
 		m.ctrlCPressed = false
 	case cleanupRequestMsg:
-		m.cleanupCurrentSession()
+		// Cleanup deliberately does NOT run here: it can block on I/O (e.g. an
+		// LSP child stuck in an uninterruptible wait), and this handler runs
+		// on the same goroutine that reads Ctrl+C/SIGINT. Blocking it would
+		// make the signal that's supposed to quit the program the very thing
+		// that hangs. tea.Quit lets bubbletea restore the terminal and return
+		// from Run(); tui.go's deferred cleanupProgramModel runs the actual
+		// cleanup afterward, off this goroutine.
 		return m, tea.Quit
 	case dotTickMsg:
 		if m.streaming || m.lastActivity.LLMRunning || m.compacting || m.cmdRunning() || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || time.Now().Before(m.tokenBlinkUntil) || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
@@ -3981,6 +4004,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case titleGeneratedMsg:
 		// Drop stale results from goroutines started before /new or /title clear.
 		if msg.gen == m.titleGen && m.sessionTitle == "" {
+			m.titleRegenerating = false
 			if msg.title != "" {
 				m.sessionTitle = truncateTitle(msg.title, maxExplicitTitleLen)
 				m.saveSession()
@@ -4532,7 +4556,6 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			m.cycleThinkingLevel()
 			return true, m, nil
 		case "q":
-			m.cleanupCurrentSession()
 			return true, m, tea.Quit
 		}
 		return true, m, nil
@@ -4830,7 +4853,8 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, nil
 		}
 		if m.ctrlCPressed {
-			m.cleanupCurrentSession()
+			// See cleanupRequestMsg: cleanup runs post-Run (tui.go), not here,
+			// so a stuck cleanup step can't block this goroutine from quitting.
 			return m, tea.Quit
 		}
 		m.ctrlCPressed = true
@@ -5153,7 +5177,6 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 
 func (m model) handleTabCtrlC() (tea.Model, tea.Cmd) {
 	if m.ctrlCPressed {
-		m.cleanupCurrentSession()
 		return m, tea.Quit
 	}
 	m.ctrlCPressed = true
@@ -5693,6 +5716,13 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.sidebarSel = selectionState{}
 				return m, openInFileExplorer(path), true
 			}
+			// Plain click on the "gen" button regenerates the session title from
+			// the latest task. A drag there still selects/copies text (the
+			// active branch above returns first).
+			if m.sidebarTitleGenForClick(mouse) {
+				m.sidebarSel = selectionState{}
+				return m, m.regenerateTitle(), true
+			}
 			if m.sidebarAllowedHeaderForClick(mouse) && m.agent != nil {
 				perm := m.agent.Permissions()
 				// Cycle: normal → normal·auto → yolo → locked → normal
@@ -5789,6 +5819,17 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				}
 				if err := config.SaveOcrConfig(m.config.Ocode.Ocr); err != nil {
 					log.Printf("save ocr enabled: %v", err)
+				}
+				m.broadcastTUIStatus()
+				m.sidebarSel = selectionState{}
+				return m, nil, true
+			}
+			if m.sidebarDiscoverToggleForClick(mouse) {
+				if m.config != nil {
+					m.config.Ocode.Discovery.Enabled = !m.config.Ocode.Discovery.Enabled
+					if err := config.SaveDiscoveryEnabled(m.config.Ocode.Discovery.Enabled); err != nil {
+						log.Printf("save discovery enabled: %v", err)
+					}
 				}
 				m.broadcastTUIStatus()
 				m.sidebarSel = selectionState{}
@@ -5902,7 +5943,6 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 
 	if pressed && m.exitButtonForClick(mouse) {
 		if m.exitPending {
-			m.cleanupCurrentSession()
 			return m, tea.Quit, true
 		}
 		m.exitPending = true
@@ -6197,6 +6237,16 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 			m.hoverSidebarCWD = true
 		}
 		if m.hoverSidebarCWD != prevHoverCWD {
+			changed = true
+		}
+
+		// Underline the clickable "gen" title button under the cursor.
+		prevHoverGen := m.hoverSidebarTitleGen
+		m.hoverSidebarTitleGen = false
+		if m.sidebarTitleGenForClick(mouse) {
+			m.hoverSidebarTitleGen = true
+		}
+		if m.hoverSidebarTitleGen != prevHoverGen {
 			changed = true
 		}
 
@@ -6696,6 +6746,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/docs" || cmd == "/doc-mode" ||
 		cmd == "/recap" ||
 		cmd == "/ocr" ||
+		cmd == "/image" ||
 		cmd == "/goal"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
@@ -7269,6 +7320,7 @@ func (m *model) handleTitleCmd(args []string) tea.Cmd {
 	m.titleRequested = false
 	m.titleAttempts = 0
 	m.titleGen++
+	m.titleRegenerating = false
 	m.saveSession()
 	m.messages = append(m.messages, message{role: roleAssistant, text: "Title cleared — will auto-generate from next assistant response."})
 	return nil
@@ -8211,6 +8263,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.titleRequested = false
 	m.titleAttempts = 0
 	m.titleGen++
+	m.titleRegenerating = false
 	m.recapGen++
 	tool.SetTodoSession(m.sessionID)
 	snapshot.Reset()
@@ -10305,26 +10358,26 @@ func (m model) buildSelectionContext() string {
 		}
 	}
 
-		if m.filesSel.active && m.files.previewPath != "" && len(m.files.previewRawLines) > 0 {
-			writeHeader()
-			path := relPath(m.files.previewPath, m.workDir)
-			startLine, _, endLine, _ := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
-			b.WriteString("\n## File selection: ")
-			b.WriteString(path)
-			b.WriteString("\n")
-			// startLine/endLine are selection indices resolved against
-			// previewRawLines (mouse hit-testing uses that slice, see
-			// cfg.point(m.files.previewRawLines, ...) above), so index into it
-			// directly. For markdown that means rendered-line numbers, not
-			// source-file line numbers, but the copied text matches what was
-			// actually selected on screen.
-			for i := startLine; i <= endLine && i < len(m.files.previewRawLines); i++ {
-				if i < 0 {
-					continue
-				}
-				fmt.Fprintf(&b, "%d: %s\n", i+1, m.files.previewRawLines[i])
+	if m.filesSel.active && m.files.previewPath != "" && len(m.files.previewRawLines) > 0 {
+		writeHeader()
+		path := relPath(m.files.previewPath, m.workDir)
+		startLine, _, endLine, _ := normaliseSelection(m.filesSel.startLine, m.filesSel.startCol, m.filesSel.endLine, m.filesSel.endCol)
+		b.WriteString("\n## File selection: ")
+		b.WriteString(path)
+		b.WriteString("\n")
+		// startLine/endLine are selection indices resolved against
+		// previewRawLines (mouse hit-testing uses that slice, see
+		// cfg.point(m.files.previewRawLines, ...) above), so index into it
+		// directly. For markdown that means rendered-line numbers, not
+		// source-file line numbers, but the copied text matches what was
+		// actually selected on screen.
+		for i := startLine; i <= endLine && i < len(m.files.previewRawLines); i++ {
+			if i < 0 {
+				continue
 			}
+			fmt.Fprintf(&b, "%d: %s\n", i+1, m.files.previewRawLines[i])
 		}
+	}
 
 	if len(m.git.selectedFiles) > 0 {
 		allFiles := m.git.currentFileList()
@@ -10668,6 +10721,50 @@ func (m *model) firstUserPromptText() string {
 		}
 	}
 	return ""
+}
+
+// lastAssistantContent returns the text of the most recent non-transient
+// assistant message with non-empty content. It is used to seed title
+// regeneration with the latest task's outcome rather than the original request.
+func (m *model) lastAssistantContent() string {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
+		if msg.role == roleAssistant && !msg.transient && strings.TrimSpace(msg.text) != "" {
+			return msg.text
+		}
+	}
+	return ""
+}
+
+// regenerateTitle clears the current session title and kicks off a fresh
+// LLM title generation based on the LATEST task in the conversation — the most
+// recent user message plus the latest assistant response — instead of the
+// original request. The result is applied by the titleGeneratedMsg handler,
+// which only writes when sessionTitle is empty, so we clear it first. A new
+// titleGen invalidates any in-flight generation so only this result lands.
+func (m *model) regenerateTitle() tea.Cmd {
+	if m.agent == nil {
+		return nil
+	}
+	lastUser := m.lastUserMessageText()
+	if strings.TrimSpace(lastUser) == "" {
+		return nil
+	}
+	lastAssistant := m.lastAssistantContent()
+	m.sessionTitle = ""
+	m.titleRequested = true
+	m.titleAttempts = 0
+	m.titleGen++
+	m.titleRegenerating = true
+	ch := m.titleCh
+	gen := m.titleGen
+	m.agent.GenerateTitleAsync(lastUser, lastAssistant, func(t string) {
+		select {
+		case ch <- titleResult{title: t, gen: gen}:
+		default:
+		}
+	})
+	return nil
 }
 
 func (m *model) appendAgentMessage(am agent.Message) {
@@ -12041,6 +12138,10 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		default:
 			snap.OcrModel = m.config.Ocode.Ocr.OpenAI.Model
 		}
+		imgCfg := m.config.Ocode.ImageGen
+		snap.ImageGenEnabled = imgCfg.Enabled
+		snap.ImageGenProvider = imgCfg.Provider
+		snap.ImageGenModel = imgCfg.Model
 	}
 	snap.SessionID = m.sessionID
 	snap.SessionTitle = m.sessionTitle
@@ -15733,6 +15834,8 @@ type sidebarRenderData struct {
 	recapModelToggleRows   int    // number of (possibly wrapped) rows the recap model row occupies
 	ocrToggleTopIdx        int    // index in topLines of the OCR on/off row, -1 if absent
 	ocrToggleRows          int    // number of (possibly wrapped) rows the OCR row occupies
+	discoverToggleTopIdx   int    // index in topLines of the discovery on/off row, -1 if absent
+	discoverToggleRows     int    // number of (possibly wrapped) rows the discovery row occupies
 	cwdTopIdx              int    // index in topLines of the "cwd:" row, -1 if absent
 	cwdRows                int    // number of (possibly wrapped) rows the cwd row occupies
 	cwdLabel               string // dim "cwd: " label (ANSI styled), kept for hover underline
@@ -16013,7 +16116,7 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 }
 
 func (m model) buildSidebarRenderData() sidebarRenderData {
-	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, ocrToggleTopIdx: -1, cwdTopIdx: -1}
+	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, ocrToggleTopIdx: -1, discoverToggleTopIdx: -1, cwdTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
 	outerBodyWidth := sidebarColumnWidth - 4
 	boxBodyWidth := sidebarColumnWidth - 4
@@ -16238,6 +16341,30 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	data.ocrToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, ocrLine, outerBodyWidth)
 	data.ocrToggleRows = len(data.topLines) - data.ocrToggleTopIdx
+	// Discovery row doubles as an on/off toggle (click to flip the runtime gate).
+	discoverOn := m.config != nil && m.config.Ocode.Discovery.Enabled
+	var discoverLine string
+	if discoverOn {
+		discoverLine = dimStyle.Render("discover: ") + successStyle.Render("●on ")
+		status := "ready"
+		if m.config != nil {
+			dc := m.config.Ocode.Discovery
+			switch {
+			case dc.EmbeddingBackend == "local":
+				if dc.LocalModelStatus != "" {
+					status = dc.LocalModelStatus
+				}
+			case dc.EmbeddingModel != "":
+				status = dc.EmbeddingModel
+			}
+		}
+		discoverLine += sidebarTextStyle.Render(status)
+	} else {
+		discoverLine = dimStyle.Render("discover: ") + dimStyle.Render("○off ")
+	}
+	data.discoverToggleTopIdx = len(data.topLines)
+	appendWrapped(&data.topLines, discoverLine, outerBodyWidth)
+	data.discoverToggleRows = len(data.topLines) - data.discoverToggleTopIdx
 	data.topLines = append(data.topLines, "")
 
 	// ── Agents section (scrollable) ──
@@ -16454,17 +16581,43 @@ func (m model) renderSidebar() string {
 	}
 	var header string
 	if title != "" {
-		// Defensive: collapse newlines so multi-line session titles
-		// don't produce a multi-line header row.
+		// Collapse newlines so a multi-line title wraps cleanly.
 		title = strings.ReplaceAll(title, "\n", " ")
-		header = sidebarHeaderStyle.Render("◆ ") + m.styles.Header.Render(title)
-		// Clamp to a single visual row. The header is rendered inside a padded,
-		// width-constrained border (inner width sidebarColumnWidth-4); without
-		// this, a long title wraps to multiple rows while sidebarHeaderHeight()
-		// still reports 1, shifting every file row below it and breaking the
-		// hover/click hit-test (files become clickable N rows above where they
-		// render). Truncating keeps logical height == visual height.
-		header = ansi.Truncate(header, sidebarColumnWidth-4, "…")
+		innerWidth := sidebarColumnWidth - 4
+		btnW := lipgloss.Width(sidebarTitleGenBtn)
+		// Wrap the FULL title across up to sidebarMaxTitleLines rows so the
+		// entire title is visible (no mid-word "…" cut-off). The gen button
+		// rides the LAST row, right-aligned, so it never steals width from the
+		// text on the rows above it.
+		wrapped := wordWrap(title, innerWidth)
+		rows := strings.Split(wrapped, "\n")
+		overflow := len(rows) > sidebarMaxTitleLines
+		if overflow {
+			rows = rows[:sidebarMaxTitleLines]
+		}
+		btnStyle := sidebarAccentStyle.Copy()
+		if m.hoverSidebarTitleGen || m.titleRegenerating {
+			btnStyle = btnStyle.Underline(true)
+		}
+		for i := range rows {
+			// "◆ " prefix on the first row; continuation rows align under the
+			// title text (past the 2-col prefix width).
+			if i == 0 {
+				rows[i] = sidebarHeaderStyle.Render("◆ ") + m.styles.Header.Render(rows[i])
+			} else {
+				rows[i] = strings.Repeat(" ", ansi.StringWidth("◆ ")) + m.styles.Header.Render(rows[i])
+			}
+		}
+		// Reserve btnW columns on the last row for the gen button. If the title
+		// spilled past the 3-line budget, mark the final row with "…".
+		last := len(rows) - 1
+		if overflow {
+			rows[last] = ansi.Truncate(rows[last], innerWidth-btnW-ansi.StringWidth("…"), "…")
+		} else {
+			rows[last] = ansi.Truncate(rows[last], innerWidth-btnW, "…")
+		}
+		rows[last] = rows[last] + btnStyle.Render(sidebarTitleGenBtn)
+		header = strings.Join(rows, "\n")
 	}
 
 	headerHeight := lipgloss.Height(header)
@@ -16626,7 +16779,11 @@ func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight in
 	return minInt(scrollBoxHeight, spaceForScroll)
 }
 
-// sidebarHeaderHeight returns 1 when the sidebar shows a title row, else 0.
+// sidebarHeaderHeight returns the number of rows (1..sidebarMaxTitleLines) the
+// wrapped session title occupies in the sidebar header, or 0 when no title is
+// shown. It mirrors the wrap performed in renderSidebar so layout, the
+// selectable-line map, and the gen-button hit-test all agree on the header's
+// on-screen height.
 func (m model) sidebarHeaderHeight() int {
 	title := m.sessionTitle
 	if title == "" {
@@ -16634,10 +16791,16 @@ func (m model) sidebarHeaderHeight() int {
 			title = truncateTitle(prompt, maxExplicitTitleLen)
 		}
 	}
-	if title != "" {
-		return 1
+	if title == "" {
+		return 0
 	}
-	return 0
+	title = strings.ReplaceAll(title, "\n", " ")
+	wrapped := wordWrap(title, sidebarColumnWidth-4)
+	n := len(strings.Split(wrapped, "\n"))
+	if n > sidebarMaxTitleLines {
+		return sidebarMaxTitleLines
+	}
+	return n
 }
 
 // sidebarSelectableLines returns the ANSI-stripped sidebar lines exactly as laid
@@ -16802,6 +16965,27 @@ func (m model) sidebarCWDForClick(mouse tea.Mouse) (string, bool) {
 	return "", false
 }
 
+// sidebarTitleGenForClick returns true when the click lands on the clickable
+// "gen" button rendered at the right edge of the sidebar title's LAST row. The
+// button only appears when a title is shown (sessionTitle set or derived from
+// the first prompt), which is exactly when the header is rendered.
+func (m model) sidebarTitleGenForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) || m.sidebarHeaderHeight() == 0 {
+		return false
+	}
+	// The header occupies rows appHeaderHeight+1 .. appHeaderHeight+headerLines;
+	// the gen button rides the LAST header row. The button occupies the last
+	// btnW columns of the inner content area — the sidebar starts at
+	// panelWidth(), with a 1-col border + 1-col padding, so inner content runs
+	// from panelWidth()+2 to panelWidth()+sidebarColumnWidth-2.
+	if mouse.Y != appHeaderHeight+m.sidebarHeaderHeight() {
+		return false
+	}
+	innerRight := m.panelWidth() + sidebarColumnWidth - 2
+	btnW := lipgloss.Width(sidebarTitleGenBtn)
+	return mouse.X >= innerRight-btnW && mouse.X < innerRight
+}
+
 // sidebarAllowedHeaderForClick returns true when the click lands on the
 // "Allowed" section header line in the pinned bottom area of the sidebar.
 func (m model) sidebarAllowedHeaderForClick(mouse tea.Mouse) bool {
@@ -16929,6 +17113,25 @@ func (m model) sidebarRecapModelToggleForClick(mouse tea.Mouse) bool {
 	}
 	startY := layout.contentTopY + data.recapModelToggleTopIdx
 	endY := minInt(startY+data.recapModelToggleRows, layout.scrollScreenY)
+	return mouse.Y >= startY && mouse.Y < endY
+}
+
+// sidebarDiscoverToggleForClick returns true when the click lands on the
+// discovery on/off row.
+func (m model) sidebarDiscoverToggleForClick(mouse tea.Mouse) bool {
+	if !m.mouseOverSidebar(mouse) {
+		return false
+	}
+	data := m.buildSidebarRenderData()
+	if data.discoverToggleTopIdx < 0 {
+		return false
+	}
+	layout := m.sidebarScreenLayout(data)
+	if data.discoverToggleTopIdx >= layout.topCount {
+		return false
+	}
+	startY := layout.contentTopY + data.discoverToggleTopIdx
+	endY := minInt(startY+data.discoverToggleRows, layout.scrollScreenY)
 	return mouse.Y >= startY && mouse.Y < endY
 }
 

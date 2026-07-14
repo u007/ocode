@@ -24,6 +24,10 @@ type TUIStatus struct {
 	OcrBackend string `json:"ocr_backend,omitempty"`
 	OcrModel   string `json:"ocr_model,omitempty"`
 	OcrEnabled bool   `json:"ocr_enabled"`
+	// Image generation tool: enabled state + selected provider/model.
+	ImageGenEnabled  bool   `json:"image_gen_enabled"`
+	ImageGenProvider string `json:"image_gen_provider,omitempty"`
+	ImageGenModel    string `json:"image_gen_model,omitempty"`
 	// IDE integration: mode is "off" | "claude" | ...; status is a short
 	// human-readable string for the status bar.
 	IDEMode   string `json:"ide_mode,omitempty"`

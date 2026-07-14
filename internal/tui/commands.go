@@ -160,6 +160,7 @@ func init() {
 		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status|init|update|cleanup]", help: "Manage documentation-first development and OKF knowledge bundle: on/off toggle, status show counts, init create bundle, update force maintenance, cleanup remove deprecated docs", handler: runDocsCmd},
 		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
+		{name: "/image", usage: "/image [status|enable|disable|model [provider/model]]", help: "Show imagegen status, toggle image generation, or set the image model/provider", handler: runImageCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 
@@ -662,7 +663,9 @@ func runPluginCmd(m *model, args []string) tea.Cmd {
 }
 
 func runExitCmd(m *model, args []string) tea.Cmd {
-	m.cleanupCurrentSession()
+	// Cleanup runs post-Run (tui.go's deferred cleanupProgramModel), not here:
+	// see the cleanupRequestMsg comment in model.go for why it must not block
+	// this goroutine.
 	return tea.Quit
 }
 
@@ -1565,4 +1568,8 @@ func runDocsCmd(m *model, args []string) tea.Cmd {
 
 func runOcrCmd(m *model, args []string) tea.Cmd {
 	return m.handleOcrCmd(args)
+}
+
+func runImageCmd(m *model, args []string) tea.Cmd {
+	return m.handleImageCmd(args)
 }

@@ -124,6 +124,10 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config) []Tool {
 	// returns a NoticedError telling the user to use /ocr enable and
 	// /ocr model to configure it.
 	builtins = append(builtins, &OcrTool{Config: cfg})
+	// Image generation tool — always registered so the model can generate
+	// images via Gemini (default), OpenAI, Novita, DeepInfra, or any
+	// OpenAI-compatible endpoint.
+	builtins = append(builtins, &ImageGenTool{Config: cfg})
 	return builtins
 }
 

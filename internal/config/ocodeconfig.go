@@ -140,8 +140,9 @@ type OcodeConfig struct {
 	UploadDir string `json:"upload_dir,omitempty"`
 	// Ocr holds the OCR tool configuration (backend, model, endpoint).
 	// Backend accepts openai-compat, paddle, and the lmstudio alias.
-	Ocr   ocr.OcrConfig `json:"ocr"`
-	Extra map[string]json.RawMessage
+	Ocr      ocr.OcrConfig  `json:"ocr"`
+	ImageGen ImageGenConfig `json:"imagegen"`
+	Extra    map[string]json.RawMessage
 }
 
 type PermissionConfig struct {
@@ -303,6 +304,7 @@ type ocodeConfigFile struct {
 	MaxImageDim         int                  `json:"image_max_dim,omitempty"`
 	UploadDir           string               `json:"upload_dir,omitempty"`
 	Ocr                 *ocr.OcrConfig       `json:"ocr,omitempty"`
+	ImageGen            *ImageGenConfig      `json:"imagegen,omitempty"`
 	// Legacy fields (read from old configs for migration)
 	OcrModel   string `json:"ocr_model,omitempty"`
 	OcrEnabled *bool  `json:"ocr_enabled,omitempty"`
@@ -356,6 +358,7 @@ func defaultOcodeConfig() OcodeConfig {
 		TUI:                 defaultTUIConfig(),
 		Ocr:                 ocr.DefaultOcrConfig(),
 		Extra:               make(map[string]json.RawMessage),
+		ImageGen:            DefaultImageGenConfig(),
 	}
 }
 
@@ -742,6 +745,16 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		}
 	}
 
+	if rawImg, ok := raw["imagegen"]; ok && rawImg != nil {
+		var imgCfg ImageGenConfig
+		if data, err := json.Marshal(rawImg); err == nil {
+			if json.Unmarshal(data, &imgCfg) == nil {
+				cfg.ImageGen = imgCfg
+			}
+		}
+		delete(raw, "imagegen")
+	}
+
 	if cfg.Extra == nil {
 		cfg.Extra = make(map[string]json.RawMessage)
 	}
@@ -1113,6 +1126,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["upload_dir"] = cfg.UploadDir
 	}
 	payload["ocr"] = cfg.Ocr
+	payload["imagegen"] = cfg.ImageGen
 	if cfg.TUI.Theme != "" || cfg.TUI.Mouse != nil || cfg.TUI.Scroll != 0 || cfg.TUI.LeaderTimeout != 0 || len(cfg.TUI.Keybinds) > 0 {
 		payload["tui"] = cfg.TUI
 	}

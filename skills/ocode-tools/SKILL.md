@@ -37,7 +37,7 @@ The TUI strips the `NOTICE:` prefix and renders the remainder as a transient mes
 func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager)
 ```
 
-Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Manager` (lives as long as the session) and registers 26+ tools:
+Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Manager` (lives as long as the session) and registers 28+ tools:
 
 | # | Tool | File | Name() | Parallel | Permission default |
 |---|------|------|--------|----------|-------------------|
@@ -70,6 +70,8 @@ Called once per session from `agent.go:NewAgent()`. Creates one shared `lsp.Mana
 | 27 | `GitHubIssueTool` | `github.go` | `github_issue` | ✅ yes | ask (implied) |
 | 28 | `GitHubWorkflowTool` | `github.go` | `github_workflow` | ✅ yes | ask (implied) |
 | 29 | `AstTool` (opt-in) | `ast.go` | `ast` | ✅ yes | allow |
+| 30 | `OcrTool` | `ocr.go` | `ocr` | ❌ no | allow |
+| 31 | `ImageGenTool` | `imagegen.go` | `imagegen` | ❌ no | allow |
 
 > Permission defaults shown above are the static defaults from `permissions.go:NewPermissionManager()`. Override via `ocodeconfig.json:permissions.tools` or agent-specific permission maps. The `ask (implied)` label means the tool isn't in the static defaults; it inherits `ask` from the generic tool-default rule. `?` marks tools not explicitly listed in the default table — check `permissions.go` for current classification.
 

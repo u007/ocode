@@ -14,11 +14,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textarea"
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
@@ -1917,7 +1919,11 @@ func TestCtrlCClearsNonEmptyInputBeforeQuitConfirmation(t *testing.T) {
 	}
 }
 
-func TestRunExitCmdUsesSharedCleanupPath(t *testing.T) {
+func TestRunExitCmdDoesNotBlockOnCleanup(t *testing.T) {
+	// Cleanup must not run synchronously here: it can block on I/O (e.g. a
+	// stuck LSP child), and this runs on the same goroutine that needs to
+	// process the quit. It runs post-Run instead (tui.go's deferred
+	// cleanupProgramModel).
 	cleanupCalls := 0
 	m := model{
 		cleanupState: &modelCleanupState{
@@ -1929,8 +1935,8 @@ func TestRunExitCmdUsesSharedCleanupPath(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected /exit to return quit command")
 	}
-	if cleanupCalls != 1 {
-		t.Fatalf("expected /exit to use shared cleanup once, got %d", cleanupCalls)
+	if cleanupCalls != 0 {
+		t.Fatalf("expected /exit not to run cleanup synchronously, got %d calls", cleanupCalls)
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatalf("expected /exit to quit, got %T", cmd())
@@ -1983,7 +1989,11 @@ func TestCleanupCurrentSessionDeduplicatesNilAgent(t *testing.T) {
 	}
 }
 
-func TestCtrlCTwiceUsesSharedCleanupPath(t *testing.T) {
+func TestCtrlCTwiceDoesNotBlockOnCleanup(t *testing.T) {
+	// The second Ctrl+C must quit immediately without running cleanup on this
+	// goroutine: a stuck cleanup step (e.g. an LSP child wedged in I/O) would
+	// otherwise hang the very goroutine Ctrl+C needs to unblock. Cleanup runs
+	// post-Run instead (tui.go's deferred cleanupProgramModel).
 	cleanupCalls := 0
 	m := model{
 		input: newTestTextarea(),
@@ -2004,15 +2014,17 @@ func TestCtrlCTwiceUsesSharedCleanupPath(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected second Ctrl+C to return quit command")
 	}
-	if cleanupCalls != 1 {
-		t.Fatalf("expected second Ctrl+C to use shared cleanup once, got %d", cleanupCalls)
+	if cleanupCalls != 0 {
+		t.Fatalf("expected second Ctrl+C not to run cleanup synchronously, got %d calls", cleanupCalls)
 	}
 	if _, ok := cmd().(tea.QuitMsg); !ok {
 		t.Fatalf("expected second Ctrl+C to quit, got %T", cmd())
 	}
 }
 
-func TestLeaderQuitUsesSharedCleanupPath(t *testing.T) {
+func TestLeaderQuitDoesNotBlockOnCleanup(t *testing.T) {
+	// Same reasoning as TestCtrlCTwiceDoesNotBlockOnCleanup: cleanup must not
+	// run synchronously here.
 	cleanupCalls := 0
 	m := model{
 		input:        newTestTextarea(),
@@ -2026,8 +2038,8 @@ func TestLeaderQuitUsesSharedCleanupPath(t *testing.T) {
 	if cmd == nil {
 		t.Fatal("expected leader q to return quit command")
 	}
-	if cleanupCalls != 1 {
-		t.Fatalf("expected leader q to use shared cleanup once, got %d", cleanupCalls)
+	if cleanupCalls != 0 {
+		t.Fatalf("expected leader q not to run cleanup synchronously, got %d calls", cleanupCalls)
 	}
 	got := updated.(model)
 	if got.leaderActive {
@@ -2616,10 +2628,13 @@ func TestSidebarHoverAtBottomVisibleScrollRow(t *testing.T) {
 		}
 	}
 
-	// Height 22 (not 20): the sidebar budget subtracts appHeaderHeight, so a
-	// 20-row terminal leaves no visible scroll window with this much pinned
-	// content — the test needs at least one visible scroll row to hover.
-	m := model{ready: true, width: 140, height: 22, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 22)}
+	// Height 23 (was 22): the sidebar budget subtracts appHeaderHeight plus all
+	// pinned top lines (mode/model, details, context, cwd, and the advisor/small/
+	// perm/recap/ide/ocr/discover toggles). A 20-row terminal leaves no visible
+	// scroll window with this much pinned content, and each added toggle row
+	// removes one scroll row — 22 now drops below one visible row, so bump to 23
+	// to keep the minimal "one visible scroll row" scenario this test guards.
+	m := model{ready: true, width: 140, height: 23, showSidebar: true, input: textarea.New(), viewport: fastviewport.New(100, 23)}
 	data := m.buildSidebarRenderData()
 	layout := m.sidebarScreenLayout(data)
 	targetPath := "file-11.go"
@@ -7070,21 +7085,86 @@ func TestComposerInputFreesGlobalShortcutChords(t *testing.T) {
 }
 
 // TestNewComposerInputKeymapUnbindsConflicts checks the keymap directly so a
-// regression is caught even if textarea's Update behavior changes.
+// regression is caught even if textarea's Update behavior changes. The global
+// chat-tab chords (ctrl+b background bash, ctrl+p file search, ctrl+d thinking
+// level, ctrl+t cycle theme) must not be claimed by the composer — but the
+// arrow keys paired with some of those chords in the default textarea keymap
+// (left with ctrl+b, up with ctrl+p) MUST stay bound so the cursor can still be
+// moved. An empty key.NewBinding() would kill the arrows too.
 func TestNewComposerInputKeymapUnbindsConflicts(t *testing.T) {
 	in := newComposerInput()
-	checks := []struct {
-		name    string
-		enabled bool
+
+	// These chords are fully unbound in the composer (no paired arrow key in
+	// the default binding), so the whole binding should be empty.
+	fullUnbind := []struct {
+		name  string
+		binding key.Binding
 	}{
-		{"ctrl+d", in.KeyMap.DeleteCharacterForward.Enabled()},
-		{"ctrl+b", in.KeyMap.CharacterBackward.Enabled()},
-		{"ctrl+t", in.KeyMap.TransposeCharacterBackward.Enabled()},
-		{"ctrl+p", in.KeyMap.LinePrevious.Enabled()},
+		{"ctrl+d", in.KeyMap.DeleteCharacterForward},
+		{"ctrl+t", in.KeyMap.TransposeCharacterBackward},
 	}
-	for _, c := range checks {
-		if c.enabled {
-			t.Errorf("%s must be unbound in the composer keymap, but it is still enabled (would shadow the global shortcut)", c.name)
+	for _, c := range fullUnbind {
+		if len(c.binding.Keys()) != 0 {
+			t.Errorf("%s must be fully unbound in the composer keymap, but it still has keys %v (would shadow the global shortcut)", c.name, c.binding.Keys())
+		}
+	}
+
+	// These default bindings pair a global chord with an arrow key. We must
+	// keep the arrow (for cursor navigation) and drop only the ctrl chord.
+	partialUnbind := []struct {
+		name       string
+		binding    key.Binding
+		keepKey    string
+		dropChord  string
+	}{
+		{"ctrl+b", in.KeyMap.CharacterBackward, "left", "ctrl+b"},
+		{"ctrl+p", in.KeyMap.LinePrevious, "up", "ctrl+p"},
+	}
+	for _, c := range partialUnbind {
+		keys := c.binding.Keys()
+		if !slices.Contains(keys, c.keepKey) {
+			t.Errorf("%s's arrow key %q must stay bound for cursor navigation, but the composer keymap keys are %v", c.name, c.keepKey, keys)
+		}
+		if slices.Contains(keys, c.dropChord) {
+			t.Errorf("%s must not claim the chord %q (it is a global shortcut), but the composer keymap still has keys %v", c.name, c.dropChord, keys)
+		}
+	}
+}
+
+// TestComposerArrowKeysStillNavigate verifies the user-visible bug fix: the
+// left/up arrows must keep moving the textarea cursor even though their
+// default textarea bindings share chords with global chat-tab shortcuts. A
+// naive empty key.NewBinding() would unbind the arrows too.
+func TestComposerArrowKeysStillNavigate(t *testing.T) {
+	in := newComposerInput()
+
+	arrowCases := []struct {
+		name  string
+		key   tea.KeyPressMsg
+		binding key.Binding
+	}{
+		{"left", tea.KeyPressMsg{Code: tea.KeyLeft}, in.KeyMap.CharacterBackward},
+		{"up", tea.KeyPressMsg{Code: tea.KeyUp}, in.KeyMap.LinePrevious},
+	}
+	for _, c := range arrowCases {
+		if !key.Matches(c.key, c.binding) {
+			t.Errorf("%s arrow must navigate the composer text, but it no longer matches the keymap binding (keys=%v)", c.name, c.binding.Keys())
+		}
+	}
+
+	// The ctrl chords must NOT match the paired binding, so the global shortcut
+	// still fires instead of being swallowed by the textarea.
+	chordCases := []struct {
+		name  string
+		key   tea.KeyPressMsg
+		binding key.Binding
+	}{
+		{"ctrl+b", tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}, in.KeyMap.CharacterBackward},
+		{"ctrl+p", tea.KeyPressMsg{Code: 'p', Mod: tea.ModCtrl}, in.KeyMap.LinePrevious},
+	}
+	for _, c := range chordCases {
+		if key.Matches(c.key, c.binding) {
+			t.Errorf("%s must be handled by the global shortcut, not the composer binding (keys=%v)", c.name, c.binding.Keys())
 		}
 	}
 }
@@ -7142,6 +7222,72 @@ func TestSidebarShowsReasoningLevelForNonReasoningModel(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("sidebar should always show 'reason: high' for a non-reasoning model, got topLines=%v", data.topLines)
+	}
+}
+
+// TestSidebarShowsDiscoverToggle verifies the sidebar renders a discover
+// on/off status row that reflects config.Ocode.Discovery.Enabled, plus a short
+// status payload (embedding model) when enabled.
+func TestSidebarShowsDiscoverToggle(t *testing.T) {
+	cols := config.OcodeConfig{Discovery: config.DiscoveryConfig{Enabled: true, EmbeddingModel: "bge-m3"}}
+	m := model{
+		ready:       true,
+		width:       140,
+		height:      40,
+		showSidebar: true,
+		input:       textarea.New(),
+		viewport:    fastviewport.New(100, 20),
+		config:      &config.Config{Model: "gpt-4o", Ocode: cols},
+		styles:      ApplyThemeColors("tokyonight"),
+	}
+	data := m.buildSidebarRenderData()
+	if data.discoverToggleTopIdx < 0 {
+		t.Fatalf("expected discover toggle row in topLines, got topLines=%v", data.topLines)
+	}
+	onLine := stripANSI(data.topLines[data.discoverToggleTopIdx])
+	if !strings.Contains(onLine, "discover:") || !strings.Contains(onLine, "on") {
+		t.Fatalf("expected discover row showing on state, got %q", onLine)
+	}
+	if !strings.Contains(onLine, "bge-m3") {
+		t.Fatalf("expected discover row to show embedding model, got %q", onLine)
+	}
+
+	// Disabled variant.
+	m.config.Ocode.Discovery.Enabled = false
+	dataOff := m.buildSidebarRenderData()
+	offLine := stripANSI(dataOff.topLines[dataOff.discoverToggleTopIdx])
+	if !strings.Contains(offLine, "discover:") || !strings.Contains(offLine, "off") {
+		t.Fatalf("expected discover row showing off state, got %q", offLine)
+	}
+}
+
+// TestSidebarDiscoverToggleHitTest verifies the discover row's clickable band
+// is hit-tested correctly so a click toggles it (mirrors the OCR toggle path).
+func TestSidebarDiscoverToggleHitTest(t *testing.T) {
+	cols := config.OcodeConfig{Discovery: config.DiscoveryConfig{Enabled: true}}
+	m := model{
+		ready:       true,
+		width:       140,
+		height:      40,
+		showSidebar: true,
+		input:       textarea.New(),
+		viewport:    fastviewport.New(100, 20),
+		config:      &config.Config{Model: "gpt-4o", Ocode: cols},
+		styles:      ApplyThemeColors("tokyonight"),
+	}
+	data := m.buildSidebarRenderData()
+	layout := m.sidebarScreenLayout(data)
+	if data.discoverToggleTopIdx < 0 || data.discoverToggleTopIdx >= layout.topCount {
+		t.Fatalf("discover row not visible: topIdx=%d topCount=%d", data.discoverToggleTopIdx, layout.topCount)
+	}
+	clickX := m.width - 5 // within the right-hand sidebar column
+	clickY := layout.contentTopY + data.discoverToggleTopIdx
+	if !m.sidebarDiscoverToggleForClick(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: clickY}) {
+		t.Fatalf("expected discover toggle click hit at Y=%d", clickY)
+	}
+	// A click well above the composed sidebar content must miss the row.
+	if m.sidebarDiscoverToggleForClick(tea.Mouse{Button: tea.MouseLeft, X: clickX, Y: 0}) {
+		t.Fatal("expected discover toggle click miss at Y=0 (above sidebar content)")
 	}
 }
 

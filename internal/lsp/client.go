@@ -315,7 +315,16 @@ func (c *Client) Close() error {
 					firstErr = err
 				}
 			}
-			<-c.exited
+			// Bounded: a process stuck in uninterruptible I/O ignores SIGKILL
+			// until the kernel unblocks it, which would otherwise hang Close
+			// (and every synchronous caller of it) forever.
+			select {
+			case <-c.exited:
+			case <-time.After(3 * time.Second):
+				if firstErr == nil {
+					firstErr = fmt.Errorf("LSP server did not exit after kill")
+				}
+			}
 		}
 	})
 	return firstErr

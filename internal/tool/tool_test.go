@@ -49,6 +49,7 @@ var expectedBuiltinTools = []string{
 	"github_issue",
 	"github_workflow",
 	"ocr",
+	"imagegen",
 }
 
 // ast and ast_grep are conditionally appended; they are tested separately
