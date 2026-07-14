@@ -349,7 +349,7 @@ func TestRenderRunTranscriptShowsThinkingLLMToolRequestAndToolResult(t *testing.
 	}
 	setRunTranscriptForTest(run,
 		agent.Message{Role: "assistant", ReasoningContent: "step 1\nstep 2\nstep 3\nstep 4", Content: "done thinking", ToolCalls: []agent.ToolCall{makeAgentToolCall("call-1", "bash", `{"command":"printf one\\ntwo\\nthree\\nfour\\nfive\\nsix\\nseven\\neight\\nnine"}`)}},
-		agent.Message{Role: "tool", ToolID: "call-1", Content: strings.Repeat("tool line\n", 20)},
+		agent.Message{Role: "tool", ToolID: "call-1", Content: strings.Repeat("tool line\n", 22)},
 	)
 
 	rendered := stripANSI(renderRunTranscript(run, 80))

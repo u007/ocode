@@ -257,7 +257,7 @@ func (t *ImageGenTool) Execute(args json.RawMessage) (string, error) {
 		model = prov.defModel
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
 	var (
@@ -326,7 +326,9 @@ func (t *ImageGenTool) generateGemini(ctx context.Context, baseURL, apiKey, mode
 		"responseModalities": []string{"IMAGE", "TEXT"},
 	}
 	if p.AspectRatio != "" {
-		genConfig["aspectRatio"] = p.AspectRatio
+		genConfig["imageConfig"] = map[string]interface{}{
+			"aspectRatio": p.AspectRatio,
+		}
 	}
 
 	body := map[string]interface{}{
@@ -340,7 +342,7 @@ func (t *ImageGenTool) generateGemini(ctx context.Context, baseURL, apiKey, mode
 		return nil, "", fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/v1/models/%s:generateContent", baseURL, model)
+	url := fmt.Sprintf("%s/v1beta/models/%s:generateContent", baseURL, model)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return nil, "", fmt.Errorf("build request: %w", err)

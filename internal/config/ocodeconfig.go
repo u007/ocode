@@ -133,6 +133,9 @@ type OcodeConfig struct {
 	// RecapTimeoutSeconds controls the timeout for /recap summary generation.
 	// Defaults to 120 if not configured.
 	RecapTimeoutSeconds int `json:"recap_timeout_seconds,omitempty"`
+	// UndoMaxAgeDelta is the number of agent step increments after which a
+	// snapshot can no longer be undone by undo_file_change. Defaults to 4.
+	UndoMaxAgeDelta int `json:"undo_max_age_delta,omitempty"`
 
 	// UploadDir overrides the default directory used by the /upload and
 	// /api/uploads endpoints. When empty, files are stored under
@@ -297,6 +300,7 @@ type ocodeConfigFile struct {
 	RecapModel          string               `json:"recap_model,omitempty"`
 	RecapModelEnabled   *bool                `json:"recap_model_enabled,omitempty"`
 	RecapTimeoutSeconds *int                 `json:"recap_timeout_seconds,omitempty"`
+	UndoMaxAgeDelta     *int                 `json:"undo_max_age_delta,omitempty"`
 	CommitMsgModel      string               `json:"commit_msg_model,omitempty"`
 	CommitMsgPrompt     string               `json:"commit_msg_prompt,omitempty"`
 	TUI                 tuiConfigFile        `json:"tui"`
@@ -355,6 +359,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Security:            defaultSecurityConfig(),
 		Discovery:           defaultDiscoveryConfig(),
 		RecapTimeoutSeconds: 120,
+		UndoMaxAgeDelta:     4,
 		TUI:                 defaultTUIConfig(),
 		Ocr:                 ocr.DefaultOcrConfig(),
 		Extra:               make(map[string]json.RawMessage),
@@ -677,6 +682,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.RecapTimeoutSeconds = *file.RecapTimeoutSeconds
 		}
 		delete(raw, "recap_timeout_seconds")
+	}
+
+	if _, ok := raw["undo_max_age_delta"]; ok {
+		if file.UndoMaxAgeDelta != nil && *file.UndoMaxAgeDelta > 0 {
+			cfg.UndoMaxAgeDelta = *file.UndoMaxAgeDelta
+		}
+		delete(raw, "undo_max_age_delta")
 	}
 
 	if _, ok := raw["memory_enabled"]; ok {
@@ -1121,6 +1133,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	if cfg.MaxImageDim > 0 {
 		payload["image_max_dim"] = cfg.MaxImageDim
+	}
+	if cfg.UndoMaxAgeDelta > 0 {
+		payload["undo_max_age_delta"] = cfg.UndoMaxAgeDelta
 	}
 	if cfg.UploadDir != "" {
 		payload["upload_dir"] = cfg.UploadDir

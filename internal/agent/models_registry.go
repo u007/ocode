@@ -362,6 +362,25 @@ func ModelSupportsVision(modelID string) bool {
 	return IsVisionModel(modelID)
 }
 
+// ModelGeneratesImages reports whether a model can generate images. The
+// models.dev registry (Modalities.Output containing "image") is authoritative
+// when it knows the model. Models absent from the registry (cold cache,
+// offline, or brand-new IDs) return false — the picker falls back to the
+// user typing an explicit provider/model spec for those.
+func ModelGeneratesImages(modelID string) bool {
+	if m, ok := modelEntryFor(modelID); ok {
+		for _, out := range m.Modalities.Output {
+			if out == "image" {
+				return true
+			}
+		}
+		// Registry knows this model and it lists no image output → not an
+		// image generator.
+		return false
+	}
+	return false
+}
+
 // modelEntryFor resolves a model ID in "provider/model" format (e.g.
 // "deepseek/deepseek-v4-flash") or bare model name to its registry entry.
 // When multiple providers list the same model, entries with non-zero costs

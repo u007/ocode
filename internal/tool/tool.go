@@ -80,7 +80,7 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config) []Tool {
 	}
 	builtins := []Tool{
 		&ReadTool{},
-		&UndoTool{},
+		&UndoTool{Config: cfg},
 		&WriteTool{Config: cfg},
 		&ReplaceLinesToolImpl{Config: cfg},
 		&DeleteTool{},

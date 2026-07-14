@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/snapshot"
 )
 
@@ -111,6 +112,61 @@ func TestUndoTool_UnknownToolCallID(t *testing.T) {
 	_, err := undo.Execute(json.RawMessage(`{"tool_call_id":"never-happened"}`))
 	if err == nil {
 		t.Fatal("expected error for unknown tool_call_id")
+	}
+}
+
+func TestUndoTool_MaxAgeDelta(t *testing.T) {
+	// nil config → default window.
+	if got := (&UndoTool{}).maxAgeDelta(); got != defaultUndoMaxAgeDelta {
+		t.Fatalf("nil-config window = %d, want %d", got, defaultUndoMaxAgeDelta)
+	}
+	// configured value overrides the default.
+	cfg := &config.Config{}
+	cfg.Ocode.UndoMaxAgeDelta = 7
+	if got := (&UndoTool{Config: cfg}).maxAgeDelta(); got != 7 {
+		t.Fatalf("configured window = %d, want 7", got)
+	}
+	// zero / unset falls back to the default rather than disabling undo.
+	cfg.Ocode.UndoMaxAgeDelta = 0
+	if got := (&UndoTool{Config: cfg}).maxAgeDelta(); got != defaultUndoMaxAgeDelta {
+		t.Fatalf("zero-config window = %d, want %d", got, defaultUndoMaxAgeDelta)
+	}
+}
+
+func TestUndoTool_ExpiresAfterConfiguredWindow(t *testing.T) {
+	_ = withTempWorkdir(t)
+	store := snapshot.NewStore(snapshot.NewAgentID(), "")
+	ctx := snapshot.WithStore(context.Background(), store)
+	ctx = snapshot.WithToolCallID(ctx, "write-tc1")
+
+	if err := os.WriteFile("a.txt", []byte("original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	wt := WriteTool{}
+	if _, err := wt.ExecuteCtx(ctx, json.RawMessage(`{"path":"a.txt","content":"modified\n"}`)); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	cfg := &config.Config{}
+	cfg.Ocode.UndoMaxAgeDelta = 2
+	undo := &UndoTool{Config: cfg}
+
+	// 2 steps old: still within the window.
+	store.AdvanceStep()
+	store.AdvanceStep()
+	if _, err := undo.ExecuteCtx(ctx, json.RawMessage(`{"tool_call_id":"write-tc1"}`)); err != nil {
+		t.Fatalf("undo at age 2 should succeed, got %v", err)
+	}
+
+	// Re-stage a fresh write, then push it past the window.
+	if _, err := wt.ExecuteCtx(ctx, json.RawMessage(`{"path":"a.txt","content":"again\n"}`)); err != nil {
+		t.Fatalf("second write: %v", err)
+	}
+	store.AdvanceStep()
+	store.AdvanceStep()
+	store.AdvanceStep()
+	if _, err := undo.ExecuteCtx(ctx, json.RawMessage(`{"tool_call_id":"write-tc1"}`)); err == nil {
+		t.Fatal("undo at age 3 should have expired (max 2)")
 	}
 }
 

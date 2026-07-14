@@ -232,7 +232,7 @@ func TestToolOutputPreviewRespectsSanitizedLineCount(t *testing.T) {
 }
 
 func TestRenderReadToolOutputBoxExpandsInline(t *testing.T) {
-	lines := make([]string, 20)
+	lines := make([]string, 28)
 	for i := range lines {
 		lines[i] = fmt.Sprintf("alpha line %02d", i+1)
 	}
@@ -246,7 +246,7 @@ func TestRenderReadToolOutputBoxExpandsInline(t *testing.T) {
 	if got := strings.Count(collapsed, "alpha line"); got != toolOutputPreviewLines {
 		t.Fatalf("expected collapsed read output box to show %d lines, got %d:\n%s", toolOutputPreviewLines, got, collapsed)
 	}
-	if !strings.Contains(collapsed, "alpha line 09") || !strings.Contains(collapsed, "alpha line 20") || strings.Contains(collapsed, "alpha line 08") {
+	if !strings.Contains(collapsed, "alpha line 09") || !strings.Contains(collapsed, "alpha line 28") || strings.Contains(collapsed, "alpha line 08") {
 		t.Fatalf("expected collapsed read output box to show only the last %d lines:\n%s", toolOutputPreviewLines, collapsed)
 	}
 
@@ -254,7 +254,7 @@ func TestRenderReadToolOutputBoxExpandsInline(t *testing.T) {
 	if got := strings.Count(expanded, "alpha line"); got != len(lines) {
 		t.Fatalf("expected expanded read output box to show %d lines, got %d:\n%s", len(lines), got, expanded)
 	}
-	if !strings.Contains(expanded, "alpha line 20") {
+	if !strings.Contains(expanded, "alpha line 28") {
 		t.Fatalf("expected expanded read output box to include the full result:\n%s", expanded)
 	}
 }

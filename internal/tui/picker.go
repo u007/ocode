@@ -131,6 +131,26 @@ func (m *model) openModelPicker() tea.Cmd {
 	favorites := config.LoadFavorites()
 	recents := config.LoadRecentModels()
 
+	// When opened as an image-model picker, restrict the favorites and
+	// recently-used sections to image-generating models only.
+	imageOnly := m.pickerImageOnly
+	if imageOnly {
+		favs := favorites[:0]
+		for _, f := range favorites {
+			if agent.ModelGeneratesImages(f) {
+				favs = append(favs, f)
+			}
+		}
+		favorites = favs
+		recs := recents[:0]
+		for _, r := range recents {
+			if agent.ModelGeneratesImages(r) {
+				recs = append(recs, r)
+			}
+		}
+		recents = recs
+	}
+
 	shown := make(map[string]bool)
 	var items, values []string
 	var isHeader []bool
@@ -182,13 +202,26 @@ func (m *model) openModelPicker() tea.Cmd {
 
 	// Start async load of the full provider model list.
 	m.pickerLoadingAll = true
-	return loadFullModelPickerCmd(shown)
+	return loadFullModelPickerCmd(shown, imageOnly)
+}
+
+// openImageModelPicker opens the model picker restricted to image-generating
+// models, so the user can pick the /image provider/model from a filtered list
+// instead of typing a provider/model spec by hand. Selecting an entry runs
+// "/image model <provider/model>", identical to typing it manually.
+func (m *model) openImageModelPicker() tea.Cmd {
+	m.pickerImageOnly = true
+	cmd := m.openModelPicker()
+	m.pickerKind = "image-model"
+	m.pickerImageOnly = true // keep set for the async load + refresh paths
+	return cmd
 }
 
 // loadFullModelPickerCmd returns a tea.Cmd that loads all provider models in a
 // background goroutine and sends a modelPickerFullModelsLoadedMsg with the
 // provider sections (excluding models already shown in favorites/recents).
-func loadFullModelPickerCmd(shown map[string]bool) tea.Cmd {
+// When imageOnly is true, only image-generating models are included.
+func loadFullModelPickerCmd(shown map[string]bool, imageOnly bool) tea.Cmd {
 	return func() tea.Msg {
 		allModels := agent.AllProviderModels()
 		lmsResult := agent.FetchLMStudioModels()
@@ -210,6 +243,9 @@ func loadFullModelPickerCmd(shown map[string]bool) tea.Cmd {
 		providerMap := make(map[string][]string)
 		for _, modelID := range allModels {
 			if shown[modelID] {
+				continue
+			}
+			if imageOnly && !agent.ModelGeneratesImages(modelID) {
 				continue
 			}
 			provider, model := splitPickerModel(modelID)
@@ -249,6 +285,26 @@ func (m *model) buildFullModelPickerItems() {
 	allModels := agent.AllProviderModelsCached()
 	favorites := config.LoadFavorites()
 	recents := config.LoadRecentModels()
+
+	// When refreshing an image-model picker, restrict every section to
+	// image-generating models only.
+	imageOnly := m.pickerImageOnly
+	if imageOnly {
+		favs := favorites[:0]
+		for _, f := range favorites {
+			if agent.ModelGeneratesImages(f) {
+				favs = append(favs, f)
+			}
+		}
+		favorites = favs
+		recs := recents[:0]
+		for _, r := range recents {
+			if agent.ModelGeneratesImages(r) {
+				recs = append(recs, r)
+			}
+		}
+		recents = recs
+	}
 
 	shown := make(map[string]bool)
 	var items, values []string
@@ -291,6 +347,9 @@ func (m *model) buildFullModelPickerItems() {
 	providerMap := make(map[string][]string)
 	for _, modelID := range allModels {
 		if shown[modelID] {
+			continue
+		}
+		if imageOnly && !agent.ModelGeneratesImages(modelID) {
 			continue
 		}
 		provider, model := splitPickerModel(modelID)
@@ -560,6 +619,7 @@ func (m *model) closePicker() {
 	m.showPicker = false
 	m.popPickerModal()
 	m.pickerKind = ""
+	m.pickerImageOnly = false
 	m.pickerItems = nil
 	m.pickerValues = nil
 	m.pickerIsHeader = nil
@@ -611,7 +671,7 @@ func modelPickerMatches(lower, filter string) bool {
 }
 
 func (m model) pickerVisibleItems() ([]string, []string) {
-	if (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model") && m.pickerFilter != "" {
+	if (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != "" {
 		items := make([]string, 0, len(m.pickerItems))
 		values := make([]string, 0, len(m.pickerValues))
 		for i, item := range m.pickerItems {
@@ -701,7 +761,7 @@ func (m model) pickerRowForY(y int) (int, bool) {
 		return 0, false
 	}
 	row := start + idx
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 	if !isFiltered && row < len(m.pickerIsHeader) && m.pickerIsHeader[row] {
 		return 0, false
 	}
@@ -717,7 +777,7 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 		m.closePicker()
 		return m, nil
 	}
-	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
+	isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 	if !isFiltered && index < len(m.pickerIsHeader) && m.pickerIsHeader[index] {
 		m.closePicker()
 		return m, nil
@@ -776,12 +836,15 @@ func (m model) selectPickerIndex(index int) (tea.Model, tea.Cmd) {
 	if kind == "ocr-model" {
 		return m.handleCommand("/ocr model " + selected)
 	}
+	if kind == "image-model" {
+		return m.handleCommand("/image model " + selected)
+	}
 	return m.handleCommand("/models " + selected)
 }
 
 func (m model) renderPicker() string {
 	hintLine := hintStyle.Render("↑/↓ select · Enter confirm · Esc cancel · type to filter")
-	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" {
+	if m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "image-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+f favorite · ctrl+r refresh · Esc cancel · type to filter")
 	} else if m.pickerKind == "advisor" || m.pickerKind == "ocr-model" {
 		hintLine = hintStyle.Render("↑/↓ select · Enter confirm · ctrl+r refresh · Esc cancel · type to filter")
@@ -807,6 +870,9 @@ func (m model) renderPicker() string {
 	}
 	if m.pickerKind == "permission-model" {
 		title = "Select permission model"
+	}
+	if m.pickerKind == "image-model" {
+		title = "Select image model"
 	}
 	if m.pickerKind == "small-model" {
 		title = "Select small model"
@@ -852,7 +918,7 @@ func (m model) renderPicker() string {
 		}
 		body.WriteString(hintStyle.Render(empty))
 	} else {
-		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
+		isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "recap-model" || m.pickerKind == "redaction-model" || m.pickerKind == "embedding-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 		start, end := m.pickerVisibleRange()
 		for i := start; i < end; i++ {
 			line := items[i]
@@ -879,7 +945,7 @@ func (m model) renderPicker() string {
 		} else if m.pickerKind == "session" && m.pickerSessionMore {
 			body.WriteString(hintStyle.Render(fmt.Sprintf("  …%d of %d shown ↓ scroll for more", end-start, m.pickerSessionTotal)))
 		}
-		if m.pickerLoadingAll && (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "ocr-model") {
+		if m.pickerLoadingAll && (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "small-model" || m.pickerKind == "redaction-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") {
 			body.WriteString(hintStyle.Render("  ~ loading all models\u2026"))
 		}
 

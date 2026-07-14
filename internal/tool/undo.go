@@ -6,21 +6,33 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/snapshot"
 )
 
-// undoMaxAgeDelta is the number of agent step increments after which a
-// snapshot is considered expired and can no longer be undone.
-const undoMaxAgeDelta = 2
+// defaultUndoMaxAgeDelta is the number of agent step increments after which a
+// snapshot is considered expired and can no longer be undone. Used when no
+// value is configured via ocode.undo_max_age_delta.
+const defaultUndoMaxAgeDelta = 4
 
 // UndoTool restores a file to its pre-edit state by tool call ID.
 // It implements ContextualTool so it can access the per-agent snapshot store.
-type UndoTool struct{}
+type UndoTool struct {
+	Config *config.Config
+}
+
+// maxAgeDelta returns the configured undo window, falling back to the default.
+func (t *UndoTool) maxAgeDelta() int {
+	if t.Config != nil && t.Config.Ocode.UndoMaxAgeDelta > 0 {
+		return t.Config.Ocode.UndoMaxAgeDelta
+	}
+	return defaultUndoMaxAgeDelta
+}
 
 func (t *UndoTool) Name() string   { return "undo_file_change" }
 func (t *UndoTool) Parallel() bool { return false }
 func (t *UndoTool) Description() string {
-	return "Undo a previous write tool call by its tool_call_id. Reverts all files changed by that call to their pre-edit state. Prefer this over `git checkout`/`git restore` for reverting a file edit you just made — call it promptly, as it is only available within 2 agent steps of the original write."
+	return fmt.Sprintf("Undo a previous write tool call by its tool_call_id. Reverts all files changed by that call to their pre-edit state. Prefer this over `git checkout`/`git restore` for reverting a file edit you just made — call it promptly, as it is only available within %d agent steps of the original write.", t.maxAgeDelta())
 }
 
 func (t *UndoTool) Definition() map[string]interface{} {
@@ -56,7 +68,7 @@ func (t *UndoTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 	}
 
 	store := snapshot.FromContext(ctx)
-	restored, err := store.UndoByToolCallID(params.ToolCallID, undoMaxAgeDelta)
+	restored, err := store.UndoByToolCallID(params.ToolCallID, t.maxAgeDelta())
 	if err != nil {
 		return "", err
 	}

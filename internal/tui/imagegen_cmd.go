@@ -42,7 +42,7 @@ func (m *model) handleImageCmd(args []string) tea.Cmd {
 		if len(args) > 1 {
 			return m.handleImageModel(args[1])
 		}
-		return m.showImageStatus()
+		return m.openImageModelPicker()
 	default:
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /image [status|enable|disable|model [provider/model]]"})
 		return nil
@@ -94,7 +94,7 @@ func (m *model) showImageStatus() tea.Cmd {
 		output = cfg.OutputPath
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf(
-		"Image generation: %s\nProvider: %s\nModel: %s\nOutput: %s\n\nUse /image enable/disable to toggle, /image model <provider/model> to select a model.",
+		"Image generation: %s\nProvider: %s\nModel: %s\nOutput: %s\n\nUse /image enable/disable to toggle, /image model to pick a model, or /image model <provider/model> to set one directly.",
 		status, provider, modelText, output)})
 	return nil
 }

@@ -37,8 +37,10 @@ git worktree add .worktrees/feature-branch feature-branch
   - To *revert a file edit you just made*, prefer the **`undo_file_change`**
     tool: pass the `tool_call_id` of the write/edit/patch/delete/multi-edit/
     replace that produced the change, and it restores exactly the files that
-    call touched to their pre-edit state. It is valid only within your **2
-    most recent steps**, so call it promptly after a bad edit. (Every file
+    call touched to their pre-edit state. It is valid within your most recent
+    agent steps (default 4, configurable via `ocode.undo_max_age_delta` in
+    `ocodeconfig.json`; `0`/unset uses the default), so call it promptly after a
+    bad edit. (Every file
     write is backed up automatically by the snapshot store, so no extra setup
     is needed.)
   - Only fall back to git (`git checkout`/`git restore`/`git revert`) when you

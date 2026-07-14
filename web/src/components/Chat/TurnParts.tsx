@@ -46,7 +46,8 @@ export function ToolBlock({
   output?: string;
   highlight?: string;
 }) {
-  const [open, setOpen] = useState(true);
+  const lineCount = output ? output.split("\n").length : 0;
+  const [open, setOpen] = useState(lineCount <= 50);
   const pending = output === undefined;
   return (
     <div className="mb-3 flex justify-start">
@@ -57,7 +58,7 @@ export function ToolBlock({
           className="flex w-full items-center gap-1.5 text-xs font-medium text-amber-300/90 hover:text-amber-200"
         >
           <span>{open ? "▾" : "▸"}</span>
-          <span>🔧 {tool || "tool"}</span>
+          <span>🔧 {tool || "tool"}{lineCount > 0 ? ` · ${lineCount} lines` : ""}</span>
           {pending && <span className="ml-1 animate-pulse text-amber-400/70">running…</span>}
         </button>
         {open && (
@@ -68,7 +69,7 @@ export function ToolBlock({
               </pre>
             )}
             {output !== undefined && output !== "" && (
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words rounded bg-zinc-900/70 p-2 font-mono text-[11px] text-zinc-400">
+              <pre className="whitespace-pre-wrap break-words rounded bg-zinc-900/70 p-2 font-mono text-[11px] text-zinc-400">
                 {highlight.trim() ? highlightMatches(output, highlight) : output}
               </pre>
             )}

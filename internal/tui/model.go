@@ -744,6 +744,7 @@ type model struct {
 	leaderSeq           int
 	showPicker          bool
 	pickerKind          string
+	pickerImageOnly     bool // when true, the model picker lists only image-generating models
 	pickerItems         []string
 	pickerValues        []string
 	pickerIsHeader      []bool
@@ -1553,8 +1554,8 @@ func newComposerInput() textarea.Model {
 	// shortcut (background bash / file search) still fires and the arrows still
 	// navigate the text.
 	ta.KeyMap.CharacterBackward = key.NewBinding(key.WithKeys("left"), key.WithHelp("left", "character backward")) // ctrl+b -> background bash
-	ta.KeyMap.LinePrevious = key.NewBinding(key.WithKeys("up"), key.WithHelp("up", "previous line"))                // ctrl+p -> file search
-	ta.KeyMap.TransposeCharacterBackward = key.NewBinding()                                                                 // ctrl+t -> cycle theme
+	ta.KeyMap.LinePrevious = key.NewBinding(key.WithKeys("up"), key.WithHelp("up", "previous line"))               // ctrl+p -> file search
+	ta.KeyMap.TransposeCharacterBackward = key.NewBinding()                                                        // ctrl+t -> cycle theme
 	return ta
 }
 
@@ -2855,7 +2856,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerIndex = 0
 	case modelPickerFullModelsLoadedMsg:
 		m.pickerLoadingAll = false
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "ocr-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "ocr-model" && m.pickerKind != "image-model") {
 			return m, nil
 		}
 		// Append provider sections below the existing favs+recents items.
@@ -2868,7 +2869,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pickerRefreshing = false
 		// If the picker was closed while the refresh was in flight, just
 		// surface the result as a transcript message and skip repopulation.
-		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model") {
+		if !m.showPicker || (m.pickerKind != "model" && m.pickerKind != "advisor" && m.pickerKind != "permission-model" && m.pickerKind != "small-model" && m.pickerKind != "redaction-model" && m.pickerKind != "recap-model" && m.pickerKind != "image-model") {
 			if msg.err != nil {
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Model cache refresh failed: %v", msg.err)})
 				m.rerenderTranscriptAndMaybeScroll()
@@ -3263,7 +3264,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// cleanup afterward, off this goroutine.
 		return m, tea.Quit
 	case dotTickMsg:
-		if m.streaming || m.lastActivity.LLMRunning || m.compacting || m.cmdRunning() || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || time.Now().Before(m.tokenBlinkUntil) || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
+		if m.streaming || m.lastActivity.LLMRunning || m.compacting || m.cmdRunning() || len(m.lastActivity.ActiveTools) > 0 || !m.detail.empty() || time.Now().Before(m.tokenBlinkUntil) || m.titleRegenerating || m.agent != nil && (m.agent.Procs() != nil && m.agent.Procs().RunningCount() > 0 || m.agent.Runs() != nil && m.agent.Runs().RunningCount() > 0) {
 			m.dotFrame = (m.dotFrame + 1) % 4
 			// Refresh live detail view content.
 			if !m.detail.empty() {
@@ -4257,7 +4258,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 		case "up":
 			if m.pickerIndex > 0 {
 				m.pickerIndex--
-				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
+				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 				if isFiltered {
 					_, values := m.pickerVisibleItems()
 					for m.pickerIndex > 0 && m.pickerIndex < len(values) && values[m.pickerIndex] == "" {
@@ -4277,7 +4278,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			items, values := m.pickerVisibleItems()
 			if m.pickerIndex < len(items)-1 {
 				m.pickerIndex++
-				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
+				isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 				for m.pickerIndex < len(items)-1 {
 					if isFiltered {
 						if m.pickerIndex < len(values) && values[m.pickerIndex] == "" {
@@ -4306,14 +4307,14 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		case "enter":
-			isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model") && m.pickerFilter != ""
+			isFiltered := (m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "small-model" || m.pickerKind == "permission-model" || m.pickerKind == "ocr-model" || m.pickerKind == "image-model") && m.pickerFilter != ""
 			if !isFiltered && m.pickerIndex < len(m.pickerIsHeader) && m.pickerIsHeader[m.pickerIndex] {
 				return true, m, nil
 			}
 			newM, cmd := m.selectPickerIndex(m.pickerIndex)
 			return true, newM, cmd
 		case "ctrl+r":
-			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "recap-model" {
+			if m.pickerKind == "model" || m.pickerKind == "advisor" || m.pickerKind == "permission-model" || m.pickerKind == "recap-model" || m.pickerKind == "image-model" {
 				if m.pickerRefreshing {
 					return true, m, nil
 				}
@@ -4377,7 +4378,7 @@ func (m model) handleModalKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cmd) {
 			}
 			return true, m, nil
 		}
-		if keyStr == "ctrl+f" && (m.pickerKind == "model" || m.pickerKind == "permission-model") {
+		if keyStr == "ctrl+f" && (m.pickerKind == "model" || m.pickerKind == "permission-model" || m.pickerKind == "image-model") {
 			items, values := m.pickerVisibleItems()
 			isSelectable := len(m.pickerIsHeader) == 0 || (m.pickerIndex < len(m.pickerIsHeader) && !m.pickerIsHeader[m.pickerIndex])
 			if m.pickerIndex < len(items) && m.pickerIndex < len(values) && isSelectable {
@@ -5721,6 +5722,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			// active branch above returns first).
 			if m.sidebarTitleGenForClick(mouse) {
 				m.sidebarSel = selectionState{}
+				if m.titleRegenerating {
+					return m, nil, true
+				}
 				return m, m.regenerateTitle(), true
 			}
 			if m.sidebarAllowedHeaderForClick(mouse) && m.agent != nil {
@@ -6173,6 +6177,14 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			cmd := m.acceptPopupSuggestion(selected)
 			return m, cmd, true
 		}
+	}
+	// The "gen" title button rides the sidebar HEADER row, which sits above
+	// contentTopY (outside sidebarSelectableLines' range) — arm the same
+	// dragging gate the release handler checks so a press-then-release click on
+	// the button is recognized as a click rather than silently unhandled.
+	if pressed && m.sidebarTitleGenForClick(mouse) {
+		m.sidebarSel = selectionState{dragging: true}
+		return m, nil, true
 	}
 	// Sidebar text selection — always start dragging on press so a subsequent
 	// release can distinguish a simple click (no drag) from a selection drag.
@@ -10764,7 +10776,7 @@ func (m *model) regenerateTitle() tea.Cmd {
 		default:
 		}
 	})
-	return nil
+	return tea.Tick(400*time.Millisecond, func(time.Time) tea.Msg { return dotTickMsg{} })
 }
 
 func (m *model) appendAgentMessage(am agent.Message) {
@@ -13730,7 +13742,17 @@ func (m *model) buildToolOutputBox(toolName, innerContent string, rawLineCount i
 		vWidth = 1
 	}
 	box := m.styles.ToolBox.Width(vWidth).Render(innerContent)
-	header := m.styles.Hint.Render("  " + toolName + " output")
+
+	// Show ▸/▾ icon only when the box is collapsible (content exceeds preview limit).
+	icon := ""
+	if rawLineCount > toolOutputPreviewLines {
+		if expanded {
+			icon = "▾ "
+		} else {
+			icon = "▸ "
+		}
+	}
+	header := m.styles.Hint.Render("  " + icon + toolName + " output")
 	if expanded {
 		footer := m.styles.Hint.Render("  ▲ click to collapse")
 		return header + "\n" + box + "\n" + footer
@@ -13776,14 +13798,22 @@ func (m *model) renderOrphanWarningBox(content string, expanded bool) string {
 		}
 	}
 
-	header := warnStyle.Render("⚠ tool call failed after retry: " + toolName)
-	if errMsg != "" {
-		header += "\n" + m.styles.Error.Render("  error: "+errMsg)
-	}
-
 	boxLines := []string{}
 	if detail != "" {
 		boxLines = strings.Split(detail, "\n")
+	}
+
+	icon := ""
+	if len(boxLines) > maxLines {
+		if expanded {
+			icon = "▾ "
+		} else {
+			icon = "▸ "
+		}
+	}
+	header := warnStyle.Render("⚠ " + icon + "tool call failed after retry: " + toolName)
+	if errMsg != "" {
+		header += "\n" + m.styles.Error.Render("  error: "+errMsg)
 	}
 
 	footer := ""
@@ -16573,12 +16603,7 @@ func (m model) renderSidebar() string {
 		data.topLines[data.cwdTopIdx] = data.cwdLabel + hoverStyle.Render(data.cwdPath)
 	}
 
-	title := m.sessionTitle
-	if title == "" {
-		if prompt := m.firstUserPromptText(); prompt != "" {
-			title = truncateTitle(prompt, maxExplicitTitleLen)
-		}
-	}
+	title := m.sidebarDisplayTitle()
 	var header string
 	if title != "" {
 		// Collapse newlines so a multi-line title wraps cleanly.
@@ -16589,14 +16614,31 @@ func (m model) renderSidebar() string {
 		// entire title is visible (no mid-word "…" cut-off). The gen button
 		// rides the LAST row, right-aligned, so it never steals width from the
 		// text on the rows above it.
-		wrapped := wordWrap(title, innerWidth)
+		// Reserve the "◆ " / indent prefix width (2 cols) added to every row
+		// below — otherwise a fully-packed wrapped row plus prefix overflows the
+		// bordered box by 2 cols, and lipgloss silently wraps that overflow onto
+		// a phantom extra line, desyncing the on-screen row count from
+		// sidebarHeaderHeight() (breaking the gen-button hit-test for any title
+		// spanning more than one line).
+		prefixW := ansi.StringWidth("◆ ")
+		wrapped := wordWrap(title, innerWidth-prefixW)
 		rows := strings.Split(wrapped, "\n")
 		overflow := len(rows) > sidebarMaxTitleLines
 		if overflow {
 			rows = rows[:sidebarMaxTitleLines]
 		}
 		btnStyle := sidebarAccentStyle.Copy()
-		if m.hoverSidebarTitleGen || m.titleRegenerating {
+		btnLabel := sidebarTitleGenBtn
+		if m.titleRegenerating {
+			// Blink the button in place (same width) while a generation is in
+			// flight, so a rapid re-click reads as "already running" rather
+			// than "did my click register?".
+			if m.dotFrame%2 == 0 {
+				btnStyle = btnStyle.Faint(true)
+			} else {
+				btnStyle = btnStyle.Underline(true)
+			}
+		} else if m.hoverSidebarTitleGen {
 			btnStyle = btnStyle.Underline(true)
 		}
 		for i := range rows {
@@ -16616,7 +16658,7 @@ func (m model) renderSidebar() string {
 		} else {
 			rows[last] = ansi.Truncate(rows[last], innerWidth-btnW, "…")
 		}
-		rows[last] = rows[last] + btnStyle.Render(sidebarTitleGenBtn)
+		rows[last] = rows[last] + btnStyle.Render(btnLabel)
 		header = strings.Join(rows, "\n")
 	}
 
@@ -16780,22 +16822,42 @@ func (m model) sidebarVisibleScrollLines(data sidebarRenderData, headerHeight in
 }
 
 // sidebarHeaderHeight returns the number of rows (1..sidebarMaxTitleLines) the
-// wrapped session title occupies in the sidebar header, or 0 when no title is
-// shown. It mirrors the wrap performed in renderSidebar so layout, the
-// selectable-line map, and the gen-button hit-test all agree on the header's
-// on-screen height.
-func (m model) sidebarHeaderHeight() int {
+// sidebarDisplayTitle returns the text shown in the sidebar title row: the
+// session title if set, else the first user prompt as a fallback, else a
+// neutral "Untitled" placeholder so the "✦ gen" button always has a row to
+// attach to (and thus stays visible/clickable even with no title).
+func (m model) sidebarDisplayTitle() string {
 	title := m.sessionTitle
 	if title == "" {
 		if prompt := m.firstUserPromptText(); prompt != "" {
 			title = truncateTitle(prompt, maxExplicitTitleLen)
 		}
 	}
+	// Fall back to a neutral placeholder so the "✦ gen" title button always has
+	// a row to attach to — even for a brand-new session that has no title yet.
+	// This keeps the gen button visible (and clickable) when there is no title,
+	// instead of disappearing entirely.
+	if title == "" {
+		title = "Untitled"
+	}
+	return title
+}
+
+// sidebarHeaderHeight returns the number of rows (0..sidebarMaxTitleLines) the
+// wrapped session title occupies in the sidebar header. It mirrors the wrap
+// performed in renderSidebar so layout, the selectable-line map, and the
+// gen-button hit-test all agree on the header's on-screen height.
+func (m model) sidebarHeaderHeight() int {
+	title := m.sidebarDisplayTitle()
 	if title == "" {
 		return 0
 	}
 	title = strings.ReplaceAll(title, "\n", " ")
-	wrapped := wordWrap(title, sidebarColumnWidth-4)
+	// Reserve the "◆ " / indent prefix width (2 cols) that renderSidebar adds to
+	// every wrapped row on top of this wrap — otherwise the prefixed row is 2
+	// cols wider than the bordered box, and lipgloss silently wraps the overflow
+	// onto a phantom extra line the caller never accounts for.
+	wrapped := wordWrap(title, sidebarColumnWidth-4-ansi.StringWidth("◆ "))
 	n := len(strings.Split(wrapped, "\n"))
 	if n > sidebarMaxTitleLines {
 		return sidebarMaxTitleLines
@@ -16864,7 +16926,7 @@ func (m model) renderSidebarWithTabBar() string {
 
 func (m *model) clampSidebarScroll() {
 	data := m.buildSidebarRenderData()
-	headerHeight := lipgloss.Height(m.styles.Header.Render("◆ "))
+	headerHeight := m.sidebarHeaderHeight()
 	visible := m.sidebarScrollBoxHeight(data, headerHeight)
 	if visible < 1 {
 		visible = 1
@@ -16967,8 +17029,9 @@ func (m model) sidebarCWDForClick(mouse tea.Mouse) (string, bool) {
 
 // sidebarTitleGenForClick returns true when the click lands on the clickable
 // "gen" button rendered at the right edge of the sidebar title's LAST row. The
-// button only appears when a title is shown (sessionTitle set or derived from
-// the first prompt), which is exactly when the header is rendered.
+// button always renders while the sidebar is up — the title row falls back to a
+// placeholder ("Untitled") when no title exists, so the gen button stays
+// visible (and clickable) even for a session with no title yet.
 func (m model) sidebarTitleGenForClick(mouse tea.Mouse) bool {
 	if !m.mouseOverSidebar(mouse) || m.sidebarHeaderHeight() == 0 {
 		return false

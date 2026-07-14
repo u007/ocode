@@ -7097,7 +7097,7 @@ func TestNewComposerInputKeymapUnbindsConflicts(t *testing.T) {
 	// These chords are fully unbound in the composer (no paired arrow key in
 	// the default binding), so the whole binding should be empty.
 	fullUnbind := []struct {
-		name  string
+		name    string
 		binding key.Binding
 	}{
 		{"ctrl+d", in.KeyMap.DeleteCharacterForward},
@@ -7112,10 +7112,10 @@ func TestNewComposerInputKeymapUnbindsConflicts(t *testing.T) {
 	// These default bindings pair a global chord with an arrow key. We must
 	// keep the arrow (for cursor navigation) and drop only the ctrl chord.
 	partialUnbind := []struct {
-		name       string
-		binding    key.Binding
-		keepKey    string
-		dropChord  string
+		name      string
+		binding   key.Binding
+		keepKey   string
+		dropChord string
 	}{
 		{"ctrl+b", in.KeyMap.CharacterBackward, "left", "ctrl+b"},
 		{"ctrl+p", in.KeyMap.LinePrevious, "up", "ctrl+p"},
@@ -7139,8 +7139,8 @@ func TestComposerArrowKeysStillNavigate(t *testing.T) {
 	in := newComposerInput()
 
 	arrowCases := []struct {
-		name  string
-		key   tea.KeyPressMsg
+		name    string
+		key     tea.KeyPressMsg
 		binding key.Binding
 	}{
 		{"left", tea.KeyPressMsg{Code: tea.KeyLeft}, in.KeyMap.CharacterBackward},
@@ -7155,8 +7155,8 @@ func TestComposerArrowKeysStillNavigate(t *testing.T) {
 	// The ctrl chords must NOT match the paired binding, so the global shortcut
 	// still fires instead of being swallowed by the textarea.
 	chordCases := []struct {
-		name  string
-		key   tea.KeyPressMsg
+		name    string
+		key     tea.KeyPressMsg
 		binding key.Binding
 	}{
 		{"ctrl+b", tea.KeyPressMsg{Code: 'b', Mod: tea.ModCtrl}, in.KeyMap.CharacterBackward},
@@ -7417,5 +7417,60 @@ func TestCtrlDInFocusedInputCyclesThinking(t *testing.T) {
 	}
 	if got.config.ThinkingBudget != 1024 {
 		t.Fatalf("ctrl+d should set ThinkingBudget to 1024 (low), got %d", got.config.ThinkingBudget)
+	}
+}
+
+func TestOpenImageModelPickerFiltersToImageModels(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	// Favorite one image-generating model and one text-only model.
+	if err := config.SaveFavoriteModel("openai/gpt-image-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveFavoriteModel("openai/gpt-4o"); err != nil {
+		t.Fatal(err)
+	}
+
+	m := newImageTestModel(t)
+	m.input = newComposerInput()
+	cmd := m.openImageModelPicker()
+	if cmd == nil {
+		t.Fatal("openImageModelPicker returned nil cmd; expected the async load cmd")
+	}
+	if m.pickerKind != "image-model" {
+		t.Fatalf("expected pickerKind=image-model, got %q", m.pickerKind)
+	}
+	if !m.pickerImageOnly {
+		t.Fatal("expected pickerImageOnly=true after opening the image picker")
+	}
+	if !m.showPicker {
+		t.Fatal("expected showPicker=true after opening the image picker")
+	}
+	// The favorites section must contain the image model but exclude the
+	// text-only model.
+	if !containsString(m.pickerValues, "openai/gpt-image-1") {
+		t.Fatalf("expected image favorite openai/gpt-image-1 in picker values, got %#v", m.pickerValues)
+	}
+	if containsString(m.pickerValues, "openai/gpt-4o") {
+		t.Fatalf("text-only favorite openai/gpt-4o should be filtered out, got %#v", m.pickerValues)
+	}
+}
+
+func TestSelectImageModelPickerRunsImageModelCommand(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	m := newImageTestModel(t)
+	m.input = newComposerInput()
+	m.pickerKind = "image-model"
+	m.pickerItems = []string{"openai/gpt-image-1"}
+	m.pickerValues = []string{"openai/gpt-image-1"}
+	updated, _ := m.selectPickerIndex(0)
+	got := updated.(*model)
+	found := false
+	for _, msg := range got.messages {
+		if strings.Contains(msg.text, "Image model set: openai/gpt-image-1") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected /image model openai/gpt-image-1 to be dispatched, got messages %#v", got.messages)
 	}
 }

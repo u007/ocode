@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	toolOutputPreviewLines = 12
+	toolOutputPreviewLines = 20
 	readToolPreviewLines   = 5
 )
 
