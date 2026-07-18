@@ -51,7 +51,7 @@ func newSessionBridge(cfg *config.Config, cwd string) (*sessionBridge, error) {
 		session.SetWorkDir(cwd)
 	}
 
-	tools, lspMgr := tool.LoadBuiltins(cfg)
+	tools, lspMgr := tool.LoadBuiltins(cfg, nil)
 	ag := agent.NewAgent(client, tools, cfg, lspMgr)
 	ag.LoadExternalToolsWithMCP(cfg)
 

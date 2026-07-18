@@ -6,7 +6,11 @@ import (
 )
 
 func TestListBoxRender(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta", "Gamma"}, 20, 5)
+	items := []string{"Alpha", "Beta", "Gamma"}
+	lb := NewListBox(20, 5)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
 	rendered := lb.Render()
 	if rendered == "" {
 		t.Fatal("expected non-empty render")
@@ -17,17 +21,30 @@ func TestListBoxRender(t *testing.T) {
 }
 
 func TestListBoxSelectedHighlight(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta", "Gamma"}, 20, 5)
+	items := []string{"Alpha", "Beta", "Gamma"}
+	lb := NewListBox(20, 5)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		if selected {
+			return "[SELECTED] " + items[idx]
+		}
+		return items[idx]
+	})
 	lb.SetSelected(1)
 	rendered := lb.Render()
-	// Selected item should be highlighted (contains the text at minimum)
 	if !strings.Contains(rendered, "Beta") {
 		t.Error("selected item Beta not visible")
+	}
+	if !strings.Contains(rendered, "[SELECTED]") {
+		t.Error("selected item not marked as selected")
 	}
 }
 
 func TestListBoxHover(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta", "Gamma"}, 20, 5)
+	items := []string{"Alpha", "Beta", "Gamma"}
+	lb := NewListBox(20, 5)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
 	lb.SetHovered(2)
 	lb.SetSelected(0)
 	rendered := lb.Render()
@@ -36,41 +53,12 @@ func TestListBoxHover(t *testing.T) {
 	}
 }
 
-func TestListBoxFilter(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta", "Gamma"}, 20, 5)
-	lb.SetFilter("bet")
-	rendered := lb.Render()
-	if !strings.Contains(rendered, "Beta") {
-		t.Error("filtered result should contain Beta")
-	}
-	if strings.Contains(rendered, "Alpha") {
-		t.Error("filtered result should not contain Alpha")
-	}
-	if strings.Contains(rendered, "Gamma") {
-		t.Error("filtered result should not contain Gamma")
-	}
-}
-
-func TestListBoxFilterClampsSelection(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta", "Gamma", "Delta"}, 20, 5)
-	lb.SetSelected(3) // Delta
-	lb.SetFilter("a") // matches Alpha, Gamma, Delta — selection should stay valid
-	if lb.Selected() >= lb.FilteredCount() {
-		t.Errorf("selection %d out of range for filtered count %d", lb.Selected(), lb.FilteredCount())
-	}
-}
-
-func TestListBoxFilterFollowsSelection(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta", "Gamma"}, 20, 5)
-	lb.SetSelected(2) // Gamma
-	lb.SetFilter("g") // only Gamma matches
-	if lb.Selected() != 0 {
-		t.Errorf("selection should be 0 after filter, got %d", lb.Selected())
-	}
-}
-
 func TestListBoxHitTest(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta", "Gamma"}, 20, 5)
+	items := []string{"Alpha", "Beta", "Gamma"}
+	lb := NewListBox(20, 5)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
 	lb.Render() // populate layout
 
 	// Hit test on first item row (contentTopY=0)
@@ -87,7 +75,11 @@ func TestListBoxHitTest(t *testing.T) {
 }
 
 func TestListBoxHitTestOutside(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta"}, 20, 5)
+	items := []string{"Alpha", "Beta"}
+	lb := NewListBox(20, 5)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
 	lb.Render()
 
 	// Hit test outside content area
@@ -102,8 +94,10 @@ func TestListBoxScroll(t *testing.T) {
 	for i := range items {
 		items[i] = strings.Repeat("X", 10)
 	}
-	lb := NewListBox(items, 20, 5)
-	lb.SetVisibleHeight(3)
+	lb := NewListBox(20, 5)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
 
 	// Initially at top
 	if lb.ScrollOffset() != 0 {
@@ -130,61 +124,103 @@ func TestListBoxScroll(t *testing.T) {
 }
 
 func TestListBoxEmptyItems(t *testing.T) {
-	lb := NewListBox(nil, 20, 5)
+	lb := NewListBox(20, 5)
+	lb.SetData(0, nil)
 	rendered := lb.Render()
 	if rendered == "" {
 		t.Fatal("empty list should still render")
 	}
 }
 
-func TestListBoxEmptyFilterResult(t *testing.T) {
-	lb := NewListBox([]string{"Alpha", "Beta"}, 20, 5)
-	lb.SetFilter("zzz")
-	rendered := lb.Render()
-	// Should show an empty hint
-	if !strings.Contains(rendered, "no") && !strings.Contains(rendered, "match") {
-		t.Error("empty filter result should show hint")
+func TestListBoxWithHeaders(t *testing.T) {
+	items := []string{"file1.go", "file2.go", "file3.go"}
+	lb := NewListBox(20, 8)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
+	lb.SetHeaderRows([]string{"● staged", "○ unstaged"})
+	lb.Render()
+
+	// Content should start after headers
+	if lb.ContentTopY() != 2 {
+		t.Errorf("expected contentTopY=2, got %d", lb.ContentTopY())
+	}
+
+	// Hit test should account for headers
+	idx := lb.HitTest(0, 2) // first item row
+	if idx != 0 {
+		t.Errorf("hit test at y=2: expected index 0, got %d", idx)
+	}
+
+	idx = lb.HitTest(0, 0) // header row
+	if idx != -1 {
+		t.Errorf("hit test on header row: expected -1, got %d", idx)
 	}
 }
 
-func TestListBoxScrollbar(t *testing.T) {
-	items := make([]string, 30)
+func TestListBoxWithFilterBar(t *testing.T) {
+	items := []string{"file1.go", "file2.go"}
+	lb := NewListBox(20, 6)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
+	lb.SetFilterRow("filter: test")
+	lb.Render()
+
+	// Content should start after filter bar
+	if lb.ContentTopY() != 1 {
+		t.Errorf("expected contentTopY=1, got %d", lb.ContentTopY())
+	}
+
+	// Hit test should account for filter bar
+	idx := lb.HitTest(0, 1) // first item row
+	if idx != 0 {
+		t.Errorf("hit test at y=1: expected index 0, got %d", idx)
+	}
+
+	idx = lb.HitTest(0, 0) // filter bar row
+	if idx != -1 {
+		t.Errorf("hit test on filter bar: expected -1, got %d", idx)
+	}
+}
+
+func TestListBoxSingleLineGuarantee(t *testing.T) {
+	// Test that long rows are truncated to fit width
+	items := []string{strings.Repeat("X", 100)}
+	lb := NewListBox(20, 5)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
+	rendered := lb.Render()
+	lines := strings.Split(rendered, "\n")
+	
+	// Each line should be exactly width (20) or less
+	for i, line := range lines {
+		lineWidth := visualLineWidth(line)
+		if lineWidth > 20 {
+			t.Errorf("line %d width %d exceeds listbox width 20", i, lineWidth)
+		}
+	}
+}
+
+func TestListBoxEnsureVisible(t *testing.T) {
+	items := make([]string, 20)
 	for i := range items {
-		items[i] = strings.Repeat("Y", 10)
+		items[i] = "item"
 	}
-	lb := NewListBox(items, 20, 5)
-	lb.SetVisibleHeight(5)
-	rendered := lb.Render()
-	// Should contain scrollbar characters
-	if !strings.Contains(rendered, "█") && !strings.Contains(rendered, "┊") {
-		t.Error("expected scrollbar in rendered output")
-	}
-}
+	lb := NewListBox(20, 5)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
 
-func TestListBoxSelected(t *testing.T) {
-	lb := NewListBox([]string{"A", "B", "C"}, 20, 5)
-	lb.SetSelected(2)
-	if lb.Selected() != 2 {
-		t.Errorf("expected selected 2, got %d", lb.Selected())
+	// Select item 15, should scroll to make it visible
+	lb.SetSelected(15)
+	if lb.ScrollOffset() == 0 {
+		t.Error("expected scroll to adjust for selected item 15")
 	}
-}
 
-func TestListBoxFilteredCount(t *testing.T) {
-	lb := NewListBox([]string{"Apple", "Banana", "Cherry", "Avocado"}, 20, 5)
-	lb.SetFilter("a") // Apple, Banana, Avocado
-	if lb.FilteredCount() != 3 {
-		t.Errorf("expected 3 filtered items, got %d", lb.FilteredCount())
-	}
-}
-
-func TestListBoxFilteredItems(t *testing.T) {
-	lb := NewListBox([]string{"Apple", "Banana", "Cherry"}, 20, 5)
-	lb.SetFilter("a") // Apple, Banana
-	items := lb.FilteredItems()
-	if len(items) != 2 {
-		t.Fatalf("expected 2 filtered items, got %d", len(items))
-	}
-	if items[0] != "Apple" || items[1] != "Banana" {
-		t.Errorf("unexpected filtered items: %v", items)
+	// Item 15 should be visible
+	if lb.ScrollOffset() > 15 || lb.ScrollOffset()+lb.ContentHeight() <= 15 {
+		t.Errorf("item 15 not visible: scroll=%d, contentHeight=%d", lb.ScrollOffset(), lb.ContentHeight())
 	}
 }

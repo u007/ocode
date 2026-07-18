@@ -3179,10 +3179,21 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 	// If the tool can stream incremental output and the UI has registered a
 	// sink, run it via ExecuteStream so chunks render live. Otherwise fall back
 	// to the synchronous Execute.
-	if st, ok := t.(tool.StreamingTool); ok && a.OnToolOutput != nil {
+	onToolOutput := a.OnToolOutput
+	if cst, ok := t.(tool.ContextualStreamingTool); ok {
+		var emitFn func(chunk string)
+		if onToolOutput != nil {
+			emitFn = func(chunk string) {
+				if chunk != "" {
+					onToolOutput(toolCallID, chunk)
+				}
+			}
+		}
+		result, err = cst.ExecuteStreamCtx(toolCtx, args, emitFn)
+	} else if st, ok := t.(tool.StreamingTool); ok && onToolOutput != nil {
 		result, err = st.ExecuteStream(args, func(chunk string) {
 			if chunk != "" {
-				a.OnToolOutput(toolCallID, chunk)
+				onToolOutput(toolCallID, chunk)
 			}
 		})
 	} else if b != nil && b.bus != nil {

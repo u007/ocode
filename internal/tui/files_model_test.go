@@ -287,6 +287,10 @@ func TestFilesTabMouseWheelScrollsTreeWhenFocused(t *testing.T) {
 	}
 	m.files.nodes = nodes
 	m.files.preview.SetContent(strings.Repeat("line\n", 100))
+	// Establish the tree ListBox's size/count the way a real render would
+	// before any scroll event arrives (View() runs before the user can
+	// interact, so this always happens in practice).
+	m.files.reconcileTreeScroll(100, 30)
 
 	updated, _ := m.Update(tea.MouseWheelMsg{Button: tea.MouseWheelDown, X: 10, Y: 5})
 	got := derefTestModel(t, updated)
@@ -294,8 +298,8 @@ func TestFilesTabMouseWheelScrollsTreeWhenFocused(t *testing.T) {
 	if got.files.cursor != 0 {
 		t.Fatalf("expected tree wheel to leave cursor at 0, got %d", got.files.cursor)
 	}
-	if got.files.treeScrollY <= 0 {
-		t.Fatalf("expected tree wheel to scroll the viewport (treeScrollY>0), got %d", got.files.treeScrollY)
+	if got.files.tree.ScrollOffset() <= 0 {
+		t.Fatalf("expected tree wheel to scroll the viewport (scrollOffset>0), got %d", got.files.tree.ScrollOffset())
 	}
 	if got.files.preview.YOffset() != 0 {
 		t.Fatalf("expected preview offset to stay at 0 when tree is focused, got %d", got.files.preview.YOffset())

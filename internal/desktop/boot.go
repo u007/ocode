@@ -15,8 +15,8 @@ import (
 
 // Handle is the result of a successful server boot.
 type Handle struct {
-	URL   string         // e.g. "http://127.0.0.1:52341" (no trailing slash)
-	Token string         // hex-encoded 16-byte random token (32 hex chars)
+	URL   string // e.g. "http://127.0.0.1:52341" (no trailing slash)
+	Token string // hex-encoded 16-byte random token (32 hex chars)
 	Srv   *server.Server
 }
 

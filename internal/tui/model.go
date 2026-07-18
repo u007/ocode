@@ -308,6 +308,13 @@ type rcRequestMsg struct {
 	req server.RCRequest
 }
 
+// cronDeliveryMsg is delivered to Update when the host (server/desktop)
+// pushes a scheduled-job result. The TUI appends a system message to the
+// chat — no agent turn, no permission prompts. See model.cronDeliveryCh.
+type cronDeliveryMsg struct {
+	delivery server.CronDelivery
+}
+
 // rcStreamEventMsg relays a streaming event from the agent to the /rc web UI.
 type rcStreamEventMsg struct {
 	event server.SSEEvent
@@ -1012,6 +1019,11 @@ type model struct {
 	// rcCh is the channel for receiving requests from the /rc web UI.
 	// When non-nil, the TUI is in remote-control mode.
 	rcCh chan server.RCRequest
+	// cronDeliveryCh receives passive cron-job delivery notifications from
+	// the host (server/desktop). The TUI appends each delivery as a
+	// system-role message in the chat — no agent turn, no permission
+	// prompts. Buffered (size 8) to absorb bursts.
+	cronDeliveryCh chan server.CronDelivery
 	// pendingRC holds the currently active RC request being processed.
 	pendingRC *server.RCRequest
 	// rcBridge is the bridge between the server and TUI, used to push messages
@@ -1486,7 +1498,7 @@ func (m *model) getInitialTools() ([]tool.Tool, *lsp.Manager) {
 			go m.lspMgr.WarmUp(".")
 		}
 	}
-	tools := tool.InitBuiltinTools(m.lspMgr, m.config)
+	tools := tool.InitBuiltinTools(m.lspMgr, m.config, nil)
 	return tools, m.lspMgr
 }
 
@@ -2259,7 +2271,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 			} else {
-				treeW := m.width * 35 / 100
+				treeW := filesTreeWidth(m.width)
 				mouseOverTree := msg.Mouse().X < treeW
 				shiftHeld := msg.Mouse().Mod&tea.ModShift != 0
 				if mouseOverTree {
@@ -2279,14 +2291,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Wheel scrolls the viewport, leaving the active selection
 						// where it is. reconcileTreeScroll clamps the offset; since
 						// the cursor is unchanged it will not snap back to it.
+						// Reconcile first so m.files.tree's size/count are fresh
+						// before applying the delta — ScrollUp/Down clamp against
+						// whatever bounds the ListBox currently holds.
+						m.files.reconcileTreeScroll(m.width, m.height)
 						if msg.Button == tea.MouseWheelUp {
-							m.files.treeScrollY -= scrollSpeed
-							m.files.reconcileTreeScroll(m.width, m.height)
+							m.files.tree.ScrollUp(scrollSpeed)
 							return m, nil
 						}
 						if msg.Button == tea.MouseWheelDown {
-							m.files.treeScrollY += scrollSpeed
-							m.files.reconcileTreeScroll(m.width, m.height)
+							m.files.tree.ScrollDown(scrollSpeed)
 							return m, nil
 						}
 					}
@@ -2315,13 +2329,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Mouse wheel over the files column scrolls the file list.
 			if mouseX >= sectRight && mouseX < filesRight {
 				if msg.Button == tea.MouseWheelUp {
-					m.git.fileListScroll -= scrollSpeed
-					m.git.clampFileListScroll()
+					m.git.changesList.ScrollUp(scrollSpeed)
 					return m, nil
 				}
 				if msg.Button == tea.MouseWheelDown {
-					m.git.fileListScroll += scrollSpeed
-					m.git.clampFileListScroll()
+					m.git.changesList.ScrollDown(scrollSpeed)
 					return m, nil
 				}
 			}
@@ -3545,13 +3557,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rcBridge.SetMessages(m.persistedAgentMessages())
 			m.rcBridge.SetAgent(m.agent)
 		}
-		// Start listening for RC requests and, in parallel, for remote
-		// permission/question resolutions (Telegram bot). The resolve listener
-		// is re-armed after each resolve, so exactly one is ever active.
+		// Start listening for RC requests, remote permission/question
+		// resolutions (Telegram bot), and passive cron-delivery
+		// notifications. All three listeners are re-armed after each event,
+		// so exactly one of each is ever active.
 		if m.rcCh != nil {
 			cmds := []tea.Cmd{waitForRCRequest(m.rcCh)}
 			if m.rcResolveCh != nil {
 				cmds = append(cmds, waitForRCResolve(m.rcResolveCh))
+			}
+			if m.cronDeliveryCh != nil {
+				cmds = append(cmds, waitForCronDelivery(m.cronDeliveryCh))
 			}
 			return m, tea.Batch(cmds...)
 		}
@@ -3598,6 +3614,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pendingRC = &msg.req
 		// Run through the agent
 		return m, m.askAgent()
+	case cronDeliveryMsg:
+		// Passive notification from the host's scheduler drainer. We
+		// render it as a system message in the chat — no agent turn, no
+		// permission prompts, no broadcast to /rc clients (they'll see
+		// the result on their next transcript fetch).
+		body := formatCronDelivery(msg.delivery)
+		m.messages = append(m.messages, message{
+			role:    roleAssistant, // render with assistant styling; system would be hidden
+			text:    body,
+			skipLLM: true,
+		})
+		if m.activeTab != tabChat {
+			m.chatUnread = true
+		}
+		m.rerenderTranscriptAndMaybeScroll()
+		// Re-arm the listener for the next delivery.
+		if m.cronDeliveryCh != nil {
+			return m, waitForCronDelivery(m.cronDeliveryCh)
+		}
+		return m, nil
 	case rcResolveMsg:
 		// A permission/question resolution arrived from an external client
 		// (Telegram bot) for a paused RC turn. Reuse the same resume paths the
@@ -5229,7 +5265,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			}
 		}
 		if m.activeTab == tabFiles {
-			treeW := m.width * 35 / 100
+			treeW := filesTreeWidth(m.width)
 			if mouse.X >= 0 && mouse.X < treeW && mouse.Y >= appHeaderHeight+1 {
 				m.files.clearActiveFile()
 				return m, nil, true
@@ -5362,71 +5398,121 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.lastClickY = mouse.Y
 				m.git.panel = gitPanelFiles
 
-				// Subtract the filter bar row when the filter is active;
-				// it occupies the first content row inside the pane.
-				logicalRow := row
-				if m.git.filterQuery != "" {
-					logicalRow--
+				// Use ListBox HitTest to map click to item index
+				// The ListBox accounts for headers, filter bar, and scroll offset
+				filesW := panelW * 30 / 100
+				filesListW := filesW - 4
+				// Match Resize()'s height calculation: h - 4 - commitInputRows
+				commitInputRows := 0
+				if m.git.committing {
+					commitInputRows = m.git.commitInput.Height() + 2
 				}
+				filesListH := m.height - 4 - commitInputRows
+				if m.git.section == gitSectionLog {
+					filesListH = m.git.commitViewport.Height()
+				}
+				if filesListH < 1 {
+					filesListH = 1
+				}
+				lb := m.git.getOrCreateListBox(m.git.section, filesListW, filesListH)
 
-				switch m.git.section {
-				case gitSectionChanges:
-					files := m.git.currentFileList()
-					fileIdx := -1
-					if logicalRow < 0 {
-						// Clicked the filter bar row
-						break
-					}
-					if m.git.filterQuery == "" {
-						// Count header rows. The renderer places ALL headers
-						// first, then ALL file lines — not interleaved per
-						// section — so headerCount is the total number of
-						// section headers in the rendered output.
-						headerCount := 0
-						if len(m.git.stagedFiles) > 0 {
-							headerCount++
+				if lb != nil {
+					// Configure the ListBox with current data before hit testing
+					switch m.git.section {
+					case gitSectionChanges:
+						files := m.git.currentFileList()
+						if m.git.filterQuery != "" || m.git.filterActive {
+							cursor := ""
+							if m.git.filterActive {
+								cursor = "█"
+							}
+							lb.SetFilterRow("ctrl+f " + m.git.filterQuery + cursor)
+						} else {
+							lb.SetFilterRow("")
 						}
-						if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
-							headerCount++
+
+						if m.git.filterQuery != "" {
+							lb.SetHeaderRows(nil)
+							lb.SetData(len(files), func(idx, w int, selected bool) string {
+								return files[idx].path
+							})
+						} else {
+							var headers []string
+							if len(m.git.stagedFiles) > 0 {
+								headers = append(headers, "● staged")
+							}
+							if len(m.git.unstagedFiles)+len(m.git.untrackedFiles) > 0 {
+								headers = append(headers, "○ unstaged/untracked")
+							}
+							lb.SetHeaderRows(headers)
+							lb.SetData(len(files), func(idx, w int, selected bool) string {
+								return files[idx].path
+							})
 						}
-						if logicalRow < headerCount {
-							break // clicked a header row
+						// Hit-testing only needs count/scroll/layout, not the
+						// selected index — don't call SetSelected here, it
+						// would force EnsureVisible and snap the live
+						// (possibly wheel-scrolled) offset out from under
+						// the click that's being interpreted against it.
+					case gitSectionLog:
+						lb.SetHeaderRows(nil)
+						lb.SetFilterRow("")
+						// One row per commit, matching what renderFileList
+						// actually renders (every row is truncated to a
+						// single physical line by ListBox.Render()).
+						lb.SetData(len(m.git.commits), func(idx, w int, selected bool) string {
+							return m.git.commits[idx].subject
+						})
+					case gitSectionStash:
+						lb.SetHeaderRows(nil)
+						lb.SetFilterRow("")
+						lb.SetData(len(m.git.stashes), func(idx, w int, selected bool) string {
+							return m.git.stashes[idx]
+						})
+					case gitSectionBranches:
+						lb.SetHeaderRows(nil)
+						lb.SetFilterRow("")
+						lb.SetData(len(m.git.branches), func(idx, w int, selected bool) string {
+							return m.git.branches[idx]
+						})
+					}
+
+					// Ensure layout is computed before hit testing
+					lb.Layout()
+
+					itemIdx := lb.HitTest(0, row)
+					if itemIdx >= 0 {
+						switch m.git.section {
+						case gitSectionChanges:
+							files := m.git.currentFileList()
+							if itemIdx < len(files) {
+								m.git.filesCursor = itemIdx
+								if isDoubleClick {
+									path := filepath.Join(m.git.workDir, files[itemIdx].path)
+									return m, m.git.openInEditor(path), true
+								}
+								st := currentStyles()
+								return m, m.git.startLoadDiff(st), true
+							}
+						case gitSectionLog:
+							if itemIdx < len(m.git.commits) {
+								m.git.commitCursor = itemIdx
+								st := currentStyles()
+								return m, m.git.startLoadDiff(st), true
+							}
+						case gitSectionStash:
+							if itemIdx < len(m.git.stashes) {
+								m.git.stashCursor = itemIdx
+								st := currentStyles()
+								return m, m.git.startLoadDiff(st), true
+							}
+						case gitSectionBranches:
+							if itemIdx < len(m.git.branches) {
+								m.git.branchCursor = itemIdx
+								st := currentStyles()
+								return m, m.git.startLoadDiff(st), true
+							}
 						}
-						// fileListScroll accounts for scrolled-off files
-						// above the visible window.
-						fileIdx = m.git.fileListScroll + (logicalRow - headerCount)
-					} else {
-						// Filtered: flat list, no headers. Apply scroll
-						// offset so clicks map to the visible window.
-						fileIdx = logicalRow + m.git.fileListScroll
-					}
-					if fileIdx >= 0 && fileIdx < len(files) {
-						m.git.filesCursor = fileIdx
-						if isDoubleClick {
-							path := filepath.Join(m.git.workDir, files[fileIdx].path)
-							return m, m.git.openInEditor(path), true
-						}
-						st := currentStyles()
-						return m, m.git.startLoadDiff(st), true
-					}
-				case gitSectionLog:
-					commitIdx := logicalRow + m.git.commitViewport.YOffset()
-					if commitIdx >= 0 && commitIdx < len(m.git.commits) {
-						m.git.commitCursor = commitIdx
-						st := currentStyles()
-						return m, m.git.startLoadDiff(st), true
-					}
-				case gitSectionStash:
-					if logicalRow >= 0 && logicalRow < len(m.git.stashes) {
-						m.git.stashCursor = logicalRow
-						st := currentStyles()
-						return m, m.git.startLoadDiff(st), true
-					}
-				case gitSectionBranches:
-					if logicalRow >= 0 && logicalRow < len(m.git.branches) {
-						m.git.branchCursor = logicalRow
-						st := currentStyles()
-						return m, m.git.startLoadDiff(st), true
 					}
 				}
 			}
@@ -5488,7 +5574,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		}
 	}
 	if pressed && m.activeTab == tabFiles {
-		treeW := m.width * 35 / 100
+		treeW := filesTreeWidth(m.width)
 		// Handle content search input field focus (click on query/ext line)
 		if m.files.mode == filesModeContentSearch {
 			previewLeft := treeW + 2
@@ -5539,11 +5625,14 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 		treeTrackHeight := headerRowCount + visibleLines // = m.height - 6, matching View()
 
 		if mouse.X == treeScrollbarX && mouse.Y >= treeTrackTop && mouse.Y < treeTrackTop+treeTrackHeight {
-			// Click is on the tree scrollbar column
+			// Click is on the tree scrollbar column. Reconcile first so
+			// m.files.tree's size/count are fresh before reading/setting
+			// its scroll offset below.
+			m.files.reconcileTreeScroll(m.width, m.height)
 			totalLines := len(m.files.nodes) // tree lines are built from nodes
 			if totalLines > visibleLines {
 				relY := mouse.Y - treeTrackTop
-				if thumbOffset, ok := scrollbarThumbOffset(mouse.Y, treeTrackTop, treeTrackHeight, totalLines, visibleLines, m.files.treeScrollY); ok {
+				if thumbOffset, ok := scrollbarThumbOffset(mouse.Y, treeTrackTop, treeTrackHeight, totalLines, visibleLines, m.files.tree.ScrollOffset()); ok {
 					// Clicked the thumb, start drag
 					m.scrollbarDrag = scrollbarDragFilesTree
 					m.scrollbarDragOffset = thumbOffset
@@ -5553,8 +5642,7 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 					if newOffset > totalLines-visibleLines {
 						newOffset = totalLines - visibleLines
 					}
-					m.files.treeScrollY = newOffset
-					m.files.reconcileTreeScroll(m.width, m.height)
+					m.files.tree.SetScrollOffset(newOffset)
 				}
 			}
 			return m, nil, true
@@ -6369,7 +6457,10 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		scrollbarSetOffset(&m.files.preview, mouse.Y-m.scrollbarDragOffset, filesTrackTop, m.files.preview.Height())
 		return m, nil, true
 	case scrollbarDragFilesTree:
-		treeW := m.width * 35 / 100
+		// Reconcile first so m.files.tree's size/count are fresh before
+		// reading/setting its scroll offset below.
+		m.files.reconcileTreeScroll(m.width, m.height)
+		treeW := filesTreeWidth(m.width)
 		headerRowCount := len(m.files.treeHeaderRows(treeW, m.styles))
 		visibleLines := m.height - 4 - 2 - headerRowCount
 		if visibleLines < 1 {
@@ -6385,7 +6476,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 		}
 
 		// Calculate new scroll position based on thumb drag
-		_, thumbSize, ok := scrollbarThumbMetrics(treeTrackHeight, totalLines, visibleLines, m.files.treeScrollY)
+		_, thumbSize, ok := scrollbarThumbMetrics(treeTrackHeight, totalLines, visibleLines, m.files.tree.ScrollOffset())
 		if !ok {
 			break
 		}
@@ -6406,7 +6497,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 
 		// Map thumb position back to scroll offset
 		maxOffset := totalLines - visibleLines
-		m.files.treeScrollY = int(float64(relY) / float64(maxThumbTop) * float64(maxOffset))
+		m.files.tree.SetScrollOffset(int(float64(relY) / float64(maxThumbTop) * float64(maxOffset)))
 		m.files.reconcileTreeScroll(m.width, m.height)
 		return m, nil, true
 	}
@@ -6470,7 +6561,7 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 	}
 
 	if m.filesSel.dragging {
-		treeW := m.width * 35 / 100
+		treeW := filesTreeWidth(m.width)
 		previewLeft := treeW + 2
 		previewBodyTop := appHeaderHeight + 1 + m.files.previewHeaderLines()
 		gutterWidth := 0
@@ -6759,6 +6850,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/recap" ||
 		cmd == "/ocr" ||
 		cmd == "/image" ||
+		cmd == "/cron" ||
 		cmd == "/goal"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
 		m.queuedCommands = append(m.queuedCommands, text)
@@ -12280,6 +12372,40 @@ func waitForRCRequest(rcCh <-chan server.RCRequest) tea.Cmd {
 		}
 		return rcRequestMsg{req: req}
 	}
+}
+
+// waitForCronDelivery listens for a single cron delivery from the host.
+// It is armed once when the channel is wired and re-armed after each
+// delivery, so exactly one listener is active per channel. A closed
+// channel returns nil and is not re-armed.
+func waitForCronDelivery(ch <-chan server.CronDelivery) tea.Cmd {
+	return func() tea.Msg {
+		d, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return cronDeliveryMsg{delivery: d}
+	}
+}
+
+// formatCronDelivery renders a CronDelivery as a human-readable chat
+// message. Mirrors the Telegram bot's PushCronResult formatting so the
+// two surfaces look similar.
+func formatCronDelivery(d server.CronDelivery) string {
+	var b strings.Builder
+	if d.Error != "" {
+		fmt.Fprintf(&b, "⏰ **cron** — %s\n", d.JobName)
+		fmt.Fprintf(&b, "job: %s · owner: %s · error: %s", d.JobID, d.Owner, d.Error)
+		return b.String()
+	}
+	result := d.Result
+	if r := []rune(result); len(r) > 1000 {
+		result = string(r[:1000]) + "…"
+	}
+	fmt.Fprintf(&b, "⏰ **cron** — %s\n", d.JobName)
+	fmt.Fprintf(&b, "job: %s · owner: %s\n\n", d.JobID, d.Owner)
+	b.WriteString(result)
+	return b.String()
 }
 
 // rcResolveMsg delivers a permission/question resolution from an external
@@ -18591,6 +18717,12 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		rcCh := make(chan server.RCRequest, 4)
 		m.rcCh = rcCh
 
+		// Create the cron-delivery channel for passive notifications from
+		// the host's scheduler drainer. Buffered to absorb bursts; older
+		// deliveries are dropped if the buffer fills.
+		cronCh := make(chan server.CronDelivery, 8)
+		m.cronDeliveryCh = cronCh
+
 		addr := fmt.Sprintf("localhost:%d", port)
 		srv := server.New(addr, "ocode", token, m.webFS)
 		srv.SetWorkDir(m.workDir)
@@ -18600,6 +18732,7 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		resolveCh := make(chan server.RCResolution, 4)
 		m.rcResolveCh = resolveCh
 		bridge := srv.RegisterExternalSession(m.sessionID, m.config.Model, rcCh, resolveCh, token)
+		bridge.CronDeliveryCh = cronCh
 
 		ln, err := srv.Listen()
 		if err != nil {
@@ -18705,6 +18838,12 @@ func (m *model) stopRCServer() {
 	m.rcCh = nil
 	m.rcBridge = nil
 	m.rcTailscaleURL = ""
+	// Close the cron delivery channel so the listener goroutine exits.
+	// Set the model field to nil so the re-arm branch becomes a no-op.
+	if m.cronDeliveryCh != nil {
+		close(m.cronDeliveryCh)
+		m.cronDeliveryCh = nil
+	}
 
 	// Tear down the registry heartbeat and remove this instance's entry so
 	// external clients stop offering it as a target.

@@ -63,6 +63,11 @@ func main() {
 		log.Printf("ocode-desktop: server boot failed: %v", bootErr)
 	} else {
 		log.Printf("ocode-desktop: server running at %s", handle.URL)
+		// Attach a scheduler.Service so the `cron` tool is available in
+		// agent sessions created in the desktop-hosted server, and /api/cron
+		// routes are live. This is the desktop counterpart of the
+		// schedulerSetup() hook in cmd/ocode's serve/web paths.
+		desktop.AttachScheduler(handle.Srv, workDir)
 	}
 
 	// Create the Wails application with the badge + notification services.
@@ -106,13 +111,13 @@ func main() {
 
 	// Create the main webview window.
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:    "main",
-		Title:   "ocode",
-		Width:   1280,
-		Height:  800,
+		Name:      "main",
+		Title:     "ocode",
+		Width:     1280,
+		Height:    800,
 		MinWidth:  800,
 		MinHeight: 600,
-		URL:    desktopURL,
+		URL:       desktopURL,
 	})
 
 	// System tray for show/hide and quit.

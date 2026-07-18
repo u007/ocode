@@ -2,69 +2,92 @@ package tui
 
 import (
 	"strings"
-
-	"github.com/charmbracelet/x/ansi"
 )
 
-// ListBox renders a filterable, scrollable list of items with selection,
-// hover, scrollbar, and mouse hit-testing. It is designed to replace the
-// inline rendering in picker.go and slash_popup.go.
+// ListBox is a shared row-list primitive that owns vertical scrolling,
+// hit-testing, and a structural single-line guarantee. Callers provide
+// their own data and row-rendering; the component ensures every rendered
+// row is clamped to one physical line so click offsets can never drift
+// from render offsets.
+//
+// The component does NOT own the data model or styling — callers pass a
+// count and renderRow callback that returns pre-styled rows. The component
+// truncates each row to width to enforce the single-line invariant.
 type ListBox struct {
-	items     []string
-	width     int
-	maxHeight int // maximum visible rows (including header/footer)
+	// Geometry
+	width  int
+	height int // total visible height in rows
 
-	// Filter state.
-	filter   string
-	filtered []int // indices into items that match filter
+	// Data source — caller owns the data
+	count     int                                          // number of items
+	renderRow func(idx, width int, selected bool) string // render one item row
 
-	// Selection state.
-	selected int // index into filtered[]
-	hovered  int // index into filtered[], -1 for none
+	// Optional fixed header rows (rendered above scrollable items)
+	headerRows []string // caller provides pre-rendered, clamped rows
 
-	// Scroll state.
+	// Optional filter bar row (rendered above headers)
+	filterRow string // empty = no filter bar
+
+	// State
 	scrollOffset int
+	selected     int // index into items [0, count)
+	hovered      int // index into items, -1 for none
 
-	// Layout (populated by layout/Render).
-	visibleHeight int
-	contentTopY   int // screen row where first item starts
+	// Layout (populated by Layout/Render)
+	contentTopY   int // screen row where first item starts (relative to listbox origin)
+	contentHeight int // number of rows available for items
 }
 
-// NewListBox creates a new ListBox with the given items and dimensions.
-func NewListBox(items []string, width, maxHeight int) *ListBox {
-	lb := &ListBox{
-		items:         items,
-		width:         width,
-		maxHeight:     maxHeight,
-		visibleHeight: maxHeight,
-		hovered:       -1,
+// NewListBox creates a new ListBox with the given dimensions.
+func NewListBox(width, height int) *ListBox {
+	return &ListBox{
+		width:   width,
+		height:  height,
+		hovered: -1,
 	}
-	lb.rebuildFiltered()
-	return lb
 }
 
-// SetVisibleHeight sets the number of visible rows for the item list.
-func (lb *ListBox) SetVisibleHeight(h int) {
-	lb.visibleHeight = h
-	lb.clampScroll()
+// SetSize sets the width and height of the list box.
+func (lb *ListBox) SetSize(width, height int) {
+	lb.width = width
+	lb.height = height
 }
 
-// SetFilter sets the filter string and rebuilds the filtered list.
-func (lb *ListBox) SetFilter(f string) {
-	lb.filter = f
-	lb.rebuildFiltered()
-	lb.clampSelection()
-	lb.clampScroll()
+// SetData sets the item count and row renderer callback.
+func (lb *ListBox) SetData(count int, renderRow func(idx, width int, selected bool) string) {
+	lb.count = count
+	lb.renderRow = renderRow
 }
 
-// SetSelected sets the selected index (into the filtered list).
+// SetHeaderRows sets the fixed header rows (rendered above scrollable items).
+func (lb *ListBox) SetHeaderRows(rows []string) {
+	lb.headerRows = rows
+}
+
+// SetFilterRow sets the optional filter bar row (rendered above headers).
+func (lb *ListBox) SetFilterRow(row string) {
+	lb.filterRow = row
+}
+
+// SetSelected sets the selected index and ensures it's visible. Use this
+// for explicit navigation (keyboard/click) — it forces the scroll to
+// follow the selection.
 func (lb *ListBox) SetSelected(i int) {
 	lb.selected = i
-	lb.clampSelection()
-	lb.ensureVisible()
+	lb.clampSelected()
+	lb.EnsureVisible(lb.selected)
 }
 
-// SetHovered sets the hovered index (into the filtered list), -1 for none.
+// SetSelectedForRender sets the selected index without adjusting scroll.
+// Use this in a pure-render path (called every frame) so that wheel-driven
+// scrolling stays decoupled from the selection — only explicit navigation
+// (SetSelected/EnsureVisible) should move the scroll offset.
+func (lb *ListBox) SetSelectedForRender(i int) {
+	lb.selected = i
+	lb.clampSelected()
+}
+
+// SetHovered sets the hovered index, -1 for none.
 func (lb *ListBox) SetHovered(i int) {
 	lb.hovered = i
 }
@@ -74,23 +97,20 @@ func (lb *ListBox) Selected() int {
 	return lb.selected
 }
 
-// FilteredCount returns the number of items matching the current filter.
-func (lb *ListBox) FilteredCount() int {
-	return len(lb.filtered)
-}
-
-// FilteredItems returns the items matching the current filter.
-func (lb *ListBox) FilteredItems() []string {
-	result := make([]string, len(lb.filtered))
-	for i, idx := range lb.filtered {
-		result[i] = lb.items[idx]
-	}
-	return result
+// Count returns the number of items.
+func (lb *ListBox) Count() int {
+	return lb.count
 }
 
 // ScrollOffset returns the current scroll offset.
 func (lb *ListBox) ScrollOffset() int {
 	return lb.scrollOffset
+}
+
+// SetScrollOffset sets the scroll offset directly.
+func (lb *ListBox) SetScrollOffset(offset int) {
+	lb.scrollOffset = offset
+	lb.clampScroll()
 }
 
 // ScrollDown scrolls down by n lines.
@@ -105,163 +125,138 @@ func (lb *ListBox) ScrollUp(n int) {
 	lb.clampScroll()
 }
 
-// HitTest maps a screen coordinate (relative to the list box origin) to
-// an item index in the filtered list. Returns -1 if the point is outside
-// the content area.
-func (lb *ListBox) HitTest(x, y int) int {
-	if y < lb.contentTopY || y >= lb.contentTopY+lb.visibleHeight {
-		return -1
-	}
-	itemIdx := lb.scrollOffset + (y - lb.contentTopY)
-	if itemIdx < 0 || itemIdx >= len(lb.filtered) {
-		return -1
-	}
-	return itemIdx
+// ContentTopY returns the screen row where the first item starts.
+func (lb *ListBox) ContentTopY() int {
+	return lb.contentTopY
 }
 
-// Render renders the list box with items, selection highlight, hover, scrollbar,
-// and empty-state hint.
-func (lb *ListBox) Render() string {
-	lb.layout()
-
-	var lines []string
-
-	if len(lb.filtered) == 0 {
-		// Empty state.
-		hint := "(no items)"
-		if lb.filter != "" {
-			hint = "(no matches)"
-		}
-		padded := hintStyle.Render(padRight(hint, lb.width))
-		lines = append(lines, padded)
-	} else {
-		// Render visible items.
-		end := lb.scrollOffset + lb.visibleHeight
-		if end > len(lb.filtered) {
-			end = len(lb.filtered)
-		}
-
-		for i := lb.scrollOffset; i < end; i++ {
-			item := lb.items[lb.filtered[i]]
-			line := lb.renderItem(item, i)
-			lines = append(lines, line)
-		}
-	}
-
-	// Pad to visible height if short.
-	for len(lines) < lb.visibleHeight {
-		lines = append(lines, strings.Repeat(" ", lb.width))
-	}
-
-	// Append scrollbar alongside items.
-	if len(lb.filtered) > lb.visibleHeight {
-		sb := NewScrollbar()
-		sbStr := sb.RenderList(lb.visibleHeight, len(lb.filtered), lb.scrollOffset, lb.visibleHeight)
-		sbLines := strings.Split(sbStr, "\n")
-		for i, line := range lines {
-			if i < len(sbLines) {
-				lines[i] = line + sbLines[i]
-			} else {
-				lines[i] = line + scrollbarTrackStyle.Render(scrollbarTrack)
-			}
-		}
-	}
-
-	return strings.Join(lines, "\n")
+// ContentHeight returns the number of rows available for items.
+func (lb *ListBox) ContentHeight() int {
+	return lb.contentHeight
 }
 
-// layout computes layout parameters.
-func (lb *ListBox) layout() {
-	if lb.visibleHeight > lb.maxHeight {
-		lb.visibleHeight = lb.maxHeight
+// Layout computes the layout geometry (contentTopY, contentHeight) and clamps scroll.
+func (lb *ListBox) Layout() {
+	// Calculate chrome height
+	chromeHeight := len(lb.headerRows)
+	if lb.filterRow != "" {
+		chromeHeight++
 	}
-	if lb.visibleHeight < 1 {
-		lb.visibleHeight = 1
+	
+	// Calculate content height
+	lb.contentHeight = lb.height - chromeHeight
+	if lb.contentHeight < 1 {
+		lb.contentHeight = 1
 	}
-	lb.contentTopY = 0
+	
+	// Content starts after chrome
+	lb.contentTopY = chromeHeight
+	
+	// Clamp scroll
 	lb.clampScroll()
 }
 
-// renderItem renders a single item row with selection/hover styling.
-func (lb *ListBox) renderItem(item string, filteredIdx int) string {
-	// Truncate to width.
-	itemWidth := ansi.StringWidth(item)
-	maxWidth := lb.width - 2 // leave room for padding
-	if itemWidth > maxWidth {
-		item = ansi.Truncate(item, maxWidth, "…")
+// Render renders the list box with headers, filter bar, items, and scrollbar.
+func (lb *ListBox) Render() string {
+	lb.Layout()
+	
+	var lines []string
+	
+	// Render filter bar if present
+	if lb.filterRow != "" {
+		lines = append(lines, truncateToWidth(lb.filterRow, lb.width))
+	}
+	
+	// Render header rows
+	for _, row := range lb.headerRows {
+		lines = append(lines, truncateToWidth(row, lb.width))
+	}
+	
+	// Render items
+	if lb.count == 0 || lb.renderRow == nil {
+		// Empty state
+		hint := "(no items)"
+		if lb.filterRow != "" {
+			hint = "(no matches)"
+		}
+		lines = append(lines, truncateToWidth(hint, lb.width))
 	} else {
-		item = item + strings.Repeat(" ", maxWidth-itemWidth)
-	}
-
-	switch {
-	case filteredIdx == lb.selected:
-		return lb.styles().Selected.Render(" " + item + " ")
-	case filteredIdx == lb.hovered:
-		return lb.styles().Hint.Render(" " + item + " ")
-	default:
-		return " " + item + " "
-	}
-}
-
-// styles returns the theme styles (using defaults if not available).
-func (lb *ListBox) styles() Styles {
-	// Use default styles — the caller can override by setting fields directly.
-	return defaultStyles()
-}
-
-// defaultStyles returns a basic set of styles for the ListBox.
-func defaultStyles() Styles {
-	return Styles{
-		Selected: selectedStyle,
-		Hint:     hintStyle,
-	}
-}
-
-// rebuildFiltered rebuilds the filtered index list from items and filter.
-func (lb *ListBox) rebuildFiltered() {
-	if lb.filter == "" {
-		lb.filtered = make([]int, len(lb.items))
-		for i := range lb.items {
-			lb.filtered[i] = i
+		// Render visible items
+		end := lb.scrollOffset + lb.contentHeight
+		if end > lb.count {
+			end = lb.count
 		}
-		return
-	}
-
-	query := strings.ToLower(lb.filter)
-	lb.filtered = lb.filtered[:0]
-	for i, item := range lb.items {
-		if fuzzyMatch(strings.ToLower(item), query) {
-			lb.filtered = append(lb.filtered, i)
+		
+		for i := lb.scrollOffset; i < end; i++ {
+			selected := i == lb.selected
+			line := lb.renderRow(i, lb.width, selected)
+			// Enforce single-line invariant: truncate to width
+			line = truncateToWidth(line, lb.width)
+			lines = append(lines, line)
 		}
 	}
-}
-
-// fuzzyMatch checks if query is a subsequence of s.
-func fuzzyMatch(s, query string) bool {
-	if query == "" {
-		return true
+	
+	// Pad to total height if short
+	for len(lines) < lb.height {
+		lines = append(lines, strings.Repeat(" ", lb.width))
 	}
-	qi := 0
-	for i := 0; i < len(s) && qi < len(query); i++ {
-		if s[i] == query[qi] {
-			qi++
+	
+	// Append scrollbar alongside items if needed
+	if lb.count > lb.contentHeight {
+		sb := NewScrollbar()
+		sbStr := sb.RenderList(lb.contentHeight, lb.count, lb.scrollOffset, lb.contentHeight)
+		sbLines := strings.Split(sbStr, "\n")
+		
+		// Scrollbar only appears alongside item rows, not chrome
+		itemStart := len(lb.headerRows)
+		if lb.filterRow != "" {
+			itemStart++
+		}
+		
+		for i := itemStart; i < itemStart+lb.contentHeight && i < len(lines); i++ {
+			sbIdx := i - itemStart
+			if sbIdx < len(sbLines) {
+				lines[i] = lines[i] + sbLines[sbIdx]
+			} else {
+				lines[i] = lines[i] + scrollbarTrackStyle.Render(scrollbarTrack)
+			}
 		}
 	}
-	return qi == len(query)
+	
+	return strings.Join(lines, "\n")
 }
 
-// clampSelection ensures selected is within [0, len(filtered)).
-func (lb *ListBox) clampSelection() {
-	if len(lb.filtered) == 0 {
-		lb.selected = 0
-		return
+// HitTest maps a screen coordinate (relative to the list box origin) to
+// an item index. Returns -1 if the point is outside the content area.
+func (lb *ListBox) HitTest(x, y int) int {
+	// Must be within item area (not chrome)
+	if y < lb.contentTopY || y >= lb.contentTopY+lb.contentHeight {
+		return -1
 	}
-	if lb.selected < 0 {
-		lb.selected = 0
+	
+	// Map to item index
+	itemIdx := lb.scrollOffset + (y - lb.contentTopY)
+	if itemIdx < 0 || itemIdx >= lb.count {
+		return -1
 	}
-	if lb.selected >= len(lb.filtered) {
-		lb.selected = len(lb.filtered) - 1
+	
+	return itemIdx
+}
+
+// EnsureVisible adjusts scroll so the given item index is visible.
+func (lb *ListBox) EnsureVisible(idx int) {
+	// Ensure layout is computed before using contentHeight
+	if lb.contentHeight == 0 {
+		lb.Layout()
 	}
+	
+	if idx < lb.scrollOffset {
+		lb.scrollOffset = idx
+	}
+	if idx >= lb.scrollOffset+lb.contentHeight {
+		lb.scrollOffset = idx - lb.contentHeight + 1
+	}
+	lb.clampScroll()
 }
 
 // clampScroll ensures scrollOffset is valid.
@@ -269,7 +264,7 @@ func (lb *ListBox) clampScroll() {
 	if lb.scrollOffset < 0 {
 		lb.scrollOffset = 0
 	}
-	maxScroll := len(lb.filtered) - lb.visibleHeight
+	maxScroll := lb.count - lb.contentHeight
 	if maxScroll < 0 {
 		maxScroll = 0
 	}
@@ -278,13 +273,16 @@ func (lb *ListBox) clampScroll() {
 	}
 }
 
-// ensureVisible adjusts scroll so the selected item is visible.
-func (lb *ListBox) ensureVisible() {
-	if lb.selected < lb.scrollOffset {
-		lb.scrollOffset = lb.selected
+// clampSelected ensures selected is within [0, count).
+func (lb *ListBox) clampSelected() {
+	if lb.count == 0 {
+		lb.selected = 0
+		return
 	}
-	if lb.selected >= lb.scrollOffset+lb.visibleHeight {
-		lb.scrollOffset = lb.selected - lb.visibleHeight + 1
+	if lb.selected < 0 {
+		lb.selected = 0
 	}
-	lb.clampScroll()
+	if lb.selected >= lb.count {
+		lb.selected = lb.count - 1
+	}
 }

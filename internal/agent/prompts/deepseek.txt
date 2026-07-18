@@ -1,0 +1,4 @@
+Output discipline (DeepSeek):
+- Never use `sed` to edit files. Use the edit tool (or a full file rewrite) instead — `sed -i` silently mismatches on multi-line context or regex-special characters and corrupts files with no diff to review.
+- Be concise. Lead with the answer, then evidence.
+- Prefer tool calls over textual descriptions when a tool fits.

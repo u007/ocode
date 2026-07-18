@@ -2,10 +2,12 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"runtime"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/tool"
 )
@@ -77,5 +79,85 @@ func TestExecuteToolCallNoStreamWhenCallbackUnset(t *testing.T) {
 	}
 	if !strings.Contains(res, "hello") {
 		t.Fatalf("expected hello in result, got %q", res)
+	}
+}
+
+type delayedStreamingTool struct {
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (delayedStreamingTool) Name() string        { return "delayed_stream" }
+func (delayedStreamingTool) Description() string { return "test streaming tool" }
+func (delayedStreamingTool) Definition() map[string]interface{} {
+	return map[string]interface{}{"name": "delayed_stream", "parameters": map[string]interface{}{"type": "object"}}
+}
+func (delayedStreamingTool) Execute(json.RawMessage) (string, error) { return "", nil }
+func (delayedStreamingTool) Parallel() bool                          { return false }
+
+func (t delayedStreamingTool) ExecuteStream(_ json.RawMessage, emit func(chunk string)) (string, error) {
+	if t.started != nil {
+		close(t.started)
+	}
+	<-t.release
+	emit("chunk-from-stream")
+	return "chunk-from-stream", nil
+}
+
+// TestExecuteToolCallStreamingCallbackSnapshotSurvivesNilFlip reproduces the
+// race where the agent's OnToolOutput callback is cleared while a streaming
+// tool is still running. executeToolCall must snapshot the callback before it
+// hands control to the tool so the live stream keeps working and does not panic.
+func TestExecuteToolCallStreamingCallbackSnapshotSurvivesNilFlip(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	got := make(chan string, 1)
+	a := &Agent{
+		tools: map[string]tool.Tool{"delayed_stream": delayedStreamingTool{started: started, release: release}},
+	}
+	a.OnToolOutput = func(_ string, chunk string) {
+		got <- chunk
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("panic: %v", r)
+			}
+		}()
+		args, _ := json.Marshal(map[string]interface{}{})
+		_, err := a.executeToolCall("delayed_stream", json.RawMessage(args), nil, "call-snapshot")
+		done <- err
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for streaming tool to start")
+	}
+
+	// Flip the field to nil after the tool has been selected but before it emits.
+	// Without a local snapshot in executeToolCall, the callback invocation races
+	// with this nil assignment and panics.
+	a.OnToolOutput = nil
+	close(release)
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("executeToolCall returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for executeToolCall")
+	}
+
+	select {
+	case chunk := <-got:
+		if chunk != "chunk-from-stream" {
+			t.Fatalf("unexpected streamed chunk %q", chunk)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for streamed callback")
 	}
 }

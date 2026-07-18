@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -18,9 +19,11 @@ import (
 	// api.openai.com/v1/chat/completions (401 missing_scope) instead of the
 	// Codex backend.
 	"github.com/u007/ocode/internal/cli"
+	"github.com/u007/ocode/internal/config"
 	_ "github.com/u007/ocode/internal/plugin/codex"
 	_ "github.com/u007/ocode/internal/plugin/grok"
 	"github.com/u007/ocode/internal/runcli"
+	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/server"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/tui"
@@ -69,6 +72,49 @@ func registerBundled() {
 	}
 }
 
+// schedulerSetup returns the server setup hook that starts a scheduler.Service
+// for the current working directory and attaches it to the server. Errors
+// starting the scheduler are logged but non-fatal: the HTTP API must still
+// come up even if the scheduler is unavailable (e.g. config not ready).
+func schedulerSetup() func(*server.Server) error {
+	return func(srv *server.Server) error {
+		wd, err := os.Getwd()
+		if err != nil {
+			wd = "."
+		}
+		cfg, err := config.Load()
+		if err != nil {
+			log.Printf("serve: scheduler disabled (config load: %v)", err)
+			return nil
+		}
+		runner := &serverSchedulerRunner{cfg: cfg}
+		svc, err := scheduler.StartForHost(cfg, wd, runner)
+		if err != nil {
+			log.Printf("serve: scheduler disabled (start: %v)", err)
+			return nil
+		}
+		srv.SetScheduler(svc)
+		store, _ := scheduler.DefaultStorePath(wd)
+		log.Printf("serve: scheduler attached (store: %s)", store)
+		return nil
+	}
+}
+
+// serverSchedulerRunner adapts server.schedulerRunner's role here so the
+// scheduler package's import graph stays clean (server imports scheduler, not
+// the other way around). The concrete RunScheduledJob lives in
+// internal/server/scheduler_runner.go; this thin shim lets main.go build a
+// host-injected runner without importing that file's internals.
+type serverSchedulerRunner struct {
+	cfg *config.Config
+}
+
+func (r *serverSchedulerRunner) RunScheduledJob(ctx context.Context, j *scheduler.Job) (string, error) {
+	// Delegate to the server-package concrete runner so all the agent / tool /
+	// session / cfg plumbing stays in one place.
+	return server.RunScheduledJob(ctx, r.cfg, j)
+}
+
 func main() {
 	// Check for help flag at top level before any subcommand
 	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
@@ -100,7 +146,7 @@ func main() {
 			if fsys := bundledModelConfigFS(); fsys != nil {
 				agent.SetBundledModelConfigFS(fsys)
 			}
-			if err := server.Run(os.Args[2:], web.FS()); err != nil {
+			if err := server.Run(os.Args[2:], web.FS(), schedulerSetup()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
@@ -113,7 +159,7 @@ func main() {
 				agent.SetBundledModelConfigFS(fsys)
 			}
 			args := append([]string{"--open"}, os.Args[2:]...)
-			if err := server.Run(args, web.FS()); err != nil {
+			if err := server.Run(args, web.FS(), schedulerSetup()); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}

@@ -161,6 +161,7 @@ func init() {
 		{name: "/goal", usage: "/goal <goal>", help: "Run the multi-agent orchestration pipeline on a coding goal", handler: runGoalCmd},
 		{name: "/ocr", usage: "/ocr [status|enable|disable|model [name]]", help: "Show OCR status, toggle OCR, or set the OCR model (from LM Studio)", handler: runOcrCmd},
 		{name: "/image", usage: "/image [status|enable|disable|model [provider/model]]", help: "Show imagegen status, toggle image generation, or set the image model/provider", handler: runImageCmd},
+		{name: "/cron", usage: "/cron [list|describe <id>|remove <id>|add <kind> <args> <message...>]", help: "Manage scheduled jobs (see docs/scheduled-jobs.md). Jobs fire in the long-lived serve/web/desktop host, not the TUI.", handler: runCronCmd},
 		{name: "/exit", aliases: []string{"/quit", "/q"}, help: "Quit the app", handler: runExitCmd},
 	}
 

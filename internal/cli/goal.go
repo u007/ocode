@@ -123,7 +123,7 @@ func Run(args []string) error {
 		return fmt.Errorf("failed to create LLM client for model %q", modelStr)
 	}
 
-	tools, lspMgr := tool.LoadBuiltins(cfg)
+	tools, lspMgr := tool.LoadBuiltins(cfg, nil)
 	parent := agent.NewAgent(client, tools, cfg, lspMgr)
 	parent.LoadExternalToolsWithMCP(cfg)
 	if opts.YOLO {

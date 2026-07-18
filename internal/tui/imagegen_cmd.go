@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -43,8 +44,26 @@ func (m *model) handleImageCmd(args []string) tea.Cmd {
 			return m.handleImageModel(args[1])
 		}
 		return m.openImageModelPicker()
+	case "timeout":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /image timeout <seconds> (a positive integer)"})
+			return nil
+		}
+		secs, err := strconv.Atoi(strings.TrimSpace(args[1]))
+		if err != nil || secs <= 0 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /image timeout <seconds> (a positive integer)"})
+			return nil
+		}
+		m.config.Ocode.ImageGen.Timeout = secs
+		if err := config.SaveImageGenConfig(m.config.Ocode.ImageGen); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
+		}
+		m.broadcastTUIStatus()
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Image generation timeout: %d seconds.", secs)})
+		return nil
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /image [status|enable|disable|model [provider/model]]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /image [status|enable|disable|model [provider/model]|timeout <seconds>]"})
 		return nil
 	}
 }
@@ -93,8 +112,12 @@ func (m *model) showImageStatus() tea.Cmd {
 	if cfg.OutputPath != "" {
 		output = cfg.OutputPath
 	}
+	timeoutText := fmt.Sprintf("%d seconds", cfg.Timeout)
+	if cfg.Timeout <= 0 {
+		timeoutText = "(built-in default)"
+	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf(
-		"Image generation: %s\nProvider: %s\nModel: %s\nOutput: %s\n\nUse /image enable/disable to toggle, /image model to pick a model, or /image model <provider/model> to set one directly.",
-		status, provider, modelText, output)})
+		"Image generation: %s\nProvider: %s\nModel: %s\nOutput: %s\nTimeout: %s\n\nUse /image enable/disable to toggle, /image model to pick a model, or /image timeout <seconds> to set the request timeout.",
+		status, provider, modelText, output, timeoutText)})
 	return nil
 }

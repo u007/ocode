@@ -86,6 +86,7 @@ func TestGitOpenBinaryUsesSystemOpener(t *testing.T) {
 func TestChangesFileListHighlight(t *testing.T) {
 	ApplyThemeColors("opencode")
 	m := gitModel{
+		height:        20, // Set height to avoid scrollbar rendering
 		section:       gitSectionChanges,
 		panel:         gitPanelFiles,
 		stagedFiles:   []gitFile{{status: "M", path: "staged.go"}},

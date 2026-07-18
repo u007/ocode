@@ -14,6 +14,9 @@ type ImageGenConfig struct {
 	// OutputPath is the default directory/file to save generated images.
 	// Empty means the working directory with an auto-generated name.
 	OutputPath string `json:"output_path,omitempty"`
+	// Timeout is the per-request timeout in seconds for image generation.
+	// 0 means use the built-in default (see DefaultImageGenConfig).
+	Timeout int `json:"timeout,omitempty"`
 }
 
 // DefaultImageGenConfig returns a sensible default imagegen configuration.
@@ -22,6 +25,10 @@ func DefaultImageGenConfig() ImageGenConfig {
 		Enabled:  false,
 		Provider: "gemini",
 		Model:    "",
+		// 15 minutes: image generation can be slow for high-quality or
+		// multi-image requests, so allow generous headroom over the old
+		// 10-minute built-in default.
+		Timeout: 900,
 	}
 }
 

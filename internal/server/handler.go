@@ -13,16 +13,18 @@ import (
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/monaco"
 	"github.com/u007/ocode/internal/projects"
+	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/session"
 	shellpkg "github.com/u007/ocode/internal/shell"
 	"github.com/u007/ocode/internal/tool"
 )
 
 type Handler struct {
-	mu     sync.Mutex
-	agents map[string]*agentSession
-	cfg    *config.Config
-	rc     *RCBridge // set when proxying to a TUI session
+	mu        sync.Mutex
+	agents    map[string]*agentSession
+	cfg       *config.Config
+	rc        *RCBridge          // set when proxying to a TUI session
+	scheduler *scheduler.Service // when set, the `cron` tool is wired into agent sessions
 	// advisorEnabled is the runtime gate for the advisor tool, shared by all
 	// agents this handler creates. Seeded from config, flipped from the web
 	// sidebar, never persisted back to config.
@@ -227,7 +229,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tools, lspMgr := tool.LoadBuiltins(h.cfg)
+		tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 		ag.LoadExternalToolsWithMCP(h.cfg)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
@@ -464,7 +466,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 
-		tools, lspMgr := tool.LoadBuiltins(h.cfg)
+		tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 		ag.LoadExternalToolsWithMCP(h.cfg)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
@@ -612,7 +614,7 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	if client == nil {
 		return nil, fmt.Errorf("failed to create LLM client")
 	}
-	tools, lspMgr := tool.LoadBuiltins(h.cfg)
+	tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
 	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 	ag.LoadExternalToolsWithMCP(h.cfg)
 	ag.SetAdvisorEnabled(h.advisorEnabled)

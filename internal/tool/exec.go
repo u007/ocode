@@ -13,6 +13,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/u007/ocode/internal/snapshot"
 )
 
 const bashDefaultTimeout = 300 * time.Second
@@ -51,15 +53,34 @@ func (t BashTool) Definition() map[string]interface{} {
 }
 
 func (t BashTool) Execute(args json.RawMessage) (string, error) {
-	return t.ExecuteStream(args, nil)
+	return t.ExecuteStreamCtx(context.Background(), args, nil)
 }
 
 // ExecuteStream runs the bash command and, when emit is non-nil, streams
+// incremental stdout/stderr chunks to it as they are produced. Backups for
+// undo are only captured when a snapshot store and tool call ID are
+// available in the context — use ExecuteCtx/ExecuteStreamCtx for that.
+func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (string, error) {
+	return t.ExecuteStreamCtx(context.Background(), args, emit)
+}
+
+// ExecuteCtx runs the bash command with backup-for-undo support but no
+// streaming.
+func (t BashTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
+	return t.ExecuteStreamCtx(ctx, args, nil)
+}
+
+// ExecuteStreamCtx runs the bash command and, when emit is non-nil, streams
 // incremental stdout/stderr chunks to it as they are produced. The returned
 // string is the canonical, complete result captured into the buffer ring and
 // supervisor. Background and move-to-background paths return immediately and
 // stop streaming (the live output shown up to that point is preserved).
-func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (string, error) {
+//
+// Before running a whitelisted destructive command (rm, mv, cp, sed -i,
+// truncate) matched by destructiveBashBackupPaths, the target file(s) are
+// snapshotted via the context's snapshot store so undo_file_change can
+// revert them — the same mechanism the Edit/Write tools use.
+func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, emit func(chunk string)) (string, error) {
 	var params struct {
 		Command         string `json:"command"`
 		Timeout         int    `json:"timeout"`
@@ -67,6 +88,22 @@ func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
+	}
+
+	tcID := snapshot.ToolCallIDFromContext(ctx)
+	var backedUpPaths []string
+	if tcID != "" {
+		store := snapshot.FromContext(ctx)
+		for _, p := range destructiveBashBackupPaths(params.Command) {
+			safe, err := confinedPath(p)
+			if err != nil {
+				continue // outside the allowed scope — not ours to back up
+			}
+			if err := store.Backup(safe, tcID); err != nil {
+				continue // intentionally not logged: best-effort undo support, never blocks the command
+			}
+			backedUpPaths = append(backedUpPaths, safe)
+		}
 	}
 
 	if params.RunInBackground {
@@ -85,7 +122,7 @@ func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	shouldCancel := true
 	defer func() {
 		if shouldCancel {
@@ -194,6 +231,7 @@ func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (
 			// supervisor exited/killed — the inline MarkExited/MarkKilled
 			// block that used to live here duplicated that work.
 			finalizeManagedProcess(proc, sup, onDone, err)
+			registerBashWrites(ctx, tcID, backedUpPaths)
 			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, emit == nil), nil
 		case <-proc.bgRequestCh:
 			streaming.Store(false)
@@ -210,7 +248,21 @@ func (t BashTool) ExecuteStream(args json.RawMessage, emit func(chunk string)) (
 
 	err := cmd.Run()
 	res := joinStdoutStderr(stdout.String(), stderr.String())
+	registerBashWrites(ctx, tcID, backedUpPaths)
 	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, emit == nil), nil
+}
+
+// registerBashWrites records backed-up paths as written in the snapshot
+// store's cross-agent registry, mirroring what Edit/Write tools do after a
+// successful write, so undo_file_change's conflict detection sees them.
+func registerBashWrites(ctx context.Context, tcID string, paths []string) {
+	if tcID == "" || len(paths) == 0 {
+		return
+	}
+	store := snapshot.FromContext(ctx)
+	for _, p := range paths {
+		store.RegisterWrite(p, tcID)
+	}
 }
 
 // emitWriter adapts a chunk-emitting callback to io.Writer so it can be

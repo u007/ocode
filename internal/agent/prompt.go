@@ -36,7 +36,13 @@ Before writing any code:
 After implementing, update documentation to reflect your changes:
 1. **Update inline documentation** — function/type comments, docstrings.
 2. **Update project documentation** — README, API docs, architecture docs, migration notes if your changes affect public APIs, config, setup steps, or data flow.
-3. **State explicitly if no doc updates are needed** and explain why.`
+3. **State explicitly if no doc updates are needed** and explain why.
+
+## Use the Knowledge Bundle via knowledge_lookup (not direct reads)
+
+When the knowledge bundle is active, the [ocode:knowledge] index above lists curated project docs (docs/). For any **why / what-did-we-decide / playbook / gotcha** question about THIS project, call the **knowledge_lookup** tool FIRST — it dispatches the context sub-agent, which semantically searches the bundle, verifies claims against the codebase, and cites doc paths.
+
+**Do NOT read docs/ files directly with the read tool** to answer knowledge questions. The docs/ directory is owned by the knowledge system: retrieval is intentionally routed through knowledge_lookup so answers stay curated, verified, and citation-tracked. Only fall back to read on docs/ if knowledge_lookup explicitly reports the bundle has no relevant information.`
 
 // PrepareMessages prepends the stable base prompt fragments for this agent.
 // It is safe to call more than once; marked fragments are not duplicated.

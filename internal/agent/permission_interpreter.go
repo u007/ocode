@@ -34,6 +34,55 @@ type interpreterEffects struct {
 	Unknown       []string `json:"unknown"`
 }
 
+// stringOrStringSlice unmarshals a JSON array of strings, coercing a bare JSON
+// string into a one-element slice. Small local models sometimes emit a single
+// path as a string instead of an array; treat that as the singleton list
+// rather than failing the whole response.
+func stringOrStringSlice(data []byte) ([]string, error) {
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err == nil {
+		return arr, nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, err
+	}
+	if s == "" {
+		return nil, nil
+	}
+	return []string{s}, nil
+}
+
+// UnmarshalJSON tolerates a bare string in place of a one-element array for
+// any effect field (see stringOrStringSlice).
+func (e *interpreterEffects) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	fields := map[string]*[]string{
+		"reads":          &e.Reads,
+		"writes":         &e.Writes,
+		"deletes":        &e.Deletes,
+		"network":        &e.Network,
+		"subprocesses":   &e.Subprocesses,
+		"db_destructive": &e.DBDestructive,
+		"unknown":        &e.Unknown,
+	}
+	for key, dest := range fields {
+		msg, ok := raw[key]
+		if !ok {
+			continue
+		}
+		parsed, err := stringOrStringSlice(msg)
+		if err != nil {
+			return fmt.Errorf("field %s: %w", key, err)
+		}
+		*dest = parsed
+	}
+	return nil
+}
+
 type interpreterModelResponse struct {
 	Decision   string             `json:"decision"`
 	Confidence float64            `json:"confidence"`

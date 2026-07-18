@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
+	"github.com/u007/ocode/internal/scheduler"
 )
 
 type rlEntry struct {
@@ -64,14 +65,17 @@ func (rl *rateLimiter) reset(ip string) {
 }
 
 type Server struct {
-	addr     string
-	username string
-	password string
-	rl       *rateLimiter
-	mux      *http.ServeMux
-	handler  *Handler
-	webFS    fs.FS
-	workDir  string
+	addr             string
+	username         string
+	password         string
+	rl               *rateLimiter
+	mux              *http.ServeMux
+	handler          *Handler
+	webFS            fs.FS
+	workDir          string
+	scheduler        any                // optional *scheduler.Service; set via SetScheduler
+	schedulerOutbox  *scheduler.Outbox  // optional; set via SetScheduler
+	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
 }
 
 func New(addr, username, password string, webFS fs.FS) *Server {
@@ -419,7 +423,14 @@ func (s *Server) RegisterExternalSession(sessionID, model string, rcCh chan RCRe
 	return bridge
 }
 
-func Run(args []string, webFS fs.FS) error {
+// Run is the entry point for the `serve`/`web` subcommands. It starts an HTTP
+// server bound to addr (host:port) and blocks until the listener closes.
+//
+// setup is an optional hook invoked once, after the Server is constructed and
+// the listener is bound, but before http.Serve begins. It receives the live
+// *Server so the caller can attach extensions (e.g. a scheduler.Service).
+// setup may be nil.
+func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	// Check for help flag before parsing
 	for _, arg := range args {
 		if arg == "-h" || arg == "--help" {
@@ -445,6 +456,12 @@ func Run(args []string, webFS fs.FS) error {
 	ln, err := srv.Listen()
 	if err != nil {
 		return err
+	}
+
+	if setup != nil {
+		if err := setup(srv); err != nil {
+			return fmt.Errorf("server setup: %w", err)
+		}
 	}
 
 	if *openBrowser {

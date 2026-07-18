@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/u007/ocode/internal/rc"
+	"github.com/u007/ocode/internal/scheduler"
 )
 
 // maxMsgRunes is the Telegram per-message length cap (we trim to stay safe).
@@ -117,6 +118,25 @@ func NewBot(token string, allowedUsers []int64, rcDir string) *Bot {
 		pendingQuestions: make(map[string]questionPending),
 		awaitingCustom:   make(map[int64]customAwait),
 	}
+}
+
+// PushCronResult posts a scheduled-job delivery to the given chat. Used by
+// the server/desktop host's outbox drainer to forward `cron` job results to
+// the user. chatID is the Telegram chat id registered for the project.
+//
+// Authorization: we trust the host to gate this. The drainer only fires
+// when the job's DeliveredTo field matches a known mapping, and the bot
+// is restricted to the configured allowed-user set.
+func (b *Bot) PushCronResult(chatID int64, jobID, jobName, owner, result, errStr string) {
+	var body string
+	if errStr != "" {
+		body = fmt.Sprintf("⏰ cron: %s\njob: %s (%s)\nerror: %s",
+			jobName, jobID, owner, trimRunes(errStr, 200))
+	} else {
+		body = fmt.Sprintf("⏰ cron: %s\njob: %s (%s)\n\n%s",
+			jobName, jobID, owner, trimRunes(result, maxMsgRunes-200))
+	}
+	_, _ = b.client.SendMessage(chatID, body, nil)
 }
 
 // Run polls Telegram until ctx is cancelled.
@@ -285,7 +305,39 @@ func (b *Bot) selectSession(chatID int64, id string) {
 	b.mu.Lock()
 	b.selected[chatID] = e.InstanceID
 	b.mu.Unlock()
+	// Auto-register this chat as the cron-result target for the project's
+	// workdir. Failures are non-fatal (the user can still drive the TUI);
+	// the worst case is cron results are log-only for this project.
+	if e.CWD != "" {
+		if err := b.registerCronTarget(e.CWD, chatID); err != nil {
+			log.Printf("telegram: register cron target %s → %d: %v", e.CWD, chatID, err)
+		}
+	}
 	b.sendCurrent(chatID)
+}
+
+// registerCronTarget writes (workdir → chatID) to the per-project
+// cron-targets.json so the host's outbox drainer can forward scheduled
+// jobs to this chat. The file lives next to jobs.json under the
+// per-project scheduler store.
+func (b *Bot) registerCronTarget(workdir string, chatID int64) error {
+	storePath, err := scheduler.DefaultStorePath(workdir)
+	if err != nil {
+		return err
+	}
+	tg := scheduler.NewTargets(storePath)
+	return tg.Set(workdir, chatID)
+}
+
+// CronTargetPath returns the cron-targets.json path for the given
+// workdir. Exposed so tests and operators can inspect or hand-edit the
+// registry without going through the bot.
+func CronTargetPath(workdir string) (string, error) {
+	p, err := scheduler.DefaultStorePath(workdir)
+	if err != nil {
+		return "", err
+	}
+	return scheduler.NewTargets(p).Path(), nil
 }
 
 func (b *Bot) sendCurrent(chatID int64) {

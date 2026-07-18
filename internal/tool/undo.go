@@ -32,7 +32,7 @@ func (t *UndoTool) maxAgeDelta() int {
 func (t *UndoTool) Name() string   { return "undo_file_change" }
 func (t *UndoTool) Parallel() bool { return false }
 func (t *UndoTool) Description() string {
-	return fmt.Sprintf("Undo a previous write tool call by its tool_call_id. Reverts all files changed by that call to their pre-edit state. Prefer this over `git checkout`/`git restore` for reverting a file edit you just made — call it promptly, as it is only available within %d agent steps of the original write.", t.maxAgeDelta())
+	return fmt.Sprintf("Undo a previous write tool call by its tool_call_id. Reverts all files changed by that call to their pre-edit state. Also works for bash calls that ran a whitelisted destructive command (rm, mv, cp, sed -i, truncate) as a single, non-compound command. Prefer this over `git checkout`/`git restore` for reverting a file edit you just made — call it promptly, as it is only available within %d agent steps of the original write.", t.maxAgeDelta())
 }
 
 func (t *UndoTool) Definition() map[string]interface{} {

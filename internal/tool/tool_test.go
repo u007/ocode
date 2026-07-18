@@ -57,7 +57,7 @@ var expectedBuiltinTools = []string{
 
 func TestInitBuiltinToolsReturnsAllTools(t *testing.T) {
 	lspMgr := lsp.NewManager(".")
-	tools := InitBuiltinTools(lspMgr, nil)
+	tools := InitBuiltinTools(lspMgr, nil, nil)
 
 	// Collect unconditionally-registered names up to the conditional append
 	// point. We verify the full conditional set separately below.
@@ -100,7 +100,7 @@ func TestInitBuiltinToolsReturnsAllTools(t *testing.T) {
 
 func TestBuiltinToolsIncludesConditionalNames(t *testing.T) {
 	lspMgr := lsp.NewManager(".")
-	tools := InitBuiltinTools(lspMgr, nil)
+	tools := InitBuiltinTools(lspMgr, nil, nil)
 
 	got := make([]string, 0, len(tools))
 	for _, tt := range tools {

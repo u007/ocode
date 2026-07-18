@@ -51,6 +51,17 @@ type StreamingTool interface {
 	ExecuteStream(args json.RawMessage, emit func(chunk string)) (string, error)
 }
 
+// ContextualStreamingTool combines ContextualTool and StreamingTool for a
+// tool that needs both the per-call context (snapshot store, tool call ID)
+// and incremental streaming output. Currently only BashTool implements
+// this, so it can snapshot files a whitelisted destructive command (rm, mv,
+// cp, sed -i, truncate) is about to touch before running it, letting
+// undo_file_change revert them afterward.
+type ContextualStreamingTool interface {
+	Tool
+	ExecuteStreamCtx(ctx context.Context, args json.RawMessage, emit func(chunk string)) (string, error)
+}
+
 // NoticedError wraps an error with a user-facing notice that should be shown
 // in the transcript but not sent to the LLM. Tools return this when they
 // encounter a recoverable problem that the user should know about (e.g. an
@@ -81,7 +92,12 @@ const NoticeSentinel = "NOTICE:"
 // existing LSP manager and config. This is the single source of truth for
 // which tools are available — both LoadBuiltins and the TUI's
 // getInitialTools call this to keep the tool list in sync.
-func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config) []Tool {
+//
+// If svc is non-nil, the `cron` tool is included and wired to the scheduler
+// (so the LLM can add/list/remove scheduled jobs). When svc is nil — e.g. the
+// TUI running without a server/desktop host — the tool is omitted; jobs can
+// still be authored via the `/cron` slash command.
+func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool {
 	if cfg != nil {
 		setExtraAllowedPaths(cfg.Ocode.ExtraAllowedPaths)
 	} else {
@@ -137,6 +153,15 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config) []Tool {
 	// images via Gemini (default), OpenAI, Novita, DeepInfra, or any
 	// OpenAI-compatible endpoint.
 	builtins = append(builtins, &ImageGenTool{Config: cfg})
+	// Scheduled-job management — only included when a scheduler service is
+	// attached. The indirection through any (resolved in cron.go) avoids a
+	// tool ↔ scheduler import cycle, since internal/scheduler/dispatch.go
+	// imports internal/tool. See cron.go for the resolver.
+	if svc != nil {
+		if ct := newCronToolFromService(svc); ct != nil {
+			builtins = append(builtins, ct)
+		}
+	}
 	return builtins
 }
 
@@ -146,10 +171,13 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config) []Tool {
 // longer in use (typically when the agent/session that owns it is torn down)
 // — failing to do so leaks the underlying language-server processes.
 //
+// svc is an optional *scheduler.Service. When non-nil, the `cron` tool is
+// included; when nil, the tool is omitted (e.g. the TUI without a host).
+//
 // Prefer InitBuiltinTools when you already have an LSP manager (e.g. the
 // TUI caches one per session) so both the manager and the tool list come
 // from a single source of truth.
-func LoadBuiltins(cfg *config.Config) ([]Tool, *lsp.Manager) {
+func LoadBuiltins(cfg *config.Config, svc any) ([]Tool, *lsp.Manager) {
 	lspMgr := lsp.NewManager(".")
-	return InitBuiltinTools(lspMgr, cfg), lspMgr
+	return InitBuiltinTools(lspMgr, cfg, svc), lspMgr
 }

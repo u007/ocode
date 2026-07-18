@@ -138,11 +138,16 @@ func TestFilesClickOffsetAfterScroll(t *testing.T) {
 	m.panel = filesPanelPreview // no hint rows: offset is purely the border
 	styles := ApplyThemeColors("tokyonight")
 
-	// Scroll down by 10 rows (wheel-style: offset only, cursor unchanged).
-	m.treeScrollY = 10
+	// Establish the tree ListBox's size/count the way a real render would
+	// before any scroll event arrives (View() runs before the user can
+	// interact, so this always happens in practice).
 	m.reconcileTreeScroll(100, 30)
-	if m.treeScrollY != 10 {
-		t.Fatalf("expected scroll to persist at 10, got %d", m.treeScrollY)
+
+	// Scroll down by 10 rows (wheel-style: offset only, cursor unchanged).
+	m.tree.SetScrollOffset(10)
+	m.reconcileTreeScroll(100, 30)
+	if m.tree.ScrollOffset() != 10 {
+		t.Fatalf("expected scroll to persist at 10, got %d", m.tree.ScrollOffset())
 	}
 
 	top := appHeaderHeight + 1 + m.treeHeaderRowCount()

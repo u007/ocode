@@ -1208,7 +1208,7 @@ func TestExecuteApprovedTool_UsesTemporaryOutOfScopePathAllowance(t *testing.T) 
 	}
 	defer os.Chdir(origWd) //nolint:errcheck
 
-	_, _ = tool.LoadBuiltins(nil)
+	_, _ = tool.LoadBuiltins(nil, nil)
 	if tool.HasExtraAllowedPath(outsideRoot) {
 		t.Fatalf("did not expect %q to be pre-allowed", outsideRoot)
 	}
@@ -4838,7 +4838,10 @@ func TestGitFileListClickFilterOffset(t *testing.T) {
 
 func TestGitLogClickAccountsForViewportOffset(t *testing.T) {
 	// Regression: clicking on the log section should account for the
-	// commitViewport's YOffset when mapping screen row to commit index.
+	// current scroll offset when mapping screen row to commit index. The
+	// log section's scroll authority is its ListBox (logList), not the
+	// vestigial commitViewport (buildCommitViewport is no longer called,
+	// so commitViewport.YOffset() no longer reflects real scroll state).
 	m := model{
 		width:     100,
 		height:    30,
@@ -4855,15 +4858,16 @@ func TestGitLogClickAccountsForViewportOffset(t *testing.T) {
 				{hash: "eee", subject: "fifth", age: "5m"},
 			},
 			commitCursor: 0,
-			commitViewport: func() viewport.Model {
-				vp := viewport.New(viewport.WithWidth(50), viewport.WithHeight(5))
-				vp.SetContent("line0\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9")
-				vp.SetYOffset(3)
-				return vp
-			}(),
-			diff: viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
+			diff:         viewport.New(viewport.WithWidth(45), viewport.WithHeight(10)),
 		},
 	}
+	// 2 visible rows out of 5 commits, scrolled to offset 3 so rows 0/1
+	// show commit index 3/4 — mirrors the original YOffset=3 scenario.
+	m.git.logList = NewListBox(0, 2)
+	m.git.logList.SetData(len(m.git.commits), func(idx, w int, selected bool) string {
+		return m.git.commits[idx].subject
+	})
+	m.git.logList.SetScrollOffset(3)
 
 	panelW := m.panelWidth()
 	sectW := panelW * 20 / 100
@@ -4893,8 +4897,8 @@ func TestGitLogClickAccountsForViewportOffset(t *testing.T) {
 }
 
 func TestGitClampFileListScroll(t *testing.T) {
-	// Verify that clampFileListScroll keeps the cursor visible and doesn't
-	// let the scroll go past the list bounds.
+	// Verify that clampFileListScroll (now using ListBox.EnsureVisible) keeps
+	// the cursor visible and doesn't let the scroll go past the list bounds.
 	m := model{
 		width:  100,
 		height: 12, // panelH = 12 - 4 = 8, visible rows = 8 - 2 = 6
@@ -4915,40 +4919,45 @@ func TestGitClampFileListScroll(t *testing.T) {
 			},
 		},
 	}
+	// Initialize the ListBox
+	m.git.changesList = NewListBox(0, 6) // 6 visible rows
+	m.git.changesList.SetData(len(m.git.unstagedFiles), func(idx, w int, selected bool) string {
+		return m.git.unstagedFiles[idx].path
+	})
 
 	// visibleRows = 6 (panelH=8, no filter)
 	// 10 files, maxScroll = 10 - 6 = 4
 
 	// Case 1: cursor at 9, scroll at 0 → scroll should jump to 4
 	m.git.filesCursor = 9
-	m.git.fileListScroll = 0
+	m.git.changesList.SetScrollOffset(0)
 	m.git.clampFileListScroll()
-	if m.git.fileListScroll != 4 {
-		t.Fatalf("cursor at 9, scroll at 0: expected scroll 4, got %d", m.git.fileListScroll)
+	if m.git.changesList.ScrollOffset() != 4 {
+		t.Fatalf("cursor at 9, scroll at 0: expected scroll 4, got %d", m.git.changesList.ScrollOffset())
 	}
 
 	// Case 2: cursor at 0, scroll at 4 → scroll should jump to 0
 	m.git.filesCursor = 0
-	m.git.fileListScroll = 4
+	m.git.changesList.SetScrollOffset(4)
 	m.git.clampFileListScroll()
-	if m.git.fileListScroll != 0 {
-		t.Fatalf("cursor at 0, scroll at 4: expected scroll 0, got %d", m.git.fileListScroll)
+	if m.git.changesList.ScrollOffset() != 0 {
+		t.Fatalf("cursor at 0, scroll at 4: expected scroll 0, got %d", m.git.changesList.ScrollOffset())
 	}
 
 	// Case 3: scroll beyond max → should clamp to 4
-	m.git.fileListScroll = 100
+	m.git.changesList.SetScrollOffset(100)
 	m.git.filesCursor = 5
 	m.git.clampFileListScroll()
-	if m.git.fileListScroll != 4 {
-		t.Fatalf("scroll at 100: expected scroll 4, got %d", m.git.fileListScroll)
+	if m.git.changesList.ScrollOffset() != 4 {
+		t.Fatalf("scroll at 100: expected scroll 4, got %d", m.git.changesList.ScrollOffset())
 	}
 
 	// Case 4: negative scroll → should clamp to 0
-	m.git.fileListScroll = -5
+	m.git.changesList.SetScrollOffset(-5)
 	m.git.filesCursor = 0
 	m.git.clampFileListScroll()
-	if m.git.fileListScroll != 0 {
-		t.Fatalf("scroll at -5: expected scroll 0, got %d", m.git.fileListScroll)
+	if m.git.changesList.ScrollOffset() != 0 {
+		t.Fatalf("scroll at -5: expected scroll 0, got %d", m.git.changesList.ScrollOffset())
 	}
 }
 
@@ -6960,7 +6969,7 @@ func TestGetInitialToolsMatchesCanonicalList(t *testing.T) {
 		tuiNames[i] = tt.Name()
 	}
 
-	canonTools := tool.InitBuiltinTools(m.lspMgr, m.config)
+	canonTools := tool.InitBuiltinTools(m.lspMgr, m.config, nil)
 	canonNames := make([]string, len(canonTools))
 	for i, tt := range canonTools {
 		canonNames[i] = tt.Name()

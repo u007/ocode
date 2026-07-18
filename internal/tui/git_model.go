@@ -164,14 +164,11 @@ type gitModel struct {
 	// file list filter
 	filterActive bool
 	filterQuery  string
-	// file list scroll offset for the Changes section; items above this
-	// index are scrolled off the top of the files pane.
-	fileListScroll int
-	// lastScrollCursor tracks the cursor value at the last scroll-snap check.
-	// When the wheel scrolls fileListScroll without moving the cursor, the
-	// clamp keeps the cursor in place instead of snapping it back. Matches
-	// the pattern in filesModel.reconcileTreeScroll.
-	lastScrollCursor int
+	// ListBox instances for each section (replaces fileListScroll, commitViewport scroll, etc.)
+	changesList  *ListBox
+	logList      *ListBox
+	stashList    *ListBox
+	branchesList *ListBox
 	// logger receives a copy of every terminal-state user action (push, pull,
 	// fetch, commit, stage/unstage, stash, branch ops, etc.) so the main
 	// model can append it to the log tab. nil means "no sink installed",
@@ -223,6 +220,11 @@ func newGitModel(workDir string) (gitModel, tea.Cmd) {
 	ci.Placeholder = "Commit message..."
 	ci.SetHeight(5)
 	m.commitInput = ci
+	// Initialize ListBox instances for each section
+	m.changesList = NewListBox(0, 0)   // size set in Resize
+	m.logList = NewListBox(0, 0)
+	m.stashList = NewListBox(0, 0)
+	m.branchesList = NewListBox(0, 0)
 	if _, err := m.gitRun("rev-parse", "--git-dir"); err != nil {
 		m.statusMsg = "not a git repository"
 		return m, nil
@@ -237,6 +239,69 @@ func (m *gitModel) SetEditor(e string) { m.editor = e }
 func (m *gitModel) SetEditorOpener(fn func(string) tea.Cmd) { m.editorOpener = fn }
 
 func (m *gitModel) SetEditorOpenerAtLine(fn func(string, int) tea.Cmd) { m.editorOpenerAtLine = fn }
+
+// setChangesListScrollOffset safely sets the scroll offset on changesList if it's not nil.
+func (m *gitModel) setChangesListScrollOffset(offset int) {
+	if m.changesList != nil {
+		m.changesList.SetScrollOffset(offset)
+	}
+}
+
+// ensureChangesListCursorVisible safely ensures the cursor is visible in changesList if it's not nil.
+func (m *gitModel) ensureChangesListCursorVisible() {
+	if m.changesList != nil {
+		m.changesList.EnsureVisible(m.filesCursor)
+	}
+}
+
+// ensureLogListCursorVisible safely ensures the cursor is visible in logList if it's not nil.
+func (m *gitModel) ensureLogListCursorVisible() {
+	if m.logList != nil {
+		m.logList.EnsureVisible(m.commitCursor)
+	}
+}
+
+// ensureStashListCursorVisible safely ensures the cursor is visible in stashList if it's not nil.
+func (m *gitModel) ensureStashListCursorVisible() {
+	if m.stashList != nil {
+		m.stashList.EnsureVisible(m.stashCursor)
+	}
+}
+
+// ensureBranchesListCursorVisible safely ensures the cursor is visible in branchesList if it's not nil.
+func (m *gitModel) ensureBranchesListCursorVisible() {
+	if m.branchesList != nil {
+		m.branchesList.EnsureVisible(m.branchCursor)
+	}
+}
+
+// getOrCreateListBox returns the ListBox for the given section, creating it if necessary.
+func (m *gitModel) getOrCreateListBox(section gitSection, width, height int) *ListBox {
+	var lb *ListBox
+	switch section {
+	case gitSectionChanges:
+		if m.changesList == nil {
+			m.changesList = NewListBox(width, height)
+		}
+		lb = m.changesList
+	case gitSectionLog:
+		if m.logList == nil {
+			m.logList = NewListBox(width, height)
+		}
+		lb = m.logList
+	case gitSectionStash:
+		if m.stashList == nil {
+			m.stashList = NewListBox(width, height)
+		}
+		lb = m.stashList
+	case gitSectionBranches:
+		if m.branchesList == nil {
+			m.branchesList = NewListBox(width, height)
+		}
+		lb = m.branchesList
+	}
+	return lb
+}
 
 func (m *gitModel) Resize(w, h int) {
 	m.width = w
@@ -263,6 +328,27 @@ func (m *gitModel) Resize(w, h int) {
 	m.commitViewport.SetHeight(h - 5 - commitInputRows)
 	// full width minus border
 	m.commitInput.SetWidth(w - 4)
+	
+	// Set ListBox sizes for all sections
+	// Files pane content width: filesW - 4 (border 2 + padding 2)
+	// Height: h - 4 (header) - commitInputRows
+	filesListW := filesW - 4
+	filesListH := h - 4 - commitInputRows
+	if filesListH < 1 {
+		filesListH = 1
+	}
+	if m.changesList != nil {
+		m.changesList.SetSize(filesListW, filesListH)
+	}
+	if m.logList != nil {
+		m.logList.SetSize(filesListW, filesListH)
+	}
+	if m.stashList != nil {
+		m.stashList.SetSize(filesListW, filesListH)
+	}
+	if m.branchesList != nil {
+		m.branchesList.SetSize(filesListW, filesListH)
+	}
 }
 
 func (m *gitModel) refresh() {
@@ -859,8 +945,7 @@ func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 			m.filterActive = true
 			m.filterQuery = ""
 			m.filesCursor = 0
-			m.fileListScroll = 0
-			m.lastScrollCursor = 0
+			m.setChangesListScrollOffset(0)
 			m.panel = gitPanelFiles
 			return m, nil
 		}
@@ -879,11 +964,21 @@ func (m gitModel) handleKey(msg tea.KeyPressMsg, w, h int) (gitModel, tea.Cmd) {
 
 func (m *gitModel) resetCursors() {
 	m.filesCursor = 0
-	m.fileListScroll = 0
-	m.lastScrollCursor = 0
+	if m.changesList != nil {
+		m.setChangesListScrollOffset(0)
+	}
 	m.commitCursor = 0
 	m.stashCursor = 0
 	m.branchCursor = 0
+	if m.logList != nil {
+		m.logList.SetScrollOffset(0)
+	}
+	if m.stashList != nil {
+		m.stashList.SetScrollOffset(0)
+	}
+	if m.branchesList != nil {
+		m.branchesList.SetScrollOffset(0)
+	}
 }
 
 func (m gitModel) handleSectionKey(key string) (gitModel, tea.Cmd) {
@@ -924,16 +1019,14 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			m.filterActive = false
 			m.filterQuery = ""
 			m.filesCursor = 0
-			m.fileListScroll = 0
-			m.lastScrollCursor = 0
+			m.setChangesListScrollOffset(0)
 			st := currentStyles()
 			return m, m.startLoadDiff(st)
 		case "backspace":
 			if len(m.filterQuery) > 0 {
 				m.filterQuery = m.filterQuery[:len(m.filterQuery)-1]
 				m.filesCursor = 0
-				m.fileListScroll = 0
-				m.lastScrollCursor = 0
+				m.setChangesListScrollOffset(0)
 				st := currentStyles()
 				return m, m.startLoadDiff(st)
 			}
@@ -943,8 +1036,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 			if len(key) == 1 {
 				m.filterQuery += key
 				m.filesCursor = 0
-				m.fileListScroll = 0
-				m.lastScrollCursor = 0
+				m.setChangesListScrollOffset(0)
 				st := currentStyles()
 				return m, m.startLoadDiff(st)
 			}
@@ -961,7 +1053,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		m.filterActive = false
 		m.filterQuery = ""
 		m.filesCursor = 0
-		m.fileListScroll = 0
+		m.setChangesListScrollOffset(0)
 		st := currentStyles()
 		return m, m.startLoadDiff(st)
 	}
@@ -1026,6 +1118,7 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				if m.commitCursor >= m.commitViewport.YOffset()+m.commitViewport.VisibleLineCount() {
 					m.commitViewport.ScrollDown(1)
 				}
+				m.ensureLogListCursorVisible()
 				st := currentStyles()
 				cmd := m.startLoadDiff(st)
 				if !m.loadingLog && m.logsMore && m.commitCursor >= len(m.commits)-5 {
@@ -1037,12 +1130,14 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 		case gitSectionStash:
 			if m.stashCursor < len(m.stashes)-1 {
 				m.stashCursor++
+				m.ensureStashListCursorVisible()
 				st := currentStyles()
 				return m, m.startLoadDiff(st)
 			}
 		case gitSectionBranches:
 			if m.branchCursor < len(m.branches)-1 {
 				m.branchCursor++
+				m.ensureBranchesListCursorVisible()
 				st := currentStyles()
 				return m, m.startLoadDiff(st)
 			}
@@ -1066,18 +1161,21 @@ func (m gitModel) handleFilesKey(key string) (gitModel, tea.Cmd) {
 				if m.commitCursor < m.commitViewport.YOffset() {
 					m.commitViewport.ScrollUp(1)
 				}
+				m.ensureLogListCursorVisible()
 				st := currentStyles()
 				return m, m.startLoadDiff(st)
 			}
 		case gitSectionStash:
 			if m.stashCursor > 0 {
 				m.stashCursor--
+				m.ensureStashListCursorVisible()
 				st := currentStyles()
 				return m, m.startLoadDiff(st)
 			}
 		case gitSectionBranches:
 			if m.branchCursor > 0 {
 				m.branchCursor--
+				m.ensureBranchesListCursorVisible()
 				st := currentStyles()
 				return m, m.startLoadDiff(st)
 			}
@@ -1945,25 +2043,8 @@ func (m gitModel) View(w, h int, styles Styles, chatUnread, exitPending bool) st
 	)
 
 	var filesContent string
-	if m.section == gitSectionLog {
-		savedOffset := m.commitViewport.YOffset()
-		m.buildCommitViewport(filesW - 5)
-		m.commitViewport.SetYOffset(savedOffset)
-		logSB := renderScrollbar(m.commitViewport.Height(), m.commitViewport.TotalLineCount(), m.commitViewport.VisibleLineCount(), m.commitViewport.YOffset())
-		filesContent = lipgloss.JoinHorizontal(lipgloss.Top, m.commitViewport.View(), logSB)
-	} else {
-		fileLines := m.renderFileList(filesW - 4)
-		filesContent = strings.Join(fileLines, "\n")
-	}
-	if m.filterActive || m.filterQuery != "" {
-		cursor := ""
-		if m.filterActive {
-			cursor = "█"
-		}
-		filterLine := styles.Hint.Render("ctrl+f " + m.filterQuery + cursor)
-		filterLine = lipgloss.NewStyle().Width(filesW - 4).MaxHeight(1).Render(filterLine)
-		filesContent = filterLine + "\n" + filesContent
-	}
+	fileLines := m.renderFileList(filesW - 4)
+	filesContent = strings.Join(fileLines, "\n")
 	filesPane := focusBorder(m.panel == gitPanelFiles).Width(filesW).Height(panelH).Render(filesContent)
 
 	diffSB := renderScrollbar(m.diff.Height(), m.diff.TotalLineCount(), m.diff.VisibleLineCount(), m.diff.YOffset())
@@ -2048,151 +2129,155 @@ func (m gitModel) fileListVisibleRows() int {
 	return vis
 }
 
-// clampFileListScroll adjusts fileListScroll so that the cursor is always
-// visible inside the files pane and the scroll never exceeds the list bounds.
-// It only snaps scroll to cursor visibility when the cursor has moved since the
-// last call, preserving independent mouse-wheel scrolling (same pattern as
-// filesModel.reconcileTreeScroll).
+// clampFileListScroll ensures the cursor is visible in the changes list.
+// This is now a thin wrapper around the ListBox's EnsureVisible.
 func (m *gitModel) clampFileListScroll() {
 	if m.section != gitSectionChanges {
 		return
 	}
 	files := m.currentFileList()
 	if len(files) == 0 {
-		m.fileListScroll = 0
+		if m.changesList != nil {
+			m.setChangesListScrollOffset(0)
+		}
 		return
 	}
-
-	visibleRows := m.fileListVisibleRows()
-
-	// Keep the cursor inside the visible window only when the cursor moved
-	// since the last clamp call. This decouples mouse-wheel scroll from
-	// cursor-commanded scroll.
-	if m.filesCursor != m.lastScrollCursor {
-		if m.filesCursor < m.fileListScroll {
-			m.fileListScroll = m.filesCursor
-		}
-		if m.filesCursor >= m.fileListScroll+visibleRows {
-			m.fileListScroll = m.filesCursor - visibleRows + 1
-		}
-		m.lastScrollCursor = m.filesCursor
-	}
-
-	// Clamp scroll so the view doesn't extend past the end of the list.
-	maxScroll := len(files) - visibleRows
-	if maxScroll < 0 {
-		maxScroll = 0
-	}
-	if m.fileListScroll > maxScroll {
-		m.fileListScroll = maxScroll
-	}
-	if m.fileListScroll < 0 {
-		m.fileListScroll = 0
+	// Ensure the cursor is visible
+	if m.changesList != nil {
+		m.ensureChangesListCursorVisible()
 	}
 }
 
-func (m gitModel) renderFileList(width int) []string {
-	var lines []string
+func (m *gitModel) renderFileList(width int) []string {
+	// Configure and render the appropriate ListBox for the current section
+	var lb *ListBox
 	switch m.section {
 	case gitSectionChanges:
-		if m.filterQuery != "" {
-			// Filtered: flat list, no staged/unstaged headers.
-			// Apply fileListScroll so only the visible window is rendered.
-			filtered := m.currentFileList()
-			visStart := m.fileListScroll
-			if visStart > len(filtered) {
-				visStart = len(filtered)
-			}
-			visEnd := visStart + m.fileListVisibleRows()
-			if visEnd > len(filtered) {
-				visEnd = len(filtered)
-			}
-			for i := visStart; i < visEnd; i++ {
-				line := "  " + filtered[i].status + " " + filtered[i].path
-				if i == m.filesCursor && m.panel == gitPanelFiles {
-					line = selectedStyle.Width(width).Render(line)
-				}
-				lines = append(lines, line)
-			}
-			break
-		}
-		// Unfiltered: headers are fixed, file items scroll beneath them.
-		// Collect header lines first, then render the visible window of
-		// file items (offset by fileListScroll).
-		var headerLines []string
-		var fileLines []string
-		fileIdx := 0
-		checkmark := func(i int) string {
-			if m.selectedFiles[i] {
-				return "◆ "
-			}
-			return "  "
-		}
-		if len(m.stagedFiles) > 0 {
-			headerLines = append(headerLines, hintStyle.Render("● staged"))
-			for _, f := range m.stagedFiles {
-				line := checkmark(fileIdx) + f.status + " " + f.path
-				if fileIdx == m.filesCursor && m.panel == gitPanelFiles {
-					line = selectedStyle.Width(width).Render(line)
-				}
-				fileLines = append(fileLines, line)
-				fileIdx++
-			}
-		}
-		if len(m.unstagedFiles)+len(m.untrackedFiles) > 0 {
-			headerLines = append(headerLines, hintStyle.Render("○ unstaged/untracked"))
-			for _, f := range m.allUnstagedAndUntracked() {
-				line := checkmark(fileIdx) + f.status + " " + f.path
-				if fileIdx == m.filesCursor && m.panel == gitPanelFiles {
-					line = selectedStyle.Width(width).Render(line)
-				}
-				fileLines = append(fileLines, line)
-				fileIdx++
-			}
-		}
-		// Apply scroll offset to file items.
-		visStart := m.fileListScroll
-		if visStart > len(fileLines) {
-			visStart = len(fileLines)
-		}
-		fileRows := m.fileListVisibleRows() - len(headerLines)
-		if fileRows < 1 && len(fileLines) > 0 {
-			fileRows = 1 // always show at least one file row
-		}
-		visEnd := visStart + fileRows
-		if visEnd > len(fileLines) {
-			visEnd = len(fileLines)
-		}
-		lines = append(lines, headerLines...)
-		lines = append(lines, fileLines[visStart:visEnd]...)
+		lb = m.changesList
 	case gitSectionLog:
-		for i, c := range m.commits {
-			line := fmt.Sprintf("%s  %s  %s", c.hash, c.subject, c.age)
-			if i == m.commitCursor {
-				line = selectedStyle.Width(width).Render(line)
-			}
-			lines = append(lines, line)
-		}
+		lb = m.logList
 	case gitSectionStash:
-		for i, s := range m.stashes {
-			line := s
-			if i == m.stashCursor {
-				line = selectedStyle.Width(width).Render(line)
-			}
-			lines = append(lines, line)
-		}
+		lb = m.stashList
 	case gitSectionBranches:
-		for i, b := range m.branches {
+		lb = m.branchesList
+	}
+	
+	// Initialize ListBox if nil (for tests or uninitialized models)
+	if lb == nil {
+		lb = NewListBox(width, m.height-4)
+		switch m.section {
+		case gitSectionChanges:
+			m.changesList = lb
+		case gitSectionLog:
+			m.logList = lb
+		case gitSectionStash:
+			m.stashList = lb
+		case gitSectionBranches:
+			m.branchesList = lb
+		}
+	}
+	
+	// Set up data and render based on section
+	switch m.section {
+	case gitSectionChanges:
+		files := m.currentFileList()
+		
+		// Set filter bar if active
+		if m.filterQuery != "" || m.filterActive {
+			cursor := ""
+			if m.filterActive {
+				cursor = "█"
+			}
+			lb.SetFilterRow("ctrl+f " + m.filterQuery + cursor)
+		} else {
+			lb.SetFilterRow("")
+		}
+		
+		if m.filterQuery != "" {
+			// Filtered: flat list, no headers
+			lb.SetHeaderRows(nil)
+			lb.SetData(len(files), func(idx, w int, selected bool) string {
+				line := "  " + files[idx].status + " " + files[idx].path
+				if selected && m.panel == gitPanelFiles {
+					line = selectedStyle.Width(w).Render(line)
+				}
+				return line
+			})
+		} else {
+			// Unfiltered: headers for staged/unstaged
+			var headers []string
+			if len(m.stagedFiles) > 0 {
+				headers = append(headers, hintStyle.Render("● staged"))
+			}
+			if len(m.unstagedFiles)+len(m.untrackedFiles) > 0 {
+				headers = append(headers, hintStyle.Render("○ unstaged/untracked"))
+			}
+			lb.SetHeaderRows(headers)
+			
+			checkmark := func(i int) string {
+				if m.selectedFiles[i] {
+					return "◆ "
+				}
+				return "  "
+			}
+			
+			lb.SetData(len(files), func(idx, w int, selected bool) string {
+				line := checkmark(idx) + files[idx].status + " " + files[idx].path
+				if selected && m.panel == gitPanelFiles {
+					line = selectedStyle.Width(w).Render(line)
+				}
+				return line
+			})
+		}
+		// SetSelectedForRender: this runs on every render (including
+		// after a mouse-wheel scroll), so it must not force EnsureVisible
+		// — that would snap independent wheel scroll back to the cursor.
+		lb.SetSelectedForRender(m.filesCursor)
+
+	case gitSectionLog:
+		lb.SetHeaderRows(nil)
+		lb.SetFilterRow("")
+		lb.SetData(len(m.commits), func(idx, w int, selected bool) string {
+			c := m.commits[idx]
+			line := fmt.Sprintf("%s  %s  %s", c.hash, c.subject, c.age)
+			if selected {
+				line = selectedStyle.Width(w).Render(line)
+			}
+			return line
+		})
+		lb.SetSelectedForRender(m.commitCursor)
+
+	case gitSectionStash:
+		lb.SetHeaderRows(nil)
+		lb.SetFilterRow("")
+		lb.SetData(len(m.stashes), func(idx, w int, selected bool) string {
+			line := m.stashes[idx]
+			if selected {
+				line = selectedStyle.Width(w).Render(line)
+			}
+			return line
+		})
+		lb.SetSelectedForRender(m.stashCursor)
+
+	case gitSectionBranches:
+		lb.SetHeaderRows(nil)
+		lb.SetFilterRow("")
+		lb.SetData(len(m.branches), func(idx, w int, selected bool) string {
+			b := m.branches[idx]
 			marker := "  "
 			if b == m.currentBranch {
 				marker = "* "
 			}
 			line := marker + b
-			if i == m.branchCursor {
-				line = selectedStyle.Width(width).Render(line)
+			if selected {
+				line = selectedStyle.Width(w).Render(line)
 			}
-			lines = append(lines, line)
-		}
+			return line
+		})
+		lb.SetSelectedForRender(m.branchCursor)
 	}
-	return lines
+	
+	// Render and split into lines
+	rendered := lb.Render()
+	return strings.Split(rendered, "\n")
 }

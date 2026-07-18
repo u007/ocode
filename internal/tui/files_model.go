@@ -182,12 +182,23 @@ type filesModel struct {
 
 	// Tree horizontal scroll offset
 	treeScrollX int // horizontal scroll offset in the tree panel (columns)
-	treeScrollY int // vertical scroll offset in the tree panel (lines)
+	// tree owns the tree pane's vertical scroll offset, layout, and click
+	// hit-testing — the single source of truth shared by View() (render),
+	// reconcileTreeScroll() (event path), and treeNodeForClick() (mouse).
+	tree *ListBox
 	// lastScrollCursor is the cursor index at the last reconcileTreeScroll. It
 	// lets reconcile scroll-to-reveal ONLY when the cursor actually moved, so
 	// wheel/scrollbar scrolling (which leaves the cursor put) never snaps the
 	// view back to the selection.
 	lastScrollCursor int
+}
+
+// filesTreeWidth returns the file tree pane's width given the total
+// available width. Shared by every call site that needs to know where the
+// tree pane ends and the preview pane begins, so the split point can never
+// drift between renderer, click hit-test, and scroll math.
+func filesTreeWidth(totalWidth int) int {
+	return totalWidth * 35 / 100
 }
 
 func newFilesModel(workDir string) filesModel {
@@ -198,6 +209,7 @@ func newFilesModel(workDir string) filesModel {
 	m.promptInput = textarea.New()
 	m.nodes = loadDirChildren(workDir, 0, false)
 	m.refreshGitStatus()
+	m.tree = NewListBox(0, 0)
 	return m
 }
 
@@ -536,7 +548,7 @@ func searchHighlightCodes(isCurrent bool) (open, close string) {
 func (m *filesModel) Resize(w, h int) {
 	m.width = w
 	m.height = h
-	treeW := w * 35 / 100
+	treeW := filesTreeWidth(w)
 	previewW := w - treeW - 3
 	m.preview.SetWidth(previewW - 14)
 	m.syncPreviewViewportHeight(h)
@@ -1492,24 +1504,38 @@ func (m *filesModel) navigateTo(relPath string) {
 	}
 }
 
+// treeNodeForClick maps a mouse click to a node index in m.nodes. It routes
+// through the shared tree ListBox (m.tree) for layout and hit-testing so
+// this can never drift from what View() actually renders — headerCount,
+// content width/height, and scroll offset are all read from (or clamped
+// through) the same object View() persists to.
 func (m filesModel) treeNodeForClick(mouse tea.Mouse, headerHeight int, styles Styles) (int, bool) {
-	treeW := m.width * 35 / 100
+	treeW := filesTreeWidth(m.width)
 	if mouse.X >= treeW {
 		return 0, false
 	}
-	// Tree content starts after header + 1 (border top line), plus the hint
-	// rows prepended in View(). treeHeaderRowCount mirrors treeHeaderRows so the
-	// rendered rows and this offset can never drift (which previously broke
-	// hit-boxes on narrow screens).
-	treeContentTop := headerHeight + 1 + m.treeHeaderRowCount()
-	if mouse.Y < treeContentTop {
-		return 0, false
+	lb := m.tree
+	if lb == nil {
+		lb = NewListBox(0, 0)
 	}
-	// The first visible row maps to node treeScrollY, so add the persisted
-	// scroll offset — without it, clicks after scrolling down hit the wrong
-	// node.
-	nodeIndex := mouse.Y - treeContentTop + m.treeScrollY
-	if nodeIndex < 0 || nodeIndex >= len(m.nodes) {
+	treeContentWidth := treeW - 7
+	if treeContentWidth < 1 {
+		treeContentWidth = 1
+	}
+	totalHeight := m.height - 4 - 2
+	if totalHeight < 1 {
+		totalHeight = 1
+	}
+	lb.SetSize(treeContentWidth, totalHeight)
+	lb.SetHeaderRows(make([]string, m.treeHeaderRowCount()))
+	lb.SetData(len(m.nodes), nil)
+	lb.Layout()
+
+	// Mouse.Y is an absolute screen row; translate to the tree box's own
+	// origin (just past the app header + pane border) before hit-testing.
+	relY := mouse.Y - headerHeight - 1
+	nodeIndex := lb.HitTest(0, relY)
+	if nodeIndex < 0 {
 		return 0, false
 	}
 	return nodeIndex, true
@@ -2063,7 +2089,7 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 	if m.mode == filesModeHelp {
 		return m.helpView(w, h, styles)
 	}
-	treeW := w * 35 / 100
+	treeW := filesTreeWidth(w)
 	previewW := w - treeW - 3
 
 	// Build raw lines first to determine max width for horizontal scrolling
@@ -2135,69 +2161,44 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		m.treeScrollX = 0
 	}
 
-	// Apply horizontal scroll offset and build final tree lines
-	treeLines := make([]string, 0, len(m.nodes))
+	// Apply horizontal scroll offset. Cursor highlighting and the final
+	// per-row truncation are applied inside the row renderer passed to
+	// m.tree below, alongside the width the ListBox actually renders at.
+	preScrollLines := make([]string, len(styledLines))
 	for i, line := range styledLines {
 		if m.treeScrollX > 0 {
 			line = skipVisibleChars(line, m.treeScrollX)
 		}
-		if i == m.cursor {
-			line = styles.Selected.Width(treeContentWidth).Render(truncateToWidth(line, treeContentWidth))
-		} else {
-			line = truncateToWidth(line, treeContentWidth)
-		}
-		treeLines = append(treeLines, line)
+		preScrollLines[i] = line
 	}
 
 	// Get header rows (search hint, multi-select status, etc.)
 	headerRows := m.treeHeaderRows(treeW, styles)
-	headerRowCount := len(headerRows)
 
-	// Calculate available height for tree lines (excluding header rows and pane frame)
-	// h - 4 = pane height (h minus top header area)
-	// - 2 = pane frame (top + bottom border)
-	// - headerRowCount = header rows that will be prepended above the file list
-	treeContentHeight := h - 4 - 2 - headerRowCount
-	if treeContentHeight < 1 {
-		treeContentHeight = 1
+	// m.tree owns vertical scroll, layout, and the single-line-per-row
+	// guarantee — the same object reconcileTreeScroll persists to on the
+	// event path, so View() (a pure renderer) never moves the selection
+	// itself; it only re-derives layout/content for the current frame.
+	if m.tree == nil {
+		m.tree = NewListBox(0, 0)
 	}
-
-	// Defensive clamp only. The authoritative scroll offset (including
-	// keep-cursor-visible) is computed and persisted by reconcileTreeScroll on
-	// the event path; View is a pure renderer that must not move the selection
-	// or it would snap wheel/scrollbar scrolling back to the cursor. The clamp
-	// here just guards against a stale offset between a resize and the next
-	// reconcile so the slice below stays in bounds.
-	maxScrollY := len(treeLines) - treeContentHeight
-	if maxScrollY < 0 {
-		maxScrollY = 0
+	totalTreeHeight := h - 4 - 2
+	if totalTreeHeight < 1 {
+		totalTreeHeight = 1
 	}
-	if m.treeScrollY > maxScrollY {
-		m.treeScrollY = maxScrollY
-	}
-	if m.treeScrollY < 0 {
-		m.treeScrollY = 0
-	}
-
-	// Slice visible lines
-	visibleStart := m.treeScrollY
-	visibleEnd := m.treeScrollY + treeContentHeight
-	if visibleEnd > len(treeLines) {
-		visibleEnd = len(treeLines)
-	}
-	visibleLines := treeLines[visibleStart:visibleEnd]
-
-	// Pad with empty lines if needed to fill viewport
-	for len(visibleLines) < treeContentHeight {
-		visibleLines = append(visibleLines, "")
-	}
-
-	treeContent := strings.Join(visibleLines, "\n")
-	// Prepend hint rows. headerRows was calculated earlier (before height calculation)
-	// to ensure rendered row count and click hit-box offset stay in lockstep.
-	if headerRowCount > 0 {
-		treeContent = strings.Join(headerRows, "\n") + "\n" + treeContent
-	}
+	m.tree.SetSize(treeContentWidth, totalTreeHeight)
+	m.tree.SetHeaderRows(headerRows)
+	m.tree.SetData(len(m.nodes), func(idx, rowWidth int, selected bool) string {
+		line := preScrollLines[idx]
+		if selected {
+			return styles.Selected.Width(rowWidth).Render(truncateToWidth(line, rowWidth))
+		}
+		return truncateToWidth(line, rowWidth)
+	})
+	// SetSelectedForRender runs every frame and must not force
+	// EnsureVisible — that would snap wheel/scrollbar scroll back to the
+	// cursor. Only reconcileTreeScroll (event path) moves the scroll.
+	m.tree.SetSelectedForRender(m.cursor)
 
 	focusBorder := func(focused bool) lipgloss.Style {
 		if focused {
@@ -2206,15 +2207,12 @@ func (m filesModel) View(w, h int, styles Styles, chatUnread, exitPending bool) 
 		return borderStyle
 	}
 
+	var treeContentFull string
 	if m.mode == filesModeFuzzy {
-		treeContent = m.fuzzyPopupView(treeW-2, h-4, styles)
+		treeContentFull = m.fuzzyPopupView(treeW-2, h-4, styles)
+	} else {
+		treeContentFull = m.tree.Render()
 	}
-	// Render scrollbar for tree pane
-	// Scrollbar container height = headers + file list (full pane height)
-	actualContentHeight := headerRowCount + treeContentHeight
-	treeSB := renderScrollbar(actualContentHeight, len(treeLines), treeContentHeight, m.treeScrollY)
-	// Join tree content with scrollbar
-	treeContentFull := lipgloss.JoinHorizontal(lipgloss.Top, treeContent, treeSB)
 	treePane := focusBorder(m.panel == filesPanelPicker).Width(treeW - 2).Height(h - 4).Render(treeContentFull)
 
 	previewSB := renderScrollbar(m.preview.Height(), m.preview.TotalLineCount(), m.preview.VisibleLineCount(), m.preview.YOffset())
@@ -2471,29 +2469,30 @@ func (m filesModel) treeHeaderRowCount() int {
 // the value-receiver View) is what lets treeNodeForClick hit-test against the
 // same rows that are on screen.
 func (m *filesModel) reconcileTreeScroll(w, h int) {
-	treeContentHeight := h - 4 - 2 - m.treeHeaderRowCount()
-	if treeContentHeight < 1 {
-		treeContentHeight = 1
+	if m.tree == nil {
+		m.tree = NewListBox(0, 0)
 	}
-	maxScrollY := len(m.nodes) - treeContentHeight
-	if maxScrollY < 0 {
-		maxScrollY = 0
+	treeW := filesTreeWidth(w)
+	treeContentWidth := treeW - 7
+	if treeContentWidth < 1 {
+		treeContentWidth = 1
 	}
+	totalHeight := h - 4 - 2
+	if totalHeight < 1 {
+		totalHeight = 1
+	}
+	m.tree.SetSize(treeContentWidth, totalHeight)
+	m.tree.SetHeaderRows(make([]string, m.treeHeaderRowCount()))
+	m.tree.SetData(len(m.nodes), nil)
+	// Only snap the scroll to reveal the cursor when the cursor actually
+	// moved since the last reconcile — this is what lets wheel/scrollbar
+	// scrolling (which leave the cursor put) scroll independently instead
+	// of snapping back to the selection on every call.
 	if m.cursor != m.lastScrollCursor {
-		if m.cursor < m.treeScrollY {
-			m.treeScrollY = m.cursor
-		}
-		if m.cursor >= m.treeScrollY+treeContentHeight {
-			m.treeScrollY = m.cursor - treeContentHeight + 1
-		}
+		m.tree.EnsureVisible(m.cursor)
 		m.lastScrollCursor = m.cursor
 	}
-	if m.treeScrollY > maxScrollY {
-		m.treeScrollY = maxScrollY
-	}
-	if m.treeScrollY < 0 {
-		m.treeScrollY = 0
-	}
+	m.tree.Layout()
 }
 
 func (m filesModel) treeHeaderRows(treeW int, styles Styles) []string {

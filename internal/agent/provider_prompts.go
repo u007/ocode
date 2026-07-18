@@ -23,6 +23,9 @@ var copilotPromptText string
 //go:embed prompts/kimi.txt
 var kimiPromptText string
 
+//go:embed prompts/deepseek.txt
+var deepseekPromptText string
+
 //go:embed prompts/small_model.txt
 var smallModelPromptText string
 
@@ -51,6 +54,8 @@ func modelFamilyPrompt(provider, model string) string {
 			basePrompt = geminiPromptText
 		case strings.Contains(m, "kimi"):
 			basePrompt = kimiPromptText
+		case strings.Contains(m, "deepseek"):
+			basePrompt = deepseekPromptText
 		case strings.Contains(m, "gpt"):
 			basePrompt = gptPromptText
 		default:
@@ -66,6 +71,8 @@ func modelFamilyPrompt(provider, model string) string {
 				basePrompt = copilotPromptText
 			case "moonshot", "kimi":
 				basePrompt = kimiPromptText
+			case "deepseek":
+				basePrompt = deepseekPromptText
 			}
 		}
 	}

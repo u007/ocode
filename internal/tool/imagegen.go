@@ -20,6 +20,23 @@ import (
 	"github.com/u007/ocode/internal/paths"
 )
 
+// defaultImageGenTimeout is the built-in per-request timeout for image
+// generation when no explicit timeout is configured or passed. It was raised
+// from 10 minutes to 15 minutes because image generation (especially
+// high-quality or multi-image requests) can take longer than the previous
+// ceiling. The timeout is overridable per-call via the tool's `timeout`
+// argument and globally via the persisted imagegen config `Timeout` field.
+const defaultImageGenTimeout = 15 * time.Minute
+
+// resolveImageGenTimeout converts a per-call timeout (seconds) into a
+// time.Duration, falling back to defaultImageGenTimeout when unset or invalid.
+func resolveImageGenTimeout(seconds int) time.Duration {
+	if seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	return defaultImageGenTimeout
+}
+
 // ImageGenTool generates images from a text prompt (and optionally an input
 // image for editing) using a pluggable provider backend.
 //
@@ -263,6 +280,10 @@ func (t *ImageGenTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "Optional API key override. If omitted, resolved from environment, opencode config, or the auth store.",
 				},
+				"timeout": map[string]interface{}{
+					"type":        "integer",
+					"description": "Per-call request timeout in seconds. Overrides the configured imagegen timeout (default 900). Use a larger value for slow or high-quality generations.",
+				},
 			},
 			"required": []string{"prompt"},
 		},
@@ -283,6 +304,7 @@ type imgGenParams struct {
 	OutputPath  string `json:"output_path"`
 	BaseURL     string `json:"base_url"`
 	APIKey      string `json:"api_key"`
+	Timeout     int    `json:"timeout"`
 }
 
 // Execute performs the image generation and returns a JSON summary.
@@ -316,6 +338,9 @@ func (t *ImageGenTool) Execute(args json.RawMessage) (string, error) {
 		}
 		if p.OutputPath == "" {
 			p.OutputPath = t.Config.Ocode.ImageGen.OutputPath
+		}
+		if p.Timeout <= 0 && t.Config.Ocode.ImageGen.Timeout > 0 {
+			p.Timeout = t.Config.Ocode.ImageGen.Timeout
 		}
 	}
 	if p.Provider == "" {
@@ -373,7 +398,7 @@ func (t *ImageGenTool) Execute(args json.RawMessage) (string, error) {
 		model = prov.defModel
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), resolveImageGenTimeout(p.Timeout))
 	defer cancel()
 
 	var (
