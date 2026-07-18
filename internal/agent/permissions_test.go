@@ -95,6 +95,31 @@ func TestPermissions_NoToolAllow_StillAsksForSensitive(t *testing.T) {
 	}
 }
 
+func TestIsSensitivePath_AllowsEnvTemplates(t *testing.T) {
+	allowed := []string{
+		".env.example",
+		".env.sample",
+		".env.template",
+		".env.dist",
+	}
+	for _, path := range allowed {
+		if isSensitivePath(path) {
+			t.Fatalf("expected %q to be treated as non-sensitive", path)
+		}
+	}
+
+	disallowed := []string{
+		".env",
+		".env.local",
+		".env.production",
+	}
+	for _, path := range disallowed {
+		if !isSensitivePath(path) {
+			t.Fatalf("expected %q to be treated as sensitive", path)
+		}
+	}
+}
+
 // TestPermissions_YOLO_Allows confirms YOLO mode short-circuits before any
 // path-based gate. (Sanity check; not part of the regression set.)
 func TestPermissions_YOLO_Allows(t *testing.T) {

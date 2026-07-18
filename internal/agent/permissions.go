@@ -1461,8 +1461,16 @@ func isSensitivePath(path string) bool {
 		}
 	}
 
-	// .env.* variants
+	// .env.* variants — only flag files that typically carry actual secrets.
+	// Safe template/sample files that are committed to git and contain only
+	// dummy values are excluded.
 	if strings.HasPrefix(base, ".env.") {
+		safeVariants := []string{".env.example", ".env.sample", ".env.template", ".env.dist"}
+		for _, safe := range safeVariants {
+			if base == safe {
+				return false
+			}
+		}
 		return true
 	}
 
