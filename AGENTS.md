@@ -254,7 +254,8 @@ consolidating the dispatch.
 ## User Interaction
 - TUI supports `/commands` and `!shell`.
 - **Slash command queuing.** All slash commands entered while the agent is
-  streaming or compacting must be queued (`m.queuedCommands`) and
+  streaming or compacting are queued (now `m.queuedItems`, a unified queue
+  preserving insertion order) and
   executed one-at-a-time after the current work ends — not run
   immediately. Only `/exit`, `/quit`, `/q` bypass the queue
   unconditionally. Synchronous local UI/config commands that do not start
@@ -262,8 +263,8 @@ consolidating the dispatch.
   centralized in `handleCommand` (the single chokepoint covering all
   callers: enter key, palette, keybinds, leader shortcuts, hotkeys) and
   **document them in the running list below** (so the next contributor
-  knows the rule). Drain `m.queuedCommands` in `agentStreamDoneMsg` and
-  `compactFinishedMsg` handlers, after `queuedInputs` are processed, so
+  knows the rule). Drain `m.queuedItems` in `agentStreamDoneMsg` and
+  `compactFinishedMsg` handlers, after input items are processed, so
   a command never fires while another stream is in flight.
   - Current instant commands: `/model`, `/models`, `/help`, `/thinking`,
     `/details`, `/login`, `/new`, `/clear`, `/sidebar`, `/commands`,

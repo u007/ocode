@@ -5080,8 +5080,8 @@ func TestEnterWhileStreamingQueuesUserInput(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("expected queued input to avoid starting a command, got %T", cmd)
 	}
-	if len(got.queuedInputs) != 1 || got.queuedInputs[0] != "follow up after this" {
-		t.Fatalf("expected input to be queued, got %#v", got.queuedInputs)
+	if len(got.queuedItems) != 1 || got.queuedItems[0].text != "follow up after this" || got.queuedItems[0].kind != queueItemInput {
+		t.Fatalf("expected input to be queued, got %#v", got.queuedItems)
 	}
 	if got.input.Value() != "" {
 		t.Fatalf("expected input to reset after queueing, got %q", got.input.Value())
@@ -5103,8 +5103,8 @@ func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
 		agent:        agent.NewAgent(nil, nil, nil, nil),
 		input:        newTestTextarea(),
 		viewport:     fastviewport.New(76, 20),
-		styles:       ApplyThemeColors("tokyonight"),
-		queuedInputs: []string{"next request"},
+		styles:      ApplyThemeColors("tokyonight"),
+		queuedItems: []queuedItem{{kind: queueItemInput, text: "next request"}},
 	}
 	m.layout()
 
@@ -5114,8 +5114,8 @@ func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
 	if got.streaming {
 		t.Fatal("expected streaming to stop")
 	}
-	if len(got.queuedInputs) != 0 {
-		t.Fatalf("expected queued input to be consumed, got %#v", got.queuedInputs)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("expected queued input to be consumed, got %#v", got.queuedItems)
 	}
 	if cmd == nil {
 		t.Fatal("expected next queued input command to start")
@@ -5131,8 +5131,8 @@ func TestStreamDoneInterruptedDoesNotStartNextQueuedInput(t *testing.T) {
 		agent:        agent.NewAgent(nil, nil, nil, nil),
 		input:        newTestTextarea(),
 		viewport:     fastviewport.New(76, 20),
-		styles:       ApplyThemeColors("tokyonight"),
-		queuedInputs: []string{"next request"},
+		styles:      ApplyThemeColors("tokyonight"),
+		queuedItems: []queuedItem{{kind: queueItemInput, text: "next request"}},
 	}
 	m.layout()
 
@@ -5142,8 +5142,8 @@ func TestStreamDoneInterruptedDoesNotStartNextQueuedInput(t *testing.T) {
 	if got.streaming {
 		t.Fatal("expected streaming to stop")
 	}
-	if len(got.queuedInputs) != 1 {
-		t.Fatalf("expected queued input to remain after interruption, got %#v", got.queuedInputs)
+	if len(got.queuedItems) != 1 {
+		t.Fatalf("expected queued input to remain after interruption, got %#v", got.queuedItems)
 	}
 	if cmd != nil {
 		t.Fatalf("expected interrupted stream not to start next queued input, got %T", cmd)

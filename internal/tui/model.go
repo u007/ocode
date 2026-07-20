@@ -103,6 +103,22 @@ const (
 	roleThinking
 )
 
+// queueItemKind classifies entries in the unified queuedItems queue so
+// drain/render/recall can dispatch each item by type while preserving
+// insertion order across all previously-separate queues.
+type queueItemKind int
+
+const (
+	queueItemInput    queueItemKind = iota // plain text queued while streaming
+	queueItemCommand                       // /slash or !shell command queued while busy
+	queueItemCompactInput                  // plain text queued during compaction
+)
+
+type queuedItem struct {
+	kind queueItemKind
+	text string
+}
+
 type message struct {
 	role      role
 	text      string
@@ -866,8 +882,7 @@ type model struct {
 	inputHistoryIndex        int
 	unsavedInput             string
 	inputAtFirstLineUpNotice bool
-	queuedInputs             []string
-	queuedCommands           []string // slash commands queued while agent is busy
+	queuedItems              []queuedItem // unified queue preserving insertion order
 	pendingJobMsgs           []message
 	expandedToolOutputs      map[int]bool
 	toolOutputRegions        []toolOutputRegion
@@ -957,7 +972,7 @@ type model struct {
 	titleAttempts            int    // failed generation attempts this session; capped at maxTitleAttempts
 	titleGen                 uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
 	compacting               bool
-	queuedCompactInputs      []string // messages queued while compaction is in flight
+	// queuedCompactInputs removed: unified queuedItems now handles all queue types
 	cmdRunningCount          int
 	shellCmdStart            time.Time // non-zero = a !shell command is running; used for elapsed timer
 	shellCmdText             string    // the shell command text, for display in the activity row
@@ -3871,19 +3886,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.rerenderTranscriptAndMaybeScroll()
 					return m, m.askAgent()
 				}
-				if len(m.queuedInputs) > 0 && m.agent != nil {
-					// Concatenate all queued inputs into a single combined message.
-					parts := make([]string, 0, len(m.queuedInputs))
-					for _, q := range m.queuedInputs {
-						parts = append(parts, strings.TrimSpace(q))
-					}
-					text := strings.Join(parts, "\n---\n")
-					m.queuedInputs = nil
-					m.layout()
-					m.maybeScrollTranscriptToBottom()
-					return m, m.processFileReferences(text)
-				}
-				if cmd, drained := m.drainQueuedCommands(); drained {
+				if cmd, drained := m.drainQueuedItems(); drained {
 					return m, cmd
 				}
 			}
@@ -3968,19 +3971,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, tea.Batch(m.askAgent(), waitCompactEvent(m.compactStartCh, m.compactCh))
 		}
-		// Drain messages queued during compaction.
-		if len(m.queuedCompactInputs) > 0 && m.agent != nil {
-			parts := make([]string, 0, len(m.queuedCompactInputs))
-			for _, q := range m.queuedCompactInputs {
-				parts = append(parts, strings.TrimSpace(q))
-			}
-			text := strings.Join(parts, "\n---\n")
-			m.queuedCompactInputs = nil
-			m.layout()
-			m.maybeScrollTranscriptToBottom()
-			return m, tea.Batch(m.processFileReferences(text), waitCompactEvent(m.compactStartCh, m.compactCh))
-		}
-		if cmd, drained := m.drainQueuedCommands(); drained {
+		// Drain messages queued during compaction (unified queue in insertion order).
+		if cmd, drained := m.drainQueuedItems(); drained {
 			if cmd != nil {
 				return m, tea.Batch(cmd, waitCompactEvent(m.compactStartCh, m.compactCh))
 			}
@@ -4806,19 +4798,17 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			m.inputAtFirstLineUpNotice = false
 		}
 
-		if len(m.queuedInputs) > 0 && m.input.Value() == "" {
-			last := m.queuedInputs[len(m.queuedInputs)-1]
-			m.queuedInputs = m.queuedInputs[:len(m.queuedInputs)-1]
-			m.input.SetValue(last)
-			m.layout()
-			return m, nil
-		}
-		if len(m.queuedCompactInputs) > 0 && m.input.Value() == "" {
-			last := m.queuedCompactInputs[len(m.queuedCompactInputs)-1]
-			m.queuedCompactInputs = m.queuedCompactInputs[:len(m.queuedCompactInputs)-1]
-			m.input.SetValue(last)
-			m.layout()
-			return m, nil
+		if len(m.queuedItems) > 0 && m.input.Value() == "" {
+			// Walk backwards to find the last input-type item (skip commands).
+			for i := len(m.queuedItems) - 1; i >= 0; i-- {
+				if m.queuedItems[i].kind == queueItemInput || m.queuedItems[i].kind == queueItemCompactInput {
+					item := m.queuedItems[i]
+					m.queuedItems = append(m.queuedItems[:i], m.queuedItems[i+1:]...)
+					m.input.SetValue(item.text)
+					m.layout()
+					return m, nil
+				}
+			}
 		}
 		if len(m.inputHistory) == 0 {
 			break
@@ -4955,7 +4945,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 
 		if strings.HasPrefix(text, "!") {
 			if m.streaming || m.compacting || m.shellStreamCmd != nil {
-				m.queuedCommands = append(m.queuedCommands, text)
+				m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
 				m.input.Reset()
 				m.layout()
 				m.maybeScrollTranscriptToBottom()
@@ -4967,7 +4957,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if m.streaming {
-			m.queuedInputs = append(m.queuedInputs, text)
+			m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemInput, text: text})
 			m.input.Reset()
 			m.layout()
 			m.maybeScrollTranscriptToBottom()
@@ -4975,7 +4965,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if m.compacting {
-			m.queuedCompactInputs = append(m.queuedCompactInputs, text)
+			m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCompactInput, text: text})
 			m.input.Reset()
 			m.layout()
 			m.maybeScrollTranscriptToBottom()
@@ -6853,7 +6843,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/cron" ||
 		cmd == "/goal"
 	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
-		m.queuedCommands = append(m.queuedCommands, text)
+		m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
 		m.input.Reset()
 		m.layout()
 		return m, nil
@@ -6957,29 +6947,83 @@ func (m *model) queueDrainBlocked() bool {
 	return m.showQuestionDialog
 }
 
-func (m *model) drainQueuedCommands() (tea.Cmd, bool) {
-	if len(m.queuedCommands) == 0 {
-		return nil, false
-	}
+func (m *model) drainQueuedItems() (tea.Cmd, bool) {
 	drained := false
-	for len(m.queuedCommands) > 0 {
-		cmdText := m.queuedCommands[0]
-		m.queuedCommands = m.queuedCommands[1:]
-		drained = true
-		// Shell commands queued while streaming are stored with the "!" prefix.
-		// Route them through startShellExecution instead of handleCommand.
-		if strings.HasPrefix(cmdText, "!") {
-			shellCmd := strings.TrimPrefix(cmdText, "!")
-			cmd := m.startShellExecution(shellCmd)
+	for len(m.queuedItems) > 0 {
+		// If no agent is configured, input and compact-input items
+		// can't be dispatched. Scan forward for a command to process
+		// instead of blocking the entire queue.
+		if m.agent == nil && m.queuedItems[0].kind != queueItemCommand {
+			cmdIdx := -1
+			for i, item := range m.queuedItems {
+				if item.kind == queueItemCommand {
+					cmdIdx = i
+					break
+				}
+			}
+			if cmdIdx == -1 {
+				break // nothing dispatchable in the queue
+			}
+			// Pop the command at cmdIdx, leaving undispatchable items in place.
+			item := m.queuedItems[cmdIdx]
+			m.queuedItems = append(m.queuedItems[:cmdIdx], m.queuedItems[cmdIdx+1:]...)
+			drained = true
+			m.layout()
+			m.maybeScrollTranscriptToBottom()
+			if strings.HasPrefix(item.text, "!") {
+				cmd := m.startShellExecution(strings.TrimPrefix(item.text, "!"))
+				if cmd != nil {
+					return cmd, true
+				}
+				continue
+			}
+			_, cmd := m.handleCommand(item.text)
 			if cmd != nil {
 				return cmd, true
 			}
 			continue
 		}
-		_, cmd := m.handleCommand(cmdText)
+
+		// Coalesce contiguous items of the same dispatchable kind
+		// (queueItemInput or queueItemCompactInput) into a single message.
+		firstKind := m.queuedItems[0].kind
+		if firstKind == queueItemInput || firstKind == queueItemCompactInput {
+			var parts []string
+			count := 0
+			for _, item := range m.queuedItems {
+				if item.kind == firstKind {
+					parts = append(parts, strings.TrimSpace(item.text))
+					count++
+				} else {
+					break
+				}
+			}
+			m.queuedItems = m.queuedItems[count:]
+			drained = true
+			text := strings.Join(parts, "\n---\n")
+			m.layout()
+			m.maybeScrollTranscriptToBottom()
+			return m.processFileReferences(text), true
+		}
+
+		// First item is a command — pop and dispatch.
+		item := m.queuedItems[0]
+		m.queuedItems = m.queuedItems[1:]
+		drained = true
+
+		// Shell commands are stored with the "!" prefix.
+		if strings.HasPrefix(item.text, "!") {
+			cmd := m.startShellExecution(strings.TrimPrefix(item.text, "!"))
+			if cmd != nil {
+				return cmd, true
+			}
+			continue
+		}
+		_, cmd := m.handleCommand(item.text)
 		if cmd != nil {
 			return cmd, true
 		}
+		// Synchronous command — continue loop to try next item.
 	}
 	return nil, drained
 }
@@ -8359,9 +8403,7 @@ func (m *model) handleNewCmd(args []string) tea.Cmd {
 	m.pendingCompactUIIdx = nil
 	m.pendingCompactResume = false
 	m.skipCompactPreflight = false
-	m.queuedInputs = nil
-	m.queuedCompactInputs = nil
-	m.queuedCommands = nil
+	m.queuedItems = nil
 	m.sessionID = time.Now().Format("2006-01-02-150405")
 	m.sessionTitle = ""
 	m.titleRequested = false
@@ -8602,7 +8644,7 @@ func (m *model) refreshEditorOpener() {
 // startShellExecution begins a shell command execution, recording it in the
 // transcript with a tool-call entry and returning the Cmd that runs the shell
 // via runStreamingShell. Used both from the immediate ! handler and from the
-// drainQueuedCommands path when a ! command was queued while streaming.
+// drainQueuedItems path when a ! command was queued while streaming.
 func (m *model) startShellExecution(cmdText string) tea.Cmd {
 	toolCallID := fmt.Sprintf("shell-%d", time.Now().UnixNano())
 	argsJSON, _ := json.Marshal(map[string]string{"command": cmdText})
@@ -15929,27 +15971,24 @@ func (m model) renderStoppedIndicator() string {
 }
 
 func (m model) renderQueueRow() string {
-	// Show queued compact inputs first (messages waiting for compaction).
-	if len(m.queuedCompactInputs) > 0 {
-		items := make([]string, 0, len(m.queuedCompactInputs))
-		for i, input := range m.queuedCompactInputs {
-			label := fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(input))
-			items = append(items, ansi.Truncate(label, 48, "..."))
-		}
-		text := fmt.Sprintf(" Queued (%d, waiting for compaction): %s", len(m.queuedCompactInputs), strings.Join(items, " | "))
-		w := m.statusContentWidth()
-		return m.styles.Status.Width(w).MaxHeight(1).Render(text)
-	}
-	allQueued := append(append([]string{}, m.queuedInputs...), m.queuedCommands...)
-	if len(allQueued) == 0 {
+	if len(m.queuedItems) == 0 {
 		return ""
 	}
-	items := make([]string, 0, len(allQueued))
-	for i, input := range allQueued {
-		label := fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(input))
+	items := make([]string, 0, len(m.queuedItems))
+	hasCompact := false
+	for i, item := range m.queuedItems {
+		if item.kind == queueItemCompactInput {
+			hasCompact = true
+		}
+		label := fmt.Sprintf("%d. %s", i+1, strings.TrimSpace(item.text))
 		items = append(items, ansi.Truncate(label, 48, "..."))
 	}
-	text := fmt.Sprintf(" Queued (%d): %s", len(allQueued), strings.Join(items, " | "))
+	var text string
+	if hasCompact {
+		text = fmt.Sprintf(" Queued (%d, waiting for compaction): %s", len(m.queuedItems), strings.Join(items, " | "))
+	} else {
+		text = fmt.Sprintf(" Queued (%d): %s", len(m.queuedItems), strings.Join(items, " | "))
+	}
 	// Clamp to a single line so a long queue can't wrap and push the bottom
 	// chrome past the terminal height.
 	w := m.statusContentWidth()

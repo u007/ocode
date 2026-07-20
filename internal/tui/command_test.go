@@ -243,22 +243,25 @@ func TestSidebarCommandRecordsTranscriptMessage(t *testing.T) {
 
 func TestDrainQueuedCommandsProcessesAllSynchronousCommands(t *testing.T) {
 	m := model{
-		width:          80,
-		height:         20,
-		input:          textarea.New(),
-		viewport:       fastviewport.New(80, 20),
-		queuedCommands: []string{"/theme", "/sidebar"},
+		width:    80,
+		height:   20,
+		input:    textarea.New(),
+		viewport: fastviewport.New(80, 20),
+		queuedItems: []queuedItem{
+			{kind: queueItemCommand, text: "/theme"},
+			{kind: queueItemCommand, text: "/sidebar"},
+		},
 	}
 
-	cmd, drained := m.drainQueuedCommands()
+	cmd, drained := m.drainQueuedItems()
 	if cmd != nil {
 		t.Fatalf("expected synchronous queued commands to return no command, got %T", cmd)
 	}
 	if !drained {
 		t.Fatal("expected queued commands to be drained")
 	}
-	if len(m.queuedCommands) != 0 {
-		t.Fatalf("expected queue to be empty after drain, got %#v", m.queuedCommands)
+	if len(m.queuedItems) != 0 {
+		t.Fatalf("expected queue to be empty after drain, got %#v", m.queuedItems)
 	}
 	if !m.showPicker || m.pickerKind != "theme" {
 		t.Fatalf("expected /theme to open picker, got showPicker=%v kind=%q", m.showPicker, m.pickerKind)
@@ -271,6 +274,46 @@ func TestDrainQueuedCommandsProcessesAllSynchronousCommands(t *testing.T) {
 	}
 	if m.messages[0].text != "/theme" || m.messages[1].text != "/sidebar" {
 		t.Fatalf("expected queued commands in order, got %#v", m.messages)
+	}
+}
+
+func TestDrainQueuedItemsPreservesMixedInputCommandOrder(t *testing.T) {
+	m := model{
+		width:      80,
+		height:     20,
+		input:      textarea.New(),
+		viewport:   fastviewport.New(80, 20),
+		agent:      agent.NewAgent(nil, nil, &config.Config{}, nil),
+		queuedItems: []queuedItem{
+			{kind: queueItemInput, text: "first user request"},
+			{kind: queueItemCommand, text: "/sidebar"},
+			{kind: queueItemInput, text: "second user request"},
+		},
+	}
+
+	cmd, drained := m.drainQueuedItems()
+	if cmd == nil {
+		t.Fatal("expected first queued input to start processing immediately")
+	}
+	if !drained {
+		t.Fatal("expected mixed queue to be drained")
+	}
+	if len(m.queuedItems) != 2 {
+		t.Fatalf("expected command and trailing input to remain queued after first drain, got %#v", m.queuedItems)
+	}
+	if m.queuedItems[0].kind != queueItemCommand || m.queuedItems[0].text != "/sidebar" {
+		t.Fatalf("expected queued command to stay next, got %#v", m.queuedItems[0])
+	}
+	if m.queuedItems[1].kind != queueItemInput || m.queuedItems[1].text != "second user request" {
+		t.Fatalf("expected trailing input to stay queued, got %#v", m.queuedItems[1])
+	}
+
+	_, nextDrained := m.drainQueuedItems()
+	if !nextDrained {
+		t.Fatal("expected queued command to be next after the first input batch")
+	}
+	if len(m.queuedItems) != 0 {
+		t.Fatalf("expected trailing input to drain after the queued command, got %#v", m.queuedItems)
 	}
 }
 
@@ -289,8 +332,8 @@ func TestLoginCommandBypassesBusyQueue(t *testing.T) {
 	}
 
 	got := updated.(*model)
-	if len(got.queuedCommands) != 0 {
-		t.Fatalf("expected /login not to be queued, got %#v", got.queuedCommands)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("expected /login not to be queued, got %#v", got.queuedItems)
 	}
 	if len(got.messages) == 0 || got.messages[0].role != roleUser || got.messages[0].text != "/login" {
 		t.Fatalf("expected /login to be recorded immediately, got %#v", got.messages)
@@ -305,18 +348,17 @@ func TestNewCommandBypassesBusyQueue(t *testing.T) {
 		viewport:       fastviewport.New(80, 20),
 		streaming:      true,
 		sessionID:      "old-session",
-		messages:       []message{{role: roleUser, text: "keep me busy"}},
-		queuedInputs:   []string{"pending user input"},
-		queuedCommands: []string{"/sidebar"},
+		messages:  []message{{role: roleUser, text: "keep me busy"}},
+		queuedItems: []queuedItem{
+			{kind: queueItemInput, text: "pending user input"},
+			{kind: queueItemCommand, text: "/sidebar"},
+		},
 	}
 
 	updated, _ := m.handleCommand("/new")
 	got := updated.(*model)
-	if len(got.queuedCommands) != 0 {
-		t.Fatalf("expected /new not to be queued, got %#v", got.queuedCommands)
-	}
-	if len(got.queuedInputs) != 0 {
-		t.Fatalf("expected /new to clear queued inputs, got %#v", got.queuedInputs)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("expected /new to clear queued items, got %#v", got.queuedItems)
 	}
 	if got.sessionID == "old-session" {
 		t.Fatal("expected /new to start a fresh session immediately")
@@ -335,17 +377,17 @@ func TestCompactFinishedResumesAfterQueuedLocalCommands(t *testing.T) {
 		agent:                agent.NewAgent(nil, nil, &config.Config{}, nil),
 		messages:             []message{{role: roleUser, text: "hello"}},
 		pendingCompactResume: true,
-		queuedCommands:       []string{"/sidebar"},
+		queuedItems:          []queuedItem{{kind: queueItemCommand, text: "/sidebar"}},
 	}
 
 	updated, cmd := m.Update(compactFinishedMsg{result: agent.CompactResult{OK: false}})
 	if cmd == nil {
-		t.Fatal("expected compact finish to resume the agent after draining queued commands")
+		t.Fatal("expected compact finish to resume the agent after draining queued items")
 	}
 
 	got := derefTestModel(t, updated)
-	if len(got.queuedCommands) != 0 {
-		t.Fatalf("expected queued commands to be drained, got %#v", got.queuedCommands)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("expected queued items to be drained, got %#v", got.queuedItems)
 	}
 	if !got.showSidebar {
 		t.Fatal("expected queued /sidebar command to run before resuming")

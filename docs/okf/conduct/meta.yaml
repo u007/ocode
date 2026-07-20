@@ -22,6 +22,8 @@ tags:
   - safety           # git/db/.env/secrets/destructive-op discipline
   - code-review      # giving & receiving review: rigor over agreement, severity, self-review
   - debugging        # bug fixing: root cause over symptom; reproduce; hypothesis-driven
+  - context-efficiency # targeted reads over whole-file dumps; no redundant re-reads; parallelize independent lookups
+  - context-accuracy   # act on what's in context; verify stale memory; gather enough before acting
 
 # Universal: applies to ANY repo. There is no marker file — the future
 # enforcement hook treats `mode: universal` corpora as always-active for the
