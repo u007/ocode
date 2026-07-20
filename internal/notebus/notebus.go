@@ -173,6 +173,14 @@ type Bus struct {
 	// and pass through unchanged.
 	redactor func(text string) string
 
+	// onAppend, when non-nil, is called on the owner goroutine
+	// after every successful entry append. The entry has its final
+	// Seq, TS, and redacted Body set. The callback must be cheap
+	// and non-blocking — it runs on the bus owner goroutine and
+	// would block all other bus operations.
+	onAppend func(Entry)
+	onAppMu  sync.Mutex
+
 	startOnce sync.Once
 	stopOnce  sync.Once
 
@@ -265,6 +273,16 @@ func (b *Bus) SetOnCompletion(cb func(agentID, status string, err error)) {
 	b.onCompMu.Lock()
 	b.onCompletion = cb
 	b.onCompMu.Unlock()
+}
+
+// SetOnAppend registers a callback that fires after every successful
+// entry append. The callback runs on the bus owner goroutine and must
+// be cheap and non-blocking — it would block all other bus operations.
+// Passing nil clears the callback. Safe to call before or after Start.
+func (b *Bus) SetOnAppend(fn func(Entry)) {
+	b.onAppMu.Lock()
+	b.onAppend = fn
+	b.onAppMu.Unlock()
 }
 
 // fireCompletion invokes the completion callback, if any, outside
@@ -509,6 +527,9 @@ func (b *Bus) handle(req busRequest) {
 		}
 		if req.seqCh != nil {
 			req.seqCh <- e.Seq
+		}
+		if b.onAppend != nil {
+			b.onAppend(e)
 		}
 	case reqReadSnapshot:
 		snap := make([]Entry, len(b.log))

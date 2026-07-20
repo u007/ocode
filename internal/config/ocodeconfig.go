@@ -49,6 +49,16 @@ type AdvisorConfig struct {
 	// instead of an LLM API client. The model field holds the Anthropic model
 	// name (e.g. "claude-sonnet-4-6") passed to claude --model.
 	ClaudeCode bool `json:"claude_code,omitempty"`
+	// Checkpoints lists loop-enforced advisor consultations, applied by the
+	// agent loop (not left to the model's discretion). Supported values:
+	//   "done" — before the agent's final answer on a non-trivial turn, the
+	//            loop injects an advisor verification of the completion claim.
+	//   "plan" — the first write-tool batch of a turn is deferred until the
+	//            advisor has reviewed the proposed changes.
+	// Checkpoints only fire when the advisor is enabled and the checkpoint
+	// is listed. The advisor model is resolved with a built-in default
+	// fallback, so absence of an explicit model does not disable checkpoints.
+	Checkpoints []string `json:"checkpoints"`
 }
 
 // PluginsConfig gates opt-in builtin tools that ship disabled by default.
@@ -246,10 +256,11 @@ type tuiConfigFile struct {
 }
 
 type advisorConfigFile struct {
-	Enabled    *bool  `json:"enabled"`
-	Provider   string `json:"provider"`
-	Model      string `json:"model"`
-	ClaudeCode *bool  `json:"claude_code,omitempty"`
+	Enabled     *bool    `json:"enabled"`
+	Provider    string   `json:"provider"`
+	Model       string   `json:"model"`
+	ClaudeCode  *bool    `json:"claude_code,omitempty"`
+	Checkpoints []string `json:"checkpoints"`
 }
 
 type pluginsConfigFile struct {
@@ -402,6 +413,10 @@ func defaultAdvisorConfig() AdvisorConfig {
 		Enabled:  true,
 		Provider: "deepseek",
 		Model:    "deepseek-v4-pro",
+		// Both on by default: "plan" vets the first write batch before any
+		// mutation, "done" verifies completion claims. Set "checkpoints": []
+		// in ocode.json to disable.
+		Checkpoints: []string{"plan", "done"},
 	}
 }
 
@@ -910,6 +925,10 @@ func applyAdvisorConfig(dst *AdvisorConfig, src advisorConfigFile) {
 	}
 	if src.ClaudeCode != nil {
 		dst.ClaudeCode = *src.ClaudeCode
+	}
+	// nil = key absent, keep default; [] = explicitly disable all checkpoints.
+	if src.Checkpoints != nil {
+		dst.Checkpoints = src.Checkpoints
 	}
 }
 
@@ -1492,8 +1511,14 @@ func SaveAdvisorModel(providerModel string) error {
 	}
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		if providerModel == "" {
-			// Reset to defaults.
-			cfg.Advisor = defaultAdvisorConfig()
+			// Reset only the model/provider fields, not the entire advisor
+			// block. Resetting the whole struct would silently restore the
+			// default checkpoints (["plan","done"]) and re-enable the advisor,
+			// which couples unrelated policy state to the model-picker command.
+			def := defaultAdvisorConfig()
+			cfg.Advisor.Provider = def.Provider
+			cfg.Advisor.Model = def.Model
+			cfg.Advisor.ClaudeCode = def.ClaudeCode
 			return nil
 		}
 		provider, model := SplitProviderModel(providerModel)

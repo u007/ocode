@@ -751,6 +751,72 @@ func TestAutoPermissionConfigLoadAppliesExplicitFalseOverrides(t *testing.T) {
 	}
 }
 
+// TestAdvisorCheckpointsRoundTrip verifies that the checkpoints field
+// round-trips through save and load correctly:
+//   - omitted key → default ["plan","done"]
+//   - explicit []   → [] (all checkpoints disabled)
+//   - explicit list → that exact list
+func TestAdvisorCheckpointsRoundTrip(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	configDir := filepath.Join(tmp, ".config", "opencode")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write an initial config with explicit empty checkpoints.
+	initial := `{"advisor":{"checkpoints":[]}}`
+	if err := os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(initial), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Load: explicit [] must be preserved.
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if cfg.Ocode.Advisor.Checkpoints == nil {
+		t.Fatal("Checkpoints is nil after loading [], want non-nil empty slice")
+	}
+	if len(cfg.Ocode.Advisor.Checkpoints) != 0 {
+		t.Fatalf("Checkpoints = %v after loading [], want []", cfg.Ocode.Advisor.Checkpoints)
+	}
+
+	// Save and reload: empty must still be empty.
+	if err := SaveOcodeConfig(&cfg.Ocode); err != nil {
+		t.Fatalf("SaveOcodeConfig failed: %v", err)
+	}
+	var cfg2 Config
+	if err := LoadOcodeConfig(&cfg2); err != nil {
+		t.Fatalf("LoadOcodeConfig (reload) failed: %v", err)
+	}
+	if cfg2.Ocode.Advisor.Checkpoints == nil {
+		t.Fatal("Checkpoints is nil after save/reload of [], want non-nil empty slice")
+	}
+	if len(cfg2.Ocode.Advisor.Checkpoints) != 0 {
+		t.Fatalf("Checkpoints = %v after save/reload of [], want []", cfg2.Ocode.Advisor.Checkpoints)
+	}
+
+	// Now set non-empty checkpoints and verify round-trip.
+	cfg2.Ocode.Advisor.Checkpoints = []string{"plan", "done"}
+	if err := SaveOcodeConfig(&cfg2.Ocode); err != nil {
+		t.Fatalf("SaveOcodeConfig (plan,done) failed: %v", err)
+	}
+	var cfg3 Config
+	if err := LoadOcodeConfig(&cfg3); err != nil {
+		t.Fatalf("LoadOcodeConfig (reload plan,done) failed: %v", err)
+	}
+	if len(cfg3.Ocode.Advisor.Checkpoints) != 2 ||
+		cfg3.Ocode.Advisor.Checkpoints[0] != "plan" ||
+		cfg3.Ocode.Advisor.Checkpoints[1] != "done" {
+		t.Fatalf("Checkpoints = %v after save/reload of [plan,done], want [plan,done]",
+			cfg3.Ocode.Advisor.Checkpoints)
+	}
+
+}
+
 func TestSaveAdvisorModel_RequiresProviderPrefix(t *testing.T) {
 	chdirTempForConfigTest(t)
 
@@ -774,6 +840,42 @@ func TestSaveAdvisorModel_RequiresProviderPrefix(t *testing.T) {
 	}
 	if cfg.Ocode.Advisor.Provider != "anthropic" || cfg.Ocode.Advisor.Model != "claude-sonnet-4-6" {
 		t.Fatalf("unexpected saved advisor config: %#v", cfg.Ocode.Advisor)
+	}
+
+	// Verify that clearing the model (empty string) only resets
+	// provider/model, not the enabled or checkpoints fields.
+	cfg.Ocode.Advisor.Enabled = false
+	cfg.Ocode.Advisor.Checkpoints = []string{}
+	if err := SaveOcodeConfig(&cfg.Ocode); err != nil {
+		t.Fatalf("SaveOcodeConfig before clear failed: %v", err)
+	}
+
+	if err := SaveAdvisorModel(""); err != nil {
+		t.Fatalf("SaveAdvisorModel('') (clear) failed: %v", err)
+	}
+
+	var cfg2 Config
+	if err := LoadOcodeConfig(&cfg2); err != nil {
+		t.Fatalf("LoadOcodeConfig after clear failed: %v", err)
+	}
+
+	// Provider/model should be back to defaults.
+	if cfg2.Ocode.Advisor.Provider != defaultAdvisorConfig().Provider {
+		t.Fatalf("after clear, Provider = %q, want default %q",
+			cfg2.Ocode.Advisor.Provider, defaultAdvisorConfig().Provider)
+	}
+	if cfg2.Ocode.Advisor.Model != defaultAdvisorConfig().Model {
+		t.Fatalf("after clear, Model = %q, want default %q",
+			cfg2.Ocode.Advisor.Model, defaultAdvisorConfig().Model)
+	}
+
+	// Enabled and Checkpoints must NOT be reset by clearing the model.
+	if cfg2.Ocode.Advisor.Enabled {
+		t.Fatal("after clear, Enabled was reset to true (should have stayed false)")
+	}
+	if cfg2.Ocode.Advisor.Checkpoints == nil || len(cfg2.Ocode.Advisor.Checkpoints) != 0 {
+		t.Fatalf("after clear, Checkpoints = %v, want [] (should not be reset to defaults)",
+			cfg2.Ocode.Advisor.Checkpoints)
 	}
 }
 

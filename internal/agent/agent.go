@@ -174,6 +174,14 @@ type Agent struct {
 	// not set OnToolOutput, so their streaming tools fall back to the synchronous
 	// Execute path.
 	OnToolOutput func(toolCallID, chunk string)
+
+	// OnNoteBusEntry, if set, is called on the bus owner goroutine
+	// each time a new entry is appended to the shared notes bus
+	// (the group bus created by maybeBuildGroupBus). The entry has
+	// its final Seq, TS, and redacted Body. Must be cheap and
+	// non-blocking — it runs on the bus owner goroutine and would
+	// block all other bus operations.
+	OnNoteBusEntry func(e notebus.Entry)
 	// OnUsage, if set, is invoked when the provider streams token usage
 	// information during a Chat call. The callback fires on the HTTP goroutine
 	// — keep handlers fast and non-blocking. Not all providers support streaming
@@ -772,6 +780,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	}
 
 	preLen := len(messages)
+	// Capture the user's goal before tail injectors run. The last user-role
+	// message in the original input is the actual request; tail injectors
+	// (discovery context, attached markdown) append user-role messages that
+	// would mask the real goal if derived from the final message list.
+	userGoal := lastUserContent(messages)
 	a.RunDiscovery(discoveryQueryFromMessages(messages, a.workDir))
 	messages = a.PrepareMessages(messages, "")
 	// Order matters for cache stability: stable content
@@ -796,12 +809,16 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// Note: GetToolDefinitions is invoked inside the iteration loop below so
 	// a mid-turn discover_more (Part 08) is visible on the next iteration.
 	var newMsgs []Message
-
 	// Recover orphaned tool calls from prior sessions: find the last assistant
 	// message that has ToolCalls, then check which call IDs have no following
 	// tool-result message. Re-execute those calls now (the prior execution is
 	// guaranteed gone — we're in a new Step invocation).
 	messages = a.recoverOrphanedToolCalls(messages)
+	// Advisor checkpoints (cfg advisor.checkpoints): fresh per-Step state so
+	// "plan" and "done" each fire at most once per user turn.
+	// Pass the pre-injection user goal explicitly — the tail may contain
+	// user-role discovery content that would mask the real request.
+	ckpt := a.newAdvisorCheckpointState(userGoal)
 
 	for i := 0; ; i++ {
 		if isCancelled() {
@@ -891,8 +908,40 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		}
 
 		if len(resp.ToolCalls) == 0 {
+			// "done" checkpoint: on non-trivial turns, have the advisor verify
+			// the completion claim before the turn ends. The injected user
+			// message sends the loop around once more with the review.
+			if followUp := a.advisorDoneCheckpoint(ckpt, resp); followUp != nil {
+				newMsgs = append(newMsgs, *followUp)
+				messages = append(messages, *followUp)
+				if a.OnMessage != nil {
+					if isCancelled() {
+						return newMsgs, nil
+					}
+					a.OnMessage(*followUp)
+				}
+				continue
+			}
 			break
 		}
+
+		// "plan" checkpoint: defer the first write-tool batch until the advisor
+		// has reviewed the proposed changes. Deferred calls get synthetic tool
+		// results (protocol-safe) and the model re-issues them next loop.
+		if deferred := a.advisorPlanCheckpoint(ckpt, resp); deferred != nil {
+			for _, m := range deferred {
+				newMsgs = append(newMsgs, m)
+				messages = append(messages, m)
+				if a.OnMessage != nil {
+					if isCancelled() {
+						return newMsgs, nil
+					}
+					a.OnMessage(m)
+				}
+			}
+			continue
+		}
+		ckpt.countBatch(resp.ToolCalls)
 
 		type tcResult struct {
 			idx int

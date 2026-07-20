@@ -39,6 +39,7 @@ import (
 	"github.com/u007/ocode/internal/knowledge"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/memory"
+	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/rc"
@@ -4059,6 +4060,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.delta.kind == "md-indexing" {
 			m.appendDiscoveryNotice("Indexing: " + msg.delta.text)
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
+		}
+		if msg.delta.kind == "note" {
+			// Shared-notes bus entry from a parallel agent group.
+			// Display as a transient, no-LLM message in the transcript
+			// so the user sees inter-agent notes in real-time.
+			m.appendDiscoveryNotice(msg.delta.text)
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, m.waitStreamEvent(msg.msgCh, msg.deltaCh, msg.errCh, msg.cancel)
 		}
@@ -11775,6 +11784,7 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 			a.OnDiscovery = nil
 			a.OnMDIndexing = nil
 			a.OnToolOutput = nil
+			a.OnNoteBusEntry = nil
 		}()
 
 		// Keep delta streaming best-effort so a burst of reasoning tokens can
@@ -11829,6 +11839,20 @@ func (m *model) streamStep(agentMsgs []agent.Message) tea.Cmd {
 		a.OnMDIndexing = func(rel string) {
 			select {
 			case deltaCh <- deltaEvent{kind: "md-indexing", text: rel}:
+			default:
+			}
+		}
+		// Stream shared-notes bus entries to the delta channel so the
+		// transcript shows note/touch/resolve entries as transient display
+		// messages in real-time. Non-blocking drop on backpressure — not
+		// critical for correctness.
+		a.OnNoteBusEntry = func(e notebus.Entry) {
+			text := formatNoteBusEntry(e)
+			if text == "" {
+				return
+			}
+			select {
+			case deltaCh <- deltaEvent{kind: "note", text: text}:
 			default:
 			}
 		}
@@ -13309,6 +13333,42 @@ func (m *model) rerenderTranscriptAndMaybeScroll() {
 func (m *model) maybeScrollTranscriptToBottom() {
 	if m.shouldAutoScrollTranscript() {
 		m.viewport.GotoBottom()
+	}
+}
+
+// formatNoteBusEntry renders a notebus.Entry as a one-line display string
+// for the chat transcript. Returns "" for entries that should not be shown.
+func formatNoteBusEntry(e notebus.Entry) string {
+	switch e.Kind {
+	case notebus.KindNote:
+		by := e.By
+		if by == "" {
+			by = "?"
+		}
+		at := e.At
+		if at == "" {
+			at = "?"
+		}
+		body := e.Body
+		if body == "" {
+			body = "(empty)"
+		}
+		return fmt.Sprintf("> [%s] %s — %s", by, at, body)
+	case notebus.KindTouch:
+		by := e.By
+		if by == "" {
+			by = "?"
+		}
+		file := e.File
+		if file == "" {
+			file = "?"
+		}
+		return fmt.Sprintf("~ [%s] edited %s", by, file)
+	case notebus.KindResolve:
+		// Resolve entries are internal bookkeeping; skip them.
+		return ""
+	default:
+		return ""
 	}
 }
 

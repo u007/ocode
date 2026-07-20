@@ -26,6 +26,7 @@ func TestWriteTouches(t *testing.T) {
 	appendWriteTouchIfGrouped(child, "write", `{"path":"a.go","content":"x"}`)
 	appendWriteTouchIfGrouped(child, "edit", `{"path":"b.go","oldtext":"a","newtext":"b"}`)
 	appendWriteTouchIfGrouped(child, "apply_patch", `{"path":"c.go"}`)
+	appendWriteTouchIfGrouped(child, "multi_file_edit", `{"edits":[{"path":"d.go","search":"x","replace":"y"},{"path":"e.go","search":"u","replace":"v"}]}`)
 	// Read tools: no touch.
 	appendWriteTouchIfGrouped(child, "read", `{"path":"d.go"}`)
 	appendWriteTouchIfGrouped(child, "glob", `{"pattern":"*.go"}`)
@@ -38,10 +39,10 @@ func TestWriteTouches(t *testing.T) {
 			touches++
 		}
 	}
-	if touches != 3 {
-		t.Errorf("touch count = %d, want 3 (write+edit+apply_patch)", touches)
+	if touches != 5 {
+		t.Errorf("touch count = %d, want 5 (write+edit+apply_patch+multi_file_edit paths)", touches)
 	}
-	wantFiles := map[string]bool{"a.go": false, "b.go": false, "c.go": false}
+	wantFiles := map[string]bool{"a.go": false, "b.go": false, "c.go": false, "d.go": false, "e.go": false}
 	for _, e := range busDelta {
 		if e.Kind == notebus.KindTouch {
 			if _, ok := wantFiles[e.File]; ok {

@@ -71,6 +71,15 @@ func (a *Agent) maybeBuildGroupBus(tcs []ToolCall, parallelTCs []int) (*notebus.
 	// never propagates to peer agents' prompts or to disk.
 	bus.SetRedactor(notebus.RedactBody)
 
+	// Wire the UI observer: when the main agent has set an
+	// OnNoteBusEntry callback, forward every bus append to it
+	// so the TUI can display note entries as they are posted.
+	if a.OnNoteBusEntry != nil {
+		bus.SetOnAppend(func(e notebus.Entry) {
+			a.OnNoteBusEntry(e)
+		})
+	}
+
 	// Optional: attach a sidecar so the bus persists.
 	if a.noteBusDir != "" {
 		sc, err := notebus.NewSidecar(a.noteBusDir, groupID)

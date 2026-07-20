@@ -399,3 +399,110 @@ func TestBusConstruction(t *testing.T) {
 		t.Errorf("fresh bus HeadSeq = %d, want 0", b.HeadSeq())
 	}
 }
+
+// TestSetOnAppend_FiresOncePerAppend: SetOnAppend fires exactly once
+// per successful Append, after the entry is finalized (Seq and TS are
+// set). Nil clears the callback.
+func TestSetOnAppend_FiresOncePerAppend(t *testing.T) {
+	b := NewBus("grp")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.Start(ctx)
+	defer func() { b.Stop(); <-b.Done() }()
+
+	var mu sync.Mutex
+	var seen []Entry
+	b.SetOnAppend(func(e Entry) {
+		mu.Lock()
+		seen = append(seen, e)
+		mu.Unlock()
+	})
+
+	if _, err := b.Append(Note(0, "a1", "x.go", "first", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Append(Note(0, "a2", "y.go", "second", 0)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sync: force a Delta to flush the owner goroutine.
+	_ = b.Delta("a1")
+
+	mu.Lock()
+	count := len(seen)
+	mu.Unlock()
+	if count != 2 {
+		t.Fatalf("onAppend called %d times, want 2", count)
+	}
+
+	// Callback sees finalized Seq and Body.
+	mu.Lock()
+	e0 := seen[0]
+	e1 := seen[1]
+	mu.Unlock()
+	if e0.Seq != 1 || e0.At != "x.go" || e0.Body != "first" || e0.By != "a1" {
+		t.Errorf("first entry: %+v", e0)
+	}
+	if e1.Seq != 2 || e1.At != "y.go" || e1.Body != "second" || e1.By != "a2" {
+		t.Errorf("second entry: %+v", e1)
+	}
+
+	// Clear callback; further appends must not fire.
+	b.SetOnAppend(nil)
+	if _, err := b.Append(Note(0, "a3", "z.go", "third", 0)); err != nil {
+		t.Fatal(err)
+	}
+	_ = b.Delta("a3")
+
+	mu.Lock()
+	count = len(seen)
+	mu.Unlock()
+	if count != 2 {
+		t.Fatalf("after SetOnAppend(nil): onAppend called %d times, want 2", count)
+	}
+}
+
+// TestSetOnAppend_ConcurrentOrder: concurrent Appends from multiple
+// goroutines produce onAppend calls in the same order as their seq
+// assignment.
+func TestSetOnAppend_ConcurrentOrder(t *testing.T) {
+	b := NewBus("grp")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b.Start(ctx)
+	defer func() { b.Stop(); <-b.Done() }()
+
+	var mu sync.Mutex
+	var seqs []int64
+	b.SetOnAppend(func(e Entry) {
+		mu.Lock()
+		seqs = append(seqs, e.Seq)
+		mu.Unlock()
+	})
+
+	const n = 20
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := b.Append(Note(0, "a1", "x.go", "x", 0))
+			if err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	_ = b.Delta("a1")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seqs) != n {
+		t.Fatalf("got %d callbacks, want %d", len(seqs), n)
+	}
+	for i := 1; i < len(seqs); i++ {
+		if seqs[i] <= seqs[i-1] {
+			t.Fatalf("seq order violation: seqs[%d]=%d <= seqs[%d]=%d", i, seqs[i], i-1, seqs[i-1])
+		}
+	}
+}

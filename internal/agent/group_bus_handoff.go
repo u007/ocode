@@ -34,14 +34,16 @@ func appendWriteTouchIfGrouped(g noteGroup, toolName, args string) {
 	if !isWriteTool(toolName) {
 		return
 	}
-	file := extractTouchFilePath(toolName, args)
-	if file == "" {
+	files := extractTouchFilePaths(toolName, args)
+	if len(files) == 0 {
 		// Defensive: a write tool without a recognizable path
 		// produces no touch. The orchestrator still sees the
 		// original tool result; this is a non-fatal skip.
 		return
 	}
-	_, _ = bus.Append(notebus.Touch(0, id, file, "edit", 0))
+	for _, file := range files {
+		_, _ = bus.Append(notebus.Touch(0, id, file, "edit", 0))
+	}
 }
 
 // agentCtx is a tiny adapter that lets a transient {bus, id}
@@ -63,29 +65,73 @@ func (a *Agent) groupID() string        { return a.noteAgentID }
 // extractTouchFilePath returns the file path that a write-class
 // tool call operated on, or "" if not extractable. The argument
 // keys we recognize (path, file_path, filePath) cover write,
-// edit, and apply_patch — the three write tools the design
-// allows to produce touches.
+// edit, apply_patch, and the single-file write tools; multi-file
+// edits return the first path from their edits[] list.
 func extractTouchFilePath(toolName, args string) string {
+	paths := extractTouchFilePaths(toolName, args)
+	if len(paths) == 0 {
+		return ""
+	}
+	return paths[0]
+}
+
+// extractTouchFilePaths returns the file paths that a write-class
+// tool call operated on, or nil if not extractable.
+func extractTouchFilePaths(toolName, args string) []string {
 	var a map[string]any
 	if err := json.Unmarshal([]byte(args), &a); err != nil {
-		return ""
+		return nil
+	}
+	paths := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	add := func(path string) {
+		if path == "" {
+			return
+		}
+		if _, ok := seen[path]; ok {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
 	}
 	for _, key := range []string{"path", "file_path", "filePath"} {
 		if v, ok := a[key].(string); ok && v != "" {
-			return v
+			add(v)
+			if toolName != "multi_file_edit" {
+				return []string{paths[0]}
+			}
 		}
 	}
-	return ""
+	if toolName == "multi_file_edit" {
+		if edits, ok := a["edits"].([]any); ok {
+			for _, edit := range edits {
+				m, ok := edit.(map[string]any)
+				if !ok {
+					continue
+				}
+				if v, ok := m["path"].(string); ok && v != "" {
+					add(v)
+				}
+			}
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	return paths
 }
 
 // isWriteTool returns true for the write-class tools that the
-// bus should observe. The list matches the plan: write, edit,
-// apply_patch. Read-class tools (read, glob, grep, list, lsp,
-// bash, webfetch, websearch, agent_status, task_status, …) are
-// never logged — the design explicitly forbids read-touches.
+// bus should observe. The list centralizes mutating-tool
+// classification used by both the note bus and the advisor
+// checkpoints (plan/done). Read-class tools (read, glob, grep,
+// list, lsp, bash, webfetch, websearch, agent_status,
+// task_status, …) are never logged — the design explicitly
+// forbids read-touches.
 func isWriteTool(name string) bool {
 	switch strings.ToLower(name) {
-	case "write", "edit", "apply_patch":
+	case "write", "edit", "apply_patch", "replace_lines",
+		"multiedit", "multi_file_edit", "delete", "format":
 		return true
 	}
 	return false
