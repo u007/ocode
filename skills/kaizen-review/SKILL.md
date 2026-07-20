@@ -15,7 +15,13 @@ Audit THIS session's tool-call failures and its context-usage/efficiency/accurac
 
 ## Step 1 — Collect failures from this conversation
 
-Collect every tool call that failed because of MODEL behavior:
+Do not rely on your own in-context memory of the transcript for this step — long sessions get compacted, and compaction summarizes over exactly the tool_result error text this step needs. Instead, dispatch a subagent to mechanically scan the **on-disk session log**, which is written uncompacted:
+
+1. Resolve the session file: the project's sessions directory is `internal/paths.ProjectSessionsDir(slug)` (`~/.local/share/ocode/project/<slug>/sessions/`); the active session is the most-recently-modified `<id>.json` in that directory (skip `index.json`). If ambiguous, ask the user for the session ID rather than guessing.
+2. Have the subagent read that JSON file directly (not the compacted conversation context) and grep the `messages[].content` for tool_result entries containing: non-zero exit indicators, `error`, `Command failed`, `denied`, `not found`, `unexpected`, `syntax error`, or similar failure markers.
+3. The subagent reports back every match verbatim (tool name, the surrounding call, and the exact error text) — no summarizing or filtering at this stage; filtering happens next.
+
+Then, from the subagent's raw matches, collect every tool call that failed because of MODEL behavior:
 - tool results with errors, wrong-parameter retries, edits that didn't apply
 - hallucinated file paths, APIs, flags, or commands
 - commands that exited non-zero due to a model mistake
