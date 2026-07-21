@@ -280,3 +280,87 @@ func TestAppendOjsonlSessionRewriteTitle(t *testing.T) {
 		t.Fatalf("expected metadata total_tokens=2.0, got %v", sess.Metadata["total_tokens"])
 	}
 }
+
+func TestLoadOjsonlSessionRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := ojsonlSessionPath(dir, "ses_load")
+	createdAt := time.Now()
+
+	if err := appendOjsonlSession(path, "ses_load", createdAt,
+		[]agent.Message{{Role: "user", Content: "hi"}}, map[string]any{"total_tokens": 1.0}, "First", true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if err := appendOjsonlSession(path, "ses_load", createdAt,
+		[]agent.Message{{Role: "assistant", Content: "there"}}, map[string]any{"total_tokens": 5.0}, "", false); err != nil {
+		t.Fatalf("seed 2: %v", err)
+	}
+
+	sess, err := loadOjsonlSession(path)
+	if err != nil {
+		t.Fatalf("loadOjsonlSession: %v", err)
+	}
+	if sess.ID != "ses_load" || sess.Title != "First" || !sess.TitleGenerated {
+		t.Fatalf("unexpected header fields: %+v", sess)
+	}
+	if len(sess.Messages) != 2 || sess.Messages[0].Content != "hi" || sess.Messages[1].Content != "there" {
+		t.Fatalf("unexpected messages: %+v", sess.Messages)
+	}
+	if sess.Metadata["total_tokens"] != 5.0 {
+		t.Fatalf("expected last meta line to win, got %#v", sess.Metadata)
+	}
+	if sess.UpdatedAt.IsZero() {
+		t.Fatal("expected UpdatedAt derived from file mtime, got zero value")
+	}
+}
+
+func TestLoadOjsonlSessionDropsTruncatedTailLine(t *testing.T) {
+	dir := t.TempDir()
+	path := ojsonlSessionPath(dir, "ses_torn")
+
+	if err := appendOjsonlSession(path, "ses_torn", time.Now(),
+		[]agent.Message{{Role: "user", Content: "hi"}}, nil, "Torn", true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Simulate a crash mid-append: append a syntactically incomplete line.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open for corrupt append: %v", err)
+	}
+	if _, err := f.Write([]byte(`{"type":"msg","role":"user","content":"cut off`)); err != nil {
+		t.Fatalf("write torn line: %v", err)
+	}
+	f.Close()
+
+	sess, err := loadOjsonlSession(path)
+	if err != nil {
+		t.Fatalf("expected torn tail line to be recoverable, got error: %v", err)
+	}
+	if len(sess.Messages) != 1 {
+		t.Fatalf("expected only the complete message to survive, got %d", len(sess.Messages))
+	}
+}
+
+func TestLoadOjsonlSessionFailsOnCorruptMiddleLine(t *testing.T) {
+	dir := t.TempDir()
+	path := ojsonlSessionPath(dir, "ses_midcorrupt")
+
+	if err := appendOjsonlSession(path, "ses_midcorrupt", time.Now(),
+		[]agent.Message{{Role: "user", Content: "hi"}}, nil, "Mid", true); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	// A syntactically complete but corrupt line, followed by a valid line —
+	// this is NOT the truncated-tail case, so it must fail, not be silently
+	// dropped.
+	f.Write([]byte("not json at all\n"))
+	line, _ := encodeMsgLine(agent.Message{Role: "user", Content: "after corruption"})
+	f.Write(line)
+	f.Close()
+
+	if _, err := loadOjsonlSession(path); err == nil {
+		t.Fatal("expected error for corrupt non-tail line, got nil")
+	}
+}

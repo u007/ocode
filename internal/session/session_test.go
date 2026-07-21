@@ -674,3 +674,47 @@ func TestOjsonlSessionFullLifecycle(t *testing.T) {
 		t.Fatal("expected Load to fail after Delete")
 	}
 }
+
+func TestListIncludesOjsonlSessions(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	if err := Save("ses_list-a", "", []agent.Message{{Role: "user", Content: "a"}}, nil); err != nil {
+		t.Fatalf("Save a: %v", err)
+	}
+
+	sessions, err := List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "ses_list-a" {
+		t.Fatalf("expected 1 session ses_list-a, got %+v", sessions)
+	}
+	if len(sessions[0].Messages) != 1 {
+		t.Fatalf("expected messages loaded, got %d", len(sessions[0].Messages))
+	}
+}
+
+func TestListRefsPaginatedIncludesOjsonlSessions(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	if err := Save("ses_refs-a", "Title A", []agent.Message{{Role: "user", Content: "a"}}, nil); err != nil {
+		t.Fatalf("Save a: %v", err)
+	}
+
+	refs, total, err := ListRefsPaginated(0, 0)
+	if err != nil {
+		t.Fatalf("ListRefsPaginated: %v", err)
+	}
+	if total != 1 || len(refs) != 1 {
+		t.Fatalf("expected 1 ref, got total=%d refs=%+v", total, refs)
+	}
+	if refs[0].ID != "ses_refs-a" || refs[0].Title != "Title A" || refs[0].Source != SourceOcode {
+		t.Fatalf("unexpected ref: %+v", refs[0])
+	}
+}
