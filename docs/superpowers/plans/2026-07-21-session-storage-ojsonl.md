@@ -30,7 +30,7 @@ Spec: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`
 **Interfaces:**
 - Produces: `ojsonlHeader{V int, ID string, CreatedAt time.Time, Title string, TitleGenerated bool}`, `encodeHeaderLine(h ojsonlHeader) ([]byte, error)`, `decodeHeaderLine(line []byte) (ojsonlHeader, error)`, `encodeMsgLine(m agent.Message) ([]byte, error)`, `encodeMetaLine(meta map[string]any) ([]byte, error)`, `peekRecordType(line []byte) (string, error)`, `decodeMsgLine(line []byte) (agent.Message, error)`, `decodeMetaLine(line []byte) (map[string]any, error)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/session/ojsonl_test.go
@@ -118,12 +118,12 @@ func TestPeekRecordTypeRejectsUnknown(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/session/... -run 'TestHeaderLineRoundTrip|TestMsgLineRoundTrip|TestMetaLineRoundTrip|TestPeekRecordTypeRejectsUnknown' -v`
 Expected: FAIL — `ojsonlHeader`, `encodeHeaderLine`, etc. undefined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/session/ojsonl.go
@@ -227,12 +227,12 @@ func peekRecordType(line []byte) (string, error) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/session/... -run 'TestHeaderLineRoundTrip|TestMsgLineRoundTrip|TestMetaLineRoundTrip|TestPeekRecordTypeRejectsUnknown' -v`
 Expected: PASS (4/4)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/session/ojsonl.go internal/session/ojsonl_test.go
@@ -251,7 +251,7 @@ git commit -m "feat(session): add .ojsonl line record types and codec"
 - Consumes: `ojsonlHeader`, `decodeHeaderLine`, `peekRecordType` (Task 1)
 - Produces: `ojsonlSessionPath(dir, id string) string`, `ojsonlWriteState{count int, title string, titleGenerated bool}`, `bootstrapOjsonlState(path string) (ojsonlWriteState, bool, error)` (bool = file existed), `getOjsonlWriteState(path string) (ojsonlWriteState, bool, error)`, `setOjsonlWriteState(path string, s ojsonlWriteState)`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/session/ojsonl_test.go (append)
@@ -308,12 +308,12 @@ func TestBootstrapOjsonlStateCountsOnlyMsgLines(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/session/... -run 'TestBootstrapOjsonlState' -v`
 Expected: FAIL — `ojsonlSessionPath`, `bootstrapOjsonlState` undefined. Add `"os"` and `"path/filepath"` to the test file's imports if not already present.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/session/ojsonl.go (append)
@@ -417,12 +417,12 @@ func bootstrapOjsonlState(path string) (ojsonlWriteState, bool, error) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/session/... -run 'TestBootstrapOjsonlState' -v`
 Expected: PASS (2/2)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/session/ojsonl.go internal/session/ojsonl_test.go
@@ -441,7 +441,7 @@ git commit -m "feat(session): add ojsonl write-state cache and bootstrap scan"
 - Consumes: `ojsonlWriteState`, `getOjsonlWriteState`, `setOjsonlWriteState`, `encodeHeaderLine`, `encodeMsgLine`, `encodeMetaLine`, `decodeHeaderLine` (Tasks 1–2)
 - Produces: `appendOjsonlSession(path, id string, createdAt time.Time, newMessages []agent.Message, metadata map[string]any, title string, titleGenerated bool) error`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/session/ojsonl_test.go (append)
@@ -550,12 +550,12 @@ func TestAppendOjsonlSessionRewritesHeaderOnTitleChange(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/session/... -run 'TestAppendOjsonlSession' -v`
 Expected: FAIL — `appendOjsonlSession` undefined. Add `"bytes"` and `"time"` to the test file's imports.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/session/ojsonl.go (append)
@@ -707,12 +707,12 @@ func rewriteOjsonlHeader(path, id string, createdAt time.Time, title string, tit
 
 Add `"bytes"` to `ojsonl.go`'s import block.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/session/... -run 'TestAppendOjsonlSession' -v`
 Expected: PASS (3/3)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/session/ojsonl.go internal/session/ojsonl_test.go
@@ -731,7 +731,7 @@ git commit -m "feat(session): add ojsonl append and title-rewrite writers"
 - Consumes: `appendOjsonlSession`, `ojsonlSessionPath` (Tasks 2–3)
 - Produces: `Save(id, title string, messages []agent.Message, metadata map[string]any) error` (signature unchanged — existing callers need no changes)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/session/session_test.go (append)
@@ -791,12 +791,12 @@ func TestSaveExistingJSONSessionStaysJSON(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/session/... -run 'TestSaveNewSessionWritesOjsonl|TestSaveExistingJSONSessionStaysJSON' -v`
 Expected: FAIL — `TestSaveNewSessionWritesOjsonl` fails because `Save` still always writes `.json`.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Replace `Save` in `internal/session/session.go`:
 
@@ -988,12 +988,12 @@ And update its one call site in `appendOjsonlSession` (Task 3) to drop the now-r
 	}
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/session/... -v`
 Expected: PASS — all tests in the package, including Tasks 1–3's tests and this task's two new tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/session/session.go internal/session/ojsonl.go internal/session/session_test.go
@@ -1013,7 +1013,7 @@ git commit -m "feat(session): dispatch Save() between .json and .ojsonl by exist
 - Consumes: `ojsonlHeader`, `decodeHeaderLine`, `peekRecordType`, `decodeMsgLine`, `decodeMetaLine`, `ojsonlSessionPath` (Tasks 1–2)
 - Produces: `loadOjsonlSession(path string) (*Session, error)`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/session/ojsonl_test.go (append)
@@ -1103,12 +1103,12 @@ func TestLoadOjsonlSessionFailsOnCorruptMiddleLine(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/session/... -run 'TestLoadOjsonlSession' -v`
 Expected: FAIL — `loadOjsonlSession` undefined.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```go
 // internal/session/ojsonl.go (append)
@@ -1255,12 +1255,12 @@ func fileExists(path string) bool {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/session/... -v`
 Expected: PASS — full package, including all three new load tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/session/session.go internal/session/ojsonl.go internal/session/ojsonl_test.go
@@ -1279,7 +1279,7 @@ git commit -m "feat(session): add .ojsonl Load() with truncated-tail recovery"
 - Consumes: `loadOjsonlSession` (Task 5)
 - Produces: `readOjsonlListMeta(path string) (ocodeMeta, error)` (header + `stat()` only, no message/meta line scanning)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/session/session_test.go (append)
@@ -1329,12 +1329,12 @@ func TestListRefsPaginatedIncludesOjsonlSessions(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/session/... -run 'TestListIncludesOjsonlSessions|TestListRefsPaginatedIncludesOjsonlSessions' -v`
 Expected: FAIL — `List()`/`ListRefsPaginated()` only scan `.json`, so a session saved as `.ojsonl` is invisible.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `internal/session/ojsonl.go`:
 
@@ -1412,12 +1412,12 @@ Modify `ListRefsPaginated` in `internal/session/session.go` — replace the sing
 	metas := append(jsonMetas, ojsonlMetas...)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/session/... -v`
 Expected: PASS — full package.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/session/session.go internal/session/ojsonl.go internal/session/session_test.go
@@ -1436,7 +1436,7 @@ git commit -m "feat(session): include .ojsonl sessions in List/ListForDir/ListRe
 - Consumes: `ojsonlSessionPath` (Task 2)
 - Produces: `Delete(id string) error` (signature unchanged)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/session/session_test.go (append)
@@ -1465,12 +1465,12 @@ func TestDeleteRemovesOjsonlSession(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/session/... -run 'TestDeleteRemovesOjsonlSession' -v`
 Expected: FAIL — `Delete` only removes the `.json` path, so the `.ojsonl` file is left behind.
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Modify `Delete` in `internal/session/session.go`:
 
@@ -1534,12 +1534,12 @@ func clearOjsonlWriteState(path string) {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/session/... -v`
 Expected: PASS — full package.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/session/session.go internal/session/ojsonl.go internal/session/session_test.go
@@ -1558,7 +1558,7 @@ git commit -m "feat(session): Delete() removes .ojsonl sessions and clears write
 - Consumes: everything from Tasks 1–7
 - Produces: nothing new — this task is verification-only
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 // internal/session/session_test.go (append)
@@ -1640,7 +1640,7 @@ func TestOjsonlSessionFullLifecycle(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/session/... -run 'TestOjsonlSessionFullLifecycle' -v`
 Expected: FAIL if any earlier task's wiring has a gap (this test exercises all of Save/Load/List/Delete together end to end); PASS immediately if Tasks 1–7 are all correctly wired — in which case skip to Step 4.
