@@ -787,12 +787,15 @@ func Delete(id string) error {
 		return err
 	}
 
-	path := filepath.Join(dir, id+".json")
-	if err := os.Remove(path); err != nil {
-		if !os.IsNotExist(err) {
+	for _, p := range []string{
+		filepath.Join(dir, id+".json"),
+		ojsonlSessionPath(dir, id),
+	} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return err
 		}
 	}
+	clearOjsonlWriteState(ojsonlSessionPath(dir, id))
 
 	// Update index
 	indexPath := filepath.Join(dir, "index.json")

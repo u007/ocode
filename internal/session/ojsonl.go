@@ -169,6 +169,12 @@ func setOjsonlWriteState(path string, s ojsonlWriteState) {
 	ojsonlStateMu.Unlock()
 }
 
+func clearOjsonlWriteState(path string) {
+	ojsonlStateMu.Lock()
+	delete(ojsonlState, path)
+	ojsonlStateMu.Unlock()
+}
+
 // bootstrapOjsonlState reads line 1 (header) for the current title, then
 // scans the rest of the file counting only "msg" lines — never "meta"
 // lines or the header itself, or the persisted-count cache would be off

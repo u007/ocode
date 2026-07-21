@@ -574,3 +574,26 @@ func TestSaveExistingJSONSessionStaysJSON(t *testing.T) {
 		t.Fatalf("expected 2 messages preserved via .json path, got %d", len(sess.Messages))
 	}
 }
+
+func TestDeleteRemovesOjsonlSession(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	if err := Save("ses_del-a", "", []agent.Message{{Role: "user", Content: "a"}}, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	dir, _ := GetStorageDir()
+	path := filepath.Join(dir, "ses_del-a.ojsonl")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file to exist before delete: %v", err)
+	}
+
+	if err := Delete("ses_del-a"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expected file removed, got err=%v", err)
+	}
+}
