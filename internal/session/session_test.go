@@ -575,6 +575,7 @@ func TestSaveExistingJSONSessionStaysJSON(t *testing.T) {
 	}
 }
 
+
 func TestDeleteRemovesOjsonlSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
@@ -595,5 +596,81 @@ func TestDeleteRemovesOjsonlSession(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected file removed, got err=%v", err)
+	}
+}
+
+func TestOjsonlSessionFullLifecycle(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	id := "ses_lifecycle"
+
+	// Turn 1: auto-titled from first user message.
+	if err := Save(id, "", []agent.Message{{Role: "user", Content: "hello there"}}, map[string]any{"total_tokens": 3.0}); err != nil {
+		t.Fatalf("Save turn 1: %v", err)
+	}
+	sess, err := Load(id)
+	if err != nil {
+		t.Fatalf("Load after turn 1: %v", err)
+	}
+	if sess.Title != "hello there" || sess.TitleGenerated {
+		t.Fatalf("expected auto-title 'hello there', generated=false, got %q/%v", sess.Title, sess.TitleGenerated)
+	}
+	if len(sess.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(sess.Messages))
+	}
+
+	// Turn 2: append assistant reply, update metadata, no title change.
+	msgs2 := append(sess.Messages, agent.Message{Role: "assistant", Content: "hi!"})
+	if err := Save(id, "", msgs2, map[string]any{"total_tokens": 9.0}); err != nil {
+		t.Fatalf("Save turn 2: %v", err)
+	}
+
+	// Turn 3: explicit /title.
+	msgs3 := append(msgs2, agent.Message{Role: "user", Content: "more"})
+	if err := Save(id, "Explicit Title", msgs3, map[string]any{"total_tokens": 15.0}); err != nil {
+		t.Fatalf("Save turn 3: %v", err)
+	}
+
+	sess, err = Load(id)
+	if err != nil {
+		t.Fatalf("Load after turn 3: %v", err)
+	}
+	if sess.Title != "Explicit Title" || !sess.TitleGenerated {
+		t.Fatalf("expected explicit title, got %q/%v", sess.Title, sess.TitleGenerated)
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d: %+v", len(sess.Messages), sess.Messages)
+	}
+	if sess.Metadata["total_tokens"] != 15.0 {
+		t.Fatalf("expected latest metadata to win, got %#v", sess.Metadata)
+	}
+
+	// List/refs see it.
+	refs, err := ListRefs()
+	if err != nil {
+		t.Fatalf("ListRefs: %v", err)
+	}
+	found := false
+	for _, r := range refs {
+		if r.ID == id {
+			found = true
+			if r.Title != "Explicit Title" {
+				t.Fatalf("expected ref title 'Explicit Title', got %q", r.Title)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expected lifecycle session in ListRefs")
+	}
+
+	// Delete removes it.
+	if err := Delete(id); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := Load(id); err == nil {
+		t.Fatal("expected Load to fail after Delete")
 	}
 }

@@ -4,6 +4,18 @@
 
 Design: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`.
 
+- [ ] **Cross-project `.ojsonl` resume fallback not implemented.** `Load()`
+  only checks the current project's storage dir for a `.ojsonl` file;
+  `readSessionFileAnyProject` (used when a session id isn't found in the
+  current project, e.g. resuming from a different cwd) still only searches
+  for `.json` files. A session created as `.ojsonl` in one project directory
+  cannot currently be resumed by id from a different cwd. Deferred because
+  it wasn't needed for the core save/load/list/delete lifecycle this plan
+  covers — implement by adding the same `ojsonlSessionPath` + `fileExists`
+  check used in `Load` into `readSessionFileAnyProject`'s per-project loop.
+
+Design: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`.
+
 - [ ] **Concurrent writers to the same session can produce duplicate/conflicting
   entries.** `Save()`'s `persistedCount` cache is per-process. If two ocode
   processes (e.g. TUI + server, or two server requests) append to the same
