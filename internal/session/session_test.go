@@ -100,7 +100,6 @@ func TestLoadFallsBackToCanonicalPrefixedID(t *testing.T) {
 		t.Fatalf("expected stored canonical id preserved, got %q", sess.ID)
 	}
 }
-
 func TestSaveGeneratesCanonicalPrefixedIDWhenBlank(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
@@ -122,7 +121,7 @@ func TestSaveGeneratesCanonicalPrefixedIDWhenBlank(t *testing.T) {
 		t.Fatalf("ReadDir failed: %v", err)
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" || entry.Name() == "index.json" {
+		if entry.IsDir() || entry.Name() == "index.json" {
 			continue
 		}
 		if !strings.HasPrefix(entry.Name(), "ses_") {
@@ -152,27 +151,15 @@ func TestSaveWritesOcodeSessionFormatWithSidebarMetadata(t *testing.T) {
 		t.Fatalf("Save failed: %v", err)
 	}
 
-	dir, err := GetStorageDir()
+	sess, err := Load("session-format")
 	if err != nil {
-		t.Fatalf("GetStorageDir failed: %v", err)
+		t.Fatalf("Load failed: %v", err)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "session-format.json"))
-	if err != nil {
-		t.Fatalf("ReadFile failed: %v", err)
+	if sess.ID == "" || sess.Title != "Demo" {
+		t.Fatalf("expected session id+title, got %+v", sess)
 	}
-
-	var got map[string]any
-	if err := json.Unmarshal(raw, &got); err != nil {
-		t.Fatalf("unmarshal raw session failed: %v", err)
-	}
-	for _, key := range []string{"id", "title", "messages", "created_at", "updated_at", "metadata"} {
-		if _, ok := got[key]; !ok {
-			t.Fatalf("expected opencode session format to include %q, got %#v", key, got)
-		}
-	}
-	metadata, ok := got["metadata"].(map[string]any)
-	if !ok {
-		t.Fatalf("expected metadata object, got %#v", got["metadata"])
+	if sess.Metadata == nil {
+		t.Fatalf("expected metadata, got nil")
 	}
 	for key, want := range map[string]float64{
 		"input_tokens":  12,
@@ -181,8 +168,8 @@ func TestSaveWritesOcodeSessionFormatWithSidebarMetadata(t *testing.T) {
 		"cached_tokens": 9,
 		"spend":         0.035,
 	} {
-		if metadata[key] != want {
-			t.Fatalf("expected metadata[%q]=%v, got %#v", key, want, metadata[key])
+		if sess.Metadata[key] != want {
+			t.Fatalf("expected metadata[%q]=%v, got %#v", key, want, sess.Metadata[key])
 		}
 	}
 }
@@ -531,5 +518,59 @@ func TestSaveTitleGeneratedFlag(t *testing.T) {
 	}
 	if !sess.TitleGenerated || sess.Title != "Login Bug Fix" {
 		t.Fatalf("empty re-save must keep generated title, got %q generated=%v", sess.Title, sess.TitleGenerated)
+	}
+}
+
+func TestSaveNewSessionWritesOjsonl(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	if err := Save("ses_ojsonl-new", "", []agent.Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	dir, _ := GetStorageDir()
+	if _, err := os.Stat(filepath.Join(dir, "ses_ojsonl-new.ojsonl")); err != nil {
+		t.Fatalf("expected .ojsonl file to exist: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ses_ojsonl-new.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no .json file for a new session, got err=%v", err)
+	}
+}
+
+func TestSaveExistingJSONSessionStaysJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	dir, _ := GetStorageDir()
+	jsonPath := filepath.Join(dir, "ses_legacy-json.json")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	seed := Session{ID: "ses_legacy-json", Title: "old", Messages: []agent.Message{{Role: "user", Content: "hi"}}}
+	seedBytes, _ := json.Marshal(seed)
+	if err := os.WriteFile(jsonPath, seedBytes, 0644); err != nil {
+		t.Fatalf("seed json file: %v", err)
+	}
+
+	if err := Save("ses_legacy-json", "", []agent.Message{
+		{Role: "user", Content: "hi"}, {Role: "assistant", Content: "there"},
+	}, nil); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dir, "ses_legacy-json.ojsonl")); !os.IsNotExist(err) {
+		t.Fatalf("expected no .ojsonl file for an id that already has a .json file, got err=%v", err)
+	}
+	sess, err := Load("ses_legacy-json")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("expected 2 messages preserved via .json path, got %d", len(sess.Messages))
 	}
 }

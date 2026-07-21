@@ -157,7 +157,9 @@ func getOjsonlWriteState(path string) (ojsonlWriteState, bool, error) {
 	if err != nil {
 		return ojsonlWriteState{}, false, err
 	}
-	setOjsonlWriteState(path, s)
+	if existed {
+		setOjsonlWriteState(path, s)
+	}
 	return s, existed, nil
 }
 
@@ -373,6 +375,37 @@ func rewriteOjsonlHeader(path, title string, titleGenerated bool) error {
 // torn write), it is dropped with a logged warning and the rest of the
 // session loads normally — only the last line can be partial in an
 // append-only file, so a corrupt line anywhere else is a hard error.
+// readOjsonlListMeta reads only the header line (line 1) of a .ojsonl file
+// plus the file mtime for updated_at — no scanning past line 1. This is the
+// cheap path used by ListRefsPaginated.
+func readOjsonlListMeta(path string, modTime time.Time) (ocodeMeta, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return ocodeMeta{}, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return ocodeMeta{}, fmt.Errorf("read ojsonl header from %s: %w", path, err)
+		}
+		return ocodeMeta{}, fmt.Errorf("ojsonl file %s is empty", path)
+	}
+
+	header, err := decodeHeaderLine(scanner.Bytes())
+	if err != nil {
+		return ocodeMeta{}, fmt.Errorf("ojsonl file %s: %w", path, err)
+	}
+
+	return ocodeMeta{
+		ID:        header.ID,
+		Title:     header.Title,
+		UpdatedAt: modTime,
+	}, nil
+}
+
 func loadOjsonlSession(path string) (*Session, error) {
 	f, err := os.Open(path)
 	if err != nil {

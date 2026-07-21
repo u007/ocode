@@ -133,8 +133,19 @@ func Save(id string, title string, messages []agent.Message, metadata map[string
 		id = NewSessionID()
 	}
 
-	path := filepath.Join(dir, id+".json")
+	// Check if a .json file already exists for this id — if so, keep using
+	// the legacy JSON format. Otherwise use the new .ojsonl format.
+	jsonPath := filepath.Join(dir, id+".json")
+	if _, err := os.Stat(jsonPath); err == nil {
+		return saveJSON(dir, jsonPath, id, title, messages, metadata)
+	}
 
+	return saveOjsonl(dir, id, title, messages, metadata)
+}
+
+// saveJSON is the legacy whole-file-rewrite path, kept for sessions that
+// were originally created as .json. Once a session is .json, it stays .json.
+func saveJSON(dir, path, id, title string, messages []agent.Message, metadata map[string]any) error {
 	var s Session
 	data, err := os.ReadFile(path)
 	if err == nil {
@@ -174,12 +185,59 @@ func Save(id string, title string, messages []agent.Message, metadata map[string
 		return err
 	}
 
-	err = os.WriteFile(path, out, 0644)
-	if err != nil {
+	if err := os.WriteFile(path, out, 0644); err != nil {
 		return err
 	}
 
 	return updateIndex(dir, id, s.Title)
+}
+
+// saveOjsonl is the append-only save path used for all new sessions, and
+// for any id whose file already exists as .ojsonl.
+func saveOjsonl(dir, id, title string, messages []agent.Message, metadata map[string]any) error {
+	path := ojsonlSessionPath(dir, id)
+
+	state, existed, err := getOjsonlWriteState(path)
+	if err != nil {
+		return err
+	}
+
+	newTitle := title
+	titleGenerated := false
+	if title != "" {
+		titleGenerated = true
+	} else if !existed && len(messages) > 0 {
+		for _, m := range messages {
+			if m.Role == "user" {
+				t := m.Content
+				if len(t) > 40 {
+					t = t[:37] + "..."
+				}
+				newTitle = t
+				break
+			}
+		}
+	} else {
+		newTitle = "" // no title change this save; appendOjsonlSession keeps the cached one
+	}
+
+	newMessages := messages
+	if existed {
+		if state.count > len(messages) {
+			return fmt.Errorf("ojsonl session %s: persisted count %d exceeds provided message count %d", path, state.count, len(messages))
+		}
+		newMessages = messages[state.count:]
+	}
+
+	if err := appendOjsonlSession(path, id, time.Now(), newMessages, metadata, newTitle, titleGenerated); err != nil {
+		return err
+	}
+
+	resolvedTitle := newTitle
+	if resolvedTitle == "" {
+		resolvedTitle = state.title
+	}
+	return updateIndex(dir, id, resolvedTitle)
 }
 
 func updateIndex(dir, id, title string) error {
@@ -209,6 +267,20 @@ func Load(id string) (*Session, error) {
 		return nil, err
 	}
 
+	// Check for .ojsonl first (try both the bare id and the canonical prefixed form).
+	ojsonlPath := ojsonlSessionPath(dir, id)
+	if !fileExists(ojsonlPath) && !strings.HasPrefix(id, canonicalSessionPrefix) {
+		ojsonlPath = ojsonlSessionPath(dir, canonicalSessionPrefix+id)
+	}
+	if fileExists(ojsonlPath) {
+		s, err := loadOjsonlSession(ojsonlPath)
+		if err != nil {
+			return nil, err
+		}
+		s.Messages = removeIncompleteToolRequests(s.Messages)
+		return s, nil
+	}
+
 	path, data, err := readSessionFile(dir, id)
 	if err != nil {
 		if os.IsNotExist(err) && shouldSearchOtherProjects(id) {
@@ -233,6 +305,15 @@ func Load(id string) (*Session, error) {
 	s.Messages = removeIncompleteToolRequests(s.Messages)
 
 	return &s, nil
+}
+
+// fileExists reports whether path exists and is readable as a regular
+// file entry (any stat error, including permission errors, is treated as
+// "does not exist" for dispatch purposes — Load's fallback paths below
+// will surface a clearer error if it turns out to be a real problem).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func shouldSearchOtherProjects(id string) bool {
@@ -376,14 +457,26 @@ func List() ([]Session, error) {
 
 	var sessions []Session
 	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" && e.Name() != "index.json" {
-			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if e.IsDir() || e.Name() == "index.json" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		ext := filepath.Ext(e.Name())
+		switch ext {
+		case ".json":
+			data, err := os.ReadFile(path)
 			if err == nil {
 				var s Session
 				if err := json.Unmarshal(data, &s); err == nil {
 					s.Messages = removeIncompleteToolRequests(s.Messages)
 					sessions = append(sessions, s)
 				}
+			}
+		case ".ojsonl":
+			s, err := loadOjsonlSession(path)
+			if err == nil {
+				s.Messages = removeIncompleteToolRequests(s.Messages)
+				sessions = append(sessions, *s)
 			}
 		}
 	}
@@ -409,14 +502,26 @@ func ListForDir(wd string) ([]Session, error) {
 
 	var sessions []Session
 	for _, e := range entries {
-		if !e.IsDir() && filepath.Ext(e.Name()) == ".json" && e.Name() != "index.json" {
-			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if e.IsDir() || e.Name() == "index.json" {
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		ext := filepath.Ext(e.Name())
+		switch ext {
+		case ".json":
+			data, err := os.ReadFile(path)
 			if err == nil {
 				var s Session
 				if err := json.Unmarshal(data, &s); err == nil {
 					s.Messages = removeIncompleteToolRequests(s.Messages)
 					sessions = append(sessions, s)
 				}
+			}
+		case ".ojsonl":
+			s, err := loadOjsonlSession(path)
+			if err == nil {
+				s.Messages = removeIncompleteToolRequests(s.Messages)
+				sessions = append(sessions, *s)
 			}
 		}
 	}
@@ -611,6 +716,20 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 		}
 		return meta, true
 	})
+	ojsonlMetas := mapDirEntries(dir, entries, ".ojsonl", func(path string, e os.DirEntry) (ocodeMeta, bool) {
+		info, err := e.Info()
+		if err != nil {
+			log.Printf("session list: stat %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
+		}
+		meta, err := readOjsonlListMeta(path, info.ModTime())
+		if err != nil {
+			log.Printf("session list: read ojsonl meta %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
+		}
+		return meta, true
+	})
+	metas = append(metas, ojsonlMetas...)
 
 	allRefs := make([]Ref, 0, len(metas))
 	clonedClaude := make(map[string]struct{})
