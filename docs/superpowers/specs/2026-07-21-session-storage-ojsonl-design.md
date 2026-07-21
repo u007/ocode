@@ -45,14 +45,21 @@ file's `mtime` via `os.Stat`, matching the fallback `readOcodeMeta`
 ## Write path (`Save`)
 
 An in-process cache, `map[sessionID]persistedCount`, tracks how many
-messages have already been written to disk for a session.
+`msg` records have already been written to disk for a session.
 
-- First `Save()` for a session ID in this process (e.g. right after
-  resuming) bootstraps the count with a cheap line-count scan (count
-  lines, don't unmarshal each one).
+- If no file exists yet for the session ID, this is a new session: write
+  line 1 (header) and the initial batch of `msg`/`meta` lines as one
+  initial file write, and seed the cache at the resulting count.
+- Otherwise, first `Save()` for a session ID in this process (e.g. right
+  after resuming) bootstraps the count with a cheap scan: read the file
+  line by line and count only lines whose record type is `msg` (a cheap
+  prefix/substring check, e.g. `"type":"msg"`, not a full unmarshal —
+  `meta` lines and line 1 must NOT be counted, or the next save will
+  either skip real messages or duplicate them).
 - Every `Save()` after that appends `messages[persistedCount:]` as `msg`
   lines, appends one `meta` line if `metadata` is non-nil, and advances
-  the cached count. This is a pure append — no read of existing content.
+  the cached count by the number of `msg` lines written. This is a pure
+  append — no read of existing content.
 - If `title` changes, line 1 is rewritten: read the file, replace line 1,
   write the result to a temp file in the same directory, then
   `os.Rename` into place. Rename is atomic on the same filesystem, so a
@@ -110,9 +117,35 @@ matches the existing single-writer-per-session assumption elsewhere in
 the codebase (see the `index.json` race already tracked separately) and
 is documented here so it isn't mistaken for a regression later.
 
+## Known limitation: title rewrite can silently drop a concurrent append
+
+A second, more severe concurrent-writer failure mode, specific to the
+temp+rename header-rewrite path. Appends go to the file via an existing
+`O_APPEND` handle opened against the file's path/inode. The title
+rewrite instead reads the whole file, writes a new version to a temp
+file, and `rename`s it over the original path. If another process holds
+an append handle opened *before* the rename and writes to it *after* the
+rename completes, that write lands on the old, now-unlinked inode —
+invisible to any reader that opens the (new) file at that path
+afterward. Unlike the duplicate-entry case above, this is real,
+silent data loss, not just a conflicting entry.
+
+Also not solved in this change, for the same reason (single-writer
+assumption, no locking) — but called out separately because it's a
+strictly worse outcome than duplication, and future work addressing
+limitation #1 (e.g. an advisory lock) should address this one at the
+same time, since they share a root cause.
+
 ## Testing
 
 - Round-trip save/load parity against existing `session_test.go` cases.
+- New-session creation: first `Save()` for an unseen ID writes header +
+  initial `msg`/`meta` lines in one write, and the cache seeds at the
+  correct count.
+- Bootstrap count only counts `msg` lines, not `meta` lines or line 1
+  (regression test for the ambiguity caught in review: seed a file with
+  header + meta + msg lines in a non-trivial order and assert the
+  bootstrapped count matches the `msg` count only).
 - Corrupt/truncated last-line recovery: session still loads, warning
   logged, only the incomplete line is dropped.
 - Bootstrap-count-from-existing-file correctness after a simulated

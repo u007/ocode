@@ -18,6 +18,15 @@ Design: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`.
   priority, possibly as part of a larger move to SQLite (see design doc's "Out
   of scope" section for why opencode made that move).
 
+- [ ] **Title rewrite can silently drop a concurrent append (data loss, not
+  just duplication).** The temp+rename header-rewrite path swaps in a new
+  inode at the session's path; a process that already had an `O_APPEND` handle
+  open on the old inode keeps writing to it after the rename, and those writes
+  become invisible to any later reader of the path. Worse than the duplication
+  case above — same root cause (no locking, single-writer assumption), same
+  deferred status. If limitation #1 is ever fixed with an advisory lock, fix
+  this one at the same time.
+
 ## Kaizen per-model stack benchmark — deferred wiring & corpus (from docs/okf: 2026-07-11)
 
 The benchmark corpus + scoring system is built under `docs/okf/` (design:
