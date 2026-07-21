@@ -1,5 +1,23 @@
 # TODO
 
+## `.ojsonl` session format — concurrent-writer safety not solved (from design: 2026-07-21)
+
+Design: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`.
+
+- [ ] **Concurrent writers to the same session can produce duplicate/conflicting
+  entries.** `Save()`'s `persistedCount` cache is per-process. If two ocode
+  processes (e.g. TUI + server, or two server requests) append to the same
+  session concurrently, each can append its own version of "the next message"
+  based on a stale count — no data is silently dropped (unlike today's
+  full-rewrite race, which drops the loser's messages), but the file can end up
+  with duplicate or conflicting entries at what was meant to be the same
+  position. No file locking is introduced to prevent this; it matches the
+  existing single-writer-per-session assumption elsewhere in the codebase (see
+  the already-tracked `index.json` race). Deferred out of scope for the
+  `.ojsonl` change itself — revisit if concurrent-write safety becomes a
+  priority, possibly as part of a larger move to SQLite (see design doc's "Out
+  of scope" section for why opencode made that move).
+
 ## Kaizen per-model stack benchmark — deferred wiring & corpus (from docs/okf: 2026-07-11)
 
 The benchmark corpus + scoring system is built under `docs/okf/` (design:
