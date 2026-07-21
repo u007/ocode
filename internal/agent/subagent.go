@@ -94,19 +94,19 @@ var DefaultSubAgents = []SubAgentSpec{
 		Name:         "explore",
 		Description:  "Fast read-only codebase exploration",
 		SystemPrompt: exploreSubAgentPrompt,
-		Tools:        []string{"read", "glob", "grep", "list", "lsp", "bash", "webfetch", "websearch"},
+		Tools:        []string{"read", "glob", "grep", "list", "lsp", "bash", "webfetch", "websearch", "skill", "load_skill"},
 	},
 	{
 		Name:         "scout",
 		Description:  "External docs, dependency research",
 		SystemPrompt: scoutSubAgentPrompt,
-		Tools:        []string{"repo_clone", "repo_overview", "glob", "grep", "list", "read", "webfetch", "websearch"},
+		Tools:        []string{"repo_clone", "repo_overview", "glob", "grep", "list", "read", "webfetch", "websearch", "skill", "load_skill"},
 	},
 	{
 		Name:         "context",
 		Description:  "knowledge curator and retriever for the project's OKF docs/ bundle — answers why/decision/playbook questions from curated docs, cites doc paths, sole automated writer of the bundle",
 		SystemPrompt: contextSubAgentPrompt,
-		Tools:        []string{"grep", "glob", "read", "list"},
+		Tools:        []string{"grep", "glob", "read", "list", "skill", "load_skill"},
 	},
 }
 

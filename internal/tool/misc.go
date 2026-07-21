@@ -59,6 +59,19 @@ func (t SkillTool) Execute(args json.RawMessage) (string, error) {
 	return s.Content, nil
 }
 
+// SkillAliasTool registers "load_skill" as an alias for SkillTool. Models
+// (including Claude Code itself, which names its own skill tool "Skill")
+// sometimes guess this name instead of "skill" — register it so that guess
+// works instead of tripping the unregistered-tool hallucination guard.
+type SkillAliasTool struct{ SkillTool }
+
+func (t SkillAliasTool) Name() string { return "load_skill" }
+func (t SkillAliasTool) Definition() map[string]interface{} {
+	def := t.SkillTool.Definition()
+	def["name"] = "load_skill"
+	return def
+}
+
 type QuestionOption struct {
 	Label       string `json:"label"`
 	Description string `json:"description"`

@@ -41,14 +41,14 @@ var DefaultAgents = []AgentSpec{
 	{
 		Name:        "debug",
 		Description: "Focused investigation with bash and read tools",
-		Tools:       []string{"read", "glob", "grep", "list", "lsp", "bash", "webfetch", "websearch", "skill"},
+		Tools:       []string{"read", "glob", "grep", "list", "lsp", "bash", "webfetch", "websearch", "skill", "load_skill"},
 		Mode:        ModeDebug,
 		Color:       "#F7768E", // red: investigation
 	},
 	{
 		Name:        "docs",
 		Description: "Documentation writing with file operations",
-		Tools:       []string{"read", "write", "edit", "glob", "grep", "list", "delete", "task", "webfetch", "websearch", "skill", "knowledge_lookup"},
+		Tools:       []string{"read", "write", "edit", "glob", "grep", "list", "delete", "task", "webfetch", "websearch", "skill", "load_skill", "knowledge_lookup"},
 		Mode:        ModeDocs,
 		Color:       "#BB9AF7", // purple: writing
 	},

@@ -119,6 +119,7 @@ func InitBuiltinTools(lspMgr *lsp.Manager, cfg *config.Config, svc any) []Tool {
 		&TodoWriteTool{},
 		&TodoReadTool{},
 		&SkillTool{},
+		&SkillAliasTool{},
 		&QuestionTool{},
 		&WebFetchTool{},
 		&WebSearchTool{},

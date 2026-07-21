@@ -31,7 +31,8 @@
 - **Sidebar Scroll-Clamp Header Height** — `clampSidebarScroll` previously assumed a 1-row sidebar header (`lipgloss.Height("◆ ")`), so when a wrapped session title occupied 2-3 rows the scroll viewport math was wrong and could overlap or under-count the header. It now uses `sidebarHeaderHeight()`, which mirrors the wrap performed in `renderSidebar`, keeping layout, the selectable-line map, and the scroll clamp in agreement. (`internal/tui/model.go`)
 
 ### Added
-- **Version Bump** — 0.8.21 → 0.8.25. (`internal/version/version.go`)
+- **Version Bump** — 0.8.21 → 0.8.26. (`internal/version/version.go`)
+- **`load_skill` Tool Alias** — New `load_skill` tool registered as an explicit alias for `skill` (models like Claude Code guess `load_skill` instead of `skill`; this prevents the unregistered-tool hallucination guard from rejecting valid skill-loading calls). Registered in all agent/subagent tool lists (`debug`, `docs`, `explore`, `scout`, `context`), added to the auto-allow and read-only permission lists, and wired into `InitBuiltinTools` via the new `SkillAliasTool` type. (`internal/tool/misc.go`, `internal/tool/tool.go`, `internal/agent/agent_registry.go`, `internal/agent/registry.go`, `internal/agent/subagent.go`, `internal/agent/permissions.go`)
 - **`TestAdvisorCheckpointsRoundTrip`** — Tests that the `advisor.checkpoints` config field round-trips through save/load correctly: omitted key → default `["plan","done"]`, explicit `[]` → disabled, explicit list → preserved. (`internal/config/ocodeconfig_test.go`)
 - **`TestVersionMatchesChangelog`** — Cross-checks that `version.Version` matches the version bump line in `CHANGES.md` `[Unreleased]` section. (`internal/version/version_test.go`)
 - **`TestSetOnAppend_*`** — Tests for `Bus.SetOnAppend`: fires once per append with finalized Seq/TS, nil clears the callback, and concurrent appends preserve seq order. (`internal/notebus/notebus_test.go`)
