@@ -1135,7 +1135,21 @@ func isWithinWorkDir(pm *PermissionManager, rawPath string) bool {
 // reported as out-of-scope. Without this, persisting a path was a no-op for the
 // bash command that triggered it (the workdir-only check stayed blind to it).
 func isWithinAllowedScope(pm *PermissionManager, resolved string) bool {
-	return pm.IsPathWithinAllowedRoots(resolved) || isTempDir(resolved)
+	return pm.IsPathWithinAllowedRoots(resolved) || isTempDir(resolved) || isAllowedDevicePath(resolved)
+}
+
+// isAllowedDevicePath reports whether resolved is one of the standard POSIX
+// stream/tty device special files. These are process-local handles, not real
+// filesystem locations under /dev, so they carry no meaningful path-scope risk
+// whether they appear as a plain command argument (e.g. "cat /dev/stdin") or
+// as a shell redirection target (e.g. "2>/dev/null").
+func isAllowedDevicePath(resolved string) bool {
+	switch resolved {
+	case "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty":
+		return true
+	default:
+		return false
+	}
 }
 
 // AllowedRoots returns the unified set of filesystem roots that are in-scope for
@@ -3330,7 +3344,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 
 	// Check redirections
 	for _, path := range cmd.redirections {
-		if path == "/dev/null" || path == "/dev/stdout" || path == "/dev/stderr" {
+		if isAllowedDevicePath(path) {
 			continue
 		}
 		resolved := resolvePath(path, pm.workDir)
