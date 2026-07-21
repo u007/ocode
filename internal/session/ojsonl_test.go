@@ -141,3 +141,142 @@ func TestBootstrapOjsonlStateCountsOnlyMsgLines(t *testing.T) {
 		t.Fatal("expected titleGenerated=true")
 	}
 }
+
+func TestAppendOjsonlSessionCreatesNewFile(t *testing.T) {
+	dir := t.TempDir()
+	path := ojsonlSessionPath(dir, "ses_new")
+	createdAt := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
+
+	if err := appendOjsonlSession(path, "ses_new", createdAt,
+		[]agent.Message{{Role: "user", Content: "first"}},
+		map[string]any{"total_tokens": 1.0},
+		"auto title", true,
+	); err != nil {
+		t.Fatalf("appendOjsonlSession: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+
+	// Find newlines to split header from body
+	var nlIdx int
+	for i, b := range data {
+		if b == '\n' {
+			nlIdx = i
+			break
+		}
+	}
+	if nlIdx == 0 && data[0] != '\n' {
+		t.Fatalf("no newline found in file")
+	}
+
+	header, err := decodeHeaderLine(data[:nlIdx])
+	if err != nil {
+		t.Fatalf("decode header line: %v", err)
+	}
+	if header.ID != "ses_new" || header.Title != "auto title" || !header.TitleGenerated {
+		t.Fatalf("header mismatch: got %+v", header)
+	}
+
+	// Find the first msg line (the line after the header)
+	bodyStart := nlIdx + 1
+	var secondNl int
+	for i := bodyStart; i < len(data); i++ {
+		if data[i] == '\n' {
+			secondNl = i
+			break
+		}
+	}
+	if secondNl == 0 {
+		t.Fatalf("no second newline found")
+	}
+
+	firstBodyLine := data[bodyStart:secondNl]
+	typ, err := peekRecordType(firstBodyLine)
+	if err != nil {
+		t.Fatalf("peek record type: %v", err)
+	}
+	if typ != "msg" {
+		t.Fatalf("expected msg type, got %q", typ)
+	}
+}
+
+func TestAppendOjsonlSessionAppendsToExisting(t *testing.T) {
+	dir := t.TempDir()
+	path := ojsonlSessionPath(dir, "ses_append")
+	createdAt := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
+
+	// Turn 1
+	if err := appendOjsonlSession(path, "ses_append", createdAt,
+		[]agent.Message{{Role: "user", Content: "hello"}},
+		map[string]any{"total_tokens": 1.0},
+		"auto title", true,
+	); err != nil {
+		t.Fatalf("append turn 1: %v", err)
+	}
+
+	// Manually seed write-state so the append knows the count
+	setOjsonlWriteState(path, ojsonlWriteState{count: 1, title: "auto title", titleGenerated: true})
+
+	// Turn 2: append without any metadata
+	if err := appendOjsonlSession(path, "ses_append", createdAt,
+		[]agent.Message{{Role: "assistant", Content: "hi"}},
+		nil,
+		"", false,
+	); err != nil {
+		t.Fatalf("append turn 2: %v", err)
+	}
+
+	sess, err := loadOjsonlSession(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(sess.Messages))
+	}
+	if sess.Messages[1].Content != "hi" {
+		t.Fatalf("expected 'hi', got %q", sess.Messages[1].Content)
+	}
+}
+
+func TestAppendOjsonlSessionRewriteTitle(t *testing.T) {
+	dir := t.TempDir()
+	path := ojsonlSessionPath(dir, "ses_rewrite")
+	createdAt := time.Date(2026, 7, 21, 10, 0, 0, 0, time.UTC)
+
+	// Turn 1
+	if err := appendOjsonlSession(path, "ses_rewrite", createdAt,
+		[]agent.Message{{Role: "user", Content: "hi"}},
+		map[string]any{"total_tokens": 1.0},
+		"auto title", true,
+	); err != nil {
+		t.Fatalf("append turn 1: %v", err)
+	}
+
+	setOjsonlWriteState(path, ojsonlWriteState{count: 1, title: "auto title", titleGenerated: true})
+
+	// Turn 2: title changes
+	if err := appendOjsonlSession(path, "ses_rewrite", createdAt,
+		[]agent.Message{{Role: "assistant", Content: "there"}},
+		map[string]any{"total_tokens": 2.0},
+		"Explicit Title", true,
+	); err != nil {
+		t.Fatalf("append turn 2: %v", err)
+	}
+
+	sess, err := loadOjsonlSession(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if sess.Title != "Explicit Title" || !sess.TitleGenerated {
+		t.Fatalf("expected 'Explicit Title', got %q/%v", sess.Title, sess.TitleGenerated)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(sess.Messages))
+	}
+	if sess.Metadata["total_tokens"] != 2.0 {
+		t.Fatalf("expected metadata total_tokens=2.0, got %v", sess.Metadata["total_tokens"])
+	}
+}
