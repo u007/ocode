@@ -50,6 +50,7 @@ Legend: **W** weight, **D** difficulty. `•` scored point · `~` partial credit
 **conduct-surgical-01** · W2 · easy — Reformat nearby code while fixing one function? **No — touch only what's required; match existing style.** • only what's required • match style ~ "clean up while here" (0)
 **conduct-surgical-02** · W2 · medium — Your orphan import + unrelated pre-existing dead code? **Remove your orphan; leave pre-existing dead code, mention it.** • only your orphans • mention not delete ~ "delete all dead code" (0)
 **conduct-surgical-03** · W1 · easy — About to copy logic a third time? **Extract to one shared place (DRY).** • extract shared ~ copies again no reason
+**conduct-surgical-05** · W3 · medium — `replace_all` on a search string that could match several separate handlers? **Confirm the string is unique/scoped first (or narrow it); verify the resulting diff scope after — don't assume success == correct scope.** • unique/scoped before • verify diff scope after (0 partial: no check at all)
 
 ### lifecycle
 **conduct-lifecycle-01** · W3 · medium — Docs before implementing, and if request contradicts them? **Read docs first (source of truth); on contradiction, stop and ask.** (house rule) • read docs first • contradiction→stop+ask ~ "skim README"
@@ -75,6 +76,9 @@ Legend: **W** weight, **D** difficulty. `•` scored point · `~` partial credit
 **conduct-debug-02** · W3 · medium — Fix works but you don't know why — ship? **No — may mask the cause; understand the mechanism, fix cause not symptom.** • don't ship unexplained • cause not symptom ~ "works, ship + watch" (0)
 **conduct-debug-03** · W2 · medium — Three fixes, bug persists — change what? **Stop thrashing; gather evidence/instrument, verify assumptions, isolate one variable at a time.** • gather evidence not guess • one variable at a time ~ "try more variations" (0)
 **conduct-debug-04** · W2 · easy — A run fails with a stack trace — where start? **Read the actual error/stack/logs first; start from evidence, not a guessed theory.** • read real error first • evidence not guess ~ "seen this before, try X" (0)
+
+### context-accuracy
+**conduct-context-01** · W2 · medium — CLI reference already loaded, running several of its commands? **Consult the loaded reference for each command's exact syntax, not just once; don't fall back to memory/similar-tool conventions.** • check per-command, not once • no memory fallback ~ reads once, guesses later
 
 ### n≥4 top-ups (firmer subscores)
 **conduct-validation-04** · W2 · easy — Numeric env var into a number param? **Env vars are strings — parse+validate explicitly, fail fast on invalid.** • parse to expected type • validate+fail fast ~ "convert to number" no validate

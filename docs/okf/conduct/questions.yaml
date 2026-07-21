@@ -757,3 +757,45 @@
     - { point: "read the real error/stack/logs first — they point at the cause", score: 1 }
     - { point: "start from evidence, not a pattern-matched guess", score: 1 }
     - { partial: "'I've seen this error before, try X' without reading it", score: 0 }
+
+- id: conduct-surgical-05
+  difficulty: medium
+  weight: 3
+  tags: [surgical-changes, verification]
+  question: >
+    You're about to edit a file with `replace_all: true` on a search string like
+    `if (guard) return c.json(guard, 400);` that could plausibly appear inside
+    several separate handler functions. What must you check before and after
+    applying it?
+  answer: >
+    Before: confirm the search string is unique to the one call site you intend
+    to change, or narrow it with more surrounding context until it is — a common
+    line shared by several independent closures will silently change all of them
+    under `replace_all`. After: verify the resulting diff's scope matches what you
+    intended (right number of hunks, right locations) before treating the edit as
+    done; don't assume a bulk replace stayed scoped just because the tool
+    returned success.
+  rubric:
+    - { point: "check the search string is unique/scoped, or narrow it, before using replace_all broadly", score: 1 }
+    - { point: "verify the actual diff scope after applying, don't assume success == correct scope", score: 1 }
+    - { partial: "uses replace_all without checking match count or reviewing the resulting diff", score: 0 }
+
+- id: conduct-context-01
+  difficulty: medium
+  weight: 2
+  tags: [context-accuracy]
+  question: >
+    A skill/reference doc for a CLI tool is already loaded in your context, and
+    you need to run several of its commands in a row. How should you form each
+    command?
+  answer: >
+    Consult the loaded reference for the exact syntax of each command before
+    running it — treat what's already in context as authoritative, not just a
+    one-time skim at the start. Repeated CLI syntax errors on different commands
+    from the same tool, when its documentation is already in context, means the
+    model is guessing from memory or a similar tool's conventions instead of
+    checking what it already has.
+  rubric:
+    - { point: "check the loaded reference for each command's exact syntax, not just once", score: 1 }
+    - { point: "don't fall back to memory/similar-tool conventions when the docs are already in context", score: 1 }
+    - { partial: "reads the skill once but keeps guessing syntax on later commands", score: 0.5 }

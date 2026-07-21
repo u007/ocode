@@ -153,6 +153,32 @@ docs-over-memory + git-reset-scope + surgical-orphans-only). Transcript:
 **On the 5 discriminating questions: 4.0/10 → 10.0/10 (+60pp).** (This was the
 initial spot-check with the git-reset-only safety block.)
 
+### Incremental addition — 2 new questions (2026-07-21, corpus_rev still 1)
+
+Two questions were added to the corpus from a live kaizen-review finding on this
+model (`conduct-surgical-05` — `replace_all` overmatch, `conduct-context-01` —
+first `context-accuracy` item, CLI syntax errors despite the skill being loaded).
+Tested via `ocode run` directly (the trustd/TLS block noted above for the
+2026-07-13 sweep no longer reproduces — verified live), closed-book, isolated
+scratch dir, no repo access. **Spot-check only — not folded into the 83.9%/94.9%
+stack scores above**, which still reflect the original 45-question corpus.
+
+| id | tags | weight | full | baseline | with digest | notes |
+|----|------|-------:|-----:|---------:|-------------:|-------|
+| conduct-surgical-05 | surgical-changes, verification | 3 | 2 | 1.5 (0.75) | **2.0 (1.00)** | baseline: checks semantic sameness + false-positive matches (misses the "unique/scoped" framing), verifies each site after ✓. With digest: "unique to the intended change" + reverts overstepped sites — hits both rubric points, generalizes from the existing surgical-changes block even though it never mentions `replace_all`. |
+| conduct-context-01 | context-accuracy | 2 | 2 | 2.0 (1.00) | 2.0 (1.00) | control — not covered by this digest (no context-accuracy block exists yet). Full marks both times: "do not rely on memory, intuition, or patterns from other tools... the loaded doc is authoritative." |
+
+**Reading:** surgical-05 confirms the existing surgical-changes digest block
+transfers to a scenario it was never written for (bulk-edit blast radius), not
+just the two questions it was derived from — same underlying principle ("every
+changed line must trace to your task"), applied to a new failure mode. context-01
+is a clean, undigested control and stays at full marks baseline — deepseek
+doesn't need corrective guidance here; consult-the-loaded-reference behavior is
+already sound in isolation (the original kaizen-review finding was about not
+re-consulting the skill *during a long live session*, which a single closed-book
+Q&A can't reproduce — a control absence-of-regression here, not proof the
+underlying session failure mode is fixed).
+
 ### Full-corpus with-digest sweep — 2026-07-13
 
 After the spot-check exposed that the safety block only covered safety-03, the

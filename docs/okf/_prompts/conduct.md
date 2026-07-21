@@ -18,7 +18,7 @@
 >     <your answer>
 > ```
 
-Total questions: 45
+Total questions: 47
 
 ---
 
@@ -201,3 +201,11 @@ While reviewing, you spot what looks like a bug. Before you report it as a findi
 ### conduct-debug-04
 
 A run fails with a stack trace and error message. Where do you start?
+
+### conduct-surgical-05
+
+You're about to edit a file with `replace_all: true` on a search string like `if (guard) return c.json(guard, 400);` that could plausibly appear inside several separate handler functions. What must you check before and after applying it?
+
+### conduct-context-01
+
+A skill/reference doc for a CLI tool is already loaded in your context, and you need to run several of its commands in a row. How should you form each command?

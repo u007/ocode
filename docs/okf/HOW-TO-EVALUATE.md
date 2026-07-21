@@ -130,6 +130,17 @@ STEPS:
    docs/okf/<STACK>/derived/<STACK>.<MODEL_ID-flattened>.SKILL.md. Rules:
    - Cover ONLY below-threshold tags. Say NOTHING about tags at/above threshold
      (the model already knows them — restating wastes prompt/cache budget).
+   - Never put eval bookkeeping in this file — no spot-check dates, question IDs,
+     rubric-threshold reasoning, or "is this tag validated yet" commentary. This
+     file is force-injected into the model's live context; that narrative belongs
+     only in `scores/` or `answers/`.
+   - Corrective content sourced from a real observed transcript (not a scored
+     corpus question) gets bare directive bullets only — no "here's what went
+     wrong" narration or quoted transcript excerpts. Save the failure story for
+     `scores/`/`answers/`; this file states the rule, not the evidence for it.
+   - Real observed transcript content is **separate from tag-gated sections** and
+     does not require a below-threshold tag. Place it as standalone sections in
+     the SKILL.md, not mixed with tag-gated corrective sections.
    - Front matter: name, description, when_to_use (gate on: active model's
      canonical id == <MODEL_ID> AND repo uses <STACK>), plus tuned_for (= the
      provider-stripped MODEL_ID, slashes kept), tuned_version, stack,

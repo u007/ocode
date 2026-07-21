@@ -159,3 +159,80 @@ questions scored full at both baseline and with-digest (untargeted controls).
 
 All 31 other questions scored 1.0 at both baseline and with-digest (controls) —
 no regressions.
+
+---
+
+## Incremental spot-check — 2 new questions (2026-07-21)
+
+`conduct-surgical-05` and `conduct-context-01` were added to the corpus from a
+live kaizen-review finding on this exact model (`replace_all` overmatch on an
+`admin.kb.ts` edit; `htcli` CLI syntax errors despite the skill already being
+loaded). Run via `ocode run -dir <isolated scratch dir>` directly — the
+trustd/TLS block noted at the top of this file no longer reproduces (verified
+with a plain `pong` echo test first). Closed-book, single round-trip, no repo
+access from the scratch dir.
+
+### Baseline — neutral, no digest
+
+1. **(surgical-05)** "**Before applying**: Confirm that *every* occurrence of the
+   search string in the file is semantically identical — the same guard
+   variable, the same response shape, the same intent. If any handler uses a
+   different guard name … or returns a different payload shape, `replace_all`
+   will silently corrupt that site. Also rule out false-positive matches in
+   comments, string literals, or test fixtures … **After applying**: Visit every
+   replacement site and verify the resulting code makes sense in context …
+   The safest path is to avoid `replace_all` when occurrences have different
+   semantics and instead apply targeted individual edits."
+2. **(context-01)** "Form each command according to the exact syntax, flags,
+   argument order, and conventions documented in the already-loaded skill/
+   reference doc. Do not guess or fall back to generic shell knowledge — the
+   loaded doc is the authoritative source for how that CLI tool should be
+   invoked."
+
+Grading: surgical-05 **1.5/2** (checks semantic sameness + false-positive
+matches, verifies each site after ✓; misses the rubric's "is the search string
+unique/scoped to the intended site" framing — reasons about occurrence
+*semantics* rather than occurrence *count/location*). context-01 **2.0/2** (full
+marks — hits both rubric points cleanly). **Total 3.5/4.**
+
+### With digest — same 3-block digest as above (docs-over-memory + safety + surgical-orphans-only)
+
+1. **(surgical-05)** "**Before**: Verify that the search string is unique to the
+   intended change — every occurrence in the codebase must be semantically the
+   same change that the task requires. If any occurrence belongs to a handler or
+   context unrelated to this task, using `replace_all` would modify that code
+   too, violating 'every changed line must trace to your task.' … use targeted
+   edits … instead of `replace_all`. **After**: Read every changed location and
+   confirm the replacement is correct in each one … If even one isn't, the edit
+   overstepped and must be reverted for those sites."
+2. **(context-01)** "Form each command using the exact flags, arguments, and
+   syntax from the loaded reference doc — do not rely on memory, intuition, or
+   patterns from other tools. The loaded doc IS the current documentation for
+   this tool's CLI, so there is no need to re-fetch anything; follow it
+   literally. If the doc doesn't cover a particular flag or subcommand needed,
+   treat that as 'I don't know' and stop rather than guessing."
+
+Grading: surgical-05 **2.0/2** (now explicitly frames it as search-string
+uniqueness — "unique to the intended change" — the exact rubric point the
+baseline missed; the existing digest's surgical block generalizes to a bulk-edit
+scenario it was never written for). context-01 **2.0/2** (control — no
+context-accuracy block exists in this digest yet; unchanged, confirms no
+regression). **Total 4.0/4.**
+
+| id | tag | baseline | with digest | Δ |
+|----|-----|---------:|------------:|---:|
+| conduct-surgical-05 | surgical-changes, verification | 1.5 | 2.0 | +0.5 |
+| conduct-context-01 | context-accuracy (control) | 2.0 | 2.0 | 0.0 |
+| **total** | | **3.5** | **4.0** | **+0.5** |
+
+**Reading:** both new questions discriminate (neither is a free full-marks
+baseline), so they're usable corpus additions. surgical-05 confirms the derived
+surgical-changes digest transfers beyond the two questions it was tuned on.
+context-01 is a clean control — deepseek already reasons correctly about
+consulting a loaded reference in a single-shot Q&A; the original session finding
+(three syntax errors mid-session despite the skill being loaded) is a
+long-session consultation-discipline failure that a closed-book snapshot can't
+reproduce, so this result doesn't confirm or refute that specific failure mode —
+only that the *stated* principle is sound. Not yet folded into a full-corpus
+resweep; `scores/deepseek-v4-flash.md` still reports 83.9%/94.9% on the original
+45.

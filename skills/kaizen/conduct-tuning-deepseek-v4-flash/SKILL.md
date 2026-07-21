@@ -1,6 +1,6 @@
 ---
 name: conduct-tuning-deepseek-v4-flash
-description: Corrective engineering-conduct guidance for the exact behaviors deepseek-v4-flash tests weak on — safety discipline (three limits: git reset scope, inspect target before destructive/outward actions, never overwrite production .env), surgical-change discipline (touch only your own orphans, never sweep or refactor adjacent code), and a precautionary hallucination line (verify recalled flags still exist). Directive rules the model must follow.
+description: Corrective engineering-conduct guidance for the exact behaviors deepseek-v4-flash tests weak on — safety discipline (three limits: git reset scope, inspect target before destructive/outward actions, never overwrite production .env), surgical-change discipline (touch only your own orphans, never sweep or refactor adjacent code, scope-check bulk/replace-all edits), a precautionary hallucination line (verify recalled flags still exist), and consulting a loaded skill/reference for every tool call rather than drifting to guessed syntax. Directive rules the model must follow.
 when_to_use: The active model id, provider-stripped, is exactly `deepseek-v4-flash` (e.g. `opencode-go/deepseek-v4-flash` → `deepseek-v4-flash`) — gate on the model id ONLY, never a stack marker. This is a UNIVERSAL corpus with NO stack detection: it applies in EVERY repo regardless of language or framework whenever this exact model is active. Do not load for any other model.
 # --- Kaizen metadata ---
 tuned_for: deepseek-v4-flash
@@ -32,7 +32,9 @@ revalidate_when: model_version changes   # STALE on any version bump — re-benc
 2. **Before any delete, overwrite, or force-push, inspect the target first.** Confirmation and a backup/dry-run are not enough — read/diff what's actually there. If it contradicts how it was described, or you didn't create it, **stop and surface that**; a matching name is not proof it's the right target.
 3. **Never overwrite production/remote `.env`** (`.env.production`, `.env.local`) unless explicitly asked — this is a *different* rule from "don't commit/leak secrets"; the hazard is destroying values that differ from local dev. And **never log secrets/credentials** (redact first).
 
-**Surgical changes — orphans only, touch nothing else:** Remove **only** the orphans YOUR change created (a now-unused import/var/function). Do NOT delete unrelated pre-existing dead code, and do NOT improve, refactor, or restyle adjacent code that isn't broken — *mention it to the user instead*, and match the existing style even if you'd write it differently. "Leave the codebase cleaner than you found it" / the Scout Rule does NOT apply here: every changed line must trace to your task.
+**Surgical changes — orphans only, touch nothing else:** Remove **only** the orphans YOUR change created (a now-unused import/var/function). Do NOT delete unrelated pre-existing dead code, and do NOT improve, refactor, or restyle adjacent code that isn't broken — *mention it to the user instead*, and match the existing style even if you'd write it differently. "Leave the codebase cleaner than you found it" / the Scout Rule does NOT apply here: every changed line must trace to your task. This includes bulk/`replace_all` edits: before applying one, confirm the search string is unique to the intended call site (or narrow it with more surrounding context) — a line shared by other, unrelated blocks (e.g. the same guard clause repeated across separate handler functions) will get changed everywhere silently. After applying, check the resulting diff's scope matches what you intended before treating the edit as done.
+
+**Consult the loaded reference for every call, not just the first:** When a skill or reference doc for a CLI tool/API is already in your context, form each command from its documented syntax — re-check the reference before each call rather than drifting to memory or another tool's conventions once the first one or two calls succeed. A syntax error is a signal to re-read the reference, not to guess a different flag or retry with an assumed variant.
 
 When in doubt on any of the above, stop and ask — an earlier approval from a different context does not carry over.
 <!-- /kaizen:digest -->
@@ -118,6 +120,21 @@ Both widen the diff beyond the task — the exact anti-pattern.
   and match the existing style even if you'd write it differently.
 - The Scout Rule / "leave it cleaner" does NOT apply here: every changed line
   must trace directly to the task.
+
+### Bulk edits (`replace_all`) need a scope check
+
+- Before a bulk/`replace_all` edit, confirm the search string is unique to the
+  intended call site, or narrow it with more surrounding context until it is.
+- After applying, check the diff's actual scope (hunk count, locations) against
+  what you intended — tool success does not mean correct scope.
+
+## Consult the loaded reference every call
+
+- Treat a loaded skill/reference as the authoritative source for that tool's
+  syntax on **every** call, not just the first — don't drift to memory,
+  intuition, or another tool's conventions once early calls succeed.
+- On a syntax/usage error, re-read the reference before retrying — don't guess
+  a different flag or subcommand from general knowledge of similar tools.
 
 ---
 
