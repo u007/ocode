@@ -4953,7 +4953,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if strings.HasPrefix(text, "!") {
-			if m.streaming || m.compacting || m.shellStreamCmd != nil {
+			if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.shellStreamCmd != nil {
 				m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
 				m.input.Reset()
 				m.layout()
@@ -4973,7 +4973,7 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 			return m, nil
 		}
 
-		if m.compacting {
+		if m.compacting || len(m.pendingCompactUIIdx) > 0 {
 			m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCompactInput, text: text})
 			m.input.Reset()
 			m.layout()
@@ -6851,7 +6851,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/image" ||
 		cmd == "/cron" ||
 		cmd == "/goal"
-	if (m.streaming || m.compacting) && !isExitCmd && !isInstantCmd {
+	if (m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0) && !isExitCmd && !isInstantCmd {
 		m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
 		m.input.Reset()
 		m.layout()

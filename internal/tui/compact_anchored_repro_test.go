@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tui/fastviewport"
@@ -122,5 +124,39 @@ func TestBackgroundJobDuringCompactionIsDeferred(t *testing.T) {
 	if len(got.messages) != msgsBefore {
 		t.Fatalf("job completion must not append to transcript during compaction: before=%d after=%d",
 			msgsBefore, len(got.messages))
+	}
+}
+
+// Reproduces the streaming->compacting race window: pendingCompactUIIdx is
+// set synchronously the instant MaybeCompactAsync starts a compaction
+// goroutine, but m.compacting only flips true later, when the async
+// compactStartedMsg is processed by the Update loop. A message submitted via
+// Enter in that gap must still be queued (like a message submitted while
+// m.compacting is already true) instead of falling through to askAgent and
+// racing the in-flight compaction.
+func TestEnterDuringPendingCompactApplyIsQueued(t *testing.T) {
+	m := newModel()
+	m.ready = true
+	upd, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = upd.(model)
+
+	m.agent = agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil)
+	m.streaming = false
+	m.compacting = false                       // not yet flipped by compactStartedMsg
+	m.pendingCompactUIIdx = []int{-1, 0, 1, 2} // set synchronously at compaction start
+	m.input.SetValue("next task")
+
+	next, cmd := m.handleChatKeys(tea.KeyPressMsg{Code: tea.KeyEnter}, nil, nil)
+	got := next.(model)
+
+	if len(got.queuedItems) != 1 {
+		t.Fatalf("expected input submitted during the pending-compact race window to be queued, "+
+			"got queuedItems=%d (cmd=%v)", len(got.queuedItems), cmd)
+	}
+	if got.queuedItems[0].kind != queueItemCompactInput {
+		t.Fatalf("expected queueItemCompactInput, got kind=%v", got.queuedItems[0].kind)
+	}
+	if got.input.Value() != "" {
+		t.Fatalf("input should be reset after queueing, got %q", got.input.Value())
 	}
 }
