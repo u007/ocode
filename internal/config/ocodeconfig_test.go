@@ -322,6 +322,8 @@ func TestSaveOcodePermissionsPersistsAcrossNextSession(t *testing.T) {
 
 	permissions := defaultPermissionConfig()
 	permissions.Tools["bash"] = "allow"
+	permissions.Bash.Prefixes["grep -n"] = "deny"
+	permissions.Bash.Prefixes["sed"] = "deny"
 	permissions.Bash.AutoAllowPrefixes = []string{"jq"}
 	permissions.Bash.PrefixModes = map[string]string{"jq": "read_only", "sed": "mutating"}
 	if err := SaveOcodePermissions(permissions); err != nil {
@@ -334,6 +336,12 @@ func TestSaveOcodePermissionsPersistsAcrossNextSession(t *testing.T) {
 	}
 	if got := cfg.Ocode.Permissions.Tools["bash"]; got != "allow" {
 		t.Fatalf("want persisted bash allow, got %q", got)
+	}
+	if got := cfg.Ocode.Permissions.Bash.Prefixes["grep -n"]; got != "deny" {
+		t.Fatalf("want persisted grep -n ban deny, got %q", got)
+	}
+	if got := cfg.Ocode.Permissions.Bash.Prefixes["sed"]; got != "deny" {
+		t.Fatalf("want persisted sed ban deny, got %q", got)
 	}
 	if len(cfg.Ocode.Permissions.Bash.AutoAllowPrefixes) != 1 || cfg.Ocode.Permissions.Bash.AutoAllowPrefixes[0] != "jq" {
 		t.Fatalf("want persisted auto_allow_prefixes [jq], got %#v", cfg.Ocode.Permissions.Bash.AutoAllowPrefixes)

@@ -110,9 +110,9 @@ const (
 type queueItemKind int
 
 const (
-	queueItemInput    queueItemKind = iota // plain text queued while streaming
-	queueItemCommand                       // /slash or !shell command queued while busy
-	queueItemCompactInput                  // plain text queued during compaction
+	queueItemInput        queueItemKind = iota // plain text queued while streaming
+	queueItemCommand                           // /slash or !shell command queued while busy
+	queueItemCompactInput                      // plain text queued during compaction
 )
 
 type queuedItem struct {
@@ -696,6 +696,10 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 	if m.agent != nil {
 		m.agent.SetSupervisor(m.supervisor)
 		m.syncRedactionRuntime()
+		// Wire the changes tab's registry accessor to the live agent.
+		m.changes = m.changes.withRegistry(m.agent.Changes)
+	} else {
+		m.changes = m.changes.withRegistry(nil)
 	}
 	// Keep the RC bridge pointed at the live agent so web-side runtime toggles
 	// (advisor on/off) follow agent switches.
@@ -812,6 +816,7 @@ type model struct {
 	chatUnread           bool
 	files                filesModel
 	git                  gitModel
+	changes              changesModel
 	initDiffCmd          tea.Cmd // initial async diff load, fired from Init()
 	logViewport          viewport.Model
 	permViewport         viewport.Model
@@ -844,7 +849,7 @@ type model struct {
 	retryDialogMsg        string
 	showURLDialog         bool   // URL open confirmation dialog
 	pendingURL            string // URL to open when confirmed
-
+	banClearConfirm       bool   // /ban clear confirmation dialog
 	// sessionDeleteConfirm tracks the session deletion confirmation dialog.
 	sessionDeleteConfirm      bool   // true when confirmation dialog is showing
 	sessionDeleteConfirmID    string // the session ID to delete
@@ -974,32 +979,32 @@ type model struct {
 	titleGen                 uint64 // monotonic counter; bumped on /new + /title clear so stale goroutine results land harmlessly
 	compacting               bool
 	// queuedCompactInputs removed: unified queuedItems now handles all queue types
-	cmdRunningCount          int
-	shellCmdStart            time.Time // non-zero = a !shell command is running; used for elapsed timer
-	shellCmdText             string    // the shell command text, for display in the activity row
-	lastCompactErr           error
-	pendingCompactUIIdx      []int
-	pendingCompactManual     bool
-	pendingCompactResume     bool
-	skipCompactPreflight     bool
-	thinkingLevelIdx         int  // index into thinkingBudgetLevels
-	agentStripOffset         int  // first visible run index in the agent strip
-	agentStripSelected       int  // selected run index in the agent strip
-	agentStripFocused        bool // whether keyboard nav is routed to the agent strip
-	permissionGrantCh        chan permissionGrantRequest
-	subAgentPermCh           chan subAgentPermRequest
-	subAgentPermCancel       context.CancelFunc            // cancels the active listenSubAgentPerm goroutine so re-arming doesn't multiply goroutines / leak on cancel
-	subAgentPermMu           *sync.Mutex                   // serialises concurrent sub-agent permission asks
-	pendingSubAgentResp      chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
-	permConfirm              string                        // "a"/"t" while the always-allow confirmation step is shown; "" otherwise. Meaningful only while showPermDialog.
-	lastClickTime            time.Time
-	lastClickX               int
-	lastClickY               int
-	permButtonRegions        []permButtonRegion
-	permHoverChoice          string         // choice of the permission button under the mouse, "" when none
-	permDirty                permDirtyFlags // tracks permission fields changed by this session
-	cleanupState             *modelCleanupState
-	supervisor               *tool.ProcessSupervisor
+	cmdRunningCount      int
+	shellCmdStart        time.Time // non-zero = a !shell command is running; used for elapsed timer
+	shellCmdText         string    // the shell command text, for display in the activity row
+	lastCompactErr       error
+	pendingCompactUIIdx  []int
+	pendingCompactManual bool
+	pendingCompactResume bool
+	skipCompactPreflight bool
+	thinkingLevelIdx     int  // index into thinkingBudgetLevels
+	agentStripOffset     int  // first visible run index in the agent strip
+	agentStripSelected   int  // selected run index in the agent strip
+	agentStripFocused    bool // whether keyboard nav is routed to the agent strip
+	permissionGrantCh    chan permissionGrantRequest
+	subAgentPermCh       chan subAgentPermRequest
+	subAgentPermCancel   context.CancelFunc            // cancels the active listenSubAgentPerm goroutine so re-arming doesn't multiply goroutines / leak on cancel
+	subAgentPermMu       *sync.Mutex                   // serialises concurrent sub-agent permission asks
+	pendingSubAgentResp  chan agent.PermissionResponse // non-nil while a sub-agent permission dialog is open
+	permConfirm          string                        // "a"/"t" while the always-allow confirmation step is shown; "" otherwise. Meaningful only while showPermDialog.
+	lastClickTime        time.Time
+	lastClickX           int
+	lastClickY           int
+	permButtonRegions    []permButtonRegion
+	permHoverChoice      string         // choice of the permission button under the mouse, "" when none
+	permDirty            permDirtyFlags // tracks permission fields changed by this session
+	cleanupState         *modelCleanupState
+	supervisor           *tool.ProcessSupervisor
 	// shellStreamCmd is the in-flight streaming `!` shell reader command.
 	// While non-nil a `!` command is actively streaming its output; new `!`
 	// commands are queued rather than run concurrently. It is cleared when the
@@ -1129,8 +1134,8 @@ type permissionGrantRequest struct {
 	respCh chan error
 }
 
-var thinkingBudgetLevels = []int{0, 1024, 8000, 16000}
-var thinkingBudgetLabels = []string{"off", "low", "med", "high"}
+var thinkingBudgetLevels = []int{0, 1024, 8000, 16000, 32000, 65536}
+var thinkingBudgetLabels = []string{"off", "low", "med", "high", "xhigh", "max"}
 
 func thinkingLevelIndexForBudget(budget int) int {
 	for i, level := range thinkingBudgetLevels {
@@ -1930,6 +1935,7 @@ func newModel(opts ...RunOptions) model {
 	workDir := m.workDir
 	m.files = newFilesModel(workDir)
 	m.git, m.initDiffCmd = newGitModel(workDir)
+	m.changes = NewChangesModel()
 	// Wire the Git tab's logger to the global DebugLog so every terminal-state
 	// git action (push, pull, fetch, commit, stage/unstage, stash, branch
 	// checkout/create/delete, ignore, hunk apply) lands in the log tab.
@@ -2197,7 +2203,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.activeTab == tabChat && !m.showConnect && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.showQuestionDialog && m.detail.empty() {
+		if m.activeTab == tabChat && !m.showConnect && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.banClearConfirm && !m.showQuestionDialog && m.detail.empty() {
 			content := msg.Content
 			if shortcode, ok := m.shortcodePastedFiles(content); ok {
 				content = shortcode
@@ -2424,7 +2430,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.showQuestionDialog && m.detail.empty()
+	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.banClearConfirm && !m.showQuestionDialog && m.detail.empty()
 
 	// Chat search bar takes priority over the chat input and the slash popup
 	// while it's open. The bar is only available on the chat tab; other tabs
@@ -2516,6 +2522,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			var cmd tea.Cmd
 			m.files, cmd = m.files.Update(msg, m.width, m.height)
+			return m, cmd
+		case tabChanges:
+			if msg.String() == "ctrl+c" {
+				return m.handleTabCtrlC()
+			}
+			if msg.String() == "esc" && !m.changes.showDetails {
+				return m.handleEscKey()
+			}
+			var cmd tea.Cmd
+			m.changes, cmd = m.changes.Update(msg, m.width, m.height)
 			return m, cmd
 		case tabGit:
 			if msg.String() == "ctrl+c" {
@@ -4187,6 +4203,9 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		if m.activeTab == tabLog {
 			m.refreshLogViewport()
 		}
+		if m.activeTab == tabChanges {
+			return true, m, nil
+		}
 		if m.activeTab == tabGit {
 			return true, m, m.git.cmdAutoRefresh()
 		}
@@ -4203,6 +4222,9 @@ func (m model) handleGlobalTabKeys(msg tea.KeyPressMsg) (bool, tea.Model, tea.Cm
 		}
 		if m.activeTab == tabLog {
 			m.refreshLogViewport()
+		}
+		if m.activeTab == tabChanges {
+			return true, m, nil
 		}
 		if m.activeTab == tabGit {
 			return true, m, m.git.cmdAutoRefresh()
@@ -4662,6 +4684,23 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		case "n", "N", "esc":
 			m.showURLDialog = false
 			m.pendingURL = ""
+			return m, nil
+		}
+		return m, nil
+	}
+
+	if m.banClearConfirm {
+		switch keyStr {
+		case "y", "Y", "enter":
+			m.banClearConfirm = false
+			m.clearAllBashBans()
+			m.layout()
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		case "n", "N", "esc":
+			m.banClearConfirm = false
+			m.layout()
+			m.rerenderTranscriptAndMaybeScroll()
 			return m, nil
 		}
 		return m, nil
@@ -5185,6 +5224,12 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		}
 		if len(m.git.selectedFiles) > 0 {
 			m.git.selectedFiles = nil
+			return m, nil
+		}
+	}
+	if m.activeTab == tabChanges {
+		if m.changes.showDetails {
+			m.changes.showDetails = false
 			return m, nil
 		}
 	}
@@ -6058,6 +6103,9 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 				m.refreshLogViewport()
 				m.logViewport.GotoBottom()
 			}
+			if tab == tabChanges {
+				return m, nil, true
+			}
 			if tab == tabGit {
 				return m, m.git.cmdAutoRefresh(), true
 			}
@@ -6200,6 +6248,53 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			m.showURLDialog = false
 			m.pendingURL = ""
 			return m, openBrowserCmd(url), true
+		}
+		return m, nil, true
+	}
+
+	if m.banClearConfirm && m.activeTab == tabChat {
+		if pressed {
+			return m, nil, true
+		}
+		// The dialog is rendered inside a bordered box in the input area.
+		// Content rows (0 = top border, 1..7 = content, 8 = bottom border):
+		//   0: ╔═ top border
+		//   1: ║ "⚠ Clear Ban List?"
+		//   2: ║ (blank)
+		//   3: ║ "Are you sure you want to clear all banned bash prefixes?"
+		//   4: ║ (blank)
+		//   5: ║ "This removes the default 'sed' ban too."
+		//   6: ║ (blank)
+		//   7: ║ hint with "[Yes]" and "[No]" buttons
+		//   8: ╚═ bottom border
+		dialogTop := m.inputAreaTopY()
+		hintRowY := dialogTop + 7
+		pw := m.panelWidth()
+		if mouse.Y >= dialogTop && mouse.Y <= dialogTop+8 && mouse.X < pw {
+			if mouse.Y == hintRowY {
+				// Content inside border starts at X=2 (║ at 0, padding at 1).
+				contentX := mouse.X - 2
+				if contentX >= 2 && contentX <= 6 {
+					// "[Yes]" — clear bans
+					m.banClearConfirm = false
+					m.clearAllBashBans()
+					m.layout()
+					m.rerenderTranscriptAndMaybeScroll()
+					return m, nil, true
+				}
+				if contentX >= 9 && contentX <= 12 {
+					// "[No]" — cancel
+					m.banClearConfirm = false
+					m.layout()
+					m.rerenderTranscriptAndMaybeScroll()
+					return m, nil, true
+				}
+			}
+			// Any other click in the dialog → cancel
+			m.banClearConfirm = false
+			m.layout()
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil, true
 		}
 		return m, nil, true
 	}
@@ -6686,6 +6781,9 @@ func (m model) handleMouseMotion(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 				m.refreshLogViewport()
 				m.logViewport.GotoBottom()
 			}
+			if tab == tabChanges {
+				return m, nil, true
+			}
 			if tab == tabGit {
 				return m, m.git.cmdAutoRefresh(), true
 			}
@@ -6835,6 +6933,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/login" ||
 		cmd == "/new" || cmd == "/clear" ||
 		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
+		cmd == "/ban" ||
 		cmd == "/yolo" || cmd == "/small-model" || cmd == "/editor" ||
 		cmd == "/editor-mode" || cmd == "/themes" || cmd == "/theme" ||
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
@@ -8028,10 +8127,14 @@ func (m *model) handleEffortCmd(args []string) {
 		idx = 2
 	case "high", "16000":
 		idx = 3
+	case "xhigh", "32000":
+		idx = 4
+	case "max", "65536":
+		idx = 5
 	case "next", "cycle", "+":
 		idx = (m.thinkingLevelIdx + 1) % len(thinkingBudgetLevels)
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown effort level %q. Use one of: off, low, med, high.", args[0])})
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Unknown effort level %q. Use one of: off, low, med, high, xhigh, max.", args[0])})
 		return
 	}
 
@@ -11549,6 +11652,26 @@ func (m *model) persistPermissions() {
 	}
 }
 
+func (m *model) clearAllBashBans() {
+	if m.agent == nil || m.agent.Permissions() == nil {
+		return
+	}
+	banned := m.agent.Permissions().BashBannedPrefixes()
+	if len(banned) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No banned bash prefixes to clear."})
+		return
+	}
+	for _, prefix := range banned {
+		m.agent.Permissions().SetBashPrefixRule(prefix, agent.PermissionAsk)
+		if m.permDirty.bashPrefixes == nil {
+			m.permDirty.bashPrefixes = make(map[string]string)
+		}
+		m.permDirty.bashPrefixes[prefix] = string(agent.PermissionAsk)
+	}
+	m.persistPermissions()
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Cleared %d banned bash prefixes.", len(banned))})
+}
+
 func (m *model) persistAutoGrant(grant config.AutoGrant) error {
 	if err := config.SaveAutoGrant(grant); err != nil {
 		return err
@@ -12670,7 +12793,17 @@ func layoutDebugf(format string, args ...any) {
 func (m model) chromeBreakdown(panelWidth int) string {
 	var b strings.Builder
 	var inputArea string
-	if m.showPermDialog {
+	if m.showRetryDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
+	} else if m.sessionDeleteConfirm {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
+	} else if m.showQuestionDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
+	} else if m.showURLDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
+	} else if m.banClearConfirm {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
+	} else if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.inputViewWithSelection())
@@ -12679,7 +12812,7 @@ func (m model) chromeBreakdown(panelWidth int) string {
 	if m.chatSearchActive {
 		b.WriteString(" find=3")
 	}
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog && !m.banClearConfirm {
 		fmt.Fprintf(&b, " slash=%d", lipgloss.Height(m.renderSlashPopup()))
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -12719,6 +12852,8 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else if m.showURLDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
+	} else if m.banClearConfirm {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
 	} else if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
@@ -12736,7 +12871,7 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 		height += 3
 	}
 	height += lipgloss.Height(inputArea)
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog && !m.banClearConfirm {
 		height += lipgloss.Height(m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -15660,6 +15795,8 @@ func (m model) renderTabContent() string {
 		return m.renderAgentsTab()
 	case tabFiles:
 		return m.files.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
+	case tabChanges:
+		return m.changes.View(m.width, m.height, m.styles)
 	case tabGit:
 		return m.git.View(m.width, m.height, m.styles, m.chatUnread, m.exitPending)
 	case tabLog:
@@ -15705,6 +15842,10 @@ func (m model) renderTabContent() string {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
+	} else if m.showURLDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
+	} else if m.banClearConfirm {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
 	} else if m.showPermDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
@@ -15718,7 +15859,7 @@ func (m model) renderTabContent() string {
 	if m.chatSearchActive {
 		leftParts = append(leftParts, m.renderChatSearchBar(panelWidth-2))
 	}
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog && !m.banClearConfirm {
 		leftParts = append(leftParts, m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -15873,6 +16014,8 @@ func (m *model) renderStatus() string {
 			suffix = " · ctrl+f search · ctrl+g fuzzy · ctrl+l edit · ctrl+n new · ctrl+b folder · ctrl+r rename · ctrl+d delete · ctrl+y copy · ctrl+o open · ctrl+t reload · alt+[/]: tab"
 		case tabGit:
 			suffix = " · tab: cycle panel · ctrl+f filter · ctrl+s stage · ctrl+u unstage · ctrl+\\ commit · ctrl+r refresh · alt+[/]/ctrl+shift+[/]: switch tab"
+		case tabChanges:
+			suffix = " · alt+[/]/ctrl+shift+[/]: switch tab"
 		case tabLog:
 			suffix = " · j/k: scroll · c: clear · alt+[/]/ctrl+shift+[/]: switch tab"
 		default:
@@ -17473,7 +17616,7 @@ func (m model) exitButtonForClick(mouse tea.Mouse) bool {
 }
 
 func tabAtX(mouseX int, barStartX int, activeTab int, unread bool) (int, bool) {
-	labels := []string{"chat", "agents", "files", "git", "log"}
+	labels := []string{"chat", "agents", "files", "changes", "git", "log"}
 	if unread && activeTab != 0 {
 		labels[0] = "chat●"
 	}
@@ -17966,7 +18109,7 @@ func (m model) agentStripTopY() int {
 		vph = 1
 	}
 	y := appHeaderHeight + vph + 2 // +2 for transcript border
-	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog {
+	if m.showSlashPopup && !m.showPermDialog && !m.showQuestionDialog && !m.showURLDialog && !m.banClearConfirm {
 		y += lipgloss.Height(m.renderSlashPopup())
 	}
 	if row := m.renderQueueRow(); row != "" {
@@ -18216,6 +18359,8 @@ func (m model) inputAreaHeight() int {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderQuestionDialog(panelWidth - 2))
 	} else if m.showURLDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderURLDialog(panelWidth - 2))
+	} else if m.banClearConfirm {
+		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
 	} else if m.showPermDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
 	} else {
@@ -18251,7 +18396,7 @@ func (m model) inputAreaTopY() int {
 }
 
 func (m model) isClickInInputArea(mouse tea.Mouse) bool {
-	if m.activeTab != tabChat || m.showPermDialog || m.showQuestionDialog || m.showURLDialog {
+	if m.activeTab != tabChat || m.showPermDialog || m.showQuestionDialog || m.showURLDialog || m.banClearConfirm {
 		return false
 	}
 	if mouse.X >= m.panelWidth() {
@@ -18750,6 +18895,27 @@ func (m *model) renderURLDialog(width int) string {
 	header := m.styles.Header.Render("~ Open URL?")
 	body := fmt.Sprintf("Open the following URL in your browser?\n\n%s", m.pendingURL)
 	hint := hintStyle.Render("Click here or press Y/Enter to open · N/Esc to cancel")
+
+	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
+		header + "\n\n" + body + "\n\n" + hint,
+	)
+}
+
+// renderBanClearConfirmDialog renders the confirmation dialog for /ban clear.
+func (m *model) renderBanClearConfirmDialog(width int) string {
+	if !m.banClearConfirm {
+		return ""
+	}
+
+	contentWidth := max(0, width-2)
+	header := m.styles.Header.Render("⚠ Clear Ban List?")
+	body := "Are you sure you want to clear all banned bash prefixes?\n\nThis removes the default 'sed' ban too."
+	// Hint with clickable Yes/No buttons. The positions are documented
+	// here and used by the mouse handler (see Update, banClearConfirm
+	// block) to determine which button was clicked.
+	//   "[Yes]" at content X=2..6  (global X=4..8)
+	//   "[No]"  at content X=9..12 (global X=11..14)
+	hint := hintStyle.Render("  [Yes]  [No]  (Y/Esc)")
 
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
 		header + "\n\n" + body + "\n\n" + hint,

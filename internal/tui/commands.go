@@ -119,7 +119,7 @@ func init() {
 		{name: "/export-claude", help: "Append chat to Claude Code JSONL", handler: runExportClaudeCmd},
 		{name: "/new", aliases: []string{"/clear"}, help: "Start a fresh session", handler: runNewCmd},
 		{name: "/thinking", help: "Toggle visibility of agent thoughts", handler: runThinkingCmd},
-		{name: "/effort", usage: "/effort [off|low|med|high]", help: "Show or set the reasoning effort (thinking budget) level", handler: runEffortCmd},
+		{name: "/effort", usage: "/effort [off|low|med|high|xhigh|max]", help: "Show or set the reasoning effort (thinking budget) level", handler: runEffortCmd},
 		{name: "/sound", usage: "/sound [on|off|test]", help: "Show status / toggle terminal bell on task completion", handler: runSoundCmd},
 		{name: "/details", help: "Toggle tool execution details", handler: runDetailsCmd},
 		{name: "/init", usage: "/init [focus]", help: "Analyze project and generate AGENTS.md", handler: runInitCmd},
@@ -139,6 +139,7 @@ func init() {
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
 		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions (model test runs tests)", handler: runPermissionsCmd},
+		{name: "/ban", usage: "/ban [list|add <command...>|remove <command...>|clear]", help: "List or manage banned bash command prefixes, including multi-word prefixes; /ban clear confirms before wiping them (default: sed)", handler: runBanCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},
@@ -867,6 +868,70 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 		return nil
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+	return nil
+}
+
+func runBanCmd(m *model, args []string) tea.Cmd {
+	usage := "Usage: /ban [list|add <command...>|remove <command...>|clear]"
+	if m.agent == nil || m.agent.Permissions() == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured.\n\n" + usage})
+		return nil
+	}
+	pm := m.agent.Permissions()
+	if len(args) == 0 || strings.EqualFold(strings.TrimSpace(args[0]), "list") {
+		banned := pm.BashBannedPrefixes()
+		var b strings.Builder
+		b.WriteString("Banned bash command prefixes:\n")
+		if len(banned) == 0 {
+			b.WriteString("  (none)\n")
+		} else {
+			for _, prefix := range banned {
+				b.WriteString(fmt.Sprintf("  %s\n", prefix))
+			}
+		}
+		b.WriteString("\n" + usage)
+		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+		return nil
+	}
+
+	action := strings.ToLower(strings.TrimSpace(args[0]))
+	prefix := ""
+	switch action {
+	case "clear":
+		if len(args) != 1 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+			return nil
+		}
+		m.banClearConfirm = true
+		return nil
+	case "add", "remove":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+			return nil
+		}
+		prefix = strings.TrimSpace(strings.Join(args[1:], " "))
+	default:
+		prefix = strings.TrimSpace(strings.Join(args, " "))
+		action = "add"
+	}
+	if prefix == "" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: usage})
+		return nil
+	}
+
+	level := agent.PermissionDeny
+	msg := fmt.Sprintf("Banned bash command prefix %q.", prefix)
+	if action == "remove" {
+		level = agent.PermissionAsk
+		msg = fmt.Sprintf("Unbanned bash command prefix %q.", prefix)
+	}
+	if m.permDirty.bashPrefixes == nil {
+		m.permDirty.bashPrefixes = make(map[string]string)
+	}
+	pm.SetBashPrefixRule(prefix, level)
+	m.permDirty.bashPrefixes[prefix] = string(level)
+	m.persistPermissions()
+	m.messages = append(m.messages, message{role: roleAssistant, text: msg})
 	return nil
 }
 

@@ -669,6 +669,22 @@ func isLoopbackNetcat(command string) bool {
 	return false
 }
 
+// isLoopbackNetworkCommand reports whether a network-capable bash command
+// (curl, wget, httpie) targets a loopback address (127.0.0.0/8, ::1,
+// localhost). Loopback connections stay on-host and cannot exfiltrate data
+// off-machine, so they are auto-allowed — same rationale as loopback nc.
+func isLoopbackNetworkCommand(command string) bool {
+	fields := splitShellFields(command)
+	if len(fields) < 2 {
+		return false
+	}
+	switch fields[0] {
+	case "curl", "wget", "http", "https":
+		return subprocessTargetsLocalhost(command)
+	}
+	return false
+}
+
 // isExfiltrationRiskCommand checks if a bash command has data exfiltration
 // risk patterns. This covers curl, wget, httpie, and netcat.
 func isExfiltrationRiskCommand(command string) bool {
@@ -2442,6 +2458,61 @@ func (pm *PermissionManager) BashPrefixRules() map[string]PermissionLevel {
 	return result
 }
 
+func (pm *PermissionManager) matchBashPrefixRule(cmdWords []string, level PermissionLevel) (string, bool) {
+	if len(cmdWords) == 0 {
+		return "", false
+	}
+	keys := make([]string, 0, len(pm.bashPrefixes))
+	for prefix, prefixLevel := range pm.bashPrefixes {
+		if prefixLevel != level {
+			continue
+		}
+		if strings.HasPrefix(prefix, bashInRootPersistPrefix) {
+			continue
+		}
+		keys = append(keys, prefix)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		iWords := len(strings.Fields(keys[i]))
+		jWords := len(strings.Fields(keys[j]))
+		if iWords != jWords {
+			return iWords > jWords
+		}
+		return keys[i] < keys[j]
+	})
+	for _, prefix := range keys {
+		prefixWords := strings.Fields(prefix)
+		if len(prefixWords) == 0 || len(prefixWords) > len(cmdWords) {
+			continue
+		}
+		matched := true
+		for i := range prefixWords {
+			if cmdWords[i] != prefixWords[i] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return prefix, true
+		}
+	}
+	return "", false
+}
+
+func (pm *PermissionManager) BashBannedPrefixes() []string {
+	result := make([]string, 0)
+	for prefix, level := range pm.bashPrefixes {
+		if strings.HasPrefix(prefix, bashInRootPersistPrefix) {
+			continue
+		}
+		if level == PermissionDeny {
+			result = append(result, prefix)
+		}
+	}
+	sort.Strings(result)
+	return result
+}
+
 func (pm *PermissionManager) ExportConfig() config.PermissionConfig {
 	tools := make(map[string]string)
 	for k, v := range pm.Rules() {
@@ -3402,6 +3473,19 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	if isLoopbackNetcat(command) {
 		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback nc): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
+	}
+
+	// Loopback curl, wget, and httpie (targeting 127.0.0.0/8, ::1, localhost)
+	// stay on-host and cannot exfiltrate data off-machine, so they are
+	// auto-allowed without prompting — same rationale as loopback nc.
+	if isLoopbackNetworkCommand(command) {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback network): command=%q", command))
+		return PermissionDecision{Level: PermissionAllow}
+	}
+
+	if deniedPrefix, ok := pm.matchBashPrefixRule(cmd.cmdWords, PermissionDeny); ok {
+		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (banned prefix rule): prefix=%s", deniedPrefix))
+		return PermissionDecision{Level: PermissionDeny}
 	}
 
 	// 1. Temp directory operations are always allowed (cross-platform)

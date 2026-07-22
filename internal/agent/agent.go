@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/u007/ocode/internal/changes"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/lsp"
@@ -305,13 +306,16 @@ type Agent struct {
 	// by teardownGroupBus so the stop-channel watcher does not leak
 	// for the agent's lifetime. nil when no group is active.
 	noteBusCancel context.CancelFunc
-
 	// snapshotStore is the per-agent snapshot store used by write tools via
 	// context. It tracks tool-call-ID-keyed backups for undo_file_change and
 	// isolates this agent's write history from concurrent agents.
 	snapshotStore *snapshot.Store
-}
 
+	// changes is the per-session file-change registry used by the
+	// changes TUI tab. Constructed in NewAgent; nil for sub-agents
+	// that share the main agent's registry.
+	changes *changes.Registry
+}
 // ChangedFiles returns the deduplicated sorted list of file paths that
 // have been backed up (modified or created) by this agent's tools.
 // Returns nil if the agent has no snapshot store (should not happen in
@@ -323,6 +327,11 @@ func (a *Agent) ChangedFiles() []string {
 	return nil
 }
 
+// Changes returns the per-session file-change registry used by the
+// changes TUI tab. May be nil if the agent was created without wiring
+// (e.g. sub-agents sharing the main agent's registry).
+func (a *Agent) Changes() *changes.Registry { return a.changes }
+
 // NoteBus returns the bus this agent participates in, or nil if
 // it is not in a group.
 func (a *Agent) NoteBus() *notebus.Bus { return a.noteBus }
@@ -332,8 +341,6 @@ func (a *Agent) NoteBus() *notebus.Bus { return a.noteBus }
 func (a *Agent) NoteAgentID() string { return a.noteAgentID }
 
 // SetNoteBus wires the bus and agent id on this agent. Called by
-// the task tool for every child in a group; safe to call on the
-// main agent as well (the bus is shared across the group).
 func (a *Agent) SetNoteBus(bus *notebus.Bus, agentID string) {
 	a.noteBus = bus
 	a.noteAgentID = agentID
@@ -608,8 +615,14 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	a.runs = NewAgentRunRegistry()
 	snapDir := a.projectSnapshotsDir()
 	a.snapshotStore = snapshot.NewStore(snapshot.NewAgentID(), snapDir)
+	// Per-session changes registry: aggregates writes from all attached
+	// snapshot stores (main agent + sub-agents) and bash-detection hooks.
+	a.changes = changes.NewRegistry()
+	_ = a.changes.AttachSnapshotStore("main", a.snapshotStore)
+
 	a.stopCh = make(chan struct{})
 	a.jobEvents = make(chan JobEvent, 32)
+
 	a.memoryMaintCh = make(chan MemoryMaintenanceRequest, 64)
 	a.docMaintCh = make(chan DocMaintenanceRequest, docMaintChannelCap)
 	a.docMaintDone = make(chan struct{})
@@ -644,7 +657,14 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 			ToolCallID: r.ToolCallID,
 		})
 	})
-	a.tools["bash"] = &tool.BashTool{Procs: a.procs}
+	workDir := a.workDir
+	if workDir == "" {
+		workDir, _ = os.Getwd()
+	}
+	a.tools["bash"] = &tool.BashTool{
+		Procs:    a.procs,
+		Recorder: changes.NewStatBashRecorder(workDir, a.changes),
+	}
 	a.tools["bash_output"] = tool.BashOutputTool{Procs: a.procs}
 	a.tools["kill_shell"] = tool.KillShellTool{Procs: a.procs}
 	a.tools["wait"] = WaitTool{procs: a.procs, runs: a.runs, agent: a}
@@ -2119,6 +2139,11 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 		emitDebug("PERMISSION", a.permissionDecisionTrace(name, args, decision, autoEnabled))
 		if decision.Level == PermissionDeny {
 			if autoEnabled && a.permissions != nil && a.permissions.Mode() != PermissionModeLocked {
+				// Hard-blocked bash commands (rm -rf /, pipe-to-shell chains,
+				// etc.) are deliberate safety stops and must never be second-
+				// guessed by the auto-permission LLM. Other bash Deny decisions
+				// (e.g. banned prefix rules) may be safely overridden when the
+				// auto-permission model judges the specific invocation acceptable.
 				if !(name == "bash" && isHardBlockedCommand(bashCommand(args))) {
 					req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
 					if decision.Request != nil {

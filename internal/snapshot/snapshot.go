@@ -345,6 +345,32 @@ func restoreSnapshot(snap Snapshot) error {
 	return nil
 }
 
+// Len returns the number of snapshots currently stored. Unlike Snapshots,
+// it does not copy the slice, so it is cheap to call as a change-detection
+// signal (e.g. the changes registry uses it to decide whether its cached
+// file list is stale without re-walking every snapshot).
+func (s *Store) Len() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.snapshots)
+}
+
+// Snapshots returns a copy of this store's snapshot slice in chronological
+// order. Used by the changes package (and any other read-only consumer that
+// needs the full per-write metadata: timestamp, tool call id, backup path).
+// Returning a copy keeps the slice header from racing with concurrent
+// appends and matches the rest of this package's read API.
+func (s *Store) Snapshots() []Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.snapshots) == 0 {
+		return nil
+	}
+	out := make([]Snapshot, len(s.snapshots))
+	copy(out, s.snapshots)
+	return out
+}
+
 // ChangedFiles returns a deduplicated sorted list of all backed-up file paths.
 func (s *Store) ChangedFiles() []string {
 	s.mu.Lock()

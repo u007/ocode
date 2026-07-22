@@ -251,6 +251,14 @@ tab (`closeChatSearchIfLeavingChat`). Implementation lives in
 `internal/tui/chat_search.go`; do not add a second find surface without
 consolidating the dispatch.
 
+## TUI Changes Tab
+The `internal/tui/changes_model.go` model implements a **changes tab** that
+lists every file the current chat session has added or edited (main agent +
+sub-agents), with per-file unified diffs and file-level or block-level undo.
+The list is not git-based — it derives from the snapshot store
+(`internal/snapshot.Store`) and a pre/post-stat bash detection hook. See
+`docs/changes-tab.md` and `docs/superpowers/specs/2026-07-22-changes-tab-design.md`.
+
 ## User Interaction
 - TUI supports `/commands` and `!shell`.
 - **Slash command queuing.** All slash commands entered while the agent is

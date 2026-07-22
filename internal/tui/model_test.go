@@ -5096,13 +5096,13 @@ func TestEnterWhileStreamingQueuesUserInput(t *testing.T) {
 
 func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
 	m := model{
-		ready:        true,
-		width:        80,
-		height:       24,
-		streaming:    true,
-		agent:        agent.NewAgent(nil, nil, nil, nil),
-		input:        newTestTextarea(),
-		viewport:     fastviewport.New(76, 20),
+		ready:       true,
+		width:       80,
+		height:      24,
+		streaming:   true,
+		agent:       agent.NewAgent(nil, nil, nil, nil),
+		input:       newTestTextarea(),
+		viewport:    fastviewport.New(76, 20),
 		styles:      ApplyThemeColors("tokyonight"),
 		queuedItems: []queuedItem{{kind: queueItemInput, text: "next request"}},
 	}
@@ -5124,13 +5124,13 @@ func TestStreamDoneStartsNextQueuedInput(t *testing.T) {
 
 func TestStreamDoneInterruptedDoesNotStartNextQueuedInput(t *testing.T) {
 	m := model{
-		ready:        true,
-		width:        80,
-		height:       24,
-		streaming:    true,
-		agent:        agent.NewAgent(nil, nil, nil, nil),
-		input:        newTestTextarea(),
-		viewport:     fastviewport.New(76, 20),
+		ready:       true,
+		width:       80,
+		height:      24,
+		streaming:   true,
+		agent:       agent.NewAgent(nil, nil, nil, nil),
+		input:       newTestTextarea(),
+		viewport:    fastviewport.New(76, 20),
 		styles:      ApplyThemeColors("tokyonight"),
 		queuedItems: []queuedItem{{kind: queueItemInput, text: "next request"}},
 	}
@@ -5275,8 +5275,9 @@ func TestTabMouseReleaseUsesRightAlignedHeaderPosition(t *testing.T) {
 	chatWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("chat"))
 	agentsWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("agents"))
 	filesWidth := lipgloss.Width(selectedStyle.Padding(0, 1).Render("files"))
+	changesWidth := lipgloss.Width(hintStyle.Padding(0, 1).Render("changes"))
 
-	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + agentsWidth + filesWidth + 1, Y: 1})
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: barStart + chatWidth + agentsWidth + filesWidth + changesWidth + 1, Y: 1})
 	got := derefTestModel(t, updated)
 
 	if got.activeTab != tabGit {
@@ -6518,6 +6519,121 @@ func TestRunPermissionsCmdModelOpensPermissionPicker(t *testing.T) {
 	}
 	if len(m.pickerValues) == 0 || m.pickerValues[0] != "auto" {
 		t.Fatalf("expected clear option to map to auto, got %#v", m.pickerValues[:minInt(len(m.pickerValues), 3)])
+	}
+}
+
+func TestRunBanCmdListsAddsAndRemovesPrefixes(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	m := model{
+		config: &cfg,
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		input:  textarea.New(),
+	}
+
+	runBanCmd(&m, nil)
+	if len(m.messages) == 0 {
+		t.Fatal("expected ban list output")
+	}
+	if got := m.messages[len(m.messages)-1].text; !strings.Contains(got, "sed") {
+		t.Fatalf("expected default ban list to include sed, got %q", got)
+	}
+
+	runBanCmd(&m, []string{"grep", "-n"})
+	if got := m.agent.Permissions().BashPrefixRules()["grep -n"]; got != agent.PermissionDeny {
+		t.Fatalf("expected grep -n to be banned, got %s", got)
+	}
+	if dec := m.agent.Permissions().Decide("bash", json.RawMessage(`{"command":"grep -n needle file.txt"}`)); dec.Level != agent.PermissionDeny {
+		t.Fatalf("expected grep -n command to be denied, got %s", dec.Level)
+	}
+
+	runBanCmd(&m, []string{"remove", "grep", "-n"})
+	if got := m.agent.Permissions().BashPrefixRules()["grep -n"]; got != agent.PermissionAsk {
+		t.Fatalf("expected grep -n to be unbanned to ask, got %s", got)
+	}
+	if dec := m.agent.Permissions().Decide("bash", json.RawMessage(`{"command":"grep -n needle file.txt"}`)); dec.Level == agent.PermissionDeny {
+		t.Fatalf("expected grep -n command to stop being denied after removal, got %s", dec.Level)
+	}
+
+	runBanCmd(&m, []string{"remove", "sed"})
+	if got := m.agent.Permissions().BashPrefixRules()["sed"]; got != agent.PermissionAsk {
+		t.Fatalf("expected sed to be unbanned to ask, got %s", got)
+	}
+
+	var loaded config.Config
+	if err := config.LoadOcodeConfig(&loaded); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if got := loaded.Ocode.Permissions.Bash.Prefixes["grep -n"]; got != "ask" {
+		t.Fatalf("expected grep -n unban override to persist to disk, got %q", got)
+	}
+	if got := loaded.Ocode.Permissions.Bash.Prefixes["sed"]; got != "ask" {
+		t.Fatalf("expected sed unban override to persist to disk, got %q", got)
+	}
+
+	runBanCmd(&m, nil)
+	got := m.messages[len(m.messages)-1].text
+	if strings.Contains(got, "grep -n") {
+		t.Fatalf("expected grep -n to be removed from ban list, got %q", got)
+	}
+	if strings.Contains(got, "sed") {
+		t.Fatalf("expected sed to be removed from ban list, got %q", got)
+	}
+}
+
+func TestRunBanCmdClearRequiresConfirmation(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+
+	cfg := config.Config{}
+	m := model{
+		config: &cfg,
+		agent:  agent.NewAgent(retryTestClient{}, nil, &cfg, nil),
+		input:  textarea.New(),
+	}
+
+	runBanCmd(&m, []string{"grep", "-n"})
+	if got := m.agent.Permissions().BashPrefixRules()["grep -n"]; got != agent.PermissionDeny {
+		t.Fatalf("expected grep -n to be banned before clear, got %s", got)
+	}
+	if got := m.agent.Permissions().BashPrefixRules()["sed"]; got != agent.PermissionDeny {
+		t.Fatalf("expected sed to remain banned before clear, got %s", got)
+	}
+
+	runBanCmd(&m, []string{"clear"})
+	if !m.banClearConfirm {
+		t.Fatal("expected /ban clear to open a confirmation dialog")
+	}
+
+	updated, _ := m.handleChatKeys(tea.KeyPressMsg{Code: 'y', Text: "y"}, nil, nil)
+	m = updated.(model)
+	if m.banClearConfirm {
+		t.Fatal("expected ban clear dialog to close after confirmation")
+	}
+	if got := m.agent.Permissions().BashPrefixRules()["grep -n"]; got != agent.PermissionAsk {
+		t.Fatalf("expected grep -n to be cleared to ask, got %s", got)
+	}
+	if got := m.agent.Permissions().BashPrefixRules()["sed"]; got != agent.PermissionAsk {
+		t.Fatalf("expected sed to be cleared to ask, got %s", got)
+	}
+	if dec := m.agent.Permissions().Decide("bash", json.RawMessage(`{"command":"grep -n needle file.txt"}`)); dec.Level == agent.PermissionDeny {
+		t.Fatalf("expected grep -n to stop being denied after clear, got %s", dec.Level)
+	}
+
+	var loaded config.Config
+	if err := config.LoadOcodeConfig(&loaded); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if got := loaded.Ocode.Permissions.Bash.Prefixes["grep -n"]; got != "ask" {
+		t.Fatalf("expected cleared grep -n to persist as ask, got %q", got)
+	}
+	if got := loaded.Ocode.Permissions.Bash.Prefixes["sed"]; got != "ask" {
+		t.Fatalf("expected cleared sed to persist as ask, got %q", got)
+	}
+	if got := m.messages[len(m.messages)-1].text; !strings.Contains(got, "Cleared 2 banned bash prefixes") {
+		t.Fatalf("expected clear confirmation message, got %q", got)
 	}
 }
 

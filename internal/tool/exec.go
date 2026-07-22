@@ -20,8 +20,18 @@ import (
 const bashDefaultTimeout = 300 * time.Second
 const bashMaxOutputLength = 30000
 
+// BashRecorder is the seam between BashTool and the changes registry.
+// The tool calls Pre() before executing a command and Post(command, exitCode)
+// after it returns. Implementations capture filesystem state around the
+// invocation to detect file changes made by the shell command.
+type BashRecorder interface {
+	Pre()
+	Post(command string, exitCode int)
+}
+
 type BashTool struct {
-	Procs *ProcessRegistry
+	Procs    *ProcessRegistry
+	Recorder BashRecorder
 }
 
 func (t BashTool) Name() string        { return "bash" }
@@ -112,6 +122,10 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		}
 		p := t.Procs.StartBackground(params.Command)
 		return fmt.Sprintf("Started background process %s. Poll with bash_output(id=%q), stop with kill_shell(id=%q).", p.ID, p.ID, p.ID), nil
+	}
+
+	if t.Recorder != nil {
+		t.Recorder.Pre()
 	}
 
 	timeout := bashDefaultTimeout
@@ -232,6 +246,9 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 			// block that used to live here duplicated that work.
 			finalizeManagedProcess(proc, sup, onDone, err)
 			registerBashWrites(ctx, tcID, backedUpPaths)
+			if t.Recorder != nil {
+				t.Recorder.Post(params.Command, commandExitCode(err))
+			}
 			return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, emit == nil), nil
 		case <-proc.bgRequestCh:
 			streaming.Store(false)
@@ -249,6 +266,9 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 	err := cmd.Run()
 	res := joinStdoutStderr(stdout.String(), stderr.String())
 	registerBashWrites(ctx, tcID, backedUpPaths)
+	if t.Recorder != nil {
+		t.Recorder.Post(params.Command, commandExitCode(err))
+	}
 	return finalizeExecResult(res, err, ctx.Err() == context.DeadlineExceeded, timeout, emit == nil), nil
 }
 

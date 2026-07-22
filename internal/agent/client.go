@@ -1749,6 +1749,20 @@ func reasoningEffortForBudget(budget int) string {
 	}
 }
 
+// reasoningEffortForBudgetOpenAI is like reasoningEffortForBudget but adds the
+// "xhigh" tier, which OpenAI's Responses API (GPT-5.1/5.2) accepts but other
+// reasoning_effort providers (openrouter, grok, novita-ai, google) are not
+// confirmed to support — so only the OpenAI Responses request path uses this.
+// "xhigh" is also the ceiling here: the /effort "max" tier (a larger token
+// budget, meaningful for Anthropic's uncapped budget_tokens) still maps to
+// "xhigh" for OpenAI since its reasoning_effort enum has no higher tier.
+func reasoningEffortForBudgetOpenAI(budget int) string {
+	if budget >= 32000 {
+		return "xhigh"
+	}
+	return reasoningEffortForBudget(budget)
+}
+
 // hoistSystemMessages moves any system messages that appear after a non-system
 // message to the front of the list, preserving their relative order. Some
 // OpenAI-compatible providers (DeepSeek, chutes-routed DeepSeek) reject
@@ -2260,7 +2274,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	input = dedupeOpenAIResponseInputItems(input)
 	input = reconcileOpenAIResponsesToolPairs(input)
 
-	model := normalizeOpenAICodexModel(c.Model)
+	model, effortOverride := normalizeOpenAICodexModel(c.Model)
 	liteMode := c.UseOAuth && c.Provider == "openai" && openAICodexResponsesLite(model)
 
 	payload := map[string]interface{}{
@@ -2281,9 +2295,19 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		}
 	}
 	c.applyGenerationParams(ctx, payload)
-	if c.ThinkingBudget > 0 {
+	if effortOverride != "" && effortOverride != "none" {
 		payload["reasoning"] = map[string]interface{}{
-			"effort":  reasoningEffortForBudget(c.ThinkingBudget),
+			"effort":  effortOverride,
+			"summary": "auto",
+		}
+	} else if effortOverride == "" && c.ThinkingBudget > 0 {
+		// Only derive from budget when no explicit model suffix override
+		// is present. When effortOverride is "none" (model ID suffix
+		// "-none"), the user explicitly opted out of reasoning — omit
+		// the reasoning block entirely rather than falling through to
+		// budget-derived reasoning.
+		payload["reasoning"] = map[string]interface{}{
+			"effort":  reasoningEffortForBudgetOpenAI(c.ThinkingBudget),
 			"summary": "auto",
 		}
 	}
@@ -2660,24 +2684,27 @@ func (c *GenericClient) openAIResponsesURL() string {
 // legacy model aliases while preserving unknown/new model IDs. The ChatGPT Codex
 // backend currently expects newer canonical IDs for the old GPT-5 aliases, but
 // users may still select future IDs from models.dev; those pass through.
-func normalizeOpenAICodexModel(model string) string {
+//
+// It also returns any reasoning-effort suffix (e.g. "-xhigh") encoded in the
+// model ID, so the caller can request that exact tier — GPT-5.1/5.2 support
+// "xhigh", a level reasoningEffortForBudget (driven by the generic /effort
+// token budget) never produces on its own. Empty string means no override:
+// the caller should fall back to the budget-derived effort.
+func normalizeOpenAICodexModel(model string) (string, string) {
 	switch model {
 	case "gpt-5", "gpt-5-mini", "gpt-5-nano":
-		return "gpt-5.1"
+		return "gpt-5.1", ""
 	case "gpt-5-codex":
-		return "gpt-5.1-codex"
+		return "gpt-5.1-codex", ""
 	case "codex-mini-latest", "gpt-5-codex-mini", "gpt-5-codex-mini-medium", "gpt-5-codex-mini-high":
-		return "gpt-5.1-codex-mini"
+		return "gpt-5.1-codex-mini", ""
 	}
 	for _, suffix := range []string{"-none", "-low", "-medium", "-high", "-xhigh"} {
-		if strings.HasPrefix(model, "gpt-5.1") && strings.HasSuffix(model, suffix) {
-			return strings.TrimSuffix(model, suffix)
-		}
-		if strings.HasPrefix(model, "gpt-5.2") && strings.HasSuffix(model, suffix) {
-			return strings.TrimSuffix(model, suffix)
+		if (strings.HasPrefix(model, "gpt-5.1") || strings.HasPrefix(model, "gpt-5.2")) && strings.HasSuffix(model, suffix) {
+			return strings.TrimSuffix(model, suffix), strings.TrimPrefix(suffix, "-")
 		}
 	}
-	return model
+	return model, ""
 }
 
 // codexPromptCacheKey returns the key the codex backend uses to scope its

@@ -170,7 +170,7 @@ See **[docs/plugins.md](docs/plugins.md)** for the complete reference.
 - **Path scope confinement** with tilde expansion and temp-directory auto-allow
 - **LLM auto-permission** — configure a fast model to handle allow/deny decisions autonomously
 - **Advisor module** — catches risky operations with configurable strictness
-- **`/permissions`** command to view/set rules interactively
+- **`/permissions`** command to view/set rules interactively; **`/ban`** is a shortcut for the bash deny list (lists banned prefixes, add/remove entries, supports multi-word prefixes, and `/ban clear` requires confirmation)
 
 ### 🖱️ TUI Mouse Support
 
@@ -275,6 +275,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/ide` | | Connect to VS Code (Claude Code extension) |
 | `/theme` | `/themes` | Switch themes instantly |
 | `/permissions` | | View/set tool and bash permissions |
+| `/ban` | | List or manage banned bash command prefixes, including multi-word prefixes (`/ban clear` confirms before wiping them; default: sed) |
 | `/yolo` | | Toggle YOLO mode on/off |
 | `/git` | | Git operations from command line |
 | `/github` | | PR, issue, and workflow commands |

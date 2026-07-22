@@ -5,6 +5,10 @@
 
 
 
+
+## 2026-07-22
+
+* **Creation**: Skill Tool Test Fixture Gap — expectedBuiltinTools Missing load_skill ([gotchas/skill-tool-test-fixture-gap.md](/gotchas/skill-tool-test-fixture-gap.md))
 ## 2026-07-11
 
 * **Creation**: Subagent Feedback-Loop Guard (task tool) ([gotchas/subagent-feedback-loop-guard.md](/gotchas/subagent-feedback-loop-guard.md))

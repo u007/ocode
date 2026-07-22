@@ -149,15 +149,15 @@ func TestPermissions_BashAutoAllowInRoot_PersistsProjectScopedRule(t *testing.T)
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
 
-	cmd := fmt.Sprintf(`{"command":"sed -n '1,3p' %s"}`, filePath)
+	cmd := fmt.Sprintf(`{"command":"awk '{print $1}' %s"}`, filePath)
 	dec := pm.Decide("bash", json.RawMessage(cmd))
 	if dec.Level != PermissionAllow {
-		t.Fatalf("expected first in-root sed command to auto-allow, got %s", dec.Level)
+		t.Fatalf("expected first in-root awk command to auto-allow, got %s", dec.Level)
 	}
 
-	key := bashInRootKey("sed", resolvedWorkDir)
+	key := bashInRootKey("awk", resolvedWorkDir)
 	if _, exists := pm.bashPrefixes[key]; exists {
-		t.Fatalf("did not expect mutating sed mode to persist in-root key %q", key)
+		t.Fatalf("did not expect mutating awk mode to persist in-root key %q", key)
 	}
 }
 
@@ -169,9 +169,9 @@ func TestPermissions_BashPersistedRule_DoesNotBypassOutOfRoot(t *testing.T) {
 	}
 	pm := NewPermissionManager()
 	pm.SetWorkDir(resolvedWorkDir)
-	pm.bashPrefixes[bashInRootKey("sed", resolvedWorkDir)] = PermissionAllow
+	pm.bashPrefixes[bashInRootKey("awk", resolvedWorkDir)] = PermissionAllow
 
-	dec := pm.Decide("bash", json.RawMessage(`{"command":"sed -n '1,3p' /etc/hosts"}`))
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"awk '{print $1}' /etc/hosts"}`))
 	if dec.Level != PermissionAsk {
 		t.Fatalf("expected out-of-root command to ask, got %s", dec.Level)
 	}
@@ -716,6 +716,34 @@ func TestPermissions_ExportConfigPreservesAutoPermissionEnabled(t *testing.T) {
 	roundTrip.LoadFromOcode(exported)
 	if !roundTrip.AutoPermissionEnabled() {
 		t.Fatal("expected LoadFromOcode to restore auto-permission enabled state")
+	}
+}
+
+func TestPermissions_DefaultBashBanIsEmpty(t *testing.T) {
+	pm := NewPermissionManager()
+	banList := pm.BashBannedPrefixes()
+	if len(banList) != 0 {
+		t.Fatalf("expected no default banned bash prefix, got %#v", banList)
+	}
+
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"sed -n '1,3p' /etc/hosts"}`))
+	if dec.Level == PermissionDeny {
+		t.Fatal("expected sed command not to be denied by default")
+	}
+}
+
+func TestPermissions_BashBanMatchesMultiWordPrefix(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetBashPrefixRule("grep -n", PermissionDeny)
+
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"grep -n needle file.txt"}`))
+	if dec.Level != PermissionDeny {
+		t.Fatalf("expected grep -n command to be denied, got %s", dec.Level)
+	}
+
+	dec = pm.Decide("bash", json.RawMessage(`{"command":"grep needle file.txt"}`))
+	if dec.Level == PermissionDeny {
+		t.Fatalf("expected grep without -n to remain unbanned, got %s", dec.Level)
 	}
 }
 
