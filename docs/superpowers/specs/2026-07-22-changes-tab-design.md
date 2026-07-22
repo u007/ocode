@@ -24,6 +24,7 @@ collapse into a single row whose right-pane preview is a unified diff of
 - `enter` — open the diff in the right pane
 - `r` — refresh from the live registry
 - `y` — copy the diff to the clipboard
+- `?` — toggle per-row details (authors, bash command, timestamps)
 
 `/new` resets the list (the registry is per-session and lives on the `Agent`).
 The list is **persisted with the session** — closing and re-opening a session
@@ -104,16 +105,24 @@ through the snapshot store, so there is no backup to restore from).
 // effect of every write the session has made to OriginalPath, merged into a
 // single view against the pre-session snapshot.
 type FileChange struct {
-    OriginalPath     string         // absolute path; never empty
-    Status           FileStatus     // Added | Modified | Deleted
-    FirstBackupPath  string         // "" for files created in-session with no pre-session backup
-    Undoable         bool           // false for bash-only changes (no backup to restore)
-    UndoAllTCID      string         // tool_call_id of the FIRST snapshot; used for "undo all"
-    ChangeCount      int            // number of distinct tool calls touching this file
-    Authors          []ChangeAuthor // ordered: main agent first, then sub-agents
-    CreatedAt        time.Time      // first change
-    UpdatedAt        time.Time      // most recent change
+   OriginalPath     string         // absolute path; never empty
+   Status           FileStatus     // Added | Modified | Deleted
+   FirstBackupPath  string         // "" for files created in-session with no pre-session backup
+   Undoable         bool           // false for bash-only changes (no backup to restore)
+   UndoAllTCID      string         // tool_call_id of the FIRST snapshot; used for "undo all"
+   ChangeCount      int            // number of distinct tool calls touching this file
+   Authors          []ChangeAuthor // ordered: main agent first, then sub-agents
+   CreatedAt        time.Time      // first change
+   UpdatedAt        time.Time      // most recent change
 }
+
+// Status reflects the file's state at UpdatedAt relative to the agent's
+// FIRST snapshot (not session-start). A file that was created in-session
+// and then edited by `edit` later still reports Modified (the file
+// exists at UpdatedAt, and the first snapshot's empty backup is the
+// baseline). A file that was Modified and then deleted (via bash `rm`
+// or the delete tool) reports Deleted at UpdatedAt, even though it was
+// once Modified.
 
 type FileStatus int
 const (
@@ -150,16 +159,19 @@ touched the file, oldest-author-first.
 
 ```go
 type Registry struct {
-    mu       sync.Mutex
-    files    map[string]*FileChange       // path → entry; lazily populated
-    byAgent  map[string]*snapshot.Store   // agentID → store to subscribe to
-    bashHook BashRecorder                 // nil if not wired
+   mu       sync.Mutex
+   files    map[string]*FileChange       // path → entry; built eagerly on every store event
+   byAgent  map[string]*snapshot.Store   // agentID → store to subscribe to
+   bashHook BashRecorder                 // nil if not wired
 }
 
 func NewRegistry() *Registry
 
 // AttachSnapshotStore is called by Agent.New (and the task tool, when a
 // sub-agent is spawned) so the registry knows to read from that store.
+// All mutations to the registry are guarded by r.mu; List() returns a
+// snapshot copy; FileChange values are immutable from the caller's
+// perspective. Authors is append-only under the lock, ordered main-first.
 func (r *Registry) AttachSnapshotStore(agentID string, store *snapshot.Store) error
 
 // DetachSnapshotStore is called when a sub-agent is torn down. Its writes
@@ -178,11 +190,32 @@ func (r *Registry) List() []FileChange
 
 // UndoFile restores path to its pre-session state. Calls UndoByToolCallID
 // for each author, oldest first, so conflict guards are satisfied.
+// Returns ErrNotUndoable if the file's FileChange.Undoable is false.
 func (r *Registry) UndoFile(path string) error
 
 // UndoBlock undoes a single tool call. Looks up the (path, toolCallID) pair
-// in the relevant store and calls UndoByToolCallID.
+// in the relevant store and calls UndoByToolCallID. Returns ErrNotUndoable
+// if the file's FileChange.Undoable is false.
 func (r *Registry) UndoBlock(path, toolCallID string) error
+
+// LatestToolCall returns the tool_call_id of the most recent snapshot
+// touching path across all attached stores (in chronological order). The
+// TUI's "U" key handler calls this first, then UndoBlock. Returns
+// ErrNotUndoable if the file is a bash-only entry, or ErrNoChanges if
+// the file has no recorded tool calls.
+func (r *Registry) LatestToolCall(path string) (string, error)
+
+// ErrNotUndoable is returned by UndoFile, UndoBlock, and LatestToolCall
+// when the file's FileChange.Undoable is false (e.g. a bash-only entry).
+// The TUI surfaces this as a status-bar message and skips the confirm
+// dialog entirely.
+var ErrNotUndoable = errors.New("changes: file is not undoable from the changes tab")
+
+// ErrNoChanges is returned by LatestToolCall when the file has no
+// recorded tool calls (e.g. a row that exists only because the saved
+// session list remembered it, but the live stores have no snapshot for
+// the path).
+var ErrNoChanges = errors.New("changes: no recorded tool calls for this file")
 ```
 
 ### 4.5 Bash detection (v1)
@@ -202,8 +235,12 @@ type BashWriteEvent struct {
     //      command and intersect with the diff set (so a comment that
     //      mentions a path doesn't count, but a real `cat > foo` that
     //      creates `foo` does).
-    TouchedPaths []string // resolved absolute paths
-    TouchedOps   []BashOp // added | modified | deleted
+    Touches []BashTouch // ordered, deduplicated; UI shows the first command that touched each path
+}
+
+type BashTouch struct {
+    Path string
+    Op   BashOp
 }
 
 type BashOp int
@@ -245,6 +282,16 @@ stores will show fewer files than when it was saved — but the user's own
 changes (the main agent's) survive, because the main agent's store is
 rebuilt from disk on re-hydration by the existing `Agent.New` logic.
 
+**Diff baseline is the agent's FIRST snapshot, not session-start state.**
+The right-pane diff for a row always compares the agent's first
+snapshot for that file (i.e. the bytes on disk immediately before the
+session's first write to it) against the current file on disk. If the
+user edited the file outside ocode between the agent's last write and
+the diff render, the right pane shows the diff against the agent's
+pre-edit state plus the user's intermediate edits as one combined diff.
+This is the simpler v1 contract; cross-cutting external edits are
+explicitly out of scope for v1.
+
 ## 5. TUI surface
 
 ### 5.1 Tab bar
@@ -285,6 +332,14 @@ Two-pane, same as the files tab:
 - **Right pane** — unified diff of the selected file, pre-session bytes vs current bytes. Lazy-loaded when a row is selected (matches the files tab's `previewLoadMessage` pattern). Sticky scroll.
 - **Footer hints** rendered inside the left pane bottom: the active keybindings for the current selection.
 
+**Per-row detail affordance (the `?` key).** Each row's metadata (list
+of authors with edit counts, the originating bash command if any, the
+first/last change timestamps) is hidden by default to keep the list
+dense. Pressing `?` toggles a details strip below the selected row
+that shows that metadata. This is the only way to identify the
+originating bash command from the UI for a row whose only change came
+from a bash invocation.
+
 ### 5.3 Keybindings (changes tab only)
 
 | Key | Action | Notes |
@@ -300,11 +355,32 @@ Two-pane, same as the files tab:
 | `J` / `K` (shift) or `PgDn` / `PgUp` | Scroll the preview pane | |
 | `esc` | Clear filter, or leave the tab | |
 | `tab` | Move focus between file list and preview | |
+| `?` | Toggle per-row details (authors, bash command, timestamps) | |
 | `1`…`6` | Jump to tab n | Already a convention; auto-extends |
 
 Both `u` and `U` show a confirm dialog: `undo foo.go to pre-session state?
 [y/N]`. The dialog reuses the existing confirm-dialog component
 (`internal/tui/component_dialog.go`).
+
+**Keybinding scope and conflicts with global TUI leader keys.** Several
+of these keys are already bound at the global TUI level: `u` is the
+global `/undo` (model.go:4573), `r` is `/redo` (4576), `y` copies the
+session id (4588), `g`/`G` jump top/bottom in the log tab
+(17686/17689), `j`/`k` move through chat input history (4688/4691),
+and `/` triggers the files-tab fuzzy filter. The changes tab SHADOWS
+these per the existing TUI convention: per-tab Update switches dispatch
+before the global handlers, so when `activeTab == tabChanges` these
+keys take their tab-local meaning and the global bindings are
+unaffected. In particular, `u` in the changes tab IS undo — scoped to
+the selected file via the existing `undo_file_change` mechanism, not
+the global `Store.Undo()` last-write-wins. Users who expect the
+chat-tab behavior of `j`/`k` (input history) must switch to the chat
+tab for that. The active keybindings are always shown in the left-pane
+footer hints so the shadowing is discoverable.
+
+The per-tab Update switch in `model.go:2502-2530` is the chokepoint
+that already routes by `activeTab`; the new `case tabChanges` arm
+follows the same pattern as `case tabFiles` / `case tabGit`.
 
 ### 5.4 Empty state
 
