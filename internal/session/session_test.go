@@ -718,3 +718,22 @@ func TestListRefsPaginatedIncludesOjsonlSessions(t *testing.T) {
 		t.Fatalf("unexpected ref: %+v", refs[0])
 	}
 }
+
+// TestRemoveIncompleteToolRequests_DropsEmptyToolID guards against a stray
+// tool-result message with no ToolID surviving session load and reaching the
+// provider — sent to the OpenAI Responses API as function_call_output with
+// call_id:"", it gets rejected with a 400 (input[N].call_id: empty string).
+func TestRemoveIncompleteToolRequests_DropsEmptyToolID(t *testing.T) {
+	messages := []agent.Message{
+		{Role: "user", Content: "do something"},
+		{Role: "tool", ToolID: "", Content: "some orphaned result"},
+	}
+
+	out := removeIncompleteToolRequests(messages)
+
+	for _, m := range out {
+		if m.Role == "tool" && m.ToolID == "" {
+			t.Fatalf("expected tool message with empty ToolID to be dropped, got: %+v", out)
+		}
+	}
+}

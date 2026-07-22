@@ -2258,34 +2258,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 		}
 	}
 	input = dedupeOpenAIResponseInputItems(input)
-
-	// Ensure every function_call has a matching function_call_output.
-	// OpenAI Responses API returns 400 if a call_id has no output.
-	outputIDs := make(map[string]bool)
-	for _, item := range input {
-		if item["type"] == "function_call_output" {
-			if id, ok := item["call_id"].(string); ok {
-				outputIDs[id] = true
-			}
-		}
-	}
-	for _, item := range input {
-		if item["type"] == "function_call" {
-			if id, ok := item["call_id"].(string); ok && !outputIDs[id] {
-				toolName := ""
-				if name, ok := item["name"].(string); ok {
-					toolName = name
-				}
-				emitDebug("API", fmt.Sprintf("auto-filling missing output for call %s (%s)", id, toolName))
-				input = append(input, map[string]interface{}{
-					"type":    "function_call_output",
-					"call_id": id,
-					"output":  "error: tool result missing",
-				})
-				outputIDs[id] = true
-			}
-		}
-	}
+	input = reconcileOpenAIResponsesToolPairs(input)
 
 	model := normalizeOpenAICodexModel(c.Model)
 	liteMode := c.UseOAuth && c.Provider == "openai" && openAICodexResponsesLite(model)
@@ -2587,6 +2560,65 @@ func openAIResponseFunctionCallIDs(items []map[string]interface{}) map[string]st
 		}
 	}
 	return callIDs
+}
+
+// reconcileOpenAIResponsesToolPairs enforces a 1:1 pairing between
+// function_call and function_call_output items. The Responses API returns a
+// 400 for either half of the mismatch: a call with no output ("call_id has no
+// output"), or an output whose call_id matches no call ("No tool call found
+// for function call output with call_id ..."). The latter happens when a tool
+// result outlives the assistant turn that requested it (e.g. history
+// compaction or repair dropped the function_call but not its output).
+func reconcileOpenAIResponsesToolPairs(input []map[string]interface{}) []map[string]interface{} {
+	callIDs := make(map[string]bool)
+	outputIDs := make(map[string]bool)
+	for _, item := range input {
+		switch item["type"] {
+		case "function_call":
+			if id, ok := item["call_id"].(string); ok {
+				callIDs[id] = true
+			}
+		case "function_call_output":
+			if id, ok := item["call_id"].(string); ok {
+				outputIDs[id] = true
+			}
+		}
+	}
+
+	out := make([]map[string]interface{}, 0, len(input))
+	for _, item := range input {
+		if item["type"] == "function_call_output" {
+			id, _ := item["call_id"].(string)
+			if !callIDs[id] {
+				emitDebug("API", fmt.Sprintf("dropping orphaned function_call_output with no matching function_call: call_id=%s", id))
+				continue
+			}
+		}
+		out = append(out, item)
+	}
+
+	for _, item := range input {
+		if item["type"] != "function_call" {
+			continue
+		}
+		id, ok := item["call_id"].(string)
+		if !ok || outputIDs[id] {
+			continue
+		}
+		toolName := ""
+		if name, ok := item["name"].(string); ok {
+			toolName = name
+		}
+		emitDebug("API", fmt.Sprintf("auto-filling missing output for call %s (%s)", id, toolName))
+		out = append(out, map[string]interface{}{
+			"type":    "function_call_output",
+			"call_id": id,
+			"output":  "error: tool result missing",
+		})
+		outputIDs[id] = true
+	}
+
+	return out
 }
 
 func dedupeOpenAIResponseInputItems(input []map[string]interface{}) []map[string]interface{} {

@@ -420,7 +420,7 @@ func removeIncompleteToolRequests(messages []agent.Message) []agent.Message {
 
 	out := make([]agent.Message, 0, len(messages))
 	for _, msg := range messages {
-		if msg.Role == "tool" && isIncompleteToolResult(msg.Content) {
+		if msg.Role == "tool" && (msg.ToolID == "" || isIncompleteToolResult(msg.Content)) {
 			continue
 		}
 		if msg.Role == "assistant" && len(msg.ToolCalls) > 0 {

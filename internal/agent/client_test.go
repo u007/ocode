@@ -260,6 +260,63 @@ func TestOpenAIResponsesHandlesJSONArguments(t *testing.T) {
 	}
 }
 
+func TestReconcileOpenAIResponsesToolPairs_DropsOrphanedOutput(t *testing.T) {
+	// A function_call_output whose call_id has no matching function_call
+	// must be dropped — the Responses API rejects it with "No tool call
+	// found for function call output with call_id ...".
+	input := []map[string]interface{}{
+		{
+			"type":    "message",
+			"role":    "user",
+			"content": "do something",
+		},
+		{
+			"type":    "function_call_output",
+			"call_id": "call-orphan",
+			"output":  "stray result",
+		},
+	}
+
+	out := reconcileOpenAIResponsesToolPairs(input)
+
+	for _, item := range out {
+		if item["type"] == "function_call_output" && item["call_id"] == "call-orphan" {
+			t.Fatalf("expected orphaned function_call_output to be dropped, got: %+v", out)
+		}
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected only the message item to remain, got %d items: %+v", len(out), out)
+	}
+}
+
+func TestReconcileOpenAIResponsesToolPairs_KeepsMatchedPair(t *testing.T) {
+	input := []map[string]interface{}{
+		{"type": "function_call", "call_id": "call-1", "name": "bash", "arguments": `{"command":"ls"}`},
+		{"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+	}
+
+	out := reconcileOpenAIResponsesToolPairs(input)
+
+	if len(out) != 2 {
+		t.Fatalf("expected matched pair to be preserved, got %d items: %+v", len(out), out)
+	}
+}
+
+func TestReconcileOpenAIResponsesToolPairs_FillsMissingOutput(t *testing.T) {
+	input := []map[string]interface{}{
+		{"type": "function_call", "call_id": "call-1", "name": "bash", "arguments": `{"command":"ls"}`},
+	}
+
+	out := reconcileOpenAIResponsesToolPairs(input)
+
+	if len(out) != 2 {
+		t.Fatalf("expected auto-filled output, got %d items: %+v", len(out), out)
+	}
+	if out[1]["type"] != "function_call_output" || out[1]["call_id"] != "call-1" {
+		t.Fatalf("expected synthesised output for call-1, got: %+v", out[1])
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Streaming-parser regression tests (review fixes 8, 9, 17)
 // ---------------------------------------------------------------------------
