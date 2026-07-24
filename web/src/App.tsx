@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatState } from "./stores/chatStore";
 import { ProjectProvider } from "./stores/projectStore";
-import { api, apiPath, authHeaders } from "./api/client";
+import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
 import AgentPreview from "./components/Chat/AgentPreview";
@@ -27,9 +27,12 @@ import ModelDialog from "./components/Layout/ModelDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
 import { useTheme } from "./hooks/useTheme";
+import { useEditorTabs } from "./hooks/useEditorTabs";
 import { useChat } from "./hooks/useChat";
 import { dispatchCommand } from "./components/Chat/commands";
 import SessionPage from "./pages/SessionPage";
+import FilePicker from "./components/Files/FilePicker";
+import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 
 type ModelDialogTab = "main" | "small" | "advisor";
 
@@ -91,42 +94,20 @@ function HomeApp() {
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const [cmdOpen, setCmdOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState("chat");
-
-  // Editor tabs state — each open file gets its own tab with Monaco editor
-  interface EditorTab {
-    id: string;
-    path: string;
-    content: string;
-  }
-  const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
-  const openFileIdsRef = useRef<Set<string>>(new Set());
-
-  const handleOpenFile = useCallback(async (path: string) => {
-    const id = `editor-${path}`;
-    if (openFileIdsRef.current.has(id)) {
-      setActiveTab(id);
-      return;
-    }
-    try {
-      const res = await fetch(apiPath(`/api/files/content?path=${encodeURIComponent(path)}`), {
-        headers: authHeaders(),
-      });
-      if (!res.ok) throw new Error("Failed to load file");
-      const data = await res.json();
-      openFileIdsRef.current.add(id);
-      setEditorTabs((prev) => [...prev, { id, path, content: data.content }]);
-      setActiveTab(id);
-    } catch (err) {
-      console.error("Failed to open file:", err);
-    }
-  }, []);
-
-  const handleCloseEditorTab = useCallback((id: string) => {
-    openFileIdsRef.current.delete(id);
-    setEditorTabs((prev) => prev.filter((t) => t.id !== id));
-    setActiveTab((prev) => (prev === id ? "files" : prev));
-  }, []);
+  const {
+    editorTabs,
+    activeTab,
+    setActiveTab,
+    handleOpenFile,
+    handleEditorChange,
+    requestCloseTab,
+    pendingClose,
+    confirmSaveAndClose,
+    confirmDiscardAndClose,
+    cancelClose,
+    saveError,
+    saveEditorTab,
+  } = useEditorTabs("chat");
 
   // Mobile responsive
   const isMobile = useIsMobile();
@@ -178,10 +159,22 @@ function HomeApp() {
       .catch(console.error);
   }, [dispatch]);
 
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
+
   useKeyboard({
     onNewSession: () => dispatch({ type: "RESET" }),
     onCommandPalette: () => setCmdOpen(true),
-    onEscape: () => setCmdOpen(false),
+    onFilePicker: () => setFilePickerOpen(true),
+    onSave: () => {
+      if (activeTab.startsWith("editor-")) {
+        const tab = editorTabs.find((t) => t.id === activeTab);
+        if (tab) saveEditorTab(tab.id);
+      }
+    },
+    onEscape: () => {
+      setCmdOpen(false);
+      setFilePickerOpen(false);
+    },
   });
 
   const openModelDialog = (tab: ModelDialogTab = "main") => {
@@ -264,8 +257,8 @@ function HomeApp() {
           <TopTabs
             activeTab={activeTab}
             onTabChange={setActiveTab}
-            editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path }))}
-            onEditorTabClose={handleCloseEditorTab}
+            editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
+            onEditorTabClose={requestCloseTab}
           />
 
           {/* Open session tabs */}
@@ -283,6 +276,7 @@ function HomeApp() {
                     key={editorTab.id}
                     path={editorTab.path}
                     content={editorTab.content}
+                    onChange={(value) => handleEditorChange(editorTab.id, value)}
                     readOnly={false}
                   />
                 );
@@ -349,6 +343,20 @@ function HomeApp() {
           onApprove={resolvePermission}
         />
       )}
+
+      <FilePicker
+        open={filePickerOpen}
+        onClose={() => setFilePickerOpen(false)}
+        onOpenFile={handleOpenFile}
+      />
+      <ConfirmCloseDialog
+        path={pendingClose?.path ?? ""}
+        open={pendingClose !== null}
+        error={saveError}
+        onSave={confirmSaveAndClose}
+        onDiscard={confirmDiscardAndClose}
+        onCancel={cancelClose}
+      />
     </div>
   );
 }
