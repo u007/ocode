@@ -311,6 +311,13 @@ export const api = {
       method: "POST",
     }),
 
+  // ── File content save (PUT) ──
+  saveFileContent: (path: string, content: string) =>
+    fetchJSON<{ path: string; saved: boolean }>("/api/files/content", {
+      method: "PUT",
+      body: JSON.stringify({ path, content }),
+    }),
+
   // ── Session title / export ──
   setSessionTitle: (id: string, title: string) =>
     fetchJSON<{ title: string }>(
