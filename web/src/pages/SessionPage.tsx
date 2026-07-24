@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, apiPath, authHeaders, connectSessionMirror } from "../api/client";
+import { api, connectSessionMirror } from "../api/client";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
 import type { Message, TUIStatus } from "../api/types";
 import ChatPanel from "../components/Chat/ChatPanel";
@@ -22,7 +22,11 @@ import AssetsPanel from "../components/Assets/AssetsPanel";
 import CronPanel from "../components/Cron/CronPanel";
 import { useChat } from "../hooks/useChat";
 import { useIsMobile } from "../hooks/useIsMobile";
+import { useKeyboard } from "../hooks/useKeyboard";
+import { useEditorTabs } from "../hooks/useEditorTabs";
 import { dispatchCommand } from "../components/Chat/commands";
+import FilePicker from "../components/Files/FilePicker";
+import ConfirmCloseDialog from "../components/Files/ConfirmCloseDialog";
 
 /** Trigger a browser file download from an in-memory string. */
 function triggerDownload(filename: string, content: string, mimeType: string) {
@@ -50,44 +54,35 @@ export default function SessionPage() {
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
-  const [activeTab, setActiveTab] = useState("chat");
+  const {
+    editorTabs,
+    activeTab,
+    setActiveTab,
+    handleOpenFile,
+    handleEditorChange,
+    requestCloseTab,
+    pendingClose,
+    confirmSaveAndClose,
+    confirmDiscardAndClose,
+    cancelClose,
+    saveError,
+    saveEditorTab,
+  } = useEditorTabs("chat");
 
-  // Editor tabs state
-  interface EditorTab {
-    id: string;
-    path: string;
-    content: string;
-  }
-  const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
-  const openFileIdsRef = useRef<Set<string>>(new Set());
+  const [filePickerOpen, setFilePickerOpen] = useState(false);
+
+  useKeyboard({
+    onFilePicker: () => setFilePickerOpen(true),
+    onSave: () => {
+      if (activeTab.startsWith("editor-")) {
+        const tab = editorTabs.find((t) => t.id === activeTab);
+        if (tab) saveEditorTab(tab.id);
+      }
+    },
+    onEscape: () => setFilePickerOpen(false),
+  });
 
   const isMobile = useIsMobile();
-
-  const handleOpenFile = useCallback(async (path: string) => {
-    const id = `editor-${path}`;
-    if (openFileIdsRef.current.has(id)) {
-      setActiveTab(id);
-      return;
-    }
-    try {
-      const res = await fetch(apiPath(`/api/files/content?path=${encodeURIComponent(path)}`), {
-        headers: authHeaders(),
-      });
-      if (!res.ok) throw new Error("Failed to load file");
-      const data = await res.json();
-      openFileIdsRef.current.add(id);
-      setEditorTabs((prev) => [...prev, { id, path, content: data.content }]);
-      setActiveTab(id);
-    } catch (err) {
-      console.error("Failed to open file:", err);
-    }
-  }, []);
-
-  const handleCloseEditorTab = useCallback((id: string) => {
-    openFileIdsRef.current.delete(id);
-    setEditorTabs((prev) => prev.filter((t) => t.id !== id));
-    setActiveTab((prev) => (prev === id ? "files" : prev));
-  }, []);
 
   // Keep a ref to the latest state for use in the SSE callback
   const stateRef = useRef(state);
@@ -391,8 +386,8 @@ export default function SessionPage() {
       <TopTabs
         activeTab={activeTab}
         onTabChange={setActiveTab}
-        editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path }))}
-        onEditorTabClose={handleCloseEditorTab}
+        editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
+        onEditorTabClose={requestCloseTab}
       />
       <div className="flex flex-1 overflow-hidden">
         <main className="flex flex-1 flex-col overflow-hidden">
@@ -406,6 +401,7 @@ export default function SessionPage() {
                   key={editorTab.id}
                   path={editorTab.path}
                   content={editorTab.content}
+                  onChange={(value) => handleEditorChange(editorTab.id, value)}
                   readOnly={false}
                 />
               );
@@ -468,6 +464,20 @@ export default function SessionPage() {
           onSubmit={submitQuestionAnswers}
         />
       )}
+
+      <FilePicker
+        open={filePickerOpen}
+        onClose={() => setFilePickerOpen(false)}
+        onOpenFile={handleOpenFile}
+      />
+      <ConfirmCloseDialog
+        path={pendingClose?.path ?? ""}
+        open={pendingClose !== null}
+        error={saveError}
+        onSave={confirmSaveAndClose}
+        onDiscard={confirmDiscardAndClose}
+        onCancel={cancelClose}
+      />
     </div>
   );
 }
