@@ -11715,14 +11715,14 @@ func (m *model) allowOutOfScopePath(req agent.PermissionRequest, persist bool) {
 // a bash-prefix or tool rule. It covers bash cd-target/path-arg asks (which carry
 // OutOfScopePath) and the redirection/env out-of-scope asks.
 func isOutOfScopePathRequest(req agent.PermissionRequest) bool {
-	return req.OutOfScopePath != "" || strings.HasSuffix(req.Rule, ".out_of_scope")
+	return req.OutOfScopePath != "" || strings.HasSuffix(req.Rule, ".out_of_scope") || strings.HasSuffix(req.Rule, ".path_pattern")
 }
 
 func outOfScopePathRoot(req agent.PermissionRequest) string {
 	if req.OutOfScopePath != "" {
 		return pathRootFromTarget(req.OutOfScopePath)
 	}
-	if !strings.HasSuffix(req.Rule, ".out_of_scope") {
+	if !strings.HasSuffix(req.Rule, ".out_of_scope") && !strings.HasSuffix(req.Rule, ".path_pattern") {
 		return ""
 	}
 	return pathRootFromPermissionArgs(req.Args)
@@ -12900,12 +12900,22 @@ var permBtnHoverStyle = permBtnStyle.
 	Background(lipgloss.Color("12")).
 	BorderForeground(lipgloss.Color("12"))
 
-// fileSearchResult holds a single workspace file for the ctrl+p file search.
-type fileSearchResult struct {
-	path     string // relative path (e.g. "internal/tui/model.go")
-	dirName  string // parent directory name (e.g. "tui")
-	fileName string // file name (e.g. "model.go")
-}
+	// alwaysVisibleDotfiles are hidden files (dotfiles) that appear in the
+	// ctrl+p file search even when hidden files are not shown. These are
+	// commonly-edited config files that users reach for frequently.
+	var alwaysVisibleDotfiles = map[string]struct{}{
+		".gitignore":     {},
+		".editorconfig":  {},
+		".gitattributes": {},
+		".env.example":   {},
+	}
+
+	// fileSearchResult holds a single workspace file for the ctrl+p file search.
+	type fileSearchResult struct {
+		path     string // relative path (e.g. "internal/tui/model.go")
+		dirName  string // parent directory name (e.g. "tui")
+		fileName string // file name (e.g. "model.go")
+	}
 
 // scanWorkspaceFiles walks the workspace tree and returns non-ignored files.
 // Only root .gitignore and .ignore files are consulted (nested ignore files
@@ -12944,9 +12954,12 @@ func scanWorkspaceFiles(root string, showHidden bool) []fileSearchResult {
 			}
 			return nil
 		}
-		// Skip hidden files (dotfiles like .env, .DS_Store, etc.) unless showHidden.
+		// Skip hidden files (dotfiles like .env, .DS_Store, etc.) unless
+		// showHidden or the file is in the alwaysVisibleDotfiles allowlist.
 		if !showHidden && strings.HasPrefix(name, ".") {
-			return nil
+			if _, ok := alwaysVisibleDotfiles[name]; !ok {
+				return nil
+			}
 		}
 		// Skip paths matched by .gitignore / .ignore patterns.
 		rel, _ := filepath.Rel(root, path)

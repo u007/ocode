@@ -172,6 +172,12 @@ func Run(args []string) error {
 	}
 	agent.ApplyAgentConfig(cfg)
 
+	// Headless runs default discovery off regardless of the user's saved
+	// config: no TUI to warm the corpus or show discovery state, and a
+	// cold-start blocking summarize/embed pass just delays the one-shot
+	// response. Disabled discovery fails open — all skills/tools attach.
+	cfg.Ocode.Discovery.Enabled = false
+
 	if opts.model != "" {
 		cfg.Model = opts.model
 	}

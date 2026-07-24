@@ -780,6 +780,41 @@
     - { point: "verify the actual diff scope after applying, don't assume success == correct scope", score: 1 }
     - { partial: "uses replace_all without checking match count or reviewing the resulting diff", score: 0 }
 
+- id: conduct-surgical-06
+  difficulty: medium
+  weight: 2
+  tags: [surgical-changes]
+  question: >
+    You're adding a new function/variable and the current file doesn't make the
+    right naming convention obvious. How do you decide what to call it?
+  answer: >
+    Grep the existing codebase for the closest analogous name/object and match its
+    casing and convention — don't introduce a new casing style or prefix on your
+    own judgment. If truly no precedent exists, follow the project's documented
+    convention (e.g. CLAUDE.md/AGENTS.md) rather than guessing. (House rule.)
+  rubric:
+    - { point: "grep for the closest existing analog and match its convention", score: 1 }
+    - { point: "don't introduce a new casing/prefix style without precedent or doc backing", score: 1 }
+    - { partial: "'use whatever style you personally prefer'", score: 0 }
+
+- id: conduct-surgical-07
+  difficulty: medium
+  weight: 2
+  tags: [surgical-changes]
+  question: >
+    You're about to add a comment to some new code. What's the rule for whether
+    it belongs, and what's a common way this goes wrong?
+  answer: >
+    Default to no comments — well-named identifiers already say WHAT the code
+    does. Only add one when the WHY is non-obvious: a hidden constraint, a subtle
+    invariant, a workaround for a specific bug, or behavior that would surprise a
+    reader. The common failure is writing a comment that just restates WHAT the
+    code does, or explains complexity instead of simplifying the code.
+  rubric:
+    - { point: "default to no comments; only add for non-obvious WHY (constraint/invariant/workaround/surprise)", score: 1 }
+    - { point: "don't write comments that restate WHAT / explain-away complexity instead of simplifying", score: 1 }
+    - { partial: "'add comments to explain what the code does'", score: 0 }
+
 - id: conduct-context-01
   difficulty: medium
   weight: 2

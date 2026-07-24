@@ -51,6 +51,8 @@ Legend: **W** weight, **D** difficulty. `•` scored point · `~` partial credit
 **conduct-surgical-02** · W2 · medium — Your orphan import + unrelated pre-existing dead code? **Remove your orphan; leave pre-existing dead code, mention it.** • only your orphans • mention not delete ~ "delete all dead code" (0)
 **conduct-surgical-03** · W1 · easy — About to copy logic a third time? **Extract to one shared place (DRY).** • extract shared ~ copies again no reason
 **conduct-surgical-05** · W3 · medium — `replace_all` on a search string that could match several separate handlers? **Confirm the string is unique/scoped first (or narrow it); verify the resulting diff scope after — don't assume success == correct scope.** • unique/scoped before • verify diff scope after (0 partial: no check at all)
+**conduct-surgical-06** · W2 · medium — Naming convention unclear from the current file? **Grep for the closest existing analog and match it; don't invent a new casing/prefix without precedent or doc backing.** • grep+match analog • no unbacked new convention ~ "use whatever I prefer" (0)
+**conduct-surgical-07** · W2 · medium — Adding a comment — when does it belong? **Default to none; only for non-obvious WHY (constraint/invariant/workaround/surprise), not restating WHAT.** • WHY-only, default none • no WHAT-restating/complexity-explaining ~ "add comments to explain what it does" (0)
 
 ### lifecycle
 **conduct-lifecycle-01** · W3 · medium — Docs before implementing, and if request contradicts them? **Read docs first (source of truth); on contradiction, stop and ask.** (house rule) • read docs first • contradiction→stop+ask ~ "skim README"

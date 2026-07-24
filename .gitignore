@@ -64,3 +64,5 @@ ocodeconfig.json
 cmd/ocode-desktop/embedded-assets/skills/
 cmd/ocode-desktop/embedded-assets/.opencode/
 cmd/ocode-desktop/embedded-assets/*.OCODE.md
+/*.log
+

@@ -18,7 +18,7 @@
 >     <your answer>
 > ```
 
-Total questions: 47
+Total questions: 49
 
 ---
 
@@ -205,6 +205,14 @@ A run fails with a stack trace and error message. Where do you start?
 ### conduct-surgical-05
 
 You're about to edit a file with `replace_all: true` on a search string like `if (guard) return c.json(guard, 400);` that could plausibly appear inside several separate handler functions. What must you check before and after applying it?
+
+### conduct-surgical-06
+
+You're adding a new function/variable and the current file doesn't make the right naming convention obvious. How do you decide what to call it?
+
+### conduct-surgical-07
+
+You're about to add a comment to some new code. What's the rule for whether it belongs, and what's a common way this goes wrong?
 
 ### conduct-context-01
 

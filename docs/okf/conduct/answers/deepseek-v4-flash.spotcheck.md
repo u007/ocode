@@ -236,3 +236,76 @@ reproduce, so this result doesn't confirm or refute that specific failure mode �
 only that the *stated* principle is sound. Not yet folded into a full-corpus
 resweep; `scores/deepseek-v4-flash.md` still reports 83.9%/94.9% on the original
 45.
+
+---
+
+## Incremental spot-check — 2 new questions (2026-07-24)
+
+`conduct-surgical-06` (naming convention with no local precedent) and
+`conduct-surgical-07` (when a comment belongs) were added to close a coverage
+gap: the corpus had no question testing naming-convention adherence, and only
+tested the "don't over-comment" half of the comment rule, never the WHY-comment
+side. Run via `ocode run -dir <isolated scratch dir>` — headless mode's
+discovery-based skill/tool gating was disabled by default this session
+(`internal/runcli/run.go`), so this and future headless closed-book runs expose
+the full tool/skill set rather than an embedding-attached subset; irrelevant
+here since the run is closed-book with no repo access regardless. Baseline used
+a same-commit build with `skills/kaizen/conduct-tuning-deepseek-v4-flash/`
+temporarily removed (so the auto-force-inject gate — model id match — has
+nothing to inject); with-digest used the normal build, letting the existing
+digest force-inject exactly as production does (no extra system-prompt text
+added by hand).
+
+### Baseline — no digest (temporarily-stripped build)
+
+1. **(surgical-06)** "First, check sibling files in the same directory and
+   package — they often reveal a local pattern not obvious from one file. If
+   that's ambiguous, look for a project-level style guide or linter config
+   (`.golangci.yml`, `.eslintrc`, `rustfmt.toml`, etc.) … Failing those, fall
+   back to the language community standard … keep a list of the names you
+   introduce so the file stays internally consistent."
+2. **(surgical-07)** "A comment belongs when it explains *why* the code exists
+   (context, tradeoff, non-obvious constraint, or the reason a simpler approach
+   doesn't work). It does NOT belong when it merely restates *what* the code
+   does … Another common failure is a 'tutorial comment' that narrates each
+   line for someone who already reads the language."
+
+Grading: surgical-06 **2.0/2** (checks local files first, defers to
+style-guide/linter over invented convention — hits both rubric points).
+surgical-07 **2.0/2** (WHY-only framing explicit; WHAT-restating failure named
+directly). **Total 4.0/4.**
+
+### With digest — production force-inject (unmodified build)
+
+1. **(surgical-06)** "Look at other files in the same package or module to find
+   the dominant naming convention. If no clear pattern emerges, follow the
+   community convention for the language … When still uncertain, pick the most
+   readable option and stay consistent within the change set."
+2. **(surgical-07)** "A comment belongs when it explains *why* the code does
+   something non-obvious … Comments that restate *what* the code does (e.g.,
+   `// increment i by 1` above `i++`) are noise … The common failure is writing
+   'what' comments instead of 'why' comments."
+
+Grading: surgical-06 **1.0/2** ("pick the most readable option" under
+uncertainty drifts toward the rubric's own-preference trap — the digest doesn't
+target naming conventions and offers no directive here, so this is a bare
+regression to point). surgical-07 **2.0/2** (unchanged, cleanest example of the
+two runs). **Total 3.0/4.**
+
+| id | tag | baseline | with digest | Δ |
+|----|-----|---------:|------------:|---:|
+| conduct-surgical-06 | surgical-changes (control) | 2.0 | 1.0 | -1.0 |
+| conduct-surgical-07 | surgical-changes (control) | 2.0 | 2.0 | 0.0 |
+| **total** | | **4.0** | **3.0** | **-1.0** |
+
+**Reading:** both questions discriminate less than the corpus average (deepseek
+already handles them well baseline), so as corpus additions their main value is
+guarding the naming/comment sub-facets against regression, not lifting a weak
+tag. Neither is a digest target — the existing `surgical-changes` digest section
+covers orphans-only/no-Scout-Rule/`replace_all`-scope, nothing about naming or
+comment-WHY — so per the noise-vs-signal rule in `HOW-TO-EVALUATE.md` (only
+trust target-tag movement; a control can wobble ±0.1-0.15 on one sample — the
+same `surgical-changes` tag showed 0.86→0.71 noise for hy3), the surgical-06
+regression is a single-sample control wobble, not a directive to extend the
+digest. Not folded into a full-corpus resweep; `scores/deepseek-v4-flash.md`
+still reports 83.9%/94.9% on the original 45.
