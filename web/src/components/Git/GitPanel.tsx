@@ -64,7 +64,7 @@ export default function GitPanel({ onOpenFile }: Props) {
 
   if (!status) return null;
 
-  const selectedDiff = files.find((f) => f.path === selectedFile);
+  const selectedDiff = (files ?? []).find((f) => f.path === selectedFile);
 
   return (
     <div className="flex flex-col h-full">

@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
-import { Loader2, Settings2 } from "lucide-react";
 import type { editor } from "monaco-editor";
+import { Loader2, Settings2 } from "lucide-react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
 import {
@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import MonacoSettingsPanel from "./MonacoSettingsPanel";
+import { parseDiffPatch, type DiffLine, type Hunk } from "../../lib/parseDiffPatch";
 
 // Ensure Monaco is configured before any editor mounts.
 import "../../lib/monaco-setup";
@@ -22,6 +23,10 @@ interface FileEditorProps {
   onChange?: (value: string) => void;
   readOnly?: boolean;
   onOpenSettings?: () => void;
+  /** Active session ID for fetching change diffs. Decorations skip when omitted. */
+  session?: string;
+  /** Called when the selection (non-collapsed range) changes in the editor. */
+  onSelectionChange?: (sel: { startLine: number; endLine: number } | null) => void;
 }
 
 // Map file extensions to Monaco language identifiers.
@@ -48,9 +53,9 @@ function extensionToLanguage(filePath: string): string {
     less: "less",
     html: "html",
     json: "json",
+    xml: "xml",
     yaml: "yaml",
     yml: "yaml",
-    xml: "xml",
     md: "markdown",
     sql: "sql",
     sh: "shell",
@@ -68,6 +73,14 @@ function extensionToLanguage(filePath: string): string {
   return langMap[ext] || "plaintext";
 }
 
+/**
+ * Determine whether a hunk represents a modification (mix of del+add at the
+ * same position) vs a pure addition (only add lines).
+ */
+function isModifiedHunk(hunk: Hunk): boolean {
+  return hunk.lines.some((l: DiffLine) => l.type === "del") && hunk.lines.some((l: DiffLine) => l.type === "add");
+}
+
 export default function FileEditor({
   path,
   content,
@@ -75,14 +88,23 @@ export default function FileEditor({
   onChange,
   readOnly = false,
   onOpenSettings,
+  session,
+  onSelectionChange,
 }: FileEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
+  // Store the Monaco API object so it's available in effects that can't reach
+  // the onMount closure.
+  const monacoRef = useRef<typeof import("monaco-editor") | null>(null);
   const [persistedSettings, setPersistedSettings] = useState<editor.IStandaloneEditorConstructionOptions | null>(null);
   const [persistedTheme, setPersistedTheme] = useState<string>("ocode-dark");
   // When the parent doesn't provide onOpenSettings (the current default), the
   // Settings button opens the Monaco settings/extensions panel in a dialog.
   const [settingsOpen, setSettingsOpen] = useState(false);
   const lang = language || extensionToLanguage(path);
+
+  // Refs for diff decoration cleanup
+  const decorationIdsRef = useRef<string[]>([]);
+  const viewZoneIdsRef = useRef<string[]>([]);
 
   // Load persisted Monaco settings on mount
   useEffect(() => {
@@ -104,8 +126,9 @@ export default function FileEditor({
       });
   }, []);
 
-  const handleEditorMount: OnMount = useCallback((editor, monaco) => {
-    editorRef.current = editor;
+  const handleEditorMount: OnMount = useCallback((ed, monaco) => {
+    editorRef.current = ed;
+    monacoRef.current = monaco;
 
     // Match the shadcn dark theme
     monaco.editor.defineTheme("ocode-dark", {
@@ -148,10 +171,191 @@ export default function FileEditor({
     monaco.editor.setTheme("ocode-dark");
   }, []);
 
-  // Update content when the file path changes
+  // ── Selection tracking ──
+  // Wire onDidChangeCursorSelection after mount to report non-collapsed selections.
+  useEffect(() => {
+    const ed = editorRef.current;
+    if (!ed || !onSelectionChange) return;
+
+    const disposable = ed.onDidChangeCursorSelection((e) => {
+      const sel = e.selection;
+      if (sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn) {
+        // Collapsed (cursor only, no selection)
+        onSelectionChange(null);
+      } else {
+        onSelectionChange({
+          startLine: sel.startLineNumber,
+          endLine: sel.endLineNumber - 1, // Monaco endLine is exclusive; convert to inclusive
+        });
+      }
+    });
+
+    return () => disposable.dispose();
+  }, [onSelectionChange]);
+
+  // ── Inline diff decorations ──
+  // Fetch the change diff whenever path or session changes, parse it, and apply
+  // deltaDecorations (for added/modified lines) and view zones (for deleted lines).
+  useEffect(() => {
+    const ed = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!ed || !monaco || !session) return;
+
+    let cancelled = false;
+
+    // Clear previous decorations/zones
+    if (decorationIdsRef.current.length > 0) {
+      ed.deltaDecorations(decorationIdsRef.current, []);
+      decorationIdsRef.current = [];
+    }
+    // View zones must be removed one at a time
+    for (const zoneId of viewZoneIdsRef.current) {
+      ed.changeViewZones((accessor) => {
+        accessor.removeZone(zoneId);
+      });
+    }
+    viewZoneIdsRef.current = [];
+
+    api
+      .getChangeDiff(session, path)
+      .then((res) => {
+        if (cancelled) return;
+        const hunks = parseDiffPatch(res.patch);
+        if (hunks.length === 0) return;
+
+        const decorations: editor.IModelDeltaDecoration[] = [];
+        const zoneDefs: { afterLine: number; lines: { text: string }[] }[] = [];
+
+        for (const hunk of hunks) {
+          const modified = isModifiedHunk(hunk);
+          const delRunLines: string[] = [];
+          let currentNewLine = hunk.newStart;
+
+          for (const line of hunk.lines) {
+            if (line.type === "add") {
+              // Added/modified line — highlight with decoration
+              const className = modified
+                ? "diff-line-modified"
+                : "diff-line-added";
+              const gutter = modified ? "diff-gutter-modified" : "diff-gutter-added";
+              decorations.push({
+                range: new monaco.Range(currentNewLine, 1, currentNewLine, 1),
+                options: {
+                  isWholeLine: true,
+                  className,
+                  linesDecorationsClassName: gutter,
+                  minimap: {
+                    color: modified ? "#eab308" : "#22c55e",
+                    position: monaco.editor.MinimapPosition.Gutter,
+                  },
+                },
+              });
+              currentNewLine++;
+            } else if (line.type === "del") {
+              delRunLines.push(line.text);
+            } else {
+              // Context line — flush any pending deletion run as a view zone
+              // above THIS line (since it's the line after the deletion).
+              if (delRunLines.length > 0) {
+                zoneDefs.push({
+                  afterLine: currentNewLine - 1,
+                  lines: delRunLines.map((t: string) => ({ text: t })),
+                });
+                delRunLines.length = 0;
+              }
+              currentNewLine++;
+            }
+          }
+
+          // Flush trailing deletion run at end of hunk
+          if (delRunLines.length > 0) {
+            zoneDefs.push({
+              afterLine: currentNewLine - 1,
+              lines: delRunLines.map((t: string) => ({ text: t })),
+            });
+          }
+        }
+
+        // Apply decorations
+        decorationIdsRef.current = ed.deltaDecorations([], decorations);
+
+        // Apply view zones
+        ed.changeViewZones((accessor) => {
+          for (const zd of zoneDefs) {
+            const domNode = document.createElement("div");
+            domNode.className = "monaco-deleted-block";
+            domNode.style.cssText = [
+              "background: rgba(127, 17, 17, 0.15);",
+              "border-left: 3px solid rgba(239, 68, 68, 0.6);",
+              "padding: 2px 8px;",
+              "font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'SF Mono', Menlo, monospace;",
+              "font-size: 12px;",
+              "color: rgba(239, 68, 68, 0.7);",
+              "display: flex;",
+              "align-items: flex-start;",
+              "gap: 6px;",
+              "user-select: text;",
+            ].join(" ");
+
+            // Copy button
+            const copyBtn = document.createElement("button");
+            copyBtn.innerHTML = [
+              '<svg width="12" height="12" viewBox="0 0 24 24" fill="none"',
+              '  stroke="currentColor" stroke-width="2"',
+              '  stroke-linecap="round" stroke-linejoin="round">',
+              '  <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>',
+              '  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
+              "</svg>",
+            ].join("\n");
+            copyBtn.title = "Copy deleted text";
+            copyBtn.style.cssText = [
+              "background: none;",
+              "border: none;",
+              "cursor: pointer;",
+              "color: rgba(239, 68, 68, 0.5);",
+              "padding: 0;",
+              "flex-shrink: 0;",
+              "margin-top: 2px;",
+            ].join(" ");
+            copyBtn.onmouseover = () => { copyBtn.style.color = "rgba(239, 68, 68, 0.9)"; };
+            copyBtn.onmouseout = () => { copyBtn.style.color = "rgba(239, 68, 68, 0.5)"; };
+            copyBtn.onclick = (e: MouseEvent) => {
+              e.stopPropagation();
+              const text = zd.lines.map((l) => l.text).join("\n");
+              navigator.clipboard.writeText(text).catch(console.error);
+            };
+
+            const textSpan = document.createElement("span");
+            textSpan.style.cssText = "white-space: pre-wrap;";
+            textSpan.textContent = zd.lines.map((l) => l.text).join("\n");
+
+            domNode.appendChild(copyBtn);
+            domNode.appendChild(textSpan);
+
+            const id = accessor.addZone({
+              afterLineNumber: Math.max(zd.afterLine, 1),
+              heightInLines: zd.lines.length,
+              domNode,
+            });
+            viewZoneIdsRef.current.push(id);
+          }
+        });
+      })
+      .catch(() => {
+        // 404 or network error — no diff for this file, skip silently.
+        // This is the common case (most files have no uncommitted changes).
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [path, session]);
+
+  // Reset editor ref when path changes
   useEffect(() => {
     return () => {
       editorRef.current = null;
+      monacoRef.current = null;
     };
   }, [path]);
 
@@ -177,8 +381,7 @@ export default function FileEditor({
         </div>
       </div>
 
-      {/* Editor settings & extensions panel (opened by the Settings button when
-          the parent doesn't handle onOpenSettings itself). */}
+      {/* Editor settings & extensions panel */}
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
         <DialogContent className="max-w-md h-[70vh] p-0 overflow-hidden gap-0 !flex flex-col">
           <DialogHeader className="px-4 py-2 border-b border-border">

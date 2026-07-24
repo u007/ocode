@@ -72,7 +72,7 @@ func (h *Handler) HandleGitDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var files []GitDiffFile
+	files := make([]GitDiffFile, 0)
 
 	// Get modified/added/deleted files from git diff
 	diffArgs := []string{"diff", "--no-color", "-u"}

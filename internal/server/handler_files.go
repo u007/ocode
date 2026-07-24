@@ -1,11 +1,13 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/u007/ocode/internal/snapshot"
 )
@@ -52,6 +54,76 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"path":    path,
 		"content": string(data),
+	})
+}
+
+type saveFileContentRequest struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) {
+	var req saveFileContentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+
+	root := h.workDir
+	if root == "" {
+		root = "."
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve work dir")
+		return
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve work dir")
+		return
+	}
+	absTarget, err := filepath.Abs(req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	// Resolve symlinks in the target's parent directory (the target itself
+	// may not exist yet), then re-check containment against the real root so
+	// a symlink inside the workspace can't be used to write outside it.
+	realParent, err := filepath.EvalSymlinks(filepath.Dir(absTarget))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	realTarget := filepath.Join(realParent, filepath.Base(absTarget))
+	rel, err := filepath.Rel(realRoot, realTarget)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		writeError(w, http.StatusBadRequest, "path is outside the workspace")
+		return
+	}
+
+	// O_NOFOLLOW rejects the write if the final path component is itself a
+	// symlink, closing the window between the containment check above and
+	// the write below.
+	f, err := os.OpenFile(realTarget, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte(req.Content)); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"path":  req.Path,
+		"saved": true,
 	})
 }
 

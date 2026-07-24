@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"path/filepath"
 	"testing"
 )
@@ -53,6 +54,32 @@ func TestGitDiffCleanRepo(t *testing.T) {
 	}
 	if len(result) != 0 {
 		t.Errorf("expected empty list for clean repo, got %d files", len(result))
+	}
+}
+
+func TestGitDiffCleanRepoReturnsEmptyArray(t *testing.T) {
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+
+	h := NewHandler()
+	h.SetWorkDir(dir)
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/git/diff", nil)
+	h.HandleGitDiff(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+
+	// Check raw body: must be JSON array "[]" not "null"
+	// Decoding into Go []GitDiffFile hides the difference because
+	// json.Decode of null into a slice leaves it nil (len(nil)==0).
+	body := w.Body.String()
+	if body == "null\n" || body == "null" {
+		t.Fatal("clean repo returned JSON null instead of empty array [] — frontend crashes on .find()")
+	}
+	if !strings.HasPrefix(body, "[") {
+		t.Fatalf("expected JSON array starting with '[', got: %s", body)
 	}
 }
 

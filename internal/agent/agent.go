@@ -3833,11 +3833,23 @@ func (a *Agent) LoadExternalTools(cfg *config.Config) {
 // handshake, ListTools) but does NOT mutate the agent's tool set - the caller
 // must apply the returned tools via AddMCPTools on the main goroutine.
 func (a *Agent) LoadMCPTools() mcpLoadResult {
-	res := mcpLoadResult{}
 	if a.config == nil {
+		return mcpLoadResult{}
+	}
+	return LoadMCPToolsForConfig(a.config)
+}
+
+// LoadMCPToolsForConfig connects to every enabled MCP server in cfg and
+// enumerates its tools. It is a pure function of cfg (no Agent state), which
+// lets callers warm a single, process-wide MCP tool set once - since MCP
+// server config is process-global, every Agent in the process would
+// otherwise redo this same blocking I/O on its own first use.
+func LoadMCPToolsForConfig(cfg *config.Config) mcpLoadResult {
+	res := mcpLoadResult{}
+	if cfg == nil {
 		return res
 	}
-	for name, mcpCfg := range a.config.MCP {
+	for name, mcpCfg := range cfg.MCP {
 		if !mcpCfg.Enabled {
 			continue
 		}

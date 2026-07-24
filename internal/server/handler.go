@@ -25,6 +25,11 @@ type Handler struct {
 	cfg       *config.Config
 	rc        *RCBridge          // set when proxying to a TUI session
 	scheduler *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	// mcpCache holds the process-wide MCP tool enumeration. MCP server config
+	// (h.cfg.MCP) is identical for every session, so connecting to each
+	// server is done once per process instead of once per session - see
+	// newMCPCache.
+	mcpCache *mcpCache
 	// advisorEnabled is the runtime gate for the advisor tool, shared by all
 	// agents this handler creates. Seeded from config, flipped from the web
 	// sidebar, never persisted back to config.
@@ -63,14 +68,17 @@ func NewHandler() *Handler {
 		log.Printf("handler: init monaco store: %v (editor config disabled)", err)
 	}
 
-	return &Handler{
+	h := &Handler{
 		agents:         make(map[string]*agentSession),
 		cfg:            cfg,
 		advisorEnabled: advisorEnabled,
 		projects:       projStore,
 		monaco:         monacoStore,
 		headlessSubs:   make(map[chan SSEEvent]struct{}),
+		mcpCache:       newMCPCache(),
 	}
+	h.mcpCache.warm(cfg)
+	return h
 }
 
 // SetWorkDir sets the working directory for git commands (used in tests).
@@ -231,7 +239,10 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 		tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-		ag.LoadExternalToolsWithMCP(h.cfg)
+		ag.LoadExternalTools(h.cfg)
+		mcpTools, mcpErrs := h.mcpCache.wait()
+		ag.AddMCPTools(mcpTools)
+		ag.AddMCPErrors(mcpErrs)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
 
 		as = &agentSession{
@@ -468,7 +479,10 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 
 		tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-		ag.LoadExternalToolsWithMCP(h.cfg)
+		ag.LoadExternalTools(h.cfg)
+		mcpTools, mcpErrs := h.mcpCache.wait()
+		ag.AddMCPTools(mcpTools)
+		ag.AddMCPErrors(mcpErrs)
 		ag.SetAdvisorEnabled(h.advisorEnabled)
 
 		as = &agentSession{
@@ -616,7 +630,10 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	}
 	tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
 	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-	ag.LoadExternalToolsWithMCP(h.cfg)
+	ag.LoadExternalTools(h.cfg)
+	mcpTools, mcpErrs := h.mcpCache.wait()
+	ag.AddMCPTools(mcpTools)
+	ag.AddMCPErrors(mcpErrs)
 	ag.SetAdvisorEnabled(h.advisorEnabled)
 	as := &agentSession{agent: ag, messages: s.Messages, model: model}
 	h.agents[id] = as

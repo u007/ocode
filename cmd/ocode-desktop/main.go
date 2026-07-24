@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/services/dock"
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
@@ -118,6 +119,14 @@ func main() {
 		MinWidth:  800,
 		MinHeight: 600,
 		URL:       desktopURL,
+	})
+
+	// Closing the window quits the app. Without this, the system tray below
+	// keeps the process (and its in-process server) alive after the window
+	// closes — surprising on macOS where closing the last window normally
+	// terminates a non-tray app.
+	window.OnWindowEvent(events.Common.WindowClosing, func(*application.WindowEvent) {
+		app.Quit()
 	})
 
 	// System tray for show/hide and quit.

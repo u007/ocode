@@ -5,13 +5,18 @@ import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
 import { Paperclip, X } from "lucide-react";
 import { apiPath, authHeaders } from "@/api/client";
+import EditorContextChip from "./EditorContextChip";
 
 interface ChatInputProps {
   /** Called when a slash command is entered. Return true if handled (async). */
   onSlashCommand?: (command: string) => boolean | Promise<boolean>;
+  /** Active editor context (file path + optional selection) to display as a chip
+   *  and attach to the outgoing message. When provided, a chip is shown above
+   *  the input and the ref is prepended to the message on send. */
+  activeEditorContext?: { path: string; selection?: { startLine: number; endLine: number } } | null;
 }
 
-export default function ChatInput({ onSlashCommand }: ChatInputProps) {
+export default function ChatInput({ onSlashCommand, activeEditorContext }: ChatInputProps) {
   const [input, setInput] = useState("");
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
@@ -96,8 +101,16 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
       }
     }
 
+    // Build refs: attached files + active editor context
     const refs = attachedFiles.map((n) => `@.ocode/uploads/${n}`).join(" ");
-    const finalMessage = refs ? `${refs} ${trimmed}` : trimmed;
+    const contextRef = activeEditorContext
+      ? activeEditorContext.selection
+        ? `@${activeEditorContext.path}#L${activeEditorContext.selection.startLine}-L${activeEditorContext.selection.endLine}`
+        : `@${activeEditorContext.path}`
+      : "";
+
+    const parts = [contextRef, refs, trimmed].filter(Boolean);
+    const finalMessage = parts.join(" ");
     setAttachedFiles([]);
     sendMessage(finalMessage);
   };
@@ -149,25 +162,29 @@ export default function ChatInput({ onSlashCommand }: ChatInputProps) {
           onHover={setSelectedIndex}
         />
       )}
-      {attachedFiles.length > 0 && (
-        <div className="flex flex-wrap gap-1 mb-2">
-          {attachedFiles.map((name) => (
-            <span
-              key={name}
-              className="inline-flex items-center gap-1 text-xs bg-zinc-700 text-zinc-300 rounded px-2 py-0.5"
+      <div className="flex flex-wrap gap-1 mb-2">
+        {attachedFiles.map((name) => (
+          <span
+            key={name}
+            className="inline-flex items-center gap-1 text-xs bg-zinc-700 text-zinc-300 rounded px-2 py-0.5"
+          >
+            {name}
+            <button
+              type="button"
+              onClick={() => setAttachedFiles((prev) => prev.filter((n) => n !== name))}
+              className="text-zinc-500 hover:text-zinc-300"
             >
-              {name}
-              <button
-                type="button"
-                onClick={() => setAttachedFiles((prev) => prev.filter((n) => n !== name))}
-                className="text-zinc-500 hover:text-zinc-300"
-              >
-                <X className="w-3 h-3" />
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
+              <X className="w-3 h-3" />
+            </button>
+          </span>
+        ))}
+        {activeEditorContext && (
+          <EditorContextChip
+            path={activeEditorContext.path}
+            selection={activeEditorContext.selection ?? null}
+          />
+        )}
+      </div>
       <input
         type="file"
         multiple

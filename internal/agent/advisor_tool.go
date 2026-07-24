@@ -273,6 +273,15 @@ func (t AdvisorTool) Execute(args json.RawMessage) (string, error) {
 		advisorAgent.permissions.SetRule(name, PermissionAllow)
 	}
 
+	// Wire the same permission-ask callback the main agent hands to its own
+	// sub-agents (see subagent.go), so an out-of-scope tool call surfaces a
+	// real prompt to the user instead of returning the inert
+	// SentinelPermissionAsk string, which the advisor model can't act on.
+	if t.mainAgent != nil {
+		advisorAgent.OnPermissionAsk = t.mainAgent.subAgentPermAsker
+		advisorAgent.SetSubAgentPermAsker(t.mainAgent.subAgentPermAsker)
+	}
+
 	// Run the agentic tool loop with the user's context prompt.
 	messages := []Message{{Role: "user", Content: params.Prompt}}
 	resp, err := advisorAgent.Step(messages)

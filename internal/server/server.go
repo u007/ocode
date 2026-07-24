@@ -115,6 +115,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/themes", s.authMiddleware(s.handleListThemes))
 	s.mux.HandleFunc("GET /api/files/tree", s.authMiddleware(s.handleFileTree))
 	s.mux.HandleFunc("GET /api/files/content", s.authMiddleware(s.handleFileContent))
+	s.mux.HandleFunc("PUT /api/files/content", s.authMiddleware(s.handleSaveFileContent))
 	s.mux.HandleFunc("POST /api/files/open", s.authMiddleware(s.handleOpenFile))
 
 	// TUI status (consolidated snapshot for the web UI status bar)
@@ -327,6 +328,10 @@ func (s *Server) handleFileTree(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleFileContent(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleFileContent(w, r)
+}
+
+func (s *Server) handleSaveFileContent(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSaveFileContent(w, r)
 }
 
 func (s *Server) handleOpenFile(w http.ResponseWriter, r *http.Request) {

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, connectSessionMirror } from "../api/client";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
@@ -70,6 +70,45 @@ export default function SessionPage() {
   } = useEditorTabs("chat");
 
   const [filePickerOpen, setFilePickerOpen] = useState(false);
+
+  // Active editor context — tracks the current file and selection for the
+  // context chip above ChatInput. Cleared when no editor tab is active.
+  const [activeEditorContext, setActiveEditorContext] = useState<{
+    path: string;
+    selection?: { startLine: number; endLine: number };
+  } | null>(null);
+
+  // Update activeEditorContext whenever the active tab changes.
+  // Preserves existing selection when the same tab stays active (avoids
+  // resetting selection on every keystroke that re-creates editorTabs).
+  useEffect(() => {
+    if (activeTab.startsWith("editor-")) {
+      const tab = editorTabs.find((t) => t.id === activeTab);
+      if (tab) {
+        setActiveEditorContext((prev) => {
+          // Same path → preserve the existing selection/context unchanged
+          if (prev?.path === tab.path) return prev;
+          return { path: tab.path };
+        });
+      } else {
+        setActiveEditorContext(null);
+      }
+    } else {
+      setActiveEditorContext(null);
+    }
+  }, [activeTab, editorTabs]);
+
+  // Called by FileEditor when the selection (non-collapsed range) changes.
+  // Merges the selection into the activeEditorContext without losing path.
+  const handleSelectionChange = useCallback(
+    (sel: { startLine: number; endLine: number } | null) => {
+      setActiveEditorContext((prev) => {
+        if (!prev) return null;
+        return { ...prev, selection: sel ?? undefined };
+      });
+    },
+    [],
+  );
 
   useKeyboard({
     onFilePicker: () => setFilePickerOpen(true),
@@ -403,6 +442,8 @@ export default function SessionPage() {
                   content={editorTab.content}
                   onChange={(value) => handleEditorChange(editorTab.id, value)}
                   readOnly={false}
+                  session={state.sessionId ?? undefined}
+                  onSelectionChange={handleSelectionChange}
                 />
               );
             })()}
@@ -410,7 +451,10 @@ export default function SessionPage() {
             <>
               <ChatPanel />
               <AgentPreview />
-              <ChatInput onSlashCommand={handleCommand} />
+              <ChatInput
+                onSlashCommand={handleCommand}
+                activeEditorContext={activeEditorContext}
+              />
               <StatusBar
                 onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
                 onModelClick={() => openModelDialog("main")}
