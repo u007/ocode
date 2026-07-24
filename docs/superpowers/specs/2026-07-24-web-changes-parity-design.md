@@ -23,11 +23,12 @@ but has zero HTTP surface. This spec adds that surface plus the web panel.
 
 ## 1. User-facing summary
 
-A new **Changes** tab (web tab bar: Chat / Files / Changes / Git / Status /
-Logs / Cron / Assets — inserted between Files and Git, matching the TUI's
-position between its `files` and `git` tabs) lists every file the current
-chat session has added or edited, aggregated across the main agent and any
-sub-agents:
+A new **Changes** tab (current web tab bar per `TopTabs.tsx`: Chat / Files /
+Git / Status / Logs / Cron / Assets — new tab inserted between Files and
+Git, matching the TUI's position between its `files` and `git` tabs, giving
+Chat / Files / Changes / Git / Status / Logs / Cron / Assets) lists every
+file the current chat session has added or edited, aggregated across the
+main agent and any sub-agents:
 
 - **Left pane** — file rows: status icon (`+` added / `M` modified / `-`
   deleted), path, author summary (e.g. "main · 3", "build · 1"), a `(bash)`
@@ -74,18 +75,39 @@ New file `internal/server/handler_changes.go`, following the existing
   `changes.RenderDiff(fc.FirstBackupPath, path)`. 404 if `path` isn't in
   the current list (stale row on the client).
 - `POST /api/changes/undo-file?session={id}` body `{"path": string}` →
-  `registry.UndoFile(path)`. Returns `200 {}` on success, `409` with
-  `{"error": "not_undoable"}` when the returned error is
-  `changes.ErrNotUndoable`, `404` when the agent/registry isn't found,
-  `400` for any other error.
+  `registry.UndoFile(path)`. Both `UndoFile` and `UndoBlock` return errors
+  wrapped via `errors.Join` (e.g. `errors.Join(ErrNoChanges, storeErr)`), so
+  handlers MUST check with `errors.Is(err, changes.ErrNotUndoable)` /
+  `errors.Is(err, changes.ErrNoChanges)`, never `==`. Status mapping:
+  `200 {}` on `nil`; `409 {"error": "not_undoable"}` on
+  `errors.Is(err, changes.ErrNotUndoable)` (bash-only entry, or a file
+  whose only recorded state is an empty backup); `404 {"error":
+  "no_changes"}` on `errors.Is(err, changes.ErrNoChanges)` (unknown path,
+  or the underlying `snapshot.Store.UndoByToolCallID` refused — conflict,
+  expiry, or not-found); `404` (no body-specific error) when
+  `activeAgentForRuns` returns nil; `400` for any other error.
 - `POST /api/changes/undo-block?session={id}` body `{"path": string}` →
-  calls `LatestToolCall(path)` then `UndoBlock(path, tcid)`. Same status
-  code contract as undo-file, plus `404` with `{"error": "no_changes"}`
-  when `LatestToolCall` returns `changes.ErrNoChanges`.
+  calls `LatestToolCall(path)` then, on success, `UndoBlock(path, tcid)`.
+  `LatestToolCall` itself can return `ErrNoChanges` (no snapshot for path)
+  or `ErrNotUndoable` (bash-only) — map those the same way before even
+  attempting `UndoBlock`. Same status code contract as undo-file for the
+  `UndoBlock` call itself.
 
-All four handlers registered in `SetHandler`/`server.go`'s route table next
-to the existing `/api/agents/runs` registration. No changes to
+All four handlers registered in `server.go`'s route table (`s.mux.HandleFunc`
+calls in the same function that registers `/api/agents/runs`, around
+`server.go:106`), next to that existing registration. No changes to
 `internal/changes` itself — its API was already shaped for this.
+
+**Distinct from the existing global undo.** `POST /api/files/undo` and
+`POST /api/files/redo` already exist (`handler_files.go`) and call the
+package-level `snapshot.Undo()`/`snapshot.Redo()` — the same global,
+last-write-wins mechanism as the TUI's global `u`/`r` keys. The new
+`/api/changes/undo-file` and `/api/changes/undo-block` routes are a
+separate, per-file-scoped mechanism through `Registry.UndoFile`/
+`UndoBlock`, mirroring the TUI changes tab's own `u`/`U` keys (which
+already shadow the global `u`/`r` bindings per
+`2026-07-22-changes-tab-design.md` §5.3). Do not merge these into the
+existing `/api/files/undo` endpoint.
 
 ## 4. Web UI components
 
@@ -97,7 +119,8 @@ New directory `web/src/components/Changes/`:
   layout matching `GitPanel.tsx`'s structure (file list left, diff right).
 - **`ChangesFileList.tsx`** — row rendering: status icon, path, author
   summary, `(bash)` badge, disabled-with-tooltip undo buttons for
-  non-undoable rows.
+  non-undoable rows. Expandable per-row detail strip (mirrors the TUI's
+  `?` toggle) showing `lastBashCommand`/`lastBashExitCode` when present.
 - **`ChangesDiffView.tsx`** — fetches `GET /api/changes/diff` for the
   selected row, renders the unified diff (port of `GitPanel.tsx`'s
   `patch.split("\n")` line-coloring block into a shared/standalone
@@ -132,6 +155,8 @@ interface FileChange {
   authors: ChangeAuthor[];
   createdAt: string;
   updatedAt: string;
+  lastBashCommand: string;
+  lastBashExitCode: number;
 }
 ```
 
