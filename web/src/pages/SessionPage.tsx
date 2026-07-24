@@ -18,6 +18,7 @@ import FileTree from "../components/Files/FileTree";
 import GitPanel from "../components/Git/GitPanel";
 import LogPanel from "../components/Logs/LogPanel";
 import AssetsPanel from "../components/Assets/AssetsPanel";
+import CronPanel from "../components/Cron/CronPanel";
 import { useChat } from "../hooks/useChat";
 import { useIsMobile } from "../hooks/useIsMobile";
 import { dispatchCommand } from "../components/Chat/commands";
@@ -426,6 +427,7 @@ export default function SessionPage() {
             <StatusPanel key={id} onClose={() => setActiveTab("chat")} />
           )}
           {activeTab === "logs" && <LogPanel />}
+          {activeTab === "cron" && <CronPanel />}
           {activeTab === "assets" && <AssetsPanel />}
         </main>
 

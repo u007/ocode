@@ -5197,6 +5197,11 @@ func (m model) handleEscKey() (tea.Model, tea.Cmd) {
 		if m.agent.Runs() != nil {
 			m.agent.Runs().CancelAll()
 		}
+		// Clear the activity snapshot immediately so the activity row stops
+		// showing stale "working" indicators (⟳ LLM, active tools, running
+		// agents) before streamDoneMsg lands. Without this there is a 1–2
+		// frame window where the activity row still animates.
+		m.lastActivity = agent.ActivitySnapshot{}
 	}
 	if m.streaming {
 		return m, func() tea.Msg { return streamDoneMsg{err: context.Canceled} }

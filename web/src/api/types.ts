@@ -56,6 +56,87 @@ export interface AgentInfo {
   mode: string;
 }
 
+export type CronScheduleKind = "at" | "every" | "cron";
+
+export type CronPermissionMode = "normal" | "yolo" | "locked";
+
+export interface CronSchedule {
+  kind: CronScheduleKind;
+  at_ms?: number;
+  every_ms?: number;
+  expr?: string;
+  tz?: string;
+}
+
+export interface CronPayload {
+  message: string;
+  notes?: string;
+  owner?: string;
+  deliver_to?: string;
+  perm_mode?: CronPermissionMode;
+}
+
+export interface CronJobState {
+  next_run_at_ms?: number;
+  last_run_at_ms?: number;
+  last_status?: string;
+  last_error?: string;
+  runs?: number;
+}
+
+export interface CronJob {
+  id: string;
+  name: string;
+  schedule: CronSchedule;
+  payload: CronPayload;
+  state: CronJobState;
+  created_at_ms: number;
+  enabled: boolean;
+}
+
+export interface CronDelivery {
+  job_id: string;
+  job_name: string;
+  owner: string;
+  delivered_to?: string;
+  result: string;
+  error?: string;
+  at: string;
+}
+
+export interface CronJobsResponse {
+  jobs: CronJob[];
+}
+
+export interface CronOutboxResponse {
+  entries: CronDelivery[];
+}
+
+export interface CronTargetsResponse {
+  targets: Record<string, number>;
+}
+
+export interface CronJobWriteRequest {
+  name?: string;
+  message: string;
+  notes?: string;
+  owner?: string;
+  deliver_to?: string;
+  perm_mode?: CronPermissionMode;
+  schedule: CronSchedule;
+}
+
+export interface CronJobPatchRequest {
+  enabled?: boolean;
+  name?: string;
+  message?: string;
+  notes?: string;
+  owner?: string;
+  deliver_to?: string;
+  perm_mode?: CronPermissionMode;
+  schedule?: CronSchedule;
+}
+
 export interface SSETextEvent {
   delta: string;
 }

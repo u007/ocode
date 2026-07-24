@@ -610,6 +610,8 @@ func statusIcon(status agent.RunStatus, running string) string {
 		return successStyle.Render("✓")
 	case agent.RunFailed:
 		return errorStyle.Render("✗")
+	case agent.RunCancelled:
+		return hintStyle.Render("⊘")
 	default:
 		return running
 	}

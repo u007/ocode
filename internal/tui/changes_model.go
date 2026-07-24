@@ -95,10 +95,11 @@ func (m changesModel) Update(msg tea.Msg, w, h int) (changesModel, tea.Cmd) {
 func (m changesModel) handleKey(msg tea.KeyPressMsg) (changesModel, tea.Cmd) {
 	// Clear status message on any navigation keypress.
 	m.statusMsg = ""
-	// No refresh here: View() runs right after Update() on every message
-	// (bubbletea's Update->View cycle), so m.files is already at most one
-	// render stale. Refreshing again here would rebuild the registry's
-	// file list twice per keystroke.
+	// View() also calls refreshFiles(), but View has a value receiver, so
+	// its refreshed copy is discarded after rendering and never reaches
+	// the model Update() persists. Refresh here so m.files is populated
+	// on the model bubbletea actually keeps between messages.
+	m = m.refreshFiles()
 
 	if len(m.files) == 0 {
 		return m, nil

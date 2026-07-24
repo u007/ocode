@@ -787,4 +787,8 @@ func (m *model) rebuildAgentClient() {
 		m.agent.RestoreMCPToolNames(mcpNames)
 	}
 	m.syncRedactionRuntime()
+	// Rewire the changes tab's registry accessor to the rebuilt agent;
+	// installAgent isn't called here so this must be done explicitly, or
+	// the Changes tab keeps reading the old/nil agent's registry.
+	m.changes = m.changes.withRegistry(m.agent.Changes)
 }

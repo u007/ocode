@@ -280,3 +280,72 @@ func TestPanicIsolation(t *testing.T) {
 	}
 	_ = errOut
 }
+
+func TestUpdateJob(t *testing.T) {
+	s := newTestService(t)
+
+	id, err := s.AddJob(Job{
+		Schedule: Schedule{Kind: KindEvery, EveryMs: int64(time.Minute / time.Millisecond)},
+		Payload:  Payload{Message: "original"},
+	})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	disabled := false
+	updated, err := s.UpdateJob(id, JobPatch{Enabled: &disabled})
+	if err != nil {
+		t.Fatalf("update enabled: %v", err)
+	}
+	if updated.Enabled {
+		t.Fatal("want disabled after update")
+	}
+
+	newName := "renamed"
+	newPayload := Payload{Message: "updated message"}
+	updated, err = s.UpdateJob(id, JobPatch{Name: &newName, Payload: &newPayload})
+	if err != nil {
+		t.Fatalf("update name/payload: %v", err)
+	}
+	if updated.Name != "renamed" || updated.Payload.Message != "updated message" {
+		t.Fatalf("want renamed/updated message, got %+v", updated)
+	}
+	if updated.Enabled {
+		t.Fatal("want enabled to remain false after unrelated update")
+	}
+
+	reenabled := true
+	updated, err = s.UpdateJob(id, JobPatch{Enabled: &reenabled})
+	if err != nil {
+		t.Fatalf("re-enable: %v", err)
+	}
+	if !updated.Enabled {
+		t.Fatal("want enabled after re-enable")
+	}
+	if updated.State.NextRunAtMs == 0 {
+		t.Fatal("want NextRunAtMs recomputed on re-enable")
+	}
+
+	before := s.GetJob(id).State.NextRunAtMs
+	newSchedule := Schedule{Kind: KindEvery, EveryMs: int64(2 * time.Hour / time.Millisecond)}
+	updated, err = s.UpdateJob(id, JobPatch{Schedule: &newSchedule})
+	if err != nil {
+		t.Fatalf("update schedule: %v", err)
+	}
+	if updated.State.NextRunAtMs == before {
+		t.Fatal("want NextRunAtMs recomputed after schedule change")
+	}
+	wantNext := fixedNow.UnixMilli() + newSchedule.EveryMs
+	if updated.State.NextRunAtMs != wantNext {
+		t.Fatalf("want next run %d, got %d", wantNext, updated.State.NextRunAtMs)
+	}
+
+	badSchedule := Schedule{Kind: KindEvery, EveryMs: 0}
+	if _, err := s.UpdateJob(id, JobPatch{Schedule: &badSchedule}); err == nil {
+		t.Fatal("expected error for invalid schedule")
+	}
+
+	if _, err := s.UpdateJob("nonexistent", JobPatch{Enabled: &disabled}); err == nil {
+		t.Fatal("expected error for unknown id")
+	}
+}

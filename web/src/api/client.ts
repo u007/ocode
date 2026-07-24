@@ -19,6 +19,12 @@ import type {
   PluginInfo,
   CommandEntry,
   SkillEntry,
+  CronJob,
+  CronJobsResponse,
+  CronJobPatchRequest,
+  CronJobWriteRequest,
+  CronOutboxResponse,
+  CronTargetsResponse,
 } from "./types";
 
 // Base path for API calls. When the SPA is served under a tailscale --set-path
@@ -66,6 +72,17 @@ async function fetchJSON<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
+  const res = await fetch(apiPath(path), {
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    ...init,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+}
+
 export const api = {
   listSessions: () => fetchJSON<SessionInfo[]>("/api/sessions"),
   getSession: (id: string, opts?: { limit?: number; offset?: number }) => {
@@ -100,6 +117,31 @@ export const api = {
     fetchJSON<GitDiffFile[]>(
       `/api/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,
     ),
+  listCronJobs: () => fetchJSON<CronJobsResponse>("/api/cron"),
+  getCronJob: (id: string) => fetchJSON<CronJob>(`/api/cron/${id}`),
+  addCronJob: (job: CronJobWriteRequest) =>
+    fetchJSON<{ id: string }>("/api/cron", {
+      method: "POST",
+      body: JSON.stringify(job),
+    }),
+  updateCronJob: (id: string, patch: CronJobPatchRequest) =>
+    fetchJSON<CronJob>(`/api/cron/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }),
+  deleteCronJob: (id: string) =>
+    fetchEmpty(`/api/cron/${id}`, {
+      method: "DELETE",
+    }),
+  getCronOutbox: () => fetchJSON<CronOutboxResponse>("/api/cron/outbox"),
+  drainCronOutbox: () =>
+    fetchJSON<CronOutboxResponse>("/api/cron/outbox?drain=true"),
+  getCronTargets: () => fetchJSON<CronTargetsResponse>("/api/cron/targets"),
+  setCronTarget: (workdir: string, chatId: number) =>
+    fetchJSON<{ ok: boolean }>("/api/cron/targets", {
+      method: "POST",
+      body: JSON.stringify({ workdir, chat_id: chatId }),
+    }),
   getTheme: (name?: string) =>
     fetchJSON<ThemeResponse>(
       name ? `/api/theme?name=${encodeURIComponent(name)}` : "/api/theme",

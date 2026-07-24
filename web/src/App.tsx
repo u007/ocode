@@ -16,6 +16,7 @@ import FileTree from "./components/Files/FileTree";
 import FileEditor from "./components/Files/FileEditor";
 import LogPanel from "./components/Logs/LogPanel";
 import AssetsPanel from "./components/Assets/AssetsPanel";
+import CronPanel from "./components/Cron/CronPanel";
 import TopTabs from "./components/Layout/TopTabs";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
@@ -297,6 +298,7 @@ function HomeApp() {
             {activeTab === "git" && <GitPanel onOpenFile={handleOpenFile} />}
             {activeTab === "status" && <StatusPanel onClose={() => setActiveTab("chat")} />}
             {activeTab === "logs" && <LogPanel />}
+            {activeTab === "cron" && <CronPanel />}
             {activeTab === "assets" && <AssetsPanel />}
           </div>
 

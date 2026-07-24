@@ -1,4 +1,4 @@
-import { MessageSquare, FolderGit2, GitBranch, ScrollText, Paperclip, Activity, FileCode, X } from "lucide-react";
+import { MessageSquare, FolderGit2, GitBranch, ScrollText, Paperclip, Activity, FileCode, X, CalendarClock } from "lucide-react";
 
 export interface EditorTabInfo {
   id: string;
@@ -18,6 +18,7 @@ const mainTabs = [
   { id: "git", label: "Git", icon: GitBranch },
   { id: "status", label: "Status", icon: Activity },
   { id: "logs", label: "Logs", icon: ScrollText },
+  { id: "cron", label: "Cron", icon: CalendarClock },
   { id: "assets", label: "Assets", icon: Paperclip },
 ];
 

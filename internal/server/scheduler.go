@@ -11,9 +11,9 @@ import (
 	"github.com/u007/ocode/internal/scheduler"
 )
 
-// cronHandler serves the REST surface for listing/adding/removing scheduled
-// jobs. It is attached to the Server only when a *scheduler.Service is set via
-// attachScheduler below.
+// cronHandler serves the REST surface for listing/adding/updating/removing
+// scheduled jobs. It is attached to the Server only when a *scheduler.Service
+// is set via attachScheduler below.
 type cronHandler struct {
 	svc *scheduler.Service
 }
@@ -30,12 +30,33 @@ type cronAddRequest struct {
 	Schedule  cronScheduleReq          `json:"schedule"`
 }
 
+type cronUpdateRequest struct {
+	Enabled   *bool                     `json:"enabled,omitempty"`
+	Name      *string                   `json:"name,omitempty"`
+	Message   *string                   `json:"message,omitempty"`
+	Notes     *string                   `json:"notes,omitempty"`
+	Owner     *string                   `json:"owner,omitempty"`
+	DeliverTo *string                   `json:"deliver_to,omitempty"`
+	PermMode  *scheduler.PermissionMode `json:"perm_mode,omitempty"`
+	Schedule  *cronScheduleReq          `json:"schedule,omitempty"`
+}
+
 type cronScheduleReq struct {
 	Kind    scheduler.ScheduleKind `json:"kind"`
 	AtMs    int64                  `json:"at_ms,omitempty"`
 	EveryMs int64                  `json:"every_ms,omitempty"`
 	Expr    string                 `json:"expr,omitempty"`
 	TZ      string                 `json:"tz,omitempty"`
+}
+
+func (req cronScheduleReq) toSchedule() scheduler.Schedule {
+	return scheduler.Schedule{
+		Kind:    req.Kind,
+		AtMs:    req.AtMs,
+		EveryMs: req.EveryMs,
+		Expr:    req.Expr,
+		TZ:      req.TZ,
+	}
 }
 
 func (h *cronHandler) list(w http.ResponseWriter, _ *http.Request) {
@@ -93,6 +114,65 @@ func (h *cronHandler) remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *cronHandler) update(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var req cronUpdateRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	cur := h.svc.GetJob(id)
+	if cur == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("job %s not found", id))
+		return
+	}
+	patch := scheduler.JobPatch{}
+	if req.Enabled != nil {
+		patch.Enabled = req.Enabled
+	}
+	if req.Name != nil {
+		patch.Name = req.Name
+	}
+	if req.Schedule != nil {
+		sched := req.Schedule.toSchedule()
+		patch.Schedule = &sched
+	}
+	if req.Message != nil || req.Notes != nil || req.Owner != nil || req.DeliverTo != nil || req.PermMode != nil {
+		payload := cur.Payload
+		if req.Message != nil {
+			payload.Message = *req.Message
+		}
+		if req.Notes != nil {
+			payload.Notes = *req.Notes
+		}
+		if req.Owner != nil {
+			payload.Owner = *req.Owner
+		}
+		if req.DeliverTo != nil {
+			payload.DeliverTo = *req.DeliverTo
+		}
+		if req.PermMode != nil {
+			payload.PermMode = *req.PermMode
+		}
+		patch.Payload = &payload
+	}
+	updated, err := h.svc.UpdateJob(id, patch)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 // handleCronTargetsList returns the current (workdir → chatID) mapping.
@@ -380,5 +460,6 @@ func (s *Server) attachScheduler(svc *scheduler.Service) {
 	s.mux.HandleFunc("GET /api/cron", s.authMiddleware(h.list))
 	s.mux.HandleFunc("POST /api/cron", s.authMiddleware(h.add))
 	s.mux.HandleFunc("GET /api/cron/{id}", s.authMiddleware(h.get))
+	s.mux.HandleFunc("PATCH /api/cron/{id}", s.authMiddleware(h.update))
 	s.mux.HandleFunc("DELETE /api/cron/{id}", s.authMiddleware(h.remove))
 }

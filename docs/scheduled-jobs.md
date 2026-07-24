@@ -82,10 +82,13 @@ fire unless a long-lived host is running. Document this in user-facing docs.
 ## Public surface
 
 ### REST (added to `internal/server/server.go` via `attachScheduler`)
-- `GET  /api/cron`        — list jobs
-- `GET  /api/cron/{id}`   — describe one
-- `POST /api/cron`        — add (`name`, `message`, `notes`, `owner`,
+- `GET    /api/cron`        — list jobs
+- `GET    /api/cron/{id}`   — describe one
+- `POST   /api/cron`        — add (`name`, `message`, `notes`, `owner`,
   `deliver_to`, `perm_mode`; `schedule: {kind, at_ms|every_ms|expr, tz}`)
+- `PATCH  /api/cron/{id}`   — partial update (any of: `enabled`, `name`, `message`,
+  `notes`, `owner`, `deliver_to`, `perm_mode`, `schedule`); fields not sent are
+  left unchanged. Uses `JobPatch` internally.
 - `DELETE /api/cron/{id}` — remove
 - `GET  /api/cron/outbox?drain=true&limit=N` — read/clear the JSONL delivery
   log (one entry per executed job; `drain=true` truncates on read)
@@ -105,6 +108,12 @@ id, _ := svc.AddJob(scheduler.Job{
     Payload:  scheduler.Payload{Message: "say hi", PermMode: scheduler.PermNormal},
 })
 svc.RemoveJob(id)
+
+# Partial update via JobPatch
+enabled := false
+svc.UpdateJob(id, scheduler.JobPatch{Enabled: &enabled})
+newSchedule := scheduler.Schedule{Kind: scheduler.KindCron, Expr: "0 9 * * 1-5", TZ: "America/New_York"}
+svc.UpdateJob(id, scheduler.JobPatch{Schedule: &newSchedule, Name: strPtr("weekday morning check")})
 ```
 
 ### Host wiring helper (`internal/scheduler/host.go`)
@@ -146,6 +155,7 @@ resolve)` for hosts that want to forward cron results to a Telegram chat
 | `internal/server/scheduler_telegram_test.go` | Telegram sink wiring test |
 | `internal/server/scheduler_resolver_test.go` | CronChatResolver + end-to-end Telegram test |
 | `internal/server/scheduler_targets_http_test.go` | `/api/cron/targets` HTTP test |
+| `internal/server/scheduler_update_http_test.go`  | `PATCH /api/cron/{id}` HTTP test |
 | `internal/desktop/scheduler.go`        | `AttachScheduler` for the desktop shell |
 | `internal/telegram/bot.go`             | `PushCronResult`; auto-registers cron target on `/session` |
 | `internal/telegram/bot_cron_target_test.go` | Bot cron-target persistence test |

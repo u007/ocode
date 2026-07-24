@@ -349,6 +349,76 @@ func (s *Service) RemoveJob(id string) error {
 	return nil
 }
 
+// JobPatch is a partial update for UpdateJob. Only non-nil fields are applied.
+// Schedule, when provided, replaces the entire Schedule and recomputes
+// State.NextRunAtMs using the same validation path as AddJob.
+type JobPatch struct {
+	Enabled  *bool
+	Name     *string
+	Schedule *Schedule
+	Payload  *Payload
+}
+
+// UpdateJob updates the job identified by id and returns the updated job.
+// It leaves the job unmodified on error.
+func (s *Service) UpdateJob(id string, patch JobPatch) (Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	idx := -1
+	for i := range s.jobs {
+		if s.jobs[i].ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return Job{}, fmt.Errorf("job %s not found", id)
+	}
+	if patch.Schedule != nil {
+		if err := validateSchedule(*patch.Schedule); err != nil {
+			return Job{}, err
+		}
+	}
+	if patch.Payload != nil && patch.Payload.Message == "" {
+		return Job{}, fmt.Errorf("message is required")
+	}
+
+	j := &s.jobs[idx]
+	prevEnabled := j.Enabled
+	if patch.Enabled != nil {
+		j.Enabled = *patch.Enabled
+	}
+	if patch.Name != nil {
+		j.Name = *patch.Name
+	}
+	if patch.Schedule != nil {
+		j.Schedule = *patch.Schedule
+	}
+	if patch.Payload != nil {
+		j.Payload = *patch.Payload
+	}
+	if j.Name == "" {
+		j.Name = j.Payload.Message
+		if len(j.Name) > 40 {
+			j.Name = j.Name[:37] + "..."
+		}
+	}
+	if patch.Schedule != nil || (patch.Enabled != nil && *patch.Enabled && !prevEnabled) {
+		nr, err := s.computeNextRun(j, s.now())
+		if err != nil {
+			return Job{}, err
+		}
+		j.State.NextRunAtMs = nr
+	}
+
+	if err := s.persistLocked(); err != nil {
+		return Job{}, err
+	}
+	s.wake()
+	return *j, nil
+}
+
 // removeJobLocked removes a job from the slice. Caller must hold mu.
 func (s *Service) removeJobLocked(id string) bool {
 	for i := range s.jobs {
