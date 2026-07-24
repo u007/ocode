@@ -2,6 +2,8 @@ package tui
 
 import (
 	"strings"
+
+	"charm.land/lipgloss/v2"
 )
 
 // ListBox is a shared row-list primitive that owns vertical scrolling,
@@ -36,6 +38,24 @@ type ListBox struct {
 	// Layout (populated by Layout/Render)
 	contentTopY   int // screen row where first item starts (relative to listbox origin)
 	contentHeight int // number of rows available for items
+
+	// Wrap mode: when true, each item's rendered row may word-wrap across
+	// multiple physical lines instead of being truncated to one line. Off
+	// by default so other ListBox callers keep the strict single-line
+	// invariant described above.
+	wrap bool
+
+	// lineMap is the materialized (itemIdx, text) pairs for the visible
+	// content area in wrap mode, built once in Layout() so Render and
+	// HitTest read the same data and can never drift from each other.
+	lineMap []listBoxLine
+}
+
+// listBoxLine is one physical screen line belonging to an item, used in
+// wrap mode where an item can span more than one line.
+type listBoxLine struct {
+	itemIdx int
+	text    string
 }
 
 // NewListBox creates a new ListBox with the given dimensions.
@@ -85,6 +105,12 @@ func (lb *ListBox) SetSelected(i int) {
 func (lb *ListBox) SetSelectedForRender(i int) {
 	lb.selected = i
 	lb.clampSelected()
+}
+
+// SetWrapEnabled enables word-wrapping of item rows across multiple
+// physical lines instead of truncating each item to a single line.
+func (lb *ListBox) SetWrapEnabled(wrap bool) {
+	lb.wrap = wrap
 }
 
 // SetHovered sets the hovered index, -1 for none.
@@ -151,9 +177,34 @@ func (lb *ListBox) Layout() {
 	
 	// Content starts after chrome
 	lb.contentTopY = chromeHeight
-	
+
 	// Clamp scroll
 	lb.clampScroll()
+
+	// In wrap mode, materialize the (itemIdx, line) pairs now so Render
+	// and HitTest both read the same data and can never drift.
+	if lb.wrap {
+		lb.buildLineMap()
+	}
+}
+
+// buildLineMap fills lb.lineMap with the wrapped physical lines for items
+// starting at scrollOffset, up to contentHeight lines total.
+func (lb *ListBox) buildLineMap() {
+	lb.lineMap = lb.lineMap[:0]
+	if lb.count == 0 || lb.renderRow == nil {
+		return
+	}
+	for i := lb.scrollOffset; i < lb.count && len(lb.lineMap) < lb.contentHeight; i++ {
+		selected := i == lb.selected
+		raw := lb.renderRow(i, lb.width, selected)
+		for _, w := range strings.Split(wordWrap(raw, lb.width), "\n") {
+			if len(lb.lineMap) >= lb.contentHeight {
+				break
+			}
+			lb.lineMap = append(lb.lineMap, listBoxLine{itemIdx: i, text: w})
+		}
+	}
 }
 
 // Render renders the list box with headers, filter bar, items, and scrollbar.
@@ -180,13 +231,19 @@ func (lb *ListBox) Render() string {
 			hint = "(no matches)"
 		}
 		lines = append(lines, truncateToWidth(hint, lb.width))
+	} else if lb.wrap {
+		// lineMap was built in Layout() — Render and HitTest share it so
+		// click offsets can never drift from what's on screen.
+		for _, ln := range lb.lineMap {
+			lines = append(lines, lipgloss.NewStyle().Width(lb.width).Render(ln.text))
+		}
 	} else {
 		// Render visible items
 		end := lb.scrollOffset + lb.contentHeight
 		if end > lb.count {
 			end = lb.count
 		}
-		
+
 		for i := lb.scrollOffset; i < end; i++ {
 			selected := i == lb.selected
 			line := lb.renderRow(i, lb.width, selected)
@@ -233,13 +290,23 @@ func (lb *ListBox) HitTest(x, y int) int {
 	if y < lb.contentTopY || y >= lb.contentTopY+lb.contentHeight {
 		return -1
 	}
-	
+
+	if lb.wrap {
+		// Read the same materialized lines Render() drew from, so a click
+		// on any physical line of a wrapped item resolves to that item.
+		lineIdx := y - lb.contentTopY
+		if lineIdx < 0 || lineIdx >= len(lb.lineMap) {
+			return -1
+		}
+		return lb.lineMap[lineIdx].itemIdx
+	}
+
 	// Map to item index
 	itemIdx := lb.scrollOffset + (y - lb.contentTopY)
 	if itemIdx < 0 || itemIdx >= lb.count {
 		return -1
 	}
-	
+
 	return itemIdx
 }
 

@@ -56,8 +56,10 @@ func (m changesModel) withRegistry(fn func() *changes.Registry) changesModel {
 
 // NewChangesModel returns an empty changes tab model.
 func NewChangesModel() changesModel {
+	list := NewListBox(0, 0)
+	list.SetWrapEnabled(true)
 	return changesModel{
-		list:      NewListBox(0, 0),
+		list:      list,
 		diffCache: make(map[string]string),
 	}
 }

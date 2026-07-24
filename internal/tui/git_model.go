@@ -282,6 +282,7 @@ func (m *gitModel) getOrCreateListBox(section gitSection, width, height int) *Li
 	case gitSectionChanges:
 		if m.changesList == nil {
 			m.changesList = NewListBox(width, height)
+			m.changesList.SetWrapEnabled(true)
 		}
 		lb = m.changesList
 	case gitSectionLog:
@@ -2167,6 +2168,7 @@ func (m *gitModel) renderFileList(width int) []string {
 		lb = NewListBox(width, m.height-4)
 		switch m.section {
 		case gitSectionChanges:
+			lb.SetWrapEnabled(true)
 			m.changesList = lb
 		case gitSectionLog:
 			m.logList = lb

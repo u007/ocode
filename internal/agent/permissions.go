@@ -2731,6 +2731,9 @@ func firstOutOfScopePath(pm *PermissionManager, command, prefix string) string {
 	if strings.Contains(command, "$(") || strings.Contains(command, "`") {
 		return ""
 	}
+	if shellCompound(command) {
+		return ""
+	}
 	fields := splitShellFields(command)
 	if len(fields) == 0 || fields[0] != prefix {
 		return ""

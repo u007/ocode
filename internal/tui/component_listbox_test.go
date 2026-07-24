@@ -74,6 +74,51 @@ func TestListBoxHitTest(t *testing.T) {
 	}
 }
 
+// TestListBoxWrapHitTest verifies that in wrap mode, a click on any
+// physical line belonging to a wrapped item resolves to that item, and
+// that the item below a wrapped item is offset by the extra line(s).
+func TestListBoxWrapHitTest(t *testing.T) {
+	items := []string{
+		"M this is a very long file path that will need to wrap across lines/pkg/subpkg/file.go",
+		"A short.go",
+	}
+	lb := NewListBox(20, 10)
+	lb.SetWrapEnabled(true)
+	lb.SetData(len(items), func(idx, width int, selected bool) string {
+		return items[idx]
+	})
+	rendered := lb.Render()
+	lines := strings.Split(rendered, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected wrapped item to span multiple lines, got %d lines:\n%s", len(lines), rendered)
+	}
+
+	// First line of the wrapped item.
+	if idx := lb.HitTest(0, 0); idx != 0 {
+		t.Errorf("hit test on wrapped item's first line: expected index 0, got %d", idx)
+	}
+	// Second physical line still belongs to the same wrapped item.
+	if idx := lb.HitTest(0, 1); idx != 0 {
+		t.Errorf("hit test on wrapped item's second line: expected index 0, got %d", idx)
+	}
+
+	// Whatever line the second item actually starts on must resolve to index 1,
+	// not be mistaken for another line of item 0.
+	itemTwoLine := -1
+	for i, l := range lines {
+		if strings.Contains(l, "short.go") {
+			itemTwoLine = i
+			break
+		}
+	}
+	if itemTwoLine < 0 {
+		t.Fatalf("could not locate item 1's rendered line in output:\n%s", rendered)
+	}
+	if idx := lb.HitTest(0, itemTwoLine); idx != 1 {
+		t.Errorf("hit test at wrapped item's following row (y=%d): expected index 1, got %d", itemTwoLine, idx)
+	}
+}
+
 func TestListBoxHitTestOutside(t *testing.T) {
 	items := []string{"Alpha", "Beta"}
 	lb := NewListBox(20, 5)
