@@ -25,6 +25,8 @@ import type {
   CronJobWriteRequest,
   CronOutboxResponse,
   CronTargetsResponse,
+  FileChange,
+  ChangeDiff,
 } from "./types";
 
 // Base path for API calls. When the SPA is served under a tailscale --set-path
@@ -430,7 +432,25 @@ export const api = {
         approved,
       }),
     }),
-
+  // ── Changes tab (session file changes) ──
+  listChanges: (session?: string) =>
+    fetchJSON<FileChange[]>(
+      `/api/changes${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+    ),
+  getChangeDiff: (session: string | undefined, path: string) =>
+    fetchJSON<ChangeDiff>(
+      `/api/changes/diff?${session ? `session=${encodeURIComponent(session)}&` : ""}path=${encodeURIComponent(path)}`,
+    ),
+  undoChangeFile: (session: string | undefined, path: string) =>
+    fetchJSON<Record<string, never>>(
+      `/api/changes/undo-file${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    ),
+  undoChangeBlock: (session: string | undefined, path: string) =>
+    fetchJSON<Record<string, never>>(
+      `/api/changes/undo-block${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+      { method: "POST", body: JSON.stringify({ path }) },
+    ),
 };
 
 export type SSEEventHandler = (event: string, data: unknown) => void;

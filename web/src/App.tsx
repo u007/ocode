@@ -12,6 +12,7 @@ import StatusBar from "./components/common/StatusBar";
 import StatusPanel from "./components/Status/StatusPanel";
 import CommandPalette from "./components/common/CommandPalette";
 import GitPanel from "./components/Git/GitPanel";
+import ChangesPanel from "./components/Changes/ChangesPanel";
 import FileTree from "./components/Files/FileTree";
 import FileEditor from "./components/Files/FileEditor";
 import LogPanel from "./components/Logs/LogPanel";
@@ -295,6 +296,7 @@ function HomeApp() {
               </div>
             )}
             {activeTab === "files" && <FileTree onOpenFile={handleOpenFile} />}
+            {activeTab === "changes" && <ChangesPanel session={currentSessionId ?? undefined} />}
             {activeTab === "git" && <GitPanel onOpenFile={handleOpenFile} />}
             {activeTab === "status" && <StatusPanel onClose={() => setActiveTab("chat")} />}
             {activeTab === "logs" && <LogPanel />}

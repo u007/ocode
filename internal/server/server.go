@@ -105,6 +105,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/models", s.authMiddleware(s.handleListModels))
 	s.mux.HandleFunc("GET /api/agents/runs", s.authMiddleware(s.handleListRuns))
 	s.mux.HandleFunc("GET /api/agents/runs/stream", s.authMiddleware(s.handleRunsStream))
+	s.mux.HandleFunc("GET /api/changes", s.authMiddleware(s.handleListChanges))
+	s.mux.HandleFunc("GET /api/changes/diff", s.authMiddleware(s.handleChangesDiff))
+	s.mux.HandleFunc("POST /api/changes/undo-file", s.authMiddleware(s.handleUndoChangeFile))
+	s.mux.HandleFunc("POST /api/changes/undo-block", s.authMiddleware(s.handleUndoChangeBlock))
 	s.mux.HandleFunc("GET /api/git/status", s.authMiddleware(s.handleGitStatus))
 	s.mux.HandleFunc("GET /api/git/diff", s.authMiddleware(s.handleGitDiff))
 	s.mux.HandleFunc("GET /api/theme", s.authMiddleware(s.handleGetTheme))
@@ -706,6 +710,20 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleRunsStream(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleRunsStream(w, r)
+}
+
+// Changes tab shims
+func (s *Server) handleListChanges(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListChanges(w, r)
+}
+func (s *Server) handleChangesDiff(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleChangesDiff(w, r)
+}
+func (s *Server) handleUndoChangeFile(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleUndoChangeFile(w, r)
+}
+func (s *Server) handleUndoChangeBlock(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleUndoChangeBlock(w, r)
 }
 
 // Log shims

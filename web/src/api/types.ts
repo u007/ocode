@@ -224,6 +224,33 @@ export interface AgentRunMessage {
   reasoningContent?: string;
 }
 
+export type FileChangeStatus = "added" | "modified" | "deleted";
+
+export interface ChangeAuthor {
+  agentId: string;
+  agentName: string;
+  changes: number;
+}
+
+export interface FileChange {
+  originalPath: string;
+  status: FileChangeStatus;
+  firstBackupPath: string;
+  undoable: boolean;
+  undoAllTcId: string;
+  changeCount: number;
+  authors: ChangeAuthor[];
+  createdAt: string;
+  updatedAt: string;
+  lastBashCommand: string;
+  lastBashExitCode: number;
+}
+
+export interface ChangeDiff {
+  path: string;
+  patch: string;
+}
+
 export interface GitDiffFile {
   path: string;
   status: string;

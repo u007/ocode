@@ -16,6 +16,7 @@ import QuestionDialog from "../components/Chat/QuestionDialog";
 import FileEditor from "../components/Files/FileEditor";
 import FileTree from "../components/Files/FileTree";
 import GitPanel from "../components/Git/GitPanel";
+import ChangesPanel from "../components/Changes/ChangesPanel";
 import LogPanel from "../components/Logs/LogPanel";
 import AssetsPanel from "../components/Assets/AssetsPanel";
 import CronPanel from "../components/Cron/CronPanel";
@@ -422,6 +423,7 @@ export default function SessionPage() {
             </>
           )}
           {activeTab === "files" && <FileTree onOpenFile={handleOpenFile} />}
+          {activeTab === "changes" && <ChangesPanel session={state.sessionId ?? undefined} />}
           {activeTab === "git" && <GitPanel onOpenFile={handleOpenFile} />}
           {activeTab === "status" && (
             <StatusPanel key={id} onClose={() => setActiveTab("chat")} />
