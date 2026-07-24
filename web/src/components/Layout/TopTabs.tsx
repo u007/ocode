@@ -3,6 +3,7 @@ import { MessageSquare, FolderGit2, GitBranch, ScrollText, Paperclip, Activity, 
 export interface EditorTabInfo {
   id: string;
   path: string;
+  isDirty?: boolean;
 }
 
 interface Props {
@@ -76,6 +77,13 @@ export default function TopTabs({ activeTab, onTabChange, editorTabs, onEditorTa
                 <div
                   key={et.id}
                   className="flex items-center gap-1 shrink-0"
+                  onMouseDown={(e) => {
+                    if (e.button === 1) {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      onEditorTabClose(et.id);
+                    }
+                  }}
                 >
                   <button
                     onClick={() => onTabChange(et.id)}
@@ -88,6 +96,9 @@ export default function TopTabs({ activeTab, onTabChange, editorTabs, onEditorTa
                   >
                     <FileCode className="w-3.5 h-3.5" />
                     <span className="max-w-[120px] truncate">{fileNameFromPath(et.path)}</span>
+                    {et.isDirty && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-zinc-300 shrink-0" title="Unsaved changes" />
+                    )}
                   </button>
                   <button
                     onClick={(e) => {
