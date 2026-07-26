@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, apiPath, authHeaders } from "../api/client";
 
 export interface EditorTab {
@@ -7,6 +7,12 @@ export interface EditorTab {
   content: string;
   originalContent: string;
   isDirty: boolean;
+  diffVersion: number;
+}
+
+export interface ActiveEditorContext {
+  path: string;
+  selection?: { startLine: number; endLine: number };
 }
 
 export interface UseEditorTabsResult {
@@ -15,6 +21,8 @@ export interface UseEditorTabsResult {
   setActiveTab: (tab: string) => void;
   handleOpenFile: (path: string) => Promise<void>;
   handleEditorChange: (id: string, content: string) => void;
+  handleSelectionChange: (sel: { startLine: number; endLine: number } | null) => void;
+  activeEditorContext: ActiveEditorContext | null;
   requestCloseTab: (id: string) => void;
   saveEditorTab: (id: string) => Promise<void>;
   pendingClose: { id: string; path: string } | null;
@@ -29,6 +37,7 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
   const [activeTab, setActiveTab] = useState(initialTab);
   const [pendingClose, setPendingClose] = useState<{ id: string; path: string } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [activeEditorContext, setActiveEditorContext] = useState<ActiveEditorContext | null>(null);
   const openFileIdsRef = useRef<Set<string>>(new Set());
 
   const handleOpenFile = useCallback(async (path: string) => {
@@ -46,7 +55,7 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
       openFileIdsRef.current.add(id);
       setEditorTabs((prev) => [
         ...prev,
-        { id, path, content: data.content, originalContent: data.content, isDirty: false },
+        { id, path, content: data.content, originalContent: data.content, isDirty: false, diffVersion: 0 },
       ]);
       setActiveTab(id);
     } catch (err) {
@@ -60,11 +69,57 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
     );
   }, []);
 
+  const handleSelectionChange = useCallback(
+    (sel: { startLine: number; endLine: number } | null) => {
+      setActiveEditorContext((prev) => {
+        if (prev) {
+          return { ...prev, selection: sel ?? undefined };
+        }
+
+        if (!activeTab.startsWith("editor-")) return null;
+        const tab = editorTabs.find((t) => t.id === activeTab);
+        if (!tab) return null;
+        return {
+          path: tab.path,
+          selection: sel ?? undefined,
+        };
+      });
+    },
+    [activeTab, editorTabs],
+  );
+
+  useEffect(() => {
+    if (editorTabs.length === 0) {
+      setActiveEditorContext(null);
+      return;
+    }
+
+    if (!activeTab.startsWith("editor-")) {
+      setActiveEditorContext(null);
+      return;
+    }
+
+    const tab = editorTabs.find((t) => t.id === activeTab);
+    if (!tab) {
+      setActiveEditorContext(null);
+      return;
+    }
+
+    setActiveEditorContext((prev) => {
+      if (prev?.path === tab.path) return prev;
+      return { path: tab.path };
+    });
+  }, [activeTab, editorTabs]);
+
   const closeTabNow = useCallback((id: string) => {
     openFileIdsRef.current.delete(id);
     setEditorTabs((prev) => prev.filter((t) => t.id !== id));
-    setActiveTab((prev) => (prev === id ? "files" : prev));
-  }, []);
+    setActiveTab((prev) => {
+      if (prev !== id) return prev;
+      const remaining = editorTabs.filter((t) => t.id !== id);
+      return remaining[0]?.id ?? "files";
+    });
+  }, [editorTabs]);
 
   const requestCloseTab = useCallback(
     (id: string) => {
@@ -87,7 +142,11 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
         await api.saveFileContent(tab.path, tab.content);
         setSaveError(null);
         setEditorTabs((prev) =>
-          prev.map((t) => (t.id === id ? { ...t, originalContent: t.content, isDirty: false } : t)),
+          prev.map((t) =>
+            t.id === id
+              ? { ...t, originalContent: t.content, isDirty: false, diffVersion: t.diffVersion + 1 }
+              : t,
+          ),
         );
       } catch (err) {
         setSaveError(err instanceof Error ? err.message : "Failed to save file");
@@ -127,6 +186,8 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
     setActiveTab,
     handleOpenFile,
     handleEditorChange,
+    handleSelectionChange,
+    activeEditorContext,
     requestCloseTab,
     saveEditorTab,
     pendingClose,

@@ -173,10 +173,55 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_SESSION_PICKER", open: !state.sessionPickerOpen });
   }, [state.sessionPickerOpen]);
 
-  // Load projects on mount
+  // On mount: load the registered projects, then make sure the server's
+  // current working directory is represented and selected — otherwise the
+  // sidebar starts with nothing highlighted and the session tab bar (which
+  // only renders once a project is active) stays hidden until the user
+  // clicks a project by hand.
   useEffect(() => {
-    refreshProjects();
-  }, [refreshProjects]);
+    let cancelled = false;
+
+    async function init() {
+      dispatch({ type: "SET_LOADING", loading: true });
+      try {
+        const [projects, status] = await Promise.all([
+          api.listProjects(),
+          api.getTUIStatus().catch(() => null),
+        ]);
+        if (cancelled) return;
+        dispatch({ type: "SET_PROJECTS", projects });
+
+        const cwd = status?.cwd;
+        if (!cwd) return;
+
+        let match = projects.find((p) => p.path === cwd);
+        if (!match) {
+          try {
+            await api.addProject(cwd);
+            const refreshed = await api.listProjects();
+            if (cancelled) return;
+            dispatch({ type: "SET_PROJECTS", projects: refreshed });
+            match = refreshed.find((p) => p.path === cwd);
+          } catch (err) {
+            console.error("Failed to register current project:", err);
+          }
+        }
+
+        if (match && !cancelled) {
+          await selectProject(match);
+        }
+      } catch (err) {
+        console.error("Failed to load projects:", err);
+        if (!cancelled) dispatch({ type: "SET_LOADING", loading: false });
+      }
+    }
+
+    init();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <ProjectContext.Provider

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatState } from "./stores/chatStore";
-import { ProjectProvider } from "./stores/projectStore";
+import { ProjectProvider, useProjectState } from "./stores/projectStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
@@ -89,6 +89,7 @@ function HomeApp() {
   const dispatch = useChatDispatch();
   const { messages: chatMessages, sessionId: currentSessionId } = useChatState();
   const { resolvePermission, pendingPermission } = useChat();
+  const { state: projectState, dispatch: projectDispatch } = useProjectState();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -100,6 +101,8 @@ function HomeApp() {
     setActiveTab,
     handleOpenFile,
     handleEditorChange,
+    handleSelectionChange,
+    activeEditorContext,
     requestCloseTab,
     pendingClose,
     confirmSaveAndClose,
@@ -240,6 +243,15 @@ function HomeApp() {
     return true;
   };
 
+  const handleSessionCreated = (tempTabId: string, sessionId: string) => {
+    projectDispatch({
+      type: "UPDATE_TAB_ID",
+      oldId: tempTabId,
+      newId: sessionId,
+      newTitle: "New session",
+    });
+  };
+
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
 
@@ -278,6 +290,9 @@ function HomeApp() {
                     content={editorTab.content}
                     onChange={(value) => handleEditorChange(editorTab.id, value)}
                     readOnly={false}
+                    session={currentSessionId ?? undefined}
+                    diffVersion={editorTab.diffVersion}
+                    onSelectionChange={handleSelectionChange}
                   />
                 );
               })()}
@@ -286,7 +301,12 @@ function HomeApp() {
               <div className="flex flex-col h-full">
                 <ChatPanel />
                 <AgentPreview />
-                <ChatInput onSlashCommand={handleCommand} />
+                <ChatInput
+                  onSlashCommand={handleCommand}
+                  activeEditorContext={activeEditorContext}
+                  sessionTabId={projectState.activeTabId}
+                  onSessionCreated={handleSessionCreated}
+                />
               </div>
             )}
             {activeTab === "files" && <FileTree onOpenFile={handleOpenFile} />}

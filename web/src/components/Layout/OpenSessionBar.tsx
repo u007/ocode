@@ -1,14 +1,15 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useChatDispatch, useChatState } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { api } from "../../api/client";
-import { X, List, Plus } from "lucide-react";
+import { X, List, Plus, Loader2 } from "lucide-react";
 
 export default function OpenSessionBar() {
   const { state: projectState, openSessionTab, closeSessionTab, toggleSessionPicker } = useProjectState();
   const chatState = useChatState();
   const chatDispatch = useChatDispatch();
   const { tabs, activeTabId } = projectState;
+  const [loadingTabId, setLoadingTabId] = useState<string | null>(null);
 
   const handleTabClick = useCallback(async (sessionId: string, title: string) => {
     // Already active — no-op
@@ -25,12 +26,15 @@ export default function OpenSessionBar() {
     }
 
     openSessionTab(sessionId, title);
+    setLoadingTabId(sessionId);
     try {
       const session = await api.getSession(sessionId);
       chatDispatch({ type: "SET_SESSION", sessionId });
       chatDispatch({ type: "SET_MESSAGES", messages: session.messages || [] });
     } catch (err) {
       console.error("Failed to load session:", err);
+    } finally {
+      setLoadingTabId(null);
     }
   }, [activeTabId, openSessionTab, chatDispatch]);
 
@@ -61,6 +65,9 @@ export default function OpenSessionBar() {
             }`}
             onClick={() => handleTabClick(tab.id, tab.title)}
           >
+            {loadingTabId === tab.id && (
+              <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+            )}
             <span className="max-w-28 truncate">{tab.title || tab.id.slice(0, 12)}</span>
             <span
               role="button"

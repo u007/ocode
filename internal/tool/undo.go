@@ -13,7 +13,7 @@ import (
 // defaultUndoMaxAgeDelta is the number of agent step increments after which a
 // snapshot is considered expired and can no longer be undone. Used when no
 // value is configured via ocode.undo_max_age_delta.
-const defaultUndoMaxAgeDelta = 4
+const defaultUndoMaxAgeDelta = 10
 
 // UndoTool restores a file to its pre-edit state by tool call ID.
 // It implements ContextualTool so it can access the per-agent snapshot store.

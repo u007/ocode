@@ -14,9 +14,18 @@ interface ChatInputProps {
    *  and attach to the outgoing message. When provided, a chip is shown above
    *  the input and the ref is prepended to the message on send. */
   activeEditorContext?: { path: string; selection?: { startLine: number; endLine: number } } | null;
+  /** Temporary session tab ID that should be remapped once the first message creates a real session. */
+  sessionTabId?: string | null;
+  /** Called when a temporary tab has been replaced by the real session ID. */
+  onSessionCreated?: (tempTabId: string, sessionId: string) => void;
 }
 
-export default function ChatInput({ onSlashCommand, activeEditorContext }: ChatInputProps) {
+export default function ChatInput({
+  onSlashCommand,
+  activeEditorContext,
+  sessionTabId,
+  onSessionCreated,
+}: ChatInputProps) {
   const [input, setInput] = useState("");
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [slashQuery, setSlashQuery] = useState("");
@@ -28,7 +37,13 @@ export default function ChatInput({ onSlashCommand, activeEditorContext }: ChatI
   // agent would otherwise answer msg2 first, then re-engage with the shell
   // output of msg1, producing confusing turn ordering.
   const [shellInFlight, setShellInFlight] = useState(false);
-  const { sendMessage, executeShell, stop, isStreaming } = useChat();
+  const { sendMessage, executeShell, stop, isStreaming } = useChat({
+    onNewSession: (sessionId) => {
+      if (sessionTabId?.startsWith("new-")) {
+        onSessionCreated?.(sessionTabId, sessionId);
+      }
+    },
+  });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachRef = useRef<HTMLInputElement>(null);
 

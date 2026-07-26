@@ -21,8 +21,8 @@ export default function CronPanel() {
 
   const loadJobs = useCallback(async () => {
     const [jobsRes, outboxRes] = await Promise.all([api.listCronJobs(), api.getCronOutbox()]);
-    setJobs(jobsRes.jobs);
-    setOutbox(outboxRes.entries);
+    setJobs(jobsRes.jobs ?? []);
+    setOutbox(outboxRes.entries ?? []);
   }, []);
 
   const loadTargets = useCallback(async () => {

@@ -136,6 +136,8 @@ func writeUndoError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, changes.ErrNotUndoable):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "not_undoable"})
+	case errors.Is(err, changes.ErrConflict):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "conflict", "message": err.Error()})
 	case errors.Is(err, changes.ErrNoChanges):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no_changes"})
 	default:

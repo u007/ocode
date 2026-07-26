@@ -65,7 +65,7 @@ go build -o ocode .
 | Tool | Description |
 |------|-------------|
 | `read`, `write`, `edit`, `delete` | Full file I/O with path confinement and permissions |
-| `undo_file_change` | Roll back a previous `write`/`edit`/`multi_edit`/`multi_file_edit`/`replace_lines`/`delete` by `tool_call_id` (2-agent-step window, conflicts with newer same-file writes are detected and refused) |
+| `undo_file_change` | Roll back a previous `write`/`edit`/`multi_edit`/`multi_file_edit`/`replace_lines`/`delete` by `tool_call_id` (10-agent-step window, conflicts with newer same-file writes are detected and refused) |
 | `bash` | Shell execution with background support, circular output buffer (256KB), `Ctrl+B` to foreground→background, and **live streaming** of combined stdout/stderr into the transcript as the command runs |
 | `grep`, `glob`, `repo_overview` | Advanced search and repository analysis |
 | `lsp` | Go-to-definition, hover docs, symbol search, diagnostics |

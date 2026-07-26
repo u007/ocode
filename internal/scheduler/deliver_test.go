@@ -56,7 +56,10 @@ func TestOutboxMissingFileIsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("drain missing: %v", err)
 	}
-	if got != nil {
-		t.Fatalf("want nil slice, got %v", got)
+	if got == nil {
+		t.Fatalf("got nil slice, want empty (non-nil) slice")
+	}
+	if len(got) != 0 {
+		t.Fatalf("want 0 entries, got %d", len(got))
 	}
 }

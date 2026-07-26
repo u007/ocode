@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,20 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+)
+
+// Sentinel errors returned (wrapped via %w) by UndoByToolCallID so callers
+// can distinguish "nothing to undo" from "there is something to undo, but
+// a conflicting change blocks it right now" — the two categories need
+// different handling upstream (e.g. HTTP status code, UI copy).
+var (
+	// ErrNotFound means no snapshot exists for the given tool_call_id.
+	ErrNotFound = errors.New("snapshot: no snapshot for tool_call_id")
+	// ErrExpired means the snapshot exists but is outside maxAgeDelta.
+	ErrExpired = errors.New("snapshot: undo window expired")
+	// ErrConflict means a newer write (same-agent or cross-agent) to the
+	// same file must be undone first.
+	ErrConflict = errors.New("snapshot: a newer change blocks this undo")
 )
 
 // Snapshot records one file's state before a write-tool modified it.
@@ -126,6 +141,30 @@ func UnregisterAgent(agentID string) {
 			fileWrites[path] = kept
 		}
 	}
+}
+
+// unregisterWrite removes one active write record for the given path.
+// It is called after a successful undo so reverted writes stop blocking
+// older undos in other agents.
+func unregisterWrite(path, agentID, toolCallID string) {
+	fileWriteMu.Lock()
+	defer fileWriteMu.Unlock()
+	writes := fileWrites[path]
+	if len(writes) == 0 {
+		return
+	}
+	kept := writes[:0]
+	for _, w := range writes {
+		if w.AgentID == agentID && w.ToolCallID == toolCallID {
+			continue
+		}
+		kept = append(kept, w)
+	}
+	if len(kept) == 0 {
+		delete(fileWrites, path)
+		return
+	}
+	fileWrites[path] = kept
 }
 
 // crossAgentWriteAfterSeq returns the first write to path by any agent other
@@ -262,14 +301,14 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 		}
 	}
 	if len(indices) == 0 {
-		return nil, fmt.Errorf("no snapshot found for tool_call_id %q", toolCallID)
+		return nil, fmt.Errorf("%w: no snapshot found for tool_call_id %q", ErrNotFound, toolCallID)
 	}
 
 	// Expiry: measured from the oldest snapshot for this call.
 	firstSnap := s.snapshots[indices[0]]
 	age := s.step - firstSnap.AgentStep
 	if age > maxAgeDelta {
-		return nil, fmt.Errorf("undo expired: %d agent steps old (max %d)", age, maxAgeDelta)
+		return nil, fmt.Errorf("%w: %d agent steps old (max %d)", ErrExpired, age, maxAgeDelta)
 	}
 
 	// Per-file conflict checks.
@@ -279,8 +318,8 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 		// Cross-agent: did another agent write this file after our write?
 		if snap.WriteSeq > 0 {
 			if conflict := crossAgentWriteAfterSeq(snap.OriginalPath, s.agentID, snap.WriteSeq); conflict != nil {
-				return nil, fmt.Errorf("cannot undo %s: modified by another agent (tool_call_id=%s) after this change",
-					snap.OriginalPath, conflict.ToolCallID)
+				return nil, fmt.Errorf("%w: cannot undo %s: modified by another agent (tool_call_id=%s) after this change",
+					ErrConflict, snap.OriginalPath, conflict.ToolCallID)
 			}
 		}
 
@@ -293,8 +332,8 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 				continue
 			}
 			if s.step-other.AgentStep <= maxAgeDelta {
-				return nil, fmt.Errorf("cannot undo %s: a newer active change (tool_call_id=%s) still exists",
-					snap.OriginalPath, other.ToolCallID)
+				return nil, fmt.Errorf("%w: cannot undo %s: a newer active change (tool_call_id=%s) still exists",
+					ErrConflict, snap.OriginalPath, other.ToolCallID)
 			}
 		}
 	}
@@ -310,6 +349,9 @@ func (s *Store) UndoByToolCallID(toolCallID string, maxAgeDelta int) ([]string, 
 		snap := s.snapshots[idx]
 		if err := restoreSnapshot(snap); err != nil {
 			return restored, fmt.Errorf("restore %s: %w", snap.OriginalPath, err)
+		}
+		if snap.ToolCallID != "" {
+			unregisterWrite(snap.OriginalPath, s.agentID, snap.ToolCallID)
 		}
 		restored = append([]string{snap.OriginalPath}, restored...) // prepend to keep natural order
 		s.snapshots = append(s.snapshots[:idx], s.snapshots[idx+1:]...)

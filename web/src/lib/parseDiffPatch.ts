@@ -31,11 +31,17 @@ export interface Hunk {
 export function parseDiffPatch(patch: string | null | undefined): Hunk[] {
   if (!patch) return [];
 
-  const lines = patch.split("\n");
+  const lines = patch.split(/\r?\n/);
   const hunks: Hunk[] = [];
   let current: Hunk | null = null;
 
-  for (const line of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const isTerminalEmptyLine = i === lines.length - 1 && line === "";
+    if (isTerminalEmptyLine) {
+      continue;
+    }
+
     const hunkHeader = /^@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/.exec(line);
     if (hunkHeader) {
       if (current) hunks.push(current);
@@ -57,13 +63,12 @@ export function parseDiffPatch(patch: string | null | undefined): Hunk[] {
       current.lines.push({ type: "del", text: line.slice(1) });
     } else if (line.startsWith(" ")) {
       current.lines.push({ type: "context", text: line.slice(1) });
+    } else if (line === "") {
+      // Blank context line without leading space — treat as empty context
+      current.lines.push({ type: "context", text: "" });
     } else if (line.startsWith("\\")) {
       // No newline at end of file — skip, not a content line
       continue;
-    } else if (line === "" && current.lines.length > 0) {
-      // Empty lines within a hunk (after the header) are literal blank lines
-      // in the original. Treat as context.
-      current.lines.push({ type: "context", text: "" });
     }
   }
 

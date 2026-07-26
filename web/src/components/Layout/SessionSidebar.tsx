@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { api } from "../../api/client";
 import { useChatDispatch, useChatState } from "../../stores/chatStore";
 import type { SessionInfo } from "../../api/types";
-import { PanelLeftClose, PanelLeft, Plus, MessageSquare } from "lucide-react";
+import { PanelLeftClose, PanelLeft, Plus, MessageSquare, Loader2 } from "lucide-react";
 
 interface Props {
   isOpen: boolean;
@@ -19,40 +19,51 @@ interface Props {
 function SessionList({
   sessions,
   onSelect,
+  loadingId,
 }: {
   sessions: SessionInfo[];
   onSelect: (id: string) => void;
+  loadingId: string | null;
 }) {
   if (sessions.length === 0) {
     return null;
   }
   return (
     <div className="flex-1 overflow-y-auto">
-      {sessions.map((session) => (
-        <button
-          key={session.id}
-          onClick={() => onSelect(session.id)}
-          className="w-full text-left px-4 py-3 text-sm hover:bg-zinc-800 text-zinc-400 border-b border-zinc-800 transition-colors"
-        >
-          <div className="flex items-center gap-2">
-            <MessageSquare className="w-4 h-4 flex-shrink-0 text-zinc-600" />
-            <div className="min-w-0">
-              <div className="truncate font-medium">
-                {session.title || session.id}
-              </div>
-              <div className="truncate text-xs text-zinc-600">
-                {new Date(session.updated_at).toLocaleDateString()}
+      {sessions.map((session) => {
+        const loading = loadingId === session.id;
+        return (
+          <button
+            key={session.id}
+            onClick={() => onSelect(session.id)}
+            disabled={loading}
+            className={`w-full text-left px-4 py-3 text-sm hover:bg-zinc-800 text-zinc-400 border-b border-zinc-800 transition-colors ${loading ? "opacity-60" : ""}`}
+          >
+            <div className="flex items-center gap-2">
+              {loading ? (
+                <Loader2 className="w-4 h-4 flex-shrink-0 text-zinc-500 animate-spin" />
+              ) : (
+                <MessageSquare className="w-4 h-4 flex-shrink-0 text-zinc-600" />
+              )}
+              <div className="min-w-0">
+                <div className="truncate font-medium">
+                  {session.title || session.id}
+                </div>
+                <div className="truncate text-xs text-zinc-600">
+                  {new Date(session.updated_at).toLocaleDateString()}
+                </div>
               </div>
             </div>
-          </div>
-        </button>
-      ))}
+          </button>
+        );
+      })}
     </div>
   );
 }
 
 export default function SessionSidebar({ isOpen, onToggle, isMobile }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [loadingId, setLoadingId] = useState<string | null>(null);
   const dispatch = useChatDispatch();
   const { sessionId } = useChatState();
 
@@ -81,12 +92,15 @@ export default function SessionSidebar({ isOpen, onToggle, isMobile }: Props) {
   };
 
   const handleSelectSession = async (id: string) => {
+    setLoadingId(id);
     try {
       const session = await api.getSession(id);
       dispatch({ type: "SET_SESSION", sessionId: id });
       dispatch({ type: "SET_MESSAGES", messages: session.messages || [] });
     } catch (err) {
       console.error("Failed to load session:", err);
+    } finally {
+      setLoadingId(null);
     }
   };
 
@@ -128,6 +142,7 @@ export default function SessionSidebar({ isOpen, onToggle, isMobile }: Props) {
               handleSelectSession(id);
               onToggle();
             }}
+            loadingId={loadingId}
           />
         </div>
       </>
@@ -165,7 +180,7 @@ export default function SessionSidebar({ isOpen, onToggle, isMobile }: Props) {
       </div>
 
       {/* Session list */}
-      {isOpen && <SessionList sessions={sessions} onSelect={handleSelectSession} />}
+      {isOpen && <SessionList sessions={sessions} onSelect={handleSelectSession} loadingId={loadingId} />}
     </div>
   );
 }

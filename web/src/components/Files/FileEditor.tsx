@@ -25,6 +25,8 @@ interface FileEditorProps {
   onOpenSettings?: () => void;
   /** Active session ID for fetching change diffs. Decorations skip when omitted. */
   session?: string;
+  /** Bumps when the file is saved so diff decorations refresh from the server. */
+  diffVersion?: number;
   /** Called when the selection (non-collapsed range) changes in the editor. */
   onSelectionChange?: (sel: { startLine: number; endLine: number } | null) => void;
 }
@@ -89,6 +91,7 @@ export default function FileEditor({
   readOnly = false,
   onOpenSettings,
   session,
+  diffVersion,
   onSelectionChange,
 }: FileEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
@@ -179,16 +182,17 @@ export default function FileEditor({
 
     const disposable = ed.onDidChangeCursorSelection((e) => {
       const sel = e.selection;
-      if (sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn) {
-        // Collapsed (cursor only, no selection)
-        onSelectionChange(null);
-      } else {
-        onSelectionChange({
-          startLine: sel.startLineNumber,
-          endLine: sel.endLineNumber - 1, // Monaco endLine is exclusive; convert to inclusive
-        });
-      }
-    });
+        if (sel.startLineNumber === sel.endLineNumber && sel.startColumn === sel.endColumn) {
+          // Collapsed (cursor only, no selection)
+          onSelectionChange(null);
+        } else {
+          onSelectionChange({
+            startLine: sel.startLineNumber,
+            // Monaco endLineNumber is exclusive only when the selection ends at column 1 of that line
+            endLine: sel.endColumn === 1 ? sel.endLineNumber - 1 : sel.endLineNumber,
+          });
+        }
+      });
 
     return () => disposable.dispose();
   }, [onSelectionChange]);
@@ -231,8 +235,22 @@ export default function FileEditor({
           const delRunLines: string[] = [];
           let currentNewLine = hunk.newStart;
 
+          const flushDeletionRun = () => {
+            if (delRunLines.length === 0) return;
+            zoneDefs.push({
+              afterLine: Math.max(currentNewLine - 1, 1),
+              lines: delRunLines.map((t: string) => ({ text: t })),
+            });
+            delRunLines.length = 0;
+          };
+
           for (const line of hunk.lines) {
             if (line.type === "add") {
+              // If this add is replacing one or more deleted lines, emit the
+              // deleted block before the added text so the visual order matches
+              // the diff hunk.
+              flushDeletionRun();
+
               // Added/modified line — highlight with decoration
               const className = modified
                 ? "diff-line-modified"
@@ -256,24 +274,13 @@ export default function FileEditor({
             } else {
               // Context line — flush any pending deletion run as a view zone
               // above THIS line (since it's the line after the deletion).
-              if (delRunLines.length > 0) {
-                zoneDefs.push({
-                  afterLine: currentNewLine - 1,
-                  lines: delRunLines.map((t: string) => ({ text: t })),
-                });
-                delRunLines.length = 0;
-              }
+              flushDeletionRun();
               currentNewLine++;
             }
           }
 
           // Flush trailing deletion run at end of hunk
-          if (delRunLines.length > 0) {
-            zoneDefs.push({
-              afterLine: currentNewLine - 1,
-              lines: delRunLines.map((t: string) => ({ text: t })),
-            });
-          }
+          flushDeletionRun();
         }
 
         // Apply decorations
@@ -349,7 +356,7 @@ export default function FileEditor({
     return () => {
       cancelled = true;
     };
-  }, [path, session]);
+  }, [path, session, diffVersion]);
 
   // Reset editor ref when path changes
   useEffect(() => {

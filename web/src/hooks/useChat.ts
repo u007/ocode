@@ -45,7 +45,7 @@ export function useChat(options?: UseChatOptions) {
           dispatch({ type: "SET_STREAMING", isStreaming: false });
         });
     },
-    [state.sessionId, dispatch],
+    [state.sessionId, dispatch, options?.onNewSession],
   );
 
   // Local stop: the browser can't cancel the TUI's agent, so this only releases

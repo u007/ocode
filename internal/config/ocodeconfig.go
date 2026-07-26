@@ -370,7 +370,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Security:            defaultSecurityConfig(),
 		Discovery:           defaultDiscoveryConfig(),
 		RecapTimeoutSeconds: 120,
-		UndoMaxAgeDelta:     4,
+		UndoMaxAgeDelta:     10,
 		TUI:                 defaultTUIConfig(),
 		Ocr:                 ocr.DefaultOcrConfig(),
 		Extra:               make(map[string]json.RawMessage),

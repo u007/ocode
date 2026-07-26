@@ -76,14 +76,14 @@ func (o *Outbox) Append(d Delivery) error {
 // results). Returns an empty slice when the file does not exist.
 func (o *Outbox) Drain() ([]Delivery, error) {
 	if o == nil {
-		return nil, nil
+		return []Delivery{}, nil
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	data, err := os.ReadFile(o.Path())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return []Delivery{}, nil
 		}
 		return nil, err
 	}
@@ -102,18 +102,21 @@ func (o *Outbox) Drain() ([]Delivery, error) {
 	if err := os.WriteFile(o.Path(), nil, 0o644); err != nil {
 		return out, err
 	}
+	if out == nil {
+		return []Delivery{}, nil
+	}
 	return out, nil
 }
 
 // Peek returns the contents of the JSONL file without truncating.
 func (o *Outbox) Peek() ([]Delivery, error) {
 	if o == nil {
-		return nil, nil
+		return []Delivery{}, nil
 	}
 	data, err := os.ReadFile(o.Path())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return []Delivery{}, nil
 		}
 		return nil, err
 	}
@@ -127,6 +130,9 @@ func (o *Outbox) Peek() ([]Delivery, error) {
 			return nil, fmt.Errorf("outbox: corrupt line: %w", err)
 		}
 		out = append(out, d)
+	}
+	if out == nil {
+		return []Delivery{}, nil
 	}
 	return out, nil
 }

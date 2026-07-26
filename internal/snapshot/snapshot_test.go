@@ -254,6 +254,36 @@ func TestStoreUndoByToolCallID_CrossAgentConflict(t *testing.T) {
 	}
 }
 
+func TestStoreUndoByToolCallID_ClearsCrossAgentRegistryOnSuccess(t *testing.T) {
+	s, _ := newTempStore(t)
+	other := NewStore("other-agent", "")
+	t.Cleanup(s.Reset)
+	t.Cleanup(other.Reset)
+
+	if err := os.WriteFile("a.txt", []byte("v0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Backup("a.txt", "tc1"); err != nil {
+		t.Fatal(err)
+	}
+	s.RegisterWrite("a.txt", "tc1")
+
+	if err := os.WriteFile("a.txt", []byte("v1\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Backup("a.txt", "tc2"); err != nil {
+		t.Fatal(err)
+	}
+	other.RegisterWrite("a.txt", "tc2")
+
+	if _, err := other.UndoByToolCallID("tc2", 5); err != nil {
+		t.Fatalf("undo newer write: %v", err)
+	}
+	if _, err := s.UndoByToolCallID("tc1", 5); err != nil {
+		t.Fatalf("expected older undo to succeed after newer undo, got %v", err)
+	}
+}
+
 func TestStoreUndoByToolCallID_SameAgentNewerBlocks(t *testing.T) {
 	s, _ := newTempStore(t)
 	if err := os.WriteFile("a.txt", []byte("v1\n"), 0644); err != nil {

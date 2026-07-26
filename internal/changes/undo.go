@@ -99,10 +99,7 @@ func (r *Registry) UndoFile(path string) error {
 		}
 		seen[key] = struct{}{}
 		if _, err := c.store.UndoByToolCallID(c.tcid, snapshotUndoMaxAge); err != nil {
-			// Cross-agent conflict / expiry / not found. Wrap the
-			// underlying error so callers can errors.Is the
-			// specific store-level failure.
-			return errors.Join(ErrNoChanges, err)
+			return wrapStoreUndoErr(err)
 		}
 	}
 	return nil
@@ -132,7 +129,7 @@ func (r *Registry) UndoBlock(path, toolCallID string) error {
 		for _, snap := range store.Snapshots() {
 			if snap.OriginalPath == path && snap.ToolCallID == toolCallID {
 				if _, err := store.UndoByToolCallID(toolCallID, snapshotUndoMaxAge); err != nil {
-					return errors.Join(ErrNoChanges, err)
+					return wrapStoreUndoErr(err)
 				}
 				return nil
 			}
@@ -199,3 +196,21 @@ func (r *Registry) lookupLocked(path string) (FileChange, bool) {
 // delta; a generous value (matching the snapshot package's own
 // internal callers) is appropriate here.
 const snapshotUndoMaxAge = 1000
+
+// wrapStoreUndoErr classifies a snapshot.Store undo failure into the
+// changes package's own sentinels, joined with the original error so
+// callers keep the human-readable detail (e.g. the blocking
+// tool_call_id) instead of it being discarded. Only snapshot.ErrNotFound
+// maps to ErrNoChanges — a genuine conflict (snapshot.ErrConflict) or
+// expiry must NOT be reported as "no changes", since there is in fact
+// something to undo; it's just blocked right now.
+func wrapStoreUndoErr(err error) error {
+	switch {
+	case errors.Is(err, snapshot.ErrNotFound):
+		return errors.Join(ErrNoChanges, err)
+	case errors.Is(err, snapshot.ErrConflict):
+		return errors.Join(ErrConflict, err)
+	default:
+		return err
+	}
+}

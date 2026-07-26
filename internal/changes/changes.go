@@ -197,3 +197,9 @@ var ErrNotUndoable = errors.New("changes: file is not undoable from the changes 
 // session list remembered it, but the live stores have no snapshot for
 // the path).
 var ErrNoChanges = errors.New("changes: no recorded tool calls for this file")
+
+// ErrConflict is returned by UndoFile/UndoBlock when the underlying
+// snapshot store refuses because a newer change (same-agent or
+// cross-agent) to the same file must be undone first. Distinct from
+// ErrNoChanges: there IS something to undo, it's just blocked.
+var ErrConflict = errors.New("changes: a newer active change still exists for this file")
