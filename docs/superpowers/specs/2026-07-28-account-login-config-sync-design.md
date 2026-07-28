@@ -101,24 +101,49 @@ guards added before commit.
 ## 5. Push flow — auto-merge, never fails to the user
 
 Client keeps a **last-synced snapshot** per blob type (the JSON as of the
-last successful push/pull), separate from the live local file.
+last successful push/pull), separate from the live local file. A brand-new
+machine has no snapshot and no server row for the user yet — see the
+bootstrap case below.
 
 On push:
 1. Route handler opens a transaction and takes
-   `pg_advisory_xact_lock(hash(user_id))` first — serializes all sync writes
-   for that user, safe if kakiit later scales to multiple instances.
+   `pg_advisory_xact_lock(hashtext(user_id)::bigint)` first — better-auth
+   ids are strings (cuid/uuid), so they're reduced to an int64 via
+   `hashtext()` before locking. This serializes all sync writes for that
+   user, safe if kakiit later scales to multiple instances.
 2. Client sends `{version: lastKnownVersion, blob: <current local JSON>}`.
+   `lastKnownVersion` is `0` for a user's first-ever push of a blob type
+   (no row exists yet); the server creates the row at `version: 1`.
 3. If `version` matches the server's current version: write, `version + 1`,
    return success.
 4. If stale: server responds with its current blob + version (not an
    error). Client performs a **3-way JSON merge** — `base` (its last-synced
    snapshot) vs `local` (current file) vs `remote` (server's latest) —
-   applying the union of keys changed since `base` on top of `remote`; a
-   key changed on both sides since `base` resolves local-wins (the edit the
-   user just made takes precedence). Client writes the merged JSON to disk
-   and retries the push with the new version. This retry is internal to
-   `internal/sync` — it never surfaces as a failure.
+   applying the union of keys changed since `base` on top of `remote`.
+   Conflict resolution when the same key changed on both sides since `base`
+   differs by blob type:
+   - `ocodeconfig`: **local wins** — the edit the user just made on this
+     device takes precedence (prefs are cheap to re-diverge, and the
+     device the user is actively using should reflect what they just did).
+   - `authsecrets`: **remote wins** — provider credentials can carry
+     rotated refresh tokens; blindly keeping a local value risks
+     resurrecting a token another device already rotated past. The local
+     device instead adopts the remote credential for that key.
+   Client writes the merged JSON to disk and retries the push with the new
+   version. This retry is bounded: up to 5 attempts with exponential
+   backoff (250ms base). If still conflicting after 5 attempts, the sync
+   cycle gives up silently (logged only) and tries again on the next
+   debounce tick or the next startup pull — never surfaced to the user, and
+   the local file is left in its last successfully-merged state either way.
 5. On success, client updates its last-synced snapshot to the pushed JSON.
+
+**Bootstrap (new machine, no local snapshot):** before any push, if the
+client has no last-synced snapshot for a blob type, it first does a pull
+(§6 startup pull). If the server has a row, that becomes the initial
+snapshot and local file (merged with whatever's already on disk using the
+same rules above, treating `base` as empty). If the server has no row
+either (first device ever for this account), the local file becomes the
+initial push with `version: 0`.
 
 ## 6. Background deferred sync (ocode client)
 
@@ -138,16 +163,32 @@ made from other devices.
 - Device-code login errors (expired/denied code): surfaced directly, since
   `/login` is an explicit foreground action, not background sync.
 
-## 8. Testing
+## 8. Logout & account lifecycle
+
+- `ocode /logout` calls `POST /api/ocode/device/revoke` with the stored sync
+  bearer token, which kakiit deletes server-side; CLI deletes the local
+  token file. Background sync stops (no token → push/pull skipped, logged
+  once, not retried).
+- Account deletion/deactivation on kakiit cascades: deleting a `user` row
+  cascades to `ocode_sync_keys` and `ocode_config_syncs` via FK
+  `ON DELETE CASCADE`, and any outstanding sync bearer tokens for that user
+  are invalidated (checked at request time via the same session-token
+  lookup already required for `/api/ocode/sync/*`).
+
+## 9. Testing
 
 - Go (`internal/sync`): 3-way JSON merge (base/local/remote fixtures,
-  same-key-both-sides conflict resolution), debounce timer behavior,
-  device-code polling state machine, snapshot tracking across
-  push/pull/merge cycles.
+  per-blob-type conflict policy — local-wins for `ocodeconfig`, remote-wins
+  for `authsecrets`), bounded-retry-with-backoff exhaustion behavior,
+  bootstrap flow (no local snapshot, with and without an existing server
+  row), debounce timer behavior, device-code polling state machine,
+  snapshot tracking across push/pull/merge cycles, logout clearing local
+  token and halting background sync.
 - kakiit (`/api/ocode/*` route tests): advisory lock serializes concurrent
   pushes from two simulated devices, stale-version push returns
   current-state (not an error), envelope encrypt/decrypt round-trip,
-  device-code approve/deny/expire paths.
+  device-code approve/deny/expire paths, revoke invalidates the token,
+  account-deletion cascade removes sync rows.
 
 ## Out of scope (this spec)
 
