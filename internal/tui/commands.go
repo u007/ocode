@@ -107,6 +107,8 @@ func init() {
 		{name: "/advisor", usage: "/advisor [provider/model|default]", help: "Set the advisor model (used by the advisor() tool for strategic guidance)", handler: runAdvisorCmd},
 		{name: "/connect", help: "Show/Set provider API keys", handler: runConnectCmd},
 		{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
+		{name: "/sync-login", help: "Log in and enable encrypted config sync", handler: runSyncLoginCmd},
+		{name: "/sync-logout", help: "Log out and stop config sync", handler: runSyncLogoutCmd},
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
 		{name: "/compact", usage: "/compact [focus]", help: "Summarise older context to free tokens; optional focus guides the summary", handler: runCompactCmd},
 		{name: "/recap", usage: "/recap [model|status|enable|disable]", help: "Summarize conversation / manage recap model", handler: runRecapCmd},

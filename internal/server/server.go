@@ -164,6 +164,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/config/agents", s.authMiddleware(s.handleListAgents))
 	s.mux.HandleFunc("PUT /api/config/agent", s.authMiddleware(s.handleSetAgent))
 
+	// Account sync (web/desktop equivalent of the TUI's /sync-login, /sync-logout)
+	s.mux.HandleFunc("POST /api/sync/login/start", s.authMiddleware(s.handleSyncLoginStart))
+	s.mux.HandleFunc("POST /api/sync/login/poll", s.authMiddleware(s.handleSyncLoginPoll))
+	s.mux.HandleFunc("GET /api/sync/status", s.authMiddleware(s.handleSyncStatus))
+	s.mux.HandleFunc("POST /api/sync/logout", s.authMiddleware(s.handleSyncLogout))
+
 	// Permissions
 	s.mux.HandleFunc("GET /api/permissions", s.authMiddleware(s.handleGetPermissions))
 	s.mux.HandleFunc("POST /api/permissions", s.authMiddleware(s.handleSetPermission))
@@ -316,6 +322,22 @@ func (s *Server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetTheme(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetTheme(w, r)
+}
+
+func (s *Server) handleSyncLoginStart(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSyncLoginStart(w, r)
+}
+
+func (s *Server) handleSyncLoginPoll(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSyncLoginPoll(w, r)
+}
+
+func (s *Server) handleSyncStatus(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSyncStatus(w, r)
+}
+
+func (s *Server) handleSyncLogout(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSyncLogout(w, r)
 }
 
 func (s *Server) handleListThemes(w http.ResponseWriter, r *http.Request) {

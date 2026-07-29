@@ -1057,7 +1057,7 @@ git commit -m "feat(ocode-sync): versioned blob push/pull routes with advisory-l
 
 ---
 
-## Part B — ocode client (Go)
+## Part B — ocode client (Go) ✅ Implemented in commit `1b4e252`
 
 ### Task 6: `internal/sync` package skeleton — types and local paths
 

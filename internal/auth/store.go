@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/u007/ocode/internal/hook"
 	"github.com/u007/ocode/internal/paths"
 )
 
@@ -142,12 +143,12 @@ var (
 	cacheLoaded bool                  // true after a successful loadStoreLocked
 )
 
-// authPath returns the opencode-compatible credentials path:
+// AuthPath returns the opencode-compatible credentials path:
 //
 //	<GlobalDataDir>/auth.json
 //
 // See internal/paths.GlobalDataDir for the platform-specific base directory.
-func authPath() (string, error) {
+func AuthPath() (string, error) {
 	base, err := paths.GlobalDataDir()
 	if err != nil {
 		return "", err
@@ -186,7 +187,7 @@ func LoadStore() error {
 }
 
 func loadStoreLocked() error {
-	path, err := authPath()
+	path, err := AuthPath()
 	if err != nil {
 		return fmt.Errorf("resolve auth path: %w", err)
 	}
@@ -391,8 +392,14 @@ func Remove(provider string) error {
 	return persistLocked()
 }
 
+// OnCredentialsSaved is invoked after every successful auth.json
+// write. Clients register callbacks with OnCredentialsSaved.Add;
+// the zero value is ready to use. Used by internal/sync to debounce
+// background push.
+var OnCredentialsSaved hook.Hooks
+
 func persistLocked() error {
-	path, err := authPath()
+	path, err := AuthPath()
 	if err != nil {
 		return fmt.Errorf("resolve auth path: %w", err)
 	}
@@ -414,5 +421,6 @@ func persistLocked() error {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return fmt.Errorf("chmod auth file: %w", err)
 	}
+	OnCredentialsSaved.Fire()
 	return nil
 }

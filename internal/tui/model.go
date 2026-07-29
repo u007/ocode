@@ -1086,6 +1086,9 @@ type model struct {
 	ideOpenEditors   []ide.Editor
 	ideSelectionSent bool
 
+	// Sync watcher stop function (set by /sync-login, called by /sync-logout).
+	syncStop func()
+
 	// Secret redaction state (see internal/redact).
 	redactionEnabled  bool
 	redactionModel    string             // local model for tier-2 scanning
@@ -11771,7 +11774,7 @@ func (m model) executeApprovedTool(toolName string, args json.RawMessage, pathRo
 		if releaseAfter {
 			defer tool.ReleaseTemporaryAllowedPath(pathRoot)
 		}
-		result, err := m.agent.HandleApprovedToolCall(toolName, args)
+		result, err := m.agent.HandleApprovedToolCall(toolName, args, m.pendingToolCallID)
 		if err != nil {
 			result = fmt.Sprintf("Error: %v", err)
 		}
@@ -12905,22 +12908,22 @@ var permBtnHoverStyle = permBtnStyle.
 	Background(lipgloss.Color("12")).
 	BorderForeground(lipgloss.Color("12"))
 
-	// alwaysVisibleDotfiles are hidden files (dotfiles) that appear in the
-	// ctrl+p file search even when hidden files are not shown. These are
-	// commonly-edited config files that users reach for frequently.
-	var alwaysVisibleDotfiles = map[string]struct{}{
-		".gitignore":     {},
-		".editorconfig":  {},
-		".gitattributes": {},
-		".env.example":   {},
-	}
+// alwaysVisibleDotfiles are hidden files (dotfiles) that appear in the
+// ctrl+p file search even when hidden files are not shown. These are
+// commonly-edited config files that users reach for frequently.
+var alwaysVisibleDotfiles = map[string]struct{}{
+	".gitignore":     {},
+	".editorconfig":  {},
+	".gitattributes": {},
+	".env.example":   {},
+}
 
-	// fileSearchResult holds a single workspace file for the ctrl+p file search.
-	type fileSearchResult struct {
-		path     string // relative path (e.g. "internal/tui/model.go")
-		dirName  string // parent directory name (e.g. "tui")
-		fileName string // file name (e.g. "model.go")
-	}
+// fileSearchResult holds a single workspace file for the ctrl+p file search.
+type fileSearchResult struct {
+	path     string // relative path (e.g. "internal/tui/model.go")
+	dirName  string // parent directory name (e.g. "tui")
+	fileName string // file name (e.g. "model.go")
+}
 
 // scanWorkspaceFiles walks the workspace tree and returns non-ignored files.
 // Only root .gitignore and .ignore files are consulted (nested ignore files

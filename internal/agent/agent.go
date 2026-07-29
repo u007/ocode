@@ -3179,8 +3179,8 @@ func extractFilesFromCommand(command string) []string {
 	return files
 }
 
-func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage) (string, error) {
-	return a.executeToolCall(name, args, nil, "")
+func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage, toolCallID string) (string, error) {
+	return a.executeToolCall(name, args, nil, toolCallID)
 }
 
 func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {

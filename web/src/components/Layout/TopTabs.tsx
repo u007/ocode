@@ -1,4 +1,5 @@
 import { MessageSquare, FolderGit2, GitBranch, ScrollText, Paperclip, Activity, FileCode, X, CalendarClock, History } from "lucide-react";
+import SyncStatusWidget from "./SyncStatusWidget";
 
 export interface EditorTabInfo {
   id: string;
@@ -117,7 +118,9 @@ export default function TopTabs({ activeTab, onTabChange, editorTabs, onEditorTa
         </>
       )}
 
-
+      <div className="ml-auto flex items-center shrink-0">
+        <SyncStatusWidget />
+      </div>
     </header>
   );
 }

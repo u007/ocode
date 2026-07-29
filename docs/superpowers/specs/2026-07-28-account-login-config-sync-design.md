@@ -1,7 +1,7 @@
 # Account Login + Encrypted Config Sync (via kakiit) — Design
 
 - **Date:** 2026-07-28
-- **Status:** Approved (design) — pending implementation plan
+- **Status:** Implemented (ocode client-side in commit `1b4e252`; kakiit backend pending separate deploy)
 - **Goal:** Let ocode users create an account and log in (`/login`), then have
   their local config (`ocodeconfig.json` and `auth.json`) sync across
   machines through a new API surface on `~/www/kakiit`, encrypted at rest,

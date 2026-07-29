@@ -16,6 +16,7 @@ import (
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/session"
 	shellpkg "github.com/u007/ocode/internal/shell"
+	ocodesync "github.com/u007/ocode/internal/sync"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -44,6 +45,12 @@ type Handler struct {
 	// this list, so the browser receives streaming tokens even without a TUI.
 	headlessSubs map[chan SSEEvent]struct{}
 	headlessMu   sync.Mutex
+
+	// syncMu guards syncClient/syncStop, which back the /api/sync/* routes
+	// (web/desktop equivalent of the TUI's /sync-login, /sync-logout).
+	syncMu     sync.Mutex
+	syncClient *ocodesync.Client
+	syncStop   func()
 }
 
 type agentSession struct {

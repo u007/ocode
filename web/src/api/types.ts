@@ -281,6 +281,29 @@ export interface ThemeResponse {
   colors: ThemeColors;
 }
 
+export interface SyncLoginStartResponse {
+  deviceCode: string;
+  userCode: string;
+  verifyUrl: string;
+  expiresIn: number;
+}
+
+export interface SyncLoginPollResponse {
+  status: "pending" | "approved" | "expired";
+}
+
+export interface SyncBlobStatus {
+  version: number;
+  syncedAt: string;
+  synced: boolean;
+}
+
+export interface SyncStatusResponse {
+  loggedIn: boolean;
+  config: SyncBlobStatus;
+  auth: SyncBlobStatus;
+}
+
 export interface AgentRun {
   id: string;
   name: string;

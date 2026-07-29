@@ -3467,6 +3467,29 @@ func TestRefreshModelPickerItemsPreservesPermissionModelClearOption(t *testing.T
 	}
 }
 
+func TestAdvisorPickerPrependsClaudeCodeModels(t *testing.T) {
+	m := model{
+		pickerItems:    []string{"existing"},
+		pickerValues:   []string{"existing"},
+		pickerIsHeader: []bool{false},
+	}
+
+	m.prependClaudeCodeSection()
+
+	gotItems := strings.Join(m.pickerItems, "\n")
+	if !strings.Contains(gotItems, "Claude Code (Read-Only CLI)") {
+		t.Fatalf("expected Claude Code section header, got %#v", m.pickerItems)
+	}
+	for _, want := range []string{"claude-code/claude-sonnet-5", "claude-code/claude-opus-5"} {
+		if !containsString(m.pickerValues, want) {
+			t.Fatalf("expected advisor picker values to include %q, got %#v", want, m.pickerValues)
+		}
+	}
+	if m.pickerValues[0] != "" || m.pickerValues[len(m.pickerValues)-2] != "" || m.pickerValues[len(m.pickerValues)-1] != "existing" {
+		t.Fatalf("expected Claude Code section to be prepended ahead of existing items, got values=%#v", m.pickerValues)
+	}
+}
+
 func TestModelPickerFilterKeywordSplitting(t *testing.T) {
 	cases := []struct {
 		name     string

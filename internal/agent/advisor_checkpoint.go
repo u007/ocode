@@ -157,7 +157,7 @@ Executor's reasoning:
 
 Proposed tool calls:
 %s
-Advise: is this the right approach? Wrong files, missing prior exploration, simpler alternative, risks? Answer with either "proceed" plus cautions, or a corrected approach.`,
+Advise: is this the right approach? Wrong files, missing prior exploration, simpler alternative, risks? Answer with either "proceed" plus cautions, or a corrected approach. This is an automated checkpoint — the executor cannot answer follow-up questions; if context is thin, give your best read with explicit caveats rather than requesting more information.`,
 		st.userGoal, resp.Content, plan.String())
 
 	advice, ok := a.runAdvisorCheckpoint(checkpointPlan, prompt)
@@ -203,7 +203,7 @@ Files changed this session:
 Executor's final report:
 %s
 
-Check: does the report satisfy the full goal? Any unvalidated claims (tests not run, build not checked), missed requirements, or loose ends? Answer "complete" if satisfied, otherwise enumerate the specific gaps to fix.`,
+Check: does the report satisfy the full goal? Any unvalidated claims (tests not run, build not checked), missed requirements, or loose ends? Answer "complete" if satisfied, otherwise enumerate the specific gaps to fix. This is an automated checkpoint — the executor cannot answer follow-up questions; if context is thin, give your best read with explicit caveats rather than requesting more information.`,
 		st.userGoal, formatChangedFiles(a.ChangedFiles()), resp.Content)
 
 	advice, ok := a.runAdvisorCheckpoint(checkpointDone, prompt)

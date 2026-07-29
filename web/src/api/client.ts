@@ -27,6 +27,9 @@ import type {
   CronTargetsResponse,
   FileChange,
   ChangeDiff,
+  SyncStatusResponse,
+  SyncLoginStartResponse,
+  SyncLoginPollResponse,
 } from "./types";
 
 // Base path for API calls. When the SPA is served under a tailscale --set-path
@@ -149,6 +152,17 @@ export const api = {
       name ? `/api/theme?name=${encodeURIComponent(name)}` : "/api/theme",
     ),
   getThemes: () => fetchJSON<ThemesListResponse>("/api/themes"),
+  getSyncStatus: () => fetchJSON<SyncStatusResponse>("/api/sync/status"),
+  syncLoginStart: () =>
+    fetchJSON<SyncLoginStartResponse>("/api/sync/login/start", {
+      method: "POST",
+    }),
+  syncLoginPoll: (deviceCode: string) =>
+    fetchJSON<SyncLoginPollResponse>("/api/sync/login/poll", {
+      method: "POST",
+      body: JSON.stringify({ deviceCode }),
+    }),
+  syncLogout: () => fetchEmpty("/api/sync/logout", { method: "POST" }),
   getMCP: () => fetchJSON<MCPStatus[]>("/api/mcp"),
   getAdvisor: () =>
     fetchJSON<{ model: string }>("/api/config/advisor"),

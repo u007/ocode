@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/u007/ocode/internal/hook"
 	"github.com/u007/ocode/internal/ocr"
 	"github.com/u007/ocode/internal/snapshot"
 )
@@ -1057,6 +1058,11 @@ func lockOcodeConfig() (func(), error) {
 // withOcodeConfigLock loads the current config under lockOcodeConfig, lets fn
 // mutate it, and writes it back before releasing — the standard shape for
 // every Save* setter below. This closes the load-modify-write race that a
+// OnConfigSaved is invoked after every successful ocodeconfig.json file
+// write. Clients register callbacks with OnConfigSaved.Add; the zero value
+// is ready to use. Used by internal/sync to debounce background push.
+var OnConfigSaved hook.Hooks
+
 // bare loadFullOcodeConfig()+SaveOcodeConfig() pair leaves open between two
 // concurrent ocode sessions.
 func withOcodeConfigLock(fn func(cfg *OcodeConfig) error) error {
@@ -1065,7 +1071,6 @@ func withOcodeConfigLock(fn func(cfg *OcodeConfig) error) error {
 		return err
 	}
 	defer unlock()
-
 	cfg, err := loadFullOcodeConfig()
 	if err != nil {
 		return fmt.Errorf("load ocode config: %w", err)
@@ -1073,7 +1078,11 @@ func withOcodeConfigLock(fn func(cfg *OcodeConfig) error) error {
 	if err := fn(cfg); err != nil {
 		return err
 	}
-	return SaveOcodeConfig(cfg)
+	if err := SaveOcodeConfig(cfg); err != nil {
+		return err
+	}
+	OnConfigSaved.Fire()
+	return nil
 }
 
 func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {

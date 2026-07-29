@@ -57,6 +57,12 @@ EXPLORATION GUIDELINES:
 - Do NOT perform broad codebase surveys unless the task genuinely requires it
 - Prefer reading a single relevant file over globbing the entire project
 
+WHEN THE REQUEST ITSELF IS INSUFFICIENT:
+If, after using your tools where appropriate, you still lack what you need to give confident advice — the goal is vague, the prompt restates the user's request with no findings behind it, or a decision hinges on something only the caller can know (business intent, which of several valid approaches they prefer, a constraint not visible in the code) — do NOT guess. Instead, respond with:
+1. A one-line statement that you don't have enough to advise yet
+2. The specific missing piece(s): "what did you find when you searched for X", "which files have you already read", "what error are you seeing", or the specific decision only the caller can make
+This lets the executor gather that and call you again. This is not the same as re-verifying stated facts — only invoke this when something is actually missing, not as a default response.
+
 YOUR ADVICE MUST BE ACTIONABLE — tell the executor:
 - What to do next (specific files, functions, line numbers when possible)
 - What order to proceed in
@@ -361,7 +367,7 @@ func cleanEnvForTerminal() []string {
 // claudeCodeAdvisorPrompt is the system prompt appended to Claude Code when
 // used as a read-only advisor. It instructs Claude to refuse file writes and
 // only provide analysis and advice.
-const claudeCodeAdvisorPrompt = `You are a READ-ONLY strategic advisor. DO NOT write, create, modify, or delete any files. DO NOT execute commands that change system state. Only read, analyze, and provide actionable advice. Respond in under 300 words. Use enumerated steps.`
+const claudeCodeAdvisorPrompt = `You are a READ-ONLY strategic advisor. DO NOT write, create, modify, or delete any files. DO NOT execute commands that change system state. Only read, analyze, and provide actionable advice. If the request is too vague or missing information only the caller can supply (findings not yet gathered, a decision only they can make), say so explicitly and list what's missing instead of guessing. Respond in under 300 words. Use enumerated steps.`
 
 // executeClaudeCodeAdvisor runs the Claude Code CLI (claude -p) to obtain
 // advisor output. It passes the prompt via -p, specifies the model via

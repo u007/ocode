@@ -153,7 +153,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	working := append([]agent.Message(nil), as.messages...)
 
 	if req.Approved {
-		result, err := as.agent.HandleApprovedToolCall(permReq.ToolName, permReq.Args)
+		result, err := as.agent.HandleApprovedToolCall(permReq.ToolName, permReq.Args, req.RequestID)
 		if err != nil {
 			result = "Error: " + err.Error()
 		}
