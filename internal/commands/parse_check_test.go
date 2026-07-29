@@ -39,8 +39,7 @@ func TestParseGitCommitPushFull(t *testing.T) {
 		t.Errorf("Prompt length = %d; expected the full body (>1500 chars). The 50-line cap may have been reintroduced.", len(cmd.Prompt))
 	}
 	for _, must := range []string{
-		"## Step 4: Stage updated docs",
-		"## Step 5: Commit and push",
+		"## Step 4: Commit and push",
 		"Report the commit hash and the branch pushed.",
 	} {
 		if !strings.Contains(cmd.Prompt, must) {

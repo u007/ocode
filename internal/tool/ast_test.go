@@ -2,9 +2,12 @@ package tool
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/lsp"
 )
 
 func TestAstTool_NameAndDefinition(t *testing.T) {
@@ -51,12 +54,24 @@ func TestAstTool_ReferencesByName(t *testing.T) {
 	if _, err := exec.LookPath("gopls"); err != nil {
 		t.Skip("gopls not installed")
 	}
-	ast := &AstTool{}
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/go.mod", []byte("module example.com/asttest\n\ngo 1.23\n"), 0600); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(dir+"/a.go", []byte("package main\n\nfunc LoadBuiltins() {}\n\nfunc callA() { LoadBuiltins() }\n"), 0600); err != nil {
+		t.Fatalf("write a.go: %v", err)
+	}
+	if err := os.WriteFile(dir+"/b.go", []byte("package main\n\nfunc callB() { LoadBuiltins() }\n"), 0600); err != nil {
+		t.Fatalf("write b.go: %v", err)
+	}
+	mgr := lsp.NewManager(dir)
+	t.Cleanup(mgr.Close)
+	ast := &AstTool{Mgr: mgr}
 	out, err := ast.Execute(json.RawMessage(`{"operation":"references","symbol":"LoadBuiltins","lang":"go"}`))
 	if err != nil {
 		t.Fatalf("references: %v", err)
 	}
-	if !strings.Contains(out, "tool.go") {
-		t.Fatalf("expected references to include tool.go, got:\n%s", out)
+	if !strings.Contains(out, "a.go") || !strings.Contains(out, "b.go") {
+		t.Fatalf("expected references to include a.go and b.go, got:\n%s", out)
 	}
 }

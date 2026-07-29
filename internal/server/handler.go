@@ -47,7 +47,7 @@ type Handler struct {
 	headlessMu   sync.Mutex
 
 	// syncMu guards syncClient/syncStop, which back the /api/sync/* routes
-	// (web/desktop equivalent of the TUI's /sync-login, /sync-logout).
+	// (web/desktop equivalent of the TUI's /login, /logout).
 	syncMu     sync.Mutex
 	syncClient *ocodesync.Client
 	syncStop   func()

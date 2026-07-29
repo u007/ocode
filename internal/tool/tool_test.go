@@ -37,6 +37,7 @@ var expectedBuiltinTools = []string{
 	"question",
 	"webfetch",
 	"websearch",
+	"load_skill",
 	"repo_clone",
 	"repo_overview",
 	"plan_enter",

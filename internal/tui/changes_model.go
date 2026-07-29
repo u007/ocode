@@ -109,29 +109,20 @@ func (m changesModel) handleKey(msg tea.KeyPressMsg) (changesModel, tea.Cmd) {
 	case "j", "down":
 		next := (m.list.Selected() + 1) % len(m.files)
 		m.list.SetSelected(next)
+		m.ensureDiffCached(next)
 	case "k", "up":
 		n := len(m.files)
 		next := (m.list.Selected() - 1 + n) % n
 		m.list.SetSelected(next)
+		m.ensureDiffCached(next)
 	case "g", "home":
 		m.list.SetSelected(0)
+		m.ensureDiffCached(0)
 	case "G", "end":
 		m.list.SetSelected(len(m.files) - 1)
+		m.ensureDiffCached(len(m.files) - 1)
 	case "enter":
-		// Compute and cache the diff for the selected file.
-		sel := m.list.Selected()
-		if sel >= 0 && sel < len(m.files) {
-			f := m.files[sel]
-			if _, cached := m.diffCache[f.OriginalPath]; !cached {
-				diff, err := changes.RenderDiff(f.FirstBackupPath, f.OriginalPath)
-				if err != nil {
-					log.Printf("changes: RenderDiff(%q, %q): %v", f.FirstBackupPath, f.OriginalPath, err)
-					m.diffCache[f.OriginalPath] = "(error rendering diff)"
-				} else {
-					m.diffCache[f.OriginalPath] = diff
-				}
-			}
-		}
+		m.ensureDiffCached(m.list.Selected())
 	case "?":
 		m.showDetails = !m.showDetails
 	case "u":
@@ -144,6 +135,25 @@ func (m changesModel) handleKey(msg tea.KeyPressMsg) (changesModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// ensureDiffCached computes and caches the diff for m.files[sel] if it is
+// not already cached.
+func (m changesModel) ensureDiffCached(sel int) {
+	if sel < 0 || sel >= len(m.files) {
+		return
+	}
+	f := m.files[sel]
+	if _, cached := m.diffCache[f.OriginalPath]; cached {
+		return
+	}
+	diff, err := changes.RenderDiff(f.FirstBackupPath, f.OriginalPath)
+	if err != nil {
+		log.Printf("changes: RenderDiff(%q, %q): %v", f.FirstBackupPath, f.OriginalPath, err)
+		m.diffCache[f.OriginalPath] = "(error rendering diff)"
+	} else {
+		m.diffCache[f.OriginalPath] = diff
+	}
 }
 
 // initUndo begins the undo confirmation flow.
@@ -283,14 +293,13 @@ func (m changesModel) View(w, h int, styles Styles) string {
 		rightContent += spacer
 	} else if sel >= 0 && sel < len(m.files) {
 		f := m.files[sel]
-		fname := filepath.Base(f.OriginalPath)
-
+		m.ensureDiffCached(sel)
 		if cachedDiff, ok := m.diffCache[f.OriginalPath]; ok && cachedDiff != "" {
 			// Render the cached diff using the unified diff renderer.
 			rendered := renderUnifiedDiff(cachedDiff, styles)
 			rightContent = lipgloss.NewStyle().Width(rightW - 4).Render(rendered)
 		} else {
-			rightContent = lipgloss.NewStyle().Width(rightW - 4).Render(styles.Hint.Render("<diff for " + fname + ">"))
+			rightContent = lipgloss.NewStyle().Width(rightW - 4).Render(styles.Hint.Render("(no changes to show)"))
 		}
 	}
 	rightPane := styles.Border.Width(rightW).Height(contentH).Render(rightContent)

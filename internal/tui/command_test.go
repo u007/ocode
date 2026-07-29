@@ -46,6 +46,14 @@ func TestLookupCommandResolvesAliases(t *testing.T) {
 		t.Fatalf("expected /theme to resolve to /themes, got %#v", got)
 	}
 
+	if got := lookupCommand("/logout"); got == nil || got.name != "/logout" {
+		t.Fatalf("expected /logout to resolve to /logout, got %#v", got)
+	}
+
+	if got := lookupCommand("/sync-logout"); got == nil || got.name != "/logout" {
+		t.Fatalf("expected /sync-logout to resolve to /logout, got %#v", got)
+	}
+
 	if got := lookupCommand("/export-claude"); got == nil || got.name != "/export-claude" {
 		t.Fatalf("expected /export-claude to resolve to itself, got %#v", got)
 	}
@@ -279,11 +287,11 @@ func TestDrainQueuedCommandsProcessesAllSynchronousCommands(t *testing.T) {
 
 func TestDrainQueuedItemsPreservesMixedInputCommandOrder(t *testing.T) {
 	m := model{
-		width:      80,
-		height:     20,
-		input:      textarea.New(),
-		viewport:   fastviewport.New(80, 20),
-		agent:      agent.NewAgent(nil, nil, &config.Config{}, nil),
+		width:    80,
+		height:   20,
+		input:    textarea.New(),
+		viewport: fastviewport.New(80, 20),
+		agent:    agent.NewAgent(nil, nil, &config.Config{}, nil),
 		queuedItems: []queuedItem{
 			{kind: queueItemInput, text: "first user request"},
 			{kind: queueItemCommand, text: "/sidebar"},
@@ -317,37 +325,39 @@ func TestDrainQueuedItemsPreservesMixedInputCommandOrder(t *testing.T) {
 	}
 }
 
-func TestLoginCommandBypassesBusyQueue(t *testing.T) {
+func TestSyncAuthCommandsBypassBusyQueue(t *testing.T) {
+	for _, command := range []string{"/login", "/logout", "/sync-logout"} {
+		m := model{
+			width:     80,
+			height:    20,
+			input:     textarea.New(),
+			viewport:  fastviewport.New(80, 20),
+			streaming: true,
+		}
+
+		updated, cmd := m.handleCommand(command)
+		if cmd == nil {
+			t.Fatalf("expected %s to run immediately while busy", command)
+		}
+
+		got := updated.(*model)
+		if len(got.queuedItems) != 0 {
+			t.Fatalf("expected %s not to be queued, got %#v", command, got.queuedItems)
+		}
+		if len(got.messages) == 0 || got.messages[0].role != roleUser || got.messages[0].text != command {
+			t.Fatalf("expected %s to be recorded immediately, got %#v", command, got.messages)
+		}
+	}
+}
+
+func TestNewCommandBypassesBusyQueue(t *testing.T) {
 	m := model{
 		width:     80,
 		height:    20,
 		input:     textarea.New(),
 		viewport:  fastviewport.New(80, 20),
 		streaming: true,
-	}
-
-	updated, cmd := m.handleCommand("/login")
-	if cmd == nil {
-		t.Fatal("expected /login to run immediately while busy")
-	}
-
-	got := updated.(*model)
-	if len(got.queuedItems) != 0 {
-		t.Fatalf("expected /login not to be queued, got %#v", got.queuedItems)
-	}
-	if len(got.messages) == 0 || got.messages[0].role != roleUser || got.messages[0].text != "/login" {
-		t.Fatalf("expected /login to be recorded immediately, got %#v", got.messages)
-	}
-}
-
-func TestNewCommandBypassesBusyQueue(t *testing.T) {
-	m := model{
-		width:          80,
-		height:         20,
-		input:          textarea.New(),
-		viewport:       fastviewport.New(80, 20),
-		streaming:      true,
-		sessionID:      "old-session",
+		sessionID: "old-session",
 		messages:  []message{{role: roleUser, text: "keep me busy"}},
 		queuedItems: []queuedItem{
 			{kind: queueItemInput, text: "pending user input"},

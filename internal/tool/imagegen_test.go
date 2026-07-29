@@ -143,7 +143,7 @@ func TestExecuteGeminiViaTestServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute error: %v", err)
 	}
-	if gotURL != "/v1/models/gemini-3.1-flash-image:generateContent" {
+	if gotURL != "/v1beta/models/gemini-3.1-flash-image:generateContent" {
 		t.Errorf("url = %q", gotURL)
 	}
 	if gotKey != "test-key" {
@@ -266,7 +266,7 @@ func TestDefinitionSchema(t *testing.T) {
 func TestImgPerImagePriceUSD(t *testing.T) {
 	cases := []struct {
 		provider, model, size, quality string
-		want                          float64
+		want                           float64
 	}{
 		{"openai", "dall-e-3", "1024x1024", "", 0.040},
 		{"openai", "dall-e-3", "1024x1024", "hd", 0.080},

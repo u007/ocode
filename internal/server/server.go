@@ -164,7 +164,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/config/agents", s.authMiddleware(s.handleListAgents))
 	s.mux.HandleFunc("PUT /api/config/agent", s.authMiddleware(s.handleSetAgent))
 
-	// Account sync (web/desktop equivalent of the TUI's /sync-login, /sync-logout)
+	// Account sync (web/desktop equivalent of the TUI's /login, /logout)
 	s.mux.HandleFunc("POST /api/sync/login/start", s.authMiddleware(s.handleSyncLoginStart))
 	s.mux.HandleFunc("POST /api/sync/login/poll", s.authMiddleware(s.handleSyncLoginPoll))
 	s.mux.HandleFunc("GET /api/sync/status", s.authMiddleware(s.handleSyncStatus))

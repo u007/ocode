@@ -49,6 +49,7 @@ import (
 	shellpkg "github.com/u007/ocode/internal/shell"
 	"github.com/u007/ocode/internal/skill"
 	"github.com/u007/ocode/internal/snapshot"
+	syncpkg "github.com/u007/ocode/internal/sync"
 	"github.com/u007/ocode/internal/tool"
 	"github.com/u007/ocode/internal/tui/fastviewport"
 	"github.com/u007/ocode/internal/usage"
@@ -241,6 +242,27 @@ type docsInitFinishedMsg struct {
 	err  error  // non-nil when the operation failed
 }
 
+// syncLoginStartedMsg is emitted when /login has started the device-code flow
+// and the user needs to see the auth code. It carries the state needed for
+// the background polling phase (client, deviceCode, expiresAt).
+type syncLoginStartedMsg struct {
+	client     *syncpkg.Client
+	deviceCode string
+	expiresAt  time.Time
+	userCode   string // displayed to the user for browser entry
+	verifyURL  string // browser URL for the verification page
+	err        error  // non-nil when the device-start call itself failed
+}
+
+// syncLoginPollMsg is emitted on each poll tick during the sync login
+// device-code approval loop.
+type syncLoginPollMsg struct {
+	status     string // "pending" | "approved" | "expired"
+	token      string // set only when status == "approved"
+	err        error  // transient polling error (retry on next tick)
+	deviceCode string // echoed for cleanup
+}
+
 // editorPickedMsg is emitted by the files-tab editor picker after the user
 // selects an editor. The parent model handles it so it can update the resolved
 // editor and rebuild the editorOpener before opening the target file.
@@ -253,11 +275,6 @@ type permissionAskMsg struct {
 	toolName   string
 	toolArgs   json.RawMessage
 	toolCallID string
-}
-
-type authFinishedMsg struct {
-	token string
-	err   error
 }
 
 type shellFinishedMsg struct {
@@ -1086,8 +1103,13 @@ type model struct {
 	ideOpenEditors   []ide.Editor
 	ideSelectionSent bool
 
-	// Sync watcher stop function (set by /sync-login, called by /sync-logout).
+	// Sync watcher stop function (set by /login, called by /logout).
 	syncStop func()
+
+	// Sync login polling state (set during /login, cleared on completion).
+	syncClient     *syncpkg.Client
+	syncDeviceCode string
+	syncExpiresAt  time.Time
 
 	// Secret redaction state (see internal/redact).
 	redactionEnabled  bool
@@ -2701,25 +2723,67 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: hintStyle.Render("(no llm configured, check opencode.json)")})
 		m.rerenderTranscriptAndMaybeScroll()
-	case authFinishedMsg:
-		if msg.err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Login failed: %v", msg.err)})
-		} else {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Google Login successful! Token received."})
-			os.Setenv("GOOGLE_OAUTH_ACCESS_TOKEN", msg.token)
-			if m.config != nil && m.config.Model != "" {
-				client := agent.NewClient(m.config, m.config.Model)
-				if client != nil {
-					tools, lspMgr := m.getInitialTools()
-					next := agent.NewAgent(client, tools, m.config, lspMgr)
-					return m, m.replaceAgent(next)
-				}
-			}
-		}
-		m.renderTranscript()
 	case statusMsg:
 		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
 		m.rerenderTranscriptAndMaybeScroll()
+	case syncLoginStartedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Sync login failed: %v", msg.err)})
+			m.rerenderTranscriptAndMaybeScroll()
+			break
+		}
+		// Display the auth code in the transcript immediately.
+		text := fmt.Sprintf("To authorize ocode sync, visit:\n  %s\nAnd enter the code:  %s\n\nWaiting for you to approve in the browser...", msg.verifyURL, msg.userCode)
+		m.messages = append(m.messages, message{role: roleAssistant, text: text})
+		m.rerenderTranscriptAndMaybeScroll()
+
+		// Store polling state so the tick handler can access it.
+		m.syncClient = msg.client
+		m.syncDeviceCode = msg.deviceCode
+		m.syncExpiresAt = msg.expiresAt
+
+		return m, m.syncLoginPoll()
+	case syncLoginPollMsg:
+		if m.syncClient == nil || m.syncDeviceCode == "" {
+			// Polling was already completed or cancelled — ignore stale ticks.
+			break
+		}
+		if msg.err != nil {
+			// Transient error — keep polling.
+			return m, m.syncLoginPoll()
+		}
+		switch msg.status {
+		case "pending":
+			if time.Now().After(m.syncExpiresAt) {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Sync login expired. Please try /login again."})
+				m.rerenderTranscriptAndMaybeScroll()
+				m.clearSyncLoginState()
+				break
+			}
+			return m, m.syncLoginPoll()
+		case "approved":
+			if err := syncpkg.SaveToken(msg.token); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Sync login: failed to save token: %v", err)})
+				m.rerenderTranscriptAndMaybeScroll()
+				m.clearSyncLoginState()
+				break
+			}
+			// Bootstrap local state.
+			_ = m.syncClient.Pull(context.Background(), syncpkg.BlobTypeConfig)
+			_ = m.syncClient.Pull(context.Background(), syncpkg.BlobTypeAuth)
+			// Stop any previous watcher before starting a new one.
+			if m.syncStop != nil {
+				m.syncStop()
+			}
+			m.syncStop = syncpkg.StartWatcher(m.syncClient)
+			m.clearSyncLoginState()
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Logged in to sync — encrypted config sync active."})
+			m.rerenderTranscriptAndMaybeScroll()
+		case "expired":
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Sync login expired. Please try /login again."})
+			m.rerenderTranscriptAndMaybeScroll()
+			m.clearSyncLoginState()
+		}
 	case docsInitFinishedMsg:
 		text := msg.text
 		if msg.err != nil {
@@ -6939,6 +7003,8 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
 		cmd == "/help" || cmd == "/thinking" || cmd == "/details" || cmd == "/sound" ||
 		cmd == "/login" ||
+		cmd == "/logout" ||
+		cmd == "/sync-logout" ||
 		cmd == "/new" || cmd == "/clear" ||
 		cmd == "/sidebar" || cmd == "/commands" || cmd == "/permissions" ||
 		cmd == "/ban" ||
@@ -7142,13 +7208,6 @@ func (m *model) drainQueuedItems() (tea.Cmd, bool) {
 		// Synchronous command — continue loop to try next item.
 	}
 	return nil, drained
-}
-
-func (m *model) handleLoginCmd(args []string) tea.Cmd {
-	return func() tea.Msg {
-		token, err := auth.LoginWithGoogle()
-		return authFinishedMsg{token: token, err: err}
-	}
 }
 
 func (m *model) handleMCPAuth(serverName string) error {
@@ -13250,6 +13309,32 @@ func permissionDialogVisibleBodyLines(body string, width int) int {
 		return 1
 	}
 	return visible
+}
+
+// syncLoginPoll returns a tea.Cmd that calls PollDevice once and sends
+// the result as a syncLoginPollMsg. The model's Update loop re-issues
+// this command until the login flow completes or expires.
+func (m *model) syncLoginPoll() tea.Cmd {
+	if m.syncClient == nil || m.syncDeviceCode == "" {
+		return nil
+	}
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		result, err := m.syncClient.PollDevice(context.Background(), m.syncDeviceCode)
+		if err != nil {
+			return syncLoginPollMsg{err: err, deviceCode: m.syncDeviceCode}
+		}
+		return syncLoginPollMsg{
+			status:     result.Status,
+			token:      result.Token,
+			deviceCode: m.syncDeviceCode,
+		}
+	})
+}
+
+// clearSyncLoginState resets the sync login polling state on the model.
+func (m *model) clearSyncLoginState() {
+	m.syncClient = nil
+	m.syncDeviceCode = ""
 }
 
 func (m *model) syncPermViewport(contentWidth int) {

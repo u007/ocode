@@ -787,6 +787,7 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*"} {
 		pm.SetRule(name, PermissionAsk)
 	}
+	pm.SetBashPrefixRule("sed", PermissionDeny)
 	return pm
 }
 

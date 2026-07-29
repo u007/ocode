@@ -21,7 +21,7 @@ func DefaultBaseURL() string {
 	if v := os.Getenv("OCODE_SYNC_URL"); v != "" {
 		return v
 	}
-	return "https://kakiit.com"
+	return "http://localhost:3201"
 }
 
 // BlobType identifies which config file is being synced.

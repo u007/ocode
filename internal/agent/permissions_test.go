@@ -719,16 +719,16 @@ func TestPermissions_ExportConfigPreservesAutoPermissionEnabled(t *testing.T) {
 	}
 }
 
-func TestPermissions_DefaultBashBanIsEmpty(t *testing.T) {
+func TestPermissions_DefaultBashBanIncludesSed(t *testing.T) {
 	pm := NewPermissionManager()
 	banList := pm.BashBannedPrefixes()
-	if len(banList) != 0 {
-		t.Fatalf("expected no default banned bash prefix, got %#v", banList)
+	if len(banList) == 0 || banList[0] != "sed" {
+		t.Fatalf("expected sed to be banned by default, got %#v", banList)
 	}
 
 	dec := pm.Decide("bash", json.RawMessage(`{"command":"sed -n '1,3p' /etc/hosts"}`))
-	if dec.Level == PermissionDeny {
-		t.Fatal("expected sed command not to be denied by default")
+	if dec.Level != PermissionDeny {
+		t.Fatalf("expected sed command to be denied by default, got %s", dec.Level)
 	}
 }
 

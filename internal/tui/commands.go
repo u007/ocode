@@ -106,9 +106,8 @@ func init() {
 		{name: "/models", aliases: []string{"/model"}, usage: "/models [name]", help: "List and switch available models", takesModelArg: true, handler: runModelsCmd},
 		{name: "/advisor", usage: "/advisor [provider/model|default]", help: "Set the advisor model (used by the advisor() tool for strategic guidance)", handler: runAdvisorCmd},
 		{name: "/connect", help: "Show/Set provider API keys", handler: runConnectCmd},
-		{name: "/login", help: "Google Login via OAuth2", handler: runLoginCmd},
-		{name: "/sync-login", help: "Log in and enable encrypted config sync", handler: runSyncLoginCmd},
-		{name: "/sync-logout", help: "Log out and stop config sync", handler: runSyncLogoutCmd},
+		{name: "/login", help: "Log in and enable encrypted config sync", handler: runSyncLoginCmd},
+		{name: "/logout", aliases: []string{"/sync-logout"}, help: "Log out and stop config sync", handler: runSyncLogoutCmd},
 		{name: "/session", aliases: []string{"/sessions", "/resume"}, usage: "/session [list|load <id>]", help: "Choose a session to resume", handler: runSessionCmd},
 		{name: "/compact", usage: "/compact [focus]", help: "Summarise older context to free tokens; optional focus guides the summary", handler: runCompactCmd},
 		{name: "/recap", usage: "/recap [model|status|enable|disable]", help: "Summarize conversation / manage recap model", handler: runRecapCmd},
@@ -291,10 +290,6 @@ func runModelCmd(m *model, args []string) tea.Cmd {
 func runConnectCmd(m *model, args []string) tea.Cmd {
 	m.handleConnectCmd(args)
 	return nil
-}
-
-func runLoginCmd(m *model, args []string) tea.Cmd {
-	return m.handleLoginCmd(args)
 }
 
 func runSessionCmd(m *model, args []string) tea.Cmd {
