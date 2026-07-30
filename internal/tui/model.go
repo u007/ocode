@@ -41,6 +41,7 @@ import (
 	"github.com/u007/ocode/internal/memory"
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/ocr"
+	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/plugins"
 	"github.com/u007/ocode/internal/rc"
 	"github.com/u007/ocode/internal/redact"
@@ -724,16 +725,7 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 		m.rcBridge.SetAgent(m.agent)
 		m.broadcastTUIStatus()
 	}
-	if prev != nil && prev != next && m.pendingSubmit != "" && m.pendingSubmitAgent == prev {
-		m.pendingSubmit = ""
-		m.pendingSubmitAgent = nil
-		m.messages = append(m.messages, message{
-			role:      roleAssistant,
-			text:      hintStyle.Render("Queued message cleared because the agent changed before MCP tools finished loading."),
-			transient: true,
-		})
-		m.rerenderTranscriptAndMaybeScroll()
-	}
+	m.clearPendingSubmitOnAgentSwap(prev, next)
 	if m.agent == nil {
 		return nil
 	}
@@ -748,6 +740,20 @@ func (m *model) installAgent(next *agent.Agent) tea.Cmd {
 		return listenJobs(m.agent)
 	}
 	return tea.Batch(listenJobs(m.agent), loadCmd)
+}
+
+func (m *model) clearPendingSubmitOnAgentSwap(prev, next *agent.Agent) {
+	if prev == nil || prev == next || m.pendingSubmit == "" || m.pendingSubmitAgent != prev {
+		return
+	}
+	m.pendingSubmit = ""
+	m.pendingSubmitAgent = nil
+	m.messages = append(m.messages, message{
+		role:      roleAssistant,
+		text:      hintStyle.Render("Queued message cleared because the agent changed before MCP tools finished loading."),
+		transient: true,
+	})
+	m.rerenderTranscriptAndMaybeScroll()
 }
 
 type model struct {
@@ -2011,6 +2017,17 @@ func newModel(opts ...RunOptions) model {
 
 	agent.DebugAppend = func(kind, msg string) {
 		DebugLog.Append(DebugEntry{Kind: DebugEntryKind(kind), Message: msg})
+	}
+	// Mirror compaction decisions to disk: the in-memory log holds only the
+	// last 500 entries, which made "auto compact never ran" undiagnosable
+	// after the fact. COMPACT entries are rare (a few per turn at most).
+	if dataDir, err := paths.GlobalDataDir(); err == nil {
+		logsDir := filepath.Join(dataDir, "logs")
+		if err := os.MkdirAll(logsDir, 0755); err == nil {
+			DebugLog.MirrorKindToFile(debuglog.EntryKind("COMPACT"), filepath.Join(logsDir, "compact.log"))
+		} else {
+			DebugLog.Append(DebugEntry{Kind: DebugEntryKind("ERROR"), Message: fmt.Sprintf("create %s for compact log mirror: %v", logsDir, err)})
+		}
 	}
 
 	if shouldLoad {

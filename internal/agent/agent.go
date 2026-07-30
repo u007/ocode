@@ -1323,10 +1323,19 @@ func (a *Agent) resolveCompactRuntime(force bool) compactRuntime {
 func (a *Agent) MaybeCompactAsync(messages []Message) bool {
 	rt := a.resolveCompactRuntime(false)
 	if !rt.Enabled {
+		emitDebug("COMPACT", "auto-compaction disabled in config")
 		return false
 	}
 	need, used := shouldCompact(messages, rt)
 	if !need {
+		// Mirror shouldCompact's unknown-window fallback so the logged limit
+		// matches the decision that was actually made.
+		window := rt.WindowTokens
+		if window <= 0 {
+			window = 100_000
+		}
+		emitDebug("COMPACT", fmt.Sprintf("below threshold: ~%d tokens used, window=%d, threshold=%.2f (limit=%d), messages=%d",
+			used, window, rt.TokenThreshold, int(float64(window)*rt.TokenThreshold), len(messages)))
 		return false
 	}
 	return a.startCompactAsync(messages, rt, "", fmt.Sprintf("triggered: ~%d tokens used, window=%d, threshold=%.2f", used, rt.WindowTokens, rt.TokenThreshold), false)

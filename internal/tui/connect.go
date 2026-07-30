@@ -760,6 +760,7 @@ func (m *model) rebuildAgentClient() {
 	if m.config == nil || m.config.Model == "" {
 		return
 	}
+	prev := m.agent
 	var mcpNames []string
 	var tools []tool.Tool
 	var lspMgr *lsp.Manager
@@ -783,12 +784,32 @@ func (m *model) rebuildAgentClient() {
 	if m.advisorEnabledSet {
 		m.agent.SetAdvisorEnabled(m.advisorEnabled)
 	}
+	if m.config != nil && m.config.Ocode.MaxSteps > 0 {
+		m.agent.SetMaxSteps(m.config.Ocode.MaxSteps)
+	}
+	if m.config != nil {
+		m.agent.SetMemoryEnabled(m.config.Ocode.MemoryEnabled)
+		m.agent.SetDocPromptEnabled(m.config.Ocode.DocPromptEnabled)
+	}
 	if len(mcpNames) > 0 {
 		m.agent.RestoreMCPToolNames(mcpNames)
 	}
+	m.agent.SetSupervisor(m.supervisor)
 	m.syncRedactionRuntime()
 	// Rewire the changes tab's registry accessor to the rebuilt agent;
 	// installAgent isn't called here so this must be done explicitly, or
 	// the Changes tab keeps reading the old/nil agent's registry.
 	m.changes = m.changes.withRegistry(m.agent.Changes)
+	m.clearPendingSubmitOnAgentSwap(prev, m.agent)
+	// Re-attach the async event callbacks (OnCompact/OnCompactStart/OnRecap/
+	// OnUsage/OnSideUsage). wireCompactCallbacks must run every time m.agent is
+	// replaced; without it the rebuilt agent's OnCompact is nil, so the next
+	// auto-compaction's result is silently dropped, pendingCompactUIIdx never
+	// clears, and compaction plus input submission stay blocked for the session.
+	m.wireCompactCallbacks()
+	// Keep the RC bridge pointed at the live agent, mirroring installAgent.
+	if m.rcBridge != nil {
+		m.rcBridge.SetAgent(m.agent)
+		m.broadcastTUIStatus()
+	}
 }

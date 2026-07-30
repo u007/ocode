@@ -116,8 +116,15 @@ type OcodeConfig struct {
 	Advisor     AdvisorConfig
 	Permissions PermissionConfig
 	Plugins     PluginsConfig
-	Security    SecurityConfig
-	Discovery   DiscoveryConfig
+	// ExternalPlugins holds installable/loadable plugin packages (source,
+	// dir, ref, enabled) such as the "orchestrator" plugin. Distinct from
+	// PluginsConfig, which only gates built-in opt-in tools. Persisted under
+	// ocodeconfig.json's "external_plugins" key — this is the source of
+	// truth for external plugins; opencode.json's legacy "plugins" key is
+	// only consulted as a one-time migration fallback.
+	ExternalPlugins map[string]PluginConfig
+	Security        SecurityConfig
+	Discovery       DiscoveryConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
 	// into the agent prompt.
 	MemoryEnabled bool
@@ -265,8 +272,7 @@ type advisorConfigFile struct {
 }
 
 type pluginsConfigFile struct {
-	AST    *bool `json:"ast"`
-	Memory *bool `json:"memory"`
+	AST *bool `json:"ast"`
 }
 
 type redactionConfigFile struct {
@@ -295,32 +301,33 @@ type discoveryConfigFile struct {
 }
 
 type ocodeConfigFile struct {
-	Compact             compactConfigFile    `json:"compact"`
-	Advisor             advisorConfigFile    `json:"advisor"`
-	Permissions         permissionConfigFile `json:"permissions"`
-	Plugins             pluginsConfigFile    `json:"plugins"`
-	Security            securityConfigFile   `json:"security"`
-	Discovery           discoveryConfigFile  `json:"discovery"`
-	MemoryEnabled       *bool                `json:"memory_enabled,omitempty"`
-	DocPromptEnabled    *bool                `json:"doc_prompt_enabled,omitempty"`
-	ExtraAllowedPaths   []string             `json:"extra_allowed_paths,omitempty"`
-	Editor              string               `json:"editor,omitempty"`
-	EditorMode          string               `json:"editor_mode,omitempty"`
-	IDEMode             string               `json:"ide_mode,omitempty"`
-	SmallModel          string               `json:"small_model,omitempty"`
-	SmallModelEnabled   *bool                `json:"small_model_enabled,omitempty"`
-	RecapModel          string               `json:"recap_model,omitempty"`
-	RecapModelEnabled   *bool                `json:"recap_model_enabled,omitempty"`
-	RecapTimeoutSeconds *int                 `json:"recap_timeout_seconds,omitempty"`
-	UndoMaxAgeDelta     *int                 `json:"undo_max_age_delta,omitempty"`
-	CommitMsgModel      string               `json:"commit_msg_model,omitempty"`
-	CommitMsgPrompt     string               `json:"commit_msg_prompt,omitempty"`
-	TUI                 tuiConfigFile        `json:"tui"`
-	MaxSteps            int                  `json:"max_steps,omitempty"`
-	MaxImageDim         int                  `json:"image_max_dim,omitempty"`
-	UploadDir           string               `json:"upload_dir,omitempty"`
-	Ocr                 *ocr.OcrConfig       `json:"ocr,omitempty"`
-	ImageGen            *ImageGenConfig      `json:"imagegen,omitempty"`
+	Compact             compactConfigFile       `json:"compact"`
+	Advisor             advisorConfigFile       `json:"advisor"`
+	Permissions         permissionConfigFile    `json:"permissions"`
+	Plugins             pluginsConfigFile       `json:"plugins"`
+	ExternalPlugins     map[string]PluginConfig `json:"external_plugins,omitempty"`
+	Security            securityConfigFile      `json:"security"`
+	Discovery           discoveryConfigFile     `json:"discovery"`
+	MemoryEnabled       *bool                   `json:"memory_enabled,omitempty"`
+	DocPromptEnabled    *bool                   `json:"doc_prompt_enabled,omitempty"`
+	ExtraAllowedPaths   []string                `json:"extra_allowed_paths,omitempty"`
+	Editor              string                  `json:"editor,omitempty"`
+	EditorMode          string                  `json:"editor_mode,omitempty"`
+	IDEMode             string                  `json:"ide_mode,omitempty"`
+	SmallModel          string                  `json:"small_model,omitempty"`
+	SmallModelEnabled   *bool                   `json:"small_model_enabled,omitempty"`
+	RecapModel          string                  `json:"recap_model,omitempty"`
+	RecapModelEnabled   *bool                   `json:"recap_model_enabled,omitempty"`
+	RecapTimeoutSeconds *int                    `json:"recap_timeout_seconds,omitempty"`
+	UndoMaxAgeDelta     *int                    `json:"undo_max_age_delta,omitempty"`
+	CommitMsgModel      string                  `json:"commit_msg_model,omitempty"`
+	CommitMsgPrompt     string                  `json:"commit_msg_prompt,omitempty"`
+	TUI                 tuiConfigFile           `json:"tui"`
+	MaxSteps            int                     `json:"max_steps,omitempty"`
+	MaxImageDim         int                     `json:"image_max_dim,omitempty"`
+	UploadDir           string                  `json:"upload_dir,omitempty"`
+	Ocr                 *ocr.OcrConfig          `json:"ocr,omitempty"`
+	ImageGen            *ImageGenConfig         `json:"imagegen,omitempty"`
 	// Legacy fields (read from old configs for migration)
 	OcrModel   string `json:"ocr_model,omitempty"`
 	OcrEnabled *bool  `json:"ocr_enabled,omitempty"`
@@ -493,6 +500,16 @@ func LoadOcodeConfig(cfg *Config) error {
 			ocode.EditorMode = EditorModeExternal
 		}
 	}
+
+	// External plugins (source/dir/ref/enabled packages like "orchestrator")
+	// are owned by ocodeconfig.json, not opencode.json — cfg.Plugins is
+	// populated exclusively from here (see loadFromFile in config.go, which
+	// intentionally skips opencode.json's "plugins" key).
+	cfg.Plugins = ocode.ExternalPlugins
+	if cfg.Plugins == nil {
+		cfg.Plugins = make(map[string]PluginConfig)
+	}
+
 	cfg.Ocode = ocode
 	return nil
 }
@@ -615,6 +632,16 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.Plugins.AST = *file.Plugins.AST
 		}
 		delete(raw, "plugins")
+	}
+
+	if _, ok := raw["external_plugins"]; ok {
+		if cfg.ExternalPlugins == nil {
+			cfg.ExternalPlugins = make(map[string]PluginConfig, len(file.ExternalPlugins))
+		}
+		for name, p := range file.ExternalPlugins {
+			cfg.ExternalPlugins[name] = p
+		}
+		delete(raw, "external_plugins")
 	}
 
 	if _, ok := raw["security"]; ok {
@@ -1120,6 +1147,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.Plugins.AST {
 		payload["plugins"] = cfg.Plugins
 	}
+	if len(cfg.ExternalPlugins) > 0 {
+		payload["external_plugins"] = cfg.ExternalPlugins
+	}
 	if len(cfg.ExtraAllowedPaths) > 0 {
 		seen := make(map[string]struct{}, len(cfg.ExtraAllowedPaths))
 		deduped := cfg.ExtraAllowedPaths[:0:0]
@@ -1174,7 +1204,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" {
 			continue
 		}
 		payload[k] = v

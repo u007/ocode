@@ -319,71 +319,39 @@ func RemoveMCPServer(name string) error {
 	return saveJSONFile(configPath, m)
 }
 
+// SavePluginEnabled, SavePlugin, and RemovePlugin persist external plugin
+// packages (source/dir/ref/enabled) to ocodeconfig.json's "external_plugins"
+// key — ocode's own config, not opencode.json. opencode.json's legacy
+// "plugins" key is left untouched (still readable as a migration fallback,
+// see LoadOcodeConfig) so it stays valid for tools that expect opencode's
+// own schema.
 func SavePluginEnabled(name string, enabled bool) error {
-	configPath, err := (&Config{}).ActiveConfigPath()
-	if err != nil {
-		return err
-	}
-	m, err := loadConfigMap(configPath)
-	if err != nil {
-		return err
-	}
-	pluginsRaw, ok := m["plugins"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("plugin %q not found in config", name)
-	}
-	entry, ok := pluginsRaw[name].(map[string]any)
-	if !ok {
-		return fmt.Errorf("plugin %q not found in config", name)
-	}
-	entry["enabled"] = enabled
-	pluginsRaw[name] = entry
-	m["plugins"] = pluginsRaw
-	return saveJSONFile(configPath, m)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		p, ok := cfg.ExternalPlugins[name]
+		if !ok {
+			return fmt.Errorf("plugin %q not found in config", name)
+		}
+		p.Enabled = enabled
+		cfg.ExternalPlugins[name] = p
+		return nil
+	})
 }
 
 func SavePlugin(name string, p PluginConfig) error {
-	configPath, err := (&Config{}).ActiveConfigPath()
-	if err != nil {
-		return err
-	}
-	m, err := loadConfigMap(configPath)
-	if err != nil {
-		return err
-	}
-	pluginsRaw, ok := m["plugins"].(map[string]any)
-	if !ok {
-		pluginsRaw = map[string]any{}
-	}
-	data, err := json.Marshal(p)
-	if err != nil {
-		return fmt.Errorf("marshal plugin config: %w", err)
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return fmt.Errorf("parse plugin config: %w", err)
-	}
-	pluginsRaw[name] = raw
-	m["plugins"] = pluginsRaw
-	return saveJSONFile(configPath, m)
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.ExternalPlugins == nil {
+			cfg.ExternalPlugins = map[string]PluginConfig{}
+		}
+		cfg.ExternalPlugins[name] = p
+		return nil
+	})
 }
 
 func RemovePlugin(name string) error {
-	configPath, err := (&Config{}).ActiveConfigPath()
-	if err != nil {
-		return err
-	}
-	m, err := loadConfigMap(configPath)
-	if err != nil {
-		return err
-	}
-	pluginsRaw, ok := m["plugins"].(map[string]any)
-	if !ok {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		delete(cfg.ExternalPlugins, name)
 		return nil
-	}
-	delete(pluginsRaw, name)
-	m["plugins"] = pluginsRaw
-	return saveJSONFile(configPath, m)
+	})
 }
 
 func loadConfigMap(path string) (map[string]any, error) {
@@ -527,12 +495,9 @@ func loadFromString(content string, config *Config) error {
 	for k, v := range temp.MCP {
 		config.MCP[k] = v
 	}
-	if config.Plugins == nil {
-		config.Plugins = make(map[string]PluginConfig)
-	}
-	for k, v := range temp.Plugins {
-		config.Plugins[k] = v
-	}
+	// Note: temp.Plugins (opencode.json's "plugins" key) is intentionally not
+	// merged here — external plugin state (source/dir/ref/enabled) is owned
+	// by ocodeconfig.json (see LoadOcodeConfig), not opencode.json.
 	for k, v := range temp.Tools {
 		config.Tools[k] = v
 	}
@@ -640,14 +605,7 @@ func mergeRemoteConfig(config *Config) error {
 			config.MCP[k] = v
 		}
 	}
-	if config.Plugins == nil {
-		config.Plugins = make(map[string]PluginConfig)
-	}
-	for k, v := range remote.Plugins {
-		if _, exists := config.Plugins[k]; !exists {
-			config.Plugins[k] = v
-		}
-	}
+	// Note: remote.Plugins is intentionally not merged — see loadFromFile.
 	for k, v := range remote.Tools {
 		if _, exists := config.Tools[k]; !exists {
 			config.Tools[k] = v
@@ -705,12 +663,9 @@ func loadFromFile(path string, config *Config) error {
 	for k, v := range temp.MCP {
 		config.MCP[k] = v
 	}
-	if config.Plugins == nil {
-		config.Plugins = make(map[string]PluginConfig)
-	}
-	for k, v := range temp.Plugins {
-		config.Plugins[k] = v
-	}
+	// Note: temp.Plugins (opencode.json's "plugins" key) is intentionally not
+	// merged here — external plugin state (source/dir/ref/enabled) is owned
+	// by ocodeconfig.json (see LoadOcodeConfig), not opencode.json.
 	for k, v := range temp.Tools {
 		config.Tools[k] = v
 	}

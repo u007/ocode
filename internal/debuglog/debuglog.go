@@ -38,6 +38,12 @@ type log struct {
 	mu      sync.Mutex
 	entries []Entry
 	notify  chan struct{}
+	// mirrorKind/mirrorPath route entries of one kind to an on-disk file (see
+	// MirrorKindToFile); mirrorFailOnce keeps a broken mirror from spamming the
+	// in-memory log with one error per append.
+	mirrorKind     EntryKind
+	mirrorPath     string
+	mirrorFailOnce sync.Once
 }
 
 func newLog() *log {
@@ -54,7 +60,14 @@ func (l *log) Append(e Entry) {
 		l.entries = l.entries[:cap-1]
 	}
 	l.entries = append(l.entries, e)
+	mirrorPath := ""
+	if l.mirrorPath != "" && e.Kind == l.mirrorKind && e.Kind != KindError {
+		mirrorPath = l.mirrorPath
+	}
 	l.mu.Unlock()
+	if mirrorPath != "" {
+		l.mirror(mirrorPath, e)
+	}
 	select {
 	case l.notify <- struct{}{}:
 	default:

@@ -3,8 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// External plugin state (source/dir/ref/enabled) is owned by ocodeconfig.json,
+// not opencode.json — see LoadOcodeConfig / SavePlugin in ocodeconfig.go.
 
 func TestSavePluginEnabled(t *testing.T) {
 	tmpHome := t.TempDir()
@@ -14,11 +18,16 @@ func TestSavePluginEnabled(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	cfgPath := filepath.Join(tmpDir, "opencode.json")
-	if err := os.WriteFile(cfgPath, []byte(`{"plugins":{"myplugin":{"source":"github.com/x/y","dir":"/tmp/x-y","enabled":true}}}`), 0o600); err != nil {
+	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chdir(tmpDir); err != nil {
+
+	ocodeCfgDir := filepath.Join(tmpHome, ".config", "opencode")
+	if err := os.MkdirAll(ocodeCfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ocodeCfgPath := filepath.Join(ocodeCfgDir, "ocodeconfig.json")
+	if err := os.WriteFile(ocodeCfgPath, []byte(`{"external_plugins":{"myplugin":{"source":"github.com/x/y","dir":"/tmp/x-y","enabled":true}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -43,9 +52,6 @@ func TestSavePlugin(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	if err := os.WriteFile(filepath.Join(tmpDir, "opencode.json"), []byte(`{}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +69,15 @@ func TestSavePlugin(t *testing.T) {
 	if got.Source != p.Source || got.Dir != p.Dir || !got.Enabled {
 		t.Errorf("got %+v, want %+v", got, p)
 	}
+
+	ocodeCfgPath := filepath.Join(tmpHome, ".config", "opencode", "ocodeconfig.json")
+	data, err := os.ReadFile(ocodeCfgPath)
+	if err != nil {
+		t.Fatalf("read ocodeconfig.json: %v", err)
+	}
+	if !strings.Contains(string(data), "acme-plugin") {
+		t.Errorf("expected acme-plugin persisted in ocodeconfig.json, got: %s", data)
+	}
 }
 
 func TestRemovePlugin(t *testing.T) {
@@ -73,11 +88,16 @@ func TestRemovePlugin(t *testing.T) {
 	origWd, _ := os.Getwd()
 	defer os.Chdir(origWd)
 
-	cfgPath := filepath.Join(tmpDir, "opencode.json")
-	if err := os.WriteFile(cfgPath, []byte(`{"plugins":{"gone":{"source":"x","dir":"/tmp/x","enabled":true}}}`), 0o600); err != nil {
+	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chdir(tmpDir); err != nil {
+
+	ocodeCfgDir := filepath.Join(tmpHome, ".config", "opencode")
+	if err := os.MkdirAll(ocodeCfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ocodeCfgPath := filepath.Join(ocodeCfgDir, "ocodeconfig.json")
+	if err := os.WriteFile(ocodeCfgPath, []byte(`{"external_plugins":{"gone":{"source":"x","dir":"/tmp/x","enabled":true}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
