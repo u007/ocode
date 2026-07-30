@@ -27,7 +27,7 @@ func captureOutputSummary(messages []agent.Message, sessionID, modelName string,
 		outC <- buf.String()
 	}()
 
-	err = outputSummary(messages, sessionID, modelName, startTime)
+	err = outputSummary(messages, sessionID, modelName, startTime, &usageTotals{})
 
 	w.Close()
 	os.Stdout = old
@@ -417,6 +417,6 @@ func BenchmarkOutputSummary(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = outputSummary(msgs, "", "", time.Now())
+		_ = outputSummary(msgs, "", "", time.Now(), &usageTotals{})
 	}
 }

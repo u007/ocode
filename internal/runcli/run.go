@@ -217,6 +217,12 @@ func Run(args []string) error {
 	tools, lspMgr := tool.LoadBuiltins(cfg, nil)
 	ag := agent.NewAgent(client, tools, cfg, lspMgr)
 	ag.LoadExternalToolsWithMCP(cfg)
+
+	var totals usageTotals
+	ag.OnUsage = func(inputTokens, outputTokens int64) {
+		totals.record(inputTokens, outputTokens)
+	}
+
 	// Only install an OnPermissionAsk override when the user explicitly opted
 	// into yolo / dangerously-skip-permissions. Otherwise leave the callback
 	// nil so the agent's default sentinel/deny path runs and prompts surface to
@@ -275,13 +281,16 @@ func Run(args []string) error {
 	}
 
 	if opts.format == "json" {
-		return outputJSONEvents(resp, opts.sessionID)
+		if err := outputJSONEvents(resp, opts.sessionID); err != nil {
+			return err
+		}
+		return emitUsageEvent(opts.sessionID, modelStr, &totals)
 	}
 
 	if opts.format == "summary" {
 		// Pass the full history (original messages + new messages) so that
 		// every tool call across the entire run is captured.
-		return outputSummary(allMessages, opts.sessionID, modelStr, startTime)
+		return outputSummary(allMessages, opts.sessionID, modelStr, startTime, &totals)
 	}
 
 	fmt.Println(responseText.String())

@@ -25,7 +25,7 @@ const (
 // It scans the response messages for tool calls, categorises file operations
 // (created, modified, deleted), counts tool usage, and includes the assistant's
 // final response text — all in a human-readable format.
-func outputSummary(messages []agent.Message, sessionID, modelName string, startTime time.Time) error {
+func outputSummary(messages []agent.Message, sessionID, modelName string, startTime time.Time, totals *usageTotals) error {
 	fileActions := make(map[string]fileAction) // final action per path
 	toolCounts := make(map[string]int)
 	var responseParts []string
@@ -112,6 +112,9 @@ func outputSummary(messages []agent.Message, sessionID, modelName string, startT
 	}
 	if modelName != "" {
 		fmt.Printf("  @ Model:    %s\n", modelName)
+	}
+	if in, out, calls := totals.snapshot(); calls > 0 {
+		fmt.Printf("  # Tokens:   %d in / %d out (%d calls)\n", in, out, calls)
 	}
 	fmt.Println()
 
