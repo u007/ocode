@@ -1,7 +1,7 @@
 # Terminal-Bench Harness + Token Reduction for `deepseek-v4-flash` (Design)
 
 Date: 2026-07-30
-Status: draft-pending-review
+Status: draft-pending-review (revised after verification pass)
 
 ## Purpose
 
@@ -31,29 +31,78 @@ TB's real costs are accepted, not ignored: one Docker container per task, slow
 runs, and high variance on small subsets. The variance is handled explicitly
 below.
 
-## Verified constraints (checked, not assumed)
+## Verified constraints (read from the installed TB source, not assumed)
 
-- **The agent runs inside the task container.** TB's `AbstractInstalledAgent`
-  requires three things: `_env` (host env vars forwarded into the container),
-  `_install_agent_script_path` (a shell script that installs the agent in the
-  container), and `_run_agent_commands(instruction)` (the headless invocation).
-  The reference implementation is `ClaudeCodeAgent`.
-- **Container agent-logs path is mounted to the host** — TB exposes
-  `CONTAINER_AGENT_LOGS_PATH` for trajectory artifacts. This is where per-task
-  token accounting will be written so the host can collect it.
-- **API egress from the container is expected.** The Claude Code adapter
-  forwards `ANTHROPIC_API_KEY` and calls the Anthropic API from inside the
-  container; ocode will forward `OPENCODE_API_KEY` and call
-  `https://opencode.ai/zen/go/v1` the same way. This is verified empirically in
-  the smoke test (Phase 3) before anything is built on top of it.
+Verified against `terminal_bench` as installed by `uvx --from terminal-bench`.
+
+- **The agent runs inside the task container.** `AbstractInstalledAgent`
+  requires `_env` (host env forwarded in), `_install_agent_script_path`, and
+  `_run_agent_commands(instruction)`. The reference implementations are
+  `ClaudeCodeAgent` and — much closer to ocode — `OpenCodeAgent`, which is a
+  Go/CLI agent invoked as `opencode --model <provider/model> run <instruction>`.
+- **The install script is a Jinja2 template.** `_get_templated_script_path`
+  renders `<name>-setup.sh.j2` from the agent's own directory with template
+  variables (`version` by default), writes it to a temp file, and chmods it.
+  So the file is `ocode-setup.sh.j2`, not a plain `.sh`.
+- **TB copies arbitrary files into the container.** `perform_task` calls
+  `session.copy_to_container(...)`, which accepts a path or list of paths with
+  a target dir and filename. **This resolves the binary-delivery question** —
+  see below.
+- **The agent is driven through a tmux session**, via `session.send_keys` /
+  `session.send_command`. Commands are typed into an interactive pane, so
+  stdout is *not* a captured pipe. Any machine-readable output must be
+  explicitly redirected to a file inside the container.
+- **TB has a first-class token-reporting channel.** `AgentResult` carries
+  `total_input_tokens` and `total_output_tokens`, and `harness.py` copies both
+  onto the per-trial results record. `AbstractInstalledAgent.perform_task`
+  hardcodes them to `0`. **This changes the metrics design** — see below.
+- **Install failure is a distinct outcome.** `perform_task` detects
+  `INSTALL_FAIL_STATUS` in the pane and returns
+  `FailureMode.AGENT_INSTALLATION_FAILED`, so a broken install is never
+  miscounted as a task failure. No custom handling needed.
+- **`CONTAINER_AGENT_LOGS_PATH` is `/agent-logs`**, mounted back to the host
+  `logging_dir` passed to `perform_task`.
+- **Verified `tb run` flags**: `--agent-import-path <module:Class>`,
+  `-t/--task-id` (repeatable, glob-capable), `--n-attempts`, `--n-concurrent`,
+  `--output-path`, `--global-agent-timeout-sec`, and `--dataset name==version`.
+  There is **no `--dataset-version` flag** — version is part of the `--dataset`
+  value. `terminal-bench-core==0.1.1` is the current pinnable version
+  compatible with this TB release.
+- **API egress from the container is expected but unproven for our host.**
+  Every installed agent calls its provider API from inside the container. The
+  smoke test (Phase 3) confirms egress to `https://opencode.ai/zen/go/v1`
+  before anything is built on top of it. TB's own docstring warns that
+  installed agents "may fail due to properties of the task container rather
+  than the agent's inability to perform the task (e.g. volume constraints,
+  broken networking)" — so this is a real risk, not a formality.
+- **`OPENCODE_API_KEY` is not in the host environment.** The credential lives
+  in `~/.local/share/opencode/auth.json` under the `opencode-go` provider
+  (`internal/auth/store.go:146`). The adapter must read it from there, not
+  from `os.environ`. Forwarding it as an env var into the container is
+  sufficient: `auth.HydrateEnv` (`internal/auth/providers.go:277`) treats an
+  already-set env var as highest precedence, so no auth file needs to be
+  seeded in the container.
 - **`ocode run -format json` emits no token usage.** `outputJSONEvents`
   (`internal/runcli/run.go:391`) emits only `text` and `tool_use` events.
   Sessions do not persist usage either — `internal/session/` has no usage field.
-- **The plumbing to fix that already exists.** `agent.TokenUsage`
-  (`internal/agent/telemetry.go:10`) is parsed for both OpenAI- and
-  Anthropic-shaped payloads, and `GenericClient.SetOnUsage`
-  (`internal/agent/client.go:185`) is a usage callback hook that `runcli` can
-  install.
+- **The plumbing to fix that already exists, and is verified live on this
+  model's code path.** `runcli` builds a real `*agent.Agent`
+  (`internal/runcli/run.go:218`), which exposes a public `OnUsage` field that
+  `chatWithDelta` installs on the client for the duration of each call
+  (`internal/agent/agent.go:503`). No client plumbing is needed — `runcli` just
+  assigns the field. For `opencode-go/deepseek-v4-flash` the request takes the
+  OpenAI-completions branch (`usesAnthropicMessagesAPI` returns true only for
+  `minimax-*`, `client.go:431`), which streams through
+  `parseOpenAIChatCompletionsStream` and invokes `onUsage` per response
+  (`client.go:1425`).
+- **The gateway emits usage without `stream_options.include_usage`.** This was
+  the main risk to the whole plan: `chatOpenAI` sets `"stream": true` but never
+  requests `stream_options` (`client.go:755`), and most OpenAI-compatible APIs
+  omit usage from streams unless asked. Verified by direct call to
+  `https://opencode.ai/zen/go/v1/chat/completions` — the final chunk carries a
+  full `usage` object (including `prompt_cache_hit_tokens` and
+  `completion_tokens_details.reasoning_tokens`) with and without the flag. **No
+  client change is required.**
 
 ## Architecture
 
@@ -61,13 +110,22 @@ Three components, built in order. Each is independently useful.
 
 ### 1. Token accounting in `ocode run` (prerequisite)
 
-`runcli` installs a `SetOnUsage` callback that accumulates input and output
-tokens across every model call in the run. At the end of a `-format json` run,
-it emits one final event:
+`runcli` assigns `ag.OnUsage` (the agent's public callback field) to an
+accumulator that sums input and output tokens across every model call in the
+run, and counts the calls. At the end of a `-format json` run, it emits one
+final event:
 
 ```
-{"type":"usage","sessionID":"...","input_tokens":N,"output_tokens":N,"total_tokens":N,"model":"..."}
+{"type":"usage","sessionID":"...","input_tokens":N,"output_tokens":N,"total_tokens":N,"model_calls":N,"model":"..."}
 ```
+
+`model_calls` is included because turn count is a primary optimization target
+(see the levers section) and it is free to collect here.
+
+On accumulation semantics: the OpenAI-style parser reports each response's
+absolute prompt/completion counts, so summing across calls gives total tokens
+billed for the run — the metric we want. (The Anthropic-style path reports
+deltas instead; irrelevant for this model but worth not generalizing from.)
 
 Scope discipline: this reports values ocode already parses. No new CLI flags,
 no behavior changes. `-format default` and `-format summary` are untouched
@@ -83,58 +141,70 @@ input-token totals instead.
 
 ### 2. TB adapter (`bench/terminal-bench/`)
 
+Python package name uses underscores so `--agent-import-path` can import it:
+
 ```
-bench/terminal-bench/
+bench/terminal_bench/
   README.md            — how to run a bench sweep end to end
+  __init__.py
   ocode_agent.py       — OcodeAgent(AbstractInstalledAgent)
-  ocode-setup.sh       — in-container install script
+  ocode-setup.sh.j2    — in-container install script (Jinja2 template)
   subset.txt           — the frozen task-ID subset (one ID per line)
+  dist/                — gitignored; linux ocode binary built by make build-linux
   runs/                — gitignored; tb output paths
 ```
 
-**`ocode_agent.py`** implements the three required members:
+**`ocode_agent.py`** implements the three required members plus one override:
 
-- `_env` — forwards `OPENCODE_API_KEY` from the host, plus `OCODE_MODEL` set to
-  `opencode-go/deepseek-v4-flash` (or whatever `--model` TB passes).
-- `_install_agent_script_path` — points at `ocode-setup.sh`.
-- `_run_agent_commands(instruction)` — a single blocking `TerminalCommand`:
-  `ocode run -yolo -format json -m "$OCODE_MODEL" -p <shlex-quoted instruction>`,
-  with stdout teed to `CONTAINER_AGENT_LOGS_PATH/ocode-run.jsonl` so the host
-  can read the trailing `usage` event after the task finishes.
+- `_env` — reads the `opencode-go` API key from
+  `~/.local/share/opencode/auth.json` (falling back to `OPENCODE_API_KEY` if
+  the user has exported it) and forwards it as `OPENCODE_API_KEY`, plus
+  `OCODE_MODEL` from the `--model` TB passes.
+- `_install_agent_script_path` — `self._get_templated_script_path("ocode-setup.sh.j2")`.
+- `_run_agent_commands(instruction)` — one blocking `TerminalCommand`
+  modelled on `OpenCodeAgent`:
+  `ocode run -yolo -format json -m "$OCODE_MODEL" -p <shlex-quoted instruction> > /agent-logs/ocode-run.jsonl 2>/agent-logs/ocode-run.err`.
+  The redirect is mandatory, not stylistic — the command runs in a tmux pane,
+  so unredirected stdout is only recoverable by scraping the pane.
+- `perform_task` override — calls `super().perform_task(...)`, then parses the
+  trailing `usage` event from the host-side `logging_dir/ocode-run.jsonl` and
+  returns an `AgentResult` with the real `total_input_tokens` /
+  `total_output_tokens` instead of the base class's hardcoded zeros. It
+  preserves `failure_mode` from the super call untouched. This is what makes
+  token cost a first-class TB metric rather than something scraped later.
 
-**`ocode-setup.sh`** installs a Linux `ocode` binary into the container and
-seeds a minimal `ocodeconfig.json` (model + provider, permissions off). The
-binary is produced by `make build-linux`. How the binary reaches the container
-is the one open implementation question; resolved during Phase 3 smoke test,
-in this preference order:
+**`ocode-setup.sh.j2`** makes the copied binary executable at a known path,
+puts it on `PATH`, and seeds a minimal `ocodeconfig.json` (model + provider,
+permissions off). It does not download anything.
 
-1. `curl` a pinned GitHub release asset (cleanest, needs a published release).
-2. `go install github.com/u007/ocode@<pinned-sha>` if the task image has Go
-   (fragile — most task images will not).
-3. Host-side static file server reachable at `host.docker.internal` (works
-   everywhere, but couples the run to a sidecar process).
+**Binary delivery is solved, not open.** `perform_task` already copies the
+install script via `session.copy_to_container`, which takes arbitrary paths.
+The adapter's `perform_task` override copies `dist/ocode-linux-<arch>` (built
+by `make build-linux`) into the container before calling `super()`. No GitHub
+release, no `go install`, no host-side file server — all three fallbacks from
+the previous draft are dropped. The binary is built from a known commit and
+its `ocode version` is recorded in the run label, since a floating binary makes
+two runs non-comparable.
 
-Whichever wins is recorded in the adapter README. The version installed is
-always pinned, never `latest` — a floating binary makes two runs
-non-comparable.
+### 3. Sweep
 
-### 3. Sweep + metrics collection
-
-A thin script (`bench/terminal-bench/sweep.sh`) wraps:
+A thin script (`bench/terminal_bench/sweep.sh`) wraps:
 
 ```
 uvx --from terminal-bench tb run \
   --agent-import-path bench.terminal_bench.ocode_agent:OcodeAgent \
   --model opencode-go/deepseek-v4-flash \
-  --dataset terminal-bench-core --dataset-version <pinned> \
+  --dataset terminal-bench-core==0.1.1 \
   --n-attempts 3 --n-concurrent 4 \
-  --output-path bench/terminal-bench/runs/<label> \
+  --output-path bench/terminal_bench/runs/<label> \
   $(sed 's/^/-t /' subset.txt)
 ```
 
-then walks the run's agent-logs directories, reads the trailing `usage` event
-from each `ocode-run.jsonl`, and writes a per-config row: task ID, pass/fail
-per attempt, input/output/total tokens, wall time, tool-call count.
+Because the adapter reports tokens through `AgentResult`, TB's own per-trial
+results carry pass/fail *and* token counts together. The sweep script only
+aggregates that output into a per-config comparison table (task ID, pass rate
+across attempts, mean input/output tokens, wall time) — it does not need to
+scrape container logs for token data.
 
 ## Handling variance (the part that decides whether this is useful)
 
@@ -153,20 +223,51 @@ discipline, prompt iteration becomes noise-chasing. So:
 - **The full dataset is run only for a final number**, once the subset-level
   improvements have stabilized.
 
+## What actually drives token cost on this model (measured)
+
+Before picking levers, the cost shape was measured directly against the
+gateway. Two results reframe the problem:
+
+**Output tokens are almost entirely reasoning, and we cannot turn them down.**
+For a trivial prompt ("write a bash one-liner to count lines in .txt files"),
+`deepseek-v4-flash` spent a mean of ~1,900 reasoning tokens out of nearly all
+its completion tokens. `reasoning_effort` is *accepted* by the gateway but has
+no measurable effect: over n=5 per level, means were 1912 (unset), 1531 (low),
+and 1691 (high), with per-sample spreads of 762–3363 that overlap completely.
+The parameter is silently ignored. (Related: `opencode-go` is not in
+`providerSupportsReasoningEffort`, `client.go:1719`, so ocode never sends it
+anyway — and there is now no reason to add it.)
+
+**Therefore the controllable levers are input tokens and turn count.** Output
+cost per turn is a fixed tax set by the model. What we control is how many
+tokens we send it and how many times we pay that tax. Turn count is a
+first-class metric, not a curiosity — halving turns roughly halves the
+uncontrollable reasoning spend.
+
 ## Optimization levers (round one, in expected-value order)
 
-These are hypotheses to test against the measured baseline, not a commit list:
+Hypotheses to test against the measured baseline, not a commit list:
 
-1. **System-prompt weight for the DeepSeek family** —
+1. **Anything that reduces turn count** — better first-shot tool selection,
+   fewer redundant reads, less flailing. Highest leverage because each turn
+   re-pays the full reasoning tax, and it is the one lever that cuts output
+   tokens at all.
+2. **System-prompt weight for the DeepSeek family** —
    `internal/agent/prompts/deepseek.txt` and `deepseek-v4-flash.OCODE.md` are
    prepended to every request. Every token there is paid on every turn.
-2. **Tool schema and description bloat** — tool definitions are re-sent each
+   (Note the tension with lever 1: trimming guidance that prevents flailing can
+   raise turn count and cost more than it saves. Measure both.)
+3. **Tool schema and description bloat** — tool definitions are re-sent each
    call; verbose descriptions are a per-turn tax.
-3. **Tool-output truncation limits** — large `read`/`bash` outputs dominate
+4. **Tool-output truncation limits** — large `read`/`bash` outputs dominate
    context growth in long tasks.
-4. **Compaction thresholds** (`internal/agent/compact.go`) — compacting too
+5. **Prompt-cache hit rate** — the gateway reports `prompt_cache_hit_tokens`,
+   which was 0 in every probe. If a stable prefix can be established across
+   turns, this is a large input-token win. Investigate before assuming it is
+   unavailable.
+6. **Compaction thresholds** (`internal/agent/compact.go`) — compacting too
    late wastes tokens; too early loses task state and costs a retry.
-5. **Skill injection** — skills loaded but unused are pure overhead.
+7. **Skill injection** — skills loaded but unused are pure overhead.
 
 Each lever is changed one at a time, measured, and kept only if tokens drop
 without a score regression outside the measured spread.
@@ -178,15 +279,21 @@ without a score regression outside the measured spread.
   test client fixtures.
 - **Adapter smoke** — 2 TB tasks, `--n-attempts 1`, verifying: container gets
   the binary, `OPENCODE_API_KEY` reaches the model, egress to `opencode.ai`
-  succeeds, and `ocode-run.jsonl` lands on the host with a `usage` event.
+  succeeds, `ocode-run.jsonl` lands on the host with a `usage` event, and TB's
+  own results record shows non-zero `total_input_tokens`.
 - **Baseline** — the frozen subset, `--n-attempts 3`, recorded in
   `bench/terminal-bench/README.md` as the number every later config is
   compared against.
 
 ## Error handling
 
-- Missing `OPENCODE_API_KEY` on the host: the adapter fails at construction
-  with a named error, not mid-run after Docker spin-up.
+- No resolvable `opencode-go` credential on the host (neither
+  `~/.local/share/opencode/auth.json` nor an exported `OPENCODE_API_KEY`): the
+  adapter fails at construction with a named error, not mid-run after Docker
+  spin-up.
+- Missing `dist/ocode-linux-<arch>`: the adapter fails at construction telling
+  the user to run `make build-linux`, rather than failing inside the container
+  as a confusing install error.
 - No `usage` event in a task's log (crash, timeout, killed container): recorded
   as `tokens: unknown` for that task and **counted in the report**, never
   silently dropped or defaulted to zero — a zero would quietly flatter the
@@ -196,16 +303,32 @@ without a score regression outside the measured spread.
 
 ## Non-goals (this round)
 
-- Cache-read/cache-write token reporting (needs a wider `SetOnUsage`; deferred
-  to `TODO.md`).
+- Cache-read/cache-write token reporting through the run's `usage` event (needs
+  a wider `OnUsage` signature; deferred to `TODO.md`). Note this does not block
+  lever 5 — cache hit rate can be investigated directly against the gateway.
+- Adding `reasoning_effort` support for `opencode-go` — measured to have no
+  effect on this model.
 - Publishing results to the TB leaderboard.
 - Optimizing any model other than `deepseek-v4-flash`.
 - Auto-tuning: every prompt/config change is human-reviewed.
 
 ## Execution order
 
-1. Token accounting in `ocode run` + unit test.
-2. Adapter + install script; resolve binary-delivery method.
-3. Two-task smoke test; confirm egress and log collection.
+1. Token accounting in `ocode run` (`ag.OnUsage` accumulator + trailing `usage`
+   event) with a unit test.
+2. Adapter package, install-script template, and binary copy.
+3. Two-task smoke test; confirm container egress, log collection, and non-zero
+   tokens in TB's results.
 4. Freeze the subset; record baseline (3 attempts).
 5. Iterate levers one at a time against the baseline.
+
+## Open risks
+
+- **Container egress is the single unproven assumption.** If TB's task
+  containers block outbound traffic to `opencode.ai`, the installed-agent
+  approach cannot work and the design needs rethinking. Phase 3 exists to find
+  this out before any optimization work is built on top. TB's own docs flag
+  broken networking as a known failure mode for installed agents.
+- **`terminal-bench-core` task IDs are not yet enumerated**, so `subset.txt` is
+  empty in this design. It is populated once from the downloaded dataset by
+  stratified sample, then frozen.
