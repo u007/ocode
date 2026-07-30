@@ -1,0 +1,22 @@
+#!/bin/bash
+# Install ocode inside the Terminal-Bench task container. The binary is copied
+# in by the adapter before this runs; this script only places it on PATH and
+# writes a minimal config.
+set -euo pipefail
+
+install -m 0755 /installed-agent/ocode /usr/local/bin/ocode
+
+mkdir -p "$HOME"
+cat > "$HOME/ocodeconfig.json" <<'JSON'
+{
+  "permissions": {
+    "auto": {
+      "enabled": false
+    }
+  }
+}
+JSON
+
+mkdir -p /agent-logs
+
+ocode version

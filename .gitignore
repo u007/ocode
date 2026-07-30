@@ -57,6 +57,10 @@ ocodeconfig.json
 .ocode/md-summaries.json
 
 
+# Terminal-Bench build and run artifacts
+bench/terminal_bench/dist/
+bench/terminal_bench/runs/
+
 # Desktop embedded assets — generated at build time by `make desktop`.
 # The embedded-assets/ dir itself (with .gitkeep) is committed so a bare
 # `go build ./cmd/ocode-desktop` still compiles; only the copied content is
