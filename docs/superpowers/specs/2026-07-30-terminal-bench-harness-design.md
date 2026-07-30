@@ -90,7 +90,10 @@ Verified against `terminal_bench` as installed by `uvx --from terminal-bench`.
   (`internal/runcli/run.go:218`), which exposes a public `OnUsage` field that
   `chatWithDelta` installs on the client for the duration of each call
   (`internal/agent/agent.go:503`). No client plumbing is needed — `runcli` just
-  assigns the field. For `opencode-go/deepseek-v4-flash` the request takes the
+  assigns the field. **`Agent.Step` is a full agentic loop**, not a single turn
+  (`agent.go:843` iterates until a response has no tool calls, bounded by
+  `maxSteps`, default 100), so `ocode run -p "<task>"` is a complete run — the
+  premise the whole adapter rests on. For `opencode-go/deepseek-v4-flash` the request takes the
   OpenAI-completions branch (`usesAnthropicMessagesAPI` returns true only for
   `minimax-*`, `client.go:431`), which streams through
   `parseOpenAIChatCompletionsStream` and invokes `onUsage` per response
@@ -191,14 +194,34 @@ two runs non-comparable.
 A thin script (`bench/terminal_bench/sweep.sh`) wraps:
 
 ```
-uvx --from terminal-bench tb run \
+uvx --from terminal-bench==0.2.18 tb run \
   --agent-import-path bench.terminal_bench.ocode_agent:OcodeAgent \
   --model opencode-go/deepseek-v4-flash \
   --dataset terminal-bench-core==0.1.1 \
   --n-attempts 3 --n-concurrent 4 \
+  --global-agent-timeout-sec 900 \
   --output-path bench/terminal_bench/runs/<label> \
   $(sed 's/^/-t /' subset.txt)
 ```
+
+Run from the repo root. Verified: `--agent-import-path` resolves a repo-local
+package under `uvx` because the working directory is on `sys.path` — a bogus
+leaf module under `bench.terminal_bench` fails with "No module named
+`bench.terminal_bench.<leaf>`", meaning the parent package imported fine. No
+`PYTHONPATH` juggling needed.
+
+**Everything that affects comparability is pinned**: the TB version
+(`terminal-bench==0.2.18`), the dataset (`terminal-bench-core==0.1.1`), and the
+ocode binary commit. A floating `uvx --from terminal-bench` would let a TB
+upgrade change scoring between the baseline and a later run, which is exactly
+the comparability problem the frozen subset exists to prevent. TB version and
+`ocode version` are both recorded in the run label.
+
+`--global-agent-timeout-sec` is the backstop against a hung run: the
+`TerminalCommand` uses `max_timeout_sec=float("inf")` (copied from
+`OpenCodeAgent`), so any tool that blocks on stdin would otherwise hang the
+tmux pane forever. `-yolo` should prevent permission prompts; the smoke test
+confirms no prompt-hang rather than assuming it.
 
 Because the adapter reports tokens through `AgentResult`, TB's own per-trial
 results carry pass/fail *and* token counts together. The sweep script only
@@ -231,10 +254,12 @@ gateway. Two results reframe the problem:
 **Output tokens are almost entirely reasoning, and we cannot turn them down.**
 For a trivial prompt ("write a bash one-liner to count lines in .txt files"),
 `deepseek-v4-flash` spent a mean of ~1,900 reasoning tokens out of nearly all
-its completion tokens. `reasoning_effort` is *accepted* by the gateway but has
-no measurable effect: over n=5 per level, means were 1912 (unset), 1531 (low),
+its completion tokens. `reasoning_effort` is *accepted* by the gateway (no error) but showed no
+measurable effect: over n=5 per level, means were 1912 (unset), 1531 (low),
 and 1691 (high), with per-sample spreads of 762–3363 that overlap completely.
-The parameter is silently ignored. (Related: `opencode-go` is not in
+Five samples cannot prove the parameter is ignored, but they are more than
+enough to drop it as a lever — any real effect is smaller than the noise.
+(Related: `opencode-go` is not in
 `providerSupportsReasoningEffort`, `client.go:1719`, so ocode never sends it
 anyway — and there is now no reason to add it.)
 
@@ -280,7 +305,11 @@ without a score regression outside the measured spread.
 - **Adapter smoke** — 2 TB tasks, `--n-attempts 1`, verifying: container gets
   the binary, `OPENCODE_API_KEY` reaches the model, egress to `opencode.ai`
   succeeds, `ocode-run.jsonl` lands on the host with a `usage` event, and TB's
-  own results record shows non-zero `total_input_tokens`.
+  own results record shows non-zero `total_input_tokens`. Also confirms two
+  container-environment risks: that no tool blocks on stdin (which would hang
+  the tmux pane), and that `session.Save` (`run.go:273`) can write — it runs
+  *after* the work completes, so an unwritable `HOME` in the task image would
+  fail the run only after all the tokens were spent.
 - **Baseline** — the frozen subset, `--n-attempts 3`, recorded in
   `bench/terminal-bench/README.md` as the number every later config is
   compared against.
@@ -329,6 +358,6 @@ without a score regression outside the measured spread.
   approach cannot work and the design needs rethinking. Phase 3 exists to find
   this out before any optimization work is built on top. TB's own docs flag
   broken networking as a known failure mode for installed agents.
-- **`terminal-bench-core` task IDs are not yet enumerated**, so `subset.txt` is
-  empty in this design. It is populated once from the downloaded dataset by
-  stratified sample, then frozen.
+- **`subset.txt` is not yet populated.** The dataset is downloaded and contains
+  80 tasks; the ~12-task subset is chosen once by stratified sample across task
+  domains, written to `subset.txt`, and then frozen.
