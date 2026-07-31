@@ -32,7 +32,15 @@ done < "$SUBSET"
 echo "label:      $LABEL"
 echo "tb:         0.2.18"
 echo "dataset:    terminal-bench-core==0.1.1"
-echo "ocode:      $(./ocode version 2>&1 | head -1)"
+DIST_BIN="bench/terminal_bench/dist/ocode-linux-$(uname -m | sed 's/x86_64/amd64/')"
+if [ ! -f "$DIST_BIN" ]; then
+  echo "error: $DIST_BIN missing; run \`make build-linux\` and copy into bench/terminal_bench/dist/" >&2
+  exit 1
+fi
+# The dist binary is a Linux binary and cannot execute on a macOS host; the
+# commit is the pin that matters, and the binary is assumed freshly built from
+# it (see the README prerequisite).
+echo "ocode-dist: $DIST_BIN"
 echo "commit:     $(git rev-parse --short HEAD)"
 
 uvx --from terminal-bench==0.2.18 tb run \
