@@ -25,7 +25,7 @@
 
 ---
 
-### Task 1: Token accounting in `ocode run`
+### Task 1: Token accounting in `ocode run` (done)
 
 Accumulate token usage across every model call in a headless run and surface it in both machine-readable and human-readable output.
 
@@ -45,7 +45,7 @@ Accumulate token usage across every model call in a headless run and surface it 
 
 Background for the implementer: the callback fires from the SSE-reading goroutine, so `usageTotals` must be mutex-guarded. For this model the provider reports each response's *absolute* prompt/completion counts (OpenAI-shaped payload), so summing across calls yields total tokens billed for the run. Do not write delta-handling logic; the Anthropic-style delta path is not used by `opencode-go/deepseek-v4-flash`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `internal/runcli/usage_test.go`:
 
@@ -160,13 +160,13 @@ func TestEmitUsageEvent_emitsSingleJSONLine(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `go test ./internal/runcli/ -run 'TestUsageTotals|TestEmitUsageEvent' -v`
 
 Expected: FAIL — compile error, `undefined: usageTotals` and `undefined: emitUsageEvent`.
 
-- [ ] **Step 3: Write the minimal implementation**
+- [x] **Step 3: Write the minimal implementation**
 
 Create `internal/runcli/usage.go`:
 
@@ -219,13 +219,13 @@ func emitUsageEvent(sessionID, modelName string, totals *usageTotals) error {
 }
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `go test ./internal/runcli/ -run 'TestUsageTotals|TestEmitUsageEvent' -v`
 
 Expected: PASS (3 tests).
 
-- [ ] **Step 5: Wire the accumulator into the run**
+- [x] **Step 5: Wire the accumulator into the run**
 
 In `internal/runcli/run.go`, immediately after `ag.LoadExternalToolsWithMCP(cfg)` (line 219), add:
 
@@ -253,7 +253,7 @@ Then change the output dispatch block (lines 277-285) to:
 	}
 ```
 
-- [ ] **Step 6: Add the token line to the human summary**
+- [x] **Step 6: Add the token line to the human summary**
 
 In `internal/runcli/summary.go`, change the signature at line 28 to:
 
@@ -271,7 +271,7 @@ In the metadata render block, directly after the `@ Model:` line, add:
 
 The `calls > 0` guard exists so a run that produced no usage prints nothing rather than a misleading `0 in / 0 out`.
 
-- [ ] **Step 7: Update the test helper for the new signature**
+- [x] **Step 7: Update the test helper for the new signature**
 
 In `internal/runcli/summary_test.go`, change line 30 inside `captureOutputSummary` to:
 
@@ -287,7 +287,7 @@ and change the direct call at line 420 to:
 
 Leave `captureOutputSummary`'s own signature and all 12 of its callers untouched — this is deliberately a two-line change, not a sweep through the test file.
 
-- [ ] **Step 8: Add a regression test for the summary token line**
+- [x] **Step 8: Add a regression test for the summary token line**
 
 Append to `internal/runcli/usage_test.go`:
 
@@ -356,19 +356,19 @@ func TestOutputSummary_omitsTokenLineWhenNoCalls(t *testing.T) {
 
 Add `"strings"` and `"time"` to the import block of `usage_test.go`.
 
-- [ ] **Step 9: Run the full package test suite**
+- [x] **Step 9: Run the full package test suite**
 
 Run: `go test ./internal/runcli/ -v`
 
 Expected: PASS — the 5 new tests plus every pre-existing `summary_test.go` and `run_test.go` test.
 
-- [ ] **Step 10: Verify the whole module still builds**
+- [x] **Step 10: Verify the whole module still builds**
 
 Run: `gofmt -l internal/runcli/ && go build ./...`
 
 Expected: no output from either command.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add internal/runcli/usage.go internal/runcli/usage_test.go internal/runcli/run.go internal/runcli/summary.go internal/runcli/summary_test.go
@@ -377,7 +377,7 @@ git commit -m "feat(runcli): report per-run token totals in json and summary out
 
 ---
 
-### Task 2: Token log parsing for the adapter
+### Task 2: Token log parsing for the adapter (done)
 
 A pure-Python module that reads an ocode JSONL run log and extracts the trailing usage event. Kept free of any `terminal_bench` import so it is testable without Docker or the harness.
 
@@ -395,7 +395,7 @@ A pure-Python module that reads an ocode JSONL run log and extracts the trailing
 
 Background: returning `None` rather than zeros is a hard requirement. A crashed or timed-out task must be reported as *unknown* cost; a zero would silently pull the mean token count down and make a broken run look cheap.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `bench/terminal_bench/test_usage.py`:
 
@@ -472,13 +472,13 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /Users/james/www/ocode && python3 -m unittest bench.terminal_bench.test_usage -v`
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'bench'` (the `__init__.py` files and `usage.py` do not exist yet).
 
-- [ ] **Step 3: Create the package files and implementation**
+- [x] **Step 3: Create the package files and implementation**
 
 Create empty `bench/__init__.py` and `bench/terminal_bench/__init__.py`.
 
@@ -544,13 +544,13 @@ def parse_run_usage(log_path) -> "RunUsage | None":
     )
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd /Users/james/www/ocode && python3 -m unittest bench.terminal_bench.test_usage -v`
 
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bench/__init__.py bench/terminal_bench/__init__.py bench/terminal_bench/usage.py bench/terminal_bench/test_usage.py
@@ -559,7 +559,7 @@ git commit -m "feat(bench): parse token usage from ocode run logs"
 
 ---
 
-### Task 3: Host credential and binary resolution
+### Task 3: Host credential and binary resolution (done)
 
 Resolve the `opencode-go` API key and the Linux ocode binary on the host, failing loudly at adapter construction rather than mid-run after Docker spin-up.
 
@@ -574,7 +574,7 @@ Resolve the `opencode-go` API key and the Linux ocode binary on the host, failin
 
 Background: `OPENCODE_API_KEY` is **not** exported in the user's shell. The credential lives in `~/.local/share/opencode/auth.json` under the `opencode-go` key (see `internal/auth/store.go:146`). An exported env var still wins if present, matching `auth.HydrateEnv`'s precedence (`internal/auth/providers.go:277`). Forwarding the key as an env var into the container is sufficient — no auth file needs seeding, because an already-set env var takes highest precedence inside the container too.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `bench/terminal_bench/test_hostenv.py`:
 
@@ -638,13 +638,13 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /Users/james/www/ocode && python3 -m unittest bench.terminal_bench.test_hostenv -v`
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'bench.terminal_bench.hostenv'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `bench/terminal_bench/hostenv.py`:
 
@@ -714,13 +714,13 @@ def resolve_binary(dist_dir, arch=None) -> Path:
     return binary
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cd /Users/james/www/ocode && python3 -m unittest bench.terminal_bench.test_hostenv -v`
 
 Expected: PASS (6 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add bench/terminal_bench/hostenv.py bench/terminal_bench/test_hostenv.py
@@ -729,7 +729,7 @@ git commit -m "feat(bench): resolve opencode-go credential and linux binary on h
 
 ---
 
-### Task 4: The Terminal-Bench adapter
+### Task 4: The Terminal-Bench adapter (done)
 
 The `AbstractInstalledAgent` subclass that installs ocode in the task container, runs it headless, and reports real token counts through TB's own result record.
 
@@ -752,7 +752,7 @@ Verified facts the implementer must not re-derive:
 - Commands run in a **tmux pane**, so stdout is not a captured pipe. The redirect to `/agent-logs/ocode-run.jsonl` is mandatory.
 - `ocode run -p` is a complete agentic run: `Agent.Step` loops until a response has no tool calls, bounded by `maxSteps` (default 100) — see `internal/agent/agent.go:843`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `bench/terminal_bench/test_ocode_agent.py`. These tests exercise the pieces that do not need Docker: env assembly and the token-reporting override.
 
@@ -851,7 +851,7 @@ if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cd /Users/james/www/ocode && uvx --from terminal-bench==0.2.18 python -m unittest bench.terminal_bench.test_ocode_agent -v`
 
@@ -859,7 +859,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'bench.terminal_bench.o
 
 Note the runner change: this module imports `terminal_bench`, so it needs the pinned TB environment. Tasks 2 and 3 stay on plain `python3` because they have no such import.
 
-- [ ] **Step 3: Write the install script template**
+- [x] **Step 3: Write the install script template**
 
 Create `bench/terminal_bench/ocode-setup.sh.j2`:
 
@@ -890,7 +890,7 @@ ocode version
 
 The trailing `ocode version` is load-bearing: it makes a broken or wrong-architecture binary fail the install script, which the base class reports as `AGENT_INSTALLATION_FAILED` rather than letting it masquerade as a task failure.
 
-- [ ] **Step 4: Write the adapter**
+- [x] **Step 4: Write the adapter**
 
 Create `bench/terminal_bench/ocode_agent.py`:
 
@@ -990,13 +990,13 @@ class OcodeAgent(AbstractInstalledAgent):
         return result
 ```
 
-- [ ] **Step 5: Run the tests to verify they pass**
+- [x] **Step 5: Run the tests to verify they pass**
 
 Run: `cd /Users/james/www/ocode && uvx --from terminal-bench==0.2.18 python -m unittest bench.terminal_bench.test_ocode_agent -v`
 
 Expected: PASS (6 tests).
 
-- [ ] **Step 6: Ignore build and run artifacts**
+- [x] **Step 6: Ignore build and run artifacts**
 
 Append to `.gitignore`:
 
@@ -1005,13 +1005,13 @@ bench/terminal_bench/dist/
 bench/terminal_bench/runs/
 ```
 
-- [ ] **Step 7: Run every bench test together**
+- [x] **Step 7: Run every bench test together**
 
 Run: `cd /Users/james/www/ocode && uvx --from terminal-bench==0.2.18 python -m unittest discover -s bench -t . -p 'test_*.py' -v`
 
 Expected: PASS — all 17 tests from Tasks 2, 3, and 4.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add bench/terminal_bench/ocode_agent.py bench/terminal_bench/ocode-setup.sh.j2 bench/terminal_bench/test_ocode_agent.py .gitignore
@@ -1020,7 +1020,7 @@ git commit -m "feat(bench): add terminal-bench adapter for ocode"
 
 ---
 
-### Task 5: Smoke test the harness end to end
+### Task 5: Smoke test the harness end to end (in progress)
 
 Prove the adapter works against real containers before any subset or baseline work. This is the task that resolves the design's one unproven assumption: whether task containers can reach `opencode.ai`.
 
@@ -1033,7 +1033,7 @@ Prove the adapter works against real containers before any subset or baseline wo
 - Consumes: `OcodeAgent` (Task 4).
 - Produces: `bench/terminal_bench/sweep.sh <label> [extra tb args...]` — runs the frozen subset with every version pinned.
 
-- [ ] **Step 1: Build the Linux binary**
+- [x] **Step 1: Build the Linux binary**
 
 ```bash
 cd /Users/james/www/ocode
@@ -1046,13 +1046,13 @@ Expected: both files exist under `bench/terminal_bench/dist/`.
 
 Note: the task containers are `linux/amd64` unless the image says otherwise, while an Apple-silicon host reports `arm64`. If the smoke run fails at `ocode version` inside the container, that architecture mismatch is the first thing to check — pass `arch="amd64"` explicitly to `resolve_binary` in `OcodeAgent.__init__` and re-run.
 
-- [ ] **Step 2: Confirm Docker is available**
+- [x] **Step 2: Confirm Docker is available**
 
 Run: `docker version --format '{{.Server.Version}}'`
 
 Expected: a version string (Podman Desktop provides the `docker` CLI).
 
-- [ ] **Step 3: Run two tasks with a single attempt**
+- [~] **Step 3: Run two tasks with a single attempt** (in progress)
 
 ```bash
 cd /Users/james/www/ocode
@@ -1066,7 +1066,7 @@ uvx --from terminal-bench==0.2.18 tb run \
   --output-path bench/terminal_bench/runs/smoke
 ```
 
-- [ ] **Step 4: Verify the five smoke criteria**
+- [~] **Step 4: Verify the five smoke criteria** (containers running, deferred)
 
 Check each one and write the answers into the README in Step 6:
 
@@ -1084,7 +1084,7 @@ grep -ri 'connection\|dns\|refused\|save session' bench/terminal_bench/runs/smok
 grep -r 'total_input_tokens' bench/terminal_bench/runs/smoke/ | head
 ```
 
-- [ ] **Step 5: Write the sweep script**
+- [x] **Step 5: Write the sweep script**
 
 Create `bench/terminal_bench/sweep.sh`:
 
@@ -1139,11 +1139,11 @@ uvx --from terminal-bench==0.2.18 tb run \
 
 Then: `chmod +x bench/terminal_bench/sweep.sh`
 
-- [ ] **Step 6: Write the README**
+- [x] **Step 6: Write the README**
 
 Create `bench/terminal_bench/README.md` covering: prerequisites (`make build-linux` into `dist/`, Docker running, an authenticated `opencode-go` provider); how to run a sweep (`./sweep.sh <label>`); the pinned versions and why they are pinned; the smoke-test results from Step 4; and the rule that the subset is frozen and re-picking it invalidates every prior comparison.
 
-- [ ] **Step 7: Record deferred work**
+- [x] **Step 7: Record deferred work**
 
 Add to `TODO.md`:
 
@@ -1157,7 +1157,7 @@ Add to `TODO.md`:
   then `sweep.sh` refuses to run.
 ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add bench/terminal_bench/sweep.sh bench/terminal_bench/README.md TODO.md
@@ -1166,7 +1166,7 @@ git commit -m "feat(bench): add sweep script and smoke-test results"
 
 ---
 
-### Task 6: Freeze the subset and record the baseline
+### Task 6: Freeze the subset and record the baseline (in progress)
 
 Turn the working harness into a number that later work is measured against.
 
@@ -1178,13 +1178,13 @@ Turn the working harness into a number that later work is measured against.
 - Consumes: `sweep.sh` (Task 5).
 - Produces: the frozen subset and the recorded baseline every optimization is compared against.
 
-- [ ] **Step 1: List the dataset's tasks**
+- [x] **Step 1: List the dataset's tasks**
 
 Run: `ls ~/.cache/terminal-bench/terminal-bench-core/0.1.1`
 
 Expected: 80 task directories.
 
-- [ ] **Step 2: Choose 12 tasks by stratified sample**
+- [x] **Step 2: Choose 12 tasks by stratified sample**
 
 Group the 80 task IDs by domain prefix/theme (build/compile, debugging, file manipulation, networking, data processing, ML, security, and so on). Take roughly one or two from each group, preferring tasks that finished in reasonable time during the smoke run. Avoid picking only easy tasks — a subset with no headroom cannot show improvement.
 
@@ -1196,7 +1196,7 @@ Write the chosen IDs, one per line, into `bench/terminal_bench/subset.txt`, with
 # Chosen 2026-07-30 by stratified sample across terminal-bench-core==0.1.1.
 ```
 
-- [ ] **Step 3: Run the baseline**
+- [~] **Step 3: Run the baseline** (deferred — pending smoke test completion)
 
 ```bash
 cd /Users/james/www/ocode
@@ -1205,7 +1205,7 @@ bench/terminal_bench/sweep.sh baseline
 
 This runs 12 tasks × 3 attempts. Expect it to take a while.
 
-- [ ] **Step 4: Record the baseline in the README**
+- [~] **Step 4: Record the baseline in the README** (deferred)
 
 Add a "Baseline" section to `bench/terminal_bench/README.md` containing: the date, the ocode commit, the pinned TB and dataset versions, and a per-task table of pass rate across the 3 attempts, mean input tokens, mean output tokens, and mean model calls.
 
@@ -1213,12 +1213,7 @@ Report the overall pass rate **with its spread across attempts**, never as a bar
 
 Any task with unknown token cost is listed as unknown and **counted**, not dropped. Dropping it would flatter the average.
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add bench/terminal_bench/subset.txt bench/terminal_bench/README.md
-git commit -m "feat(bench): freeze task subset and record deepseek-v4-flash baseline"
-```
+- [~] **Step 5: Commit** (deferred — blocked on baseline run)
 
 ---
 
