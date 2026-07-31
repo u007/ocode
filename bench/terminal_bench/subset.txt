@@ -1,0 +1,15 @@
+# FROZEN SUBSET -- do not re-pick.
+# Changing these IDs invalidates every prior comparison.
+# Chosen 2026-07-31 by stratified sample across terminal-bench-core==0.1.1.
+build-tcc-qemu
+fix-permissions
+csv-to-parquet
+configure-git-webserver
+count-dataset-tokens
+cartpole-rl-training
+crack-7z-hash
+chess-best-move
+sqlite-db-truncate
+polyglot-rust-c
+qemu-alpine-ssh
+tmux-advanced-workflow
