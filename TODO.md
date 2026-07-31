@@ -512,16 +512,26 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
   output. The gateway does return `prompt_cache_hit_tokens`. Widening the
   callback signature would let the bench measure prompt-cache effectiveness
   directly. See `docs/superpowers/specs/2026-07-30-terminal-bench-harness-design.md`.
-- [ ] **`subset.txt` is unfrozen.** Populated in the baseline task (Task 6);
-  until then `sweep.sh` refuses to run.
-- [ ] **Live end-to-end smoke pending.** Two-task smoke test started on
-  2026-07-31 but was still running when the plan implementation turn ended.
-  Pending verification: `ocode-run.jsonl` exists and contains a `"type":"usage"`
-  line, tokens propagated into `AgentResult`, no `save session` errors, no
-  container timeout.
-- [ ] **Unverified assumption: outbound egress from TB Docker containers to
-  provider API.** Initial evidence (commands started and made API calls) is
-  positive; final confirmation requires completed task artifacts.
+- [x] **`subset.txt` frozen — DONE 2026-07-31.** 12 tasks by stratified
+  sample across `terminal-bench-core==0.1.1`. Re-picking invalidates every
+  prior comparison.
+- [ ] **Baseline sweep not yet run.** `bench/terminal_bench/sweep.sh baseline`
+  runs the frozen 12-task subset (3 attempts each) and records pass rate with
+  spread + per-task token means into the README. Needs real API spend and a
+  few hours; not run during the implementation turn.
+- [x] **Live end-to-end smoke — DONE 2026-07-31.** Verified on
+  `hello-world`, `sqlite-db-truncate`, `fix-permissions` (3/3 resolved):
+  `ocode-run.jsonl` lands in `sessions/` with a trailing `"type":"usage"` line,
+  `total_input_tokens` propagates into `AgentResult` (35,635 / 265,581 /
+  45,224), no `save session` errors, all runs completed under the timeout.
+- [x] **Egress assumption — CONFIRMED 2026-07-31.** LLM calls to
+  `opencode.ai` succeed inside TB task containers. One transient Docker
+  internal-DNS blip was observed at the very end of a long chess run (53
+  successful calls before it); not systematic.
+- [ ] **First smoke tasks (`chess-best-move`, `count-dataset-tokens`) exceed
+  the 900s timeout.** Both are intrinsically long; the chess agent flailed on
+  image analysis. The frozen subset currently avoids them; revisit only if a
+  longer timeout is acceptable for the sweep.
 
 ## Server permission-prompt bridge — deferred items
 

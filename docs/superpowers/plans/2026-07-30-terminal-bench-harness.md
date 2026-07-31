@@ -1052,7 +1052,7 @@ Run: `docker version --format '{{.Server.Version}}'`
 
 Expected: a version string (Podman Desktop provides the `docker` CLI).
 
-- [~] **Step 3: Run two tasks with a single attempt** (in progress)
+- [x] **Step 3: Run two tasks with a single attempt** (ran three quick tasks instead after the two original tasks exceeded the 900s timeout)
 
 ```bash
 cd /Users/james/www/ocode
@@ -1066,7 +1066,7 @@ uvx --from terminal-bench==0.2.18 tb run \
   --output-path bench/terminal_bench/runs/smoke
 ```
 
-- [~] **Step 4: Verify the five smoke criteria** (containers running, deferred)
+- [x] **Step 4: Verify the five smoke criteria**
 
 Check each one and write the answers into the README in Step 6:
 

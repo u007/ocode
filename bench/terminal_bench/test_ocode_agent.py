@@ -33,15 +33,21 @@ class OcodeAgentEnvTest(unittest.TestCase):
         self.assertIn("ocode run", command)
         self.assertIn("-yolo", command)
         self.assertIn("-format json", command)
-        self.assertIn("/agent-logs/ocode-run.jsonl", command)
+        self.assertIn("/logs/ocode-run.jsonl", command)
         self.assertIn(shlex.quote("fix the failing test"), command)
 
 
 class OcodeAgentTokenReportingTest(unittest.TestCase):
     def _run_with_log(self, log_lines):
-        logging_dir = Path(tempfile.mkdtemp())
+        # Mirror the real harness layout: logging_dir is <trial>/agent-logs
+        # and the container /logs mount lands in <trial>/sessions.
+        base_dir = Path(tempfile.mkdtemp())
+        logging_dir = base_dir / "agent-logs"
+        logging_dir.mkdir(parents=True, exist_ok=True)
         if log_lines is not None:
-            (logging_dir / "ocode-run.jsonl").write_text(
+            run_log = base_dir / "sessions" / "ocode-run.jsonl"
+            run_log.parent.mkdir(parents=True, exist_ok=True)
+            run_log.write_text(
                 "\n".join(json.dumps(line) for line in log_lines) + "\n"
             )
 

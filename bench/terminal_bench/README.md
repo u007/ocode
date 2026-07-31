@@ -68,21 +68,32 @@ keeping the sweep affordable.
 
 ## Smoke Test Results
 
-### 2026-07-31 (first run)
+### 2026-07-31 (verified end-to-end)
 
-Two-task smoke test (`chess-best-move`, `count-dataset-tokens`) with
-`--n-attempts 1 --n-concurrent 2`:
+Three-task smoke test (`hello-world`, `sqlite-db-truncate`, `fix-permissions`)
+with `--n-attempts 1 --n-concurrent 3`:
 
 | Check | Status | Evidence |
 |-------|--------|----------|
-| Install succeeded | ✅ | `ocode version` printed `0.8.33` in both containers; no `INSTALL_FAIL_STATUS` |
-| Egress works | ✅ | ocode commands started and are making API calls inside containers |
-| Log landed | ⏳ | Still in progress |
-| Tokens propagated | ⏳ | Still in progress |
-| No prompt-hang / session save | ⏳ | Still in progress |
+| Install succeeded | ✅ | `ocode version` printed `0.8.33` in every container; no `INSTALL_FAIL_STATUS` |
+| Egress works | ✅ | LLM calls to `opencode.ai` succeeded inside every container (the design's one unproven assumption — confirmed) |
+| Log landed | ✅ | `sessions/ocode-run.jsonl` exists per task with trailing `"type":"usage"` line |
+| Tokens propagated | ✅ | `total_input_tokens` non-zero in results: hello-world 35,635 / sqlite-db-truncate 265,581 / fix-permissions 45,224 |
+| No prompt-hang / session save | ✅ | All runs completed well under the 600s timeout; no `save session` errors in `ocode-run.err` |
 
-The smoke run is currently in progress (containers running, ocode executing
-tasks headless). Full results will be added once both tasks complete.
+Results: **3/3 resolved (100%)** with real token accounting.
+
+### 2026-07-31 (first attempt — diagnostic)
+
+The original two-task smoke (`chess-best-move`, `count-dataset-tokens`) hit the
+900s global timeout — both tasks are intrinsically long (the chess agent
+flailed on image analysis for ~109 messages; the dataset agent was tokenizing a
+large HF dataset). Egress and install were confirmed even there (53 successful
+LLM calls in the chess container, one transient Docker-internal DNS blip at the
+end). This surfaced a real bug: the adapter wrote to `/agent-logs/`, but the
+dataset's compose files only mount `/logs` (→ host `sessions/`), so no log
+landed on the host and tokens stayed zero. Fixed by writing to `/logs/` and
+parsing from `sessions/ocode-run.jsonl`.
 
 ## Key Design Decisions
 

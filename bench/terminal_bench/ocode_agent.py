@@ -19,8 +19,8 @@ from bench.terminal_bench.usage import parse_run_usage
 
 logger = logging.getLogger(__name__)
 
-CONTAINER_LOG = "/agent-logs/ocode-run.jsonl"
-CONTAINER_ERR = "/agent-logs/ocode-run.err"
+CONTAINER_LOG = "/logs/ocode-run.jsonl"
+CONTAINER_ERR = "/logs/ocode-run.err"
 DIST_DIR = Path(__file__).parent / "dist"
 
 
@@ -79,7 +79,12 @@ class OcodeAgent(AbstractInstalledAgent):
             )
             return result
 
-        usage = parse_run_usage(Path(logging_dir) / "ocode-run.jsonl")
+        # The container's /logs is mounted to the host sessions dir, which for
+        # this harness layout is the sibling of logging_dir (agent-logs). The
+        # dataset compose files do NOT mount /agent-logs, so the log can only
+        # be read back through the sessions mount.
+        run_log = Path(logging_dir).parent / "sessions" / "ocode-run.jsonl"
+        usage = parse_run_usage(run_log)
         if usage is None:
             # Deliberately leave the base class's zeros in place and say so.
             # Inventing a number here would make a crashed run look cheap.
