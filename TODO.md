@@ -505,6 +505,24 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
 - [ ] Web answering of agent `question` prompts works only in **headless serve mode** (the server owns the agent in `Handler.agents`). In `/rc` bridge mode the TUI owns the agent and its own question dialog; `POST /api/questions` returns 409 there because the server has no hook to resolve the TUI dialog without changing `internal/tui` behavior. Closing the RC-mode gap needs a TUI-side path (e.g. inject the web answer into the TUI's `submitQuestionAnswers` via the RC bridge) — deferred (from server question bridge: 2026-07-09).
 - ~~Note: the pre-existing permission-prompt bridge is likewise not wired end-to-end for the web~~ — **FIXED 2026-07-09**: the mirror now emits `permission`/`permission_resolved` SSE frames (from `wireHeadlessAgentCallbacks`'s `PERMISSION_ASK:` sentinel detection), and a dedicated `POST /api/permissions/resolve` (`{request_id, session_id?, approved}`) resolves the ask by executing (approve) or denying the paused tool call and re-Step'ing — mirroring the question bridge. The config `POST /api/permissions` (`{tool, level}`) is untouched. `web/src/hooks/useChat.ts` `resolvePermission` now calls `api.resolvePermission`.
 
+## Bench: Terminal-Bench harness follow-ups
+
+- [ ] **Cache-token reporting.** `ocode run`'s `usage` event omits
+  cache-read/cache-write counts because `Agent.OnUsage` carries only input and
+  output. The gateway does return `prompt_cache_hit_tokens`. Widening the
+  callback signature would let the bench measure prompt-cache effectiveness
+  directly. See `docs/superpowers/specs/2026-07-30-terminal-bench-harness-design.md`.
+- [ ] **`subset.txt` is unfrozen.** Populated in the baseline task (Task 6);
+  until then `sweep.sh` refuses to run.
+- [ ] **Live end-to-end smoke pending.** Two-task smoke test started on
+  2026-07-31 but was still running when the plan implementation turn ended.
+  Pending verification: `ocode-run.jsonl` exists and contains a `"type":"usage"`
+  line, tokens propagated into `AgentResult`, no `save session` errors, no
+  container timeout.
+- [ ] **Unverified assumption: outbound egress from TB Docker containers to
+  provider API.** Initial evidence (commands started and made API calls) is
+  positive; final confirmation requires completed task artifacts.
+
 ## Server permission-prompt bridge — deferred items
 
 - [ ] Web permission resolution is **approve/deny only** — no "always allow". The web `PermissionDialog` offers two buttons, and rule persistence (the TUI's `a`/`t` choices) pulls in `agent.IsHarmfulRequest` guards, out-of-scope-path handling (`allowOutOfScopePath`), webfetch-domain rules, and `PermissionManager` writes that `HandleResolvePermission` deliberately does not replicate. If always-allow is wanted on the web, add a persist flag to the resolve payload + dialog and route it through the same guarded persist path the TUI uses (from permission bridge: 2026-07-09).
