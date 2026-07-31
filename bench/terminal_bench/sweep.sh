@@ -20,6 +20,12 @@ if [ ! -s "$SUBSET" ]; then
   exit 1
 fi
 
+# Preflight: a dead Docker daemon burns every trial. Fail fast instead.
+if ! docker version --format '{{.Server.Version}}' >/dev/null 2>&1; then
+  echo "error: Docker daemon is not reachable (start Podman Desktop / Docker Desktop first)" >&2
+  exit 1
+fi
+
 TASK_ARGS=()
 while read -r task; do
   [ -z "$task" ] && continue

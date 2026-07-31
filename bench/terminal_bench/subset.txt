@@ -1,14 +1,17 @@
 # FROZEN SUBSET -- do not re-pick.
 # Changing these IDs invalidates every prior comparison.
 # Chosen 2026-07-31 by stratified sample across terminal-bench-core==0.1.1.
+# v2: replaced chess-best-move (games/puzzles) -> path-tracing and
+# count-dataset-tokens (data processing) -> heterogeneous-dates because both
+# originals exceeded the 900s smoke timeout; no baseline had been recorded yet.
 build-tcc-qemu
 fix-permissions
 csv-to-parquet
 configure-git-webserver
-count-dataset-tokens
+heterogeneous-dates
 cartpole-rl-training
 crack-7z-hash
-chess-best-move
+path-tracing
 sqlite-db-truncate
 polyglot-rust-c
 qemu-alpine-ssh
