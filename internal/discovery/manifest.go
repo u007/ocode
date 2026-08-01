@@ -34,7 +34,12 @@ type Artifact struct {
 type ServerManifest struct {
 	OS, Arch string
 	ModelID  string // e.g. "local/bge-m3" or "local/lfm2.5-embedding"
-	Dim      int
+	// Kind distinguishes embedding manifests ("" or "embed", the existing
+	// default) from chat/completion manifests ("chat"). Embedding-model
+	// pickers (LocalManifestsForHost) only see "" / "embed"; the local-model
+	// instance manager (ChatManifestsForHost) only sees "chat".
+	Kind string
+	Dim  int
 	// Backend selects how the model is served. "" or "llamacpp" = bundled
 	// llama-server with a GGUF; "mlx" = Apple-Silicon MLX Python server.
 	Backend string
@@ -236,12 +241,25 @@ func ManifestForModel(modelID string) (ServerManifest, bool) {
 	return ServerManifest{}, false
 }
 
-// LocalManifestsForHost returns every manifest that can run on this host
-// (used by the embedding-model picker to list selectable local models).
+// LocalManifestsForHost returns every embedding manifest that can run on this
+// host (used by the embedding-model picker to list selectable local models).
+// Chat-kind manifests (see ChatManifestsForHost) are excluded.
 func LocalManifestsForHost() []ServerManifest {
 	var out []ServerManifest
 	for _, m := range localManifests {
-		if m.OS == runtime.GOOS && m.Arch == runtime.GOARCH {
+		if m.OS == runtime.GOOS && m.Arch == runtime.GOARCH && m.Kind != "chat" {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// ChatManifestsForHost returns every chat/completion manifest that can run on
+// this host (used by /localmodel to list catalog entries available to add).
+func ChatManifestsForHost() []ServerManifest {
+	var out []ServerManifest
+	for _, m := range localManifests {
+		if m.OS == runtime.GOOS && m.Arch == runtime.GOARCH && m.Kind == "chat" {
 			out = append(out, m)
 		}
 	}

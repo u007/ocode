@@ -54,6 +54,22 @@ func TestExpectedServeID(t *testing.T) {
 	}
 }
 
+func TestLocalManifestsForHostExcludesChatKind(t *testing.T) {
+	for _, m := range LocalManifestsForHost() {
+		if m.Kind == "chat" {
+			t.Fatalf("LocalManifestsForHost returned a chat-kind manifest: %s", m.ModelID)
+		}
+	}
+}
+
+func TestChatManifestsForHostOnlyChatKind(t *testing.T) {
+	for _, m := range ChatManifestsForHost() {
+		if m.Kind != "chat" {
+			t.Fatalf("ChatManifestsForHost returned a non-chat manifest: %s (kind=%q)", m.ModelID, m.Kind)
+		}
+	}
+}
+
 func TestModelMatches(t *testing.T) {
 	// llama.cpp reports the full GGUF path; substring match on basename.
 	if !modelMatches([]string{"/Users/x/discovery/local-darwin-arm64/bge-m3-q4_k_m.gguf"}, "bge-m3-q4_k_m.gguf") {
