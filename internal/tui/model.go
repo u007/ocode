@@ -8197,7 +8197,7 @@ func (m *model) showLocalModelList() {
 			if lm.Enabled {
 				state = "enabled"
 				if info, ok := m.localModelInstanceInfo(man.ModelID, lm); ok {
-					state = string(info.State)
+					state = fmt.Sprintf("%s, mem=%s", info.State, localModelMemString(info))
 				}
 			}
 			status = fmt.Sprintf("%s, max_parallel=%d", state, lm.MaxParallel)
@@ -8326,6 +8326,7 @@ func startLocalModelInstance(ag *agent.Agent, id string, maxParallel int) error 
 		// runs — a poll timeout must not leave a running process untracked
 		// (see SetModelInstanceProcessID's doc comment).
 		discovery.SetModelInstanceProcessID(id, p.ID)
+		discovery.SetModelInstancePID(id, p.PID)
 		return nil
 	}
 	return discovery.StartModelInstance(spawn, id, port, maxParallel, agent.DiscoveryCacheDir())
@@ -8397,11 +8398,29 @@ func (m *model) showLocalModelStatus(name string) {
 		fmt.Fprintf(&b, "%s\n  enabled: %v\n  max_parallel: %d\n", id, lm.Enabled, lm.MaxParallel)
 		if info, ok := m.localModelInstanceInfo(id, lm); ok {
 			fmt.Fprintf(&b, "  state: %s\n  port: %d\n  base_url: %s\n", info.State, info.Port, info.BaseURL)
+			fmt.Fprintf(&b, "  mem: %s\n", localModelMemString(info))
 		} else {
 			fmt.Fprintf(&b, "  state: %s\n", discovery.InstanceStopped)
 		}
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+// localModelMemString reports info's RSS memory, or an explanatory
+// placeholder when it can't be measured: PID is 0 for an instance found only
+// via a cross-process port probe (ProbeModelInstance never learns the OS
+// pid of a server spawned by a different ocode process), and RSSBytes itself
+// can fail (process exited between the status check and the RSS read, or
+// permission denied).
+func localModelMemString(info discovery.InstanceInfo) string {
+	if info.PID == 0 {
+		return "unknown (started by another ocode process)"
+	}
+	rss, err := discovery.RSSBytes(info.PID)
+	if err != nil {
+		return "unknown (" + err.Error() + ")"
+	}
+	return formatBytes(int64(rss))
 }
 
 func (m *model) handleDiscoverIgnoreCmd(args []string) tea.Cmd {

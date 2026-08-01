@@ -56,6 +56,10 @@ type Process struct {
 	ExitCode  int
 	StartedAt time.Time
 	EndedAt   time.Time
+	// PID is the OS process id, set once cmd.Start() succeeds (0 until
+	// then). Written once and never mutated afterward, so — like ID and
+	// Command — it's safe to read without holding mu.
+	PID int
 
 	// supKey is the key used when reporting this process's lifecycle to the
 	// shared ProcessSupervisor. Equals ID for an empty SupervisorIDPrefix and
@@ -309,6 +313,7 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 		}
 		return p
 	}
+	p.PID = cmd.Process.Pid
 
 	pump := func(rc io.Reader) {
 		if _, err := io.Copy(processOutputWriter{p: p}, rc); err != nil {

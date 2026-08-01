@@ -60,6 +60,11 @@ type InstanceInfo struct {
 	Port        int
 	MaxParallel int
 	BaseURL     string
+	// PID is the OS process id of the server this session spawned, or 0 when
+	// unknown — e.g. for an instance discovered via ProbeModelInstance
+	// (started by a different ocode process, so we never had its PID) or
+	// before the spawn closure has recorded it.
+	PID int
 }
 
 type chatInstance struct {
@@ -309,6 +314,18 @@ func StopModelInstance(procs *tool.ProcessRegistry, modelID string) error {
 	delete(instances, modelID)
 	instMu.Unlock()
 	return nil
+}
+
+// SetModelInstancePID records the OS process id of a running instance (for
+// memory reporting — see RSSBytes). Same call-site rule as
+// SetModelInstanceProcessID: call it from inside the spawn closure right
+// after the process starts, not after StartModelInstance returns.
+func SetModelInstancePID(modelID string, pid int) {
+	instMu.Lock()
+	defer instMu.Unlock()
+	if inst, ok := instances[modelID]; ok {
+		inst.info.PID = pid
+	}
 }
 
 // SetModelInstanceProcessID records the tool.ProcessRegistry id for a running
