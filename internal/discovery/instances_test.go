@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/u007/ocode/internal/tool"
@@ -53,5 +54,42 @@ func TestStopModelInstanceNotRunningIsNoop(t *testing.T) {
 	procs := tool.NewProcessRegistry()
 	if err := StopModelInstance(procs, "local/never-started"); err != nil {
 		t.Fatalf("stopping a never-started instance should be a no-op, got: %v", err)
+	}
+}
+
+func TestFilterMLXArgsDropsUnsupportedFlag(t *testing.T) {
+	argv := []string{"python3", "-m", "mlx_lm.server",
+		"--model", "{repo}",
+		"--host", "127.0.0.1",
+		"--port", "{port}",
+		"--decode-concurrency", "{parallel}"}
+	// mlx_lm 0.30.5 (the PrismML fork pairing) lacks --decode-concurrency.
+	supported := map[string]bool{"--model": true, "--host": true, "--port": true}
+	out := filterMLXArgs(argv, "prism-ml/Bonsai-8B-mlx-1bit", 11459, 2, supported)
+	for _, a := range out {
+		if a == "--decode-concurrency" {
+			t.Fatalf("unsupported flag --decode-concurrency was not dropped: %v", out)
+		}
+	}
+	// The placeholder should have been expanded and the flag's value dropped
+	// alongside it: python3 -m mlx_lm.server --model <repo> --host 127.0.0.1
+	// --port <port> = 9 args.
+	if got := len(out); got != 9 {
+		t.Fatalf("filtered argv has %d args, want 9: %v", got, out)
+	}
+}
+
+func TestFilterMLXArgsKeepsSupportedFlag(t *testing.T) {
+	argv := []string{"python3", "-m", "mlx_lm.server",
+		"--model", "{repo}",
+		"--decode-concurrency", "{parallel}"}
+	supported := map[string]bool{"--model": true, "--decode-concurrency": true}
+	out := filterMLXArgs(argv, "prism-ml/Bonsai-8B-mlx-1bit", 11459, 2, supported)
+	joined := strings.Join(out, " ")
+	if !strings.Contains(joined, "--decode-concurrency") {
+		t.Fatalf("supported flag was dropped: %v", out)
+	}
+	if !strings.Contains(joined, "2") {
+		t.Fatalf("{parallel} not expanded to 2: %v", out)
 	}
 }

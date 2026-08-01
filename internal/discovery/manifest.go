@@ -210,6 +210,9 @@ var localManifests = []ServerManifest{
 		// OpenAI-compatible server (mlx_lm.server). --decode-concurrency is
 		// mlx_lm.server's concurrent-request-slot flag, substituted from
 		// {parallel} by the instance manager (internal/discovery/instances.go).
+		// It only exists in mlx_lm >= 0.31 — the PrismML fork's paired
+		// mlx_lm 0.30.5 lacks it, and spawnMLXChatServer drops unsupported
+		// flags (probed via `mlx_lm.server --help`) rather than failing.
 		// NOTE: 1-bit kernels require the PrismML mlx fork (the model card
 		// instructs `pip install mlx @ git+https://github.com/PrismML-Eng/mlx.git@prism`);
 		// stock mlx rejects bits=1 at load ("requested number of bits 1 is not
