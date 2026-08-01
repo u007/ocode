@@ -95,6 +95,15 @@ type DiscoveryConfig struct {
 	IgnorePaths []string
 }
 
+// LocalModelConfig is one user-registered local chat/completion model
+// instance (see internal/discovery/instances.go). MaxParallel is the number
+// of concurrent request slots (1 or 2) the running server process is
+// launched with.
+type LocalModelConfig struct {
+	Enabled     bool `json:"enabled"`
+	MaxParallel int  `json:"max_parallel"`
+}
+
 type SecurityConfig struct {
 	Redaction RedactionConfig `json:"redaction"`
 }
@@ -123,8 +132,12 @@ type OcodeConfig struct {
 	// truth for external plugins; opencode.json's legacy "plugins" key is
 	// only consulted as a one-time migration fallback.
 	ExternalPlugins map[string]PluginConfig
-	Security        SecurityConfig
-	Discovery       DiscoveryConfig
+	// LocalModels holds registered local chat/completion model instances
+	// (see /localmodel), keyed by model id (e.g. "local/bonsai-8b-1bit").
+	// Distinct from Discovery, which only covers the embedding model.
+	LocalModels map[string]LocalModelConfig
+	Security    SecurityConfig
+	Discovery   DiscoveryConfig
 	// MemoryEnabled toggles injection of the ocode-mem skill and memory files
 	// into the agent prompt.
 	MemoryEnabled bool
@@ -305,34 +318,35 @@ type discoveryConfigFile struct {
 }
 
 type ocodeConfigFile struct {
-	Compact             compactConfigFile       `json:"compact"`
-	Advisor             advisorConfigFile       `json:"advisor"`
-	Permissions         permissionConfigFile    `json:"permissions"`
-	Plugins             pluginsConfigFile       `json:"plugins"`
-	ExternalPlugins     map[string]PluginConfig `json:"external_plugins,omitempty"`
-	Security            securityConfigFile      `json:"security"`
-	Discovery           discoveryConfigFile     `json:"discovery"`
-	MemoryEnabled       *bool                   `json:"memory_enabled,omitempty"`
-	DocPromptEnabled    *bool                   `json:"doc_prompt_enabled,omitempty"`
-	ExtraAllowedPaths   []string                `json:"extra_allowed_paths,omitempty"`
-	Editor              string                  `json:"editor,omitempty"`
-	EditorMode          string                  `json:"editor_mode,omitempty"`
-	IDEMode             string                  `json:"ide_mode,omitempty"`
-	SmallModel          string                  `json:"small_model,omitempty"`
-	SmallModelEnabled   *bool                   `json:"small_model_enabled,omitempty"`
-	RecapModel          string                  `json:"recap_model,omitempty"`
-	RecapModelEnabled   *bool                   `json:"recap_model_enabled,omitempty"`
-	RecapTimeoutSeconds *int                    `json:"recap_timeout_seconds,omitempty"`
-	UndoMaxAgeDelta     *int                    `json:"undo_max_age_delta,omitempty"`
-	MaxConcurrentAgents *int                    `json:"max_concurrent_agents,omitempty"`
-	CommitMsgModel      string                  `json:"commit_msg_model,omitempty"`
-	CommitMsgPrompt     string                  `json:"commit_msg_prompt,omitempty"`
-	TUI                 tuiConfigFile           `json:"tui"`
-	MaxSteps            int                     `json:"max_steps,omitempty"`
-	MaxImageDim         int                     `json:"image_max_dim,omitempty"`
-	UploadDir           string                  `json:"upload_dir,omitempty"`
-	Ocr                 *ocr.OcrConfig          `json:"ocr,omitempty"`
-	ImageGen            *ImageGenConfig         `json:"imagegen,omitempty"`
+	Compact             compactConfigFile           `json:"compact"`
+	Advisor             advisorConfigFile           `json:"advisor"`
+	Permissions         permissionConfigFile        `json:"permissions"`
+	Plugins             pluginsConfigFile           `json:"plugins"`
+	ExternalPlugins     map[string]PluginConfig     `json:"external_plugins,omitempty"`
+	LocalModels         map[string]LocalModelConfig `json:"local_models,omitempty"`
+	Security            securityConfigFile          `json:"security"`
+	Discovery           discoveryConfigFile         `json:"discovery"`
+	MemoryEnabled       *bool                       `json:"memory_enabled,omitempty"`
+	DocPromptEnabled    *bool                       `json:"doc_prompt_enabled,omitempty"`
+	ExtraAllowedPaths   []string                    `json:"extra_allowed_paths,omitempty"`
+	Editor              string                      `json:"editor,omitempty"`
+	EditorMode          string                      `json:"editor_mode,omitempty"`
+	IDEMode             string                      `json:"ide_mode,omitempty"`
+	SmallModel          string                      `json:"small_model,omitempty"`
+	SmallModelEnabled   *bool                       `json:"small_model_enabled,omitempty"`
+	RecapModel          string                      `json:"recap_model,omitempty"`
+	RecapModelEnabled   *bool                       `json:"recap_model_enabled,omitempty"`
+	RecapTimeoutSeconds *int                        `json:"recap_timeout_seconds,omitempty"`
+	UndoMaxAgeDelta     *int                        `json:"undo_max_age_delta,omitempty"`
+	MaxConcurrentAgents *int                        `json:"max_concurrent_agents,omitempty"`
+	CommitMsgModel      string                      `json:"commit_msg_model,omitempty"`
+	CommitMsgPrompt     string                      `json:"commit_msg_prompt,omitempty"`
+	TUI                 tuiConfigFile               `json:"tui"`
+	MaxSteps            int                         `json:"max_steps,omitempty"`
+	MaxImageDim         int                         `json:"image_max_dim,omitempty"`
+	UploadDir           string                      `json:"upload_dir,omitempty"`
+	Ocr                 *ocr.OcrConfig              `json:"ocr,omitempty"`
+	ImageGen            *ImageGenConfig             `json:"imagegen,omitempty"`
 	// Legacy fields (read from old configs for migration)
 	OcrModel   string `json:"ocr_model,omitempty"`
 	OcrEnabled *bool  `json:"ocr_enabled,omitempty"`
@@ -648,6 +662,16 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.ExternalPlugins[name] = p
 		}
 		delete(raw, "external_plugins")
+	}
+
+	if _, ok := raw["local_models"]; ok {
+		if cfg.LocalModels == nil {
+			cfg.LocalModels = make(map[string]LocalModelConfig, len(file.LocalModels))
+		}
+		for id, lm := range file.LocalModels {
+			cfg.LocalModels[id] = lm
+		}
+		delete(raw, "local_models")
 	}
 
 	if _, ok := raw["security"]; ok {
@@ -1166,6 +1190,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if len(cfg.ExternalPlugins) > 0 {
 		payload["external_plugins"] = cfg.ExternalPlugins
 	}
+	if len(cfg.LocalModels) > 0 {
+		payload["local_models"] = cfg.LocalModels
+	}
 	if len(cfg.ExtraAllowedPaths) > 0 {
 		seen := make(map[string]struct{}, len(cfg.ExtraAllowedPaths))
 		deduped := cfg.ExtraAllowedPaths[:0:0]
@@ -1223,7 +1250,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" {
 			continue
 		}
 		payload[k] = v
@@ -1436,6 +1463,28 @@ func SaveDiscoveryIgnorePaths(paths []string) error {
 func SaveLocalModelStatus(status string) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.Discovery.LocalModelStatus = status
+		return nil
+	})
+}
+
+// SaveLocalModelConfig persists (creating or updating) one registered local
+// chat model's enabled flag and concurrent-slot limit, using load-modify-write
+// so it cannot clobber a concurrent session's other config.
+func SaveLocalModelConfig(modelID string, enabled bool, maxParallel int) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if cfg.LocalModels == nil {
+			cfg.LocalModels = map[string]LocalModelConfig{}
+		}
+		cfg.LocalModels[modelID] = LocalModelConfig{Enabled: enabled, MaxParallel: maxParallel}
+		return nil
+	})
+}
+
+// DeleteLocalModelConfig removes a registered local chat model entirely
+// (distinct from disabling it — this forgets the MaxParallel setting too).
+func DeleteLocalModelConfig(modelID string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		delete(cfg.LocalModels, modelID)
 		return nil
 	})
 }
