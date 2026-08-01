@@ -47,12 +47,13 @@ func (h *Handler) RunStates() []RunState {
 			return
 		}
 		for _, r := range ag.Runs().Snapshot() {
+			status := r.CurrentStatus()
 			out = append(out, RunState{
 				SessionID: sessionID,
 				ID:        r.ID,
 				Name:      r.Name,
-				Ended:     r.Status != agent.RunRunning,
-				Failed:    r.Status == agent.RunFailed,
+				Ended:     status.IsTerminal(),
+				Failed:    status == agent.RunFailed,
 			})
 		}
 	}

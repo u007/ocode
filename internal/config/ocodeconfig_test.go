@@ -215,6 +215,31 @@ func TestEditorModeLoadSave(t *testing.T) {
 	})
 }
 
+func TestMaxConcurrentAgentsRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	if err := SaveMaxConcurrentAgents(7); err != nil {
+		t.Fatalf("SaveMaxConcurrentAgents failed: %v", err)
+	}
+
+	var cfg Config
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig failed: %v", err)
+	}
+	if cfg.Ocode.MaxConcurrentAgents != 7 {
+		t.Fatalf("MaxConcurrentAgents = %d, want 7", cfg.Ocode.MaxConcurrentAgents)
+	}
+
+	if err := SaveMaxConcurrentAgents(-1); err != nil {
+		t.Fatalf("SaveMaxConcurrentAgents(-1) failed: %v", err)
+	}
+	if err := LoadOcodeConfig(&cfg); err != nil {
+		t.Fatalf("LoadOcodeConfig after normalization failed: %v", err)
+	}
+	if cfg.Ocode.MaxConcurrentAgents != 0 {
+		t.Fatalf("negative MaxConcurrentAgents = %d, want normalized 0", cfg.Ocode.MaxConcurrentAgents)
+	}
+}
+
 func TestIDEModeLoadSave(t *testing.T) {
 	chdirTempForConfigTest(t)
 

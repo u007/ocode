@@ -112,6 +112,18 @@ type Agent struct {
 	runs        *AgentRunRegistry
 	stopCh      chan struct{}
 	stopMu      sync.Mutex
+	// slotRelease, slotMu, nestedTaskCalls, slotPendingReacq back this
+	// agent's reentrant hold on its own concurrency-limiter slot. See
+	// pauseOwnSlotForNestedCall in subagent.go: while this agent is blocked
+	// on its own synchronous "task" dispatch(es), it isn't doing concurrent
+	// work itself, so it must give its slot back to the shared pool —
+	// otherwise a low max_concurrent_agents limit deadlocks against itself
+	// on any synchronous nested dispatch (the child can never get a slot
+	// because the only holders are its own blocked ancestors).
+	slotMu           sync.Mutex
+	slotRelease      func()
+	nestedTaskCalls  int
+	slotPendingReacq bool
 	// redactionRegistry, when non-nil, is used to resolve OCSEC tokens in
 	// tool arguments back to original values before tool execution.
 	redactionRegistry *redact.Registry
@@ -316,6 +328,7 @@ type Agent struct {
 	// that share the main agent's registry.
 	changes *changes.Registry
 }
+
 // ChangedFiles returns the deduplicated sorted list of file paths that
 // have been backed up (modified or created) by this agent's tools.
 // Returns nil if the agent has no snapshot store (should not happen in
@@ -613,6 +626,9 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	}
 	a.procs = tool.NewProcessRegistry()
 	a.runs = NewAgentRunRegistry()
+	if cfg != nil {
+		a.runs.SetMaxConcurrent(cfg.Ocode.MaxConcurrentAgents)
+	}
 	snapDir := a.projectSnapshotsDir()
 	a.snapshotStore = snapshot.NewStore(snapshot.NewAgentID(), snapDir)
 	// Per-session changes registry: aggregates writes from all attached
@@ -3596,6 +3612,83 @@ func (a *Agent) SetSupervisorIDPrefix(prefix string) {
 
 // Runs returns the registry of async subagent runs.
 func (a *Agent) Runs() *AgentRunRegistry { return a.runs }
+
+// pauseOwnSlotForNestedCall marks that a is about to block on one more of
+// its own synchronous "task" dispatches (a acting as the dispatcher of a
+// child subagent). If this is the first such outstanding nested call and a
+// currently holds a concurrency slot (i.e. a was itself dispatched as a
+// tracked subagent), that slot is released back to the shared pool — a is
+// not doing concurrent work while blocked waiting on its child, so holding
+// the slot would only self-deadlock a low max_concurrent_agents limit
+// against a's own descendants. The returned func must be deferred by the
+// caller; once every outstanding nested call has returned, it blocks (via
+// a.runs' shared limiter) to reacquire a's slot before a resumes doing real
+// work. Safe to call on a nil *Agent (no-op).
+func (a *Agent) pauseOwnSlotForNestedCall() func() {
+	if a == nil {
+		return func() {}
+	}
+	a.slotMu.Lock()
+	a.nestedTaskCalls++
+	var toRelease func()
+	if a.nestedTaskCalls == 1 && a.slotRelease != nil {
+		toRelease = a.slotRelease
+		a.slotRelease = nil
+		a.slotPendingReacq = true
+	}
+	a.slotMu.Unlock()
+	if toRelease != nil {
+		toRelease()
+	}
+	return func() {
+		a.slotMu.Lock()
+		a.nestedTaskCalls--
+		needsReacquire := a.nestedTaskCalls == 0 && a.slotPendingReacq
+		if needsReacquire {
+			a.slotPendingReacq = false
+		}
+		a.slotMu.Unlock()
+		if !needsReacquire || a.runs == nil {
+			return
+		}
+		rel, err := a.runs.Acquire(a.StopCh())
+		if err != nil {
+			// Session stopped while waiting to resume; nothing further for
+			// a to do with a slot at this point.
+			return
+		}
+		a.slotMu.Lock()
+		a.slotRelease = rel
+		a.slotMu.Unlock()
+	}
+}
+
+// setOwnSlot records that a now holds the concurrency slot acquired by its
+// dispatcher on its behalf (see AgentRunRegistry.Acquire). Paired with
+// releaseOwnSlot, which the dispatch's own code path must defer.
+func (a *Agent) setOwnSlot(release func()) {
+	if a == nil || release == nil {
+		return
+	}
+	a.slotMu.Lock()
+	a.slotRelease = release
+	a.slotMu.Unlock()
+}
+
+// releaseOwnSlot releases a's own concurrency slot exactly once, if it
+// currently holds one. Safe to call multiple times or on a nil *Agent.
+func (a *Agent) releaseOwnSlot() {
+	if a == nil {
+		return
+	}
+	a.slotMu.Lock()
+	rel := a.slotRelease
+	a.slotRelease = nil
+	a.slotMu.Unlock()
+	if rel != nil {
+		rel()
+	}
+}
 
 // EffectiveTemperature returns the temperature set on the current LLM client,
 // or nil if no explicit temperature is configured (model default applies).

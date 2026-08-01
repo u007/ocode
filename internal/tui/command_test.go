@@ -285,6 +285,25 @@ func TestDrainQueuedCommandsProcessesAllSynchronousCommands(t *testing.T) {
 	}
 }
 
+func TestAgentsStatusIsInstantButLimitChangeQueues(t *testing.T) {
+	m := model{
+		streaming: true,
+		input:     textarea.New(),
+	}
+
+	updated, _ := m.handleCommand("/agents status")
+	got := updated.(*model)
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("/agents status was queued while streaming: %#v", got.queuedItems)
+	}
+
+	updated, _ = got.handleCommand("/agents limit 3")
+	got = updated.(*model)
+	if len(got.queuedItems) != 1 || got.queuedItems[0].text != "/agents limit 3" {
+		t.Fatalf("/agents limit should queue while streaming, got %#v", got.queuedItems)
+	}
+}
+
 func TestDrainQueuedItemsPreservesMixedInputCommandOrder(t *testing.T) {
 	m := model{
 		width:    80,

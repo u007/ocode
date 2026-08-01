@@ -258,6 +258,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 |---------|---------|---------|
 | `/model` | `/m` | Switch LLM provider/model with fuzzy search |
 | `/advisor` | | Set the advisor model for strategic guidance; `advisor.checkpoints` config (default `["plan", "done"]`, set `[]` to disable) makes the agent loop enforce advisor review of first write batches and completion claims |
+| `/agents` | | Show active/queued subagents and the concurrency limit, or set it with `/agents limit <n>` (0 = unlimited; persisted to `ocodeconfig.json`) |
 | `/compact` | `[focus]` | Manually compact context; optional focus guides summary |
 | `/review` | | AI code review of working dir, file, commit, branch, or PR |
 | `/standup` | `/catchup` | Caveman summary of recent commits + pending changes, with sorted TODOs and missed stubs |

@@ -8,6 +8,8 @@
     "/Users/james/www/opencode/packages/llm/src",
     "/Users/james/www/opencode/packages/app",
     "/Users/james/www/opencode/packages/core/src",
-    "/Users/james/www/opencode"
+    "/Users/james/www/opencode",
+    "/Users/james/.cache/terminal-bench/terminal-bench-core/0.1.1",
+    "/Users/james/.cache/uv/archive-v0/HQu-BTwTmwjpzN-urVptz/lib/python3.12/site-packages/terminal_bench/harness"
   ]
 }

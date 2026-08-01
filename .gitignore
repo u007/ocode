@@ -60,6 +60,7 @@ ocodeconfig.json
 # Terminal-Bench build and run artifacts
 bench/terminal_bench/dist/
 bench/terminal_bench/runs/
+bench/**/__pycache__/
 
 # Desktop embedded assets — generated at build time by `make desktop`.
 # The embedded-assets/ dir itself (with .gitkeep) is committed so a bare

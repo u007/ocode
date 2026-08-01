@@ -154,6 +154,10 @@ type OcodeConfig struct {
 	// UndoMaxAgeDelta is the number of agent step increments after which a
 	// snapshot can no longer be undone by undo_file_change. Defaults to 4.
 	UndoMaxAgeDelta int `json:"undo_max_age_delta,omitempty"`
+	// MaxConcurrentAgents caps how many subagents (task tool dispatches) may
+	// run at once; excess dispatches queue until a slot frees up. Defaults to
+	// 2. 0 means unlimited.
+	MaxConcurrentAgents int `json:"max_concurrent_agents"`
 
 	// UploadDir overrides the default directory used by the /upload and
 	// /api/uploads endpoints. When empty, files are stored under
@@ -320,6 +324,7 @@ type ocodeConfigFile struct {
 	RecapModelEnabled   *bool                   `json:"recap_model_enabled,omitempty"`
 	RecapTimeoutSeconds *int                    `json:"recap_timeout_seconds,omitempty"`
 	UndoMaxAgeDelta     *int                    `json:"undo_max_age_delta,omitempty"`
+	MaxConcurrentAgents *int                    `json:"max_concurrent_agents,omitempty"`
 	CommitMsgModel      string                  `json:"commit_msg_model,omitempty"`
 	CommitMsgPrompt     string                  `json:"commit_msg_prompt,omitempty"`
 	TUI                 tuiConfigFile           `json:"tui"`
@@ -379,6 +384,7 @@ func defaultOcodeConfig() OcodeConfig {
 		Discovery:           defaultDiscoveryConfig(),
 		RecapTimeoutSeconds: 120,
 		UndoMaxAgeDelta:     10,
+		MaxConcurrentAgents: 2,
 		TUI:                 defaultTUIConfig(),
 		Ocr:                 ocr.DefaultOcrConfig(),
 		Extra:               make(map[string]json.RawMessage),
@@ -732,6 +738,16 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.UndoMaxAgeDelta = *file.UndoMaxAgeDelta
 		}
 		delete(raw, "undo_max_age_delta")
+	}
+
+	if _, ok := raw["max_concurrent_agents"]; ok {
+		// Unlike most int settings, 0 is a valid explicit value here (means
+		// unlimited), so apply whenever the key is present rather than
+		// gating on > 0.
+		if file.MaxConcurrentAgents != nil {
+			cfg.MaxConcurrentAgents = *file.MaxConcurrentAgents
+		}
+		delete(raw, "max_concurrent_agents")
 	}
 
 	if _, ok := raw["memory_enabled"]; ok {
@@ -1195,6 +1211,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	if cfg.UndoMaxAgeDelta > 0 {
 		payload["undo_max_age_delta"] = cfg.UndoMaxAgeDelta
 	}
+	// Always written (unlike the other max_* settings): 0 is a meaningful
+	// explicit value (unlimited), not "unset", so it must round-trip.
+	payload["max_concurrent_agents"] = cfg.MaxConcurrentAgents
 	if cfg.UploadDir != "" {
 		payload["upload_dir"] = cfg.UploadDir
 	}
@@ -1267,6 +1286,18 @@ func SaveOcodePermissions(permissions PermissionConfig) error {
 func SaveMaxSteps(n int) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.MaxSteps = n
+		return nil
+	})
+}
+
+// SaveMaxConcurrentAgents persists the max-concurrent-subagents limit.
+// n <= 0 is stored as 0, meaning unlimited.
+func SaveMaxConcurrentAgents(n int) error {
+	if n < 0 {
+		n = 0
+	}
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.MaxConcurrentAgents = n
 		return nil
 	})
 }

@@ -97,6 +97,21 @@ func (m *blockingToolCallClient) Chat(messages []Message, tools []map[string]int
 func (m *blockingToolCallClient) GetProvider() string { return "mock" }
 func (m *blockingToolCallClient) GetModel() string    { return "mock-model" }
 
+// blockingReleaseClient blocks every Chat call until release is closed, then
+// returns a plain assistant message (no tool calls). Safe for concurrent
+// calls from multiple subagents sharing the same client.
+type blockingReleaseClient struct {
+	release chan struct{}
+}
+
+func (c *blockingReleaseClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
+	<-c.release
+	return &Message{Role: "assistant", Content: "done"}, nil
+}
+
+func (c *blockingReleaseClient) GetProvider() string { return "mock" }
+func (c *blockingReleaseClient) GetModel() string    { return "mock-model" }
+
 type panicClient struct{}
 
 func (p *panicClient) Chat(messages []Message, tools []map[string]interface{}) (*Message, error) {
@@ -205,6 +220,51 @@ func TestTaskToolBackgroundRunUnexpectedStopMarksFailed(t *testing.T) {
 	t.Fatal("background run never reached failed state")
 }
 
+func TestTaskToolBackgroundRunQueuesBeyondMaxConcurrent(t *testing.T) {
+	client := &blockingReleaseClient{release: make(chan struct{})}
+	a := NewAgent(client, nil, nil, nil)
+	a.Runs().SetMaxConcurrent(1)
+	taskTool, ok := a.tools["task"].(*TaskTool)
+	if !ok {
+		t.Fatalf("task tool type = %T", a.tools["task"])
+	}
+
+	if _, err := taskTool.Execute([]byte(`{"prompt":"one","run_in_background":true}`)); err != nil {
+		t.Fatalf("Execute 1 err: %v", err)
+	}
+	if _, err := taskTool.Execute([]byte(`{"prompt":"two","run_in_background":true}`)); err != nil {
+		t.Fatalf("Execute 2 err: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if a.Runs().RunningCount() == 1 && a.Runs().QueuedCount() == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if running, queued := a.Runs().RunningCount(), a.Runs().QueuedCount(); running != 1 || queued != 1 {
+		t.Fatalf("running=%d queued=%d, want running=1 queued=1 (second dispatch should be blocked behind the limit)", running, queued)
+	}
+
+	close(client.release)
+
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		done := 0
+		for _, run := range a.Runs().Snapshot() {
+			if run.statusValue() == RunDone {
+				done++
+			}
+		}
+		if done == 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("both background runs never completed after release")
+}
+
 func TestNestedSubAgentPermissionAskCascadesToMainThread(t *testing.T) {
 	childTask := ToolCall{ID: "call-child-task", Type: "function"}
 	childTask.Function.Name = "task"
@@ -293,6 +353,48 @@ func TestNestedSubagentPermissionCallbackCascades(t *testing.T) {
 	}
 	if !strings.Contains(joined, "parent complete") {
 		t.Fatalf("expected final parent response, got %q", joined)
+	}
+}
+
+// TestNestedSyncTaskDispatchDoesNotDeadlockUnderMaxConcurrentAgentsOne
+// guards against a specific self-deadlock: with max_concurrent_agents=1, a
+// synchronous "task" dispatch chain (root -> child -> grandchild) must not
+// hang forever waiting for a concurrency slot that only the chain's own
+// blocked ancestors hold. The root blocks on the child, which blocks on the
+// grandchild — at every instant only the innermost call is doing real work,
+// so the chain must be able to borrow back its single slot rather than
+// deadlock against itself (see Agent.pauseOwnSlotForNestedCall).
+func TestNestedSyncTaskDispatchDoesNotDeadlockUnderMaxConcurrentAgentsOne(t *testing.T) {
+	mkToolCall := func(id, name, args string) ToolCall {
+		tc := ToolCall{ID: id, Type: "function"}
+		tc.Function.Name = name
+		tc.Function.Arguments = args
+		return tc
+	}
+	client := &MockToolClient{responses: []*Message{
+		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-root-task", "task", `{"prompt":"spawn child","agent":"general"}`)}},
+		{Role: "assistant", ToolCalls: []ToolCall{mkToolCall("call-child-task", "task", `{"prompt":"spawn grandchild","agent":"general"}`)}},
+		{Role: "assistant", Content: "grandchild done"},
+		{Role: "assistant", Content: "child done"},
+		{Role: "assistant", Content: "root done"},
+	}}
+	a := NewAgent(client, nil, nil, nil)
+	a.Permissions().SetRule("task", PermissionAllow)
+	a.Runs().SetMaxConcurrent(1)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.Step([]Message{{Role: "user", Content: "start"}})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Step err: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Step deadlocked: nested synchronous task dispatch never completed under max_concurrent_agents=1")
 	}
 }
 

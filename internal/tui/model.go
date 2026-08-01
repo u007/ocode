@@ -3604,7 +3604,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// result splice against the wrong (or nil) mapping, silently discarding
 		// it. pendingCompactUIIdx is set synchronously at compaction start, so
 		// it covers the whole window (including before compactStartedMsg lands).
-		if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 {
+		if m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0 || m.showPermDialog {
 			m.pendingJobMsgs = append(m.pendingJobMsgs, injected)
 		} else {
 			m.messages = append(m.messages, message{
@@ -7041,6 +7041,12 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/image" ||
 		cmd == "/cron" ||
 		cmd == "/goal"
+	// Agent status is a local inspection command and must remain usable while
+	// the stream is busy. Changing the persistent limit is deliberately queued,
+	// like the other mid-stream state mutations.
+	if cmd == "/agents" && (len(args) == 0 || args[0] == "status") {
+		isInstantCmd = true
+	}
 	if (m.streaming || m.compacting || len(m.pendingCompactUIIdx) > 0) && !isExitCmd && !isInstantCmd {
 		m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemCommand, text: text})
 		m.input.Reset()
@@ -7143,7 +7149,7 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 // the LLM until the answer is submitted (submitQuestionAnswers calls
 // askAgent again, which fires a later streamDoneMsg that processes the queue).
 func (m *model) queueDrainBlocked() bool {
-	return m.showQuestionDialog
+	return m.showQuestionDialog || m.showPermDialog
 }
 
 func (m *model) drainQueuedItems() (tea.Cmd, bool) {
@@ -9625,6 +9631,101 @@ func (m *model) handleMaxStepCmd(args []string) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Max steps set to 0 (unlimited — default cap of 100 steps applies).\nPersisted to config."})
 	} else {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Max steps set to %d.\nPersisted to config.", n)})
+	}
+}
+
+// handleAgentsCmd routes /agents [status|limit <n>]. With no args it shows
+// the current concurrency limit plus every running/queued subagent.
+func (m *model) handleAgentsCmd(args []string) {
+	if len(args) == 0 || strings.EqualFold(args[0], "status") {
+		m.showAgentsStatus()
+		return
+	}
+	switch strings.ToLower(args[0]) {
+	case "limit":
+		m.handleAgentsLimitCmd(args[1:])
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /agents [status|limit <n>]"})
+	}
+}
+
+func (m *model) showAgentsStatus() {
+	var b strings.Builder
+	b.WriteString("⚙ Agents\n")
+	b.WriteString(strings.Repeat("─", 30) + "\n\n")
+
+	limit := 0
+	var running, queued int
+	var active []*agent.AgentRun
+	if m.agent != nil && m.agent.Runs() != nil {
+		limit = m.agent.Runs().MaxConcurrent()
+		running = m.agent.Runs().RunningCount()
+		queued = m.agent.Runs().QueuedCount()
+		for _, run := range m.agent.Runs().Snapshot() {
+			if run.Status == agent.RunRunning || run.Status == agent.RunQueued {
+				active = append(active, run)
+			}
+		}
+	} else if m.config != nil {
+		limit = m.config.Ocode.MaxConcurrentAgents
+	}
+
+	if limit == 0 {
+		b.WriteString("Concurrency limit: unlimited\n")
+	} else {
+		b.WriteString(fmt.Sprintf("Concurrency limit: %d\n", limit))
+	}
+	b.WriteString(fmt.Sprintf("Active: %d running, %d queued\n\n", running, queued))
+
+	if len(active) == 0 {
+		b.WriteString("No subagents currently active.\n")
+	} else {
+		for _, run := range active {
+			elapsed := time.Since(run.StartedAt).Round(time.Second)
+			b.WriteString(fmt.Sprintf("  [%s] %s — %s (%s)\n", run.Status, run.Name, run.ID, elapsed))
+		}
+	}
+	b.WriteString("\nUsage: /agents limit <n>   — set max concurrent subagents (0 = unlimited)\n")
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m *model) handleAgentsLimitCmd(args []string) {
+	if len(args) == 0 {
+		limit := 0
+		if m.agent != nil && m.agent.Runs() != nil {
+			limit = m.agent.Runs().MaxConcurrent()
+		} else if m.config != nil {
+			limit = m.config.Ocode.MaxConcurrentAgents
+		}
+		status := fmt.Sprintf("%d", limit)
+		if limit == 0 {
+			status = "0 (unlimited)"
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Max concurrent agents: %s\n\nUsage: /agents limit <n>   — 0 = unlimited", status)})
+		return
+	}
+
+	n, err := strconv.Atoi(args[0])
+	if err != nil || n < 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Invalid number: %q. Please provide a non-negative integer (0 = unlimited).", args[0])})
+		return
+	}
+
+	if m.agent != nil && m.agent.Runs() != nil {
+		m.agent.Runs().SetMaxConcurrent(n)
+	}
+	if m.config != nil {
+		m.config.Ocode.MaxConcurrentAgents = n
+	}
+	if err := config.SaveMaxConcurrentAgents(n); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to persist agent concurrency limit: %v (in-memory value still active for this session)", err)})
+		return
+	}
+
+	if n == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Max concurrent agents set to 0 (unlimited).\nPersisted to config."})
+	} else {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Max concurrent agents set to %d. Excess subagent dispatches will queue.\nPersisted to config.", n)})
 	}
 }
 

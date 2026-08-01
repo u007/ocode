@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -11,6 +12,11 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
+// ErrAgentQueueCancelled is returned by AgentRunRegistry.Acquire when the
+// caller's stop channel closes while a dispatch is still waiting for a
+// concurrency slot.
+var ErrAgentQueueCancelled = errors.New("agent dispatch cancelled while queued")
+
 // RunStatus is the lifecycle state of an async subagent run.
 type RunStatus string
 
@@ -19,10 +25,26 @@ const (
 	RunDone      RunStatus = "done"
 	RunFailed    RunStatus = "failed"
 	RunCancelled RunStatus = "cancelled"
+	// RunQueued means the run is registered but waiting for a concurrency
+	// slot (see AgentRunRegistry.Acquire) before its subagent actually
+	// starts stepping.
+	RunQueued RunStatus = "queued"
 )
+
+// IsActive reports whether a run can still start or is currently executing.
+// Queued runs are active and must not be pruned or reported as finished.
+func (s RunStatus) IsActive() bool {
+	return s == RunRunning || s == RunQueued
+}
+
+// IsTerminal reports whether a run has reached a final state.
+func (s RunStatus) IsTerminal() bool {
+	return s == RunDone || s == RunFailed || s == RunCancelled
+}
 
 // transcriptCap bounds the per-run stored message count.
 const transcriptCap = 200
+
 // AgentRun is one async subagent execution.
 type AgentRun struct {
 	ID         string
@@ -106,6 +128,10 @@ func (r *AgentRun) statusValue() RunStatus {
 	return r.Status
 }
 
+// CurrentStatus returns the run status under its mutex. Consumers outside the
+// agent package should use this accessor rather than reading Status directly.
+func (r *AgentRun) CurrentStatus() RunStatus { return r.statusValue() }
+
 func (r *AgentRun) appendTranscript(m Message) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -170,13 +196,14 @@ func (r *AgentRun) finishErr(err string) {
 	r.closeDone()
 }
 
-// tryFinishCancelled marks the run as Cancelled only if it is still Running.
-// Used by CancelAll and CancelOwned so the TUI reflects the cancelled state
-// immediately, without racing with the goroutine that may call finishOK later.
+// tryFinishCancelled marks the run as Cancelled only if it is still Running
+// or Queued. Used by CancelAll and CancelOwned so the TUI reflects the
+// cancelled state immediately, without racing with the goroutine that may
+// call finishOK later.
 func (r *AgentRun) tryFinishCancelled() {
 	r.mu.Lock()
 	cancelled := false
-	if r.Status == RunRunning {
+	if r.Status == RunRunning || r.Status == RunQueued {
 		r.Status = RunCancelled
 		r.Err = "cancelled"
 		r.EndedAt = time.Now()
@@ -186,6 +213,33 @@ func (r *AgentRun) tryFinishCancelled() {
 	if cancelled {
 		r.closeDone()
 	}
+}
+
+// markQueued transitions a freshly-created run into the Queued state while
+// it waits for a concurrency slot from AgentRunRegistry.Acquire.
+func (r *AgentRun) markQueued() {
+	r.mu.Lock()
+	if r.Status == RunRunning {
+		r.Status = RunQueued
+	}
+	r.mu.Unlock()
+}
+
+// beginExecution transitions a queued run back to Running once it has
+// acquired a concurrency slot. It returns false if cancellation won the race
+// while the run was queued. Unlimited runs begin in Running and are accepted
+// here as well.
+func (r *AgentRun) beginExecution() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	switch r.Status {
+	case RunQueued:
+		r.Status = RunRunning
+		return true
+	case RunRunning:
+		return true
+	}
+	return false
 }
 
 // MarkRetrying records that the run is being retried after an error.
@@ -211,6 +265,118 @@ func (r *AgentRun) IsRetrying() bool {
 	return r.RetryCount > 0 && r.Status == RunRunning
 }
 
+// agentConcurrencyLimiter is the shared semaphore behind AgentRunRegistry's
+// concurrency gating. It is a separate object (rather than plain fields on
+// AgentRunRegistry) so multiple registries — one per Agent instance, main or
+// sub — can share a single pool of slots via ShareLimiterFrom. Without this
+// indirection, every subagent's fresh AgentRunRegistry would enforce its own
+// independent cap, letting the true number of concurrently active agents
+// multiply with nesting depth instead of respecting one session-wide limit.
+type agentConcurrencyLimiter struct {
+	mu      sync.Mutex
+	max     int
+	holders int
+	queued  int
+	changed chan struct{}
+}
+
+func (l *agentConcurrencyLimiter) setMax(n int) {
+	if n < 0 {
+		n = 0
+	}
+	l.mu.Lock()
+	l.max = n
+	l.broadcastLocked()
+	l.mu.Unlock()
+}
+
+func (l *agentConcurrencyLimiter) getMax() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.max
+}
+
+func (l *agentConcurrencyLimiter) getQueued() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.queued
+}
+
+func (l *agentConcurrencyLimiter) acquire(stopCh <-chan struct{}) (func(), error) {
+	// Check cancellation before admission, including the unlimited path. This
+	// matters during Agent.Shutdown: an old dispatch must not be admitted just
+	// because the configured limit is zero.
+	if isClosed(stopCh) {
+		return nil, ErrAgentQueueCancelled
+	}
+
+	l.mu.Lock()
+	waiting := false
+	for {
+		if isClosed(stopCh) {
+			if waiting {
+				l.queued--
+			}
+			l.mu.Unlock()
+			return nil, ErrAgentQueueCancelled
+		}
+		if l.max == 0 || l.holders < l.max {
+			if waiting {
+				l.queued--
+			}
+			l.holders++
+			l.mu.Unlock()
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					l.mu.Lock()
+					if l.holders > 0 {
+						l.holders--
+					}
+					l.broadcastLocked()
+					l.mu.Unlock()
+				})
+			}, nil
+		}
+		if !waiting {
+			l.queued++
+			waiting = true
+		}
+		changed := l.changed
+		l.mu.Unlock()
+		select {
+		case <-stopCh:
+		case <-changed:
+		}
+		l.mu.Lock()
+	}
+}
+
+// broadcastLocked wakes every waiter after a limit or holder change. Closing
+// and replacing the notification channel avoids lost wakeups while retaining
+// all existing holders; unlike replacing a semaphore channel, live resizing
+// cannot strand waiters or lose accounting.
+func (l *agentConcurrencyLimiter) broadcastLocked() {
+	if l.changed == nil {
+		l.changed = make(chan struct{})
+		return
+	}
+	close(l.changed)
+	l.changed = make(chan struct{})
+}
+
+func isClosed(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
 // AgentRunRegistry holds the main agent's async subagent runs.
 type AgentRunRegistry struct {
 	mu      sync.Mutex
@@ -218,12 +384,61 @@ type AgentRunRegistry struct {
 	order   []string
 	counter int
 	onDone  func(*AgentRun)
+
+	// limiter caps how many dispatches (across this registry AND any
+	// registries it shares the limiter with, see ShareLimiterFrom) may hold
+	// a slot at once. Every registry gets its own private limiter by
+	// default; TaskTool.Execute reassigns a subagent's limiter to its
+	// dispatcher's so the whole call tree respects one session-wide cap.
+	limiter *agentConcurrencyLimiter
 }
 
 func NewAgentRunRegistry() *AgentRunRegistry {
 	return &AgentRunRegistry{
-		runs: make(map[string]*AgentRun),
+		runs:    make(map[string]*AgentRun),
+		limiter: &agentConcurrencyLimiter{},
 	}
+}
+
+// ShareLimiterFrom makes r draw concurrency slots from the same pool as
+// parent, so dispatches through r count against parent's (and everyone
+// else's who shares that same limiter) cap instead of getting an
+// independent allowance. Must be called before any Acquire on r; typically
+// right after a subagent's AgentRunRegistry is constructed and before its
+// Step loop starts.
+func (r *AgentRunRegistry) ShareLimiterFrom(parent *AgentRunRegistry) {
+	if parent == nil || parent.limiter == nil {
+		return
+	}
+	r.limiter = parent.limiter
+}
+
+// SetMaxConcurrent sets the concurrency limit for Acquire calls. n<=0 means
+// unlimited. Existing holders remain accounted for when the limit changes, and
+// blocked waiters are re-evaluated immediately. Since the limiter may be
+// shared (see ShareLimiterFrom), this affects every registry sharing it.
+func (r *AgentRunRegistry) SetMaxConcurrent(n int) {
+	r.limiter.setMax(n)
+}
+
+// MaxConcurrent returns the current concurrency limit (0 = unlimited).
+func (r *AgentRunRegistry) MaxConcurrent() int {
+	return r.limiter.getMax()
+}
+
+// QueuedCount returns the number of dispatches currently blocked in Acquire
+// waiting for a concurrency slot, across every registry sharing this limiter.
+func (r *AgentRunRegistry) QueuedCount() int {
+	return r.limiter.getQueued()
+}
+
+// Acquire blocks until a concurrency slot is available, then returns a
+// release func the caller must invoke exactly once when done. If no limit is
+// configured (SetMaxConcurrent(0) or never called), it returns immediately
+// with a no-op release. stopCh, if non-nil, aborts the wait with
+// ErrAgentQueueCancelled when closed.
+func (r *AgentRunRegistry) Acquire(stopCh <-chan struct{}) (func(), error) {
+	return r.limiter.acquire(stopCh)
 }
 
 func (r *AgentRunRegistry) SetOnDone(fn func(*AgentRun)) {
@@ -273,7 +488,7 @@ func (r *AgentRunRegistry) pruneCompletedLocked(keepMax int) int {
 	}
 	var completed []entry
 	for id, run := range r.runs {
-		if run.statusValue() != RunRunning {
+		if run.statusValue().IsTerminal() {
 			completed = append(completed, entry{id: id, end: run.EndedAt})
 		}
 	}
@@ -343,7 +558,7 @@ func (r *AgentRunRegistry) CancelOwned(taskID, dispatcher string) error {
 	if run.Dispatcher != dispatcher {
 		return fmt.Errorf("task %s is not owned by %q", taskID, dispatcher)
 	}
-	if run.statusValue() != RunRunning {
+	if status := run.statusValue(); status != RunRunning && status != RunQueued {
 		return nil // already terminal; no-op
 	}
 	if run.Cancel != nil {
@@ -363,7 +578,7 @@ func (r *AgentRunRegistry) CancelAll() {
 	}
 	r.mu.Unlock()
 	for _, run := range runs {
-		if run.statusValue() != RunRunning {
+		if !run.statusValue().IsActive() {
 			continue
 		}
 		if run.Cancel != nil {

@@ -292,6 +292,16 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	subAgent := NewAgent(t.mainAgent.client, tools, t.mainAgent.config, t.mainAgent.lspMgr)
+	// Draw concurrency slots from the same pool as the dispatcher instead of
+	// NewAgent's fresh per-agent default. Without this, max_concurrent_agents
+	// only caps direct dispatches at each nesting level independently, and
+	// the true number of agents active at once can multiply with nesting
+	// depth (e.g. 2 top-level subagents each dispatching 2 more = 4 active).
+	// Must happen before subAgent's Step loop can call Acquire, i.e. before
+	// this function returns control to subAgent.
+	if t.runs != nil && subAgent.runs != nil {
+		subAgent.runs.ShareLimiterFrom(t.runs)
+	}
 	// Share the parent's snapshot store so file writes flow to the same
 	// store that the TUI sidebar reads from. Without this, every sub-agent
 	// creates its own isolated store (via NewAgent → NewStore), and the
@@ -427,29 +437,85 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		}
 		attachRunTranscript(run)
 
-	go func() {
-		// Tear down the transient sub-agent's goroutines once this background
-		// run reaches a terminal state. The AgentRun record (transcript +
-		// result + run.Sub for ModelLabel) is retained so status/resume still
-		// work, but the two maintenance-worker goroutines no longer leak. This
-		// mirrors the synchronous path's shutdownTransient; it must only run
-		// AFTER completion — never while the agent is still running, or it
-		// would Cancel() and abort the run.
-		defer subAgent.shutdownTransient()
-		result, err := t.executeSubAgent(spec.Name, subAgent, subAgentMsgs)
-		if err != nil {
-			run.finishErr(err.Error())
-			t.runs.notifyDone(run)
-			return
+		// Only surface a Queued state when a concurrency limit is actually
+		// configured — otherwise Acquire below is a no-op and the run goes
+		// straight to Running, same as before this limiter existed.
+		limited := t.runs.MaxConcurrent() > 0
+		if limited {
+			run.markQueued()
 		}
-		run.finishOK(result)
-		t.runs.notifyDone(run)
-	}()
+		var stopCh <-chan struct{}
+		if t.mainAgent != nil {
+			stopCh = t.mainAgent.StopCh()
+		}
+		runs := t.runs
 
-		return fmt.Sprintf("task_id: %s (agent: %s)\nstate: running\n\n<task_result>\nBackground task started. Poll with task_status or agent_status.\n</task_result>", run.ID, spec.Name), nil
+		go func() {
+			// Tear down the transient sub-agent's goroutines once this background
+			// run reaches a terminal state. The AgentRun record (transcript +
+			// result + run.Sub for ModelLabel) is retained so status/resume still
+			// work, but the two maintenance-worker goroutines no longer leak. This
+			// mirrors the synchronous path's shutdownTransient; it must only run
+			// AFTER completion — never while the agent is still running, or it
+			// would Cancel() and abort the run.
+			defer subAgent.shutdownTransient()
+
+			// Wait for a concurrency slot (no-op when unlimited). If the session
+			// is cancelled while this dispatch is still queued, stopCh closes and
+			// we bail without ever starting the sub-agent.
+			release, aerr := runs.Acquire(stopCh)
+			if aerr != nil {
+				run.tryFinishCancelled()
+				runs.notifyDone(run)
+				return
+			}
+			// Own the slot via subAgent (not a bare defer) so that if subAgent
+			// itself dispatches further nested "task" calls, it can temporarily
+			// hand this slot back to the shared pool instead of self-deadlocking
+			// (see Agent.pauseOwnSlotForNestedCall).
+			subAgent.setOwnSlot(release)
+			defer subAgent.releaseOwnSlot()
+			// task_cancel or session shutdown may have cancelled this specific run
+			// while it was queued (CancelOwned marks Queued runs Cancelled too);
+			// honor that instead of starting work the caller already gave up on.
+			// Re-check the stop channel after Acquire as well: cancellation can race
+			// with the final slot admission, including when the limit is unlimited.
+			if run.statusValue() == RunCancelled || isClosed(stopCh) {
+				run.tryFinishCancelled()
+				runs.notifyDone(run)
+				return
+			}
+			if !run.beginExecution() {
+				runs.notifyDone(run)
+				return
+			}
+
+			result, err := t.executeSubAgent(spec.Name, subAgent, subAgentMsgs)
+			if err != nil {
+				run.finishErr(err.Error())
+				runs.notifyDone(run)
+				return
+			}
+			run.finishOK(result)
+			runs.notifyDone(run)
+		}()
+
+		state := "running"
+		if limited {
+			state = "queued"
+		}
+		return fmt.Sprintf("task_id: %s (agent: %s)\nstate: %s\n\n<task_result>\nBackground task started. Poll with task_status or agent_status.\n</task_result>", run.ID, spec.Name, state), nil
 	}
 
-	// Synchronous mode
+	// Synchronous mode. t.mainAgent is about to block on subAgent's full
+	// execution, so it isn't doing concurrent work itself for the duration —
+	// hand its own concurrency slot (if it holds one) back to the shared
+	// pool for the duration of this call, otherwise a low
+	// max_concurrent_agents limit would deadlock against t.mainAgent's own
+	// blocked ancestors on any synchronous nested dispatch.
+	resumeMainSlot := t.mainAgent.pauseOwnSlotForNestedCall()
+	defer resumeMainSlot()
+
 	var run *AgentRun
 	if t.runs != nil {
 		run = t.runs.New(spec.Name)
@@ -460,6 +526,30 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 			run.Dispatcher = t.mainAgent.spec.Name
 		}
 		attachRunTranscript(run)
+
+		if t.runs.MaxConcurrent() > 0 {
+			run.markQueued()
+		}
+		var stopCh <-chan struct{}
+		if t.mainAgent != nil {
+			stopCh = t.mainAgent.StopCh()
+		}
+		release, aerr := t.runs.Acquire(stopCh)
+		if aerr != nil {
+			run.tryFinishCancelled()
+			return "", aerr
+		}
+		if run.statusValue() == RunCancelled || isClosed(stopCh) {
+			release()
+			run.tryFinishCancelled()
+			return "", fmt.Errorf("task cancelled while queued")
+		}
+		if !run.beginExecution() {
+			release()
+			return "", fmt.Errorf("task cancelled while queued")
+		}
+		subAgent.setOwnSlot(release)
+		defer subAgent.releaseOwnSlot()
 	}
 	// Each synchronous sub-agent dispatch builds a fresh Agent with two
 	// maintenance-worker goroutines (memory + doc) that would otherwise leak

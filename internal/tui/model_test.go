@@ -4285,6 +4285,49 @@ func TestAgentDetailClickOpensNestedSubAgent(t *testing.T) {
 	}
 }
 
+// TestAgentDetailClickOpensImmediateChildNotGrandchild guards against a
+// regression where clicking a sub-agent card's own header row (not its
+// nested grandchild content) opened the deepest-nested descendant instead
+// of the immediate child, because row-range metadata for nested blocks
+// drifted by one row per ancestor level.
+func TestAgentDetailClickOpensImmediateChildNotGrandchild(t *testing.T) {
+	a := agent.NewAgent(nil, nil, nil, nil)
+	root := a.Runs().New("root")
+	root.Sub = agent.NewAgent(nil, nil, nil, nil)
+	child := root.Sub.Runs().New("child")
+	child.Sub = agent.NewAgent(nil, nil, nil, nil)
+	grandchild := child.Sub.Runs().New("grandchild")
+	setRunTranscriptForTest(root, agent.Message{Role: "assistant", Content: "root"})
+	setRunTranscriptForTest(child, agent.Message{Role: "assistant", Content: "child"})
+	setRunTranscriptForTest(grandchild, agent.Message{Role: "assistant", Content: "grandchild"})
+
+	m := model{ready: true, width: 100, height: 28, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
+	m.openAgentDetail(root.ID)
+	top := m.detail[len(m.detail)-1]
+
+	// Find the actual rendered row of the child's header line (not the
+	// bookkeeping rowStart, which is exactly what the drift bug corrupts).
+	row := -1
+	for i, line := range top.rawLines {
+		if strings.Contains(line, "▾ child") {
+			row = i
+			break
+		}
+	}
+	if row < 0 {
+		t.Fatal("expected to find rendered child header line")
+	}
+
+	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 2, Y: m.detailViewportContentTopY() + row})
+	got := derefTestModel(t, updated)
+	if len(got.detail) < 2 {
+		t.Fatal("expected clicking child run to push nested detail view")
+	}
+	if gotID := got.detail[len(got.detail)-1].runID; gotID != child.ID {
+		t.Fatalf("expected clicking child header to open immediate child %q, got %q", child.ID, gotID)
+	}
+}
+
 func TestMouseWheelScrollsAgentDetailViewport(t *testing.T) {
 	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
@@ -5552,6 +5595,64 @@ func TestHandleNewCmdClearsTelemetry(t *testing.T) {
 	}
 	if m.sessionTelemetry.usedTokens() != 0 || m.sessionTelemetry.spend != nil {
 		t.Fatalf("expected telemetry to clear on new session, got %#v", m.sessionTelemetry)
+	}
+}
+
+func TestHandleNewCmdCancelsOldRunningAndQueuedAgentsBeforeAdmission(t *testing.T) {
+	oldAgent := agent.NewAgent(nil, nil, &config.Config{Ocode: config.OcodeConfig{MaxConcurrentAgents: 1}}, nil)
+	newAgentReady := false
+	t.Cleanup(func() {
+		oldAgent.Shutdown()
+	})
+
+	// Occupy the old session's only slot, then create a queued run whose
+	// admission goroutine would represent the subagent's real start boundary.
+	hold, err := oldAgent.Runs().Acquire(nil)
+	if err != nil {
+		t.Fatalf("acquire old session holder: %v", err)
+	}
+	queued := oldAgent.Runs().New("old-queued")
+	queued.Status = agent.RunQueued
+	started := make(chan struct{})
+	go func() {
+		release, err := oldAgent.Runs().Acquire(oldAgent.StopCh())
+		if err != nil {
+			return
+		}
+		defer release()
+		if queued.CurrentStatus() == agent.RunCancelled {
+			return
+		}
+		close(started)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for oldAgent.Runs().QueuedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if oldAgent.Runs().QueuedCount() == 0 {
+		hold()
+		t.Fatal("old queued agent did not reach the admission wait")
+	}
+
+	running := oldAgent.Runs().New("old-running")
+	running.Cancel = func() { newAgentReady = true }
+	m := model{agent: oldAgent}
+	m.handleNewCmd(nil)
+	hold()
+	if m.agent == nil || m.agent == oldAgent {
+		t.Fatal("/new did not install a new agent")
+	}
+	t.Cleanup(func() { m.agent.Shutdown() })
+	if !newAgentReady {
+		t.Fatal("/new did not cancel the old running agent")
+	}
+	select {
+	case <-started:
+		t.Fatal("old queued agent crossed the admission boundary after /new")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := queued.CurrentStatus(); got != agent.RunCancelled {
+		t.Fatalf("old queued run status = %s, want %s", got, agent.RunCancelled)
 	}
 }
 

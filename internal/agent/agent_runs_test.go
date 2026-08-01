@@ -3,6 +3,7 @@ package agent
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAgentRunRegistryLifecycle(t *testing.T) {
@@ -218,6 +219,241 @@ func TestCancelAllMarksRunCancelled(t *testing.T) {
 	}
 }
 
+func TestAgentRunRegistryAcquireUnlimited(t *testing.T) {
+	r := NewAgentRunRegistry()
+	release, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("Acquire err: %v", err)
+	}
+	release()
+	if r.QueuedCount() != 0 {
+		t.Fatalf("QueuedCount = %d, want 0", r.QueuedCount())
+	}
+}
+
+func TestAgentRunRegistryAcquireUnlimitedHonorsCancellation(t *testing.T) {
+	r := NewAgentRunRegistry()
+	stopCh := make(chan struct{})
+	close(stopCh)
+	if _, err := r.Acquire(stopCh); err != ErrAgentQueueCancelled {
+		t.Fatalf("unlimited Acquire err = %v, want ErrAgentQueueCancelled", err)
+	}
+}
+
+func TestAgentRunRegistryAcquireQueues(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.SetMaxConcurrent(1)
+
+	release1, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("first Acquire err: %v", err)
+	}
+
+	acquired := make(chan struct{})
+	go func() {
+		release2, err := r.Acquire(nil)
+		if err != nil {
+			t.Errorf("second Acquire err: %v", err)
+			return
+		}
+		close(acquired)
+		release2()
+	}()
+
+	// Give the second Acquire time to start blocking behind the held slot.
+	for i := 0; i < 100 && r.QueuedCount() == 0; i++ {
+		time.Sleep(time.Millisecond)
+	}
+	if r.QueuedCount() != 1 {
+		t.Fatalf("QueuedCount while blocked = %d, want 1", r.QueuedCount())
+	}
+	select {
+	case <-acquired:
+		t.Fatal("second Acquire returned before the first slot was released")
+	default:
+	}
+
+	release1()
+
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Acquire never unblocked after release")
+	}
+}
+
+func TestAgentRunRegistryAcquireCancelledByStopCh(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.SetMaxConcurrent(1)
+	release1, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("first Acquire err: %v", err)
+	}
+	defer release1()
+
+	stopCh := make(chan struct{})
+	close(stopCh)
+	_, err = r.Acquire(stopCh)
+	if err != ErrAgentQueueCancelled {
+		t.Fatalf("Acquire err = %v, want ErrAgentQueueCancelled", err)
+	}
+}
+
+func TestAgentRunRegistryResizingPreservesHoldersAndWakesWaiters(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.SetMaxConcurrent(1)
+	release1, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("first Acquire err: %v", err)
+	}
+
+	acquired := make(chan struct{})
+	go func() {
+		release, err := r.Acquire(nil)
+		if err != nil {
+			t.Errorf("waiting Acquire err: %v", err)
+			return
+		}
+		close(acquired)
+		release()
+	}()
+	waitForQueued(t, r)
+
+	// Increasing the limit must wake the waiter even though the first holder
+	// was acquired before the resize.
+	r.SetMaxConcurrent(2)
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter was stranded after increasing the limit")
+	}
+	release1()
+}
+
+func TestAgentRunRegistryResizingAccountsExistingHolders(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.SetMaxConcurrent(2)
+	release1, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("first Acquire err: %v", err)
+	}
+	release2, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("second Acquire err: %v", err)
+	}
+	defer release2()
+
+	r.SetMaxConcurrent(1)
+	acquired := make(chan struct{})
+	go func() {
+		release, err := r.Acquire(nil)
+		if err != nil {
+			t.Errorf("waiting Acquire err: %v", err)
+			return
+		}
+		close(acquired)
+		release()
+	}()
+	waitForQueued(t, r)
+	select {
+	case <-acquired:
+		t.Fatal("waiter exceeded the reduced limit while two holders remained")
+	default:
+	}
+	release1()
+	select {
+	case <-acquired:
+		t.Fatal("waiter exceeded the reduced limit while one existing holder remained")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release2()
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter was stranded after existing holders released")
+	}
+}
+
+func TestAgentRunRegistryUnlimitedToFiniteCountsExistingHolders(t *testing.T) {
+	r := NewAgentRunRegistry()
+	release1, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("first Acquire err: %v", err)
+	}
+	release2, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("second Acquire err: %v", err)
+	}
+	r.SetMaxConcurrent(1)
+
+	acquired := make(chan struct{})
+	go func() {
+		release, err := r.Acquire(nil)
+		if err != nil {
+			t.Errorf("waiting Acquire err: %v", err)
+			return
+		}
+		close(acquired)
+		release()
+	}()
+	waitForQueued(t, r)
+	release1()
+	select {
+	case <-acquired:
+		t.Fatal("waiter ignored the second existing holder after unlimited-to-finite resize")
+	case <-time.After(50 * time.Millisecond):
+	}
+	release2()
+	select {
+	case <-acquired:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter was stranded after unlimited-to-finite resize")
+	}
+}
+
+func TestAgentRunRegistryCancelAllCancelsQueued(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.SetMaxConcurrent(1)
+	run := r.New("queued")
+	run.markQueued()
+	cancelled := false
+	run.Cancel = func() { cancelled = true }
+	r.CancelAll()
+	if !cancelled {
+		t.Fatal("CancelAll did not invoke queued run cancel")
+	}
+	if got := run.CurrentStatus(); got != RunCancelled {
+		t.Fatalf("queued status = %s, want %s", got, RunCancelled)
+	}
+}
+
+func TestAgentRunRegistryDoesNotPruneQueuedRuns(t *testing.T) {
+	r := NewAgentRunRegistry()
+	queued := r.New("queued")
+	queued.markQueued()
+	for i := 0; i < 31; i++ {
+		run := r.New("done")
+		run.finishOK("done")
+	}
+	if removed := r.PruneCompleted(30); removed != 1 {
+		t.Fatalf("PruneCompleted removed %d runs, want 1", removed)
+	}
+	if _, ok := r.Get(queued.ID); !ok {
+		t.Fatal("queued run was pruned while still active")
+	}
+}
+
+func waitForQueued(t *testing.T, r *AgentRunRegistry) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for r.QueuedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if r.QueuedCount() == 0 {
+		t.Fatal("waiter did not enter the limiter queue")
+	}
+}
+
 func TestCancelOwnedEmptyDispatcherOnRun(t *testing.T) {
 	r := NewAgentRunRegistry()
 	run := r.New("explore")
@@ -231,4 +467,3 @@ func TestCancelOwnedEmptyDispatcherOnRun(t *testing.T) {
 		t.Fatalf("status = %s, want %s", run.statusValue(), RunCancelled)
 	}
 }
-

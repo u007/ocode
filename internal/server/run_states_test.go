@@ -17,6 +17,8 @@ func TestRunStatesEmptyWhenNoAgents(t *testing.T) {
 func TestRunStatesReportsSessionRuns(t *testing.T) {
 	a := agent.NewAgent(nil, nil, nil, nil)
 	running := a.Runs().New("worker")
+	queued := a.Runs().New("queued-worker")
+	queued.Status = agent.RunQueued
 	done := a.Runs().New("finished-worker")
 	done.Status = agent.RunDone
 	failed := a.Runs().New("broken-worker")
@@ -28,8 +30,8 @@ func TestRunStatesReportsSessionRuns(t *testing.T) {
 	h.agents[sessionID] = &agentSession{agent: a}
 
 	states := h.RunStates()
-	if len(states) != 3 {
-		t.Fatalf("expected 3 run states, got %d: %+v", len(states), states)
+	if len(states) != 4 {
+		t.Fatalf("expected 4 run states, got %d: %+v", len(states), states)
 	}
 	byName := map[string]RunState{}
 	for _, s := range states {
@@ -40,6 +42,9 @@ func TestRunStatesReportsSessionRuns(t *testing.T) {
 	}
 	if s := byName["worker"]; s.Ended || s.Failed {
 		t.Fatalf("running run misreported: %+v", s)
+	}
+	if s := byName["queued-worker"]; s.Ended || s.Failed {
+		t.Fatalf("queued run misreported as terminal: %+v", s)
 	}
 	if s := byName["finished-worker"]; !s.Ended || s.Failed {
 		t.Fatalf("done run misreported: %+v", s)

@@ -150,6 +150,7 @@ func init() {
 		{name: "/rc", aliases: []string{"/remote-control"}, usage: "/rc [port|off]", help: "Start/stop web UI to remote-control this session", handler: runRemoteControlCmd},
 		{name: "/ide", usage: "/ide [claude|off|status]", help: "Connect to VS Code (Claude Code extension) for live file/selection context", handler: runIDECmd},
 		{name: "/max-step", aliases: []string{"/max-steps"}, usage: "/max-step [n]", help: "Show or set the max tool-call steps before auto-summary", handler: runMaxStepCmd},
+		{name: "/agents", usage: "/agents [status|limit <n>]", help: "Show active/queued subagents, or set max concurrent subagents (0 = unlimited)", handler: runAgentsCmd},
 		{name: "/mask", usage: "/mask [on|off|status|mode [lenient|full]|model [name]|list]", help: "Show secret redaction status, manage the tier-2 model, or list secrets", handler: runMaskCmd},
 		{name: "/mem", usage: "/mem [on|off|status|update [user|project|global] [focus]]", help: "Toggle memory context injection, inspect memory files, or update a memory scope", handler: runMemCmd},
 		{name: "/paths", help: "Show all relevant filesystem paths: root, extra allowed paths, config files, and data directories", handler: runPathsCmd},
@@ -1363,6 +1364,11 @@ func runMaskCmd(m *model, args []string) tea.Cmd {
 
 func runMaxStepCmd(m *model, args []string) tea.Cmd {
 	m.handleMaxStepCmd(args)
+	return nil
+}
+
+func runAgentsCmd(m *model, args []string) tea.Cmd {
+	m.handleAgentsCmd(args)
 	return nil
 }
 

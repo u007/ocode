@@ -274,18 +274,6 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 	// sub-agent cards.
 	card := strings.TrimRight(body.String(), "\n")
 	runBlocks = append([]detailRunBlock{{runID: run.ID, runPath: runPath, rowStart: cardStart, rowEnd: currentRow}}, runBlocks...)
-	for i := range runBlocks {
-		runBlocks[i].rowStart++
-		runBlocks[i].rowEnd++
-	}
-	for i := range procBlocks {
-		procBlocks[i].rowStart++
-		procBlocks[i].rowEnd++
-	}
-	for i := range expandRegions {
-		expandRegions[i].rowStart++
-		expandRegions[i].rowEnd++
-	}
 	if indent == "" {
 		return card, runBlocks, procBlocks, expandRegions
 	}
