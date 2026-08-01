@@ -1,6 +1,9 @@
 package discovery
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestManifestForModel(t *testing.T) {
 	if m, ok := ManifestForModel("local/bge-m3"); !ok || m.ModelID != "local/bge-m3" || m.Backend != BackendLlamaCpp {
@@ -103,6 +106,46 @@ func TestBonsaiManifestResolvesOnEveryDeclaredPlatform(t *testing.T) {
 		if !found {
 			t.Errorf("no local/bonsai-8b-1bit manifest for %s/%s", c.os, c.arch)
 		}
+	}
+}
+
+// TestManifestForModelIgnoresHostForDivergentBackends documents the exact bug
+// ChatManifestForHost was added to fix: ManifestForModel does a bare ModelID
+// match with no OS/Arch filter, so for a model id with per-platform entries
+// that use DIFFERENT backends (local/bonsai-8b-1bit: MLX on darwin/arm64,
+// llama.cpp everywhere else), it returns whichever entry happens to be first
+// in localManifests — regardless of this host's actual platform. Chat call
+// sites (StartModelInstance, /localmodel add) must use ChatManifestForHost
+// instead, never this function, for exactly this reason.
+func TestManifestForModelIgnoresHostForDivergentBackends(t *testing.T) {
+	got, ok := ManifestForModel("local/bonsai-8b-1bit")
+	if !ok {
+		t.Fatal("expected a local/bonsai-8b-1bit manifest to exist")
+	}
+	if got.OS != "darwin" || got.Arch != "arm64" || got.Backend != BackendMLX {
+		t.Fatalf("test assumption changed (first declared bonsai entry is no longer darwin/arm64 MLX): got %s/%s backend=%q — update this test's expectation and re-verify the bug this documents still applies to whichever entry is now first", got.OS, got.Arch, got.Backend)
+	}
+}
+
+// TestChatManifestForHostMatchesRuntimeHost is the regression guard for the
+// same bug: unlike ManifestForModel, ChatManifestForHost must only ever
+// return the manifest whose OS/Arch equal the actual running host's.
+func TestChatManifestForHostMatchesRuntimeHost(t *testing.T) {
+	man, ok := ChatManifestForHost("local/bonsai-8b-1bit")
+	if !ok {
+		t.Skip("no local/bonsai-8b-1bit manifest declared for this test host's OS/Arch")
+	}
+	if man.OS != runtime.GOOS || man.Arch != runtime.GOARCH {
+		t.Fatalf("ChatManifestForHost returned %s/%s, want the current host %s/%s", man.OS, man.Arch, runtime.GOOS, runtime.GOARCH)
+	}
+	if man.Kind != "chat" {
+		t.Fatalf("ChatManifestForHost returned a non-chat manifest: Kind=%q", man.Kind)
+	}
+}
+
+func TestChatManifestForHostUnknownModelReturnsFalse(t *testing.T) {
+	if _, ok := ChatManifestForHost("local/does-not-exist-anywhere"); ok {
+		t.Fatal("expected false for an unregistered model id")
 	}
 }
 

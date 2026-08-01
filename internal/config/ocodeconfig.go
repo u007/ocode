@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -1487,6 +1488,27 @@ func DeleteLocalModelConfig(modelID string) error {
 		delete(cfg.LocalModels, modelID)
 		return nil
 	})
+}
+
+// RegisteredLocalModelIDs returns the sorted list of all registered local
+// chat model ids, loaded FRESH from disk rather than any in-memory config
+// cache. discovery.AssignChatPort's determinism guarantee ("multiple ocode
+// processes agree on the same port without a shared allocation file") only
+// holds if every process computes the sort over the same registered-id set
+// at assignment time — sourcing from a session's possibly-stale in-memory
+// config could make two processes compute different ports for the same
+// model id.
+func RegisteredLocalModelIDs() ([]string, error) {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(cfg.LocalModels))
+	for id := range cfg.LocalModels {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // SaveOcodeASTPlugin persists the enabled state of the opt-in "ast" tool.

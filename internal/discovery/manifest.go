@@ -359,6 +359,25 @@ func ChatManifestsForHost() []ServerManifest {
 	return out
 }
 
+// ChatManifestForHost returns the chat-kind manifest for modelID that matches
+// THIS host's OS/Arch, or false. Unlike ManifestForModel (a bare ModelID
+// match), this is safe to use for a specific model id that has multiple
+// per-platform entries with DIFFERENT backends — e.g. local/bonsai-8b-1bit is
+// MLX on darwin/arm64 but llama.cpp GGUF everywhere else. ManifestForModel
+// would silently return whichever entry for that ModelID happens to be first
+// in localManifests, regardless of the current host, which is only harmless
+// for embedding manifests (all platform rows share one backend). All chat
+// call sites (StartModelInstance, /localmodel add) must use this function,
+// not ManifestForModel.
+func ChatManifestForHost(modelID string) (ServerManifest, bool) {
+	for _, m := range localManifests {
+		if m.ModelID == modelID && m.Kind == "chat" && m.OS == runtime.GOOS && m.Arch == runtime.GOARCH {
+			return m, true
+		}
+	}
+	return ServerManifest{}, false
+}
+
 // ExpectedServeID is the model id the running server must report in
 // /v1/models for us to adopt it. llama.cpp reports the GGUF path, so we match
 // on the GGUF basename; the MLX server reports the served model id — the HF

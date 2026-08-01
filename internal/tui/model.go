@@ -243,6 +243,19 @@ type docsInitFinishedMsg struct {
 	err  error  // non-nil when the operation failed
 }
 
+// localModelActionMsg is emitted when an async /localmodel enable|limit
+// operation (spawn + health-poll, which can take minutes on a cold model
+// download) completes. Config-map mutation happens in the Update() handler
+// for this message (main goroutine only) — the background goroutine that
+// produces it must never touch *model fields directly.
+type localModelActionMsg struct {
+	modelID     string
+	enabled     bool
+	maxParallel int
+	text        string // result text to display (success or error)
+	err         error  // non-nil when the operation failed (config map is not updated)
+}
+
 // syncLoginStartedMsg is emitted when /login has started the device-code flow
 // and the user needs to see the auth code. It carries the state needed for
 // the background polling phase (client, deviceCode, expiresAt).
@@ -2808,6 +2821,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: text})
 		m.rerenderTranscriptAndMaybeScroll()
+	case localModelActionMsg:
+		if msg.err == nil {
+			if m.config.Ocode.LocalModels == nil {
+				m.config.Ocode.LocalModels = map[string]config.LocalModelConfig{}
+			}
+			m.config.Ocode.LocalModels[msg.modelID] = config.LocalModelConfig{Enabled: msg.enabled, MaxParallel: msg.maxParallel}
+		}
+		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
+		m.rerenderTranscriptAndMaybeScroll()
 	case usageSummaryMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error querying usage: %v", msg.err)})
@@ -3939,6 +3961,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// pendingCompactUIIdx must not be overwritten before its result is
 		// spliced, or the result applies against the wrong mapping and is
 		// silently discarded (context never shrinks → compaction runs forever).
+		compactionBarrier := false
 		if msg.err == nil && m.agent != nil && len(m.pendingCompactUIIdx) == 0 {
 			agentMsgs, uiIdx := m.buildAgentMessagesSnapshot()
 			// Only update the pending uiIdx mapping if the agent actually
@@ -3947,6 +3970,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// turn's mapping — silently deleting the wrong messages.
 			if m.agent.MaybeCompactAsync(agentMsgs) {
 				m.pendingCompactUIIdx = uiIdx
+				m.pendingCompactResume = true
+				compactionBarrier = true
 			}
 		}
 		if msg.err != nil {
@@ -3967,7 +3992,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// as if it were a prior assistant turn corrupts the conversation.
 			m.messages = append(m.messages, message{role: roleAssistant, text: errorText, skipLLM: true})
 			m.rerenderTranscriptAndMaybeScroll()
-		} else {
+		} else if !compactionBarrier {
 			m.lastRetryableLLMErr = ""
 			// While a question dialog is active the agent has paused waiting
 			// for the user's answer. Do NOT drain queued inputs/commands or
@@ -8086,7 +8111,10 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 // handleLocalModelCmd implements /localmodel list|add|enable|disable|limit|status.
 func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]"})
+		// No-arg /localmodel shows status for every registered model (same as
+		// `/localmodel status` with no name), not a usage message — status is
+		// the most useful default view.
+		m.showLocalModelStatus("")
 		return nil
 	}
 	switch strings.ToLower(args[0]) {
@@ -8103,19 +8131,19 @@ func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel enable <name>"})
 			return nil
 		}
-		m.localModelSetEnabled(args[1], true)
+		return m.localModelEnableCmd(args[1])
 	case "disable":
 		if len(args) < 2 {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel disable <name>"})
 			return nil
 		}
-		m.localModelSetEnabled(args[1], false)
+		m.localModelDisable(args[1])
 	case "limit":
 		if len(args) < 3 {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel limit <name> <1|2>"})
 			return nil
 		}
-		m.localModelSetLimit(args[1], args[2])
+		return m.localModelLimitCmd(args[1], args[2])
 	case "status":
 		name := ""
 		if len(args) > 1 {
@@ -8137,6 +8165,28 @@ func localModelID(name string) string {
 	return "local/" + name
 }
 
+// localModelInstanceInfo returns the best-known instance snapshot for id: the
+// in-process record if this session started it, otherwise (when lm.Enabled)
+// a live probe of its assigned port so a model started by a DIFFERENT ocode
+// process is still reported correctly instead of showing "stopped".
+func (m *model) localModelInstanceInfo(id string, lm config.LocalModelConfig) (discovery.InstanceInfo, bool) {
+	if info, ok := discovery.GetModelInstance(id); ok && info.State == discovery.InstanceReady {
+		return info, true
+	}
+	if !lm.Enabled {
+		return discovery.InstanceInfo{}, false
+	}
+	registeredIDs, err := config.RegisteredLocalModelIDs()
+	if err != nil {
+		return discovery.InstanceInfo{}, false
+	}
+	port, err := discovery.AssignChatPort(id, registeredIDs)
+	if err != nil {
+		return discovery.InstanceInfo{}, false
+	}
+	return discovery.ProbeModelInstance(id, port)
+}
+
 func (m *model) showLocalModelList() {
 	var b strings.Builder
 	b.WriteString("Local model catalog:\n")
@@ -8146,8 +8196,8 @@ func (m *model) showLocalModelList() {
 			state := "disabled"
 			if lm.Enabled {
 				state = "enabled"
-				if inst, ok := discovery.GetModelInstance(man.ModelID); ok {
-					state = string(inst.State)
+				if info, ok := m.localModelInstanceInfo(man.ModelID, lm); ok {
+					state = string(info.State)
 				}
 			}
 			status = fmt.Sprintf("%s, max_parallel=%d", state, lm.MaxParallel)
@@ -8159,8 +8209,7 @@ func (m *model) showLocalModelList() {
 
 func (m *model) localModelAdd(name string) {
 	id := localModelID(name)
-	man, ok := discovery.ManifestForModel(id)
-	if !ok || man.Kind != "chat" {
+	if _, ok := discovery.ChatManifestForHost(id); !ok {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "No local chat model catalog entry for " + id + " on this platform"})
 		return
 	}
@@ -8187,106 +8236,143 @@ func (m *model) registeredLocalModelIDs() []string {
 	return ids
 }
 
-func (m *model) localModelSetEnabled(name string, enabled bool) {
+// localModelDisable stops modelID's process (if running) and persists
+// Enabled=false. Synchronous: procs.Kill just signals the process, it doesn't
+// wait minutes for a health check, so this is safe inside Update().
+func (m *model) localModelDisable(name string) {
 	id := localModelID(name)
 	lm, exists := m.config.Ocode.LocalModels[id]
 	if !exists {
 		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is not registered. Run /localmodel add " + name + " first"})
 		return
 	}
-	if enabled == lm.Enabled {
-		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is already " + map[bool]string{true: "enabled", false: "disabled"}[enabled]})
+	if !lm.Enabled {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is already disabled"})
 		return
 	}
-	if !enabled {
-		if m.agent != nil {
-			if err := discovery.StopModelInstance(m.agent.Procs(), id); err != nil {
-				m.messages = append(m.messages, message{role: roleAssistant, text: "Error stopping " + id + ": " + err.Error()})
-				return
-			}
-		}
-		lm.Enabled = false
-		if err := config.SaveLocalModelConfig(id, false, lm.MaxParallel); err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+	if m.agent != nil {
+		if err := discovery.StopModelInstance(m.agent.Procs(), id); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error stopping " + id + ": " + err.Error()})
 			return
 		}
-		m.config.Ocode.LocalModels[id] = lm
-		m.messages = append(m.messages, message{role: roleAssistant, text: id + ": disabled"})
-		return
 	}
-	if err := m.startLocalModelInstance(id, lm.MaxParallel); err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Error starting " + id + ": " + err.Error()})
-		return
-	}
-	lm.Enabled = true
-	if err := config.SaveLocalModelConfig(id, true, lm.MaxParallel); err != nil {
+	lm.Enabled = false
+	if err := config.SaveLocalModelConfig(id, false, lm.MaxParallel); err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
 		return
 	}
 	m.config.Ocode.LocalModels[id] = lm
-	m.messages = append(m.messages, message{role: roleAssistant, text: id + ": enabled"})
+	m.messages = append(m.messages, message{role: roleAssistant, text: id + ": disabled"})
 }
 
-// startLocalModelInstance resolves this model's deterministic port and spawns
-// it through the agent's supervised process registry, mirroring the spawn
-// closure shape used by ensureDiscovery (internal/agent/discovery_glue.go:60-72).
-func (m *model) startLocalModelInstance(id string, maxParallel int) error {
-	if m.agent == nil {
-		return fmt.Errorf("no active agent to spawn the local model process")
+// localModelEnableCmd validates synchronously (fast, no I/O beyond the
+// in-memory config map) and, if a start is actually needed, returns a tea.Cmd
+// that does the slow spawn+health-poll work (can take minutes on a cold
+// model download) off the Bubble Tea Update() goroutine. The returned
+// tea.Cmd must not touch *model fields — only localModelActionMsg's handler
+// in Update() may mutate m.config.
+func (m *model) localModelEnableCmd(name string) tea.Cmd {
+	id := localModelID(name)
+	lm, exists := m.config.Ocode.LocalModels[id]
+	if !exists {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is not registered. Run /localmodel add " + name + " first"})
+		return nil
 	}
-	port, err := discovery.AssignChatPort(id, m.registeredLocalModelIDs())
+	if lm.Enabled {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is already enabled"})
+		return nil
+	}
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No active agent to spawn the local model process"})
+		return nil
+	}
+	ag := m.agent
+	maxParallel := lm.MaxParallel
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + id + " (this can take a while on a cold model download)..."})
+	return func() tea.Msg {
+		if err := startLocalModelInstance(ag, id, maxParallel); err != nil {
+			return localModelActionMsg{modelID: id, text: "Error starting " + id + ": " + err.Error(), err: err}
+		}
+		if err := config.SaveLocalModelConfig(id, true, maxParallel); err != nil {
+			return localModelActionMsg{modelID: id, text: "Error: " + err.Error(), err: err}
+		}
+		return localModelActionMsg{modelID: id, enabled: true, maxParallel: maxParallel, text: id + ": enabled"}
+	}
+}
+
+// startLocalModelInstance resolves id's deterministic port from a disk-fresh
+// registered-id set (config.RegisteredLocalModelIDs — so concurrent ocode
+// processes agree on the same port even if THIS process's in-memory config is
+// stale) and spawns it through ag's supervised process registry. Runs on a
+// background goroutine (see localModelEnableCmd/localModelLimitCmd's returned
+// tea.Cmd), so it must not touch *model fields — only ag (an *agent.Agent,
+// safe to use concurrently) and package-level discovery/config functions.
+func startLocalModelInstance(ag *agent.Agent, id string, maxParallel int) error {
+	registeredIDs, err := config.RegisteredLocalModelIDs()
 	if err != nil {
 		return err
 	}
-	procs := m.agent.Procs()
-	var lastProcID string
+	port, err := discovery.AssignChatPort(id, registeredIDs)
+	if err != nil {
+		return err
+	}
+	procs := ag.Procs()
 	spawn := func(cmdline string) error {
 		p := procs.StartBackground(cmdline)
 		if p != nil && p.SnapshotStatus() == tool.ProcExited {
 			return fmt.Errorf("local chat server process exited immediately on spawn")
 		}
-		lastProcID = p.ID
+		// Recorded immediately, before StartModelInstance's health-poll loop
+		// runs — a poll timeout must not leave a running process untracked
+		// (see SetModelInstanceProcessID's doc comment).
+		discovery.SetModelInstanceProcessID(id, p.ID)
 		return nil
 	}
-	if err := discovery.StartModelInstance(spawn, id, port, maxParallel, agent.DiscoveryCacheDir()); err != nil {
-		return err
-	}
-	discovery.SetModelInstanceProcessID(id, lastProcID)
-	return nil
+	return discovery.StartModelInstance(spawn, id, port, maxParallel, agent.DiscoveryCacheDir())
 }
 
-func (m *model) localModelSetLimit(name, valueStr string) {
+// localModelLimitCmd validates synchronously and, if the model is currently
+// enabled (so a stop+restart is needed to apply the new slot count), returns
+// a tea.Cmd for the slow part — same async rule as localModelEnableCmd.
+func (m *model) localModelLimitCmd(name, valueStr string) tea.Cmd {
 	id := localModelID(name)
 	value, err := strconv.Atoi(valueStr)
 	if err != nil || (value != 1 && value != 2) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid limit " + valueStr + " — must be 1 or 2"})
-		return
+		return nil
 	}
 	lm, exists := m.config.Ocode.LocalModels[id]
 	if !exists {
 		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is not registered. Run /localmodel add " + name + " first"})
-		return
+		return nil
 	}
-	wasEnabled := lm.Enabled
-	if wasEnabled && m.agent != nil {
-		if err := discovery.StopModelInstance(m.agent.Procs(), id); err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Error stopping " + id + " to apply new limit: " + err.Error()})
-			return
+	if !lm.Enabled {
+		if err := config.SaveLocalModelConfig(id, false, value); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return nil
 		}
+		m.config.Ocode.LocalModels[id] = config.LocalModelConfig{Enabled: false, MaxParallel: value}
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%s: max_parallel set to %d", id, value)})
+		return nil
 	}
-	lm.MaxParallel = value
-	if wasEnabled {
-		if err := m.startLocalModelInstance(id, value); err != nil {
-			m.messages = append(m.messages, message{role: roleAssistant, text: "Error restarting " + id + " with new limit: " + err.Error()})
-			return
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No active agent to restart the local model process"})
+		return nil
+	}
+	ag := m.agent
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Restarting %s with max_parallel=%d...", id, value)})
+	return func() tea.Msg {
+		if err := discovery.StopModelInstance(ag.Procs(), id); err != nil {
+			return localModelActionMsg{modelID: id, text: "Error stopping " + id + " to apply new limit: " + err.Error(), err: err}
 		}
+		if err := startLocalModelInstance(ag, id, value); err != nil {
+			return localModelActionMsg{modelID: id, text: "Error restarting " + id + " with new limit: " + err.Error(), err: err}
+		}
+		if err := config.SaveLocalModelConfig(id, true, value); err != nil {
+			return localModelActionMsg{modelID: id, text: "Error: " + err.Error(), err: err}
+		}
+		return localModelActionMsg{modelID: id, enabled: true, maxParallel: value, text: fmt.Sprintf("%s: max_parallel set to %d", id, value)}
 	}
-	if err := config.SaveLocalModelConfig(id, lm.Enabled, value); err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
-		return
-	}
-	m.config.Ocode.LocalModels[id] = lm
-	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%s: max_parallel set to %d", id, value)})
 }
 
 func (m *model) showLocalModelStatus(name string) {
@@ -8309,8 +8395,8 @@ func (m *model) showLocalModelStatus(name string) {
 			continue
 		}
 		fmt.Fprintf(&b, "%s\n  enabled: %v\n  max_parallel: %d\n", id, lm.Enabled, lm.MaxParallel)
-		if inst, ok := discovery.GetModelInstance(id); ok {
-			fmt.Fprintf(&b, "  state: %s\n  port: %d\n  base_url: %s\n", inst.State, inst.Port, inst.BaseURL)
+		if info, ok := m.localModelInstanceInfo(id, lm); ok {
+			fmt.Fprintf(&b, "  state: %s\n  port: %d\n  base_url: %s\n", info.State, info.Port, info.BaseURL)
 		} else {
 			fmt.Fprintf(&b, "  state: %s\n", discovery.InstanceStopped)
 		}

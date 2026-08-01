@@ -93,3 +93,27 @@ func TestFilterMLXArgsKeepsSupportedFlag(t *testing.T) {
 		t.Fatalf("{parallel} not expanded to 2: %v", out)
 	}
 }
+
+// TestFilterMLXArgsNilSupportedKeepsEverything guards the fail-open fix: a
+// nil `supported` map (the flag probe failed — python3 missing, mlx_lm not
+// installed, --help timed out) must keep every flag, including required ones
+// like --model/--host/--port, rather than treating "probe failed" the same as
+// "probed successfully and found zero supported flags" (which would silently
+// produce a broken spawn command with no required arguments at all).
+func TestFilterMLXArgsNilSupportedKeepsEverything(t *testing.T) {
+	argv := []string{"python3", "-m", "mlx_lm.server",
+		"--model", "{repo}",
+		"--host", "127.0.0.1",
+		"--port", "{port}",
+		"--decode-concurrency", "{parallel}"}
+	out := filterMLXArgs(argv, "prism-ml/Bonsai-8B-mlx-1bit", 11459, 2, nil)
+	if len(out) != len(argv) {
+		t.Fatalf("nil supported map dropped flags: got %v, want all %d args kept: %v", out, len(argv), argv)
+	}
+	joined := strings.Join(out, " ")
+	for _, want := range []string{"--model", "--host", "--port", "--decode-concurrency"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("nil supported map should keep every flag; missing %s in %v", want, out)
+		}
+	}
+}

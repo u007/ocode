@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"path/filepath"
@@ -79,8 +80,8 @@ var (
 // because first load downloads multi-GB weights; see chatHealthPollAttempts).
 // Updates the in-process instance map on success.
 func StartModelInstance(spawn func(cmdline string) error, modelID string, port int, maxParallel int, cacheDir string) error {
-	man, ok := ManifestForModel(modelID)
-	if !ok || man.Kind != "chat" {
+	man, ok := ChatManifestForHost(modelID)
+	if !ok {
 		return fmt.Errorf("no local chat manifest for model %q on %s/%s", modelID, goos(), goarch())
 	}
 
@@ -186,7 +187,10 @@ func spawnMLXChatServer(spawn func(cmdline string) error, man ServerManifest, po
 // filterMLXArgs expands {repo}/{port}/{parallel} placeholders and drops flags
 // the installed mlx_lm.server doesn't understand (e.g. --decode-concurrency is
 // absent from the mlx_lm 0.30.5 that the PrismML mlx fork pairs with) instead
-// of failing the spawn.
+// of failing the spawn. supported == nil means the flag probe itself failed
+// (see mlxServerFlags) — fail OPEN in that case (keep every flag) rather than
+// silently stripping required flags like --model/--host/--port along with the
+// genuinely-unsupported ones.
 func filterMLXArgs(launchArgv []string, repo string, port, maxParallel int, supported map[string]bool) []string {
 	argv := make([]string, 0, len(launchArgv))
 	for i := 0; i < len(launchArgv); i++ {
@@ -194,7 +198,7 @@ func filterMLXArgs(launchArgv []string, repo string, port, maxParallel int, supp
 		a = strings.ReplaceAll(a, "{repo}", repo)
 		a = strings.ReplaceAll(a, "{port}", fmt.Sprintf("%d", port))
 		a = strings.ReplaceAll(a, "{parallel}", fmt.Sprintf("%d", maxParallel))
-		if strings.HasPrefix(a, "--") && !supported[a] {
+		if supported != nil && strings.HasPrefix(a, "--") && !supported[a] {
 			emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("mlx_lm.server does not support %s; dropping", a))
 			// Drop the flag's value too (the next arg, if it is not itself a flag).
 			if i+1 < len(launchArgv) && !strings.HasPrefix(launchArgv[i+1], "--") {
@@ -212,30 +216,63 @@ func filterMLXArgs(launchArgv []string, repo string, port, maxParallel int, supp
 // flag only exists in mlx_lm >= 0.31; the PrismML mlx fork pairs with
 // mlx_lm 0.30.5, which lacks it. Instead of failing the spawn, drop any
 // manifest flag the installed server doesn't understand and note it.
+//
+// Returns nil if the probe itself failed (python3 missing, mlx_lm not
+// installed, --help hung past the timeout, etc.) — nil is a distinct signal
+// from "probed successfully and found zero flags", and filterMLXArgs treats
+// nil as "keep every flag" (fail open) rather than dropping everything
+// including --model/--host/--port, which would silently produce a broken
+// spawn command.
 var (
 	mlxFlagsOnce  sync.Once
-	mlxServerFlag = map[string]bool{}
+	mlxServerFlag map[string]bool // nil until mlxServerFlags() resolves it
 )
 
 func mlxServerFlags() map[string]bool {
 	mlxFlagsOnce.Do(func() {
 		// Running --help is cheap and side-effect free; the server exits
-		// after printing usage. Use a short timeout in case python3 is slow
-		// or missing on PATH.
-		out, err := exec.Command("python3", "-m", "mlx_lm.server", "--help").Output()
+		// after printing usage. Bounded timeout in case python3/mlx_lm's
+		// import chain is slow or python3 is missing from PATH — an
+		// unbounded exec here would hang the caller indefinitely.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "python3", "-m", "mlx_lm.server", "--help").Output()
 		if err != nil {
-			emitUserDiscoveryDebug("DISCOVERY", "mlx_lm.server --help failed: "+err.Error())
-			return
+			emitUserDiscoveryDebug("DISCOVERY", "mlx_lm.server --help failed (keeping all manifest flags): "+err.Error())
+			return // mlxServerFlag stays nil — fail open
 		}
+		flags := map[string]bool{}
 		for _, line := range strings.Split(string(out), "\n") {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "--") {
 				name := strings.Fields(line)[0]
-				mlxServerFlag[name] = true
+				flags[name] = true
 			}
 		}
+		mlxServerFlag = flags
 	})
 	return mlxServerFlag
+}
+
+// ProbeModelInstance checks whether modelID's chat server is already running
+// and healthy at port, via a live HTTP probe — unlike GetModelInstance, this
+// finds a server started by a DIFFERENT ocode process (this process's
+// in-memory instances map only knows about servers it spawned itself).
+// Mirrors EnsureLocalServer's probe-before-spawn pattern (localserver.go) so
+// /localmodel status doesn't misreport "stopped" for a model another session
+// already has running on its assigned port.
+func ProbeModelInstance(modelID string, port int) (InstanceInfo, bool) {
+	man, ok := ChatManifestForHost(modelID)
+	if !ok {
+		return InstanceInfo{}, false
+	}
+	base := fmt.Sprintf("http://localhost:%d", port)
+	expect := man.ExpectedServeID()
+	healthy, served := probeLocalServerModel(base, man.HealthPath, expect)
+	if !healthy || !modelMatches(served, expect) {
+		return InstanceInfo{}, false
+	}
+	return InstanceInfo{ModelID: modelID, State: InstanceReady, Port: port, BaseURL: base}, true
 }
 
 // GetModelInstance returns the last-known snapshot for modelID, or false if it
@@ -275,10 +312,14 @@ func StopModelInstance(procs *tool.ProcessRegistry, modelID string) error {
 }
 
 // SetModelInstanceProcessID records the tool.ProcessRegistry id for a running
-// instance so StopModelInstance can find it later. Called by the /localmodel
-// command handler right after a successful StartModelInstance, since
-// StartModelInstance itself only sees the spawn closure, not the *tool.Process
-// it creates.
+// instance so StopModelInstance can find it later. Must be called from inside
+// the spawn closure passed to StartModelInstance, immediately after
+// procs.StartBackground succeeds — NOT after StartModelInstance returns.
+// StartModelInstance's health-poll loop can take minutes (cold model
+// download) and return an error on timeout even though the process is
+// genuinely running; recording the id only on success would leave that
+// process un-trackable and un-killable (StopModelInstance would report
+// nothing to stop while the real process keeps holding its port).
 func SetModelInstanceProcessID(modelID, processID string) {
 	instMu.Lock()
 	defer instMu.Unlock()
