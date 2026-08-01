@@ -70,6 +70,36 @@ func TestChatManifestsForHostOnlyChatKind(t *testing.T) {
 	}
 }
 
+func TestBonsaiManifestResolvesOnEveryDeclaredPlatform(t *testing.T) {
+	cases := []struct {
+		os, arch, wantBackend string
+	}{
+		{"darwin", "arm64", BackendMLX},
+		{"darwin", "amd64", BackendLlamaCpp},
+		{"linux", "amd64", BackendLlamaCpp},
+	}
+	for _, c := range cases {
+		found := false
+		for _, m := range localManifests {
+			if m.ModelID == "local/bonsai-8b-1bit" && m.OS == c.os && m.Arch == c.arch {
+				found = true
+				if m.Backend != c.wantBackend {
+					t.Errorf("%s/%s: backend = %q, want %q", c.os, c.arch, m.Backend, c.wantBackend)
+				}
+				if m.Kind != "chat" {
+					t.Errorf("%s/%s: Kind = %q, want \"chat\"", c.os, c.arch, m.Kind)
+				}
+				if m.CompletionPath != "/v1/chat/completions" {
+					t.Errorf("%s/%s: CompletionPath = %q, want /v1/chat/completions", c.os, c.arch, m.CompletionPath)
+				}
+			}
+		}
+		if !found {
+			t.Errorf("no local/bonsai-8b-1bit manifest for %s/%s", c.os, c.arch)
+		}
+	}
+}
+
 func TestModelMatches(t *testing.T) {
 	// llama.cpp reports the full GGUF path; substring match on basename.
 	if !modelMatches([]string{"/Users/x/discovery/local-darwin-arm64/bge-m3-q4_k_m.gguf"}, "bge-m3-q4_k_m.gguf") {

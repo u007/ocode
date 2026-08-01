@@ -55,6 +55,9 @@ type ServerManifest struct {
 	LaunchArgv []string
 	HealthPath string // e.g. "/v1/models"
 	EmbedPath  string // e.g. "/v1/embeddings"
+	// CompletionPath is the OpenAI-compatible chat completions path (chat-kind
+	// manifests only), e.g. "/v1/chat/completions".
+	CompletionPath string
 }
 
 // localManifests pin concrete llama.cpp release tarballs (b9777) per supported
@@ -200,6 +203,79 @@ var localManifests = []ServerManifest{
 			"--host", "127.0.0.1"},
 		HealthPath: "/v1/models",
 		EmbedPath:  "/v1/embeddings",
+	},
+	{
+		// Bonsai 8B, 1-bit (ternary/BitNet-style quant). MLX build on Apple
+		// Silicon: prism-ml/Bonsai-8B-mlx-1bit, run via mlx_lm's own
+		// OpenAI-compatible server (mlx_lm.server). --max-sequences is
+		// mlx_lm.server's concurrent-request-slot flag, substituted from
+		// {parallel} by the instance manager (internal/discovery/instances.go).
+		OS: "darwin", Arch: "arm64",
+		ModelID: "local/bonsai-8b-1bit", Kind: "chat", Backend: BackendMLX,
+		MLXRepo: "prism-ml/Bonsai-8B-mlx-1bit",
+		LaunchArgv: []string{"python3", "-m", "mlx_lm.server",
+			"--model", "{repo}",
+			"--host", "127.0.0.1",
+			"--port", "{port}",
+			"--max-sequences", "{parallel}"},
+		HealthPath:     "/v1/models",
+		CompletionPath: "/v1/chat/completions",
+	},
+	{
+		// Bonsai 8B, 1-bit — macOS Intel, via llama.cpp GGUF
+		// (prism-ml/Bonsai-8B-gguf). --parallel is llama-server's
+		// concurrent-request-slot flag (aka -np), substituted from
+		// {parallel} by the instance manager.
+		OS: "darwin", Arch: "amd64",
+		ModelID: "local/bonsai-8b-1bit", Kind: "chat", Backend: BackendLlamaCpp,
+		Artifacts: []Artifact{
+			{
+				URL:     "https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-macos-x64.tar.gz",
+				SHA256:  "6271bffb4aa142351f63fff1cb8e42bd16e7b9877f2b5bc5e49037f91f3f0897",
+				Dest:    "llama-server",
+				Exec:    true,
+				Archive: ArchiveGZ,
+			},
+			{
+				URL:    "https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B-Q1_0.gguf",
+				SHA256: "284a335aa3fb2ced3b1b01fcb40b08aa783e3b70832767f0dd2e3fdfa134bd54",
+				Dest:   "bonsai-8b-1bit.gguf",
+			},
+		},
+		LaunchArgv: []string{"{bin}/llama-b9777/llama-server",
+			"-m", "{bin}/bonsai-8b-1bit.gguf",
+			"--port", "{port}",
+			"--parallel", "{parallel}",
+			"--host", "127.0.0.1"},
+		HealthPath:     "/v1/models",
+		CompletionPath: "/v1/chat/completions",
+	},
+	{
+		// Bonsai 8B, 1-bit — Linux x86_64, via llama.cpp GGUF (same artifact
+		// as the darwin/amd64 entry, different llama-server tarball).
+		OS: "linux", Arch: "amd64",
+		ModelID: "local/bonsai-8b-1bit", Kind: "chat", Backend: BackendLlamaCpp,
+		Artifacts: []Artifact{
+			{
+				URL:     "https://github.com/ggml-org/llama.cpp/releases/download/b9777/llama-b9777-bin-ubuntu-x64.tar.gz",
+				SHA256:  "f1994e1d9904f318c8347b000e7ef5dfd49fa4a24de044887da85d9bbfe84811",
+				Dest:    "llama-server",
+				Exec:    true,
+				Archive: ArchiveGZ,
+			},
+			{
+				URL:    "https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B-Q1_0.gguf",
+				SHA256: "284a335aa3fb2ced3b1b01fcb40b08aa783e3b70832767f0dd2e3fdfa134bd54",
+				Dest:   "bonsai-8b-1bit.gguf",
+			},
+		},
+		LaunchArgv: []string{"{bin}/llama-b9777/llama-server",
+			"-m", "{bin}/bonsai-8b-1bit.gguf",
+			"--port", "{port}",
+			"--parallel", "{parallel}",
+			"--host", "127.0.0.1"},
+		HealthPath:     "/v1/models",
+		CompletionPath: "/v1/chat/completions",
 	},
 }
 
