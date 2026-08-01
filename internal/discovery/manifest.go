@@ -210,6 +210,10 @@ var localManifests = []ServerManifest{
 		// OpenAI-compatible server (mlx_lm.server). --decode-concurrency is
 		// mlx_lm.server's concurrent-request-slot flag, substituted from
 		// {parallel} by the instance manager (internal/discovery/instances.go).
+		// NOTE: 1-bit kernels require the PrismML mlx fork (the model card
+		// instructs `pip install mlx @ git+https://github.com/PrismML-Eng/mlx.git@prism`);
+		// stock mlx rejects bits=1 at load ("requested number of bits 1 is not
+		// supported").
 		OS: "darwin", Arch: "arm64",
 		ModelID: "local/bonsai-8b-1bit", Kind: "chat", Backend: BackendMLX,
 		MLXRepo: "prism-ml/Bonsai-8B-mlx-1bit",
@@ -226,6 +230,12 @@ var localManifests = []ServerManifest{
 		// (prism-ml/Bonsai-8B-gguf). --parallel is llama-server's
 		// concurrent-request-slot flag (aka -np), substituted from
 		// {parallel} by the instance manager.
+		// NOTE: the model card ships Q1_0 kernels via the PrismML llama.cpp
+		// fork (github.com/PrismML-Eng/llama.cpp, "includes Q1_0 kernels"); if
+		// upstream b9777 llama-server fails to load the Q1_0 GGUF
+		// ("unsupported quantization"), switch the server artifact to the
+		// fork's release tarball (llama-prism-b9599-9ca265a-bin-macos-x64.tar.gz,
+		// sha256 7c6179a43265c0f24c7336c976b5aae81589b33cb979543421d538ae25175d88).
 		OS: "darwin", Arch: "amd64",
 		ModelID: "local/bonsai-8b-1bit", Kind: "chat", Backend: BackendLlamaCpp,
 		Artifacts: []Artifact{
@@ -253,6 +263,10 @@ var localManifests = []ServerManifest{
 	{
 		// Bonsai 8B, 1-bit — Linux x86_64, via llama.cpp GGUF (same artifact
 		// as the darwin/amd64 entry, different llama-server tarball).
+		// NOTE: same Q1_0-kernel caveat as the darwin/amd64 entry — if
+		// upstream b9777 cannot load the Q1_0 GGUF, use the PrismML fork
+		// tarball (llama-prism-b9599-9ca265a-bin-ubuntu-x64.tar.gz,
+		// sha256 35e935c828f58f9837d3da357a86846deb11d4feffc835d9e94e7d8fc1bbd55e).
 		OS: "linux", Arch: "amd64",
 		ModelID: "local/bonsai-8b-1bit", Kind: "chat", Backend: BackendLlamaCpp,
 		Artifacts: []Artifact{
