@@ -223,6 +223,13 @@ func discoveryCacheDir() string {
 	return base + "/discovery"
 }
 
+// DiscoveryCacheDir exposes discoveryCacheDir to other packages (e.g. the TUI
+// /localmodel command, which spawns local chat-model servers into the same
+// cache layout as the embedder).
+func DiscoveryCacheDir() string {
+	return discoveryCacheDir()
+}
+
 // discoveryModelRoot returns the active model id and project root used to gate
 // Kaizen (per-model tuned) skills. Mirrors the resolution in prompt.go so the
 // discovery corpus admits the same tuned skills LoadContext would.

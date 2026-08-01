@@ -8083,6 +8083,241 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 	}
 }
 
+// handleLocalModelCmd implements /localmodel list|add|enable|disable|limit|status.
+func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
+	if len(args) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]"})
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "list":
+		m.showLocalModelList()
+	case "add":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel add <name>"})
+			return nil
+		}
+		m.localModelAdd(args[1])
+	case "enable":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel enable <name>"})
+			return nil
+		}
+		m.localModelSetEnabled(args[1], true)
+	case "disable":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel disable <name>"})
+			return nil
+		}
+		m.localModelSetEnabled(args[1], false)
+	case "limit":
+		if len(args) < 3 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel limit <name> <1|2>"})
+			return nil
+		}
+		m.localModelSetLimit(args[1], args[2])
+	case "status":
+		name := ""
+		if len(args) > 1 {
+			name = args[1]
+		}
+		m.showLocalModelStatus(name)
+	default:
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]"})
+	}
+	return nil
+}
+
+// localModelID resolves a bare catalog name (e.g. "bonsai-8b-1bit") or a full
+// model id (e.g. "local/bonsai-8b-1bit") to the manifest's ModelID.
+func localModelID(name string) string {
+	if strings.HasPrefix(name, "local/") {
+		return name
+	}
+	return "local/" + name
+}
+
+func (m *model) showLocalModelList() {
+	var b strings.Builder
+	b.WriteString("Local model catalog:\n")
+	for _, man := range discovery.ChatManifestsForHost() {
+		status := "not added"
+		if lm, ok := m.config.Ocode.LocalModels[man.ModelID]; ok {
+			state := "disabled"
+			if lm.Enabled {
+				state = "enabled"
+				if inst, ok := discovery.GetModelInstance(man.ModelID); ok {
+					state = string(inst.State)
+				}
+			}
+			status = fmt.Sprintf("%s, max_parallel=%d", state, lm.MaxParallel)
+		}
+		fmt.Fprintf(&b, "  %s (%s)\n", man.ModelID, status)
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
+func (m *model) localModelAdd(name string) {
+	id := localModelID(name)
+	man, ok := discovery.ManifestForModel(id)
+	if !ok || man.Kind != "chat" {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No local chat model catalog entry for " + id + " on this platform"})
+		return
+	}
+	if _, exists := m.config.Ocode.LocalModels[id]; exists {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is already registered"})
+		return
+	}
+	if err := config.SaveLocalModelConfig(id, false, 1); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+		return
+	}
+	if m.config.Ocode.LocalModels == nil {
+		m.config.Ocode.LocalModels = map[string]config.LocalModelConfig{}
+	}
+	m.config.Ocode.LocalModels[id] = config.LocalModelConfig{Enabled: false, MaxParallel: 1}
+	m.messages = append(m.messages, message{role: roleAssistant, text: id + " registered (disabled). Enable with /localmodel enable " + id})
+}
+
+func (m *model) registeredLocalModelIDs() []string {
+	ids := make([]string, 0, len(m.config.Ocode.LocalModels))
+	for id := range m.config.Ocode.LocalModels {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (m *model) localModelSetEnabled(name string, enabled bool) {
+	id := localModelID(name)
+	lm, exists := m.config.Ocode.LocalModels[id]
+	if !exists {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is not registered. Run /localmodel add " + name + " first"})
+		return
+	}
+	if enabled == lm.Enabled {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is already " + map[bool]string{true: "enabled", false: "disabled"}[enabled]})
+		return
+	}
+	if !enabled {
+		if m.agent != nil {
+			if err := discovery.StopModelInstance(m.agent.Procs(), id); err != nil {
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Error stopping " + id + ": " + err.Error()})
+				return
+			}
+		}
+		lm.Enabled = false
+		if err := config.SaveLocalModelConfig(id, false, lm.MaxParallel); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+			return
+		}
+		m.config.Ocode.LocalModels[id] = lm
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + ": disabled"})
+		return
+	}
+	if err := m.startLocalModelInstance(id, lm.MaxParallel); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error starting " + id + ": " + err.Error()})
+		return
+	}
+	lm.Enabled = true
+	if err := config.SaveLocalModelConfig(id, true, lm.MaxParallel); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+		return
+	}
+	m.config.Ocode.LocalModels[id] = lm
+	m.messages = append(m.messages, message{role: roleAssistant, text: id + ": enabled"})
+}
+
+// startLocalModelInstance resolves this model's deterministic port and spawns
+// it through the agent's supervised process registry, mirroring the spawn
+// closure shape used by ensureDiscovery (internal/agent/discovery_glue.go:60-72).
+func (m *model) startLocalModelInstance(id string, maxParallel int) error {
+	if m.agent == nil {
+		return fmt.Errorf("no active agent to spawn the local model process")
+	}
+	port, err := discovery.AssignChatPort(id, m.registeredLocalModelIDs())
+	if err != nil {
+		return err
+	}
+	procs := m.agent.Procs()
+	var lastProcID string
+	spawn := func(cmdline string) error {
+		p := procs.StartBackground(cmdline)
+		if p != nil && p.SnapshotStatus() == tool.ProcExited {
+			return fmt.Errorf("local chat server process exited immediately on spawn")
+		}
+		lastProcID = p.ID
+		return nil
+	}
+	if err := discovery.StartModelInstance(spawn, id, port, maxParallel, agent.DiscoveryCacheDir()); err != nil {
+		return err
+	}
+	discovery.SetModelInstanceProcessID(id, lastProcID)
+	return nil
+}
+
+func (m *model) localModelSetLimit(name, valueStr string) {
+	id := localModelID(name)
+	value, err := strconv.Atoi(valueStr)
+	if err != nil || (value != 1 && value != 2) {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Invalid limit " + valueStr + " — must be 1 or 2"})
+		return
+	}
+	lm, exists := m.config.Ocode.LocalModels[id]
+	if !exists {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is not registered. Run /localmodel add " + name + " first"})
+		return
+	}
+	wasEnabled := lm.Enabled
+	if wasEnabled && m.agent != nil {
+		if err := discovery.StopModelInstance(m.agent.Procs(), id); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error stopping " + id + " to apply new limit: " + err.Error()})
+			return
+		}
+	}
+	lm.MaxParallel = value
+	if wasEnabled {
+		if err := m.startLocalModelInstance(id, value); err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error restarting " + id + " with new limit: " + err.Error()})
+			return
+		}
+	}
+	if err := config.SaveLocalModelConfig(id, lm.Enabled, value); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: " + err.Error()})
+		return
+	}
+	m.config.Ocode.LocalModels[id] = lm
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%s: max_parallel set to %d", id, value)})
+}
+
+func (m *model) showLocalModelStatus(name string) {
+	var b strings.Builder
+	ids := []string{}
+	if name != "" {
+		ids = append(ids, localModelID(name))
+	} else {
+		ids = m.registeredLocalModelIDs()
+		sort.Strings(ids)
+	}
+	if len(ids) == 0 {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "No local models registered. Run /localmodel add <name>."})
+		return
+	}
+	for _, id := range ids {
+		lm, exists := m.config.Ocode.LocalModels[id]
+		if !exists {
+			fmt.Fprintf(&b, "%s: not registered\n", id)
+			continue
+		}
+		fmt.Fprintf(&b, "%s\n  enabled: %v\n  max_parallel: %d\n", id, lm.Enabled, lm.MaxParallel)
+		if inst, ok := discovery.GetModelInstance(id); ok {
+			fmt.Fprintf(&b, "  state: %s\n  port: %d\n  base_url: %s\n", inst.State, inst.Port, inst.BaseURL)
+		} else {
+			fmt.Fprintf(&b, "  state: %s\n", discovery.InstanceStopped)
+		}
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
+}
+
 func (m *model) handleDiscoverIgnoreCmd(args []string) tea.Cmd {
 	dc := &m.config.Ocode.Discovery
 	defaults := config.DefaultDiscoveryIgnorePaths()

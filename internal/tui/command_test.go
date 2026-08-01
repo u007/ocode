@@ -1198,3 +1198,30 @@ func (c *staticLLMClient) Chat(messages []agent.Message, tools []map[string]inte
 
 func (c *staticLLMClient) GetProvider() string { return "mock" }
 func (c *staticLLMClient) GetModel() string    { return "mock-model" }
+
+func TestLocalModelListEmptyShowsCatalogOnly(t *testing.T) {
+	m := model{
+		input:  newTestTextarea(),
+		config: &config.Config{Ocode: config.OcodeConfig{}},
+	}
+	m.handleLocalModelCmd([]string{"list"})
+	if len(m.messages) == 0 {
+		t.Fatal("expected a message listing the catalog")
+	}
+	last := m.messages[len(m.messages)-1].text
+	if !strings.Contains(last, "bonsai-8b-1bit") {
+		t.Fatalf("expected catalog entry bonsai-8b-1bit in output, got: %s", last)
+	}
+}
+
+func TestLocalModelLimitRejectsInvalidValue(t *testing.T) {
+	m := model{
+		input:  newTestTextarea(),
+		config: &config.Config{Ocode: config.OcodeConfig{}},
+	}
+	m.handleLocalModelCmd([]string{"limit", "local/bonsai-8b-1bit", "3"})
+	last := m.messages[len(m.messages)-1].text
+	if !strings.Contains(last, "1") || !strings.Contains(last, "2") {
+		t.Fatalf("expected error mentioning valid values 1/2, got: %s", last)
+	}
+}
