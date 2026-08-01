@@ -50,9 +50,13 @@ Reuses the existing building blocks, generalized from "one embedder slot" to
   logic (check user override → check fixed port for a matching model →
   spawn new) is generalized to take a model id and a per-model port instead
   of being hardcoded to the embedder's fixed port 11457. Each enabled local
-  model gets its own fixed port, assigned deterministically (e.g. next free
-  port from a small reserved range) so multiple ocode processes on the same
-  machine can still share one running instance per model.
+  model gets its own fixed port from a reserved range `11458-11465` (8 slots),
+  assigned deterministically by sorting registered model ids alphabetically
+  and taking the next free slot in that order — so multiple ocode processes
+  on the same machine agree on the same port for the same model without
+  needing a shared allocation file. `/localmodel add` beyond 8 registered
+  models fails with an explicit "no free local-model port" error rather than
+  silently reusing a port.
 
 ### New: instance registry (`internal/discovery/instances.go`)
 
