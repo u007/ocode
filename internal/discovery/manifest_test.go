@@ -52,6 +52,12 @@ func TestExpectedServeID(t *testing.T) {
 	if got := lfm.ExpectedServeID(); got != "lfm2.5-embedding-350m-q4_k_m.gguf" {
 		t.Fatalf("lfm ExpectedServeID = %q, want gguf basename", got)
 	}
+	// The chat MLX manifest serves via mlx_lm.server, which reports the HF repo
+	// id in /v1/models — not the discovery ModelID.
+	bonsaiMLX, _ := ManifestForModel("local/bonsai-8b-1bit")
+	if got := bonsaiMLX.ExpectedServeID(); got != "prism-ml/Bonsai-8B-mlx-1bit" {
+		t.Fatalf("bonsai MLX ExpectedServeID = %q, want HF repo id", got)
+	}
 }
 
 func TestLocalManifestsForHostExcludesChatKind(t *testing.T) {

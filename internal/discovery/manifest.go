@@ -207,7 +207,7 @@ var localManifests = []ServerManifest{
 	{
 		// Bonsai 8B, 1-bit (ternary/BitNet-style quant). MLX build on Apple
 		// Silicon: prism-ml/Bonsai-8B-mlx-1bit, run via mlx_lm's own
-		// OpenAI-compatible server (mlx_lm.server). --max-sequences is
+		// OpenAI-compatible server (mlx_lm.server). --decode-concurrency is
 		// mlx_lm.server's concurrent-request-slot flag, substituted from
 		// {parallel} by the instance manager (internal/discovery/instances.go).
 		OS: "darwin", Arch: "arm64",
@@ -217,7 +217,7 @@ var localManifests = []ServerManifest{
 			"--model", "{repo}",
 			"--host", "127.0.0.1",
 			"--port", "{port}",
-			"--max-sequences", "{parallel}"},
+			"--decode-concurrency", "{parallel}"},
 		HealthPath:     "/v1/models",
 		CompletionPath: "/v1/chat/completions",
 	},
@@ -344,9 +344,14 @@ func ChatManifestsForHost() []ServerManifest {
 
 // ExpectedServeID is the model id the running server must report in
 // /v1/models for us to adopt it. llama.cpp reports the GGUF path, so we match
-// on the GGUF basename; the MLX server reports the discovery ModelID directly.
+// on the GGUF basename; the MLX server reports the served model id — the HF
+// repo id (mlx_lm.server, chat manifests) or the discovery ModelID verbatim
+// (the bundled mlx_embed_server.py, which is handed the ModelID via --model-id).
 func (m ServerManifest) ExpectedServeID() string {
 	if m.Backend == BackendMLX {
+		if m.MLXRepo != "" {
+			return m.MLXRepo
+		}
 		return m.ModelID
 	}
 	for _, a := range m.Artifacts {
