@@ -255,11 +255,16 @@ var (
 
 func mlxServerFlags() map[string]bool {
 	mlxFlagsOnce.Do(func() {
-		// Running --help is cheap and side-effect free; the server exits
-		// after printing usage. Bounded timeout in case python3/mlx_lm's
-		// import chain is slow or python3 is missing from PATH — an
-		// unbounded exec here would hang the caller indefinitely.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Running --help is side-effect free (the server prints usage and
+		// exits), but NOT cheap: mlx_lm.server's import chain (mlx, numpy,
+		// transformers-like deps) can legitimately take longer than a naive
+		// few-second timeout to even reach argparse, especially on a cold
+		// bytecode cache — an earlier 5s timeout was observed killing this
+		// probe in practice ("signal: killed"), which forced the fail-open
+		// path (keep every manifest flag, including ones this server
+		// actually rejects) on every run. 30s is generous because this only
+		// runs once per process lifetime (sync.Once).
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		out, err := exec.CommandContext(ctx, "python3", "-m", "mlx_lm.server", "--help").Output()
 		if err != nil {
