@@ -149,6 +149,28 @@ func TestChatManifestForHostUnknownModelReturnsFalse(t *testing.T) {
 	}
 }
 
+// TestBonsaiMLXManifestHasNoConcurrencyFlag guards a real crash: an earlier
+// revision passed --decode-concurrency {parallel} in the MLX LaunchArgv,
+// assuming mlx_lm.server supported a concurrent-request-slot flag. It
+// doesn't (confirmed from the server's own --help usage output), so the
+// spawn crashed with "unrecognized arguments: --decode-concurrency" — this
+// happened even with the flag-probe/drop safety net working correctly,
+// because the flag never existed on any version of this server to probe
+// for. The fix is to never pass it in the first place, not to rely on
+// runtime detection for a flag we now know is always absent.
+func TestBonsaiMLXManifestHasNoConcurrencyFlag(t *testing.T) {
+	for _, m := range localManifests {
+		if m.ModelID != "local/bonsai-8b-1bit" || m.Backend != BackendMLX {
+			continue
+		}
+		for _, a := range m.LaunchArgv {
+			if a == "--decode-concurrency" || a == "--max-sequences" || a == "{parallel}" {
+				t.Fatalf("MLX bonsai manifest LaunchArgv must not reference a concurrency flag/placeholder this server doesn't support: %v", m.LaunchArgv)
+			}
+		}
+	}
+}
+
 func TestModelMatches(t *testing.T) {
 	// llama.cpp reports the full GGUF path; substring match on basename.
 	if !modelMatches([]string{"/Users/x/discovery/local-darwin-arm64/bge-m3-q4_k_m.gguf"}, "bge-m3-q4_k_m.gguf") {

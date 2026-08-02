@@ -207,12 +207,23 @@ var localManifests = []ServerManifest{
 	{
 		// Bonsai 8B, 1-bit (ternary/BitNet-style quant). MLX build on Apple
 		// Silicon: prism-ml/Bonsai-8B-mlx-1bit, run via mlx_lm's own
-		// OpenAI-compatible server (mlx_lm.server). --decode-concurrency is
-		// mlx_lm.server's concurrent-request-slot flag, substituted from
-		// {parallel} by the instance manager (internal/discovery/instances.go).
-		// It only exists in mlx_lm >= 0.31 — the PrismML fork's paired
-		// mlx_lm 0.30.5 lacks it, and spawnMLXChatServer drops unsupported
-		// flags (probed via `mlx_lm.server --help`) rather than failing.
+		// OpenAI-compatible server (mlx_lm.server).
+		//
+		// NO concurrency flag: earlier revisions of this manifest passed
+		// --decode-concurrency {parallel}, assuming mlx_lm.server had a
+		// concurrent-request-slot flag like llama-server's --parallel. It
+		// does not — confirmed from this server's own `--help` usage output
+		// (only -h/--model/--adapter-path/--host/--port/--draft-model/
+		// --num-draft-tokens/--trust-remote-code/--log-level/--chat-template/
+		// --use-default-chat-template/--temp/--top-p/--top-k/--min-p/
+		// --max-tokens/--chat-template-args exist), which is why passing it
+		// crashed the spawn with "unrecognized arguments: --decode-concurrency"
+		// even with spawnMLXChatServer's flag-probe/drop safety net working
+		// correctly. MaxParallel (/localmodel limit) is therefore a no-op for
+		// this backend — accepted and stored, but nothing in the launch
+		// command reflects it. Only the llama.cpp GGUF entries below actually
+		// honor --parallel.
+		//
 		// NOTE: 1-bit kernels require the PrismML mlx fork (the model card
 		// instructs `pip install mlx @ git+https://github.com/PrismML-Eng/mlx.git@prism`);
 		// stock mlx rejects bits=1 at load ("requested number of bits 1 is not
@@ -223,8 +234,7 @@ var localManifests = []ServerManifest{
 		LaunchArgv: []string{"python3", "-m", "mlx_lm.server",
 			"--model", "{repo}",
 			"--host", "127.0.0.1",
-			"--port", "{port}",
-			"--decode-concurrency", "{parallel}"},
+			"--port", "{port}"},
 		HealthPath:     "/v1/models",
 		CompletionPath: "/v1/chat/completions",
 	},
