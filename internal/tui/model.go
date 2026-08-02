@@ -256,6 +256,16 @@ type localModelActionMsg struct {
 	err         error  // non-nil when the operation failed (config map is not updated)
 }
 
+// modelSwitchWarmedMsg is emitted when warmLocalModelIfNeededCmd's async
+// spawn+health-poll (restart-recovery: config says a local model is enabled,
+// but this session never started it) completes. On success the Update()
+// handler calls finishModelSwitch to actually apply the switch — it was
+// deliberately deferred until the server is confirmed healthy.
+type modelSwitchWarmedMsg struct {
+	modelID string
+	err     error
+}
+
 // syncLoginStartedMsg is emitted when /login has started the device-code flow
 // and the user needs to see the auth code. It carries the state needed for
 // the background polling phase (client, deviceCode, expiresAt).
@@ -2830,6 +2840,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.messages = append(m.messages, message{role: roleAssistant, text: msg.text})
 		m.rerenderTranscriptAndMaybeScroll()
+	case modelSwitchWarmedMsg:
+		if msg.err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Error starting " + msg.modelID + ": " + msg.err.Error()})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		}
+		cmd := m.finishModelSwitch(msg.modelID)
+		m.rerenderTranscriptAndMaybeScroll()
+		return m, cmd
 	case usageSummaryMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error querying usage: %v", msg.err)})
@@ -7606,52 +7625,109 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 	}
 	if len(args) > 0 {
 		modelID := args[0]
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", modelID), transient: true})
-		m.activeModel = modelID
-		if m.config != nil {
-			m.config.Model = modelID
+		if warmCmd := m.warmLocalModelIfNeededCmd(modelID); warmCmd != nil {
+			return warmCmd
 		}
-		// Kaizen skill-as-slash admit depends on active model — rebuild popup list.
-		m.refreshCustomCommands()
-		// Persist the user's selection even when the new client cannot be built yet
-		// (e.g. provider credentials are not connected). The UI model name should
-		// still reflect the chosen model so the picker / status line stay in sync.
-		if err := config.SaveLastModel(modelID); err != nil {
-			log.Printf("save last model: %v", err)
-		}
-		if strings.Contains(modelID, "/") {
-			if err := config.SaveRecentModel(modelID); err != nil {
-				log.Printf("save recent model: %v", err)
+		return m.finishModelSwitch(modelID)
+	}
+	return nil
+}
+
+// warmLocalModelIfNeededCmd covers the restart-recovery gap for /localmodel
+// models: config can say Enabled=true (set only after a successful
+// /localmodel enable earlier) while THIS session never actually started the
+// server — e.g. ocode restarted and the spawned process is gone, or was never
+// started this run. Returns nil (meaning "proceed synchronously, no warm-up
+// needed") for every other case: not a "local/..." id, already running this
+// session, running via a different ocode process (live port probe), or not a
+// registered+enabled /localmodel entry at all (NewClient's existing
+// nil-baseURL handling covers that misconfiguration the same way it always
+// has). When warm-up genuinely is needed, prints a "Starting..." message and
+// returns a tea.Cmd that spawns it off the Update() goroutine, only finishing
+// the model switch (finishModelSwitch) once it reports healthy.
+func (m *model) warmLocalModelIfNeededCmd(modelID string) tea.Cmd {
+	if !strings.HasPrefix(modelID, "local/") {
+		return nil
+	}
+	if _, ok := discovery.GetModelInstance(modelID); ok {
+		return nil
+	}
+	if m.config == nil {
+		return nil
+	}
+	lm, exists := m.config.Ocode.LocalModels[modelID]
+	if !exists || !lm.Enabled {
+		return nil
+	}
+	if registeredIDs, err := config.RegisteredLocalModelIDs(); err == nil {
+		if port, err := discovery.AssignChatPort(modelID, registeredIDs); err == nil {
+			if _, ok := discovery.ProbeModelInstance(modelID, port); ok {
+				return nil // a different ocode process already has it running and healthy
 			}
 		}
-		var mcpNames []string
-		if m.agent != nil {
-			mcpNames = m.agent.MCPToolNames()
-		}
-		client := agent.NewClient(m.config, modelID)
-		var tools []tool.Tool
-		var lspMgr *lsp.Manager
-		if m.agent != nil {
-			tools = m.agent.GetTools()
-			// Reuse the existing LSP manager so diagnostics already in
-			// the store survive a model switch (a fresh manager would
-			// re-spawn gopls and start with an empty store).
-			lspMgr = m.lspMgr
-		} else {
-			tools, lspMgr = m.getInitialTools()
-		}
-		if client != nil {
-			next := agent.NewAgent(client, tools, m.config, lspMgr)
-			next.RestoreMCPToolNames(mcpNames)
-			return m.replaceAgent(next)
-		}
-		if m.agent == nil {
-			next := agent.NewAgent(nil, tools, m.config, lspMgr)
-			next.RestoreMCPToolNames(mcpNames)
-			return m.replaceAgent(next)
-		}
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Selected model %s, but no API key was found for its provider. Run /connect to add credentials.", modelID)})
 	}
+	if m.agent == nil {
+		return nil
+	}
+	ag := m.agent
+	maxParallel := lm.MaxParallel
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + modelID + " (this can take a while on a cold model download)..."})
+	return func() tea.Msg {
+		err := startLocalModelInstance(ag, modelID, maxParallel)
+		return modelSwitchWarmedMsg{modelID: modelID, err: err}
+	}
+}
+
+// finishModelSwitch does the actual model switch: persists the selection,
+// builds a new client for modelID, and swaps in a new Agent. Split out of
+// handleModelCmd so warmLocalModelIfNeededCmd's async path can defer calling
+// this until a cold local-model instance is confirmed healthy.
+func (m *model) finishModelSwitch(modelID string) tea.Cmd {
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Switching to model %s", modelID), transient: true})
+	m.activeModel = modelID
+	if m.config != nil {
+		m.config.Model = modelID
+	}
+	// Kaizen skill-as-slash admit depends on active model — rebuild popup list.
+	m.refreshCustomCommands()
+	// Persist the user's selection even when the new client cannot be built yet
+	// (e.g. provider credentials are not connected). The UI model name should
+	// still reflect the chosen model so the picker / status line stay in sync.
+	if err := config.SaveLastModel(modelID); err != nil {
+		log.Printf("save last model: %v", err)
+	}
+	if strings.Contains(modelID, "/") {
+		if err := config.SaveRecentModel(modelID); err != nil {
+			log.Printf("save recent model: %v", err)
+		}
+	}
+	var mcpNames []string
+	if m.agent != nil {
+		mcpNames = m.agent.MCPToolNames()
+	}
+	client := agent.NewClient(m.config, modelID)
+	var tools []tool.Tool
+	var lspMgr *lsp.Manager
+	if m.agent != nil {
+		tools = m.agent.GetTools()
+		// Reuse the existing LSP manager so diagnostics already in
+		// the store survive a model switch (a fresh manager would
+		// re-spawn gopls and start with an empty store).
+		lspMgr = m.lspMgr
+	} else {
+		tools, lspMgr = m.getInitialTools()
+	}
+	if client != nil {
+		next := agent.NewAgent(client, tools, m.config, lspMgr)
+		next.RestoreMCPToolNames(mcpNames)
+		return m.replaceAgent(next)
+	}
+	if m.agent == nil {
+		next := agent.NewAgent(nil, tools, m.config, lspMgr)
+		next.RestoreMCPToolNames(mcpNames)
+		return m.replaceAgent(next)
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Selected model %s, but no API key was found for its provider. Run /connect to add credentials.", modelID)})
 	return nil
 }
 
@@ -8233,6 +8309,26 @@ func (m *model) registeredLocalModelIDs() []string {
 	for id := range m.config.Ocode.LocalModels {
 		ids = append(ids, id)
 	}
+	return ids
+}
+
+// enabledLocalModelIDs returns the sorted ids of every /localmodel entry with
+// Enabled=true, in "local/<name>" form — union'd into the chat model picker
+// (openModelPicker et al.) so a registered local model is selectable there
+// and in every picker that reuses it (/model, /permissions model,
+// /small-model, /recap-model, ...). Must only be called from the main
+// goroutine (reads m.config directly).
+func (m *model) enabledLocalModelIDs() []string {
+	if m.config == nil {
+		return nil
+	}
+	var ids []string
+	for id, lm := range m.config.Ocode.LocalModels {
+		if lm.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
 	return ids
 }
 

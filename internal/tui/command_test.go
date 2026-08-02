@@ -1225,3 +1225,65 @@ func TestLocalModelLimitRejectsInvalidValue(t *testing.T) {
 		t.Fatalf("expected error mentioning valid values 1/2, got: %s", last)
 	}
 }
+
+func TestEnabledLocalModelIDsNilConfigReturnsNil(t *testing.T) {
+	m := model{input: newTestTextarea()}
+	if got := m.enabledLocalModelIDs(); got != nil {
+		t.Fatalf("expected nil for a nil config, got %v", got)
+	}
+}
+
+func TestEnabledLocalModelIDsFiltersDisabledAndSorts(t *testing.T) {
+	m := model{
+		input: newTestTextarea(),
+		config: &config.Config{Ocode: config.OcodeConfig{LocalModels: map[string]config.LocalModelConfig{
+			"local/zeta":   {Enabled: true, MaxParallel: 1},
+			"local/alpha":  {Enabled: true, MaxParallel: 2},
+			"local/hidden": {Enabled: false, MaxParallel: 1},
+		}}},
+	}
+	got := m.enabledLocalModelIDs()
+	want := []string{"local/alpha", "local/zeta"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// TestWarmLocalModelIfNeededCmdSkipsNonLocalModel guards that the model-switch
+// warm-up hook (restart-recovery for /localmodel) never engages for a normal
+// hosted-provider model — it must return nil (proceed synchronously) so
+// picking e.g. "anthropic/claude-..." is unaffected.
+func TestWarmLocalModelIfNeededCmdSkipsNonLocalModel(t *testing.T) {
+	m := model{
+		input:  newTestTextarea(),
+		config: &config.Config{Ocode: config.OcodeConfig{}},
+	}
+	if cmd := m.warmLocalModelIfNeededCmd("anthropic/claude-sonnet-5"); cmd != nil {
+		t.Fatal("expected nil for a non-local model id")
+	}
+}
+
+func TestWarmLocalModelIfNeededCmdSkipsUnregisteredLocalModel(t *testing.T) {
+	m := model{
+		input:  newTestTextarea(),
+		config: &config.Config{Ocode: config.OcodeConfig{}},
+	}
+	if cmd := m.warmLocalModelIfNeededCmd("local/never-registered"); cmd != nil {
+		t.Fatal("expected nil for a local model id with no /localmodel entry")
+	}
+}
+
+func TestWarmLocalModelIfNeededCmdSkipsWhenNoAgent(t *testing.T) {
+	m := model{
+		input: newTestTextarea(),
+		config: &config.Config{Ocode: config.OcodeConfig{LocalModels: map[string]config.LocalModelConfig{
+			"local/bonsai-8b-1bit": {Enabled: true, MaxParallel: 1},
+		}}},
+	}
+	// No m.agent set — nothing to spawn through, so this must fall through to
+	// nil (finishModelSwitch's existing nil-agent handling then runs), not
+	// panic on a nil agent dereference.
+	if cmd := m.warmLocalModelIfNeededCmd("local/bonsai-8b-1bit"); cmd != nil {
+		t.Fatal("expected nil when m.agent is nil")
+	}
+}

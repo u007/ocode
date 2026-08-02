@@ -22,6 +22,7 @@ import (
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/discovery"
 	providerplugin "github.com/u007/ocode/internal/plugin/provider"
 	"github.com/u007/ocode/internal/redact"
 )
@@ -3366,6 +3367,7 @@ var keyOptionalProviders = map[string]bool{
 	"opencode":    true, // free tier (mimo-v2.5-free etc.)
 	"opencode-go": true,
 	"lmstudio":    true, // local server, no key
+	"local":       true, // /localmodel-managed local server, no key
 }
 
 var providers = map[string]providerInfo{
@@ -3395,6 +3397,11 @@ var providers = map[string]providerInfo{
 	"opencode-go":           {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
 	"copilot":               {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
 	"lmstudio":              {"", "http://localhost:1234/v1"},
+	// "local" has no static baseURL — see the provider == "local" branch
+	// below, which resolves it per-model via discovery.GetModelInstance
+	// (each /localmodel instance runs on its own port, unlike every other
+	// provider here which shares one fixed endpoint).
+	"local": {"", ""},
 	"cloudflare-workers":    {"CLOUDFLARE_API_KEY", ""},
 	"cloudflare-gateway":    {"CLOUDFLARE_GATEWAY_KEY", ""},
 	"codex":                 {"OPENAI_API_KEY", "https://api.openai.com/v1"},
@@ -3540,6 +3547,29 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	if provider == "lmstudio" {
 		if override := os.Getenv("LMSTUDIO_BASE_URL"); override != "" {
 			baseURL = normalizeLMStudioBaseURL(override)
+		}
+	}
+
+	// "local" (/localmodel-managed instances) has no static baseURL — unlike
+	// every other provider, each model runs on its OWN port
+	// (discovery.AssignChatPort), so it must be resolved per full model id,
+	// not per provider. GetModelInstance covers a server this process
+	// started or already adopted; ProbeModelInstance covers one warmed up by
+	// a DIFFERENT ocode process (config says Enabled=true, this process
+	// never called StartModelInstance for it). If neither resolves, baseURL
+	// stays "" and the existing "no baseURL" check below refuses to build the
+	// client — the caller gets a clear nil instead of a deferred
+	// connection-refused on the first request.
+	if provider == "local" {
+		fullModelID := "local/" + model
+		if info, ok := discovery.GetModelInstance(fullModelID); ok && info.BaseURL != "" {
+			baseURL = info.BaseURL
+		} else if registeredIDs, err := config.RegisteredLocalModelIDs(); err == nil {
+			if port, err := discovery.AssignChatPort(fullModelID, registeredIDs); err == nil {
+				if info, ok := discovery.ProbeModelInstance(fullModelID, port); ok {
+					baseURL = info.BaseURL
+				}
+			}
 		}
 	}
 

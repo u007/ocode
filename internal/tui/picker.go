@@ -202,9 +202,12 @@ func (m *model) openModelPicker() tea.Cmd {
 	m.showPicker = true
 	m.pushPickerModal()
 
-	// Start async load of the full provider model list.
+	// Start async load of the full provider model list. enabledLocalModelIDs
+	// is read from m.config synchronously here (main goroutine) and passed
+	// in, not read inside the returned tea.Cmd's closure (which runs on a
+	// background goroutine and must never touch *model fields).
 	m.pickerLoadingAll = true
-	return loadFullModelPickerCmd(shown, imageOnly)
+	return loadFullModelPickerCmd(shown, imageOnly, m.enabledLocalModelIDs())
 }
 
 // openImageModelPicker opens the model picker restricted to image-generating
@@ -222,10 +225,13 @@ func (m *model) openImageModelPicker() tea.Cmd {
 // loadFullModelPickerCmd returns a tea.Cmd that loads all provider models in a
 // background goroutine and sends a modelPickerFullModelsLoadedMsg with the
 // provider sections (excluding models already shown in favorites/recents).
-// When imageOnly is true, only image-generating models are included.
-func loadFullModelPickerCmd(shown map[string]bool, imageOnly bool) tea.Cmd {
+// When imageOnly is true, only image-generating models are included. localIDs
+// are the caller's enabled /localmodel entries (see enabledLocalModelIDs) —
+// passed in rather than read here because this closure runs off the main
+// goroutine and must not touch *model/config state directly.
+func loadFullModelPickerCmd(shown map[string]bool, imageOnly bool, localIDs []string) tea.Cmd {
 	return func() tea.Msg {
-		allModels := agent.AllProviderModels()
+		allModels := append(agent.AllProviderModels(), localIDs...)
 		lmsResult := agent.FetchLMStudioModels()
 
 		var items, values []string
@@ -284,7 +290,7 @@ func loadFullModelPickerCmd(shown map[string]bool, imageOnly bool) tea.Cmd {
 func (m *model) buildFullModelPickerItems() {
 	m.input.Blur()
 	lmsResult := agent.FetchLMStudioModels()
-	allModels := agent.AllProviderModelsCached()
+	allModels := append(agent.AllProviderModelsCached(), m.enabledLocalModelIDs()...)
 	favorites := config.LoadFavorites()
 	recents := config.LoadRecentModels()
 

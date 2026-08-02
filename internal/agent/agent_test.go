@@ -496,6 +496,19 @@ func TestNewClientUsesChutesLLMEndpoint(t *testing.T) {
 	}
 }
 
+// TestNewClientLocalProviderNoInstanceReturnsNil guards the fail-safe path
+// for /localmodel-backed models: "local" has no static baseURL (each instance
+// runs on its own port), so with no running/probeable instance for the
+// requested model, NewClient must return nil (the existing "no baseURL"
+// check) rather than build a client pointed at an empty base URL that would
+// fail with a confusing connection-refused on first use.
+func TestNewClientLocalProviderNoInstanceReturnsNil(t *testing.T) {
+	client := NewClient(nil, "local/never-started-in-this-test")
+	if client != nil {
+		t.Fatalf("expected nil client for an unresolvable local model, got %#v", client)
+	}
+}
+
 func TestNewClientUsesOpenCodeGoEndpoint(t *testing.T) {
 	client := NewClient(nil, "opencode-go/glm-5.1")
 	got, ok := client.(*GenericClient)

@@ -84,10 +84,30 @@ var (
 // passes or times out (300x1s poll — longer than EnsureLocalServer's 60x1s
 // because first load downloads multi-GB weights; see chatHealthPollAttempts).
 // Updates the in-process instance map on success.
+//
+// Probes port before spawning (mirrors EnsureLocalServer's adopt-before-spawn
+// pattern in localserver.go) and adopts an already-healthy, matching server
+// instead of spawning a second one. This matters once callers re-warm an
+// "enabled" model after a restart: this process's in-memory instances map is
+// empty then, but a DIFFERENT ocode process (or a previous run of this same
+// session) may already have a healthy server bound to modelID's port. Without
+// this check, StartModelInstance would try to bind the same port again, fail,
+// then have its health-poll find and adopt the OTHER process's server anyway
+// — but with the wrong processID recorded (this call's spawn never
+// succeeded), leaving /localmodel disable unable to find the real process and
+// /localmodel status reading a dead PID for memory.
 func StartModelInstance(spawn func(cmdline string) error, modelID string, port int, maxParallel int, cacheDir string) error {
 	man, ok := ChatManifestForHost(modelID)
 	if !ok {
 		return fmt.Errorf("no local chat manifest for model %q on %s/%s", modelID, goos(), goarch())
+	}
+
+	if info, ok := ProbeModelInstance(modelID, port); ok {
+		instMu.Lock()
+		info.MaxParallel = maxParallel
+		instances[modelID] = &chatInstance{info: info} // processID stays empty — we don't own this process
+		instMu.Unlock()
+		return nil
 	}
 
 	instMu.Lock()
