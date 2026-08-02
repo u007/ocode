@@ -209,23 +209,30 @@ func (t TaskTool) Definition() map[string]interface{} {
 					"type":        "boolean",
 					"description": "When true and the parallel batch contains 2+ subagent calls with this flag, the agent will share a notes bus across the group. Has no effect on a single (non-grouped) call.",
 				},
+				"resume_task_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Resume a previously cancelled or completed task instead of starting a new one. Set to the task_id of a run whose state is cancelled or done; prompt becomes the follow-up instruction and the sub-agent continues with its full prior conversation history.",
+				},
 			},
 			"required": []string{"prompt"},
 		},
 	}
 }
 
+type taskToolParams struct {
+	Prompt          string `json:"prompt"`
+	Agent           string `json:"agent"`
+	SubagentType    string `json:"subagent_type"`
+	Context         string `json:"context"`
+	Description     string `json:"description"`
+	RunInBackground bool   `json:"run_in_background"`
+	Background      bool   `json:"background"`
+	SharedNotes     bool   `json:"shared_notes"`
+	ResumeTaskID    string `json:"resume_task_id"`
+}
+
 func (t TaskTool) Execute(args json.RawMessage) (string, error) {
-	var params struct {
-		Prompt          string `json:"prompt"`
-		Agent           string `json:"agent"`
-		SubagentType    string `json:"subagent_type"`
-		Context         string `json:"context"`
-		Description     string `json:"description"`
-		RunInBackground bool   `json:"run_in_background"`
-		Background      bool   `json:"background"`
-		SharedNotes     bool   `json:"shared_notes"`
-	}
+	var params taskToolParams
 	if err := json.Unmarshal(args, &params); err != nil {
 		return "", err
 	}
@@ -238,6 +245,10 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	}
 	if params.Background {
 		params.RunInBackground = true
+	}
+
+	if params.ResumeTaskID != "" {
+		return t.executeResume(params)
 	}
 
 	spec := t.findAgent(params.Agent)
@@ -458,6 +469,90 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 	return fallbackWarning + result, nil
+}
+
+// resumeEligibleRun looks up taskID and validates it can be resumed: it must
+// exist, be owned by the calling agent (same comparison as
+// AgentRunRegistry.CancelOwned), and be in RunCancelled or RunDone. Returns
+// the run and its subagent-type name (run.Name) on success.
+func (t TaskTool) resumeEligibleRun(taskID string) (*AgentRun, string, error) {
+	if t.runs == nil {
+		return nil, "", fmt.Errorf("no agent run registry")
+	}
+	run, ok := t.runs.Get(taskID)
+	if !ok {
+		return nil, "", fmt.Errorf("unknown task: %s", taskID)
+	}
+	dispatcher := ""
+	if t.mainAgent != nil && t.mainAgent.spec != nil {
+		dispatcher = t.mainAgent.spec.Name
+	}
+	if run.Dispatcher != dispatcher {
+		return nil, "", fmt.Errorf("task %s is not owned by %q", taskID, dispatcher)
+	}
+	status := run.statusValue()
+	if status != RunCancelled && status != RunDone {
+		return nil, "", fmt.Errorf("task %s cannot be resumed from state %q (only cancelled or done tasks can be resumed)", taskID, status)
+	}
+	if run.Sub == nil {
+		return nil, "", fmt.Errorf("task %s has no resumable sub-agent state", taskID)
+	}
+	return run, run.Name, nil
+}
+
+// executeResume continues a cancelled-or-completed subagent run with a new
+// prompt. It reuses the original *Agent (run.Sub) and its full prior
+// transcript instead of constructing a fresh subagent, so tools, permissions,
+// and conversation history all carry over unchanged.
+func (t TaskTool) executeResume(params taskToolParams) (string, error) {
+	run, specName, err := t.resumeEligibleRun(params.ResumeTaskID)
+	if err != nil {
+		return "", err
+	}
+	subAgent := run.Sub
+
+	// Re-dispatch guard: refuse repeated identical resumes without any
+	// intervening user input, same protection fresh dispatch has (see
+	// subagentDispatchLimit).
+	if t.mainAgent != nil {
+		if count := t.mainAgent.NoteSubagentDispatch(specName); count > subagentDispatchLimit {
+			return fmt.Sprintf("Error: refusing to resume subagent %q — it has been launched %d times in a row without any new user input. This usually means the conversation is in a feedback loop. Wait for the user to provide new direction before retrying.", specName, count), nil
+		}
+	}
+
+	if !run.beginResume() {
+		return fmt.Sprintf("Error: task %s changed state and can no longer be resumed (currently %s).", params.ResumeTaskID, run.statusValue()), nil
+	}
+
+	// Build the follow-up message(s) the same way a fresh dispatch builds its
+	// initial ones (context -> optional system message, prompt -> user
+	// message), then append them onto the run's existing transcript — which
+	// already holds the full prior conversation, seeded at the original
+	// dispatch and streamed via subAgent.OnMessage as it ran. The resulting
+	// TranscriptPublic() is exactly the message slice Step needs, since
+	// Agent.Step is stateless and retains no history of its own between
+	// calls.
+	var resumeMsgs []Message
+	if params.Context != "" {
+		resumeMsgs = append(resumeMsgs, Message{
+			Role:    "system",
+			Content: "Background Context: " + params.Context,
+		})
+	}
+	resumeMsgs = append(resumeMsgs, Message{Role: "user", Content: params.Prompt})
+	for _, msg := range resumeMsgs {
+		run.appendTranscript(msg)
+	}
+	messages := run.TranscriptPublic()
+
+	// Undo shutdownTransient(): reopen stopCh and restart the maintenance
+	// workers it tore down when this run first went terminal.
+	subAgent.RearmMaintenance()
+
+	if params.RunInBackground {
+		return t.runBackgroundDispatch(specName, subAgent, run, messages, "resumed"), nil
+	}
+	return t.runSyncDispatch(specName, subAgent, run, messages)
 }
 
 // runBackgroundDispatch launches subAgent asynchronously against messages,
