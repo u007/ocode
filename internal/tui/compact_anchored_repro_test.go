@@ -27,6 +27,7 @@ func compactCfg() *config.Config {
 	cfg.Ocode.Compact.SummaryTimeoutSeconds = 5
 	cfg.Ocode.Compact.SummaryMaxRetries = 0
 	cfg.Ocode.Compact.MaxSummaryInputTokens = 100000
+	cfg.Ocode.Compact.TokenThreshold = 0.0001
 	return cfg
 }
 
@@ -124,6 +125,53 @@ func TestBackgroundJobDuringCompactionIsDeferred(t *testing.T) {
 	if len(got.messages) != msgsBefore {
 		t.Fatalf("job completion must not append to transcript during compaction: before=%d after=%d",
 			msgsBefore, len(got.messages))
+	}
+}
+
+func TestStreamDoneCompactionIsABarrier(t *testing.T) {
+	m := model{
+		viewport:          fastviewport.New(80, 20),
+		styles:            ApplyThemeColors("tokyonight"),
+		agent:             agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
+		streaming:         true,
+		recapModelEnabled: true,
+		messages: []message{
+			{role: roleUser, text: "one"}, {role: roleAssistant, text: "two"},
+			{role: roleUser, text: "three"}, {role: roleAssistant, text: "four"},
+		},
+		queuedItems:    []queuedItem{{kind: queueItemInput, text: "queued"}},
+		pendingJobMsgs: []message{{role: roleAssistant, text: "job result"}},
+	}
+
+	updated, cmd := m.Update(streamDoneMsg{})
+	got := updated.(model)
+	if !got.pendingCompactResume {
+		t.Fatal("expected compaction completion to record deferred resume")
+	}
+	if len(got.queuedItems) != 1 || len(got.pendingJobMsgs) != 1 {
+		t.Fatal("stream completion drained work before compaction finished")
+	}
+	if got.recapGen != 0 {
+		t.Fatal("stream completion started recap before compaction finished")
+	}
+
+	snapshot, uiIdx := got.buildAgentMessagesSnapshot()
+	result, enabled := got.agent.Compact(snapshot)
+	if !enabled || !result.OK {
+		t.Fatalf("expected a compactable result, enabled=%v result=%+v", enabled, result)
+	}
+	got.pendingCompactUIIdx = uiIdx
+	got.skipCompactPreflight = true
+	updated, cmd = got.Update(compactFinishedMsg{result: result})
+	resumed := updated.(model)
+	if cmd == nil {
+		t.Fatal("expected deferred work to resume after compaction")
+	}
+	if len(resumed.pendingJobMsgs) != 0 {
+		t.Fatal("deferred background work was not released after compaction")
+	}
+	if resumed.pendingCompactResume {
+		t.Fatal("deferred resume was not consumed")
 	}
 }
 
