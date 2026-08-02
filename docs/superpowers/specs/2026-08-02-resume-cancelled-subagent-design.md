@@ -31,7 +31,7 @@ Look up the run via `t.runs.Get(resume_task_id)`. Reject (return a tool error st
 - `run.CurrentStatus()` is `RunCancelled` or `RunDone`,
 - `run.Sub != nil`.
 
-This reuses the existing dispatcher-ownership convention rather than introducing a new one.
+This reuses the existing dispatcher-ownership convention rather than introducing a new one — implement the comparison identically to `CancelOwned`'s (`run.Dispatcher != dispatcher`), including its edge case where a top-level (non-subagent) dispatcher has `run.Dispatcher == ""` because `run.Dispatcher` is only set `if t.mainAgent.spec != nil`. Do not special-case this in the resume check; mirror `CancelOwned` exactly so the two ownership rules never drift apart.
 
 ### 3. Rebuilding conversation history
 
@@ -60,7 +60,7 @@ The resume path always calls `RearmMaintenance()` unconditionally — a resumabl
 
 ### 5. Concurrency slot
 
-Add `AgentRun.beginResume()` (mirrors the existing `markQueued`/`beginExecution` pair): transitions `RunCancelled`/`RunDone` → `RunRunning`, resets `EndedAt` to zero. Returns false (reject) if the run isn't in one of those two states — handles the race where two resume calls target the same run concurrently.
+Add `AgentRun.beginResume()` (mirrors the existing `markQueued`/`beginExecution` pair): transitions `RunCancelled`/`RunDone` → `RunRunning`, resets `EndedAt` to zero. Returns false (reject) if the run isn't in one of those two states — handles the race where two resume calls target the same run concurrently. It does not need to clear `Err`/`Result`: stale values from the prior terminal state are harmless (the `RunRunning` branch in `task_status`/`agent_status` never surfaces them) and get overwritten when the resumed run's own `finishOK`/`finishErr` runs.
 
 After `beginResume()` succeeds, the resume path goes through the *same* queue/acquire flow a fresh dispatch uses: `run.markQueued()` (if `t.runs.MaxConcurrent() > 0`) → `t.runs.Acquire(stopCh)` → `run.beginExecution()` → `subAgent.setOwnSlot(release)`. This keeps resumed runs subject to `max_concurrent_agents` exactly like fresh ones.
 
