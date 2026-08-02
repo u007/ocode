@@ -467,3 +467,76 @@ func TestCancelOwnedEmptyDispatcherOnRun(t *testing.T) {
 		t.Fatalf("status = %s, want %s", run.statusValue(), RunCancelled)
 	}
 }
+
+func TestBeginResumeFromCancelled(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.tryFinishCancelled()
+	if run.statusValue() != RunCancelled {
+		t.Fatalf("setup: status = %s, want cancelled", run.statusValue())
+	}
+
+	if ok := run.beginResume(); !ok {
+		t.Fatal("beginResume() = false, want true for a cancelled run")
+	}
+	if run.statusValue() != RunRunning {
+		t.Fatalf("status = %s, want running", run.statusValue())
+	}
+	if !run.EndedAt.IsZero() {
+		t.Fatalf("EndedAt = %v, want zero", run.EndedAt)
+	}
+}
+
+func TestBeginResumeFromDone(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.finishOK("original result")
+	if run.statusValue() != RunDone {
+		t.Fatalf("setup: status = %s, want done", run.statusValue())
+	}
+
+	if ok := run.beginResume(); !ok {
+		t.Fatal("beginResume() = false, want true for a done run")
+	}
+	if run.statusValue() != RunRunning {
+		t.Fatalf("status = %s, want running", run.statusValue())
+	}
+}
+
+func TestBeginResumeRejectsRunning(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore") // New() leaves the run in RunRunning
+
+	if ok := run.beginResume(); ok {
+		t.Fatal("beginResume() = true, want false for a running run")
+	}
+	if run.statusValue() != RunRunning {
+		t.Fatalf("status changed to %s, want unchanged running", run.statusValue())
+	}
+}
+
+func TestBeginResumeRejectsFailed(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.finishErr("boom")
+
+	if ok := run.beginResume(); ok {
+		t.Fatal("beginResume() = true, want false for a failed run")
+	}
+	if run.statusValue() != RunFailed {
+		t.Fatalf("status changed to %s, want unchanged failed", run.statusValue())
+	}
+}
+
+func TestBeginResumeRejectsQueued(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.markQueued()
+	if run.statusValue() != RunQueued {
+		t.Fatalf("setup: status = %s, want queued", run.statusValue())
+	}
+
+	if ok := run.beginResume(); ok {
+		t.Fatal("beginResume() = true, want false for a queued run")
+	}
+}

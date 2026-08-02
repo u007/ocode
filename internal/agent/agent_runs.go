@@ -242,6 +242,24 @@ func (r *AgentRun) beginExecution() bool {
 	return false
 }
 
+// beginResume transitions a resumable run (Cancelled or Done) back into the
+// Running state so it can be re-queued through the normal Acquire/
+// beginExecution flow. Returns false if the run is not in one of those two
+// states — e.g. a concurrent resume call already claimed it. Does not touch
+// Err/Result: stale values from the prior terminal state are harmless (the
+// RunRunning branch of task_status/agent_status never surfaces them) and are
+// overwritten once the resumed run reaches its own finishOK/finishErr.
+func (r *AgentRun) beginResume() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Status != RunCancelled && r.Status != RunDone {
+		return false
+	}
+	r.Status = RunRunning
+	r.EndedAt = time.Time{}
+	return true
+}
+
 // MarkRetrying records that the run is being retried after an error.
 func (r *AgentRun) MarkRetrying(errMsg string) {
 	r.mu.Lock()
