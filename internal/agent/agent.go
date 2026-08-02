@@ -625,6 +625,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 		noteBusFactory: defaultNoteBusFactory,
 	}
 	a.procs = tool.NewProcessRegistry()
+	autoStartLocalModelsOnce.Do(func() { autoStartEnabledLocalModels(a, cfg) })
 	a.runs = NewAgentRunRegistry()
 	if cfg != nil {
 		a.runs.SetMaxConcurrent(cfg.Ocode.MaxConcurrentAgents)
@@ -1313,7 +1314,7 @@ func (a *Agent) resolveCompactRuntime(force bool) compactRuntime {
 	}
 	rt.SummaryTimeoutSeconds = c.SummaryTimeoutSeconds
 	if rt.SummaryTimeoutSeconds <= 0 {
-		rt.SummaryTimeoutSeconds = 90
+		rt.SummaryTimeoutSeconds = 300
 	}
 	rt.SummaryMaxRetries = c.SummaryMaxRetries
 	if rt.SummaryMaxRetries < 0 {
@@ -2419,6 +2420,16 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		}
 	}
 
+	bannedPrefixes := ""
+	if toolName == "bash" && a.permissions != nil {
+		if prefixes := a.permissions.BashBannedPrefixes(); len(prefixes) > 0 {
+			bannedPrefixes = "\nBanned command prefixes (the user has explicitly forbidden these — ALWAYS DENY if the command invokes one of them anywhere, including inside a pipeline, subshell, or for/while/if/case body, even if it is not the first word of the line):\n"
+			for _, p := range prefixes {
+				bannedPrefixes += "  - " + p + "\n"
+			}
+		}
+	}
+
 	prompt := fmt.Sprintf(`You are a permission gatekeeper for an AI coding assistant.
 A tool call is requesting permission. Decide whether to ALLOW or DENY it.
 
@@ -2426,7 +2437,7 @@ Tool: %s
 Arguments: %s
 Rule: %s
 Scope: %s
-%s
+%s%s
 Project context:
 %s
 
@@ -2450,7 +2461,7 @@ Keep your reply short. Examples of correctly formatted final lines:
 ALLOW: writes a test file inside the project directory
 ALLOW: read-only listing of project files
 DENY: deletes files outside the working directory
-These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, context)
+These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, bannedPrefixes, context)
 
 	// Apply custom prompt from config if set.
 	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
@@ -3774,6 +3785,30 @@ func (a *Agent) ResetCancellation() {
 	default:
 		// Not cancelled; nothing to do.
 	}
+}
+
+// RearmMaintenance undoes shutdownTransient(): it reopens the stop channel
+// and recreates + restarts the doc/memory maintenance worker goroutines that
+// shutdownTransient permanently closed via sync.Once-guarded shutdowns. Used
+// when resuming a previously cancelled-or-completed subagent, whose
+// shutdownTransient already ran once via the dispatch goroutine's defer.
+// Mirrors the channel/goroutine setup in NewAgent (see agent.go:640-649).
+func (a *Agent) RearmMaintenance() {
+	a.docMaintMu.Lock()
+	a.docMaintClosing = false
+	a.docMaintMu.Unlock()
+
+	a.memoryMaintCh = make(chan MemoryMaintenanceRequest, 64)
+	a.docMaintCh = make(chan DocMaintenanceRequest, docMaintChannelCap)
+	a.docMaintDone = make(chan struct{})
+	a.memoryMaintDone = make(chan struct{})
+	a.docMaintShutdownOnce = sync.Once{}
+	a.memoryMaintShutdownOnce = sync.Once{}
+
+	go a.memoryMaintenanceWorker()
+	go a.docMaintenanceWorker()
+
+	a.ResetCancellation()
 }
 
 // StopCh returns the current stop channel. Callers that need to check
