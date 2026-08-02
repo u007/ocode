@@ -174,3 +174,64 @@ func TestTaskToolResumeDoneSucceedsBackground(t *testing.T) {
 		t.Fatalf("Result = %q, want the resumed sub-agent's response", run.Result)
 	}
 }
+
+// TestTaskToolResumeChainResumeResume proves a run can be resumed, finish,
+// and be resumed AGAIN: the second resume runs shutdownTransient (from the
+// first resume's dispatch) followed by a second RearmMaintenance, exercising
+// the fresh sync.Once guards + recreated channels in sequence.
+func TestTaskToolResumeChainResumeResume(t *testing.T) {
+	caller := buildResumeCallerAgent(t, "build")
+	run := caller.runs.New("explore")
+	run.Dispatcher = "build"
+	run.appendTranscript(Message{Role: "user", Content: "first prompt"})
+	run.finishOK("first result")
+
+	capture := &captureClient{}
+	sub := NewAgent(capture, nil, nil, nil)
+	sub.shutdownTransient()
+	run.Sub = sub
+	run.Cancel = sub.Cancel
+
+	tool := TaskTool{mainAgent: caller, registry: DefaultAgentRegistry, runs: caller.runs}
+
+	// Resume 1 (sync): goes terminal again (RunDone) with teardown.
+	if _, err := tool.Execute(json.RawMessage(`{"prompt":"second prompt","resume_task_id":"` + run.ID + `"}`)); err != nil {
+		t.Fatalf("first resume err: %v", err)
+	}
+	if run.statusValue() != RunDone {
+		t.Fatalf("after first resume: status = %s, want done", run.statusValue())
+	}
+	if run.Result != "ok" {
+		t.Fatalf("after first resume: Result = %q, want ok", run.Result)
+	}
+
+	// Resume 2 (sync): must work against the freshly re-armed channels.
+	if _, err := tool.Execute(json.RawMessage(`{"prompt":"third prompt","resume_task_id":"` + run.ID + `"}`)); err != nil {
+		t.Fatalf("second resume err: %v", err)
+	}
+	if run.statusValue() != RunDone {
+		t.Fatalf("after second resume: status = %s, want done", run.statusValue())
+	}
+	if run.Result != "ok" {
+		t.Fatalf("after second resume: Result = %q, want ok", run.Result)
+	}
+
+	// Transcript continuity across the chain: every prompt is present, in order.
+	var contents []string
+	for _, m := range capture.Messages {
+		contents = append(contents, m.Content)
+	}
+	want := []string{"first prompt", "second prompt", "third prompt"}
+	for _, w := range want {
+		found := false
+		for _, c := range contents {
+			if c == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("captured messages %v missing expected content %q", contents, w)
+		}
+	}
+}

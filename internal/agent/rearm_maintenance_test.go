@@ -18,11 +18,16 @@ func TestRearmMaintenanceAllowsSecondShutdown(t *testing.T) {
 func TestRearmMaintenanceReopensStopChannel(t *testing.T) {
 	a := NewAgent(&MockClient{}, nil, nil, nil)
 
-	a.Cancel()
+	// Use shutdownTransient (not a bare Cancel) to mirror the terminal-dispatch
+	// path: Cancel() alone leaves the maintenance workers alive, so
+	// RearmMaintenance's channel-field writes would race their `range` loops.
+	// shutdownTransient internally calls Cancel (stopCh closes, as asserted
+	// below) and waits for both workers to exit via their done channels.
+	a.shutdownTransient()
 	select {
 	case <-a.StopCh():
 	default:
-		t.Fatal("setup: stopCh should be closed after Cancel()")
+		t.Fatal("setup: stopCh should be closed after shutdownTransient()")
 	}
 
 	a.RearmMaintenance()

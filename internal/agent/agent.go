@@ -3793,6 +3793,10 @@ func (a *Agent) ResetCancellation() {
 // when resuming a previously cancelled-or-completed subagent, whose
 // shutdownTransient already ran once via the dispatch goroutine's defer.
 // Mirrors the channel/goroutine setup in NewAgent (see agent.go:640-649).
+// The worker-exit guarantee is the bounded wait the shutdowns perform on the
+// done channels (5s); under normal operation the workers are exited by the
+// time this runs, so replacing the channel fields cannot race their range
+// loops.
 func (a *Agent) RearmMaintenance() {
 	a.docMaintMu.Lock()
 	a.docMaintClosing = false
