@@ -7,6 +7,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/u007/ocode/internal/notebus"
 	"github.com/u007/ocode/internal/tool"
@@ -520,6 +521,15 @@ func (t TaskTool) executeResume(params taskToolParams) (string, error) {
 		}
 	}
 
+	// Status can flip to terminal (finishOK/finishErr/tryFinishCancelled)
+	// before the dispatch goroutine's deferred shutdownTransient() has
+	// actually run — resumeEligibleRun above only checked Status, so wait for
+	// that teardown to genuinely finish before touching subAgent again.
+	// Otherwise RearmMaintenance below could race a still-running
+	// shutdownTransient over the same maintenance-worker fields. Must happen
+	// BEFORE beginResume, which replaces teardownDone for the new cycle.
+	run.awaitTeardown(10 * time.Second)
+
 	if !run.beginResume() {
 		return fmt.Sprintf("Error: task %s changed state and can no longer be resumed (currently %s).", params.ResumeTaskID, run.statusValue()), nil
 	}
@@ -581,8 +591,17 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		// work, but the two maintenance-worker goroutines no longer leak. This
 		// mirrors the synchronous path's shutdownTransient; it must only run
 		// AFTER completion — never while the agent is still running, or it
-		// would Cancel() and abort the run.
-		defer subAgent.shutdownTransient()
+		// would Cancel() and abort the run. run.markTeardownDone() runs after
+		// shutdownTransient() (not concurrently with it) since both are in the
+		// same deferred closure — a resume waiting on awaitTeardown only
+		// unblocks once teardown has actually finished, closing the race where
+		// Status already looks terminal (set above via finishOK/finishErr,
+		// which return before this deferred func runs) but the maintenance
+		// goroutines RearmMaintenance would reinitialize are still live.
+		defer func() {
+			subAgent.shutdownTransient()
+			run.markTeardownDone()
+		}()
 
 		// Wait for a concurrency slot (no-op when unlimited). If the session
 		// is cancelled while this dispatch is still queued, stopCh closes and
@@ -676,8 +695,15 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 	// returns so we don't accumulate one leaked Agent + goroutines per
 	// knowledge_lookup / synchronous task. The sub-agent shares the parent's
 	// snapshotStore, so shutdownTransient stops only the goroutines/loop and
-	// must NOT Reset the shared store.
-	defer subAgent.shutdownTransient()
+	// must NOT Reset the shared store. Also signal run.markTeardownDone (when
+	// run is tracked) so a later resume's awaitTeardown sees this cycle's
+	// teardown as finished — see runBackgroundDispatch for why that matters.
+	defer func() {
+		subAgent.shutdownTransient()
+		if run != nil {
+			run.markTeardownDone()
+		}
+	}()
 	result, resp, err := t.executeSubAgentWithTranscript(specName, subAgent, messages)
 	if err != nil {
 		if run != nil {

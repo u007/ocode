@@ -540,3 +540,95 @@ func TestBeginResumeRejectsQueued(t *testing.T) {
 		t.Fatal("beginResume() = true, want false for a queued run")
 	}
 }
+
+// TestAwaitTeardownBlocksUntilMarkTeardownDone proves the resume race-guard
+// primitive actually synchronizes: awaitTeardown must not return before
+// markTeardownDone is called on the same run, and must return promptly once
+// it is. Run with -race: this exercises exactly the concurrent access
+// pattern (concurrent read of run.teardownDone / concurrent close) that
+// RearmMaintenance's real caller (executeResume) depends on being race-free.
+func TestAwaitTeardownBlocksUntilMarkTeardownDone(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+
+	release := make(chan struct{})
+	go func() {
+		<-release
+		run.markTeardownDone()
+	}()
+
+	waitReturned := make(chan struct{})
+	go func() {
+		run.awaitTeardown(2 * time.Second)
+		close(waitReturned)
+	}()
+
+	select {
+	case <-waitReturned:
+		t.Fatal("awaitTeardown returned before markTeardownDone was called")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-waitReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("awaitTeardown did not return after markTeardownDone")
+	}
+}
+
+// TestAwaitTeardownTimesOutWithoutSignal proves awaitTeardown does not hang
+// forever if markTeardownDone is never called (e.g. a dispatch whose
+// shutdownTransient somehow never completes) — it must give up after the
+// timeout rather than deadlocking the resume path.
+func TestAwaitTeardownTimesOutWithoutSignal(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+
+	start := time.Now()
+	run.awaitTeardown(50 * time.Millisecond)
+	if elapsed := time.Since(start); elapsed < 50*time.Millisecond {
+		t.Fatalf("awaitTeardown returned early after %v, want >= 50ms", elapsed)
+	}
+}
+
+// TestBeginResumeRearmsTeardownAndDoneChannels proves beginResume replaces
+// both teardownDone and done with fresh, open channels for the new dispatch
+// cycle — otherwise a caller that resumes twice would find markTeardownDone
+// (from the second dispatch) closing an already-closed channel, and Done()
+// would report the run as finished the instant it was resumed.
+func TestBeginResumeRearmsTeardownAndDoneChannels(t *testing.T) {
+	r := NewAgentRunRegistry()
+	run := r.New("explore")
+	run.finishOK("first result")
+	run.markTeardownDone()
+
+	oldDone := run.Done()
+	select {
+	case <-oldDone:
+	default:
+		t.Fatal("setup: original done channel should be closed after finishOK")
+	}
+
+	if ok := run.beginResume(); !ok {
+		t.Fatal("beginResume() = false, want true")
+	}
+
+	newDone := run.Done()
+	select {
+	case <-newDone:
+		t.Fatal("Done() still closed immediately after beginResume — not re-armed")
+	default:
+	}
+
+	// The new teardownDone must also be open (not still closed from the
+	// prior markTeardownDone call above) and must not panic when closed again.
+	run.markTeardownDone()
+
+	run.finishOK("second result")
+	select {
+	case <-newDone:
+	default:
+		t.Fatal("Done() (post-resume) did not close after the resumed run's finishOK")
+	}
+}

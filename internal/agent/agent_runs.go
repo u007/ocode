@@ -68,6 +68,17 @@ type AgentRun struct {
 	inputTokens  int64
 	outputTokens int64
 
+	// teardownDone is closed once the current dispatch's shutdownTransient()
+	// has actually finished running. Status flips to terminal (via
+	// finishOK/finishErr/tryFinishCancelled) BEFORE the dispatch goroutine's
+	// deferred shutdownTransient() call runs, so a resume that only checks
+	// CurrentStatus() can race a still-finishing teardown — RearmMaintenance
+	// would then reinitialize the same doc/memory maintenance fields
+	// shutdownTransient is concurrently tearing down. beginResume replaces
+	// this channel and clears teardownClosed for each new dispatch cycle.
+	teardownDone   chan struct{}
+	teardownClosed bool
+
 	// Retry tracking
 	RetryCount int       // number of retries attempted
 	LastError  string    // last error message if retrying
@@ -100,8 +111,45 @@ func (r *AgentRun) closeDone() {
 	})
 }
 
-// Done returns a channel that is closed when the run reaches a terminal state.
+// Done returns a channel that is closed when the run reaches a terminal
+// state. beginResume replaces this channel for each new dispatch cycle, so a
+// reference obtained before a resume only reflects that earlier cycle —
+// callers that resume a run and then need to wait again must call Done()
+// again afterward to get the current cycle's channel.
 func (r *AgentRun) Done() <-chan struct{} { return r.done }
+
+// markTeardownDone signals that the current dispatch's shutdownTransient()
+// call has finished. Called from the dispatch goroutine (background or sync)
+// after shutdownTransient() returns — see runBackgroundDispatch/
+// runSyncDispatch in subagent.go. Idempotent per dispatch cycle.
+func (r *AgentRun) markTeardownDone() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.teardownDone != nil && !r.teardownClosed {
+		close(r.teardownDone)
+		r.teardownClosed = true
+	}
+}
+
+// awaitTeardown blocks until the current dispatch's shutdownTransient() has
+// finished, or timeout elapses. Resume must call this before touching Sub
+// (RearmMaintenance in particular) — Status flips to terminal before the
+// dispatch goroutine's deferred shutdownTransient() actually runs, so
+// resuming as soon as Status looks terminal can race a still-finishing
+// teardown that is concurrently mutating the same maintenance-worker fields
+// RearmMaintenance reinitializes.
+func (r *AgentRun) awaitTeardown(timeout time.Duration) {
+	r.mu.Lock()
+	ch := r.teardownDone
+	r.mu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case <-ch:
+	case <-time.After(timeout):
+	}
+}
 
 // ModelLabel returns "provider/model" (or just "model" when no provider) for
 // the subagent backing this run. Returns "" when Sub is nil or its client has
@@ -249,6 +297,17 @@ func (r *AgentRun) beginExecution() bool {
 // Err/Result: stale values from the prior terminal state are harmless (the
 // RunRunning branch of task_status/agent_status never surfaces them) and are
 // overwritten once the resumed run reaches its own finishOK/finishErr.
+//
+// Callers MUST call awaitTeardown before beginResume (not after) — this
+// resets teardownDone/teardownClosed for the new dispatch cycle, so waiting
+// on it afterward would wait on a channel that only the *new* dispatch's
+// shutdownTransient will ever close, deadlocking until the timeout instead
+// of observing the *previous* cycle's teardown.
+//
+// Also re-arms done/doneOnce so Done() reflects this new cycle's completion
+// rather than the original terminal transition — otherwise a Done() channel
+// obtained before resume would already be closed and callers would believe a
+// freshly-resumed run had instantly finished.
 func (r *AgentRun) beginResume() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -257,6 +316,10 @@ func (r *AgentRun) beginResume() bool {
 	}
 	r.Status = RunRunning
 	r.EndedAt = time.Time{}
+	r.teardownDone = make(chan struct{})
+	r.teardownClosed = false
+	r.done = make(chan struct{})
+	r.doneOnce = sync.Once{}
 	return true
 }
 
@@ -471,11 +534,12 @@ func (r *AgentRunRegistry) New(name string) *AgentRun {
 	r.counter++
 	id := "agent-run-" + strconv.Itoa(r.counter)
 	run := &AgentRun{
-		ID:        id,
-		Name:      name,
-		Status:    RunRunning,
-		StartedAt: time.Now(),
-		done:      make(chan struct{}),
+		ID:           id,
+		Name:         name,
+		Status:       RunRunning,
+		StartedAt:    time.Now(),
+		done:         make(chan struct{}),
+		teardownDone: make(chan struct{}),
 	}
 	r.runs[id] = run
 	r.order = append(r.order, id)

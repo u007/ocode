@@ -92,6 +92,7 @@ func TestTaskToolResumeCancelledSucceedsSync(t *testing.T) {
 	capture := &captureClient{}
 	sub := NewAgent(capture, nil, nil, nil)
 	sub.shutdownTransient() // mirrors the real teardown that ran when this run first went terminal
+	run.markTeardownDone()  // ...and the signal runBackgroundDispatch/runSyncDispatch send once it's done
 	run.Sub = sub
 	run.Cancel = sub.Cancel
 
@@ -141,6 +142,7 @@ func TestTaskToolResumeDoneSucceedsBackground(t *testing.T) {
 	capture := &captureClient{}
 	sub := NewAgent(capture, nil, nil, nil)
 	sub.shutdownTransient()
+	run.markTeardownDone()
 	run.Sub = sub
 	run.Cancel = sub.Cancel
 
@@ -156,16 +158,15 @@ func TestTaskToolResumeDoneSucceedsBackground(t *testing.T) {
 		t.Fatalf("result = %q, want it to reuse task_id %s", result, run.ID)
 	}
 
-	// Wait for the resumed background run to actually finish. run.Done() is
-	// already closed from the ORIGINAL finishOK (the done channel is
-	// doneOnce-guarded and beginResume deliberately does not re-arm it), so
-	// waiting on it is vacuous — poll the terminal status instead.
-	deadline := time.Now().Add(5 * time.Second)
-	for run.statusValue() != RunDone {
-		if time.Now().After(deadline) {
-			t.Fatalf("background resume did not finish within 5s (status = %s)", run.statusValue())
-		}
-		time.Sleep(5 * time.Millisecond)
+	// By the time Execute returns, beginResume already ran synchronously
+	// (before the background goroutine was launched) and replaced run.done
+	// with a fresh channel for this new dispatch cycle — so, unlike the
+	// original terminal transition's channel, THIS one is still open and
+	// waiting on it here actually blocks for the resumed run's completion.
+	select {
+	case <-run.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("background resume did not finish within 5s")
 	}
 	if run.statusValue() != RunDone {
 		t.Fatalf("status = %s, want done", run.statusValue())
@@ -189,6 +190,7 @@ func TestTaskToolResumeChainResumeResume(t *testing.T) {
 	capture := &captureClient{}
 	sub := NewAgent(capture, nil, nil, nil)
 	sub.shutdownTransient()
+	run.markTeardownDone()
 	run.Sub = sub
 	run.Cancel = sub.Cancel
 
