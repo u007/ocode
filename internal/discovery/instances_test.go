@@ -3,6 +3,7 @@ package discovery
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/u007/ocode/internal/tool"
 )
@@ -54,6 +55,64 @@ func TestStopModelInstanceNotRunningIsNoop(t *testing.T) {
 	procs := tool.NewProcessRegistry()
 	if err := StopModelInstance(procs, "local/never-started"); err != nil {
 		t.Fatalf("stopping a never-started instance should be a no-op, got: %v", err)
+	}
+}
+
+func TestChatBreakerBlocksAfterThreshold(t *testing.T) {
+	modelID := "local/test-breaker-threshold"
+	t.Cleanup(func() { chatBreakerReset(modelID) })
+
+	if blocked, _, _ := chatBreakerBlocked(modelID); blocked {
+		t.Fatal("fresh model should not be blocked")
+	}
+	chatBreakerRecordFailure(modelID)
+	if blocked, _, _ := chatBreakerBlocked(modelID); blocked {
+		t.Fatal("single failure should not trip the breaker (threshold=2)")
+	}
+	if !chatBreakerRecentFailure(modelID) {
+		t.Fatal("a single recent failure should still shorten the retry poll budget")
+	}
+	chatBreakerRecordFailure(modelID)
+	blocked, failures, _ := chatBreakerBlocked(modelID)
+	if !blocked {
+		t.Fatal("two consecutive failures should trip the breaker")
+	}
+	if failures != 2 {
+		t.Fatalf("failures = %d, want 2", failures)
+	}
+}
+
+func TestChatBreakerResetClearsFailures(t *testing.T) {
+	modelID := "local/test-breaker-reset"
+	t.Cleanup(func() { chatBreakerReset(modelID) })
+
+	chatBreakerRecordFailure(modelID)
+	chatBreakerRecordFailure(modelID)
+	if blocked, _, _ := chatBreakerBlocked(modelID); !blocked {
+		t.Fatal("expected breaker to be tripped before reset")
+	}
+	chatBreakerReset(modelID)
+	if blocked, _, _ := chatBreakerBlocked(modelID); blocked {
+		t.Fatal("expected breaker to clear after a successful health check")
+	}
+	if chatBreakerRecentFailure(modelID) {
+		t.Fatal("expected no recent failure after reset")
+	}
+}
+
+func TestChatBreakerCooldownExpires(t *testing.T) {
+	modelID := "local/test-breaker-cooldown"
+	t.Cleanup(func() { chatBreakerReset(modelID) })
+
+	chatFailuresMu.Lock()
+	chatFailures[modelID] = &chatFailureState{
+		consecutiveFailures: chatBreakerThreshold,
+		lastFailureAt:       time.Now().Add(-chatBreakerCooldown - time.Second),
+	}
+	chatFailuresMu.Unlock()
+
+	if blocked, _, _ := chatBreakerBlocked(modelID); blocked {
+		t.Fatal("expected breaker to no longer block once the cooldown window has passed")
 	}
 }
 

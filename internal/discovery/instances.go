@@ -89,6 +89,74 @@ var (
 	startLocks = map[string]*sync.Mutex{}
 )
 
+// chatBreakerThreshold/chatBreakerCooldown gate StartModelInstance's
+// fail-fast circuit breaker: after chatBreakerThreshold consecutive
+// health-poll failures for a modelID, further calls within chatBreakerCooldown
+// of the last failure are rejected immediately instead of repeating a
+// multi-minute spawn+poll that is very unlikely to succeed. A successful
+// health check clears the counter.
+const (
+	chatBreakerThreshold = 2
+	chatBreakerCooldown  = 10 * time.Minute
+)
+
+type chatFailureState struct {
+	consecutiveFailures int
+	lastFailureAt       time.Time
+}
+
+var (
+	chatFailuresMu sync.Mutex
+	chatFailures   = map[string]*chatFailureState{}
+)
+
+// chatBreakerRecordFailure records a health-poll failure for modelID.
+func chatBreakerRecordFailure(modelID string) {
+	chatFailuresMu.Lock()
+	defer chatFailuresMu.Unlock()
+	s, ok := chatFailures[modelID]
+	if !ok {
+		s = &chatFailureState{}
+		chatFailures[modelID] = s
+	}
+	s.consecutiveFailures++
+	s.lastFailureAt = time.Now()
+}
+
+// chatBreakerReset clears modelID's failure history after a successful
+// health check or a successful adopt-of-already-healthy-instance.
+func chatBreakerReset(modelID string) {
+	chatFailuresMu.Lock()
+	defer chatFailuresMu.Unlock()
+	delete(chatFailures, modelID)
+}
+
+// chatBreakerRecentFailure reports whether modelID has failed at least once
+// recently (within chatBreakerCooldown), used to shorten the health-poll
+// budget on retry instead of repeating the full first-attempt budget.
+func chatBreakerRecentFailure(modelID string) bool {
+	chatFailuresMu.Lock()
+	defer chatFailuresMu.Unlock()
+	s, ok := chatFailures[modelID]
+	return ok && s.consecutiveFailures > 0 && time.Since(s.lastFailureAt) < chatBreakerCooldown
+}
+
+// chatBreakerBlocked reports whether modelID has failed chatBreakerThreshold
+// or more times in a row within chatBreakerCooldown, in which case
+// StartModelInstance should fail fast instead of spawning/polling again.
+func chatBreakerBlocked(modelID string) (blocked bool, failures int, lastFailureAt time.Time) {
+	chatFailuresMu.Lock()
+	defer chatFailuresMu.Unlock()
+	s, ok := chatFailures[modelID]
+	if !ok {
+		return false, 0, time.Time{}
+	}
+	if s.consecutiveFailures >= chatBreakerThreshold && time.Since(s.lastFailureAt) < chatBreakerCooldown {
+		return true, s.consecutiveFailures, s.lastFailureAt
+	}
+	return false, s.consecutiveFailures, s.lastFailureAt
+}
+
 // lockForStart returns the singleton mutex used to serialize
 // StartModelInstance calls for modelID within this process.
 func lockForStart(modelID string) *sync.Mutex {
@@ -136,7 +204,21 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 		info.MaxParallel = maxParallel
 		instances[modelID] = &chatInstance{info: info} // processID stays empty — we don't own this process
 		instMu.Unlock()
+		chatBreakerReset(modelID)
 		return nil
+	}
+
+	// A model that has already failed to become healthy chatBreakerThreshold
+	// times in a row recently is very unlikely to succeed on yet another
+	// blind retry (e.g. the bonsai-8b-1bit incident: a missing native
+	// dependency made the server hang instead of erroring, and every caller
+	// that needed the model — one per permission decision — independently
+	// ate the full 15-minute poll budget). Fail fast instead of repeating
+	// the same multi-minute hang until the cooldown lapses or the caller
+	// manually restarts the model.
+	if blocked, failures, lastFailureAt := chatBreakerBlocked(modelID); blocked {
+		return fmt.Errorf("local chat server for %q failed to become healthy %d times recently (last failure %s ago) — not retrying automatically to avoid repeated hangs; fix the underlying issue (check the discovery debug log) and restart the model manually via /localmodel to retry",
+			modelID, failures, time.Since(lastFailureAt).Round(time.Second))
 	}
 
 	instMu.Lock()
@@ -212,19 +294,33 @@ func waitForChatHealth(modelID, base string, man ServerManifest) error {
 	// runtime, and binding the port. 15 minutes (vs the embedder's 60s) is a
 	// deliberately wide safety margin for a large/1-bit-quant model on a slow
 	// disk, not a download budget.
-	const chatHealthPollAttempts = 900
-	for i := 0; i < chatHealthPollAttempts; i++ {
+	//
+	// That 15-minute budget is only warranted the FIRST time this modelID is
+	// started in this process — a fair benefit of the doubt for a genuinely
+	// slow cold load. A model that has already failed to become healthy
+	// recently (chatBreakerRecentFailure) is far more likely stuck than slow
+	// (see the bonsai-8b-1bit incident this guards against), so retries get a
+	// much shorter budget instead of repeating the full 15-minute hang.
+	const chatHealthPollAttemptsFirst = 900
+	const chatHealthPollAttemptsRetry = 60
+	attempts := chatHealthPollAttemptsFirst
+	if chatBreakerRecentFailure(modelID) {
+		attempts = chatHealthPollAttemptsRetry
+	}
+	for i := 0; i < attempts; i++ {
 		if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
 			if !modelMatches(served, expect) {
 				instMu.Lock()
 				instances[modelID].info.State = InstanceStopped
 				instMu.Unlock()
+				chatBreakerRecordFailure(modelID)
 				return fmt.Errorf("spawned chat server on %s serves %v, not %s", base, served, modelID)
 			}
 			instMu.Lock()
 			instances[modelID].info.State = InstanceReady
 			instances[modelID].info.BaseURL = base
 			instMu.Unlock()
+			chatBreakerReset(modelID)
 			return nil
 		}
 		time.Sleep(time.Second)
@@ -232,6 +328,7 @@ func waitForChatHealth(modelID, base string, man ServerManifest) error {
 	instMu.Lock()
 	instances[modelID].info.State = InstanceStopped
 	instMu.Unlock()
+	chatBreakerRecordFailure(modelID)
 	return fmt.Errorf("local chat server for %q did not become healthy on %s", modelID, base)
 }
 
