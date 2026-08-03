@@ -597,7 +597,10 @@ func (m *model) openMessagePicker() {
 	m.pickerItems = items
 	m.pickerValues = values
 	m.pickerIsHeader = nil
-	m.pickerIndex = 0
+	m.pickerIndex = len(items) - 1
+	if m.pickerIndex < 0 {
+		m.pickerIndex = 0
+	}
 	m.pickerFilter = ""
 	m.showPicker = true
 	m.pushPickerModal()
