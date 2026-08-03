@@ -260,10 +260,13 @@ type localModelActionMsg struct {
 // spawn+health-poll (restart-recovery: config says a local model is enabled,
 // but this session never started it) completes. On success the Update()
 // handler calls finishModelSwitch to actually apply the switch — it was
-// deliberately deferred until the server is confirmed healthy.
+// deliberately deferred until the server is confirmed healthy. When
+// switchModel is false the warm-up serves a non-main-model role (e.g. the
+// auto-permission model) and the active model must be left untouched.
 type modelSwitchWarmedMsg struct {
-	modelID string
-	err     error
+	modelID     string
+	err         error
+	switchModel bool
 }
 
 // syncLoginStartedMsg is emitted when /login has started the device-code flow
@@ -780,20 +783,26 @@ func (m *model) clearPendingSubmitOnAgentSwap(prev, next *agent.Agent) {
 }
 
 type model struct {
-	viewport             fastviewport.Model
-	input                textarea.Model
-	messages             []message
-	agent                *agent.Agent
-	advisorEnabled       bool // runtime advisor state; persisted across agent rebuilds
-	soundEnabled         bool // terminal bell on task completion / permission request
-	bellNotifier         func()
-	advisorEnabledSet    bool // whether advisorEnabled should be applied to newly installed agents
-	smallModelEnabled    bool // runtime small model state; persisted across agent rebuilds
-	smallModelEnabledSet bool // whether smallModelEnabled should be applied to newly installed agents
-	recapModelEnabled    bool // runtime recap model state; persisted across agent rebuilds
-	recapModelEnabledSet bool // whether recapModelEnabled should be applied to newly installed agents
-	ocrEnabled           bool // runtime OCR tool state; persisted across agent rebuilds
-	ocrEnabledSet        bool // whether ocrEnabled should be applied to newly installed agents
+	viewport       fastviewport.Model
+	input          textarea.Model
+	messages       []message
+	agent          *agent.Agent
+	advisorEnabled bool // runtime advisor state; persisted across agent rebuilds
+	soundEnabled   bool // terminal bell on task completion / permission request
+	bellNotifier   func()
+	// probeLocalModelInstance overrides the live port probe used by
+	// localModelNeedsWarm (nil = discovery.ProbeModelInstance). Injectable for
+	// tests so the warm-up decision never depends on whether a real local-model
+	// server happens to be running on the assigned port of the machine running
+	// the test.
+	probeLocalModelInstance func(modelID string, port int) (discovery.InstanceInfo, bool)
+	advisorEnabledSet       bool // whether advisorEnabled should be applied to newly installed agents
+	smallModelEnabled       bool // runtime small model state; persisted across agent rebuilds
+	smallModelEnabledSet    bool // whether smallModelEnabled should be applied to newly installed agents
+	recapModelEnabled       bool // runtime recap model state; persisted across agent rebuilds
+	recapModelEnabledSet    bool // whether recapModelEnabled should be applied to newly installed agents
+	ocrEnabled              bool // runtime OCR tool state; persisted across agent rebuilds
+	ocrEnabledSet           bool // whether ocrEnabled should be applied to newly installed agents
 	// kaizenAnnounced is the sorted set of digest-contributing Kaizen skill
 	// names last announced in the transcript, so the "directives active" notice
 	// is emitted once per active-model change rather than on every request.
@@ -2843,6 +2852,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case modelSwitchWarmedMsg:
 		if msg.err != nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "Error starting " + msg.modelID + ": " + msg.err.Error()})
+			m.rerenderTranscriptAndMaybeScroll()
+			return m, nil
+		}
+		if !msg.switchModel {
+			// Warm-up for a non-main-model role (e.g. the auto-permission
+			// model): the server is healthy, but the active model must not
+			// change — there is no model switch to finish.
+			m.messages = append(m.messages, message{role: roleAssistant, text: msg.modelID + " is running."})
 			m.rerenderTranscriptAndMaybeScroll()
 			return m, nil
 		}
@@ -7633,6 +7650,64 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 	return nil
 }
 
+// localModelNeedsWarm reports whether modelID is a registered+enabled
+// /localmodel entry whose server is not currently running (neither an
+// in-process instance nor a healthy server on its assigned port). Returns
+// false for every other case: not a "local/..." id, not registered, not
+// enabled, or already running.
+func (m *model) localModelNeedsWarm(modelID string) bool {
+	if !strings.HasPrefix(modelID, "local/") {
+		return false
+	}
+	// Only a live in-process instance suppresses warm-up. A record in a
+	// terminal-failure state (InstanceStopped — StartModelInstance persists it
+	// when the start-lock, spawn, or health-poll fails) must NOT be treated as
+	// "already running": doing so deadlocks every retry, leaving the model
+	// permanently unable to start until the process is restarted.
+	if info, ok := discovery.GetModelInstance(modelID); ok && info.State != discovery.InstanceStopped {
+		return false
+	}
+	if m.config == nil {
+		return false
+	}
+	lm, exists := m.config.Ocode.LocalModels[modelID]
+	if !exists || !lm.Enabled {
+		return false
+	}
+	if registeredIDs, err := config.RegisteredLocalModelIDs(); err == nil {
+		if port, err := discovery.AssignChatPort(modelID, registeredIDs); err == nil {
+			probe := discovery.ProbeModelInstance
+			if m.probeLocalModelInstance != nil {
+				probe = m.probeLocalModelInstance
+			}
+			if _, ok := probe(modelID, port); ok {
+				return false // a different ocode process already has it running and healthy
+			}
+		}
+	}
+	return true
+}
+
+// startLocalModelCmd spawns a registered-but-stopped local model's server off
+// the Update() goroutine and reports back via modelSwitchWarmedMsg. When
+// switchModel is true the completion handler finishes a deferred main-model
+// switch; when false it only confirms the server is ready (used for
+// non-main-model roles like the auto-permission model). Returns nil when no
+// warm-up is needed (see localModelNeedsWarm).
+func (m *model) startLocalModelCmd(modelID string, switchModel bool) tea.Cmd {
+	if !m.localModelNeedsWarm(modelID) || m.agent == nil {
+		return nil
+	}
+	ag := m.agent
+	lm := m.config.Ocode.LocalModels[modelID]
+	maxParallel := lm.MaxParallel
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + modelID + " (this can take a while on a cold model download)..."})
+	return func() tea.Msg {
+		err := startLocalModelInstance(ag, modelID, maxParallel)
+		return modelSwitchWarmedMsg{modelID: modelID, err: err, switchModel: switchModel}
+	}
+}
+
 // warmLocalModelIfNeededCmd covers the restart-recovery gap for /localmodel
 // models: config can say Enabled=true (set only after a successful
 // /localmodel enable earlier) while THIS session never actually started the
@@ -7640,42 +7715,21 @@ func (m *model) handleModelCmd(args []string) tea.Cmd {
 // started this run. Returns nil (meaning "proceed synchronously, no warm-up
 // needed") for every other case: not a "local/..." id, already running this
 // session, running via a different ocode process (live port probe), or not a
-// registered+enabled /localmodel entry at all (NewClient's existing
-// nil-baseURL handling covers that misconfiguration the same way it always
-// has). When warm-up genuinely is needed, prints a "Starting..." message and
-// returns a tea.Cmd that spawns it off the Update() goroutine, only finishing
-// the model switch (finishModelSwitch) once it reports healthy.
+// registered+enabled /localmodel entry at all. When warm-up genuinely is
+// needed, prints a "Starting..." message and returns a tea.Cmd that spawns it
+// off the Update() goroutine, only finishing the model switch
+// (finishModelSwitch) once it reports healthy.
 func (m *model) warmLocalModelIfNeededCmd(modelID string) tea.Cmd {
-	if !strings.HasPrefix(modelID, "local/") {
-		return nil
-	}
-	if _, ok := discovery.GetModelInstance(modelID); ok {
-		return nil
-	}
-	if m.config == nil {
-		return nil
-	}
-	lm, exists := m.config.Ocode.LocalModels[modelID]
-	if !exists || !lm.Enabled {
-		return nil
-	}
-	if registeredIDs, err := config.RegisteredLocalModelIDs(); err == nil {
-		if port, err := discovery.AssignChatPort(modelID, registeredIDs); err == nil {
-			if _, ok := discovery.ProbeModelInstance(modelID, port); ok {
-				return nil // a different ocode process already has it running and healthy
-			}
-		}
-	}
-	if m.agent == nil {
-		return nil
-	}
-	ag := m.agent
-	maxParallel := lm.MaxParallel
-	m.messages = append(m.messages, message{role: roleAssistant, text: "Starting " + modelID + " (this can take a while on a cold model download)..."})
-	return func() tea.Msg {
-		err := startLocalModelInstance(ag, modelID, maxParallel)
-		return modelSwitchWarmedMsg{modelID: modelID, err: err}
-	}
+	return m.startLocalModelCmd(modelID, true)
+}
+
+// warmLocalModelCmd is the warm-only variant of warmLocalModelIfNeededCmd for
+// non-main-model roles: it starts a registered-but-stopped local model's
+// server without touching the active model. Used when setting a /localmodel
+// entry as the auto-permission model so permission decisions can actually
+// reach it.
+func (m *model) warmLocalModelCmd(modelID string) tea.Cmd {
+	return m.startLocalModelCmd(modelID, false)
 }
 
 // finishModelSwitch does the actual model switch: persists the selection,
@@ -8185,12 +8239,19 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 }
 
 // handleLocalModelCmd implements /localmodel list|add|enable|disable|limit|status.
+// localModelUsage is the canonical /localmodel usage string, shared between
+// the command-table registration (commands.go) and the in-command
+// help/fallback messages below so the two can't drift.
+const localModelUsage = "/localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]|help"
+
 func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
 		// No-arg /localmodel shows status for every registered model (same as
 		// `/localmodel status` with no name), not a usage message — status is
-		// the most useful default view.
+		// the most useful default view. The usage line is appended below so
+		// subcommands stay discoverable without changing that default.
 		m.showLocalModelStatus("")
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: " + localModelUsage})
 		return nil
 	}
 	switch strings.ToLower(args[0]) {
@@ -8226,8 +8287,10 @@ func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 			name = args[1]
 		}
 		m.showLocalModelStatus(name)
+	case "help", "-h", "--help":
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: " + localModelUsage})
 	default:
-		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]"})
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Unknown /localmodel subcommand " + strconv.Quote(args[0]) + "\nUsage: " + localModelUsage})
 	}
 	return nil
 }
@@ -8312,26 +8375,6 @@ func (m *model) registeredLocalModelIDs() []string {
 	return ids
 }
 
-// enabledLocalModelIDs returns the sorted ids of every /localmodel entry with
-// Enabled=true, in "local/<name>" form — union'd into the chat model picker
-// (openModelPicker et al.) so a registered local model is selectable there
-// and in every picker that reuses it (/model, /permissions model,
-// /small-model, /recap-model, ...). Must only be called from the main
-// goroutine (reads m.config directly).
-func (m *model) enabledLocalModelIDs() []string {
-	if m.config == nil {
-		return nil
-	}
-	var ids []string
-	for id, lm := range m.config.Ocode.LocalModels {
-		if lm.Enabled {
-			ids = append(ids, id)
-		}
-	}
-	sort.Strings(ids)
-	return ids
-}
-
 // localModelDisable stops modelID's process (if running) and persists
 // Enabled=false. Synchronous: procs.Kill just signals the process, it doesn't
 // wait minutes for a health check, so this is safe inside Update().
@@ -8404,28 +8447,7 @@ func (m *model) localModelEnableCmd(name string) tea.Cmd {
 // tea.Cmd), so it must not touch *model fields — only ag (an *agent.Agent,
 // safe to use concurrently) and package-level discovery/config functions.
 func startLocalModelInstance(ag *agent.Agent, id string, maxParallel int) error {
-	registeredIDs, err := config.RegisteredLocalModelIDs()
-	if err != nil {
-		return err
-	}
-	port, err := discovery.AssignChatPort(id, registeredIDs)
-	if err != nil {
-		return err
-	}
-	procs := ag.Procs()
-	spawn := func(cmdline string) error {
-		p := procs.StartBackground(cmdline)
-		if p != nil && p.SnapshotStatus() == tool.ProcExited {
-			return fmt.Errorf("local chat server process exited immediately on spawn")
-		}
-		// Recorded immediately, before StartModelInstance's health-poll loop
-		// runs — a poll timeout must not leave a running process untracked
-		// (see SetModelInstanceProcessID's doc comment).
-		discovery.SetModelInstanceProcessID(id, p.ID)
-		discovery.SetModelInstancePID(id, p.PID)
-		return nil
-	}
-	return discovery.StartModelInstance(spawn, id, port, maxParallel, agent.DiscoveryCacheDir())
+	return agent.StartLocalModelInstance(ag, id, maxParallel)
 }
 
 // localModelLimitCmd validates synchronously and, if the model is currently
@@ -8454,6 +8476,15 @@ func (m *model) localModelLimitCmd(name, valueStr string) tea.Cmd {
 	}
 	if m.agent == nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "No active agent to restart the local model process"})
+		return nil
+	}
+	// A server running but owned by a DIFFERENT ocode process cannot be
+	// stopped from here — StopModelInstance would silently no-op (it only
+	// kills a processID this process recorded), and we'd then adopt the
+	// still-running server, save the new max_parallel to config, and report
+	// success even though the live server never picked up the change.
+	if info, ok := m.localModelInstanceInfo(id, lm); ok && info.State == discovery.InstanceReady && !discovery.OwnsModelInstance(id) {
+		m.messages = append(m.messages, message{role: roleAssistant, text: id + " is running under a different ocode process — restart that process (or run /localmodel disable then enable there) to apply the new max_parallel"})
 		return nil
 	}
 	ag := m.agent
@@ -10233,10 +10264,46 @@ func (m *model) handlePermissionModelCmd(args []string) tea.Cmd {
 	}
 
 	// Validate that the model is available (provider exists and has credentials).
-	client := agent.NewClient(m.config, target)
-	if client == nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", target)})
-		return nil
+	// Registered /localmodel entries are valid even when their server is not
+	// currently running — NewClient resolves their base URL from the assigned
+	// port only while the server is live, so validate against the registered set
+	// instead, and warm the instance up below.
+	if provider == "local" {
+		registered, err := config.RegisteredLocalModelIDs()
+		if err != nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to read registered local models: %v", err)})
+			return nil
+		}
+		if !slices.Contains(registered, target) {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%s is not a registered local model — run /localmodel add <name> first.", target)})
+			return nil
+		}
+		// A registered-but-disabled entry cannot serve permission decisions:
+		// warmLocalModelCmd only starts enabled entries, so persisting it now
+		// would save a config NewClient can never build a client for (no live
+		// instance / base URL) and auto-permission would silently fall back
+		// every session. Reject early with a pointer to the fix.
+		enabled := false
+		if m.config != nil {
+			if lm, ok := m.config.Ocode.LocalModels[target]; ok {
+				enabled = lm.Enabled
+			}
+		}
+		if !enabled {
+			if lm, ok, err := config.LocalModelConfigFor(target); err == nil && ok {
+				enabled = lm.Enabled
+			}
+		}
+		if !enabled {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("%s is registered but disabled — enable it first with /localmodel enable %s.", target, target)})
+			return nil
+		}
+	} else {
+		client := agent.NewClient(m.config, target)
+		if client == nil {
+			m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create client for %s — unknown provider or missing configuration.", target)})
+			return nil
+		}
 	}
 
 	// Set and persist.
@@ -10251,6 +10318,14 @@ func (m *model) handlePermissionModelCmd(args []string) tea.Cmd {
 		m.config.Ocode.Permissions.Auto.Model = target
 	}
 	m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Permission model updated to %s\nPersisted to config for next session.", target)})
+	// Start the server for a registered-but-stopped local model so permission
+	// decisions can actually reach it (mirrors the /models switch path). The
+	// warm-only variant leaves the active model untouched.
+	if provider == "local" {
+		if warmCmd := m.warmLocalModelCmd(target); warmCmd != nil {
+			return warmCmd
+		}
+	}
 	return nil
 }
 
@@ -11487,7 +11562,10 @@ func (m *model) saveSession() {
 	for _, m := range agentMsgs {
 		roleCounts[m.Role]++
 	}
-	session.Save(m.sessionID, m.sessionTitle, agentMsgs, m.sessionSidebarMetadata())
+	if err := session.Save(m.sessionID, m.sessionTitle, agentMsgs, m.sessionSidebarMetadata()); err != nil {
+		agent.DebugAppendf("SESSION", "save FAILED for session %s: %v", m.sessionID, err)
+		return
+	}
 	agent.DebugAppendf("SESSION", "saved session %s (%d msgs: user=%d asst=%d tool=%d system=%d)", m.sessionID, len(agentMsgs), roleCounts["user"], roleCounts["assistant"], roleCounts["tool"], roleCounts["system"])
 }
 
@@ -17173,6 +17251,35 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 	return []string{tokenLine + dimStyle.Render(" · ") + sidebarAccentStyle.Render(spend)}
 }
 
+// clampSidebarModelName truncates a model id so a sidebar toggle row stays on
+// one line. Long ids (e.g. "lmstudio/ternary-bonsai-8b-mlx") otherwise wrap
+// onto a second, detached-looking line that reads as "the model is missing".
+// Mirrors the cwd row's compactWorkingDir truncation.
+func clampSidebarModelName(name string, prefixWidth, totalWidth int) string {
+	avail := totalWidth - prefixWidth
+	if avail < 6 {
+		avail = 6
+	}
+	if lipgloss.Width(name) <= avail {
+		return name
+	}
+	return ansi.Truncate(name, avail-1, "…")
+}
+
+// renderSidebarModelToggle builds a single-line "label: ●on/○off <model>" row
+// for the pinned model-configuration rows (advisor/small/perm/recap/ocr),
+// clamping the model id so the row can never wrap.
+func renderSidebarModelToggle(label, model string, on bool, width int) string {
+	var tag string
+	if on {
+		tag = successStyle.Render("●on ")
+	} else {
+		tag = dimStyle.Render("○off ")
+	}
+	prefix := dimStyle.Render(label+": ") + tag
+	return prefix + sidebarTextStyle.Render(clampSidebarModelName(model, lipgloss.Width(prefix), width))
+}
+
 func (m model) buildSidebarRenderData() sidebarRenderData {
 	data := sidebarRenderData{fileScrollLinePaths: map[int]string{}, allowedHeaderBottomIdx: -1, advisorToggleTopIdx: -1, smallModelToggleTopIdx: -1, permModelToggleTopIdx: -1, ideToggleTopIdx: -1, recapModelToggleTopIdx: -1, ocrToggleTopIdx: -1, discoverToggleTopIdx: -1, cwdTopIdx: -1}
 	// User requested no border/padding on scroll sections (2026-05-25)
@@ -17326,36 +17433,18 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	}
 	// Advisor row doubles as an on/off toggle (click to flip the runtime gate).
 	advisorOn := m.agent == nil || m.agent.AdvisorEnabled()
-	var advisorLine string
-	if advisorOn {
-		advisorLine = dimStyle.Render("advisor: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(advisorModel)
-	} else {
-		advisorLine = dimStyle.Render("advisor: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(advisorModel)
-	}
 	data.advisorToggleTopIdx = len(data.topLines)
-	appendWrapped(&data.topLines, advisorLine, outerBodyWidth)
+	appendWrapped(&data.topLines, renderSidebarModelToggle("advisor", advisorModel, advisorOn, outerBodyWidth), outerBodyWidth)
 	data.advisorToggleRows = len(data.topLines) - data.advisorToggleTopIdx
 	// Small model row doubles as an on/off toggle (click to flip the runtime gate).
 	smallModelOn := m.smallModelEnabled
-	var smallModelLine string
-	if smallModelOn {
-		smallModelLine = dimStyle.Render("small: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(smallModel)
-	} else {
-		smallModelLine = dimStyle.Render("small: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(smallModel)
-	}
 	data.smallModelToggleTopIdx = len(data.topLines)
-	appendWrapped(&data.topLines, smallModelLine, outerBodyWidth)
+	appendWrapped(&data.topLines, renderSidebarModelToggle("small", smallModel, smallModelOn, outerBodyWidth), outerBodyWidth)
 	data.smallModelToggleRows = len(data.topLines) - data.smallModelToggleTopIdx
 	// Perm model row doubles as an on/off toggle (click to flip the runtime gate).
 	permModelOn := m.agent != nil && m.agent.Permissions().AutoPermissionEnabled()
-	var permModelLine string
-	if permModelOn {
-		permModelLine = dimStyle.Render("perm: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(pPermModel)
-	} else {
-		permModelLine = dimStyle.Render("perm: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(pPermModel)
-	}
 	data.permModelToggleTopIdx = len(data.topLines)
-	appendWrapped(&data.topLines, permModelLine, outerBodyWidth)
+	appendWrapped(&data.topLines, renderSidebarModelToggle("perm", pPermModel, permModelOn, outerBodyWidth), outerBodyWidth)
 	data.permModelToggleRows = len(data.topLines) - data.permModelToggleTopIdx
 	// Recap model row doubles as an on/off toggle (click to flip the runtime gate).
 	recapModelOn := m.recapModelEnabled
@@ -17366,14 +17455,8 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 	if recapModel == "" {
 		recapModel = "(auto)"
 	}
-	var recapModelLine string
-	if recapModelOn {
-		recapModelLine = dimStyle.Render("recap: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(recapModel)
-	} else {
-		recapModelLine = dimStyle.Render("recap: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(recapModel)
-	}
 	data.recapModelToggleTopIdx = len(data.topLines)
-	appendWrapped(&data.topLines, recapModelLine, outerBodyWidth)
+	appendWrapped(&data.topLines, renderSidebarModelToggle("recap", recapModel, recapModelOn, outerBodyWidth), outerBodyWidth)
 	data.recapModelToggleRows = len(data.topLines) - data.recapModelToggleTopIdx
 	data.ideToggleTopIdx = len(data.topLines)
 	appendWrapped(&data.topLines, m.ideSidebarStatusLine(), outerBodyWidth)
@@ -17390,14 +17473,8 @@ func (m model) buildSidebarRenderData() sidebarRenderData {
 		ocrModel = "(not set)"
 	}
 	ocrOn := m.ocrEnabled
-	var ocrLine string
-	if ocrOn {
-		ocrLine = dimStyle.Render("ocr: ") + successStyle.Render("●on ") + sidebarTextStyle.Render(ocrModel)
-	} else {
-		ocrLine = dimStyle.Render("ocr: ") + dimStyle.Render("○off ") + sidebarTextStyle.Render(ocrModel)
-	}
 	data.ocrToggleTopIdx = len(data.topLines)
-	appendWrapped(&data.topLines, ocrLine, outerBodyWidth)
+	appendWrapped(&data.topLines, renderSidebarModelToggle("ocr", ocrModel, ocrOn, outerBodyWidth), outerBodyWidth)
 	data.ocrToggleRows = len(data.topLines) - data.ocrToggleTopIdx
 	// Discovery row doubles as an on/off toggle (click to flip the runtime gate).
 	discoverOn := m.config != nil && m.config.Ocode.Discovery.Enabled

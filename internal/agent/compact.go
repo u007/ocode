@@ -348,6 +348,13 @@ const compactPruneToolMaxChars = 2000
 // capped to compactPruneToolMaxChars.
 const compactRenderedToolMaxChars = compactPruneToolMaxChars + 128
 
+// compactSummaryMaxOutputTokensFallback is used only when the summary
+// client's model is absent from the models.dev registry (ModelMaxOutputTokens
+// returns 0) and its real completion-token cap can't be looked up. The
+// registry value is preferred (see runSummary) so the cap always matches
+// what the model can actually produce, rather than an arbitrary guess.
+const compactSummaryMaxOutputTokensFallback = 8192
+
 func pruneToolResults(middle []Message, maxChars int) []Message {
 	if maxChars <= 0 {
 		return middle
@@ -751,6 +758,23 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 	}
 	var lastErr error
 	malformed := ""
+	// Capping max_tokens explicitly (rather than leaving it unset) matters
+	// specifically for large-context summarisation: some OpenAI-compatible
+	// routers (e.g. opencode-go) default an omitted max_tokens to the
+	// model's remaining context window rather than its real completion cap,
+	// and reject the request once that computed default exceeds the cap —
+	// which is exactly what happens compacting a near-context-limit
+	// conversation. Use the summary model's own registry-reported completion
+	// cap (not an arbitrary constant) so the request always matches what the
+	// model can actually produce; fall back to a conservative constant only
+	// when the model is unknown to the registry. Passed via context (not a
+	// client field) so it applies only to this call, not to any other
+	// request sharing the client.
+	maxOutputTokens := ModelMaxOutputTokens(client.GetProvider() + "/" + client.GetModel())
+	if maxOutputTokens <= 0 {
+		maxOutputTokens = compactSummaryMaxOutputTokensFallback
+	}
+	summaryCtx := context.WithValue(ctx, ctxKeyMaxTokens, int(maxOutputTokens))
 	// +1 grants one dedicated retry when the only failure is a malformed
 	// (template-violating) summary, even with maxRetries=0.
 	maxAttempts := maxRetries + 1
@@ -770,7 +794,13 @@ func runSummary(ctx context.Context, client LLMClient, prompt string, maxRetries
 			err     error
 		}, 1)
 		go func() {
-			resp, err := client.Chat([]Message{{Role: "user", Content: prompt}}, nil)
+			var resp *Message
+			var err error
+			if gc, ok := client.(*GenericClient); ok {
+				resp, err = gc.ChatWithContext(summaryCtx, []Message{{Role: "user", Content: prompt}}, nil)
+			} else {
+				resp, err = client.Chat([]Message{{Role: "user", Content: prompt}}, nil)
+			}
 			if err != nil {
 				done <- struct {
 					content string

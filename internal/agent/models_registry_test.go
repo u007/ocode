@@ -63,6 +63,25 @@ func TestModelWindowOpenRouterLiveFallback(t *testing.T) {
 	}
 }
 
+func TestModelMaxOutputTokensOpenRouterLiveFallback(t *testing.T) {
+	seedOpenRouterLiveCache(t, map[string]modelEntry{
+		"tencent/hy3:free": {
+			ID:    "tencent/hy3:free",
+			Limit: modelLimit{Context: 131072, Output: 8192},
+		},
+	})
+
+	if got := ModelMaxOutputTokens("openrouter/tencent/hy3:free"); got != 8192 {
+		t.Fatalf("ModelMaxOutputTokens(openrouter/tencent/hy3:free) = %d, want 8192", got)
+	}
+
+	// Unknown model must return 0 so callers know to fall back, not silently
+	// send a wrong cap.
+	if got := ModelMaxOutputTokens("openrouter/nonexistent/model:xyz"); got != 0 {
+		t.Fatalf("ModelMaxOutputTokens(unknown) = %d, want 0", got)
+	}
+}
+
 func TestModelEntryForOpenRouterColonVariant(t *testing.T) {
 	// The live cache keys by the bare id (after any "openrouter/" prefix), so a
 	// lookup of "openrouter/tencent/hy3:free" must hit the cached

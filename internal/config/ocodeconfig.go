@@ -359,7 +359,7 @@ func defaultCompactConfig() CompactConfig {
 		TokenThreshold:        0.85,
 		KeepRecentTurns:       3,
 		MinMessages:           8,
-		SummaryTimeoutSeconds: 90,
+		SummaryTimeoutSeconds: 600,
 		SummaryMaxRetries:     1,
 		MaxSummaryInputTokens: 50000,
 	}
@@ -1509,6 +1509,19 @@ func RegisteredLocalModelIDs() ([]string, error) {
 	}
 	sort.Strings(ids)
 	return ids, nil
+}
+
+// LocalModelConfigFor returns modelID's registered config, loaded FRESH from
+// disk (same rationale as RegisteredLocalModelIDs — a per-request concurrency
+// gate must see another process's latest max_parallel, not a stale in-memory
+// snapshot). ok is false if modelID is not registered.
+func LocalModelConfigFor(modelID string) (lm LocalModelConfig, ok bool, err error) {
+	cfg, err := loadFullOcodeConfig()
+	if err != nil {
+		return LocalModelConfig{}, false, err
+	}
+	lm, ok = cfg.LocalModels[modelID]
+	return lm, ok, nil
 }
 
 // SaveOcodeASTPlugin persists the enabled state of the opt-in "ast" tool.

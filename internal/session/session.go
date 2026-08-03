@@ -221,11 +221,26 @@ func saveOjsonl(dir, id, title string, messages []agent.Message, metadata map[st
 		newTitle = "" // no title change this save; appendOjsonlSession keeps the cached one
 	}
 
+	resolvedTitle := newTitle
+	if resolvedTitle == "" {
+		resolvedTitle = state.title
+	}
+
+	if existed && state.count > len(messages) {
+		// Message count shrank (e.g. /compact spliced out old messages).
+		// The append-only path can't represent this, so rewrite the whole
+		// file instead of erroring out and silently leaving stale content
+		// on disk (that stale content is what a later resume would load).
+		rewriteTitle := resolvedTitle
+		rewriteTitleGenerated := titleGenerated || state.titleGenerated
+		if err := rewriteOjsonlFull(path, id, state.createdAt, messages, metadata, rewriteTitle, rewriteTitleGenerated); err != nil {
+			return err
+		}
+		return updateIndex(dir, id, rewriteTitle)
+	}
+
 	newMessages := messages
 	if existed {
-		if state.count > len(messages) {
-			return fmt.Errorf("ojsonl session %s: persisted count %d exceeds provided message count %d", path, state.count, len(messages))
-		}
 		newMessages = messages[state.count:]
 	}
 
@@ -233,10 +248,6 @@ func saveOjsonl(dir, id, title string, messages []agent.Message, metadata map[st
 		return err
 	}
 
-	resolvedTitle := newTitle
-	if resolvedTitle == "" {
-		resolvedTitle = state.title
-	}
 	return updateIndex(dir, id, resolvedTitle)
 }
 

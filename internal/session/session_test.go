@@ -675,6 +675,62 @@ func TestOjsonlSessionFullLifecycle(t *testing.T) {
 	}
 }
 
+func TestSaveHandlesShrinkingMessageCount(t *testing.T) {
+	tmpDir := t.TempDir()
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	os.Chdir(tmpDir)
+
+	id := "ses_compact"
+
+	full := []agent.Message{
+		{Role: "user", Content: "one"},
+		{Role: "assistant", Content: "two"},
+		{Role: "user", Content: "three"},
+		{Role: "assistant", Content: "four"},
+	}
+	if err := Save(id, "", full, map[string]any{"total_tokens": 100.0}); err != nil {
+		t.Fatalf("Save full history: %v", err)
+	}
+
+	// Simulate /compact: the middle is replaced by a single summary
+	// message, so the persisted count (4) now exceeds len(messages) (2).
+	compacted := []agent.Message{
+		{Role: "system", Content: "summary of one..four"},
+		{Role: "user", Content: "five"},
+	}
+	if err := Save(id, "", compacted, map[string]any{"total_tokens": 20.0}); err != nil {
+		t.Fatalf("Save after compaction: %v", err)
+	}
+
+	sess, err := Load(id)
+	if err != nil {
+		t.Fatalf("Load after compaction: %v", err)
+	}
+	if len(sess.Messages) != 2 {
+		t.Fatalf("expected 2 messages after compaction resume, got %d: %+v", len(sess.Messages), sess.Messages)
+	}
+	if sess.Messages[0].Content != "summary of one..four" || sess.Messages[1].Content != "five" {
+		t.Fatalf("expected compacted content to survive resume, got %+v", sess.Messages)
+	}
+	if sess.Metadata["total_tokens"] != 20.0 {
+		t.Fatalf("expected compacted metadata to win, got %#v", sess.Metadata)
+	}
+
+	// A subsequent append-only save (post-compaction growth) must still work.
+	grown := append(compacted, agent.Message{Role: "assistant", Content: "six"})
+	if err := Save(id, "", grown, map[string]any{"total_tokens": 30.0}); err != nil {
+		t.Fatalf("Save after post-compaction growth: %v", err)
+	}
+	sess, err = Load(id)
+	if err != nil {
+		t.Fatalf("Load after growth: %v", err)
+	}
+	if len(sess.Messages) != 3 {
+		t.Fatalf("expected 3 messages after growth, got %d: %+v", len(sess.Messages), sess.Messages)
+	}
+}
+
 func TestListIncludesOjsonlSessions(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()

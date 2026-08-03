@@ -160,7 +160,7 @@ func init() {
 		{name: "/upload", aliases: []string{"/uploads"}, usage: "/upload [path]", help: "Show or set the file upload directory used by /api/uploads", handler: runUploadCmd},
 		{name: "/search", aliases: []string{"/find"}, usage: "/search <query>", help: "Find a message by keyword (opens the in-chat find bar)", handler: runSearchCmd},
 		{name: "/discover", usage: "/discover [enable|disable|status|model [name]|ignore [add|remove|clear] [path]]", help: "Enable/disable retrieval-based skill/MCP discovery, show status, choose the query-embedding model, or manage ignored paths", handler: runDiscoverCmd},
-		{name: "/localmodel", usage: "/localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]",
+		{name: "/localmodel", usage: localModelUsage,
 			help:    "Manage locally-run chat/completion model instances (e.g. Bonsai 8B 1-bit) that LM Studio can't serve",
 			handler: runLocalModelCmd},
 		{name: "/docs", aliases: []string{"/doc-mode"}, usage: "/docs [on|off|status|init|update|cleanup]", help: "Manage documentation-first development and OKF knowledge bundle: on/off toggle, status show counts, init create bundle, update force maintenance, cleanup remove deprecated docs", handler: runDocsCmd},

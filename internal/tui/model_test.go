@@ -2909,6 +2909,26 @@ func TestDebugLogMsgPromotesOnlyNewUserFacingEntries(t *testing.T) {
 	}
 }
 
+func TestModelPickerExcludesEnabledLocalModel(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	m := model{config: &config.Config{Ocode: config.OcodeConfig{
+		LocalModels: map[string]config.LocalModelConfig{
+			"local/foo": {Enabled: true, MaxParallel: 1},
+		},
+	}}}
+	m.openModelPicker()
+
+	// The local-model instance manager design scopes /localmodel to
+	// start/stop/query — enabled entries must NOT be wired into the general
+	// model picker (active-chat-model selection via the picker is a future
+	// concern). Select them by typing "/model local/foo" instead.
+	if containsString(m.pickerValues, "local/foo") {
+		t.Fatalf("expected enabled local model to be excluded from the picker, got values=%#v", m.pickerValues)
+	}
+}
+
 func TestModelPickerShowsFavoritesAndRecentsFirst(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	if err := config.SaveRecentModel("openai/gpt-4o-mini"); err != nil {

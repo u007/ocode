@@ -1314,7 +1314,7 @@ func (a *Agent) resolveCompactRuntime(force bool) compactRuntime {
 	}
 	rt.SummaryTimeoutSeconds = c.SummaryTimeoutSeconds
 	if rt.SummaryTimeoutSeconds <= 0 {
-		rt.SummaryTimeoutSeconds = 300
+		rt.SummaryTimeoutSeconds = 600
 	}
 	rt.SummaryMaxRetries = c.SummaryMaxRetries
 	if rt.SummaryMaxRetries < 0 {

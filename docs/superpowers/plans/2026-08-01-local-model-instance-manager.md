@@ -6,7 +6,13 @@
 
 **Architecture:** Generalize the existing embedder-only local-server pattern (`internal/discovery/localserver.go`, `manifest.go`) into a small model-id-keyed instance registry (`internal/discovery/instances.go`) that reuses the same artifact-download, health-check, and supervised-spawn building blocks. A new `ServerManifest.Kind` field distinguishes "embed" (existing) from "chat" (new) manifests so the embedding-model picker doesn't see chat models and vice versa.
 
-**Tech Stack:** Go (existing `internal/discovery`, `internal/config`, `internal/tui` packages), llama.cpp `llama-server` (`--parallel N` flag), `mlx_lm.server` (`--max-sequences N` flag, Apple Silicon only).
+**Tech Stack:** Go (existing `internal/discovery`, `internal/config`, `internal/tui` packages), llama.cpp `llama-server` (`--parallel N` flag), `mlx_lm.server` (Apple Silicon only).
+
+> **Implementation notes (as-built, supersede the above where they conflict):**
+> - `mlx_lm.server` accepts **no** `--max-sequences`/`--parallel`/`--decode-concurrency` equivalent (the `--decode-concurrency` flag doesn't exist). `max_parallel` for MLX chat models is enforced **client-side** by a cross-process counting semaphore (`internal/agent/local_model_limiter.go` — `localConcurrencyTransport`, lock files under `<cache-dir>/locks/`), because the deterministic port assignment means every ocode process talks to the same physical server and a per-process semaphore would undercount.
+> - `StartModelInstance` additionally serializes spawns with a per-model in-process mutex (`lockForStart`) and a cross-process `O_CREATE|O_EXCL` start-lock file (`acquireChatStartLock`, 6-min stale reclaim) so concurrent ocode processes can't double-spawn on the same port; lock losers adopt the winner via `waitForChatHealth`, and `OwnsModelInstance` distinguishes spawned-vs-adopted for `/localmodel limit`.
+> - MLX chat spawns are forced offline (`HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1`) so a cached model launches without mlx_lm.server's per-launch HF Hub update check (which 404/401s for non-public repos).
+> - As decided in the design's non-goal: `/localmodel` entries are **not** listed in the model picker; select via `/model local/<id>` (warms the server). The TUI warm-up path is `localModelNeedsWarm` + `startLocalModelCmd(modelID, switchModel)`; a terminal `InstanceStopped` record must not suppress a retry warm-up.
 
 ## Global Constraints
 

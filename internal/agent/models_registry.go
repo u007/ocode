@@ -343,6 +343,16 @@ func ModelWindow(modelID string) int64 {
 	return 0
 }
 
+// ModelMaxOutputTokens returns the model's maximum completion/output token
+// count for a given model ID in "provider/model" format or bare model name.
+// It checks the models.dev registry first, then falls back to 0 (unknown).
+func ModelMaxOutputTokens(modelID string) int64 {
+	if m, ok := modelEntryFor(modelID); ok {
+		return m.Limit.Output
+	}
+	return 0
+}
+
 // ModelSupportsVision reports whether a model can accept image input. The
 // models.dev registry (Modalities.Input containing "image") is authoritative
 // when it knows the model. For models absent from the registry (cold cache,

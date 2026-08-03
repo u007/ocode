@@ -578,3 +578,58 @@ func TestAccountID_NotJWTParsed(t *testing.T) {
 		t.Errorf("expected AccountID from cache, got %q", client.AccountID)
 	}
 }
+
+// TestChatOpenAI_MaxTokensFromContextOverride locks in the compaction fix:
+// when a caller sets ctxKeyMaxTokens on the context, chatOpenAI must send
+// that value as max_tokens instead of leaving it unset (which some
+// OpenAI-compatible routers, e.g. opencode-go, default to the model's
+// remaining context window rather than its real completion cap, and reject
+// once that computed default exceeds it).
+func TestChatOpenAI_MaxTokensFromContextOverride(t *testing.T) {
+	var gotMaxTokens interface{}
+	sawMaxTokensKey := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			t.Fatalf("bad request body: %v", err)
+		}
+		gotMaxTokens, sawMaxTokensKey = payload["max_tokens"]
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fw := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n")
+		fw.Flush()
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		fw.Flush()
+	}))
+	defer srv.Close()
+
+	c := &GenericClient{
+		APIKey:   "test",
+		Model:    "deepseek-v4-flash",
+		BaseURL:  srv.URL,
+		Provider: "opencode-go",
+	}
+
+	ctx := context.WithValue(context.Background(), ctxKeyMaxTokens, 8192)
+	if _, err := c.chatOpenAI(ctx, []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("chatOpenAI error: %v", err)
+	}
+	if !sawMaxTokensKey {
+		t.Fatalf("expected max_tokens in payload, got none")
+	}
+	if got, want := gotMaxTokens, float64(8192); got != want {
+		t.Fatalf("max_tokens = %v, want %v", got, want)
+	}
+
+	// Without the context override, max_tokens must stay unset — this must
+	// not become the default behaviour for every OpenAI-compatible call.
+	sawMaxTokensKey = false
+	if _, err := c.chatOpenAI(context.Background(), []Message{{Role: "user", Content: "hi"}}, nil); err != nil {
+		t.Fatalf("chatOpenAI error: %v", err)
+	}
+	if sawMaxTokensKey {
+		t.Fatalf("expected max_tokens omitted without override, got %v", gotMaxTokens)
+	}
+}

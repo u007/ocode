@@ -136,6 +136,7 @@ type ojsonlWriteState struct {
 	count          int
 	title          string
 	titleGenerated bool
+	createdAt      time.Time
 }
 
 var (
@@ -223,7 +224,7 @@ func bootstrapOjsonlState(path string) (ojsonlWriteState, bool, error) {
 		return ojsonlWriteState{}, true, fmt.Errorf("scan %s: %w", path, err)
 	}
 
-	return ojsonlWriteState{count: count, title: header.Title, titleGenerated: header.TitleGenerated}, true, nil
+	return ojsonlWriteState{count: count, title: header.Title, titleGenerated: header.TitleGenerated, createdAt: header.CreatedAt}, true, nil
 }
 
 // appendOjsonlSession appends new messages and an optional metadata line to
@@ -259,7 +260,7 @@ func appendOjsonlSession(path, id string, createdAt time.Time, newMessages []age
 			return fmt.Errorf("create ojsonl session %s: %w", path, err)
 		}
 		setOjsonlWriteState(path, ojsonlWriteState{
-			count: len(newMessages), title: title, titleGenerated: titleGenerated,
+			count: len(newMessages), title: title, titleGenerated: titleGenerated, createdAt: createdAt,
 		})
 		return nil
 	}
@@ -373,6 +374,52 @@ func rewriteOjsonlHeader(path, title string, titleGenerated bool) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename temp file into %s: %w", path, err)
 	}
+	return nil
+}
+
+// rewriteOjsonlFull replaces the entire .ojsonl file (header + all messages
+// + metadata) via temp file + rename. Used when the message count shrinks
+// (e.g. after /compact splices out old messages) since the normal append
+// path can only grow the persisted count.
+func rewriteOjsonlFull(path, id string, createdAt time.Time, messages []agent.Message, metadata map[string]any, title string, titleGenerated bool) error {
+	headerLine, err := encodeHeaderLine(ojsonlHeader{
+		V:              ojsonlSchemaVersion,
+		ID:             id,
+		CreatedAt:      createdAt,
+		Title:          title,
+		TitleGenerated: titleGenerated,
+	})
+	if err != nil {
+		return err
+	}
+	body, err := encodeOjsonlBody(messages, metadata)
+	if err != nil {
+		return err
+	}
+	content := append(headerLine, body...)
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file for %s: %w", path, err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("write temp file for %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("close temp file for %s: %w", path, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename temp file into %s: %w", path, err)
+	}
+
+	setOjsonlWriteState(path, ojsonlWriteState{
+		count: len(messages), title: title, titleGenerated: titleGenerated, createdAt: createdAt,
+	})
 	return nil
 }
 

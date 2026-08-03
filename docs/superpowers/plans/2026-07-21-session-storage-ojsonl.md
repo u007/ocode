@@ -15,6 +15,7 @@
 - Every appended batch is written with a single `Write()` call on a file opened with `O_APPEND` (verbatim from spec — required for cross-process atomicity of the append itself).
 - Header (line 1) rewrites use write-to-temp-in-same-dir + `os.Rename` — never in-place truncate+overwrite (verbatim from spec).
 - Concurrent-writer safety (duplicate appends, and the title-rewrite/append race) is explicitly out of scope for this plan — already tracked in `TODO.md`. Do not add file locking.
+- **As-built addition (2026-08):** the append path is not the only writer — a save whose message count is *smaller* than the persisted count (e.g. `/compact` spliced out old messages) previously errored with "persisted count exceeds provided message count". `saveOjsonl` now detects the shrink and rewrites the whole file via `rewriteOjsonlFull` (temp file + `os.Rename`, preserving header `CreatedAt`/title, same temp+rename primitive as header rewrites) instead of erroring and leaving stale content that a later resume would load.
 - Cross-project session-file fallback (`readSessionFileAnyProject`) and the legacy bare-timestamp id path are `.json`-only in this plan. `.ojsonl` sessions are always created with the canonical `ses_` id, so no legacy-id resolution is needed for them. Cross-project fallback for `.ojsonl` is out of scope for this plan (add to `TODO.md` in Task 8).
 
 Spec: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`

@@ -42,9 +42,13 @@ const (
 	ctxKeyTemperature ctxChatParamKey = iota
 	ctxKeyTopP
 	ctxKeyTopK
+	ctxKeyMaxTokens
 )
 
-var llmHTTPClient = &http.Client{Timeout: llmRequestTimeout}
+var llmHTTPClient = &http.Client{
+	Timeout:   llmRequestTimeout,
+	Transport: &localConcurrencyTransport{next: http.DefaultTransport},
+}
 var llmRetryBaseDelay = 500 * time.Millisecond
 
 // ErrNoResponseFromOpenAIResponses is returned when the OpenAI Responses API
@@ -408,6 +412,22 @@ func isReasoningOnlyModel(modelID string) bool {
 // Used to produce *float64 literals for model-ID-based defaults.
 func floatPtr(v float64) *float64 { return &v }
 
+// maxTokensFromContext reads a per-call max_tokens override set via
+// ctxKeyMaxTokens (context.WithValue), mirroring applyGenerationParams'
+// context-override pattern for temperature/top_p/top_k. Using context
+// instead of a *GenericClient field avoids mutating shared client state that
+// subsequent calls on the same client (e.g. the main coding loop reusing
+// the same client as compaction) would inherit.
+func maxTokensFromContext(ctx context.Context) (int, bool) {
+	if ctx == nil {
+		return 0, false
+	}
+	if v, ok := ctx.Value(ctxKeyMaxTokens).(int); ok && v > 0 {
+		return v, true
+	}
+	return 0, false
+}
+
 func maybeStripMaxTokensForGateway(provider, model string, payload map[string]interface{}) {
 	if provider != "cloudflare-gateway" {
 		return
@@ -758,6 +778,9 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 		"model":    c.Model,
 		"messages": openAIMessages,
 		"stream":   true,
+	}
+	if maxTokens, ok := maxTokensFromContext(ctx); ok {
+		payload["max_tokens"] = maxTokens
 	}
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
@@ -3789,6 +3812,9 @@ func (c *GenericClient) chatOpenAIWebSocket(ctx context.Context, messages []Mess
 		"messages": openAIMessages,
 		"stream":   true,
 	}
+	if maxTokens, ok := maxTokensFromContext(ctx); ok {
+		payload["max_tokens"] = maxTokens
+	}
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)
 	if providerSupportsReasoningEffort(c.Provider) && c.ThinkingBudget > 0 {
@@ -3830,6 +3856,9 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 		"model":    c.Model,
 		"messages": openAIMessages,
 		"stream":   true,
+	}
+	if maxTokens, ok := maxTokensFromContext(ctx); ok {
+		payload["max_tokens"] = maxTokens
 	}
 	c.applyGenerationParams(ctx, payload)
 	maybeStripMaxTokensForGateway(c.Provider, c.Model, payload)

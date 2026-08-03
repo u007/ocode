@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -75,7 +76,29 @@ type chatInstance struct {
 var (
 	instMu    sync.Mutex
 	instances = map[string]*chatInstance{}
+
+	// startMu guards startLocks — lazily created per-model mutexes that
+	// serialize StartModelInstance calls for the same modelID within this
+	// process. Without this, two goroutines racing to auto-start the same
+	// model (e.g. two sub-agents, or a background auto-start racing a manual
+	// /localmodel enable) would both pass the probe-before-spawn check at the
+	// same time and try to bind the same port.
+	startMu    sync.Mutex
+	startLocks = map[string]*sync.Mutex{}
 )
+
+// lockForStart returns the singleton mutex used to serialize
+// StartModelInstance calls for modelID within this process.
+func lockForStart(modelID string) *sync.Mutex {
+	startMu.Lock()
+	defer startMu.Unlock()
+	l, ok := startLocks[modelID]
+	if !ok {
+		l = &sync.Mutex{}
+		startLocks[modelID] = l
+	}
+	return l
+}
 
 // StartModelInstance resolves modelID's chat manifest, downloads any llama.cpp
 // artifacts (idempotent, sha-pinned — same EnsureArtifact path as the
@@ -97,6 +120,10 @@ var (
 // succeeded), leaving /localmodel disable unable to find the real process and
 // /localmodel status reading a dead PID for memory.
 func StartModelInstance(spawn func(cmdline string) error, modelID string, port int, maxParallel int, cacheDir string) error {
+	lock := lockForStart(modelID)
+	lock.Lock()
+	defer lock.Unlock()
+
 	man, ok := ChatManifestForHost(modelID)
 	if !ok {
 		return fmt.Errorf("no local chat manifest for model %q on %s/%s", modelID, goos(), goarch())
@@ -117,6 +144,28 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 	instMu.Unlock()
 
 	base := fmt.Sprintf("http://localhost:%d", port)
+
+	// The in-process lockForStart mutex above only serializes calls within
+	// THIS ocode process. A relaunched ocode process (e.g. the user retrying
+	// after a slow/stuck cold download) has an empty in-memory instances map
+	// and no idea another process's spawn is still in flight, so its own
+	// ProbeModelInstance check above (not yet healthy) would otherwise fall
+	// straight through to spawning a SECOND competing server on the same
+	// port — both then contend for network/CPU and neither ever finishes.
+	// acquireChatStartLock is a cross-process file lock so only one process
+	// spawns; everyone else adopts by waiting on the same health poll below.
+	acquired, release, lockErr := acquireChatStartLock(cacheDir, modelID)
+	if lockErr != nil {
+		instMu.Lock()
+		instances[modelID].info.State = InstanceStopped
+		instMu.Unlock()
+		return lockErr
+	}
+	if !acquired {
+		return waitForChatHealth(modelID, base, man)
+	}
+	defer release()
+
 	var err error
 	switch man.Backend {
 	case BackendMLX:
@@ -125,12 +174,33 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 		err = spawnLlamaCppChatServer(spawn, man, cacheDir, port, maxParallel)
 	}
 	if err != nil {
+		// A concurrent ocode process may have won the race and bound the port
+		// first (e.g. two ocode instances launched at the same moment both
+		// auto-starting the same enabled model) — re-probe once before
+		// reporting failure, so this process adopts the winner's server
+		// instead of erroring out.
+		if info, probeOK := ProbeModelInstance(modelID, port); probeOK {
+			instMu.Lock()
+			info.MaxParallel = maxParallel
+			instances[modelID] = &chatInstance{info: info}
+			instMu.Unlock()
+			return nil
+		}
 		instMu.Lock()
 		instances[modelID].info.State = InstanceStopped
 		instMu.Unlock()
 		return err
 	}
 
+	return waitForChatHealth(modelID, base, man)
+}
+
+// waitForChatHealth polls modelID's chat server until it reports healthy or
+// the poll budget is exhausted, updating the in-process instance map with
+// the outcome. Shared by the process that actually spawned the server and by
+// a relaunched process that lost the start-lock race (see
+// acquireChatStartLock) and is just waiting on someone else's spawn.
+func waitForChatHealth(modelID, base string, man ServerManifest) error {
 	expect := man.ExpectedServeID()
 	// First load downloads the real weights (multi-GB on MLX, which fetches
 	// inside mlx_lm.server before /v1/models responds; llama.cpp downloads
@@ -157,6 +227,56 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 	instances[modelID].info.State = InstanceStopped
 	instMu.Unlock()
 	return fmt.Errorf("local chat server for %q did not become healthy on %s", modelID, base)
+}
+
+// chatStartLockStaleAfter bounds how long a start-lock file may be held
+// before a contending process treats it as abandoned (the holder crashed or
+// was killed mid-spawn without cleaning up) and reclaims it. Set above
+// waitForChatHealth's 300s poll budget so a legitimately slow cold download
+// is never stolen from mid-flight.
+const chatStartLockStaleAfter = 6 * time.Minute
+
+// acquireChatStartLock is a cross-process mutex (O_CREATE|O_EXCL lock file —
+// same primitive as config.lockOcodeConfig and the local-model concurrency
+// slots in agent/local_model_limiter.go) guarding modelID's spawn step in
+// StartModelInstance, so two ocode processes racing to auto-start the same
+// enabled model (or a relaunch racing a still-starting prior process) don't
+// both spawn a competing server on the same port. acquired is false when
+// another live process already holds the lock; the caller should adopt that
+// process's in-flight start (waitForChatHealth) instead of spawning.
+func acquireChatStartLock(cacheDir, modelID string) (acquired bool, release func(), err error) {
+	lockDir := filepath.Join(cacheDir, "locks")
+	if err := os.MkdirAll(lockDir, 0755); err != nil {
+		return false, nil, err
+	}
+	safeID := strings.ReplaceAll(modelID, "/", "_")
+	lockPath := filepath.Join(lockDir, safeID+".start.lock")
+
+	for attempt := 0; attempt < 2; attempt++ {
+		f, openErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
+		if openErr == nil {
+			f.Close()
+			released := false
+			return true, func() {
+				if released {
+					return
+				}
+				released = true
+				os.Remove(lockPath)
+			}, nil
+		}
+		if !os.IsExist(openErr) {
+			return false, nil, fmt.Errorf("create chat start lock %s: %w", lockPath, openErr)
+		}
+		if attempt == 0 {
+			if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > chatStartLockStaleAfter {
+				os.Remove(lockPath) // abandoned lock from a crashed holder — reclaim and retry
+				continue
+			}
+		}
+		break
+	}
+	return false, nil, nil
 }
 
 // spawnLlamaCppChatServer mirrors spawnLlamaCppServer (localserver.go) but
@@ -201,7 +321,12 @@ func spawnLlamaCppChatServer(spawn func(cmdline string) error, man ServerManifes
 // runs the bundled mlx_embed_server.py via {script}).
 func spawnMLXChatServer(spawn func(cmdline string) error, man ServerManifest, port, maxParallel int) error {
 	argv := filterMLXArgs(man.LaunchArgv, man.MLXRepo, port, maxParallel, mlxServerFlags())
-	cmdline := strings.Join(argv, " ")
+	// Once cached locally, mlx_lm.server still hits the HF Hub API on every
+	// launch to check for repo updates. That check has nothing to do with
+	// whether the model is already running, and fails loudly (404/401) for
+	// repos that aren't publicly reachable. Force offline mode so a cached
+	// model launches without the hub round-trip.
+	cmdline := "HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 " + strings.Join(argv, " ")
 	emitUserDiscoveryDebug("DISCOVERY", "spawning MLX chat server: "+cmdline)
 	if err := spawn(cmdline); err != nil {
 		return fmt.Errorf("spawn MLX chat server: %w", err)
@@ -317,9 +442,39 @@ func GetModelInstance(modelID string) (InstanceInfo, bool) {
 	return inst.info, true
 }
 
+// SetModelInstanceStateForTest forces modelID's in-process instance record
+// into state, creating it if absent. Test-only: production state transitions
+// happen exclusively inside StartModelInstance/StopModelInstance — this exists
+// so callers of GetModelInstance (e.g. the TUI's warm-up decision) can be
+// regression-tested against stale/failed records without spawning a server.
+func SetModelInstanceStateForTest(modelID string, state InstanceState) {
+	instMu.Lock()
+	defer instMu.Unlock()
+	if inst, ok := instances[modelID]; ok {
+		inst.info.State = state
+		return
+	}
+	instances[modelID] = &chatInstance{info: InstanceInfo{ModelID: modelID, State: state}}
+}
+
 // StopModelInstance kills modelID's running process (if any) via procs and
 // clears the in-process instance record. No-op (not an error) if the model
 // was never started or is already stopped.
+// OwnsModelInstance reports whether THIS process spawned modelID's running
+// server (as opposed to having merely adopted one already running from a
+// different ocode process via ProbeModelInstance). StopModelInstance is a
+// no-op when this is false — callers that need to actually stop/restart the
+// server (e.g. /localmodel limit changing max_parallel) must check this
+// first and tell the user which process owns it instead of silently no-op'ing
+// a stop and then reporting success on a config value the live server never
+// picked up.
+func OwnsModelInstance(modelID string) bool {
+	instMu.Lock()
+	defer instMu.Unlock()
+	inst, ok := instances[modelID]
+	return ok && inst.processID != ""
+}
+
 func StopModelInstance(procs *tool.ProcessRegistry, modelID string) error {
 	instMu.Lock()
 	inst, ok := instances[modelID]

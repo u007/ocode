@@ -15,6 +15,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/discovery"
 )
 
 func TestLookupCommandResolvesAliases(t *testing.T) {
@@ -1226,29 +1227,6 @@ func TestLocalModelLimitRejectsInvalidValue(t *testing.T) {
 	}
 }
 
-func TestEnabledLocalModelIDsNilConfigReturnsNil(t *testing.T) {
-	m := model{input: newTestTextarea()}
-	if got := m.enabledLocalModelIDs(); got != nil {
-		t.Fatalf("expected nil for a nil config, got %v", got)
-	}
-}
-
-func TestEnabledLocalModelIDsFiltersDisabledAndSorts(t *testing.T) {
-	m := model{
-		input: newTestTextarea(),
-		config: &config.Config{Ocode: config.OcodeConfig{LocalModels: map[string]config.LocalModelConfig{
-			"local/zeta":   {Enabled: true, MaxParallel: 1},
-			"local/alpha":  {Enabled: true, MaxParallel: 2},
-			"local/hidden": {Enabled: false, MaxParallel: 1},
-		}}},
-	}
-	got := m.enabledLocalModelIDs()
-	want := []string{"local/alpha", "local/zeta"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
-		t.Fatalf("got %v, want %v", got, want)
-	}
-}
-
 // TestWarmLocalModelIfNeededCmdSkipsNonLocalModel guards that the model-switch
 // warm-up hook (restart-recovery for /localmodel) never engages for a normal
 // hosted-provider model — it must return nil (proceed synchronously) so
@@ -1286,4 +1264,47 @@ func TestWarmLocalModelIfNeededCmdSkipsWhenNoAgent(t *testing.T) {
 	if cmd := m.warmLocalModelIfNeededCmd("local/bonsai-8b-1bit"); cmd != nil {
 		t.Fatal("expected nil when m.agent is nil")
 	}
+}
+
+// TestLocalModelNeedsWarmRetriesAfterStaleStoppedRecord is a regression test
+// for the retry deadlock: StartModelInstance persists an InstanceStopped record
+// when the start-lock, spawn, or health-poll fails, and localModelNeedsWarm
+// used to treat ANY in-process record as "already running" — so every retry
+// skipped warm-up and the model stayed permanently unusable until the process
+// was restarted.
+func TestLocalModelNeedsWarmRetriesAfterStaleStoppedRecord(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	modelID := "local/bonsai-8b-1bit"
+	if err := config.SaveLocalModelConfig(modelID, true, 1); err != nil {
+		t.Fatalf("SaveLocalModelConfig: %v", err)
+	}
+	cfg := config.Config{}
+	cfg.Ocode.LocalModels = map[string]config.LocalModelConfig{modelID: {Enabled: true, MaxParallel: 1}}
+	m := model{
+		config: &cfg,
+		input:  newTestTextarea(),
+		// Never see a live server on the assigned port — the scenario under
+		// test is a record left over from a FAILED start, not a healthy server.
+		probeLocalModelInstance: func(string, int) (discovery.InstanceInfo, bool) {
+			return discovery.InstanceInfo{}, false
+		},
+	}
+
+	discovery.SetModelInstanceStateForTest(modelID, discovery.InstanceStopped)
+	if !m.localModelNeedsWarm(modelID) {
+		t.Fatal("expected warm-up to be needed despite a stale InstanceStopped record")
+	}
+	// A start in flight or a ready instance must still suppress warm-up.
+	discovery.SetModelInstanceStateForTest(modelID, discovery.InstanceStarting)
+	if m.localModelNeedsWarm(modelID) {
+		t.Fatal("expected no warm-up while an in-process start is in flight")
+	}
+	discovery.SetModelInstanceStateForTest(modelID, discovery.InstanceReady)
+	if m.localModelNeedsWarm(modelID) {
+		t.Fatal("expected no warm-up while an in-process instance is ready")
+	}
+	// Leave the shared in-process instance map in a neutral state so other
+	// tests in this package don't observe the record.
+	discovery.SetModelInstanceStateForTest(modelID, discovery.InstanceStopped)
 }
