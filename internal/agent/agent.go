@@ -2370,6 +2370,18 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 		return false, "no permission model configured"
 	}
 
+	// A "local/"-managed auto-permission model can be dead (crashed after
+	// being marked "ready" — see discovery.GetModelInstance's doc comment) or
+	// still cold-starting/downloading from a previous enable. Block here
+	// until it is actually live instead of building a client that immediately
+	// hits a dead port and burns its retry budget in seconds (see
+	// EnsureLocalModelRunning's doc comment for why a second concurrent start
+	// attempt is safe — it just waits on the same health-poll).
+	if err := EnsureLocalModelRunning(a, modelName); err != nil {
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=local_model_start_failed err=%v", toolName, modelLabel, err))
+		return false, "local model unavailable: " + err.Error()
+	}
+
 	client := newClientFn(a.config, modelName)
 	if client == nil {
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=client_creation_failed", toolName, modelLabel))

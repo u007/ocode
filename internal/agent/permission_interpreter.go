@@ -205,6 +205,13 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 		return true, "matched persisted interpreter grant", ""
 	}
 
+	// See askPermissionModel's identical call for why this blocks until a
+	// "local/"-managed model is actually live instead of racing a dead port.
+	if err := EnsureLocalModelRunning(a, modelName); err != nil {
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=local_model_start_failed err=%v", ie.Language, modelLabel, err))
+		return false, "local model unavailable: " + err.Error(), ""
+	}
+
 	client := newClientFn(a.config, modelName)
 	if client == nil {
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=client_creation_failed", ie.Language, modelLabel))

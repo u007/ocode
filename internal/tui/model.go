@@ -8242,7 +8242,7 @@ func (m *model) handleDiscoverCmd(args []string) tea.Cmd {
 // localModelUsage is the canonical /localmodel usage string, shared between
 // the command-table registration (commands.go) and the in-command
 // help/fallback messages below so the two can't drift.
-const localModelUsage = "/localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]|help"
+const localModelUsage = "/localmodel list|add <name>|enable <name>|disable <name>|limit <name> <1|2>|status [name]|hf-token <token>|help"
 
 func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 	if len(args) == 0 {
@@ -8287,6 +8287,12 @@ func (m *model) handleLocalModelCmd(args []string) tea.Cmd {
 			name = args[1]
 		}
 		m.showLocalModelStatus(name)
+	case "hf-token":
+		if len(args) < 2 {
+			m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /localmodel hf-token <token>\nGet one from https://huggingface.co/settings/tokens (read access is enough)"})
+			return nil
+		}
+		m.localModelSetHFToken(args[1])
 	case "help", "-h", "--help":
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: " + localModelUsage})
 	default:
@@ -8309,21 +8315,36 @@ func localModelID(name string) string {
 // a live probe of its assigned port so a model started by a DIFFERENT ocode
 // process is still reported correctly instead of showing "stopped".
 func (m *model) localModelInstanceInfo(id string, lm config.LocalModelConfig) (discovery.InstanceInfo, bool) {
-	if info, ok := discovery.GetModelInstance(id); ok && info.State == discovery.InstanceReady {
-		return info, true
-	}
 	if !lm.Enabled {
 		return discovery.InstanceInfo{}, false
 	}
-	registeredIDs, err := config.RegisteredLocalModelIDs()
-	if err != nil {
+	// GetModelInstance is an in-memory record that never notices the
+	// underlying process crashing on its own — trusting a cached "ready"
+	// state without a live check is what reported a dead server as running.
+	// Always confirm with ProbeModelInstance; only borrow the cached
+	// record's PID (for mem reporting below) when this process owns it,
+	// since ProbeModelInstance itself never learns a PID.
+	cached, cachedOK := discovery.GetModelInstance(id)
+	port := cached.Port
+	if port == 0 {
+		registeredIDs, err := config.RegisteredLocalModelIDs()
+		if err != nil {
+			return discovery.InstanceInfo{}, false
+		}
+		p, err := discovery.AssignChatPort(id, registeredIDs)
+		if err != nil {
+			return discovery.InstanceInfo{}, false
+		}
+		port = p
+	}
+	live, ok := discovery.ProbeModelInstance(id, port)
+	if !ok {
 		return discovery.InstanceInfo{}, false
 	}
-	port, err := discovery.AssignChatPort(id, registeredIDs)
-	if err != nil {
-		return discovery.InstanceInfo{}, false
+	if cachedOK {
+		live.PID = cached.PID
 	}
-	return discovery.ProbeModelInstance(id, port)
+	return live, true
 }
 
 func (m *model) showLocalModelList() {
@@ -8402,6 +8423,23 @@ func (m *model) localModelDisable(name string) {
 	}
 	m.config.Ocode.LocalModels[id] = lm
 	m.messages = append(m.messages, message{role: roleAssistant, text: id + ": disabled"})
+}
+
+// localModelSetHFToken persists a Hugging Face access token (used to
+// authenticate first-time downloads of gated/rate-limited MLX chat models —
+// see discovery.ensureMLXChatModelCached). Stored via internal/auth's
+// credential store (auth.json, 0600) rather than ocodeconfig.json — same
+// place API keys/OAuth tokens for LLM providers already live, so it gets the
+// same tight file permissions and automatically syncs to the backend through
+// auth.OnCredentialsSaved (see internal/sync.StartWatcher), instead of
+// sitting in plaintext inside the general config file. Fast/no spawning
+// involved, so this runs synchronously unlike localModelEnableCmd.
+func (m *model) localModelSetHFToken(token string) {
+	if err := auth.Set("huggingface", auth.Credential{Kind: auth.KindAPIKey, Key: token}); err != nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error saving Hugging Face token: " + err.Error()})
+		return
+	}
+	m.messages = append(m.messages, message{role: roleAssistant, text: "Hugging Face token saved. Retry /localmodel enable <name> for any model that needs it."})
 }
 
 // localModelEnableCmd validates synchronously (fast, no I/O beyond the

@@ -2,8 +2,10 @@ package agent
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
+	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/tool"
@@ -25,6 +27,10 @@ func StartLocalModelInstance(ag *Agent, id string, maxParallel int) error {
 	if err != nil {
 		return err
 	}
+	var hfToken string
+	if cred, ok := auth.Get("huggingface"); ok {
+		hfToken = cred.Key
+	}
 	procs := ag.Procs()
 	spawn := func(cmdline string) error {
 		p := procs.StartBackground(cmdline)
@@ -38,7 +44,7 @@ func StartLocalModelInstance(ag *Agent, id string, maxParallel int) error {
 		discovery.SetModelInstancePID(id, p.PID)
 		return nil
 	}
-	if err := discovery.StartModelInstance(spawn, id, port, maxParallel, DiscoveryCacheDir()); err != nil {
+	if err := discovery.StartModelInstance(spawn, id, port, maxParallel, DiscoveryCacheDir(), hfToken); err != nil {
 		// StartModelInstance can fail after already spawning a process (e.g.
 		// the health-poll timed out while the server was still loading) — if
 		// this call owns that process, kill it instead of leaving it orphaned
@@ -51,6 +57,36 @@ func StartLocalModelInstance(ag *Agent, id string, maxParallel int) error {
 		return err
 	}
 	return nil
+}
+
+// EnsureLocalModelRunning blocks until fullModelID (e.g. "local/bonsai-8b-1bit")
+// is actually live, before a caller builds an LLM client against it. It is a
+// thin wrapper over StartLocalModelInstance, which is already safe to call
+// whether or not the model is currently up:
+//   - already healthy: StartModelInstance's own probe-before-spawn check
+//     short-circuits, so this returns almost instantly;
+//   - dead (crashed after being marked "ready" — see discovery.GetModelInstance's
+//     doc comment): spawns a fresh instance and blocks on the health-poll
+//     instead of letting the caller hit a dead port and fail fast;
+//   - another goroutine/process is already mid-spawn (cold model download):
+//     StartModelInstance's cross-process lock file (acquireChatStartLock) and
+//     in-process lockForStart mutex make this call simply wait on that same
+//     health-poll rather than racing a second spawn.
+//
+// No-op for any model id that isn't registered+enabled under /localmodel
+// (including non-"local/" ids), since only those are ocode's to start.
+func EnsureLocalModelRunning(ag *Agent, fullModelID string) error {
+	if ag == nil || !strings.HasPrefix(fullModelID, "local/") {
+		return nil
+	}
+	lm, ok, err := config.LocalModelConfigFor(fullModelID)
+	if err != nil {
+		return err
+	}
+	if !ok || !lm.Enabled {
+		return nil
+	}
+	return StartLocalModelInstance(ag, fullModelID, lm.MaxParallel)
 }
 
 // autoStartLocalModelsOnce ensures the enabled-local-model auto-start scan

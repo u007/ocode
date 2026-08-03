@@ -1,8 +1,10 @@
 package discovery
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,7 +121,7 @@ func lockForStart(modelID string) *sync.Mutex {
 // — but with the wrong processID recorded (this call's spawn never
 // succeeded), leaving /localmodel disable unable to find the real process and
 // /localmodel status reading a dead PID for memory.
-func StartModelInstance(spawn func(cmdline string) error, modelID string, port int, maxParallel int, cacheDir string) error {
+func StartModelInstance(spawn func(cmdline string) error, modelID string, port int, maxParallel int, cacheDir string, hfToken string) error {
 	lock := lockForStart(modelID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -169,7 +171,7 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 	var err error
 	switch man.Backend {
 	case BackendMLX:
-		err = spawnMLXChatServer(spawn, man, port, maxParallel)
+		err = spawnMLXChatServer(spawn, man, port, maxParallel, hfToken)
 	default:
 		err = spawnLlamaCppChatServer(spawn, man, cacheDir, port, maxParallel)
 	}
@@ -202,11 +204,15 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 // acquireChatStartLock) and is just waiting on someone else's spawn.
 func waitForChatHealth(modelID, base string, man ServerManifest) error {
 	expect := man.ExpectedServeID()
-	// First load downloads the real weights (multi-GB on MLX, which fetches
-	// inside mlx_lm.server before /v1/models responds; llama.cpp downloads
-	// up front via EnsureArtifact). Allow 5 minutes instead of the embedder's
-	// 60s so a cold first enable on a slow connection doesn't time out.
-	const chatHealthPollAttempts = 300
+	// Weights are already downloaded by the time this poll starts (MLX via
+	// ensureMLXChatModelCached, llama.cpp via EnsureArtifact — both run
+	// earlier in spawn*ChatServer's synchronous setup, each with its own
+	// generous download budget). This loop only covers the server process
+	// actually booting: reading cached weights off disk, initializing the
+	// runtime, and binding the port. 15 minutes (vs the embedder's 60s) is a
+	// deliberately wide safety margin for a large/1-bit-quant model on a slow
+	// disk, not a download budget.
+	const chatHealthPollAttempts = 900
 	for i := 0; i < chatHealthPollAttempts; i++ {
 		if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
 			if !modelMatches(served, expect) {
@@ -231,10 +237,12 @@ func waitForChatHealth(modelID, base string, man ServerManifest) error {
 
 // chatStartLockStaleAfter bounds how long a start-lock file may be held
 // before a contending process treats it as abandoned (the holder crashed or
-// was killed mid-spawn without cleaning up) and reclaims it. Set above
-// waitForChatHealth's 300s poll budget so a legitimately slow cold download
-// is never stolen from mid-flight.
-const chatStartLockStaleAfter = 6 * time.Minute
+// was killed mid-spawn without cleaning up) and reclaims it. The lock is held
+// across BOTH the model-weight download (ensureMLXChatModelCached's 30-minute
+// budget, spawnLlamaCppChatServer's EnsureArtifact) and the post-download
+// waitForChatHealth poll (15 minutes) — set above their combined worst case so
+// a legitimately slow cold download is never stolen mid-flight.
+const chatStartLockStaleAfter = 50 * time.Minute
 
 // acquireChatStartLock is a cross-process mutex (O_CREATE|O_EXCL lock file —
 // same primitive as config.lockOcodeConfig and the local-model concurrency
@@ -319,7 +327,10 @@ func spawnLlamaCppChatServer(spawn func(cmdline string) error, man ServerManifes
 // spawnMLXChatServer spawns mlx_lm.server directly (no bundled script — chat
 // manifests set LaunchArgv[0]="python3", unlike the embedder's MLX path which
 // runs the bundled mlx_embed_server.py via {script}).
-func spawnMLXChatServer(spawn func(cmdline string) error, man ServerManifest, port, maxParallel int) error {
+func spawnMLXChatServer(spawn func(cmdline string) error, man ServerManifest, port, maxParallel int, hfToken string) error {
+	if err := ensureMLXChatModelCached(man.MLXRepo, hfToken); err != nil {
+		return err
+	}
 	argv := filterMLXArgs(man.LaunchArgv, man.MLXRepo, port, maxParallel, mlxServerFlags())
 	// Once cached locally, mlx_lm.server still hits the HF Hub API on every
 	// launch to check for repo updates. That check has nothing to do with
@@ -332,6 +343,98 @@ func spawnMLXChatServer(spawn func(cmdline string) error, man ServerManifest, po
 		return fmt.Errorf("spawn MLX chat server: %w", err)
 	}
 	return nil
+}
+
+// ensureMLXChatModelCached runs huggingface_hub's snapshot_download for repo
+// before the offline launch below. spawnMLXChatServer always sets
+// HF_HUB_OFFLINE=1 for the actual mlx_lm.server launch (see its comment),
+// which means mlx_lm.server itself can never perform a first-time download —
+// it just fails with "Cannot find an appropriate cached snapshot folder ...
+// and outgoing traffic has been disabled". snapshot_download always hits the
+// Hub over the network to re-verify every file's metadata unless told not
+// to — plain snapshot_download(repo_id=...) is NOT a network no-op once
+// cached, contrary to what this comment used to claim, so it was re-running
+// a "Fetching N files" pass against the network on every single launch. Try
+// local_files_only=True first (pure local cache check, no network); only
+// fall back to a real network download if that raises because something is
+// actually missing.
+func ensureMLXChatModelCached(repo, hfToken string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("ensuring MLX model %q is downloaded (no-op if already cached)", repo))
+	script := fmt.Sprintf(`
+from huggingface_hub import snapshot_download
+try:
+    snapshot_download(repo_id=%[1]q, local_files_only=True)
+except Exception:
+    snapshot_download(repo_id=%[1]q)
+`, repo)
+	cmd := exec.CommandContext(ctx, "python3", "-c", script)
+	if hfToken != "" {
+		cmd.Env = append(os.Environ(), "HF_TOKEN="+hfToken)
+	}
+	var out bytes.Buffer
+	progress := &downloadProgressWriter{onLine: func(line string) {
+		emitUserDiscoveryDebug("DISCOVERY", fmt.Sprintf("downloading %s: %s", repo, line))
+	}}
+	cmd.Stdout = io.MultiWriter(&out, progress)
+	cmd.Stderr = io.MultiWriter(&out, progress)
+	if err := cmd.Run(); err != nil {
+		return mlxDownloadError(repo, err, out.String())
+	}
+	return nil
+}
+
+// downloadProgressWriter forwards huggingface_hub's snapshot_download output
+// to onLine as it streams, so a multi-GB cold download shows live progress in
+// the discovery debug log instead of going silent until the 30-minute
+// deadline. tqdm (which huggingface_hub uses for its progress bars) rewrites
+// its line in place with \r rather than \n, so lines are split on either, and
+// throttled to one emission per second so a fast-updating bar doesn't flood
+// the log with one entry per percent.
+type downloadProgressWriter struct {
+	onLine   func(string)
+	buf      []byte
+	lastEmit time.Time
+}
+
+func (w *downloadProgressWriter) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		idx := bytes.IndexAny(w.buf, "\r\n")
+		if idx < 0 {
+			break
+		}
+		line := strings.TrimSpace(string(w.buf[:idx]))
+		w.buf = w.buf[idx+1:]
+		if line == "" || time.Since(w.lastEmit) < time.Second {
+			continue
+		}
+		w.lastEmit = time.Now()
+		w.onLine(line)
+	}
+	return len(p), nil
+}
+
+// mlxDownloadError turns a failed snapshot_download into an actionable error.
+// huggingface_hub's own errors for gated/private repos or anonymous rate
+// limiting all mention one of these terms in their message; when they do, the
+// fix is a token, not a retry, so point the user straight at /localmodel
+// hf-token instead of surfacing a bare Python traceback.
+func mlxDownloadError(repo string, err error, out string) error {
+	lower := strings.ToLower(out)
+	authSignals := []string{"401", "403", "gated", "not logged in", "access to model", "restricted", "authentication", "unauthorized"}
+	for _, signal := range authSignals {
+		if strings.Contains(lower, signal) {
+			return fmt.Errorf(
+				"model %q requires Hugging Face authentication to download: %w\n"+
+					"Fix: get a read-access token from https://huggingface.co/settings/tokens, "+
+					"then run \"/localmodel hf-token <token>\" and retry enabling this model "+
+					"(or run \"huggingface-cli login\" / export HF_TOKEN in your shell instead)",
+				repo, err)
+		}
+	}
+	return fmt.Errorf("download MLX model %q: %w: %s", repo, err, strings.TrimSpace(out))
 }
 
 // filterMLXArgs expands {repo}/{port}/{parallel} placeholders and drops flags

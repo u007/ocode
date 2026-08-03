@@ -3585,14 +3585,39 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	// connection-refused on the first request.
 	if provider == "local" {
 		fullModelID := "local/" + model
-		if info, ok := discovery.GetModelInstance(fullModelID); ok && info.BaseURL != "" {
-			baseURL = info.BaseURL
+		// GetModelInstance is an in-memory record that is never invalidated
+		// if the spawned server crashes on its own (OOM, model runtime
+		// error, etc.) — trusting its BaseURL blindly reports "ready" for a
+		// server that is actually dead, which is exactly the deferred
+		// connection-refused this comment block claims to avoid. Use it only
+		// to shortcut which port to check, then confirm liveness with a live
+		// probe (ProbeModelInstance) either way.
+		var port int
+		if info, ok := discovery.GetModelInstance(fullModelID); ok && info.Port != 0 {
+			port = info.Port
 		} else if registeredIDs, err := config.RegisteredLocalModelIDs(); err == nil {
-			if port, err := discovery.AssignChatPort(fullModelID, registeredIDs); err == nil {
-				if info, ok := discovery.ProbeModelInstance(fullModelID, port); ok {
-					baseURL = info.BaseURL
-				}
+			port, _ = discovery.AssignChatPort(fullModelID, registeredIDs)
+		}
+		if port != 0 {
+			if info, ok := discovery.ProbeModelInstance(fullModelID, port); ok {
+				baseURL = info.BaseURL
 			}
+		}
+		// mlx_lm.server (unlike llama-server) honours the request body's
+		// "model" field as a live model-switch instruction. model here is
+		// still the bare suffix ("bonsai-8b-1bit") left over from the
+		// provider/model split above, which does not match the HF repo id
+		// mlx_lm.server was actually launched with (man.MLXRepo, e.g.
+		// "prism-ml/Bonsai-8B-mlx-1bit") — sending it as-is makes
+		// mlx_lm.server try to dynamically load a model literally named
+		// "bonsai-8b-1bit", which isn't a real repo, failing with the same
+		// "Cannot find an appropriate cached snapshot folder ... offline"
+		// error as an uncached model, even though the already-running server
+		// is healthy and serving the right model under its real id. Rewrite
+		// model to the manifest's ExpectedServeID (the id the server was
+		// actually launched with) so the request field matches.
+		if man, ok := discovery.ChatManifestForHost(fullModelID); ok {
+			model = man.ExpectedServeID()
 		}
 	}
 
