@@ -94,13 +94,31 @@ func run() error {
 		out[provID] = provider{ID: id, Models: models}
 	}
 
-	encoded, err := json.Marshal(out)
+	// Wrap the providers in {"generated_at", "providers"} so the runtime can
+	// decide when the embedded snapshot is stale and refresh from models.dev
+	// automatically instead of trusting the build-time copy forever.
+	type snapshotFile struct {
+		GeneratedAt string              `json:"generated_at"`
+		ModelCount  int                 `json:"model_count,omitempty"`
+		Providers   map[string]provider `json:"providers"`
+	}
+	modelCount := 0
+	for _, pe := range out {
+		modelCount += len(pe.Models)
+	}
+	wrapped := snapshotFile{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		ModelCount:  modelCount,
+		Providers:   out,
+	}
+
+	encoded, err := json.Marshal(wrapped)
 	if err != nil {
 		return fmt.Errorf("marshal snapshot: %w", err)
 	}
 	if err := os.WriteFile(dest, append(encoded, '\n'), 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", dest, err)
 	}
-	fmt.Printf("wrote %s (%d providers, %d bytes)\n", dest, len(out), len(encoded)+1)
+	fmt.Printf("wrote %s (%d providers, %d bytes, generated %s)\n", dest, len(out), len(encoded)+1, wrapped.GeneratedAt)
 	return nil
 }

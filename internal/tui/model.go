@@ -135,6 +135,15 @@ type message struct {
 	// result (which would duplicate the trailing output in the transcript and
 	// the LLM prompt). See the streaming bash-tool path.
 	streamFinalized bool
+	// usageStale marks a message whose raw.Usage was recorded before the most
+	// recent compaction spliced this message's earlier context away. The
+	// TotalTokens on such a message still reflects the old, larger
+	// pre-compaction prompt size, so buildAgentMessagesSnapshot must exclude
+	// it from context-size estimation (falling back to the heuristic
+	// estimate) even though the message itself survives compaction as kept
+	// tail. raw.Usage itself is left untouched so persisted per-turn cost
+	// accounting is unaffected.
+	usageStale bool
 }
 
 // estimateTok approximates token count as len(s)/4.
@@ -2026,6 +2035,13 @@ func newModel(opts ...RunOptions) model {
 			func() int { return m.width },
 			sup,
 		))
+		m.changes.editor = editor
+		m.changes.editorOpener = createEditorOpener(
+			editor,
+			editorMode,
+			func() int { return m.width },
+			sup,
+		)
 		m.git.SetEditorOpenerAtLine(createEditorOpenerAtLine(
 			editor,
 			editorMode,
@@ -2089,6 +2105,17 @@ func newModel(opts ...RunOptions) model {
 			// writing a placeholder file under the (missing) session ID.
 			m.sessionLoadErr = err
 		}
+	}
+
+	// cfg.Model was set but agent.NewClient still failed to build a client
+	// (e.g. a stored last_model value missing its provider prefix, like
+	// "gpt-4o-mini" instead of "openai/gpt-4o-mini"). The agent above is
+	// constructed unconditionally in that case, leaving a silently
+	// client-less agent whose failure only surfaces later as a confusing
+	// error (e.g. "/compact" reporting "no summary client"). Surface it now.
+	if a != nil && a.Client() == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf(
+			"⚠ Could not connect to model %q — its provider could not be resolved. Run /model to reselect it.", cfg.Model)})
 	}
 
 	return m
@@ -2441,6 +2468,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.Button == tea.MouseWheelDown {
 				m.git.diff.ScrollDown(scrollSpeed)
 				return m, nil
+			}
+		}
+		if m.activeTab == tabChanges {
+			leftW := m.width * 35 / 100
+			if leftW < 10 {
+				leftW = 10
+			}
+			if msg.Mouse().X < leftW {
+				if msg.Button == tea.MouseWheelUp {
+					m.changes.list.ScrollUp(scrollSpeed)
+					return m, nil
+				}
+				if msg.Button == tea.MouseWheelDown {
+					m.changes.list.ScrollDown(scrollSpeed)
+					return m, nil
+				}
+			} else {
+				if msg.Button == tea.MouseWheelUp {
+					m.changes.diff.ScrollUp(scrollSpeed)
+					return m, nil
+				}
+				if msg.Button == tea.MouseWheelDown {
+					m.changes.diff.ScrollDown(scrollSpeed)
+					return m, nil
+				}
 			}
 		}
 		if m.activeTab == tabLog {
@@ -5543,6 +5595,32 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			scrollbarSetOffset(&m.logViewport, mouse.Y, logTrackTop, logTrackHeight)
 		}
 		return m, nil, true
+	}
+	if pressed && m.activeTab == tabChanges {
+		contentTop := appHeaderHeight + 1
+		leftW := m.width * 35 / 100
+		if leftW < 10 {
+			leftW = 10
+		}
+		if mouse.X >= 0 && mouse.X < leftW && mouse.Y >= contentTop {
+			row := mouse.Y - contentTop
+			itemIdx := m.changes.list.HitTest(0, row)
+			if itemIdx >= 0 && itemIdx < len(m.changes.files) {
+				isDoubleClick := time.Since(m.lastClickTime) < 400*time.Millisecond && mouse.X == m.lastClickX && mouse.Y == m.lastClickY
+				m.lastClickTime = time.Now()
+				m.lastClickX = mouse.X
+				m.lastClickY = mouse.Y
+				m.changes.list.SetSelected(itemIdx)
+				m.changes.ensureDiffCached(itemIdx)
+				m.changes.diff.GotoTop()
+				if isDoubleClick {
+					path := m.changes.files[itemIdx].OriginalPath
+					m.changes.statusMsg = "opening editor..."
+					return m, m.changes.openInEditor(path), true
+				}
+			}
+			return m, nil, true
+		}
 	}
 	if pressed && m.activeTab == tabGit {
 		panelW := m.panelWidth()
@@ -9346,6 +9424,8 @@ func (m *model) refreshEditorOpener() {
 	m.git.SetEditor(editor)
 	m.git.SetEditorOpener(createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor))
 	m.git.SetEditorOpenerAtLine(createEditorOpenerAtLine(editor, mode, func() int { return m.width }, m.supervisor))
+	m.changes.editor = editor
+	m.changes.editorOpener = createEditorOpener(editor, mode, func() int { return m.width }, m.supervisor)
 }
 
 // startShellExecution begins a shell command execution, recording it in the
@@ -15479,7 +15559,11 @@ func (m *model) buildAgentMessagesSnapshot() ([]agent.Message, []int) {
 			if strings.Contains(msg.raw.Content, tool.SentinelWaitingForUser) {
 				continue
 			}
-			agentMsgs = append(agentMsgs, *msg.raw)
+			am := *msg.raw
+			if msg.usageStale {
+				am.Usage = nil
+			}
+			agentMsgs = append(agentMsgs, am)
 			uiIdx = append(uiIdx, i)
 			continue
 		}
@@ -15667,7 +15751,16 @@ func (m *model) applyCompactionResult(r agent.CompactResult, uiIdx []int) (bool,
 	newMsgs = append(newMsgs, m.messages[:uiFrom]...)
 	newMsgs = append(newMsgs, divider)
 	newMsgs = append(newMsgs, banner)
-	newMsgs = append(newMsgs, m.messages[uiTo:]...)
+	// The kept tail (messages after the compacted range) survives verbatim,
+	// but any real Usage it carries was measured against the old, larger
+	// pre-compaction prompt. Mark it stale so context-size estimation falls
+	// back to the heuristic until a fresh post-compaction Usage arrives.
+	for _, tailMsg := range m.messages[uiTo:] {
+		if tailMsg.raw != nil && tailMsg.raw.Usage != nil {
+			tailMsg.usageStale = true
+		}
+		newMsgs = append(newMsgs, tailMsg)
+	}
 	m.messages = newMsgs
 	bannerIdx := uiFrom + 1 // divider at uiFrom, banner at uiFrom+1
 	return true, bannerIdx

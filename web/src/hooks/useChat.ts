@@ -6,6 +6,8 @@ import type { QuestionAnswerPayload } from "../api/types";
 interface UseChatOptions {
   /** Called when a new session is created (first message from Home page). */
   onNewSession?: (sessionId: string) => void;
+  /** Correlates the first turn with a temporary session tab. */
+  requestId?: string;
 }
 
 export function useChat(options?: UseChatOptions) {
@@ -27,7 +29,7 @@ export function useChat(options?: UseChatOptions) {
       // use api.chat() which creates a new session and returns the session ID.
       const submitPromise = sid
         ? api.sendMessage(sid, content)
-        : api.chat(content).then((res) => {
+        : api.chat(content, undefined, undefined, options?.requestId).then((res) => {
             // Store the new session ID so subsequent messages go to the same session
             dispatch({ type: "SET_SESSION", sessionId: res.sessionId });
             // Notify caller so it can navigate to the new session page
@@ -45,7 +47,7 @@ export function useChat(options?: UseChatOptions) {
           dispatch({ type: "SET_STREAMING", isStreaming: false });
         });
     },
-    [state.sessionId, dispatch, options?.onNewSession],
+    [state.sessionId, dispatch, options?.onNewSession, options?.requestId],
   );
 
   // Local stop: the browser can't cancel the TUI's agent, so this only releases

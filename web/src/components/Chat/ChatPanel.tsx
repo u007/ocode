@@ -8,12 +8,16 @@ import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 const PAGE_SIZE = 50;
 
 export default function ChatPanel() {
-  const { messages, live, hasMore, loadingMore } = useChatState();
+  const chatState = useChatState();
+  const { messages, live, hasMore, loadingMore } = chatState;
   const dispatch = useChatDispatch();
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const topRef = useRef<HTMLDivElement>(null);
   const [initialized, setInitialized] = useState(false);
+  const loadGenerationRef = useRef(0);
+  const stateRef = useRef(chatState);
+  stateRef.current = chatState;
   const [reachedTop, setReachedTop] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   // Whether the viewport is pinned to the bottom. Driven by handleScroll and
@@ -59,15 +63,31 @@ export default function ChatPanel() {
   // so the empty-state "Start a conversation" placeholder is shown instead of
   // a blank panel.
   useEffect(() => {
+    const generation = ++loadGenerationRef.current;
+    let cancelled = false;
     if (!storeSessionId) {
       setInitialized(true);
-      return;
+      return () => {
+        cancelled = true;
+      };
     }
+    setInitialized(false);
     setSessionId(storeSessionId);
 
     api
       .getSession(storeSessionId, { limit: PAGE_SIZE })
       .then((detail) => {
+        if (cancelled || generation !== loadGenerationRef.current) return;
+        // A live mirror event may have arrived while the initial history fetch
+        // was in flight. Its in-memory state is newer than disk; do not wipe
+        // the visible user message or live delta with that older snapshot.
+        if (
+          stateRef.current.sessionId === storeSessionId &&
+          (stateRef.current.messages.length > 0 || stateRef.current.live.length > 0)
+        ) {
+          setInitialized(true);
+          return;
+        }
         // Set messages and pagination state
         dispatch({
           type: "MERGE_SNAPSHOT",
@@ -86,9 +106,13 @@ export default function ChatPanel() {
         });
       })
       .catch((err) => {
+        if (cancelled || generation !== loadGenerationRef.current) return;
         console.error("Failed to load session:", err);
         setInitialized(true);
       });
+    return () => {
+      cancelled = true;
+    };
   }, [storeSessionId, dispatch]);
 
   // Auto-scroll to bottom on new messages/live content, but ONLY when the user

@@ -1,8 +1,12 @@
 package agent
 
 import (
+	"bufio"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +32,18 @@ const (
 	modelsCacheFile = "models.json"
 	envModelsPath   = "OPENCODE_MODELS_PATH"
 )
+
+// registryLockWait bounds how long a registry load waits on the cross-process
+// models.dev refresh lock before giving up and using stale data. Kept short so
+// a slow refresh in another ocode process can't stall lookups; flock
+// auto-releases if the holder crashes. A var (not a const) so tests can shrink
+// the wait.
+var registryLockWait = 5 * time.Second
+
+// errRegistryLockHeld reports that another ocode process currently holds the
+// models.dev refresh lock, so this process skips its own fetch and falls back
+// to the data it already has rather than fetching concurrently.
+var errRegistryLockHeld = errors.New("models.dev refresh lock held by another process")
 
 type modelLimit struct {
 	Context int64 `json:"context"`
@@ -77,9 +93,10 @@ type providerEntry struct {
 }
 
 type modelsRegistry struct {
-	mu        sync.RWMutex
-	data      map[string]providerEntry
-	fetchedAt time.Time
+	mu               sync.RWMutex
+	data             map[string]providerEntry
+	fetchedAt        time.Time
+	lastFetchAttempt time.Time
 }
 
 var registry = &modelsRegistry{}
@@ -108,14 +125,25 @@ func loadCache() (map[string]providerEntry, time.Time, error) {
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	var parsed map[string]providerEntry
-	if err := json.Unmarshal(data, &parsed); err != nil {
+	// Current format: the registryFile wrapper with tracking metadata. Older
+	// caches written before the wrapper existed are a bare provider map — keep
+	// loading those so a mixed fleet of binaries can share the file.
+	var wrapped registryFile
+	if err := json.Unmarshal(data, &wrapped); err == nil && len(wrapped.Providers) > 0 {
+		return wrapped.Providers, info.ModTime(), nil
+	}
+	var legacy map[string]providerEntry
+	if err := json.Unmarshal(data, &legacy); err != nil {
 		return nil, time.Time{}, err
 	}
-	return parsed, info.ModTime(), nil
+	return legacy, info.ModTime(), nil
 }
 
-func writeCache(data map[string]providerEntry) error {
+// writeCache atomically replaces the on-disk models cache with data plus
+// tracking metadata: when it was fetched, what triggered the fetch (source),
+// how long the fetch took, a content hash, and the model count. The file's
+// mtime doubles as the cross-process "last updated" signal.
+func writeCache(data map[string]providerEntry, source string, duration time.Duration) error {
 	path, err := cachePath()
 	if err != nil {
 		return err
@@ -123,11 +151,193 @@ func writeCache(data map[string]providerEntry) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(data, "", "  ")
+	b, err := json.MarshalIndent(registryFile{
+		FetchedAt:       time.Now().UTC().Format(time.RFC3339),
+		FetchSource:     source,
+		FetchDurationMS: duration.Milliseconds(),
+		ContentHash:     contentHash(data),
+		ModelCount:      countModels(data),
+		Providers:       data,
+	}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// Write to a temp file in the same directory, then rename over the target:
+	// concurrent readers (other ocode processes doing a freshness check) see
+	// either the old or the new file, never a partially written one.
+	tmp, err := os.CreateTemp(filepath.Dir(path), modelsCacheFile+".tmp*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+// contentHash returns a sha256 hex digest of the canonical JSON encoding of
+// the provider map, so any process can tell at a glance whether its in-memory
+// copy matches the on-disk cache without a full compare.
+func contentHash(data map[string]providerEntry) string {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// countModels returns the total number of model entries across all providers.
+func countModels(data map[string]providerEntry) int {
+	n := 0
+	for _, p := range data {
+		n += len(p.Models)
+	}
+	return n
+}
+
+// cacheModTime returns the mtime of the on-disk models cache, which doubles as
+// the cross-process "last updated" record. Returns ok=false when the cache
+// does not exist or cannot be stat'd.
+func cacheModTime() (time.Time, bool) {
+	p, err := cachePath()
+	if err != nil {
+		return time.Time{}, false
+	}
+	info, err := os.Stat(p)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return info.ModTime(), true
+}
+
+// ── models.dev refresh history ──────────────────────────────────────────────
+
+const (
+	// modelsHistoryFile is the bounded append-only audit log of models.dev
+	// fetches, one JSON line per fetch attempt (success or failure), written
+	// under the same cross-process refresh lock that serializes the fetches
+	// themselves.
+	modelsHistoryFile = "models-history.jsonl"
+)
+
+// modelsHistoryMaxLines caps the sidecar at the most recent entries (one per
+// fetch, roughly one per 5-min TTL window per process). A var (not a const) so
+// tests can shrink the cap.
+var modelsHistoryMaxLines = 5000
+
+// HistoryEntry is one line of the models.dev refresh audit log.
+type HistoryEntry struct {
+	// TS is the RFC3339 UTC time the fetch attempt happened.
+	TS string `json:"ts"`
+	// Source is what triggered the fetch: "auto" or "force".
+	Source string `json:"source"`
+	// ModelCount is the number of model entries in a successful fetch.
+	ModelCount int `json:"model_count,omitempty"`
+	// DurationMS is how long the models.dev request took.
+	DurationMS int64 `json:"duration_ms,omitempty"`
+	// Hash is the content hash of a successful fetch.
+	Hash string `json:"hash,omitempty"`
+	// Error is set on a failed fetch attempt.
+	Error string `json:"error,omitempty"`
+}
+
+func historyPath() (string, error) {
+	p, err := cachePath()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(p), modelsHistoryFile), nil
+}
+
+// appendHistory appends one entry to the bounded JSONL history and trims it to
+// the newest modelsHistoryMaxLines entries. The caller must hold the
+// cross-process models.dev refresh lock (as fetchRegistryWithLock does) so
+// appends from different processes never interleave.
+func appendHistory(e HistoryEntry) {
+	path, err := historyPath()
+	if err != nil {
+		emitDebug("AGENT", fmt.Sprintf("models history path: %v", err))
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		emitDebug("AGENT", fmt.Sprintf("models history dir: %v", err))
+		return
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		emitDebug("AGENT", fmt.Sprintf("models history marshal: %v", err))
+		return
+	}
+
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		emitDebug("AGENT", fmt.Sprintf("models history open: %v", err))
+		return
+	}
+	defer f.Close()
+
+	var lines [][]byte
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		lines = append(lines, append([]byte(nil), sc.Bytes()...))
+	}
+	lines = append(lines, line)
+	if len(lines) > modelsHistoryMaxLines {
+		lines = lines[len(lines)-modelsHistoryMaxLines:]
+	}
+
+	if err := f.Truncate(0); err != nil {
+		return
+	}
+	if _, err := f.Seek(0, 0); err != nil {
+		return
+	}
+	w := bufio.NewWriter(f)
+	for _, l := range lines {
+		w.Write(append(l, '\n'))
+	}
+	w.Flush()
+}
+
+// RegistryHistory returns the most recent limit refresh entries in
+// chronological order (limit <= 0 returns all). Best-effort: malformed or
+// partially written lines are skipped rather than failing, so it is safe to
+// call while another process is appending.
+func RegistryHistory(limit int) []HistoryEntry {
+	path, err := historyPath()
+	if err != nil {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var entries []HistoryEntry
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var e HistoryEntry
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			continue // skip torn/malformed lines
+		}
+		entries = append(entries, e)
+	}
+	if limit > 0 && len(entries) > limit {
+		entries = entries[len(entries)-limit:]
+	}
+	return entries
 }
 
 // fetchRemoteClient is the HTTP client used by fetchRemote. Tests can swap
@@ -154,6 +364,43 @@ func fetchRemote() (map[string]providerEntry, error) {
 	return parsed, nil
 }
 
+// registryFile is the on-disk/embedded form of the models registry — used both
+// by the build-time snapshot (models-snapshot.json) and the runtime cache
+// (models.json). It wraps the provider map with tracking metadata so any
+// process can tell when a copy was produced, where it came from, and whether
+// its content matches what a peer loaded.
+type registryFile struct {
+	// GeneratedAt is the snapshot's build time (written by
+	// tools/gen-models-snapshot). The runtime treats the snapshot as fresh for
+	// modelsCacheTTL after this stamp, then refreshes from models.dev.
+	GeneratedAt string `json:"generated_at,omitempty"`
+	// FetchedAt is when the runtime cache was last written after a models.dev
+	// fetch — the explicit "last updated" answer for the cache file.
+	FetchedAt string `json:"fetched_at,omitempty"`
+	// FetchSource records what triggered the fetch: "auto" (loadRegistry TTL
+	// refresh) or "force" (model-picker ctrl+r).
+	FetchSource string `json:"fetch_source,omitempty"`
+	// FetchDurationMS is how long the models.dev fetch took.
+	FetchDurationMS int64 `json:"fetch_duration_ms,omitempty"`
+	// ContentHash is a sha256 hex digest of the canonical provider-map JSON.
+	ContentHash string `json:"content_hash,omitempty"`
+	// ModelCount is the total number of model entries across all providers.
+	ModelCount int `json:"model_count,omitempty"`
+
+	Providers map[string]providerEntry `json:"providers"`
+}
+
+// snapshotCache memoizes parsing of the embedded snapshot, which is immutable
+// for the lifetime of the process.
+type snapshotCache struct {
+	once      sync.Once
+	providers map[string]providerEntry
+	generated time.Time // zero => legacy snapshot with unknown age
+	ok        bool
+}
+
+var snapshotState = &snapshotCache{}
+
 func loadFromEnvPath() (map[string]providerEntry, bool) {
 	path := os.Getenv(envModelsPath)
 	if path == "" {
@@ -172,17 +419,157 @@ func loadFromEnvPath() (map[string]providerEntry, bool) {
 	return parsed, true
 }
 
-func loadFromSnapshot() (map[string]providerEntry, bool) {
-	var parsed map[string]providerEntry
-	if err := json.Unmarshal(modelsSnapshotData, &parsed); err != nil || len(parsed) == 0 {
-		return nil, false
+// loadFromSnapshot returns the embedded snapshot's providers, the UTC time it
+// was generated (zero for legacy snapshots without a generated_at stamp), and
+// whether it parsed. Callers treat a zero generated time as "unknown age" —
+// i.e. stale — while still using the data as a fetch-failure fallback.
+func loadFromSnapshot() (map[string]providerEntry, time.Time, bool) {
+	snapshotState.once.Do(func() {
+		parseSnapshot(modelsSnapshotData, snapshotState)
+	})
+	return snapshotState.providers, snapshotState.generated, snapshotState.ok
+}
+
+func parseSnapshot(data []byte, st *snapshotCache) {
+	var wrapped registryFile
+	if err := json.Unmarshal(data, &wrapped); err == nil && len(wrapped.Providers) > 0 {
+		st.providers = wrapped.Providers
+		if t, err := time.Parse(time.RFC3339, wrapped.GeneratedAt); err == nil {
+			st.generated = t
+		}
+		st.ok = true
+		return
 	}
-	return parsed, true
+	// Legacy format: a bare provider map with no generated_at stamp. Its age
+	// is unknown, so callers treat it as stale and refresh from models.dev.
+	var legacy map[string]providerEntry
+	if err := json.Unmarshal(data, &legacy); err == nil && len(legacy) > 0 {
+		st.providers = legacy
+		st.ok = true
+	}
+}
+
+// modelsLockPath returns the path of the cross-process lock file guarding
+// models.dev refreshes. It sits next to the on-disk cache so its mtime-based
+// freshness and the flock are shared with every ocode process on the machine.
+func modelsLockPath() (string, error) {
+	p, err := cachePath()
+	if err != nil {
+		return "", err
+	}
+	return p + ".lock", nil
+}
+
+// refreshRegistryWithLock is the automatic path (loadRegistry): it re-checks
+// the shared on-disk cache after acquiring the cross-process lock, in case
+// another ocode process just refreshed it, and only fetches when that cache is
+// still stale.
+func refreshRegistryWithLock() (map[string]providerEntry, error) {
+	return fetchRegistryWithLock(true, "auto")
+}
+
+// forceFetchRegistryWithLock is the explicit path (ForceRefreshRegistry /
+// model-picker refresh): it always fetches from models.dev, even when the
+// cache is fresh, but still serializes on the cross-process lock so two
+// processes can't fetch simultaneously.
+func forceFetchRegistryWithLock() (map[string]providerEntry, error) {
+	return fetchRegistryWithLock(false, "force")
+}
+
+// fetchRegistryWithLock fetches the models.dev registry under a cross-process
+// flock (next to the on-disk cache). Only one ocode process refreshes at a
+// time: contenders wait up to registryLockWait for the holder to finish (flock
+// auto-releases if the holder crashes), then either use the holder's freshly
+// written cache (when recheckFreshCache) or proceed. On timeout the caller
+// receives errRegistryLockHeld and falls back to the data it already has —
+// it never fetches concurrently.
+//
+// Every actual fetch attempt (success or failure) is appended to the bounded
+// models-history.jsonl audit log, so "when was the registry last updated (and
+// by what)" has an explicit record rather than only a file mtime.
+func fetchRegistryWithLock(recheckFreshCache bool, source string) (map[string]providerEntry, error) {
+	lockPath, err := modelsLockPath()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, fmt.Errorf("create models cache dir: %w", err)
+	}
+	f, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open models refresh lock: %w", err)
+	}
+	defer f.Close()
+
+	deadline := time.Now().Add(registryLockWait)
+	for {
+		if err := tryLockFile(f); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return nil, errRegistryLockHeld
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	defer unlockFile(f)
+
+	// Another process may have refreshed between our staleness check and lock
+	// acquisition — use its fresh cache instead of fetching again.
+	if recheckFreshCache {
+		if cached, modTime, err := loadCache(); err == nil && time.Since(modTime) < modelsCacheTTL {
+			return cached, nil
+		}
+	}
+
+	start := time.Now()
+	remote, err := fetchRemote()
+	dur := time.Since(start)
+	if err != nil {
+		appendHistory(HistoryEntry{
+			TS:         time.Now().UTC().Format(time.RFC3339),
+			Source:     source,
+			DurationMS: dur.Milliseconds(),
+			Error:      err.Error(),
+		})
+		return nil, err
+	}
+	if err := writeCache(remote, source, dur); err != nil {
+		emitDebug("AGENT", fmt.Sprintf("models.dev cache write failed: %v", err))
+	}
+	appendHistory(HistoryEntry{
+		TS:         time.Now().UTC().Format(time.RFC3339),
+		Source:     source,
+		ModelCount: countModels(remote),
+		DurationMS: dur.Milliseconds(),
+		Hash:       contentHash(remote),
+	})
+	return remote, nil
 }
 
 func loadRegistry() map[string]providerEntry {
 	registry.mu.RLock()
 	if registry.data != nil && time.Since(registry.fetchedAt) < modelsCacheTTL {
+		// Memory is fresh, but another ocode process may have refreshed
+		// models.dev since we loaded and written a newer on-disk cache. Adopt
+		// it immediately rather than serving a 5-minute-old in-memory copy, so
+		// concurrent processes converge on the same "last updated" data.
+		if mt, ok := cacheModTime(); ok && mt.After(registry.fetchedAt) {
+			registry.mu.RUnlock()
+			registry.mu.Lock()
+			// Double-check under the write lock: a peer may have adopted it
+			// (or refreshed the cache) while we were waiting.
+			if registry.data != nil && !registry.fetchedAt.IsZero() {
+				if mt, ok := cacheModTime(); ok && mt.After(registry.fetchedAt) {
+					if cached, _, err := loadCache(); err == nil {
+						registry.data = cached
+						registry.fetchedAt = mt
+					}
+				}
+			}
+			d := registry.data
+			registry.mu.Unlock()
+			return d
+		}
 		d := registry.data
 		registry.mu.RUnlock()
 		return d
@@ -196,41 +583,60 @@ func loadRegistry() map[string]providerEntry {
 		return registry.data
 	}
 
+	// An explicit OPENCODE_MODELS_PATH override is always authoritative and
+	// never subject to the TTL.
 	if data, ok := loadFromEnvPath(); ok {
 		registry.data = data
 		registry.fetchedAt = time.Now()
 		return data
 	}
 
-	if data, ok := loadFromSnapshot(); ok {
-		registry.data = data
-		registry.fetchedAt = time.Now()
-		return data
-	}
-
+	// The on-disk cache is the cross-process "last updated" record: its mtime
+	// is set by whichever ocode process fetched models.dev last. A fresh cache
+	// wins over the build-time snapshot — it is strictly newer registry state.
 	if cached, modTime, err := loadCache(); err == nil && time.Since(modTime) < modelsCacheTTL {
 		registry.data = cached
 		registry.fetchedAt = modTime
 		return cached
 	}
 
-	remote, err := fetchRemote()
-	if err != nil {
-		emitDebug("AGENT", fmt.Sprintf("models.dev fetch failed: %v", err))
-		if cached, modTime, err := loadCache(); err == nil {
-			registry.data = cached
-			registry.fetchedAt = modTime
-			return cached
+	// The embedded snapshot is only fresh within modelsCacheTTL of its
+	// generated_at stamp. Legacy unstamped snapshots have unknown age and are
+	// treated as stale (they still serve as a fetch-failure fallback below).
+	if snap, snapTime, ok := loadFromSnapshot(); ok {
+		if !snapTime.IsZero() && time.Since(snapTime) < modelsCacheTTL {
+			registry.data = snap
+			registry.fetchedAt = snapTime
+			return snap
 		}
-		return nil
 	}
 
-	if err := writeCache(remote); err != nil {
-		emitDebug("AGENT", fmt.Sprintf("models.dev cache write failed: %v", err))
+	// Everything is stale: refresh from models.dev, throttled to one attempt
+	// per TTL window per process so a down network or a slow lock holder can't
+	// stall every lookup or trigger concurrent refetching.
+	if time.Since(registry.lastFetchAttempt) >= modelsCacheTTL {
+		registry.lastFetchAttempt = time.Now()
+		if remote, err := refreshRegistryWithLock(); err == nil {
+			registry.data = remote
+			registry.fetchedAt = time.Now()
+			return remote
+		} else {
+			emitDebug("AGENT", fmt.Sprintf("models.dev refresh skipped or failed (using stale data): %v", err))
+		}
 	}
-	registry.data = remote
-	registry.fetchedAt = time.Now()
-	return remote
+
+	// Fetch failed or was throttled/skipped: use the newest stale copy.
+	if cached, modTime, err := loadCache(); err == nil {
+		registry.data = cached
+		registry.fetchedAt = modTime
+		return cached
+	}
+	if snap, snapTime, ok := loadFromSnapshot(); ok {
+		registry.data = snap
+		registry.fetchedAt = snapTime
+		return snap
+	}
+	return nil
 }
 
 // PreloadRegistry fetches the models.dev registry in the background so it is
@@ -257,8 +663,10 @@ func NovitaModelsLoaded() bool {
 }
 
 // ForceRefreshRegistry synchronously fetches the models.dev registry and
-// updates the in-memory cache, bypassing the 5-minute TTL. It does NOT bypass
-// the OPENCODE_MODELS_PATH env var or the embedded snapshot in loadRegistry —
+// updates the in-memory cache, bypassing the 5-minute TTL. The fetch runs under
+// the cross-process refresh lock, so concurrent processes (or the automatic
+// loadRegistry refresh) can't fetch simultaneously. It does NOT bypass the
+// OPENCODE_MODELS_PATH env var or the embedded snapshot in loadRegistry —
 // the freshly-updated fetchedAt makes the TTL short-circuit in loadRegistry
 // return the new data on subsequent calls, so AllProviderModels and friends
 // see the refreshed list immediately.
@@ -268,7 +676,7 @@ func NovitaModelsLoaded() bool {
 // the error). Returns (nil, err) only when both the remote fetch fails and
 // there is no prior in-memory data to fall back on.
 func ForceRefreshRegistry() (map[string]providerEntry, error) {
-	remote, err := fetchRemote()
+	remote, err := forceFetchRegistryWithLock()
 	if err != nil {
 		emitDebug("AGENT", fmt.Sprintf("force refresh: models.dev fetch failed: %v", err))
 		registry.mu.RLock()
@@ -284,10 +692,6 @@ func ForceRefreshRegistry() (map[string]providerEntry, error) {
 	registry.data = remote
 	registry.fetchedAt = time.Now()
 	registry.mu.Unlock()
-
-	if err := writeCache(remote); err != nil {
-		emitDebug("AGENT", fmt.Sprintf("force refresh: cache write failed: %v", err))
-	}
 	return remote, nil
 }
 

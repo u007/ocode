@@ -143,7 +143,7 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "resolve channel full; try again")
 			return
 		}
-		h.broadcastEvent(SSEEvent{Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
+		h.broadcastEvent(SSEEvent{SessionID: req.SessionID, Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
 		writeJSON(w, http.StatusOK, ChatResponse{})
 		return
 	}
@@ -187,11 +187,16 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.wireHeadlessAgentCallbacks(as.agent)
+	h.wireHeadlessAgentCallbacks(sessID, as.agent)
 
 	resp, err := as.agent.Step(working)
 	if err != nil {
 		log.Printf("serve error: question answer step: %v", err)
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessID,
+			Event:     "error",
+			Data:      map[string]string{"error": err.Error()},
+		})
 		writeError(w, http.StatusInternalServerError, "agent error: "+err.Error())
 		return
 	}
@@ -208,9 +213,9 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	_ = session.Save(sessID, "", as.messages, nil)
 
 	// Tell the mirror the dialog can be dismissed, then stream the continuation.
-	h.broadcastEvent(SSEEvent{Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
-	h.broadcastEvent(SSEEvent{Event: "messages", Data: as.messages})
-	h.broadcastEvent(SSEEvent{Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "question_resolved", Data: map[string]string{"request_id": req.RequestID}})
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
 
 	writeJSON(w, http.StatusOK, ChatResponse{
 		Content:   content.String(),

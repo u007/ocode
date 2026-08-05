@@ -38,6 +38,7 @@ export default function ChatInput({
   // output of msg1, producing confusing turn ordering.
   const [shellInFlight, setShellInFlight] = useState(false);
   const { sendMessage, executeShell, stop, isStreaming } = useChat({
+    requestId: sessionTabId ?? undefined,
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);

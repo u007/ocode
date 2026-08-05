@@ -46,6 +46,10 @@ type Handler struct {
 	headlessSubs map[chan SSEEvent]struct{}
 	headlessMu   sync.Mutex
 
+	// titleGen guards one-shot session-title generation for headless turns
+	// (web/desktop, no TUI). See title_gen.go.
+	titleGen *titleGenState
+
 	// syncMu guards syncClient/syncStop, which back the /api/sync/* routes
 	// (web/desktop equivalent of the TUI's /login, /logout).
 	syncMu     sync.Mutex
@@ -83,6 +87,7 @@ func NewHandler() *Handler {
 		monaco:         monacoStore,
 		headlessSubs:   make(map[chan SSEEvent]struct{}),
 		mcpCache:       newMCPCache(),
+		titleGen:       newTitleGenState(),
 	}
 	h.mcpCache.warm(cfg)
 	return h
@@ -150,7 +155,7 @@ func (h *Handler) broadcastEvent(ev SSEEvent) {
 // call pauses on a PERMISSION_ASK sentinel (no OnPermissionAsk callback is wired
 // in headless mode), the tool branch emits a `permission` frame so a connected
 // browser can render the approve/deny dialog.
-func (h *Handler) wireHeadlessAgentCallbacks(ag *agent.Agent) {
+func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) {
 	// Map OnDelta kinds to SSE event names matching the TUI RC bridge pattern:
 	// "reasoning" → "thinking", "text" → "text".
 	ag.OnDelta = func(kind, text string) {
@@ -159,15 +164,17 @@ func (h *Handler) wireHeadlessAgentCallbacks(ag *agent.Agent) {
 			event = "thinking"
 		}
 		h.broadcastEvent(SSEEvent{
-			Event: event,
-			Data:  TextDelta{Delta: text},
+			SessionID: sessionID,
+			Event:     event,
+			Data:      TextDelta{Delta: text},
 		})
 	}
 	ag.OnMessage = func(m agent.Message) {
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
 			for _, tc := range m.ToolCalls {
 				h.broadcastEvent(SSEEvent{
-					Event: "tool_start",
+					SessionID: sessionID,
+					Event:     "tool_start",
 					Data: ToolStartEvent{
 						Tool:    tc.Function.Name,
 						Command: tc.Function.Arguments,
@@ -177,19 +184,22 @@ func (h *Handler) wireHeadlessAgentCallbacks(ag *agent.Agent) {
 		}
 		if m.Role == "tool" {
 			h.broadcastEvent(SSEEvent{
-				Event: "tool_result",
-				Data:  ToolResultEvent{Tool: "tool", Output: m.Content},
+				SessionID: sessionID,
+				Event:     "tool_result",
+				Data:      ToolResultEvent{Tool: "tool", Output: m.Content},
 			})
 			if prompts, ok := parseQuestionAsk(m.Content); ok {
 				h.broadcastEvent(SSEEvent{
-					Event: "question",
-					Data:  QuestionEvent{RequestID: m.ToolID, Questions: prompts},
+					SessionID: sessionID,
+					Event:     "question",
+					Data:      QuestionEvent{RequestID: m.ToolID, Questions: prompts},
 				})
 			}
 			if req, ok := parsePermissionAsk(m.Content); ok {
 				h.broadcastEvent(SSEEvent{
-					Event: "permission",
-					Data:  newPermissionEvent(m.ToolID, req),
+					SessionID: sessionID,
+					Event:     "permission",
+					Data:      newPermissionEvent(m.ToolID, req),
 				})
 			}
 		}
@@ -219,6 +229,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	h.mu.Lock()
 	var as *agentSession
+	createdSession := false
 	if req.SessionID != "" {
 		as = h.agents[req.SessionID]
 	}
@@ -227,6 +238,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		sid := req.SessionID
 		if sid == "" {
 			sid = session.NewSessionID()
+			createdSession = true
 		}
 
 		var messages []agent.Message
@@ -271,17 +283,35 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	// In headless mode (no RC bridge), wire up streaming callbacks so live
 	// tokens and tool activity are broadcast to SSE mirror subscribers.
 	if h.rc == nil {
+		if createdSession {
+			h.broadcastEvent(SSEEvent{
+				SessionID: req.SessionID,
+				Event:     "session_started",
+				Data: map[string]string{
+					"session_id": req.SessionID,
+					"request_id": req.RequestID,
+				},
+			})
+		}
 		// Broadcast the user message so the SSE mirror can echo it.
 		h.broadcastEvent(SSEEvent{
-			Event: "user_message",
-			Data:  map[string]string{"content": req.Content},
+			SessionID: req.SessionID,
+			Event:     "user_message",
+			Data:      map[string]string{"content": req.Content},
 		})
-		h.wireHeadlessAgentCallbacks(as.agent)
+		h.wireHeadlessAgentCallbacks(req.SessionID, as.agent)
 	}
 
 	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
+		if h.rc == nil {
+			h.broadcastEvent(SSEEvent{
+				SessionID: req.SessionID,
+				Event:     "error",
+				Data:      map[string]string{"error": err.Error()},
+			})
+		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
 	}
@@ -296,17 +326,20 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = session.Save(req.SessionID, "", as.messages, nil)
+	h.maybeGenerateSessionTitle(req.SessionID, as)
 
 	// Broadcast the authoritative message snapshot and turn_done so the SSE
 	// mirror (and any connected browser) is in sync.
 	if h.rc == nil {
 		h.broadcastEvent(SSEEvent{
-			Event: "messages",
-			Data:  as.messages,
+			SessionID: req.SessionID,
+			Event:     "messages",
+			Data:      as.messages,
 		})
 		h.broadcastEvent(SSEEvent{
-			Event: "turn_done",
-			Data:  DoneEvent{SessionID: req.SessionID, Model: as.model},
+			SessionID: req.SessionID,
+			Event:     "turn_done",
+			Data:      DoneEvent{SessionID: req.SessionID, Model: as.model},
 		})
 	}
 
@@ -512,15 +545,23 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 	if h.rc == nil {
 		// Broadcast the user message so the SSE mirror can echo it.
 		h.broadcastEvent(SSEEvent{
-			Event: "user_message",
-			Data:  map[string]string{"content": req.Content},
+			SessionID: id,
+			Event:     "user_message",
+			Data:      map[string]string{"content": req.Content},
 		})
-		h.wireHeadlessAgentCallbacks(as.agent)
+		h.wireHeadlessAgentCallbacks(id, as.agent)
 	}
 
 	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
+		if h.rc == nil {
+			h.broadcastEvent(SSEEvent{
+				SessionID: id,
+				Event:     "error",
+				Data:      map[string]string{"error": err.Error()},
+			})
+		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
 	}
@@ -536,16 +577,22 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 
 	_ = session.Save(id, "", as.messages, nil)
 
+	// Headless-only: generate a title for an untitled session after its first
+	// turn (mirrors the TUI; no-op when an RC bridge is attached).
+	h.maybeGenerateSessionTitle(id, as)
+
 	// Broadcast the authoritative message snapshot and turn_done so the SSE
 	// mirror (and any connected browser) is in sync.
 	if h.rc == nil {
 		h.broadcastEvent(SSEEvent{
-			Event: "messages",
-			Data:  as.messages,
+			SessionID: id,
+			Event:     "messages",
+			Data:      as.messages,
 		})
 		h.broadcastEvent(SSEEvent{
-			Event: "turn_done",
-			Data:  DoneEvent{SessionID: id, Model: as.model},
+			SessionID: id,
+			Event:     "turn_done",
+			Data:      DoneEvent{SessionID: id, Model: as.model},
 		})
 	}
 
@@ -687,8 +734,9 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 	// drops. Matches the chat handler's post-turn broadcast.
 	if h.rc == nil {
 		h.broadcastEvent(SSEEvent{
-			Event: "messages",
-			Data:  as.messages,
+			SessionID: id,
+			Event:     "messages",
+			Data:      as.messages,
 		})
 	}
 

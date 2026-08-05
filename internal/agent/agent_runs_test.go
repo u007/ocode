@@ -427,6 +427,42 @@ func TestAgentRunRegistryCancelAllCancelsQueued(t *testing.T) {
 	}
 }
 
+func TestAgentRunRegistryAcquireForRunWakesOnOwnCancellation(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.SetMaxConcurrent(1)
+	release1, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("first Acquire err: %v", err)
+	}
+	defer release1()
+
+	run := r.New("queued")
+	run.markQueued()
+	run.Cancel = func() {}
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := r.AcquireForRun(run, nil)
+		errCh <- err
+	}()
+	waitForQueued(t, r)
+
+	// Cancelling this specific queued run must wake its own AcquireForRun
+	// immediately, without waiting for the unrelated held slot to free up.
+	if cerr := r.CancelOwned(run.ID, run.Dispatcher); cerr != nil {
+		t.Fatalf("CancelOwned err: %v", cerr)
+	}
+
+	select {
+	case err := <-errCh:
+		if err != ErrAgentQueueCancelled {
+			t.Fatalf("AcquireForRun err = %v, want ErrAgentQueueCancelled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("AcquireForRun stayed blocked after its own run was cancelled")
+	}
+}
+
 func TestAgentRunRegistryDoesNotPruneQueuedRuns(t *testing.T) {
 	r := NewAgentRunRegistry()
 	queued := r.New("queued")

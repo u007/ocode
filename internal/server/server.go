@@ -821,6 +821,7 @@ type ChatRequest struct {
 	Content   string `json:"content"`
 	SessionID string `json:"sessionId,omitempty"`
 	Model     string `json:"model,omitempty"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 type ChatResponse struct {

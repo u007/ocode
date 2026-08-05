@@ -88,6 +88,46 @@ func TestAnchoredReCompactionAppliesToTranscript(t *testing.T) {
 	}
 }
 
+// After a successful compaction, the kept tail messages still carry real
+// Usage data from before compaction ran (their TotalTokens reflects the old,
+// larger pre-compaction prompt). buildAgentMessagesSnapshot must not let that
+// stale Usage leak into CurrentContextEstimate, or the sidebar (and
+// shouldCompact) keep reporting the pre-compaction context size forever.
+func TestCompactionMarksKeptTailUsageStale(t *testing.T) {
+	staleTotal := int64(80000)
+	tailUsage := &agent.TokenUsage{TotalTokens: &staleTotal}
+	m := model{
+		viewport: fastviewport.New(80, 20),
+		styles:   ApplyThemeColors("tokyonight"),
+		agent:    agent.NewAgent(fakeCompactSummaryClient{}, nil, compactCfg(), nil),
+		messages: []message{
+			{role: roleUser, text: "task one please"},
+			{role: roleAssistant, text: "did task one"},
+			{role: roleUser, text: "task two please"},
+			{role: roleAssistant, text: "did task two", raw: &agent.Message{Role: "assistant", Content: "did task two", Usage: tailUsage}},
+		},
+	}
+
+	snap, uiIdx := m.buildAgentMessagesSnapshot()
+	result, enabled := m.agent.Compact(snap)
+	if !enabled {
+		t.Fatal("compaction unexpectedly disabled")
+	}
+	if !result.OK {
+		t.Fatalf("compaction did not produce a result: %+v", result)
+	}
+	ok, _ := m.applyCompactionResult(result, uiIdx)
+	if !ok {
+		t.Fatal("applyCompactionResult returned false")
+	}
+
+	postSnap, _ := m.buildAgentMessagesSnapshot()
+	tokens, source := agent.CurrentContextEstimate(postSnap, 4)
+	if source != "estimated" {
+		t.Fatalf("expected context estimate to fall back to heuristic after compaction, got source=%q tokens=%d (leaked stale pre-compaction Usage)", source, tokens)
+	}
+}
+
 // Reproduces the root cause of the "log says done, chat shows nothing" bug:
 // a background job completing WHILE a compaction is in flight must NOT start a
 // new turn/compaction. If it does, it overwrites pendingCompactUIIdx and the

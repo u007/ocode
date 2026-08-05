@@ -111,7 +111,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		}
 		// Dismiss the web dialog; the TUI will also broadcast this once it
 		// applies the resolution, but sending it now keeps the UI snappy.
-		h.broadcastEvent(SSEEvent{Event: "permission_resolved", Data: map[string]string{"request_id": req.RequestID}})
+		h.broadcastEvent(SSEEvent{SessionID: req.SessionID, Event: "permission_resolved", Data: map[string]string{"request_id": req.RequestID}})
 		writeJSON(w, http.StatusOK, ChatResponse{})
 		return
 	}
@@ -167,11 +167,16 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		working[len(working)-1].Content = "denied: tool " + permReq.ToolName + " denied by user"
 	}
 
-	h.wireHeadlessAgentCallbacks(as.agent)
+	h.wireHeadlessAgentCallbacks(sessID, as.agent)
 
 	resp, err := as.agent.Step(working)
 	if err != nil {
 		log.Printf("serve error: permission resolve step: %v", err)
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessID,
+			Event:     "error",
+			Data:      map[string]string{"error": err.Error()},
+		})
 		writeError(w, http.StatusInternalServerError, "agent error: "+err.Error())
 		return
 	}
@@ -188,9 +193,9 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	_ = session.Save(sessID, "", as.messages, nil)
 
 	// Tell the mirror the dialog can be dismissed, then stream the continuation.
-	h.broadcastEvent(SSEEvent{Event: "permission_resolved", Data: map[string]string{"request_id": req.RequestID}})
-	h.broadcastEvent(SSEEvent{Event: "messages", Data: as.messages})
-	h.broadcastEvent(SSEEvent{Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "permission_resolved", Data: map[string]string{"request_id": req.RequestID}})
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
+	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
 
 	writeJSON(w, http.StatusOK, ChatResponse{
 		Content:   content.String(),

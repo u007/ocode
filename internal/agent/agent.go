@@ -1292,17 +1292,10 @@ func (a *Agent) resolveCompactRuntime(force bool) compactRuntime {
 	}
 	rt.KeepRecentTokens = c.KeepRecentTokens
 	if rt.KeepRecentTokens <= 0 && rt.WindowTokens > 0 {
-		// Default: keep roughly a quarter of the model window as working
-		// context, clamped to a sane floor/ceiling so tiny or huge windows both
-		// behave reasonably. A long single-user-turn agentic run is then bounded
-		// to this recent budget instead of retaining the whole conversation.
-		v := int(float64(rt.WindowTokens) * 0.25)
-		if v < 20000 {
-			v = 20000
-		}
-		if v > 120000 {
-			v = 120000
-		}
+		// Default: cap the retained recent-tail budget at 20k tokens so a
+		// long single-user-turn agentic run is bounded to a small working
+		// context instead of retaining a large fraction of the conversation.
+		v := 20000
 		if v > rt.WindowTokens {
 			v = rt.WindowTokens
 		}
@@ -1376,6 +1369,10 @@ func (a *Agent) CompactAsync(messages []Message, focus string) bool {
 // is anything to summarise. Auto-compaction passes force=false so it still skips
 // conversations that are comfortably within budget.
 func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, note string, force bool) bool {
+	if a.compactSummaryClient() == nil {
+		emitDebug("COMPACT", "skipped: no LLM client connected")
+		return false
+	}
 	if !a.compactMu.TryLock() {
 		emitDebug("COMPACT", "skipped: another compaction in flight")
 		return false
@@ -1799,6 +1796,17 @@ func (a *Agent) compactSummaryClient() LLMClient {
 
 	compact := a.config.Ocode.Compact
 	if compact.SummaryProvider == "" && compact.SummaryModel == "" {
+		// No explicit summary-model override: prefer the small model when
+		// enabled (compaction is a good fit for it — cheap/fast, no tool
+		// calls), falling back to the main client when small-model use is
+		// disabled or unresolvable.
+		if a.config.Ocode.SmallModelEnabled {
+			if small := ResolveSmallModel(a.config); small != "" {
+				if client := NewClient(a.config, small); client != nil {
+					return client
+				}
+			}
+		}
 		return a.client
 	}
 

@@ -68,6 +68,29 @@ var modelsDevPricing = map[string]ModelPricing{
 		InputPerMillion:  0.30,
 		OutputPerMillion: 1.20,
 	},
+	// OpenAI's GPT-5.6 codex family (used via the codex provider plugin).
+	// Kept in the fallback map because the embedded models-snapshot.json is a
+	// gitignored build-time artifact that predates these models until
+	// regenerated with `make models-snapshot`; without these entries spend
+	// resolves to $0 and logs "[PRICING] unknown model".
+	"gpt-5.6-luna": {
+		InputPerMillion:      0.20,
+		OutputPerMillion:     1.20,
+		CacheReadPerMillion:  0.02,
+		CacheWritePerMillion: 0.25,
+	},
+	"gpt-5.6-terra": {
+		InputPerMillion:      2,
+		OutputPerMillion:     12,
+		CacheReadPerMillion:  0.2,
+		CacheWritePerMillion: 2.5,
+	},
+	"gpt-5.6-sol": {
+		InputPerMillion:      5,
+		OutputPerMillion:     30,
+		CacheReadPerMillion:  0.5,
+		CacheWritePerMillion: 6.25,
+	},
 }
 
 func Lookup(model string) (ModelPricing, bool) {

@@ -1027,6 +1027,67 @@ func TestCompactSummaryClientUsesOverride(t *testing.T) {
 	}
 }
 
+func TestCompactSummaryClientUsesSmallModelWhenEnabled(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	a := &Agent{
+		client: &MockClient{},
+		config: &config.Config{Ocode: config.OcodeConfig{
+			SmallModel:        "openai/gpt-4o-mini",
+			SmallModelEnabled: true,
+		}},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient (small model), got %T", client)
+	}
+	if gc.Provider != "openai" || gc.Model != "gpt-4o-mini" {
+		t.Fatalf("unexpected summary client: %+v", gc)
+	}
+}
+
+func TestCompactSummaryClientFallsBackToMainWhenSmallModelDisabled(t *testing.T) {
+	a := &Agent{
+		client: &MockClient{},
+		config: &config.Config{Ocode: config.OcodeConfig{
+			SmallModel:        "openai/gpt-4o-mini",
+			SmallModelEnabled: false,
+		}},
+	}
+
+	client := a.compactSummaryClient()
+	if client != a.client {
+		t.Fatalf("expected fallback to main client when small model disabled, got %T", client)
+	}
+}
+
+func TestCompactSummaryClientExplicitOverrideBeatsSmallModel(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "test-key")
+
+	a := &Agent{
+		client: &MockClient{},
+		config: &config.Config{Ocode: config.OcodeConfig{
+			SmallModel:        "openai/gpt-4o-mini",
+			SmallModelEnabled: true,
+			Compact: config.CompactConfig{
+				SummaryProvider: "openai",
+				SummaryModel:    "gpt-5",
+			},
+		}},
+	}
+
+	client := a.compactSummaryClient()
+	gc, ok := client.(*GenericClient)
+	if !ok {
+		t.Fatalf("expected GenericClient, got %T", client)
+	}
+	if gc.Model != "gpt-5" {
+		t.Fatalf("explicit compact.summary_model must win over small model, got model=%q", gc.Model)
+	}
+}
+
 func TestRunCompactPrunesLargeToolResultsInSummaryPrompt(t *testing.T) {
 	client := &scriptedCaptureClient{Responses: []string{validSummaryText("summary")}}
 	a := &Agent{client: client}
@@ -2054,13 +2115,16 @@ func withRegistryState(t *testing.T, data map[string]providerEntry, fetchedAt ti
 	registry.mu.Lock()
 	prevData := registry.data
 	prevFetchedAt := registry.fetchedAt
+	prevAttempt := registry.lastFetchAttempt
 	registry.data = data
 	registry.fetchedAt = fetchedAt
+	registry.lastFetchAttempt = time.Time{}
 	registry.mu.Unlock()
 	t.Cleanup(func() {
 		registry.mu.Lock()
 		registry.data = prevData
 		registry.fetchedAt = prevFetchedAt
+		registry.lastFetchAttempt = prevAttempt
 		registry.mu.Unlock()
 	})
 }
@@ -2130,7 +2194,7 @@ func TestLoadFromSnapshotPopulated(t *testing.T) {
 	if len(modelsSnapshotData) == 0 {
 		t.Fatal("expected embedded snapshot to be non-empty")
 	}
-	data, ok := loadFromSnapshot()
+	data, _, ok := loadFromSnapshot()
 	if !ok {
 		t.Fatal("expected loadFromSnapshot to return ok=true for the populated embedded snapshot")
 	}
@@ -2168,21 +2232,24 @@ func TestLoadRegistryEnvWinsOverSnapshot(t *testing.T) {
 	}
 }
 
-func TestLoadRegistrySnapshotWinsOverCache(t *testing.T) {
+func TestLoadRegistryUsesSnapshotWhenNoCache(t *testing.T) {
 	// HOME temp dir ensures no leftover cache file is used.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CACHE_HOME", home)
 	t.Setenv("APPDATA", home) // windows
 	t.Setenv(envModelsPath, "")
+	// Use a synthetic fresh snapshot so the test is hermetic regardless of the
+	// age of the embedded snapshot artifact on the machine running it.
+	withSnapshotBytes(t, mustSnapshotWrapper(t, "snaptest", time.Now()))
 	withRegistryState(t, nil, time.Time{})
 
 	got := loadRegistry()
 	if got == nil {
 		t.Fatal("expected loadRegistry to return data from the embedded snapshot when no env var is set and no cache exists")
 	}
-	if _, ok := got["openai"]; !ok {
-		t.Fatalf("expected snapshot-derived data to contain openai, got keys: %v", keysOf(got))
+	if _, ok := got["snaptest"]; !ok {
+		t.Fatalf("expected snapshot-derived data to contain snaptest, got keys: %v", keysOf(got))
 	}
 }
 
@@ -2311,6 +2378,12 @@ func TestForceRefreshRegistrySuccess(t *testing.T) {
 }
 
 func TestForceRefreshRegistryRemoteFailureKeepsExisting(t *testing.T) {
+	// HOME temp dir so the refresh lock file lands in a sandboxed path.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home)
+	t.Setenv(envModelsPath, "")
 	// Pre-populate the registry with known data and make fetchRemote fail.
 	prev := map[string]providerEntry{
 		"existing": {ID: "existing", Models: map[string]modelEntry{
@@ -2338,6 +2411,11 @@ func TestForceRefreshRegistryRemoteFailureKeepsExisting(t *testing.T) {
 }
 
 func TestForceRefreshRegistryRemoteFailureNoExisting(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home)
+	t.Setenv(envModelsPath, "")
 	withRegistryState(t, nil, time.Time{})
 	withFetchRemoteError(t, fmt.Errorf("simulated network down"))
 
@@ -2351,6 +2429,11 @@ func TestForceRefreshRegistryRemoteFailureNoExisting(t *testing.T) {
 }
 
 func TestForceRefreshRegistryNon200Status(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home)
+	t.Setenv(envModelsPath, "")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 	}))

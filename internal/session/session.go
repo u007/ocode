@@ -291,7 +291,6 @@ func Load(id string) (*Session, error) {
 		s.Messages = removeIncompleteToolRequests(s.Messages)
 		return s, nil
 	}
-
 	path, data, err := readSessionFile(dir, id)
 	if err != nil {
 		if os.IsNotExist(err) && shouldSearchOtherProjects(id) {
@@ -302,6 +301,16 @@ func Load(id string) (*Session, error) {
 				err = nil
 			} else if !os.IsNotExist(fallbackErr) {
 				return nil, fallbackErr
+			} else if ojsonlPath, ok := findOjsonlSessionAnyProject(id); ok {
+				// No legacy JSON anywhere — look for an .ojsonl session in
+				// another project (e.g. desktop -session from a different cwd).
+				s, loadErr := loadOjsonlSession(ojsonlPath)
+				if loadErr != nil {
+					return nil, loadErr
+				}
+				s.Messages = removeIncompleteToolRequests(s.Messages)
+				log.Printf("session: loaded %q from fallback project path %s", id, ojsonlPath)
+				return s, nil
 			}
 		}
 	}
@@ -365,6 +374,28 @@ func readSessionFileAnyProject(id string) (string, []byte, error) {
 	}
 
 	return "", nil, os.ErrNotExist
+}
+
+func findOjsonlSessionAnyProject(id string) (string, bool) {
+	dataDir, err := paths.GlobalDataDir()
+	if err != nil {
+		return "", false
+	}
+	entries, err := os.ReadDir(filepath.Join(dataDir, "project"))
+	if err != nil {
+		return "", false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		dir := filepath.Join(dataDir, "project", entry.Name(), "sessions")
+		path := ojsonlSessionPath(dir, id)
+		if fileExists(path) {
+			return path, true
+		}
+	}
+	return "", false
 }
 
 func readSessionFile(dir, id string) (string, []byte, error) {

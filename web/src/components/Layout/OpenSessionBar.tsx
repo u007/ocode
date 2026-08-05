@@ -1,42 +1,20 @@
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 import { useChatDispatch, useChatState } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
-import { api } from "../../api/client";
 import { X, List, Plus, Loader2 } from "lucide-react";
 
 export default function OpenSessionBar() {
-  const { state: projectState, openSessionTab, closeSessionTab, toggleSessionPicker } = useProjectState();
+  const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab } = useProjectState();
   const chatState = useChatState();
   const chatDispatch = useChatDispatch();
-  const { tabs, activeTabId } = projectState;
-  const [loadingTabId, setLoadingTabId] = useState<string | null>(null);
 
-  const handleTabClick = useCallback(async (sessionId: string, title: string) => {
+  const handleTabClick = useCallback((sessionId: string, title: string) => {
     // Already active — no-op
     if (activeTabId === sessionId) return;
-
-    // New session tabs (temp IDs starting with "new-") — just activate with empty chat
-    if (sessionId.startsWith("new-")) {
-      openSessionTab(sessionId, title);
-      if (!chatState.sessionId) {
-        // Only reset if no real session was created yet (first message not sent)
-        chatDispatch({ type: "RESET" });
-      }
-      return;
-    }
-
+    // Message loading for real sessions is handled centrally by
+    // SessionTabSync (it watches activeTabId). Just activate the tab.
     openSessionTab(sessionId, title);
-    setLoadingTabId(sessionId);
-    try {
-      const session = await api.getSession(sessionId);
-      chatDispatch({ type: "SET_SESSION", sessionId });
-      chatDispatch({ type: "SET_MESSAGES", messages: session.messages || [] });
-    } catch (err) {
-      console.error("Failed to load session:", err);
-    } finally {
-      setLoadingTabId(null);
-    }
-  }, [activeTabId, openSessionTab, chatDispatch]);
+  }, [activeTabId, openSessionTab]);
 
   const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
     e.stopPropagation();
@@ -45,6 +23,11 @@ export default function OpenSessionBar() {
       chatDispatch({ type: "RESET" });
     }
   }, [closeSessionTab, chatState.sessionId, chatDispatch]);
+
+  // A real session tab is "loading" while it's active but its messages are not
+  // yet in the chat store (SessionTabSync fetch in flight).
+  const isLoadingTab = (tabId: string) =>
+    activeTabId === tabId && !tabId.startsWith("new-") && chatState.sessionId !== tabId;
 
   // Always show when a project is active, even with zero tabs
   if (!projectState.activeProject) {
@@ -65,10 +48,10 @@ export default function OpenSessionBar() {
             }`}
             onClick={() => handleTabClick(tab.id, tab.title)}
           >
-            {loadingTabId === tab.id && (
+            {isLoadingTab(tab.id) && (
               <Loader2 className="w-3 h-3 animate-spin shrink-0" />
             )}
-            <span className="max-w-28 truncate">{tab.title || tab.id.slice(0, 12)}</span>
+            <span className="max-w-28 truncate" title={tab.title || tab.id}>{tab.title || tab.id.slice(0, 12)}</span>
             <span
               role="button"
               tabIndex={0}
@@ -90,8 +73,7 @@ export default function OpenSessionBar() {
       {/* New session button */}
       <button
         onClick={() => {
-          const tempId = `new-${Date.now()}`;
-          openSessionTab(tempId, "New session");
+          openNewSessionTab();
           chatDispatch({ type: "RESET" });
         }}
         className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors shrink-0"

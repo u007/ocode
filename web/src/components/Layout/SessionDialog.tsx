@@ -1,20 +1,18 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { useChatState, useChatDispatch } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
-import { api } from "../../api/client";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { MessageSquare, Plus, X, Loader2, Check } from "lucide-react";
 
 export default function SessionDialog() {
-  const { state: projectState, openSessionTab, closeSessionTab, toggleSessionPicker } = useProjectState();
+  const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab } = useProjectState();
   const chatState = useChatState();
   const chatDispatch = useChatDispatch();
-  const { projectSessions, sessionsLoading, tabs, activeTabId, sessionPickerOpen, activeProject } = projectState;
+  const { projectSessions, sessionsLoading, sessionPickerOpen, activeProject } = projectState;
 
   const [searchQuery, setSearchQuery] = useState("");
-  const [loadingId, setLoadingId] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Auto-focus search input when dialog opens
@@ -34,29 +32,21 @@ export default function SessionDialog() {
     );
   }, [projectSessions, searchQuery]);
 
-  // Open a session tab and switch to it
-  const handleSessionClick = useCallback(async (sessionId: string, title: string) => {
-    setLoadingId(sessionId);
-    try {
-      openSessionTab(sessionId, title);
-      const session = await api.getSession(sessionId);
-      chatDispatch({ type: "SET_SESSION", sessionId });
-      chatDispatch({ type: "SET_MESSAGES", messages: session.messages || [] });
-      toggleSessionPicker();
-      setSearchQuery("");
-    } catch (err) {
-      console.error("Failed to load session:", err);
-    } finally {
-      setLoadingId(null);
-    }
-  }, [openSessionTab, chatDispatch, toggleSessionPicker]);
+  // Open a session tab and switch to it. Message loading is handled centrally
+  // by SessionTabSync (it watches activeTabId).
+  const handleSessionClick = useCallback((sessionId: string, title: string) => {
+    openSessionTab(sessionId, title);
+    toggleSessionPicker();
+    setSearchQuery("");
+  }, [openSessionTab, toggleSessionPicker]);
 
   // Create a new session
   const handleNewSession = useCallback(() => {
+    openNewSessionTab();
     chatDispatch({ type: "RESET" });
     toggleSessionPicker();
     setSearchQuery("");
-  }, [chatDispatch, toggleSessionPicker]);
+  }, [openNewSessionTab, chatDispatch, toggleSessionPicker]);
 
   // Close a session tab
   const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
@@ -115,7 +105,7 @@ export default function SessionDialog() {
               {filteredSessions.map((session) => {
                 const open = isTabOpen(session.id);
                 const current = isCurrentSession(session.id);
-                const loading = loadingId === session.id;
+                const loading = false;
                 return (
                   <button
                     key={session.id}

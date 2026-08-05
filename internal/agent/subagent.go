@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync/atomic"
@@ -264,6 +265,18 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 			return "", fmt.Errorf("no agent available")
 		}
 		spec = defaultSpec
+	}
+
+	// Hidden agents (e.g. the orchestrator pipeline's internal
+	// orchestrator-planner/-explorer/-developer/-validator subagents) are
+	// scoped to their own plugin: only a caller loaded from the same
+	// directory as the target may dispatch it. This stops the main LLM, or
+	// any agent outside that plugin, from invoking an internal-only agent
+	// directly via the task tool.
+	if spec.Hidden {
+		if !t.callerCanDispatch(spec) {
+			return "", fmt.Errorf("agent %q is internal-only and cannot be dispatched from here", spec.Name)
+		}
 	}
 
 	// Re-dispatch guard: refuse repeated identical subagent launches without
@@ -606,7 +619,7 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 		// Wait for a concurrency slot (no-op when unlimited). If the session
 		// is cancelled while this dispatch is still queued, stopCh closes and
 		// we bail without ever starting the sub-agent.
-		release, aerr := runs.Acquire(stopCh)
+		release, aerr := runs.AcquireForRun(run, stopCh)
 		if aerr != nil {
 			run.tryFinishCancelled()
 			runs.notifyDone(run)
@@ -671,7 +684,7 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 		if t.mainAgent != nil {
 			stopCh = t.mainAgent.StopCh()
 		}
-		release, aerr := t.runs.Acquire(stopCh)
+		release, aerr := t.runs.AcquireForRun(run, stopCh)
 		if aerr != nil {
 			run.tryFinishCancelled()
 			return "", aerr
@@ -811,6 +824,23 @@ func (t TaskTool) ExecuteRaw(agentName, prompt string, background bool) (string,
 		"run_in_background": background,
 	})
 	return t.Execute(args)
+}
+
+// callerCanDispatch reports whether the agent that owns this TaskTool
+// instance (t.mainAgent) is allowed to dispatch the given hidden target.
+// A hidden agent may only be dispatched by a caller defined in the same
+// source directory (i.e. the same markdown-agent plugin) — this keeps
+// pipeline-internal agents like orchestrator-developer reachable only from
+// their own orchestrator.md, not from the main LLM or unrelated agents.
+func (t TaskTool) callerCanDispatch(target *AgentDefinition) bool {
+	if t.registry == nil || t.mainAgent == nil || t.mainAgent.spec == nil {
+		return false
+	}
+	callerDef := t.registry.Get(t.mainAgent.spec.Name)
+	if callerDef == nil {
+		return false
+	}
+	return filepath.Dir(callerDef.Source) == filepath.Dir(target.Source)
 }
 
 func (t TaskTool) findAgent(name string) *AgentDefinition {

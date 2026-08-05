@@ -8,9 +8,12 @@ package tui
 import (
 	"fmt"
 	"log"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -45,6 +48,17 @@ type changesModel struct {
 
 	// list is the ListBox for the scrollable file list.
 	list *ListBox
+
+	// diff is the viewport for the scrollable right-hand diff preview. It is
+	// a pointer so mutations made from value-receiver methods (View,
+	// handleKey) persist on the model held by the parent tea.Model.
+	diff *viewport.Model
+
+	// editor is the fallback $EDITOR/vi command used when editorOpener is
+	// nil (e.g. in tests). editorOpener is wired by the parent model to the
+	// shared editor-launch path (tmux split-pane aware).
+	editor       string
+	editorOpener func(string) tea.Cmd
 }
 
 // withRegistry returns a copy of the model with getRegistry set to fn.
@@ -58,9 +72,12 @@ func (m changesModel) withRegistry(fn func() *changes.Registry) changesModel {
 func NewChangesModel() changesModel {
 	list := NewListBox(0, 0)
 	list.SetWrapEnabled(true)
+	diff := viewport.New()
+	diff.SoftWrap = true
 	return changesModel{
 		list:      list,
 		diffCache: make(map[string]string),
+		diff:      &diff,
 	}
 }
 
@@ -110,19 +127,33 @@ func (m changesModel) handleKey(msg tea.KeyPressMsg) (changesModel, tea.Cmd) {
 		next := (m.list.Selected() + 1) % len(m.files)
 		m.list.SetSelected(next)
 		m.ensureDiffCached(next)
+		m.diff.GotoTop()
 	case "k", "up":
 		n := len(m.files)
 		next := (m.list.Selected() - 1 + n) % n
 		m.list.SetSelected(next)
 		m.ensureDiffCached(next)
+		m.diff.GotoTop()
 	case "g", "home":
 		m.list.SetSelected(0)
 		m.ensureDiffCached(0)
+		m.diff.GotoTop()
 	case "G", "end":
 		m.list.SetSelected(len(m.files) - 1)
 		m.ensureDiffCached(len(m.files) - 1)
+		m.diff.GotoTop()
 	case "enter":
 		m.ensureDiffCached(m.list.Selected())
+	case "ctrl+d", "pgdown":
+		m.diff.ScrollDown(m.diff.Height() / 2)
+	case "ctrl+u", "pgup":
+		m.diff.ScrollUp(m.diff.Height() / 2)
+	case "ctrl+e":
+		sel := m.list.Selected()
+		if sel >= 0 && sel < len(m.files) {
+			m.statusMsg = "opening editor..."
+			return m, m.openInEditor(m.files[sel].OriginalPath)
+		}
 	case "?":
 		m.showDetails = !m.showDetails
 	case "u":
@@ -135,6 +166,34 @@ func (m changesModel) handleKey(msg tea.KeyPressMsg) (changesModel, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// openInEditor launches the configured editor on path. Mirrors gitModel's
+// and filesModel's openInEditor: prefer the shared editorOpener (tmux
+// split-pane aware) when wired, else fall back to a plain exec.Command.
+func (m changesModel) openInEditor(path string) tea.Cmd {
+	if isBinaryFile(path) {
+		return openFileWithOSDefault(path)
+	}
+	if m.editorOpener != nil {
+		return m.editorOpener(path)
+	}
+	editor := m.editor
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+	cmdParts := strings.Fields(editor)
+	if len(cmdParts) == 0 {
+		return func() tea.Msg { return editorFinishedMsg{err: os.ErrInvalid} }
+	}
+	cmdParts = append(cmdParts, path)
+	c := exec.Command(cmdParts[0], cmdParts[1:]...)
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return editorFinishedMsg{err: err}
+	})
 }
 
 // ensureDiffCached computes and caches the diff for m.files[sel] if it is
@@ -284,10 +343,21 @@ func (m changesModel) View(w, h int, styles Styles) string {
 	}
 	leftPane := styles.Border.Width(leftW).Height(contentH).Render(leftContent)
 
-	// --- Right pane: diff preview ---
+	// --- Right pane: diff preview (scrollable viewport) ---
+	diffPaneW := rightW - 4
+	diffPaneH := contentH - 2
+	if diffPaneW < 1 {
+		diffPaneW = 1
+	}
+	if diffPaneH < 1 {
+		diffPaneH = 1
+	}
+	m.diff.SetWidth(diffPaneW)
+	m.diff.SetHeight(diffPaneH)
+
 	var rightContent string
 	if len(m.files) == 0 {
-		rightContent = styles.Hint.Render(truncateToWidth("files the agent edits will appear here.", rightW-4))
+		rightContent = styles.Hint.Render(truncateToWidth("files the agent edits will appear here.", diffPaneW))
 		// Pad to full pane height to keep layout stable.
 		spacer := strings.Repeat("\n", contentH-3)
 		rightContent += spacer
@@ -297,10 +367,11 @@ func (m changesModel) View(w, h int, styles Styles) string {
 		if cachedDiff, ok := m.diffCache[f.OriginalPath]; ok && cachedDiff != "" {
 			// Render the cached diff using the unified diff renderer.
 			rendered := renderUnifiedDiff(cachedDiff, styles)
-			rightContent = lipgloss.NewStyle().Width(rightW - 4).Render(rendered)
+			m.diff.SetContent(rendered)
 		} else {
-			rightContent = lipgloss.NewStyle().Width(rightW - 4).Render(styles.Hint.Render("(no changes to show)"))
+			m.diff.SetContent(styles.Hint.Render("(no changes to show)"))
 		}
+		rightContent = m.diff.View()
 	}
 	rightPane := styles.Border.Width(rightW).Height(contentH).Render(rightContent)
 
@@ -364,7 +435,8 @@ func (m changesModel) renderHints() string {
 	hints := []string{
 		"j/k navigate",
 		"g top G bottom",
-		"enter diff",
+		"ctrl+u/d scroll diff",
+		"ctrl+e editor",
 		"? details",
 		"u undo-file",
 		"U undo-block",

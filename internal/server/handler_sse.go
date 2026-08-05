@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
@@ -13,8 +14,13 @@ import (
 )
 
 type SSEEvent struct {
-	Event string      `json:"event"`
-	Data  interface{} `json:"data"`
+	// SessionID is transport metadata used to route events to the correct web
+	// session. It is not part of the internal event JSON payload; the SSE
+	// writer emits it as the standard `id` field so existing event payloads stay
+	// backwards-compatible.
+	SessionID string      `json:"-"`
+	Event     string      `json:"event"`
+	Data      interface{} `json:"data"`
 }
 
 type TextDelta struct {
@@ -231,6 +237,10 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 	as.messages = append(as.messages, resp...)
 	_ = session.Save(sessionID, "", as.messages, nil)
 
+	// Headless-only: generate a title for an untitled session after its first
+	// turn (mirrors the TUI; no-op when an RC bridge is attached).
+	h.maybeGenerateSessionTitle(sessionID, as)
+
 	sendSSE(w, flusher, "done", DoneEvent{
 		SessionID: sessionID,
 		Model:     sessModel,
@@ -261,14 +271,37 @@ func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) 
 
 	sessionID := r.URL.Query().Get("session")
 
+	// Optional allowlist of event names (?events=status,turn_done). When set,
+	// only those events are forwarded — lets the web tab bar subscribe to
+	// status updates without receiving every message/tool payload on the bus.
+	var eventFilter map[string]bool
+	if ev := r.URL.Query().Get("events"); ev != "" {
+		eventFilter = make(map[string]bool)
+		for _, name := range strings.Split(ev, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				eventFilter[name] = true
+			}
+		}
+	}
+	forward := func(ev SSEEvent) {
+		if eventFilter != nil && !eventFilter[ev.Event] {
+			return
+		}
+		if sessionID != "" && ev.SessionID != "" && ev.SessionID != sessionID {
+			return
+		}
+		sendSSEWithSession(w, flusher, ev.SessionID, ev.Event, ev.Data)
+	}
+
 	if rc != nil {
 		// RC bridge mode: subscribe to the TUI's broadcast channel.
 		sub := rc.Subscribe()
 		defer rc.Unsubscribe(sub)
 
 		// Send the current history immediately so a freshly-loaded (or reconnecting)
-		// browser is in sync before live events start flowing.
-		sendSSE(w, flusher, "messages", rc.GetMessages())
+		// browser is in sync before live events start flowing. Bridge events from
+		// older TUI code may not carry SessionID, so decorate them at this boundary.
+		forward(SSEEvent{SessionID: rc.SessionID, Event: "messages", Data: rc.GetMessages()})
 
 		ctx := r.Context()
 		for {
@@ -276,12 +309,19 @@ func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) 
 			case <-ctx.Done():
 				return
 			case ev := <-sub:
-				sendSSE(w, flusher, ev.Event, ev.Data)
+				if ev.SessionID == "" {
+					ev.SessionID = rc.SessionID
+				}
+				forward(ev)
 			}
 		}
 	}
 
-	// Headless/serve mode: subscribe to the handler's local event bus.
+	// Headless/serve mode: subscribe to the handler's local event bus before
+	// loading history, so events produced during the disk read stay queued.
+	sub := h.subscribeHeadless()
+	defer h.unsubscribeHeadless(sub)
+
 	// Load current messages from disk so the browser gets history immediately.
 	var initMsgs []agent.Message
 	if sessionID != "" {
@@ -290,10 +330,7 @@ func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) 
 			initMsgs = s.Messages
 		}
 	}
-	sendSSE(w, flusher, "messages", initMsgs)
-
-	sub := h.subscribeHeadless()
-	defer h.unsubscribeHeadless(sub)
+	forward(SSEEvent{SessionID: sessionID, Event: "messages", Data: initMsgs})
 
 	ctx := r.Context()
 	for {
@@ -301,13 +338,20 @@ func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) 
 		case <-ctx.Done():
 			return
 		case ev := <-sub:
-			sendSSE(w, flusher, ev.Event, ev.Data)
+			forward(ev)
 		}
 	}
 }
 
 func sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
+	sendSSEWithSession(w, flusher, "", event, data)
+}
+
+func sendSSEWithSession(w http.ResponseWriter, flusher http.Flusher, sessionID, event string, data interface{}) {
 	jsonData, _ := json.Marshal(data)
+	// Always emit an id line. An empty id resets EventSource.lastEventId so an
+	// untagged status/history frame cannot inherit the preceding session.
+	fmt.Fprintf(w, "id: %s\n", sessionID)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, jsonData)
 	flusher.Flush()
 }

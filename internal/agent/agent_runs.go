@@ -384,17 +384,28 @@ func (l *agentConcurrencyLimiter) getQueued() int {
 }
 
 func (l *agentConcurrencyLimiter) acquire(stopCh <-chan struct{}) (func(), error) {
+	return l.acquireCancellable(stopCh, nil)
+}
+
+// acquireCancellable is acquire, plus an optional cancelCh that also wakes a
+// queued waiter immediately — e.g. a run's own Done() channel, so cancelling
+// (or otherwise finishing) one specific queued run doesn't leave its waiter
+// parked until some unrelated holder happens to release and broadcast.
+// Without this, a cancelled run's goroutine stays blocked in the select below
+// until an unrelated slot frees up, so the queue never reflects the
+// cancellation and can appear to wait forever.
+func (l *agentConcurrencyLimiter) acquireCancellable(stopCh, cancelCh <-chan struct{}) (func(), error) {
 	// Check cancellation before admission, including the unlimited path. This
 	// matters during Agent.Shutdown: an old dispatch must not be admitted just
 	// because the configured limit is zero.
-	if isClosed(stopCh) {
+	if isClosed(stopCh) || isClosed(cancelCh) {
 		return nil, ErrAgentQueueCancelled
 	}
 
 	l.mu.Lock()
 	waiting := false
 	for {
-		if isClosed(stopCh) {
+		if isClosed(stopCh) || isClosed(cancelCh) {
 			if waiting {
 				l.queued--
 			}
@@ -427,6 +438,7 @@ func (l *agentConcurrencyLimiter) acquire(stopCh <-chan struct{}) (func(), error
 		l.mu.Unlock()
 		select {
 		case <-stopCh:
+		case <-cancelCh:
 		case <-changed:
 		}
 		l.mu.Lock()
@@ -520,6 +532,19 @@ func (r *AgentRunRegistry) QueuedCount() int {
 // ErrAgentQueueCancelled when closed.
 func (r *AgentRunRegistry) Acquire(stopCh <-chan struct{}) (func(), error) {
 	return r.limiter.acquire(stopCh)
+}
+
+// AcquireForRun is Acquire, but also wakes immediately if run reaches a
+// terminal state (e.g. cancelled via CancelOwned/CancelAll) while still
+// queued, instead of leaving the wait parked until an unrelated holder
+// releases its slot. Callers that already have the AgentRun for this
+// dispatch should prefer this over Acquire.
+func (r *AgentRunRegistry) AcquireForRun(run *AgentRun, stopCh <-chan struct{}) (func(), error) {
+	var cancelCh <-chan struct{}
+	if run != nil {
+		cancelCh = run.Done()
+	}
+	return r.limiter.acquireCancellable(stopCh, cancelCh)
 }
 
 func (r *AgentRunRegistry) SetOnDone(fn func(*AgentRun)) {

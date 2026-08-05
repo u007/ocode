@@ -22,6 +22,7 @@ import TopTabs from "./components/Layout/TopTabs";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
 import OpenSessionBar from "./components/Layout/OpenSessionBar";
+import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import ModelDialog from "./components/Layout/ModelDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
@@ -89,7 +90,7 @@ function HomeApp() {
   const dispatch = useChatDispatch();
   const { messages: chatMessages, sessionId: currentSessionId } = useChatState();
   const { resolvePermission, pendingPermission } = useChat();
-  const { state: projectState, dispatch: projectDispatch } = useProjectState();
+  const { activeTabId, dispatch: projectDispatch } = useProjectState();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -257,6 +258,7 @@ function HomeApp() {
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
+      <SessionTabSync />
 
       {/* Main content area */}
       <div className="flex flex-1 overflow-hidden">
@@ -307,7 +309,7 @@ function HomeApp() {
                 <ChatInput
                   onSlashCommand={handleCommand}
                   activeEditorContext={activeEditorContext}
-                  sessionTabId={projectState.activeTabId}
+                  sessionTabId={activeTabId}
                   onSessionCreated={handleSessionCreated}
                 />
               </div>

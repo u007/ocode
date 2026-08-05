@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net/url"
 	"os"
+	"strings"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -28,6 +30,21 @@ import (
 var embeddedAssets embed.FS
 
 func main() {
+	// The desktop shell hosts the web UI, so resume a requested session by
+	// navigating to the same session route used by the web application.
+	var sessionID string
+	for i := 1; i < len(os.Args); i++ {
+		switch os.Args[i] {
+		case "-session", "--session":
+			if i+1 >= len(os.Args) || os.Args[i+1] == "" {
+				log.Printf("ocode-desktop: %s requires a session ID", os.Args[i])
+				os.Exit(2)
+			}
+			sessionID = os.Args[i+1]
+			i++
+		}
+	}
+
 	// Resolve the working directory the server anchors relative paths to.
 	// A Finder/Dock-launched .app starts with cwd "/" — fall back to the
 	// user's home directory so session/upload paths never target the root.
@@ -99,12 +116,22 @@ func main() {
 	// Build the webview URL with the auth token (same ?token= param the TUI /rc
 	// command and EventSource use).
 	appURL := fmt.Sprintf("%s/?token=%s", handle.URL, handle.Token)
+	if sessionID != "" {
+		appURL = fmt.Sprintf("%s/session/%s?token=%s", handle.URL, url.PathEscape(sessionID), handle.Token)
+	}
 
 	// Determine desktop URL via env override (for dev hot-reload).
 	desktopURL := appURL
 	if devURL := os.Getenv("OCODE_DESKTOP_DEV_URL"); devURL != "" {
 		log.Printf("ocode-desktop: using dev URL %s", devURL)
 		desktopURL = devURL
+		if sessionID != "" {
+			parsed, err := url.Parse(devURL)
+			if err == nil {
+				parsed.Path = strings.TrimRight(parsed.Path, "/") + "/session/" + url.PathEscape(sessionID)
+				desktopURL = parsed.String()
+			}
+		}
 	}
 
 	// Set up the application menu (native Edit menu for Cmd+C/V etc.).

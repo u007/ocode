@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -913,6 +914,23 @@ func TestCharsPerTokenForUnknownFallsBack(t *testing.T) {
 }
 
 func TestResolveCompactRuntimeDefaultsKeepRecentTokens(t *testing.T) {
+	// Sandbox the models cache and swap in a fresh synthetic snapshot so this
+	// test never depends on the developer's real cache or network access.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", home)
+	t.Setenv("APPDATA", home)
+	t.Setenv(envModelsPath, "")
+	wrapped := registryFile{
+		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+		Providers: map[string]providerEntry{
+			"openai": {ID: "openai", Models: map[string]modelEntry{
+				"gpt-4o": {ID: "gpt-4o", Limit: modelLimit{Context: 128000}},
+			}},
+		},
+	}
+	snap, _ := json.Marshal(wrapped)
+	withSnapshotBytes(t, snap)
 	if ModelWindow("openai/gpt-4o") <= 0 {
 		t.Skip("model registry unavailable for openai/gpt-4o")
 	}

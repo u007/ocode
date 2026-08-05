@@ -48,6 +48,64 @@ func TestHandleSessionMessagesMirrorsBridge(t *testing.T) {
 	if !strings.Contains(body, "typed in the tui") || !strings.Contains(body, "answer from the agent") {
 		t.Fatalf("expected mirrored messages in frame, got: %q", body)
 	}
+	if !strings.Contains(body, "id: sess-1") {
+		t.Fatalf("expected session id metadata in frame, got: %q", body)
+	}
+}
+
+func TestHandleSessionMessagesFiltersHeadlessSessions(t *testing.T) {
+	h := NewHandler()
+	ctx, cancel := context.WithCancel(context.Background())
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/chat/messages?session=sess-1", nil).WithContext(ctx)
+
+	done := make(chan struct{})
+	go func() {
+		h.HandleSessionMessages(w, r)
+		close(done)
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	h.broadcastEvent(SSEEvent{
+		SessionID: "sess-2",
+		Event:     "text",
+		Data:      TextDelta{Delta: "wrong session"},
+	})
+	h.broadcastEvent(SSEEvent{
+		SessionID: "sess-1",
+		Event:     "text",
+		Data:      TextDelta{Delta: "right session"},
+	})
+	time.Sleep(40 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream handler did not return after context cancel")
+	}
+
+	body := w.Body.String()
+	if strings.Contains(body, "wrong session") {
+		t.Fatalf("leaked another session's event: %q", body)
+	}
+	if !strings.Contains(body, "right session") || !strings.Contains(body, "id: sess-1") {
+		t.Fatalf("missing matching session event: %q", body)
+	}
+}
+
+func TestSendSSEWithSessionResetsEventSourceID(t *testing.T) {
+	w := httptest.NewRecorder()
+	flusher := w
+	sendSSEWithSession(w, flusher, "sess-1", "text", TextDelta{Delta: "one"})
+	sendSSEWithSession(w, flusher, "", "status", map[string]string{"ok": "yes"})
+
+	body := w.Body.String()
+	if !strings.Contains(body, "id: sess-1\nevent: text") {
+		t.Fatalf("expected tagged frame, got: %q", body)
+	}
+	if !strings.Contains(body, "id: \nevent: status") {
+		t.Fatalf("expected empty id to reset the transport session, got: %q", body)
+	}
 }
 
 // TestHandleSessionMessagesForwardsLiveEvents verifies that events broadcast by

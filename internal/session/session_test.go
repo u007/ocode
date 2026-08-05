@@ -575,7 +575,6 @@ func TestSaveExistingJSONSessionStaysJSON(t *testing.T) {
 	}
 }
 
-
 func TestDeleteRemovesOjsonlSession(t *testing.T) {
 	tmpDir := t.TempDir()
 	origWd, _ := os.Getwd()
@@ -791,5 +790,53 @@ func TestRemoveIncompleteToolRequests_DropsEmptyToolID(t *testing.T) {
 		if m.Role == "tool" && m.ToolID == "" {
 			t.Fatalf("expected tool message with empty ToolID to be dropped, got: %+v", out)
 		}
+	}
+}
+
+// TestLoadCrossProjectOjsonlFallback verifies that a session stored as .ojsonl
+// in another project's storage dir is found when Load runs from a different
+// working directory (the desktop `-session <id>` flow). Regression test for
+// sessions resumed empty from a different cwd.
+func TestLoadCrossProjectOjsonlFallback(t *testing.T) {
+	seedDir := t.TempDir()
+	otherDir := t.TempDir()
+
+	// Seed the session into the "other" project's storage dir.
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatal(err)
+	}
+	sessID := NewSessionID()
+	if err := Save(sessID, "Cross-project", []agent.Message{{Role: "user", Content: "hello"}}, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	// Record the seeded files so we can clean up real-data-dir pollution.
+	seededDir, err := GetStorageDir()
+	if err != nil {
+		t.Fatalf("GetStorageDir: %v", err)
+	}
+	seededFile := filepath.Join(seededDir, sessID+".ojsonl")
+	if _, err := os.Stat(seededFile); err != nil {
+		t.Fatalf("expected seeded ojsonl file at %s: %v", seededFile, err)
+	}
+	t.Cleanup(func() {
+		os.Remove(seededFile)
+		os.Remove(filepath.Join(seededDir, "index.json"))
+	})
+
+	// Now load from a different cwd (the "current" project).
+	if err := os.Chdir(seedDir); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := Load(sessID)
+	if err != nil {
+		t.Fatalf("Load from different cwd failed: %v", err)
+	}
+	if sess.ID != sessID || sess.Title != "Cross-project" {
+		t.Fatalf("expected cross-project session, got %+v", sess)
+	}
+	if len(sess.Messages) != 1 || sess.Messages[0].Content != "hello" {
+		t.Fatalf("expected seeded messages, got %+v", sess.Messages)
 	}
 }

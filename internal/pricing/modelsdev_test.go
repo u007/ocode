@@ -51,3 +51,20 @@ func TestLookupNormalizesCaseInsensitiveModelNames(t *testing.T) {
 		t.Fatalf("unexpected case-insensitive pricing: %+v", got)
 	}
 }
+
+func TestLookupFallsBackToCodexGPT56Pricing(t *testing.T) {
+	// The GPT-5.6 codex family (gpt-5.6-luna/sol/terra) must resolve even when
+	// the models.dev snapshot is stale, so codex sessions don't silently bill $0.
+	got, ok := Lookup("gpt-5.6-luna")
+	if !ok {
+		t.Fatal("expected gpt-5.6-luna pricing to exist")
+	}
+	if got.InputPerMillion != 0.20 || got.OutputPerMillion != 1.20 {
+		t.Fatalf("unexpected gpt-5.6-luna pricing: %+v", got)
+	}
+
+	// Provider-prefixed form must normalize the same way.
+	if _, ok := Lookup("openai/gpt-5.6-terra"); !ok {
+		t.Fatal("expected openai/gpt-5.6-terra pricing to resolve")
+	}
+}
