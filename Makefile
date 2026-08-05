@@ -258,3 +258,5 @@ docker-serve: docker-build
 docker-run: docker-build
 	@echo "🚀 Running: ocode $(ARGS)"
 	docker compose run --rm ocode $(ARGS)
+
+install-all: install install-desktop

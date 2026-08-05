@@ -11815,13 +11815,7 @@ func (m *model) appendAgentMessage(am agent.Message) {
 				// approve/deny buttons. The sentinel tool message stays in the
 				// transcript (raw: &copyMsg) so the resumed turn can find/replace it.
 				if m.pendingRC != nil && m.pendingRC.StreamCh != nil {
-					ev := server.PermissionEvent{
-						RequestID: am.ToolID,
-						Tool:      req.ToolName,
-						Command:   req.Command,
-						Rule:      req.Rule,
-						Summary:   req.Summary,
-					}
+					ev := newRCPermissionEvent(am.ToolID, req)
 					select {
 					case m.pendingRC.StreamCh <- server.SSEEvent{Event: "permission", Data: ev}:
 					default:
@@ -11995,6 +11989,26 @@ func parsePermissionRequest(content string) (agent.PermissionRequest, bool) {
 	return req, true
 }
 
+// newRCPermissionEvent keeps the TUI-owned /rc bridge on the same permission
+// event contract as the server-owned session stream. In particular, a missing
+// auto-permission model is not a denial and must remain distinguishable from a
+// model-generated deny reason in remote clients.
+func newRCPermissionEvent(requestID string, req agent.PermissionRequest) server.PermissionEvent {
+	command := req.Command
+	if command == "" && len(req.Args) > 0 {
+		command = string(req.Args)
+	}
+	return server.PermissionEvent{
+		RequestID:        requestID,
+		Tool:             req.ToolName,
+		Command:          command,
+		Rule:             req.Rule,
+		Summary:          req.Summary,
+		DenyReason:       req.DenyReason,
+		ModelUnavailable: req.ModelUnavailable,
+	}
+}
+
 func permissionRequestSummary(req agent.PermissionRequest) string {
 	if req.Command != "" {
 		return formatToolCallHint(makeToolCall(req.ToolName, string(req.Args)))
@@ -12013,6 +12027,11 @@ func renderPermissionRequestBody(req agent.PermissionRequest) string {
 	if req.DenyReason != "" {
 		lines = append(lines, "⛔ Auto-denied by LLM permission model:")
 		lines = append(lines, req.DenyReason)
+		lines = append(lines, "")
+	}
+	if req.ModelUnavailable != "" {
+		lines = append(lines, "ℹ Permission model unavailable — asking you instead:")
+		lines = append(lines, req.ModelUnavailable)
 		lines = append(lines, "")
 	}
 	if req.Summary != "" {

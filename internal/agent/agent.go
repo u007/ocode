@@ -2175,7 +2175,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 					if decision.Request != nil {
 						req = *decision.Request
 					}
-					allowed, reason, _ := a.consultPermissionModel(name, args, &req)
+					allowed, reason, _, consulted := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						if a.permissions != nil {
@@ -2197,8 +2197,16 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 						}
 						return a.executeToolCall(name, args, b, toolCallID)
 					}
-					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
-					return fmt.Sprintf("denied: tool %q was denied by the LLM permission model. Reason: %s", name, reason), nil
+					if consulted {
+						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						return fmt.Sprintf("denied: tool %q was denied by the LLM permission model. Reason: %s", name, reason), nil
+					}
+					// The judge never rendered a verdict (model unavailable /
+					// transport failure). Report the policy denial that was
+					// already in force rather than attributing it to an LLM
+					// that never ran — the call stays denied either way, but
+					// the reason must not be a fabricated safety judgment.
+					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_unavailable tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 				}
 			}
 			return fmt.Sprintf("denied: tool %q is not permitted by permission rules. This call is blocked by policy — do not retry the same call; choose a different approach or ask the user.", name), nil
@@ -2217,19 +2225,27 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 					// Consult the LLM permission model (interpreter executions
 					// take the structured effect-verification path; everything
 					// else the plain ALLOW/DENY path).
-					allowed, reason, summary := a.consultPermissionModel(name, args, &req)
+					allowed, reason, summary, consulted := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						return a.executeToolCall(name, args, b, toolCallID)
 					}
-					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
-					// LLM denied — fall through to human ask.
+					// LLM denied, or was never reachable — either way fall
+					// through to human ask. The two are carried in separate
+					// fields so the prompt only shows the auto-denied banner
+					// when a judge actually decided.
 					if decision.Request == nil && name == "bash" {
 						// Reuse the bash builder so the deny dialog shows the
 						// command/prefix, not a thinner args-only summary.
 						req = *bashPermissionRequest(args, bashCommand(args), "")
 					}
-					req.DenyReason = reason
+					if consulted {
+						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						req.DenyReason = reason
+					} else {
+						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_unavailable tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						req.ModelUnavailable = reason
+					}
 					req.Summary = summary
 					decision.Request = &req
 				}
@@ -2341,7 +2357,12 @@ func permissionRequestSummary(req *PermissionRequest) string {
 // structured effect-verification path; every other tool/command uses the plain
 // ALLOW/DENY path. Remote runners (npx, bunx) can't have their source analyzed,
 // so they skip the interpreter path and fall through to the plain path.
-func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *PermissionRequest) (bool, string, string) {
+//
+// The trailing consulted flag reports whether the model actually rendered a
+// verdict. When it is false the request never reached a judge (no model
+// configured, local server not healthy, transport failure) and the reason
+// describes that failure — callers must not present it as a denial.
+func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *PermissionRequest) (allowed bool, reason string, summary string, consulted bool) {
 	if name == "bash" {
 		var p struct {
 			Command string `json:"command"`
@@ -2352,22 +2373,25 @@ func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *P
 			}
 		}
 	}
-	allowed, reason := a.askPermissionModel(name, args, req)
-	return allowed, reason, ""
+	allowed, reason, consulted = a.askPermissionModel(name, args, req)
+	return allowed, reason, "", consulted
 }
 
 // askPermissionModel sends a permission request to the configured LLM model
-// and returns (allowed bool, reason string). The model can only approve or
-// ask (deny falls through to human). Returns (true, "") on approval,
-// (false, reason) on denial/ask, and (false, error) on LLM failure.
+// and returns (allowed, reason, consulted). The model can only approve or
+// ask (deny falls through to human). Returns (true, "", true) on approval,
+// (false, reason, true) on denial/ask, and (false, reason, false) when no
+// verdict was obtained at all — no model configured, the local server never
+// came up, or the request never completed. Callers must keep those apart:
+// only consulted==true reflects an actual judgment about the command.
 //
 // The LLM is given a read_file tool so it can explore the codebase before
 // deciding. The tool call loop is capped at maxToolCalls to prevent abuse.
-func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *PermissionRequest) (bool, string) {
+func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *PermissionRequest) (bool, string, bool) {
 	modelName := a.autoPermissionModelName()
 	modelLabel := a.autoPermissionModelDisplayName()
 	if modelName == "unavailable" {
-		return false, "no permission model configured"
+		return false, "no permission model configured", false
 	}
 
 	// A "local/"-managed auto-permission model can be dead (crashed after
@@ -2379,13 +2403,13 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 	// attempt is safe — it just waits on the same health-poll).
 	if err := EnsureLocalModelRunning(a, modelName); err != nil {
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=local_model_start_failed err=%v", toolName, modelLabel, err))
-		return false, "local model unavailable: " + err.Error()
+		return false, "local model unavailable: " + err.Error(), false
 	}
 
 	client := newClientFn(a.config, modelName)
 	if client == nil {
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=client_creation_failed", toolName, modelLabel))
-		return false, "could not create LLM client"
+		return false, "could not create LLM client", false
 	}
 	pinDeterministicSampling(client)
 
@@ -2489,7 +2513,7 @@ These are format examples only — decide from THIS request's tool and arguments
 	}
 	finalText, gotFinal, failReason := runPermissionModelLoop(a.StopCh(), client, messages, tools, modelLabel, toolName, a.RecordSideUsageFromMessage, roots)
 	if !gotFinal {
-		return false, failReason
+		return false, failReason, false
 	}
 
 	decided, allow, reason := parsePermissionVerdict(finalText)
@@ -2514,7 +2538,7 @@ These are format examples only — decide from THIS request's tool and arguments
 			// Surface the transport error so the user knows the retry failed
 			// rather than just seeing "ambiguous LLM response".
 			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_reprompt_error tool=%s err=%s", toolName, retryErr))
-			return false, fmt.Sprintf("permission judge retry failed: %s", retryErr)
+			return false, fmt.Sprintf("permission judge retry failed: %s", retryErr), false
 		}
 	}
 	if decided {
@@ -2523,14 +2547,14 @@ These are format examples only — decide from THIS request's tool and arguments
 		if allow {
 			if ok, vreason := a.verifyAutoGrant(toolName, args, req); !ok {
 				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_guardrail_reject tool=%s reason=%s", toolName, vreason))
-				return false, vreason
+				return false, vreason, true
 			}
 		}
-		return allow, reason
+		return allow, reason, true
 	}
 
 	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_ambiguous tool=%s response=%s", toolName, truncateDebugArgs([]byte(finalText), 100)))
-	return false, "ambiguous LLM response: " + finalText
+	return false, "ambiguous LLM response: " + finalText, true
 }
 
 // pinDeterministicSampling forces greedy decoding on a freshly created

@@ -171,6 +171,10 @@ export interface SSEToolErrorEvent {
 export interface SSEPermissionEvent {
   tool: string;
   command?: string;
+  rule?: string;
+  summary?: string;
+  deny_reason?: string;
+  model_unavailable?: string;
   request_id: string;
 }
 

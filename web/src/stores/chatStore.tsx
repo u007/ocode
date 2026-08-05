@@ -4,6 +4,10 @@ import type { Message, LivePart, TUIStatus, QuestionPrompt } from "../api/types"
 export interface PermissionRequest {
   tool: string;
   command?: string;
+  rule?: string;
+  summary?: string;
+  deny_reason?: string;
+  model_unavailable?: string;
   request_id: string;
 }
 

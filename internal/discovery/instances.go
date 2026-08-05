@@ -75,6 +75,19 @@ type chatInstance struct {
 	processID string // tool.Process.ID, empty when stopped
 }
 
+// markInstanceState records state for modelID's in-process instance record.
+// The record may legitimately be gone: StopModelInstance deletes it under
+// instMu without holding the per-model start lock, so a stop racing a start
+// that is still unwinding leaves nothing to update. That is not an error —
+// but indexing the map blindly would panic on the nil *chatInstance.
+func markInstanceState(modelID string, state InstanceState) {
+	instMu.Lock()
+	defer instMu.Unlock()
+	if inst, ok := instances[modelID]; ok {
+		inst.info.State = state
+	}
+}
+
 var (
 	instMu    sync.Mutex
 	instances = map[string]*chatInstance{}
@@ -240,15 +253,24 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 	// spawns; everyone else adopts by waiting on the same health poll below.
 	acquired, release, lockErr := acquireChatStartLock(cacheDir, modelID)
 	if lockErr != nil {
-		instMu.Lock()
-		instances[modelID].info.State = InstanceStopped
-		instMu.Unlock()
+		markInstanceState(modelID, InstanceStopped)
 		return lockErr
 	}
 	if !acquired {
 		return waitForChatHealth(modelID, base, man)
 	}
 	defer release()
+
+	// Holding the start lock means no other ocode process is legitimately
+	// spawning this model right now, so a port that is bound but failed the
+	// probe above belongs to an orphan from a dead ocode process. Reclaim it
+	// here: the spawn below cannot bind an occupied port, and without this the
+	// call would spawn nothing, poll a wedged server for 15 minutes, and fail.
+	if _, reapErr := reapStrayChatServer(modelID, port, man); reapErr != nil {
+		markInstanceState(modelID, InstanceStopped)
+		chatBreakerRecordFailure(modelID)
+		return reapErr
+	}
 
 	var err error
 	switch man.Backend {
@@ -270,9 +292,7 @@ func StartModelInstance(spawn func(cmdline string) error, modelID string, port i
 			instMu.Unlock()
 			return nil
 		}
-		instMu.Lock()
-		instances[modelID].info.State = InstanceStopped
-		instMu.Unlock()
+		markInstanceState(modelID, InstanceStopped)
 		return err
 	}
 
@@ -310,24 +330,22 @@ func waitForChatHealth(modelID, base string, man ServerManifest) error {
 	for i := 0; i < attempts; i++ {
 		if healthy, served := probeLocalServerModel(base, man.HealthPath, expect); healthy {
 			if !modelMatches(served, expect) {
-				instMu.Lock()
-				instances[modelID].info.State = InstanceStopped
-				instMu.Unlock()
+				markInstanceState(modelID, InstanceStopped)
 				chatBreakerRecordFailure(modelID)
 				return fmt.Errorf("spawned chat server on %s serves %v, not %s", base, served, modelID)
 			}
 			instMu.Lock()
-			instances[modelID].info.State = InstanceReady
-			instances[modelID].info.BaseURL = base
+			if inst, ok := instances[modelID]; ok {
+				inst.info.State = InstanceReady
+				inst.info.BaseURL = base
+			}
 			instMu.Unlock()
 			chatBreakerReset(modelID)
 			return nil
 		}
 		time.Sleep(time.Second)
 	}
-	instMu.Lock()
-	instances[modelID].info.State = InstanceStopped
-	instMu.Unlock()
+	markInstanceState(modelID, InstanceStopped)
 	chatBreakerRecordFailure(modelID)
 	return fmt.Errorf("local chat server for %q did not become healthy on %s", modelID, base)
 }
@@ -360,6 +378,16 @@ func acquireChatStartLock(cacheDir, modelID string) (acquired bool, release func
 	for attempt := 0; attempt < 2; attempt++ {
 		f, openErr := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 		if openErr == nil {
+			// Record the owner so a contender can tell "another ocode is
+			// genuinely mid-spawn" from "the holder died without releasing".
+			// Without this, a lock orphaned by a SIGKILLed process blocks
+			// every contender behind the 50-minute mtime staleness rule —
+			// including the stray-server reap below it, which is precisely
+			// what a dead holder leaves behind. A write failure is not fatal:
+			// the lock still works, it just falls back to mtime staleness.
+			if _, writeErr := fmt.Fprintf(f, "%d", os.Getpid()); writeErr != nil {
+				emitDiscoveryDebugAt("DISCOVERY", fmt.Sprintf("could not record owner pid in chat start lock %s: %v", lockPath, writeErr), false)
+			}
 			f.Close()
 			released := false
 			return true, func() {
@@ -374,6 +402,10 @@ func acquireChatStartLock(cacheDir, modelID string) (acquired bool, release func
 			return false, nil, fmt.Errorf("create chat start lock %s: %w", lockPath, openErr)
 		}
 		if attempt == 0 {
+			if chatStartLockOwnerDead(lockPath) {
+				os.Remove(lockPath) // holder is gone — reclaim and retry
+				continue
+			}
 			if info, statErr := os.Stat(lockPath); statErr == nil && time.Since(info.ModTime()) > chatStartLockStaleAfter {
 				os.Remove(lockPath) // abandoned lock from a crashed holder — reclaim and retry
 				continue

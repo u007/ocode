@@ -12,6 +12,10 @@ interface Props {
   open: boolean;
   tool: string;
   command?: string;
+  rule?: string;
+  summary?: string;
+  denyReason?: string;
+  modelUnavailable?: string;
   requestId: string;
   onApprove: (requestId: string, approved: boolean) => Promise<boolean>;
 }
@@ -20,6 +24,10 @@ export default function PermissionDialog({
   open,
   tool,
   command,
+  rule,
+  summary,
+  denyReason,
+  modelUnavailable,
   requestId,
   onApprove,
 }: Props) {
@@ -58,6 +66,33 @@ export default function PermissionDialog({
         </DialogHeader>
 
         <div className="space-y-4">
+          {denyReason && (
+            <div className="rounded-lg border border-red-900/60 bg-red-950/30 p-3 text-sm text-red-200">
+              <div className="font-medium">Auto-denied by LLM permission model:</div>
+              <div className="mt-1">{denyReason}</div>
+            </div>
+          )}
+
+          {modelUnavailable && (
+            <div className="rounded-lg border border-yellow-900/60 bg-yellow-950/30 p-3 text-sm text-yellow-200">
+              <div className="font-medium">Permission model unavailable — asking you instead:</div>
+              <div className="mt-1">{modelUnavailable}</div>
+            </div>
+          )}
+
+          {summary && (
+            <div className="rounded-lg border border-zinc-700 bg-zinc-800/60 p-3 text-sm text-zinc-300">
+              <div className="font-medium text-zinc-200">Model summary:</div>
+              <div className="mt-1">{summary}</div>
+            </div>
+          )}
+
+          {rule && (
+            <div className="text-xs text-zinc-500">
+              Permission rule: <span className="font-mono">{rule}</span>
+            </div>
+          )}
+
           <div className="flex items-center gap-3 p-3 rounded-lg bg-zinc-800 border border-zinc-700">
             {(() => {
               const Icon = toolIcon;

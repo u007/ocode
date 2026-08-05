@@ -24,6 +24,9 @@ type PermissionEvent struct {
 	Rule       string `json:"rule,omitempty"`
 	Summary    string `json:"summary,omitempty"`
 	DenyReason string `json:"deny_reason,omitempty"`
+	// ModelUnavailable mirrors PermissionRequest.ModelUnavailable: the judge
+	// never ran, so the browser must not render this as a denial.
+	ModelUnavailable string `json:"model_unavailable,omitempty"`
 }
 
 // newPermissionEvent projects a parsed PermissionRequest onto the SSE frame the
@@ -41,6 +44,8 @@ func newPermissionEvent(requestID string, req agent.PermissionRequest) Permissio
 		Rule:       req.Rule,
 		Summary:    req.Summary,
 		DenyReason: req.DenyReason,
+
+		ModelUnavailable: req.ModelUnavailable,
 	}
 }
 

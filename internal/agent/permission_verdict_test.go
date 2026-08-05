@@ -234,7 +234,7 @@ func TestAskPermissionModelRepromptRecovery(t *testing.T) {
 			"This looks safe to me and I would approve the call.", // no parseable verdict
 			"ALLOW: safe mock tool call",                          // strict retry answer
 		})
-		allowed, reason := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
+		allowed, reason, _ := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
 		if !allowed {
 			t.Fatalf("expected retry to recover ALLOW, got denied: %q", reason)
 		}
@@ -248,7 +248,7 @@ func TestAskPermissionModelRepromptRecovery(t *testing.T) {
 			"This looks safe to me and I would approve the call.",
 			"I really do think this should be approved.", // still no verdict
 		})
-		allowed, reason := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
+		allowed, reason, _ := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
 		if allowed {
 			t.Fatal("ambiguous retry must not auto-allow")
 		}
@@ -262,12 +262,56 @@ func TestAskPermissionModelRepromptRecovery(t *testing.T) {
 
 	t.Run("clean verdict skips retry", func(t *testing.T) {
 		a, client := newAgentWithScript([]string{"ALLOW: fine"})
-		allowed, _ := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
+		allowed, _, _ := a.askPermissionModel("mock_tool", json.RawMessage(`{}`), nil)
 		if !allowed {
 			t.Fatal("expected allow")
 		}
 		if client.CallCount != 1 {
 			t.Fatalf("expected single model call, got %d", client.CallCount)
+		}
+	})
+}
+
+// TestConsultPermissionModelReportsUnconsulted covers the infrastructure-failure
+// paths: when no verdict is obtained the consulted flag must be false so callers
+// present the request as an ordinary human ask, not as an LLM denial.
+func TestConsultPermissionModelReportsUnconsulted(t *testing.T) {
+	t.Run("client creation fails", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
+		a := NewAgent(nil, nil, cfg, nil)
+		prevClientFn := newClientFn
+		t.Cleanup(func() { newClientFn = prevClientFn })
+		newClientFn = func(_ *config.Config, _ string) LLMClient { return nil }
+
+		allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"ps -p 1"}`), nil)
+		if allowed {
+			t.Fatal("failed client must not allow")
+		}
+		if consulted {
+			t.Fatalf("expected consulted=false when the client cannot be built, reason=%q", reason)
+		}
+	})
+
+	t.Run("real verdict is consulted", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
+		a := NewAgent(nil, nil, cfg, nil)
+		prevClientFn := newClientFn
+		t.Cleanup(func() { newClientFn = prevClientFn })
+		newClientFn = func(_ *config.Config, _ string) LLMClient {
+			return &scriptedCaptureClient{Responses: []string{"DENY: touches files outside the workspace"}}
+		}
+
+		allowed, reason, _, consulted := a.consultPermissionModel("bash", json.RawMessage(`{"command":"ps -p 1"}`), nil)
+		if allowed {
+			t.Fatal("DENY verdict must not allow")
+		}
+		if !consulted {
+			t.Fatal("a real DENY verdict must report consulted=true")
+		}
+		if !strings.Contains(reason, "outside the workspace") {
+			t.Fatalf("expected the model's reason, got %q", reason)
 		}
 	})
 }

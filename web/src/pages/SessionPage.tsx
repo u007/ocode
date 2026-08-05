@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, connectSessionMirror } from "../api/client";
 import { useChatState, useChatDispatch } from "../stores/chatStore";
-import type { Message, TUIStatus } from "../api/types";
+import type { Message, SSEPermissionEvent, TUIStatus } from "../api/types";
 import ChatPanel from "../components/Chat/ChatPanel";
 import AgentPreview from "../components/Chat/AgentPreview";
 import ChatInput from "../components/Chat/ChatInput";
@@ -231,10 +231,10 @@ export default function SessionPage() {
           break;
         case "permission": {
           // Agent paused on a PERMISSION_ASK. Show the approve/deny dialog.
-          const p = data as { request_id: string; tool: string; command?: string };
+          const p = data as SSEPermissionEvent;
           dispatch({
             type: "PERMISSION_REQUEST",
-            permission: { request_id: p.request_id, tool: p.tool, command: p.command },
+            permission: p,
           });
           break;
         }
@@ -459,6 +459,10 @@ export default function SessionPage() {
           open={true}
           tool={pendingPermission.tool}
           command={pendingPermission.command}
+          rule={pendingPermission.rule}
+          summary={pendingPermission.summary}
+          denyReason={pendingPermission.deny_reason}
+          modelUnavailable={pendingPermission.model_unavailable}
           requestId={pendingPermission.request_id}
           onApprove={resolvePermission}
         />

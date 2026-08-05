@@ -59,6 +59,28 @@ func chdirTempForConfigTest(t *testing.T) {
 	})
 }
 
+func TestNewRCPermissionEventPropagatesDecisionMetadata(t *testing.T) {
+	req := agent.PermissionRequest{
+		ToolName:         "bash",
+		Args:             json.RawMessage(`{"command":"rm -rf build"}`),
+		Rule:             "bash.prefix.rm",
+		Summary:          "removes generated files",
+		DenyReason:       "destructive command",
+		ModelUnavailable: "local permission model is unavailable",
+	}
+
+	ev := newRCPermissionEvent("call-1", req)
+	if ev.RequestID != "call-1" || ev.Tool != req.ToolName {
+		t.Fatalf("event identity mismatch: %+v", ev)
+	}
+	if ev.Command != string(req.Args) {
+		t.Fatalf("command fallback lost raw args: got %q", ev.Command)
+	}
+	if ev.Rule != req.Rule || ev.Summary != req.Summary || ev.DenyReason != req.DenyReason || ev.ModelUnavailable != req.ModelUnavailable {
+		t.Fatalf("permission metadata was not propagated: %+v", ev)
+	}
+}
+
 type retryTestClient struct{}
 
 func (retryTestClient) Chat([]agent.Message, []map[string]interface{}) (*agent.Message, error) {
@@ -1150,7 +1172,7 @@ func TestRenderPermissionRequestBodyIncludesModelSummary(t *testing.T) {
 		Scope:      agent.PermissionScopeBashPrefix,
 		Rule:       "bash.prefix.bash.interpreter.javascript",
 		Summary:    "reads the script file and reports whether it can typecheck cleanly",
-		DenyReason: "source unavailable for analysis",
+		DenyReason: "writes outside the allowed roots",
 	}
 
 	got := renderPermissionRequestBody(req)
@@ -1164,8 +1186,55 @@ func TestRenderPermissionRequestBodyIncludesModelSummary(t *testing.T) {
 	if !strings.Contains(got, "⛔ Auto-denied by LLM permission model:") {
 		t.Fatalf("expected auto-denied label, got %q", got)
 	}
-	if !strings.Contains(got, "source unavailable for analysis") {
+	if !strings.Contains(got, "writes outside the allowed roots") {
 		t.Fatalf("expected deny reason text, got %q", got)
+	}
+}
+
+// A permission model that never rendered a verdict (local server down,
+// transport failure) must not be presented as a denial: no ⛔ banner, and the
+// prompt asks the ordinary "Allow this action?" question.
+func TestRenderPermissionModelUnavailableIsNotShownAsDenial(t *testing.T) {
+	req := agent.PermissionRequest{
+		ToolName:         "bash",
+		Command:          "ps -p 80891",
+		Prefix:           "ps",
+		Scope:            agent.PermissionScopeBashPrefix,
+		Rule:             "bash.prefix.ps",
+		ModelUnavailable: `local model unavailable: local chat server for "local/bonsai-8b-1bit" did not become healthy on http://localhost:11458`,
+	}
+
+	body := renderPermissionRequestBody(req)
+	if strings.Contains(body, "Auto-denied") {
+		t.Fatalf("unavailable model must not render an auto-denied banner, got %q", body)
+	}
+	if !strings.Contains(body, "ℹ Permission model unavailable — asking you instead:") {
+		t.Fatalf("expected unavailable notice, got %q", body)
+	}
+	if !strings.Contains(body, "did not become healthy") {
+		t.Fatalf("expected unavailable detail text, got %q", body)
+	}
+
+	prompt := renderPermissionPrompt(req)
+	if !strings.Contains(prompt, "Allow this action?") {
+		t.Fatalf("expected the ordinary allow prompt, got %q", prompt)
+	}
+	if strings.Contains(prompt, "Auto-denied — allow anyway?") {
+		t.Fatalf("unavailable model must not use the auto-denied prompt, got %q", prompt)
+	}
+
+	// The agent reaches the TUI through the PERMISSION_ASK: sentinel, so the
+	// notice is only visible if the field survives that round-trip.
+	payload, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal permission request: %v", err)
+	}
+	decoded, ok := parsePermissionRequest(tool.SentinelPermissionAsk + string(payload))
+	if !ok {
+		t.Fatal("expected the sentinel payload to parse")
+	}
+	if decoded.ModelUnavailable != req.ModelUnavailable {
+		t.Fatalf("ModelUnavailable lost in the sentinel round-trip: got %q", decoded.ModelUnavailable)
 	}
 }
 

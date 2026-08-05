@@ -49,6 +49,12 @@ type PermissionRequest struct {
 	Scope      PermissionScope `json:"scope"`
 	Rule       string          `json:"rule"`
 	DenyReason string          `json:"deny_reason,omitempty"`
+	// ModelUnavailable is set instead of DenyReason when the auto-permission
+	// model was never actually consulted (none configured, local server not
+	// healthy, client/transport failure). The human prompt surfaces it as a
+	// neutral notice: presenting an infrastructure failure as a safety verdict
+	// tells the user their command was judged dangerous when nothing judged it.
+	ModelUnavailable string `json:"model_unavailable,omitempty"`
 	// Summary carries a short model-generated explanation for the request that
 	// the human permission prompt can surface alongside any deny reason. It is
 	// optional and only populated when the auto-permission flow has one.
