@@ -27,6 +27,7 @@ interface ChatState {
   sessionId: string | null;
   model: string | null;
   smallModel: string | null;
+  smallModelEnabled: boolean;
   advisorModel: string | null;
   advisorEnabled: boolean;
   ocrModel: string | null;
@@ -60,6 +61,7 @@ type ChatAction =
   | { type: "SET_SESSION"; sessionId: string }
   | { type: "SET_MODEL"; model: string }
   | { type: "SET_SMALL_MODEL"; model: string }
+  | { type: "SET_SMALL_MODEL_ENABLED"; enabled: boolean }
   | { type: "SET_ADVISOR_MODEL"; model: string }
   | { type: "SET_ADVISOR_ENABLED"; enabled: boolean }
   | { type: "SET_OCR_MODEL"; model: string }
@@ -91,6 +93,7 @@ const initialState: ChatState = {
   sessionId: null,
   model: null,
   smallModel: null,
+  smallModelEnabled: false,
   advisorModel: null,
   advisorEnabled: true,
   ocrModel: null,
@@ -124,6 +127,8 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
       return { ...state, model: action.model };
     case "SET_SMALL_MODEL":
       return { ...state, smallModel: action.model };
+    case "SET_SMALL_MODEL_ENABLED":
+      return { ...state, smallModelEnabled: action.enabled };
     case "SET_ADVISOR_MODEL":
       return { ...state, advisorModel: action.model };
     case "SET_ADVISOR_ENABLED":
@@ -191,11 +196,13 @@ function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case "RESET":
       // Preserve the advisor on/off toggle across new sessions — the server
       // keeps it for the handler's lifetime, so the status must not snap back.
-      // The TUI status snapshot is also preserved so the bar doesn't blank out
-      // during a /new; the next "status" SSE event will overwrite it anyway.
+      // Same for the small-model gate (persisted to config). The TUI status
+      // snapshot is also preserved so the bar doesn't blank out during a /new;
+      // the next "status" SSE event will overwrite it anyway.
       return {
         ...initialState,
         advisorEnabled: state.advisorEnabled,
+        smallModelEnabled: state.smallModelEnabled,
         tuiStatus: state.tuiStatus,
         spendingUSD: state.spendingUSD,
         tuiStatusReady: state.tuiStatusReady,

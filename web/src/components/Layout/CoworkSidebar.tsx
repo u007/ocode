@@ -81,6 +81,7 @@ export default function CoworkSidebar({
   const {
     model,
     smallModel,
+    smallModelEnabled,
     advisorModel,
     advisorEnabled,
     ocrModel,
@@ -197,6 +198,19 @@ export default function CoworkSidebar({
       console.error("failed to toggle advisor", err);
       // Roll back optimistic update on failure so the UI stays truthful.
       dispatch({ type: "SET_ADVISOR_ENABLED", enabled: advisorEnabled });
+    });
+  };
+
+  // Toggle the small-model runtime gate on/off. Persisted to config (like the
+  // TUI's small-model sidebar toggle), so this is NOT session-only like the
+  // advisor toggle.
+  const toggleSmallModel = () => {
+    const next = !smallModelEnabled;
+    dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: next });
+    api.setSmallModelEnabled(next).catch((err) => {
+      console.error("failed to toggle small model", err);
+      // Roll back optimistic update on failure so the UI stays truthful.
+      dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: smallModelEnabled });
     });
   };
 
@@ -369,6 +383,34 @@ export default function CoworkSidebar({
                 <div className="text-zinc-300 font-mono truncate">
                   {smallModel || config.smallModel || "Not set"}
                 </div>
+              </button>
+              {/* Small model runtime on/off — persisted to config, mirrors the
+                  TUI's small-model sidebar toggle. */}
+              <button
+                type="button"
+                onClick={toggleSmallModel}
+                className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800"
+                title="Enable or disable the small model (persisted to config)"
+              >
+                <span className="text-zinc-500">Small Model</span>
+                <span className="flex items-center gap-2">
+                  <span
+                    className={`font-mono ${smallModelEnabled ? "text-emerald-400" : "text-zinc-500"}`}
+                  >
+                    {smallModelEnabled ? "on" : "off"}
+                  </span>
+                  <span
+                    className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
+                      smallModelEnabled ? "bg-emerald-500/80" : "bg-zinc-600"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                        smallModelEnabled ? "translate-x-3.5" : "translate-x-0.5"
+                      }`}
+                    />
+                  </span>
+                </span>
               </button>
               <button
                 type="button"

@@ -42,6 +42,10 @@ func (h *Handler) HandleSetModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Push a fresh status snapshot so connected web clients (status bar,
+	// sidebar) reflect the new model immediately instead of showing the
+	// mount-time/last-TUI value until the next turn.
+	h.pushStatusSnapshot()
 	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
 }
 
@@ -72,11 +76,22 @@ func (h *Handler) HandleGetSmallModel(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleSetSmallModel sets the small model and/or flips the runtime on/off
+// gate. Both fields are persisted to config (mirroring the TUI's small-model
+// sidebar toggle, which calls config.SaveSmallModelEnabled). Either field may
+// be provided on its own: {"model": "..."} (or "auto" to clear) sets the model
+// without touching the gate; {"enabled": bool} toggles the gate without
+// changing the model.
 func (h *Handler) HandleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Model string `json:"model"`
+		Model   string `json:"model"`
+		Enabled *bool  `json:"enabled"`
 	}
-	if err := readBodyJSON(r, &req); err != nil || req.Model == "" {
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.Model == "" && req.Enabled == nil {
 		writeError(w, http.StatusBadRequest, `model is required (use "auto" to clear)`)
 		return
 	}
@@ -89,24 +104,48 @@ func (h *Handler) HandleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Model == "auto" {
-		h.cfg.Ocode.SmallModel = ""
-		resolved := agent.ResolveSmallModel(h.cfg)
-		if err := config.SaveSmallModel(resolved); err != nil {
+	if req.Enabled != nil {
+		h.cfg.Ocode.SmallModelEnabled = *req.Enabled
+		if err := config.SaveSmallModelEnabled(*req.Enabled); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		h.cfg.Ocode.SmallModel = resolved
-		writeJSON(w, http.StatusOK, map[string]string{"model": resolved, "source": "auto"})
-		return
 	}
 
-	if err := config.SaveSmallModel(req.Model); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	if req.Model != "" {
+		if req.Model == "auto" {
+			h.cfg.Ocode.SmallModel = ""
+			resolved := agent.ResolveSmallModel(h.cfg)
+			if err := config.SaveSmallModel(resolved); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			h.cfg.Ocode.SmallModel = resolved
+			h.pushStatusSnapshot()
+			writeJSON(w, http.StatusOK, map[string]any{
+				"model":   resolved,
+				"enabled": h.cfg.Ocode.SmallModelEnabled,
+				"source":  "auto",
+			})
+			return
+		}
+
+		if err := config.SaveSmallModel(req.Model); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		h.cfg.Ocode.SmallModel = req.Model
 	}
-	h.cfg.Ocode.SmallModel = req.Model
-	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model, "source": "manual"})
+
+	// Push a fresh status snapshot so the web's status bar / sidebar reflect
+	// the new small model + gate immediately (headless: SSE broadcast; RC
+	// bridge: merged into the TUI's snapshot).
+	h.pushStatusSnapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model":   h.cfg.Ocode.SmallModel,
+		"enabled": h.cfg.Ocode.SmallModelEnabled,
+		"source":  "manual",
+	})
 }
 
 func (h *Handler) HandleGetAdvisor(w http.ResponseWriter, r *http.Request) {
@@ -140,6 +179,7 @@ func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.cfg.Ocode.Advisor.Model = req.Model
+	h.pushStatusSnapshot()
 	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
 }
 

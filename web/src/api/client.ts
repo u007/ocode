@@ -118,6 +118,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  // Flip the runtime small-model on/off gate (persisted, mirrors the TUI's
+  // small-model sidebar toggle).
+  setSmallModelEnabled: (enabled: boolean) =>
+    fetchJSON<{ model: string; enabled: boolean; source: string }>("/api/config/small-model", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
   getGitDiff: (path?: string) =>
     fetchJSON<GitDiffFile[]>(
       `/api/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,

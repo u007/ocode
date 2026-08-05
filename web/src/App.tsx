@@ -139,7 +139,10 @@ function HomeApp() {
       .catch(console.error);
     api
       .getSmallModelWithEnabled()
-      .then((res) => dispatch({ type: "SET_SMALL_MODEL", model: res.model || "" }))
+      .then((res) => {
+        dispatch({ type: "SET_SMALL_MODEL", model: res.model || "" });
+        dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: res.enabled });
+      })
       .catch(console.error);
     api
       .getAdvisor()

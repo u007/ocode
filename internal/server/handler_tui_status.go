@@ -18,7 +18,14 @@ func (h *Handler) HandleGetTUIStatus(w http.ResponseWriter, r *http.Request, rc 
 		writeJSON(w, http.StatusOK, rc.TUIStatus())
 		return
 	}
-	// Headless fallback — populate the fields that don't need a live session.
+	writeJSON(w, http.StatusOK, h.buildStatusSnapshot())
+}
+
+// buildStatusSnapshot assembles a TUIStatus snapshot from the server's own
+// config — used for the headless (no TUI attached) fallback and to push fresh
+// state to the web after web-initiated config changes (model selection,
+// small-model toggle, etc.).
+func (h *Handler) buildStatusSnapshot() TUIStatus {
 	snap := TUIStatus{
 		AdvisorEnabled: h.advisorEnabled,
 		OcrBackend:     "openai-compat",
@@ -45,7 +52,30 @@ func (h *Handler) HandleGetTUIStatus(w http.ResponseWriter, r *http.Request, rc 
 	if cwd, err := os.Getwd(); err == nil {
 		snap.CWD = cwd
 	}
-	writeJSON(w, http.StatusOK, snap)
+	return snap
+}
+
+// pushStatusSnapshot broadcasts a fresh status snapshot to connected web
+// clients after a web-initiated config change. In headless mode it goes to the
+// local SSE bus (the same "status" event the TUI pushes through the RC
+// bridge). When an RC bridge is attached, it merges the config-derived model
+// fields into the TUI's latest snapshot — preserving TUI-owned fields (session,
+// cwd, context, spending) — and sets it on the bridge status store, which also
+// fires the "status" SSE event. Without this, the web's status bar would keep
+// showing the mount-time (or last TUI-broadcast) model until the next turn.
+func (h *Handler) pushStatusSnapshot() {
+	snap := h.buildStatusSnapshot()
+	if h.rc != nil {
+		cur := h.rc.TUIStatus()
+		cur.MainModel = snap.MainModel
+		cur.SmallModel = snap.SmallModel
+		cur.SmallModelOn = snap.SmallModelOn
+		cur.AdvisorModel = snap.AdvisorModel
+		cur.UpdatedAt = snap.UpdatedAt
+		h.rc.StatusStore().Set(cur, h.rc)
+		return
+	}
+	h.broadcastEvent(SSEEvent{Event: "status", Data: snap})
 }
 
 // HandleGetSpending returns the cumulative USD cost for today, sourced from the

@@ -29,6 +29,7 @@ export default function StatusBar({ onCoworkToggle, onModelClick, onStatusClick 
   const {
     model,
     smallModel,
+    smallModelEnabled,
     advisorModel,
     advisorEnabled,
     isStreaming,
@@ -40,12 +41,15 @@ export default function StatusBar({ onCoworkToggle, onModelClick, onStatusClick 
 
   // Pull every field from the consolidated snapshot when present; fall back to
   // the per-field store state for older TUI builds that don't push "status".
+  // The per-field store state is preferred for the main/small/advisor models:
+  // it is updated on web-initiated selection immediately, while the snapshot
+  // can lag (mount-time value in headless mode, last TUI broadcast otherwise).
   const snap = tuiStatus;
-  const mainModel = snap?.main_model || model || "";
-  const liveSmallModel = snap?.small_model || smallModel || "";
-  const liveAdvisorModel = snap?.advisor_model || advisorModel || "";
+  const mainModel = model || snap?.main_model || "";
+  const liveSmallModel = smallModel || snap?.small_model || "";
+  const liveAdvisorModel = advisorModel || snap?.advisor_model || "";
   const liveAdvisorEnabled = snap?.advisor_enabled ?? advisorEnabled;
-  const liveSmallOn = snap?.small_model_enabled ?? false;
+  const liveSmallOn = snap?.small_model_enabled ?? smallModelEnabled;
   const ideStatus = snap?.ide_status || "";
   const sessionTitle = snap?.session_title || "";
   const sessionId = snap?.session_id || "";
