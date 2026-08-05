@@ -99,6 +99,16 @@ brainstorm → design spec → implementation plan cycle (see
 - Likely a small bug-fix task (wire `/search` to open/focus the existing
   `ChatSearchBar`) rather than a full spec.
 
+## 11. Per-session web streaming state — deferred
+
+- The current streaming fix intentionally keeps one visible-session
+  `ChatState` and reloads background tabs from durable session history when
+  activated.
+- A `Map<sessionID, ChatState>` would preserve live activity in background
+  tabs, but would require changing shared chat/status consumers. Treat it as a
+  separate brainstorm → design → implementation task if background-tab live
+  rendering becomes a requirement.
+
 ## Not gaps (web has, TUI doesn't — no action needed)
 
 - Assets/uploads panel (`web/src/components/Assets/AssetsPanel.tsx`)
