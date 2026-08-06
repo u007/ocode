@@ -7,6 +7,7 @@ import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
 import ChatPanel from "./components/Chat/ChatPanel";
 import AgentPreview from "./components/Chat/AgentPreview";
+import AgentsPanel from "./components/Agents/AgentsPanel";
 import ChatInput from "./components/Chat/ChatInput";
 import StatusBar from "./components/common/StatusBar";
 import StatusPanel from "./components/Status/StatusPanel";
@@ -96,6 +97,7 @@ function HomeApp() {
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const [cmdOpen, setCmdOpen] = useState(false);
+  const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const {
     editorTabs,
     activeTab,
@@ -112,6 +114,15 @@ function HomeApp() {
     saveError,
     saveEditorTab,
   } = useEditorTabs("chat");
+
+  useEffect(() => {
+    setSelectedAgentRunId(null);
+  }, [currentSessionId]);
+
+  const openAgentDetail = (runId: string) => {
+    setSelectedAgentRunId(runId);
+    setActiveTab("agents");
+  };
 
   // Mobile responsive
   const isMobile = useIsMobile();
@@ -305,7 +316,7 @@ function HomeApp() {
             {activeTab === "chat" && (
               <div className="flex flex-col h-full">
                 <ChatPanel />
-                <AgentPreview />
+                <AgentPreview onOpenDetail={openAgentDetail} />
                 <ChatInput
                   onSlashCommand={handleCommand}
                   activeEditorContext={activeEditorContext}
@@ -313,6 +324,13 @@ function HomeApp() {
                   onSessionCreated={handleSessionCreated}
                 />
               </div>
+            )}
+            {activeTab === "agents" && (
+              <AgentsPanel
+                session={currentSessionId ?? undefined}
+                selectedRunId={selectedAgentRunId}
+                onSelectRun={setSelectedAgentRunId}
+              />
             )}
             {activeTab === "files" && <FileTree onOpenFile={handleOpenFile} />}
             {activeTab === "changes" && <ChangesPanel session={currentSessionId ?? undefined} />}
