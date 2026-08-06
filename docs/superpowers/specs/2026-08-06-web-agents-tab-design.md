@@ -74,7 +74,11 @@ unchanged, so this ships to desktop automatically once merged in `web/`.
 
 ## Testing
 
-Extend web test suite (Vitest + Testing Library) to cover:
+`web/` has no test infrastructure today (no vitest, no test script, no
+`.test.tsx` files). This feature adds a minimal Vitest + React Testing
+Library setup (`vitest`, `@testing-library/react`, `@testing-library/jest-dom`,
+`jsdom` as devDependencies; `vitest.config.ts`; a `test` script in
+`package.json`) — the first test infra in the repo — scoped to covering:
 - Agents tab renders the run list for the active session.
 - Clicking a run opens its detail view, including nested sub-agent runs.
 - Back button returns to the list.
