@@ -3,10 +3,14 @@ import { useChatState } from "../../stores/chatStore";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
 import RunNode from "../Agents/RunNode";
 
+interface AgentPreviewProps {
+  onOpenDetail?: (runId: string) => void;
+}
+
 // AgentPreview is the live "agent preview" rail above the chat input: top-level
 // agent runs, each clickable to expand its messages and nested sub-agents
 // inline. Renders nothing when no runs are active.
-export default function AgentPreview() {
+export default function AgentPreview({ onOpenDetail }: AgentPreviewProps) {
   const { sessionId } = useChatState();
   const runs = useAgentRuns(sessionId);
 
@@ -33,7 +37,7 @@ export default function AgentPreview() {
       </div>
       <div className="space-y-0.5">
         {runs.map((run) => (
-          <RunNode key={run.id} run={run} depth={0} />
+          <RunNode key={run.id} run={run} depth={0} onOpenDetail={onOpenDetail} />
         ))}
       </div>
     </div>
