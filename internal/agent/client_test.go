@@ -354,6 +354,66 @@ func TestParseOpenAIChatCompletionsStream_MultiToolCall(t *testing.T) {
 	}
 }
 
+func TestParseOpenAIChatCompletionsStream_EmptyArgumentsNormalized(t *testing.T) {
+	// An empty-string arguments field is what OpenAI-compatible providers emit
+	// for a ZERO-PARAMETER tool (todoread and plan_exit both declare
+	// `properties: {}`); providers differ on whether they send "{}" or omit the
+	// field. It must normalize to "{}", not fail.
+	//
+	// This previously errored. That was wrong twice over: the error is not
+	// matched by isRetryableLLMClientError, so it ended the turn instead of
+	// being retried as its comment claimed, and it made every zero-parameter
+	// tool call provider-dependent. Empty-argument hazards are caught where
+	// they matter — exec.go rejects an empty bash command.
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-a","function":{"name":"todoread","arguments":""}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil, nil)
+	if err != nil {
+		t.Fatalf("empty arguments on a zero-parameter tool must not error: %v", err)
+	}
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(msg.ToolCalls))
+	}
+	if msg.ToolCalls[0].Function.Arguments != "{}" {
+		t.Fatalf("empty arguments not normalized to \"{}\": %q", msg.ToolCalls[0].Function.Arguments)
+	}
+}
+
+func TestParseOpenAIChatCompletionsStream_MalformedArgumentsErrors(t *testing.T) {
+	// Non-empty but unparseable arguments ARE fatal: executing them would run
+	// a tool call the model did not actually express.
+	stream := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call-a","function":{"name":"bash","arguments":"{\"cmd\": "}}]}}]}`,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	msg, _, err := parseOpenAIChatCompletionsStream(strings.NewReader(stream), nil, nil)
+	if err == nil {
+		t.Fatalf("expected error for malformed arguments, got msg with %d tool calls", len(msg.ToolCalls))
+	}
+	if !strings.Contains(err.Error(), "invalid tool call arguments") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestChatOpenAI_RoutesOpenCodeGoGPT56ToResponses(t *testing.T) {
+	// opencode-go/gpt-5.6-luna must be served via the OpenAI Responses API
+	// (responses-lite), not chat/completions, or its tool calls come back empty.
+	c := &GenericClient{Provider: "opencode-go", Model: "gpt-5.6-luna", APIKey: "k"}
+	url := c.openAIResponsesURL()
+	if !strings.HasSuffix(url, "/responses") {
+		t.Fatalf("expected responses URL for opencode-go gpt-5.6, got %q", url)
+	}
+	if !openAICodexResponsesLite(c.Model) {
+		t.Fatalf("gpt-5.6-luna should be detected as responses-lite")
+	}
+}
+
 func TestParseOpenAIChatCompletionsStream_InlineThinkTags(t *testing.T) {
 	stream := strings.Join([]string{
 		`data: {"choices":[{"delta":{"content":"A<think>B</think>C"}}]}`,

@@ -180,6 +180,7 @@ func parseAgentContent(content, source string) (*AgentDefinition, []LoadDiagnost
 
 	model := strings.TrimSpace(fm.fields["model"])
 	color := strings.TrimSpace(fm.fields["color"])
+	expectedOutput := strings.TrimSpace(fm.fields["expected_output"])
 	temperature := parseOptionalFloat(fm.fields["temperature"])
 	topP := parseOptionalFloat(fm.fields["top_p"])
 	// Surface invalid numeric values as warnings rather than silently dropping.
@@ -202,18 +203,19 @@ func parseAgentContent(content, source string) (*AgentDefinition, []LoadDiagnost
 	}
 
 	def := &AgentDefinition{
-		Name:         name,
-		Description:  desc,
-		SystemPrompt: body,
-		Mode:         mode,
-		Hidden:       hidden,
-		Permissions:  fm.permissions,
-		Source:       source,
-		MaxSteps:     maxSteps,
-		Model:        model,
-		Color:        color,
-		Temperature:  temperature,
-		TopP:         topP,
+		Name:           name,
+		Description:    desc,
+		SystemPrompt:   body,
+		Mode:           mode,
+		Hidden:         hidden,
+		Permissions:    fm.permissions,
+		Source:         source,
+		MaxSteps:       maxSteps,
+		Model:          model,
+		Color:          color,
+		ExpectedOutput: expectedOutput,
+		Temperature:    temperature,
+		TopP:           topP,
 	}
 
 	return def, diags

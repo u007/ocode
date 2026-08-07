@@ -843,6 +843,11 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// very tail so the cached prefix is unchanged. The injector is a no-op when
 	// discovery is off — bytes identical to today.
 	messages = a.injectDiscoveryContext(messages)
+	// Re-anchor the todo plan into the user-role volatile tail so a long run
+	// (or post-compaction turn) keeps the model's own plan in scope. The block
+	// is user-role, not system-role, because every system-role message rides
+	// the cached system block — see AGENTS.md "## Persistent todo plan".
+	messages = injectTodoTail(messages)
 	// Note: GetToolDefinitions is invoked inside the iteration loop below so
 	// a mid-turn discover_more (Part 08) is visible on the next iteration.
 	var newMsgs []Message
@@ -1049,75 +1054,157 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			// the shared task-tool instance.
 		}
 
+		// DAG gate: when the parallel batch contains at least one
+		// task call declaring `id` or `depends_on`, route through
+		// the in-batch DAG scheduler instead of the legacy flat
+		// fan-out. The scheduler writes per-node outcomes back
+		// into the same `results []Message` slice the legacy path
+		// uses, so the rest of this loop (group-bus handoff,
+		// sequential dispatch, etc.) is byte-identical.
+		//
+		// The slice the scheduler is given is the parallel sub-slice
+		// of resp.ToolCalls (in order). The dispatch closure is
+		// shaped exactly like the inner goroutine below, so the
+		// activity hook, the auto-touch, the error-shape conversion,
+		// and the per-call imagegen notice all run the same way
+		// regardless of which path took the call.
 		if len(parallelTCs) > 0 {
-			var wg sync.WaitGroup
+			parallelCalls := make([]ToolCall, len(parallelTCs))
 			for k, i := range parallelTCs {
-				wg.Add(1)
-				go func(idx int, k int, tc ToolCall, cancelled func() bool) {
-					defer wg.Done()
-					if cancelled() {
-						return
-					}
+				parallelCalls[k] = resp.ToolCalls[i]
+			}
+			if dagHasDependencies(parallelCalls) {
+				// Build a dispatch closure that captures the
+				// agent's current state. The closure:
+				//   1. Augments the args with the labelled
+				//      predecessor context (if any).
+				//   2. Builds the per-call task binding so
+				//      grouped subagents still see the bus.
+				//   3. Calls handleToolCallWithImages, which
+				//      owns the activity hook, the auto-touch
+				//      on writes, the error-shape conversion,
+				//      and the per-tool imagegen notice.
+				//
+				// The closure returns (text, images, error) so
+				// the scheduler can build the same Message
+				// shape the legacy goroutine would have.
+				dispatch := func(tc ToolCall, binding *taskBinding, toolCallID string, predecessorContext string) (string, []Image, error) {
 					a.activity.toolStarted(tc.Function.Name)
-					// Build the per-call group binding (bus +
-					// agent id + tracker). It is threaded through
-					// handleToolCall and applied to a COPY of the
-					// task tool, so concurrent goroutines never
-					// share mutable bus state. No group → nil
-					// binding → unchanged behavior.
-					var (
-						bus     *notebus.Bus
-						agentID string
-						binding *taskBinding
-					)
-					if groupBus != nil {
-						bus = groupBus
-						if k < len(groupAgentIDs) {
-							agentID = groupAgentIDs[k]
-						}
-						binding = &taskBinding{bus: bus, agentID: agentID, tracker: groupTracker}
+					defer a.activity.toolDone(tc.Function.Name)
+					args, err := dagContextFrom(json.RawMessage(tc.Function.Arguments), predecessorContext)
+					if err != nil {
+						return "", nil, err
 					}
-					result, images, err := a.handleToolCallWithImages(tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding, tc.ID)
-					// Auto-touch: if the call succeeded and was a
-					// write-class tool, append a touch to the bus
-					// so peers know this file changed. Read tools
-					// are never touched (cache-stability invariant).
-					// We only touch on the goroutine that owned
-					// the call (no extra goroutine to avoid
-					// ordering surprises with the owner).
-					if err == nil && bus != nil {
+					result, images, err := a.handleToolCallWithImages(tc.Function.Name, args, binding, toolCallID)
+					if err == nil && binding != nil && binding.bus != nil {
+						// Auto-touch for grouped writes —
+						// mirrors the legacy path exactly.
 						appendWriteTouchIfGrouped(&agentCtx{
-							noteBus:     bus,
-							noteAgentID: agentID,
+							noteBus:     binding.bus,
+							noteAgentID: binding.agentID,
 						}, tc.Function.Name, tc.Function.Arguments)
 					}
-					a.activity.toolDone(tc.Function.Name)
-					var notice string
-					if err != nil {
-						var ne *tool.NoticedError
-						if errors.As(err, &ne) {
-							notice = ne.Notice
+					return result, images, err
+				}
+				dagMsgs, dagErr := runDAGFromValidated(parallelCalls, stopCh, isCancelled, groupBus, groupAgentIDs, groupTracker, dispatch)
+				if dagErr != nil {
+					// Validation failed. Scope the error to the
+					// subagent dispatches that own the id
+					// namespace: a bad depends_on must not
+					// cancel unrelated parallel work (a read, a
+					// grep) that merely shared the batch. The
+					// non-task calls are dispatched normally
+					// through the same closure.
+					errText := dagErr.Error()
+					var wg sync.WaitGroup
+					for k, i := range parallelTCs {
+						tc := resp.ToolCalls[i]
+						if isDAGEligibleCall(tc) {
+							results[i] = Message{
+								Role:    "tool",
+								ToolID:  tc.ID,
+								Content: errText,
+							}
+							continue
 						}
-						result = fmt.Sprintf("Error: %v", err)
-					} else if tc.Function.Name == "imagegen" {
-						// Only imagegen currently embeds a display-only cost
-						// notice behind SuccessNoticeSeparator. Gate the split to
-						// that tool so the shared result path is not parsed for
-						// every tool call.
-						if idx2 := strings.Index(result, tool.SuccessNoticeSeparator); idx2 >= 0 {
-							notice = result[:idx2]
-							result = result[idx2+len(tool.SuccessNoticeSeparator):]
+						wg.Add(1)
+						go func(idx, k int, tc ToolCall) {
+							defer wg.Done()
+							if isCancelled() {
+								return
+							}
+							var binding *taskBinding
+							if groupBus != nil && k < len(groupAgentIDs) && groupAgentIDs[k] != "" {
+								binding = &taskBinding{bus: groupBus, agentID: groupAgentIDs[k], tracker: groupTracker}
+							}
+							result, images, err := dispatch(tc, binding, tc.ID, "")
+							content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
+							results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display}
+						}(i, k, tc)
+					}
+					wg.Wait()
+				} else {
+					// Map scheduler messages back into the
+					// caller's results slice. dagMsgs is indexed
+					// by position in parallelCalls (k) — NOT by
+					// the resp.ToolCalls index (i). See
+					// buildResults: msgs[k] is the result of the
+					// call at parallelIdx[k].
+					for k, i := range parallelTCs {
+						if k < len(dagMsgs) {
+							results[i] = dagMsgs[k]
 						}
 					}
-					fullResult := result
-					result = TruncateToolResult(tc.ID, result)
-					results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: result, Images: images, Notice: notice}
-					if fullResult != result {
-						results[idx].DisplayContent = fullResult
-					}
-				}(i, k, resp.ToolCalls[i], isCancelled)
+				}
+			} else {
+				var wg sync.WaitGroup
+				for k, i := range parallelTCs {
+					wg.Add(1)
+					go func(idx int, k int, tc ToolCall, cancelled func() bool) {
+						defer wg.Done()
+						if cancelled() {
+							return
+						}
+						a.activity.toolStarted(tc.Function.Name)
+						// Build the per-call group binding (bus +
+						// agent id + tracker). It is threaded through
+						// handleToolCall and applied to a COPY of the
+						// task tool, so concurrent goroutines never
+						// share mutable bus state. No group → nil
+						// binding → unchanged behavior.
+						var (
+							bus     *notebus.Bus
+							agentID string
+							binding *taskBinding
+						)
+						if groupBus != nil {
+							bus = groupBus
+							if k < len(groupAgentIDs) {
+								agentID = groupAgentIDs[k]
+							}
+							binding = &taskBinding{bus: bus, agentID: agentID, tracker: groupTracker}
+						}
+						result, images, err := a.handleToolCallWithImages(tc.Function.Name, json.RawMessage(tc.Function.Arguments), binding, tc.ID)
+						// Auto-touch: if the call succeeded and was a
+						// write-class tool, append a touch to the bus
+						// so peers know this file changed. Read tools
+						// are never touched (cache-stability invariant).
+						// We only touch on the goroutine that owned
+						// the call (no extra goroutine to avoid
+						// ordering surprises with the owner).
+						if err == nil && bus != nil {
+							appendWriteTouchIfGrouped(&agentCtx{
+								noteBus:     bus,
+								noteAgentID: agentID,
+							}, tc.Function.Name, tc.Function.Arguments)
+						}
+						a.activity.toolDone(tc.Function.Name)
+						content, display, notice := shapeToolResult(tc.Function.Name, tc.ID, result, err)
+						results[idx] = Message{Role: "tool", ToolID: tc.ID, Content: content, Images: images, Notice: notice, DisplayContent: display}
+					}(i, k, resp.ToolCalls[i], isCancelled)
+				}
+				wg.Wait()
 			}
-			wg.Wait()
 			// Reconcile handoff: run the pre-pass on the
 			// log + tracker and append the rendered output as
 			// a [ocode:reconcile] system message. The

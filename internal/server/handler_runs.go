@@ -27,18 +27,31 @@ type runMessageDTO struct {
 // agentRunDTO mirrors a *agent.AgentRun for the web "agent preview" strip,
 // including the run's transcript and its nested sub-agent runs (recursively).
 type agentRunDTO struct {
-	ID           string          `json:"id"`
-	Name         string          `json:"name"`
-	Status       string          `json:"status"`
-	Result       string          `json:"result,omitempty"`
-	Err          string          `json:"err,omitempty"`
-	Model        string          `json:"model,omitempty"`
-	StartedAt    time.Time       `json:"startedAt"`
-	EndedAt      *time.Time      `json:"endedAt,omitempty"`
-	InputTokens  int64           `json:"inputTokens"`
-	OutputTokens int64           `json:"outputTokens"`
-	Messages     []runMessageDTO `json:"messages"`
-	Children     []agentRunDTO   `json:"children"`
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Status       string     `json:"status"`
+	Result       string     `json:"result,omitempty"`
+	Err          string     `json:"err,omitempty"`
+	Model        string     `json:"model,omitempty"`
+	StartedAt    time.Time  `json:"startedAt"`
+	EndedAt      *time.Time `json:"endedAt,omitempty"`
+	InputTokens  int64      `json:"inputTokens"`
+	OutputTokens int64      `json:"outputTokens"`
+	// Contract is the output-contract verdict, present only when the
+	// dispatch carried an expected_output contract (checked). satisfied is
+	// false when the result did not meet the contract after the single
+	// retry, or when verification itself failed. It is a shape check, not
+	// "verified correct".
+	Contract *agentRunContractDTO `json:"contract,omitempty"`
+	Messages []runMessageDTO      `json:"messages"`
+	Children []agentRunDTO        `json:"children"`
+}
+
+// agentRunContractDTO mirrors the AgentRun contract-verdict fields.
+type agentRunContractDTO struct {
+	Checked    bool   `json:"checked"`
+	Satisfied  bool   `json:"satisfied"`
+	Deficiency string `json:"deficiency,omitempty"`
 }
 
 // buildRunDTO converts a run (and its nested sub-agent runs) into a serialisable
@@ -58,6 +71,9 @@ func buildRunDTO(r *agent.AgentRun) agentRunDTO {
 		OutputTokens: out,
 		Messages:     []runMessageDTO{},
 		Children:     []agentRunDTO{},
+	}
+	if checked, satisfied, deficiency := r.ContractVerdict(); checked {
+		dto.Contract = &agentRunContractDTO{Checked: true, Satisfied: satisfied, Deficiency: deficiency}
 	}
 	if !r.EndedAt.IsZero() {
 		ended := r.EndedAt

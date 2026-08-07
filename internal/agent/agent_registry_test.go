@@ -653,3 +653,63 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+func TestTaskToolContractResolutionPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+
+	agentsDir := filepath.Join(home, ".config", "opencode", "agents")
+	os.MkdirAll(agentsDir, 0755)
+	os.WriteFile(filepath.Join(agentsDir, "contract-agent.md"), []byte(`---
+description: agent with a default contract
+mode: subagent
+expected_output: the default contract text
+---
+body
+`), 0644)
+
+	reg := NewAgentRegistry()
+	reg.LoadMarkdownAgents()
+
+	t.Run("call-supplied wins over definition", func(t *testing.T) {
+		// The agent definition carries a default contract; the call supplies
+		// its own — the call value must win.
+		taskTool := TaskTool{mainAgent: &Agent{tools: make(map[string]tool.Tool)}, registry: reg}
+		spec := taskTool.findAgent("contract-agent")
+		if spec == nil {
+			t.Fatal("expected contract-agent in registry")
+		}
+		if got := resolveContract("call contract", spec.ExpectedOutput); got != "call contract" {
+			t.Fatalf("resolveContract = %q, want call-supplied value", got)
+		}
+		// Also assert the wiring inside Execute: the same resolution lands on
+		// the per-call copy. (Execute is a value receiver, so the caller's
+		// copy is unchanged — assert via the run's transcript instead of the
+		// local field is not possible here; the helper test above is the
+		// authority, and the loader round-trip test covers the definition
+		// source.)
+	})
+
+	t.Run("definition wins when call omits", func(t *testing.T) {
+		taskTool := TaskTool{mainAgent: &Agent{tools: make(map[string]tool.Tool)}, registry: reg}
+		spec := taskTool.findAgent("contract-agent")
+		if spec == nil {
+			t.Fatal("expected contract-agent in registry")
+		}
+		if got := resolveContract("", spec.ExpectedOutput); got != "the default contract text" {
+			t.Fatalf("resolveContract = %q, want definition value", got)
+		}
+	})
+
+	t.Run("both empty skips verification", func(t *testing.T) {
+		taskTool := TaskTool{mainAgent: &Agent{tools: make(map[string]tool.Tool)}, registry: reg}
+		spec := taskTool.findAgent("general")
+		if spec == nil {
+			t.Fatal("expected general in registry")
+		}
+		if got := resolveContract("", spec.ExpectedOutput); got != "" {
+			t.Fatalf("resolveContract = %q, want empty (no verification)", got)
+		}
+	})
+}

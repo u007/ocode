@@ -758,6 +758,13 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 			return c.chatOpenAIResponses(ctx, messages, tools)
 		}
 	}
+	// opencode-go (and opencode) route Codex GPT-5.6 models through the OpenAI
+	// Responses API, not chat/completions. These are responses-lite models that
+	// only serve tool calls correctly on the responses path; sending them to
+	// chat/completions is what produced empty tool-call arguments.
+	if (c.Provider == "opencode-go" || c.Provider == "opencode") && openAICodexResponsesLite(c.Model) {
+		return c.chatOpenAIResponses(ctx, messages, tools)
+	}
 	if c.UseOAuth && c.Provider == "grok" {
 		if plugin, ok := providerplugin.Get("grok"); ok && plugin.ModelAllowed(c.Model) {
 			return c.chatGrokSubscription(ctx, messages, tools)
@@ -1534,9 +1541,23 @@ func parseOpenAIChatCompletionsStream(body io.Reader, onDelta func(kind, text st
 	sort.Ints(toolOrder)
 	for _, idx := range toolOrder {
 		tc := *toolByIdx[idx]
-		if tc.Function.Arguments != "" && !json.Valid([]byte(tc.Function.Arguments)) {
-			emitDebug("AGENT", fmt.Sprintf("openai: invalid tool arguments for %s (id=%s, %d bytes); falling back to {}", tc.Function.Name, tc.ID, len(tc.Function.Arguments)))
+		// Malformed (non-empty but unparseable) arguments are fatal: executing
+		// them would run a tool call the model did not actually express.
+		//
+		// An ABSENT/empty arguments field is not malformed — it is what
+		// OpenAI-compatible providers emit for a zero-parameter tool
+		// (`todoread`, `plan_exit` both declare `properties: {}`), and
+		// providers differ on whether they send "{}" or omit the field. It is
+		// normalized to "{}" here. Failing the whole response on it would end
+		// the turn outright: this error matches nothing in
+		// isRetryableLLMClientError, so Chat's retry loop breaks immediately
+		// rather than retrying as the previous comment claimed. Empty-argument
+		// hazards are caught where they matter — e.g. exec.go rejects an empty
+		// bash command.
+		if strings.TrimSpace(tc.Function.Arguments) == "" {
 			tc.Function.Arguments = "{}"
+		} else if !json.Valid([]byte(tc.Function.Arguments)) {
+			return nil, nil, fmt.Errorf("openai: invalid tool call arguments for %s (id=%s, %d bytes)", tc.Function.Name, tc.ID, len(tc.Function.Arguments))
 		}
 		msg.ToolCalls = append(msg.ToolCalls, tc)
 	}
@@ -2299,7 +2320,11 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	input = reconcileOpenAIResponsesToolPairs(input)
 
 	model, effortOverride := normalizeOpenAICodexModel(c.Model)
-	liteMode := c.UseOAuth && c.Provider == "openai" && openAICodexResponsesLite(model)
+	// Responses-lite treatment (developer-item tools, the
+	// x-openai-internal-codex-responses-lite header, reasoning.context) applies
+	// to GPT-5.6 models on the OpenAI OAuth codex backend AND on opencode-go /
+	// opencode, which proxy the same responses-lite endpoint.
+	liteMode := openAICodexResponsesLite(model) && (c.UseOAuth && c.Provider == "openai" || c.Provider == "opencode-go" || c.Provider == "opencode")
 
 	payload := map[string]interface{}{
 		"model":        model,
@@ -2567,6 +2592,19 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 			return nil, fmt.Errorf("openai responses stream error: SSE line exceeded 16MB buffer (likely huge reasoning block): %w", err)
 		}
 		return nil, fmt.Errorf("openai responses stream error: %w", err)
+	}
+
+	// Malformed (non-empty but unparseable) arguments are fatal. An absent or
+	// empty arguments field is not: it is what providers emit for a
+	// zero-parameter tool, and this error is not retryable — failing here ends
+	// the turn instead of retrying it. See the same guard in the streaming
+	// path for the full reasoning.
+	for i := range toolCalls {
+		if strings.TrimSpace(toolCalls[i].Function.Arguments) == "" {
+			toolCalls[i].Function.Arguments = "{}"
+		} else if !json.Valid([]byte(toolCalls[i].Function.Arguments)) {
+			return nil, fmt.Errorf("openai responses: invalid tool call arguments for %s (id=%s, %d bytes)", toolCalls[i].Function.Name, toolCalls[i].ID, len(toolCalls[i].Function.Arguments))
+		}
 	}
 
 	if fullText == "" && len(toolCalls) == 0 {
@@ -3394,37 +3432,37 @@ var keyOptionalProviders = map[string]bool{
 }
 
 var providers = map[string]providerInfo{
-	"openai":                {"OPENAI_API_KEY", "https://api.openai.com/v1"},
-	"anthropic":             {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
-	"openrouter":            {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
-	"google":                {"GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"},
-	"zai":                   {"ZAI_API_KEY", "https://api.z.ai/v1"},
-	"z.ai":                  {"ZAI_API_KEY", "https://api.z.ai/v1"},
-	"zai-coding":            {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
-	"chutes":                {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"},
-	"chutes-coding":         {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
-	"alibaba":               {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
-	"alibaba-coding":        {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
-	"moonshot":              {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
-	"minimax":               {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
-	"requesty":              {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
-	"deepinfra":             {"DEEPINFRA_API_KEY", "https://api.deepinfra.com/v1/openai"},
-	"nvidia":                {"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"},
-	"302ai":                 {"302AI_API_KEY", "https://api.302.ai/v1"},
-	"deepseek":              {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
-	"grok":                  {"XAI_API_KEY", "https://api.x.ai/v1"},
-	"groq":                  {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
-	"mistral":               {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
-	"novita-ai":             {"NOVITA_API_KEY", "https://api.novita.ai/openai/v1"},
-	"opencode":              {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
-	"opencode-go":           {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
-	"copilot":               {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
-	"lmstudio":              {"", "http://localhost:1234/v1"},
+	"openai":         {"OPENAI_API_KEY", "https://api.openai.com/v1"},
+	"anthropic":      {"ANTHROPIC_API_KEY", "https://api.anthropic.com/v1"},
+	"openrouter":     {"OPENROUTER_API_KEY", "https://openrouter.ai/api/v1"},
+	"google":         {"GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai"},
+	"zai":            {"ZAI_API_KEY", "https://api.z.ai/v1"},
+	"z.ai":           {"ZAI_API_KEY", "https://api.z.ai/v1"},
+	"zai-coding":     {"ZAI_API_KEY", "https://api.z.ai/api/coding/paas/v4"},
+	"chutes":         {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"},
+	"chutes-coding":  {"CHUTES_API_KEY", "https://llm.chutes.ai/v1"}, // Placeholder if distinct endpoint exists
+	"alibaba":        {"DASHSCOPE_API_KEY", "https://dashscope.aliyuncs.com/compatible-mode/v1"},
+	"alibaba-coding": {"DASHSCOPE_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1"},
+	"moonshot":       {"MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"},
+	"minimax":        {"MINIMAX_API_KEY", "https://api.minimax.chat/v1"},
+	"requesty":       {"REQUESTY_API_KEY", "https://router.requesty.ai/v1"},
+	"deepinfra":      {"DEEPINFRA_API_KEY", "https://api.deepinfra.com/v1/openai"},
+	"nvidia":         {"NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1"},
+	"302ai":          {"302AI_API_KEY", "https://api.302.ai/v1"},
+	"deepseek":       {"DEEPSEEK_API_KEY", "https://api.deepseek.com/v1"},
+	"grok":           {"XAI_API_KEY", "https://api.x.ai/v1"},
+	"groq":           {"GROQ_API_KEY", "https://api.groq.com/openai/v1"},
+	"mistral":        {"MISTRAL_API_KEY", "https://api.mistral.ai/v1"},
+	"novita-ai":      {"NOVITA_API_KEY", "https://api.novita.ai/openai/v1"},
+	"opencode":       {"OPENCODE_API_KEY", "https://opencode.ai/zen/v1"},
+	"opencode-go":    {"OPENCODE_API_KEY", "https://opencode.ai/zen/go/v1"},
+	"copilot":        {"GITHUB_COPILOT_TOKEN", "https://api.githubcopilot.com"},
+	"lmstudio":       {"", "http://localhost:1234/v1"},
 	// "local" has no static baseURL — see the provider == "local" branch
 	// below, which resolves it per-model via discovery.GetModelInstance
 	// (each /localmodel instance runs on its own port, unlike every other
 	// provider here which shares one fixed endpoint).
-	"local": {"", ""},
+	"local":                 {"", ""},
 	"cloudflare-workers":    {"CLOUDFLARE_API_KEY", ""},
 	"cloudflare-gateway":    {"CLOUDFLARE_GATEWAY_KEY", ""},
 	"codex":                 {"OPENAI_API_KEY", "https://api.openai.com/v1"},

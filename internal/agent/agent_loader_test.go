@@ -40,6 +40,32 @@ func TestParseAgentContent_HonorsModelField(t *testing.T) {
 // now applied (not warned about) when valid; warnings only fire for invalid
 // numeric values.
 
+func TestParseAgentContent_HonorsExpectedOutputField(t *testing.T) {
+	// An agent markdown with expected_output frontmatter round-trips into the
+	// definition.
+	src := "---\ndescription: test\nmode: subagent\nexpected_output: the list of affected files, one path per line\n---\nbody"
+	def, _ := parseAgentContent(src, "fake.md")
+	if def == nil {
+		t.Fatal("expected def")
+	}
+	if def.ExpectedOutput != "the list of affected files, one path per line" {
+		t.Errorf("ExpectedOutput = %q, want the frontmatter value", def.ExpectedOutput)
+	}
+}
+
+func TestParseAgentContent_ExpectedOutputDefaultsEmpty(t *testing.T) {
+	// An agent markdown without expected_output yields an empty field — no
+	// contract means verification is skipped entirely.
+	src := "---\ndescription: test\nmode: subagent\n---\nbody"
+	def, _ := parseAgentContent(src, "fake.md")
+	if def == nil {
+		t.Fatal("expected def")
+	}
+	if def.ExpectedOutput != "" {
+		t.Errorf("ExpectedOutput = %q, want empty default", def.ExpectedOutput)
+	}
+}
+
 func writeAgentFile(t *testing.T, parts ...string) {
 	t.Helper()
 	p := filepath.Join(parts...)

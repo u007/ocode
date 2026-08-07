@@ -174,6 +174,16 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 	if run.Status == agent.RunCancelled && strings.TrimSpace(run.Err) != "" {
 		appendLine(errorStyle.Render("Cancelled: " + strings.TrimSpace(run.Err)))
 	}
+	// Output-contract verdict: a finished run whose contract was not met (or
+	// whose verification failed) gets an explicit line. Shape check, not
+	// "verified correct".
+	if checked, satisfied, deficiency := run.ContractVerdict(); checked && !satisfied {
+		if strings.TrimSpace(deficiency) != "" {
+			appendLine(errorStyle.Render("Output contract not met: " + strings.TrimSpace(deficiency)))
+		} else {
+			appendLine(errorStyle.Render("Output contract not met"))
+		}
+	}
 
 	if messages := run.TranscriptPublic(); len(messages) > 0 {
 		appendLine(headerStyle.Render("Messages"))
@@ -475,6 +485,12 @@ func renderAgentRunStripCard(ri *agent.AgentRun, width int, frame string, select
 	}
 	if in, out := ri.Usage(); in > 0 || out > 0 {
 		head += fmt.Sprintf(" · ↓%s ↑%s", formatTokenCount(in), formatTokenCount(out))
+	}
+	// Output-contract badge: a run that finished but did not meet its
+	// expected_output contract gets an explicit marker. This is a shape
+	// check, not "verified correct" — the text says so.
+	if checked, satisfied, _ := ri.ContractVerdict(); checked && !satisfied {
+		head += " " + errorStyle.Render("contract ✗")
 	}
 	if selected {
 		b.WriteString(selectedStyle.Render(truncateToWidth(head, width)) + "\n")

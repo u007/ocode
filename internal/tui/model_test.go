@@ -2411,7 +2411,7 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 	if err := snapshot.Backup("changed.go"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (tool.TodoWriteTool{}).Execute(mustJSON(t, map[string]string{"todoText": "- [ ] ship task 4"})); err != nil {
+	if _, err := (tool.TodoWriteTool{}).Execute(mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] ship task 4"})); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2426,7 +2426,7 @@ func TestSidebarViewShowsChangedFilesAndTodoState(t *testing.T) {
 	}
 
 	view := stripANSI(m.View().Content)
-	for _, want := range []string{"Files", "changed.go", "TODO", "[○] ship task 4"} {
+	for _, want := range []string{"Files", "changed.go", "TODO", "[○] t1 ship task 4"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected sidebar to include %q, got %q", want, view)
 		}
@@ -5932,7 +5932,7 @@ func TestHandleNewCmdResetsSessionScopedState(t *testing.T) {
 	if err := snapshot.Backup("changed.go"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (tool.TodoWriteTool{}).Execute(mustJSON(t, map[string]string{"todoText": "- [ ] ship task 4"})); err != nil {
+	if _, err := (tool.TodoWriteTool{}).Execute(mustJSON(t, map[string]any{"revision": 0, "todoText": "- [ ] ship task 4"})); err != nil {
 		t.Fatal(err)
 	}
 

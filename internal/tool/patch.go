@@ -6,16 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"unicode"
 
 	"github.com/u007/ocode/internal/snapshot"
-)
-
-var (
-	todoMu             sync.RWMutex
-	todoStates         map[string]string
-	currentTodoSession string
 )
 
 const patchDescription = `Use the apply_patch tool to edit files. Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
@@ -550,112 +543,4 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 	}
 
 	return "Success. Updated the following files:\n" + strings.Join(results, "\n"), nil
-}
-
-type TodoWriteTool struct{}
-
-func (t TodoWriteTool) Name() string { return "todowrite" }
-func (t TodoWriteTool) Description() string {
-	return "Manage todo lists during coding sessions."
-}
-func (t TodoWriteTool) Parallel() bool { return false }
-func (t TodoWriteTool) Definition() map[string]interface{} {
-	return map[string]interface{}{
-		"name":        "todowrite",
-		"description": "Manage todo lists during coding sessions. Use markers: [✓], [•], [ ]",
-		"parameters": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"todoText": map[string]interface{}{
-					"type":        "string",
-					"description": "The todo list content. Each line is a bullet starting with a status marker: [✓], [•], [ ]",
-				},
-			},
-			"required": []string{"todoText"},
-		},
-	}
-}
-
-func (t TodoWriteTool) Execute(args json.RawMessage) (string, error) {
-	var params struct {
-		TodoText string `json:"todoText"`
-	}
-	if err := json.Unmarshal(args, &params); err != nil {
-		return "", err
-	}
-
-	todoMu.Lock()
-	if todoStates == nil {
-		todoStates = make(map[string]string)
-	}
-	if currentTodoSession == "" {
-		todoMu.Unlock()
-		return "", fmt.Errorf("todo session not set")
-	}
-	todoStates[currentTodoSession] = params.TodoText
-	todoMu.Unlock()
-
-	return "Successfully updated todo list", nil
-}
-
-type TodoReadTool struct{}
-
-func (t TodoReadTool) Name() string        { return "todoread" }
-func (t TodoReadTool) Description() string { return "Read the current session todo list" }
-func (t TodoReadTool) Parallel() bool      { return true }
-func (t TodoReadTool) Definition() map[string]interface{} {
-	return map[string]interface{}{
-		"name":        "todoread",
-		"description": "Read the current session todo list",
-		"parameters":  map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
-	}
-}
-
-func (t TodoReadTool) Execute(args json.RawMessage) (string, error) {
-	todoMu.RLock()
-	content := todoStates[currentTodoSession]
-	todoMu.RUnlock()
-	if content == "" {
-		return "No todo list found", nil
-	}
-	return string(content), nil
-}
-
-func SetTodoSession(sessionID string) {
-	todoMu.Lock()
-	currentTodoSession = sessionID
-	if todoStates == nil {
-		todoStates = make(map[string]string)
-	}
-	todoMu.Unlock()
-}
-
-func TodoState() string {
-	todoMu.RLock()
-	defer todoMu.RUnlock()
-	if todoStates == nil {
-		return ""
-	}
-	return todoStates[currentTodoSession]
-}
-
-func SetTodoState(state string) {
-	todoMu.Lock()
-	if currentTodoSession == "" {
-		todoMu.Unlock()
-		return
-	}
-	if todoStates == nil {
-		todoStates = make(map[string]string)
-	}
-	todoStates[currentTodoSession] = state
-	todoMu.Unlock()
-}
-
-func ResetTodoState() {
-	todoMu.Lock()
-	if todoStates != nil {
-		delete(todoStates, currentTodoSession)
-	}
-	todoMu.Unlock()
 }

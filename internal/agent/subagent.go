@@ -153,6 +153,13 @@ type TaskTool struct {
 	// agents completed, which failed, and which partitions they
 	// owned.
 	groupTracker *groupTracker
+
+	// contract is the resolved output contract for this dispatch
+	// (call-supplied expected_output, else the agent definition's
+	// expected_output frontmatter, else "" = no verification). Set on
+	// the same short-lived per-call copy as groupBus/agentID; the
+	// shared instance in a.tools["task"] leaves it empty.
+	contract string
 }
 
 func (t TaskTool) Name() string        { return "task" }
@@ -215,6 +222,19 @@ func (t TaskTool) Definition() map[string]interface{} {
 					"type":        "string",
 					"description": "Resume a previously cancelled or completed task instead of starting a new one. Set to the task_id of a run whose state is cancelled or done; prompt becomes the follow-up instruction and the sub-agent continues with its full prior conversation history.",
 				},
+				"expected_output": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional output contract: a short natural-language description of the shape or content the result must have (e.g. \"the full list of affected files, one path per line\"). When set, the sub-agent's final result is verified against it before being returned, and retried once in place if it does not match. If omitted, the agent's own expected_output frontmatter (if any) applies; with neither, no verification is performed.",
+				},
+				"id": map[string]interface{}{
+					"type":        "string",
+					"description": "Optional caller-chosen label for this dispatch, unique within the parallel batch. Combined with depends_on this batch becomes a DAG: a node that names another node's id in depends_on will not start until the named predecessor completes successfully, and the predecessor's final result is prepended to the child's context. Omit both fields to take the legacy flat parallel fan-out path.",
+				},
+				"depends_on": map[string]interface{}{
+					"type":        "array",
+					"items":       map[string]interface{}{"type": "string"},
+					"description": "Optional list of ids (set on sibling task calls in the same parallel batch) that must complete successfully before this dispatch starts. Only honoured inside the parallel partition; an unknown id, duplicate id, or cycle is a hard error and no node in the affected component runs. Concurrency is bounded by the shared agent limiter — dependents acquire their slot after every predecessor resolves (they never block on predecessors inside the child, which would deadlock the limiter).",
+				},
 			},
 			"required": []string{"prompt"},
 		},
@@ -222,15 +242,18 @@ func (t TaskTool) Definition() map[string]interface{} {
 }
 
 type taskToolParams struct {
-	Prompt          string `json:"prompt"`
-	Agent           string `json:"agent"`
-	SubagentType    string `json:"subagent_type"`
-	Context         string `json:"context"`
-	Description     string `json:"description"`
-	RunInBackground bool   `json:"run_in_background"`
-	Background      bool   `json:"background"`
-	SharedNotes     bool   `json:"shared_notes"`
-	ResumeTaskID    string `json:"resume_task_id"`
+	Prompt          string   `json:"prompt"`
+	Agent           string   `json:"agent"`
+	SubagentType    string   `json:"subagent_type"`
+	Context         string   `json:"context"`
+	Description     string   `json:"description"`
+	RunInBackground bool     `json:"run_in_background"`
+	Background      bool     `json:"background"`
+	SharedNotes     bool     `json:"shared_notes"`
+	ResumeTaskID    string   `json:"resume_task_id"`
+	ExpectedOutput  string   `json:"expected_output"`
+	DAGID           string   `json:"id"`
+	DAGDeps         []string `json:"depends_on"`
 }
 
 func (t TaskTool) Execute(args json.RawMessage) (string, error) {
@@ -266,6 +289,12 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		}
 		spec = defaultSpec
 	}
+
+	// Resolve the output contract: call-supplied expected_output wins,
+	// otherwise the agent definition's expected_output frontmatter. Empty
+	// from both sources means no verification — the unchanged, zero-cost
+	// path.
+	t.contract = resolveContract(params.ExpectedOutput, spec.ExpectedOutput)
 
 	// Hidden agents (e.g. the orchestrator pipeline's internal
 	// orchestrator-planner/-explorer/-developer/-validator subagents) are
@@ -485,6 +514,17 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	return fallbackWarning + result, nil
 }
 
+// resolveContract picks the effective output contract for a dispatch:
+// call-supplied expected_output wins over the agent definition's
+// expected_output frontmatter. Empty from both sources means no
+// verification — the unchanged, zero-cost path.
+func resolveContract(callValue, defValue string) string {
+	if callValue != "" {
+		return callValue
+	}
+	return defValue
+}
+
 // resumeEligibleRun looks up taskID and validates it can be resumed: it must
 // exist, be owned by the calling agent (same comparison as
 // AgentRunRegistry.CancelOwned), and be in RunCancelled or RunDone. Returns
@@ -524,6 +564,15 @@ func (t TaskTool) executeResume(params taskToolParams) (string, error) {
 		return "", err
 	}
 	subAgent := run.Sub
+
+	// Resolve the output contract for the resumed dispatch the same way a
+	// fresh dispatch does: call-supplied expected_output, else the agent
+	// definition's expected_output frontmatter, else none.
+	defContract := ""
+	if def := t.findAgent(specName); def != nil {
+		defContract = def.ExpectedOutput
+	}
+	t.contract = resolveContract(params.ExpectedOutput, defContract)
 
 	// Re-dispatch guard: refuse repeated identical resumes without any
 	// intervening user input, same protection fresh dispatch has (see
@@ -646,12 +695,19 @@ func (t TaskTool) runBackgroundDispatch(specName string, subAgent *Agent, run *A
 			return
 		}
 
-		result, err := t.executeSubAgent(specName, subAgent, messages)
+		result, resp, err := t.executeSubAgentWithTranscript(specName, subAgent, messages)
 		if err != nil {
 			run.finishErr(err.Error())
 			runs.notifyDone(run)
 			return
 		}
+		// Output-contract verification + single in-place retry, inside the
+		// dispatch goroutine after the child ran and before the terminal
+		// status is published. The deferred shutdownTransient (above) only
+		// fires on goroutine exit, so the child is still live here; a polled
+		// "done" therefore means "done and checked". The verdict is recorded
+		// on the run before finishOK so agent_status/task_status surface it.
+		result, _, _ = t.verifyAndRetryContract(specName, subAgent, messages, resp, result, run)
 		run.finishOK(result)
 		runs.notifyDone(run)
 	}()
@@ -725,6 +781,16 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 		}
 		return "", err
 	}
+
+	// Output-contract verification + single in-place retry. Must happen
+	// HERE — inside runSyncDispatch, before the deferred shutdownTransient
+	// fires — so the retry can step the still-live child. The retry is NOT
+	// routed back through TaskTool.Execute (which would rebuild the child
+	// and trip the re-dispatch guard), and the public resume_task_id path
+	// is unusable mid-dispatch (resumeEligibleRun requires a terminal run).
+	// resp is reassigned by the retry so the persisted child session below
+	// reflects the final transcript.
+	result, resp, _ = t.verifyAndRetryContract(specName, subAgent, messages, resp, result, run)
 
 	sessionID := childSessionID("parent", specName)
 	metadata := childSessionMetadata("parent", specName)
@@ -861,11 +927,19 @@ func (t TaskTool) findAgent(name string) *AgentDefinition {
 	return nil
 }
 
+// mainAgentOnlyTools lists tools that only the main agent may invoke. The
+// store-load-bearing rule: subagents must never write to the todo file —
+// only the main agent owns the plan. Subagents may still call todoread.
+var mainAgentOnlyTools = map[string]bool{
+	"todowrite":   true,
+	"todo_update": true,
+}
+
 func (t TaskTool) getToolsForDef(spec *AgentDefinition) []tool.Tool {
 	if len(spec.Tools) == 0 {
-		return t.mainAgent.GetTools()
+		return filterMainOnlyTools(t.mainAgent.GetTools())
 	}
-	allTools := t.mainAgent.GetTools()
+	allTools := filterMainOnlyTools(t.mainAgent.GetTools())
 	result := make([]tool.Tool, 0, len(spec.Tools))
 	for _, mainTool := range allTools {
 		for _, allowed := range spec.Tools {
@@ -874,6 +948,17 @@ func (t TaskTool) getToolsForDef(spec *AgentDefinition) []tool.Tool {
 				break
 			}
 		}
+	}
+	return result
+}
+
+func filterMainOnlyTools(tools []tool.Tool) []tool.Tool {
+	result := make([]tool.Tool, 0, len(tools))
+	for _, t := range tools {
+		if mainAgentOnlyTools[t.Name()] {
+			continue
+		}
+		result = append(result, t)
 	}
 	return result
 }
@@ -945,6 +1030,19 @@ func (t AgentStatusTool) Execute(args json.RawMessage) (string, error) {
 		b.WriteString("\nError: ")
 		b.WriteString(run.Err)
 	}
+	// Output-contract verdict, surfaced for any run that carried one. A
+	// finished-but-contract-failed run is "done" with a caveat — the parent
+	// must not read done as correct.
+	if checked, satisfied, deficiency := run.ContractVerdict(); checked {
+		if satisfied {
+			b.WriteString("\nContract: satisfied")
+		} else {
+			b.WriteString("\nContract: NOT satisfied")
+			if strings.TrimSpace(deficiency) != "" {
+				b.WriteString(" — " + strings.TrimSpace(deficiency))
+			}
+		}
+	}
 	return b.String(), nil
 }
 
@@ -1006,12 +1104,23 @@ func formatTaskRunStatus(taskID string, run *AgentRun) string {
 		}
 		return formatTaskStatus(taskID, "running", text)
 	case RunDone:
-		return formatTaskStatus(taskID, "completed", run.Result)
+		text := run.Result
+		if checked, satisfied, deficiency := run.ContractVerdict(); checked && !satisfied {
+			text = "Contract NOT satisfied" + contractDeficiencySuffix(deficiency) + "\n\n" + text
+		}
+		return formatTaskStatus(taskID, "completed", text)
 	case RunFailed:
 		return formatTaskStatus(taskID, "error", run.Err)
 	default:
 		return formatTaskStatus(taskID, string(status), "")
 	}
+}
+
+func contractDeficiencySuffix(deficiency string) string {
+	if strings.TrimSpace(deficiency) == "" {
+		return ""
+	}
+	return " — " + strings.TrimSpace(deficiency)
 }
 
 func formatTaskStatus(taskID, state, text string) string {

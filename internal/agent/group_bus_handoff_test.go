@@ -169,3 +169,52 @@ func TestCompletionCallbackFires(t *testing.T) {
 
 // smoke import to ensure notebus package is reachable
 var _ = notebus.NewBus
+
+// TestGroupBusBatchOrderStableWithDAG confirms that when the parallel
+// batch declares dependencies (so the scheduler runs it as a DAG, not
+// a flat fan-out), the group-bus agent ids are still assigned in
+// batch order (a1, a2, …) — not in launch order. The execution order
+// is now "a1 then a2 then a3" (because c depends on b which depends on
+// a), but the ids are a1/a2/a3 in the order the calls APPEAR in the
+// batch, not a1/a2/a3 in the order they happen to run. A late node
+// (a3, after a1 and a2 finish) still sees a1's and a2's notes on the
+// bus because the bus spans the whole DAG.
+func TestGroupBusBatchOrderStableWithDAG(t *testing.T) {
+	factory := &recordingBusFactory{}
+	a := NewAgent(&MockClient{}, nil, nil, nil)
+	a.SetNoteBusFactory(factory.New)
+
+	// Chain: a -> b -> c. The ids in the parallel batch are
+	// a, b, c in that order; the agent ids must be a1, a2, a3 in
+	// the same order, regardless of the fact that c will run last.
+	t1 := ToolCall{ID: "t1", Type: "function", Function: struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}{Name: "task", Arguments: `{"prompt":"a","agent":"general","shared_notes":true,"id":"a"}`}}
+	t2 := ToolCall{ID: "t2", Type: "function", Function: struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}{Name: "task", Arguments: `{"prompt":"b","agent":"explore","shared_notes":true,"id":"b","depends_on":["a"]}`}}
+	t3 := ToolCall{ID: "t3", Type: "function", Function: struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	}{Name: "task", Arguments: `{"prompt":"c","agent":"scout","shared_notes":true,"id":"c","depends_on":["b"]}`}}
+
+	tcs := []ToolCall{t1, t2, t3}
+	parallelTCs := []int{0, 1, 2}
+	bus, ids := a.maybeBuildGroupBus(tcs, parallelTCs)
+	if bus == nil {
+		t.Fatal("expected a bus for 3 qualifying calls")
+	}
+	defer a.teardownGroupBus(bus)
+
+	want := []string{"a1", "a2", "a3"}
+	if len(ids) != len(want) {
+		t.Fatalf("ids len = %d, want %d", len(ids), len(want))
+	}
+	for i, w := range want {
+		if ids[i] != w {
+			t.Errorf("ids[%d] = %q, want %q (batch order, not launch order)", i, ids[i], w)
+		}
+	}
+}

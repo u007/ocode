@@ -1,6 +1,6 @@
 //go:build !windows
 
-package knowledge
+package filelock
 
 import (
 	"os"

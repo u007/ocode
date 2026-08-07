@@ -46,4 +46,29 @@ describe("RunNode", () => {
     // row click was not triggered, so messages stay visible (still open)
     expect(screen.getByText("looks good")).toBeInTheDocument();
   });
+
+  it("badges a run whose output contract was checked and not satisfied", () => {
+    const contractFailed: AgentRun = {
+      ...baseRun,
+      contract: { checked: true, satisfied: false, deficiency: "missing file list" },
+    };
+    render(<RunNode run={contractFailed} depth={0} />);
+    const badge = screen.getByText("contract ✗");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveAttribute("title", expect.stringContaining("missing file list"));
+  });
+
+  it("shows no contract badge when the contract was satisfied", () => {
+    const contractOK: AgentRun = {
+      ...baseRun,
+      contract: { checked: true, satisfied: true },
+    };
+    render(<RunNode run={contractOK} depth={0} />);
+    expect(screen.queryByText("contract ✗")).not.toBeInTheDocument();
+  });
+
+  it("shows no contract badge when no contract applies", () => {
+    render(<RunNode run={baseRun} depth={0} />);
+    expect(screen.queryByText("contract ✗")).not.toBeInTheDocument();
+  });
 });

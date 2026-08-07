@@ -537,3 +537,26 @@ Deferred (CocoIndex plugin): see plan `docs/superpowers/plans/2026-05-28-cocoind
 
 - [ ] Web permission resolution is **approve/deny only** — no "always allow". The web `PermissionDialog` offers two buttons, and rule persistence (the TUI's `a`/`t` choices) pulls in `agent.IsHarmfulRequest` guards, out-of-scope-path handling (`allowOutOfScopePath`), webfetch-domain rules, and `PermissionManager` writes that `HandleResolvePermission` deliberately does not replicate. If always-allow is wanted on the web, add a persist flag to the resolve payload + dialog and route it through the same guarded persist path the TUI uses (from permission bridge: 2026-07-09).
 - [ ] Like the question bridge, permission resolution works only in **headless serve mode**; `/rc` bridge mode returns 409 (the TUI owns the agent + its own permission dialog) (from permission bridge: 2026-07-09).
+
+## In-batch task DAG — deferred cross-turn `depends_on` (from PLAN-agent-crew/02-task-dag.md: 2026-08-07)
+
+Phase 3 of PLAN-agent-crew/ implemented `id` / `depends_on` for **in-batch**
+dependency edges — within a single parallel batch of `task` calls, the
+scheduler validates the graph, schedules in dependency order, injects
+predecessor output into the dependent's `context`, skips transitive
+dependents on failure, and respects cancellation. `internal/agent/task_dag.go`
++ `task_dag_test.go` + `agent.go` wiring.
+
+Deferred:
+
+- [ ] **Cross-turn `depends_on`.** A `depends_on` referencing a `task_id`
+  from an earlier turn (or an in-flight background run) is out of scope for
+  v1. Required to support "ship A, then B that consumes A" across a
+  multi-turn workflow without re-dispatching A. Genuinely useful and
+  genuinely more complex than the in-batch case: cross-turn lifetime
+  (parent session may resume), background-run id resolution (registry
+  lookup), cancellation propagation across turn boundaries, and per-edge
+  persistence (so a resume can rebuild the partial graph). Likely
+  requires a `dispatched_at_turn` annotation on the run registry and a
+  new "wait-for-run" primitive alongside `AcquireForRun`. Build on the
+  in-batch scheduler, do not replace it.

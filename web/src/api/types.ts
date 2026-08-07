@@ -319,6 +319,11 @@ export interface AgentRun {
   endedAt?: string;
   inputTokens: number;
   outputTokens: number;
+  // Contract is the output-contract verdict, present only when the dispatch
+  // carried an expected_output contract. satisfied=false means the result
+  // did not meet the contract after the single retry (or verification
+  // failed) — a shape check, not "verified correct".
+  contract?: { checked: boolean; satisfied: boolean; deficiency?: string };
   messages: AgentRunMessage[];
   children: AgentRun[];
 }

@@ -151,6 +151,18 @@ export default function RunNode({ run, depth, onOpenDetail }: RunNodeProps) {
           <span className="shrink-0 truncate font-mono text-[11px] text-zinc-500">{run.model}</span>
         )}
         <span className={`shrink-0 text-[11px] ${s.text}`}>{run.status}</span>
+        {run.contract && run.contract.checked && !run.contract.satisfied && (
+          <span
+            title={
+              run.contract.deficiency
+                ? `Output contract not met: ${run.contract.deficiency}`
+                : "Output contract not met"
+            }
+            className="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 font-mono text-[10px] text-red-300 ring-1 ring-inset ring-red-800/50"
+          >
+            contract ✗
+          </span>
+        )}
 
         <span className="ml-auto flex shrink-0 items-center gap-2">
           {summary && (

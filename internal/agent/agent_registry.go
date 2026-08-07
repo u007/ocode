@@ -44,6 +44,14 @@ type AgentDefinition struct {
 	// from explicit zero.
 	Temperature *float64
 	TopP        *float64
+	// ExpectedOutput is an optional default output contract for dispatches
+	// of this agent: a short natural-language description of the shape or
+	// content the caller requires of the result. When set, a dispatch of
+	// this agent without an explicit expected_output argument is verified
+	// against it before the result is returned (and retried once on
+	// failure). Empty means no default contract — verification is skipped
+	// entirely unless the call supplies expected_output.
+	ExpectedOutput string
 }
 
 type LoadDiagnostic struct {

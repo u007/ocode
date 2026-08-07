@@ -29,6 +29,9 @@ var deepseekPromptText string
 //go:embed prompts/small_model.txt
 var smallModelPromptText string
 
+//go:embed prompts/task_verifier.txt
+var taskVerifierPromptText string
+
 // modelFamilyPrompt returns a short tuning fragment for the given
 // provider/model pair. Model-ID routing wins over provider routing so that
 // reasoning models and codex variants land in their own buckets even when

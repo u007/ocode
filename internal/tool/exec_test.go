@@ -108,6 +108,27 @@ func TestBashTool_ExecuteFallsBackWithoutEmit(t *testing.T) {
 	}
 }
 
+// TestBashTool_RejectsEmptyCommand verifies that a command that is empty or
+// contains only whitespace is rejected before any process is spawned (and
+// before backups/recorder hooks run). This guards against models that emit a
+// tool call with no arguments (e.g. a codex/responses-lite model served over
+// the chat-completions endpoint) silently running `bash -c ""`.
+func TestBashTool_RejectsEmptyCommand(t *testing.T) {
+	procs := NewProcessRegistry()
+	bt := BashTool{Procs: procs}
+
+	for _, cmd := range []string{"", "   ", "\t\n  "} {
+		args, _ := json.Marshal(map[string]interface{}{"command": cmd})
+		out, err := bt.Execute(args)
+		if err == nil {
+			t.Fatalf("expected error for command %q, got output %q", cmd, out)
+		}
+		if !strings.Contains(err.Error(), "empty command") {
+			t.Fatalf("expected 'empty command' error for %q, got %v", cmd, err)
+		}
+	}
+}
+
 // TestBashTool_StreamKeepsFullOutput verifies the chunked-tool-result fix:
 // when the command streams its output live (emit != nil), the canonical
 // returned result is NOT capped at bashMaxOutputLength (30000), so the full

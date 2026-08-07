@@ -33,6 +33,7 @@ var expectedBuiltinTools = []string{
 	"apply_patch",
 	"todowrite",
 	"todoread",
+	"todo_update",
 	"skill",
 	"question",
 	"webfetch",

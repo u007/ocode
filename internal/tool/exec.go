@@ -100,6 +100,14 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		return "", err
 	}
 
+	// Reject commands that are empty or contain only whitespace. A model that
+	// emits a tool call with no arguments (e.g. a codex/responses-lite model
+	// served over the chat-completions endpoint) would otherwise run `bash -c ""`,
+	// a silent no-op that can corrupt a multi-step plan. Fail loudly instead.
+	if strings.TrimSpace(params.Command) == "" {
+		return "", fmt.Errorf("bash: refusing to run an empty command")
+	}
+
 	tcID := snapshot.ToolCallIDFromContext(ctx)
 	var backedUpPaths []string
 	if tcID != "" {

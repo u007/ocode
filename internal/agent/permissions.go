@@ -784,7 +784,7 @@ func NewPermissionManager() *PermissionManager {
 	for k, v := range bashAutoAllowDefaultModes {
 		pm.bashPrefixModes[k] = v
 	}
-	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "ocr", "cron"} {
+	for _, name := range []string{"read", "glob", "grep", "list", "lsp", "lsp_diagnostics", "skill", "load_skill", "question", "todoread", "todowrite", "todo_update", "advisor", "task", "task_status", "agent_status", "repo_overview", "plan_enter", "plan_exit", "wait", "bash_output", "kill_shell", "ocr", "cron"} {
 		pm.rules[name] = PermissionAllow
 	}
 	for _, name := range []string{"write", "edit", "multiedit", "multi_file_edit", "replace_lines", "apply_patch", "format", "imagegen"} {

@@ -83,6 +83,32 @@ type AgentRun struct {
 	RetryCount int       // number of retries attempted
 	LastError  string    // last error message if retrying
 	RetryingAt time.Time // when the last retry started
+
+	// Output-contract verdict. ContractChecked is true when the dispatch
+	// carried an expected_output contract and verification ran. When
+	// checked, ContractSatisfied is the final verdict and
+	// ContractDeficiency is what the verifier said was missing (or the
+	// failure reason when the check itself failed). These are written
+	// exactly once, before finishOK/finishErr, on the dispatch goroutine.
+	ContractChecked    bool
+	ContractSatisfied  bool
+	ContractDeficiency string
+}
+
+// SetContractVerdict records the output-contract verdict for this run.
+func (r *AgentRun) SetContractVerdict(satisfied bool, deficiency string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ContractChecked = true
+	r.ContractSatisfied = satisfied
+	r.ContractDeficiency = deficiency
+}
+
+// ContractVerdict returns the run's contract verdict fields.
+func (r *AgentRun) ContractVerdict() (checked, satisfied bool, deficiency string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ContractChecked, r.ContractSatisfied, r.ContractDeficiency
 }
 
 // AddUsage accumulates input/output token counts reported by the provider.

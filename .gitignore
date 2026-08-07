@@ -13,6 +13,8 @@ internal/tui/.opencode
 
 # Markdown discovery corpus (auto-generated cache)
 .ocode/md-summaries.json
+# Per-session todo files (auto-generated, session-scoped plan)
+.ocode/todo/
 
 
 # Git worktrees (parallel development checkouts)
