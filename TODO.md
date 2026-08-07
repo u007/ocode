@@ -4,15 +4,14 @@
 
 Design: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`.
 
-- [ ] **Cross-project `.ojsonl` resume fallback not implemented.** `Load()`
-  only checks the current project's storage dir for a `.ojsonl` file;
-  `readSessionFileAnyProject` (used when a session id isn't found in the
-  current project, e.g. resuming from a different cwd) still only searches
-  for `.json` files. A session created as `.ojsonl` in one project directory
-  cannot currently be resumed by id from a different cwd. Deferred because
-  it wasn't needed for the core save/load/list/delete lifecycle this plan
-  covers — implement by adding the same `ojsonlSessionPath` + `fileExists`
-  check used in `Load` into `readSessionFileAnyProject`'s per-project loop.
+- [x] **Cross-project `.ojsonl` resume fallback.** DONE — `Load()`
+  now searches for a `.ojsonl` file first (bare id, then canonical prefixed
+  form) and `findOjsonlSessionAnyProject` (added 2026-08-05, commit
+  4981eea) falls back to `.ojsonl` files in *any* project's storage dir when
+  neither the current project's `.ojsonl` nor its legacy `.json` contains the
+  id — resuming a session created as `.ojsonl` from a different cwd now works.
+  Previously `readSessionFileAnyProject` searched only `.json` files and a
+  cross-project `.ojsonl` session could not be resumed by id.
 
 Design: `docs/superpowers/specs/2026-07-21-session-storage-ojsonl-design.md`.
 

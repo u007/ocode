@@ -327,7 +327,6 @@ function HomeApp() {
             )}
             {activeTab === "agents" && (
               <AgentsPanel
-                session={currentSessionId ?? undefined}
                 selectedRunId={selectedAgentRunId}
                 onSelectRun={setSelectedAgentRunId}
               />

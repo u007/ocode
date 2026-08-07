@@ -6485,20 +6485,18 @@ func (m model) handleMouseAction(mouse tea.Mouse, pressed bool) (tea.Model, tea.
 			return m, nil, true
 		}
 		// The dialog is rendered inside a bordered box in the input area.
-		// Content rows (0 = top border, 1..7 = content, 8 = bottom border):
+		// Content rows (0 = top border, 1..5 = content, 6 = bottom border):
 		//   0: ╔═ top border
 		//   1: ║ "⚠ Clear Ban List?"
 		//   2: ║ (blank)
 		//   3: ║ "Are you sure you want to clear all banned bash prefixes?"
 		//   4: ║ (blank)
-		//   5: ║ "This removes the default 'sed' ban too."
-		//   6: ║ (blank)
-		//   7: ║ hint with "[Yes]" and "[No]" buttons
-		//   8: ╚═ bottom border
+		//   5: ║ hint with "[Yes]" and "[No]" buttons
+		//   6: ╚═ bottom border
 		dialogTop := m.inputAreaTopY()
-		hintRowY := dialogTop + 7
+		hintRowY := dialogTop + 5
 		pw := m.panelWidth()
-		if mouse.Y >= dialogTop && mouse.Y <= dialogTop+8 && mouse.X < pw {
+		if mouse.Y >= dialogTop && mouse.Y <= dialogTop+6 && mouse.X < pw {
 			if mouse.Y == hintRowY {
 				// Content inside border starts at X=2 (║ at 0, padding at 1).
 				contentX := mouse.X - 2
@@ -10347,8 +10345,7 @@ func (m *model) handlePermissionModelCmd(args []string) tea.Cmd {
 		b.WriteString("Choose \"(not set)\" to clear the override and use the small model fallback.\n")
 
 		m.messages = append(m.messages, message{role: roleAssistant, text: b.String()})
-		m.openPermissionModelPicker()
-		return nil
+		return m.openPermissionModelPicker()
 	}
 
 	target := strings.TrimSpace(args[0])
@@ -19796,7 +19793,7 @@ func (m *model) renderBanClearConfirmDialog(width int) string {
 
 	contentWidth := max(0, width-2)
 	header := m.styles.Header.Render("⚠ Clear Ban List?")
-	body := "Are you sure you want to clear all banned bash prefixes?\n\nThis removes the default 'sed' ban too."
+	body := "Are you sure you want to clear all banned bash prefixes?"
 	// Hint with clickable Yes/No buttons. The positions are documented
 	// here and used by the mouse handler (see Update, banClearConfirm
 	// block) to determine which button was clicked.

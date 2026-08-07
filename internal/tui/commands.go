@@ -140,7 +140,7 @@ func init() {
 		{name: "/mcp-auth", usage: "/mcp-auth <server>", help: "Authenticate with remote MCP server via OAuth", handler: runMCPAuthCmd},
 		{name: "/agent", usage: "/agent <name>", help: "Switch agent (build, plan, review, debug, docs)", handler: runAgentCmd},
 		{name: "/permissions", usage: "/permissions [auto-add|auto-remove|mode|auto|model|<tool>]", help: "View or set tool, bash auto-allow, and LLM auto-permissions (model test runs tests)", handler: runPermissionsCmd},
-		{name: "/ban", usage: "/ban [list|add <command...>|remove <command...>|clear]", help: "List or manage banned bash command prefixes, including multi-word prefixes; /ban clear confirms before wiping them (default: sed)", handler: runBanCmd},
+		{name: "/ban", usage: "/ban [list|add <command...>|remove <command...>|clear]", help: "List or manage banned bash command prefixes, including multi-word prefixes; no prefixes are banned by default; /ban clear confirms before wiping them", handler: runBanCmd},
 		{name: "/yolo", usage: "/yolo [on|off|status]", help: "Toggle YOLO permissions mode", handler: runYoloCmd},
 		{name: "/small-model", usage: "/small-model [model]", help: "Show or switch the small model (used for lightweight tasks)", handler: runSmallModelCmd},
 		{name: "/github", usage: "/github <action> [args]", help: "GitHub actions (pr, issue, workflow)", handler: runGitHubCmd},

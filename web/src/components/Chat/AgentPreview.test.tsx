@@ -18,14 +18,14 @@ const runningRun: AgentRun = {
   children: [],
 };
 
-const mockUseAgentRuns = vi.fn<() => AgentRun[]>();
+const mockUseAgentRuns = vi.fn<() => { runs: AgentRun[]; loaded: boolean }>();
 vi.mock("../../hooks/useAgentRuns", () => ({
   useAgentRuns: () => mockUseAgentRuns(),
 }));
 
 describe("AgentPreview", () => {
   it("calls onOpenDetail with the run id when a run name is clicked", () => {
-    mockUseAgentRuns.mockReturnValue([runningRun]);
+    mockUseAgentRuns.mockReturnValue({ runs: [runningRun], loaded: true });
     const onOpenDetail = vi.fn();
     render(<AgentPreview onOpenDetail={onOpenDetail} />);
 
@@ -35,7 +35,7 @@ describe("AgentPreview", () => {
   });
 
   it("renders nothing when there are no runs", () => {
-    mockUseAgentRuns.mockReturnValue([]);
+    mockUseAgentRuns.mockReturnValue({ runs: [], loaded: true });
     const { container } = render(<AgentPreview onOpenDetail={vi.fn()} />);
 
     expect(container).toBeEmptyDOMElement();

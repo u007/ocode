@@ -2395,9 +2395,13 @@ func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *P
 //
 // The LLM is given a read_file tool so it can explore the codebase before
 // deciding. The tool call loop is capped at maxToolCalls to prevent abuse.
-func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *PermissionRequest) (bool, string, bool) {
+func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *PermissionRequest) (allowed bool, reason string, consulted bool) {
+	start := time.Now()
 	modelName := a.autoPermissionModelName()
 	modelLabel := a.autoPermissionModelDisplayName()
+	defer func() {
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_elapsed tool=%s model=%s allowed=%t consulted=%t elapsed=%s", toolName, modelLabel, allowed, consulted, time.Since(start)))
+	}()
 	if modelName == "unavailable" {
 		return false, "no permission model configured", false
 	}

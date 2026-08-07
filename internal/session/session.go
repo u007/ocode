@@ -279,11 +279,11 @@ func Load(id string) (*Session, error) {
 	}
 
 	// Check for .ojsonl first (try both the bare id and the canonical prefixed form).
-	ojsonlPath := ojsonlSessionPath(dir, id)
-	if !fileExists(ojsonlPath) && !strings.HasPrefix(id, canonicalSessionPrefix) {
-		ojsonlPath = ojsonlSessionPath(dir, canonicalSessionPrefix+id)
-	}
-	if fileExists(ojsonlPath) {
+	for _, candidate := range sessionCandidateIDs(id) {
+		ojsonlPath := ojsonlSessionPath(dir, candidate)
+		if !fileExists(ojsonlPath) {
+			continue
+		}
 		s, err := loadOjsonlSession(ojsonlPath)
 		if err != nil {
 			return nil, err
@@ -390,12 +390,21 @@ func findOjsonlSessionAnyProject(id string) (string, bool) {
 			continue
 		}
 		dir := filepath.Join(dataDir, "project", entry.Name(), "sessions")
-		path := ojsonlSessionPath(dir, id)
-		if fileExists(path) {
-			return path, true
+		for _, candidate := range sessionCandidateIDs(id) {
+			path := ojsonlSessionPath(dir, candidate)
+			if fileExists(path) {
+				return path, true
+			}
 		}
 	}
 	return "", false
+}
+
+func sessionCandidateIDs(id string) []string {
+	if strings.HasPrefix(id, canonicalSessionPrefix) {
+		return []string{id, strings.TrimPrefix(id, canonicalSessionPrefix)}
+	}
+	return []string{id, canonicalSessionPrefix + id}
 }
 
 func readSessionFile(dir, id string) (string, []byte, error) {
@@ -420,16 +429,7 @@ func readSessionFile(dir, id string) (string, []byte, error) {
 }
 
 func sessionLoadPaths(dir, id string) []string {
-	ids := []string{id}
-	switch {
-	case strings.HasPrefix(id, canonicalSessionPrefix):
-		legacyID := strings.TrimPrefix(id, canonicalSessionPrefix)
-		if legacyID != "" && legacyID != id {
-			ids = append(ids, legacyID)
-		}
-	default:
-		ids = append(ids, canonicalSessionPrefix+id)
-	}
+	ids := sessionCandidateIDs(id)
 	paths := make([]string, 0, len(ids))
 	seen := make(map[string]struct{}, len(ids))
 	for _, candidate := range ids {

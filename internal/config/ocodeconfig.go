@@ -171,6 +171,17 @@ type OcodeConfig struct {
 	// MaxConcurrentAgents caps how many subagents (task tool dispatches) may
 	// run at once; excess dispatches queue until a slot frees up. Defaults to
 	// 2. 0 means unlimited.
+	//
+	// Access discipline (keep this invariant): the live limit is enforced by
+	// AgentRunRegistry.SetMaxConcurrent / MaxConcurrent, which are
+	// mutex-protected — that is the single source of truth at runtime. This
+	// field is a plain int on purpose (JSON-serialized; atomic types would
+	// break encoding/json), and its in-memory value is written ONLY from the
+	// TUI event-loop goroutine in handleAgentsLimitCmd, which is queue-gated
+	// while the agent is streaming — so a subagent's construction-time read of
+	// this field (internal/agent/agent.go, SetMaxConcurrent) can never overlap
+	// a write. Never read or write this field from a background goroutine;
+	// route runtime limit changes through the registry instead.
 	MaxConcurrentAgents int `json:"max_concurrent_agents"`
 
 	// UploadDir overrides the default directory used by the /upload and

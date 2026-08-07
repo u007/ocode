@@ -793,7 +793,9 @@ func NewPermissionManager() *PermissionManager {
 	for _, name := range []string{"delete", "bash", "webfetch", "websearch", "repo_clone", "mcp_*"} {
 		pm.SetRule(name, PermissionAsk)
 	}
-	pm.SetBashPrefixRule("sed", PermissionDeny)
+	// No bash prefixes are banned by default — bans are opt-in via
+	// `/ban add <prefix>`. The `sed` special-casing below (compound-command
+	// parsing) applies to any sed rule a user configures.
 	return pm
 }
 
@@ -890,6 +892,14 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if isHardBlockedCommand(command) {
 			emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionDeny}
+		}
+		if parsed, err := parseShellCommandLine(command); err == nil {
+			for _, cmd := range parsed {
+				if reason := dangerousRmReason(pm, cmd.cmdWords); reason != "" {
+					emitDebug("perm", fmt.Sprintf("Decide ASK (dangerous rm): tool=bash command=%q reason=%s", command, reason))
+					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "rm")}
+				}
+			}
 		}
 		if pm.mode == PermissionModeYOLO {
 			emitDebug("perm", "Decide ALLOW (yolo): tool=bash")
@@ -2852,6 +2862,61 @@ func isLikelyPathArg(arg string) bool {
 		return true
 	}
 	return false
+}
+
+// dangerousRmReason reports why a `rm` invocation with a recursive and/or
+// force flag should always require human approval, regardless of YOLO mode
+// or any persisted "rm" bash-prefix rule. isHardBlockedCommand only catches
+// the exact literal "rm -rf /", so without this check YOLO mode gave
+// `rm -rf ../`, `rm -rf ~`, or `rm -rf /absolute/path` an unconditional
+// ALLOW with no scope check at all. Returns "" when the command isn't a
+// scope-violating rm.
+func dangerousRmReason(pm *PermissionManager, fields []string) string {
+	if len(fields) == 0 || filepath.Base(fields[0]) != "rm" {
+		return ""
+	}
+	hasForce, hasRecursive := false, false
+	var targets []string
+	for i := 1; i < len(fields); i++ {
+		arg := fields[i]
+		if arg == "--" {
+			targets = append(targets, fields[i+1:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "--") {
+			switch arg {
+			case "--force":
+				hasForce = true
+			case "--recursive":
+				hasRecursive = true
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && len(arg) > 1 {
+			for _, c := range arg[1:] {
+				if c == 'f' {
+					hasForce = true
+				} else if c == 'r' || c == 'R' {
+					hasRecursive = true
+				}
+			}
+			continue
+		}
+		targets = append(targets, arg)
+	}
+	if !hasForce && !hasRecursive {
+		return ""
+	}
+	if pm == nil || pm.workDir == "" {
+		return ""
+	}
+	for _, t := range targets {
+		resolved := resolvePath(t, pm.workDir)
+		if !isWithinAllowedScope(pm, resolved) {
+			return fmt.Sprintf("rm target %q resolves outside allowed scope", t)
+		}
+	}
+	return ""
 }
 
 func isHardBlockedCommand(command string) bool {

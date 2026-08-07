@@ -2,6 +2,7 @@ package agent
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -666,5 +667,135 @@ func TestBeginResumeRearmsTeardownAndDoneChannels(t *testing.T) {
 	case <-newDone:
 	default:
 		t.Fatal("Done() (post-resume) did not close after the resumed run's finishOK")
+	}
+}
+
+// TestAgentRunQueuedLifecycleRaceStress hammers the queued-run lifecycle —
+// AcquireForRun admission, CancelOwned on queued runs, PruneCompleted, and
+// live SetMaxConcurrent resizes — from many goroutines at once. It exists to
+// be run under `go test -race`: it proves the limiter accounting, the
+// queued-run registry entries, and the Done()-channel wakeups are all
+// synchronized, not just functionally correct in the single-threaded tests.
+func TestAgentRunQueuedLifecycleRaceStress(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.SetMaxConcurrent(2)
+
+	const workers = 24
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Dispatch workers: each creates a run, queues it, and acquires a slot
+	// (or observes cancellation while queued), then finishes and releases.
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				run := r.New("stress")
+				run.markQueued()
+				release, err := r.AcquireForRun(run, nil)
+				if err != nil {
+					run.tryFinishCancelled()
+					r.notifyDone(run)
+					continue
+				}
+				if !run.beginExecution() {
+					release()
+					r.notifyDone(run)
+					continue
+				}
+				// Simulate the sub-agent goroutine doing a little work while
+				// holding the slot, then finishing like runBackgroundDispatch.
+				time.Sleep(time.Millisecond)
+				run.finishOK("ok")
+				release()
+				r.notifyDone(run)
+			}
+		}()
+	}
+
+	// Canceller: randomly cancel runs that are currently queued (only ones
+	// this goroutine "owns" via the empty dispatcher match).
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for _, run := range r.Snapshot() {
+				if run.statusValue() == RunQueued {
+					_ = r.CancelOwned(run.ID, "")
+				}
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	// Pruner: keep the registry bounded, exactly like the agent loop does.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			r.PruneCompleted(30)
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	// Resizer: churn the live limit between 1, 2, and 0 (unlimited), which
+	// exercises setMax's broadcast wakeups against in-flight admissions.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		limits := []int{1, 2, 0}
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			r.SetMaxConcurrent(limits[i%len(limits)])
+			i++
+			time.Sleep(3 * time.Millisecond)
+		}
+	}()
+
+	time.Sleep(500 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+
+	// Accounting must be consistent after quiescence: no negative queued
+	// count, and the limiter must admit new work (max may be 0 = unlimited
+	// or 1/2; either way an Acquire must not hang forever).
+	r.SetMaxConcurrent(2)
+	release, err := r.Acquire(nil)
+	if err != nil {
+		t.Fatalf("Acquire after stress failed: %v", err)
+	}
+	release()
+	if q := r.QueuedCount(); q < 0 {
+		t.Fatalf("QueuedCount() = %d after stress, want >= 0", q)
+	}
+	for _, run := range r.Snapshot() {
+		if run.CurrentStatus().IsActive() {
+			t.Fatalf("run %s remains active after stress: %s", run.ID, run.CurrentStatus())
+		}
+	}
+	r.PruneCompleted(0)
+	if runs := r.Snapshot(); len(runs) != 0 {
+		t.Fatalf("PruneCompleted(0) left %d terminal runs", len(runs))
 	}
 }

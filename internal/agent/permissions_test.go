@@ -132,6 +132,48 @@ func TestPermissions_YOLO_Allows(t *testing.T) {
 	}
 }
 
+// TestPermissions_YOLO_DangerousRmOutOfScope_StillAsks confirms that
+// isHardBlockedCommand's literal "rm -rf /" match is not the only guard:
+// recursive/force rm targeting a path outside the workdir must always ask,
+// even under YOLO, even for targets other than the literal root.
+func TestPermissions_YOLO_DangerousRmOutOfScope_StillAsks(t *testing.T) {
+	cases := []struct {
+		name    string
+		command string
+	}{
+		{"parent traversal", "rm -rf ../"},
+		{"absolute path outside project", "rm -rf /Users/test/other-project"},
+		{"home dir shorthand", "rm -rf ~"},
+		{"force without recursive", "rm -f /Users/test/other-project/file.txt"},
+		{"flags split apart", "rm -f -r /Users/test/other-project"},
+		{"long flags", "rm --recursive --force /Users/test/other-project"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pm := NewPermissionManager()
+			pm.SetWorkDir("/Users/test/project")
+			pm.SetMode(PermissionModeYOLO)
+			dec := pm.Decide("bash", json.RawMessage(fmt.Sprintf(`{"command":%q}`, tc.command)))
+			if dec.Level != PermissionAsk {
+				t.Fatalf("Decide(%q) = %s, want Ask", tc.command, dec.Level)
+			}
+		})
+	}
+}
+
+// TestPermissions_YOLO_RmInScope_StillAllowed confirms the new dangerous-rm
+// guard doesn't regress the common case: recursive/force rm targeting a path
+// inside the workdir stays a plain YOLO allow.
+func TestPermissions_YOLO_RmInScope_StillAllowed(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetWorkDir("/Users/test/project")
+	pm.SetMode(PermissionModeYOLO)
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"rm -rf build"}`))
+	if dec.Level != PermissionAllow {
+		t.Fatalf("in-scope rm should still be YOLO-allowed, got %s", dec.Level)
+	}
+}
+
 func TestPermissions_BashAutoAllowInRoot_PersistsProjectScopedRule(t *testing.T) {
 	workDir := t.TempDir()
 	resolvedWorkDir, err := filepath.EvalSymlinks(workDir)
@@ -719,16 +761,30 @@ func TestPermissions_ExportConfigPreservesAutoPermissionEnabled(t *testing.T) {
 	}
 }
 
-func TestPermissions_DefaultBashBanIncludesSed(t *testing.T) {
+func TestPermissions_NoDefaultBashBan(t *testing.T) {
 	pm := NewPermissionManager()
+	if banList := pm.BashBannedPrefixes(); len(banList) != 0 {
+		t.Fatalf("expected no bash prefixes banned by default, got %#v", banList)
+	}
+
+	dec := pm.Decide("bash", json.RawMessage(`{"command":"sed -n '1,3p' /etc/hosts"}`))
+	if dec.Level == PermissionDeny {
+		t.Fatalf("expected sed command to not be denied by default, got %s", dec.Level)
+	}
+}
+
+func TestPermissions_ManualBashBanIncludesSed(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetBashPrefixRule("sed", PermissionDeny)
+
 	banList := pm.BashBannedPrefixes()
 	if len(banList) == 0 || banList[0] != "sed" {
-		t.Fatalf("expected sed to be banned by default, got %#v", banList)
+		t.Fatalf("expected sed to be banned after manual add, got %#v", banList)
 	}
 
 	dec := pm.Decide("bash", json.RawMessage(`{"command":"sed -n '1,3p' /etc/hosts"}`))
 	if dec.Level != PermissionDeny {
-		t.Fatalf("expected sed command to be denied by default, got %s", dec.Level)
+		t.Fatalf("expected sed command to be denied after manual ban, got %s", dec.Level)
 	}
 }
 

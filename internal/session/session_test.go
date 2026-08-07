@@ -840,3 +840,41 @@ func TestLoadCrossProjectOjsonlFallback(t *testing.T) {
 		t.Fatalf("expected seeded messages, got %+v", sess.Messages)
 	}
 }
+
+func TestLoadCrossProjectOjsonlFallbackBareID(t *testing.T) {
+	seedDir := t.TempDir()
+	otherDir := t.TempDir()
+
+	origWd, _ := os.Getwd()
+	defer os.Chdir(origWd)
+	if err := os.Chdir(otherDir); err != nil {
+		t.Fatal(err)
+	}
+	sessID := NewSessionID()
+	if err := Save(sessID, "Cross-project bare ID", []agent.Message{{Role: "user", Content: "hello"}}, nil); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	seededDir, err := GetStorageDir()
+	if err != nil {
+		t.Fatalf("GetStorageDir: %v", err)
+	}
+	seededFile := filepath.Join(seededDir, sessID+".ojsonl")
+	if _, err := os.Stat(seededFile); err != nil {
+		t.Fatalf("expected seeded ojsonl file at %s: %v", seededFile, err)
+	}
+	t.Cleanup(func() {
+		os.Remove(seededFile)
+		os.Remove(filepath.Join(seededDir, "index.json"))
+	})
+
+	if err := os.Chdir(seedDir); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := Load(strings.TrimPrefix(sessID, canonicalSessionPrefix))
+	if err != nil {
+		t.Fatalf("Load from different cwd with bare ID failed: %v", err)
+	}
+	if sess.ID != sessID || sess.Title != "Cross-project bare ID" {
+		t.Fatalf("expected cross-project session, got %+v", sess)
+	}
+}

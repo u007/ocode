@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,8 +73,9 @@ type InstanceInfo struct {
 }
 
 type chatInstance struct {
-	info      InstanceInfo
-	processID string // tool.Process.ID, empty when stopped
+	info         InstanceInfo
+	processID    string // tool.Process.ID, empty when stopped
+	warmupCancel context.CancelFunc
 }
 
 // markInstanceState records state for modelID's in-process instance record.
@@ -334,13 +337,23 @@ func waitForChatHealth(modelID, base string, man ServerManifest) error {
 				chatBreakerRecordFailure(modelID)
 				return fmt.Errorf("spawned chat server on %s serves %v, not %s", base, served, modelID)
 			}
+			warmupCtx, warmupCancel := context.WithCancel(context.Background())
 			instMu.Lock()
 			if inst, ok := instances[modelID]; ok {
+				if inst.warmupCancel != nil {
+					inst.warmupCancel()
+				}
 				inst.info.State = InstanceReady
 				inst.info.BaseURL = base
+				inst.warmupCancel = warmupCancel
 			}
 			instMu.Unlock()
 			chatBreakerReset(modelID)
+			// Fire-and-forget: the warm-up is best-effort and only improves a
+			// later RSS reading; a slow first forward pass (up to the client's
+			// 60s timeout) must not stall health-ready reporting, so it runs
+			// off the caller's critical path.
+			go warmUpChatModel(warmupCtx, base, man)
 			return nil
 		}
 		time.Sleep(time.Second)
@@ -348,6 +361,50 @@ func waitForChatHealth(modelID, base string, man ServerManifest) error {
 	markInstanceState(modelID, InstanceStopped)
 	chatBreakerRecordFailure(modelID)
 	return fmt.Errorf("local chat server for %q did not become healthy on %s", modelID, base)
+}
+
+// warmUpChatModel issues one minimal completion request so the memory figure
+// /localmodel list reports (via RSSBytes, OS-level process RSS) reflects the
+// model actually being resident rather than just the server process having
+// bound its port. This matters most for the MLX backend: mlx_lm's arrays are
+// lazily evaluated, so a freshly-spawned mlx_lm.server has only loaded the
+// weight graph, not materialized it into unified memory — RSS stays near the
+// bare Python/MLX interpreter footprint (a few hundred MB) until the first
+// forward pass forces evaluation. llama.cpp's server loads and typically
+// touches weight pages eagerly at startup, so this call is a no-op there in
+// effect, but issuing it uniformly (rather than special-casing by backend)
+// keeps the reported number consistent and meaningful across every backend
+// and platform (MLX/darwin, llama.cpp GGUF on darwin/linux/windows) without
+// depending on any OS- or backend-specific memory-accounting API.
+//
+// Best-effort: a failure here (slow first load, server hiccup) must not fail
+// model startup. The request is cancelled when its instance is stopped or
+// replaced, and failures are logged for diagnostics.
+func warmUpChatModel(ctx context.Context, base string, man ServerManifest) {
+	if man.CompletionPath == "" {
+		return
+	}
+	body := fmt.Sprintf(`{"model":%q,"messages":[{"role":"user","content":"hi"}],"max_tokens":1}`, man.ExpectedServeID())
+	client := &http.Client{Timeout: 60 * time.Second}
+	started := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+man.CompletionPath, bytes.NewBufferString(body))
+	if err != nil {
+		log.Printf("local model warm-up %q: build request: %v", man.ModelID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Printf("local model warm-up %q after %s: %v", man.ModelID, time.Since(started).Round(time.Millisecond), err)
+		}
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		log.Printf("local model warm-up %q after %s: HTTP %s", man.ModelID, time.Since(started).Round(time.Millisecond), resp.Status)
+	}
 }
 
 // chatStartLockStaleAfter bounds how long a start-lock file may be held
@@ -715,7 +772,11 @@ func StopModelInstance(procs *tool.ProcessRegistry, modelID string) error {
 		return nil
 	}
 	procID := inst.processID
+	warmupCancel := inst.warmupCancel
 	instMu.Unlock()
+	if warmupCancel != nil {
+		warmupCancel()
+	}
 
 	if procs != nil {
 		if _, err := procs.Kill(procID); err != nil {

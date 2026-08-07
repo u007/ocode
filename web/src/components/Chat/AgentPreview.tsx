@@ -12,7 +12,7 @@ interface AgentPreviewProps {
 // inline. Renders nothing when no runs are active.
 export default function AgentPreview({ onOpenDetail }: AgentPreviewProps) {
   const { sessionId } = useChatState();
-  const runs = useAgentRuns(sessionId);
+  const { runs } = useAgentRuns(sessionId);
 
   if (runs.length === 0) return null;
 

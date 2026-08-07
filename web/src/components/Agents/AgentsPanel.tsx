@@ -1,10 +1,10 @@
 import { ArrowLeft, Bot } from "lucide-react";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
+import { useChatState } from "../../stores/chatStore";
 import RunNode, { childSummary, elapsed, statusStyles } from "./RunNode";
 import type { AgentRun } from "../../api/types";
 
 interface AgentsPanelProps {
-  session: string | undefined;
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
 }
@@ -47,8 +47,12 @@ function AgentListRow({ run, onOpen }: { run: AgentRun; onOpen: () => void }) {
   );
 }
 
-export default function AgentsPanel({ session, selectedRunId, onSelectRun }: AgentsPanelProps) {
-  const runs = useAgentRuns(session ?? null);
+export default function AgentsPanel({ selectedRunId, onSelectRun }: AgentsPanelProps) {
+  // Session comes from the chat store — the same single source the agent
+  // preview rail uses — so a run clicked in the preview is always looked up in
+  // the exact tree that produced it.
+  const { sessionId } = useChatState();
+  const { runs, loaded } = useAgentRuns(sessionId);
   const selected = selectedRunId ? findRun(runs, selectedRunId) : undefined;
 
   if (selected) {
@@ -75,6 +79,38 @@ export default function AgentsPanel({ session, selectedRunId, onSelectRun }: Age
         <div className="flex-1 overflow-y-auto p-3">
           <RunNode run={selected} depth={0} />
         </div>
+      </div>
+    );
+  }
+
+  // A run id is selected but the tree hasn't loaded yet (the SSE stream sends
+  // its first snapshot after connect). Don't fall through to the list or the
+  // empty state yet — that would make the click appear to have done nothing.
+  if (selectedRunId && !loaded) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-2 text-zinc-500">
+        <Bot className="h-8 w-8 animate-pulse" />
+        <p className="text-sm">Loading agent run…</p>
+      </div>
+    );
+  }
+
+  // The tree is loaded but the selected run is not in it (e.g. the registry
+  // pruned it, or the session changed underneath the selection). Surface this
+  // instead of silently showing an unrelated list.
+  if (selectedRunId && loaded) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 p-4 text-center text-zinc-500">
+        <Bot className="h-8 w-8" />
+        <p className="max-w-sm text-sm">
+          This agent run is no longer available in the current session's run list.
+        </p>
+        <button
+          onClick={() => onSelectRun(null)}
+          className="rounded-md bg-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100"
+        >
+          Back to all runs
+        </button>
       </div>
     );
   }

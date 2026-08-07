@@ -239,6 +239,26 @@ var localManifests = []ServerManifest{
 		CompletionPath: "/v1/chat/completions",
 	},
 	{
+		// Qwen3-4B-Instruct-2507, 4-bit MLX quant (mlx-community). Evaluated
+		// as a replacement auto-permission judge for local/bonsai-8b-1bit: the
+		// 1-bit Bonsai quant fabricated banned-prefix matches that were not
+		// present in the command (e.g. claiming "sed -i" on a plain git push).
+		// Qwen3-4B-Instruct-4bit reproduced none of those hallucinations
+		// across a 7-case suite built from real auto-permission session
+		// history, at ~1.2s/judgment (~19x faster than the -Thinking variant,
+		// which spends its budget on <think> reasoning before the verdict
+		// line) and ~3GB peak VRAM.
+		OS: "darwin", Arch: "arm64",
+		ModelID: "local/qwen3-4b-instruct-4bit", Kind: "chat", Backend: BackendMLX,
+		MLXRepo: "mlx-community/Qwen3-4B-Instruct-2507-4bit",
+		LaunchArgv: []string{"python3", "-m", "mlx_lm.server",
+			"--model", "{repo}",
+			"--host", "127.0.0.1",
+			"--port", "{port}"},
+		HealthPath:     "/v1/models",
+		CompletionPath: "/v1/chat/completions",
+	},
+	{
 		// Bonsai 8B, 1-bit — macOS Intel, via llama.cpp GGUF
 		// (prism-ml/Bonsai-8B-gguf). --parallel is llama-server's
 		// concurrent-request-slot flag (aka -np), substituted from

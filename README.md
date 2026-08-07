@@ -276,7 +276,7 @@ Type `/` in the chat input to open the palette. Commands execute inline or via `
 | `/ide` | | Connect to VS Code (Claude Code extension) |
 | `/theme` | `/themes` | Switch themes instantly |
 | `/permissions` | | View/set tool and bash permissions |
-| `/ban` | | List or manage banned bash command prefixes, including multi-word prefixes (`/ban clear` confirms before wiping them; default: sed) |
+| `/ban` | | List or manage banned bash command prefixes, including multi-word prefixes (`/ban clear` confirms before wiping them; no prefixes are banned by default) |
 | `/yolo` | | Toggle YOLO mode on/off |
 | `/git` | | Git operations from command line |
 | `/github` | | PR, issue, and workflow commands |

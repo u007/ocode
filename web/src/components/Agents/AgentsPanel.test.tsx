@@ -29,23 +29,28 @@ const runs: AgentRun[] = [
   },
 ];
 
-const mockUseAgentRuns = vi.fn<() => AgentRun[]>();
+// The panel resolves its session from the chat store, like AgentPreview does.
+vi.mock("../../stores/chatStore", () => ({
+  useChatState: () => ({ sessionId: "session-1" }),
+}));
+
+const mockUseAgentRuns = vi.fn<() => { runs: AgentRun[]; loaded: boolean }>();
 vi.mock("../../hooks/useAgentRuns", () => ({
   useAgentRuns: () => mockUseAgentRuns(),
 }));
 
 describe("AgentsPanel", () => {
   it("shows the empty state when there are no runs", () => {
-    mockUseAgentRuns.mockReturnValue([]);
-    render(<AgentsPanel session="session-1" selectedRunId={null} onSelectRun={vi.fn()} />);
+    mockUseAgentRuns.mockReturnValue({ runs: [], loaded: true });
+    render(<AgentsPanel selectedRunId={null} onSelectRun={vi.fn()} />);
 
     expect(screen.getByText("No agent runs yet in this session.")).toBeInTheDocument();
   });
 
   it("renders the run list and opens a run's detail view on click", () => {
-    mockUseAgentRuns.mockReturnValue(runs);
+    mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
     const onSelectRun = vi.fn();
-    render(<AgentsPanel session="session-1" selectedRunId={null} onSelectRun={onSelectRun} />);
+    render(<AgentsPanel selectedRunId={null} onSelectRun={onSelectRun} />);
 
     expect(screen.getByText("code-reviewer")).toBeInTheDocument();
     fireEvent.click(screen.getByText("code-reviewer"));
@@ -53,19 +58,49 @@ describe("AgentsPanel", () => {
   });
 
   it("renders the selected run's full tree, including nested children, in detail view", () => {
-    mockUseAgentRuns.mockReturnValue(runs);
-    render(<AgentsPanel session="session-1" selectedRunId="run-1" onSelectRun={vi.fn()} />);
+    mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
+    render(<AgentsPanel selectedRunId="run-1" onSelectRun={vi.fn()} />);
 
     expect(screen.getByText("reviewed")).toBeInTheDocument();
     expect(screen.getByText("sub-linter")).toBeInTheDocument();
   });
 
   it("calls onSelectRun(null) when the back button is clicked", () => {
-    mockUseAgentRuns.mockReturnValue(runs);
+    mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
     const onSelectRun = vi.fn();
-    render(<AgentsPanel session="session-1" selectedRunId="run-1" onSelectRun={onSelectRun} />);
+    render(<AgentsPanel selectedRunId="run-1" onSelectRun={onSelectRun} />);
 
     fireEvent.click(screen.getByText("Agents"));
+    expect(onSelectRun).toHaveBeenCalledWith(null);
+  });
+
+  it("shows a loading state while the tree has not arrived yet instead of falling through", () => {
+    mockUseAgentRuns.mockReturnValue({ runs: [], loaded: false });
+    render(<AgentsPanel selectedRunId="run-1" onSelectRun={vi.fn()} />);
+
+    expect(screen.getByText("Loading agent run…")).toBeInTheDocument();
+    expect(
+      screen.queryByText("No agent runs yet in this session."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("surfaces a selected run that is missing from the loaded tree instead of silently showing the list", () => {
+    mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
+    render(<AgentsPanel selectedRunId="gone-run" onSelectRun={vi.fn()} />);
+
+    expect(
+      screen.getByText("This agent run is no longer available in the current session's run list."),
+    ).toBeInTheDocument();
+    // Must not silently fall through to the unrelated run list.
+    expect(screen.queryByText("code-reviewer")).not.toBeInTheDocument();
+  });
+
+  it("back button in the missing-run view clears the selection", () => {
+    mockUseAgentRuns.mockReturnValue({ runs, loaded: true });
+    const onSelectRun = vi.fn();
+    render(<AgentsPanel selectedRunId="gone-run" onSelectRun={onSelectRun} />);
+
+    fireEvent.click(screen.getByText("Back to all runs"));
     expect(onSelectRun).toHaveBeenCalledWith(null);
   });
 });

@@ -62,8 +62,44 @@ func (m *model) openPermissionModelPicker() tea.Cmd {
 	// active model.
 	cmd := m.openModelPicker()
 	m.pickerKind = "permission-model"
+	// openModelPicker deliberately omits /localmodel entries (see its
+	// comment) since general chat-model selection scopes local models to
+	// /model. The permission-model picker is the opposite case: registered
+	// local models (e.g. local/qwen3-4b-instruct-4bit) are the primary,
+	// expected target for the auto-permission judge, so surface them here.
+	m.appendPermissionModelLocalModels()
 	m.prependPermissionModelClearOption()
 	return cmd
+}
+
+// appendPermissionModelLocalModels adds an enabled-local-models section to
+// the permission-model picker. Only enabled entries are listed — a
+// registered-but-disabled model would be immediately rejected by
+// handlePermissionModelCmd (it cannot serve permission decisions until
+// enabled via /localmodel enable), so showing it as selectable would just be
+// a dead end.
+func (m *model) appendPermissionModelLocalModels() {
+	if m.pickerKind != "permission-model" || m.config == nil {
+		return
+	}
+	ids := make([]string, 0, len(m.config.Ocode.LocalModels))
+	for id, lm := range m.config.Ocode.LocalModels {
+		if lm.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+	m.pickerItems = append(m.pickerItems, "Local Models")
+	m.pickerValues = append(m.pickerValues, "")
+	m.pickerIsHeader = append(m.pickerIsHeader, true)
+	for _, id := range ids {
+		m.pickerItems = append(m.pickerItems, "  "+id)
+		m.pickerValues = append(m.pickerValues, id)
+		m.pickerIsHeader = append(m.pickerIsHeader, false)
+	}
 }
 
 func (m *model) prependPermissionModelClearOption() {
@@ -95,6 +131,7 @@ func (m *model) refreshModelPickerItems() {
 	m.pickerFilter = filter
 	m.pickerIndex = idx
 	if kind == "permission-model" {
+		m.appendPermissionModelLocalModels()
 		m.prependPermissionModelClearOption()
 	}
 	if kind == "small-model" {

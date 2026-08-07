@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/u007/ocode/internal/config"
 )
@@ -184,9 +185,13 @@ func (a *Agent) acquireInterpreterSource(ie *InterpreterExec) (source, sha strin
 // falls back to human Ask (allowed=false). consulted==false means no verdict was
 // obtained at all (no model, source unreadable, server down, transport failure) —
 // see askPermissionModel for why callers must not report those as denials.
-func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExec) (bool, string, string, bool) {
+func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExec) (allowed bool, reason string, summary string, consulted bool) {
+	start := time.Now()
 	modelName := a.autoPermissionModelName()
 	modelLabel := a.autoPermissionModelDisplayName()
+	defer func() {
+		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_elapsed lang=%s mode=%s model=%s allowed=%t consulted=%t elapsed=%s", ie.Language, ie.SourceMode, modelLabel, allowed, consulted, time.Since(start)))
+	}()
 	if modelName == "unavailable" {
 		return false, "no permission model configured", "", false
 	}
@@ -335,7 +340,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 		}
 		finalText = retryText
 	}
-	summary := strings.TrimSpace(resp.Summary)
+	summary = strings.TrimSpace(resp.Summary)
 
 	if allowed, reason := a.verifyInterpreterEffects(ie, &resp, minConfidence, allowDestructive, truncated); !allowed {
 		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_reject lang=%s conf=%.2f reason=%s", ie.Language, resp.Confidence, reason))

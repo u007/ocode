@@ -6746,12 +6746,13 @@ func TestRunBanCmdListsAddsAndRemovesPrefixes(t *testing.T) {
 		input:  textarea.New(),
 	}
 
+	runBanCmd(&m, []string{"add", "sed"})
 	runBanCmd(&m, nil)
 	if len(m.messages) == 0 {
 		t.Fatal("expected ban list output")
 	}
 	if got := m.messages[len(m.messages)-1].text; !strings.Contains(got, "sed") {
-		t.Fatalf("expected default ban list to include sed, got %q", got)
+		t.Fatalf("expected ban list to include manually added sed, got %q", got)
 	}
 
 	runBanCmd(&m, []string{"grep", "-n"})
@@ -6811,13 +6812,18 @@ func TestRunBanCmdClearRequiresConfirmation(t *testing.T) {
 	if got := m.agent.Permissions().BashPrefixRules()["grep -n"]; got != agent.PermissionDeny {
 		t.Fatalf("expected grep -n to be banned before clear, got %s", got)
 	}
+	runBanCmd(&m, []string{"add", "sed"})
 	if got := m.agent.Permissions().BashPrefixRules()["sed"]; got != agent.PermissionDeny {
-		t.Fatalf("expected sed to remain banned before clear, got %s", got)
+		t.Fatalf("expected sed to be banned before clear, got %s", got)
 	}
 
 	runBanCmd(&m, []string{"clear"})
 	if !m.banClearConfirm {
 		t.Fatal("expected /ban clear to open a confirmation dialog")
+	}
+	dialog := m.renderBanClearConfirmDialog(80)
+	if strings.Contains(dialog, "default 'sed' ban") {
+		t.Fatalf("expected ban clear dialog not to claim sed is banned by default, got %q", dialog)
 	}
 
 	updated, _ := m.handleChatKeys(tea.KeyPressMsg{Code: 'y', Text: "y"}, nil, nil)

@@ -81,7 +81,7 @@ ocode starts in **normal mode** (project-confined file writes allowed, dangerous
 }
 ```
 
-Or use `/permissions` in the TUI to view/edit rules interactively, or `/ban` to manage the bash deny list (default: `sed`, supports multi-word prefixes like `grep -n`, and `/ban clear` asks for confirmation first).
+Or use `/permissions` in the TUI to view/edit rules interactively, or `/ban` to manage the bash deny list (bans are opt-in, supports multi-word prefixes like `grep -n`, and `/ban clear` asks for confirmation first).
 
 For hands-off operation, set an `auto_permission_model`:
 
