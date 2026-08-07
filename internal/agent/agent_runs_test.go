@@ -187,6 +187,53 @@ func TestCancelOwnedCorrectDispatcher(t *testing.T) {
 	}
 }
 
+// TestCancelOwnedForceReleasesSlotForHungRun reproduces the "cancel a run
+// stuck inside a plain Tool.Execute call" scenario: Tool.Execute takes no
+// context, so Cancel() closing stopCh does not make a hung tool call return,
+// and the dispatch goroutine's own deferred releaseOwnSlot() never runs.
+// CancelOwned must force-release the slot itself so a run queued behind the
+// hung one can proceed immediately, instead of waiting forever for a
+// goroutine that will never come back.
+func TestCancelOwnedForceReleasesSlotForHungRun(t *testing.T) {
+	r := NewAgentRunRegistry()
+	r.SetMaxConcurrent(1)
+
+	run1 := r.New("hung")
+	run1.Dispatcher = "build"
+	run1.Cancel = func() {} // stopCh close has no effect on the "hung" tool call
+	release, err := r.AcquireForRun(run1, nil)
+	if err != nil {
+		t.Fatalf("run1 Acquire err: %v", err)
+	}
+	run1.Sub = &Agent{}
+	run1.Sub.setOwnSlot(release)
+	// Deliberately never call run1.Sub.releaseOwnSlot() here — this stands in
+	// for the goroutine being permanently blocked inside Tool.Execute.
+
+	run2 := r.New("queued")
+	run2.markQueued()
+	run2.Cancel = func() {}
+	errCh := make(chan error, 1)
+	go func() {
+		_, aerr := r.AcquireForRun(run2, nil)
+		errCh <- aerr
+	}()
+	waitForQueued(t, r)
+
+	if cerr := r.CancelOwned(run1.ID, "build"); cerr != nil {
+		t.Fatalf("CancelOwned err: %v", cerr)
+	}
+
+	select {
+	case aerr := <-errCh:
+		if aerr != nil {
+			t.Fatalf("run2 AcquireForRun err = %v, want nil (slot should have been force-released)", aerr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("run2 stayed queued after run1 was cancelled — slot was not force-released")
+	}
+}
+
 func TestCancelOwnedAlreadyDoneIsNoOp(t *testing.T) {
 	r := NewAgentRunRegistry()
 	run := r.New("explore")

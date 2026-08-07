@@ -293,28 +293,6 @@ func Load(id string) (*Session, error) {
 	}
 	path, data, err := readSessionFile(dir, id)
 	if err != nil {
-		if os.IsNotExist(err) && shouldSearchOtherProjects(id) {
-			fallbackPath, fallbackData, fallbackErr := readSessionFileAnyProject(id)
-			if fallbackErr == nil {
-				path = fallbackPath
-				data = fallbackData
-				err = nil
-			} else if !os.IsNotExist(fallbackErr) {
-				return nil, fallbackErr
-			} else if ojsonlPath, ok := findOjsonlSessionAnyProject(id); ok {
-				// No legacy JSON anywhere — look for an .ojsonl session in
-				// another project (e.g. desktop -session from a different cwd).
-				s, loadErr := loadOjsonlSession(ojsonlPath)
-				if loadErr != nil {
-					return nil, loadErr
-				}
-				s.Messages = removeIncompleteToolRequests(s.Messages)
-				log.Printf("session: loaded %q from fallback project path %s", id, ojsonlPath)
-				return s, nil
-			}
-		}
-	}
-	if err != nil {
 		return nil, err
 	}
 
@@ -334,70 +312,6 @@ func Load(id string) (*Session, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func shouldSearchOtherProjects(id string) bool {
-	if strings.HasPrefix(id, canonicalSessionPrefix) {
-		return true
-	}
-	_, err := time.Parse("2006-01-02-150405", id)
-	return err == nil
-}
-
-// readSessionFileAnyProject searches all project session dirs for a
-// session with the given ID (used when resuming from a different cwd).
-func readSessionFileAnyProject(id string) (string, []byte, error) {
-	dataDir, err := paths.GlobalDataDir()
-	if err != nil {
-		return "", nil, err
-	}
-
-	projectRoot := filepath.Join(dataDir, "project")
-	entries, err := os.ReadDir(projectRoot)
-	if err != nil {
-		return "", nil, err
-	}
-
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		dir := filepath.Join(projectRoot, e.Name(), "sessions")
-		path, data, readErr := readSessionFile(dir, id)
-		if readErr == nil {
-			log.Printf("session: loaded %q from fallback project path %s", id, path)
-			return path, data, nil
-		}
-		if !os.IsNotExist(readErr) {
-			return "", nil, readErr
-		}
-	}
-
-	return "", nil, os.ErrNotExist
-}
-
-func findOjsonlSessionAnyProject(id string) (string, bool) {
-	dataDir, err := paths.GlobalDataDir()
-	if err != nil {
-		return "", false
-	}
-	entries, err := os.ReadDir(filepath.Join(dataDir, "project"))
-	if err != nil {
-		return "", false
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		dir := filepath.Join(dataDir, "project", entry.Name(), "sessions")
-		for _, candidate := range sessionCandidateIDs(id) {
-			path := ojsonlSessionPath(dir, candidate)
-			if fileExists(path) {
-				return path, true
-			}
-		}
-	}
-	return "", false
 }
 
 func sessionCandidateIDs(id string) []string {

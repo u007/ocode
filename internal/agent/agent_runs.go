@@ -263,6 +263,24 @@ func (r *AgentRun) tryFinishCancelled() {
 	}
 }
 
+// forceReleaseSlot immediately returns this run's concurrency slot to the
+// shared limiter pool, without waiting for the run's own goroutine to notice
+// cancellation and unwind. Cancel() only closes the subagent's stop channel,
+// which chatWithDelta honors for in-flight LLM calls — but Tool.Execute takes
+// no context, so a subagent blocked inside a plain tool call (bash, an MCP
+// call, anything not using ExecuteCtx) will not observe cancellation and may
+// never return. Without this, such a run would hold its slot forever after
+// being marked Cancelled, starving every other dispatch sharing the same
+// max_concurrent_agents limiter. Safe to call unconditionally: releaseOwnSlot
+// is a no-op if the run never held a slot (e.g. it was still Queued), and the
+// run's own deferred releaseOwnSlot() call (once its goroutine eventually
+// does return) becomes a no-op too, since the slot is already cleared here.
+func (r *AgentRun) forceReleaseSlot() {
+	if r.Sub != nil {
+		r.Sub.releaseOwnSlot()
+	}
+}
+
 // markQueued transitions a freshly-created run into the Queued state while
 // it waits for a concurrency slot from AgentRunRegistry.Acquire.
 func (r *AgentRun) markQueued() {
@@ -672,6 +690,7 @@ func (r *AgentRunRegistry) CancelOwned(taskID, dispatcher string) error {
 		run.Cancel()
 	}
 	run.tryFinishCancelled()
+	run.forceReleaseSlot()
 	return nil
 }
 
@@ -692,6 +711,7 @@ func (r *AgentRunRegistry) CancelAll() {
 			run.Cancel()
 		}
 		run.tryFinishCancelled()
+		run.forceReleaseSlot()
 	}
 }
 
