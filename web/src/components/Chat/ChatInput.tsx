@@ -1,5 +1,6 @@
 import { useState, type KeyboardEvent, useRef, useEffect } from "react";
 import { useChat } from "../../hooks/useChat";
+import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
@@ -37,8 +38,7 @@ export default function ChatInput({
   // agent would otherwise answer msg2 first, then re-engage with the shell
   // output of msg1, producing confusing turn ordering.
   const [shellInFlight, setShellInFlight] = useState(false);
-  const { sendMessage, executeShell, stop, isStreaming } = useChat({
-    requestId: sessionTabId ?? undefined,
+  const { sendMessage, executeShell, stop, isStreaming } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
         onSessionCreated?.(sessionTabId, sessionId);
@@ -47,6 +47,18 @@ export default function ChatInput({
   });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const attachRef = useRef<HTMLInputElement>(null);
+
+  // Per-tab draft: restore this tab's typed-but-unsent text whenever the active
+  // session tab changes (the draft map also lets the "New session" button tell
+  // whether the active tab is "completely empty").
+  useEffect(() => {
+    setInput(getDraft(sessionTabId));
+  }, [sessionTabId]);
+
+  const updateDraft = (value: string) => {
+    setInput(value);
+    setDraft(sessionTabId, value);
+  };
 
   const handleAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files) return;
@@ -86,6 +98,7 @@ export default function ChatInput({
     const trimmed = input.trim();
     if (!trimmed || isStreaming || shellInFlight) return;
     setInput("");
+    clearDraft(sessionTabId);
     setShowSlashMenu(false);
 
     // Check if this is a slash command (handler may be async)
@@ -132,7 +145,7 @@ export default function ChatInput({
   };
 
   const handleSlashSelect = (command: string) => {
-    setInput(command + " ");
+    updateDraft(command + " ");
     setShowSlashMenu(false);
     textareaRef.current?.focus();
   };
@@ -223,7 +236,7 @@ export default function ChatInput({
           rows={2}
           placeholder="Type a message... (Enter to send, Shift+Enter for newline, / for commands, ! for shell)"
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => updateDraft(e.target.value)}
           onKeyDown={handleKeyDown}
         />
         {isStreaming ? (

@@ -1,38 +1,40 @@
 import { useCallback } from "react";
-import { useChatState, useChatDispatch } from "../stores/chatStore";
+import { useChatState, useChatDispatch, getSessionSlice } from "../stores/chatStore";
 import { api } from "../api/client";
 import type { QuestionAnswerPayload } from "../api/types";
 
 interface UseChatOptions {
-  /** Called when a new session is created (first message from Home page). */
+  /** Called when a new session is created (first message from an empty tab). */
   onNewSession?: (sessionId: string) => void;
-  /** Correlates the first turn with a temporary session tab. */
-  requestId?: string;
 }
 
-export function useChat(options?: UseChatOptions) {
+// sessionId is the tab this hook is scoped to — a real session id, a
+// temporary `new-<ts>` tab id (before the first message creates a session),
+// or null when no tab is active.
+export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const state = useChatState();
   const dispatch = useChatDispatch();
+  const slice = getSessionSlice(state, sessionId);
 
   // Submit is fire-and-forget: the message is forwarded to the TUI's agent and
   // ALL rendering (the user echo, live thinking/text tokens, tool activity, and
-  // the final answer) arrives over the persistent mirror stream in SessionPage.
-  // This keeps a single source of truth and makes the view identical whether the
-  // turn was started here or in the TUI.
+  // the final answer) arrives over the persistent mirror stream in
+  // SessionTabSync. This keeps a single source of truth and makes the view
+  // identical whether the turn was started here or in the TUI.
   const sendMessage = useCallback(
     (content: string) => {
-      const sid = state.sessionId;
-      dispatch({ type: "SET_STREAMING", isStreaming: true });
-      dispatch({ type: "SET_ERROR", error: null });
+      if (!sessionId) return;
+      const isRealSession = !sessionId.startsWith("new-");
+      dispatch({ type: "SET_STREAMING", sessionId, isStreaming: true });
+      dispatch({ type: "SET_ERROR", sessionId, error: null });
 
-      // If no session exists yet (Home page after /new or first message),
-      // use api.chat() which creates a new session and returns the session ID.
-      const submitPromise = sid
-        ? api.sendMessage(sid, content)
-        : api.chat(content, undefined, undefined, options?.requestId).then((res) => {
-            // Store the new session ID so subsequent messages go to the same session
-            dispatch({ type: "SET_SESSION", sessionId: res.sessionId });
-            // Notify caller so it can navigate to the new session page
+      // A `new-*` tab has no session yet — api.chat() creates one and the
+      // request_id (this tab's id) lets SessionTabSync rekey the tab once the
+      // "session_started" event (or this response, whichever wins the race)
+      // reports the real session id.
+      const submitPromise = isRealSession
+        ? api.sendMessage(sessionId, content)
+        : api.chat(content, undefined, undefined, sessionId).then((res) => {
             options?.onNewSession?.(res.sessionId);
             return res;
           });
@@ -41,20 +43,21 @@ export function useChat(options?: UseChatOptions) {
       // is the primary completion signal. The .then is a safety net in case that
       // frame is missed; the .catch surfaces a failed submit.
       submitPromise
-        .then(() => dispatch({ type: "SET_STREAMING", isStreaming: false }))
+        .then(() => dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false }))
         .catch((err) => {
-          dispatch({ type: "SET_ERROR", error: err.message || "send failed" });
-          dispatch({ type: "SET_STREAMING", isStreaming: false });
+          dispatch({ type: "SET_ERROR", sessionId, error: err.message || "send failed" });
+          dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
         });
     },
-    [state.sessionId, dispatch, options?.onNewSession, options?.requestId],
+    [sessionId, dispatch, options?.onNewSession],
   );
 
   // Local stop: the browser can't cancel the TUI's agent, so this only releases
   // the input. The turn continues in the TUI and the mirror will still commit it.
   const stop = useCallback(() => {
-    dispatch({ type: "SET_STREAMING", isStreaming: false });
-  }, [dispatch]);
+    if (!sessionId) return;
+    dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+  }, [dispatch, sessionId]);
 
   // Resolve a pending agent permission ask via the dedicated resolve endpoint
   // (NOT the config POST /api/permissions, which sets a tool rule). Only a
@@ -62,21 +65,22 @@ export function useChat(options?: UseChatOptions) {
   // can retry.
   const resolvePermission = useCallback(
     async (requestId: string, approved: boolean) => {
+      if (!sessionId) return false;
       try {
-        await api.resolvePermission(requestId, state.sessionId, approved);
-        dispatch({ type: "PERMISSION_RESOLVED" });
+        await api.resolvePermission(requestId, sessionId, approved);
+        dispatch({ type: "PERMISSION_RESOLVED", sessionId });
         return true;
       } catch (err) {
         console.error("Failed to resolve permission:", err);
         dispatch({
           type: "SET_ERROR",
-          error:
-            err instanceof Error ? err.message : "permission resolve failed",
+          sessionId,
+          error: err instanceof Error ? err.message : "permission resolve failed",
         });
         return false;
       }
     },
-    [dispatch, state.sessionId],
+    [dispatch, sessionId],
   );
 
   // Submit answers to a pending agent question prompt. Mirrors the TUI's
@@ -84,20 +88,22 @@ export function useChat(options?: UseChatOptions) {
   // success dismisses the dialog. Failures keep it open and surface an error.
   const submitQuestionAnswers = useCallback(
     async (requestId: string, answers: QuestionAnswerPayload[]) => {
+      if (!sessionId) return false;
       try {
-        await api.answerQuestion(requestId, state.sessionId, answers);
-        dispatch({ type: "QUESTION_RESOLVED" });
+        await api.answerQuestion(requestId, sessionId, answers);
+        dispatch({ type: "QUESTION_RESOLVED", sessionId });
         return true;
       } catch (err) {
         console.error("Failed to answer question:", err);
         dispatch({
           type: "SET_ERROR",
+          sessionId,
           error: err instanceof Error ? err.message : "question answer failed",
         });
         return false;
       }
     },
-    [dispatch, state.sessionId],
+    [dispatch, sessionId],
   );
 
   // Execute a shell command directly (for ! prefix commands)
@@ -125,8 +131,8 @@ export function useChat(options?: UseChatOptions) {
     stop,
     resolvePermission,
     submitQuestionAnswers,
-    isStreaming: state.isStreaming,
-    pendingPermission: state.pendingPermission,
-    pendingQuestion: state.pendingQuestion,
+    isStreaming: slice.isStreaming,
+    pendingPermission: slice.pendingPermission,
+    pendingQuestion: slice.pendingQuestion,
   };
 }
