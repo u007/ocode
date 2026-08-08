@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { useIsMobile } from "./hooks/useIsMobile";
-import { ChatProvider, useChatDispatch, useChatState } from "./stores/chatStore";
+import { ChatProvider, useChatDispatch, useChatState, getSessionSlice } from "./stores/chatStore";
 import { ProjectProvider, useProjectState } from "./stores/projectStore";
 import { api } from "./api/client";
 import ErrorBoundary from "./components/common/ErrorBoundary";
@@ -19,6 +19,7 @@ import FileEditor from "./components/Files/FileEditor";
 import LogPanel from "./components/Logs/LogPanel";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
+import { Tabs, TabsContent } from "@/components/ui/tabs";
 import TopTabs from "./components/Layout/TopTabs";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
@@ -89,9 +90,9 @@ function triggerDownload(filename: string, content: string, mimeType: string) {
 
 function HomeApp() {
   const dispatch = useChatDispatch();
-  const { messages: chatMessages, sessionId: currentSessionId } = useChatState();
-  const { resolvePermission, pendingPermission } = useChat();
-  const { activeTabId, dispatch: projectDispatch } = useProjectState();
+  const chatState = useChatState();
+  const { state: projectState, activeTabId, dispatch: projectDispatch, openSessionTab } = useProjectState();
+  const { resolvePermission, pendingPermission } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -117,7 +118,7 @@ function HomeApp() {
 
   useEffect(() => {
     setSelectedAgentRunId(null);
-  }, [currentSessionId]);
+  }, [activeTabId]);
 
   const openAgentDetail = (runId: string) => {
     setSelectedAgentRunId(runId);
@@ -180,7 +181,9 @@ function HomeApp() {
   const [filePickerOpen, setFilePickerOpen] = useState(false);
 
   useKeyboard({
-    onNewSession: () => dispatch({ type: "RESET" }),
+    onNewSession: () => {
+      if (activeTabId) dispatch({ type: "RESET", sessionId: activeTabId });
+    },
     onCommandPalette: () => setCmdOpen(true),
     onFilePicker: () => setFilePickerOpen(true),
     onSave: () => {
@@ -204,7 +207,7 @@ function HomeApp() {
     const baseCmd = cmd.split(" ")[0];
     // Built-in quick actions that don't need the dispatch pipeline
     if (baseCmd === "/clear" || baseCmd === "/new") {
-      dispatch({ type: "RESET" });
+      if (activeTabId) dispatch({ type: "RESET", sessionId: activeTabId });
       return true;
     }
     if (baseCmd === "/model") {
@@ -217,7 +220,7 @@ function HomeApp() {
       commandName: baseCmd,
       args: cmd.slice(baseCmd.length).trim(),
       api: {
-        listSessions: () => api.listSessions(),
+        listSessions: () => api.listSessions().then((r) => r.sessions),
         getSession: (id) => api.getSession(id),
         getOcrConfig: () => api.getOcrConfig(),
         setOcrConfig: (cfg) => api.setOcrConfig(cfg),
@@ -234,8 +237,8 @@ function HomeApp() {
         setMaskMode: (mode) => api.setMaskMode(mode),
         setMaskModel: (model) => api.setMaskModel(model),
       },
-      getMessages: () => chatMessages,
-      getSessionId: () => currentSessionId,
+      getMessages: () => getSessionSlice(chatState, activeTabId).messages,
+      getSessionId: () => activeTabId,
     });
 
     if (!result.handled) return false;
@@ -243,14 +246,16 @@ function HomeApp() {
     // Apply result effects
     if (result.messages) {
       for (const msg of result.messages) {
-        dispatch({ type: "ADD_MESSAGE", message: msg });
+        if (activeTabId) {
+          dispatch({ type: "ADD_MESSAGE", sessionId: activeTabId, message: msg });
+        }
       }
     }
     if (result.sessionId) {
-      dispatch({ type: "SET_SESSION", sessionId: result.sessionId });
+      openSessionTab(result.sessionId, result.sessionId);
     }
     if (result.newSession) {
-      dispatch({ type: "RESET" });
+      if (activeTabId) dispatch({ type: "RESET", sessionId: activeTabId });
     }
     if (result.download) {
       triggerDownload(result.download.filename, result.download.content, result.download.mimeType);
@@ -258,7 +263,12 @@ function HomeApp() {
     return true;
   };
 
+  // Direct fallback for the temp-tab → real-session rename: SessionTabSync
+  // does the same rekey off the "session_started" SSE event, whichever
+  // arrives first. REKEY_SESSION/UPDATE_TAB_ID are both idempotent (no-op if
+  // the old id is already gone), so running this twice is safe.
   const handleSessionCreated = (tempTabId: string, sessionId: string) => {
+    dispatch({ type: "REKEY_SESSION", oldId: tempTabId, newId: sessionId });
     projectDispatch({
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,
@@ -266,6 +276,8 @@ function HomeApp() {
       newTitle: "New session",
     });
   };
+
+  const allChatTabs = Object.values(projectState.tabsByProject).flat();
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
@@ -281,41 +293,54 @@ function HomeApp() {
 
         {/* Center content */}
         <main className="flex flex-1 flex-col overflow-hidden">
-          {/* Content navigation tabs (chat/files/git/status/logs/assets + editor tabs) */}
-          <TopTabs
-            activeTab={activeTab}
-            onTabChange={setActiveTab}
-            editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
-            onEditorTabClose={requestCloseTab}
-          />
+          {/* Tabs context wraps header triggers + content panels */}
+          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-col flex-1 overflow-hidden">
+            {/* Content navigation tabs (chat/files/git/status/logs/assets + editor tabs) */}
+            <TopTabs
+              editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
+              onEditorTabClose={requestCloseTab}
+              activeTab={activeTab}
+              onTabSelect={setActiveTab}
+            />
 
-          {/* Open session tabs */}
-          <OpenSessionBar />
+            {/* Open session tabs */}
+            <OpenSessionBar />
 
-          {/* Tab content */}
-          <div className="flex-1 overflow-hidden">
-            {/* Editor tab — opened when a file is clicked from files/git/chat */}
-            {activeTab.startsWith("editor-") &&
-              (() => {
-                const editorTab = editorTabs.find((t) => t.id === activeTab);
-                if (!editorTab) return null;
-                return (
-                  <FileEditor
-                    key={editorTab.id}
-                    path={editorTab.path}
-                    content={editorTab.content}
-                    onChange={(value) => handleEditorChange(editorTab.id, value)}
-                    readOnly={false}
-                    session={currentSessionId ?? undefined}
-                    diffVersion={editorTab.diffVersion}
-                    onSelectionChange={handleSelectionChange}
-                  />
-                );
-              })()}
+            {/* Tab content */}
+            <div className="flex-1 overflow-hidden flex flex-col">
+            {/* Editor tabs — dynamic, one per open file */}
+            {editorTabs.map((et) => (
+              <TabsContent key={et.id} value={et.id} forceMount className="flex-1 overflow-hidden m-0">
+                <FileEditor
+                  path={et.path}
+                  content={et.content}
+                  onChange={(value) => handleEditorChange(et.id, value)}
+                  readOnly={false}
+                  session={activeTabId ?? undefined}
+                  diffVersion={et.diffVersion}
+                  onSelectionChange={handleSelectionChange}
+                />
+              </TabsContent>
+            ))}
+
             {/* Main tabs */}
-            {activeTab === "chat" && (
+            <TabsContent value="chat" forceMount className="flex-1 overflow-hidden m-0">
               <div className="flex flex-col h-full">
-                <ChatPanel />
+                <div className="relative flex-1 min-h-0 overflow-hidden">
+                  {allChatTabs.map((tab) => (
+                    <div
+                      key={tab.id}
+                      className={
+                        tab.projectPath === projectState.activeProject?.path &&
+                        tab.id === activeTabId
+                          ? "absolute inset-0"
+                          : "absolute inset-0 hidden"
+                      }
+                    >
+                      <ChatPanel sessionId={tab.id} />
+                    </div>
+                  ))}
+                </div>
                 <AgentPreview onOpenDetail={openAgentDetail} />
                 <ChatInput
                   onSlashCommand={handleCommand}
@@ -324,21 +349,36 @@ function HomeApp() {
                   onSessionCreated={handleSessionCreated}
                 />
               </div>
-            )}
-            {activeTab === "agents" && (
+            </TabsContent>
+            <TabsContent value="agents" forceMount className="flex-1 overflow-hidden m-0">
               <AgentsPanel
                 selectedRunId={selectedAgentRunId}
                 onSelectRun={setSelectedAgentRunId}
               />
-            )}
-            {activeTab === "files" && <FileTree onOpenFile={handleOpenFile} />}
-            {activeTab === "changes" && <ChangesPanel session={currentSessionId ?? undefined} />}
-            {activeTab === "git" && <GitPanel onOpenFile={handleOpenFile} />}
-            {activeTab === "status" && <StatusPanel onClose={() => setActiveTab("chat")} />}
-            {activeTab === "logs" && <LogPanel />}
-            {activeTab === "cron" && <CronPanel />}
-            {activeTab === "assets" && <AssetsPanel />}
-          </div>
+            </TabsContent>
+            <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0">
+              <FileTree onOpenFile={handleOpenFile} />
+            </TabsContent>
+            <TabsContent value="changes" forceMount className="flex-1 overflow-hidden m-0">
+              <ChangesPanel session={activeTabId ?? undefined} />
+            </TabsContent>
+            <TabsContent value="git" forceMount className="flex-1 overflow-hidden m-0">
+              <GitPanel onOpenFile={handleOpenFile} />
+            </TabsContent>
+            <TabsContent value="status" forceMount className="flex-1 overflow-hidden m-0">
+              <StatusPanel onClose={() => setActiveTab("chat")} />
+            </TabsContent>
+            <TabsContent value="logs" forceMount className="flex-1 overflow-hidden m-0">
+              <LogPanel active={activeTab === "logs"} />
+            </TabsContent>
+            <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0">
+              <CronPanel />
+            </TabsContent>
+            <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0">
+              <AssetsPanel />
+            </TabsContent>
+            </div>
+          </Tabs>
 
           {/* Status bar */}
           <StatusBar
