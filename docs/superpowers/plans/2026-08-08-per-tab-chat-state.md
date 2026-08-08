@@ -35,7 +35,7 @@ Full design at `docs/superpowers/specs/2026-08-08-per-tab-chat-state-design.md`.
 **Interfaces:**
 - Produces: `projectReducer` now resolves the owning project internally for `UPDATE_TAB_TITLE`/`UPDATE_TAB_ID` — callers don't change, both actions still take `{id, title}` / `{oldId, newId, newTitle?}` with no project path.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `web/src/stores/projectStore.test.tsx`:
 
@@ -105,12 +105,12 @@ describe("projectStore tab actions across projects", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd web && npx vitest run src/stores/projectStore.test.tsx`
 Expected: FAIL — both assertions fail because the reducer currently looks up `state.activeProject.path` (`/proj-a`), not the tab's real project (`/proj-b`), so the title/rekey lands nowhere.
 
-- [ ] **Step 3: Add an owning-project lookup helper and use it in both cases**
+- [x] **Step 3: Add an owning-project lookup helper and use it in both cases**
 
 In `web/src/stores/projectStore.tsx`, add above `projectReducer` (near `activeTabId`/`activeTabs`):
 
@@ -164,17 +164,17 @@ Replace the `UPDATE_TAB_TITLE` and `UPDATE_TAB_ID` cases:
 
 These replace the two existing cases wholesale (both previously started with `if (!path) return state;` using the outer `path = state.activeProject?.path || ""` — leave that outer `path` const as-is, it's still used by `ADD_TAB`/`REMOVE_TAB`/`SET_ACTIVE_TAB`/`UPDATE_TAB_TITLE`'s old body being replaced/`ENSURE_NEW_TAB`, none of which change).
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd web && npx vitest run src/stores/projectStore.test.tsx`
 Expected: PASS
 
-- [ ] **Step 5: Run the full web test suite to check for regressions**
+- [x] **Step 5: Run the full web test suite to check for regressions**
 
 Run: `cd web && npx vitest run`
 Expected: PASS (no other suite touches these reducer cases yet)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd web && git add src/stores/projectStore.tsx src/stores/projectStore.test.tsx
@@ -202,7 +202,7 @@ git commit -m "fix(web): scope tab rename/rekey to the tab's own project"
   - Global (session-independent) fields/actions are unchanged: `model`, `smallModel*`, `advisorModel`, `advisorEnabled`, `ocr*`, `tuiStatus`, `sessionContext`, `spendingUSD`, `tuiStatusReady` and their setters.
   - `RESET`'s old "preserve advisor/small-model/tuiStatus across reset" behavior is dropped — those fields are global now and were never touched by a per-session `RESET` in the first place.
 
-- [ ] **Step 1: Write the failing reducer tests**
+- [x] **Step 1: Write the failing reducer tests**
 
 Create `web/src/stores/chatStore.test.tsx`:
 
@@ -314,12 +314,12 @@ describe("chatStore per-session isolation", () => {
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd web && npx vitest run src/stores/chatStore.test.tsx`
 Expected: FAIL — `chatReducer`/`getSessionSlice`/`ChatState` aren't exported yet and the action shapes don't match.
 
-- [ ] **Step 3: Rewrite `chatStore.tsx`**
+- [x] **Step 3: Rewrite `chatStore.tsx`**
 
 Replace the whole file with:
 
@@ -650,17 +650,17 @@ export function useChatDispatch() {
 }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd web && npx vitest run src/stores/chatStore.test.tsx`
 Expected: PASS
 
-- [ ] **Step 5: Confirm the rest of the app doesn't type-check yet (expected)**
+- [x] **Step 5: Confirm the rest of the app doesn't type-check yet (expected)**
 
 Run: `cd web && npx tsgo --noEmit 2>&1 | head -50` (or `bun run typecheck` if configured — check `package.json`)
 Expected: Many errors in `ChatPanel.tsx`, `SessionTabSync.tsx`, `useChat.ts`, `App.tsx`, `OpenSessionBar.tsx`, `SessionDialog.tsx`, `AgentPreview.tsx`, `AgentsPanel.tsx`, `StatusBar.tsx`, `CoworkSidebar.tsx`, `SessionSidebar.tsx` — all fixed by Tasks 3-10. This step is just confirming the compiler agrees with the plan's file list; nothing to fix here yet.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd web && git add src/stores/chatStore.tsx src/stores/chatStore.test.tsx
@@ -678,7 +678,7 @@ git commit -m "feat(web): split chatStore into per-session slices"
 - Consumes: `getSessionSlice`, `SessionSlice` from `../stores/chatStore` (Task 2).
 - Produces: `useChat(sessionId: string | null, options?: UseChatOptions): {...}` — same return shape as before (`sendMessage`, `executeShell`, `stop`, `resolvePermission`, `submitQuestionAnswers`, `isStreaming`, `pendingPermission`, `pendingQuestion`), now scoped to `sessionId`. `UseChatOptions` drops `requestId` (redundant with the new `sessionId` param — the caller already passes the tab id as `sessionId`, so the `api.chat()` correlator uses that directly).
 
-- [ ] **Step 1: Rewrite `useChat.ts`**
+- [x] **Step 1: Rewrite `useChat.ts`**
 
 ```ts
 import { useCallback } from "react";
@@ -821,7 +821,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
 }
 ```
 
-- [ ] **Step 2: Update `ChatInput.tsx`'s call site**
+- [x] **Step 2: Update `ChatInput.tsx`'s call site**
 
 In `web/src/components/Chat/ChatInput.tsx`, change:
 
@@ -850,12 +850,12 @@ to:
 
 (App.tsx's own `useChat()` call site is updated in Task 6, once `activeTabId` is wired there.)
 
-- [ ] **Step 3: Verify with typecheck (full fix lands after later tasks, but confirm this file is now internally consistent)**
+- [x] **Step 3: Verify with typecheck (full fix lands after later tasks, but confirm this file is now internally consistent)**
 
 Run: `cd web && npx tsgo --noEmit 2>&1 | grep -E "useChat.ts|ChatInput.tsx"`
 Expected: No errors from these two files (errors from other not-yet-updated files are expected and are handled in later tasks).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd web && git add src/hooks/useChat.ts src/components/Chat/ChatInput.tsx
@@ -873,7 +873,7 @@ git commit -m "feat(web): scope useChat to an explicit session id"
 - Consumes: `getSessionSlice` from `../../stores/chatStore` (Task 2); `useProjectState` from `../../stores/projectStore` (existing, for the title-update dispatch — see Task 1 fix, which makes this safe even for a background-project tab).
 - Produces: `ChatPanel` now takes a required `sessionId: string` prop. No more implicit "current session" — the parent decides which session each instance renders (Task 6).
 
-- [ ] **Step 1: Rewrite `ChatPanel.tsx`**
+- [x] **Step 1: Rewrite `ChatPanel.tsx`**
 
 ```tsx
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -1259,7 +1259,7 @@ Two behavioral notes versus the original, both required by the multi-mount chang
 - Root class changed from `relative flex-1 min-h-0` to `relative h-full min-h-0`: each `ChatPanel` is now wrapped in an `absolute inset-0` positioning box (Task 6), not a direct flex child, so it needs `h-full` to fill that box instead of `flex-1`.
 - The Cmd/Ctrl+F listener now guards on `offsetParent === null` (true when a CSS-hidden ancestor exists) so every open tab's `ChatPanel` — all mounted simultaneously — doesn't independently pop its own search bar when only one is visible.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 cd web && git add src/components/Chat/ChatPanel.tsx
@@ -1279,7 +1279,7 @@ git commit -m "feat(web): ChatPanel renders one session per instance"
 - Consumes: `REKEY_SESSION` action (Task 2), `UPDATE_TAB_ID`/`UPDATE_TAB_TITLE` fixed in Task 1.
 - Produces: no change to the component's public surface (still `<SessionTabSync />`, no props) — only its internal event routing changes.
 
-- [ ] **Step 1: Rewrite `SessionTabSync.tsx`**
+- [x] **Step 1: Rewrite `SessionTabSync.tsx`**
 
 ```tsx
 import { useEffect, useRef } from "react";
@@ -1494,7 +1494,7 @@ export default function SessionTabSync() {
 
 Note what's deleted versus the original: the whole first `useEffect` ("select the session represented by the active tab") is gone — it existed only to `RESET` + `SET_SESSION` + fetch on every `activeTabId` change, which `ChatPanel` now owns per-mount (Task 4) and no longer needs repeating on every switch. `loadedTabRef`, `activeSessionRef`, `pendingNewSessionRef`, `activeTabRef`, `tabsRef` are all gone with it — the multi-tab-aware `openSessionIdsRef` replaces their job.
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
 
 ```bash
 cd web && git add src/components/Layout/SessionTabSync.tsx
@@ -1511,7 +1511,7 @@ git commit -m "feat(web): route SSE mirror events to every open tab, not just th
 **Interfaces:**
 - Consumes: `ChatPanel(sessionId)` (Task 4), `useChat(sessionId, options)` (Task 3), `REKEY_SESSION` (Task 2).
 
-- [ ] **Step 1: Read `activeProject`/`tabsByProject` alongside `activeTabId`, drop `chatState.sessionId`**
+- [x] **Step 1: Read `activeProject`/`tabsByProject` alongside `activeTabId`, drop `chatState.sessionId`**
 
 Change (around line 93-95):
 
@@ -1530,7 +1530,7 @@ to:
 
 `chatMessages`/`currentSessionId` are gone — find their remaining uses below and replace each with `activeTabId` (there is no more `chatMessages` use; it was only destructured for `getMessages: () => chatMessages` in `handleCommand`, which now reads messages from the active tab's slice — see Step 3).
 
-- [ ] **Step 2: Update the `selectedAgentRunId` reset effect**
+- [x] **Step 2: Update the `selectedAgentRunId` reset effect**
 
 Change:
 
@@ -1548,7 +1548,7 @@ to:
   }, [activeTabId]);
 ```
 
-- [ ] **Step 3: Update `handleCommand`'s message/session getters and the three bare `RESET` dispatches**
+- [x] **Step 3: Update `handleCommand`'s message/session getters and the three bare `RESET` dispatches**
 
 `handleCommand` needs the active tab's messages for `getMessages`. Add the chat state read near the top of `HomeApp` (with the other hooks, right after the `useProjectState`/`useChat` block from Step 1):
 
@@ -1600,7 +1600,7 @@ Change the three bare `dispatch({ type: "RESET" })` calls — the keyboard short
     }
 ```
 
-- [ ] **Step 4: Rewrite `handleSessionCreated`**
+- [x] **Step 4: Rewrite `handleSessionCreated`**
 
 Change:
 
@@ -1633,7 +1633,7 @@ to:
   };
 ```
 
-- [ ] **Step 5: Replace the single `<ChatPanel />` with one instance per open tab, across all projects**
+- [x] **Step 5: Replace the single `<ChatPanel />` with one instance per open tab, across all projects**
 
 Compute the full tab list once near the top of the render (after the other hooks, before the `return`):
 
@@ -1689,15 +1689,15 @@ to:
             </TabsContent>
 ```
 
-- [ ] **Step 6: Replace `FileEditor`/`ChangesPanel`'s `session={currentSessionId}`**
+- [x] **Step 6: Replace `FileEditor`/`ChangesPanel`'s `session={currentSessionId}`**
 
 Both currently read `session={currentSessionId ?? undefined}` — change both to `session={activeTabId ?? undefined}`.
 
-- [ ] **Step 7: Remove the now-unused `ChatPanel` import if App.tsx imported `AgentPreview`'s props differently — verify import list**
+- [x] **Step 7: Remove the now-unused `ChatPanel` import if App.tsx imported `AgentPreview`'s props differently — verify import list**
 
 `ChatPanel` is still imported and used (just with a prop now) — no import changes needed there. Double-check `useChatState`/`useChatDispatch`/`getSessionSlice` are all imported (Step 3) and `useProjectState`'s destructure includes `state` (Step 1).
 
-- [ ] **Step 8: Typecheck**
+- [x] **Step 8: Typecheck**
 
 Run: `cd web && npx tsgo --noEmit 2>&1 | grep App.tsx`
 Expected: No errors from `App.tsx`. (Other files' errors are handled in Tasks 7-10.)
@@ -1708,7 +1708,7 @@ Run: `cd web && npm run dev` (or the project's existing dev command)
 Open the app, open two session tabs in the same project, confirm the chat area still fills the available height and scrolls correctly in both tabs (this validates the `h-full`/`absolute inset-0` sizing chain introduced across Task 4 Step 1 and this task's Step 5).
 Expected: chat area renders full-height, scrolls normally, no visible layout regression versus before this plan.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 cd web && git add src/App.tsx
@@ -1726,7 +1726,7 @@ git commit -m "feat(web): mount one ChatPanel per open tab, source active sessio
 **Interfaces:**
 - Consumes: `getSessionSlice` from `../../stores/chatStore`.
 
-- [ ] **Step 1: `OpenSessionBar.tsx` — swap `chatState.sessionId` for `activeTabId`, drop the now-unnecessary RESET, add pending badges**
+- [x] **Step 1: `OpenSessionBar.tsx` — swap `chatState.sessionId` for `activeTabId`, drop the now-unnecessary RESET, add pending badges**
 
 Change the `useChatState`/`useChatDispatch` import line to also pull `getSessionSlice`:
 
@@ -1798,7 +1798,7 @@ Add a pending badge to each tab row. Inside the `tabs.map((tab) => { ... })` blo
 
 (The rest of that block — the close `<span>` — is unchanged.)
 
-- [ ] **Step 2: `SessionDialog.tsx` — swap `chatState.sessionId` for `activeTabId`, drop the RESET call**
+- [x] **Step 2: `SessionDialog.tsx` — swap `chatState.sessionId` for `activeTabId`, drop the RESET call**
 
 Change `handleCloseTab`:
 
@@ -1822,12 +1822,12 @@ Change `handleNewSession` — drop the RESET:
 
 `chatState` is now unused in this file if nothing else reads it — check: `isCurrentSession` already uses `activeTabId`, not `chatState`. Confirm no remaining reference to `chatState.sessionId`; if `useChatState()`'s only remaining consumer was these two spots, remove the now-unused `chatState`/`useChatState` import. (`chatDispatch`/`useChatDispatch` stays — still used by both handlers above.)
 
-- [ ] **Step 3: Typecheck**
+- [x] **Step 3: Typecheck**
 
 Run: `cd web && npx tsgo --noEmit 2>&1 | grep -E "OpenSessionBar.tsx|SessionDialog.tsx"`
 Expected: No errors.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd web && git add src/components/Layout/OpenSessionBar.tsx src/components/Layout/SessionDialog.tsx
@@ -1847,7 +1847,7 @@ git commit -m "feat(web): tab bar reads active tab from projectStore, shows pend
 **Interfaces:**
 - Consumes: `useProjectState` from `../../stores/projectStore`.
 
-- [ ] **Step 1: `AgentPreview.tsx`**
+- [x] **Step 1: `AgentPreview.tsx`**
 
 Change:
 
@@ -1869,7 +1869,7 @@ import { useAgentRuns } from "../../hooks/useAgentRuns";
   const { activeTabId: sessionId } = useProjectState();
 ```
 
-- [ ] **Step 2: `AgentsPanel.tsx`**
+- [x] **Step 2: `AgentsPanel.tsx`**
 
 Same swap — change:
 
@@ -1895,7 +1895,7 @@ import { useProjectState } from "../../stores/projectStore";
   const { activeTabId: sessionId } = useProjectState();
 ```
 
-- [ ] **Step 3: Update both tests' mocks**
+- [x] **Step 3: Update both tests' mocks**
 
 In `AgentPreview.test.tsx`, change:
 
@@ -1932,12 +1932,12 @@ vi.mock("../../stores/projectStore", () => ({
 }));
 ```
 
-- [ ] **Step 4: Run the updated tests**
+- [x] **Step 4: Run the updated tests**
 
 Run: `cd web && npx vitest run src/components/Chat/AgentPreview.test.tsx src/components/Agents/AgentsPanel.test.tsx`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd web && git add src/components/Chat/AgentPreview.tsx src/components/Chat/AgentPreview.test.tsx \
@@ -1956,7 +1956,7 @@ git commit -m "refactor(web): AgentPreview/AgentsPanel read session id from proj
 **Interfaces:**
 - Consumes: `getSessionSlice` from `../../stores/chatStore`, `useProjectState` from `../../stores/projectStore`.
 
-- [ ] **Step 1: `StatusBar.tsx`**
+- [x] **Step 1: `StatusBar.tsx`**
 
 Change the import and destructure:
 
@@ -2020,7 +2020,7 @@ import { useProjectState } from "../../stores/projectStore";
 
 Everything else in the file (lines using `isStreaming`/`error`) is unchanged — they're still local variables with the same names, just now sourced from the active tab's slice.
 
-- [ ] **Step 2: `CoworkSidebar.tsx`**
+- [x] **Step 2: `CoworkSidebar.tsx`**
 
 Change:
 
@@ -2060,7 +2060,7 @@ to:
 
 Add the import: `import { useProjectState } from "../../stores/projectStore";` (check the file doesn't already import it under a different local name first — it doesn't, per the earlier grep).
 
-- [ ] **Step 3: Typecheck**
+- [x] **Step 3: Typecheck**
 
 Run: `cd web && npx tsgo --noEmit 2>&1 | grep -E "StatusBar.tsx|CoworkSidebar.tsx"`
 Expected: No errors.
@@ -2069,7 +2069,7 @@ Expected: No errors.
 
 Run the dev server, send a message, confirm the status bar's streaming indicator still appears/disappears correctly and the Cowork sidebar's "Session: ..." line still shows the active tab's id.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd web && git add src/components/common/StatusBar.tsx src/components/Layout/CoworkSidebar.tsx
@@ -2085,7 +2085,7 @@ git commit -m "refactor(web): StatusBar/CoworkSidebar read the active tab's sess
 **Files:**
 - Modify: `web/src/components/Layout/SessionSidebar.tsx:146,182-185,195`
 
-- [ ] **Step 1: Swap the session source and drop the `SET_SESSION` dispatch**
+- [x] **Step 1: Swap the session source and drop the `SET_SESSION` dispatch**
 
 Change:
 
@@ -2110,12 +2110,12 @@ Find the dispatch at line 195 (`dispatch({ type: "SET_SESSION", sessionId: id })
 
 and at the call site, replace `dispatch({ type: "SET_SESSION", sessionId: id });` with `openSessionTab(id, id);` (check the surrounding code for a title variable in scope — use it if present instead of `id`).
 
-- [ ] **Step 2: Typecheck**
+- [x] **Step 2: Typecheck**
 
 Run: `cd web && npx tsgo --noEmit 2>&1 | grep SessionSidebar.tsx`
 Expected: No errors.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 cd web && git add src/components/Layout/SessionSidebar.tsx
@@ -2128,12 +2128,12 @@ git commit -m "chore(web): fix unused SessionSidebar for the chatStore session-i
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Full typecheck**
+- [x] **Step 1: Full typecheck**
 
 Run: `cd web && npx tsgo --noEmit` (or `bun run typecheck`, per the project's configured script)
 Expected: Zero errors.
 
-- [ ] **Step 2: Full test suite**
+- [x] **Step 2: Full test suite**
 
 Run: `cd web && npx vitest run`
 Expected: All tests pass, including the new `chatStore.test.tsx` and `projectStore.test.tsx` and the updated `AgentPreview.test.tsx`/`AgentsPanel.test.tsx`.
