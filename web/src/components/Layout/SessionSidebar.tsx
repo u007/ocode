@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { api } from "../../api/client";
-import { useChatDispatch, useChatState } from "../../stores/chatStore";
+import { useProjectState } from "../../stores/projectStore";
 import type { SessionInfo } from "../../api/types";
 import { PanelLeftClose, PanelLeft, Plus, MessageSquare, Loader2, Copy, Check } from "lucide-react";
 
@@ -35,6 +35,8 @@ interface Props {
   isMobile?: boolean;
 }
 
+const PAGE_SIZE = 30;
+
 // SessionList renders the scrollable list of session entries. Extracted from
 // SessionSidebar so the mobile and desktop branches can share one definition
 // of "what a session row looks like" — the two branches previously duplicated
@@ -45,10 +47,16 @@ function SessionList({
   sessions,
   onSelect,
   loadingId,
+  hasMore,
+  loadingMore,
+  onLoadMore,
 }: {
   sessions: SessionInfo[];
   onSelect: (id: string) => void;
   loadingId: string | null;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
 }) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const copyTimer = useRef<number | null>(null);
@@ -62,11 +70,19 @@ function SessionList({
     copyTimer.current = window.setTimeout(() => setCopiedId(null), 1500);
   };
 
+  const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    if (!hasMore || loadingMore) return;
+    const el = e.currentTarget;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 100) {
+      onLoadMore();
+    }
+  };
+
   if (sessions.length === 0) {
     return null;
   }
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div className="flex-1 overflow-y-auto" onScroll={handleScroll}>
       {sessions.map((session) => {
         const loading = loadingId === session.id;
         const copied = copiedId === session.id;
@@ -111,18 +127,44 @@ function SessionList({
           </div>
         );
       })}
+      {loadingMore && (
+        <div className="flex items-center justify-center gap-2 py-3 text-xs text-zinc-600">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Loading more…
+        </div>
+      )}
     </div>
   );
 }
 
 export default function SessionSidebar({ isOpen, onToggle, isMobile }: Props) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [loadingId, setLoadingId] = useState<string | null>(null);
-  const dispatch = useChatDispatch();
-  const { sessionId } = useChatState();
+  const { activeTabId: sessionId, openSessionTab, openNewSessionTab } = useProjectState();
 
   const fetchSessions = () => {
-    api.listSessions().then(setSessions).catch(console.error);
+    api
+      .listSessions({ limit: PAGE_SIZE, offset: 0 })
+      .then((r) => {
+        setSessions(r.sessions);
+        setTotal(r.total);
+      })
+      .catch(console.error);
+  };
+
+  const loadMore = () => {
+    if (loadingMore || sessions.length >= total) return;
+    setLoadingMore(true);
+    api
+      .listSessions({ limit: PAGE_SIZE, offset: sessions.length })
+      .then((r) => {
+        setSessions((prev) => [...prev, ...r.sessions]);
+        setTotal(r.total);
+      })
+      .catch(console.error)
+      .finally(() => setLoadingMore(false));
   };
 
   useEffect(() => {
@@ -142,15 +184,14 @@ export default function SessionSidebar({ isOpen, onToggle, isMobile }: Props) {
   }, [sessionId]);
 
   const handleNewSession = () => {
-    dispatch({ type: "RESET" });
+    openNewSessionTab();
   };
 
   const handleSelectSession = async (id: string) => {
     setLoadingId(id);
     try {
       const session = await api.getSession(id);
-      dispatch({ type: "SET_SESSION", sessionId: id });
-      dispatch({ type: "SET_MESSAGES", messages: session.messages || [] });
+      openSessionTab(id, session.title || id);
     } catch (err) {
       console.error("Failed to load session:", err);
     } finally {
@@ -197,6 +238,9 @@ export default function SessionSidebar({ isOpen, onToggle, isMobile }: Props) {
               onToggle();
             }}
             loadingId={loadingId}
+            hasMore={sessions.length < total}
+            loadingMore={loadingMore}
+            onLoadMore={loadMore}
           />
         </div>
       </>
@@ -234,7 +278,16 @@ export default function SessionSidebar({ isOpen, onToggle, isMobile }: Props) {
       </div>
 
       {/* Session list */}
-      {isOpen && <SessionList sessions={sessions} onSelect={handleSelectSession} loadingId={loadingId} />}
+      {isOpen && (
+        <SessionList
+          sessions={sessions}
+          onSelect={handleSelectSession}
+          loadingId={loadingId}
+          hasMore={sessions.length < total}
+          loadingMore={loadingMore}
+          onLoadMore={loadMore}
+        />
+      )}
     </div>
   );
 }
