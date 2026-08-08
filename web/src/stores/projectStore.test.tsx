@@ -15,6 +15,8 @@ vi.mock("../api/client", () => ({
 
 // projectReducer is not exported — drive it through the provider + dispatch,
 // same as a real consumer would.
+const testProjectA = { path: "/proj-a", name: "a", added_at: "", last_used_at: "" };
+
 function setup() {
   return renderHook(() => useProjectState(), {
     wrapper: ({ children }) => <ProjectProvider>{children}</ProjectProvider>,
@@ -27,7 +29,7 @@ describe("projectStore tab actions across projects", () => {
     await act(async () => {
       result.current.dispatch({
         type: "SET_ACTIVE_PROJECT",
-        project: { path: "/proj-a", name: "a" },
+        project: testProjectA,
       });
       result.current.dispatch({
         type: "ADD_TAB",
@@ -36,7 +38,7 @@ describe("projectStore tab actions across projects", () => {
       // Switch active project away from proj-b before renaming its tab.
       result.current.dispatch({
         type: "SET_ACTIVE_PROJECT",
-        project: { path: "/proj-a", name: "a" },
+        project: testProjectA,
       });
       result.current.dispatch({
         type: "UPDATE_TAB_TITLE",
@@ -57,7 +59,7 @@ describe("projectStore tab actions across projects", () => {
     await act(async () => {
       result.current.dispatch({
         type: "SET_ACTIVE_PROJECT",
-        project: { path: "/proj-a", name: "a" },
+        project: testProjectA,
       });
       result.current.dispatch({
         type: "ADD_TAB",
