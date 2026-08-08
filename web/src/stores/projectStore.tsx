@@ -62,6 +62,17 @@ function activeTabId(state: ProjectState): string | null {
   return state.activeTabByProject[state.activeProject.path] || null;
 }
 
+/** Finds which project's tab list contains this tab id, regardless of which
+ *  project is currently active. Needed because tab rename/rekey can be
+ *  triggered by a background session (SessionTabSync, ChatPanel) whose
+ *  project isn't the one the user is currently looking at. */
+function findProjectPathForTab(state: ProjectState, tabId: string): string | null {
+  for (const [path, list] of Object.entries(state.tabsByProject)) {
+    if (list.some((t) => t.id === tabId)) return path;
+  }
+  return null;
+}
+
 function projectReducer(state: ProjectState, action: ProjectAction): ProjectState {
   const path = state.activeProject?.path || "";
   switch (action.type) {
@@ -108,24 +119,32 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     case "SET_SESSION_PICKER":
       return { ...state, sessionPickerOpen: action.open };
     case "UPDATE_TAB_TITLE": {
-      if (!path) return state;
-      const list = (state.tabsByProject[path] || []).map((t) =>
+      const ownerPath = findProjectPathForTab(state, action.id);
+      if (!ownerPath) return state;
+      const list = state.tabsByProject[ownerPath].map((t) =>
         t.id === action.id ? { ...t, title: action.title } : t
       );
-      return { ...state, tabsByProject: { ...state.tabsByProject, [path]: list } };
+      return { ...state, tabsByProject: { ...state.tabsByProject, [ownerPath]: list } };
     }
     case "UPDATE_TAB_ID": {
-      const key = path || "";
-      const list = state.tabsByProject[key] || [];
+      const ownerPath = findProjectPathForTab(state, action.oldId);
+      if (!ownerPath) return state;
+      const list = state.tabsByProject[ownerPath];
       const tab = list.find((t) => t.id === action.oldId);
       if (!tab) return state;
       const newTab = { ...tab, id: action.newId, title: action.newTitle || tab.title };
       return {
         ...state,
-        tabsByProject: { ...state.tabsByProject, [key]: list.map((t) => (t.id === action.oldId ? newTab : t)) },
+        tabsByProject: {
+          ...state.tabsByProject,
+          [ownerPath]: list.map((t) => (t.id === action.oldId ? newTab : t)),
+        },
         activeTabByProject: {
           ...state.activeTabByProject,
-          [key]: state.activeTabByProject[key] === action.oldId ? action.newId : state.activeTabByProject[key],
+          [ownerPath]:
+            state.activeTabByProject[ownerPath] === action.oldId
+              ? action.newId
+              : state.activeTabByProject[ownerPath],
         },
       };
     }
@@ -229,9 +248,11 @@ interface ProjectContextType {
   addProject: (path: string) => Promise<void>;
   removeProject: (path: string) => Promise<void>;
   toggleSessionPicker: () => void;
-  /** Opens the project's "New session" tab — activates it if one exists
-   *  (auto-ensured by ENSURE_NEW_TAB), otherwise creates it. */
-  openNewSessionTab: () => string | null;
+  /** Opens the project's "New session" tab — always adds a fresh tab (keeping
+   *  the current running one), unless `reuseIfEmpty` is set and the active tab
+   *  is an empty `new-*` tab (no draft, no session), in which case it just
+   *  activates it. */
+  openNewSessionTab: (reuseIfEmpty?: boolean) => string | null;
   /** Opens a session tab for the active project. If no project is active yet
    *  (boot race), remembers it and applies once a project is selected. */
   openDeepLinkSession: (sessionId: string, sessionTitle?: string) => void;
@@ -269,6 +290,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "SET_LOADING", loading: false });
     }
   }, []);
+
+  // Load the saved project list once on mount so the sidebar is populated on
+  // startup (previously only add/remove re-fetched, leaving the list empty).
+  useEffect(() => {
+    refreshProjects();
+  }, [refreshProjects]);
 
   const selectProject = useCallback(async (project: Project) => {
     dispatch({ type: "SET_ACTIVE_PROJECT", project });
@@ -343,18 +370,20 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     dispatch({ type: "SET_SESSION_PICKER", open: !state.sessionPickerOpen });
   }, [state.sessionPickerOpen]);
 
-  const openNewSessionTab = useCallback((): string | null => {
+  const openNewSessionTab = useCallback((reuseIfEmpty = false): string | null => {
     const path = state.activeProject?.path || "";
-    const list = state.tabsByProject[path] || [];
-    const existing = list.find((t) => t.id.startsWith("new-"));
-    if (existing) {
-      dispatch({ type: "SET_ACTIVE_TAB", id: existing.id });
-      return existing.id;
+    const activeId = state.activeTabByProject[path] || null;
+    // Reuse the active tab when it is a completely empty new-session tab —
+    // no point stacking duplicate blank tabs. Otherwise always add a fresh tab
+    // and keep the current (running) tab in the bar.
+    if (reuseIfEmpty && activeId && activeId.startsWith("new-")) {
+      dispatch({ type: "SET_ACTIVE_TAB", id: activeId });
+      return activeId;
     }
     const tempId = `new-${Date.now()}`;
     dispatch({ type: "ADD_TAB", tab: { id: tempId, projectPath: path, title: "New session" } });
     return tempId;
-  }, [state.activeProject, state.tabsByProject]);
+  }, [state.activeProject, state.activeTabByProject]);
 
   // Apply a stashed deep-link session once the first project is selected.
   const appliedPending = useRef(false);
@@ -366,6 +395,44 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       openSessionTab(stashed, stashed);
     }
   }, [state.activeProject, openSessionTab]);
+
+  // ── Boot: auto-select the server's working-directory project ─────────────
+  // On open the desktop/web UI should land on the current project: the server
+  // reports which saved project root matches its cwd (auto-adding it to the
+  // sidebar when the cwd is a real project root). We select it once the saved
+  // project list has loaded, unless the user (or a deep-link flow) already
+  // picked a project.
+  const bootAutoSelect = useRef<{ ran: boolean }>({ ran: false });
+  const sawLoading = useRef(false);
+  const activeProjectRef = useRef<Project | null>(null);
+  activeProjectRef.current = state.activeProject;
+  useEffect(() => {
+    if (state.loading) {
+      sawLoading.current = true;
+      return;
+    }
+    if (!sawLoading.current || bootAutoSelect.current.ran) return;
+    bootAutoSelect.current.ran = true;
+    if (state.activeProject) return; // user already picked one — don't override
+    (async () => {
+      try {
+        const res = await api.getCurrentProject();
+        const proj = res?.project;
+        if (!proj) return;
+        // The user may have clicked a project while the fetch was in flight.
+        if (activeProjectRef.current) return;
+        // Refresh so the sidebar shows the project (the server may have just
+        // auto-added it), then select the freshest copy.
+        await refreshProjects();
+        if (activeProjectRef.current) return;
+        const fresh = await api.listProjects();
+        const match = fresh.find((p) => p.path === proj.path);
+        if (match) selectProject(match);
+      } catch (err) {
+        console.error("Failed to auto-select current project:", err);
+      }
+    })();
+  }, [state.loading, state.activeProject, refreshProjects, selectProject]);
 
   return (
     <ProjectContext.Provider
