@@ -1,6 +1,7 @@
 import { useCallback } from "react";
-import { useChatDispatch, useChatState } from "../../stores/chatStore";
+import { useChatDispatch, useChatState, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
+import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { X, List, Plus, Loader2 } from "lucide-react";
 
 export default function OpenSessionBar() {
@@ -19,15 +20,13 @@ export default function OpenSessionBar() {
   const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
     e.stopPropagation();
     closeSessionTab(tabId);
-    if (chatState.sessionId === tabId) {
-      chatDispatch({ type: "RESET" });
-    }
-  }, [closeSessionTab, chatState.sessionId, chatDispatch]);
+    chatDispatch({ type: "RESET", sessionId: tabId });
+  }, [closeSessionTab, chatDispatch]);
 
-  // A real session tab is "loading" while it's active but its messages are not
-  // yet in the chat store (SessionTabSync fetch in flight).
+  // A real session tab is "loading" while its slice hasn't finished its first
+  // fetch yet (ChatPanel's own initial-load effect sets `initialized`).
   const isLoadingTab = (tabId: string) =>
-    activeTabId === tabId && !tabId.startsWith("new-") && chatState.sessionId !== tabId;
+    !tabId.startsWith("new-") && !getSessionSlice(chatState, tabId).initialized;
 
   // Always show when a project is active, even with zero tabs
   if (!projectState.activeProject) {
@@ -35,9 +34,11 @@ export default function OpenSessionBar() {
   }
 
   return (
-    <div className="flex items-center h-8 px-2 gap-0.5 bg-zinc-900 border-b border-zinc-700 overflow-x-auto scrollbar-none">
+    <div className="flex items-center h-8 px-2 gap-0.5 bg-zinc-900 border-b border-zinc-700 overflow-x-auto scrollbar-hide">
       {tabs.map((tab) => {
         const isActive = activeTabId === tab.id;
+        const slice = getSessionSlice(chatState, tab.id);
+        const hasPending = !isActive && (slice.pendingPermission !== null || slice.pendingQuestion !== null);
         return (
           <div
             key={tab.id}
@@ -50,6 +51,12 @@ export default function OpenSessionBar() {
           >
             {isLoadingTab(tab.id) && (
               <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+            )}
+            {hasPending && (
+              <span
+                className="h-1.5 w-1.5 rounded-full bg-amber-400 shrink-0"
+                title="Waiting for a response in this tab"
+              />
             )}
             <span className="max-w-28 truncate" title={tab.title || tab.id}>{tab.title || tab.id.slice(0, 12)}</span>
             <span
@@ -73,8 +80,10 @@ export default function OpenSessionBar() {
       {/* New session button */}
       <button
         onClick={() => {
-          openNewSessionTab();
-          chatDispatch({ type: "RESET" });
+          // Add a fresh tab and keep the current (running) one — unless the
+          // active tab is a completely empty new-session tab (no draft, no
+          // session yet), in which case reuse it instead of duplicating.
+          openNewSessionTab(isNewSessionTabEmpty(activeTabId));
         }}
         className="flex items-center gap-1 px-2 py-1 rounded text-xs text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors shrink-0"
         title="New session"

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { useChatState, useChatDispatch } from "../../stores/chatStore";
+import { useChatDispatch } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
+import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -8,7 +9,6 @@ import { MessageSquare, Plus, X, Loader2, Check } from "lucide-react";
 
 export default function SessionDialog() {
   const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab } = useProjectState();
-  const chatState = useChatState();
   const chatDispatch = useChatDispatch();
   const { projectSessions, sessionsLoading, sessionPickerOpen, activeProject } = projectState;
 
@@ -42,20 +42,17 @@ export default function SessionDialog() {
 
   // Create a new session
   const handleNewSession = useCallback(() => {
-    openNewSessionTab();
-    chatDispatch({ type: "RESET" });
+    openNewSessionTab(isNewSessionTabEmpty(activeTabId));
     toggleSessionPicker();
     setSearchQuery("");
-  }, [openNewSessionTab, chatDispatch, toggleSessionPicker]);
+  }, [activeTabId, openNewSessionTab, toggleSessionPicker]);
 
   // Close a session tab
   const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
     e.stopPropagation();
     closeSessionTab(tabId);
-    if (chatState.sessionId === tabId) {
-      chatDispatch({ type: "RESET" });
-    }
-  }, [closeSessionTab, chatState.sessionId, chatDispatch]);
+    chatDispatch({ type: "RESET", sessionId: tabId });
+  }, [closeSessionTab, chatDispatch]);
 
   // Check if a session is currently open as a tab
   const isTabOpen = useCallback((sessionId: string) => {
