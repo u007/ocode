@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { api, apiPath, authHeaders } from "../../api/client";
 import { useChatState, useChatDispatch } from "../../stores/chatStore";
+import { useProjectState } from "../../stores/projectStore";
 import type { AgentInfo, LSPStatus, MCPStatus } from "../../api/types";
 import { applyThemeColors } from "../../hooks/useTheme";
 import PluginsPanel from "./PluginsPanel";
@@ -87,10 +88,10 @@ export default function CoworkSidebar({
     ocrModel,
     ocrEnabled,
     ocrBackend,
-    sessionId,
     tuiStatus,
   } = useChatState();
   const dispatch = useChatDispatch();
+  const { activeTabId: sessionId } = useProjectState();
 
   // Fetch git branch periodically
   useEffect(() => {

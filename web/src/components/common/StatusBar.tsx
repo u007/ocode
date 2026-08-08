@@ -1,4 +1,5 @@
-import { useChatState } from "../../stores/chatStore";
+import { useChatState, getSessionSlice } from "../../stores/chatStore";
+import { useProjectState } from "../../stores/projectStore";
 import { Button } from "@/components/ui/button";
 import { PanelRight } from "lucide-react";
 
@@ -26,18 +27,19 @@ function formatUSD(n: number): string {
 }
 
 export default function StatusBar({ onCoworkToggle, onModelClick, onStatusClick }: Props) {
+  const chatState = useChatState();
   const {
     model,
     smallModel,
     smallModelEnabled,
     advisorModel,
     advisorEnabled,
-    isStreaming,
-    error,
     tuiStatus,
     sessionContext,
     spendingUSD,
-  } = useChatState();
+  } = chatState;
+  const { activeTabId } = useProjectState();
+  const { isStreaming, error } = getSessionSlice(chatState, activeTabId);
 
   // Pull every field from the consolidated snapshot when present; fall back to
   // the per-field store state for older TUI builds that don't push "status".
