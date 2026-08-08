@@ -67,6 +67,43 @@ itself — "current" is purely which tab's slice a given `ChatPanel` instance
 is told to render (see below), sourced from `projectStore`'s
 `tabsByProject`/`activeTabByProject`, not duplicated in `chatStore`.
 
+### Downstream consumers of the removed global `sessionId`
+
+Several places outside `ChatPanel` read the now-removed top-level
+`chatState.sessionId` as a stand-in for "the active tab" and need to switch
+to reading `activeTabId` from `projectStore` instead:
+
+- `App.tsx`'s `currentSessionId` (`useChatState().sessionId`), passed to
+  `FileEditor` (`session={currentSessionId}`), `ChangesPanel`
+  (`session={currentSessionId}`), and the `selectedAgentRunId` reset effect.
+- `OpenSessionBar.tsx` and `SessionDialog.tsx`, both of which compare
+  `chatState.sessionId === tabId` to detect "the tab being closed is the
+  active one" — becomes `activeTabId === tabId`.
+
+`useChat()` (`hooks/useChat.ts`) is the other major consumer: `sendMessage`,
+`resolvePermission`, and `submitQuestionAnswers` all read/write
+`state.sessionId` directly, and it's the source of the single global
+`pendingPermission`/`pendingQuestion` that `App.tsx`'s `PermissionDialog`
+renders. It changes to take the target `sessionId` (the active tab, already
+threaded into `ChatInput` today as `sessionTabId`) as an explicit argument
+rather than an implicit read of removed store state, and to read/dispatch
+against that session's slice in `chatStore.sessions`.
+
+### Temp tab → real session id rekeying
+
+A new chat starts life as tab id `new-<timestamp>`; today `SessionTabSync`
+and `handleSessionCreated` rename it to the real server session id via
+`UPDATE_TAB_ID` once the first turn's `session_started` event (or response)
+arrives. Since `ChatPanel` instances and `chatStore.sessions` entries are
+now keyed by session/tab id, that rename must rekey the *existing* slice
+(move `sessions["new-<ts>"]` to `sessions["<real-id>"]`, preserving whatever
+messages/live content already streamed in) rather than starting a fresh
+slice under the new key — otherwise the first turn's own live-streamed
+content is dropped at the exact moment the session is created, reintroducing
+the class of bug this design fixes. A new `REKEY_SESSION` action (old id,
+new id) covers this in the reducer; `SessionTabSync`'s `UPDATE_TAB_ID`
+handling calls it alongside the existing `projectDispatch`.
+
 ### Rendering: one `ChatPanel` per open tab, all projects
 
 `App.tsx` currently mounts a single `<ChatPanel />` under the "chat"
