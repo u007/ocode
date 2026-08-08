@@ -70,6 +70,11 @@ type PermissionRequest struct {
 type PermissionDecision struct {
 	Level   PermissionLevel
 	Request *PermissionRequest
+	// HardDeny marks a Deny that must never be reconsidered by the LLM
+	// auto-permission judge (hard-blocked commands, /ban-listed bash
+	// prefixes). Unlike other Deny decisions, these are not soft hints —
+	// they cannot be overridden even when auto-permission is enabled.
+	HardDeny bool
 }
 
 // PermissionResponse is returned by an interactive permission callback. Level
@@ -891,7 +896,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		command := bashCommand(args)
 		if isHardBlockedCommand(command) {
 			emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
-			return PermissionDecision{Level: PermissionDeny}
+			return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 		}
 		if parsed, err := parseShellCommandLine(command); err == nil {
 			for _, cmd := range parsed {
@@ -3517,7 +3522,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	command := rebuildCommandLine(cmd.cmdWords)
 	if isHardBlockedCommand(command) {
 		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (hard-blocked): command=%q", command))
-		return PermissionDecision{Level: PermissionDeny}
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 	}
 
 	prefix := cmd.cmdWords[0]
@@ -3560,7 +3565,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 
 	if deniedPrefix, ok := pm.matchBashPrefixRule(cmd.cmdWords, PermissionDeny); ok {
 		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (banned prefix rule): prefix=%s", deniedPrefix))
-		return PermissionDecision{Level: PermissionDeny}
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 	}
 
 	// 1. Temp directory operations are always allowed (cross-platform)
@@ -3582,7 +3587,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// governs every subcommand and must win over any granular allow.
 	if level, exists := pm.bashPrefixes[prefix]; exists && level == PermissionDeny {
 		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (broad prefix rule): prefix=%s", prefix))
-		return PermissionDecision{Level: PermissionDeny}
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 	}
 	// Then the granular rulePrefix (e.g. "git push"), which carries always-allow.
 	if level, exists := pm.bashPrefixes[rulePrefix]; exists {

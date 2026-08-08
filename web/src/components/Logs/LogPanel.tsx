@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { apiPath, authToken, authHeaders } from "@/api/client";
 import { Trash2, Pause, Play, Filter } from "lucide-react";
@@ -19,15 +19,45 @@ const KIND_COLORS: Record<string, string> = {
 
 const KIND_FILTERS = ["ALL", "LLM", "TOOL", "AGENT", "ERROR", "SESSION", "GIT"];
 
-export default function LogPanel() {
+export default function LogPanel({ active }: { active: boolean }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState(true);
   const [filter, setFilter] = useState("ALL");
   const [autoScroll, setAutoScroll] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const bottomRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [reconnectAttempt, setReconnectAttempt] = useState(0);
+
+  // Mirror of `autoScroll` for handlers that must read the current value
+  // without re-running their effects (scroll handler, tab-visibility effect).
+  const autoScrollRef = useRef(true);
+  useEffect(() => {
+    autoScrollRef.current = autoScroll;
+  }, [autoScroll]);
+
+  // Tab-visibility bookkeeping. The panel is force-mounted and hidden with
+  // `display: none` while the tab is inactive, so "mounted" !== "open". The
+  // scroll position is saved on every scroll (display:none resets scrollTop
+  // to 0, so it can only be read while the panel is visible), and when the
+  // tab opens:
+  //   - first open            -> jump to the bottom (show the latest logs)
+  //   - re-open while pinned  -> catch up to the latest logs
+  //   - re-open while reading -> restore the saved position
+  const hasOpenedRef = useRef(false);
+  const savedScrollTopRef = useRef(0);
+  const rafRef = useRef(0);
+
+  // Scroll the viewport to the bottom. Instant by default — smooth scrolling
+  // during streaming starts a competing animation (down/up bounce, eventual
+  // lockout; same lesson as ChatPanel). The explicit ↓ button uses smooth.
+  const scrollToBottom = useCallback((smooth = false) => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+    autoScrollRef.current = true;
+    setAutoScroll(true);
+  }, []);
 
   useEffect(() => {
     // Load initial logs
@@ -68,21 +98,49 @@ export default function LogPanel() {
     es.onerror = () => {
       es.close();
       console.warn("SSE connection lost, reconnecting in 3s…");
-      setTimeout(() => {
-        if (streaming) setStreaming((s) => s); // trigger reconnect
-      }, 3000);
+      // setStreaming with the same boolean value is a no-op in React (bails
+      // out of the re-render), so it never re-ran this effect. Use a counter
+      // dependency instead so the reconnect actually fires.
+      setTimeout(() => setReconnectAttempt((n) => n + 1), 3000);
     };
 
     return () => {
       es.close();
     };
-  }, [streaming]);
+  }, [streaming, reconnectAttempt]);
 
+  // Follow the tail on new logs, but only while the user is pinned to the
+  // bottom (autoScroll enabled). Instant, not smooth — see scrollToBottom.
   useEffect(() => {
-    if (autoScroll) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
+    if (!autoScroll) return;
+    const el = containerRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
   }, [logs, autoScroll]);
+
+  // React to the log tab becoming visible. The first open jumps to the bottom
+  // to show the latest entries; later opens restore the saved position unless
+  // the user was following the tail (then catch up to the latest).
+  useEffect(() => {
+    if (!active) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const firstOpen = !hasOpenedRef.current;
+    hasOpenedRef.current = true;
+    const jumpToBottom = firstOpen || autoScrollRef.current;
+    if (jumpToBottom) {
+      autoScrollRef.current = true;
+      setAutoScroll(true);
+    }
+    requestAnimationFrame(() => {
+      const view = containerRef.current;
+      if (!view) return;
+      view.scrollTop = jumpToBottom ? view.scrollHeight : savedScrollTopRef.current;
+    });
+  }, [active]);
+
+  // Cancel a pending deferred scroll check on unmount.
+  useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
 
   const handleClear = async () => {
     if (!window.confirm("Clear all logs?")) return;
@@ -94,12 +152,23 @@ export default function LogPanel() {
     }
   };
 
-  const handleScroll = () => {
+  const handleScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
-    setAutoScroll(atBottom);
-  };
+    // Save the position while the element is still visible — display:none
+    // resets scrollTop to 0, so this cannot wait for the tab to hide.
+    savedScrollTopRef.current = el.scrollTop;
+    // Defer the pinned-to-bottom check to the next frame. Content growth
+    // during streaming fires scroll events where scrollHeight has grown but
+    // scrollTop has not caught up yet, which makes the distance look large
+    // and wrongly flips auto-scroll off (same fix as ChatPanel).
+    cancelAnimationFrame(rafRef.current);
+    rafRef.current = requestAnimationFrame(() => {
+      const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 30;
+      autoScrollRef.current = atBottom;
+      setAutoScroll(atBottom);
+    });
+  }, []);
 
   const filteredLogs = filter === "ALL" ? logs : logs.filter((l) => l.kind === filter);
 
@@ -146,7 +215,14 @@ export default function LogPanel() {
             type="button"
             variant="ghost"
             size="sm"
-            onClick={() => setAutoScroll(!autoScroll)}
+            onClick={() => {
+              if (autoScroll) {
+                autoScrollRef.current = false;
+                setAutoScroll(false);
+              } else {
+                scrollToBottom(true);
+              }
+            }}
             title={autoScroll ? "Disable auto-scroll" : "Enable auto-scroll"}
             className={autoScroll ? "text-blue-400" : "text-zinc-500"}
           >
@@ -195,7 +271,6 @@ export default function LogPanel() {
             </div>
           ))
         )}
-        <div ref={bottomRef} />
       </div>
     </div>
   );

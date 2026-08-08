@@ -330,7 +330,15 @@ func (a *Agent) RunDiscovery(query string) {
 		emitDebug("DISCOVERY", fmt.Sprintf("corpus warm deferred to background: %v", err))
 		return
 	}
-	added, err := a.disco.session.Discover(context.Background(), query)
+	// Discover embeds the query against a (now-warm) corpus. On a hot cache
+	// this is normally fast, but nothing bounded it before: any embedder
+	// slowness (network latency, a local model server serializing this
+	// behind other work) stalled the whole turn before the first streamed
+	// token, with no timeout to fail open like Warm has. Give it the same
+	// tight per-turn budget.
+	rankCtx, rankCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	added, err := a.disco.session.Discover(rankCtx, query)
+	rankCancel()
 	if err != nil {
 		emitDebug("DISCOVERY", fmt.Sprintf("rank failed (fail-open, all attached): %v", err))
 		a.disco.enabled = false

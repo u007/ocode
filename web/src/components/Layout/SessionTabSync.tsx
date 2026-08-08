@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useChatDispatch, useChatState } from "../../stores/chatStore";
+import { useChatDispatch, useChatState, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { connectSessionMirror } from "../../api/client";
 import type { Message, SSEPermissionEvent, TUIStatus } from "../../api/types";
@@ -26,6 +26,12 @@ export default function SessionTabSync() {
   openSessionIdsRef.current = new Set(
     Object.values(projectState.tabsByProject).flat().map((tab) => tab.id),
   );
+
+  // The mirror handler below is a stable closure (effect deps don't include
+  // chatState); read current slices through this ref so it never sees stale
+  // per-session state from the render that installed the listener.
+  const chatStateRef = useRef(chatState);
+  chatStateRef.current = chatState;
 
   // One persistent mirror for status and chat events. The server places the
   // session ID in the SSE `id` field; existing event payloads remain unchanged.
@@ -106,6 +112,34 @@ export default function SessionTabSync() {
           const snapshot = Array.isArray(data)
             ? (data as Message[])
             : ((data as { messages?: Message[] }).messages ?? []);
+          const current = getSessionSlice(chatStateRef.current, sessionId);
+          // When older history is paginated in (hasMore), a live snapshot only
+          // ever carries the tail the server currently holds in memory — if it
+          // extends what's already loaded, append just the new tail instead of
+          // replacing, so the scrolled-back prefix isn't dropped.
+          if (
+            current.hasMore &&
+            current.messages.length > 0 &&
+            snapshot.length > current.messages.length
+          ) {
+            let isPrefix = true;
+            for (let i = 0; i < current.messages.length; i++) {
+              if (
+                current.messages[i].role !== snapshot[i]?.role ||
+                current.messages[i].content !== snapshot[i]?.content
+              ) {
+                isPrefix = false;
+                break;
+              }
+            }
+            if (isPrefix) {
+              snapshot.slice(current.messages.length).forEach((message) =>
+                chatDispatch({ type: "ADD_MESSAGE", sessionId, message }),
+              );
+              chatDispatch({ type: "SET_TOTAL", sessionId, total: snapshot.length });
+              break;
+            }
+          }
           chatDispatch({ type: "SET_MESSAGES", sessionId, messages: snapshot });
           chatDispatch({ type: "SET_TOTAL", sessionId, total: snapshot.length });
           break;

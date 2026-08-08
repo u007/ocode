@@ -49,6 +49,17 @@ html.light {
   color-scheme: light;
 }
 
+@layer utilities {
+  /* Hide scrollbars on horizontal tab strips while keeping them scrollable */
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 /* ── Inline diff decorations (FileEditor.tsx) ── */
 .diff-line-added {
   background-color: rgba(34, 197, 94, 0.12) !important;

@@ -43,6 +43,7 @@ const (
 type Ref struct {
 	ID        string
 	Title     string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 	Source    Source
 }
@@ -497,7 +498,7 @@ func ListAll() ([]Ref, error) {
 	refs := make([]Ref, 0, len(ocodeSessions))
 	clonedClaude := make(map[string]struct{})
 	for _, s := range ocodeSessions {
-		refs = append(refs, Ref{ID: s.ID, Title: s.Title, UpdatedAt: s.UpdatedAt, Source: SourceOcode})
+		refs = append(refs, Ref{ID: s.ID, Title: s.Title, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt, Source: SourceOcode})
 		if s.Metadata != nil {
 			if originalID, ok := s.Metadata["claude_original_session_id"].(string); ok && originalID != "" {
 				clonedClaude[originalID] = struct{}{}
@@ -579,6 +580,7 @@ func mapDirEntries[T any](dir string, entries []os.DirEntry, ext string, fn func
 type ocodeMeta struct {
 	ID        string
 	Title     string
+	CreatedAt time.Time
 	UpdatedAt time.Time
 	CloneOf   string // metadata.claude_original_session_id; "" when not a clone
 }
@@ -622,6 +624,10 @@ func readOcodeMeta(path string, modTime time.Time) (ocodeMeta, error) {
 			if err := dec.Decode(&meta.UpdatedAt); err != nil {
 				return ocodeMeta{}, err
 			}
+		case "created_at":
+			if err := dec.Decode(&meta.CreatedAt); err != nil {
+				return ocodeMeta{}, err
+			}
 		case "metadata":
 			var m map[string]any
 			if err := dec.Decode(&m); err != nil {
@@ -642,6 +648,9 @@ func readOcodeMeta(path string, modTime time.Time) (ocodeMeta, error) {
 	}
 	if meta.UpdatedAt.IsZero() {
 		meta.UpdatedAt = modTime
+	}
+	if meta.CreatedAt.IsZero() {
+		meta.CreatedAt = meta.UpdatedAt
 	}
 	return meta, nil
 }
@@ -693,6 +702,7 @@ func ListRefsPaginated(limit, offset int) ([]Ref, int, error) {
 		allRefs = append(allRefs, Ref{
 			ID:        meta.ID,
 			Title:     meta.Title,
+			CreatedAt: meta.CreatedAt,
 			UpdatedAt: meta.UpdatedAt,
 			Source:    SourceOcode,
 		})
@@ -865,7 +875,7 @@ func claudeRefQuick(id, path string, modTime time.Time) Ref {
 	if title == "" {
 		title = id
 	}
-	return Ref{ID: "claude:" + id, Title: title, UpdatedAt: modTime, Source: SourceClaude}
+	return Ref{ID: "claude:" + id, Title: title, CreatedAt: modTime, UpdatedAt: modTime, Source: SourceClaude}
 }
 
 func getClaudeProjectDir() (string, error) {

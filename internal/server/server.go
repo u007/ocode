@@ -212,9 +212,14 @@ func (s *Server) registerRoutes() {
 
 	// Projects (multi-project desktop UI)
 	s.mux.HandleFunc("GET /api/projects", s.authMiddleware(s.handleListProjects))
+	s.mux.HandleFunc("GET /api/projects/current", s.authMiddleware(s.handleGetCurrentProject))
 	s.mux.HandleFunc("POST /api/projects", s.authMiddleware(s.handleAddProject))
 	s.mux.HandleFunc("DELETE /api/projects/{path...}", s.authMiddleware(s.handleRemoveProject))
 	s.mux.HandleFunc("GET /api/projects/sessions", s.authMiddleware(s.handleListProjectSessions))
+
+	// Open-session tab state (server-side persistence; survives desktop restarts)
+	s.mux.HandleFunc("GET /api/tabs", s.authMiddleware(s.handleGetTabs))
+	s.mux.HandleFunc("PUT /api/tabs", s.authMiddleware(s.handleSetTabs))
 
 	// Directory browser for the project sidebar folder picker.
 	s.mux.HandleFunc("GET /api/browse", s.authMiddleware(s.handleBrowseDirectory))
@@ -791,6 +796,9 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) { s.handler.
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListProjects(w, r)
 }
+func (s *Server) handleGetCurrentProject(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetCurrentProject(w, r)
+}
 func (s *Server) handleAddProject(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleAddProject(w, r)
 }
@@ -799,6 +807,12 @@ func (s *Server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleListProjectSessions(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListProjectSessions(w, r)
+}
+func (s *Server) handleGetTabs(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetTabs(w, r)
+}
+func (s *Server) handleSetTabs(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetTabs(w, r)
 }
 func (s *Server) handleBrowseDirectory(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleBrowseDirectory(w, r)
@@ -837,6 +851,11 @@ type SessionInfo struct {
 	UpdatedAt string `json:"updated_at"`
 }
 
+type SessionListResponse struct {
+	Sessions []SessionInfo `json:"sessions"`
+	Total    int           `json:"total"`
+}
+
 type SessionDetail struct {
 	SessionInfo
 	Messages []agent.Message `json:"messages"`
@@ -848,6 +867,11 @@ type ModelInfo struct {
 	Model    string `json:"model"`
 	Provider string `json:"provider"`
 	Active   bool   `json:"active"`
+	// Favorite and Recent mirror the TUI model picker's priority sections
+	// (★ Favorites / Recently Used): the web and desktop selectors surface
+	// these first, sorted exactly like the TUI.
+	Favorite bool `json:"favorite,omitempty"`
+	Recent   bool `json:"recent,omitempty"`
 }
 
 func printServeUsage() {

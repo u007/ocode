@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
@@ -41,6 +42,14 @@ func (h *Handler) HandleSetModel(w http.ResponseWriter, r *http.Request) {
 	if err := config.SaveLastModel(req.Model); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Mirror the TUI's finishModelSwitch: record the pick in the shared
+	// recent-models list so the web/desktop model selector's "Recently Used"
+	// section stays in sync with the TUI.
+	if strings.Contains(req.Model, "/") {
+		if err := config.SaveRecentModel(req.Model); err != nil {
+			log.Printf("save recent model: %v", err)
+		}
 	}
 	// Push a fresh status snapshot so connected web clients (status bar,
 	// sidebar) reflect the new model immediately instead of showing the

@@ -43,6 +43,11 @@ export interface SessionDetail extends SessionInfo {
   total: number;
 }
 
+export interface SessionListResponse {
+  sessions: SessionInfo[];
+  total: number;
+}
+
 export interface ModelInfo {
   name: string;
   model: string;

@@ -23,6 +23,7 @@ import (
 	"github.com/u007/ocode/internal/bundled"
 	"github.com/u007/ocode/internal/desktop"
 	"github.com/u007/ocode/internal/skill"
+	"github.com/u007/ocode/internal/version"
 	"github.com/u007/ocode/web"
 )
 
@@ -140,7 +141,7 @@ func main() {
 	// Create the main webview window.
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:      "main",
-		Title:     "ocode",
+		Title:     "ocode " + version.Version,
 		Width:     1280,
 		Height:    800,
 		MinWidth:  800,

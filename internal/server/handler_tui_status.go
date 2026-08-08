@@ -49,9 +49,16 @@ func (h *Handler) buildStatusSnapshot() TUIStatus {
 		}
 		snap.OcrEnabled = h.cfg.Ocode.Ocr.Enabled
 	}
-	if cwd, err := os.Getwd(); err == nil {
-		snap.CWD = cwd
+	// CWD: the server's anchored project root (set by the desktop shell) is the
+	// source of truth — os.Getwd() can be "/" for a Finder-launched .app or
+	// drift from the configured workdir on a headless serve.
+	cwd := h.workDir
+	if cwd == "" {
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
 	}
+	snap.CWD = cwd
 	return snap
 }
 

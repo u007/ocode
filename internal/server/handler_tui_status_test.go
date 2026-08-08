@@ -49,6 +49,30 @@ func TestBuildStatusSnapshot(t *testing.T) {
 	}
 }
 
+// The headless snapshot must report the server's anchored workDir as CWD (the
+// desktop shell sets it explicitly; os.Getwd() can be "/" for a Finder-launched
+// .app and drift from the configured root).
+func TestBuildStatusSnapshotUsesWorkDir(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	h.workDir = "/tmp/ocode-test-project"
+
+	snap := h.buildStatusSnapshot()
+	if snap.CWD != "/tmp/ocode-test-project" {
+		t.Errorf("CWD = %q, want %q", snap.CWD, "/tmp/ocode-test-project")
+	}
+}
+
+// With no workDir configured the snapshot falls back to the process cwd.
+func TestBuildStatusSnapshotFallsBackToProcessCwd(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	h.workDir = ""
+
+	snap := h.buildStatusSnapshot()
+	if snap.CWD == "" {
+		t.Error("CWD is empty, want process cwd fallback")
+	}
+}
+
 // A web-initiated main-model change must broadcast a fresh "status" SSE event
 // in headless mode so the web status bar doesn't keep showing the old model.
 func TestPushStatusSnapshotBroadcastsInHeadlessMode(t *testing.T) {

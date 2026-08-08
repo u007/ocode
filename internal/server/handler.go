@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -11,12 +12,14 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/monaco"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/scheduler"
 	"github.com/u007/ocode/internal/session"
 	shellpkg "github.com/u007/ocode/internal/shell"
 	ocodesync "github.com/u007/ocode/internal/sync"
+	"github.com/u007/ocode/internal/tabs"
 	"github.com/u007/ocode/internal/tool"
 )
 
@@ -37,6 +40,7 @@ type Handler struct {
 	advisorEnabled bool
 	workDir        string // override for git commands in tests
 	projects       *projects.Store
+	tabsStore      *tabs.Store
 	monaco         *monaco.Store
 
 	// headlessSubs is the subscriber list for broadcasting live SSE events
@@ -74,6 +78,11 @@ func NewHandler() *Handler {
 		log.Printf("handler: init project store: %v (multi-project UI disabled)", err)
 	}
 
+	tabsStore, err := tabs.NewStore()
+	if err != nil {
+		log.Printf("handler: init tab store: %v (open-tab persistence disabled)", err)
+	}
+
 	monacoStore, err := monaco.NewStore()
 	if err != nil {
 		log.Printf("handler: init monaco store: %v (editor config disabled)", err)
@@ -84,12 +93,23 @@ func NewHandler() *Handler {
 		cfg:            cfg,
 		advisorEnabled: advisorEnabled,
 		projects:       projStore,
+		tabsStore:      tabsStore,
 		monaco:         monacoStore,
 		headlessSubs:   make(map[chan SSEEvent]struct{}),
 		mcpCache:       newMCPCache(),
 		titleGen:       newTitleGenState(),
 	}
 	h.mcpCache.warm(cfg)
+
+	// Wire the agent's debug log sink so the Log tab (backed by debuglog.Log,
+	// see handler_logs.go) receives entries in headless/desktop mode. The TUI
+	// wires the same sink before starting its alt-screen; guard so a server
+	// started from within an RC-bridged TUI session doesn't clobber it.
+	if agent.DebugAppend == nil {
+		agent.DebugAppend = func(kind, msg string) {
+			debuglog.Log.Append(debuglog.Entry{Kind: debuglog.EntryKind(kind), Message: msg})
+		}
+	}
 	return h
 }
 
@@ -351,23 +371,36 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleListSessions(w http.ResponseWriter, r *http.Request) {
-	sessions, err := session.List()
+	limit := 0 // 0 means return all
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	refs, total, err := session.ListRefsPaginated(limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list sessions: %v", err))
 		return
 	}
 
-	result := make([]SessionInfo, 0, len(sessions))
-	for _, s := range sessions {
+	result := make([]SessionInfo, 0, len(refs))
+	for _, ref := range refs {
 		result = append(result, SessionInfo{
-			ID:        s.ID,
-			Title:     s.Title,
-			CreatedAt: s.CreatedAt.Format(time.RFC3339),
-			UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+			ID:        ref.ID,
+			Title:     ref.Title,
+			CreatedAt: ref.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: ref.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, SessionListResponse{Sessions: result, Total: total})
 }
 
 func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id string) {
@@ -604,20 +637,56 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 }
 
 func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
-	models := []ModelInfo{}
-
 	// Mark the currently configured model as active.
 	currentModel := ""
 	if h.cfg != nil {
 		currentModel = h.cfg.Model
 	}
 
-	// Load all models from the models.dev registry. Use the non-blocking
-	// variant: it consults the embedded snapshot plus any live caches already
-	// populated by the background preload (see Server.Serve), and never performs
-	// a synchronous network fetch inside the HTTP handler.
-	allModels := agent.AllProviderModelsCached()
-	for _, id := range allModels {
+	// Mirror the TUI model picker ordering (openModelPicker in
+	// internal/tui/picker.go): ★ Favorites first, then Recently Used, then the
+	// remaining registry models grouped alphabetically by provider/model.
+	// Favorites / recents that are not in the registry are still listed, just
+	// like the TUI shows them regardless of registry membership.
+	favorites := config.LoadFavorites()
+	recents := config.LoadRecentModels()
+	registry := agent.AllProviderModelsCached()
+
+	shown := make(map[string]bool)
+	var ordered []string
+	addModel := func(id string) {
+		if id == "" || shown[id] {
+			return
+		}
+		shown[id] = true
+		ordered = append(ordered, id)
+	}
+
+	// 1. Favorites (in saved order), 2. Recently used (in saved order).
+	favSet := make(map[string]bool)
+	for _, f := range favorites {
+		favSet[f] = true
+		addModel(f)
+	}
+	for _, r := range recents {
+		addModel(r)
+	}
+
+	// 3. Remaining registry models, alphabetically by provider then model
+	// (equivalent to sorting the "provider/model" ids).
+	rest := make([]string, 0, len(registry))
+	for _, id := range registry {
+		if !shown[id] {
+			rest = append(rest, id)
+		}
+	}
+	sort.Strings(rest)
+	for _, id := range rest {
+		addModel(id)
+	}
+
+	models := make([]ModelInfo, 0, len(ordered))
+	for _, id := range ordered {
 		provider, modelName, ok := splitModelID(id)
 		if !ok {
 			provider = "other"
@@ -628,6 +697,10 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 			Model:    modelName,
 			Provider: provider,
 			Active:   id == currentModel,
+			// A model that is both favorite and recent shows only in the
+			// Favorites section, matching the TUI's dedupe.
+			Favorite: favSet[id],
+			Recent:   !favSet[id] && containsStr(recents, id),
 		})
 	}
 
@@ -651,6 +724,16 @@ func (h *Handler) HandleListModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, models)
+}
+
+// containsStr reports whether s is present in xs.
+func containsStr(xs []string, s string) bool {
+	for _, x := range xs {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // splitModelID splits "provider/model" into provider and model parts.

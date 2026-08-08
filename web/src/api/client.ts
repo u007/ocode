@@ -2,6 +2,7 @@ import type {
   ChatResponse,
   SessionInfo,
   SessionDetail,
+  SessionListResponse,
   ModelInfo,
   AgentInfo,
   AgentRun,
@@ -89,7 +90,15 @@ async function fetchEmpty(path: string, init?: RequestInit): Promise<void> {
 }
 
 export const api = {
-  listSessions: () => fetchJSON<SessionInfo[]>("/api/sessions"),
+  listSessions: (opts?: { limit?: number; offset?: number }) => {
+    const params = new URLSearchParams();
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    if (opts?.offset) params.set("offset", String(opts.offset));
+    const qs = params.toString();
+    return fetchJSON<SessionListResponse>(
+      `/api/sessions${qs ? `?${qs}` : ""}`,
+    );
+  },
   getSession: (id: string, opts?: { limit?: number; offset?: number }) => {
     const params = new URLSearchParams();
     if (opts?.limit) params.set("limit", String(opts.limit));
@@ -253,6 +262,11 @@ export const api = {
       body: JSON.stringify({ command, workDir }),
     }),
   listProjects: () => fetchJSON<Project[]>("/api/projects"),
+  /** The saved project root matching the server's working directory (auto-added
+   *  when the cwd is a real project root), or null. Used to auto-select the
+   *  sidebar project on startup. */
+  getCurrentProject: () =>
+    fetchJSON<{ project: Project | null; cwd?: string }>("/api/projects/current"),
   addProject: (path: string) =>
     fetchJSON<{ status: string }>("/api/projects", {
       method: "POST",

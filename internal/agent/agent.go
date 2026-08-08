@@ -2261,11 +2261,11 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 		if decision.Level == PermissionDeny {
 			if autoEnabled && a.permissions != nil && a.permissions.Mode() != PermissionModeLocked {
 				// Hard-blocked bash commands (rm -rf /, pipe-to-shell chains,
-				// etc.) are deliberate safety stops and must never be second-
-				// guessed by the auto-permission LLM. Other bash Deny decisions
-				// (e.g. banned prefix rules) may be safely overridden when the
-				// auto-permission model judges the specific invocation acceptable.
-				if !(name == "bash" && isHardBlockedCommand(bashCommand(args))) {
+				// etc.) and /ban-listed bash prefixes are deliberate safety
+				// stops and must never be second-guessed by the auto-permission
+				// LLM — HardDeny is set on Decide()'s Deny result for exactly
+				// these cases.
+				if !decision.HardDeny {
 					req := PermissionRequest{ToolName: name, Args: args, Scope: PermissionScopeTool, Rule: "tool." + name}
 					if decision.Request != nil {
 						req = *decision.Request

@@ -9,7 +9,7 @@ export function useSessions() {
   const refresh = useCallback(async () => {
     try {
       const data = await api.listSessions();
-      setSessions(data);
+      setSessions(data.sessions);
     } catch (e) {
       console.error("Failed to load sessions:", e);
     } finally {

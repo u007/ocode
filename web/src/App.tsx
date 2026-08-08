@@ -36,6 +36,7 @@ import { dispatchCommand } from "./components/Chat/commands";
 import SessionPage from "./pages/SessionPage";
 import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
+import { isNewSessionTabEmpty } from "./lib/tabDrafts";
 
 type ModelDialogTab = "main" | "small" | "advisor";
 
@@ -91,7 +92,7 @@ function triggerDownload(filename: string, content: string, mimeType: string) {
 function HomeApp() {
   const dispatch = useChatDispatch();
   const chatState = useChatState();
-  const { state: projectState, activeTabId, dispatch: projectDispatch, openSessionTab } = useProjectState();
+  const { state: projectState, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab } = useProjectState();
   const { resolvePermission, pendingPermission } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
@@ -182,7 +183,7 @@ function HomeApp() {
 
   useKeyboard({
     onNewSession: () => {
-      if (activeTabId) dispatch({ type: "RESET", sessionId: activeTabId });
+      openNewSessionTab(isNewSessionTabEmpty(activeTabId));
     },
     onCommandPalette: () => setCmdOpen(true),
     onFilePicker: () => setFilePickerOpen(true),
@@ -207,7 +208,7 @@ function HomeApp() {
     const baseCmd = cmd.split(" ")[0];
     // Built-in quick actions that don't need the dispatch pipeline
     if (baseCmd === "/clear" || baseCmd === "/new") {
-      if (activeTabId) dispatch({ type: "RESET", sessionId: activeTabId });
+      openNewSessionTab(isNewSessionTabEmpty(activeTabId));
       return true;
     }
     if (baseCmd === "/model") {
@@ -255,7 +256,7 @@ function HomeApp() {
       openSessionTab(result.sessionId, result.sessionId);
     }
     if (result.newSession) {
-      if (activeTabId) dispatch({ type: "RESET", sessionId: activeTabId });
+      openNewSessionTab(isNewSessionTabEmpty(activeTabId));
     }
     if (result.download) {
       triggerDownload(result.download.filename, result.download.content, result.download.mimeType);

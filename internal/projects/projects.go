@@ -36,9 +36,13 @@ func NewStore() (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("projects: resolve global data dir: %w", err)
 	}
-	s := &Store{
-		path: filepath.Join(globalDir, "projects.json"),
-	}
+	return NewStoreAt(filepath.Join(globalDir, "projects.json"))
+}
+
+// NewStoreAt creates or loads a project store rooted at an explicit JSON path.
+// Used by the server tests to keep the store out of the real global data dir.
+func NewStoreAt(path string) (*Store, error) {
+	s := &Store{path: path}
 	if err := s.load(); err != nil {
 		log.Printf("projects: loading projects list: %v (starting fresh)", err)
 		s.cache = nil

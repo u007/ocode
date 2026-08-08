@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { highlightMatches } from "./ChatSearchBar";
 
+const TOOL_OUTPUT_PREVIEW_LINES = 20;
+
 // ThinkingBlock renders reasoning tokens in a muted panel. The content is shown
 // expanded by default so reasoning is visible immediately in the web UI.
 export function ThinkingBlock({
@@ -48,7 +50,15 @@ export function ToolBlock({
 }) {
   const lineCount = output ? output.split("\n").length : 0;
   const [open, setOpen] = useState(lineCount <= 50);
+  const [expanded, setExpanded] = useState(false);
   const pending = output === undefined;
+  const outputLines = output ? output.split("\n") : [];
+  const collapsible = outputLines.length > TOOL_OUTPUT_PREVIEW_LINES;
+  const visibleOutput =
+    collapsible && !expanded
+      ? outputLines.slice(-TOOL_OUTPUT_PREVIEW_LINES).join("\n")
+      : output;
+  const hiddenLineCount = outputLines.length - TOOL_OUTPUT_PREVIEW_LINES;
   return (
     <div className="mb-3 flex justify-start">
       <div className="max-w-[95%] md:max-w-[80%] w-full rounded-lg border border-amber-700/40 bg-amber-950/20 px-3 py-2">
@@ -69,9 +79,24 @@ export function ToolBlock({
               </pre>
             )}
             {output !== undefined && output !== "" && (
-              <pre className="whitespace-pre-wrap break-words rounded bg-zinc-900/70 p-2 font-mono text-[11px] text-zinc-400">
-                {highlight.trim() ? highlightMatches(output, highlight) : output}
-              </pre>
+              <div className="rounded bg-zinc-900/70 p-2">
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-zinc-400">
+                  {highlight.trim()
+                    ? highlightMatches(visibleOutput ?? "", highlight)
+                    : visibleOutput}
+                </pre>
+                {collapsible && (
+                  <button
+                    type="button"
+                    onClick={() => setExpanded((v) => !v)}
+                    className="mt-1 text-[11px] text-zinc-500 hover:text-zinc-300"
+                  >
+                    {expanded
+                      ? "▲ click to collapse"
+                      : `… ${hiddenLineCount} earlier lines · click to expand`}
+                  </button>
+                )}
+              </div>
             )}
           </div>
         )}

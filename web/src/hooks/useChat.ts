@@ -41,9 +41,13 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
 
       // HandleSendMessage blocks until the turn completes; the mirror's turn_done
       // is the primary completion signal. The .then is a safety net in case that
-      // frame is missed; the .catch surfaces a failed submit.
+      // frame is missed; the .catch surfaces a failed submit. For a `new-*` tab
+      // the slice may already have been rekeyed to the real session id by the
+      // time this resolves — target the resolved response's sessionId, not the
+      // stale temp id, so this doesn't resurrect an orphaned slice under the
+      // old key.
       submitPromise
-        .then(() => dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false }))
+        .then((res) => dispatch({ type: "SET_STREAMING", sessionId: res.sessionId, isStreaming: false }))
         .catch((err) => {
           dispatch({ type: "SET_ERROR", sessionId, error: err.message || "send failed" });
           dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });

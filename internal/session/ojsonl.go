@@ -452,9 +452,14 @@ func readOjsonlListMeta(path string, modTime time.Time) (ocodeMeta, error) {
 		return ocodeMeta{}, fmt.Errorf("ojsonl file %s: %w", path, err)
 	}
 
+	createdAt := header.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = modTime
+	}
 	return ocodeMeta{
 		ID:        header.ID,
 		Title:     header.Title,
+		CreatedAt: createdAt,
 		UpdatedAt: modTime,
 	}, nil
 }
