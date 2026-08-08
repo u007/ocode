@@ -29,9 +29,10 @@ const runs: AgentRun[] = [
   },
 ];
 
-// The panel resolves its session from the chat store, like AgentPreview does.
-vi.mock("../../stores/chatStore", () => ({
-  useChatState: () => ({ sessionId: "session-1" }),
+// The panel resolves its session from the active project tab, like
+// AgentPreview does.
+vi.mock("../../stores/projectStore", () => ({
+  useProjectState: () => ({ activeTabId: "session-1" }),
 }));
 
 const mockUseAgentRuns = vi.fn<() => { runs: AgentRun[]; loaded: boolean }>();

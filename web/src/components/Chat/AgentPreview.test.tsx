@@ -3,8 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import AgentPreview from "./AgentPreview";
 import type { AgentRun } from "../../api/types";
 
-vi.mock("../../stores/chatStore", () => ({
-  useChatState: () => ({ sessionId: "session-1" }),
+vi.mock("../../stores/projectStore", () => ({
+  useProjectState: () => ({ activeTabId: "session-1" }),
 }));
 
 const runningRun: AgentRun = {

@@ -1,5 +1,5 @@
 import { Bot } from "lucide-react";
-import { useChatState } from "../../stores/chatStore";
+import { useProjectState } from "../../stores/projectStore";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
 import RunNode from "../Agents/RunNode";
 
@@ -11,7 +11,7 @@ interface AgentPreviewProps {
 // agent runs, each clickable to expand its messages and nested sub-agents
 // inline. Renders nothing when no runs are active.
 export default function AgentPreview({ onOpenDetail }: AgentPreviewProps) {
-  const { sessionId } = useChatState();
+  const { activeTabId: sessionId } = useProjectState();
   const { runs } = useAgentRuns(sessionId);
 
   if (runs.length === 0) return null;

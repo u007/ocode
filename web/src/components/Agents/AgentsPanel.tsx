@@ -1,6 +1,6 @@
 import { ArrowLeft, Bot } from "lucide-react";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
-import { useChatState } from "../../stores/chatStore";
+import { useProjectState } from "../../stores/projectStore";
 import RunNode, { childSummary, elapsed, statusStyles } from "./RunNode";
 import type { AgentRun } from "../../api/types";
 
@@ -48,10 +48,10 @@ function AgentListRow({ run, onOpen }: { run: AgentRun; onOpen: () => void }) {
 }
 
 export default function AgentsPanel({ selectedRunId, onSelectRun }: AgentsPanelProps) {
-  // Session comes from the chat store — the same single source the agent
-  // preview rail uses — so a run clicked in the preview is always looked up in
-  // the exact tree that produced it.
-  const { sessionId } = useChatState();
+  // Session comes from the active project tab — the same single source the
+  // agent preview rail uses — so a run clicked in the preview is always
+  // looked up in the exact tree that produced it.
+  const { activeTabId: sessionId } = useProjectState();
   const { runs, loaded } = useAgentRuns(sessionId);
   const selected = selectedRunId ? findRun(runs, selectedRunId) : undefined;
 
