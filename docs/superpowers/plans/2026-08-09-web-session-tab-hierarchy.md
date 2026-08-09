@@ -1,6 +1,6 @@
 # Web/Desktop Session Tab Hierarchy Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Restructure the web/desktop UI so the top-level nav is
 `[Files] [Git] [Cron] [Assets] [Status] [Logs] [Sessions]`, and Chat/Agents/
@@ -51,7 +51,7 @@ Radix UI (`@radix-ui/react-tabs`), Tailwind CSS.
 - Produces: new dispatchable action
   `{ type: "SET_TAB_SUB_TAB"; id: string; subTab: SessionSubTabId }`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `web/src/stores/projectStore.test.tsx` (new `describe` block, same
 file, same `setup()` helper already defined there):
@@ -112,12 +112,12 @@ tab: { id: "sess-b", projectPath: "/proj-b", title: "old", activeSubTab: "chat" 
 tab: { id: "new-1", projectPath: "/proj-b", title: "New session", activeSubTab: "chat" },
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd web && bun run test -- projectStore` (or `npx vitest run src/stores/projectStore.test.tsx`)
 Expected: FAIL — `activeSubTab` doesn't exist on `Tab`, `SET_TAB_SUB_TAB` is not a recognized action (TS error and/or runtime no-op assertion failures).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `web/src/stores/projectStore.tsx`:
 
@@ -219,18 +219,18 @@ Update `persistTabs`'s serialization (line 226):
       tabs: real.map((t) => ({ id: t.id, title: t.title, subTab: t.activeSubTab })),
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `cd web && bun run test -- projectStore`
 Expected: PASS (all `projectStore.test.tsx` tests, including the 3 new ones).
 
-- [ ] **Step 5: Type check**
+- [x] **Step 5: Type check**
 
 Run: `cd web && bun run typecheck`
 Expected: no errors. (This will surface any other `Tab` literal construction
 site missed above — fix any that appear before moving on.)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/src/stores/projectStore.tsx web/src/stores/projectStore.test.tsx
@@ -254,7 +254,7 @@ git commit -m "feat(web): add per-session activeSubTab state to projectStore"
   would make every stacked instance show the *same* — currently active —
   session, defeating the point of stacking).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 In `web/src/components/Agents/AgentsPanel.test.tsx`, remove the
 `vi.mock("../../stores/projectStore", ...)` block (lines 34-36) — the panel
@@ -275,7 +275,7 @@ Apply the same `sessionId="session-1"` addition to the other 7
 `render(<AgentsPanel ... />)` calls in the file, leaving every other prop
 and assertion unchanged.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd web && bun run test -- AgentsPanel`
 Expected: FAIL — TS error (`sessionId` is not a valid prop on the current
@@ -283,7 +283,7 @@ Expected: FAIL — TS error (`sessionId` is not a valid prop on the current
 called, since it doesn't exist as an import target after the mock removal
 until the component itself is updated.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `web/src/components/Agents/AgentsPanel.tsx`, drop the `useProjectState`
 import (line 3) and change the component:
@@ -305,19 +305,19 @@ export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: A
 (Remove the old comment above the deleted `useProjectState()` line — it no
 longer applies once the session comes from a prop.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd web && bun run test -- AgentsPanel`
 Expected: PASS (all 8 tests).
 
-- [ ] **Step 5: Type check**
+- [x] **Step 5: Type check**
 
 Run: `cd web && bun run typecheck`
 Expected: no errors from this file (the only other consumer, `App.tsx`, is
 updated in Task 5 — a transient type error there until Task 5 lands is
 expected and fine).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add web/src/components/Agents/AgentsPanel.tsx web/src/components/Agents/AgentsPanel.test.tsx
@@ -348,7 +348,7 @@ git commit -m "refactor(web): AgentsPanel takes sessionId as an explicit prop"
   `editorTabs`/`onEditorTabClose`) — consumed by Task 5, which passes
   `activeView`/`setActiveView`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `web/src/hooks/useEditorTabs.test.ts`:
 
@@ -406,13 +406,13 @@ describe("useEditorTabs", () => {
 });
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd web && bun run test -- useEditorTabs`
 Expected: FAIL — `activeEditorTabId` is `undefined` (the hook still exposes
 `activeTab`/`setActiveTab`).
 
-- [ ] **Step 3: Implement `useEditorTabs.ts`**
+- [x] **Step 3: Implement `useEditorTabs.ts`**
 
 In `web/src/hooks/useEditorTabs.ts`:
 
@@ -552,12 +552,12 @@ Update the final `return` (lines 183-198):
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd web && bun run test -- useEditorTabs`
 Expected: PASS (all 3 new tests).
 
-- [ ] **Step 5: Create `EditorTabBar.tsx`**
+- [x] **Step 5: Create `EditorTabBar.tsx`**
 
 Create `web/src/components/Layout/EditorTabBar.tsx` (lifts the editor-tab
 rendering block currently at `TopTabs.tsx:113-156`, adds a "file tree"
@@ -654,7 +654,7 @@ export default function EditorTabBar({
 }
 ```
 
-- [ ] **Step 6: Trim `TopTabs.tsx`**
+- [x] **Step 6: Trim `TopTabs.tsx`**
 
 Replace `web/src/components/Layout/TopTabs.tsx` in full with:
 
@@ -792,7 +792,7 @@ export default function TopTabs({ activeTab, onTabSelect }: Props) {
 }
 ```
 
-- [ ] **Step 7: Type check**
+- [x] **Step 7: Type check**
 
 Run: `cd web && bun run typecheck`
 Expected: errors only in `App.tsx` (still calling `useEditorTabs("chat")`
@@ -800,7 +800,7 @@ and referencing the old `TopTabs`/`activeTab` shape) — fixed in Task 5.
 Confirm no errors in `useEditorTabs.ts`, `EditorTabBar.tsx`, or `TopTabs.tsx`
 themselves.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add web/src/hooks/useEditorTabs.ts web/src/hooks/useEditorTabs.test.ts \
@@ -823,7 +823,7 @@ git commit -m "refactor(web): split file-editor tabs out of TopTabs into EditorT
   `SET_TAB_SUB_TAB` for the active session tab. No props — reads everything
   from `useProjectState()`, mirroring `OpenSessionBar`'s pattern.
 
-- [ ] **Step 1: Implement**
+- [x] **Step 1: Implement**
 
 No dedicated test — this is a thin presentational wrapper over
 already-tested reducer state (Task 1) and is exercised via the App-level
@@ -871,12 +871,12 @@ export default function SessionSubTabs() {
 }
 ```
 
-- [ ] **Step 2: Type check**
+- [x] **Step 2: Type check**
 
 Run: `cd web && bun run typecheck`
 Expected: no new errors from this file.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add web/src/components/Layout/SessionSubTabs.tsx
@@ -906,7 +906,7 @@ test suite (nothing here should break other components' tests) plus manual
 browser verification (Step 3), consistent with how the rest of the app's
 top-level wiring is validated.
 
-- [ ] **Step 1: Update imports and hook usage**
+- [x] **Step 1: Update imports and hook usage**
 
 In `web/src/App.tsx`:
 
@@ -973,7 +973,7 @@ of the file (line 1):
 import { useCallback, useEffect, useRef, useState } from "react";
 ```
 
-- [ ] **Step 2: Update `openAgentDetail`, `useKeyboard`, and derive the active session tab**
+- [x] **Step 2: Update `openAgentDetail`, `useKeyboard`, and derive the active session tab**
 
 Replace `openAgentDetail` (lines 124-127) — it now needs to flip the
 *active session's* sub-tab, not the old global tab:
@@ -1010,7 +1010,7 @@ Add a derived active-session-tab lookup right after `allChatTabs` (line
 (`projectState.tabs` — the provider's derived "active project's tabs" list,
 already returned by `useProjectState()`, `projectStore.tsx:441`.)
 
-- [ ] **Step 3: Replace the main content JSX**
+- [x] **Step 3: Replace the main content JSX**
 
 Replace the whole block from `<Tabs value={activeTab} ...>` through its
 closing `</Tabs>` (lines 298-382) with:
@@ -1138,7 +1138,7 @@ Note `GitPanel`'s `onOpenFile={openFileAndShow}` (was `handleOpenFile`) —
 opening a file from the Git diff view must also switch the top-level view to
 Files, same as opening one from the File tree.
 
-- [ ] **Step 4: Update `StatusBar` and `CoworkSidebar` wiring**
+- [x] **Step 4: Update `StatusBar` and `CoworkSidebar` wiring**
 
 Update the `StatusBar` `onStatusClick` prop (lines 385-391):
 
@@ -1166,7 +1166,7 @@ session's sub-tab is Chat":
         )}
 ```
 
-- [ ] **Step 5: Update the `FilePicker` open-file callback**
+- [x] **Step 5: Update the `FilePicker` open-file callback**
 
 `FilePicker`'s `onOpenFile` prop (near the end of the file, `onOpenFile={handleOpenFile}`)
 must also use the wrapper so opening a file from the command-palette file
@@ -1180,7 +1180,7 @@ picker switches to the Files view:
       />
 ```
 
-- [ ] **Step 6: Delete dead code**
+- [x] **Step 6: Delete dead code**
 
 ```bash
 git rm web/src/components/Layout/SessionSidebar.tsx
@@ -1191,12 +1191,12 @@ Confirm no remaining references:
 Run: `cd web && grep -rn "SessionSidebar" src`
 Expected: no output.
 
-- [ ] **Step 7: Type check**
+- [x] **Step 7: Type check**
 
 Run: `cd web && bun run typecheck`
 Expected: no errors.
 
-- [ ] **Step 8: Run the full test suite**
+- [x] **Step 8: Run the full test suite**
 
 Run: `cd web && bun run test`
 Expected: PASS — every test file (including the ones touched in Tasks 1-2)
@@ -1205,7 +1205,7 @@ passes, and nothing else regresses (e.g. `chatStore.test.tsx`,
 `smoke.test.tsx` are all untouched by this refactor and must still be
 green).
 
-- [ ] **Step 9: Manual browser verification**
+- [x] **Step 9: Manual browser verification**
 
 Run: `cd web && bun run dev` (and separately start the ocode backend server
 per the project's normal dev workflow, if not already running).
@@ -1233,7 +1233,7 @@ Walk through, in the browser:
 If any step fails, fix it before proceeding — do not mark this task
 complete on a red manual walkthrough.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add -A web/src/App.tsx
