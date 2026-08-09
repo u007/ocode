@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatState, getSessionSlice } from "./stores/chatStore";
@@ -21,9 +21,11 @@ import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import TopTabs from "./components/Layout/TopTabs";
+import EditorTabBar from "./components/Layout/EditorTabBar";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
 import OpenSessionBar from "./components/Layout/OpenSessionBar";
+import SessionSubTabs from "./components/Layout/SessionSubTabs";
 import SessionTabSync from "./components/Layout/SessionTabSync";
 import CoworkSidebar from "./components/Layout/CoworkSidebar";
 import ModelDialog from "./components/Layout/ModelDialog";
@@ -92,7 +94,7 @@ function triggerDownload(filename: string, content: string, mimeType: string) {
 function HomeApp() {
   const dispatch = useChatDispatch();
   const chatState = useChatState();
-  const { state: projectState, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab } = useProjectState();
+  const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab } = useProjectState();
   const { resolvePermission, pendingPermission } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
@@ -100,10 +102,13 @@ function HomeApp() {
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
   const [cmdOpen, setCmdOpen] = useState(false);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<
+    "files" | "git" | "cron" | "assets" | "status" | "logs" | "sessions"
+  >("sessions");
   const {
     editorTabs,
-    activeTab,
-    setActiveTab,
+    activeEditorTabId,
+    setActiveEditorTabId,
     handleOpenFile,
     handleEditorChange,
     handleSelectionChange,
@@ -115,7 +120,17 @@ function HomeApp() {
     cancelClose,
     saveError,
     saveEditorTab,
-  } = useEditorTabs("chat");
+  } = useEditorTabs();
+
+  // Opening a file from anywhere (tree, git diff, file picker) shows the
+  // Files view and selects the editor tab.
+  const openFileAndShow = useCallback(
+    async (path: string) => {
+      await handleOpenFile(path);
+      setActiveView("files");
+    },
+    [handleOpenFile],
+  );
 
   useEffect(() => {
     setSelectedAgentRunId(null);
@@ -123,7 +138,9 @@ function HomeApp() {
 
   const openAgentDetail = (runId: string) => {
     setSelectedAgentRunId(runId);
-    setActiveTab("agents");
+    if (activeTabId) {
+      projectDispatch({ type: "SET_TAB_SUB_TAB", id: activeTabId, subTab: "agents" });
+    }
   };
 
   // Mobile responsive
@@ -188,9 +205,8 @@ function HomeApp() {
     onCommandPalette: () => setCmdOpen(true),
     onFilePicker: () => setFilePickerOpen(true),
     onSave: () => {
-      if (activeTab.startsWith("editor-")) {
-        const tab = editorTabs.find((t) => t.id === activeTab);
-        if (tab) saveEditorTab(tab.id);
+      if (activeEditorTabId) {
+        saveEditorTab(activeEditorTabId);
       }
     },
     onEscape: () => {
@@ -279,6 +295,7 @@ function HomeApp() {
   };
 
   const allChatTabs = Object.values(projectState.tabsByProject).flat();
+  const activeSessionTab = tabs.find((t) => t.id === activeTabId);
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
@@ -295,89 +312,120 @@ function HomeApp() {
         {/* Center content */}
         <main className="flex flex-1 flex-col overflow-hidden">
           {/* Tabs context wraps header triggers + content panels */}
-          <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-col flex-1 overflow-hidden">
-            {/* Content navigation tabs (chat/files/git/status/logs/assets + editor tabs) */}
-            <TopTabs
-              editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
-              onEditorTabClose={requestCloseTab}
-              activeTab={activeTab}
-              onTabSelect={setActiveTab}
-            />
+          <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
+            <TopTabs activeTab={activeView} onTabSelect={(v) => setActiveView(v as typeof activeView)} />
 
-            {/* Open session tabs */}
-            <OpenSessionBar />
-
-            {/* Tab content */}
             <div className="flex-1 overflow-hidden flex flex-col">
-            {/* Editor tabs — dynamic, one per open file */}
-            {editorTabs.map((et) => (
-              <TabsContent key={et.id} value={et.id} forceMount className="flex-1 overflow-hidden m-0">
-                <FileEditor
-                  path={et.path}
-                  content={et.content}
-                  onChange={(value) => handleEditorChange(et.id, value)}
-                  readOnly={false}
-                  session={activeTabId ?? undefined}
-                  diffVersion={et.diffVersion}
-                  onSelectionChange={handleSelectionChange}
+              <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex flex-col">
+                <EditorTabBar
+                  editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
+                  activeEditorTabId={activeEditorTabId}
+                  onSelectTree={() => setActiveEditorTabId(null)}
+                  onSelectTab={setActiveEditorTabId}
+                  onCloseTab={requestCloseTab}
                 />
-              </TabsContent>
-            ))}
-
-            {/* Main tabs */}
-            <TabsContent value="chat" forceMount className="flex-1 overflow-hidden m-0">
-              <div className="flex flex-col h-full">
-                <div className="relative flex-1 min-h-0 overflow-hidden">
-                  {allChatTabs.map((tab) => (
+                <div className="relative flex-1 overflow-hidden">
+                  <div className={activeEditorTabId === null ? "absolute inset-0" : "absolute inset-0 hidden"}>
+                    <FileTree onOpenFile={openFileAndShow} />
+                  </div>
+                  {editorTabs.map((et) => (
                     <div
-                      key={tab.id}
-                      className={
-                        tab.projectPath === projectState.activeProject?.path &&
-                        tab.id === activeTabId
-                          ? "absolute inset-0"
-                          : "absolute inset-0 hidden"
-                      }
+                      key={et.id}
+                      className={et.id === activeEditorTabId ? "absolute inset-0" : "absolute inset-0 hidden"}
                     >
-                      <ChatPanel sessionId={tab.id} />
+                      <FileEditor
+                        path={et.path}
+                        content={et.content}
+                        onChange={(value) => handleEditorChange(et.id, value)}
+                        readOnly={false}
+                        session={activeTabId ?? undefined}
+                        diffVersion={et.diffVersion}
+                        onSelectionChange={handleSelectionChange}
+                      />
                     </div>
                   ))}
                 </div>
-                <AgentPreview onOpenDetail={openAgentDetail} />
-                <ChatInput
-                  onSlashCommand={handleCommand}
-                  activeEditorContext={activeEditorContext}
-                  sessionTabId={activeTabId}
-                  onSessionCreated={handleSessionCreated}
-                />
-              </div>
-            </TabsContent>
-            <TabsContent value="agents" forceMount className="flex-1 overflow-hidden m-0">
-              <AgentsPanel
-                selectedRunId={selectedAgentRunId}
-                onSelectRun={setSelectedAgentRunId}
-              />
-            </TabsContent>
-            <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0">
-              <FileTree onOpenFile={handleOpenFile} />
-            </TabsContent>
-            <TabsContent value="changes" forceMount className="flex-1 overflow-hidden m-0">
-              <ChangesPanel session={activeTabId ?? undefined} />
-            </TabsContent>
-            <TabsContent value="git" forceMount className="flex-1 overflow-hidden m-0">
-              <GitPanel onOpenFile={handleOpenFile} />
-            </TabsContent>
-            <TabsContent value="status" forceMount className="flex-1 overflow-hidden m-0">
-              <StatusPanel onClose={() => setActiveTab("chat")} />
-            </TabsContent>
-            <TabsContent value="logs" forceMount className="flex-1 overflow-hidden m-0">
-              <LogPanel active={activeTab === "logs"} />
-            </TabsContent>
-            <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0">
-              <CronPanel />
-            </TabsContent>
-            <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0">
-              <AssetsPanel />
-            </TabsContent>
+              </TabsContent>
+
+              <TabsContent value="git" forceMount className="flex-1 overflow-hidden m-0">
+                <GitPanel onOpenFile={openFileAndShow} />
+              </TabsContent>
+              <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0">
+                <CronPanel />
+              </TabsContent>
+              <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0">
+                <AssetsPanel />
+              </TabsContent>
+              <TabsContent value="status" forceMount className="flex-1 overflow-hidden m-0">
+                <StatusPanel onClose={() => setActiveView("sessions")} />
+              </TabsContent>
+              <TabsContent value="logs" forceMount className="flex-1 overflow-hidden m-0">
+                <LogPanel active={activeView === "logs"} />
+              </TabsContent>
+
+              <TabsContent value="sessions" forceMount className="flex-1 overflow-hidden m-0">
+                <div className="flex flex-col h-full">
+                  <OpenSessionBar />
+                  <SessionSubTabs />
+                  <div className="relative flex-1 min-h-0 overflow-hidden">
+                    {allChatTabs.map((tab) => (
+                      <div
+                        key={`${tab.id}:chat`}
+                        className={
+                          tab.projectPath === projectState.activeProject?.path &&
+                          tab.id === activeTabId &&
+                          tab.activeSubTab === "chat"
+                            ? "absolute inset-0 flex flex-col"
+                            : "absolute inset-0 hidden"
+                        }
+                      >
+                        <div className="relative flex-1 min-h-0 overflow-hidden">
+                          <ChatPanel sessionId={tab.id} />
+                        </div>
+                        <AgentPreview onOpenDetail={openAgentDetail} />
+                        <ChatInput
+                          onSlashCommand={handleCommand}
+                          activeEditorContext={activeEditorContext}
+                          sessionTabId={tab.id}
+                          onSessionCreated={handleSessionCreated}
+                        />
+                      </div>
+                    ))}
+                    {allChatTabs.map((tab) => (
+                      <div
+                        key={`${tab.id}:agents`}
+                        className={
+                          tab.projectPath === projectState.activeProject?.path &&
+                          tab.id === activeTabId &&
+                          tab.activeSubTab === "agents"
+                            ? "absolute inset-0"
+                            : "absolute inset-0 hidden"
+                        }
+                      >
+                        <AgentsPanel
+                          sessionId={tab.id}
+                          selectedRunId={selectedAgentRunId}
+                          onSelectRun={setSelectedAgentRunId}
+                        />
+                      </div>
+                    ))}
+                    {allChatTabs.map((tab) => (
+                      <div
+                        key={`${tab.id}:changes`}
+                        className={
+                          tab.projectPath === projectState.activeProject?.path &&
+                          tab.id === activeTabId &&
+                          tab.activeSubTab === "changes"
+                            ? "absolute inset-0"
+                            : "absolute inset-0 hidden"
+                        }
+                      >
+                        <ChangesPanel session={tab.id} />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </TabsContent>
             </div>
           </Tabs>
 
@@ -385,14 +433,12 @@ function HomeApp() {
           <StatusBar
             onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
             onModelClick={() => openModelDialog("main")}
-            onStatusClick={() => {
-              setActiveTab("status");
-            }}
+            onStatusClick={() => setActiveView("status")}
           />
         </main>
 
-        {/* Right sidebar - cowork panel (only on chat tab) */}
-        {activeTab === "chat" && (
+        {/* Right sidebar - cowork panel (only on Sessions view with the active session's sub-tab on Chat) */}
+        {activeView === "sessions" && activeSessionTab?.activeSubTab === "chat" && (
           <CoworkSidebar
             isOpen={coworkOpen}
             onClose={() => setCoworkOpen(false)}
@@ -430,7 +476,7 @@ function HomeApp() {
       <FilePicker
         open={filePickerOpen}
         onClose={() => setFilePickerOpen(false)}
-        onOpenFile={handleOpenFile}
+        onOpenFile={openFileAndShow}
       />
       <ConfirmCloseDialog
         path={pendingClose?.path ?? ""}
