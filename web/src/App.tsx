@@ -136,11 +136,9 @@ function HomeApp() {
     setSelectedAgentRunId(null);
   }, [activeTabId]);
 
-  const openAgentDetail = (runId: string) => {
+  const openAgentDetail = (sessionId: string, runId: string) => {
     setSelectedAgentRunId(runId);
-    if (activeTabId) {
-      projectDispatch({ type: "SET_TAB_SUB_TAB", id: activeTabId, subTab: "agents" });
-    }
+    projectDispatch({ type: "SET_TAB_SUB_TAB", id: sessionId, subTab: "agents" });
   };
 
   // Mobile responsive
@@ -382,7 +380,7 @@ function HomeApp() {
                         <div className="relative flex-1 min-h-0 overflow-hidden">
                           <ChatPanel sessionId={tab.id} />
                         </div>
-                        <AgentPreview onOpenDetail={openAgentDetail} />
+                        <AgentPreview onOpenDetail={(runId) => openAgentDetail(tab.id, runId)} />
                         <ChatInput
                           onSlashCommand={handleCommand}
                           activeEditorContext={activeEditorContext}
