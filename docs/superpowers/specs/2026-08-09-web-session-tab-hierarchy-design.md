@@ -74,11 +74,18 @@ App.tsx
   `'sessions'` view.
 - `OpenSessionBar.tsx`: unchanged internally, just repositioned to sit above
   `SessionSubTabs` instead of being a peer of the old global `TopTabs`.
-- `AgentsPanel`, `ChangesPanel`, `StatusPanel`/`StatusBar`, `LogPanel`:
-  extend the existing `ChatPanel` stacking pattern (`App.tsx:328-353`) — one
-  mounted instance per `${sessionId}:${subTab}` combination among currently
-  open session tabs, visibility toggled via the same absolute/hidden CSS
-  technique, not conditional unmount.
+- `AgentsPanel`, `ChangesPanel`, `StatusPanel`, `LogPanel`: extend the
+  existing `ChatPanel` stacking pattern (`App.tsx:328-353`) — one mounted
+  instance per `${sessionId}:${subTab}` combination among currently open
+  session tabs, visibility toggled via the same absolute/hidden CSS
+  technique, not conditional unmount. (`StatusPanel.tsx`, the "Status" tab
+  content, is distinct from `StatusBar.tsx`, the persistent bottom status
+  bar at `App.tsx:385-391` — the bottom bar is unrelated to this change and
+  stays global.)
+- `CoworkSidebar` (`App.tsx:395-403`) is currently shown only when
+  `activeTab === "chat"`. Since `activeTab` is repurposed as the top-level
+  view selector, this condition must change to: top-level view is
+  `'sessions'` **and** the active session's `activeSubTab === 'chat'`.
 - Delete `SessionSidebar.tsx` (dead code, unused since `b25ab73`).
 
 ## 6. Data flow
