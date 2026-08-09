@@ -1,10 +1,10 @@
 import { ArrowLeft, Bot } from "lucide-react";
 import { useAgentRuns } from "../../hooks/useAgentRuns";
-import { useProjectState } from "../../stores/projectStore";
 import RunNode, { childSummary, elapsed, statusStyles } from "./RunNode";
 import type { AgentRun } from "../../api/types";
 
 interface AgentsPanelProps {
+  sessionId: string | null;
   selectedRunId: string | null;
   onSelectRun: (runId: string | null) => void;
 }
@@ -47,11 +47,7 @@ function AgentListRow({ run, onOpen }: { run: AgentRun; onOpen: () => void }) {
   );
 }
 
-export default function AgentsPanel({ selectedRunId, onSelectRun }: AgentsPanelProps) {
-  // Session comes from the active project tab — the same single source the
-  // agent preview rail uses — so a run clicked in the preview is always
-  // looked up in the exact tree that produced it.
-  const { activeTabId: sessionId } = useProjectState();
+export default function AgentsPanel({ sessionId, selectedRunId, onSelectRun }: AgentsPanelProps) {
   const { runs, loaded } = useAgentRuns(sessionId);
   const selected = selectedRunId ? findRun(runs, selectedRunId) : undefined;
 
