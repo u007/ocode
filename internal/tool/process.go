@@ -518,10 +518,11 @@ func (r *ProcessRegistry) KillAll() {
 
 // ProcInfo is a read-only snapshot for the TUI.
 type ProcInfo struct {
-	ID       string
-	Command  string
-	Status   ProcStatus
-	ExitCode int
+	ID        string
+	Command   string
+	Status    ProcStatus
+	ExitCode  int
+	StartedAt time.Time
 }
 
 // Snapshot returns all processes in start order.
@@ -544,10 +545,11 @@ func (r *ProcessRegistry) Snapshot() []ProcInfo {
 			}
 			st, code := r.viewState(p, id, sup)
 			out = append(out, ProcInfo{
-				ID:       id,
-				Command:  p.Command,
-				Status:   st,
-				ExitCode: code,
+				ID:        id,
+				Command:   p.Command,
+				Status:    st,
+				ExitCode:  code,
+				StartedAt: p.StartedAt,
 			})
 		}
 		return out
@@ -559,7 +561,7 @@ func (r *ProcessRegistry) Snapshot() []ProcInfo {
 			continue
 		}
 		st, code := p.snapshotStatus()
-		out = append(out, ProcInfo{ID: id, Command: p.Command, Status: st, ExitCode: code})
+		out = append(out, ProcInfo{ID: id, Command: p.Command, Status: st, ExitCode: code, StartedAt: p.StartedAt})
 	}
 	return out
 }

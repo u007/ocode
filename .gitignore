@@ -30,6 +30,7 @@ internal/tui/.opencode
 ocode_export_*.md
 
 # Build outputs
+/dist/
 /release
 /ocode-darwin-*
 /ocode-linux-*

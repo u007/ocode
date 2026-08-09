@@ -684,6 +684,7 @@ func NewAgent(client LLMClient, tools []tool.Tool, cfg *config.Config, lspMgr *l
 	}
 	a.tools["bash_output"] = tool.BashOutputTool{Procs: a.procs}
 	a.tools["kill_shell"] = tool.KillShellTool{Procs: a.procs}
+	a.tools["list_processes"] = tool.ListProcessesTool{Procs: a.procs}
 	a.tools["wait"] = WaitTool{procs: a.procs, runs: a.runs, agent: a}
 	// "agent" tool retired in favor of "task". AgentTool the type is kept
 	// only so existing transcripts/back-compat permission entries still

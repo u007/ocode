@@ -3,6 +3,8 @@ package tool
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // BashOutputTool returns incremental output of a background process.
@@ -95,4 +97,47 @@ func (t KillShellTool) Execute(args json.RawMessage) (string, error) {
 		return fmt.Sprintf("Error: %v", err), nil
 	}
 	return msg, nil
+}
+
+// ListProcessesTool lists still-running background processes started by ocode.
+type ListProcessesTool struct {
+	Procs *ProcessRegistry
+}
+
+func (t ListProcessesTool) Name() string        { return "list_processes" }
+func (t ListProcessesTool) Description() string { return "List running background processes" }
+func (t ListProcessesTool) Parallel() bool      { return true }
+func (t ListProcessesTool) Definition() map[string]interface{} {
+	return map[string]interface{}{
+		"name":        "list_processes",
+		"description": "List background processes started with bash(run_in_background) that are still running, sorted by start time (oldest first).",
+		"parameters": map[string]interface{}{
+			"type":       "object",
+			"properties": map[string]interface{}{},
+		},
+	}
+}
+
+func (t ListProcessesTool) Execute(_ json.RawMessage) (string, error) {
+	if t.Procs == nil {
+		return "", fmt.Errorf("no process registry")
+	}
+	procs := t.Procs.Snapshot()
+	running := make([]ProcInfo, 0, len(procs))
+	for _, p := range procs {
+		if p.Status == ProcRunning {
+			running = append(running, p)
+		}
+	}
+	if len(running) == 0 {
+		return "(no running processes)", nil
+	}
+	sort.Slice(running, func(i, j int) bool {
+		return running[i].StartedAt.Before(running[j].StartedAt)
+	})
+	var b strings.Builder
+	for _, p := range running {
+		fmt.Fprintf(&b, "%s [%s] started=%s %s\n", p.ID, p.Status, p.StartedAt.Format("2006-01-02T15:04:05Z07:00"), p.Command)
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
 }
