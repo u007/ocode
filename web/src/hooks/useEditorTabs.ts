@@ -17,8 +17,8 @@ export interface ActiveEditorContext {
 
 export interface UseEditorTabsResult {
   editorTabs: EditorTab[];
-  activeTab: string;
-  setActiveTab: (tab: string) => void;
+  activeEditorTabId: string | null;
+  setActiveEditorTabId: (id: string | null) => void;
   handleOpenFile: (path: string) => Promise<void>;
   handleEditorChange: (id: string, content: string) => void;
   handleSelectionChange: (sel: { startLine: number; endLine: number } | null) => void;
@@ -32,9 +32,9 @@ export interface UseEditorTabsResult {
   saveError: string | null;
 }
 
-export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
+export function useEditorTabs(): UseEditorTabsResult {
   const [editorTabs, setEditorTabs] = useState<EditorTab[]>([]);
-  const [activeTab, setActiveTab] = useState(initialTab);
+  const [activeEditorTabId, setActiveEditorTabId] = useState<string | null>(null);
   const [pendingClose, setPendingClose] = useState<{ id: string; path: string } | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [activeEditorContext, setActiveEditorContext] = useState<ActiveEditorContext | null>(null);
@@ -43,7 +43,7 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
   const handleOpenFile = useCallback(async (path: string) => {
     const id = `editor-${path}`;
     if (openFileIdsRef.current.has(id)) {
-      setActiveTab(id);
+      setActiveEditorTabId(id);
       return;
     }
     try {
@@ -57,7 +57,7 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
         ...prev,
         { id, path, content: data.content, originalContent: data.content, isDirty: false, diffVersion: 0 },
       ]);
-      setActiveTab(id);
+      setActiveEditorTabId(id);
     } catch (err) {
       console.error("Failed to open file:", err);
     }
@@ -76,8 +76,8 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
           return { ...prev, selection: sel ?? undefined };
         }
 
-        if (!activeTab.startsWith("editor-")) return null;
-        const tab = editorTabs.find((t) => t.id === activeTab);
+        if (!activeEditorTabId) return null;
+        const tab = editorTabs.find((t) => t.id === activeEditorTabId);
         if (!tab) return null;
         return {
           path: tab.path,
@@ -85,7 +85,7 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
         };
       });
     },
-    [activeTab, editorTabs],
+    [activeEditorTabId, editorTabs],
   );
 
   useEffect(() => {
@@ -94,12 +94,12 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
       return;
     }
 
-    if (!activeTab.startsWith("editor-")) {
+    if (!activeEditorTabId) {
       setActiveEditorContext(null);
       return;
     }
 
-    const tab = editorTabs.find((t) => t.id === activeTab);
+    const tab = editorTabs.find((t) => t.id === activeEditorTabId);
     if (!tab) {
       setActiveEditorContext(null);
       return;
@@ -109,15 +109,15 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
       if (prev?.path === tab.path) return prev;
       return { path: tab.path };
     });
-  }, [activeTab, editorTabs]);
+  }, [activeEditorTabId, editorTabs]);
 
   const closeTabNow = useCallback((id: string) => {
     openFileIdsRef.current.delete(id);
     setEditorTabs((prev) => prev.filter((t) => t.id !== id));
-    setActiveTab((prev) => {
+    setActiveEditorTabId((prev) => {
       if (prev !== id) return prev;
       const remaining = editorTabs.filter((t) => t.id !== id);
-      return remaining[0]?.id ?? "files";
+      return remaining[0]?.id ?? null;
     });
   }, [editorTabs]);
 
@@ -182,8 +182,8 @@ export function useEditorTabs(initialTab = "chat"): UseEditorTabsResult {
 
   return {
     editorTabs,
-    activeTab,
-    setActiveTab,
+    activeEditorTabId,
+    setActiveEditorTabId,
     handleOpenFile,
     handleEditorChange,
     handleSelectionChange,
