@@ -41,6 +41,11 @@ export interface SessionSlice {
   // Lets ChatPanel skip re-fetching on remount and lets OpenSessionBar know
   // when a tab's "loading" spinner should clear.
   initialized: boolean;
+  // Agent-run rows the user collapsed in the agent preview rail / Agents
+  // panel, keyed by run id. Kept per-session so expand/collapse survives
+  // switching session tabs or projects — RunNode remounts (new run tree,
+  // new session) would otherwise reset every row to expanded.
+  collapsedRunIds: string[];
 }
 
 export const emptySessionSlice: SessionSlice = {
@@ -54,6 +59,7 @@ export const emptySessionSlice: SessionSlice = {
   hasMore: false,
   loadingMore: false,
   initialized: false,
+  collapsedRunIds: [],
 };
 
 /** Reads one session's slice, falling back to the shared empty default for a
@@ -122,6 +128,7 @@ export type ChatAction =
   | { type: "SET_TUI_STATUS"; status: TUIStatus }
   | { type: "SET_TUI_STATUS_READY"; ready: boolean }
   | { type: "REKEY_SESSION"; oldId: string; newId: string }
+  | { type: "TOGGLE_RUN_COLLAPSED"; sessionId: string; runId: string }
   | { type: "RESET"; sessionId: string };
 
 export const initialState: ChatState = {
@@ -256,6 +263,16 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       sessions[action.newId] = slice;
       return { ...state, sessions };
     }
+    case "TOGGLE_RUN_COLLAPSED":
+      return updateSession(state, action.sessionId, (s) => {
+        const has = s.collapsedRunIds.includes(action.runId);
+        return {
+          ...s,
+          collapsedRunIds: has
+            ? s.collapsedRunIds.filter((id) => id !== action.runId)
+            : [...s.collapsedRunIds, action.runId],
+        };
+      });
     case "SET_SESSION_CONTEXT":
       return { ...state, sessionContext: action.context };
     case "SET_SPENDING":
