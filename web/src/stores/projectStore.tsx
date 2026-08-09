@@ -2,10 +2,13 @@ import { createContext, useContext, useReducer, useEffect, useCallback, useRef, 
 import { api } from "../api/client";
 import type { Project, SessionInfo } from "../api/types";
 
+export type SessionSubTabId = "chat" | "agents" | "changes";
+
 export interface Tab {
   id: string; // session ID (or `new-<ts>` temp ID before first message)
   projectPath: string;
   title: string;
+  activeSubTab: SessionSubTabId;
 }
 
 interface ProjectState {
@@ -33,6 +36,7 @@ type ProjectAction =
   | { type: "ADD_TAB"; tab: Tab }
   | { type: "REMOVE_TAB"; id: string }
   | { type: "SET_ACTIVE_TAB"; id: string | null }
+  | { type: "SET_TAB_SUB_TAB"; id: string; subTab: SessionSubTabId }
   | { type: "UPDATE_TAB_TITLE"; id: string; title: string }
   | { type: "UPDATE_TAB_ID"; oldId: string; newId: string; newTitle?: string }
   | { type: "RESTORE_TABS"; tabsByProject: Record<string, Tab[]>; activeTabByProject: Record<string, string | null> }
@@ -116,6 +120,14 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
     }
     case "SET_ACTIVE_TAB":
       return path ? { ...state, activeTabByProject: { ...state.activeTabByProject, [path]: action.id } } : state;
+    case "SET_TAB_SUB_TAB": {
+      const ownerPath = findProjectPathForTab(state, action.id);
+      if (!ownerPath) return state;
+      const list = state.tabsByProject[ownerPath].map((t) =>
+        t.id === action.id ? { ...t, activeSubTab: action.subTab } : t
+      );
+      return { ...state, tabsByProject: { ...state.tabsByProject, [ownerPath]: list } };
+    }
     case "SET_SESSION_PICKER":
       return { ...state, sessionPickerOpen: action.open };
     case "UPDATE_TAB_TITLE": {
@@ -164,6 +176,7 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         id: `new-${Date.now()}`,
         projectPath: action.path,
         title: "New session",
+        activeSubTab: "chat",
       };
       return {
         ...state,
@@ -187,7 +200,7 @@ const STORAGE_KEY = "ocode.ui.tabs.v1";
 
 interface PersistedTabs {
   version: 1;
-  projects: Record<string, { tabs: { id: string; title: string }[]; active: string | null }>;
+  projects: Record<string, { tabs: { id: string; title: string; subTab?: SessionSubTabId }[]; active: string | null }>;
 }
 
 function loadPersistedTabs(): { tabsByProject: Record<string, Tab[]>; activeTabByProject: Record<string, string | null> } {
@@ -204,7 +217,12 @@ function loadPersistedTabs(): { tabsByProject: Record<string, Tab[]>; activeTabB
       if (!entry || !Array.isArray(entry.tabs)) continue;
       const tabs = entry.tabs
         .filter((t) => t && typeof t.id === "string" && !t.id.startsWith("new-"))
-        .map((t) => ({ id: t.id, projectPath: path, title: typeof t.title === "string" ? t.title : t.id }));
+        .map((t) => ({
+          id: t.id,
+          projectPath: path,
+          title: typeof t.title === "string" ? t.title : t.id,
+          activeSubTab: (t.subTab === "agents" || t.subTab === "changes" ? t.subTab : "chat") as SessionSubTabId,
+        }));
       if (tabs.length === 0) continue;
       tabsByProject[path] = tabs;
       activeTabByProject[path] = entry.active && tabs.some((t) => t.id === entry.active) ? entry.active : tabs[tabs.length - 1].id;
@@ -223,7 +241,7 @@ function persistTabs(state: ProjectState) {
     const real = tabs.filter((t) => !t.id.startsWith("new-"));
     if (real.length === 0) continue;
     projects[path] = {
-      tabs: real.map((t) => ({ id: t.id, title: t.title })),
+      tabs: real.map((t) => ({ id: t.id, title: t.title, subTab: t.activeSubTab })),
       active: state.activeTabByProject[path] ?? null,
     };
   }
@@ -317,6 +335,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       id: sessionId,
       projectPath: path,
       title: sessionTitle || sessionId,
+      activeSubTab: "chat",
     };
     dispatch({ type: "ADD_TAB", tab });
   }, [state.activeProject]);
@@ -381,7 +400,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       return activeId;
     }
     const tempId = `new-${Date.now()}`;
-    dispatch({ type: "ADD_TAB", tab: { id: tempId, projectPath: path, title: "New session" } });
+    dispatch({ type: "ADD_TAB", tab: { id: tempId, projectPath: path, title: "New session", activeSubTab: "chat" } });
     return tempId;
   }, [state.activeProject, state.activeTabByProject]);
 

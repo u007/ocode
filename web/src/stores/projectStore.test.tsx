@@ -33,7 +33,7 @@ describe("projectStore tab actions across projects", () => {
       });
       result.current.dispatch({
         type: "ADD_TAB",
-        tab: { id: "sess-b", projectPath: "/proj-b", title: "old" },
+        tab: { id: "sess-b", projectPath: "/proj-b", title: "old", activeSubTab: "chat" },
       });
       // Switch active project away from proj-b before renaming its tab.
       result.current.dispatch({
@@ -63,7 +63,7 @@ describe("projectStore tab actions across projects", () => {
       });
       result.current.dispatch({
         type: "ADD_TAB",
-        tab: { id: "new-1", projectPath: "/proj-b", title: "New session" },
+        tab: { id: "new-1", projectPath: "/proj-b", title: "New session", activeSubTab: "chat" },
       });
       result.current.dispatch({
         type: "UPDATE_TAB_ID",
@@ -76,5 +76,48 @@ describe("projectStore tab actions across projects", () => {
     const tabs = result.current.state.tabsByProject["/proj-b"];
     expect(tabs.find((t) => t.id === "sess-real")?.title).toBe("Real title");
     expect(tabs.find((t) => t.id === "new-1")).toBeUndefined();
+  });
+});
+
+describe("projectStore session sub-tabs", () => {
+  it("ADD_TAB defaults a new tab's activeSubTab to chat", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-1", projectPath: "/proj-a", title: "s1", activeSubTab: "chat" },
+      });
+    });
+    await act(async () => {});
+    expect(result.current.tabs.find((t) => t.id === "sess-1")?.activeSubTab).toBe("chat");
+  });
+
+  it("SET_TAB_SUB_TAB updates a tab that belongs to a non-active project", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({
+        type: "ADD_TAB",
+        tab: { id: "sess-b", projectPath: "/proj-b", title: "b", activeSubTab: "chat" },
+      });
+      result.current.dispatch({
+        type: "SET_ACTIVE_PROJECT",
+        project: testProjectA,
+      });
+      result.current.dispatch({ type: "SET_TAB_SUB_TAB", id: "sess-b", subTab: "agents" });
+    });
+    await act(async () => {});
+    expect(result.current.state.tabsByProject["/proj-b"][0].activeSubTab).toBe("agents");
+  });
+
+  it("SET_TAB_SUB_TAB is a no-op for an unknown tab id", async () => {
+    const { result } = setup();
+    await act(async () => {
+      result.current.dispatch({ type: "SET_ACTIVE_PROJECT", project: testProjectA });
+      result.current.dispatch({ type: "SET_TAB_SUB_TAB", id: "does-not-exist", subTab: "agents" });
+    });
+    await act(async () => {});
+    expect(result.current.state.tabsByProject["/proj-a"]).toBeUndefined();
   });
 });
