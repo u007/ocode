@@ -35,6 +35,7 @@
 | Tab scope split | **Session-scoped:** Chat, Agents, Changes, Status, Logs. **Project-scoped:** Files, Git, Cron, Assets — these are directory/project-wide concepts, not tied to one chat session. |
 | Layout | Top-level row becomes `[Files] [Git] [Cron] [Assets] [Sessions]`. Selecting "Sessions" reveals the open-session-tab strip beneath it, and a sub-tab strip (Chat/Agents/Changes/Status/Logs) beneath that, scoped to whichever session tab is active. |
 | Dead code | `SessionSidebar.tsx` is deleted as part of this work (unused since `b25ab73`). |
+| Editor tabs | **Nest under the Files top-level view.** `useEditorTabs`'s `activeTab`/editor-tab state currently doubles as the global `Tabs` `value` (`App.tsx:103-118`, `handleOpenFile` in `useEditorTabs.ts:43-64`). It is decoupled from the top-level view selector: opening a file switches the top-level view to `'files'` and separately tracks which editor tab (or the file tree) is showing within that view — mirroring the Sessions > session-tabs pattern one level shallower (no further sub-tab split needed under an editor tab). |
 
 ## 3. Architecture overview
 
@@ -42,7 +43,10 @@
 App.tsx
  └─ activeView: 'files' | 'git' | 'cron' | 'assets' | 'sessions'   (was activeTab, global sub-tab)
      ├─ TopTabs.tsx        → [Files, Git, Cron, Assets, Sessions]
-     ├─ FilesPanel / GitPanel / CronPanel / AssetsPanel            (unchanged, project-scoped)
+     ├─ 'files' view:
+     │   ├─ EditorTabBar.tsx      (new) → open file-editor tabs + "file tree" entry
+     │   └─ FileTree.tsx (when no editor tab active) | FileEditor.tsx (per open editor tab)
+     ├─ GitPanel / CronPanel / AssetsPanel                          (unchanged, project-scoped)
      └─ 'sessions' view:
          ├─ OpenSessionBar.tsx        (unchanged structurally)
          ├─ SessionSubTabs.tsx        (new) → [Chat, Agents, Changes, Status, Logs]
@@ -63,11 +67,23 @@ App.tsx
 - `App.tsx`'s `activeTab`/`setActiveTab` is repurposed as the top-level view
   selector (`'files' | 'git' | 'cron' | 'assets' | 'sessions'`); it no longer
   controls which of Chat/Agents/Changes/Status/Logs is visible.
+- `useEditorTabs` (`hooks/useEditorTabs.ts`) drops its `activeTab`/`setActiveTab`
+  return values (that was the same state as the old global `Tabs` value) and
+  gains `activeEditorTabId: string | null` (`null` = file tree shown). Editor
+  tab open/close/switch logic is otherwise unchanged. `handleOpenFile` no
+  longer needs to double as "switch the whole app to this view" — that
+  becomes the caller's job (`App.tsx` also calls `setActiveView('files')`
+  when a file is opened from anywhere, e.g. from a chat message reference).
 
 ## 5. Component changes
 
 - `TopTabs.tsx`: `mainTabs` shrinks to the 5 project-scoped entries plus a
-  `Sessions` entry.
+  `Sessions` entry. It stops rendering file-editor tabs inline
+  (`TopTabs.tsx:113-156` moves to the new `EditorTabBar.tsx`).
+- New `EditorTabBar.tsx` (`Layout/`): renders the open file-editor tabs (the
+  logic at `TopTabs.tsx:113-156` today) plus a "file tree" entry to return to
+  `FileTree`. Mounted beneath `TopTabs` inside the `'files'` view, mirroring
+  `OpenSessionBar`'s position under the `'sessions'` view.
 - New `SessionSubTabs.tsx` (`Layout/`): renders the 5 session-scoped sub-tabs
   for the currently-active session tab; reads/writes `activeSubTab` via
   `SET_TAB_SUB_TAB`. Mounted directly beneath `OpenSessionBar` inside the
