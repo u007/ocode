@@ -39,7 +39,9 @@ export default function FilePicker({ open, onClose, onOpenFile }: Props) {
 
   useEffect(() => {
     if (!open) return;
-    fetch(apiPath("/api/files/tree"), { headers: authHeaders() })
+    // depth=0 asks the server for the full tree (no depth cap) so files
+    // nested deep in the project are searchable, not just the shallow ones.
+    fetch(apiPath(`/api/files/tree?depth=0`), { headers: authHeaders() })
       .then((res) => res.json())
       .then((tree: FileNode[]) => setFiles(flattenFiles(tree)))
       .catch((err) => console.error("Failed to load file tree:", err));

@@ -440,6 +440,22 @@ export const api = {
   listCommands: () => fetchJSON<CommandEntry[]>("/api/commands"),
   listSkills: () => fetchJSON<SkillEntry[]>("/api/skills"),
 
+  // ── Command context (repo-analysis prompts for /standup, /changes, /review) ──
+  getCommandContext: (name: string, args?: string) =>
+    fetchJSON<{ prompt: string }>(
+      `/api/command-context/${encodeURIComponent(name)}${args ? `?args=${encodeURIComponent(args)}` : ""}`,
+    ),
+
+  // ── GitHub (backing /github pr|issue) ──
+  getGithubPR: (owner: string, repo: string, number: number) =>
+    fetchJSON<{ pr: Record<string, unknown>; diff?: string }>(
+      `/api/github/pr/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/${number}`,
+    ),
+  getGithubIssues: (owner: string, repo: string, state?: string) =>
+    fetchJSON<Record<string, unknown>[]>(
+      `/api/github/issues/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}${state ? `?state=${encodeURIComponent(state)}` : ""}`,
+    ),
+
   // ── Agent question prompts ──
   // Answer a pending `question` prompt raised by the agent. Throws on 404/409
   // so callers can surface the failure and dismiss the dialog.

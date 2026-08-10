@@ -1937,6 +1937,36 @@ func TestBuildTUIStatusSnapshotIncludesOcrBackendAndBackendModel(t *testing.T) {
 	}
 }
 
+func TestBuildTUIStatusSnapshotIncludesActivityFields(t *testing.T) {
+	// When the agent is idle the activity fields must be absent.
+	m := model{}
+	snap := m.buildTUIStatusSnapshot()
+	if snap.LLMRunning {
+		t.Fatal("LLMRunning should be false when idle")
+	}
+	if len(snap.ActiveTools) != 0 || len(snap.ActiveAgents) != 0 {
+		t.Fatal("ActiveTools and ActiveAgents should be empty when idle")
+	}
+
+	// When the agent has active work the snapshot must reflect it.
+	now := time.Now()
+	m.lastActivity = agent.ActivitySnapshot{
+		LLMRunning:   true,
+		ActiveTools:  []agent.ToolActivity{{Name: "bash", StartedAt: now}},
+		ActiveAgents: []string{"code-reviewer"},
+	}
+	snap = m.buildTUIStatusSnapshot()
+	if !snap.LLMRunning {
+		t.Fatal("LLMRunning should be true")
+	}
+	if len(snap.ActiveTools) != 1 || snap.ActiveTools[0].Name != "bash" {
+		t.Fatalf("ActiveTools = %v, want [{bash ...}]", snap.ActiveTools)
+	}
+	if len(snap.ActiveAgents) != 1 || snap.ActiveAgents[0] != "code-reviewer" {
+		t.Fatalf("ActiveAgents = %v, want [code-reviewer]", snap.ActiveAgents)
+	}
+}
+
 func TestMCPCmdListsConfiguredServers(t *testing.T) {
 	m := model{
 		config: &config.Config{MCP: map[string]config.MCPConfig{

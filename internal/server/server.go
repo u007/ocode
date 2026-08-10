@@ -206,6 +206,7 @@ func (s *Server) registerRoutes() {
 	// Info
 	s.mux.HandleFunc("GET /api/skills", s.authMiddleware(s.handleListSkills))
 	s.mux.HandleFunc("GET /api/commands", s.authMiddleware(s.handleListCommands))
+	s.mux.HandleFunc("GET /api/command-context/{name}", s.authMiddleware(s.handleCommandContext))
 	s.mux.HandleFunc("GET /api/github/pr/{owner}/{repo}/{number}", s.authMiddleware(s.handleGitHubPR))
 	s.mux.HandleFunc("GET /api/github/issues/{owner}/{repo}", s.authMiddleware(s.handleGitHubIssues))
 	s.mux.HandleFunc("POST /api/init", s.authMiddleware(s.handleInit))
@@ -486,6 +487,13 @@ func Run(args []string, webFS fs.FS, setup func(srv *Server) error) error {
 	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
 
 	srv := New(addr, username, password, webFS)
+	// Anchor the server to the process working directory so relative-path
+	// endpoints (file tree, file content, git, uploads) resolve against the
+	// project root regardless of where the process was launched from. The
+	// desktop shell passes its own workDir explicitly before serving.
+	if wd, err := os.Getwd(); err == nil {
+		srv.SetWorkDir(wd)
+	}
 
 	// Bind before opening the browser so the URL reflects the port actually
 	// bound (Listen falls forward to a free port if the requested one is busy).
@@ -773,6 +781,9 @@ func (s *Server) handleListSkills(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListCommands(w, r)
+}
+func (s *Server) handleCommandContext(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleCommandContext(w, r, r.PathValue("name"))
 }
 func (s *Server) handleGitHubPR(w http.ResponseWriter, r *http.Request) {
 	owner, repo, number, ok := parseGitHubPRRoute(r)

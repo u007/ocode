@@ -48,6 +48,12 @@ export default function OpenSessionBar() {
                 : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60"
             }`}
             onClick={() => handleTabClick(tab.id, tab.title)}
+            onMouseDown={(e) => {
+              if (e.button === 1) {
+                e.preventDefault(); // suppress middle-click autoscroll
+                handleCloseTab(e, tab.id);
+              }
+            }}
           >
             {isLoadingTab(tab.id) && (
               <Loader2 className="w-3 h-3 animate-spin shrink-0" />

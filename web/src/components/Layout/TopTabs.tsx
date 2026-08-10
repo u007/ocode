@@ -10,13 +10,13 @@ interface Props {
 }
 
 const mainTabs = [
+  { id: "sessions", label: "Sessions", icon: MessageSquare },
   { id: "files", label: "Files", icon: FolderGit2 },
   { id: "git", label: "Git", icon: GitBranch },
   { id: "cron", label: "Cron", icon: CalendarClock },
   { id: "assets", label: "Assets", icon: Paperclip },
   { id: "status", label: "Status", icon: Activity },
   { id: "logs", label: "Logs", icon: ScrollText },
-  { id: "sessions", label: "Sessions", icon: MessageSquare },
 ];
 
 export default function TopTabs({ activeTab, onTabSelect }: Props) {

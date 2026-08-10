@@ -72,7 +72,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       if (!sessionId) return false;
       try {
         await api.resolvePermission(requestId, sessionId, approved);
-        dispatch({ type: "PERMISSION_RESOLVED", sessionId });
+        dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId });
         return true;
       } catch (err) {
         console.error("Failed to resolve permission:", err);

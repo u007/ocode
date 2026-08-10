@@ -13,6 +13,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/debuglog"
+	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/monaco"
 	"github.com/u007/ocode/internal/projects"
 	"github.com/u007/ocode/internal/scheduler"
@@ -59,6 +60,29 @@ type Handler struct {
 	syncMu     sync.Mutex
 	syncClient *ocodesync.Client
 	syncStop   func()
+
+	// lspMgr is the single LSP manager shared by every agent session this
+	// handler creates. A server process serves one project root (h.workDir
+	// never changes after startup), so every session/tab talks to the same
+	// language servers instead of each spawning its own gopls etc. — see
+	// sharedLSPManager.
+	lspMgrOnce sync.Once
+	lspMgr     *lsp.Manager
+}
+
+// sharedLSPManager returns the process-wide LSP manager, creating it on
+// first use. All agent sessions in this handler share it so opening
+// multiple tabs/sessions against the same project doesn't spawn a
+// redundant language-server process per tab.
+func (h *Handler) sharedLSPManager() *lsp.Manager {
+	h.lspMgrOnce.Do(func() {
+		root := h.workDir
+		if root == "" {
+			root = "."
+		}
+		h.lspMgr = lsp.NewManager(root)
+	})
+	return h.lspMgr
 }
 
 type agentSession struct {
@@ -276,7 +300,8 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
+		lspMgr := h.sharedLSPManager()
+		tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 		ag.LoadExternalTools(h.cfg)
 		mcpTools, mcpErrs := h.mcpCache.wait()
@@ -550,7 +575,8 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			return
 		}
 
-		tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
+		lspMgr := h.sharedLSPManager()
+		tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 		ag.LoadExternalTools(h.cfg)
 		mcpTools, mcpErrs := h.mcpCache.wait()
@@ -765,7 +791,8 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	if client == nil {
 		return nil, fmt.Errorf("failed to create LLM client")
 	}
-	tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
+	lspMgr := h.sharedLSPManager()
+	tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
 	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 	ag.LoadExternalTools(h.cfg)
 	mcpTools, mcpErrs := h.mcpCache.wait()

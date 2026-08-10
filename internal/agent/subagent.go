@@ -296,6 +296,16 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	// path.
 	t.contract = resolveContract(params.ExpectedOutput, spec.ExpectedOutput)
 
+	// Self-dispatch guard: an agent may never dispatch its own type (e.g.
+	// explore spawning explore, review-changes spawning review-changes).
+	// Unlike the re-dispatch guard below (which only trips after repeated
+	// identical launches), this has no natural termination condition — each
+	// spawned instance could itself dispatch another, recursing without
+	// bound — so it is refused outright, even on the first attempt.
+	if t.mainAgent != nil && t.mainAgent.spec != nil && spec.Name == t.mainAgent.spec.Name {
+		return fmt.Sprintf("Error: agent %q cannot dispatch another instance of itself — this can recurse indefinitely. Do the work directly or dispatch a different agent type.", spec.Name), nil
+	}
+
 	// Hidden agents (e.g. the orchestrator pipeline's internal
 	// orchestrator-planner/-explorer/-developer/-validator subagents) are
 	// scoped to their own plugin: only a caller loaded from the same

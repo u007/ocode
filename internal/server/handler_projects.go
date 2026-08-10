@@ -96,19 +96,19 @@ func (h *Handler) HandleListProjectSessions(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	sessions, err := session.ListForDir(projectPath)
+	refs, err := session.ListRefsForDir(projectPath)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("list sessions: %v", err))
 		return
 	}
 
-	result := make([]SessionInfo, 0, len(sessions))
-	for _, s := range sessions {
+	result := make([]SessionInfo, 0, len(refs))
+	for _, ref := range refs {
 		result = append(result, SessionInfo{
-			ID:        s.ID,
-			Title:     s.Title,
-			CreatedAt: s.CreatedAt.Format(time.RFC3339),
-			UpdatedAt: s.UpdatedAt.Format(time.RFC3339),
+			ID:        ref.ID,
+			Title:     ref.Title,
+			CreatedAt: ref.CreatedAt.Format(time.RFC3339),
+			UpdatedAt: ref.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 

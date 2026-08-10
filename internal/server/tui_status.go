@@ -34,6 +34,12 @@ type TUIStatus struct {
 	IDEStatus string `json:"ide_status,omitempty"`
 	// Subagent model currently active in the latest turn (empty when none).
 	SubagentModel string `json:"subagent_model,omitempty"`
+	// Agent activity — mirrors the TUI's activity row so the web status bar can
+	// show what the agent is doing right now (LLM call running, in-flight
+	// tools, live sub-agents). All empty when idle.
+	LLMRunning   bool                 `json:"llm_running,omitempty"`
+	ActiveTools  []ToolActivityStatus `json:"active_tools,omitempty"`
+	ActiveAgents []string             `json:"active_agents,omitempty"`
 	// Session identity / metadata.
 	SessionID    string `json:"session_id,omitempty"`
 	SessionTitle string `json:"session_title,omitempty"`
@@ -61,6 +67,14 @@ type TUIStatus struct {
 type FileStatus struct {
 	Path   string `json:"path"`
 	Status string `json:"status,omitempty"`
+}
+
+// ToolActivityStatus is one in-flight tool call, mirroring agent.ToolActivity
+// in a JSON-friendly form for the web status bar. StartedAt is RFC3339 on the
+// server clock; the web renders it as a local time/elapsed label.
+type ToolActivityStatus struct {
+	Name      string `json:"name"`
+	StartedAt string `json:"started_at,omitempty"`
 }
 
 // LSPStatus mirrors lsp.ServerStatus plus a coarse state string the web can

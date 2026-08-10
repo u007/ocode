@@ -2,10 +2,10 @@ import { useChatState, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { Button } from "@/components/ui/button";
 import { PanelRight } from "lucide-react";
+import type { ToolActivityStatus } from "../../api/types";
 
 interface Props {
   onCoworkToggle?: () => void;
-  onModelClick?: () => void;
   onStatusClick?: () => void;
 }
 
@@ -26,32 +26,55 @@ function formatUSD(n: number): string {
   return `$${n.toFixed(0)}`;
 }
 
-export default function StatusBar({ onCoworkToggle, onModelClick, onStatusClick }: Props) {
+// Render one in-flight tool the way the TUI activity row does: `name [HH:MM:SS]`.
+// Long tool names are truncated so the status bar stays readable on one row.
+function toolActivityLabel(t: ToolActivityStatus): string {
+  const name = t.name.length > 24 ? t.name.slice(0, 21) + "…" : t.name;
+  if (!t.started_at) return `⚙ ${name}`;
+  const started = new Date(t.started_at);
+  if (isNaN(started.getTime())) return `⚙ ${name}`;
+  return `⚙ ${name} [${started.toLocaleTimeString([], { hour12: false })}]`;
+}
+
+// Builds the "current running status" segment shown at the bottom, mirroring the
+// TUI's activity row (⟳ LLM · ⚙ tool · @ agent). Prefers the consolidated TUI
+// activity snapshot (RC-bridge mode); falls back to the per-session streaming
+// state + in-flight live tool for headless/desktop mode where no TUI is attached.
+function runningStatusParts(
+  isStreaming: boolean,
+  snap: import("../../api/types").TUIStatus | null,
+  liveToolName: string | undefined,
+): string[] {
+  const parts: string[] = [];
+  if (snap?.llm_running) parts.push("⟳ llm");
+  for (const agent of snap?.active_agents ?? []) parts.push(`@ ${agent}`);
+  for (const t of snap?.active_tools ?? []) parts.push(toolActivityLabel(t));
+  if (parts.length > 0) return parts;
+  // No TUI activity snapshot (headless/desktop mode, or the TUI reports idle):
+  // derive from the per-session stream state instead.
+  if (isStreaming) parts.push("streaming");
+  if (liveToolName) parts.push(`⚙ ${liveToolName.length > 24 ? liveToolName.slice(0, 21) + "…" : liveToolName}`);
+  return parts;
+}
+
+export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const chatState = useChatState();
-  const {
-    model,
-    smallModel,
-    smallModelEnabled,
-    advisorModel,
-    advisorEnabled,
-    tuiStatus,
-    sessionContext,
-    spendingUSD,
-  } = chatState;
+  const { tuiStatus, sessionContext, spendingUSD } = chatState;
   const { activeTabId } = useProjectState();
-  const { isStreaming, error } = getSessionSlice(chatState, activeTabId);
+  const { isStreaming, error, live } = getSessionSlice(chatState, activeTabId);
 
   // Pull every field from the consolidated snapshot when present; fall back to
   // the per-field store state for older TUI builds that don't push "status".
-  // The per-field store state is preferred for the main/small/advisor models:
-  // it is updated on web-initiated selection immediately, while the snapshot
-  // can lag (mount-time value in headless mode, last TUI broadcast otherwise).
   const snap = tuiStatus;
-  const mainModel = model || snap?.main_model || "";
-  const liveSmallModel = smallModel || snap?.small_model || "";
-  const liveAdvisorModel = advisorModel || snap?.advisor_model || "";
-  const liveAdvisorEnabled = snap?.advisor_enabled ?? advisorEnabled;
-  const liveSmallOn = snap?.small_model_enabled ?? smallModelEnabled;
+  // The in-flight tool from the per-session live buffer (headless/desktop
+  // fallback): the most recent tool part that hasn't produced a result yet.
+  const liveToolName = [...live]
+    .reverse()
+    .find(
+      (p): p is Extract<import("../../api/types").LivePart, { kind: "tool" }> =>
+        p.kind === "tool" && p.output === undefined,
+    )?.tool;
+  const runningParts = runningStatusParts(isStreaming, snap, liveToolName);
   const ideStatus = snap?.ide_status || "";
   const sessionTitle = snap?.session_title || "";
   const sessionId = snap?.session_id || "";
@@ -81,37 +104,9 @@ export default function StatusBar({ onCoworkToggle, onModelClick, onStatusClick 
 
   return (
     <div className="flex flex-col border-t border-zinc-700 px-4 py-1.5 text-xs text-zinc-500 gap-0.5">
-      {/* Row 1: model, small + on/off, advisor + on/off, IDE, streaming */}
+      {/* Row 1: IDE, subagent, streaming */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3 min-w-0 flex-wrap">
-          <button
-            type="button"
-            onClick={onModelClick}
-            className="hover:text-zinc-300 transition-colors truncate max-w-[20rem]"
-            title={`${mainModel}${sessionTitle ? ` — ${sessionTitle}` : ""}`}
-          >
-            {mainModel || "no model"}
-          </button>
-          {liveSmallModel && (
-            <span
-              className={
-                liveSmallOn ? "text-emerald-500" : "text-zinc-600"
-              }
-              title="Small model — auto for sub-tasks"
-            >
-              · small: {liveSmallModel} {liveSmallOn ? "●on" : "○off"}
-            </span>
-          )}
-          {liveAdvisorModel && (
-            <span
-              className={
-                liveAdvisorEnabled ? "text-emerald-500" : "text-zinc-600"
-              }
-              title="Advisor model — second opinion / sanity check"
-            >
-              · advisor: {liveAdvisorModel} {liveAdvisorEnabled ? "●on" : "○off"}
-            </span>
-          )}
           {ideStatus && (
             <span className="text-zinc-500" title="IDE integration">
               · {ideStatus}
@@ -122,10 +117,13 @@ export default function StatusBar({ onCoworkToggle, onModelClick, onStatusClick 
               · subagent: {subagent}
             </span>
           )}
-          {isStreaming && (
-            <span className="flex items-center gap-1 text-blue-400">
+          {runningParts.length > 0 && (
+            <span
+              className="flex items-center gap-1 text-blue-400"
+              title="Agent running status"
+            >
               <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-500" />
-              streaming
+              <span className="truncate max-w-[28rem]">{runningParts.join("  ·  ")}</span>
             </span>
           )}
         </div>

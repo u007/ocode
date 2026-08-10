@@ -176,7 +176,8 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		tools, lspMgr := tool.LoadBuiltins(h.cfg, h.scheduler)
+		lspMgr := h.sharedLSPManager()
+		tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
 		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 		ag.LoadExternalTools(h.cfg)
 		mcpTools, mcpErrs := h.mcpCache.wait()

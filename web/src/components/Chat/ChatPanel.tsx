@@ -94,6 +94,11 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
         // it with this older snapshot.
         const current = getSessionSlice(stateRef.current, sessionId);
         if (current.messages.length > 0 || current.live.length > 0) {
+          // The mirror already populated the slice while the fetch was in
+          // flight — its state is newer than disk. Do not wipe it with this
+          // older snapshot, but do mark the slice initialized so the tab's
+          // "loading" spinner clears.
+          dispatch({ type: "MARK_INITIALIZED", sessionId });
           setInitialized(true);
           return;
         }

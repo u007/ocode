@@ -251,6 +251,17 @@ function HomeApp() {
         setMaskEnabled: (enabled) => api.setMaskEnabled(enabled),
         setMaskMode: (mode) => api.setMaskMode(mode),
         setMaskModel: (model) => api.setMaskModel(model),
+        getCommandContext: (name, args) => api.getCommandContext(name, args),
+        getSessionContext: (id) => api.getSessionContext(id),
+        getLSPStatuses: () => api.getLSPStatuses(),
+        listSkills: () => api.listSkills(),
+        getMCP: () => api.getMCP(),
+        getGithubPR: (owner, repo, number) => api.getGithubPR(owner, repo, number),
+        getGithubIssues: (owner, repo, state) => api.getGithubIssues(owner, repo, state),
+        getAgentRuns: () => api.listAgentRuns(),
+        getCronJobs: () => api.listCronJobs().then((r) => r.jobs),
+        getSmallModelWithEnabled: () => api.getSmallModelWithEnabled(),
+        getAdvisor: () => api.getAdvisor(),
       },
       getMessages: () => getSessionSlice(chatState, activeTabId).messages,
       getSessionId: () => activeTabId,
@@ -430,7 +441,6 @@ function HomeApp() {
           {/* Status bar */}
           <StatusBar
             onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
-            onModelClick={() => openModelDialog("main")}
             onStatusClick={() => setActiveView("status")}
           />
         </main>

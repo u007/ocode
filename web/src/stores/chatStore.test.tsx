@@ -102,4 +102,37 @@ describe("chatStore per-session isolation", () => {
     });
     expect(getSessionSlice(state, "a").initialized).toBe(true);
   });
+
+  it("SET_MESSAGES (mirror snapshot) commits history AND marks the session initialized", () => {
+    let state = initial();
+    // A mirror "messages" snapshot arriving before the history fetch resolves
+    // must clear the tab spinner — the spinner keys off `initialized`.
+    state = chatReducer(state, {
+      type: "SET_MESSAGES",
+      sessionId: "a",
+      messages: [{ role: "user", content: "hi" }, { role: "assistant", content: "hello" }],
+    });
+    const slice = getSessionSlice(state, "a");
+    expect(slice.messages).toHaveLength(2);
+    expect(slice.initialized).toBe(true);
+    expect(slice.live).toEqual([]);
+  });
+
+  it("MARK_INITIALIZED clears the loading flag without touching content", () => {
+    let state = initial();
+    // ChatPanel's initial-load effect hits this when the mirror already
+    // populated the slice (live parts) before the fetch resolved — it must
+    // mark the slice initialized without wiping the newer live state.
+    state = chatReducer(state, {
+      type: "LIVE_DELTA",
+      sessionId: "a",
+      kind: "text",
+      delta: "hi",
+    });
+    expect(getSessionSlice(state, "a").initialized).toBe(false);
+    state = chatReducer(state, { type: "MARK_INITIALIZED", sessionId: "a" });
+    const slice = getSessionSlice(state, "a");
+    expect(slice.initialized).toBe(true);
+    expect(slice.live).toEqual([{ kind: "text", text: "hi" }]);
+  });
 });

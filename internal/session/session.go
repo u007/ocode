@@ -445,8 +445,11 @@ func List() ([]Session, error) {
 	return sessions, nil
 }
 
-// ListForDir returns all sessions scoped to a specific working directory.
-func ListForDir(wd string) ([]Session, error) {
+// ListRefsForDir returns lightweight refs (id/title/timestamps) for sessions
+// scoped to a specific working directory, without materializing the messages
+// array. Mirrors the metadata-only approach in ListRefsPaginated — use this
+// instead of ListForDir for anything that only needs list display fields.
+func ListRefsForDir(wd string) ([]Ref, error) {
 	dir, err := GetStorageDirForPath(wd)
 	if err != nil {
 		return nil, err
@@ -457,37 +460,50 @@ func ListForDir(wd string) ([]Session, error) {
 		return nil, err
 	}
 
-	var sessions []Session
-	for _, e := range entries {
-		if e.IsDir() || e.Name() == "index.json" {
-			continue
+	metas := mapDirEntries(dir, entries, ".json", func(path string, e os.DirEntry) (ocodeMeta, bool) {
+		info, err := e.Info()
+		if err != nil {
+			log.Printf("session list: stat %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
 		}
-		path := filepath.Join(dir, e.Name())
-		ext := filepath.Ext(e.Name())
-		switch ext {
-		case ".json":
-			data, err := os.ReadFile(path)
-			if err == nil {
-				var s Session
-				if err := json.Unmarshal(data, &s); err == nil {
-					s.Messages = removeIncompleteToolRequests(s.Messages)
-					sessions = append(sessions, s)
-				}
-			}
-		case ".ojsonl":
-			s, err := loadOjsonlSession(path)
-			if err == nil {
-				s.Messages = removeIncompleteToolRequests(s.Messages)
-				sessions = append(sessions, *s)
-			}
+		meta, err := readOcodeMeta(path, info.ModTime())
+		if err != nil {
+			log.Printf("session list: read meta %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
 		}
+		return meta, true
+	})
+	ojsonlMetas := mapDirEntries(dir, entries, ".ojsonl", func(path string, e os.DirEntry) (ocodeMeta, bool) {
+		info, err := e.Info()
+		if err != nil {
+			log.Printf("session list: stat %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
+		}
+		meta, err := readOjsonlListMeta(path, info.ModTime())
+		if err != nil {
+			log.Printf("session list: read ojsonl meta %s: %v", e.Name(), err)
+			return ocodeMeta{}, false
+		}
+		return meta, true
+	})
+	metas = append(metas, ojsonlMetas...)
+
+	refs := make([]Ref, 0, len(metas))
+	for _, meta := range metas {
+		refs = append(refs, Ref{
+			ID:        meta.ID,
+			Title:     meta.Title,
+			CreatedAt: meta.CreatedAt,
+			UpdatedAt: meta.UpdatedAt,
+			Source:    SourceOcode,
+		})
 	}
 
-	sort.Slice(sessions, func(i, j int) bool {
-		return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	sort.Slice(refs, func(i, j int) bool {
+		return refs[i].UpdatedAt.After(refs[j].UpdatedAt)
 	})
 
-	return sessions, nil
+	return refs, nil
 }
 
 func ListAll() ([]Ref, error) {

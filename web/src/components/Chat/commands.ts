@@ -32,6 +32,14 @@ import {
   Bot,
   Puzzle,
   Terminal,
+  GitPullRequest,
+  ListChecks,
+  Activity,
+  Gauge,
+  Cpu,
+  GitBranch,
+  CalendarClock,
+  Radio,
 } from "lucide-react";
 
 // ─── Command Definition ────────────────────────────────────────────────────
@@ -77,6 +85,18 @@ export const COMMANDS: CommandDef[] = [
   { name: "/plugin", description: "List, enable, install, or remove plugins", icon: Puzzle },
   { name: "/share", description: "Share session link", icon: Share2 },
   { name: "/help", description: "Show available commands", icon: HelpCircle },
+  { name: "/standup", description: "Review recent commits + pending changes (standup summary)", icon: ListChecks },
+  { name: "/changes", description: "Analyze repo changes: diffs, LSP errors, specs", icon: GitBranch },
+  { name: "/review", description: "AI code review of changes, file, commit, branch, or PR", icon: GitPullRequest },
+  { name: "/context", description: "Show context window token budget", icon: Gauge },
+  { name: "/lsp", description: "Show LSP diagnostics and error counts", icon: Activity },
+  { name: "/agents", description: "Show active/queued subagents", icon: Cpu },
+  { name: "/skills", description: "List available skills", icon: Sparkles },
+  { name: "/mcp", description: "List or toggle MCP servers", icon: Radio },
+  { name: "/cron", description: "Manage scheduled jobs", icon: CalendarClock },
+  { name: "/small-model", description: "Show or switch the small model", icon: Settings },
+  { name: "/advisor", description: "Set the advisor model", icon: Bot },
+  { name: "/github", description: "GitHub actions (pr, issue)", icon: GitPullRequest },
 ];
 
 // ─── Dynamic commands (custom commands + skills from the server) ──────────────
@@ -178,6 +198,10 @@ export function helpMessage(): Message {
  * - `messages` — optional assistant messages to inject into the chat
  * - `sessionId` — optional session to load / switch to
  * - `newSession` — if true, reset to a fresh session
+ * - `prompt` — a user-role message to send through the normal chat pipeline
+ *   (used by repo-analysis commands like /standup, /changes, /review: the
+ *   server gathers git context and returns the assembled prompt, which the
+ *   client then sends verbatim so the LLM answers it like a TUI turn)
  */
 export interface CommandResult {
   handled: boolean;
@@ -190,6 +214,8 @@ export interface CommandResult {
     content: string;
     mimeType: string;
   };
+  /** User-role message to send through the normal chat send path. */
+  prompt?: string;
 }
 
 /**
@@ -218,6 +244,34 @@ export interface CommandContext {
     setMaskEnabled: (enabled: boolean) => Promise<{ enabled: boolean }>;
     setMaskMode: (mode: string) => Promise<{ mode: string }>;
     setMaskModel: (model: string) => Promise<{ model: string }>;
+    /** Fetch an assembled LLM prompt for a repo-analysis command (/standup, /changes, /review). */
+    getCommandContext: (name: string, args?: string) => Promise<{ prompt: string }>;
+    /** Token budget for the current session (/context). */
+    getSessionContext: (id: string) => Promise<{
+      session_id: string;
+      message_count: number;
+      estimated_tokens: number;
+      max_tokens?: number;
+      model?: string;
+    }>;
+    /** LSP server status + aggregated diagnostic counts (/lsp). */
+    getLSPStatuses: () => Promise<{ lsp_servers: import("../../api/types").LSPStatus[] }>;
+    /** Available skills (/skills). */
+    listSkills: () => Promise<import("../../api/types").SkillEntry[]>;
+    /** MCP server status (/mcp). */
+    getMCP: () => Promise<import("../../api/types").MCPStatus[]>;
+    /** GitHub PR details + diff (/github pr). */
+    getGithubPR: (owner: string, repo: string, number: number) => Promise<{ pr: Record<string, unknown>; diff?: string }>;
+    /** GitHub issue list (/github issue list). */
+    getGithubIssues: (owner: string, repo: string, state?: string) => Promise<Record<string, unknown>[]>;
+    /** Subagent runs (/agents). */
+    getAgentRuns?: () => Promise<{ id: string; agent?: string; title?: string; status?: string; state?: string }[]>;
+    /** Scheduled jobs (/cron). */
+    getCronJobs?: () => Promise<{ id: string | number; name?: string; next_run?: string }[]>;
+    /** Small-model config (/small-model). */
+    getSmallModelWithEnabled?: () => Promise<{ model: string; enabled: boolean }>;
+    /** Advisor model (/advisor). */
+    getAdvisor?: () => Promise<{ model: string }>;
   };
   /** Current messages in the chat store (used by /export). */
   getMessages?: () => Message[];
@@ -303,6 +357,43 @@ export async function dispatchCommand(
 
     case "/btw":
       return handleBtw(args, ctx);
+
+    // ── Repo-analysis commands: server assembles the full prompt, client
+    //    sends it verbatim through the normal chat pipeline (TUI parity) ──
+    case "/standup":
+    case "/changes":
+    case "/review":
+      return handleCommandContext(commandName, args, ctx);
+
+    // ── Token budget / LSP status (assistant message) ──
+    case "/context":
+      return handleContext(ctx);
+
+    case "/lsp":
+      return handleLsp(ctx);
+
+    // ── Status lists (assistant message) ──
+    case "/agents":
+      return handleAgents(ctx);
+
+    case "/skills":
+      return handleSkills(ctx);
+
+    case "/mcp":
+      return handleMcp(ctx);
+
+    case "/cron":
+      return handleCron(ctx);
+
+    case "/github":
+      return handleGithub(args, ctx);
+
+    // ── Config routing (model dialog tabs) ──
+    case "/small-model":
+      return handleSmallModel(ctx);
+
+    case "/advisor":
+      return handleAdvisor(ctx);
 
     // ── Fall through to LLM (the agent may interpret them) ──
     case "/search":
@@ -1123,6 +1214,399 @@ async function handleBtw(args: string, ctx: CommandContext): Promise<CommandResu
         role: "assistant",
         content: `**BTW failed:** ${err instanceof Error ? err.message : String(err)}`,
       }],
+    };
+  }
+}
+
+// ─── Repo-analysis commands (/standup, /changes, /review) ──────────────────
+
+/**
+ * Server-side prompt assembly. The server gathers the same git context the
+ * TUI uses (recent commits, pending diffs, LSP, spec files) and returns the
+ * full LLM prompt; the client sends it verbatim through the normal send path
+ * so the web behaves exactly like the TUI /standup | /changes | /review.
+ */
+async function handleCommandContext(
+  commandName: string,
+  args: string,
+  ctx: CommandContext,
+): Promise<CommandResult> {
+  const name = commandName.slice(1); // strip leading "/"
+  try {
+    const { prompt } = await ctx.api.getCommandContext(name, args || undefined);
+    return { handled: true, prompt };
+  } catch (err) {
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**${commandName} failed:** ${err instanceof Error ? err.message : String(err)}`,
+      }],
+    };
+  }
+}
+
+// ─── /context — token budget ──────────────────────────────────────────────
+
+async function handleContext(ctx: CommandContext): Promise<CommandResult> {
+  const sessionId = ctx.getSessionId?.();
+  if (!sessionId) {
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "No active session." }],
+    };
+  }
+  try {
+    const c = await ctx.api.getSessionContext(sessionId);
+    const pct = c.max_tokens ? Math.round((c.estimated_tokens / c.max_tokens) * 100) : null;
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: [
+          "## Context Budget",
+          `- **Model:** ${c.model || "unknown"}`,
+          `- **Messages:** ${c.message_count}`,
+          `- **Estimated tokens:** ~${c.estimated_tokens.toLocaleString()}`,
+          `- **Max context:** ${c.max_tokens ? c.max_tokens.toLocaleString() : "unknown"}${pct !== null ? ` (${pct}% used)` : ""}`,
+        ].join("\n"),
+      }],
+    };
+  } catch (err) {
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**/context failed:** ${err instanceof Error ? err.message : String(err)}`,
+      }],
+    };
+  }
+}
+
+// ─── /lsp — diagnostics status ────────────────────────────────────────────
+
+async function handleLsp(ctx: CommandContext): Promise<CommandResult> {
+  try {
+    const { lsp_servers } = await ctx.api.getLSPStatuses();
+    if (!lsp_servers.length) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "No LSP servers active." }],
+      };
+    }
+    const lines = lsp_servers.map((s) => {
+      const errs = s.diagnostics_errors ?? 0;
+      const warns = s.diagnostics_warnings ?? 0;
+      const diag = errs + warns > 0 ? ` — ${errs} errors, ${warns} warnings` : " — no diagnostics";
+      return `- **${s.lang_id || s.cmd}** (${s.state})${diag}`;
+    });
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `## LSP Status\n\n${lines.join("\n")}`,
+      }],
+    };
+  } catch (err) {
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**/lsp failed:** ${err instanceof Error ? err.message : String(err)}`,
+      }],
+    };
+  }
+}
+
+// ─── /agents — subagent status ────────────────────────────────────────────
+
+async function handleAgents(ctx: CommandContext): Promise<CommandResult> {
+  try {
+    const runs = await ctx.api.getAgentRuns?.();
+    if (!runs || !runs.length) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "No active or queued subagents." }],
+      };
+    }
+    const lines = runs.map((r) => {
+      const s = typeof r.status === "string" ? r.status : (r.state ?? "running");
+      return `- **${r.agent || r.id}** — ${s}${r.title ? ` (${r.title})` : ""}`;
+    });
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `## Subagents\n\n${lines.join("\n")}`,
+      }],
+    };
+  } catch (err) {
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**/agents failed:** ${err instanceof Error ? err.message : String(err)}`,
+      }],
+    };
+  }
+}
+
+// ─── /skills — available skills ───────────────────────────────────────────
+
+async function handleSkills(ctx: CommandContext): Promise<CommandResult> {
+  try {
+    const skills = await ctx.api.listSkills();
+    if (!skills.length) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "No skills installed." }],
+      };
+    }
+    const lines = skills.map(
+      (s) => `- **${s.name}**${s.description ? ` — ${s.description}` : ""}`,
+    );
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `## Skills\n\n${lines.join("\n")}`,
+      }],
+    };
+  } catch (err) {
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**/skills failed:** ${err instanceof Error ? err.message : String(err)}`,
+      }],
+    };
+  }
+}
+
+// ─── /mcp — MCP server status ─────────────────────────────────────────────
+
+async function handleMcp(ctx: CommandContext): Promise<CommandResult> {
+  try {
+    const servers = await ctx.api.getMCP();
+    if (!servers.length) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "No MCP servers configured." }],
+      };
+    }
+    const lines = servers.map(
+      (s) => `- **${s.name}** — ${s.enabled ? "enabled" : "disabled"}`,
+    );
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `## MCP Servers\n\n${lines.join("\n")}\n\nUse \`/mcp enable <name>\` or \`/mcp disable <name>\` to toggle.`,
+      }],
+    };
+  } catch (err) {
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**/mcp failed:** ${err instanceof Error ? err.message : String(err)}`,
+      }],
+    };
+  }
+}
+
+// ─── /cron — scheduled jobs ───────────────────────────────────────────────
+
+async function handleCron(ctx: CommandContext): Promise<CommandResult> {
+  try {
+    const jobs = await ctx.api.getCronJobs?.();
+    if (!jobs || !jobs.length) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "No scheduled jobs. Use `/cron add` to create one." }],
+      };
+    }
+    const lines = jobs.map((j) => {
+      const id = typeof j.id === "string" ? j.id : String(j.id);
+      const name = typeof j.name === "string" ? j.name : id;
+      return `- **${name}** (\`${id}\`)${typeof j.next_run === "string" ? ` — next ${j.next_run}` : ""}`;
+    });
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `## Scheduled Jobs\n\n${lines.join("\n")}`,
+      }],
+    };
+  } catch (err) {
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**/cron failed:** ${err instanceof Error ? err.message : String(err)}`,
+      }],
+    };
+  }
+}
+
+// ─── /github — PR and issue lookup ────────────────────────────────────────
+
+async function handleGithub(args: string, ctx: CommandContext): Promise<CommandResult> {
+  const parts = args.trim().split(/\s+/).filter(Boolean);
+
+  // /github pr <owner> <repo> <number>
+  if (parts[0] === "pr" && parts.length >= 4) {
+    const [, owner, repo, numStr] = parts;
+    const num = Number(numStr);
+    if (!Number.isFinite(num)) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "Invalid PR number. Usage: `/github pr <owner> <repo> <number>`" }],
+      };
+    }
+    try {
+      const { pr, diff } = await ctx.api.getGithubPR(owner, repo, num);
+      const title = typeof pr.title === "string" ? pr.title : "(untitled)";
+      const state = typeof pr.state === "string" ? pr.state : "unknown";
+      const body = typeof pr.body === "string" && pr.body ? pr.body : "(no description)";
+      const user = pr.user as { login?: unknown } | undefined;
+      const author = typeof user?.login === "string" ? user.login : "unknown";
+      const content = [
+        `## PR #${num}: ${title}`,
+        `**State:** ${state} | **Author:** ${author}`,
+        "",
+        body,
+        "",
+        "### Diff",
+        "```diff",
+        diff || "(diff unavailable)",
+        "```",
+      ].join("\n");
+      return { handled: true, messages: [{ role: "assistant", content }] };
+    } catch (err) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: `**GitHub PR error:** ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  }
+
+  // /github issue list <owner> <repo> [state]
+  if (parts[0] === "issue" && parts[1] === "list" && parts.length >= 4) {
+    const [, , owner, repo] = parts;
+    const state = parts[4] ?? "open";
+    try {
+      const issues = await ctx.api.getGithubIssues(owner, repo, state);
+      if (!issues.length) {
+        return {
+          handled: true,
+          messages: [{ role: "assistant", content: `No ${state} issues in ${owner}/${repo}.` }],
+        };
+      }
+      const lines = issues.map((i) => {
+        const num = typeof i.number === "number" ? i.number : "?";
+        const title = typeof i.title === "string" ? i.title : "(untitled)";
+        return `- **#${num}** ${title}`;
+      });
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: `## Issues (${owner}/${repo}, ${state})\n\n${lines.join("\n")}` }],
+      };
+    } catch (err) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: `**GitHub issue error:** ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  }
+
+  // /github issue get <owner> <repo> <number>
+  if (parts[0] === "issue" && parts[1] === "get" && parts.length >= 5) {
+    const [, , owner, repo, numStr] = parts;
+    const num = Number(numStr);
+    if (!Number.isFinite(num)) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: "Invalid issue number. Usage: `/github issue get <owner> <repo> <number>`" }],
+      };
+    }
+    try {
+      const issues = await ctx.api.getGithubIssues(owner, repo, "all");
+      const issue = issues.find((i) => i.number === num);
+      if (!issue) {
+        return {
+          handled: true,
+          messages: [{ role: "assistant", content: `Issue #${num} not found in ${owner}/${repo}.` }],
+        };
+      }
+      const title = typeof issue.title === "string" ? issue.title : "(untitled)";
+      const state = typeof issue.state === "string" ? issue.state : "unknown";
+      const body = typeof issue.body === "string" && issue.body ? issue.body : "(no description)";
+      return {
+        handled: true,
+        messages: [{
+          role: "assistant",
+          content: `## Issue #${num}: ${title}\n\n**State:** ${state}\n\n${body}`,
+        }],
+      };
+    } catch (err) {
+      return {
+        handled: true,
+        messages: [{ role: "assistant", content: `**GitHub issue error:** ${err instanceof Error ? err.message : String(err)}` }],
+      };
+    }
+  }
+
+  return {
+    handled: true,
+    messages: [{
+      role: "assistant",
+      content: [
+        "## GitHub commands",
+        "- `/github pr <owner> <repo> <number>` — Get PR diff and details",
+        "- `/github issue list <owner> <repo> [state]` — List issues",
+        "- `/github issue get <owner> <repo> <number>` — Get issue details",
+      ].join("\n"),
+    }],
+  };
+}
+
+// ─── /small-model, /advisor — config routing ──────────────────────────────
+
+async function handleSmallModel(ctx: CommandContext): Promise<CommandResult> {
+  try {
+    const cfg = await ctx.api.getSmallModelWithEnabled?.();
+    const model = cfg?.model || "not configured";
+    const enabled = cfg?.enabled ?? true;
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**Small model:** ${model}${enabled ? "" : " (disabled)"}\n\nSwitch it from the model selector or via config.`,
+      }],
+    };
+  } catch {
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "**Small model:** not configured" }],
+    };
+  }
+}
+
+async function handleAdvisor(ctx: CommandContext): Promise<CommandResult> {
+  try {
+    const cfg = await ctx.api.getAdvisor?.();
+    return {
+      handled: true,
+      messages: [{
+        role: "assistant",
+        content: `**Advisor model:** ${cfg?.model || "default"}\n\nSet it with \`/advisor <model>\` or from settings.`,
+      }],
+    };
+  } catch {
+    return {
+      handled: true,
+      messages: [{ role: "assistant", content: "**Advisor model:** default" }],
     };
   }
 }

@@ -354,6 +354,11 @@ export interface TUIStatus {
   image_gen_provider?: string;
   image_gen_model?: string;
   subagent_model?: string;
+  // Agent activity — mirrors the TUI's activity row so the status bar can show
+  // what the agent is doing right now. All empty when idle.
+  llm_running?: boolean;
+  active_tools?: ToolActivityStatus[];
+  active_agents?: string[];
   session_id?: string;
   session_title?: string;
   cwd?: string;
@@ -370,6 +375,13 @@ export interface TUIStatus {
 export interface FileStatus {
   path: string;
   status?: string;
+}
+
+// One in-flight tool call, pushed in TUIStatus.active_tools. started_at is
+// RFC3339 on the server clock; the status bar renders it as a local time.
+export interface ToolActivityStatus {
+  name: string;
+  started_at?: string;
 }
 
 export interface LSPStatus {

@@ -214,9 +214,11 @@ export default function SessionTabSync() {
             permission: data as SSEPermissionEvent,
           });
           break;
-        case "permission_resolved":
-          chatDispatch({ type: "PERMISSION_RESOLVED", sessionId });
+        case "permission_resolved": {
+          const evData = data as { request_id?: string };
+          chatDispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId: evData.request_id });
           break;
+        }
         case "error":
           chatDispatch({ type: "SET_ERROR", sessionId, error: (data as { error: string }).error });
           chatDispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });

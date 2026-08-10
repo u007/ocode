@@ -3570,6 +3570,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		m.broadcastTUIStatus()
 		if m.lspDiagCh != nil {
 			return m, listenLSPDiags(m.lspDiagCh)
 		}
@@ -3613,6 +3614,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Kind:    debuglog.KindLSP,
 			Message: fmt.Sprintf("%s ready  (%s · %s)", msg.event.Cmd, msg.event.LangID, msg.event.Root),
 		})
+		m.broadcastTUIStatus()
 		var cmds []tea.Cmd
 		cmds = append(cmds, listenLSPEvents(m.lspEventCh), lspIndexingTimer(msg.event.Cmd))
 		return m, tea.Batch(cmds...)
@@ -3621,11 +3623,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.lspServerStartTimes, msg.cmd)
 		}
 		m.lspStateSeq++
+		m.broadcastTUIStatus()
 		return m, nil
 	case streamStartedMsg:
 		m.streaming = true
 		m.cancelStream = msg.cancel
 		m.lastActivity = agent.ActivitySnapshot{LLMRunning: true}
+		// Push the activity state to the web status bar (mirrors the TUI's
+		// "⟳ LLM" indicator) — the activity tracker's own snapshot arrives a
+		// beat later, so reflect the transition promptly.
+		m.broadcastTUIStatus()
 		m.streamStartedAt = time.Now()
 		m.streamEndedAt = time.Time{}
 		m.streamTokenEstimate = 0
@@ -3671,6 +3678,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activityRowReserved = true
 			m.layout()
 		}
+		// Mirror the activity row to the web status bar so it tracks what the
+		// agent is doing (LLM call, active tools, live sub-agents) in real time.
+		m.broadcastTUIStatus()
 		if m.agent != nil {
 			return m, m.armActivityListener()
 		}
@@ -4019,6 +4029,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.cancelStream = nil
 		m.lastActivity = agent.ActivitySnapshot{}
+		// The agent's own LLMRunning=false snapshot may not have landed yet —
+		// push the idle activity state so the web status bar clears its running
+		// indicator promptly at turn end.
+		m.broadcastTUIStatus()
 		m.streamEndedAt = time.Now()
 		m.streamWasInterrupted = msg.err != nil
 		// Ring the terminal bell on task completion (if enabled).
@@ -13292,6 +13306,22 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 		snap.IDEStatus = "IDE off"
 	}
 	snap.SubagentModel = m.activeSubagentModel()
+	// Agent activity row — mirrors the TUI's "⟳ LLM · ⚙ tool · @ agent"
+	// indicator so the web status bar shows what the agent is doing right now.
+	snap.LLMRunning = m.lastActivity.LLMRunning
+	if len(m.lastActivity.ActiveAgents) > 0 {
+		snap.ActiveAgents = append([]string(nil), m.lastActivity.ActiveAgents...)
+	}
+	if len(m.lastActivity.ActiveTools) > 0 {
+		tools := make([]server.ToolActivityStatus, 0, len(m.lastActivity.ActiveTools))
+		for _, ta := range m.lastActivity.ActiveTools {
+			tools = append(tools, server.ToolActivityStatus{
+				Name:      ta.Name,
+				StartedAt: ta.StartedAt.Format(time.RFC3339),
+			})
+		}
+		snap.ActiveTools = tools
+	}
 	// Context usage: use the model's full window from the agent registry. The
 	// current-input count is left at zero when the TUI isn't streaming a turn;
 	// the web computes the running total from /api/sessions/{id}/context and
@@ -19804,25 +19834,6 @@ func (m *model) renderBanClearConfirmDialog(width int) string {
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
 		header + "\n\n" + body + "\n\n" + hint,
 	)
-}
-
-// handleReviewCmd implements the /review command for AI code review.
-func (m *model) handleReviewCmd(args []string) tea.Cmd {
-	// Detect what to review
-	target, arg, description := detectReviewTarget(args)
-
-	// Get the review context (git diff, file content, etc.)
-	context, err := getReviewContext(target, arg, m.workDir)
-	if err != nil {
-		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Review error: %v", err)})
-		return nil
-	}
-
-	// Build the review prompt
-	prompt := buildReviewPrompt(target, context, description)
-
-	// Send to agent for review
-	return m.sendCustomCommandPrompt(prompt)
 }
 
 func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {

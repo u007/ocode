@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -22,10 +23,49 @@ type FileNode struct {
 func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 	root := r.URL.Query().Get("path")
 	if root == "" {
+		// Anchor to the server's project root, not the process CWD: a
+		// Finder-launched desktop .app starts with cwd "/" and serve may be
+		// started from anywhere, so "."-relative trees list the wrong
+		// directory (the whole filesystem on desktop).
+		root = h.workDir
+	}
+	if root == "" {
 		root = "."
 	}
+	// Resolve relative roots against the anchored workDir so they are stable
+	// regardless of the process CWD, and confine an explicit ?path= to the
+	// workDir so the endpoint cannot be used to list arbitrary directories.
+	if !filepath.IsAbs(root) && h.workDir != "" {
+		root = filepath.Join(h.workDir, root)
+	}
+	if r.URL.Query().Get("path") != "" {
+		if h.workDir == "" {
+			writeError(w, http.StatusBadRequest, "server has no working directory configured; explicit path not allowed")
+			return
+		}
+		if !containedIn(root, h.workDir) {
+			writeError(w, http.StatusBadRequest, "path outside working directory")
+			return
+		}
+	}
 
-	node, err := buildFileTree(root, 0)
+	// Depth cap for the returned tree. The default (4) preserves the
+	// historical behavior of listing files nested up to four levels; depth=0
+	// returns the full tree (the file picker needs every file, not just the
+	// shallow ones).
+	maxDepth := 4
+	if raw := r.URL.Query().Get("depth"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			maxDepth = n
+		}
+	}
+
+	base, err := filepath.Abs(root)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	node, err := buildFileTree(base, base, 0, maxDepth)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -38,11 +78,45 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, node.Children)
 }
 
+// containedIn reports whether path p (an absolute path) is inside dir, after
+// resolving symlinks so a symlink inside dir cannot reach outside it. Mirrors
+// the containment check in HandleSaveFileContent.
+func containedIn(p, dir string) bool {
+	absP, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	realP, err := filepath.EvalSymlinks(absP)
+	if err != nil {
+		return false
+	}
+	realDir, err := filepath.EvalSymlinks(absDir)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(realDir, realP)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
+	}
+
+	// Resolve relative paths (as returned by the file tree) against the
+	// anchored workDir so they stay correct when the process CWD differs
+	// from the project root (e.g. a Finder-launched desktop .app).
+	if !filepath.IsAbs(path) && h.workDir != "" {
+		path = filepath.Join(h.workDir, path)
 	}
 
 	data, err := os.ReadFile(path)
@@ -127,23 +201,31 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-func buildFileTree(root string, depth int) (FileNode, error) {
-	info, err := os.Stat(root)
+// buildFileTree walks the directory tree rooted at cur and returns a FileNode
+// whose Path values are relative to base (the resolved root), so the frontend
+// contract stays the same whether the root is "." or an absolute path.
+// maxDepth caps how deep the walk descends; maxDepth == 0 means unlimited.
+func buildFileTree(base, cur string, depth, maxDepth int) (FileNode, error) {
+	info, err := os.Stat(cur)
 	if err != nil {
 		return FileNode{}, err
 	}
 
+	rel, err := filepath.Rel(base, cur)
+	if err != nil {
+		rel = cur
+	}
 	node := FileNode{
 		Name:  info.Name(),
-		Path:  root,
+		Path:  rel,
 		IsDir: info.IsDir(),
 	}
 
-	if !info.IsDir() || depth > 3 {
+	if !info.IsDir() || (maxDepth > 0 && depth >= maxDepth) {
 		return node, nil
 	}
 
-	entries, err := os.ReadDir(root)
+	entries, err := os.ReadDir(cur)
 	if err != nil {
 		return node, nil
 	}
@@ -159,7 +241,7 @@ func buildFileTree(root string, depth int) (FileNode, error) {
 		if strings.HasPrefix(e.Name(), ".") || e.Name() == "node_modules" {
 			continue
 		}
-		child, err := buildFileTree(filepath.Join(root, e.Name()), depth+1)
+		child, err := buildFileTree(base, filepath.Join(cur, e.Name()), depth+1, maxDepth)
 		if err != nil {
 			continue
 		}

@@ -100,6 +100,7 @@ export interface ChatState {
 export type ChatAction =
   | { type: "ADD_MESSAGE"; sessionId: string; message: Message }
   | { type: "SET_MESSAGES"; sessionId: string; messages: Message[] }
+  | { type: "MARK_INITIALIZED"; sessionId: string }
   | { type: "SET_MODEL"; model: string }
   | { type: "SET_SMALL_MODEL"; model: string }
   | { type: "SET_SMALL_MODEL_ENABLED"; enabled: boolean }
@@ -116,7 +117,7 @@ export type ChatAction =
   | { type: "LIVE_TOOL_RESULT"; sessionId: string; output: string }
   | { type: "LIVE_RESET"; sessionId: string }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
-  | { type: "PERMISSION_RESOLVED"; sessionId: string }
+  | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
   | { type: "QUESTION_REQUEST"; sessionId: string; question: QuestionRequest }
   | { type: "QUESTION_RESOLVED"; sessionId: string }
   | { type: "PREPEND_MESSAGES"; sessionId: string; messages: Message[]; total: number }
@@ -165,11 +166,24 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       }));
     case "SET_MESSAGES":
       // Authoritative snapshot lands at a turn boundary — commit it and clear
-      // the live buffer it supersedes.
+      // the live buffer it supersedes. It also marks the slice initialized:
+      // the mirror's snapshot is authoritative history, so a tab whose slice
+      // was populated by the mirror must not keep its "loading" spinner
+      // waiting on a history fetch that is now redundant.
       return updateSession(state, action.sessionId, (s) => ({
         ...s,
         messages: action.messages,
         live: [],
+        initialized: true,
+      }));
+    case "MARK_INITIALIZED":
+      // Marks a slice as initialized without replacing its content — used when
+      // the mirror already populated the slice (messages/live) before the
+      // initial history fetch resolved, so the fetch result is not allowed to
+      // clobber newer live state but the tab spinner still clears.
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        initialized: true,
       }));
     case "SET_MODEL":
       return { ...state, model: action.model };
@@ -242,7 +256,19 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         pendingPermission: action.permission,
       }));
     case "PERMISSION_RESOLVED":
-      return updateSession(state, action.sessionId, (s) => ({ ...s, pendingPermission: null }));
+      return updateSession(state, action.sessionId, (s) => {
+        // Only clear pendingPermission if the requestId matches (or if none specified for backward compat).
+        // This prevents a permission_resolved for one request from closing the dialog for a different
+        // (newer) permission ask that arrived during the same Step().
+        if (
+          action.requestId &&
+          s.pendingPermission &&
+          s.pendingPermission.request_id !== action.requestId
+        ) {
+          return s;
+        }
+        return { ...s, pendingPermission: null };
+      });
     case "QUESTION_REQUEST":
       return updateSession(state, action.sessionId, (s) => ({
         ...s,

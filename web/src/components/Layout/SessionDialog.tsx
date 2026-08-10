@@ -108,6 +108,12 @@ export default function SessionDialog() {
                     key={session.id}
                     onClick={() => handleSessionClick(session.id, session.title)}
                     disabled={loading}
+                    onMouseDown={(e) => {
+                      if (e.button === 1 && open) {
+                        e.preventDefault(); // suppress middle-click autoscroll
+                        handleCloseTab(e, session.id);
+                      }
+                    }}
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left text-sm transition-colors ${
                       current
                         ? "bg-accent text-accent-foreground"
