@@ -868,3 +868,33 @@ func (h *Handler) HandleSetEditorConfig(w http.ResponseWriter, r *http.Request) 
 		"editor": req.Editor, "editor_mode": req.EditorMode, "ide_mode": req.IDEMode,
 	})
 }
+
+// HandleGetImageGenConfig reports the image-generation settings.
+func (h *Handler) HandleGetImageGenConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.ImageGenConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.ImageGen
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleSetImageGenConfig persists the image-generation settings.
+func (h *Handler) HandleSetImageGenConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.ImageGenConfig
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveImageGenConfig(req); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.ImageGen = req
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}

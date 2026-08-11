@@ -194,3 +194,22 @@ func TestHandleSetEditorConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetImageGenConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"enabled":true,"provider":"gemini","model":"gemini-3-pro-image","output_path":"/tmp/img","timeout":120}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/imagegen", strings.NewReader(body))
+	h.HandleSetImageGenConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.ImageGen
+	h.mu.Unlock()
+	if !got.Enabled || got.Provider != "gemini" || got.Model != "gemini-3-pro-image" || got.Timeout != 120 {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}
