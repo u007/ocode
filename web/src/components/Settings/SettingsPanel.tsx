@@ -14,6 +14,7 @@ import PathsForm from "./PathsForm";
 import FeaturesForm from "./FeaturesForm";
 import LimitsForm from "./LimitsForm";
 import ImageGenForm from "./ImageGenForm";
+import OcodePluginsForm from "./OcodePluginsForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -103,6 +104,8 @@ function renderGroup(id: SettingsGroupId) {
       return <LimitsForm />;
     case "imagegen":
       return <ImageGenForm />;
+    case "plugins":
+      return <OcodePluginsForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
