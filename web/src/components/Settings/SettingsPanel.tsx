@@ -1,4 +1,6 @@
 import { useState } from "react";
+import ModelDefaultsForm from "./ModelDefaultsForm";
+import CommitMsgForm from "./CommitMsgForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -58,6 +60,10 @@ const OPENCODE_GROUPS: GroupDef[] = [
 // so each task's diff is a localized one-case addition.
 function renderGroup(id: SettingsGroupId) {
   switch (id) {
+    case "model-defaults":
+      return <ModelDefaultsForm />;
+    case "commit-msg":
+      return <CommitMsgForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
