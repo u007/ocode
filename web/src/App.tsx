@@ -22,6 +22,7 @@ import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import TopTabs from "./components/Layout/TopTabs";
+import SettingsPanel from "./components/Settings/SettingsPanel";
 import EditorTabBar from "./components/Layout/EditorTabBar";
 import ProjectSidebar from "./components/Layout/ProjectSidebar";
 import SessionDialog from "./components/Layout/SessionDialog";
@@ -106,7 +107,7 @@ function HomeApp() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<
-    "files" | "git" | "cron" | "assets" | "sessions"
+    "files" | "git" | "cron" | "assets" | "sessions" | "settings"
   >("sessions");
   const {
     editorTabs,
@@ -378,6 +379,9 @@ function HomeApp() {
               </TabsContent>
               <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0">
                 <AssetsPanel />
+              </TabsContent>
+              <TabsContent value="settings" forceMount className="flex-1 overflow-hidden m-0">
+                <SettingsPanel />
               </TabsContent>
 
               <TabsContent value="sessions" forceMount className="flex-1 overflow-hidden m-0">
