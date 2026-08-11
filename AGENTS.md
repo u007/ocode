@@ -573,6 +573,45 @@ tools array every turn and bust the whole cached prefix.
   multi-step pipeline is wanted later, that belongs in
   `internal/orchestrator`, built on this.
 
+## Web/Desktop Server: `Handler.mu` is a map lock, never a work lock
+
+`internal/server.Handler.mu` guards the `h.agents` map (and a few small config
+fields) and is taken by **every** endpoint — the session list, the run-state
+polls behind the desktop dock badge, the config routes, the permission and
+question resolvers. Holding it across slow work therefore does not slow one
+session down, it freezes all of them: the recurring "a session is stuck and
+won't run while another session is running" bug class.
+
+Rules for anything in `internal/server`:
+
+- **Never hold `h.mu` across an LLM call, a `Step`, a compaction, a recap, or
+  agent construction.** Agent construction is slow in ways that are easy to
+  miss: `tool.InitBuiltinTools` and `LoadExternalTools` touch the filesystem
+  and can spawn plugin processes, `agent.NewAgent` may auto-start a local model
+  server, and `mcpCache.wait()` blocks until the process-wide MCP enumeration
+  finishes (unbounded — an unreachable MCP server makes it slow). Build outside
+  the lock with `buildAgentSession`, then insert with `registerAgentSession`,
+  which double-checks the map and shuts down the loser of a construction race.
+  `ensureAgentSession` / `getOrCreateAgentSession` wrap both; use them.
+- **Per-turn work belongs under `agentSession.mu`.** That serializes turns
+  within one session and leaves different sessions fully parallel.
+- **Lock order is `agentSession.mu` → `h.mu`, never the reverse.** A turn holds
+  the session lock and then takes `h.mu` (via the title generator), so taking a
+  session lock while holding `h.mu` deadlocks. To scan sessions for a pending
+  ask, snapshot the candidates under `h.mu`, release it, then inspect each
+  candidate under its own lock — that is what `findPendingSession` does. Reading
+  `as.messages` under `h.mu` alone is a data race against a running turn.
+- **Do not pin an HTTP connection for the length of a turn.** A browser allows
+  only six concurrent connections per origin over HTTP/1.1 (the server is plain
+  HTTP, so there is no h2 multiplexing), and the SPA already spends some on the
+  session mirror and the agent-run stream. A request held open per running turn
+  starves the other sessions' requests — the same "stuck session" symptom with a
+  client-side cause. `POST /api/chat` and `POST /api/sessions/{id}/message`
+  therefore take `"async": true` (the web client always sets it) and reply `202`
+  once the turn is dispatched; output reaches the browser over the SSE mirror,
+  which is the UI's rendering source anyway. The synchronous path stays for
+  non-browser callers (scheduler, Telegram, external API clients).
+
 ## Data Storage
 All persistent state lives under a single cross-platform global directory
 resolved by `internal/paths.GlobalDataDir()`:

@@ -10,7 +10,6 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
-	"github.com/u007/ocode/internal/tool"
 )
 
 type SSEEvent struct {
@@ -77,13 +76,8 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.mu.Lock()
-
 	// If we have an RC bridge, forward to the TUI's agent instead of using our own.
-	if h.rc != nil {
-		rc := h.rc
-		h.mu.Unlock()
-
+	if rc := h.RCBridge(); rc != nil {
 		// Send session info
 		sendSSE(w, flusher, "session", map[string]string{"session_id": rc.SessionID})
 
@@ -151,10 +145,7 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var as *agentSession
-	if sessionID != "" {
-		as = h.agents[sessionID]
-	}
+	as := h.lookupAgentSession(sessionID)
 
 	if as == nil {
 		if sessionID == "" {
@@ -162,38 +153,18 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var messages []agent.Message
-		if sessionID != "" {
-			s, err := session.Load(sessionID)
-			if err == nil {
-				messages = s.Messages
-			}
+		if s, err := session.Load(sessionID); err == nil {
+			messages = s.Messages
 		}
 
-		client := agent.NewClient(h.cfg, model)
-		if client == nil {
-			h.mu.Unlock()
-			writeError(w, http.StatusInternalServerError, "failed to create LLM client")
+		// Built with no handler lock held — see agent_session.go.
+		var err error
+		as, err = h.ensureAgentSession(sessionID, model, messages)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-
-		lspMgr := h.sharedLSPManager()
-		tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
-		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-		ag.LoadExternalTools(h.cfg)
-		mcpTools, mcpErrs := h.mcpCache.wait()
-		ag.AddMCPTools(mcpTools)
-		ag.AddMCPErrors(mcpErrs)
-		ag.SetAdvisorEnabled(h.advisorEnabled)
-
-		as = &agentSession{
-			agent:    ag,
-			messages: messages,
-			model:    model,
-		}
-		h.agents[sessionID] = as
 	}
-
-	h.mu.Unlock()
 
 	as.mu.Lock()
 	defer as.mu.Unlock()

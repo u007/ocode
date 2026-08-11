@@ -95,10 +95,7 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.mu.Lock()
-	rc := h.rc
-	if rc != nil {
-		h.mu.Unlock()
+	if rc := h.RCBridge(); rc != nil {
 		// A TUI session is bridged: the TUI owns the agent, so forward the
 		// decision to its RC bridge instead of resolving on the server.
 		decision := "allow"
@@ -117,37 +114,15 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	}
 
 	// Locate the session whose pending permission ask matches request_id. Prefer
-	// the explicit session_id; otherwise scan (tool-call IDs are unique).
-	var as *agentSession
-	var sessID string
-	if req.SessionID != "" {
-		if cand, ok := h.agents[req.SessionID]; ok && tailIsPermissionAsk(cand.messages) &&
-			cand.messages[len(cand.messages)-1].ToolID == req.RequestID {
-			as, sessID = cand, req.SessionID
-		}
-	} else {
-		for id, cand := range h.agents {
-			if tailIsPermissionAsk(cand.messages) && cand.messages[len(cand.messages)-1].ToolID == req.RequestID {
-				as, sessID = cand, id
-				break
-			}
-		}
-	}
-	h.mu.Unlock()
-
+	// the explicit session_id; otherwise scan (tool-call IDs are unique). The
+	// session comes back with its lock held, so the tail cannot be resolved out
+	// from under us by a racing request.
+	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, tailIsPermissionAsk)
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending permission found for request_id")
 		return
 	}
-
-	as.mu.Lock()
 	defer as.mu.Unlock()
-
-	// Re-check under the session lock: another resolver may have raced in.
-	if !tailIsPermissionAsk(as.messages) || as.messages[len(as.messages)-1].ToolID != req.RequestID {
-		writeError(w, http.StatusConflict, "permission already resolved or superseded")
-		return
-	}
 
 	last := &as.messages[len(as.messages)-1]
 	permReq, ok := parsePermissionAsk(last.Content)
