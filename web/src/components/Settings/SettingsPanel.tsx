@@ -9,6 +9,9 @@ import TerminalForm from "./TerminalForm";
 import OcrForm from "./OcrForm";
 import DiscoveryForm from "./DiscoveryForm";
 import TUIForm from "./TUIForm";
+import EditorModeForm from "./EditorModeForm";
+import PathsForm from "./PathsForm";
+import FeaturesForm from "./FeaturesForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -88,6 +91,12 @@ function renderGroup(id: SettingsGroupId) {
       return <DiscoveryForm />;
     case "tui":
       return <TUIForm />;
+    case "editor":
+      return <EditorModeForm />;
+    case "paths":
+      return <PathsForm />;
+    case "features":
+      return <FeaturesForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
