@@ -68,3 +68,22 @@ func TestHandleSetRecapConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetCommitMsgConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"commit_msg_model":"claude-sonnet-5","commit_msg_prompt":"Write a concise commit message."}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/commit-msg", strings.NewReader(body))
+	h.HandleSetCommitMsgConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode
+	h.mu.Unlock()
+	if got.CommitMsgModel != "claude-sonnet-5" || got.CommitMsgPrompt != "Write a concise commit message." {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}

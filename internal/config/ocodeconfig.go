@@ -1987,3 +1987,12 @@ func ResolveEditor(cfg *OcodeConfig) string {
 	}
 	return "vi"
 }
+
+// SaveOcodeCommitMsgConfig persists the commit-message generation model and prompt.
+func SaveOcodeCommitMsgConfig(model, prompt string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.CommitMsgModel = model
+		cfg.CommitMsgPrompt = prompt
+		return nil
+	})
+}

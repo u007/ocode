@@ -636,3 +636,44 @@ func (h *Handler) HandleSetRecapConfig(w http.ResponseWriter, r *http.Request) {
 		"recap_timeout_seconds": req.RecapTimeoutSeconds,
 	})
 }
+
+// HandleGetCommitMsgConfig reports the commit-message generation model and prompt.
+func (h *Handler) HandleGetCommitMsgConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	model, prompt := "", ""
+	if h.cfg != nil {
+		model = h.cfg.Ocode.CommitMsgModel
+		prompt = h.cfg.Ocode.CommitMsgPrompt
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"commit_msg_model":  model,
+		"commit_msg_prompt": prompt,
+	})
+}
+
+// HandleSetCommitMsgConfig persists the commit-message generation model and prompt.
+func (h *Handler) HandleSetCommitMsgConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		CommitMsgModel  string `json:"commit_msg_model"`
+		CommitMsgPrompt string `json:"commit_msg_prompt"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodeCommitMsgConfig(req.CommitMsgModel, req.CommitMsgPrompt); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.CommitMsgModel = req.CommitMsgModel
+		h.cfg.Ocode.CommitMsgPrompt = req.CommitMsgPrompt
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"commit_msg_model":  req.CommitMsgModel,
+		"commit_msg_prompt": req.CommitMsgPrompt,
+	})
+}
