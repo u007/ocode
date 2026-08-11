@@ -939,3 +939,54 @@ func (h *Handler) HandleSetPathsConfig(w http.ResponseWriter, r *http.Request) {
 		"upload_dir":          req.UploadDir,
 	})
 }
+
+// HandleGetLimitsConfig reports the execution limits.
+func (h *Handler) HandleGetLimitsConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	maxSteps, maxImageDim, maxConcurrent, undoMaxAgeDelta := 0, 0, 0, 10
+	if h.cfg != nil {
+		maxSteps = h.cfg.Ocode.MaxSteps
+		maxImageDim = h.cfg.Ocode.MaxImageDim
+		maxConcurrent = h.cfg.Ocode.MaxConcurrentAgents
+		undoMaxAgeDelta = h.cfg.Ocode.UndoMaxAgeDelta
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"max_steps":            maxSteps,
+		"image_max_dim":        maxImageDim,
+		"max_concurrent_agents": maxConcurrent,
+		"undo_max_age_delta":   undoMaxAgeDelta,
+	})
+}
+
+// HandleSetLimitsConfig persists the execution limits.
+func (h *Handler) HandleSetLimitsConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MaxSteps           int `json:"max_steps"`
+		ImageMaxDim        int `json:"image_max_dim"`
+		MaxConcurrentAgents int `json:"max_concurrent_agents"`
+		UndoMaxAgeDelta    int `json:"undo_max_age_delta"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodeLimits(req.MaxSteps, req.ImageMaxDim, req.MaxConcurrentAgents, req.UndoMaxAgeDelta); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.MaxSteps = req.MaxSteps
+		h.cfg.Ocode.MaxImageDim = req.ImageMaxDim
+		h.cfg.Ocode.MaxConcurrentAgents = req.MaxConcurrentAgents
+		h.cfg.Ocode.UndoMaxAgeDelta = req.UndoMaxAgeDelta
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"max_steps":             req.MaxSteps,
+		"image_max_dim":         req.ImageMaxDim,
+		"max_concurrent_agents": req.MaxConcurrentAgents,
+		"undo_max_age_delta":    req.UndoMaxAgeDelta,
+	})
+}

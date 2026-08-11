@@ -232,3 +232,27 @@ func TestHandleSetPathsConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetLimitsConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	// Note: the on-wire key is image_max_dim (the struct JSON tag), not
+	// max_image_dim — struct tags are the source of truth (plan constraint #19).
+	body := `{"max_steps":150,"image_max_dim":2500,"max_concurrent_agents":4,"undo_max_age_delta":8}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/limits", strings.NewReader(body))
+	h.HandleSetLimitsConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode
+	h.mu.Unlock()
+	if got.MaxSteps != 150 || got.MaxImageDim != 2500 || got.MaxConcurrentAgents != 4 {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+	if got.UndoMaxAgeDelta != 8 {
+		t.Errorf("undo_max_age_delta not updated: %d", got.UndoMaxAgeDelta)
+	}
+}

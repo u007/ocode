@@ -2054,3 +2054,16 @@ func SaveOcodePathsConfig(extraAllowedPaths []string, uploadDir string) error {
 		return nil
 	})
 }
+
+// SaveOcodeLimits persists the execution limits in one atomic lock-held write.
+// It does not replace SaveMaxSteps/SaveMaxConcurrentAgents, which remain for
+// the TUI commands that use them.
+func SaveOcodeLimits(maxSteps, maxImageDim, maxConcurrentAgents, undoMaxAgeDelta int) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.MaxSteps = maxSteps
+		c.MaxImageDim = maxImageDim
+		c.MaxConcurrentAgents = maxConcurrentAgents
+		c.UndoMaxAgeDelta = undoMaxAgeDelta
+		return nil
+	})
+}
