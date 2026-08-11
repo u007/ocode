@@ -7,6 +7,7 @@ import PermissionsForm from "./PermissionsForm";
 import SecurityForm from "./SecurityForm";
 import TerminalForm from "./TerminalForm";
 import OcrForm from "./OcrForm";
+import DiscoveryForm from "./DiscoveryForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -82,6 +83,8 @@ function renderGroup(id: SettingsGroupId) {
       return <TerminalForm />;
     case "ocr":
       return <OcrForm />;
+    case "discovery":
+      return <DiscoveryForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
