@@ -5,6 +5,8 @@ import CompactForm from "./CompactForm";
 import AdvisorForm from "./AdvisorForm";
 import PermissionsForm from "./PermissionsForm";
 import SecurityForm from "./SecurityForm";
+import TerminalForm from "./TerminalForm";
+import OcrForm from "./OcrForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -76,6 +78,10 @@ function renderGroup(id: SettingsGroupId) {
       return <PermissionsForm />;
     case "security":
       return <SecurityForm />;
+    case "terminal":
+      return <TerminalForm />;
+    case "ocr":
+      return <OcrForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
