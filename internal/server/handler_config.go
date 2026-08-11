@@ -469,16 +469,35 @@ func (h *Handler) HandleGetMaskConfig(w http.ResponseWriter, r *http.Request) {
 	enabled := false
 	mode := "lenient"
 	model := ""
+	baseURL := ""
+	failMode := ""
+	allowRemoteTier2 := false
+	var skipLLMIfClean *bool
+	customWords := []string{}
 	if h.cfg != nil {
-		enabled = h.cfg.Ocode.Security.Redaction.Enabled
-		mode = config.ResolveRedactionMode(h.cfg.Ocode.Security.Redaction)
-		model = h.cfg.Ocode.Security.Redaction.Model
+		rc := h.cfg.Ocode.Security.Redaction
+		enabled = rc.Enabled
+		mode = config.ResolveRedactionMode(rc)
+		model = rc.Model
+		baseURL = rc.BaseURL
+		failMode = rc.FailMode
+		allowRemoteTier2 = rc.AllowRemoteTier2
+		skipLLMIfClean = rc.SkipLLMIfClean
+		customWords = rc.CustomWords
 	}
 	h.mu.Unlock()
+	if customWords == nil {
+		customWords = []string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"enabled": enabled,
-		"mode":    mode,
-		"model":   model,
+		"enabled":            enabled,
+		"mode":               mode,
+		"model":              model,
+		"base_url":           baseURL,
+		"fail_mode":          failMode,
+		"allow_remote_tier2": allowRemoteTier2,
+		"skip_llm_if_clean":  skipLLMIfClean,
+		"custom_words":       customWords,
 	})
 }
 
@@ -1134,4 +1153,58 @@ func (h *Handler) HandleSetLocalModelsConfig(w http.ResponseWriter, r *http.Requ
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, req)
+}
+
+// HandleSetMaskAdvanced persists the advanced redaction fields
+// (base_url, fail_mode, allow_remote_tier2, custom_words). The deprecated
+// skip_llm_if_clean flag is intentionally not writable here; it is derived
+// from Mode via ResolveRedactionMode.
+func (h *Handler) HandleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		BaseURL          string   `json:"base_url"`
+		FailMode         string   `json:"fail_mode"`
+		AllowRemoteTier2 bool     `json:"allow_remote_tier2"`
+		CustomWords      []string `json:"custom_words"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.FailMode != "" && req.FailMode != "block" && req.FailMode != "warn" {
+		writeError(w, http.StatusBadRequest, "fail_mode must be \"block\" or \"warn\"")
+		return
+	}
+
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
+	if err := config.SaveSecurityRedaction(func(rc *config.RedactionConfig) {
+		rc.BaseURL = req.BaseURL
+		if req.FailMode != "" {
+			rc.FailMode = req.FailMode
+		}
+		rc.AllowRemoteTier2 = req.AllowRemoteTier2
+		rc.CustomWords = req.CustomWords
+	}); err != nil {
+		h.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.cfg.Ocode.Security.Redaction.BaseURL = req.BaseURL
+	if req.FailMode != "" {
+		h.cfg.Ocode.Security.Redaction.FailMode = req.FailMode
+	}
+	h.cfg.Ocode.Security.Redaction.AllowRemoteTier2 = req.AllowRemoteTier2
+	h.cfg.Ocode.Security.Redaction.CustomWords = req.CustomWords
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"base_url":           req.BaseURL,
+		"fail_mode":          req.FailMode,
+		"allow_remote_tier2": req.AllowRemoteTier2,
+		"custom_words":       req.CustomWords,
+	})
 }

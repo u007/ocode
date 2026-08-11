@@ -207,6 +207,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/mask/enabled", s.authMiddleware(s.handleSetMaskEnabled))
 	s.mux.HandleFunc("PUT /api/config/mask/mode", s.authMiddleware(s.handleSetMaskMode))
 	s.mux.HandleFunc("PUT /api/config/mask/model", s.authMiddleware(s.handleSetMaskModel))
+	s.mux.HandleFunc("PUT /api/config/mask/advanced", s.authMiddleware(s.handleSetMaskAdvanced))
 	s.mux.HandleFunc("GET /api/config/agents", s.authMiddleware(s.handleListAgents))
 	s.mux.HandleFunc("PUT /api/config/agent", s.authMiddleware(s.handleSetAgent))
 
@@ -819,6 +820,9 @@ func (s *Server) handleSetMaskMode(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetMaskModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetMaskModel(w, r)
+}
+func (s *Server) handleSetMaskAdvanced(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetMaskAdvanced(w, r)
 }
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListAgents(w, r)

@@ -364,3 +364,68 @@ func TestHandleSetAdvisorSetsProviderClaudeCode(t *testing.T) {
 		t.Errorf("checkpoints not updated: %+v", got.Checkpoints)
 	}
 }
+
+func TestHandleGetMaskConfigIncludesAdvancedFields(t *testing.T) {
+	h := testConfigHandler(t)
+	h.mu.Lock()
+	h.cfg.Ocode.Security.Redaction = config.RedactionConfig{
+		Enabled: true, Model: "m", BaseURL: "http://localhost:11434", FailMode: "block",
+		AllowRemoteTier2: true, CustomWords: []string{"secret1"},
+	}
+	h.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/config/mask", nil)
+	h.HandleGetMaskConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp struct {
+		BaseURL          string   `json:"base_url"`
+		FailMode         string   `json:"fail_mode"`
+		AllowRemoteTier2 bool     `json:"allow_remote_tier2"`
+		CustomWords      []string `json:"custom_words"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.BaseURL != "http://localhost:11434" || resp.FailMode != "block" ||
+		!resp.AllowRemoteTier2 || len(resp.CustomWords) != 1 || resp.CustomWords[0] != "secret1" {
+		t.Errorf("advanced fields missing from GET response: %+v", resp)
+	}
+}
+
+func TestHandleSetMaskAdvancedPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"base_url":"http://localhost:11434","fail_mode":"warn","allow_remote_tier2":true,` +
+		`"custom_words":["acme","secret1"]}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/mask/advanced", strings.NewReader(body))
+	h.HandleSetMaskAdvanced(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Security.Redaction
+	h.mu.Unlock()
+	if got.BaseURL != "http://localhost:11434" || got.FailMode != "warn" ||
+		!got.AllowRemoteTier2 || len(got.CustomWords) != 2 {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}
+
+func TestHandleSetMaskAdvancedRejectsBadFailMode(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"fail_mode":"explode"}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/mask/advanced", strings.NewReader(body))
+	h.HandleSetMaskAdvanced(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", w.Code, w.Body.String())
+	}
+}
