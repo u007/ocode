@@ -314,3 +314,53 @@ func TestHandleSetLocalModelsConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetAdvisorPreservesUnsetFields(t *testing.T) {
+	h := testConfigHandler(t)
+	h.mu.Lock()
+	h.cfg.Ocode.Advisor = config.AdvisorConfig{
+		Model: "old-model", Provider: "anthropic", ClaudeCode: true, Checkpoints: []string{"done"},
+	}
+	h.mu.Unlock()
+
+	// Only model is sent — provider/claude_code/checkpoints must be preserved.
+	body := `{"model":"new-model"}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/advisor", strings.NewReader(body))
+	h.HandleSetAdvisor(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Advisor
+	h.mu.Unlock()
+	if got.Model != "new-model" {
+		t.Errorf("Model = %q, want new-model", got.Model)
+	}
+	if got.Provider != "anthropic" || !got.ClaudeCode || len(got.Checkpoints) != 1 {
+		t.Errorf("unset fields were cleared: %+v", got)
+	}
+}
+
+func TestHandleSetAdvisorSetsProviderClaudeCode(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"provider":"claude-code","model":"claude-sonnet-4-6","checkpoints":["plan","done"]}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/advisor", strings.NewReader(body))
+	h.HandleSetAdvisor(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Advisor
+	h.mu.Unlock()
+	if got.Provider != "claude-code" || !got.ClaudeCode || got.Model != "claude-sonnet-4-6" {
+		t.Errorf("advisor not updated: %+v", got)
+	}
+	if len(got.Checkpoints) != 2 {
+		t.Errorf("checkpoints not updated: %+v", got.Checkpoints)
+	}
+}

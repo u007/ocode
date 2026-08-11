@@ -159,37 +159,81 @@ func (h *Handler) HandleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) HandleGetAdvisor(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	model := ""
+	cfg := config.AdvisorConfig{}
 	if h.cfg != nil {
-		model = h.cfg.Ocode.Advisor.Model
+		cfg = h.cfg.Ocode.Advisor
 	}
 	h.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]string{"model": model})
+	if cfg.Checkpoints == nil {
+		cfg.Checkpoints = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":     cfg.Enabled,
+		"provider":    cfg.Provider,
+		"model":       cfg.Model,
+		"claude_code": cfg.ClaudeCode,
+		"checkpoints": cfg.Checkpoints,
+	})
 }
 
 func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Model string `json:"model"`
+		Provider    *string  `json:"provider"`
+		Model       string   `json:"model"`
+		ClaudeCode  *bool    `json:"claude_code"`
+		Checkpoints []string `json:"checkpoints"`
 	}
-	if err := readBodyJSON(r, &req); err != nil || req.Model == "" {
-		writeError(w, http.StatusBadRequest, "model is required")
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Model == "" && req.Provider == nil && req.ClaudeCode == nil && req.Checkpoints == nil {
+		writeError(w, http.StatusBadRequest, "no advisor fields provided")
 		return
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	if h.cfg == nil {
+		h.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, "config not loaded")
 		return
 	}
-	if err := config.SaveAdvisorModel(req.Model); err != nil {
+	// Merge onto the current block so a partial PUT (e.g. web's
+	// {"model":"..."} only) cannot clear the other fields.
+	cur := h.cfg.Ocode.Advisor
+	if req.Provider != nil {
+		cur.Provider = *req.Provider
+		// Provider change also toggles the Claude Code backend by convention.
+		cur.ClaudeCode = (*req.Provider == "claude-code")
+	}
+	if req.Model != "" {
+		cur.Model = req.Model
+	}
+	if req.ClaudeCode != nil {
+		cur.ClaudeCode = *req.ClaudeCode
+	}
+	if req.Checkpoints != nil {
+		cur.Checkpoints = req.Checkpoints
+	}
+	if err := config.SaveOcodeAdvisorConfig(cur); err != nil {
+		h.mu.Unlock()
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	h.cfg.Ocode.Advisor.Model = req.Model
+	h.cfg.Ocode.Advisor = cur
 	h.pushStatusSnapshot()
-	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
+	h.mu.Unlock()
+
+	if cur.Checkpoints == nil {
+		cur.Checkpoints = []string{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":     cur.Enabled,
+		"provider":    cur.Provider,
+		"model":       cur.Model,
+		"claude_code": cur.ClaudeCode,
+		"checkpoints": cur.Checkpoints,
+	})
 }
 
 // HandleGetAdvisorEnabled reports whether the advisor tool is currently exposed.

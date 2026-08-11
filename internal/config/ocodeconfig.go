@@ -2092,3 +2092,13 @@ func SaveOcodeLocalModels(models map[string]LocalModelConfig) error {
 		return nil
 	})
 }
+
+// SaveOcodeAdvisorConfig persists the whole advisor block (provider, model,
+// claude_code, checkpoints). Callers that only want to change the model
+// should keep using SaveAdvisorModel; this replaces the entire block.
+func SaveOcodeAdvisorConfig(cfg AdvisorConfig) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Advisor = cfg
+		return nil
+	})
+}
