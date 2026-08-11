@@ -201,6 +201,20 @@ function HomeApp() {
       .catch(console.error);
   }, [dispatch]);
 
+  // Desktop-only: the native "Settings…" menu item emits this event to
+  // switch the shared webview to the Settings tab. No-op in the browser
+  // (the Wails-injected global is undefined there). Note: with the current
+  // Wails v3 runtime the SPA is served from the ocode HTTP server and never
+  // loads /wails/runtime.js, so `wails.Events` is absent and this listener
+  // never fires — the Settings tab remains reachable via TopTabs (see
+  // cmd/ocode-desktop/main.go buildAppMenu).
+  useEffect(() => {
+    const wailsEvents = (window as unknown as { wails?: { Events?: { On?: (name: string, cb: () => void) => () => void } } }).wails?.Events;
+    if (!wailsEvents?.On) return;
+    const unsubscribe = wailsEvents.On("ocode:open-settings", () => setActiveView("settings"));
+    return () => unsubscribe?.();
+  }, []);
+
   const [filePickerOpen, setFilePickerOpen] = useState(false);
 
   useKeyboard({

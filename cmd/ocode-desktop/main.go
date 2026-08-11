@@ -216,6 +216,17 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow) *appl
 		appMenu := menu.AddSubmenu("ocode")
 		appMenu.AddRole(application.About)
 		appMenu.AddSeparator()
+		appMenu.Add("Settings…").
+			SetAccelerator("CmdOrCtrl+,").
+			OnClick(func(*application.Context) {
+				// The webview loads the ocode SPA from an external URL and never
+				// loads /wails/runtime.js, so window._wails.dispatchWailsEvent is
+				// absent and this emit is a no-op today (ExecJS queues forever).
+				// Kept so the native menu item exists and the wiring is correct
+				// for a future Wails version/runtime that can reach the page.
+				window.EmitEvent("ocode:open-settings", nil)
+			})
+		appMenu.AddSeparator()
 		appMenu.AddRole(application.ServicesMenu)
 		appMenu.AddSeparator()
 		appMenu.AddRole(application.Hide)
@@ -228,8 +239,16 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow) *appl
 				confirmQuit(app, window)
 			})
 	} else {
-		// Windows/Linux: Quit lives in the File menu.
+		// Windows/Linux: Settings + Quit live in the File menu.
 		fileMenu := menu.AddSubmenu("File")
+		fileMenu.Add("Settings…").
+			SetAccelerator("CmdOrCtrl+,").
+			OnClick(func(*application.Context) {
+				// See the darwin branch comment: no-op until the Wails runtime
+				// reaches the page, but keeps the menu item and wiring correct.
+				window.EmitEvent("ocode:open-settings", nil)
+			})
+		fileMenu.AddSeparator()
 		fileMenu.Add("Quit ocode").
 			SetAccelerator("CmdOrCtrl+q").
 			OnClick(func(*application.Context) {
