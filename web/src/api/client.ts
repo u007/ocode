@@ -33,6 +33,57 @@ import type {
   SyncLoginPollResponse,
 } from "./types";
 
+export interface CompactConfig {
+  enabled: boolean;
+  summary_provider: string;
+  summary_model: string;
+  token_threshold: number;
+  keep_recent_turns: number;
+  keep_recent_tokens: number;
+  min_messages: number;
+  summary_timeout_seconds: number;
+  summary_max_retries: number;
+  max_summary_input_tokens: number;
+}
+
+export interface AutoPermissionConfig {
+  enabled?: boolean;
+  allow_destructive?: boolean;
+  prompt?: string;
+  max_context_bytes?: number;
+  max_context_sources?: number;
+  max_context_lines_per_source?: number;
+  min_confidence?: number;
+  grants?: unknown[];
+}
+
+export interface DiscoveryConfig {
+  enabled: boolean;
+  embedding_model: string;
+  embedding_backend: string;
+  local_model_status: string;
+  local_server_url: string;
+  pinned_skills: string[];
+  ignore_paths: string[];
+}
+
+export interface TUISettings {
+  theme: string;
+  mouse: boolean | null;
+  scroll_speed: number;
+  keybinds: Record<string, string>;
+  leader_timeout: number;
+  branchless: boolean;
+}
+
+export interface ImageGenConfig {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  output_path?: string;
+  timeout?: number;
+}
+
 // Base path for API calls. When the SPA is served under a tailscale --set-path
 // prefix (e.g. /<sessionID>), API calls must include the prefix or the tailscale
 // proxy routes them to whichever session owns the root path. The /rc command
@@ -133,6 +184,110 @@ export const api = {
     fetchJSON<{ model: string; enabled: boolean; source: string }>("/api/config/small-model", {
       method: "PUT",
       body: JSON.stringify({ enabled }),
+    }),
+
+  // --- New/extended OcodeConfig endpoints (Plan 1: configuration-api-backend) ---
+
+  getRecapConfig: () =>
+    fetchJSON<{ recap_model: string; recap_model_enabled: boolean; recap_timeout_seconds: number }>(
+      "/api/config/ocode/recap",
+    ),
+  setRecapConfig: (recap_model: string, recap_model_enabled: boolean, recap_timeout_seconds: number) =>
+    fetchJSON<{ recap_model: string; recap_model_enabled: boolean; recap_timeout_seconds: number }>(
+      "/api/config/ocode/recap",
+      { method: "PUT", body: JSON.stringify({ recap_model, recap_model_enabled, recap_timeout_seconds }) },
+    ),
+
+  getCommitMsgConfig: () =>
+    fetchJSON<{ commit_msg_model: string; commit_msg_prompt: string }>("/api/config/ocode/commit-msg"),
+  setCommitMsgConfig: (commit_msg_model: string, commit_msg_prompt: string) =>
+    fetchJSON<{ commit_msg_model: string; commit_msg_prompt: string }>("/api/config/ocode/commit-msg", {
+      method: "PUT",
+      body: JSON.stringify({ commit_msg_model, commit_msg_prompt }),
+    }),
+
+  getCompactConfig: () => fetchJSON<CompactConfig>("/api/config/ocode/compact"),
+  setCompactConfig: (cfg: CompactConfig) =>
+    fetchJSON<CompactConfig>("/api/config/ocode/compact", { method: "PUT", body: JSON.stringify(cfg) }),
+
+  getAdvisorFull: () =>
+    fetchJSON<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>(
+      "/api/config/advisor",
+    ),
+  setAdvisorFull: (fields: Partial<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>) =>
+    fetchJSON<{ model: string; provider: string; claude_code: boolean; checkpoints: string[] }>(
+      "/api/config/advisor",
+      { method: "PUT", body: JSON.stringify(fields) },
+    ),
+
+  getAutoPermissionConfig: () => fetchJSON<AutoPermissionConfig>("/api/config/ocode/permissions-auto"),
+  setAutoPermissionConfig: (cfg: AutoPermissionConfig) =>
+    fetchJSON<AutoPermissionConfig>("/api/config/ocode/permissions-auto", {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+
+  getMaskAdvanced: () =>
+    fetchJSON<{
+      enabled: boolean; mode: string; model: string; base_url: string; fail_mode: string;
+      allow_remote_tier2: boolean; custom_words: string[];
+    }>("/api/config/mask"),
+  setMaskAdvanced: (fields: { base_url: string; fail_mode: string; allow_remote_tier2: boolean; custom_words: string[] }) =>
+    fetchJSON<typeof fields>("/api/config/mask/advanced", { method: "PUT", body: JSON.stringify(fields) }),
+
+  getDiscoveryConfig: () => fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery"),
+  setDiscoveryConfig: (cfg: DiscoveryConfig) =>
+    fetchJSON<DiscoveryConfig>("/api/config/ocode/discovery", { method: "PUT", body: JSON.stringify(cfg) }),
+
+  getTUISettings: () => fetchJSON<TUISettings>("/api/config/ocode/tui"),
+  setTUISettings: (cfg: TUISettings) =>
+    fetchJSON<TUISettings>("/api/config/ocode/tui", { method: "PUT", body: JSON.stringify(cfg) }),
+
+  getEditorConfig: () =>
+    fetchJSON<{ editor: string; editor_mode: string; ide_mode: string }>("/api/config/ocode/editor"),
+  setEditorConfig: (editor: string, editor_mode: string, ide_mode: string) =>
+    fetchJSON<{ editor: string; editor_mode: string; ide_mode: string }>("/api/config/ocode/editor", {
+      method: "PUT",
+      body: JSON.stringify({ editor, editor_mode, ide_mode }),
+    }),
+
+  getImageGenConfig: () => fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen"),
+  setImageGenConfig: (cfg: ImageGenConfig) =>
+    fetchJSON<ImageGenConfig>("/api/config/ocode/imagegen", { method: "PUT", body: JSON.stringify(cfg) }),
+
+  getPathsConfig: () =>
+    fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>("/api/config/ocode/paths"),
+  setPathsConfig: (extra_allowed_paths: string[], upload_dir: string) =>
+    fetchJSON<{ extra_allowed_paths: string[]; upload_dir: string }>("/api/config/ocode/paths", {
+      method: "PUT",
+      body: JSON.stringify({ extra_allowed_paths, upload_dir }),
+    }),
+
+  getLimitsConfig: () =>
+    fetchJSON<{ max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }>(
+      "/api/config/ocode/limits",
+    ),
+  setLimitsConfig: (fields: { max_steps: number; image_max_dim: number; max_concurrent_agents: number; undo_max_age_delta: number }) =>
+    fetchJSON<typeof fields>("/api/config/ocode/limits", { method: "PUT", body: JSON.stringify(fields) }),
+
+  getFeaturesConfig: () =>
+    fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>("/api/config/ocode/features"),
+  setFeaturesConfig: (memory_enabled: boolean, doc_prompt_enabled: boolean) =>
+    fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>("/api/config/ocode/features", {
+      method: "PUT",
+      body: JSON.stringify({ memory_enabled, doc_prompt_enabled }),
+    }),
+
+  getPluginsEnabledConfig: () => fetchJSON<{ ast: boolean }>("/api/config/ocode/plugins-enabled"),
+  setPluginsEnabledConfig: (ast: boolean) =>
+    fetchJSON<{ ast: boolean }>("/api/config/ocode/plugins-enabled", { method: "PUT", body: JSON.stringify({ ast }) }),
+
+  getLocalModelsConfig: () =>
+    fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>("/api/config/ocode/local-models"),
+  setLocalModelsConfig: (models: Record<string, { enabled: boolean; max_parallel: number }>) =>
+    fetchJSON<Record<string, { enabled: boolean; max_parallel: number }>>("/api/config/ocode/local-models", {
+      method: "PUT",
+      body: JSON.stringify(models),
     }),
   getGitDiff: (path?: string) =>
     fetchJSON<GitDiffFile[]>(
