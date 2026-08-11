@@ -2004,3 +2004,18 @@ func SaveOcodeCompactConfig(cfg CompactConfig) error {
 		return nil
 	})
 }
+
+// SaveOcodeAutoPermissionConfig persists the auto-approval block, preserving
+// Model (owned exclusively by the /permissions model setter) from whatever
+// is currently on disk.
+func SaveOcodeAutoPermissionConfig(cfg AutoPermissionConfig) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		preservedModel := ""
+		if c.Permissions.Auto != nil {
+			preservedModel = c.Permissions.Auto.Model
+		}
+		cfg.Model = preservedModel
+		c.Permissions.Auto = &cfg
+		return nil
+	})
+}

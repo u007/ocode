@@ -108,3 +108,30 @@ func TestHandleSetCompactConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetAutoPermissionConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+	h.mu.Lock()
+	h.cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Model: "existing-model"}
+	h.mu.Unlock()
+
+	body := `{"enabled":true,"allow_destructive":false,"prompt":"custom prompt",` +
+		`"max_context_bytes":4096,"max_context_sources":3,"max_context_lines_per_source":50,` +
+		`"min_confidence":0.9,"grants":[]}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/permissions-auto", strings.NewReader(body))
+	h.HandleSetAutoPermissionConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Permissions.Auto
+	h.mu.Unlock()
+	if got == nil || !got.Enabled || got.MaxContextBytes != 4096 {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+	if got.Model != "existing-model" {
+		t.Errorf("Model must be preserved, got %q", got.Model)
+	}
+}

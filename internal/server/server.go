@@ -168,6 +168,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/commit-msg", s.authMiddleware(s.handleSetCommitMsgConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/compact", s.authMiddleware(s.handleGetCompactConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/compact", s.authMiddleware(s.handleSetCompactConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/permissions-auto", s.authMiddleware(s.handleGetAutoPermissionConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/permissions-auto", s.authMiddleware(s.handleSetAutoPermissionConfig))
 	// Interactive pty terminal (always enabled). The browser cannot set an
 	// Authorization header on a WebSocket, so this relies on
 	// authMiddleware's ?token= support.
@@ -693,6 +695,12 @@ func (s *Server) handleGetCompactConfig(w http.ResponseWriter, r *http.Request) 
 }
 func (s *Server) handleSetCompactConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetCompactConfig(w, r)
+}
+func (s *Server) handleGetAutoPermissionConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetAutoPermissionConfig(w, r)
+}
+func (s *Server) handleSetAutoPermissionConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetAutoPermissionConfig(w, r)
 }
 func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleTerminalWS(w, r)

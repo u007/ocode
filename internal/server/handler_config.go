@@ -707,3 +707,40 @@ func (h *Handler) HandleSetCompactConfig(w http.ResponseWriter, r *http.Request)
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, req)
 }
+
+// HandleGetAutoPermissionConfig reports the LLM auto-approval block.
+func (h *Handler) HandleGetAutoPermissionConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.AutoPermissionConfig{}
+	if h.cfg != nil && h.cfg.Ocode.Permissions.Auto != nil {
+		cfg = *h.cfg.Ocode.Permissions.Auto
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleSetAutoPermissionConfig persists the auto-approval block. The Model
+// field is owned exclusively by the /permissions model setter, so it is
+// preserved from the current config rather than taken from the request.
+func (h *Handler) HandleSetAutoPermissionConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.AutoPermissionConfig
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodeAutoPermissionConfig(req); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	preservedModel := ""
+	if h.cfg != nil {
+		if h.cfg.Ocode.Permissions.Auto != nil {
+			preservedModel = h.cfg.Ocode.Permissions.Auto.Model
+		}
+		req.Model = preservedModel
+		h.cfg.Ocode.Permissions.Auto = &req
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}
