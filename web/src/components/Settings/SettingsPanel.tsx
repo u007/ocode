@@ -12,6 +12,7 @@ import TUIForm from "./TUIForm";
 import EditorModeForm from "./EditorModeForm";
 import PathsForm from "./PathsForm";
 import FeaturesForm from "./FeaturesForm";
+import LimitsForm from "./LimitsForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -97,6 +98,8 @@ function renderGroup(id: SettingsGroupId) {
       return <PathsForm />;
     case "features":
       return <FeaturesForm />;
+    case "limits":
+      return <LimitsForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
