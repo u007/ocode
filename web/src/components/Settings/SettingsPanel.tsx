@@ -4,6 +4,7 @@ import CommitMsgForm from "./CommitMsgForm";
 import CompactForm from "./CompactForm";
 import AdvisorForm from "./AdvisorForm";
 import PermissionsForm from "./PermissionsForm";
+import SecurityForm from "./SecurityForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -73,6 +74,8 @@ function renderGroup(id: SettingsGroupId) {
       return <AdvisorForm />;
     case "permissions":
       return <PermissionsForm />;
+    case "security":
+      return <SecurityForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
