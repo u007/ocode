@@ -8,6 +8,7 @@ import SecurityForm from "./SecurityForm";
 import TerminalForm from "./TerminalForm";
 import OcrForm from "./OcrForm";
 import DiscoveryForm from "./DiscoveryForm";
+import TUIForm from "./TUIForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -85,6 +86,8 @@ function renderGroup(id: SettingsGroupId) {
       return <OcrForm />;
     case "discovery":
       return <DiscoveryForm />;
+    case "tui":
+      return <TUIForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
