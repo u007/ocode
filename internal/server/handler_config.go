@@ -525,11 +525,12 @@ func (h *Handler) HandleSetAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"name": spec.Name, "description": spec.Description})
 }
 
-// HandleGetTerminalEnabled reports whether the interactive pty terminal is
-// enabled for the server's single configured workdir.
-func (h *Handler) HandleGetTerminalEnabled(w http.ResponseWriter, r *http.Request) {
+// HandleGetTerminalConfig reports the interactive pty terminal's availability
+// and scrollback setting for the server's single configured workdir. The
+// terminal itself is always enabled; "available" reflects whether the server
+// can safely expose it (authentication configured or loopback bind).
+func (h *Handler) HandleGetTerminalConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	enabled := h.cfg != nil && h.cfg.Ocode.TerminalEnabled
 	scrollback := config.DefaultTerminalScrollbackLines
 	workDir := h.workDir
 	available := h.terminalAuthConfigured || h.terminalLoopback
@@ -538,67 +539,47 @@ func (h *Handler) HandleGetTerminalEnabled(w http.ResponseWriter, r *http.Reques
 	}
 	h.mu.Unlock()
 	if !available {
-		enabled = false
 		workDir = ""
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":          enabled,
 		"available":        available,
 		"scrollback_lines": scrollback,
 		"work_dir":         workDir,
 	})
 }
 
-// HandleSetTerminalEnabled flips the interactive-terminal gate and persists it
-// to config. Default is on; an explicit `terminal_enabled: false` turns it
-// off. Enabling exposes a real shell in the project root to anyone who can
-// reach the web UI.
-func (h *Handler) HandleSetTerminalEnabled(w http.ResponseWriter, r *http.Request) {
+// HandleSetTerminalConfig persists the terminal's scrollback setting. There is
+// no enable/disable toggle: the interactive terminal is always enabled.
+func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Enabled         *bool `json:"enabled"`
-		ScrollbackLines *int  `json:"scrollback_lines"`
+		ScrollbackLines *int `json:"scrollback_lines"`
 	}
-	if err := readBodyJSON(r, &req); err != nil || (req.Enabled == nil && req.ScrollbackLines == nil) {
-		writeError(w, http.StatusBadRequest, "enabled or scrollback_lines is required")
+	if err := readBodyJSON(r, &req); err != nil || req.ScrollbackLines == nil {
+		writeError(w, http.StatusBadRequest, "scrollback_lines is required")
 		return
 	}
 
-	h.mu.Lock()
-	available := h.terminalAuthConfigured || h.terminalLoopback
-	h.mu.Unlock()
-	if req.Enabled != nil && *req.Enabled && !available {
-		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
-		return
-	}
-
-	if err := config.SaveTerminalConfig(req.Enabled, req.ScrollbackLines); err != nil {
+	if err := config.SaveTerminalScrollbackLines(*req.ScrollbackLines); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
 		return
 	}
 
 	h.mu.Lock()
 	if h.cfg != nil {
-		if req.Enabled != nil {
-			h.cfg.Ocode.TerminalEnabled = *req.Enabled
-		}
-		if req.ScrollbackLines != nil {
-			h.cfg.Ocode.TerminalScrollbackLines = config.NormalizeTerminalScrollbackLines(*req.ScrollbackLines)
-		}
+		h.cfg.Ocode.TerminalScrollbackLines = config.NormalizeTerminalScrollbackLines(*req.ScrollbackLines)
 	}
-	enabled := h.cfg != nil && h.cfg.Ocode.TerminalEnabled
 	scrollback := config.DefaultTerminalScrollbackLines
 	workDir := h.workDir
+	available := h.terminalAuthConfigured || h.terminalLoopback
 	if h.cfg != nil {
 		scrollback = config.NormalizeTerminalScrollbackLines(h.cfg.Ocode.TerminalScrollbackLines)
 	}
 	h.mu.Unlock()
 
 	if !available {
-		enabled = false
 		workDir = ""
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"enabled":          enabled,
 		"available":        available,
 		"scrollback_lines": scrollback,
 		"work_dir":         workDir,

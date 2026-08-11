@@ -160,11 +160,11 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
 	s.mux.HandleFunc("GET /api/config/small-model", s.authMiddleware(s.handleGetSmallModel))
 	s.mux.HandleFunc("PUT /api/config/small-model", s.authMiddleware(s.handleSetSmallModel))
-	s.mux.HandleFunc("GET /api/config/terminal", s.authMiddleware(s.handleGetTerminalEnabled))
-	s.mux.HandleFunc("PUT /api/config/terminal", s.authMiddleware(s.handleSetTerminalEnabled))
-	// Interactive pty terminal (gated on config.Ocode.TerminalEnabled). The
-	// browser cannot set an Authorization header on a WebSocket, so this
-	// relies on authMiddleware's ?token= support.
+	s.mux.HandleFunc("GET /api/config/terminal", s.authMiddleware(s.handleGetTerminalConfig))
+	s.mux.HandleFunc("PUT /api/config/terminal", s.authMiddleware(s.handleSetTerminalConfig))
+	// Interactive pty terminal (always enabled). The browser cannot set an
+	// Authorization header on a WebSocket, so this relies on
+	// authMiddleware's ?token= support.
 	s.mux.HandleFunc("GET /api/terminal/ws", s.authMiddleware(s.handleTerminalWS))
 	s.mux.HandleFunc("GET /api/config/advisor", s.authMiddleware(s.handleGetAdvisor))
 	s.mux.HandleFunc("PUT /api/config/advisor", s.authMiddleware(s.handleSetAdvisor))
@@ -664,11 +664,11 @@ func (s *Server) handleGetSmallModel(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetSmallModel(w, r)
 }
-func (s *Server) handleGetTerminalEnabled(w http.ResponseWriter, r *http.Request) {
-	s.handler.HandleGetTerminalEnabled(w, r)
+func (s *Server) handleGetTerminalConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetTerminalConfig(w, r)
 }
-func (s *Server) handleSetTerminalEnabled(w http.ResponseWriter, r *http.Request) {
-	s.handler.HandleSetTerminalEnabled(w, r)
+func (s *Server) handleSetTerminalConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetTerminalConfig(w, r)
 }
 func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleTerminalWS(w, r)

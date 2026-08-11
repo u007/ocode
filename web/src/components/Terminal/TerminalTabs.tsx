@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import TerminalPanel from "./TerminalPanel";
-import { useTerminalEnabled } from "@/hooks/useTerminalEnabled";
+import { useTerminalConfig } from "@/hooks/useTerminalConfig";
 
 interface TerminalInstance {
   id: string;
@@ -26,7 +26,7 @@ function newTerminal(): TerminalInstance {
  * sub-tab panels, and has no reason to live in the global project store.
  */
 export default function TerminalTabs({ active, projectPath }: { active: boolean; projectPath: string }) {
-  const { enabled, loading, error, scrollbackLines } = useTerminalEnabled(projectPath);
+  const { available, loading, error, scrollbackLines } = useTerminalConfig(projectPath);
   const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   // This panel is force-mounted for every session tab (matching LogPanel's
@@ -42,10 +42,10 @@ export default function TerminalTabs({ active, projectPath }: { active: boolean;
   };
 
   useEffect(() => {
-    if (!active || !enabled || autoOpened.current) return;
+    if (!active || !available || autoOpened.current) return;
     autoOpened.current = true;
     openTerminal();
-  }, [active, enabled]);
+  }, [active, available]);
 
   const closeTerminal = (id: string) => {
     setTerminals((prev) => {
@@ -57,7 +57,7 @@ export default function TerminalTabs({ active, projectPath }: { active: boolean;
     });
   };
 
-  if (loading || (enabled && scrollbackLines <= 0)) {
+  if (loading || (available && scrollbackLines <= 0)) {
     return <div className="p-4 text-sm text-zinc-500">Checking terminal availability…</div>;
   }
 
@@ -65,11 +65,12 @@ export default function TerminalTabs({ active, projectPath }: { active: boolean;
     return <div className="p-4 text-sm text-red-400">Failed to read terminal setting: {error}</div>;
   }
 
-  if (!enabled) {
+  if (!available) {
     return (
       <div className="p-4 text-sm text-zinc-400">
-        The interactive terminal is disabled for this project. Enable{" "}
-        <span className="font-mono text-zinc-200">Terminal</span> in the sidebar settings to use it.
+        The interactive terminal is unavailable on this server: it requires server
+        authentication or a loopback bind address, and the selected project must match
+        the server&apos;s working directory.
       </div>
     );
   }

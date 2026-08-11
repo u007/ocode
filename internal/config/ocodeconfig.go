@@ -146,12 +146,6 @@ type OcodeConfig struct {
 	// prompt into the agent's system prompt so it reads existing docs before
 	// implementing and updates them afterward.
 	DocPromptEnabled bool
-	// TerminalEnabled gates the interactive pty-backed terminal exposed over
-	// /api/terminal/ws and its web UI sub-tab. Default true (on by default); an
-	// explicit `terminal_enabled: false` in ocodeconfig.json disables it. The
-	// terminal hands the browser a real shell in the project root, so keep it
-	// off on any host where the web UI is reachable by untrusted parties.
-	TerminalEnabled bool
 	// TerminalScrollbackLines controls how many lines xterm.js retains for the
 	// interactive terminal. Values are normalized to the supported range when
 	// config is loaded; zero means use DefaultTerminalScrollbackLines.
@@ -371,7 +365,6 @@ type ocodeConfigFile struct {
 	Discovery               discoveryConfigFile         `json:"discovery"`
 	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
-	TerminalEnabled         *bool                       `json:"terminal_enabled,omitempty"`
 	TerminalScrollbackLines *int                        `json:"terminal_scrollback_lines,omitempty"`
 	ExtraAllowedPaths       []string                    `json:"extra_allowed_paths,omitempty"`
 	Editor                  string                      `json:"editor,omitempty"`
@@ -433,13 +426,10 @@ func defaultSecurityConfig() SecurityConfig {
 
 func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
-		Compact:       defaultCompactConfig(),
-		Advisor:       defaultAdvisorConfig(),
-		Permissions:   defaultPermissionConfig(),
-		MemoryEnabled: true,
-		// Interactive pty terminal: on by default (explicit
-		// `terminal_enabled: false` in config disables it).
-		TerminalEnabled:         true,
+		Compact:                 defaultCompactConfig(),
+		Advisor:                 defaultAdvisorConfig(),
+		Permissions:             defaultPermissionConfig(),
+		MemoryEnabled:           true,
 		SmallModelEnabled:       true,
 		RecapModelEnabled:       false,
 		Security:                defaultSecurityConfig(),
@@ -828,13 +818,6 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.MemoryEnabled = *file.MemoryEnabled
 		}
 		delete(raw, "memory_enabled")
-	}
-
-	if _, ok := raw["terminal_enabled"]; ok {
-		if file.TerminalEnabled != nil {
-			cfg.TerminalEnabled = *file.TerminalEnabled
-		}
-		delete(raw, "terminal_enabled")
 	}
 
 	if _, ok := raw["terminal_scrollback_lines"]; ok {
@@ -1292,7 +1275,6 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	payload["memory_enabled"] = cfg.MemoryEnabled
 	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
-	payload["terminal_enabled"] = cfg.TerminalEnabled
 	payload["terminal_scrollback_lines"] = NormalizeTerminalScrollbackLines(cfg.TerminalScrollbackLines)
 	if cfg.MaxSteps > 0 {
 		payload["max_steps"] = cfg.MaxSteps
@@ -1315,7 +1297,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_scrollback_lines" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" {
 			continue
 		}
 		payload[k] = v
@@ -1763,27 +1745,11 @@ func SaveAdvisorEnabled(enabled bool) error {
 	})
 }
 
-// SaveTerminalEnabled persists the interactive-terminal toggle to config.
-func SaveTerminalEnabled(enabled bool) error {
-	return SaveTerminalConfig(&enabled, nil)
-}
-
 // SaveTerminalScrollbackLines persists the interactive terminal's scrollback
 // limit using the same locked read-modify-write path as other config setters.
 func SaveTerminalScrollbackLines(lines int) error {
-	return SaveTerminalConfig(nil, &lines)
-}
-
-// SaveTerminalConfig persists the terminal settings in one locked
-// read-modify-write operation so a combined API update cannot partially apply.
-func SaveTerminalConfig(enabled *bool, scrollbackLines *int) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
-		if enabled != nil {
-			cfg.TerminalEnabled = *enabled
-		}
-		if scrollbackLines != nil {
-			cfg.TerminalScrollbackLines = NormalizeTerminalScrollbackLines(*scrollbackLines)
-		}
+		cfg.TerminalScrollbackLines = NormalizeTerminalScrollbackLines(lines)
 		return nil
 	})
 }

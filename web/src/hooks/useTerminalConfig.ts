@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "@/api/client";
 
 export interface TerminalConfig {
-  enabled: boolean;
   available?: boolean;
   scrollback_lines?: number;
   work_dir?: string;
@@ -19,11 +18,6 @@ function publish(value: TerminalConfig) {
   for (const fn of listeners) fn(value);
 }
 
-/** Push a locally-known enabled value to every terminal-config subscriber. */
-export function setTerminalEnabledCache(value: boolean) {
-  publish({ ...(cached ?? { enabled: false }), enabled: value });
-}
-
 function sameProject(projectPath: string | undefined, serverWorkDir: string | undefined) {
   // Older/headless test responses did not include work_dir. The server now
   // always sends it, but treating an absent value as unknown preserves the
@@ -33,12 +27,11 @@ function sameProject(projectPath: string | undefined, serverWorkDir: string | un
 
 function viewFor(config: TerminalConfig | null, projectPath: string | undefined) {
   if (!config) {
-    return { enabled: false, available: false, loading: true, scrollbackLines: 0, scopeMatches: false };
+    return { available: false, loading: true, scrollbackLines: 0, scopeMatches: false };
   }
   const scopeMatches = sameProject(projectPath, config.work_dir);
   const available = config.available !== false && scopeMatches;
   return {
-    enabled: config.enabled && available,
     available,
     loading: false,
     scrollbackLines: config.scrollback_lines ?? 0,
@@ -46,7 +39,14 @@ function viewFor(config: TerminalConfig | null, projectPath: string | undefined)
   };
 }
 
-export function useTerminalEnabled(projectPath?: string) {
+/**
+ * Terminal availability + scrollback for the server's single workdir. The
+ * terminal itself is always enabled — there is no enable/disable switch —
+ * so this only reports whether the server can safely expose it (authentication
+ * configured or loopback bind) and whether the selected project matches the
+ * server's workdir.
+ */
+export function useTerminalConfig(projectPath?: string) {
   const [config, setConfig] = useState<TerminalConfig | null>(cached);
   const [error, setError] = useState<string | null>(null);
   const view = viewFor(config, projectPath);
@@ -63,7 +63,7 @@ export function useTerminalEnabled(projectPath?: string) {
   useEffect(() => {
     if (cached !== null) return;
     let cancelled = false;
-    const req = inFlight ?? (inFlight = api.getTerminalEnabled());
+    const req = inFlight ?? (inFlight = api.getTerminalConfig());
     req
       .then((next) => {
         inFlight = null;
@@ -80,27 +80,12 @@ export function useTerminalEnabled(projectPath?: string) {
     };
   }, []);
 
-  const setTerminalEnabled = useCallback(
-    (next: boolean) => {
-      if (!config || !view.scopeMatches || config.available === false) return;
-      const previous = config;
-      publish({ ...config, enabled: next });
-      api.setTerminalEnabled(next).catch((err) => {
-        console.error("failed to toggle terminal", err);
-        publish(previous);
-      });
-    },
-    [config, view.scopeMatches],
-  );
-
   return {
-    enabled: view.enabled,
     available: view.available,
     scopeMatches: view.scopeMatches,
     loading: view.loading,
     error,
     scrollbackLines: view.scrollbackLines,
     serverWorkDir: config?.work_dir ?? "",
-    setTerminalEnabled,
   };
 }

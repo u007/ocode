@@ -196,18 +196,13 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
   // Interactive pty terminal configuration for the server's single workdir.
-  getTerminalEnabled: () =>
+  // The terminal itself is always enabled; these are availability/scrollback.
+  getTerminalConfig: () =>
     fetchJSON<{
-      enabled: boolean;
       available?: boolean;
       scrollback_lines: number;
       work_dir: string;
     }>("/api/config/terminal"),
-  setTerminalEnabled: (enabled: boolean) =>
-    fetchJSON<{ enabled: boolean }>("/api/config/terminal", {
-      method: "PUT",
-      body: JSON.stringify({ enabled }),
-    }),
   setTerminalScrollbackLines: (scrollback_lines: number) =>
     fetchJSON<{ scrollback_lines: number }>("/api/config/terminal", {
       method: "PUT",

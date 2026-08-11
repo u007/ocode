@@ -4,7 +4,6 @@ import { useChatState, useChatDispatch, getSessionSlice } from "../../stores/cha
 import { useProjectState } from "../../stores/projectStore";
 import type { AgentInfo, LSPStatus, MCPStatus } from "../../api/types";
 import { applyThemeColors } from "../../hooks/useTheme";
-import { useTerminalEnabled } from "../../hooks/useTerminalEnabled";
 import PluginsPanel from "./PluginsPanel";
 import {
   Bot,
@@ -70,10 +69,6 @@ export default function CoworkSidebar({
     git: true,
   });
   const projectState = useProjectState();
-  // The server hosts one project root. Keep the toggle scoped to that root so
-  // a project selected in the SPA cannot appear to control another directory.
-  const { enabled: terminalEnabled, scopeMatches: terminalScopeMatches, setTerminalEnabled } =
-    useTerminalEnabled(projectState.state.activeProject?.path);
   const [gitBranch, setGitBranch] = useState<string>("");
   const [mcpServers, setMcpServers] = useState<MCPStatus[]>([]);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
@@ -485,40 +480,6 @@ export default function CoworkSidebar({
                     <span
                       className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
                         ocrEnabled ? "translate-x-3.5" : "translate-x-0.5"
-                      }`}
-                    />
-                  </span>
-                </span>
-              </button>
-              {/* Interactive terminal on/off — persisted for the server's
-                  configured workdir. */}
-              <div className="mt-1 mb-1 border-t border-zinc-700/50" />
-              <button
-                type="button"
-                onClick={() => setTerminalEnabled(!terminalEnabled)}
-                disabled={!terminalScopeMatches}
-                className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
-                title={
-                  terminalScopeMatches
-                    ? "Enable or disable the interactive terminal sub-tab"
-                    : "Terminal is configured for the server's project root"
-                }
-              >
-                <span className="text-zinc-500">Terminal</span>
-                <span className="flex items-center gap-2">
-                  <span
-                    className={`font-mono ${terminalEnabled ? "text-emerald-400" : "text-zinc-500"}`}
-                  >
-                    {terminalEnabled ? "on" : "off"}
-                  </span>
-                  <span
-                    className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
-                      terminalEnabled ? "bg-emerald-500/80" : "bg-zinc-600"
-                    }`}
-                  >
-                    <span
-                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                        terminalEnabled ? "translate-x-3.5" : "translate-x-0.5"
                       }`}
                     />
                   </span>

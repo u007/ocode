@@ -101,7 +101,6 @@ func (h *Handler) releaseTerminalSession() {
 // message. Server -> client frames are always binary pty output.
 func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	enabled := h.cfg != nil && h.cfg.Ocode.TerminalEnabled
 	workDir := h.workDir
 	available := h.terminalAuthConfigured || h.terminalLoopback
 	h.mu.Unlock()
@@ -110,10 +109,6 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	// of an opaque websocket failure.
 	if !available {
 		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
-		return
-	}
-	if !enabled {
-		writeError(w, http.StatusForbidden, "terminal is disabled; enable it in settings")
 		return
 	}
 	if !h.reserveTerminalSession() {

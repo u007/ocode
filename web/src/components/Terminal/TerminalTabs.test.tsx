@@ -25,8 +25,8 @@ vi.mock("@xterm/addon-fit", () => ({
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@/api/client", () => ({
   api: {
-    getTerminalEnabled: () =>
-      Promise.resolve({ enabled: true, available: true, scrollback_lines: 9999, work_dir: "/project" }),
+    getTerminalConfig: () =>
+      Promise.resolve({ available: true, scrollback_lines: 9999, work_dir: "/project" }),
   },
   apiPath: (p: string) => p,
   authToken: () => "tok",

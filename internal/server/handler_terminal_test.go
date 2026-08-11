@@ -10,20 +10,15 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-
-	"github.com/u007/ocode/internal/config"
 )
 
 // terminalTestServer returns an httptest server serving only the terminal ws
 // endpoint, plus its ws:// URL. The direct handler is explicitly configured as
 // loopback-safe so these tests exercise the pty bridge without a Server route.
-func terminalTestServer(t *testing.T, enabled bool) (*httptest.Server, string) {
+func terminalTestServer(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
 	h := NewHandler()
-	h.mu.Lock()
-	h.cfg = &config.Config{Ocode: config.OcodeConfig{TerminalEnabled: enabled}}
 	h.workDir = t.TempDir()
-	h.mu.Unlock()
 	h.SetTerminalAccessPolicy(false, true)
 
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleTerminalWS))
@@ -31,29 +26,9 @@ func terminalTestServer(t *testing.T, enabled bool) (*httptest.Server, string) {
 	return srv, "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
-func TestTerminalWSRejectedWhenDisabled(t *testing.T) {
-	_, wsURL := terminalTestServer(t, false)
-
-	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err == nil {
-		conn.Close()
-		t.Fatal("expected dial to fail when terminal is disabled")
-	}
-	if resp == nil {
-		t.Fatalf("expected an HTTP response, got dial error: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
-	}
-}
-
 func TestTerminalWSRejectsWhenSessionLimitIsReached(t *testing.T) {
 	h := NewHandler()
-	h.mu.Lock()
-	h.cfg = &config.Config{Ocode: config.OcodeConfig{TerminalEnabled: true}}
 	h.workDir = t.TempDir()
-	h.mu.Unlock()
 	h.SetTerminalAccessPolicy(false, true)
 	for i := 0; i < terminalMaxSessions; i++ {
 		if !h.reserveTerminalSession() {
@@ -75,7 +50,7 @@ func TestTerminalWSRejectsWhenSessionLimitIsReached(t *testing.T) {
 
 func TestTerminalWSReadLimit(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
-	_, wsURL := terminalTestServer(t, true)
+	_, wsURL := terminalTestServer(t)
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial failed: %v", err)
@@ -97,7 +72,7 @@ func TestTerminalWSReadLimit(t *testing.T) {
 // site must not be able to drive a shell from a logged-in user's browser.
 func TestTerminalWSRejectsCrossOrigin(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
-	_, wsURL := terminalTestServer(t, true)
+	_, wsURL := terminalTestServer(t)
 
 	hdr := http.Header{}
 	hdr.Set("Origin", "http://evil.example.com")
@@ -118,7 +93,7 @@ func TestTerminalWSRejectsCrossOrigin(t *testing.T) {
 // A same-origin Origin header (what the SPA actually sends) is accepted.
 func TestTerminalWSAcceptsSameOrigin(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
-	srv, wsURL := terminalTestServer(t, true)
+	srv, wsURL := terminalTestServer(t)
 
 	hdr := http.Header{}
 	hdr.Set("Origin", srv.URL)
@@ -134,7 +109,7 @@ func TestTerminalWSAcceptsSameOrigin(t *testing.T) {
 
 func TestTerminalWSEchoesShellOutput(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
-	_, wsURL := terminalTestServer(t, true)
+	_, wsURL := terminalTestServer(t)
 
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
@@ -178,7 +153,7 @@ func TestTerminalWSEchoesShellOutput(t *testing.T) {
 // promptly rather than leaving the read loop blocked forever.
 func TestTerminalWSClientCloseDoesNotHang(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
-	srv, wsURL := terminalTestServer(t, true)
+	srv, wsURL := terminalTestServer(t)
 
 	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {

@@ -86,10 +86,10 @@ Configure via `apiKeys` in config or provider-specific env vars:
 
 **Global override:** Set `OPENCODE_AUTH_TOKEN` to use a single token for all providers, bypassing per-provider configuration. Useful for CI/CD or proxy setups.
 
-### Per-Project Config & the Terminal Toggle
+### Per-Project Config & the Terminal
 
 - Config is resolved **per project**: the server/desktop shell anchors a working directory on boot and reloads that project's `opencode.json` (`config.SetWorkDir`), so provider overrides/API keys come from the served project — never assume `os.Getwd()` (a Finder-launched `.app` starts at `/`).
-- `terminal_enabled` (default **on**): enables the interactive pty-backed terminal — `GET /api/terminal/ws` (WebSocket) and the **Terminal** sub-tab in the web UI. Set `"terminal_enabled": false` in `ocodeconfig.json` to disable it. The server serves one fixed project workdir; the UI only exposes Terminal when the selected project matches that workdir. An unauthenticated server may expose the terminal only on loopback; configure server credentials before binding it to a non-loopback address. `terminal_scrollback_lines` defaults to **9999** and is clamped to 100–100000.
+- **Interactive terminal (always enabled)**: the pty-backed terminal — `GET /api/terminal/ws` (WebSocket) and the **Terminal** sub-tab in the web UI — is unconditionally on; there is no `terminal_enabled` config and no way to disable it. The server serves one fixed project workdir; the UI only exposes the terminal when the selected project matches that workdir. Because the terminal hands the browser a real shell, an unauthenticated server may expose it only on a loopback bind; configure server credentials before binding it to a non-loopback address. `terminal_scrollback_lines` defaults to **9999** and is clamped to 100–100000.
 - **Bundled skills go stale**: the bundled skills (`ocode-tui`, `ocode-desktop`, `ocode-usage`, …) are snapshotted into the binary at build time. After upgrading ocode, run `ocode skills upgrade` to refresh your installed copies; until then the docs may describe features your binary lacks.
 
 ---
@@ -191,7 +191,7 @@ ocode serve --tailscale
 - **Agents tab** — run list with full-screen detail view per agent run (also available as a per-session sub-tab)
 - **Mobile sidebar** — Overlay with backdrop on viewports < 768px
 - **Web shell** — `!` prefix in chat input runs local shell commands
-- **Interactive terminal** *(unreleased, working tree)* — pty-backed terminal sub-tab (`GET /api/terminal/ws`, WebSocket) gated by `terminal_enabled`; unlike `POST /api/shell` it's a persistent interactive shell, one pty per connection, with an eight-session cap and 32 KiB inbound frame limit
+- **Interactive terminal** *(unreleased, working tree)* — pty-backed terminal sub-tab (`GET /api/terminal/ws`, WebSocket), always enabled (no `terminal_enabled` config); unlike `POST /api/shell` it's a persistent interactive shell, one pty per connection, with an eight-session cap and 32 KiB inbound frame limit
 - **Live status panel** — Real-time model, context, LSP, spending, modified files; status bar shows live agent **activity** (LLM running, active tools, active sub-agents)
 - **File uploads** — Drag-and-drop uploads; directory set via `/upload` command
 
@@ -200,12 +200,12 @@ ocode serve --tailscale
 - `POST /api/chat` — Send message
 - `GET /api/chat/stream` — Stream response (SSE)
 - `POST /api/shell` — Run a local shell command (used by `!` prefix)
-- `GET /api/terminal/ws` — Interactive pty terminal WebSocket *(unreleased, working tree)*; gated on `terminal_enabled`, same-origin-only upgrade, auth via `?token=` when credentials are configured, and loopback-only when they are not
+- `GET /api/terminal/ws` — Interactive pty terminal WebSocket *(unreleased, working tree)*; always enabled, same-origin-only upgrade, auth via `?token=` when credentials are configured, and loopback-only when they are not
 - `GET /api/sessions` — List sessions (supports `?limit=&offset=` pagination; returns lightweight refs)
 - `GET /api/sessions/:id` — Session detail with live model/context info
 - `GET /api/models` — List models
 - `GET /api/small-model` — Small model status (includes `enabled` field)
-- `GET /api/config/terminal`, `PUT /api/config/terminal` — Read/set `terminal_enabled` *(unreleased, working tree)*
+- `GET /api/config/terminal`, `PUT /api/config/terminal` — Read terminal availability/scrollback/workdir; set `scrollback_lines` *(unreleased, working tree)*
 - `GET /api/files/tree` — File tree (anchored to the project workdir, `?depth=` param)
 - `GET /api/git/status` — Git status
 - `GET /api/tui-status` — Live TUI state (model, advisor, IDE, CWD, context, LSP, modified files, **agent activity**)
@@ -699,7 +699,7 @@ ocode run -fork "New direction"
 | "Connection refused" | Ensure server is running (`ocode serve`) |
 | TUI rendering issues | Resize terminal, check `TERM` env var |
 | Desktop file tree lists the whole filesystem | Old symptom of a Finder-launched `.app` (cwd `/`) — fixed by workdir anchoring; ensure `srv.SetWorkDir` ran at boot |
-| Terminal sub-tab / `/api/terminal/ws` missing | Check `terminal_enabled`, server credentials/bind address, and that the selected project matches the server's fixed workdir |
+| Terminal sub-tab / `/api/terminal/ws` missing | The terminal is always enabled; check server credentials/bind address (loopback-only when unauthenticated) and that the selected project matches the server's fixed workdir |
 | "Auto-denied by LLM permission model" with no judge configured | A dead/unreachable auto-permission model now shows a neutral "unavailable" notice and asks you instead — if you still see a denial banner, the model did return a verdict |
 | Todo plan edits conflict across processes | The todo file (`.ocode/todo/<session-id>.md`) uses advisory `flock`; if another ocode process holds it, wait for it to release rather than editing the file by hand |
 
