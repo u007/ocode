@@ -16,6 +16,8 @@ import LimitsForm from "./LimitsForm";
 import ImageGenForm from "./ImageGenForm";
 import OcodePluginsForm from "./OcodePluginsForm";
 import ThemeForm from "./ThemeForm";
+import OpencodeMcpForm from "./OpencodeMcpForm";
+import OpencodeReadOnlyForm from "./OpencodeReadOnlyForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -109,6 +111,24 @@ function renderGroup(id: SettingsGroupId) {
       return <OcodePluginsForm />;
     case "theme":
       return <ThemeForm />;
+    case "opencode-mcp":
+      return <OpencodeMcpForm />;
+    case "opencode-plugins":
+      return (
+        <OpencodeReadOnlyForm
+          title="Legacy Plugins Key"
+          note="opencode.json's legacy plugins key is read by ocode for migration only and is never written back — this value is informational."
+          data={{ note: "not yet exposed via API — see docs/superpowers/specs/2026-08-11-configuration-ui-design.md section 7" }}
+        />
+      );
+    case "opencode-model-state":
+      return (
+        <OpencodeReadOnlyForm
+          title="Model Selection State"
+          note="opencode/model.json (recent/favorite model selections) is owned exclusively by opencode — ocode only reads it as a fallback."
+          data={{ note: "not yet exposed via API — see docs/superpowers/specs/2026-08-11-configuration-ui-design.md section 7" }}
+        />
+      );
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
