@@ -1031,3 +1031,63 @@ func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request
 		"doc_prompt_enabled": req.DocPromptEnabled,
 	})
 }
+
+// HandleGetPluginsEnabledConfig reports the opt-in builtin tool gates.
+func (h *Handler) HandleGetPluginsEnabledConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.PluginsConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.Plugins
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleSetPluginsEnabledConfig persists the opt-in builtin tool gates.
+func (h *Handler) HandleSetPluginsEnabledConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.PluginsConfig
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodePluginsConfig(req); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.Plugins = req
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}
+
+// HandleGetLocalModelsConfig reports the registered local model instances.
+func (h *Handler) HandleGetLocalModelsConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	models := map[string]config.LocalModelConfig{}
+	if h.cfg != nil && h.cfg.Ocode.LocalModels != nil {
+		models = h.cfg.Ocode.LocalModels
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, models)
+}
+
+// HandleSetLocalModelsConfig persists the registered local model instances.
+func (h *Handler) HandleSetLocalModelsConfig(w http.ResponseWriter, r *http.Request) {
+	req := map[string]config.LocalModelConfig{}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodeLocalModels(req); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.LocalModels = req
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}

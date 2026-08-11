@@ -184,6 +184,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/limits", s.authMiddleware(s.handleSetLimitsConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/features", s.authMiddleware(s.handleGetFeaturesConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/features", s.authMiddleware(s.handleSetFeaturesConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/plugins-enabled", s.authMiddleware(s.handleGetPluginsEnabledConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/plugins-enabled", s.authMiddleware(s.handleSetPluginsEnabledConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/local-models", s.authMiddleware(s.handleGetLocalModelsConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/local-models", s.authMiddleware(s.handleSetLocalModelsConfig))
 	// Interactive pty terminal (always enabled). The browser cannot set an
 	// Authorization header on a WebSocket, so this relies on
 	// authMiddleware's ?token= support.
@@ -757,6 +761,18 @@ func (s *Server) handleGetFeaturesConfig(w http.ResponseWriter, r *http.Request)
 }
 func (s *Server) handleSetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetFeaturesConfig(w, r)
+}
+func (s *Server) handleGetPluginsEnabledConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetPluginsEnabledConfig(w, r)
+}
+func (s *Server) handleSetPluginsEnabledConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetPluginsEnabledConfig(w, r)
+}
+func (s *Server) handleGetLocalModelsConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetLocalModelsConfig(w, r)
+}
+func (s *Server) handleSetLocalModelsConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetLocalModelsConfig(w, r)
 }
 func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleTerminalWS(w, r)

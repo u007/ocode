@@ -2076,3 +2076,19 @@ func SaveOcodeFeatures(memoryEnabled, docPromptEnabled bool) error {
 		return nil
 	})
 }
+
+// SaveOcodePluginsConfig persists the opt-in builtin tool gates.
+func SaveOcodePluginsConfig(cfg PluginsConfig) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Plugins = cfg
+		return nil
+	})
+}
+
+// SaveOcodeLocalModels persists the registered local model instances.
+func SaveOcodeLocalModels(models map[string]LocalModelConfig) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.LocalModels = models
+		return nil
+	})
+}

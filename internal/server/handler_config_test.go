@@ -275,3 +275,42 @@ func TestHandleSetFeaturesConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetPluginsEnabledConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"ast":true}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/plugins-enabled", strings.NewReader(body))
+	h.HandleSetPluginsEnabledConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Plugins
+	h.mu.Unlock()
+	if !got.AST {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}
+
+func TestHandleSetLocalModelsConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"local/bonsai-8b-1bit":{"enabled":true,"max_parallel":2}}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/local-models", strings.NewReader(body))
+	h.HandleSetLocalModelsConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.LocalModels
+	h.mu.Unlock()
+	lm, ok := got["local/bonsai-8b-1bit"]
+	if !ok || !lm.Enabled || lm.MaxParallel != 2 {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}
