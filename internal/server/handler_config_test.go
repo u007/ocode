@@ -213,3 +213,22 @@ func TestHandleSetImageGenConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetPathsConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"extra_allowed_paths":["/tmp/scratch","/data"],"upload_dir":"/data/uploads"}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/paths", strings.NewReader(body))
+	h.HandleSetPathsConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode
+	h.mu.Unlock()
+	if len(got.ExtraAllowedPaths) != 2 || got.UploadDir != "/data/uploads" {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}

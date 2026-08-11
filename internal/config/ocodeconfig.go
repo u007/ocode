@@ -2045,3 +2045,12 @@ func SaveOcodeEditorConfig(editor, editorMode, ideMode string) error {
 		return nil
 	})
 }
+
+// SaveOcodePathsConfig persists the extra-allowed-paths and upload-directory settings.
+func SaveOcodePathsConfig(extraAllowedPaths []string, uploadDir string) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.ExtraAllowedPaths = extraAllowedPaths
+		c.UploadDir = uploadDir
+		return nil
+	})
+}

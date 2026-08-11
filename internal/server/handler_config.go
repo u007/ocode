@@ -898,3 +898,44 @@ func (h *Handler) HandleSetImageGenConfig(w http.ResponseWriter, r *http.Request
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, req)
 }
+
+// HandleGetPathsConfig reports the extra-allowed-paths and upload-directory settings.
+func (h *Handler) HandleGetPathsConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	paths, uploadDir := []string(nil), ""
+	if h.cfg != nil {
+		paths = h.cfg.Ocode.ExtraAllowedPaths
+		uploadDir = h.cfg.Ocode.UploadDir
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"extra_allowed_paths": paths,
+		"upload_dir":          uploadDir,
+	})
+}
+
+// HandleSetPathsConfig persists the extra-allowed-paths and upload-directory settings.
+func (h *Handler) HandleSetPathsConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ExtraAllowedPaths []string `json:"extra_allowed_paths"`
+		UploadDir         string   `json:"upload_dir"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodePathsConfig(req.ExtraAllowedPaths, req.UploadDir); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.ExtraAllowedPaths = req.ExtraAllowedPaths
+		h.cfg.Ocode.UploadDir = req.UploadDir
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"extra_allowed_paths": req.ExtraAllowedPaths,
+		"upload_dir":          req.UploadDir,
+	})
+}
