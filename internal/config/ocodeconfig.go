@@ -1267,6 +1267,9 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["recap_model"] = cfg.RecapModel
 	}
 	payload["recap_model_enabled"] = cfg.RecapModelEnabled
+	if cfg.RecapTimeoutSeconds > 0 {
+		payload["recap_timeout_seconds"] = cfg.RecapTimeoutSeconds
+	}
 	if cfg.CommitMsgModel != "" {
 		payload["commit_msg_model"] = cfg.CommitMsgModel
 	}
@@ -1360,6 +1363,16 @@ func SaveOcodePermissions(permissions PermissionConfig) error {
 func SaveMaxSteps(n int) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.MaxSteps = n
+		return nil
+	})
+}
+
+// SaveOcodeRecapConfig persists the /recap model selection and timeout.
+func SaveOcodeRecapConfig(model string, enabled bool, timeoutSeconds int) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.RecapModel = model
+		cfg.RecapModelEnabled = enabled
+		cfg.RecapTimeoutSeconds = timeoutSeconds
 		return nil
 	})
 }

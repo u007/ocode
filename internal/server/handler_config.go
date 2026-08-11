@@ -585,3 +585,54 @@ func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request
 		"work_dir":         workDir,
 	})
 }
+
+// ── Ocode config sections (web Settings tab) ──────────────────────────────
+
+// HandleGetRecapConfig reports the /recap model selection and timeout.
+func (h *Handler) HandleGetRecapConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	model, enabled, timeout := "", false, 0
+	if h.cfg != nil {
+		model = h.cfg.Ocode.RecapModel
+		enabled = h.cfg.Ocode.RecapModelEnabled
+		timeout = h.cfg.Ocode.RecapTimeoutSeconds
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recap_model":           model,
+		"recap_model_enabled":   enabled,
+		"recap_timeout_seconds": timeout,
+	})
+}
+
+// HandleSetRecapConfig persists the /recap model selection and timeout.
+func (h *Handler) HandleSetRecapConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RecapModel          string `json:"recap_model"`
+		RecapModelEnabled   bool   `json:"recap_model_enabled"`
+		RecapTimeoutSeconds int    `json:"recap_timeout_seconds"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := config.SaveOcodeRecapConfig(req.RecapModel, req.RecapModelEnabled, req.RecapTimeoutSeconds); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.RecapModel = req.RecapModel
+		h.cfg.Ocode.RecapModelEnabled = req.RecapModelEnabled
+		h.cfg.Ocode.RecapTimeoutSeconds = req.RecapTimeoutSeconds
+	}
+	h.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"recap_model":           req.RecapModel,
+		"recap_model_enabled":   req.RecapModelEnabled,
+		"recap_timeout_seconds": req.RecapTimeoutSeconds,
+	})
+}
