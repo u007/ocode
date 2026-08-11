@@ -256,3 +256,22 @@ func TestHandleSetLimitsConfigPersists(t *testing.T) {
 		t.Errorf("undo_max_age_delta not updated: %d", got.UndoMaxAgeDelta)
 	}
 }
+
+func TestHandleSetFeaturesConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"memory_enabled":true,"doc_prompt_enabled":false}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/features", strings.NewReader(body))
+	h.HandleSetFeaturesConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode
+	h.mu.Unlock()
+	if !got.MemoryEnabled || got.DocPromptEnabled {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}

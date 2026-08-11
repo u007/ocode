@@ -990,3 +990,44 @@ func (h *Handler) HandleSetLimitsConfig(w http.ResponseWriter, r *http.Request) 
 		"undo_max_age_delta":    req.UndoMaxAgeDelta,
 	})
 }
+
+// HandleGetFeaturesConfig reports the memory/doc-prompt feature toggles.
+func (h *Handler) HandleGetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	mem, doc := false, false
+	if h.cfg != nil {
+		mem = h.cfg.Ocode.MemoryEnabled
+		doc = h.cfg.Ocode.DocPromptEnabled
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"memory_enabled":     mem,
+		"doc_prompt_enabled": doc,
+	})
+}
+
+// HandleSetFeaturesConfig persists the memory/doc-prompt feature toggles.
+func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		MemoryEnabled    bool `json:"memory_enabled"`
+		DocPromptEnabled bool `json:"doc_prompt_enabled"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodeFeatures(req.MemoryEnabled, req.DocPromptEnabled); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.MemoryEnabled = req.MemoryEnabled
+		h.cfg.Ocode.DocPromptEnabled = req.DocPromptEnabled
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"memory_enabled":     req.MemoryEnabled,
+		"doc_prompt_enabled": req.DocPromptEnabled,
+	})
+}

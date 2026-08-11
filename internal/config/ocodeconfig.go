@@ -2067,3 +2067,12 @@ func SaveOcodeLimits(maxSteps, maxImageDim, maxConcurrentAgents, undoMaxAgeDelta
 		return nil
 	})
 }
+
+// SaveOcodeFeatures persists the memory/doc-prompt feature toggles.
+func SaveOcodeFeatures(memoryEnabled, docPromptEnabled bool) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.MemoryEnabled = memoryEnabled
+		c.DocPromptEnabled = docPromptEnabled
+		return nil
+	})
+}
