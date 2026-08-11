@@ -15,6 +15,7 @@ import FeaturesForm from "./FeaturesForm";
 import LimitsForm from "./LimitsForm";
 import ImageGenForm from "./ImageGenForm";
 import OcodePluginsForm from "./OcodePluginsForm";
+import ThemeForm from "./ThemeForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -106,6 +107,8 @@ function renderGroup(id: SettingsGroupId) {
       return <ImageGenForm />;
     case "plugins":
       return <OcodePluginsForm />;
+    case "theme":
+      return <ThemeForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
