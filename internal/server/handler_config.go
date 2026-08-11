@@ -677,3 +677,33 @@ func (h *Handler) HandleSetCommitMsgConfig(w http.ResponseWriter, r *http.Reques
 		"commit_msg_prompt": req.CommitMsgPrompt,
 	})
 }
+
+// HandleGetCompactConfig reports the auto-compact settings block.
+func (h *Handler) HandleGetCompactConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.CompactConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.Compact
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleSetCompactConfig persists the auto-compact settings block.
+func (h *Handler) HandleSetCompactConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.CompactConfig
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodeCompactConfig(req); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.Compact = req
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}

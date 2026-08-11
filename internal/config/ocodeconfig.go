@@ -1996,3 +1996,11 @@ func SaveOcodeCommitMsgConfig(model, prompt string) error {
 		return nil
 	})
 }
+
+// SaveOcodeCompactConfig persists the auto-compact settings block.
+func SaveOcodeCompactConfig(cfg CompactConfig) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Compact = cfg
+		return nil
+	})
+}

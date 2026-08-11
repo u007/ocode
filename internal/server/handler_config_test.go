@@ -87,3 +87,24 @@ func TestHandleSetCommitMsgConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetCompactConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"enabled":true,"summary_provider":"anthropic","summary_model":"claude-haiku-4-5",` +
+		`"token_threshold":0.8,"keep_recent_turns":4,"keep_recent_tokens":2000,"min_messages":6,` +
+		`"summary_timeout_seconds":30,"summary_max_retries":2,"max_summary_input_tokens":50000}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/compact", strings.NewReader(body))
+	h.HandleSetCompactConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Compact
+	h.mu.Unlock()
+	if !got.Enabled || got.SummaryModel != "claude-haiku-4-5" || got.KeepRecentTurns != 4 {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}
