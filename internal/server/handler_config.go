@@ -744,3 +744,55 @@ func (h *Handler) HandleSetAutoPermissionConfig(w http.ResponseWriter, r *http.R
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, req)
 }
+
+// discoveryConfigDTO carries DiscoveryConfig over the wire. DiscoveryConfig has
+// no Go struct tags — the keys below match the hand-mapped discoveryMap keys in
+// writeOcodeConfigFile exactly.
+type discoveryConfigDTO struct {
+	Enabled          bool     `json:"enabled"`
+	EmbeddingModel   string   `json:"embedding_model"`
+	EmbeddingBackend string   `json:"embedding_backend"`
+	LocalModelStatus string   `json:"local_model_status"`
+	LocalServerURL   string   `json:"local_server_url"`
+	PinnedSkills     []string `json:"pinned_skills"`
+	IgnorePaths      []string `json:"ignore_paths"`
+}
+
+// HandleGetDiscoveryConfig reports the discovery-based skill/MCP retrieval settings.
+func (h *Handler) HandleGetDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	d := config.DiscoveryConfig{}
+	if h.cfg != nil {
+		d = h.cfg.Ocode.Discovery
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, discoveryConfigDTO{
+		Enabled: d.Enabled, EmbeddingModel: d.EmbeddingModel, EmbeddingBackend: d.EmbeddingBackend,
+		LocalModelStatus: d.LocalModelStatus, LocalServerURL: d.LocalServerURL,
+		PinnedSkills: d.PinnedSkills, IgnorePaths: d.IgnorePaths,
+	})
+}
+
+// HandleSetDiscoveryConfig persists the discovery-based skill/MCP retrieval settings.
+func (h *Handler) HandleSetDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
+	var req discoveryConfigDTO
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	cfg := config.DiscoveryConfig{
+		Enabled: req.Enabled, EmbeddingModel: req.EmbeddingModel, EmbeddingBackend: req.EmbeddingBackend,
+		LocalModelStatus: req.LocalModelStatus, LocalServerURL: req.LocalServerURL,
+		PinnedSkills: req.PinnedSkills, IgnorePaths: req.IgnorePaths,
+	}
+	if err := config.SaveOcodeDiscoveryConfig(cfg); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.Discovery = cfg
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}

@@ -135,3 +135,23 @@ func TestHandleSetAutoPermissionConfigPersists(t *testing.T) {
 		t.Errorf("Model must be preserved, got %q", got.Model)
 	}
 }
+
+func TestHandleSetDiscoveryConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"enabled":true,"embedding_model":"bge-m3","embedding_backend":"local",` +
+		`"local_model_status":"ready","local_server_url":"","pinned_skills":["foo"],"ignore_paths":["dist/"]}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/discovery", strings.NewReader(body))
+	h.HandleSetDiscoveryConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.Discovery
+	h.mu.Unlock()
+	if !got.Enabled || got.EmbeddingModel != "bge-m3" || len(got.PinnedSkills) != 1 {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}

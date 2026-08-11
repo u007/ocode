@@ -170,6 +170,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/compact", s.authMiddleware(s.handleSetCompactConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/permissions-auto", s.authMiddleware(s.handleGetAutoPermissionConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/permissions-auto", s.authMiddleware(s.handleSetAutoPermissionConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/discovery", s.authMiddleware(s.handleGetDiscoveryConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/discovery", s.authMiddleware(s.handleSetDiscoveryConfig))
 	// Interactive pty terminal (always enabled). The browser cannot set an
 	// Authorization header on a WebSocket, so this relies on
 	// authMiddleware's ?token= support.
@@ -701,6 +703,12 @@ func (s *Server) handleGetAutoPermissionConfig(w http.ResponseWriter, r *http.Re
 }
 func (s *Server) handleSetAutoPermissionConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetAutoPermissionConfig(w, r)
+}
+func (s *Server) handleGetDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetDiscoveryConfig(w, r)
+}
+func (s *Server) handleSetDiscoveryConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetDiscoveryConfig(w, r)
 }
 func (s *Server) handleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleTerminalWS(w, r)

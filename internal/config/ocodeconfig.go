@@ -2019,3 +2019,11 @@ func SaveOcodeAutoPermissionConfig(cfg AutoPermissionConfig) error {
 		return nil
 	})
 }
+
+// SaveOcodeDiscoveryConfig persists the discovery-based skill/MCP retrieval settings.
+func SaveOcodeDiscoveryConfig(cfg DiscoveryConfig) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Discovery = cfg
+		return nil
+	})
+}
