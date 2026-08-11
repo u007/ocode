@@ -13,6 +13,7 @@ import EditorModeForm from "./EditorModeForm";
 import PathsForm from "./PathsForm";
 import FeaturesForm from "./FeaturesForm";
 import LimitsForm from "./LimitsForm";
+import ImageGenForm from "./ImageGenForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -100,6 +101,8 @@ function renderGroup(id: SettingsGroupId) {
       return <FeaturesForm />;
     case "limits":
       return <LimitsForm />;
+    case "imagegen":
+      return <ImageGenForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
