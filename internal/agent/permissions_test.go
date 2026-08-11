@@ -633,10 +633,13 @@ func TestPermissions_GitReadOnlySubcommandsAllow(t *testing.T) {
 
 	cases := []string{
 		`{"command":"git status"}`,
+		`{"command":"git status --short --branch"}`,
 		`{"command":"git diff HEAD~1"}`,
 		`{"command":"git log --oneline -10"}`,
 		`{"command":"git show HEAD"}`,
 		`{"command":"git rev-parse HEAD"}`,
+		`{"command":"git check-ignore web/dist"}`,
+		`{"command":"git check-ignore -v .env.local"}`,
 	}
 	for _, cmd := range cases {
 		t.Run(cmd, func(t *testing.T) {

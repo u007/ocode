@@ -1556,3 +1556,145 @@ func TestDeleteLocalModelConfigRemovesEntry(t *testing.T) {
 		t.Fatal("local/bonsai-8b-1bit still present after DeleteLocalModelConfig")
 	}
 }
+
+// TerminalEnabled mirrors MemoryEnabled's load/save plumbing but defaults to
+// ON: an explicit `terminal_enabled: false` in the config file is respected,
+// but a fresh config gets the interactive terminal without opting in.
+func TestTerminalEnabledLoadSave(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	t.Run("default is enabled", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.TerminalEnabled {
+			t.Fatal("terminal should default to enabled")
+		}
+	})
+
+	t.Run("explicit false in file wins", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"terminal_enabled":false}`), 0o644)
+
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg.Ocode.TerminalEnabled {
+			t.Fatal("explicit terminal_enabled:false must be honored over the default")
+		}
+	})
+
+	t.Run("load enabled from file", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+		os.WriteFile(filepath.Join(configDir, "ocodeconfig.json"), []byte(`{"terminal_enabled":true}`), 0o644)
+
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.TerminalEnabled {
+			t.Fatal("want terminal enabled from file")
+		}
+	})
+
+	t.Run("save round-trips", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		configDir := filepath.Join(tmp, ".config", "opencode")
+		os.MkdirAll(configDir, 0o755)
+
+		if err := SaveTerminalEnabled(true); err != nil {
+			t.Fatalf("SaveTerminalEnabled(true) failed: %v", err)
+		}
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if !cfg.Ocode.TerminalEnabled {
+			t.Fatal("terminal should persist as enabled after save")
+		}
+
+		if err := SaveTerminalEnabled(false); err != nil {
+			t.Fatalf("SaveTerminalEnabled(false) failed: %v", err)
+		}
+		var cfg2 Config
+		if err := LoadOcodeConfig(&cfg2); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg2.Ocode.TerminalEnabled {
+			t.Fatal("terminal should persist as disabled after save")
+		}
+	})
+}
+
+func TestTerminalScrollbackLinesConfig(t *testing.T) {
+	chdirTempForConfigTest(t)
+
+	t.Run("defaults to 9999", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg.Ocode.TerminalScrollbackLines != DefaultTerminalScrollbackLines {
+			t.Fatalf("scrollback = %d, want %d", cfg.Ocode.TerminalScrollbackLines, DefaultTerminalScrollbackLines)
+		}
+	})
+
+	t.Run("clamps loaded values", func(t *testing.T) {
+		for _, tc := range []struct {
+			name string
+			json string
+			want int
+		}{
+			{name: "too small", json: `{"terminal_scrollback_lines":1}`, want: MinTerminalScrollbackLines},
+			{name: "too large", json: `{"terminal_scrollback_lines":999999}`, want: MaxTerminalScrollbackLines},
+			{name: "zero", json: `{"terminal_scrollback_lines":0}`, want: DefaultTerminalScrollbackLines},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				tmp := t.TempDir()
+				t.Setenv("HOME", tmp)
+				path := filepath.Join(tmp, ".config", "opencode")
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(path, "ocodeconfig.json"), []byte(tc.json), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				var cfg Config
+				if err := LoadOcodeConfig(&cfg); err != nil {
+					t.Fatalf("LoadOcodeConfig failed: %v", err)
+				}
+				if cfg.Ocode.TerminalScrollbackLines != tc.want {
+					t.Fatalf("scrollback = %d, want %d", cfg.Ocode.TerminalScrollbackLines, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("save round-trips", func(t *testing.T) {
+		tmp := t.TempDir()
+		t.Setenv("HOME", tmp)
+		if err := SaveTerminalScrollbackLines(12345); err != nil {
+			t.Fatalf("SaveTerminalScrollbackLines failed: %v", err)
+		}
+		var cfg Config
+		if err := LoadOcodeConfig(&cfg); err != nil {
+			t.Fatalf("LoadOcodeConfig failed: %v", err)
+		}
+		if cfg.Ocode.TerminalScrollbackLines != 12345 {
+			t.Fatalf("scrollback = %d, want 12345", cfg.Ocode.TerminalScrollbackLines)
+		}
+	})
+}

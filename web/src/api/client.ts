@@ -195,6 +195,24 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ enabled }),
     }),
+  // Interactive pty terminal configuration for the server's single workdir.
+  getTerminalEnabled: () =>
+    fetchJSON<{
+      enabled: boolean;
+      available?: boolean;
+      scrollback_lines: number;
+      work_dir: string;
+    }>("/api/config/terminal"),
+  setTerminalEnabled: (enabled: boolean) =>
+    fetchJSON<{ enabled: boolean }>("/api/config/terminal", {
+      method: "PUT",
+      body: JSON.stringify({ enabled }),
+    }),
+  setTerminalScrollbackLines: (scrollback_lines: number) =>
+    fetchJSON<{ scrollback_lines: number }>("/api/config/terminal", {
+      method: "PUT",
+      body: JSON.stringify({ scrollback_lines }),
+    }),
   // TUI status (consolidated snapshot pushed by the TUI on every state
   // change). The web also subscribes to the "status" SSE event so the bar
   // updates live without polling.

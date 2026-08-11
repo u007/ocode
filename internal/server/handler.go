@@ -42,6 +42,12 @@ type Handler struct {
 	projects       *projects.Store
 	tabsStore      *tabs.Store
 	monaco         *monaco.Store
+	// terminalAuthConfigured and terminalLoopback are set by Server.New. A
+	// terminal is only exposed without credentials when the server is bound to
+	// a loopback address.
+	terminalAuthConfigured bool
+	terminalLoopback       bool
+	activeTerminalSessions int
 
 	// headlessSubs is the subscriber list for broadcasting live SSE events
 	// in headless/serve mode (when no RC bridge is active). The SSE mirror
@@ -69,6 +75,16 @@ type Handler struct {
 	lspMgr     *lsp.Manager
 }
 
+// SetTerminalAccessPolicy configures the security boundary for the terminal
+// endpoints. It is kept on Handler so direct handler tests exercise the same
+// policy as the server routes.
+func (h *Handler) SetTerminalAccessPolicy(authConfigured, loopback bool) {
+	h.mu.Lock()
+	h.terminalAuthConfigured = authConfigured
+	h.terminalLoopback = loopback
+	h.mu.Unlock()
+}
+
 // sharedLSPManager returns the process-wide LSP manager, creating it on
 // first use. All agent sessions in this handler share it so opening
 // multiple tabs/sessions against the same project doesn't spawn a
@@ -82,6 +98,43 @@ func (h *Handler) sharedLSPManager() *lsp.Manager {
 		h.lspMgr = lsp.NewManager(root)
 	})
 	return h.lspMgr
+}
+
+// collectLSPStatuses reports the servers active on the shared LSP manager, in
+// the same shape the TUI's collectLSPStatuses builds from its own manager —
+// used for the headless (no RC bridge) web/desktop status path.
+func (h *Handler) collectLSPStatuses() []LSPStatus {
+	mgr := h.sharedLSPManager()
+	active := mgr.ActiveServers()
+	if len(active) == 0 {
+		return []LSPStatus{}
+	}
+
+	var errByCmd, warnByCmd map[string]int
+	if ds := mgr.Diagnostics(); ds != nil {
+		errByCmd = make(map[string]int)
+		warnByCmd = make(map[string]int)
+		for _, d := range ds.All() {
+			switch d.Severity {
+			case lsp.SeverityError:
+				errByCmd[d.ServerCmd]++
+			case lsp.SeverityWarning:
+				warnByCmd[d.ServerCmd]++
+			}
+		}
+	}
+
+	out := make([]LSPStatus, 0, len(active))
+	for _, s := range active {
+		out = append(out, LSPStatus{
+			Cmd:                 s.Cmd,
+			LangID:              s.LangID,
+			State:               "running",
+			DiagnosticsErrors:   errByCmd[s.Cmd],
+			DiagnosticsWarnings: warnByCmd[s.Cmd],
+		})
+	}
+	return out
 }
 
 type agentSession struct {
@@ -136,9 +189,31 @@ func NewHandler() *Handler {
 	return h
 }
 
-// SetWorkDir sets the working directory for git commands (used in tests).
+// SetWorkDir sets the working directory for git commands (used in tests) and
+// reloads h.cfg from that directory's opencode.json. Without the reload, a
+// server booted from a different cwd than the project it ends up serving
+// (desktop shell, web server launched via a wrapper) would keep using
+// provider overrides (API keys, base URLs) from the wrong project, or none at
+// all — see internal/desktop/boot.go, which calls this before Serve starts.
 func (h *Handler) SetWorkDir(dir string) {
 	h.workDir = dir
+	config.SetWorkDir(dir)
+
+	cfg, err := config.Load()
+	if err != nil {
+		log.Printf("handler: reload config for workdir %q: %v", dir, err)
+		return
+	}
+	agent.ApplyAgentConfig(cfg)
+
+	mcpCache := newMCPCache()
+	mcpCache.warm(cfg)
+
+	h.mu.Lock()
+	h.cfg = cfg
+	h.advisorEnabled = cfg == nil || cfg.Ocode.Advisor.Enabled
+	h.mcpCache = mcpCache
+	h.mu.Unlock()
 }
 
 // RCBridge returns the bridge to a TUI session, or nil if the handler is

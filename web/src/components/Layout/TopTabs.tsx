@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef, useState } from "react";
-import { FolderGit2, GitBranch, ScrollText, Paperclip, Activity, CalendarClock, MessageSquare, MoreHorizontal } from "lucide-react";
+import { FolderGit2, GitBranch, Paperclip, CalendarClock, MessageSquare, MoreHorizontal } from "lucide-react";
 import { TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
 import SyncStatusWidget from "./SyncStatusWidget";
@@ -15,8 +15,6 @@ const mainTabs = [
   { id: "git", label: "Git", icon: GitBranch },
   { id: "cron", label: "Cron", icon: CalendarClock },
   { id: "assets", label: "Assets", icon: Paperclip },
-  { id: "status", label: "Status", icon: Activity },
-  { id: "logs", label: "Logs", icon: ScrollText },
 ];
 
 export default function TopTabs({ activeTab, onTabSelect }: Props) {

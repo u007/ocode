@@ -1,7 +1,24 @@
 import { useState } from "react";
 import { highlightMatches } from "./ChatSearchBar";
+import HighlightedCode from "./HighlightedCode";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 20;
+
+// Language to highlight a tool's raw result with. Keyed on what the Go tools in
+// internal/tool actually return, not on the file they touched:
+// the write/edit family returns FormatDiff output, bash returns raw combined
+// stdout/stderr, and everything else (read's line-numbered content, grep, glob,
+// list, todo*) has no grammar that renders it correctly — those stay plain.
+// Only the live stream (ChatPanel) supplies a real tool name alongside output;
+// replayed history arrives as a role-"tool" message with no name, so it is
+// rendered plain.
+const TOOL_OUTPUT_LANG: Record<string, string> = {
+  bash: "shellsession",
+  write: "diff",
+  edit: "diff",
+  multiedit: "diff",
+  replace_lines: "diff",
+};
 
 // ThinkingBlock renders reasoning tokens in a muted panel. The content is shown
 // expanded by default so reasoning is visible immediately in the web UI.
@@ -75,15 +92,24 @@ export function ToolBlock({
           <div className="mt-2 space-y-2">
             {command && (
               <pre className="whitespace-pre-wrap break-words rounded bg-zinc-900/70 p-2 font-mono text-[11px] text-zinc-300">
-                {highlight.trim() ? highlightMatches(command, highlight) : command}
+                {highlight.trim() ? (
+                  highlightMatches(command, highlight)
+                ) : (
+                  <HighlightedCode code={command} lang="json" />
+                )}
               </pre>
             )}
             {output !== undefined && output !== "" && (
               <div className="rounded bg-zinc-900/70 p-2">
                 <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-zinc-400">
-                  {highlight.trim()
-                    ? highlightMatches(visibleOutput ?? "", highlight)
-                    : visibleOutput}
+                  {highlight.trim() ? (
+                    highlightMatches(visibleOutput ?? "", highlight)
+                  ) : (
+                    <HighlightedCode
+                      code={visibleOutput ?? ""}
+                      lang={TOOL_OUTPUT_LANG[tool] ?? ""}
+                    />
+                  )}
                 </pre>
                 {collapsible && (
                   <button

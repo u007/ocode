@@ -145,19 +145,29 @@ type OcodeConfig struct {
 	// DocPromptEnabled toggles injection of a documentation-first development
 	// prompt into the agent's system prompt so it reads existing docs before
 	// implementing and updates them afterward.
-	DocPromptEnabled  bool
-	ExtraAllowedPaths []string
-	Editor            string
-	EditorMode        string
-	IDEMode           string
-	SmallModel        string
-	SmallModelEnabled bool
-	RecapModel        string
-	RecapModelEnabled bool
-	CommitMsgModel    string
-	CommitMsgPrompt   string
-	TUI               TUIConfig
-	MaxSteps          int `json:"max_steps,omitempty"`
+	DocPromptEnabled bool
+	// TerminalEnabled gates the interactive pty-backed terminal exposed over
+	// /api/terminal/ws and its web UI sub-tab. Default true (on by default); an
+	// explicit `terminal_enabled: false` in ocodeconfig.json disables it. The
+	// terminal hands the browser a real shell in the project root, so keep it
+	// off on any host where the web UI is reachable by untrusted parties.
+	TerminalEnabled bool
+	// TerminalScrollbackLines controls how many lines xterm.js retains for the
+	// interactive terminal. Values are normalized to the supported range when
+	// config is loaded; zero means use DefaultTerminalScrollbackLines.
+	TerminalScrollbackLines int
+	ExtraAllowedPaths       []string
+	Editor                  string
+	EditorMode              string
+	IDEMode                 string
+	SmallModel              string
+	SmallModelEnabled       bool
+	RecapModel              string
+	RecapModelEnabled       bool
+	CommitMsgModel          string
+	CommitMsgPrompt         string
+	TUI                     TUIConfig
+	MaxSteps                int `json:"max_steps,omitempty"`
 	// MaxImageDim caps the longest edge (px) of an embedded image; larger
 	// images are downscaled to fit, preserving aspect ratio. 0 means use the
 	// agent package default (2000).
@@ -193,6 +203,27 @@ type OcodeConfig struct {
 	Ocr      ocr.OcrConfig  `json:"ocr"`
 	ImageGen ImageGenConfig `json:"imagegen"`
 	Extra    map[string]json.RawMessage
+}
+
+const (
+	DefaultTerminalScrollbackLines = 9999
+	MinTerminalScrollbackLines     = 100
+	MaxTerminalScrollbackLines     = 100000
+)
+
+// NormalizeTerminalScrollbackLines applies the terminal scrollback default and
+// bounds to values loaded from config or supplied by an API client.
+func NormalizeTerminalScrollbackLines(lines int) int {
+	if lines <= 0 {
+		return DefaultTerminalScrollbackLines
+	}
+	if lines < MinTerminalScrollbackLines {
+		return MinTerminalScrollbackLines
+	}
+	if lines > MaxTerminalScrollbackLines {
+		return MaxTerminalScrollbackLines
+	}
+	return lines
 }
 
 type PermissionConfig struct {
@@ -330,35 +361,37 @@ type discoveryConfigFile struct {
 }
 
 type ocodeConfigFile struct {
-	Compact             compactConfigFile           `json:"compact"`
-	Advisor             advisorConfigFile           `json:"advisor"`
-	Permissions         permissionConfigFile        `json:"permissions"`
-	Plugins             pluginsConfigFile           `json:"plugins"`
-	ExternalPlugins     map[string]PluginConfig     `json:"external_plugins,omitempty"`
-	LocalModels         map[string]LocalModelConfig `json:"local_models,omitempty"`
-	Security            securityConfigFile          `json:"security"`
-	Discovery           discoveryConfigFile         `json:"discovery"`
-	MemoryEnabled       *bool                       `json:"memory_enabled,omitempty"`
-	DocPromptEnabled    *bool                       `json:"doc_prompt_enabled,omitempty"`
-	ExtraAllowedPaths   []string                    `json:"extra_allowed_paths,omitempty"`
-	Editor              string                      `json:"editor,omitempty"`
-	EditorMode          string                      `json:"editor_mode,omitempty"`
-	IDEMode             string                      `json:"ide_mode,omitempty"`
-	SmallModel          string                      `json:"small_model,omitempty"`
-	SmallModelEnabled   *bool                       `json:"small_model_enabled,omitempty"`
-	RecapModel          string                      `json:"recap_model,omitempty"`
-	RecapModelEnabled   *bool                       `json:"recap_model_enabled,omitempty"`
-	RecapTimeoutSeconds *int                        `json:"recap_timeout_seconds,omitempty"`
-	UndoMaxAgeDelta     *int                        `json:"undo_max_age_delta,omitempty"`
-	MaxConcurrentAgents *int                        `json:"max_concurrent_agents,omitempty"`
-	CommitMsgModel      string                      `json:"commit_msg_model,omitempty"`
-	CommitMsgPrompt     string                      `json:"commit_msg_prompt,omitempty"`
-	TUI                 tuiConfigFile               `json:"tui"`
-	MaxSteps            int                         `json:"max_steps,omitempty"`
-	MaxImageDim         int                         `json:"image_max_dim,omitempty"`
-	UploadDir           string                      `json:"upload_dir,omitempty"`
-	Ocr                 *ocr.OcrConfig              `json:"ocr,omitempty"`
-	ImageGen            *ImageGenConfig             `json:"imagegen,omitempty"`
+	Compact                 compactConfigFile           `json:"compact"`
+	Advisor                 advisorConfigFile           `json:"advisor"`
+	Permissions             permissionConfigFile        `json:"permissions"`
+	Plugins                 pluginsConfigFile           `json:"plugins"`
+	ExternalPlugins         map[string]PluginConfig     `json:"external_plugins,omitempty"`
+	LocalModels             map[string]LocalModelConfig `json:"local_models,omitempty"`
+	Security                securityConfigFile          `json:"security"`
+	Discovery               discoveryConfigFile         `json:"discovery"`
+	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
+	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
+	TerminalEnabled         *bool                       `json:"terminal_enabled,omitempty"`
+	TerminalScrollbackLines *int                        `json:"terminal_scrollback_lines,omitempty"`
+	ExtraAllowedPaths       []string                    `json:"extra_allowed_paths,omitempty"`
+	Editor                  string                      `json:"editor,omitempty"`
+	EditorMode              string                      `json:"editor_mode,omitempty"`
+	IDEMode                 string                      `json:"ide_mode,omitempty"`
+	SmallModel              string                      `json:"small_model,omitempty"`
+	SmallModelEnabled       *bool                       `json:"small_model_enabled,omitempty"`
+	RecapModel              string                      `json:"recap_model,omitempty"`
+	RecapModelEnabled       *bool                       `json:"recap_model_enabled,omitempty"`
+	RecapTimeoutSeconds     *int                        `json:"recap_timeout_seconds,omitempty"`
+	UndoMaxAgeDelta         *int                        `json:"undo_max_age_delta,omitempty"`
+	MaxConcurrentAgents     *int                        `json:"max_concurrent_agents,omitempty"`
+	CommitMsgModel          string                      `json:"commit_msg_model,omitempty"`
+	CommitMsgPrompt         string                      `json:"commit_msg_prompt,omitempty"`
+	TUI                     tuiConfigFile               `json:"tui"`
+	MaxSteps                int                         `json:"max_steps,omitempty"`
+	MaxImageDim             int                         `json:"image_max_dim,omitempty"`
+	UploadDir               string                      `json:"upload_dir,omitempty"`
+	Ocr                     *ocr.OcrConfig              `json:"ocr,omitempty"`
+	ImageGen                *ImageGenConfig             `json:"imagegen,omitempty"`
 	// Legacy fields (read from old configs for migration)
 	OcrModel   string `json:"ocr_model,omitempty"`
 	OcrEnabled *bool  `json:"ocr_enabled,omitempty"`
@@ -400,21 +433,25 @@ func defaultSecurityConfig() SecurityConfig {
 
 func defaultOcodeConfig() OcodeConfig {
 	return OcodeConfig{
-		Compact:             defaultCompactConfig(),
-		Advisor:             defaultAdvisorConfig(),
-		Permissions:         defaultPermissionConfig(),
-		MemoryEnabled:       true,
-		SmallModelEnabled:   true,
-		RecapModelEnabled:   false,
-		Security:            defaultSecurityConfig(),
-		Discovery:           defaultDiscoveryConfig(),
-		RecapTimeoutSeconds: 120,
-		UndoMaxAgeDelta:     10,
-		MaxConcurrentAgents: 2,
-		TUI:                 defaultTUIConfig(),
-		Ocr:                 ocr.DefaultOcrConfig(),
-		Extra:               make(map[string]json.RawMessage),
-		ImageGen:            DefaultImageGenConfig(),
+		Compact:       defaultCompactConfig(),
+		Advisor:       defaultAdvisorConfig(),
+		Permissions:   defaultPermissionConfig(),
+		MemoryEnabled: true,
+		// Interactive pty terminal: on by default (explicit
+		// `terminal_enabled: false` in config disables it).
+		TerminalEnabled:         true,
+		SmallModelEnabled:       true,
+		RecapModelEnabled:       false,
+		Security:                defaultSecurityConfig(),
+		Discovery:               defaultDiscoveryConfig(),
+		RecapTimeoutSeconds:     120,
+		UndoMaxAgeDelta:         10,
+		MaxConcurrentAgents:     2,
+		TerminalScrollbackLines: DefaultTerminalScrollbackLines,
+		TUI:                     defaultTUIConfig(),
+		Ocr:                     ocr.DefaultOcrConfig(),
+		Extra:                   make(map[string]json.RawMessage),
+		ImageGen:                DefaultImageGenConfig(),
 	}
 }
 
@@ -791,6 +828,20 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 			cfg.MemoryEnabled = *file.MemoryEnabled
 		}
 		delete(raw, "memory_enabled")
+	}
+
+	if _, ok := raw["terminal_enabled"]; ok {
+		if file.TerminalEnabled != nil {
+			cfg.TerminalEnabled = *file.TerminalEnabled
+		}
+		delete(raw, "terminal_enabled")
+	}
+
+	if _, ok := raw["terminal_scrollback_lines"]; ok {
+		if file.TerminalScrollbackLines != nil {
+			cfg.TerminalScrollbackLines = NormalizeTerminalScrollbackLines(*file.TerminalScrollbackLines)
+		}
+		delete(raw, "terminal_scrollback_lines")
 	}
 
 	if _, ok := raw["doc_prompt_enabled"]; ok {
@@ -1241,6 +1292,8 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	payload["memory_enabled"] = cfg.MemoryEnabled
 	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
+	payload["terminal_enabled"] = cfg.TerminalEnabled
+	payload["terminal_scrollback_lines"] = NormalizeTerminalScrollbackLines(cfg.TerminalScrollbackLines)
 	if cfg.MaxSteps > 0 {
 		payload["max_steps"] = cfg.MaxSteps
 	}
@@ -1262,7 +1315,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_scrollback_lines" {
 			continue
 		}
 		payload[k] = v
@@ -1706,6 +1759,31 @@ func SaveDocPromptEnabled(enabled bool) error {
 func SaveAdvisorEnabled(enabled bool) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.Advisor.Enabled = enabled
+		return nil
+	})
+}
+
+// SaveTerminalEnabled persists the interactive-terminal toggle to config.
+func SaveTerminalEnabled(enabled bool) error {
+	return SaveTerminalConfig(&enabled, nil)
+}
+
+// SaveTerminalScrollbackLines persists the interactive terminal's scrollback
+// limit using the same locked read-modify-write path as other config setters.
+func SaveTerminalScrollbackLines(lines int) error {
+	return SaveTerminalConfig(nil, &lines)
+}
+
+// SaveTerminalConfig persists the terminal settings in one locked
+// read-modify-write operation so a combined API update cannot partially apply.
+func SaveTerminalConfig(enabled *bool, scrollbackLines *int) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if enabled != nil {
+			cfg.TerminalEnabled = *enabled
+		}
+		if scrollbackLines != nil {
+			cfg.TerminalScrollbackLines = NormalizeTerminalScrollbackLines(*scrollbackLines)
+		}
 		return nil
 	})
 }

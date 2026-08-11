@@ -150,6 +150,7 @@ var bashSubcommandAllow = map[string]bool{
 	"git reflog":       true,
 	"git shortlog":     true,
 	"git cat-file":     true,
+	"git check-ignore": true,
 	"git grep":         true,
 	"git name-rev":     true,
 	"git for-each-ref": true,

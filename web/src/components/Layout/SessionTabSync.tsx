@@ -73,7 +73,16 @@ export default function SessionTabSync() {
 
       if (event === "status") {
         const status = data as TUIStatus;
-        chatDispatch({ type: "SET_TUI_STATUS", status });
+        if (eventSessionId && openSessionIdsRef.current.has(eventSessionId)) {
+          chatDispatch({ type: "SET_TUI_STATUS", sessionId: eventSessionId, status });
+          if (status.session_title) {
+            projectDispatch({
+              type: "UPDATE_TAB_TITLE",
+              id: eventSessionId,
+              title: status.session_title,
+            });
+          }
+        }
         if (status.advisor_enabled !== undefined) {
           chatDispatch({ type: "SET_ADVISOR_ENABLED", enabled: !!status.advisor_enabled });
         }
@@ -226,19 +235,6 @@ export default function SessionTabSync() {
       }
     });
   }, [chatDispatch, projectDispatch]);
-
-  // When a live status event carries a session title for one of our open
-  // tabs (in any project), replace the tab label. Empty titles are ignored.
-  useEffect(() => {
-    const status = chatState.tuiStatus;
-    if (!status?.session_title || !status.session_id) return;
-    if (!openSessionIdsRef.current.has(status.session_id)) return;
-    projectDispatch({
-      type: "UPDATE_TAB_TITLE",
-      id: status.session_id,
-      title: status.session_title,
-    });
-  }, [chatState.tuiStatus, projectDispatch]);
 
   return null;
 }

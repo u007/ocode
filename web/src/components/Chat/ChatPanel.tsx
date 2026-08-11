@@ -267,6 +267,19 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
     }
   }, [hasMore, loadingMore, messages.length, sessionId, dispatch]);
 
+  // Role "tool" messages carry only tool_call_id, not the tool's name — resolve
+  // it here from the assistant message that issued the call, so replayed
+  // history can syntax-highlight tool output the same as the live stream does.
+  const toolNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const msg of messages) {
+      for (const tc of msg.tool_calls ?? []) {
+        map.set(tc.id, tc.function.name);
+      }
+    }
+    return map;
+  }, [messages]);
+
   return (
     <div className="relative h-full min-h-0">
       {searchOpen && (
@@ -338,7 +351,11 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
                 : "scroll-mt-16"
             }
           >
-            <MessageBubble message={msg} highlight={searchOpen ? searchQuery : ""} />
+            <MessageBubble
+              message={msg}
+              highlight={searchOpen ? searchQuery : ""}
+              toolName={msg.tool_call_id ? toolNameById.get(msg.tool_call_id) : undefined}
+            />
           </div>
           );
         })}

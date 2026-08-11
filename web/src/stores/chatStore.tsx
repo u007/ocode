@@ -46,6 +46,11 @@ export interface SessionSlice {
   // switching session tabs or projects — RunNode remounts (new run tree,
   // new session) would otherwise reset every row to expanded.
   collapsedRunIds: string[];
+  // Live TUI status for this session (model, IDE, cwd, context, spending,
+  // modified files, LSP servers, extra paths). Updated by the SSE "status"
+  // event for this session id, so each tab tracks its own session instead of
+  // whichever session most recently emitted a status event.
+  tuiStatus: TUIStatus | null;
 }
 
 export const emptySessionSlice: SessionSlice = {
@@ -60,6 +65,7 @@ export const emptySessionSlice: SessionSlice = {
   loadingMore: false,
   initialized: false,
   collapsedRunIds: [],
+  tuiStatus: null,
 };
 
 /** Reads one session's slice, falling back to the shared empty default for a
@@ -85,11 +91,6 @@ export interface ChatState {
   ocrModel: string | null;
   ocrEnabled: boolean;
   ocrBackend: string | null;
-  // Live TUI status (model, advisor, IDE, session, cwd, context, spending,
-  // modified files, LSP servers, extra paths). Updated by the SSE "status"
-  // event so the bar tracks the TUI without polling. Null until the first
-  // event arrives or the initial fetch resolves.
-  tuiStatus: TUIStatus | null;
   sessionContext: SessionContextMetrics | null;
   spendingUSD: number | null;
   // True once the very first /api/tui-status fetch has resolved. Lets the UI
@@ -126,7 +127,7 @@ export type ChatAction =
   | { type: "SET_TOTAL"; sessionId: string; total: number }
   | { type: "SET_SESSION_CONTEXT"; context: SessionContextMetrics | null }
   | { type: "SET_SPENDING"; spendingUSD: number | null }
-  | { type: "SET_TUI_STATUS"; status: TUIStatus }
+  | { type: "SET_TUI_STATUS"; sessionId: string; status: TUIStatus }
   | { type: "SET_TUI_STATUS_READY"; ready: boolean }
   | { type: "REKEY_SESSION"; oldId: string; newId: string }
   | { type: "TOGGLE_RUN_COLLAPSED"; sessionId: string; runId: string }
@@ -142,7 +143,6 @@ export const initialState: ChatState = {
   ocrModel: null,
   ocrEnabled: false,
   ocrBackend: "openai-compat",
-  tuiStatus: null,
   sessionContext: null,
   spendingUSD: null,
   tuiStatusReady: false,
@@ -304,7 +304,10 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     case "SET_SPENDING":
       return { ...state, spendingUSD: action.spendingUSD };
     case "SET_TUI_STATUS":
-      return { ...state, tuiStatus: action.status, tuiStatusReady: true };
+      return {
+        ...updateSession(state, action.sessionId, (s) => ({ ...s, tuiStatus: action.status })),
+        tuiStatusReady: true,
+      };
     case "SET_TUI_STATUS_READY":
       return { ...state, tuiStatusReady: action.ready };
     case "PREPEND_MESSAGES":

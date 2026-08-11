@@ -59,9 +59,9 @@ function runningStatusParts(
 
 export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const chatState = useChatState();
-  const { tuiStatus, sessionContext, spendingUSD } = chatState;
+  const { sessionContext, spendingUSD } = chatState;
   const { activeTabId } = useProjectState();
-  const { isStreaming, error, live } = getSessionSlice(chatState, activeTabId);
+  const { isStreaming, error, live, tuiStatus } = getSessionSlice(chatState, activeTabId);
 
   // Pull every field from the consolidated snapshot when present; fall back to
   // the per-field store state for older TUI builds that don't push "status".

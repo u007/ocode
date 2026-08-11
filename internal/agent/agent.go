@@ -4217,7 +4217,7 @@ func (a *Agent) recoverOrphanedToolCalls(messages []Message) []Message {
 	out = append(out, messages[:insertAt]...)
 
 	for _, tc := range orphans {
-		result, err := a.HandleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments))
+		result, err := a.handleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
 		if err != nil {
 			result = fmt.Sprintf("ORPHAN_TOOL_ERROR:%s:%v\n%s", tc.Function.Name, err, result)
 		}

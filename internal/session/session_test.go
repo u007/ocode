@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/u007/ocode/internal/agent"
@@ -52,8 +53,36 @@ func TestNewSessionIDUsesCanonicalPrefix(t *testing.T) {
 	if !strings.HasPrefix(id, "ses_") {
 		t.Fatalf("expected canonical ses_ prefix, got %q", id)
 	}
-	if len(id) != len("ses_2006-01-02-150405") {
-		t.Fatalf("expected timestamp-style session id, got %q", id)
+	if len(id) != len("ses_2006-01-02-150405-aabbccdd") {
+		t.Fatalf("expected timestamp+random-suffix session id, got %q", id)
+	}
+}
+
+// Two "new chat" requests arriving in the same second used to generate
+// identical session IDs, silently merging distinct sessions (see HandleChat)
+// and making the second block on the first's per-session mutex for its whole
+// turn. NewSessionID must stay unique even when called concurrently within
+// the same second.
+func TestNewSessionIDUniqueUnderConcurrency(t *testing.T) {
+	const n = 200
+	ids := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ids <- NewSessionID()
+		}()
+	}
+	wg.Wait()
+	close(ids)
+
+	seen := make(map[string]bool, n)
+	for id := range ids {
+		if seen[id] {
+			t.Fatalf("duplicate session id generated: %q", id)
+		}
+		seen[id] = true
 	}
 }
 

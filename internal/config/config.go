@@ -11,8 +11,39 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
+
+// workDirOverride overrides os.Getwd() for project config resolution in
+// findProjectConfigDir and FindProjectRoot. Set via SetWorkDir so that a
+// server process serving a project opened after boot (desktop shell, web
+// server launched from a different cwd) resolves that project's
+// opencode.json instead of the process's original working directory. Empty
+// means fall back to os.Getwd() — see internal/session.SetWorkDir for the
+// same pattern.
+var (
+	workDirOverride   string
+	workDirOverrideMu sync.RWMutex
+)
+
+// SetWorkDir sets the working directory used for project config resolution.
+// Pass "" to revert to os.Getwd().
+func SetWorkDir(dir string) {
+	workDirOverrideMu.Lock()
+	workDirOverride = dir
+	workDirOverrideMu.Unlock()
+}
+
+func effectiveWorkDir() (string, error) {
+	workDirOverrideMu.RLock()
+	dir := workDirOverride
+	workDirOverrideMu.RUnlock()
+	if dir != "" {
+		return dir, nil
+	}
+	return os.Getwd()
+}
 
 type MCPOAuthConfig struct {
 	Enabled          *bool    `json:"enabled"`
@@ -404,7 +435,7 @@ func getProjectConfigPath() (string, error) {
 }
 
 func findProjectConfigDir() (string, error) {
-	curr, err := os.Getwd()
+	curr, err := effectiveWorkDir()
 	if err != nil {
 		return "", err
 	}
@@ -431,7 +462,7 @@ func findProjectConfigDir() (string, error) {
 }
 
 func FindProjectRoot() string {
-	curr, err := os.Getwd()
+	curr, err := effectiveWorkDir()
 	if err != nil {
 		return ""
 	}

@@ -17,6 +17,7 @@ import ChangesPanel from "./components/Changes/ChangesPanel";
 import FileTree from "./components/Files/FileTree";
 import FileEditor from "./components/Files/FileEditor";
 import LogPanel from "./components/Logs/LogPanel";
+import TerminalTabs from "./components/Terminal/TerminalTabs";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
@@ -43,8 +44,10 @@ import { isNewSessionTabEmpty } from "./lib/tabDrafts";
 type ModelDialogTab = "main" | "small" | "advisor";
 
 function StatusMetricsHydrator() {
-  const { tuiStatus } = useChatState();
+  const chatState = useChatState();
   const dispatch = useChatDispatch();
+  const { activeTabId } = useProjectState();
+  const { tuiStatus } = getSessionSlice(chatState, activeTabId);
   const lastSessionId = useRef<string | null>(null);
 
   useEffect(() => {
@@ -94,7 +97,7 @@ function triggerDownload(filename: string, content: string, mimeType: string) {
 function HomeApp() {
   const dispatch = useChatDispatch();
   const chatState = useChatState();
-  const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab } = useProjectState();
+  const { state: projectState, tabs, activeTabId, dispatch: projectDispatch, openSessionTab, openNewSessionTab, closeSessionTab } = useProjectState();
   const { resolvePermission, pendingPermission } = useChat(activeTabId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [coworkOpen, setCoworkOpen] = useState(true);
@@ -103,7 +106,7 @@ function HomeApp() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<
-    "files" | "git" | "cron" | "assets" | "status" | "logs" | "sessions"
+    "files" | "git" | "cron" | "assets" | "sessions"
   >("sessions");
   const {
     editorTabs,
@@ -180,7 +183,10 @@ function HomeApp() {
     api
       .getTUIStatus()
       .then((res) => {
-        dispatch({ type: "SET_TUI_STATUS", status: res });
+        const seedSessionId = res.session_id || activeTabId;
+        if (seedSessionId) {
+          dispatch({ type: "SET_TUI_STATUS", sessionId: seedSessionId, status: res });
+        }
         if (res.ocr_backend !== undefined) {
           dispatch({ type: "SET_OCR_BACKEND", backend: res.ocr_backend || "openai-compat" });
         }
@@ -205,6 +211,14 @@ function HomeApp() {
     onSave: () => {
       if (activeEditorTabId) {
         saveEditorTab(activeEditorTabId);
+      }
+    },
+    onCloseSession: () => {
+      // Cmd/Ctrl+W: close the active session tab. Mirrors the X button in
+      // OpenSessionBar (closeSessionTab + drop the chat slice).
+      if (activeTabId) {
+        closeSessionTab(activeTabId);
+        dispatch({ type: "RESET", sessionId: activeTabId });
       }
     },
     onEscape: () => {
@@ -365,12 +379,6 @@ function HomeApp() {
               <TabsContent value="assets" forceMount className="flex-1 overflow-hidden m-0">
                 <AssetsPanel />
               </TabsContent>
-              <TabsContent value="status" forceMount className="flex-1 overflow-hidden m-0">
-                <StatusPanel onClose={() => setActiveView("sessions")} />
-              </TabsContent>
-              <TabsContent value="logs" forceMount className="flex-1 overflow-hidden m-0">
-                <LogPanel active={activeView === "logs"} />
-              </TabsContent>
 
               <TabsContent value="sessions" forceMount className="flex-1 overflow-hidden m-0">
                 <div className="flex flex-col h-full">
@@ -432,6 +440,52 @@ function HomeApp() {
                         <ChangesPanel session={tab.id} />
                       </div>
                     ))}
+                    {allChatTabs.map((tab) => (
+                      <div
+                        key={`${tab.id}:logs`}
+                        className={
+                          tab.projectPath === projectState.activeProject?.path &&
+                          tab.id === activeTabId &&
+                          tab.activeSubTab === "logs"
+                            ? "absolute inset-0"
+                            : "absolute inset-0 hidden"
+                        }
+                      >
+                        <LogPanel active={tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "logs"} />
+                      </div>
+                    ))}
+                    {allChatTabs.map((tab) => (
+                      <div
+                        key={`${tab.id}:terminal`}
+                        className={
+                          tab.projectPath === projectState.activeProject?.path &&
+                          tab.id === activeTabId &&
+                          tab.activeSubTab === "terminal"
+                            ? "absolute inset-0"
+                            : "absolute inset-0 hidden"
+                        }
+                      >
+                        <TerminalTabs
+                          active={
+                            tab.projectPath === projectState.activeProject?.path &&
+                            tab.id === activeTabId &&
+                            tab.activeSubTab === "terminal"
+                          }
+                          projectPath={tab.projectPath}
+                        />
+                      </div>
+                    ))}
+                    {allChatTabs.map((tab) => (
+                      tab.projectPath === projectState.activeProject?.path &&
+                      tab.id === activeTabId &&
+                      tab.activeSubTab === "status" ? (
+                        <div key={`${tab.id}:status`} className="absolute inset-0">
+                          <StatusPanel onClose={() =>
+                            projectDispatch({ type: "SET_TAB_SUB_TAB", id: tab.id, subTab: "chat" })
+                          } />
+                        </div>
+                      ) : null
+                    ))}
                   </div>
                 </div>
               </TabsContent>
@@ -441,7 +495,17 @@ function HomeApp() {
           {/* Status bar */}
           <StatusBar
             onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
-            onStatusClick={() => setActiveView("status")}
+            onStatusClick={() => {
+              setActiveView("sessions");
+              if (activeTabId) {
+                projectDispatch({ type: "SET_TAB_SUB_TAB", id: activeTabId, subTab: "status" });
+              } else {
+                const newId = openNewSessionTab(true);
+                if (newId) {
+                  projectDispatch({ type: "SET_TAB_SUB_TAB", id: newId, subTab: "status" });
+                }
+              }
+            }}
           />
         </main>
 

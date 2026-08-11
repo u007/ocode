@@ -11,16 +11,18 @@ A short, dense map of the ocode TUI so you don't re-discover it from scratch.
 ## 1. Single entry point
 
 - `tui.Run(opts RunOptions)` in `internal/tui/tui.go:25` — redirects `log` to a debug panel, then calls `tea.NewProgram(newModel(opts))`.
-- `newModel(opts ...RunOptions) model` in `internal/tui/model.go:1248` — assembles the `model` struct: input, viewport, tabs, sidebar, files/git sub-models, agent, theme.
-- `View() tea.View` in `internal/tui/model.go:10786` — builds `tea.NewView(m.renderContent())`, sets `AltScreen = true`, conditionally sets `MouseMode = MouseModeAllMotion` when `m.mouseEnabled()` returns true (required for hover-underline on the sidebar; gated by config `tui.mouse`).
-- `Update(msg tea.Msg) (tea.Model, tea.Cmd)` in `internal/tui/model.go:1570` — value receiver. Big `switch msg := msg.(type)` for window size, key, mouse, agent, debug, etc.
+- `newModel(opts ...RunOptions) model` in `internal/tui/model.go:1667` — assembles the `model` struct: input, viewport, tabs, sidebar, files/git sub-models, agent, theme.
+- `View() tea.View` in `internal/tui/model.go:16603` — builds `tea.NewView(m.renderContent())`, sets `AltScreen = true`, conditionally sets `MouseMode = MouseModeAllMotion` when `m.mouseEnabled()` returns true (required for hover-underline on the sidebar; gated by config `tui.mouse`).
+- `Update(msg tea.Msg) (tea.Model, tea.Cmd)` in `internal/tui/model.go:2206` — value receiver. Big `switch msg := msg.(type)` for window size, key, mouse, agent, debug, etc.
+
+> **Line anchors drift fast** — `model.go` is ~20.4k lines and grows constantly. The numbers above were current at 0.8.46; if a grep for the function lands elsewhere, trust the symbol, not the number.
 
 ## 2. Screen layout (chat tab, top → bottom)
 
 ```
 ┌────────────────────────────────────────────┐ y = 0
 │  (blank — top pad, appHeaderTopPad)        │ y = 0
-│  ◆ ocode <title>  ·  opencode clone v…  ▌1:chat ▌2:files …  ✕ exit │ y = 1   (app header)
+│  ◆ ocode <title>  ·  opencode clone v…  ▌chat ▌agents ▌files ▌changes ▌git ▌log ✕ exit │ y = 1   (app header)
 │  ╭──── transcript (bordered) ─────────╮  │ y = 2
 │  │ …                                  │  │   viewport content rows
 │  ╰────────────────────────────────────╯  │
@@ -37,29 +39,35 @@ The **app header is 2 rows**: a leading blank pad + the title line. Always go th
 
 | Constant / helper | Where | What it is |
 | --- | --- | --- |
-| `appHeaderTopPad` (string) | `model.go:10803` | The leading `"\n"` blank row above the title. |
-| `appHeaderLeftPad` (string) | `model.go:10807` | A single leading space so the bold `◆` doesn't pin to column 0. |
-| `appHeaderHintGap` (string) | `model.go:10811` | The `"  "` between the title and the dim version hint. |
-| `appHeaderHeight` (int) | `model.go:10818` | Total header rows = **2** (top pad + title). Use this in every `trackTop / bodyTop / clickY` calculation. |
-| `(m model).renderAppHeader(title, hint, tabBar, exitBtn, width)` | `model.go:10831` | The only correct way to render the app header. Returns the full padded line. |
-| `(m model).viewportContentTopY()` | `model.go:12532` | First row of the transcript content (= `appHeaderHeight + 1` for the top border). |
-| `(m model).agentStripTopY()` | `model.go:12549` | First row of the agent strip. |
-| `(m model).logContentTopY()` | `model.go:12309` | First row of the log viewport (= `appHeaderHeight + 3` for header + search + kind bar). |
+| `appHeaderTopPad` (string) | `model.go:16620` | The leading `"\n"` blank row above the title. |
+| `appHeaderLeftPad` (string) | `model.go:16624` | A single leading space so the bold `◆` doesn't pin to column 0. |
+| `appHeaderHintGap` (string) | `model.go:16628` | The `"  "` between the title and the dim version hint. |
+| `appHeaderHeight` (int) | `model.go:16635` | Total header rows = **2** (top pad + title). Use this in every `trackTop / bodyTop / clickY` calculation. |
+| `(m model).renderAppHeader(title, hint, tabBar, exitBtn, width)` | `model.go:16648` | The only correct way to render the app header. Returns the full padded line. |
+| `(m model).viewportContentTopY()` | `model.go:19003` | First row of the transcript content (= `appHeaderHeight + 1` for the top border). |
+| `(m model).agentStripTopY()` | `model.go:19020` | First row of the agent strip. |
+| `(m model).logContentTopY()` | `model.go:18617` | First row of the log viewport (= `appHeaderHeight + 3` for header + search + kind bar). |
 
 **Rule:** if you add a new chrome row above the viewport, update `appHeaderHeight` (or the chrome-height sum in `layoutLogViewport` / `bottomChromeHeight`) and the affected `…TopY` helpers in lockstep. Mismatch = mouse clicks land on the wrong row and scrollbar drags jump.
 
+**Status broadcast:** when the TUI is mirrored to web/desktop (`/rc` bridge), the server's `TUIStatus` now carries the TUI's **activity row** state (`LLMRunning`, `ActiveTools`, `ActiveAgents` — added 0.8.45) so the web status bar shows live agent activity instead of just the model name. If you add a new activity indicator in the TUI, surface it through `internal/server/tui_status.go` too.
+
 ## 3. Per-tab render path
 
-`m.renderContent()` in `model.go:10856` delegates to `m.renderTabContent()` in `model.go:10884` which handles modals/detail view first, then routes by `m.activeTab`:
+`m.renderContent()` in `model.go:16673` handles modal overlays (theme picker, picker, connect, file search) first, then calls `m.renderTabContent()` in `model.go:16701`, which handles the drill-in detail view, then routes by `m.activeTab` (constants in `internal/tui/tabs.go`, `tabCount = 6`):
 
+- `tabAgents` → `m.renderAgentsTab()` — agent-run list (same data the web Agents tab shows)
 - `tabFiles` → `m.files.View(w, h, styles, chatUnread, exitPending)` (`internal/tui/files_model.go`)
-- `tabGit`   → `m.git.View(w, h, styles, chatUnread, exitPending)` (`internal/tui/git_model.go:1628`)
-- `tabLog`   → `m.renderLogTab()` (`internal/tui/model.go:12349`)
+- `tabChanges` → `m.changes.View(w, h, styles)` — changes/diff view
+- `tabGit`   → `m.git.View(w, h, styles, chatUnread, exitPending)` (`internal/tui/git_model.go:2011`)
+- `tabLog`   → `m.renderLogTab()` (`internal/tui/model.go:18815`)
 - `tabChat` (default) → inline render: header → (transcript + sidebar | status chain) → overflow re-render safety net
 
-Both `files.View` and `git.View` build their own header; **they also use `appHeaderTopPad`/`appHeaderLeftPad`/`appHeaderHintGap`** so the chrome is identical across tabs. If you tweak the constants, all four tabs change.
+Both `files.View` and `git.View` build their own header; **they also use `appHeaderTopPad`/`appHeaderLeftPad`/`appHeaderHintGap`** so the chrome is identical across tabs. If you tweak the constants, all six tabs change.
 
-The chat `renderContent` has a **safety net** at `model.go:10979`: if the rendered output's height exceeds `m.height`, the viewport is shrunk and the layout is re-rendered. New chrome rows that push `bottomChromeHeight` up can trip this — verify with `TestActivityRowGrowthStaysWithinHeight` in `internal/tui/overflow_repro_test.go` (uses a deliberately short 13-row terminal).
+The chat `renderContent` has a **safety net** at `model.go:16811`: if the rendered output's height exceeds `m.height`, the viewport is shrunk and the layout is re-rendered (plus a hard clamp at `model.go:16846` for modal backdrops). New chrome rows that push `bottomChromeHeight` up can trip this — verify with `TestActivityRowGrowthStaysWithinHeight` in `internal/tui/overflow_repro_test.go:19` (uses a deliberately short 13-row terminal).
+
+**Web parity note:** since 0.8.45 the repo-analysis commands (`/standup`, `/changes`, `/review`) build their prompts in the shared `internal/commandctx` package, and the TUI files (`changes.go`, `review.go`, `standup.go`) are thin wrappers over it. The web/desktop server exposes the identical prompts via `GET /api/command-context/{standup,changes,review}` — never reimplement the prompt-building logic in one place without the other.
 
 ## 4. Theme + styles
 
@@ -79,7 +87,7 @@ The chat `renderContent` has a **safety net** at `model.go:10979`: if the render
 4. **Release** → if `active`, `extractSelectionText` + `clipboard.WriteAll` (log copy errors, never swallow); if **not active** (no drag distance), clear and **fall through to the click handler** so a plain click still toggles/opens.
 5. Track both styled and `stripANSI` raw lines so highlight and extract share the same coordinate space. Selection coords are screen-row/col relative to the content's top-left (`contentTopY`); bordered box left chrome = 2 cols (border(1) + padding(1)).
 
-See `internal/tui/selection.go`, `handleMouseAction` (`model.go:4050`) / `handleMouseMotion` (`model.go:4742`), and the per-surface sel fields on the model struct (`m.sel`, `m.logSel`, `m.filesSel`, `m.gitSel`, `m.inputSel`, `m.sidebarSel`) plus the drill-in's own `detailView.sel` (`internal/tui/detail_view.go`) for working copies.
+See `internal/tui/selection.go`, `handleMouseAction` (`model.go:5502`) / `handleMouseMotion` (`model.go:6637`), and the per-surface sel fields on the model struct (`m.sel`, `m.logSel`, `m.filesSel`, `m.gitSel`, `m.inputSel`, `m.sidebarSel`) plus the drill-in's own `detailView.sel` (`internal/tui/detail_view.go`) for working copies.
 
 ## 6. TUI output safety (alt-screen)
 
@@ -93,7 +101,7 @@ Any `fmt.Print*` / `fmt.Fprint*(os.Stdout|os.Stderr,…)` / `println` / raw `os.
 
 In `internal/tui`:
 
-- `newTestTextarea()` and `derefTestModel(t, value)` live in `slash_popup_test.go:308-321` — the textarea must be focused; `derefTestModel` unwraps the `(model, *model)` mix returned by `Update`.
+- `newTestTextarea()` and `derefTestModel(t, value)` live in `slash_popup_test.go:308` and `:314` — the textarea must be focused; `derefTestModel` unwraps the `(model, *model)` mix returned by `Update`.
 - Common test model: `model{ready, width, height, input: newTestTextarea(), viewport: viewport.New(...), styles: ApplyThemeColors("tokyonight"), activeTab, ...}`.
 - For tests that exercise layout/mouse Y math, **always use `appHeaderHeight`** (or `appHeaderHeight + 1` for first content row inside a bordered panel) — never `lipgloss.Height(m.styles.Header.Render("◆ ocode"))`. The latter returns 1 (just the styled text) and is wrong by 1 row now.
 - For tests with a very short terminal (e.g. 13 rows for `TestActivityRowGrowthStaysWithinHeight`), remember the new top pad consumes 1 of those rows. The overflow safety net kicks in if chrome is too tall.
@@ -103,10 +111,10 @@ In `internal/tui`:
 **Add a top chrome row (above the transcript):** update `appHeaderHeight` (or the `bottomChromeHeight` sum) and every `…TopY` helper in lockstep. Re-run `go test ./internal/tui/...` — `TestActivityRowGrowthStaysWithinHeight`, the transcript scrollbar track/thumb tests, and the click tests will catch any Y-drift.
 
 **Add a new tab:**
-1. New const in `internal/tui/tabs.go` (e.g. `tabFoo = 4`), bump `tabCount`.
-2. Add to `labels` in `renderTabBar`.
-3. Add a `case tabFoo: return m.foo.View(...)` in `renderContent`.
-4. Update `handleGlobalTabKeys` (alt+[/] / ctrl+shift+[/) in `model.go:3126`.
+1. New const in `internal/tui/tabs.go` (e.g. `tabFoo = 6`), bump `tabCount` (currently 6: chat, agents, files, changes, git, log).
+2. Add to `labels` in `renderTabBar` (`tabs.go:13`).
+3. Add a `case tabFoo: return m.foo.View(...)` in `renderTabContent` (`model.go:16701`).
+4. Update `handleGlobalTabKeys` (alt+[/] / ctrl+shift+[/) in `model.go:4398`.
 5. Update the `lipgloss.Height(m.styles.Header.Render("◆ ocode  Foo"))` callsites — replace with `appHeaderHeight` (or add a `appHeaderHeight` alias for that tab) so a future header tweak still works.
 6. Add a foo sub-model with its own `View`, plus any click/selection fields.
 
@@ -119,9 +127,9 @@ In `internal/tui`:
 ## 9. Files to know
 
 ### Core layout & chrome
-- `internal/tui/model.go` (~13.4k lines) — model struct, Update, View, renderContent, layout, mouse, scrollbar, all the chrome math.
+- `internal/tui/model.go` (~20.4k lines) — model struct, Update, View, renderContent, layout, mouse, scrollbar, all the chrome math. Tab routing in `renderTabContent`; the agents tab (`tabAgents`) renders via `m.renderAgentsTab()`.
 - `internal/tui/theme.go` — themes + style singletons.
-- `internal/tui/tabs.go` — tab constants + `renderTabBar`.
+- `internal/tui/tabs.go` — tab constants (6: chat, agents, files, changes, git, log) + `renderTabBar`.
 - `internal/tui/selection.go` — shared `selectionState`, `applySelectionHighlight`, `extractSelectionText`, `normaliseSelection`.
 - `internal/tui/scrollbar.go` — `renderScrollbar`, `scrollbarThumbMetrics`, `scrollbarThumbOffset`, `renderListScrollbar`.
 - `internal/tui/debuglog.go` — debug panel writer (target of `log.SetOutput`).
@@ -140,7 +148,7 @@ In `internal/tui`:
 
 ### Modal dialogs / popups
 - `internal/tui/connect.go`, `picker.go`, `question_prompt.go`, `slash_popup.go` — modal dialogs / popups.
-- `internal/tui/permission_modal.go` — permission request modal.
+- `internal/tui/permission_modal.go` — permission request modal. Since the permission-hardening work, an unreachable auto-permission judge renders a **neutral** "ℹ Permission model unavailable — asking you instead" notice (then the normal allow/deny prompt), never a "⛔ Auto-denied by LLM permission model" banner — the two cases (denied vs. no verdict obtained) must stay distinct in the UI.
 - `internal/tui/other_modals_adapter.go` — adapter for permission/question modals.
 - `internal/tui/perm_dialog_adapter.go` — permission dialog adapter.
 - `internal/tui/picker_adapter.go` — picker adapter.
@@ -156,7 +164,8 @@ In `internal/tui`:
 - `internal/tui/commands.go` — slash-command registry/dispatch.
 - `internal/tui/pathlink.go` — clickable `file:line` path detection in the transcript.
 - `internal/tui/urllink.go` (643 lines) — clickable URL link regions and markdown table rendering.
-- `internal/tui/changes.go` (236 lines) — changes/diff display.
+- `internal/tui/changes.go` (38 lines) — **thin wrapper** over the shared `internal/commandctx` package (see §3 web-parity note); `review.go`/`standup.go` are similarly slimmed. `internal/commandctx/commandctx.go` (~700 lines) holds the real prompt-building logic shared with the web/desktop server. The changes-tab UI lives in `internal/tui/changes_model.go` (`changesModel.View(w, h, styles)`, line 283).
+- `internal/tui/picker.go` — message picker; opens at the **most recent** entry (`openMessagePicker` sets `pickerIndex = len(items) - 1`), not the top of history.
 
 ### Review & GitHub
 - `internal/tui/review.go`, `review_overlay.go`, `github_tui.go` — `/review` + PR review overlay.

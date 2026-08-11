@@ -8,12 +8,17 @@ import {
 } from "../../lib/fileLinks";
 import { ThinkingBlock, ToolBlock } from "./TurnParts";
 import { highlightMatches } from "./ChatSearchBar";
+import HighlightedCode from "./HighlightedCode";
 
 interface Props {
   message: Message;
   // Active find-bar query. When set, plaintext regions (user text, thinking,
   // tool args/output) wrap matches in <mark>. Empty string = no highlight.
   highlight?: string;
+  // Name of the tool that produced this message, resolved by the caller from
+  // the preceding assistant message's tool_calls (role "tool" messages carry
+  // only tool_call_id, not the name). Used to pick a syntax-highlight language.
+  toolName?: string;
 }
 
 // AssistantText renders markdown assistant output. Shared by committed messages
@@ -46,9 +51,16 @@ export function AssistantText({ content }: { content: string }) {
                     </code>
                   );
                 }
+                // Fenced block: react-markdown puts the fence tag in the
+                // className as `language-xxx`, and appends a trailing newline
+                // that would render as a blank last line once highlighted.
+                const lang = /language-([\w+-]+)/.exec(className ?? "")?.[1] ?? "";
                 return (
                   <code className={className} {...props}>
-                    {children}
+                    <HighlightedCode
+                      code={String(children).replace(/\n$/, "")}
+                      lang={lang}
+                    />
                   </code>
                 );
               },
@@ -112,10 +124,17 @@ export function AssistantText({ content }: { content: string }) {
   );
 }
 
-export default function MessageBubble({ message, highlight = "" }: Props) {
-  // Tool result message (role "tool"): no tool name is carried, only the output.
+export default function MessageBubble({ message, highlight = "", toolName = "" }: Props) {
+  // Tool result message (role "tool"): no tool name is carried on the message
+  // itself, only tool_call_id — the caller resolves toolName from that.
   if (message.role === "tool") {
-    return <ToolBlock tool="result" output={message.content} highlight={highlight} />;
+    return (
+      <ToolBlock
+        tool={toolName || "result"}
+        output={message.content}
+        highlight={highlight}
+      />
+    );
   }
 
   // Assistant turn that issued tool calls and/or carried reasoning.

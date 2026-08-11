@@ -59,6 +59,7 @@ func (h *Handler) buildStatusSnapshot() TUIStatus {
 		}
 	}
 	snap.CWD = cwd
+	snap.LSPServers = h.collectLSPStatuses()
 	return snap
 }
 
@@ -109,14 +110,19 @@ func (h *Handler) HandleGetSpending(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleGetLSPStatuses returns the current set of running LSP servers, derived
-// from the TUI's bridge snapshot (when attached) or an empty list (headless).
+// from the TUI's bridge snapshot (when attached) or from the handler's own
+// shared LSP manager (headless web/desktop).
 func (h *Handler) HandleGetLSPStatuses(w http.ResponseWriter, r *http.Request, rc *RCBridge) {
 	if rc == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"lsp_servers": []LSPStatus{}})
+		writeJSON(w, http.StatusOK, map[string]any{"lsp_servers": h.collectLSPStatuses()})
 		return
 	}
+	servers := rc.TUIStatus().LSPServers
+	if servers == nil {
+		servers = []LSPStatus{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"lsp_servers": rc.TUIStatus().LSPServers,
+		"lsp_servers": servers,
 	})
 }
 
@@ -130,8 +136,12 @@ func (h *Handler) HandleGetModifiedFiles(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, map[string]any{"modified_files": []FileStatus{}})
 		return
 	}
+	files := rc.TUIStatus().ModifiedFiles
+	if files == nil {
+		files = []FileStatus{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"modified_files": rc.TUIStatus().ModifiedFiles,
+		"modified_files": files,
 	})
 }
 

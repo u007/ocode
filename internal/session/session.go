@@ -2,6 +2,8 @@ package session
 
 import (
 	"bufio"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,8 +57,17 @@ type sessionIndex struct {
 
 const canonicalSessionPrefix = "ses_"
 
+// NewSessionID generates a session ID. The timestamp alone only has
+// second-resolution: two "new chat" requests (e.g. from two browser tabs)
+// arriving in the same second produced identical IDs, silently merging the
+// two sessions in Handler.agents and in the on-disk session file, and making
+// the second request block on the first's per-session mutex until its whole
+// turn finished. The random suffix guarantees uniqueness across concurrent
+// callers regardless of timing.
 func NewSessionID() string {
-	return canonicalSessionPrefix + time.Now().Format("2006-01-02-150405")
+	var suffix [4]byte
+	_, _ = rand.Read(suffix[:])
+	return canonicalSessionPrefix + time.Now().Format("2006-01-02-150405") + "-" + hex.EncodeToString(suffix[:])
 }
 
 // GetStorageDir returns the per-project sessions directory under the

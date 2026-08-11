@@ -1288,7 +1288,7 @@ async function handleContext(ctx: CommandContext): Promise<CommandResult> {
 async function handleLsp(ctx: CommandContext): Promise<CommandResult> {
   try {
     const { lsp_servers } = await ctx.api.getLSPStatuses();
-    if (!lsp_servers.length) {
+    if (!lsp_servers?.length) {
       return {
         handled: true,
         messages: [{ role: "assistant", content: "No LSP servers active." }],

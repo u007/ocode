@@ -1,7 +1,7 @@
 ---
 name: ocode-usage
-description: Comprehensive guide on how to use ocode — the AI coding agent. Covers installation, configuration, TUI mode, headless run mode, web server, MCP servers, models, skills, and common workflows. Use this when users ask "how do I use ocode", "getting started with ocode", "ocode tutorial", or need a reference for any ocode feature.
-when_to_use: When the user asks for help using ocode, wants a tutorial, needs to understand available commands, or asks "how do I..." questions about ocode features. Also triggered by: "ocode tutorial", "getting started", "how to use", "ocode guide", "ocode help".
+description: Comprehensive guide on how to use ocode — the AI coding agent. Covers installation, configuration, TUI mode, headless run mode, web server, desktop shell, MCP servers, models, skills, sub-agent tasks, and common workflows. Use this when users ask "how do I use ocode", "getting started with ocode", "ocode tutorial", or need a reference for any ocode feature.
+when_to_use: When the user asks for help using ocode, wants a tutorial, needs to understand available commands, tools, or features (including desktop, sessions, tasks, todo plans, scheduled jobs), or asks "how do I..." questions about ocode features. Also triggered by: "ocode tutorial", "getting started", "how to use", "ocode guide", "ocode help".
 ---
 
 # ocode Usage Guide
@@ -86,6 +86,12 @@ Configure via `apiKeys` in config or provider-specific env vars:
 
 **Global override:** Set `OPENCODE_AUTH_TOKEN` to use a single token for all providers, bypassing per-provider configuration. Useful for CI/CD or proxy setups.
 
+### Per-Project Config & the Terminal Toggle
+
+- Config is resolved **per project**: the server/desktop shell anchors a working directory on boot and reloads that project's `opencode.json` (`config.SetWorkDir`), so provider overrides/API keys come from the served project — never assume `os.Getwd()` (a Finder-launched `.app` starts at `/`).
+- `terminal_enabled` (default **on**): enables the interactive pty-backed terminal — `GET /api/terminal/ws` (WebSocket) and the **Terminal** sub-tab in the web UI. Set `"terminal_enabled": false` in `ocodeconfig.json` to disable it. The server serves one fixed project workdir; the UI only exposes Terminal when the selected project matches that workdir. An unauthenticated server may expose the terminal only on loopback; configure server credentials before binding it to a non-loopback address. `terminal_scrollback_lines` defaults to **9999** and is clamped to 100–100000.
+- **Bundled skills go stale**: the bundled skills (`ocode-tui`, `ocode-desktop`, `ocode-usage`, …) are snapshotted into the binary at build time. After upgrading ocode, run `ocode skills upgrade` to refresh your installed copies; until then the docs may describe features your binary lacks.
+
 ---
 
 ## 3. Modes of Operation
@@ -101,7 +107,7 @@ ocode --permission-mode off  # Disable permissions entirely
 ```
 
 **TUI Navigation:**
-- `Tab` / `Shift+Tab` — Switch tabs (chat, files, git, log)
+- `Tab` / `Shift+Tab` — Switch tabs (chat, agents, files, changes, git, log)
 - `Shift+Tab` (while agent running) — Toggle agent strip focus (cycle through running agents)
 - `Ctrl+P` — Search and open files (command palette)
 - `Ctrl+X` — Leader key (then `h` help, `u` undo, `r` redo, `n` new, `l` list, `c` compact, `t` thinking level)
@@ -181,9 +187,12 @@ ocode serve --tailscale
 ```
 
 **Web UI features:**
+- **Session tabs** — Sessions open as top-level tabs (sessions first); each has per-session sub-tabs: **Chat / Agents / Changes / Logs / Status**, plus **Terminal** when the server project has terminal access. Middle-click a session tab to close it. Cmd/Ctrl+W (desktop) closes the active session tab; Cmd/Ctrl+Q asks before quitting.
+- **Agents tab** — run list with full-screen detail view per agent run (also available as a per-session sub-tab)
 - **Mobile sidebar** — Overlay with backdrop on viewports < 768px
 - **Web shell** — `!` prefix in chat input runs local shell commands
-- **Live status panel** — Real-time model, context, LSP, spending, modified files
+- **Interactive terminal** *(unreleased, working tree)* — pty-backed terminal sub-tab (`GET /api/terminal/ws`, WebSocket) gated by `terminal_enabled`; unlike `POST /api/shell` it's a persistent interactive shell, one pty per connection, with an eight-session cap and 32 KiB inbound frame limit
+- **Live status panel** — Real-time model, context, LSP, spending, modified files; status bar shows live agent **activity** (LLM running, active tools, active sub-agents)
 - **File uploads** — Drag-and-drop uploads; directory set via `/upload` command
 
 **Endpoints:**
@@ -191,16 +200,19 @@ ocode serve --tailscale
 - `POST /api/chat` — Send message
 - `GET /api/chat/stream` — Stream response (SSE)
 - `POST /api/shell` — Run a local shell command (used by `!` prefix)
-- `GET /api/sessions` — List sessions (supports `?limit=&offset=` pagination)
+- `GET /api/terminal/ws` — Interactive pty terminal WebSocket *(unreleased, working tree)*; gated on `terminal_enabled`, same-origin-only upgrade, auth via `?token=` when credentials are configured, and loopback-only when they are not
+- `GET /api/sessions` — List sessions (supports `?limit=&offset=` pagination; returns lightweight refs)
 - `GET /api/sessions/:id` — Session detail with live model/context info
 - `GET /api/models` — List models
 - `GET /api/small-model` — Small model status (includes `enabled` field)
-- `GET /api/files/tree` — File tree
+- `GET /api/config/terminal`, `PUT /api/config/terminal` — Read/set `terminal_enabled` *(unreleased, working tree)*
+- `GET /api/files/tree` — File tree (anchored to the project workdir, `?depth=` param)
 - `GET /api/git/status` — Git status
-- `GET /api/tui-status` — Live TUI state (model, advisor, IDE, CWD, context, LSP, modified files)
+- `GET /api/tui-status` — Live TUI state (model, advisor, IDE, CWD, context, LSP, modified files, **agent activity**)
 - `GET /api/spending` — LLM token spending
-- `GET /api/lsp/statuses` — LSP server statuses
+- `GET /api/lsp/statuses` — LSP server statuses (shared LSP manager)
 - `GET /api/files/modified` — Modified files list
+- `GET /api/command-context/{standup,changes,review}` — Repo-analysis prompt built by the shared `commandctx` package (byte-identical to the TUI's `/standup`, `/changes`, `/review`)
 - `POST /api/uploads` — Upload endpoint configuration
 - `POST /api/uploads/file` — File upload endpoint
 
@@ -341,6 +353,8 @@ ocode skills uninstall ocode-tui
 | Skill | Description |
 |-------|-------------|
 | `ocode-tui` | TUI architecture guide |
+| `ocode-desktop` | Desktop shell (Wails) wiring guide |
+| `ocode-web` | Web SPA wiring guide |
 | `ocode-tools` | Built-in tool system reference |
 | `ocode-permissions` | Permission modes, policies, and configuration |
 | `ocode-agent-architecture` | Agent loop, context loading, provider abstraction |
@@ -446,6 +460,8 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/compact` | `[focus]` | Manually trigger context compaction | Uses configured summary model (separate from chat model) |
 | `/review` | | AI code review (working dir, file, commit, branch, or PR) | Uses parallel agents with shared notes bus |
 | `/standup` | `/catchup` | Caveman summary of recent commits + pending changes | Reviews last 5 commits + working-tree changes |
+| `/cron` | | Manage scheduled jobs | `list`, `describe <id>`, `remove <id>`, `add <kind> <args> <message>`; jobs fire in the long-lived serve/web/desktop host, not the TUI (see `docs/scheduled-jobs.md`) |
+| `/agents` | | Show active/queued subagents, or set max concurrent subagents | `status`, `limit <n>` (0 = unlimited) |
 | `/clear` | `/new` | Start a fresh conversation in the current session | Keeps session on disk; only clears in-memory messages |
 | `/session` | `/s`, `/resume` | List, pick, or resume sessions | Supports pagination with limit/offset |
 | `/export` | | Export session as JSON | Full transcript for backup or migration |
@@ -474,6 +490,8 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/btw` | `/by-the-way` | Add a quick aside to the conversation | Injects a note without breaking flow |
 | `/init` | | Analyze project and generate AGENTS.md | Project initialization |
 | `/help` | `/?` | Show all available commands | Auto-generated from registered command specs |
+
+**Web command parity (since 0.8.45):** the web/desktop UI supports the same slash-command surface as the TUI — `/standup`, `/changes`, `/review`, `/context`, `/lsp`, `/agents`, `/skills`, `/mcp`, `/cron`, `/small-model`, `/advisor`, `/github` all work in the web chat input. The repo-analysis ones (`/standup`, `/changes`, `/review`) build their prompts through the shared `internal/commandctx` package, so TUI and web get byte-identical context.
 
 ### Command Palette (`Ctrl+P`)
 
@@ -553,6 +571,8 @@ The **recommended** way to cut down on permission interruptions. An LLM-based la
 - The auto-permission model can only emit `allow` or `ask` — it **cannot** emit `deny` or widen scope
 - Hard blocks (destructive git, data exfiltration) are deterministic and final — the auto layer cannot override them
 - `allow_destructive: false` instructs the model to conservatively deny operations it cannot confidently approve
+- **`rm` scope hardening:** any `rm -f`/`-r` invocation whose targets resolve outside the project workdir requires approval in **every** mode (even YOLO or a persisted `rm` allow rule) — only in-scope `rm` stays auto-allowed
+- **Unavailable judge ≠ denial:** if the auto-permission LLM can't be reached (no model configured, local server down), the prompt shows a neutral "permission model unavailable — asking you instead" notice and falls back to the ordinary allow/deny prompt — it is **not** reported as an auto-denial
 
 ### Tool Permission Levels
 
@@ -566,9 +586,11 @@ Every tool/prefix rule resolves to one of:
 
 Default tool rules:
 ```
-Always allow:  read, glob, grep, list, lsp, skill, question, todoread, todowrite,
-              advisor, task, task_status, agent_status, repo_overview, plan_enter,
-              plan_exit, wait, bash_output, kill_shell
+Always allow:  read, glob, grep, list, lsp, lsp_diagnostics, skill, load_skill,
+              question, todoread, todowrite, todo_update, advisor, task,
+              task_status, agent_status, repo_overview, plan_enter,
+              plan_exit, wait, bash_output, kill_shell, list_processes,
+              ocr, cron
 
 Default allow: write, edit, multiedit, multi_file_edit, replace_lines,
               apply_patch, format
@@ -618,6 +640,28 @@ ocode includes a **secret redaction system** that detects and masks common crede
 
 ---
 
+## 10.6. Sub-Agent Tasks, Todo Plans & Background Processes
+
+### Task tool (sub-agent dispatch)
+
+The `task` tool dispatches a sub-agent. Recent additions:
+
+- **`expected_output` contract** — optional natural-language description of the required result shape (e.g. *"the full list of affected files, one path per line"*). When set, the sub-agent's final result is verified against it and retried **once in place** if it doesn't match; falls back to the agent definition's `expected_output` frontmatter, then no verification. Contract verdicts surface in `agent_status`/`task_status`, the TUI detail view, and the web Agents tab.
+- **`resume_task_id`** — resume a cancelled or completed sub-agent run instead of starting a new one (the sub-agent continues with its full prior conversation history).
+- **In-batch DAG** — `id` + `depends_on` turn a parallel batch into a wave-scheduled DAG: a node doesn't start until its named predecessors succeed, and the predecessor's final result is prepended to the child's context. Omit both fields for the legacy flat fan-out.
+- **Self-dispatch guard** — an agent can never dispatch another instance of its own type (e.g. `explore` spawning `explore`); it's refused outright to prevent unbounded recursion.
+- `todowrite`/`todo_update` are filtered out of sub-agent tool sets (main-agent-only).
+
+### Persistent todo plan
+
+- The agent's todo plan lives on disk at `.ocode/todo/<session-id>.md` with a **revision protocol** (targeted updates, destructive-replacement guard, advisory `flock` serialization). It's injected into the agent's context whenever non-empty; `todoread` is the canonical read before any mutation.
+
+### Background processes
+
+- `bash(..., run_in_background: true)` starts a background process. `list_processes` lists all running background processes sorted by start time, and `bash_output`/`kill_shell` manage them. (Since 0.8.45, `ProcInfo` carries `StartedAt`.)
+
+---
+
 ## 11. Sessions
 
 Sessions are stored in `~/.local/share/opencode/sessions/`
@@ -654,6 +698,10 @@ ocode run -fork "New direction"
 | "Permission denied" | Check file permissions, or enable the auto-permission layer (recommended) instead of `-yolo` |
 | "Connection refused" | Ensure server is running (`ocode serve`) |
 | TUI rendering issues | Resize terminal, check `TERM` env var |
+| Desktop file tree lists the whole filesystem | Old symptom of a Finder-launched `.app` (cwd `/`) — fixed by workdir anchoring; ensure `srv.SetWorkDir` ran at boot |
+| Terminal sub-tab / `/api/terminal/ws` missing | Check `terminal_enabled`, server credentials/bind address, and that the selected project matches the server's fixed workdir |
+| "Auto-denied by LLM permission model" with no judge configured | A dead/unreachable auto-permission model now shows a neutral "unavailable" notice and asks you instead — if you still see a denial banner, the model did return a verdict |
+| Todo plan edits conflict across processes | The todo file (`.ocode/todo/<session-id>.md`) uses advisory `flock`; if another ocode process holds it, wait for it to release rather than editing the file by hand |
 
 ### Debug Mode
 
@@ -688,6 +736,8 @@ ocode  # Will prompt for setup
 | `Shift+Enter` | New line in input |
 | `↑` / `↓` | History / scroll |
 | `Ctrl+C` | Interrupt agent |
+
+**Desktop (Wails) differences:** `Cmd/Ctrl+W` is deliberately unbound in the native menu so the key reaches the webview, where it closes the active **session tab** (not the app). `Cmd/Ctrl+Q` shows a native "Quit ocode?" confirmation before exiting. *(Unreleased — working tree, post-0.8.46.)*
 
 ---
 

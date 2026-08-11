@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/config"
 )
 
 func TestHandlerChatNoContent(t *testing.T) {
@@ -101,6 +103,44 @@ func TestNoAuthWhenEmpty(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", w.Code)
+	}
+}
+
+func TestTerminalRejectedOnUnauthenticatedNonLoopbackServer(t *testing.T) {
+	s := New("0.0.0.0:0", "", "", nil)
+	s.handler.mu.Lock()
+	s.handler.cfg = &config.Config{Ocode: config.OcodeConfig{TerminalEnabled: true}}
+	s.handler.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/config/terminal", nil)
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET terminal config status = %d, want 200", w.Code)
+	}
+	var status struct {
+		Enabled   bool `json:"enabled"`
+		Available bool `json:"available"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&status); err != nil {
+		t.Fatalf("decode terminal config: %v", err)
+	}
+	if status.Available || status.Enabled {
+		t.Fatalf("unsafe unauthenticated terminal status = %+v, want unavailable and disabled", status)
+	}
+
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("PUT", "/api/config/terminal", bytes.NewBufferString(`{"enabled":true}`))
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("enable terminal status = %d, want 403", w.Code)
+	}
+
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("GET", "/api/terminal/ws", nil)
+	s.mux.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("terminal websocket status = %d, want 403", w.Code)
 	}
 }
 

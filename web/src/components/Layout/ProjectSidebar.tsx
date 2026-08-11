@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useProjectState } from "../../stores/projectStore";
+import { useChatState } from "../../stores/chatStore";
 import { FolderGit2, Plus, Trash2, ChevronLeft, FolderOpen, Loader2, FolderSearch } from "lucide-react";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -7,6 +8,91 @@ import { ScrollArea } from "../ui/scroll-area";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "../ui/tooltip";
 import { Separator } from "../ui/separator";
 import DirectoryBrowser from "./DirectoryBrowser";
+
+type SessionStatus = "none" | "idle" | "running";
+
+/** Derive per-project session status from open tabs + chat slices.
+ *  "running" = any tab is streaming; "idle" = any tab has a real session
+ *  (non-new-* id); "none" = no sessions. */
+function useProjectSessionStatus(projectPath: string): SessionStatus {
+  const { state: projectState } = useProjectState();
+  const chatState = useChatState();
+  const tabs = projectState.tabsByProject[projectPath];
+
+  return useMemo(() => {
+    if (!tabs || tabs.length === 0) return "none";
+    for (const tab of tabs) {
+      if (tab.id.startsWith("new-")) continue;
+      const slice = chatState.sessions[tab.id];
+      if (slice?.isStreaming) return "running";
+    }
+    // Any non-new tab means a real session exists → idle.
+    const hasRealSession = tabs.some((t) => !t.id.startsWith("new-"));
+    return hasRealSession ? "idle" : "none";
+  }, [tabs, chatState.sessions]);
+}
+
+function SessionDot({ status }: { status: SessionStatus }) {
+  if (status === "none") return null;
+  return (
+    <span
+      className={`shrink-0 h-2 w-2 rounded-full ${
+        status === "running"
+          ? "bg-blue-500 animate-pulse"
+          : "bg-zinc-500"
+      }`}
+    />
+  );
+}
+
+interface ProjectRowProps {
+  project: { path: string; name: string };
+  isActive: boolean;
+  onSelect: () => void;
+  onRemove: () => void;
+}
+
+// A dedicated component (rather than inlining this in a .map()) so
+// useProjectSessionStatus is called at a stable top level per project
+// instance, not a variable number of times per ProjectSidebar render.
+function ProjectRow({ project, isActive, onSelect, onRemove }: ProjectRowProps) {
+  const status = useProjectSessionStatus(project.path);
+  return (
+    <div className="group relative px-1">
+      <Button
+        variant="ghost"
+        className={`w-full justify-start gap-3 px-3 h-auto py-2.5 text-sm ${
+          isActive
+            ? "bg-accent text-accent-foreground border-l-2 border-primary"
+            : "text-muted-foreground border-l-2 border-transparent"
+        }`}
+        onClick={onSelect}
+      >
+        <FolderGit2 className="w-4 h-4 shrink-0 text-muted-foreground/70" />
+        <div className="min-w-0 flex-1 text-left">
+          <div className="truncate font-medium text-foreground/90">
+            {project.name}
+          </div>
+          <div className="truncate text-xs text-muted-foreground/60">
+            {project.path}
+          </div>
+        </div>
+        <SessionDot status={status} />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="p-1 h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </Button>
+      </Button>
+    </div>
+  );
+}
 
 interface Props {
   isOpen: boolean;
@@ -102,38 +188,13 @@ export default function ProjectSidebar({ isOpen, onToggle }: Props) {
         ) : (
           <div className="py-1">
             {state.projects.map((project) => (
-              <div key={project.path} className="group relative px-1">
-                <Button
-                  variant="ghost"
-                  className={`w-full justify-start gap-3 px-3 h-auto py-2.5 text-sm ${
-                    state.activeProject?.path === project.path
-                      ? "bg-accent text-accent-foreground border-l-2 border-primary"
-                      : "text-muted-foreground border-l-2 border-transparent"
-                  }`}
-                  onClick={() => selectProject(project)}
-                >
-                  <FolderGit2 className="w-4 h-4 shrink-0 text-muted-foreground/70" />
-                  <div className="min-w-0 flex-1 text-left">
-                    <div className="truncate font-medium text-foreground/90">
-                      {project.name}
-                    </div>
-                    <div className="truncate text-xs text-muted-foreground/60">
-                      {project.path}
-                    </div>
-                  </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="p-1 h-6 w-6 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-destructive"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      removeProject(project.path);
-                    }}
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
-                </Button>
-              </div>
+              <ProjectRow
+                key={project.path}
+                project={project}
+                isActive={state.activeProject?.path === project.path}
+                onSelect={() => selectProject(project)}
+                onRemove={() => removeProject(project.path)}
+              />
             ))}
           </div>
         )}

@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -135,9 +136,6 @@ func main() {
 		}
 	}
 
-	// Set up the application menu (native Edit menu for Cmd+C/V etc.).
-	app.Menu.SetApplicationMenu(application.DefaultApplicationMenu())
-
 	// Create the main webview window.
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:      "main",
@@ -148,6 +146,15 @@ func main() {
 		MinHeight: 600,
 		URL:       desktopURL,
 	})
+
+	// Set up the application menu. The Wails default binds CmdOrCtrl+W to
+	// "Close Window" (which on this single-window shell quits the whole app)
+	// and CmdOrCtrl+Q to an unconfirmed quit. ocode sessions are web tabs, so
+	// Cmd/Ctrl+W is deliberately left unbound — the key reaches the webview,
+	// which closes the active session tab — and Cmd/Ctrl+Q asks for
+	// confirmation before quitting. The menu needs the window reference for
+	// the confirmation dialog, so it is built after window creation.
+	app.Menu.SetApplicationMenu(buildAppMenu(app, window))
 
 	// Closing the window quits the app. Without this, the system tray below
 	// keeps the process (and its in-process server) alive after the window
@@ -184,4 +191,85 @@ func main() {
 	if err := app.Run(); err != nil {
 		log.Printf("ocode-desktop: app run error: %v", err)
 	}
+}
+
+// buildAppMenu builds the native application menu. It differs from the Wails
+// default in two deliberate ways:
+//
+//   - CmdOrCtrl+W is NOT bound to any menu item. The default binds it to
+//     "Close Window", which on this single-window shell quits the whole app
+//     (WindowClosing → app.Quit). Desktop sessions are web tabs, so the key
+//     is left to fall through to the webview, where the frontend closes the
+//     active session tab instead. The frontend handles it in useKeyboard.
+//
+//   - CmdOrCtrl+Q (Quit) shows a native confirmation dialog first; the app
+//     only quits when the user confirms, so a stray ⌘Q cannot kill the app
+//     (and its in-process agent server) by accident.
+//
+// The standard Edit/View/Window menus are kept for text editing (Cmd+C/V),
+// reload/devtools, and window management.
+func buildAppMenu(app *application.App, window *application.WebviewWindow) *application.Menu {
+	menu := application.NewMenu()
+
+	// macOS application menu (first menu, named after the app).
+	if runtime.GOOS == "darwin" {
+		appMenu := menu.AddSubmenu("ocode")
+		appMenu.AddRole(application.About)
+		appMenu.AddSeparator()
+		appMenu.AddRole(application.ServicesMenu)
+		appMenu.AddSeparator()
+		appMenu.AddRole(application.Hide)
+		appMenu.AddRole(application.HideOthers)
+		appMenu.AddRole(application.UnHide)
+		appMenu.AddSeparator()
+		appMenu.Add("Quit ocode").
+			SetAccelerator("CmdOrCtrl+q").
+			OnClick(func(*application.Context) {
+				confirmQuit(app, window)
+			})
+	} else {
+		// Windows/Linux: Quit lives in the File menu.
+		fileMenu := menu.AddSubmenu("File")
+		fileMenu.Add("Quit ocode").
+			SetAccelerator("CmdOrCtrl+q").
+			OnClick(func(*application.Context) {
+				confirmQuit(app, window)
+			})
+	}
+
+	// Standard Edit menu (Cmd+C/V/X/A/Z for webview text fields).
+	menu.AddRole(application.EditMenu)
+
+	// View menu (reload, devtools, zoom, fullscreen).
+	menu.AddRole(application.ViewMenu)
+
+	// Window menu. The macOS role is fine (Minimise/Zoom/Front, no Cmd+W).
+	// On Windows/Linux the default role adds "Close Window" bound to Cmd+W,
+	// which we must not bind — build it manually without that item.
+	if runtime.GOOS == "darwin" {
+		menu.AddRole(application.WindowMenu)
+	} else {
+		winMenu := menu.AddSubmenu("Window")
+		winMenu.AddRole(application.Minimise)
+		winMenu.AddRole(application.Zoom)
+	}
+
+	return menu
+}
+
+// confirmQuit asks for explicit confirmation before quitting. Quit is
+// cancelled by default (Enter/Escape dismisses safely); the app only exits
+// when the user clicks the "Quit" button.
+func confirmQuit(app *application.App, window *application.WebviewWindow) {
+	dlg := app.Dialog.Question().
+		SetTitle("Quit ocode?").
+		SetMessage("Are you sure you want to quit ocode?").
+		AttachToWindow(window)
+	cancel := dlg.AddButton("Cancel")
+	cancel.SetAsCancel()
+	cancel.SetAsDefault()
+	dlg.AddButton("Quit").OnClick(func() {
+		app.Quit()
+	})
+	dlg.Show()
 }
