@@ -2027,3 +2027,11 @@ func SaveOcodeDiscoveryConfig(cfg DiscoveryConfig) error {
 		return nil
 	})
 }
+
+// SaveOcodeTUIConfig persists the TUI theme/input/keybind settings.
+func SaveOcodeTUIConfig(cfg TUIConfig) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.TUI = cfg
+		return nil
+	})
+}

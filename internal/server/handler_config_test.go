@@ -155,3 +155,23 @@ func TestHandleSetDiscoveryConfigPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetTUIConfigSectionPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"theme":"dracula","mouse":true,"scroll_speed":2.5,"keybinds":{"quit":"ctrl+c"},` +
+		`"leader_timeout":1000,"branchless":false}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/tui", strings.NewReader(body))
+	h.HandleSetTUIConfigSection(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode.TUI
+	h.mu.Unlock()
+	if got.Theme != "dracula" || got.Mouse == nil || !*got.Mouse || got.Keybinds["quit"] != "ctrl+c" {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}

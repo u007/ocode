@@ -796,3 +796,33 @@ func (h *Handler) HandleSetDiscoveryConfig(w http.ResponseWriter, r *http.Reques
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, req)
 }
+
+// HandleGetTUIConfigSection reports the TUI theme/input/keybind settings.
+func (h *Handler) HandleGetTUIConfigSection(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	cfg := config.TUIConfig{}
+	if h.cfg != nil {
+		cfg = h.cfg.Ocode.TUI
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+// HandleSetTUIConfigSection persists the TUI theme/input/keybind settings.
+func (h *Handler) HandleSetTUIConfigSection(w http.ResponseWriter, r *http.Request) {
+	var req config.TUIConfig
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodeTUIConfig(req); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.TUI = req
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, req)
+}
