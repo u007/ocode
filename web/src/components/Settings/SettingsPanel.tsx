@@ -1,6 +1,7 @@
 import { useState } from "react";
 import ModelDefaultsForm from "./ModelDefaultsForm";
 import CommitMsgForm from "./CommitMsgForm";
+import CompactForm from "./CompactForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -64,6 +65,8 @@ function renderGroup(id: SettingsGroupId) {
       return <ModelDefaultsForm />;
     case "commit-msg":
       return <CommitMsgForm />;
+    case "compact":
+      return <CompactForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
