@@ -2,6 +2,8 @@ import { useState } from "react";
 import ModelDefaultsForm from "./ModelDefaultsForm";
 import CommitMsgForm from "./CommitMsgForm";
 import CompactForm from "./CompactForm";
+import AdvisorForm from "./AdvisorForm";
+import PermissionsForm from "./PermissionsForm";
 
 export type SettingsGroupId =
   | "model-defaults"
@@ -67,6 +69,10 @@ function renderGroup(id: SettingsGroupId) {
       return <CommitMsgForm />;
     case "compact":
       return <CompactForm />;
+    case "advisor":
+      return <AdvisorForm />;
+    case "permissions":
+      return <PermissionsForm />;
     default:
       return (
         <div className="text-sm text-zinc-500 p-6">
