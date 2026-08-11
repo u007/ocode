@@ -1,23 +1,18 @@
 import { useState, useEffect } from "react";
 import { api, apiPath, authHeaders } from "../../api/client";
-import { useChatState, useChatDispatch, getSessionSlice } from "../../stores/chatStore";
+import { useChatState, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
-import type { AgentInfo, LSPStatus, MCPStatus } from "../../api/types";
-import { applyThemeColors } from "../../hooks/useTheme";
+import type { AgentInfo, LSPStatus } from "../../api/types";
 import PluginsPanel from "./PluginsPanel";
 import {
   Bot,
-  Wrench,
   FileText,
   ChevronDown,
   ChevronRight,
-  Cpu,
-  Link,
   Hash,
   Zap,
   Target,
   GitBranch,
-  Palette,
   AlertCircle,
   AlertTriangle,
   Puzzle,
@@ -35,10 +30,36 @@ interface Props {
 
 interface ConfigState {
   model: string;
-  smallModel: string;
-  advisorModel: string;
-  permissionMode: string;
-  autoAllow: boolean;
+}
+
+// Expanded/collapsed state of the sidebar sections. Persisted to localStorage
+// (versioned key, same pattern as the session tabs in projectStore) so the
+// user's layout survives reloads. Models/Theme/Tools/Paths sections moved to
+// the Settings tab (v2 key so removed section keys don't linger in old state).
+const SIDEBAR_SECTIONS_KEY = "ocode.ui.sidebar.v2";
+
+const DEFAULT_SECTIONS: Record<string, boolean> = {
+  agent: true,
+  context: true,
+  lsp: false,
+  files: false,
+  todo: false,
+  git: true,
+};
+
+function loadExpandedSections(): Record<string, boolean> {
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_SECTIONS_KEY);
+    if (!raw) return DEFAULT_SECTIONS;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return DEFAULT_SECTIONS;
+    // Merge so newly added sections inherit their defaults instead of
+    // silently collapsing.
+    return { ...DEFAULT_SECTIONS, ...parsed };
+  } catch (err) {
+    console.error("Failed to load sidebar sections:", err);
+    return DEFAULT_SECTIONS;
+  }
 }
 
 export default function CoworkSidebar({
@@ -51,29 +72,11 @@ export default function CoworkSidebar({
   const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [config, setConfig] = useState<ConfigState>({
     model: "",
-    smallModel: "",
-    advisorModel: "",
-    permissionMode: "auto",
-    autoAllow: false,
   });
-  const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({
-    agent: true,
-    models: false,
-    tools: false,
-    context: true,
-    paths: false,
-    lsp: false,
-    files: false,
-    todo: false,
-    theme: false,
-    git: true,
-  });
+  const [expandedSections, setExpandedSections] =
+    useState<Record<string, boolean>>(loadExpandedSections);
   const projectState = useProjectState();
   const [gitBranch, setGitBranch] = useState<string>("");
-  const [mcpServers, setMcpServers] = useState<MCPStatus[]>([]);
-  const [mcpBusy, setMcpBusy] = useState<string | null>(null);
-  const [themes, setThemes] = useState<{ name: string; label: string }[]>([]);
-  const [currentTheme, setCurrentTheme] = useState<string>("");
   const [todoItems] = useState<string[]>([]);
   // Locally-tracked active agent. The `activeAgent` prop is fixed by the
   // parent, so switching agents is reflected via this optimistic state.
@@ -81,19 +84,38 @@ export default function CoworkSidebar({
   const [agentBusy, setAgentBusy] = useState(false);
   const [pluginsOpen, setPluginsOpen] = useState(false);
   const chatState = useChatState();
-  const {
-    model,
-    smallModel,
-    smallModelEnabled,
-    advisorModel,
-    advisorEnabled,
-    ocrModel,
-    ocrEnabled,
-    ocrBackend,
-  } = chatState;
-  const dispatch = useChatDispatch();
+  const { model } = chatState;
   const { activeTabId: sessionId } = projectState;
-  const { tuiStatus } = getSessionSlice(chatState, sessionId);
+  const { tuiStatus, messages } = getSessionSlice(chatState, sessionId);
+  // Fallback context usage for when no TUI is bridged to this server (pure
+  // web/desktop sessions) — tuiStatus.context_* only gets populated by a live
+  // TUI process, so without this the sidebar would show "No context data
+  // yet" forever. /api/sessions/:id/context computes the same estimate from
+  // the saved session messages independent of any TUI.
+  const [fallbackContext, setFallbackContext] = useState<{
+    current: number;
+    max: number;
+    model?: string;
+  } | null>(null);
+  const tuiContextMax = tuiStatus?.context_max_tokens ?? 0;
+  useEffect(() => {
+    if (!sessionId || tuiContextMax > 0) return;
+    let cancelled = false;
+    api
+      .getSessionContext(sessionId)
+      .then((res) => {
+        if (cancelled) return;
+        setFallbackContext({
+          current: res.estimated_tokens,
+          max: res.max_tokens ?? 0,
+          model: res.model,
+        });
+      })
+      .catch((err) => console.error("Failed to fetch session context:", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, messages.length, tuiContextMax]);
 
   // Fetch git branch periodically
   useEffect(() => {
@@ -118,42 +140,28 @@ export default function CoworkSidebar({
   useEffect(() => {
     api.listAgents().then(setAgents).catch(console.error);
 
-    // Fetch config
+    // Fetch the main model name for the compact Model trigger.
     Promise.all([
       fetch(apiPath("/api/config/model"), { headers: authHeaders() }).then((r) => r.json()),
-      fetch(apiPath("/api/config/small-model"), { headers: authHeaders() }).then((r) => r.json()),
-      fetch(apiPath("/api/config/advisor"), { headers: authHeaders() }).then((r) => r.json()),
-      fetch(apiPath("/api/permissions"), { headers: authHeaders() }).then((r) => r.json()),
     ])
-      .then(([modelRes, smallRes, advisorRes, permRes]) => {
+      .then(([modelRes]) => {
         setConfig({
           model: (modelRes as { model: string }).model || "",
-          smallModel: (smallRes as { small_model: string }).small_model || "",
-          advisorModel: (advisorRes as { advisor: string }).advisor || "",
-          permissionMode: (permRes as { mode: string }).mode || "auto",
-          autoAllow: (permRes as { auto_allow: boolean }).auto_allow || false,
         });
       })
       .catch(console.error);
   }, []);
 
-  // Fetch real MCP server status (replaces the previously hardcoded tool chips).
-  useEffect(() => {
-    api.getMCP().then(setMcpServers).catch(console.error);
-  }, []);
-
-  // Fetch the list of available themes for the theme selector.
-  useEffect(() => {
-    api
-      .getThemes()
-      .then((res) => {
-        setThemes(res.themes);
-        setCurrentTheme(res.current);
-      })
-      .catch(console.error);
-  }, []);
-
   const currentAgent = agents.find((a) => a.name === selectedAgent);
+
+  // Persist the expanded/collapsed section layout so it survives reloads.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_SECTIONS_KEY, JSON.stringify(expandedSections));
+    } catch (err) {
+      console.error("Failed to persist sidebar sections:", err);
+    }
+  }, [expandedSections]);
 
   const toggleSection = (section: string) => {
     setExpandedSections((prev) => ({ ...prev, [section]: !prev[section] }));
@@ -175,81 +183,18 @@ export default function CoworkSidebar({
       .finally(() => setAgentBusy(false));
   };
 
-  // Enable/disable an MCP server. Optimistically flips the toggle; rolls back on
-  // failure so the UI stays truthful.
-  const toggleMcp = (server: MCPStatus) => {
-    const next = !server.enabled;
-    setMcpBusy(server.name);
-    setMcpServers((prev) =>
-      prev.map((m) => (m.name === server.name ? { ...m, enabled: next } : m)),
-    );
-    api
-      .setMCPEnabled(server.name, next)
-      .catch((err) => {
-        console.error("failed to toggle MCP server", err);
-        setMcpServers((prev) =>
-          prev.map((m) => (m.name === server.name ? { ...m, enabled: server.enabled } : m)),
-        );
-      })
-      .finally(() => setMcpBusy(null));
-  };
-
-  const toggleAdvisor = () => {
-    const next = !advisorEnabled;
-    dispatch({ type: "SET_ADVISOR_ENABLED", enabled: next });
-    api.setAdvisorEnabled(next).catch((err) => {
-      console.error("failed to toggle advisor", err);
-      // Roll back optimistic update on failure so the UI stays truthful.
-      dispatch({ type: "SET_ADVISOR_ENABLED", enabled: advisorEnabled });
-    });
-  };
-
-  // Toggle the small-model runtime gate on/off. Persisted to config (like the
-  // TUI's small-model sidebar toggle), so this is NOT session-only like the
-  // advisor toggle.
-  const toggleSmallModel = () => {
-    const next = !smallModelEnabled;
-    dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: next });
-    api.setSmallModelEnabled(next).catch((err) => {
-      console.error("failed to toggle small model", err);
-      // Roll back optimistic update on failure so the UI stays truthful.
-      dispatch({ type: "SET_SMALL_MODEL_ENABLED", enabled: smallModelEnabled });
-    });
-  };
-
-  const toggleOcr = () => {
-    const next = !ocrEnabled;
-    dispatch({ type: "SET_OCR_ENABLED", enabled: next });
-    api.setOcrEnabled(next).catch((err) => {
-      console.error("failed to toggle ocr", err);
-      // Roll back optimistic update on failure so the UI stays truthful.
-      dispatch({ type: "SET_OCR_ENABLED", enabled: ocrEnabled });
-    });
-  };
-
-  // Apply a theme by fetching its colors from the server and writing them to
-  // the CSS variables. The change is visual only (the web is a remote viewer);
-  // the TUI theme is owned by the terminal config.
-  const applyTheme = (name: string) => {
-    api
-      .getTheme(name)
-      .then((resp) => {
-        applyThemeColors(resp.colors);
-        setCurrentTheme(name);
-      })
-      .catch((err) => console.error("failed to apply theme", err));
-  };
-
-  // Real data sourced from the live TUI status snapshot.
-  const contextCurrent = tuiStatus?.context_current_tokens ?? 0;
-  const contextMax = tuiStatus?.context_max_tokens ?? 0;
+  // Real data sourced from the live TUI status snapshot, falling back to the
+  // per-session estimate when no TUI is bridged (see fallbackContext above).
+  const contextCurrent =
+    tuiContextMax > 0 ? (tuiStatus?.context_current_tokens ?? 0) : (fallbackContext?.current ?? 0);
+  const contextMax = tuiContextMax > 0 ? tuiContextMax : (fallbackContext?.max ?? 0);
+  const contextModel = tuiContextMax > 0 ? tuiStatus?.context_model : fallbackContext?.model;
   const contextPct =
     contextMax > 0
       ? Math.min(100, Math.round((contextCurrent / contextMax) * 100))
       : 0;
   const lspServers: LSPStatus[] = tuiStatus?.lsp_servers ?? [];
   const modifiedFiles = tuiStatus?.modified_files ?? [];
-  const extraPaths = tuiStatus?.extra_allowed_paths ?? [];
 
   // On mobile the sidebar is always mounted (so it can slide); when closed it
   // sits off-screen. On desktop it is fully removed when closed so the chat
@@ -349,150 +294,22 @@ export default function CoworkSidebar({
           )}
         </div>
 
-        {/* Models Section */}
-        <div className="border-b border-zinc-700">
+        {/* Compact main-model trigger — Small/Advisor/OCR/Permissions moved to
+            the Settings tab (see docs/superpowers/specs/2026-08-11-configuration-ui-design.md).
+            This is the only remaining sidebar entry point for ModelDialog,
+            which stays out of scope for this feature. */}
+        <div className="border-b border-zinc-700 px-4 py-2.5">
           <button
-            onClick={() => toggleSection("models")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
+            type="button"
+            onClick={() => onModelClick?.("main")}
+            className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
+            disabled={!onModelClick}
           >
-            {expandedSections.models ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-            <Cpu className="w-4 h-4 text-purple-400" />
-            Models
-          </button>
-          {expandedSections.models && (
-            <div className="px-4 pb-3 space-y-2">
-              <button
-                type="button"
-                onClick={() => onModelClick?.("main")}
-                className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
-                disabled={!onModelClick}
-              >
-                <div className="text-zinc-500 mb-1">Main Model</div>
-                <div className="text-zinc-300 font-mono truncate">
-                  {model || config.model || "Not set"}
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={() => onModelClick?.("small")}
-                className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
-                disabled={!onModelClick}
-              >
-                <div className="text-zinc-500 mb-1">Small Model</div>
-                <div className="text-zinc-300 font-mono truncate">
-                  {smallModel || config.smallModel || "Not set"}
-                </div>
-              </button>
-              {/* Small model runtime on/off — persisted to config, mirrors the
-                  TUI's small-model sidebar toggle. */}
-              <button
-                type="button"
-                onClick={toggleSmallModel}
-                className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800"
-                title="Enable or disable the small model (persisted to config)"
-              >
-                <span className="text-zinc-500">Small Model</span>
-                <span className="flex items-center gap-2">
-                  <span
-                    className={`font-mono ${smallModelEnabled ? "text-emerald-400" : "text-zinc-500"}`}
-                  >
-                    {smallModelEnabled ? "on" : "off"}
-                  </span>
-                  <span
-                    className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
-                      smallModelEnabled ? "bg-emerald-500/80" : "bg-zinc-600"
-                    }`}
-                  >
-                    <span
-                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                        smallModelEnabled ? "translate-x-3.5" : "translate-x-0.5"
-                      }`}
-                    />
-                  </span>
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => onModelClick?.("advisor")}
-                className="w-full rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800 disabled:cursor-default disabled:hover:bg-transparent"
-                disabled={!onModelClick}
-              >
-                <div className="text-zinc-500 mb-1">Advisor Model</div>
-                <div className="text-zinc-300 font-mono truncate">
-                  {advisorModel || config.advisorModel || "Not set"}
-                </div>
-              </button>
-              {/* Runtime advisor on/off — session-only, not saved to config. */}
-              <button
-                type="button"
-                onClick={toggleAdvisor}
-                className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800"
-                title="Enable or disable the advisor tool for this session (not saved to config)"
-              >
-                <span className="text-zinc-500">Advisor</span>
-                <span className="flex items-center gap-2">
-                  <span
-                    className={`font-mono ${advisorEnabled ? "text-emerald-400" : "text-zinc-500"}`}
-                  >
-                    {advisorEnabled ? "on" : "off"}
-                  </span>
-                  <span
-                    className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
-                      advisorEnabled ? "bg-emerald-500/80" : "bg-zinc-600"
-                    }`}
-                  >
-                    <span
-                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                        advisorEnabled ? "translate-x-3.5" : "translate-x-0.5"
-                      }`}
-                    />
-                  </span>
-                </span>
-              </button>
-              {/* OCR tool on/off toggle */}
-              <div className="mt-1 mb-1 border-t border-zinc-700/50" />
-              <div className="text-zinc-500 mb-1 text-xs">OCR</div>
-              <div className="text-zinc-600 text-xs mb-1">{ocrBackend || "openai-compat"}</div>
-              <button
-                type="button"
-                onClick={toggleOcr}
-                className="flex w-full items-center justify-between rounded px-1 py-1 text-left text-xs transition-colors hover:bg-zinc-800"
-                title="Enable or disable the OCR tool"
-              >
-                <span className="text-zinc-400 truncate font-mono">
-                  {ocrModel || "Not set"}
-                </span>
-                <span className="flex items-center gap-2">
-                  <span
-                    className={`font-mono ${ocrEnabled ? "text-emerald-400" : "text-zinc-500"}`}
-                  >
-                    {ocrEnabled ? "on" : "off"}
-                  </span>
-                  <span
-                    className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
-                      ocrEnabled ? "bg-emerald-500/80" : "bg-zinc-600"
-                    }`}
-                  >
-                    <span
-                      className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                        ocrEnabled ? "translate-x-3.5" : "translate-x-0.5"
-                      }`}
-                    />
-                  </span>
-                </span>
-              </button>
-              <div className="text-xs">
-                <div className="text-zinc-500 mb-1">Permission Model</div>
-                <div className="text-zinc-300 font-mono truncate">
-                  {config.autoAllow ? "Auto-allow" : config.permissionMode}
-                </div>
-              </div>
+            <div className="text-zinc-500 mb-1">Model</div>
+            <div className="text-zinc-300 font-mono truncate">
+              {model || config.model || "Not set"}
             </div>
-          )}
+          </button>
         </div>
 
         {/* Context Section — real token usage from the TUI status snapshot. */}
@@ -533,9 +350,9 @@ export default function CoworkSidebar({
                   </div>
                   <div className="text-right text-[11px] text-zinc-500 mt-1">
                     {contextPct}%
-                    {tuiStatus?.context_model && (
+                    {contextModel && (
                       <span className="ml-2 text-zinc-600 font-mono">
-                        {tuiStatus.context_model}
+                        {contextModel}
                       </span>
                     )}
                   </div>
@@ -544,41 +361,6 @@ export default function CoworkSidebar({
                 <div className="text-xs text-zinc-500">
                   No context data yet
                 </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Extra Allowed Paths Section */}
-        <div className="border-b border-zinc-700">
-          <button
-            onClick={() => toggleSection("paths")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
-          >
-            {expandedSections.paths ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-            <Link className="w-4 h-4 text-indigo-400" />
-            Extra Paths
-          </button>
-          {expandedSections.paths && (
-            <div className="px-4 pb-3">
-              {extraPaths.length > 0 ? (
-                <div className="space-y-1">
-                  {extraPaths.map((p) => (
-                    <div
-                      key={p}
-                      className="text-xs text-zinc-400 p-1.5 rounded bg-zinc-800 font-mono truncate"
-                      title={p}
-                    >
-                      {p}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-xs text-zinc-500">No extra paths</div>
               )}
             </div>
           )}
@@ -702,68 +484,6 @@ export default function CoworkSidebar({
           )}
         </div>
 
-        {/* Tools / MCP Section — real MCP server status. */}
-        <div className="border-b border-zinc-700">
-          <button
-            onClick={() => toggleSection("tools")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
-          >
-            {expandedSections.tools ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-            <Wrench className="w-4 h-4 text-green-400" />
-            Tools / MCP
-          </button>
-          {expandedSections.tools && (
-            <div className="px-4 pb-3">
-              {mcpServers.length > 0 ? (
-                <div className="space-y-1">
-                  {mcpServers.map((m) => (
-                    <div
-                      key={m.name}
-                      className="flex items-center justify-between text-xs text-zinc-400 p-1.5 rounded bg-zinc-800"
-                    >
-                      <span className="truncate font-mono" title={m.name}>
-                        {m.name}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => toggleMcp(m)}
-                        disabled={mcpBusy === m.name}
-                        className="flex items-center gap-2 flex-shrink-0 disabled:opacity-50"
-                        title={m.enabled ? "Disable MCP server" : "Enable MCP server"}
-                      >
-                        <span
-                          className={`text-[10px] ${
-                            m.enabled ? "text-emerald-400" : "text-zinc-500"
-                          }`}
-                        >
-                          {m.enabled ? "on" : "off"}
-                        </span>
-                        <span
-                          className={`relative inline-flex h-4 w-7 flex-shrink-0 items-center rounded-full transition-colors ${
-                            m.enabled ? "bg-emerald-500/80" : "bg-zinc-600"
-                          }`}
-                        >
-                          <span
-                            className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
-                              m.enabled ? "translate-x-3.5" : "translate-x-0.5"
-                            }`}
-                          />
-                        </span>
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-xs text-zinc-500">No MCP servers</div>
-              )}
-            </div>
-          )}
-        </div>
-
         {/* Plugins Section — opens the full plugin manager dialog. */}
         <div className="border-b border-zinc-700">
           <button
@@ -813,47 +533,6 @@ export default function CoworkSidebar({
                     Agent will add items during execution
                   </div>
                 </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Theme Section — functional theme selector. */}
-        <div className="border-b border-zinc-700">
-          <button
-            onClick={() => toggleSection("theme")}
-            className="flex items-center gap-2 w-full px-4 py-2.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800"
-          >
-            {expandedSections.theme ? (
-              <ChevronDown className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-            <Palette className="w-4 h-4 text-pink-400" />
-            Theme
-          </button>
-          {expandedSections.theme && (
-            <div className="px-4 pb-3">
-              {themes.length > 0 ? (
-                <div className="grid grid-cols-2 gap-1.5">
-                  {themes.map((t) => (
-                    <button
-                      key={t.name}
-                      type="button"
-                      onClick={() => applyTheme(t.name)}
-                      className={`text-xs rounded px-2 py-1.5 truncate transition-colors ${
-                        currentTheme === t.name
-                          ? "bg-emerald-600/30 text-emerald-300 border border-emerald-600/50"
-                          : "bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
-                      }`}
-                      title={t.name}
-                    >
-                      {t.label}
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-xs text-zinc-500">No themes</div>
               )}
             </div>
           )}
