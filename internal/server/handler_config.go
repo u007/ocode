@@ -826,3 +826,45 @@ func (h *Handler) HandleSetTUIConfigSection(w http.ResponseWriter, r *http.Reque
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, req)
 }
+
+// HandleGetEditorConfig reports the editor/editor-mode/ide-mode settings.
+func (h *Handler) HandleGetEditorConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	editor, editorMode, ideMode := "", "", ""
+	if h.cfg != nil {
+		editor = h.cfg.Ocode.Editor
+		editorMode = h.cfg.Ocode.EditorMode
+		ideMode = h.cfg.Ocode.IDEMode
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"editor": editor, "editor_mode": editorMode, "ide_mode": ideMode,
+	})
+}
+
+// HandleSetEditorConfig persists the editor/editor-mode/ide-mode settings.
+func (h *Handler) HandleSetEditorConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Editor     string `json:"editor"`
+		EditorMode string `json:"editor_mode"`
+		IDEMode    string `json:"ide_mode"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveOcodeEditorConfig(req.Editor, req.EditorMode, req.IDEMode); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.Editor = req.Editor
+		h.cfg.Ocode.EditorMode = req.EditorMode
+		h.cfg.Ocode.IDEMode = req.IDEMode
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"editor": req.Editor, "editor_mode": req.EditorMode, "ide_mode": req.IDEMode,
+	})
+}

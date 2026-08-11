@@ -175,3 +175,22 @@ func TestHandleSetTUIConfigSectionPersists(t *testing.T) {
 		t.Errorf("in-memory cfg not updated: %+v", got)
 	}
 }
+
+func TestHandleSetEditorConfigPersists(t *testing.T) {
+	h := testConfigHandler(t)
+
+	body := `{"editor":"code","editor_mode":"external","ide_mode":"none"}`
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/ocode/editor", strings.NewReader(body))
+	h.HandleSetEditorConfig(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", w.Code, w.Body.String())
+	}
+	h.mu.Lock()
+	got := h.cfg.Ocode
+	h.mu.Unlock()
+	if got.Editor != "code" || got.EditorMode != "external" || got.IDEMode != "none" {
+		t.Errorf("in-memory cfg not updated: %+v", got)
+	}
+}

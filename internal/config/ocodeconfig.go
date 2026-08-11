@@ -2035,3 +2035,13 @@ func SaveOcodeTUIConfig(cfg TUIConfig) error {
 		return nil
 	})
 }
+
+// SaveOcodeEditorConfig persists the editor/editor-mode/ide-mode settings.
+func SaveOcodeEditorConfig(editor, editorMode, ideMode string) error {
+	return withOcodeConfigLock(func(c *OcodeConfig) error {
+		c.Editor = editor
+		c.EditorMode = editorMode
+		c.IDEMode = ideMode
+		return nil
+	})
+}
