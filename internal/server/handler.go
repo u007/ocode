@@ -21,7 +21,6 @@ import (
 	shellpkg "github.com/u007/ocode/internal/shell"
 	ocodesync "github.com/u007/ocode/internal/sync"
 	"github.com/u007/ocode/internal/tabs"
-	"github.com/u007/ocode/internal/tool"
 )
 
 type Handler struct {
@@ -262,24 +261,21 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	model := req.Model
-	if model == "" {
-		if h.cfg != nil && h.cfg.Model != "" {
-			model = h.cfg.Model
-		} else {
+	if model == "" && h.cfg != nil {
+		model = h.cfg.Model
+	}
+
+	createdSession := false
+	sid := req.SessionID
+	as := h.lookupAgentSession(sid)
+
+	if as == nil {
+		// A model is only required to build a new agent; a resident session
+		// already carries the model it was created with.
+		if model == "" {
 			writeError(w, http.StatusBadRequest, "no model configured")
 			return
 		}
-	}
-
-	h.mu.Lock()
-	var as *agentSession
-	createdSession := false
-	if req.SessionID != "" {
-		as = h.agents[req.SessionID]
-	}
-
-	if as == nil {
-		sid := req.SessionID
 		if sid == "" {
 			sid = session.NewSessionID()
 			createdSession = true
@@ -293,103 +289,36 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		client := agent.NewClient(h.cfg, model)
-		if client == nil {
-			h.mu.Unlock()
-			writeError(w, http.StatusInternalServerError, "failed to create LLM client")
+		// Built with no handler lock held — see agent_session.go.
+		var err error
+		as, err = h.ensureAgentSession(sid, model, messages)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-
-		lspMgr := h.sharedLSPManager()
-		tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
-		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-		ag.LoadExternalTools(h.cfg)
-		mcpTools, mcpErrs := h.mcpCache.wait()
-		ag.AddMCPTools(mcpTools)
-		ag.AddMCPErrors(mcpErrs)
-		ag.SetAdvisorEnabled(h.advisorEnabled)
-
-		as = &agentSession{
-			agent:    ag,
-			messages: messages,
-			model:    model,
-		}
-		h.agents[sid] = as
 		req.SessionID = sid
 	}
-	h.mu.Unlock()
 
-	as.mu.Lock()
-	defer as.mu.Unlock()
+	opts := turnOptions{sessionStarted: createdSession, requestID: req.RequestID}
 
-	as.messages = append(as.messages, agent.Message{Role: "user", Content: req.Content})
-	messages := append([]agent.Message(nil), as.messages...)
-
-	// In headless mode (no RC bridge), wire up streaming callbacks so live
-	// tokens and tool activity are broadcast to SSE mirror subscribers.
-	if h.rc == nil {
-		if createdSession {
-			h.broadcastEvent(SSEEvent{
-				SessionID: req.SessionID,
-				Event:     "session_started",
-				Data: map[string]string{
-					"session_id": req.SessionID,
-					"request_id": req.RequestID,
-				},
-			})
-		}
-		// Broadcast the user message so the SSE mirror can echo it.
-		h.broadcastEvent(SSEEvent{
+	// Async: acknowledge immediately and stream the turn over the SSE mirror.
+	if req.Async {
+		h.startTurnAsync(req.SessionID, as, req.Content, opts)
+		writeJSON(w, http.StatusAccepted, ChatResponse{
 			SessionID: req.SessionID,
-			Event:     "user_message",
-			Data:      map[string]string{"content": req.Content},
+			Model:     as.model,
 		})
-		h.wireHeadlessAgentCallbacks(req.SessionID, as.agent)
+		return
 	}
 
-	resp, err := as.agent.Step(messages)
+	content, err := h.runTurn(req.SessionID, as, req.Content, opts)
 	if err != nil {
-		log.Printf("serve error: agent step: %v", err)
-		if h.rc == nil {
-			h.broadcastEvent(SSEEvent{
-				SessionID: req.SessionID,
-				Event:     "error",
-				Data:      map[string]string{"error": err.Error()},
-			})
-		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
 	}
 
-	as.messages = append(as.messages, resp...)
-
-	var content strings.Builder
-	for _, m := range resp {
-		if m.Role == "assistant" && m.Content != "" {
-			content.WriteString(m.Content)
-		}
-	}
-
-	_ = session.Save(req.SessionID, "", as.messages, nil)
-	h.maybeGenerateSessionTitle(req.SessionID, as)
-
-	// Broadcast the authoritative message snapshot and turn_done so the SSE
-	// mirror (and any connected browser) is in sync.
-	if h.rc == nil {
-		h.broadcastEvent(SSEEvent{
-			SessionID: req.SessionID,
-			Event:     "messages",
-			Data:      as.messages,
-		})
-		h.broadcastEvent(SSEEvent{
-			SessionID: req.SessionID,
-			Event:     "turn_done",
-			Data:      DoneEvent{SessionID: req.SessionID, Model: as.model},
-		})
-	}
-
 	writeJSON(w, http.StatusOK, ChatResponse{
-		Content:   content.String(),
+		Content:   content,
 		SessionID: req.SessionID,
 		Model:     as.model,
 	})
@@ -504,6 +433,8 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id string) {
 	var req struct {
 		Content string `json:"content"`
+		// Async: see ChatRequest.Async.
+		Async bool `json:"async,omitempty"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -514,13 +445,8 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	h.mu.Lock()
-
 	// If we have an RC bridge, forward to the TUI's agent instead of using our own.
-	if h.rc != nil {
-		rc := h.rc
-		h.mu.Unlock()
-
+	if rc := h.RCBridge(); rc != nil {
 		resultCh := make(chan RCResult, 1)
 		select {
 		case rc.RcCh <- RCRequest{Content: req.Content, ResultCh: resultCh}:
@@ -552,111 +478,46 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	as, ok := h.agents[id]
-	if !ok {
+	as := h.lookupAgentSession(id)
+	if as == nil {
 		s, err := session.Load(id)
 		if err != nil {
-			h.mu.Unlock()
 			writeError(w, http.StatusNotFound, "session not found")
 			return
 		}
 
-		model := h.cfg.Model
+		model := ""
+		if h.cfg != nil {
+			model = h.cfg.Model
+		}
 		if model == "" {
-			h.mu.Unlock()
 			writeError(w, http.StatusBadRequest, "no model configured")
 			return
 		}
 
-		client := agent.NewClient(h.cfg, model)
-		if client == nil {
-			h.mu.Unlock()
-			writeError(w, http.StatusInternalServerError, "failed to create LLM client")
+		// Built with no handler lock held — see agent_session.go.
+		as, err = h.ensureAgentSession(id, model, s.Messages)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-
-		lspMgr := h.sharedLSPManager()
-		tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
-		ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-		ag.LoadExternalTools(h.cfg)
-		mcpTools, mcpErrs := h.mcpCache.wait()
-		ag.AddMCPTools(mcpTools)
-		ag.AddMCPErrors(mcpErrs)
-		ag.SetAdvisorEnabled(h.advisorEnabled)
-
-		as = &agentSession{
-			agent:    ag,
-			messages: s.Messages,
-			model:    model,
-		}
-		h.agents[id] = as
-	}
-	h.mu.Unlock()
-
-	as.mu.Lock()
-	defer as.mu.Unlock()
-
-	as.messages = append(as.messages, agent.Message{Role: "user", Content: req.Content})
-	messages := append([]agent.Message(nil), as.messages...)
-
-	// In headless mode (no RC bridge), wire up streaming callbacks so live
-	// tokens and tool activity are broadcast to SSE mirror subscribers.
-	if h.rc == nil {
-		// Broadcast the user message so the SSE mirror can echo it.
-		h.broadcastEvent(SSEEvent{
-			SessionID: id,
-			Event:     "user_message",
-			Data:      map[string]string{"content": req.Content},
-		})
-		h.wireHeadlessAgentCallbacks(id, as.agent)
 	}
 
-	resp, err := as.agent.Step(messages)
+	// Async: acknowledge immediately and stream the turn over the SSE mirror.
+	if req.Async {
+		h.startTurnAsync(id, as, req.Content, turnOptions{})
+		writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: as.model})
+		return
+	}
+
+	content, err := h.runTurn(id, as, req.Content, turnOptions{})
 	if err != nil {
-		log.Printf("serve error: agent step: %v", err)
-		if h.rc == nil {
-			h.broadcastEvent(SSEEvent{
-				SessionID: id,
-				Event:     "error",
-				Data:      map[string]string{"error": err.Error()},
-			})
-		}
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
 	}
 
-	as.messages = append(as.messages, resp...)
-
-	var content strings.Builder
-	for _, m := range resp {
-		if m.Role == "assistant" && m.Content != "" {
-			content.WriteString(m.Content)
-		}
-	}
-
-	_ = session.Save(id, "", as.messages, nil)
-
-	// Headless-only: generate a title for an untitled session after its first
-	// turn (mirrors the TUI; no-op when an RC bridge is attached).
-	h.maybeGenerateSessionTitle(id, as)
-
-	// Broadcast the authoritative message snapshot and turn_done so the SSE
-	// mirror (and any connected browser) is in sync.
-	if h.rc == nil {
-		h.broadcastEvent(SSEEvent{
-			SessionID: id,
-			Event:     "messages",
-			Data:      as.messages,
-		})
-		h.broadcastEvent(SSEEvent{
-			SessionID: id,
-			Event:     "turn_done",
-			Data:      DoneEvent{SessionID: id, Model: as.model},
-		})
-	}
-
 	writeJSON(w, http.StatusOK, ChatResponse{
-		Content:   content.String(),
+		Content:   content,
 		SessionID: id,
 		Model:     as.model,
 	})
@@ -772,47 +633,18 @@ func splitModelID(id string) (provider, model string, ok bool) {
 	return "", "", false
 }
 
-// getOrCreateAgentSession returns the in-memory agent session for id,
-// creating one from the saved session if it does not exist yet.
-// Must be called with h.mu held.
-func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
-	if as, ok := h.agents[id]; ok {
-		return as, nil
-	}
-	s, err := session.Load(id)
-	if err != nil {
-		return nil, fmt.Errorf("session not found: %w", err)
-	}
-	model := h.cfg.Model
-	if model == "" {
-		return nil, fmt.Errorf("no model configured")
-	}
-	client := agent.NewClient(h.cfg, model)
-	if client == nil {
-		return nil, fmt.Errorf("failed to create LLM client")
-	}
-	lspMgr := h.sharedLSPManager()
-	tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
-	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
-	ag.LoadExternalTools(h.cfg)
-	mcpTools, mcpErrs := h.mcpCache.wait()
-	ag.AddMCPTools(mcpTools)
-	ag.AddMCPErrors(mcpErrs)
-	ag.SetAdvisorEnabled(h.advisorEnabled)
-	as := &agentSession{agent: ag, messages: s.Messages, model: model}
-	h.agents[id] = as
-	return as, nil
-}
-
 func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, id string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	as, err := h.getOrCreateAgentSession(id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+
+	// Compaction is an LLM call. It runs under the per-session lock only —
+	// holding h.mu across it would freeze every other session's turn for its
+	// whole duration.
+	as.mu.Lock()
+	defer as.mu.Unlock()
 
 	result, enabled := as.agent.Compact(as.messages)
 	if !enabled {
@@ -842,7 +674,7 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 	// browser) replaces its stale message list — otherwise the web transcript
 	// keeps showing the pre-compaction messages and its context size never
 	// drops. Matches the chat handler's post-turn broadcast.
-	if h.rc == nil {
+	if h.RCBridge() == nil {
 		h.broadcastEvent(SSEEvent{
 			SessionID: id,
 			Event:     "messages",
@@ -857,24 +689,25 @@ func (h *Handler) HandleCompactSession(w http.ResponseWriter, r *http.Request, i
 }
 
 func (h *Handler) HandleRecapSession(w http.ResponseWriter, r *http.Request, id string) {
-	h.mu.Lock()
-
 	as, err := h.getOrCreateAgentSession(id)
 	if err != nil {
-		h.mu.Unlock()
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+
+	// Snapshot the transcript under the session lock, then release it: Recap is
+	// an LLM call and must not block the session's next turn (nor, via h.mu,
+	// every other session).
+	as.mu.Lock()
 	if len(as.messages) == 0 {
-		h.mu.Unlock()
+		as.mu.Unlock()
 		writeError(w, http.StatusUnprocessableEntity, "no messages to recap")
 		return
 	}
-
 	msgs := make([]agent.Message, len(as.messages))
 	copy(msgs, as.messages)
 	ag := as.agent
-	h.mu.Unlock()
+	as.mu.Unlock()
 
 	text := ag.Recap(msgs, "")
 

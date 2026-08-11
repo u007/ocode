@@ -124,10 +124,7 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.mu.Lock()
-	rc := h.rc
-	if rc != nil {
-		h.mu.Unlock()
+	if rc := h.RCBridge(); rc != nil {
 		// TUI session bridged: forward the answers to the TUI's RC bridge, which
 		// owns the agent and its question dialog. Preserve every selected answer
 		// (multi-select questions) instead of collapsing to the first.
@@ -149,31 +146,14 @@ func (h *Handler) HandleAnswerQuestion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Locate the session whose pending question matches request_id. Prefer the
-	// explicit session_id; otherwise scan (tool-call IDs are unique).
-	var as *agentSession
-	var sessID string
-	if req.SessionID != "" {
-		if cand, ok := h.agents[req.SessionID]; ok &&
-			tailIsQuestionAsk(cand.messages) &&
-			cand.messages[len(cand.messages)-1].ToolID == req.RequestID {
-			as, sessID = cand, req.SessionID
-		}
-	} else {
-		for id, cand := range h.agents {
-			if tailIsQuestionAsk(cand.messages) && cand.messages[len(cand.messages)-1].ToolID == req.RequestID {
-				as, sessID = cand, id
-				break
-			}
-		}
-	}
-	h.mu.Unlock()
-
+	// explicit session_id; otherwise scan (tool-call IDs are unique). The
+	// session comes back with its lock held, so the tail cannot be answered out
+	// from under us by a racing request.
+	as, sessID := h.findPendingSession(req.SessionID, req.RequestID, tailIsQuestionAsk)
 	if as == nil {
 		writeError(w, http.StatusNotFound, "no pending question found for request_id")
 		return
 	}
-
-	as.mu.Lock()
 	defer as.mu.Unlock()
 
 	answerJSON, err := json.Marshal(req.Answers)

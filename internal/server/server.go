@@ -847,6 +847,13 @@ type ChatRequest struct {
 	SessionID string `json:"sessionId,omitempty"`
 	Model     string `json:"model,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
+	// Async, when set, makes the endpoint acknowledge with 202 as soon as the
+	// turn is dispatched instead of holding the HTTP connection open until the
+	// agent finishes. The web UI sets it: a browser allows only six concurrent
+	// connections per origin over HTTP/1.1, so a connection pinned for every
+	// running turn starves the other sessions' requests and makes them look
+	// stuck. All turn output reaches the browser over the SSE mirror.
+	Async bool `json:"async,omitempty"`
 }
 
 type ChatResponse struct {

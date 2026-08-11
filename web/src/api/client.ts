@@ -241,15 +241,23 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  // Both send endpoints are called with async:true: the server acknowledges
+  // with 202 as soon as the turn is dispatched instead of holding the request
+  // open until the agent finishes. A browser allows only six concurrent
+  // connections per origin over HTTP/1.1 (no TLS here, so no h2 multiplexing),
+  // and a connection pinned for every running turn starved the other sessions'
+  // requests — a second session would just sit there doing nothing. The turn's
+  // output arrives over the session mirror (see SessionTabSync), which is where
+  // the UI renders it from anyway.
   sendMessage: (sessionId: string, content: string) =>
     fetchJSON<ChatResponse>(`/api/sessions/${sessionId}/message`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({ content, async: true }),
     }),
   chat: (content: string, sessionId?: string, model?: string, requestId?: string) =>
     fetchJSON<ChatResponse>("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ content, sessionId, model, request_id: requestId }),
+      body: JSON.stringify({ content, sessionId, model, request_id: requestId, async: true }),
     }),
   openFile: (path: string, line?: number) =>
     fetchJSON<{ path: string; status: string }>("/api/files/open", {
