@@ -113,6 +113,16 @@ lastHeartbeat}`.
 
 - One `eventBus` module: single `EventSource` to `/api/events`, reconnect with
   backoff, routes by event type + session/project tag into stores.
+- **Subscription model:** The bus dispatches per-event-type (no wildcard). A
+  consumer must subscribe to each event type it handles individually via
+  `eventBus.on(eventType, handler)`. The `ROUTABLE_EVENTS` constant in
+  `sessionEvents.ts` exports the full list of routable event names (the two
+  process-global ones — `session_started`, `status` — plus every session-scoped
+  event). `SessionTabSync` subscribes to every event in `ROUTABLE_EVENTS`
+  and feeds each into `routeBusEnvelope`. Subscribing to the SSE frame name
+  (`"envelope"`) is a common mistake — the server sets that on the HTTP
+  response, but it never appears as an `event` field in the bus — and will
+  silently drop all live events.
 - Deleted: `connectSessionMirror`, per-session `useAgentRuns` EventSources,
   `LogPanel` EventSource, git polling (`CoworkSidebar.tsx:121-138`), spending
   polling (`App.tsx:76`). Terminal WebSocket stays. Total: 2 long-lived

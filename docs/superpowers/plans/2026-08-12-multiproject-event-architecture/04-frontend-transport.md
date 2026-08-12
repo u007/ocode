@@ -65,6 +65,14 @@ sessions. Total long-lived connections: 2 (events SSE + terminal WebSocket).
   `connectSessionMirror` call; keep behavior identical otherwise. Verify:
   existing frontend tests + manual chat round-trip. Commit.
 
+  > **Subscription gotcha:** The bus dispatches per-event-type (no wildcard).
+  > `SessionTabSync` must subscribe to each event type in `ROUTABLE_EVENTS`
+  > individually via `eventBus.on(event, handler)`, not to a single
+  > `"envelope"` event. `ROUTABLE_EVENTS` (defined in `sessionEvents.ts`)
+  > lists all routable event names — the two process-global ones plus every
+  > session-scoped event. Subscribing to the SSE frame name `"envelope"`
+  > silently drops all live events. See the design spec §4.
+
 - [ ] **Task 3: swap agent-runs, logs.** `useAgentRuns` and `LogPanel`
   subscribe via eventBus; their EventSources deleted. Verify manually (runs
   panel updates during a task; logs panel streams) + typecheck. Commit.

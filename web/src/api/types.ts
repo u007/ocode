@@ -339,6 +339,10 @@ export interface AgentRun {
 // event and reflects every field in the status bar / drill-down panel.
 export interface TUIStatus {
   main_model?: string;
+  // Extended-thinking token budget for the main model (0 = off). Mirrors the
+  // TUI's ctrl+d / /effort reasoning level so the sidebar can display and
+  // change it.
+  thinking_budget?: number;
   small_model?: string;
   small_model_enabled?: boolean;
   advisor_model?: string;

@@ -31,6 +31,7 @@ func (h *Handler) buildStatusSnapshot() TUIStatus {
 	}
 	if h.cfg != nil {
 		snap.MainModel = h.cfg.Model
+		snap.ThinkingBudget = h.cfg.ThinkingBudget
 		snap.SmallModel = h.cfg.Ocode.SmallModel
 		snap.SmallModelOn = h.cfg.Ocode.SmallModelEnabled
 		snap.AdvisorModel = h.cfg.Ocode.Advisor.Model
@@ -74,6 +75,7 @@ func (h *Handler) pushStatusSnapshot() {
 	if h.rc != nil {
 		cur := h.rc.TUIStatus()
 		cur.MainModel = snap.MainModel
+		cur.ThinkingBudget = snap.ThinkingBudget
 		cur.SmallModel = snap.SmallModel
 		cur.SmallModelOn = snap.SmallModelOn
 		cur.AdvisorModel = snap.AdvisorModel

@@ -58,6 +58,116 @@ func (h *Handler) HandleSetModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"model": req.Model})
 }
 
+// thinkingBudgetLevelInfo returns the canonical level list for the thinking
+// budget API payload. Each entry pairs the level label with its token budget.
+func thinkingBudgetLevelInfo() []map[string]any {
+	info := make([]map[string]any, 0, len(config.ThinkingBudgetLevels))
+	for i, budget := range config.ThinkingBudgetLevels {
+		info = append(info, map[string]any{"level": config.ThinkingBudgetLabels[i], "budget": budget})
+	}
+	return info
+}
+
+// HandleGetThinkingBudget returns the current extended-thinking budget (0 =
+// off) plus the canonical level list, so the web sidebar can display the
+// reasoning level and render a switch with the same options as the TUI's
+// /effort command.
+func (h *Handler) HandleGetThinkingBudget(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	budget := 0
+	if h.cfg != nil {
+		budget = h.cfg.ThinkingBudget
+	}
+	// When a TUI is attached it owns the live reasoning level; prefer its
+	// snapshot so the web mirrors what the user last set with ctrl+d /effort.
+	if rc := h.rc; rc != nil {
+		if live := rc.TUIStatus(); live.MainModel != "" {
+			budget = live.ThinkingBudget
+		}
+	}
+	h.mu.Unlock()
+	level := config.ThinkingBudgetLabels[config.ThinkingLevelIndexForBudget(budget)]
+	writeJSON(w, http.StatusOK, map[string]any{
+		"budget": budget,
+		"level":  level,
+		"levels": thinkingBudgetLevelInfo(),
+	})
+}
+
+// HandleSetThinkingBudget sets the extended-thinking budget for the main
+// model. Accepts either {"level": "med"} or {"budget": 8000}; the budget must
+// be one of the canonical config.ThinkingBudgetLevels values. It persists the
+// choice (config.SaveLastThinkingBudget) and pushes a fresh status snapshot so
+// the web sidebar/status bar update immediately. In headless/desktop mode the
+// budget takes effect for subsequently built agent sessions; when a TUI is
+// bridged the running TUI keeps its own level until the user changes it there
+// (mirroring the model-switch limitation — see
+// docs/architecture/sidebar-tui-parity-gaps.md).
+func (h *Handler) HandleSetThinkingBudget(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Level  string `json:"level"`
+		Budget *int   `json:"budget"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if req.Level == "" && req.Budget == nil {
+		writeError(w, http.StatusBadRequest, `one of "level" or "budget" is required`)
+		return
+	}
+	if req.Level != "" && req.Budget != nil {
+		writeError(w, http.StatusBadRequest, `provide either "level" or "budget", not both`)
+		return
+	}
+
+	budget := -1
+	if req.Budget != nil {
+		budget = *req.Budget
+	}
+	if req.Level != "" {
+		level := strings.ToLower(strings.TrimSpace(req.Level))
+		found := false
+		for i, lvl := range config.ThinkingBudgetLabels {
+			if lvl == level {
+				budget = config.ThinkingBudgetLevels[i]
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeError(w, http.StatusBadRequest, "unknown level, use one of: off, low, med, high, xhigh, max")
+			return
+		}
+	}
+
+	idx := config.ThinkingLevelIndexForBudget(budget)
+	if config.ThinkingBudgetLevels[idx] != budget {
+		writeError(w, http.StatusBadRequest, "budget must be one of: 0, 1024, 8000, 16000, 32000, 65536")
+		return
+	}
+
+	h.mu.Lock()
+	if h.cfg == nil {
+		h.mu.Unlock()
+		writeError(w, http.StatusInternalServerError, "config not loaded")
+		return
+	}
+	h.cfg.ThinkingBudget = budget
+	h.mu.Unlock()
+
+	if err := config.SaveLastThinkingBudget(budget); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	h.pushStatusSnapshot()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"budget": budget,
+		"level":  config.ThinkingBudgetLabels[idx],
+		"levels": thinkingBudgetLevelInfo(),
+	})
+}
+
 func (h *Handler) HandleGetSmallModel(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	current := ""

@@ -51,6 +51,12 @@ const SESSION_SCOPED_EVENTS = new Set([
   "session_bootstrap",
 ]);
 
+/** Every event name `routeBusEnvelope` handles — the two process-global ones
+ *  (`session_started`, `status`) plus every session-scoped event above. The
+ *  bus dispatches per-event-type (see eventBus.ts), so a consumer must
+ *  subscribe to each of these individually; there's no wildcard. */
+export const ROUTABLE_EVENTS = ["session_started", "status", ...SESSION_SCOPED_EVENTS];
+
 export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void {
   const { event, session_id: envSessionId, data } = env;
   // The envelope's session_id is authoritative (the server tags at source);

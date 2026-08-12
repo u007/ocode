@@ -1206,16 +1206,15 @@ type permissionGrantRequest struct {
 	respCh chan error
 }
 
-var thinkingBudgetLevels = []int{0, 1024, 8000, 16000, 32000, 65536}
-var thinkingBudgetLabels = []string{"off", "low", "med", "high", "xhigh", "max"}
+// Reasoning-effort level tables now live in internal/config (shared with the
+// web/desktop server so both surfaces agree on the level set — see
+// config.ThinkingBudgetLevels/Labels/ThinkingLevelIndexForBudget). Local
+// aliases keep the many existing references here unchanged.
+var thinkingBudgetLevels = config.ThinkingBudgetLevels
+var thinkingBudgetLabels = config.ThinkingBudgetLabels
 
 func thinkingLevelIndexForBudget(budget int) int {
-	for i, level := range thinkingBudgetLevels {
-		if level == budget {
-			return i
-		}
-	}
-	return 0
+	return config.ThinkingLevelIndexForBudget(budget)
 }
 
 func (m *model) cycleThinkingLevel() {
@@ -13264,6 +13263,7 @@ func (m *model) buildTUIStatusSnapshot() server.TUIStatus {
 	}
 	if m.config != nil {
 		snap.MainModel = m.config.Model
+		snap.ThinkingBudget = m.config.ThinkingBudget
 		snap.SmallModel = m.config.Ocode.SmallModel
 		snap.AdvisorModel = m.config.Ocode.Advisor.Model
 		snap.ExtraAllowedPaths = m.config.Ocode.ExtraAllowedPaths

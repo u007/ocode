@@ -164,6 +164,8 @@ func (s *Server) registerRoutes() {
 	// Config
 	s.mux.HandleFunc("GET /api/config/model", s.authMiddleware(s.handleGetModel))
 	s.mux.HandleFunc("PUT /api/config/model", s.authMiddleware(s.handleSetModel))
+	s.mux.HandleFunc("GET /api/config/thinking-budget", s.authMiddleware(s.handleGetThinkingBudget))
+	s.mux.HandleFunc("PUT /api/config/thinking-budget", s.authMiddleware(s.handleSetThinkingBudget))
 	s.mux.HandleFunc("GET /api/config/small-model", s.authMiddleware(s.handleGetSmallModel))
 	s.mux.HandleFunc("PUT /api/config/small-model", s.authMiddleware(s.handleSetSmallModel))
 	s.mux.HandleFunc("GET /api/config/terminal", s.authMiddleware(s.handleGetTerminalConfig))
@@ -748,6 +750,12 @@ func (s *Server) handleGetModel(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleSetModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetModel(w, r)
+}
+func (s *Server) handleGetThinkingBudget(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetThinkingBudget(w, r)
+}
+func (s *Server) handleSetThinkingBudget(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetThinkingBudget(w, r)
 }
 func (s *Server) handleGetSmallModel(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetSmallModel(w, r)

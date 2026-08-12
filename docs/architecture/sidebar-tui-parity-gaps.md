@@ -85,14 +85,14 @@ The web sidebar (`web/src/components/Layout/CoworkSidebar.tsx`) has collapsible 
 
 The TUIStatus struct (`internal/server/tui_status.go`) has no `mode` field. The web cannot display the CODE/PLAN badge because the backend never sends it. Adding a `Mode string` field to `TUIStatus` and populating it from `m.agent.Mode()` would close this gap.
 
-### Gap 2: Temperature + Reasoning effort
+### Gap 2: Temperature + Reasoning effort (reasoning effort closed)
 
 | | TUI | Web |
 |---|---|---|
-| **Source** | `m.agent.EffectiveTemperature()` + `thinkingBudgetLabels[m.thinkingLevelIdx]` | Not in `TUIStatus` struct |
-| **Status** | Rendered in pinned top as `temp: 0.3 · reason: high` | **Missing** |
+| **Source** | `m.agent.EffectiveTemperature()` + `thinkingBudgetLabels[m.thinkingLevelIdx]` | `tuiStatus.thinking_budget` + `GET/PUT /api/config/thinking-budget` |
+| **Status** | Rendered in pinned top as `temp: 0.3 · reason: high` | **Reasoning effort: implemented; temperature: missing** |
 
-Neither temperature nor reasoning effort is exposed through `TUIStatus`. The web has no way to display them. Adding fields like `Temperature` and `ReasoningEffort` to `TUIStatus` and populating them in the RC bridge would close this gap.
+Reasoning effort is now exposed: `TUIStatus.ThinkingBudget` (not `omitempty` — 0 = "off" is meaningful) is populated from `m.config.ThinkingBudget` in both the headless snapshot and the RC-bridge merge, and `GET/PUT /api/config/thinking-budget` returns the canonical level list (`config.ThinkingBudgetLevels`/`ThinkingBudgetLabels` — `off`/`low`/`med`/`high`/`xhigh`/`max` = 0/1024/8000/16000/32000/65536) and accepts a level name or raw budget, persisting via `SaveLastThinkingBudget`. Temperature is still not in `TUIStatus` — adding a `Temperature` field and populating it from `m.agent.EffectiveTemperature()` would close the remaining half.
 
 ### Gap 3: Recap model toggle
 
@@ -230,13 +230,12 @@ CoworkSidebar consumes subset of tuiStatus + dedicated REST calls
 
 **Fields MISSING from TUIStatus (and thus unavailable to web):**
 - `mode` (CODE/PLAN) — would need to be added to Go struct
-- `temperature` — would need to be added
-- `reasoning_effort` — would need to be added
+- `temperature` — would need to be added (reasoning effort is already covered by `thinking_budget` + `/api/config/thinking-budget`)
 
 ## Recommended Actions
 
 1. **Add `mode` field to `TUIStatus`** and populate from `m.agent.Mode()`.
-2. **Add `temperature` and `reasoning_effort` fields to `TUIStatus`**.
+2. **Add `temperature` to `TUIStatus`** (reasoning effort is already covered by `thinking_budget` + `/api/config/thinking-budget`).
 3. **Render recap model toggle in CoworkSidebar** from existing `tuiStatus.recap_model`/`recap_model_enabled`.
 4. **Render agent run registry in CoworkSidebar** from `/api/agents/runs`.
 5. **Enrich the Git section** with ahead/behind, staged/modified/untracked counts.

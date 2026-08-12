@@ -5,6 +5,7 @@ import { eventBus } from "../../lib/eventBus";
 import {
   routeBusEnvelope,
   reconcileOpenSessions,
+  ROUTABLE_EVENTS,
   type SessionEventRouter,
 } from "../../lib/sessionEvents";
 
@@ -48,13 +49,17 @@ export default function SessionTabSync() {
       projectDispatch,
       getState: () => chatStateRef.current,
     };
-    const offEnvelope = eventBus.on("envelope", (env) => routeBusEnvelope(env, router));
+    // The bus dispatches per-event-type (no wildcard) — subscribe to every
+    // event routeBusEnvelope handles individually.
+    const offEnvelope = ROUTABLE_EVENTS.map((event) =>
+      eventBus.on(event, (env) => routeBusEnvelope(env, router)),
+    );
     const offReconnect = eventBus.onReconnect(() => {
       // Reconcile every open session: turn state + transcript refetch.
       void reconcileOpenSessions(openSessionIdsRef.current, chatDispatch);
     });
     return () => {
-      offEnvelope();
+      offEnvelope.forEach((off) => off());
       offReconnect();
     };
   }, [chatDispatch, projectDispatch]);

@@ -11,6 +11,10 @@ import "sync"
 type TUIStatus struct {
 	// Main chat model (provider/model).
 	MainModel string `json:"main_model,omitempty"`
+	// Extended-thinking token budget for the main model (0 = off). Mirrors the
+	// TUI's ctrl+d / /effort reasoning level so the web sidebar can display and
+	// change it. Not omitempty: 0 is the meaningful "off" level.
+	ThinkingBudget int `json:"thinking_budget"`
 	// Small model name + runtime on/off (the web should mirror both).
 	SmallModel   string `json:"small_model,omitempty"`
 	SmallModelOn bool   `json:"small_model_enabled"`

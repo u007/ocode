@@ -171,6 +171,18 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ model }),
     }),
+  // Extended-thinking (reasoning effort) budget for the main model. budget 0 =
+  // off; levels list the canonical off/low/med/high/xhigh/max options shared
+  // with the TUI's /effort command.
+  getThinkingBudget: () =>
+    fetchJSON<{ budget: number; level: string; levels: { level: string; budget: number }[] }>(
+      "/api/config/thinking-budget",
+    ),
+  setThinkingBudget: (level: string) =>
+    fetchJSON<{ budget: number; level: string; levels: { level: string; budget: number }[] }>(
+      "/api/config/thinking-budget",
+      { method: "PUT", body: JSON.stringify({ level }) },
+    ),
   getSmallModel: () =>
     fetchJSON<{ model: string; priority: string }>("/api/config/small-model"),
   setSmallModel: (model: string) =>

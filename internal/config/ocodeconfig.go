@@ -1666,6 +1666,28 @@ func GetLastModel() string {
 	return ""
 }
 
+// ThinkingBudgetLevels lists the supported reasoning-effort token budgets in
+// ascending order. Index 0 is "off" (no extended thinking). Shared by the TUI
+// (ctrl+d cycle, /effort command, sidebar "reason:" line) and the web/desktop
+// server (TUIStatus.ThinkingBudget + /api/config/thinking-budget) so both
+// surfaces agree on the level set.
+var ThinkingBudgetLevels = []int{0, 1024, 8000, 16000, 32000, 65536}
+
+// ThinkingBudgetLabels names each ThinkingBudgetLevels entry, used for the
+// "reason: <label>" display and the /effort + web API level names.
+var ThinkingBudgetLabels = []string{"off", "low", "med", "high", "xhigh", "max"}
+
+// ThinkingLevelIndexForBudget returns the index into ThinkingBudgetLevels for
+// budget, defaulting to 0 ("off") when budget is not one of the known levels.
+func ThinkingLevelIndexForBudget(budget int) int {
+	for i, level := range ThinkingBudgetLevels {
+		if level == budget {
+			return i
+		}
+	}
+	return 0
+}
+
 // SaveLastThinkingBudget persists the last used thinking budget into ocodeconfig.json
 // so it can be restored across sessions.
 func SaveLastThinkingBudget(budget int) error {

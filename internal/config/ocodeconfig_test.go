@@ -1618,3 +1618,43 @@ func TestTerminalScrollbackLinesConfig(t *testing.T) {
 		}
 	})
 }
+
+func TestThinkingBudgetLevelsAndIndex(t *testing.T) {
+	if len(ThinkingBudgetLevels) != len(ThinkingBudgetLabels) {
+		t.Fatalf("level/budget table length mismatch: %d budgets, %d labels", len(ThinkingBudgetLevels), len(ThinkingBudgetLabels))
+	}
+	// Every known budget maps to its own index; the label matches.
+	for i, budget := range ThinkingBudgetLevels {
+		if got := ThinkingLevelIndexForBudget(budget); got != i {
+			t.Errorf("ThinkingLevelIndexForBudget(%d) = %d, want %d", budget, got, i)
+		}
+	}
+	// Unknown/negative budgets fall back to "off" (index 0).
+	for _, unknown := range []int{-1, 512, 20000, 100000} {
+		if got := ThinkingLevelIndexForBudget(unknown); got != 0 {
+			t.Errorf("ThinkingLevelIndexForBudget(%d) = %d, want 0 (off)", unknown, got)
+		}
+	}
+	// Level 0 is "off" with budget 0 — the meaningful default.
+	if ThinkingBudgetLabels[0] != "off" || ThinkingBudgetLevels[0] != 0 {
+		t.Fatalf("level 0 = %s/%d, want off/0", ThinkingBudgetLabels[0], ThinkingBudgetLevels[0])
+	}
+}
+
+func TestSaveAndGetLastThinkingBudgetRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if err := SaveLastThinkingBudget(16000); err != nil {
+		t.Fatalf("SaveLastThinkingBudget failed: %v", err)
+	}
+	if got := GetLastThinkingBudget(); got != 16000 {
+		t.Fatalf("GetLastThinkingBudget = %d, want 16000", got)
+	}
+	// Saving "off" (0) must persist too — 0 is a meaningful level.
+	if err := SaveLastThinkingBudget(0); err != nil {
+		t.Fatalf("SaveLastThinkingBudget(0) failed: %v", err)
+	}
+	if got := GetLastThinkingBudget(); got != 0 {
+		t.Fatalf("GetLastThinkingBudget = %d, want 0 after saving off", got)
+	}
+}

@@ -195,3 +195,171 @@ func TestHandleSetSmallModelRejectsEmptyBody(t *testing.T) {
 		t.Fatalf("status = %d, want 400", w.Code)
 	}
 }
+
+// The headless snapshot must always carry the thinking budget (0 = off is a
+// meaningful value, not an absent field).
+func TestBuildStatusSnapshotCarriesThinkingBudget(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	snap := h.buildStatusSnapshot()
+	if snap.ThinkingBudget != 0 {
+		t.Errorf("ThinkingBudget = %d, want 0 (off) default", snap.ThinkingBudget)
+	}
+	h.mu.Lock()
+	h.cfg.ThinkingBudget = 8000
+	h.mu.Unlock()
+	snap = h.buildStatusSnapshot()
+	if snap.ThinkingBudget != 8000 {
+		t.Errorf("ThinkingBudget = %d, want 8000", snap.ThinkingBudget)
+	}
+}
+
+// pushStatusSnapshot must propagate a web-initiated budget change through the
+// bridge merge so the sidebar reflects it immediately.
+func TestPushStatusSnapshotMergesThinkingBudget(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	bridge := &RCBridge{}
+	h.mu.Lock()
+	h.rc = bridge
+	h.mu.Unlock()
+	bridge.StatusStore().Set(TUIStatus{MainModel: "gpt-4o-mini", SessionID: "sess-tui-1"}, bridge)
+
+	h.mu.Lock()
+	h.cfg.ThinkingBudget = 16000
+	h.mu.Unlock()
+
+	h.pushStatusSnapshot()
+	if got := bridge.TUIStatus().ThinkingBudget; got != 16000 {
+		t.Errorf("merged ThinkingBudget = %d, want 16000", got)
+	}
+	if got := bridge.TUIStatus().SessionID; got != "sess-tui-1" {
+		t.Errorf("SessionID = %q, want preserved sess-tui-1", got)
+	}
+}
+
+func TestHandleGetThinkingBudgetHeadless(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	h.mu.Lock()
+	h.cfg.ThinkingBudget = 8000
+	h.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/config/thinking-budget", nil)
+	h.HandleGetThinkingBudget(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var resp struct {
+		Budget int                      `json:"budget"`
+		Level  string                   `json:"level"`
+		Levels []map[string]interface{} `json:"levels"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Budget != 8000 || resp.Level != "med" {
+		t.Errorf("budget/level = %d/%q, want 8000/med", resp.Budget, resp.Level)
+	}
+	if len(resp.Levels) != len(config.ThinkingBudgetLevels) {
+		t.Errorf("levels len = %d, want %d", len(resp.Levels), len(config.ThinkingBudgetLevels))
+	}
+}
+
+func TestHandleGetThinkingBudgetPrefersBridge(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	bridge := &RCBridge{}
+	h.mu.Lock()
+	h.rc = bridge
+	h.mu.Unlock()
+	bridge.StatusStore().Set(TUIStatus{MainModel: "gpt-4o-mini", ThinkingBudget: 32000}, bridge)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/config/thinking-budget", nil)
+	h.HandleGetThinkingBudget(w, r)
+
+	var resp struct {
+		Budget int    `json:"budget"`
+		Level  string `json:"level"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Budget != 32000 || resp.Level != "xhigh" {
+		t.Errorf("budget/level = %d/%q, want 32000/xhigh", resp.Budget, resp.Level)
+	}
+}
+
+func TestHandleSetThinkingBudgetByLevel(t *testing.T) {
+	h := testHandlerWithConfig(t)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/thinking-budget", strings.NewReader(`{"level":"high"}`))
+	h.HandleSetThinkingBudget(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Budget int    `json:"budget"`
+		Level  string `json:"level"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Budget != 16000 || resp.Level != "high" {
+		t.Errorf("budget/level = %d/%q, want 16000/high", resp.Budget, resp.Level)
+	}
+	if h.cfg.ThinkingBudget != 16000 {
+		t.Errorf("h.cfg.ThinkingBudget = %d, want 16000", h.cfg.ThinkingBudget)
+	}
+}
+
+func TestHandleSetThinkingBudgetByBudgetOff(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	h.mu.Lock()
+	h.cfg.ThinkingBudget = 8000
+	h.mu.Unlock()
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("PUT", "/api/config/thinking-budget", strings.NewReader(`{"budget":0}`))
+	h.HandleSetThinkingBudget(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Budget int    `json:"budget"`
+		Level  string `json:"level"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Budget != 0 || resp.Level != "off" {
+		t.Errorf("budget/level = %d/%q, want 0/off", resp.Budget, resp.Level)
+	}
+	if h.cfg.ThinkingBudget != 0 {
+		t.Errorf("h.cfg.ThinkingBudget = %d, want 0", h.cfg.ThinkingBudget)
+	}
+}
+
+func TestHandleSetThinkingBudgetRejectsBadInputs(t *testing.T) {
+	h := testHandlerWithConfig(t)
+	cases := []string{
+		`{}`,
+		`{"level":"ultra"}`,
+		`{"budget":500}`,
+		`{"level":"med","budget":8000}`,
+	}
+	for _, body := range cases {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("PUT", "/api/config/thinking-budget", strings.NewReader(body))
+		h.HandleSetThinkingBudget(w, r)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("body %q → status %d, want 400", body, w.Code)
+		}
+	}
+	// Nothing may have been persisted for invalid input.
+	if h.cfg.ThinkingBudget != 0 {
+		t.Errorf("h.cfg.ThinkingBudget = %d after invalid inputs, want 0", h.cfg.ThinkingBudget)
+	}
+}
