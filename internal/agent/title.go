@@ -57,13 +57,13 @@ func (a *Agent) generateTitleWithClients(clients []LLMClient, system, prompt str
 	for _, client := range clients {
 		content, err := a.titleChat(client, system, prompt)
 		if err != nil {
-			emitDebug("TITLE", fmt.Sprintf("%s/%s error: %v", client.GetProvider(), client.GetModel(), err))
+			a.emitDebug("TITLE", fmt.Sprintf("%s/%s error: %v", client.GetProvider(), client.GetModel(), err))
 			continue
 		}
 		if t := sanitizeTitle(content); t != "" {
 			return t
 		}
-		emitDebug("TITLE", fmt.Sprintf("%s/%s returned empty title", client.GetProvider(), client.GetModel()))
+		a.emitDebug("TITLE", fmt.Sprintf("%s/%s returned empty title", client.GetProvider(), client.GetModel()))
 	}
 	return ""
 }

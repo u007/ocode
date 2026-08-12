@@ -510,7 +510,10 @@ function HomeApp() {
                             : "absolute inset-0 hidden"
                         }
                       >
-                        <LogPanel active={tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "logs"} />
+                        <LogPanel
+                          active={tab.projectPath === projectState.activeProject?.path && tab.id === activeTabId && tab.activeSubTab === "logs"}
+                          sessionId={tab.id}
+                        />
                       </div>
                     ))}
                     {allChatTabs.map((tab) => (

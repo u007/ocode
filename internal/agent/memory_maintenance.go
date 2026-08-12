@@ -86,7 +86,7 @@ func (a *Agent) memoryMaintShutdown() {
 		select {
 		case <-a.memoryMaintDone:
 		case <-time.After(5 * time.Second):
-			emitDebug("MEMORY", "shutdown: worker did not exit within 5s, proceeding")
+			a.emitDebug("MEMORY", "shutdown: worker did not exit within 5s, proceeding")
 		}
 	})
 }
@@ -97,7 +97,7 @@ func (a *Agent) runMemoryMaintenance(req MemoryMaintenanceRequest) {
 	}
 	client := a.memoryMaintenanceClient()
 	if client == nil {
-		emitDebug("MEMORY", "skipped: no small-model client available")
+		a.emitDebug("MEMORY", "skipped: no small-model client available")
 		return
 	}
 	if strings.TrimSpace(req.WorkDir) == "" {
@@ -105,22 +105,22 @@ func (a *Agent) runMemoryMaintenance(req MemoryMaintenanceRequest) {
 	}
 	paths, err := memory.ResolvePaths(req.WorkDir)
 	if err != nil {
-		emitDebug("MEMORY", fmt.Sprintf("resolve paths: %v", err))
+		a.emitDebug("MEMORY", fmt.Sprintf("resolve paths: %v", err))
 		return
 	}
 	scopes, err := loadMemoryScopes(paths)
 	if err != nil {
-		emitDebug("MEMORY", fmt.Sprintf("load scopes: %v", err))
+		a.emitDebug("MEMORY", fmt.Sprintf("load scopes: %v", err))
 		return
 	}
 
 	// First pass: let the small model decide whether this job produces durable
 	// memory worth writing at all.
 	if decision, err := a.runMemoryMaintenancePass(client, req, scopes, "", ""); err != nil {
-		emitDebug("MEMORY", fmt.Sprintf("planner failed: %v", err))
+		a.emitDebug("MEMORY", fmt.Sprintf("planner failed: %v", err))
 	} else if decision != nil {
 		if err := applyMemoryDecision(decision, scopes); err != nil {
-			emitDebug("MEMORY", fmt.Sprintf("apply decision: %v", err))
+			a.emitDebug("MEMORY", fmt.Sprintf("apply decision: %v", err))
 		}
 	}
 
@@ -131,9 +131,9 @@ func (a *Agent) runMemoryMaintenance(req MemoryMaintenanceRequest) {
 			continue
 		}
 		if _, err := a.runMemoryMaintenancePass(client, req, scopes, spec.Key, "compress"); err != nil {
-			emitDebug("MEMORY", fmt.Sprintf("compress %s: %v", spec.Key, err))
+			a.emitDebug("MEMORY", fmt.Sprintf("compress %s: %v", spec.Key, err))
 			if err := writeMemoryScope(scope.Path, hardTruncateMemoryBody(scope.Body, memoryMaintenanceHardLimitBytes)); err != nil {
-				emitDebug("MEMORY", fmt.Sprintf("fallback truncate %s: %v", spec.Key, err))
+				a.emitDebug("MEMORY", fmt.Sprintf("fallback truncate %s: %v", spec.Key, err))
 			}
 			continue
 		} else {

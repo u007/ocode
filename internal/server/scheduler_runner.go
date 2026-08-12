@@ -48,6 +48,7 @@ func (r *schedulerRunner) RunScheduledJob(ctx context.Context, job *scheduler.Jo
 	}
 
 	sessionID := "cron:" + job.ID
+	ag.SetSessionID(sessionID)
 	prefix := scheduler.ContextPrefix(job)
 	msgs, err := loadOrSeedCronSession(sessionID, prefix, job.Payload.Message)
 	if err != nil {

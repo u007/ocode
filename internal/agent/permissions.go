@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/paths"
 	"github.com/u007/ocode/internal/pathscope"
 	"github.com/u007/ocode/internal/tool"
@@ -106,6 +107,21 @@ type PermissionManager struct {
 	webfetchDomains       map[string]PermissionLevel
 	autoPermissionEnabled bool
 	autoGrants            []config.AutoGrant
+	// sessionID tags this manager's debug-log entries with the owning
+	// agent's session (set via Agent.SetSessionID). Empty means untagged
+	// (process-global) — see emitDebug.
+	sessionID string
+}
+
+// emitDebug appends a debug-log entry tagged with the owning agent's
+// session id, or falls back to the process-global sink when untagged (TUI,
+// or a PermissionManager built outside a session-scoped Agent).
+func (pm *PermissionManager) emitDebug(kind, msg string) {
+	if pm == nil || pm.sessionID == "" {
+		emitDebug(kind, msg)
+		return
+	}
+	debuglog.Log.Append(debuglog.Entry{Kind: debuglog.EntryKind(kind), Message: msg, SessionID: pm.sessionID})
 }
 
 type patternRule struct {
@@ -883,32 +899,32 @@ func (pm *PermissionManager) LoadFromOcode(cfg config.PermissionConfig) {
 }
 
 func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) PermissionDecision {
-	emitDebug("perm", fmt.Sprintf("Decide: tool=%s mode=%s", toolName, pm.mode))
+	pm.emitDebug("perm", fmt.Sprintf("Decide: tool=%s mode=%s", toolName, pm.mode))
 	if pm.mode == PermissionModeLocked {
 		if isReadOnlyTool(toolName) {
-			emitDebug("perm", fmt.Sprintf("Decide ALLOW (locked, read-only): tool=%s", toolName))
+			pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (locked, read-only): tool=%s", toolName))
 			return PermissionDecision{Level: PermissionAllow}
 		}
-		emitDebug("perm", fmt.Sprintf("Decide DENY (locked, not read-only): tool=%s", toolName))
+		pm.emitDebug("perm", fmt.Sprintf("Decide DENY (locked, not read-only): tool=%s", toolName))
 		return PermissionDecision{Level: PermissionDeny}
 	}
 
 	if toolName == "bash" {
 		command := bashCommand(args)
 		if isHardBlockedCommand(command) {
-			emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
+			pm.emitDebug("perm", fmt.Sprintf("Decide DENY (hard-blocked): tool=bash command=%q", command))
 			return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 		}
 		if parsed, err := parseShellCommandLine(command); err == nil {
 			for _, cmd := range parsed {
 				if reason := dangerousRmReason(pm, cmd.cmdWords); reason != "" {
-					emitDebug("perm", fmt.Sprintf("Decide ASK (dangerous rm): tool=bash command=%q reason=%s", command, reason))
+					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (dangerous rm): tool=bash command=%q reason=%s", command, reason))
 					return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "rm")}
 				}
 			}
 		}
 		if pm.mode == PermissionModeYOLO {
-			emitDebug("perm", "Decide ALLOW (yolo): tool=bash")
+			pm.emitDebug("perm", "Decide ALLOW (yolo): tool=bash")
 			return PermissionDecision{Level: PermissionAllow}
 		}
 
@@ -918,7 +934,7 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		// from heredoc body content being tokenized as separate commands.
 		if ie, ok := classifyInterpreterExecution(command); ok &&
 			(ie.SourceMode == "heredoc" || ie.SourceMode == "inline_eval" || ie.SourceMode == "script_file" || ie.SourceMode == "stdin_pipe") {
-			emitDebug("perm", fmt.Sprintf("Decide ASK (interpreter): lang=%s mode=%s", ie.Language, ie.SourceMode))
+			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (interpreter): lang=%s mode=%s", ie.Language, ie.SourceMode))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, "bash.interpreter."+ie.Language)}
 		}
 
@@ -957,12 +973,12 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		if finalDecision != nil {
 			return *finalDecision
 		}
-		emitDebug("perm", "Decide ALLOW (bash, no ask/deny): tool=bash")
+		pm.emitDebug("perm", "Decide ALLOW (bash, no ask/deny): tool=bash")
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	if pm.mode == PermissionModeYOLO {
-		emitDebug("perm", fmt.Sprintf("Decide ALLOW (yolo): tool=%s", toolName))
+		pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (yolo): tool=%s", toolName))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
@@ -974,12 +990,12 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			// "deny" overrides the normal workdir/sensitive checks.
 			if level := pm.CheckPathPatterns(toolName, path); level != "" {
 				if level == PermissionAsk {
-					emitDebug("perm", fmt.Sprintf("Decide ASK (path pattern): tool=%s path=%s", toolName, path))
+					pm.emitDebug("perm", fmt.Sprintf("Decide ASK (path pattern): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 						ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".path_pattern",
 					}}
 				}
-				emitDebug("perm", fmt.Sprintf("Decide %s (path pattern): tool=%s path=%s", level, toolName, path))
+				pm.emitDebug("perm", fmt.Sprintf("Decide %s (path pattern): tool=%s path=%s", level, toolName, path))
 				return PermissionDecision{Level: level}
 			}
 			// Relative paths and glob patterns (non-absolute) are implicitly within workDir.
@@ -989,55 +1005,55 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 			if filepath.IsAbs(path) && !isWithinAllowedScope(pm, path) {
 				// Temp directories are always allowed (cross-platform)
 				if isTempDir(path) {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (temp dir): tool=%s path=%s", toolName, path))
+					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (temp dir): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
 				// Managed cache dirs (tool-results + cloned-repo cache) are always
 				// allowed for read operations — they contain ocode's own state.
 				if isReadOnlyTool(toolName) && isWithinAllowedScope(pm, path) {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (allowed scope, read-only): tool=%s path=%s", toolName, path))
+					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (allowed scope, read-only): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
 				// Read-only tools on immutable, developer-trusted roots (the Go
 				// module cache, written 0444 and content-addressed) are benign —
 				// allow without prompting or consulting the permission model.
 				if isReadOnlyTool(toolName) && isImmutableReadRoot(path) {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (immutable read root): tool=%s path=%s", toolName, path))
+					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (immutable read root): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
 				// Only user-confirmed allows ("always allow this tool") override the
 				// out-of-scope gate. Default allow rules do NOT bypass it — the
 				// user should be asked when writing outside the workdir.
 				if pm.IsUserConfirmedRule(toolName) {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (out-of-scope, user-confirmed tool): tool=%s path=%s", toolName, path))
+					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (out-of-scope, user-confirmed tool): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
-				emitDebug("perm", fmt.Sprintf("Decide ASK (out-of-scope): tool=%s path=%s", toolName, path))
+				pm.emitDebug("perm", fmt.Sprintf("Decide ASK (out-of-scope): tool=%s path=%s", toolName, path))
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".out_of_scope",
 				}}
 			}
 			if isSensitivePath(path) {
 				if pm.IsUserConfirmedRule(toolName) {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (sensitive, user-confirmed tool): tool=%s path=%s", toolName, path))
+					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (sensitive, user-confirmed tool): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
-				emitDebug("perm", fmt.Sprintf("Decide ASK (sensitive): tool=%s path=%s", toolName, path))
+				pm.emitDebug("perm", fmt.Sprintf("Decide ASK (sensitive): tool=%s path=%s", toolName, path))
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".sensitive_path",
 				}}
 			}
 			if toolName == "delete" {
 				if pm.IsUserConfirmedRule(toolName) {
-					emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, user-confirmed tool): tool=%s path=%s", toolName, path))
+					pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (delete, user-confirmed tool): tool=%s path=%s", toolName, path))
 					return PermissionDecision{Level: PermissionAllow}
 				}
-				emitDebug("perm", fmt.Sprintf("Decide ASK (delete): tool=%s path=%s", toolName, path))
+				pm.emitDebug("perm", fmt.Sprintf("Decide ASK (delete): tool=%s path=%s", toolName, path))
 				return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 					ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName + ".delete",
 				}}
 			}
-			emitDebug("perm", fmt.Sprintf("Decide ALLOW (path in workdir): tool=%s path=%s", toolName, path))
+			pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (path in workdir): tool=%s path=%s", toolName, path))
 			return PermissionDecision{Level: PermissionAllow}
 		}
 	}
@@ -1048,14 +1064,14 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 		domain := extractDomainFromURL(path)
 		if domain != "" {
 			if isLocalhostDomain(domain) {
-				emitDebug("perm", fmt.Sprintf("Decide ALLOW (webfetch localhost): tool=%s domain=%s", toolName, domain))
+				pm.emitDebug("perm", fmt.Sprintf("Decide ALLOW (webfetch localhost): tool=%s domain=%s", toolName, domain))
 				return PermissionDecision{Level: PermissionAllow}
 			}
 			if level, exists := pm.webfetchDomains[domain]; exists {
-				emitDebug("perm", fmt.Sprintf("Decide %s (webfetch domain cached): tool=%s domain=%s", level, toolName, domain))
+				pm.emitDebug("perm", fmt.Sprintf("Decide %s (webfetch domain cached): tool=%s domain=%s", level, toolName, domain))
 				return PermissionDecision{Level: level}
 			}
-			emitDebug("perm", fmt.Sprintf("Decide ASK (webfetch domain): tool=%s domain=%s", toolName, domain))
+			pm.emitDebug("perm", fmt.Sprintf("Decide ASK (webfetch domain): tool=%s domain=%s", toolName, domain))
 			return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{
 				ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "webfetch.domain." + domain,
 			}}
@@ -1064,10 +1080,10 @@ func (pm *PermissionManager) Decide(toolName string, args json.RawMessage) Permi
 
 	level := pm.Check(toolName)
 	if level == PermissionAsk {
-		emitDebug("perm", fmt.Sprintf("Decide ASK (tool rule): tool=%s", toolName))
+		pm.emitDebug("perm", fmt.Sprintf("Decide ASK (tool rule): tool=%s", toolName))
 		return PermissionDecision{Level: PermissionAsk, Request: &PermissionRequest{ToolName: toolName, Args: args, Scope: PermissionScopeTool, Rule: "tool." + toolName}}
 	}
-	emitDebug("perm", fmt.Sprintf("Decide %s (tool rule): tool=%s", level, toolName))
+	pm.emitDebug("perm", fmt.Sprintf("Decide %s (tool rule): tool=%s", level, toolName))
 	return PermissionDecision{Level: level}
 }
 
@@ -3015,11 +3031,25 @@ func parseShellCommandLine(commandLine string) ([]parsedShellCommand, error) {
 		}
 	}
 
+	// Shell reserved words that introduce a new command body without an
+	// intervening operator token (e.g. "do rm -rf /" inside a for/while
+	// loop, or "then rm -rf /" inside an if). Without splitting here, the
+	// banned command becomes a trailing word of the keyword's own fragment
+	// instead of a fragment's leading word, so matchBashPrefixRule never
+	// sees it and the deny short-circuit is skipped.
+	bodyIntroKeywords := map[string]bool{
+		"do": true, "then": true, "else": true, "elif": true,
+	}
+
 	for _, tok := range tokens {
 		if tok.typ == tokOp {
 			emitCommand()
 		} else if tok.typ == tokLeftParen || tok.typ == tokRightParen {
 			emitCommand()
+		} else if tok.typ == tokWord && len(currentTokens) == 0 && bodyIntroKeywords[tok.value] {
+			// Bare keyword at the start of a fragment: drop it and let the
+			// following words form their own command fragment.
+			continue
 		} else if tok.typ == tokSubst {
 			subCmds, err := parseShellCommandLine(tok.value)
 			if err == nil {
@@ -3477,14 +3507,14 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 			if isLikelyPathArg(val) {
 				resolved := resolvePath(val, pm.workDir)
 				if !isWithinAllowedScope(pm, resolved) {
-					emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env out-of-scope): env=%s path=%s", env, resolved))
+					pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env out-of-scope): env=%s path=%s", env, resolved))
 					return PermissionDecision{
 						Level:   PermissionAsk,
 						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, false),
 					}
 				}
 				if isSensitivePath(resolved) {
-					emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env sensitive): env=%s path=%s", env, resolved))
+					pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (env sensitive): env=%s path=%s", env, resolved))
 					return PermissionDecision{
 						Level:   PermissionAsk,
 						Request: envVarPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, true),
@@ -3501,14 +3531,14 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		}
 		resolved := resolvePath(path, pm.workDir)
 		if !isWithinAllowedScope(pm, resolved) {
-			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect out-of-scope): path=%s", resolved))
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect out-of-scope): path=%s", resolved))
 			return PermissionDecision{
 				Level:   PermissionAsk,
 				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, false),
 			}
 		}
 		if isSensitivePath(resolved) {
-			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect sensitive): path=%s", resolved))
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (redirect sensitive): path=%s", resolved))
 			return PermissionDecision{
 				Level:   PermissionAsk,
 				Request: redirectionPermissionRequest(args, rebuildCommandLine(cmd.cmdWords), resolved, true),
@@ -3522,7 +3552,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 
 	command := rebuildCommandLine(cmd.cmdWords)
 	if isHardBlockedCommand(command) {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (hard-blocked): command=%q", command))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (hard-blocked): command=%q", command))
 		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 	}
 
@@ -3544,7 +3574,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// tool-level "bash" allow would otherwise permit them (e.g. a persisted
 	// "git push" rule must not auto-approve "git push --force").
 	if IsHarmfulBashCommand(command) {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (harmful): command=%q", command))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (harmful): command=%q", command))
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 	}
 
@@ -3552,7 +3582,7 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// exfiltrate data off-machine, so it is auto-allowed without prompting —
 	// this is the one nc variant we treat as safe (it is never "harmful").
 	if isLoopbackNetcat(command) {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback nc): command=%q", command))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback nc): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
@@ -3560,26 +3590,26 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// stay on-host and cannot exfiltrate data off-machine, so they are
 	// auto-allowed without prompting — same rationale as loopback nc.
 	if isLoopbackNetworkCommand(command) {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback network): command=%q", command))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback network): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	if deniedPrefix, ok := pm.matchBashPrefixRule(cmd.cmdWords, PermissionDeny); ok {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (banned prefix rule): prefix=%s", deniedPrefix))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (banned prefix rule): prefix=%s", deniedPrefix))
 		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 	}
 
 	// 1. Temp directory operations are always allowed (cross-platform)
 	// Check if all path arguments in the command reference temp directories.
 	if allArgsAreTempDirs(cmd.cmdWords) {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (all args are temp dirs): command=%q", command))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (all args are temp dirs): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	// 2. Persisted in-root rule
 	if level, exists := pm.bashPrefixes[bashInRootKey(prefix, pm.workDir)]; exists {
 		if level == PermissionAllow && canAutoAllowInRoot(pm, command, prefix) {
-			emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (in-root): prefix=%s", prefix))
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (in-root): prefix=%s", prefix))
 			return PermissionDecision{Level: PermissionAllow}
 		}
 	}
@@ -3587,23 +3617,23 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// 3. Explicit prefix rule. A broad single-word deny (e.g. "git" => deny)
 	// governs every subcommand and must win over any granular allow.
 	if level, exists := pm.bashPrefixes[prefix]; exists && level == PermissionDeny {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (broad prefix rule): prefix=%s", prefix))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (broad prefix rule): prefix=%s", prefix))
 		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 	}
 	// Then the granular rulePrefix (e.g. "git push"), which carries always-allow.
 	if level, exists := pm.bashPrefixes[rulePrefix]; exists {
 		if level == PermissionAsk {
-			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (prefix rule): prefix=%s", rulePrefix))
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (prefix rule): prefix=%s", rulePrefix))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 		}
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, rulePrefix))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (prefix rule): prefix=%s", level, rulePrefix))
 		return PermissionDecision{Level: level}
 	}
 	// Finally a broad single-word ask rule (only reached when rulePrefix differs,
 	// i.e. git; a broad "git" allow cannot persist so only Ask remains here).
 	if rulePrefix != prefix {
 		if level, exists := pm.bashPrefixes[prefix]; exists && level == PermissionAsk {
-			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (broad prefix rule): prefix=%s", prefix))
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (broad prefix rule): prefix=%s", prefix))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 		}
 	}
@@ -3611,12 +3641,12 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	// 4. Path-scoped auto-allow
 	if bashAutoAllowPrefixes[prefix] {
 		if canAutoAllowWithMode(pm, command, prefix) {
-			emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (auto-allow): prefix=%s", prefix))
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (auto-allow): prefix=%s", prefix))
 			return PermissionDecision{Level: PermissionAllow}
 		}
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (auto-allow, not in root): prefix=%s", prefix))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (auto-allow, not in root): prefix=%s", prefix))
 		if outPath := firstOutOfScopePath(pm, command, prefix); outPath != "" {
-			emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (out-of-scope path): prefix=%s path=%s", prefix, outPath))
+			pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (out-of-scope path): prefix=%s path=%s", prefix, outPath))
 			return PermissionDecision{Level: PermissionAsk, Request: bashPathPermissionRequest(args, command, outPath)}
 		}
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, prefix)}
@@ -3624,23 +3654,23 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 
 	// 4. Argless commands
 	if bashAlwaysAllow[prefix] {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (always-allow): prefix=%s", prefix))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (always-allow): prefix=%s", prefix))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	// 5. Subcommand-pinned allowlist
 	if matchSubcommandAllow(command) {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (subcommand allowlist): command=%q", command))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (subcommand allowlist): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
 	}
 
 	// 6. Fall through to tool-level rule
 	level := pm.Check("bash")
 	if level == PermissionAsk {
-		emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (tool rule): prefix=%s", rulePrefix))
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ASK (tool rule): prefix=%s", rulePrefix))
 		return PermissionDecision{Level: PermissionAsk, Request: bashPermissionRequest(args, command, rulePrefix)}
 	}
-	emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (tool rule): prefix=%s", level, prefix))
+	pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand %s (tool rule): prefix=%s", level, prefix))
 	return PermissionDecision{Level: level}
 }
 

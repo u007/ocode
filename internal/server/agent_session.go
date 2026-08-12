@@ -74,6 +74,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	lspMgr := h.sharedLSPManager()
 	tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
 	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
+	ag.SetSessionID(sessionID)
 	// The agent's workdir comes from the registry entry's project root, not
 	// the process cwd — multi-project sessions run against their own repo
 	// (environment prompt, file-edit snapshots, permissions, discovery all

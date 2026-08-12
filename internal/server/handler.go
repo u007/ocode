@@ -208,20 +208,7 @@ func NewHandler() *Handler {
 	// workdir first (backward compat with single-project servers) plus every
 	// saved project root; the onEvict hook keeps the legacy h.agents mirror in
 	// sync when idle agents are released.
-	h.sessions = NewSessionManager(defaultSessionIdleTimeout, func() []string {
-		roots := make([]string, 0, 4)
-		if h.workDir != "" {
-			roots = append(roots, h.workDir)
-		}
-		if h.projects != nil {
-			for _, p := range h.projects.List() {
-				if p.Path != "" {
-					roots = append(roots, p.Path)
-				}
-			}
-		}
-		return roots
-	}, func(sessionID string) {
+	h.sessions = NewSessionManager(defaultSessionIdleTimeout, h.allowedProjectRoots, func(sessionID string) {
 		h.mu.Lock()
 		as := h.agents[sessionID]
 		delete(h.agents, sessionID)
@@ -245,6 +232,26 @@ func NewHandler() *Handler {
 		}
 	}
 	return h
+}
+
+// allowedProjectRoots returns the set of project roots this server serves:
+// its own workdir first (backward compat with single-project servers) plus
+// every saved project root. It is the shared trust boundary for anything that
+// binds work to a project directory — session resolution (SessionManager) and
+// the interactive terminal's per-project cwd both validate against it.
+func (h *Handler) allowedProjectRoots() []string {
+	roots := make([]string, 0, 4)
+	if h.workDir != "" {
+		roots = append(roots, h.workDir)
+	}
+	if h.projects != nil {
+		for _, p := range h.projects.List() {
+			if p.Path != "" {
+				roots = append(roots, p.Path)
+			}
+		}
+	}
+	return roots
 }
 
 // SetWorkDir sets the working directory for git commands (used in tests) and

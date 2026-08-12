@@ -26,7 +26,7 @@ function newTerminal(): TerminalInstance {
  * sub-tab panels, and has no reason to live in the global project store.
  */
 export default function TerminalTabs({ active, projectPath }: { active: boolean; projectPath: string }) {
-  const { available, loading, error, scrollbackLines } = useTerminalConfig(projectPath);
+  const { available, loading, error, scrollbackLines } = useTerminalConfig();
   const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
   const [activeId, setActiveId] = useState<string>("");
   // This panel is force-mounted for every session tab (matching LogPanel's
@@ -69,8 +69,7 @@ export default function TerminalTabs({ active, projectPath }: { active: boolean;
     return (
       <div className="p-4 text-sm text-zinc-400">
         The interactive terminal is unavailable on this server: it requires server
-        authentication or a loopback bind address, and the selected project must match
-        the server&apos;s working directory.
+        authentication or a loopback bind address.
       </div>
     );
   }
@@ -125,7 +124,11 @@ export default function TerminalTabs({ active, projectPath }: { active: boolean;
                 t.id === activeId ? "absolute inset-0" : "absolute inset-0 hidden"
               }
             >
-              <TerminalPanel active={active && t.id === activeId} scrollbackLines={scrollbackLines} />
+              <TerminalPanel
+                active={active && t.id === activeId}
+                scrollbackLines={scrollbackLines}
+                projectPath={projectPath}
+              />
             </div>
           ))
         )}

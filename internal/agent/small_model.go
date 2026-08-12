@@ -73,5 +73,5 @@ func injectSmallModelIfEligible(a *Agent, spec *AgentSpec, cfg *config.Config) {
 		return // explicit override in agent definition wins
 	}
 	spec.Model = cfg.Ocode.SmallModel
-	emitDebug("AGENT", fmt.Sprintf("spec %q: injecting small model %s", spec.Name, spec.Model))
+	a.emitDebug("AGENT", fmt.Sprintf("spec %q: injecting small model %s", spec.Name, spec.Model))
 }

@@ -78,7 +78,7 @@ func (a *Agent) ensureDiscovery() {
 		}
 		base, dim, e := discovery.EnsureLocalServer(spawn, modelID, discoveryCacheDir(), func(s string) {
 			if err := config.SaveLocalModelStatus(s); err != nil {
-				emitDebug("DISCOVERY", fmt.Sprintf("persist local model status %q failed: %v", s, err))
+				a.emitDebug("DISCOVERY", fmt.Sprintf("persist local model status %q failed: %v", s, err))
 			}
 		}, discovery.LocalServerOptions{UserBaseURL: dc.LocalServerURL})
 		if e != nil {
@@ -90,7 +90,7 @@ func (a *Agent) ensureDiscovery() {
 		emb, err = discovery.ResolveEmbedder(dc.EmbeddingBackend, dc.EmbeddingModel, keyForEnv)
 	}
 	if err != nil {
-		emitDebug("DISCOVERY", fmt.Sprintf("disabled (fail-open): %v", err))
+		a.emitDebug("DISCOVERY", fmt.Sprintf("disabled (fail-open): %v", err))
 		a.disco = &discoveryState{enabled: false, initErr: err.Error()}
 		return
 	}
@@ -327,7 +327,7 @@ func (a *Agent) RunDiscovery(query string) {
 	warmCancel()
 	if err != nil {
 		a.startBackgroundWarm(docs)
-		emitDebug("DISCOVERY", fmt.Sprintf("corpus warm deferred to background: %v", err))
+		a.emitDebug("DISCOVERY", fmt.Sprintf("corpus warm deferred to background: %v", err))
 		return
 	}
 	// Discover embeds the query against a (now-warm) corpus. On a hot cache
@@ -340,7 +340,7 @@ func (a *Agent) RunDiscovery(query string) {
 	added, err := a.disco.session.Discover(rankCtx, query)
 	rankCancel()
 	if err != nil {
-		emitDebug("DISCOVERY", fmt.Sprintf("rank failed (fail-open, all attached): %v", err))
+		a.emitDebug("DISCOVERY", fmt.Sprintf("rank failed (fail-open, all attached): %v", err))
 		a.disco.enabled = false
 		return
 	}
@@ -351,7 +351,7 @@ func (a *Agent) RunDiscovery(query string) {
 		}
 		a.OnDiscovery(strings.Join(names, ", "))
 	}
-	emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total (q=%.60q)",
+	a.emitDebug("DISCOVERY", fmt.Sprintf("turn rank: %d newly attached, %d total (q=%.60q)",
 		len(added), len(a.disco.session.Attached()), query))
 }
 
@@ -370,10 +370,10 @@ func (a *Agent) startBackgroundWarm(docs []discovery.Doc) {
 		ctx, cancel := context.WithTimeout(context.Background(), discoveryWarmTimeout)
 		defer cancel()
 		if err := d.engine.Warm(ctx, docs); err != nil {
-			emitDebug("DISCOVERY", fmt.Sprintf("background corpus warm failed: %v", err))
+			a.emitDebug("DISCOVERY", fmt.Sprintf("background corpus warm failed: %v", err))
 			return
 		}
-		emitDebug("DISCOVERY", "background corpus warm complete (cache hot; ranking resumes next turn)")
+		a.emitDebug("DISCOVERY", "background corpus warm complete (cache hot; ranking resumes next turn)")
 	}()
 }
 

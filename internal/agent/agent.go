@@ -17,6 +17,7 @@ import (
 
 	"github.com/u007/ocode/internal/changes"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/hooks"
 	"github.com/u007/ocode/internal/lsp"
 	"github.com/u007/ocode/internal/mcp"
@@ -45,6 +46,34 @@ func emitDebug(kind, msg string) {
 // that want to emit a debug log without importing fmt twice.
 func DebugAppendf(kind, format string, args ...interface{}) {
 	emitDebug(kind, fmt.Sprintf(format, args...))
+}
+
+// SetSessionID tags this agent (and its owned permission manager and LLM
+// client, if it's a *GenericClient) with a session id so their debug-log
+// entries are attributed to this session — see emitDebug and
+// internal/server/handler_logs.go. Called once at construction
+// (buildAgentSession); the TUI never calls this, so its entries stay
+// untagged (process-global), matching its single-session-per-process model.
+func (a *Agent) SetSessionID(sessionID string) {
+	a.sessionID = sessionID
+	if a.permissions != nil {
+		a.permissions.sessionID = sessionID
+	}
+	if gc, ok := a.client.(*GenericClient); ok {
+		gc.sessionID = sessionID
+	}
+}
+
+// emitDebug appends a debug-log entry tagged with this agent's session id.
+// Safe to call on a nil receiver (e.g. TaskTool.mainAgent left unset on the
+// shared, undispatched tool instance) — falls back to the process-global
+// sink used by DebugAppendf.
+func (a *Agent) emitDebug(kind, msg string) {
+	if a == nil || a.sessionID == "" {
+		emitDebug(kind, msg)
+		return
+	}
+	debuglog.Log.Append(debuglog.Entry{Kind: debuglog.EntryKind(kind), Message: msg, SessionID: a.sessionID})
 }
 
 // getClientAPIKey extracts the API key from an LLMClient via type assertion.
@@ -111,6 +140,11 @@ type Agent struct {
 	// This is used by the /cd command to update the working directory shown
 	// to the LLM without changing the process working directory.
 	workDir string
+	// sessionID tags this agent's debug-log entries so the desktop/web Log
+	// tab can scope itself to the active session (see SetSessionID and
+	// emitDebug). Empty in the TUI, where DebugAppend is process-global by
+	// design (single session per process).
+	sessionID string
 	// lspMgr, when non-nil, is the project-wide LSP manager. The agent
 	// loop reads its diagnostic store on every Step to build a
 	// transient system-message fragment (see injectLSPDiagnostics) — it
@@ -547,7 +581,7 @@ func (a *Agent) chatWithDelta(stopCh <-chan struct{}, messages []Message, toolDe
 					RetryingAt: time.Now(),
 					Kind:       "llm",
 				})
-				emitDebug("retry", fmt.Sprintf("llm %s — retry %d/%d in %v: %v",
+				a.emitDebug("retry", fmt.Sprintf("llm %s — retry %d/%d in %v: %v",
 					gc.Model, attempt+1, maxRetries+1, delay, err))
 			}
 			defer func() { gc.RetryNotifier = origNotifier }()
@@ -892,7 +926,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		// (Part 08) only becomes visible to the LLM on the next loop.
 		toolDefs := a.GetToolDefinitions()
 		if i == 0 {
-			emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prompt prep, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
+			a.emitDebug("AGENT", fmt.Sprintf("Step: %d msgs (after prompt prep, was %d) with %d tools", len(messages), preLen, len(toolDefs)))
 		}
 		limit := a.maxSteps
 		if limit <= 0 {
@@ -918,7 +952,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 			return newMsgs, nil
 		}
-		emitDebug("LLM", fmt.Sprintf("→ %s/%s [%d msgs]", a.client.GetProvider(), a.client.GetModel(), len(messages)))
+		a.emitDebug("LLM", fmt.Sprintf("→ %s/%s [%d msgs]", a.client.GetProvider(), a.client.GetModel(), len(messages)))
 		a.activity.setLLMRunning(true)
 		resp, err := a.chatWithDelta(stopCh, messages, toolDefs)
 		a.activity.setLLMRunning(false)
@@ -926,10 +960,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			if isCancelled() || errors.Is(err, context.Canceled) {
 				// Expected cancellation (user interrupt / superseded request) —
 				// benign, not an error condition. Log quietly per logging rules.
-				emitDebug("LLM", fmt.Sprintf("request cancelled: provider=%s model=%q",
+				a.emitDebug("LLM", fmt.Sprintf("request cancelled: provider=%s model=%q",
 					a.client.GetProvider(), a.client.GetModel()))
 			} else {
-				emitDebug("ERROR", fmt.Sprintf("LLM error: provider=%s model=%q apiKey=%s error: %v",
+				a.emitDebug("ERROR", fmt.Sprintf("LLM error: provider=%s model=%q apiKey=%s error: %v",
 					a.client.GetProvider(), a.client.GetModel(), maskKey(getClientAPIKey(a.client)), err))
 			}
 			return nil, err
@@ -945,7 +979,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			if resp.Usage.CompletionTokens != nil {
 				out = *resp.Usage.CompletionTokens
 			}
-			emitDebug("LLM", fmt.Sprintf("← tokens in=%d out=%d", in, out))
+			a.emitDebug("LLM", fmt.Sprintf("← tokens in=%d out=%d", in, out))
 			a.warnIfNearWindow(in)
 		}
 
@@ -1040,7 +1074,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		// → no-op (the common case).
 		if groupBus != nil {
 			if err := seedBrief(groupBus, a.noteBusBrief); err != nil {
-				emitDebug("NOTEBUS", fmt.Sprintf("seedBrief failed: %v", err))
+				a.emitDebug("NOTEBUS", fmt.Sprintf("seedBrief failed: %v", err))
 			}
 		}
 
@@ -1359,7 +1393,7 @@ func (a *Agent) warnIfNearWindow(promptTokens int64) {
 	}
 	limit := int64(float64(rt.WindowTokens) * rt.TokenThreshold)
 	if promptTokens >= limit {
-		emitDebug("COMPACT", fmt.Sprintf("warning: prompt tokens=%d ≥ threshold=%d (window=%d); compaction will run after this Step", promptTokens, limit, rt.WindowTokens))
+		a.emitDebug("COMPACT", fmt.Sprintf("warning: prompt tokens=%d ≥ threshold=%d (window=%d); compaction will run after this Step", promptTokens, limit, rt.WindowTokens))
 	}
 }
 
@@ -1439,7 +1473,7 @@ func (a *Agent) resolveCompactRuntime(force bool) compactRuntime {
 func (a *Agent) MaybeCompactAsync(messages []Message) bool {
 	rt := a.resolveCompactRuntime(false)
 	if !rt.Enabled {
-		emitDebug("COMPACT", "auto-compaction disabled in config")
+		a.emitDebug("COMPACT", "auto-compaction disabled in config")
 		return false
 	}
 	need, used := shouldCompact(messages, rt)
@@ -1450,7 +1484,7 @@ func (a *Agent) MaybeCompactAsync(messages []Message) bool {
 		if window <= 0 {
 			window = 100_000
 		}
-		emitDebug("COMPACT", fmt.Sprintf("below threshold: ~%d tokens used, window=%d, threshold=%.2f (limit=%d), messages=%d",
+		a.emitDebug("COMPACT", fmt.Sprintf("below threshold: ~%d tokens used, window=%d, threshold=%.2f (limit=%d), messages=%d",
 			used, window, rt.TokenThreshold, int(float64(window)*rt.TokenThreshold), len(messages)))
 		return false
 	}
@@ -1476,16 +1510,16 @@ func (a *Agent) CompactAsync(messages []Message, focus string) bool {
 // conversations that are comfortably within budget.
 func (a *Agent) startCompactAsync(messages []Message, rt compactRuntime, focus, note string, force bool) bool {
 	if a.compactSummaryClient() == nil {
-		emitDebug("COMPACT", "skipped: no LLM client connected")
+		a.emitDebug("COMPACT", "skipped: no LLM client connected")
 		return false
 	}
 	if !a.compactMu.TryLock() {
-		emitDebug("COMPACT", "skipped: another compaction in flight")
+		a.emitDebug("COMPACT", "skipped: another compaction in flight")
 		return false
 	}
 	snapshot := make([]Message, len(messages))
 	copy(snapshot, messages)
-	emitDebug("COMPACT", note)
+	a.emitDebug("COMPACT", note)
 	if a.OnCompactStart != nil {
 		a.OnCompactStart()
 	}
@@ -1785,7 +1819,7 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 		if prevSummaryIdx >= prefixEnd {
 			// A previous summary exists: fall back to re-compacting it so
 			// manual /compact always produces a result.
-			emitDebug("COMPACT", fmt.Sprintf("manual compact: no new content after summary at %d; re-compacting summary itself", prevSummaryIdx))
+			a.emitDebug("COMPACT", fmt.Sprintf("manual compact: no new content after summary at %d; re-compacting summary itself", prevSummaryIdx))
 			middleStart = prevSummaryIdx
 			tailStart = prevSummaryIdx + 1
 			prevSummary = "" // don't pass the old summary as <previous-summary> since we're re-compacting it
@@ -1797,14 +1831,14 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 			// makes /compact work on a resumed session whose entire history
 			// still fits in the recent-token budget (the common case for a
 			// single-turn agentic run or a short session).
-			emitDebug("COMPACT", "forced compact: summarising entire conversation after prefix (suffix within token budget)")
+			a.emitDebug("COMPACT", "forced compact: summarising entire conversation after prefix (suffix within token budget)")
 			middleStart = prefixEnd
 			tailStart = len(messages)
 		} else {
 			// Auto-compaction: the entire conversation already fits within the
 			// recent-token budget, so there is genuinely nothing old to
 			// summarise.
-			emitDebug("COMPACT", "skipped: no compactible middle (suffix already within token budget)")
+			a.emitDebug("COMPACT", "skipped: no compactible middle (suffix already within token budget)")
 			return res
 		}
 	}
@@ -1853,11 +1887,11 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 		prompt, dropped := buildSummaryPrompt(batch, rt.MaxSummaryInputTokens, running, focus)
 		if dropped > 0 {
 			totalDropped += dropped
-			emitDebug("COMPACT", fmt.Sprintf("batch %d/%d: dropped %d msgs from summary input (size cap)", bi+1, len(batches), dropped))
+			a.emitDebug("COMPACT", fmt.Sprintf("batch %d/%d: dropped %d msgs from summary input (size cap)", bi+1, len(batches), dropped))
 		}
 		summaryText, err := runSummary(ctx, client, prompt, rt.SummaryMaxRetries, a.RecordSideUsageFromMessage)
 		if err != nil {
-			emitDebug("COMPACT", fmt.Sprintf("summary failed on batch %d/%d: %v", bi+1, len(batches), err))
+			a.emitDebug("COMPACT", fmt.Sprintf("summary failed on batch %d/%d: %v", bi+1, len(batches), err))
 			res.Err = err
 			return res
 		}
@@ -1891,7 +1925,7 @@ func (a *Agent) runCompact(messages []Message, rt compactRuntime, focus string, 
 	res.ReplaceFrom = replaceFrom
 	res.ReplaceTo = tailStart
 	res.Summary = summaryMsg
-	emitDebug("COMPACT", fmt.Sprintf("done: replaced [%d:%d] (%d msgs) with anchored=%v summary", replaceFrom, tailStart, tailStart-replaceFrom, prevSummaryIdx >= 0))
+	a.emitDebug("COMPACT", fmt.Sprintf("done: replaced [%d:%d] (%d msgs) with anchored=%v summary", replaceFrom, tailStart, tailStart-replaceFrom, prevSummaryIdx >= 0))
 	return res
 }
 
@@ -2066,7 +2100,7 @@ func (a *Agent) scanToolResult(toolName string, toolArgs string, content string)
 		masked := redactText(content, a.redactionRegistry)
 		masked, err := redact.ScanAndMask(masked, a.redactionScanner, a.redactionRegistry)
 		if err != nil {
-			emitDebug("REDACT", fmt.Sprintf("tier-2 scan error (read %s): %v", sensitiveReadPath, err))
+			a.emitDebug("REDACT", fmt.Sprintf("tier-2 scan error (read %s): %v", sensitiveReadPath, err))
 			return masked
 		}
 		return masked
@@ -2185,12 +2219,12 @@ func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *t
 		// The pixels are a best-effort enrichment; the textual stub in `text`
 		// still describes the image, so degrade to it rather than failing the
 		// whole tool call.
-		emitDebug("ERROR", fmt.Sprintf("read image %s: reading bytes for vision block: %v", path, ierr))
+		a.emitDebug("ERROR", fmt.Sprintf("read image %s: reading bytes for vision block: %v", path, ierr))
 		return text, nil, nil
 	}
 	enc, ierr := NewImageFromBytes(raw, mime, a.imageMaxDim())
 	if ierr != nil {
-		emitDebug("ERROR", fmt.Sprintf("read image %s: encoding vision block: %v", path, ierr))
+		a.emitDebug("ERROR", fmt.Sprintf("read image %s: encoding vision block: %v", path, ierr))
 		return text, nil, nil
 	}
 	note := fmt.Sprintf("[image file: %s — shown below]", path)
@@ -2276,7 +2310,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 	if a.permissions != nil {
 		autoEnabled := a.permissions.AutoPermissionEnabled()
 		decision := a.permissions.Decide(name, args)
-		emitDebug("PERMISSION", a.permissionDecisionTrace(name, args, decision, autoEnabled))
+		a.emitDebug("PERMISSION", a.permissionDecisionTrace(name, args, decision, autoEnabled))
 		if decision.Level == PermissionDeny {
 			if autoEnabled && a.permissions != nil && a.permissions.Mode() != PermissionModeLocked {
 				// Hard-blocked bash commands (rm -rf /, pipe-to-shell chains,
@@ -2291,7 +2325,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 					}
 					allowed, reason, _, consulted := a.consultPermissionModel(name, args, &req)
 					if allowed {
-						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						if a.permissions != nil {
 							prevLevel, hadLevel := a.permissions.rules[name]
 							prevConfirmed, hadConfirmed := a.permissions.userConfirmedRules[name]
@@ -2312,7 +2346,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 						return a.executeToolCall(name, args, b, toolCallID)
 					}
 					if consulted {
-						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						return fmt.Sprintf("denied: tool %q was denied by the LLM permission model. Reason: %s", name, reason), nil
 					}
 					// The judge never rendered a verdict (model unavailable /
@@ -2320,7 +2354,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 					// already in force rather than attributing it to an LLM
 					// that never ran — the call stays denied either way, but
 					// the reason must not be a fabricated safety judgment.
-					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_unavailable tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+					a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_unavailable tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 				}
 			}
 			return fmt.Sprintf("denied: tool %q is not permitted by permission rules. This call is blocked by policy — do not retry the same call; choose a different approach or ask the user.", name), nil
@@ -2333,7 +2367,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 					req = *decision.Request
 				}
 				if IsHarmfulRequest(req) && !a.autoPermissionAllowsDestructive() {
-					emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
+					a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_fallback_harmful tool=%s command=%s", name, req.Command))
 					// Fall through to human ask unless destructive auto-permission is enabled.
 				} else {
 					// Consult the LLM permission model (interpreter executions
@@ -2341,7 +2375,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 					// else the plain ALLOW/DENY path).
 					allowed, reason, summary, consulted := a.consultPermissionModel(name, args, &req)
 					if allowed {
-						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						return a.executeToolCall(name, args, b, toolCallID)
 					}
 					// LLM denied, or was never reachable — either way fall
@@ -2354,17 +2388,17 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 						req = *bashPermissionRequest(args, bashCommand(args), "")
 					}
 					if consulted {
-						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						req.DenyReason = reason
 					} else {
-						emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_unavailable tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
+						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_unavailable tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
 						req.ModelUnavailable = reason
 					}
 					req.Summary = summary
 					decision.Request = &req
 				}
 			}
-			emitDebug("PERMISSION", fmt.Sprintf("tier=human_ask tool=%s request=%s callback=%t", name, permissionRequestSummary(decision.Request), a.OnPermissionAsk != nil))
+			a.emitDebug("PERMISSION", fmt.Sprintf("tier=human_ask tool=%s request=%s callback=%t", name, permissionRequestSummary(decision.Request), a.OnPermissionAsk != nil))
 			// When a permission callback is wired (sub-agents), ask the user
 			// synchronously and act on the answer. The PERMISSION_ASK: sentinel
 			// path is used only when no callback is set (the main agent's flow,
@@ -2506,7 +2540,7 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 	modelName := a.autoPermissionModelName()
 	modelLabel := a.autoPermissionModelDisplayName()
 	defer func() {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_elapsed tool=%s model=%s allowed=%t consulted=%t elapsed=%s", toolName, modelLabel, allowed, consulted, time.Since(start)))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_elapsed tool=%s model=%s allowed=%t consulted=%t elapsed=%s", toolName, modelLabel, allowed, consulted, time.Since(start)))
 	}()
 	if modelName == "unavailable" {
 		return false, "no permission model configured", false
@@ -2520,13 +2554,13 @@ func (a *Agent) askPermissionModel(toolName string, args json.RawMessage, req *P
 	// EnsureLocalModelRunning's doc comment for why a second concurrent start
 	// attempt is safe — it just waits on the same health-poll).
 	if err := EnsureLocalModelRunning(a, modelName); err != nil {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=local_model_start_failed err=%v", toolName, modelLabel, err))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=local_model_start_failed err=%v", toolName, modelLabel, err))
 		return false, "local model unavailable: " + err.Error(), false
 	}
 
 	client := newClientFn(a.config, modelName)
 	if client == nil {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=client_creation_failed", toolName, modelLabel))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_fail tool=%s model=%s error=client_creation_failed", toolName, modelLabel))
 		return false, "could not create LLM client", false
 	}
 	pinDeterministicSampling(client)
@@ -2643,7 +2677,7 @@ These are format examples only — decide from THIS request's tool and arguments
 		// withheld so the model must answer, and the prior tool exchanges are
 		// not replayed — the model's own final text carries its conclusion, and
 		// the retry only asks it to restate that in the required format.
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_reprompt tool=%s response=%s", toolName, truncateDebugArgs([]byte(finalText), 100)))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_reprompt tool=%s response=%s", toolName, truncateDebugArgs([]byte(finalText), 100)))
 		messages = append(messages,
 			Message{Role: "assistant", Content: finalText},
 			Message{Role: "user", Content: "Your previous reply did not contain a parseable verdict. Reply with EXACTLY one line and nothing else:\nALLOW: <brief reason>\nor\nDENY: <brief reason>"})
@@ -2655,7 +2689,7 @@ These are format examples only — decide from THIS request's tool and arguments
 		} else if retryErr != "" {
 			// Surface the transport error so the user knows the retry failed
 			// rather than just seeing "ambiguous LLM response".
-			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_reprompt_error tool=%s err=%s", toolName, retryErr))
+			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_reprompt_error tool=%s err=%s", toolName, retryErr))
 			return false, fmt.Sprintf("permission judge retry failed: %s", retryErr), false
 		}
 	}
@@ -2664,14 +2698,14 @@ These are format examples only — decide from THIS request's tool and arguments
 		// alone never auto-approves (mirrors the interpreter effect verifier).
 		if allow {
 			if ok, vreason := a.verifyAutoGrant(toolName, args, req); !ok {
-				emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_guardrail_reject tool=%s reason=%s", toolName, vreason))
+				a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_guardrail_reject tool=%s reason=%s", toolName, vreason))
 				return false, vreason, true
 			}
 		}
 		return allow, reason, true
 	}
 
-	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_ambiguous tool=%s response=%s", toolName, truncateDebugArgs([]byte(finalText), 100)))
+	a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_ambiguous tool=%s response=%s", toolName, truncateDebugArgs([]byte(finalText), 100)))
 	return false, "ambiguous LLM response: " + finalText, true
 }
 
@@ -3374,7 +3408,7 @@ func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage, toolCa
 }
 
 func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
-	emitDebug("TOOL", fmt.Sprintf("→ %s %s", name, truncateDebugArgs(args, 120)))
+	a.emitDebug("TOOL", fmt.Sprintf("→ %s %s", name, truncateDebugArgs(args, 120)))
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
 	}
@@ -3390,7 +3424,7 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		emitDebug("TOOL", fmt.Sprintf("tool %q not found for agent %q — available: %v", name, agentID, keys))
+		a.emitDebug("TOOL", fmt.Sprintf("tool %q not found for agent %q — available: %v", name, agentID, keys))
 		return "", fmt.Errorf("tool %s not found", name)
 	}
 
@@ -3495,9 +3529,9 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 	}
 
 	if err != nil {
-		emitDebug("ERROR", fmt.Sprintf("tool %s: %v", name, err))
+		a.emitDebug("ERROR", fmt.Sprintf("tool %s: %v", name, err))
 	} else {
-		emitDebug("TOOL", fmt.Sprintf("← %s (ok)", name))
+		a.emitDebug("TOOL", fmt.Sprintf("← %s (ok)", name))
 		a.trackDirMDTouch(name, args)
 	}
 	return result, err
@@ -3520,16 +3554,16 @@ func (a *Agent) GetToolDefinitions() []map[string]interface{} {
 			}
 		}
 		if !exposed {
-			emitDebug("TOOLS", fmt.Sprintf("ocr not exposed: exists=%v allowed=%v discovery=%v specTools=%d deniedTools=%d", exists, a.isToolAllowed("ocr"), a.discoveryAllows("ocr"), len(getSpecTools(a.spec)), len(getDeniedSpecTools(a.spec))))
+			a.emitDebug("TOOLS", fmt.Sprintf("ocr not exposed: exists=%v allowed=%v discovery=%v specTools=%d deniedTools=%d", exists, a.isToolAllowed("ocr"), a.discoveryAllows("ocr"), len(getSpecTools(a.spec)), len(getDeniedSpecTools(a.spec))))
 		}
 	} else {
-		emitDebug("TOOLS", "ocr not exposed: missing from a.tools")
+		a.emitDebug("TOOLS", "ocr not exposed: missing from a.tools")
 	}
 	// Deterministic order keeps the provider tool-cache prefix stable across
 	// turns (a.tools is a map → random iteration would bust the cache and
 	// defeat the sticky-set benefit).
 	sort.Strings(names)
-	emitDebug("TOOLS", fmt.Sprintf("exposing %d tools: %s", len(names), strings.Join(names, ", ")))
+	a.emitDebug("TOOLS", fmt.Sprintf("exposing %d tools: %s", len(names), strings.Join(names, ", ")))
 	defs := make([]map[string]interface{}, 0, len(names))
 	for _, name := range names {
 		defs = append(defs, a.tools[name].Definition())
@@ -3691,9 +3725,9 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 	}
 	if strings.TrimSpace(spec.Model) != "" {
 		if a.config == nil {
-			emitDebug("AGENT", fmt.Sprintf("spec %q requested model %q but agent has no config; keeping current client", spec.Name, spec.Model))
+			a.emitDebug("AGENT", fmt.Sprintf("spec %q requested model %q but agent has no config; keeping current client", spec.Name, spec.Model))
 		} else if client := NewClient(a.config, spec.Model); client != nil {
-			emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
+			a.emitDebug("AGENT", fmt.Sprintf("spec %q: switching client to %s", spec.Name, spec.Model))
 			a.client = client
 			a.clearEnvironmentPromptCache()
 			a.preloadedModelContext = "" // model may have changed; reload model-specific context lazily
@@ -3704,14 +3738,14 @@ func (a *Agent) applySpecModel(spec *AgentSpec) {
 				}
 			}
 		} else {
-			emitDebug("AGENT", fmt.Sprintf("spec %q model %q: NewClient returned nil; keeping current client", spec.Name, spec.Model))
+			a.emitDebug("AGENT", fmt.Sprintf("spec %q model %q: NewClient returned nil; keeping current client", spec.Name, spec.Model))
 		}
 	}
 	if gc, ok := a.client.(*GenericClient); ok {
 		gc.Temperature = spec.Temperature
 		gc.TopP = spec.TopP
 		if spec.Temperature != nil || spec.TopP != nil {
-			emitDebug("AGENT", fmt.Sprintf("spec %q: sampling params temperature=%v top_p=%v", spec.Name, spec.Temperature, spec.TopP))
+			a.emitDebug("AGENT", fmt.Sprintf("spec %q: sampling params temperature=%v top_p=%v", spec.Name, spec.Temperature, spec.TopP))
 		}
 	}
 }
@@ -3876,7 +3910,7 @@ func (a *Agent) emitJob(ev JobEvent) {
 	select {
 	case a.jobEvents <- ev:
 	default:
-		emitDebug("JOB", "job event buffer full, dropped "+ev.ID)
+		a.emitDebug("JOB", "job event buffer full, dropped "+ev.ID)
 	}
 }
 
@@ -4224,7 +4258,7 @@ func (a *Agent) recoverOrphanedToolCalls(messages []Message) []Message {
 		return messages
 	}
 
-	emitDebug("RECOVER", fmt.Sprintf("re-executing %d orphaned tool call(s) from assistant at index %d", len(orphans), candidateIdx))
+	a.emitDebug("RECOVER", fmt.Sprintf("re-executing %d orphaned tool call(s) from assistant at index %d", len(orphans), candidateIdx))
 
 	// Re-execute each orphan and insert results right after the assistant.
 	insertAt := candidateIdx + 1

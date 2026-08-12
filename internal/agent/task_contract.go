@@ -95,11 +95,11 @@ func (t TaskTool) verifyContract(contract, result string) contractVerdict {
 	var text string
 	select {
 	case <-ctx.Done():
-		emitDebug("CONTRACT", fmt.Sprintf("verification timed out: %v", ctx.Err()))
+		t.mainAgent.emitDebug("CONTRACT", fmt.Sprintf("verification timed out: %v", ctx.Err()))
 		return contractVerdict{CheckFailed: true, Deficiency: "contract verification timed out"}
 	case out := <-respCh:
 		if out.err != nil {
-			emitDebug("CONTRACT", fmt.Sprintf("verification call failed: %v", out.err))
+			t.mainAgent.emitDebug("CONTRACT", fmt.Sprintf("verification call failed: %v", out.err))
 			return contractVerdict{CheckFailed: true, Deficiency: "contract verification failed: " + out.err.Error()}
 		}
 		if out.msg == nil || strings.TrimSpace(out.msg.Content) == "" {
@@ -110,7 +110,7 @@ func (t TaskTool) verifyContract(contract, result string) contractVerdict {
 
 	satisfied, deficiency, perr := parseVerdictResponse(text)
 	if perr != nil {
-		emitDebug("CONTRACT", fmt.Sprintf("%v (raw: %.200s)", perr, text))
+		t.mainAgent.emitDebug("CONTRACT", fmt.Sprintf("%v (raw: %.200s)", perr, text))
 		return contractVerdict{CheckFailed: true, Deficiency: "contract verification returned an unparseable verdict"}
 	}
 	return contractVerdict{Satisfied: satisfied, Deficiency: deficiency}

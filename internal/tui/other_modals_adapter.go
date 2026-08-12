@@ -28,7 +28,7 @@ func (q *questionModal) Handle(msg tea.Msg) bool {
 		}
 		return true
 	case "esc":
-		q.m.showQuestionDialog = false
+		q.m.clearQuestionPrompt()
 		return true
 	}
 	return false

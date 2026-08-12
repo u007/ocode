@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -803,6 +804,24 @@ func TestPermissions_BashBanMatchesMultiWordPrefix(t *testing.T) {
 	dec = pm.Decide("bash", json.RawMessage(`{"command":"grep needle file.txt"}`))
 	if dec.Level == PermissionDeny {
 		t.Fatalf("expected grep without -n to remain unbanned, got %s", dec.Level)
+	}
+}
+
+func TestPermissions_BashBanMatchesInsideLoopAndConditionalBodies(t *testing.T) {
+	pm := NewPermissionManager()
+	pm.SetBashPrefixRule("rm", PermissionDeny)
+
+	cases := []string{
+		`for i in 1 2; do rm -rf /tmp/x; done`,
+		`while true; do rm -rf /tmp/x; done`,
+		`if true; then rm -rf /tmp/x; fi`,
+		`if true; then echo hi; else rm -rf /tmp/x; fi`,
+	}
+	for _, c := range cases {
+		dec := pm.Decide("bash", json.RawMessage(`{"command":`+strconv.Quote(c)+`}`))
+		if dec.Level != PermissionDeny || !dec.HardDeny {
+			t.Fatalf("expected hard deny for %q, got level=%s hardDeny=%v", c, dec.Level, dec.HardDeny)
+		}
 	}
 }
 

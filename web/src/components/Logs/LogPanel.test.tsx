@@ -82,23 +82,23 @@ afterEach(() => {
 
 describe("LogPanel scroll behavior", () => {
   it("jumps to the bottom the first time the tab is opened", async () => {
-    const { rerender, container } = render(<LogPanel active={false} />);
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
     await act(async () => {}); // flush the initial logs fetch
     const scroller = getScroller(container);
     makeScrollable(scroller, 1000, 100);
 
-    act(() => rerender(<LogPanel active={true} />));
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
 
     expect(scroller.scrollTop).toBe(1000);
   });
 
   it("retains the scroll position when the user scrolled up and new logs arrive", async () => {
-    const { rerender, container } = render(<LogPanel active={false} />);
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
     await act(async () => {});
     const scroller = getScroller(container);
     makeScrollable(scroller, 1000, 100);
 
-    act(() => rerender(<LogPanel active={true} />)); // first open -> bottom
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />)); // first open -> bottom
     expect(scroller.scrollTop).toBe(1000);
 
     // User scrolls up to read older entries.
@@ -112,12 +112,12 @@ describe("LogPanel scroll behavior", () => {
   });
 
   it("follows new logs when the scrollbar is near the bottom", async () => {
-    const { rerender, container } = render(<LogPanel active={false} />);
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
     await act(async () => {});
     const scroller = getScroller(container);
     const { setScrollHeight } = makeScrollable(scroller, 1000, 100);
 
-    act(() => rerender(<LogPanel active={true} />));
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
     expect(scroller.scrollTop).toBe(1000);
 
     // Scroll to within 30px of the bottom (distance 20): still "near bottom".
@@ -131,12 +131,12 @@ describe("LogPanel scroll behavior", () => {
   });
 
   it("restores the saved position when the tab is re-opened after reading", async () => {
-    const { rerender, container } = render(<LogPanel active={false} />);
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
     await act(async () => {});
     const scroller = getScroller(container);
     makeScrollable(scroller, 1000, 100);
 
-    act(() => rerender(<LogPanel active={true} />)); // open #1 -> bottom
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />)); // open #1 -> bottom
     expect(scroller.scrollTop).toBe(1000);
 
     // Read older logs: scroll up (disables auto-scroll, saves the position).
@@ -144,41 +144,41 @@ describe("LogPanel scroll behavior", () => {
     fireEvent.scroll(scroller);
 
     // Leave the tab. In a real browser display:none resets scrollTop to 0.
-    act(() => rerender(<LogPanel active={false} />));
+    act(() => rerender(<LogPanel active={false} sessionId="test-session" />));
     scroller.scrollTop = 0;
 
     // Re-open: the saved position is restored, not forced to the bottom.
-    act(() => rerender(<LogPanel active={true} />));
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
     expect(scroller.scrollTop).toBe(300);
   });
 
   it("catches up to the latest logs when re-opening while following", async () => {
-    const { rerender, container } = render(<LogPanel active={false} />);
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
     await act(async () => {});
     const scroller = getScroller(container);
     const { setScrollHeight } = makeScrollable(scroller, 1000, 100);
 
-    act(() => rerender(<LogPanel active={true} />)); // open #1 -> bottom (following)
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />)); // open #1 -> bottom (following)
     expect(scroller.scrollTop).toBe(1000);
 
     // Leave while pinned to the bottom, and let logs stream in while hidden.
-    act(() => rerender(<LogPanel active={false} />));
+    act(() => rerender(<LogPanel active={false} sessionId="test-session" />));
     scroller.scrollTop = 0;
     setScrollHeight(2000);
     emitLog("hidden entry");
 
     // Re-open: jumps to the new bottom to catch up.
-    act(() => rerender(<LogPanel active={true} />));
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
     expect(scroller.scrollTop).toBe(2000);
   });
 
   it("re-enabling auto-scroll from the toolbar jumps to the bottom", async () => {
-    const { rerender, container } = render(<LogPanel active={false} />);
+    const { rerender, container } = render(<LogPanel active={false} sessionId="test-session" />);
     await act(async () => {});
     const scroller = getScroller(container);
     makeScrollable(scroller, 1000, 100);
 
-    act(() => rerender(<LogPanel active={true} />));
+    act(() => rerender(<LogPanel active={true} sessionId="test-session" />));
 
     // Disable auto-scroll, then scroll up.
     fireEvent.click(screen.getByTitle("Disable auto-scroll"));

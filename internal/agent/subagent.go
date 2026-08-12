@@ -281,7 +281,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 	if spec == nil {
 		if params.Agent != "" {
 			fallbackWarning = fmt.Sprintf("⚠ Agent %q not found; fell back to built-in general agent.\n\n", params.Agent)
-			emitDebug("TASK", fmt.Sprintf("agent %q not found, falling back to general", params.Agent))
+			t.mainAgent.emitDebug("TASK", fmt.Sprintf("agent %q not found, falling back to general", params.Agent))
 		}
 		defaultSpec := t.findAgent("general")
 		if defaultSpec == nil {
@@ -351,7 +351,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 				injectedDocToolNames = append(injectedDocToolNames, dt.Name())
 			}
 		} else {
-			emitDebug("KNOWLEDGE", fmt.Sprintf("context agent dispatched without doc tools: %v", err))
+			t.mainAgent.emitDebug("KNOWLEDGE", fmt.Sprintf("context agent dispatched without doc tools: %v", err))
 		}
 	}
 
@@ -391,7 +391,7 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		// is for the debug log; the tracker records in
 		// addition.
 		subAgent.SetNoteBusCompletion(func(agentID, status string, err error) {
-			emitDebug("NOTEBUS", fmt.Sprintf("agent %s status=%s err=%v", agentID, status, err))
+			t.mainAgent.emitDebug("NOTEBUS", fmt.Sprintf("agent %s status=%s err=%v", agentID, status, err))
 			if t.groupTracker != nil {
 				t.groupTracker.Record(agentID, status, err)
 			}
@@ -806,7 +806,7 @@ func (t TaskTool) runSyncDispatch(specName string, subAgent *Agent, run *AgentRu
 	metadata := childSessionMetadata("parent", specName)
 	if t.persistChildSess != nil {
 		if err := t.persistChildSess(sessionID, fmt.Sprintf("Child: %s", specName), resp, metadata); err != nil {
-			emitDebug("SESSION", fmt.Sprintf("failed to persist child session: %v", err))
+			t.mainAgent.emitDebug("SESSION", fmt.Sprintf("failed to persist child session: %v", err))
 		}
 	}
 

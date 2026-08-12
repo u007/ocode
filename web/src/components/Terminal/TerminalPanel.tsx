@@ -18,9 +18,11 @@ import { apiPath, authToken } from "@/api/client";
 export default function TerminalPanel({
   active,
   scrollbackLines,
+  projectPath,
 }: {
   active: boolean;
   scrollbackLines: number;
+  projectPath: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -62,10 +64,16 @@ export default function TerminalPanel({
 
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     const token = authToken();
+    const params = new URLSearchParams();
+    if (token) params.set("token", token);
+    // project_path pins the shell's cwd to this tab's project; the server
+    // validates it against its registered project roots.
+    if (projectPath) params.set("project_path", projectPath);
+    const query = params.toString();
     // apiPath() keeps the tailscale --set-path prefix, without which the proxy
     // routes the socket to whichever session owns the root path.
     const url = `${scheme}//${window.location.host}${apiPath("/api/terminal/ws")}${
-      token ? `?token=${encodeURIComponent(token)}` : ""
+      query ? `?${query}` : ""
     }`;
     const sock = new WebSocket(url);
     sock.binaryType = "arraybuffer";
@@ -114,7 +122,7 @@ export default function TerminalPanel({
       termRef.current = null;
       fitRef.current = null;
     };
-  }, [scrollbackLines]);
+  }, [scrollbackLines, projectPath]);
 
   // Re-fit when the tab comes back to the foreground: any resize that happened
   // while hidden was skipped because the container had no layout.

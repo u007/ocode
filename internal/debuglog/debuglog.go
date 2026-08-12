@@ -28,6 +28,12 @@ type Entry struct {
 	// llama-server …") so a long artifact download doesn't sit silent on
 	// the Log tab while the user is on the chat tab waiting for a reply.
 	UserFacing bool
+	// SessionID tags entries emitted during a specific session's turn
+	// (LLM/tool/permission activity) so the Log tab can scope itself to the
+	// active session. Empty means process-global (startup, registry loads,
+	// background maintenance) and is shown regardless of which session tab
+	// is active — see HandleGetLogs.
+	SessionID string
 }
 
 const cap = 500
@@ -93,6 +99,22 @@ func (l *log) Clear() {
 	l.entries = l.entries[:0]
 	l.seq = 0
 	l.mu.Unlock()
+}
+
+// ClearSession removes only entries tagged with sessionID, leaving
+// process-global (untagged) and other sessions' entries in place. Sequence
+// numbers are not reset, so existing SnapshotSince cursors stay valid — the
+// ring simply gets shorter for the caller's next diff.
+func (l *log) ClearSession(sessionID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := l.entries[:0]
+	for _, e := range l.entries {
+		if e.SessionID != sessionID {
+			kept = append(kept, e)
+		}
+	}
+	l.entries = kept
 }
 
 // Cursor returns the current sequence cursor: pass it to SnapshotSince to

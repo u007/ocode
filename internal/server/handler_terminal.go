@@ -92,6 +92,12 @@ func (h *Handler) releaseTerminalSession() {
 // the project working directory, giving the web UI a real interactive terminal
 // (as opposed to POST /api/shell, which is one-shot command exec).
 //
+// A `project_path` query parameter selects which project's root the shell
+// starts in. It must be one of the roots the server serves (workdir or a
+// saved project — the same trust boundary as session resolution); anything
+// else is rejected, so this never becomes "spawn a shell in an arbitrary
+// directory". Absent means the server workdir, preserving the old contract.
+//
 // The handler is stateless per connection: one websocket == one pty == one
 // shell process. Multiple terminal tabs in the UI simply open multiple
 // connections, so there is no server-side session registry to keep in sync.
@@ -110,6 +116,21 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	if !available {
 		writeError(w, http.StatusForbidden, "terminal requires server authentication or a loopback bind address")
 		return
+	}
+	if requested := r.URL.Query().Get("project_path"); requested != "" && requested != workDir {
+		allowed := false
+		for _, root := range h.allowedProjectRoots() {
+			if requested == root {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			log.Printf("terminal: rejected project_path %q: not a registered project root", requested)
+			writeError(w, http.StatusForbidden, "project_path is not a project registered with this server")
+			return
+		}
+		workDir = requested
 	}
 	if !h.reserveTerminalSession() {
 		writeError(w, http.StatusTooManyRequests, "too many active terminal sessions")

@@ -161,7 +161,7 @@ func (a *Agent) acquireInterpreterSource(ie *InterpreterExec) (source, sha strin
 		}
 		data, err := os.ReadFile(full)
 		if err != nil {
-			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_read_fail path=%s err=%v", full, err))
+			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_read_fail path=%s err=%v", full, err))
 			return "", "", false, false
 		}
 		clean, valid := sanitizeSource(string(data))
@@ -190,7 +190,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	modelName := a.autoPermissionModelName()
 	modelLabel := a.autoPermissionModelDisplayName()
 	defer func() {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_elapsed lang=%s mode=%s model=%s allowed=%t consulted=%t elapsed=%s", ie.Language, ie.SourceMode, modelLabel, allowed, consulted, time.Since(start)))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_elapsed lang=%s mode=%s model=%s allowed=%t consulted=%t elapsed=%s", ie.Language, ie.SourceMode, modelLabel, allowed, consulted, time.Since(start)))
 	}()
 	if modelName == "unavailable" {
 		return false, "no permission model configured", "", false
@@ -198,7 +198,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 
 	source, sha, truncated, ok := a.acquireInterpreterSource(ie)
 	if !ok {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_no_source lang=%s mode=%s", ie.Language, ie.SourceMode))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_no_source lang=%s mode=%s", ie.Language, ie.SourceMode))
 		return false, fmt.Sprintf("interpreter execution (%s %s): source unavailable for analysis", ie.Language, ie.SourceMode), "", false
 	}
 
@@ -208,20 +208,20 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	// overriding a later allow_destructive=false policy change.
 	allowDestructive := a.autoPermissionAllowsDestructive()
 	if a.permissions.MatchInterpreterGrant(ie, sha, allowDestructive) {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_grant_match lang=%s mode=%s", ie.Language, ie.SourceMode))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_grant_match lang=%s mode=%s", ie.Language, ie.SourceMode))
 		return true, "matched persisted interpreter grant", "", true
 	}
 
 	// See askPermissionModel's identical call for why this blocks until a
 	// "local/"-managed model is actually live instead of racing a dead port.
 	if err := EnsureLocalModelRunning(a, modelName); err != nil {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=local_model_start_failed err=%v", ie.Language, modelLabel, err))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=local_model_start_failed err=%v", ie.Language, modelLabel, err))
 		return false, "local model unavailable: " + err.Error(), "", false
 	}
 
 	client := newClientFn(a.config, modelName)
 	if client == nil {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=client_creation_failed", ie.Language, modelLabel))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_fail lang=%s model=%s error=client_creation_failed", ie.Language, modelLabel))
 		return false, "could not create LLM client", "", false
 	}
 	pinDeterministicSampling(client)
@@ -253,7 +253,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	}
 	payloadJSON, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_payload_fail err=%v", err))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_payload_fail err=%v", err))
 		return false, "could not build interpreter consultation payload", "", false
 	}
 
@@ -325,7 +325,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 
 	var resp interpreterModelResponse
 	if err := json.Unmarshal([]byte(extractJSONObject(finalText)), &resp); err != nil {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_parse_fail err=%v resp=%s", err, truncateDebugArgs([]byte(finalText), 200)))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_parse_fail err=%v resp=%s", err, truncateDebugArgs([]byte(finalText), 200)))
 		// Retry once: tell the model exactly what was wrong and demand a corrected reply.
 		messages = append(messages,
 			Message{Role: "assistant", Content: finalText},
@@ -335,7 +335,7 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 			return false, "interpreter effect summary was not valid JSON", "", false
 		}
 		if err2 := json.Unmarshal([]byte(extractJSONObject(retryText)), &resp); err2 != nil {
-			emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_parse_fail_retry err=%v resp=%s", err2, truncateDebugArgs([]byte(retryText), 200)))
+			a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_parse_fail_retry err=%v resp=%s", err2, truncateDebugArgs([]byte(retryText), 200)))
 			return false, "interpreter effect summary was not valid JSON after retry", "", false
 		}
 		finalText = retryText
@@ -343,12 +343,12 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	summary = strings.TrimSpace(resp.Summary)
 
 	if allowed, reason := a.verifyInterpreterEffects(ie, &resp, minConfidence, allowDestructive, truncated); !allowed {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_reject lang=%s conf=%.2f reason=%s", ie.Language, resp.Confidence, reason))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_reject lang=%s conf=%.2f reason=%s", ie.Language, resp.Confidence, reason))
 		return false, reason, summary, true
 	}
 
 	if ie.SourceMode == "heredoc" || ie.SourceMode == "inline_eval" {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_allow_transient lang=%s mode=%s conf=%.2f", ie.Language, ie.SourceMode, resp.Confidence))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_allow_transient lang=%s mode=%s conf=%.2f", ie.Language, ie.SourceMode, resp.Confidence))
 		return true, resp.Summary, summary, true
 	}
 
@@ -356,11 +356,11 @@ func (a *Agent) askPermissionModelInterpreter(command string, ie *InterpreterExe
 	// principle, an auto-grant is only accepted if Go can persist it; a save
 	// failure defers to human Ask rather than allowing in-RAM only.
 	if err := a.persistInterpreterGrant(ie, sha, command, &resp); err != nil {
-		emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_grant_save_fail err=%v", err))
+		a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_grant_save_fail err=%v", err))
 		return false, "could not persist interpreter grant durably; deferring to human", summary, true
 	}
 
-	emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_allow lang=%s mode=%s conf=%.2f", ie.Language, ie.SourceMode, resp.Confidence))
+	a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_interp_allow lang=%s mode=%s conf=%.2f", ie.Language, ie.SourceMode, resp.Confidence))
 	return true, resp.Summary, summary, true
 }
 

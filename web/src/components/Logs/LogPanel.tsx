@@ -7,6 +7,7 @@ import { Trash2, Pause, Play, Filter } from "lucide-react";
 interface LogEntry {
   kind: string;
   message: string;
+  session_id?: string;
 }
 
 const KIND_COLORS: Record<string, string> = {
@@ -20,7 +21,7 @@ const KIND_COLORS: Record<string, string> = {
 
 const KIND_FILTERS = ["ALL", "LLM", "TOOL", "AGENT", "ERROR", "SESSION", "GIT"];
 
-export default function LogPanel({ active }: { active: boolean }) {
+export default function LogPanel({ active, sessionId }: { active: boolean; sessionId: string }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState(true);
   const [filter, setFilter] = useState("ALL");
@@ -59,8 +60,10 @@ export default function LogPanel({ active }: { active: boolean }) {
   }, []);
 
   useEffect(() => {
-    // Load initial logs
-    fetch(apiPath("/api/logs"), { headers: authHeaders() })
+    // Load initial logs, scoped to this session (plus process-global entries
+    // — see HandleGetLogs).
+    setLogs([]);
+    fetch(apiPath(`/api/logs?session_id=${encodeURIComponent(sessionId)}`), { headers: authHeaders() })
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -73,20 +76,23 @@ export default function LogPanel({ active }: { active: boolean }) {
         console.error("Failed to fetch logs:", err);
         setError("Failed to load logs");
       });
-  }, []);
+  }, [sessionId]);
 
   // Live logs arrive as `logs` envelopes on the shared event bus (the single
   // /api/events connection). The `streaming` toggle pauses consumption (the
-  // bus itself stays connected — other consumers share it).
+  // bus itself stays connected — other consumers share it). Only entries for
+  // this session (or untagged process-global ones) are kept — see
+  // logBusForwardLoop.
   useEffect(() => {
     if (!streaming) return;
     const off = eventBus.on("logs", (env) => {
       const entry = env.data as LogEntry;
       if (!entry || typeof entry.message !== "string") return;
+      if (entry.session_id && entry.session_id !== sessionId) return;
       setLogs((prev) => [...prev, entry]);
     });
     return off;
-  }, [streaming]);
+  }, [streaming, sessionId]);
 
   // Follow the tail on new logs, but only while the user is pinned to the
   // bottom (autoScroll enabled). Instant, not smooth — see scrollToBottom.
@@ -122,9 +128,12 @@ export default function LogPanel({ active }: { active: boolean }) {
   useEffect(() => () => cancelAnimationFrame(rafRef.current), []);
 
   const handleClear = async () => {
-    if (!window.confirm("Clear all logs?")) return;
+    if (!window.confirm("Clear logs for this session?")) return;
     try {
-      await fetch(apiPath("/api/logs"), { method: "DELETE", headers: authHeaders() });
+      await fetch(apiPath(`/api/logs?session_id=${encodeURIComponent(sessionId)}`), {
+        method: "DELETE",
+        headers: authHeaders(),
+      });
       setLogs([]);
     } catch (err) {
       console.error("Failed to clear logs:", err);

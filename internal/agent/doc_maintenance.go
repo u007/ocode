@@ -59,14 +59,14 @@ func (a *Agent) QueueDocMaintenance(req DocMaintenanceRequest) {
 	defer a.docMaintMu.Unlock()
 
 	if a.docMaintClosing {
-		emitDebug("DOCMAINT", "shutting down, dropped maintenance request")
+		a.emitDebug("DOCMAINT", "shutting down, dropped maintenance request")
 		return
 	}
 
 	select {
 	case a.docMaintCh <- req:
 	default:
-		emitDebug("DOCMAINT", "doc maintenance channel full, dropped request")
+		a.emitDebug("DOCMAINT", "doc maintenance channel full, dropped request")
 	}
 }
 
@@ -79,7 +79,7 @@ func (a *Agent) docMaintenanceWorker() {
 		closing := a.docMaintClosing
 		a.docMaintMu.Unlock()
 		if closing {
-			emitDebug("DOCMAINT", "shutting down, dropping queued maintenance request")
+			a.emitDebug("DOCMAINT", "shutting down, dropping queued maintenance request")
 			continue
 		}
 		a.runDocMaintenance(req)
@@ -97,13 +97,13 @@ func (a *Agent) runDocMaintenance(req DocMaintenanceRequest) {
 	// Check bundle marker is still present.
 	bundle, ok := knowledge.DetectBundle(req.WorkDir)
 	if !ok {
-		emitDebug("DOCMAINT", "no bundle marker found, skipping")
+		a.emitDebug("DOCMAINT", "no bundle marker found, skipping")
 		return
 	}
 
 	client := a.docMaintenanceClient()
 	if client == nil {
-		emitDebug("DOCMAINT", "skipped: no small-model client available")
+		a.emitDebug("DOCMAINT", "skipped: no small-model client available")
 		return
 	}
 
@@ -134,15 +134,15 @@ func (a *Agent) runDocMaintenance(req DocMaintenanceRequest) {
 	var decision docMaintTriageResult
 	select {
 	case <-ctx.Done():
-		emitDebug("DOCMAINT", fmt.Sprintf("triage timed out: %v", ctx.Err()))
+		a.emitDebug("DOCMAINT", fmt.Sprintf("triage timed out: %v", ctx.Err()))
 		return
 	case out := <-respCh:
 		if out.err != nil {
-			emitDebug("DOCMAINT", fmt.Sprintf("triage failed: %v", out.err))
+			a.emitDebug("DOCMAINT", fmt.Sprintf("triage failed: %v", out.err))
 			return
 		}
 		if out.msg == nil {
-			emitDebug("DOCMAINT", "triage returned empty response")
+			a.emitDebug("DOCMAINT", "triage returned empty response")
 			return
 		}
 		a.RecordSideUsageFromMessage(out.msg)
@@ -150,21 +150,21 @@ func (a *Agent) runDocMaintenance(req DocMaintenanceRequest) {
 		// so strip those before unmarshalling (M4).
 		clean := stripJSONFences(out.msg.Content)
 		if err := json.Unmarshal([]byte(clean), &decision); err != nil {
-			emitDebug("DOCMAINT", fmt.Sprintf("triage parse error: %v — raw: %s", err, out.msg.Content))
+			a.emitDebug("DOCMAINT", fmt.Sprintf("triage parse error: %v — raw: %s", err, out.msg.Content))
 			return
 		}
 	}
 
 	if decision.Decision == "noop" || len(decision.Actions) == 0 {
-		emitDebug("DOCMAINT", "triage decided noop")
+		a.emitDebug("DOCMAINT", "triage decided noop")
 		return
 	}
 
 	// Pass 2: Execute — dispatch the context agent with the triage plan.
-	emitDebug("DOCMAINT", fmt.Sprintf("executing %d triage actions", len(decision.Actions)))
+	a.emitDebug("DOCMAINT", fmt.Sprintf("executing %d triage actions", len(decision.Actions)))
 	spec := FindSubAgentSpec("context")
 	if spec == nil {
-		emitDebug("DOCMAINT", "context subagent not found")
+		a.emitDebug("DOCMAINT", "context subagent not found")
 		return
 	}
 
@@ -178,12 +178,12 @@ func (a *Agent) runDocMaintenance(req DocMaintenanceRequest) {
 	// Dispatch the context agent via the task tool.
 	taskTool, ok := a.GetTool("task")
 	if !ok {
-		emitDebug("DOCMAINT", "task tool not available for execution")
+		a.emitDebug("DOCMAINT", "task tool not available for execution")
 		return
 	}
 	task, ok := taskTool.(*TaskTool)
 	if !ok {
-		emitDebug("DOCMAINT", "task tool has unexpected type")
+		a.emitDebug("DOCMAINT", "task tool has unexpected type")
 		return
 	}
 
@@ -202,10 +202,10 @@ For each action:
 
 	result, err := task.ExecuteRaw("context", execPrompt, false)
 	if err != nil {
-		emitDebug("DOCMAINT", fmt.Sprintf("execution failed: %v", err))
+		a.emitDebug("DOCMAINT", fmt.Sprintf("execution failed: %v", err))
 		return
 	}
-	emitDebug("DOCMAINT", fmt.Sprintf("execution complete: %s", result[:min(len(result), 200)]))
+	a.emitDebug("DOCMAINT", fmt.Sprintf("execution complete: %s", result[:min(len(result), 200)]))
 }
 
 func (a *Agent) docMaintenanceClient() LLMClient {
@@ -301,7 +301,7 @@ func (a *Agent) docMaintShutdown() {
 		a.docMaintMu.Unlock()
 
 		if remaining > 0 {
-			emitDebug("DOCMAINT", fmt.Sprintf("shutdown: %d pending maintenance requests will be dropped", remaining))
+			a.emitDebug("DOCMAINT", fmt.Sprintf("shutdown: %d pending maintenance requests will be dropped", remaining))
 		}
 
 		// Wait for the worker to finish its in-flight item (if any) and exit.
@@ -310,7 +310,7 @@ func (a *Agent) docMaintShutdown() {
 		select {
 		case <-a.docMaintDone:
 		case <-time.After(5 * time.Second):
-			emitDebug("DOCMAINT", "shutdown: worker did not exit within 5s, proceeding")
+			a.emitDebug("DOCMAINT", "shutdown: worker did not exit within 5s, proceeding")
 		}
 	})
 }

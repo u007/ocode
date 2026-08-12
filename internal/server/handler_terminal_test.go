@@ -5,11 +5,14 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/u007/ocode/internal/projects"
 )
 
 // terminalTestServer returns an httptest server serving only the terminal ws
@@ -24,6 +27,78 @@ func terminalTestServer(t *testing.T) (*httptest.Server, string) {
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleTerminalWS))
 	t.Cleanup(srv.Close)
 	return srv, "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// project_path must be one of the server's registered roots — anything else
+// would let a client spawn a shell in an arbitrary directory.
+func TestTerminalWSRejectsUnregisteredProjectPath(t *testing.T) {
+	h := NewHandler()
+	h.workDir = t.TempDir()
+	h.SetTerminalAccessPolicy(false, true)
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/terminal/ws?project_path=/somewhere/else", nil)
+	h.HandleTerminalWS(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+// A project_path matching a registered project root starts the shell in that
+// directory instead of the server workdir.
+func TestTerminalWSSpawnsShellInRequestedProject(t *testing.T) {
+	t.Setenv("SHELL", "/bin/sh")
+	otherRoot := t.TempDir()
+
+	h := NewHandler()
+	h.workDir = t.TempDir()
+	h.SetTerminalAccessPolicy(false, true)
+	// Swap in a temp-backed store so the test never writes the user's real
+	// projects.json.
+	store, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatalf("projects.NewStoreAt: %v", err)
+	}
+	if err := store.Add(otherRoot); err != nil {
+		t.Fatalf("register project: %v", err)
+	}
+	h.projects = store
+
+	srv := httptest.NewServer(http.HandlerFunc(h.HandleTerminalWS))
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "?project_path=" + url.QueryEscape(otherRoot)
+
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial failed: %v", err)
+	}
+	if resp != nil {
+		resp.Body.Close()
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("pwd\n")); err != nil {
+		t.Fatalf("command write failed: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	var seen strings.Builder
+	// macOS tempdirs resolve through /private symlinks, so match on the
+	// unique dir suffix rather than the full path. The typed line echo is
+	// just "pwd", so a single occurrence is the shell's actual output.
+	want := "/" + filepath.Base(otherRoot)
+	for {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatalf("SetReadDeadline failed: %v", err)
+		}
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read failed before seeing pwd output (got %q): %v", seen.String(), err)
+		}
+		seen.Write(data)
+		if strings.Contains(seen.String(), want) {
+			return
+		}
+	}
 }
 
 func TestTerminalWSRejectsWhenSessionLimitIsReached(t *testing.T) {

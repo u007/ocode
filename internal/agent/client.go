@@ -22,6 +22,7 @@ import (
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/discovery"
 	providerplugin "github.com/u007/ocode/internal/plugin/provider"
 	"github.com/u007/ocode/internal/redact"
@@ -164,6 +165,22 @@ type GenericClient struct {
 	// When set, ChatWithContext scans all message contents for known-format
 	// secrets and redacts them before sending to the provider.
 	Redaction *redact.NetHook
+
+	// sessionID tags this client's debug-log entries with the owning agent's
+	// session (set via Agent.SetSessionID). Empty means untagged
+	// (process-global) — see emitDebug.
+	sessionID string
+}
+
+// emitDebug appends a debug-log entry tagged with the owning agent's
+// session id, or falls back to the process-global sink when untagged (TUI,
+// or a client built outside a session-scoped Agent, e.g. NewClient itself).
+func (c *GenericClient) emitDebug(kind, msg string) {
+	if c == nil || c.sessionID == "" {
+		emitDebug(kind, msg)
+		return
+	}
+	debuglog.Log.Append(debuglog.Entry{Kind: debuglog.EntryKind(kind), Message: msg, SessionID: c.sessionID})
 }
 
 // SetOnDelta installs (or clears, with nil) the streaming-token callback on
@@ -624,7 +641,7 @@ func (c *GenericClient) chatCopilot(ctx context.Context, messages []Message, too
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("copilot error (%d): %s", resp.StatusCode, string(body))
-		emitDebug("error", msg)
+		c.emitDebug("error", msg)
 		return nil, fmt.Errorf("%s", msg)
 	}
 	msg, usageRaw, err := parseOpenAIChatCompletionsStream(resp.Body, c.onDelta(), c.onUsage())
@@ -712,7 +729,7 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 			req.Header[k] = vs
 		}
 	}
-	emitDebug("LLM", fmt.Sprintf("chatGrokSubscription: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
+	c.emitDebug("LLM", fmt.Sprintf("chatGrokSubscription: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -726,7 +743,7 @@ func (c *GenericClient) chatGrokSubscription(ctx context.Context, messages []Mes
 			return nil, fmt.Errorf("Grok subscription session expired — run /connect to re-authenticate")
 		}
 		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
-		emitDebug("ERROR", fmt.Sprintf("chatGrokSubscription: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
+		c.emitDebug("ERROR", fmt.Sprintf("chatGrokSubscription: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
 		return nil, fmt.Errorf("%s", msg)
 	}
 
@@ -817,7 +834,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
-	emitDebug("LLM", fmt.Sprintf("chatOpenAI: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
+	c.emitDebug("LLM", fmt.Sprintf("chatOpenAI: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -828,7 +845,7 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
-		emitDebug("ERROR", fmt.Sprintf("chatOpenAI: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
+		c.emitDebug("ERROR", fmt.Sprintf("chatOpenAI: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
 		return nil, fmt.Errorf("%s", msg)
 	}
 
@@ -921,7 +938,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 	if c.APIKey != "" {
 		req.Header.Set("x-goog-api-key", c.APIKey)
 	}
-	emitDebug("LLM", fmt.Sprintf("chatGoogle: url=%s model=%q", url, c.Model))
+	c.emitDebug("LLM", fmt.Sprintf("chatGoogle: url=%s model=%q", url, c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -932,7 +949,7 @@ func (c *GenericClient) chatGoogle(ctx context.Context, messages []Message, tool
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
-		emitDebug("ERROR", fmt.Sprintf("chatGoogle: status=%d url=%s", resp.StatusCode, url))
+		c.emitDebug("ERROR", fmt.Sprintf("chatGoogle: status=%d url=%s", resp.StatusCode, url))
 		return nil, fmt.Errorf("%s", msg)
 	}
 
@@ -2468,7 +2485,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 			return nil, fmt.Errorf("ChatGPT session expired — run /connect to re-authenticate")
 		}
 		msg := fmt.Sprintf("openai responses error (%d): %s", resp.StatusCode, string(body))
-		emitDebug("error", msg)
+		c.emitDebug("error", msg)
 		return nil, fmt.Errorf("%s", msg)
 	}
 
@@ -2625,7 +2642,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	if len(responseUsage) > 0 {
 		usage, err := parseOpenAIResponsesUsage(responseUsage)
 		if err != nil {
-			emitDebug("error", fmt.Sprintf("parse openai responses usage: %v", err))
+			c.emitDebug("error", fmt.Sprintf("parse openai responses usage: %v", err))
 		} else if usage != nil {
 			msg.Usage = usage
 			msg.Spend = usage.Spend(msg.Model)
@@ -2981,7 +2998,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("anthropic error (%d): %s", resp.StatusCode, string(body))
-		emitDebug("error", msg)
+		c.emitDebug("error", msg)
 		return nil, fmt.Errorf("%s", msg)
 	}
 
@@ -3085,7 +3102,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 			}
 			if len(ev.Message.Usage) > 0 {
 				resultUsage = ev.Message.Usage
-				emitDebug("TOKENS", fmt.Sprintf("message_start usage from provider=%s model=%s: %s", c.Provider, c.Model, string(ev.Message.Usage)))
+				c.emitDebug("TOKENS", fmt.Sprintf("message_start usage from provider=%s model=%s: %s", c.Provider, c.Model, string(ev.Message.Usage)))
 				if onUsage != nil {
 					var u struct {
 						InputTokens  int64 `json:"input_tokens"`
@@ -3132,7 +3149,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 			if len(ev.Usage) > 0 {
 				// message_delta carries cumulative output_tokens; merge by
 				// preferring it over message_start's input_tokens.
-				emitDebug("TOKENS", fmt.Sprintf("message_delta usage from provider=%s model=%s: %s", c.Provider, c.Model, string(ev.Usage)))
+				c.emitDebug("TOKENS", fmt.Sprintf("message_delta usage from provider=%s model=%s: %s", c.Provider, c.Model, string(ev.Usage)))
 				resultUsage = mergeAnthropicUsage(resultUsage, ev.Usage)
 				if onUsage != nil {
 					var u struct {
@@ -3179,7 +3196,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 				// valid JSON (typically the stream was truncated mid-tool).
 				// Fall back to an empty object so the tool call is still
 				// dispatched and the model can react to the error.
-				emitDebug("AGENT", fmt.Sprintf("anthropic: truncated tool_use input_json for %s (id=%s, %d bytes); falling back to {}", b.toolName, b.toolID, len(args)))
+				c.emitDebug("AGENT", fmt.Sprintf("anthropic: truncated tool_use input_json for %s (id=%s, %d bytes); falling back to {}", b.toolName, b.toolID, len(args)))
 				args = "{}"
 			}
 			resMsg.ToolCalls = append(resMsg.ToolCalls, ToolCall{
@@ -3209,7 +3226,7 @@ func (c *GenericClient) chatAnthropic(ctx context.Context, messages []Message, t
 	// their streaming usage events. Fill it in from a character-based estimate
 	// of the messages we sent so spend and context-window display are accurate.
 	if usage != nil && usage.PromptTokens == nil {
-		emitDebug("TOKENS", fmt.Sprintf("provider=%s model=%s returned no input_tokens in usage (raw=%s); estimating from message content", c.Provider, c.Model, string(resultUsage)))
+		c.emitDebug("TOKENS", fmt.Sprintf("provider=%s model=%s returned no input_tokens in usage (raw=%s); estimating from message content", c.Provider, c.Model, string(resultUsage)))
 		estimated := int64(messagesTokens(messages, charsPerTokenFor(c.Provider, c.Model)))
 		if system != "" {
 			estimated += int64((len(system) + charsPerToken - 1) / charsPerToken)
@@ -3860,7 +3877,7 @@ func (c *GenericClient) chatOpenAIWebSocket(ctx context.Context, messages []Mess
 	// Connect
 	if err := wsClient.Connect(ctx); err != nil {
 		// Fallback to HTTP on connection failure
-		emitDebug("websocket", fmt.Sprintf("WebSocket connect failed, falling back to HTTP: %v", err))
+		c.emitDebug("websocket", fmt.Sprintf("WebSocket connect failed, falling back to HTTP: %v", err))
 		return c.chatOpenAIHTTP(ctx, messages, tools)
 	}
 
@@ -3898,7 +3915,7 @@ func (c *GenericClient) chatOpenAIWebSocket(ctx context.Context, messages []Mess
 		Payload: mustMarshal(payload),
 	}); err != nil {
 		// Fallback to HTTP on send failure
-		emitDebug("websocket", fmt.Sprintf("WebSocket send failed, falling back to HTTP: %v", err))
+		c.emitDebug("websocket", fmt.Sprintf("WebSocket send failed, falling back to HTTP: %v", err))
 		return c.chatOpenAIHTTP(ctx, messages, tools)
 	}
 
@@ -3951,7 +3968,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	if c.APIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.APIKey)
 	}
-	emitDebug("LLM", fmt.Sprintf("chatOpenAIHTTP: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
+	c.emitDebug("LLM", fmt.Sprintf("chatOpenAIHTTP: url=%s apiKey=%s model=%q", url, maskKey(c.APIKey), c.Model))
 
 	resp, err := llmHTTPClient.Do(req)
 	if err != nil {
@@ -3962,7 +3979,7 @@ func (c *GenericClient) chatOpenAIHTTP(ctx context.Context, messages []Message, 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		msg := fmt.Sprintf("%s error (%d): %s", c.Provider, resp.StatusCode, string(body))
-		emitDebug("ERROR", fmt.Sprintf("chatOpenAIHTTP: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
+		c.emitDebug("ERROR", fmt.Sprintf("chatOpenAIHTTP: status=%d apiKey=%s url=%s", resp.StatusCode, maskKey(c.APIKey), url))
 		return nil, fmt.Errorf("%s", msg)
 	}
 
@@ -4026,7 +4043,7 @@ func (c *GenericClient) receiveWebSocketStream(ctx context.Context, wsClient *We
 
 			default:
 				// Handle other message types
-				emitDebug("websocket", fmt.Sprintf("unexpected message type: %s", wsMsg.Type))
+				c.emitDebug("websocket", fmt.Sprintf("unexpected message type: %s", wsMsg.Type))
 			}
 		}
 	}

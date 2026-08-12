@@ -75,6 +75,11 @@ describe("TerminalTabs", () => {
   const closeButtons = () =>
     screen.getAllByRole("button", { name: /^Close Terminal / }) as HTMLElement[];
 
+  it("connects each terminal socket with the tab's project_path", async () => {
+    await renderTabs();
+    expect(sockets[0].url).toContain(`project_path=${encodeURIComponent("/project")}`);
+  });
+
   it("opens an additional terminal (and socket) when + is clicked", async () => {
     await renderTabs();
     expect(closeButtons()).toHaveLength(1);

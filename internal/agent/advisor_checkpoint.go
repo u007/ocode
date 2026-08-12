@@ -102,20 +102,20 @@ func (a *Agent) runAdvisorCheckpoint(kind, prompt string) (string, bool) {
 	}
 	args, err := json.Marshal(map[string]string{"prompt": prompt})
 	if err != nil {
-		emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint: marshal failed: %v", kind, err))
+		a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint: marshal failed: %v", kind, err))
 		return "", false
 	}
-	emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint firing", kind))
+	a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint firing", kind))
 	a.activity.toolStarted("advisor")
 	advice, err := t.Execute(args)
 	a.activity.toolDone("advisor")
 	if err != nil {
-		emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint failed (continuing without advice): %v", kind, err))
+		a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint failed (continuing without advice): %v", kind, err))
 		return "", false
 	}
 	advice = strings.TrimSpace(advice)
 	if advice == "" {
-		emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint returned empty advice (continuing)", kind))
+		a.emitDebug("ADVISOR", fmt.Sprintf("%s checkpoint returned empty advice (continuing)", kind))
 		return "", false
 	}
 	return advice, true

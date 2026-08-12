@@ -147,7 +147,7 @@ func (a *Agent) ensureMDState() {
 	}
 	client := a.mdSummaryClient()
 	if client == nil {
-		emitDebug("MD-DISCOVERY", "no LLM client available — markdown discovery inactive")
+		a.emitDebug("MD-DISCOVERY", "no LLM client available — markdown discovery inactive")
 		return
 	}
 	root := a.effectiveWorkDir()
@@ -219,7 +219,7 @@ func (a *Agent) mdSummarizePass(root string) {
 		}
 		content, err := os.ReadFile(r.abs)
 		if err != nil {
-			emitDebug("MD-DISCOVERY", fmt.Sprintf("read %s failed: %v", r.rel, err))
+			a.emitDebug("MD-DISCOVERY", fmt.Sprintf("read %s failed: %v", r.rel, err))
 			if e, ok := cur[r.rel]; ok { // keep prior entry on a transient read error
 				next[r.rel] = e
 			}
@@ -258,7 +258,7 @@ func (a *Agent) mdSummarizePass(root string) {
 				defer func() { <-sem }()
 				content, err := os.ReadFile(r.abs)
 				if err != nil {
-					emitDebug("MD-DISCOVERY", fmt.Sprintf("read %s failed: %v", r.rel, err))
+					a.emitDebug("MD-DISCOVERY", fmt.Sprintf("read %s failed: %v", r.rel, err))
 					return
 				}
 				hash := hashBytes(content)
@@ -284,7 +284,7 @@ func (a *Agent) mdSummarizePass(root string) {
 	a.publishMDSnapshot(next)
 	if dirty {
 		if err := saveMDCache(st.cachePath, next); err != nil {
-			emitDebug("MD-DISCOVERY", fmt.Sprintf("save cache failed: %v", err))
+			a.emitDebug("MD-DISCOVERY", fmt.Sprintf("save cache failed: %v", err))
 		}
 	}
 	st.mu.Lock()
@@ -389,11 +389,11 @@ func (a *Agent) summarizeMarkdown(rel string, content []byte) string {
 
 	select {
 	case <-ctx.Done():
-		emitDebug("MD-DISCOVERY", fmt.Sprintf("summarize %s timeout: %v", rel, ctx.Err()))
+		a.emitDebug("MD-DISCOVERY", fmt.Sprintf("summarize %s timeout: %v", rel, ctx.Err()))
 		return ""
 	case r := <-done:
 		if r.err != nil {
-			emitDebug("MD-DISCOVERY", fmt.Sprintf("summarize %s error: %v", rel, r.err))
+			a.emitDebug("MD-DISCOVERY", fmt.Sprintf("summarize %s error: %v", rel, r.err))
 			return ""
 		}
 		return sanitizeMDSummary(r.content)

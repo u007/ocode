@@ -18,38 +18,28 @@ function publish(value: TerminalConfig) {
   for (const fn of listeners) fn(value);
 }
 
-function sameProject(projectPath: string | undefined, serverWorkDir: string | undefined) {
-  // Older/headless test responses did not include work_dir. The server now
-  // always sends it, but treating an absent value as unknown preserves the
-  // existing API compatibility for embedded clients.
-  return !projectPath || !serverWorkDir || projectPath === serverWorkDir;
-}
-
-function viewFor(config: TerminalConfig | null, projectPath: string | undefined) {
+function viewFor(config: TerminalConfig | null) {
   if (!config) {
-    return { available: false, loading: true, scrollbackLines: 0, scopeMatches: false };
+    return { available: false, loading: true, scrollbackLines: 0 };
   }
-  const scopeMatches = sameProject(projectPath, config.work_dir);
-  const available = config.available !== false && scopeMatches;
   return {
-    available,
+    available: config.available !== false,
     loading: false,
     scrollbackLines: config.scrollback_lines ?? 0,
-    scopeMatches,
   };
 }
 
 /**
- * Terminal availability + scrollback for the server's single workdir. The
- * terminal itself is always enabled — there is no enable/disable switch —
- * so this only reports whether the server can safely expose it (authentication
- * configured or loopback bind) and whether the selected project matches the
- * server's workdir.
+ * Terminal availability + scrollback. The terminal itself is always enabled —
+ * there is no enable/disable switch — so this only reports whether the server
+ * can safely expose it (authentication configured or loopback bind). Which
+ * directory a shell opens in is chosen per connection via the WS
+ * `project_path` parameter, so there is no project-scope gate here.
  */
-export function useTerminalConfig(projectPath?: string) {
+export function useTerminalConfig() {
   const [config, setConfig] = useState<TerminalConfig | null>(cached);
   const [error, setError] = useState<string | null>(null);
-  const view = viewFor(config, projectPath);
+  const view = viewFor(config);
 
   useEffect(() => {
     const listener: Listener = (next) => setConfig(next);
@@ -82,7 +72,6 @@ export function useTerminalConfig(projectPath?: string) {
 
   return {
     available: view.available,
-    scopeMatches: view.scopeMatches,
     loading: view.loading,
     error,
     scrollbackLines: view.scrollbackLines,

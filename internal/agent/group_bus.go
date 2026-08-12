@@ -84,7 +84,7 @@ func (a *Agent) maybeBuildGroupBus(tcs []ToolCall, parallelTCs []int) (*notebus.
 	if a.noteBusDir != "" {
 		sc, err := notebus.NewSidecar(a.noteBusDir, groupID)
 		if err != nil {
-			emitDebug("NOTEBUS", fmt.Sprintf("sidecar open failed: %v", err))
+			a.emitDebug("NOTEBUS", fmt.Sprintf("sidecar open failed: %v", err))
 		} else {
 			bus.SetPersist(sc)
 		}
@@ -112,7 +112,7 @@ func (a *Agent) maybeBuildGroupBus(tcs []ToolCall, parallelTCs []int) (*notebus.
 			}
 		}
 	}
-	emitDebug("NOTEBUS", fmt.Sprintf("group %q created with %d agents (subagents=%d)", groupID, len(subagentIdxs), len(subagentIdxs)))
+	a.emitDebug("NOTEBUS", fmt.Sprintf("group %q created with %d agents (subagents=%d)", groupID, len(subagentIdxs), len(subagentIdxs)))
 	return bus, ids
 }
 
