@@ -16,12 +16,6 @@ export interface QuestionRequest {
   questions: QuestionPrompt[];
 }
 
-export interface SessionContextMetrics {
-  currentTokens: number;
-  maxTokens: number;
-  model: string;
-}
-
 /** Per-session chat state — one entry per open tab, keyed by session id (or
  *  the temporary `new-<ts>` tab id before the first message creates a real
  *  session). Kept in `ChatState.sessions` so every open tab can render and
@@ -51,6 +45,17 @@ export interface SessionSlice {
   // event for this session id, so each tab tracks its own session instead of
   // whichever session most recently emitted a status event.
   tuiStatus: TUIStatus | null;
+  // Part 05: per-session status/turn state. `turnActive` is the authoritative
+  // streaming flag — set by turn_started, cleared by turn_done/turn_error —
+  // and `isStreaming` (the legacy promise-derived flag) mirrors it. The
+  // watchdog uses `lastHeartbeatAt` for stall detection and sets
+  // `turnStalled`; `bootstrapStage` tracks the async session bootstrap. All
+  // populated from bus events or the fetch-on-activation status fetch.
+  turnActive: boolean;
+  lastHeartbeatAt: number | null;
+  bootstrapStage: string | null;
+  turnStalled: boolean;
+  statusLoading: boolean;
 }
 
 export const emptySessionSlice: SessionSlice = {
@@ -66,6 +71,11 @@ export const emptySessionSlice: SessionSlice = {
   initialized: false,
   collapsedRunIds: [],
   tuiStatus: null,
+  turnActive: false,
+  lastHeartbeatAt: null,
+  bootstrapStage: null,
+  turnStalled: false,
+  statusLoading: false,
 };
 
 /** Reads one session's slice, falling back to the shared empty default for a
@@ -77,6 +87,30 @@ export function getSessionSlice(
 ): SessionSlice {
   if (!sessionId) return emptySessionSlice;
   return state.sessions[sessionId] ?? emptySessionSlice;
+}
+
+/** Selector: the per-session status snapshot (populated by the
+ *  fetch-on-activation status fetch and patched by bus `status` events). */
+export function getSessionStatus(
+  state: ChatState,
+  sessionId: string | null | undefined,
+): TUIStatus | null {
+  return getSessionSlice(state, sessionId).tuiStatus;
+}
+
+/** Selector: the per-session turn-state fields consumed by the streaming
+ *  spinner, the watchdog, and the bootstrap indicator. */
+export function getTurnState(
+  state: ChatState,
+  sessionId: string | null | undefined,
+): { turnActive: boolean; lastHeartbeatAt: number | null; turnStalled: boolean; bootstrapStage: string | null } {
+  const s = getSessionSlice(state, sessionId);
+  return {
+    turnActive: s.turnActive,
+    lastHeartbeatAt: s.lastHeartbeatAt,
+    turnStalled: s.turnStalled,
+    bootstrapStage: s.bootstrapStage,
+  };
 }
 
 export interface ChatState {
@@ -91,7 +125,6 @@ export interface ChatState {
   ocrModel: string | null;
   ocrEnabled: boolean;
   ocrBackend: string | null;
-  sessionContext: SessionContextMetrics | null;
   spendingUSD: number | null;
   // True once the very first /api/tui-status fetch has resolved. Lets the UI
   // show "loading…" vs. "not connected" while waiting for the first frame.
@@ -125,9 +158,13 @@ export type ChatAction =
   | { type: "SET_LOADING_MORE"; sessionId: string; loading: boolean }
   | { type: "MERGE_SNAPSHOT"; sessionId: string; messages: Message[]; total: number }
   | { type: "SET_TOTAL"; sessionId: string; total: number }
-  | { type: "SET_SESSION_CONTEXT"; context: SessionContextMetrics | null }
   | { type: "SET_SPENDING"; spendingUSD: number | null }
   | { type: "SET_TUI_STATUS"; sessionId: string; status: TUIStatus }
+  | { type: "SET_STATUS_LOADING"; sessionId: string; loading: boolean }
+  | { type: "SET_TURN_STATE"; sessionId: string; turnActive: boolean }
+  | { type: "SET_TURN_HEARTBEAT"; sessionId: string }
+  | { type: "SET_TURN_STALLED"; sessionId: string; stalled: boolean }
+  | { type: "SET_BOOTSTRAP_STAGE"; sessionId: string; stage: string | null }
   | { type: "SET_TUI_STATUS_READY"; ready: boolean }
   | { type: "REKEY_SESSION"; oldId: string; newId: string }
   | { type: "TOGGLE_RUN_COLLAPSED"; sessionId: string; runId: string }
@@ -143,7 +180,6 @@ export const initialState: ChatState = {
   ocrModel: null,
   ocrEnabled: false,
   ocrBackend: "openai-compat",
-  sessionContext: null,
   spendingUSD: null,
   tuiStatusReady: false,
 };
@@ -299,8 +335,6 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
             : [...s.collapsedRunIds, action.runId],
         };
       });
-    case "SET_SESSION_CONTEXT":
-      return { ...state, sessionContext: action.context };
     case "SET_SPENDING":
       return { ...state, spendingUSD: action.spendingUSD };
     case "SET_TUI_STATUS":
@@ -308,6 +342,42 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         ...updateSession(state, action.sessionId, (s) => ({ ...s, tuiStatus: action.status })),
         tuiStatusReady: true,
       };
+    case "SET_STATUS_LOADING":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        statusLoading: action.loading,
+      }));
+    case "SET_TURN_STATE":
+      // turnActive is the authoritative streaming flag. Clearing it also
+      // clears the watchdog stall and heartbeat so a later activation of the
+      // same session starts from a clean state.
+      return updateSession(state, action.sessionId, (s) =>
+        action.turnActive
+          ? { ...s, turnActive: true, lastHeartbeatAt: Date.now(), turnStalled: false }
+          : {
+              ...s,
+              turnActive: false,
+              lastHeartbeatAt: null,
+              turnStalled: false,
+              isStreaming: false,
+            },
+      );
+    case "SET_TURN_HEARTBEAT":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        lastHeartbeatAt: Date.now(),
+        turnStalled: false,
+      }));
+    case "SET_TURN_STALLED":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        turnStalled: action.stalled,
+      }));
+    case "SET_BOOTSTRAP_STAGE":
+      return updateSession(state, action.sessionId, (s) => ({
+        ...s,
+        bootstrapStage: action.stage,
+      }));
     case "SET_TUI_STATUS_READY":
       return { ...state, tuiStatusReady: action.ready };
     case "PREPEND_MESSAGES":

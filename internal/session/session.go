@@ -140,7 +140,27 @@ func Save(id string, title string, messages []agent.Message, metadata map[string
 	if err != nil {
 		return err
 	}
+	return saveToDir(dir, id, title, messages, metadata)
+}
 
+// SaveForDir persists a session into the storage dir associated with wd, so
+// multi-project servers can save a session under its owning project root
+// instead of the process workdir (Save keeps using the process/session
+// workdir). The on-disk format is identical to Save — same JSON/ojsonl
+// selection, same index updates — so sessions written by one path load via
+// the other.
+func SaveForDir(wd, id string, title string, messages []agent.Message, metadata map[string]any) error {
+	dir, err := GetStorageDirForPath(wd)
+	if err != nil {
+		return err
+	}
+	return saveToDir(dir, id, title, messages, metadata)
+}
+
+// saveToDir is the shared save core: it resolves the session's storage dir,
+// keeps the legacy JSON format for sessions that already exist as .json, and
+// otherwise appends to the .ojsonl transcript.
+func saveToDir(dir, id string, title string, messages []agent.Message, metadata map[string]any) error {
 	if id == "" {
 		id = NewSessionID()
 	}
@@ -314,6 +334,35 @@ func Load(id string) (*Session, error) {
 	}
 	s.Messages = removeIncompleteToolRequests(s.Messages)
 
+	return &s, nil
+}
+
+// LoadForDir loads a session from the storage associated with wd. It is used
+// by multi-project servers; Load continues to use the process/session workdir.
+func LoadForDir(wd, id string) (*Session, error) {
+	dir, err := GetStorageDirForPath(wd)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range sessionCandidateIDs(id) {
+		if path := ojsonlSessionPath(dir, candidate); fileExists(path) {
+			s, err := loadOjsonlSession(path)
+			if err != nil {
+				return nil, err
+			}
+			s.Messages = removeIncompleteToolRequests(s.Messages)
+			return s, nil
+		}
+	}
+	path, data, err := readSessionFile(dir, id)
+	if err != nil {
+		return nil, err
+	}
+	var s Session
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil, fmt.Errorf("session file %s is corrupt: %w", path, err)
+	}
+	s.Messages = removeIncompleteToolRequests(s.Messages)
 	return &s, nil
 }
 

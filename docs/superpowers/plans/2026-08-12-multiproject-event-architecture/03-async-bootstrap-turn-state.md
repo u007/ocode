@@ -35,7 +35,8 @@ status endpoints give the frontend server truth to derive state from.
 - Tests beside each file
 
 **Interfaces produced (used by later parts):**
-- Bus events: `session_bootstrap` (data: stage ∈ `tools|mcp|model`, plus a
+- Bus events: `session_bootstrap` (data: stage ∈ `model|tools|mcp` in build
+  order, plus a
   terminal `ready` and `warning` for MCP timeout), `turn_started`,
   `turn_heartbeat`, `turn_done`, `turn_error` (data includes failing stage
   when bootstrap-caused) — all session- and project-tagged.

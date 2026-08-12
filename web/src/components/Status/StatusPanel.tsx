@@ -14,7 +14,7 @@ interface Props {
 // StatusBar so the user can drill in without leaving the chat.
 export default function StatusPanel({ onClose }: Props) {
   const chatState = useChatState();
-  const { sessionContext, spendingUSD } = chatState;
+  const { spendingUSD } = chatState;
   const { activeTabId } = useProjectState();
   const { tuiStatus } = getSessionSlice(chatState, activeTabId);
   const [files, setFiles] = useState<FileStatus[]>([]);
@@ -23,9 +23,11 @@ export default function StatusPanel({ onClose }: Props) {
   const [mcp, setMcp] = useState<MCPStatus[]>([]);
   const [mcpBusy, setMcpBusy] = useState<string | null>(null);
 
-  // Fetch the dedicated file/lsp/spending endpoints on mount — these are
-  // cheaper than re-fetching the whole tui-status, and the user only opens
-  // this panel occasionally, so a small one-shot fetch is fine.
+  // Fetch the dedicated file/lsp/spending endpoints when the panel opens and
+  // whenever the active session changes — these are cheaper than re-fetching
+  // the whole tui-status snapshot, but they are session-scoped (modified files
+  // live in the session's project), so a stale []-deps fetch would show the
+  // previous session's data after a tab switch.
   useEffect(() => {
     let cancelled = false;
     api
@@ -55,7 +57,7 @@ export default function StatusPanel({ onClose }: Props) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [activeTabId]);
 
   // Enable/disable an MCP server with an optimistic toggle (rolled back on
   // failure).
@@ -86,8 +88,8 @@ export default function StatusPanel({ onClose }: Props) {
   const advisorOn = snap?.advisor_enabled ?? false;
   const ideStatus = snap?.ide_status || "(unknown)";
   const cwd = snap?.cwd || "";
-  const ctxCur = sessionContext?.currentTokens ?? snap?.context_current_tokens ?? 0;
-  const ctxMax = sessionContext?.maxTokens ?? snap?.context_max_tokens ?? 0;
+  const ctxCur = snap?.context_current_tokens ?? 0;
+  const ctxMax = snap?.context_max_tokens ?? 0;
   const subagent = snap?.subagent_model || "";
   const extraPaths = snap?.extra_allowed_paths || [];
   // Prefer the dedicated /api/files/modified fetch; fall back to the

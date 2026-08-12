@@ -121,13 +121,13 @@ func TestPushStatusSnapshotMergesWithBridgeSnapshot(t *testing.T) {
 
 	// Simulate a TUI snapshot with TUI-owned fields set.
 	bridge.StatusStore().Set(TUIStatus{
-		MainModel:       "gpt-4o-mini",
-		SmallModel:      "opencode-go/deepseek-v4-flash",
-		SmallModelOn:    true,
-		AdvisorModel:    "advisor-model",
-		SessionID:       "sess-tui-1",
-		SessionTitle:    "TUI title",
-		CWD:             "/tmp",
+		MainModel:        "gpt-4o-mini",
+		SmallModel:       "opencode-go/deepseek-v4-flash",
+		SmallModelOn:     true,
+		AdvisorModel:     "advisor-model",
+		SessionID:        "sess-tui-1",
+		SessionTitle:     "TUI title",
+		CWD:              "/tmp",
 		ContextMaxTokens: 200000,
 	}, bridge)
 

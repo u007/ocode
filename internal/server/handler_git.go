@@ -30,35 +30,67 @@ type GitStatus struct {
 	HasChanges   bool     `json:"has_changes"`
 }
 
+// HandleGitStatus returns the working-tree status. By default it reports the
+// server's workdir; ?project=<path> selects a registered project root instead
+// (unknown paths are rejected so the endpoint can't probe arbitrary dirs).
 func (h *Handler) HandleGitStatus(w http.ResponseWriter, r *http.Request) {
-	branch := ""
-	if out, err := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD").Output(); err == nil {
-		branch = strings.TrimSpace(string(out))
+	dir := h.workDir
+	if p := r.URL.Query().Get("project"); p != "" && p != h.workDir {
+		if !h.isRegisteredProjectRoot(p) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
+			return
+		}
+		dir = p
 	}
+	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+}
 
-	staged := []string{}
-	changed := []string{}
-	if out, err := exec.Command("git", "diff", "--name-only", "--cached").Output(); err == nil {
-		for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if f != "" {
-				staged = append(staged, f)
-			}
+// isRegisteredProjectRoot reports whether p is one of the saved project roots.
+func (h *Handler) isRegisteredProjectRoot(p string) bool {
+	if h.projects == nil {
+		return false
+	}
+	for _, proj := range h.projects.List() {
+		if proj.Path == p {
+			return true
 		}
 	}
-	if out, err := exec.Command("git", "diff", "--name-only").Output(); err == nil {
-		for _, f := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-			if f != "" {
-				changed = append(changed, f)
-			}
+	return false
+}
+
+// gitStatusForDir computes the working-tree status of the repo at dir. It is
+// shared by the legacy GET endpoint (with the server's workdir) and the
+// subscriber-aware server-push git watcher (per project root). A non-repo or
+// erroring dir yields an empty, no-changes status.
+func gitStatusForDir(dir string) GitStatus {
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		if dir != "" {
+			cmd.Dir = dir
 		}
+		out, _ := cmd.Output()
+		return strings.TrimSpace(string(out))
 	}
 
-	writeJSON(w, http.StatusOK, GitStatus{
-		Branch:       branch,
-		StagedFiles:  staged,
-		ChangedFiles: changed,
-		HasChanges:   len(staged) > 0 || len(changed) > 0,
-	})
+	// Initialize slices so JSON serializes [] (not null) — the web UI reads
+	// staged_files.length / changed_files.length unconditionally.
+	status := GitStatus{
+		Branch:       run("rev-parse", "--abbrev-ref", "HEAD"),
+		StagedFiles:  []string{},
+		ChangedFiles: []string{},
+	}
+	for _, f := range strings.Split(run("diff", "--name-only", "--cached"), "\n") {
+		if f != "" {
+			status.StagedFiles = append(status.StagedFiles, f)
+		}
+	}
+	for _, f := range strings.Split(run("diff", "--name-only"), "\n") {
+		if f != "" {
+			status.ChangedFiles = append(status.ChangedFiles, f)
+		}
+	}
+	status.HasChanges = len(status.StagedFiles) > 0 || len(status.ChangedFiles) > 0
+	return status
 }
 
 // HandleGitDiff returns the unified diff for the working tree.

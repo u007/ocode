@@ -99,8 +99,8 @@ lastHeartbeat}`.
 - `POST /api/chat` validates, **persists the user message to the session**,
   registers the session, and returns **202 immediately** — a bootstrap failure
   after 202 never loses the message; retry re-uses it. Agent build runs in a
-  goroutine emitting `session_bootstrap` stage events (`tools`, `mcp`,
-  `model`).
+  goroutine emitting `session_bootstrap` stage events in build order
+  (`model`, `tools`, `mcp`, then terminal `ready`).
 - `mcpCache.wait()` gets a timeout (~30s): proceed without stragglers, emit a
   warning event.
 - Turn lifecycle events: `turn_started` → `turn_heartbeat` (~10s while

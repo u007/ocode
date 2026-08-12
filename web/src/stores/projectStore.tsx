@@ -27,7 +27,7 @@ interface ProjectState {
   tabsRestored: boolean;
 }
 
-type ProjectAction =
+export type ProjectAction =
   | { type: "SET_PROJECTS"; projects: Project[] }
   | { type: "SET_LOADING"; loading: boolean }
   | { type: "SET_ACTIVE_PROJECT"; project: Project | null }

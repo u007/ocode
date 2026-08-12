@@ -28,16 +28,16 @@ type ojsonlHeader struct {
 
 // ojsonlMsgRecord is the JSON structure of each msg-type line.
 type ojsonlMsgRecord struct {
-	Type               string                   `json:"type"`
-	Role               string                   `json:"role"`
-	Content            string                   `json:"content,omitempty"`
-	Images             []agent.Image            `json:"images,omitempty"`
-	ReasoningContent   string                   `json:"reasoning_content,omitempty"`
-	Signature          string                   `json:"signature,omitempty"`
-	ToolCalls          []agent.ToolCall         `json:"tool_calls,omitempty"`
-	ToolID             string                   `json:"tool_call_id,omitempty"`
+	Type                string                   `json:"type"`
+	Role                string                   `json:"role"`
+	Content             string                   `json:"content,omitempty"`
+	Images              []agent.Image            `json:"images,omitempty"`
+	ReasoningContent    string                   `json:"reasoning_content,omitempty"`
+	Signature           string                   `json:"signature,omitempty"`
+	ToolCalls           []agent.ToolCall         `json:"tool_calls,omitempty"`
+	ToolID              string                   `json:"tool_call_id,omitempty"`
 	OpenAIResponseItems []map[string]interface{} `json:"openai_response_items,omitempty"`
-	Notice             string                   `json:"notice,omitempty"`
+	Notice              string                   `json:"notice,omitempty"`
 }
 
 // ojsonlMetaRecord is the JSON structure of each meta-type line.
@@ -67,16 +67,16 @@ func decodeHeaderLine(line []byte) (ojsonlHeader, error) {
 // encodeMsgLine serializes a message as a single JSON line with trailing '\n'.
 func encodeMsgLine(m agent.Message) ([]byte, error) {
 	rec := ojsonlMsgRecord{
-		Type:               "msg",
-		Role:               m.Role,
-		Content:            m.Content,
-		Images:             m.Images,
-		ReasoningContent:   m.ReasoningContent,
-		Signature:          m.Signature,
-		ToolCalls:          m.ToolCalls,
-		ToolID:             m.ToolID,
+		Type:                "msg",
+		Role:                m.Role,
+		Content:             m.Content,
+		Images:              m.Images,
+		ReasoningContent:    m.ReasoningContent,
+		Signature:           m.Signature,
+		ToolCalls:           m.ToolCalls,
+		ToolID:              m.ToolID,
 		OpenAIResponseItems: m.OpenAIResponseItems,
-		Notice:             m.Notice,
+		Notice:              m.Notice,
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -92,15 +92,15 @@ func decodeMsgLine(line []byte) (agent.Message, error) {
 		return agent.Message{}, fmt.Errorf("decode ojsonl msg record: %w", err)
 	}
 	return agent.Message{
-		Role:               rec.Role,
-		Content:            rec.Content,
-		Images:             rec.Images,
-		ReasoningContent:   rec.ReasoningContent,
-		Signature:          rec.Signature,
-		ToolCalls:          rec.ToolCalls,
-		ToolID:             rec.ToolID,
+		Role:                rec.Role,
+		Content:             rec.Content,
+		Images:              rec.Images,
+		ReasoningContent:    rec.ReasoningContent,
+		Signature:           rec.Signature,
+		ToolCalls:           rec.ToolCalls,
+		ToolID:              rec.ToolID,
 		OpenAIResponseItems: rec.OpenAIResponseItems,
-		Notice:             rec.Notice,
+		Notice:              rec.Notice,
 	}, nil
 }
 

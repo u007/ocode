@@ -23,19 +23,19 @@ func (h *Handler) HandleLogStream(w http.ResponseWriter, r *http.Request) {
 
 	writeEntries := func(entries []debuglog.Entry) {
 		for _, e := range entries {
-			data, _ := json.Marshal(map[string]string{
+			entry := map[string]string{
 				"kind":    string(e.Kind),
 				"message": e.Message,
-			})
+			}
+			data, _ := json.Marshal(entry)
 			fmt.Fprintf(w, "data: %s\n\n", data)
 		}
 	}
 
 	// Send existing entries immediately
-	entries := debuglog.Log.Snapshot()
+	entries, cursor := debuglog.Log.SnapshotSince(0)
 	writeEntries(entries)
 	flusher.Flush()
-	lastCount := len(entries)
 
 	// Subscribe to new entries
 	notify := debuglog.Log.Notify()
@@ -48,18 +48,42 @@ func (h *Handler) HandleLogStream(w http.ResponseWriter, r *http.Request) {
 		case <-ctx.Done():
 			return
 		case <-notify:
-			entries := debuglog.Log.Snapshot()
-			if len(entries) < lastCount {
-				lastCount = 0
-			}
-			if len(entries) > lastCount {
-				writeEntries(entries[lastCount:])
-				lastCount = len(entries)
-			}
+			var fresh []debuglog.Entry
+			fresh, cursor = debuglog.Log.SnapshotSince(cursor)
+			writeEntries(fresh)
 			flusher.Flush()
 		case <-ticker.C:
 			// Periodic flush to keep connection alive
 			flusher.Flush()
+		}
+	}
+}
+
+// logBusForwardLoop publishes each new debug-log entry on the unified bus
+// exactly once, process-wide (Part 02: logs are process-global, tagged with no
+// project/session). It polls SnapshotSince on a short ticker instead of listening
+// on debuglog's Notify channel: notify is a single shared buffered(1) channel
+// whose signals are consumed competitively, and the legacy per-connection
+// HandleLogStream loop already listens on it — a second permanent listener
+// would steal its wakeups. The existing backlog at startup is not republished;
+// bus consumers fetch history via GET /api/logs.
+func (h *Handler) logBusForwardLoop(stop <-chan struct{}) {
+	cursor := debuglog.Log.Cursor()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			var fresh []debuglog.Entry
+			fresh, cursor = debuglog.Log.SnapshotSince(cursor)
+			for _, e := range fresh {
+				h.bus.Publish("logs", "", "", map[string]string{
+					"kind":    string(e.Kind),
+					"message": e.Message,
+				})
+			}
 		}
 	}
 }

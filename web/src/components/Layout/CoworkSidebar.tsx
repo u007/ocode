@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api, apiPath, authHeaders } from "../../api/client";
 import { useChatState, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
+import { eventBus } from "../../lib/eventBus";
 import type { AgentInfo, LSPStatus } from "../../api/types";
 import PluginsPanel from "./PluginsPanel";
 import {
@@ -86,56 +87,42 @@ export default function CoworkSidebar({
   const chatState = useChatState();
   const { model } = chatState;
   const { activeTabId: sessionId } = projectState;
-  const { tuiStatus, messages } = getSessionSlice(chatState, sessionId);
-  // Fallback context usage for when no TUI is bridged to this server (pure
-  // web/desktop sessions) — tuiStatus.context_* only gets populated by a live
-  // TUI process, so without this the sidebar would show "No context data
-  // yet" forever. /api/sessions/:id/context computes the same estimate from
-  // the saved session messages independent of any TUI.
-  const [fallbackContext, setFallbackContext] = useState<{
-    current: number;
-    max: number;
-    model?: string;
-  } | null>(null);
-  const tuiContextMax = tuiStatus?.context_max_tokens ?? 0;
-  useEffect(() => {
-    if (!sessionId || tuiContextMax > 0) return;
-    let cancelled = false;
-    api
-      .getSessionContext(sessionId)
-      .then((res) => {
-        if (cancelled) return;
-        setFallbackContext({
-          current: res.estimated_tokens,
-          max: res.max_tokens ?? 0,
-          model: res.model,
-        });
-      })
-      .catch((err) => console.error("Failed to fetch session context:", err));
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId, messages.length, tuiContextMax]);
+  const activeProject = projectState.state.activeProject ?? null;
+  const { tuiStatus } = getSessionSlice(chatState, sessionId);
 
-  // Fetch git branch periodically
+  // Git branch comes from `git_status` events on the shared bus (the server's
+  // subscriber-aware watcher emits an initial snapshot for viewed projects and
+  // on change — no 10s polling). A one-shot fetch seeds the render for the
+  // case where the watcher hasn't ticked for this project yet.
   useEffect(() => {
+    let cancelled = false;
     const fetchBranch = async () => {
       try {
-        const res = await fetch(apiPath("/api/git/status"), {
-          headers: authHeaders(),
-        });
+        // Seed for the active project, not the server workdir — the legacy
+        // no-param form reports the workdir's repo.
+        const qs = activeProject
+          ? `?project=${encodeURIComponent(activeProject.path)}`
+          : "";
+        const res = await fetch(apiPath(`/api/git/status${qs}`), { headers: authHeaders() });
         const data = await res.json();
-        if (data.branch) {
-          setGitBranch(data.branch);
-        }
+        if (!cancelled && data.branch) setGitBranch(data.branch);
       } catch (err) {
         console.error("Failed to fetch git branch:", err);
       }
     };
     fetchBranch();
-    const interval = setInterval(fetchBranch, 10000);
-    return () => clearInterval(interval);
-  }, []);
+    const off = eventBus.on("git_status", (env) => {
+      // The git section reflects the active project; events for other viewed
+      // projects (another tab in a different project) are ignored.
+      if (env.project && activeProject && env.project !== activeProject.path) return;
+      const branch = (env.data as { branch?: string }).branch;
+      if (branch) setGitBranch(branch);
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [activeProject?.path]);
 
   useEffect(() => {
     api.listAgents().then(setAgents).catch(console.error);
@@ -183,12 +170,11 @@ export default function CoworkSidebar({
       .finally(() => setAgentBusy(false));
   };
 
-  // Real data sourced from the live TUI status snapshot, falling back to the
-  // per-session estimate when no TUI is bridged (see fallbackContext above).
-  const contextCurrent =
-    tuiContextMax > 0 ? (tuiStatus?.context_current_tokens ?? 0) : (fallbackContext?.current ?? 0);
-  const contextMax = tuiContextMax > 0 ? tuiContextMax : (fallbackContext?.max ?? 0);
-  const contextModel = tuiContextMax > 0 ? tuiStatus?.context_model : fallbackContext?.model;
+  // Context usage from the per-session status snapshot (populated by the
+  // fetch-on-activation status fetch and patched by bus `status` events).
+  const contextCurrent = tuiStatus?.context_current_tokens ?? 0;
+  const contextMax = tuiStatus?.context_max_tokens ?? 0;
+  const contextModel = tuiStatus?.context_model;
   const contextPct =
     contextMax > 0
       ? Math.min(100, Math.round((contextCurrent / contextMax) * 100))

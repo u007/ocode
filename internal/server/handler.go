@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
@@ -33,6 +34,15 @@ type Handler struct {
 	// lifecycle. Every session-scoped handler resolves through it, so sessions
 	// from any registered project load and run (no more cross-project 404s).
 	sessions *SessionManager
+	// bus is the unified tagged event bus (Part 02). Every emitters publishes
+	// envelopes here; /api/events streams them to web clients.
+	bus *EventBus
+	// runsEmitterOn and watchEmittersOn are the once-per-handler start guards
+	// for the server-push emitters (runs / git / spending / logs), so repeated
+	// /api/events connections only launch each loop once.
+	runsEmitterOn   atomic.Bool
+	watchEmittersOn atomic.Bool
+	logsEmitterOn   atomic.Bool
 	// mcpCache holds the process-wide MCP tool enumeration. MCP server config
 	// (h.cfg.MCP) is identical for every session, so connecting to each
 	// server is done once per process instead of once per session - see
@@ -59,6 +69,18 @@ type Handler struct {
 	// this list, so the browser receives streaming tokens even without a TUI.
 	headlessSubs map[chan SSEEvent]struct{}
 	headlessMu   sync.Mutex
+
+	// turnMu guards turnLocks, the per-session turn serialization mutexes
+	// (Part 03 persist-then-202 / async bootstrap). Turns on different
+	// sessions run in parallel; turns on one session are strictly ordered.
+	turnMu    sync.Mutex
+	turnLocks map[string]*sync.Mutex
+	// turnHeartbeatInterval is the turn_heartbeat period (10s default; tests
+	// shorten it). It must be set before any turn starts for that handler.
+	turnHeartbeatInterval time.Duration
+	// mcpBootstrapTimeout bounds the MCP wait during agent bootstrap (30s
+	// default; tests shorten it). Set before any bootstrap for that handler.
+	mcpBootstrapTimeout time.Duration
 
 	// titleGen guards one-shot session-title generation for headless turns
 	// (web/desktop, no TUI). See title_gen.go.
@@ -178,6 +200,7 @@ func NewHandler() *Handler {
 		headlessSubs:   make(map[chan SSEEvent]struct{}),
 		mcpCache:       newMCPCache(),
 		titleGen:       newTitleGenState(),
+		bus:            NewEventBus(),
 	}
 
 	// The session registry is the single authority for session → project root
@@ -200,8 +223,14 @@ func NewHandler() *Handler {
 		return roots
 	}, func(sessionID string) {
 		h.mu.Lock()
+		as := h.agents[sessionID]
 		delete(h.agents, sessionID)
 		h.mu.Unlock()
+		// Shut down the released agent so plugin/LSP/background workers
+		// don't linger past eviction (mirrors the register-dedup path).
+		if as != nil && as.agent != nil {
+			as.agent.Shutdown()
+		}
 	})
 
 	h.mcpCache.warm(cfg)
@@ -278,6 +307,11 @@ func (h *Handler) unsubscribeHeadless(ch chan SSEEvent) {
 // it goes to headlessSubs; when an RC bridge is active it goes through the
 // bridge instead (which the TUI uses to push events). Sends are non-blocking:
 // a slow consumer drops the event rather than stalling the caller.
+//
+// Every headless event is also published on the unified event bus (Part 02) —
+// the single multiplexed stream /api/events carries the same payloads the
+// legacy mirror did, tagged with the session's owning project. The legacy
+// headlessSubs fan-out stays until Part 06 deletes the old endpoints.
 func (h *Handler) broadcastEvent(ev SSEEvent) {
 	// When an RC bridge is active, the TUI pushes events through the bridge.
 	// Our local streaming callbacks should not also push directly — the TUI
@@ -289,6 +323,21 @@ func (h *Handler) broadcastEvent(ev SSEEvent) {
 		case ch <- ev:
 		default:
 		}
+	}
+	// Publish to the unified bus too. Session-scoped events carry the
+	// session's project root from the registry (cheap map lookup, no disk —
+	// every turn runs on a registered session). Project/session stay empty for
+	// process-global events like status. The session's reconcile watermark
+	// (GET /api/sessions/:id/state last_seq) follows the bus sequence.
+	project := ""
+	if ev.SessionID != "" {
+		if e := h.sessions.Lookup(ev.SessionID); e != nil {
+			project = e.ProjectRoot
+		}
+	}
+	h.bus.Publish(ev.Event, project, ev.SessionID, ev.Data)
+	if ev.SessionID != "" {
+		h.sessions.SetLastSeq(ev.SessionID, h.bus.LastSeq())
 	}
 }
 
@@ -369,19 +418,19 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		model = h.cfg.Model
 	}
 
-	createdSession := false
 	sid := req.SessionID
 	projectRoot := req.ProjectPath
 	if projectRoot == "" {
 		projectRoot = h.workDir
 	}
 
-	// Bind the session to its project root in the registry (explicit
-	// project_path wins; a resolved existing session keeps its root) so the
-	// agent is built against the right workdir and cross-project 404s become
-	// impossible for sessions that exist.
+	createdSession := false
 	var entry *sessionEntry
 	if sid != "" {
+		// Bind the session to its project root in the registry (explicit
+		// project_path wins; a resolved existing session keeps its root) so
+		// the agent is built against the right workdir and cross-project 404s
+		// become impossible for sessions that exist.
 		if req.ProjectPath != "" {
 			h.sessions.Register(sid, req.ProjectPath)
 		}
@@ -393,53 +442,73 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 			// preserve that by binding to the default root and continuing.
 			entry = h.sessions.Register(sid, projectRoot)
 		}
-	}
-	as := h.lookupAgentSession(sid)
-
-	if as == nil {
-		// A model is only required to build a new agent; a resident session
-		// already carries the model it was created with.
+	} else {
+		// A model is only required to create a new session.
 		if model == "" {
 			writeError(w, http.StatusBadRequest, "no model configured")
 			return
 		}
-		if sid == "" {
-			sid = session.NewSessionID()
-			createdSession = true
-			entry = h.sessions.Register(sid, projectRoot)
-		}
-
-		var messages []agent.Message
-		if req.SessionID != "" && entry != nil {
-			s, err := session.LoadForDir(entry.ProjectRoot, req.SessionID)
-			if err == nil {
-				messages = s.Messages
-			}
-		}
-
-		// Built with no handler lock held — see agent_session.go.
-		var err error
-		as, err = h.ensureAgentSession(sid, model, messages, entry.ProjectRoot)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		req.SessionID = sid
+		sid = session.NewSessionID()
+		createdSession = true
+		entry = h.sessions.Register(sid, projectRoot)
 	}
 
 	opts := turnOptions{sessionStarted: createdSession, requestID: req.RequestID}
 
-	// Async: acknowledge immediately and stream the turn over the SSE mirror.
+	// Async (web/desktop): persist-then-202 — the user message is written to
+	// the session's on-disk transcript before the 202 returns, and the agent
+	// bootstrap (if needed) runs on a per-session goroutine with observable
+	// stage events. A bootstrap failure after 202 never loses the message.
 	if req.Async {
-		h.startTurnAsync(req.SessionID, as, req.Content, opts)
+		if createdSession {
+			// The session_started marker survives a bootstrap failure: the
+			// first turn that actually runs emits the frame correlated back
+			// to the tab that created the session.
+			h.sessions.SetSessionStart(sid, req.RequestID)
+		}
+		job, err := h.dispatchTurn(sid, model, req.Content, opts)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		select {
+		case <-job.persistAck:
+			if job.err != nil {
+				writeError(w, http.StatusInternalServerError, job.err.Error())
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
 		writeJSON(w, http.StatusAccepted, ChatResponse{
-			SessionID: req.SessionID,
-			Model:     as.model,
+			SessionID: sid,
+			Model:     model,
 		})
 		return
 	}
 
-	content, err := h.runTurn(req.SessionID, as, req.Content, opts)
+	// Sync (scheduler, Telegram, external API clients): build inline and wait
+	// for the result.
+	as := h.lookupAgentSession(sid)
+	if as == nil {
+		var messages []agent.Message
+		if req.SessionID != "" && entry != nil {
+			if s, err := session.LoadForDir(entry.ProjectRoot, req.SessionID); err == nil {
+				messages = s.Messages
+			}
+		}
+		// Built with no handler lock held — see agent_session.go.
+		var err error
+		var stage string
+		as, stage, err = h.ensureAgentSession(sid, model, messages, entry.ProjectRoot)
+		if err != nil {
+			h.publishTurnError(sid, err, stage)
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
+	content, err := h.runTurn(sid, as, req.Content, opts)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
 		return
@@ -447,7 +516,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, ChatResponse{
 		Content:   content,
-		SessionID: req.SessionID,
+		SessionID: sid,
 		Model:     as.model,
 	})
 }
@@ -581,8 +650,32 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// If we have an RC bridge, forward to the TUI's agent instead of using our own.
-	if rc := h.RCBridge(); rc != nil {
+	// Part 06: uniform send path. Resolve the session first, then route by
+	// its registry entry — no more "any message goes to the TUI when a
+	// bridge is attached" global forwarding. A bridged TUI session (id ==
+	// the bridge's session) is forwarded through the bridge; every other
+	// session runs on the server's own agent.
+	entry, err := h.sessions.Resolve(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	if rc := h.RCBridge(); rc != nil && id == rc.SessionID {
+		if req.Async {
+			// Acknowledge immediately; the TUI streams the turn to the mirror
+			// via its own broadcast channel (the bridge re-broadcasts to the
+			// unified bus, Part 06).
+			select {
+			case rc.RcCh <- RCRequest{Content: req.Content, ResultCh: make(chan RCResult, 1)}:
+			default:
+				writeError(w, http.StatusServiceUnavailable, "TUI is busy, try again")
+				return
+			}
+			writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: rc.Model})
+			return
+		}
+
 		resultCh := make(chan RCResult, 1)
 		select {
 		case rc.RcCh <- RCRequest{Content: req.Content, ResultCh: resultCh}:
@@ -605,7 +698,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 			writeJSON(w, http.StatusOK, ChatResponse{
 				Content:   content.String(),
-				SessionID: rc.SessionID,
+				SessionID: id,
 				Model:     rc.Model,
 			})
 		case <-time.After(5 * time.Minute):
@@ -616,11 +709,6 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 
 	as := h.lookupAgentSession(id)
 	if as == nil {
-		entry, err := h.sessions.Resolve(id)
-		if err != nil {
-			writeError(w, http.StatusNotFound, "session not found")
-			return
-		}
 		s, err := session.LoadForDir(entry.ProjectRoot, id)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "session not found")
@@ -637,16 +725,33 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 
 		// Built with no handler lock held — see agent_session.go.
-		as, err = h.ensureAgentSession(id, model, s.Messages, entry.ProjectRoot)
+		var stage string
+		as, stage, err = h.ensureAgentSession(id, model, s.Messages, entry.ProjectRoot)
 		if err != nil {
+			h.publishTurnError(id, err, stage)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
 
-	// Async: acknowledge immediately and stream the turn over the SSE mirror.
+	// Async: persist-then-202 — the message is durable on disk before the 202
+	// returns; bootstrap (if needed) and the turn run on a per-session
+	// goroutine with events streamed over the unified bus.
 	if req.Async {
-		h.startTurnAsync(id, as, req.Content, turnOptions{})
+		job, err := h.dispatchTurn(id, "", req.Content, turnOptions{})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		select {
+		case <-job.persistAck:
+			if job.err != nil {
+				writeError(w, http.StatusInternalServerError, job.err.Error())
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
 		writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: as.model})
 		return
 	}

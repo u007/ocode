@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatState, getSessionSlice } from "./stores/chatStore";
@@ -42,43 +42,37 @@ import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 import { isNewSessionTabEmpty } from "./lib/tabDrafts";
 import { notifyWailsRuntimeReady } from "./lib/wails";
+import { eventBus } from "./lib/eventBus";
+import { useSessionStatus } from "./hooks/useSessionStatus";
+import { useTurnWatchdog } from "./hooks/useTurnWatchdog";
 
 type ModelDialogTab = "main" | "small" | "advisor";
 
 function StatusMetricsHydrator() {
-  const chatState = useChatState();
   const dispatch = useChatDispatch();
-  const { activeTabId } = useProjectState();
-  const { tuiStatus } = getSessionSlice(chatState, activeTabId);
-  const lastSessionId = useRef<string | null>(null);
 
+  // Spending is server-pushed on the unified bus (`spending` envelopes) — the
+  // 60s client poll is gone. Seed with one fetch so the value renders before
+  // the first event (the emitter only publishes on change).
   useEffect(() => {
     let cancelled = false;
-    const sessionId = tuiStatus?.session_id ?? null;
-
-    if (lastSessionId.current !== sessionId) {
-      dispatch({ type: "SET_SESSION_CONTEXT", context: null });
-      lastSessionId.current = sessionId;
-    }
-
-    const updateSpending = async () => {
-      try {
-        const res = await api.getSpending();
-        if (!cancelled) {
-          dispatch({ type: "SET_SPENDING", spendingUSD: res.spending_usd });
-        }
-      } catch (err) {
-        console.error(err);
+    api
+      .getSpending()
+      .then((res) => {
+        if (!cancelled) dispatch({ type: "SET_SPENDING", spendingUSD: res.spending_usd });
+      })
+      .catch(console.error);
+    const off = eventBus.on("spending", (env) => {
+      const data = env.data as { spending_usd?: number };
+      if (typeof data.spending_usd === "number") {
+        dispatch({ type: "SET_SPENDING", spendingUSD: data.spending_usd });
       }
-    };
-
-    updateSpending();
-    const interval = setInterval(updateSpending, 60000);
+    });
     return () => {
       cancelled = true;
-      clearInterval(interval);
+      off();
     };
-  }, [tuiStatus?.session_id, dispatch]);
+  }, [dispatch]);
 
   return null;
 }
@@ -105,6 +99,18 @@ function HomeApp() {
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
+
+  // Part 05: per-session status on tab activation + streaming watchdog.
+  useSessionStatus(activeTabId);
+  useTurnWatchdog(activeTabId);
+
+  // Declare the viewed projects on the shared bus (drives the server's
+  // subscriber-aware git/spending emitters). All open tabs' projects count,
+  // so background tabs in other projects keep receiving their events.
+  useEffect(() => {
+    const paths = [...new Set(Object.values(projectState.tabsByProject).flat().map((t) => t.projectPath))];
+    eventBus.setProjects(paths);
+  }, [projectState.tabsByProject]);
   const [cmdOpen, setCmdOpen] = useState(false);
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<
@@ -182,13 +188,12 @@ function HomeApp() {
       .getAdvisor()
       .then((res) => dispatch({ type: "SET_ADVISOR_MODEL", model: res.model || "" }))
       .catch(console.error);
+    // OCR settings are global config, not session state — seed them here.
+    // (Session status itself arrives via session-tagged bus events; the old
+    // full SET_TUI_STATUS seed stays removed.)
     api
       .getTUIStatus()
       .then((res) => {
-        const seedSessionId = res.session_id || activeTabId;
-        if (seedSessionId) {
-          dispatch({ type: "SET_TUI_STATUS", sessionId: seedSessionId, status: res });
-        }
         if (res.ocr_backend !== undefined) {
           dispatch({ type: "SET_OCR_BACKEND", backend: res.ocr_backend || "openai-compat" });
         }

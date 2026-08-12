@@ -113,8 +113,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/chat", s.authMiddleware(s.handleChat))
 	s.mux.HandleFunc("GET /api/chat/stream", s.authMiddleware(s.handleChatStream))
 	s.mux.HandleFunc("GET /api/chat/messages", s.authMiddleware(s.handleSessionMessages))
+	// Unified tagged event bus (Part 02). The single SSE stream that replaces
+	// the chat mirror, logs SSE, and per-session agent-runs SSE (those stay
+	// functional until Part 06 removes them).
+	s.mux.HandleFunc("GET /api/events", s.authMiddleware(s.handleEvents))
 	s.mux.HandleFunc("GET /api/sessions", s.authMiddleware(s.handleListSessions))
 	s.mux.HandleFunc("GET /api/sessions/{id}", s.authMiddleware(s.handleGetSession))
+	s.mux.HandleFunc("GET /api/sessions/{id}/state", s.authMiddleware(s.handleSessionState))
+	s.mux.HandleFunc("GET /api/sessions/{id}/status", s.authMiddleware(s.handleSessionStatus))
 	s.mux.HandleFunc("POST /api/sessions/{id}/message", s.authMiddleware(s.handleSendMessage))
 	s.mux.HandleFunc("GET /api/models", s.authMiddleware(s.handleListModels))
 	s.mux.HandleFunc("GET /api/agents/runs", s.authMiddleware(s.handleListRuns))
@@ -348,6 +354,16 @@ func (s *Server) handleGetSession(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetSession(w, r, id)
 }
 
+func (s *Server) handleSessionState(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleSessionState(w, r, id)
+}
+
+func (s *Server) handleSessionStatus(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.handler.HandleSessionStatus(w, r, id)
+}
+
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.handler.HandleSendMessage(w, r, id)
@@ -359,6 +375,10 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSessionMessages(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSessionMessages(w, r)
+}
+
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleEvents(w, r)
 }
 
 func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
@@ -491,6 +511,9 @@ func (s *Server) Serve(ln net.Listener) error {
 	stop := make(chan struct{})
 	defer close(stop)
 	go s.handler.evictIdleLoop(stop)
+	// Forward new debug-log entries onto the unified event bus exactly once,
+	// process-wide (never per SSE connection).
+	go s.handler.logBusForwardLoop(stop)
 	return http.Serve(ln, s.mux)
 }
 
@@ -517,6 +540,13 @@ func (h *Handler) evictIdleLoop(stop <-chan struct{}) {
 // so the web UI can stream and interact with it. Instead of creating a new agent,
 // the server forwards requests through the rcCh channel to the TUI's Update loop.
 // Returns the bridge so the caller can push messages into it.
+//
+// Part 06: the bridged TUI session becomes a first-class SessionManager entry
+// (bound to the TUI's project root — the handler workdir, which the TUI sets
+// via SetWorkDir before calling this), so the per-session state/status
+// endpoints and the uniform send path resolve it like any other session. The
+// bridge also re-broadcasts every frame onto the unified event bus, tagged at
+// source with the real session id and project.
 func (s *Server) RegisterExternalSession(sessionID, model string, rcCh chan RCRequest, resolveCh chan RCResolution, token string) *RCBridge {
 	s.handler.mu.Lock()
 	defer s.handler.mu.Unlock()
@@ -527,7 +557,16 @@ func (s *Server) RegisterExternalSession(sessionID, model string, rcCh chan RCRe
 		Token:     token,
 		SessionID: sessionID,
 		Model:     model,
+		publish: func(ev SSEEvent) {
+			project := ""
+			if e := s.handler.sessions.Lookup(ev.SessionID); e != nil {
+				project = e.ProjectRoot
+			}
+			s.handler.bus.Publish(ev.Event, project, ev.SessionID, ev.Data)
+			s.handler.sessions.SetLastSeq(ev.SessionID, s.handler.bus.LastSeq())
+		},
 	}
+	s.handler.sessions.Register(sessionID, s.handler.workDir)
 	s.handler.rc = bridge
 	return bridge
 }

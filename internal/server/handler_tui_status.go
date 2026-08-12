@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/u007/ocode/internal/usage"
 )
 
 // HandleGetTUIStatus returns the latest TUI status snapshot pushed by the TUI
@@ -90,20 +88,16 @@ func (h *Handler) pushStatusSnapshot() {
 // usage records. The web displays this next to the model in the status bar so
 // the user can see spend accumulate as the model runs.
 func (h *Handler) HandleGetSpending(w http.ResponseWriter, r *http.Request) {
-	now := time.Now()
-	from := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	recs, err := usage.Query(from, now)
+	total, records, err := computeSpending()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	var total float64
-	for _, rec := range recs {
-		total += rec.Spend
-	}
+	now := time.Now()
+	from := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"spending_usd": total,
-		"records":      len(recs),
+		"records":      records,
 		"from":         from.Format(time.RFC3339),
 		"to":           now.Format(time.RFC3339),
 	})

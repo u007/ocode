@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"strings"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 

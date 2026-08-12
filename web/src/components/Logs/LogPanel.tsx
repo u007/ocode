@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { apiPath, authToken, authHeaders } from "@/api/client";
+import { apiPath, authHeaders } from "@/api/client";
+import { eventBus } from "@/lib/eventBus";
 import { Trash2, Pause, Play, Filter } from "lucide-react";
 
 interface LogEntry {
@@ -25,9 +26,7 @@ export default function LogPanel({ active }: { active: boolean }) {
   const [filter, setFilter] = useState("ALL");
   const [autoScroll, setAutoScroll] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [reconnectAttempt, setReconnectAttempt] = useState(0);
 
   // Mirror of `autoScroll` for handlers that must read the current value
   // without re-running their effects (scroll handler, tab-visibility effect).
@@ -76,38 +75,18 @@ export default function LogPanel({ active }: { active: boolean }) {
       });
   }, []);
 
+  // Live logs arrive as `logs` envelopes on the shared event bus (the single
+  // /api/events connection). The `streaming` toggle pauses consumption (the
+  // bus itself stays connected — other consumers share it).
   useEffect(() => {
-    if (!streaming) {
-      eventSourceRef.current?.close();
-      return;
-    }
-
-    const token = authToken();
-    const es = new EventSource(apiPath(`/api/logs/stream${token ? `?token=${token}` : ""}`));
-    eventSourceRef.current = es;
-
-    es.onmessage = (e) => {
-      try {
-        const entry = JSON.parse(e.data) as LogEntry;
-        setLogs((prev) => [...prev, entry]);
-      } catch {
-        // Ignore parse errors
-      }
-    };
-
-    es.onerror = () => {
-      es.close();
-      console.warn("SSE connection lost, reconnecting in 3s…");
-      // setStreaming with the same boolean value is a no-op in React (bails
-      // out of the re-render), so it never re-ran this effect. Use a counter
-      // dependency instead so the reconnect actually fires.
-      setTimeout(() => setReconnectAttempt((n) => n + 1), 3000);
-    };
-
-    return () => {
-      es.close();
-    };
-  }, [streaming, reconnectAttempt]);
+    if (!streaming) return;
+    const off = eventBus.on("logs", (env) => {
+      const entry = env.data as LogEntry;
+      if (!entry || typeof entry.message !== "string") return;
+      setLogs((prev) => [...prev, entry]);
+    });
+    return off;
+  }, [streaming]);
 
   // Follow the tail on new logs, but only while the user is pinned to the
   // bottom (autoScroll enabled). Instant, not smooth — see scrollToBottom.

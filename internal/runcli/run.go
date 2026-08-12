@@ -18,6 +18,11 @@ import (
 	"github.com/u007/ocode/internal/tool"
 )
 
+// headlessNoQuestionSuffix is appended to the user prompt in non-interactive
+// (headless) runs: there is no UI to answer the question tool, so a call to it
+// would stall the run.
+const headlessNoQuestionSuffix = "\n\n[Non-interactive run: do not call the `question` tool — no user is available to answer. Proceed with reasonable assumptions and state them in your response.]"
+
 type stringSliceFlag []string
 
 func (s *stringSliceFlag) String() string { return strings.Join(*s, ",") }
@@ -215,6 +220,16 @@ func Run(args []string) error {
 	}
 
 	tools, lspMgr := tool.LoadBuiltins(cfg, nil)
+	// Headless runs have no UI to answer the question tool — drop it from the
+	// tool list so the model cannot call it at all.
+	filtered := tools[:0]
+	for _, t := range tools {
+		if t.Name() == "question" {
+			continue
+		}
+		filtered = append(filtered, t)
+	}
+	tools = filtered
 	ag := agent.NewAgent(client, tools, cfg, lspMgr)
 	ag.LoadExternalToolsWithMCP(cfg)
 
@@ -260,7 +275,9 @@ func Run(args []string) error {
 
 	startTime := time.Now()
 
-	messages = append(messages, agent.Message{Role: "user", Content: promptText})
+	// Headless runs have no interactive UI, so instruct the model up front to
+	// never block on the question tool.
+	messages = append(messages, agent.Message{Role: "user", Content: promptText + headlessNoQuestionSuffix})
 
 	resp, err := ag.Step(messages)
 	if err != nil {

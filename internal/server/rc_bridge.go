@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"sync"
 
 	"github.com/u007/ocode/internal/agent"
@@ -112,6 +113,12 @@ type RCBridge struct {
 	// Updated by the TUI whenever a tracked field changes and broadcast as a
 	// `status` SSE event. Read by GET /api/tui-status for initial page loads.
 	status *tuiStatusStore
+
+	// publish, when set (wired by Server.RegisterExternalSession), re-broadcasts
+	// every frame this bridge broadcasts onto the unified event bus, tagged at
+	// source with the bridge's real session id and owning project (Part 06). It
+	// is called outside b.mu, so it may take handler/registry locks.
+	publish func(ev SSEEvent)
 }
 
 // PushCronDelivery enqueues a delivery for the TUI to consume. It is
@@ -157,17 +164,34 @@ func (b *RCBridge) Unsubscribe(ch chan SSEEvent) {
 	b.mu.Unlock()
 }
 
-// Broadcast delivers a live event to every subscriber. Sends are non-blocking:
-// a slow consumer drops the event rather than stalling the TUI. The authoritative
-// "messages" snapshot emitted at each turn boundary self-heals any dropped delta.
+// Broadcast delivers a live event to every subscriber and re-broadcasts it on
+// the unified event bus. Sends are non-blocking: a slow consumer drops the
+// event rather than stalling the TUI. The authoritative "messages" snapshot
+// emitted at each turn boundary self-heals any dropped delta.
+//
+// Part 06: frames are tagged with the real session id at source — the bridge
+// owns the TUI session id, so it stamps any frame the TUI produced without
+// one. A frame that still has no session id (a producer bug: the bridge
+// itself was built without a session id) is dropped loudly, never forwarded
+// with an ambiguous tag.
 func (b *RCBridge) Broadcast(ev SSEEvent) {
+	if ev.SessionID == "" {
+		if b.SessionID == "" {
+			log.Printf("rc bridge: ERROR dropping untagged frame %q (bridge has no session id)", ev.Event)
+			return
+		}
+		ev.SessionID = b.SessionID
+	}
 	b.mu.RLock()
-	defer b.mu.RUnlock()
 	for ch := range b.subscribers {
 		select {
 		case ch <- ev:
 		default:
 		}
+	}
+	b.mu.RUnlock()
+	if b.publish != nil {
+		b.publish(ev)
 	}
 }
 

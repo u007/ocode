@@ -1,6 +1,8 @@
 package server
 
 import (
+	"time"
+
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
 	"github.com/u007/ocode/internal/tool"
@@ -40,4 +42,18 @@ func (c *mcpCache) warm(cfg *config.Config) {
 func (c *mcpCache) wait() ([]tool.Tool, []string) {
 	<-c.ready
 	return c.tools, c.errs
+}
+
+// waitTimeout returns the MCP tools with a bounded wait. When the background
+// enumeration has not finished within timeout, it returns nil tools/errors and
+// timedOut=true so the caller can proceed without stragglers and emit a
+// warning event instead of hanging the session bootstrap. The nil return on
+// timeout avoids a data race on c.tools with the still-running warm goroutine.
+func (c *mcpCache) waitTimeout(timeout time.Duration) ([]tool.Tool, []string, bool) {
+	select {
+	case <-c.ready:
+		return c.tools, c.errs, false
+	case <-time.After(timeout):
+		return nil, nil, true
+	}
 }

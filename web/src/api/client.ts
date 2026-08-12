@@ -381,6 +381,19 @@ export const api = {
       max_tokens?: number;
       model?: string;
     }>(`/api/sessions/${id}/context`),
+  // Reconcile endpoint (Parts 03–05): authoritative turn state + the bus seq
+  // watermark. Reconcile = state fetch + transcript refetch, never event
+  // replay. The watchdog and the reconnect path use this to clear a stuck
+  // streaming spinner.
+  getSessionState: (id: string) =>
+    fetchJSON<{ bootstrap_stage: string; turn_active: boolean; last_seq: number }>(
+      `/api/sessions/${id}/state`,
+    ),
+  // Per-session status snapshot (Part 03): superset of /api/tui-status with
+  // session_id populated and context_* included, so each tab renders its own
+  // status without a TUI bridge.
+  getSessionStatus: (id: string) =>
+    fetchJSON<TUIStatus>(`/api/sessions/${id}/status`),
   getSmallModelWithEnabled: () =>
     fetchJSON<{ model: string; enabled: boolean; priority: string }>(
       "/api/config/small-model",
@@ -693,75 +706,7 @@ export type SSEEventHandler = (
   sessionId?: string,
 ) => void;
 
-// connectSessionMirror opens the persistent live mirror of the bridged TUI
-// session. It carries every event needed for a 2-way live view: full-list
-// snapshots (`messages`), `user_message`, token deltas (`thinking`, `text`),
-// tool activity (`tool_start`, `tool_result`), `turn_done`, and `error`. So
-// activity originating in the TUI (or any other browser) appears here live.
-// Returns a cleanup function.
-export function connectSessionMirror(
-  session: string | undefined,
-  onEvent: SSEEventHandler,
-  events?: string,
-): () => void {
-  const params = new URLSearchParams();
-  if (session) params.set("session", session);
-  if (events) params.set("events", events);
-  if (_token) params.set("token", _token);
+// The legacy per-session SSE connectors (connectSessionMirror,
+// connectAgentRunsSSE) were deleted in Part 04: every event type they carried
+// now flows over the single /api/events stream consumed by `lib/eventBus`.
 
-  const es = new EventSource(apiPath(`/api/chat/messages?${params}`));
-	const on = (name: string) =>
-		es.addEventListener(name, (e) => {
-			try {
-				const message = e as MessageEvent;
-				onEvent(name, JSON.parse(message.data), message.lastEventId || undefined);
-      } catch (err) {
-        console.error(`failed to parse '${name}' mirror frame`, err);
-      }
-    });
-  ["messages", "session_started", "user_message", "thinking", "text", "tool_start", "tool_result", "turn_done", "status", "advisor_enabled", "question", "question_resolved", "permission", "permission_resolved"].forEach(on);
-  // The "error" event is overloaded: a server-sent `event: error` carries data,
-  // while a transport failure (EventSource auto-reconnects) carries none.
-  es.addEventListener("error", (e) => {
-    const data = (e as MessageEvent).data;
-    if (!data) {
-      console.error("session mirror SSE connection error");
-      return;
-    }
-		try {
-			onEvent("error", JSON.parse(data), (e as MessageEvent).lastEventId || undefined);
-    } catch (err) {
-      console.error("failed to parse 'error' mirror frame", err);
-    }
-  });
-
-  return () => es.close();
-}
-
-// connectAgentRunsSSE opens a live stream of the agent-run tree (the web "agent
-// preview"). The server pushes a full snapshot on every change. Returns a
-// cleanup function that closes the stream.
-export function connectAgentRunsSSE(
-  session: string | undefined,
-  onRuns: (runs: AgentRun[]) => void,
-): () => void {
-  const params = new URLSearchParams();
-  if (session) params.set("session", session);
-  if (_token) params.set("token", _token);
-
-  const es = new EventSource(apiPath(`/api/agents/runs/stream?${params}`));
-  es.addEventListener("runs", (e) => {
-    try {
-      onRuns(JSON.parse(e.data) as AgentRun[]);
-    } catch (err) {
-      console.error("failed to parse agent runs frame", err);
-    }
-  });
-  // Native EventSource auto-reconnects on transient errors; only log so a
-  // dropped stream is visible without tearing the UI down.
-  es.addEventListener("error", () => {
-    console.error("agent runs SSE connection error");
-  });
-
-  return () => es.close();
-}

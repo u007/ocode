@@ -1015,20 +1015,20 @@ func (h *Handler) HandleGetLimitsConfig(w http.ResponseWriter, r *http.Request) 
 	}
 	h.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"max_steps":            maxSteps,
-		"image_max_dim":        maxImageDim,
+		"max_steps":             maxSteps,
+		"image_max_dim":         maxImageDim,
 		"max_concurrent_agents": maxConcurrent,
-		"undo_max_age_delta":   undoMaxAgeDelta,
+		"undo_max_age_delta":    undoMaxAgeDelta,
 	})
 }
 
 // HandleSetLimitsConfig persists the execution limits.
 func (h *Handler) HandleSetLimitsConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		MaxSteps           int `json:"max_steps"`
-		ImageMaxDim        int `json:"image_max_dim"`
+		MaxSteps            int `json:"max_steps"`
+		ImageMaxDim         int `json:"image_max_dim"`
 		MaxConcurrentAgents int `json:"max_concurrent_agents"`
-		UndoMaxAgeDelta    int `json:"undo_max_age_delta"`
+		UndoMaxAgeDelta     int `json:"undo_max_age_delta"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")

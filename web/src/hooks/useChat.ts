@@ -56,9 +56,11 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
   );
 
   // Local stop: the browser can't cancel the TUI's agent, so this only releases
-  // the input. The turn continues in the TUI and the mirror will still commit it.
+  // the input and clears the UI streaming state. The turn continues server-side;
+  // a later turn_done/turn_error becomes a no-op (turn state already cleared).
   const stop = useCallback(() => {
     if (!sessionId) return;
+    dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
     dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
   }, [dispatch, sessionId]);
 
@@ -134,7 +136,10 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
     stop,
     resolvePermission,
     submitQuestionAnswers,
-    isStreaming: slice.isStreaming,
+    // isStreaming derives from the per-session turn state (Part 05): set
+    // optimistically on 202 (SET_STREAMING), confirmed by turn_started
+    // (turnActive), cleared by turn_done/turn_error or a rejected submit.
+    isStreaming: slice.isStreaming || slice.turnActive,
     pendingPermission: slice.pendingPermission,
     pendingQuestion: slice.pendingQuestion,
   };

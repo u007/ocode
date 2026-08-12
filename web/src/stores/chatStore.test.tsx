@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chatReducer, getSessionSlice, initialState } from "./chatStore";
+import { chatReducer, getSessionSlice, getTurnState, initialState } from "./chatStore";
 import type { ChatState } from "./chatStore";
 
 function initial(): ChatState {
@@ -134,5 +134,68 @@ describe("chatStore per-session isolation", () => {
     const slice = getSessionSlice(state, "a");
     expect(slice.initialized).toBe(true);
     expect(slice.live).toEqual([{ kind: "text", text: "hi" }]);
+  });
+});
+
+describe("chatStore Part 05 turn/status state", () => {
+  it("SET_TURN_STATE true activates the turn and stamps a heartbeat", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: true });
+    const s = getSessionSlice(state, "a");
+    expect(s.turnActive).toBe(true);
+    expect(s.lastHeartbeatAt).not.toBeNull();
+    expect(s.turnStalled).toBe(false);
+  });
+
+  it("SET_TURN_STATE false clears turn state and the streaming flag", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: true });
+    state = chatReducer(state, { type: "SET_STREAMING", sessionId: "a", isStreaming: true });
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: false });
+    const s = getSessionSlice(state, "a");
+    expect(s.turnActive).toBe(false);
+    expect(s.lastHeartbeatAt).toBeNull();
+    expect(s.isStreaming).toBe(false);
+  });
+
+  it("SET_TURN_HEARTBEAT refreshes lastHeartbeatAt and clears a stall", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: true });
+    state = chatReducer(state, { type: "SET_TURN_STALLED", sessionId: "a", stalled: true });
+    state = chatReducer(state, { type: "SET_TURN_HEARTBEAT", sessionId: "a" });
+    const s = getSessionSlice(state, "a");
+    expect(s.lastHeartbeatAt).not.toBeNull();
+    expect(s.turnStalled).toBe(false);
+  });
+
+  it("SET_BOOTSTRAP_STAGE records the stage", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_BOOTSTRAP_STAGE", sessionId: "a", stage: "mcp" });
+    expect(getSessionSlice(state, "a").bootstrapStage).toBe("mcp");
+  });
+
+  it("SET_TUI_STATUS is per-session and marks status ready", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_TUI_STATUS", sessionId: "a", status: { session_title: "T" } });
+    expect(getSessionSlice(state, "a").tuiStatus?.session_title).toBe("T");
+    expect(getSessionSlice(state, "b").tuiStatus).toBeNull();
+    expect(state.tuiStatusReady).toBe(true);
+  });
+
+  it("SET_STATUS_LOADING is per-session", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_STATUS_LOADING", sessionId: "a", loading: true });
+    expect(getSessionSlice(state, "a").statusLoading).toBe(true);
+    expect(getSessionSlice(state, "b").statusLoading).toBe(false);
+  });
+
+  it("getTurnState selector returns the session's turn fields", () => {
+    let state = initial();
+    state = chatReducer(state, { type: "SET_TURN_STATE", sessionId: "a", turnActive: true });
+    state = chatReducer(state, { type: "SET_BOOTSTRAP_STAGE", sessionId: "a", stage: "ready" });
+    const turn = getTurnState(state, "a");
+    expect(turn.turnActive).toBe(true);
+    expect(turn.bootstrapStage).toBe("ready");
+    expect(turn.turnStalled).toBe(false);
   });
 });

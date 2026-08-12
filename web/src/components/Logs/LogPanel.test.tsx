@@ -2,19 +2,36 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import LogPanel from "./LogPanel";
 
-// jsdom has no EventSource, requestAnimationFrame, or element scrolling, so
-// provide minimal stand-ins that let the component's streaming + scroll logic
-// actually run.
+// LogPanel consumes live logs from the shared event bus (the single
+// /api/events connection); the old per-panel EventSource is gone. Mock the
+// bus module and drive `logs` envelopes through it.
 
-type SSEHandler = (e: { data: string }) => void;
+const busHandlers = new Map<string, Set<(env: unknown) => void>>();
 
-class MockEventSource {
-  onmessage: SSEHandler | null = null;
-  onerror: (() => void) | null = null;
-  close = vi.fn();
+vi.mock("@/lib/eventBus", () => ({
+  eventBus: {
+    on: (event: string, handler: (env: unknown) => void) => {
+      let set = busHandlers.get(event);
+      if (!set) {
+        set = new Set();
+        busHandlers.set(event, set);
+      }
+      set.add(handler);
+      return () => {
+        set.delete(handler);
+      };
+    },
+    onReconnect: () => () => {},
+  },
+}));
+
+function emitLog(message: string, kind = "TOOL") {
+  act(() => {
+    busHandlers.get("logs")?.forEach((h) =>
+      h({ event: "logs", project: "", session_id: "", seq: 1, data: { kind, message } }),
+    );
+  });
 }
-
-let es: MockEventSource;
 
 /** Give the scroll container controllable metrics (jsdom has no layout). */
 function makeScrollable(el: HTMLElement, scrollHeight: number, clientHeight: number) {
@@ -41,12 +58,6 @@ function getScroller(container: HTMLElement): HTMLElement {
   return el;
 }
 
-function emitLog(message: string, kind = "TOOL") {
-  act(() => {
-    es.onmessage?.({ data: JSON.stringify({ kind, message }) });
-  });
-}
-
 beforeEach(() => {
   vi.stubGlobal(
     "fetch",
@@ -55,8 +66,7 @@ beforeEach(() => {
       json: async () => [],
     }),
   );
-  es = new MockEventSource();
-  vi.stubGlobal("EventSource", vi.fn(() => es));
+  busHandlers.clear();
   vi.stubGlobal("requestAnimationFrame", (cb: () => void) => {
     cb();
     return 1;

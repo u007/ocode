@@ -59,7 +59,7 @@ function runningStatusParts(
 
 export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const chatState = useChatState();
-  const { sessionContext, spendingUSD } = chatState;
+  const { spendingUSD } = chatState;
   const { activeTabId } = useProjectState();
   const { isStreaming, error, live, tuiStatus } = getSessionSlice(chatState, activeTabId);
 
@@ -79,8 +79,8 @@ export default function StatusBar({ onCoworkToggle, onStatusClick }: Props) {
   const sessionTitle = snap?.session_title || "";
   const sessionId = snap?.session_id || "";
   const cwd = snap?.cwd || "";
-  const ctxCur = sessionContext?.currentTokens ?? snap?.context_current_tokens ?? 0;
-  const ctxMax = sessionContext?.maxTokens ?? snap?.context_max_tokens ?? 0;
+  const ctxCur = snap?.context_current_tokens ?? 0;
+  const ctxMax = snap?.context_max_tokens ?? 0;
   const spending = spendingUSD ?? snap?.spending_usd ?? 0;
   const modifiedCount = snap?.modified_files?.length ?? 0;
   const lspCount = snap?.lsp_servers?.length ?? 0;

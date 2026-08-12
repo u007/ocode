@@ -22,7 +22,9 @@ function stripTruncationFooter(content: string): string {
 // Language to highlight a tool's raw result with. Keyed on what the Go tools in
 // internal/tool actually return, not on the file they touched:
 // the write/edit family returns FormatDiff output, bash returns raw combined
-// stdout/stderr, and everything else (read's line-numbered content, grep, glob,
+// stdout/stderr. `read`'s output is source code, so its language is derived
+// per-call from the file extension in its command params (see readLang
+// below) rather than being a fixed entry here. Everything else (grep, glob,
 // list, todo*) has no grammar that renders it correctly — those stay plain.
 // Only the live stream (ChatPanel) supplies a real tool name alongside output;
 // replayed history arrives as a role-"tool" message with no name, so it is
@@ -34,6 +36,23 @@ const TOOL_OUTPUT_LANG: Record<string, string> = {
   multiedit: "diff",
   replace_lines: "diff",
 };
+
+// readLang derives a Shiki language hint from the `path` field of a `read`
+// tool call's JSON command, e.g. {"path":"worker/protocol/messages.go"} ->
+// "go". Returns "" when the command isn't parseable JSON, has no path, or
+// the path has no extension — HighlightedCode falls back to plain text.
+function readLang(command: string | undefined): string {
+  if (!command) return "";
+  try {
+    const parsed = JSON.parse(command) as Record<string, unknown>;
+    const path = parsed.path ?? parsed.file_path ?? parsed.filePath;
+    if (typeof path !== "string") return "";
+    const ext = path.split(".").pop();
+    return ext && ext !== path ? ext : "";
+  } catch {
+    return "";
+  }
+}
 
 // ThinkingBlock renders reasoning tokens in a muted panel. The content is shown
 // expanded by default so reasoning is visible immediately in the web UI.
@@ -124,7 +143,10 @@ export function ToolBlock({
                   ) : (
                     <HighlightedCode
                       code={visibleOutput ?? ""}
-                      lang={TOOL_OUTPUT_LANG[tool] ?? ""}
+                      lang={
+                        TOOL_OUTPUT_LANG[tool] ??
+                        (tool === "read" ? readLang(command) : "")
+                      }
                     />
                   )}
                 </pre>

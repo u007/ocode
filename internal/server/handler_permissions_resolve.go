@@ -172,6 +172,9 @@ func (h *Handler) HandleResolvePermission(w http.ResponseWriter, r *http.Request
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "messages", Data: as.messages})
 	h.broadcastEvent(SSEEvent{SessionID: sessID, Event: "turn_done", Data: DoneEvent{SessionID: sessID, Model: as.model}})
 
+	// Post-turn auto-compaction check (mirrors runTurn).
+	as.agent.MaybeCompactAsync(as.messages)
+
 	writeJSON(w, http.StatusOK, ChatResponse{
 		Content:   content.String(),
 		SessionID: sessID,

@@ -76,15 +76,27 @@ func TestCrossProjectSessionHandlers(t *testing.T) {
 }
 
 // TestChatRegistersProjectBinding verifies POST /api/chat with a project_path
-// binds the new session to that project root (the registry entry carries it).
+// binds the new session to that project root (the registry entry carries it)
+// AND that the async path is persist-then-202: the 202 returns with the
+// message already durable on disk under the owning project, before the agent
+// bootstrap has even succeeded (a model that can never build a client is
+// deliberately used, so only the persist could have produced the 202).
 func TestChatRegistersProjectBinding(t *testing.T) {
 	h := NewHandler()
 	proj := t.TempDir()
 	h.projects = newTestProjectStore(t, proj)
 
-	rec := chatRequest(t, h, map[string]any{"content": "hi", "project_path": proj})
-	if rec.Code != http.StatusOK && rec.Code != http.StatusAccepted {
-		t.Fatalf("chat status %d, want 200/202 (body %s)", rec.Code, rec.Body.String())
+	rec := chatRequest(t, h, map[string]any{
+		"content":      "hi",
+		"project_path": proj,
+		"async":        true,
+		// A model whose client can never build (no local server): the 202 must
+		// still arrive (message persisted) and the bootstrap failure must not
+		// lose the message.
+		"model": "local/definitely-not-running",
+	})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("chat status %d, want 202 (body %s)", rec.Code, rec.Body.String())
 	}
 	var resp ChatResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
@@ -99,5 +111,14 @@ func TestChatRegistersProjectBinding(t *testing.T) {
 	}
 	if entry.ProjectRoot != proj {
 		t.Fatalf("entry project root = %q, want %q", entry.ProjectRoot, proj)
+	}
+	// The message must already be on disk in the session's own project at 202
+	// time — a later bootstrap failure can never lose it.
+	s, err := session.LoadForDir(proj, resp.SessionID)
+	if err != nil {
+		t.Fatalf("load persisted session: %v", err)
+	}
+	if len(s.Messages) != 1 || s.Messages[0].Content != "hi" {
+		t.Fatalf("persisted messages = %+v, want [user: hi]", s.Messages)
 	}
 }

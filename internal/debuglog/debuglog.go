@@ -38,6 +38,11 @@ type log struct {
 	mu      sync.Mutex
 	entries []Entry
 	notify  chan struct{}
+	// seq counts every entry ever appended; entry i in the ring has sequence
+	// seq-len(entries)+i. Clear resets it to 0. Lets SnapshotSince consumers
+	// diff correctly across ring-buffer drops (len stops growing at cap, so
+	// a count-based diff would stall) and across clears (no re-emits).
+	seq uint64
 	// mirrorKind/mirrorPath route entries of one kind to an on-disk file (see
 	// MirrorKindToFile); mirrorFailOnce keeps a broken mirror from spamming the
 	// in-memory log with one error per append.
@@ -60,6 +65,7 @@ func (l *log) Append(e Entry) {
 		l.entries = l.entries[:cap-1]
 	}
 	l.entries = append(l.entries, e)
+	l.seq++
 	mirrorPath := ""
 	if l.mirrorPath != "" && e.Kind == l.mirrorKind && e.Kind != KindError {
 		mirrorPath = l.mirrorPath
@@ -85,7 +91,37 @@ func (l *log) Snapshot() []Entry {
 func (l *log) Clear() {
 	l.mu.Lock()
 	l.entries = l.entries[:0]
+	l.seq = 0
 	l.mu.Unlock()
+}
+
+// Cursor returns the current sequence cursor: pass it to SnapshotSince to
+// receive only entries appended after this call.
+func (l *log) Cursor() uint64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.seq
+}
+
+// SnapshotSince returns the entries appended at or after cursor since,
+// plus the cursor to pass on the next call. A since ahead of the current
+// sequence means the log was cleared (restart from 0); a since behind the
+// ring's oldest entry means entries were dropped before being read (those
+// are unavoidably skipped). Treat cursors as opaque: always pass back the
+// previous return value.
+func (l *log) SnapshotSince(since uint64) ([]Entry, uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	first := l.seq - uint64(len(l.entries))
+	if since > l.seq { // cleared since the last call
+		since = 0
+	}
+	if since < first { // ring dropped unread entries
+		since = first
+	}
+	out := make([]Entry, l.seq-since)
+	copy(out, l.entries[since-first:])
+	return out, l.seq
 }
 
 func (l *log) Notify() chan struct{} {

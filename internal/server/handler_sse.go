@@ -153,16 +153,23 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var messages []agent.Message
+		projectRoot := ""
 		if entry, err := h.sessions.Resolve(sessionID); err == nil {
+			projectRoot = entry.ProjectRoot
 			if s, err := session.LoadForDir(entry.ProjectRoot, sessionID); err == nil {
 				messages = s.Messages
 			}
 		}
 
-		// Built with no handler lock held — see agent_session.go.
+		// Built with no handler lock held — see agent_session.go. The resolved
+		// project root keeps the agent bound to the session's owning project;
+		// a brand-new (unresolvable) session on this legacy endpoint binds to
+		// the process workdir as before.
 		var err error
-		as, err = h.ensureAgentSession(sessionID, model, messages, "")
+		var stage string
+		as, stage, err = h.ensureAgentSession(sessionID, model, messages, projectRoot)
 		if err != nil {
+			h.publishTurnError(sessionID, err, stage)
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -219,6 +226,9 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		SessionID: sessionID,
 		Model:     sessModel,
 	})
+
+	// Post-turn auto-compaction check (mirrors runTurn).
+	ag.MaybeCompactAsync(as.messages)
 }
 
 // HandleSessionMessages is the persistent live mirror of the bridged TUI session.
@@ -273,8 +283,7 @@ func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) 
 		defer rc.Unsubscribe(sub)
 
 		// Send the current history immediately so a freshly-loaded (or reconnecting)
-		// browser is in sync before live events start flowing. Bridge events from
-		// older TUI code may not carry SessionID, so decorate them at this boundary.
+		// browser is in sync before live events start flowing.
 		forward(SSEEvent{SessionID: rc.SessionID, Event: "messages", Data: rc.GetMessages()})
 
 		ctx := r.Context()
@@ -283,8 +292,14 @@ func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) 
 			case <-ctx.Done():
 				return
 			case ev := <-sub:
+				// Part 06: every bridge frame must arrive tagged with its real
+				// session id — RCBridge.Broadcast stamps at source and the old
+				// re-stamping compensation is gone. An untagged frame is a
+				// producer bug; drop it loudly instead of guessing which
+				// session it belongs to.
 				if ev.SessionID == "" {
-					ev.SessionID = rc.SessionID
+					log.Printf("rc bridge: ERROR dropping untagged frame %q at mirror (no session id)", ev.Event)
+					continue
 				}
 				forward(ev)
 			}

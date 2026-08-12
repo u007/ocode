@@ -147,15 +147,21 @@ func TestHandleSessionMessagesForwardsLiveEvents(t *testing.T) {
 }
 
 // TestRCBridgeUnsubscribeStopsDelivery verifies an unsubscribed channel no longer
-// receives broadcasts (no leak / no send to a dead consumer).
+// receives broadcasts (no leak / no send to a dead consumer). The bridge has a
+// session id (as RegisterExternalSession always sets one) so Broadcast can
+// stamp frames at source; the frame the subscriber receives must carry that
+// real session id (Part 06 at-source tagging).
 func TestRCBridgeUnsubscribeStopsDelivery(t *testing.T) {
-	b := &RCBridge{}
+	b := &RCBridge{SessionID: "sess-1"}
 	ch := b.Subscribe()
 	b.Broadcast(SSEEvent{Event: "text", Data: TextDelta{Delta: "a"}})
 	select {
 	case ev := <-ch:
 		if ev.Event != "text" {
 			t.Fatalf("expected text event, got %q", ev.Event)
+		}
+		if ev.SessionID != "sess-1" {
+			t.Fatalf("expected at-source tagged frame with session sess-1, got %q", ev.SessionID)
 		}
 	default:
 		t.Fatal("subscriber did not receive broadcast")
@@ -166,6 +172,20 @@ func TestRCBridgeUnsubscribeStopsDelivery(t *testing.T) {
 	select {
 	case ev := <-ch:
 		t.Fatalf("unsubscribed channel still received %q", ev.Event)
+	default:
+	}
+}
+
+// TestRCBridgeDropsUntaggedFrameWithoutSessionID verifies the Part 06 fail-
+// loudly contract: a frame broadcast by a bridge that has no session id of its
+// own is dropped, never forwarded with an ambiguous tag.
+func TestRCBridgeDropsUntaggedFrameWithoutSessionID(t *testing.T) {
+	b := &RCBridge{} // no SessionID — cannot tag frames
+	ch := b.Subscribe()
+	b.Broadcast(SSEEvent{Event: "text", Data: TextDelta{Delta: "a"}})
+	select {
+	case ev := <-ch:
+		t.Fatalf("untagged frame was delivered: %+v", ev)
 	default:
 	}
 }

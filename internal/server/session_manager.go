@@ -41,9 +41,8 @@ type SessionManager struct {
 	onEvict func(sessionID string)
 }
 
-// sessionEntry is one registry row. Bootstrap/turn state fields are
-// placeholders in Part 01 and become real in Part 03 (async bootstrap, turn
-// lifecycle).
+// sessionEntry is one registry row. Bootstrap/turn state fields became real in
+// Part 03 (async bootstrap with observable stages, turn lifecycle).
 type sessionEntry struct {
 	SessionID   string
 	ProjectRoot string
@@ -53,14 +52,32 @@ type sessionEntry struct {
 	// lookup paths.
 	agent *agentSession
 
-	// bootstrapStage is one of "", "tools", "mcp", "model", "ready"
-	// (Part 03 fills these transitions).
+	// bootstrapStage is the current bootstrap stage: "" (idle/not started),
+	// "tools", "mcp", "model", or "ready" (terminal). On a failed bootstrap it
+	// stays at the failing stage and bootstrapErr carries the error.
 	bootstrapStage string
+	// bootstrapErr is the error message of the last failed bootstrap ("" when
+	// the last bootstrap succeeded or none ran). A later successful bootstrap
+	// clears it.
+	bootstrapErr string
 	// turnActive is true while a turn is running on this session's agent.
 	turnActive bool
-	// lastSeq is the last event-bus sequence observed for this session
-	// (Part 02/03).
+	// lastSeq is the last event-bus sequence observed for this session, the
+	// reconcile watermark returned by GET /api/sessions/:id/state.
 	lastSeq uint64
+
+	// pending holds user message contents persisted to the session's on-disk
+	// transcript but whose turns have not started yet (Part 03 persist-then-
+	// 202). Bootstrap strips exactly len(pending) trailing messages from the
+	// disk transcript so runTurn's in-memory append does not duplicate them.
+	// Turn jobs shift one entry per successfully started turn.
+	pending []string
+
+	// pendingStartRequestID correlates the session_started frame to the tab
+	// that created a brand-new session. Set when the session is created and
+	// consumed (cleared) by the first turn that runs, so the frame survives a
+	// bootstrap failure that delays the first turn.
+	pendingStartRequestID string
 
 	// lastActivity is the last time the entry had an active turn or was
 	// touched. Used by EvictIdle.
@@ -77,10 +94,10 @@ type sessionEntry struct {
 // id after EvictIdle releases its agent.
 func NewSessionManager(idleTimeout time.Duration, projectRoots func() []string, onEvict func(string)) *SessionManager {
 	return &SessionManager{
-		entries:     make(map[string]*sessionEntry),
-		idleTimeout: idleTimeout,
+		entries:      make(map[string]*sessionEntry),
+		idleTimeout:  idleTimeout,
 		projectRoots: projectRoots,
-		onEvict:     onEvict,
+		onEvict:      onEvict,
 	}
 }
 
@@ -222,4 +239,181 @@ func (m *SessionManager) Snapshot() []*sessionEntry {
 		out = append(out, &cp)
 	}
 	return out
+}
+
+// Bootstrap stage order, indexed for transition validation. "" is idle (no
+// bootstrap attempted); "ready" is terminal.
+// Order matches the actual emission sequence in buildAgentSession:
+// model → tools → mcp → ready.
+var bootstrapStageOrder = map[string]int{
+	"":      0,
+	"model": 1,
+	"tools": 2,
+	"mcp":   3,
+	"ready": 4,
+}
+
+// SetBootstrapStage advances the entry's bootstrap stage. Illegal transitions
+// (jumping backwards, or mutating a finished bootstrap) are error-logged but
+// the stage is still recorded — the stage is diagnostic state that the state
+// endpoint reports, never a gate on agent construction. A transition to ""
+// resets a failed bootstrap for a retry.
+func (m *SessionManager) SetBootstrapStage(sessionID, stage string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil {
+		log.Printf("session manager: setBootstrapStage(%q) for unknown session", sessionID)
+		return
+	}
+	if !validBootstrapTransition(e.bootstrapStage, stage) {
+		log.Printf("session manager: ERROR illegal bootstrap transition %q -> %q for session %s", e.bootstrapStage, stage, sessionID)
+	}
+	e.bootstrapStage = stage
+	if stage == "ready" {
+		// A successful bootstrap clears any prior failure so the state
+		// endpoint does not keep reporting a stale error.
+		e.bootstrapErr = ""
+	}
+}
+
+// validBootstrapTransition reports whether moving from one stage to another
+// is a forward progression. Jumping ahead (tools -> ready) is tolerated; only
+// backwards jumps and mutations of a terminal stage are illegal.
+func validBootstrapTransition(from, to string) bool {
+	f, okF := bootstrapStageOrder[from]
+	t, okT := bootstrapStageOrder[to]
+	if !okF || !okT {
+		return false
+	}
+	return t > f
+}
+
+// SetBootstrapFailed records a bootstrap failure at the failing stage so the
+// state endpoint can report which stage broke.
+func (m *SessionManager) SetBootstrapFailed(sessionID, stage string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		e.bootstrapStage = stage
+	}
+}
+
+// SetBootstrapError records the failure message on the entry (used by the
+// state endpoint's bootstrap_error field).
+func (m *SessionManager) SetBootstrapError(sessionID, errMsg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		e.bootstrapErr = errMsg
+	}
+}
+
+// SetLastSeq records the event-bus sequence watermark for the session (the
+// reconcile last_seq). The bus sequence is global and monotonic, so the
+// latest observed value is simply stored per session.
+func (m *SessionManager) SetLastSeq(sessionID string, seq uint64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		e.lastSeq = seq
+	}
+}
+
+// PushPending records a user message content that has been persisted to disk
+// but whose turn has not started yet.
+func (m *SessionManager) PushPending(sessionID, content string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		e.pending = append(e.pending, content)
+	}
+}
+
+// PendingFront returns the oldest persisted-but-unturned message content.
+func (m *SessionManager) PendingFront(sessionID string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil || len(e.pending) == 0 {
+		return "", false
+	}
+	return e.pending[0], true
+}
+
+// ShiftPending drops the oldest pending message after its turn has started
+// (the message has been appended to the in-memory transcript by runTurn).
+func (m *SessionManager) ShiftPending(sessionID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil && len(e.pending) > 0 {
+		e.pending = e.pending[1:]
+	}
+}
+
+// PendingCount reports how many messages are persisted but not yet turned.
+// Bootstrap strips exactly this many trailing messages from the on-disk
+// transcript.
+func (m *SessionManager) PendingCount(sessionID string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		return len(e.pending)
+	}
+	return 0
+}
+
+// SetSessionStart records that a brand-new session was created and its first
+// turn must emit session_started (correlated to the creating tab's
+// requestID), even if that first turn runs after a bootstrap failure.
+func (m *SessionManager) SetSessionStart(sessionID, requestID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		e.pendingStartRequestID = requestID
+	}
+}
+
+// ConsumeSessionStart returns and clears the pending session_started marker.
+// The bool reports whether a marker was set.
+func (m *SessionManager) ConsumeSessionStart(sessionID string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil || e.pendingStartRequestID == "" {
+		return "", false
+	}
+	rid := e.pendingStartRequestID
+	e.pendingStartRequestID = ""
+	return rid, true
+}
+
+// SessionState is the wire shape of GET /api/sessions/:id/state — the
+// reconcile endpoint. The frontend derives streaming state from it
+// (turn_active) and detects events it may have missed via last_seq.
+type SessionState struct {
+	SessionID      string `json:"session_id"`
+	BootstrapStage string `json:"bootstrap_stage"`
+	BootstrapError string `json:"bootstrap_error,omitempty"`
+	TurnActive     bool   `json:"turn_active"`
+	LastSeq        uint64 `json:"last_seq"`
+}
+
+// State returns the session's reconcile state. The bool reports whether the
+// session is known to the registry (false for sessions in no registered
+// project).
+func (m *SessionManager) State(sessionID string) (SessionState, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e := m.entries[sessionID]
+	if e == nil {
+		return SessionState{}, false
+	}
+	return SessionState{
+		SessionID:      e.SessionID,
+		BootstrapStage: e.bootstrapStage,
+		BootstrapError: e.bootstrapErr,
+		TurnActive:     e.turnActive,
+		LastSeq:        e.lastSeq,
+	}, true
 }

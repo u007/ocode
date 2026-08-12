@@ -4,12 +4,24 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
+
+// bootstrapMCPTimeout bounds the MCP tool enumeration wait during session
+// bootstrap (30s per the design spec). Bootstrap proceeds without stragglers
+// and emits a session_bootstrap warning event instead of hanging the first
+// turn of a session.
+const bootstrapMCPTimeout = 30 * time.Second
+
+// turnHeartbeatInterval is how often a running turn emits turn_heartbeat on
+// the event bus (10s per the design spec). Tests may shorten the interval on
+// the Handler before starting a turn.
+const turnHeartbeatInterval = 10 * time.Second
 
 // This file owns the lifecycle of per-session agents and the execution of a
 // single turn.
@@ -39,21 +51,26 @@ func (h *Handler) advisorFlag() bool {
 	return h.advisorEnabled
 }
 
-// buildAgentSession constructs a fresh agent session. **It must be called with
-// no handler lock held**: every step here can block for a long time —
+// buildAgentSession constructs a fresh agent session, emitting observable
+// bootstrap stage events (session_bootstrap: model → tools → mcp → ready) and
+// advancing the registry entry's bootstrap stage. **It must be called with no
+// handler lock held**: every step here can block for a long time —
 // InitBuiltinTools and LoadExternalTools touch the filesystem and can spawn
-// plugin processes, NewAgent may auto-start a local model server, and
-// mcpCache.wait() blocks until the process-wide MCP enumeration finishes
-// (unbounded, and an unreachable MCP server makes it slow).
-func (h *Handler) buildAgentSession(model string, messages []agent.Message, projectRoot string) (*agentSession, error) {
+// plugin processes, NewAgent may auto-start a local model server, and the MCP
+// wait is bounded by bootstrapMCPTimeout (an unreachable MCP server must not
+// hang the first turn). The returned stage names the failing step when err is
+// non-nil ("" on success), so callers can emit turn_error carrying it.
+func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Message, projectRoot string) (*agentSession, string, error) {
 	if model == "" {
-		return nil, fmt.Errorf("no model configured")
-	}
-	client := agent.NewClient(h.cfg, model)
-	if client == nil {
-		return nil, fmt.Errorf("failed to create LLM client")
+		return nil, "model", fmt.Errorf("no model configured")
 	}
 
+	// Stage "model": LLM client + agent shell.
+	h.publishBootstrapStage(sessionID, "model")
+	client := agent.NewClient(h.cfg, model)
+	if client == nil {
+		return nil, "model", fmt.Errorf("failed to create LLM client")
+	}
 	lspMgr := h.sharedLSPManager()
 	tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
 	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
@@ -64,13 +81,29 @@ func (h *Handler) buildAgentSession(model string, messages []agent.Message, proj
 	if projectRoot != "" {
 		ag.SetWorkDir(projectRoot)
 	}
+
+	// Stage "tools": external/plugin tools.
+	h.publishBootstrapStage(sessionID, "tools")
 	ag.LoadExternalTools(h.cfg)
-	mcpTools, mcpErrs := h.mcpCache.wait()
+
+	// Stage "mcp": MCP tools with a bounded wait. Stragglers are dropped with
+	// a warning event rather than stalling the bootstrap.
+	h.publishBootstrapStage(sessionID, "mcp")
+	timeout := h.mcpBootstrapTimeout
+	if timeout <= 0 {
+		timeout = bootstrapMCPTimeout
+	}
+	mcpTools, mcpErrs, timedOut := h.mcpCache.waitTimeout(timeout)
 	ag.AddMCPTools(mcpTools)
 	ag.AddMCPErrors(mcpErrs)
-	ag.SetAdvisorEnabled(h.advisorFlag())
+	if timedOut {
+		h.publishBootstrapWarning(sessionID, "mcp", "MCP enumeration did not finish within 30s; proceeding without stragglers")
+	}
 
-	return &agentSession{agent: ag, messages: messages, model: model}, nil
+	ag.SetAdvisorEnabled(h.advisorFlag())
+	h.wireCompactCallbacks(sessionID, ag)
+	h.publishBootstrapStage(sessionID, "ready")
+	return &agentSession{agent: ag, messages: messages, model: model}, "", nil
 }
 
 // registerAgentSession installs as under id unless a concurrent request
@@ -99,16 +132,88 @@ func (h *Handler) registerAgentSession(id string, as *agentSession, projectRoot 
 // ensureAgentSession returns the live agent session for id, building it from
 // the supplied history when it is not resident yet. Construction happens
 // without h.mu held; only the lookup and the insert take it. projectRoot is
-// the binding for new sessions ("" keeps an already-resolved root).
-func (h *Handler) ensureAgentSession(id, model string, messages []agent.Message, projectRoot string) (*agentSession, error) {
+// the binding for new sessions ("" keeps an already-resolved root). The
+// returned stage names the failing bootstrap step when err is non-nil.
+func (h *Handler) ensureAgentSession(id, model string, messages []agent.Message, projectRoot string) (*agentSession, string, error) {
 	if as := h.lookupAgentSession(id); as != nil {
-		return as, nil
+		return as, "", nil
 	}
-	as, err := h.buildAgentSession(model, messages, projectRoot)
+	as, stage, err := h.buildAgentSession(id, model, messages, projectRoot)
 	if err != nil {
-		return nil, err
+		return nil, stage, err
 	}
-	return h.registerAgentSession(id, as, projectRoot), nil
+	return h.registerAgentSession(id, as, projectRoot), "", nil
+}
+
+// publishBusEvent publishes a session-scoped event directly on the unified
+// bus — tagged with the session's owning project — and records the bus
+// sequence as the session's reconcile watermark. These events are new in
+// Part 03 (bootstrap stages, turn lifecycle) and only /api/events consumers
+// know them, so there is no legacy mirror fan-out. Never called with h.mu
+// or the session turn lock ordering inverted (it takes the registry lock
+// briefly, which no caller holds while running a turn).
+func (h *Handler) publishBusEvent(event, sessionID string, data any) {
+	project := ""
+	if e := h.sessions.Lookup(sessionID); e != nil {
+		project = e.ProjectRoot
+	}
+	h.bus.Publish(event, project, sessionID, data)
+	h.sessions.SetLastSeq(sessionID, h.bus.LastSeq())
+}
+
+// publishBootstrapStage records the stage on the registry entry and emits the
+// session_bootstrap event for it.
+func (h *Handler) publishBootstrapStage(sessionID, stage string) {
+	h.sessions.SetBootstrapStage(sessionID, stage)
+	h.publishBusEvent("session_bootstrap", sessionID, map[string]string{
+		"session_id": sessionID,
+		"stage":      stage,
+	})
+}
+
+// publishBootstrapWarning emits a non-terminal session_bootstrap event for the
+// given stage carrying a warning (used when the bounded MCP wait times out and
+// bootstrap proceeds without stragglers).
+func (h *Handler) publishBootstrapWarning(sessionID, stage, warning string) {
+	h.publishBusEvent("session_bootstrap", sessionID, map[string]any{
+		"session_id": sessionID,
+		"stage":      stage,
+		"warning":    warning,
+	})
+}
+
+// publishTurnStarted emits turn_started for a session entering a turn.
+func (h *Handler) publishTurnStarted(sessionID string) {
+	h.publishBusEvent("turn_started", sessionID, map[string]string{"session_id": sessionID})
+}
+
+// publishTurnDone emits the terminal turn_done for a successful turn. In
+// headless mode it goes through broadcastEvent so the legacy mirror and the
+// bus both get it; when an RC bridge is attached the mirror is fed by the
+// bridge, so the bus publish is direct.
+func (h *Handler) publishTurnDone(sessionID, model string) {
+	ev := DoneEvent{SessionID: sessionID, Model: model}
+	if h.RCBridge() == nil {
+		h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "turn_done", Data: ev})
+		return
+	}
+	h.publishBusEvent("turn_done", sessionID, ev)
+}
+
+// publishTurnError emits turn_error for a failed turn. stage is the failing
+// bootstrap stage when the failure was bootstrap-caused ("" for a turn error),
+// per the design spec: "Bootstrap failure emits turn_error carrying the
+// failing stage." In headless mode the legacy mirror also receives an "error"
+// frame (its existing streaming-clearing signal).
+func (h *Handler) publishTurnError(sessionID string, err error, stage string) {
+	data := map[string]any{"session_id": sessionID, "error": err.Error()}
+	if stage != "" {
+		data["stage"] = stage
+	}
+	h.publishBusEvent("turn_error", sessionID, data)
+	if h.RCBridge() == nil {
+		h.broadcastEvent(SSEEvent{SessionID: sessionID, Event: "error", Data: map[string]string{"error": err.Error()}})
+	}
 }
 
 // getOrCreateAgentSession returns the in-memory agent session for id, loading
@@ -132,7 +237,8 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	if h.cfg != nil {
 		model = h.cfg.Model
 	}
-	return h.ensureAgentSession(id, model, s.Messages, entry.ProjectRoot)
+	as, _, err := h.ensureAgentSession(id, model, s.Messages, entry.ProjectRoot)
+	return as, err
 }
 
 // findPendingSession locates the session whose transcript tail is a pending ask
@@ -189,8 +295,17 @@ type turnOptions struct {
 // takes the per-session lock (so turns on one session serialize) and **never
 // takes h.mu**, so turns on different sessions run fully in parallel.
 //
-// It is called both inline (synchronous API) and from a goroutine (the async
-// API); the returned text is the assistant reply for the synchronous callers.
+// It is called both inline (synchronous API) and from a turn-job goroutine
+// (the async API); the returned text is the assistant reply for the
+// synchronous callers.
+//
+// Turn lifecycle: the registry entry is marked turn-active, turn_started is
+// emitted, a heartbeat ticker emits turn_heartbeat while the turn runs, and
+// turn_done / turn_error terminates the state. These flow for headless and
+// bridged sessions alike (Part 06: the TUI does not consume the web bus, so
+// its own mirror rendering is unaffected); only the mirror-specific frames
+// (session_started, user_message, live deltas, messages snapshot) stay
+// headless-only, because a bridged TUI broadcasts its own equivalents.
 func (h *Handler) runTurn(sessionID string, as *agentSession, content string, opts turnOptions) (string, error) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
@@ -198,11 +313,44 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	as.messages = append(as.messages, agent.Message{Role: "user", Content: content})
 	messages := append([]agent.Message(nil), as.messages...)
 
+	// Turn lifecycle: mark active, start the heartbeat, emit turn_started.
+	// The session_started marker (set at session creation) survives a
+	// bootstrap failure: the first turn that actually runs emits the frame
+	// correlated to the creating tab.
+	emitSessionStarted := false
+	if rid, ok := h.sessions.ConsumeSessionStart(sessionID); ok {
+		opts.requestID = rid
+		emitSessionStarted = true
+	} else if opts.sessionStarted {
+		emitSessionStarted = true
+	}
+	h.sessions.setTurnActive(sessionID, true)
+	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	go h.turnHeartbeat(sessionID, heartbeatStop, heartbeatDone)
+	defer func() {
+		close(heartbeatStop)
+		<-heartbeatDone
+		h.sessions.setTurnActive(sessionID, false)
+	}()
+	h.publishTurnStarted(sessionID)
+
 	// In headless mode (no RC bridge), wire up streaming callbacks so live
 	// tokens and tool activity are broadcast to SSE mirror subscribers.
 	headless := h.RCBridge() == nil
+	if !headless && emitSessionStarted {
+		// Bridged: the TUI mirrors its own frames, but the request-id that
+		// correlates session_started back to the creating browser tab exists
+		// only here — publish it on the unified bus so the correlation is not
+		// silently dropped (broadcastEvent below already dual-publishes the
+		// headless frame to the bus).
+		h.publishBusEvent("session_started", sessionID, map[string]string{
+			"session_id": sessionID,
+			"request_id": opts.requestID,
+		})
+	}
 	if headless {
-		if opts.sessionStarted {
+		if emitSessionStarted {
 			h.broadcastEvent(SSEEvent{
 				SessionID: sessionID,
 				Event:     "session_started",
@@ -224,6 +372,7 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 	resp, err := as.agent.Step(messages)
 	if err != nil {
 		log.Printf("serve error: agent step: %v", err)
+		h.publishTurnError(sessionID, err, "")
 		if headless {
 			h.broadcastEvent(SSEEvent{
 				SessionID: sessionID,
@@ -243,41 +392,263 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		}
 	}
 
-	_ = session.Save(sessionID, "", as.messages, nil)
+	_ = h.saveSession(sessionID, "", as.messages, nil)
 
 	// Headless-only: generate a title for an untitled session after its first
 	// turn (mirrors the TUI; no-op when an RC bridge is attached).
 	h.maybeGenerateSessionTitle(sessionID, as)
 
-	// Broadcast the authoritative message snapshot and turn_done so the SSE
-	// mirror (and any connected browser) is in sync.
+	// Broadcast the authoritative message snapshot so the SSE mirror (and any
+	// connected browser) is in sync, then the terminal turn_done.
 	if headless {
 		h.broadcastEvent(SSEEvent{
 			SessionID: sessionID,
 			Event:     "messages",
 			Data:      as.messages,
 		})
-		h.broadcastEvent(SSEEvent{
-			SessionID: sessionID,
-			Event:     "turn_done",
-			Data:      DoneEvent{SessionID: sessionID, Model: as.model},
-		})
 	}
+	h.publishTurnDone(sessionID, as.model)
+
+	// Post-turn auto-compaction check (mirrors the TUI's trigger). Runs in a
+	// goroutine when over threshold; the result lands via OnCompact
+	// (applyCompactResult), which takes as.mu itself.
+	as.agent.MaybeCompactAsync(as.messages)
 
 	return reply.String(), nil
 }
 
-// startTurnAsync runs a turn on its own goroutine. The HTTP response is
-// written before the turn starts, so the browser does not hold a connection
-// open for the whole turn — with HTTP/1.1's six-connections-per-origin cap, a
-// held connection per running session is what made a second session appear
-// stuck. All output reaches the browser over the persistent SSE mirror, which
-// is where the web UI renders turns from anyway.
-func (h *Handler) startTurnAsync(sessionID string, as *agentSession, content string, opts turnOptions) {
-	go func() {
-		if _, err := h.runTurn(sessionID, as, content, opts); err != nil {
-			// runTurn already logged and broadcast the error frame.
+// turnHeartbeat emits turn_heartbeat on the bus every interval while a turn
+// runs, so a client watching the session can distinguish "still running" from
+// "stalled" (the frontend's 30s watchdog). It exits when stop is closed and
+// closes done on exit so the turn can join it.
+func (h *Handler) turnHeartbeat(sessionID string, stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	interval := h.turnHeartbeatInterval
+	if interval <= 0 {
+		interval = turnHeartbeatInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			h.publishBusEvent("turn_heartbeat", sessionID, map[string]string{"session_id": sessionID})
+		}
+	}
+}
+
+// turnJob is one queued async turn. persistAck is closed once the user
+// message is durable on disk (before the bootstrap starts), letting the HTTP
+// handler return 202 without racing the agent build; err is set when the
+// persist itself failed.
+type turnJob struct {
+	content    string
+	model      string
+	opts       turnOptions
+	persistAck chan struct{}
+	err        error
+}
+
+// sessionTurnLock returns the per-session mutex that serializes turn jobs
+// (persist → bootstrap → turn) for one session. Jobs on different sessions
+// run fully in parallel. The mutexes live for the registry entry's lifetime.
+func (h *Handler) sessionTurnLock(id string) *sync.Mutex {
+	h.turnMu.Lock()
+	defer h.turnMu.Unlock()
+	if h.turnLocks == nil {
+		h.turnLocks = make(map[string]*sync.Mutex)
+	}
+	l, ok := h.turnLocks[id]
+	if !ok {
+		l = &sync.Mutex{}
+		h.turnLocks[id] = l
+	}
+	return l
+}
+
+// dispatchTurn starts a turn on its own goroutine, serialized per session
+// (single-flight bootstrap + ordered turns). model is used only when the
+// session has no resident agent yet. The caller waits on job.persistAck to
+// return 202 once the message is durable.
+func (h *Handler) dispatchTurn(id, model, content string, opts turnOptions) (*turnJob, error) {
+	job := &turnJob{content: content, model: model, opts: opts, persistAck: make(chan struct{})}
+	go h.executeTurnJob(id, job)
+	return job, nil
+}
+
+// executeTurnJob runs one queued turn end to end, under the session's turn
+// lock so persist and turn ordering never interleave:
+//
+//  1. Persist the user message to the session's on-disk transcript, then
+//     close persistAck (the caller's 202 gate). A bootstrap failure after
+//     this point never loses the message — it stays durable and the next job
+//     retries the bootstrap.
+//  2. Bootstrap the agent if none is resident. Single-flight is guaranteed by
+//     the session lock: at most one job runs per session at a time.
+//  3. Turn every pending message in order — the current job's plus any that
+//     were persisted while an earlier bootstrap was failing. Each successful
+//     (or failed-after-start) turn shifts one pending message; messages whose
+//     bootstrap never succeeded stay pending for the retry.
+func (h *Handler) executeTurnJob(id string, job *turnJob) {
+	lock := h.sessionTurnLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	entry := h.sessions.Lookup(id)
+	if entry == nil {
+		job.err = fmt.Errorf("session not found")
+		close(job.persistAck)
+		return
+	}
+
+	// 1. Durable persist before the caller's 202.
+	if err := h.persistUserMessage(entry, job.content); err != nil {
+		log.Printf("serve error: persist user message for %s: %v", id, err)
+		job.err = err
+		close(job.persistAck)
+		return
+	}
+	h.sessions.PushPending(id, job.content)
+	close(job.persistAck)
+
+	// 2. Bootstrap once if needed. Failure surfaces as turn_error carrying the
+	// failing stage; the message stays pending (durable) for the next job.
+	as := h.lookupAgentSession(id)
+	if as == nil {
+		var err error
+		var stage string
+		as, stage, err = h.bootstrapEntryAgent(entry, job.model)
+		if err != nil {
+			h.sessions.SetBootstrapFailed(id, stage)
+			h.sessions.SetBootstrapError(id, err.Error())
+			h.publishTurnError(id, err, stage)
+			log.Printf("serve error: bootstrap agent for %s (stage %s): %v", id, stage, err)
 			return
 		}
-	}()
+	}
+
+	// 3. Turn every pending message in order.
+	for {
+		content, ok := h.sessions.PendingFront(id)
+		if !ok {
+			break
+		}
+		_, err := h.runTurn(id, as, content, job.opts)
+		// Shift regardless of outcome: on success the reply is in the
+		// transcript; on failure the user message was appended in memory (and
+		// remains durable on disk), so the next retry must not re-append it.
+		h.sessions.ShiftPending(id)
+		if err != nil {
+			return // runTurn published turn_error
+		}
+		// Only the first turn of the job carries the request's turn options
+		// (session_started correlation); catch-up turns are plain.
+		job.opts = turnOptions{}
+	}
+}
+
+// bootstrapEntryAgent builds the agent for a registry entry from the
+// session's on-disk transcript, stripping the trailing messages that are
+// still pending (persisted but not yet turned — runTurn re-appends them at
+// turn time). Emits session_bootstrap stage events via buildAgentSession.
+func (h *Handler) bootstrapEntryAgent(entry *sessionEntry, model string) (*agentSession, string, error) {
+	if model == "" && h.cfg != nil {
+		model = h.cfg.Model
+	}
+	var history []agent.Message
+	if s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID); err == nil {
+		history = s.Messages
+	}
+	if n := h.sessions.PendingCount(entry.SessionID); n > 0 && n <= len(history) {
+		history = history[:len(history)-n]
+	}
+	as, stage, err := h.buildAgentSession(entry.SessionID, model, history, entry.ProjectRoot)
+	if err != nil {
+		return nil, stage, err
+	}
+	return h.registerAgentSession(entry.SessionID, as, entry.ProjectRoot), "", nil
+}
+
+// persistUserMessage appends the user message to the session's on-disk
+// transcript (under its owning project root) before the 202 returns, so a
+// bootstrap failure after 202 never loses it. The in-memory transcript picks
+// the message up at turn time (runTurn's append); the registry's pending
+// count keeps the two in sync.
+func (h *Handler) persistUserMessage(entry *sessionEntry, content string) error {
+	var msgs []agent.Message
+	if s, err := session.LoadForDir(entry.ProjectRoot, entry.SessionID); err == nil {
+		msgs = s.Messages
+	}
+	msgs = append(msgs, agent.Message{Role: "user", Content: content})
+	return session.SaveForDir(entry.ProjectRoot, entry.SessionID, "", msgs, nil)
+}
+
+// wireCompactCallbacks attaches OnCompact to a server-built agent so async
+// auto-compaction results land back in the session transcript. The TUI wires
+// its own callbacks (tui.wireCompactCallbacks); without this server-side
+// equivalent, headless (web/desktop) compaction results were silently dropped
+// — OnCompact was nil, so MaybeCompactAsync had no effect even if called.
+func (h *Handler) wireCompactCallbacks(sessionID string, ag *agent.Agent) {
+	ag.OnCompact = func(r agent.CompactResult) {
+		h.applyCompactResult(sessionID, r)
+	}
+}
+
+// applyCompactResult splices an async compaction summary into the session
+// transcript, persists it, and broadcasts the new snapshot so connected
+// browsers drop their stale (pre-compaction) message lists. Runs on the
+// compaction goroutine, so it takes the per-session lock itself.
+//
+// The result's splice indices refer to the snapshot taken when compaction
+// started; turns only ever append, so they stay valid as long as the
+// transcript has not shrunk since (a racing manual /compact can shrink it —
+// in that case the stale result is dropped).
+func (h *Handler) applyCompactResult(sessionID string, r agent.CompactResult) {
+	if !r.OK {
+		if r.Err != nil {
+			log.Printf("serve: auto-compaction failed for session %s: %v", sessionID, r.Err)
+		}
+		return
+	}
+	as := h.lookupAgentSession(sessionID)
+	if as == nil {
+		log.Printf("serve: auto-compaction result for unknown session %s dropped", sessionID)
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.messages) < r.OriginalLen || r.ReplaceFrom < 0 || r.ReplaceTo > len(as.messages) || r.ReplaceFrom > r.ReplaceTo {
+		log.Printf("serve: auto-compaction result for session %s dropped: transcript changed (len=%d, splice=[%d:%d), snapshot=%d)",
+			sessionID, len(as.messages), r.ReplaceFrom, r.ReplaceTo, r.OriginalLen)
+		return
+	}
+	compacted := make([]agent.Message, 0, r.ReplaceFrom+1+len(as.messages)-r.ReplaceTo)
+	compacted = append(compacted, as.messages[:r.ReplaceFrom]...)
+	compacted = append(compacted, r.Summary)
+	compacted = append(compacted, as.messages[r.ReplaceTo:]...)
+	as.messages = compacted
+
+	if err := h.saveSession(sessionID, "", as.messages, nil); err != nil {
+		log.Printf("serve: persisting compacted transcript for session %s: %v", sessionID, err)
+	}
+	if h.RCBridge() == nil {
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessionID,
+			Event:     "messages",
+			Data:      as.messages,
+		})
+	}
+}
+
+// saveSession persists a transcript to the session's owning project's storage
+// dir — multi-project sessions must not land in the server's own project (the
+// process workdir). Falls back to the process default only when the registry
+// entry is unknown.
+func (h *Handler) saveSession(sessionID, title string, msgs []agent.Message, metadata map[string]any) error {
+	if e := h.sessions.Lookup(sessionID); e != nil && e.ProjectRoot != "" {
+		return session.SaveForDir(e.ProjectRoot, sessionID, title, msgs, metadata)
+	}
+	return session.Save(sessionID, title, msgs, metadata)
 }
