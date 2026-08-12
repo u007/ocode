@@ -67,6 +67,15 @@ export default function SessionTabSync() {
             newId: eventSessionId,
             newTitle: "New session",
           });
+          // Keep the routing ref in sync immediately. The server broadcasts
+          // `session_started` and the `user_message` echo back-to-back; the
+          // rekey above is an async React state update, so the ref still holds
+          // only the temp `new-*` id when the echo arrives. Without this, the
+          // very first message of a session is dropped at the routing gate
+          // below and never shows in the transcript until the turn-end
+          // `messages` snapshot (and is lost entirely if that snapshot races).
+          openSessionIdsRef.current.delete(started.request_id);
+          openSessionIdsRef.current.add(eventSessionId);
         }
         return;
       }

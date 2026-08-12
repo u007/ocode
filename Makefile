@@ -48,7 +48,7 @@ bundle-desktop-assets:
 desktop: web-build bundle-desktop-assets
 	$(DESKTOP_BUILD)
 
-install-desktop: web-build desktop
+install-desktop: web-build desktop desktop-app
 	$(DESKTOP_INSTALL)
 
 ## desktop-app: build and bundle ocode.app (macOS only)

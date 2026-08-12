@@ -41,6 +41,7 @@ import SessionPage from "./pages/SessionPage";
 import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 import { isNewSessionTabEmpty } from "./lib/tabDrafts";
+import { notifyWailsRuntimeReady } from "./lib/wails";
 
 type ModelDialogTab = "main" | "small" | "advisor";
 
@@ -201,18 +202,53 @@ function HomeApp() {
       .catch(console.error);
   }, [dispatch]);
 
-  // Desktop-only: the native "Settings…" menu item emits this event to
-  // switch the shared webview to the Settings tab. No-op in the browser
-  // (the Wails-injected global is undefined there). Note: with the current
-  // Wails v3 runtime the SPA is served from the ocode HTTP server and never
-  // loads /wails/runtime.js, so `wails.Events` is absent and this listener
-  // never fires — the Settings tab remains reachable via TopTabs (see
-  // cmd/ocode-desktop/main.go buildAppMenu).
+  // Desktop-only: complete the Wails "runtime ready" handshake by hand.
+  // Every navigation gets a minimal native bridge unconditionally injected
+  // as window._wails.invoke (see wails/v3 internal/runtime/runtime_*.go) —
+  // that's why JS→Go calls already work. But WebviewWindow.ExecJS (used
+  // below and by the native "Settings…" menu handler in
+  // cmd/ocode-desktop/main.go) only runs immediately once the Go side's
+  // internal `runtimeLoaded` flag is set; until then every ExecJS call is
+  // queued forever. That flag is only set when the page posts the literal
+  // message "wails:runtime:ready" — normally done by Wails' own
+  // @wailsio/runtime JS module, reachable only via /wails/runtime.js on
+  // Wails' own asset server. This SPA is served by ocode's own HTTP server
+  // at an external origin and never loads that module, so nothing ever
+  // sends that message and runtimeLoaded stays false for the app's entire
+  // lifetime. Sending it ourselves via the already-injected invoke bridge
+  // completes the same handshake without pulling in the full runtime.
   useEffect(() => {
-    const wailsEvents = (window as unknown as { wails?: { Events?: { On?: (name: string, cb: () => void) => () => void } } }).wails?.Events;
-    if (!wailsEvents?.On) return;
-    const unsubscribe = wailsEvents.On("ocode:open-settings", () => setActiveView("settings"));
-    return () => unsubscribe?.();
+    let timer: number | undefined;
+    let attempts = 0;
+    const maxAttempts = 200; // Five seconds; enough for desktop navigation, bounded in browsers.
+    const attemptHandshake = () => {
+      if (notifyWailsRuntimeReady()) {
+        return;
+      }
+      attempts++;
+      if (attempts < maxAttempts) {
+        timer = window.setTimeout(attemptHandshake, 25);
+      }
+    };
+    attemptHandshake();
+    return () => {
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, []);
+
+  // The native "Settings…" menu item's OnClick handler runs window.ExecJS to
+  // dispatch this plain DOM CustomEvent directly into the page (see
+  // cmd/ocode-desktop/main.go buildAppMenu). This does not depend on any
+  // Wails-injected runtime global beyond the handshake above —
+  // window.EmitEvent/window.wails.Events remain structurally unavailable
+  // since this page never loads the full runtime module. No-op in the
+  // browser (the event is simply never dispatched there).
+  useEffect(() => {
+    const handler = () => setActiveView("settings");
+    window.addEventListener("ocode:open-settings", handler);
+    return () => window.removeEventListener("ocode:open-settings", handler);
   }, []);
 
   const [filePickerOpen, setFilePickerOpen] = useState(false);

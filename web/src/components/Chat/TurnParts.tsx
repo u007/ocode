@@ -4,6 +4,21 @@ import HighlightedCode from "./HighlightedCode";
 
 const TOOL_OUTPUT_PREVIEW_LINES = 20;
 
+// Mirrors internal/tui/tool_render.go's stripTruncationFooter: the Go layer
+// appends this marker (see internal/agent/truncate.go TruncationMarkerPrefix)
+// to the tool result sent to the LLM so it knows how to fetch the rest. The
+// footer must stay in the LLM-facing content but is noise for the human
+// reading the chat, so strip it before rendering.
+const TRUNCATION_MARKER_PREFIX = "[output truncated:";
+
+function stripTruncationFooter(content: string): string {
+  const marker = "\n\n" + TRUNCATION_MARKER_PREFIX;
+  const idx = content.indexOf(marker);
+  if (idx >= 0) return content.slice(0, idx);
+  if (content.startsWith(TRUNCATION_MARKER_PREFIX)) return "";
+  return content;
+}
+
 // Language to highlight a tool's raw result with. Keyed on what the Go tools in
 // internal/tool actually return, not on the file they touched:
 // the write/edit family returns FormatDiff output, bash returns raw combined
@@ -65,16 +80,18 @@ export function ToolBlock({
   output?: string;
   highlight?: string;
 }) {
-  const lineCount = output ? output.split("\n").length : 0;
+  const displayOutput =
+    output !== undefined ? stripTruncationFooter(output) : output;
+  const lineCount = displayOutput ? displayOutput.split("\n").length : 0;
   const [open, setOpen] = useState(lineCount <= 50);
   const [expanded, setExpanded] = useState(false);
   const pending = output === undefined;
-  const outputLines = output ? output.split("\n") : [];
+  const outputLines = displayOutput ? displayOutput.split("\n") : [];
   const collapsible = outputLines.length > TOOL_OUTPUT_PREVIEW_LINES;
   const visibleOutput =
     collapsible && !expanded
       ? outputLines.slice(-TOOL_OUTPUT_PREVIEW_LINES).join("\n")
-      : output;
+      : displayOutput;
   const hiddenLineCount = outputLines.length - TOOL_OUTPUT_PREVIEW_LINES;
   return (
     <div className="mb-3 flex justify-start">

@@ -219,12 +219,16 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow) *appl
 		appMenu.Add("Settings…").
 			SetAccelerator("CmdOrCtrl+,").
 			OnClick(func(*application.Context) {
-				// The webview loads the ocode SPA from an external URL and never
-				// loads /wails/runtime.js, so window._wails.dispatchWailsEvent is
-				// absent and this emit is a no-op today (ExecJS queues forever).
-				// Kept so the native menu item exists and the wiring is correct
-				// for a future Wails version/runtime that can reach the page.
-				window.EmitEvent("ocode:open-settings", nil)
+				// window.EmitEvent depends on Wails' own wails:// scheme handler
+				// to inject window._wails into the page; this webview loads a
+				// plain http://127.0.0.1:PORT URL served by ocode's own
+				// embed.FS-backed HTTP server, which never goes through that
+				// handler, so window._wails is never injected there — the event
+				// is a structural no-op, not a timing issue. ExecJS instead runs
+				// arbitrary JS directly in the loaded page regardless of how it
+				// was loaded, so we dispatch a plain DOM CustomEvent that the
+				// React app listens for with a normal addEventListener.
+				window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:open-settings"))`)
 			})
 		appMenu.AddSeparator()
 		appMenu.AddRole(application.ServicesMenu)
@@ -244,9 +248,9 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow) *appl
 		fileMenu.Add("Settings…").
 			SetAccelerator("CmdOrCtrl+,").
 			OnClick(func(*application.Context) {
-				// See the darwin branch comment: no-op until the Wails runtime
-				// reaches the page, but keeps the menu item and wiring correct.
-				window.EmitEvent("ocode:open-settings", nil)
+				// See the darwin branch comment: window.EmitEvent is a structural
+				// no-op for a plain http:// webview, so use ExecJS directly.
+				window.ExecJS(`window.dispatchEvent(new CustomEvent("ocode:open-settings"))`)
 			})
 		fileMenu.AddSeparator()
 		fileMenu.Add("Quit ocode").
