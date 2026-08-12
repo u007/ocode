@@ -60,8 +60,14 @@ lastHeartbeat}`.
 
 - **Resolution:** storage stays on-disk per project slug (format unchanged).
   An unknown session ID is resolved by checking registered projects' storage
-  dirs (via `GetStorageDirForPath`), then cached. `session.Load` gains a
+  dirs (via `GetStorageDirForPath`), then cached. The search space is the
+  server-side persisted project store (`h.projects`, `internal/projects`) —
+  already the source for `HandleListProjects`. `session.Load` gains a
   for-dir variant; `effectiveWorkDir()`-based resolution is removed.
+- **Eviction:** built agent sessions are released after an idle timeout
+  (default 30 min, no active turn); the registry entry and on-disk session
+  remain, and the agent rebuilds on the next message. Prevents unbounded
+  agent/plugin processes as projects accumulate.
 - **Creation:** `POST /api/chat` carries `project_path`; the manager binds the
   session to that root and the agent's workdir is that root.
 - **All session-scoped handlers** (`get`, `context`, `message`, `chat`)
@@ -81,19 +87,27 @@ lastHeartbeat}`.
   (`/api/chat/messages`), the logs SSE, and per-session agent-runs SSE.
 - Git status and spending become server-pushed events (server watches/computes,
   emits on change), replacing client 10s/60s polling.
-- Per-session `seq` supports reconnect reconciliation.
+- `seq` is a single global monotonic counter per server process, stamped on
+  every envelope. It exists to detect gaps, not to replay: on reconnect the
+  client reconciles state and refetches transcripts (below) instead of
+  seq-based event replay. Git/spending events are emitted only for projects
+  with at least one connected client showing them (subscriber-aware), not for
+  every registered project.
 
 ### 3. Async bootstrap + turn state machine
 
-- `POST /api/chat` validates, registers the session, returns **202
-  immediately**. Agent build runs in a goroutine emitting `session_bootstrap`
-  stage events (`tools`, `mcp`, `model`).
+- `POST /api/chat` validates, **persists the user message to the session**,
+  registers the session, and returns **202 immediately** — a bootstrap failure
+  after 202 never loses the message; retry re-uses it. Agent build runs in a
+  goroutine emitting `session_bootstrap` stage events (`tools`, `mcp`,
+  `model`).
 - `mcpCache.wait()` gets a timeout (~30s): proceed without stragglers, emit a
   warning event.
 - Turn lifecycle events: `turn_started` → `turn_heartbeat` (~10s while
   running) → `turn_done` | `turn_error`.
 - Reconcile endpoint: `GET /api/sessions/:id/state` →
-  `{bootstrap_stage, turn_active, last_seq}`.
+  `{bootstrap_stage, turn_active, last_seq}`. Reconcile = state fetch +
+  transcript refetch, never event replay.
 
 ### 4. Frontend transport
 
@@ -103,15 +117,18 @@ lastHeartbeat}`.
   `LogPanel` EventSource, git polling (`CoworkSidebar.tsx:121-138`), spending
   polling (`App.tsx:76`). Terminal WebSocket stays. Total: 2 long-lived
   connections.
-- On reconnect: reconcile every open session via
-  `GET /api/sessions/:id/state`.
+- On reconnect: for every open session, reconcile via
+  `GET /api/sessions/:id/state` **and refetch its messages** — events missed
+  during the disconnect are recovered by refetch, not replay.
 - Unknown-session events: loud `console.warn`, never a silent drop.
 
 ### 5. Status + streaming contract (frontend)
 
 - **Status:** on tab activation (mount, session switch, project switch) fetch
   new `GET /api/sessions/:id/status` (includes `context_*`); events
-  patch/invalidate. Removed: the mount-once seed (`App.tsx:186-203`), the
+  patch/invalidate. Placeholder tabs (`new-*` ids, no server session yet) skip
+  the fetch and render project-level defaults; the slice is first populated by
+  the `session_bootstrap`/`session_started` events after the first message. Removed: the mount-once seed (`App.tsx:186-203`), the
   sessionless status broadcast path, and the dual-source `fallbackContext` —
   one `sessionStatus` slice per session.
 - **Streaming:** `isStreaming` derives from turn state, not a promise. Set on
@@ -146,6 +163,9 @@ lastHeartbeat}`.
 4. Frontend `eventBus` transport swap; delete old streams/polling.
 5. Frontend status-on-activation + streaming watchdog; delete legacy paths.
 6. RC-bridge registration as first-class session; delete forwarding/re-stamping.
+   (Until this phase, RC frames keep the legacy re-stamping path — the
+   at-source tagging in section 2 applies to headless emitters from phase 2 and
+   to RC frames only from phase 6.)
 
 Each phase independently shippable; old endpoints removed only after phase 4/5
 land.
