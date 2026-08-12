@@ -29,6 +29,10 @@ type Handler struct {
 	cfg       *config.Config
 	rc        *RCBridge          // set when proxying to a TUI session
 	scheduler *scheduler.Service // when set, the `cron` tool is wired into agent sessions
+	// sessions is the single authority for session ID → project root + agent
+	// lifecycle. Every session-scoped handler resolves through it, so sessions
+	// from any registered project load and run (no more cross-project 404s).
+	sessions *SessionManager
 	// mcpCache holds the process-wide MCP tool enumeration. MCP server config
 	// (h.cfg.MCP) is identical for every session, so connecting to each
 	// server is done once per process instead of once per session - see
@@ -175,6 +179,31 @@ func NewHandler() *Handler {
 		mcpCache:       newMCPCache(),
 		titleGen:       newTitleGenState(),
 	}
+
+	// The session registry is the single authority for session → project root
+	// + agent lifecycle. Its resolution search space is the handler's own
+	// workdir first (backward compat with single-project servers) plus every
+	// saved project root; the onEvict hook keeps the legacy h.agents mirror in
+	// sync when idle agents are released.
+	h.sessions = NewSessionManager(defaultSessionIdleTimeout, func() []string {
+		roots := make([]string, 0, 4)
+		if h.workDir != "" {
+			roots = append(roots, h.workDir)
+		}
+		if h.projects != nil {
+			for _, p := range h.projects.List() {
+				if p.Path != "" {
+					roots = append(roots, p.Path)
+				}
+			}
+		}
+		return roots
+	}, func(sessionID string) {
+		h.mu.Lock()
+		delete(h.agents, sessionID)
+		h.mu.Unlock()
+	})
+
 	h.mcpCache.warm(cfg)
 
 	// Wire the agent's debug log sink so the Log tab (backed by debuglog.Log,
@@ -342,6 +371,29 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 	createdSession := false
 	sid := req.SessionID
+	projectRoot := req.ProjectPath
+	if projectRoot == "" {
+		projectRoot = h.workDir
+	}
+
+	// Bind the session to its project root in the registry (explicit
+	// project_path wins; a resolved existing session keeps its root) so the
+	// agent is built against the right workdir and cross-project 404s become
+	// impossible for sessions that exist.
+	var entry *sessionEntry
+	if sid != "" {
+		if req.ProjectPath != "" {
+			h.sessions.Register(sid, req.ProjectPath)
+		}
+		var err error
+		entry, err = h.sessions.Resolve(sid)
+		if err != nil {
+			// Session exists in no registered project. Today this call site is
+			// lenient (a missing session silently starts with empty history);
+			// preserve that by binding to the default root and continuing.
+			entry = h.sessions.Register(sid, projectRoot)
+		}
+	}
 	as := h.lookupAgentSession(sid)
 
 	if as == nil {
@@ -354,11 +406,12 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 		if sid == "" {
 			sid = session.NewSessionID()
 			createdSession = true
+			entry = h.sessions.Register(sid, projectRoot)
 		}
 
 		var messages []agent.Message
-		if req.SessionID != "" {
-			s, err := session.Load(req.SessionID)
+		if req.SessionID != "" && entry != nil {
+			s, err := session.LoadForDir(entry.ProjectRoot, req.SessionID)
 			if err == nil {
 				messages = s.Messages
 			}
@@ -366,7 +419,7 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 
 		// Built with no handler lock held — see agent_session.go.
 		var err error
-		as, err = h.ensureAgentSession(sid, model, messages)
+		as, err = h.ensureAgentSession(sid, model, messages, entry.ProjectRoot)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -486,7 +539,15 @@ func (h *Handler) HandleGetSession(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	s, err := session.Load(id)
+	// Resolve the session's owning project through the registry so sessions
+	// from any registered project load, not just the server's own workdir.
+	entry, err := h.sessions.Resolve(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	s, err := session.LoadForDir(entry.ProjectRoot, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
@@ -555,7 +616,12 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 
 	as := h.lookupAgentSession(id)
 	if as == nil {
-		s, err := session.Load(id)
+		entry, err := h.sessions.Resolve(id)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		s, err := session.LoadForDir(entry.ProjectRoot, id)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "session not found")
 			return
@@ -571,7 +637,7 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 
 		// Built with no handler lock held — see agent_session.go.
-		as, err = h.ensureAgentSession(id, model, s.Messages)
+		as, err = h.ensureAgentSession(id, model, s.Messages, entry.ProjectRoot)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -914,7 +980,12 @@ func (h *Handler) HandleSetSessionTitle(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *Handler) HandleSessionContext(w http.ResponseWriter, r *http.Request, id string) {
-	s, err := session.Load(id)
+	entry, err := h.sessions.Resolve(id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	s, err := session.LoadForDir(entry.ProjectRoot, id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "session not found")
 		return

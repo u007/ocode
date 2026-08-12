@@ -153,13 +153,15 @@ func (h *Handler) HandleChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var messages []agent.Message
-		if s, err := session.Load(sessionID); err == nil {
-			messages = s.Messages
+		if entry, err := h.sessions.Resolve(sessionID); err == nil {
+			if s, err := session.LoadForDir(entry.ProjectRoot, sessionID); err == nil {
+				messages = s.Messages
+			}
 		}
 
 		// Built with no handler lock held — see agent_session.go.
 		var err error
-		as, err = h.ensureAgentSession(sessionID, model, messages)
+		as, err = h.ensureAgentSession(sessionID, model, messages, "")
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -297,9 +299,10 @@ func (h *Handler) HandleSessionMessages(w http.ResponseWriter, r *http.Request) 
 	// Load current messages from disk so the browser gets history immediately.
 	var initMsgs []agent.Message
 	if sessionID != "" {
-		s, err := session.Load(sessionID)
-		if err == nil {
-			initMsgs = s.Messages
+		if entry, err := h.sessions.Resolve(sessionID); err == nil {
+			if s, err := session.LoadForDir(entry.ProjectRoot, sessionID); err == nil {
+				initMsgs = s.Messages
+			}
 		}
 	}
 	forward(SSEEvent{SessionID: sessionID, Event: "messages", Data: initMsgs})

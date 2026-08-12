@@ -485,7 +485,32 @@ func (s *Server) Serve(ln net.Listener) error {
 	go agent.PreloadOpenRouterModels()
 	go agent.PreloadNovitaModels()
 	log.Printf("serving on %s", s.addr)
+	// Periodically release idle built agents so agent/plugin processes do not
+	// accumulate as projects accumulate. The registry entry and on-disk
+	// session survive; the agent rebuilds on the next message.
+	stop := make(chan struct{})
+	defer close(stop)
+	go s.handler.evictIdleLoop(stop)
 	return http.Serve(ln, s.mux)
+}
+
+// evictIdleLoop runs the session-registry idle-agent eviction pass on a
+// fixed interval until stop is closed (Serve return). Eviction never touches
+// sessions with an active turn.
+func (h *Handler) evictIdleLoop(stop <-chan struct{}) {
+	if h.sessions == nil {
+		return
+	}
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			h.sessions.EvictIdle()
+		}
+	}
 }
 
 // RegisterExternalSession registers an existing TUI session with the web server
@@ -984,6 +1009,9 @@ type ChatRequest struct {
 	SessionID string `json:"sessionId,omitempty"`
 	Model     string `json:"model,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
+	// ProjectPath binds the session to a project root (multi-project). Empty
+	// falls back to the server's own workdir.
+	ProjectPath string `json:"project_path,omitempty"`
 	// Async, when set, makes the endpoint acknowledge with 202 as soon as the
 	// turn is dispatched instead of holding the HTTP connection open until the
 	// agent finishes. The web UI sets it: a browser allows only six concurrent

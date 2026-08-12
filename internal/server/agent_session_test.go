@@ -247,10 +247,10 @@ func TestRegisterAgentSessionDedupes(t *testing.T) {
 	first := &agentSession{agent: agent.NewAgent(instantClient{}, nil, nil, nil), model: "fake-model"}
 	second := &agentSession{agent: agent.NewAgent(instantClient{}, nil, nil, nil), model: "fake-model"}
 
-	if got := h.registerAgentSession("sess-dup", first); got != first {
+	if got := h.registerAgentSession("sess-dup", first, ""); got != first {
 		t.Fatal("first registration should win")
 	}
-	if got := h.registerAgentSession("sess-dup", second); got != first {
+	if got := h.registerAgentSession("sess-dup", second, ""); got != first {
 		t.Fatal("second registration should return the already-registered session")
 	}
 	if got := h.lookupAgentSession("sess-dup"); got != first {

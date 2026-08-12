@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/session"
@@ -44,7 +45,7 @@ func (h *Handler) advisorFlag() bool {
 // plugin processes, NewAgent may auto-start a local model server, and
 // mcpCache.wait() blocks until the process-wide MCP enumeration finishes
 // (unbounded, and an unreachable MCP server makes it slow).
-func (h *Handler) buildAgentSession(model string, messages []agent.Message) (*agentSession, error) {
+func (h *Handler) buildAgentSession(model string, messages []agent.Message, projectRoot string) (*agentSession, error) {
 	if model == "" {
 		return nil, fmt.Errorf("no model configured")
 	}
@@ -56,6 +57,13 @@ func (h *Handler) buildAgentSession(model string, messages []agent.Message) (*ag
 	lspMgr := h.sharedLSPManager()
 	tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
 	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
+	// The agent's workdir comes from the registry entry's project root, not
+	// the process cwd — multi-project sessions run against their own repo
+	// (environment prompt, file-edit snapshots, permissions, discovery all
+	// follow SetWorkDir).
+	if projectRoot != "" {
+		ag.SetWorkDir(projectRoot)
+	}
 	ag.LoadExternalTools(h.cfg)
 	mcpTools, mcpErrs := h.mcpCache.wait()
 	ag.AddMCPTools(mcpTools)
@@ -69,8 +77,10 @@ func (h *Handler) buildAgentSession(model string, messages []agent.Message) (*ag
 // already registered one, and returns the session that won. Because
 // construction now happens outside h.mu, two first messages for the same
 // session can race; the loser is shut down so its background workers don't
-// linger.
-func (h *Handler) registerAgentSession(id string, as *agentSession) *agentSession {
+// linger. The session registry entry is bound to projectRoot (or keeps an
+// already-resolved root when projectRoot is empty).
+func (h *Handler) registerAgentSession(id string, as *agentSession, projectRoot string) *agentSession {
+	entry := h.sessions.Register(id, projectRoot)
 	h.mu.Lock()
 	if existing, ok := h.agents[id]; ok {
 		h.mu.Unlock()
@@ -81,31 +91,40 @@ func (h *Handler) registerAgentSession(id string, as *agentSession) *agentSessio
 	}
 	h.agents[id] = as
 	h.mu.Unlock()
+	h.sessions.setAgent(id, as)
+	entry.lastActivity = time.Now()
 	return as
 }
 
 // ensureAgentSession returns the live agent session for id, building it from
 // the supplied history when it is not resident yet. Construction happens
-// without h.mu held; only the lookup and the insert take it.
-func (h *Handler) ensureAgentSession(id, model string, messages []agent.Message) (*agentSession, error) {
+// without h.mu held; only the lookup and the insert take it. projectRoot is
+// the binding for new sessions ("" keeps an already-resolved root).
+func (h *Handler) ensureAgentSession(id, model string, messages []agent.Message, projectRoot string) (*agentSession, error) {
 	if as := h.lookupAgentSession(id); as != nil {
 		return as, nil
 	}
-	as, err := h.buildAgentSession(model, messages)
+	as, err := h.buildAgentSession(model, messages, projectRoot)
 	if err != nil {
 		return nil, err
 	}
-	return h.registerAgentSession(id, as), nil
+	return h.registerAgentSession(id, as, projectRoot), nil
 }
 
 // getOrCreateAgentSession returns the in-memory agent session for id, loading
-// its transcript from disk when it is not resident. Callers must NOT hold
+// its transcript from disk when it is not resident. It resolves the session's
+// owning project through the registry (so sessions from any registered
+// project load, not just the server's own workdir). Callers must NOT hold
 // h.mu.
 func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	if as := h.lookupAgentSession(id); as != nil {
 		return as, nil
 	}
-	s, err := session.Load(id)
+	entry, err := h.sessions.Resolve(id)
+	if err != nil {
+		return nil, fmt.Errorf("session not found: %w", err)
+	}
+	s, err := session.LoadForDir(entry.ProjectRoot, id)
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %w", err)
 	}
@@ -113,7 +132,7 @@ func (h *Handler) getOrCreateAgentSession(id string) (*agentSession, error) {
 	if h.cfg != nil {
 		model = h.cfg.Model
 	}
-	return h.ensureAgentSession(id, model, s.Messages)
+	return h.ensureAgentSession(id, model, s.Messages, entry.ProjectRoot)
 }
 
 // findPendingSession locates the session whose transcript tail is a pending ask
