@@ -65,7 +65,7 @@ func BuildLearnContext(inventory LearnInventory, focus string) string {
 	b.WriteString("\nProject-root skills\n")
 	b.WriteString(strings.Repeat("-", 19) + "\n")
 	if len(inventory.ProjectSkills) == 0 {
-		b.WriteString("- (none found under skills/, .opencode/skills/, or .claude/skill)\n")
+		b.WriteString("- (none found under skills/, .opencode/skills/, or .claude/skills)\n")
 	} else {
 		for _, s := range inventory.ProjectSkills {
 			fmt.Fprintf(&b, "- %s\n", s.Name)

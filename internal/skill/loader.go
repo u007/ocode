@@ -265,7 +265,7 @@ func modelMatchesTuned(activeModel, tunedFor string) bool {
 func ProjectLocalSkillDirs(root string) []string {
 	return []string{
 		filepath.Join(root, ".opencode", "skills"),
-		filepath.Join(root, ".claude", "skill"),
+		filepath.Join(root, ".claude", "skills"),
 		filepath.Join(root, "skills"),
 	}
 }

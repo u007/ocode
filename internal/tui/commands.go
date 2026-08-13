@@ -63,7 +63,7 @@ func refreshCustomCommands(cfg *config.Config, workDir, activeModel string) {
 	}
 
 	// Register skills as slash commands. Skills loaded later in the search path
-	// (e.g. .claude/skill) are already deduplicated by LoadSkillsForRoot
+	// (e.g. .claude/skills) are already deduplicated by LoadSkillsForRoot
 	// (first-seen wins). Kaizen skills gate on activeModel. We only register a
 	// skill if no built-in command or custom command already claims that name.
 	for _, s := range skill.LoadSkillsForModel(workDir, activeModel) {
