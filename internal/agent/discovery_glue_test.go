@@ -192,6 +192,12 @@ func TestDiscoveryStatusAndReset(t *testing.T) {
 	if !st.Active || st.Model != "openai/text-embedding-3-small" || st.MCPTotal != 2 {
 		t.Fatalf("bad status: %+v", st)
 	}
+	// SkillTotal must equal the admitted corpus (what the names-index actually
+	// contains) — Kaizen skills gated out for the active model must not inflate
+	// the denominator, or /discover status's attached/total misleads.
+	if st.SkillTotal != len(st.AllSkills) {
+		t.Fatalf("SkillTotal = %d, want %d (admitted corpus size); AllSkills=%v", st.SkillTotal, len(st.AllSkills), st.AllSkills)
+	}
 	a.ResetDiscovery()
 	if a.disco != nil {
 		t.Fatal("ResetDiscovery must clear state so it re-inits next turn")

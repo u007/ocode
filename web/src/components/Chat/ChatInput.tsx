@@ -1,6 +1,7 @@
 import { useState, type KeyboardEvent, useRef, useEffect } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
+import { getQueue, pushQueued, shiftQueued, popLastQueued } from "../../lib/tabQueue";
 import { Button } from "@/components/ui/button";
 import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
@@ -38,6 +39,7 @@ export default function ChatInput({
   // agent would otherwise answer msg2 first, then re-engage with the shell
   // output of msg1, producing confusing turn ordering.
   const [shellInFlight, setShellInFlight] = useState(false);
+  const [queueCount, setQueueCount] = useState(0);
   const { sendMessage, executeShell, stop, isStreaming } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
@@ -53,7 +55,59 @@ export default function ChatInput({
   // whether the active tab is "completely empty").
   useEffect(() => {
     setInput(getDraft(sessionTabId));
+    setQueueCount(getQueue(sessionTabId).length);
   }, [sessionTabId]);
+
+  // Dispatch a `/command` or `!shell` command, replaying the same logic used
+  // for an immediate send. Returns true if it started a new agent turn
+  // (i.e. draining must stop until that turn ends).
+  const dispatchCommand = async (text: string): Promise<boolean> => {
+    if (text.startsWith("/") && onSlashCommand) {
+      const handled = await onSlashCommand(text);
+      if (handled) return false;
+    }
+    if (text.startsWith("!")) {
+      const command = text.slice(1).trim();
+      if (command) {
+        setShellInFlight(true);
+        try {
+          const result = await executeShell(command);
+          const outputMessage = result.exitCode === 0
+            ? `Shell command executed successfully:\n\`\`\`\n${result.output}\n\`\`\``
+            : `Shell command failed (exit code ${result.exitCode}):\n\`\`\`\n${result.error || result.output}\n\`\`\``;
+          sendMessage(outputMessage);
+          return true;
+        } finally {
+          setShellInFlight(false);
+        }
+      }
+      return false;
+    }
+    sendMessage(text);
+    return true;
+  };
+
+  // Auto-drain the queue once the turn (streaming or shell exec) frees up,
+  // in FIFO order — mirrors the TUI's drainQueuedItems. Stops as soon as an
+  // item starts a new turn; the next busy->free transition continues it.
+  const busy = isStreaming || shellInFlight;
+  const prevBusyRef = useRef(busy);
+  useEffect(() => {
+    if (prevBusyRef.current && !busy) {
+      (async () => {
+        for (;;) {
+          const item = shiftQueued(sessionTabId);
+          setQueueCount(getQueue(sessionTabId).length);
+          if (!item) break;
+          const startedTurn =
+            item.kind === "command" ? await dispatchCommand(item.text) : (sendMessage(item.text), true);
+          if (startedTurn) break;
+        }
+      })();
+    }
+    prevBusyRef.current = busy;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, sessionTabId]);
 
   const updateDraft = (value: string) => {
     setInput(value);
@@ -96,41 +150,27 @@ export default function ChatInput({
 
   const handleSend = async () => {
     const trimmed = input.trim();
-    if (!trimmed || isStreaming || shellInFlight) return;
+    if (!trimmed) return;
     setInput("");
     clearDraft(sessionTabId);
     setShowSlashMenu(false);
 
-    // Check if this is a slash command (handler may be async)
-    if (trimmed.startsWith("/") && onSlashCommand) {
-      const handled = await onSlashCommand(trimmed);
-      if (handled) return;
-    }
-
-    // Check if this is a shell command (! prefix). The shell call is async
-    // and can take many seconds; we hold shellInFlight for the duration so
-    // the user can't fire a second message in the gap. sendMessage() below
-    // enqueues the result onto the chat stream, which the agent will pick up
-    // after the current turn ends (handled by isStreaming in the store).
-    if (trimmed.startsWith("!")) {
-      const command = trimmed.slice(1).trim();
-      if (command) {
-        setShellInFlight(true);
-        try {
-          const result = await executeShell(command);
-          // Send the result as a message to the agent for display
-          const outputMessage = result.exitCode === 0
-            ? `Shell command executed successfully:\n\`\`\`\n${result.output}\n\`\`\``
-            : `Shell command failed (exit code ${result.exitCode}):\n\`\`\`\n${result.error || result.output}\n\`\`\``;
-          sendMessage(outputMessage);
-        } finally {
-          setShellInFlight(false);
-        }
+    // While a turn is busy (streaming or a shell command in flight), queue
+    // instead of blocking — mirrors the TUI's unified queuedItems, drained by
+    // the effect above once the turn frees up.
+    if (trimmed.startsWith("/") || trimmed.startsWith("!")) {
+      if (busy) {
+        pushQueued(sessionTabId, { kind: "command", text: trimmed });
+        setQueueCount(getQueue(sessionTabId).length);
         return;
       }
+      await dispatchCommand(trimmed);
+      return;
     }
 
-    // Build refs: attached files + active editor context
+    // Build refs: attached files + active editor context. Resolved now (not
+    // at drain time) so queueing a message doesn't leave stale attachment
+    // chips hanging around in the composer.
     const refs = attachedFiles.map((n) => `@.ocode/uploads/${n}`).join(" ");
     const contextRef = activeEditorContext
       ? activeEditorContext.selection
@@ -141,7 +181,23 @@ export default function ChatInput({
     const parts = [contextRef, refs, trimmed].filter(Boolean);
     const finalMessage = parts.join(" ");
     setAttachedFiles([]);
+
+    if (busy) {
+      pushQueued(sessionTabId, { kind: "message", text: finalMessage });
+      setQueueCount(getQueue(sessionTabId).length);
+      return;
+    }
     sendMessage(finalMessage);
+  };
+
+  // Recall the most recently queued item into the input box for editing —
+  // web equivalent of the TUI's up-arrow queue restore.
+  const restoreLastQueued = () => {
+    const item = popLastQueued(sessionTabId);
+    if (!item) return false;
+    setQueueCount(getQueue(sessionTabId).length);
+    updateDraft(item.text);
+    return true;
   };
 
   const handleSlashSelect = (command: string) => {
@@ -171,6 +227,13 @@ export default function ChatInput({
       }
       if (e.key === "Escape") {
         setShowSlashMenu(false);
+        return;
+      }
+    }
+
+    if (e.key === "ArrowUp" && input === "") {
+      if (restoreLastQueued()) {
+        e.preventDefault();
         return;
       }
     }
@@ -214,6 +277,11 @@ export default function ChatInput({
           />
         )}
       </div>
+      {queueCount > 0 && (
+        <div className="text-xs text-zinc-500 mb-1">
+          {queueCount} queued — press ↑ in an empty box to edit the last one
+        </div>
+      )}
       <input
         type="file"
         multiple

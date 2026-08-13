@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
+import { useChatState } from "../../stores/chatStore";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
+import ModelDialog from "../Layout/ModelDialog";
 
 export default function AdvisorForm() {
   const [model, setModel] = useState("");
@@ -10,9 +12,15 @@ export default function AdvisorForm() {
   const [claudeCode, setClaudeCode] = useState(false);
   const [checkpoints, setCheckpoints] = useState<string[]>([]);
   const [runtimeEnabled, setRuntimeEnabled] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The advisor model is picked through the ModelDialog (which persists
+  // immediately on select); the chat store is the live value, with the
+  // API-loaded copy as fallback so the display/save never revert a fresh pick.
+  const { advisorModel } = useChatState();
+  const currentModel = advisorModel || model;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -39,7 +47,7 @@ export default function AdvisorForm() {
     setSaving(true);
     setError(null);
     try {
-      await api.setAdvisorFull({ model, provider, claude_code: claudeCode, checkpoints });
+      await api.setAdvisorFull({ model: currentModel, provider, claude_code: claudeCode, checkpoints });
       await api.setAdvisorEnabled(runtimeEnabled);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -76,7 +84,23 @@ export default function AdvisorForm() {
       </div>
       <div className="space-y-1.5">
         <label className="text-xs text-zinc-500">Model</label>
-        <Input value={model} onChange={(e) => setModel(e.target.value)} className="h-8 text-xs" />
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={currentModel || undefined}>
+            {currentModel || "Not set"}
+          </div>
+          <Button size="sm" variant="outline" type="button" onClick={() => setDialogOpen(true)} className="h-8 text-xs">
+            Change…
+          </Button>
+        </div>
+        <ModelDialog
+          open={dialogOpen}
+          onClose={() => setDialogOpen(false)}
+          purpose="advisor"
+          onPick={(_, selectedModel, modelInfo) => {
+            setModel(selectedModel);
+            if (modelInfo) setProvider(modelInfo.provider);
+          }}
+        />
       </div>
       <label className="flex items-center gap-2 text-xs text-zinc-400">
         <input type="checkbox" checked={claudeCode} onChange={(e) => setClaudeCode(e.target.checked)} />

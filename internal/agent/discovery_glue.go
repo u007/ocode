@@ -179,7 +179,6 @@ func (a *Agent) SyncPinnedSkills() {
 	a.disco.lastPinned = pinnedSet
 }
 
-
 // pinnedSkillIDs returns the configured pinned-skill IDs ("skill:<name>").
 func (a *Agent) pinnedSkillIDs() []string {
 	if a.config == nil {
@@ -267,10 +266,13 @@ func skillDoc(s skill.Skill) discovery.Doc {
 // loads their full body on demand via the skill tool.
 func (a *Agent) discoveryDocs() []discovery.Doc {
 	var docs []discovery.Doc
-	for _, s := range skill.LoadSkills() {
+	activeModel, root := a.discoveryModelRoot()
+	for _, s := range skill.LoadSkillsForRoot(root) {
+		if s.TunedFor != "" {
+			continue // Kaizen skills are gated separately below
+		}
 		docs = append(docs, skillDoc(s))
 	}
-	activeModel, root := a.discoveryModelRoot()
 	for _, s := range skill.KaizenSkillsForModel(root, activeModel) {
 		docs = append(docs, skillDoc(s))
 	}
@@ -397,8 +399,6 @@ type DiscoveryStatusInfo struct {
 // DiscoveryStatus reports the current discovery state (for /discover status, /context).
 func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 	st := DiscoveryStatusInfo{MCPTotal: len(a.mcpTools)}
-	allSkills := skill.LoadSkills()
-	st.SkillTotal = len(allSkills)
 	if a.config != nil {
 		st.Model = a.config.Ocode.Discovery.EmbeddingModel
 		st.Backend = a.config.Ocode.Discovery.EmbeddingBackend
@@ -431,6 +431,12 @@ func (a *Agent) DiscoveryStatus() DiscoveryStatusInfo {
 			st.AllMD = append(st.AllMD, d.Name)
 		}
 	}
+	// SkillTotal is the admitted corpus — what the names-index actually
+	// contains (every non-Kaizen skill plus the Kaizen skills admitted for the
+	// active model). Counting all root skills instead would inflate the
+	// denominator with per-model-tuned skills gated out for the active model,
+	// making /discover status's attached/total misleading.
+	st.SkillTotal = len(st.AllSkills)
 	st.MDPending = a.mdPending()
 	return st
 }

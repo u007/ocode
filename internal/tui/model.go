@@ -911,6 +911,11 @@ type model struct {
 	showPermDialog        bool
 	showRetryDialog       bool
 	retryDialogMsg        string
+	showBtwDialog         bool   // /btw: shows the side-query popup
+	btwLoading            bool   // true while the /btw request is in flight
+	btwQuestion           string // the aside text sent with /btw
+	btwAnswer             string // the model's response, once received
+	btwGen                uint64 // monotonic counter; invalidates stale /btw responses
 	showURLDialog         bool   // URL open confirmation dialog
 	pendingURL            string // URL to open when confirmed
 	banClearConfirm       bool   // /ban clear confirmation dialog
@@ -1027,6 +1032,7 @@ type model struct {
 	compactCh                chan agent.CompactResult
 	compactStartCh           chan struct{}
 	recapCh                  chan recapFinishedMsg
+	btwCh                    chan btwResultMsg
 	recapText                string // held until recap finishes, then cleared; recap result goes to m.messages
 	recapGen                 uint64 // monotonic counter; bumped on /new and each recap request so stale recap goroutines can be ignored
 	titleCh                  chan titleResult
@@ -1933,6 +1939,7 @@ func newModel(opts ...RunOptions) model {
 		compactCh:            make(chan agent.CompactResult, 4),
 		compactStartCh:       make(chan struct{}, 4),
 		recapCh:              make(chan recapFinishedMsg, 4),
+		btwCh:                make(chan btwResultMsg, 4),
 		titleCh:              make(chan titleResult, 4),
 		usageCh:              make(chan usageEvent, 16),
 		sideUsageCh:          make(chan sideUsageData, 16),
@@ -2121,7 +2128,7 @@ func newModel(opts ...RunOptions) model {
 }
 
 func (m model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitTitleEvent(m.titleCh)}
+	cmds := []tea.Cmd{textarea.Blink, waitForDebugLog(), waitCompactEvent(m.compactStartCh, m.compactCh), waitRecapEvent(m.recapCh), waitTitleEvent(m.titleCh), waitBtwEvent(m.btwCh)}
 	if m.permissionGrantCh != nil {
 		cmds = append(cmds, listenPermissionGrant(m.permissionGrantCh))
 	}
@@ -2303,7 +2310,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.activeTab == tabChat && !m.showConnect && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.banClearConfirm && !m.showQuestionDialog && m.detail.empty() {
+		if m.activeTab == tabChat && !m.showConnect && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.banClearConfirm && !m.showQuestionDialog && !m.showBtwDialog && m.detail.empty() {
 			content := msg.Content
 			if shortcode, ok := m.shortcodePastedFiles(content); ok {
 				content = shortcode
@@ -2555,7 +2562,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.banClearConfirm && !m.showQuestionDialog && m.detail.empty()
+	inputAllowed := m.activeTab == tabChat && !m.showPicker && !m.showConnect && !m.showFileSearch && !m.leaderActive && !m.showPermDialog && !m.showRetryDialog && !m.showURLDialog && !m.banClearConfirm && !m.showQuestionDialog && !m.showBtwDialog && m.detail.empty()
 
 	// Chat search bar takes priority over the chat input and the slash popup
 	// while it's open. The bar is only available on the chat tab; other tabs
@@ -4234,6 +4241,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.layout()
 		}
 		return m, waitRecapEvent(m.recapCh)
+	case btwResultMsg:
+		if msg.gen == m.btwGen {
+			m.btwLoading = false
+			if msg.err != "" {
+				m.btwAnswer = "Error: " + msg.err
+			} else {
+				m.btwAnswer = msg.text
+			}
+			m.layout()
+		}
+		return m, waitBtwEvent(m.btwCh)
 	case goalDoneMsg:
 		if msg.err != "" {
 			m.messages = append(m.messages, message{
@@ -4884,6 +4902,18 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		return m, nil
 	}
 
+	if m.showBtwDialog {
+		switch keyStr {
+		case "enter", "esc":
+			m.showBtwDialog = false
+			m.btwLoading = false
+			m.btwQuestion = ""
+			m.btwAnswer = ""
+			return m, nil
+		}
+		return m, nil
+	}
+
 	if m.showURLDialog {
 		switch keyStr {
 		case "y", "Y", "enter":
@@ -5057,16 +5087,12 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if len(m.queuedItems) > 0 && m.input.Value() == "" {
-			// Walk backwards to find the last input-type item (skip commands).
-			for i := len(m.queuedItems) - 1; i >= 0; i-- {
-				if m.queuedItems[i].kind == queueItemInput || m.queuedItems[i].kind == queueItemCompactInput {
-					item := m.queuedItems[i]
-					m.queuedItems = append(m.queuedItems[:i], m.queuedItems[i+1:]...)
-					m.input.SetValue(item.text)
-					m.layout()
-					return m, nil
-				}
-			}
+			i := len(m.queuedItems) - 1
+			item := m.queuedItems[i]
+			m.queuedItems = append(m.queuedItems[:i], m.queuedItems[i+1:]...)
+			m.input.SetValue(item.text)
+			m.layout()
+			return m, nil
 		}
 		if len(m.inputHistory) == 0 {
 			break
@@ -9843,13 +9869,41 @@ func silenceCmdOutput(cmd *exec.Cmd) {
 	cmd.Stderr = io.Discard
 }
 
+// handleBtwCmd runs a side query: the current conversation history plus the
+// aside text is sent as a one-shot completion, and the answer is shown in a
+// popup dialog. Neither the aside nor its answer become part of m.messages
+// or the persisted session history.
 func (m *model) handleBtwCmd(args []string) {
 	if len(args) == 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /btw <message> — add a quick aside to the conversation (by the way)"})
 		return
 	}
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: no agent available"})
+		return
+	}
 	text := strings.Join(args, " ")
-	m.messages = append(m.messages, message{role: roleAssistant, text: "Noted: " + text})
+	agentMsgs, _ := m.buildAgentMessagesSnapshot()
+	agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: text})
+
+	m.btwGen++
+	gen := m.btwGen
+	m.showBtwDialog = true
+	m.btwLoading = true
+	m.btwQuestion = text
+	m.btwAnswer = ""
+
+	ch := m.btwCh
+	m.agent.AskAsync(agentMsgs, func(content string, err error) {
+		res := btwResultMsg{gen: gen, text: content}
+		if err != nil {
+			res.err = err.Error()
+		}
+		select {
+		case ch <- res:
+		default:
+		}
+	})
 }
 
 func (m *model) handleInitCmd(args []string) tea.Cmd {
@@ -13658,6 +13712,8 @@ func (m model) chromeBreakdown(panelWidth int) string {
 	var inputArea string
 	if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
+	} else if m.showBtwDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBtwDialog(panelWidth - 2))
 	} else if m.sessionDeleteConfirm {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
@@ -13709,6 +13765,8 @@ func (m model) bottomChromeHeight(panelWidth int) int {
 	var inputArea string
 	if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
+	} else if m.showBtwDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBtwDialog(panelWidth - 2))
 	} else if m.sessionDeleteConfirm {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
@@ -15460,6 +15518,21 @@ type recapFinishedMsg struct {
 	short bool // true for 1-line auto-recap, false for manual /recap
 }
 
+func waitBtwEvent(doneCh chan btwResultMsg) tea.Cmd {
+	return func() tea.Msg {
+		return <-doneCh
+	}
+}
+
+// btwResultMsg carries the result of a /btw side-query back into the
+// bubbletea event loop. gen guards against a stale result overwriting a
+// newer /btw request's popup.
+type btwResultMsg struct {
+	gen  uint64
+	text string
+	err  string
+}
+
 // deltaEvent carries one streamed token (kind ∈ {"reasoning","text"}) from
 // the LLM HTTP goroutine to the TUI's event loop.
 type deltaEvent struct {
@@ -16458,7 +16531,7 @@ func (m model) modalOpen() bool {
 	if m.modalStack != nil && m.modalStack.Len() > 0 {
 		return true
 	}
-	return m.showPicker || m.showConnect || m.showFileSearch || m.showRetryDialog || m.sessionDeleteConfirm || m.showQuestionDialog
+	return m.showPicker || m.showConnect || m.showFileSearch || m.showRetryDialog || m.sessionDeleteConfirm || m.showQuestionDialog || m.showBtwDialog
 }
 
 // renderDetailView renders the top-of-stack detail view.
@@ -16753,6 +16826,8 @@ func (m model) renderTabContent() string {
 	var inputArea string
 	if m.showRetryDialog {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderRetryDialog(panelWidth - 2))
+	} else if m.showBtwDialog {
+		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderBtwDialog(panelWidth - 2))
 	} else if m.sessionDeleteConfirm {
 		inputArea = borderStyle.Width(panelWidth - 2).Render(m.renderSessionDeleteConfirmDialog(panelWidth - 2))
 	} else if m.showQuestionDialog {
@@ -19780,6 +19855,31 @@ func (m *model) renderRetryDialog(width int) string {
 		header + "\n\n" + body + "\n\n" + dismissHint,
 	)
 
+}
+
+// renderBtwDialog renders the /btw side-query popup: the aside text, a
+// loading indicator or the model's answer, and a dismiss hint.
+func (m *model) renderBtwDialog(width int) string {
+	if !m.showBtwDialog {
+		return ""
+	}
+
+	contentWidth := max(0, width-2)
+
+	header := m.styles.Header.Render("↳ By The Way")
+	question := hintStyle.Render("» " + m.btwQuestion)
+	var body string
+	if m.btwLoading {
+		body = "Thinking…"
+	} else {
+		body = m.btwAnswer
+	}
+	body = wrapView(body, contentWidth)
+	dismissHint := hintStyle.Render("Press Enter or Esc to dismiss")
+
+	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
+		header + "\n\n" + question + "\n\n" + body + "\n\n" + dismissHint,
+	)
 }
 
 func (m *model) renderSessionDeleteConfirmDialog(width int) string {

@@ -13,6 +13,9 @@ func TestDefaultDiscoveryConfig(t *testing.T) {
 	if d.EmbeddingModel != "" {
 		t.Fatalf("embedding_model must default empty (no implicit vendor), got %q", d.EmbeddingModel)
 	}
+	if d.EmbeddingBackend != "local" {
+		t.Fatalf("embedding_backend must default to \"local\" (no implicit remote server), got %q", d.EmbeddingBackend)
+	}
 	if d.LocalServerURL != "" {
 		t.Fatalf("local_server_url must default empty (no implicit server), got %q", d.LocalServerURL)
 	}

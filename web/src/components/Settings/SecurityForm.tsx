@@ -3,11 +3,13 @@ import { api } from "../../api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
+import ModelDialog from "../Layout/ModelDialog";
 
 export default function SecurityForm() {
   const [enabled, setEnabled] = useState(false);
   const [mode, setMode] = useState("lenient");
   const [model, setModel] = useState("");
+  const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [baseUrl, setBaseUrl] = useState("");
   const [failMode, setFailMode] = useState("warn");
   const [allowRemoteTier2, setAllowRemoteTier2] = useState(false);
@@ -82,7 +84,21 @@ export default function SecurityForm() {
       </div>
       <div className="space-y-1.5">
         <label className="text-xs text-zinc-500">Model</label>
-        <Input value={model} onChange={(e) => setModel(e.target.value)} className="h-8 text-xs" />
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={model || undefined}>
+            {model || "Not set"}
+          </div>
+          <Button size="sm" variant="outline" type="button" onClick={() => setModelDialogOpen(true)} className="h-8 text-xs">
+            Change…
+          </Button>
+        </div>
+        <ModelDialog
+          open={modelDialogOpen}
+          onClose={() => setModelDialogOpen(false)}
+          purpose="mask"
+          onPick={(_, m) => setModel(m)}
+          currentValues={{ mask: model }}
+        />
       </div>
       <div className="space-y-1.5">
         <label className="text-xs text-zinc-500">Base URL</label>

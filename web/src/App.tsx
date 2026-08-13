@@ -593,7 +593,7 @@ function HomeApp() {
       <ModelDialog
         open={modelDialogOpen}
         onClose={() => setModelDialogOpen(false)}
-        initialTab={modelDialogTab}
+        purpose={modelDialogTab}
       />
 
       {/* Permission Dialog */}

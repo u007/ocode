@@ -4,9 +4,11 @@ import type { OcrConfig } from "../../api/types";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
+import ModelDialog from "../Layout/ModelDialog";
 
 export default function OcrForm() {
   const [cfg, setCfg] = useState<OcrConfig | null>(null);
+  const [ocrDialogOpen, setOcrDialogOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -78,10 +80,20 @@ export default function OcrForm() {
       </div>
       <div className="space-y-1.5">
         <label className="text-xs text-zinc-500">OpenAI model</label>
-        <Input
-          value={String(cfg.openai?.model ?? "")}
-          onChange={(e) => setCfg({ ...cfg, openai: { ...cfg.openai, model: e.target.value } })}
-          className="h-8 text-xs"
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={cfg.openai?.model || undefined}>
+            {cfg.openai?.model || "Not set"}
+          </div>
+          <Button size="sm" variant="outline" type="button" onClick={() => setOcrDialogOpen(true)} className="h-8 text-xs">
+            Change…
+          </Button>
+        </div>
+        <ModelDialog
+          open={ocrDialogOpen}
+          onClose={() => setOcrDialogOpen(false)}
+          purpose="ocr"
+          onPick={(_, m) => setCfg({ ...cfg, openai: { ...cfg.openai, model: m } })}
+          currentValues={{ ocr: cfg.openai?.model ?? "" }}
         />
       </div>
       <div className="space-y-1.5">

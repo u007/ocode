@@ -449,7 +449,7 @@ func defaultDiscoveryConfig() DiscoveryConfig {
 	return DiscoveryConfig{
 		Enabled:          false,
 		EmbeddingModel:   "",
-		EmbeddingBackend: "http",
+		EmbeddingBackend: "local",
 		LocalModelStatus: "none",
 		PinnedSkills:     []string{"brainstorming", "using-superpowers"},
 		IgnorePaths:      DefaultDiscoveryIgnorePaths(),

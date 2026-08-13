@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
+import { useChatState } from "../../stores/chatStore";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
+import ModelDialog from "../Layout/ModelDialog";
 
 export default function ModelDefaultsForm() {
-  const [smallModel, setSmallModel] = useState("");
+  // The small model itself is picked through the ModelDialog (which persists
+  // immediately on select), so its value is read from the chat store — seeded
+  // at boot, refreshed on every dialog open/select. This form only owns the
+  // enabled toggle and the recap config.
+  const { smallModel } = useChatState();
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [recapDialogOpen, setRecapDialogOpen] = useState(false);
   const [smallModelEnabled, setSmallModelEnabled] = useState(false);
   const [recapModel, setRecapModel] = useState("");
   const [recapEnabled, setRecapEnabled] = useState(false);
@@ -19,7 +27,6 @@ export default function ModelDefaultsForm() {
     setError(null);
     try {
       const [sm, recap] = await Promise.all([api.getSmallModelWithEnabled(), api.getRecapConfig()]);
-      setSmallModel(sm.model);
       setSmallModelEnabled(sm.enabled);
       setRecapModel(recap.recap_model);
       setRecapEnabled(recap.recap_model_enabled);
@@ -39,7 +46,8 @@ export default function ModelDefaultsForm() {
     setSaving(true);
     setError(null);
     try {
-      await api.setSmallModel(smallModel);
+      // The small model is persisted by the ModelDialog on select — writing
+      // our own copy here would revert a pick made just before Save.
       await api.setSmallModelEnabled(smallModelEnabled);
       await api.setRecapConfig(recapModel, recapEnabled, recapTimeout);
     } catch (err) {
@@ -64,7 +72,15 @@ export default function ModelDefaultsForm() {
 
       <div className="space-y-1.5">
         <label className="text-xs text-zinc-500">Small model</label>
-        <Input value={smallModel} onChange={(e) => setSmallModel(e.target.value)} className="h-8 text-xs" />
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={smallModel || undefined}>
+            {smallModel || "Not set"}
+          </div>
+          <Button size="sm" variant="outline" type="button" onClick={() => setDialogOpen(true)} className="h-8 text-xs">
+            Change…
+          </Button>
+        </div>
+        <ModelDialog open={dialogOpen} onClose={() => setDialogOpen(false)} purpose="small" />
       </div>
       <label className="flex items-center gap-2 text-xs text-zinc-400">
         <input type="checkbox" checked={smallModelEnabled} onChange={(e) => setSmallModelEnabled(e.target.checked)} />
@@ -73,7 +89,21 @@ export default function ModelDefaultsForm() {
 
       <div className="space-y-1.5">
         <label className="text-xs text-zinc-500">Recap model</label>
-        <Input value={recapModel} onChange={(e) => setRecapModel(e.target.value)} className="h-8 text-xs" />
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={recapModel || undefined}>
+            {recapModel || "Not set"}
+          </div>
+          <Button size="sm" variant="outline" type="button" onClick={() => setRecapDialogOpen(true)} className="h-8 text-xs">
+            Change…
+          </Button>
+        </div>
+        <ModelDialog
+          open={recapDialogOpen}
+          onClose={() => setRecapDialogOpen(false)}
+          purpose="recap"
+          onPick={(_, m) => setRecapModel(m)}
+          currentValues={{ recap: recapModel }}
+        />
       </div>
       <label className="flex items-center gap-2 text-xs text-zinc-400">
         <input type="checkbox" checked={recapEnabled} onChange={(e) => setRecapEnabled(e.target.checked)} />

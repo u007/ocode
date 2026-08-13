@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../../api/client";
 import { Button } from "../ui/button";
-import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
+import ModelDialog from "../Layout/ModelDialog";
 
 export default function CommitMsgForm() {
   const [model, setModel] = useState("");
+  const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -55,7 +56,21 @@ export default function CommitMsgForm() {
       {error && <div className="text-xs text-red-400">{error}</div>}
       <div className="space-y-1.5">
         <label className="text-xs text-zinc-500">Model</label>
-        <Input value={model} onChange={(e) => setModel(e.target.value)} className="h-8 text-xs" />
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={model || undefined}>
+            {model || "Not set"}
+          </div>
+          <Button size="sm" variant="outline" type="button" onClick={() => setModelDialogOpen(true)} className="h-8 text-xs">
+            Change…
+          </Button>
+        </div>
+        <ModelDialog
+          open={modelDialogOpen}
+          onClose={() => setModelDialogOpen(false)}
+          purpose="commit"
+          onPick={(_, m) => setModel(m)}
+          currentValues={{ commit: model }}
+        />
       </div>
       <div className="space-y-1.5">
         <label className="text-xs text-zinc-500">Prompt</label>

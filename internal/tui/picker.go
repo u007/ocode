@@ -111,6 +111,35 @@ func (m *model) prependPermissionModelClearOption() {
 	m.pickerIsHeader = append([]bool{false}, m.pickerIsHeader...)
 }
 
+// appendRedactionModelLocalModels adds an enabled-local-models section to the
+// redaction (tier-2 scanning) model picker. Only enabled entries are listed —
+// a registered-but-disabled model cannot be started by the local-model
+// lifecycle, so it could never serve a scan. Mirror of
+// appendPermissionModelLocalModels for kind="redaction-model".
+func (m *model) appendRedactionModelLocalModels() {
+	if m.pickerKind != "redaction-model" || m.config == nil {
+		return
+	}
+	ids := make([]string, 0, len(m.config.Ocode.LocalModels))
+	for id, lm := range m.config.Ocode.LocalModels {
+		if lm.Enabled {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	sort.Strings(ids)
+	m.pickerItems = append(m.pickerItems, "Local Models")
+	m.pickerValues = append(m.pickerValues, "")
+	m.pickerIsHeader = append(m.pickerIsHeader, true)
+	for _, id := range ids {
+		m.pickerItems = append(m.pickerItems, "  "+id)
+		m.pickerValues = append(m.pickerValues, id)
+		m.pickerIsHeader = append(m.pickerIsHeader, false)
+	}
+}
+
 // refreshModelPickerItems repopulates the current model-family picker
 // (kind = "model" | "advisor" | "permission-model" | "small-model" | "redaction-model") from the latest registry
 // data, preserving the user's filter text, pending filter text, and selection
@@ -139,6 +168,9 @@ func (m *model) refreshModelPickerItems() {
 	}
 	if kind == "recap-model" {
 		m.prependRecapModelClearOption()
+	}
+	if kind == "redaction-model" {
+		m.appendRedactionModelLocalModels()
 	}
 	if kind == "advisor" {
 		m.prependClaudeCodeSection()
@@ -1104,6 +1136,13 @@ func (m *model) openRedactionModelPicker() tea.Cmd {
 	// selection saves the tier-2 redaction scanning model instead of the active model.
 	cmd := m.openModelPicker()
 	m.pickerKind = "redaction-model"
+	// The tier-2 scanner is typically a local model — surface registered
+	// /localmodel entries (e.g. local/bonsai-8b-mlx-1bit) so they can be
+	// selected from the picker instead of only typed, mirroring the
+	// permission-model picker. Only enabled entries are listed: a disabled
+	// model cannot be started by the local-model lifecycle, so it could
+	// never serve a scan.
+	m.appendRedactionModelLocalModels()
 	return cmd
 }
 

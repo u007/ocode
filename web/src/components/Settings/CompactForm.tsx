@@ -3,6 +3,7 @@ import { api, type CompactConfig } from "../../api/client";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
 import { Loader2 } from "lucide-react";
+import ModelDialog from "../Layout/ModelDialog";
 
 const EMPTY: CompactConfig = {
   enabled: false, summary_provider: "", summary_model: "", token_threshold: 0,
@@ -25,6 +26,7 @@ const FIELDS: { key: keyof CompactConfig; label: string; type: "text" | "number"
 
 export default function CompactForm() {
   const [cfg, setCfg] = useState<CompactConfig>(EMPTY);
+  const [summaryDialogOpen, setSummaryDialogOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -70,7 +72,26 @@ export default function CompactForm() {
       <h2 className="text-sm font-semibold text-zinc-200">Compact</h2>
       {error && <div className="text-xs text-red-400">{error}</div>}
       {FIELDS.map((f) =>
-        f.type === "checkbox" ? (
+        f.key === "summary_model" ? (
+          <div key={f.key} className="space-y-1.5">
+            <label className="text-xs text-zinc-500">{f.label}</label>
+            <div className="flex items-center gap-2">
+              <div className="flex-1 h-8 px-3 rounded-md bg-zinc-800 border border-zinc-700 text-xs text-zinc-300 flex items-center truncate" title={cfg.summary_model || undefined}>
+                {cfg.summary_model || "Not set"}
+              </div>
+              <Button size="sm" variant="outline" type="button" onClick={() => setSummaryDialogOpen(true)} className="h-8 text-xs">
+                Change…
+              </Button>
+            </div>
+            <ModelDialog
+              open={summaryDialogOpen}
+              onClose={() => setSummaryDialogOpen(false)}
+              purpose="summary"
+              onPick={(_, m) => setCfg({ ...cfg, summary_model: m })}
+              currentValues={{ summary: cfg.summary_model }}
+            />
+          </div>
+        ) : f.type === "checkbox" ? (
           <label key={f.key} className="flex items-center gap-2 text-xs text-zinc-400">
             <input
               type="checkbox"

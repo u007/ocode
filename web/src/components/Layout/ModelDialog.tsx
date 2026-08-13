@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { api } from "../../api/client";
 import { useChatDispatch, useChatState } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
+import { advisorSelectionPayload } from "./modelSelection";
 import { Search, Check } from "lucide-react";
 import {
   Dialog,
@@ -10,22 +11,42 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
+/** The single model-selection purpose this dialog is opened for. Each settings
+ *  field opens the dialog for exactly one purpose — there are no tabs. */
+export type ModelDialogTab = "main" | "small" | "advisor" | "recap" | "ocr" | "mask" | "commit" | "summary";
+
+const PURPOSE_TITLES: Record<ModelDialogTab, string> = {
+  main: "Select Model",
+  small: "Select Small Model",
+  advisor: "Select Advisor Model",
+  recap: "Select Recap Model",
+  ocr: "Select OCR Model",
+  mask: "Select Mask Model",
+  commit: "Select Commit Message Model",
+  summary: "Select Summary Model",
+};
+
 interface Props {
   open: boolean;
   onClose: () => void;
-  initialTab?: "main" | "small" | "advisor";
+  /** The single field this dialog selects a model for. Defaults to "main". */
+  purpose?: ModelDialogTab;
+  /** Called when a form-owned purpose's model is picked (recap/ocr/mask/commit/summary).
+   *  The owning form persists it via its own Save; the dialog never writes
+   *  these itself (writing would bypass the form's other fields and desync it). */
+  onPick?: (purpose: ModelDialogTab, modelId: string, model?: ModelInfo) => void;
+  /** Current value for form-owned purposes, used to highlight the active model. */
+  currentValues?: Partial<Record<ModelDialogTab, string>>;
 }
 
-export default function ModelDialog({ open, onClose, initialTab = "main" }: Props) {
+export default function ModelDialog({ open, onClose, purpose = "main", onPick, currentValues }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [search, setSearch] = useState("");
-  const [activeTab, setActiveTab] = useState<"main" | "small" | "advisor">(initialTab);
   const { model: activeModel, smallModel, advisorModel } = useChatState();
   const dispatch = useChatDispatch();
 
   useEffect(() => {
     if (open) {
-      setActiveTab(initialTab);
       api.listModels().then(setModels).catch(console.error);
       setSearch("");
       api.getConfigModel().then((res) => {
@@ -38,7 +59,7 @@ export default function ModelDialog({ open, onClose, initialTab = "main" }: Prop
         dispatch({ type: "SET_ADVISOR_MODEL", model: res.model });
       }).catch(console.error);
     }
-  }, [open, initialTab, dispatch]);
+  }, [open, dispatch]);
 
   const filteredModels = models.filter(
     (m) =>
@@ -55,63 +76,50 @@ export default function ModelDialog({ open, onClose, initialTab = "main" }: Prop
   }, {} as Record<string, ModelInfo[]>);
 
   const getCurrentModel = () => {
-    switch (activeTab) {
+    switch (purpose) {
       case "small":
         return smallModel;
       case "advisor":
         return advisorModel;
       default:
-        return activeModel;
+        return currentValues?.[purpose] ?? activeModel;
     }
   };
 
-  const handleSelect = (modelId: string) => {
-    switch (activeTab) {
+  const handleSelect = (selectedModel: ModelInfo) => {
+    const modelId = selectedModel.name;
+    switch (purpose) {
       case "small":
         dispatch({ type: "SET_SMALL_MODEL", model: modelId });
         api.setSmallModel(modelId).catch(console.error);
         break;
       case "advisor":
-        dispatch({ type: "SET_ADVISOR_MODEL", model: modelId });
-        api.setAdvisor(modelId).catch(console.error);
+        {
+          const selection = advisorSelectionPayload(selectedModel);
+          dispatch({ type: "SET_ADVISOR_MODEL", model: selection.model });
+          onPick?.(purpose, selection.model, selectedModel);
+          api.setAdvisorFull(selection).catch(console.error);
+        }
         break;
-      default:
+      case "main":
         dispatch({ type: "SET_MODEL", model: modelId });
         api.setConfigModel(modelId).catch(console.error);
+        break;
+      default:
+        // Form-owned purpose (recap/ocr/mask/commit/summary): hand the pick to
+        // the owning form, which persists it via its own Save.
+        onPick?.(purpose, modelId, selectedModel);
         break;
     }
     onClose();
   };
 
-  const tabs = [
-    { id: "main" as const, label: "Model" },
-    { id: "small" as const, label: "Small Model" },
-    { id: "advisor" as const, label: "Advisor" },
-  ];
-
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DialogContent className="sm:max-w-md bg-zinc-900 border-zinc-700">
         <DialogHeader>
-          <DialogTitle className="text-zinc-100">Select Model</DialogTitle>
+          <DialogTitle className="text-zinc-100">{PURPOSE_TITLES[purpose]}</DialogTitle>
         </DialogHeader>
-
-        {/* Tabs */}
-        <div className="flex gap-1 border-b border-zinc-700 pb-2">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-3 py-1.5 text-sm rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
-                activeTab === tab.id
-                  ? "bg-zinc-700 text-white"
-                  : "text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </div>
 
         {/* Search */}
         <div className="relative">
@@ -136,15 +144,15 @@ export default function ModelDialog({ open, onClose, initialTab = "main" }: Prop
               {providerModels.map((m) => (
                 <button
                   key={m.name}
-                  onClick={() => handleSelect(m.name)}
+                  onClick={() => handleSelect(m)}
                   className={`w-full flex items-center justify-between px-3 py-2 rounded-md text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900 ${
-                    getCurrentModel() === m.name || m.active
+                    getCurrentModel() === (purpose === "advisor" ? m.model : m.name) || m.active
                       ? "bg-blue-600/20 text-blue-400"
                       : "text-zinc-300 hover:bg-zinc-800"
                   }`}
                 >
                   <span className="truncate">{m.model}</span>
-                  {(getCurrentModel() === m.name || m.active) && (
+                  {(getCurrentModel() === (purpose === "advisor" ? m.model : m.name) || m.active) && (
                     <Check className="h-4 w-4 text-blue-400 flex-shrink-0" />
                   )}
                 </button>

@@ -95,7 +95,17 @@ func loadSkillsFromPaths(paths []string) []Skill {
 			continue
 		}
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			// entry.IsDir() is false for a symlink (its DirEntry.Type() carries
+			// ModeSymlink, not ModeDir) even when the target is a directory —
+			// stat through the link so skill dirs installed as symlinks (the
+			// common layout under ~/.config/opencode/skills) aren't skipped.
+			isDir := entry.IsDir()
+			if !isDir && entry.Type()&os.ModeSymlink != 0 {
+				if info, err := os.Stat(filepath.Join(dir, entry.Name())); err == nil {
+					isDir = info.IsDir()
+				}
+			}
+			if !isDir {
 				continue
 			}
 			name := entry.Name()

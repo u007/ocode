@@ -7,6 +7,7 @@ import (
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/discovery"
 	"github.com/u007/ocode/internal/redact"
 )
 
@@ -139,6 +140,19 @@ func defaultRedactionBaseURL(modelName string) string {
 	switch provider {
 	case "lmstudio":
 		return "http://localhost:1234/v1"
+	case "local":
+		// /localmodel-managed chat models serve OpenAI-compatible /v1 on a
+		// deterministic per-model port (discovery.AssignChatPort, 11458+).
+		// The tier-2 scanner appends "/chat/completions" to the base URL, so
+		// the "/v1" suffix is required to reach /v1/chat/completions. The
+		// registered-id set is loaded fresh from disk (same source as
+		// StartLocalModelInstance) so the port matches whatever another ocode
+		// process would assign.
+		if registeredIDs, err := config.RegisteredLocalModelIDs(); err == nil {
+			if port, err := discovery.AssignChatPort(modelName, registeredIDs); err == nil {
+				return fmt.Sprintf("http://localhost:%d/v1", port)
+			}
+		}
 	}
 	return ""
 }
@@ -178,10 +192,21 @@ func (m *model) setRedactionModel(modelName string) error {
 	// SaveSecurityRedaction reads from disk, so we must derive from m.config first,
 	// then persist the result.
 	baseURL := ""
+	prevModel := ""
 	if m.config != nil {
 		baseURL = m.config.Ocode.Security.Redaction.BaseURL
+		prevModel = m.config.Ocode.Security.Redaction.Model
 	}
-	if baseURL == "" {
+	// Refresh the base URL for local-server providers:
+	// - No URL configured → auto-assign the default for the new model.
+	// - The existing URL was auto-assigned for the PREVIOUS model (it equals
+	//   what the default formula yields for that model) → recompute for the
+	//   new model, so switching local model A → B doesn't keep A's port, and a
+	//   port left stale by a changed registered-model set is refreshed on
+	//   re-pick.
+	// Explicitly custom URLs (that never matched the auto formula) are
+	// preserved — the user's own endpoint choice wins.
+	if baseURL == "" || (prevModel != "" && baseURL == defaultRedactionBaseURL(prevModel)) {
 		if def := defaultRedactionBaseURL(modelName); def != "" {
 			agent.DebugAppendf("REDACT", "auto-set tier-2 scanner base_url to %q for model %q", def, modelName)
 			baseURL = def
@@ -259,7 +284,31 @@ func buildLLMScanner(baseURL, model string, allowRemote bool) *redact.LLMScanner
 		}
 	}
 
-	return &redact.LLMScanner{BaseURL: baseURL, Model: scannerRequestModelName(model), AllowRemote: allowRemote, APIKey: apiKey}
+	scannerModel := scannerRequestModelName(model)
+	// /localmodel-managed MLX servers (mlx_lm.server, unlike llama-server)
+	// honour the request body's "model" field as a live model-switch
+	// instruction, so the persisted id ("local/bonsai-8b-1bit") must be
+	// rewritten to the id the server was actually launched with (the HF repo
+	// id, e.g. "prism-ml/Bonsai-8B-mlx-1bit") — same rewrite the main chat
+	// client applies in NewClient. llama.cpp ignores the field, so the rewrite
+	// is harmless for that backend too.
+	if strings.HasPrefix(model, "local/") {
+		man, ok := discovery.ChatManifestForHost(model)
+		if !ok {
+			// Fail closed: a local/* id with no chat manifest for this host
+			// cannot be served by the /localmodel lifecycle, so the base URL
+			// (auto-assigned from AssignChatPort) is stale or the id was
+			// hand-typed. Sending the raw "local/<id>" would make an MLX server
+			// attempt a live model-switch to a model it doesn't have and fail
+			// the scan confusingly — skip the tier-2 pass instead (regex
+			// tier-1 still applies) and say why.
+			agent.DebugAppendf("REDACT", "tier-2 scanner: no chat manifest for local model %q on this host; skipping tier-2 scan", model)
+			return nil
+		}
+		scannerModel = man.ExpectedServeID()
+	}
+
+	return &redact.LLMScanner{BaseURL: baseURL, Model: scannerModel, AllowRemote: allowRemote, APIKey: apiKey}
 }
 
 // extractProvider extracts the provider prefix from a model name.
