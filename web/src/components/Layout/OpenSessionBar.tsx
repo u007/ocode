@@ -2,6 +2,7 @@ import { useCallback } from "react";
 import { useChatDispatch, useChatState, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
+import { clearQueue } from "../../lib/tabQueue";
 import { X, List, Plus, Loader2 } from "lucide-react";
 
 export default function OpenSessionBar() {
@@ -21,6 +22,7 @@ export default function OpenSessionBar() {
     e.stopPropagation();
     closeSessionTab(tabId);
     chatDispatch({ type: "RESET", sessionId: tabId });
+    clearQueue(tabId);
   }, [closeSessionTab, chatDispatch]);
 
   // A real session tab is "loading" while its slice hasn't finished its first

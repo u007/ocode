@@ -278,9 +278,13 @@ The list is not git-based — it derives from the snapshot store
     `/details`, `/login`, `/new`, `/clear`, `/sidebar`, `/commands`,
     `/permissions`, `/yolo`, `/small-model`, `/editor`, `/editor-mode`,
     `/themes`, `/theme`, `/lsp`, `/usage`, `/share`, `/connect`, `/agent`,
-    `/mcp`, `/advisor`, `/mask`, `/btw`, `/by-the-way`, `/rc`,
+    `/mcp`, `/advisor`, `/mask`, `/rc`,
     `/remote-control`, `/search`, `/find`, `/docs`, `/doc-mode`, `/recap`,
     `/goal`, and `/agents status` (or `/agents` with no arguments).
+    `/btw`/`/by-the-way` is deliberately NOT instant: it starts a one-shot LLM
+    completion on the shared client, and running it mid-stream would race the
+    main turn's installed `OnDelta` callback (tokens leaking into the
+    transcript), so it queues like any other work.
   - **Queued by design (mutates persistent state mid-stream, so it must
     wait for the current turn to end):** `/add-dir`, `/add-dirs`, `/doc-sync`,
     `/agents limit <n>`.

@@ -5087,12 +5087,18 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if len(m.queuedItems) > 0 && m.input.Value() == "" {
-			i := len(m.queuedItems) - 1
-			item := m.queuedItems[i]
-			m.queuedItems = append(m.queuedItems[:i], m.queuedItems[i+1:]...)
-			m.input.SetValue(item.text)
-			m.layout()
-			return m, nil
+			// Walk backwards to find the last input-type item (skip commands).
+			// A queued command is waiting to run; recalling it into the input
+			// would silently remove it from execution.
+			for i := len(m.queuedItems) - 1; i >= 0; i-- {
+				if m.queuedItems[i].kind == queueItemInput || m.queuedItems[i].kind == queueItemCompactInput {
+					item := m.queuedItems[i]
+					m.queuedItems = append(m.queuedItems[:i], m.queuedItems[i+1:]...)
+					m.input.SetValue(item.text)
+					m.layout()
+					return m, nil
+				}
+			}
 		}
 		if len(m.inputHistory) == 0 {
 			break
@@ -7192,6 +7198,10 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// Instant commands are local UI / config / auth actions that never need to
 	// wait for the current stream or compaction turn, so they can run immediately
 	// even while busy.
+	// /btw is deliberately NOT instant: it starts a one-shot LLM completion on
+	// the shared client, and running it mid-stream would race the main turn's
+	// installed OnDelta callback (its tokens would leak into the transcript).
+	// Queued, it runs after the stream ends — naturally serialized.
 	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
 		cmd == "/help" || cmd == "/thinking" || cmd == "/details" || cmd == "/sound" ||
@@ -7206,7 +7216,6 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 		cmd == "/lsp" || cmd == "/usage" || cmd == "/share" ||
 		cmd == "/connect" || cmd == "/agent" || cmd == "/mcp" ||
 		cmd == "/advisor" || cmd == "/mask" || cmd == "/mem" ||
-		cmd == "/btw" || cmd == "/by-the-way" ||
 		cmd == "/paths" ||
 		cmd == "/rc" || cmd == "/remote-control" ||
 		cmd == "/search" || cmd == "/find" ||

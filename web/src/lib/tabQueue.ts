@@ -40,12 +40,31 @@ export function shiftQueued(tabId: string | null | undefined): QueuedItem | unde
   return list.shift();
 }
 
-/** Pop the most recently queued item (LIFO) — used to recall it into the input box. */
+/** Pop the most recently queued MESSAGE item (LIFO) — used to recall it into the
+ *  input box. Queued commands are skipped: a command is waiting to run, and
+ *  recalling it into the input would silently remove it from execution. */
 export function popLastQueued(tabId: string | null | undefined): QueuedItem | undefined {
   if (!tabId) return undefined;
   const list = queues.get(tabId);
   if (!list || list.length === 0) return undefined;
-  return list.pop();
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (list[i].kind === "message") {
+      return list.splice(i, 1)[0];
+    }
+  }
+  return undefined;
+}
+
+/** Move a queue from one tab id to another. Used when a temp `new-*` tab becomes
+ *  a real session: ChatInput queues by the temp id, and without the rekey those
+ *  queued items would be orphaned under the old id and never drain. */
+export function rekeyQueue(oldId: string | null | undefined, newId: string | null | undefined) {
+  if (!oldId || !newId || oldId === newId) return;
+  const list = queues.get(oldId);
+  if (!list || list.length === 0) return;
+  queues.delete(oldId);
+  const existing = queues.get(newId) ?? [];
+  queues.set(newId, [...existing, ...list]);
 }
 
 export function clearQueue(tabId: string | null | undefined) {

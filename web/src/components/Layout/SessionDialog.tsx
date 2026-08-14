@@ -2,6 +2,7 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { useChatDispatch } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
+import { clearQueue } from "../../lib/tabQueue";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
@@ -52,6 +53,7 @@ export default function SessionDialog() {
     e.stopPropagation();
     closeSessionTab(tabId);
     chatDispatch({ type: "RESET", sessionId: tabId });
+    clearQueue(tabId);
   }, [closeSessionTab, chatDispatch]);
 
   // Check if a session is currently open as a tab

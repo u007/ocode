@@ -42,6 +42,11 @@ interface Props {
 export default function ModelDialog({ open, onClose, purpose = "main", onPick, currentValues }: Props) {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [search, setSearch] = useState("");
+  // The advisor's Claude Code toggle is owned by AdvisorForm; the dialog must
+  // carry the current value through a pick so the server's provider-change
+  // convention (provider set → claude_code = (provider === "claude-code"))
+  // cannot silently flip a toggle the user set explicitly.
+  const [advisorClaudeCode, setAdvisorClaudeCode] = useState(false);
   const { model: activeModel, smallModel, advisorModel } = useChatState();
   const dispatch = useChatDispatch();
 
@@ -57,6 +62,9 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
       }).catch(console.error);
       api.getAdvisor().then((res) => {
         dispatch({ type: "SET_ADVISOR_MODEL", model: res.model });
+      }).catch(console.error);
+      api.getAdvisorFull().then((res) => {
+        setAdvisorClaudeCode(res.claude_code);
       }).catch(console.error);
     }
   }, [open, dispatch]);
@@ -98,7 +106,10 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
           const selection = advisorSelectionPayload(selectedModel);
           dispatch({ type: "SET_ADVISOR_MODEL", model: selection.model });
           onPick?.(purpose, selection.model, selectedModel);
-          api.setAdvisorFull(selection).catch(console.error);
+          // Carry the current claude_code through the PUT: the server flips
+          // claude_code to (provider === "claude-code") whenever provider is
+          // set, which would silently disable CLI mode on any non-CLI pick.
+          api.setAdvisorFull({ ...selection, claude_code: advisorClaudeCode }).catch(console.error);
         }
         break;
       case "main":

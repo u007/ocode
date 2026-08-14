@@ -41,6 +41,7 @@ import SessionPage from "./pages/SessionPage";
 import FilePicker from "./components/Files/FilePicker";
 import ConfirmCloseDialog from "./components/Files/ConfirmCloseDialog";
 import { isNewSessionTabEmpty } from "./lib/tabDrafts";
+import { rekeyQueue } from "./lib/tabQueue";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { eventBus } from "./lib/eventBus";
 import { useSessionStatus } from "./hooks/useSessionStatus";
@@ -365,6 +366,7 @@ function HomeApp() {
   // the old id is already gone), so running this twice is safe.
   const handleSessionCreated = (tempTabId: string, sessionId: string) => {
     dispatch({ type: "REKEY_SESSION", oldId: tempTabId, newId: sessionId });
+    rekeyQueue(tempTabId, sessionId);
     projectDispatch({
       type: "UPDATE_TAB_ID",
       oldId: tempTabId,

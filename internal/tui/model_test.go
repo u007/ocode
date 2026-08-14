@@ -5201,6 +5201,64 @@ func TestUpKeyUsesInputHistoryWithoutScrollingTranscript(t *testing.T) {
 	}
 }
 
+func TestUpArrowRestoreSkipsQueuedCommands(t *testing.T) {
+	m := model{
+		ready:    true,
+		width:    80,
+		height:   24,
+		input:    newTestTextarea(),
+		viewport: fastviewport.New(76, 20),
+		styles:   ApplyThemeColors("tokyonight"),
+		queuedItems: []queuedItem{
+			{kind: queueItemCommand, text: "/btw aside"},
+			{kind: queueItemInput, text: "queued follow-up"},
+		},
+	}
+	// inputHistoryIndex must be -1 (not the zero value) so the up-arrow handler
+	// reaches the queue-restore branch instead of treating the press as history
+	// navigation.
+	m.inputHistoryIndex = -1
+	m.layout()
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	got := derefTestModel(t, updated)
+
+	// The most recently queued INPUT is restored; the queued command stays put
+	// (recalling it into the input would silently remove it from execution).
+	if got.input.Value() != "queued follow-up" {
+		t.Fatalf("expected up arrow to restore queued input, got %q", got.input.Value())
+	}
+	if len(got.queuedItems) != 1 || got.queuedItems[0].kind != queueItemCommand || got.queuedItems[0].text != "/btw aside" {
+		t.Fatalf("expected queued command to remain, got %#v", got.queuedItems)
+	}
+}
+
+func TestUpArrowRestoreWithOnlyQueuedCommandsRestoresNothing(t *testing.T) {
+	m := model{
+		ready:       true,
+		width:       80,
+		height:      24,
+		input:       newTestTextarea(),
+		viewport:    fastviewport.New(76, 20),
+		styles:      ApplyThemeColors("tokyonight"),
+		queuedItems: []queuedItem{{kind: queueItemCommand, text: "/btw aside"}},
+	}
+	// inputHistoryIndex must be -1 (not the zero value) so the up-arrow handler
+	// reaches the queue-restore branch instead of treating the press as history
+	// navigation.
+	m.inputHistoryIndex = -1
+	m.layout()
+
+	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
+	got := derefTestModel(t, updated)
+
+	// No input-type item queued — the command stays queued and the input is
+	// untouched (falls through to the input-history branch).
+	if len(got.queuedItems) != 1 {
+		t.Fatalf("expected queued command to remain, got %#v", got.queuedItems)
+	}
+}
+
 func TestSlashCommandAddedToInputHistory(t *testing.T) {
 	m := model{
 		ready:             true,
