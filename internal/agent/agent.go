@@ -2651,6 +2651,16 @@ ALLOW: read-only listing of project files
 DENY: deletes files outside the working directory
 These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, bannedPrefixes, context)
 
+	// Prepend the bundled auto-permission addendum, if installed (see
+	// config.InstallAutoPermissionPrompt). This is kept separate from
+	// permissions.auto.prompt below, which is the user's own free-form
+	// override and must never be silently overwritten by a bundled update.
+	if bundled, err := config.LoadAutoPermissionPromptBody(); err != nil {
+		a.emitDebug("ERROR", fmt.Sprintf("failed to load bundled auto-permission prompt: %v", err))
+	} else if bundled != "" {
+		prompt = bundled + "\n\n" + prompt
+	}
+
 	// Apply custom prompt from config if set.
 	if a.config != nil && a.config.Ocode.Permissions.Auto != nil && a.config.Ocode.Permissions.Auto.Prompt != "" {
 		prompt = a.config.Ocode.Permissions.Auto.Prompt + "\n\n" + prompt

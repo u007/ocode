@@ -473,7 +473,7 @@ Type `/` in the chat input to open the slash command palette with autocomplete (
 | `/rc` | `/remote-control` | Start/stop web UI to mirror this session | `/rc off` stops the server |
 | `/ide` | | Connect to VS Code (Claude Code extension) | Lock discovery, WebSocket + MCP client |
 | `/theme` | `/themes` | Switch themes instantly | Built-in themes: Tokyo Night, Storm, Catppuccin |
-| `/permissions` | | View/set tool and bash permissions | Supports per-tool rules, bash prefix rules, auto-permission model |
+| `/permissions` | | View/set tool and bash permissions | Supports per-tool rules, bash prefix rules, auto-permission model, `/permissions auto prompt` for the bundled prompt addendum |
 | `/yolo` | | Toggle YOLO permissions mode on/off (**last resort** — prefer the auto-permission layer) | Auto-approves permission-gated tools (respects hard blocks) |
 | `/git` | | Git operations from command line | Stage, unstage, discard, commit, push, pull, branch |
 | `/github` | | PR, issue, and workflow commands | GitHub API integration |
@@ -573,6 +573,7 @@ The **recommended** way to cut down on permission interruptions. An LLM-based la
 - `allow_destructive: false` instructs the model to conservatively deny operations it cannot confidently approve
 - **`rm` scope hardening:** any `rm -f`/`-r` invocation whose targets resolve outside the project workdir requires approval in **every** mode (even YOLO or a persisted `rm` allow rule) — only in-scope `rm` stays auto-allowed
 - **Unavailable judge ≠ denial:** if the auto-permission LLM can't be reached (no model configured, local server down), the prompt shows a neutral "permission model unavailable — asking you instead" notice and falls back to the ordinary allow/deny prompt — it is **not** reported as an auto-denial
+- **Bundled prompt addendum:** `/permissions auto prompt <status|install|upgrade> [force]` manages a versioned, installable addendum (`~/.config/opencode/auto-permission-prompt.md`) prepended to the gatekeeper prompt — ships a default body of known-safe git commands (`git status`/`diff`/`log`/`show`/`blame`/`fetch`/`add`/…); `status` reports `missing`/`up-to-date`/`outdated`/`custom-modified`, `install`/`upgrade` write the bundled body (auto-upgrading untouched outdated copies; `force` overwrites custom-modified, backing up first). Distinct from the `prompt` config field, which is the user's own override and is never clobbered.
 
 ### Tool Permission Levels
 

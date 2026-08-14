@@ -692,7 +692,7 @@ func runAgentCmd(m *model, args []string) tea.Cmd {
 }
 
 func runPermissionsCmd(m *model, args []string) tea.Cmd {
-	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status> | model [test|<provider/model>|auto]]"
+	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status|prompt <status|install|upgrade>> | model [test|<provider/model>|auto]]"
 	if len(args) == 0 {
 		if m.agent == nil || m.agent.Permissions() == nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured.\n\n" + usage})
@@ -839,8 +839,10 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 				enabled := m.agent.Permissions().AutoPermissionEnabled()
 				status := map[bool]string{true: "on", false: "off"}[enabled]
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("LLM auto-allow is %s.", status)})
+			case "prompt":
+				m.messages = append(m.messages, message{role: roleAssistant, text: runAutoPermissionPromptCmd(args[2:])})
 			default:
-				m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions auto <on|off|status>"})
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions auto <on|off|status|prompt <status|install|upgrade>>"})
 			}
 			return nil
 		case "model":
@@ -995,6 +997,42 @@ func runSkillsCmd(m *model, args []string) tea.Cmd {
 	default:
 		m.handleSkillsCmd(args)
 		return nil
+	}
+}
+
+// runAutoPermissionPromptCmd handles `/permissions auto prompt [status|install|upgrade]`,
+// which manages the bundled auto-LLM gatekeeper prompt addendum
+// (~/.config/opencode/auto-permission-prompt.md) the same way `/skills
+// install|upgrade` manages bundled skills: detect missing/outdated/
+// custom-modified, and only overwrite a customized file when the user
+// explicitly upgrades.
+func runAutoPermissionPromptCmd(args []string) string {
+	sub := "status"
+	if len(args) > 0 {
+		sub = strings.ToLower(args[0])
+	}
+	switch sub {
+	case "status":
+		status, err := config.GetAutoPermissionPromptStatus()
+		if err != nil {
+			return fmt.Sprintf("Failed to check auto-permission prompt status: %v", err)
+		}
+		path, _ := config.AutoPermissionPromptFilePath()
+		return fmt.Sprintf("Auto-permission prompt addendum: %s\n  path: %s\n  bundled version: %s", status, path, config.BundledAutoPermissionPromptVersion)
+	case "install", "upgrade", "update":
+		force := false
+		for _, a := range args[1:] {
+			if strings.EqualFold(a, "force") {
+				force = true
+			}
+		}
+		action, err := config.InstallAutoPermissionPrompt(force)
+		if err != nil {
+			return fmt.Sprintf("Failed to install auto-permission prompt: %v", err)
+		}
+		return fmt.Sprintf("Auto-permission prompt addendum: %s.", action)
+	default:
+		return "Usage: /permissions auto prompt <status|install|upgrade> [force]"
 	}
 }
 
