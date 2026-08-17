@@ -722,12 +722,21 @@ func isExfiltrationRiskCommand(command string) bool {
 	}
 
 	switch fields[0] {
-	case "curl":
-		return isExfiltrationRiskCurl(fields)
-	case "wget":
-		return isExfiltrationRiskWget(fields)
-	case "http", "https":
-		return isExfiltrationRiskHTTPie(fields)
+	case "curl", "wget", "http", "https":
+		// Loopback connections (127.0.0.0/8, ::1, localhost) stay on-host and
+		// cannot exfiltrate data off-machine, so secrets in headers/data sent
+		// to localhost are never harmful — same rationale as loopback nc below.
+		if subprocessTargetsLocalhost(command) {
+			return false
+		}
+		switch fields[0] {
+		case "curl":
+			return isExfiltrationRiskCurl(fields)
+		case "wget":
+			return isExfiltrationRiskWget(fields)
+		default:
+			return isExfiltrationRiskHTTPie(fields)
+		}
 	case "nc", "ncat":
 		return isExfiltrationRiskNetcat(fields)
 	}
@@ -3568,6 +3577,15 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 		rulePrefix = prefix + " " + cmd.cmdWords[1]
 	}
 
+	// Explicit user bans win over the hardcoded "harmful" ask-list below — a
+	// user who has run "/ban add git stash" wants it silently denied, not
+	// asked about every time. Checked first so the harmful-command ask can't
+	// shadow an explicit deny rule.
+	if deniedPrefix, ok := pm.matchBashPrefixRule(cmd.cmdWords, PermissionDeny); ok {
+		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (banned prefix rule): prefix=%s", deniedPrefix))
+		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
+	}
+
 	// Harmful operations (git revert/stash/reset/clean/checkout/restore/switch,
 	// git push/pull --force, exfiltration) always require explicit human
 	// approval and must never auto-allow — even when a broader prefix rule or a
@@ -3592,11 +3610,6 @@ func (pm *PermissionManager) decideSingleCommand(args json.RawMessage, cmd parse
 	if isLoopbackNetworkCommand(command) {
 		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand ALLOW (loopback network): command=%q", command))
 		return PermissionDecision{Level: PermissionAllow}
-	}
-
-	if deniedPrefix, ok := pm.matchBashPrefixRule(cmd.cmdWords, PermissionDeny); ok {
-		pm.emitDebug("perm", fmt.Sprintf("decideSingleCommand DENY (banned prefix rule): prefix=%s", deniedPrefix))
-		return PermissionDecision{Level: PermissionDeny, HardDeny: true}
 	}
 
 	// 1. Temp directory operations are always allowed (cross-platform)

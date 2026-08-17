@@ -53,6 +53,7 @@ type runOptions struct {
 	thinking       bool
 	username       string
 	password       string
+	timeout        int
 }
 
 func parseRunArgs(args []string) (runOptions, []string, error) {
@@ -87,6 +88,7 @@ func parseRunArgs(args []string) (runOptions, []string, error) {
 	fs.StringVar(&opts.username, "username", "", "Basic auth username for --attach")
 	fs.StringVar(&opts.username, "u", "", "Basic auth username for --attach")
 	fs.StringVar(&opts.password, "password", "", "Basic auth password for --attach")
+	fs.IntVar(&opts.timeout, "timeout", 150, "Per-request LLM timeout in seconds (0 = no timeout, wait indefinitely)")
 	fs.StringVar(&opts.password, "P", "", "Basic auth password for --attach")
 
 	if err := fs.Parse(args); err != nil {
@@ -122,6 +124,7 @@ func printRunUsage() {
 	fmt.Println("  -dir <path>               Directory to run in")
 	fmt.Println("  -username, -u <name>      Basic auth username for --attach")
 	fmt.Println("  -password, -P <pass>      Basic auth password for --attach")
+	fmt.Println("  -timeout <seconds>        Per-request LLM timeout (default: 150, 0 = no timeout)")
 	fmt.Println("  -h, --help                Show this help message")
 	fmt.Println()
 	fmt.Println("Examples:")
@@ -231,6 +234,9 @@ func Run(args []string) error {
 	}
 	tools = filtered
 	ag := agent.NewAgent(client, tools, cfg, lspMgr)
+	if opts.timeout > 0 {
+		ag.RequestTimeout = time.Duration(opts.timeout) * time.Second
+	}
 	ag.LoadExternalToolsWithMCP(cfg)
 
 	var totals usageTotals

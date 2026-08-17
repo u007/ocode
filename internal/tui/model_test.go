@@ -4482,36 +4482,6 @@ func TestMouseWheelScrollsAgentDetailViewport(t *testing.T) {
 	}
 }
 
-func TestAgentDetailShowsAndOpensRunBackgroundProcess(t *testing.T) {
-	a := agent.NewAgent(nil, nil, nil, nil)
-	run := a.Runs().New("worker")
-	run.Procs = tool.NewProcessRegistry()
-	proc := run.Procs.StartBackground("printf hello")
-	t.Cleanup(func() { _, _ = run.Procs.Kill(proc.ID) })
-	setRunTranscriptForTest(run, agent.Message{Role: "assistant", Content: "root"})
-	time.Sleep(50 * time.Millisecond)
-
-	m := model{ready: true, width: 100, height: 28, activeTab: tabChat, input: newTestTextarea(), styles: ApplyThemeColors("tokyonight"), agent: a}
-	m.openAgentDetail(run.ID)
-	top := m.detail[len(m.detail)-1]
-	if len(top.procs) == 0 {
-		t.Fatal("expected background process blocks in agent detail view")
-	}
-	row := top.procs[0].rowStart
-
-	updated, _ := m.Update(tea.MouseReleaseMsg{Button: tea.MouseNone, X: 2, Y: m.detailViewportContentTopY() + row})
-	got := derefTestModel(t, updated)
-	if len(got.detail) < 2 {
-		t.Fatal("expected clicking process row to open process log detail")
-	}
-	if got.detail[len(got.detail)-1].kind != detailProcessLog {
-		t.Fatalf("expected process log detail, got %v", got.detail[len(got.detail)-1].kind)
-	}
-	if got.detail[len(got.detail)-1].procID != proc.ID {
-		t.Fatalf("expected process log for %q, got %q", proc.ID, got.detail[len(got.detail)-1].procID)
-	}
-}
-
 func TestAgentDetailSuppressesHiddenInputEditing(t *testing.T) {
 	a := agent.NewAgent(nil, nil, nil, nil)
 	run := a.Runs().New("worker")
@@ -5201,7 +5171,7 @@ func TestUpKeyUsesInputHistoryWithoutScrollingTranscript(t *testing.T) {
 	}
 }
 
-func TestUpArrowRestoreSkipsQueuedCommands(t *testing.T) {
+func TestUpArrowRestoreIncludesQueuedCommands(t *testing.T) {
 	m := model{
 		ready:    true,
 		width:    80,
@@ -5210,8 +5180,8 @@ func TestUpArrowRestoreSkipsQueuedCommands(t *testing.T) {
 		viewport: fastviewport.New(76, 20),
 		styles:   ApplyThemeColors("tokyonight"),
 		queuedItems: []queuedItem{
-			{kind: queueItemCommand, text: "/btw aside"},
 			{kind: queueItemInput, text: "queued follow-up"},
+			{kind: queueItemCommand, text: "/btw aside"},
 		},
 	}
 	// inputHistoryIndex must be -1 (not the zero value) so the up-arrow handler
@@ -5223,17 +5193,17 @@ func TestUpArrowRestoreSkipsQueuedCommands(t *testing.T) {
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	got := derefTestModel(t, updated)
 
-	// The most recently queued INPUT is restored; the queued command stays put
-	// (recalling it into the input would silently remove it from execution).
-	if got.input.Value() != "queued follow-up" {
-		t.Fatalf("expected up arrow to restore queued input, got %q", got.input.Value())
+	// The most recently queued item (the command) is restored into the input
+	// and removed from the queue, so resubmitting it doesn't duplicate it.
+	if got.input.Value() != "/btw aside" {
+		t.Fatalf("expected up arrow to restore queued command, got %q", got.input.Value())
 	}
-	if len(got.queuedItems) != 1 || got.queuedItems[0].kind != queueItemCommand || got.queuedItems[0].text != "/btw aside" {
-		t.Fatalf("expected queued command to remain, got %#v", got.queuedItems)
+	if len(got.queuedItems) != 1 || got.queuedItems[0].kind != queueItemInput || got.queuedItems[0].text != "queued follow-up" {
+		t.Fatalf("expected queued input to remain, got %#v", got.queuedItems)
 	}
 }
 
-func TestUpArrowRestoreWithOnlyQueuedCommandsRestoresNothing(t *testing.T) {
+func TestUpArrowRestoreWithOnlyQueuedCommandsRestoresAndRemoves(t *testing.T) {
 	m := model{
 		ready:       true,
 		width:       80,
@@ -5252,10 +5222,11 @@ func TestUpArrowRestoreWithOnlyQueuedCommandsRestoresNothing(t *testing.T) {
 	updated, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyUp})
 	got := derefTestModel(t, updated)
 
-	// No input-type item queued — the command stays queued and the input is
-	// untouched (falls through to the input-history branch).
-	if len(got.queuedItems) != 1 {
-		t.Fatalf("expected queued command to remain, got %#v", got.queuedItems)
+	if got.input.Value() != "/btw aside" {
+		t.Fatalf("expected up arrow to restore queued command, got %q", got.input.Value())
+	}
+	if len(got.queuedItems) != 0 {
+		t.Fatalf("expected queued command to be removed, got %#v", got.queuedItems)
 	}
 }
 

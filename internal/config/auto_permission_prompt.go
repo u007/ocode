@@ -23,7 +23,7 @@ import (
 // This text is intentionally separate from permissions.auto.prompt in
 // ocodeconfig.json: that field is the user's own free-form override and
 // must never be silently overwritten by a bundled update.
-const BundledAutoPermissionPromptVersion = "1.1.0"
+const BundledAutoPermissionPromptVersion = "1.2.0"
 
 // BundledAutoPermissionPromptBody is the shipped default addendum. Bump
 // BundledAutoPermissionPromptVersion whenever this changes.
@@ -41,6 +41,7 @@ const BundledAutoPermissionPromptBody = `Always ALLOW these git commands without
 - "git describe" — describes a commit; read-only.
 - "git fetch" — updates remote-tracking refs only; does not touch the working tree or local branches.
 - "git add" (and "git add -A"/"-p" etc.) — stages changes into the index; does not touch the working tree and is trivially reversible with "git reset".
+- "curl"/"wget"/"http"/"https" targeting localhost, 127.0.0.0/8, or ::1 (any port/path, including with auth headers or request bodies) — loopback-only traffic stays on-host and cannot exfiltrate data off-machine.
 `
 
 // AutoPermissionPromptStatus mirrors internal/skill's skill status states,
@@ -91,6 +92,71 @@ func AutoPermissionPromptFilePath() (string, error) {
 		dir = filepath.Join(os.Getenv("APPDATA"), "opencode")
 	}
 	return filepath.Join(dir, "auto-permission-prompt.md"), nil
+}
+
+// CustomAutoPermissionPromptFilePath returns the path to the user's own
+// free-form addendum, appended after the bundled prompt. This file is never
+// managed, versioned, or overwritten by InstallAutoPermissionPrompt — it
+// exists so people can extend the auto-permission gatekeeper without editing
+// the bundled file, which would otherwise mark it CustomModified and block
+// future auto-upgrades of the bundled content (see LoadAutoPermissionPromptBody).
+func CustomAutoPermissionPromptFilePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	dir := filepath.Join(home, ".config", "opencode")
+	if runtime.GOOS == "windows" {
+		dir = filepath.Join(os.Getenv("APPDATA"), "opencode")
+	}
+	return filepath.Join(dir, "auto-permission-prompt.local.md"), nil
+}
+
+// customAutoPermissionPromptTemplate seeds a freshly created local addendum
+// file with an explanatory comment, so opening it for the first time doesn't
+// show a blank file with no indication of what it's for.
+const customAutoPermissionPromptTemplate = `<!--
+Your own additions to the auto-permission gatekeeper prompt. This text is
+appended after the bundled addendum (auto-permission-prompt.md) and before
+the per-request prompt. Edit freely — unlike the bundled file, this one is
+never touched by "/permissions auto prompt install|upgrade".
+-->
+`
+
+// EnsureCustomAutoPermissionPromptFile creates the custom addendum file,
+// seeded with an explanatory template, if it doesn't already exist. It never
+// overwrites an existing file.
+func EnsureCustomAutoPermissionPromptFile() error {
+	path, err := CustomAutoPermissionPromptFilePath()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+	return writeAutoPermissionPromptFileAtomic(path, []byte(customAutoPermissionPromptTemplate))
+}
+
+// LoadCustomAutoPermissionPromptBody returns the user's own addendum body,
+// or "" (with a nil error) if no local addendum file exists yet.
+func LoadCustomAutoPermissionPromptBody() (string, error) {
+	path, err := CustomAutoPermissionPromptFilePath()
+	if err != nil {
+		return "", err
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", err
+	}
+	return string(body), nil
 }
 
 func autoPermissionPromptSidecarPath(installedPath string) string {
@@ -180,8 +246,21 @@ func InstallAutoPermissionPrompt(force bool) (string, error) {
 }
 
 // LoadAutoPermissionPromptBody returns the installed prompt body, or ""
-// (with a nil error) if nothing is installed yet.
+// (with a nil error) if nothing is installed yet. An installed file that is
+// Outdated (unmodified since install, but the bundled body has since
+// changed) is silently auto-upgraded first — this is the same "safe,
+// unattended" case InstallAutoPermissionPrompt documents, so a stale
+// addendum self-heals the next time it's loaded instead of requiring the
+// user to run `/permissions auto prompt upgrade` by hand. A
+// CustomModified file is left untouched, exactly as a manual upgrade
+// without force would leave it.
 func LoadAutoPermissionPromptBody() (string, error) {
+	if status, err := GetAutoPermissionPromptStatus(); err == nil && status == AutoPermissionPromptOutdated {
+		if _, ierr := InstallAutoPermissionPrompt(false); ierr != nil {
+			return "", fmt.Errorf("auto-upgrade outdated auto-permission prompt: %w", ierr)
+		}
+	}
+
 	path, err := AutoPermissionPromptFilePath()
 	if err != nil {
 		return "", err

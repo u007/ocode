@@ -692,7 +692,7 @@ func runAgentCmd(m *model, args []string) tea.Cmd {
 }
 
 func runPermissionsCmd(m *model, args []string) tea.Cmd {
-	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status|prompt <status|install|upgrade>> | model [test|<provider/model>|auto]]"
+	usage := "Usage: /permissions [<tool> <allow|deny|ask> | bash:<prefix> <allow|deny|ask> | auto-add <prefix> | auto-remove <prefix> | mode <prefix> <read_only|mutating|never_auto> | auto <on|off|status|prompt <status|install|upgrade|edit>> | model [test|<provider/model>|auto]]"
 	if len(args) == 0 {
 		if m.agent == nil || m.agent.Permissions() == nil {
 			m.messages = append(m.messages, message{role: roleAssistant, text: "No permission manager configured.\n\n" + usage})
@@ -840,9 +840,21 @@ func runPermissionsCmd(m *model, args []string) tea.Cmd {
 				status := map[bool]string{true: "on", false: "off"}[enabled]
 				m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("LLM auto-allow is %s.", status)})
 			case "prompt":
+				if len(args) >= 3 && strings.ToLower(args[2]) == "edit" {
+					if err := config.EnsureCustomAutoPermissionPromptFile(); err != nil {
+						m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to create custom auto-permission prompt file: %v", err)})
+						return nil
+					}
+					path, err := config.CustomAutoPermissionPromptFilePath()
+					if err != nil {
+						m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Failed to resolve custom auto-permission prompt path: %v", err)})
+						return nil
+					}
+					return m.openPathInEditorCmd(path)
+				}
 				m.messages = append(m.messages, message{role: roleAssistant, text: runAutoPermissionPromptCmd(args[2:])})
 			default:
-				m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions auto <on|off|status|prompt <status|install|upgrade>>"})
+				m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /permissions auto <on|off|status|prompt <status|install|upgrade|edit>>"})
 			}
 			return nil
 		case "model":
@@ -1005,7 +1017,16 @@ func runSkillsCmd(m *model, args []string) tea.Cmd {
 // (~/.config/opencode/auto-permission-prompt.md) the same way `/skills
 // install|upgrade` manages bundled skills: detect missing/outdated/
 // custom-modified, and only overwrite a customized file when the user
-// explicitly upgrades.
+// explicitly upgrades. An outdated-but-unmodified file also self-heals the
+// next time it's loaded (config.LoadAutoPermissionPromptBody), so this
+// command is mostly for checking status or forcing an upgrade over local
+// edits.
+//
+// The `edit` subcommand is handled by the caller (runPermissionsCmd) rather
+// than here, since opening $EDITOR needs the tea.Cmd / *model plumbing this
+// string-returning helper doesn't have — it opens
+// auto-permission-prompt.local.md, the user's own addendum appended after
+// the bundled prompt (see CustomAutoPermissionPromptFilePath).
 func runAutoPermissionPromptCmd(args []string) string {
 	sub := "status"
 	if len(args) > 0 {
@@ -1032,7 +1053,7 @@ func runAutoPermissionPromptCmd(args []string) string {
 		}
 		return fmt.Sprintf("Auto-permission prompt addendum: %s.", action)
 	default:
-		return "Usage: /permissions auto prompt <status|install|upgrade> [force]"
+		return "Usage: /permissions auto prompt <status|install|upgrade|edit> [force]"
 	}
 }
 

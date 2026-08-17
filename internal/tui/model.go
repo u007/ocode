@@ -679,6 +679,12 @@ func (m *model) cleanupAgent(target *agent.Agent) {
 }
 
 func (m *model) cleanupCurrentSession() {
+	// Cancel any running /btw side-query loop so its child agent and
+	// processes die with the session.
+	if m.btwCancel != nil {
+		m.btwCancel()
+		m.btwCancel = nil
+	}
 	if m.supervisor != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -911,14 +917,17 @@ type model struct {
 	showPermDialog        bool
 	showRetryDialog       bool
 	retryDialogMsg        string
-	showBtwDialog         bool   // /btw: shows the side-query popup
-	btwLoading            bool   // true while the /btw request is in flight
-	btwQuestion           string // the aside text sent with /btw
-	btwAnswer             string // the model's response, once received
-	btwGen                uint64 // monotonic counter; invalidates stale /btw responses
-	showURLDialog         bool   // URL open confirmation dialog
-	pendingURL            string // URL to open when confirmed
-	banClearConfirm       bool   // /ban clear confirmation dialog
+	showBtwDialog         bool           // /btw: shows the side-query popup
+	btwLoading            bool           // true while the /btw request is in flight
+	btwQuestion           string         // the aside text sent with /btw
+	btwAnswer             string         // the model's response, once received
+	btwActivity           string         // live tool-activity lines streamed while the loop runs
+	btwCancel             func()         // cancels the running /btw side-query loop (stops the child agent + its processes)
+	btwGen                uint64         // monotonic counter; invalidates stale /btw responses
+	btwViewport           viewport.Model // vertically scrollable body for the /btw popup (wrapped text)
+	showURLDialog         bool           // URL open confirmation dialog
+	pendingURL            string         // URL to open when confirmed
+	banClearConfirm       bool           // /ban clear confirmation dialog
 	// sessionDeleteConfirm tracks the session deletion confirmation dialog.
 	sessionDeleteConfirm      bool   // true when confirmation dialog is showing
 	sessionDeleteConfirmID    string // the session ID to delete
@@ -1939,7 +1948,8 @@ func newModel(opts ...RunOptions) model {
 		compactCh:            make(chan agent.CompactResult, 4),
 		compactStartCh:       make(chan struct{}, 4),
 		recapCh:              make(chan recapFinishedMsg, 4),
-		btwCh:                make(chan btwResultMsg, 4),
+		btwCh:                make(chan btwResultMsg, 64),
+		btwViewport:          viewport.New(viewport.WithWidth(80), viewport.WithHeight(8)),
 		titleCh:              make(chan titleResult, 4),
 		usageCh:              make(chan usageEvent, 16),
 		sideUsageCh:          make(chan sideUsageData, 16),
@@ -2385,6 +2395,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Mouse outside dialog bounds — fall through to transcript scroll.
+		}
+		if m.showBtwDialog && m.activeTab == tabChat {
+			// Same inline placement as the permission dialog: scroll the /btw
+			// popup's body only when the wheel is over it; otherwise let the
+			// transcript scroll.
+			mouse := msg.Mouse()
+			topY := m.inputAreaTopY()
+			if mouse.X < m.panelWidth() && mouse.Y >= topY && mouse.Y < topY+m.inputAreaHeight() {
+				if msg.Button == tea.MouseWheelUp {
+					m.btwViewport.ScrollUp(scrollSpeed)
+					return m, nil
+				}
+				if msg.Button == tea.MouseWheelDown {
+					m.btwViewport.ScrollDown(scrollSpeed)
+					return m, nil
+				}
+			}
 		}
 		if m.activeTab == tabFiles {
 			// Prefer panel focus first, then mouse position.
@@ -4243,13 +4270,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitRecapEvent(m.recapCh)
 	case btwResultMsg:
 		if msg.gen == m.btwGen {
-			m.btwLoading = false
-			if msg.err != "" {
-				m.btwAnswer = "Error: " + msg.err
+			if msg.live {
+				// Live update while the side-query loop runs: activity lines
+				// and streamed text both append; the dialog stays loading.
+				if msg.activity {
+					if m.btwActivity != "" && !strings.HasSuffix(m.btwActivity, "\n") {
+						m.btwActivity += "\n"
+					}
+					m.btwActivity += msg.text
+				} else {
+					m.btwAnswer += msg.text
+				}
+				m.layout()
 			} else {
-				m.btwAnswer = msg.text
+				// Final result: replace the accumulated answer, drop loading.
+				m.btwLoading = false
+				m.btwCancel = nil
+				if msg.err != "" {
+					m.btwAnswer = "Error: " + msg.err
+				} else {
+					m.btwAnswer = msg.text
+				}
+				m.layout()
 			}
-			m.layout()
 		}
 		return m, waitBtwEvent(m.btwCh)
 	case goalDoneMsg:
@@ -4905,10 +4948,29 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 	if m.showBtwDialog {
 		switch keyStr {
 		case "enter", "esc":
+			// Cancel the running side-query loop so it stops burning tokens
+			// and its child processes are killed.
+			if m.btwCancel != nil {
+				m.btwCancel()
+				m.btwCancel = nil
+			}
 			m.showBtwDialog = false
 			m.btwLoading = false
 			m.btwQuestion = ""
 			m.btwAnswer = ""
+			m.btwActivity = ""
+			return m, nil
+		case "up", "k":
+			m.btwViewport.ScrollUp(m.scrollSpeed)
+			return m, nil
+		case "down", "j":
+			m.btwViewport.ScrollDown(m.scrollSpeed)
+			return m, nil
+		case "ctrl+u", "pgup":
+			m.btwViewport.ScrollUp(m.btwViewport.Height())
+			return m, nil
+		case "ctrl+d", "pgdown":
+			m.btwViewport.ScrollDown(m.btwViewport.Height())
 			return m, nil
 		}
 		return m, nil
@@ -5087,18 +5149,14 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 		}
 
 		if len(m.queuedItems) > 0 && m.input.Value() == "" {
-			// Walk backwards to find the last input-type item (skip commands).
-			// A queued command is waiting to run; recalling it into the input
-			// would silently remove it from execution.
-			for i := len(m.queuedItems) - 1; i >= 0; i-- {
-				if m.queuedItems[i].kind == queueItemInput || m.queuedItems[i].kind == queueItemCompactInput {
-					item := m.queuedItems[i]
-					m.queuedItems = append(m.queuedItems[:i], m.queuedItems[i+1:]...)
-					m.input.SetValue(item.text)
-					m.layout()
-					return m, nil
-				}
-			}
+			// Restore the most recently queued item, regardless of kind, and
+			// remove it from the queue so resubmitting doesn't duplicate it.
+			i := len(m.queuedItems) - 1
+			item := m.queuedItems[i]
+			m.queuedItems = append(m.queuedItems[:i], m.queuedItems[i+1:]...)
+			m.input.SetValue(item.text)
+			m.layout()
+			return m, nil
 		}
 		if len(m.inputHistory) == 0 {
 			break
@@ -7123,12 +7181,6 @@ func (m model) handleDetailClick(mouse tea.Mouse) (tea.Model, tea.Cmd, bool) {
 				return m, nil, true
 			}
 		}
-		for _, b := range top.procs {
-			if contentLine >= b.rowStart && contentLine < b.rowEnd {
-				m.openProcessLogForRun(top.runPath, b.procID)
-				return m, nil, true
-			}
-		}
 		for _, b := range top.runs {
 			if b.runPath != top.runPath && contentLine >= b.rowStart && contentLine < b.rowEnd {
 				m.openAgentDetail(b.runPath)
@@ -7198,10 +7250,13 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 	// Instant commands are local UI / config / auth actions that never need to
 	// wait for the current stream or compaction turn, so they can run immediately
 	// even while busy.
-	// /btw is deliberately NOT instant: it starts a one-shot LLM completion on
-	// the shared client, and running it mid-stream would race the main turn's
-	// installed OnDelta callback (its tokens would leak into the transcript).
-	// Queued, it runs after the stream ends — naturally serialized.
+	// /btw is deliberately NOT instant: it starts an independent side-query
+	// agent loop (its own client) on the shared workdir, and running it
+	// mid-stream would interleave a second concurrent LLM loop with the main
+	// turn — the popup also blocks input while open. Queued, it runs after
+	// the stream ends — naturally serialized. (Its child agent has its own
+	// client, so unlike the old shared-client version there is no OnDelta
+	// race; queuing is about stream interleaving and UI, not token leakage.)
 	isExitCmd := cmd == "/exit" || cmd == "/quit" || cmd == "/q"
 	isInstantCmd := cmd == "/model" || cmd == "/models" ||
 		cmd == "/help" || cmd == "/thinking" || cmd == "/details" || cmd == "/sound" ||
@@ -9216,6 +9271,12 @@ func (m *model) handleExportClaudeCmd(args []string) {
 }
 
 func (m *model) handleNewCmd(args []string) tea.Cmd {
+	// Cancel any running /btw side-query loop — its child agent and processes
+	// must not outlive the session it was answering for.
+	if m.btwCancel != nil {
+		m.btwCancel()
+		m.btwCancel = nil
+	}
 	// Drop the LSP manager too so the new session starts with no language
 	// servers running. The next query (or /plugin enable ast) will lazily
 	// spin up fresh ones via getInitialTools.
@@ -9879,9 +9940,11 @@ func silenceCmdOutput(cmd *exec.Cmd) {
 }
 
 // handleBtwCmd runs a side query: the current conversation history plus the
-// aside text is sent as a one-shot completion, and the answer is shown in a
-// popup dialog. Neither the aside nor its answer become part of m.messages
-// or the persisted session history.
+// aside text is sent through an INDEPENDENT agent loop (its own client, its
+// own message list, tools enabled) and the answer is shown in a popup dialog.
+// Neither the aside, the tool activity, nor the answer become part of
+// m.messages or the persisted session history. The side-query loop is
+// cancelled when the popup is dismissed or a new /btw starts.
 func (m *model) handleBtwCmd(args []string) {
 	if len(args) == 0 {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Usage: /btw <message> — add a quick aside to the conversation (by the way)"})
@@ -9891,9 +9954,19 @@ func (m *model) handleBtwCmd(args []string) {
 		m.messages = append(m.messages, message{role: roleAssistant, text: "Error: no agent available"})
 		return
 	}
+	// Cancel any still-running previous side-query loop (it is replaced below).
+	if m.btwCancel != nil {
+		m.btwCancel()
+		m.btwCancel = nil
+	}
 	text := strings.Join(args, " ")
 	agentMsgs, _ := m.buildAgentMessagesSnapshot()
 	agentMsgs = append(agentMsgs, agent.Message{Role: "user", Content: text})
+	// Tier-1 redaction parity with streamStep: mask secrets in the aside
+	// before it reaches the side-query LLM.
+	if m.redactionRegistry != nil {
+		applyTier1UserRedaction(agentMsgs, m.redactionRegistry)
+	}
 
 	m.btwGen++
 	gen := m.btwGen
@@ -9901,9 +9974,36 @@ func (m *model) handleBtwCmd(args []string) {
 	m.btwLoading = true
 	m.btwQuestion = text
 	m.btwAnswer = ""
+	m.btwActivity = ""
 
 	ch := m.btwCh
-	m.agent.AskAsync(agentMsgs, func(content string, err error) {
+	m.btwCancel = m.agent.AskLoopAsync(agentMsgs, agent.AskLoopOptions{
+		Tools:         m.btwTools(),
+		ExcludedTools: btwExcludedTools,
+		MaxSteps:      btwMaxSteps,
+		// Stream tool activity into the popup as it happens.
+		OnMessage: func(am agent.Message) {
+			if line := formatBtwActivity(am); line != "" {
+				select {
+				case ch <- btwResultMsg{gen: gen, text: line, live: true, activity: true}:
+				default:
+					// drop on backpressure — the final answer is authoritative
+				}
+			}
+		},
+		// Stream text tokens into the popup live (the child has its own
+		// client, so this can never leak into the main transcript).
+		OnDelta: func(kind, text string) {
+			if kind != "text" || text == "" {
+				return
+			}
+			select {
+			case ch <- btwResultMsg{gen: gen, text: text, live: true}:
+			default:
+				// drop on backpressure — the final answer is authoritative
+			}
+		},
+	}, func(content string, err error) {
 		res := btwResultMsg{gen: gen, text: content}
 		if err != nil {
 			res.err = err.Error()
@@ -9913,6 +10013,77 @@ func (m *model) handleBtwCmd(args []string) {
 		default:
 		}
 	})
+}
+
+// btwMaxSteps caps the /btw side-query loop so a runaway tool chain cannot
+// burn tokens forever in the popup.
+const btwMaxSteps = 8
+
+// btwExcludedTools lists tools the /btw side-query loop must not expose.
+// It is used BOTH to filter the builtin slice (question, todo/plan tools)
+// and as AskLoopOptions.ExcludedTools, which deletes NewAgent-registered
+// tools (task family, wait, knowledge_lookup, advisor) from the child's
+// final tool map — the slice filter alone cannot remove those, since
+// NewAgent registers them unconditionally. The result stays non-interactive:
+// any permission ASK is denied non-blockingly by AskLoopAsync.
+var btwExcludedTools = []string{
+	"question",
+	"task",
+	"task_status",
+	"agent_status",
+	"task_cancel",
+	"wait",
+	"todo_write",
+	"todo_update",
+	"plan_enter",
+	"plan_exit",
+	"discover_more",
+	"knowledge_lookup",
+	"advisor",
+}
+
+// btwTools returns the tool set exposed to the /btw side-query loop: the
+// builtin set minus btwExcludedTools. The exclusion list is applied to the
+// slice HERE and (as AskLoopOptions.ExcludedTools) to the child's final tool
+// map, because NewAgent unconditionally registers the dispatch family even
+// when the slice omits it. The result stays non-interactive: any permission
+// ASK is denied non-blockingly by AskLoopAsync.
+func (m *model) btwTools() []tool.Tool {
+	excluded := make(map[string]bool, len(btwExcludedTools))
+	for _, name := range btwExcludedTools {
+		excluded[name] = true
+	}
+	tools, _ := m.getInitialTools()
+	var out []tool.Tool
+	for _, t := range tools {
+		if excluded[t.Name()] {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+// formatBtwActivity renders a compact activity line for a /btw loop message:
+// "→ name: args" for an assistant tool call (the tool-result message carries
+// only the call id, so it adds no signal). Returns "" when the message has
+// nothing worth surfacing.
+func formatBtwActivity(am agent.Message) string {
+	if am.Role == "assistant" && len(am.ToolCalls) > 0 {
+		var b strings.Builder
+		for _, tc := range am.ToolCalls {
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			args := strings.TrimSpace(tc.Function.Arguments)
+			if len(args) > 60 {
+				args = args[:57] + "..."
+			}
+			b.WriteString("→ " + tc.Function.Name + " " + args)
+		}
+		return b.String()
+	}
+	return ""
 }
 
 func (m *model) handleInitCmd(args []string) tea.Cmd {
@@ -11411,7 +11582,8 @@ func (m *model) handleContextCmd(args []string) {
 		telemetry = aggregateSidebarTelemetry(m.messages)
 	}
 	if telemetry.hasData() {
-		fmt.Fprintf(&b, "  Usage      In %s  Cache %s  Out %s\n", strconv.FormatInt(telemetry.inputTokens, 10), strconv.FormatInt(telemetry.cachedTokens, 10), strconv.FormatInt(telemetry.outputTokens, 10))
+		cacheRate := formatPercent(telemetry.cachedTokens, telemetry.inputTokens+telemetry.cachedTokens)
+		fmt.Fprintf(&b, "  Usage      In %s  Cache %s (%s)  Out %s\n", strconv.FormatInt(telemetry.inputTokens, 10), strconv.FormatInt(telemetry.cachedTokens, 10), cacheRate, strconv.FormatInt(telemetry.outputTokens, 10))
 		if telemetry.spend != nil {
 			fmt.Fprintf(&b, "             $%.4f\n", *telemetry.spend)
 		}
@@ -13633,6 +13805,9 @@ func (m *model) layout() {
 	if m.showPermDialog {
 		m.syncPermViewport(max(0, panelWidth-4))
 	}
+	if m.showBtwDialog {
+		m.syncBtwViewport(max(0, panelWidth-4))
+	}
 	innerWidth := panelWidth - 8 // -8 not -7: 1-col right margin guards against terminal double-width shift (VS Code known bug)
 	if innerWidth < 1 {
 		innerWidth = 1
@@ -15533,13 +15708,18 @@ func waitBtwEvent(doneCh chan btwResultMsg) tea.Cmd {
 	}
 }
 
-// btwResultMsg carries the result of a /btw side-query back into the
-// bubbletea event loop. gen guards against a stale result overwriting a
-// newer /btw request's popup.
+// btwResultMsg carries a /btw side-query event back into the bubbletea event
+// loop. gen guards against a stale result overwriting a newer /btw request's
+// popup. live=false is the final answer (text/err replace the accumulated
+// popup body); live=true is an incremental update while the loop runs —
+// activity=true carries a tool-activity line, activity=false carries streamed
+// text tokens.
 type btwResultMsg struct {
-	gen  uint64
-	text string
-	err  string
+	gen      uint64
+	text     string
+	err      string
+	live     bool
+	activity bool
 }
 
 // deltaEvent carries one streamed token (kind ∈ {"reasoning","text"}) from
@@ -16327,10 +16507,10 @@ func (m *model) openAgentDetail(runID string) {
 	}
 	vp := viewport.New(viewport.WithWidth(m.detailViewportWidth()), viewport.WithHeight(m.detailViewportHeight()))
 	expanded := map[string]bool{}
-	content, runs, procs, regions := renderRunTranscriptDetail(run, runID, vp.Width(), expanded)
+	content, runs, regions := renderRunTranscriptDetail(run, runID, vp.Width(), expanded)
 	vp.SetContent(content)
 	vp.GotoBottom()
-	dv := detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, procs: procs, expanded: expanded, regions: regions}
+	dv := detailView{kind: detailAgentRun, runID: run.ID, runPath: runID, vp: vp, runs: runs, expanded: expanded, regions: regions}
 	dv.content = content
 	dv.lines = strings.Split(content, "\n")
 	dv.rawLines = strings.Split(stripANSI(content), "\n")
@@ -16404,11 +16584,10 @@ func (m *model) refreshTopDetailView() {
 		if !ok {
 			return
 		}
-		content, runs, procs, regions := renderRunTranscriptDetail(run, top.runPath, top.vp.Width(), top.expanded)
+		content, runs, regions := renderRunTranscriptDetail(run, top.runPath, top.vp.Width(), top.expanded)
 		setDetailContent(top, content)
 		top.runID = run.ID
 		top.runs = runs
-		top.procs = procs
 		top.regions = regions
 	case detailProcessList:
 		if reg := m.processRegistryForRun(top.runPath); reg != nil {
@@ -16559,7 +16738,7 @@ func (m model) renderDetailView(d detailView) string {
 	}
 	hints := "esc: back · j/k: scroll · mouse: scroll · drag: select · ctrl+f: find"
 	if d.kind == detailAgentRun {
-		hints += " · click: sub-agent/process · ctrl+g: processes"
+		hints += " · click: sub-agent · ctrl+g: processes"
 	} else if d.kind == detailProcessList {
 		hints += " · click: open process"
 	} else if d.kind == detailReview {
@@ -17115,6 +17294,11 @@ func (m *model) renderStatus() string {
 		in := formatTokenCount(m.sessionTelemetry.inputTokens)
 		out := formatTokenCount(m.sessionTelemetry.outputTokens)
 		tokUsage = fmt.Sprintf(" · \u2193%s \u2191%s", in, out)
+		if m.sessionTelemetry.cachedTokens > 0 {
+			cache := formatTokenCount(m.sessionTelemetry.cachedTokens)
+			rate := formatPercent(m.sessionTelemetry.cachedTokens, m.sessionTelemetry.inputTokens+m.sessionTelemetry.cachedTokens)
+			tokUsage += fmt.Sprintf(" \u29d6%s(%s)", cache, rate)
+		}
 	}
 	leftStatus := statusPrefix + tokUsage + permissionMode + compactState + jobState
 	if m.mcpLoading {
@@ -17500,9 +17684,10 @@ func sidebarUsageLines(telemetry sidebarTelemetry) []string {
 		return []string{"n/a"}
 	}
 	tokenLine := fmt.Sprintf(
-		"In %s  Cache %s  Out %s",
+		"In %s  Cache %s (%s)  Out %s",
 		formatCompactInt(telemetry.inputTokens),
 		formatCompactInt(telemetry.cachedTokens),
+		formatPercent(telemetry.cachedTokens, telemetry.inputTokens+telemetry.cachedTokens),
 		formatCompactInt(telemetry.outputTokens),
 	)
 	if telemetry.spend == nil {
@@ -19361,6 +19546,8 @@ func (m model) inputAreaHeight() int {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderBanClearConfirmDialog(panelWidth - 2))
 	} else if m.showPermDialog {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderPermissionDialog(panelWidth - 2))
+	} else if m.showBtwDialog {
+		rendered = borderStyle.Width(panelWidth - 2).Render(m.renderBtwDialog(panelWidth - 2))
 	} else {
 		rendered = borderStyle.Width(panelWidth - 2).Render(m.input.View())
 	}
@@ -19866,8 +20053,85 @@ func (m *model) renderRetryDialog(width int) string {
 
 }
 
-// renderBtwDialog renders the /btw side-query popup: the aside text, a
-// loading indicator or the model's answer, and a dismiss hint.
+// btwDialogMaxBodyLines caps the /btw popup body at ~40% of the terminal
+// height so long answers stay scrollable while the transcript above remains
+// visible. Falls back to the fixed cap on small or unknown terminal sizes.
+const btwDialogMaxBodyLines = 11
+
+func (m model) btwDialogMaxBodyLines() int {
+	lines := m.height * 2 / 5
+	if lines < btwDialogMaxBodyLines {
+		return btwDialogMaxBodyLines
+	}
+	return lines
+}
+
+// syncBtwViewport rebuilds the /btw popup's scrollable body: wraps the
+// question + live activity + (streamed or final) answer at the dialog content
+// width, sizes the viewport to its wrapped content height (capped at
+// btwDialogMaxBodyLines), and preserves the scroll offset across updates so
+// live-streaming text does not yank the user back to the top. Called from
+// layout() so the wrapped lines, scroll bounds, and rendered height all agree.
+func (m *model) syncBtwViewport(contentWidth int) {
+	if !m.showBtwDialog || contentWidth < 1 {
+		return
+	}
+	// The bubbles viewport does NOT soft-wrap: long lines must be wrapped to
+	// the content width here, before SetContent, or they would render off the
+	// dialog edge and the height/scroll math would be wrong.
+	body := wrapView(m.renderBtwBody(), contentWidth)
+	prevYOffset := m.btwViewport.YOffset()
+	m.btwViewport.SetWidth(contentWidth)
+	m.btwViewport.SetContent(body)
+	bodyHeight := lipgloss.Height(lipgloss.NewStyle().Width(contentWidth).Render(body))
+	m.btwViewport.SetHeight(min(max(1, bodyHeight), m.btwDialogMaxBodyLines()))
+	// Short-terminal safety net, mirroring syncPermViewport: shrink the body
+	// until the chrome plus a 1-row transcript fits the terminal, so the popup
+	// can never push the frame past the screen height (alt-screen corruption).
+	if m.height > 0 && m.showBtwDialog {
+		if deficit := m.bottomChromeHeight(m.panelWidth()) + 1 - m.height; deficit > 0 {
+			m.btwViewport.SetHeight(max(1, m.btwViewport.Height()-deficit))
+		}
+	}
+	m.btwViewport.SetYOffset(prevYOffset)
+}
+
+// renderBtwBody assembles the scrollable body of the /btw popup: the aside
+// question, live tool activity lines, and the streamed or final answer. Long
+// lines wrap at the dialog width inside the viewport.
+func (m *model) renderBtwBody() string {
+	question := hintStyle.Render("» " + m.btwQuestion)
+	var parts []string
+	if question != "" {
+		parts = append(parts, question)
+	}
+	var body string
+	if m.btwLoading {
+		body = "Thinking…"
+		if m.btwActivity != "" {
+			body = strings.TrimRight(m.btwActivity, "\n")
+		}
+		if m.btwAnswer != "" {
+			if body != "Thinking…" {
+				body += "\n\n"
+			}
+			body += m.btwAnswer
+		}
+	} else {
+		body = m.btwAnswer
+		if m.btwActivity != "" {
+			body = strings.TrimRight(m.btwActivity, "\n") + "\n\n" + m.btwAnswer
+		}
+	}
+	if body != "" {
+		parts = append(parts, body)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// renderBtwDialog renders the /btw side-query popup: the header, a vertically
+// scrollable wrapped body (viewport), a scroll indicator when content overflows,
+// and a dismiss hint. Up/Down/j/k and the mouse wheel scroll the body.
 func (m *model) renderBtwDialog(width int) string {
 	if !m.showBtwDialog {
 		return ""
@@ -19876,18 +20140,30 @@ func (m *model) renderBtwDialog(width int) string {
 	contentWidth := max(0, width-2)
 
 	header := m.styles.Header.Render("↳ By The Way")
-	question := hintStyle.Render("» " + m.btwQuestion)
-	var body string
-	if m.btwLoading {
-		body = "Thinking…"
-	} else {
-		body = m.btwAnswer
+
+	bodyView := m.btwViewport.View()
+	totalLines := strings.Count(wrapView(m.renderBtwBody(), contentWidth), "\n") + 1
+	visibleLines := m.btwViewport.Height()
+	if totalLines > visibleLines {
+		// Add a scroll indicator arrow to the last visible line.
+		scrollHint := "▼ "
+		if m.btwViewport.YOffset() > 0 {
+			scrollHint = "▲▼ "
+		}
+		if m.btwViewport.YOffset() > 0 && m.btwViewport.YOffset()+visibleLines >= totalLines {
+			scrollHint = "▲ "
+		}
+		lastNewLine := strings.LastIndex(bodyView, "\n")
+		if lastNewLine >= 0 {
+			bodyView = bodyView[:lastNewLine] + " " + scrollHint + bodyView[lastNewLine:]
+		} else if bodyView != "" {
+			bodyView += " " + scrollHint
+		}
 	}
-	body = wrapView(body, contentWidth)
 	dismissHint := hintStyle.Render("Press Enter or Esc to dismiss")
 
 	return lipgloss.NewStyle().Width(contentWidth).MaxWidth(contentWidth).Render(
-		header + "\n\n" + question + "\n\n" + body + "\n\n" + dismissHint,
+		header + "\n\n" + bodyView + "\n\n" + dismissHint,
 	)
 }
 

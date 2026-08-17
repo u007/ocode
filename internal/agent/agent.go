@@ -265,6 +265,13 @@ type Agent struct {
 	// Sub-agents run in their own goroutines and never reach the TUI's
 	// tool-result handling, so the sentinel path is invisible to them.
 	OnPermissionAsk func(PermissionRequest) PermissionResponse
+	// RequestTimeout, if non-zero, bounds each LLM call (including its
+	// internal retries) to this duration, overriding the package-wide
+	// llmRequestTimeout default. Headless `ocode run` sets this to a short
+	// value so an unresponsive endpoint (dead local model, black-holed
+	// proxy) surfaces an error quickly instead of retrying for up to
+	// llmMaxRetries × llmRequestTimeout.
+	RequestTimeout time.Duration
 	// OnPermissionGrant, if set, is invoked when the permission verifier derives
 	// a durable auto-grant that should be persisted by the session layer. The
 	// callback owns persistence; the agent keeps only the in-memory matcher in
@@ -601,6 +608,11 @@ func (a *Agent) chatWithDelta(stopCh <-chan struct{}, messages []Message, toolDe
 		}()
 		ctx, ctxCancel := stopChContext(stopCh)
 		defer ctxCancel()
+		if a.RequestTimeout > 0 {
+			var timeoutCancel context.CancelFunc
+			ctx, timeoutCancel = context.WithTimeout(ctx, a.RequestTimeout)
+			defer timeoutCancel()
+		}
 		return gc.ChatWithContext(ctx, messages, toolDefs)
 	}
 	return a.client.Chat(messages, toolDefs)
@@ -2650,6 +2662,16 @@ ALLOW: writes a test file inside the project directory
 ALLOW: read-only listing of project files
 DENY: deletes files outside the working directory
 These are format examples only — decide from THIS request's tool and arguments.`, toolName, toolArgs, rule, scope, allowedRoots, bannedPrefixes, context)
+
+	// Insert the user's own local addendum (auto-permission-prompt.local.md)
+	// right after the bundled prompt, before this final prepend step runs.
+	// It lives in its own file specifically so people never need to edit the
+	// bundled file to extend it — see CustomAutoPermissionPromptFilePath.
+	if custom, err := config.LoadCustomAutoPermissionPromptBody(); err != nil {
+		a.emitDebug("ERROR", fmt.Sprintf("failed to load custom auto-permission prompt: %v", err))
+	} else if custom != "" {
+		prompt = custom + "\n\n" + prompt
+	}
 
 	// Prepend the bundled auto-permission addendum, if installed (see
 	// config.InstallAutoPermissionPrompt). This is kept separate from

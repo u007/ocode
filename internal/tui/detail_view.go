@@ -36,7 +36,6 @@ type detailView struct {
 	rawLines []string
 	sel      selectionState
 	runs     []detailRunBlock
-	procs    []detailProcBlock
 	expanded map[string]bool
 	regions  []detailExpandRegion
 	// in-view find bar (ctrl+f while the detail card is open)
@@ -57,12 +56,6 @@ type detailExpandRegion struct {
 type detailRunBlock struct {
 	runID    string
 	runPath  string
-	rowStart int
-	rowEnd   int
-}
-
-type detailProcBlock struct {
-	procID   string
 	rowStart int
 	rowEnd   int
 }
@@ -112,20 +105,20 @@ func blockAtRow(blocks []agentStripBlock, row int) string {
 // detail viewport. It intentionally hides raw system prompts; the default user
 // view should explain agent activity, not dump internal prompts.
 func renderRunTranscript(run *agent.AgentRun, width int) string {
-	content, _, _, _ := renderRunTranscriptDetail(run, run.ID, width, nil)
+	content, _, _ := renderRunTranscriptDetail(run, run.ID, width, nil)
 	return content
 }
 
-func renderRunTranscriptDetail(run *agent.AgentRun, runPath string, width int, expanded map[string]bool) (string, []detailRunBlock, []detailProcBlock, []detailExpandRegion) {
+func renderRunTranscriptDetail(run *agent.AgentRun, runPath string, width int, expanded map[string]bool) (string, []detailRunBlock, []detailExpandRegion) {
 	if width < 24 {
 		width = 24
 	}
 	return renderAgentRunCard(run, runPath, width, 0, expanded)
 }
 
-func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, expanded map[string]bool) (string, []detailRunBlock, []detailProcBlock, []detailExpandRegion) {
+func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, expanded map[string]bool) (string, []detailRunBlock, []detailExpandRegion) {
 	if run == nil {
-		return "", nil, nil, nil
+		return "", nil, nil
 	}
 	indent := strings.Repeat("  ", min(depth, 2))
 	cardWidth := max(20, width-lipglossWidth(indent)-4)
@@ -134,7 +127,6 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 
 	var body strings.Builder
 	var runBlocks []detailRunBlock
-	var procBlocks []detailProcBlock
 	var expandRegions []detailExpandRegion
 	currentRow := 0
 	innerWidth := max(1, cardWidth-4)
@@ -239,22 +231,25 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 		appendLine(renderMarkdown(strings.TrimSpace(run.Result), textStyle))
 	}
 
-	if procs := runProcesses(run); len(procs) > 0 {
-		appendLine(headerStyle.Render("Background processes"))
-		for _, pi := range procs {
-			line := formatProcessListLine(pi)
-			rowStart := currentRow
-			appendLine(line)
-			procBlocks = append(procBlocks, detailProcBlock{procID: pi.ID, rowStart: rowStart, rowEnd: currentRow})
-		}
-	}
-
 	if len(children) > 0 {
 		appendLine(headerStyle.Render("Sub-agents"))
 		for _, child := range children {
-			childStart := currentRow
 			childPath := runPath + "/" + child.ID
-			childText, childRuns, childProcs, childRegions := renderAgentRunCard(child, childPath, max(20, cardWidth-4), depth+1, expanded)
+			if depth > 0 {
+				// Already one level deep in this card: don't recurse further
+				// inline. Show a one-line summary; clicking it opens the
+				// child as its own detail view (one more level per click).
+				rowStart := currentRow
+				line := fmt.Sprintf("  %s %s %s · %s", child.Name, statusIcon(child.Status, "●"), child.Status, formatRunElapsed(child))
+				if summary := formatChildSummary(agentRunChildren(child)); summary != "" {
+					line += " · " + summary
+				}
+				appendLine(line)
+				runBlocks = append(runBlocks, detailRunBlock{runID: child.ID, runPath: childPath, rowStart: rowStart, rowEnd: currentRow})
+				continue
+			}
+			childStart := currentRow
+			childText, childRuns, childRegions := renderAgentRunCard(child, childPath, max(20, cardWidth-4), depth+1, expanded)
 			body.WriteString(childText)
 			if !strings.HasSuffix(childText, "\n") {
 				body.WriteString("\n")
@@ -264,11 +259,6 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 				b.rowStart += childStart
 				b.rowEnd += childStart
 				runBlocks = append(runBlocks, b)
-			}
-			for _, b := range childProcs {
-				b.rowStart += childStart
-				b.rowEnd += childStart
-				procBlocks = append(procBlocks, b)
 			}
 			for _, b := range childRegions {
 				b.rowStart += childStart
@@ -285,9 +275,9 @@ func renderAgentRunCard(run *agent.AgentRun, runPath string, width, depth int, e
 	card := strings.TrimRight(body.String(), "\n")
 	runBlocks = append([]detailRunBlock{{runID: run.ID, runPath: runPath, rowStart: cardStart, rowEnd: currentRow}}, runBlocks...)
 	if indent == "" {
-		return card, runBlocks, procBlocks, expandRegions
+		return card, runBlocks, expandRegions
 	}
-	return indentBlock(card, indent), runBlocks, procBlocks, expandRegions
+	return indentBlock(card, indent), runBlocks, expandRegions
 }
 
 func renderDetailThinkingBox(content string, width int, expanded bool) string {
@@ -414,13 +404,6 @@ func lineCount(s string) int {
 		return 0
 	}
 	return strings.Count(trimmed, "\n") + 1
-}
-
-func runProcesses(run *agent.AgentRun) []tool.ProcInfo {
-	if run == nil || run.Procs == nil {
-		return nil
-	}
-	return run.Procs.Snapshot()
 }
 
 func formatProcessListLine(pi tool.ProcInfo) string {

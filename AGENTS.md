@@ -281,10 +281,13 @@ The list is not git-based — it derives from the snapshot store
     `/mcp`, `/advisor`, `/mask`, `/rc`,
     `/remote-control`, `/search`, `/find`, `/docs`, `/doc-mode`, `/recap`,
     `/goal`, and `/agents status` (or `/agents` with no arguments).
-    `/btw`/`/by-the-way` is deliberately NOT instant: it starts a one-shot LLM
-    completion on the shared client, and running it mid-stream would race the
-    main turn's installed `OnDelta` callback (tokens leaking into the
-    transcript), so it queues like any other work.
+    `/btw`/`/by-the-way` is deliberately NOT instant: it starts an independent
+    side-query agent loop (its own child agent with its own client — see
+    `Agent.AskLoopAsync`), and running it mid-stream would interleave a second
+    concurrent LLM loop with the main turn (the popup also blocks input while
+    open), so it queues like any other work. Unlike the old shared-client
+    one-shot, there is no `OnDelta` race — the child's client is fresh — so
+    queuing is about stream interleaving and UI, not token leakage.
   - **Queued by design (mutates persistent state mid-stream, so it must
     wait for the current turn to end):** `/add-dir`, `/add-dirs`, `/doc-sync`,
     `/agents limit <n>`.

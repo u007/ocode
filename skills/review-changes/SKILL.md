@@ -63,6 +63,15 @@ When the group finishes, run reconcile on the bus:
 - For contradictions that can't be settled from notes alone, spawn ONE focused verify agent
 - Flag any partition whose agent failed or was cancelled as **UNREVIEWED**
 
+## Tools Beyond Grep
+
+Reviewer agents default to `grep`/`read`, but two structural tools often find things text search misses — worth mentioning in agent prompts:
+
+- **`ast_grep`**: matches code by syntax SHAPE (tree-sitter patterns, `$VAR`/`$$$ARGS`), not text. Use to check a bad pattern isn't repeated elsewhere in the diff/codebase (e.g. `if err != nil { return $E }` swallowing errors), or to preview a structural rewrite. Opt-in — requires `plugins.ast` enabled (`/plugin enable ast`) and the `ast-grep` binary on PATH.
+- **`ast`**: LSP-backed semantic lookup (references/definitions/callers). Use to check the blast radius of a changed function/symbol signature before flagging a breaking change.
+
+Both are plain tool calls agents can invoke directly when reasoning about correctness or cross-cutting risk — no special wiring needed.
+
 ## Output Format
 
 The final reconciled report uses this format (parsed by the TUI):

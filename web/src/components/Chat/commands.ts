@@ -904,20 +904,32 @@ function errorMessage(prefix: string, err: unknown): CommandResult {
   };
 }
 
+// cacheRate returns the cache hit rate as a percentage of (prompt + cache
+// read) tokens, i.e. how much of the input context was served from cache
+// rather than sent fresh.
+function cacheRate(promptTokens: number, cacheReadTokens: number): string {
+  const denom = promptTokens + cacheReadTokens;
+  if (denom <= 0) return "0.0%";
+  return `${((cacheReadTokens / denom) * 100).toFixed(1)}%`;
+}
+
 function formatUsage(s: UsageSummary): string {
   const lines: string[] = ["## Token Usage"];
   lines.push("");
   lines.push(`**Requests:** ${s.total_requests.toLocaleString()}  `);
   lines.push(`**Total tokens:** ${s.total_tokens.toLocaleString()}  `);
+  lines.push(
+    `**Cache rate:** ${cacheRate(s.total_prompt_tokens, s.total_cache_read_tokens)}  `,
+  );
   lines.push(`**Spend:** $${s.total_spend.toFixed(4)}`);
   lines.push("");
 
   if (s.by_model.length > 0) {
-    lines.push("| Model | Requests | Prompt | Completion | Cache read | Total | Spend |");
-    lines.push("|---|--:|--:|--:|--:|--:|--:|");
+    lines.push("| Model | Requests | Prompt | Completion | Cache read | Cache % | Total | Spend |");
+    lines.push("|---|--:|--:|--:|--:|--:|--:|--:|");
     for (const m of s.by_model) {
       lines.push(
-        `| ${m.model} | ${m.request_count.toLocaleString()} | ${m.prompt_tokens.toLocaleString()} | ${m.completion_tokens.toLocaleString()} | ${m.cache_read_tokens.toLocaleString()} | ${m.total_tokens.toLocaleString()} | $${m.spend.toFixed(4)} |`,
+        `| ${m.model} | ${m.request_count.toLocaleString()} | ${m.prompt_tokens.toLocaleString()} | ${m.completion_tokens.toLocaleString()} | ${m.cache_read_tokens.toLocaleString()} | ${cacheRate(m.prompt_tokens, m.cache_read_tokens)} | ${m.total_tokens.toLocaleString()} | $${m.spend.toFixed(4)} |`,
       );
     }
   }
