@@ -2089,6 +2089,10 @@ func newModel(opts ...RunOptions) model {
 		logsDir := filepath.Join(dataDir, "logs")
 		if err := os.MkdirAll(logsDir, 0755); err == nil {
 			DebugLog.MirrorKindToFile(debuglog.EntryKind("COMPACT"), filepath.Join(logsDir, "compact.log"))
+			// Mirror per-turn cache stats (input/cache_read/cache_write/output)
+			// to disk: the sidebar's cache-hit % is cumulative and hides
+			// per-turn variance needed to diagnose cache misses.
+			DebugLog.MirrorKindToFile(debuglog.EntryKind("TOKENS"), filepath.Join(logsDir, "tokens.log"))
 		} else {
 			DebugLog.Append(DebugEntry{Kind: DebugEntryKind("ERROR"), Message: fmt.Sprintf("create %s for compact log mirror: %v", logsDir, err)})
 		}
@@ -9556,6 +9560,7 @@ func (m *model) startShellExecution(cmdText string) tea.Cmd {
 	m.shellCmdText = cmdText
 	if !m.activityRowReserved {
 		m.activityRowReserved = true
+		m.layout()
 	}
 	return m.runStreamingShell(cmdText, m.workDir, toolCallID)
 }

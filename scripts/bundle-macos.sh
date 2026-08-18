@@ -10,6 +10,8 @@ fi
 
 BINARY="$1"
 APP="$2"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ICON="$SCRIPT_DIR/../build/appicon.icns"
 
 if [[ ! -f "$BINARY" ]]; then
   echo "error: binary not found: $BINARY" >&2
@@ -22,6 +24,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/ocode"
 chmod +x "$APP/Contents/MacOS/ocode"
 
+if [[ -f "$ICON" ]]; then
+  cp "$ICON" "$APP/Contents/Resources/appicon.icns"
+fi
+
 PLIST="$APP/Contents/Info.plist"
 cat > "$PLIST" <<'PLIST_EOF'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -30,6 +36,8 @@ cat > "$PLIST" <<'PLIST_EOF'
 <dict>
 	<key>CFBundleExecutable</key>
 	<string>ocode</string>
+	<key>CFBundleIconFile</key>
+	<string>appicon.icns</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.u007.ocode</string>
 	<key>CFBundleName</key>

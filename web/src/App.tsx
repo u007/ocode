@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatState, getSessionSlice } from "./stores/chatStore";
@@ -17,7 +17,7 @@ import ChangesPanel from "./components/Changes/ChangesPanel";
 import FileTree from "./components/Files/FileTree";
 import FileEditor from "./components/Files/FileEditor";
 import LogPanel from "./components/Logs/LogPanel";
-import TerminalTabs from "./components/Terminal/TerminalTabs";
+import TerminalTabs, { type TerminalTabsHandle } from "./components/Terminal/TerminalTabs";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
@@ -263,6 +263,16 @@ function HomeApp() {
     onNewSession: () => {
       openNewSessionTab(isNewSessionTabEmpty(activeTabId));
     },
+    onNewTerminal: () => {
+      // Ctrl/Cmd+T: if on terminal sub-tab, open a new terminal instance;
+      // otherwise create a new session tab (same as Ctrl/Cmd+N).
+      const currentTab = tabs.find((t) => t.id === activeTabId);
+      if (currentTab?.activeSubTab === "terminal") {
+        terminalRefs.current.get(activeTabId!)?.openTerminal();
+      } else {
+        openNewSessionTab(isNewSessionTabEmpty(activeTabId));
+      }
+    },
     onCommandPalette: () => setCmdOpen(true),
     onFilePicker: () => setFilePickerOpen(true),
     onSave: () => {
@@ -377,6 +387,9 @@ function HomeApp() {
 
   const allChatTabs = Object.values(projectState.tabsByProject).flat();
   const activeSessionTab = tabs.find((t) => t.id === activeTabId);
+
+  // Refs to TerminalTabs instances so Ctrl/Cmd+T can open a new terminal
+  const terminalRefs = useRef<Map<string, TerminalTabsHandle>>(new Map());
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950">
@@ -530,12 +543,17 @@ function HomeApp() {
                         }
                       >
                         <TerminalTabs
+                          ref={(handle) => {
+                            if (handle) terminalRefs.current.set(tab.id, handle);
+                            else terminalRefs.current.delete(tab.id);
+                          }}
                           active={
                             tab.projectPath === projectState.activeProject?.path &&
                             tab.id === activeTabId &&
                             tab.activeSubTab === "terminal"
                           }
                           projectPath={tab.projectPath}
+                          sessionId={tab.id}
                         />
                       </div>
                     ))}

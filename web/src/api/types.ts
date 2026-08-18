@@ -17,7 +17,8 @@ export interface Message {
 export type LivePart =
   | { kind: "thinking"; text: string }
   | { kind: "text"; text: string }
-  | { kind: "tool"; tool: string; command?: string; output?: string };
+  | { kind: "tool"; tool: string; command?: string; output?: string }
+  | { kind: "status"; text: string };
 
 export interface ChatRequest {
   content: string;

@@ -150,6 +150,7 @@ export type ChatAction =
   | { type: "LIVE_TOOL_START"; sessionId: string; tool: string; command?: string }
   | { type: "LIVE_TOOL_RESULT"; sessionId: string; output: string }
   | { type: "LIVE_RESET"; sessionId: string }
+  | { type: "LIVE_PERMISSION_CHECK"; sessionId: string; tool: string; model: string; active: boolean }
   | { type: "PERMISSION_REQUEST"; sessionId: string; permission: PermissionRequest }
   | { type: "PERMISSION_RESOLVED"; sessionId: string; requestId?: string }
   | { type: "QUESTION_REQUEST"; sessionId: string; question: QuestionRequest }
@@ -286,6 +287,23 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       });
     case "LIVE_RESET":
       return updateSession(state, action.sessionId, (s) => ({ ...s, live: [] }));
+    case "LIVE_PERMISSION_CHECK": {
+      const text = `Checking permission for ${action.tool} (${action.model})…`;
+      return updateSession(state, action.sessionId, (s) => {
+        if (action.active) {
+          return { ...s, live: [...s.live, { kind: "status", text }] };
+        }
+        const live = [...s.live];
+        for (let i = live.length - 1; i >= 0; i--) {
+          const part = live[i];
+          if (part.kind === "status" && part.text === text) {
+            live.splice(i, 1);
+            break;
+          }
+        }
+        return { ...s, live };
+      });
+    }
     case "PERMISSION_REQUEST":
       return updateSession(state, action.sessionId, (s) => ({
         ...s,

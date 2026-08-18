@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ChevronRight, File, Folder, FolderOpen } from "lucide-react";
+import { ChevronRight, File, Folder, FolderOpen, Loader2 } from "lucide-react";
 import { apiPath, authHeaders } from "@/api/client";
 
 interface FileNode {
@@ -8,6 +8,11 @@ interface FileNode {
   path: string;
   is_dir: boolean;
   children?: FileNode[];
+}
+
+interface FileTreeResponse {
+  children: FileNode[];
+  truncated: boolean;
 }
 
 interface FileTreeProps {
@@ -55,6 +60,51 @@ function FileIcon({ name, isDir, expanded }: { name: string; isDir: boolean; exp
 
 function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
   const [expanded, setExpanded] = useState(depth < 1);
+  // Lazily fetched immediate children for this directory. null = not fetched
+  // yet; the initial tree only carries one level, so every directory below
+  // the root fetches its own children on first expand instead of the whole
+  // subtree being walked upfront.
+  const [children, setChildren] = useState<FileNode[] | null>(node.children ?? null);
+  const [loadingChildren, setLoadingChildren] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    if (!node.is_dir || !expanded || children !== null) return;
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setLoadingChildren(true);
+    (async () => {
+      try {
+        const res = await fetch(
+          apiPath(`/api/files/tree?path=${encodeURIComponent(node.path)}&depth=1`),
+          { headers: authHeaders(), signal: controller.signal },
+        );
+        if (!res.ok) throw new Error("Failed to load directory");
+        const data: FileTreeResponse = await res.json();
+        if (data.truncated) {
+          console.warn(`File tree truncated under ${node.path}; not all entries were loaded`);
+        }
+        setChildren(data.children);
+      } catch (err) {
+        if ((err as Error).name !== "AbortError") {
+          console.error("File tree children error:", err);
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoadingChildren(false);
+      }
+    })();
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expanded, node.is_dir, node.path]);
+
+  const toggle = () => {
+    if (expanded) {
+      // Collapsing cancels any in-flight children fetch for this directory.
+      abortRef.current?.abort();
+      setLoadingChildren(false);
+    }
+    setExpanded(!expanded);
+  };
 
   if (node.is_dir) {
     return (
@@ -62,7 +112,7 @@ function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
         <button
           className="w-full justify-start h-7 px-2 text-xs gap-1.5 font-normal flex items-center hover:bg-zinc-800 transition-colors"
           style={{ paddingLeft: `${depth * 12 + 8}px` }}
-          onClick={() => setExpanded(!expanded)}
+          onClick={toggle}
         >
           <ChevronRight
             className={`w-3 h-3 shrink-0 text-muted-foreground transition-transform ${
@@ -71,9 +121,12 @@ function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
           />
           <FileIcon name={node.name} isDir expanded={expanded} />
           <span className="truncate text-muted-foreground">{node.name}</span>
+          {loadingChildren && (
+            <Loader2 className="w-3 h-3 shrink-0 text-muted-foreground animate-spin ml-auto mr-2" />
+          )}
         </button>
         {expanded &&
-          node.children?.map((child) => (
+          children?.map((child) => (
             <TreeNode
               key={child.path}
               node={child}
@@ -111,9 +164,13 @@ export default function FileTree({ onOpenFile }: FileTreeProps) {
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(apiPath("/api/files/tree"), { headers: authHeaders() });
+        const res = await fetch(apiPath("/api/files/tree?depth=1"), { headers: authHeaders() });
         if (!res.ok) throw new Error("Failed to load file tree");
-        setTree(await res.json());
+        const data: FileTreeResponse = await res.json();
+        if (data.truncated) {
+          console.warn("File tree truncated at the root; not all entries were loaded");
+        }
+        setTree(data.children);
       } catch (err) {
         console.error("File tree error:", err);
       } finally {

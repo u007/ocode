@@ -3,7 +3,7 @@ import { useChatState, useChatDispatch, getSessionSlice } from "../../stores/cha
 import { useProjectState } from "../../stores/projectStore";
 import { api } from "../../api/client";
 import MessageBubble, { AssistantText } from "./MessageBubble";
-import { ThinkingBlock, ToolBlock } from "./TurnParts";
+import { StatusBlock, ThinkingBlock, ToolBlock } from "./TurnParts";
 import ChatSearchBar, { messageMatchesQuery } from "./ChatSearchBar";
 
 const PAGE_SIZE = 50;
@@ -365,6 +365,8 @@ export default function ChatPanel({ sessionId }: ChatPanelProps) {
             return <ThinkingBlock key={`live-${i}`} text={part.text} />;
           if (part.kind === "text")
             return <AssistantText key={`live-${i}`} content={part.text} />;
+          if (part.kind === "status")
+            return <StatusBlock key={`live-${i}`} text={part.text} />;
           return (
             <ToolBlock
               key={`live-${i}`}

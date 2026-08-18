@@ -42,6 +42,15 @@ type ToolErrorEvent struct {
 	Error string `json:"error"`
 }
 
+// PermissionCheckEvent mirrors an OnPermissionCheck callback: the auto-
+// permission LLM judge started (Active true) or finished (Active false)
+// deciding whether Tool may run, using Model as the judge.
+type PermissionCheckEvent struct {
+	Tool   string `json:"tool"`
+	Model  string `json:"model"`
+	Active bool   `json:"active"`
+}
+
 type DoneEvent struct {
 	SessionID string `json:"session_id"`
 	Model     string `json:"model"`

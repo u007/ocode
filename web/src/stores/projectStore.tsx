@@ -1,6 +1,7 @@
 import { createContext, useContext, useReducer, useEffect, useCallback, useRef, type ReactNode } from "react";
 import { api } from "../api/client";
 import type { Project, SessionInfo } from "../api/types";
+import { dropSessionTerminals } from "../components/Terminal/terminalPersistence";
 
 export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "terminal";
 
@@ -365,6 +366,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   const closeSessionTab = useCallback((sessionId: string) => {
     dispatch({ type: "REMOVE_TAB", id: sessionId });
+    dropSessionTerminals(sessionId);
   }, []);
 
   const addProject = useCallback(async (path: string) => {

@@ -16,6 +16,11 @@ interface FileNode {
   children?: FileNode[];
 }
 
+interface FileTreeResponse {
+  children: FileNode[];
+  truncated: boolean;
+}
+
 interface Props {
   open: boolean;
   onClose: () => void;
@@ -43,7 +48,12 @@ export default function FilePicker({ open, onClose, onOpenFile }: Props) {
     // nested deep in the project are searchable, not just the shallow ones.
     fetch(apiPath(`/api/files/tree?depth=0`), { headers: authHeaders() })
       .then((res) => res.json())
-      .then((tree: FileNode[]) => setFiles(flattenFiles(tree)))
+      .then((data: FileTreeResponse) => {
+        if (data.truncated) {
+          console.warn("File tree truncated; not all files are searchable");
+        }
+        setFiles(flattenFiles(data.children));
+      })
       .catch((err) => console.error("Failed to load file tree:", err));
   }, [open]);
 

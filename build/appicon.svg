@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#151821"/>
+      <stop offset="1" stop-color="#0a0b0f"/>
+    </linearGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#86efac"/>
+      <stop offset="0.55" stop-color="#22c55e"/>
+      <stop offset="1" stop-color="#15803d"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg)"/>
+
+  <!-- abstract "o": a broken ring (open arc) + offset dot, reads as agent/run mark -->
+  <path d="M 512 232
+           A 280 280 0 1 1 268 660"
+        fill="none" stroke="url(#ring)" stroke-width="86" stroke-linecap="round"/>
+
+  <circle cx="686" cy="700" r="72" fill="url(#ring)"/>
+</svg>

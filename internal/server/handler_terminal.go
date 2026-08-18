@@ -59,33 +59,12 @@ func terminalSameOrigin(r *http.Request) bool {
 // side free of binary/text send juggling.
 var resizePrefix = []byte(`{"type":"resize"`)
 
-const (
-	terminalMaxMessageSize = 32 * 1024
-	terminalMaxSessions    = 8
-)
+const terminalMaxMessageSize = 32 * 1024
 
 type terminalResizeMsg struct {
 	Type string `json:"type"`
 	Cols uint16 `json:"cols"`
 	Rows uint16 `json:"rows"`
-}
-
-func (h *Handler) reserveTerminalSession() bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.activeTerminalSessions >= terminalMaxSessions {
-		return false
-	}
-	h.activeTerminalSessions++
-	return true
-}
-
-func (h *Handler) releaseTerminalSession() {
-	h.mu.Lock()
-	if h.activeTerminalSessions > 0 {
-		h.activeTerminalSessions--
-	}
-	h.mu.Unlock()
 }
 
 // HandleTerminalWS bridges a websocket to a pty-backed login shell running in
@@ -132,11 +111,6 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		}
 		workDir = requested
 	}
-	if !h.reserveTerminalSession() {
-		writeError(w, http.StatusTooManyRequests, "too many active terminal sessions")
-		return
-	}
-	defer h.releaseTerminalSession()
 
 	if workDir == "" {
 		workDir = "."

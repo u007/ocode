@@ -47,6 +47,7 @@ const SESSION_SCOPED_EVENTS = new Set([
   "question_resolved",
   "permission",
   "permission_resolved",
+  "permission_check",
   "error",
   "session_bootstrap",
 ]);
@@ -279,6 +280,17 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
       case "permission_resolved": {
         const evData = data as { request_id?: string };
         r.dispatch({ type: "PERMISSION_RESOLVED", sessionId, requestId: evData.request_id });
+        return;
+      }
+      case "permission_check": {
+        const evData = data as { tool: string; model: string; active: boolean };
+        r.dispatch({
+          type: "LIVE_PERMISSION_CHECK",
+          sessionId,
+          tool: evData.tool,
+          model: evData.model,
+          active: evData.active,
+        });
         return;
       }
       case "error":

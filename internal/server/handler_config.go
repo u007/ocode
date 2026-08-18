@@ -26,8 +26,8 @@ func (h *Handler) HandleSetModel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Model string `json:"model"`
 	}
-	if err := readBodyJSON(r, &req); err != nil || req.Model == "" {
-		writeError(w, http.StatusBadRequest, "model is required")
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -211,7 +211,7 @@ func (h *Handler) HandleSetSmallModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Model == "" && req.Enabled == nil {
-		writeError(w, http.StatusBadRequest, `model is required (use "auto" to clear)`)
+		writeError(w, http.StatusBadRequest, "model or enabled is required")
 		return
 	}
 
@@ -289,7 +289,7 @@ func (h *Handler) HandleGetAdvisor(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Provider    *string  `json:"provider"`
-		Model       string   `json:"model"`
+		Model       *string  `json:"model"`
 		ClaudeCode  *bool    `json:"claude_code"`
 		Checkpoints []string `json:"checkpoints"`
 	}
@@ -297,7 +297,7 @@ func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Model == "" && req.Provider == nil && req.ClaudeCode == nil && req.Checkpoints == nil {
+	if req.Model == nil && req.Provider == nil && req.ClaudeCode == nil && req.Checkpoints == nil {
 		writeError(w, http.StatusBadRequest, "no advisor fields provided")
 		return
 	}
@@ -316,8 +316,8 @@ func (h *Handler) HandleSetAdvisor(w http.ResponseWriter, r *http.Request) {
 		// Provider change also toggles the Claude Code backend by convention.
 		cur.ClaudeCode = (*req.Provider == "claude-code")
 	}
-	if req.Model != "" {
-		cur.Model = req.Model
+	if req.Model != nil {
+		cur.Model = *req.Model
 	}
 	if req.ClaudeCode != nil {
 		cur.ClaudeCode = *req.ClaudeCode
@@ -437,7 +437,7 @@ func (h *Handler) HandleSetOcrModel(w http.ResponseWriter, r *http.Request) {
 		Model string `json:"model"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "model is required")
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
@@ -657,7 +657,7 @@ func (h *Handler) HandleSetMaskModel(w http.ResponseWriter, r *http.Request) {
 		Model string `json:"model"`
 	}
 	if err := readBodyJSON(r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "model is required")
+		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 

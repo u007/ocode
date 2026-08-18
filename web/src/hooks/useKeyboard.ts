@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 
 interface ShortcutHandlers {
   onNewSession?: () => void;
+  onNewTerminal?: () => void;
   onCommandPalette?: () => void;
   onFilePicker?: () => void;
   onSave?: () => void;
@@ -44,6 +45,10 @@ export function useKeyboard(handlers: ShortcutHandlers) {
       if (e.key === "n" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
         ref.current.onNewSession?.();
+      }
+      if (e.key === "t" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        ref.current.onNewTerminal?.();
       }
       if (e.key === "w" && (e.metaKey || e.ctrlKey) && isDesktopShell()) {
         // Don't steal Ctrl+W from the embedded terminal (xterm uses it as

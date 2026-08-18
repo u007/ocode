@@ -58,11 +58,11 @@ func TestHandleFileTreeAnchorsToWorkDir(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	var nodes []FileNode
-	if err := json.Unmarshal(w.Body.Bytes(), &nodes); err != nil {
+	var resp FileTreeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	paths := flattenTree(t, nodes)
+	paths := flattenTree(t, resp.Children)
 	if !contains(paths, "project.txt") {
 		t.Fatalf("expected tree anchored to workDir to contain project.txt, got %v", paths)
 	}
@@ -93,11 +93,11 @@ func TestHandleFileTreeDepthCap(t *testing.T) {
 	// Default depth: shallow file present, deep file absent.
 	w := httptest.NewRecorder()
 	h.HandleFileTree(w, httptest.NewRequest("GET", "/api/files/tree", nil))
-	var nodes []FileNode
-	if err := json.Unmarshal(w.Body.Bytes(), &nodes); err != nil {
+	var resp FileTreeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	paths := flattenTree(t, nodes)
+	paths := flattenTree(t, resp.Children)
 	if !contains(paths, filepath.Join("sub", "deep", "leaf.txt")) {
 		t.Fatalf("expected leaf.txt (depth 4) in default tree, got %v", paths)
 	}
@@ -111,11 +111,11 @@ func TestHandleFileTreeDepthCap(t *testing.T) {
 	if w2.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", w2.Code, w2.Body.String())
 	}
-	var nodes2 []FileNode
-	if err := json.Unmarshal(w2.Body.Bytes(), &nodes2); err != nil {
+	var resp2 FileTreeResponse
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp2); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	paths2 := flattenTree(t, nodes2)
+	paths2 := flattenTree(t, resp2.Children)
 	if !contains(paths2, filepath.Join("a", "b", "c", "d", "very.txt")) {
 		t.Fatalf("expected very.txt (depth 5) in depth=0 tree, got %v", paths2)
 	}
@@ -137,12 +137,12 @@ func TestHandleFileTreePathParam(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200 for relative path, got %d: %s", w.Code, w.Body.String())
 	}
-	var nodes []FileNode
-	if err := json.Unmarshal(w.Body.Bytes(), &nodes); err != nil {
+	var resp FileTreeResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !contains(flattenTree(t, nodes), "in.txt") {
-		t.Fatalf("expected sub/in.txt via relative ?path=, got %v", nodes)
+	if !contains(flattenTree(t, resp.Children), "in.txt") {
+		t.Fatalf("expected sub/in.txt via relative ?path=, got %v", resp.Children)
 	}
 
 	// Absolute ?path= inside workDir works.

@@ -265,6 +265,17 @@ type Agent struct {
 	// Sub-agents run in their own goroutines and never reach the TUI's
 	// tool-result handling, so the sentinel path is invisible to them.
 	OnPermissionAsk func(PermissionRequest) PermissionResponse
+	// OnPermissionCheck, if set, is invoked around an auto-permission LLM
+	// judge consult (consultPermissionModel): once with active=true right
+	// before the consult starts, and once with active=false when it returns
+	// (allow, deny, or unavailable). toolName/modelLabel identify what's
+	// being checked and with which model. This consult runs synchronously
+	// inside the tool-call path and can take anywhere from sub-second to
+	// several minutes (cold local-model start, slow judge, multi-turn
+	// read_file exploration capped at maxToolCalls) with no other visible
+	// activity — headless callers use this to surface a "checking
+	// permission" indicator instead of the turn appearing to hang.
+	OnPermissionCheck func(toolName, modelLabel string, active bool)
 	// RequestTimeout, if non-zero, bounds each LLM call (including its
 	// internal retries) to this duration, overriding the package-wide
 	// llmRequestTimeout default. Headless `ocode run` sets this to a short
@@ -2523,6 +2534,11 @@ func permissionRequestSummary(req *PermissionRequest) string {
 // configured, local server not healthy, transport failure) and the reason
 // describes that failure — callers must not present it as a denial.
 func (a *Agent) consultPermissionModel(name string, args json.RawMessage, req *PermissionRequest) (allowed bool, reason string, summary string, consulted bool) {
+	if a.OnPermissionCheck != nil {
+		modelLabel := a.autoPermissionModelDisplayName()
+		a.OnPermissionCheck(name, modelLabel, true)
+		defer a.OnPermissionCheck(name, modelLabel, false)
+	}
 	if name == "bash" {
 		var p struct {
 			Command string `json:"command"`

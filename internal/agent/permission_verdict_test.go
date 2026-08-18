@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -270,6 +271,33 @@ func TestAskPermissionModelRepromptRecovery(t *testing.T) {
 			t.Fatalf("expected single model call, got %d", client.CallCount)
 		}
 	})
+}
+
+// TestConsultPermissionModelFiresOnPermissionCheck verifies the hook a
+// headless caller uses to show a "checking permission" indicator: it must
+// fire exactly once with active=true before the consult and once with
+// active=false after, even on a DENY verdict.
+func TestConsultPermissionModelFiresOnPermissionCheck(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Ocode.Permissions.Auto = &config.AutoPermissionConfig{Enabled: true, Model: "mock/model"}
+	a := NewAgent(nil, nil, cfg, nil)
+	prevClientFn := newClientFn
+	t.Cleanup(func() { newClientFn = prevClientFn })
+	newClientFn = func(_ *config.Config, _ string) LLMClient {
+		return &scriptedCaptureClient{Responses: []string{"DENY: nope"}}
+	}
+
+	var calls []string
+	a.OnPermissionCheck = func(toolName, modelLabel string, active bool) {
+		calls = append(calls, fmt.Sprintf("%s/%t", toolName, active))
+	}
+
+	a.consultPermissionModel("bash", json.RawMessage(`{"command":"ps -p 1"}`), nil)
+
+	want := []string{"bash/true", "bash/false"}
+	if len(calls) != len(want) || calls[0] != want[0] || calls[1] != want[1] {
+		t.Fatalf("expected %v, got %v", want, calls)
+	}
 }
 
 // TestConsultPermissionModelReportsUnconsulted covers the infrastructure-failure

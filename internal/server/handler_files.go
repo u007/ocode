@@ -65,17 +65,28 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	node, err := buildFileTree(base, base, 0, maxDepth)
+	count := 0
+	node, err := buildFileTree(base, base, 0, maxDepth, &count)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Return only the children (top-level entries) so the frontend receives
-	// an array of FileNode that it can iterate with .map().
 	if node.Children == nil {
 		node.Children = []FileNode{}
 	}
-	writeJSON(w, http.StatusOK, node.Children)
+	writeJSON(w, http.StatusOK, FileTreeResponse{
+		Children:  node.Children,
+		Truncated: count >= maxTreeNodes,
+	})
+}
+
+// FileTreeResponse wraps the top-level entries returned by HandleFileTree.
+// Truncated is true when buildFileTree hit maxTreeNodes and stopped walking
+// before covering the whole tree, so the frontend can warn instead of
+// silently rendering an incomplete tree as if it were complete.
+type FileTreeResponse struct {
+	Children  []FileNode `json:"children"`
+	Truncated bool       `json:"truncated"`
 }
 
 // containedIn reports whether path p (an absolute path) is inside dir, after
@@ -201,11 +212,35 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// ignoredDirNames are directories skipped during the tree walk because they
+// hold generated/vendored content that is large and not source-navigable.
+var ignoredDirNames = map[string]bool{
+	"node_modules":     true,
+	"vendor":           true,
+	"dist":             true,
+	"build":            true,
+	"target":           true,
+	".next":            true,
+	".venv":            true,
+	"venv":             true,
+	"__pycache__":      true,
+	"coverage":         true,
+	"bower_components": true,
+	".cache":           true,
+}
+
+// maxTreeNodes bounds the total number of nodes a single tree walk will
+// visit, so an unbounded depth=0 request (e.g. from the file picker) on a
+// huge monorepo can't hang the request goroutine indefinitely.
+const maxTreeNodes = 20000
+
 // buildFileTree walks the directory tree rooted at cur and returns a FileNode
 // whose Path values are relative to base (the resolved root), so the frontend
 // contract stays the same whether the root is "." or an absolute path.
 // maxDepth caps how deep the walk descends; maxDepth == 0 means unlimited.
-func buildFileTree(base, cur string, depth, maxDepth int) (FileNode, error) {
+// count tracks the total nodes visited across the whole walk and stops
+// descending further once maxTreeNodes is reached.
+func buildFileTree(base, cur string, depth, maxDepth int, count *int) (FileNode, error) {
 	info, err := os.Stat(cur)
 	if err != nil {
 		return FileNode{}, err
@@ -221,7 +256,8 @@ func buildFileTree(base, cur string, depth, maxDepth int) (FileNode, error) {
 		IsDir: info.IsDir(),
 	}
 
-	if !info.IsDir() || (maxDepth > 0 && depth >= maxDepth) {
+	*count++
+	if !info.IsDir() || (maxDepth > 0 && depth >= maxDepth) || *count >= maxTreeNodes {
 		return node, nil
 	}
 
@@ -238,10 +274,13 @@ func buildFileTree(base, cur string, depth, maxDepth int) (FileNode, error) {
 	})
 
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".") || e.Name() == "node_modules" {
+		if *count >= maxTreeNodes {
+			break
+		}
+		if strings.HasPrefix(e.Name(), ".") || ignoredDirNames[e.Name()] {
 			continue
 		}
-		child, err := buildFileTree(base, filepath.Join(cur, e.Name()), depth+1, maxDepth)
+		child, err := buildFileTree(base, filepath.Join(cur, e.Name()), depth+1, maxDepth, count)
 		if err != nil {
 			continue
 		}

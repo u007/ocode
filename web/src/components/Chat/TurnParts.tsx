@@ -86,6 +86,21 @@ export function ThinkingBlock({
   );
 }
 
+// StatusBlock renders a transient one-line status (e.g. an in-flight
+// auto-permission judge consult) so the chat shows activity instead of
+// looking stalled while the turn is legitimately busy off-screen.
+export function StatusBlock({ text }: { text: string }) {
+  if (!text) return null;
+  return (
+    <div className="mb-3 flex justify-start">
+      <div className="flex items-center gap-1.5 rounded-lg border border-zinc-700/60 bg-zinc-900/40 px-3 py-2 text-xs text-zinc-400">
+        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-zinc-500" />
+        <span>{text}</span>
+      </div>
+    </div>
+  );
+}
+
 // ToolBlock renders a single tool call and (optionally) its result. The details
 // are expanded by default so tool output is visible immediately.
 export function ToolBlock({

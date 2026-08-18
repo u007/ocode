@@ -61,7 +61,6 @@ type Handler struct {
 	// a loopback address.
 	terminalAuthConfigured bool
 	terminalLoopback       bool
-	activeTerminalSessions int
 
 	// headlessSubs is the subscriber list for broadcasting live SSE events
 	// in headless/serve mode (when no RC bridge is active). The SSE mirror
@@ -370,6 +369,13 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 			SessionID: sessionID,
 			Event:     event,
 			Data:      TextDelta{Delta: text},
+		})
+	}
+	ag.OnPermissionCheck = func(toolName, modelLabel string, active bool) {
+		h.broadcastEvent(SSEEvent{
+			SessionID: sessionID,
+			Event:     "permission_check",
+			Data:      PermissionCheckEvent{Tool: toolName, Model: modelLabel, Active: active},
 		})
 	}
 	ag.OnMessage = func(m agent.Message) {

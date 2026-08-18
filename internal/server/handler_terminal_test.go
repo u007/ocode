@@ -101,28 +101,6 @@ func TestTerminalWSSpawnsShellInRequestedProject(t *testing.T) {
 	}
 }
 
-func TestTerminalWSRejectsWhenSessionLimitIsReached(t *testing.T) {
-	h := NewHandler()
-	h.workDir = t.TempDir()
-	h.SetTerminalAccessPolicy(false, true)
-	for i := 0; i < terminalMaxSessions; i++ {
-		if !h.reserveTerminalSession() {
-			t.Fatalf("reserve %d unexpectedly failed", i)
-		}
-	}
-	t.Cleanup(func() {
-		for i := 0; i < terminalMaxSessions; i++ {
-			h.releaseTerminalSession()
-		}
-	})
-
-	w := httptest.NewRecorder()
-	h.HandleTerminalWS(w, httptest.NewRequest("GET", "/api/terminal/ws", nil))
-	if w.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want %d", w.Code, http.StatusTooManyRequests)
-	}
-}
-
 func TestTerminalWSReadLimit(t *testing.T) {
 	t.Setenv("SHELL", "/bin/sh")
 	_, wsURL := terminalTestServer(t)

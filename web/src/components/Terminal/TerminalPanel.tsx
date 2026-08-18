@@ -1,8 +1,10 @@
 import { useEffect, useRef } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 import { apiPath, authToken } from "@/api/client";
+import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 
 /**
  * A single interactive terminal: one xterm.js instance bridged to one
@@ -14,12 +16,18 @@ import { apiPath, authToken } from "@/api/client";
  * backgrounded (so the shell keeps running and scrollback survives), but a
  * `display: none` container measures 0x0, so fitting is deferred until the tab
  * is visible again.
+ *
+ * `id` identifies this terminal for scrollback persistence: on mount, text
+ * saved under this id (if any) is replayed before the fresh pty connects, so
+ * a reload shows what happened last time even though the shell itself is new.
  */
 export default function TerminalPanel({
+  id,
   active,
   scrollbackLines,
   projectPath,
 }: {
+  id: string;
   active: boolean;
   scrollbackLines: number;
   projectPath: string;
@@ -27,6 +35,7 @@ export default function TerminalPanel({
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const serializeRef = useRef<SerializeAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
 
   // Fit to the container and tell the pty about the new size. No-op while the
@@ -58,9 +67,28 @@ export default function TerminalPanel({
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    const serialize = new SerializeAddon();
+    term.loadAddon(serialize);
     term.open(el);
     termRef.current = term;
     fitRef.current = fit;
+    serializeRef.current = serialize;
+
+    const savedBuffer = loadTerminalBuffer(id);
+    if (savedBuffer) {
+      term.write(savedBuffer);
+      term.write("\r\n\x1b[2m── restored, shell disconnected ──\x1b[0m\r\n");
+    }
+
+    const saveBuffer = () => {
+      const s = serializeRef.current;
+      if (!s) return;
+      saveTerminalBuffer(id, s.serialize({ scrollback: scrollbackLines }));
+    };
+    const saveInterval = setInterval(saveBuffer, 5000);
+    const onPageHide = () => saveBuffer();
+    document.addEventListener("visibilitychange", onPageHide);
+    window.addEventListener("pagehide", onPageHide);
 
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
     const token = authToken();
@@ -113,6 +141,10 @@ export default function TerminalPanel({
     observer.observe(el);
 
     return () => {
+      saveBuffer();
+      clearInterval(saveInterval);
+      document.removeEventListener("visibilitychange", onPageHide);
+      window.removeEventListener("pagehide", onPageHide);
       observer.disconnect();
       dataSub.dispose();
       // Closing the socket is what kills the pty process server-side.
@@ -121,6 +153,7 @@ export default function TerminalPanel({
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
+      serializeRef.current = null;
     };
   }, [scrollbackLines, projectPath]);
 

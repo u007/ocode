@@ -55,6 +55,22 @@ describe("routeBusEnvelope", () => {
     expect(slice.isStreaming).toBe(true);
   });
 
+  it("permission_check surfaces and clears a status live part", () => {
+    const { router, getState } = makeRouter(["s1"]);
+    routeBusEnvelope(
+      env("permission_check", { data: { tool: "bash", model: "local/qwen3-4b", active: true } }),
+      router,
+    );
+    expect(getState().sessions["s1"].live).toEqual([
+      { kind: "status", text: "Checking permission for bash (local/qwen3-4b)…" },
+    ]);
+    routeBusEnvelope(
+      env("permission_check", { data: { tool: "bash", model: "local/qwen3-4b", active: false } }),
+      router,
+    );
+    expect(getState().sessions["s1"].live).toEqual([]);
+  });
+
   it("turn lifecycle drives turn state (streaming flag)", () => {
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(env("turn_started", { data: { session_id: "s1" } }), router);

@@ -3,7 +3,7 @@ import { api } from "../../api/client";
 import { useChatDispatch, useChatState } from "../../stores/chatStore";
 import type { ModelInfo } from "../../api/types";
 import { advisorSelectionPayload } from "./modelSelection";
-import { Search, Check } from "lucide-react";
+import { Search, Check, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -125,6 +125,29 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
     onClose();
   };
 
+  const handleClear = () => {
+    switch (purpose) {
+      case "small":
+        dispatch({ type: "SET_SMALL_MODEL", model: "" });
+        api.setSmallModel("auto").catch(console.error);
+        break;
+      case "advisor":
+        dispatch({ type: "SET_ADVISOR_MODEL", model: "" });
+        onPick?.(purpose, "");
+        api.setAdvisorFull({ model: "", provider: "", claude_code: advisorClaudeCode }).catch(console.error);
+        break;
+      case "main":
+        dispatch({ type: "SET_MODEL", model: "" });
+        api.setConfigModel("").catch(console.error);
+        break;
+      default:
+        // Form-owned purpose: hand empty string to the owning form.
+        onPick?.(purpose, "");
+        break;
+    }
+    onClose();
+  };
+
   return (
     <Dialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
       <DialogContent className="sm:max-w-md bg-zinc-900 border-zinc-700">
@@ -144,6 +167,15 @@ export default function ModelDialog({ open, onClose, purpose = "main", onPick, c
             autoFocus
           />
         </div>
+
+        {/* Clear button */}
+        <button
+          onClick={handleClear}
+          className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-md text-sm text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900"
+        >
+          <X className="h-4 w-4" />
+          Clear (not set)
+        </button>
 
         {/* Model list */}
         <div className="max-h-96 overflow-y-auto">

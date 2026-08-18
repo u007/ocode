@@ -22,6 +22,11 @@ vi.mock("@xterm/addon-fit", () => ({
     fit = vi.fn();
   },
 }));
+vi.mock("@xterm/addon-serialize", () => ({
+  SerializeAddon: class {
+    serialize = vi.fn(() => "");
+  },
+}));
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@/api/client", () => ({
   api: {
@@ -52,6 +57,7 @@ class MockSocket {
 beforeEach(() => {
   sockets.length = 0;
   disposeSpy.mockClear();
+  window.localStorage.clear();
   vi.stubGlobal("WebSocket", MockSocket as unknown as typeof WebSocket);
   vi.stubGlobal(
     "ResizeObserver",
@@ -62,9 +68,9 @@ beforeEach(() => {
   );
 });
 
-async function renderTabs() {
+async function renderTabs(sessionId = "session-1") {
   const { default: TerminalTabs } = await import("./TerminalTabs");
-  render(<TerminalTabs active projectPath="/project" />);
+  render(<TerminalTabs active projectPath="/project" sessionId={sessionId} />);
   // First terminal is opened lazily once the panel becomes active.
   await waitFor(() => expect(sockets.length).toBe(1));
 }
@@ -102,5 +108,21 @@ describe("TerminalTabs", () => {
     await waitFor(() => expect(closeButtons()).toHaveLength(1));
     expect(closeButtons()[0].getAttribute("aria-label")).not.toBe(firstLabel);
     expect(firstSocket.close).toHaveBeenCalled();
+  });
+
+  it("restores the same number of terminal tabs (fresh sockets) after remount", async () => {
+    const { default: TerminalTabs } = await import("./TerminalTabs");
+    const { unmount } = render(<TerminalTabs active projectPath="/project" sessionId="session-restore" />);
+    await waitFor(() => expect(sockets.length).toBe(1));
+    fireEvent.click(screen.getByLabelText("New terminal"));
+    await waitFor(() => expect(sockets.length).toBe(2));
+    await waitFor(() => expect(closeButtons()).toHaveLength(2));
+    unmount();
+
+    sockets.length = 0;
+    render(<TerminalTabs active projectPath="/project" sessionId="session-restore" />);
+
+    await waitFor(() => expect(sockets.length).toBe(2));
+    expect(closeButtons()).toHaveLength(2);
   });
 });

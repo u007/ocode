@@ -1,14 +1,29 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useChatDispatch, useChatState, getSessionSlice } from "../../stores/chatStore";
 import { useProjectState } from "../../stores/projectStore";
 import { isNewSessionTabEmpty } from "../../lib/tabDrafts";
 import { clearQueue } from "../../lib/tabQueue";
+import { api } from "../../api/client";
+import type { SessionSlice } from "../../stores/chatStore";
 import { X, List, Plus, Loader2 } from "lucide-react";
 
+// While a tab's session has an in-flight turn, show what it's doing instead
+// of its (possibly stale) title. Reverts to the title once idle.
+function activeProcessLabel(slice: SessionSlice): string | null {
+  if (!slice.turnActive) return null;
+  for (let i = slice.live.length - 1; i >= 0; i--) {
+    const part = slice.live[i];
+    if (part.kind === "tool") return part.command || part.tool;
+  }
+  return "Running…";
+}
+
 export default function OpenSessionBar() {
-  const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab } = useProjectState();
+  const { state: projectState, tabs, activeTabId, openSessionTab, closeSessionTab, toggleSessionPicker, openNewSessionTab, dispatch: projectDispatch } = useProjectState();
   const chatState = useChatState();
   const chatDispatch = useChatDispatch();
+  const [editingTabId, setEditingTabId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
 
   const handleTabClick = useCallback((sessionId: string, title: string) => {
     // Already active — no-op
@@ -17,6 +32,24 @@ export default function OpenSessionBar() {
     // SessionTabSync (it watches activeTabId). Just activate the tab.
     openSessionTab(sessionId, title);
   }, [activeTabId, openSessionTab]);
+
+  const startRename = useCallback((tabId: string, currentTitle: string) => {
+    setEditingTabId(tabId);
+    setEditValue(currentTitle);
+  }, []);
+
+  const commitRename = useCallback((tabId: string) => {
+    const title = editValue.trim();
+    setEditingTabId(null);
+    if (!title) return;
+    projectDispatch({ type: "UPDATE_TAB_TITLE", id: tabId, title });
+    // Unsaved ("new-") tabs have no session on the server yet — persist the
+    // title locally only; it's sent once the session is created.
+    if (tabId.startsWith("new-")) return;
+    api.setSessionTitle(tabId, title).catch((err) => {
+      console.error("failed to save renamed tab title", err);
+    });
+  }, [editValue, projectDispatch]);
 
   const handleCloseTab = useCallback((e: React.MouseEvent, tabId: string) => {
     e.stopPropagation();
@@ -41,6 +74,9 @@ export default function OpenSessionBar() {
         const isActive = activeTabId === tab.id;
         const slice = getSessionSlice(chatState, tab.id);
         const hasPending = !isActive && (slice.pendingPermission !== null || slice.pendingQuestion !== null);
+        const processLabel = activeProcessLabel(slice);
+        const displayTitle = processLabel ?? (tab.title || tab.id.slice(0, 12));
+        const isEditing = editingTabId === tab.id;
         return (
           <div
             key={tab.id}
@@ -66,7 +102,31 @@ export default function OpenSessionBar() {
                 title="Waiting for a response in this tab"
               />
             )}
-            <span className="max-w-28 truncate" title={tab.title || tab.id}>{tab.title || tab.id.slice(0, 12)}</span>
+            {isEditing ? (
+              <input
+                autoFocus
+                value={editValue}
+                onChange={(e) => setEditValue(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onBlur={() => commitRename(tab.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commitRename(tab.id);
+                  else if (e.key === "Escape") setEditingTabId(null);
+                }}
+                className="max-w-28 w-24 bg-zinc-950 text-zinc-100 rounded px-1 outline-none border border-blue-500"
+              />
+            ) : (
+              <span
+                className="max-w-28 truncate"
+                title={processLabel ? `${displayTitle} (double-click to rename)` : "Double-click to rename"}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  startRename(tab.id, tab.title || "");
+                }}
+              >
+                {displayTitle}
+              </span>
+            )}
             <span
               role="button"
               tabIndex={0}
