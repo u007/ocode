@@ -71,7 +71,7 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	if client == nil {
 		return nil, "model", fmt.Errorf("failed to create LLM client")
 	}
-	lspMgr := h.sharedLSPManager()
+	lspMgr := h.lspManagerFor(projectRoot)
 	tools := tool.InitBuiltinTools(lspMgr, h.cfg, h.scheduler)
 	ag := agent.NewAgent(client, tools, h.cfg, lspMgr)
 	ag.SetSessionID(sessionID)

@@ -485,7 +485,21 @@ func (t TaskTool) Execute(args json.RawMessage) (string, error) {
 		for _, msg := range subAgentMsgs {
 			run.appendTranscript(msg)
 		}
-		subAgent.OnMessage = func(msg Message) { run.appendTranscript(msg) }
+		subAgent.OnMessage = func(msg Message) {
+			run.appendTranscript(msg)
+			// Forward to the parent session's own OnMessage/OnDelta (wired by the
+			// TUI/server to publish "thinking"/"text" for the live chat stream).
+			// Without this, sub-agent runs only ever reached run.appendTranscript
+			// (the separate runs/task panel) and never appeared in the main chat.
+			if t.mainAgent != nil && t.mainAgent.OnMessage != nil {
+				t.mainAgent.OnMessage(msg)
+			}
+		}
+		subAgent.OnDelta = func(kind, text string) {
+			if t.mainAgent != nil && t.mainAgent.OnDelta != nil {
+				t.mainAgent.OnDelta(kind, text)
+			}
+		}
 		subAgent.OnUsage = func(in, out int64) { run.AddUsage(in, out) }
 	}
 

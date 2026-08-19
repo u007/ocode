@@ -1,4 +1,4 @@
-.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app
+.PHONY: build build-all build-darwin build-linux build-windows clean install release test web-build web-dev dev production close kill-ports models-snapshot docker-build docker docker-serve docker-run desktop install-desktop desktop-app desktop-icon-windows docker-desktop-darwin docker-desktop-linux docker-desktop-linux-arm docker-desktop-windows build-desktop-all docker-release
 
 APP      := ocode
 VERSION  := $(shell grep "Version" internal/version/version.go | cut -d'"' -f2)
@@ -54,6 +54,14 @@ install-desktop: web-build desktop desktop-app
 ## desktop-app: build and bundle ocode.app (macOS only)
 desktop-app: desktop
 	./scripts/bundle-macos.sh bin/ocode-desktop bin/ocode.app
+
+## desktop-icon-windows: regenerate the committed Windows .exe icon resource
+## (cmd/ocode-desktop/rsrc_windows_*.syso) from cmd/ocode-desktop/winres/.
+## go build auto-links these .syso files for GOOS=windows builds on any host;
+## re-run this only when the icon or winres.json metadata changes.
+## Requires: go install github.com/tc-hib/go-winres@latest
+desktop-icon-windows:
+	cd cmd/ocode-desktop && go-winres make --in winres/winres.json --out rsrc
 
 # ── OS-specific builds (output to project root for convenience) ──────────────
 
@@ -117,10 +125,10 @@ models-snapshot:
 # ── Web UI ───────────────────────────────────────────────────────────────────
 
 web-build:
-	cd web && npm install && npm run build
+	cd web && pnpm install && pnpm run build
 
 web-dev:
-	cd web && npm run dev
+	cd web && pnpm run dev
 
 # ── Kill processes on common ports ─────────────────────────────────────────────
 # Usage: make kill-ports or make close
@@ -134,7 +142,7 @@ kill-ports:
 	@echo "✅ Done"
 
 # ── Development ───────────────────────────────────────────────────────────────
-# Run backend + frontend with hot reload. Requires: go, node/npm
+# Run backend + frontend with hot reload. Requires: go, node/pnpm
 # Usage: make dev
 
 dev:
@@ -153,7 +161,7 @@ dev:
 	@sleep 2
 	@# Start frontend in background
 	@echo "🎨 Starting Vite frontend..."
-	@cd web && npm run dev &
+	@cd web && pnpm run dev &
 	@# Wait for both
 	@wait
 
@@ -258,5 +266,76 @@ docker-serve: docker-build
 docker-run: docker-build
 	@echo "🚀 Running: ocode $(ARGS)"
 	docker compose run --rm ocode $(ARGS)
+
+# ── Docker Cross-Compilation (macOS, Linux & Windows desktop) ─────────────
+# Build ocode desktop binaries for all platforms. macOS is built locally
+# (Docker can't cross-compile for macOS — needs native Apple frameworks).
+# Linux and Windows are built via Docker.
+#
+# Usage:
+#   make docker-desktop-darwin    # macOS amd64 + arm64 (local build)
+#   make docker-desktop-linux     # Linux amd64 desktop binary
+#   make docker-desktop-linux-arm # Linux arm64 desktop binary (requires QEMU)
+#   make docker-desktop-windows   # Windows amd64 desktop binary
+#   make docker-desktop-all       # All desktop targets (macOS + Linux + Windows)
+#   make docker-release           # Alias for docker-desktop-all
+# ─────────────────────────────────────────────────────────────────────────────
+
+docker-desktop-darwin:
+	@echo "🔨 Building macOS desktop binaries (local build)..."
+	@mkdir -p release
+	$(MAKE) web-build bundle-desktop-assets
+	CGO_ENABLED=1 CGO_LDFLAGS="-mmacosx-version-min=26.0" GOOS=darwin GOARCH=amd64 \
+	    go build $(LDFLAGS) -o release/ocode-desktop-darwin-amd64 ./cmd/ocode-desktop
+	CGO_ENABLED=1 CGO_LDFLAGS="-mmacosx-version-min=26.0" GOOS=darwin GOARCH=arm64 \
+	    go build $(LDFLAGS) -o release/ocode-desktop-darwin-arm64 ./cmd/ocode-desktop
+	@test -s release/ocode-desktop-darwin-amd64 || (echo "❌ macOS amd64 build failed" && exit 1)
+	@test -s release/ocode-desktop-darwin-arm64 || (echo "❌ macOS arm64 build failed" && exit 1)
+	@chmod +x release/ocode-desktop-darwin-*
+	@echo "✅ Built: release/ocode-desktop-darwin-amd64 ($$(du -h release/ocode-desktop-darwin-amd64 | cut -f1))"
+	@echo "✅ Built: release/ocode-desktop-darwin-arm64 ($$(du -h release/ocode-desktop-darwin-arm64 | cut -f1))"
+
+docker-desktop-linux:
+	@echo "🔨 Building Linux amd64 desktop binary via Docker..."
+	@mkdir -p release
+	docker build -f Dockerfile.cross --target linux-desktop-out -o release/ .
+	@test -s release/ocode-desktop-linux-amd64 || (echo "❌ Build failed: binary not found or empty" && exit 1)
+	@chmod +x release/ocode-desktop-linux-amd64
+	@echo "✅ Built: release/ocode-desktop-linux-amd64 ($$(du -h release/ocode-desktop-linux-amd64 | cut -f1))"
+
+docker-desktop-linux-arm:
+	@echo "🔨 Building Linux arm64 desktop binary via Docker (QEMU emulation)..."
+	@mkdir -p release
+	docker buildx build --platform linux/arm64 -f Dockerfile.cross --target linux-desktop-arm-out -o release/ .
+	@test -s release/ocode-desktop-linux-arm64 || (echo "❌ Build failed: binary not found or empty" && exit 1)
+	@chmod +x release/ocode-desktop-linux-arm64
+	@echo "✅ Built: release/ocode-desktop-linux-arm64 ($$(du -h release/ocode-desktop-linux-arm64 | cut -f1))"
+
+docker-desktop-windows:
+	@echo "🔨 Building Windows amd64 desktop binary via Docker..."
+	@mkdir -p release
+	docker build -f Dockerfile.cross --target windows-desktop-out -o release/ .
+	@test -s release/ocode-desktop-windows-amd64.exe || (echo "❌ Build failed: binary not found or empty" && exit 1)
+	@echo "✅ Built: release/ocode-desktop-windows-amd64.exe ($$(du -h release/ocode-desktop-windows-amd64.exe | cut -f1))"
+
+build-desktop-all:
+	@echo "🔨 Building all desktop binaries..."
+	@mkdir -p release
+	@# Build macOS locally (Docker can't cross-compile for macOS)
+	$(MAKE) docker-desktop-darwin
+	@# Build Linux + Windows via Docker
+	docker build -f Dockerfile.cross --target output -o release/ .
+	@test -s release/ocode-desktop-darwin-amd64 || (echo "❌ macOS amd64 binary missing" && exit 1)
+	@test -s release/ocode-desktop-darwin-arm64 || (echo "❌ macOS arm64 binary missing" && exit 1)
+	@test -s release/ocode-desktop-linux-amd64 || (echo "❌ Linux amd64 binary missing" && exit 1)
+	@test -s release/ocode-desktop-linux-arm64 || (echo "❌ Linux arm64 binary missing" && exit 1)
+	@test -s release/ocode-desktop-windows-amd64.exe || (echo "❌ Windows binary missing" && exit 1)
+	make desktop-app
+	@chmod +x release/ocode-desktop-darwin-* release/ocode-desktop-linux-*
+	@echo "✅ Built all desktop binaries:"
+	@ls -lh release/ocode-desktop-*
+
+# Alias for backward compatibility with the plan
+docker-release: build-desktop-all
 
 install-all: install install-desktop

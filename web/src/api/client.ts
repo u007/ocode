@@ -14,6 +14,7 @@ import type {
   ThemesListResponse,
   FileStatus,
   Project,
+  ProjectGroup,
   BrowseResponse,
   PermissionsResponse,
   UsageSummary,
@@ -301,10 +302,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(models),
     }),
-  getGitDiff: (path?: string) =>
-    fetchJSON<GitDiffFile[]>(
-      `/api/git/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,
-    ),
+  getGitDiff: (path?: string, project?: string) => {
+    const params = new URLSearchParams();
+    if (path) params.set("path", path);
+    if (project) params.set("project", project);
+    const query = params.toString();
+    return fetchJSON<GitDiffFile[]>(`/api/git/diff${query ? `?${query}` : ""}`);
+  },
   listCronJobs: () => fetchJSON<CronJobsResponse>("/api/cron"),
   getCronJob: (id: string) => fetchJSON<CronJob>(`/api/cron/${id}`),
   addCronJob: (job: CronJobWriteRequest) =>
@@ -368,12 +372,27 @@ export const api = {
     fetchJSON<{
       available?: boolean;
       scrollback_lines: number;
+      font_family: string;
+      font_size: number;
+      shell: string;
+      default_shell: string;
+      available_shells: string[];
       work_dir: string;
     }>("/api/config/terminal"),
   setTerminalScrollbackLines: (scrollback_lines: number) =>
     fetchJSON<{ scrollback_lines: number }>("/api/config/terminal", {
       method: "PUT",
       body: JSON.stringify({ scrollback_lines }),
+    }),
+  setTerminalFontConfig: (font_family: string, font_size: number) =>
+    fetchJSON<{ font_family: string; font_size: number }>("/api/config/terminal", {
+      method: "PUT",
+      body: JSON.stringify({ font_family, font_size }),
+    }),
+  setTerminalShell: (shell: string) =>
+    fetchJSON<{ shell: string }>("/api/config/terminal", {
+      method: "PUT",
+      body: JSON.stringify({ shell }),
     }),
   // TUI status (consolidated snapshot pushed by the TUI on every state
   // change). The web also subscribes to the "status" SSE event so the bar
@@ -447,10 +466,17 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ content, async: true }),
     }),
-  chat: (content: string, sessionId?: string, model?: string, requestId?: string) =>
+  chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string) =>
     fetchJSON<ChatResponse>("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ content, sessionId, model, request_id: requestId, async: true }),
+      body: JSON.stringify({
+        content,
+        sessionId,
+        model,
+        request_id: requestId,
+        project_path: projectPath,
+        async: true,
+      }),
     }),
   openFile: (path: string, line?: number) =>
     fetchJSON<{ path: string; status: string }>("/api/files/open", {
@@ -479,6 +505,46 @@ export const api = {
     }),
   listProjectSessions: (path: string) =>
     fetchJSON<SessionInfo[]>("/api/projects/sessions?path=" + encodeURIComponent(path)),
+  renameProject: (path: string, name: string) =>
+    fetchJSON<{ status: string }>("/api/projects/rename", {
+      method: "POST",
+      body: JSON.stringify({ path, name }),
+    }),
+  reorderProjects: (paths: string[]) =>
+    fetchJSON<{ status: string }>("/api/projects/reorder", {
+      method: "POST",
+      body: JSON.stringify({ paths }),
+    }),
+  setProjectGroup: (path: string, group: string) =>
+    fetchJSON<{ status: string }>("/api/projects/group", {
+      method: "POST",
+      body: JSON.stringify({ path, group }),
+    }),
+  listGroups: () => fetchJSON<ProjectGroup[]>("/api/projects/groups"),
+  createGroup: (name: string) =>
+    fetchJSON<{ status: string }>("/api/projects/groups", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  deleteGroup: (name: string) =>
+    fetchJSON<{ status: string }>("/api/projects/groups/" + encodeURIComponent(name), {
+      method: "DELETE",
+    }),
+  renameGroup: (oldName: string, newName: string) =>
+    fetchJSON<Project[]>("/api/projects/groups/rename", {
+      method: "POST",
+      body: JSON.stringify({ old_name: oldName, new_name: newName }),
+    }),
+  reorderGroups: (names: string[]) =>
+    fetchJSON<{ status: string }>("/api/projects/groups/reorder", {
+      method: "POST",
+      body: JSON.stringify({ names }),
+    }),
+  setGroupCollapsed: (name: string, collapsed: boolean) =>
+    fetchJSON<{ status: string }>("/api/projects/groups/collapse", {
+      method: "POST",
+      body: JSON.stringify({ name, collapsed }),
+    }),
   // Monaco editor settings and extensions
   getMonacoSettings: () => fetchJSON<{ theme: string; font_size: number; tab_size: number; word_wrap: boolean; minimap: boolean; line_numbers: boolean }>("/api/monaco/settings"),
   setMonacoSettings: (settings: Record<string, unknown>) =>
@@ -538,20 +604,22 @@ export const api = {
     }),
 
   // ── File edit history ──
-  undoFileChange: () =>
-    fetchJSON<{ path: string; action: string }>("/api/files/undo", {
-      method: "POST",
-    }),
-  redoFileChange: () =>
-    fetchJSON<{ path: string; action: string }>("/api/files/redo", {
-      method: "POST",
-    }),
+  undoFileChange: (session?: string) =>
+    fetchJSON<{ path: string; action: string }>(
+      `/api/files/undo${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+      { method: "POST" },
+    ),
+  redoFileChange: (session?: string) =>
+    fetchJSON<{ path: string; action: string }>(
+      `/api/files/redo${session ? `?session=${encodeURIComponent(session)}` : ""}`,
+      { method: "POST" },
+    ),
 
   // ── File content save (PUT) ──
-  saveFileContent: (path: string, content: string) =>
+  saveFileContent: (path: string, content: string, projectRoot?: string) =>
     fetchJSON<{ path: string; saved: boolean }>("/api/files/content", {
       method: "PUT",
-      body: JSON.stringify({ path, content }),
+      body: JSON.stringify({ path, content, project_root: projectRoot }),
     }),
 
   // ── Session title / export ──
@@ -721,4 +789,3 @@ export type SSEEventHandler = (
 // The legacy per-session SSE connectors (connectSessionMirror,
 // connectAgentRunsSSE) were deleted in Part 04: every event type they carried
 // now flows over the single /api/events stream consumed by `lib/eventBus`.
-

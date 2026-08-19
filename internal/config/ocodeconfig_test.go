@@ -1641,6 +1641,35 @@ func TestThinkingBudgetLevelsAndIndex(t *testing.T) {
 	}
 }
 
+func TestThinkingBudgetForLabel(t *testing.T) {
+	// Every canonical label resolves to its own budget.
+	for i, label := range ThinkingBudgetLabels {
+		if got, ok := ThinkingBudgetForLabel(label); !ok || got != ThinkingBudgetLevels[i] {
+			t.Errorf("ThinkingBudgetForLabel(%q) = %d, %v; want %d, true", label, got, ok, ThinkingBudgetLevels[i])
+		}
+	}
+	// Aliases, case-insensitivity, whitespace, and exact numeric values.
+	cases := map[string]int{
+		"none":   0,
+		"medium": 8000,
+		"HIGH":   16000,
+		" max ":  65536,
+		"1024":   1024,
+		"0":      0,
+	}
+	for in, want := range cases {
+		if got, ok := ThinkingBudgetForLabel(in); !ok || got != want {
+			t.Errorf("ThinkingBudgetForLabel(%q) = %d, %v; want %d, true", in, got, ok, want)
+		}
+	}
+	// Unknown values are rejected.
+	for _, in := range []string{"", "ultra", "512", "-1"} {
+		if _, ok := ThinkingBudgetForLabel(in); ok {
+			t.Errorf("ThinkingBudgetForLabel(%q) ok = true, want false", in)
+		}
+	}
+}
+
 func TestSaveAndGetLastThinkingBudgetRoundTrip(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)

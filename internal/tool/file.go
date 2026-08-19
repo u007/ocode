@@ -558,7 +558,7 @@ func (t WriteTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string
 	if t.Config != nil {
 		formatters = t.Config.Formatters
 	}
-	FormatAfterWrite(safe, formatters)
+	FormatAfterWrite(ctx, safe, formatters)
 
 	return undoHint(FormatDiff(params.Path, string(prev), newContent), tcID), nil
 }
@@ -673,7 +673,7 @@ func (t ReplaceLinesToolImpl) ExecuteCtx(ctx context.Context, args json.RawMessa
 	if t.Config != nil {
 		formatters = t.Config.Formatters
 	}
-	FormatAfterWrite(safe, formatters)
+	FormatAfterWrite(ctx, safe, formatters)
 
 	return undoHint(FormatDiff(params.Path, string(prev), newContent), tcID), nil
 }
@@ -823,7 +823,7 @@ func (t EditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string,
 	if t.Config != nil {
 		formatters = t.Config.Formatters
 	}
-	FormatAfterWrite(safe, formatters)
+	FormatAfterWrite(ctx, safe, formatters)
 
 	return undoHint(FormatDiff(params.Path, fileContent, newContent), tcID), nil
 }
@@ -952,7 +952,7 @@ func (t MultiEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (st
 	if t.Config != nil {
 		formatters = t.Config.Formatters
 	}
-	FormatAfterWrite(safe, formatters)
+	FormatAfterWrite(ctx, safe, formatters)
 
 	return undoHint(FormatDiff(params.FilePath, origContent, newContent), tcID), nil
 }
@@ -1089,7 +1089,7 @@ func (t MultiFileEditTool) ExecuteCtx(ctx context.Context, args json.RawMessage)
 		if tcID != "" {
 			store.RegisterWrite(safe, tcID)
 		}
-		FormatAfterWrite(safe, formatters)
+		FormatAfterWrite(ctx, safe, formatters)
 	}
 
 	return undoHint(fmt.Sprintf("Successfully performed %d edits across %d file(s)", len(params.Edits), len(fileOrder)), tcID), nil

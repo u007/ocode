@@ -315,6 +315,11 @@ type Agent struct {
 	subagentDispatchCount int
 	preloadedContextMu    sync.RWMutex
 	preloadedContext      string // set by askAgent to avoid duplicate LoadContext calls
+	// orphanRecoveryWG tracks background goroutines spawned by
+	// recoverOneOrphanedToolCall that are abandoned on timeout/cancel.
+	// Shutdown waits on it before resetting shared state (snapshotStore,
+	// changes registry) so an abandoned goroutine can't race that reset.
+	orphanRecoveryWG      sync.WaitGroup
 	memoryEnabled         bool   // whether memory prompt injection is active
 	docPromptEnabled      bool   // whether doc-first development prompt is injected
 	preloadedModelContext string // cached result of LoadModelContext, set once lazily
@@ -406,6 +411,26 @@ func (a *Agent) ChangedFiles() []string {
 // changes TUI tab. May be nil if the agent was created without wiring
 // (e.g. sub-agents sharing the main agent's registry).
 func (a *Agent) Changes() *changes.Registry { return a.changes }
+
+// UndoLastChange reverts the most recently written file in this agent's
+// session (LIFO, independent of tool_call_id). Scoped to this agent's own
+// snapshot store, unlike the legacy package-level snapshot.Undo(), which
+// operates on a process-wide store no session ever attaches to.
+func (a *Agent) UndoLastChange() (string, error) {
+	if a.snapshotStore == nil {
+		return "", fmt.Errorf("no snapshot store for this session")
+	}
+	return a.snapshotStore.Undo()
+}
+
+// RedoLastChange re-applies the most recently undone change from
+// UndoLastChange. See UndoLastChange for why this is session-scoped.
+func (a *Agent) RedoLastChange() (string, error) {
+	if a.snapshotStore == nil {
+		return "", fmt.Errorf("no snapshot store for this session")
+	}
+	return a.snapshotStore.Redo()
+}
 
 // NoteBus returns the bus this agent participates in, or nil if
 // it is not in a group.
@@ -927,7 +952,7 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 	// message that has ToolCalls, then check which call IDs have no following
 	// tool-result message. Re-execute those calls now (the prior execution is
 	// guaranteed gone — we're in a new Step invocation).
-	messages = a.recoverOrphanedToolCalls(messages)
+	messages = a.recoverOrphanedToolCalls(messages, stopCh)
 	// Advisor checkpoints (cfg advisor.checkpoints): fresh per-Step state so
 	// "plan" and "done" each fire at most once per user turn.
 	// Pass the pre-injection user goal explicitly — the tail may contain
@@ -2222,7 +2247,7 @@ func (a *Agent) HandleToolCall(name string, args json.RawMessage) (string, error
 // result — an image read on a non-vision model yields the textual image stub
 // from ReadTool.Execute, so text-only providers still get a useful description.
 func (a *Agent) handleToolCallWithImages(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, []Image, error) {
-	text, err := a.handleToolCall(name, args, b, toolCallID)
+	text, err := a.handleToolCallWithContext(context.Background(), name, args, b, toolCallID)
 	if err != nil {
 		return text, nil, err
 	}
@@ -2299,6 +2324,14 @@ func imageReadPath(args json.RawMessage) (string, bool) {
 // when dispatched from the Step loop (where tc.ID is available); it is ""
 // for direct/test callers (HandleToolCall, HandleApprovedToolCall).
 func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
+	return a.handleToolCallWithContext(context.Background(), name, args, b, toolCallID)
+}
+
+// handleToolCallWithContext is the context-aware implementation used by
+// orphan recovery. Keeping the context through permission-approved execution
+// lets ContextualTool implementations (notably bash and formatters) stop when
+// recovery is cancelled or times out.
+func (a *Agent) handleToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
 	if deny, ok := gateToolCall(a.Mode(), name, args); !ok {
 		return deny, nil
 	}
@@ -2366,7 +2399,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 								}
 							}()
 						}
-						return a.executeToolCall(name, args, b, toolCallID)
+						return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
 					}
 					if consulted {
 						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_deny tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
@@ -2399,7 +2432,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 					allowed, reason, summary, consulted := a.consultPermissionModel(name, args, &req)
 					if allowed {
 						a.emitDebug("PERMISSION", fmt.Sprintf("tier=auto_llm_allow tool=%s model=%s reason=%s", name, a.autoPermissionModelDisplayName(), reason))
-						return a.executeToolCall(name, args, b, toolCallID)
+						return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
 					}
 					// LLM denied, or was never reachable — either way fall
 					// through to human ask. The two are carried in separate
@@ -2434,7 +2467,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 				resp := a.OnPermissionAsk(req)
 				if resp.Level == PermissionAllow {
 					a.applyPermissionResponse(req, resp)
-					return a.executeToolCall(name, args, b, toolCallID)
+					return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
 				}
 				return fmt.Sprintf("denied: tool %q denied by user. Do not retry the same call; ask the user how they'd like to proceed or take a different approach.", name), nil
 			}
@@ -2452,7 +2485,7 @@ func (a *Agent) handleToolCall(name string, args json.RawMessage, b *taskBinding
 	// model-allow, and PermissionAsk → OnPermissionAsk-allow. See the
 	// comment at the top of this function for the rationale.)
 
-	return a.executeToolCall(name, args, b, toolCallID)
+	return a.executeToolCallWithContext(ctx, name, args, b, toolCallID)
 }
 
 func (a *Agent) autoPermissionModelName() string {
@@ -3456,6 +3489,10 @@ func (a *Agent) HandleApprovedToolCall(name string, args json.RawMessage, toolCa
 }
 
 func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
+	return a.executeToolCallWithContext(context.Background(), name, args, b, toolCallID)
+}
+
+func (a *Agent) executeToolCallWithContext(ctx context.Context, name string, args json.RawMessage, b *taskBinding, toolCallID string) (string, error) {
 	a.emitDebug("TOOL", fmt.Sprintf("→ %s %s", name, truncateDebugArgs(args, 120)))
 	if !a.isToolAllowed(name) {
 		return fmt.Sprintf("denied: tool %q is not allowed for this agent. Do not retry; use a different tool or approach.", name), nil
@@ -3514,7 +3551,10 @@ func (a *Agent) executeToolCall(name string, args json.RawMessage, b *taskBindin
 	// Build a context carrying the per-agent snapshot store and tool call ID
 	// so ContextualTool implementations (write tools, undo_file_change) can
 	// track writes per-agent without touching the global store.
-	toolCtx := context.Background()
+	toolCtx := ctx
+	if toolCtx == nil {
+		toolCtx = context.Background()
+	}
 	if a.snapshotStore != nil && toolCallID != "" {
 		toolCtx = snapshot.WithStore(toolCtx, a.snapshotStore)
 		toolCtx = snapshot.WithToolCallID(toolCtx, toolCallID)
@@ -3971,6 +4011,10 @@ func (a *Agent) Shutdown() {
 	}
 	// Shut down doc maintenance worker (drains current item, drops queued).
 	a.docMaintShutdown()
+	// Wait for any abandoned orphan-recovery goroutine (see
+	// recoverOneOrphanedToolCall) to finish before resetting shared state
+	// below, so it can't race the reset.
+	a.orphanRecoveryWG.Wait()
 	// Drop this agent's entries from the global cross-agent write registry so
 	// surviving agents' UndoByToolCallID doesn't see stale same-agent writes
 	// blocking them. Safe to call multiple times (Reset is idempotent).
@@ -4272,7 +4316,14 @@ func (a *Agent) AddMCPErrors(errs []string) {
 // the end of the message list. The old behaviour appended everything at the
 // end, placing tool results AFTER the new user message and confusing the LLM
 // into responding with "done".
-func (a *Agent) recoverOrphanedToolCalls(messages []Message) []Message {
+// orphanRecoveryTimeout bounds re-execution of an orphaned tool call from a
+// resumed session. Without this, a re-run of something like `bash: git push`
+// that blocks on a credential/network prompt hangs Step() forever, and since
+// callers (runTurn, streamStep) hold the session mutex/goroutine across the
+// whole Step() call, the entire session becomes permanently stuck.
+const orphanRecoveryTimeout = 30 * time.Second
+
+func (a *Agent) recoverOrphanedToolCalls(messages []Message, stopCh <-chan struct{}) []Message {
 	// Find the LAST assistant message with orphaned tool calls.
 	candidateIdx := -1
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -4318,16 +4369,52 @@ func (a *Agent) recoverOrphanedToolCalls(messages []Message) []Message {
 	out = append(out, messages[:insertAt]...)
 
 	for _, tc := range orphans {
-		result, err := a.handleToolCall(tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
+		result, err := a.recoverOneOrphanedToolCall(tc, stopCh)
 		if err != nil {
 			result = fmt.Sprintf("ORPHAN_TOOL_ERROR:%s:%v\n%s", tc.Function.Name, err, result)
 		}
 		result = TruncateToolResult(tc.ID, result)
-		out = append(out, Message{Role: "tool", ToolID: tc.ID, Content: result})
+		toolMsg := Message{Role: "tool", ToolID: tc.ID, Content: result}
+		out = append(out, toolMsg)
+		if a.OnMessage != nil {
+			a.OnMessage(toolMsg)
+		}
 	}
 
 	out = append(out, messages[insertAt:]...)
 	return out
+}
+
+// recoverOneOrphanedToolCall runs recovery with a bounded, cancellable context.
+// It is tracked so Shutdown waits for any final tool cleanup before resetting
+// shared state (snapshotStore, changes registry).
+func (a *Agent) recoverOneOrphanedToolCall(tc ToolCall, stopCh <-chan struct{}) (string, error) {
+	type outcome struct {
+		result string
+		err    error
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), orphanRecoveryTimeout)
+	defer cancel()
+	done := make(chan outcome, 1)
+	a.orphanRecoveryWG.Add(1)
+	go func() {
+		defer a.orphanRecoveryWG.Done()
+		result, err := a.handleToolCallWithContext(ctx, tc.Function.Name, json.RawMessage(tc.Function.Arguments), nil, tc.ID)
+		done <- outcome{result, err}
+	}()
+
+	select {
+	case o := <-done:
+		return o.result, o.err
+	case <-stopCh:
+		cancel()
+		return "", fmt.Errorf("cancelled before orphaned tool call %q completed", tc.Function.Name)
+	case <-ctx.Done():
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("orphaned tool call %q did not complete within %s", tc.Function.Name, orphanRecoveryTimeout)
+		}
+		return "", fmt.Errorf("cancelled before orphaned tool call %q completed", tc.Function.Name)
+	}
 }
 
 func truncateDebugArgs(args json.RawMessage, max int) string {

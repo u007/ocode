@@ -1740,6 +1740,17 @@ func newModel(opts ...RunOptions) model {
 		_ = config.SaveAutoPermissionEnabled(autoEnabled) // best-effort persist
 	}
 
+	// Apply -effort override before the model is constructed so both the
+	// agent client and the sidebar "reason:" level pick it up. Persisted like
+	// /effort so the choice survives across sessions. Invalid values were
+	// already rejected in main.go.
+	if cfg != nil && o.Effort != "" {
+		if budget, ok := config.ThinkingBudgetForLabel(o.Effort); ok {
+			cfg.ThinkingBudget = budget
+			_ = config.SaveLastThinkingBudget(budget) // best-effort persist
+		}
+	}
+
 	// shouldLoad tracks whether the session ID was explicitly provided
 	// (via -session flag or -continue) vs auto-generated. We only attempt
 	// to load an existing session file when explicitly requested.
@@ -9234,7 +9245,11 @@ func (m *model) handleRecapEnable(enable bool) tea.Cmd {
 }
 
 func (m *model) handleRedoCmd(args []string) {
-	path, err := snapshot.Redo()
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error redoing: no agent configured"})
+		return
+	}
+	path, err := m.agent.RedoLastChange()
 	if err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error redoing: %v", err)})
 	} else {
@@ -11845,7 +11860,11 @@ func (m *model) sendCustomCommandPrompt(prompt string) tea.Cmd {
 }
 
 func (m *model) handleUndoCmd(args []string) {
-	path, err := snapshot.Undo()
+	if m.agent == nil {
+		m.messages = append(m.messages, message{role: roleAssistant, text: "Error undoing: no agent configured"})
+		return
+	}
+	path, err := m.agent.UndoLastChange()
 	if err != nil {
 		m.messages = append(m.messages, message{role: roleAssistant, text: fmt.Sprintf("Error undoing: %v", err)})
 	} else {
@@ -12267,15 +12286,15 @@ func (m *model) recordUsage(am agent.Message) {
 		return
 	}
 	u := am.Usage
-	promptTokens := int64(0)
+	// promptTokens excludes cache reads regardless of provider payload shape
+	// (see agent.TokenUsage.NormalizedPromptTokens) so usage.Record's stored
+	// PromptTokens is uniform across providers for cache-ratio calculations.
+	promptTokens := u.NormalizedPromptTokens()
 	completionTokens := int64(0)
 	cacheReadTokens := int64(0)
 	totalTokens := int64(0)
 	spend := 0.0
 
-	if u.PromptTokens != nil {
-		promptTokens = *u.PromptTokens
-	}
 	if u.CompletionTokens != nil {
 		completionTokens = *u.CompletionTokens
 	}
@@ -12285,7 +12304,7 @@ func (m *model) recordUsage(am agent.Message) {
 	if u.TotalTokens != nil {
 		totalTokens = *u.TotalTokens
 	} else {
-		totalTokens = promptTokens + completionTokens
+		totalTokens = promptTokens + cacheReadTokens + completionTokens
 	}
 	if am.Spend != nil {
 		spend = *am.Spend
@@ -15201,6 +15220,9 @@ func (m *model) buildURLLinkRegions() {
 // final bubble-boxed block. Splitting them lets renderMessageBlock cache the
 // inner content so a viewport resize only redoes the cheap box-layout step.
 func (m *model) renderUserTextWithInner(text string) (innerContent, block string) {
+	// Pasted user text can carry the same frame-corrupting bytes as model
+	// output (raw CRs, escapes from a copied terminal session).
+	text = sanitizeForTUI(text)
 	if m.redactionRegistry != nil {
 		text = renderSecrets(text, m.redactionRegistry)
 	}
@@ -16803,6 +16825,9 @@ func formatTokenCount(n int64) string {
 }
 
 func (m model) renderAssistantText(text string) string {
+	// Model text is untrusted: strip control bytes / zero-width runes that
+	// would corrupt the alt-screen frame (see sanitizeForTUI).
+	text = sanitizeForTUI(text)
 	// Apply renderSecrets to show masked previews instead of raw tokens
 	if m.redactionRegistry != nil {
 		text = renderSecrets(text, m.redactionRegistry)
@@ -17442,10 +17467,14 @@ func (t sidebarTelemetry) hasData() bool {
 func (t *sidebarTelemetry) addMessage(msg agent.Message) {
 	messageTotal := int64(0)
 	if msg.Usage != nil {
-		if msg.Usage.PromptTokens != nil {
-			t.inputTokens += *msg.Usage.PromptTokens
-			messageTotal += *msg.Usage.PromptTokens
-		}
+		// Use NormalizedPromptTokens (excludes cache reads) rather than the
+		// raw PromptTokens field: OpenAI/DeepSeek/opencode-go-style payloads
+		// fold cache reads into PromptTokens, which would double-count them
+		// once here and again via CacheReadTokens below, corrupting the
+		// "Cache %" ratio shown in the status bar.
+		promptTokens := msg.Usage.NormalizedPromptTokens()
+		t.inputTokens += promptTokens
+		messageTotal += promptTokens
 		if msg.Usage.CompletionTokens != nil {
 			t.outputTokens += *msg.Usage.CompletionTokens
 			messageTotal += *msg.Usage.CompletionTokens
@@ -20281,7 +20310,7 @@ func (m *model) handleRemoteControlCmd(args []string) tea.Cmd {
 		// and receives permission/question resolutions via resolveCh.
 		resolveCh := make(chan server.RCResolution, 4)
 		m.rcResolveCh = resolveCh
-		bridge := srv.RegisterExternalSession(m.sessionID, m.config.Model, rcCh, resolveCh, token)
+		bridge := srv.RegisterExternalSession(m.sessionID, m.config.Model, m.workDir, rcCh, resolveCh, token)
 		bridge.CronDeliveryCh = cronCh
 
 		ln, err := srv.Listen()

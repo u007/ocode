@@ -34,6 +34,48 @@ func TestHandlerChatInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestHandlerChatRequiresProjectPathWithoutServerWorkDir(t *testing.T) {
+	h := NewHandler()
+	h.workDir = ""
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/chat", bytes.NewReader([]byte(`{"content":"hello"}`)))
+	h.HandleChat(w, r)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "project_path is required") {
+		t.Fatalf("expected project-path error, got %q", w.Body.String())
+	}
+}
+
+func TestHandlerChatBindsSessionToRequestProjectPath(t *testing.T) {
+	h := NewHandler()
+	h.workDir = ""
+	projectRoot := t.TempDir()
+	const sessionID = "sess-request-project"
+	h.sessions.Register(sessionID, t.TempDir())
+	newTestSession(h, sessionID, instantClient{})
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/api/chat", bytes.NewReader([]byte(fmt.Sprintf(
+		`{"content":"hello","sessionId":%q,"project_path":%q}`,
+		sessionID,
+		projectRoot,
+	))))
+	h.HandleChat(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	entry := h.sessions.Lookup(sessionID)
+	if entry == nil {
+		t.Fatalf("session %q was not registered", sessionID)
+	}
+	if got := entry.ProjectRoot; got != projectRoot {
+		t.Fatalf("session project root = %q, want %q", got, projectRoot)
+	}
+}
+
 func TestAuthMiddleware(t *testing.T) {
 	s := New("localhost:0", "user", "pass", nil)
 

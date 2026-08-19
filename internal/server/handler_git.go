@@ -15,9 +15,13 @@ type GitDiffFile struct {
 
 // gitRun runs a git command in the handler's work directory and returns stdout.
 func (h *Handler) gitRun(args ...string) (string, error) {
+	return gitRunInDir(h.workDir, args...)
+}
+
+func gitRunInDir(dir string, args ...string) (string, error) {
 	cmd := exec.Command("git", args...)
-	if h.workDir != "" {
-		cmd.Dir = h.workDir
+	if dir != "" {
+		cmd.Dir = dir
 	}
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
@@ -34,15 +38,23 @@ type GitStatus struct {
 // server's workdir; ?project=<path> selects a registered project root instead
 // (unknown paths are rejected so the endpoint can't probe arbitrary dirs).
 func (h *Handler) HandleGitStatus(w http.ResponseWriter, r *http.Request) {
+	dir, ok := h.gitProjectDir(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
+		return
+	}
+	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+}
+
+func (h *Handler) gitProjectDir(r *http.Request) (string, bool) {
 	dir := h.workDir
 	if p := r.URL.Query().Get("project"); p != "" && p != h.workDir {
 		if !h.isRegisteredProjectRoot(p) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
-			return
+			return "", false
 		}
 		dir = p
 	}
-	writeJSON(w, http.StatusOK, gitStatusForDir(dir))
+	return dir, true
 }
 
 // isRegisteredProjectRoot reports whether p is one of the saved project roots.
@@ -97,9 +109,17 @@ func gitStatusForDir(dir string) GitStatus {
 // Supports ?path= filter for a single file.
 func (h *Handler) HandleGitDiff(w http.ResponseWriter, r *http.Request) {
 	pathFilter := r.URL.Query().Get("path")
+	dir, ok := h.gitProjectDir(r)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown project"})
+		return
+	}
+	runGit := func(args ...string) (string, error) {
+		return gitRunInDir(dir, args...)
+	}
 
 	// Check if we're in a git repo
-	if _, err := h.gitRun("rev-parse", "--git-dir"); err != nil {
+	if _, err := runGit("rev-parse", "--git-dir"); err != nil {
 		writeJSON(w, http.StatusOK, []GitDiffFile{})
 		return
 	}
@@ -111,7 +131,7 @@ func (h *Handler) HandleGitDiff(w http.ResponseWriter, r *http.Request) {
 	if pathFilter != "" {
 		diffArgs = append(diffArgs, "--", pathFilter)
 	}
-	if diffOut, err := h.gitRun(diffArgs...); err == nil && diffOut != "" {
+	if diffOut, err := runGit(diffArgs...); err == nil && diffOut != "" {
 		files = append(files, parseUnifiedDiff(diffOut)...)
 	}
 
@@ -120,7 +140,7 @@ func (h *Handler) HandleGitDiff(w http.ResponseWriter, r *http.Request) {
 	if pathFilter != "" {
 		statusArgs = append(statusArgs, "--", pathFilter)
 	}
-	if statusOut, err := h.gitRun(statusArgs...); err == nil {
+	if statusOut, err := runGit(statusArgs...); err == nil {
 		for _, line := range strings.Split(statusOut, "\n") {
 			if len(line) < 4 {
 				continue
@@ -130,7 +150,7 @@ func (h *Handler) HandleGitDiff(w http.ResponseWriter, r *http.Request) {
 			if strings.Contains(statusCode, "?") {
 				// Untracked file — get its content as patch
 				patch := ""
-				if content, err := h.gitRun("diff", "--no-index", "/dev/null", filePath); err != nil {
+				if content, err := runGit("diff", "--no-index", "/dev/null", filePath); err != nil {
 					patch = content
 				}
 				files = append(files, GitDiffFile{

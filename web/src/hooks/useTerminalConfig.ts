@@ -4,6 +4,11 @@ import { api } from "@/api/client";
 export interface TerminalConfig {
   available?: boolean;
   scrollback_lines?: number;
+  font_family?: string;
+  font_size?: number;
+  shell?: string;
+  default_shell?: string;
+  available_shells?: string[];
   work_dir?: string;
 }
 
@@ -18,15 +23,40 @@ function publish(value: TerminalConfig) {
   for (const fn of listeners) fn(value);
 }
 
+export const DEFAULT_TERMINAL_FONT_FAMILY =
+  "ui-monospace, SFMono-Regular, Menlo, monospace";
+export const DEFAULT_TERMINAL_FONT_SIZE = 13;
+
 function viewFor(config: TerminalConfig | null) {
   if (!config) {
-    return { available: false, loading: true, scrollbackLines: 0 };
+    return {
+      available: false,
+      loading: true,
+      scrollbackLines: 0,
+      fontFamily: DEFAULT_TERMINAL_FONT_FAMILY,
+      fontSize: DEFAULT_TERMINAL_FONT_SIZE,
+      shell: "",
+      defaultShell: "",
+      availableShells: [] as string[],
+    };
   }
   return {
     available: config.available !== false,
     loading: false,
     scrollbackLines: config.scrollback_lines ?? 0,
+    fontFamily: config.font_family || DEFAULT_TERMINAL_FONT_FAMILY,
+    fontSize: config.font_size ?? DEFAULT_TERMINAL_FONT_SIZE,
+    shell: config.shell ?? "",
+    defaultShell: config.default_shell ?? "",
+    availableShells: config.available_shells ?? [],
   };
+}
+
+/** Re-fetches terminal config and pushes it to every mounted useTerminalConfig() consumer. */
+export async function refreshTerminalConfig() {
+  const next = await api.getTerminalConfig();
+  publish(next);
+  return next;
 }
 
 /**
@@ -75,6 +105,11 @@ export function useTerminalConfig() {
     loading: view.loading,
     error,
     scrollbackLines: view.scrollbackLines,
+    fontFamily: view.fontFamily,
+    fontSize: view.fontSize,
+    shell: view.shell,
+    defaultShell: view.defaultShell,
+    availableShells: view.availableShells,
     serverWorkDir: config?.work_dir ?? "",
   };
 }

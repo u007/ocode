@@ -11,9 +11,11 @@ import SessionTabSync from "./SessionTabSync";
 // (see eventBus.ts) — which silently dropped every live text/turn event and
 // left the UI to update only via the slow reconcile/watchdog fallback.
 
+let tabsByProject: Record<string, { id: string; title: string }[]> = {};
+
 vi.mock("../../stores/projectStore", () => ({
   useProjectState: () => ({
-    state: { tabsByProject: { "/proj": [{ id: "s1", title: "t" }] } },
+    state: { tabsByProject },
     dispatch: vi.fn(),
   }),
 }));
@@ -36,7 +38,10 @@ function Probe({ sessionId }: { sessionId: string }) {
 }
 
 describe("SessionTabSync", () => {
-  beforeEach(() => subscribed.clear());
+  beforeEach(() => {
+    subscribed.clear();
+    tabsByProject = {};
+  });
 
   it("subscribes to every real event type routeBusEnvelope handles, never the SSE frame name 'envelope'", () => {
     render(
@@ -53,6 +58,7 @@ describe("SessionTabSync", () => {
   });
 
   it("routes a live 'text' envelope into the session's store slice", () => {
+    tabsByProject = { "/proj": [{ id: "s1", title: "t" }] };
     const { getByTestId } = render(
       <ChatProvider>
         <SessionTabSync />
@@ -63,6 +69,37 @@ describe("SessionTabSync", () => {
       subscribed.get("text")?.({
         event: "text",
         session_id: "s1",
+        seq: 1,
+        data: { delta: "hello" },
+      });
+    });
+    expect(getByTestId("text").textContent).toBe("hello");
+  });
+
+  it("routes events for a tab opened after the initial mount (regression: openSessionIdsRef must not be swapped for a new Set)", () => {
+    // No tabs open yet at mount — matches the real app on startup.
+    const { getByTestId, rerender } = render(
+      <ChatProvider>
+        <SessionTabSync />
+        <Probe sessionId="s2" />
+      </ChatProvider>,
+    );
+
+    // A new session tab opens after mount, triggering a re-render with an
+    // updated tabsByProject — but the effect that installed the router only
+    // runs once, so it must observe this via the same mutated Set instance.
+    tabsByProject = { "/proj": [{ id: "s2", title: "t" }] };
+    rerender(
+      <ChatProvider>
+        <SessionTabSync />
+        <Probe sessionId="s2" />
+      </ChatProvider>,
+    );
+
+    act(() => {
+      subscribed.get("text")?.({
+        event: "text",
+        session_id: "s2",
         seq: 1,
         data: { delta: "hello" },
       });

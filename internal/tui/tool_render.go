@@ -146,6 +146,10 @@ func collapseBlankLines(s string) string {
 func renderThinkingContent(text string, st Styles) string {
 	const open = "<tool_call>"
 	const close = "</tool_call>"
+	// Thinking text is model output, not tool output, but it is just as
+	// untrusted: a degenerating model can emit control bytes, cursor moves,
+	// or zero-width runes that corrupt the alt-screen frame.
+	text = sanitizeForTUI(text)
 	text = collapseBlankLines(text)
 	if !strings.Contains(text, open) {
 		return text

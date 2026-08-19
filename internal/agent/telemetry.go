@@ -136,6 +136,26 @@ func usageForProvider(provider string, raw json.RawMessage) (*TokenUsage, error)
 	}
 }
 
+// NormalizedPromptTokens returns prompt/input tokens with cache-read tokens
+// excluded, regardless of whether the provider's raw usage payload already
+// folds cache reads into the prompt count (OpenAI/DeepSeek/opencode-go-style)
+// or keeps them separate (Anthropic-style). This gives callers a single,
+// provider-independent denominator for cache-hit-ratio calculations.
+func (u *TokenUsage) NormalizedPromptTokens() int64 {
+	if u == nil || u.PromptTokens == nil {
+		return 0
+	}
+	prompt := *u.PromptTokens
+	if !u.PromptIncludesCacheRead || u.CacheReadTokens == nil {
+		return prompt
+	}
+	cacheRead := *u.CacheReadTokens
+	if prompt > cacheRead {
+		return prompt - cacheRead
+	}
+	return 0
+}
+
 func (u *TokenUsage) Spend(model string) *float64 {
 	if u == nil {
 		return nil

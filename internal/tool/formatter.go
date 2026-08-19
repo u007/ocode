@@ -2,6 +2,7 @@ package tool
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -38,6 +39,10 @@ func (t FormatTool) Definition() map[string]interface{} {
 }
 
 func (t FormatTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t FormatTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		Path string `json:"path"`
 	}
@@ -54,14 +59,14 @@ func (t FormatTool) Execute(args json.RawMessage) (string, error) {
 		return "", err
 	}
 
-	if err := FormatFile(safe, t.Config.Formatters); err != nil {
+	if err := FormatFile(ctx, safe, t.Config.Formatters); err != nil {
 		return "", err
 	}
 
 	return fmt.Sprintf("Successfully formatted %s", params.Path), nil
 }
 
-func FormatFile(path string, formatters map[string]config.FormatterConfig) error {
+func FormatFile(ctx context.Context, path string, formatters map[string]config.FormatterConfig) error {
 	ext := strings.ToLower(filepath.Ext(path))
 	baseName := filepath.Base(path)
 
@@ -114,7 +119,8 @@ func FormatFile(path string, formatters map[string]config.FormatterConfig) error
 	}
 
 	if !bytes.Equal(content, formatted) {
-		snapshot.Backup(path) //nolint:errcheck
+		tcID := snapshot.ToolCallIDFromContext(ctx)
+		_ = snapshot.FromContext(ctx).Backup(path, tcID) //nolint:errcheck
 		if err := os.WriteFile(path, formatted, 0644); err != nil {
 			return fmt.Errorf("write formatted %s: %w", path, err)
 		}
@@ -123,9 +129,9 @@ func FormatFile(path string, formatters map[string]config.FormatterConfig) error
 	return nil
 }
 
-func FormatAfterWrite(path string, formatters map[string]config.FormatterConfig) {
+func FormatAfterWrite(ctx context.Context, path string, formatters map[string]config.FormatterConfig) {
 	if len(formatters) == 0 {
 		return
 	}
-	_ = FormatFile(path, formatters)
+	_ = FormatFile(ctx, path, formatters)
 }

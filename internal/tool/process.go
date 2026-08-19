@@ -10,7 +10,6 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/u007/ocode/internal/hooks"
@@ -258,7 +257,7 @@ func (r *ProcessRegistry) StartBackground(command string) *Process {
 		cmd = exec.Command("cmd", "/C", command)
 	} else {
 		cmd = exec.Command("bash", "-c", command)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		setProcGroup(cmd)
 	}
 	processHooksMu.RLock()
 	ph := processHooks
@@ -481,11 +480,7 @@ func (r *ProcessRegistry) Kill(id string) (string, error) {
 	cmd := p.cmd
 	p.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
-		if runtime.GOOS == "windows" {
-			_ = cmd.Process.Kill()
-		} else {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
+		_ = killProcessGroup(cmd.Process)
 	}
 	if sup != nil {
 		sup.MarkKilled(p.SupKey(), code)

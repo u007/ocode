@@ -16,6 +16,8 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
+
+	"github.com/u007/ocode/internal/config"
 )
 
 // terminalUpgrader upgrades /api/terminal/ws. The origin check is same-origin
@@ -88,6 +90,10 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	workDir := h.workDir
 	available := h.terminalAuthConfigured || h.terminalLoopback
+	shellOverride := ""
+	if h.cfg != nil {
+		shellOverride = h.cfg.Ocode.TerminalShell
+	}
 	h.mu.Unlock()
 
 	// Reject before upgrading so the browser sees a real HTTP status instead
@@ -116,12 +122,25 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		workDir = "."
 	}
 
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
+	// A registered project root can vanish from disk (deleted, renamed,
+	// unmounted). pty.Start would fail with an opaque 500, so fall back to the
+	// user's home directory and still hand out a shell.
+	if _, statErr := os.Stat(workDir); statErr != nil {
+		log.Printf("terminal: working directory %q unavailable, falling back to home dir: %v", workDir, statErr)
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			log.Printf("terminal: resolve home dir fallback failed: %v", homeErr)
+			home = "/"
+		}
+		workDir = home
 	}
 
-	cmd := exec.Command(shell)
+	shell := shellOverride
+	if shell == "" {
+		shell = config.DefaultTerminalShell()
+	}
+
+	cmd := terminalShellCommand(shell)
 	cmd.Dir = workDir
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 
@@ -132,11 +151,19 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// terminal_id (the frontend's TerminalPanel `id`) lets the terminal-
+	// processes emitter correlate a pid with the tab the browser shows it
+	// under. Registration is best-effort: an old/other client that omits it
+	// just doesn't show up in the Processes tab.
+	terminalID := r.URL.Query().Get("terminal_id")
+	h.terminalProcs.register(terminalID, terminalProcEntry{Project: workDir, PID: int32(cmd.Process.Pid)})
+
 	ws, err := terminalUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Upgrade already wrote an error response; tear the pty back down so
 		// a failed handshake doesn't leak a shell process.
 		log.Printf("terminal: websocket upgrade failed: %v", err)
+		h.terminalProcs.unregister(terminalID)
 		if killErr := cmd.Process.Kill(); killErr != nil {
 			log.Printf("terminal: failed to kill pty shell after upgrade failure: %v", killErr)
 		}
@@ -154,6 +181,7 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 	var closeOnce sync.Once
 	shutdown := func() {
 		closeOnce.Do(func() {
+			h.terminalProcs.unregister(terminalID)
 			if err := cmd.Process.Kill(); err != nil && !isProcessDone(err) {
 				log.Printf("terminal: failed to kill pty shell: %v", err)
 			}
@@ -218,6 +246,14 @@ func (h *Handler) HandleTerminalWS(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// terminalShellCommand starts the configured Unix shell as a login shell so
+// startup files such as ~/.zprofile and ~/.bash_profile can initialize PATH.
+// This is especially important for the desktop app, whose process is usually
+// launched by Finder or the Dock rather than from an already-initialized shell.
+func terminalShellCommand(shell string) *exec.Cmd {
+	return exec.Command(shell, "-l")
 }
 
 // isProcessDone reports whether a Kill error is just "the shell already

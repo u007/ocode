@@ -21,10 +21,11 @@ const STATUS_BADGES: Record<string, { label: string; color: string }> = {
 const REFRESH_INTERVAL = 10000;
 
 interface Props {
-  onOpenFile?: (path: string) => void;
+  onOpenFile?: (path: string, projectRoot?: string) => void;
+  projectPath?: string;
 }
 
-export default function GitPanel({ onOpenFile }: Props) {
+export default function GitPanel({ onOpenFile, projectPath }: Props) {
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [files, setFiles] = useState<GitDiffFile[]>([]);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
@@ -32,25 +33,26 @@ export default function GitPanel({ onOpenFile }: Props) {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(apiPath("/api/git/status"), { headers: authHeaders() });
+      const query = projectPath ? `?project=${encodeURIComponent(projectPath)}` : "";
+      const res = await fetch(apiPath(`/api/git/status${query}`), { headers: authHeaders() });
       const data = await res.json();
       setStatus(data);
     } catch (err) {
       console.error("Failed to fetch git status:", err);
     }
-  }, []);
+  }, [projectPath]);
 
   const fetchDiff = useCallback(async () => {
     try {
       setLoading(true);
-      const diffFiles = await api.getGitDiff();
+      const diffFiles = await api.getGitDiff(undefined, projectPath);
       setFiles(diffFiles);
     } catch (err) {
       console.error("Failed to fetch git diff:", err);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [projectPath]);
 
   useEffect(() => {
     fetchStatus();
@@ -130,7 +132,7 @@ export default function GitPanel({ onOpenFile }: Props) {
               <span>{selectedDiff.path}</span>
               {onOpenFile && (
                 <button
-                  onClick={() => onOpenFile(selectedDiff.path)}
+                  onClick={() => onOpenFile(selectedDiff.path, projectPath)}
                   className="flex items-center gap-1 text-blue-400 hover:text-blue-300 transition-colors"
                   title="Open file in editor tab"
                 >

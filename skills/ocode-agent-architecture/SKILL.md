@@ -6,7 +6,7 @@ when_to_use: When working on the core agent loop (internal/agent/), context load
 
 # ocode Agent Architecture
 
-This skill maps the ocode agent subsystem (`internal/agent/`, 30+ files). It is the neural centre of the application — every user message, tool call, and LLM response flows through it.
+This skill maps the ocode agent subsystem (`internal/agent/`). It is the neural centre of the application — every user message, tool call, and LLM response flows through it.
 
 ## 1. File atlas (non-test files, grouped by function)
 
@@ -21,7 +21,9 @@ This skill maps the ocode agent subsystem (`internal/agent/`, 30+ files). It is 
 | **Permissions** | `permissions.go`, `permission_interpreter.go`, `agent_permissions.go`, `mode_gate.go`, `command_capabilities.go` | Permission evaluation, LLM auto-permission, mode-based tool gating (see also `ocode-permissions` skill) |
 | **Hooks** | (in `internal/hooks/`) | Pre/post tool hooks, chat param overrides, shell env injection |
 | **Observability** | `activity.go`, `telemetry.go`, `retry_events.go`, `retry_status.go` | Activity tracking for TUI, token usage telemetry, retry status events |
-| **Other** | `title.go`, `redaction.go`, `mode.go`, `registry.go`, `advisor_tool.go`, `wait_tool.go` | Session title gen, secret redaction, agent modes (build/plan/review/debug/docs), advisor sub-agent, wait tool |
+| **Discovery** | `discovery_glue.go`, `dir_docs.go` | Markdown doc discovery, project doc indexing |
+| **Advisor** | `advisor_tool.go`, `advisor_checkpoint.go` | Advisor sub-agent, checkpoint/resume for advisor runs |
+| **Other** | `title.go`, `redaction.go`, `mode.go`, `registry.go`, `wait_tool.go`, `brief_seeding.go`, `child_emit.go`, `delta_inject.go`, `append_stable.go`, `ask.go`, `bash_stream.go` | Session title gen, secret redaction, agent modes, wait tool, brief seeding for review, child agent emit, delta injection, stable message append, ask handler, bash streaming |
 
 ## 2. Agent loop (`agent.go:Step`)
 
@@ -48,59 +50,28 @@ LOOP (up to maxSteps, default ~20):
        → dispatches to provider-specific chat:
          chatOpenAI() / chatAnthropic() / chatCopilot()
        → retries on 429 / transient errors
-
-  2. If response has NO tool calls → break (done)
-
-  3. Sort tool calls: parallel (true in Definition()) run in goroutines;
-     sequential (false) run one at a time.
-
-  4. For each tool call:
-     a. gateToolCall(a.Mode(), name, args)   → mode_gate.go
-     b. a.permissions.Decide(name, args)      → permissions.go (see ocode-permissions skill)
-     c. hooks.RunPreHook(name, args)          → may block tool
-     d. a.pipeline.RunToolBefore(name, args)  → may transform args
-     e. tool.Execute(args)                    → actually runs the tool
-     f. result = TruncateToolResult(result)   → truncate.go (cap large output)
-     g. hooks.RunPostHook(name, args, result) → fire-and-forget
-     h. a.pipeline.RunToolAfter(name, result) → may transform result
-
-  5. Append assistant response + tool results to messages
-  6. a.MaybeCompactAsync(messages)           → compact.go (if nearing context limit)
-  7. Loop back to step 1
+  2. Process response → append assistant message
+  3. If tool calls:
+     → a.dispatchToolCalls(toolCalls, messages)
+       → hooks.RunPreHook(name, args)        — user-configured pre-tool shell hooks
+       → a.pipeline.RunToolBefore(name, args) — in-process transform
+       → tool.Execute(args)                  — actual implementation
+       → TruncateToolResult(result)          — truncate.go (cap large output)
+       → hooks.RunPostHook(name, args, result)
+       → a.pipeline.RunToolAfter(name, result)
+       → append to messages, continue loop
+  4. If no tool calls → break (turn complete)
+  ↓
+a.MaybeCompactAsync()                     → compact.go (async context compaction)
 ```
 
-## 3. Context loading order (`context.go:LoadContext`)
+## 3. LLM client (`client.go`)
 
-```go
-func LoadContext(selection string, config *Config) (string, []systemContextKind) {
 ```
-
-Loads in order — earlier items appear higher in the assembled context:
-
-1. **AGENTS.md** (project root) — if git-tracked with unstaged changes, uses HEAD version
-2. **CLAUDE.md** (project root) — same HEAD-vs-working-tree rule
-3. **`.cursorrules`** (project root) — if present
-4. **`.opencode/rules/*.md** (project root) — all files sorted alphabetically
-5. **Plugin context** — `plugins.LoadPluginContext()` for installed plugins
-6. **Skill catalog** — `skill.Catalog(true)` → all loaded skills' frontmatter
-
-Model-specific context (`LoadModelContext`): searches three directories (priority order):
-1. Project root (`./`)
-2. `.opencode/` subdirectory
-3. `~/.config/opencode/` global directory
-
-Within each directory: exact stem match beats wildcard match (trailing `*` stem). First directory with a match wins.
-
-**Embedded fallback:** If no file found on disk, `loadBundledModelContext` checks the compiled-in `//go:embed` FS set by `main.go`. This ensures the default model always ships with its instructions.
-
-## 4. Provider abstraction (`client.go`)
-
-```go
-type LLMClient interface {
-    Chat(ctx context.Context, messages []Message, tools []ToolDefinition) (*Message, error)
+LLMClient interface:
+    ChatWithContext(ctx, messages, tools) → (Message, error)
     GetProvider() string
     GetModel() string
-}
 ```
 
 `GenericClient` is the concrete implementation. Key fields:
@@ -122,10 +93,22 @@ Model metadata: `models_registry.go` provides `ModelWindow(modelName)` for conte
 
 Small model resolution: `small_model.go:ResolveSmallModel()` selects a cheaper model for compaction, title generation, and sub-agents like `explore`/`general`. Falls back to the primary model if no small model is configured.
 
+## 4. Tool interface extensions (`internal/tool/tool.go`)
+
+The base `Tool` interface has three optional extensions:
+
+| Extension | Purpose |
+|-----------|---------|
+| `ContextualTool` | Adds `ExecuteCtx(ctx, args)` for tools needing snapshot store access or tool call ID |
+| `StreamingTool` | Adds `ExecuteStream(ctx, args, emit)` for long-running tools that emit incremental output |
+| `ImageResultTool` | Adds `ExecuteImage(args)` for tools returning raw image bytes (vision block embedding) |
+
+The agent loop checks for these extensions at dispatch time and calls the appropriate method.
+
 ## 5. Sub-agent system
 
 Built-in primary agents (from `registry.go`): `build`, `plan`, `review`, `debug`, `docs`.
-Built-in sub-agents (from `subagent.go`): `general`, `explore`, `scout`.
+Built-in sub-agents (from `subagent.go`): `general`, `explore`, `scout`, `context`.
 Custom agents loaded from `.opencode/agents/*.md` or `~/.config/opencode/agents/*.md` via `agent_loader.go`.
 
 **TaskTool** (`subagent.go`) — registered as the `"task"` tool in `agent.go:NewAgent()`:

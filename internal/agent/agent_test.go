@@ -721,6 +721,55 @@ func TestOpenAIResponsesCapturesReasoningAndFunctionCallItems(t *testing.T) {
 	}
 }
 
+func TestOpenAIResponsesFunctionCallArgumentDeltas(t *testing.T) {
+	// The done item's `arguments` wins over accumulated deltas (the API
+	// repeats the completed arguments there); deltas are the fallback when
+	// the done item omits them. Two calls in one stream cover both paths.
+	originalClient := llmHTTPClient
+	defer func() {
+		llmHTTPClient = originalClient
+	}()
+
+	llmHTTPClient = &http.Client{
+		Timeout: llmRequestTimeout,
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\\\"pattern\\\":\"}\n\n" +
+						"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"\\\"*.go\\\"}\"}\n\n" +
+						"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"glob\",\"arguments\":\"{\\\"pattern\\\":\\\"*.ts\\\"}\"}}\n\n" +
+						"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"{\\\"pattern\\\":\"}\n\n" +
+						"data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_2\",\"delta\":\"\\\"*.md\\\"}\"}\n\n" +
+						"data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_2\",\"name\":\"glob\"}}\n\n" +
+						"data: [DONE]\n",
+				)),
+				Header: make(http.Header),
+			}, nil
+		}),
+	}
+
+	client := &GenericClient{Provider: "opencode-go", Model: "muse-spark-1.2", BaseURL: "https://example.test/v1"}
+	msg, err := client.chatOpenAIResponses(context.Background(), []Message{{Role: "user", Content: "glob"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.ToolCalls) != 2 {
+		t.Fatalf("expected 2 tool calls, got %#v", msg.ToolCalls)
+	}
+	if got := msg.ToolCalls[0].Function.Arguments; got != `{"pattern":"*.ts"}` {
+		t.Fatalf("final arguments must win over deltas, got %q", got)
+	}
+	if got := msg.ToolCalls[1].Function.Arguments; got != `{"pattern":"*.md"}` {
+		t.Fatalf("delta fallback arguments = %q", got)
+	}
+	// The stored item replayed as next-turn input must carry the recovered
+	// arguments too.
+	if got := msg.OpenAIResponseItems[1]["arguments"]; got != `{"pattern":"*.md"}` {
+		t.Fatalf("stored item arguments = %#v", got)
+	}
+}
+
 func TestOpenAIResponsesIncludesStoredOutputItemsBeforeToolResult(t *testing.T) {
 	originalClient := llmHTTPClient
 	defer func() {
@@ -1889,7 +1938,7 @@ func TestRecoverOrphanedToolCallsBasicRecovery(t *testing.T) {
 		{Role: "assistant", Content: "I'll help", ToolCalls: []ToolCall{tc}},
 	}
 
-	result := a.recoverOrphanedToolCalls(messages)
+	result := a.recoverOrphanedToolCalls(messages, nil)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 messages (assistant + tool result), got %d", len(result))
@@ -1922,7 +1971,7 @@ func TestRecoverOrphanedToolCallsPartialRecovery(t *testing.T) {
 		{Role: "tool", ToolID: "call-1", Content: "existing result"},
 	}
 
-	result := a.recoverOrphanedToolCalls(messages)
+	result := a.recoverOrphanedToolCalls(messages, nil)
 
 	if len(result) != 3 {
 		t.Fatalf("expected 3 messages (assistant + existing tool + recovered tool), got %d", len(result))
@@ -1951,7 +2000,7 @@ func TestRecoverOrphanedToolCallsFailedRecovery(t *testing.T) {
 		{Role: "assistant", Content: "I'll help", ToolCalls: []ToolCall{tc}},
 	}
 
-	result := a.recoverOrphanedToolCalls(messages)
+	result := a.recoverOrphanedToolCalls(messages, nil)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 messages, got %d", len(result))
@@ -1977,7 +2026,7 @@ func TestRecoverOrphanedToolCallsEmptyCase(t *testing.T) {
 		{Role: "tool", ToolID: "call-1", Content: "result"},
 	}
 
-	result := a.recoverOrphanedToolCalls(messages)
+	result := a.recoverOrphanedToolCalls(messages, nil)
 
 	if len(result) != 2 {
 		t.Fatalf("expected 2 messages (no recovery), got %d", len(result))
@@ -2011,7 +2060,7 @@ func TestRecoverOrphanedToolCallsOnlyLastAssistant(t *testing.T) {
 		{Role: "tool", ToolID: "call-2", Content: "result-2"},
 	}
 
-	result := a.recoverOrphanedToolCalls(messages)
+	result := a.recoverOrphanedToolCalls(messages, nil)
 
 	// No changes expected: last assistant (idx 2) has all results (call-2 at idx 3).
 	// Earlier orphan (tc1 at idx 0) is NOT recovered. Length unchanged.
@@ -2049,7 +2098,7 @@ func TestRecoverOrphanedToolCallsInsertPosition(t *testing.T) {
 		{Role: "user", Content: "NEW MESSAGE — must come after inserted tool results"},
 	}
 
-	result := a.recoverOrphanedToolCalls(messages)
+	result := a.recoverOrphanedToolCalls(messages, nil)
 
 	if len(result) != len(messages)+1 {
 		t.Fatalf("expected %d messages (inserted one tool result), got %d", len(messages)+1, len(result))

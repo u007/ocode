@@ -1,17 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, apiPath, authHeaders } from "../api/client";
+import {
+  clearEditorDraft,
+  hashContent,
+  loadEditorDraft,
+  loadEditorTabs,
+  saveEditorDraft,
+  saveEditorTabs,
+} from "../components/Files/editorTabsPersistence";
 
 export interface EditorTab {
   id: string;
   path: string;
+  projectRoot?: string;
   content: string;
   originalContent: string;
   isDirty: boolean;
   diffVersion: number;
+  /** The file changed (or vanished) on disk outside this app while this tab
+   *  held unsaved edits — surfaced as a banner until reloaded or dismissed. */
+  externalChange: boolean;
 }
 
 export interface ActiveEditorContext {
   path: string;
+  projectRoot?: string;
   selection?: { startLine: number; endLine: number };
 }
 
@@ -19,7 +32,9 @@ export interface UseEditorTabsResult {
   editorTabs: EditorTab[];
   activeEditorTabId: string | null;
   setActiveEditorTabId: (id: string | null) => void;
-  handleOpenFile: (path: string) => Promise<void>;
+  handleOpenFile: (path: string, projectRoot?: string) => Promise<void>;
+  reloadTabFromDisk: (id: string) => Promise<void>;
+  dismissExternalChange: (id: string) => void;
   handleEditorChange: (id: string, content: string) => void;
   handleSelectionChange: (sel: { startLine: number; endLine: number } | null) => void;
   activeEditorContext: ActiveEditorContext | null;
@@ -40,26 +55,135 @@ export function useEditorTabs(): UseEditorTabsResult {
   const [activeEditorContext, setActiveEditorContext] = useState<ActiveEditorContext | null>(null);
   const openFileIdsRef = useRef<Set<string>>(new Set());
 
-  const handleOpenFile = useCallback(async (path: string) => {
-    const id = `editor-${path}`;
+  const fetchFileContent = useCallback(async (path: string, projectRoot?: string): Promise<string> => {
+    const query = new URLSearchParams({ path });
+    if (projectRoot) query.set("project_root", projectRoot);
+    const res = await fetch(apiPath(`/api/files/content?${query.toString()}`), {
+      headers: authHeaders(),
+    });
+    if (!res.ok) throw new Error("Failed to load file");
+    const data = await res.json();
+    return data.content as string;
+  }, []);
+
+  const handleOpenFile = useCallback(async (path: string, projectRoot?: string) => {
+    const id = projectRoot ? `editor-${projectRoot}::${path}` : `editor-${path}`;
     if (openFileIdsRef.current.has(id)) {
       setActiveEditorTabId(id);
       return;
     }
+    const draft = loadEditorDraft(id);
+    let tab: EditorTab;
     try {
-      const res = await fetch(apiPath(`/api/files/content?path=${encodeURIComponent(path)}`), {
-        headers: authHeaders(),
-      });
-      if (!res.ok) throw new Error("Failed to load file");
-      const data = await res.json();
-      openFileIdsRef.current.add(id);
-      setEditorTabs((prev) => [
-        ...prev,
-        { id, path, content: data.content, originalContent: data.content, isDirty: false, diffVersion: 0 },
-      ]);
-      setActiveEditorTabId(id);
+      const disk = await fetchFileContent(path, projectRoot);
+      if (draft && draft.content !== disk) {
+        // Unsaved edits survive the reload. If the on-disk content no longer
+        // matches what the draft was edited against, the file moved under the
+        // draft — flag it so the tab shows a conflict banner.
+        tab = {
+          id,
+          path,
+          projectRoot,
+          content: draft.content,
+          originalContent: disk,
+          isDirty: true,
+          diffVersion: 0,
+          externalChange: draft.baseHash !== hashContent(disk),
+        };
+      } else {
+        if (draft) clearEditorDraft(id); // draft matches disk — it was saved elsewhere
+        tab = {
+          id,
+          path,
+          projectRoot,
+          content: disk,
+          originalContent: disk,
+          isDirty: false,
+          diffVersion: 0,
+          externalChange: false,
+        };
+      }
     } catch (err) {
-      console.error("Failed to open file:", err);
+      if (!draft) {
+        console.error("Failed to open file:", err);
+        return;
+      }
+      // The file is gone (deleted/renamed outside the app) but we still hold
+      // unsaved edits — open the tab from the draft so the user can inspect
+      // and re-save rather than silently losing their work.
+      console.error("Failed to open file, restoring unsaved draft instead:", err);
+      tab = {
+        id,
+        path,
+        projectRoot,
+        content: draft.content,
+        originalContent: "",
+        isDirty: true,
+        diffVersion: 0,
+        externalChange: true,
+      };
+    }
+    openFileIdsRef.current.add(id);
+    setEditorTabs((prev) => [...prev, tab]);
+    setActiveEditorTabId(id);
+  }, [fetchFileContent]);
+
+  // Restore the previously open editor tabs once on mount. Content is
+  // re-fetched; a file that no longer exists on disk simply fails its fetch
+  // inside handleOpenFile (logged there) and its tab is dropped from the
+  // persisted list by the next save.
+  const restored = useRef(false);
+  const restoreDone = useRef(false);
+  useEffect(() => {
+    if (restored.current) return;
+    restored.current = true;
+    const saved = loadEditorTabs();
+    if (!saved || saved.tabs.length === 0) {
+      restoreDone.current = true;
+      return;
+    }
+    (async () => {
+      // Sequential so the restored tab order matches what was persisted.
+      for (const t of saved.tabs) {
+        await handleOpenFile(t.path, t.projectRoot);
+      }
+      setActiveEditorTabId((prev) => {
+        if (saved.activeId && openFileIdsRef.current.has(saved.activeId)) return saved.activeId;
+        return prev;
+      });
+      restoreDone.current = true;
+    })();
+  }, [handleOpenFile]);
+
+  // Persist the open tab list whenever it changes — but never before the
+  // restore above has finished, or the initial empty state (and each
+  // half-restored intermediate) would clobber the saved list.
+  useEffect(() => {
+    if (!restoreDone.current) return;
+    saveEditorTabs(
+      editorTabs.map((t) => ({ path: t.path, projectRoot: t.projectRoot })),
+      activeEditorTabId,
+      editorTabs.map((t) => t.id),
+    );
+  }, [editorTabs, activeEditorTabId]);
+
+  // Latest tabs, readable from timers/listeners without re-subscribing.
+  const editorTabsRef = useRef<EditorTab[]>([]);
+  useEffect(() => {
+    editorTabsRef.current = editorTabs;
+  }, [editorTabs]);
+
+  // Debounced draft persistence per tab (localStorage write per keystroke
+  // would be wasteful on large files).
+  const draftTimers = useRef<Map<string, number>>(new Map());
+
+  const flushDraft = useCallback((id: string) => {
+    const tab = editorTabsRef.current.find((t) => t.id === id);
+    if (!tab) return;
+    if (tab.isDirty) {
+      saveEditorDraft(id, { content: tab.content, baseHash: hashContent(tab.originalContent) });
+    } else {
+      clearEditorDraft(id);
     }
   }, []);
 
@@ -67,7 +191,31 @@ export function useEditorTabs(): UseEditorTabsResult {
     setEditorTabs((prev) =>
       prev.map((t) => (t.id === id ? { ...t, content, isDirty: content !== t.originalContent } : t)),
     );
-  }, []);
+    const timers = draftTimers.current;
+    const pending = timers.get(id);
+    if (pending !== undefined) window.clearTimeout(pending);
+    timers.set(
+      id,
+      window.setTimeout(() => {
+        timers.delete(id);
+        flushDraft(id);
+      }, 500),
+    );
+  }, [flushDraft]);
+
+  // A reload/quit inside the debounce window would drop the last keystrokes —
+  // flush every pending draft synchronously on the way out.
+  useEffect(() => {
+    const flushAll = () => {
+      for (const [id, timer] of draftTimers.current) {
+        window.clearTimeout(timer);
+        flushDraft(id);
+      }
+      draftTimers.current.clear();
+    };
+    window.addEventListener("beforeunload", flushAll);
+    return () => window.removeEventListener("beforeunload", flushAll);
+  }, [flushDraft]);
 
   const handleSelectionChange = useCallback(
     (sel: { startLine: number; endLine: number } | null) => {
@@ -106,8 +254,8 @@ export function useEditorTabs(): UseEditorTabsResult {
     }
 
     setActiveEditorContext((prev) => {
-      if (prev?.path === tab.path) return prev;
-      return { path: tab.path };
+      if (prev?.path === tab.path && prev?.projectRoot === tab.projectRoot) return prev;
+      return { path: tab.path, projectRoot: tab.projectRoot };
     });
   }, [activeEditorTabId, editorTabs]);
 
@@ -139,12 +287,13 @@ export function useEditorTabs(): UseEditorTabsResult {
       const tab = editorTabs.find((t) => t.id === id);
       if (!tab) return;
       try {
-        await api.saveFileContent(tab.path, tab.content);
+        await api.saveFileContent(tab.path, tab.content, tab.projectRoot);
         setSaveError(null);
+        clearEditorDraft(id);
         setEditorTabs((prev) =>
           prev.map((t) =>
             t.id === id
-              ? { ...t, originalContent: t.content, isDirty: false, diffVersion: t.diffVersion + 1 }
+              ? { ...t, originalContent: t.content, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false }
               : t,
           ),
         );
@@ -180,11 +329,86 @@ export function useEditorTabs(): UseEditorTabsResult {
     setSaveError(null);
   }, []);
 
+  // Discards in-editor state (and any draft) in favour of the current on-disk
+  // content — the "Reload from disk" action on the external-change banner.
+  const reloadTabFromDisk = useCallback(
+    async (id: string) => {
+      const tab = editorTabsRef.current.find((t) => t.id === id);
+      if (!tab) return;
+      try {
+        const disk = await fetchFileContent(tab.path, tab.projectRoot);
+        clearEditorDraft(id);
+        setEditorTabs((prev) =>
+          prev.map((t) =>
+            t.id === id
+              ? { ...t, content: disk, originalContent: disk, isDirty: false, diffVersion: t.diffVersion + 1, externalChange: false }
+              : t,
+          ),
+        );
+      } catch (err) {
+        console.error("Failed to reload file from disk:", err);
+      }
+    },
+    [fetchFileContent],
+  );
+
+  const dismissExternalChange = useCallback((id: string) => {
+    setEditorTabs((prev) => prev.map((t) => (t.id === id ? { ...t, externalChange: false } : t)));
+  }, []);
+
+  // Watch the active tab for modifications made outside the app: re-fetch its
+  // content every 10s (and on window focus, the moment users typically come
+  // back from an external editor). A clean tab silently follows the disk; a
+  // dirty tab keeps the user's edits, rebases originalContent onto the new
+  // disk state, and raises the externalChange banner.
+  useEffect(() => {
+    if (!activeEditorTabId) return;
+    let cancelled = false;
+
+    const check = async () => {
+      if (document.hidden) return;
+      const tab = editorTabsRef.current.find((t) => t.id === activeEditorTabId);
+      if (!tab) return;
+      try {
+        const disk = await fetchFileContent(tab.path, tab.projectRoot);
+        if (cancelled || disk === tab.originalContent) return;
+        setEditorTabs((prev) =>
+          prev.map((t) => {
+            if (t.id !== tab.id || t.originalContent === disk) return t;
+            if (!t.isDirty) {
+              return { ...t, content: disk, originalContent: disk, diffVersion: t.diffVersion + 1 };
+            }
+            return { ...t, originalContent: disk, isDirty: t.content !== disk, externalChange: t.content !== disk };
+          }),
+        );
+      } catch (err) {
+        // The file disappeared out from under an open tab. Flag rather than
+        // spam: the banner covers "modified or deleted outside the app".
+        console.error("External-change check failed (file unreadable):", err);
+        if (!cancelled) {
+          setEditorTabs((prev) =>
+            prev.map((t) => (t.id === activeEditorTabId && t.isDirty ? { ...t, externalChange: true } : t)),
+          );
+        }
+      }
+    };
+
+    const interval = window.setInterval(check, 10_000);
+    window.addEventListener("focus", check);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", check);
+    };
+  }, [activeEditorTabId, fetchFileContent]);
+
   return {
     editorTabs,
     activeEditorTabId,
     setActiveEditorTabId,
     handleOpenFile,
+    reloadTabFromDisk,
+    dismissExternalChange,
     handleEditorChange,
     handleSelectionChange,
     activeEditorContext,

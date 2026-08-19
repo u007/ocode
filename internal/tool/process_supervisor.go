@@ -5,9 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"runtime"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -409,28 +407,16 @@ func (p *supervisedProcess) defaultGraceful() error {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	if runtime.GOOS == "windows" {
-		return p.cmd.Process.Kill()
-	}
 	record := p.snapshot()
-	if record.OwnsProcessGroup {
-		return syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
-	}
-	return p.cmd.Process.Signal(syscall.SIGTERM)
+	return terminateProcess(p.cmd.Process, record.OwnsProcessGroup)
 }
 
 func (p *supervisedProcess) defaultForce() error {
 	if p.cmd == nil || p.cmd.Process == nil {
 		return nil
 	}
-	if runtime.GOOS == "windows" {
-		return p.cmd.Process.Kill()
-	}
 	record := p.snapshot()
-	if record.OwnsProcessGroup {
-		return syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
-	}
-	return p.cmd.Process.Kill()
+	return forceKillProcess(p.cmd.Process, record.OwnsProcessGroup)
 }
 
 func waitForResult(ctx context.Context, ch <-chan waitResult, timeout time.Duration) (waitResult, bool) {

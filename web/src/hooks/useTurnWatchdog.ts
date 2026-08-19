@@ -1,7 +1,12 @@
 import { useEffect, useRef } from "react";
-import { useChatDispatch, useChatState, getTurnState, type ChatAction } from "../stores/chatStore";
+import {
+  useChatDispatch,
+  useChatState,
+  getTurnState,
+  type ChatAction,
+  type ChatState,
+} from "../stores/chatStore";
 import { api } from "../api/client";
-import { eventBus } from "../lib/eventBus";
 
 /** Stall threshold: no turn_heartbeat for this long while a turn is active
  *  means the stream (or the turn) is stuck. */
@@ -28,8 +33,51 @@ export function applyReconcileState(
   }
 }
 
+async function reconcileSession(
+  dispatch: (a: ChatAction) => void,
+  sessionId: string,
+): Promise<void> {
+  try {
+    const state = await api.getSessionState(sessionId);
+    applyReconcileState(dispatch, sessionId, state);
+  } catch (err) {
+    console.warn(`turn watchdog: reconcile failed for ${sessionId}`, err);
+  }
+}
+
+/** One stall-detection pass over every session currently held open (any
+ *  project, active or backgrounded) — exported for unit tests. */
+export function runWatchdogTick(
+  sessionIds: Iterable<string>,
+  getState: () => ChatState,
+  dispatch: (a: ChatAction) => void,
+): void {
+  const now = Date.now();
+  for (const sessionId of sessionIds) {
+    if (!sessionId || sessionId.startsWith("new-")) continue;
+    const turn = getTurnState(getState(), sessionId);
+    if (!turn.turnActive) continue; // idle — nothing to watch
+    const lastBeat = turn.lastHeartbeatAt ?? now;
+    if (now - lastBeat > STALL_THRESHOLD_MS) {
+      if (!turn.turnStalled) {
+        console.warn(
+          `turn watchdog: session ${sessionId} stalled — no heartbeat for ${STALL_THRESHOLD_MS / 1000}s; reconciling`,
+        );
+        dispatch({ type: "SET_TURN_STALLED", sessionId, stalled: true });
+      }
+      void reconcileSession(dispatch, sessionId);
+    }
+  }
+}
+
 /**
- * useTurnWatchdog — per-session streaming watchdog.
+ * useTurnWatchdogAll — streaming watchdog for every open session at once.
+ *
+ * A single interval covers every session id in `openSessionIds` (all open
+ * tabs, any project) instead of only the currently active tab — a turn
+ * stalling in a backgrounded tab must still get reconciled, not just one the
+ * user happens to be looking at. `openSessionIds` is read through a ref so
+ * newly opened/closed tabs are picked up without resetting the interval.
  *
  * While a session's turn is active (turn state from the store, patched by bus
  * turn_heartbeat events), no heartbeat within STALL_THRESHOLD_MS marks the
@@ -40,54 +88,22 @@ export function applyReconcileState(
  *   side; we keep the stalled marker (a fresh heartbeat clears it) and retry
  *   on the next tick.
  *
- * Reconcile also runs on bus reconnect (eventBus.onReconnect) and on tab
- * activation of a turn-active session, per the Part 05 design.
+ * Bus-reconnect reconcile for open sessions is already handled by
+ * SessionTabSync's `reconcileOpenSessions`, so this hook only owns the
+ * periodic stall check.
  */
-export function useTurnWatchdog(sessionId: string | null): void {
+export function useTurnWatchdogAll(openSessionIds: ReadonlySet<string>): void {
   const dispatch = useChatDispatch();
   const chatState = useChatState();
   const stateRef = useRef(chatState);
   stateRef.current = chatState;
+  const idsRef = useRef(openSessionIds);
+  idsRef.current = openSessionIds;
 
   useEffect(() => {
-    if (!sessionId || sessionId.startsWith("new-")) return;
-    let cancelled = false;
-
-    const reconcile = async () => {
-      try {
-        const state = await api.getSessionState(sessionId);
-        if (cancelled) return;
-        applyReconcileState(dispatch, sessionId, state);
-      } catch (err) {
-        if (!cancelled) console.warn(`turn watchdog: reconcile failed for ${sessionId}`, err);
-      }
-    };
-
-    // Reconcile on reconnect and on activation of a turn-active session.
-    const offReconnect = eventBus.onReconnect(() => void reconcile());
-    if (getTurnState(stateRef.current, sessionId).turnActive) void reconcile();
-
-    const interval = window.setInterval(() => {
-      if (cancelled) return;
-      const turn = getTurnState(stateRef.current, sessionId);
-      if (!turn.turnActive) return; // idle — nothing to watch
-      const now = Date.now();
-      const lastBeat = turn.lastHeartbeatAt ?? now;
-      if (now - lastBeat > STALL_THRESHOLD_MS) {
-        if (!turn.turnStalled) {
-          console.warn(
-            `turn watchdog: session ${sessionId} stalled — no heartbeat for ${STALL_THRESHOLD_MS / 1000}s; reconciling`,
-          );
-          dispatch({ type: "SET_TURN_STALLED", sessionId, stalled: true });
-        }
-        void reconcile();
-      }
-    }, WATCHDOG_INTERVAL_MS);
-
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-      offReconnect();
-    };
-  }, [sessionId, dispatch]);
+    const tick = () => runWatchdogTick(idsRef.current, () => stateRef.current, dispatch);
+    tick(); // cover sessions that were already stalled/turn-active at mount
+    const interval = window.setInterval(tick, WATCHDOG_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [dispatch]);
 }

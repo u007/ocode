@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Routes, Route } from "react-router-dom";
 import { useIsMobile } from "./hooks/useIsMobile";
 import { ChatProvider, useChatDispatch, useChatState, getSessionSlice } from "./stores/chatStore";
@@ -18,6 +18,7 @@ import FileTree from "./components/Files/FileTree";
 import FileEditor from "./components/Files/FileEditor";
 import LogPanel from "./components/Logs/LogPanel";
 import TerminalTabs, { type TerminalTabsHandle } from "./components/Terminal/TerminalTabs";
+import ProcessesPanel from "./components/Terminal/ProcessesPanel";
 import AssetsPanel from "./components/Assets/AssetsPanel";
 import CronPanel from "./components/Cron/CronPanel";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
@@ -34,6 +35,7 @@ import ModelDialog from "./components/Layout/ModelDialog";
 import PermissionDialog from "./components/Chat/PermissionDialog";
 import { useKeyboard } from "./hooks/useKeyboard";
 import { useTheme } from "./hooks/useTheme";
+import { useResizableSidebar } from "./hooks/useResizableSidebar";
 import { useEditorTabs } from "./hooks/useEditorTabs";
 import { useChat } from "./hooks/useChat";
 import { dispatchCommand } from "./components/Chat/commands";
@@ -45,7 +47,7 @@ import { rekeyQueue } from "./lib/tabQueue";
 import { notifyWailsRuntimeReady } from "./lib/wails";
 import { eventBus } from "./lib/eventBus";
 import { useSessionStatus } from "./hooks/useSessionStatus";
-import { useTurnWatchdog } from "./hooks/useTurnWatchdog";
+import { useTurnWatchdogAll } from "./hooks/useTurnWatchdog";
 
 type ModelDialogTab = "main" | "small" | "advisor";
 
@@ -100,10 +102,17 @@ function HomeApp() {
   const [coworkOpen, setCoworkOpen] = useState(true);
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [modelDialogTab, setModelDialogTab] = useState<ModelDialogTab>("main");
+  const sidebar = useResizableSidebar();
 
   // Part 05: per-session status on tab activation + streaming watchdog.
   useSessionStatus(activeTabId);
-  useTurnWatchdog(activeTabId);
+  // Watches every open tab (any project), not just the active one, so a
+  // turn stalling in a backgrounded tab still gets detected and reconciled.
+  const openSessionIds = useMemo(
+    () => new Set(Object.values(projectState.tabsByProject).flat().map((t) => t.id)),
+    [projectState.tabsByProject],
+  );
+  useTurnWatchdogAll(openSessionIds);
 
   // Declare the viewed projects on the shared bus (drives the server's
   // subscriber-aware git/spending emitters). All open tabs' projects count,
@@ -132,13 +141,15 @@ function HomeApp() {
     cancelClose,
     saveError,
     saveEditorTab,
+    reloadTabFromDisk,
+    dismissExternalChange,
   } = useEditorTabs();
 
   // Opening a file from anywhere (tree, git diff, file picker) shows the
   // Files view and selects the editor tab.
   const openFileAndShow = useCallback(
-    async (path: string) => {
-      await handleOpenFile(path);
+    async (path: string, projectRoot?: string) => {
+      await handleOpenFile(path, projectRoot);
       setActiveView("files");
     },
     [handleOpenFile],
@@ -281,12 +292,27 @@ function HomeApp() {
       }
     },
     onCloseSession: () => {
-      // Cmd/Ctrl+W: close the active session tab. Mirrors the X button in
-      // OpenSessionBar (closeSessionTab + drop the chat slice).
-      if (activeTabId) {
-        closeSessionTab(activeTabId);
-        dispatch({ type: "RESET", sessionId: activeTabId });
+      // Cmd/Ctrl+W: close whatever is frontmost. On the Files view that is
+      // the active editor tab (requestCloseTab handles the unsaved-changes
+      // confirm); on the terminal sub-tab it is the active terminal
+      // instance; otherwise the session tab itself. Mirrors each tab bar's
+      // X button.
+      if (activeView === "files") {
+        if (activeEditorTabId) {
+          requestCloseTab(activeEditorTabId);
+        }
+        return;
       }
+      if (activeView !== "sessions" || !activeTabId) return;
+      const currentTab = tabs.find((t) => t.id === activeTabId);
+      if (
+        currentTab?.activeSubTab === "terminal" &&
+        terminalRefs.current.get(activeTabId)?.closeActiveTerminal()
+      ) {
+        return;
+      }
+      closeSessionTab(activeTabId);
+      dispatch({ type: "RESET", sessionId: activeTabId });
     },
     onEscape: () => {
       setCmdOpen(false);
@@ -401,15 +427,46 @@ function HomeApp() {
         <ProjectSidebar
           isOpen={sidebarOpen}
           onToggle={() => setSidebarOpen(!sidebarOpen)}
+          width={sidebarOpen ? sidebar.width : undefined}
         />
 
+        {/* Sidebar resize handle */}
+        {sidebarOpen && (
+          <div
+            ref={sidebar.handleRef}
+            role="separator"
+            aria-orientation="vertical"
+            aria-valuemin={sidebar.minWidth}
+            aria-valuemax={sidebar.maxWidth}
+            aria-valuenow={sidebar.width}
+            tabIndex={0}
+            className="w-1 flex-shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
+            onPointerDown={sidebar.onPointerDown}
+            onDoubleClick={sidebar.resetToDefault}
+            onKeyDown={(e) => {
+              const step = e.shiftKey ? 50 : 10;
+              if (e.key === "ArrowLeft") {
+                e.preventDefault();
+                sidebar.setWidth(sidebar.width - step);
+              } else if (e.key === "ArrowRight") {
+                e.preventDefault();
+                sidebar.setWidth(sidebar.width + step);
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                sidebar.resetToDefault();
+              }
+            }}
+          />
+        )}
+
         {/* Center content */}
+
         <main className="flex flex-1 flex-col overflow-hidden">
           {/* Tabs context wraps header triggers + content panels */}
           <Tabs value={activeView} onValueChange={(v) => setActiveView(v as typeof activeView)} className="flex flex-col flex-1 overflow-hidden">
             <TopTabs activeTab={activeView} onTabSelect={(v) => setActiveView(v as typeof activeView)} />
 
-            <div className="flex-1 overflow-hidden flex flex-col">
+            <div className="flex-1 overflow-hidden flex flex-col pb-2">
               <TabsContent value="files" forceMount className="flex-1 overflow-hidden m-0 flex flex-col">
                 <EditorTabBar
                   editorTabs={editorTabs.map((t) => ({ id: t.id, path: t.path, isDirty: t.isDirty }))}
@@ -420,7 +477,7 @@ function HomeApp() {
                 />
                 <div className="relative flex-1 overflow-hidden">
                   <div className={activeEditorTabId === null ? "absolute inset-0" : "absolute inset-0 hidden"}>
-                    <FileTree onOpenFile={openFileAndShow} />
+                    <FileTree onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} />
                   </div>
                   {editorTabs.map((et) => (
                     <div
@@ -429,12 +486,16 @@ function HomeApp() {
                     >
                       <FileEditor
                         path={et.path}
+                        persistKey={et.id}
                         content={et.content}
                         onChange={(value) => handleEditorChange(et.id, value)}
                         readOnly={false}
                         session={activeTabId ?? undefined}
                         diffVersion={et.diffVersion}
                         onSelectionChange={handleSelectionChange}
+                        externalChange={et.externalChange}
+                        onReloadFromDisk={() => reloadTabFromDisk(et.id)}
+                        onDismissExternalChange={() => dismissExternalChange(et.id)}
                       />
                     </div>
                   ))}
@@ -442,7 +503,7 @@ function HomeApp() {
               </TabsContent>
 
               <TabsContent value="git" forceMount className="flex-1 overflow-hidden m-0">
-                <GitPanel onOpenFile={openFileAndShow} />
+                <GitPanel onOpenFile={openFileAndShow} projectPath={projectState.activeProject?.path} />
               </TabsContent>
               <TabsContent value="cron" forceMount className="flex-1 overflow-hidden m-0">
                 <CronPanel />
@@ -558,6 +619,20 @@ function HomeApp() {
                       </div>
                     ))}
                     {allChatTabs.map((tab) => (
+                      <div
+                        key={`${tab.id}:processes`}
+                        className={
+                          tab.projectPath === projectState.activeProject?.path &&
+                          tab.id === activeTabId &&
+                          tab.activeSubTab === "processes"
+                            ? "absolute inset-0"
+                            : "absolute inset-0 hidden"
+                        }
+                      >
+                        <ProcessesPanel sessionId={tab.id} />
+                      </div>
+                    ))}
+                    {allChatTabs.map((tab) => (
                       tab.projectPath === projectState.activeProject?.path &&
                       tab.id === activeTabId &&
                       tab.activeSubTab === "status" ? (
@@ -574,21 +649,23 @@ function HomeApp() {
             </div>
           </Tabs>
 
-          {/* Status bar */}
-          <StatusBar
-            onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
-            onStatusClick={() => {
-              setActiveView("sessions");
-              if (activeTabId) {
-                projectDispatch({ type: "SET_TAB_SUB_TAB", id: activeTabId, subTab: "status" });
-              } else {
-                const newId = openNewSessionTab(true);
-                if (newId) {
-                  projectDispatch({ type: "SET_TAB_SUB_TAB", id: newId, subTab: "status" });
+          {/* Status bar — only on chat sub-tab */}
+          {activeView === "sessions" && activeSessionTab?.activeSubTab === "chat" && (
+            <StatusBar
+              onCoworkToggle={() => setCoworkOpen(!coworkOpen)}
+              onStatusClick={() => {
+                setActiveView("sessions");
+                if (activeTabId) {
+                  projectDispatch({ type: "SET_TAB_SUB_TAB", id: activeTabId, subTab: "status" });
+                } else {
+                  const newId = openNewSessionTab(true);
+                  if (newId) {
+                    projectDispatch({ type: "SET_TAB_SUB_TAB", id: newId, subTab: "status" });
+                  }
                 }
-              }
-            }}
-          />
+              }}
+            />
+          )}
         </main>
 
         {/* Right sidebar - cowork panel (only on Sessions view with the active session's sub-tab on Chat) */}
@@ -631,6 +708,7 @@ function HomeApp() {
         open={filePickerOpen}
         onClose={() => setFilePickerOpen(false)}
         onOpenFile={openFileAndShow}
+        projectPath={projectState.activeProject?.path}
       />
       <ConfirmCloseDialog
         path={pendingClose?.path ?? ""}

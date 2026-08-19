@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"io"
 	"log"
 	"mime"
@@ -20,15 +21,24 @@ type uploadFileInfo struct {
 	Mime    string `json:"mime"`
 }
 
-// uploadDir returns the absolute path of the configured upload directory,
-// creating it if needed. Honors cfg.Ocode.UploadDir when set; otherwise falls
-// back to <workDir>/.ocode/uploads.
-func (h *Handler) uploadDir() (string, error) {
+// uploadDir returns the absolute path of the upload directory for the
+// request's project, creating it if needed. A ?project= query selects which
+// registered project root receives the uploads (same trust boundary as the
+// git endpoints); absent means the server workdir. Uploads must land in the
+// project the session runs against — chat and terminal reference them by the
+// relative path `.ocode/uploads/<name>`, which resolves against the session's
+// project dir, not the server process workdir. cfg.Ocode.UploadDir, when set,
+// overrides the project-relative default.
+func (h *Handler) uploadDir(r *http.Request) (string, error) {
 	var dir string
 	if h.cfg != nil && h.cfg.Ocode.UploadDir != "" {
 		dir = h.cfg.Ocode.UploadDir
 	} else {
-		dir = filepath.Join(h.workDir, ".ocode", "uploads")
+		root, ok := h.gitProjectDir(r)
+		if !ok {
+			return "", errUnknownProject
+		}
+		dir = filepath.Join(root, ".ocode", "uploads")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
@@ -36,11 +46,19 @@ func (h *Handler) uploadDir() (string, error) {
 	return dir, nil
 }
 
+// errUnknownProject marks a ?project= value that is not a registered project
+// root, so handlers can answer 400 instead of 500.
+var errUnknownProject = errors.New("unknown project")
+
 // HandleUploads dispatches on HTTP method: GET lists files, POST stores
 // uploaded multipart files, DELETE removes a file by ?name=<base>.
 func (h *Handler) HandleUploads(w http.ResponseWriter, r *http.Request) {
-	dir, err := h.uploadDir()
+	dir, err := h.uploadDir(r)
 	if err != nil {
+		if errors.Is(err, errUnknownProject) {
+			writeError(w, http.StatusBadRequest, "unknown project")
+			return
+		}
 		log.Printf("uploads: resolve dir: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to resolve upload directory")
 		return
@@ -189,8 +207,12 @@ func (h *Handler) HandleUploadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	dir, err := h.uploadDir()
+	dir, err := h.uploadDir(r)
 	if err != nil {
+		if errors.Is(err, errUnknownProject) {
+			writeError(w, http.StatusBadRequest, "unknown project")
+			return
+		}
 		log.Printf("uploads: resolve dir: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to resolve upload directory")
 		return

@@ -62,11 +62,29 @@ describe("useKeyboard", () => {
 
     act(() => {
       dispatchKey("w", false, true, terminal);
-      dispatchKey("w", true, false, terminal);
     });
 
     document.body.removeChild(terminal);
     expect(onCloseSession).not.toHaveBeenCalled();
+  });
+
+  it("closes via Cmd+W even when the embedded terminal has focus", () => {
+    // Cmd+W (metaKey) is never sent to the pty, so it should still close the
+    // frontmost tab while typing in the terminal — only Ctrl+W is the
+    // shell's delete-previous-word.
+    const onCloseSession = vi.fn();
+    renderHook(() => useKeyboard({ onCloseSession }));
+
+    const terminal = document.createElement("div");
+    terminal.className = "xterm";
+    document.body.appendChild(terminal);
+
+    act(() => {
+      dispatchKey("w", true, false, terminal);
+    });
+
+    document.body.removeChild(terminal);
+    expect(onCloseSession).toHaveBeenCalledTimes(1);
   });
 
   it("does not call onCloseSession for plain W", () => {

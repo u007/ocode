@@ -1,0 +1,99 @@
+import { useEffect, useMemo, useState } from "react";
+import { Gauge } from "lucide-react";
+import { eventBus } from "@/lib/eventBus";
+import { loadSessionTerminals } from "./terminalPersistence";
+
+interface TerminalProcessStat {
+  id: string;
+  pid: number;
+  cpu_percent: number;
+  mem_bytes: number;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Chrome-Task-Manager-style view of every open terminal in this session tab:
+ * CPU% and memory summed across the whole process tree (the shell plus
+ * whatever it launched — a nested `ocode`, its `/rc` server, etc.), so a
+ * runaway grandchild process surfaces even though the pty's own pid stays
+ * quiet. Rows come from the `terminal_processes` envelope the server emitter
+ * publishes (see internal/server/emitters.go); titles come from the same
+ * localStorage-persisted terminal list TerminalTabs itself reads.
+ */
+export default function ProcessesPanel({ sessionId }: { sessionId: string }) {
+  const [stats, setStats] = useState<Record<string, TerminalProcessStat>>({});
+  const [titles, setTitles] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    const off = eventBus.on("terminal_processes", (env) => {
+      const rows = env.data as TerminalProcessStat[];
+      if (!Array.isArray(rows)) return;
+      setStats((prev) => {
+        const next = { ...prev };
+        for (const row of rows) next[row.id] = row;
+        return next;
+      });
+      // Refresh titles from the persisted terminal list on every update — it's
+      // a single localStorage read, and picks up renames/new terminals without
+      // needing TerminalTabs to be lifted into shared state.
+      const saved = loadSessionTerminals(sessionId);
+      if (saved) {
+        setTitles(Object.fromEntries(saved.terminals.map((t) => [t.id, t.title])));
+      }
+    });
+    return off;
+  }, [sessionId]);
+
+  const rows = useMemo(() => {
+    return Object.values(stats)
+      .filter((s) => titles[s.id] !== undefined)
+      .sort((a, b) => b.cpu_percent - a.cpu_percent);
+  }, [stats, titles]);
+
+  return (
+    <div className="flex h-full flex-col bg-zinc-900">
+      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-zinc-700 px-3 text-sm text-zinc-400">
+        <Gauge className="h-4 w-4" />
+        Processes
+      </div>
+      <div className="flex-1 overflow-y-auto">
+        {rows.length === 0 ? (
+          <div className="p-4 text-sm text-zinc-500">
+            No terminal process data yet. Open a terminal to see it here.
+          </div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b border-zinc-800 text-left text-xs uppercase text-zinc-500">
+                <th className="px-3 py-2 font-medium">Terminal</th>
+                <th className="px-3 py-2 font-medium">PID</th>
+                <th className="px-3 py-2 font-medium">CPU</th>
+                <th className="px-3 py-2 font-medium">Memory</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => (
+                <tr key={row.id} className="border-b border-zinc-800/50 text-zinc-300">
+                  <td className="px-3 py-2">{titles[row.id]}</td>
+                  <td className="px-3 py-2 text-zinc-500">{row.pid}</td>
+                  <td
+                    className={`px-3 py-2 tabular-nums ${
+                      row.cpu_percent > 50 ? "text-red-400" : row.cpu_percent > 15 ? "text-yellow-400" : ""
+                    }`}
+                  >
+                    {row.cpu_percent.toFixed(1)}%
+                  </td>
+                  <td className="px-3 py-2 tabular-nums">{formatBytes(row.mem_bytes)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
+  );
+}

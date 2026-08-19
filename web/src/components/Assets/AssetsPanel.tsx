@@ -12,6 +12,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { apiPath, authHeaders } from "@/api/client";
+import { useProjectState } from "../../stores/projectStore";
 
 interface UploadedFile {
   name: string;
@@ -43,19 +44,21 @@ function fileIcon(mime: string) {
   return FileIcon;
 }
 
-function fileAPIURL(name: string): string {
-  return apiPath(`/api/uploads/file?name=${encodeURIComponent(name)}`);
+// projectQuery is "" or "&project=<path>" — uploads are project-scoped, so
+// every endpoint call carries the active project alongside ?name=.
+function fileAPIURL(name: string, projectQuery: string): string {
+  return apiPath(`/api/uploads/file?name=${encodeURIComponent(name)}${projectQuery}`);
 }
 
-async function fetchBlob(name: string): Promise<string> {
-  const r = await fetch(fileAPIURL(name), { headers: authHeaders() });
+async function fetchBlob(name: string, projectQuery: string): Promise<string> {
+  const r = await fetch(fileAPIURL(name, projectQuery), { headers: authHeaders() });
   if (!r.ok) throw new Error(`fetch failed: ${r.status}`);
   return URL.createObjectURL(await r.blob());
 }
 
-async function triggerDownload(name: string): Promise<void> {
+async function triggerDownload(name: string, projectQuery: string): Promise<void> {
   try {
-    const url = await fetchBlob(name);
+    const url = await fetchBlob(name, projectQuery);
     const a = document.createElement("a");
     a.href = url;
     a.download = name;
@@ -103,6 +106,12 @@ export default function AssetsPanel() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const projectPath = useProjectState().state.activeProject?.path;
+  // Appended to URLs that already carry a query (?name=...).
+  const projectQuery = projectPath ? `&project=${encodeURIComponent(projectPath)}` : "";
+  // Used where /api/uploads has no other query params.
+  const projectOnlyQuery = projectPath ? `?project=${encodeURIComponent(projectPath)}` : "";
+
   // Revoke stale blob URL whenever it changes to avoid memory leaks.
   useEffect(() => {
     return () => {
@@ -114,7 +123,7 @@ export default function AssetsPanel() {
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch(apiPath("/api/uploads"), {
+      const r = await fetch(apiPath(`/api/uploads${projectOnlyQuery}`), {
         headers: authHeaders(),
       });
       if (!r.ok) {
@@ -128,7 +137,7 @@ export default function AssetsPanel() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [projectOnlyQuery]);
 
   useEffect(() => {
     void loadFiles();
@@ -139,7 +148,7 @@ export default function AssetsPanel() {
       const fd = new FormData();
       Array.from(fileList).forEach((f) => fd.append("file", f));
       try {
-        const r = await fetch(apiPath("/api/uploads"), {
+        const r = await fetch(apiPath(`/api/uploads${projectOnlyQuery}`), {
           method: "POST",
           headers: authHeaders(),
           body: fd,
@@ -153,14 +162,14 @@ export default function AssetsPanel() {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [loadFiles]
+    [loadFiles, projectOnlyQuery]
   );
 
   const deleteFile = useCallback(
     async (name: string) => {
       try {
         const r = await fetch(
-          apiPath(`/api/uploads?name=${encodeURIComponent(name)}`),
+          apiPath(`/api/uploads?name=${encodeURIComponent(name)}${projectQuery}`),
           { method: "DELETE", headers: authHeaders() }
         );
         if (!r.ok && r.status !== 204) {
@@ -174,7 +183,7 @@ export default function AssetsPanel() {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    []
+    [projectQuery]
   );
 
   const handleSelect = useCallback(async (file: UploadedFile) => {
@@ -184,7 +193,7 @@ export default function AssetsPanel() {
     setBlobUrl(null);
     if (file.mime.startsWith("text/")) {
       try {
-        const r = await fetch(fileAPIURL(file.name), { headers: authHeaders() });
+        const r = await fetch(fileAPIURL(file.name, projectQuery), { headers: authHeaders() });
         setPreviewText(r.ok ? await r.text() : `(failed to load preview: ${r.status})`);
       } catch (e) {
         console.error("Preview load failed:", e);
@@ -192,12 +201,12 @@ export default function AssetsPanel() {
       }
     } else {
       try {
-        setBlobUrl(await fetchBlob(file.name));
+        setBlobUrl(await fetchBlob(file.name, projectQuery));
       } catch (e) {
         console.error("Blob load failed:", e);
       }
     }
-  }, []);
+  }, [projectQuery]);
 
   const SelectedIcon = useMemo(
     () => (selected ? fileIcon(selected.mime) : FileIcon),
@@ -298,7 +307,7 @@ export default function AssetsPanel() {
                     <div className="flex items-center gap-1 shrink-0">
                       <button
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); void triggerDownload(file.name); }}
+                        onClick={(e) => { e.stopPropagation(); void triggerDownload(file.name, projectQuery); }}
                         title="Download"
                         className="text-zinc-400 hover:text-zinc-200 p-1"
                       >
@@ -372,7 +381,7 @@ export default function AssetsPanel() {
                   variant="ghost"
                   size="sm"
                   className="h-7 px-2"
-                  onClick={() => void triggerDownload(selected.name)}
+                  onClick={() => void triggerDownload(selected.name, projectQuery)}
                 >
                   <Download className="w-3.5 h-3.5 mr-1" />
                   Download
@@ -432,7 +441,7 @@ export default function AssetsPanel() {
                   <p className="text-zinc-500 text-sm">No preview available</p>
                   <button
                     type="button"
-                    onClick={() => void triggerDownload(selected.name)}
+                    onClick={() => void triggerDownload(selected.name, projectQuery)}
                     className="inline-flex items-center text-blue-400 hover:text-blue-300 text-sm"
                   >
                     <Download className="w-3.5 h-3.5 mr-1" />

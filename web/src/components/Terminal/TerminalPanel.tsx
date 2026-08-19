@@ -1,9 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
-import { apiPath, authToken } from "@/api/client";
+import { apiPath, authHeaders, authToken } from "@/api/client";
 import { loadTerminalBuffer, saveTerminalBuffer } from "./terminalPersistence";
 
 /**
@@ -25,11 +25,15 @@ export default function TerminalPanel({
   id,
   active,
   scrollbackLines,
+  fontFamily,
+  fontSize,
   projectPath,
 }: {
   id: string;
   active: boolean;
   scrollbackLines: number;
+  fontFamily: string;
+  fontSize: number;
   projectPath: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -37,6 +41,79 @@ export default function TerminalPanel({
   const fitRef = useRef<FitAddon | null>(null);
   const serializeRef = useRef<SerializeAddon | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const dragCounterRef = useRef(0);
+  const [isDragging, setIsDragging] = useState(false);
+
+  // Upload dropped files and insert their names into the terminal stdin.
+  const uploadAndInsert = useCallback(async (files: File[]) => {
+    if (files.length === 0) return;
+    const fd = new FormData();
+    files.forEach((f) => fd.append("file", f));
+    try {
+      const query = projectPath ? `?project=${encodeURIComponent(projectPath)}` : "";
+      const r = await fetch(apiPath(`/api/uploads${query}`), {
+        method: "POST",
+        headers: authHeaders(),
+        body: fd,
+      });
+      const saved: { name: string }[] = await r.json();
+      const names = saved.map((f) => f.name);
+      if (names.length === 0) return;
+      const term = termRef.current;
+      const sock = socketRef.current;
+      if (!term || !sock || sock.readyState !== WebSocket.OPEN) return;
+      // Insert uploaded file names into the terminal. Use the relative path
+      // under the default upload directory so the user can immediately
+      // reference them in shell commands (e.g. `cat .ocode/uploads/foo.txt`).
+      // If a custom upload dir is configured this path won't resolve, but
+      // the filename alone still helps.
+      const paths = names.map((n) => `.ocode/uploads/${n}`);
+      const text = paths.join(" ") + " ";
+      sock.send(text);
+    } catch (err) {
+      console.error("terminal: file upload failed:", err);
+    }
+  }, [projectPath]);
+
+  // Drag-and-drop handlers — follow the same counter-based pattern used by
+  // ChatInput to correctly handle nested dragenter/dragleave from child
+  // elements.
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes("Files")) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounterRef.current = 0;
+      setIsDragging(false);
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length > 0) {
+        uploadAndInsert(files);
+      }
+    },
+    [uploadAndInsert],
+  );
 
   // Fit to the container and tell the pty about the new size. No-op while the
   // container has no layout (hidden tab), which would otherwise force xterm to
@@ -61,8 +138,8 @@ export default function TerminalPanel({
     const term = new Terminal({
       cursorBlink: true,
       scrollback: scrollbackLines,
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-      fontSize: 13,
+      fontFamily,
+      fontSize,
       theme: { background: "#18181b", foreground: "#e4e4e7" },
     });
     const fit = new FitAddon();
@@ -73,6 +150,20 @@ export default function TerminalPanel({
     termRef.current = term;
     fitRef.current = fit;
     serializeRef.current = serialize;
+
+    // xterm.js sends plain "\r" for Enter regardless of Shift, so a nested
+    // TUI (e.g. ocode itself) can never tell them apart. Emit the CSI-u
+    // disambiguated sequence bubbletea already knows how to decode
+    // (charm.land/bubbletea/v2's key disambiguation is on by default) so
+    // Shift+Enter reaches it as a distinct key instead of a second Enter.
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type === "keydown" && ev.key === "Enter" && ev.shiftKey) {
+        const sock = socketRef.current;
+        if (sock && sock.readyState === WebSocket.OPEN) sock.send("\x1b[13;2u");
+        return false;
+      }
+      return true;
+    });
 
     const savedBuffer = loadTerminalBuffer(id);
     if (savedBuffer) {
@@ -95,8 +186,10 @@ export default function TerminalPanel({
     const params = new URLSearchParams();
     if (token) params.set("token", token);
     // project_path pins the shell's cwd to this tab's project; the server
-    // validates it against its registered project roots.
+    // validates it against its registered project roots. terminal_id lets the
+    // terminal-processes emitter (Processes tab) correlate a pid with this tab.
     if (projectPath) params.set("project_path", projectPath);
+    params.set("terminal_id", id);
     const query = params.toString();
     // apiPath() keeps the tailscale --set-path prefix, without which the proxy
     // routes the socket to whichever session owns the root path.
@@ -157,11 +250,40 @@ export default function TerminalPanel({
     };
   }, [scrollbackLines, projectPath]);
 
+  // Apply font changes to the live terminal in place instead of tearing down
+  // the session (which would kill the pty/websocket) whenever settings change.
+  useEffect(() => {
+    const term = termRef.current;
+    if (!term) return;
+    term.options.fontFamily = fontFamily;
+    term.options.fontSize = fontSize;
+    fitAndResize.current();
+  }, [fontFamily, fontSize]);
+
   // Re-fit when the tab comes back to the foreground: any resize that happened
   // while hidden was skipped because the container had no layout.
+  // Also focus the xterm terminal so the user can type immediately.
   useEffect(() => {
-    if (active) fitAndResize.current();
+    if (active) {
+      fitAndResize.current();
+      termRef.current?.focus();
+    }
   }, [active]);
 
-  return <div ref={containerRef} className="h-full w-full bg-zinc-900 p-2" />;
+  return (
+    <div
+      ref={containerRef}
+      className="relative h-full w-full bg-zinc-900 p-2"
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {isDragging && (
+        <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-md border-2 border-dashed border-blue-500 bg-blue-500/10">
+          <span className="text-sm font-medium text-blue-300">Drop files here</span>
+        </div>
+      )}
+    </div>
+  );
 }

@@ -32,9 +32,14 @@ export default function SessionTabSync() {
   // current set via this ref. `routeBusEnvelope` mutates it directly during a
   // session_started rekey so the first user_message echo isn't dropped.
   const openSessionIdsRef = useRef<Set<string>>(new Set());
-  openSessionIdsRef.current = new Set(
-    Object.values(projectState.tabsByProject).flat().map((tab) => tab.id),
-  );
+  // Mutate the existing Set in place rather than reassigning — the router
+  // closure below (installed once by the effect) holds a reference to this
+  // exact Set instance. Reassigning it here would leave that closure's
+  // "openSessionIds" stuck on whatever tabs existed at mount, permanently
+  // dropping every event for tabs opened afterward.
+  const liveTabIds = Object.values(projectState.tabsByProject).flat().map((tab) => tab.id);
+  openSessionIdsRef.current.clear();
+  liveTabIds.forEach((id) => openSessionIdsRef.current.add(id));
 
   // The router below is a stable closure (effect deps don't include
   // chatState); read current slices through this ref so it never sees stale

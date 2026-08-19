@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
-	"syscall"
 	"time"
 )
 
@@ -53,7 +52,7 @@ func Build(ctx context.Context, command string, dir string) *exec.Cmd {
 		c.Dir = dir
 	}
 	if runtime.GOOS != "windows" {
-		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		setProcGroup(c)
 	}
 	return c
 }

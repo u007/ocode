@@ -51,10 +51,12 @@ export function useKeyboard(handlers: ShortcutHandlers) {
         ref.current.onNewTerminal?.();
       }
       if (e.key === "w" && (e.metaKey || e.ctrlKey) && isDesktopShell()) {
-        // Don't steal Ctrl+W from the embedded terminal (xterm uses it as
-        // readline "delete previous word" while typing).
+        // Don't steal Ctrl+W from the embedded terminal (readline "delete
+        // previous word" while typing). Cmd+W (metaKey) is never sent to the
+        // pty, so it still closes the frontmost tab even when the terminal
+        // has focus.
         const target = e.target as Element | null;
-        if (target instanceof Element && target.closest(".xterm")) return;
+        if (!e.metaKey && target instanceof Element && target.closest(".xterm")) return;
         e.preventDefault();
         ref.current.onCloseSession?.();
       }

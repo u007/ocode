@@ -150,7 +150,25 @@ func (a *Agent) ensureMDState() {
 		a.emitDebug("MD-DISCOVERY", "no LLM client available — markdown discovery inactive")
 		return
 	}
+	// Markdown discovery is project-scoped. Do not fall back to the process cwd
+	// here: desktop processes launched from Finder/Dock commonly have $HOME as
+	// their cwd, which would make a new unbound session scan the user's files.
+	if strings.TrimSpace(a.workDir) == "" {
+		a.emitDebug("MD-DISCOVERY", "no project workdir bound — markdown discovery disabled")
+		a.mdState = &mdDiscoveryState{}
+		return
+	}
 	root := a.effectiveWorkDir()
+	// Never sweep the user's home directory: a session that lost its project
+	// binding (empty workDir → process cwd, which for the desktop app is
+	// $HOME) would otherwise trigger a blocking summarization pass over every
+	// markdown file the user owns, stalling the turn for minutes.
+	if abs, err := filepath.Abs(root); err == nil {
+		if home, herr := os.UserHomeDir(); herr == nil && home != "" && abs == home {
+			a.emitDebug("MD-DISCOVERY", fmt.Sprintf("workdir %s is the home directory — markdown discovery disabled", abs))
+			return
+		}
+	}
 	cachePath := mdSummaryCachePath(root)
 	st := &mdDiscoveryState{
 		cache:     loadMDCache(cachePath),

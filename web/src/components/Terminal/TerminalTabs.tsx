@@ -1,8 +1,26 @@
-import { useEffect, useImperativeHandle, useRef, useState, forwardRef } from "react";
-import { Plus, X } from "lucide-react";
+import { useEffect, useImperativeHandle, useRef, useState, forwardRef, type RefObject } from "react";
+import { Plus, X, Pencil } from "lucide-react";
 import TerminalPanel from "./TerminalPanel";
 import { useTerminalConfig } from "@/hooks/useTerminalConfig";
 import { loadSessionTerminals, saveSessionTerminals } from "./terminalPersistence";
+import { ContextMenu } from "@/components/Layout/ContextMenu";
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  horizontalListSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 interface TerminalInstance {
   id: string;
@@ -38,13 +56,110 @@ function bumpSeqPast(titles: string[]) {
  */
 export interface TerminalTabsHandle {
   openTerminal: () => void;
+  /** Close the active terminal instance. Returns false when there is none,
+   *  so the caller (Cmd/Ctrl+W) can fall through to closing the session tab. */
+  closeActiveTerminal: () => boolean;
+}
+
+/** One draggable tab. Drag activation needs a few pixels of movement
+ *  (see `sensors` below) so a plain click still activates/renames the tab
+ *  instead of being swallowed as a zero-distance drag. */
+function SortableTerminalTab({
+  t,
+  isActive,
+  isRenaming,
+  renameValue,
+  renameInputRef,
+  onActivate,
+  onStartRename,
+  onRenameChange,
+  onCommitRename,
+  onCancelRename,
+  onClose,
+}: {
+  t: TerminalInstance;
+  isActive: boolean;
+  isRenaming: boolean;
+  renameValue: string;
+  renameInputRef: RefObject<HTMLInputElement>;
+  onActivate: () => void;
+  onStartRename: () => void;
+  onRenameChange: (v: string) => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+  onClose: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: t.id });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+
+  return (
+    <ContextMenu
+      items={[{ label: "Rename", icon: <Pencil className="w-3.5 h-3.5" />, onClick: onStartRename }]}
+    >
+      <div
+        ref={setNodeRef}
+        style={style}
+        {...attributes}
+        {...listeners}
+        onAuxClick={(e) => {
+          if (e.button === 1) onClose();
+        }}
+        className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-sm transition-colors touch-none ${
+          isActive
+            ? "bg-zinc-700 text-white"
+            : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+        }`}
+      >
+        {isRenaming ? (
+          <input
+            ref={renameInputRef}
+            value={renameValue}
+            onChange={(e) => onRenameChange(e.target.value)}
+            onBlur={onCommitRename}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") onCommitRename();
+              if (e.key === "Escape") onCancelRename();
+            }}
+            className="w-24 rounded bg-zinc-800 px-1 text-sm text-white outline-none"
+          />
+        ) : (
+          <button
+            type="button"
+            onClick={onActivate}
+            onDoubleClick={onStartRename}
+            title="Double-click to rename, drag to reorder"
+            className="whitespace-nowrap"
+          >
+            {t.title}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label={`Close ${t.title}`}
+          title={`Close ${t.title}`}
+          className="rounded p-0.5 text-zinc-500 hover:bg-zinc-600 hover:text-white"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+    </ContextMenu>
+  );
 }
 
 const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPath: string; sessionId: string }>(
   function TerminalTabs({ active, projectPath, sessionId }, ref) {
-    const { available, loading, error, scrollbackLines } = useTerminalConfig();
+    const { available, loading, error, scrollbackLines, fontFamily, fontSize } = useTerminalConfig();
     const [terminals, setTerminals] = useState<TerminalInstance[]>([]);
     const [activeId, setActiveId] = useState<string>("");
+    const [renamingId, setRenamingId] = useState<string | null>(null);
+    const [renameValue, setRenameValue] = useState("");
+    const renameInputRef = useRef<HTMLInputElement>(null);
     // This panel is force-mounted for every session tab (matching LogPanel's
     // hidden-but-mounted pattern), so the first shell is spawned only once the
     // Terminal sub-tab is actually opened — otherwise every session tab would
@@ -60,6 +175,24 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
     // that stale empty state before the real state renders.
     const skipNextSave = useRef(false);
 
+    // Reorder activation needs a few pixels of movement so a plain click
+    // still activates/renames a tab (mirrors ProjectSidebar's drag setup).
+    const dndSensors = useSensors(
+      useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+      useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    );
+
+    const handleTabDragEnd = (event: DragEndEvent) => {
+      const { active, over } = event;
+      if (!over || active.id === over.id) return;
+      setTerminals((prev) => {
+        const oldIndex = prev.findIndex((t) => t.id === active.id);
+        const newIndex = prev.findIndex((t) => t.id === over.id);
+        if (oldIndex === -1 || newIndex === -1) return prev;
+        return arrayMove(prev, oldIndex, newIndex);
+      });
+    };
+
     const openTerminal = () => {
       const term = newTerminal();
       setTerminals((prev) => [...prev, term]);
@@ -68,6 +201,11 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
 
     useImperativeHandle(ref, () => ({
       openTerminal,
+      closeActiveTerminal: () => {
+        if (!activeId || !terminals.some((t) => t.id === activeId)) return false;
+        closeTerminal(activeId);
+        return true;
+      },
     }));
 
     // Restore this session's previously open terminal tabs (fresh shells, prior
@@ -103,6 +241,29 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
       saveSessionTerminals(sessionId, terminals, activeId);
     }, [sessionId, terminals, activeId]);
 
+    const startRename = (t: TerminalInstance) => {
+      setRenameValue(t.title);
+      setRenamingId(t.id);
+    };
+
+    useEffect(() => {
+      if (renamingId) {
+        renameInputRef.current?.focus();
+        renameInputRef.current?.select();
+      }
+    }, [renamingId]);
+
+    const commitRename = () => {
+      const id = renamingId;
+      if (!id) return;
+      const trimmed = renameValue.trim();
+      setRenamingId(null);
+      if (!trimmed) return;
+      setTerminals((prev) => prev.map((t) => (t.id === id ? { ...t, title: trimmed } : t)));
+    };
+
+    const cancelRename = () => setRenamingId(null);
+
     const closeTerminal = (id: string) => {
       // Buffer cleanup happens via GC in the persistence effect once this id
       // drops out of `terminals` — not here, since TerminalPanel's own unmount
@@ -137,29 +298,26 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
     return (
       <div className="flex h-full flex-col bg-zinc-900">
         <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-zinc-700 bg-zinc-900 px-2">
-          {terminals.map((t) => (
-            <div
-              key={t.id}
-              className={`flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-sm transition-colors ${
-                t.id === activeId
-                  ? "bg-zinc-700 text-white"
-                  : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
-              }`}
-            >
-              <button type="button" onClick={() => setActiveId(t.id)} className="whitespace-nowrap">
-                {t.title}
-              </button>
-              <button
-                type="button"
-                onClick={() => closeTerminal(t.id)}
-                aria-label={`Close ${t.title}`}
-                title={`Close ${t.title}`}
-                className="rounded p-0.5 text-zinc-500 hover:bg-zinc-600 hover:text-white"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          ))}
+          <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleTabDragEnd}>
+            <SortableContext items={terminals.map((t) => t.id)} strategy={horizontalListSortingStrategy}>
+              {terminals.map((t) => (
+                <SortableTerminalTab
+                  key={t.id}
+                  t={t}
+                  isActive={t.id === activeId}
+                  isRenaming={renamingId === t.id}
+                  renameValue={renameValue}
+                  renameInputRef={renameInputRef}
+                  onActivate={() => setActiveId(t.id)}
+                  onStartRename={() => startRename(t)}
+                  onRenameChange={setRenameValue}
+                  onCommitRename={commitRename}
+                  onCancelRename={cancelRename}
+                  onClose={() => closeTerminal(t.id)}
+                />
+              ))}
+            </SortableContext>
+          </DndContext>
           <button
             type="button"
             onClick={openTerminal}
@@ -188,6 +346,8 @@ const TerminalTabs = forwardRef<TerminalTabsHandle, { active: boolean; projectPa
                   id={t.id}
                   active={active && t.id === activeId}
                   scrollbackLines={scrollbackLines}
+                  fontFamily={fontFamily}
+                  fontSize={fontSize}
                   projectPath={projectPath}
                 />
               </div>

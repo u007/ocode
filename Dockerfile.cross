@@ -1,0 +1,196 @@
+# ── ocode Desktop Cross-Compilation ────────────────────────────────────────
+# Multi-stage, multi-target Dockerfile for building ocode desktop binaries
+# for Linux and Windows from any host (macOS, Linux, Windows).
+#
+# macOS is NOT built here — Docker can't cross-compile for macOS (needs native
+# Apple frameworks). Use `make docker-desktop-darwin` for local macOS builds.
+#
+# Targets:
+#   --target linux-desktop       Linux amd64 desktop binary
+#   --target linux-desktop-arm   Linux arm64 desktop binary (requires docker buildx + QEMU)
+#   --target windows-desktop     Windows amd64 desktop binary
+#   --target output              All artifacts in /output
+#
+# Usage:
+#   # Build all desktop targets at once (includes macOS via local build)
+#   make docker-desktop-all
+#
+#   # Build a single target
+#   docker build -f Dockerfile.cross --target linux-desktop -o release/ .
+#   docker build -f Dockerfile.cross --target windows-desktop -o release/ .
+#
+#   # Via Makefile (recommended)
+#   make docker-desktop-darwin   # macOS amd64 + arm64 (local build)
+#   make docker-desktop-linux
+#   make docker-desktop-linux-arm
+#   make docker-desktop-windows
+#   make docker-desktop-all      # All platforms
+#
+# ──────────────────────────────────────────────────────────────────────────
+
+ARG GO_VERSION=1.26
+ARG NODE_VERSION=22
+
+# ── Stage 1: Web frontend builder (shared by all targets) ────────────────
+FROM node:${NODE_VERSION}-alpine AS web-builder
+
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /build/web
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN corepack enable && pnpm install --frozen-lockfile
+
+COPY web/ ./
+RUN pnpm run build
+
+# ── Go toolchain alias (buildkit forbids ${VAR} expansion in COPY --from) ─
+FROM golang:${GO_VERSION}-bookworm AS go-toolchain
+
+# ── Stage 2: Go module cache (shared by all targets) ────────────────────
+FROM go-toolchain AS go-modules
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+# ── Stage 3: Bundle desktop assets (skills, plugins, model prompts) ──────
+# Note: .opencode/plugins/ and deepseek-v4-flash.OCODE.md are optional.
+# We copy the whole repo first, then conditionally handle optional files in RUN.
+FROM alpine:3.20 AS asset-bundler
+
+WORKDIR /build
+COPY . .
+
+RUN mkdir -p cmd/ocode-desktop/embedded-assets/skills \
+    && mkdir -p cmd/ocode-desktop/embedded-assets/.opencode/plugins \
+    && cp -R skills/. cmd/ocode-desktop/embedded-assets/skills/ \
+    && if [ -d .opencode/plugins ]; then cp -R .opencode/plugins/. cmd/ocode-desktop/embedded-assets/.opencode/plugins/; fi \
+    && if [ -f deepseek-v4-flash.OCODE.md ]; then cp deepseek-v4-flash.OCODE.md cmd/ocode-desktop/embedded-assets/; fi
+
+# ── Stage 4: Linux Desktop (amd64) ─────────────────────────────────────
+# Builds natively on amd64 Debian with GCC. Uses -tags gtk3 for WebKit2GTK 4.1
+# (broader compatibility than GTK4/WebKitGTK 6.0).
+# Platform pinned: CGO GOARCH=amd64 needs an amd64 gcc (arm64 gcc rejects -m64).
+FROM --platform=linux/amd64 debian:bookworm AS linux-desktop
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgtk-3-dev \
+    libwebkit2gtk-4.1-dev \
+    git \
+    ca-certificates \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+WORKDIR /build
+
+# Copy Go modules (cached layer)
+COPY --from=go-modules /go/pkg /go/pkg
+
+# Copy source code
+COPY . .
+
+# Copy pre-built web assets
+COPY --from=web-builder /build/web/dist ./web/dist
+
+# Copy bundled desktop assets
+COPY --from=asset-bundler /build/cmd/ocode-desktop/embedded-assets ./cmd/ocode-desktop/embedded-assets
+
+# Build Linux amd64 desktop binary (native GCC, no cross-compilation needed)
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
+    go build -tags gtk3 -ldflags="-s -w" -o /output/ocode-desktop-linux-amd64 ./cmd/ocode-desktop \
+    && test -s /output/ocode-desktop-linux-amd64
+
+# ── Stage 5: Linux Desktop (arm64) ─────────────────────────────────────
+# Requires Docker buildx with QEMU emulation for ARM64.
+# Build with: docker buildx build --platform linux/arm64 -f Dockerfile.cross --target linux-desktop-arm -o release/ .
+# Or use: make docker-desktop-linux-arm (which sets --platform automatically)
+FROM --platform=linux/arm64 debian:bookworm AS linux-desktop-arm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libgtk-3-dev \
+    libwebkit2gtk-4.1-dev \
+    git \
+    ca-certificates \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=go-toolchain /usr/local/go /usr/local/go
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+WORKDIR /build
+COPY --from=go-modules /go/pkg /go/pkg
+COPY . .
+COPY --from=web-builder /build/web/dist ./web/dist
+COPY --from=asset-bundler /build/cmd/ocode-desktop/embedded-assets ./cmd/ocode-desktop/embedded-assets
+
+# Build Linux arm64 desktop binary
+# Note: This stage must be built with --platform linux/arm64 (QEMU emulation)
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
+    go build -tags gtk3 -ldflags="-s -w" -o /output/ocode-desktop-linux-arm64 ./cmd/ocode-desktop \
+    && test -s /output/ocode-desktop-linux-arm64
+
+# ── Stage 6: Windows Desktop (amd64) ───────────────────────────────────
+# Wails v3 on Windows uses purego for WebView2 — no CGO required.
+# Builds with GOOS=windows GOARCH=amd64 (pure Go cross-compilation).
+FROM golang:${GO_VERSION}-bookworm AS windows-desktop
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY --from=go-modules /go/pkg /go/pkg
+COPY . .
+COPY --from=web-builder /build/web/dist ./web/dist
+COPY --from=asset-bundler /build/cmd/ocode-desktop/embedded-assets ./cmd/ocode-desktop/embedded-assets
+
+# Pure Go cross-compilation (no CGO needed for Windows WebView2 with purego)
+RUN CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+    go build -ldflags="-s -w -H windowsgui" -o /output/ocode-desktop-windows-amd64.exe ./cmd/ocode-desktop \
+    && test -s /output/ocode-desktop-windows-amd64.exe
+
+# ── Per-target export stages (docker build -o exports the whole stage
+# filesystem, so each build stage gets a scratch stage holding only /output) ─
+FROM scratch AS linux-desktop-out
+COPY --from=linux-desktop /output/ /
+
+FROM scratch AS linux-desktop-arm-out
+COPY --from=linux-desktop-arm /output/ /
+
+FROM scratch AS windows-desktop-out
+COPY --from=windows-desktop /output/ /
+
+# ── Stage 7: Output aggregator ──────────────────────────────────────────
+# Validate in a normal image, then export from scratch. The local Docker
+# exporter mirrors the stage filesystem, so exporting an Alpine stage with
+# WORKDIR /output would place artifacts under release/output/ instead of at
+# the requested release/ root.
+FROM alpine:3.20 AS output-validate
+
+RUN apk add --no-cache bash coreutils
+
+WORKDIR /output
+
+# Copy all build artifacts
+COPY --from=linux-desktop /output/ ./
+COPY --from=linux-desktop-arm /output/ ./
+COPY --from=windows-desktop /output/ ./
+
+# Validate every expected artifact exists and is non-empty.
+RUN test -s ocode-desktop-linux-amd64 \
+    && test -s ocode-desktop-linux-arm64 \
+    && test -s ocode-desktop-windows-amd64.exe \
+    && echo "=== Build Artifacts ===" \
+    && ls -lh ocode-desktop-* \
+    && echo "=== Checksums ===" \
+    && sha256sum ocode-desktop-* \
+    && echo "=== Validation Passed ==="
+
+FROM scratch AS output
+COPY --from=output-validate /output/ /

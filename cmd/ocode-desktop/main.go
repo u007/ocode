@@ -14,6 +14,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
@@ -30,6 +32,9 @@ import (
 
 //go:embed all:embedded-assets
 var embeddedAssets embed.FS
+
+//go:embed appicon.png
+var appIcon []byte
 
 func main() {
 	// The desktop shell hosts the web UI, so resume a requested session by
@@ -103,6 +108,7 @@ func main() {
 	app := application.New(application.Options{
 		Name:        "ocode",
 		Description: "AI coding agent",
+		Icon:        appIcon,
 		Services:    services,
 	})
 
@@ -145,6 +151,9 @@ func main() {
 		MinWidth:  800,
 		MinHeight: 600,
 		URL:       desktopURL,
+		Linux: application.LinuxWindow{
+			Icon: appIcon,
+		},
 	})
 
 	// Set up the application menu. The Wails default binds CmdOrCtrl+W to
@@ -210,6 +219,7 @@ func main() {
 // reload/devtools, and window management.
 func buildAppMenu(app *application.App, window *application.WebviewWindow) *application.Menu {
 	menu := application.NewMenu()
+	quitHandler := rapidQuitHandler(app, window)
 
 	// macOS application menu (first menu, named after the app).
 	if runtime.GOOS == "darwin" {
@@ -240,7 +250,7 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow) *appl
 		appMenu.Add("Quit ocode").
 			SetAccelerator("CmdOrCtrl+q").
 			OnClick(func(*application.Context) {
-				confirmQuit(app, window)
+				quitHandler()
 			})
 	} else {
 		// Windows/Linux: Settings + Quit live in the File menu.
@@ -256,7 +266,7 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow) *appl
 		fileMenu.Add("Quit ocode").
 			SetAccelerator("CmdOrCtrl+q").
 			OnClick(func(*application.Context) {
-				confirmQuit(app, window)
+				quitHandler()
 			})
 	}
 
@@ -278,6 +288,33 @@ func buildAppMenu(app *application.App, window *application.WebviewWindow) *appl
 	}
 
 	return menu
+}
+
+// rapidQuitThreshold is the window within which a second CmdOrCtrl+Q is
+// treated as deliberate double-tap-to-quit, bypassing the confirmation
+// dialog. A single press still confirms, so an accidental shortcut remains
+// protected by the confirmation dialog.
+const rapidQuitThreshold = 1500 * time.Millisecond
+
+// rapidQuitHandler returns a quit handler that quits immediately if invoked
+// twice within rapidQuitThreshold, and otherwise shows the confirmation
+// dialog (see confirmQuit).
+func rapidQuitHandler(app *application.App, window *application.WebviewWindow) func() {
+	var mu sync.Mutex
+	var lastPress time.Time
+	return func() {
+		mu.Lock()
+		now := time.Now()
+		rapid := !lastPress.IsZero() && now.Sub(lastPress) < rapidQuitThreshold
+		lastPress = now
+		mu.Unlock()
+
+		if rapid {
+			app.Quit()
+			return
+		}
+		confirmQuit(app, window)
+	}
 }
 
 // confirmQuit asks for explicit confirmation before quitting. Quit is

@@ -110,12 +110,12 @@ describe("routeBusEnvelope", () => {
     expect(router.openSessionIds.has("s9")).toBe(true);
   });
 
-  it("warns loudly for chat events of an unknown session (never a silent drop)", () => {
+  it("routes chat events for a session with no open tab (background sessions stay live)", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { router, getState } = makeRouter(["s1"]);
     routeBusEnvelope(env("text", { session_id: "other", data: { delta: "x" } }), router);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("other"));
-    expect(getState().sessions["other"]).toBeUndefined();
+    expect(warn).not.toHaveBeenCalled();
+    expect(getState().sessions["other"]?.live[0]).toMatchObject({ kind: "text", text: "x" });
   });
 
   it("warns for a session-scoped event without any session id", () => {

@@ -31,6 +31,9 @@ func (a *Agent) trackDirMDTouch(toolName string, args json.RawMessage) {
 	if !ok {
 		return
 	}
+	if strings.TrimSpace(a.workDir) == "" {
+		return
+	}
 	var params map[string]json.RawMessage
 	if err := json.Unmarshal(args, &params); err != nil {
 		return

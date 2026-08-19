@@ -29,6 +29,19 @@ func terminalTestServer(t *testing.T) (*httptest.Server, string) {
 	return srv, "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
+func TestTerminalShellCommandUsesLoginMode(t *testing.T) {
+	cmd := terminalShellCommand("/bin/zsh")
+	want := []string{"/bin/zsh", "-l"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("command args = %v, want %v", cmd.Args, want)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Fatalf("command args = %v, want %v", cmd.Args, want)
+		}
+	}
+}
+
 // project_path must be one of the server's registered roots — anything else
 // would let a client spawn a shell in an arbitrary directory.
 func TestTerminalWSRejectsUnregisteredProjectPath(t *testing.T) {

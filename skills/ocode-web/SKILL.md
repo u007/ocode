@@ -87,10 +87,21 @@ web/
         │   └── AssetsPanel.tsx     # Uploaded file manager
         ├── Status/
         │   └── StatusPanel.tsx     # TUI status drill-down (files, LSP, spending)
-        └── common/
-            ├── StatusBar.tsx       # Bottom bar: tokens, model, session, context, spending
-            ├── CommandPalette.tsx  # ⌘K palette (cmdk-based)
-            └── ErrorBoundary.tsx   # React error boundary with reload button
+        ├── Agents/
+        │   └── AgentsPanel.tsx     # Agent-run tree viewer (same data as TUI agents tab)
+        ├── Changes/
+        │   └── ChangesPanel.tsx    # Session file changes with diffs
+        ├── Cron/
+        │   └── CronPanel.tsx       # Scheduled jobs management
+        ├── Terminal/
+        │   ├── TerminalTabs.tsx    # Terminal instance manager (N tabs)
+        │   └── TerminalPanel.tsx   # xterm.js + WebSocket terminal emulator
+        ├── Settings/
+        │   └── SettingsPanel.tsx   # App settings UI
+        ├── common/
+        │   ├── StatusBar.tsx       # Bottom bar: tokens, model, session, context, spending
+        │   ├── CommandPalette.tsx  # ⌘K palette (cmdk-based)
+        │   └── ErrorBoundary.tsx   # React error boundary with reload button
         └── ui/                    # shadcn/ui primitives (8+ components)
             ├── button.tsx, badge.tsx, input.tsx, dialog.tsx
             ├── tabs.tsx, command.tsx, select.tsx, separator.tsx
@@ -120,7 +131,12 @@ web/
         │   ├── <GitPanel>             (Git tab)
         │   ├── <StatusPanel>          (Status tab)
         │   ├── <LogPanel>             (Logs tab)
-        │   └── <AssetsPanel>          (Assets tab)
+        │   ├── <AssetsPanel>          (Assets tab)
+        │   ├── <AgentsPanel>          (Agents tab)
+        │   ├── <ChangesPanel>         (Changes tab)
+        │   ├── <CronPanel>            (Cron tab)
+        │   ├── <TerminalTabs>         (Terminal sub-tab)
+        │   └── <SettingsPanel>        (Settings)
         ├── <ChatInput>                (textarea, slash menu, file attach)
         │   └── <SlashCommandMenu>
         ├── <StatusBar>                (bottom bar)

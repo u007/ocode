@@ -54,6 +54,7 @@ type runOptions struct {
 	username       string
 	password       string
 	timeout        int
+	effort         string
 }
 
 func parseRunArgs(args []string) (runOptions, []string, error) {
@@ -66,6 +67,7 @@ func parseRunArgs(args []string) (runOptions, []string, error) {
 	fs.StringVar(&opts.model, "model", "", "Model to use")
 	fs.StringVar(&opts.model, "m", "", "Model to use")
 	fs.StringVar(&opts.agentName, "agent", "", "Agent name")
+	fs.StringVar(&opts.effort, "effort", "", "Reasoning effort level: off, low, med, high, xhigh, or max")
 	fs.StringVar(&opts.sessionID, "session", "", "Session ID")
 	fs.StringVar(&opts.sessionID, "s", "", "Session ID")
 	fs.BoolVar(&opts.cont, "continue", false, "Continue last session")
@@ -106,6 +108,7 @@ func printRunUsage() {
 	fmt.Println("  -prompt, -p <text>        Prompt text (can also use positional args)")
 	fmt.Println("  -model, -m <model>        Model to use (overrides config)")
 	fmt.Println("  -agent <name>             Agent name/mode to use")
+	fmt.Println("  -effort <level>           Reasoning effort (thinking budget): off, low, med, high, xhigh, max")
 	fmt.Println("  -session, -s <id>         Session ID to resume")
 	fmt.Println("  -continue, -c             Continue the most recent session")
 	fmt.Println("  -fork                     Fork from the most recent session (new session)")
@@ -188,6 +191,15 @@ func Run(args []string) error {
 
 	if opts.model != "" {
 		cfg.Model = opts.model
+	}
+	if opts.effort != "" {
+		budget, ok := config.ThinkingBudgetForLabel(opts.effort)
+		if !ok {
+			return fmt.Errorf("invalid -effort %q (want off, low, med, high, xhigh, or max)", opts.effort)
+		}
+		// One-shot override for this run only: headless runs must not mutate
+		// the persisted last_thinking_budget the TUI restores from.
+		cfg.ThinkingBudget = budget
 	}
 	if opts.yolo || opts.dangerous {
 		cfg.Ocode.Permissions.Mode = string(agent.PermissionModeYOLO)

@@ -5,6 +5,7 @@ import { useProjectState } from "../../stores/projectStore";
 import { eventBus } from "../../lib/eventBus";
 import type { AgentInfo, LSPStatus } from "../../api/types";
 import PluginsPanel from "./PluginsPanel";
+import ReasoningLevelSelector from "./ReasoningLevelSelector";
 import {
   Bot,
   FileText,
@@ -296,6 +297,11 @@ export default function CoworkSidebar({
               {model || config.model || "Not set"}
             </div>
           </button>
+          {/* Reasoning level selector */}
+          <ReasoningLevelSelector
+            thinkingBudget={tuiStatus?.thinking_budget}
+            disabled={!onModelClick}
+          />
         </div>
 
         {/* Context Section — real token usage from the TUI status snapshot. */}

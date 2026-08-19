@@ -775,11 +775,12 @@ func (c *GenericClient) chatOpenAI(ctx context.Context, messages []Message, tool
 			return c.chatOpenAIResponses(ctx, messages, tools)
 		}
 	}
-	// opencode-go (and opencode) route Codex GPT-5.6 models through the OpenAI
-	// Responses API, not chat/completions. These are responses-lite models that
-	// only serve tool calls correctly on the responses path; sending them to
-	// chat/completions is what produced empty tool-call arguments.
-	if (c.Provider == "opencode-go" || c.Provider == "opencode") && openAICodexResponsesLite(c.Model) {
+	// opencode-go (and opencode) route Responses-only models through the OpenAI
+	// Responses API, not chat/completions. These models only serve tool calls
+	// correctly on the responses path; sending them to chat/completions is what
+	// produced empty (GPT-5.6) or truncated/invalid (Muse Spark) tool-call
+	// arguments.
+	if (c.Provider == "opencode-go" || c.Provider == "opencode") && opencodeResponsesOnlyModel(c.Model) {
 		return c.chatOpenAIResponses(ctx, messages, tools)
 	}
 	if c.UseOAuth && c.Provider == "grok" {
@@ -2497,6 +2498,11 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 	var toolCalls []ToolCall
 	var responseItems []map[string]interface{}
 	var responseUsage json.RawMessage
+	// Accumulates response.function_call_arguments.delta per output item id.
+	// Only a fallback: when response.output_item.done carries `arguments`,
+	// that final value wins (the API repeats the completed arguments there,
+	// so appending done onto deltas would double them).
+	argDeltas := map[string]string{}
 	onDelta := c.onDelta()
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -2521,6 +2527,7 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 			Model    string                 `json:"model"`
 			Delta    string                 `json:"delta"`
 			Text     string                 `json:"text"`
+			ItemID   string                 `json:"item_id"`
 			Item     map[string]interface{} `json:"item"`
 			Response map[string]interface{} `json:"response"`
 		}
@@ -2559,6 +2566,10 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 			if fullText == "" {
 				fullText = payload.Text
 			}
+		case "response.function_call_arguments.delta":
+			if payload.ItemID != "" {
+				argDeltas[payload.ItemID] += payload.Delta
+			}
 		case "response.output_item.done":
 			itemType, _ := payload.Item["type"].(string)
 			if itemText := openAIResponseItemText(payload.Item); itemText != "" && fullText == "" {
@@ -2574,6 +2585,16 @@ func (c *GenericClient) chatOpenAIResponses(ctx context.Context, messages []Mess
 				}
 				name, _ := payload.Item["name"].(string)
 				arguments, _ := payload.Item["arguments"].(string)
+				if arguments == "" {
+					if itemID, _ := payload.Item["id"].(string); itemID != "" {
+						if acc := argDeltas[itemID]; acc != "" {
+							arguments = acc
+							// The stored item is replayed as next-turn input;
+							// keep it consistent with the recovered arguments.
+							payload.Item["arguments"] = acc
+						}
+					}
+				}
 				toolCalls = append(toolCalls, ToolCall{
 					ID:   id,
 					Type: "function",
@@ -2807,6 +2828,17 @@ var codexPromptCacheKey = sync.OnceValue(func() string {
 // GPT-5.6 family (sol/terra/luna) sets use_responses_lite; older models do not.
 func openAICodexResponsesLite(model string) bool {
 	return strings.HasPrefix(model, "gpt-5.6")
+}
+
+// opencodeResponsesOnlyModel reports whether the opencode zen proxy serves
+// this model exclusively via the Responses API (models.dev registers these
+// with npm @ai-sdk/openai and a .../responses endpoint). Their chat/completions
+// route streams tool-call arguments that arrive empty or as invalid JSON.
+// Muse Spark (Meta) is a plain Responses model — it must NOT get the codex
+// responses-lite treatment (developer-item tools, lite header); only the
+// GPT-5.6 family does, via openAICodexResponsesLite.
+func opencodeResponsesOnlyModel(model string) bool {
+	return openAICodexResponsesLite(model) || strings.HasPrefix(model, "muse-spark")
 }
 
 func openAIResponseText(response map[string]interface{}) string {

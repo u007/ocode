@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { useChatState, useChatDispatch, getSessionSlice } from "../stores/chatStore";
+import { useProjectState, findProjectPathForTab } from "../stores/projectStore";
 import { api } from "../api/client";
 import type { QuestionAnswerPayload } from "../api/types";
 
@@ -14,6 +15,7 @@ interface UseChatOptions {
 export function useChat(sessionId: string | null, options?: UseChatOptions) {
   const state = useChatState();
   const dispatch = useChatDispatch();
+  const { state: projectState } = useProjectState();
   const slice = getSessionSlice(state, sessionId);
 
   // Submit is fire-and-forget: the message is forwarded to the TUI's agent and
@@ -32,9 +34,25 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
       // request_id (this tab's id) lets SessionTabSync rekey the tab once the
       // "session_started" event (or this response, whichever wins the race)
       // reports the real session id.
+      // Bind the new session to the project that owns this tab (not just the
+      // currently active project — the send may come from a background tab).
+      // Without an explicit project_path the server would fall back to its
+      // own cwd, which for the desktop app is $HOME.
+      const projectPath =
+        findProjectPathForTab(projectState, sessionId) ??
+        projectState.activeProject?.path;
+      if (!isRealSession && !projectPath) {
+        dispatch({
+          type: "SET_ERROR",
+          sessionId,
+          error: "Select a project before starting a chat.",
+        });
+        dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
+        return;
+      }
       const submitPromise = isRealSession
         ? api.sendMessage(sessionId, content)
-        : api.chat(content, undefined, undefined, sessionId).then((res) => {
+        : api.chat(content, undefined, undefined, sessionId, projectPath).then((res) => {
             options?.onNewSession?.(res.sessionId);
             return res;
           });
@@ -52,7 +70,7 @@ export function useChat(sessionId: string | null, options?: UseChatOptions) {
         dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
       });
     },
-    [sessionId, dispatch, options?.onNewSession],
+    [sessionId, dispatch, projectState, options?.onNewSession],
   );
 
   // Local stop: the browser can't cancel the TUI's agent, so this only releases

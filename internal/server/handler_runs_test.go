@@ -71,6 +71,44 @@ func TestHandleListRunsEmptyWhenNoSession(t *testing.T) {
 	}
 }
 
+func TestHandleListRunsScopesRCBridgeToItsSession(t *testing.T) {
+	h, sessionID := newRunsHandler(t)
+
+	rcAgent := agent.NewAgent(nil, nil, nil, nil)
+	rcAgent.Runs().New("rc-worker")
+	bridge := &RCBridge{SessionID: "rc-session"}
+	bridge.SetAgent(rcAgent)
+	h.rc = bridge
+
+	for _, tc := range []struct {
+		name       string
+		query      string
+		wantRun    string
+		wantLength int
+	}{
+		{name: "bridge session", query: "rc-session", wantRun: "rc-worker", wantLength: 1},
+		{name: "server session", query: sessionID, wantRun: "worker", wantLength: 1},
+		{name: "unknown session", query: "missing", wantLength: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest("GET", "/api/agents/runs?session="+tc.query, nil)
+			h.HandleListRuns(w, r)
+
+			var runs []agentRunDTO
+			if err := json.Unmarshal(w.Body.Bytes(), &runs); err != nil {
+				t.Fatalf("decode runs: %v", err)
+			}
+			if len(runs) != tc.wantLength {
+				t.Fatalf("got %d runs, want %d: %+v", len(runs), tc.wantLength, runs)
+			}
+			if tc.wantRun != "" && runs[0].Name != tc.wantRun {
+				t.Fatalf("got run %q, want %q", runs[0].Name, tc.wantRun)
+			}
+		})
+	}
+}
+
 func TestHandleRunsStreamEmitsInitialFrame(t *testing.T) {
 	h, sessionID := newRunsHandler(t)
 

@@ -1,9 +1,10 @@
-import { createContext, useContext, useReducer, useEffect, useCallback, useRef, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useCallback, useRef, type ReactNode } from "react";
+import { Store, useSelector } from "@tanstack/react-store";
 import { api } from "../api/client";
-import type { Project, SessionInfo } from "../api/types";
+import type { Project, ProjectGroup, SessionInfo } from "../api/types";
 import { dropSessionTerminals } from "../components/Terminal/terminalPersistence";
 
-export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "terminal";
+export type SessionSubTabId = "chat" | "agents" | "changes" | "logs" | "status" | "terminal" | "processes";
 
 export interface Tab {
   id: string; // session ID (or `new-<ts>` temp ID before first message)
@@ -26,6 +27,8 @@ interface ProjectState {
   /** Persisted-tab restore bookkeeping: set once restore ran so the deep-link
    *  opener doesn't race it. */
   tabsRestored: boolean;
+  /** Project groups for sidebar organization. */
+  groups: ProjectGroup[];
 }
 
 export type ProjectAction =
@@ -42,8 +45,8 @@ export type ProjectAction =
   | { type: "UPDATE_TAB_ID"; oldId: string; newId: string; newTitle?: string }
   | { type: "RESTORE_TABS"; tabsByProject: Record<string, Tab[]>; activeTabByProject: Record<string, string | null> }
   | { type: "ENSURE_NEW_TAB"; path: string }
-  | { type: "SET_SESSION_PICKER"; open: boolean };
-
+  | { type: "SET_SESSION_PICKER"; open: boolean }
+  | { type: "SET_GROUPS"; groups: ProjectGroup[] };
 const initialState: ProjectState = {
   projects: [],
   loading: false,
@@ -54,6 +57,7 @@ const initialState: ProjectState = {
   activeTabByProject: {},
   sessionPickerOpen: false,
   tabsRestored: false,
+  groups: [],
 };
 
 /** Tabs of the active project (derived so consumers can keep reading `tabs`). */
@@ -71,7 +75,7 @@ function activeTabId(state: ProjectState): string | null {
  *  project is currently active. Needed because tab rename/rekey can be
  *  triggered by a background session (SessionTabSync, ChatPanel) whose
  *  project isn't the one the user is currently looking at. */
-function findProjectPathForTab(state: ProjectState, tabId: string): string | null {
+export function findProjectPathForTab(state: ProjectState, tabId: string): string | null {
   for (const [path, list] of Object.entries(state.tabsByProject)) {
     if (list.some((t) => t.id === tabId)) return path;
   }
@@ -188,6 +192,8 @@ function projectReducer(state: ProjectState, action: ProjectAction): ProjectStat
         },
       };
     }
+    case "SET_GROUPS":
+      return { ...state, groups: action.groups };
     default:
       return state;
   }
@@ -222,7 +228,7 @@ function loadPersistedTabs(): { tabsByProject: Record<string, Tab[]>; activeTabB
           id: t.id,
           projectPath: path,
           title: typeof t.title === "string" ? t.title : t.id,
-          activeSubTab: (t.subTab === "agents" || t.subTab === "changes" || t.subTab === "logs" || t.subTab === "status" || t.subTab === "terminal" ? t.subTab : "chat") as SessionSubTabId,
+          activeSubTab: (t.subTab === "agents" || t.subTab === "changes" || t.subTab === "logs" || t.subTab === "status" || t.subTab === "terminal" || t.subTab === "processes" ? t.subTab : "chat") as SessionSubTabId,
         }));
       if (tabs.length === 0) continue;
       tabsByProject[path] = tabs;
@@ -261,11 +267,20 @@ interface ProjectContextType {
   activeTabId: string | null;
   dispatch: React.Dispatch<ProjectAction>;
   refreshProjects: () => Promise<void>;
+  refreshGroups: () => Promise<void>;
   selectProject: (project: Project) => Promise<void>;
   openSessionTab: (sessionId: string, sessionTitle: string) => void;
   closeSessionTab: (sessionId: string) => void;
   addProject: (path: string) => Promise<void>;
   removeProject: (path: string) => Promise<void>;
+  renameProject: (path: string, name: string) => Promise<void>;
+  reorderProjects: (paths: string[]) => Promise<void>;
+  setProjectGroup: (path: string, group: string) => Promise<void>;
+  createGroup: (name: string) => Promise<void>;
+  deleteGroup: (name: string) => Promise<void>;
+  renameGroup: (oldName: string, newName: string) => Promise<void>;
+  reorderGroups: (names: string[]) => Promise<void>;
+  setGroupCollapsed: (name: string, collapsed: boolean) => Promise<void>;
   toggleSessionPicker: () => void;
   /** Opens the project's "New session" tab — always adds a fresh tab (keeping
    *  the current running one), unless `reuseIfEmpty` is set and the active tab
@@ -280,7 +295,18 @@ interface ProjectContextType {
 const ProjectContext = createContext<ProjectContextType | null>(null);
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(projectReducer, initialState);
+  // Backed by a @tanstack/store Store instance rather than useReducer — same
+  // action-dispatch shape (projectReducer + ProjectAction) so the large body
+  // of effects/callbacks below (which close over `state` and `dispatch`
+  // exactly as useReducer produced them) needed no changes.
+  const storeRef = useRef<Store<ProjectState> | null>(null);
+  if (!storeRef.current) storeRef.current = new Store(initialState);
+  const store = storeRef.current;
+  const state = useSelector(store);
+  const dispatch = useCallback(
+    (action: ProjectAction) => store.setState((prev) => projectReducer(prev, action)),
+    [store],
+  );
 
   // Debounced persistence of tabs + active tab. Runs on every tabs change.
   useEffect(() => {
@@ -310,11 +336,21 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshGroups = useCallback(async () => {
+    try {
+      const groups = await api.listGroups();
+      dispatch({ type: "SET_GROUPS", groups });
+    } catch (err) {
+      console.error("Failed to load groups:", err);
+    }
+  }, []);
+
   // Load the saved project list once on mount so the sidebar is populated on
   // startup (previously only add/remove re-fetched, leaving the list empty).
   useEffect(() => {
     refreshProjects();
-  }, [refreshProjects]);
+    refreshGroups();
+  }, [refreshProjects, refreshGroups]);
 
   const selectProject = useCallback(async (project: Project) => {
     dispatch({ type: "SET_ACTIVE_PROJECT", project });
@@ -386,6 +422,80 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       console.error("Failed to remove project:", err);
     }
   }, [refreshProjects]);
+
+  const renameProject = useCallback(async (path: string, name: string) => {
+    try {
+      await api.renameProject(path, name);
+      await refreshProjects();
+    } catch (err) {
+      console.error("Failed to rename project:", err);
+    }
+  }, [refreshProjects]);
+
+  const reorderProjects = useCallback(async (paths: string[]) => {
+    try {
+      await api.reorderProjects(paths);
+      await refreshProjects();
+    } catch (err) {
+      console.error("Failed to reorder projects:", err);
+    }
+  }, [refreshProjects]);
+
+  const setProjectGroup = useCallback(async (path: string, group: string) => {
+    try {
+      await api.setProjectGroup(path, group);
+      await refreshProjects();
+    } catch (err) {
+      console.error("Failed to set project group:", err);
+    }
+  }, [refreshProjects]);
+
+  const createGroup = useCallback(async (name: string) => {
+    try {
+      await api.createGroup(name);
+      await refreshGroups();
+    } catch (err) {
+      console.error("Failed to create group:", err);
+    }
+  }, [refreshGroups]);
+
+  const deleteGroup = useCallback(async (name: string) => {
+    try {
+      await api.deleteGroup(name);
+      await refreshGroups();
+      await refreshProjects();
+    } catch (err) {
+      console.error("Failed to delete group:", err);
+    }
+  }, [refreshGroups, refreshProjects]);
+
+  const renameGroup = useCallback(async (oldName: string, newName: string) => {
+    try {
+      await api.renameGroup(oldName, newName);
+      await refreshGroups();
+      await refreshProjects();
+    } catch (err) {
+      console.error("Failed to rename group:", err);
+    }
+  }, [refreshGroups, refreshProjects]);
+
+  const reorderGroups = useCallback(async (names: string[]) => {
+    try {
+      await api.reorderGroups(names);
+      await refreshGroups();
+    } catch (err) {
+      console.error("Failed to reorder groups:", err);
+    }
+  }, [refreshGroups]);
+
+  const setGroupCollapsed = useCallback(async (name: string, collapsed: boolean) => {
+    try {
+      await api.setGroupCollapsed(name, collapsed);
+      await refreshGroups();
+    } catch (err) {
+      console.error("Failed to set group collapsed:", err);
+    }
+  }, [refreshGroups]);
 
   const toggleSessionPicker = useCallback(() => {
     dispatch({ type: "SET_SESSION_PICKER", open: !state.sessionPickerOpen });
@@ -463,11 +573,20 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
         activeTabId: activeTabId(state),
         dispatch,
         refreshProjects,
+        refreshGroups,
         selectProject,
         openSessionTab,
         closeSessionTab,
         addProject,
         removeProject,
+        renameProject,
+        reorderProjects,
+        setProjectGroup,
+        createGroup,
+        deleteGroup,
+        renameGroup,
+        reorderGroups,
+        setGroupCollapsed,
         toggleSessionPicker,
         openNewSessionTab,
         openDeepLinkSession,

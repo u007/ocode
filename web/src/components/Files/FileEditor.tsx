@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import MonacoSettingsPanel from "./MonacoSettingsPanel";
+import { loadEditorScroll, saveEditorScroll } from "./editorTabsPersistence";
 import { parseDiffPatch, type DiffLine, type Hunk } from "../../lib/parseDiffPatch";
 
 // Ensure Monaco is configured before any editor mounts.
@@ -29,6 +30,13 @@ interface FileEditorProps {
   diffVersion?: number;
   /** Called when the selection (non-collapsed range) changes in the editor. */
   onSelectionChange?: (sel: { startLine: number; endLine: number } | null) => void;
+  /** Stable id to persist/restore the scroll position under. Skips when omitted. */
+  persistKey?: string;
+  /** The file changed on disk outside the app while this tab held unsaved
+   *  edits — shows a warning banner with reload/dismiss actions. */
+  externalChange?: boolean;
+  onReloadFromDisk?: () => void;
+  onDismissExternalChange?: () => void;
 }
 
 // Map file extensions to Monaco language identifiers.
@@ -93,6 +101,10 @@ export default function FileEditor({
   session,
   diffVersion,
   onSelectionChange,
+  persistKey,
+  externalChange = false,
+  onReloadFromDisk,
+  onDismissExternalChange,
 }: FileEditorProps) {
   const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
   // Store the Monaco API object so it's available in effects that can't reach
@@ -129,9 +141,24 @@ export default function FileEditor({
       });
   }, []);
 
+  const scrollSaveTimer = useRef<number | null>(null);
+
   const handleEditorMount: OnMount = useCallback((ed, monaco) => {
     editorRef.current = ed;
     monacoRef.current = monaco;
+
+    // Restore the persisted scroll position and keep it saved (debounced) as
+    // the user scrolls, so reopening this file lands where they left off.
+    if (persistKey) {
+      const savedTop = loadEditorScroll(persistKey);
+      if (savedTop > 0) ed.setScrollTop(savedTop);
+      ed.onDidScrollChange(() => {
+        if (scrollSaveTimer.current !== null) window.clearTimeout(scrollSaveTimer.current);
+        scrollSaveTimer.current = window.setTimeout(() => {
+          saveEditorScroll(persistKey, ed.getScrollTop());
+        }, 300);
+      });
+    }
 
     // Match the shadcn dark theme
     monaco.editor.defineTheme("ocode-dark", {
@@ -172,7 +199,7 @@ export default function FileEditor({
     });
 
     monaco.editor.setTheme("ocode-dark");
-  }, []);
+  }, [persistKey]);
 
   // ── Selection tracking ──
   // Wire onDidChangeCursorSelection after mount to report non-collapsed selections.
@@ -387,6 +414,37 @@ export default function FileEditor({
           </Button>
         </div>
       </div>
+
+      {/* External-change conflict banner */}
+      {externalChange && (
+        <div className="flex items-center justify-between gap-2 border-b border-amber-500/30 bg-amber-500/10 px-4 py-1.5 text-xs text-amber-500">
+          <span>This file was modified or deleted outside ocode. Your unsaved edits are kept; saving will overwrite the on-disk version.</span>
+          <div className="flex shrink-0 items-center gap-1">
+            {onReloadFromDisk && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs text-amber-500 hover:text-amber-400"
+                onClick={onReloadFromDisk}
+                title="Discard your edits and load the on-disk content"
+              >
+                Reload from disk
+              </Button>
+            )}
+            {onDismissExternalChange && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs text-muted-foreground hover:text-foreground"
+                onClick={onDismissExternalChange}
+                title="Keep editing your version"
+              >
+                Dismiss
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Editor settings & extensions panel */}
       <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>

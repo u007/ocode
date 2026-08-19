@@ -189,6 +189,12 @@ var globalStore = NewStore("global", "")
 
 // Package-level functions delegate to the global store so existing call sites
 // (TUI undo/redo, config backup) continue to work unchanged.
+// SetGlobalBaseDir points the package-level global store (used by Backup) at
+// an explicit directory. Without this it falls back to a cwd-relative
+// ".opencode/snapshots", which fails when cwd is read-only (e.g. desktop/web
+// server processes launched from a read-only app bundle or project mount).
+func SetGlobalBaseDir(dir string) { globalStore.SetBaseDir(dir) }
+
 func Backup(path string) error      { return globalStore.Backup(path, "") }
 func ChangedFiles() []string        { return globalStore.ChangedFiles() }
 func Reset()                        { globalStore.Reset() }

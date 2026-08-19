@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/u007/ocode/internal/projects"
 )
 
 func newFilesHandler(t *testing.T) (*Handler, string) {
@@ -141,7 +143,7 @@ func TestHandleFileTreePathParam(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !contains(flattenTree(t, resp.Children), "in.txt") {
+	if !contains(flattenTree(t, resp.Children), filepath.Join("sub", "in.txt")) {
 		t.Fatalf("expected sub/in.txt via relative ?path=, got %v", resp.Children)
 	}
 
@@ -161,6 +163,58 @@ func TestHandleFileTreePathParam(t *testing.T) {
 	h.HandleFileTree(w3, httptest.NewRequest("GET", "/api/files/tree?path="+url.QueryEscape(outside), nil))
 	if w3.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for path outside workDir, got %d: %s", w3.Code, w3.Body.String())
+	}
+}
+
+func TestHandleFileTreeNestedPathInSelectedProject(t *testing.T) {
+	h, _ := newFilesHandler(t)
+	projectDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(projectDir, "sub", "deep"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "sub", "deep", "leaf.txt"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	projectStore, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Add(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	h.projects = projectStore
+
+	// The frontend loads the selected project with an absolute path, then uses
+	// that same root when expanding a relative node path.
+	rootQuery := "/api/files/tree?path=" + url.QueryEscape(projectDir) + "&depth=1"
+	w := httptest.NewRecorder()
+	h.HandleFileTree(w, httptest.NewRequest("GET", rootQuery, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for selected project root, got %d: %s", w.Code, w.Body.String())
+	}
+
+	nested := filepath.Join(projectDir, "sub")
+	nestedQuery := "/api/files/tree?path=" + url.QueryEscape(nested) + "&depth=1"
+	w2 := httptest.NewRecorder()
+	h.HandleFileTree(w2, httptest.NewRequest("GET", nestedQuery, nil))
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200 for nested selected-project path, got %d: %s", w2.Code, w2.Body.String())
+	}
+	var resp FileTreeResponse
+	if err := json.Unmarshal(w2.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !contains(flattenTree(t, resp.Children), filepath.Join("sub", "deep")) {
+		t.Fatalf("expected nested directory in selected project, got %v", resp.Children)
+	}
+
+	outside := t.TempDir()
+	badQuery := "/api/files/tree?path=" + url.QueryEscape(outside) + "&depth=1"
+	w3 := httptest.NewRecorder()
+	h.HandleFileTree(w3, httptest.NewRequest("GET", badQuery, nil))
+	if w3.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for path outside allowed projects, got %d: %s", w3.Code, w3.Body.String())
 	}
 }
 
@@ -185,6 +239,49 @@ func TestHandleFileContentResolvesAgainstWorkDir(t *testing.T) {
 	}
 	if resp.Content != "hello" {
 		t.Fatalf("expected content hello, got %q", resp.Content)
+	}
+}
+
+func TestHandleFileContentResolvesAgainstAllowedProjectRoot(t *testing.T) {
+	h, tmpDir := newFilesHandler(t)
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "a.txt"), []byte("other project"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	projectStore, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Add(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	h.projects = projectStore
+
+	query := "/api/files/content?path=a.txt&project_root=" + url.QueryEscape(projectDir)
+	w := httptest.NewRecorder()
+	h.HandleFileContent(w, httptest.NewRequest("GET", query, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Content != "other project" {
+		t.Fatalf("expected selected project content, got %q", resp.Content)
+	}
+
+	outside := filepath.Join(tmpDir, "a.txt")
+	if err := os.WriteFile(outside, []byte("work dir"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	badQuery := "/api/files/content?path=a.txt&project_root=" + url.QueryEscape(t.TempDir())
+	w2 := httptest.NewRecorder()
+	h.HandleFileContent(w2, httptest.NewRequest("GET", badQuery, nil))
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for disallowed project root, got %d: %s", w2.Code, w2.Body.String())
 	}
 }
 
@@ -214,6 +311,41 @@ func TestHandleSaveFileContentWritesFile(t *testing.T) {
 		t.Fatalf("expected saved=true, got %+v", resp)
 	}
 
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "changed\n" {
+		t.Fatalf("expected file content %q, got %q", "changed\n", string(got))
+	}
+}
+
+func TestHandleSaveFileContentResolvesAgainstAllowedProjectRoot(t *testing.T) {
+	h, _ := newFilesHandler(t)
+	projectDir := t.TempDir()
+	target := filepath.Join(projectDir, "a.txt")
+	if err := os.WriteFile(target, []byte("original\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	projectStore, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := projectStore.Add(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	h.projects = projectStore
+
+	body, _ := json.Marshal(map[string]string{
+		"path":         "a.txt",
+		"content":      "changed\n",
+		"project_root": projectDir,
+	})
+	w := httptest.NewRecorder()
+	h.HandleSaveFileContent(w, httptest.NewRequest("PUT", "/api/files/content", bytes.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
 	got, err := os.ReadFile(target)
 	if err != nil {
 		t.Fatal(err)

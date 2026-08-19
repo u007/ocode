@@ -12,6 +12,7 @@
     "/Users/james/.cache/terminal-bench/terminal-bench-core/0.1.1",
     "/Users/james/.cache/uv/archive-v0/HQu-BTwTmwjpzN-urVptz/lib/python3.12/site-packages/terminal_bench/harness",
     "/Users/james/.vite-plus/bin",
-    "/Users/james/.config/opencode"
+    "/Users/james/.config/opencode",
+    "/opt/homebrew/bin"
   ]
 }

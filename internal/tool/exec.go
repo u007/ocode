@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/u007/ocode/internal/snapshot"
@@ -157,7 +156,7 @@ func (t BashTool) ExecuteStreamCtx(ctx context.Context, args json.RawMessage, em
 		cmd = exec.CommandContext(ctx, "cmd", "/C", params.Command)
 	} else {
 		cmd = exec.CommandContext(ctx, "bash", "-c", params.Command)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		setProcGroup(cmd)
 	}
 
 	// streaming gates live emission. Once the command is moved to the

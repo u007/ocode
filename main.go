@@ -235,6 +235,16 @@ func main() {
 				opts.PermissionMode = mode
 				i++
 			}
+		case "-effort", "--effort":
+			if i+1 < len(os.Args) {
+				level := os.Args[i+1]
+				if _, ok := config.ThinkingBudgetForLabel(level); !ok {
+					fmt.Fprintf(os.Stderr, "ocode: invalid --effort %q (want off, low, med, high, xhigh, or max)\n", level)
+					os.Exit(2)
+				}
+				opts.Effort = level
+				i++
+			}
 		}
 	}
 
@@ -273,6 +283,8 @@ func printUsage() {
 	fmt.Println("                   Auto-approve all permission prompts")
 	fmt.Println("  --permission-mode <auto|off>")
 	fmt.Println("                   Set permission mode (default: auto)")
+	fmt.Println("  -effort <off|low|med|high|xhigh|max>")
+	fmt.Println("                   Set reasoning effort (thinking budget) level")
 	fmt.Println()
 	fmt.Println("Run 'ocode <command> -h' for command-specific help.")
 }

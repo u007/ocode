@@ -212,6 +212,20 @@ func TestMDSummaryClientFallsBackToMainClient(t *testing.T) {
 	}
 }
 
+func TestMDDiscoveryRequiresBoundProjectWorkDir(t *testing.T) {
+	client := &fakeSummClient{reply: "should not be called"}
+	a := &Agent{client: client, config: &config.Config{}}
+
+	a.ensureMDState()
+
+	if a.mdState == nil {
+		t.Fatal("unbound markdown discovery should be marked inactive")
+	}
+	if got := atomic.LoadInt32(&client.calls); got != 0 {
+		t.Fatalf("unbound discovery must not summarize files from process cwd: %d calls", got)
+	}
+}
+
 func TestMDSummarizeFailureBacksOff(t *testing.T) {
 	root := t.TempDir()
 	docPath := filepath.Join(root, "docs", "x.md")

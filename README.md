@@ -44,6 +44,13 @@ go build -o ocode .
 
 ---
 
+## Releases
+
+Pre-built binaries and installers are available in the [Releases folder](https://drive.google.com/drive/folders/168zPGETI9ofdENAOO9k9Z3XKAGOyylzC?usp=sharing) on Google Drive.
+
+---
+
+
 ## Features
 
 ### 💬 Chat & Agent Loop

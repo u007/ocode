@@ -19,6 +19,13 @@ import (
 )
 
 // Record represents a single LLM API call.
+//
+// PromptTokens always excludes CacheReadTokens, regardless of the source
+// provider's raw usage payload shape (Anthropic keeps cache reads out of
+// input_tokens; OpenAI/DeepSeek/opencode-go fold them into prompt_tokens).
+// Callers write normalized values (see agent.TokenUsage.NormalizedPromptTokens),
+// so ratio(s) derived from records can uniformly use
+// CacheReadTokens / (PromptTokens + CacheReadTokens) across all providers.
 type Record struct {
 	Timestamp        time.Time `json:"t"`
 	Model            string    `json:"m"`
@@ -118,7 +125,10 @@ func recordsPath() (string, error) {
 }
 
 // RecordUsage writes a single usage record to the JSON-lines file.
-// It is safe for concurrent calls.
+// It is safe for concurrent calls. promptTokens must already exclude
+// cacheReadTokens (see Record's doc comment) — callers with a
+// *agent.TokenUsage should pass NormalizedPromptTokens(), not the raw
+// provider PromptTokens field.
 func RecordUsage(t time.Time, model string, provider string, promptTokens, completionTokens, cacheReadTokens, totalTokens int64, spend float64) error {
 	rec := Record{
 		Timestamp:        t,

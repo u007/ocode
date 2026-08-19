@@ -20,7 +20,7 @@ func newRCResolveServer(t *testing.T, register bool) *Server {
 	s := New("localhost:0", "", "test-secret", nil)
 	if register {
 		resolveCh := make(chan RCResolution, 1)
-		s.RegisterExternalSession("tui-sess", "test-model", make(chan RCRequest, 1), resolveCh, "test-secret")
+		s.RegisterExternalSession("tui-sess", "test-model", "", make(chan RCRequest, 1), resolveCh, "test-secret")
 	}
 	return s
 }

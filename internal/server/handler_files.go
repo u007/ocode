@@ -8,9 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
-
-	"github.com/u007/ocode/internal/snapshot"
 )
 
 type FileNode struct {
@@ -38,15 +35,23 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 	if !filepath.IsAbs(root) && h.workDir != "" {
 		root = filepath.Join(h.workDir, root)
 	}
+	// matchedRoot is the specific project root or extra-allowed-path that
+	// contains the requested root, when one was given explicitly; it becomes
+	// the anchor for returned Path values below. An implicit request (no
+	// ?path=) always means "the server's own project", so it anchors to
+	// workDir directly without needing a match.
+	matchedRoot := h.workDir
 	if r.URL.Query().Get("path") != "" {
 		if h.workDir == "" {
 			writeError(w, http.StatusBadRequest, "server has no working directory configured; explicit path not allowed")
 			return
 		}
-		if !containedIn(root, h.workDir) {
+		dir, ok := h.fileTreeRootFor(root)
+		if !ok {
 			writeError(w, http.StatusBadRequest, "path outside working directory")
 			return
 		}
+		matchedRoot = dir
 	}
 
 	// Depth cap for the returned tree. The default (4) preserves the
@@ -65,8 +70,21 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Anchor returned Path values to matchedRoot (the project root or extra
+	// dir the request resolved into) rather than to the requested subtree:
+	// the frontend re-requests a subdirectory's children by passing a
+	// child's Path straight back as ?path=, so those paths must stay valid
+	// (relative to the same fixed root) no matter how deep the query root
+	// is, or a second-level expand silently resolves to the wrong directory
+	// and renders empty.
+	anchor := base
+	if matchedRoot != "" {
+		if absMatchedRoot, err := filepath.Abs(matchedRoot); err == nil {
+			anchor = absMatchedRoot
+		}
+	}
 	count := 0
-	node, err := buildFileTree(base, base, 0, maxDepth, &count)
+	node, err := buildFileTree(anchor, base, 0, maxDepth, &count)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -87,6 +105,53 @@ func (h *Handler) HandleFileTree(w http.ResponseWriter, r *http.Request) {
 type FileTreeResponse struct {
 	Children  []FileNode `json:"children"`
 	Truncated bool       `json:"truncated"`
+}
+
+// fileTreeRootFor reports whether root may be browsed by HandleFileTree —
+// inside the server's workDir, inside a saved project root
+// (allowedProjectRoots), or inside a configured extra-allowed-path — and, if
+// so, returns the specific containing root. Desktop users switch the file
+// tree between the active project and their extra dirs, so the boundary
+// can't be workDir alone, and the matched root (not workDir) is what the
+// returned tree's Path values must be anchored to: HandleFileTree anchors
+// every node's Path to it so a later depth=1 expand of a nested directory
+// re-resolves against the same project/extra-dir root instead of drifting to
+// wherever the server's workDir happens to be.
+func (h *Handler) fileTreeRootFor(root string) (string, bool) {
+	candidates := h.allowedProjectRoots()
+	h.mu.Lock()
+	if h.cfg != nil {
+		candidates = append(candidates, h.cfg.Ocode.ExtraAllowedPaths...)
+	}
+	h.mu.Unlock()
+
+	// Pick the most specific (longest) containing root rather than the
+	// first match in list order: h.workDir is always listed first in
+	// allowedProjectRoots, so a broader workDir (e.g. a Finder-launched
+	// desktop .app anchored at the home dir) would otherwise win over the
+	// exact project root the request actually resolved into, anchoring
+	// returned Path values to the wrong directory.
+	best := ""
+	for _, dir := range candidates {
+		if dir == "" || !containedIn(root, dir) {
+			continue
+		}
+		absDir, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		if best == "" {
+			best = absDir
+			continue
+		}
+		if len(absDir) > len(best) {
+			best = absDir
+		}
+	}
+	if best == "" {
+		return "", false
+	}
+	return best, true
 }
 
 // containedIn reports whether path p (an absolute path) is inside dir, after
@@ -123,6 +188,21 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if projectRoot := r.URL.Query().Get("project_root"); projectRoot != "" {
+		root, ok := h.fileContentRootFor(projectRoot)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
+			return
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		if !containedIn(path, root) {
+			writeError(w, http.StatusBadRequest, "path is outside the project root")
+			return
+		}
+	}
+
 	// Resolve relative paths (as returned by the file tree) against the
 	// anchored workDir so they stay correct when the process CWD differs
 	// from the project root (e.g. a Finder-launched desktop .app).
@@ -143,8 +223,9 @@ func (h *Handler) HandleFileContent(w http.ResponseWriter, r *http.Request) {
 }
 
 type saveFileContentRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path        string `json:"path"`
+	Content     string `json:"content"`
+	ProjectRoot string `json:"project_root,omitempty"`
 }
 
 func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +242,17 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 	root := h.workDir
 	if root == "" {
 		root = "."
+	}
+	if req.ProjectRoot != "" {
+		var ok bool
+		root, ok = h.fileContentRootFor(req.ProjectRoot)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "project_root is not an allowed project root")
+			return
+		}
+		if !filepath.IsAbs(req.Path) {
+			req.Path = filepath.Join(root, req.Path)
+		}
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
@@ -195,7 +287,7 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 	// O_NOFOLLOW rejects the write if the final path component is itself a
 	// symlink, closing the window between the containment check above and
 	// the write below.
-	f, err := os.OpenFile(realTarget, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0600)
+	f, err := os.OpenFile(realTarget, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|oNoFollow, 0600)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -210,6 +302,42 @@ func (h *Handler) HandleSaveFileContent(w http.ResponseWriter, r *http.Request) 
 		"path":  req.Path,
 		"saved": true,
 	})
+}
+
+// fileContentRootFor validates a project root supplied by the frontend. Roots
+// are compared after resolving symlinks so an alias cannot bypass the project
+// allowlist. Extra allowed paths are included because the Files tree can be
+// switched to those roots as well.
+func (h *Handler) fileContentRootFor(root string) (string, bool) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		return "", false
+	}
+
+	allowed := h.allowedProjectRoots()
+	h.mu.Lock()
+	if h.cfg != nil {
+		allowed = append(allowed, h.cfg.Ocode.ExtraAllowedPaths...)
+	}
+	h.mu.Unlock()
+	for _, candidate := range allowed {
+		if candidate == "" {
+			continue
+		}
+		absCandidate, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
+		realCandidate, err := filepath.EvalSymlinks(absCandidate)
+		if err == nil && filepath.Clean(realCandidate) == filepath.Clean(realRoot) {
+			return absRoot, true
+		}
+	}
+	return "", false
 }
 
 // ignoredDirNames are directories skipped during the tree walk because they
@@ -291,7 +419,12 @@ func buildFileTree(base, cur string, depth, maxDepth int, count *int) (FileNode,
 }
 
 func (h *Handler) HandleUndo(w http.ResponseWriter, r *http.Request) {
-	path, err := snapshot.Undo()
+	ag := h.activeAgentForRuns(r.URL.Query().Get("session"))
+	if ag == nil {
+		writeError(w, http.StatusNotFound, "no active agent for session")
+		return
+	}
+	path, err := ag.UndoLastChange()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -300,7 +433,12 @@ func (h *Handler) HandleUndo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) HandleRedo(w http.ResponseWriter, r *http.Request) {
-	path, err := snapshot.Redo()
+	ag := h.activeAgentForRuns(r.URL.Query().Get("session"))
+	if ag == nil {
+		writeError(w, http.StatusNotFound, "no active agent for session")
+		return
+	}
+	path, err := ag.RedoLastChange()
 	if err != nil {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return

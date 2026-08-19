@@ -250,3 +250,225 @@ func listRoots() ([]DirectoryEntry, error) {
 
 	return roots, nil
 }
+
+// ── Rename / Reorder / Group endpoints ─────────────────────────────────────
+
+// HandleRenameProject changes the display name of a project.
+func (h *Handler) HandleRenameProject(w http.ResponseWriter, r *http.Request) {
+	if h.projects == nil {
+		writeError(w, http.StatusInternalServerError, "project store not available")
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if body.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := h.projects.Rename(body.Path, body.Name); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("rename project: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleReorderProjects sets the manual sort order for all projects.
+func (h *Handler) HandleReorderProjects(w http.ResponseWriter, r *http.Request) {
+	if h.projects == nil {
+		writeError(w, http.StatusInternalServerError, "project store not available")
+		return
+	}
+	var body struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if len(body.Paths) == 0 {
+		writeError(w, http.StatusBadRequest, "paths is required")
+		return
+	}
+	if err := h.projects.Reorder(body.Paths); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("reorder projects: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleSetProjectGroup assigns a project to a group (or clears it).
+func (h *Handler) HandleSetProjectGroup(w http.ResponseWriter, r *http.Request) {
+	if h.projects == nil {
+		writeError(w, http.StatusInternalServerError, "project store not available")
+		return
+	}
+	var body struct {
+		Path  string `json:"path"`
+		Group string `json:"group"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if body.Path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if err := h.projects.SetGroup(body.Path, body.Group); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("set group: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ── Group endpoints ────────────────────────────────────────────────────────
+
+// HandleListGroups returns all project groups.
+func (h *Handler) HandleListGroups(w http.ResponseWriter, _ *http.Request) {
+	if h.projectGroups == nil {
+		writeJSON(w, http.StatusOK, []projects.ProjectGroup{})
+		return
+	}
+	writeJSON(w, http.StatusOK, h.projectGroups.ListGroups())
+}
+
+// HandleCreateGroup creates a new project group.
+func (h *Handler) HandleCreateGroup(w http.ResponseWriter, r *http.Request) {
+	if h.projectGroups == nil {
+		writeError(w, http.StatusInternalServerError, "group store not available")
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := h.projectGroups.CreateGroup(body.Name); err != nil {
+		writeError(w, http.StatusConflict, fmt.Sprintf("create group: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleDeleteGroup removes a group and ungroups its projects.
+func (h *Handler) HandleDeleteGroup(w http.ResponseWriter, r *http.Request) {
+	if h.projectGroups == nil {
+		writeError(w, http.StatusInternalServerError, "group store not available")
+		return
+	}
+	name := r.PathValue("name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	// Ungroup all projects in this group.
+	if h.projects != nil {
+		for _, p := range h.projects.List() {
+			if p.Group == name {
+				_ = h.projects.SetGroup(p.Path, "")
+			}
+		}
+	}
+
+	if err := h.projectGroups.DeleteGroup(name); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("delete group: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleRenameGroup changes the name of a group.
+func (h *Handler) HandleRenameGroup(w http.ResponseWriter, r *http.Request) {
+	if h.projectGroups == nil {
+		writeError(w, http.StatusInternalServerError, "group store not available")
+		return
+	}
+	var body struct {
+		OldName string `json:"old_name"`
+		NewName string `json:"new_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if body.OldName == "" {
+		writeError(w, http.StatusBadRequest, "old_name is required")
+		return
+	}
+	if body.NewName == "" {
+		writeError(w, http.StatusBadRequest, "new_name is required")
+		return
+	}
+	projs, err := h.projectGroups.RenameGroup(body.OldName, body.NewName, h.projects)
+	if err != nil {
+		writeError(w, http.StatusConflict, fmt.Sprintf("rename group: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, projs)
+}
+
+// HandleReorderGroups sets the order for all groups.
+func (h *Handler) HandleReorderGroups(w http.ResponseWriter, r *http.Request) {
+	if h.projectGroups == nil {
+		writeError(w, http.StatusInternalServerError, "group store not available")
+		return
+	}
+	var body struct {
+		Names []string `json:"names"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if len(body.Names) == 0 {
+		writeError(w, http.StatusBadRequest, "names is required")
+		return
+	}
+	if err := h.projectGroups.ReorderGroups(body.Names); err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("reorder groups: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleSetGroupCollapsed toggles the collapsed state of a group.
+func (h *Handler) HandleSetGroupCollapsed(w http.ResponseWriter, r *http.Request) {
+	if h.projectGroups == nil {
+		writeError(w, http.StatusInternalServerError, "group store not available")
+		return
+	}
+	var body struct {
+		Name      string `json:"name"`
+		Collapsed bool   `json:"collapsed"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
+		return
+	}
+	if body.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if err := h.projectGroups.SetCollapsed(body.Name, body.Collapsed); err != nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("set collapsed: %v", err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}

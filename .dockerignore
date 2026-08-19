@@ -21,7 +21,6 @@ web/node_modules/
 web/dist/assets/
 internal/config/.opencode/snapshots/
 internal/tui/.opencode/
-internal/agent/models-snapshot.json
 .tmp_*
 .d_*.diff
 build_*.sh

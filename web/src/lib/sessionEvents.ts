@@ -13,10 +13,10 @@ import type { BusEnvelope } from "./eventBus";
  * that feeds live envelopes from the event bus into `routeBusEnvelope`, and
  * fires `reconcileOpenSessions` on reconnect.
  *
- * Unknown-session events are a loud `console.warn`, never a silent drop —
- * a session-scoped event that no open tab can receive indicates either a
- * missed `session_started` rekey or a session driven elsewhere (TUI) that the
- * user should know about.
+ * Session-scoped events route into chatStore for ANY session id, whether or
+ * not that session has an open tab right now — chat state must stay current
+ * in the background so switching tabs never shows stale data. Only a missing
+ * session id (can't be routed at all) is a loud `console.warn`.
  */
 
 export interface SessionEventRouter {
@@ -30,8 +30,7 @@ export interface SessionEventRouter {
   getState: () => ChatState;
 }
 
-/** Session-scoped events that must carry a session id; a session-scoped event
- *  whose session has no open tab is a routing miss (warn, never silent). */
+/** Session-scoped events that must carry a session id to be routed. */
 const SESSION_SCOPED_EVENTS = new Set([
   "user_message",
   "thinking",
@@ -101,7 +100,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
 
   if (event === "status") {
     const status = data as TUIStatus;
-    if (eventSessionId && r.openSessionIds.has(eventSessionId)) {
+    if (eventSessionId) {
       r.dispatch({ type: "SET_TUI_STATUS", sessionId: eventSessionId, status });
       if (status.session_title) {
         r.projectDispatch({
@@ -135,27 +134,27 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
     return;
   }
 
-  // Turn lifecycle and bootstrap are per-session too — route them through the
-  // open-tab gate below (they set the streaming/turn state on the session).
+  // Turn lifecycle and bootstrap are per-session too — route them into that
+  // session's slice (they set the streaming/turn state on the session).
   if (event === "turn_started") {
-    return routeSessionScoped(env, eventSessionId, r, (sessionId) => {
+    return routeSessionScoped(env, eventSessionId, (sessionId) => {
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: true });
       r.dispatch({ type: "SET_ERROR", sessionId, error: null });
     });
   }
   if (event === "turn_heartbeat") {
-    return routeSessionScoped(env, eventSessionId, r, (sessionId) => {
+    return routeSessionScoped(env, eventSessionId, (sessionId) => {
       r.dispatch({ type: "SET_TURN_HEARTBEAT", sessionId });
     });
   }
   if (event === "turn_done") {
-    return routeSessionScoped(env, eventSessionId, r, (sessionId) => {
+    return routeSessionScoped(env, eventSessionId, (sessionId) => {
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
       r.dispatch({ type: "SET_STREAMING", sessionId, isStreaming: false });
     });
   }
   if (event === "turn_error") {
-    return routeSessionScoped(env, eventSessionId, r, (sessionId) => {
+    return routeSessionScoped(env, eventSessionId, (sessionId) => {
       r.dispatch({ type: "SET_TURN_STATE", sessionId, turnActive: false });
       r.dispatch({
         type: "SET_ERROR",
@@ -165,7 +164,7 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
     });
   }
   if (event === "session_bootstrap") {
-    return routeSessionScoped(env, eventSessionId, r, (sessionId) => {
+    return routeSessionScoped(env, eventSessionId, (sessionId) => {
       const stage = (data as { stage?: string }).stage ?? null;
       r.dispatch({ type: "SET_BOOTSTRAP_STAGE", sessionId, stage });
       // A bootstrap with no open tab may still need the tab created — handled
@@ -174,8 +173,8 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
   }
 
   // Every other event is per-session chat content — route it to that
-  // session's slice as long as it has an open tab.
-  routeSessionScoped(env, eventSessionId, r, (sessionId) => {
+  // session's slice.
+  routeSessionScoped(env, eventSessionId, (sessionId) => {
     switch (event) {
       case "messages": {
         const snapshot = Array.isArray(data)
@@ -307,7 +306,6 @@ export function routeBusEnvelope(env: BusEnvelope, r: SessionEventRouter): void 
 function routeSessionScoped(
   env: BusEnvelope,
   eventSessionId: string | null,
-  r: SessionEventRouter,
   apply: (sessionId: string) => void,
 ): void {
   const { event } = env;
@@ -318,12 +316,8 @@ function routeSessionScoped(
     console.warn(`eventBus: '${event}' event arrived without a session id — cannot route`);
     return;
   }
-  if (!r.openSessionIds.has(eventSessionId)) {
-    console.warn(
-      `eventBus: '${event}' event for session ${eventSessionId} (project ${env.project ?? "?"}) has no open tab — dropping`,
-    );
-    return;
-  }
+  // No open-tab gate: every session's chat state is kept live in the
+  // background so it's current the moment a tab opens on it.
   apply(eventSessionId);
 }
 

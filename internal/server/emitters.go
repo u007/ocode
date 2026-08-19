@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/usage"
 )
@@ -207,6 +208,120 @@ func (h *Handler) logsEmitterLoop() {
 			}
 		}
 	}
+}
+
+// terminalProcsPollInterval is how often the terminal-processes emitter
+// re-samples CPU/mem. Faster than gitPollInterval since the whole point is
+// catching a runaway process while it's happening.
+const terminalProcsPollInterval = 1500 * time.Millisecond
+
+// terminalProcessStat is one row of the Processes tab: a terminal's id (as
+// assigned by TerminalPanel) plus its process tree's summed CPU/mem.
+type terminalProcessStat struct {
+	ID         string  `json:"id"`
+	PID        int32   `json:"pid"`
+	CPUPercent float64 `json:"cpu_percent"`
+	MemBytes   uint64  `json:"mem_bytes"`
+}
+
+// startTerminalProcessesEmitter launches the terminal CPU/mem poller once per
+// handler. Called from HandleEvents; safe to call repeatedly.
+func (h *Handler) startTerminalProcessesEmitter() {
+	if !h.terminalProcsEmitterOn.CompareAndSwap(false, true) {
+		return
+	}
+	go h.terminalProcessesEmitterLoop()
+}
+
+// terminalProcessesEmitterLoop samples every registered terminal's process
+// tree (shell + all descendants — a nested `ocode`, its `/rc` server, etc.)
+// and publishes one `terminal_processes` envelope per project with that
+// project's terminals. gopsutil's Percent(0) reports the delta since the last
+// call *on the same *process.Process value*, so process handles are cached
+// across ticks (a fresh NewProcess each tick would always read 0%); the cache
+// is pruned each tick to drop pids that exited.
+func (h *Handler) terminalProcessesEmitterLoop() {
+	ticker := time.NewTicker(terminalProcsPollInterval)
+	defer ticker.Stop()
+	cache := make(map[int32]*process.Process)
+	idleFor := time.Duration(0)
+	for range ticker.C {
+		if h.bus.SubscriberCount() == 0 {
+			idleFor += terminalProcsPollInterval
+			if idleFor >= emitterIdleExit {
+				h.terminalProcsEmitterOn.Store(false)
+				return
+			}
+			continue
+		}
+		idleFor = 0
+
+		entries := h.terminalProcs.snapshot()
+		if len(entries) == 0 {
+			continue
+		}
+
+		byProject := make(map[string][]terminalProcessStat, len(entries))
+		touched := make(map[int32]bool)
+		for id, entry := range entries {
+			cpu, mem := sumProcessTree(entry.PID, cache, touched)
+			byProject[entry.Project] = append(byProject[entry.Project], terminalProcessStat{
+				ID:         id,
+				PID:        entry.PID,
+				CPUPercent: cpu,
+				MemBytes:   mem,
+			})
+		}
+		for pid := range cache {
+			if !touched[pid] {
+				delete(cache, pid)
+			}
+		}
+		for proj, stats := range byProject {
+			h.bus.Publish("terminal_processes", proj, "", stats)
+		}
+	}
+}
+
+// sumProcessTree walks pid and all its descendants, summing CPU% and RSS
+// bytes. cache holds *process.Process handles across ticks so Percent(0) has
+// a prior sample to diff against; touched records every pid visited this
+// tick so the caller can prune cache entries for processes that exited. A
+// pid that has already exited (or was never valid) contributes zero rather
+// than erroring the whole terminal's row.
+func sumProcessTree(pid int32, cache map[int32]*process.Process, touched map[int32]bool) (cpuPercent float64, memBytes uint64) {
+	if touched[pid] {
+		return 0, 0 // cycle guard; process trees are acyclic in practice
+	}
+	touched[pid] = true
+
+	p, ok := cache[pid]
+	if !ok {
+		np, err := process.NewProcess(pid)
+		if err != nil {
+			return 0, 0
+		}
+		p = np
+		cache[pid] = p
+	}
+
+	if pct, err := p.Percent(0); err == nil {
+		cpuPercent += pct
+	}
+	if mi, err := p.MemoryInfo(); err == nil && mi != nil {
+		memBytes += mi.RSS
+	}
+
+	children, err := p.Children()
+	if err != nil {
+		return cpuPercent, memBytes
+	}
+	for _, c := range children {
+		childCPU, childMem := sumProcessTree(c.Pid, cache, touched)
+		cpuPercent += childCPU
+		memBytes += childMem
+	}
+	return cpuPercent, memBytes
 }
 
 // computeSpending returns today's cumulative USD spend and record count, shared

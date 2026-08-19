@@ -1,4 +1,4 @@
-import { MessageSquare, Bot, History, ScrollText, Activity, Terminal as TerminalIcon } from "lucide-react";
+import { MessageSquare, Bot, History, ScrollText, Activity, Terminal as TerminalIcon, Gauge } from "lucide-react";
 import { useProjectState, type SessionSubTabId } from "../../stores/projectStore";
 
 const subTabs: { id: SessionSubTabId; label: string; icon: typeof MessageSquare }[] = [
@@ -8,6 +8,7 @@ const subTabs: { id: SessionSubTabId; label: string; icon: typeof MessageSquare 
   { id: "logs", label: "Logs", icon: ScrollText },
   { id: "status", label: "Status", icon: Activity },
   { id: "terminal", label: "Terminal", icon: TerminalIcon },
+  { id: "processes", label: "Processes", icon: Gauge },
 ];
 
 export default function SessionSubTabs() {

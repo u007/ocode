@@ -19,6 +19,7 @@ type RunOptions struct {
 	Continue       bool
 	YOLO           bool
 	PermissionMode string // "" | "auto" | "off"
+	Effort         string // "" leaves the persisted thinking budget untouched; otherwise off|low|med|high|xhigh|max
 	WebFS          fs.FS  // Embedded web assets for /rc command
 }
 

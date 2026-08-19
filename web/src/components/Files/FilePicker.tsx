@@ -24,7 +24,8 @@ interface FileTreeResponse {
 interface Props {
   open: boolean;
   onClose: () => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, projectRoot?: string) => void;
+  projectPath?: string;
 }
 
 function flattenFiles(nodes: FileNode[]): string[] {
@@ -39,14 +40,19 @@ function flattenFiles(nodes: FileNode[]): string[] {
   return out;
 }
 
-export default function FilePicker({ open, onClose, onOpenFile }: Props) {
+export default function FilePicker({ open, onClose, onOpenFile, projectPath }: Props) {
   const [files, setFiles] = useState<string[]>([]);
 
   useEffect(() => {
     if (!open) return;
     // depth=0 asks the server for the full tree (no depth cap) so files
     // nested deep in the project are searchable, not just the shallow ones.
-    fetch(apiPath(`/api/files/tree?depth=0`), { headers: authHeaders() })
+    // An explicit path anchors the request to the active project instead of
+    // the server's own workDir (fixed at launch, e.g. home dir on desktop).
+    const query = projectPath
+      ? `path=${encodeURIComponent(projectPath)}&depth=0`
+      : "depth=0";
+    fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() })
       .then((res) => res.json())
       .then((data: FileTreeResponse) => {
         if (data.truncated) {
@@ -55,7 +61,7 @@ export default function FilePicker({ open, onClose, onOpenFile }: Props) {
         setFiles(flattenFiles(data.children));
       })
       .catch((err) => console.error("Failed to load file tree:", err));
-  }, [open]);
+  }, [open, projectPath]);
 
   return (
     <CommandDialog open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
@@ -68,7 +74,7 @@ export default function FilePicker({ open, onClose, onOpenFile }: Props) {
               key={path}
               value={path}
               onSelect={() => {
-                onOpenFile(path);
+                onOpenFile(path, projectPath);
                 onClose();
               }}
             >

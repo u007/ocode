@@ -1,7 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { ChevronRight, File, Folder, FolderOpen, Loader2 } from "lucide-react";
-import { apiPath, authHeaders } from "@/api/client";
+import { api, apiPath, authHeaders } from "@/api/client";
 
 interface FileNode {
   name: string;
@@ -16,7 +23,8 @@ interface FileTreeResponse {
 }
 
 interface FileTreeProps {
-  onOpenFile: (path: string) => void;
+  onOpenFile: (path: string, projectRoot?: string) => void;
+  projectPath?: string;
 }
 
 const langIcons: Record<string, string> = {
@@ -40,6 +48,19 @@ interface TreeNodeProps {
   depth: number;
   selectedPath: string | null;
   onSelect: (path: string) => void;
+  projectRoot?: string;
+}
+
+// Tree responses keep paths relative to their selected root so they can be
+// opened in the editor with the same projectRoot. Expansion requests are
+// different: the server must receive the selected root as well, otherwise a
+// relative child path is resolved against its default workDir.
+export function treePathForRequest(projectRoot: string | undefined, nodePath: string): string {
+  if (!projectRoot) return nodePath;
+  const root = projectRoot.replace(/[\\/]+$/, "");
+  const relative = nodePath.replace(/^[\\/]+/, "");
+  if (!relative || relative === ".") return projectRoot;
+  return `${root}/${relative}`;
 }
 
 function FileIcon({ name, isDir, expanded }: { name: string; isDir: boolean; expanded: boolean }) {
@@ -58,8 +79,8 @@ function FileIcon({ name, isDir, expanded }: { name: string; isDir: boolean; exp
   return <File className="w-4 h-4 text-blue-400 shrink-0" />;
 }
 
-function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
-  const [expanded, setExpanded] = useState(depth < 1);
+function TreeNode({ node, depth, selectedPath, onSelect, projectRoot }: TreeNodeProps) {
+  const [expanded, setExpanded] = useState(false);
   // Lazily fetched immediate children for this directory. null = not fetched
   // yet; the initial tree only carries one level, so every directory below
   // the root fetches its own children on first expand instead of the whole
@@ -76,7 +97,9 @@ function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
     (async () => {
       try {
         const res = await fetch(
-          apiPath(`/api/files/tree?path=${encodeURIComponent(node.path)}&depth=1`),
+          apiPath(
+            `/api/files/tree?path=${encodeURIComponent(treePathForRequest(projectRoot, node.path))}&depth=1`,
+          ),
           { headers: authHeaders(), signal: controller.signal },
         );
         if (!res.ok) throw new Error("Failed to load directory");
@@ -133,6 +156,7 @@ function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
               depth={depth + 1}
               selectedPath={selectedPath}
               onSelect={onSelect}
+              projectRoot={projectRoot}
             />
           ))}
       </div>
@@ -155,16 +179,48 @@ function TreeNode({ node, depth, selectedPath, onSelect }: TreeNodeProps) {
   );
 }
 
-export default function FileTree({ onOpenFile }: FileTreeProps) {
+export default function FileTree({ onOpenFile, projectPath }: FileTreeProps) {
   const [tree, setTree] = useState<FileNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [extraPaths, setExtraPaths] = useState<string[]>([]);
+  const [activeRoot, setActiveRoot] = useState<string | undefined>(projectPath);
 
-  // Load tree on mount
+  // The active project is the default root; extra allowed paths (configured
+  // in Settings) are additional roots the user can switch the tree to.
   useEffect(() => {
+    api
+      .getPathsConfig()
+      .then((cfg) => setExtraPaths(cfg.extra_allowed_paths || []))
+      .catch((err) => console.error("Failed to load extra allowed paths:", err));
+  }, []);
+
+  // Switching projects resets the tree back to that project's root.
+  useEffect(() => {
+    setActiveRoot(projectPath);
+  }, [projectPath]);
+
+  const rootOptions = useMemo(() => {
+    const opts: { path: string; label: string }[] = [];
+    if (projectPath) opts.push({ path: projectPath, label: projectPath.split("/").pop() || projectPath });
+    for (const p of extraPaths) {
+      if (p && !opts.some((o) => o.path === p)) {
+        opts.push({ path: p, label: p.split("/").pop() || p });
+      }
+    }
+    return opts;
+  }, [projectPath, extraPaths]);
+
+  // Load tree whenever the active root changes. Without an explicit path,
+  // the server falls back to its own anchored workDir, which on desktop is
+  // fixed at process launch (often the home dir) and not the active project.
+  useEffect(() => {
+    setLoading(true);
     (async () => {
       try {
-        const res = await fetch(apiPath("/api/files/tree?depth=1"), { headers: authHeaders() });
+        const root = activeRoot ?? projectPath;
+        const query = root ? `path=${encodeURIComponent(root)}&depth=1` : "depth=1";
+        const res = await fetch(apiPath(`/api/files/tree?${query}`), { headers: authHeaders() });
         if (!res.ok) throw new Error("Failed to load file tree");
         const data: FileTreeResponse = await res.json();
         if (data.truncated) {
@@ -177,17 +233,31 @@ export default function FileTree({ onOpenFile }: FileTreeProps) {
         setLoading(false);
       }
     })();
-  }, []);
+  }, [activeRoot, projectPath]);
 
   const handleSelect = (path: string) => {
     setSelectedPath(path);
-    onOpenFile(path);
+    onOpenFile(path, activeRoot);
   };
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 h-9 border-b border-border shrink-0">
-        <h3 className="text-xs font-medium text-muted-foreground">Files</h3>
+      <div className="flex items-center justify-between px-3 h-9 border-b border-border shrink-0 gap-2">
+        <h3 className="text-xs font-medium text-muted-foreground shrink-0">Files</h3>
+        {rootOptions.length > 1 && (
+          <Select value={activeRoot} onValueChange={setActiveRoot}>
+            <SelectTrigger className="h-6 w-auto min-w-0 max-w-[60%] text-xs px-2 gap-1 border-none bg-transparent">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {rootOptions.map((o) => (
+                <SelectItem key={o.path} value={o.path} className="text-xs">
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        )}
       </div>
       <ScrollArea className="flex-1">
         {loading ? (
@@ -207,6 +277,7 @@ export default function FileTree({ onOpenFile }: FileTreeProps) {
                 depth={0}
                 selectedPath={selectedPath}
                 onSelect={handleSelect}
+                projectRoot={activeRoot}
               />
             ))}
           </div>

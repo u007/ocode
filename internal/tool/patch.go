@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -394,6 +395,10 @@ func (t PatchTool) Definition() map[string]interface{} {
 }
 
 func (t PatchTool) Execute(args json.RawMessage) (string, error) {
+	return t.ExecuteCtx(context.Background(), args)
+}
+
+func (t PatchTool) ExecuteCtx(ctx context.Context, args json.RawMessage) (string, error) {
 	var params struct {
 		PatchText string `json:"patchText"`
 	}
@@ -412,6 +417,12 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 		return "", fmt.Errorf("patch rejected: no file operations found")
 	}
 
+	// Route through the per-agent snapshot store (from ctx) rather than the
+	// legacy package-level snapshot.Backup/Restore, which write to an
+	// unattached global store and never surface in the Changes tab.
+	tcID := snapshot.ToolCallIDFromContext(ctx)
+	store := snapshot.FromContext(ctx)
+
 	// Snapshot all affected files before applying.
 	var backedUp int
 	for _, h := range hunks {
@@ -421,13 +432,13 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 		safe, err := confinedPath(h.path)
 		if err != nil {
 			if backedUp > 0 {
-				_ = snapshot.DiscardRecent(backedUp)
+				_ = store.DiscardRecent(backedUp)
 			}
 			return "", err
 		}
-		if err := snapshot.Backup(safe); err != nil {
+		if err := store.Backup(safe, tcID); err != nil {
 			if backedUp > 0 {
-				_ = snapshot.DiscardRecent(backedUp)
+				_ = store.DiscardRecent(backedUp)
 			}
 			return "", fmt.Errorf("failed to back up %s: %w", safe, err)
 		}
@@ -437,6 +448,7 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 	var (
 		results      []string
 		cleanupPaths []string
+		writtenPaths []string
 	)
 	rollback := func(cause error) (string, error) {
 		for i := len(cleanupPaths) - 1; i >= 0; i-- {
@@ -459,11 +471,11 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 					continue
 				}
 				seen[safe] = struct{}{}
-				if restoreErr := snapshot.Restore(safe); restoreErr != nil {
+				if restoreErr := store.Restore(safe); restoreErr != nil {
 					return strings.Join(results, "\n"), fmt.Errorf("%w (rollback failed: %v)", cause, restoreErr)
 				}
 			}
-			if discardErr := snapshot.DiscardRecent(backedUp); discardErr != nil {
+			if discardErr := store.DiscardRecent(backedUp); discardErr != nil {
 				return strings.Join(results, "\n"), fmt.Errorf("%w (rollback cleanup failed: %v)", cause, discardErr)
 			}
 		}
@@ -488,6 +500,7 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 				return rollback(err)
 			}
 			cleanupPaths = append(cleanupPaths, safe)
+			writtenPaths = append(writtenPaths, safe)
 			results = append(results, "A "+h.path)
 
 		case "delete":
@@ -498,6 +511,7 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 			if err := os.Remove(safe); err != nil {
 				return rollback(err)
 			}
+			writtenPaths = append(writtenPaths, safe)
 			results = append(results, "D "+h.path)
 
 		case "update":
@@ -534,6 +548,7 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 			if h.movePath != "" {
 				cleanupPaths = append(cleanupPaths, dest)
 			}
+			writtenPaths = append(writtenPaths, dest)
 			if h.movePath != "" {
 				results = append(results, "M "+h.path+" -> "+h.movePath)
 			} else {
@@ -542,5 +557,11 @@ func (t PatchTool) Execute(args json.RawMessage) (string, error) {
 		}
 	}
 
-	return "Success. Updated the following files:\n" + strings.Join(results, "\n"), nil
+	if tcID != "" {
+		for _, p := range writtenPaths {
+			store.RegisterWrite(p, tcID)
+		}
+	}
+
+	return undoHint("Success. Updated the following files:\n"+strings.Join(results, "\n"), tcID), nil
 }

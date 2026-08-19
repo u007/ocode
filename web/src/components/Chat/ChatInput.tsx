@@ -1,4 +1,4 @@
-import { useState, type KeyboardEvent, useRef, useEffect } from "react";
+import { useState, type KeyboardEvent, useRef, useEffect, useCallback } from "react";
 import { useChat } from "../../hooks/useChat";
 import { getDraft, setDraft, clearDraft } from "../../lib/tabDrafts";
 import { getQueue, pushQueued, shiftQueued, popLastQueued } from "../../lib/tabQueue";
@@ -7,6 +7,7 @@ import SlashCommandMenu from "./SlashCommandMenu";
 import { COMMANDS } from "./commands";
 import { Paperclip, X } from "lucide-react";
 import { apiPath, authHeaders } from "@/api/client";
+import { useProjectState } from "../../stores/projectStore";
 import EditorContextChip from "./EditorContextChip";
 
 interface ChatInputProps {
@@ -40,6 +41,8 @@ export default function ChatInput({
   // output of msg1, producing confusing turn ordering.
   const [shellInFlight, setShellInFlight] = useState(false);
   const [queueCount, setQueueCount] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
   const { sendMessage, executeShell, stop, isStreaming } = useChat(sessionTabId ?? null, {
     onNewSession: (sessionId) => {
       if (sessionTabId?.startsWith("new-")) {
@@ -114,12 +117,17 @@ export default function ChatInput({
     setDraft(sessionTabId, value);
   };
 
-  const handleAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files) return;
+  // Shared upload logic for both file input and drag-and-drop. Uploads are
+  // project-scoped: they land in <project>/.ocode/uploads so the relative
+  // @.ocode/uploads/<name> refs below resolve against the session's project.
+  const projectPath = useProjectState().state.activeProject?.path;
+  const uploadFiles = async (files: File[]) => {
+    if (files.length === 0) return;
     const fd = new FormData();
-    Array.from(e.target.files).forEach((f) => fd.append("file", f));
+    files.forEach((f) => fd.append("file", f));
     try {
-      const r = await fetch(apiPath("/api/uploads"), {
+      const query = projectPath ? `?project=${encodeURIComponent(projectPath)}` : "";
+      const r = await fetch(apiPath(`/api/uploads${query}`), {
         method: "POST",
         headers: authHeaders(),
         body: fd,
@@ -129,7 +137,47 @@ export default function ChatInput({
     } catch (err) {
       console.error("upload failed:", err);
     }
+  };
+
+  const handleAttach = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files) return;
+    await uploadFiles(Array.from(e.target.files));
     e.target.value = "";
+  };
+
+  // Drag-and-drop handlers
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes("Files")) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = 0;
+    setIsDragging(false);
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length > 0) {
+      uploadFiles(files);
+    }
   };
 
   useEffect(() => {
@@ -245,7 +293,20 @@ export default function ChatInput({
   };
 
   return (
-    <div className="border-t border-zinc-700 p-4 relative">
+    <div 
+      className={`border-t border-zinc-700 p-4 relative transition-colors ${
+        isDragging ? "bg-blue-500/10 border-blue-500" : ""
+      }`}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+    >
+      {isDragging && (
+        <div className="absolute inset-0 flex items-center justify-center bg-blue-500/20 border-2 border-dashed border-blue-400 rounded-lg z-10 pointer-events-none">
+          <span className="text-blue-300 text-sm font-medium">Drop files here</span>
+        </div>
+      )}
       {showSlashMenu && (
         <SlashCommandMenu
           query={slashQuery}

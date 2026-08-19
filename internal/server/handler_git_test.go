@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/u007/ocode/internal/projects"
 )
 
 func TestGitDiffNoRepo(t *testing.T) {
@@ -182,6 +185,47 @@ func TestGitDiffUntrackedFile(t *testing.T) {
 	}
 	if result[0].Status != "untracked" {
 		t.Errorf("expected status untracked, got %s", result[0].Status)
+	}
+}
+
+func TestGitDiffUsesRegisteredProject(t *testing.T) {
+	serverDir := t.TempDir()
+	projectDir := t.TempDir()
+	initGitRepo(t, projectDir)
+	writeFile(t, filepath.Join(projectDir, "project.txt"), "initial")
+	run(t, projectDir, "git", "add", "project.txt")
+	run(t, projectDir, "git", "commit", "-m", "initial")
+	writeFile(t, filepath.Join(projectDir, "project.txt"), "changed")
+
+	h := NewHandler()
+	h.SetWorkDir(serverDir)
+	store, err := projects.NewStoreAt(filepath.Join(t.TempDir(), "projects.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(projectDir); err != nil {
+		t.Fatal(err)
+	}
+	h.projects = store
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/api/git/diff?project="+url.QueryEscape(projectDir), nil)
+	h.HandleGitDiff(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var result []GitDiffFile
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(result) != 1 || result[0].Path != "project.txt" {
+		t.Fatalf("expected project.txt diff, got %+v", result)
+	}
+
+	bad := httptest.NewRecorder()
+	h.HandleGitDiff(bad, httptest.NewRequest("GET", "/api/git/diff?project="+url.QueryEscape(t.TempDir()), nil))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown project, got %d", bad.Code)
 	}
 }
 

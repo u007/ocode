@@ -9,6 +9,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 
 	"github.com/u007/ocode/internal/server"
 )
@@ -20,11 +26,18 @@ type Handle struct {
 	Srv   *server.Server
 }
 
-// StartServer boots an ocode HTTP/SSE API server on 127.0.0.1:0 (random port)
-// with a fresh auth token, and returns the handle the desktop shell needs to
-// open its webview window. The server runs in a background goroutine and dies
-// with the process by design — internal/server has no graceful-shutdown API
-// and window close = app quit = process exit (see the desktop shell spec).
+// StartServer boots an ocode HTTP/SSE API server on 127.0.0.1 with a fresh
+// auth token, and returns the handle the desktop shell needs to open its
+// webview window. The server runs in a background goroutine and dies with the
+// process by design — internal/server has no graceful-shutdown API and window
+// close = app quit = process exit (see the desktop shell spec).
+//
+// The port is sticky across launches: the webview's localStorage (terminal
+// tabs, editor tabs, session tabs) is scoped to the http://127.0.0.1:PORT
+// origin, so a random port every launch would silently discard all persisted
+// UI state. The first launch binds a random port and saves it; later launches
+// reuse it, falling back to a fresh random port (and re-saving) only if the
+// saved one is taken.
 //
 // webFS is the embedded SPA (web.FS()). workDir is the project root the
 // server resolves relative paths from.
@@ -35,10 +48,23 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 	}
 	token := hex.EncodeToString(tokenBytes)
 
-	srv := server.New("127.0.0.1:0", "ocode", token, webFS)
+	bindAddr := "127.0.0.1:0"
+	if p := loadSavedPort(); p > 0 {
+		bindAddr = fmt.Sprintf("127.0.0.1:%d", p)
+	}
+
+	srv := server.New(bindAddr, "ocode", token, webFS)
 	srv.SetWorkDir(workDir)
 
 	ln, err := srv.Listen()
+	if err != nil && bindAddr != "127.0.0.1:0" {
+		// Saved port unavailable (another process grabbed it, or a second
+		// desktop instance) — persisted UI state won't be visible this run.
+		log.Printf("desktop: saved port %s unavailable, falling back to a random port: %v", bindAddr, err)
+		srv = server.New("127.0.0.1:0", "ocode", token, webFS)
+		srv.SetWorkDir(workDir)
+		ln, err = srv.Listen()
+	}
 	if err != nil {
 		return nil, fmt.Errorf("desktop: listen: %w", err)
 	}
@@ -47,6 +73,7 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 	// back to s.addr, so we must use ln.Addr()).
 	addr := ln.Addr().String()
 	url := fmt.Sprintf("http://%s", addr)
+	saveBoundPort(addr)
 
 	go func() {
 		log.Printf("desktop: serving on %s", url)
@@ -60,4 +87,71 @@ func StartServer(webFS fs.FS, workDir string) (*Handle, error) {
 		Token: token,
 		Srv:   srv,
 	}, nil
+}
+
+// portFilePath is the file the desktop shell remembers its listen port in.
+// It lives next to the global ocode config (~/.config/opencode on unix,
+// %APPDATA%\opencode on Windows).
+func portFilePath() (string, error) {
+	if customDir := os.Getenv("OPENCODE_CONFIG_DIR"); customDir != "" {
+		return filepath.Join(customDir, "desktop-port"), nil
+	}
+	if runtime.GOOS == "windows" {
+		appData := os.Getenv("APPDATA")
+		if appData == "" {
+			return "", fmt.Errorf("desktop: APPDATA is not set")
+		}
+		return filepath.Join(appData, "opencode", "desktop-port"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config", "opencode", "desktop-port"), nil
+}
+
+// loadSavedPort returns the port used by a previous desktop launch, or 0 when
+// none is saved (first launch) or the file is unreadable/invalid.
+func loadSavedPort() int {
+	path, err := portFilePath()
+	if err != nil {
+		log.Printf("desktop: resolve port file path: %v", err)
+		return 0
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("desktop: read saved port file %s: %v", path, err)
+		}
+		return 0
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || port <= 0 || port > 65535 {
+		log.Printf("desktop: ignoring invalid saved port %q in %s", strings.TrimSpace(string(data)), path)
+		return 0
+	}
+	return port
+}
+
+// saveBoundPort persists the port of the bound listen address for the next
+// launch. Failure is non-fatal (the app still runs, resume just won't
+// survive the next relaunch) but always logged.
+func saveBoundPort(addr string) {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		log.Printf("desktop: parse bound address %q to save port: %v", addr, err)
+		return
+	}
+	path, err := portFilePath()
+	if err != nil {
+		log.Printf("desktop: resolve port file path: %v", err)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		log.Printf("desktop: create config dir for port file: %v", err)
+		return
+	}
+	if err := os.WriteFile(path, []byte(portStr+"\n"), 0o600); err != nil {
+		log.Printf("desktop: save port file %s: %v", path, err)
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -150,7 +151,16 @@ type OcodeConfig struct {
 	// interactive terminal. Values are normalized to the supported range when
 	// config is loaded; zero means use DefaultTerminalScrollbackLines.
 	TerminalScrollbackLines int
-	ExtraAllowedPaths       []string
+	// TerminalFontFamily overrides the interactive terminal's font stack.
+	// Empty means use the frontend's built-in default monospace stack.
+	TerminalFontFamily string
+	// TerminalFontSize overrides the interactive terminal's font size in px.
+	// Zero means use DefaultTerminalFontSize.
+	TerminalFontSize int
+	// TerminalShell overrides which shell binary the interactive terminal
+	// starts. Empty means use $SHELL, falling back to /bin/sh.
+	TerminalShell     string
+	ExtraAllowedPaths []string
 	Editor                  string
 	EditorMode              string
 	IDEMode                 string
@@ -203,7 +213,26 @@ const (
 	DefaultTerminalScrollbackLines = 9999
 	MinTerminalScrollbackLines     = 100
 	MaxTerminalScrollbackLines     = 100000
+
+	DefaultTerminalFontSize = 13
+	MinTerminalFontSize     = 8
+	MaxTerminalFontSize     = 32
 )
+
+// NormalizeTerminalFontSize applies the terminal font size default and bounds
+// to values loaded from config or supplied by an API client.
+func NormalizeTerminalFontSize(size int) int {
+	if size <= 0 {
+		return DefaultTerminalFontSize
+	}
+	if size < MinTerminalFontSize {
+		return MinTerminalFontSize
+	}
+	if size > MaxTerminalFontSize {
+		return MaxTerminalFontSize
+	}
+	return size
+}
 
 // NormalizeTerminalScrollbackLines applies the terminal scrollback default and
 // bounds to values loaded from config or supplied by an API client.
@@ -366,6 +395,9 @@ type ocodeConfigFile struct {
 	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
 	TerminalScrollbackLines *int                        `json:"terminal_scrollback_lines,omitempty"`
+	TerminalFontFamily      string                      `json:"terminal_font_family,omitempty"`
+	TerminalFontSize        *int                        `json:"terminal_font_size,omitempty"`
+	TerminalShell           string                      `json:"terminal_shell,omitempty"`
 	ExtraAllowedPaths       []string                    `json:"extra_allowed_paths,omitempty"`
 	Editor                  string                      `json:"editor,omitempty"`
 	EditorMode              string                      `json:"editor_mode,omitempty"`
@@ -827,6 +859,23 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "terminal_scrollback_lines")
 	}
 
+	if _, ok := raw["terminal_font_family"]; ok {
+		cfg.TerminalFontFamily = file.TerminalFontFamily
+		delete(raw, "terminal_font_family")
+	}
+
+	if _, ok := raw["terminal_font_size"]; ok {
+		if file.TerminalFontSize != nil {
+			cfg.TerminalFontSize = NormalizeTerminalFontSize(*file.TerminalFontSize)
+		}
+		delete(raw, "terminal_font_size")
+	}
+
+	if _, ok := raw["terminal_shell"]; ok {
+		cfg.TerminalShell = file.TerminalShell
+		delete(raw, "terminal_shell")
+	}
+
 	if _, ok := raw["doc_prompt_enabled"]; ok {
 		if file.DocPromptEnabled != nil {
 			cfg.DocPromptEnabled = *file.DocPromptEnabled
@@ -1279,6 +1328,15 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	payload["memory_enabled"] = cfg.MemoryEnabled
 	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
 	payload["terminal_scrollback_lines"] = NormalizeTerminalScrollbackLines(cfg.TerminalScrollbackLines)
+	if cfg.TerminalFontFamily != "" {
+		payload["terminal_font_family"] = cfg.TerminalFontFamily
+	}
+	if cfg.TerminalFontSize > 0 {
+		payload["terminal_font_size"] = NormalizeTerminalFontSize(cfg.TerminalFontSize)
+	}
+	if cfg.TerminalShell != "" {
+		payload["terminal_shell"] = cfg.TerminalShell
+	}
 	if cfg.MaxSteps > 0 {
 		payload["max_steps"] = cfg.MaxSteps
 	}
@@ -1300,7 +1358,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" {
 			continue
 		}
 		payload[k] = v
@@ -1617,6 +1675,15 @@ func SaveEditorMode(mode string) error {
 	})
 }
 
+func init() {
+	// Config saves always target the global path (see ActiveOcodeConfigPath),
+	// so backups must live next to it, not in a cwd-relative ".opencode" dir
+	// that may be read-only for the desktop/web server process.
+	if path, err := getGlobalOcodeConfigPath(); err == nil {
+		snapshot.SetGlobalBaseDir(filepath.Join(filepath.Dir(path), "snapshots"))
+	}
+}
+
 func getGlobalOcodeConfigPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -1676,6 +1743,26 @@ var ThinkingBudgetLevels = []int{0, 1024, 8000, 16000, 32000, 65536}
 // ThinkingBudgetLabels names each ThinkingBudgetLevels entry, used for the
 // "reason: <label>" display and the /effort + web API level names.
 var ThinkingBudgetLabels = []string{"off", "low", "med", "high", "xhigh", "max"}
+
+// ThinkingBudgetForLabel maps an effort level name (off/low/med/high/xhigh/max,
+// plus the aliases none/medium and a level's exact token value) to its token
+// budget. Shared by the -effort CLI flags and the TUI /effort command so every
+// surface accepts the same level names.
+func ThinkingBudgetForLabel(label string) (int, bool) {
+	l := strings.ToLower(strings.TrimSpace(label))
+	switch l {
+	case "none":
+		l = "off"
+	case "medium":
+		l = "med"
+	}
+	for i, name := range ThinkingBudgetLabels {
+		if l == name || l == strconv.Itoa(ThinkingBudgetLevels[i]) {
+			return ThinkingBudgetLevels[i], true
+		}
+	}
+	return 0, false
+}
 
 // ThinkingLevelIndexForBudget returns the index into ThinkingBudgetLevels for
 // budget, defaulting to 0 ("off") when budget is not one of the known levels.
@@ -1785,6 +1872,42 @@ func SaveAdvisorEnabled(enabled bool) error {
 func SaveTerminalScrollbackLines(lines int) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.TerminalScrollbackLines = NormalizeTerminalScrollbackLines(lines)
+		return nil
+	})
+}
+
+// SaveTerminalFontFamily persists the interactive terminal's font family using
+// the same locked read-modify-write path as other config setters. An empty
+// fontFamily clears the override (frontend falls back to its built-in default
+// monospace stack).
+func SaveTerminalFontFamily(fontFamily string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.TerminalFontFamily = strings.TrimSpace(fontFamily)
+		return nil
+	})
+}
+
+// SaveTerminalFontSize persists the interactive terminal's font size using the
+// same locked read-modify-write path as other config setters. A size <= 0
+// clears the override so the size tracks the built-in default again.
+func SaveTerminalFontSize(fontSize int) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		if fontSize <= 0 {
+			cfg.TerminalFontSize = 0
+			return nil
+		}
+		cfg.TerminalFontSize = NormalizeTerminalFontSize(fontSize)
+		return nil
+	})
+}
+
+// SaveTerminalShell persists the interactive terminal's shell binary using the
+// same locked read-modify-write path as other config setters. An empty shell
+// clears the override (the server falls back to $SHELL, then a platform
+// default).
+func SaveTerminalShell(shell string) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.TerminalShell = strings.TrimSpace(shell)
 		return nil
 	})
 }

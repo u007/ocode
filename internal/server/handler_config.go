@@ -705,10 +705,18 @@ func (h *Handler) HandleSetAgent(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) HandleGetTerminalConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	scrollback := config.DefaultTerminalScrollbackLines
+	fontFamily := ""
+	fontSize := config.DefaultTerminalFontSize
+	shell := ""
 	workDir := h.workDir
 	available := h.terminalAuthConfigured || h.terminalLoopback
 	if h.cfg != nil {
 		scrollback = config.NormalizeTerminalScrollbackLines(h.cfg.Ocode.TerminalScrollbackLines)
+		fontFamily = h.cfg.Ocode.TerminalFontFamily
+		if h.cfg.Ocode.TerminalFontSize > 0 {
+			fontSize = config.NormalizeTerminalFontSize(h.cfg.Ocode.TerminalFontSize)
+		}
+		shell = h.cfg.Ocode.TerminalShell
 	}
 	h.mu.Unlock()
 	if !available {
@@ -717,35 +725,95 @@ func (h *Handler) HandleGetTerminalConfig(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"available":        available,
 		"scrollback_lines": scrollback,
+		"font_family":      fontFamily,
+		"font_size":        fontSize,
+		"shell":            shell,
+		"default_shell":    config.DefaultTerminalShell(),
+		"available_shells": config.AvailableShells(),
 		"work_dir":         workDir,
 	})
 }
 
-// HandleSetTerminalConfig persists the terminal's scrollback setting. There is
-// no enable/disable toggle: the interactive terminal is always enabled.
+// HandleSetTerminalConfig persists the terminal's scrollback, font family,
+// and font size settings. There is no enable/disable toggle: the interactive
+// terminal is always enabled. Fields absent from the request keep their
+// current stored values.
 func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ScrollbackLines *int `json:"scrollback_lines"`
+		ScrollbackLines *int    `json:"scrollback_lines"`
+		FontFamily      *string `json:"font_family"`
+		FontSize        *int    `json:"font_size"`
+		Shell           *string `json:"shell"`
 	}
-	if err := readBodyJSON(r, &req); err != nil || req.ScrollbackLines == nil {
-		writeError(w, http.StatusBadRequest, "scrollback_lines is required")
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.ScrollbackLines == nil && req.FontFamily == nil && req.FontSize == nil && req.Shell == nil {
+		writeError(w, http.StatusBadRequest, "at least one of scrollback_lines, font_family, font_size, shell is required")
 		return
 	}
 
-	if err := config.SaveTerminalScrollbackLines(*req.ScrollbackLines); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
-		return
+	// Persist only the fields present in the request via targeted savers, so
+	// concurrent updates to different fields cannot clobber each other with a
+	// stale pre-read snapshot.
+	if req.ScrollbackLines != nil {
+		if err := config.SaveTerminalScrollbackLines(*req.ScrollbackLines); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+	}
+	if req.FontFamily != nil {
+		if err := config.SaveTerminalFontFamily(*req.FontFamily); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+	}
+	if req.FontSize != nil {
+		if err := config.SaveTerminalFontSize(*req.FontSize); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
+	}
+	if req.Shell != nil {
+		if err := config.SaveTerminalShell(*req.Shell); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+			return
+		}
 	}
 
 	h.mu.Lock()
 	if h.cfg != nil {
-		h.cfg.Ocode.TerminalScrollbackLines = config.NormalizeTerminalScrollbackLines(*req.ScrollbackLines)
+		if req.ScrollbackLines != nil {
+			h.cfg.Ocode.TerminalScrollbackLines = config.NormalizeTerminalScrollbackLines(*req.ScrollbackLines)
+		}
+		if req.FontFamily != nil {
+			h.cfg.Ocode.TerminalFontFamily = strings.TrimSpace(*req.FontFamily)
+		}
+		if req.FontSize != nil {
+			if *req.FontSize <= 0 {
+				h.cfg.Ocode.TerminalFontSize = 0
+			} else {
+				h.cfg.Ocode.TerminalFontSize = config.NormalizeTerminalFontSize(*req.FontSize)
+			}
+		}
+		if req.Shell != nil {
+			h.cfg.Ocode.TerminalShell = strings.TrimSpace(*req.Shell)
+		}
 	}
 	scrollback := config.DefaultTerminalScrollbackLines
+	fontFamily := ""
+	fontSize := config.DefaultTerminalFontSize
+	shell := ""
 	workDir := h.workDir
 	available := h.terminalAuthConfigured || h.terminalLoopback
 	if h.cfg != nil {
 		scrollback = config.NormalizeTerminalScrollbackLines(h.cfg.Ocode.TerminalScrollbackLines)
+		fontFamily = h.cfg.Ocode.TerminalFontFamily
+		if h.cfg.Ocode.TerminalFontSize > 0 {
+			fontSize = config.NormalizeTerminalFontSize(h.cfg.Ocode.TerminalFontSize)
+		}
+		shell = h.cfg.Ocode.TerminalShell
 	}
 	h.mu.Unlock()
 
@@ -755,6 +823,11 @@ func (h *Handler) HandleSetTerminalConfig(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{
 		"available":        available,
 		"scrollback_lines": scrollback,
+		"font_family":      fontFamily,
+		"font_size":        fontSize,
+		"shell":            shell,
+		"default_shell":    config.DefaultTerminalShell(),
+		"available_shells": config.AvailableShells(),
 		"work_dir":         workDir,
 	})
 }

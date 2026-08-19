@@ -415,6 +415,14 @@ export interface Project {
   name: string;
   added_at: string;
   last_used_at: string;
+  order: number;
+  group: string;
+}
+
+export interface ProjectGroup {
+  name: string;
+  order: number;
+  collapsed: boolean;
 }
 
 // ── Permissions ──

@@ -149,7 +149,7 @@ func TestRegisterExternalSessionRegistersTUIProject(t *testing.T) {
 	rcCh := make(chan RCRequest, 1)
 	resolveCh := make(chan RCResolution, 1)
 
-	bridge := srv.RegisterExternalSession("sess-tui", "model-x", rcCh, resolveCh, "tok")
+	bridge := srv.RegisterExternalSession("sess-tui", "model-x", workDir, rcCh, resolveCh, "tok")
 	if bridge == nil {
 		t.Fatal("RegisterExternalSession returned nil bridge")
 	}

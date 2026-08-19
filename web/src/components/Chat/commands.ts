@@ -314,10 +314,10 @@ export async function dispatchCommand(
 
     // ── File edit history ──
     case "/undo":
-      return handleUndo();
+      return handleUndo(ctx);
 
     case "/redo":
-      return handleRedo();
+      return handleRedo(ctx);
 
     // ── Usage / init ──
     case "/usage":
@@ -698,9 +698,9 @@ async function handleTitle(args: string, ctx: CommandContext): Promise<CommandRe
   }
 }
 
-async function handleUndo(): Promise<CommandResult> {
+async function handleUndo(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const res = await api.undoFileChange();
+    const res = await api.undoFileChange(ctx.getSessionId?.() ?? undefined);
     return {
       handled: true,
       messages: [{ role: "assistant", content: `Undid last change to \`${res.path}\`.` }],
@@ -710,9 +710,9 @@ async function handleUndo(): Promise<CommandResult> {
   }
 }
 
-async function handleRedo(): Promise<CommandResult> {
+async function handleRedo(ctx: CommandContext): Promise<CommandResult> {
   try {
-    const res = await api.redoFileChange();
+    const res = await api.redoFileChange(ctx.getSessionId?.() ?? undefined);
     return {
       handled: true,
       messages: [{ role: "assistant", content: `Redid change to \`${res.path}\`.` }],

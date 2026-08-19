@@ -161,3 +161,27 @@ func TestOpenAICodexResponsesLite(t *testing.T) {
 		}
 	}
 }
+
+func TestOpencodeResponsesOnlyModel(t *testing.T) {
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-5.6-sol", true},
+		{"muse-spark-1.2", true},
+		{"muse-spark-1.2-contributor", true},
+		{"gpt-5.5", false},
+		{"deepseek-v4-flash", false},
+		{"kimi-k2-thinking", false},
+	}
+	for _, c := range cases {
+		if got := opencodeResponsesOnlyModel(c.model); got != c.want {
+			t.Errorf("opencodeResponsesOnlyModel(%q) = %v, want %v", c.model, got, c.want)
+		}
+	}
+	// Muse Spark is a plain Responses model — it must not get the codex
+	// responses-lite treatment (developer-item tools, lite header).
+	if openAICodexResponsesLite("muse-spark-1.2") {
+		t.Fatal("muse-spark-1.2 must not be responses-lite")
+	}
+}

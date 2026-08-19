@@ -110,7 +110,10 @@ func (h *Handler) activeAgentForRuns(sessionID string) *agent.Agent {
 	h.mu.Lock()
 	rc := h.rc
 	h.mu.Unlock()
-	if rc != nil {
+	// A remote-control bridge owns exactly one TUI session. Do not return its
+	// run tree for every session opened in the same web client: doing so makes
+	// the Agents panel appear identical across unrelated chat sessions.
+	if rc != nil && sessionID == rc.SessionID {
 		if a := rc.Agent(); a != nil {
 			return a
 		}

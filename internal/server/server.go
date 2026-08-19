@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/exec"
 	"runtime"
@@ -76,20 +77,22 @@ type Server struct {
 	scheduler        any                // optional *scheduler.Service; set via SetScheduler
 	schedulerOutbox  *scheduler.Outbox  // optional; set via SetScheduler
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
+	startedAt        time.Time
 }
 
 func New(addr, username, password string, webFS fs.FS) *Server {
 	mux := http.NewServeMux()
 	h := NewHandler()
 	s := &Server{
-		addr:     addr,
-		username: username,
-		password: password,
-		rl:       newRateLimiter(),
-		mux:      mux,
-		handler:  h,
-		webFS:    webFS,
-		workDir:  ".",
+		addr:      addr,
+		username:  username,
+		password:  password,
+		rl:        newRateLimiter(),
+		mux:       mux,
+		handler:   h,
+		webFS:     webFS,
+		workDir:   ".",
+		startedAt: time.Now(),
 	}
 	h.SetTerminalAccessPolicy(username != "" || password != "", isLoopbackBind(addr))
 	s.registerRoutes()
@@ -272,6 +275,15 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/projects", s.authMiddleware(s.handleAddProject))
 	s.mux.HandleFunc("DELETE /api/projects/{path...}", s.authMiddleware(s.handleRemoveProject))
 	s.mux.HandleFunc("GET /api/projects/sessions", s.authMiddleware(s.handleListProjectSessions))
+	s.mux.HandleFunc("POST /api/projects/rename", s.authMiddleware(s.handleRenameProject))
+	s.mux.HandleFunc("POST /api/projects/reorder", s.authMiddleware(s.handleReorderProjects))
+	s.mux.HandleFunc("POST /api/projects/group", s.authMiddleware(s.handleSetProjectGroup))
+	s.mux.HandleFunc("GET /api/projects/groups", s.authMiddleware(s.handleListGroups))
+	s.mux.HandleFunc("POST /api/projects/groups", s.authMiddleware(s.handleCreateGroup))
+	s.mux.HandleFunc("DELETE /api/projects/groups/{name}", s.authMiddleware(s.handleDeleteGroup))
+	s.mux.HandleFunc("POST /api/projects/groups/rename", s.authMiddleware(s.handleRenameGroup))
+	s.mux.HandleFunc("POST /api/projects/groups/reorder", s.authMiddleware(s.handleReorderGroups))
+	s.mux.HandleFunc("POST /api/projects/groups/collapse", s.authMiddleware(s.handleSetGroupCollapsed))
 
 	// Open-session tab state (server-side persistence; survives desktop restarts)
 	s.mux.HandleFunc("GET /api/tabs", s.authMiddleware(s.handleGetTabs))
@@ -289,6 +301,16 @@ func (s *Server) registerRoutes() {
 	// Uploads (assets)
 	s.mux.HandleFunc("/api/uploads", s.authMiddleware(s.handleUploads))
 	s.mux.HandleFunc("/api/uploads/file", s.authMiddleware(s.handleUploadFile))
+
+	// Runtime diagnostics: Go heap/goroutine stats and net/http/pprof profiles,
+	// gated behind the same auth as everything else so it's never exposed
+	// unauthenticated even on a non-loopback bind.
+	s.mux.HandleFunc("GET /api/debug/runtime", s.authMiddleware(s.handleDebugRuntime))
+	s.mux.HandleFunc("/debug/pprof/", s.authMiddleware(pprof.Index))
+	s.mux.HandleFunc("/debug/pprof/cmdline", s.authMiddleware(pprof.Cmdline))
+	s.mux.HandleFunc("/debug/pprof/profile", s.authMiddleware(pprof.Profile))
+	s.mux.HandleFunc("/debug/pprof/symbol", s.authMiddleware(pprof.Symbol))
+	s.mux.HandleFunc("/debug/pprof/trace", s.authMiddleware(pprof.Trace))
 
 	// Serve embedded web UI for non-API routes
 	s.mux.Handle("/", spaHandler(s.webFS))
@@ -397,6 +419,32 @@ func (s *Server) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetTheme(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetTheme(w, r)
+}
+
+// debugRuntimeStats reports process-wide Go runtime memory/goroutine stats.
+// This is process totals, not per-session — attributing heap usage to an
+// individual session would require per-session profiling, which pprof (also
+// wired at /debug/pprof/) provides instead.
+type debugRuntimeStats struct {
+	HeapAllocBytes uint64 `json:"heap_alloc_bytes"`
+	HeapSysBytes   uint64 `json:"heap_sys_bytes"`
+	SysBytes       uint64 `json:"sys_bytes"`
+	NumGoroutine   int    `json:"num_goroutine"`
+	NumGC          uint32 `json:"num_gc"`
+	Uptime         string `json:"uptime"`
+}
+
+func (s *Server) handleDebugRuntime(w http.ResponseWriter, r *http.Request) {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	writeJSON(w, http.StatusOK, debugRuntimeStats{
+		HeapAllocBytes: m.HeapAlloc,
+		HeapSysBytes:   m.HeapSys,
+		SysBytes:       m.Sys,
+		NumGoroutine:   runtime.NumGoroutine(),
+		NumGC:          m.NumGC,
+		Uptime:         time.Since(s.startedAt).String(),
+	})
 }
 
 func (s *Server) handleSyncLoginStart(w http.ResponseWriter, r *http.Request) {
@@ -544,12 +592,13 @@ func (h *Handler) evictIdleLoop(stop <-chan struct{}) {
 // Returns the bridge so the caller can push messages into it.
 //
 // Part 06: the bridged TUI session becomes a first-class SessionManager entry
-// (bound to the TUI's project root — the handler workdir, which the TUI sets
-// via SetWorkDir before calling this), so the per-session state/status
-// endpoints and the uniform send path resolve it like any other session. The
-// bridge also re-broadcasts every frame onto the unified event bus, tagged at
-// source with the real session id and project.
-func (s *Server) RegisterExternalSession(sessionID, model string, rcCh chan RCRequest, resolveCh chan RCResolution, token string) *RCBridge {
+// (bound to projectRoot — the TUI's own workdir, passed explicitly so the
+// binding never depends on the handler's process-level workdir), so the
+// per-session state/status endpoints and the uniform send path resolve it
+// like any other session. The bridge also re-broadcasts every frame onto the
+// unified event bus, tagged at source with the real session id and project.
+// An empty projectRoot falls back to the handler workdir.
+func (s *Server) RegisterExternalSession(sessionID, model, projectRoot string, rcCh chan RCRequest, resolveCh chan RCResolution, token string) *RCBridge {
 	s.handler.mu.Lock()
 	defer s.handler.mu.Unlock()
 
@@ -568,7 +617,10 @@ func (s *Server) RegisterExternalSession(sessionID, model string, rcCh chan RCRe
 			s.handler.sessions.SetLastSeq(ev.SessionID, s.handler.bus.LastSeq())
 		},
 	}
-	s.handler.sessions.Register(sessionID, s.handler.workDir)
+	if projectRoot == "" {
+		projectRoot = s.handler.workDir
+	}
+	s.handler.sessions.Register(sessionID, projectRoot)
 	s.handler.rc = bridge
 	return bridge
 }
@@ -1027,6 +1079,33 @@ func (s *Server) handleRemoveProject(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) handleListProjectSessions(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleListProjectSessions(w, r)
+}
+func (s *Server) handleRenameProject(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRenameProject(w, r)
+}
+func (s *Server) handleReorderProjects(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleReorderProjects(w, r)
+}
+func (s *Server) handleSetProjectGroup(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetProjectGroup(w, r)
+}
+func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleListGroups(w, r)
+}
+func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleCreateGroup(w, r)
+}
+func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleDeleteGroup(w, r)
+}
+func (s *Server) handleRenameGroup(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleRenameGroup(w, r)
+}
+func (s *Server) handleReorderGroups(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleReorderGroups(w, r)
+}
+func (s *Server) handleSetGroupCollapsed(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetGroupCollapsed(w, r)
 }
 func (s *Server) handleGetTabs(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetTabs(w, r)

@@ -422,3 +422,33 @@ func TestRenderToolResultStripsDangerousControls(t *testing.T) {
 		t.Errorf("expected visible text to survive sanitization, got %q", got)
 	}
 }
+
+// TestMessageTextPathsSanitized verifies that model-originated message text
+// (assistant text, thinking blocks, user text) is sanitized before terminal
+// render. Models can emit control bytes, cursor moves, and zero-width runes
+// mid-degeneration; only tool output was sanitized previously, so these
+// leaked into the alt-screen frame via the message paths.
+func TestMessageTextPathsSanitized(t *testing.T) {
+	// CR, cursor-up CSI, C1 CSI byte, zero-width space, invalid UTF-8 byte.
+	dirty := "abc\rdef\x1b[2Aghi\x9bjkl​mno\xffpqr"
+	forbidden := []string{"\r", "\x1b[2A", "\x9b", "​", "\xff"}
+
+	m := model{styles: ApplyThemeColors("tokyonight"), showThinking: true}
+
+	checks := map[string]string{
+		"assistant": m.renderAssistantText(dirty),
+		"thinking":  renderThinkingContent(dirty, m.styles),
+	}
+	for name, got := range checks {
+		for _, bad := range forbidden {
+			if strings.Contains(got, bad) {
+				t.Errorf("%s: expected %q to be stripped, got %q", name, bad, got)
+			}
+		}
+		for _, want := range []string{"abc", "def", "ghi", "jkl", "mno", "pqr"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: expected visible text %q to survive, got %q", name, want, got)
+			}
+		}
+	}
+}

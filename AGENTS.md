@@ -619,6 +619,31 @@ Rules for anything in `internal/server`:
   which is the UI's rendering source anyway. The synchronous path stays for
   non-browser callers (scheduler, Telegram, external API clients).
 
+## Web/Desktop Server: project dirs are per-session, not per-process
+
+`h.workDir` (process cwd at startup, or what desktop boot passes to
+`SetWorkDir`) is only the **default** project for a web/desktop server — never
+the working directory of a session's work. The rules:
+
+- **Session work follows the session's project root.** `SessionManager` binds
+  session id → project root; `buildAgentSession` calls `ag.SetWorkDir` with it
+  and takes its LSP manager from `h.lspManagerFor(projectRoot)` — one manager
+  per project root, shared across tabs on the same repo. Never route a
+  session-scoped operation through `h.workDir`.
+- **Project-scoped endpoints take an explicit project param**, validated
+  against `allowedProjectRoots()` (workdir + saved projects — the shared trust
+  boundary): git uses `?project=`, terminal uses `?project_path=`, file tree
+  confines `?path=`, command-context and uploads use `?project=` (uploads
+  must land in `<project>/.ocode/uploads` — chat and terminal reference them
+  by the relative path `.ocode/uploads/<name>`, which resolves against the
+  session's project dir). A new endpoint that binds work to a directory must
+  follow the same pattern, not read `h.workDir`.
+- **The TUI RC bridge passes its own workdir** to `RegisterExternalSession`
+  explicitly; `h.workDir` is only the empty-root fallback.
+- The TUI itself is unaffected by any of this: it drives `internal/agent`
+  directly with `m.workDir` and only touches `internal/server` for RC bridge
+  types.
+
 ## Data Storage
 All persistent state lives under a single cross-platform global directory
 resolved by `internal/paths.GlobalDataDir()`:

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 
 	"github.com/u007/ocode/internal/config"
 )
@@ -143,7 +142,7 @@ func systemOpener(path string) (string, []string) {
 func startDetached(name string, args []string) error {
 	c := exec.Command(name, args...)
 	if runtime.GOOS != "windows" {
-		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		setProcGroup(c)
 	}
 	return c.Start()
 }

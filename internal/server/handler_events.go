@@ -35,6 +35,7 @@ func (h *Handler) HandleEvents(w http.ResponseWriter, r *http.Request) {
 	h.startRunsEmitter()
 	h.startWatchEmitters()
 	h.startLogsEmitter()
+	h.startTerminalProcessesEmitter()
 
 	// Immediate connection comment + flush so the client's HTTP request
 	// completes its handshake and the response headers are visible before the

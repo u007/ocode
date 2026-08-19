@@ -16,7 +16,14 @@ import (
 // command is unknown or there is nothing to summarise (e.g. empty repo).
 func (h *Handler) HandleCommandContext(w http.ResponseWriter, r *http.Request, name string) {
 	args := parseCommandArgs(r.URL.Query().Get("args"))
-	workDir := h.workDir
+	// A ?project= query selects which registered project root the command
+	// runs against (same trust boundary as the git endpoints); absent means
+	// the server workdir.
+	workDir, ok := h.gitProjectDir(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "unknown project")
+		return
+	}
 	if workDir == "" {
 		workDir = "."
 	}
@@ -25,9 +32,9 @@ func (h *Handler) HandleCommandContext(w http.ResponseWriter, r *http.Request, n
 	var err error
 	switch name {
 	case "standup":
-		prompt, err = commandctx.Standup(workDir, h.sharedLSPManager())
+		prompt, err = commandctx.Standup(workDir, h.lspManagerFor(workDir))
 	case "changes":
-		prompt, err = commandctx.Changes(workDir, h.sharedLSPManager())
+		prompt, err = commandctx.Changes(workDir, h.lspManagerFor(workDir))
 	case "review":
 		prompt, err = commandctx.Review(workDir, args)
 	default:

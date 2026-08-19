@@ -2,23 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useEffect, type ReactNode } from "react";
 import { ChatProvider, useChatDispatch } from "../stores/chatStore";
-import { useTurnWatchdog, applyReconcileState, STALL_THRESHOLD_MS } from "./useTurnWatchdog";
+import { useTurnWatchdogAll, applyReconcileState, STALL_THRESHOLD_MS } from "./useTurnWatchdog";
 
 const mockGetSessionState = vi.fn();
 vi.mock("../api/client", () => ({
   api: { getSessionState: (...a: unknown[]) => mockGetSessionState(...a) },
-}));
-
-// A controllable event bus fake: record reconnect handlers, fire them on demand.
-const reconnectHandlers = new Set<() => void>();
-vi.mock("../lib/eventBus", () => ({
-  eventBus: {
-    onReconnect: (h: () => void) => {
-      reconnectHandlers.add(h);
-      return () => reconnectHandlers.delete(h);
-    },
-    on: () => () => {},
-  },
 }));
 
 function Wrapper({ children }: { children: ReactNode }) {
@@ -53,13 +41,12 @@ describe("applyReconcileState", () => {
   });
 });
 
-describe("useTurnWatchdog", () => {
+describe("useTurnWatchdogAll", () => {
   beforeEach(() => {
     // Fake Date too, so the watchdog's Date.now() comparisons advance with the
     // timers (lastHeartbeatAt stamping relies on it).
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
     mockGetSessionState.mockReset();
-    reconnectHandlers.clear();
   });
   afterEach(() => {
     vi.useRealTimers();
@@ -67,31 +54,32 @@ describe("useTurnWatchdog", () => {
   });
 
   it("does nothing for placeholder new-* tabs", () => {
-    renderHook(() => useTurnWatchdog("new-123"), { wrapper: Wrapper });
+    renderHook(() => useTurnWatchdogAll(new Set(["new-123"])), { wrapper: Wrapper });
     vi.advanceTimersByTime(STALL_THRESHOLD_MS + 10_000);
     expect(mockGetSessionState).not.toHaveBeenCalled();
   });
 
-  it("does nothing while the session is idle (no active turn)", () => {
-    renderHook(() => useTurnWatchdog("s1"), { wrapper: Wrapper });
+  it("does nothing while every session is idle (no active turn)", () => {
+    renderHook(() => useTurnWatchdogAll(new Set(["s1", "s2"])), { wrapper: Wrapper });
     vi.advanceTimersByTime(STALL_THRESHOLD_MS + 10_000);
     expect(mockGetSessionState).not.toHaveBeenCalled();
   });
 
-  it("marks a stalled turn and reconciles once the heartbeat stops", async () => {
+  it("marks a stalled turn and reconciles once the heartbeat stops, for a backgrounded session too", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     // Watchdog + turn activator live in the same component so the dispatch
-    // lands in the same store the watchdog reads.
+    // lands in the same store the watchdog reads. "s2" stands in for a tab
+    // that is open but not the active one.
     renderHook(
-      ({ id }: { id: string }) => {
-        useTurnWatchdog(id);
+      ({ ids }: { ids: string[] }) => {
+        useTurnWatchdogAll(new Set(ids));
         const dispatch = useChatDispatch();
         useEffect(() => {
-          dispatch({ type: "SET_TURN_STATE", sessionId: id, turnActive: true });
-        }, [dispatch, id]);
+          ids.forEach((id) => dispatch({ type: "SET_TURN_STATE", sessionId: id, turnActive: true }));
+        }, [dispatch, ids]);
         return null;
       },
-      { initialProps: { id: "s1" }, wrapper: Wrapper },
+      { initialProps: { ids: ["s1", "s2"] }, wrapper: Wrapper },
     );
 
     mockGetSessionState.mockResolvedValue({ bootstrap_stage: "ready", turn_active: false, last_seq: 9 });
@@ -99,8 +87,10 @@ describe("useTurnWatchdog", () => {
     vi.advanceTimersByTime(STALL_THRESHOLD_MS + 5_000);
     await Promise.resolve(); // settle the reconcile promise chain
 
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("stalled"));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("s1"));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("s2"));
     expect(mockGetSessionState).toHaveBeenCalledWith("s1");
+    expect(mockGetSessionState).toHaveBeenCalledWith("s2");
     warn.mockRestore();
   });
 
@@ -108,7 +98,7 @@ describe("useTurnWatchdog", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     renderHook(
       ({ id }: { id: string }) => {
-        useTurnWatchdog(id);
+        useTurnWatchdogAll(new Set([id]));
         const dispatch = useChatDispatch();
         useEffect(() => {
           dispatch({ type: "SET_TURN_STATE", sessionId: id, turnActive: true });
@@ -129,13 +119,5 @@ describe("useTurnWatchdog", () => {
     });
     expect(warn.mock.calls.filter((c) => String(c[0]).includes("stalled")).length).toBe(1);
     warn.mockRestore();
-  });
-
-  it("reconciles on eventBus reconnect regardless of turn state", () => {
-    mockGetSessionState.mockResolvedValue({ bootstrap_stage: "", turn_active: false, last_seq: 1 });
-    renderHook(() => useTurnWatchdog("s1"), { wrapper: Wrapper });
-    expect(mockGetSessionState).not.toHaveBeenCalled();
-    reconnectHandlers.forEach((h) => h());
-    expect(mockGetSessionState).toHaveBeenCalledWith("s1");
   });
 });

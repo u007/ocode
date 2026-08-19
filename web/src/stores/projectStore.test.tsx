@@ -10,13 +10,13 @@ vi.mock("../api/client", () => ({
     listProjects: vi.fn().mockResolvedValue([]),
     getCurrentProject: vi.fn().mockResolvedValue(null),
     listProjectSessions: vi.fn().mockResolvedValue([]),
+    listGroups: vi.fn().mockResolvedValue([]),
   },
 }));
 
 // projectReducer is not exported — drive it through the provider + dispatch,
 // same as a real consumer would.
-const testProjectA = { path: "/proj-a", name: "a", added_at: "", last_used_at: "" };
-
+const testProjectA = { path: "/proj-a", name: "a", added_at: "", last_used_at: "", order: 1, group: "" };
 function setup() {
   return renderHook(() => useProjectState(), {
     wrapper: ({ children }) => <ProjectProvider>{children}</ProjectProvider>,

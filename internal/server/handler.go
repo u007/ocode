@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,9 +41,10 @@ type Handler struct {
 	// runsEmitterOn and watchEmittersOn are the once-per-handler start guards
 	// for the server-push emitters (runs / git / spending / logs), so repeated
 	// /api/events connections only launch each loop once.
-	runsEmitterOn   atomic.Bool
-	watchEmittersOn atomic.Bool
-	logsEmitterOn   atomic.Bool
+	runsEmitterOn          atomic.Bool
+	watchEmittersOn        atomic.Bool
+	logsEmitterOn          atomic.Bool
+	terminalProcsEmitterOn atomic.Bool
 	// mcpCache holds the process-wide MCP tool enumeration. MCP server config
 	// (h.cfg.MCP) is identical for every session, so connecting to each
 	// server is done once per process instead of once per session - see
@@ -52,8 +54,9 @@ type Handler struct {
 	// agents this handler creates. Seeded from config, flipped from the web
 	// sidebar, never persisted back to config.
 	advisorEnabled bool
-	workDir        string // override for git commands in tests
+	workDir        string // server project root; overridden by the boot path
 	projects       *projects.Store
+	projectGroups  *projects.GroupStore
 	tabsStore      *tabs.Store
 	monaco         *monaco.Store
 	// terminalAuthConfigured and terminalLoopback are set by Server.New. A
@@ -61,6 +64,9 @@ type Handler struct {
 	// a loopback address.
 	terminalAuthConfigured bool
 	terminalLoopback       bool
+	// terminalProcs tracks the pid of every open terminal pty, read by the
+	// terminal-processes emitter to report per-terminal CPU/mem.
+	terminalProcs *terminalRegistry
 
 	// headlessSubs is the subscriber list for broadcasting live SSE events
 	// in headless/serve mode (when no RC bridge is active). The SSE mirror
@@ -91,13 +97,13 @@ type Handler struct {
 	syncClient *ocodesync.Client
 	syncStop   func()
 
-	// lspMgr is the single LSP manager shared by every agent session this
-	// handler creates. A server process serves one project root (h.workDir
-	// never changes after startup), so every session/tab talks to the same
-	// language servers instead of each spawning its own gopls etc. — see
-	// sharedLSPManager.
-	lspMgrOnce sync.Once
-	lspMgr     *lsp.Manager
+	// lspMgrs holds one LSP manager per project root. Sessions bound to the
+	// same project share a manager (multiple tabs on one repo don't spawn
+	// redundant gopls processes), while sessions on different registered
+	// projects each get language servers rooted at their own repo — see
+	// lspManagerFor.
+	lspMu   sync.Mutex
+	lspMgrs map[string]*lsp.Manager
 }
 
 // SetTerminalAccessPolicy configures the security boundary for the terminal
@@ -110,54 +116,73 @@ func (h *Handler) SetTerminalAccessPolicy(authConfigured, loopback bool) {
 	h.mu.Unlock()
 }
 
-// sharedLSPManager returns the process-wide LSP manager, creating it on
-// first use. All agent sessions in this handler share it so opening
-// multiple tabs/sessions against the same project doesn't spawn a
-// redundant language-server process per tab.
-func (h *Handler) sharedLSPManager() *lsp.Manager {
-	h.lspMgrOnce.Do(func() {
-		root := h.workDir
-		if root == "" {
-			root = "."
-		}
-		h.lspMgr = lsp.NewManager(root)
-	})
-	return h.lspMgr
+// lspManagerFor returns the LSP manager rooted at the given project root,
+// creating it on first use. Sessions on the same project share a manager so
+// multiple tabs don't spawn redundant language-server processes; sessions on
+// different registered projects get managers rooted at their own repo. An
+// empty root falls back to the server's workdir (single-project servers, TUI
+// RC bridge) and then to ".".
+func (h *Handler) lspManagerFor(root string) *lsp.Manager {
+	if root == "" {
+		root = h.workDir
+	}
+	if root == "" {
+		root = "."
+	}
+	h.lspMu.Lock()
+	defer h.lspMu.Unlock()
+	if h.lspMgrs == nil {
+		h.lspMgrs = make(map[string]*lsp.Manager)
+	}
+	mgr, ok := h.lspMgrs[root]
+	if !ok {
+		mgr = lsp.NewManager(root)
+		h.lspMgrs[root] = mgr
+	}
+	return mgr
 }
 
-// collectLSPStatuses reports the servers active on the shared LSP manager, in
-// the same shape the TUI's collectLSPStatuses builds from its own manager —
-// used for the headless (no RC bridge) web/desktop status path.
+// collectLSPStatuses reports the servers active across every per-project LSP
+// manager, in the same shape the TUI's collectLSPStatuses builds from its own
+// manager — used for the headless (no RC bridge) web/desktop status path.
 func (h *Handler) collectLSPStatuses() []LSPStatus {
-	mgr := h.sharedLSPManager()
-	active := mgr.ActiveServers()
-	if len(active) == 0 {
-		return []LSPStatus{}
+	h.lspMu.Lock()
+	mgrs := make([]*lsp.Manager, 0, len(h.lspMgrs))
+	for _, m := range h.lspMgrs {
+		mgrs = append(mgrs, m)
 	}
+	h.lspMu.Unlock()
 
-	var errByCmd, warnByCmd map[string]int
-	if ds := mgr.Diagnostics(); ds != nil {
-		errByCmd = make(map[string]int)
-		warnByCmd = make(map[string]int)
-		for _, d := range ds.All() {
-			switch d.Severity {
-			case lsp.SeverityError:
-				errByCmd[d.ServerCmd]++
-			case lsp.SeverityWarning:
-				warnByCmd[d.ServerCmd]++
+	out := []LSPStatus{}
+	for _, mgr := range mgrs {
+		active := mgr.ActiveServers()
+		if len(active) == 0 {
+			continue
+		}
+
+		var errByCmd, warnByCmd map[string]int
+		if ds := mgr.Diagnostics(); ds != nil {
+			errByCmd = make(map[string]int)
+			warnByCmd = make(map[string]int)
+			for _, d := range ds.All() {
+				switch d.Severity {
+				case lsp.SeverityError:
+					errByCmd[d.ServerCmd]++
+				case lsp.SeverityWarning:
+					warnByCmd[d.ServerCmd]++
+				}
 			}
 		}
-	}
 
-	out := make([]LSPStatus, 0, len(active))
-	for _, s := range active {
-		out = append(out, LSPStatus{
-			Cmd:                 s.Cmd,
-			LangID:              s.LangID,
-			State:               "running",
-			DiagnosticsErrors:   errByCmd[s.Cmd],
-			DiagnosticsWarnings: warnByCmd[s.Cmd],
-		})
+		for _, s := range active {
+			out = append(out, LSPStatus{
+				Cmd:                 s.Cmd,
+				LangID:              s.LangID,
+				State:               "running",
+				DiagnosticsErrors:   errByCmd[s.Cmd],
+				DiagnosticsWarnings: warnByCmd[s.Cmd],
+			})
+		}
 	}
 	return out
 }
@@ -173,8 +198,12 @@ func NewHandler() *Handler {
 	cfg, _ := config.Load()
 	agent.ApplyAgentConfig(cfg)
 	advisorEnabled := cfg == nil || cfg.Ocode.Advisor.Enabled
+	// Direct Handler users (including tests) still need a useful project root.
+	// The desktop/server boot path replaces this with its explicit project root
+	// through SetWorkDir before serving requests.
+	defaultWorkDir, _ := os.Getwd()
 
-	projStore, err := projects.NewStore()
+	projStore, projGroupStore, err := projects.NewStore()
 	if err != nil {
 		log.Printf("handler: init project store: %v (multi-project UI disabled)", err)
 	}
@@ -193,13 +222,16 @@ func NewHandler() *Handler {
 		agents:         make(map[string]*agentSession),
 		cfg:            cfg,
 		advisorEnabled: advisorEnabled,
+		workDir:        defaultWorkDir,
 		projects:       projStore,
+		projectGroups:  projGroupStore,
 		tabsStore:      tabsStore,
 		monaco:         monacoStore,
 		headlessSubs:   make(map[chan SSEEvent]struct{}),
 		mcpCache:       newMCPCache(),
 		titleGen:       newTitleGenState(),
 		bus:            NewEventBus(),
+		terminalProcs:  newTerminalRegistry(),
 	}
 
 	// The session registry is the single authority for session → project root
@@ -435,6 +467,14 @@ func (h *Handler) HandleChat(w http.ResponseWriter, r *http.Request) {
 	projectRoot := req.ProjectPath
 	if projectRoot == "" {
 		projectRoot = h.workDir
+	}
+	// A session must be bound to a real project root. An empty root would make
+	// the agent fall back to the server process's cwd (for the desktop app,
+	// typically $HOME), and markdown discovery would then sweep the whole home
+	// directory — blocking the first turn for minutes. Fail fast instead.
+	if projectRoot == "" {
+		writeError(w, http.StatusBadRequest, "project_path is required (no server workdir to fall back to)")
+		return
 	}
 
 	createdSession := false

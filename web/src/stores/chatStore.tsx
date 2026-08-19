@@ -1,4 +1,5 @@
-import { createContext, useContext, useReducer, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useRef, type ReactNode } from "react";
+import { Store, useSelector } from "@tanstack/react-store";
 import type { Message, LivePart, TUIStatus, QuestionPrompt } from "../api/types";
 
 export interface PermissionRequest {
@@ -435,24 +436,31 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   }
 }
 
-const ChatStateContext = createContext<ChatState>(initialState);
-const ChatDispatchContext = createContext<React.Dispatch<ChatAction>>(() => {});
+// Backed by a @tanstack/store Store instance rather than useReducer, so the
+// action-dispatch shape (chatReducer + ChatAction) is preserved 1:1 for the
+// ~20 existing consumers of useChatState/useChatDispatch — only the storage
+// engine underneath changed.
+const ChatStoreContext = createContext<Store<ChatState> | null>(null);
 
 export function ChatProvider({ children }: { children: ReactNode }) {
-  const [state, dispatch] = useReducer(chatReducer, initialState);
+  const storeRef = useRef<Store<ChatState> | null>(null);
+  if (!storeRef.current) storeRef.current = new Store(initialState);
   return (
-    <ChatStateContext.Provider value={state}>
-      <ChatDispatchContext.Provider value={dispatch}>
-        {children}
-      </ChatDispatchContext.Provider>
-    </ChatStateContext.Provider>
+    <ChatStoreContext.Provider value={storeRef.current}>{children}</ChatStoreContext.Provider>
   );
 }
 
-export function useChatState() {
-  return useContext(ChatStateContext);
+function useChatStore(): Store<ChatState> {
+  const store = useContext(ChatStoreContext);
+  if (!store) throw new Error("useChatState/useChatDispatch must be used within ChatProvider");
+  return store;
 }
 
-export function useChatDispatch() {
-  return useContext(ChatDispatchContext);
+export function useChatState(): ChatState {
+  return useSelector(useChatStore());
+}
+
+export function useChatDispatch(): (action: ChatAction) => void {
+  const store = useChatStore();
+  return useCallback((action: ChatAction) => store.setState((prev) => chatReducer(prev, action)), [store]);
 }
