@@ -387,6 +387,11 @@ type OcodeConfig struct {
 	// prompt into the agent's system prompt so it reads existing docs before
 	// implementing and updates them afterward.
 	DocPromptEnabled bool
+	// ProfileDebug toggles verbose profile debugging to the log tab, emitting
+	// the active profile and its effective overrides (model, provider, creds,
+	// mcp, etc.) when a session is built or the profile switches. Default
+	// off.
+	ProfileDebug bool
 	// TerminalScrollbackLines controls how many lines xterm.js retains for the
 	// interactive terminal. Values are normalized to the supported range when
 	// config is loaded; zero means use DefaultTerminalScrollbackLines.
@@ -635,6 +640,7 @@ type ocodeConfigFile struct {
 	Discovery               discoveryConfigFile         `json:"discovery"`
 	MemoryEnabled           *bool                       `json:"memory_enabled,omitempty"`
 	DocPromptEnabled        *bool                       `json:"doc_prompt_enabled,omitempty"`
+	ProfileDebug            *bool                       `json:"profile_debug,omitempty"`
 	TerminalScrollbackLines *int                        `json:"terminal_scrollback_lines,omitempty"`
 	TerminalFontFamily      string                      `json:"terminal_font_family,omitempty"`
 	TerminalFontSize        *int                        `json:"terminal_font_size,omitempty"`
@@ -1125,6 +1131,13 @@ func loadOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		delete(raw, "doc_prompt_enabled")
 	}
 
+	if _, ok := raw["profile_debug"]; ok {
+		if file.ProfileDebug != nil {
+			cfg.ProfileDebug = *file.ProfileDebug
+		}
+		delete(raw, "profile_debug")
+	}
+
 	if _, ok := raw["tui"]; ok {
 		applyTUIConfig(&cfg.TUI, file.TUI)
 		delete(raw, "tui")
@@ -1591,6 +1604,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 	}
 	payload["memory_enabled"] = cfg.MemoryEnabled
 	payload["doc_prompt_enabled"] = cfg.DocPromptEnabled
+	payload["profile_debug"] = cfg.ProfileDebug
 	payload["terminal_scrollback_lines"] = NormalizeTerminalScrollbackLines(cfg.TerminalScrollbackLines)
 	if cfg.TerminalFontFamily != "" {
 		payload["terminal_font_family"] = cfg.TerminalFontFamily
@@ -1625,7 +1639,7 @@ func writeOcodeConfigFile(path string, cfg *OcodeConfig) error {
 		payload["tui"] = cfg.TUI
 	}
 	for k, v := range cfg.Extra {
-		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" {
+		if k == "compact" || k == "advisor" || k == "permissions" || k == "plugins" || k == "external_plugins" || k == "local_models" || k == "extra_allowed_paths" || k == "max_steps" || k == "discovery" || k == "recap_model" || k == "recap_model_enabled" || k == "ocr" || k == "terminal_enabled" || k == "terminal_scrollback_lines" || k == "terminal_font_family" || k == "terminal_font_size" || k == "terminal_shell" || k == "profiles" || k == "profile_debug" {
 			continue
 		}
 		payload[k] = v
@@ -2245,6 +2259,14 @@ func SaveAdvisorModel(providerModel string) error {
 func SaveDocPromptEnabled(enabled bool) error {
 	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
 		cfg.DocPromptEnabled = enabled
+		return nil
+	})
+}
+
+// SaveProfileDebug persists the profile debug toggle to config.
+func SaveProfileDebug(enabled bool) error {
+	return withOcodeConfigLock(func(cfg *OcodeConfig) error {
+		cfg.ProfileDebug = enabled
 		return nil
 	})
 }

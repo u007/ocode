@@ -4040,6 +4040,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
+		} else if msg.msg.Role == "user" {
+			// Spliced into the running turn by EnqueueInjection (see the
+			// "enter" handler's m.streaming branch). Render it now and drop
+			// the matching entry from the display queue — it has already
+			// been sent, so drainQueuedItems must not resend it once the
+			// turn ends.
+			m.removeQueuedInputByText(msg.msg.Content)
+			rawCopy := msg.msg
+			m.messages = append(m.messages, message{role: roleUser, text: msg.msg.Content, raw: &rawCopy})
+			if m.activeTab != tabChat {
+				m.chatUnread = true
+			}
+			if m.rcBridge != nil {
+				m.rcBridge.SetMessages(m.persistedAgentMessages())
+			}
+			m.rerenderTranscriptAndMaybeScroll()
 		}
 		return m, m.waitStreamEvent(msg.ch, msg.deltaCh, msg.errCh, msg.cancel)
 	case streamDoneMsg:
@@ -5325,6 +5341,17 @@ func (m model) handleChatKeys(msg tea.KeyPressMsg, tiCmd, vpCmd tea.Cmd) (tea.Mo
 
 		if m.streaming {
 			m.queuedItems = append(m.queuedItems, queuedItem{kind: queueItemInput, text: text})
+			// Also hand it straight to the running agent: EnqueueInjection
+			// splices it into the Step loop at the next tool-call boundary,
+			// instead of waiting for drainQueuedItems to run after the whole
+			// (possibly multi-tool-call) turn finishes. The streamMsgEvent
+			// "user" branch removes the queuedItems entry once the agent
+			// actually picks it up; drainQueuedItems is the backstop for
+			// anything left over when the turn ends (e.g. injected too late
+			// to be seen by the last loop iteration).
+			if m.agent != nil {
+				m.agent.EnqueueInjection(agent.Message{Role: "user", Content: text})
+			}
 			m.input.Reset()
 			m.layout()
 			m.maybeScrollTranscriptToBottom()
@@ -7409,6 +7436,19 @@ func (m *model) handleCommand(text string) (tea.Model, tea.Cmd) {
 // askAgent again, which fires a later streamDoneMsg that processes the queue).
 func (m *model) queueDrainBlocked() bool {
 	return m.showQuestionDialog || m.showPermDialog
+}
+
+// removeQueuedInputByText removes the first queueItemInput entry matching
+// text from the display queue. Called when the running turn has already
+// picked the message up via EnqueueInjection, so drainQueuedItems (which
+// runs once the whole turn finishes) does not send it a second time.
+func (m *model) removeQueuedInputByText(text string) {
+	for i, item := range m.queuedItems {
+		if item.kind == queueItemInput && item.text == text {
+			m.queuedItems = append(m.queuedItems[:i], m.queuedItems[i+1:]...)
+			return
+		}
+	}
 }
 
 func (m *model) drainQueuedItems() (tea.Cmd, bool) {

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { getActiveWindowId } from "../ProfileSwitcher"
+import { authedFetch } from "@/api/client"
 
 type Profile = { name: string; displayName: string; overrideCount: number; credentialCount: number }
 type Cred = { provider: string; label: string; masked: string; kind: string }
@@ -23,11 +24,14 @@ export default function ProfilesManager() {
     setLoading(true)
     try {
       const [pRes, wRes] = await Promise.all([
-        fetch("/api/profiles").then(r=>r.json()),
-        fetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`).then(r=>r.json()).catch(()=>({activeProfile:""})),
+        authedFetch("/api/profiles"),
+        authedFetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`).catch(() => null as Response | null),
       ])
-      setProfiles(pRes.profiles || [])
-      setActive(wRes.activeProfile || wRes.effectiveProfile || "")
+      if (!pRes.ok) { const t = await pRes.text().catch(() => pRes.statusText); setError(t); return }
+      const pData = await pRes.json().catch(() => ({} as any))
+      const wData = wRes && wRes.ok ? await wRes.json().catch(() => ({ activeProfile: "" } as any)) : { activeProfile: "" }
+      setProfiles(pData.profiles || [])
+      setActive(wData.activeProfile || wData.effectiveProfile || "")
     } catch (e) {
       setError(String(e))
     } finally { setLoading(false) }
@@ -40,8 +44,8 @@ export default function ProfilesManager() {
     setEff(null); setCreds([])
     try {
       const [eRes, cRes] = await Promise.all([
-        fetch(`/api/profiles/${encodeURIComponent(name)}/effective`).then(r=>r.json()),
-        fetch(`/api/profiles/${encodeURIComponent(name)}/auth`).then(r=>r.json()),
+        authedFetch(`/api/profiles/${encodeURIComponent(name)}/effective`).then(r=>r.json()),
+        authedFetch(`/api/profiles/${encodeURIComponent(name)}/auth`).then(r=>r.json()),
       ])
       setEff(eRes)
       setCreds(cRes.credentials || [])
@@ -53,7 +57,7 @@ export default function ProfilesManager() {
     if (!name) return
     if (!/^[a-z0-9_-]{1,32}$/.test(name)) { setError("name must match [a-z0-9_-]{1,32}"); return }
     setError(null)
-    const res = await fetch("/api/profiles", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ name }) })
+    const res = await authedFetch("/api/profiles", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ name }) })
     if (!res.ok) { const t = await res.text(); setError(t); return }
     setNewName("")
     refresh()
@@ -63,7 +67,7 @@ export default function ProfilesManager() {
     if (!n || n===oldName) return
     const nn = n.trim().toLowerCase()
     if (!/^[a-z0-9_-]{1,32}$/.test(nn)) { setError("name must match [a-z0-9_-]{1,32}"); return }
-    const res = await fetch(`/api/profiles/${encodeURIComponent(oldName)}/rename`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({newName: nn})})
+    const res = await authedFetch(`/api/profiles/${encodeURIComponent(oldName)}/rename`, { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({newName: nn})})
     if (!res.ok) { const t=await res.text(); setError(t); return }
     refresh()
   }
@@ -71,36 +75,36 @@ export default function ProfilesManager() {
     if (active === name) { setError(`Cannot delete "${name}" — it is active in this window. Switch to Default first.`); return }
     const ok = confirm(`Delete "${name}"? Removes ${overrideCount} overrides + ${credCount} keys — cannot undo.`)
     if (!ok) return
-    const res = await fetch(`/api/profiles/${encodeURIComponent(name)}`, { method:"DELETE" })
+    const res = await authedFetch(`/api/profiles/${encodeURIComponent(name)}`, { method:"DELETE" })
     if (!res.ok) { const t=await res.text(); setError(t.includes("active") ? `Cannot delete "${name}" — switch to Default first.` : t); return }
     refresh()
   }
   const setActiveProfile = async (name:string) => {
-    const res = await fetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`, { method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile: name})})
+    const res = await authedFetch(`/api/window/${encodeURIComponent(windowId)}/activeProfile`, { method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile: name})})
     if (!res.ok) { const t=await res.text(); setError(t); return }
     setActive(name)
   }
   const saveKey = async (name: string) => {
     if (!credKey.trim()) { setError("apiKey required"); return }
-    const res = await fetch(`/api/profiles/${encodeURIComponent(name)}/auth/${encodeURIComponent(credProvider)}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({apiKey: credKey.trim()})})
+    const res = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/auth/${encodeURIComponent(credProvider)}`, { method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify({apiKey: credKey.trim()})})
     if (!res.ok) { const t=await res.text(); setError(t); return }
     setCredKey("")
-    const cRes = await fetch(`/api/profiles/${encodeURIComponent(name)}/auth`).then(r=>r.json())
+    const cRes = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/auth`).then(r=>r.json())
     setCreds(cRes.credentials || [])
     refresh()
   }
   const deleteKey = async (name: string, provider: string) => {
     if (!confirm(`Remove ${provider} key from "${name}"?`)) return
-    const res = await fetch(`/api/profiles/${encodeURIComponent(name)}/auth/${encodeURIComponent(provider)}`, { method:"DELETE" })
+    const res = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/auth/${encodeURIComponent(provider)}`, { method:"DELETE" })
     if (!res.ok) { const t=await res.text(); setError(t); return }
-    const cRes = await fetch(`/api/profiles/${encodeURIComponent(name)}/auth`).then(r=>r.json())
+    const cRes = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/auth`).then(r=>r.json())
     setCreds(cRes.credentials || [])
     refresh()
   }
   const resetField = async (name: string, field: string) => {
-    const res = await fetch(`/api/profiles/${encodeURIComponent(name)}/overrides/${encodeURIComponent(field)}`, { method:"DELETE" })
+    const res = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/overrides/${encodeURIComponent(field)}`, { method:"DELETE" })
     if (!res.ok) { const t=await res.text(); setError(t); return }
-    const eRes = await fetch(`/api/profiles/${encodeURIComponent(name)}/effective`).then(r=>r.json())
+    const eRes = await authedFetch(`/api/profiles/${encodeURIComponent(name)}/effective`).then(r=>r.json())
     setEff(eRes)
     refresh()
   }

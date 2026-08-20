@@ -113,6 +113,21 @@ export function authToken(): string {
   return _token;
 }
 
+/**
+ * fetch() wrapper for API calls. Injects the auth bearer token (when the SPA
+ * was opened with ?token=... or behind an authenticated server) and the SPA
+ * base path (when served under a proxy prefix). Always use this instead of a
+ * raw fetch() for any /api call — raw fetches hit the auth middleware with no
+ * credentials, which returns 401 "unauthorized", trips the rate limiter
+ * (429 "too many requests"), and makes the non-JSON error body fail .json().
+ */
+export async function authedFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  for (const [k, v] of Object.entries(authHeaders())) headers.set(k, v);
+  return fetch(apiPath(path), { ...init, headers });
+}
+
 /** Prepends the current SPA base path to an API or SSE path. */
 export function apiPath(path: string): string {
   return `${BASE}${path}`;
@@ -289,6 +304,13 @@ export const api = {
     fetchJSON<{ memory_enabled: boolean; doc_prompt_enabled: boolean }>("/api/config/ocode/features", {
       method: "PUT",
       body: JSON.stringify({ memory_enabled, doc_prompt_enabled }),
+    }),
+
+  getProfileDebugConfig: () => fetchJSON<{ profile_debug: boolean }>("/api/config/ocode/profile-debug"),
+  setProfileDebugConfig: (profile_debug: boolean) =>
+    fetchJSON<{ profile_debug: boolean }>("/api/config/ocode/profile-debug", {
+      method: "PUT",
+      body: JSON.stringify({ profile_debug }),
     }),
 
   getPluginsEnabledConfig: () => fetchJSON<{ ast: boolean }>("/api/config/ocode/plugins-enabled"),
@@ -468,7 +490,10 @@ export const api = {
   sendMessage: (sessionId: string, content: string) => {
     let windowId = ""
     try {
-      windowId = sessionStorage.getItem("ocode.windowId") || ""
+      windowId = new URLSearchParams(window.location.search).get("windowId")?.trim() || ""
+      if (!windowId) {
+        windowId = sessionStorage.getItem("ocode.windowId") || ""
+      }
       if (!windowId) {
         windowId = `win-${crypto.randomUUID().slice(0, 8)}`
         sessionStorage.setItem("ocode.windowId", windowId)
@@ -483,7 +508,10 @@ export const api = {
   chat: (content: string, sessionId?: string, model?: string, requestId?: string, projectPath?: string) => {
     let windowId = ""
     try {
-      windowId = sessionStorage.getItem("ocode.windowId") || ""
+      windowId = new URLSearchParams(window.location.search).get("windowId")?.trim() || ""
+      if (!windowId) {
+        windowId = sessionStorage.getItem("ocode.windowId") || ""
+      }
       if (!windowId) {
         windowId = `win-${crypto.randomUUID().slice(0, 8)}`
         sessionStorage.setItem("ocode.windowId", windowId)

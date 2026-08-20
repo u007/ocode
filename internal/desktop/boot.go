@@ -28,9 +28,10 @@ type Handle struct {
 
 // StartServer boots an ocode HTTP/SSE API server on 127.0.0.1 with a fresh
 // auth token, and returns the handle the desktop shell needs to open its
-// webview window. The server runs in a background goroutine and dies with the
-// process by design — internal/server has no graceful-shutdown API and window
-// close = app quit = process exit (see the desktop shell spec).
+// webview window. The server runs in a background goroutine; on desktop quit
+// the shell calls handle.Srv.Shutdown(ctx) (bounded by a TTL) to drain agent
+// sessions and gracefully terminate any running terminal ptys before the
+// process exits. See desktopShutdownTimeout in cmd/ocode-desktop/main.go.
 //
 // The port is sticky across launches: the webview's localStorage (terminal
 // tabs, editor tabs, session tabs) is scoped to the http://127.0.0.1:PORT

@@ -48,6 +48,62 @@ func DebugAppendf(kind, format string, args ...interface{}) {
 	emitDebug(kind, fmt.Sprintf(format, args...))
 }
 
+// injectionQueue holds plain user messages queued for mid-turn injection
+// (see Agent.injectQueue). Zero value is ready to use; safe for concurrent
+// push (caller goroutine) and drain (Step goroutine).
+type injectionQueue struct {
+	mu    sync.Mutex
+	items []Message
+}
+
+func (q *injectionQueue) push(m Message) {
+	q.mu.Lock()
+	q.items = append(q.items, m)
+	q.mu.Unlock()
+}
+
+func (q *injectionQueue) drain() []Message {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nil
+	}
+	items := q.items
+	q.items = nil
+	return items
+}
+
+func (q *injectionQueue) len() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.items)
+}
+
+// EnqueueInjection queues a plain user message to be spliced into this
+// agent's running Step loop at the next tool-call boundary, instead of
+// waiting for the whole (possibly multi-tool-call) turn to finish. Safe to
+// call from any goroutine, whether or not a turn is currently running — if
+// none is, the message simply sits until the next Step() call drains it
+// as the first thing it does.
+func (a *Agent) EnqueueInjection(m Message) {
+	a.injectQueue.push(m)
+}
+
+// HasPendingInjections reports whether a message is queued via
+// EnqueueInjection and not yet picked up by a running Step.
+func (a *Agent) HasPendingInjections() bool {
+	return a.injectQueue.len() > 0
+}
+
+// DrainPendingInjections removes and returns any messages queued via
+// EnqueueInjection that have not yet been picked up by a running Step. Used
+// to recover a message stranded by the narrow race between "is a turn
+// active" and the turn actually finishing — see the server's
+// flushStrandedInjections.
+func (a *Agent) DrainPendingInjections() []Message {
+	return a.injectQueue.drain()
+}
+
 // SetSessionID tags this agent (and its owned permission manager and LLM
 // client, if it's a *GenericClient) with a session id so their debug-log
 // entries are attributed to this session — see emitDebug and
@@ -217,6 +273,13 @@ type Agent struct {
 	// (assistant replies and tool results) as soon as they are generated,
 	// enabling live UI updates between iterations of the tool-call loop.
 	OnMessage func(Message)
+	// injectQueue holds plain user messages submitted (via EnqueueInjection)
+	// while Step is running. It is drained at the top of every loop iteration
+	// — after a tool-call round has fully completed, before the next LLM
+	// call — so a queued message reaches the model at the next tool-call
+	// boundary instead of waiting for the whole (possibly multi-tool-call)
+	// turn to finish. Safe for concurrent use.
+	injectQueue injectionQueue
 	// OnDelta, if set, is invoked from inside Chat for each streamed reasoning
 	// or text token (kind ∈ {"reasoning","text"}). The callback fires on the
 	// HTTP goroutine — keep handlers fast and non-blocking (push to a buffered
@@ -973,6 +1036,22 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 		// prompt preparation. Inject them before each model iteration so the
 		// next LLM call sees instructions for files touched in this turn.
 		messages = injectDirMDTail(messages, a)
+		// Slot in any plain messages the user queued (EnqueueInjection) while
+		// this turn's tool calls were running. This boundary — after a
+		// completed tool round, before the next LLM call — is the same seam
+		// injectDirMDTail uses above: messages is a fully-formed,
+		// protocol-valid history for every provider (see
+		// repairToolCallSequence), so appending a user-role message here
+		// needs no cancel/restart of the in-flight turn.
+		if queued := a.injectQueue.drain(); len(queued) > 0 {
+			for _, m := range queued {
+				newMsgs = append(newMsgs, m)
+				messages = append(messages, m)
+				if a.OnMessage != nil {
+					a.OnMessage(m)
+				}
+			}
+		}
 		// Recompute tool defs each iteration: a mid-turn discover_more call
 		// (Part 08) only becomes visible to the LLM on the next loop.
 		toolDefs := a.GetToolDefinitions()
@@ -1000,6 +1079,10 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			newMsgs = append(newMsgs, *resp)
 			if a.OnMessage != nil {
 				a.OnMessage(*resp)
+			}
+			{
+				sig := a.collectDiscoveryOptSignal(ckpt, newMsgs)
+				a.maybePostTaskDiscoveryOptimization(sig, userGoal)
 			}
 			return newMsgs, nil
 		}
@@ -1396,10 +1479,18 @@ func (a *Agent) Step(messages []Message) ([]Message, error) {
 			}
 		}
 		if pauseAfterResults {
+			{
+				sig := a.collectDiscoveryOptSignal(ckpt, newMsgs)
+				a.maybePostTaskDiscoveryOptimization(sig, userGoal)
+			}
 			return newMsgs, nil
 		}
 	}
 
+	{
+		sig := a.collectDiscoveryOptSignal(ckpt, newMsgs)
+		a.maybePostTaskDiscoveryOptimization(sig, userGoal)
+	}
 	return newMsgs, nil
 }
 

@@ -230,7 +230,16 @@ export default function ChatInput({
     const finalMessage = parts.join(" ");
     setAttachedFiles([]);
 
+    if (isStreaming) {
+      // A turn is actively running — send now. The server slots this into
+      // the live agent loop at the next tool-call boundary instead of
+      // waiting for the whole (possibly multi-tool-call) turn to finish.
+      sendMessage(finalMessage);
+      return;
+    }
     if (busy) {
+      // Shell command in flight, no agent turn running yet — nothing to
+      // inject into, so queue as before until it frees up.
       pushQueued(sessionTabId, { kind: "message", text: finalMessage });
       setQueueCount(getQueue(sessionTabId).length);
       return;

@@ -1290,6 +1290,42 @@ func (h *Handler) HandleSetFeaturesConfig(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// HandleGetProfileDebugConfig reports the profile debug toggle.
+func (h *Handler) HandleGetProfileDebugConfig(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	enabled := false
+	if h.cfg != nil {
+		enabled = h.cfg.Ocode.ProfileDebug
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"profile_debug": enabled,
+	})
+}
+
+// HandleSetProfileDebugConfig persists the profile debug toggle.
+func (h *Handler) HandleSetProfileDebugConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ProfileDebug bool `json:"profile_debug"`
+	}
+	if err := readBodyJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if err := config.SaveProfileDebug(req.ProfileDebug); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save config: "+err.Error())
+		return
+	}
+	h.mu.Lock()
+	if h.cfg != nil {
+		h.cfg.Ocode.ProfileDebug = req.ProfileDebug
+	}
+	h.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"profile_debug": req.ProfileDebug,
+	})
+}
+
 // HandleGetPluginsEnabledConfig reports the opt-in builtin tool gates.
 func (h *Handler) HandleGetPluginsEnabledConfig(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()

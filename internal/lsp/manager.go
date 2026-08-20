@@ -242,6 +242,7 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 	m.mu.Lock()
 	if c, ok := m.clients[ext]; ok {
 		m.mu.Unlock()
+		m.emitReady(spec)
 		return c, nil
 	}
 	meta, attached := m.brokerMeta[ext]
@@ -265,11 +266,13 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 			if existing := m.clients[ext]; existing != nil {
 				m.mu.Unlock()
 				_ = c.Close()
+				m.emitReady(spec)
 				return existing, nil
 			}
 			m.installDiagnosticsHandler(ext, c)
 			m.clients[ext] = c
 			m.mu.Unlock()
+			m.emitReady(spec)
 			return c, nil
 		}
 	}
@@ -292,21 +295,34 @@ func (m *Manager) ClientForExt(ext string) (*Client, error) {
 	if existing := m.clients[ext]; existing != nil {
 		m.mu.Unlock()
 		_ = c.Close()
+		m.emitReady(spec)
 		return existing, nil
 	}
 	m.installDiagnosticsHandler(ext, c)
 	m.clients[ext] = c
-	// Read eventCh while holding the lock, then send outside the lock.
+	m.mu.Unlock()
+	m.emitReady(spec)
+	return c, nil
+}
+
+// emitReady sends a "ready" ServerStartedEvent for spec, if an event channel
+// is registered. Called on every ClientForExt return path (fresh client,
+// cached client, or broker-attached client) so the sidebar's indexing
+// indicator always clears — previously only the isolated-stdio path emitted
+// this, leaving the broker and cached-client paths stuck showing "indexing…"
+// forever.
+func (m *Manager) emitReady(spec serverSpec) {
+	m.mu.Lock()
 	eventCh := m.eventCh
 	m.mu.Unlock()
-	if eventCh != nil {
-		evt := ServerStartedEvent{Cmd: spec.cmd, LangID: spec.langID, Root: m.root, Phase: "ready"}
-		select {
-		case eventCh <- evt:
-		default:
-		}
+	if eventCh == nil {
+		return
 	}
-	return c, nil
+	evt := ServerStartedEvent{Cmd: spec.cmd, LangID: spec.langID, Root: m.root, Phase: "ready"}
+	select {
+	case eventCh <- evt:
+	default:
+	}
 }
 
 // ClientForFile is ClientForExt keyed by a file path's extension.

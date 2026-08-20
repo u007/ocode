@@ -3546,7 +3546,11 @@ func maskKey(key string) string {
 }
 
 func NewClient(cfg *config.Config, model string) LLMClient {
-	emitDebug("AGENT", fmt.Sprintf("NewClient: building client for model %q", model))
+	return NewClientWithProfile(cfg, model, auth.ActiveProfile())
+}
+
+func NewClientWithProfile(cfg *config.Config, model string, profile string) LLMClient {
+	emitDebug("AGENT", fmt.Sprintf("NewClient: building client for model %q profile=%q", model, profile))
 	provider := ""
 	apiKey := ""
 	baseURL := ""
@@ -3585,6 +3589,57 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 	if v := os.Getenv("OPENCODE_AUTH_TOKEN"); v != "" {
 		apiKey = v
 		emitDebug("AGENT", fmt.Sprintf("NewClient: OPENCODE_AUTH_TOKEN override — apiKey=%s", maskKey(apiKey)))
+	}
+
+	// Profile sidecar credentials (auth.profiles.json) outrank config delta and
+	// base credentials but not OPENCODE_AUTH_TOKEN. This is the sparse-profile
+	// path that desktop window switches rely on for per-window keys.
+	if apiKey == "" && profile != "" && provider != "" {
+		if cred, ok := auth.GetProfileCredential(profile, provider); ok {
+			switch cred.Kind {
+			case auth.KindAPIKey:
+				if cred.Key != "" {
+					apiKey = cred.Key
+					emitDebug("AGENT", fmt.Sprintf("NewClient: profile %q credential — kind=%s apiKey=%s", profile, cred.Kind, maskKey(apiKey)))
+				}
+				if cred.BaseURL != "" && baseURL == "" {
+					baseURL = cred.BaseURL
+				}
+			case auth.KindOAuth:
+				if provider == "grok" {
+					if tok, ok := auth.OAuthAccessTokenForProfile(profile, provider); ok {
+						apiKey = tok
+					} else {
+						apiKey = cred.AccessToken
+					}
+					useOAuth = true
+					accountID = cred.AccountID
+					if cred.BaseURL != "" {
+						baseURL = cred.BaseURL
+					}
+					grokAuthToken = cred.CookieAuthToken
+					grokCt0 = cred.CookieCt0
+					emitDebug("AGENT", fmt.Sprintf("NewClient: profile %q grok credential — useOAuth=%v apiKey=%s", profile, useOAuth, maskKey(apiKey)))
+				} else {
+					if tok, refreshed := auth.OAuthAccessTokenForProfile(profile, provider); refreshed {
+						apiKey = tok
+					} else {
+						apiKey = cred.AccessToken
+					}
+					useOAuth = true
+					accountID = cred.AccountID
+					if cred.BaseURL != "" && baseURL == "" {
+						baseURL = cred.BaseURL
+					}
+					emitDebug("AGENT", fmt.Sprintf("NewClient: profile %q OAuth credential — useOAuth=%v apiKey=%s", profile, useOAuth, maskKey(apiKey)))
+				}
+			}
+		}
+		if apiKey == "" {
+			if b := auth.GetProfileBaseURL(profile, provider); b != "" && baseURL == "" {
+				baseURL = b
+			}
+		}
 	}
 
 	// Use config for provider details if available
@@ -3660,7 +3715,13 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 		if baseURL == "" {
 			baseURL = info.baseURL
 		}
-		if override := auth.GetBaseURL(provider); override != "" {
+		if profile != "" {
+			if b := auth.GetProfileBaseURL(profile, provider); b != "" {
+				baseURL = b
+			} else if override := auth.GetBaseURL(provider); override != "" {
+				baseURL = override
+			}
+		} else if override := auth.GetBaseURL(provider); override != "" {
 			baseURL = override
 		}
 	}
@@ -3728,8 +3789,33 @@ func NewClient(cfg *config.Config, model string) LLMClient {
 			provider = "anthropic"
 		}
 		if info, ok := providers[provider]; ok {
-			apiKey = os.Getenv(info.envKey)
-			baseURL = info.baseURL
+			if profile != "" {
+				if k := auth.ResolveKeyForProfile(provider, profile, cfg); k != "" {
+					apiKey = k
+				} else {
+					apiKey = os.Getenv(info.envKey)
+				}
+			} else {
+				apiKey = os.Getenv(info.envKey)
+			}
+			if profile != "" {
+				if b := auth.GetProfileBaseURL(profile, provider); b != "" {
+					baseURL = b
+				} else {
+					baseURL = info.baseURL
+				}
+			} else {
+				baseURL = info.baseURL
+			}
+		}
+	}
+	if apiKey == "" && profile != "" && provider != "" {
+		if k := auth.ResolveKeyForProfile(provider, profile, cfg); k != "" {
+			apiKey = k
+			emitDebug("AGENT", fmt.Sprintf("NewClient: profile %q fallback key — apiKey=%s", profile, maskKey(apiKey)))
+		}
+		if b := auth.GetProfileBaseURL(profile, provider); b != "" && baseURL == "" {
+			baseURL = b
 		}
 	}
 

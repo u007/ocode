@@ -17,9 +17,10 @@ const KIND_COLORS: Record<string, string> = {
   ERROR: "text-red-400",
   SESSION: "text-yellow-400",
   GIT: "text-cyan-400",
+  PROFILE: "text-orange-400",
 };
 
-const KIND_FILTERS = ["ALL", "LLM", "TOOL", "AGENT", "ERROR", "SESSION", "GIT"];
+const KIND_FILTERS = ["ALL", "LLM", "TOOL", "AGENT", "ERROR", "SESSION", "GIT", "PROFILE"];
 
 export default function LogPanel({ active, sessionId }: { active: boolean; sessionId: string }) {
   const [logs, setLogs] = useState<LogEntry[]>([]);

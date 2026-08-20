@@ -136,12 +136,20 @@ export default function TerminalPanel({
     const el = containerRef.current;
     if (!el) return;
 
+    const savedBuffer = loadTerminalBuffer(id);
     const term = new Terminal({
       cursorBlink: true,
       scrollback: scrollbackLines,
       fontFamily,
       fontSize,
       theme: { background: "#18181b", foreground: "#e4e4e7" },
+      // Construct at the size the buffer was serialized at, so restoring it
+      // doesn't reflow/garble the text before the ResizeObserver-driven fit()
+      // ever runs. Falls back to xterm's defaults for legacy saved buffers
+      // (or no buffer) that carry no cols/rows.
+      ...(savedBuffer?.cols && savedBuffer?.rows
+        ? { cols: savedBuffer.cols, rows: savedBuffer.rows }
+        : {}),
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -174,9 +182,8 @@ export default function TerminalPanel({
       return true;
     });
 
-    const savedBuffer = loadTerminalBuffer(id);
     if (savedBuffer) {
-      term.write(savedBuffer);
+      term.write(savedBuffer.text);
       term.write("\r\n\x1b[2m── restored, shell disconnected ──\x1b[0m\r\n");
     }
 
@@ -206,7 +213,7 @@ export default function TerminalPanel({
     const doSave = () => {
       const s = serializeRef.current;
       if (!s) return;
-      saveTerminalBuffer(id, s.serialize({ scrollback: scrollbackLines }));
+      saveTerminalBuffer(id, s.serialize({ scrollback: scrollbackLines }), term.cols, term.rows);
     };
     const saveInterval = setInterval(scheduleSave, 30000);
     const onPageHide = () => doSave();

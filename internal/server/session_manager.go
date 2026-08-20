@@ -229,6 +229,17 @@ func (m *SessionManager) setTurnActive(sessionID string, active bool) {
 	m.mu.Unlock()
 }
 
+// IsTurnActive reports whether a turn is currently running on the session.
+// Used by profile reconciliation to avoid tearing down an agent mid-turn.
+func (m *SessionManager) IsTurnActive(sessionID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.entries[sessionID]; e != nil {
+		return e.turnActive
+	}
+	return false
+}
+
 // EvictIdle releases the built agent of every entry that has sat idle longer
 // than the threshold with no active turn. The registry entry and the on-disk
 // session remain; the agent rebuilds on the next message. Returns the ids of

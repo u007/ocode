@@ -10,6 +10,7 @@ import (
 
 	"github.com/u007/ocode/internal/agent"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debuglog"
 	"github.com/u007/ocode/internal/session"
 	"github.com/u007/ocode/internal/tool"
 )
@@ -71,12 +72,8 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	// fall back to env > window-state global (v1 global fallback).
 	effCfg := h.cfg
 	var prof string
-	if entry := h.sessions.Lookup(sessionID); entry != nil && entry.WindowID != "" {
-		if v := os.Getenv("OCODE_PROFILE"); v != "" {
-			prof = v
-		} else {
-			prof = h.getWindowProfile(entry.WindowID)
-		}
+	if entry := h.sessions.Lookup(sessionID); entry != nil {
+		prof = h.resolveSessionProfile(entry)
 	} else {
 		prof = h.globalEffectiveProfile()
 	}
@@ -87,9 +84,40 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 	}
 	// Stage "model": LLM client + agent shell.
 	h.publishBootstrapStage(sessionID, "model")
-	client := agent.NewClient(effCfg, model)
+	client := agent.NewClientWithProfile(effCfg, model, prof)
 	if client == nil {
 		return nil, "model", fmt.Errorf("failed to create LLM client")
+	}
+	// Profile debug: emit active profile + overrides to the log tab when the
+	// dedicated toggle is on (default off). This surfaces per-window effective
+	// profile, not just the global fallback, so the log tab explains exactly
+	// which keys/model the next turn will use.
+	if profDebug := func() bool {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		return h.cfg != nil && h.cfg.Ocode.ProfileDebug
+	}(); profDebug {
+		windowID := ""
+		if entry := h.sessions.Lookup(sessionID); entry != nil {
+			windowID = entry.WindowID
+		}
+		h.emitProfileDebugForWindow(windowID, prof, sessionID)
+		// Also emit a session-scoped line with effective model/provider keys for
+		// this specific build, so the log tab shows why a profile switch took
+		// effect on this session's next turn.
+		effModel := model
+		if effCfg != nil && effCfg.Model != "" {
+			effModel = effCfg.Model
+		}
+		activeLabel := prof
+		if activeLabel == "" {
+			activeLabel = "Default"
+		}
+		debuglog.Log.Append(debuglog.Entry{
+			Kind:      debuglog.KindProfile,
+			Message:   fmt.Sprintf("PROFILE session=%s window=%s active=%q effModel=%q project=%q", sessionID, windowID, activeLabel, effModel, projectRoot),
+			SessionID: sessionID,
+		})
 	}
 	lspMgr := h.lspManagerFor(projectRoot)
 	tools := tool.InitBuiltinTools(lspMgr, effCfg, h.scheduler)
@@ -131,8 +159,86 @@ func (h *Handler) buildAgentSession(sessionID, model string, messages []agent.Me
 
 	ag.SetAdvisorEnabled(h.advisorFlag())
 	h.wireCompactCallbacks(sessionID, ag)
+	as := &agentSession{agent: ag, messages: messages, model: model, profile: prof}
 	h.publishBootstrapStage(sessionID, "ready")
-	return &agentSession{agent: ag, messages: messages, model: model}, "", nil
+	return as, "", nil
+}
+
+// resolveSessionProfile computes the effective profile a session should run
+// under, given its registry entry. Order: OCODE_PROFILE env (ephemeral, wins
+// everywhere) > the window's active profile (when the session is bound to a
+// window) > the v1 global fallback (most-recent window / env).
+func (h *Handler) resolveSessionProfile(entry *sessionEntry) string {
+	if v := os.Getenv("OCODE_PROFILE"); v != "" {
+		return v
+	}
+	if entry.WindowID != "" {
+		return h.getWindowProfile(entry.WindowID)
+	}
+	return h.globalEffectiveProfile()
+}
+
+// reconcileProfileAgent rebuilds the resident agent for id when the window's
+// current active profile differs from the one the agent was built with. The
+// design requires "mid-stream turns finish on the old profile; the next turn
+// uses the new profile" — so a profile switch takes effect on the very next
+// turn without restarting the app.
+//
+// It is a no-op (returns as unchanged) when:
+//   - as is nil (the caller's normal bootstrap path handles it),
+//   - the session is not window-bound,
+//   - a turn is currently active (the in-flight turn finishes on the old
+//     profile, per the design), or
+//   - the profile hasn't changed.
+//
+// The rebuild calls buildAgentSession (slow: may spawn plugin/MCP processes),
+// which is acceptable because profile switches are rare and happen at turn
+// boundaries.
+func (h *Handler) reconcileProfileAgent(id string, as *agentSession, model string) (*agentSession, error) {
+	if as == nil {
+		return nil, nil
+	}
+	entry := h.sessions.Lookup(id)
+	if entry == nil || entry.WindowID == "" {
+		return as, nil
+	}
+	// Never tear down an agent mid-turn. The running turn keeps its pointer to
+	// the old agent and finishes on the old profile; the rebuild lands on the
+	// next turn instead.
+	if h.sessions.IsTurnActive(id) {
+		return as, nil
+	}
+	cur := h.resolveSessionProfile(entry)
+	if cur == as.profile {
+		return as, nil
+	}
+	newAs, stage, err := h.buildAgentSession(id, model, as.messages, entry.ProjectRoot)
+	if err != nil {
+		log.Printf("serve error: rebuild agent for %s on profile switch (stage %s): %v", id, stage, err)
+		return as, err
+	}
+	h.replaceAgentSession(id, newAs)
+	log.Printf("profile: rebuilt agent for session %s (%s -> %s)", id, as.profile, cur)
+	return newAs, nil
+}
+
+// replaceAgentSession swaps the resident agent for id under h.mu, shutting down
+// the previous one. Callers must NOT hold h.mu. The swap is atomic with respect
+// to the map; an in-flight turn holding the old agent's lock continues
+// undisturbed on the old agent (its pointer stays valid) and the next turn
+// picks up the replacement.
+//
+// The old agent is shut down only when no turn is active for id: this is
+// enforced here, not just by callers, so a future or racing caller can't
+// tear down an agent mid-turn by skipping the IsTurnActive check.
+func (h *Handler) replaceAgentSession(id string, as *agentSession) {
+	h.mu.Lock()
+	old, ok := h.agents[id]
+	h.agents[id] = as
+	h.mu.Unlock()
+	if ok && old != as && old.agent != nil && !h.sessions.IsTurnActive(id) {
+		old.agent.Shutdown()
+	}
 }
 
 // registerAgentSession installs as under id unless a concurrent request
@@ -361,6 +467,7 @@ func (h *Handler) runTurn(sessionID string, as *agentSession, content string, op
 		close(heartbeatStop)
 		<-heartbeatDone
 		h.sessions.setTurnActive(sessionID, false)
+		h.flushStrandedInjections(sessionID, as)
 	}()
 	h.publishTurnStarted(sessionID)
 
@@ -558,6 +665,16 @@ func (h *Handler) executeTurnJob(id string, job *turnJob) {
 		}
 	}
 
+	// A profile switch takes effect on the next turn: rebuild the resident
+	// agent on the window's new active profile before turning the first
+	// pending message. reconcileProfileAgent is a no-op when no turn is active
+	// and the profile hasn't changed.
+	if reb, err := h.reconcileProfileAgent(id, as, job.model); err != nil {
+		log.Printf("serve error: reconcile profile for %s: %v", id, err)
+	} else {
+		as = reb
+	}
+
 	// 3. Turn every pending message in order.
 	for {
 		content, ok := h.sessions.PendingFront(id)
@@ -612,6 +729,37 @@ func (h *Handler) persistUserMessage(entry *sessionEntry, content string) error 
 	}
 	msgs = append(msgs, agent.Message{Role: "user", Content: content})
 	return session.SaveForDir(entry.ProjectRoot, entry.SessionID, "", msgs, nil)
+}
+
+// tryEnqueueInjection hands content to sessionID's agent for mid-turn
+// splicing if (and only if) a turn is currently active on it, so the message
+// reaches the LLM at the next tool-call boundary of the running turn rather
+// than starting a whole new queued turn after it. Returns false — meaning
+// the caller should fall through to the normal dispatchTurn path — when no
+// turn is active. Agent.EnqueueInjection is safe to call regardless, so the
+// narrow race against the turn finishing right after the IsTurnActive check
+// costs nothing: flushStrandedInjections (runTurn's defer) is the backstop
+// for anything left in the queue once the turn ends.
+func (h *Handler) tryEnqueueInjection(sessionID, content string) bool {
+	as := h.lookupAgentSession(sessionID)
+	if as == nil || !h.sessions.IsTurnActive(sessionID) {
+		return false
+	}
+	as.agent.EnqueueInjection(agent.Message{Role: "user", Content: content})
+	return true
+}
+
+// flushStrandedInjections drains any message left in as.agent's injection
+// queue when a turn ends (the race tryEnqueueInjection can't fully close:
+// enqueued after the last Step loop check but before setTurnActive(false)).
+// Each stranded message is dispatched as an ordinary follow-up turn so
+// nothing submitted by the user is ever silently dropped.
+func (h *Handler) flushStrandedInjections(sessionID string, as *agentSession) {
+	for _, m := range as.agent.DrainPendingInjections() {
+		if _, err := h.dispatchTurn(sessionID, "", m.Content, turnOptions{}); err != nil {
+			log.Printf("serve: flush stranded injection for %s: %v", sessionID, err)
+		}
+	}
 }
 
 // wireCompactCallbacks attaches OnCompact to a server-built agent so async

@@ -86,7 +86,7 @@ The full startup sequence:
    - `srv.SetWorkDir(workDir)` — the server anchors the project working directory and **reloads that project's `opencode.json`** via `handler.SetWorkDir` (`config.SetWorkDir` + `config.Load` + `agent.ApplyAgentConfig` + MCP cache warm). Without this, a Finder/Dock-launched `.app` (cwd `/`) would resolve config against the wrong directory — or none — and file-tree endpoints would anchor to `/`.
    - `srv.Listen()` starts the HTTP listener
    - Returns a `Handle{URL, Token, Srv}` (e.g. `URL = "http://127.0.0.1:52341"`)
-   - The server runs in a background goroutine and dies with the process — there is no graceful shutdown
+   - The server runs in a background goroutine. On desktop quit, `app.OnShutdown` calls `handle.Srv.Shutdown(ctx)` — bounded by a TTL (see `desktopShutdownTimeout` in `cmd/ocode-desktop/main.go`, default 5s, override via `OCODE_DESKTOP_SHUTDOWN_TIMEOUT`) — which drains agent sessions and gracefully terminates running terminal ptys (SIGTERM → wait → SIGKILL of the process group) before the process exits.
 
 3. **Create Wails services** — dock service (always) + notification service (conditional):
    - `dock.New()` — always created on macOS; `dockSvc.SetBadgeCount(n)` sets the dock badge
@@ -127,7 +127,7 @@ type Handle struct {
 - Starts `srv.Serve(ln)` in a goroutine
 - Returns the Handle
 
-**Key detail**: The server has no graceful-shutdown API. Window close = app quit = process exit. The server goroutine dies with the process.
+**Key detail**: The server exposes `Server.Shutdown(ctx)` (in `internal/server`) which gracefully stops it within a TTL: it tears down agent sessions and running terminal ptys, then stops accepting new HTTP connections and drains in-flight ones. `cmd/ocode-desktop/main.go` wires this into Wails' `app.OnShutdown` via `desktopShutdownTimeout` (default 5s).
 
 ## 6. Run-State Watcher — `internal/desktop/watch.go`
 
@@ -172,7 +172,7 @@ ocode.app/
 
 2. **macOS notification trap** — `notifications.New()` calls `UNUserNotificationCenter`, which **crashes the process** when the binary is not inside a `.app` bundle on macOS. Always call `notificationsSupported()` before creating the notification service. The bare `bin/ocode-desktop` binary must never touch the notifier. Dev workflow uses the bare binary; hot-reload mode intentionally has no notifications.
 
-3. **No graceful shutdown** — The server goroutine dies with the process. `server.New()` has no `Shutdown()` or `Close()` method. Window close = process exit. If you add cleanup logic, wire it to `app.OnShutdown()` or a signal handler, not a server lifecycle hook.
+3. **Graceful shutdown on quit** — `server.New()` now exposes `Shutdown(ctx)`, which drains agent sessions and gracefully terminates running terminal ptys (SIGTERM → wait → SIGKILL of the process group) within a TTL before the process exits. `cmd/ocode-desktop/main.go` wires `handle.Srv.Shutdown(ctx)` into Wails' `app.OnShutdown` (which runs synchronously on the main thread before exit). The TTL comes from `desktopShutdownTimeout()` — default 5s, override via `OCODE_DESKTOP_SHUTDOWN_TIMEOUT` (seconds). Terminals get up to ~2s of SIGTERM grace inside that budget. Do not add raw `os.Exit`/signal handlers for cleanup; keep it on `app.OnShutdown`.
 
 4. **Auth token is single-use per bootstrap** — The random token is generated once at startup and remains valid for the lifetime of the process. There's no token rotation or refresh. The webview URL includes it as `?token=` query param.
 

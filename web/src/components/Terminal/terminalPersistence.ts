@@ -91,18 +91,37 @@ function gcBuffers(file: PersistedTabsFile) {
   }
 }
 
-export function loadTerminalBuffer(id: string): string | null {
+export interface PersistedTerminalBuffer {
+  text: string;
+  cols: number;
+  rows: number;
+}
+
+/** Reads a saved buffer. Also accepts the pre-dimensions legacy format (a raw
+ *  serialized string), returned with cols/rows unset so the caller falls back
+ *  to xterm's defaults. */
+export function loadTerminalBuffer(id: string): PersistedTerminalBuffer | null {
   try {
-    return window.localStorage.getItem(BUFFER_KEY_PREFIX + id);
+    const raw = window.localStorage.getItem(BUFFER_KEY_PREFIX + id);
+    if (!raw) return null;
+    if (raw.startsWith("{")) {
+      const parsed = JSON.parse(raw) as PersistedTerminalBuffer;
+      if (typeof parsed.text === "string") return parsed;
+      return null;
+    }
+    return { text: raw, cols: 0, rows: 0 };
   } catch (err) {
     console.error("Failed to load terminal buffer:", err);
     return null;
   }
 }
 
-export function saveTerminalBuffer(id: string, text: string) {
+export function saveTerminalBuffer(id: string, text: string, cols: number, rows: number) {
   try {
-    window.localStorage.setItem(BUFFER_KEY_PREFIX + id, text);
+    window.localStorage.setItem(
+      BUFFER_KEY_PREFIX + id,
+      JSON.stringify({ text, cols, rows } satisfies PersistedTerminalBuffer),
+    );
   } catch (err) {
     console.error("Failed to persist terminal buffer:", err);
   }

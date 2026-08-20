@@ -206,7 +206,11 @@ type agentSession struct {
 	agent    *agent.Agent
 	messages []agent.Message
 	model    string
-	mu       sync.Mutex
+	// profile is the effective profile name the agent was built with ("" = base).
+	// Compared against the window's current active profile on each turn so a
+	// profile switch takes effect on the next turn without an app restart.
+	profile string
+	mu      sync.Mutex
 }
 
 func NewHandler() *Handler {
@@ -443,6 +447,19 @@ func (h *Handler) wireHeadlessAgentCallbacks(sessionID string, ag *agent.Agent) 
 		})
 	}
 	ag.OnMessage = func(m agent.Message) {
+		if m.Role == "user" {
+			// A message injected mid-turn from the session's live queue (see
+			// tryEnqueueInjection) — the normal user_message broadcast in
+			// runTurn only covers the turn's own opening message, so an
+			// injected one needs its own frame to show up in a connected
+			// browser as soon as the agent picks it up.
+			h.broadcastEvent(SSEEvent{
+				SessionID: sessionID,
+				Event:     "user_message",
+				Data:      map[string]string{"content": m.Content},
+			})
+			return
+		}
 		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
 			for _, tc := range m.ToolCalls {
 				h.broadcastEvent(SSEEvent{
@@ -852,6 +869,24 @@ func (h *Handler) HandleSendMessage(w http.ResponseWriter, r *http.Request, id s
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+	}
+
+	// A profile switch takes effect on the next turn: if the window's active
+	// profile changed since this agent was built, rebuild it on the new profile.
+	if reb, err := h.reconcileProfileAgent(id, as, as.model); err != nil {
+		h.publishTurnError(id, err, "profile")
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("agent error: %v", err))
+		return
+	} else {
+		as = reb
+	}
+
+	// A turn already running on this session slots the message into the live
+	// Step loop at the next tool-call boundary instead of waiting for the
+	// whole turn to finish and queuing a brand new one behind it.
+	if h.tryEnqueueInjection(id, req.Content) {
+		writeJSON(w, http.StatusAccepted, ChatResponse{SessionID: id, Model: as.model})
+		return
 	}
 
 	// Async: persist-then-202 — the message is durable on disk before the 202

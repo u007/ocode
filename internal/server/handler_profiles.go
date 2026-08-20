@@ -1,12 +1,14 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
 
 	"github.com/u007/ocode/internal/auth"
 	"github.com/u007/ocode/internal/config"
+	"github.com/u007/ocode/internal/debuglog"
 )
 
 func (h *Handler) handleListProfiles(w http.ResponseWriter, r *http.Request) {
@@ -546,5 +548,52 @@ func (h *Handler) handleSetWindowActiveProfile(w http.ResponseWriter, r *http.Re
 	if h.bus != nil {
 		h.bus.Publish("profile.windowChanged", "", "", map[string]string{"windowId": windowID, "profile": profile})
 	}
+	h.emitProfileDebugForWindow(windowID, profile, "")
 	writeJSON(w, http.StatusOK, map[string]string{"windowId": windowID, "activeProfile": profile})
+}
+
+func (h *Handler) emitProfileDebugForWindow(windowID, profile, sessionID string) {
+	h.mu.Lock()
+	enabled := h.cfg != nil && h.cfg.Ocode.ProfileDebug
+	h.mu.Unlock()
+	if !enabled {
+		return
+	}
+	eff := profile
+	if eff == "" {
+		eff = "Default"
+	} else {
+		if delta, ok := config.GetProfile(profile); ok {
+			overrides := config.ProfileOverrideCount(delta)
+			creds := auth.ProfileCredentialCount(profile)
+			model := ""
+			if delta.Model != nil {
+				model = *delta.Model
+			}
+			// effective model via merged config (cheap, already loaded)
+			if model == "" && h.cfg != nil {
+				model = h.cfg.Model
+			}
+			display := ""
+			if delta.DisplayName != nil {
+				display = *delta.DisplayName
+			}
+			baseURL := ""
+			if providerID := strings.SplitN(model, "/", 2)[0]; providerID != "" {
+				baseURL = auth.GetProfileBaseURL(profile, providerID)
+			}
+			debuglog.Log.Append(debuglog.Entry{
+				Kind:      debuglog.KindProfile,
+				Message:   fmt.Sprintf("PROFILE window=%s active=%q display=%q model=%q overrides=%d creds=%d baseURL=%q session=%s", windowID, eff, display, model, overrides, creds, baseURL, sessionID),
+				SessionID: sessionID,
+			})
+			return
+		}
+	}
+	// Default or missing profile case
+	debuglog.Log.Append(debuglog.Entry{
+		Kind:      debuglog.KindProfile,
+		Message:   fmt.Sprintf("PROFILE window=%s active=%q overrides=0 creds=0 session=%s", windowID, eff, sessionID),
+		SessionID: sessionID,
+	})
 }

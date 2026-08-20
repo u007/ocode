@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -121,20 +123,34 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Stable per-window id threaded into the webview so the frontend binds
+	// per-window profile state (active profile, chat config) to this desktop
+	// window and survives webview reloads (the random per-tab id the web
+	// falls back to would otherwise reset on every reload).
+	const desktopWindowName = "main"
+
 	// Build the webview URL with the auth token (same ?token= param the TUI /rc
-	// command and EventSource use).
-	appURL := fmt.Sprintf("%s/?token=%s", handle.URL, handle.Token)
+	// command and EventSource use) and the stable windowId.
+	appURL := fmt.Sprintf("%s/?token=%s&windowId=%s", handle.URL, handle.Token, desktopWindowName)
 	if sessionID != "" {
-		appURL = fmt.Sprintf("%s/session/%s?token=%s", handle.URL, url.PathEscape(sessionID), handle.Token)
+		appURL = fmt.Sprintf("%s/session/%s?token=%s&windowId=%s", handle.URL, url.PathEscape(sessionID), handle.Token, desktopWindowName)
 	}
 
 	// Determine desktop URL via env override (for dev hot-reload).
 	desktopURL := appURL
 	if devURL := os.Getenv("OCODE_DESKTOP_DEV_URL"); devURL != "" {
 		log.Printf("ocode-desktop: using dev URL %s", devURL)
-		desktopURL = devURL
+		parsed, err := url.Parse(devURL)
+		if err == nil {
+			q := parsed.Query()
+			q.Set("windowId", desktopWindowName)
+			parsed.RawQuery = q.Encode()
+			desktopURL = parsed.String()
+		} else {
+			desktopURL = devURL
+		}
 		if sessionID != "" {
-			parsed, err := url.Parse(devURL)
+			parsed, err := url.Parse(desktopURL)
 			if err == nil {
 				parsed.Path = strings.TrimRight(parsed.Path, "/") + "/session/" + url.PathEscape(sessionID)
 				desktopURL = parsed.String()
@@ -144,7 +160,7 @@ func main() {
 
 	// Create the main webview window.
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:      "main",
+		Name:      desktopWindowName,
 		Title:     "ocode " + version.Version,
 		Width:     1280,
 		Height:    800,
@@ -196,10 +212,46 @@ func main() {
 	// Dock badge, notifications, and focus tracking driven by run state.
 	wireNative(app.Context(), window, handle, notifier, dockSvc)
 
+	// Graceful shutdown on quit: when the app quits (Cmd+Q, tray Quit, window
+	// close), drain agent sessions and terminate any running terminal ptys
+	// within a TTL. Wails runs OnShutdown synchronously on the main thread
+	// before the process exits, so this blocks the quit only up to the timeout
+	// and guarantees shells aren't slaughtered mid-command.
+	app.OnShutdown(func() {
+		if handle == nil || handle.Srv == nil {
+			return
+		}
+		timeout := desktopShutdownTimeout()
+		log.Printf("ocode-desktop: graceful shutdown (timeout %s)", timeout)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		handle.Srv.Shutdown(ctx)
+	})
+
 	// Run the application (blocks until the window closes).
 	if err := app.Run(); err != nil {
 		log.Printf("ocode-desktop: app run error: %v", err)
 	}
+}
+
+// desktopShutdownTimeout returns the maximum time the desktop app waits for a
+// graceful shutdown before the process exits. It is the TTL that bounds the
+// whole teardown: agent sessions drain and running terminals are SIGTERM'd then
+// SIGKILL'd within this window. Override with OCODE_DESKTOP_SHUTDOWN_TIMEOUT
+// (seconds). The default of 5s is long enough for terminals to flush and short
+// enough that a quit never feels frozen; the sane range is 3–10s.
+func desktopShutdownTimeout() time.Duration {
+	const defaultTimeout = 5 * time.Second
+	if v := os.Getenv("OCODE_DESKTOP_SHUTDOWN_TIMEOUT"); v != "" {
+		if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+			d := time.Duration(secs) * time.Second
+			if d > 60*time.Second {
+				d = 60 * time.Second
+			}
+			return d
+		}
+	}
+	return defaultTimeout
 }
 
 // buildAppMenu builds the native application menu. It differs from the Wails

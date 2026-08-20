@@ -161,10 +161,32 @@ func GetBaseURL(id string) string {
 	return cred.BaseURL
 }
 
+// GetProfileBaseURL returns the per-credential base URL override for a profile, or "" if none.
+func GetProfileBaseURL(profile, id string) string {
+	cred, ok := GetProfileCredential(profile, id)
+	if !ok {
+		return ""
+	}
+	return cred.BaseURL
+}
+
 // OAuthAccessToken returns the (possibly refreshed) OAuth access token for a provider.
 // Returns "", false if no OAuth credential is stored.
 func OAuthAccessToken(id string) (string, bool) {
 	cred, ok := Get(id)
+	if !ok || cred.Kind != KindOAuth {
+		return "", false
+	}
+	cred = refreshIfExpiring(id, cred)
+	if cred.AccessToken == "" {
+		return "", false
+	}
+	return cred.AccessToken, true
+}
+
+// OAuthAccessTokenForProfile returns the (possibly refreshed) OAuth access token for a profile/provider.
+func OAuthAccessTokenForProfile(profile, id string) (string, bool) {
+	cred, ok := GetProfileCredential(profile, id)
 	if !ok || cred.Kind != KindOAuth {
 		return "", false
 	}

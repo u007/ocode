@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -78,6 +79,12 @@ type Server struct {
 	schedulerOutbox  *scheduler.Outbox  // optional; set via SetScheduler
 	schedulerTargets *scheduler.Targets // optional; set via SetScheduler
 	startedAt        time.Time
+
+	// ln and httpServer are populated by Serve so Shutdown can stop accepting
+	// new connections and drain in-flight ones. Guarded by shutdownMu.
+	shutdownMu sync.Mutex
+	ln         net.Listener
+	httpServer *http.Server
 }
 
 func New(addr, username, password string, webFS fs.FS) *Server {
@@ -195,6 +202,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("PUT /api/config/ocode/limits", s.authMiddleware(s.handleSetLimitsConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/features", s.authMiddleware(s.handleGetFeaturesConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/features", s.authMiddleware(s.handleSetFeaturesConfig))
+	s.mux.HandleFunc("GET /api/config/ocode/profile-debug", s.authMiddleware(s.handleGetProfileDebugConfig))
+	s.mux.HandleFunc("PUT /api/config/ocode/profile-debug", s.authMiddleware(s.handleSetProfileDebugConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/plugins-enabled", s.authMiddleware(s.handleGetPluginsEnabledConfig))
 	s.mux.HandleFunc("PUT /api/config/ocode/plugins-enabled", s.authMiddleware(s.handleSetPluginsEnabledConfig))
 	s.mux.HandleFunc("GET /api/config/ocode/local-models", s.authMiddleware(s.handleGetLocalModelsConfig))
@@ -579,7 +588,41 @@ func (s *Server) Serve(ln net.Listener) error {
 	// Forward new debug-log entries onto the unified event bus exactly once,
 	// process-wide (never per SSE connection).
 	go s.handler.logBusForwardLoop(stop)
-	return http.Serve(ln, s.mux)
+
+	// Track the listener + an *http.Server so Shutdown can stop accepting new
+	// connections and drain in-flight ones (graceful shutdown for desktop quit
+	// and any caller that wires it up).
+	s.shutdownMu.Lock()
+	s.ln = ln
+	s.httpServer = &http.Server{Handler: s.mux}
+	s.shutdownMu.Unlock()
+
+	return s.httpServer.Serve(ln)
+}
+
+// Shutdown gracefully stops the server within ctx. It first tears down agent
+// sessions and running terminals (so in-flight work and interactive shells get
+// a chance to flush/exit), then stops accepting new HTTP connections and drains
+// in-flight ones. It always returns by the time ctx expires — callers pass a
+// TTL context so a desktop quit never hangs.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.handler != nil {
+		s.handler.Shutdown(ctx)
+	}
+	s.shutdownMu.Lock()
+	hs := s.httpServer
+	ln := s.ln
+	s.shutdownMu.Unlock()
+	if hs != nil {
+		// Stop accepting new connections and wait for in-flight requests to
+		// finish (or ctx to expire). Long-lived SSE connections are released on
+		// ctx expiry, after which we close the listener to force any stragglers.
+		_ = hs.Shutdown(ctx)
+	}
+	if ln != nil {
+		_ = ln.Close()
+	}
+	return nil
 }
 
 // evictIdleLoop runs the session-registry idle-agent eviction pass on a
@@ -901,6 +944,12 @@ func (s *Server) handleGetFeaturesConfig(w http.ResponseWriter, r *http.Request)
 }
 func (s *Server) handleSetFeaturesConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleSetFeaturesConfig(w, r)
+}
+func (s *Server) handleGetProfileDebugConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleGetProfileDebugConfig(w, r)
+}
+func (s *Server) handleSetProfileDebugConfig(w http.ResponseWriter, r *http.Request) {
+	s.handler.HandleSetProfileDebugConfig(w, r)
 }
 func (s *Server) handleGetPluginsEnabledConfig(w http.ResponseWriter, r *http.Request) {
 	s.handler.HandleGetPluginsEnabledConfig(w, r)

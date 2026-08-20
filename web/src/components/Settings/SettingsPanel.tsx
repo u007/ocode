@@ -19,9 +19,11 @@ import ThemeForm from "./ThemeForm";
 import OpencodeMcpForm from "./OpencodeMcpForm";
 import OpencodeReadOnlyForm from "./OpencodeReadOnlyForm";
 import ProfilesManager from "./ProfilesManager";
+import ProfileDebugForm from "./ProfileDebugForm";
 
 export type SettingsGroupId =
   | "profiles"
+  | "profile-debug"
   | "model-defaults"
   | "commit-msg"
   | "compact"
@@ -50,6 +52,7 @@ interface GroupDef {
 
 const OCODE_GROUPS: GroupDef[] = [
   { id: "profiles", label: "Profiles" },
+  { id: "profile-debug", label: "Profile Debug" },
   { id: "model-defaults", label: "Model Defaults & Recap" },
   { id: "commit-msg", label: "Commit Message" },
   { id: "compact", label: "Compact" },
@@ -82,6 +85,8 @@ function renderGroup(id: SettingsGroupId) {
   switch (id) {
     case "profiles":
       return <ProfilesManager />;
+    case "profile-debug":
+      return <ProfileDebugForm />;
     case "model-defaults":
       return <ModelDefaultsForm />;
     case "commit-msg":
